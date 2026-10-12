@@ -1,0 +1,14 @@
+# Triggers the privileged root update helper when the daemon drops a request
+# file. The daemon (node111) can stage but NEVER flip — 111node-update.service
+# is the only actor that promotes into releases/ and flips `current` (D12).
+
+[Unit]
+Description=111 node update request watcher
+
+[Path]
+PathChanged=/var/lib/111/state/update-request.json
+PathChanged=/var/lib/111/state/revert-request.json
+Unit=111node-update.service
+
+[Install]
+WantedBy=multi-user.target

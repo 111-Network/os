@@ -1,0 +1,20 @@
+# Privileged root update helper (D12): re-verifies manifest minisig + staged-tree
+# hashes, promotes staging → releases/<ver>/, writes the probation journal and
+# monotonic floor (root-owned), flips `current`, restarts 111node.service.
+# Also services revert-request.json (READY-but-503) and probation finalization.
+
+[Unit]
+Description=111 node privileged update helper (root)
+Documentation=https://111.network/docs/node
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/111 update-helper
+
+# Root, writes only inside /var/lib/111 (StateDirectory=111, root-owned).
+ProtectSystem=strict
+StateDirectory=111
+ProtectHome=true
+PrivateTmp=true
+# No capabilities needed beyond filesystem writes + systemctl over the dbus socket.
+NoNewPrivileges=true

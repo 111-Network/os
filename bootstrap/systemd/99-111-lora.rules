@@ -1,0 +1,26 @@
+# 111 LoRa radios: keep ModemManager off the serial ports (ID_MM_DEVICE_IGNORE).
+# Installed to /etc/udev/rules.d/99-111-lora.rules; table mirrors
+# crates/node111/assets/lora-table.toml (signed-artifact data; this rule file is
+# rendered from the same rows at install time).
+#
+# Known conflict: brltty (screen reader) autoprobes some serial radios — users
+# running brltty alongside LoRa must adjust brltty, not this rule.
+
+ACTION!="add|change", GOTO="111_lora_end"
+SUBSYSTEM!="tty", GOTO="111_lora_end"
+
+# Heltec WiFi LoRa 32 V3 (CP2102)
+ATTRS{idVendor}=="10c4", ATTRS{idProduct}=="ea60", ENV{ID_MM_DEVICE_IGNORE}="1"
+
+# LILYGO T-Beam (1a86 QinHeng UART bridges, wildcard pid)
+ATTRS{idVendor}=="1a86", ENV{ID_MM_DEVICE_IGNORE}="1"
+
+# ESP32-S3 native USB
+ATTRS{idVendor}=="303a", ENV{ID_MM_DEVICE_IGNORE}="1"
+
+# LILYGO T-Echo (nRF52 runtime + DFU) and RAK4631
+ATTRS{idVendor}=="239a", ATTRS{idProduct}=="4405", ENV{ID_MM_DEVICE_IGNORE}="1"
+ATTRS{idVendor}=="239a", ATTRS{idProduct}=="0029", ENV{ID_MM_DEVICE_IGNORE}="1"
+ATTRS{idVendor}=="239a", ATTRS{idProduct}=="8029", ENV{ID_MM_DEVICE_IGNORE}="1"
+
+LABEL="111_lora_end"

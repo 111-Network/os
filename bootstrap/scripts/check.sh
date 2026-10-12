@@ -31,7 +31,13 @@ else
 fi
 echo "== systemd-analyze =="
 if command -v systemd-analyze >/dev/null 2>&1 && ls systemd/*.service >/dev/null 2>&1; then
-  systemd-analyze verify systemd/*.service systemd/*.path 2>&1 | grep -v "Command.*not documented\|is not a valid unit name" || true
+  # verify resolves units by name — point it at a temp unit dir (systemd 249
+  # lacks `verify --root` and absolute-path FILE handling is version-dependent)
+  SC_T=$(mktemp -d)
+  cp systemd/*.service systemd/*.path "$SC_T/"
+  SYSTEMD_UNIT_PATH="$SC_T" systemd-analyze verify 111node.service 111node-update.path 111node-update.service 2>&1 |
+    grep -v "not executable\|not found\|netplan\|snapd\|Failed to create" || true
+  rm -rf "$SC_T"
 else
   echo "no units yet — SKIP"
 fi
