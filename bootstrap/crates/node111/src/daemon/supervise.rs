@@ -40,6 +40,9 @@ pub struct ChildSpec {
     pub args: Vec<String>,
     pub env: Vec<(String, String)>,
     pub backoff: BackoffPolicy,
+    /// When set, stdout+stderr append to this file (children whose logs are
+    /// signal, e.g. rnsd peer discovery). Inherit otherwise.
+    pub stdout_log: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -176,9 +179,39 @@ pub fn spawn_child(spec: ChildSpec) -> ChildHandle {
                     let mut cmd = tokio::process::Command::new(&spec.program);
                     cmd.args(&spec.args)
                         .envs(spec.env.iter().map(|(k, v)| (k, v)))
-                        .stdin(std::process::Stdio::null())
-                        .stdout(std::process::Stdio::inherit())
-                        .stderr(std::process::Stdio::inherit());
+                        .stdin(std::process::Stdio::null());
+                    match &spec.stdout_log {
+                        Some(path) => match std::fs::OpenOptions::new()
+                            .create(true)
+                            .append(true)
+                            .open(path)
+                        {
+                            Ok(f) => {
+                                let err_f = f.try_clone();
+                                match err_f {
+                                    Ok(e2) => {
+                                        cmd.stdout(std::process::Stdio::from(f));
+                                        cmd.stderr(std::process::Stdio::from(e2));
+                                    }
+                                    Err(_) => {
+                                        cmd.stdout(std::process::Stdio::from(f));
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                eprintln!(
+                                    "111 supervise: open {} failed: {e} — inheriting",
+                                    path.display()
+                                );
+                                cmd.stdout(std::process::Stdio::inherit())
+                                    .stderr(std::process::Stdio::inherit());
+                            }
+                        },
+                        None => {
+                            cmd.stdout(std::process::Stdio::inherit())
+                                .stderr(std::process::Stdio::inherit());
+                        }
+                    }
                     cmd.spawn()
                 };
                 let mut child = match spawn_result {
@@ -310,6 +343,7 @@ mod tests {
             args: vec![],
             env: vec![],
             backoff: policy(20),
+            stdout_log: None,
         };
         let h = spawn_child(spec);
         tokio::time::sleep(Duration::from_millis(600)).await;
@@ -324,6 +358,7 @@ mod tests {
             args: vec!["30".into()],
             env: vec![],
             backoff: policy(20),
+            stdout_log: None,
         };
         let h = spawn_child(spec);
         tokio::time::sleep(Duration::from_millis(200)).await;
@@ -345,6 +380,7 @@ mod tests {
                 crash_loop_threshold: 3,
                 ..policy(20)
             },
+            stdout_log: None,
         };
         let h = spawn_child(spec);
         tokio::time::sleep(Duration::from_millis(400)).await;

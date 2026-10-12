@@ -1,0 +1,15 @@
+# 111 node rnsd config (Reticulum INI format) — rendered by 111 daemon.
+# Regenerated on netlink interface-change events; the schema-version field is
+# the Layer 6 takeover seam (a bumped version means newer software owns this
+# file and v1 regeneration stops).
+schema-version = @@SCHEMA_VERSION@@
+
+[reticulum]
+  enable_transport = no
+  share_instance = no
+
+[interfaces]
+  [[Auto Interface]]
+    type = AutoInterface
+    enabled = yes
+    group_id = 111.network
