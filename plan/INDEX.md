@@ -31,7 +31,7 @@ Harness: Claude Code (this session) + Workflow orchestration.
 | # | Layer | Status | Spec |
 |---|---|---|---|
 | 0 | Knowledge | 🔨 building — spec locked (D7), see `os/knowledge/TASKS.md` | `os/knowledge/README.md` ✅ locked |
-| 1 | Bootstrap | ⬜ pending | — |
+| 1 | Bootstrap | 🔬 researching — scope locked w/ user 2026-10-12 (Linux + phone-via-USB-C; running minimal node; minimal cache + standard offer) | — |
 | 2 | Identity | ⬜ pending | — |
 | 3 | Local Intelligence | ⬜ pending | — |
 | 4 | Interface & Dashboard | ⬜ pending | — |
