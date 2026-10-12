@@ -29,10 +29,14 @@ pub fn serve_dir(dir: PathBuf, date_header: Option<String>) -> u16 {
                     .nth(1)
                     .unwrap_or("/")
                     .trim_start_matches('/');
-                let file = dir.join(path);
-                let (status, body) = match std::fs::read(&file) {
-                    Ok(bytes) => ("200 OK", bytes),
-                    Err(_) => ("404 Not Found", b"not found".to_vec()),
+                let (status, body) = if path.trim_end_matches('/') == "204" {
+                    ("204 No Content", Vec::new())
+                } else {
+                    let file = dir.join(path);
+                    match std::fs::read(&file) {
+                        Ok(bytes) => ("200 OK", bytes),
+                        Err(_) => ("404 Not Found", b"not found".to_vec()),
+                    }
                 };
                 let date = date_header
                     .map(|d| format!("Date: {d}\r\n"))

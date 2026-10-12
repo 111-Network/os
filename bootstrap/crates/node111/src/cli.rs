@@ -9,6 +9,9 @@ pub struct InstallArgs {
     pub serial: Option<String>,
     pub keep_adb: bool,
     pub allow_degraded: bool,
+    /// Shim-forwarded floor (the binary also refuses below the compiled-in
+    /// MIN_INSTALLER_VERSION).
+    pub min_installer_version: Option<crate::calver::Calver>,
 }
 
 pub fn main_entry(args: Vec<String>) -> i32 {

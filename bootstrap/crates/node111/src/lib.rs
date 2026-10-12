@@ -2,6 +2,10 @@
 //! Module tree frozen at T0 per os/bootstrap/TASKS.md; stubs are filled by their
 //! owning tasks. Cross-module contracts live in the pinned types (see TASKS.md).
 
+/// Compiled-in minimum installer version (calver). Stale-shim redirects cannot
+/// downgrade an install below this floor; release machinery bumps it (T15).
+pub const MIN_INSTALLER_VERSION: &str = "2026.10.01";
+
 pub mod calver;
 pub mod cli;
 pub mod config;
