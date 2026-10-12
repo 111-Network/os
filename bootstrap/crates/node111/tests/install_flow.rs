@@ -266,6 +266,11 @@ fn happy_path_end_to_end_and_idempotent_rerun() {
     assert!(root.join("receipt.json").exists());
     assert!(root.join("state/offer.json").exists());
     assert!(flow.fs_root.path().join("usr/local/bin/111").exists());
+    assert!(flow
+        .fs_root
+        .path()
+        .join("usr/local/bin/111-uninstall")
+        .exists());
     let unit = std::fs::read_to_string(
         flow.fs_root
             .path()

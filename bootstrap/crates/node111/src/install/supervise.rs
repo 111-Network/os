@@ -117,6 +117,14 @@ pub fn run(ctx: &InstallContext, degraded: bool) -> anyhow::Result<()> {
         &["0700", &ctx.layout.identity_dir().to_string_lossy()],
     );
 
+    // --- /usr/local/bin/111-uninstall wrapper (spec layout) ---
+    write(
+        ctx,
+        "/usr/local/bin/111-uninstall",
+        "#!/bin/sh\n# 111 node uninstall wrapper — see 111 uninstall\nexec /usr/local/bin/111 uninstall \"$@\"\n",
+        0o755,
+    )?;
+
     // --- reload + enable ---
     must(ctx, "systemctl", &["daemon-reload"])?;
     let _ = ctx.runner.run("udevadm", &["control", "--reload"]);
