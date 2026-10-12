@@ -1,0 +1,89 @@
+manifest-version = 1
+date = "2026.10.12"
+channel = "stable"
+release = "2026.10.12"
+min-upgrade-from = "2026.10.01"
+
+[pkg.111.target.x86_64-unknown-linux-musl]
+url = "https://example.invalid/v2026.10.12/111-x86_64-unknown-linux-musl"
+sha256 = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+size = 5242880
+
+[pkg.111.target.aarch64-unknown-linux-musl]
+url = "https://example.invalid/v2026.10.12/111-aarch64-unknown-linux-musl"
+sha256 = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+size = 4981234
+
+[payload.x86_64-unknown-linux-musl]
+url = "https://example.invalid/v2026.10.12/payload-x86_64.tar.gz"
+sha256 = "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+size = 7340032
+
+[payload.aarch64-unknown-linux-musl]
+url = "https://example.invalid/v2026.10.12/payload-aarch64.tar.gz"
+sha256 = "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+size = 7100123
+
+[apk.termux]
+url = "https://example.invalid/apks/termux-app_v0.118.3_arm64-v8a.apk"
+sha256 = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+size = 12345678
+
+[apk.termux-boot]
+url = "https://example.invalid/apks/termux-boot_v0.8.1.apk"
+sha256 = "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+size = 234567
+
+[apk.termux-api]
+url = "https://example.invalid/apks/termux-api_v0.53.0.apk"
+sha256 = "0000000000000000000000000000000000000000000000000000000000000001"
+size = 345678
+
+[[deb]]
+name = "openssh"
+url = "https://example.invalid/debs/openssh_9.2_aarch64.deb"
+sha256 = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+size = 900001
+
+[[deb]]
+name = "termux-services"
+url = "https://example.invalid/debs/termux-services_0.13_all.deb"
+sha256 = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+size = 40002
+
+[[deb]]
+name = "cronie"
+url = "https://example.invalid/debs/cronie_1.7_aarch64.deb"
+sha256 = "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+size = 80003
+
+[[deb]]
+name = "python"
+url = "https://example.invalid/debs/python_3.12_aarch64.deb"
+sha256 = "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+size = 12000004
+
+[[deb]]
+name = "python-cryptography"
+url = "https://example.invalid/debs/python-cryptography_42_aarch64.deb"
+sha256 = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+size = 2100005
+
+[rns-lock]
+url = "https://example.invalid/v2026.10.12/rns-lock.txt"
+sha256 = "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+size = 2048
+
+[kb]
+url = "https://example.invalid/v2026.10.12/kb.tar.gz"
+sha256 = "0000000000000000000000000000000000000000000000000000000000000001"
+size = 1048576
+
+[[keychain]]
+generation = 0
+pubkey = "RWSwDusSn11Y2NID4fE2wwV6IZU8QwR7A5gtKtx1u6/ezzQ5WNzpjW4A"
+
+[[keychain]]
+generation = 1
+pubkey = "RWReplacedByNextGenKey0000000000000000000000000="
+signature_by_previous = "untrusted comment: fixture\nplaceholder"
