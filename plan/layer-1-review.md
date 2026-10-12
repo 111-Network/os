@@ -32,3 +32,7 @@ Privileged update helper (root oneshot; hardens the node111-writable floor) — 
 - **DoH to pinned endpoints** for Android DNS — adds pinned-endpoint fragility; hickory-resolver reading `getprop net.dns1` + IP-literal fallback is simpler and offline-consistent.
 - **mDNS/Avahi discovery for the sshd maintenance channel** — multicast is exactly what's broken in Termux (MulticastLock finding); recovery = documented re-provisioning ceremony + Layer 9 watchdog channel instead.
 - **Fork-update model (old binary parents the new one until healthy)** — probation-journal + boot-adoption solves the same actor-survival problem without a second process model; journal also covers torn-payload boot, which fork-update doesn't.
+
+## Lock amendments (D12, 2026-10-12) — spec v2 → v2.1, LOCKED
+
+User amendments at lock: (a) the privileged root update helper was promoted from deferred-v1.1 into v1 — daemon stages-only, root helper flips (releases/, journal, floor all root-owned); (b) calendar versioning (`YYYY.MM.DD[.N]`) replaces semver-shaped versions everywhere; (c) phone multicast limitation confirmed as honest v1 scope with the helper-APK fix planned. Triage dispositions otherwise unchanged.

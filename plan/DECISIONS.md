@@ -95,6 +95,13 @@ ADR-lite. Every decision, its rejected alternatives, and why. Newest last; never
 - **Rejected:** Next.js static export (heaviest runtime for offline old-phone target, imports the moving Next 16 target); HTMX + askama (double UI surface next to the agent's JSON API; kept as fallback if Node in os/ CI ever blocks); vanilla JS/WebComponents (bespoke mini-framework, philosophy violation); two separate simple/advanced apps (GL.iNet/LuCI drift trap); WebSocket (no client→server streaming need); types-only contract (too weak for sibling layers coding against it).
 - **Why:** only React gives the typed component model the "component-scalable" requirement needs while porting DESIGN.md exactly; one JSON contract keeps the agent's function surface single-source; one component tree with density flags kills the two-UIs maintenance trap; SSE is the minimal live channel that survives hub topology and old phones.
 
+## D12 — Layer 1 spec locked (v2.1); lock amendments
+
+- **Date:** 2026-10-12
+- **Decision:** Layer 1 spec locked at v2.1 with three user amendments over the reviewed v2 draft: (a) **Privileged root update helper ships in v1** (panel-deferred, user promoted): the daemon only fetches/verifies/stages signed updates into `state/staging/`; a root oneshot (`111 update-helper`, path-triggered) re-verifies, promotes to `releases/`, flips `current`, and writes the probation journal + monotonic floor (both root-owned); a root `update-guard` ExecStartPre reverts expired probation before every start. User rationale: the daemon can never touch its own payload — a failed or hostile update always leaves the running version intact. (b) **Calendar versioning** `YYYY.MM.DD[.N]` for releases, shim URLs, and `min-upgrade-from` — no semver in v1. (c) Phone multicast limitation accepted as honest v1 scope (phones isolated-capable; LAN-join acceptance is Linux-only) with the full fix (MulticastLock helper APK) recorded as designed and planned for v1.1/Layer 6.
+- **Rejected:** keeping `/opt/111` with a weakened sandbox (ReadWritePaths + chown); daemon-side symlink flips; deferring the privileged helper to v1.1; building the MulticastLock APK in v1.
+- **Why:** strongest integrity boundary for unattended offline nodes; calver matches the project's dated-everything conventions and is trivially monotonic.
+
 ## Pending
 
 - Move deep architecture content out of `os/README.md` into per-layer specs (blocked on layer homes existing).
