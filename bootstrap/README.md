@@ -1,8 +1,8 @@
 # Layer 1 — Bootstrap
 
-The single entry point: **one command** that turns a Linux machine — or an Android phone connected over USB-C — into a running 111 Network node. It detects hardware and environment, assigns the device category, generates a provisional cryptographic identity, installs only what the device needs, prefetches a minimal offline cache, and leaves a **running minimal node** with a reachable dashboard. The only interaction is privilege escalation (sudo/doas/su) and, on phones, the unavoidable on-device taps.
+The single entry point: **one command** that turns a Linux machine — or an Android phone connected over USB-C — into a running 111 Network node. It detects hardware and environment, assigns the device category, generates the node's cryptographic identity, installs only what the device needs, prefetches a minimal offline cache, and leaves a **running minimal node** with a reachable dashboard. The only interaction is privilege escalation (sudo/doas/su) and, on phones, the unavoidable on-device taps.
 
-Status of this document: **spec v2.1 — LOCKED** (decisions: `os/plan/DECISIONS.md` D9 + D12 lock amendments; panel triage: `os/plan/layer-1-review.md`; research: `os/plan/layer-1-options.md`).
+Status of this document: **spec v2.2 — LOCKED** (decisions: `os/plan/DECISIONS.md` D9 + D12 lock amendments · D14(d): provisional identity seam replaced by Layer 2's locked contract — `os/identity/README.md`; panel triage: `os/plan/layer-1-review.md`; research: `os/plan/layer-1-options.md`).
 
 ## The one command
 
@@ -17,11 +17,11 @@ curl -fsSL https://install.111.network/install.sh | sh -s -- --phone   # provisi
 
 ## Architecture
 
-**ONE musl-static Rust binary** (`111`, x86_64 + aarch64) with subcommands: `install` (the installer), `daemon` (the node, exec'd by systemd/runit), `identity backup|export`, `config`, `uninstall`. Plus a tiny POSIX **shim**.
+**ONE musl-static Rust binary** (`111`, x86_64 + aarch64) with subcommands: `install` (the installer), `daemon` (the node, exec'd by systemd/runit), `identity backup|restore|commission`, `config`, `uninstall`. Plus a tiny POSIX **shim**.
 
 1. **Shim** (`install.sh`, ~200 lines): `set -u`, fully function-wrapped, execution only on the last line (anti-truncation). Detects `uname -s/-m` and `getconf LONG_BIT` (32-bit userspace on 64-bit kernel; armv7l kernels ⇒ clean refusal). Downloads the `111` binary — **GitHub Releases is the primary/canonical source**, own-domain mirror is fallback (brief A1/A4 hierarchy). Verifies **sha256 pinned inside the shim** in a `mktemp -d` (0700), then `sudo install -m 0755` to a root-owned path and execs **that** copy (closes the verify→exec TOCTOU). Privilege order: already-root → `sudo` → `doas` → print exact `su -c` line and exit. sha256 tool: `sha256sum` with busybox fallback. Published at version-pinned URLs (`/v0.1.0/install.sh`); the binary refuses to install below a compiled-in minimum version (stale-shim redirects can't downgrade). Each shim's sha256 + minisig is published on the GitHub release page (independent channel).
 2. **`111 install`**: preflight → probe → categorize → keygen → package install + prefetch → stage → supervise → verify → receipt (`/var/lib/111/receipt.json`, root-owned 0644) → `/usr/local/bin/111-uninstall`. The minisign verify key is compiled into the binary; the installer MUST verify the channel manifest's detached minisig before trusting any pin in it (hard failure otherwise) — this binds every second-hop artifact (payload, APKs, KB tarball, platform-tools fallback) to the signed manifest.
-3. **`111 daemon`** (the node): provisional identity holder, tokio supervision tree (restart-in-place per task with exponential backoff + cap — the Layer 9 seam), embedded axum dashboard + `/health`, update client (fetches, verifies, and stages signed updates — but **cannot flip or write the payload**: a privileged root helper performs all release switching, so a broken or compromised update can never touch the intact running version), KB server, and — when python3+venv exist — parent of a hash-locked `rnsd` child. systemd/runit are thin `Restart=always` wrappers, never the supervisor of record.
+3. **`111 daemon`** (the node): identity holder, tokio supervision tree (restart-in-place per task with exponential backoff + cap — the Layer 9 seam), embedded axum dashboard + `/health`, update client (fetches, verifies, and stages signed updates — but **cannot flip or write the payload**: a privileged root helper performs all release switching, so a broken or compromised update can never touch the intact running version), KB server, and — when python3+venv exist — parent of a hash-locked `rnsd` child. systemd/runit are thin `Restart=always` wrappers, never the supervisor of record.
 
 ## Artifacts per release (all pinned URL+sha256+size in the signed manifest)
 
@@ -42,11 +42,11 @@ State machine; every step probes content first, resumes on partial failure, reco
 1. **Preflight:** systemd present (`/run/systemd/system`) else refuse with docs pointer · privilege contract (above) · free space ≥ (payload + packages) ×2 · clock sanity: HTTP `Date` header of the connectivity probe vs local time (loud refusal beyond threshold — Pi has no RTC) · connectivity = HTTPS HEAD against the real artifact endpoints + HTTP-204 ×2 + DNS + default route (probe endpoints named: `install.111.network/204` + own-domain fallback only) · WSL/container: systemd-less containers refuse; systemd-ful WSL/containers warn and cap at degraded relay (`--allow-degraded` silences the warn) with a degraded unit drop-in (AmbientCapabilities stripped to the container's CapBnd).
 2. **Probe:** facts from `/proc`+`/sysfs` (rule table below). All facts degradable to "unknown".
 3. **Categorize** (deterministic table below) + record gateway capability (install-time internet is guaranteed, so this records intent for later layers).
-4. **Identity:** BIP-39 mnemonic (12 words) → secp256k1 key (NIP-06 path `m/44'/1237'/0'/0/0`, k256 `schnorr`); trio (`secret.hex` 0600, `npub` 0644, `mnemonic` 0600) written to a temp dir and **atomically renamed** into `identity/` (0700, node111); never overwrite. Keygen runs at install, system RNG seeded.
+4. **Identity:** BIP-39 mnemonic (12 words) → SLIP-0010 hardened-only derivation → Ed25519+X25519 keyset (paths `m/111'/0'/{0',1'}` per `os/identity/README.md` v2); file set (`mnemonic` 0600, `keyset` 0600, `nodeid` 0644, `descriptor` 0644, `counters` 0600) written to a temp dir and **atomically renamed** into `identity/` (0700, node111); never overwrite. Keygen runs at install, system RNG seeded.
 5. **Packages (online):** best-effort `apt-get update` first; then **install** `python3 python3-venv iw ca-certificates` (dnf5/pacman equivalents per family: Fedora `python3 iw ca-certificates`, Arch `python iw ca-certificates`) — documented host mutation, and what makes Bundle B real on fresh images. The resolved closure is also **downloaded** into `cache/packages/` (root-owned 0755) via `apt-get download` on the closure / `dnf5 download --resolve` + createrepo_c / `pacman -Sw` — offline reinstall/rollback assets. Plus `pip download` of the rns lockfile closure into `cache/packages/python/` (offline venv rebuild path). Every cached artifact hash-recorded in the receipt.
 6. **Stage:** fetch release payload tarball → `releases/<ver>.tmp-<pid>/`, verify sha256 + extracted-tree manifest, fsync, rename to `releases/<ver>/`; flip `current` symlink (single atomic unit — KB rides inside the payload, so binary+KB can never split-brain). Prune to exactly 2 releases, only after probation passes (never delete an open probation's revert target).
 7. **Supervise:** create `node111` system user (dialout/uucp by `getent`); write unit + distro drop-in + udev rule; `daemon-reload`; `udevadm control --reload --trigger`; `systemctl restart systemd-logind`-free (LogNamespace needs no global restart); `enable --now`.
-8. **Verify:** `/health` 200 within 60s; dashboard reachable on `127.0.0.1:11180`; socket asserted loopback-bound; receipt written; print npub + dashboard URL + `sudo -u node111 111 identity backup` hint.
+8. **Verify:** `/health` 200 within 60s; dashboard reachable on `127.0.0.1:11180`; socket asserted loopback-bound; receipt written; print NodeId + dashboard URL + `sudo -u node111 111 identity backup` hint.
 9. **Offer (dismissible):** standard tier = small local model. v1 semantics: accepting records intent in `state/offer.json` + `/api/status` field and downloads **nothing** — Layer 3 replaces the hook. Maximal tier not offered until standard exists.
 
 ## Install flow — phone over USB-C
@@ -83,13 +83,16 @@ First match wins (thresholds = D9 defaults):
 | 7 | Pi 3/4, or fallback ≥1GB RAM | 1 relay / 2A |
 | overlay | internet up at detect time | + 5 gateway capability (recorded; re-evaluated by later layers) |
 
-## Identity (provisional seam — final crypto is Layer 2's call, D9)
+## Identity (contract locked by Layer 2 — `os/identity/README.md` v2, D13/D14)
 
-- secp256k1 from BIP-39 mnemonic at NIP-06 path, generated at install (RNG seeded — CVE-2025-52464 lesson).
-- `identity/` 0700 node111: `secret.hex` 0600 · `npub` 0644 · `mnemonic` 0600 — atomic-trio write, never overwrite.
-- Boot integrity check: unreadable/corrupt identity ⇒ quarantine dir, distinct dashboard/`/api/status` error state, **never silent re-key**; regeneration requires explicit `111 identity recover`.
-- `sudo -u node111 111 identity backup` displays words; `… identity export` writes NIP-49 `ncryptsec` (interactive passphrase w/ confirmation, refuses pipes). Neither is reachable over HTTP, ever.
-- Seam contract: the identity dir is the only key consumer in v1; Layer 2 swap = replace dir + reader.
+Identity is Layer 2's contract, locked at `os/identity/README.md` v2 (D13/D14); this section summarizes what Layer 1 implements against.
+
+- Silent install-time keygen preserved: BIP-39 mnemonic → SLIP-0010 hardened-only derivation → Ed25519 signing + X25519 ECDH keyset per the L2 spec (RNG seeded — CVE-2025-52464 lesson).
+- `identity/` 0700 node111: `mnemonic` 0600 · `keyset` 0600 (64B private keyset; derived cache, regenerable from the mnemonic) · `nodeid` 0644 (34B record: `0xed 0x01` ‖ 32B pubkey) · `descriptor` 0644 (4B backup descriptor) · `counters` 0600 (announce + per-peer traffic counters — protocol state, not secret) — atomic temp-dir-then-rename write, never overwrite.
+- Boot integrity check: unreadable/corrupt identity ⇒ quarantine dir, distinct dashboard/`/api/status` error state, **never silent re-key**; regeneration requires explicit `111 identity restore`.
+- Verbs: `sudo -u node111 111 identity backup` displays the words — the TTY-only ceremony (refuses non-TTY stdout) · `111 identity restore` · `111 identity commission` (Cat-1 ceremony, commissioner side). The provisional `recover` is subsumed by `restore`; the NIP-49 `export` is deleted. None is reachable over HTTP, ever.
+- Display: npub → NodeId — install verify-print, dashboard, and `/api/status` show the NodeId (hex in APIs; bech32 `node1…` for human transfer).
+- Migration: a D9-format dir migrates on first run of the L2-wired binary per L2 §8.4 — same words, new derivation, one-time NodeId change; legacy `secret.hex`/`npub` quarantined, old→new NodeId mapping logged.
 
 ## On-disk layout (naming normative; ownership is the security boundary)
 
@@ -98,7 +101,7 @@ First match wins (thresholds = D9 defaults):
 | `/var/lib/111/releases/<ver>/` | **root** 0755 | payload: `bin/111` + `share/kb/` (one atomic unit); writable only by the root update helper — never by the daemon |
 | `/var/lib/111/current` | **root** | symlink → active release; exactly 2 kept, pruned only after probation |
 | `/var/lib/111/state/staging/` | node111 0755 | daemon's download/verify staging area; the helper re-verifies and promotes into `releases/` |
-| `/var/lib/111/identity/` | node111 0700 | key trio |
+| `/var/lib/111/identity/` | node111 0700 | L2 identity file set: `mnemonic`/`keyset`/`nodeid`/`descriptor`/`counters` (§Identity) |
 | `/var/lib/111/state/` | node111 0755 | `update-request.json` / `revert-request.json` (daemon→helper signals) · `facts.json` · `offer.json` |
 | `/var/lib/111/state/update.json` + `floor.json` | **root** 0644 | probation journal + monotonic floor — written only by the root helper, read by the daemon |
 | `/var/lib/111/cache/packages/` | **root** 0755 | prefetched .debs/.rpms + python wheels (offline reinstall assets; consumed by a privileged `111 admin` flow or documented manual command — never `dpkg -i` by node111 without hash re-verify against the receipt) |
@@ -119,7 +122,7 @@ Provisioning host: downloads `~/.cache/111`; maintenance keys `~/.local/share/11
 
 ## Dashboard v1 (deliberately minimal — real dashboard is Layer 4)
 
-Single binary-embedded page, **strictly GET/read-only**, on `127.0.0.1:11180` (LAN binding = explicit `111 config` opt-in with warning until Layer 4 auth; Host-header allowlist `127.0.0.1`/`localhost` against DNS rebinding; identity material never on any endpoint). Shows: npub, category, version, KB sha, transport state (`no transport`/`isolated`/`joined`/`transport degraded`), uptime/health, last-successful-update-check, clock-fault state when present, standard-tier offer (intent-recording stub). `/health` (200/503 per the component checklist) + `/api/status` (JSON; schema pinned in TASKS.md — it is the Layer 4/9 seam surface) on the same port. No KB browsing in v1. "Mesh joined" = rnsd child up AND ≥1 AutoInterface peer within 60s when another node exists on the LAN (asserted for Linux nodes; phones run rnsd but multicast receive needs a MulticastLock no CLI can acquire — phones may sit at `isolated` in v1; the full fix — a tiny MulticastLock helper APK — is designed and planned for v1.1/Layer 6; honestly-scoped per user decision, D12).
+Single binary-embedded page, **strictly GET/read-only**, on `127.0.0.1:11180` (LAN binding = explicit `111 config` opt-in with warning until Layer 4 auth; Host-header allowlist `127.0.0.1`/`localhost` against DNS rebinding; identity material never on any endpoint). Shows: NodeId, category, version, KB sha, transport state (`no transport`/`isolated`/`joined`/`transport degraded`), uptime/health, last-successful-update-check, clock-fault state when present, standard-tier offer (intent-recording stub). `/health` (200/503 per the component checklist) + `/api/status` (JSON; schema pinned in TASKS.md — it is the Layer 4/9 seam surface) on the same port. No KB browsing in v1. "Mesh joined" = rnsd child up AND ≥1 AutoInterface peer within 60s when another node exists on the LAN (asserted for Linux nodes; phones run rnsd but multicast receive needs a MulticastLock no CLI can acquire — phones may sit at `isolated` in v1; the full fix — a tiny MulticastLock helper APK — is designed and planned for v1.1/Layer 6; honestly-scoped per user decision, D12).
 
 ## Transport (conditional, Bundle B)
 
@@ -140,7 +143,7 @@ When python3+venv exist post-step-5: `/var/lib/111/venvs/rns` built with `pip in
 
 - **Trust chain:** GitHub Releases = canonical artifact store; shim fetches from it first (own-domain mirror = fallback); shim pins the binary's sha256; the binary embeds the minisign key and verifies the signed manifest before trusting any pin in it; manifest pins authenticate every other artifact (payload, APKs, debs, wheels, KB, platform-tools). **The shim hop itself is TLS-only** — residual risk stated plainly; mitigations: shim sha256+minisig published on the GitHub release page (independent channel), compiled-in minimum installer version.
 - **Termux GitHub builds:** debuggable + public test key — anyone with adb authorization can read node keys. Accepted (D9 E1) with: lockdown via `adb_enabled 0` as the final labeled step, on-device keygen (keys never touch the host), no `allow-external-apps`, sshd verified on a fresh LAN before lockdown, documented recovery ceremony (re-enabling adb = on-device taps; true revocation = manual UI step).
-- **Key material:** 0600/0700, never logged, never transmitted, never on HTTP; transport keys (X25519) are later layers' (derivation/attestation). Phone maintenance key on the host: `~/.local/share/111/keys` 0600 — its theft = phone shell; recorded.
+- **Key material:** 0600/0700, never logged, never transmitted, never on HTTP; the node's X25519 ECDH key is part of the install-time keyset (L2 spec §2); **transport credentials** are separate per-node keys bound by attestation (L2 spec §10) — later layers' (derivation/attestation). Phone maintenance key on the host: `~/.local/share/111/keys` 0600 — its theft = phone shell; recorded.
 - **Connectivity probes** hit first-party endpoints only (`install.111.network/204`); zero telemetry = no data collection beyond standard HTTP access logs.
 - **`dialout`** grants broad serial access — accepted for single-purpose nodes. **`allow-external-apps` is never set.** Privileged consumption of `cache/packages/` re-verifies hashes against the receipt.
 - Root-owned receipt/cache close the node111→root escalation (dropped-.deb and forged-receipt paths). **The daemon can never modify its own payload** (D12): `releases/`, `current`, the probation journal and the monotonic floor are root-owned; every release switch is re-verified and executed by the root helper — a failed or hostile update leaves the running version fully intact.
@@ -153,7 +156,7 @@ macOS/Windows (node and provisioning host) · ESP32/LoRa relays · manual Termux
 
 **Blockers:** V1 run-as channel end-to-end on Termux v0.118.3 GitHub build, PIN lockscreen set, one Android 15 device (physical) · V2 reboot autostart with PIN set (Pixel + Samsung + Xiaomi; records starts-at-first-unlock) · V3 `pip install --require-hashes rns==1.5.6` in Termux from prefetched debs only (settles the .deb closure list) · V8 Linux end-to-end on Debian 12 + Arch + Fedora VMs (unit start, watchdog quiet, dashboard, uninstall) · V11 sshd reachable after reboot + doze on a fresh LAN.
 **Non-blocking:** V4 phantom-setting persistence across reboot (real devices only, readback) · V5 injection fallback (size/corruption/screen-timeout bounds) · V6 MIUI flow incl. SIM-less refusal · V7 Pi 32-bit-userspace detection · V9 BBK 24h idle survival · V10 phone rnsd runs (join asserted Linux-only) · V12 interrupted-unpack resume · V13 16KB emulator exec + Termux bootstrap · V14 adb-unplug survival post-start.
-**Fault injection:** F1 kill installer mid-extract → re-run heals · F2 crash-before-READY release → auto-revert · F3 READY-but-503 release → auto-revert · F4 corrupt identity → error state + `recover`, never silent re-key · F5 skewed clock → clock-fault surfaced · F6 stale signed manifest → refusal (incl. on RTC-less Pi) · F7 phone reboot mid-provision → resume after unlock.
+**Fault injection:** F1 kill installer mid-extract → re-run heals · F2 crash-before-READY release → auto-revert · F3 READY-but-503 release → auto-revert · F4 corrupt identity → error state + `restore`, never silent re-key · F5 skewed clock → clock-fault surfaced · F6 stale signed manifest → refusal (incl. on RTC-less Pi) · F7 phone reboot mid-provision → resume after unlock.
 
 ## Acceptance criteria (v1 done = all true)
 
@@ -167,6 +170,6 @@ macOS/Windows (node and provisioning host) · ESP32/LoRa relays · manual Termux
 
 ## Seams for later layers
 
-Layer 2: identity dir swap (above) · Layer 3: offer hook (`state/offer.json` + dashboard element + `/api/status` field) + hub-offload endpoint · Layer 4: dashboard surface/port/auth + `/api/status` schema · Layer 5/6: rnsd child → real transport management (`/var/lib/111/rns`, config schema-version, netlink trigger, `transport_state` enum), radio table · Layer 7: gateway re-evaluation, KB git-sync, manifest gossip · Layer 9: supervision-tree handles, `/health` contract, exit(0)-restart, watchdog heartbeat, per-OEM phone watchdog channel.
+Layer 2: identity seam contract delivered — `os/identity/README.md` v2 (§Identity above) · Layer 3: offer hook (`state/offer.json` + dashboard element + `/api/status` field) + hub-offload endpoint · Layer 4: dashboard surface/port/auth + `/api/status` schema · Layer 5/6: rnsd child → real transport management (`/var/lib/111/rns`, config schema-version, netlink trigger, `transport_state` enum), radio table · Layer 7: gateway re-evaluation, KB git-sync, manifest gossip · Layer 9: supervision-tree handles, `/health` contract, exit(0)-restart, watchdog heartbeat, per-OEM phone watchdog channel.
 
 Build tasks: `os/bootstrap/TASKS.md` (created at build start per `os/plan/EXECUTION.md`).
