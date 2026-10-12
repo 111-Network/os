@@ -32,7 +32,7 @@ Harness: Claude Code (this session) + Workflow orchestration.
 |---|---|---|---|
 | 0 | Knowledge | ✅ built — spec locked (D7), all 13 tasks done: 9 candidate seed entries, generator + `--check` green (0 errors), hook committed (activation: `git config core.hooksPath hooks`) | `os/knowledge/README.md` ✅ locked |
 | 1 | Bootstrap | ✅ built — spec v2.1 (D9 + D12), all 17 tasks done: ~90 cargo tests + 21 shim cases + namespace e2e green; `verify/local-smoke.sh` ALL LOCAL GATES GREEN; external HW gates (V1–V3, V8, V11) in runbooks before first signed release | `os/bootstrap/README.md` ✅ locked · `os/bootstrap/TASKS.md` ✅ |
-| 2 | Identity | ✍️ speccing — decisions locked (D13): Ed25519+X25519 dual keyset, raw-pubkey NodeId, Reticulum-shaped wire contract (clean-room), BIP-39+SLIP-0010 backup, agentic hook, attestation bridge; spec draft + adversarial pass in flight | — |
+| 2 | Identity | 🔨 building — spec v2 locked (D13 + D14; 4-judge panel, 71 findings triaged in `layer-2-review.md`); build per `os/identity/TASKS.md` | `os/identity/README.md` ✅ locked |
 | 3 | Local Intelligence | ✍️ speccing — decisions locked (D10): hybrid harness (thin `111-agent` loop + opencode on hubs), llama-server child of 111d, qwen3-4b standard tier; spec v1 draft minimal, adversarial pass queued | `os/intelligence/README.md` (draft) |
 | 4 | Interface & Dashboard | ✍️ speccing — decisions locked (D11): React+Vite→rust-embed, single-tree simple/advanced mode, REST+one-SSE `/api/v1` contract w/ interim `openapi.yaml`; scope = full UI on mock adapters, wiring deferred; spec draft next, adversarial pass queued | `os/interface/README.md` (draft) |
 | 5 | Messaging & Data | ⬜ pending | — |

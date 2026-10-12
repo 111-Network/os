@@ -1,0 +1,86 @@
+# Layer 2 — Adversarial Review Triage (2026-10-12)
+
+Panel: 4 judges (fable), lenses crypto-correctness / completeness-fidelity / embedded-realism / cross-layer-seams+ops.
+Verdicts: 4× **NOT LOCK-READY** — all gating items fixable in place, no redesign ("one focused revision pass away from lock" — seams).
+Findings: **71 raw** (crypto 15 · complete 18 · embedded 20 · seams 18), heavy cross-judge convergence.
+Full raw reports: agent transcripts `l2-judge-{crypto,complete,embedded,seams}-2` (this session).
+
+## Convergence map (independent co-discovery = highest confidence)
+
+| Cluster | Judges | Severity |
+|---|---|---|
+| Counter state absent from backup/restore → restored node fleet-mute | complete#1 + embedded#1 (+crypto#7, seams#1 adjacent) | BLOCKER ×2 |
+| Announce-counter commit/jump rule strands nodes after unclean reboot | seams#1 (+crypto#7, embedded#1) | BLOCKER |
+| Sealed-packet recipe not byte-exact implementable (KDF/AD/nonce/checks unpinned; cited libs are XSalsa20) | crypto#1 (+embedded#2) | BLOCKER |
+| Ed25519 verification-strictness divergence (dalek default vs strict) + X25519 low-order/all-zero gap → fleet pinning-consensus split | crypto#3 + complete#4 + embedded#2 | MAJOR ×3 |
+| No domain separation on any signed artifact (announce/cert/attestation; protocol-confusion class the spec itself cites) | crypto#4 + seams#5 | MAJOR ×2 |
+| Commissioning channel/device: §5 "never transmitted" vs §8.3 mandatory transit; channel mins unpinned; software unowned | crypto#5 + complete#2 + embedded#4 + seams#4 | MAJOR ×4 |
+| libsodium row mandates `crypto_box*` = XSalsa20 — contradicts the pinned XChaCha20 AEAD | seams#3 + complete#9 | MAJOR ×2 |
+| TPM2 can't hold Ed25519 on commodity hardware (sealed-storage ≠ resident key) | embedded#5 + complete#14 | MAJOR ×2 |
+| Monocypher fast-track collides with rubric's flat bus-factor ≥2 gate | embedded#6 + complete#7 | MAJOR ×2 → **user call (below)** |
+| Recipient-mode export circular as key recovery + no byte format | crypto#11 + complete#5 + embedded#17 | MAJOR ×3 |
+| recover/restore verb desync vs Layer 1's locked spec AND its built code | seams#2 + complete#8 + embedded#18a | MAJOR ×3 |
+| Noise audit row dangling (§6.6→§11) | crypto#9 + complete#10 + embedded#8 | MINOR ×3 |
+
+## User calls at lock (ask-don't-assume rule)
+
+1. **Rubric amendment (embedded#6/complete#7):** D14 records a **vendored-primitive exception** to the flat bus-factor ≥2 gate for `testing`: permitted when the project is CC0/permissive-licensed + vendored hash-pinned + forkability recorded; the §14 agreement-vector harness run doubles as the smoke-test log. Monocypher enters `testing`; `proven` unchanged (field evidence only). — **user approved 2026-10-12**
+2. **Commissioning owner (embedded#4 cluster):** the operator's computer running the **`111` CLI** owns the Cat-1 ceremony (commission verb in 111id scope); channel minimums pinned now; protocol bytes spec'd when Cat-1 firmware lands. — **user approved 2026-10-12**
+3. **Wire AEAD (drafter flag 4):** single fleet-wide **XChaCha20-Poly1305** locked (software cost tens of µs/frame at LoRa rates; ESP32 hardware-AES argument is a non-issue; minimal agility surface per §12 rule 14). User answered by redirecting to build momentum; recorded as accepted-recommended, reversible via the crypto-mode registry if ever revisited.
+
+## Disposition: ~44 unique fixes accepted → folded into spec v2 · several sub-items deferred (listed) · 0 rejected outright
+
+### Accepted — blockers (4/4)
+
+1. **Sealed-packet recipe pinned byte-exact** (crypto#1) → §6.4: `shared = X25519(esk, rpk)`, MUST reject all-zero shared · `key = BLAKE2b-256("111/seal/v1" ‖ shared ‖ epk ‖ rpk)` · `nonce = BLAKE2b-192("111/seal-n/v1" ‖ epk ‖ rpk)` (derived, never transmitted) · AD = `version ‖ crypto_mode ‖ counter(LE u64) ‖` all other cleartext header bytes · tag 16B · explicit "project-pinned composition, NOT libsodium-`crypto_box_seal`-compatible; implementers compose from `crypto_aead_xchacha20poly1305_ietf_*`/Monocypher AEAD + generichash, never call sealed-box verbatim".
+2. **Restore recovers wire function, not just keys** (complete#1+embedded#1) → counter-state file in the §13 layout + Cat-1 NVS map; initial counter = 0 (first announce = 1); normative restore-resumption: node MUST set `counter = floor + 1024` where floor is learned from mesh-gossiped copies of its own prior announces or operator-supplied (0 only if never deployed), and MUST NOT announce before the jump; MUST-retire-old-instance ceremony rule; §14 restore→reannounce/send vectors.
+3. **Announce counter synchronously committed (fsync) BEFORE transmit** (seams#1) — announces are rare; the batch-commit/flash-wear argument is per-packet only. Per-peer traffic counters keep batch-commit with pinned jump `J ≥ N` on both send and receive sides.
+4. (Cluster 2 is the second blocker; both counted above.)
+
+### Accepted — majors (deduplicated)
+
+- **Strict verification predicate pinned** (3-way) → §3/§6.2: Ed25519 acceptance = `verify_strict`-class (canonical R and A encodings, S < ℓ, reject small-order A and R) — Monocypher/libsodium already strict; dalek MUST NOT use the default `verify()`. X25519: reject low-order public keys, abort on all-zero DH output. Wycheproof/malleability edge vectors added to §14.
+- **Domain separation everywhere** (2-way) → ASCII tag prepended inside every signed region: `111/announce/v1`, `111/delegation/v1`, `111/attest-node/v1`, `111/attest-transport/v1` (in-band tags — Monocypher 4 lacks Ed25519ctx); normative line: every future signed artifact (proofs, acks, revocations) MUST carry its own tag.
+- **FS claim made honest** (crypto#2) → "sender-side forward secrecy + per-packet key independence; recipient-long-term-key compromise decrypts recorded incoming history" — residual written into §12's table, rule 12 reworded.
+- **Commissioning contract** (4-way + user call) → §5 carve-out for the one-time provisioning transit; §8.3: channel = point-to-point local physical (USB-UART provisioning mode or BLE numeric comparison), never routed/broadcast; challenge-verify after write (relay signs commissioner nonce); commissioner wipes its copy; only the event logged. Owner = `111` CLI (`111 identity commission`); protocol bytes at Cat-1 firmware build (§15).
+- **Attestation supersedure** (crypto#6) → per (node_pubkey, transport_id) the greatest expiry_epoch wins; superseded re-publication rejected; node-signed revocation entry rides the future §9 revocation set.
+- **libsodium row fixed** (seams#3+complete#9) → `crypto_sign*` + `crypto_aead_xchacha20poly1305_ietf_*` + `crypto_generichash` only; parity-reference scoping (out of §14 vector scope unless linked).
+- **Ceremony semantics per category** (seams#4+complete#18) → Cat 2+: keygen silent at install (L1 zero-interaction carried); the ceremony IS the post-install `111 identity backup` invocation; its verification gate applies to the backup, never to node operation. Cat 1: commissioner ceremony blocking, verify-then-provision order; relay-side NVS write atomic (commit flag); re-provisioning accepted iff no committed keyset exists.
+- **Pinning store bounded** (seams#6+embedded#11) → immutability applies to held key material, not retention: bounded store, LRU eviction permitted (NodeId = raw pubkey ⇒ re-TOFU on re-appearance accepts only the true key holder); redundant `node_id` field dropped (== sign_pubkey under B2); ~80–130B/peer arithmetic stated; v1 default cap 256 peers; rate limits remain L6/7's.
+- **Duplicate-NodeId handling** (seams#7) → a node receiving an announce with its OWN NodeId MUST NOT pin it and MUST surface a distinct identity-collision error state; remedy documented (restore on one device only); §14 negative test.
+- **Rotation = succession stated** (seams#8) → under B2 rotation is key succession: successor = new NodeId pinned fresh under §6.3; §10 attestation provides verifiable lineage; stable-identifier-across-rotation explicitly NOT provided.
+- **Crypto-mode registry assigned** (complete#3+seams#15a) → `0x01` = the §6.4 construction; future modes append-only, never weaker; envelope-version field owned by L5, crypto-mode registry owned by L2; changes require identity-layer sign-off.
+- **Phase-2 export pinned properly** (3-way) → purpose: post-root-restore STATE carrier (pinning store, config, future child secrets) — NOT root recovery (roots restore from words only); byte format: `version(1) ‖ ephemeral_pk(32) ‖ ciphertext ‖ node_sig(64)` reusing the §6.4 construction; restore sequencing pinned (words → root → fetch → verify → decrypt → state); operator-recovery-key variant recorded as the phase-2 alternative.
+- **Entropy discipline re-scoped to ALL key generation** (embedded#3+crypto#8) → incl. per-packet ephemerals; TRNG-seeded CSPRNG explicitly permitted for operational keys (reseed + health-check rules stated — the actual COLDCARD lesson is predictable fallback, not CSPRNG use); standing SAR-ADC entropy config for RF-off ESP32-S3 relays as lifetime config (not keygen-time); `bootloader_random_enable` wording fixed (runtime config, not eFuse "burn"); `getrandom()` named for Cat 2+.
+- **TPM2 row corrected** (embedded#5+complete#14) → "TPM2-sealed at-rest encryption (TPM holds the storage key; commodity TPMs are NIST-curve-only) OR SE050B+ (native Ed25519+X25519 custody)"; Cat-4 floor = the Cat-2 contract when neither present.
+- **Verb set unified + migration path** (3-way) → post-swap verbs: `backup`, `restore` (+ `commission`); L1's `recover` is subsumed by `restore` (quarantine-then-explicit semantics carried), `export`/nip49.rs deleted, bip32.rs deleted — recorded as L1 code+spec amendment (v2.1→v2.2); D9-format migration: first run of the L2-wired binary against a legacy dir reads the preserved `mnemonic`, derives the L2 keyset, quarantines `secret.hex`/`npub`, logs the NodeId change.
+- **§11 Noise row** (3-way) → snow/clatter unaudited (`testing` cap; RUSTSEC-2024-0011 fixed 0.9.5); Noise* formally-verified C = rubric-clean path. §12 rule 14 scoped: one AEAD within the packet crypto-mode; §6.6 upgrades are separately pinned named protocols.
+- **H1 deliverable completeness** (embedded#7+complete#17) → normative "111id module scope" subsection: keygen · sign/verify (strict) · ECDH · sealed-packet · announce encode/verify · pinning store + counter state · backup/restore/migrate · attestation · encodings · commission support — plus the host Monocypher C harness as an explicit deliverable (doubles as the G1/D14 smoke-test log).
+
+### Accepted — minors (folded in, one line each)
+
+BIP-39 4-bit (12-word) vs 8-bit (24-word) checksum stated + restored-NodeId confirmation MUST (crypto#10) · revocation set keyed by (root_pubkey ‖ serial), entries root-signed, epoch-trust dependency + both failure directions written (crypto#12) · SLIP-44 check recorded: coin 111 = ARK, no path collision (BIP-44 layouts put coin types at m/44'/111'/…, disjoint from m/111'/…), no BIP-43 purpose-111 registration (crypto#13) · v1 verifiers MUST reject non-empty delegation trailers; undefined-epoch ⇒ expiry not evaluated in v1 (crypto#15 + seams#9) · Cat 3 rows added to §5/§12 tables (complete#6) · restore input hygiene: BIP-39 checksum MUST, NFKC/case/whitespace normalization, SLIP-0010 "key half, chain discarded" (complete#11) · "CompactSeedQR-style project QR (4B descriptor prefix)" rename (complete#12+embedded#16) · weak-key self-test concretized (all-zero/uniform-byte/counter-pattern/low-order-pubkey); known-weak blocklist empty-in-v1, distributed via the signed channel manifest when populated (complete#13+embedded#13) · collision checks + agent-cert restore policy (certs disposable, re-issued post-restore, never re-derived) recorded in §15 (complete#15) · KB list + bip-39 + briar entries (complete#16) · 56B honest overhead (32B epk + 16B tag + 8B counter ≈ 24% of 233B); LoRaWAN short-counter reconstruction deferred (embedded#9) · receive-side batch-commit rollback residual written + L5 idempotency cover + negative test (embedded#10) · Rust pin-set completeness (x25519-dalek, chacha20poly1305, blake2 floors) + ~3–5KB stack figure (embedded#12) · nRF52840 boot-time FICR Rev-3 check: pre-Rev3 ⇒ commissioning warns + explicit operator acknowledgment, residual recorded (embedded#14) · bech32 decoders MUST enforce expected data-part length (embedded#15) · backup refuses non-TTY stdout; Termux invocation noted (no sudo -u); "words shown only at explicit local-TTY ceremonies" wording (embedded#18b+seams#14) · attestation vectors cover encoding+signature only; expiry semantics untestable until L7's epoch (embedded#19) · `reticulum-protocol` KB row on-schema (protocol case study, `candidate`, LicenseRef machine-visible) (embedded#20) · `descriptor` file (0644, 4B) added to the §13 layout (seams#10+embedded#7e) · stale "L1 unbuilt" premise fixed; npub→NodeId display amendments enumerated (install print, dashboard, `/api/status` hex) (seams#11) · mnemonic-at-rest residual written + hub option to shred the mnemonic file after verified backup (seams#12) · "agent holds zero key material" scoped to v1 custody; post-activation the agent holds ONLY its attenuated key (seams#13) · counter/window serialization placement is L5's envelope layout, state machine is L2's; ratchet-space size pinned by L5 at envelope lock, v1 absent (seams#15b/d) · operator label pinned to 10 base32 chars; transport_id registry owned by L2 (seams#16) · compromise/burn runbook (new mnemonic = new NodeId; lost-without-backup = unrecoverable by design) (seams#17) · appdata escape sentence: transport-mutable data (hop counts etc.) rides OUTSIDE the signed blob (seams L6/7 note).
+
+### Deferred (recorded in §15)
+
+Commissioning channel protocol bytes (Cat-1 firmware build) · Noise-implementation audit procurement · LoRaWAN short-counter wire optimization · known-weak blocklist population path · operator-recovery-key export variant (phase-2 alternative) · per-peer budget refinement at the Cat-1 layer · (carried) everything already in §15.
+
+### Rejected
+
+None outright. Two sub-suggestions partially deferred rather than adopted now: a full commissioning protocol skeleton (channel minimums + ownership pinned instead; bytes at Cat-1 build), and pinning the delegation-cert scope-bit semantics (layout + sizes pinned now; bit meanings at activation).
+
+## Cross-layer connection checklist (preserved for the user's later layer-connection check — seams judge, 20 items)
+
+**L1↔L2:** (1) byte-exact dir parity — files, perms, owner, mnemonic NFKC+trailing-newline, nodeid 34B record; (2) corrupt ⇒ quarantine + distinct `/api/status` error + `/health identity=false`, never silent re-key; (3) verb set {backup, restore, commission} + recover/export disposition incl. nip49.rs/bip32.rs deletion; (4) install step-4 keygen swap (silent, D9 shape) + phone on-device keygen unchanged; (5) NodeId replaces npub in verify-print/dashboard/`/api/status` (hex in APIs); (6) entropy = getrandom on Linux/Android; (7) uninstall still removes the dir; update machinery never touches it; (8) provisional-dev-install migration path.
+
+**L2↔L3:** (9) signer IPC owner, socket perms, request/response schema in L3's spec; (10) default-deny policy engine + durable per-scope grants + activity log owned by L3, UCAN-aligned scope vocabulary; (11) delegation activation stays a soft upgrade — verifier rule already shipped in 111id, agent keys minted only via §9 certs.
+
+**L2↔L5:** (12) envelope hook byte layout — signer_pubkey offset, trailer presence/version/empty encoding, ratchet-space size; (13) crypto-mode + envelope-version changes require L2 sign-off; (14) per-peer counter/window serialization (AEAD-AD placement) vs L5's message-ID idempotency boundary; group key distribution never static-static on node keys; announces are L2 artifacts, not L5 envelopes.
+
+**L2↔L4:** (15) pinned label length (10 base32 chars, grouped 4-4-2… see §7); alias local-only; backup action = CLI instruction only; identity error + identity-collision states surfaced; dashboard identity-material grep test.
+
+**L2↔L6/7 (activation gates):** (16) relay verify-vs-blind policy; (17) announce rate caps + bounded pinning store; (18) mesh-epoch source semantics incl. absence fail-mode; (19) attestation gossip carriage; (20) appdata layout/ownership.
+
+## Post-fix verdict
+
+All four judges' gating items resolved in spec v2 (fixes above). Spec locked as **v2** per D14.
