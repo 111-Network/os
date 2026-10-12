@@ -77,15 +77,61 @@ impl Runner for MockRunner {
     }
 }
 
-/// An `install::probe::Env` backed by fixture files on disk (tests point it at a
-/// fixture /proc+/sysfs tree).
-pub struct FixtureEnv {
-    pub root: std::path::PathBuf,
+/// In-memory `install::probe::Env` for probe/categorize tests: fake files, fake
+/// dir listings, fake command outputs. Unlisted paths behave as absent (Err),
+/// so every probe degrades to "unknown" unless the test arranges otherwise.
+#[derive(Default)]
+pub struct MapEnv {
+    pub files: std::collections::HashMap<String, String>,
+    pub dirs: std::collections::HashMap<String, Vec<String>>,
+    /// Exact "prog arg1 arg2" → stdout. Failing commands = absent key.
+    pub cmds: std::collections::HashMap<String, String>,
 }
 
-impl FixtureEnv {
-    pub fn new(root: impl Into<std::path::PathBuf>) -> Self {
-        FixtureEnv { root: root.into() }
+impl MapEnv {
+    pub fn new() -> Self {
+        Self::default()
+    }
+    pub fn file(mut self, path: &str, content: &str) -> Self {
+        self.files.insert(path.to_string(), content.to_string());
+        self
+    }
+    pub fn dir(mut self, path: &str, entries: &[&str]) -> Self {
+        self.dirs.insert(
+            path.to_string(),
+            entries.iter().map(|s| s.to_string()).collect(),
+        );
+        self
+    }
+    pub fn cmd(mut self, cmdline: &str, stdout: &str) -> Self {
+        self.cmds.insert(cmdline.to_string(), stdout.to_string());
+        self
+    }
+}
+
+impl crate::install::probe::Env for MapEnv {
+    fn read_file(&self, path: &str) -> std::io::Result<String> {
+        self.files
+            .get(path)
+            .cloned()
+            .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, path.to_string()))
+    }
+    fn read_dir(&self, path: &str) -> std::io::Result<Vec<String>> {
+        self.dirs
+            .get(path)
+            .cloned()
+            .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, path.to_string()))
+    }
+    fn run(&self, program: &str, args: &[&str]) -> std::io::Result<String> {
+        let key = if args.is_empty() {
+            program.to_string()
+        } else {
+            format!("{program} {}", args.join(" "))
+        };
+        self.cmds
+            .get(&key)
+            .cloned()
+            .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, key))
     }
 }
 

@@ -1,0 +1,45 @@
+# LoRa USB radio table — ships inside the signed release artifact
+# (`releases/<ver>/share/…` via the payload); never loaded from an unsigned
+# channel (spec §Detection & §Artifacts).
+#
+# Match rule: VID:PID AND (product-contains when present). Pid "*" matches any.
+# Product substrings are matched case-insensitively against sysfs `product`.
+# Rows are the spec-pinned set (D9/research sweep, 2026-10-12).
+
+# Heltec WiFi LoRa 32 V3 — CP2102 bridge. The product string is the generic
+# CP2102 one, so vid:pid AND product substring both required by spec intent;
+# Layer 6 refines (this row deliberately over-matches other CP2102 radios).
+[[radio]]
+vid = "10c4"
+pid = "ea60"
+product_contains = "CP2102"
+name = "Heltec WiFi LoRa 32 V3 (CP2102)"
+
+# LILYGO T-Beam — CH9102/CH340-class bridge (1a86 QinHeng). Generic UART with no
+# stable product string, so this row matches vid:pid only; Layer 6 refines.
+[[radio]]
+vid = "1a86"
+pid = "*"
+name = "LILYGO T-Beam (1a86 UART)"
+
+# ESP32-S3 native USB (Espressif SoC-integrated).
+[[radio]]
+vid = "303a"
+pid = "*"
+name = "ESP32-S3 native USB"
+
+# RAKwireless / T-Echo nRF52 USB — Adafruit nRF52 VID, runtime + DFU pids.
+[[radio]]
+vid = "239a"
+pid = "4405"
+name = "LILYGO T-Echo (nRF52 runtime)"
+
+[[radio]]
+vid = "239a"
+pid = "0029"
+name = "LILYGO T-Echo (nRF52 DFU)"
+
+[[radio]]
+vid = "239a"
+pid = "8029"
+name = "RAK4631"
