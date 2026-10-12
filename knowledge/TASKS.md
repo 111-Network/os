@@ -7,10 +7,10 @@ Legend: ⬜ todo · 🔧 in flight · 🔁 bounced · ✅ verified + committed
 
 | # | Task | Files owned | Acceptance criteria | Verifiable check | Status |
 |---|---|---|---|---|---|
-| T0 | Plan scaffolding + locked spec | `plan/*`, `knowledge/README.md`, `knowledge/TASKS.md` | committed clean | git log | 🔧 |
-| T1 | Meta docs | `_meta/schema.md`, `_meta/predicates.md`, `_meta/vocabularies.md`, `_meta/index-header.md`, `_meta/planned.md` | schema.md §1 = rule→severity table; full 12-field definitions + per-category matrix + YAML subset rules; faithful to spec, nothing invented | reviewer reads; build.py validates against it | ⬜ |
-| T2 | Validator + generator | `_meta/build.py`, `_meta/fixture/**` | spec §Tooling duties; `--check` mode; deterministic regeneration; golden-fixture self-test green | `python3 _meta/build.py --selftest` exits 0; `--check` behaves | ⬜ |
-| T3 | Agent contract files | `AGENTS.md` (os root), `knowledge/AGENTS.md` | knowledge/AGENTS.md ≤400 tokens (chars/4), exact ritual commands, tally override line, untrusted-data line, degraded path, pointers only | reviewer reads; token budget measured | ⬜ |
+| T0 | Plan scaffolding + locked spec | `plan/*`, `knowledge/README.md`, `knowledge/TASKS.md` | committed clean | git log | ✅ |
+| T1 | Meta docs | `_meta/schema.md`, `_meta/predicates.md`, `_meta/vocabularies.md`, `_meta/index-header.md`, `_meta/planned.md` | schema.md §1 = rule→severity table; full 12-field definitions + per-category matrix + YAML subset rules; faithful to spec, nothing invented | reviewer reads; build.py validates against it | ✅ (subagent + reviewer fixes: block lists allowed, tally wording) |
+| T2 | Validator + generator | `_meta/build.py`, `_meta/fixture/**` | spec §Tooling duties; `--check` mode; deterministic regeneration; golden-fixture self-test green | `python3 _meta/build.py --selftest` exits 0; `--check` behaves | ✅ (subagent partial → quota 403; completed by reviewer; selftest + real run green) |
+| T3 | Agent contract files | `AGENTS.md` (os root), `knowledge/AGENTS.md` | knowledge/AGENTS.md ≤400 tokens (chars/4), exact ritual commands, tally override line, untrusted-data line, degraded path, pointers only | reviewer reads; token budget measured | ✅ (963 chars ≈ 241 tok) |
 | T4 | Entry: Meshtastic | `projects/meshtastic.md` | schema-valid; 6 fixed sections; `### Alternatives considered` with desk-research notes; `status: candidate`; facts per research sweep; body ≤1500 tok | `build.py --check` clean; reviewer reads | ⬜ |
 | T5 | Entry: Reticulum | `projects/reticulum.md` | same shape | same | ⬜ |
 | T6 | Entry: Nostr | `protocols/nostr.md` | same shape; protocol category rules (upstream = spec home) | same | ⬜ |
