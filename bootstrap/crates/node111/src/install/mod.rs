@@ -38,13 +38,20 @@ pub fn run(args: crate::cli::InstallArgs) -> anyhow::Result<()> {
                 .parse()
                 .expect("compiled-in MIN_INSTALLER_VERSION is a valid calver")
         }),
-        manifest_base: crate::daemon::updater::fetch::DEFAULT_MANIFEST_BASE.to_string(),
+        // Operator override (mirrors, air-gapped channels, e2e rigs):
+        // NODE111_MANIFEST_BASE (+ NODE111_PROBE_204, comma-separated).
+        manifest_base: std::env::var("NODE111_MANIFEST_BASE")
+            .unwrap_or_else(|_| crate::daemon::updater::fetch::DEFAULT_MANIFEST_BASE.to_string()),
         manifest_fallback: Some(crate::daemon::updater::fetch::FALLBACK_MANIFEST_BASE.to_string()),
         health_base: "http://127.0.0.1:11180".to_string(),
-        probe_204: vec![
-            preflight::PROBE_204_PRIMARY.to_string(),
-            preflight::PROBE_204_FALLBACK.to_string(),
-        ],
+        probe_204: std::env::var("NODE111_PROBE_204")
+            .map(|v| v.split(',').map(|s| s.trim().to_string()).collect())
+            .unwrap_or_else(|_| {
+                vec![
+                    preflight::PROBE_204_PRIMARY.to_string(),
+                    preflight::PROBE_204_FALLBACK.to_string(),
+                ]
+            }),
         check_root: true,
     };
     let fetcher =
@@ -60,7 +67,14 @@ pub fn run_with(
     ctx: &InstallContext,
     fetcher: &crate::util::http::Fetcher,
 ) -> anyhow::Result<Receipt> {
-    // 0. existing receipt (untrusted hint) + version gate
+    // 0. base tree + existing receipt (untrusted hint) + version gate
+    for d in [
+        ctx.layout.state_dir(),
+        ctx.layout.root.join("releases"),
+        ctx.layout.root.join("cache/packages"),
+    ] {
+        std::fs::create_dir_all(&d)?;
+    }
     let prior = Receipt::read(&ctx.layout.root.join("receipt.json"))?;
 
     // 1. preflight (fetches + verifies the channel manifest)

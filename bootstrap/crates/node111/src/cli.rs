@@ -42,7 +42,19 @@ fn parse_install_flags(args: &[String]) -> anyhow::Result<InstallArgs> {
     let mut ia = InstallArgs::default();
     let mut i = 0;
     while i < args.len() {
-        match args[i].as_str() {
+        let arg = args[i].as_str();
+        // `--flag value` and `--flag=value` both accepted (the shim uses =).
+        if let Some(v) = arg.strip_prefix("--min-installer-version=") {
+            ia.min_installer_version = Some(v.parse()?);
+            i += 1;
+            continue;
+        }
+        if let Some(v) = arg.strip_prefix("--serial=") {
+            ia.serial = Some(v.to_string());
+            i += 1;
+            continue;
+        }
+        match arg {
             "--phone" => ia.phone = true,
             "--keep-adb" => ia.keep_adb = true,
             "--reboot-test" => ia.reboot_test = true,
@@ -217,6 +229,17 @@ mod tests {
         assert!(ia.phone && ia.keep_adb);
         assert_eq!(ia.serial.as_deref(), Some("abc123"));
         assert!(parse(&["identity".into(), "export".into()]).is_ok());
+        // shim passes --min-installer-version=X (with =) — must parse
+        let ia2 = match parse(&[
+            "install".into(),
+            "--min-installer-version=2026.10.01".into(),
+        ])
+        .unwrap()
+        {
+            Cmd::Install(ia) => ia,
+            other => panic!("{other:?}"),
+        };
+        assert_eq!(ia2.min_installer_version.unwrap().to_string(), "2026.10.01");
         assert!(parse(&["identity".into(), "wut".into()]).is_err());
         assert!(parse(&["bogus".into()]).is_err());
         assert!(matches!(

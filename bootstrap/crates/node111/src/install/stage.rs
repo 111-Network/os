@@ -48,6 +48,15 @@ pub fn run(
 
     let releases = ctx.layout.root.join("releases");
     std::fs::create_dir_all(&releases)?;
+    // F1: a prior kill mid-extract leaves `.{ver}.tmp-<pid>` debris — sweep it
+    // (content-probe healing is the whole point of the tmp+rename design).
+    for entry in std::fs::read_dir(&releases)? {
+        let entry = entry?;
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if name.starts_with(&format!(".{}.tmp-", manifest.release())) {
+            let _ = std::fs::remove_dir_all(entry.path());
+        }
+    }
     let tmp = releases.join(format!(
         ".{}.tmp-{}",
         manifest.release(),

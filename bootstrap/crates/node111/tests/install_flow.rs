@@ -138,7 +138,6 @@ fn setup(date_header: Option<String>) -> Flow {
         etc: fs_root.path().join("etc/111"),
     };
     std::fs::create_dir_all(&layout.root).unwrap();
-    std::fs::create_dir_all(layout.state_dir()).unwrap();
     Flow {
         _served: served,
         _node: node,
@@ -382,6 +381,38 @@ fn clock_skew_refuses() {
     let fetcher = node111::util::http::Fetcher::new(Duration::from_secs(10), 64 << 20).unwrap();
     let err = run_with(&ctx, &fetcher).unwrap_err();
     assert!(err.to_string().contains("clock"), "{err}");
+}
+
+/// F1: installer killed mid-extract leaves a torn .tmp dir — re-run must heal
+/// (content probe, never existence: the torn dir is removed and restaged).
+#[test]
+fn f1_torn_stage_heals() {
+    let flow = setup(None);
+    let env = base_env("debian");
+    // simulate the kill-mid-extract debris
+    let debris = flow.layout.root.join("releases/.2026.10.12.tmp-9999");
+    std::fs::create_dir_all(&debris).unwrap();
+    std::fs::write(debris.join("partial"), b"torn").unwrap();
+    // and a torn RELEASE dir (rename happened, tree incomplete)
+    let torn = flow.layout.root.join("releases/2026.10.12");
+    std::fs::create_dir_all(&torn).unwrap();
+    std::fs::write(torn.join("bin"), b"incomplete").unwrap();
+
+    let runner = MockRunner::new(script(&flow.layout, false, true));
+    let ctx = ctx_for(&flow, &runner, &env, false);
+    let fetcher = node111::util::http::Fetcher::new(Duration::from_secs(10), 64 << 20).unwrap();
+    let receipt = run_with(&ctx, &fetcher).unwrap_or_else(|e| panic!("heal install failed: {e:#}"));
+    assert_eq!(receipt.version, RELEASE);
+    // debris gone, real tree verified
+    assert!(!flow
+        .layout
+        .root
+        .join("releases/.2026.10.12.tmp-9999")
+        .exists());
+    let release = flow.layout.root.join("releases/2026.10.12");
+    assert!(release.join("bin/111").exists());
+    assert!(node111::daemon::updater::stage::verify_tree(&release).is_ok());
+    runner.assert_exhausted();
 }
 
 #[test]
