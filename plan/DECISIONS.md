@@ -73,7 +73,17 @@ ADR-lite. Every decision, its rejected alternatives, and why. Newest last; never
 - **Rejected:** package-repo installer; TLS-only shim; bundle C1 (fakes "mesh joined") and C3 (dead weight, non-portable); raw-key-only identity; blocking Layer 1 on Layer 2's crypto; release-APK `input text` injection (kept as fallback); own provisioner APK (revisit v1.1); postmarketOS as default; armv7 phones; non-systemd distros (clean refusal); proot-distro; GPG signing; installer telemetry.
 - **Why:** strongest verified installer anatomy (uv + Determinate + k3s patterns); smallest node that honestly satisfies "running minimal node"; identity seam cheap to swap; run-as is the only verified fully-headless phone channel.
 
+## D10 — Layer 3 (Local Intelligence) design decisions
+
+- **Date:** 2026-10-12
+- **Decision:** Scope locked with user: **no new research** — every adopted component comes from existing KB entries (`llama-cpp`, `qwen3-4b`, `opencode`), whose own use-when/do-not-use-when sections dictated the split. Layer boundary: **Layer 3 = capability** (models, serving, harness); **Layer 9 = behavior** (monitor cadence, diagnosis playbooks, sandbox, PR gate) — Layer 9 consumes Layer 3 through one task API and stays harness-agnostic.
+  - **H1** hybrid harness: thin always-on Rust agent loop (`111-agent`, supervised child of `111d`, same pattern as the `rnsd` child) for chat, KB grounding, monitoring, and the task API; opencode adopted on hub tiers (4A/4B, opt-in on 2B) for patch-class tasks via headless JSONL — invoked **by** `111-agent`, never directly by Layer 9.
+  - **S1** serving: pinned `llama-server` binary as supervised child of `111d`; OpenAI-compatible endpoint `127.0.0.1:11181`; GGUF blobs sha256-pinned in the signed channel manifest, fetched via Layer 1's standard-tier prefetch; no runtime model downloads.
+  - **M1** model default: qwen3-4b Q4_K_M is the standard tier wherever a local model runs (2B, 4A, 4B); the 4B hub ladder (8B → 32B / 30B-A3B MoE) is one config table, not a new adoption. Offload-only nodes (2A, 3) run `111-agent` as a pure client of a nearby hub.
+  - Ports: dashboard 11180 (Layer 1), llama-server 11181, `111-agent` 11182 — localhost; LAN binding follows the bootstrap dashboard's explicit opt-in rule.
+- **Rejected:** opencode everywhere (a 24/7 Node/TypeScript runtime on every intelligence-capable node; the KB entry itself warns it "belongs on hubs, not relays"); custom-only thin loop (reinvents an agent harness — against adopt-don't-reinvent — and caps patch-generation quality); Ollama (a second heavy always-on daemon whose supervision/update duties overlap `111d`'s; would require new adoption research); llama.cpp embedded as a library in `111d` (couples the kernel's release cycle to the inference engine and adds custom serving plumbing); on-node fine-tuning (weights change only via signed channel-manifest swaps); WAN/cloud model calls (breaks offline-first).
+- **Why:** the smallest layer that honestly satisfies the README's "continuous agent" without a resident Node daemon; the harness-agnostic task seam keeps Layer 9 unblocked; every component traces to a KB entry, so the adopt-vs-build rule is exercised, not bypassed.
+
 ## Pending
 
 - Move deep architecture content out of `os/README.md` into per-layer specs (blocked on layer homes existing).
-- Layer home convention: `os/<layer-slug>/README.md` — confirm at Layer 0 options stage (`os/knowledge/` is already dictated by the README).

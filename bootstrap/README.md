@@ -150,6 +150,6 @@ V1 `run-as com.termux` on Termux v0.118.3 GitHub build, headless bootstrap (one 
 
 ## Seams for later layers
 
-Layer 2: identity dir swap (above) · Layer 3: standard-tier offer hook + hub offload endpoint · Layer 4: dashboard surface/port contract + auth · Layer 5/6: rnsd child → real transport management; radio detection table · Layer 7: gateway re-evaluation, KB git-sync, manifest gossip · Layer 9: supervision-tree handles, `/health` contract, exit(0)-restart primitive, watchdog heartbeat, per-OEM phone watchdog channel.
+Layer 2: identity dir swap (above) · Layer 3 (per D10 / `os/intelligence/README.md`): standard-tier offer hook = qwen3-4b Q4_K_M GGUF prefetch, model blobs in `/var/lib/111/models/` sha256-pinned in the channel manifest · supervised children `llama-server` (127.0.0.1:11181) and `111-agent` (127.0.0.1:11182, chat + task API), same spawn/health-gate pattern as the `rnsd` child · hub offload endpoint (OpenAI-compatible, mesh-routed, identity-authenticated) · Layer 4: dashboard surface/port contract + auth · Layer 5/6: rnsd child → real transport management; radio detection table · Layer 7: gateway re-evaluation, KB git-sync, manifest gossip · Layer 9: supervision-tree handles, `/health` contract, exit(0)-restart primitive, watchdog heartbeat, per-OEM phone watchdog channel.
 
 Build tasks: `os/bootstrap/TASKS.md` (created at build start per `os/plan/EXECUTION.md`).
