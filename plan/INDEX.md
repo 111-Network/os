@@ -34,7 +34,7 @@ Harness: Claude Code (this session) + Workflow orchestration.
 | 1 | Bootstrap | ✍️ speccing — spec v2 post-review (`layer-1-review.md`), awaiting user lock | `os/bootstrap/README.md` (draft v2) |
 | 2 | Identity | 🧭 deciding — options brief ready (`layer-2-options.md`), 8-agent sweep done 2026-10-12; scope locked w/ user (node identity only; backup+recovery in scope, rotation/revocation deferred; crypto on merit, NOT Nostr-locked; agentic-native; all 6 device categories) | — |
 | 3 | Local Intelligence | ✍️ speccing — decisions locked (D10): hybrid harness (thin `111-agent` loop + opencode on hubs), llama-server child of 111d, qwen3-4b standard tier; spec v1 draft minimal, adversarial pass queued | `os/intelligence/README.md` (draft) |
-| 4 | Interface & Dashboard | ⬜ pending | — |
+| 4 | Interface & Dashboard | ✍️ speccing — decisions locked (D11): React+Vite→rust-embed, single-tree simple/advanced mode, REST+one-SSE `/api/v1` contract w/ interim `openapi.yaml`; scope = full UI on mock adapters, wiring deferred; spec draft next, adversarial pass queued | `os/interface/README.md` (draft) |
 | 5 | Messaging & Data | ⬜ pending | — |
 | 6 | Transport & Bridge | ⬜ pending | — |
 | 7 | Relay & Presence | ⬜ pending | — |
