@@ -160,20 +160,29 @@ pub fn check_once(cfg: &UpdaterConfig, layout: &DaemonLayout) -> anyhow::Result<
     };
     let tarball = fetcher.get(&payload.url)?;
     let manifest_sha = crate::util::hash::sha256_bytes(&manifest_bytes);
-    stage::stage_payload(
+    let staged = stage::stage_payload(
         &tarball,
         payload,
         &layout.state_dir().join("staging"),
         &manifest.release(),
     )?;
+    // The root helper re-verifies from the staging bundle alone (D12): the
+    // signed channel manifest + its minisig ride alongside the tarball.
+    crate::util::fs::atomic_write(
+        &staged.join("channel-111-stable.toml"),
+        &manifest_bytes,
+        0o644,
+    )?;
+    crate::util::fs::atomic_write(
+        &staged.join("channel-111-stable.toml.minisig"),
+        sig_text.as_bytes(),
+        0o644,
+    )?;
     stage::write_update_request(
         &layout.state_dir(),
         &manifest.release(),
         &manifest_sha,
-        &layout
-            .state_dir()
-            .join("staging")
-            .join(manifest.release().to_string()),
+        &staged,
     )?;
     record_success(layout)?;
     Ok(FetchOutcome::Staged {

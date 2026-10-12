@@ -8,6 +8,7 @@ Description=111 node update request watcher
 [Path]
 PathChanged=/var/lib/111/state/update-request.json
 PathChanged=/var/lib/111/state/revert-request.json
+PathChanged=/var/lib/111/state/health-confirmed.json
 Unit=111node-update.service
 
 [Install]

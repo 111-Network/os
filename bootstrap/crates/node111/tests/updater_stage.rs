@@ -126,11 +126,14 @@ fn happy_path_stages_and_requests() {
         .unwrap()
         .ends_with("staging/2026.10.12"));
 
-    // staged tree is complete + verified
+    // staging bundle is complete (D12): tarball + tree + manifest + minisig
     let staged = layout.state_dir().join("staging/2026.10.12");
-    assert!(staged.join("bin/111").exists());
-    assert!(staged.join("share/kb/llms.txt").exists());
-    assert!(staged.join("share/payload.manifest").exists());
+    assert!(staged.join("payload.tar.gz").exists());
+    assert!(staged.join("channel-111-stable.toml").exists());
+    assert!(staged.join("channel-111-stable.toml.minisig").exists());
+    assert!(staged.join("tree/bin/111").exists());
+    assert!(staged.join("tree/share/kb/llms.txt").exists());
+    assert!(staged.join("tree/share/payload.manifest").exists());
 
     // last-successful-check recorded
     assert!(layout.state_dir().join("last-update-check.json").exists());

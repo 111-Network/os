@@ -19,19 +19,39 @@ pub struct Journal {
 
 impl Journal {
     pub fn read(path: &std::path::Path) -> anyhow::Result<Option<Self>> {
-        let _ = path;
-        todo!("T11")
+        let bytes = match std::fs::read(path) {
+            Ok(b) => b,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(e) => return Err(e.into()),
+        };
+        let journal: Journal = serde_json::from_slice(&bytes)
+            .map_err(|e| anyhow::anyhow!("corrupt probation journal {}: {e}", path.display()))?;
+        anyhow::ensure!(
+            journal.schema == 1,
+            "journal schema {} unsupported",
+            journal.schema
+        );
+        Ok(Some(journal))
     }
 
     /// Atomic write; root-only caller.
     pub fn write(&self, path: &std::path::Path) -> anyhow::Result<()> {
-        let _ = path;
-        todo!("T11")
+        let json = serde_json::to_vec_pretty(self)?;
+        crate::util::fs::atomic_write(path, &json, 0o644)
     }
 
-    /// Clear the journal (probation finalized or reverted).
+    /// Clear the journal (probation finalized or reverted): write a non-pending
+    /// tombstone (kept for forensics) rather than unlinking.
     pub fn clear(path: &std::path::Path) -> anyhow::Result<()> {
-        let _ = path;
-        todo!("T11")
+        if let Some(mut j) = Self::read(path)? {
+            j.pending = false;
+            j.write(path)?;
+        }
+        Ok(())
     }
 }
+
+/// Probation window: from flip to confirmed-sustained health (spec: the health
+/// checklist must hold across the window; watchdog kills during probation
+/// count as probation failures).
+pub const PROBATION_SECS: u64 = 600;

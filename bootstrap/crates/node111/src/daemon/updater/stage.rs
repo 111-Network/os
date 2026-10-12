@@ -10,7 +10,7 @@ use std::path::{Component, Path, PathBuf};
 
 /// Extract a gzipped tarball with strict path safety: no absolute paths, no
 /// `..`, no symlink/hardlink entries (payload is a plain file tree).
-fn safe_unpack(tarball: &[u8], dest: &Path) -> anyhow::Result<()> {
+pub(crate) fn safe_unpack(tarball: &[u8], dest: &Path) -> anyhow::Result<()> {
     let mut archive = tar::Archive::new(GzDecoder::new(tarball));
     for entry in archive.entries()? {
         let mut entry = entry?;
@@ -97,8 +97,14 @@ pub fn stage_payload(
     std::fs::create_dir(&tmp)?;
 
     let result = (|| -> anyhow::Result<()> {
-        safe_unpack(tarball, &tmp)?;
-        verify_tree(&tmp)?;
+        // Staging bundle (D12): the raw pinned tarball + the extracted tree/ +
+        // (fetch.rs adds) the signed channel manifest + minisig. The root
+        // helper re-verifies everything from these bytes alone.
+        crate::util::fs::atomic_write(&tmp.join("payload.tar.gz"), tarball, 0o644)?;
+        let tree = tmp.join("tree");
+        std::fs::create_dir(&tree)?;
+        safe_unpack(tarball, &tree)?;
+        verify_tree(&tree)?;
         Ok(())
     })();
     if let Err(e) = result {

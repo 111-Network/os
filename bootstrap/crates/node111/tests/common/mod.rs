@@ -1,5 +1,9 @@
 //! Shared test helpers: a minimal loopback HTTP/1.1 file server (no deps —
 //! TASKS.md bars tiny_http et al).
+//!
+//! Compiled separately into every integration binary — helpers unused by one
+//! binary are dead code there; the allow keeps `-D warnings` honest.
+#![allow(dead_code)]
 
 use std::io::{Read, Write};
 use std::net::TcpListener;
