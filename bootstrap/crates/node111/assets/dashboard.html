@@ -1,0 +1,100 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>111 node</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 24px 16px;
+    background: #0a0a0a; color: #d4d4d4;
+    font: 14px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
+    max-width: 720px; margin-inline: auto;
+  }
+  h1 { font-size: 18px; font-weight: 600; margin: 0 0 4px; }
+  .sub { color: #737373; font-size: 12px; margin-bottom: 24px; }
+  .card {
+    border: 1px solid #262626; border-radius: 2px;
+    padding: 12px 16px; margin-bottom: 12px; background: #111;
+  }
+  .row { display: flex; justify-content: space-between; gap: 16px; padding: 2px 0; }
+  .k { color: #737373; }
+  .v { text-align: right; word-break: break-all; }
+  .ok { color: #4ade80; }
+  .bad { color: #ff3333; }
+  .warn { color: #facc15; }
+  .pill { border: 1px solid currentColor; padding: 0 6px; border-radius: 2px; font-size: 12px; }
+</style>
+</head>
+<body>
+<h1>111 node</h1>
+<div class="sub">local dashboard · read-only · 127.0.0.1:11180</div>
+
+<div class="card">
+  <div class="row"><span class="k">health</span><span class="v" id="health">—</span></div>
+  <div class="row"><span class="k">npub</span><span class="v" id="npub">—</span></div>
+  <div class="row"><span class="k">category</span><span class="v" id="category">—</span></div>
+  <div class="row"><span class="k">version</span><span class="v" id="version">—</span></div>
+  <div class="row"><span class="k">uptime</span><span class="v" id="uptime">—</span></div>
+</div>
+
+<div class="card">
+  <div class="row"><span class="k">transport</span><span class="v" id="transport">—</span></div>
+  <div class="row"><span class="k">KB snapshot</span><span class="v" id="kb">—</span></div>
+</div>
+
+<div class="card">
+  <div class="row"><span class="k">last successful update check</span><span class="v" id="upd">—</span></div>
+  <div class="row"><span class="k">update pending</span><span class="v" id="updp">—</span></div>
+  <div class="row"><span class="k">clock</span><span class="v" id="clock">—</span></div>
+</div>
+
+<div class="card" id="offercard" hidden>
+  <div class="row"><span class="k">standard tier offer</span><span class="v" id="offer">—</span></div>
+</div>
+
+<div class="card" id="errcard" hidden>
+  <div class="row"><span class="k bad">node error</span><span class="v bad" id="err">—</span></div>
+</div>
+
+<script>
+"use strict";
+const $ = id => document.getElementById(id);
+const txt = (id, v) => { $(id).textContent = v; };
+function fmtUptime(s) {
+  const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60);
+  return h > 0 ? `${h}h ${m}m` : m > 0 ? `${m}m ${s % 60}s` : `${s}s`;
+}
+async function refresh() {
+  try {
+    const r = await fetch("/api/status", { headers: { "Accept": "application/json" } });
+    const s = await r.json();
+    const ok = s.health.status === "ok";
+    $("health").innerHTML = `<span class="${ok ? "ok" : "bad"} pill">${s.health.status}</span>`;
+    txt("npub", s.node.npub || "—");
+    txt("category", s.node.category || "—");
+    txt("version", s.node.version);
+    txt("uptime", fmtUptime(s.node.uptime_sec));
+    const t = s.transport_state;
+    $("transport").innerHTML = `<span class="${t === "joined" ? "ok" : t.includes("degraded") ? "bad" : "warn"}">${t}</span>`;
+    txt("kb", s.kb ? `${s.kb.entries} entries · ${s.kb.sha256.slice(0, 12)}…` : "—");
+    txt("upd", s.updates.last_successful_check || "never");
+    txt("updp", s.updates.pending ? "yes" : "no");
+    $("clock").innerHTML = s.clock_fault
+      ? '<span class="bad">clock fault</span>'
+      : '<span class="ok">ok</span>';
+    $("offercard").hidden = !s.offer;
+    if (s.offer) txt("offer", `${s.offer.tier} · ${s.offer.state}`);
+    $("errcard").hidden = !s.error_state;
+    if (s.error_state) txt("err", `${s.error_state.kind}: ${s.error_state.detail}`);
+  } catch (e) {
+    $("health").innerHTML = '<span class="bad pill">unreachable</span>';
+  }
+}
+refresh();
+setInterval(refresh, 5000);
+</script>
+</body>
+</html>
