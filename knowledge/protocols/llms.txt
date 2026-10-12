@@ -4,4 +4,9 @@
 
 ## Optional
 
+- [BIP-39](bip-39.md): Mnemonic seed-phrase standard; checksum is weak and format carries no version. | candidate | identity,offline
+- [EDHOC](edhoc.md): Lightweight authenticated key exchange for constrained links; young ecosystem. | candidate | identity,networking,offline
+- [Noise Protocol Framework](noise-framework.md): Pattern-based handshake framework; patterns verified, implementations unaudited. | candidate | identity,networking,offline
 - [Nostr](nostr.md): Signed-event protocol with self-authenticating identity and offline-first relay sync. | candidate | identity,networking,sync
+- [Reticulum protocol](reticulum-protocol.md): Public-domain mesh protocol design; code license non-OSI with AI-training clause. | candidate | identity,mesh,networking
+- [SLIP-0010](slip-0010.md): Hardened-only Ed25519 HD derivation standard that pairs with BIP-39 seeds. | candidate | identity,offline
