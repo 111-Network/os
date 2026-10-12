@@ -4,8 +4,8 @@
 
 ## Optional
 
-- [Automerge](automerge.md): Local-first CRDT library with a Rust core and language bindings. | candidate | crdt,offline,sync
-- [llama.cpp](llama-cpp.md): Portable local LLM inference runtime in plain C/C++. | candidate | llm,runtime
-- [Meshtastic](meshtastic.md): LoRa mesh firmware with mature phone apps and a large deployed network. | candidate | lora,mesh,offline
-- [OpenCode](opencode.md): Terminal-native open-source AI coding agent, provider-agnostic, local-model capable. | candidate | agent
-- [Reticulum](reticulum.md): Cryptography-first mesh networking stack, transport-agnostic, Python reference implementation. | candidate | mesh,networking,offline
+- [Automerge](automerge.md): Local-first CRDT library for JSON documents with Git-like merge history. | candidate | crdt,offline,storage
+- [llama.cpp](llama-cpp.md): Low-level portable C/C++ GGUF inference engine for CPU-first local inference. | candidate | llm,offline,runtime
+- [Meshtastic](meshtastic.md): LoRa mesh firmware using managed flooding; flooding scales poorly on busy channels. | candidate | lora,mesh
+- [OpenCode](opencode.md): Open-source coding agent CLI with terminal TUI and 75+ model providers. | candidate | agent,llm
+- [Reticulum](reticulum.md): Sovereign end-to-end encrypted networking stack; custom license needs legal review | candidate | mesh,networking,offline

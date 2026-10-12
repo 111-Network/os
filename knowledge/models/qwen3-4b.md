@@ -2,65 +2,64 @@
 title: Qwen3 4B
 category: model
 status: candidate
-summary: Compact Apache-licensed LLM with switchable thinking mode, 32K native context.
-tags: [llm]
-aliases: [Qwen3-4B]
+summary: Apache-2.0 4B-parameter LLM family default for local reasoning, coding, and agents.
+tags: [llm, offline]
 platforms: [linux, android]
-upstream: https://huggingface.co/Qwen/Qwen3-4B
+upstream: "https://huggingface.co/Qwen"
 license: Apache-2.0
 last_verified: 2026-10-12
-sources:
-  - https://huggingface.co/Qwen/Qwen3-4B
-  - https://github.com/QwenLM/Qwen3
-  - https://qwen.ai/
-relations:
-  used_in: ["[[llama-cpp]]"]
+sources: ["https://huggingface.co/Qwen", "https://github.com/ggml-org/llama.cpp"]
 ---
-Compact Apache-licensed LLM with switchable thinking mode, 32K native context.
+
+Apache-2.0 4B-parameter LLM family default for local reasoning, coding, and agents.
 
 ## What it is
 
-A 4-billion-parameter dense language model from the Qwen3 family, released
-under Apache-2.0 with weights on Hugging Face. It supports a hybrid thinking
-mode: reasoning traces can be enabled for harder prompts or disabled for
-low-latency chat. Native context is 32K tokens, extendable with YaRN to
-roughly 131K. Specialized 2507 refresh variants add a 256K context window.
-GGUF builds run locally through [[llama-cpp]].
+Qwen3 4B is a 4-billion-parameter open weights language model from Alibaba,
+released under Apache-2.0.
+It is the repeatedly cited default all-rounder for reasoning, coding, and
+multilingual workloads in 2026.
+Reported as of 2026-10, it needs roughly 3-4 GB of VRAM at Q4 quantization
+and runs on Pi 5-class hardware and old laptops.
 
 ## Use when
 
-A small self-hosted model is needed for drafting, classification, or agent
-tool-use on nodes with a few gigabytes of RAM. The permissive license makes
-it a safe default for redistribution inside the OS image, and its thinking
-toggle lets one model serve both quick answers and deeper planning.
+- A local model must run offline on modest hardware under a permissive license.
+- Relay-class and hub-class nodes want one model family across size tiers.
+- Tool-calling and agent behavior matter more than frontier benchmark peaks.
+- The serving path is GGUF quantization through [[llama-cpp]].
 
 ## Do NOT use when
 
-Quality bar exceeds small-model ability: long multi-step reasoning, large
-context recall, or precise tool-call reliability still favor bigger models or
-cloud APIs. The 4B class is the budget tier, not the capability ceiling.
+- Long-horizon agentic tasks demand frontier closed-model quality;
+  the gap is meaningful at this size.
+- Deployer policy excludes Chinese-origin model families.
+- A node cannot spare roughly 3-4 GB of VRAM, or equivalent RAM, at Q4.
 
 ## Details
 
-Desk research, verified 2026-10-12. Model gate adaptation applies: project
-gates plus a mandatory license check, which Apache-2.0 passes cleanly.
-Weights are public with a documented model card; the family has a broad
-ecosystem of tooling and quantized redistributions. Footprint on ESP32-class
-hardware is out of reach; the realistic home is Linux-class nodes and phones
-with sufficient RAM. Promotion past candidate requires on-device quality and
-latency measurement logged by the OS's own smoke test.
+The Qwen3 family scales from 0.6B to 32B dense parameters plus a 30B-A3B
+MoE variant, so one family spans relay-class to hub-class nodes.
+Community GGUF quantization support is huge, and llama.cpp is the de facto
+serving runtime for that ecosystem.
+Reported as of 2026-10: strong tool-calling and agent behavior for its size
+class, with a large catalog of community quantizations.
+Platforms noted as of 2026-10: linux and android.
 
 ## Evidence
 
+- 2026-10-12 — Desk research sweep; no first-party field testing yet.
+
 ### Alternatives considered
 
-2026-10-12: desk research sweep. Phi-4-mini and Gemma 4-class models were
-weighed; Gemma carries a custom license needing review, and Phi-4-mini has a
-similar footprint with a different license posture. Devstral 24B and
-gpt-oss-20b were recorded as larger-step-up options for hub nodes. Qwen3 4B
-stays the compact default for its permissive license and mature tooling
-support in GGUF form.
+- Smaller Qwen3 dense variants (0.6B-1.7B) for relay-class nodes;
+  weaker at agent tasks than the 4B point.
+- The 30B-A3B MoE variant for hub-class nodes; heavier per-node footprint.
+- Frontier closed models; higher quality ceiling but incompatible with
+  offline operation and permissive licensing goals.
 
 ## Links
 
-Runtime pairing: [[llama-cpp]]. Weights: https://huggingface.co/Qwen/Qwen3-4B
+- Upstream: https://huggingface.co/Qwen
+- Serving runtime: [[llama-cpp]]
+- Provenance sources are listed in the frontmatter.

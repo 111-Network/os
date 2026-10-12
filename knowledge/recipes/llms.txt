@@ -4,4 +4,4 @@
 
 ## Optional
 
-- [Install Meshtastic on Heltec V3](install-meshtastic-on-heltec-wifi-lora-32-v3.md): Installs Meshtastic firmware on a Heltec WiFi LoRa 32 V3 over USB. | candidate | hardware,lora,mesh
+- [Install Meshtastic on Heltec V3](install-meshtastic-on-heltec-wifi-lora-32-v3.md): Meshtastic firmware install path for the Heltec WiFi LoRa 32 V3. | candidate | hardware,lora,mesh

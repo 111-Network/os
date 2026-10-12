@@ -2,65 +2,67 @@
 title: OpenCode
 category: project
 status: candidate
-summary: Terminal-native open-source AI coding agent, provider-agnostic, local-model capable.
-tags: [agent]
-aliases: [opencode]
+summary: Open-source coding agent CLI with terminal TUI and 75+ model providers.
+tags: [agent, llm]
 platforms: [linux, macos, windows]
 upstream: https://github.com/anomalyco/opencode
 license: MIT
 last_verified: 2026-10-12
 sources:
   - https://github.com/anomalyco/opencode
-  - https://opencode.ai/
-relations:
-  uses: ["[[llama-cpp]]"]
+  - https://opencode.ai
 ---
-Terminal-native open-source AI coding agent, provider-agnostic, local-model capable.
+Open-source coding agent CLI with terminal TUI and 75+ model providers.
 
 ## What it is
 
-An MIT-licensed coding agent that runs as a terminal UI, reading a codebase,
-editing files, and executing commands in an agentic loop. It is
-provider-agnostic through a model catalog and speaks to local runtimes via
-OpenAI-compatible endpoints, so a self-hosted stack such as
-[[llama-cpp]] can serve as its backend. LSP integration supplies code
-diagnostics, and MCP support extends its tool surface. The repository moved
-from the sst organization to anomalyco in 2026.
+An open-source coding and agent CLI, reported as of 2026-10 as the
+most-starred project in its class with 212,751 GitHub stars. MIT-licensed,
+written in TypeScript, last pushed 2026-10-12. It ships a terminal TUI, a
+desktop app, and an IDE extension. It is provider-agnostic with 75+
+providers, including local models served through Ollama or LM Studio. It
+reads LSP context, runs parallel sessions, and separates plan and build
+agents. Version 2.x was released in September 2026. It can run headless with
+JSONL input/output, which makes it usable as orchestration for an autonomous
+maintainer agent.
 
 ## Use when
 
-A scriptable, self-hosted coding agent is needed that does not hard-wire one
-vendor's API. It is a candidate harness for the OS's own build agents,
-especially where runs must stay on local infrastructure with credentials
-held on the machine.
+A single coding-agent harness is wanted across terminal, desktop, and IDE
+surfaces. Provider choice matters, including local models kept on the
+machine. Scripted or headless operation is needed, for example an
+orchestration loop driving repository maintenance with structured JSONL
+events.
 
 ## Do NOT use when
 
-A managed IDE-integrated assistant with cloud-only models is acceptable
-instead; OpenCode's value is control and portability, which costs setup
-effort. It is also not a model itself, so model quality depends on the
-configured backend.
+The target node is relay-class or weakest-tier hardware: the TypeScript and
+Node runtime is heavy there, so it belongs on hubs, not relays. A stable,
+slowly-changing dependency is required without version pinning: the project
+moves fast, so versions need pinning. Expected agent quality exceeds what the
+local model behind it can deliver — the harness does not raise the model's
+ceiling.
 
 ## Details
 
-Desk research, verified 2026-10-12. MIT license, very active public history,
-large multi-contributor base, and a documented build path. The project
-supports air-gapped deployment with local providers, and credentials stay on
-the user's machine, which aligns with the OS's offline-first posture. The
-harness is a TypeScript rewrite of an earlier Go version; that history is a
-maturity signal worth re-checking at the testing gate. Telemetry defaults
-need verification in a local build during the smoke test.
+Star count, provider count, and push freshness are reported as of 2026-10
+from the 2026-10-12 research sweep, not re-measured locally. The headless
+JSONL mode is the property that fits the OS's autonomous maintainer design:
+an outer loop can spawn sessions, feed prompts, and parse events without a
+terminal. The v2.x line dates from September 2026, so early-adopter drift is
+a real risk when pinning. Local-model paths go through OpenAI-compatible
+endpoints from Ollama or LM Studio.
 
 ## Evidence
 
 ### Alternatives considered
 
-2026-10-12: desk research sweep. Goose and Aider-pattern harnesses were
-weighed; Goose overlaps in provider-agnosticism, while Aider-style git-loop
-agents are editor-centric. pi-mono-class loops were noted for minimal
-runtimes. OpenCode stays the leading harness candidate for its MIT license,
-terminal-first design, and native AGENTS.md ecosystem alignment.
+2026-10-12: desk research sweep. Other open coding-agent CLIs exist,
+including Aider-style git-loop harnesses and editor-centric assistants;
+OpenCode leads on star count, MIT license, provider breadth, LSP context,
+and headless JSONL operation. Model runtimes such as llama.cpp are
+complements underneath it, not alternatives to it.
 
 ## Links
 
-Local backend: [[llama-cpp]]. Upstream: https://github.com/anomalyco/opencode
+Upstream: https://github.com/anomalyco/opencode — Docs: https://opencode.ai

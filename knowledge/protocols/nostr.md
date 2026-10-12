@@ -2,64 +2,75 @@
 title: Nostr
 category: protocol
 status: candidate
-summary: Simple open protocol for global messaging over relays, keys as identity.
-tags: [networking, identity]
-aliases: [Nostr protocol]
+summary: Signed-event protocol with self-authenticating identity and offline-first relay sync.
+tags: [sync, networking, identity]
 upstream: https://github.com/nostr-protocol/nips
 last_verified: 2026-10-12
 sources:
+  - https://nips.nostr.com
   - https://github.com/nostr-protocol/nips
-  - https://github.com/nostr-protocol/nostr
-  - https://nostr.com/
 ---
-Simple open protocol for global messaging over relays, keys as identity.
+Signed-event protocol with self-authenticating identity and offline-first relay sync.
 
 ## What it is
 
-A minimal protocol for publishing signed events to relays and subscribing to
-other users' events by public key. Identity is a secp256k1 keypair; events are
-JSON with a Schnorr signature; relays are dumb replication servers chosen by
-each client. Standards evolve as NIPs, Nostr Implementation Possibilities,
-maintained in the protocol's specification repository.
+A simple signed-event protocol (NIP-01) over WebSocket relays. Clients
+publish events to relays; relays store and forward them. Every event is
+self-authenticating signed JSON, and identity is a secp256k1 Schnorr keypair
+that comes free with the signature scheme — no certificate authority, no
+registry, no account server. Around 89 relay implementations exist, reported
+as of 2026-10.
 
 ## Use when
 
-A key-based, relay-agnostic messaging or identity fabric is needed where
-users (or agents) bring their own keys and tolerate relay plumbing. It is a
-candidate for the identity-adjacent messaging layer on always-on nodes, and
-its NIP process is a template for spec evolution the OS can mirror.
+- A project needs portable, self-sovereign identity that signs offline and
+  verifies anywhere, with no trust anchor to run.
+- Catch-up-after-offline is the dominant traffic shape: two parties reconcile
+  what changed while a link was down, instead of resending everything.
+- A mesh application needs an internet bridge: relays gossip events globally,
+  and bitchat already uses nostr this way in production.
 
 ## Do NOT use when
 
-Offline-first mesh delivery is the requirement: nostr expects reachable
-relays and does not define store-and-forward radio transport. It is also the
-wrong tool where human-readable names, contact lists, or trust graphs are
-needed without extra protocol layers.
+- The link is LoRa-class: the protocol is WebSocket-centric and needs
+  adaptation before it fits low-bandwidth or store-and-forward radio links.
+- Nobody can absorb relay operations: public-relay spam and DoS management is
+  a real, ongoing burden on the relay operator.
+- A mesh routing layer is what is needed: nostr is not a mesh protocol, it is
+  a sync and identity layer, so it needs a transport such as [[reticulum]] or
+  [[meshtastic]] underneath on radio paths.
 
 ## Details
 
-Desk research, verified 2026-10-12. The NIPs repository declares all NIPs
-public domain via a README statement; there is no formal license file, which
-is recorded here as provenance rather than an SPDX expression. Protocol gate
-adaptation applies: spec stability plus independent implementations replace
-repo-activity gates. Multiple independent relay implementations exist in
-several languages, and client diversity is broad, so the implementation
-diversity gate passes on paper. Relay selection, event storage cost, and spam
-control remain the open operational problems the OS would need to solve for
-its own deployments.
+- NIP-77 Negentropy set reconciliation is the key offline-first sync
+  mechanism. NEG-OPEN / NEG-MSG / NEG-CLOSE frames reconcile event sets with
+  a reported 10-100x bandwidth reduction, and the same reconciliation works
+  relay-to-relay — designed exactly for catch-up-after-offline.
+- Relay implementations: strfry (C++/LMDB, supports NIP-77, the standard for
+  public relays), nostr-rs-relay (Rust/SQLite, friendly to a Raspberry Pi),
+  and khatru (a Go relay framework).
+- A local relay is trivially self-hosted on a Pi or Umbrel, so a node can
+  hold its community's events and reconcile with the wider net whenever a
+  link appears.
+- Protocol gate view: NIP-01 is a stable spec with many independent
+  implementations, which replaces the repo-activity gates for this category.
 
 ## Evidence
 
 ### Alternatives considered
 
-2026-10-12: desk research sweep. ActivityPub was weighed as the federated
-alternative; it has heavier server requirements and weaker identity
-portability. Matrix was weighed as the rich-state alternative; its
-server-side complexity is the wrong fit for ESP32-class or intermittent
-links. Secure Scuttlebutt was noted as closer to offline-first but with a
-smaller 2026 ecosystem. Nostr stays the leading candidate for key-based
-identity messaging, pending a defined relay strategy.
+- [[automerge]] — mergeable-document sync (CRDT); strong for application
+  data, but it offers no global identity and no relay gossip layer, so it
+  answers a different question than signed public events.
+- [[reticulum]] — a mesh transport and routing stack; complementary rather
+  than competing, since nostr needs a transport under it on radio links.
+- [[meshtastic]] — LoRa mesh firmware with its own radio layer; not an
+  event or identity protocol, and not a fit for internet-relay sync.
+- 2026-10-12 — Desk-research sweep; entered at candidate tier per the
+  three-gate rubric, protocol adaptation (spec stability plus multiple
+  independent implementations).
 
 ## Links
 
-Spec home: https://github.com/nostr-protocol/nips
+- https://nips.nostr.com
+- https://github.com/nostr-protocol/nips

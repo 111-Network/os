@@ -2,8 +2,8 @@
 title: llama.cpp
 category: project
 status: candidate
-summary: Portable local LLM inference runtime in plain C/C++.
-tags: [llm, runtime]
+summary: Low-level portable C/C++ GGUF inference engine for CPU-first local inference.
+tags: [llm, runtime, offline]
 aliases: [llama cpp]
 platforms: [linux, macos, windows, android]
 upstream: https://github.com/ggml-org/llama.cpp
@@ -11,58 +11,51 @@ license: MIT
 last_verified: 2026-10-12
 sources:
   - https://github.com/ggml-org/llama.cpp
-  - https://github.com/ggml-org/llama.cpp/releases
-relations:
-  uses: ["[[qwen3-4b]]"]
-  used_in: ["[[opencode]]"]
 ---
-Portable local LLM inference runtime in plain C/C++.
+Low-level portable C/C++ GGUF inference engine for CPU-first local inference.
 
 ## What it is
 
-An inference engine that runs Llama-derived and compatible transformer models
-on ordinary CPUs and GPUs with no hard dependencies beyond a C/C++ toolchain.
-It ships a server mode with an OpenAI-compatible HTTP API, a CLI chat mode,
-and quantization tooling (GGUF) that shrinks models to fit small devices.
-Bindings and ports exist for many languages and for Android and iOS.
+A portable C/C++ inference engine for GGUF models, MIT-licensed, embeddable
+directly as a library. CPU-first, with GPU offload via CUDA, Metal, Vulkan,
+and SYCL. Reported as of 2026-10: 130,866 GitHub stars, with daily pushes.
 
 ## Use when
 
-Local inference is needed on hardware the OS targets, from a Linux box down
-to a mid-range phone. Its server mode is the default seam for agent harnesses
-that expect an OpenAI-style endpoint, and its GGUF ecosystem is where
-compact models such as [[qwen3-4b]] are published.
+Running 4-8B language models on weak nodes, from Raspberry Pi-class boards
+up to servers, where aggressive quantization (4-bit and below) keeps models
+viable. It is the de facto backend behind most local-LLM tooling, so adopting
+it rides an existing ecosystem. Pairs with compact models such as [[qwen3-4b]]
+and backs agent harnesses such as [[opencode]].
 
 ## Do NOT use when
 
-SOTA-quality generation at large scale is required; llama.cpp optimizes for
-portability and footprint, not datacenter throughput. It is also the wrong
-layer for training or fine-tuning, and exotic architectures may lag behind
-upstream releases.
+A turnkey product is needed: llama.cpp is low-level, so serving and model
+management are built by the integrator. On phones, Vulkan and NPU paths are
+less turnkey than ExecuTorch. Giant MoE models are impractical on it.
 
 ## Details
 
-Desk research, verified 2026-10-12. MIT license, public source under the
-ggml-org organization, extremely active history with frequent tagged
-releases, and a large multi-org contributor base. The repository provides a
-documented network-isolated build (plain cmake) and runs with networking
-disabled, which matters for the testing-gate offline check. Packaging in
-distros and language ecosystems is broad. Footprint per device class still
-needs measurement on the OS's own hardware profiles before promotion past
-candidate.
+Desk research, verified 2026-10-12. MIT license; canonical repository under
+the ggml-org organization. Scale and activity reported as of 2026-10:
+130,866 stars and daily pushes. Runs from Raspberry Pi-class hardware up to
+servers; offload backends cover CUDA, Metal, Vulkan, and SYCL. Quantization
+at 4-bit and below is what makes 4-8B models viable on weak nodes, matching
+the OS's small-model target. Embeddable as a library, which fits the
+adopt-vs-build rule of wrapping a proven seam rather than writing inference
+plumbing.
 
 ## Evidence
 
 ### Alternatives considered
 
-2026-10-12: desk research sweep. Ollama was weighed as the friendliest
-packaging, but it is a distribution wrapper rather than the runtime itself.
-MLC and ExecuTorch were noted for mobile-class acceleration at the cost of a
-heavier toolchain. whisper.cpp and moonshine.cpp were recorded as sibling
-projects in the same repository family for audio. llama.cpp stays the default
-inference seam for its build simplicity and GGUF ubiquity.
+2026-10-12: desk research sweep. ExecuTorch offers more turnkey Vulkan/NPU
+support on phones, at the cost of a heavier and less portable toolchain.
+llama.cpp stays the default inference seam for its C/C++ portability,
+library embeddability, and GGUF ecosystem ubiquity; serving and model
+management remain integrator-built by design.
 
 ## Links
 
-Model pairing: [[qwen3-4b]]. Consumer: [[opencode]].
 Upstream: https://github.com/ggml-org/llama.cpp
+Model pairing: [[qwen3-4b]]. Consumer: [[opencode]].

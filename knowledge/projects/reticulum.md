@@ -2,69 +2,73 @@
 title: Reticulum
 category: project
 status: candidate
-summary: Cryptography-first mesh networking stack, transport-agnostic, Python reference implementation.
+summary: Sovereign end-to-end encrypted networking stack; custom license needs legal review
 tags: [mesh, networking, offline]
-aliases: [Reticulum Network Stack]
 platforms: [linux, android, macos, windows]
 upstream: https://github.com/markqvist/Reticulum
 license: LicenseRef-Reticulum
 last_verified: 2026-10-12
 sources:
+  - https://reticulum.network
   - https://github.com/markqvist/Reticulum
-  - https://reticulum.network/
-  - https://markqvist.github.io/Reticulum/manual/whatis.html
 relations:
   alternative_to: ["[[meshtastic]]"]
 ---
-Cryptography-first mesh networking stack, transport-agnostic, Python reference implementation.
+
+Sovereign end-to-end encrypted networking stack; custom license needs legal review
 
 ## What it is
 
-A networking stack where every interface is encrypted and authenticated by
-construction. The reference implementation is pure Python with minimal
-dependencies, and the stack runs over LoRa, packet radio, serial, TCP, UDP,
-and WiFi links interchangeably. Higher-level protocols such as LXMF provide
-messaging on top. The project publishes a manual, a mesh architecture, and a
-community of compatible implementations in other languages.
+Reticulum is a complete networking stack for sovereign and off-grid
+communications.
+It provides cryptographic identities and end-to-end encryption
+(Ed25519 and X25519, with forward secrecy) as one universal layer,
+independent of the transport underneath.
 
 ## Use when
 
-Encrypted, self-organizing multi-hop networking is needed on Linux-class
-hosts, especially where several transports must be bridged under one identity
-model. It is a candidate for the encrypted transport layer between nodes that
-can run Python or one of the alternative implementations.
+- Building offline-first systems that must move data across whatever link
+  exists: LoRa via RNode hardware, TCP/UDP, WiFi, serial links, or I2P.
+- Designing a hub-plus-relay node where a dumb radio peripheral owns the
+  physical link and the host does addressing, crypto, and routing.
+- Delay-tolerant messaging is required: LXMF builds store-and-forward in
+  by design, so links can drop without losing the message flow.
 
 ## Do NOT use when
 
-The target is ESP32-class hardware: the reference implementation needs Python
-and does not run on microcontrollers. Ports such as microReticulum exist but
-are separate projects with their own maturity. The non-standard custom license
-also needs acceptance review before any core-infra adoption.
+- The deployment depends on a large install base or a broad app ecosystem
+  around the protocol; the community is smaller than [[meshtastic]].
+- Derivative work needs clean licensing: the custom Reticulum License needs
+  a legal read first, even though the protocol itself was dedicated to the
+  public domain in 2016.
+- Single-maintainer risk is unacceptable: the GitHub repos are mirrors of
+  private development, so bus factor is a structural concern.
 
 ## Details
 
-Desk research, verified 2026-10-12. The reference implementation ships a
-custom permissive license (recorded here as LicenseRef-Reticulum); the
-protocol itself is declared public domain, but the license text is not an OSI
-entry, so the candidate gate treats it as a flagged item to resolve before
-adoption, never for core infrastructure without a documented exception.
-Dependencies are Python 3 plus cryptography and pyserial, keeping the
-air-gapped build story simple. Community implementations include a Go port and
-a Rust effort, which the 2026 sweep noted as a sign of protocol interest.
-Activity is steady with a single lead maintainer, so bus factor is a real
-consideration at the testing gate.
+- Component versions reported as of 2026-10: RNS 1.3.5, LXMF 1.0.1,
+  NomadNet 1.4.4.
+- The reference implementation is a Python 3 userland stack; it runs on
+  anything with Python 3, including the Android build.
+- Host-radio split: RNode is a dumb LoRa KISS modem, while the host owns
+  addressing, encryption, and routing. This matches hub-plus-relay OS
+  designs directly.
+- Community implementations exist: microReticulum (C++) and Reticulum-Go.
+- The project has been in continuous development since 2016, ten years as
+  of this entry.
+- The live world map at rmap.world shows a growing node population.
 
 ## Evidence
 
 ### Alternatives considered
 
-2026-10-12: desk research sweep. [[meshtastic]] covers the same mesh job on
-microcontrollers with a much larger deployed base but weaker transport
-abstraction and no built-in end-to-end identity layer. Yggdrasil was noted as
-an encrypted overlay, but it assumes IP underneath rather than multi-hop LoRa.
-Reticulum is held as the leading option for Linux-class encrypted mesh links
-pending license review and a smoke test.
+- [[meshtastic]] — larger community and app ecosystem, but firmware-level
+  mesh radio rather than a full encrypted networking stack with
+  cryptographic identities and transport-agnostic routing.
+- 2026-10-12: desk research from the project site and the GitHub mirror;
+  versions and activity figures reported as of 2026-10.
 
 ## Links
 
-Mesh alternative: [[meshtastic]]. Upstream: https://github.com/markqvist/Reticulum
+- https://reticulum.network
+- https://github.com/markqvist/Reticulum

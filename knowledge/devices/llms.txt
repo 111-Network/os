@@ -4,4 +4,4 @@
 
 ## Optional
 
-- [Heltec WiFi LoRa 32 V3](heltec-wifi-lora-32-v3.md): ESP32-S3 LoRa development board with OLED, the current budget Meshtastic node. | candidate | hardware,lora
+- [Heltec WiFi LoRa 32 V3](heltec-wifi-lora-32-v3.md): ESP32-S3 SX1262 LoRa dev board running all major mesh firmware stacks. | candidate | hardware,lora,mesh

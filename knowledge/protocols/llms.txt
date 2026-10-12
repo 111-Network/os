@@ -4,4 +4,4 @@
 
 ## Optional
 
-- [Nostr](nostr.md): Simple open protocol for global messaging over relays, keys as identity. | candidate | identity,networking
+- [Nostr](nostr.md): Signed-event protocol with self-authenticating identity and offline-first relay sync. | candidate | identity,networking,sync

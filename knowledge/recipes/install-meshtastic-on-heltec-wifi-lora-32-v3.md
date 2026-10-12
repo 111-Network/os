@@ -2,65 +2,76 @@
 title: Install Meshtastic on Heltec V3
 category: recipe
 status: candidate
-summary: Installs Meshtastic firmware on a Heltec WiFi LoRa 32 V3 over USB.
+summary: Meshtastic firmware install path for the Heltec WiFi LoRa 32 V3.
 tags: [mesh, lora, hardware]
 last_verified: 2026-10-12
 sources:
-  - https://meshtastic.org/docs/hardware/devices/heltec-automation/wifi-lora-32-v3/
+  - https://meshtastic.org/docs
   - https://flasher.meshtastic.org/
 relations:
   depends_on: ["[[meshtastic]]"]
   runs_on: ["[[heltec-wifi-lora-32-v3]]"]
 ---
-Installs Meshtastic firmware on a Heltec WiFi LoRa 32 V3 over USB.
+Meshtastic firmware install path for the Heltec WiFi LoRa 32 V3.
 
 ## What it is
 
-The documented bring-up path for turning a [[heltec-wifi-lora-32-v3]] board
-into a [[meshtastic]] node. It flashes the current stable device firmware
-over USB-C, after which the node is configured through the Android or iOS
-app over Bluetooth, or through the device's WiFi-hosted web UI.
+The documented procedure for turning a [[heltec-wifi-lora-32-v3]] board into
+a running [[meshtastic]] node. Firmware is flashed over USB-C using either
+the upstream web flasher or the esptool command line tool; the node is then
+configured over Bluetooth Low Energy or a USB serial web client.
 
 ## Use when
 
-A fresh board arrives, a node needs recovery from a bad flash, or a bench
-unit must be pinned to a known firmware version before field testing. This
-recipe is also the template other device bring-ups are copied from.
+A fresh board needs firmware before its first field test, a node must be
+recovered from a failed flash, or a bench unit should be pinned to a known
+upstream build.
 
 ## Do NOT use when
 
-The board already runs a working Meshtastic build and only needs settings
-changes; use the app or web UI instead. It is also not the path for
-firmware development builds, which come from the firmware repository's
-own build tooling.
+The board already runs a working build and only needs setting changes; pair
+the app with the node instead. Building firmware from source is a separate
+development path, not this install recipe.
 
 ## Details
 
-Verified against upstream documentation on 2026-10-12; not yet executed on
-our bench. The web flasher at flasher.meshtastic.org is the upstream-recommended
-path: connect the board over USB-C, put it in download mode, and flash the
-firmware build matched to the board. Command-line equivalent with esptool:
+Desk research against upstream documentation as of 2026-10; not yet executed
+on our bench, so status stays candidate. Two install paths exist.
+
+Web flasher, the upstream-recommended path: open flasher.meshtastic.org in
+Chrome or Edge (WebSerial support is required; browsers without it cannot
+drive the flasher), connect the board over USB-C, select the firmware build
+for the Heltec V3, and flash. If the board is not detected, put it in
+bootloader mode and retry.
+
+esptool CLI fallback for hosts without a compatible browser:
 
 ```sh
 esptool.py write_flash 0x0 firmware-heltec-v3.bin
 ```
 
-Download mode is entered by holding the PRG button while connecting USB, or
-by holding PRG and tapping RST on an already-powered board. After flashing,
-the OLED shows the node status screen and the device advertises over
-Bluetooth for app pairing, or serves its web UI when WiFi is enabled.
-Promotion of this recipe past candidate happens when the smoke test logs a
-real bench run with firmware version, host OS, and result.
+Use the Heltec V3 firmware build from upstream releases; the flasher path
+and the CLI path flash the same per-board image.
+
+After a successful flash, set the LoRa region (EU868, US915, or the
+matching local plan) before the radio is used; the region is a legal
+transmit parameter and a per-device setting. Pairing then happens over
+Bluetooth Low Energy with the Meshtastic Android or iOS app, or through the
+USB serial web client, for the remaining configuration.
+
+Promotion past candidate needs a smoke test: one real bench flash with
+firmware version, host OS, and result logged in this entry.
 
 ## Evidence
 
 ### Alternatives considered
 
-2026-10-12: desk research against upstream docs. esptool.py is the fallback
-when a browser flasher is unavailable; it needs the correct firmware binary
-per board revision. PlatformIO and the firmware repo's own build flow were
-recorded as the development path, deliberately out of scope for an install
-recipe. The web flasher stays the default for its one-step operation.
+2026-10-12: desk research against upstream documentation; neither path has
+been run on our hardware. The web flasher stays the default for its
+one-step, upstream-guided flow with per-board firmware selection built in.
+esptool is kept as the fallback for hosts without a WebSerial-capable
+browser. Building from the firmware repository source was recorded as the
+development path and deliberately left out of scope for an install recipe.
 
 ## Links
 

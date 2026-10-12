@@ -2,71 +2,66 @@
 title: Meshtastic
 category: project
 status: candidate
-summary: LoRa mesh firmware with mature phone apps and a large deployed network.
-tags: [mesh, lora, offline]
-aliases: [Meshtastic firmware]
-platforms: [esp32, nrf52, android, ios]
+summary: LoRa mesh firmware using managed flooding; flooding scales poorly on busy channels.
+tags: [mesh, lora]
+platforms: [esp32, nrf52, rp2040, linux]
 upstream: https://github.com/meshtastic/firmware
 license: GPL-3.0-only
 last_verified: 2026-10-12
 sources:
-  - https://github.com/meshtastic/firmware
   - https://meshtastic.org/docs
-  - https://github.com/meshtastic/Meshtastic-Android
+  - https://github.com/meshtastic/firmware
 relations:
   runs_on: ["[[heltec-wifi-lora-32-v3]]"]
   alternative_to: ["[[reticulum]]"]
+  required_by: ["[[install-meshtastic-on-heltec-wifi-lora-32-v3]]"]
 ---
-LoRa mesh firmware with mature phone apps and a large deployed network.
+
+LoRa mesh firmware using managed flooding; flooding scales poorly on busy channels.
 
 ## What it is
 
-An open-source firmware project that turns cheap ESP32 and nRF52 boards with a
-LoRa radio into mesh nodes. Nodes forward text messages, position reports, and
-telemetry for each other over LoRa; phones connect over Bluetooth or WiFi to a
-nearby node. The project ships companion Android and iOS apps, a device
-firmware repository with a documented flashing path, and a protobuf-based
-firmware API that downstream tools build on.
+Open-source LoRa mesh networking firmware for ESP32, nRF52, RP2040, and Linux
+targets. Nodes form a peer mesh and relay packets by managed flooding, with a
+roughly seven-hop cap. Licensed GPL-3.0.
 
 ## Use when
 
-A low-bandwidth, long-range, infrastructure-free text-mesh is needed on
-commodity hardware. It is the default candidate for the messaging backbone on
-ESP32-class nodes, and the most common way hobbyists run LoRa mesh today.
+- Off-grid text messaging and position sharing over LoRa radio.
+- Community deployments where nodes join and relay without engineered routes.
+- Integration with MQTT, Home Assistant, or ATAK plugins is wanted.
+- Running on cheap ESP32 hardware such as [[heltec-wifi-lora-32-v3]].
 
 ## Do NOT use when
 
-Throughput matters. LoRa duty cycles and data rates put user payloads in the
-tens of bytes per second class. It is also a poor fit where store-and-forward
-beyond a few hops or rich metadata is required; the mesh is optimized for
-small, ephemeral messages between nearby nodes.
+- Engineered multi-hop routes are required; flooding scales poorly with load.
+- Low channel noise is needed; dense meshes add relay chatter.
+- Deterministic latency matters; reported multi-hop latency varies by density.
 
 ## Details
 
-Desk research, verified 2026-10-12. The firmware is GPL-3.0-only, source is
-public on GitHub with a large contributor base and frequent tagged releases.
-Supported hardware families include ESP32, ESP32-S3, and nRF52 boards with
-SX1262-family radios; [[heltec-wifi-lora-32-v3]] is the budget reference
-board. The project maintains official apps, a web-based flasher, and a
-protobuf API surface, which makes it scriptable from an agent harness. The
-GPL-3.0-only license is copyleft: fine for the OS to adopt and wrap behind a
-seam, with linking boundaries kept clean. Candidate gate status: OSI license,
-public source, active history, documented install path all pass; testing and
-proven gates require first-party smoke tests and field log.
+Reported as of 2026-10: about 40k GitHub stars. The firmware 2.8.x line is
+current (2.8.1; 2.8.0 was revoked over a packet-signing bug). Recent releases
+added XEdDSA packet signing, a redesigned NodeDB, and traffic management.
+Multi-hop latency of 10-20s is reported on dense networks. US nodes now default
+to the LongTurbo modem preset.
+
+Two 2026 CVEs were patched promptly: a mesh DoS via malformed UTF-8 node names,
+fixed in 2.7.23, and a GitHub Actions RCE, fixed in 2.7.21. The response speed
+is evidence of active security maintenance.
+
+The community is large, with regional deployments such as Austin Mesh and
+NoDak Mesh.
 
 ## Evidence
 
 ### Alternatives considered
 
-2026-10-12: desk research sweep. [[reticulum]] is the main alternative: more
-generic and transport-agnostic, but the Python reference implementation does
-not run on ESP32-class hardware directly, and its custom license needs review
-against the candidate gate. MeshCore and Meshtastic-fork-derived firmware were
-noted in the sweep as younger contenders with smaller deployed networks.
-qaul and Serval were recorded as historical or unverified. Meshtastic wins on
-deployed-node count, tooling maturity, and phone-app ecosystem at this stage.
+- [[reticulum]] — engineered multi-hop routing with store-and-forward; stronger
+  fit when routes must be deterministic, heavier to deploy than flooding.
+- Desk research sweep of 2026-10-12; no first-party smoke test yet.
 
 ## Links
 
-Device profile: [[heltec-wifi-lora-32-v3]]. Mesh alternative: [[reticulum]].
-Upstream: https://github.com/meshtastic/firmware
+- [Official documentation](https://meshtastic.org/docs)
+- [Upstream firmware repository](https://github.com/meshtastic/firmware)

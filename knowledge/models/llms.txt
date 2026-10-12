@@ -4,4 +4,4 @@
 
 ## Optional
 
-- [Qwen3 4B](qwen3-4b.md): Compact Apache-licensed LLM with switchable thinking mode, 32K native context. | candidate | llm
+- [Qwen3 4B](qwen3-4b.md): Apache-2.0 4B-parameter LLM family default for local reasoning, coding, and agents. | candidate | llm,offline
