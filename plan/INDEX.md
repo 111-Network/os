@@ -32,7 +32,7 @@ Harness: Claude Code (this session) + Workflow orchestration.
 |---|---|---|---|
 | 0 | Knowledge | 🔨 building — spec locked (D7), see `os/knowledge/TASKS.md` | `os/knowledge/README.md` ✅ locked |
 | 1 | Bootstrap | 🔬 researching — scope locked w/ user 2026-10-12 (Linux + phone-via-USB-C; running minimal node; minimal cache + standard offer) | — |
-| 2 | Identity | ⬜ pending | — |
+| 2 | Identity | 🔬 researching — scope locked w/ user 2026-10-12 (node identity only, no human/contact/trust model; generate+store+use+backup/recovery, rotation/revocation deferred; crypto picked on merit — NOT Nostr-locked, Nostr itself not final; agentic-native lens: agents are first-class key users; must run on all 6 device categories incl. ESP32-class) | — |
 | 3 | Local Intelligence | ⬜ pending | — |
 | 4 | Interface & Dashboard | ⬜ pending | — |
 | 5 | Messaging & Data | ⬜ pending | — |
