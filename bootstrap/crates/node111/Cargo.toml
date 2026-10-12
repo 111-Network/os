@@ -39,6 +39,10 @@ tempfile = "3"
 # T3: NFKC/NFKD for NIP-49 passphrases + BIP-39 recovery input (spec-mandated
 # normalization; already in the dep graph as an optional bip39 dep — pure Rust, tiny).
 unicode-normalization = "0.1"
+# T10/T5: payload tarball extraction. Pure-Rust backends only (musl determinism):
+# flate2 with miniz_oxide (no zlib C), tar for the archive format.
+tar = "0.4"
+flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
 
 [lib]
 name = "node111"
