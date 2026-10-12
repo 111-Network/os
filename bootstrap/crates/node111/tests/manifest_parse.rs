@@ -114,6 +114,76 @@ fn parse_verified_happy_path_and_floor_refusal() {
     );
 }
 
+/// T15 round-trip: the generator's output parses through the T2 parser.
+#[test]
+fn generated_manifest_parses() {
+    if std::process::Command::new("python3")
+        .arg("--version")
+        .output()
+        .is_err()
+    {
+        eprintln!("python3 absent — skipping generator round-trip");
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let arts = dir.path().join("artifacts");
+    std::fs::create_dir_all(&arts).unwrap();
+    std::fs::write(arts.join("111-x86_64-unknown-linux-musl"), b"fake binary").unwrap();
+    std::fs::write(
+        arts.join("payload-x86_64-unknown-linux-musl.tar.gz"),
+        b"fake payload",
+    )
+    .unwrap();
+    std::fs::write(
+        arts.join("rns-lock.txt"),
+        b"rns==1.5.6 --hash=sha256:ab
+",
+    )
+    .unwrap();
+    std::fs::write(arts.join("kb.tar.gz"), b"fake kb").unwrap();
+    let out = dir.path().join("channel-111-stable.toml");
+    let status = std::process::Command::new("python3")
+        .arg(format!(
+            "{}/../../manifest/gen-manifest.py",
+            env!("CARGO_MANIFEST_DIR")
+        ))
+        .args([
+            "--version",
+            "2026.10.12",
+            "--artifacts-dir",
+            arts.to_str().unwrap(),
+            "--min-upgrade-from",
+            "2026.10.01",
+            "--url-base",
+            "https://example.invalid/v2026.10.12",
+            "--keychain-gen",
+            "0",
+            "--pubkey",
+            "RWTestKey000000000000000000000000000000000000000=",
+            "--out",
+            out.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        status.status.success(),
+        "gen-manifest failed: {}",
+        String::from_utf8_lossy(&status.stderr)
+    );
+    let text = std::fs::read_to_string(&out).unwrap();
+    let m = ChannelManifest::parse(&text).unwrap();
+    assert_eq!(m.release().to_string(), "2026.10.12");
+    assert!(m.binary_for("x86_64-unknown-linux-musl").is_some());
+    assert!(m.payload_for("x86_64-unknown-linux-musl").is_some());
+    let payload = m.payload_for("x86_64-unknown-linux-musl").unwrap();
+    assert_eq!(
+        payload.sha256,
+        node111::util::hash::sha256_bytes(b"fake payload")
+    );
+    assert_eq!(payload.size, 12);
+    assert_eq!(m.keychain().len(), 1);
+}
+
 #[test]
 fn tamper_negatives() {
     let base = fixture_text();
