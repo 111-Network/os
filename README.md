@@ -27,7 +27,7 @@ The aim is to never reinvent the wheel. Proven external projects are assets, not
 - The node bootstrapper and thin glue code that detects hardware, selects the device's role, pulls in adopted components, and assembles them into a running node. This is the only intentionally custom piece, kept isolated so the project stays scalable — and retired the moment a proven project can do the job.
 
 **Adopted (tracked in the Knowledge Layer, each one swappable):**
-- Mesh and radio stacks, cryptographic identity, local model runtimes, the Nostr sync transport, storage engines, and the dashboard's design system.
+- Mesh and radio stacks, cryptographic identity, local model runtimes, sync transports, storage engines, and the dashboard's design system.
 
 If a solid project exists, we use it. A custom piece exists only where nothing proven fits.
 
@@ -44,9 +44,9 @@ The foundation every other layer reads from. A curated, AI-readable knowledge ba
 - **Protocols and formats** the system speaks.
 - **This project's own documentation**.
 
-Format follows AI-readability best practice: Markdown only, one topic per file, short lines, YAML frontmatter with tags/category/status (`proven`, `testing`, `candidate`), wikilinks between entries, an `llms.txt`-style index, and many small files rather than few large ones — structured so the knowledge can be graphed later.
+Format follows AI-readability best practice: Markdown only, one topic per file, short lines, YAML frontmatter with tags/category/status (`proven`, `testing`, `candidate`), wikilinks between entries, a lightweight agent-readable index, and many small files rather than few large ones — structured so the knowledge can be graphed later.
 
-The source of truth lives at the operating-system level in `os/knowledge/`. The website has its own clear job; the knowledge base is published to it later via CI (e.g., GitHub Actions).
+The source of truth lives at the operating-system level in `os/knowledge/`. The website has its own clear job; the knowledge base is published to it later via CI.
 
 This layer drives adoption decisions ("if a solid project exists, we use it"), grounds the local agent's reasoning, and provides the per-device install recipes the Bootstrap Layer consumes.
 
@@ -58,7 +58,7 @@ This bootstrapper is the custom glue described above: isolated, minimal, and rep
 
 ### 2. Identity Layer
 
-Every node receives an automatically created cryptographic, wallet-style identity at install time. This identity signs all outgoing traffic and authenticates the node to peers. Identity is offline-first and independent of phone numbers, email, or central authorities. It is adopted from proven identity systems tracked in the Knowledge Layer — and the same keypair can anchor the node's Nostr identity when it operates as a gateway. Users who later care about key management can back up or secure their keys; until then the system remains fully functional without any extra steps.
+Every node receives an automatically created cryptographic, wallet-style identity at install time. This identity signs all outgoing traffic and authenticates the node to peers. Identity is offline-first and independent of phone numbers, email, or central authorities. It is adopted from proven identity systems tracked in the Knowledge Layer — and the same keypair can anchor the node's identity on the global network when it operates as a gateway. Users who later care about key management can back up or secure their keys; until then the system remains fully functional without any extra steps.
 
 ### 3. Local Intelligence Layer
 
@@ -86,11 +86,11 @@ Bridges join physically incompatible channels (long-range radio with Wi-Fi/BLE) 
 
 ### 7. Relay & Presence Layer
 
-Nodes continuously announce reachability through heartbeats. Nodes that possess internet connectivity advertise that fact and become gateways. Gateways synchronize the offline local mesh state with the global network using Nostr as an asynchronous transport layer: intermittent gateways flush pending queues whenever connectivity appears, while permanent gateways stream global broadcasts and encrypted messages into the local mesh in real time. When a node loses connectivity it continues to serve as a pure mesh participant. Delivery paths form dynamically from the combination of local mesh links and internet-capable gateways.
+Nodes continuously announce reachability through heartbeats. Nodes that possess internet connectivity advertise that fact and become gateways. Gateways synchronize the offline local mesh state with the global network through an asynchronous store-and-forward transport adopted via the Knowledge Layer: intermittent gateways flush pending queues whenever connectivity appears, while permanent gateways stream global broadcasts and encrypted messages into the local mesh in real time. When a node loses connectivity it continues to serve as a pure mesh participant. Delivery paths form dynamically from the combination of local mesh links and internet-capable gateways.
 
 ### 8. Storage & Shared State Layer
 
-Each node keeps an encrypted local store, pruned by capacity rather than by imposed rules. Knowledge hubs host the large shared datasets: offline Wikipedia, regional maps, software updates, and network troubleshooting patches. A lightweight append-only shared log may be used for the small subset of state that benefits from collective consistency — adopted from a proven project, never a custom consensus implementation.
+Each node keeps an encrypted local store, pruned by capacity rather than by imposed rules. Knowledge hubs host the large shared datasets: offline encyclopedias, regional maps, software updates, and network troubleshooting patches. A lightweight append-only shared log may be used for the small subset of state that benefits from collective consistency — adopted from a proven project, never a custom consensus implementation.
 
 ### 9. Self-Healing & Evolution Layer
 
@@ -142,14 +142,14 @@ Category 5 is not shown as a column: it is an overlay role (see below) that adds
 - **General Role**: High-compute, high-storage local network servers that operate completely offline. They serve as the community service layer.
 - **Network Capability**: High-throughput local Wi-Fi, Ethernet, or multi-hop local mesh connections.
 - **Subcategories**:
-  - **4A — Knowledge Hubs**: Nodes equipped with expanded storage that host local offline databases (e.g., offline Wikipedia, regional maps, software updates, and network troubleshooting patches), including a local copy of the Knowledge Layer.
+  - **4A — Knowledge Hubs**: Nodes equipped with expanded storage that host local offline databases (e.g., offline encyclopedias, regional maps, software updates, and network troubleshooting patches), including a local copy of the Knowledge Layer.
   - **4B — Compute Hubs**: Nodes equipped with dedicated GPUs/accelerators running larger open models (8B–70B parameters). Weaker local devices can offload heavy AI reasoning or code-patch generation to these hubs over the local mesh.
 
-### Category 5: Global Gateways (Nostr Synchronization Bridges)
+### Category 5: Global Gateways (Global Sync Bridges)
 
 - **General Role**: An overlay role, not a hardware tier. Any node across Categories 2, 3, or 4 that establishes active reachability to the public internet becomes a gateway. (Category 1 devices lack the compute and interfaces to hold this role.)
 - **Network Capability**: Dual presence — an active connection to both the local offline mesh and public internet relays.
-- **Primary Task**: Synchronizes the offline local mesh state with the global network using Nostr as an asynchronous transport layer.
+- **Primary Task**: Synchronizes the offline local mesh state with the global network using the adopted asynchronous transport layer.
 - **Subcategories**:
   - **5A — Intermittent Gateways**: Mobile or opportunistic endpoints (e.g., laptops or phones connecting briefly to public networks) that sync pending queues when internet access is available.
   - **5B — Permanent Gateways**: Always-on nodes with stable broadband access that stream incoming global broadcasts and encrypted messages directly into the local physical mesh in real time.

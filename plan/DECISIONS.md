@@ -54,6 +54,12 @@ ADR-lite. Every decision, its rejected alternatives, and why. Newest last; never
 - **Rejected:** hand-rolled stdlib YAML parser; entry_type frontmatter field (derivable); reopening skeleton scope.
 - **Why:** the rubric's "proven = field-proven" promise is only real if the linter can check its evidence structurally; the skeleton's job is proving the machinery end-to-end on real data.
 
+## D8 — The vision doc names no tools
+
+- **Date:** 2026-10-12
+- **Decision:** `os/README.md` states goals, intentions, and ideas only — no specific tool or project names. Removed: Nostr (5 mentions), llms.txt, GitHub Actions, Wikipedia. Generic technology *classes* (LoRa, Wi-Fi, BLE, Markdown, YAML) stay. Tool/project adoption lives in Knowledge Layer entries and this decisions log, earned through the research→decision cycle.
+- **Why:** the founding document stays stable while implementation choices evolve; nothing gets prematurely fixed by being named in it.
+
 ## Pending
 
 - Move deep architecture content out of `os/README.md` into per-layer specs (blocked on layer homes existing).
