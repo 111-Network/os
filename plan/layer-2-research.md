@@ -1,5 +1,7 @@
 # Layer 2 (Identity) — research run state
 
+**✅ COMPLETE 2026-10-12 — all 8 dimensions returned. Condensed into `layer-2-options.md`; this file kept as run history.**
+
 Durable resume coordinates for the Layer 2 research sweep (D3: plan state lives on disk, never only in chat).
 
 ## Scope lock (user, 2026-10-12)
@@ -21,7 +23,8 @@ Durable resume coordinates for the Layer 2 research sweep (D3: plan state lives 
 ## History
 
 - 2026-10-12 ~05:30 CEST: first launch. `wire-auth` completed (431k subagent tokens, 148 tool uses total); other 7 agents died on the k3 5-hour quota limit (403).
-- 2026-10-12 12:55 CEST: quota refreshed; resumed via `Workflow({scriptPath, resumeFromRunId})`, unchanged script → wire-auth replays from cache, 7 failed agents re-run live with identical prompts.
+- 2026-10-12 12:55 CEST: quota refreshed; resumed via `Workflow({scriptPath, resumeFromRunId})`, unchanged script → wire-auth replayed from cache, 7 failed agents re-ran live with identical prompts.
+- 2026-10-12 ~13:20 CEST: **run complete, 8/8** (496k tokens, 217 tool uses this run). Findings extracted from the journal, cross-checked (discrepancy resolutions in the brief §Cross-check), condensed into `layer-2-options.md`. Temp script copy `.workflow-resume-layer-2.js` deleted per cleanup note.
 
 ## If interrupted again (quota / session loss)
 

@@ -32,7 +32,7 @@ Harness: Claude Code (this session) + Workflow orchestration.
 |---|---|---|---|
 | 0 | Knowledge | ✅ built — spec locked (D7), all 13 tasks done: 9 candidate seed entries, generator + `--check` green (0 errors), hook committed (activation: `git config core.hooksPath hooks`) | `os/knowledge/README.md` ✅ locked |
 | 1 | Bootstrap | ✍️ speccing — decisions taken (D9), spec draft + adversarial pass in flight | — |
-| 2 | Identity | 🔬 researching — scope locked w/ user 2026-10-12 (node identity only, no human/contact/trust model; generate+store+use+backup/recovery, rotation/revocation deferred; crypto picked on merit — NOT Nostr-locked, Nostr itself not final; agentic-native lens: agents are first-class key users; must run on all 6 device categories incl. ESP32-class) | — |
+| 2 | Identity | 🧭 deciding — options brief ready (`layer-2-options.md`), 8-agent sweep done 2026-10-12; scope locked w/ user (node identity only; backup+recovery in scope, rotation/revocation deferred; crypto on merit, NOT Nostr-locked; agentic-native; all 6 device categories) | — |
 | 3 | Local Intelligence | ✍️ speccing — decisions locked (D10): hybrid harness (thin `111-agent` loop + opencode on hubs), llama-server child of 111d, qwen3-4b standard tier; spec v1 draft minimal, adversarial pass queued | `os/intelligence/README.md` (draft) |
 | 4 | Interface & Dashboard | ⬜ pending | — |
 | 5 | Messaging & Data | ⬜ pending | — |
