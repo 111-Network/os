@@ -3,4 +3,5 @@
 pub mod fs;
 pub mod hash;
 pub mod http;
+pub mod paths;
 pub mod run;
