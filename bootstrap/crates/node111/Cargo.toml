@@ -36,6 +36,9 @@ time = { version = "0.3", features = ["formatting", "parsing", "serde"] }
 libc = "0.2"
 anyhow = "1"
 tempfile = "3"
+# T3: NFKC/NFKD for NIP-49 passphrases + BIP-39 recovery input (spec-mandated
+# normalization; already in the dep graph as an optional bip39 dep — pure Rust, tiny).
+unicode-normalization = "0.1"
 
 [lib]
 name = "node111"

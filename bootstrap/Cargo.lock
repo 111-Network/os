@@ -1005,6 +1005,7 @@ dependencies = [
  "time",
  "tokio",
  "toml",
+ "unicode-normalization",
  "ureq",
  "webpki-roots",
 ]
