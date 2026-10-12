@@ -1,0 +1,42 @@
+[package]
+name = "node111"
+version = "0.0.0" # calver stamped at release time; see scripts/release.sh
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "111"
+path = "src/main.rs"
+
+# Dependency policy (os/bootstrap/TASKS.md): this set is frozen; additions need
+# reviewer sign-off recorded in the task row.
+[dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "process", "time", "net", "sync", "fs"] }
+axum = "0.8"
+rust-embed = "8"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+sha2 = "0.10"
+hmac = "0.12"
+k256 = { version = "0.14", features = ["schnorr"] }
+bip39 = "2"
+bech32 = "0.11"
+scrypt = "0.11"
+chacha20poly1305 = "0.10"
+minisign-verify = "0.2"
+ureq = { version = "3", default-features = false, features = ["rustls"] }
+webpki-roots = "1"
+sysinfo = "0.33"
+os_info = "3"
+nusb = "0.1"
+rtnetlink = "0.14"
+sd-notify = "0.4"
+time = { version = "0.3", features = ["formatting", "parsing", "serde"] }
+libc = "0.2"
+anyhow = "1"
+tempfile = "3"
+
+[lib]
+name = "node111"
+path = "src/lib.rs"
