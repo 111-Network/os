@@ -15,6 +15,8 @@ pub struct InstallArgs {
     pub serial: Option<String>,
     pub keep_adb: bool,
     pub allow_degraded: bool,
+    /// Optional adb-reboot verification test before lockdown.
+    pub reboot_test: bool,
     /// Shim-forwarded floor (the binary also refuses below the compiled-in
     /// MIN_INSTALLER_VERSION).
     pub min_installer_version: Option<crate::calver::Calver>,
@@ -27,6 +29,7 @@ enum Cmd {
     IdentityBackup,
     IdentityExport,
     IdentityRecover,
+    IdentityGenerate,
     Config(Vec<String>),
     Uninstall { phone: bool, serial: Option<String> },
     UpdateHelper,
@@ -42,6 +45,7 @@ fn parse_install_flags(args: &[String]) -> anyhow::Result<InstallArgs> {
         match args[i].as_str() {
             "--phone" => ia.phone = true,
             "--keep-adb" => ia.keep_adb = true,
+            "--reboot-test" => ia.reboot_test = true,
             "--allow-degraded" => ia.allow_degraded = true,
             "--serial" => {
                 i += 1;
@@ -76,6 +80,7 @@ fn parse(args: &[String]) -> anyhow::Result<Cmd> {
             Some("backup") => Cmd::IdentityBackup,
             Some("export") => Cmd::IdentityExport,
             Some("recover") => Cmd::IdentityRecover,
+            Some("generate") => Cmd::IdentityGenerate,
             other => anyhow::bail!("usage: 111 identity backup|export|recover (got {other:?})"),
         },
         "config" => Cmd::Config(args[1..].to_vec()),
@@ -129,6 +134,9 @@ pub fn main_entry(args: Vec<String>) -> i32 {
         Cmd::IdentityBackup => identity_backup(),
         Cmd::IdentityExport => identity_export(),
         Cmd::IdentityRecover => identity_recover(),
+        Cmd::IdentityGenerate => crate::identity::generate(&identity_dir()).map(|id| {
+            println!("identity generated: {}", id.npub);
+        }),
         Cmd::Config(rest) => crate::config::run(&rest),
         Cmd::Uninstall { phone, serial } => {
             if phone {

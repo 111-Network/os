@@ -20,6 +20,11 @@ pub trait Runner: Send + Sync {
     fn run(&self, program: &str, args: &[&str]) -> anyhow::Result<Output>;
     /// Run as another user (`sudo -u`); the installer is root when it uses this.
     fn run_as(&self, user: &str, program: &str, args: &[&str]) -> anyhow::Result<Output>;
+    /// Run with bytes on stdin (file pushes over `sh -c 'cat > …'` etc.).
+    fn run_stdin(&self, program: &str, args: &[&str], input: &[u8]) -> anyhow::Result<Output> {
+        let _ = (program, args, input);
+        anyhow::bail!("run_stdin not supported by this Runner")
+    }
 }
 
 pub struct SystemRunner;
@@ -55,6 +60,38 @@ impl Runner for SystemRunner {
         let mut cmd = std::process::Command::new("sudo");
         cmd.arg("-u").arg(user).arg("--").arg(program).args(args);
         Self::spawn(cmd)
+    }
+
+    fn run_stdin(&self, program: &str, args: &[&str], input: &[u8]) -> anyhow::Result<Output> {
+        use std::io::Write;
+        let mut child = std::process::Command::new(program)
+            .args(args)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .with_context(|| format!("spawn {program}"))?;
+        child
+            .stdin
+            .as_mut()
+            .ok_or_else(|| anyhow::anyhow!("stdin pipe"))?
+            .write_all(input)?;
+        let display = format!("{program} {}", args.join(" "));
+        let out = child
+            .wait_with_output()
+            .with_context(|| format!("wait {display}"))?;
+        let status = match out.status.code() {
+            Some(code) => code,
+            None => {
+                use std::os::unix::process::ExitStatusExt;
+                -out.status.signal().unwrap_or(0)
+            }
+        };
+        Ok(Output {
+            status,
+            stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
+            stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
+        })
     }
 }
 

@@ -75,6 +75,13 @@ impl Runner for MockRunner {
         self.calls.lock().unwrap().push(cmd.clone());
         self.pop_matching(&cmd)
     }
+    fn run_stdin(&self, program: &str, args: &[&str], input: &[u8]) -> anyhow::Result<Output> {
+        // Keyed as the plain invocation; the input bytes are recorded for asserts.
+        let cmd = Self::format_cmd(program, args);
+        let record = format!("{cmd} <stdin:{}B>", input.len());
+        self.calls.lock().unwrap().push(record);
+        self.pop_matching(&cmd)
+    }
 }
 
 /// In-memory `install::probe::Env` for probe/categorize tests: fake files, fake

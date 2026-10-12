@@ -105,6 +105,7 @@ pub struct ChannelManifest {
     payloads: Vec<PinnedArtifact>, // name = target triple
     termux_apks: Vec<PinnedArtifact>,
     termux_debs: Vec<PinnedArtifact>,
+    platform_tools: Option<PinnedArtifact>,
     rns_lock: PinnedArtifact,
     kb: PinnedArtifact,
     keychain: Vec<KeyEntry>,
@@ -128,6 +129,8 @@ struct RawManifest {
     payload: BTreeMap<String, RawArtifact>,
     #[serde(default)]
     apk: BTreeMap<String, RawArtifact>,
+    #[serde(default, rename = "platform-tools")]
+    platform_tools: Option<RawArtifact>,
     #[serde(default, rename = "deb")]
     debs: Vec<RawDeb>,
     #[serde(rename = "rns-lock")]
@@ -268,6 +271,10 @@ impl ChannelManifest {
 
         let rns_lock = artifact("rns-lock.txt".into(), "rns-lock", raw.rns_lock.clone())?;
         let kb = artifact("kb".into(), "kb", raw.kb.clone())?;
+        let platform_tools = raw
+            .platform_tools
+            .map(|r| artifact("platform-tools".into(), "platform-tools", r))
+            .transpose()?;
 
         let mut keychain = Vec::new();
         for (i, entry) in raw.keychain.iter().enumerate() {
@@ -305,6 +312,7 @@ impl ChannelManifest {
             payloads,
             termux_apks,
             termux_debs,
+            platform_tools,
             rns_lock,
             kb,
             keychain,
@@ -350,6 +358,11 @@ impl ChannelManifest {
     }
     pub fn termux_debs(&self) -> &[PinnedArtifact] {
         &self.termux_debs
+    }
+    /// Google platform-tools zip pin for the adb fallback (absent ⇒ fallback
+    /// unavailable, phone flow requires a distro adb).
+    pub fn platform_tools(&self) -> Option<&PinnedArtifact> {
+        self.platform_tools.as_ref()
     }
     pub fn rns_lock(&self) -> &PinnedArtifact {
         &self.rns_lock
