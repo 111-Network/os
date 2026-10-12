@@ -1,0 +1,34 @@
+#!/data/data/com.termux/files/usr/bin/sh
+# runit service: 111 node daemon.
+# Install path on device: $PREFIX/var/service/111node/run
+# (symlink target lives in the payload; the provisioner links it in)
+
+set -u
+
+PREFIX=${PREFIX:-/data/data/com.termux/files/usr}
+export PREFIX
+
+# shellcheck disable=SC1091  # $PREFIX-relative on device; intentionally dynamic
+[ -f "$PREFIX/var/lib/111/profile.env" ] && . "$PREFIX/var/lib/111/profile.env"
+
+LOG="$PREFIX/var/log/111node.log"
+mkdir -p "$PREFIX/var/log" "$PREFIX/var/lib/111/state"
+
+# sleep-throttle guard: if the last start was under 2s ago, breathe for 5s
+# (crash-loop damping for the runit wrapper; the daemon's own supervision tree
+# is the supervisor of record per spec §Architecture 3)
+ST="$PREFIX/var/lib/111/state/111node.laststart"
+now=$(date +%s)
+last=0
+[ -f "$ST" ] && last=$(cat "$ST" 2>/dev/null || printf '0')
+printf '%s\n' "$now" > "$ST"
+case "$last" in
+	'' | *[!0-9]*) last=0 ;;
+esac
+if [ $((now - last)) -lt 2 ]; then
+	sleep 5
+fi
+
+printf '%s 111node: starting\n' "$(date -Iseconds 2>/dev/null || date)" >> "$LOG"
+exec >>"$LOG" 2>&1
+exec "$PREFIX/var/lib/111/current/bin/111" daemon

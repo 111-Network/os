@@ -1,0 +1,9 @@
+#!/data/data/com.termux/files/usr/bin/sh
+# runit finish hook: runs when the daemon exits. Logging only — restart
+# decisions belong to runit (runit re-invokes ./run) and, inside the daemon,
+# to the supervision tree.
+PREFIX=${PREFIX:-/data/data/com.termux/files/usr}
+LOG="$PREFIX/var/log/111node.log"
+mkdir -p "$PREFIX/var/log"
+printf '%s 111node: exited (code %s, signal %s)\n' "$(date -Iseconds 2>/dev/null || date)" "${1:-?}" "${2:-?}" >> "$LOG"
+exit 0
