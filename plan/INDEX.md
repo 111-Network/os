@@ -31,7 +31,7 @@ Harness: Claude Code (this session) + Workflow orchestration.
 | # | Layer | Status | Spec |
 |---|---|---|---|
 | 0 | Knowledge | ✅ built — spec locked (D7), all 13 tasks done: 9 candidate seed entries, generator + `--check` green (0 errors), hook committed (activation: `git config core.hooksPath hooks`) | `os/knowledge/README.md` ✅ locked |
-| 1 | Bootstrap | 🧭 deciding — options brief + critic gaps ready (`layer-1-options.md`), awaiting user decisions | — |
+| 1 | Bootstrap | ✍️ speccing — decisions taken (D9), spec draft + adversarial pass in flight | — |
 | 2 | Identity | 🔬 researching — scope locked w/ user 2026-10-12 (node identity only, no human/contact/trust model; generate+store+use+backup/recovery, rotation/revocation deferred; crypto picked on merit — NOT Nostr-locked, Nostr itself not final; agentic-native lens: agents are first-class key users; must run on all 6 device categories incl. ESP32-class) | — |
 | 3 | Local Intelligence | ⬜ pending | — |
 | 4 | Interface & Dashboard | ⬜ pending | — |

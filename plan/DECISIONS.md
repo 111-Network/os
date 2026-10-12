@@ -60,6 +60,19 @@ ADR-lite. Every decision, its rejected alternatives, and why. Newest last; never
 - **Decision:** `os/README.md` states goals, intentions, and ideas only — no specific tool or project names. Removed: Nostr (5 mentions), llms.txt, GitHub Actions, Wikipedia. Generic technology *classes* (LoRa, Wi-Fi, BLE, Markdown, YAML) stay. Tool/project adoption lives in Knowledge Layer entries and this decisions log, earned through the research→decision cycle.
 - **Why:** the founding document stays stable while implementation choices evolve; nothing gets prematurely fixed by being named in it.
 
+## D9 — Layer 1 (Bootstrap) design decisions
+
+- **Date:** 2026-10-12
+- **Decision:** Scope locked with user: targets = Linux laptops/servers/RPi (x86_64 + aarch64, systemd-only) + Android phones provisioned over USB-C from a Linux computer running the same command; end state = running minimal node; offline prefetch = minimal with post-install offer of a standard tier (small model). From the options brief (`layer-1-options.md`; 7-scout sweep + completeness critic, 24 gaps folded):
+  - **A1** two-stage installer: version-pinned POSIX shim on own domain (function-wrapped, artifact sha256 pinned inside, downloads+verifies as user then re-execs via sudo) → ONE musl-static Rust binary from GitHub Releases + own-domain mirror; `receipt.json` + on-disk `111-uninstall.sh`; zero telemetry.
+  - **B** implementation: Rust static binary (spec detail, not polled).
+  - **C2** minimal node = `111d` kernel (secp256k1 identity, tokio supervision tree, embedded minimal dashboard + `/health`, minisign self-updater with A/B + health-gated auto-rollback, KB fetcher) + KB tarball snapshot + conditional `rnsd` child when python3 exists (meshtasticd/radios detection-only). User amendment: v1 dashboard stays truly minimal — "the very minimums live is enough"; real dashboard work is Layer 4's.
+  - **D1** identity: provisional secp256k1 (k256, NCC-audited), BIP-39 mnemonic born silently at install (NIP-06 path), shown only via post-install `111 identity backup`. Provisional: Layer 2 owns final crypto on merit (its scope is explicitly NOT Nostr-locked; see also D8 — README no longer names Nostr); a one-time re-key on Layer 2 landing is accepted.
+  - **E1** phone path: same command drives adb — pinned GitHub debuggable Termux APKs (single signature source) + `run-as com.termux` headless channel + Termux:Boot/runit supervision + adb hardening; aarch64 phones only; debuggable-build trust model accepted with post-install revocation of USB-debugging authorizations; postmarketOS stays an experimental opt-in tier.
+  - Detail-level (spec-reviewed, not polled — full text in the brief): FHS layout `/opt/111` + `/var/lib/111` + `/etc/111`; rustup-v2 TOML channel manifest + minisign with pre-designed key-rotation chain; systemd system unit (user `node111`, ambient caps, `dialout`, watchdog, journald cap); category rule set with proposed default thresholds; pre-build verification matrix V1–V8.
+- **Rejected:** package-repo installer; TLS-only shim; bundle C1 (fakes "mesh joined") and C3 (dead weight, non-portable); raw-key-only identity; blocking Layer 1 on Layer 2's crypto; release-APK `input text` injection (kept as fallback); own provisioner APK (revisit v1.1); postmarketOS as default; armv7 phones; non-systemd distros (clean refusal); proot-distro; GPG signing; installer telemetry.
+- **Why:** strongest verified installer anatomy (uv + Determinate + k3s patterns); smallest node that honestly satisfies "running minimal node"; identity seam cheap to swap; run-as is the only verified fully-headless phone channel.
+
 ## Pending
 
 - Move deep architecture content out of `os/README.md` into per-layer specs (blocked on layer homes existing).
