@@ -6,6 +6,7 @@ use std::sync::Arc;
 use axum::extract::{Request, State};
 use axum::http::{header, StatusCode};
 use axum::middleware::{self, Next};
+use axum::response::sse::KeepAlive;
 use axum::response::{IntoResponse, Response, Sse};
 use axum::routing::{get, post};
 use axum::{Json, Router};
@@ -18,6 +19,10 @@ use crate::model::Client;
 use crate::store::Store;
 use crate::tasks::{self, TaskEngine};
 use crate::{chat, health, status};
+
+/// Comment-frame cadence that keeps idle SSE connections (and any proxy in
+/// front of them) from timing out.
+const SSE_KEEP_ALIVE: std::time::Duration = std::time::Duration::from_secs(15);
 
 pub struct AppState {
     pub cfg: Arc<Config>,
@@ -122,20 +127,26 @@ async fn status_handler(State(s): State<Arc<AppState>>) -> Response {
         tasks_open: s.tasks.open_count(),
         uptime_sec: s.started.elapsed().as_secs(),
         version: env!("CARGO_PKG_VERSION"),
+        node_id: s.cfg.node_id.clone(),
+        category: s.cfg.category.clone(),
     };
     (StatusCode::OK, Json(body)).into_response()
 }
 
-/// SSE: replay the last 50 journal events, then live. Lagging subscribers
-/// drop events rather than block the journal.
+/// SSE: replay the last 50 journal events, then live. Replay and
+/// subscription are taken atomically, so nothing is lost or duplicated at the
+/// seam. Lagging subscribers drop events rather than block the journal.
 async fn events_handler(State(s): State<Arc<AppState>>) -> Response {
     use tokio_stream::StreamExt;
     type SseItem = Result<axum::response::sse::Event, std::convert::Infallible>;
-    let replay = tokio_stream::iter(s.journal.tail(50)).map(|ev| -> SseItem { Ok(to_sse(ev)) });
-    let live = tokio_stream::wrappers::BroadcastStream::new(s.journal.subscribe())
+    let (backlog, rx) = s.journal.replay_and_subscribe(50);
+    let replay = tokio_stream::iter(backlog).map(|ev| -> SseItem { Ok(to_sse(ev)) });
+    let live = tokio_stream::wrappers::BroadcastStream::new(rx)
         .filter_map(|r| r.ok())
         .map(|ev| -> SseItem { Ok(to_sse(ev)) });
-    Sse::new(replay.chain(live)).into_response()
+    Sse::new(replay.chain(live))
+        .keep_alive(KeepAlive::new().interval(SSE_KEEP_ALIVE).text("keep-alive"))
+        .into_response()
 }
 
 fn to_sse(ev: events::Event) -> axum::response::sse::Event {

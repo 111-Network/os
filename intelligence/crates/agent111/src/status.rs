@@ -57,6 +57,10 @@ pub struct StatusBody {
     pub tasks_open: usize,
     pub uptime_sec: u64,
     pub version: &'static str,
+    /// Additive: Layer 2 NodeId hex handed down by 111d (null when none).
+    pub node_id: Option<String>,
+    /// Additive: node category from config.
+    pub category: String,
 }
 
 #[cfg(test)]
