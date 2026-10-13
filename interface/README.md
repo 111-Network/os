@@ -208,11 +208,13 @@ and pairing records; the UI only reads it and edits aliases.
 - **Add device** `/devices/add`: a grid of classes — *LoRa board over USB*, *Phone or laptop over
   Wi-Fi*, *Bluetooth device*, *Handheld radio (coming)*. Hardware classes explain "plug it in — it
   appears here by itself" and offer "Guide me with the agent" (generic prompt + class hint).
-  *Phone/laptop* shows the pairing instructions: the dashboard URL + "run `111 dashboard` on the
-  node for the pair code" and, when LAN sharing is on, the pair QR; it links to the LAN-sharing
-  setting when off. Honest copy everywhere: pairing a phone makes it a companion of this node; an
-  old phone becoming a node of its own is the install command's job (Layer 1), and phones joining
-  each other over Wi-Fi/BLE arrives with Layer 6 (`os/plan/devices.md`).
+  *Phone/laptop* splits into the three roles a phone can have: **control this node** (pair: the
+  dashboard URL + "run `111 dashboard` on the node for the pair code", the pair QR when LAN sharing
+  is on, a link to the LAN-sharing setting when off), **make it a node of its own** (the install
+  command over USB-C — Layer 1, exists), **message through this node** (coming with Layer 6, see
+  `os/plan/devices.md`). *Handheld radio* says plainly: licensed operators only, plaintext-only on
+  air (encrypted traffic is not allowed on amateur bands), detect-and-explain now, experimental tier
+  later. Honest copy everywhere; no fake capabilities.
 
 ### 6.4 Nearby — `/nearby` (stub, Layer 7)
 Other people's nodes around you. v1 shows what `111d` knows (`transport_state`: joined/isolated/
@@ -277,7 +279,7 @@ reason, can_run_here, requires?, description, kb_entry?, embed_url?, detail{...}
 | `agent` | Local AI agent (`111-agent`) | child running ∧ `GET :11182/health` 200 | binary absent (requires standard tier) | child degraded/backoff, or `/health` 503 |
 | `model` | Local model (`llama-server`) | child running ∧ `GET :11181/health` 200 | no GGUF/binary (requires standard tier; `offer` state in detail) | degraded/backoff, or health non-200 after 120 s grace |
 | `transport` | Mesh transport (Reticulum `rnsd`) | rnsd child running (`detail.peers: joined|isolated`) | `no transport` (requires python3 + venv) | `transport degraded` |
-| `radio` | LoRa radio (Meshtastic) | TCP connect to `127.0.0.1:4403` succeeds (meshtasticd) | no radio detected (`can_run_here=false`, requires a LoRa board) or radio detected but meshtasticd absent | meshtasticd detected but port refused for > 60 s |
+| `radio` | LoRa radio stack | a stack is **bound** to a detected board: rnsd running with an `RNodeInterface` stanza in `<root>/rns/config` for its port (`radio_bound_rnode`), or meshtasticd answering `127.0.0.1:4403` (`radio_bound_meshtastic`, SPI HATs/CH341 adapters only — meshtasticd never drives a USB board) | no board detected (`no_radio`; `can_run_here=false` on phones) or board present but nothing bound (`radio_unbound` → "Set up with the agent") | a bound stack stopped answering > 60 s (`stack_down`) |
 | `kb` | Knowledge base | KB verified (`kb != null`) | KB payload absent | payload present, verification failed |
 | `gateway` | Internet gateway | WAN probe 204 OK (every 60 s) | no internet (no setup action; `actions: []`) | — |
 | `codeagent` | Code agent (opencode) | hub category ∧ `opencode` on PATH | otherwise (`can_run_here=false` on non-hubs) | — |
@@ -292,12 +294,15 @@ offer (`restart`, `log`); never identity material.
 path or vendor:product:serial, BLE MAC, or the companion session id). `111d` recomputes every 5 s
 from: `/dev/serial/by-id/*` + `/sys/bus/usb/devices` (vendor/product ids, product strings) matched
 against `assets/lora-table.toml` (known LoRa boards → `kind: radio`, `capabilities: ["lora"]`,
-`service_id: radio`, `kb_entry`), `/sys/class/bluetooth` (adapters → `bluetooth`), paired dashboard
+`service_id: radio`, `kb_entry`, **`match.confidence: likely`** — a USB VID:PID names the serial chip, not the
+board or its firmware, so `name` reads "Likely: Heltec WiFi LoRa 32 V3", `firmware.family: unknown` until a
+consented probe (Layer 6 `identify`) confirms; never open a serial port automatically — it can reset ESP32
+boards), `/sys/class/bluetooth` (adapters → `bluetooth`), paired dashboard
 sessions (`companion`, identity = peer ip + user agent, `last_seen` = session last_seen). Aliases
 and forget-marks live in `<root>/state/devices.json` keyed by `id`. States: `connected` (present
-now) · `disconnected` (known, not present; kept until forgotten) · `needs_setup` (present, no
-driving service live — e.g. LoRa board without meshtasticd) · `error` (present, driver/service in
-error). Snapshot published on the events bus as `devices` after a 2-tick debounce.
+now) · `disconnected` (known, not present; kept until forgotten) · `needs_setup` (present, **no stack
+bound** — `driver.stack == null`) · `error` (present, bound stack in error, or the port exists but is
+unreadable). `driver` says what drives it ("Driven by: Mesh transport (RNode) / Meshtastic / nothing yet"). Snapshot published on the events bus as `devices` after a 2-tick debounce.
 
 ## 8. Agent hand-off prompt (contract)
 

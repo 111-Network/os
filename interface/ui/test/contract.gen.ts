@@ -80,7 +80,7 @@ export const schemas: Record<string, JsonSchema> = {
       "since": {"type":"string","format":"date-time"},
       "reason_code": {
         "type": "string",
-        "description": "stable snake_case, e.g. binary_absent, no_python, child_backoff, health_503, no_radio, wan_offline, verified"
+        "description": "stable snake_case, e.g. binary_absent, no_python, child_backoff, health_503, no_radio, radio_unbound, radio_bound_rnode, radio_bound_meshtastic, stack_down, wan_offline, verified. Clients treat unknown codes as display-only."
       },
       "reason": {"type":"string","description":"one plain sentence"},
       "can_run_here": {"type":"boolean"},
@@ -355,7 +355,35 @@ export const schemas: Record<string, JsonSchema> = {
   },
   "DeviceKind": {"type":"string","enum":["radio","bluetooth","companion","node","analog","unknown"]},
   "DeviceState": {"type":"string","enum":["connected","disconnected","needs_setup","error"]},
-  "DeviceTransport": {"type":"string","enum":["usb-serial","bluetooth","wifi","lan","audio","unknown"]},
+  "DeviceTransport": {"type":"string","enum":["usb-serial","spi","bluetooth","wifi","lan","tcp","audio","unknown"]},
+  "DeviceMatch": {
+    "type": "object",
+    "required": ["confidence","rule"],
+    "description": "How the record was identified. USB VID:PID names the serial chip, not the board or its firmware (os/plan/devices.md §0): table matches are 'likely' until a consented probe confirms.",
+    "properties": {
+      "confidence": {"type":"string","enum":["exact","likely","unknown"]},
+      "rule": {"type":"string","description":"e.g. lora-table 303a:1001, serial-by-id, session, probe"}
+    }
+  },
+  "DeviceFirmware": {
+    "type": "object",
+    "required": ["family","version","source"],
+    "properties": {
+      "family": {"type":"string","enum":["rnode","meshtastic","meshcore","kiss","none","unknown"]},
+      "version": {"type":["string","null"]},
+      "source": {"type":"string","enum":["probe","user","agent","unknown"]}
+    }
+  },
+  "DeviceDriver": {
+    "type": "object",
+    "required": ["stack","interface","live"],
+    "description": "What drives this device right now. A USB Meshtastic board is NOT driven by meshtasticd (SPI HATs only); it is driven by rnsd's RNodeInterface (RNode firmware) or a Meshtastic client, or nothing yet.",
+    "properties": {
+      "stack": {"type":["string","null"],"enum":["reticulum","meshtastic","meshcore","dashboard",null]},
+      "interface": {"type":["string","null"],"description":"e.g. rnsd interface name, 'meshtasticd', 'session'"},
+      "live": {"type":"boolean"}
+    }
+  },
   "DeviceRecord": {
     "type": "object",
     "required": [
@@ -396,14 +424,29 @@ export const schemas: Record<string, JsonSchema> = {
         "items": {"type":"string"},
         "description": "e.g. lora, meshtastic-firmware, ble, dashboard-session"
       },
-      "service_id": {"$ref":"#/components/schemas/ServiceId","description":"the service that drives this device, if any"},
+      "service_id": {
+        "$ref": "#/components/schemas/ServiceId",
+        "description": "the registry service this device belongs to, if any"
+      },
+      "match": {"$ref":"#/components/schemas/DeviceMatch"},
+      "firmware": {"oneOf":[{"$ref":"#/components/schemas/DeviceFirmware"},{"type":"null"}]},
+      "driver": {"oneOf":[{"$ref":"#/components/schemas/DeviceDriver"},{"type":"null"}]},
+      "role": {
+        "type": ["string","null"],
+        "enum": ["controller","terminal","relay","node",null],
+        "description": "companions only: what this paired device does for the node (v1: controller)"
+      },
       "kb_entry": {"type":"string"},
       "identity": {
         "type": "object",
         "additionalProperties": true,
         "description": "vendor_id, product_id, serial, port, mac, ip, user_agent — whatever was detected; untrusted strings"
       },
-      "actions": {"type":"array","items":{"type":"string","enum":["rename","forget","agent"]}},
+      "actions": {
+        "type": "array",
+        "items": {"type":"string","enum":["rename","forget","agent","identify","pair","authorize"]},
+        "description": "identify/pair/authorize are reserved for the Layer 6 core; clients render unknown values as disabled"
+      },
       "detail": {
         "type": "object",
         "additionalProperties": true,

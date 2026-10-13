@@ -397,7 +397,7 @@ export interface components {
             state: components["schemas"]["ServiceState"];
             /** Format: date-time */
             since: string;
-            /** @description stable snake_case, e.g. binary_absent, no_python, child_backoff, health_503, no_radio, wan_offline, verified */
+            /** @description stable snake_case, e.g. binary_absent, no_python, child_backoff, health_503, no_radio, radio_unbound, radio_bound_rnode, radio_bound_meshtastic, stack_down, wan_offline, verified. Clients treat unknown codes as display-only. */
             reason_code: string;
             /** @description one plain sentence */
             reason: string;
@@ -637,7 +637,29 @@ export interface components {
         /** @enum {string} */
         DeviceState: "connected" | "disconnected" | "needs_setup" | "error";
         /** @enum {string} */
-        DeviceTransport: "usb-serial" | "bluetooth" | "wifi" | "lan" | "audio" | "unknown";
+        DeviceTransport: "usb-serial" | "spi" | "bluetooth" | "wifi" | "lan" | "tcp" | "audio" | "unknown";
+        /** @description How the record was identified. USB VID:PID names the serial chip, not the board or its firmware (os/plan/devices.md §0): table matches are 'likely' until a consented probe confirms. */
+        DeviceMatch: {
+            /** @enum {string} */
+            confidence: "exact" | "likely" | "unknown";
+            /** @description e.g. lora-table 303a:1001, serial-by-id, session, probe */
+            rule: string;
+        };
+        DeviceFirmware: {
+            /** @enum {string} */
+            family: "rnode" | "meshtastic" | "meshcore" | "kiss" | "none" | "unknown";
+            version: string | null;
+            /** @enum {string} */
+            source: "probe" | "user" | "agent" | "unknown";
+        };
+        /** @description What drives this device right now. A USB Meshtastic board is NOT driven by meshtasticd (SPI HATs only); it is driven by rnsd's RNodeInterface (RNode firmware) or a Meshtastic client, or nothing yet. */
+        DeviceDriver: {
+            /** @enum {string|null} */
+            stack: "reticulum" | "meshtastic" | "meshcore" | "dashboard" | null;
+            /** @description e.g. rnsd interface name, 'meshtasticd', 'session' */
+            interface: string | null;
+            live: boolean;
+        };
         DeviceRecord: {
             /** @description stable across reboots (hash of serial-by-id path / vendor:product:serial / BLE MAC / companion session id) */
             id: string;
@@ -658,14 +680,23 @@ export interface components {
             reason: string;
             /** @description e.g. lora, meshtastic-firmware, ble, dashboard-session */
             capabilities: string[];
-            /** @description the service that drives this device, if any */
+            /** @description the registry service this device belongs to, if any */
             service_id?: components["schemas"]["ServiceId"];
+            match?: components["schemas"]["DeviceMatch"];
+            firmware?: components["schemas"]["DeviceFirmware"] | null;
+            driver?: components["schemas"]["DeviceDriver"] | null;
+            /**
+             * @description companions only: what this paired device does for the node (v1: controller)
+             * @enum {string|null}
+             */
+            role?: "controller" | "terminal" | "relay" | "node" | null;
             kb_entry?: string;
             /** @description vendor_id, product_id, serial, port, mac, ip, user_agent — whatever was detected; untrusted strings */
             identity: {
                 [key: string]: unknown;
             };
-            actions: ("rename" | "forget" | "agent")[];
+            /** @description identify/pair/authorize are reserved for the Layer 6 core; clients render unknown values as disabled */
+            actions: ("rename" | "forget" | "agent" | "identify" | "pair" | "authorize")[];
             /** @description raw detection facts the panel renders; bounded */
             detail: {
                 [key: string]: unknown;
