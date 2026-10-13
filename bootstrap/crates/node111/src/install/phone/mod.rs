@@ -264,6 +264,8 @@ pub fn run(args: InstallArgs) -> anyhow::Result<()> {
         verify::on_device_health(&adb)?;
         let host_key = start::host_keys_dir().join("id_ed25519");
         start::verify_sshd_forward(&adb, &runner, &host_key)?;
+        // Layer 4 §12: phone-local browser, before the lockdown kills adb.
+        start::open_dashboard(&adb);
     });
 
     // 8. ordered final: optional reboot test → OEM checklist → labeled lockdown
@@ -306,10 +308,18 @@ pub fn run(args: InstallArgs) -> anyhow::Result<()> {
     }
 
     let human = crate::identity::node_id_bech32(&node_id).unwrap_or_else(|| node_id.clone());
+    let host_key = start::host_keys_dir().join("id_ed25519");
     println!(
-        "\n111 phone provisioned:\n  node id: {human}\n  hex:     {node_id}\n  serial:  {}\n  health:   adb forward tcp:11180 tcp:11180 → http://127.0.0.1:11180\n  teardown: 111 uninstall --phone{}",
+        "\n111 phone provisioned:\n  node id:   {human}\n  hex:       {node_id}\n  serial:    {}\n  dashboard: {} (in the phone's browser){}\n  teardown:  111 uninstall --phone{}\n\nBack up the phone's identity (12 words) with:\n  {}",
         pre.serial,
-        if args.keep_adb { " (adb kept)" } else { " (over sshd)" }
+        start::PHONE_DASHBOARD_URL,
+        if args.keep_adb {
+            "\n             from this computer: adb forward tcp:11180 tcp:11180 → http://127.0.0.1:11180"
+        } else {
+            ""
+        },
+        if args.keep_adb { " (adb kept)" } else { " (over sshd)" },
+        start::backup_hint(&host_key)
     );
     Ok(())
 }

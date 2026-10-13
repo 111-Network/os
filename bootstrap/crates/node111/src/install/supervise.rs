@@ -95,8 +95,21 @@ pub fn run(ctx: &InstallContext, degraded: bool) -> anyhow::Result<()> {
     }
 
     // --- minimal config env (/etc/111/env, 0640 root:node111) ---
-    let env_content = "# 111 node config (minimal; `111 config` manages)\n";
-    write(ctx, "/etc/111/env", env_content, 0o640)?;
+    // Written only when absent: a re-run/upgrade must not wipe `111 config`
+    // choices (e.g. DASHBOARD_LAN). Ownership is (re)asserted every run —
+    // atomic_write leaves root:root and the daemon runs as node111 (D15 fix);
+    // agent.env (Layer 3, operator-created) gets the same treatment.
+    let env_path = ctx.sys("/etc/111/env");
+    if !env_path.exists() {
+        let env_content = "# 111 node config (minimal; `111 config` manages)\n";
+        write(ctx, "/etc/111/env", env_content, 0o640)?;
+    }
+    for f in ["/etc/111/env", "/etc/111/agent.env"] {
+        let p = ctx.sys(f);
+        if p.exists() {
+            crate::config::chown_root_node111(&p);
+        }
+    }
 
     // --- ownership: node111 trees vs root trees (the security boundary) ---
     // node111: state/, state/staging/, identity/, rns/, venvs/

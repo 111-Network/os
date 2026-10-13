@@ -1,5 +1,5 @@
 //! CLI surface: install · daemon · identity backup|restore|commission ·
-//! config · uninstall · update-helper · update-guard.
+//! config · dashboard [rotate] · uninstall · update-helper · update-guard.
 //! Flags: --phone --serial --keep-adb --allow-degraded --min-installer-version
 //! --version (calver). Host install and --phone are mutually exclusive.
 
@@ -39,6 +39,10 @@ enum Cmd {
         burn: bool,
     },
     Config(Vec<String>),
+    /// `111 dashboard [rotate]` (Layer 4 §11): URLs, LAN state, pair code, QR.
+    Dashboard {
+        rotate: bool,
+    },
     Uninstall {
         phone: bool,
         serial: Option<String>,
@@ -118,6 +122,11 @@ fn parse(args: &[String]) -> anyhow::Result<Cmd> {
             other => anyhow::bail!("usage: 111 identity backup|restore|commission (got {other:?})"),
         },
         "config" => Cmd::Config(args[1..].to_vec()),
+        "dashboard" => match (args.get(1).map(String::as_str), args.len()) {
+            (None, _) => Cmd::Dashboard { rotate: false },
+            (Some("rotate"), 2) => Cmd::Dashboard { rotate: true },
+            (other, _) => anyhow::bail!("usage: 111 dashboard [rotate] (got {other:?})"),
+        },
         "uninstall" => {
             let phone = args[1..].iter().any(|a| a == "--phone");
             let serial = args[1..]
@@ -143,6 +152,7 @@ USAGE:
   111 identity backup|restore      (run as the node user: sudo -u node111 111 identity backup)
   111 identity commission [--loopback-test]   (Cat-1 relay ceremony; your own computer, needs a terminal)
   111 config [show | dashboard.lan true|false | offer accept|dismiss]
+  111 dashboard [rotate]           (dashboard URLs + pair code; rotate = new code, sign everyone out)
   111 uninstall [--phone] [--serial SERIAL]
   111 update-helper | 111 update-guard     (root oneshots via systemd)
   111 --version";
@@ -171,6 +181,7 @@ pub fn main_entry(args: Vec<String>) -> i32 {
         Cmd::IdentityCommission { loopback_test } => identity_commission(loopback_test),
         Cmd::IdentityGenerate { burn } => identity_generate(burn),
         Cmd::Config(rest) => crate::config::run(&rest),
+        Cmd::Dashboard { rotate } => dashboard_cmd(rotate),
         Cmd::Uninstall { phone, serial } => {
             if phone {
                 crate::install::phone::teardown::run(serial)
@@ -188,6 +199,122 @@ pub fn main_entry(args: Vec<String>) -> i32 {
             1
         }
     }
+}
+
+/// LAN sharing as configured on disk (env file OR settings.json). An
+/// unreadable env file (non-root caller) counts as "not set there".
+fn lan_configured_now(state_dir: &std::path::Path) -> bool {
+    let etc = crate::config::env_path();
+    let pairs = etc
+        .parent()
+        .and_then(|d| crate::daemon::load_env(d).ok())
+        .unwrap_or_default();
+    crate::daemon::dashboard::bind::lan_configured(&pairs, state_dir)
+}
+
+/// The pair URL encoded in the QR: the announced `.local` name if the daemon
+/// bound one, else its first LAN IP URL, else `http://111.local`.
+pub fn pair_url(urls: &[String], code: &str) -> String {
+    let local = urls
+        .iter()
+        .find(|u| u.contains(".local") && !u.contains(".localhost"));
+    let lan_ip = urls
+        .iter()
+        .find(|u| !u.contains("127.0.0.1") && !u.contains("localhost") && !u.contains(".local"));
+    let base = local
+        .or(lan_ip)
+        .map(String::as_str)
+        .unwrap_or("http://111.local");
+    format!("{}/#/pair?code={code}", base.trim_end_matches('/'))
+}
+
+/// Terminal QR (unicode half blocks, inverted for dark terminals).
+pub fn render_qr(data: &str) -> anyhow::Result<String> {
+    use qrcode::render::unicode::Dense1x2;
+    let code = qrcode::QrCode::new(data.as_bytes())?;
+    Ok(code
+        .render::<Dense1x2>()
+        .dark_color(Dense1x2::Light)
+        .light_color(Dense1x2::Dark)
+        .quiet_zone(true)
+        .build())
+}
+
+/// `111 dashboard` / `111 dashboard rotate`.
+fn dashboard_cmd(rotate: bool) -> anyhow::Result<()> {
+    use crate::daemon::dashboard::{api_v1::auth, bind};
+    let state_dir = crate::util::paths::root().join("state");
+    if rotate {
+        let code = auth::rotate_files(&state_dir).map_err(|e| {
+            let denied = e
+                .chain()
+                .filter_map(|c| c.downcast_ref::<std::io::Error>())
+                .any(|io| io.kind() == std::io::ErrorKind::PermissionDenied);
+            if denied {
+                anyhow::anyhow!("permission denied — run: sudo 111 dashboard rotate")
+            } else {
+                e
+            }
+        })?;
+        println!("New pair code: {code}");
+        println!("Every paired browser was signed out; LAN visitors pair again with the new code.");
+        return Ok(());
+    }
+
+    let file = bind::read_state(&state_dir).filter(|f| bind::pid_alive(f.pid));
+    let configured = lan_configured_now(&state_dir);
+    let (urls, lan_running) = match &file {
+        Some(f) => {
+            println!(
+                "111 dashboard — daemon running (pid {}, since {})",
+                f.pid, f.started_at
+            );
+            if f.urls.is_empty() {
+                println!("  (the daemon could not bind its dashboard port — see journalctl --namespace=111node -u 111node)");
+            }
+            (f.urls.clone(), Some(f.lan))
+        }
+        None => {
+            println!("111 dashboard — daemon not running; once it starts the dashboard is at:");
+            (vec![bind::FALLBACK_URL.to_string()], None)
+        }
+    };
+    for u in &urls {
+        println!("  {u}");
+    }
+    let lan_now = lan_running.unwrap_or(configured);
+    match (lan_running, configured) {
+        (Some(true), false) => println!(
+            "LAN sharing: on (turned off in config — takes effect after: sudo systemctl restart 111node)"
+        ),
+        (Some(false), true) => println!(
+            "LAN sharing: off (turned on in config — takes effect after: sudo systemctl restart 111node)"
+        ),
+        (_, _) if lan_now => println!("LAN sharing: on — visitors on your network must pair"),
+        _ => println!("LAN sharing: off — enable with: sudo 111 config dashboard.lan true"),
+    }
+    match auth::read_pair_code(&state_dir) {
+        Ok(Some(code)) => {
+            println!("Pair code:   {code}   (LAN visitors enter it; this computer never needs it)");
+            if lan_now {
+                let url = pair_url(&urls, &code);
+                match render_qr(&url) {
+                    Ok(qr) => println!("\nScan to pair: {url}\n{qr}"),
+                    Err(_) => println!("Pair link: {url}"),
+                }
+            }
+        }
+        Ok(None) => {
+            println!("Pair code:   not generated yet — the daemon creates it at first start")
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
+            println!(
+                "Pair code:   readable by root or the node user only — run: sudo 111 dashboard"
+            )
+        }
+        Err(e) => println!("Pair code:   unreadable ({e})"),
+    }
+    Ok(())
 }
 
 fn identity_dir() -> std::path::PathBuf {
@@ -447,11 +574,48 @@ mod tests {
         };
         assert_eq!(ia2.min_installer_version.unwrap().to_string(), "2026.10.01");
         assert!(parse(&["identity".into(), "wut".into()]).is_err());
+        assert!(matches!(
+            parse(&["dashboard".into()]).unwrap(),
+            Cmd::Dashboard { rotate: false }
+        ));
+        assert!(matches!(
+            parse(&["dashboard".into(), "rotate".into()]).unwrap(),
+            Cmd::Dashboard { rotate: true }
+        ));
+        assert!(parse(&["dashboard".into(), "rotat".into()]).is_err());
+        assert!(parse(&["dashboard".into(), "rotate".into(), "x".into()]).is_err());
         assert!(parse(&["bogus".into()]).is_err());
         assert!(matches!(
             parse(&["uninstall".into(), "--phone".into()]).unwrap(),
             Cmd::Uninstall { phone: true, .. }
         ));
+    }
+
+    #[test]
+    fn pair_url_prefers_mdns_then_lan_ip() {
+        let urls = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert_eq!(
+            pair_url(
+                &urls(&[
+                    "http://111.localhost",
+                    "http://127.0.0.1:11180",
+                    "http://111.local",
+                    "http://192.168.1.5"
+                ]),
+                "7KQ2-XM9D"
+            ),
+            "http://111.local/#/pair?code=7KQ2-XM9D"
+        );
+        assert_eq!(
+            pair_url(
+                &urls(&["http://127.0.0.1:11180", "http://192.168.1.5:11180"]),
+                "X"
+            ),
+            "http://192.168.1.5:11180/#/pair?code=X"
+        );
+        assert_eq!(pair_url(&[], "X"), "http://111.local/#/pair?code=X");
+        let qr = render_qr("http://111.local/#/pair?code=7KQ2-XM9D").unwrap();
+        assert!(qr.lines().count() > 10);
     }
 
     #[test]

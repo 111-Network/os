@@ -44,6 +44,22 @@ zeroize = "1"
 # flate2 with miniz_oxide (no zlib C), tar for the archive format.
 tar = "0.4"
 flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
+# Layer 4 R1 (D15, sign-off in os/bootstrap/TASKS.md dependency policy):
+# mDNS `111.local` announce while LAN-bound (optional: `mdns` feature, default on,
+# so a target that fails to link can build without it).
+mdns-sd = { version = "0.21", default-features = false, optional = true }
+# `111 dashboard` terminal QR of the pair URL (unicode renderer only; no image).
+qrcode = { version = "0.14", default-features = false }
+# Already in the graph (id111 / axum): session tokens + pair codes; SSE stream glue.
+getrandom = "0.2"
+futures-util = { version = "0.3", default-features = false, features = ["std"] }
+
+[features]
+default = ["mdns"]
+# mDNS `111.local` announce (Layer 4, D15). Disable for a target where mdns-sd
+# fails to build/link: `--no-default-features` — the dashboard then lists only
+# IP URLs.
+mdns = ["dep:mdns-sd"]
 
 [lib]
 name = "node111"

@@ -121,6 +121,37 @@ pub fn verify_health(
     }
 }
 
+/// Phone-local dashboard URL (the phone's own browser; loopback = no pairing).
+pub const PHONE_DASHBOARD_URL: &str = "http://127.0.0.1:11180";
+
+/// Best-effort (spec §12, Layer 4): open the dashboard in the phone's browser
+/// via an Android VIEW intent — run after on-device verify, BEFORE the adb
+/// lockdown. Never fails the provisioning; returns whether adb accepted it.
+pub fn open_dashboard(adb: &Adb<'_>) -> bool {
+    let cmd = format!("am start -a android.intent.action.VIEW -d {PHONE_DASHBOARD_URL}");
+    match adb.shell(&cmd) {
+        Ok(out) if out.ok() && !out.stdout.contains("Error") => {
+            eprintln!(
+                "111 phone: opened the dashboard in the phone's browser ({PHONE_DASHBOARD_URL})"
+            );
+            true
+        }
+        _ => {
+            eprintln!("111 phone: could not open a browser on the phone — open {PHONE_DASHBOARD_URL} there yourself");
+            false
+        }
+    }
+}
+
+/// The identity-backup command for a provisioned phone (TTY-only ceremony over
+/// the sshd maintenance channel; `-t` allocates the terminal it requires).
+pub fn backup_hint(host_key: &Path) -> String {
+    format!(
+        "ssh -t -p 8022 -i {} <phone-ip> '. $PREFIX/var/lib/111/profile.env && 111 identity backup'",
+        host_key.display()
+    )
+}
+
 /// sshd login verification: via forward first (scriptable), then the fresh-LAN
 /// ceremony (spec step 7 — before any lockdown).
 pub fn verify_sshd_forward(
@@ -159,4 +190,55 @@ pub fn host_keys_dir() -> PathBuf {
     crate::util::paths::home_dir()
         .unwrap_or_else(|| PathBuf::from("."))
         .join(".local/share/111/keys")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::testkit::MockRunner;
+    use crate::util::run::Output;
+
+    fn out(status: i32, stdout: &str) -> Output {
+        Output {
+            status,
+            stdout: stdout.into(),
+            stderr: String::new(),
+        }
+    }
+
+    const AM: &str =
+        "adb -s S1 shell am start -a android.intent.action.VIEW -d http://127.0.0.1:11180";
+
+    #[test]
+    fn open_dashboard_is_best_effort() {
+        let ok = MockRunner::new(vec![(
+            AM,
+            out(0, "Starting: Intent { act=android.intent.action.VIEW }"),
+        )]);
+        assert!(open_dashboard(&Adb::new(&ok, Some("S1".into()), "adb")));
+        ok.assert_exhausted();
+        // `am` reports some failures on stdout with exit 0
+        let no_browser = MockRunner::new(vec![(
+            AM,
+            out(0, "Error: Activity not started, unable to resolve Intent"),
+        )]);
+        assert!(!open_dashboard(&Adb::new(
+            &no_browser,
+            Some("S1".into()),
+            "adb"
+        )));
+        let adb_down = MockRunner::new(vec![(AM, out(1, ""))]);
+        assert!(!open_dashboard(&Adb::new(
+            &adb_down,
+            Some("S1".into()),
+            "adb"
+        )));
+    }
+
+    #[test]
+    fn backup_hint_uses_the_sshd_channel_with_a_tty() {
+        let h = backup_hint(Path::new("/home/u/.local/share/111/keys/id_ed25519"));
+        assert!(h.starts_with("ssh -t -p 8022 -i /home/u/.local/share/111/keys/id_ed25519 "));
+        assert!(h.ends_with("'. $PREFIX/var/lib/111/profile.env && 111 identity backup'"));
+    }
 }

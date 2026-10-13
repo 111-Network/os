@@ -262,23 +262,11 @@ async fn daemon_main() -> anyhow::Result<()> {
     // probation monitor (health-confirmed / revert-request signals)
     tokio::spawn(probation_monitor(layout.clone(), Arc::clone(&state)));
 
-    // dashboard (loopback unless LAN explicitly opted in)
-    let lan_opt_in = env_pairs
-        .iter()
-        .any(|(k, v)| k == "DASHBOARD_LAN" && v == "true");
-    let bind: std::net::SocketAddr = if lan_opt_in {
-        ([0, 0, 0, 0], dashboard::DEFAULT_PORT).into()
-    } else {
-        ([127, 0, 0, 1], dashboard::DEFAULT_PORT).into()
-    };
-    {
-        let state = Arc::clone(&state);
-        tokio::spawn(async move {
-            if let Err(e) = dashboard::serve(state, bind, lan_opt_in).await {
-                eprintln!("111 daemon: dashboard failed: {e:#}");
-            }
-        });
-    }
+    // dashboard (Layer 4, D15): loopback unless LAN sharing is on (env
+    // DASHBOARD_LAN=true OR state/settings.json lan_enabled); :11180 + :80
+    // best-effort; pairing auth for non-loopback peers; mDNS when LAN.
+    let lan = dashboard::bind::lan_configured(&env_pairs, &layout.state_dir());
+    let dashboard = dashboard::start(Arc::clone(&state), layout.clone(), lan).await;
 
     // READY once serving (components may still be warming — /health reflects)
     watchdog::ready();
@@ -289,6 +277,7 @@ async fn daemon_main() -> anyhow::Result<()> {
         _ = tokio::signal::ctrl_c() => {},
         _ = sigterm.recv() => {},
     }
+    dashboard.stop();
     transport.stop();
     intelligence.stop();
     eprintln!("111 daemon: shutting down");

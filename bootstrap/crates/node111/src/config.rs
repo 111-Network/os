@@ -1,11 +1,11 @@
 //! `111 config` — minimal node config in /etc/111 (env file 0640 root:node111).
-//! LAN dashboard binding is an explicit opt-in here with a printed warning until
-//! Layer 4 auth exists.
+//! LAN dashboard sharing is an explicit opt-in here with a printed warning; LAN
+//! visitors must pair with the code `111 dashboard` prints (Layer 4, D15).
 
 use crate::daemon::load_env;
 use std::path::PathBuf;
 
-fn env_path() -> PathBuf {
+pub(crate) fn env_path() -> PathBuf {
     if std::env::var("NODE111_ROOT").is_ok() {
         crate::util::paths::root().join("etc/env")
     } else {
@@ -22,7 +22,37 @@ fn write_env(pairs: &[(String, String)]) -> anyhow::Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    crate::util::fs::atomic_write(&path, text.as_bytes(), 0o640)
+    crate::util::fs::atomic_write(&path, text.as_bytes(), 0o640)?;
+    // atomic_write replaces the inode (root:root under sudo) — hand the group
+    // back to node111 or the daemon cannot read its own config (D15 defect fix).
+    chown_root_node111(&path);
+    Ok(())
+}
+
+/// The `node111` group id (`getgrnam`), if the group exists.
+pub fn node111_gid() -> Option<u32> {
+    let name = std::ffi::CString::new("node111").ok()?;
+    let gr = unsafe { libc::getgrnam(name.as_ptr()) };
+    (!gr.is_null()).then(|| unsafe { (*gr).gr_gid })
+}
+
+/// `chown root:node111 <path>` when running as root (no-op otherwise: Termux /
+/// `NODE111_ROOT` trees are owned by the invoking user). Best-effort, logged.
+pub fn chown_root_node111(path: &std::path::Path) {
+    if unsafe { libc::geteuid() } != 0 {
+        return;
+    }
+    match node111_gid() {
+        Some(gid) => {
+            if let Err(e) = std::os::unix::fs::chown(path, Some(0), Some(gid)) {
+                eprintln!("111: chown root:node111 {} failed: {e}", path.display());
+            }
+        }
+        None => eprintln!(
+            "111: group node111 not found — {} stays root-owned (the daemon may not read it)",
+            path.display()
+        ),
+    }
 }
 
 pub fn run(args: &[String]) -> anyhow::Result<()> {
@@ -57,9 +87,8 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
             };
             if on {
                 println!(
-                    "WARNING: binding the dashboard to the LAN exposes node state to your \
-                     network. It stays GET/read-only with no auth until Layer 4 — enable \
-                     only on networks you trust."
+                    "WARNING: LAN visitors must enter the pair code shown by `111 dashboard`; \
+                     traffic is unencrypted on shared Wi-Fi."
                 );
             }
             let mut pairs = load_env(env_path().parent().unwrap_or(&PathBuf::from("/etc/111")))?;

@@ -57,7 +57,12 @@ pub fn run(args: crate::cli::InstallArgs) -> anyhow::Result<()> {
     let fetcher =
         crate::util::http::Fetcher::new(std::time::Duration::from_secs(60), 512 * 1024 * 1024)?;
     let receipt = run_with(&ctx, &fetcher)?;
-    verify::print_success(&receipt.node_id, &receipt.category, &receipt.version);
+    verify::print_success(
+        &ctx.layout,
+        &receipt.node_id,
+        &receipt.category,
+        &receipt.version,
+    );
     Ok(())
 }
 

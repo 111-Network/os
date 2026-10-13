@@ -1,6 +1,9 @@
 //! T8 acceptance: dashboard HTTP behavior on an ephemeral loopback port —
-//! GET-only, Host allowlist, /health + /api/status contracts, loopback assert,
-//! and a rendered-page identity-material grep.
+//! GET-only Layer 1 routes, Host allowlist, /health + /api/status contracts,
+//! loopback assert, and a rendered-page identity-material grep. Layer 4 (D15):
+//! the minimal page moved to `/v1`; `/` serves the UI (or the not-built
+//! notice); Host refusals are problem+json. Auth/CSRF/static/events matrix:
+//! tests/dashboard_auth.rs.
 
 use node111::daemon::dashboard::{serve, DashboardState, SharedState, TransportState};
 use node111::daemon::health::TransportHealth;
@@ -70,14 +73,25 @@ async fn page_and_api_contracts() {
     }
     let port = start_server(state).await;
 
-    // index page
-    let (code, body) = http_get(port, "/", "127.0.0.1");
+    // Layer 1 minimal page (moved to /v1 by D15)
+    let (code, body) = http_get(port, "/v1", "127.0.0.1");
     assert_eq!(code, 200);
     assert!(body.contains("111 node"));
 
-    // identity-material grep over the rendered page: no key-bearing strings.
+    // identity-material grep over the rendered pages: no key-bearing strings.
     for banned in ["mnemonic", "keyset", "BIP-39"] {
-        assert!(!body.contains(banned), "page leaks {banned}");
+        assert!(!body.contains(banned), "/v1 leaks {banned}");
+    }
+
+    // `/` = the Layer 4 UI (embedded dist) or the not-built notice ("111 node")
+    // — either way an HTML page with no identity material.
+    let (code, body) = http_get(port, "/", "127.0.0.1");
+    assert_eq!(code, 200);
+    if !node111::daemon::dashboard::routes::ui_embedded() {
+        assert!(body.contains("111 node"));
+    }
+    for banned in ["mnemonic", "keyset", "BIP-39"] {
+        assert!(!body.contains(banned), "/ leaks {banned}");
     }
 
     // /api/status schema
@@ -138,9 +152,15 @@ async fn get_only_and_host_allowlist() {
     let (code, _) = http_req(port, "DELETE", "/", "127.0.0.1");
     assert_eq!(code, 405);
 
+    let (code, _) = http_req(port, "POST", "/v1", "127.0.0.1");
+    assert_eq!(code, 405);
+
     for bad_host in ["evil.example.com", "127.0.0.1.evil.com", "192.168.1.5"] {
-        let (code, _) = http_get(port, "/api/status", bad_host);
+        let (code, body) = http_get(port, "/api/status", bad_host);
         assert_eq!(code, 400, "host {bad_host} must be refused");
+        let p: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(p["code"], "bad_request");
+        assert_eq!(p["title"], "refused Host header");
     }
     let (code, _) = http_get(port, "/api/status", "localhost:11180");
     assert_eq!(code, 200);
