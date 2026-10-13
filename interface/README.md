@@ -261,7 +261,7 @@ stderr is not readable by `111d` itself (journald namespace); the page says so a
 ### 6.9 Pair — `/pair`
 Shown when any `/api/v1` call returns `401 unauthenticated` (LAN visitors). Pixel title, the
 instruction ("On the node run `111 dashboard` and type the pair code"), 8-char input (`xxxx-xxxx`),
-rate-limit feedback, success → reload state. Loopback visitors never see it.
+rate-limit feedback, success → reload state. Trusted-loopback visitors never see it; under Termux (loopback not trusted, §11) the phone's own browser pairs once and returns to the route it came from.
 
 ### 6.10 Connection states
 `/events` silence > 45 s (the `status` heartbeat is every 30 s) → global banner "Disconnected — last update N s ago", all dots → unknown
