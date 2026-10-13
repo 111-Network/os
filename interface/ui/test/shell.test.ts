@@ -6,6 +6,7 @@ import { DISCONNECTED_TEXT, RECONNECTED_TEXT, connectionAnnouncement, createAnno
 import { cleanPath, hrefTo, routeFragment } from "../src/app/location";
 import { formatPairCode, isCompletePairCode, retrySeconds, waitPhrase } from "../src/app/pair-code";
 import { isReturnable, rememberReturn, takeReturn, type ReturnStore } from "../src/app/pair-return";
+import { isUntrustedLoopback, needsPairCode, pairIntro } from "../src/app/pairing";
 import type { ServiceRecord } from "../src/lib/api/types";
 import { attentionSummary } from "../src/lib/attention";
 import { LAYERS, layerBySlug } from "../src/lib/layers";
@@ -513,5 +514,36 @@ describe("pair screen helpers", () => {
     store.setItem("111.ui.return", "//evil.example");
     expect(takeReturn(store)).toBe("/");
     expect(takeReturn(null)).toBe("/");
+  });
+});
+
+describe("who has to pair (loopback trust is a node policy)", () => {
+  const s = (loopback: boolean, paired: boolean, loopback_trusted?: boolean) => ({ loopback, paired, ...(loopback_trusted === undefined ? {} : { loopback_trusted }) });
+  it("a trusted loopback browser (laptop) never sees /pair", () => {
+    expect(needsPairCode(s(true, false, true))).toBe(false);
+    expect(needsPairCode(s(true, false))).toBe(false); // an older daemon omits the field: the old behaviour
+  });
+  it("an untrusted loopback browser (Termux) pairs exactly like a LAN visitor", () => {
+    expect(needsPairCode(s(true, false, false))).toBe(true);
+    expect(needsPairCode(s(false, false, true))).toBe(true);
+    expect(needsPairCode(s(false, false))).toBe(true);
+  });
+  it("a paired browser never needs a code, whatever the policy", () => {
+    expect(needsPairCode(s(true, true, false))).toBe(false);
+    expect(needsPairCode(s(false, true))).toBe(false);
+  });
+  it("only an unpaired loopback browser under a no-trust policy gets the 'this phone' copy", () => {
+    expect(isUntrustedLoopback(s(true, false, false))).toBe(true);
+    expect(isUntrustedLoopback(s(true, true, false))).toBe(false);
+    expect(isUntrustedLoopback(s(true, false, true))).toBe(false);
+    expect(isUntrustedLoopback(s(false, false, false))).toBe(false);
+    expect(isUntrustedLoopback(s(true, false))).toBe(false);
+  });
+  it("the pair screen copy: 'this phone' for Termux, 'the node' otherwise, never 'this computer'", () => {
+    const termux = pairIntro(true);
+    expect(`${termux.text}${termux.command}${termux.tail}`).toBe("This phone's browser pairs once. The code is shown by 111 dashboard (the installer opened this link with it).");
+    const lan = pairIntro(false);
+    expect(`${lan.text}${lan.command}${lan.tail}`).toBe("On the node run 111 dashboard and type the pair code shown there.");
+    for (const p of [termux, lan]) expect(`${p.text}${p.tail}`).not.toMatch(/never needs a code|this computer/i);
   });
 });

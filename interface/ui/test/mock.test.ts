@@ -6,6 +6,7 @@ import { buildFixtures } from "../src/lib/api/mock/fixtures";
 import type { DeviceRecord } from "../src/lib/api/types";
 import { finalSentence, pickReply, tokenize } from "../src/lib/api/mock/chat";
 import { SERVICE_IDS, type ChatFrame, type ServiceId } from "../src/lib/api/types";
+import { needsPairCode } from "../src/app/pairing";
 import { operations, sse } from "./contract.gen";
 import { FakeClock, collect, flush, last } from "./helpers/fakes";
 import { validate, validateAgainst } from "./helpers/validate";
@@ -139,7 +140,7 @@ describe("fixtures", () => {
 describe.each(SCENARIO_NAMES)("scenario %s: every result validates against openapi.yaml", (scenario) => {
   it("status, services, proposals, settings, kb, auth, logs", async () => {
     const { a } = make(scenario);
-    if (scenario === "lan-unpaired") await a.auth.pair(MOCK_PAIR_CODE);
+    if (scenario === "lan-unpaired" || scenario === "termux-unpaired") await a.auth.pair(MOCK_PAIR_CODE);
 
     expectValid("getStatus", await a.status());
     const services = await a.services();
@@ -162,7 +163,7 @@ describe.each(SCENARIO_NAMES)("scenario %s: every result validates against opena
 
   it("agent routes either validate or fail with a valid problem+json", async () => {
     const { a } = make(scenario);
-    if (scenario === "lan-unpaired") await a.auth.pair(MOCK_PAIR_CODE);
+    if (scenario === "lan-unpaired" || scenario === "termux-unpaired") await a.auth.pair(MOCK_PAIR_CODE);
     const agentLive = (await a.service("agent")).state === "live";
     const modelLive = (await a.service("model")).state === "live";
 
@@ -194,7 +195,7 @@ describe.each(SCENARIO_NAMES)("scenario %s: every result validates against opena
 
   it("every event frame validates against its x-sse-events schema", async () => {
     const { a, clock } = make(scenario);
-    if (scenario === "lan-unpaired") await a.auth.pair(MOCK_PAIR_CODE);
+    if (scenario === "lan-unpaired" || scenario === "termux-unpaired") await a.auth.pair(MOCK_PAIR_CODE);
     const { frames } = listen(a);
     await flush();
     await clock.advanceAsync(65_000, 500);
@@ -311,6 +312,37 @@ describe("scenarios", () => {
 
     await a.auth.logout();
     expect(await failure(a.status())).toMatchObject({ code: "unauthenticated" });
+  });
+
+  it("auth/session carries the loopback policy and the caller's own device id", async () => {
+    const healthy = make("healthy").a;
+    expect(await healthy.auth.session()).toMatchObject({ loopback: true, loopback_trusted: true, paired: false, device_id: "ses-4be2a91c07d5" });
+    expectValid("authSession", await healthy.auth.session());
+    const lan = make("lan-unpaired").a;
+    expect(await lan.auth.session()).toMatchObject({ loopback: false, loopback_trusted: true, device_id: null });
+    await lan.auth.pair(MOCK_PAIR_CODE);
+    expect(await lan.auth.session()).toMatchObject({ paired: true, device_id: "ses-4be2a91c07d5" });
+  });
+
+  it("termux-unpaired: a loopback browser that is not trusted gets 401 until it pairs, like a LAN visitor", async () => {
+    const { a } = make("termux-unpaired");
+    const session = await a.auth.session();
+    expect(session).toMatchObject({ loopback: true, loopback_trusted: false, paired: false, device_id: null });
+    expectValid("authSession", session);
+    expect(needsPairCode(session)).toBe(true);
+    for (const c of [a.status(), a.services(), a.devices(), a.settings(), a.proposals()]) expect(await failure(c)).toMatchObject({ status: 401, code: "unauthenticated" });
+    const { states } = listen(a);
+    await flush();
+    expect(states).toEqual(["connecting", "closed"]);
+
+    expect(await failure(a.auth.pair("ZZZZ-ZZZZ"))).toMatchObject({ status: 401 });
+    expect(await a.auth.pair("aaaa-bbbb")).toMatchObject({ paired: true, loopback: true, loopback_trusted: false, device_id: "ses-4be2a91c07d5" });
+    await flush();
+    expect(states.slice(-1)).toEqual(["open"]);
+    expect((await a.status()).auth).toEqual({ loopback: true, paired: true });
+    expect(needsPairCode(await a.auth.session())).toBe(false);
+    // still on loopback, so the loopback-only settings work once paired
+    expect(await a.patchSettings({ lan_enabled: false })).toMatchObject({ lan_enabled: false });
   });
 
   it("lan-unpaired: five wrong codes lock pairing for a minute", async () => {

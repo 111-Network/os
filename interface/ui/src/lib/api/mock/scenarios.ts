@@ -4,7 +4,7 @@
 import { RADIO_BOARD_FOUND, RADIO_NO_BOARD, VERSION, heltecDevice, iso, logLine, type Fixtures } from "./fixtures";
 import type { AgentEvent, AgentStatus, DeviceRecord, Proposal, ServiceId, ServiceRecord, Settings, Status } from "../types";
 
-export const SCENARIO_NAMES = ["healthy", "first-run", "agent-down", "transport-error", "lan-unpaired", "lan-locked", "updating", "new-device"] as const;
+export const SCENARIO_NAMES = ["healthy", "first-run", "agent-down", "transport-error", "lan-unpaired", "termux-unpaired", "lan-locked", "updating", "new-device"] as const;
 export type ScenarioName = (typeof SCENARIO_NAMES)[number];
 
 /** The pair code `lan-unpaired` accepts (dashes, spaces and case are ignored, like the daemon). */
@@ -13,6 +13,8 @@ export const MOCK_PAIR_CODE = "AAAA-BBBB";
 export interface MockAuth {
   /** Loopback peers bypass auth and may use loopback-only settings. */
   loopback: boolean;
+  /** Policy (`auth/session.loopback_trusted`): false under Termux, where a loopback browser pairs like any other. */
+  loopbackTrusted: boolean;
   /** Every /api/v1 call except /auth/* answers 401 until pairing succeeds. */
   requirePair: boolean;
   paired: boolean;
@@ -90,7 +92,7 @@ function dataFrom(base: Fixtures): MockData {
     kbIndex: c.kbIndex,
     kbEntries: c.kbEntries,
     logs: c.logs,
-    auth: { loopback: true, requirePair: false, paired: false, created: null, deviceId: c.devices.find((d) => d.kind === "companion")?.id ?? null },
+    auth: { loopback: true, loopbackTrusted: true, requirePair: false, paired: false, created: null, deviceId: c.devices.find((d) => d.kind === "companion")?.id ?? null },
   };
 }
 
@@ -258,6 +260,20 @@ export const lanLocked: ScenarioFn = (base) => {
   };
 };
 
+export const termuxUnpaired: ScenarioFn = (base) => {
+  const data = dataFrom(base);
+  // The node runs on the phone itself and the browser reaches it over loopback, but loopback is not trusted
+  // there: every call answers 401 until the code from `111 dashboard` is entered.
+  data.status.auth = { loopback: true, paired: false };
+  data.auth = { ...data.auth, loopback: true, loopbackTrusted: false, requirePair: true, paired: false, created: null };
+  return {
+    name: "termux-unpaired",
+    summary: `Termux: a loopback browser the node does not trust. Every call answers 401 until auth.pair('${MOCK_PAIR_CODE}') succeeds.`,
+    data,
+    script: [],
+  };
+};
+
 export const updating: ScenarioFn = (base) => {
   const data = dataFrom(base);
   const NEXT = "2026.10.14";
@@ -322,6 +338,7 @@ export const scenarios: Record<ScenarioName, ScenarioFn> = {
   "agent-down": agentDown,
   "transport-error": transportError,
   "lan-unpaired": lanUnpaired,
+  "termux-unpaired": termuxUnpaired,
   "lan-locked": lanLocked,
   updating,
   "new-device": newDevice,

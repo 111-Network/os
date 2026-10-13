@@ -1,10 +1,12 @@
-// Pair screen (spec sections 6.9 and 11). Shown when the node answers 401 to a LAN visitor; loopback
-// visitors never see it. A wrong code stays on this screen (the auth gate never redirects from /pair).
+// Pair screen (spec sections 6.9 and 11). Shown when the node answers 401: to a LAN visitor, and to a
+// loopback visitor whose node does not trust loopback (Termux). A trusted loopback visitor never sees it.
+// A wrong code stays on this screen (the auth gate never redirects from /pair).
 import { useEffect, useState, type FormEvent } from "react";
 import { navigate } from "wouter/use-hash-location";
 import { useNow } from "../app/hooks";
 import { formatPairCode, isCompletePairCode, retrySeconds, waitPhrase } from "../app/pair-code";
 import { takeReturn } from "../app/pair-return";
+import { isUntrustedLoopback, needsPairCode, pairIntro } from "../app/pairing";
 import { Button } from "../components/button";
 import { Input } from "../components/input";
 import { Panel } from "../components/panel";
@@ -31,7 +33,10 @@ export default function PairView() {
   const now = useNow(blockedUntil > Date.now());
   const wait = Math.max(0, Math.ceil((blockedUntil - now) / 1000));
 
-  // Strip `?code=` from the address bar, and send loopback (or already paired) visitors home.
+  // The node does not trust this loopback browser (Termux): the copy says "this phone", not "the node".
+  const [untrustedLoopback, setUntrustedLoopback] = useState(false);
+
+  // Strip `?code=` from the address bar, and send visitors who need no code (paired, or trusted loopback) home.
   useEffect(() => {
     let cancelled = false;
     consumeParam("code");
@@ -39,7 +44,11 @@ export default function PairView() {
       try {
         const adapter = await getAdapter();
         const session = await adapter.auth.session();
-        if (cancelled || !(session.loopback || session.paired)) return;
+        if (cancelled) return;
+        if (needsPairCode(session)) {
+          setUntrustedLoopback(isUntrustedLoopback(session));
+          return;
+        }
         // Clear a stale "needs pairing" flag first, or the auth gate would bounce straight back here.
         await apiStore.refreshAll();
         if (!cancelled && !apiStore.getState().meta.needsPair) navigate(takeReturn(), { replace: true });
@@ -86,13 +95,16 @@ export default function PairView() {
   else if (failure?.kind === "limited" && wait > 0) message = `Too many attempts. Wait ${waitPhrase(failure.seconds)}.`;
   else if (failure?.kind === "other") message = failure.text;
   const host = typeof window === "undefined" ? "" : window.location.host;
+  const intro = pairIntro(untrustedLoopback);
 
   return (
     <main id="main" className="mx-auto flex min-h-dvh w-full max-w-md flex-col justify-center gap-6 px-4 py-10">
       <SectionHeader level={1} kicker="pair this browser" title="Pair" />
       <Panel title="pair">
         <p className="font-mono text-xs leading-relaxed text-muted-foreground">
-          On the node run <code className="border border-border px-1 text-foreground">111 dashboard</code> and type the pair code shown there.
+          {intro.text}
+          <code className="border border-border px-1 text-foreground">{intro.command}</code>
+          {intro.tail}
         </p>
         {host ? (
           <p className="mt-2 font-mono text-xs leading-relaxed text-muted-foreground">
