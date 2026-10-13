@@ -663,6 +663,11 @@ export interface components {
         DeviceRecord: {
             /** @description stable across reboots (hash of serial-by-id path / vendor:product:serial / BLE MAC / companion session id) */
             id: string;
+            /**
+             * Format: date-time
+             * @description when the published state last changed
+             */
+            since: string;
             kind: components["schemas"]["DeviceKind"];
             /** @description user-given name */
             alias: string | null;

@@ -395,6 +395,7 @@ export const schemas: Record<string, JsonSchema> = {
       "transport",
       "first_seen",
       "last_seen",
+      "since",
       "reason_code",
       "reason",
       "capabilities",
@@ -407,6 +408,7 @@ export const schemas: Record<string, JsonSchema> = {
         "type": "string",
         "description": "stable across reboots (hash of serial-by-id path / vendor:product:serial / BLE MAC / companion session id)"
       },
+      "since": {"type":"string","format":"date-time","description":"when the published state last changed"},
       "kind": {"$ref":"#/components/schemas/DeviceKind"},
       "alias": {"type":["string","null"],"description":"user-given name"},
       "name": {"type":"string","description":"detected product name or a plain fallback like 'USB serial device'"},
