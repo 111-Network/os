@@ -69,6 +69,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/services/{id}/restart": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** @description Restart one child that 111d supervises (`actions` contains `restart`). SIGTERM, grace, SIGKILL, then the supervisor's normal respawn (which also clears `child_degraded` back-off). Services 111d does not supervise (external daemons such as rnsd/meshtasticd/opencode) answer 409 `not_supervised`. Loopback or a paired session, like every write. */
+        post: operations["restartService"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/devices": {
         parameters: {
             query?: never;
@@ -230,7 +247,7 @@ export interface paths {
         delete?: never;
         options?: never;
         head?: never;
-        /** @description Partial merge. `lan_enabled` and `offer` are loopback-only (403 loopback_only otherwise). `lan_enabled` takes effect on restart. */
+        /** @description Partial merge. `lan_enabled` and `offer` are loopback-only (403 loopback_only otherwise). `lan_enabled` is the single source of truth for LAN sharing (`111 config dashboard.lan` writes the same `state/settings.json`); it takes effect on restart. When the node's environment file pins `DASHBOARD_LAN`, `lan_locked` is true and a patch of `lan_enabled` answers 409 `settings_locked`. */
         patch: operations["patchSettings"];
         trace?: never;
     };
@@ -376,7 +393,7 @@ export interface components {
             status: number;
             detail?: string;
             /** @enum {string} */
-            code: "unauthenticated" | "loopback_only" | "lan_read_only" | "agent_unavailable" | "model_unavailable" | "bad_request" | "not_found" | "rate_limited" | "already_decided" | "needs_hub" | "upstream_error" | "internal";
+            code: "unauthenticated" | "loopback_only" | "lan_read_only" | "agent_unavailable" | "model_unavailable" | "bad_request" | "not_found" | "rate_limited" | "already_decided" | "not_supervised" | "settings_locked" | "needs_hub" | "upstream_error" | "internal";
             errors?: {
                 pointer?: string;
                 message: string;
@@ -577,7 +594,10 @@ export interface components {
         Settings: {
             schema: number;
             alias: string | null;
+            /** @description effective value: settings.json, or the DASHBOARD_LAN override when lan_locked */
             lan_enabled: boolean;
+            /** @description true when DASHBOARD_LAN in the node's environment file overrides settings.json; the UI disables the toggle */
+            lan_locked: boolean;
             /** @enum {string|null} */
             offer: "offered" | "accepted" | "dismissed" | null;
         };
@@ -832,6 +852,35 @@ export interface operations {
                 };
             };
             404: components["responses"]["Problem"];
+        };
+    };
+    restartService: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: components["parameters"]["serviceId"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Restarting */
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        schema: number;
+                        id: string;
+                        restarting: boolean;
+                    };
+                };
+            };
+            404: components["responses"]["Problem"];
+            /** @description not_supervised */
+            409: components["responses"]["Problem"];
         };
     };
     listDevices: {
@@ -1152,6 +1201,8 @@ export interface operations {
                 };
             };
             403: components["responses"]["Problem"];
+            /** @description settings_locked */
+            409: components["responses"]["Problem"];
         };
     };
     restartNode: {

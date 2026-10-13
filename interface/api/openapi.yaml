@@ -39,6 +39,15 @@ paths:
       responses:
         "200": { description: OK, content: { application/json: { schema: { $ref: "#/components/schemas/LogTail" } } } }
         "404": { $ref: "#/components/responses/Problem" }
+  /api/v1/services/{id}/restart:
+    post:
+      operationId: restartService
+      description: Restart one child that 111d supervises (`actions` contains `restart`). SIGTERM, grace, SIGKILL, then the supervisor's normal respawn (which also clears `child_degraded` back-off). Services 111d does not supervise (external daemons such as rnsd/meshtasticd/opencode) answer 409 `not_supervised`. Loopback or a paired session, like every write.
+      parameters: [ { $ref: "#/components/parameters/serviceId" } ]
+      responses:
+        "202": { description: Restarting, content: { application/json: { schema: { type: object, required: [schema, id, restarting], properties: { schema: { type: integer }, id: { type: string }, restarting: { type: boolean } } } } } }
+        "404": { $ref: "#/components/responses/Problem" }
+        "409": { description: not_supervised, $ref: "#/components/responses/Problem" }
   /api/v1/devices:
     get:
       operationId: listDevices
@@ -132,11 +141,12 @@ paths:
         "200": { description: OK, content: { application/json: { schema: { $ref: "#/components/schemas/Settings" } } } }
     patch:
       operationId: patchSettings
-      description: Partial merge. `lan_enabled` and `offer` are loopback-only (403 loopback_only otherwise). `lan_enabled` takes effect on restart.
+      description: Partial merge. `lan_enabled` and `offer` are loopback-only (403 loopback_only otherwise). `lan_enabled` is the single source of truth for LAN sharing (`111 config dashboard.lan` writes the same `state/settings.json`); it takes effect on restart. When the node's environment file pins `DASHBOARD_LAN`, `lan_locked` is true and a patch of `lan_enabled` answers 409 `settings_locked`.
       requestBody: { required: true, content: { application/json: { schema: { $ref: "#/components/schemas/SettingsPatch" } } } }
       responses:
         "200": { description: OK, content: { application/json: { schema: { $ref: "#/components/schemas/Settings" } } } }
         "403": { $ref: "#/components/responses/Problem" }
+        "409": { description: settings_locked, $ref: "#/components/responses/Problem" }
   /api/v1/node/restart:
     post:
       operationId: restartNode
@@ -204,7 +214,7 @@ components:
         detail: { type: string }
         code:
           type: string
-          enum: [unauthenticated, loopback_only, lan_read_only, agent_unavailable, model_unavailable, bad_request, not_found, rate_limited, already_decided, needs_hub, upstream_error, internal]
+          enum: [unauthenticated, loopback_only, lan_read_only, agent_unavailable, model_unavailable, bad_request, not_found, rate_limited, already_decided, not_supervised, settings_locked, needs_hub, upstream_error, internal]
         errors: { type: array, items: { type: object, required: [message], properties: { pointer: { type: string }, message: { type: string } } } }
     ServiceId: { type: string, enum: [agent, model, transport, radio, kb, gateway, codeagent] }
     ServiceState: { type: string, enum: [live, unset, error, starting] }
@@ -364,11 +374,12 @@ components:
         decision: { type: [object, "null"], properties: { decision: { $ref: "#/components/schemas/Decision" }, at: { type: string, format: date-time } } }
     Settings:
       type: object
-      required: [schema, alias, lan_enabled, offer]
+      required: [schema, alias, lan_enabled, lan_locked, offer]
       properties:
         schema: { type: integer }
         alias: { type: [string, "null"], maxLength: 64 }
-        lan_enabled: { type: boolean }
+        lan_enabled: { type: boolean, description: "effective value: settings.json, or the DASHBOARD_LAN override when lan_locked" }
+        lan_locked: { type: boolean, description: "true when DASHBOARD_LAN in the node's environment file overrides settings.json; the UI disables the toggle" }
         offer: { type: [string, "null"], enum: [offered, accepted, dismissed, null] }
     SettingsPatch:
       type: object
