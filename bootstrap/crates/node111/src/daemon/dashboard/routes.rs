@@ -113,6 +113,8 @@ struct StatusBody {
     clock_fault: bool,
     offer: Option<super::OfferState>,
     error_state: Option<super::ErrorState>,
+    /// Additive (Layer 3): agent + model server states, agent API URL.
+    intelligence: super::IntelligenceState,
 }
 
 #[derive(Serialize)]
@@ -175,6 +177,7 @@ async fn api_status(State(state): State<SharedState>) -> impl IntoResponse {
         clock_fault: s.clock_fault,
         offer: s.offer.clone(),
         error_state: s.error_state.clone(),
+        intelligence: s.intelligence.clone(),
     };
     Json(body)
 }

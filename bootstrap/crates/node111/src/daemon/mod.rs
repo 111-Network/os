@@ -4,6 +4,7 @@
 
 pub mod dashboard;
 pub mod health;
+pub mod intelligence;
 pub mod kb;
 pub mod supervise;
 pub mod transport;
@@ -224,6 +225,30 @@ async fn daemon_main() -> anyhow::Result<()> {
         });
     }
 
+    // Layer 3 children (llama-server + 111-agent; each `absent` unless installed)
+    let intelligence = {
+        let (category, node_id) = {
+            let s = state.read().unwrap();
+            (s.category.clone(), s.node_id.clone())
+        };
+        Arc::new(intelligence::start(
+            &layout,
+            category.as_deref(),
+            node_id.as_deref(),
+        ))
+    };
+    {
+        let state = Arc::clone(&state);
+        let intelligence = Arc::clone(&intelligence);
+        let mut tick = tokio::time::interval(Duration::from_secs(2));
+        tokio::spawn(async move {
+            loop {
+                tick.tick().await;
+                state.write().unwrap().intelligence = intelligence.state();
+            }
+        });
+    }
+
     // updater loop (fetch/verify/stage; never flips — root helper owns that)
     {
         let cfg = updater::fetch::UpdaterConfig::production(
@@ -265,6 +290,7 @@ async fn daemon_main() -> anyhow::Result<()> {
         _ = sigterm.recv() => {},
     }
     transport.stop();
+    intelligence.stop();
     eprintln!("111 daemon: shutting down");
     Ok(())
 }

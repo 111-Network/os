@@ -4,6 +4,7 @@
 pub mod routes;
 
 use crate::daemon::health::Components;
+use crate::daemon::intelligence::IntelligenceState;
 use serde::Serialize;
 use std::sync::{Arc, RwLock};
 use std::time::Instant;
@@ -54,6 +55,8 @@ pub struct DashboardState {
     pub clock_fault: bool,
     pub offer: Option<OfferState>,
     pub error_state: Option<ErrorState>,
+    /// Layer 3 children (agent + model server); written by the daemon's mirror task.
+    pub intelligence: IntelligenceState,
 }
 
 impl DashboardState {
@@ -77,6 +80,7 @@ impl DashboardState {
             clock_fault: false,
             offer: None,
             error_state: None,
+            intelligence: IntelligenceState::default(),
         }
     }
 
