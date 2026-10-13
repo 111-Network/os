@@ -837,6 +837,29 @@ fn write_initial_counters(dir: &Path, announce_counter: u64) -> Result<(), Count
     Ok(())
 }
 
+/// §4/§13 — write a FRESH identity dir for a never-before-deployed keyset
+/// (install-time silent keygen on Cat 2+, §8.3): the full §13 file set with
+/// the §6.2 announce counter at 0 (genesis announce = 1). This is the
+/// keygen path's writer — NOT the §8.4 restore path, which would persist the
+/// restore-only `floor + 1024` jump (reviewer fix, wave 3: Layer 1's binding
+/// had to route fresh keygen through `restore` because this was `pub(crate)`).
+/// Never overwrites (`LiveIdentityDir` when the dir holds identity files).
+pub fn create_fresh_identity(
+    dir: &Path,
+    mnemonic: &RootMnemonic,
+    keyset: &Keyset,
+) -> Result<(), RestoreError> {
+    let wc = match mnemonic.word_count() {
+        12 => WordCount::Twelve,
+        _ => WordCount::TwentyFour, // RootMnemonic admits exactly 12 or 24 (v1 profile)
+    };
+    let descriptor = BackupDescriptor::for_word_count(wc);
+    write_identity_dir(dir, mnemonic, keyset, descriptor, 0).map_err(|e| match e {
+        DirWriteError::Exists => RestoreError::LiveIdentityDir,
+        DirWriteError::Io(e) => RestoreError::Io(e),
+    })
+}
+
 /// Internal write outcome: the never-overwrite refusal is distinct from I/O
 /// failure so callers can map it to their own error class (§8.4's
 /// `LiveIdentityDir`, §13's Exists class).
