@@ -125,10 +125,16 @@ impl fmt::Display for MigrationError {
                 write!(f, "§8.4/D9: not a legacy identity dir — nothing to migrate")
             }
             MigrationError::CorruptLegacy(why) => {
-                write!(f, "§8.4/D9: legacy identity dir incomplete/unreadable: {why}")
+                write!(
+                    f,
+                    "§8.4/D9: legacy identity dir incomplete/unreadable: {why}"
+                )
             }
             MigrationError::MixedState(why) => {
-                write!(f, "§8.4/D9: legacy and new-format files coexist: {why} — fail closed")
+                write!(
+                    f,
+                    "§8.4/D9: legacy and new-format files coexist: {why} — fail closed"
+                )
             }
             MigrationError::Mnemonic(e) => write!(f, "{e}"),
             MigrationError::Keyset(e) => write!(f, "{e}"),
@@ -272,14 +278,15 @@ pub fn migrate(dir: &Path) -> Result<MigrationOutcome, MigrationError> {
     fsync_dir(parent)?;
     // §6.2 fresh initial announce counter for a NodeId no peer has seen.
     let announce_counter_init = 0u64;
-    if let Err(e) = backup::write_identity_dir(dir, &mnemonic, &keyset, descriptor, announce_counter_init)
+    if let Err(e) =
+        backup::write_identity_dir(dir, &mnemonic, &keyset, descriptor, announce_counter_init)
     {
         let _ = fs::rename(&quarantine_dir, dir); // best-effort rollback
         let _ = fsync_dir(parent);
         return Err(match e {
-            backup::DirWriteError::Exists => MigrationError::Io(io::Error::other(
-                "identity dir reappeared during migration",
-            )),
+            backup::DirWriteError::Exists => {
+                MigrationError::Io(io::Error::other("identity dir reappeared during migration"))
+            }
             backup::DirWriteError::Io(e) => MigrationError::Io(e),
         });
     }
@@ -304,8 +311,7 @@ mod tests {
     /// tests) — a realistic D9 dir body.
     const V1_WORDS: &str =
         "leader monkey parrot ring guide accident before fence cannon height naive bean";
-    const V1_SECRET_HEX: &str =
-        "7f7ff03d123792d6ac594bfa67bf6d0c0ab55b6b1fdb6249303fe861f1ccba9a";
+    const V1_SECRET_HEX: &str = "7f7ff03d123792d6ac594bfa67bf6d0c0ab55b6b1fdb6249303fe861f1ccba9a";
     const V1_NPUB: &str = "npub1zutzeysacnf9rru6zqwmxd54mud0k44tst6l70ja5mhv8jjumytsd2x7nu";
 
     static NEXT_DIR: AtomicU64 = AtomicU64::new(0);
@@ -317,10 +323,8 @@ mod tests {
     impl TestDir {
         fn new(name: &str) -> Self {
             let n = NEXT_DIR.fetch_add(1, Ordering::Relaxed);
-            let path = std::env::temp_dir().join(format!(
-                "id111-migrate-{name}-{}-{n}",
-                std::process::id()
-            ));
+            let path = std::env::temp_dir()
+                .join(format!("id111-migrate-{name}-{}-{n}", std::process::id()));
             let _ = fs::remove_dir_all(&path);
             fs::create_dir_all(&path).unwrap();
             TestDir(path)
@@ -375,10 +379,7 @@ mod tests {
             format!("{V1_WORDS}\n")
         );
         assert_eq!(mode(dir.join(backup::MNEMONIC_FILE).as_path()), 0o600);
-        assert_eq!(
-            fs::read(dir.join(backup::KEYSET_FILE)).unwrap().len(),
-            64
-        );
+        assert_eq!(fs::read(dir.join(backup::KEYSET_FILE)).unwrap().len(), 64);
         let record = fs::read(dir.join(backup::NODEID_FILE)).unwrap();
         assert_eq!(&record[..2], &[0xed, 0x01]);
         assert_eq!(&record[2..], out.new_node_id.as_bytes());
@@ -389,7 +390,9 @@ mod tests {
         // Fresh §6.2 counter state (new NodeId — no floor+jump), read back
         // through the owning `CounterStore`.
         assert_eq!(
-            crate::counters::CounterStore::open(&dir).unwrap().announce_last(),
+            crate::counters::CounterStore::open(&dir)
+                .unwrap()
+                .announce_last(),
             0u64
         );
         assert_eq!(mode(dir.join(backup::COUNTERS_FILE).as_path()), 0o600);
@@ -399,10 +402,7 @@ mod tests {
         // byte-identical, npub byte-identical, the legacy mnemonic copy too.
         assert!(!dir.join(LEGACY_SECRET_FILE).exists());
         assert!(!dir.join(LEGACY_NPUB_FILE).exists());
-        assert_eq!(
-            out.quarantine_dir,
-            t.0.join("identity.quarantine-d9")
-        );
+        assert_eq!(out.quarantine_dir, t.0.join("identity.quarantine-d9"));
         assert_eq!(
             fs::read_to_string(out.quarantine_dir.join(LEGACY_SECRET_FILE)).unwrap(),
             format!("{V1_SECRET_HEX}\n")
@@ -463,20 +463,14 @@ mod tests {
         let dir3c = t3c.identity();
         fs::create_dir_all(&dir3c).unwrap();
         fs::write(dir3c.join(LEGACY_MNEMONIC_FILE), format!("{V1_WORDS}\n")).unwrap();
-        assert!(matches!(
-            migrate(&dir3c),
-            Err(MigrationError::NotLegacyDir)
-        ));
+        assert!(matches!(migrate(&dir3c), Err(MigrationError::NotLegacyDir)));
 
         // Mixed state: full trio + a new-format file — fail closed.
         let t4 = TestDir::new("mixed");
         let dir4 = t4.identity();
         make_legacy_dir(&dir4, V1_WORDS);
         fs::write(dir4.join(backup::KEYSET_FILE), [0u8; 64]).unwrap();
-        assert!(matches!(
-            migrate(&dir4),
-            Err(MigrationError::MixedState(_))
-        ));
+        assert!(matches!(migrate(&dir4), Err(MigrationError::MixedState(_))));
         // Nothing moved.
         assert!(dir4.join(LEGACY_SECRET_FILE).exists());
     }
@@ -548,7 +542,10 @@ mod tests {
         );
         assert!(rendered.contains(V1_NPUB));
         assert!(rendered.contains(&crate::encoding::hex_encode(
-            Keyset::derive_from_mnemonic(V1_WORDS).unwrap().node_id().as_bytes()
+            Keyset::derive_from_mnemonic(V1_WORDS)
+                .unwrap()
+                .node_id()
+                .as_bytes()
         )));
     }
 }

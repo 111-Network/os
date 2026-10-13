@@ -444,7 +444,10 @@ impl CounterStore {
         self.mark_running()?;
         let base = self.traffic_base;
         let entry = self.peer_entry(*peer, base)?;
-        let next = entry.send_last.checked_add(1).ok_or(CounterError::Overflow)?;
+        let next = entry
+            .send_last
+            .checked_add(1)
+            .ok_or(CounterError::Overflow)?;
         entry.send_last = next;
         self.tick_and_maybe_commit()?;
         Ok(next)
@@ -741,7 +744,7 @@ mod tests {
         w.offer(3).unwrap();
         assert_eq!(w.high(), 3);
         assert_eq!(w.bitmap(), 0b101); // counters 3 and 1
-        // In-window gap fill.
+                                       // In-window gap fill.
         w.offer(2).unwrap();
         assert_eq!(w.bitmap(), 0b111);
         assert_eq!(w.offer(2), Err(WindowReject::Replayed));
@@ -771,7 +774,7 @@ mod tests {
         assert_eq!(w.offer(10), Err(WindowReject::Replayed));
         assert_eq!(w.offer(8), Err(WindowReject::Replayed));
         w.offer(13).unwrap(); // unset bit inside the window: accepted
-        // A jump ≥ 32 clears the bitmap entirely.
+                              // A jump ≥ 32 clears the bitmap entirely.
         w.jump_forward(32);
         assert_eq!(w.bitmap(), 0);
         assert_eq!(w.high(), 46);
@@ -827,7 +830,7 @@ mod tests {
             assert_eq!(store.next_send_counter(&a).unwrap(), 1);
             store.on_receive(&a, 7).unwrap();
             store.commit().unwrap(); // also makes N = 8 durable for the jump
-            // Three more sends, uncommitted (3 < N = 8 after the commit).
+                                     // Three more sends, uncommitted (3 < N = 8 after the commit).
             assert_eq!(store.next_send_counter(&a).unwrap(), 2);
             assert_eq!(store.next_send_counter(&a).unwrap(), 3);
             assert_eq!(store.next_send_counter(&a).unwrap(), 4);
@@ -928,7 +931,10 @@ mod tests {
         store.set_restore_floor(100).unwrap();
         // §8.4: counter = floor + 1024, committed before the call returns.
         assert_eq!(store.announce_last(), 100 + RESTORE_JUMP);
-        assert_eq!(store.next_announce_counter().unwrap(), 100 + RESTORE_JUMP + 1);
+        assert_eq!(
+            store.next_announce_counter().unwrap(),
+            100 + RESTORE_JUMP + 1
+        );
         // §8.4: the same jump applies to per-peer traffic send-counters on
         // new sessions — a fresh peer's first packet uses 1024 + 1.
         let a = peer(0xb1);
@@ -940,7 +946,10 @@ mod tests {
         let mut store = CounterStore::open(tmp.path()).unwrap();
         assert!(!store.is_restore_pending());
         assert_eq!(store.announce_last(), 100 + RESTORE_JUMP + 1);
-        assert_eq!(store.next_announce_counter().unwrap(), 100 + RESTORE_JUMP + 2);
+        assert_eq!(
+            store.next_announce_counter().unwrap(),
+            100 + RESTORE_JUMP + 2
+        );
         // traffic_base persists: another new peer still starts past the jump.
         let b = peer(0xb2);
         assert_eq!(store.next_send_counter(&b).unwrap(), RESTORE_JUMP + 1);
@@ -1040,7 +1049,10 @@ mod tests {
             let tmp = TempDir::new(name);
             fs::write(tmp.path().join(COUNTERS_FILE), &bytes).unwrap();
             assert!(
-                matches!(CounterStore::open(tmp.path()), Err(CounterError::Corrupt(_))),
+                matches!(
+                    CounterStore::open(tmp.path()),
+                    Err(CounterError::Corrupt(_))
+                ),
                 "case {name} must be rejected as corrupt"
             );
         }
@@ -1099,7 +1111,10 @@ mod tests {
         drop(store); // simulated crash — no shutdown()
 
         let mut reopened = CounterStore::open(&dir).unwrap();
-        assert!(reopened.peer_traffic(&peer).is_none(), "peer was never persisted");
+        assert!(
+            reopened.peer_traffic(&peer).is_none(),
+            "peer was never persisted"
+        );
         let next = reopened.next_send_counter(&peer).unwrap();
         assert!(
             next > c3 && next > n,

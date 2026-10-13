@@ -269,9 +269,18 @@ mod tests {
         let sign = derive_signing_seed(&seed);
         let ecdh = derive_ecdh_scalar(&seed);
         println!("SLIP-0010 project vectors (frozen by the §14 vector task):");
-        println!("  seed (BIP-39, abandon×11+about, empty passphrase) = {}", to_hex(&seed[..]));
-        println!("  m/111'/0'/0' (Ed25519 signing seed) = {}", to_hex(&sign[..]));
-        println!("  m/111'/0'/1' (X25519 private scalar, raw) = {}", to_hex(&ecdh[..]));
+        println!(
+            "  seed (BIP-39, abandon×11+about, empty passphrase) = {}",
+            to_hex(&seed[..])
+        );
+        println!(
+            "  m/111'/0'/0' (Ed25519 signing seed) = {}",
+            to_hex(&sign[..])
+        );
+        println!(
+            "  m/111'/0'/1' (X25519 private scalar, raw) = {}",
+            to_hex(&ecdh[..])
+        );
 
         // Frozen values (this implementation is pinned byte-exact by the
         // published SLIP-0010 vectors above; the project paths are additionally

@@ -593,11 +593,7 @@ mod tests {
         // LRU order survives the round-trip: A was pinned first, B second;
         // evicting at cap 2 must take A.
         let tmp2 = TempDir::new("persist-lru");
-        std::fs::copy(
-            tmp.path().join(PEERS_FILE),
-            tmp2.path().join(PEERS_FILE),
-        )
-        .unwrap();
+        std::fs::copy(tmp.path().join(PEERS_FILE), tmp2.path().join(PEERS_FILE)).unwrap();
         let mut store = PinStore::open_with_cap(tmp2.path(), cap(2)).unwrap();
         assert_eq!(
             store.apply_announce(id(0xd3), enc_key(3), 1).unwrap(),

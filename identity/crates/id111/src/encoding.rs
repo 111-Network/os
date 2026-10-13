@@ -90,7 +90,11 @@ impl fmt::Display for EncodingError {
                 write!(f, "invalid length: expected {expected}, got {got}")
             }
             Self::UnknownPrefix(p) => {
-                write!(f, "unknown multicodec prefix: 0x{:02x} 0x{:02x}", p[0], p[1])
+                write!(
+                    f,
+                    "unknown multicodec prefix: 0x{:02x} 0x{:02x}",
+                    p[0], p[1]
+                )
             }
             Self::InvalidHex => write!(f, "invalid lowercase-hex machine string"),
             Self::InvalidBech32 => write!(f, "invalid bech32 (BIP-173) string"),
@@ -155,8 +159,7 @@ pub fn parse_record(record: &[u8]) -> Result<(KeyKind, [u8; KEY_LEN]), EncodingE
         });
     }
     let prefix = [record[0], record[1]];
-    let kind =
-        KeyKind::from_prefix(prefix).ok_or(EncodingError::UnknownPrefix(prefix))?;
+    let kind = KeyKind::from_prefix(prefix).ok_or(EncodingError::UnknownPrefix(prefix))?;
     let mut key = [0u8; KEY_LEN];
     key.copy_from_slice(&record[2..]);
     Ok((kind, key))
@@ -232,8 +235,7 @@ pub fn bech32_encode_qr(key: &[u8; KEY_LEN]) -> String {
 /// - The data part must be the canonical zero-padded encoding of those 32B
 ///   (re-encode comparison) — padding-malleable aliases are rejected.
 pub fn bech32_decode(s: &str) -> Result<[u8; KEY_LEN], EncodingError> {
-    let checked =
-        CheckedHrpstring::new::<Bech32>(s).map_err(|_| EncodingError::InvalidBech32)?;
+    let checked = CheckedHrpstring::new::<Bech32>(s).map_err(|_| EncodingError::InvalidBech32)?;
     if checked.hrp() != NODE_HRP_PARSED {
         return Err(EncodingError::WrongHrp);
     }
@@ -358,16 +360,13 @@ mod tests {
     /// with an independent reference (a from-scratch Python BIP-173 encoder
     /// plus hashlib/base32 for the label) and frozen here.
     const PK: [u8; KEY_LEN] = [
-        0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d,
-        0x0e, 0x0f, 0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1a, 0x1b,
-        0x1c, 0x1d, 0x1e, 0x1f,
+        0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e,
+        0x0f, 0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1a, 0x1b, 0x1c, 0x1d,
+        0x1e, 0x1f,
     ];
-    const PK_HEX: &str =
-        "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f";
-    const PK_BECH32: &str =
-        "node1qqqsyqcyq5rqwzqfpg9scrgwpugpzysnzs23v9ccrydpk8qarc0s2mc22u";
-    const PK_BECH32_QR: &str =
-        "NODE1QQQSYQCYQ5RQWZQFPG9SCRGWPUGPZYSNZS23V9CCRYDPK8QARC0S2MC22U";
+    const PK_HEX: &str = "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f";
+    const PK_BECH32: &str = "node1qqqsyqcyq5rqwzqfpg9scrgwpugpzysnzs23v9ccrydpk8qarc0s2mc22u";
+    const PK_BECH32_QR: &str = "NODE1QQQSYQCYQ5RQWZQFPG9SCRGWPUGPZYSNZS23V9CCRYDPK8QARC0S2MC22U";
     const PK_LABEL: &str = "mmg4-2klg-yq";
 
     #[test]
@@ -378,7 +377,10 @@ mod tests {
         assert_eq!(operator_label(&PK), PK_LABEL);
         let mut expected_record = vec![0xed, 0x01];
         expected_record.extend_from_slice(&PK);
-        assert_eq!(encode_record(KeyKind::Ed25519Pub, &PK)[..], expected_record[..]);
+        assert_eq!(
+            encode_record(KeyKind::Ed25519Pub, &PK)[..],
+            expected_record[..]
+        );
     }
 
     #[test]
@@ -402,7 +404,13 @@ mod tests {
     #[test]
     fn record_rejects_unknown_prefix() {
         // Fail closed (§7/§12 rule 1): no prefix other than the two assigned.
-        for bad in [[0x00, 0x00], [0xed, 0x00], [0xed, 0x02], [0xec, 0x00], [0x16, 0x01]] {
+        for bad in [
+            [0x00, 0x00],
+            [0xed, 0x00],
+            [0xed, 0x02],
+            [0xec, 0x00],
+            [0x16, 0x01],
+        ] {
             let mut rec = [0u8; RECORD_LEN];
             rec[..2].copy_from_slice(&bad);
             rec[2..].copy_from_slice(&PK);
@@ -415,17 +423,26 @@ mod tests {
         let rec = encode_record(KeyKind::Ed25519Pub, &PK);
         assert_eq!(
             parse_record(&rec[..33]),
-            Err(EncodingError::InvalidLength { expected: 34, got: 33 })
+            Err(EncodingError::InvalidLength {
+                expected: 34,
+                got: 33
+            })
         );
         let mut long = rec.to_vec();
         long.push(0x00);
         assert_eq!(
             parse_record(&long),
-            Err(EncodingError::InvalidLength { expected: 34, got: 35 })
+            Err(EncodingError::InvalidLength {
+                expected: 34,
+                got: 35
+            })
         );
         assert_eq!(
             parse_record(&[]),
-            Err(EncodingError::InvalidLength { expected: 34, got: 0 })
+            Err(EncodingError::InvalidLength {
+                expected: 34,
+                got: 0
+            })
         );
     }
 
@@ -466,15 +483,24 @@ mod tests {
     fn hex_decode_rejects_wrong_length() {
         assert_eq!(
             hex_decode(&PK_HEX[..63]),
-            Err(EncodingError::InvalidLength { expected: 64, got: 63 })
+            Err(EncodingError::InvalidLength {
+                expected: 64,
+                got: 63
+            })
         );
         assert_eq!(
             hex_decode(&format!("{PK_HEX}00")),
-            Err(EncodingError::InvalidLength { expected: 64, got: 66 })
+            Err(EncodingError::InvalidLength {
+                expected: 64,
+                got: 66
+            })
         );
         assert_eq!(
             hex_decode(""),
-            Err(EncodingError::InvalidLength { expected: 64, got: 0 })
+            Err(EncodingError::InvalidLength {
+                expected: 64,
+                got: 0
+            })
         );
     }
 
@@ -490,8 +516,8 @@ mod tests {
     fn bech32_decode_rejects_bech32m() {
         // §7 BANNED: bech32m. A bech32m-checksummed encoding of the exact same
         // payload under the same HRP must fail.
-        let m = bech32::encode_lower::<bech32::Bech32m>(NODE_HRP_PARSED, &PK)
-            .expect("encode works");
+        let m =
+            bech32::encode_lower::<bech32::Bech32m>(NODE_HRP_PARSED, &PK).expect("encode works");
         assert_ne!(m, PK_BECH32);
         assert_eq!(bech32_decode(&m), Err(EncodingError::InvalidBech32));
     }
@@ -504,11 +530,14 @@ mod tests {
         // rejected purely on size.
         for bad_len in [0usize, 31, 33, 64] {
             let payload = vec![0x5au8; bad_len];
-            let s = bech32::encode_lower::<Bech32>(NODE_HRP_PARSED, &payload)
-                .expect("encode works");
+            let s =
+                bech32::encode_lower::<Bech32>(NODE_HRP_PARSED, &payload).expect("encode works");
             assert_eq!(
                 bech32_decode(&s),
-                Err(EncodingError::InvalidLength { expected: 32, got: bad_len })
+                Err(EncodingError::InvalidLength {
+                    expected: 32,
+                    got: bad_len
+                })
             );
         }
     }
@@ -529,11 +558,11 @@ mod tests {
     fn bech32_decode_rejects_wrong_hrp() {
         // §7: `npub` HRP reuse is BANNED — a nostr-shaped string must not be
         // misread as a NodeId.
-        let npub = bech32::encode_lower::<Bech32>(Hrp::parse("npub").unwrap(), &PK)
-            .expect("encode works");
+        let npub =
+            bech32::encode_lower::<Bech32>(Hrp::parse("npub").unwrap(), &PK).expect("encode works");
         assert_eq!(bech32_decode(&npub), Err(EncodingError::WrongHrp));
-        let other = bech32::encode_lower::<Bech32>(Hrp::parse("test").unwrap(), &PK)
-            .expect("encode works");
+        let other =
+            bech32::encode_lower::<Bech32>(Hrp::parse("test").unwrap(), &PK).expect("encode works");
         assert_eq!(bech32_decode(&other), Err(EncodingError::WrongHrp));
     }
 
@@ -548,7 +577,11 @@ mod tests {
     #[test]
     fn bech32_decode_rejects_garbage() {
         for bad in ["", "node", "node1", "1qqqsyqcyq5", "node1QQQSYQCYQ5!"] {
-            assert_eq!(bech32_decode(bad), Err(EncodingError::InvalidBech32), "input: {bad:?}");
+            assert_eq!(
+                bech32_decode(bad),
+                Err(EncodingError::InvalidBech32),
+                "input: {bad:?}"
+            );
         }
         // 'b', 'i', 'o' are outside the bech32 charset.
         let mut s = PK_BECH32.to_string();
@@ -577,7 +610,10 @@ mod tests {
         assert!(CheckedHrpstring::new::<Bech32>(&mutated).is_ok());
         assert_ne!(mutated, PK_BECH32);
         // ...and only the canonicality gate refuses it.
-        assert_eq!(bech32_decode(&mutated), Err(EncodingError::NonCanonicalBech32));
+        assert_eq!(
+            bech32_decode(&mutated),
+            Err(EncodingError::NonCanonicalBech32)
+        );
     }
 
     #[test]

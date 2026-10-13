@@ -25,7 +25,9 @@
 //! This module handles PUBLIC material plus signatures only — no secret or
 //! zeroize handling here.
 
-use crate::keyset::{validate_x25519_public_key, verify_strict_tagged, Keyset, NodeId, VerifyError};
+use crate::keyset::{
+    validate_x25519_public_key, verify_strict_tagged, Keyset, NodeId, VerifyError,
+};
 use crate::store::{PinOutcome, PinStore, StoreError};
 
 /// §6.2 — the ASCII domain tag prepended inside the signed region (part of
@@ -86,7 +88,10 @@ impl std::fmt::Display for AnnounceError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             AnnounceError::MalformedLength { got } => {
-                write!(f, "§6.2: announce length {got} outside {BASE_LEN}–{MAX_LEN}")
+                write!(
+                    f,
+                    "§6.2: announce length {got} outside {BASE_LEN}–{MAX_LEN}"
+                )
             }
             AnnounceError::UnsupportedVersion(v) => {
                 write!(f, "§6.2: unknown announce version 0x{v:02x} (fail closed)")
@@ -171,7 +176,11 @@ impl Announce {
     /// commits it (fsync) before returning — the §6.2 sync-commit rule: the
     /// counter is durable BEFORE the announce it authorizes is transmitted.
     /// This constructor never invents a counter value.
-    pub fn create(keyset: &Keyset, counter: u64, appdata: &[u8]) -> Result<Announce, AnnounceError> {
+    pub fn create(
+        keyset: &Keyset,
+        counter: u64,
+        appdata: &[u8],
+    ) -> Result<Announce, AnnounceError> {
         if appdata.len() > APPDATA_MAX {
             return Err(AnnounceError::AppdataTooLong { got: appdata.len() });
         }
@@ -345,8 +354,9 @@ mod tests {
     /// The Ed25519 group order ℓ, little-endian (test-local mirror of the
     /// keyset.rs constant, used to build the S + ℓ malleability negative).
     const GROUP_ORDER_L_LE: [u8; 32] = [
-        0xed, 0xd3, 0xf5, 0x5c, 0x1a, 0x63, 0x12, 0x58, 0xd6, 0x9c, 0xf7, 0xa2, 0xde, 0xf9, 0xde, 0x14,
-        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x10,
+        0xed, 0xd3, 0xf5, 0x5c, 0x1a, 0x63, 0x12, 0x58, 0xd6, 0x9c, 0xf7, 0xa2, 0xde, 0xf9, 0xde,
+        0x14, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x10,
     ];
 
     /// LE 32-byte addition (test construction only).
@@ -363,19 +373,17 @@ mod tests {
 
     // Two fixed keysets from public test material: RFC 8032 signing seeds +
     // RFC 7748 X25519 scalars (Alice/Bob).
-    const SIGN_SEED_A: &str =
-        "9d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f60";
-    const SIGN_SEED_B: &str =
-        "4ccd089b28ff96da9db6c346ec114e0f5b8a319f35aba624da8cf6ed4fb8a6fb";
+    const SIGN_SEED_A: &str = "9d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f60";
+    const SIGN_SEED_B: &str = "4ccd089b28ff96da9db6c346ec114e0f5b8a319f35aba624da8cf6ed4fb8a6fb";
     const ALICE_SCALAR: [u8; 32] = [
-        0x77, 0x07, 0x6d, 0x0a, 0x73, 0x18, 0xa5, 0x7d, 0x3c, 0x16, 0xc1, 0x72, 0x51, 0xb2,
-        0x66, 0x45, 0xdf, 0x4c, 0x2f, 0x87, 0xeb, 0xc0, 0x99, 0x2a, 0xb1, 0x77, 0xfb, 0xa5,
-        0x1d, 0xb9, 0x2c, 0x2a,
+        0x77, 0x07, 0x6d, 0x0a, 0x73, 0x18, 0xa5, 0x7d, 0x3c, 0x16, 0xc1, 0x72, 0x51, 0xb2, 0x66,
+        0x45, 0xdf, 0x4c, 0x2f, 0x87, 0xeb, 0xc0, 0x99, 0x2a, 0xb1, 0x77, 0xfb, 0xa5, 0x1d, 0xb9,
+        0x2c, 0x2a,
     ];
     const BOB_SCALAR: [u8; 32] = [
-        0x5d, 0xab, 0x08, 0x7e, 0x62, 0x4a, 0x8a, 0x4b, 0x79, 0xe1, 0x7f, 0x8b, 0x83, 0x80,
-        0x0e, 0xe6, 0x6f, 0x3b, 0xb1, 0x29, 0x26, 0x18, 0xb6, 0xfd, 0x1c, 0x2f, 0x8b, 0x27,
-        0xff, 0x88, 0xe0, 0xeb,
+        0x5d, 0xab, 0x08, 0x7e, 0x62, 0x4a, 0x8a, 0x4b, 0x79, 0xe1, 0x7f, 0x8b, 0x83, 0x80, 0x0e,
+        0xe6, 0x6f, 0x3b, 0xb1, 0x29, 0x26, 0x18, 0xb6, 0xfd, 0x1c, 0x2f, 0x8b, 0x27, 0xff, 0x88,
+        0xe0, 0xeb,
     ];
 
     fn keyset(sign_seed_hex: &str, scalar: [u8; 32]) -> Keyset {
@@ -433,7 +441,9 @@ mod tests {
         // Fixed point: the NodeId matches keyset.rs's frozen project vector.
         assert_eq!(
             ks.node_id(),
-            NodeId::from(hex32("6f1d5331e36e16d341fa06c9f622cc8569710f2a62d7491e9be8e953df844f01"))
+            NodeId::from(hex32(
+                "6f1d5331e36e16d341fa06c9f622cc8569710f2a62d7491e9be8e953df844f01"
+            ))
         );
 
         // §14 vector — PRINTED for the T8 freeze (run with --nocapture).
@@ -465,12 +475,17 @@ mod tests {
         assert_eq!(e.enc_pubkey(), a.public().enc_pubkey());
         assert_eq!(e.highest_announce_counter(), 1);
 
-        let wire2 = Announce::create(&a, 2, b"role=relay;hint=lora").unwrap().encode();
+        let wire2 = Announce::create(&a, 2, b"role=relay;hint=lora")
+            .unwrap()
+            .encode();
         assert_eq!(
             process_announce(&mut store, &own, &wire2).unwrap(),
             PinOutcome::CounterUpdated { previous: 1 }
         );
-        assert_eq!(store.get(&a.node_id()).unwrap().highest_announce_counter(), 2);
+        assert_eq!(
+            store.get(&a.node_id()).unwrap().highest_announce_counter(),
+            2
+        );
     }
 
     #[test]
@@ -608,12 +623,7 @@ mod tests {
         assert!(good.verify().is_ok());
         let head = good.encode();
         let head = &head[..head.len() - 64];
-        assert!(crate::keyset::verify_strict(
-            &good.node_id(),
-            head,
-            good.signature()
-        )
-        .is_err());
+        assert!(crate::keyset::verify_strict(&good.node_id(), head, good.signature()).is_err());
     }
 
     #[test]
@@ -630,9 +640,7 @@ mod tests {
         wire[sig_off + 32..].copy_from_slice(&le_add(&s, &GROUP_ORDER_L_LE));
         assert!(matches!(
             process_announce(&mut store, &own, &wire),
-            Err(AnnounceError::InvalidSignature(
-                VerifyError::NonCanonicalS
-            ))
+            Err(AnnounceError::InvalidSignature(VerifyError::NonCanonicalS))
         ));
         assert!(store.is_empty());
     }

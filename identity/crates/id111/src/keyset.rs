@@ -231,7 +231,10 @@ impl fmt::Display for VerifyError {
             VerifyError::NonCanonicalR => write!(f, "§3: non-canonical R encoding"),
             VerifyError::NonCanonicalS => write!(f, "§3: non-canonical S (S ≥ ℓ)"),
             VerifyError::InvalidSignature => {
-                write!(f, "§3: strict verification failed (bad signature or small-order A/R)")
+                write!(
+                    f,
+                    "§3: strict verification failed (bad signature or small-order A/R)"
+                )
             }
         }
     }
@@ -255,10 +258,16 @@ impl fmt::Display for EcdhError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             EcdhError::LowOrderPublicKey => {
-                write!(f, "§3: low-order X25519 public key rejected (RFC 7748 §6.1)")
+                write!(
+                    f,
+                    "§3: low-order X25519 public key rejected (RFC 7748 §6.1)"
+                )
             }
             EcdhError::NonContributory => {
-                write!(f, "§6.4: all-zero X25519 shared secret — aborting (RFC 7748 §6.1)")
+                write!(
+                    f,
+                    "§6.4: all-zero X25519 shared secret — aborting (RFC 7748 §6.1)"
+                )
             }
         }
     }
@@ -560,7 +569,11 @@ fn is_canonical_point_encoding(enc: &[u8; 32]) -> bool {
 /// `node` is the claimed signer's NodeId (B2: it IS the Ed25519 public key);
 /// `message` is the exact signed input (tagged artifacts: `tag ‖ bytes` —
 /// use `verify_strict_tagged`).
-pub fn verify_strict(node: &NodeId, message: &[u8], signature: &[u8; 64]) -> Result<(), VerifyError> {
+pub fn verify_strict(
+    node: &NodeId,
+    message: &[u8],
+    signature: &[u8; 64],
+) -> Result<(), VerifyError> {
     // A (public key): canonical encoding.
     if !is_canonical_point_encoding(node.as_bytes()) {
         return Err(VerifyError::NonCanonicalPublicKey);
@@ -717,8 +730,7 @@ mod tests {
         assert_eq!(x25519_public_from_scalar(&bob_scalar), bob_pub);
 
         // ECDH through the Keyset API, both directions.
-        let sign_seed =
-            hex32("9d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f60");
+        let sign_seed = hex32("9d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f60");
         let mut b = [0u8; 64];
         b[..32].copy_from_slice(&sign_seed);
         b[32..].copy_from_slice(&ALICE_SCALAR);
@@ -931,18 +943,14 @@ mod tests {
         let mut basepoint = [0u8; 32];
         basepoint[0] = 9;
         assert!(validate_x25519_public_key(&basepoint).is_ok());
-        assert!(
-            validate_x25519_public_key(&hex32(
-                "8520f0098930a754748b7ddcb43ef75a0dbf3a0d26381af4eba4a98eaa9b4e6a"
-            ))
-            .is_ok()
-        );
-        assert!(
-            validate_x25519_public_key(&hex32(
-                "de9edb7d7b7dc1b4d35b61c2ece435373f8343c85b78674dadfc7e146f882b4f"
-            ))
-            .is_ok()
-        );
+        assert!(validate_x25519_public_key(&hex32(
+            "8520f0098930a754748b7ddcb43ef75a0dbf3a0d26381af4eba4a98eaa9b4e6a"
+        ))
+        .is_ok());
+        assert!(validate_x25519_public_key(&hex32(
+            "de9edb7d7b7dc1b4d35b61c2ece435373f8343c85b78674dadfc7e146f882b4f"
+        ))
+        .is_ok());
     }
 
     #[test]
@@ -952,8 +960,7 @@ mod tests {
         // low-order check fires first — the was_contributory arm is kept as
         // defense-in-depth; every input that would reach it is already
         // rejected here. The observable behavior is the mandated abort.)
-        let sign_seed =
-            hex32("9d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f60");
+        let sign_seed = hex32("9d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f60");
         let mut b = [0u8; 64];
         b[..32].copy_from_slice(&sign_seed);
         b[32..].copy_from_slice(&ALICE_SCALAR);
@@ -971,8 +978,7 @@ mod tests {
 
     #[test]
     fn weak_key_self_test_vectors() {
-        let good_seed =
-            hex32("9d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f60");
+        let good_seed = hex32("9d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f60");
         let mut base = [0u8; 64];
         base[..32].copy_from_slice(&good_seed);
         base[32..].copy_from_slice(&ALICE_SCALAR);
@@ -1066,7 +1072,10 @@ mod tests {
         let pubks = ks.public();
         println!("Project keyset vector (frozen by the §14 vector task):");
         println!("  mnemonic = abandon×11 about (BIP-39, empty passphrase)");
-        println!("  NodeId (Ed25519 pubkey) = {}", to_hex(pubks.sign_pubkey()));
+        println!(
+            "  NodeId (Ed25519 pubkey) = {}",
+            to_hex(pubks.sign_pubkey())
+        );
         println!("  X25519 pubkey           = {}", to_hex(pubks.enc_pubkey()));
         println!("  public keyset (64B)     = {}", to_hex(&pubks.to_bytes()));
 

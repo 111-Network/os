@@ -28,13 +28,13 @@
 
 pub mod commission;
 
+use id111::backup::create_fresh_identity;
 use id111::backup::{
     self, BackupArtifacts, BackupDescriptor, CounterFloor, RestoreError, RestoreOptions,
     RestoreOutcome, COUNTERS_FILE, DESCRIPTOR_FILE, DESCRIPTOR_LEN, KEYSET_FILE, MNEMONIC_FILE,
     NODEID_FILE,
 };
 use id111::bip39::{RootMnemonic, WordCount};
-use id111::backup::create_fresh_identity;
 use id111::encoding::{self, KeyKind, NodeIdDisplay};
 use id111::keyset::{Keyset, NodeId};
 use id111::migrate::{self, MigrationError, LEGACY_NPUB_FILE, LEGACY_SECRET_FILE};
@@ -719,10 +719,13 @@ mod tests {
         assert!(q.starts_with(t.path()));
 
         let err = generate(&dir).unwrap_err();
-        assert!(matches!(
-            err.downcast_ref::<IdentityError>(),
-            Some(IdentityError::QuarantinePresent(_))
-        ), "{err}");
+        assert!(
+            matches!(
+                err.downcast_ref::<IdentityError>(),
+                Some(IdentityError::QuarantinePresent(_))
+            ),
+            "{err}"
+        );
         assert!(!dir.exists(), "refusal must write nothing");
         assert!(err.to_string().contains("identity restore"));
 

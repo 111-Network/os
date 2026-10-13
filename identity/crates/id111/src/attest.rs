@@ -200,11 +200,17 @@ pub enum AttestError {
     /// §10 — the attestation is dead at the supplied epoch (`current >=
     /// expiry_epoch`); expired attestations are dead. Only reachable with a
     /// caller-supplied mesh-epoch (§6.7: never evaluated without a source).
-    Expired { expiry_epoch: MeshEpoch, current: MeshEpoch },
+    Expired {
+        expiry_epoch: MeshEpoch,
+        current: MeshEpoch,
+    },
     /// §10 supersedure — re-publication of a superseded attestation: the
     /// resolver already holds a greater `expiry_epoch` for this
     /// `(node_pubkey, transport_id)`.
-    Superseded { retained: MeshEpoch, offered: MeshEpoch },
+    Superseded {
+        retained: MeshEpoch,
+        offered: MeshEpoch,
+    },
     /// §10 — same `(node_pubkey, transport_id, expiry_epoch)` but different
     /// bytes: an unresolvable conflict, rejected fail-closed (the spec's
     /// ordering is by `expiry_epoch` only; equal epochs admit no tie-break).
@@ -218,17 +224,32 @@ impl fmt::Display for AttestError {
                 write!(f, "§10: attestation must be {expected}B, got {got}B")
             }
             AttestError::UnknownVersion(v) => {
-                write!(f, "§10: unknown attestation version 0x{v:02x} (fail closed)")
+                write!(
+                    f,
+                    "§10: unknown attestation version 0x{v:02x} (fail closed)"
+                )
             }
             AttestError::UnknownTransportId(t) => {
-                write!(f, "§10: unknown transport_id 0x{t:02x} (L2 registry, fail closed)")
+                write!(
+                    f,
+                    "§10: unknown transport_id 0x{t:02x} (L2 registry, fail closed)"
+                )
             }
             AttestError::InvalidNodeSignature(e) => write!(f, "§10 node_sig: {e}"),
             AttestError::InvalidTransportSignature => {
-                write!(f, "§10: transport_sig rejected by the plugged transport verifier")
+                write!(
+                    f,
+                    "§10: transport_sig rejected by the plugged transport verifier"
+                )
             }
-            AttestError::Expired { expiry_epoch, current } => {
-                write!(f, "§10: attestation dead at {current} (expiry {expiry_epoch})")
+            AttestError::Expired {
+                expiry_epoch,
+                current,
+            } => {
+                write!(
+                    f,
+                    "§10: attestation dead at {current} (expiry {expiry_epoch})"
+                )
             }
             AttestError::Superseded { retained, offered } => write!(
                 f,
@@ -741,8 +762,7 @@ mod tests {
     /// A second, distinct node (RFC 8032 TEST 1 seed; X25519 half = Alice's
     /// scalar, as in keyset.rs tests).
     fn second_keyset() -> Keyset {
-        let sign_seed =
-            hex32("9d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f60");
+        let sign_seed = hex32("9d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f60");
         let alice_scalar =
             hex32("77076d0a7318a57d3c16c17251b26645df4c2f87ebc0992ab177fba51db92c2a");
         let mut bytes = [0u8; 64];
@@ -782,7 +802,12 @@ mod tests {
     #[test]
     fn wire_layout_and_round_trip() {
         let ks = test_keyset();
-        let leg = NodeLeg::issue(&ks, TID, fixed_transport_key(), epoch(0x1122_3344_5566_7788));
+        let leg = NodeLeg::issue(
+            &ks,
+            TID,
+            fixed_transport_key(),
+            epoch(0x1122_3344_5566_7788),
+        );
         assert!(leg.verify_node_leg().is_ok());
         let att = leg.complete(fixed_transport_sig());
 
@@ -875,17 +900,26 @@ mod tests {
         let wire = valid_wire();
         assert!(matches!(
             Attestation::from_bytes(&wire[..201]),
-            Err(AttestError::InvalidLength { expected: 202, got: 201 })
+            Err(AttestError::InvalidLength {
+                expected: 202,
+                got: 201
+            })
         ));
         let mut long = wire.to_vec();
         long.push(0x00);
         assert!(matches!(
             Attestation::from_bytes(&long),
-            Err(AttestError::InvalidLength { expected: 202, got: 203 })
+            Err(AttestError::InvalidLength {
+                expected: 202,
+                got: 203
+            })
         ));
         assert!(matches!(
             Attestation::from_bytes(&[]),
-            Err(AttestError::InvalidLength { expected: 202, got: 0 })
+            Err(AttestError::InvalidLength {
+                expected: 202,
+                got: 0
+            })
         ));
     }
 
@@ -940,8 +974,9 @@ mod tests {
         wrong_order.push(0x01); // transport_id BEFORE transport_key (wire order)
         wrong_order.extend_from_slice(&tkey);
         wrong_order.extend_from_slice(&epoch(1000).to_le_bytes());
-        assert!(verify_strict_tagged(&ks.node_id(), NODE_TAG, &wrong_order, leg.node_sig())
-            .is_err());
+        assert!(
+            verify_strict_tagged(&ks.node_id(), NODE_TAG, &wrong_order, leg.node_sig()).is_err()
+        );
         // Sanity: the spec order verifies.
         assert!(leg.verify_node_leg().is_ok());
     }
@@ -984,7 +1019,13 @@ mod tests {
         // §6.1/§14: domain-tag confusion MUST fail. A signature over the exact
         // node-leg body made under another tag is not a valid node_sig.
         let ks = test_keyset();
-        let body = node_sig_body(0x01, &ks.node_id(), &fixed_transport_key(), TID, epoch(1000));
+        let body = node_sig_body(
+            0x01,
+            &ks.node_id(),
+            &fixed_transport_key(),
+            TID,
+            epoch(1000),
+        );
 
         let wrong = ks.sign_with_tag(b"111/announce/v1", &body);
         assert!(verify_strict_tagged(&ks.node_id(), NODE_TAG, &body, &wrong).is_err());
@@ -995,9 +1036,7 @@ mod tests {
 
         // And a real node_sig does not verify under the transport tag.
         let leg = NodeLeg::issue(&ks, TID, fixed_transport_key(), epoch(1000));
-        assert!(
-            verify_strict_tagged(&ks.node_id(), TRANSPORT_TAG, &body, leg.node_sig()).is_err()
-        );
+        assert!(verify_strict_tagged(&ks.node_id(), TRANSPORT_TAG, &body, leg.node_sig()).is_err());
         // The bare body (tag stripped) is not the signed input either.
         assert!(verify_strict(&ks.node_id(), &body, leg.node_sig()).is_err());
     }
@@ -1020,15 +1059,23 @@ mod tests {
         // First-seen pins.
         assert_eq!(set.insert(mk(10)), Ok(Resolution::Pinned));
         assert_eq!(set.len(), 1);
-        assert_eq!(set.get(&ks.node_id(), TID).unwrap().expiry_epoch(), epoch(10));
+        assert_eq!(
+            set.get(&ks.node_id(), TID).unwrap().expiry_epoch(),
+            epoch(10)
+        );
 
         // Greater expiry supersedes; the retained one is replaced.
         assert_eq!(
             set.insert(mk(20)),
-            Ok(Resolution::Supersedes { previous: epoch(10) })
+            Ok(Resolution::Supersedes {
+                previous: epoch(10)
+            })
         );
         assert_eq!(set.len(), 1);
-        assert_eq!(set.get(&ks.node_id(), TID).unwrap().expiry_epoch(), epoch(20));
+        assert_eq!(
+            set.get(&ks.node_id(), TID).unwrap().expiry_epoch(),
+            epoch(20)
+        );
 
         // Re-publication of the superseded one is rejected.
         assert_eq!(
@@ -1039,7 +1086,10 @@ mod tests {
             })
         );
         // State untouched by the rejection.
-        assert_eq!(set.get(&ks.node_id(), TID).unwrap().expiry_epoch(), epoch(20));
+        assert_eq!(
+            set.get(&ks.node_id(), TID).unwrap().expiry_epoch(),
+            epoch(20)
+        );
 
         // Byte-identical re-receipt at the retained epoch is a duplicate.
         assert_eq!(set.insert(mk(20)), Ok(Resolution::Duplicate));
@@ -1057,8 +1107,8 @@ mod tests {
         // Same (node, transport_id, expiry_epoch) but different bytes — here
         // a different transport_key. Unresolvable by the spec's ordering;
         // rejected fail-closed, retained state unchanged.
-        let conflict = NodeLeg::issue(&ks, TID, [0x99u8; 32], epoch(10))
-            .complete(fixed_transport_sig());
+        let conflict =
+            NodeLeg::issue(&ks, TID, [0x99u8; 32], epoch(10)).complete(fixed_transport_sig());
         assert_eq!(
             set.insert(conflict),
             Err(AttestError::ConflictingAttestation { epoch: epoch(10) })
@@ -1236,7 +1286,9 @@ mod tests {
         // alone proves the node authorized the binding (module header).
         assert_eq!(
             set.insert(forged),
-            Ok(Resolution::Supersedes { previous: epoch(10) })
+            Ok(Resolution::Supersedes {
+                previous: epoch(10)
+            })
         );
     }
 

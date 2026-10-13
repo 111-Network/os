@@ -290,16 +290,28 @@ impl fmt::Display for DescriptorError {
                 write!(f, "§8.2: descriptor must be 4 bytes, got {n}")
             }
             DescriptorError::UnknownVersion(b) => {
-                write!(f, "§8.2: unknown descriptor version byte {b:#04x} (fail closed)")
+                write!(
+                    f,
+                    "§8.2: unknown descriptor version byte {b:#04x} (fail closed)"
+                )
             }
             DescriptorError::UnknownCurve(b) => {
-                write!(f, "§8.2: unknown descriptor curve byte {b:#04x} (fail closed)")
+                write!(
+                    f,
+                    "§8.2: unknown descriptor curve byte {b:#04x} (fail closed)"
+                )
             }
             DescriptorError::UnknownDerivation(b) => {
-                write!(f, "§8.2: unknown descriptor derivation byte {b:#04x} (fail closed)")
+                write!(
+                    f,
+                    "§8.2: unknown descriptor derivation byte {b:#04x} (fail closed)"
+                )
             }
             DescriptorError::UnknownEncoding(b) => {
-                write!(f, "§8.2: unknown descriptor encoding byte {b:#04x} (fail closed)")
+                write!(
+                    f,
+                    "§8.2: unknown descriptor encoding byte {b:#04x} (fail closed)"
+                )
             }
         }
     }
@@ -365,7 +377,11 @@ impl BackupArtifacts {
 impl fmt::Debug for BackupArtifacts {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         // §5/§12: words and entropy are secret — never Debug-print them.
-        write!(f, "BackupArtifacts(descriptor {}, redacted)", self.descriptor)
+        write!(
+            f,
+            "BackupArtifacts(descriptor {}, redacted)",
+            self.descriptor
+        )
     }
 }
 
@@ -483,12 +499,10 @@ pub fn check_words(
     let phrase = mnemonic.phrase();
     let words: Vec<&str> = phrase.split(' ').collect();
     for (&pos, answer) in positions.iter().zip(answers.iter()) {
-        let expected = words
-            .get(pos)
-            .ok_or(BackupError::PositionOutOfRange {
-                position: pos,
-                words: words.len(),
-            })?;
+        let expected = words.get(pos).ok_or(BackupError::PositionOutOfRange {
+            position: pos,
+            words: words.len(),
+        })?;
         // §8.4 hygiene on the typed answer: trim, case-fold, NFKC.
         let folded = answer.trim().to_lowercase();
         let mut cow = std::borrow::Cow::Borrowed(folded.as_str());
@@ -736,11 +750,12 @@ fn restore_commit(
     }
     let keyset = Keyset::derive_from_root(mnemonic)?;
     let announce_counter_init = counter_floor.initial_announce_counter();
-    write_identity_dir(dir, mnemonic, &keyset, descriptor, announce_counter_init)
-        .map_err(|e| match e {
+    write_identity_dir(dir, mnemonic, &keyset, descriptor, announce_counter_init).map_err(|e| {
+        match e {
             DirWriteError::Exists => RestoreError::LiveIdentityDir,
             DirWriteError::Io(e) => RestoreError::Io(e),
-        })?;
+        }
+    })?;
     Ok(RestoreOutcome {
         node_id: keyset.node_id(),
         descriptor,
@@ -811,7 +826,9 @@ pub fn restore_from_qr(
 /// D9-legacy files (§8.4: a live, unquarantined dir refuses restore;
 /// never overwrite).
 pub(crate) fn identity_files_present(dir: &Path) -> bool {
-    IDENTITY_FILE_NAMES.iter().any(|name| dir.join(name).exists())
+    IDENTITY_FILE_NAMES
+        .iter()
+        .any(|name| dir.join(name).exists())
 }
 
 /// §13/§8.4 — write the initial `counters` file through the owning
@@ -940,7 +957,8 @@ pub(crate) fn write_identity_dir(
         mnemonic_body.push('\n');
         write_file(&tmp.join(MNEMONIC_FILE), mnemonic_body.as_bytes(), 0o600)?;
         write_file(&tmp.join(KEYSET_FILE), &keyset.to_bytes()[..], 0o600)?;
-        let nodeid_record = encoding::encode_record(KeyKind::Ed25519Pub, keyset.node_id().as_bytes());
+        let nodeid_record =
+            encoding::encode_record(KeyKind::Ed25519Pub, keyset.node_id().as_bytes());
         write_file(&tmp.join(NODEID_FILE), &nodeid_record, 0o644)?;
         write_file(&tmp.join(DESCRIPTOR_FILE), &descriptor.to_bytes(), 0o644)?;
         // §13 `counters` — the format is owned by `crate::counters` (T4):
@@ -1019,18 +1037,16 @@ impl fmt::Display for BackupError {
                 f,
                 "§8.3: QR descriptor encoding byte contradicts its entropy length — fail closed"
             ),
-            BackupError::SampleCountOutOfRange { requested, words } => write!(
-                f,
-                "§8.3: sample size {requested} outside 1..={words}"
-            ),
+            BackupError::SampleCountOutOfRange { requested, words } => {
+                write!(f, "§8.3: sample size {requested} outside 1..={words}")
+            }
             BackupError::PositionOutOfRange { position, words } => write!(
                 f,
                 "§8.3: sampled position {position} outside a {words}-word phrase"
             ),
-            BackupError::AnswerCountMismatch { expected, got } => write!(
-                f,
-                "§8.3: {got} answers for {expected} sampled positions"
-            ),
+            BackupError::AnswerCountMismatch { expected, got } => {
+                write!(f, "§8.3: {got} answers for {expected} sampled positions")
+            }
             BackupError::Entropy(e) => write!(f, "§4.2: getrandom() failed: {e}"),
         }
     }
@@ -1071,10 +1087,8 @@ mod tests {
     impl TestDir {
         fn new(name: &str) -> Self {
             let n = NEXT_DIR.fetch_add(1, Ordering::Relaxed);
-            let path = std::env::temp_dir().join(format!(
-                "id111-backup-{name}-{}-{n}",
-                std::process::id()
-            ));
+            let path = std::env::temp_dir()
+                .join(format!("id111-backup-{name}-{}-{n}", std::process::id()));
             let _ = fs::remove_dir_all(&path);
             fs::create_dir_all(&path).unwrap();
             TestDir(path)
@@ -1118,10 +1132,22 @@ mod tests {
             assert_eq!(bytes, want);
             assert_eq!(BackupDescriptor::from_bytes(&bytes).unwrap(), d);
         }
-        assert_eq!(BackupDescriptor::V1_12_WORDS.word_count(), WordCount::Twelve);
-        assert_eq!(BackupDescriptor::V1_24_WORDS.word_count(), WordCount::TwentyFour);
-        assert_eq!(to_hex(&BackupDescriptor::V1_12_WORDS.to_bytes()), "01010101");
-        assert_eq!(to_hex(&BackupDescriptor::V1_24_WORDS.to_bytes()), "01010102");
+        assert_eq!(
+            BackupDescriptor::V1_12_WORDS.word_count(),
+            WordCount::Twelve
+        );
+        assert_eq!(
+            BackupDescriptor::V1_24_WORDS.word_count(),
+            WordCount::TwentyFour
+        );
+        assert_eq!(
+            to_hex(&BackupDescriptor::V1_12_WORDS.to_bytes()),
+            "01010101"
+        );
+        assert_eq!(
+            to_hex(&BackupDescriptor::V1_24_WORDS.to_bytes()),
+            "01010102"
+        );
         assert_eq!(BackupDescriptor::V1_12_WORDS.to_string(), "01010101");
     }
 
@@ -1248,7 +1274,10 @@ mod tests {
         // Correct answers pass — including with §8.4 hygiene (case/whitespace).
         let answers: Vec<&str> = positions.iter().map(|&p| phrase[p].as_str()).collect();
         assert!(check_words(&m, &positions, &answers).unwrap());
-        let messy: Vec<String> = answers.iter().map(|a| format!("  {} ", a.to_uppercase())).collect();
+        let messy: Vec<String> = answers
+            .iter()
+            .map(|a| format!("  {} ", a.to_uppercase()))
+            .collect();
         let messy_refs: Vec<&str> = messy.iter().map(String::as_str).collect();
         assert!(check_words(&m, &positions, &messy_refs).unwrap());
 
@@ -1298,7 +1327,13 @@ mod tests {
             assert_eq!(out2.descriptor, art.descriptor);
 
             // The two restores agree byte-for-byte on disk.
-            for name in [MNEMONIC_FILE, KEYSET_FILE, NODEID_FILE, DESCRIPTOR_FILE, COUNTERS_FILE] {
+            for name in [
+                MNEMONIC_FILE,
+                KEYSET_FILE,
+                NODEID_FILE,
+                DESCRIPTOR_FILE,
+                COUNTERS_FILE,
+            ] {
                 assert_eq!(
                     fs::read(t.identity().join(name)).unwrap(),
                     fs::read(t2.identity().join(name)).unwrap(),
@@ -1402,7 +1437,9 @@ mod tests {
             )))
         ));
         let t3 = TestDir::new("count15");
-        let fifteen = ::bip39::Mnemonic::from_entropy(&[0u8; 20]).unwrap().to_string();
+        let fifteen = ::bip39::Mnemonic::from_entropy(&[0u8; 20])
+            .unwrap()
+            .to_string();
         assert!(matches!(
             restore(&t3.identity(), &fifteen, &opts()),
             Err(RestoreError::Mnemonic(Bip39Error::UnsupportedWordCount(15)))
@@ -1434,7 +1471,9 @@ mod tests {
         };
         assert!(matches!(
             restore(&t3.identity(), CANONICAL_WORDS, &o3),
-            Err(RestoreError::Descriptor(DescriptorError::UnknownDerivation(0x99)))
+            Err(RestoreError::Descriptor(
+                DescriptorError::UnknownDerivation(0x99)
+            ))
         ));
 
         // QR restore: a conflicting separately-supplied descriptor — fail closed.
@@ -1523,13 +1562,34 @@ mod tests {
 
         println!("Backup-format KAT (frozen by the §14 vector task, T8):");
         println!("  mnemonic = abandon×11 about (BIP-39, empty passphrase)");
-        println!("  descriptor (4B hex)                     = {art_desc}", art_desc = art.descriptor);
-        println!("  QR payload (20B = descriptor‖entropy) = {}", to_hex(art.qr_payload()));
-        println!("  NodeId (hex)                          = {}", display.hex());
-        println!("  NodeId (bech32)                       = {}", display.bech32());
-        println!("  operator label (display-only, §7)     = {}", display.label());
-        println!("  nodeid file (34B record, hex)         = {}", to_hex(&nodeid_record));
-        println!("  mnemonic file body                    = \"{}\\n\"", m.phrase());
+        println!(
+            "  descriptor (4B hex)                     = {art_desc}",
+            art_desc = art.descriptor
+        );
+        println!(
+            "  QR payload (20B = descriptor‖entropy) = {}",
+            to_hex(art.qr_payload())
+        );
+        println!(
+            "  NodeId (hex)                          = {}",
+            display.hex()
+        );
+        println!(
+            "  NodeId (bech32)                       = {}",
+            display.bech32()
+        );
+        println!(
+            "  operator label (display-only, §7)     = {}",
+            display.label()
+        );
+        println!(
+            "  nodeid file (34B record, hex)         = {}",
+            to_hex(&nodeid_record)
+        );
+        println!(
+            "  mnemonic file body                    = \"{}\\n\"",
+            m.phrase()
+        );
         println!("  counters file                         = owned by crate::counters (magic 111c); restore ⇒ announce_last = floor + 1024");
 
         assert_eq!(art.descriptor.to_bytes(), [0x01, 0x01, 0x01, 0x01]);
@@ -1573,7 +1633,10 @@ mod tests {
         assert_eq!(s.announce_last(), 41 + RESTORE_COUNTER_JUMP);
         assert_eq!(s.traffic_base(), RESTORE_COUNTER_JUMP);
         // First post-restore announce exceeds the floor with the §8.4 margin.
-        assert_eq!(s.next_announce_counter().unwrap(), 42 + RESTORE_COUNTER_JUMP);
+        assert_eq!(
+            s.next_announce_counter().unwrap(),
+            42 + RESTORE_COUNTER_JUMP
+        );
 
         let _ = fs::remove_dir_all(&base);
     }

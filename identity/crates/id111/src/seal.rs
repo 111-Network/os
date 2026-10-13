@@ -146,8 +146,8 @@ impl SealHeader {
     /// Serialize per the v1 wire pin: `version ‖ crypto_mode ‖ counter(LE) ‖
     /// extra_len ‖ extra`.
     fn to_bytes(&self) -> Result<Vec<u8>, SealError> {
-        let extra_len =
-            u8::try_from(self.extra.len()).map_err(|_| SealError::HeaderTooLarge(self.extra.len()))?;
+        let extra_len = u8::try_from(self.extra.len())
+            .map_err(|_| SealError::HeaderTooLarge(self.extra.len()))?;
         let mut out = Vec::with_capacity(HEADER_FIXED_LEN + self.extra.len());
         out.push(self.version);
         out.push(self.crypto_mode);
@@ -200,7 +200,10 @@ impl fmt::Display for SealError {
             SealError::Entropy(e) => write!(f, "§4.2: getrandom() failed: {e}"),
             SealError::Ecdh(e) => write!(f, "{e}"),
             SealError::UnsupportedCryptoMode(m) => {
-                write!(f, "§6.4: unsupported crypto_mode 0x{m:02x} (registry: 0x01 only)")
+                write!(
+                    f,
+                    "§6.4: unsupported crypto_mode 0x{m:02x} (registry: 0x01 only)"
+                )
             }
             SealError::HeaderTooLarge(n) => {
                 write!(f, "§6.4: header extra {n}B exceeds {MAX_EXTRA_LEN}B")
@@ -255,14 +258,23 @@ impl fmt::Display for OpenError {
         match self {
             OpenError::Truncated => write!(f, "§6.4: packet truncated (size-limit before parse)"),
             OpenError::UnsupportedCryptoMode(m) => {
-                write!(f, "§6.4: unsupported crypto_mode 0x{m:02x} (registry: 0x01 only)")
+                write!(
+                    f,
+                    "§6.4: unsupported crypto_mode 0x{m:02x} (registry: 0x01 only)"
+                )
             }
             OpenError::Ecdh(e) => write!(f, "{e}"),
             OpenError::AuthFailed => {
-                write!(f, "§6.4: AEAD authentication failed (wrong key or tampered packet)")
+                write!(
+                    f,
+                    "§6.4: AEAD authentication failed (wrong key or tampered packet)"
+                )
             }
             OpenError::PlaintextTooShort => {
-                write!(f, "§6.4: inner plaintext shorter than the 32B sender NodeId")
+                write!(
+                    f,
+                    "§6.4: inner plaintext shorter than the 32B sender NodeId"
+                )
             }
         }
     }
@@ -444,10 +456,13 @@ pub fn open(recipient: &Keyset, packet: &[u8]) -> Result<OpenedPacket, OpenError
     let ad = &packet[..header_len];
     let cipher = XChaCha20Poly1305::new((&*key).into());
     let inner = cipher
-        .decrypt((&nonce).into(), Payload {
-            msg: ciphertext,
-            aad: ad,
-        })
+        .decrypt(
+            (&nonce).into(),
+            Payload {
+                msg: ciphertext,
+                aad: ad,
+            },
+        )
         .map_err(|_| OpenError::AuthFailed)?;
 
     // Inner pin: sender_node_id(32) ‖ plaintext.
@@ -511,13 +526,16 @@ mod tests {
         0xc4, 0x44, 0x49, 0xc5, 0x69, 0x7b, 0x32, 0x69, 0x19, 0x70, 0x3b, 0xac, 0x03, 0x1c, 0xae,
         0x7f, 0x60,
     ];
-    const RFC7748_ALICE_PUB: &str = "8520f0098930a754748b7ddcb43ef75a0dbf3a0d26381af4eba4a98eaa9b4e6a";
-    const RFC7748_BOB_PUB: &str = "de9edb7d7b7dc1b4d35b61c2ece435373f8343c85b78674dadfc7e146f882b4f";
+    const RFC7748_ALICE_PUB: &str =
+        "8520f0098930a754748b7ddcb43ef75a0dbf3a0d26381af4eba4a98eaa9b4e6a";
+    const RFC7748_BOB_PUB: &str =
+        "de9edb7d7b7dc1b4d35b61c2ece435373f8343c85b78674dadfc7e146f882b4f";
     const RFC7748_SHARED: &str = "4a5d9d5ba4ce2de1728e3bf480350f25e07e21c947d19e3376f09b3c1e161742";
 
     /// The frozen §14 project keyset's NodeId (keyset.rs
     /// `project_keyset_vector`) — the KAT sender.
-    const PROJECT_NODE_ID: &str = "6f1d5331e36e16d341fa06c9f622cc8569710f2a62d7491e9be8e953df844f01";
+    const PROJECT_NODE_ID: &str =
+        "6f1d5331e36e16d341fa06c9f622cc8569710f2a62d7491e9be8e953df844f01";
 
     fn keyset_with_scalar(scalar: [u8; 32]) -> Keyset {
         let mut bytes = [0u8; 64];
@@ -552,7 +570,10 @@ mod tests {
         let packet = seal(&bob.x25519_public(), &header, &sender, plaintext).unwrap();
 
         // Wire shape: header(11+8 extra) ‖ epk(32) ‖ ct(32 sender + 13 pt) ‖ tag(16).
-        assert_eq!(packet.len(), 11 + 8 + EPK_LEN + SENDER_NODE_ID_LEN + plaintext.len() + TAG_LEN);
+        assert_eq!(
+            packet.len(),
+            11 + 8 + EPK_LEN + SENDER_NODE_ID_LEN + plaintext.len() + TAG_LEN
+        );
 
         let opened = open(&bob, &packet).unwrap();
         assert_eq!(opened.header, header);
@@ -790,10 +811,13 @@ mod tests {
         let nonce = derive_nonce(&epk, &rpk);
         let cipher = XChaCha20Poly1305::new((&*key).into());
         let ct = cipher
-            .encrypt((&nonce).into(), Payload {
-                msg: b"too short",
-                aad: &header_bytes,
-            })
+            .encrypt(
+                (&nonce).into(),
+                Payload {
+                    msg: b"too short",
+                    aad: &header_bytes,
+                },
+            )
             .unwrap();
         let mut packet = header_bytes;
         packet.extend_from_slice(&epk);
@@ -875,7 +899,8 @@ mod tests {
 
         // Printed for T8's §14 vector freeze (run with --nocapture).
         let esk_static = x25519_dalek::StaticSecret::from(ALICE_SCALAR);
-        let shared = esk_static.diffie_hellman(&x25519_dalek::PublicKey::from(hex32(RFC7748_BOB_PUB)));
+        let shared =
+            esk_static.diffie_hellman(&x25519_dalek::PublicKey::from(hex32(RFC7748_BOB_PUB)));
         let shared = Zeroizing::new(shared.to_bytes());
         let epk = hex32(RFC7748_ALICE_PUB);
         let rpk = hex32(RFC7748_BOB_PUB);
@@ -885,9 +910,18 @@ mod tests {
         println!("  rpk (RFC 7748 Bob pub)      = {RFC7748_BOB_PUB}");
         println!("  shared (RFC 7748 value)     = {RFC7748_SHARED}");
         println!("  sender NodeId (§14 project) = {PROJECT_NODE_ID}");
-        println!("  header bytes                = {}", to_hex(&packet[..header_len]));
-        println!("  key   = BLAKE2b-256(\"111/seal/v1\"‖shared‖epk‖rpk)   = {}", to_hex(&derive_key(&shared, &epk, &rpk)[..]));
-        println!("  nonce = BLAKE2b-192(\"111/seal-n/v1\"‖epk‖rpk)        = {}", to_hex(&derive_nonce(&epk, &rpk)));
+        println!(
+            "  header bytes                = {}",
+            to_hex(&packet[..header_len])
+        );
+        println!(
+            "  key   = BLAKE2b-256(\"111/seal/v1\"‖shared‖epk‖rpk)   = {}",
+            to_hex(&derive_key(&shared, &epk, &rpk)[..])
+        );
+        println!(
+            "  nonce = BLAKE2b-192(\"111/seal-n/v1\"‖epk‖rpk)        = {}",
+            to_hex(&derive_nonce(&epk, &rpk))
+        );
         println!("  plaintext                   = {}", to_hex(plaintext));
         println!("  packet hex                  = {}", to_hex(&packet));
         assert_eq!(&shared[..], &hex(RFC7748_SHARED)[..]);

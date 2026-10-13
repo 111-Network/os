@@ -71,10 +71,9 @@ impl fmt::Display for Bip39Error {
                 "§8.1: entropy must be 16 or 32 bytes (12/24 words), got {n}"
             ),
             Bip39Error::Mnemonic(e) => write!(f, "§8.4: mnemonic rejected: {e}"),
-            Bip39Error::UnsupportedWordCount(n) => write!(
-                f,
-                "§8.1: v1 profile accepts only 12/24 words, got {n}"
-            ),
+            Bip39Error::UnsupportedWordCount(n) => {
+                write!(f, "§8.1: v1 profile accepts only 12/24 words, got {n}")
+            }
         }
     }
 }

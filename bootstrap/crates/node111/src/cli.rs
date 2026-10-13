@@ -30,12 +30,19 @@ enum Cmd {
     IdentityRestore,
     /// Cat-1 commissioning ceremony, commissioner side (L2 §8.3, T11).
     /// `--loopback-test` runs step 4 against the in-process test relay.
-    IdentityCommission { loopback_test: bool },
+    IdentityCommission {
+        loopback_test: bool,
+    },
     /// Internal (not in USAGE): idempotent keygen for the phone flow's
     /// on-device step — prints the NodeId hex; never overwrites.
-    IdentityGenerate { burn: bool },
+    IdentityGenerate {
+        burn: bool,
+    },
     Config(Vec<String>),
-    Uninstall { phone: bool, serial: Option<String> },
+    Uninstall {
+        phone: bool,
+        serial: Option<String>,
+    },
     UpdateHelper,
     UpdateGuard,
     Version,
@@ -270,7 +277,9 @@ fn identity_restore() -> anyhow::Result<()> {
     if crate::identity::is_live(&dir) {
         return Err(crate::identity::IdentityError::Exists.into());
     }
-    let words = zeroize::Zeroizing::new(read_hidden("enter your recovery words (12 or 24, input hidden): ")?);
+    let words = zeroize::Zeroizing::new(read_hidden(
+        "enter your recovery words (12 or 24, input hidden): ",
+    )?);
     let descriptor = crate::identity::parse_descriptor_hex(&read_visible(
         "descriptor printed under the words (8 hex digits; Enter = v1 defaults): ",
     )?)?;
@@ -393,7 +402,9 @@ mod tests {
         ));
         assert!(matches!(
             parse(&["identity".into(), "commission".into()]).unwrap(),
-            Cmd::IdentityCommission { loopback_test: false }
+            Cmd::IdentityCommission {
+                loopback_test: false
+            }
         ));
         assert!(matches!(
             parse(&[
@@ -402,11 +413,18 @@ mod tests {
                 "--loopback-test".into()
             ])
             .unwrap(),
-            Cmd::IdentityCommission { loopback_test: true }
+            Cmd::IdentityCommission {
+                loopback_test: true
+            }
         ));
         // unknown flags are refused, never ignored (a typo must not silently
         // select the other transport mode)
-        assert!(parse(&["identity".into(), "commission".into(), "--loopbak-test".into()]).is_err());
+        assert!(parse(&[
+            "identity".into(),
+            "commission".into(),
+            "--loopbak-test".into()
+        ])
+        .is_err());
         assert!(parse(&[
             "identity".into(),
             "commission".into(),
