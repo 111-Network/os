@@ -274,10 +274,11 @@ async fn lan_peer_pairs_401_then_200_then_logout() {
     ] {
         get(lan, path).problem(401, "unauthenticated");
     }
-    // ... but the UI, the legacy page and the Layer 1 seam still serve
+    // ... and so are the Layer 1 seam and the minimal page (node facts)
+    get(lan, "/api/status").problem(401, "unauthenticated");
+    get(lan, "/v1").problem(401, "unauthenticated");
+    // the UI (to reach /pair) and the bare health probe stay open
     assert_eq!(get(lan, "/").status, 200);
-    assert_eq!(get(lan, "/v1").status, 200);
-    assert_eq!(get(lan, "/api/status").status, 200);
     assert!(matches!(get(lan, "/health").status, 200 | 503));
     let s = get(lan, "/api/v1/auth/session");
     assert_eq!(s.status, 200);
@@ -341,9 +342,22 @@ async fn lan_peer_pairs_401_then_200_then_logout() {
     assert_eq!(v["paired"], true);
     assert!(v["created"].is_string());
 
-    // a forged/unknown token is still 401
+    // the session opens the Layer 1 seam and the minimal page too
+    assert_eq!(
+        get_with(lan, "/api/status", &[("Cookie", &cookie)]).status,
+        200
+    );
+    assert_eq!(get_with(lan, "/v1", &[("Cookie", &cookie)]).status, 200);
+
+    // a forged/unknown token is still 401 ...
     let bogus = format!("s111={}", "a".repeat(64));
     get_with(lan, "/api/v1/status", &[("Cookie", &bogus)]).problem(401, "unauthenticated");
+    // ... but cannot shadow a valid one sent alongside it
+    let both = format!("{bogus}; s111={token}");
+    assert_eq!(
+        get_with(lan, "/api/v1/status", &[("Cookie", &both)]).status,
+        200
+    );
 
     // logout revokes (204 + cookie cleared) → 401 again
     let r = post_json(lan, "/api/v1/auth/logout", "{}", &[("Cookie", &cookie)]);
@@ -909,4 +923,163 @@ async fn events_reset_replay_live_and_keepalive() {
             r#"{"seq":7}"#.to_string()
         )
     );
+}
+
+// ---------------------------------------------------------------- headers + problems
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn security_headers_on_every_response() {
+    let dist = fixture_dist();
+    let ui = dist.path().to_path_buf();
+    let n = node_with(false, move |c| c.ui_dir = Some(ui));
+    let port = serve(&n.api, None).await;
+    for path in [
+        "/",
+        "/assets/index-Ab12Cd.js",
+        "/missing.js",
+        "/health",
+        "/api/status",
+        "/api/v1/status",
+        "/api/v1/nope",
+    ] {
+        let r = get(port, path);
+        assert_eq!(
+            r.header("content-security-policy"),
+            Some(routes::CSP),
+            "{path}"
+        );
+        assert_eq!(
+            r.header("x-content-type-options"),
+            Some("nosniff"),
+            "{path}"
+        );
+        assert_eq!(r.header("referrer-policy"), Some("no-referrer"), "{path}");
+    }
+    let csp = routes::CSP;
+    for directive in [
+        "default-src 'self'",
+        "script-src 'self';",
+        "connect-src 'self'",
+        "frame-ancestors 'none'",
+        "base-uri 'self'",
+        "form-action 'self'",
+    ] {
+        assert!(csp.contains(directive), "{directive}");
+    }
+    // refused Host answers carry them too
+    let r = request(port, "GET", "/", Some("evil.com"), &[], None);
+    assert_eq!(r.header("content-security-policy"), Some(routes::CSP));
+
+    // /v1: same policy, plus the hash of its one inline script (and only that)
+    let r = get(port, "/v1");
+    assert_eq!(r.status, 200);
+    let v1 = r.header("content-security-policy").unwrap();
+    let body = &r.body;
+    let open = body.find("<script>").unwrap() + "<script>".len();
+    let close = open + body[open..].find("</script>").unwrap();
+    use sha2::Digest;
+    let want = routes::base64(&sha2::Sha256::digest(&body.as_bytes()[open..close]));
+    assert!(
+        v1.contains(&format!("script-src 'self' 'sha256-{want}';")),
+        "{v1}"
+    );
+    assert_eq!(v1.replace(&format!(" 'sha256-{want}'"), ""), routes::CSP);
+}
+
+#[test]
+fn base64_vectors() {
+    for (raw, enc) in [
+        ("", ""),
+        ("f", "Zg=="),
+        ("fo", "Zm8="),
+        ("foo", "Zm9v"),
+        ("foob", "Zm9vYg=="),
+        ("fooba", "Zm9vYmE="),
+        ("foobar", "Zm9vYmFy"),
+    ] {
+        assert_eq!(routes::base64(raw.as_bytes()), enc, "{raw}");
+    }
+    // a script with no inline <script> keeps the strict policy verbatim
+    assert_eq!(routes::csp_with_inline_scripts("<p>hi</p>"), routes::CSP);
+}
+
+/// POST with a body far above axum's 2 MiB default limit; the writer runs on
+/// its own thread (the server answers 413 before reading it all).
+fn post_oversized(port: u16, path: &str) -> Resp {
+    let mut conn = TcpStream::connect(("127.0.0.1", port)).unwrap();
+    conn.set_read_timeout(Some(Duration::from_secs(10)))
+        .unwrap();
+    let len = 3 << 20;
+    let head = format!(
+        "POST {path} HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\nContent-Type: application/json\r\nContent-Length: {len}\r\n\r\n"
+    );
+    let mut w = conn.try_clone().unwrap();
+    let writer = std::thread::spawn(move || {
+        let _ = w.write_all(head.as_bytes());
+        let chunk = vec![b' '; 64 * 1024];
+        for _ in 0..(len / chunk.len()) {
+            if w.write_all(&chunk).is_err() {
+                break;
+            }
+        }
+    });
+    let mut raw = Vec::new();
+    let _ = conn.read_to_end(&mut raw);
+    let _ = writer.join();
+    let raw = String::from_utf8_lossy(&raw).into_owned();
+    let (head, body) = raw.split_once("\r\n\r\n").unwrap_or((&raw, ""));
+    let mut lines = head.lines();
+    let status = lines
+        .next()
+        .and_then(|l| l.split_whitespace().nth(1))
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(0);
+    let headers: Vec<(String, String)> = lines
+        .filter_map(|l| l.split_once(':'))
+        .map(|(k, v)| (k.trim().to_string(), v.trim().to_string()))
+        .collect();
+    let chunked = headers.iter().any(|(k, v)| {
+        k.eq_ignore_ascii_case("transfer-encoding") && v.eq_ignore_ascii_case("chunked")
+    });
+    Resp {
+        status,
+        body: if chunked {
+            dechunk(body)
+        } else {
+            body.to_string()
+        },
+        headers,
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn framework_errors_are_problem_json() {
+    let n = node();
+    let port = serve(&n.api, None).await;
+    // unknown API route, any method: 404 (not the static catch-all's 405)
+    post_json(port, "/api/v1/proposals/not-a-ulid/decide", "{}", &[]).problem(404, "not_found");
+    request(port, "DELETE", "/api/v1/nope", Some("127.0.0.1"), &[], None).problem(404, "not_found");
+    // wrong method on a real route: 405 problem, Allow kept
+    let r = get(port, "/api/v1/node/restart");
+    r.problem(405, "bad_request");
+    assert!(
+        r.header("allow").is_some_and(|a| a.contains("POST")),
+        "{:?}",
+        r.headers
+    );
+    // Path<String> rejection (not UTF-8): 400 problem with the reason as detail
+    let r = get(port, "/api/v1/services/%FF");
+    r.problem(400, "bad_request");
+    assert!(r.json()["detail"].as_str().is_some_and(|d| !d.is_empty()));
+    // oversized body (axum's 2 MiB default limit): 413 problem
+    let r = tokio::task::spawn_blocking(move || post_oversized(port, "/api/v1/auth/pair"))
+        .await
+        .unwrap();
+    r.problem(413, "bad_request");
+    // the Layer 1 seam is GET-only: 405 there is problem+json as well
+    request(port, "POST", "/api/status", Some("127.0.0.1"), &[], None).problem(405, "bad_request");
+    // non-API paths keep their plain answers
+    let r = get(port, "/missing.js");
+    assert_eq!(r.status, 404);
+    assert_ne!(r.header("content-type"), Some("application/problem+json"));
 }

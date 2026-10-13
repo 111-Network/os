@@ -82,7 +82,7 @@ export const schemas: Record<string, JsonSchema> = {
       "since": {"type":"string","format":"date-time"},
       "reason_code": {
         "type": "string",
-        "description": "stable snake_case, display-only for clients. Emitted set (111d): healthy, health_pending, spawn_pending, child_degraded, child_stopped, health_error, health_unreachable, binary_absent, no_model, no_python, venv_unavailable, transport_degraded, joined, isolated, no_radio, radio_unbound, radio_bound_rnode, radio_bound_meshtastic, stack_waiting, stack_down, verify_failed, kb_absent, wan_ok, wan_unknown, wan_offline, not_hub, opencode_found, opencode_absent."
+        "description": "stable snake_case, display-only for clients. Emitted set (111d): healthy, health_pending, spawn_pending, child_degraded, child_stopped, child_backoff, health_error, health_503, health_unreachable, binary_absent, no_model, no_python, venv_unavailable, transport_degraded, joined, isolated, no_radio, radio_unbound, radio_bound_rnode, radio_bound_meshtastic, stack_waiting, stack_down, verify_failed, kb_absent, wan_ok, wan_unknown, wan_offline, not_hub, opencode_found, opencode_absent."
       },
       "reason": {"type":"string","description":"one plain sentence"},
       "can_run_here": {"type":"boolean"},
@@ -740,7 +740,7 @@ export const operations: Record<string, ContractOperation> = {
     "requestSchema": null,
     "query": [],
     "pathParams": ["id"],
-    "errors": [404]
+    "errors": [404,502]
   },
   "decideProposal": {
     "method": "POST",
@@ -756,7 +756,7 @@ export const operations: Record<string, ContractOperation> = {
     },
     "query": [],
     "pathParams": ["id"],
-    "errors": [404,409]
+    "errors": [404,409,502]
   },
   "getSettings": {
     "method": "GET",

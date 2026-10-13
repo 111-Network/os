@@ -22,7 +22,7 @@
 //! `radio` is the LoRa radio *stack* row (spec §7, devices brief): live when a
 //! stack is bound to a board — rnsd running with an enabled `RNodeInterface`
 //! stanza in `<root>/rns/config` whose port is a detected serial device
-//! (`radio_bound_rnode`), or meshtasticd answering `127.0.0.1:4403`
+//! (`radio_bound_rnode`), or meshtasticd listening on local port 4403
 //! (`radio_bound_meshtastic`; meshtasticd drives SPI HATs / CH341 adapters and
 //! never a USB board). A bound stack that stops answering is `starting`
 //! (`stack_waiting`) for [`STACK_DOWN_GRACE`], then `error` (`stack_down`).
@@ -37,6 +37,7 @@ pub mod probe;
 use crate::daemon::dashboard::{OfferState, TransportState};
 use crate::daemon::intelligence::ChildDisplay;
 use crate::daemon::kb::KbStatus;
+use crate::daemon::supervise::ChildControl;
 use serde::Serialize;
 use serde_json::{json, Value};
 use std::sync::RwLock;
@@ -122,10 +123,34 @@ pub enum Kind {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Action {
-    /// In the contract enum but never emitted until a per-child restart route
-    /// exists (Layer 9).
+    /// `POST /api/v1/services/{id}/restart` — offered exactly for the children
+    /// this daemon supervises right now (agent, model, transport while rnsd is
+    /// a child); see [`Supervised`].
     Restart,
     Log,
+}
+
+/// The children 111d supervises, by service. The daemon start hook inserts an
+/// `Arc<Supervised>` into `ApiState` ext; `POST /services/{id}/restart` reads
+/// it (no entry ⇒ `409 not_supervised`).
+#[derive(Clone, Default)]
+pub struct Supervised {
+    children: Vec<(ServiceId, ChildControl)>,
+}
+
+impl Supervised {
+    /// Add `id`'s child when there is one (`None`: absent, stub).
+    pub fn with(mut self, id: ServiceId, child: Option<ChildControl>) -> Self {
+        if let Some(c) = child {
+            self.children.retain(|(i, _)| *i != id);
+            self.children.push((id, c));
+        }
+        self
+    }
+
+    pub fn get(&self, id: ServiceId) -> Option<&ChildControl> {
+        self.children.iter().find(|(i, _)| *i == id).map(|(_, c)| c)
+    }
 }
 
 /// One `ServiceRecord` (contract schema; optional fields omitted when unset).
@@ -225,7 +250,7 @@ pub fn catalogue(id: ServiceId) -> Catalogue {
             name: "opencode",
             plain_name: "Code agent",
             kind: Kind::Detected,
-            requires: Some("A hub-class node (category Hub4A or Hub4B) with opencode on the PATH."),
+            requires: Some("A hub-class node (category Hub4A or Hub4B) with opencode installed."),
             description: "opencode, a coding agent that can work on software on this node. It \
                 runs on hub-class machines that have the opencode tool installed.",
             kb_entry: Some("projects/opencode.md"),
@@ -305,7 +330,8 @@ pub struct RadioFacts {
     pub rnode: Vec<RnodeBound>,
     /// The rnsd child is running (the RNode binding's stack).
     pub rnsd_running: bool,
-    /// TCP connect to 127.0.0.1:4403 succeeded this tick.
+    /// Something LISTENs on local port 4403 this tick (`/proc/net/tcp{,6}`;
+    /// never a connect — meshtasticd serves one client at a time).
     pub meshtastic_open: bool,
     /// meshtasticd answered at some point this daemon lifetime (its binding
     /// is only knowable by it answering).
@@ -360,7 +386,8 @@ pub struct Facts {
     /// `current/share/kb/` exists (distinguishes "absent" from "failed verify").
     pub kb_payload_present: bool,
     pub gateway: GatewayFacts,
-    /// opencode path when found on PATH.
+    /// opencode path when found (PATH, then the usual install directories:
+    /// `probe::opencode_dirs`).
     pub opencode: Option<String>,
 }
 
@@ -504,14 +531,17 @@ fn child_rule(
     }
 }
 
-/// `log` when the child's log file exists (no `restart` until a per-child
-/// restart route exists, Layer 9).
-fn child_actions(c: &ChildFacts) -> Vec<Action> {
-    if c.log.is_some() {
-        vec![Action::Log]
-    } else {
-        Vec::new()
+/// `restart` while the daemon supervises the child (not absent, not stopped
+/// for shutdown), `log` when its log file exists.
+fn child_actions(display: ChildDisplay, log: bool) -> Vec<Action> {
+    let mut out = Vec::new();
+    if !matches!(display, ChildDisplay::Absent | ChildDisplay::Stopped) {
+        out.push(Action::Restart);
     }
+    if log {
+        out.push(Action::Log);
+    }
+    out
 }
 
 fn agent(f: &Facts) -> Computed {
@@ -528,7 +558,7 @@ fn agent(f: &Facts) -> Computed {
         let (s, code, reason) = child_rule(id, "agent", c, AGENT_GRACE, f.boot_elapsed);
         Computed::new(id, s, code, reason)
     };
-    out.actions = child_actions(c);
+    out.actions = child_actions(c.display, c.log.is_some());
     out.detail = json!({
         "child": display_str(c.display),
         "pid": c.pid,
@@ -570,7 +600,7 @@ fn model(f: &Facts) -> Computed {
         };
         Computed::new(id, s, code, reason)
     };
-    out.actions = child_actions(c);
+    out.actions = child_actions(c.display, c.log.is_some());
     out.detail = json!({
         "child": display_str(c.display),
         "pid": c.pid,
@@ -639,9 +669,7 @@ fn transport(f: &Facts) -> Computed {
         ),
     };
     let child = f.transport_child;
-    if f.transport_log.is_some() {
-        out.actions.push(Action::Log);
-    }
+    out.actions = child_actions(child, f.transport_log.is_some());
     let peers = match f.transport_state {
         TransportState::Joined => Some("joined"),
         TransportState::Isolated => Some("isolated"),
@@ -675,7 +703,7 @@ fn radio(f: &Facts) -> Computed {
             id,
             ServiceState::Live,
             "radio_bound_meshtastic",
-            "meshtasticd drives the LoRa radio and answers on port 4403.",
+            "meshtasticd drives the LoRa radio and listens on port 4403.",
         );
         c.kb_entry = Some("projects/meshtastic.md");
         c
@@ -827,7 +855,7 @@ fn codeagent(f: &Facts) -> Computed {
             id,
             ServiceState::Unset,
             "opencode_absent",
-            "opencode is not installed (it was not found on the PATH).",
+            "opencode is not installed (it was not found on the PATH or in the usual install folders).",
         ),
     };
     out.detail = json!({

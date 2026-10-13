@@ -15,6 +15,10 @@
 //!   `Content-Type: application/json` (else 415) and, when `Origin` is present,
 //!   its authority must equal `Host` (else 403). It applies to loopback peers too
 //!   — the loopback browser is exactly who CSRF targets.
+//! - Errors: handlers answer [`Problem`]s; anything the framework produces
+//!   instead (extractor rejections, 413, 405, unknown routes) is rewritten to
+//!   problem+json with the same status by `routes::api_problems`, which wraps
+//!   every `/api/*` path of the app.
 //!
 //! Every contract route is built (R1–R4). A future route still follows the same
 //! pattern: register the path in its submodule's `router()`, merge it below once.

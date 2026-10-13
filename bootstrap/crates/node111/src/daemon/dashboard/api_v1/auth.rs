@@ -8,7 +8,8 @@
 //!   8-char pair code from `<root>/state/dashboard-pair.json` (`{schema, code,
 //!   created}`, generated at first daemon start, printed by `111 dashboard`).
 //! - **Rate limit:** 5 failed pairs per peer IP per minute → `429 rate_limited`;
-//!   20 failures in total → the code rotates (logged).
+//!   20 failures in total → the code rotates (logged). See [`FAILS_BEFORE_ROTATE`]
+//!   for the trade-off.
 //! - **CSRF** ([`csrf_guard`]): mutating requests must be `application/json` and,
 //!   when `Origin` is present, its authority must equal `Host`.
 //!
@@ -22,7 +23,7 @@
 //! Nothing in production inserts `MockConnectInfo`, and `ConnectInfo` wins.
 
 use super::{ApiRouter, ApiState, Problem};
-use crate::util::fs::atomic_write;
+use crate::util::fs::atomic_write_owned;
 use axum::extract::connect_info::{ConnectInfo, MockConnectInfo};
 use axum::extract::{FromRequestParts, Request, State};
 use axum::http::request::Parts;
@@ -49,7 +50,20 @@ pub const SESSION_MAX_AGE_SECS: u64 = 15_552_000;
 pub const FAILS_PER_PEER: usize = 5;
 pub const FAIL_WINDOW: Duration = Duration::from_secs(60);
 /// Total failures (since the last rotation) that rotate the code.
+///
+/// Trade-off (chosen design, kept on purpose): the per-peer limit alone does
+/// not bound guessing — a LAN attacker can spread guesses over many source
+/// addresses (an IPv6 /64 is effectively unlimited). Rotating after 20 wrong
+/// codes from *anyone* caps the guesses any one code ever receives at 20
+/// (≈ 20 / 30⁸ success odds). The cost: anyone on the LAN can force a rotation
+/// by sending 20 wrong codes, so the owner has to read the new code from
+/// `111 dashboard`. Existing sessions survive such a rotation (only
+/// `111 dashboard rotate` revokes them), so paired browsers are unaffected.
 pub const FAILS_BEFORE_ROTATE: u32 = 20;
+/// Peers whose recent failures are remembered at most (memory bound: entries
+/// older than [`FAIL_WINDOW`] are pruned on every attempt, and beyond this cap
+/// the peer whose last failure is oldest is forgotten first).
+pub const MAX_FAIL_PEERS: usize = 1024;
 /// Sessions kept (least recently seen dropped beyond this).
 pub const MAX_SESSIONS: usize = 64;
 /// `last_seen` is persisted at most this often (in memory it is always fresh).
@@ -179,6 +193,36 @@ fn parse_rfc3339(s: &str) -> Option<time::OffsetDateTime> {
     time::OffsetDateTime::parse(s, &time::format_description::well_known::Rfc3339).ok()
 }
 
+/// Drop failure stamps older than [`FAIL_WINDOW`] and peers left with none.
+fn prune_failures(failures: &mut HashMap<IpAddr, VecDeque<Instant>>, now: Instant) {
+    failures.retain(|_, q| {
+        while q
+            .front()
+            .is_some_and(|t| now.saturating_duration_since(*t) >= FAIL_WINDOW)
+        {
+            q.pop_front();
+        }
+        !q.is_empty()
+    });
+}
+
+/// Record one failure from `peer`, keeping at most [`MAX_FAIL_PEERS`] peers.
+fn record_failure(failures: &mut HashMap<IpAddr, VecDeque<Instant>>, peer: IpAddr, now: Instant) {
+    prune_failures(failures, now);
+    failures.entry(peer).or_default().push_back(now);
+    while failures.len() > MAX_FAIL_PEERS {
+        let Some(stalest) = failures
+            .iter()
+            .filter(|(ip, _)| **ip != peer)
+            .min_by_key(|(_, q)| q.back().copied())
+            .map(|(ip, _)| *ip)
+        else {
+            break;
+        };
+        failures.remove(&stalest);
+    }
+}
+
 // ---------------------------------------------------------------- on-disk files
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -244,8 +288,17 @@ fn read_json<T: for<'de> Deserialize<'de>>(path: &Path) -> std::io::Result<Optio
 }
 
 fn write_json<T: Serialize>(path: &Path, value: &T) -> anyhow::Result<()> {
+    write_json_owned(path, value, None)
+}
+
+/// [`write_json`] with the tmp file `fchown`ed to `owner` before the rename.
+fn write_json_owned<T: Serialize>(
+    path: &Path,
+    value: &T,
+    owner: Option<(u32, u32)>,
+) -> anyhow::Result<()> {
     let body = serde_json::to_vec_pretty(value)?;
-    atomic_write(path, &body, 0o600)
+    atomic_write_owned(path, &body, 0o600, owner)
 }
 
 /// `111 dashboard`: the current pair code (`Ok(None)` = not generated yet; an
@@ -258,37 +311,43 @@ pub fn read_pair_code(state_dir: &Path) -> std::io::Result<Option<String>> {
 }
 
 /// `111 dashboard rotate`: new code + revoke every session. Run as root, the
-/// files are handed to `node111` so the daemon can keep using them.
+/// files are handed to `node111` so the daemon can keep using them: the tmp
+/// file is `fchown`ed through its descriptor before the rename (state/ is
+/// node111-writable, so a chown by path afterwards could follow a symlink the
+/// daemon user planted there and hand root a chown of any file).
 pub fn rotate_files(state_dir: &Path) -> anyhow::Result<String> {
     let pf = new_pair_file();
     let pair = state_dir.join(PAIR_FILE);
     let sessions = state_dir.join(SESSIONS_FILE);
-    write_json(&pair, &pf)?;
-    write_json(
+    let owner = if unsafe { libc::geteuid() } == 0 {
+        match node_user_ids() {
+            Ok(ids) => Some(ids),
+            Err(e) => {
+                eprintln!("111 dashboard: files stay root-owned: {e:#}");
+                None
+            }
+        }
+    } else {
+        None
+    };
+    write_json_owned(&pair, &pf, owner)?;
+    write_json_owned(
         &sessions,
         &SessionsFile {
             schema: 1,
             sessions: Vec::new(),
         },
+        owner,
     )?;
-    if unsafe { libc::geteuid() } == 0 {
-        for p in [&pair, &sessions] {
-            if let Err(e) = chown_to_node_user(p) {
-                eprintln!("111 dashboard: chown node111 {}: {e:#}", p.display());
-            }
-        }
-    }
     Ok(pf.code)
 }
 
-/// chown `node111:node111` (uid/gid looked up via getpwnam).
-fn chown_to_node_user(path: &Path) -> anyhow::Result<()> {
+/// `node111`'s uid/gid (getpwnam).
+fn node_user_ids() -> anyhow::Result<(u32, u32)> {
     let name = std::ffi::CString::new("node111")?;
     let pw = unsafe { libc::getpwnam(name.as_ptr()) };
     anyhow::ensure!(!pw.is_null(), "user node111 not found");
-    let (uid, gid) = unsafe { ((*pw).pw_uid, (*pw).pw_gid) };
-    std::os::unix::fs::chown(path, Some(uid), Some(gid))?;
-    Ok(())
+    Ok(unsafe { ((*pw).pw_uid, (*pw).pw_gid) })
 }
 
 // ---------------------------------------------------------------- the store
@@ -319,6 +378,7 @@ struct Inner {
     total_failures: u32,
     last_persist: Option<Instant>,
     warned_write: bool,
+    warned_read: bool,
 }
 
 /// Pair code + sessions + rate limiter. File-backed under `<root>/state/` in the
@@ -343,6 +403,7 @@ impl AuthStore {
                 total_failures: 0,
                 last_persist: None,
                 warned_write: false,
+                warned_read: false,
             }),
         };
         {
@@ -372,29 +433,56 @@ impl AuthStore {
         self.dir.as_ref().map(|d| d.join(SESSIONS_FILE))
     }
 
-    /// Re-read whichever file changed on disk since we last saw it.
+    /// Re-read whichever file changed on disk since we last saw it. The stamp
+    /// is recorded only when the read itself succeeded: a transient I/O error
+    /// must not mark a version as seen (the next call retries it). An absent
+    /// or garbled file is a successful read of nothing usable.
     fn refresh(&self, inner: &mut Inner) {
         if let Some(p) = self.pair_path() {
             let st = stamp(&p);
             if st.is_some() && st != inner.pair_stamp {
-                if let Ok(Some(pf)) = read_json::<PairFile>(&p) {
-                    if normalize_code(&pf.code).is_some() {
-                        inner.pair = pf;
-                        inner.total_failures = 0;
+                match read_json::<PairFile>(&p) {
+                    Ok(pf) => {
+                        if let Some(pf) = pf.filter(|pf| normalize_code(&pf.code).is_some()) {
+                            inner.pair = pf;
+                            inner.total_failures = 0;
+                        }
+                        inner.pair_stamp = st;
+                        inner.warned_read = false;
                     }
+                    Err(e) => Self::warn_read(inner, &p, &e),
                 }
-                inner.pair_stamp = st;
             }
         }
         if let Some(p) = self.sessions_path() {
             let st = stamp(&p);
             if st != inner.sessions_stamp {
-                inner.sessions = match read_json::<SessionsFile>(&p) {
-                    Ok(Some(f)) => f.sessions,
-                    _ => Vec::new(),
-                };
-                inner.sessions_stamp = st;
+                match read_json::<SessionsFile>(&p) {
+                    Ok(f) => {
+                        inner.sessions = f.map(|f| f.sessions).unwrap_or_default();
+                        inner.sessions_stamp = st;
+                        inner.warned_read = false;
+                    }
+                    Err(e) => {
+                        // fail closed for this call (a rotation may have revoked
+                        // everything), unstamped so the next call re-reads
+                        inner.sessions.clear();
+                        Self::warn_read(inner, &p, &e);
+                    }
+                }
             }
+        }
+    }
+
+    /// One stderr line per failing stretch (a persistently unreadable file
+    /// would otherwise log on every request).
+    fn warn_read(inner: &mut Inner, path: &Path, e: &std::io::Error) {
+        if !inner.warned_read {
+            eprintln!(
+                "111 daemon: dashboard auth: cannot read {}: {e} (retrying on every request)",
+                path.display()
+            );
+            inner.warned_read = true;
         }
     }
 
@@ -532,14 +620,12 @@ impl AuthStore {
         let mut inner = self.inner.lock().unwrap();
         self.refresh(&mut inner);
         let now = Instant::now();
-        let fails = inner.failures.entry(peer).or_default();
-        while fails
-            .front()
-            .is_some_and(|t| now.duration_since(*t) >= FAIL_WINDOW)
+        prune_failures(&mut inner.failures, now);
+        if let Some(fails) = inner
+            .failures
+            .get(&peer)
+            .filter(|f| f.len() >= FAILS_PER_PEER)
         {
-            fails.pop_front();
-        }
-        if fails.len() >= FAILS_PER_PEER {
             let oldest = *fails.front().expect("non-empty");
             let wait = FAIL_WINDOW.saturating_sub(now.duration_since(oldest));
             return Err(PairError::RateLimited {
@@ -551,7 +637,7 @@ impl AuthStore {
             _ => false,
         };
         if !ok {
-            inner.failures.entry(peer).or_default().push_back(now);
+            record_failure(&mut inner.failures, peer, now);
             inner.total_failures += 1;
             if inner.total_failures >= FAILS_BEFORE_ROTATE {
                 inner.pair = new_pair_file();
@@ -617,16 +703,30 @@ impl AuthStore {
 
 // ---------------------------------------------------------------- middleware
 
-/// The `s111` cookie value, if any (all `Cookie` headers are searched).
-pub fn session_cookie(headers: &HeaderMap) -> Option<String> {
+/// Every `s111` cookie value, in header order (all `Cookie` headers are
+/// searched). A browser sends several when cookies with the same name exist
+/// for different paths/domains — one planted by another site on the LAN must
+/// not shadow the real one, so callers try them all ([`AuthStore::session_in`]).
+pub fn session_cookies(headers: &HeaderMap) -> Vec<String> {
     headers
         .get_all(header::COOKIE)
         .iter()
         .filter_map(|v| v.to_str().ok())
         .flat_map(|v| v.split(';'))
         .filter_map(|kv| kv.trim().split_once('='))
-        .find(|(k, _)| *k == COOKIE)
+        .filter(|(k, _)| *k == COOKIE)
         .map(|(_, v)| v.trim().to_string())
+        .collect()
+}
+
+impl AuthStore {
+    /// The first `s111` cookie in `headers` that names a valid session:
+    /// `(token, created)`.
+    pub fn session_in(&self, headers: &HeaderMap) -> Option<(String, String)> {
+        session_cookies(headers)
+            .into_iter()
+            .find_map(|t| self.session_for(&t).map(|created| (t, created)))
+    }
 }
 
 fn unauthenticated() -> Problem {
@@ -647,9 +747,9 @@ pub async fn require_session(
     if is_loopback(&req) {
         return next.run(req).await;
     }
-    match session_cookie(req.headers()) {
-        Some(tok) if api.auth.session_for(&tok).is_some() => next.run(req).await,
-        _ => unauthenticated().into_response(),
+    match api.auth.session_in(req.headers()) {
+        Some(_) => next.run(req).await,
+        None => unauthenticated().into_response(),
     }
 }
 
@@ -734,7 +834,7 @@ async fn session(
     ext: Extensions,
     headers: HeaderMap,
 ) -> Json<AuthSession> {
-    let created = session_cookie(&headers).and_then(|t| api.auth.session_for(&t));
+    let created = api.auth.session_in(&headers).map(|(_, created)| created);
     Json(AuthSession {
         schema: 1,
         loopback: peer_is_loopback(&ext),
@@ -806,7 +906,7 @@ async fn pair(
 }
 
 async fn logout(State(api): State<Arc<ApiState>>, headers: HeaderMap) -> Response {
-    if let Some(tok) = session_cookie(&headers) {
+    for tok in session_cookies(&headers) {
         api.auth.logout(&tok);
     }
     (
@@ -889,10 +989,108 @@ mod tests {
             header::COOKIE,
             HeaderValue::from_static("a=1; s111=abc ; b=2"),
         );
-        assert_eq!(session_cookie(&h).as_deref(), Some("abc"));
+        assert_eq!(session_cookies(&h), ["abc"]);
         let mut h = HeaderMap::new();
         h.append(header::COOKIE, HeaderValue::from_static("x111=no"));
-        assert_eq!(session_cookie(&h), None);
+        assert!(session_cookies(&h).is_empty());
+        let mut h = HeaderMap::new();
+        h.append(
+            header::COOKIE,
+            HeaderValue::from_static("s111=one; s111=two"),
+        );
+        h.append(header::COOKIE, HeaderValue::from_static("s111=three"));
+        assert_eq!(session_cookies(&h), ["one", "two", "three"]);
+    }
+
+    #[test]
+    fn a_shadowing_cookie_does_not_hide_the_valid_one() {
+        let store = AuthStore::open(None);
+        let s = store
+            .pair("192.168.1.9".parse().unwrap(), &store.pair_code())
+            .unwrap();
+        let planted = "f".repeat(64);
+        let mut h = HeaderMap::new();
+        let v = format!("s111={planted}; s111={}", s.token);
+        h.append(header::COOKIE, HeaderValue::from_str(&v).unwrap());
+        let (tok, created) = store.session_in(&h).expect("second value validates");
+        assert_eq!((tok, created), (s.token.clone(), s.created));
+        let mut h = HeaderMap::new();
+        h.append(
+            header::COOKIE,
+            HeaderValue::from_str(&format!("s111={planted}")).unwrap(),
+        );
+        assert!(store.session_in(&h).is_none());
+    }
+
+    #[test]
+    fn failure_map_prunes_and_is_capped() {
+        let t0 = Instant::now();
+        let mut f: HashMap<IpAddr, VecDeque<Instant>> = HashMap::new();
+        let ip = |i: u32| IpAddr::V4(Ipv4Addr::from(0x0a00_0000 + i));
+        record_failure(&mut f, ip(1), t0);
+        record_failure(&mut f, ip(2), t0 + Duration::from_secs(30));
+        assert_eq!(f.len(), 2);
+        // a minute after ip(1)'s failure it is gone; ip(2) is still in window
+        record_failure(&mut f, ip(3), t0 + FAIL_WINDOW);
+        assert!(!f.contains_key(&ip(1)));
+        assert!(f.contains_key(&ip(2)) && f.contains_key(&ip(3)));
+        prune_failures(&mut f, t0 + Duration::from_secs(200));
+        assert!(f.is_empty());
+        // many peers inside one window: bounded, the stalest forgotten first
+        for i in 0..(MAX_FAIL_PEERS as u32 + 50) {
+            record_failure(&mut f, ip(100 + i), t0 + Duration::from_millis(i as u64));
+        }
+        assert_eq!(f.len(), MAX_FAIL_PEERS);
+        assert!(!f.contains_key(&ip(100)), "oldest evicted");
+        assert!(f.contains_key(&ip(100 + MAX_FAIL_PEERS as u32 + 49)));
+    }
+
+    #[test]
+    fn many_peers_never_grow_the_store_unbounded() {
+        let store = AuthStore::open(None);
+        for i in 0..(MAX_FAIL_PEERS as u32 + 200) {
+            let peer = IpAddr::V4(Ipv4Addr::from(0xc0a8_0000 + i));
+            assert!(matches!(
+                store.pair(peer, "0000-0000"),
+                Err(PairError::Wrong)
+            ));
+        }
+        assert!(store.inner.lock().unwrap().failures.len() <= MAX_FAIL_PEERS);
+    }
+
+    #[test]
+    fn transient_read_failure_does_not_mark_a_version_seen() {
+        if unsafe { libc::geteuid() } == 0 {
+            return; // root reads 0000 files: the failure cannot be simulated
+        }
+        use std::os::unix::fs::PermissionsExt;
+        let set_mode = |p: &Path, m: u32| {
+            std::fs::set_permissions(p, std::fs::Permissions::from_mode(m)).unwrap()
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let store = AuthStore::open(Some(dir.path().to_path_buf()));
+        let other = AuthStore::open(Some(dir.path().to_path_buf()));
+        let old = store.pair_code();
+        assert_eq!(other.pair_code(), old);
+
+        // pair file: a rotation the daemon fails to read once is still adopted later
+        let new = rotate_files(dir.path()).unwrap();
+        let pair = dir.path().join(PAIR_FILE);
+        set_mode(&pair, 0o000);
+        assert_eq!(store.pair_code(), old, "unreadable: keeps what it had");
+        set_mode(&pair, 0o600);
+        assert_eq!(store.pair_code(), new, "re-read once readable");
+
+        // sessions file: unreadable fails closed, then the session is back
+        let s = store.pair("10.0.0.2".parse().unwrap(), &new).unwrap();
+        let sessions = dir.path().join(SESSIONS_FILE);
+        set_mode(&sessions, 0o000);
+        assert!(other.session_for(&s.token).is_none(), "fail closed");
+        set_mode(&sessions, 0o600);
+        assert!(
+            other.session_for(&s.token).is_some(),
+            "re-read once readable"
+        );
     }
 
     #[test]

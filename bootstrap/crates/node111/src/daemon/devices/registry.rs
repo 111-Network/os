@@ -130,8 +130,25 @@ impl Probe {
     }
 }
 
-/// Is meshtasticd answering? (TCP connect, bounded.)
+/// Is meshtasticd answering? For a local address this is a LISTEN check in
+/// `/proc/net/tcp{,6}` (`services::probe::listening_under`): meshtasticd
+/// serves one API client, so connecting every tick would evict the real one.
+/// A connect probe (bounded) runs only for a non-local address or when procfs
+/// is unreadable.
 pub async fn probe(addr: SocketAddr, timeout: Duration) -> Probe {
+    let ip = addr.ip().to_canonical();
+    if ip.is_loopback() || ip.is_unspecified() {
+        if let Some(listening) = crate::daemon::services::probe::listening_under(
+            std::path::Path::new("/proc/net"),
+            addr.port(),
+        ) {
+            return if listening {
+                Probe::Open
+            } else {
+                Probe::Refused
+            };
+        }
+    }
     match tokio::time::timeout(timeout, tokio::net::TcpStream::connect(addr)).await {
         Ok(Ok(_)) => Probe::Open,
         Ok(Err(e)) if e.kind() == std::io::ErrorKind::ConnectionRefused => Probe::Refused,

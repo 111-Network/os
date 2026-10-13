@@ -161,10 +161,55 @@ fn rfc3339_now() -> String {
         .unwrap_or_else(|_| "unknown".into())
 }
 
+/// What the URL list is built from. Fixed for the daemon lifetime except the
+/// announced mDNS name (a conflict renames it, possibly more than once) and
+/// the LAN IPs (re-read on every [`publish_urls`]).
+struct UrlInputs {
+    main_ok: bool,
+    port80_ok: bool,
+    lan: bool,
+    mdns_host: std::sync::Mutex<Option<String>>,
+    started_at: String,
+}
+
+/// Recompute the URL list into `ApiState.bind` + `state/dashboard.json`.
+/// Writes only on a change unless `force` (the first publish). Returns the
+/// list when it was (re)published.
+fn publish_urls(api: &ApiState, inp: &UrlInputs, force: bool) -> Option<BindInfo> {
+    let lan_ips = if inp.lan {
+        bind::lan_ipv4s()
+    } else {
+        Vec::new()
+    };
+    let host = inp.mdns_host.lock().unwrap().clone();
+    let urls = bind::urls(
+        inp.main_ok,
+        inp.port80_ok,
+        DEFAULT_PORT,
+        inp.lan,
+        host.as_deref(),
+        &lan_ips,
+    );
+    let info = {
+        let mut b = api.bind.write().unwrap();
+        if !force && b.urls == urls {
+            return None;
+        }
+        b.urls = urls;
+        b.lan = inp.lan;
+        b.clone()
+    };
+    if let Err(e) = bind::write_state(&api.layout.state_dir(), &info, &inp.started_at) {
+        eprintln!("111 daemon: cannot write state/dashboard.json: {e:#}");
+    }
+    Some(info)
+}
+
 /// Daemon entry: pairing state, binds (`:11180` + best-effort `:80`), mDNS when
-/// LAN, URL list → `ApiState.bind` + `state/dashboard.json`, serve tasks, own-
-/// address refresh (30 s). Never fails: bind errors are logged (the daemon keeps
-/// running headless, as before).
+/// LAN, URL list → `ApiState.bind` + `state/dashboard.json`, serve tasks, and
+/// (LAN) a 30 s refresh of the own addresses and the URL list (DHCP can move
+/// the LAN IP). Never fails: bind errors are logged (the daemon keeps running
+/// headless, as before).
 pub async fn start(
     state: SharedState,
     layout: crate::daemon::DaemonLayout,
@@ -179,55 +224,39 @@ pub async fn start(
         eprintln!("111 daemon: dashboard LAN sharing ON — LAN visitors must pair (`111 dashboard` shows the code)");
     }
     let bound = bind::bind_all(lan, DEFAULT_PORT).await;
-    let started_at = rfc3339_now();
+    let inputs = Arc::new(UrlInputs {
+        main_ok: bound.main_ok,
+        port80_ok: bound.port80_ok,
+        lan,
+        mdns_host: std::sync::Mutex::new(None),
+        started_at: rfc3339_now(),
+    });
 
     let mdns = if lan && (bound.main_ok || bound.port80_ok) {
         let port = if bound.port80_ok { 80 } else { DEFAULT_PORT };
         let weak = Arc::downgrade(&api);
-        let (main_ok, port80_ok, started) = (bound.main_ok, bound.port80_ok, started_at.clone());
+        let inp = Arc::clone(&inputs);
         mdns::Announcer::start(
             port,
             Box::new(move |host: String| {
+                *inp.mdns_host.lock().unwrap() = Some(host);
                 if let Some(api) = weak.upgrade() {
-                    let urls = bind::urls(
-                        main_ok,
-                        port80_ok,
-                        DEFAULT_PORT,
-                        true,
-                        Some(&host),
-                        &bind::lan_ipv4s(),
-                    );
-                    let info = {
-                        let mut b = api.bind.write().unwrap();
-                        b.urls = urls;
-                        b.clone()
-                    };
-                    let _ = bind::write_state(&api.layout.state_dir(), &info, &started);
+                    publish_urls(&api, &inp, false);
                 }
             }),
         )
     } else {
         None
     };
-    let mdns_host = mdns
-        .as_ref()
-        .map(|_| mdns::HOSTNAME.trim_end_matches('.').to_string());
-    let lan_ips = if lan { bind::lan_ipv4s() } else { Vec::new() };
-    let info = BindInfo {
-        urls: bind::urls(
-            bound.main_ok,
-            bound.port80_ok,
-            DEFAULT_PORT,
-            lan,
-            mdns_host.as_deref(),
-            &lan_ips,
-        ),
-        lan,
-    };
-    *api.bind.write().unwrap() = info.clone();
-    if let Err(e) = bind::write_state(&layout.state_dir(), &info, &started_at) {
-        eprintln!("111 daemon: cannot write state/dashboard.json: {e:#}");
+    if mdns.is_some() {
+        // a rename may already have landed from the monitor thread; keep it
+        inputs
+            .mdns_host
+            .lock()
+            .unwrap()
+            .get_or_insert_with(|| mdns::HOSTNAME.trim_end_matches('.').to_string());
     }
+    let info = publish_urls(&api, &inputs, true).unwrap_or_default();
     if !info.urls.is_empty() {
         eprintln!("111 daemon: dashboard at {}", info.urls.join(" · "));
     }
@@ -250,8 +279,63 @@ pub async fn start(
                 tick.tick().await;
                 let Some(api) = weak.upgrade() else { break };
                 api.set_own_addrs(bind::own_addresses());
+                if let Some(info) = publish_urls(&api, &inputs, false) {
+                    eprintln!(
+                        "111 daemon: dashboard URLs changed: {}",
+                        info.urls.join(" · ")
+                    );
+                }
             }
         });
     }
     DashboardHandle { api, mdns }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn api_in(dir: &std::path::Path, lan: bool) -> Arc<ApiState> {
+        std::fs::create_dir_all(dir.join("state")).unwrap();
+        let layout = crate::daemon::DaemonLayout {
+            root: dir.to_path_buf(),
+            etc: dir.join("etc"),
+        };
+        let mut cfg = ApiConfig::new(layout, lan);
+        cfg.persist_auth = false;
+        ApiState::new(Arc::new(RwLock::new(DashboardState::new("t"))), cfg)
+    }
+
+    #[test]
+    fn url_list_is_republished_when_its_inputs_change() {
+        let dir = tempfile::tempdir().unwrap();
+        let api = api_in(dir.path(), true);
+        let inp = UrlInputs {
+            main_ok: true,
+            port80_ok: false,
+            lan: true,
+            mdns_host: std::sync::Mutex::new(Some("111.local".into())),
+            started_at: "2026-10-14T00:00:00Z".into(),
+        };
+        let first = publish_urls(&api, &inp, true).expect("forced");
+        assert!(first.urls.contains(&"http://111.local:11180".to_string()));
+        assert_eq!(
+            bind::read_state(&api.layout.state_dir()).unwrap().urls,
+            first.urls
+        );
+        // nothing changed: no rewrite
+        assert!(publish_urls(&api, &inp, false).is_none());
+        // a second mDNS rename lands in both the API state and the file
+        for host in ["111-2.local", "111-3.local"] {
+            *inp.mdns_host.lock().unwrap() = Some(host.into());
+            let info = publish_urls(&api, &inp, false).expect("changed");
+            let want = format!("http://{host}:11180");
+            assert!(info.urls.contains(&want), "{:?}", info.urls);
+            assert!(api.bind.read().unwrap().urls.contains(&want));
+            assert!(bind::read_state(&api.layout.state_dir())
+                .unwrap()
+                .urls
+                .contains(&want));
+        }
+    }
 }

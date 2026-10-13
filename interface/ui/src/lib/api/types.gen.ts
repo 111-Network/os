@@ -414,7 +414,7 @@ export interface components {
             state: components["schemas"]["ServiceState"];
             /** Format: date-time */
             since: string;
-            /** @description stable snake_case, display-only for clients. Emitted set (111d): healthy, health_pending, spawn_pending, child_degraded, child_stopped, health_error, health_unreachable, binary_absent, no_model, no_python, venv_unavailable, transport_degraded, joined, isolated, no_radio, radio_unbound, radio_bound_rnode, radio_bound_meshtastic, stack_waiting, stack_down, verify_failed, kb_absent, wan_ok, wan_unknown, wan_offline, not_hub, opencode_found, opencode_absent. */
+            /** @description stable snake_case, display-only for clients. Emitted set (111d): healthy, health_pending, spawn_pending, child_degraded, child_stopped, child_backoff, health_error, health_503, health_unreachable, binary_absent, no_model, no_python, venv_unavailable, transport_degraded, joined, isolated, no_radio, radio_unbound, radio_bound_rnode, radio_bound_meshtastic, stack_waiting, stack_down, verify_failed, kb_absent, wan_ok, wan_unknown, wan_offline, not_hub, opencode_found, opencode_absent. */
             reason_code: string;
             /** @description one plain sentence */
             reason: string;
@@ -1129,6 +1129,8 @@ export interface operations {
                 };
             };
             404: components["responses"]["Problem"];
+            /** @description upstream_error: the agent wrote a kind outside the enum */
+            502: components["responses"]["Problem"];
         };
     };
     decideProposal: {
@@ -1160,6 +1162,8 @@ export interface operations {
             404: components["responses"]["Problem"];
             /** @description already_decided */
             409: components["responses"]["Problem"];
+            /** @description upstream_error: the agent wrote a kind outside the enum */
+            502: components["responses"]["Problem"];
         };
     };
     getSettings: {

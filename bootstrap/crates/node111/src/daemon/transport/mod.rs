@@ -7,7 +7,7 @@ pub mod netlink;
 pub mod venv;
 
 use crate::daemon::health::TransportHealth;
-use crate::daemon::supervise::{self, ChildHandle, ChildSpec};
+use crate::daemon::supervise::{self, ChildControl, ChildHandle, ChildSpec};
 use crate::daemon::DaemonLayout;
 use crate::util::run::Runner;
 use std::path::PathBuf;
@@ -42,10 +42,28 @@ impl TransportHandle {
         self.child.read().unwrap().as_ref().map(|c| c.state())
     }
 
-    /// Stop the rnsd child (daemon shutdown path).
+    /// Control of the rnsd child (`None` on the stub or after shutdown).
+    pub fn control(&self) -> Option<ChildControl> {
+        self.child
+            .read()
+            .unwrap()
+            .as_ref()
+            .map(ChildHandle::control)
+    }
+
+    /// Stop the rnsd child without waiting.
     pub fn stop(&self) {
         if let Some(c) = self.child.write().unwrap().take() {
             c.stop();
+        }
+    }
+
+    /// Daemon shutdown: stop the rnsd child and join it (SIGTERM, `grace`,
+    /// SIGKILL — [`ChildControl::stop_and_wait`]).
+    pub async fn stop_and_wait(&self, grace: std::time::Duration) {
+        let child = self.child.write().unwrap().take();
+        if let Some(c) = child {
+            c.stop_and_wait(grace).await;
         }
     }
 

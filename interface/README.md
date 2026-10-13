@@ -229,7 +229,9 @@ flagship service; no fake inbox.
 ### 6.6 Service page — `/services/:id`
 Header: dot + `LIVE|NOT SET|ERROR|STARTING`, plain name, `since`, one-line reason.
 - **LIVE** → the service's **control panel** (native, built from `detail`): spec table of what the
-  daemon knows, actions (advanced: restart child, view log tail), KB entry link (`/kb/<path>`),
+  daemon knows, actions (advanced: restart child — only when `actions` has `restart`, i.e. for the
+  children `111d` runs itself; every other service links to Settings → "Restart node" instead —
+  and view log tail), KB entry link (`/kb/<path>`),
   and — when the registry supplies `embed_url` (e.g. a self-hosted Meshtastic web client) — an
   "Open full client" link-out, never an iframe.
 - **NOT SET** → `description` (what it is, 2–3 lines), `requires` (what it needs), primary button
@@ -279,14 +281,23 @@ reason, can_run_here, requires?, description, kb_entry?, embed_url?, detail{...}
 | `agent` | Local AI agent (`111-agent`) | child running ∧ `GET :11182/health` 200 | binary absent (requires standard tier) | child degraded/backoff, or `/health` 503 |
 | `model` | Local model (`llama-server`) | child running ∧ `GET :11181/health` 200 | no GGUF/binary (requires standard tier; `offer` state in detail) | degraded/backoff, or health non-200 after 120 s grace |
 | `transport` | Mesh transport (Reticulum `rnsd`) | rnsd child running (`detail.peers: joined|isolated`) | `no transport` (requires python3 + venv) | `transport degraded` |
-| `radio` | LoRa radio stack | a stack is **bound** to a detected board: rnsd running with an `RNodeInterface` stanza in `<root>/rns/config` for its port (`radio_bound_rnode`), or meshtasticd answering `127.0.0.1:4403` (`radio_bound_meshtastic`, SPI HATs/CH341 adapters only — meshtasticd never drives a USB board) | no board detected (`no_radio`; `can_run_here=false` on phones) or board present but nothing bound (`radio_unbound` → "Set up with the agent") | a bound stack stopped answering > 60 s (`stack_down`) |
+| `radio` | LoRa radio stack | a stack is **bound** to a detected board: rnsd running with an `RNodeInterface` stanza in `<root>/rns/config` for its port (`radio_bound_rnode`), or meshtasticd listening on local port 4403 (a LISTEN socket in `/proc/net/tcp`, never a connect — meshtasticd accepts one client) (`radio_bound_meshtastic`, SPI HATs/CH341 adapters only — meshtasticd never drives a USB board) | no board detected (`no_radio`; `can_run_here=false` on phones) or board present but nothing bound (`radio_unbound` → "Set up with the agent") | a bound stack stopped answering > 60 s (`stack_down`) |
 | `kb` | Knowledge base | KB verified (`kb != null`) | KB payload absent | payload present, verification failed |
 | `gateway` | Internet gateway | WAN probe 204 OK (every 60 s) | no internet (no setup action; `actions: []`) | — |
 | `codeagent` | Code agent (opencode) | hub category ∧ `opencode` on PATH | otherwise (`can_run_here=false` on non-hubs) | — |
 
 `detail` carries the raw facts the panel renders (child state, ports, model id, transport_state,
 offer, kb sha/entries, radio ids, last probe). `actions` lists the registry actions the UI may
-offer (`restart`, `log`); never identity material.
+offer; never identity material:
+
+- `restart` — exactly for the children `111d` supervises right now: `agent` (`111-agent`), `model`
+  (`llama-server`) and `transport` while rnsd runs as a `111d` child (not the detection-only stub).
+  `POST /api/v1/services/{id}/restart` answers `202` at once; the daemon sends SIGTERM, waits 5 s,
+  sends SIGKILL if needed, and respawns the child immediately with its back-off cleared, so a
+  `child_degraded` (crash-looped) child gets a fresh start. Services `111d` does not run —
+  `radio`, `kb`, `gateway`, `codeagent`, and external daemons such as meshtasticd or opencode —
+  never offer it and answer `409 not_supervised`; their pages link to "Restart node" instead.
+- `log` — when the service has a log file (`agent`, `model`, `transport`).
 
 ### 7.1 Device registry (computed by `111d`)
 
@@ -365,6 +376,7 @@ same prompts start *doing* instead of *telling* — the UI does not change.
 | POST | `/api/v1/proposals/{id}/decision` | `{decision: accepted|dismissed}` → `<root>/agent/decisions/{id}.json` (Layer 9 consumes) |
 | GET/PATCH | `/api/v1/settings` | `alias`, `lan_enabled` (loopback-only), `offer` (loopback-only) → `<root>/state/settings.json` |
 | POST | `/api/v1/node/restart` | graceful `exit(0)` after reply; supervisor restarts |
+| POST | `/api/v1/services/{id}/restart` | restart a child 111d supervises (§7 `actions`); `409 not_supervised` otherwise |
 | POST | `/api/v1/update/check` | wakes the updater loop (`Notify`); state in `/status.update` |
 | GET | `/api/v1/kb` · `/api/v1/kb/entry?path=` | `llms.txt` + one entry (read-only, traversal-guarded) |
 | POST | `/api/v1/auth/pair` · `/auth/logout` · GET `/auth/session` | pairing (§11) |

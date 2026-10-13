@@ -22,6 +22,7 @@ use node111::daemon::services::{
     self, compute, AgentStatusProbe, ChildFacts, Facts, GatewayFacts, Probe, Radio, RadioFacts,
     Registry, RnodeBound, ServiceId, ServiceState,
 };
+use node111::daemon::supervise;
 use node111::daemon::updater::{self, LastResult, UpdaterStatus};
 use node111::daemon::DaemonLayout;
 use serde_json::{json, Value};
@@ -298,6 +299,7 @@ fn assert_superset(legacy: &Value, v1: &Value, path: &str, skip: &[&str]) {
 async fn status_schema_pins_and_superset() {
     let n = node();
     n.write("current/bin/111-agent", "#!/bin/sh\n");
+    n.write("current/share/kb/llms.txt", "# 111 KB\n");
     let port = serve(&n.api, None).await;
 
     let r = get(port, "/api/v1/status");
@@ -432,6 +434,31 @@ async fn status_schema_pins_and_superset() {
         get(port, "/api/v1/status").json()["layers"],
         json!([0, 1, 2, 4])
     );
+    // "working", not "installed": a failed identity drops 2 ...
+    n.api.dash.write().unwrap().components.identity = false;
+    assert_eq!(
+        get(port, "/api/v1/status").json()["layers"],
+        json!([0, 1, 4])
+    );
+    // ... a KB directory that went away drops 0 ...
+    std::fs::rename(
+        n.root().join("current/share/kb"),
+        n.root().join("current/share/kb.gone"),
+    )
+    .unwrap();
+    assert_eq!(get(port, "/api/v1/status").json()["layers"], json!([1, 4]));
+    // ... and so does a KB that failed verification, even with the files back
+    std::fs::rename(
+        n.root().join("current/share/kb.gone"),
+        n.root().join("current/share/kb"),
+    )
+    .unwrap();
+    assert_eq!(
+        get(port, "/api/v1/status").json()["layers"],
+        json!([0, 1, 4])
+    );
+    n.api.dash.write().unwrap().kb = None;
+    assert_eq!(get(port, "/api/v1/status").json()["layers"], json!([1, 4]));
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -620,7 +647,10 @@ fn rows_agent() {
     });
     let a = row(&f, ServiceId::Agent);
     assert_eq!((a.state, a.reason_code), (L, "healthy"));
-    assert_eq!(serde_json::to_value(&a.actions).unwrap(), json!(["log"]));
+    assert_eq!(
+        serde_json::to_value(&a.actions).unwrap(),
+        json!(["restart", "log"])
+    );
     assert_eq!(a.detail["port"], 11182);
     assert_eq!(a.detail["child"], "running");
     assert_eq!(a.detail["model_id"], "qwen3-4b");
@@ -640,6 +670,17 @@ fn rows_agent() {
 
     f.agent.display = ChildDisplay::Degraded;
     assert_eq!(st(&f, ServiceId::Agent), (E, "child_degraded", true));
+    // a crash-looped child is exactly what restart is for
+    assert_eq!(
+        serde_json::to_value(row(&f, ServiceId::Agent).actions).unwrap(),
+        json!(["restart", "log"])
+    );
+    // stopped for shutdown: nothing to restart any more
+    f.agent.display = ChildDisplay::Stopped;
+    assert_eq!(
+        serde_json::to_value(row(&f, ServiceId::Agent).actions).unwrap(),
+        json!(["log"])
+    );
     f.agent.display = ChildDisplay::Backoff;
     assert_eq!(st(&f, ServiceId::Agent), (E, "child_backoff", true));
     // never spawned yet at boot ⇒ starting, until the grace ends
@@ -677,10 +718,16 @@ fn rows_model() {
     assert_eq!((m.state, m.reason_code), (L, "healthy"));
     assert_eq!(m.detail["port"], 11181);
     assert_eq!(m.detail["model_file"], "qwen3-4b-q4_k_m.gguf");
-    assert_eq!(serde_json::to_value(&m.actions).unwrap(), json!(["log"]));
-    // no restart action anywhere until a per-child restart route exists
+    assert_eq!(
+        serde_json::to_value(&m.actions).unwrap(),
+        json!(["restart", "log"])
+    );
+    // restart is about the child, log about the file
     f.model.log = None;
-    assert!(row(&f, ServiceId::Model).actions.is_empty());
+    assert_eq!(
+        serde_json::to_value(row(&f, ServiceId::Model).actions).unwrap(),
+        json!(["restart"])
+    );
 }
 
 #[test]
@@ -692,6 +739,12 @@ fn rows_transport() {
     // python3 present but the venv could not be built: still the stub
     f.python3 = true;
     assert_eq!(st(&f, ServiceId::Transport), (U, "venv_unavailable", true));
+    // a leftover rnsd.log on the stub: log only, no rnsd child to restart
+    f.transport_log = Some("/x/rns/rnsd.log".into());
+    assert_eq!(
+        serde_json::to_value(row(&f, ServiceId::Transport).actions).unwrap(),
+        json!(["log"])
+    );
 
     f.transport_state = TransportState::Isolated;
     f.transport_child = ChildDisplay::Running;
@@ -700,7 +753,10 @@ fn rows_transport() {
     assert_eq!((t.state, t.reason_code), (L, "isolated"));
     assert_eq!(t.detail["peers"], "isolated");
     assert_eq!(t.detail["transport_state"], "isolated");
-    assert_eq!(serde_json::to_value(&t.actions).unwrap(), json!(["log"]));
+    assert_eq!(
+        serde_json::to_value(&t.actions).unwrap(),
+        json!(["restart", "log"])
+    );
 
     f.transport_state = TransportState::Joined;
     assert_eq!(st(&f, ServiceId::Transport), (L, "joined", true));
@@ -994,7 +1050,10 @@ async fn services_routes_and_frames() {
         assert!(r["description"].as_str().is_some_and(|s| s.len() > 40));
         assert!(r["detail"].is_object());
         for a in r["actions"].as_array().unwrap() {
-            assert_eq!(a, &json!("log"), "restart is not emitted (no route yet)");
+            one_of(a, &[json!("restart"), json!("log")]);
+            if a == "restart" {
+                assert_eq!(r["kind"], "child", "restart only for children: {r}");
+            }
         }
         let rc = r["reason_code"].as_str().unwrap();
         assert!(
@@ -1096,7 +1155,7 @@ async fn settings_merge_alias_and_loopback_only() {
     let s = get(lo, "/api/v1/settings").json();
     assert_eq!(
         s,
-        json!({"schema": 1, "alias": null, "lan_enabled": false, "offer": null})
+        json!({"schema": 1, "alias": null, "lan_enabled": false, "lan_locked": false, "offer": null})
     );
 
     // alias from a paired LAN peer: allowed, trimmed; shows in /status
@@ -1147,7 +1206,7 @@ async fn settings_merge_alias_and_loopback_only() {
     assert_eq!(r.status, 200, "{}", r.body);
     assert_eq!(
         r.json(),
-        json!({"schema": 1, "alias": "Kitchen node", "lan_enabled": true, "offer": null})
+        json!({"schema": 1, "alias": "Kitchen node", "lan_enabled": true, "lan_locked": false, "offer": null})
     );
     let on_disk: Value = serde_json::from_slice(&std::fs::read(&settings_file).unwrap()).unwrap();
     assert_eq!(on_disk["schema"], 1);
@@ -1181,7 +1240,9 @@ async fn settings_merge_alias_and_loopback_only() {
     assert!(r.json()["alias"].is_null());
     assert!(get(lo, "/api/v1/status").json()["node"]["alias"].is_null());
 
-    // configured lan_enabled is env OR settings
+    // configured lan_enabled: settings, unless the env file's DASHBOARD_LAN
+    // pins it (then lan_locked, and a lan_enabled PATCH is 409; the full matrix
+    // lives in tests/settings_lan.rs)
     send_json(
         lo,
         "PATCH",
@@ -1191,8 +1252,18 @@ async fn settings_merge_alias_and_loopback_only() {
     );
     assert_eq!(get(lo, "/api/v1/settings").json()["lan_enabled"], false);
     n.write("etc/env", "DASHBOARD_LAN=true\n");
-    assert_eq!(get(lo, "/api/v1/settings").json()["lan_enabled"], true);
+    let s = get(lo, "/api/v1/settings").json();
+    assert_eq!(s["lan_enabled"], true);
+    assert_eq!(s["lan_locked"], true);
     assert_eq!(get(lo, "/api/v1/status").json()["lan_enabled"], true);
+    send_json(
+        lo,
+        "PATCH",
+        "/api/v1/settings",
+        r#"{"lan_enabled":false}"#,
+        None,
+    )
+    .problem(409, "settings_locked");
 
     // PATCH needs JSON (CSRF guard from R1 still applies)
     request(
@@ -1389,6 +1460,100 @@ async fn restart_replies_then_signals() {
         Some("{}"),
     )
     .problem(403, "bad_request");
+}
+
+fn sleeper(name: &str) -> supervise::ChildSpec {
+    supervise::ChildSpec {
+        name: name.into(),
+        program: "/bin/sleep".into(),
+        args: vec!["30".into()],
+        env: vec![],
+        backoff: supervise::BackoffPolicy::default(),
+        stdout_log: None,
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn service_restart_route() {
+    let n = node();
+    let port = serve(&n.api, None).await;
+    // nothing supervised in this process: every known id is 409, unknown 404
+    for id in ServiceId::ALL {
+        send_json(
+            port,
+            "POST",
+            &format!("/api/v1/services/{}/restart", id.as_str()),
+            "{}",
+            None,
+        )
+        .problem(409, "not_supervised");
+    }
+    send_json(port, "POST", "/api/v1/services/nope/restart", "{}", None).problem(404, "not_found");
+
+    // the model server is a supervised child; transport is the stub (absent)
+    let model = supervise::spawn_child(sleeper("llama-server"));
+    assert!(wait_until(Duration::from_secs(3), || model.pid().is_some()).await);
+    let old = model.pid().unwrap();
+    n.api.insert_ext(Arc::new(
+        services::Supervised::default()
+            .with(ServiceId::Model, Some(model.control()))
+            .with(ServiceId::Transport, None),
+    ));
+    let r = send_json(port, "POST", "/api/v1/services/model/restart", "{}", None);
+    assert_eq!(r.status, 202, "{}", r.body);
+    assert_eq!(
+        r.json(),
+        json!({"schema": 1, "id": "model", "restarting": true})
+    );
+    assert!(
+        wait_until(Duration::from_secs(5), || model
+            .pid()
+            .is_some_and(|p| p != old))
+        .await,
+        "respawned with a new pid"
+    );
+    assert_eq!(model.state(), supervise::ChildState::Running);
+    for id in ["transport", "agent", "radio", "kb", "gateway", "codeagent"] {
+        let r = send_json(
+            port,
+            "POST",
+            &format!("/api/v1/services/{id}/restart"),
+            "{}",
+            None,
+        );
+        r.problem(409, "not_supervised");
+        assert!(r.json()["detail"].as_str().is_some_and(|d| !d.is_empty()));
+    }
+
+    // same gate as every write: LAN needs a session, CSRF applies, POST only
+    let lan = serve(&n.api, Some("10.0.0.9:4000")).await;
+    send_json(lan, "POST", "/api/v1/services/model/restart", "{}", None)
+        .problem(401, "unauthenticated");
+    request(
+        port,
+        "POST",
+        "/api/v1/services/model/restart",
+        &[
+            ("Content-Type", "application/json"),
+            ("Origin", "http://evil.example"),
+        ],
+        Some("{}"),
+    )
+    .problem(403, "bad_request");
+    request(
+        port,
+        "POST",
+        "/api/v1/services/model/restart",
+        &[("Content-Type", "text/plain")],
+        Some("{}"),
+    )
+    .problem(415, "bad_request");
+    get(port, "/api/v1/services/model/restart").problem(405, "bad_request");
+
+    // after shutdown the child is gone for good: 409
+    model.stop_and_wait(Duration::from_secs(5)).await;
+    send_json(port, "POST", "/api/v1/services/model/restart", "{}", None)
+        .problem(409, "not_supervised");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

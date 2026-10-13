@@ -15,7 +15,11 @@
 #              keys, pairing from a real non-loopback source (dummy0), CSRF, events
 #              reset + Last-Event-ID replay, chat relay (token/tool/done/error),
 #              history, proposals + decisions, agent task → proposal frames, update
-#              check, restart (exit 0). SSE tapes go to ui/test/tapes/ (see SMOKE_TAPES).
+#              check, per-service restart (supervised child → 202 + back LIVE with a
+#              new pid; non-supervised → 409), node restart (exit 0, children joined).
+#              Also: CSP + security headers, problem+json for framework errors, the
+#              Layer 1 /api/status + /v1 gated for unpaired LAN visitors.
+#              SSE tapes go to ui/test/tapes/ (see SMOKE_TAPES).
 #
 # Every check prints `ok:` or `FAIL:` (`note:` lines are information only); the
 # script exits 1 on any FAIL. Every process dies with the pid namespace; the
@@ -83,6 +87,13 @@ snip() { head -c 300 "$W/body" 2>/dev/null | tr '\n\r' '  '; }
 # t DESC CONDITION — CONDITION is eval'd at check time (pass it single-quoted)
 t() {
   if eval "$2"; then ok "$1"; else fail "$1  [HTTP ${ST:-?}: $(snip)]"; fi
+}
+# csp_strict VALUE — the dashboard policy: same-origin only, no inline or eval script
+csp_strict() {
+  local c=$1
+  [[ $c == *"default-src 'self'"* && $c == *"script-src 'self';"* &&
+    $c == *"connect-src 'self'"* && $c == *"frame-ancestors 'none'"* &&
+    $c == *"base-uri 'self'"* && $c != *unsafe-eval* ]]
 }
 problem_is() { # problem_is STATUS CODE — last response is that problem+json
   [ "$ST" = "$1" ] && ct_is application/problem+json && [ "$(jget .code)" = "$2" ]
@@ -189,6 +200,12 @@ inner() {
   req GET "$B/"
   t "GET / → 200 text/html, cache-control: no-cache, <div id=\"root\">" \
     '[ "$ST" = 200 ] && ct_is text/html && [ "$(hdr cache-control)" = no-cache ] && grep -q "<div id=\"root\">" "$W/body"'
+  local csp
+  csp=$(hdr content-security-policy)
+  t "GET / carries a strict CSP (script-src 'self' only, connect-src 'self', frame-ancestors 'none')" \
+    'csp_strict "$csp"'
+  t "GET / carries X-Content-Type-Options: nosniff and Referrer-Policy: no-referrer" \
+    '[ "$(hdr x-content-type-options)" = nosniff ] && [ "$(hdr referrer-policy)" = no-referrer ]'
   local served_sha dist_sha
   served_sha=$(sha256sum <"$W/body" | cut -c1-64)
   dist_sha=$(sha256sum <"$UI/dist/index.html" | cut -c1-64)
@@ -218,6 +235,13 @@ inner() {
   t "GET /fonts/GeistMono-Variable.woff2 → 200 font/woff2" '[ "$ST" = 200 ] && ct_is font/woff2'
   req GET "$B/api/v1/nope"
   t "unknown /api/v1 route → 404 problem+json" '[ "$ST" = 404 ] && ct_is application/problem+json'
+  req POST "$B/api/v1/proposals/not-a-ulid/decide" -H 'Content-Type: application/json' -d '{}'
+  t "POST to an unknown /api/v1 path → 404 problem+json (not the static catch-all's 405)" 'problem_is 404 not_found'
+  req GET "$B/api/v1/services/%FF"
+  t "bad path parameter (not UTF-8) → 400 problem+json with the reason in detail" \
+    'problem_is 400 bad_request && jb ".detail | length > 0"'
+  req GET "$B/api/v1/node/restart"
+  t "wrong method on an /api/v1 route → 405 problem+json" 'problem_is 405 bad_request'
   req GET "$B/" -H 'Host: evil.com'
   t "Host: evil.com → 400 problem+json" 'problem_is 400 bad_request'
   req GET "$B/" -H 'Host: 111.localhost'
@@ -327,6 +351,12 @@ inner() {
   t "LAN GET /api/v1/events without a session → 401" '[ "$ST" = 401 ]'
   req GET "$L/" "${lan[@]}"
   t "LAN GET / (static) still serves without a session (SPA shows /pair)" '[ "$ST" = 200 ] && ct_is text/html'
+  req GET "$L/api/status" "${lan[@]}"
+  t "LAN GET /api/status (Layer 1 seam) without a session → 401 problem+json" 'problem_is 401 unauthenticated'
+  req GET "$L/v1" "${lan[@]}"
+  t "LAN GET /v1 (minimal page) without a session → 401 problem+json" 'problem_is 401 unauthenticated'
+  req GET "$L/health" "${lan[@]}"
+  t "LAN GET /health stays open (200|503)" 'case $ST in 200 | 503) true ;; *) false ;; esac'
   req GET "$L/api/v1/auth/session" "${lan[@]}"
   t "LAN GET /api/v1/auth/session → {loopback:false, paired:false, lan_enabled:true}" \
     '[ "$ST" = 200 ] && jb ".loopback == false and .paired == false and .lan_enabled == true"'
@@ -357,6 +387,8 @@ inner() {
     '[ "$ST" = 200 ] && [ "$(jget -c .auth)" = "{\"loopback\":false,\"paired\":true}" ]'
   req GET "$L/api/v1/services" "${lan[@]}" -b "$jar"
   t "LAN GET /api/v1/services with the cookie → 200" '[ "$ST" = 200 ]'
+  req GET "$L/api/status" "${lan[@]}" -b "$jar"
+  t "LAN GET /api/status with the cookie → 200" '[ "$ST" = 200 ] && jb ".schema == 1"'
   req PATCH "$L/api/v1/settings" "${lan[@]}" -b "$jar" -H 'Content-Type: application/json' -d '{"lan_enabled":false}'
   t "LAN PATCH /settings {lan_enabled:false} → 403 loopback_only" 'problem_is 403 loopback_only'
   req PATCH "$L/api/v1/settings" "${lan[@]}" -b "$jar" -H 'Content-Type: application/json' -d '{"offer":"accepted"}'
@@ -480,8 +512,42 @@ inner() {
     note "tapes in ui/test/tapes already present — kept (SMOKE_TAPES=1 re-records)"
   fi
 
+  # ---------------------------------------------------------------- per-service restart
+  phase "5g. per-service restart (supervised child vs not)"
+  req GET "$B/api/v1/services/model"
+  local mpid0 mstate0
+  mpid0=$(jget .detail.pid)
+  mstate0=$(jget .state)
+  t "model is a supervised child: actions has restart ($(jget -c .actions), state $mstate0, pid $mpid0)" \
+    'jb ".kind == \"child\" and (.actions | index(\"restart\"))" && [[ "$mpid0" =~ ^[0-9]+$ ]]'
+  req POST "$B/api/v1/services/model/restart" -H 'Content-Type: application/json' -d '{}'
+  t "POST /api/v1/services/model/restart → 202 {schema:1, id:model, restarting:true}" \
+    '[ "$ST" = 202 ] && jb ". == {schema: 1, id: \"model\", restarting: true}"'
+  local mpid1="" mstate1=""
+  for _ in $(seq 1 100); do
+    req GET "$B/api/v1/services/model"
+    mpid1=$(jget .detail.pid)
+    mstate1=$(jget .state)
+    [[ "$mpid1" =~ ^[0-9]+$ ]] && [ "$mpid1" != "$mpid0" ] && [ "$mstate1" = live ] && break
+    sleep 0.3
+  done
+  t "model comes back LIVE with a new pid ($mpid0 → $mpid1, state $mstate1)" \
+    '[[ "$mpid1" =~ ^[0-9]+$ ]] && [ "$mpid1" != "$mpid0" ] && [ "$mstate1" = live ]'
+  t "the old llama-server process is gone" '! kill -0 "$mpid0" 2>/dev/null'
+  req GET "$B/api/v1/services/transport"
+  t "transport (detection-only stub here) offers no restart ($(jget .reason_code), actions $(jget -c .actions))" \
+    'jb "(.actions | index(\"restart\")) == null"'
+  req POST "$B/api/v1/services/transport/restart" -H 'Content-Type: application/json' -d '{}'
+  t "POST /api/v1/services/transport/restart → 409 not_supervised" 'problem_is 409 not_supervised'
+  req POST "$B/api/v1/services/kb/restart" -H 'Content-Type: application/json' -d '{}'
+  t "POST /api/v1/services/kb/restart → 409 not_supervised" 'problem_is 409 not_supervised'
+  req POST "$B/api/v1/services/nope/restart" -H 'Content-Type: application/json' -d '{}'
+  t "POST /api/v1/services/nope/restart → 404 not_found" 'problem_is 404 not_found'
+  req POST "$L/api/v1/services/model/restart" --interface "$LANIP" -H 'Content-Type: application/json' -d '{}'
+  t "LAN POST /services/model/restart without a session → 401" 'problem_is 401 unauthenticated'
+
   # ---------------------------------------------------------------- actions
-  phase "5g. update check + restart"
+  phase "5h. update check + node restart"
   req POST "$B/api/v1/update/check" -H "$cj" -d '{}'
   t "POST /api/v1/update/check → 202 {started:true}" '[ "$ST" = 202 ] && jb ".started == true"'
   req POST "$B/api/v1/node/restart" -H "$cj" -d '{}'

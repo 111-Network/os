@@ -1,6 +1,6 @@
 //! `GET /api/v1/services` · `/services/{id}` · `/services/{id}/log?n=` — the
-//! services registry (spec §7; logic in `crate::daemon::services`). Owned by
-//! Layer 4 task R2.
+//! services registry (spec §7; logic in `crate::daemon::services`) — and
+//! `POST /services/{id}/restart`. Owned by Layer 4 task R2.
 //!
 //! - The registry is started by the daemon hook (`services::probe::spawn`) and
 //!   read from `ApiState` ext; without it (compat `serve()`, tools) the list
@@ -12,25 +12,87 @@
 //!   Services without a log file — or whose file does not exist yet — answer
 //!   `source: "none"` with no lines. Lines are sanitized (control chars except
 //!   `\t` stripped) by `services::log`. Log tails work without the registry.
+//! - Restart: only the children this daemon supervises (`services::Supervised`
+//!   in `ApiState` ext: agent, model, transport while rnsd is a child) →
+//!   `202 {schema, id, restarting}` at once; the restart runs in the
+//!   background (SIGTERM, [`RESTART_GRACE`], SIGKILL, immediate respawn with
+//!   the back-off cleared — also out of `child_degraded`). Anything else →
+//!   `409 not_supervised`. Same gate as every write (loopback or session,
+//!   CSRF).
 
 use super::{ApiRouter, ApiState, Problem};
 use crate::daemon::intelligence;
-use crate::daemon::services::{self, log, Registry, ServiceId};
+use crate::daemon::services::{self, log, Registry, ServiceId, Supervised};
+use crate::daemon::supervise::ChildState;
 use axum::extract::rejection::QueryRejection;
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
-use axum::routing::get;
+use axum::routing::{get, post};
 use axum::Json;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
+
+/// SIGTERM → SIGKILL grace of a dashboard-requested child restart.
+pub const RESTART_GRACE: Duration = crate::daemon::CHILD_STOP_GRACE;
 
 pub fn router() -> ApiRouter {
     axum::Router::new()
         .route("/api/v1/services", get(list))
         .route("/api/v1/services/{id}", get(one))
         .route("/api/v1/services/{id}/log", get(log_tail))
+        .route("/api/v1/services/{id}/restart", post(restart))
+}
+
+fn not_supervised(id: ServiceId) -> Response {
+    let detail = match id {
+        ServiceId::Agent | ServiceId::Model => {
+            "It is not installed on this node, so there is nothing to restart.".to_string()
+        }
+        ServiceId::Transport => "Mesh transport runs as the detection-only stub here (no python3 \
+            or Reticulum environment), so there is no rnsd process to restart."
+            .to_string(),
+        other => format!(
+            "{} is not a process the node runs; use \"Restart node\" in Settings to restart \
+             everything.",
+            services::catalogue(other).plain_name
+        ),
+    };
+    Problem::new(
+        StatusCode::CONFLICT,
+        "not_supervised",
+        "This service is not run by the node itself.",
+    )
+    .detail(detail)
+    .into_response()
+}
+
+async fn restart(State(api): State<Arc<ApiState>>, Path(id): Path<String>) -> Response {
+    let Some(sid) = ServiceId::parse(&id) else {
+        return unknown(&id);
+    };
+    let child = api
+        .ext::<Arc<Supervised>>()
+        .and_then(|s| s.get(sid).cloned())
+        .filter(|c| c.state() != ChildState::Stopped);
+    let Some(child) = child else {
+        return not_supervised(sid);
+    };
+    eprintln!(
+        "111 daemon: restart of {} ({}) requested from the dashboard",
+        sid.as_str(),
+        child.name()
+    );
+    tokio::spawn(async move {
+        child.restart(RESTART_GRACE).await;
+    });
+    (
+        StatusCode::ACCEPTED,
+        Json(serde_json::json!({"schema": 1, "id": sid.as_str(), "restarting": true})),
+    )
+        .into_response()
 }
 
 fn registry_down() -> Response {

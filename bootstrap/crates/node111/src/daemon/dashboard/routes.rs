@@ -13,15 +13,24 @@
 //! - The Layer 1 minimal page moved to `GET /v1`.
 //! - `/api/v1/*` — see `api_v1/mod.rs` (auth, CSRF, events).
 //! - Host guard (DNS-rebinding defense) on everything, widened per §11.
+//! - `/api/status` and `/v1` are gated like `/api/v1/*` (loopback or a valid
+//!   session, else `401 unauthenticated`); `/`, static files and `/health`
+//!   stay open (a LAN visitor needs the UI to reach `/pair`).
+//! - Every response carries [`CSP`] (`/v1` adds the hash of its one inline
+//!   script), `X-Content-Type-Options: nosniff` and `Referrer-Policy:
+//!   no-referrer`.
+//! - Any `/api/*` error that is not already JSON (axum extractor rejections,
+//!   413, 405, unknown routes) is rewritten to `application/problem+json`
+//!   with the same status ([`api_problems`]).
 
-use super::api_v1::{self, ApiState, Problem};
+use super::api_v1::{self, auth, ApiState, Problem};
 use crate::daemon::health::{evaluate, HealthStatus, TransportHealth};
 use axum::body::Body;
 use axum::extract::{Path, Request, State};
 use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
 use axum::middleware::{self, Next};
 use axum::response::{Html, IntoResponse, Response};
-use axum::routing::get;
+use axum::routing::{any, get};
 use axum::Json;
 use serde::Serialize;
 use sha2::{Digest, Sha256};
@@ -54,6 +63,90 @@ const NOT_BUILT: &str = r#"<!doctype html>
 <p>The minimal node page works: <a href="/v1" style="color:#fff">/v1</a></p>
 </main></body></html>
 "#;
+
+/// Content-Security-Policy on every response. The UI ships no inline script;
+/// inline `style` attributes are allowed (the not-built notice, the UI's
+/// `<noscript>` fallback).
+pub const CSP: &str = "default-src 'self'; script-src 'self'; connect-src 'self'; \
+img-src 'self' data:; font-src 'self' data:; style-src 'self' 'unsafe-inline'; \
+frame-ancestors 'none'; base-uri 'self'; form-action 'self'";
+
+// ---------------------------------------------------------------- headers
+
+/// Security headers on every response (kept when a handler set its own).
+async fn security_headers(req: Request, next: Next) -> Response {
+    let mut resp = next.run(req).await;
+    let h = resp.headers_mut();
+    for (name, value) in [
+        (header::CONTENT_SECURITY_POLICY, CSP),
+        (header::X_CONTENT_TYPE_OPTIONS, "nosniff"),
+        (header::REFERRER_POLICY, "no-referrer"),
+    ] {
+        if !h.contains_key(&name) {
+            h.insert(name, HeaderValue::from_static(value));
+        }
+    }
+    resp
+}
+
+/// Machine code for a framework-generated error status (contract enum).
+fn problem_code(status: StatusCode) -> &'static str {
+    match status {
+        StatusCode::NOT_FOUND => "not_found",
+        StatusCode::UNAUTHORIZED => "unauthenticated",
+        StatusCode::TOO_MANY_REQUESTS => "rate_limited",
+        s if s.is_server_error() => "internal",
+        _ => "bad_request",
+    }
+}
+
+/// `/api/*` errors that are not JSON (axum's plain-text extractor rejections,
+/// 413 body limit, 405, …) become problem+json with the same status; the
+/// framework's message becomes `detail`. Other headers (e.g. `Allow`) stay.
+async fn api_problems(req: Request, next: Next) -> Response {
+    if !req.uri().path().starts_with("/api/") {
+        return next.run(req).await;
+    }
+    let resp = next.run(req).await;
+    let status = resp.status();
+    if !(status.is_client_error() || status.is_server_error()) {
+        return resp;
+    }
+    let json = resp
+        .headers()
+        .get(header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.split(';').next())
+        .is_some_and(|m| {
+            let m = m.trim();
+            m.eq_ignore_ascii_case("application/json")
+                || m.eq_ignore_ascii_case("application/problem+json")
+        });
+    if json {
+        return resp;
+    }
+    let (mut parts, body) = resp.into_parts();
+    let text = axum::body::to_bytes(body, 4096).await.unwrap_or_default();
+    let detail = String::from_utf8_lossy(&text).trim().to_string();
+    let title = status.canonical_reason().unwrap_or("error");
+    let mut problem = Problem::new(status, problem_code(status), title);
+    if !detail.is_empty() {
+        problem = problem.detail(detail);
+    }
+    let fresh = problem.into_response();
+    parts.headers.remove(header::CONTENT_LENGTH);
+    parts.headers.remove(header::TRANSFER_ENCODING);
+    for (k, v) in fresh.headers() {
+        parts.headers.insert(k.clone(), v.clone());
+    }
+    Response::from_parts(parts, fresh.into_body())
+}
+
+/// Any method on an `/api/` path no route claims: `404 not_found` (without
+/// this, the GET-only static catch-all would answer `405` to a POST).
+async fn api_not_found() -> Problem {
+    Problem::new(StatusCode::NOT_FOUND, "not_found", "no such API route")
+}
 
 // ---------------------------------------------------------------- host guard
 
@@ -280,23 +373,82 @@ pub fn ui_embedded() -> bool {
 /// The whole dashboard app (state applied). Serve with
 /// `into_make_service_with_connect_info::<SocketAddr>()` — auth needs the peer.
 pub fn app(api: Arc<ApiState>) -> axum::Router {
-    let legacy = axum::Router::new()
+    let open = axum::Router::new()
         .route("/", get(ui_index))
-        .route("/v1", get(legacy_index))
         .route("/health", get(health))
+        .route("/api/{*rest}", any(api_not_found))
+        .route("/{*path}", get(ui_path));
+    // Layer 1 seam + minimal page: node facts, so pairing-gated like /api/v1.
+    let gated = axum::Router::new()
+        .route("/v1", get(legacy_index))
         .route("/api/status", get(api_status))
-        .route("/{*path}", get(ui_path))
-        .with_state(Arc::clone(&api));
-    legacy
+        .route_layer(middleware::from_fn_with_state(
+            Arc::clone(&api),
+            auth::require_session,
+        ));
+    open.merge(gated)
+        .with_state(Arc::clone(&api))
         .merge(api_v1::router(Arc::clone(&api)))
+        .layer(middleware::from_fn(api_problems))
         .layer(middleware::from_fn_with_state(api, host_guard))
+        .layer(middleware::from_fn(security_headers))
+}
+
+/// Standard base64 (RFC 4648, padded) — CSP hash sources only.
+pub fn base64(bytes: &[u8]) -> String {
+    const A: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
+    for chunk in bytes.chunks(3) {
+        let b = [
+            chunk[0],
+            *chunk.get(1).unwrap_or(&0),
+            *chunk.get(2).unwrap_or(&0),
+        ];
+        let n = (b[0] as u32) << 16 | (b[1] as u32) << 8 | b[2] as u32;
+        for (i, shift) in [18, 12, 6, 0].into_iter().enumerate() {
+            if i <= chunk.len() {
+                out.push(A[(n >> shift & 63) as usize] as char);
+            } else {
+                out.push('=');
+            }
+        }
+    }
+    out
+}
+
+/// [`CSP`] plus a `'sha256-…'` source for each inline `<script>` in `page`
+/// (the Layer 1 minimal page carries one; the policy stays strict otherwise).
+pub fn csp_with_inline_scripts(page: &str) -> String {
+    let mut hashes = String::new();
+    let mut rest = page;
+    while let Some(open) = rest.find("<script>") {
+        let body = &rest[open + "<script>".len()..];
+        let Some(close) = body.find("</script>") else {
+            break;
+        };
+        let digest = Sha256::digest(&body.as_bytes()[..close]);
+        hashes.push_str(&format!(" 'sha256-{}'", base64(&digest)));
+        rest = &body[close..];
+    }
+    CSP.replacen(
+        "script-src 'self'",
+        &format!("script-src 'self'{hashes}"),
+        1,
+    )
 }
 
 /// `GET /v1` — the Layer 1 minimal page (kept for old browsers, spec §2).
 async fn legacy_index() -> impl IntoResponse {
     match DashboardAssets::get("dashboard.html") {
         Some(page) => {
-            Html(String::from_utf8_lossy(page.data.as_ref()).into_owned()).into_response()
+            let page = String::from_utf8_lossy(page.data.as_ref()).into_owned();
+            let csp = csp_with_inline_scripts(&page);
+            let mut resp = Html(page).into_response();
+            if let Ok(v) = HeaderValue::from_str(&csp) {
+                resp.headers_mut()
+                    .insert(header::CONTENT_SECURITY_POLICY, v);
+            }
+            resp
         }
         None => (StatusCode::INTERNAL_SERVER_ERROR, "dashboard asset missing").into_response(),
     }

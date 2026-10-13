@@ -118,45 +118,195 @@ impl BackoffSchedule {
     }
 }
 
-pub struct ChildHandle {
-    state_rx: tokio::sync::watch::Receiver<ChildState>,
-    stop: Arc<std::sync::atomic::AtomicBool>,
-    pid: Arc<Mutex<Option<u32>>>,
-    #[allow(dead_code)] // task kept alive by the handle
-    task: tokio::task::JoinHandle<()>,
+/// Pid + pending restart, under one lock so a restart request and the
+/// supervisor's spawn/exit bookkeeping never interleave (see [`ChildControl::restart`]).
+#[derive(Debug, Default)]
+struct Shared {
+    pid: Option<u32>,
+    /// A restart was requested and not yet satisfied by a fresh spawn.
+    restart: bool,
 }
 
-impl ChildHandle {
+/// After SIGKILL, how long to wait for the supervisor to reap the child.
+pub const KILL_WAIT: Duration = Duration::from_secs(2);
+
+/// The cloneable control side of one supervised child: read its state and
+/// pid, stop it, restart it. Obtained from [`ChildHandle::control`]; the
+/// dashboard's per-service restart route holds these.
+#[derive(Clone)]
+pub struct ChildControl {
+    name: String,
+    state_rx: tokio::sync::watch::Receiver<ChildState>,
+    stop: Arc<std::sync::atomic::AtomicBool>,
+    shared: Arc<Mutex<Shared>>,
+    /// Wakes the supervisor out of a back-off sleep or the degraded wait.
+    kick: Arc<tokio::sync::Notify>,
+}
+
+fn signal(pid: u32, sig: libc::c_int) {
+    unsafe { libc::kill(pid as libc::pid_t, sig) };
+}
+
+impl ChildControl {
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
     pub fn state(&self) -> ChildState {
         *self.state_rx.borrow()
     }
 
     /// Current child PID when running (None while backing off/stopped).
     pub fn pid(&self) -> Option<u32> {
-        *self.pid.lock().unwrap()
+        self.shared.lock().unwrap().pid
     }
 
-    /// Ask the child to stop: SIGTERM when running, then the supervisor exits
-    /// instead of restarting.
+    /// Ask the child to stop without waiting: SIGTERM when running, then the
+    /// supervisor exits instead of restarting. Prefer [`Self::stop_and_wait`].
     pub fn stop(&self) {
         self.stop.store(true, std::sync::atomic::Ordering::SeqCst);
-        if let Some(pid) = *self.pid.lock().unwrap() {
-            unsafe { libc::kill(pid as libc::pid_t, libc::SIGTERM) };
+        self.kick.notify_one();
+        if let Some(pid) = self.pid() {
+            signal(pid, libc::SIGTERM);
+        }
+    }
+
+    /// Stop and join: SIGTERM, wait up to `grace` for the supervisor to reap
+    /// the child and report [`ChildState::Stopped`], then SIGKILL and wait up
+    /// to [`KILL_WAIT`] more. Returns once the supervisor is done (or gave up).
+    pub async fn stop_and_wait(&self, grace: Duration) {
+        self.stop();
+        let mut rx = self.state_rx.clone();
+        // `Err` from wait_for = the supervisor task is gone: also done.
+        let stopped = |s: &ChildState| *s == ChildState::Stopped;
+        if tokio::time::timeout(grace, rx.wait_for(stopped))
+            .await
+            .is_ok()
+        {
+            return;
+        }
+        if let Some(pid) = self.pid() {
+            eprintln!(
+                "111 supervise: {} (pid {pid}) ignored SIGTERM for {grace:?} — SIGKILL",
+                self.name
+            );
+            signal(pid, libc::SIGKILL);
+        }
+        if tokio::time::timeout(KILL_WAIT, rx.wait_for(stopped))
+            .await
+            .is_err()
+        {
+            eprintln!("111 supervise: {} did not stop after SIGKILL", self.name);
+        }
+    }
+
+    /// Restart in place: SIGTERM the running child, wait up to `grace` for it
+    /// to exit, SIGKILL if it did not; the supervisor respawns it at once with
+    /// a fresh back-off schedule. A child in back-off or `Degraded` (crash
+    /// loop: the supervisor had stopped respawning) is respawned immediately.
+    /// Returns `false` when the child is stopped for good (daemon shutdown);
+    /// a restart already in flight is joined, not repeated.
+    pub async fn restart(&self, grace: Duration) -> bool {
+        if self.stop.load(std::sync::atomic::Ordering::SeqCst)
+            || self.state() == ChildState::Stopped
+        {
+            return false;
+        }
+        let pid = {
+            let mut sh = self.shared.lock().unwrap();
+            if sh.restart {
+                return true; // already pending
+            }
+            sh.restart = true;
+            sh.pid
+        };
+        self.kick.notify_one();
+        let Some(pid) = pid else {
+            return true; // backing off / degraded: the kick respawns it
+        };
+        signal(pid, libc::SIGTERM);
+        let deadline = Instant::now() + grace;
+        while self.pid() == Some(pid) && Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        if self.pid() == Some(pid) {
+            eprintln!(
+                "111 supervise: {} (pid {pid}) ignored SIGTERM for {grace:?} — SIGKILL",
+                self.name
+            );
+            signal(pid, libc::SIGKILL);
+            let deadline = Instant::now() + KILL_WAIT;
+            while self.pid() == Some(pid) && Instant::now() < deadline {
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        }
+        true
+    }
+
+    /// Supervisor side: wait until `dur` elapses (`None` = forever) or a
+    /// stop/restart request arrives. A stale wake-up (a permit left from a
+    /// request that was already served) does not cut the wait short.
+    async fn wait_for_request(&self, dur: Option<Duration>) {
+        let deadline = dur.map(|d| tokio::time::Instant::now() + d);
+        loop {
+            if self.stop.load(std::sync::atomic::Ordering::SeqCst)
+                || self.shared.lock().unwrap().restart
+            {
+                return;
+            }
+            match deadline {
+                Some(dl) => {
+                    if tokio::time::timeout_at(dl, self.kick.notified())
+                        .await
+                        .is_err()
+                    {
+                        return;
+                    }
+                }
+                None => self.kick.notified().await,
+            }
         }
     }
 }
 
+/// Owner of one supervised child: the [`ChildControl`] (via `Deref`) plus the
+/// supervisor task.
+pub struct ChildHandle {
+    ctl: ChildControl,
+    #[allow(dead_code)] // task kept alive by the handle
+    task: tokio::task::JoinHandle<()>,
+}
+
+impl std::ops::Deref for ChildHandle {
+    type Target = ChildControl;
+    fn deref(&self) -> &ChildControl {
+        &self.ctl
+    }
+}
+
+impl ChildHandle {
+    /// A cloneable control for this child (restart route, joins).
+    pub fn control(&self) -> ChildControl {
+        self.ctl.clone()
+    }
+}
+
 /// Spawn a supervised child: restart-in-place, backoff per policy, sustained
-/// crash-loop ⇒ Degraded (surfaced by the dashboard, not fatal to the daemon).
+/// crash-loop ⇒ Degraded (surfaced by the dashboard, not fatal to the daemon;
+/// the supervisor then waits for a [`ChildControl::restart`] or a stop).
 /// Must be called within a tokio runtime.
 pub fn spawn_child(spec: ChildSpec) -> ChildHandle {
     let (state_tx, state_rx) = tokio::sync::watch::channel(ChildState::Backoff);
-    let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let pid: Arc<Mutex<Option<u32>>> = Arc::new(Mutex::new(None));
+    let ctl = ChildControl {
+        name: spec.name.clone(),
+        state_rx,
+        stop: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        shared: Arc::new(Mutex::new(Shared::default())),
+        kick: Arc::new(tokio::sync::Notify::new()),
+    };
 
     let task = {
-        let stop = Arc::clone(&stop);
-        let pid = Arc::clone(&pid);
+        let ctl = ctl.clone();
         let mut schedule = BackoffSchedule::new(
             spec.backoff.clone(),
             std::time::SystemTime::now()
@@ -165,10 +315,11 @@ pub fn spawn_child(spec: ChildSpec) -> ChildHandle {
                 .unwrap_or(0x9e37_79b9),
         );
         tokio::spawn(async move {
+            let stopping = || ctl.stop.load(std::sync::atomic::Ordering::SeqCst);
             let window = Duration::from_secs(spec.backoff.crash_loop_window_secs);
             let mut last_spawn: Option<Instant> = None;
-            loop {
-                if stop.load(std::sync::atomic::Ordering::SeqCst) {
+            'run: loop {
+                if stopping() {
                     break;
                 }
                 // Stable run since last spawn? reset backoff.
@@ -221,37 +372,73 @@ pub fn spawn_child(spec: ChildSpec) -> ChildHandle {
                             "111 supervise: spawn {} failed: {e}",
                             spec.program.display()
                         );
+                        if std::mem::take(&mut ctl.shared.lock().unwrap().restart) {
+                            schedule.reset(); // a requested restart gets a fresh schedule
+                        }
                         match schedule.record_exit(Instant::now()) {
                             Decision::Delay(d) => {
                                 let _ = state_tx.send(ChildState::Backoff);
-                                tokio::time::sleep(d).await;
+                                ctl.wait_for_request(Some(d)).await;
                                 continue;
                             }
                             Decision::Degraded => {
                                 let _ = state_tx.send(ChildState::Degraded);
-                                return;
+                                ctl.wait_for_request(None).await;
+                                continue;
                             }
                         }
                     }
                 };
                 last_spawn = Some(Instant::now());
-                *pid.lock().unwrap() = child.id();
+                let pid = child.id();
+                {
+                    let mut sh = ctl.shared.lock().unwrap();
+                    sh.pid = pid;
+                    // a restart requested before this spawn is satisfied by it
+                    if std::mem::take(&mut sh.restart) {
+                        schedule.reset();
+                    }
+                }
                 let _ = state_tx.send(ChildState::Running);
+                if stopping() {
+                    // stop raced the spawn (it saw no pid to signal)
+                    if let Some(pid) = pid {
+                        signal(pid, libc::SIGTERM);
+                    }
+                }
 
                 let _ = child.wait().await;
-                *pid.lock().unwrap() = None;
+                let restarting = {
+                    let mut sh = ctl.shared.lock().unwrap();
+                    sh.pid = None;
+                    std::mem::take(&mut sh.restart)
+                };
 
-                if stop.load(std::sync::atomic::Ordering::SeqCst) {
+                if stopping() {
                     break;
+                }
+                if restarting {
+                    // requested restart: respawn now, fresh back-off
+                    schedule.reset();
+                    continue;
                 }
                 match schedule.record_exit(Instant::now()) {
                     Decision::Delay(d) => {
                         let _ = state_tx.send(ChildState::Backoff);
-                        tokio::time::sleep(d).await;
+                        ctl.wait_for_request(Some(d)).await;
                     }
                     Decision::Degraded => {
                         let _ = state_tx.send(ChildState::Degraded);
-                        return;
+                        // crash loop: no more respawns until a restart request
+                        loop {
+                            ctl.wait_for_request(None).await;
+                            if stopping() {
+                                break 'run;
+                            }
+                            if ctl.shared.lock().unwrap().restart {
+                                break;
+                            }
+                        }
                     }
                 }
             }
@@ -259,12 +446,7 @@ pub fn spawn_child(spec: ChildSpec) -> ChildHandle {
         })
     };
 
-    ChildHandle {
-        state_rx,
-        stop,
-        pid,
-        task,
-    }
+    ChildHandle { ctl, task }
 }
 
 #[cfg(test)]
@@ -367,6 +549,133 @@ mod tests {
         h.stop();
         tokio::time::sleep(Duration::from_millis(300)).await;
         assert_eq!(h.state(), ChildState::Stopped);
+    }
+
+    fn sh(script: &str, args: &[&str]) -> ChildSpec {
+        let mut a = vec!["-c".to_string(), script.to_string(), "sh".to_string()];
+        a.extend(args.iter().map(|s| s.to_string()));
+        ChildSpec {
+            name: "sh-test".into(),
+            program: PathBuf::from("/bin/sh"),
+            args: a,
+            env: vec![],
+            backoff: BackoffPolicy {
+                crash_loop_threshold: 3,
+                ..policy(20)
+            },
+            stdout_log: None,
+        }
+    }
+
+    async fn until(limit: Duration, f: impl Fn() -> bool) -> bool {
+        let t0 = Instant::now();
+        while t0.elapsed() < limit {
+            if f() {
+                return true;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        f()
+    }
+
+    fn alive(pid: u32) -> bool {
+        unsafe { libc::kill(pid as libc::pid_t, 0) == 0 }
+    }
+
+    #[tokio::test]
+    async fn stop_and_wait_joins_a_cooperative_child() {
+        let h = spawn_child(sh("exec sleep 30", &[]));
+        assert!(until(Duration::from_secs(2), || h.pid().is_some()).await);
+        let pid = h.pid().unwrap();
+        let t0 = Instant::now();
+        h.stop_and_wait(Duration::from_secs(5)).await;
+        assert!(t0.elapsed() < Duration::from_secs(2), "{:?}", t0.elapsed());
+        assert_eq!(h.state(), ChildState::Stopped);
+        assert_eq!(h.pid(), None);
+        assert!(!alive(pid), "reaped");
+    }
+
+    #[tokio::test]
+    async fn stop_and_wait_kills_a_child_that_ignores_sigterm() {
+        let h = spawn_child(sh("trap '' TERM; while :; do sleep 0.05; done", &[]));
+        assert!(until(Duration::from_secs(2), || h.pid().is_some()).await);
+        tokio::time::sleep(Duration::from_millis(100)).await; // trap installed
+        let pid = h.pid().unwrap();
+        let t0 = Instant::now();
+        h.stop_and_wait(Duration::from_millis(300)).await;
+        let took = t0.elapsed();
+        assert!(
+            took >= Duration::from_millis(300),
+            "waited the grace: {took:?}"
+        );
+        assert!(took < Duration::from_secs(3), "{took:?}");
+        assert_eq!(h.state(), ChildState::Stopped);
+        assert!(!alive(pid), "SIGKILLed and reaped");
+    }
+
+    #[tokio::test]
+    async fn stop_and_wait_ends_a_degraded_supervisor() {
+        let h = spawn_child(sh("exit 1", &[]));
+        assert!(until(Duration::from_secs(3), || h.state() == ChildState::Degraded).await);
+        h.stop_and_wait(Duration::from_secs(5)).await;
+        assert_eq!(h.state(), ChildState::Stopped);
+        assert!(
+            !h.control().restart(Duration::from_secs(1)).await,
+            "stopped for good"
+        );
+    }
+
+    #[tokio::test]
+    async fn restart_respawns_now_with_a_new_pid() {
+        let h = spawn_child(sh("exec sleep 30", &[]));
+        assert!(until(Duration::from_secs(2), || h.pid().is_some()).await);
+        let old = h.pid().unwrap();
+        let ctl = h.control();
+        let t0 = Instant::now();
+        assert!(ctl.restart(Duration::from_secs(5)).await);
+        assert!(
+            until(Duration::from_secs(2), || h.pid().is_some_and(|p| p != old)).await,
+            "respawned"
+        );
+        // no back-off sleep in between (policy initial is 20 ms; well under 1 s)
+        assert!(t0.elapsed() < Duration::from_secs(1), "{:?}", t0.elapsed());
+        assert_eq!(h.state(), ChildState::Running);
+        assert!(!alive(old));
+        h.stop_and_wait(Duration::from_secs(5)).await;
+    }
+
+    #[tokio::test]
+    async fn restart_takes_a_term_ignoring_child_down_with_sigkill() {
+        let h = spawn_child(sh("trap '' TERM; while :; do sleep 0.05; done", &[]));
+        assert!(until(Duration::from_secs(2), || h.pid().is_some()).await);
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let old = h.pid().unwrap();
+        assert!(h.control().restart(Duration::from_millis(300)).await);
+        assert!(until(Duration::from_secs(2), || h.pid().is_some_and(|p| p != old)).await);
+        assert!(!alive(old));
+        h.stop_and_wait(Duration::from_millis(300)).await;
+    }
+
+    #[tokio::test]
+    async fn restart_clears_a_crash_loop() {
+        let dir = tempfile::tempdir().unwrap();
+        let mark = dir.path().join("ok");
+        let m = mark.to_str().unwrap();
+        // crashes until the marker exists, then runs
+        let h = spawn_child(sh("test -f \"$1\" || exit 1; exec sleep 30", &[m]));
+        assert!(until(Duration::from_secs(3), || h.state() == ChildState::Degraded).await);
+        // degraded means the supervisor stopped respawning: it stays down
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert_eq!(h.state(), ChildState::Degraded);
+        assert_eq!(h.pid(), None);
+        std::fs::write(&mark, "").unwrap();
+        assert!(h.control().restart(Duration::from_secs(1)).await);
+        assert!(
+            until(Duration::from_secs(2), || h.state() == ChildState::Running).await,
+            "fresh start out of degraded"
+        );
+        assert!(h.pid().is_some());
+        h.stop_and_wait(Duration::from_secs(5)).await;
     }
 
     #[tokio::test]

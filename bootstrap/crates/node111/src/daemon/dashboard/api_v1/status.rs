@@ -23,9 +23,10 @@
 //!   effective one.
 //! - `auth` — this request: `loopback` = loopback peer, `paired` = carries a
 //!   valid session cookie.
-//! - `layers` — rule as built today: `0` (knowledge, ships in every release),
-//!   `1` (this daemon), `2` (identity), `3` iff `current/bin/111-agent` exists,
-//!   `4` (this dashboard — it is answering).
+//! - `layers` — layers *working* right now (contract `Status.layers`): `0` iff
+//!   the KB payload verified at start and `current/share/kb` is still
+//!   readable, `1` always (this daemon), `2` iff the identity loaded ok, `3`
+//!   iff `current/bin/111-agent` exists, `4` always (this dashboard answers).
 //!
 //! **Heartbeat** ([`spawn_heartbeat`]): every 2 s the snapshot is rebuilt and a
 //! `status` frame is published on the events bus when it changed (diffed as
@@ -234,9 +235,22 @@ pub fn display_forms(node_id: Option<&str>) -> (Option<String>, Option<String>) 
     }
 }
 
-/// Layers this node runs as built today (see module docs for the rule).
-pub fn layers(layout: &crate::daemon::DaemonLayout) -> Vec<u8> {
-    let mut l = vec![0, 1, 2];
+/// Layers working right now (see module docs for the rule). `kb_verified` =
+/// the KB passed its integrity check at start; `identity_ok` = the identity
+/// loaded (the `/health` identity component).
+pub fn layers(
+    layout: &crate::daemon::DaemonLayout,
+    kb_verified: bool,
+    identity_ok: bool,
+) -> Vec<u8> {
+    let mut l = Vec::new();
+    if kb_verified && std::fs::read_dir(layout.current_release().join("share/kb")).is_ok() {
+        l.push(0);
+    }
+    l.push(1);
+    if identity_ok {
+        l.push(2);
+    }
     if crate::daemon::intelligence::paths::agent_binary(layout).is_file() {
         l.push(3);
     }
@@ -261,9 +275,9 @@ pub fn build(api: &ApiState, auth: AuthView) -> Status {
     let agent_status = api.ext::<Arc<Registry>>().and_then(|r| r.agent_status());
     let alias = settings::read_file(&state_dir).alias;
     let lan_enabled = settings::lan_configured(api);
-    let layers = layers(&api.layout);
     let bind = api.bind.read().unwrap().clone();
     let s = api.dash.read().unwrap();
+    let layers = layers(&api.layout, s.kb.is_some(), s.components.identity);
     let update = update_view(&state_dir, &s, updater.as_deref());
     let (label, bech32) = display_forms(s.node_id.as_deref());
     let agent_running = s.intelligence.agent == ChildDisplay::Running;
@@ -327,7 +341,7 @@ async fn get_status(
 ) -> Json<Status> {
     let view = AuthView {
         loopback: auth::peer_is_loopback(&ext),
-        paired: auth::session_cookie(&headers).is_some_and(|t| api.auth.session_for(&t).is_some()),
+        paired: api.auth.session_in(&headers).is_some(),
     };
     Json(build(&api, view))
 }

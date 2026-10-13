@@ -12,7 +12,9 @@
 //!   No key material ever reaches it.
 //! - Both log to `<root>/agent/`, which is created 0700.
 
-use crate::daemon::supervise::{self, BackoffPolicy, ChildHandle, ChildSpec, ChildState};
+use crate::daemon::supervise::{
+    self, BackoffPolicy, ChildControl, ChildHandle, ChildSpec, ChildState,
+};
 use crate::daemon::DaemonLayout;
 use serde::Serialize;
 use std::path::{Path, PathBuf};
@@ -71,8 +73,8 @@ pub struct IntelligenceHandle {
 impl IntelligenceHandle {
     /// Current display state (cheap; the daemon mirrors it into the dashboard).
     pub fn state(&self) -> IntelligenceState {
-        let agent = ChildDisplay::from(self.agent.as_ref().map(ChildHandle::state));
-        let model_server = ChildDisplay::from(self.model.as_ref().map(ChildHandle::state));
+        let agent = ChildDisplay::from(self.agent.as_ref().map(|c| c.state()));
+        let model_server = ChildDisplay::from(self.model.as_ref().map(|c| c.state()));
         let agent_url = (agent == ChildDisplay::Running).then(|| AGENT_URL.to_string());
         IntelligenceState {
             agent,
@@ -84,19 +86,45 @@ impl IntelligenceHandle {
     /// Current `111-agent` PID while running (Layer 4 services registry uses
     /// PID changes to time its `starting` grace after each spawn).
     pub fn agent_pid(&self) -> Option<u32> {
-        self.agent.as_ref().and_then(ChildHandle::pid)
+        self.agent.as_ref().and_then(|c| c.pid())
     }
 
     /// Current `llama-server` PID while running (see [`Self::agent_pid`]).
     pub fn model_pid(&self) -> Option<u32> {
-        self.model.as_ref().and_then(ChildHandle::pid)
+        self.model.as_ref().and_then(|c| c.pid())
     }
 
-    /// SIGTERM both children and stop restarting them (daemon shutdown path).
+    /// Control of the `111-agent` child (`None` when absent).
+    pub fn agent_control(&self) -> Option<ChildControl> {
+        self.agent.as_ref().map(ChildHandle::control)
+    }
+
+    /// Control of the `llama-server` child (`None` when absent).
+    pub fn model_control(&self) -> Option<ChildControl> {
+        self.model.as_ref().map(ChildHandle::control)
+    }
+
+    /// SIGTERM both children and stop restarting them, without waiting.
     pub fn stop(&self) {
         for child in [&self.agent, &self.model].into_iter().flatten() {
             child.stop();
         }
+    }
+
+    /// Daemon shutdown: stop both children and join them (SIGTERM, `grace`,
+    /// SIGKILL — [`ChildControl::stop_and_wait`]), concurrently.
+    pub async fn stop_and_wait(&self, grace: std::time::Duration) {
+        let agent = async {
+            if let Some(c) = &self.agent {
+                c.stop_and_wait(grace).await;
+            }
+        };
+        let model = async {
+            if let Some(c) = &self.model {
+                c.stop_and_wait(grace).await;
+            }
+        };
+        tokio::join!(agent, model);
     }
 }
 

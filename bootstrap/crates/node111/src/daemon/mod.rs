@@ -74,6 +74,10 @@ pub fn reprobe(env: &dyn Env, layout: &DaemonLayout) -> (Facts, Result<Classific
     (facts, class)
 }
 
+/// SIGTERM → SIGKILL grace for each supervised child on daemon shutdown (and
+/// for a dashboard per-service restart).
+pub const CHILD_STOP_GRACE: Duration = Duration::from_secs(5);
+
 /// Release version currently linked (basename of `current`).
 fn current_version(layout: &DaemonLayout) -> String {
     crate::update_helper::current_version(layout).unwrap_or_else(|| "unknown".into())
@@ -292,6 +296,13 @@ async fn daemon_main() -> anyhow::Result<()> {
             transport: Arc::clone(&transport),
         },
     );
+    // POST /api/v1/services/{id}/restart: the children this daemon supervises
+    dashboard.api.insert_ext(Arc::new(
+        services::Supervised::default()
+            .with(services::ServiceId::Agent, intelligence.agent_control())
+            .with(services::ServiceId::Model, intelligence.model_control())
+            .with(services::ServiceId::Transport, transport.control()),
+    ));
     dashboard::api_v1::status::spawn_heartbeat(Arc::clone(&dashboard.api));
     let restart = Arc::new(tokio::sync::Notify::new());
     let restart_signal = dashboard::api_v1::actions::RestartSignal(Arc::clone(&restart));
@@ -317,8 +328,12 @@ async fn daemon_main() -> anyhow::Result<()> {
         },
     }
     dashboard.stop();
-    transport.stop();
-    intelligence.stop();
+    // join every child (SIGTERM, grace, SIGKILL) before exiting: an orphaned
+    // llama-server would keep the port and the RAM the next daemon needs
+    tokio::join!(
+        transport.stop_and_wait(CHILD_STOP_GRACE),
+        intelligence.stop_and_wait(CHILD_STOP_GRACE),
+    );
     eprintln!("111 daemon: shutting down");
     Ok(())
 }

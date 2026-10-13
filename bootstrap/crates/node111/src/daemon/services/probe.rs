@@ -2,14 +2,20 @@
 //! gathers [`Facts`]; the rules live in [`super::compute`].
 //!
 //! Cadence: one 2 s tick (child states, `GET :11182/health` and
-//! `GET :11181/health` with a 2 s timeout, TCP connect to `127.0.0.1:4403` with
-//! a 1 s timeout — all concurrent); every 5th tick (10 s) the agent's own
+//! `GET :11181/health` with a 2 s timeout, and whether anything LISTENs on
+//! local port 4403 — all concurrent); every 5th tick (10 s) the agent's own
 //! status (`GET :11182/v1/agent/status`, for `/status.intelligence`), PATH
 //! lookups (`opencode`, `python3`) and one board-detection pass (R4's
 //! `devices::detect::scan` + `devices::rns::bindings`, matched against the
 //! LoRa table here); a separate WAN
 //! task every 60 s (HTTP 204 probe, 3 s timeout per URL, same URLs as the
 //! installer's connectivity check).
+//!
+//! meshtasticd serves one API client at a time: a TCP connect every tick would
+//! evict the user's real client (the phone app, the web client). Its port is
+//! therefore checked by reading `/proc/net/tcp{,6}` for a LISTEN socket
+//! ([`port_listening`]); only where procfs is unreadable does a connect probe
+//! run instead.
 
 use super::{
     rfc3339_now, AgentStatusProbe, ChildFacts, Facts, GatewayFacts, Probe, Radio, RadioFacts,
@@ -147,6 +153,39 @@ pub async fn agent_status() -> Option<AgentStatusProbe> {
     Some(AgentStatusProbe { state, model_id })
 }
 
+/// Does one `/proc/net/tcp{,6}` table hold a socket on local `port` in state
+/// `0A` (LISTEN)? Rows: `sl local_address rem_address st …`, addresses as
+/// `HEXIP:HEXPORT`.
+pub fn listening_in_table(table: &str, port: u16) -> bool {
+    table.lines().skip(1).any(|line| {
+        let mut f = line.split_whitespace();
+        let (_sl, local, _remote, state) = (f.next(), f.next(), f.next(), f.next());
+        state == Some("0A")
+            && local
+                .and_then(|l| l.rsplit_once(':'))
+                .and_then(|(_, p)| u16::from_str_radix(p, 16).ok())
+                == Some(port)
+    })
+}
+
+/// LISTEN check under a procfs `net` dir (`/proc/net` in production). `None`
+/// when `<dir>/tcp` is unreadable; a missing `tcp6` (IPv6 off) is no listener.
+pub fn listening_under(net_dir: &Path, port: u16) -> Option<bool> {
+    let v4 = std::fs::read_to_string(net_dir.join("tcp")).ok()?;
+    let v6 = std::fs::read_to_string(net_dir.join("tcp6")).unwrap_or_default();
+    Some(listening_in_table(&v4, port) || listening_in_table(&v6, port))
+}
+
+/// Is something listening on local TCP `port`? Never connects (see module
+/// docs); falls back to a connect probe only when `/proc/net/tcp` is
+/// unreadable.
+pub async fn port_listening(port: u16, timeout: Duration) -> bool {
+    match listening_under(Path::new("/proc/net"), port) {
+        Some(listening) => listening,
+        None => tcp_open(port, timeout).await,
+    }
+}
+
 /// TCP connect to `127.0.0.1:port` within `timeout`.
 pub async fn tcp_open(port: u16, timeout: Duration) -> bool {
     matches!(
@@ -221,11 +260,58 @@ fn is_executable(p: &Path) -> bool {
 
 /// `which name` over `$PATH`, then `extra` directories.
 pub fn which(name: &str, extra: &[&str]) -> Option<PathBuf> {
+    which_in(name, extra.iter().map(PathBuf::from))
+}
+
+/// [`which`] with owned extra directories.
+pub fn which_in(name: &str, extra: impl IntoIterator<Item = PathBuf>) -> Option<PathBuf> {
     let path = std::env::var_os("PATH").unwrap_or_default();
     std::env::split_paths(&path)
-        .chain(extra.iter().map(PathBuf::from))
+        .chain(extra)
         .map(|d| d.join(name))
         .find(|p| is_executable(p))
+}
+
+/// Where `opencode` gets installed besides `$PATH` — a systemd unit's PATH is
+/// minimal, so the daemon would miss a perfectly good install. System-wide
+/// prefixes first, then per-user ones under each of `homes`.
+pub fn opencode_dirs(homes: &[PathBuf]) -> Vec<PathBuf> {
+    let mut dirs: Vec<PathBuf> = [
+        "/usr/local/bin",
+        "/opt/opencode/bin",
+        "/opt/homebrew/bin",
+        "/snap/bin",
+    ]
+    .into_iter()
+    .map(PathBuf::from)
+    .collect();
+    for home in homes {
+        dirs.push(home.join(".opencode/bin"));
+        dirs.push(home.join(".local/bin"));
+    }
+    dirs
+}
+
+/// The daemon user's home (passwd entry of the effective uid; `node111` in
+/// production) and `$HOME` when it differs. The user who ran the installer is
+/// not recorded anywhere the daemon can read, so their home is not searched.
+fn own_homes() -> Vec<PathBuf> {
+    let mut homes = Vec::new();
+    let pw = unsafe { libc::getpwuid(libc::geteuid()) };
+    if !pw.is_null() {
+        let dir = unsafe { (*pw).pw_dir };
+        if !dir.is_null() {
+            let s = unsafe { std::ffi::CStr::from_ptr(dir) };
+            homes.push(PathBuf::from(s.to_string_lossy().into_owned()));
+        }
+    }
+    if let Some(h) = std::env::var_os("HOME").filter(|h| !h.is_empty()) {
+        let h = PathBuf::from(h);
+        if !homes.contains(&h) {
+            homes.push(h);
+        }
+    }
+    homes
 }
 
 /// The LoRa-table row a USB device matches (installer rule: VID:PID and, when
@@ -301,7 +387,8 @@ fn slow_facts(layout: &DaemonLayout) -> SlowFacts {
     );
     SlowFacts {
         python3: which("python3", &[]).is_some(),
-        opencode: which("opencode", &[]).map(|p| p.to_string_lossy().into_owned()),
+        opencode: which_in("opencode", opencode_dirs(&own_homes()))
+            .map(|p| p.to_string_lossy().into_owned()),
         boards: usb_readable.then(|| boards_from_scan(&scan, &lora_table())),
         rnode: bound_rnodes(&bindings, &scan),
     }
@@ -457,7 +544,7 @@ pub fn spawn(api: Arc<ApiState>, src: Sources) -> Arc<Registry> {
                             Probe::NotRun
                         }
                     },
-                    tcp_open(MESHTASTIC_PORT, PORT_TIMEOUT),
+                    port_listening(MESHTASTIC_PORT, PORT_TIMEOUT),
                 );
                 if !agent_up {
                     registry.set_agent_status(None);
@@ -697,6 +784,39 @@ mod tests {
         assert_eq!(which("tool-z", &[d]), None);
     }
 
+    #[test]
+    fn opencode_found_outside_the_daemon_path() {
+        let dirs = opencode_dirs(&[PathBuf::from("/var/lib/111"), PathBuf::from("/home/u")]);
+        for want in [
+            "/usr/local/bin",
+            "/opt/opencode/bin",
+            "/opt/homebrew/bin",
+            "/snap/bin",
+            "/var/lib/111/.opencode/bin",
+            "/var/lib/111/.local/bin",
+            "/home/u/.opencode/bin",
+            "/home/u/.local/bin",
+        ] {
+            assert!(dirs.contains(&PathBuf::from(want)), "{want}: {dirs:?}");
+        }
+        // an install under a home's ~/.opencode/bin is found though PATH lacks it
+        let home = tempfile::tempdir().unwrap();
+        let bin = home.path().join(".opencode/bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        let exe = bin.join("opencode-test-111");
+        std::fs::write(&exe, "#!/bin/sh\n").unwrap();
+        std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert_eq!(
+            which_in(
+                "opencode-test-111",
+                opencode_dirs(&[home.path().to_path_buf()])
+            ),
+            Some(exe)
+        );
+        assert!(!own_homes().is_empty());
+    }
+
     #[tokio::test]
     async fn loopback_get_and_refused_port() {
         let listener = tokio::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
@@ -730,5 +850,66 @@ mod tests {
             .is_err());
         assert!(!tcp_open(closed, PORT_TIMEOUT).await);
         assert!(matches!(health(closed).await, Probe::Unreachable(_)));
+    }
+
+    #[test]
+    fn proc_net_tcp_listen_rows() {
+        // real /proc/net/tcp shape: header, a LISTEN on 0.0.0.0:4403 (0x1133),
+        // an ESTABLISHED socket whose *local* port is 4403, a LISTEN elsewhere
+        let v4 = "  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode\n\
+   0: 00000000:1133 00000000:0000 0A 00000000:00000000 00:00000000 00000000   999        0 1 1 0000000000000000 100 0 0 10 0\n\
+   1: 0100007F:2B9C 00000000:0000 0A 00000000:00000000 00:00000000 00000000  1000        0 2 1 0000000000000000 100 0 0 10 0\n";
+        assert!(listening_in_table(v4, 4403));
+        assert!(listening_in_table(v4, 11164));
+        assert!(!listening_in_table(v4, 11180));
+        let established = "  sl  local_address rem_address   st\n\
+   0: 0100007F:1133 0100007F:D431 01 00000000:00000000\n\
+   1: 0100007F:D431 0100007F:1133 01 00000000:00000000\n";
+        assert!(
+            !listening_in_table(established, 4403),
+            "only LISTEN rows count"
+        );
+        let v6 = "  sl  local_address                         remote_address                        st\n\
+   0: 00000000000000000000000000000000:1133 00000000000000000000000000000000:0000 0A 00000000:00000000\n";
+        assert!(listening_in_table(v6, 4403));
+        assert!(!listening_in_table("", 4403));
+        assert!(!listening_in_table("header only\n", 4403));
+
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(
+            listening_under(dir.path(), 4403),
+            None,
+            "unreadable → fallback"
+        );
+        std::fs::write(dir.path().join("tcp"), established).unwrap();
+        assert_eq!(
+            listening_under(dir.path(), 4403),
+            Some(false),
+            "no tcp6 is fine"
+        );
+        std::fs::write(dir.path().join("tcp6"), v6).unwrap();
+        assert_eq!(listening_under(dir.path(), 4403), Some(true));
+    }
+
+    #[tokio::test]
+    async fn listen_check_sees_a_real_listener_without_connecting() {
+        let listener = std::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        if Path::new("/proc/net/tcp").is_file() {
+            assert_eq!(listening_under(Path::new("/proc/net"), port), Some(true));
+        }
+        assert!(port_listening(port, PORT_TIMEOUT).await);
+        // nothing was accepted: the check never opened a connection
+        if Path::new("/proc/net/tcp").is_file() {
+            assert_eq!(
+                listener.accept().map_err(|e| e.kind()).err(),
+                Some(std::io::ErrorKind::WouldBlock)
+            );
+        }
+        // The "nothing listens" half is covered by `proc_net_tcp_listen_rows`
+        // on fixture tables: /proc/net/tcp is shared by every process in the
+        // network namespace, so a released ephemeral port may be re-bound by
+        // a concurrent test at any moment.
     }
 }

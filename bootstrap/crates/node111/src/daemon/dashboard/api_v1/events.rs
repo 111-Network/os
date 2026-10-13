@@ -223,7 +223,7 @@ async fn events(
     let token = if auth::peer_is_loopback(&ext) {
         None
     } else {
-        auth::session_cookie(&headers)
+        api.auth.session_in(&headers).map(|(token, _)| token)
     };
     let stream = stream_for(sub).take_while(move |_| {
         let ok = token

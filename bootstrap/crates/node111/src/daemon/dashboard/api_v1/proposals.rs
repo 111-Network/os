@@ -5,7 +5,11 @@
 //! - `proposals/<id>.json` — written by `111-agent` (`{schema,id,node_id,task_id,
 //!   kind,title,body,created_at}`, no status). Untrusted input: read-only here,
 //!   size-capped, a file whose `id` differs from its name is skipped, an
-//!   unparsable one is skipped with one stderr line.
+//!   unparsable one is skipped with one stderr line. `kind` must be one of
+//!   the contract's [`KINDS`]: an unknown kind is skipped in lists and
+//!   events, and `GET /proposals/{id}` / a decision on it answer `502
+//!   upstream_error` naming the value (the agent wrote something the
+//!   contract does not allow).
 //! - `decisions/<id>.json` — `{schema:1, decision, at}`, written here atomically
 //!   ([`crate::util::fs::atomic_write`]); Layer 9 consumes it. A proposal is
 //!   `decided` iff a valid decision file exists (a corrupt one is ignored and
@@ -38,6 +42,8 @@ use time::OffsetDateTime;
 
 /// List cap (newest first).
 pub const MAX_LIST: usize = 200;
+/// `Proposal.kind` (contract enum).
+pub const KINDS: [&str; 4] = ["diagnose", "propose", "patch", "chat"];
 /// Largest proposal/decision file read (bodies are model-written markdown).
 const MAX_FILE: u64 = 1 << 20;
 
@@ -174,18 +180,43 @@ fn read_decision(layout: &DaemonLayout, id: &str) -> Option<DecisionRec> {
     }
 }
 
+/// Why a present proposal file cannot be served.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Unusable {
+    /// Unreadable, unparsable, or misnamed.
+    Broken(String),
+    /// Parsed, but `kind` is not in [`KINDS`] (the value, verbatim).
+    Kind(String),
+}
+
+impl std::fmt::Display for Unusable {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Unusable::Broken(e) => f.write_str(e),
+            Unusable::Kind(k) => write!(f, "unknown kind {k:?}"),
+        }
+    }
+}
+
 /// `Ok(None)` = no such file; `Err` = present but unusable (logged by callers).
-fn read_proposal(layout: &DaemonLayout, id: &str) -> Result<Option<Proposal>, String> {
+fn read_proposal(layout: &DaemonLayout, id: &str) -> Result<Option<Proposal>, Unusable> {
     if !valid_id(id) {
         return Ok(None);
     }
     let path = proposals_dir(layout).join(format!("{id}.json"));
-    let Some(text) = read_capped(&path).map_err(|e| e.to_string())? else {
+    let Some(text) = read_capped(&path).map_err(|e| Unusable::Broken(e.to_string()))? else {
         return Ok(None);
     };
-    let f: ProposalFile = serde_json::from_str(&text).map_err(|e| e.to_string())?;
+    let f: ProposalFile =
+        serde_json::from_str(&text).map_err(|e| Unusable::Broken(e.to_string()))?;
     if f.id != id {
-        return Err(format!("its id {:?} does not match the file name", f.id));
+        return Err(Unusable::Broken(format!(
+            "its id {:?} does not match the file name",
+            f.id
+        )));
+    }
+    if !KINDS.contains(&f.kind.as_str()) {
+        return Err(Unusable::Kind(f.kind));
     }
     Ok(Some(Proposal {
         decision: read_decision(layout, id),
@@ -209,6 +240,34 @@ pub fn get_one(layout: &DaemonLayout, id: &str) -> Option<Proposal> {
             None
         }
     }
+}
+
+/// One proposal for a route: unknown kind → `502 upstream_error` naming it;
+/// otherwise as [`get_one`] (`None` = 404).
+fn get_checked(layout: &DaemonLayout, id: &str) -> Result<Option<Proposal>, Problem> {
+    match read_proposal(layout, id) {
+        Ok(p) => Ok(p),
+        Err(Unusable::Kind(kind)) => {
+            eprintln!("111 proposals: {id}.json has unknown kind {kind:?}");
+            Err(bad_kind(id, &kind))
+        }
+        Err(e) => {
+            eprintln!("111 proposals: skipping {id}.json: {e}");
+            Ok(None)
+        }
+    }
+}
+
+fn bad_kind(id: &str, kind: &str) -> Problem {
+    Problem::new(
+        StatusCode::BAD_GATEWAY,
+        "upstream_error",
+        "The local AI agent wrote a proposal this dashboard cannot show.",
+    )
+    .detail(format!(
+        "proposal {id} has kind {kind:?}; expected one of {}",
+        KINDS.join(", ")
+    ))
 }
 
 /// The `event: proposal` payload for `id` (events subscriber), if readable.
@@ -278,7 +337,7 @@ static DECIDE_LOCK: Mutex<()> = Mutex::new(());
 /// 409 `already_decided` when a valid decision exists.
 pub fn decide(layout: &DaemonLayout, id: &str, decision: &str) -> Result<Proposal, Problem> {
     let _guard = DECIDE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    let Some(mut p) = get_one(layout, id) else {
+    let Some(mut p) = get_checked(layout, id)? else {
         return Err(not_found());
     };
     if let Some(d) = &p.decision {
@@ -381,9 +440,10 @@ async fn get_handler(
         return not_found().into_response();
     }
     let layout = api.layout.clone();
-    match tokio::task::spawn_blocking(move || get_one(&layout, &id)).await {
-        Ok(Some(p)) => Json(p).into_response(),
-        Ok(None) => not_found().into_response(),
+    match tokio::task::spawn_blocking(move || get_checked(&layout, &id)).await {
+        Ok(Ok(Some(p))) => Json(p).into_response(),
+        Ok(Ok(None)) => not_found().into_response(),
+        Ok(Err(problem)) => problem.into_response(),
         Err(e) => internal(e).into_response(),
     }
 }
@@ -521,6 +581,50 @@ mod tests {
                 .decision,
             "accepted"
         );
+    }
+
+    #[test]
+    fn unknown_kind_is_an_upstream_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let l = layout(dir.path());
+        let pdir = proposals_dir(&l);
+        std::fs::create_dir_all(&pdir).unwrap();
+        for kind in KINDS {
+            let id = format!("prop-{kind}");
+            std::fs::write(
+                pdir.join(format!("{id}.json")),
+                json!({"id": id, "kind": kind, "title": "t", "body": "b",
+                       "created_at": "2026-10-01T10:00:00Z"})
+                .to_string(),
+            )
+            .unwrap();
+            assert_eq!(get_checked(&l, &id).unwrap().unwrap().kind, kind);
+        }
+        std::fs::write(
+            pdir.join("prop-evil.json"),
+            json!({"id": "prop-evil", "kind": "rm -rf /", "title": "t", "body": "b",
+                   "created_at": "2026-10-02T10:00:00Z"})
+            .to_string(),
+        )
+        .unwrap();
+        let p = get_checked(&l, "prop-evil").unwrap_err();
+        assert_eq!((p.status, p.code), (502, "upstream_error"));
+        assert!(
+            p.detail.as_deref().unwrap().contains("\"rm -rf /\""),
+            "{p:?}"
+        );
+        // a decision on it is refused the same way; nothing is written
+        let p = decide(&l, "prop-evil", "accepted").unwrap_err();
+        assert_eq!((p.status, p.code), (502, "upstream_error"));
+        assert!(!decisions_dir(&l).join("prop-evil.json").exists());
+        // lists and events skip it; the valid ones still show
+        let ids: Vec<_> = list(&l, StatusFilter::All)
+            .into_iter()
+            .map(|p| p.id)
+            .collect();
+        assert_eq!(ids.len(), KINDS.len());
+        assert!(!ids.contains(&"prop-evil".to_string()));
+        assert!(summary(&l, "prop-evil").is_none());
     }
 
     #[test]

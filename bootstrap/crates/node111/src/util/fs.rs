@@ -11,6 +11,18 @@ use std::path::{Path, PathBuf};
 /// after the rename so the change survives a crash. The final file's permission
 /// bits are exactly `mode` (the process umask is overridden via `fchmod`).
 pub fn atomic_write(path: &std::path::Path, data: &[u8], mode: u32) -> anyhow::Result<()> {
+    atomic_write_owned(path, data, mode, None)
+}
+
+/// [`atomic_write`], and when `owner` is `Some((uid, gid))` the tmp file is
+/// `fchown`ed through its open descriptor *before* the rename — never chown by
+/// path afterwards (a path chown follows a symlink planted at `path`).
+pub fn atomic_write_owned(
+    path: &std::path::Path,
+    data: &[u8],
+    mode: u32,
+    owner: Option<(u32, u32)>,
+) -> anyhow::Result<()> {
     use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 
     let dir = path.parent().unwrap_or_else(|| Path::new("."));
@@ -42,6 +54,9 @@ pub fn atomic_write(path: &std::path::Path, data: &[u8], mode: u32) -> anyhow::R
     let result = (|| -> anyhow::Result<()> {
         // fchmod defeats umask: final mode is exactly `mode`.
         file.set_permissions(std::fs::Permissions::from_mode(mode))?;
+        if let Some((uid, gid)) = owner {
+            std::os::unix::fs::fchown(&file, Some(uid), Some(gid))?;
+        }
         file.write_all(data)?;
         file.sync_all()?; // fsync file data + metadata before rename
         drop(file);
@@ -75,5 +90,24 @@ mod tests {
         atomic_write(&p, b"hello", 0o640).unwrap();
         assert_eq!(std::fs::read(&p).unwrap(), b"hello");
         assert_eq!(p.metadata().unwrap().permissions().mode() & 0o777, 0o640);
+    }
+
+    #[test]
+    fn owned_write_replaces_a_planted_symlink_and_sets_owner() {
+        use std::os::unix::fs::MetadataExt;
+        let dir = tempfile::tempdir().unwrap();
+        let victim = dir.path().join("victim");
+        std::fs::write(&victim, b"keep").unwrap();
+        let p = dir.path().join("out.json");
+        std::os::unix::fs::symlink(&victim, &p).unwrap();
+        // our own uid/gid: fchown to them needs no privilege
+        let (uid, gid) = unsafe { (libc::geteuid(), libc::getegid()) };
+        atomic_write_owned(&p, b"new", 0o600, Some((uid, gid))).unwrap();
+        let meta = std::fs::symlink_metadata(&p).unwrap();
+        assert!(meta.file_type().is_file(), "the symlink itself is replaced");
+        assert_eq!((meta.uid(), meta.gid()), (uid, gid));
+        assert_eq!(meta.mode() & 0o777, 0o600);
+        assert_eq!(std::fs::read(&p).unwrap(), b"new");
+        assert_eq!(std::fs::read(&victim).unwrap(), b"keep", "target untouched");
     }
 }
