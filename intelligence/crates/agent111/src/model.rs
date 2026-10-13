@@ -1,7 +1,17 @@
 //! OpenAI-compatible model client (blocking ureq; callers use spawn_blocking).
 //! Talks to llama-server locally, or to a hub's endpoint when offloaded.
 //! Plain HTTP only — endpoints are loopback/private fabric; encryption is
-//! Layer 5's job. Full implementation with SSE streaming lands in T2.
+//! Layer 5's job.
+//!
+//! Error taxonomy (distinguishable in the message text):
+//! `model unreachable: …` for transport failures (refused, timeout, DNS),
+//! `model http status <code>: <snippet>` for non-2xx responses (snippet is
+//! the response body truncated to 200 chars), and `malformed model
+//! response: …` for bad SSE framing or JSON.
+
+use std::collections::BTreeMap;
+use std::io::{BufRead, BufReader};
+use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
@@ -51,22 +61,51 @@ pub struct Reply {
     pub tool_calls: Vec<ToolCall>,
 }
 
+/// Default whole-call timeout; tests shrink it via `Client::with_timeout`.
+const DEFAULT_TIMEOUT: Duration = Duration::from_secs(120);
+/// Health probes stay snappy even when the main timeout is large.
+const PROBE_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// Hard caps on what a model stream may make us buffer. Exceeding any of
+/// these is a (malformed-class) error, never a panic.
+const MAX_REPLY_TEXT: usize = 4 * 1024 * 1024;
+const MAX_SSE_LINE: usize = 1024 * 1024;
+const MAX_TOOL_ARGS: usize = 1024 * 1024;
+
 #[derive(Clone)]
 pub struct Client {
     base: String,
     model_id: String,
     agent: ureq::Agent,
+    probe_agent: ureq::Agent,
+}
+
+/// One agent config, shared by chat calls and health probes; only the
+/// timeout differs. Status codes are classified by hand (the error needs a
+/// body snippet), so ureq must not map non-2xx to `Err` body-less.
+fn agent_with_timeout(timeout: Duration) -> ureq::Agent {
+    ureq::Agent::config_builder()
+        .timeout_global(Some(timeout))
+        .http_status_as_error(false)
+        .build()
+        .into()
 }
 
 impl Client {
     pub fn new(base: impl Into<String>, model_id: impl Into<String>) -> Self {
-        let config = ureq::Agent::config_builder()
-            .timeout_global(Some(std::time::Duration::from_secs(120)))
-            .build();
+        Self::with_timeout(base, model_id, DEFAULT_TIMEOUT)
+    }
+
+    pub fn with_timeout(
+        base: impl Into<String>,
+        model_id: impl Into<String>,
+        timeout: Duration,
+    ) -> Self {
         Self {
             base: base.into(),
             model_id: model_id.into(),
-            agent: config.into(),
+            agent: agent_with_timeout(timeout),
+            probe_agent: agent_with_timeout(timeout.min(PROBE_TIMEOUT)),
         }
     }
 
@@ -80,22 +119,224 @@ impl Client {
 
     /// llama-server `/health`: 200 when a model is loaded and serving.
     /// Any non-2xx or connection error counts as unreachable (honest).
+    /// The probe uses its own short (≤2s) timeout, never the chat timeout.
     pub fn reachable(&self) -> bool {
         let url = format!("{}/health", self.base.trim_end_matches('/'));
-        match self.agent.get(&url).call() {
+        match self.probe_agent.get(&url).call() {
             Ok(resp) => resp.status().is_success(),
             Err(_) => false,
         }
     }
 
     /// Streaming chat completion with the OpenAI tool-calling protocol.
-    /// `on_delta` receives each text delta as it arrives. T2 implements.
+    /// `on_delta` receives each non-empty text delta as it arrives; the
+    /// returned `Reply` holds the full concatenation plus any tool calls.
     pub fn chat_stream(
         &self,
-        _messages: &[ChatMessage],
-        _tools: &[serde_json::Value],
-        _on_delta: &mut dyn FnMut(&str),
+        messages: &[ChatMessage],
+        tools: &[serde_json::Value],
+        on_delta: &mut dyn FnMut(&str),
     ) -> anyhow::Result<Reply> {
-        anyhow::bail!("model client lands in T2")
+        let url = format!("{}/v1/chat/completions", self.base.trim_end_matches('/'));
+        let mut body = serde_json::json!({
+            "model": self.model_id,
+            "messages": messages,
+            "stream": true,
+        });
+        if !tools.is_empty() {
+            body["tools"] = serde_json::Value::Array(tools.to_vec());
+        }
+
+        let mut resp = self
+            .agent
+            .post(&url)
+            .send_json(&body)
+            .map_err(|e| anyhow::anyhow!("model unreachable: {e}"))?;
+
+        let status = resp.status();
+        if !status.is_success() {
+            let raw = resp
+                .body_mut()
+                .with_config()
+                .limit(64 * 1024)
+                .read_to_string()
+                .unwrap_or_default();
+            let snippet: String = raw.trim().chars().take(200).collect();
+            anyhow::bail!(
+                "model http status {}: {}",
+                status.as_u16(),
+                if snippet.is_empty() {
+                    "<empty body>"
+                } else {
+                    &snippet
+                }
+            );
+        }
+
+        let mut reader = BufReader::new(resp.body_mut().as_reader());
+        let mut reply = Reply::default();
+        // Tool calls stream in fragments keyed by `index`; order the map so
+        // the finished calls come out in the order the model started them.
+        let mut partials: BTreeMap<u64, PartialToolCall> = BTreeMap::new();
+
+        while let Some(line) = read_sse_line(&mut reader, MAX_SSE_LINE)? {
+            if line.is_empty() || line.starts_with(':') {
+                continue; // event boundary, or a keep-alive comment
+            }
+            let Some(data) = line.strip_prefix("data:") else {
+                continue; // event:/id:/retry: fields are unused
+            };
+            let data = data.strip_prefix(' ').unwrap_or(data);
+            if data.trim() == "[DONE]" {
+                break;
+            }
+            let chunk: Chunk = serde_json::from_str(data)
+                .map_err(|e| anyhow::anyhow!("malformed model response: bad SSE data JSON: {e}"))?;
+            let Some(choice) = chunk.choices.into_iter().next() else {
+                continue; // e.g. a usage-only trailer chunk
+            };
+            let Some(delta) = choice.delta else { continue };
+            if let Some(content) = delta.content.filter(|s| !s.is_empty()) {
+                reply.text.push_str(&content);
+                if reply.text.len() > MAX_REPLY_TEXT {
+                    anyhow::bail!(
+                        "malformed model response: accumulated text exceeds {MAX_REPLY_TEXT} bytes"
+                    );
+                }
+                on_delta(&content);
+            }
+            if let Some(calls) = delta.tool_calls {
+                for call in calls {
+                    let entry = partials.entry(call.index).or_default();
+                    if let Some(id) = call.id.filter(|s| !s.is_empty()) {
+                        entry.id = Some(id);
+                    }
+                    if let Some(function) = call.function {
+                        if let Some(name) = function.name.filter(|s| !s.is_empty()) {
+                            entry.name = Some(name);
+                        }
+                        if let Some(arguments) = function.arguments {
+                            entry.arguments.push_str(&arguments);
+                            if entry.arguments.len() > MAX_TOOL_ARGS {
+                                anyhow::bail!(
+                                    "malformed model response: tool arguments exceed {MAX_TOOL_ARGS} bytes"
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // [DONE] or clean EOF ends the turn: parse each arguments string
+        // exactly once, now that all its fragments have arrived.
+        for partial in partials.into_values() {
+            let arguments = if partial.arguments.trim().is_empty() {
+                serde_json::Value::Object(serde_json::Map::new())
+            } else {
+                serde_json::from_str(&partial.arguments).map_err(|e| {
+                    anyhow::anyhow!("malformed model response: tool arguments not valid JSON: {e}")
+                })?
+            };
+            reply.tool_calls.push(ToolCall {
+                id: partial.id.unwrap_or_default(),
+                name: partial.name.unwrap_or_default(),
+                arguments,
+            });
+        }
+        Ok(reply)
     }
+}
+
+/// Read one SSE line (without the terminator) with a hard size cap.
+/// `Ok(None)` is a clean EOF before any bytes; a final unterminated line
+/// at EOF is still returned. `\r\n` terminators lose the `\r`.
+fn read_sse_line(reader: &mut impl BufRead, cap: usize) -> anyhow::Result<Option<String>> {
+    let mut raw: Vec<u8> = Vec::new();
+    loop {
+        let (consumed, terminated, eof) = {
+            let available = reader.fill_buf()?;
+            if available.is_empty() {
+                (0, false, true)
+            } else {
+                match available.iter().position(|&b| b == b'\n') {
+                    Some(pos) => {
+                        raw.extend_from_slice(&available[..pos]);
+                        (pos + 1, true, false)
+                    }
+                    None => {
+                        raw.extend_from_slice(available);
+                        (available.len(), false, false)
+                    }
+                }
+            }
+        };
+        reader.consume(consumed);
+        if raw.len() > cap {
+            anyhow::bail!("malformed model response: SSE line exceeds {cap} bytes");
+        }
+        if terminated {
+            break;
+        }
+        if eof {
+            if raw.is_empty() {
+                return Ok(None);
+            }
+            break;
+        }
+    }
+    if raw.last() == Some(&b'\r') {
+        raw.pop();
+    }
+    let line = String::from_utf8(raw)
+        .map_err(|_| anyhow::anyhow!("malformed model response: SSE line is not UTF-8"))?;
+    Ok(Some(line))
+}
+
+/// `choices[0]` of one `data:` chunk. Unknown fields (role, finish_reason,
+/// usage, …) are ignored so llama-server extras never break parsing.
+#[derive(Debug, Deserialize)]
+struct Chunk {
+    #[serde(default)]
+    choices: Vec<ChunkChoice>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ChunkChoice {
+    #[serde(default)]
+    delta: Option<ChunkDelta>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ChunkDelta {
+    #[serde(default)]
+    content: Option<String>,
+    #[serde(default)]
+    tool_calls: Option<Vec<ChunkToolCall>>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ChunkToolCall {
+    #[serde(default)]
+    index: u64,
+    #[serde(default)]
+    id: Option<String>,
+    #[serde(default)]
+    function: Option<ChunkFunction>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ChunkFunction {
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    arguments: Option<String>,
+}
+
+/// One in-flight tool call, reassembled across stream fragments.
+#[derive(Default)]
+struct PartialToolCall {
+    id: Option<String>,
+    name: Option<String>,
+    arguments: String,
 }
