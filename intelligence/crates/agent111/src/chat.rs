@@ -34,3 +34,21 @@ pub async fn handler(
     )
         .into_response()
 }
+
+#[derive(Debug, Deserialize)]
+pub struct HistoryQuery {
+    pub conversation_id: String,
+}
+
+/// GET /v1/chat/history?conversation_id=… — the stored conversation (OpenAI
+/// message shapes, in order). 111d's relay serves Layer 4 from this. T4 implements.
+pub async fn history_handler(
+    State(_state): State<Arc<AppState>>,
+    axum::extract::Query(_q): axum::extract::Query<HistoryQuery>,
+) -> Response {
+    (
+        StatusCode::NOT_IMPLEMENTED,
+        Json(serde_json::json!({"schema": 1, "error": "history lands in T4"})),
+    )
+        .into_response()
+}

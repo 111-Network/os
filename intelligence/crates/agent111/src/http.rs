@@ -35,6 +35,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/v1/agent/status", get(status_handler))
         .route("/v1/agent/events", get(events_handler))
         .route("/v1/chat", post(chat::handler))
+        .route("/v1/chat/history", get(chat::history_handler))
         .route("/v1/agent/task", post(task_handler))
         .layer(middleware::from_fn(host_guard))
         .with_state(state)

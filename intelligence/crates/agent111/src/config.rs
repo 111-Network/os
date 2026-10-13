@@ -22,6 +22,8 @@ pub struct Config {
     pub category: String,
     pub daemon_health_url: String,
     pub opencode_path: PathBuf,
+    /// Node identity (Layer 2 NodeId hex), handed down by 111d; stamps proposals.
+    pub node_id: Option<String>,
     pub lan: bool,
 }
 
@@ -39,6 +41,7 @@ impl Default for Config {
             category: "unknown".to_string(),
             daemon_health_url: "http://127.0.0.1:11180/health".to_string(),
             opencode_path: PathBuf::from("opencode"),
+            node_id: None,
             lan: false,
         }
     }
@@ -111,6 +114,9 @@ impl Config {
             "111_AGENT_OPENCODE_PATH",
         ) {
             cfg.opencode_path = PathBuf::from(v);
+        }
+        if let Some(v) = pick(&flags.node_id, env, &file_vars, "111_AGENT_NODE_ID") {
+            cfg.node_id = Some(v);
         }
         if flags.lan {
             cfg.lan = true;
@@ -187,6 +193,7 @@ struct Flags {
     category: Option<String>,
     daemon_health_url: Option<String>,
     opencode_path: Option<String>,
+    node_id: Option<String>,
     env_file: Option<String>,
     lan: bool,
 }
@@ -221,6 +228,7 @@ impl Flags {
                 "--category" => f.category = Some(value(&mut i)?),
                 "--daemon-health-url" => f.daemon_health_url = Some(value(&mut i)?),
                 "--opencode-path" => f.opencode_path = Some(value(&mut i)?),
+                "--node-id" => f.node_id = Some(value(&mut i)?),
                 "--env-file" => f.env_file = Some(value(&mut i)?),
                 "--lan" => {
                     if inline.is_some() {

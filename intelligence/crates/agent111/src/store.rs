@@ -14,6 +14,8 @@ use crate::tasks::TaskKind;
 pub struct Proposal {
     pub schema: u8,
     pub id: String,
+    /// Layer 2 NodeId hex of the authoring node (None when 111d passed none).
+    pub node_id: Option<String>,
     pub task_id: Option<String>,
     pub kind: String,
     pub title: String,
@@ -117,6 +119,7 @@ impl Store {
 
     pub fn save_proposal(
         &self,
+        node_id: Option<String>,
         task_id: Option<String>,
         kind: &str,
         title: &str,
@@ -125,6 +128,7 @@ impl Store {
         let p = Proposal {
             schema: 1,
             id: new_id("prop"),
+            node_id,
             task_id,
             kind: kind.to_string(),
             title: title.to_string(),
