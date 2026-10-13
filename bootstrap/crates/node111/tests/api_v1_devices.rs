@@ -1363,6 +1363,56 @@ async fn forgetting_your_own_companion_logs_you_out() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn auth_session_names_the_callers_own_companion() {
+    let n = node_with(|t| t.heltec(), true); // two pre-existing sessions too
+    let lan = n.serve(Some("192.168.1.78:40000")).await;
+    let code = auth::read_pair_code(&n.api.layout.state_dir())
+        .unwrap()
+        .unwrap();
+    let r = request(
+        lan,
+        "POST",
+        "/api/v1/auth/pair",
+        &[("Content-Type", "application/json")],
+        Some(&format!(r#"{{"code":"{code}"}}"#)),
+    );
+    assert_eq!(r.status, 200, "{}", r.body);
+    let cookie = r.cookie();
+    let paired_id = r.json()["device_id"].as_str().unwrap().to_string();
+    n.tick().await;
+
+    let session = request(
+        lan,
+        "GET",
+        "/api/v1/auth/session",
+        &[("Cookie", &cookie)],
+        None,
+    );
+    assert_eq!(session.json()["device_id"], paired_id.as_str());
+    let list = request(lan, "GET", "/api/v1/devices", &[("Cookie", &cookie)], None).json();
+    let companions: Vec<_> = list["devices"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|d| d["kind"] == "companion")
+        .collect();
+    assert!(companions.len() >= 2, "{list}");
+    let mine: Vec<_> = companions
+        .iter()
+        .filter(|d| d["id"] == paired_id.as_str())
+        .collect();
+    assert_eq!(
+        mine.len(),
+        1,
+        "exactly one companion is this browser: {list}"
+    );
+    assert_eq!(mine[0]["identity"]["ip"], "192.168.1.78");
+    // unpaired: null
+    let v = request(lan, "GET", "/api/v1/auth/session", &[], None).json();
+    assert!(v["device_id"].is_null());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn absent_hardware_is_remembered_with_its_alias() {
     let n = node();
     n.tick().await;

@@ -1083,3 +1083,130 @@ async fn framework_errors_are_problem_json() {
     assert_eq!(r.status, 404);
     assert_ne!(r.header("content-type"), Some("application/problem+json"));
 }
+
+// ---------------------------------------------------------------- loopback trust policy
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn untrusted_loopback_pairs_like_a_lan_peer() {
+    // Termux: Android has no per-app loopback isolation
+    let n = node_with(false, |c| c.trust_loopback = false);
+    assert!(!n.api.auth.loopback_trusted());
+    let real = serve(&n.api, None).await; // real ConnectInfo, loopback socket
+    let mock = serve(&n.api, Some("127.0.0.1:5000")).await;
+    for port in [real, mock] {
+        for path in ["/api/v1/status", "/api/v1/services", "/api/status", "/v1"] {
+            get(port, path).problem(401, "unauthenticated");
+        }
+        assert!(matches!(get(port, "/health").status, 200 | 503));
+        assert_eq!(get(port, "/").status, 200);
+        let v = get(port, "/api/v1/auth/session").json();
+        assert_eq!(v["loopback"], true);
+        assert_eq!(v["loopback_trusted"], false);
+        assert_eq!(v["paired"], false);
+        assert!(v["device_id"].is_null());
+    }
+    // the phone's own browser pairs from loopback
+    let code = pair_code(&n.api);
+    let r = post_json(
+        mock,
+        "/api/v1/auth/pair",
+        &format!(r#"{{"code":"{code}"}}"#),
+        &[],
+    );
+    assert_eq!(r.status, 200, "{}", r.body);
+    let token = cookie_of(&r);
+    let v = r.json();
+    assert_eq!(
+        (v["loopback"].clone(), v["paired"].clone()),
+        (true.into(), true.into())
+    );
+    assert_eq!(v["device_id"], auth::companion_device_id(&token));
+    let cookie = format!("s111={token}");
+    for port in [real, mock] {
+        let r = get_with(port, "/api/v1/status", &[("Cookie", &cookie)]);
+        assert_eq!(r.status, 200, "{}", r.body);
+        assert_eq!(r.json()["auth"]["loopback"], true);
+        assert_eq!(
+            get_with(port, "/api/status", &[("Cookie", &cookie)]).status,
+            200
+        );
+        let v = get_with(port, "/api/v1/auth/session", &[("Cookie", &cookie)]).json();
+        assert_eq!(v["paired"], true);
+        assert_eq!(v["device_id"], auth::companion_device_id(&token));
+    }
+    // a paired loopback stream opens
+    let c2 = cookie.clone();
+    let sse = tokio::task::spawn_blocking(move || {
+        sse_read(mock, &[("Cookie", &c2)], Duration::from_secs(3), |t| {
+            t.contains("event: reset")
+        })
+    })
+    .await
+    .unwrap();
+    assert!(sse.starts_with("HTTP/1.1 200"), "{sse}");
+    // still loopback for the loopback-only field checks: not 403 loopback_only
+    let r = request(
+        mock,
+        "PATCH",
+        "/api/v1/settings",
+        Some("127.0.0.1"),
+        &[("Content-Type", "application/json"), ("Cookie", &cookie)],
+        Some(r#"{"offer":"dismissed"}"#),
+    );
+    assert_eq!(r.status, 200, "{}", r.body);
+    // a LAN session cannot do that
+    let lan = serve(&n.api, Some("192.168.1.50:4000")).await;
+    let r = post_json(
+        lan,
+        "/api/v1/auth/pair",
+        &format!(r#"{{"code":"{code}"}}"#),
+        &[],
+    );
+    let lan_cookie = format!("s111={}", cookie_of(&r));
+    request(
+        lan,
+        "PATCH",
+        "/api/v1/settings",
+        Some("127.0.0.1"),
+        &[
+            ("Content-Type", "application/json"),
+            ("Cookie", &lan_cookie),
+        ],
+        Some(r#"{"offer":"dismissed"}"#),
+    )
+    .problem(403, "loopback_only");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn trusted_loopback_session_view() {
+    // default policy (plain Linux): unchanged, loopback needs no session
+    let n = node();
+    assert!(n.api.auth.loopback_trusted());
+    let port = serve(&n.api, Some("[::1]:5000")).await;
+    assert_eq!(get(port, "/api/v1/status").status, 200);
+    let v = get(port, "/api/v1/auth/session").json();
+    assert_eq!(v["loopback"], true);
+    assert_eq!(v["loopback_trusted"], true);
+    assert!(v["device_id"].is_null());
+    // even with a valid cookie a trusted loopback call names no companion
+    let code = pair_code(&n.api);
+    let r = post_json(
+        port,
+        "/api/v1/auth/pair",
+        &format!(r#"{{"code":"{code}"}}"#),
+        &[],
+    );
+    assert!(r.json()["device_id"].is_null(), "{}", r.body);
+    let cookie = format!("s111={}", cookie_of(&r));
+    let v = get_with(port, "/api/v1/auth/session", &[("Cookie", &cookie)]).json();
+    assert_eq!(v["paired"], true);
+    assert!(v["device_id"].is_null());
+    // the same session from a LAN address does
+    let lan = serve(&n.api, Some("192.168.1.9:1")).await;
+    let v = get_with(lan, "/api/v1/auth/session", &[("Cookie", &cookie)]).json();
+    assert_eq!(v["loopback_trusted"], true);
+    assert_eq!(
+        v["device_id"],
+        auth::companion_device_id(cookie.strip_prefix("s111=").unwrap())
+    );
+}

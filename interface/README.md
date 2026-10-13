@@ -46,12 +46,12 @@ into `111d` by a dedicated `RustEmbed` struct over `interface/ui/dist` (release:
 debug: disk). Dev: `pnpm dev` with `server.proxy` of `/api` → `127.0.0.1:11180`, or the in-browser
 mock adapter with no daemon at all.
 
-**Allowed dependencies — exact set:** `react`, `react-dom`, `wouter` (hash routing), `lucide-react`
-(named imports only), `tailwindcss@4` + `@tailwindcss/vite`, `vite`, `@vitejs/plugin-react`,
+**Allowed dependencies — exact set:** `react`, `react-dom`, `wouter` (hash routing),
+`tailwindcss@4` + `@tailwindcss/vite`, `vite`, `@vitejs/plugin-react`,
 `typescript`, `@types/react`, `@types/react-dom`, `@types/node`, `openapi-typescript` (dev),
-`vitest` (dev). **Forbidden:** shadcn/ui, framer-motion, `tw-animate-css`, any `next/*`, state
-libraries, CSS-in-JS, any runtime network fetch (fonts and everything bundled), `import { icons }`
-from lucide.
+`vitest` (dev). No icon library: the terminal aesthetic uses text glyphs and square dots, so
+`lucide-react` was dropped. **Forbidden:** shadcn/ui, framer-motion, `tw-animate-css`, any `next/*`, state
+libraries, CSS-in-JS, any runtime network fetch (fonts and everything bundled), an icon library.
 
 **Browser floor (D15):** Chrome 111+ / Safari 16.4+ / Firefox 128+ (Tailwind 4 emits `color-mix()`
 and `@layer`). ≈ Android 7+ with an updated Chrome/WebView, iOS 16.4+. `index.html` carries a

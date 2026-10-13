@@ -280,7 +280,8 @@ inner() {
   req GET "$B/api/status"
   t "Layer 1 /api/status still 200 (additive seam unchanged)" '[ "$ST" = 200 ] && jb ".schema == 1 and has(\"intelligence\")"'
   req GET "$B/api/v1/auth/session"
-  t "GET /api/v1/auth/session from loopback → loopback:true" '[ "$ST" = 200 ] && jb ".loopback == true"'
+  t "GET /api/v1/auth/session from loopback → loopback:true, loopback_trusted:true (not Termux), device_id:null" \
+    '[ "$ST" = 200 ] && jb ".loopback == true and .loopback_trusted == true and .device_id == null"'
 
   req GET "$B/api/v1/services"
   t "GET /api/v1/services → 7 records, ids agent,codeagent,gateway,kb,model,radio,transport" \
@@ -410,6 +411,9 @@ inner() {
     sleep 0.5
   done
   t "the paired browser appears in /api/v1/devices as a companion ($comp)" '[ -n "$comp" ]'
+  req GET "$L/api/v1/auth/session" "${lan[@]}" -b "$jar"
+  t "LAN GET /auth/session names that companion as this browser (device_id $(jget .device_id))" \
+    '[ "$ST" = 200 ] && [ "$(jget .device_id)" = "${comp%% *}" ]'
 
   req POST "$L/api/v1/auth/logout" "${lan[@]}" -b "$jar" -c "$jar" -H 'Content-Type: application/json' -d '{}'
   t "LAN POST /auth/logout → 204" '[ "$ST" = 204 ]'

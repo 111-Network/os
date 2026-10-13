@@ -219,6 +219,12 @@ pub async fn start(
     if !routes::ui_embedded() {
         eprintln!("111 daemon: dashboard UI not embedded in this build — / serves a notice; /v1 is the minimal page");
     }
+    if !api.auth.loopback_trusted() {
+        eprintln!(
+            "111 daemon: loopback is not trusted here (Termux, or {}=false) — the phone's own browser pairs like a LAN visitor",
+            api_v1::auth::TRUST_LOOPBACK_ENV
+        );
+    }
     if lan {
         api.set_own_addrs(bind::own_addresses());
         eprintln!("111 daemon: dashboard LAN sharing ON — LAN visitors must pair (`111 dashboard` shows the code)");

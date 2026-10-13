@@ -8,8 +8,9 @@
 //! merges them once and never needs editing again:
 //!
 //! - **gated** submodules (everything except `auth`) sit behind
-//!   [`auth::require_session`]: loopback peers pass, others need a valid `s111`
-//!   session cookie, else `401 unauthenticated`.
+//!   [`auth::require_session`]: loopback peers pass (unless the loopback-trust
+//!   policy is off — Termux), others need a valid `s111` session cookie, else
+//!   `401 unauthenticated`.
 //! - `auth` routes (`/api/v1/auth/*`) are open (that is how a LAN visitor pairs).
 //! - [`auth::csrf_guard`] wraps BOTH groups: every POST/PATCH/PUT/DELETE must be
 //!   `Content-Type: application/json` (else 415) and, when `Origin` is present,
@@ -80,6 +81,9 @@ pub struct ApiConfig {
     pub ui_dir: Option<PathBuf>,
     /// `/api/v1/events` keep-alive interval (tests shorten it).
     pub keepalive: Duration,
+    /// Loopback peers bypass pairing ([`auth::loopback_trusted`]: false under
+    /// Termux unless `DASHBOARD_TRUST_LOOPBACK=true`). Computed once here.
+    pub trust_loopback: bool,
 }
 
 impl ApiConfig {
@@ -90,6 +94,7 @@ impl ApiConfig {
             persist_auth: true,
             ui_dir: None,
             keepalive: KEEPALIVE,
+            trust_loopback: auth::loopback_trusted(),
         }
     }
 }
@@ -122,7 +127,8 @@ impl ApiState {
             auth::AuthStore::open(Some(cfg.layout.state_dir()))
         } else {
             auth::AuthStore::open(None)
-        };
+        }
+        .with_loopback_trust(cfg.trust_loopback);
         Arc::new(ApiState {
             dash,
             auth,

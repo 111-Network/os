@@ -282,15 +282,21 @@ mod tests {
 
     #[tokio::test]
     async fn refused_connection_is_connect_error() {
-        let l = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
-        let port = l.local_addr().unwrap().port();
-        drop(l);
-        let t = Target::parse(&format!("http://127.0.0.1:{port}")).unwrap();
-        let deadline = Instant::now() + Duration::from_secs(5);
-        let err = send(&t, Method::GET, "/", None, Duration::from_secs(2), deadline)
-            .await
-            .err()
-            .unwrap();
-        assert!(matches!(err, Error::Connect(_)), "{err}");
+        // A just-released ephemeral port can be re-bound by a parallel test before we connect
+        // (seen once in CI-style runs): retry on a fresh port instead of asserting on a race.
+        let mut last = None;
+        for _ in 0..5 {
+            let l = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+            let port = l.local_addr().unwrap().port();
+            drop(l);
+            let t = Target::parse(&format!("http://127.0.0.1:{port}")).unwrap();
+            let deadline = Instant::now() + Duration::from_secs(5);
+            match send(&t, Method::GET, "/", None, Duration::from_secs(2), deadline).await {
+                Err(Error::Connect(_)) => return,
+                Err(e) => last = Some(e.to_string()),
+                Ok(r) => last = Some(format!("unexpected response {}", r.status)),
+            }
+        }
+        panic!("never saw a connect error: {last:?}");
     }
 }

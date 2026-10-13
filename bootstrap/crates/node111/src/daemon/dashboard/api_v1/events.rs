@@ -220,7 +220,7 @@ async fn events(
     // A paired (non-loopback) stream ends at the first frame after its session
     // is revoked (logout, `111 dashboard rotate`, expiry); the reconnect then
     // gets 401 and the UI shows /pair. Loopback streams are never cut.
-    let token = if auth::peer_is_loopback(&ext) {
+    let token = if auth::trusted_loopback(&api, &ext) {
         None
     } else {
         api.auth.session_in(&headers).map(|(token, _)| token)

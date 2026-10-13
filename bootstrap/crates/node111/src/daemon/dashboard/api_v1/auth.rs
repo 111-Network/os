@@ -1,7 +1,13 @@
 //! Dashboard pairing auth (spec §11, D15 "token auth now").
 //!
-//! - **Loopback = trusted.** A request whose peer address is loopback (incl.
-//!   `::ffff:127.0.0.1`) bypasses auth.
+//! - **Loopback = trusted, by policy** ([`loopback_trusted`], read once at
+//!   start): a request whose peer address is loopback (incl.
+//!   `::ffff:127.0.0.1`) bypasses auth — except under Termux, where Android
+//!   gives apps no per-app loopback isolation (any app on the phone could
+//!   drive the node through `127.0.0.1:11180`), so loopback peers pair like
+//!   LAN peers. `DASHBOARD_TRUST_LOOPBACK=true|false` overrides the detection.
+//!   Either way a loopback peer still *is* loopback for the `loopback_only`
+//!   field checks, and `/health` and `POST /auth/pair` stay open.
 //! - **Everyone else needs a session**: cookie `s111=<64 hex>` whose sha256 is in
 //!   `<root>/state/dashboard-sessions.json` (`{schema, sessions:[{hash, created,
 //!   last_seen, peer, user_agent?}]}`), obtained by `POST /api/v1/auth/pair {code}` with the
@@ -68,6 +74,43 @@ pub const MAX_FAIL_PEERS: usize = 1024;
 pub const MAX_SESSIONS: usize = 64;
 /// `last_seen` is persisted at most this often (in memory it is always fresh).
 const LAST_SEEN_PERSIST: Duration = Duration::from_secs(600);
+
+/// Overrides the loopback-trust detection: `true` | `false` (anything else is
+/// ignored). Read from the daemon environment (`/etc/111/env` is loaded into
+/// it at start).
+pub const TRUST_LOOPBACK_ENV: &str = "DASHBOARD_TRUST_LOOPBACK";
+/// Set by Termux in every shell and service it starts.
+pub const TERMUX_VERSION_ENV: &str = "TERMUX_VERSION";
+/// Termux's install prefix (exists on a phone node running under Termux).
+pub const TERMUX_PREFIX: &str = "/data/data/com.termux/files/usr";
+
+/// The loopback-trust policy from its inputs: the override wins when it is
+/// `true` or `false`; otherwise loopback is trusted unless this is Termux
+/// (`TERMUX_VERSION` non-empty, or [`TERMUX_PREFIX`] exists).
+pub fn loopback_trust_policy(
+    override_value: Option<&str>,
+    termux_version: Option<&str>,
+    termux_prefix_exists: bool,
+) -> bool {
+    match override_value
+        .map(|v| v.trim().to_ascii_lowercase())
+        .as_deref()
+    {
+        Some("true") => true,
+        Some("false") => false,
+        _ => !(termux_version.is_some_and(|v| !v.trim().is_empty()) || termux_prefix_exists),
+    }
+}
+
+/// This process's loopback-trust policy ([`loopback_trust_policy`] over the
+/// real environment). Computed once at daemon start (`ApiConfig::new`).
+pub fn loopback_trusted() -> bool {
+    loopback_trust_policy(
+        std::env::var(TRUST_LOOPBACK_ENV).ok().as_deref(),
+        std::env::var(TERMUX_VERSION_ENV).ok().as_deref(),
+        Path::new(TERMUX_PREFIX).is_dir(),
+    )
+}
 
 /// Crockford base32 minus every vowel (Crockford already drops I L O U; A and E
 /// go too so no code spells a word): 30 symbols, 8 chars ≈ 39 bits.
@@ -386,6 +429,8 @@ struct Inner {
 pub struct AuthStore {
     dir: Option<PathBuf>,
     inner: Mutex<Inner>,
+    /// Loopback peers bypass the session check (see module docs).
+    trust_loopback: bool,
 }
 
 impl AuthStore {
@@ -394,6 +439,7 @@ impl AuthStore {
     pub fn open(dir: Option<PathBuf>) -> Self {
         let store = AuthStore {
             dir,
+            trust_loopback: true,
             inner: Mutex::new(Inner {
                 pair: new_pair_file(),
                 pair_stamp: None,
@@ -423,6 +469,18 @@ impl AuthStore {
             }
         }
         store
+    }
+
+    /// Set the loopback-trust policy (`ApiState::new` passes the value
+    /// computed once at start; tests pass `false` to simulate Termux).
+    pub fn with_loopback_trust(mut self, trusted: bool) -> Self {
+        self.trust_loopback = trusted;
+        self
+    }
+
+    /// Do loopback peers bypass the session check?
+    pub fn loopback_trusted(&self) -> bool {
+        self.trust_loopback
     }
 
     fn pair_path(&self) -> Option<PathBuf> {
@@ -738,13 +796,28 @@ fn unauthenticated() -> Problem {
     .detail("Run `111 dashboard` on the node and enter its pair code.")
 }
 
-/// Gate for every `/api/v1/*` route except `/api/v1/auth/*`.
+/// A loopback peer *and* loopback is trusted by policy: no session needed.
+pub fn trusted_loopback(api: &ApiState, ext: &Extensions) -> bool {
+    api.auth.loopback_trusted() && peer_is_loopback(ext)
+}
+
+/// The companion `DeviceRecord.id` of the session behind `token` (the device
+/// registry derives it from the stored session hash).
+pub fn companion_device_id(token: &str) -> String {
+    crate::daemon::devices::device_id(
+        crate::daemon::devices::DeviceKind::Companion,
+        &sha256_hex(token.to_ascii_lowercase().as_bytes()),
+    )
+}
+
+/// Gate for every `/api/v1/*` route except `/api/v1/auth/*` (and the Layer 1
+/// `/api/status` + `/v1`).
 pub async fn require_session(
     State(api): State<Arc<ApiState>>,
     req: Request,
     next: Next,
 ) -> Response {
-    if is_loopback(&req) {
+    if trusted_loopback(&api, req.extensions()) {
         return next.run(req).await;
     }
     match api.auth.session_in(req.headers()) {
@@ -818,6 +891,12 @@ pub struct AuthSession {
     pub paired: bool,
     pub lan_enabled: bool,
     pub created: Option<String>,
+    /// The node's loopback-trust policy (false under Termux: the phone's own
+    /// browser pairs too).
+    pub loopback_trusted: bool,
+    /// The caller's own companion `DeviceRecord.id` (`null` when unpaired or
+    /// trusted loopback).
+    pub device_id: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -834,13 +913,19 @@ async fn session(
     ext: Extensions,
     headers: HeaderMap,
 ) -> Json<AuthSession> {
-    let created = api.auth.session_in(&headers).map(|(_, created)| created);
+    let session = api.auth.session_in(&headers);
+    let device_id = session
+        .as_ref()
+        .filter(|_| !trusted_loopback(&api, &ext))
+        .map(|(token, _)| companion_device_id(token));
     Json(AuthSession {
         schema: 1,
         loopback: peer_is_loopback(&ext),
-        paired: created.is_some(),
+        paired: session.is_some(),
         lan_enabled: lan_effective(&api),
-        created,
+        created: session.map(|(_, created)| created),
+        loopback_trusted: api.auth.loopback_trusted(),
+        device_id,
     })
 }
 
@@ -876,6 +961,8 @@ async fn pair(
                 paired: true,
                 lan_enabled: lan_effective(&api),
                 created: Some(s.created),
+                loopback_trusted: api.auth.loopback_trusted(),
+                device_id: (!trusted_loopback(&api, &ext)).then(|| companion_device_id(&s.token)),
             })
             .into_response();
             if let Ok(v) = HeaderValue::from_str(&cookie) {
@@ -980,6 +1067,53 @@ mod tests {
             Some("127.0.0.1")
         ));
         assert!(!origin_matches_host("http://127.0.0.1", None));
+    }
+
+    #[test]
+    fn loopback_trust_policy_matrix() {
+        // default (plain Linux): trusted
+        assert!(loopback_trust_policy(None, None, false));
+        // Termux by its env var or by its prefix: not trusted
+        assert!(!loopback_trust_policy(None, Some("0.118.1"), false));
+        assert!(!loopback_trust_policy(None, None, true));
+        assert!(
+            loopback_trust_policy(None, Some(""), false),
+            "empty is unset"
+        );
+        // the override wins both ways
+        assert!(loopback_trust_policy(Some("true"), Some("0.118.1"), true));
+        assert!(loopback_trust_policy(Some(" TRUE "), None, true));
+        assert!(!loopback_trust_policy(Some("false"), None, false));
+        // anything else is no override
+        assert!(loopback_trust_policy(Some("yes"), None, false));
+        assert!(!loopback_trust_policy(Some("0"), None, true));
+        // this dev/CI box is plain Linux unless told otherwise
+        if std::env::var_os(TRUST_LOOPBACK_ENV).is_none()
+            && std::env::var_os(TERMUX_VERSION_ENV).is_none()
+            && !Path::new(TERMUX_PREFIX).exists()
+        {
+            assert!(loopback_trusted(), "default on Linux unchanged");
+        }
+        assert!(AuthStore::open(None).loopback_trusted(), "store default");
+        assert!(!AuthStore::open(None)
+            .with_loopback_trust(false)
+            .loopback_trusted());
+    }
+
+    #[test]
+    fn companion_id_matches_the_registry_derivation() {
+        let token = "ab".repeat(32);
+        assert_eq!(
+            companion_device_id(&token),
+            crate::daemon::devices::device_id(
+                crate::daemon::devices::DeviceKind::Companion,
+                &sha256_hex(token.as_bytes())
+            )
+        );
+        assert_eq!(
+            companion_device_id(&token.to_uppercase()),
+            companion_device_id(&token)
+        );
     }
 
     #[test]
