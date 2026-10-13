@@ -199,11 +199,12 @@ and pairing records; the UI only reads it and edits aliases.
   the whole registry + raw detection facts: identify what is connected or paired, set up what is
   needed, fix errors. No per-device-type scripts anywhere — the agent resolves devices from facts
   + KB.
-- **Detail** `/devices/:id`: inline rename (alias, `PATCH`), spec table (detected name, ids,
+- **Detail** `/devices/:id`: inline rename (alias, `PATCH`; empty clears), spec table (detected name, ids,
   port/MAC/IP, capabilities, driving service, firmware if known, first seen / last seen), state +
   reason, "Let the agent handle it" (same generic prompt scoped to this device), KB entry link,
   raw facts disclosure (advanced), **Forget** (2-step confirm; detected hardware reappears when
-  plugged in again; paired companions lose their session).
+  plugged in again; paired companions lose their session — forgetting the companion you are
+  browsing from logs you out, and the confirm says so).
 - **Add device** `/devices/add`: a grid of classes — *LoRa board over USB*, *Phone or laptop over
   Wi-Fi*, *Bluetooth device*, *Handheld radio (coming)*. Hardware classes explain "plug it in — it
   appears here by itself" and offer "Guide me with the agent" (generic prompt + class hint).
@@ -259,7 +260,7 @@ instruction ("On the node run `111 dashboard` and type the pair code"), 8-char i
 rate-limit feedback, success → reload state. Loopback visitors never see it.
 
 ### 6.10 Connection states
-`/events` silence > 20 s → global banner "Disconnected — last update N s ago", all dots → unknown
+`/events` silence > 45 s (the `status` heartbeat is every 30 s) → global banner "Disconnected — last update N s ago", all dots → unknown
 (hollow). Reconnect resumes with `Last-Event-ID`; `reset` → refetch snapshots. `status.node.version`
 change → "Node updated — reload" banner.
 
