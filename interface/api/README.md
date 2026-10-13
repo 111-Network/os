@@ -21,7 +21,13 @@ the `x-sse-events` map) into `ui/src/lib/api/types.gen.ts` — never hand-edited
   the ring, otherwise the first frame is `event: reset` and the client refetches `/status`,
   `/services`, `/proposals`; `: keep-alive` comment every 15 s; `status` is also re-sent every 30 s
   as a heartbeat. `agent` frames are the upstream `111-agent` events verbatim (dedupe on `seq`;
-  upstream replays its last 50 on connect).
+  upstream replays its last 50 on connect). `status` frames are shared by every subscriber, so
+  their `auth` block is a placeholder — clients keep the `auth` from their own `GET /status`.
+  `services`/`devices` frames are published on a **state** change (plus `since`); `detail`
+  refreshes on the next snapshot, not on every probe tick.
+- **Not gated:** `/`, static assets, `/health` (body is booleans) and `/api/v1/auth/*`. Everything
+  else — including the Layer 1 seam `/api/status` and the `/v1` legacy page — needs loopback or a
+  session.
 - **Chat stream (`POST /chat`, `stream:true`):** the response body is `text/event-stream` with
   `event:` names from `x-sse-events.chat`; the stream ends after `done` or `error`. No `id:` lines.
   Pre-stream failures are `problem+json`, never SSE. Clients use `fetch` + a streaming parser

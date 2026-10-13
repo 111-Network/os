@@ -218,7 +218,7 @@ components:
         kind: { type: string, enum: [child, detected, builtin] }
         state: { $ref: "#/components/schemas/ServiceState" }
         since: { type: string, format: date-time }
-        reason_code: { type: string, description: "stable snake_case, e.g. binary_absent, no_python, child_backoff, health_503, no_radio, radio_unbound, radio_bound_rnode, radio_bound_meshtastic, stack_down, wan_offline, verified. Clients treat unknown codes as display-only." }
+        reason_code: { type: string, description: "stable snake_case, display-only for clients. Emitted set (111d): healthy, health_pending, spawn_pending, child_degraded, child_stopped, health_error, health_unreachable, binary_absent, no_model, no_python, venv_unavailable, transport_degraded, joined, isolated, no_radio, radio_unbound, radio_bound_rnode, radio_bound_meshtastic, stack_waiting, stack_down, verify_failed, kb_absent, wan_ok, wan_unknown, wan_offline, not_hub, opencode_found, opencode_absent." }
         reason: { type: string, description: "one plain sentence" }
         can_run_here: { type: boolean }
         requires: { type: string }
@@ -284,7 +284,7 @@ components:
           properties: { loopback: { type: boolean }, paired: { type: boolean } }
         layers:
           type: array
-          description: which layers this node runs (0–9) as built today
+          description: "layers this node runs right now (0 needs the KB payload verified, 2 needs identity ok, 3 needs the agent binary, 1 and 4 always)"
           items: { type: integer, minimum: 0, maximum: 9 }
     ChildState: { type: string, enum: [absent, running, backoff, degraded, stopped] }
     LogTail:
@@ -448,7 +448,7 @@ components:
         transport: { $ref: "#/components/schemas/DeviceTransport" }
         first_seen: { type: string, format: date-time }
         last_seen: { type: string, format: date-time }
-        reason_code: { type: string, description: "stable snake_case, e.g. present, unplugged, no_driver_service, service_error, session_active, session_idle" }
+        reason_code: { type: string, description: "stable snake_case, display-only for clients. Emitted set (111d): stack_bound, stack_down, radio_unbound, unbound, no_port_access, adapter_idle, unidentified, session_active, session_idle, unplugged, not_detected." }
         reason: { type: string, description: "one plain sentence" }
         capabilities: { type: array, items: { type: string }, description: "e.g. lora, meshtastic-firmware, ble, dashboard-session" }
         service_id: { $ref: "#/components/schemas/ServiceId", description: "the registry service this device belongs to, if any" }

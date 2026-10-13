@@ -80,7 +80,7 @@ export const schemas: Record<string, JsonSchema> = {
       "since": {"type":"string","format":"date-time"},
       "reason_code": {
         "type": "string",
-        "description": "stable snake_case, e.g. binary_absent, no_python, child_backoff, health_503, no_radio, radio_unbound, radio_bound_rnode, radio_bound_meshtastic, stack_down, wan_offline, verified. Clients treat unknown codes as display-only."
+        "description": "stable snake_case, display-only for clients. Emitted set (111d): healthy, health_pending, spawn_pending, child_degraded, child_stopped, health_error, health_unreachable, binary_absent, no_model, no_python, venv_unavailable, transport_degraded, joined, isolated, no_radio, radio_unbound, radio_bound_rnode, radio_bound_meshtastic, stack_waiting, stack_down, verify_failed, kb_absent, wan_ok, wan_unknown, wan_offline, not_hub, opencode_found, opencode_absent."
       },
       "reason": {"type":"string","description":"one plain sentence"},
       "can_run_here": {"type":"boolean"},
@@ -171,7 +171,7 @@ export const schemas: Record<string, JsonSchema> = {
       },
       "layers": {
         "type": "array",
-        "description": "which layers this node runs (0–9) as built today",
+        "description": "layers this node runs right now (0 needs the KB payload verified, 2 needs identity ok, 3 needs the agent binary, 1 and 4 always)",
         "items": {"type":"integer","minimum":0,"maximum":9}
       }
     }
@@ -423,7 +423,7 @@ export const schemas: Record<string, JsonSchema> = {
       "last_seen": {"type":"string","format":"date-time"},
       "reason_code": {
         "type": "string",
-        "description": "stable snake_case, e.g. present, unplugged, no_driver_service, service_error, session_active, session_idle"
+        "description": "stable snake_case, display-only for clients. Emitted set (111d): stack_bound, stack_down, radio_unbound, unbound, no_port_access, adapter_idle, unidentified, session_active, session_idle, unplugged, not_detected."
       },
       "reason": {"type":"string","description":"one plain sentence"},
       "capabilities": {
