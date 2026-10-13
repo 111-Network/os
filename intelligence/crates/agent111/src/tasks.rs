@@ -29,7 +29,12 @@ use crate::store::{new_id, Store, Task, TaskState};
 /// <prompt>`. See knowledge/projects/opencode.md (headless JSONL is the
 /// delegation seam). The exact subcommand/flags drift across opencode
 /// releases (the 2.x line moves fast), so pinning a version is one edit here.
-const OPENCODE_ARGV: &[&str] = &["run", "--format", "json"];
+const OPENCODE_ARGV: &[&str] = &["run", "--format", "json", "--pure"];
+/// Provider id declared in the per-task `opencode.json`; the model flag is
+/// `-m local/<model_id>`. Verified against opencode 1.18.18: without this
+/// project config it rejects any model id not in its catalog
+/// ("ProviderModelNotFoundError"), and `--pure` disables external plugins.
+const OPENCODE_PROVIDER: &str = "local";
 
 const DEFAULT_PATCH_TIMEOUT: Duration = Duration::from_secs(600);
 const HEALTH_TIMEOUT: Duration = Duration::from_secs(2);
@@ -408,8 +413,13 @@ impl Ctx {
 
         // No WAN/cloud model, no API keys: the child sees only PATH, HOME and
         // the one permitted provider, the local OpenAI-compatible endpoint.
+        let model_base = format!("{}/v1", self.cfg.model_base.trim_end_matches('/'));
+        write_opencode_config(&work, &model_base, &self.cfg.model_id)
+            .map_err(|e| format!("cannot write opencode.json: {e}"))?;
         let mut cmd = Command::new(&exe);
         cmd.args(OPENCODE_ARGV)
+            .arg("-m")
+            .arg(format!("{OPENCODE_PROVIDER}/{}", self.cfg.model_id))
             .arg(prompt)
             .current_dir(&work)
             .env_clear()
@@ -421,11 +431,8 @@ impl Ctx {
                 cmd.env(key, v);
             }
         }
-        cmd.env(
-            "OPENAI_BASE_URL",
-            format!("{}/v1", self.cfg.model_base.trim_end_matches('/')),
-        )
-        .env("OPENAI_API_KEY", "local");
+        cmd.env("OPENAI_BASE_URL", &model_base)
+            .env("OPENAI_API_KEY", "local");
 
         let child = cmd
             .spawn()
@@ -480,6 +487,25 @@ struct Supervised {
 enum Msg {
     Out(String),
     Err(String),
+}
+
+/// Per-task opencode project config: exactly one provider, the local
+/// OpenAI-compatible endpoint, with the node's model declared so opencode's
+/// catalog check passes. No cloud provider can be reached from this config.
+fn write_opencode_config(work: &Path, model_base: &str, model_id: &str) -> std::io::Result<()> {
+    let cfg = serde_json::json!({
+        "$schema": "https://opencode.ai/config.json",
+        "provider": {
+            OPENCODE_PROVIDER: {
+                "npm": "@ai-sdk/openai-compatible",
+                "name": "111 local model",
+                "options": { "baseURL": model_base, "apiKey": "local" },
+                "models": { model_id: { "name": model_id } }
+            }
+        },
+        "model": format!("{OPENCODE_PROVIDER}/{model_id}")
+    });
+    std::fs::write(work.join("opencode.json"), serde_json::to_vec_pretty(&cfg)?)
 }
 
 /// Drive a piped child to completion or the deadline. Reader threads feed a

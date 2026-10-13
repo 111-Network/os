@@ -345,8 +345,26 @@ fn patch_delegates_to_opencode_with_scrubbed_env() {
 
     // Pinned headless argv, prompt last and grounded in the KB ref.
     let argv = std::fs::read_to_string(work.join("opencode-argv.txt")).unwrap();
-    assert!(argv.starts_with("run\n--format\njson\n"), "{argv}");
+    assert!(
+        argv.starts_with("run\n--format\njson\n--pure\n-m\nlocal/"),
+        "{argv}"
+    );
     assert!(argv.contains("fix heartbeat") && argv.contains("ALPHA-MARKER"));
+    // Per-task project config: exactly one provider, the local endpoint,
+    // with the node's model declared (opencode rejects undeclared model ids).
+    let oc: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(work.join("opencode.json")).unwrap())
+            .unwrap();
+    let providers = oc["provider"].as_object().unwrap();
+    assert_eq!(providers.len(), 1, "exactly one provider: {oc}");
+    assert_eq!(
+        oc["provider"]["local"]["options"]["baseURL"],
+        format!("{}/v1", model.url())
+    );
+    assert!(
+        oc["provider"]["local"]["models"].get("qwen3-4b").is_some()
+            || oc["model"].as_str().unwrap().starts_with("local/")
+    );
 
     // patch never touches the model.
     assert!(seen.lock().unwrap().is_empty());
