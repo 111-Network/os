@@ -52,7 +52,7 @@ fn defaults_when_nothing_set() {
 
 #[test]
 fn env_file_overrides_defaults() {
-    let file = "# comment\n\n  111_AGENT_PORT=12001 \n111_AGENT_MODEL_ID=phi-4\n111_AGENT_LAN=yes\n111_AGENT_STATE_DIR=/tmp/state\n";
+    let file = "# comment\n\n  AGENT111_PORT=12001 \nAGENT111_MODEL_ID=phi-4\nAGENT111_LAN=yes\nAGENT111_STATE_DIR=/tmp/state\n";
     let cfg = resolve(&[], &[], &[(DEFAULT_ENV_FILE, file)]).unwrap();
     assert_eq!(cfg.port, 12001);
     assert_eq!(cfg.model_id, "phi-4");
@@ -64,10 +64,10 @@ fn env_file_overrides_defaults() {
 
 #[test]
 fn precedence_flag_over_env_var_over_env_file_over_default() {
-    let file = "111_AGENT_PORT=12001\n111_AGENT_MODEL_BASE=http://10.9.9.9:11181\n";
+    let file = "AGENT111_PORT=12001\nAGENT111_MODEL_BASE=http://10.9.9.9:11181\n";
     let env = [
-        ("111_AGENT_PORT", "13001"),
-        ("111_AGENT_MODEL_BASE", "http://192.168.0.5:11181"),
+        ("AGENT111_PORT", "13001"),
+        ("AGENT111_MODEL_BASE", "http://192.168.0.5:11181"),
     ];
     let flag_base = "http://172.16.0.7:11181";
 
@@ -92,7 +92,7 @@ fn precedence_flag_over_env_var_over_env_file_over_default() {
     assert_eq!(cfg.model_base, "http://10.9.9.9:11181");
 
     // Empty env var counts as unset, so the file value shows through.
-    let cfg = resolve(&[("111_AGENT_PORT", "")], &[], &[(DEFAULT_ENV_FILE, file)]).unwrap();
+    let cfg = resolve(&[("AGENT111_PORT", "")], &[], &[(DEFAULT_ENV_FILE, file)]).unwrap();
     assert_eq!(cfg.port, 12001);
 
     // --flag=value form parses identically.
@@ -103,16 +103,16 @@ fn precedence_flag_over_env_var_over_env_file_over_default() {
 #[test]
 fn env_file_path_from_env_var_and_flag() {
     let files = [
-        ("/custom/a.env", "111_AGENT_PORT=12011"),
-        ("/custom/b.env", "111_AGENT_PORT=12012"),
+        ("/custom/a.env", "AGENT111_PORT=12011"),
+        ("/custom/b.env", "AGENT111_PORT=12012"),
     ];
     // Env var selects the file.
-    let cfg = resolve(&[("111_AGENT_ENV_FILE", "/custom/a.env")], &[], &files).unwrap();
+    let cfg = resolve(&[("AGENT111_ENV_FILE", "/custom/a.env")], &[], &files).unwrap();
     assert_eq!(cfg.port, 12011);
 
     // Flag is honored before the file is read: it beats the env var's path.
     let cfg = resolve(
-        &[("111_AGENT_ENV_FILE", "/custom/a.env")],
+        &[("AGENT111_ENV_FILE", "/custom/a.env")],
         &["--env-file", "/custom/b.env"],
         &files,
     )
@@ -120,13 +120,13 @@ fn env_file_path_from_env_var_and_flag() {
     assert_eq!(cfg.port, 12012);
 
     // A selected-but-missing env file is fine: defaults continue.
-    let cfg = resolve(&[("111_AGENT_ENV_FILE", "/nope.env")], &[], &files).unwrap();
+    let cfg = resolve(&[("AGENT111_ENV_FILE", "/nope.env")], &[], &files).unwrap();
     assert_eq!(cfg.port, 11182);
 }
 
 #[test]
 fn malformed_env_file_names_the_line() {
-    let file = "111_AGENT_PORT=12001\n# fine\n\nbogus line here\n";
+    let file = "AGENT111_PORT=12001\n# fine\n\nbogus line here\n";
     let err = resolve(&[], &[], &[(DEFAULT_ENV_FILE, file)]).unwrap_err();
     let msg = format!("{err:#}");
     assert!(msg.contains("line 4"), "msg: {msg}");
@@ -167,7 +167,7 @@ fn missing_flag_value_is_a_clear_error() {
 
 #[test]
 fn bad_port_is_a_clear_error() {
-    let err = resolve(&[("111_AGENT_PORT", "abc")], &[], &[]).unwrap_err();
+    let err = resolve(&[("AGENT111_PORT", "abc")], &[], &[]).unwrap_err();
     assert!(format!("{err:#}").contains("port"), "{err:#}");
 
     let err = resolve(&[], &["--port", "99999"], &[]).unwrap_err();
@@ -225,8 +225,8 @@ fn lan_flag_does_not_rescue_a_public_model_base() {
     // Same via the env var: lan never influences the guard.
     let err = resolve(
         &[
-            ("111_AGENT_MODEL_BASE", "http://8.8.8.8:11181"),
-            ("111_AGENT_LAN", "true"),
+            ("AGENT111_MODEL_BASE", "http://8.8.8.8:11181"),
+            ("AGENT111_LAN", "true"),
         ],
         &[],
         &[],

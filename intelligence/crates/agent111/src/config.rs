@@ -1,4 +1,4 @@
-//! Configuration: defaults < env file (`/etc/111/agent.env`) < `111_AGENT_*`
+//! Configuration: defaults < env file (`/etc/111/agent.env`) < `AGENT111_*`
 //! env vars < CLI flags, plus the startup model-base guard (no WAN inference,
 //! ever; the `lan` flag never influences it).
 //!
@@ -27,7 +27,7 @@ pub struct Config {
     pub lan: bool,
 }
 
-/// Default env-file path; overridden by `111_AGENT_ENV_FILE` / `--env-file`.
+/// Default env-file path; overridden by `AGENT111_ENV_FILE` / `--env-file`.
 pub const DEFAULT_ENV_FILE: &str = "/etc/111/agent.env";
 
 impl Default for Config {
@@ -56,7 +56,7 @@ impl Config {
 
     /// Pure resolution: flags > env vars > env file > defaults. `args` are
     /// argv without the program name. The env-file path itself follows the
-    /// same chain (`--env-file` > `111_AGENT_ENV_FILE` > [`DEFAULT_ENV_FILE`])
+    /// same chain (`--env-file` > `AGENT111_ENV_FILE` > [`DEFAULT_ENV_FILE`])
     /// and is honored before the file is read. A missing env file is fine;
     /// a malformed one is a startup error naming the line. Ends with the
     /// model-base guard: a refusal aborts startup.
@@ -70,7 +70,7 @@ impl Config {
         let env_file = flags
             .env_file
             .clone()
-            .or_else(|| env("111_AGENT_ENV_FILE").filter(|v| !v.is_empty()))
+            .or_else(|| env("AGENT111_ENV_FILE").filter(|v| !v.is_empty()))
             .unwrap_or_else(|| DEFAULT_ENV_FILE.to_string());
         let file_vars = match read_file(Path::new(&env_file)) {
             Ok(content) => parse_env_file(Path::new(&env_file), &content)?,
@@ -79,31 +79,31 @@ impl Config {
         };
 
         let mut cfg = Self::default();
-        if let Some(v) = pick(&flags.port, env, &file_vars, "111_AGENT_PORT") {
+        if let Some(v) = pick(&flags.port, env, &file_vars, "AGENT111_PORT") {
             cfg.port = v
                 .parse()
                 .map_err(|_| anyhow!("bad port value {v:?} (expected 0..=65535)"))?;
         }
-        if let Some(v) = pick(&flags.model_base, env, &file_vars, "111_AGENT_MODEL_BASE") {
+        if let Some(v) = pick(&flags.model_base, env, &file_vars, "AGENT111_MODEL_BASE") {
             cfg.model_base = v;
         }
-        if let Some(v) = pick(&flags.model_id, env, &file_vars, "111_AGENT_MODEL_ID") {
+        if let Some(v) = pick(&flags.model_id, env, &file_vars, "AGENT111_MODEL_ID") {
             cfg.model_id = v;
         }
-        if let Some(v) = pick(&flags.kb_dir, env, &file_vars, "111_AGENT_KB_DIR") {
+        if let Some(v) = pick(&flags.kb_dir, env, &file_vars, "AGENT111_KB_DIR") {
             cfg.kb_dir = PathBuf::from(v);
         }
-        if let Some(v) = pick(&flags.state_dir, env, &file_vars, "111_AGENT_STATE_DIR") {
+        if let Some(v) = pick(&flags.state_dir, env, &file_vars, "AGENT111_STATE_DIR") {
             cfg.state_dir = PathBuf::from(v);
         }
-        if let Some(v) = pick(&flags.category, env, &file_vars, "111_AGENT_CATEGORY") {
+        if let Some(v) = pick(&flags.category, env, &file_vars, "AGENT111_CATEGORY") {
             cfg.category = v;
         }
         if let Some(v) = pick(
             &flags.daemon_health_url,
             env,
             &file_vars,
-            "111_AGENT_DAEMON_HEALTH_URL",
+            "AGENT111_DAEMON_HEALTH_URL",
         ) {
             cfg.daemon_health_url = v;
         }
@@ -111,16 +111,16 @@ impl Config {
             &flags.opencode_path,
             env,
             &file_vars,
-            "111_AGENT_OPENCODE_PATH",
+            "AGENT111_OPENCODE_PATH",
         ) {
             cfg.opencode_path = PathBuf::from(v);
         }
-        if let Some(v) = pick(&flags.node_id, env, &file_vars, "111_AGENT_NODE_ID") {
+        if let Some(v) = pick(&flags.node_id, env, &file_vars, "AGENT111_NODE_ID") {
             cfg.node_id = Some(v);
         }
         if flags.lan {
             cfg.lan = true;
-        } else if let Some(v) = pick(&None, env, &file_vars, "111_AGENT_LAN") {
+        } else if let Some(v) = pick(&None, env, &file_vars, "AGENT111_LAN") {
             cfg.lan = parse_truthy(&v);
         }
 
@@ -371,11 +371,11 @@ mod tests {
     fn env_file_parser() {
         let vars = parse_env_file(
             Path::new("test.env"),
-            "# comment\n\n 111_AGENT_PORT=12000 \n111_AGENT_MODEL_ID=phi-4\n",
+            "# comment\n\n AGENT111_PORT=12000 \nAGENT111_MODEL_ID=phi-4\n",
         )
         .unwrap();
-        assert_eq!(vars.get("111_AGENT_PORT").unwrap(), "12000");
-        assert_eq!(vars.get("111_AGENT_MODEL_ID").unwrap(), "phi-4");
+        assert_eq!(vars.get("AGENT111_PORT").unwrap(), "12000");
+        assert_eq!(vars.get("AGENT111_MODEL_ID").unwrap(), "phi-4");
         let err = parse_env_file(Path::new("test.env"), "ok=1\nbogus line\n").unwrap_err();
         assert!(err.to_string().contains("line 2"), "{err}");
     }
