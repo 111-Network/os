@@ -1,10 +1,13 @@
-// Placeholder (U2). A later build task replaces the body; keep this path and the default export.
-import { Empty } from "../../components/empty";
+// Devices (spec 6.3). The router sends /devices, /devices/add and /devices/:id here; this view branches on the route.
+import { useLocation, useParams } from "wouter";
+import AddDevice from "./add";
+import DeviceDetail from "./detail";
+import DeviceList from "./list";
 
 export default function DevicesView() {
-  return (
-    <Empty kicker="placeholder" title="Devices">
-      Attached and paired devices land here, including the add and detail pages.
-    </Empty>
-  );
+  const [path] = useLocation();
+  const { id } = useParams<{ id?: string }>();
+  if (path === "/devices/add") return <AddDevice />;
+  if (id) return <DeviceDetail key={id} id={id} />;
+  return <DeviceList />;
 }
