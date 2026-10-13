@@ -41,7 +41,7 @@ Legend: ⬜ todo · 🔧 in flight · 🔁 bounced · ✅ verified + committed
 **HTTP contracts:**
 - `GET /health` → always JSON `{schema:1, status:"ok"|"error", components:{identity:bool, kb:bool, transport:"alive"|"absent"|"degraded", updater_idle:bool}}`; 200 iff `ok`, else 503.
 - `GET /api/status` → `{schema:1, node:{node_id,category,version,uptime_sec}  (v2.2: `node_id` = lowercase hex NodeId, was `npub`), kb:{sha256,entries}, transport_state:"no transport"|"isolated"|"joined"|"transport degraded", health:<health body>, updates:{last_successful_check:null|RFC3339, pending:bool, floor}, clock_fault:bool, offer:null|{tier,state}, error_state:null|{kind,detail}}`. Additive-only; this is the Layer 4/9 seam.
-- Dashboard page + both endpoints: GET-only (405), Host allowlist `127.0.0.1`/`localhost` (any port), bind `127.0.0.1:11180` default, LAN bind only via `111 config dashboard.lan true` with printed warning. No identity material on any endpoint.
+- `/health` + `/api/status`: GET-only (405). Host allowlist, binds (`:11180` + best-effort `:80`, LAN opt-in), mDNS and pairing auth are now per the Layer 4 dashboard section of README.md; `/api/v1/*` (incl. POST/PATCH/DELETE + one SSE stream) per `os/interface/api/openapi.yaml` (amended 2026-10-13, D15). No identity material on any endpoint.
 
 **Constants:** port 11180 · user `node111` · roots `/var/lib/111` `/etc/111` · symlink `/usr/local/bin/111` · unit names `111node.service` `111node-update.{path,service}` · calver `YYYY.MM.DD[.N]` (zero-padded, lexicographic) · min calver crate-compiled · rns lockfile `rns==1.5.6` hash-locked · Termux pins `termux-app v0.118.3` / `:Boot v0.8.1` / `:API v0.53.0`.
 
