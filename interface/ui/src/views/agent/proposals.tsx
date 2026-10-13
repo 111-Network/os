@@ -56,17 +56,24 @@ function ProposalCard({ proposal, now, onWhy, onDecided }: CardProps) {
           {createdText(proposal.created_at, now)}
         </time>
       </div>
-      <Disclosure summary="details" className="mt-1">
+      <Disclosure
+        summary={
+          <>
+            details<span className="sr-only"> of {proposal.title}</span>
+          </>
+        }
+        className="mt-1"
+      >
         <ProposalBody body={proposal.body} />
       </Disclosure>
       <div className="mt-1 flex flex-wrap gap-2">
-        <Button size="sm" variant="primary" arrow={false} loading={busy === "accepted"} disabled={busy !== null} onClick={() => void decide("accepted")}>
+        <Button size="sm" variant="primary" arrow={false} loading={busy === "accepted"} aria-disabled={busy !== null || undefined} onClick={() => void decide("accepted")}>
           Mark accepted
         </Button>
-        <Button size="sm" loading={busy === "dismissed"} disabled={busy !== null} onClick={() => void decide("dismissed")}>
+        <Button size="sm" loading={busy === "dismissed"} aria-disabled={busy !== null || undefined} onClick={() => void decide("dismissed")}>
           Dismiss
         </Button>
-        <Button size="sm" disabled={busy !== null} onClick={() => onWhy(proposal)}>
+        <Button size="sm" aria-disabled={busy !== null || undefined} onClick={() => onWhy(proposal)}>
           Why?
         </Button>
       </div>
@@ -91,7 +98,7 @@ export function ProposalCards({ proposals, onWhy, onDecided }: ProposalCardsProp
   const now = useNow(proposals.length > 0, 30_000);
   if (proposals.length === 0) return null;
   return (
-    <section aria-label="Open proposals" className="max-h-[35%] shrink-0 overflow-y-auto border-t border-border bg-secondary/20 p-3">
+    <section aria-label="Open proposals" className="shrink-0 border border-border bg-secondary/20 p-3">
       <p className="mb-2 text-[10px] uppercase tracking-widest text-muted-foreground">
         {proposals.length === 1 ? "1 proposal needs you" : `${proposals.length} proposals need you`}
       </p>

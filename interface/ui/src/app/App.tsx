@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Router, useLocation } from "wouter";
 import { useServices } from "../lib/api/hooks";
+import { cx } from "../lib/cx";
 import { ModeProvider } from "../lib/mode";
 import { titleFor } from "../lib/nav";
 import PairView from "../views/pair";
@@ -52,6 +53,10 @@ function Shell() {
 
   if (path === PAIR_PATH) return <PairView />;
 
+  // The Agent route is a chat that fills the screen: below `lg` the column is exactly the viewport and
+  // the transcript is its one scroll container (no page scroll, no min-height fighting the keyboard).
+  const fill = path === "/";
+
   return (
     <div className="lg:flex">
       <button
@@ -62,9 +67,13 @@ function Shell() {
         Skip to content
       </button>
       <Sidebar path={path} desktop={desktop} drawerOpen={drawerOpen} onClose={closeDrawer} />
-      <div inert={drawerActive} className="flex min-h-dvh min-w-0 flex-1 flex-col">
+      <div inert={drawerActive} className={cx("flex min-w-0 flex-1 flex-col", fill ? "h-dvh overflow-hidden lg:h-auto lg:min-h-dvh lg:overflow-visible" : "min-h-dvh")}>
         <Header path={path} drawerOpen={drawerActive} desktop={desktop} onMenu={() => setDrawerOpen(true)} />
-        <main id={MAIN_ID} tabIndex={-1} className="mx-auto flex w-full max-w-7xl flex-1 flex-col px-4 py-6 outline-none lg:px-8">
+        <main
+          id={MAIN_ID}
+          tabIndex={-1}
+          className={cx("mx-auto flex w-full max-w-7xl flex-1 flex-col px-4 py-6 outline-none lg:px-8", fill && "min-h-0 max-lg:p-0")}
+        >
           <AppRoutes />
         </main>
       </div>

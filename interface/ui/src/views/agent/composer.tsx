@@ -88,15 +88,23 @@ export function Composer({ session, streaming, draftSeq, onSubmitted }: Composer
           submit();
         }}
       />
-      {streaming ? (
-        <Button size="sm" onClick={() => session.stop()}>
-          stop
-        </Button>
-      ) : (
-        <Button type="submit" size="sm" variant="primary" disabled={empty}>
-          send
-        </Button>
-      )}
+      {/* One button, two jobs: a swapped element would lose the keyboard user's focus. */}
+      <Button
+        type={streaming ? "button" : "submit"}
+        size="sm"
+        variant={streaming ? "default" : "primary"}
+        aria-disabled={!streaming && empty ? true : undefined}
+        onClick={
+          streaming
+            ? () => {
+                session.stop();
+                ref.current?.focus();
+              }
+            : undefined
+        }
+      >
+        {streaming ? "stop" : "send"}
+      </Button>
       <span id="composer-hint" className="sr-only">
         Enter sends. Shift and Enter adds a new line.
       </span>

@@ -3,7 +3,7 @@
 // environment. The views map these plain values onto primitives.
 import { isApiError } from "../../lib/api/problem";
 import type { ServiceRecord, Settings, Status } from "../../lib/api/types";
-import { buildPrompt, type PromptGoal } from "../../lib/prompts";
+import { questionPrompt, type PromptGoal } from "../../lib/prompts";
 
 /** Text shown in place of a control that only works on the node itself (paired LAN session). */
 export const LOOPBACK_ONLY_TEXT = "available on the node itself";
@@ -21,7 +21,6 @@ export interface EssentialRow {
   note?: string;
 }
 
-export const BACKUP_COMMAND = "sudo -u node111 111 identity backup";
 export const BACKUP_NOTE = "The dashboard never shows or sends your keys.";
 
 const ESSENTIALS: readonly EssentialRow[] = [
@@ -89,10 +88,13 @@ export function problemText(err: unknown): string {
   return err instanceof Error && err.message ? err.message : "Something went wrong.";
 }
 
+/** An alias can be 64 characters; the inline confirm keeps the question readable (same bound as Forget). */
+export const RESTART_NAME_MAX = 40;
+
 /** The destructive confirm label: "Restart {alias ?? label}". */
 export function restartConfirmText(status: Status | null | undefined): string {
   const n = status?.node;
-  const name = n?.alias?.trim() || n?.label || "this node";
+  const name = (n?.alias?.trim() || n?.label || "this node").slice(0, RESTART_NAME_MAX);
   return `Restart ${name}`;
 }
 
@@ -279,5 +281,5 @@ export function layerAskPrompt(
   status: Status | null,
 ): { text: string; from: string; goal: PromptGoal } {
   const prefix = `About Layer ${n} (${title}): what is its state on this node and what should I configure?`;
-  return { text: `${prefix}\n\n${buildPrompt("check", { kind: "node" }, { status })}`, from: title, goal: "check" };
+  return { text: questionPrompt(prefix, { kind: "node" }, { status }), from: title, goal: "check" };
 }

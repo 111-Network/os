@@ -3,7 +3,8 @@
 import { useEffect, useState, type FormEvent } from "react";
 import { navigate } from "wouter/use-hash-location";
 import { useNow } from "../app/hooks";
-import { formatPairCode, isCompletePairCode, retrySeconds } from "../app/pair-code";
+import { formatPairCode, isCompletePairCode, retrySeconds, waitPhrase } from "../app/pair-code";
+import { takeReturn } from "../app/pair-return";
 import { Button } from "../components/button";
 import { Input } from "../components/input";
 import { Panel } from "../components/panel";
@@ -11,11 +12,11 @@ import { SectionHeader } from "../components/section-header";
 import { apiStore, getAdapter, isApiError } from "../lib/api";
 import { consumeParam, readParams } from "../lib/params";
 
-type Failure = { kind: "wrong" } | { kind: "limited" } | { kind: "other"; text: string };
+type Failure = { kind: "wrong" } | { kind: "limited"; seconds: number } | { kind: "other"; text: string };
 
 function failureFor(err: unknown): Failure {
   if (!isApiError(err)) return { kind: "other", text: "Pairing failed. Try again." };
-  if (err.status === 429 || err.code === "rate_limited") return { kind: "limited" };
+  if (err.status === 429 || err.code === "rate_limited") return { kind: "limited", seconds: retrySeconds(err.problem.detail) };
   if (err.status === 401 || err.unauthenticated) return { kind: "wrong" };
   if (err.code === "network") return { kind: "other", text: "Could not reach the node. Check that it is running and try again." };
   return { kind: "other", text: err.problem.detail || err.problem.title };
@@ -41,7 +42,7 @@ export default function PairView() {
         if (cancelled || !(session.loopback || session.paired)) return;
         // Clear a stale "needs pairing" flag first, or the auth gate would bounce straight back here.
         await apiStore.refreshAll();
-        if (!cancelled && !apiStore.getState().meta.needsPair) navigate("/", { replace: true });
+        if (!cancelled && !apiStore.getState().meta.needsPair) navigate(takeReturn(), { replace: true });
       } catch {
         /* node unreachable: stay on the form */
       }
@@ -68,20 +69,23 @@ export default function PairView() {
         setFailure({ kind: "other", text: "Paired, but the node still refuses this browser. Check that cookies are enabled for this address." });
         return;
       }
-      navigate("/", { replace: true });
+      navigate(takeReturn(), { replace: true });
     } catch (err) {
       const f = failureFor(err);
-      if (f.kind === "limited") setBlockedUntil(Date.now() + retrySeconds(isApiError(err) ? err.problem.detail : undefined) * 1000);
+      if (f.kind === "limited") setBlockedUntil(Date.now() + f.seconds * 1000);
       setFailure(f);
     } finally {
       setBusy(false);
     }
   };
 
+  // The alert text never changes while it is on screen (a live region that rewrites itself every second
+  // is read out every second); the countdown beside it is not live.
   let message: string | null = null;
   if (failure?.kind === "wrong") message = "Wrong code. Check the code shown on the node and try again.";
-  else if (failure?.kind === "limited" && wait > 0) message = `Too many attempts — wait ${wait}s`;
+  else if (failure?.kind === "limited" && wait > 0) message = `Too many attempts. Wait ${waitPhrase(failure.seconds)}.`;
   else if (failure?.kind === "other") message = failure.text;
+  const host = typeof window === "undefined" ? "" : window.location.host;
 
   return (
     <main id="main" className="mx-auto flex min-h-dvh w-full max-w-md flex-col justify-center gap-6 px-4 py-10">
@@ -90,6 +94,11 @@ export default function PairView() {
         <p className="font-mono text-xs leading-relaxed text-muted-foreground">
           On the node run <code className="border border-border px-1 text-foreground">111 dashboard</code> and type the pair code shown there.
         </p>
+        {host ? (
+          <p className="mt-2 font-mono text-xs leading-relaxed text-muted-foreground">
+            This browser is pairing with the node at <span className="break-all text-foreground">{host}</span>.
+          </p>
+        ) : null}
         <form onSubmit={submit} noValidate className="mt-4 flex flex-col gap-3">
           <label htmlFor="pair-code" className="text-[10px] uppercase tracking-widest text-muted-foreground">
             Pair code
@@ -115,6 +124,11 @@ export default function PairView() {
           {message ? (
             <p id="pair-message" role="alert" className="font-mono text-xs text-foreground">
               {message}
+            </p>
+          ) : null}
+          {failure?.kind === "limited" && wait > 0 ? (
+            <p aria-live="off" className="font-mono text-xs text-muted-foreground">
+              You can try again in {wait}s.
             </p>
           ) : null}
           <Button type="submit" variant="primary" loading={busy} disabled={!canSubmit && !busy}>

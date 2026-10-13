@@ -76,11 +76,43 @@ const HEADING_CLASS = {
   6: "mt-4 font-mono text-xs font-bold text-muted-foreground",
 } as const;
 
-function BlockNode({ block }: { block: Block }): ReactNode {
+export interface RenderOptions {
+  /**
+   * Headings are bold lines, not document headings: for a body shown inside another page (a proposal
+   * in the chat) where it must not add to the outline.
+   */
+  headingsAsBold?: boolean;
+  /** Small muted text for a body inside a card. */
+  compact?: boolean;
+  /**
+   * The shallowest heading level in the document (see `minHeadingLevel`). Headings are numbered from it,
+   * so the first one is an h2 under the page's h1 whatever level the author started at.
+   */
+  minLevel?: number;
+}
+
+/** The shallowest heading level among the top-level blocks (1 when there is none). */
+export function minHeadingLevel(blocks: readonly Block[]): number {
+  let min = 7;
+  for (const b of blocks) if (b.t === "heading" && b.level < min) min = b.level;
+  return min === 7 ? 1 : min;
+}
+
+function BlockNode({ block, opts }: { block: Block; opts: RenderOptions }): ReactNode {
+  const small = opts.compact === true;
+  const text = small ? "break-words text-xs leading-relaxed text-muted-foreground" : "font-mono text-sm leading-relaxed text-foreground";
   switch (block.t) {
     case "heading": {
-      // The page title is the h1, so document headings start at h2.
-      const Tag = HEADING_TAG[block.level];
+      if (opts.headingsAsBold) {
+        return (
+          <p className="mt-2 font-bold text-foreground">
+            <Inlines nodes={block.children} />
+          </p>
+        );
+      }
+      // The page title is the h1, so document headings start at h2 and never skip a level.
+      const rel = Math.min(6, Math.max(1, block.level - (opts.minLevel ?? 1) + 1)) as 1 | 2 | 3 | 4 | 5 | 6;
+      const Tag = HEADING_TAG[rel];
       return (
         <Tag className={HEADING_CLASS[block.level]}>
           <Inlines nodes={block.children} />
@@ -89,20 +121,20 @@ function BlockNode({ block }: { block: Block }): ReactNode {
     }
     case "paragraph":
       return (
-        <p className="font-mono text-sm leading-relaxed text-foreground">
+        <p className={text}>
           <Inlines nodes={block.children} />
         </p>
       );
     case "list": {
       const Tag = block.ordered ? "ol" : "ul";
       return (
-        <Tag start={block.ordered ? block.start : undefined} className={cx("space-y-1 ps-6 font-mono text-sm leading-relaxed text-foreground", block.ordered ? "list-decimal" : "list-disc")}>
+        <Tag start={block.ordered ? block.start : undefined} className={cx("space-y-1 ps-6", text, block.ordered ? "list-decimal" : "list-disc")}>
           {block.items.map((item, i) => (
             <li key={i}>
               <Inlines nodes={item.children} />
               {item.sub.length > 0 ? (
                 <div className="mt-1">
-                  <Blocks blocks={item.sub} />
+                  <Blocks blocks={item.sub} {...opts} />
                 </div>
               ) : null}
             </li>
@@ -115,7 +147,7 @@ function BlockNode({ block }: { block: Block }): ReactNode {
     case "quote":
       return (
         <blockquote className="border-s-2 border-border ps-4 text-muted-foreground">
-          <Blocks blocks={block.children} />
+          <Blocks blocks={block.children} {...opts} />
         </blockquote>
       );
     case "rule":
@@ -123,11 +155,11 @@ function BlockNode({ block }: { block: Block }): ReactNode {
   }
 }
 
-export function Blocks({ blocks }: { blocks: readonly Block[] }) {
+export function Blocks({ blocks, ...opts }: { blocks: readonly Block[] } & RenderOptions) {
   return (
-    <div className="space-y-3">
+    <div className={opts.compact ? "space-y-2" : "space-y-3"}>
       {blocks.map((b, i) => (
-        <BlockNode key={i} block={b} />
+        <BlockNode key={i} block={b} opts={opts} />
       ))}
     </div>
   );

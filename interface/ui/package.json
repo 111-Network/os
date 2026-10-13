@@ -14,7 +14,6 @@
     "check": "pnpm typecheck && pnpm test && pnpm build && pnpm budget"
   },
   "dependencies": {
-    "lucide-react": "^0.564.0",
     "react": "^19.2.0",
     "react-dom": "^19.2.0",
     "wouter": "^3.13.0"

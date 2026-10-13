@@ -32,10 +32,10 @@ export function Row({ id, label, help, children }: RowProps) {
 
 /** One inline line of feedback under a control: polite status, or an assertive problem. */
 export function Feedback({ text, problem = false }: { text: string | null; problem?: boolean }) {
-  if (!text) return <div role={problem ? "alert" : "status"} className="sr-only" />;
+  // One element whether or not there is text, so a screen reader hears the text arrive in a live region it already knows.
   return (
-    <p role={problem ? "alert" : "status"} className={`mt-2 ${FEEDBACK} ${problem ? "text-destructive" : "text-muted-foreground"}`}>
-      {problem ? `Problem: ${text}` : text}
+    <p role={problem ? "alert" : "status"} className={text ? `mt-2 ${FEEDBACK} ${problem ? "text-destructive" : "text-muted-foreground"}` : "sr-only"}>
+      {text ? (problem ? `Problem: ${text}` : text) : ""}
     </p>
   );
 }

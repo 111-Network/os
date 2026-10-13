@@ -77,12 +77,91 @@ export function announce(text: string): void {
   shared(text);
 }
 
+export interface RegionWriterDeps {
+  /** Puts text into the live region (a state setter). */
+  set: (text: string) => void;
+  setTimer: (fn: () => void, ms: number) => unknown;
+  clearTimer: (handle: unknown) => void;
+  now?: () => number;
+  /** How long the region stays empty before the same words are written again. */
+  repeatGapMs?: number;
+  /** A message must have been on screen this long before a route change may clear it. */
+  settleMs?: number;
+}
+
+export const REPEAT_GAP_MS = 80;
+export const SETTLE_MS = 2000;
+
+/**
+ * Writes to the live region. A screen reader announces a *change*, so the same sentence twice in a row
+ * (a second "Check started", a repeated "Disconnected") would be silent; it empties the region first and
+ * writes the words again a moment later.
+ */
+export function createRegionWriter(deps: RegionWriterDeps) {
+  const gap = deps.repeatGapMs ?? REPEAT_GAP_MS;
+  const settle = deps.settleMs ?? SETTLE_MS;
+  const now = deps.now ?? (() => Date.now());
+  let shown = "";
+  let shownAt = 0;
+  let timer: unknown = null;
+  const apply = (text: string) => {
+    shown = text;
+    shownAt = now();
+    deps.set(text);
+  };
+  const cancel = () => {
+    if (timer !== null) deps.clearTimer(timer);
+    timer = null;
+  };
+  return {
+    show(text: string): void {
+      cancel();
+      if (text !== "" && text === shown) {
+        apply("");
+        timer = deps.setTimer(() => {
+          timer = null;
+          apply(text);
+        }, gap);
+      } else apply(text);
+    },
+    /**
+     * Empty the region, but only if it still shows `stale` (something newer stays). A message that was
+     * just announced ("forgotten", then the page changes) is given time to be read before it goes.
+     */
+    clearIf(stale: string): void {
+      if (shown !== stale) return;
+      cancel();
+      const age = now() - shownAt;
+      if (age >= settle) {
+        apply("");
+        return;
+      }
+      timer = deps.setTimer(() => {
+        timer = null;
+        if (shown === stale) apply("");
+      }, settle - age);
+    },
+    cancel,
+  };
+}
+
 export function LiveRegion() {
   const [text, setText] = useState("");
+  const writer = useRef<ReturnType<typeof createRegionWriter> | null>(null);
+  if (writer.current === null) {
+    writer.current = createRegionWriter({
+      set: setText,
+      setTimer: (fn, ms) => window.setTimeout(fn, ms),
+      clearTimer: (h) => window.clearTimeout(h as number),
+    });
+  }
   useEffect(() => {
-    listeners.add(setText);
+    const w = writer.current!;
+    const show = (t: string) => w.show(t);
+    listeners.add(show);
     return () => {
-      listeners.delete(setText);
+      listeners.delete(show);
+      w.cancel();
     };
   }, []);
 
@@ -97,17 +176,17 @@ export function LiveRegion() {
     if (next.text) announce(next.text);
   }, [disconnected, everOpened, needsPair]);
 
-  // A new route starts with a clean region: a stale message must not follow the user around. Anything
-  // announced during the same render pass (a view announcing on mount) is newer and stays.
+  // A new route starts with a clean region: a stale message must not follow the user around. The text
+  // this render saw is the stale one; anything announced during the same commit (a view announcing on
+  // mount) is newer and stays.
   const [path] = useAppLocation();
-  const shown = useRef(text);
-  shown.current = text;
+  const rendered = useRef(text);
+  rendered.current = text;
   const lastPath = useRef(path);
   useEffect(() => {
     if (lastPath.current === path) return;
     lastPath.current = path;
-    const stale = shown.current;
-    setText((current) => (current === stale ? "" : current));
+    writer.current!.clearIf(rendered.current);
   }, [path]);
   return (
     <div role="status" aria-live="polite" aria-atomic="true" className="sr-only">

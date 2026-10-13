@@ -3,6 +3,7 @@
 import { Panel } from "../../components/panel";
 import { SectionHeader } from "../../components/section-header";
 import { useStatus } from "../../lib/api/hooks";
+import { NEARBY_QUESTION, questionPrompt } from "../../lib/prompts";
 import { AgentButton, useAgentReachable } from "../devices/agent-button";
 import { nearbySentence, radarArt } from "./radar";
 
@@ -39,9 +40,7 @@ export default function NearbyView() {
           from="Nearby"
           goal="check"
           reachable={reachable}
-          prompt={() =>
-            `Who is nearby? Tell me what this node can hear on the mesh right now, and what I would need to see more.\n\nContext from the dashboard: transport state is "${status?.transport_state ?? "unknown"}".`
-          }
+          prompt={() => questionPrompt(NEARBY_QUESTION, { kind: "node" }, { status })}
         />
       </div>
     </div>

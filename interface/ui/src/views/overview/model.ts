@@ -2,10 +2,11 @@
 // summary, the Node facts and the activity lines. No React, no clock except what is passed in.
 import type { AgentEvent, DeviceRecord, Proposal, ServiceRecord, Status } from "../../lib/api/types";
 import type { DotState } from "../../components/status-dot";
+import { IDENTITY_BACKUP_COMMAND } from "../../lib/commands";
+import { summary } from "../../lib/devices";
 import { sanitizeLine } from "../../lib/prompts";
 import { agoText, formatDuration, reasonText } from "../services/model";
 
-export const IDENTITY_BACKUP_COMMAND = "sudo -u node111 111 identity backup";
 export const NEEDS_YOU_ID = "needs-you";
 
 // ---------------------------------------------------------------------------------- needs you
@@ -138,12 +139,7 @@ export function devicesSummary(devices: readonly DeviceRecord[] | null): Devices
   const connected = list.filter((d) => d.state === "connected").length;
   const needSetup = list.filter((d) => d.state === "needs_setup").length;
   const error = list.filter((d) => d.state === "error").length;
-  const text =
-    devices === null
-      ? "Waiting for the node to report."
-      : list.length === 0
-        ? "Nothing attached or paired yet."
-        : `${connected} connected · ${needSetup} need setup · ${error} error`;
+  const text = devices === null ? "Waiting for the node to report." : list.length === 0 ? "Nothing attached or paired yet." : summary(list).sentence;
   return { total: list.length, connected, needSetup, error, text };
 }
 
@@ -165,11 +161,16 @@ export interface NodeFacts {
   reach: string;
 }
 
-export function updateText(u: Status["update"]): string {
+/** `runningVersion`: the version the node runs now, so an applied update can say what it updated to. */
+export function updateText(u: Status["update"], runningVersion?: string | null): string {
   const v = u.pending_version ? ` ${u.pending_version}` : "";
   switch (u.state) {
     case "idle":
-      return u.pending ? `update${v} waiting` : u.last_result === "up_to_date" ? "up to date" : "idle";
+      if (u.pending) return `update${v} waiting`;
+      if (u.last_result === "up_to_date") return "up to date";
+      // `staged` is the last result of an update that went through; the node is idle again on the new version.
+      if (u.last_result === "staged") return runningVersion ? `updated to ${runningVersion}` : "updated";
+      return "idle";
     case "checking":
       return "checking for updates\u2026";
     case "staged":
@@ -194,7 +195,7 @@ export function nodeFacts(status: Status, services: readonly ServiceRecord[] | n
     category: n.category,
     version: n.version,
     uptime: formatDuration(n.uptime_sec),
-    update: updateText(status.update),
+    update: updateText(status.update, n.version),
     lastCheck: status.update.last_check ? agoText(status.update.last_check, now) : "never",
     gateway: !gw ? "unknown" : gw.state === "live" ? "internet reachable" : gw.state === "starting" ? "checking" : "no internet",
     addresses: status.bind.urls,

@@ -3,7 +3,7 @@
 // the agent's; these helpers only turn registry fields into plain words and prepared prompts.
 import type { DotState } from "../components/status-dot";
 import type { DeviceKind, DeviceRecord, DeviceState, DeviceTransport, ServiceRecord, Status } from "./api/types";
-import { buildPrompt, sanitizeLine, type PromptGoal } from "./prompts";
+import { buildPrompt, questionPrompt, sanitizeLine, type PromptGoal } from "./prompts";
 
 // ---------------------------------------------------------------- state and dots
 
@@ -378,17 +378,33 @@ export function devicePrompt(a: {
   const { device } = a;
   const { goal } = deviceAgentAction(device);
   const service = device.service_id ? (a.services.find((s) => s.id === device.service_id) ?? null) : null;
-  const body = buildPrompt(goal, { kind: "device", device, service }, { status: a.status, rawFacts: device.detail });
-  // The check goal sentence is about the whole node; say which device the question is about.
-  const text = goal === "check" ? `About the device ${promptName(device)}: what is it, is it working, what can it do?\n\n${body}` : body;
+  const subject = { kind: "device", device, service } as const;
+  const ctx = { status: a.status, rawFacts: device.detail };
+  // The check goal sentence is about the whole node, so a device question brings its own question and
+  // only the context block (one goal per prompt).
+  const text =
+    goal === "check"
+      ? questionPrompt(`About the device ${promptName(device)}: what is it, is it working, what can it do?`, subject, ctx)
+      : buildPrompt(goal, subject, ctx);
   return { text, goal };
 }
 
-/** Text of the inline confirm for Forget. The Button appends the question mark. */
-export function forgetConfirm(d: Pick<DeviceRecord, "kind" | "alias" | "name">): string {
+/** True when `d` is the caller's own browser session (`GET /auth/session` -> `device_id`). */
+export function isThisBrowser(d: Pick<DeviceRecord, "id">, ownId: string | null | undefined): boolean {
+  return typeof ownId === "string" && d.id === ownId;
+}
+
+/**
+ * Text of the inline confirm for Forget. The Button appends the question mark. `ownId` is the session's
+ * `device_id`: a definite warning when it is this very device, a plain one when it is another, and the
+ * hedge only while it is unknown (null or absent).
+ */
+export function forgetConfirm(d: Pick<DeviceRecord, "id" | "kind" | "alias" | "name">, ownId?: string | null): string {
   const name = displayName(d).slice(0, 40);
   switch (d.kind) {
     case "companion":
+      if (isThisBrowser(d, ownId)) return `Forget ${name}? This is the browser you are using now; you will be logged out. Go ahead`;
+      if (typeof ownId === "string") return `Forget ${name}? That device is logged out and has to pair again. Go ahead`;
       return `Forget ${name}? If this is the phone you are using right now, you will be logged out. Go ahead`;
     case "node":
       return `Forget ${name}? The link to that node is removed. Go ahead`;
@@ -474,7 +490,7 @@ export function pairingHelp(status: Pick<Status, "lan_enabled" | "bind"> | null)
   if (!status.lan_enabled) {
     return {
       state: "off",
-      body: "LAN sharing is off — turn it on in Settings → Sharing (from the node itself).",
+      body: "LAN sharing is off. Turn it on in Settings, under LAN sharing, from the node itself.",
       command: null,
       urls: [],
       primaryUrl: null,

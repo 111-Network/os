@@ -114,9 +114,9 @@ export type ServiceBody = "live" | "starting" | "unset" | "unavailable" | "error
 
 export interface Handoff {
   goal: "setup" | "fix";
-  /** The button text: with the agent live it hands off; otherwise it reveals the steps. */
+  /** The button text: with the agent live it hands off; otherwise it reveals the request it would have sent. */
   label: string;
-  mode: "agent" | "steps";
+  mode: "agent" | "request";
 }
 
 export interface ServicePageState {
@@ -143,6 +143,18 @@ export interface ServicePageState {
  */
 export const NO_SETUP_SERVICES: ReadonlySet<string> = new Set(["gateway"]);
 
+/**
+ * With the agent down, the hand-off button shows the prepared message (the prompt and its context),
+ * not instructions. The recipe in the knowledge base is where the actual steps are.
+ */
+export const REQUEST_LABEL = "Show the request";
+export const REQUEST_HIDE_LABEL = "Hide the request";
+export const REQUEST_COPY_LABEL = "copy the request";
+export const requestNote = (hasRecipe: boolean): string =>
+  hasRecipe
+    ? "The agent is not running. This is the request it would get; the recipe has the steps."
+    : "The agent is not running. This is the request it would get. Copy it for when the agent is back.";
+
 
 export function servicePageState(service: ServiceRecord, agentLive: boolean): ServicePageState {
   const body: ServiceBody =
@@ -150,9 +162,9 @@ export function servicePageState(service: ServiceRecord, agentLive: boolean): Se
 
   let handoff: Handoff | null = null;
   if (body === "unset" && !NO_SETUP_SERVICES.has(service.id)) {
-    handoff = { goal: "setup", label: agentLive ? "Set up with the agent" : "Show steps", mode: agentLive ? "agent" : "steps" };
+    handoff = { goal: "setup", label: agentLive ? "Set up with the agent" : REQUEST_LABEL, mode: agentLive ? "agent" : "request" };
   } else if (body === "error") {
-    handoff = { goal: "fix", label: agentLive ? "Fix with the agent" : "Show steps", mode: agentLive ? "agent" : "steps" };
+    handoff = { goal: "fix", label: agentLive ? "Fix with the agent" : REQUEST_LABEL, mode: agentLive ? "agent" : "request" };
   }
 
   const kb = service.kb_entry ? normalizeKbPath(service.kb_entry) : null;

@@ -1,7 +1,7 @@
 // The sidebar (spec section 5). One component, three layouts:
 //   lg+ docked, 260 px, collapsible to a 56 px icon rail (state kept in localStorage 111.ui.rail);
 //   <lg off-canvas drawer, closed by default, focus-trapped while open, closes on Escape / overlay / navigation.
-import { useEffect, useRef, useState, type KeyboardEvent, type ReactNode } from "react";
+import { useEffect, useRef, useState, type KeyboardEvent, type ReactNode, type RefObject } from "react";
 import { Badge } from "../components/badge";
 import { Button } from "../components/button";
 import { Segmented } from "../components/segmented";
@@ -23,6 +23,31 @@ import {
 import { hrefTo } from "./location";
 
 export const RAIL_STORAGE_KEY = "111.ui.rail";
+
+/** True while the element has more content below its visible part (so a cut-off row is not mistaken for the end). */
+export function useMoreBelow<T extends HTMLElement>(): [RefObject<T | null>, boolean] {
+  const ref = useRef<T>(null);
+  const [more, setMore] = useState(false);
+  useEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    const update = () => setMore(el.scrollHeight - el.scrollTop - el.clientHeight > 2);
+    update();
+    el.addEventListener("scroll", update, { passive: true });
+    const resize = typeof ResizeObserver === "undefined" ? null : new ResizeObserver(update);
+    resize?.observe(el);
+    const mutate = typeof MutationObserver === "undefined" ? null : new MutationObserver(update);
+    mutate?.observe(el, { childList: true, subtree: true, attributes: true, attributeFilter: ["hidden"] });
+    window.addEventListener("resize", update);
+    return () => {
+      el.removeEventListener("scroll", update);
+      resize?.disconnect();
+      mutate?.disconnect();
+      window.removeEventListener("resize", update);
+    };
+  }, []);
+  return [ref, more];
+}
 
 function readRail(): boolean {
   try {
@@ -224,6 +249,7 @@ export function Sidebar({ path, desktop, drawerOpen, onClose }: SidebarProps) {
   const nav = visibleNav(mode, services);
   const advanced = mode === "advanced";
   const panelRef = useRef<HTMLDivElement>(null);
+  const [scrollRef, moreBelow] = useMoreBelow<HTMLDivElement>();
 
   const inSettings = path === "/settings" || path.startsWith("/settings/");
   const [settingsOpen, setSettingsOpen] = useState(inSettings);
@@ -336,34 +362,50 @@ export function Sidebar({ path, desktop, drawerOpen, onClose }: SidebarProps) {
         <NodeChip rail={railed} />
 
         <nav aria-label="Main" className="flex min-h-0 flex-1 flex-col">
-          <div className="min-h-0 flex-1 overflow-y-auto overflow-x-hidden py-2">
-            <ul aria-label="Pages" className="flex flex-col">
-              {nav.core.map((i) => row(i, true))}
-            </ul>
+          <div className="relative min-h-0 flex-1">
+            <div ref={scrollRef} className="h-full overflow-y-auto overflow-x-hidden py-2">
+              <ul aria-label="Pages" className="flex flex-col">
+                {nav.core.map((i) => row(i, true))}
+              </ul>
 
-            <SectionLabel rail={railed}>services</SectionLabel>
-            {serviceNote && !railed ? <p className="px-3 py-2 text-xs text-muted-foreground">{serviceNote}</p> : null}
-            <ul aria-label="Services" className="flex flex-col">
-              {nav.services.map(serviceRow)}
-            </ul>
-            {nav.unavailable.length > 0 && !railed ? (
-              <div>
-                <GroupToggle id="nav-unavailable" open={unavailableOpen} onToggle={() => setUnavailableOpen((o) => !o)}>
-                  Not available on this device ({nav.unavailable.length})
-                </GroupToggle>
-                <ul id="nav-unavailable" aria-label="Not available on this device" hidden={!unavailableOpen} className="flex flex-col ps-3">
+              <SectionLabel rail={railed}>services</SectionLabel>
+              {serviceNote && !railed ? <p className="px-3 py-2 text-xs text-muted-foreground">{serviceNote}</p> : null}
+              <ul aria-label="Services" className="flex flex-col">
+                {nav.services.map(serviceRow)}
+              </ul>
+              {nav.unavailable.length > 0 && !railed ? (
+                <div>
+                  <GroupToggle id="nav-unavailable" open={unavailableOpen} onToggle={() => setUnavailableOpen((o) => !o)}>
+                    Not available on this device ({nav.unavailable.length})
+                  </GroupToggle>
+                  <ul id="nav-unavailable" aria-label="Not available on this device" hidden={!unavailableOpen} className="flex flex-col ps-3">
+                    {nav.unavailable.map(serviceRow)}
+                  </ul>
+                </div>
+              ) : null}
+              {/* The rail has no room for a group toggle, but the pages must stay reachable: dimmed rows. */}
+              {nav.unavailable.length > 0 && railed ? (
+                <ul aria-label="Not available on this device" className="flex flex-col opacity-60">
                   {nav.unavailable.map(serviceRow)}
                 </ul>
-              </div>
-            ) : null}
+              ) : null}
 
-            {nav.advanced.length > 0 ? (
-              <>
-                <SectionLabel rail={railed}>advanced</SectionLabel>
-                <ul aria-label="Advanced pages" className="flex flex-col">
-                  {nav.advanced.map((i) => row(i, true))}
-                </ul>
-              </>
+              {nav.advanced.length > 0 ? (
+                <>
+                  <SectionLabel rail={railed}>advanced</SectionLabel>
+                  <ul aria-label="Advanced pages" className="flex flex-col">
+                    {nav.advanced.map((i) => row(i, true))}
+                  </ul>
+                </>
+              ) : null}
+            </div>
+            {moreBelow ? (
+              <div
+                aria-hidden="true"
+                className="pointer-events-none absolute inset-x-0 bottom-0 flex h-6 items-center justify-center border-t border-border bg-background/95 font-mono text-[10px] uppercase tracking-widest text-muted-foreground"
+              >
+                {railed ? "v" : "v more"}
+              </div>
             ) : null}
           </div>
 

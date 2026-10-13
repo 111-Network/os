@@ -132,7 +132,7 @@ export function titleFor(path: string, services?: readonly ServiceRecord[] | nul
   const exact: Record<string, string> = {
     "/overview": "Overview",
     "/devices": "Devices",
-    "/devices/add": "Add a device",
+    "/devices/add": "Add device",
     "/nearby": "Nearby",
     "/messages": "Messages",
     "/logs": "Logs",

@@ -2,7 +2,7 @@
 import { memo } from "react";
 import { Badge } from "../../components/badge";
 import { Button } from "../../components/button";
-import type { ChatRow } from "./state";
+import type { ChatRow, Starter } from "./state";
 import type { LiveTurn, QueuedMessage } from "./session";
 
 function ToolLines({ tools }: { tools?: string[] | undefined }) {
@@ -128,17 +128,12 @@ export function Transcript({ rows, live }: MessageListProps) {
   );
 }
 
-export interface Starter {
-  label: string;
-  text: string;
-}
-
-/** First-message area: not a chat message, just a nudge with three prepared starting points. */
+/** First-message area: not a chat message, just a nudge with prepared starting points. */
 export function Greeting({ starters, onStage }: { starters: Starter[]; onStage: (text: string) => void }) {
   return (
     <div className="border border-dashed border-border p-4">
       <p className="max-w-prose text-muted-foreground">
-        {"Ask anything about this node. Try: 'check this node', 'set up the LoRa radio', 'who is nearby?'"}
+        {`Ask anything about this node. Try: ${starters.map((s) => `'${s.label}'`).join(", ")}`}
       </p>
       <div className="mt-3 flex flex-wrap gap-2">
         {starters.map((s) => (

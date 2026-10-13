@@ -4,10 +4,10 @@ import { describe, expect, it } from "vitest";
 import { ApiError } from "../src/lib/api/problem";
 import { buildFixtures } from "../src/lib/api/mock/fixtures";
 import type { LogTail, ServiceRecord, Settings, Status } from "../src/lib/api/types";
+import { IDENTITY_BACKUP_COMMAND } from "../src/lib/commands";
 import { LAYERS, layerBySlug } from "../src/lib/layers";
 import { cleanLines, emptyLogText, followText, hasNoSource, logServices, tailSummary, LOG_POLL_MS } from "../src/views/logs/model";
 import {
-  BACKUP_COMMAND,
   BACKUP_NOTE,
   LAN_LOCKED_TEXT,
   LOOPBACK_ONLY_TEXT,
@@ -54,7 +54,7 @@ describe("essentialRows", () => {
     expect(row.help).toBe("Your identity is 12 words. Back them up once, from the node itself:");
     expect(row.note).toBe("The dashboard never shows or sends your keys.");
     expect(BACKUP_NOTE).toBe(row.note);
-    expect(BACKUP_COMMAND).toBe("sudo -u node111 111 identity backup");
+    expect(IDENTITY_BACKUP_COMMAND).toBe("sudo -u node111 111 identity backup");
   });
   it("returns a fresh array so a caller cannot reorder the shared list", () => {
     const a = essentialRows();
@@ -106,6 +106,8 @@ describe("small rules", () => {
     s.node.label = null;
     expect(restartConfirmText(s)).toBe("Restart this node");
     expect(restartConfirmText(null)).toBe("Restart this node");
+    s.node.alias = "x".repeat(64);
+    expect(restartConfirmText(s)).toBe(`Restart ${"x".repeat(40)}`);
   });
   it("alias patch sends null when empty or blank, trimmed text otherwise", () => {
     expect(aliasPatchValue("")).toBeNull();
@@ -294,7 +296,7 @@ describe("layer catalogue and ask prompt", () => {
   it("prefixes the node check prompt with the layer question", () => {
     const p = layerAskPrompt(3, "Intelligence", status());
     expect(p.text.startsWith("About Layer 3 (Intelligence): what is its state on this node and what should I configure?\n\n")).toBe(true);
-    expect(p.text).toContain("Check this node end to end");
+    expect(p.text).not.toContain("Check this node end to end"); // one goal per prompt
     expect(p.text).toContain("Workshop laptop");
     expect(p.from).toBe("Intelligence");
     expect(p.goal).toBe("check");

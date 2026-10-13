@@ -92,7 +92,7 @@ export default function LogsView() {
       <Panel title="journal" suffix="daemon">
         <p className="max-w-prose font-mono text-xs leading-relaxed text-muted-foreground">{JOURNAL_NOTE}</p>
         <div className="mt-3 flex flex-wrap items-center gap-3">
-          <code className="min-w-0 break-all border border-border bg-background px-3 py-2 font-mono text-xs text-foreground">{JOURNAL_COMMAND}</code>
+          <code className="min-w-0 whitespace-pre-wrap break-words border border-border bg-background px-3 py-2 font-mono text-xs text-foreground">{JOURNAL_COMMAND}</code>
           <CopyButton text={JOURNAL_COMMAND} ariaLabel="Copy the journalctl command" />
         </div>
       </Panel>

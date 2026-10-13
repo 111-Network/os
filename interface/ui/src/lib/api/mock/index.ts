@@ -531,6 +531,8 @@ export function createMockAdapter(opts: MockOptions = {}): MockAdapter {
             paired: state.auth.paired,
             lan_enabled: state.status.lan_enabled,
             created: state.auth.created,
+            loopback_trusted: state.auth.loopback,
+            device_id: state.auth.loopback || state.auth.paired ? state.auth.deviceId : null,
           }),
           { auth: false },
         ),
@@ -551,7 +553,15 @@ export function createMockAdapter(opts: MockOptions = {}): MockAdapter {
             state.auth.created = iso(clock.now());
             state.status.auth.paired = true;
             queueMicrotask(() => bus.retryGated());
-            return { schema: 1, loopback: state.auth.loopback, paired: true, lan_enabled: state.status.lan_enabled, created: state.auth.created };
+            return {
+              schema: 1,
+              loopback: state.auth.loopback,
+              paired: true,
+              lan_enabled: state.status.lan_enabled,
+              created: state.auth.created,
+              loopback_trusted: state.auth.loopback,
+              device_id: state.auth.deviceId,
+            };
           },
           { auth: false },
         ),

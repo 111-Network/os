@@ -11,7 +11,7 @@ import { getAdapter, isApiError } from "../../lib/api";
 import { useMode } from "../../lib/mode";
 import { buildSlugIndex, classifyHref, frontmatterRows, kbRouteTarget, parseMarkdown, type KbRoute } from "../../lib/markdown";
 import { RouteLink } from "../services/shared";
-import { Blocks } from "./render";
+import { Blocks, minHeadingLevel } from "./render";
 
 const TEXT = "font-mono text-xs leading-relaxed text-muted-foreground";
 
@@ -107,7 +107,7 @@ function Document({ text, path }: { text: string; path: string }) {
       ) : null}
       {rows.length > 0 ? <SpecTable mode={mode} rows={rows} /> : null}
       <article className="max-w-3xl">
-        <Blocks blocks={doc.blocks} />
+        <Blocks blocks={doc.blocks} minLevel={minHeadingLevel(doc.blocks)} />
       </article>
       {doc.truncated ? <p className={TEXT}>This entry is very long. Only the first part is shown.</p> : null}
     </div>

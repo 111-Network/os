@@ -1,7 +1,8 @@
 // Pure helpers for the Agent view: the state machine, history filter, conversation id, tool lines
 // and the "Why?" prompt. No React and no DOM, so all of it runs under the node test environment.
 import type { ChatHistory, Proposal, ServiceRecord, Status } from "../../lib/api/sse.gen";
-import { buildPrompt, sanitizeLine } from "../../lib/prompts";
+import { buildPrompt, NEARBY_QUESTION, questionPrompt, sanitizeLine } from "../../lib/prompts";
+import { NO_SETUP_SERVICES } from "../services/model";
 
 // ---------------------------------------------------------------- agent state machine
 
@@ -221,13 +222,45 @@ export function loadConversationId(store: KeyValueStore | null = localStore(), f
   return id;
 }
 
+// ---------------------------------------------------------------- starters
+
+/** A prepared message offered on an empty conversation. Never sent by itself. */
+export interface Starter {
+  label: string;
+  text: string;
+}
+
+/** At most this many service starters, so the empty state stays a nudge. */
+export const MAX_SERVICE_STARTERS = 2;
+
+/**
+ * The empty conversation's starting points. Nothing here is per-service: every service starter is the
+ * one prompt builder over a registry record. A service that is in error comes first (fix), then ones that
+ * can be set up on this device; the agent itself is left out (it cannot fix itself from a chat to itself).
+ */
+export function starters(services: readonly ServiceRecord[] | null, status: Status | null): Starter[] {
+  const forServices: Starter[] = [];
+  const list = (services ?? []).filter((s) => s.id !== "agent" && s.can_run_here !== false);
+  for (const s of list.filter((x) => x.state === "error")) {
+    forServices.push({ label: `fix the ${s.plain_name}`, text: buildPrompt("fix", { kind: "service", service: s }, { status }) });
+  }
+  for (const s of list.filter((x) => x.state === "unset" && !NO_SETUP_SERVICES.has(x.id))) {
+    forServices.push({ label: `set up the ${s.plain_name}`, text: buildPrompt("setup", { kind: "service", service: s }, { status }) });
+  }
+  return [
+    { label: "check this node", text: buildPrompt("check", { kind: "node" }, { status }) },
+    ...forServices.slice(0, MAX_SERVICE_STARTERS),
+    { label: "who is nearby?", text: questionPrompt(NEARBY_QUESTION, { kind: "node" }, { status }) },
+  ];
+}
+
 // ---------------------------------------------------------------- proposals
 
 /** The prompt staged by a proposal card's "Why?" button. */
 export function whyPrompt(proposal: Pick<Proposal, "id" | "title">, status: Status | null): string {
   const title = sanitizeLine(proposal.title).replace(/"/g, "'").slice(0, 120);
   const head = `Explain proposal ${proposal.id} ("${title}") in plain words: what it changes, the risk, and how to undo it.`;
-  return `${head}\n\n${buildPrompt("check", { kind: "node" }, { status })}`;
+  return questionPrompt(head, { kind: "node" }, { status });
 }
 
 /** Maximum message length the contract accepts. */

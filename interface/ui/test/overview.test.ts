@@ -2,12 +2,12 @@
 import { describe, expect, it } from "vitest";
 import { buildFixtures } from "../src/lib/api/mock/fixtures";
 import type { AgentEvent, DeviceRecord, ServiceRecord, Status } from "../src/lib/api/types";
+import { IDENTITY_BACKUP_COMMAND } from "../src/lib/commands";
 import { verdict, verdictDot } from "../src/lib/verdict";
 import {
   activityLine,
   detailText,
   devicesSummary,
-  IDENTITY_BACKUP_COMMAND,
   nearbySentence,
   needsYou,
   nodeFacts,
@@ -213,8 +213,8 @@ describe("nearby, devices and node summaries", () => {
 
   it("devicesSummary counts by state", () => {
     const d = devices([{ state: "connected" }, { state: "needs_setup" }, { state: "error" }, { state: "disconnected" }]);
-    expect(devicesSummary(d)).toMatchObject({ total: 4, connected: 1, needSetup: 1, error: 1, text: "1 connected \u00b7 1 need setup \u00b7 1 error" });
-    expect(devicesSummary(fx.devices).text).toBe("3 connected \u00b7 1 need setup \u00b7 0 error");
+    expect(devicesSummary(d)).toMatchObject({ total: 4, connected: 1, needSetup: 1, error: 1, text: "4 devices: 1 connected, 1 needs setup, 1 has an error, 1 disconnected." });
+    expect(devicesSummary(fx.devices).text).toBe("4 devices: 3 connected, 1 needs setup.");
     expect(devicesSummary([]).text).toBe("Nothing attached or paired yet.");
     expect(devicesSummary(null).text).toMatch(/Waiting/);
   });
@@ -226,6 +226,10 @@ describe("nearby, devices and node summaries", () => {
     expect(updateText({ ...u, state: "staged", pending: true, pending_version: null })).toBe("update staged, applies on restart");
     expect(updateText({ ...u, state: "failed" })).toBe("last update failed");
     expect(updateText({ ...u, state: "checking" })).toMatch(/checking/);
+    // an update that went through leaves the node idle with last_result "staged": say what it is on now
+    expect(updateText({ ...u, state: "idle", pending: false, pending_version: null, last_result: "staged" }, "2026.10.14")).toBe("updated to 2026.10.14");
+    expect(updateText({ ...u, state: "idle", pending: false, pending_version: null, last_result: "staged" })).toBe("updated");
+    expect(updateText({ ...u, state: "idle", pending: false, last_result: null })).toBe("idle");
   });
 
   it("nodeFacts humanizes uptime, last check, gateway and reach", () => {

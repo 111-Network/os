@@ -11,13 +11,13 @@ import { useActivity, useProposals, useServices, useStatus } from "../../lib/api
 import { openProposalsOf } from "../../lib/api/store";
 import { consumeParam } from "../../lib/params";
 import { Adv } from "../../lib/mode";
-import { buildPrompt, takePrompt } from "../../lib/prompts";
+import { takePrompt } from "../../lib/prompts";
 import { OfferCard, PreparedBanner, StateNotice } from "./banners";
 import { Composer } from "./composer";
 import { chatSession as session } from "./instance";
-import { Greeting, QueuedList, Transcript, type Starter } from "./messages";
+import { Greeting, QueuedList, Transcript } from "./messages";
 import { ProposalCards } from "./proposals";
-import { agentState, queuedNotice, whyPrompt } from "./state";
+import { agentState, queuedNotice, starters, whyPrompt } from "./state";
 
 const FOLLOW_SLACK_PX = 24;
 const RAW_EVENTS = 50;
@@ -62,7 +62,7 @@ export default function AgentView() {
   useLayoutEffect(() => {
     const el = listRef.current;
     if (el && pinned.current) el.scrollTop = el.scrollHeight;
-  }, [snap.rows, snap.live, snap.queued, snap.history]);
+  }, [snap.rows, snap.live, snap.queued, snap.history, open.length]);
   const follow = useCallback(() => {
     pinned.current = true;
   }, []);
@@ -81,14 +81,7 @@ export default function AgentView() {
   }, [proposals, open]);
 
   const stage = useCallback((text: string) => session.stage(text), []);
-  const starters: Starter[] = useMemo(
-    () => [
-      { label: "check this node", text: buildPrompt("check", { kind: "node" }, { status }) },
-      { label: "set up the LoRa radio", text: "Set up the LoRa radio on this node and test it." },
-      { label: "who is nearby?", text: "Who is nearby on the mesh? Tell me which other nodes this one has heard." },
-    ],
-    [status],
-  );
+  const startersList = useMemo(() => starters(services, status), [services, status]);
 
   const focusList = useCallback(() => listRef.current?.focus(), []);
 
@@ -119,17 +112,21 @@ export default function AgentView() {
       suffix="chat"
       chromeEnd={chip}
       flush
-      className="flex h-[calc(100dvh-7rem)] min-h-[26rem] flex-col"
+      // Below `lg` the panel fills the column the shell fixed to the viewport (see App.tsx); from `lg`
+      // up it is a fixed-height window in the page.
+      className="flex min-h-0 flex-1 flex-col max-lg:border-x-0 lg:h-[calc(100dvh-7rem)] lg:min-h-[26rem] lg:flex-none"
       bodyClassName="flex min-h-0 flex-1 flex-col font-mono text-sm leading-relaxed"
     >
+      <h1 className="sr-only">Agent</h1>
       <Adv>
-        <div className="flex flex-wrap items-center gap-x-5 gap-y-1 border-b border-border px-4 py-1 text-xs text-muted-foreground">
-          <span>model: {intelligence?.model_id ?? "none"}</span>
-          <span>serving: {intelligence?.agent_state ?? "unknown"}</span>
-          <span className="inline-flex items-center gap-2">
-            <span className="break-all">conversation: {snap.conversationId}</span>
-            <CopyButton text={snap.conversationId} label="copy" ariaLabel="Copy conversation id" />
+        {/* One line, whatever the screen: the id is the part that gets cut. Gone while the keyboard leaves < 480 px. */}
+        <div className="relative flex [@media(max-height:480px)]:hidden items-center gap-x-3 overflow-hidden whitespace-nowrap border-b border-border px-4 text-xs text-muted-foreground">
+          <span className="min-w-0 truncate">model: {intelligence?.model_id ?? "none"}</span>
+          <span className="shrink-0">serving: {intelligence?.agent_state ?? "unknown"}</span>
+          <span className="min-w-0 flex-1 truncate" title={snap.conversationId}>
+            conversation: {snap.conversationId}
           </span>
+          <CopyButton text={snap.conversationId} label="copy" ariaLabel="Copy conversation id" className="shrink-0" />
         </div>
       </Adv>
 
@@ -146,13 +143,18 @@ export default function AgentView() {
         aria-label="Conversation"
         tabIndex={0}
         onScroll={onScroll}
-        className="flex min-h-0 flex-1 flex-col gap-4 overflow-y-auto px-4 py-4 focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-foreground focus-visible:outline-none"
+        className="relative flex min-h-0 flex-1 flex-col gap-4 overflow-y-auto px-4 py-4 focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-foreground focus-visible:outline-none"
       >
         {snap.history === "loading" && empty ? <p className="text-xs text-muted-foreground">loading conversation</p> : null}
         {snap.history === "error" ? <p className="text-xs text-muted-foreground">The earlier messages of this conversation could not be loaded.</p> : null}
-        {empty && snap.history !== "loading" ? <Greeting starters={starters} onStage={stage} /> : null}
+        {empty && snap.history !== "loading" ? <Greeting starters={startersList} onStage={stage} /> : null}
         <Transcript rows={snap.rows} live={snap.live} />
         <QueuedList queued={snap.queued} onRemove={(id) => session.removeQueued(id)} onRetry={() => session.retryQueued()} />
+        {/* Proposals are part of the conversation (spec 6.1): inline, where the agent said them. */}
+        <ProposalCards proposals={open} onWhy={(p) => session.stage(whyPrompt(p, status))} onDecided={focusList} />
+        <Adv>
+          <JsonBlock summary={`raw events (last ${Math.min(activity.length, RAW_EVENTS)})`} value={activity.slice(0, RAW_EVENTS)} />
+        </Adv>
       </div>
 
       {snap.notice ? (
@@ -160,14 +162,6 @@ export default function AgentView() {
           {snap.notice}
         </p>
       ) : null}
-
-      <ProposalCards proposals={open} onWhy={(p) => session.stage(whyPrompt(p, status))} onDecided={focusList} />
-
-      <Adv>
-        <div className="border-t border-border px-4">
-          <JsonBlock summary={`raw events (last ${Math.min(activity.length, RAW_EVENTS)})`} value={activity.slice(0, RAW_EVENTS)} />
-        </div>
-      </Adv>
 
       <Composer session={session} streaming={snap.live !== null} draftSeq={snap.draftSeq} onSubmitted={follow} />
     </Panel>

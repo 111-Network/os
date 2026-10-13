@@ -19,6 +19,7 @@ import {
   identityRows,
   isLoopbackUrl,
   isMdnsUrl,
+  isThisBrowser,
   isNumericIpv4Url,
   kindTransport,
   kindWord,
@@ -256,7 +257,9 @@ describe("prompts", () => {
     const { text, goal } = devicePrompt({ device: dev({ name: "Evil\u0007‮ name" }), services: [], status });
     expect(goal).toBe("check");
     expect(text.startsWith("About the device Evil name: what is it, is it working, what can it do?\n\n")).toBe(true);
-    expect(text).toContain("Check this node end to end");
+    expect(text).not.toContain("Check this node end to end"); // one goal per prompt
+    expect(text).toContain("Context from the dashboard");
+    expect(text).toContain('"id":'); // the device is the subject
   });
 });
 
@@ -265,6 +268,23 @@ describe("forgetConfirm", () => {
     const t = forgetConfirm(dev({ kind: "companion", name: "Android phone" }));
     expect(t).toContain("Forget Android phone?");
     expect(t).toContain("If this is the phone you are using right now, you will be logged out");
+  });
+  it("is definite about this very browser, plain about another device, and hedges only when unknown", () => {
+    const phone = dev({ id: "ses-1", kind: "companion", name: "Android phone" });
+    expect(forgetConfirm(phone, "ses-1")).toBe("Forget Android phone? This is the browser you are using now; you will be logged out. Go ahead");
+    expect(forgetConfirm(phone, "ses-2")).toBe("Forget Android phone? That device is logged out and has to pair again. Go ahead");
+    expect(forgetConfirm(phone, "ses-2")).not.toContain("If this is");
+    expect(forgetConfirm(phone, null)).toContain("If this is the phone you are using right now");
+    expect(forgetConfirm(phone, undefined)).toContain("If this is the phone you are using right now");
+  });
+  it("only a companion gets the logout wording, whatever the session id is", () => {
+    expect(forgetConfirm(dev({ id: "usb-1", kind: "radio" }), "usb-1")).toContain("shows up again");
+  });
+  it("isThisBrowser matches the session's device_id exactly", () => {
+    expect(isThisBrowser({ id: "ses-1" }, "ses-1")).toBe(true);
+    expect(isThisBrowser({ id: "ses-1" }, "ses-2")).toBe(false);
+    expect(isThisBrowser({ id: "ses-1" }, null)).toBe(false);
+    expect(isThisBrowser({ id: "ses-1" }, undefined)).toBe(false);
   });
   it("says hardware comes back when plugged in again", () => {
     expect(forgetConfirm(dev({ kind: "radio", alias: "roof board" }))).toContain("Forget roof board?");
@@ -281,7 +301,7 @@ describe("pairingHelp (Add device, Control this node)", () => {
   it("LAN off: says so, links to Settings, shows no addresses and no pair address", () => {
     const h = pairingHelp({ lan_enabled: false, bind: { urls: ["http://111.localhost", "http://127.0.0.1:11180"], lan: false } });
     expect(h.state).toBe("off");
-    expect(h.body).toBe("LAN sharing is off — turn it on in Settings → Sharing (from the node itself).");
+    expect(h.body).toBe("LAN sharing is off. Turn it on in Settings, under LAN sharing, from the node itself.");
     expect(h.settingsHref).toBe("/settings");
     expect(h.urls).toEqual([]);
     expect(h.pairUrl).toBeNull();

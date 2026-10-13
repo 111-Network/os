@@ -46,8 +46,8 @@ describe("servicePageState", () => {
     expect(p.restart).toBe(false);
   });
 
-  it("unset and runnable with the agent not live: Show steps", () => {
-    expect(servicePageState(svc("radio"), false).handoff).toEqual({ goal: "setup", label: "Show steps", mode: "steps" });
+  it("unset and runnable with the agent not live: Show the request (it is the prompt, not steps)", () => {
+    expect(servicePageState(svc("radio"), false).handoff).toEqual({ goal: "setup", label: "Show the request", mode: "request" });
   });
 
   it("unset but cannot run here: unavailable, no button at all", () => {
@@ -86,8 +86,8 @@ describe("servicePageState", () => {
     expect(servicePageState(svc("model", { state: "unset", actions: ["restart"] }), true).restart).toBe(false);
   });
 
-  it("error with the agent not live (including the agent's own page): Show steps", () => {
-    expect(servicePageState(svc("agent", { state: "error" }), false).handoff).toEqual({ goal: "fix", label: "Show steps", mode: "steps" });
+  it("error with the agent not live (including the agent's own page): Show the request", () => {
+    expect(servicePageState(svc("agent", { state: "error" }), false).handoff).toEqual({ goal: "fix", label: "Show the request", mode: "request" });
   });
 
   it("starting: no hand-off, the log is still offered", () => {
@@ -102,7 +102,7 @@ describe("servicePageState", () => {
           const p = servicePageState(svc("radio", { state, can_run_here: can }), agentLive);
           if (state === "live" || state === "starting") expect(p.handoff).toBeNull();
           if (state === "unset" && !can) expect(p.handoff).toBeNull();
-          if (p.handoff) expect(p.handoff.mode).toBe(agentLive ? "agent" : "steps");
+          if (p.handoff) expect(p.handoff.mode).toBe(agentLive ? "agent" : "request");
         }
       }
     }

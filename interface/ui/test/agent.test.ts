@@ -11,6 +11,7 @@ import {
   mintConversationId,
   queuedNotice,
   reasonClause,
+  starters,
   toolLine,
   whyPrompt,
   type HistoryMessage,
@@ -265,6 +266,38 @@ describe("conversation id", () => {
 
 // ---------------------------------------------------------------- small pure helpers
 
+describe("starters (derived from the registry, one prompt builder)", () => {
+  const labels = (s: ReturnType<typeof starters>) => s.map((x) => x.label);
+  it("always offers check and nearby, and nothing per-service when everything is live", () => {
+    const list = starters([svc("agent", "live"), svc("model", "live"), svc("radio", "live")], status());
+    expect(labels(list)).toEqual(["check this node", "who is nearby?"]);
+  });
+  it("offers setup for an unset service that can run here, named from the registry", () => {
+    const radio = svc("radio", "unset", { plain_name: "LoRa radio" });
+    const list = starters([svc("agent", "live"), radio], status());
+    expect(labels(list)).toEqual(["check this node", "set up the LoRa radio", "who is nearby?"]);
+    expect(list[1]!.text.startsWith("Set up the LoRa radio on this node and test it.")).toBe(true);
+    expect(list[1]!.text).toContain('"id":"radio"');
+  });
+  it("does not offer a radio starter when the radio cannot run here", () => {
+    const list = starters([svc("radio", "unset", { can_run_here: false })], status());
+    expect(labels(list)).toEqual(["check this node", "who is nearby?"]);
+  });
+  it("offers fix for an errored service first, skips the agent itself and the gateway, and caps the count", () => {
+    const list = starters(
+      [svc("agent", "error"), svc("model", "error", { plain_name: "Local model" }), svc("gateway", "unset"), svc("radio", "unset"), svc("kb", "unset"), svc("transport", "unset")],
+      status(),
+    );
+    expect(labels(list)).toEqual(["check this node", "fix the Local model", "set up the radio", "who is nearby?"]);
+  });
+  it("works before the registry has loaded", () => {
+    expect(labels(starters(null, null))).toEqual(["check this node", "who is nearby?"]);
+  });
+  it("every starter is plain text, nothing sent", () => {
+    for (const s of starters([svc("radio", "unset")], status())) expect(typeof s.text).toBe("string");
+  });
+});
+
 describe("toolLine and whyPrompt", () => {
   it("names the agent's fixed tools in plain words and shows unknown ones safely", () => {
     expect(toolLine("kb.read")).toBe("[reading kb]");
@@ -277,7 +310,8 @@ describe("toolLine and whyPrompt", () => {
   it("stages the explain sentence in front of the node check prompt", () => {
     const p = whyPrompt({ id: "prop-1", title: 'Raise "ctx"\u0007' }, status());
     expect(p.startsWith(`Explain proposal prop-1 ("Raise 'ctx'") in plain words: what it changes, the risk, and how to undo it.`)).toBe(true);
-    expect(p).toContain("Check this node end to end and tell me what needs attention.");
+    expect(p).not.toContain("Check this node end to end"); // one goal per prompt: the question above, then context only
+    expect(p).toContain("Context from the dashboard");
     expect(p).toContain("category Node2B");
   });
 });

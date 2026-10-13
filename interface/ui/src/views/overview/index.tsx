@@ -44,7 +44,7 @@ function ChecklistList({ rows }: { rows: ChecklistRow[] }) {
             ) : null}
             {r.command ? (
               <div className="mt-2 flex flex-wrap items-center gap-2">
-                <code className="break-all border border-border bg-secondary/20 px-2 py-1 text-foreground">{r.command}</code>
+                <code className="whitespace-pre-wrap break-words border border-border bg-secondary/20 px-2 py-1 text-foreground">{r.command}</code>
                 <CopyButton text={r.command} label="copy command" ariaLabel="Copy the identity backup command" />
               </div>
             ) : null}

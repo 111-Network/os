@@ -27,3 +27,11 @@ export function retrySeconds(detail: string | undefined): number {
   if (m?.[1]) return Math.max(1, Number(m[1]) * 60);
   return DEFAULT_RETRY_SECONDS;
 }
+
+/** "about a minute", "about 45 seconds", "about 2 minutes": a rounded wait that can sit still in an alert. */
+export function waitPhrase(seconds: number): string {
+  const s = Math.max(1, Math.round(seconds));
+  if (s < 50) return s === 1 ? "about a second" : `about ${s} seconds`;
+  const m = Math.round(s / 60);
+  return m <= 1 ? "about a minute" : `about ${m} minutes`;
+}

@@ -29,6 +29,7 @@ import {
   drivenBy,
   firmwareText,
   forgetConfirm,
+  isThisBrowser,
   identityRows,
   kindWord,
   presenceText,
@@ -37,8 +38,10 @@ import {
   stateLabel,
   transportWord,
 } from "../../lib/devices";
+import { kbRoutePath, normalizeKbPath } from "../../lib/markdown";
 import { Adv, useMode } from "../../lib/mode";
 import { AgentButton, useAgentReachable } from "./agent-button";
+import { useOwnDeviceId, type OwnDeviceId } from "./own-device";
 
 const BACK = (
   <ButtonLink href={hrefTo("/devices")} size="sm">
@@ -91,8 +94,7 @@ function RenameForm({ device }: { device: DeviceRecord }) {
       const adapter = await getAdapter();
       await adapter.patchDevice(device.id, { alias: aliasFromDraft(draft, device) });
       await apiStore.refreshDevices();
-      announce("renamed");
-      setMessage({ kind: "ok", text: "Renamed." });
+      setMessage({ kind: "ok", text: "Renamed." }); // announced by the status line below: one channel
     } catch (err) {
       if (redirectIfUnauthenticated(err)) return;
       setMessage({ kind: "error", text: errorText(err, "Could not rename the device. Try again.") });
@@ -120,23 +122,25 @@ function RenameForm({ device }: { device: DeviceRecord }) {
           }}
           className="min-w-0 flex-1 basis-56"
         />
-        <Button type="submit" disabled={!dirty} loading={busy}>
+        <Button type="submit" aria-disabled={!dirty || undefined} loading={busy}>
           Save name
         </Button>
       </div>
       <p id="device-name-help" className="font-mono text-[11px] leading-snug text-muted-foreground">
         Leave it empty to use the detected name: {device.name}
       </p>
-      {message ? (
-        <p role={message.kind === "error" ? "alert" : "status"} className={message.kind === "error" ? "font-mono text-xs text-destructive" : "font-mono text-xs text-muted-foreground"}>
-          {message.text}
-        </p>
-      ) : null}
+      {/* Both lines stay in the page so a screen reader hears the text arrive. */}
+      <p role="status" className={message?.kind === "ok" ? "font-mono text-xs text-muted-foreground" : "sr-only"}>
+        {message?.kind === "ok" ? message.text : ""}
+      </p>
+      <p role="alert" className={message?.kind === "error" ? "font-mono text-xs text-destructive" : "sr-only"}>
+        {message?.kind === "error" ? message.text : ""}
+      </p>
     </form>
   );
 }
 
-function ForgetButton({ device }: { device: DeviceRecord }) {
+function ForgetButton({ device, ownId }: { device: DeviceRecord; ownId: OwnDeviceId }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -160,7 +164,7 @@ function ForgetButton({ device }: { device: DeviceRecord }) {
   return (
     <div className="flex flex-col gap-2">
       <div>
-        <Button variant="destructive" confirm={forgetConfirm(device)} loading={busy} onClick={() => void forget()}>
+        <Button variant="destructive" confirm={forgetConfirm(device, ownId)} loading={busy} onClick={() => void forget()}>
           Forget
         </Button>
       </div>
@@ -182,6 +186,7 @@ export default function DeviceDetail({ id }: { id: string }) {
   const { ready } = useApiMeta();
   const { mode } = useMode();
   const reachable = useAgentReachable();
+  const ownId = useOwnDeviceId();
   const now = useNow(true, 15_000);
 
   if (devices === null) {
@@ -255,6 +260,8 @@ export default function DeviceDetail({ id }: { id: string }) {
   add("Reason code", device.reason_code, "advanced");
 
   const reserved = device.actions.filter((a) => a === "identify" || a === "pair" || a === "authorize");
+  const kbPath = device.kb_entry ? normalizeKbPath(device.kb_entry) : null;
+  const recipePath = kbPath ? kbRoutePath(kbPath) : null;
 
   return (
     <div className="flex flex-col gap-6">
@@ -267,6 +274,7 @@ export default function DeviceDetail({ id }: { id: string }) {
         <Badge>{kindWord(device.kind)}</Badge>
         <Badge>{stateLabel(device.state, disconnected)}</Badge>
         {confidenceLabel(device) === "likely" ? <Badge>likely</Badge> : null}
+        {isThisBrowser(device, ownId) ? <Badge>this browser</Badge> : null}
         <span className="font-mono text-xs text-muted-foreground">{presenceText(device, now, disconnected)}</span>
       </div>
 
@@ -283,6 +291,7 @@ export default function DeviceDetail({ id }: { id: string }) {
             from={name.slice(0, 60)}
             goal={action.goal}
             reachable={reachable}
+            recipe={recipePath}
             prompt={() => devicePrompt({ device, services: services ?? [], status }).text}
           />
           <p className="max-w-prose font-mono text-[11px] leading-snug text-muted-foreground">The agent gives you steps or a proposal. It does not touch the hardware itself.</p>
@@ -310,7 +319,7 @@ export default function DeviceDetail({ id }: { id: string }) {
 
       {can("forget") ? (
         <div className="border-t border-border pt-4">
-          <ForgetButton device={device} />
+          <ForgetButton device={device} ownId={ownId} />
         </div>
       ) : null}
     </div>

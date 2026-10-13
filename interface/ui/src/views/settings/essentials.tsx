@@ -13,10 +13,10 @@ import { Toggle } from "../../components/toggle";
 import { apiStore, getAdapter, type Adapter } from "../../lib/api";
 import { useConnection, useStatus } from "../../lib/api/hooks";
 import type { Settings } from "../../lib/api/types";
+import { IDENTITY_BACKUP_COMMAND } from "../../lib/commands";
 import { useMode, type Mode } from "../../lib/mode";
 import { toSpecRows } from "./facts";
 import {
-  BACKUP_COMMAND,
   LOOPBACK_ONLY_TEXT,
   aliasPatchValue,
   essentialRows,
@@ -108,14 +108,13 @@ function AliasRow({ settings, onSaved }: { settings: Settings | null; onSaved: (
 
   const submit = async (e: FormEvent) => {
     e.preventDefault();
-    if (draft === null) return;
+    if (draft === null || !dirty) return;
     setSaved(false);
     const next = await run((a) => a.patchSettings({ alias: aliasPatchValue(draft) }));
     if (!next) return;
     onSaved(next);
     setDraft(null);
-    setSaved(true);
-    announce("Node name saved");
+    setSaved(true); // announced by the "Saved." status line: one channel
     void apiStore.refreshStatus();
   };
 
@@ -134,7 +133,7 @@ function AliasRow({ settings, onSaved }: { settings: Settings | null; onSaved: (
             setDraft(e.target.value);
           }}
         />
-        <Button type="submit" variant="primary" arrow={false} disabled={!dirty} loading={action.pending}>
+        <Button type="submit" variant="primary" arrow={false} aria-disabled={!dirty || undefined} loading={action.pending}>
           Save
         </Button>
       </div>
@@ -162,10 +161,10 @@ function BackupRow({ note }: { note: string }) {
   return (
     <div className="flex flex-col gap-3 border border-border bg-secondary/20 p-4">
       <div className="flex flex-wrap items-center gap-3">
-        <code className="min-w-0 break-all border border-border bg-background px-3 py-2 font-mono text-xs text-foreground">
-          {BACKUP_COMMAND}
+        <code className="min-w-0 whitespace-pre-wrap break-words border border-border bg-background px-3 py-2 font-mono text-xs text-foreground">
+          {IDENTITY_BACKUP_COMMAND}
         </code>
-        <CopyButton text={BACKUP_COMMAND} ariaLabel="Copy the identity backup command" />
+        <CopyButton text={IDENTITY_BACKUP_COMMAND} ariaLabel="Copy the identity backup command" />
       </div>
       <p className={`text-muted-foreground ${FEEDBACK}`}>{note}</p>
     </div>
@@ -205,7 +204,14 @@ function RestartRow() {
   const waiting = requestedAt !== null && !back;
   return (
     <div>
-      <Button variant="destructive" confirm={restartConfirmText(status)} loading={action.pending} disabled={waiting || status === null} onClick={() => void restart()}>
+      <Button
+        variant="destructive"
+        confirm={restartConfirmText(status)}
+        loading={action.pending}
+        disabled={status === null}
+        aria-disabled={waiting || undefined}
+        onClick={() => void restart()}
+      >
         Restart node
       </Button>
       {waiting ? (
@@ -318,7 +324,8 @@ function SharingPanel({ settings, onSaved }: { settings: Settings | null; onSave
         <Toggle
           pressed={lanOn}
           onPressedChange={(next) => void toggleLan(next)}
-          disabled={gated || locked || !known || lanAction.pending}
+          disabled={gated || locked || !known}
+          busy={lanAction.pending}
           aria-describedby={gated ? "lan-gate" : locked ? "lan-note" : undefined}
         >
           <span>LAN sharing</span> <span aria-hidden="true">{lanOn ? "[ON]" : "[OFF]"}</span>
@@ -342,12 +349,12 @@ function SharingPanel({ settings, onSaved }: { settings: Settings | null; onSave
         </p>
         <div className={actions.accept || actions.dismiss ? "mt-3 flex flex-wrap gap-2" : undefined}>
           {actions.accept ? (
-            <Button variant="primary" arrow={false} size="sm" disabled={gated || offerAction.pending} onClick={() => void decide("accepted")} aria-describedby={gated ? "offer-gate" : undefined}>
+            <Button variant="primary" arrow={false} size="sm" disabled={gated} loading={offerAction.pending} onClick={() => void decide("accepted")} aria-describedby={gated ? "offer-gate" : undefined}>
               Accept
             </Button>
           ) : null}
           {actions.dismiss ? (
-            <Button size="sm" disabled={gated || offerAction.pending} onClick={() => void decide("dismissed")} aria-describedby={gated ? "offer-gate" : undefined}>
+            <Button size="sm" disabled={gated} aria-disabled={offerAction.pending || undefined} onClick={() => void decide("dismissed")} aria-describedby={gated ? "offer-gate" : undefined}>
               Dismiss
             </Button>
           ) : null}
@@ -382,7 +389,7 @@ export function Essentials() {
 
   return (
     <div className="flex flex-col gap-6">
-      <SectionHeader level={1} kicker="settings" title="Essentials" />
+      <SectionHeader level={1} kicker="essentials" title="Settings" />
       {error ? (
         <p role="alert" className={`text-destructive ${FEEDBACK}`}>
           Problem: settings could not be loaded. {error}

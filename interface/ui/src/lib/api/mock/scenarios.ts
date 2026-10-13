@@ -17,6 +17,11 @@ export interface MockAuth {
   requirePair: boolean;
   paired: boolean;
   created: string | null;
+  /**
+   * The companion record that is "this browser" (`GET /auth/session` -> device_id), for loopback and paired
+   * callers. The mock pretends the dev browser is the paired phone fixture so the feature can be seen.
+   */
+  deviceId: string | null;
 }
 
 export interface MockData {
@@ -85,7 +90,7 @@ function dataFrom(base: Fixtures): MockData {
     kbIndex: c.kbIndex,
     kbEntries: c.kbEntries,
     logs: c.logs,
-    auth: { loopback: true, requirePair: false, paired: false, created: null },
+    auth: { loopback: true, requirePair: false, paired: false, created: null, deviceId: c.devices.find((d) => d.kind === "companion")?.id ?? null },
   };
 }
 
@@ -229,7 +234,7 @@ export const lanUnpaired: ScenarioFn = (base) => {
   data.status.lan_enabled = true;
   data.status.bind = { urls: ["http://111.local", "http://192.168.1.42"], lan: true };
   data.settings.lan_enabled = true;
-  data.auth = { loopback: false, requirePair: true, paired: false, created: null };
+  data.auth = { ...data.auth, loopback: false, requirePair: true, paired: false, created: null };
   return {
     name: "lan-unpaired",
     summary: `A LAN visitor: every call answers 401 until auth.pair('${MOCK_PAIR_CODE}') succeeds.`,

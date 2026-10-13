@@ -4,7 +4,7 @@
 //   unset      what it is, what it needs, "Set up with the agent" (or nothing, when this device cannot run it)
 //   error      reason, log lines, Restart, "Fix with the agent" (and the Settings -> Restart node link when back-off is stuck)
 // The prompt text always comes from the one builder in lib/prompts.ts; nothing here is per-service.
-import { useEffect, useState, type ReactNode } from "react";
+import { useEffect, useId, useState, type ReactNode } from "react";
 import { useParams } from "wouter";
 import { redirectIfUnauthenticated } from "../../app/AuthGate";
 import { useNow } from "../../app/hooks";
@@ -32,6 +32,9 @@ import {
   flattenDetail,
   KIND_LABEL,
   reasonText,
+  REQUEST_COPY_LABEL,
+  REQUEST_HIDE_LABEL,
+  requestNote,
   RESTART_GIVE_UP_MS,
   RESTART_IDLE,
   restartButtonLabel,
@@ -50,11 +53,27 @@ const LABEL = "font-mono text-[10px] uppercase tracking-widest text-muted-foregr
 
 // ------------------------------------------------------------------------------------ hand-off
 
-function HandoffButton({ service, handoff, related, children }: { service: ServiceRecord; handoff: Handoff; related: DeviceRecord[]; children?: ReactNode }) {
+function HandoffButton({
+  service,
+  handoff,
+  related,
+  recipePath,
+  children,
+}: {
+  service: ServiceRecord;
+  handoff: Handoff;
+  related: DeviceRecord[];
+  /** Route of the KB recipe. With the agent down it is the primary action: it has the real steps. */
+  recipePath: string | null;
+  children?: ReactNode;
+}) {
   const status = useStatus();
   const [, navigate] = useAppLocation();
   const [busy, setBusy] = useState(false);
   const [steps, setSteps] = useState<string | null>(null);
+  const panelId = useId();
+  const offline = handoff.mode === "request";
+  const recipeFirst = offline && recipePath !== null;
 
   const onClick = async () => {
     if (steps !== null) {
@@ -65,7 +84,7 @@ function HandoffButton({ service, handoff, related, children }: { service: Servi
     try {
       const logLines = await fetchLogLines(service.id, MAX_LOG_LINES);
       const text = buildPrompt(handoff.goal, { kind: "service", service, devices: related }, { status, logLines });
-      if (handoff.mode === "agent") navigate(agentHrefFor(stagePrompt(text, service.plain_name, handoff.goal)));
+      if (!offline) navigate(agentHrefFor(stagePrompt(text, service.plain_name, handoff.goal)));
       else setSteps(text);
     } finally {
       setBusy(false);
@@ -75,27 +94,40 @@ function HandoffButton({ service, handoff, related, children }: { service: Servi
   return (
     <div className="space-y-3">
       <div className="flex flex-wrap items-start gap-3">
-        <Button variant="primary" loading={busy} onClick={() => void onClick()} aria-expanded={handoff.mode === "steps" ? steps !== null : undefined}>
-          {steps !== null ? "Hide steps" : handoff.label}
+        {recipeFirst ? (
+          <ButtonLink variant="primary" href={hrefTo(recipePath)}>
+            Read the recipe
+          </ButtonLink>
+        ) : null}
+        <Button
+          variant={recipeFirst ? "default" : "primary"}
+          loading={busy}
+          onClick={() => void onClick()}
+          aria-expanded={offline ? steps !== null : undefined}
+          aria-controls={offline ? panelId : undefined}
+        >
+          {steps !== null ? REQUEST_HIDE_LABEL : handoff.label}
         </Button>
         {children}
       </div>
-      {handoff.mode === "agent" ? (
-        <p className={TEXT}>This opens the agent with a prepared message. Nothing is sent until you send it.</p>
+      {offline ? (
+        <p className={TEXT}>{requestNote(recipePath !== null)}</p>
       ) : (
-        <p className={TEXT}>The agent is not running right now, so the steps are shown here instead.</p>
+        <p className={TEXT}>This opens the agent with a prepared message. Nothing is sent until you send it.</p>
       )}
-      {steps !== null ? (
-        <div className="space-y-2">
-          <pre
-            tabIndex={0}
-            className="max-h-96 overflow-auto whitespace-pre-wrap break-words border border-border bg-secondary/20 p-3 font-mono text-xs leading-relaxed text-muted-foreground focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-foreground focus-visible:outline-none"
-          >
-            {steps}
-          </pre>
-          <CopyButton text={steps} label="copy steps" />
-        </div>
-      ) : null}
+      <div id={panelId} hidden={steps === null}>
+        {steps !== null ? (
+          <div className="space-y-2">
+            <pre
+              tabIndex={0}
+              className="max-h-96 overflow-auto whitespace-pre-wrap break-words border border-border bg-secondary/20 p-3 font-mono text-xs leading-relaxed text-muted-foreground focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-foreground focus-visible:outline-none"
+            >
+              {steps}
+            </pre>
+            <CopyButton text={steps} label={REQUEST_COPY_LABEL} />
+          </div>
+        ) : null}
+      </div>
     </div>
   );
 }
@@ -140,7 +172,6 @@ function RestartControl({ service }: { service: ServiceRecord }) {
       <Button
         confirm={`Restart ${service.plain_name}`}
         loading={phase.kind !== "idle"}
-        disabled={phase.kind !== "idle"}
         onClick={() => void restart()}
       >
         {restartButtonLabel(phase)}
@@ -185,11 +216,12 @@ function ControlPanel({ service, devices }: { service: ServiceRecord; devices: D
   );
 }
 
-function Links({ page }: { page: ServicePageState }) {
-  if (!page.kbPath && !page.embedUrl) return null;
+function Links({ page, skipRecipe = false }: { page: ServicePageState; skipRecipe?: boolean }) {
+  const recipe = skipRecipe ? null : page.kbPath;
+  if (!recipe && !page.embedUrl) return null;
   return (
     <div className="flex flex-wrap items-center gap-3">
-      {page.kbPath ? <ButtonLink href={hrefTo(page.kbPath)}>Read the recipe</ButtonLink> : null}
+      {recipe ? <ButtonLink href={hrefTo(recipe)}>Read the recipe</ButtonLink> : null}
       {page.embedUrl ? (
         <ButtonLink href={page.embedUrl} external>
           Open full client
@@ -274,12 +306,12 @@ function ServicePage({ service }: { service: ServiceRecord }) {
               ]}
             />
             {page.handoff ? (
-              <HandoffButton service={service} handoff={page.handoff} related={devices} />
+              <HandoffButton service={service} handoff={page.handoff} related={devices} recipePath={page.kbPath} />
             ) : (
               <p className={TEXT}>There is no setup step for this one. It turns live by itself once the condition above is met.</p>
             )}
           </Panel>
-          <Links page={page} />
+          <Links page={page} skipRecipe={page.handoff?.mode === "request" && page.kbPath !== null} />
         </>
       ) : null}
 
@@ -301,7 +333,7 @@ function ServicePage({ service }: { service: ServiceRecord }) {
             </Disclosure>
           ) : null}
           {page.handoff ? (
-            <HandoffButton service={service} handoff={page.handoff} related={devices}>
+            <HandoffButton service={service} handoff={page.handoff} related={devices} recipePath={page.kbPath}>
               {page.restart ? <RestartControl service={service} /> : null}
               {page.nodeRestartLink ? <ButtonLink href={hrefTo("/settings")}>Settings {"->"} Restart node</ButtonLink> : null}
             </HandoffButton>

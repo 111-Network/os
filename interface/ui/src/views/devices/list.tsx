@@ -18,12 +18,14 @@ import {
   displayName,
   drivenBy,
   groupByKind,
+  isThisBrowser,
   kindTransport,
   registryPrompt,
   stateLabel,
   summary,
 } from "../../lib/devices";
 import { AgentButton, useAgentReachable } from "./agent-button";
+import { useOwnDeviceId, type OwnDeviceId } from "./own-device";
 
 export const detailHref = (id: string): string => hrefTo(`/devices/${encodeURIComponent(id)}`);
 
@@ -47,7 +49,7 @@ function RowLink({ d, first, children }: { d: DeviceRecord; first?: boolean; chi
 /** Below this width four columns do not fit: the other three fold into a second line of the name cell. */
 const WIDE_QUERY = "(min-width: 640px)";
 
-function columns(nodeDisconnected: boolean, now: number, wide: boolean): DataColumn<DeviceRecord>[] {
+function columns(nodeDisconnected: boolean, now: number, wide: boolean, ownId: OwnDeviceId): DataColumn<DeviceRecord>[] {
   const name: DataColumn<DeviceRecord> = {
     key: "name",
     header: "Device",
@@ -57,6 +59,7 @@ function columns(nodeDisconnected: boolean, now: number, wide: boolean): DataCol
           <StatusDot state={deviceDot(d.state, nodeDisconnected)} label={false} />
           <span className="min-w-0 break-words">{displayName(d)}</span>
           {confidenceLabel(d) === "likely" ? <Badge className="shrink-0">likely</Badge> : null}
+          {isThisBrowser(d, ownId) ? <Badge className="shrink-0">this browser</Badge> : null}
         </span>
         <span className="ps-4 text-[11px] leading-snug text-muted-foreground">
           {stateLabel(d.state, nodeDisconnected)}
@@ -113,6 +116,7 @@ export default function DeviceList() {
   const { disconnected } = useConnection();
   const { ready } = useApiMeta();
   const reachable = useAgentReachable();
+  const ownId = useOwnDeviceId();
   const now = useNow(true, 15_000);
   const wide = useMediaQuery(WIDE_QUERY);
 
@@ -141,7 +145,7 @@ export default function DeviceList() {
 
   const groups = groupByKind(devices);
   const sum = summary(devices);
-  const cols = columns(disconnected, now, wide);
+  const cols = columns(disconnected, now, wide, ownId);
 
   return (
     <div className="flex flex-col gap-6">

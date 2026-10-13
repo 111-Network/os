@@ -3,10 +3,12 @@
 // Nothing is ever sent from here (spec section 8).
 import { useId, useState } from "react";
 import { navigate } from "wouter/use-hash-location";
-import { Button, type ButtonVariant } from "../../components/button";
+import { hrefTo } from "../../app/location";
+import { Button, ButtonLink, type ButtonVariant } from "../../components/button";
 import { CopyButton } from "../../components/copy-button";
 import { useServices } from "../../lib/api/hooks";
 import { agentHrefFor, stagePrompt, type PromptGoal } from "../../lib/prompts";
+import { REQUEST_COPY_LABEL, REQUEST_HIDE_LABEL, REQUEST_LABEL } from "../services/model";
 
 /** True while the agent service is live, and also before the first services snapshot (the Agent view explains a down agent). */
 export function useAgentReachable(): boolean {
@@ -26,10 +28,12 @@ export interface AgentButtonProps {
   variant?: ButtonVariant;
   reachable: boolean;
   className?: string;
+  /** Route of the KB recipe for this thing (`/kb/...`). With the agent down it is the primary action. */
+  recipe?: string | null;
 }
 
-export function AgentButton({ label, prompt, from, goal, variant = "primary", reachable, className }: AgentButtonProps) {
-  const [steps, setSteps] = useState<string | null>(null);
+export function AgentButton({ label, prompt, from, goal, variant = "primary", reachable, className, recipe = null }: AgentButtonProps) {
+  const [steps, setSteps] = useState<string | null>(null); // the prepared request, while shown
   const panelId = useId();
 
   const onClick = () => {
@@ -40,21 +44,29 @@ export function AgentButton({ label, prompt, from, goal, variant = "primary", re
     setSteps((open) => (open === null ? prompt() : null));
   };
 
+  const recipeFirst = !reachable && recipe !== null;
   return (
     <div className={className}>
-      <Button
-        variant={variant}
-        onClick={onClick}
-        aria-expanded={reachable ? undefined : steps !== null}
-        aria-controls={reachable ? undefined : panelId}
-      >
-        {reachable ? label : steps !== null ? "Hide steps" : "Show steps"}
-      </Button>
+      <div className="flex flex-wrap items-start gap-3">
+        {recipeFirst ? (
+          <ButtonLink variant="primary" href={hrefTo(recipe)}>
+            Read the recipe
+          </ButtonLink>
+        ) : null}
+        <Button
+          variant={recipeFirst ? "default" : variant}
+          onClick={onClick}
+          aria-expanded={reachable ? undefined : steps !== null}
+          aria-controls={reachable ? undefined : panelId}
+        >
+          {reachable ? label : steps !== null ? REQUEST_HIDE_LABEL : REQUEST_LABEL}
+        </Button>
+      </div>
       <div id={panelId} hidden={steps === null} className="mt-3 max-w-prose">
         {steps !== null ? (
           <div className="flex flex-col gap-2">
             <p className="font-mono text-xs leading-relaxed text-muted-foreground">
-              The local agent is not running right now. This is the prompt it would get. Copy it for when the agent is back.
+              The local agent is not running right now. This is the request it would get. {recipe !== null ? "The recipe has the steps. " : ""}Copy it for when the agent is back.
             </p>
             <pre
               tabIndex={0}
@@ -62,7 +74,7 @@ export function AgentButton({ label, prompt, from, goal, variant = "primary", re
             >
               {steps}
             </pre>
-            <CopyButton text={steps} label="copy prompt" ariaLabel="Copy the prompt" />
+            <CopyButton text={steps} label={REQUEST_COPY_LABEL} ariaLabel="Copy the request" />
           </div>
         ) : null}
       </div>

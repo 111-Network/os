@@ -2,9 +2,10 @@
 // route/location helpers, pair-code handling, banner text and the announcer throttle.
 import { describe, expect, it } from "vitest";
 import { disconnectedText, formatAgo } from "../src/app/format";
-import { DISCONNECTED_TEXT, RECONNECTED_TEXT, connectionAnnouncement, createAnnouncer } from "../src/app/LiveRegion";
+import { DISCONNECTED_TEXT, RECONNECTED_TEXT, connectionAnnouncement, createAnnouncer, createRegionWriter } from "../src/app/LiveRegion";
 import { cleanPath, hrefTo, routeFragment } from "../src/app/location";
-import { formatPairCode, isCompletePairCode, retrySeconds } from "../src/app/pair-code";
+import { formatPairCode, isCompletePairCode, retrySeconds, waitPhrase } from "../src/app/pair-code";
+import { isReturnable, rememberReturn, takeReturn, type ReturnStore } from "../src/app/pair-return";
 import type { ServiceRecord } from "../src/lib/api/types";
 import { attentionSummary } from "../src/lib/attention";
 import { LAYERS, layerBySlug } from "../src/lib/layers";
@@ -171,7 +172,7 @@ describe("nav helpers", () => {
   it("titleFor", () => {
     expect(titleFor("/")).toBe("Agent");
     expect(titleFor("/overview")).toBe("Overview");
-    expect(titleFor("/devices/add")).toBe("Add a device");
+    expect(titleFor("/devices/add")).toBe("Add device");
     expect(titleFor("/devices/abc")).toBe("Device");
     expect(titleFor("/services/radio", SERVICES)).toBe("LoRa radio");
     expect(titleFor("/services/radio", null)).toBe("Service");
@@ -403,5 +404,114 @@ describe("createAnnouncer", () => {
     expect(r.sent.length).toBeLessThanOrEqual(3);
     expect(r.sent[0]).toBe("m0");
     expect(r.sent[r.sent.length - 1]).toBe("m9");
+  });
+});
+
+describe("createRegionWriter (the same sentence twice is still announced)", () => {
+  function rig() {
+    let t = 0;
+    const writes: string[] = [];
+    const timers = new Map<number, { at: number; fn: () => void }>();
+    let seq = 0;
+    const w = createRegionWriter({
+      set: (x) => writes.push(x),
+      now: () => t,
+      setTimer: (fn, ms) => {
+        timers.set(++seq, { at: t + ms, fn });
+        return seq;
+      },
+      clearTimer: (h) => void timers.delete(h as number),
+    });
+    const advance = (ms: number) => {
+      t += ms;
+      for (const [id, x] of [...timers]) {
+        if (x.at <= t) {
+          timers.delete(id);
+          x.fn();
+        }
+      }
+    };
+    return { w, writes, advance };
+  }
+  it("writes a new sentence at once", () => {
+    const { w, writes } = rig();
+    w.show("Check started.");
+    w.show("Restarting.");
+    expect(writes).toEqual(["Check started.", "Restarting."]);
+  });
+  it("empties the region, then writes an identical sentence again", () => {
+    const { w, writes, advance } = rig();
+    w.show("Check started.");
+    w.show("Check started.");
+    expect(writes).toEqual(["Check started.", ""]);
+    advance(80);
+    expect(writes).toEqual(["Check started.", "", "Check started."]);
+  });
+  it("a different sentence arriving during the gap wins", () => {
+    const { w, writes, advance } = rig();
+    w.show("a");
+    w.show("a");
+    w.show("b");
+    advance(500);
+    expect(writes[writes.length - 1]).toBe("b");
+  });
+  it("clearIf clears only the text it was told is stale", () => {
+    const { w, writes, advance } = rig();
+    w.show("old");
+    advance(5000);
+    w.show("new");
+    w.clearIf("old");
+    expect(writes[writes.length - 1]).toBe("new");
+    advance(5000);
+    w.clearIf("new");
+    expect(writes[writes.length - 1]).toBe("");
+  });
+  it("a message announced just before the route changed is given time to be read, then goes", () => {
+    const { w, writes, advance } = rig();
+    w.show("forgotten");
+    advance(60); // the page changes 60 ms later
+    w.clearIf("forgotten");
+    expect(writes).toEqual(["forgotten"]);
+    advance(1900);
+    expect(writes).toEqual(["forgotten"]);
+    advance(100);
+    expect(writes).toEqual(["forgotten", ""]);
+  });
+  it("a newer message cancels the pending clear", () => {
+    const { w, writes, advance } = rig();
+    w.show("forgotten");
+    w.clearIf("forgotten");
+    w.show("renamed");
+    advance(5000);
+    expect(writes).toEqual(["forgotten", "renamed"]);
+  });
+});
+
+describe("pair screen helpers", () => {
+  it("waitPhrase gives a wait that can sit still in an alert", () => {
+    expect(waitPhrase(60)).toBe("about a minute");
+    expect(waitPhrase(45)).toBe("about 45 seconds");
+    expect(waitPhrase(120)).toBe("about 2 minutes");
+    expect(waitPhrase(0)).toBe("about a second");
+  });
+  const mem = (): ReturnStore => {
+    const m = new Map<string, string>();
+    return { getItem: (k) => m.get(k) ?? null, setItem: (k, v) => void m.set(k, v), removeItem: (k) => void m.delete(k) };
+  };
+  it("pairing returns to the route the visitor was on, once", () => {
+    const store = mem();
+    rememberReturn("/devices/add", store);
+    expect(takeReturn(store)).toBe("/devices/add");
+    expect(takeReturn(store)).toBe("/");
+  });
+  it("only plain in-app routes are remembered", () => {
+    for (const bad of ["/pair", "/", "", "//evil.example/x", "https://evil.example", "/a?b=1", "/a#b", "javascript:alert(1)", "/" + "a".repeat(300)]) {
+      expect(isReturnable(bad), bad).toBe(false);
+    }
+    for (const good of ["/devices", "/services/radio", "/kb/projects/a%20b.md", "/settings/l3"]) expect(isReturnable(good), good).toBe(true);
+    const store = mem();
+    store.setItem("111.ui.return", "//evil.example");
+    expect(takeReturn(store)).toBe("/");
+    expect(takeReturn(null)).toBe("/");
   });
 });

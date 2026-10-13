@@ -11,7 +11,7 @@ export type ButtonVariant = "default" | "primary" | "destructive";
 export type ButtonSize = "md" | "sm";
 
 const BASE =
-  "group inline-flex min-h-11 items-center justify-center gap-2 border font-mono transition-all duration-200 disabled:pointer-events-none disabled:opacity-50";
+  "group inline-flex min-h-11 items-center justify-center gap-2 border font-mono transition-all duration-200 disabled:pointer-events-none disabled:opacity-50 aria-disabled:cursor-default aria-disabled:opacity-50";
 
 const SIZE: Record<ButtonSize, string> = {
   md: "px-6 py-3 text-sm",
@@ -49,7 +49,11 @@ export interface ButtonProps extends ButtonHTMLAttributes<HTMLButtonElement> {
    * "{confirm}? [Yes] [No]" in place (focus lands on No, Escape cancels). `onClick` fires on Yes only.
    */
   confirm?: string;
-  /** Disables the button and shows a blinking block cursor. */
+  /**
+   * Shows a blinking block cursor and ignores clicks. The button is marked `aria-disabled`, not `disabled`:
+   * a disabled button cannot hold focus, so the keyboard user would be thrown to the page body every time
+   * an action starts. The same goes for `aria-disabled` passed in directly.
+   */
   loading?: boolean;
   /** Trailing `->`. Defaults to true for `primary`. */
   arrow?: boolean;
@@ -73,7 +77,8 @@ export function Button({
   const noRef = useRef<HTMLButtonElement>(null);
   const wasAsking = useRef(false);
   const showArrow = arrow ?? variant === "primary";
-  const inert = !!disabled || loading;
+  const soft = loading || rest["aria-disabled"] === true || rest["aria-disabled"] === "true";
+  const inert = !!disabled || soft;
 
   useEffect(() => {
     if (asking) noRef.current?.focus();
@@ -122,9 +127,14 @@ export function Button({
       ref={mainRef}
       // A confirmable submit button must not submit on the first click.
       type={confirm ? "button" : type}
-      disabled={inert}
+      disabled={!!disabled}
+      aria-disabled={soft || undefined}
       aria-busy={loading || undefined}
       onClick={(e) => {
+        if (soft) {
+          e.preventDefault(); // no submit, no action; focus stays where it is
+          return;
+        }
         if (confirm) setAsking(true);
         else onClick?.(e);
       }}

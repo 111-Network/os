@@ -74,7 +74,8 @@ function ControlThisNode({ help }: { help: PairingHelp }) {
           <div id={panelId} hidden={!showPair} className="flex flex-col gap-2 border border-border p-3">
             {showPair ? (
               <>
-                <p className="font-pixel text-lg leading-snug break-all text-foreground md:text-2xl">{help.pairUrl}</p>
+                {/* Monospace, not the pixel face: 0/O and 1/l must be told apart when this is typed by hand. */}
+                <p className="font-mono text-lg leading-snug break-all text-foreground md:text-xl">{help.pairUrl}</p>
                 <p className={P}>
                   Type this address on the phone, then enter the pair code from the node. Run <Code>{PAIR_COMMAND}</Code> on the node for a scannable code.
                 </p>
@@ -114,7 +115,7 @@ export default function AddDevice() {
       </p>
 
       <div className="grid gap-4 md:grid-cols-2">
-        <Panel title="LoRa board over USB" className="flex flex-col" bodyClassName="flex flex-1 flex-col gap-4">
+        <Panel title="LoRa board over USB" heading={2} className="flex flex-col" bodyClassName="flex flex-1 flex-col gap-4">
           <p className={P}>
             Plug it in. It appears in the list by itself within a few seconds. The board shows as &lsquo;likely&rsquo; until it is identified.
           </p>
@@ -128,7 +129,7 @@ export default function AddDevice() {
           />
         </Panel>
 
-        <Panel title="Bluetooth device" className="flex flex-col" bodyClassName="flex flex-1 flex-col gap-4">
+        <Panel title="Bluetooth device" heading={2} className="flex flex-col" bodyClassName="flex flex-1 flex-col gap-4">
           <p className={P}>Bluetooth pairing arrives with Layer 6. Adapters already show in the list.</p>
           <AgentButton
             label="Guide me with the agent"
@@ -140,12 +141,12 @@ export default function AddDevice() {
           />
         </Panel>
 
-        <Panel title="Phone or laptop" className="md:col-span-2" bodyClassName="divide-y divide-border">
+        <Panel title="Phone or laptop" heading={2} className="md:col-span-2" bodyClassName="divide-y divide-border">
           <Role title="Control this node">
             <ControlThisNode help={help} />
           </Role>
           <Role title="Make it a node of its own">
-            <p className={P}>Run the install command on a computer with the phone connected over USB-C. See the install docs.</p>
+            <p className={P}>Run the install command on a computer with the phone connected over USB-C. Ask the agent for the exact command.</p>
             <AgentButton
               label="Ask the agent how"
               from="Add device: phone as a node"
@@ -162,7 +163,7 @@ export default function AddDevice() {
           </Role>
         </Panel>
 
-        <Panel title="Handheld radio (Baofeng-class)" className="md:col-span-2" bodyClassName="flex flex-col gap-3">
+        <Panel title="Handheld radio (Baofeng-class)" heading={2} className="md:col-span-2" bodyClassName="flex flex-col gap-3">
           <div>
             <Badge>coming</Badge>
           </div>

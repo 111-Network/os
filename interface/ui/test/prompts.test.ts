@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { boundLog, buildPrompt, sanitizeLine, stagePrompt, takePrompt, type StorageLike } from "../src/lib/prompts";
+import { boundJson, boundLog, buildPrompt, questionPrompt, sanitizeLine, stagePrompt, takePrompt, truncateUtf8, type StorageLike } from "../src/lib/prompts";
 import type { DeviceRecord, ServiceRecord, Status } from "../src/lib/api/sse.gen";
 
 const status = { node: { label: "k7m2-9x4p-aa", alias: null, category: "Node2B", version: "2026.10.13" }, layers: [0, 1, 2, 3] } as unknown as Status;
@@ -40,6 +40,52 @@ describe("buildPrompt", () => {
     const p = buildPrompt("check", { kind: "node" }, { status, logLines: lines });
     expect(p).toContain("- last log lines:");
     expect(p).not.toContain("‮");
+  });
+});
+
+describe("one goal per prompt", () => {
+  const goals = ["Set up the", "Fix the", "Look at ", "Check this node end to end"];
+  it("context emits the context block only, with no goal sentence", () => {
+    const p = buildPrompt("context", { kind: "node" }, { status });
+    expect(p.startsWith("Context from the dashboard")).toBe(true);
+    for (const g of goals) expect(p).not.toContain(g);
+    expect(p).toContain("category Node2B");
+  });
+  it("a hint still comes first in a context-only prompt", () => {
+    expect(buildPrompt("context", { kind: "node" }, { status, hint: "the roof board" }).startsWith("Hint from the user: the roof board")).toBe(true);
+  });
+  it("questionPrompt puts the question over the context and carries exactly one goal", () => {
+    const p = questionPrompt("Who is nearby?", { kind: "node" }, { status });
+    expect(p.startsWith("Who is nearby?\n\nContext from the dashboard")).toBe(true);
+    for (const g of goals) expect(p).not.toContain(g);
+  });
+  it("the four goals still lead with their sentence", () => {
+    expect(buildPrompt("check", { kind: "node" }, { status }).startsWith("Check this node end to end")).toBe(true);
+  });
+});
+
+describe("bounding by bytes", () => {
+  it("never cuts a surrogate pair in half", () => {
+    // each emoji is 4 UTF-8 bytes and two UTF-16 units; a cut at 6 bytes falls inside the second one
+    const s = "😀😀😀";
+    const cut = truncateUtf8(s, 6);
+    expect(cut).toBe("😀");
+    expect(new TextEncoder().encode(cut).length).toBeLessThanOrEqual(6);
+    expect(new TextDecoder().decode(new TextEncoder().encode(cut))).toBe(cut); // a lone surrogate would come back as U+FFFD
+    expect(truncateUtf8(s, 8)).toBe("😀😀");
+    expect(truncateUtf8(s, 3)).toBe("");
+    expect(truncateUtf8("abc", 3)).toBe("abc");
+  });
+  it("boundJson truncates with an emoji at the boundary and stays well-formed", () => {
+    const out = boundJson({ t: "a😀😀😀😀" }, 14);
+    expect(out.endsWith("…(truncated)")).toBe(true);
+    const body = out.slice(0, -"…(truncated)".length);
+    expect(new TextEncoder().encode(body).length).toBeLessThanOrEqual(14);
+    expect(new TextDecoder("utf-8", { fatal: true }).decode(new TextEncoder().encode(body))).toBe(body); // valid UTF-16 -> UTF-8 round trip
+    expect(body).not.toContain("\ufffd");
+  });
+  it("boundJson leaves small values alone", () => {
+    expect(boundJson({ a: 1 }, 100)).toBe('{"a":1}');
   });
 });
 
