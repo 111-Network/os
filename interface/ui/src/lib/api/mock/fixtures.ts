@@ -160,10 +160,10 @@ export const RADIO_NO_BOARD = {
 
 /** Radio service facts once a board is attached but meshtasticd is not installed. */
 export const RADIO_BOARD_FOUND = {
-  reason_code: "meshtasticd_absent",
-  reason: "A LoRa board is connected, but the radio service is not installed yet.",
+  reason_code: "radio_unbound",
+  reason: "A LoRa board is plugged in, but nothing is bound to it yet.",
   can_run_here: true,
-  requires: "meshtasticd, the Meshtastic daemon, on this node.",
+  requires: "a mesh stack bound to the board — a Reticulum RNode interface or Meshtastic.",
   detail: { devices: [HELTEC_ID] as string[], port: 4403 },
 };
 
@@ -320,7 +320,7 @@ export function buildFixtures(now: number): Fixtures {
       sinceMs: 4 * MIN,
       ...RADIO_BOARD_FOUND,
       description:
-        "A LoRa radio lets this node talk to others several kilometres away without Wi-Fi or internet. The node drives it through Meshtastic.",
+        "Long-range radio for the mesh: it lets this node talk to others several kilometres away without Wi-Fi or internet. A LoRa board must be bound to a stack before it carries traffic.",
       kb_entry: "projects/meshtastic.md",
       actions: [],
     }),
