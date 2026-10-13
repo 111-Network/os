@@ -370,7 +370,7 @@ export function createMockAdapter(opts: MockOptions = {}): MockAdapter {
             const original = originals.get(id);
             if (!original || state.devices.some((x) => x.id === id)) return;
             const now = iso(clock.now());
-            ctx.addDevice({ ...structuredClone(original), alias: null, first_seen: now, last_seen: now });
+            ctx.addDevice({ ...structuredClone(original), alias: null, first_seen: now, since: now, last_seen: now });
           });
         }
       }).then(() => undefined),
