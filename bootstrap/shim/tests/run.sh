@@ -25,8 +25,11 @@ pass() { printf '%s\n' "t1-test: ok: $*"; }
 # --- fixtures: two fake binaries with distinct content ---------------------
 FIX="$T/fixtures"
 mkdir -p "$FIX"
-printf '#!/bin/sh\necho "fake 111 installer x86_64: $@"\n' > "$FIX/111-x86_64-unknown-linux-musl"
-printf '#!/bin/sh\necho "fake 111 installer aarch64: $@"\n' > "$FIX/111-aarch64-unknown-linux-musl"
+# $* and $(id -u) expand inside the fake binaries, not here.
+# shellcheck disable=SC2016
+printf '#!/bin/sh\necho "fake 111 installer x86_64: $*"\necho "fake uid=$(id -u)"\n' > "$FIX/111-x86_64-unknown-linux-musl"
+# shellcheck disable=SC2016
+printf '#!/bin/sh\necho "fake 111 installer aarch64: $*"\necho "fake uid=$(id -u)"\n' > "$FIX/111-aarch64-unknown-linux-musl"
 SHA_X=$(sha256sum "$FIX/111-x86_64-unknown-linux-musl" | cut -d' ' -f1)
 SHA_A=$(sha256sum "$FIX/111-aarch64-unknown-linux-musl" | cut -d' ' -f1)
 
@@ -56,12 +59,27 @@ done
 BASE_URL="http://127.0.0.1:$PORT"
 export SHIM111_BASE_URL="$BASE_URL"
 
-set_hooks() { # $1 dry_run, $2 fake_uname, $3 fake_bit, $4 fake_priv ("" = unset)
+set_hooks() { # $1 dry_run, $2 fake_uname, $3 fake_bit, $4 fake_priv, $5 dest ("" = unset)
 	if [ -n "$1" ]; then export SHIM111_DRY_RUN="$1"; else unset SHIM111_DRY_RUN 2>/dev/null || true; fi
 	if [ -n "$2" ]; then export SHIM111_FAKE_UNAME="$2"; else unset SHIM111_FAKE_UNAME 2>/dev/null || true; fi
 	if [ -n "$3" ]; then export SHIM111_FAKE_BIT="$3"; else unset SHIM111_FAKE_BIT 2>/dev/null || true; fi
 	if [ -n "$4" ]; then export SHIM111_FAKE_PRIV="$4"; else unset SHIM111_FAKE_PRIV 2>/dev/null || true; fi
+	if [ -n "${5:-}" ]; then export SHIM111_DEST="$5"; else unset SHIM111_DEST 2>/dev/null || true; fi
 }
+
+# --phone fixtures: a read-only bin dir (privileged install step needed), a
+# writable one (no privilege at all), and sudo/doas stubs that record any call.
+RO="$T/ro-bin"
+RW="$T/rw-bin"
+STUBS="$T/stubs"
+mkdir -p "$RO" "$RW" "$STUBS"
+chmod 0555 "$RO"
+for _p in sudo doas; do
+	printf '#!/bin/sh\necho "%s $*" >> "%s/priv-calls"\nexit 1\n' "$_p" "$T" > "$STUBS/$_p"
+	chmod 0755 "$STUBS/$_p"
+done
+ME=$(id -u)
+ME_NAME=$(id -un)
 
 run_shim() { # $1 = shell label; remaining args = shim args
 	_sh=$1
@@ -99,14 +117,52 @@ for SH in dash bash busybox; do
 		echo "$OUT" >&2
 	fi
 
-	# args passthrough visible in the dry-run exec line
+	# --phone, destination needs privilege: sudo/doas for the install step
+	# ONLY; the installer is exec'd as the invoking user (it refuses root)
+	set_hooks 1 "" "" "" "$RO/111-bootstrap"
 	OUT=$(run_shim "$SH" --phone 2>&1)
-	if echo "$OUT" | grep -q "would run: /usr/local/bin/111-bootstrap install --min-installer-version=2026.10.01 '--phone'"; then
-		pass "$SH: --phone passes through"
+	RC=$?
+	if [ $RC -eq 0 ] &&
+		echo "$OUT" | grep -Eq "privilege mechanism: (sudo|doas) \(binary install step only\)" &&
+		echo "$OUT" | grep -q "would run: install -m 0755 .* $RO/111-bootstrap" &&
+		echo "$OUT" | grep -q "would run as $ME_NAME, no sudo: $RO/111-bootstrap install --min-installer-version=2026.10.01 '--phone'" &&
+		! echo "$OUT" | grep -q "would run: sudo\|would run: doas"; then
+		pass "$SH: --phone escalates for the binary install only"
 	else
-		fail "$SH: --phone passthrough"
+		fail "$SH: --phone dry-run (rc=$RC)"
 		echo "$OUT" >&2
 	fi
+
+	# --phone, user-writable destination: real run, no sudo/doas at all, and
+	# the installer runs as us with the shim args (incl. --yes) passed through
+	set_hooks "" "" "" "" "$RW/111-bootstrap"
+	rm -f "$T/priv-calls" "$RW/111-bootstrap"
+	OUT=$(PATH="$STUBS:$PATH" run_shim "$SH" --phone --yes 2>&1)
+	RC=$?
+	if [ $RC -eq 0 ] &&
+		echo "$OUT" | grep -q "fake 111 installer x86_64: install --min-installer-version=2026.10.01 --phone --yes" &&
+		echo "$OUT" | grep -q "fake uid=$ME\$" &&
+		[ -x "$RW/111-bootstrap" ] && [ ! -e "$T/priv-calls" ]; then
+		pass "$SH: --phone with a writable destination runs as the user, no sudo"
+	else
+		fail "$SH: --phone user run (rc=$RC, priv calls: $(cat "$T/priv-calls" 2>/dev/null))"
+		echo "$OUT" >&2
+	fi
+
+	# --phone, no privilege mechanism and a read-only destination: the two
+	# exact steps (root install, then the user run), exit 1
+	set_hooks "" "" "" none "$RO/111-bootstrap"
+	OUT=$(run_shim "$SH" --phone 2>&1)
+	RC=$?
+	if [ $RC -eq 1 ] &&
+		echo "$OUT" | grep -q "1. as root: *su -c 'install -m 0755 .* $RO/111-bootstrap'" &&
+		echo "$OUT" | grep -q "2. then as YOU, no sudo: $RO/111-bootstrap install --min-installer-version=2026.10.01 '--phone'"; then
+		pass "$SH: --phone without privilege prints root-install + user-run steps"
+	else
+		fail "$SH: --phone no-privilege path (rc=$RC)"
+		echo "$OUT" >&2
+	fi
+	set_hooks 1 "" "" ""
 
 	# 2. tampered pin: wrong sha refused before any privileged action
 	sed -e "s/@@SHIM_VERSION@@/2026.10.12/" \

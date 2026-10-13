@@ -1,6 +1,6 @@
 //! CLI surface: install · daemon · identity backup|restore|commission ·
 //! config · dashboard [rotate] · uninstall · update-helper · update-guard.
-//! Flags: --phone --serial --keep-adb --allow-degraded --min-installer-version
+//! Flags: --phone --serial --keep-adb --reboot-test --yes --allow-degraded --min-installer-version
 //! --version (calver). Host install and --phone are mutually exclusive.
 
 /// Binary version: stamped by release builds (NODE111_BUILD_VERSION), "dev" otherwise.
@@ -17,6 +17,10 @@ pub struct InstallArgs {
     pub allow_degraded: bool,
     /// Optional adb-reboot verification test before lockdown.
     pub reboot_test: bool,
+    /// Phone flow: answer the operator confirmations (fresh-LAN sshd check,
+    /// adb lockdown) in advance. Without it they are asked on the terminal
+    /// and fail closed when there is none.
+    pub yes: bool,
     /// Shim-forwarded floor (the binary also refuses below the compiled-in
     /// MIN_INSTALLER_VERSION).
     pub min_installer_version: Option<crate::calver::Calver>,
@@ -74,6 +78,7 @@ fn parse_install_flags(args: &[String]) -> anyhow::Result<InstallArgs> {
             "--keep-adb" => ia.keep_adb = true,
             "--reboot-test" => ia.reboot_test = true,
             "--allow-degraded" => ia.allow_degraded = true,
+            "--yes" => ia.yes = true,
             "--serial" => {
                 i += 1;
                 ia.serial = Some(
@@ -147,7 +152,7 @@ const USAGE: &str = "111 — the 111 Network node
 
 USAGE:
   111 install [--allow-degraded] [--min-installer-version=CALVER]
-  111 install --phone [--serial SERIAL] [--keep-adb]
+  111 install --phone [--serial SERIAL] [--keep-adb] [--reboot-test] [--yes]
   111 daemon
   111 identity backup|restore      (run as the node user: sudo -u node111 111 identity backup)
   111 identity commission [--loopback-test]   (Cat-1 relay ceremony; your own computer, needs a terminal)
@@ -201,31 +206,153 @@ pub fn main_entry(args: Vec<String>) -> i32 {
     }
 }
 
-/// LAN sharing as configured on disk (env file OR settings.json). An
-/// unreadable env file (non-root caller) counts as "not set there".
-fn lan_configured_now(state_dir: &std::path::Path) -> bool {
+/// LAN sharing as configured on disk (`DASHBOARD_LAN` override, else
+/// settings.json). `None` when the env file exists but is unreadable (non-root
+/// caller): whether it pins the value is then unknown.
+fn lan_config_now(
+    state_dir: &std::path::Path,
+) -> Option<crate::daemon::dashboard::bind::LanConfig> {
     let etc = crate::config::env_path();
-    let pairs = etc
-        .parent()
-        .and_then(|d| crate::daemon::load_env(d).ok())
-        .unwrap_or_default();
-    crate::daemon::dashboard::bind::lan_configured(&pairs, state_dir)
+    let pairs = crate::daemon::load_env(etc.parent()?).ok()?;
+    Some(crate::daemon::dashboard::bind::lan_config(
+        &pairs, state_dir,
+    ))
 }
 
-/// The pair URL encoded in the QR: the announced `.local` name if the daemon
-/// bound one, else its first LAN IP URL, else `http://111.local`.
-pub fn pair_url(urls: &[String], code: &str) -> String {
-    let local = urls
+fn on_off(b: bool) -> &'static str {
+    if b {
+        "on"
+    } else {
+        "off"
+    }
+}
+
+/// The `LAN sharing:` line of `111 dashboard`. `running` = the live daemon's
+/// LAN state (None = not running); `cfg` = what the next start will use (None =
+/// env file unreadable).
+pub fn lan_line(
+    running: Option<bool>,
+    cfg: Option<crate::daemon::dashboard::bind::LanConfig>,
+    env_file: &std::path::Path,
+    termux: bool,
+) -> String {
+    let restart = if termux {
+        crate::config::TERMUX_RESTART
+    } else {
+        crate::config::HOST_RESTART
+    };
+    let pin = format!(
+        "pinned by {} in {}",
+        crate::daemon::dashboard::bind::LAN_ENV_KEY,
+        env_file.display()
+    );
+    if let (Some(now), Some(c)) = (running, cfg) {
+        if now != c.enabled {
+            let how = if c.locked {
+                format!(", {pin}")
+            } else {
+                String::new()
+            };
+            return format!(
+                "LAN sharing: {} (configured {}{how} — takes effect after: {restart})",
+                on_off(now),
+                on_off(c.enabled),
+            );
+        }
+    }
+    let now = running.or(cfg.map(|c| c.enabled)).unwrap_or(false);
+    let suffix = match cfg {
+        Some(c) if c.locked => format!(" ({pin})"),
+        _ => String::new(),
+    };
+    if now {
+        format!("LAN sharing: on{suffix} — visitors on your network must pair")
+    } else {
+        format!(
+            "LAN sharing: off{suffix} — enable with: {}",
+            crate::config::lan_enable_hint(termux)
+        )
+    }
+}
+
+fn is_lan_ip_url(u: &str) -> bool {
+    !u.contains("127.0.0.1") && !u.contains("localhost") && !u.contains(".local")
+}
+
+fn is_mdns_url(u: &str) -> bool {
+    u.contains(".local") && !u.contains(".localhost")
+}
+
+fn with_code(base: &str, code: &str) -> String {
+    format!("{}/#/pair?code={code}", base.trim_end_matches('/'))
+}
+
+/// The pair URL encoded in the QR and printed: a LAN-IP URL — Android browsers
+/// (the usual companion) do not resolve `.local` names. Order: the daemon's
+/// first LAN-IP URL, else this host's first LAN IPv4 on `:11180`, else the
+/// announced `.local` name, else `http://111.local`.
+pub fn pair_url(urls: &[String], code: &str, lan_ips: &[std::net::Ipv4Addr]) -> String {
+    if let Some(u) = urls.iter().find(|u| is_lan_ip_url(u)) {
+        return with_code(u, code);
+    }
+    if let Some(ip) = lan_ips.first() {
+        return with_code(
+            &format!("http://{ip}:{}", crate::daemon::dashboard::DEFAULT_PORT),
+            code,
+        );
+    }
+    let base = urls
         .iter()
-        .find(|u| u.contains(".local") && !u.contains(".localhost"));
-    let lan_ip = urls
-        .iter()
-        .find(|u| !u.contains("127.0.0.1") && !u.contains("localhost") && !u.contains(".local"));
-    let base = local
-        .or(lan_ip)
+        .find(|u| is_mdns_url(u))
         .map(String::as_str)
         .unwrap_or("http://111.local");
-    format!("{}/#/pair?code={code}", base.trim_end_matches('/'))
+    with_code(base, code)
+}
+
+/// Lines listed under the QR: the other LAN-IP URLs, the `.local` name (with
+/// the Android caveat; left out on a Termux node, where mDNS needs a
+/// MulticastLock no CLI can take — D12), and the local URL (no pairing on a
+/// host; on a Termux node loopback is not trusted, so its pair link).
+pub fn pair_alternatives(urls: &[String], code: &str, primary: &str, termux: bool) -> Vec<String> {
+    let mut out = Vec::new();
+    for u in urls.iter().filter(|u| is_lan_ip_url(u)) {
+        let p = with_code(u, code);
+        if p != primary {
+            out.push(format!("  also:          {p}"));
+        }
+    }
+    if !termux {
+        for u in urls.iter().filter(|u| is_mdns_url(u)) {
+            let p = with_code(u, code);
+            if p != primary {
+                out.push(format!(
+                    "  also:          {p}   (not from Android: its browsers do not resolve .local names)"
+                ));
+            }
+        }
+    }
+    out.push(local_pair_line(urls, code, termux));
+    out
+}
+
+/// The local-browser line: on a host loopback needs no pairing; on a Termux
+/// node it does (any app can reach 127.0.0.1), so the phone gets its pair link.
+pub fn local_pair_line(urls: &[String], code: &str, termux: bool) -> String {
+    if termux {
+        let local = urls
+            .iter()
+            .find(|u| u.contains("127.0.0.1"))
+            .map(String::as_str)
+            .unwrap_or(crate::daemon::dashboard::bind::FALLBACK_URL);
+        return format!("  on this phone: {}", with_code(local, code));
+    }
+    let local = urls
+        .iter()
+        .find(|u| u.contains("111.localhost"))
+        .or_else(|| urls.iter().find(|u| u.contains("127.0.0.1")))
+        .map(String::as_str)
+        .unwrap_or(crate::daemon::dashboard::bind::FALLBACK_URL);
+    format!("  on this node:  {local}   (no pairing needed)")
 }
 
 /// Terminal QR (unicode half blocks, inverted for dark terminals).
@@ -261,8 +388,9 @@ fn dashboard_cmd(rotate: bool) -> anyhow::Result<()> {
         return Ok(());
     }
 
-    let file = bind::read_state(&state_dir).filter(|f| bind::pid_alive(f.pid));
-    let configured = lan_configured_now(&state_dir);
+    let file = bind::read_state(&state_dir).filter(bind::daemon_alive);
+    let configured = lan_config_now(&state_dir);
+    let termux = crate::config::on_termux();
     let (urls, lan_running) = match &file {
         Some(f) => {
             println!(
@@ -280,28 +408,41 @@ fn dashboard_cmd(rotate: bool) -> anyhow::Result<()> {
         }
     };
     for u in &urls {
-        println!("  {u}");
+        if termux && is_mdns_url(u) {
+            println!("  {u}   (may not resolve: Android needs a MulticastLock for mDNS)");
+        } else {
+            println!("  {u}");
+        }
     }
-    let lan_now = lan_running.unwrap_or(configured);
-    match (lan_running, configured) {
-        (Some(true), false) => println!(
-            "LAN sharing: on (turned off in config — takes effect after: sudo systemctl restart 111node)"
-        ),
-        (Some(false), true) => println!(
-            "LAN sharing: off (turned on in config — takes effect after: sudo systemctl restart 111node)"
-        ),
-        (_, _) if lan_now => println!("LAN sharing: on — visitors on your network must pair"),
-        _ => println!("LAN sharing: off — enable with: sudo 111 config dashboard.lan true"),
-    }
+    let lan_now = lan_running
+        .or(configured.map(|c| c.enabled))
+        .unwrap_or(false);
+    println!(
+        "{}",
+        lan_line(lan_running, configured, &crate::config::env_path(), termux)
+    );
     match auth::read_pair_code(&state_dir) {
         Ok(Some(code)) => {
-            println!("Pair code:   {code}   (LAN visitors enter it; this computer never needs it)");
+            if termux {
+                println!(
+                    "Pair code:   {code}   (every browser enters it once, this phone's own too)"
+                );
+            } else {
+                println!(
+                    "Pair code:   {code}   (LAN visitors enter it; this computer never needs it)"
+                );
+            }
             if lan_now {
-                let url = pair_url(&urls, &code);
+                let url = pair_url(&urls, &code, &bind::lan_ipv4s());
                 match render_qr(&url) {
                     Ok(qr) => println!("\nScan to pair: {url}\n{qr}"),
                     Err(_) => println!("Pair link: {url}"),
                 }
+                for line in pair_alternatives(&urls, &code, &url, termux) {
+                    println!("{line}");
+                }
+            } else if termux {
+                println!("{}", local_pair_line(&urls, &code, true));
             }
         }
         Ok(None) => {
@@ -517,8 +658,20 @@ mod tests {
             Cmd::Install(ia) => ia,
             other => panic!("{other:?}"),
         };
-        assert!(ia.phone && ia.keep_adb);
+        assert!(ia.phone && ia.keep_adb && !ia.yes);
         assert_eq!(ia.serial.as_deref(), Some("abc123"));
+        // the shim's phone branch forwards --yes (non-interactive confirmations)
+        match parse(&[
+            "install".into(),
+            "--min-installer-version=2026.10.01".into(),
+            "--phone".into(),
+            "--yes".into(),
+        ])
+        .unwrap()
+        {
+            Cmd::Install(ia) => assert!(ia.phone && ia.yes),
+            other => panic!("{other:?}"),
+        }
         assert!(matches!(
             parse(&["identity".into(), "backup".into()]).unwrap(),
             Cmd::IdentityBackup
@@ -591,31 +744,126 @@ mod tests {
         ));
     }
 
+    fn urls(v: &[&str]) -> Vec<String> {
+        v.iter().map(|s| s.to_string()).collect()
+    }
+
     #[test]
-    fn pair_url_prefers_mdns_then_lan_ip() {
-        let urls = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+    fn pair_url_prefers_the_lan_ip_over_mdns() {
+        let all = urls(&[
+            "http://111.localhost",
+            "http://127.0.0.1:11180",
+            "http://111.local",
+            "http://192.168.1.5",
+        ]);
+        let ip: std::net::Ipv4Addr = "10.0.0.9".parse().unwrap();
+        // the daemon's LAN-IP URL wins over 111.local (Android cannot resolve it)
         assert_eq!(
-            pair_url(
-                &urls(&[
-                    "http://111.localhost",
-                    "http://127.0.0.1:11180",
-                    "http://111.local",
-                    "http://192.168.1.5"
-                ]),
-                "7KQ2-XM9D"
-            ),
-            "http://111.local/#/pair?code=7KQ2-XM9D"
+            pair_url(&all, "7KQ2-XM9D", &[ip]),
+            "http://192.168.1.5/#/pair?code=7KQ2-XM9D"
         );
         assert_eq!(
             pair_url(
                 &urls(&["http://127.0.0.1:11180", "http://192.168.1.5:11180"]),
-                "X"
+                "X",
+                &[]
             ),
             "http://192.168.1.5:11180/#/pair?code=X"
         );
-        assert_eq!(pair_url(&[], "X"), "http://111.local/#/pair?code=X");
-        let qr = render_qr("http://111.local/#/pair?code=7KQ2-XM9D").unwrap();
+        // daemon not running / no LAN URL: this host's LAN IP on :11180
+        assert_eq!(
+            pair_url(&urls(&["http://127.0.0.1:11180"]), "X", &[ip]),
+            "http://10.0.0.9:11180/#/pair?code=X"
+        );
+        // no LAN IP at all: the announced name, else 111.local
+        assert_eq!(
+            pair_url(&urls(&["http://111-2.local:11180"]), "X", &[]),
+            "http://111-2.local:11180/#/pair?code=X"
+        );
+        assert_eq!(pair_url(&[], "X", &[]), "http://111.local/#/pair?code=X");
+
+        // alternatives: other LAN IPs, .local with the Android caveat, local URL
+        let two = urls(&[
+            "http://111.localhost",
+            "http://127.0.0.1:11180",
+            "http://111.local",
+            "http://192.168.1.5",
+            "http://10.0.0.9",
+        ]);
+        let primary = pair_url(&two, "C", &[]);
+        let alt = pair_alternatives(&two, "C", &primary, false);
+        assert_eq!(
+            alt,
+            [
+                "  also:          http://10.0.0.9/#/pair?code=C",
+                "  also:          http://111.local/#/pair?code=C   (not from Android: its browsers do not resolve .local names)",
+                "  on this node:  http://111.localhost   (no pairing needed)",
+            ]
+        );
+        // a Termux node leaves .local out (no MulticastLock, D12) and, with
+        // loopback untrusted there, gives the phone its own pair link
+        let alt = pair_alternatives(&two, "C", &primary, true);
+        assert!(alt.iter().all(|l| !l.contains("111.local/")), "{alt:?}");
+        assert_eq!(
+            alt.last().unwrap(),
+            "  on this phone: http://127.0.0.1:11180/#/pair?code=C"
+        );
+        assert!(alt.iter().all(|l| !l.contains("no pairing needed")));
+        // no :80 → the 127.0.0.1 URL is the local one
+        let alt = pair_alternatives(
+            &urls(&["http://127.0.0.1:11180", "http://192.168.1.5:11180"]),
+            "C",
+            "http://192.168.1.5:11180/#/pair?code=C",
+            false,
+        );
+        assert_eq!(
+            alt,
+            ["  on this node:  http://127.0.0.1:11180   (no pairing needed)"]
+        );
+
+        let qr = render_qr("http://192.168.1.5/#/pair?code=7KQ2-XM9D").unwrap();
         assert!(qr.lines().count() > 10);
+    }
+
+    #[test]
+    fn lan_line_reports_pins_and_pending_restarts() {
+        use crate::daemon::dashboard::bind::LanConfig;
+        let env = std::path::Path::new("/etc/111/env");
+        let c = |enabled, locked| Some(LanConfig { enabled, locked });
+        assert_eq!(
+            lan_line(Some(true), c(true, false), env, false),
+            "LAN sharing: on — visitors on your network must pair"
+        );
+        assert_eq!(
+            lan_line(Some(false), c(false, false), env, false),
+            "LAN sharing: off — enable with: sudo 111 config dashboard.lan true && sudo systemctl restart 111node"
+        );
+        assert_eq!(
+            lan_line(Some(true), c(true, true), env, false),
+            "LAN sharing: on (pinned by DASHBOARD_LAN in /etc/111/env) — visitors on your network must pair"
+        );
+        assert_eq!(
+            lan_line(None, c(false, true), env, false),
+            "LAN sharing: off (pinned by DASHBOARD_LAN in /etc/111/env) — enable with: sudo 111 config dashboard.lan true && sudo systemctl restart 111node"
+        );
+        assert_eq!(
+            lan_line(Some(true), c(false, false), env, false),
+            "LAN sharing: on (configured off — takes effect after: sudo systemctl restart 111node)"
+        );
+        assert_eq!(
+            lan_line(Some(false), c(true, true), env, false),
+            "LAN sharing: off (configured on, pinned by DASHBOARD_LAN in /etc/111/env — takes effect after: sudo systemctl restart 111node)"
+        );
+        // env file unreadable (non-root): the running state, no pin claim
+        assert_eq!(
+            lan_line(Some(true), None, env, false),
+            "LAN sharing: on — visitors on your network must pair"
+        );
+        // Termux: no sudo, runit restart
+        assert_eq!(
+            lan_line(None, c(false, false), env, true),
+            "LAN sharing: off — enable with: 111 config dashboard.lan true && SVDIR=$PREFIX/var/service sv restart 111node"
+        );
     }
 
     #[test]

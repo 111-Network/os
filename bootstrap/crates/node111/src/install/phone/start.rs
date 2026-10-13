@@ -121,23 +121,65 @@ pub fn verify_health(
     }
 }
 
-/// Phone-local dashboard URL (the phone's own browser; loopback = no pairing).
+/// Phone-local dashboard URL (the phone's own browser). Loopback is NOT trusted
+/// on a phone node (any app can reach 127.0.0.1), so that browser pairs once.
 pub const PHONE_DASHBOARD_URL: &str = "http://127.0.0.1:11180";
+
+/// The daemon's pair file on the phone (`<root>/state/dashboard-pair.json`,
+/// created at first daemon start). Absolute: run-as shells carry no `$PREFIX`.
+pub const PHONE_PAIR_FILE: &str =
+    "/data/data/com.termux/files/usr/var/lib/111/state/dashboard-pair.json";
+
+/// The pair code in a `dashboard-pair.json` body, re-rendered from the
+/// validated symbols as `XXXX-XXXX` (device output never reaches a shell
+/// command unvalidated).
+pub fn parse_pair_code(body: &str) -> Option<String> {
+    let pf: crate::daemon::dashboard::api_v1::auth::PairFile =
+        serde_json::from_str(body.trim()).ok()?;
+    let sym = crate::daemon::dashboard::api_v1::auth::normalize_code(&pf.code)?;
+    let s = String::from_utf8(sym.to_vec()).ok()?;
+    Some(format!("{}-{}", &s[..4], &s[4..]))
+}
+
+/// The phone's current pair code (run-as `cat` of [`PHONE_PAIR_FILE`]); `None`
+/// when unreadable or malformed.
+pub fn read_pair_code(adb: &Adb<'_>) -> Option<String> {
+    let body = runas::run_as_output(adb, &format!("cat {PHONE_PAIR_FILE}")).ok()?;
+    parse_pair_code(&body)
+}
+
+/// The URL the phone's browser opens: the pair link when the code is known.
+pub fn phone_open_url(code: Option<&str>) -> String {
+    match code {
+        Some(c) => format!("{PHONE_DASHBOARD_URL}/#/pair?code={c}"),
+        None => PHONE_DASHBOARD_URL.to_string(),
+    }
+}
 
 /// Best-effort (spec §12, Layer 4): open the dashboard in the phone's browser
 /// via an Android VIEW intent — run after on-device verify, BEFORE the adb
-/// lockdown. Never fails the provisioning; returns whether adb accepted it.
-pub fn open_dashboard(adb: &Adb<'_>) -> bool {
-    let cmd = format!("am start -a android.intent.action.VIEW -d {PHONE_DASHBOARD_URL}");
+/// lockdown. With the pair code it opens the pair link (the browser pairs in
+/// one tap); without it, the plain URL plus the `111 dashboard` hint. Never
+/// fails the provisioning; returns whether adb accepted it.
+pub fn open_dashboard(adb: &Adb<'_>, code: Option<&str>) -> bool {
+    let url = phone_open_url(code);
+    // quoted: `?` would glob in the device shell (the code is validated, no quotes)
+    let cmd = format!("am start -a android.intent.action.VIEW -d '{url}'");
+    if code.is_none() {
+        eprintln!(
+            "111 phone: could not read the pair code from the phone — the browser will ask for it; \
+             `111 dashboard` on the phone prints it"
+        );
+    }
     match adb.shell(&cmd) {
         Ok(out) if out.ok() && !out.stdout.contains("Error") => {
-            eprintln!(
-                "111 phone: opened the dashboard in the phone's browser ({PHONE_DASHBOARD_URL})"
-            );
+            eprintln!("111 phone: opened the dashboard in the phone's browser ({url})");
             true
         }
         _ => {
-            eprintln!("111 phone: could not open a browser on the phone — open {PHONE_DASHBOARD_URL} there yourself");
+            eprintln!(
+                "111 phone: could not open a browser on the phone — open {url} there yourself"
+            );
             false
         }
     }
@@ -206,33 +248,80 @@ mod tests {
         }
     }
 
-    const AM: &str =
-        "adb -s S1 shell am start -a android.intent.action.VIEW -d http://127.0.0.1:11180";
+    const AM_PAIR: &str = "adb -s S1 shell am start -a android.intent.action.VIEW -d 'http://127.0.0.1:11180/#/pair?code=7KQ2-XM9D'";
+    const AM_PLAIN: &str =
+        "adb -s S1 shell am start -a android.intent.action.VIEW -d 'http://127.0.0.1:11180'";
+    const CAT: &str = "adb -s S1 shell run-as com.termux sh -c 'cat /data/data/com.termux/files/usr/var/lib/111/state/dashboard-pair.json'";
 
     #[test]
     fn open_dashboard_is_best_effort() {
         let ok = MockRunner::new(vec![(
-            AM,
+            AM_PAIR,
             out(0, "Starting: Intent { act=android.intent.action.VIEW }"),
         )]);
-        assert!(open_dashboard(&Adb::new(&ok, Some("S1".into()), "adb")));
+        assert!(open_dashboard(
+            &Adb::new(&ok, Some("S1".into()), "adb"),
+            Some("7KQ2-XM9D")
+        ));
         ok.assert_exhausted();
         // `am` reports some failures on stdout with exit 0
         let no_browser = MockRunner::new(vec![(
-            AM,
+            AM_PAIR,
             out(0, "Error: Activity not started, unable to resolve Intent"),
         )]);
-        assert!(!open_dashboard(&Adb::new(
-            &no_browser,
-            Some("S1".into()),
-            "adb"
-        )));
-        let adb_down = MockRunner::new(vec![(AM, out(1, ""))]);
-        assert!(!open_dashboard(&Adb::new(
-            &adb_down,
-            Some("S1".into()),
-            "adb"
-        )));
+        assert!(!open_dashboard(
+            &Adb::new(&no_browser, Some("S1".into()), "adb"),
+            Some("7KQ2-XM9D")
+        ));
+        let adb_down = MockRunner::new(vec![(AM_PAIR, out(1, ""))]);
+        assert!(!open_dashboard(
+            &Adb::new(&adb_down, Some("S1".into()), "adb"),
+            Some("7KQ2-XM9D")
+        ));
+        // no code: the plain URL (the browser shows the pair screen)
+        let plain = MockRunner::new(vec![(AM_PLAIN, out(0, "Starting: Intent"))]);
+        assert!(open_dashboard(
+            &Adb::new(&plain, Some("S1".into()), "adb"),
+            None
+        ));
+        plain.assert_exhausted();
+    }
+
+    #[test]
+    fn pair_code_is_read_from_the_phone_and_validated() {
+        let body = r#"{"schema":1,"code":"7KQ2-XM9D","created":"2026-10-14T00:00:00Z"}"#;
+        let r = MockRunner::new(vec![(CAT, out(0, body))]);
+        assert_eq!(
+            read_pair_code(&Adb::new(&r, Some("S1".into()), "adb")).as_deref(),
+            Some("7KQ2-XM9D")
+        );
+        r.assert_exhausted();
+        // run-as failure / missing file
+        let r = MockRunner::new(vec![(CAT, out(1, ""))]);
+        assert_eq!(
+            read_pair_code(&Adb::new(&r, Some("S1".into()), "adb")),
+            None
+        );
+        // malformed or hostile content never reaches the am command
+        for bad in [
+            "",
+            "garbage",
+            r#"{"schema":1,"code":"7KQ2-XM9","created":"x"}"#,
+            r#"{"schema":1,"code":"7KQ2-XM9D'; reboot; '","created":"x"}"#,
+            r#"{"schema":1,"code":"AEIU-OOOO","created":"x"}"#,
+        ] {
+            assert_eq!(parse_pair_code(bad), None, "{bad}");
+        }
+        // read-alikes and spacing normalize to the canonical display form
+        assert_eq!(
+            parse_pair_code(r#"{"schema":1,"code":" 7kq2 xm9d ","created":"x"}"#).as_deref(),
+            Some("7KQ2-XM9D")
+        );
+        assert_eq!(
+            phone_open_url(Some("7KQ2-XM9D")),
+            "http://127.0.0.1:11180/#/pair?code=7KQ2-XM9D"
+        );
+        assert_eq!(phone_open_url(None), "http://127.0.0.1:11180");
     }
 
     #[test]

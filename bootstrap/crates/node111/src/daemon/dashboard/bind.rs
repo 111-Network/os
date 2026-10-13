@@ -4,15 +4,22 @@
 //!   the same address best-effort (needs `CAP_NET_BIND_SERVICE` — present in the
 //!   systemd unit, stripped in degraded containers, impossible on Termux). A
 //!   failed `:80` bind is logged once and never fails startup.
-//! - LAN sharing = env `DASHBOARD_LAN=true` OR `state/settings.json`
-//!   `lan_enabled: true` (R2 writes that file; it is only read here), read once
-//!   per daemon start.
+//! - Loopback listeners are IPv4 `127.0.0.1` plus IPv6 `[::1]` (best effort,
+//!   silently skipped when IPv6 is off): `111.localhost` resolves to `::1` on
+//!   many hosts. The LAN listener is IPv4 `0.0.0.0` only.
+//! - LAN sharing has ONE source of truth: `state/settings.json` `lan_enabled`
+//!   (written by the dashboard's `PATCH /api/v1/settings` and by
+//!   `111 config dashboard.lan`). `DASHBOARD_LAN` in the env file, when present,
+//!   is an explicit override (`true` = on, any other value = off) and *locks*
+//!   the setting (`lan_locked`, PATCH → 409). Read once per daemon start.
 //! - The URLs that actually bound, nicest first, go into `ApiState.bind` and
-//!   `<root>/state/dashboard.json` (`{schema:1, urls, lan, pid, started_at}`) for
-//!   `111 dashboard` and the installer's success print.
+//!   `<root>/state/dashboard.json` (`{schema:1, urls, lan, pid, pid_start,
+//!   started_at}`) for `111 dashboard` and the installer's success print.
+//!   `pid_start` (`/proc/<pid>/stat` field 22) lets readers tell a live daemon
+//!   from a recycled pid after a crash ([`daemon_alive`]).
 
 use serde::{Deserialize, Serialize};
-use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::path::Path;
 
 pub const STATE_FILE: &str = "dashboard.json";
@@ -34,6 +41,10 @@ pub struct DashboardFile {
     pub urls: Vec<String>,
     pub lan: bool,
     pub pid: u32,
+    /// Start time of `pid` in clock ticks since boot (`/proc/<pid>/stat` field
+    /// 22). Absent in files written before it existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pid_start: Option<u64>,
     pub started_at: String,
 }
 
@@ -51,13 +62,45 @@ pub fn settings_lan_enabled(state_dir: &Path) -> bool {
         .is_some_and(|s| s.lan_enabled)
 }
 
-/// Effective LAN sharing for a daemon start: env file `DASHBOARD_LAN=true` OR
-/// settings `lan_enabled`.
-pub fn lan_configured(env_pairs: &[(String, String)], state_dir: &Path) -> bool {
+/// The env-file key that overrides (and locks) `settings.json` `lan_enabled`.
+pub const LAN_ENV_KEY: &str = "DASHBOARD_LAN";
+
+/// `DASHBOARD_LAN` from the env file: `Some(value == "true")` when present with
+/// a non-empty value (last line wins, like sourcing), `None` when absent.
+pub fn lan_env_override(env_pairs: &[(String, String)]) -> Option<bool> {
     env_pairs
         .iter()
-        .any(|(k, v)| k == "DASHBOARD_LAN" && v == "true")
-        || settings_lan_enabled(state_dir)
+        .rev()
+        .find(|(k, v)| k == LAN_ENV_KEY && !v.is_empty())
+        .map(|(_, v)| v == "true")
+}
+
+/// LAN sharing as configured: the effective value and whether the env file pins it.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct LanConfig {
+    pub enabled: bool,
+    /// `DASHBOARD_LAN` is present in the env file and overrides `settings.json`.
+    pub locked: bool,
+}
+
+/// Effective LAN sharing: the env-file `DASHBOARD_LAN` override when present
+/// (locked), else `state/settings.json` `lan_enabled`.
+pub fn lan_config(env_pairs: &[(String, String)], state_dir: &Path) -> LanConfig {
+    match lan_env_override(env_pairs) {
+        Some(enabled) => LanConfig {
+            enabled,
+            locked: true,
+        },
+        None => LanConfig {
+            enabled: settings_lan_enabled(state_dir),
+            locked: false,
+        },
+    }
+}
+
+/// Effective LAN sharing for a daemon start (see [`lan_config`]).
+pub fn lan_configured(env_pairs: &[(String, String)], state_dir: &Path) -> bool {
+    lan_config(env_pairs, state_dir).enabled
 }
 
 /// Bind one listener; refuses a non-loopback address without the LAN opt-in.
@@ -80,6 +123,7 @@ pub struct Bound {
 }
 
 /// Bind `ip:port` (required) and `ip:80` (best effort). Failures are logged.
+/// The same ports are also bound on `[::1]` (best effort, see [`bind_v6_loopback`]).
 pub async fn bind_all(lan: bool, port: u16) -> Bound {
     let ip: IpAddr = if lan {
         Ipv4Addr::UNSPECIFIED.into()
@@ -108,10 +152,38 @@ pub async fn bind_all(lan: bool, port: u16) -> Bound {
                 false
             }
         };
+    let mut v6_ports = vec![port];
+    if port80_ok {
+        v6_ports.push(80);
+    }
+    for p in v6_ports {
+        if let Some(l) = bind_v6_loopback(p).await {
+            listeners.push(l);
+        }
+    }
     Bound {
         listeners,
         main_ok,
         port80_ok,
+    }
+}
+
+/// `[::1]:port`, best effort: silent when IPv6 is disabled (no `::1`, or no
+/// AF_INET6 at all), one log line for anything else (e.g. port taken).
+pub async fn bind_v6_loopback(port: u16) -> Option<tokio::net::TcpListener> {
+    let addr = SocketAddr::new(Ipv6Addr::LOCALHOST.into(), port);
+    match tokio::net::TcpListener::bind(addr).await {
+        Ok(l) => Some(l),
+        Err(e) => {
+            let ipv6_off = matches!(
+                e.raw_os_error(),
+                Some(libc::EADDRNOTAVAIL) | Some(libc::EAFNOSUPPORT) | Some(libc::EPROTONOSUPPORT)
+            );
+            if !ipv6_off {
+                eprintln!("111 daemon: dashboard bind {addr} failed ({e}); IPv4 loopback only");
+            }
+            None
+        }
     }
 }
 
@@ -157,6 +229,7 @@ pub fn write_state(state_dir: &Path, info: &BindInfo, started_at: &str) -> anyho
         urls: info.urls.clone(),
         lan: info.lan,
         pid: std::process::id(),
+        pid_start: proc_start_time(std::process::id()),
         started_at: started_at.to_string(),
     };
     crate::util::fs::atomic_write(
@@ -179,6 +252,36 @@ pub fn pid_alive(pid: u32) -> bool {
     }
     let r = unsafe { libc::kill(pid as i32, 0) };
     r == 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+}
+
+/// Field 22 (`starttime`, clock ticks since boot) of a `/proc/<pid>/stat` line.
+/// `comm` (field 2) may hold spaces and parentheses, so fields are counted
+/// after the LAST `)`.
+pub fn parse_stat_start_time(stat: &str) -> Option<u64> {
+    let (_, rest) = stat.rsplit_once(')')?;
+    // rest starts at field 3 (state) → field 22 is index 22 - 3.
+    rest.split_whitespace().nth(22 - 3)?.parse().ok()
+}
+
+/// Start time of a live `pid` (None when gone or `/proc` hides it).
+pub fn proc_start_time(pid: u32) -> Option<u64> {
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    parse_stat_start_time(&stat)
+}
+
+/// Is the daemon that wrote `file` still running? The pid must be alive AND,
+/// when the file recorded a start time and `/proc` shows one, the two must
+/// match — a crashed daemon's pid recycled by an unrelated process is not
+/// mistaken for a running dashboard. Older files (no `pid_start`) and a hidden
+/// `/proc` fall back to the bare pid check.
+pub fn daemon_alive(file: &DashboardFile) -> bool {
+    if !pid_alive(file.pid) {
+        return false;
+    }
+    match (file.pid_start, proc_start_time(file.pid)) {
+        (Some(recorded), Some(live)) => recorded == live,
+        _ => true,
+    }
 }
 
 /// One interface address from `getifaddrs`.
@@ -296,22 +399,147 @@ mod tests {
         assert!(urls(false, false, 11180, true, None, &ips).is_empty());
     }
 
-    #[test]
-    fn lan_config_sources() {
-        let dir = tempfile::tempdir().unwrap();
-        assert!(!lan_configured(&[], dir.path()));
-        assert!(lan_configured(
-            &[("DASHBOARD_LAN".into(), "true".into())],
-            dir.path()
-        ));
+    fn env(v: &str) -> Vec<(String, String)> {
+        vec![(LAN_ENV_KEY.to_string(), v.to_string())]
+    }
+
+    fn settings(dir: &Path, lan: bool) {
         std::fs::write(
-            dir.path().join(SETTINGS_FILE),
-            r#"{"schema":1,"lan_enabled":true,"alias":null}"#,
+            dir.join(SETTINGS_FILE),
+            format!(r#"{{"schema":1,"lan_enabled":{lan},"alias":null}}"#),
         )
         .unwrap();
-        assert!(lan_configured(&[], dir.path()));
+    }
+
+    #[test]
+    fn lan_config_settings_is_the_source_env_overrides() {
+        let dir = tempfile::tempdir().unwrap();
+        let off = LanConfig {
+            enabled: false,
+            locked: false,
+        };
+        // env absent: settings.json decides (absent/garbled = off)
+        assert_eq!(lan_config(&[], dir.path()), off);
+        settings(dir.path(), true);
+        assert_eq!(
+            lan_config(&[], dir.path()),
+            LanConfig {
+                enabled: true,
+                locked: false
+            }
+        );
+        settings(dir.path(), false);
+        assert_eq!(lan_config(&[], dir.path()), off);
         std::fs::write(dir.path().join(SETTINGS_FILE), "garbage").unwrap();
-        assert!(!lan_configured(&[], dir.path()));
+        assert_eq!(lan_config(&[], dir.path()), off);
+
+        // env present: overrides settings in BOTH directions and locks
+        settings(dir.path(), true);
+        assert_eq!(
+            lan_config(&env("false"), dir.path()),
+            LanConfig {
+                enabled: false,
+                locked: true
+            }
+        );
+        assert!(!lan_configured(&env("false"), dir.path()));
+        settings(dir.path(), false);
+        assert_eq!(
+            lan_config(&env("true"), dir.path()),
+            LanConfig {
+                enabled: true,
+                locked: true
+            }
+        );
+        assert!(lan_configured(&env("true"), dir.path()));
+        // any non-"true" value pins off; an empty value counts as absent;
+        // the last line wins
+        assert_eq!(lan_env_override(&env("yes")), Some(false));
+        assert_eq!(lan_env_override(&env("")), None);
+        let mut two = env("true");
+        two.extend(env("false"));
+        assert_eq!(lan_env_override(&two), Some(false));
+        assert_eq!(lan_env_override(&[("OTHER".into(), "true".into())]), None);
+    }
+
+    #[test]
+    fn stat_start_time_parsing() {
+        // comm with spaces and parentheses; field 22 = 987654
+        let stat = "4242 (111 (d) x) S 1 4242 4242 0 -1 4194560 100 0 0 0 1 2 0 0 20 0 9 0 987654 1000 200 18446744073709551615";
+        assert_eq!(parse_stat_start_time(stat), Some(987654));
+        assert_eq!(parse_stat_start_time("garbage"), None);
+        assert_eq!(parse_stat_start_time("1 (x) S 1 2"), None);
+        let own = proc_start_time(std::process::id());
+        assert!(own.is_some(), "/proc/self/stat must parse");
+    }
+
+    #[test]
+    fn stale_dashboard_file_is_not_a_running_daemon() {
+        let dir = tempfile::tempdir().unwrap();
+        let info = BindInfo {
+            urls: vec!["http://127.0.0.1:11180".into()],
+            lan: false,
+        };
+        write_state(dir.path(), &info, "2026-10-14T00:00:00Z").unwrap();
+        let f = read_state(dir.path()).unwrap();
+        assert_eq!(f.pid_start, proc_start_time(std::process::id()));
+        assert!(daemon_alive(&f), "the writer itself is alive");
+
+        // pid recycled by another process: same pid, different start time
+        let recycled = DashboardFile {
+            pid_start: f.pid_start.map(|t| t + 1),
+            ..f.clone()
+        };
+        assert!(!daemon_alive(&recycled));
+
+        // the writer exited: its pid is gone
+        let mut child = std::process::Command::new("true").spawn().unwrap();
+        let dead_pid = child.id();
+        child.wait().unwrap();
+        let dead = DashboardFile {
+            pid: dead_pid,
+            pid_start: Some(1),
+            ..f.clone()
+        };
+        assert!(!daemon_alive(&dead));
+
+        // a file from before pid_start existed: bare pid check
+        let legacy: DashboardFile = serde_json::from_str(&format!(
+            r#"{{"schema":1,"urls":[],"lan":false,"pid":{},"started_at":"x"}}"#,
+            std::process::id()
+        ))
+        .unwrap();
+        assert_eq!(legacy.pid_start, None);
+        assert!(daemon_alive(&legacy));
+    }
+
+    #[tokio::test]
+    async fn loopback_binds_ipv6_too_when_available() {
+        // a free port: bind :0 on v4, release it, reuse the number
+        let port = std::net::TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port();
+        let v6_available = std::net::TcpListener::bind("[::1]:0").is_ok();
+        let bound = bind_all(false, port).await;
+        assert!(bound.main_ok);
+        let v6: Vec<_> = bound
+            .listeners
+            .iter()
+            .filter_map(|l| l.local_addr().ok())
+            .filter(|a| a.is_ipv6())
+            .collect();
+        if v6_available {
+            assert!(
+                v6.iter().any(|a| a.port() == port && a.ip().is_loopback()),
+                "{v6:?}"
+            );
+        } else {
+            assert!(v6.is_empty());
+        }
+        // never a non-loopback v6 address
+        assert!(v6.iter().all(|a| a.ip().is_loopback()));
     }
 
     #[test]
@@ -331,5 +559,6 @@ mod tests {
         assert_eq!(f.urls, info.urls);
         assert_eq!(f.pid, std::process::id());
         assert!(pid_alive(f.pid));
+        assert!(daemon_alive(&f));
     }
 }

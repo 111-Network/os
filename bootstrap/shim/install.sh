@@ -24,6 +24,13 @@
 # installer. Zero telemetry: the only outbound connections are the two
 # artifact URLs.
 #
+# --phone: provisioning runs as the INVOKING user (adb authorization is
+# per-user; the installer refuses root). Privilege is used for the
+# `install -m 0755` step only — skipped entirely when the destination is
+# user-writable — and the installed copy is exec'd WITHOUT sudo/doas. Its
+# operator prompts read /dev/tty (stdin is this script's pipe under
+# `curl | sh`); --yes answers them in advance.
+#
 # Anti-truncation: every statement lives inside a function; the ONLY
 # top-level statement is the final `main "$@"` line. A partially-downloaded
 # script therefore dies with a shell syntax error (or, at best, defines a
@@ -42,6 +49,8 @@
 #   SHIM111_FAKE_UNAME      pretend `uname -m` returned this value
 #   SHIM111_FAKE_BIT        pretend `getconf LONG_BIT` returned this value
 #   SHIM111_FAKE_PRIV=none  pretend: not root, no sudo, no doas
+#   SHIM111_DEST            install destination instead of
+#                           /usr/local/bin/111-bootstrap
 #
 # NOTE: hook names must be valid POSIX shell identifiers — an earlier draft
 # used `111_*` names, but names starting with a digit are not importable
@@ -71,6 +80,7 @@ read_hooks() {
 	HOOK_FAKE_UNAME=${SHIM111_FAKE_UNAME:-}
 	HOOK_FAKE_BIT=${SHIM111_FAKE_BIT:-}
 	HOOK_FAKE_PRIV=${SHIM111_FAKE_PRIV:-}
+	HOOK_DEST=${SHIM111_DEST:-}
 }
 
 # ---------------------------------------------------------------------------
@@ -87,6 +97,11 @@ load_pins() {
 	MIRROR_BASE="https://install.111.network/v${SHIM_VERSION}"
 	DEST="/usr/local/bin/111-bootstrap"
 	DOCS="https://111.network/docs/install"
+}
+
+apply_dest_hook() {
+	[ -n "$HOOK_DEST" ] && DEST=$HOOK_DEST
+	:
 }
 
 # ---------------------------------------------------------------------------
@@ -240,9 +255,26 @@ args_quoted() { # print each arg, space-separated and single-quoted
 	done
 }
 
+has_phone_arg() { # any arg == --phone
+	for _a in "$@"; do
+		[ "$_a" = "--phone" ] && return 0
+	done
+	return 1
+}
+
+dest_user_writable() { # DEST can be (re)placed without privilege
+	_dir=$(dirname "$DEST")
+	[ -d "$_dir" ] && [ -w "$_dir" ] && { [ ! -e "$DEST" ] || [ -w "$DEST" ]; }
+}
+
 install_and_exec() {
 	INSTALL_CMD="install -m 0755 $TMPBIN $DEST"
 	EXEC_CMD="$DEST install --min-installer-version=$MIN_INSTALLER_VERSION"
+
+	if has_phone_arg "$@"; then
+		install_and_exec_phone "$@"
+		return
+	fi
 
 	if [ "$PRIV" = "none" ]; then
 		# Keep TMPD (traps cleared): the printed command references the
@@ -290,6 +322,63 @@ install_and_exec() {
 	esac
 }
 
+# --phone: privilege for the binary install only; the installer itself runs as
+# the invoking user (it refuses root — adb authorization is per-user).
+install_and_exec_phone() {
+	if [ "$PRIV" = "root" ]; then
+		IPRIV=root
+	elif dest_user_writable; then
+		IPRIV=user
+	else
+		IPRIV=$PRIV
+	fi
+
+	if [ "$IPRIV" = "root" ]; then
+		# Root shell (e.g. `curl … | sudo sh`): the phone flow cannot run as
+		# root. Install the binary, then tell the user what to run.
+		if [ "$HOOK_DRY_RUN" = "1" ]; then
+			info "dry-run: would run: $INSTALL_CMD"
+		else
+			install -m 0755 "$TMPBIN" "$DEST" || die "install to $DEST failed"
+			info "installed root-owned $DEST"
+		fi
+		warn "--phone must run as your normal user, not root (adb authorization is per-user)."
+		info "run this as your normal user (no sudo) to provision the phone:"
+		printf '  %s %s\n' "$EXEC_CMD" "$(args_quoted "$@")"
+		exit 1
+	fi
+
+	if [ "$IPRIV" = "none" ]; then
+		clear_traps
+		warn "$DEST is not writable, and neither sudo nor doas was found — cannot install the binary."
+		info "verified binary kept at: $TMPBIN"
+		info "1. as root:              su -c $(sq "$INSTALL_CMD")"
+		info "2. then as YOU, no sudo: $EXEC_CMD $(args_quoted "$@")"
+		exit 1
+	fi
+
+	if [ "$HOOK_DRY_RUN" = "1" ]; then
+		info "dry-run: privilege mechanism: $IPRIV (binary install step only)"
+		info "dry-run: would run: $INSTALL_CMD"
+		info "dry-run: would run as $(id -un), no sudo: $EXEC_CMD $(args_quoted "$@")"
+		return 0
+	fi
+
+	case "$IPRIV" in
+		user) install -m 0755 "$TMPBIN" "$DEST" || die "install to $DEST failed" ;;
+		sudo) sudo install -m 0755 "$TMPBIN" "$DEST" || die "sudo install to $DEST failed" ;;
+		doas) doas install -m 0755 "$TMPBIN" "$DEST" || die "doas install to $DEST failed" ;;
+		*)    die "internal error: bad privilege mechanism '$IPRIV'" ;;
+	esac
+	info "installed $DEST"
+
+	rm -rf "$TMPD"
+	clear_traps
+
+	# No sudo/doas here: the phone flow runs as you.
+	exec "$DEST" install "--min-installer-version=$MIN_INSTALLER_VERSION" "$@"
+}
+
 # ---------------------------------------------------------------------------
 # main
 # ---------------------------------------------------------------------------
@@ -297,6 +386,7 @@ install_and_exec() {
 main() {
 	load_pins
 	read_hooks
+	apply_dest_hook
 	info "111 Network bootstrap shim v${SHIM_VERSION}"
 	detect_os
 	detect_arch

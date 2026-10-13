@@ -11,15 +11,20 @@
 //! - `lan_enabled` and `offer` are loopback-only, checked per field: a patch
 //!   that carries either from a non-loopback peer is `403 loopback_only` and
 //!   nothing is written.
+//! - `lan_enabled` is the single source of truth for LAN sharing (`111 config
+//!   dashboard.lan` writes the same file); it takes effect on daemon restart.
+//!   When the env file (`<etc>/env`) carries `DASHBOARD_LAN`, that value wins
+//!   and the setting is locked: `lan_locked: true`, and a patch that sets
+//!   `lan_enabled` is `409 settings_locked` (nothing written) whose detail names
+//!   the env file.
 //! - `offer: accepted|dismissed` is also written to `state/offer.json` in the
 //!   exact format `111 config offer` writes, and mirrored into `/status.offer`,
 //!   so Layer 1 stays consistent.
-//! - Reads: `alias` from the file; `lan_enabled` is the *configured* value —
-//!   env `DASHBOARD_LAN=true` (`<etc>/env`) OR the file's `lan_enabled` (the
-//!   daemon reads the same pair at start via `bind::lan_configured`; the env
-//!   file is root-owned, so while it says `true` a `false` here cannot turn LAN
-//!   off and the response keeps answering `true`); `offer` from
-//!   `state/offer.json` (Layer 1's record), else the file's last write.
+//! - Reads: `alias` from the file; `lan_enabled` is the *configured* value the
+//!   next daemon start will use (`bind::lan_config`: the env override when
+//!   present, else the file) and `lan_locked` says whether the env pins it;
+//!   `offer` from `state/offer.json` (Layer 1's record), else the file's last
+//!   write.
 //! - Every successful PATCH publishes a `status` frame (alias shows in status).
 
 use super::{auth, status, ApiRouter, ApiState, Problem};
@@ -77,6 +82,8 @@ pub struct Settings {
     pub schema: u32,
     pub alias: Option<String>,
     pub lan_enabled: bool,
+    /// `DASHBOARD_LAN` in the env file overrides `lan_enabled` (UI disables the toggle).
+    pub lan_locked: bool,
     pub offer: Option<String>,
 }
 
@@ -88,11 +95,31 @@ pub fn read_file(state_dir: &Path) -> SettingsFile {
         .unwrap_or_default()
 }
 
-/// Configured LAN sharing (env file OR settings), as the next daemon start
-/// will see it.
-pub fn lan_configured(api: &ApiState) -> bool {
+/// Configured LAN sharing (env override, else settings) as the next daemon
+/// start will see it, plus whether the env file locks it.
+pub fn lan_config(api: &ApiState) -> bind::LanConfig {
     let env = crate::daemon::load_env(&api.layout.etc).unwrap_or_default();
-    bind::lan_configured(&env, &api.layout.state_dir())
+    bind::lan_config(&env, &api.layout.state_dir())
+}
+
+/// Configured LAN sharing (see [`lan_config`]).
+pub fn lan_configured(api: &ApiState) -> bool {
+    lan_config(api).enabled
+}
+
+/// `409 settings_locked`: `DASHBOARD_LAN` in `env_file` pins LAN sharing.
+pub fn locked_problem(env_file: &Path) -> Problem {
+    Problem::new(
+        StatusCode::CONFLICT,
+        "settings_locked",
+        "LAN sharing is pinned",
+    )
+    .detail(format!(
+        "{} in {} sets LAN sharing and overrides this setting. Remove that line \
+         (`sudo 111 config dashboard.lan true|false` does it), then restart the node.",
+        bind::LAN_ENV_KEY,
+        env_file.display()
+    ))
 }
 
 fn valid_offer_state(s: &str) -> bool {
@@ -113,10 +140,12 @@ pub fn current(api: &ApiState) -> Settings {
     let state_dir = api.layout.state_dir();
     let f = read_file(&state_dir);
     let offer = read_offer_state(&state_dir).or(f.offer.filter(|s| valid_offer_state(s)));
+    let lan = lan_config(api);
     Settings {
         schema: 1,
         alias: f.alias,
-        lan_enabled: lan_configured(api),
+        lan_enabled: lan.enabled,
+        lan_locked: lan.locked,
         offer,
     }
 }
@@ -260,6 +289,9 @@ async fn patch_settings(
     };
     if patch.needs_loopback() && !auth::peer_is_loopback(&ext) {
         return auth::loopback_only().into_response();
+    }
+    if patch.lan_enabled.is_some() && lan_config(&api).locked {
+        return locked_problem(&api.layout.etc.join("env")).into_response();
     }
     if let Err(e) = apply(&api, &patch) {
         eprintln!("111 daemon: settings write failed: {e:#}");

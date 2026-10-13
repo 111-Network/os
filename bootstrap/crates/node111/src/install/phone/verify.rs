@@ -23,11 +23,14 @@ pub fn on_device_health(adb: &Adb<'_>) -> anyhow::Result<()> {
 
 /// The fresh-LAN sshd ceremony (spec step 7): automated attempt on the phone's
 /// current Wi-Fi IP; on failure the LABELED manual step (operator moves the
-/// phone to a fresh network and confirms) — after which lockdown may proceed.
+/// phone to a fresh network and confirms on the terminal) — after which
+/// lockdown may proceed. No terminal / end of input = NOT confirmed (error);
+/// `yes` (`--yes`) confirms in advance.
 pub fn fresh_lan_sshd_ceremony(
     adb: &Adb<'_>,
     host_key: &std::path::Path,
     runner: &dyn crate::util::run::Runner,
+    yes: bool,
 ) -> anyhow::Result<()> {
     // phone's wlan0 IPv4
     let ip = adb
@@ -70,8 +73,11 @@ pub fn fresh_lan_sshd_ceremony(
   (skipping risks locking yourself out of the maintenance channel)",
         host_key.display()
     );
-    let mut line = String::new();
-    std::io::stdin().read_line(&mut line)?;
-    eprintln!("111 phone: operator confirmed fresh-LAN sshd check");
+    match super::prompt::answer(super::prompt::open_tty(), yes, "the fresh-LAN sshd check")? {
+        Some(_) => eprintln!("111 phone: operator confirmed fresh-LAN sshd check"),
+        None => eprintln!(
+            "111 phone: WARNING: --yes — fresh-LAN sshd check NOT performed; confirmed by flag"
+        ),
+    }
     Ok(())
 }

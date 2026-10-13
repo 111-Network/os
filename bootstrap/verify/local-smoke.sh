@@ -34,10 +34,11 @@ gate "F5 clock skew refused/surfaced" sh -c 'cargo test --test install_flow cloc
 gate "F6 stale/replay manifest refused" cargo test --test updater_stage -- --quiet
 gate "V5 injection bounds (e2e chunker unit)" cargo test --test phone_flow -- --quiet
 gate "V7 shim 32-bit + full shim harness" sh shim/tests/run.sh
+gate "cross-build refuses a missing/stale UI" sh scripts/tests/cross-build-ui-gate.sh
 gate "V12 interrupted-unpack resume (idempotent install)" cargo test --test install_flow happy_path -- --quiet
 # V13: p_align from the existing dist binary, else rebuild first (nested quoting via file)
 if [ "$(readelf -lW /tmp/dist-test/111-aarch64-unknown-linux-musl 2>/dev/null | awk '$1=="LOAD"{print $NF; exit}')" != "0x4000" ]; then
-  scripts/cross-build.sh 2026.10.12 /tmp/dist-test >/dev/null 2>&1
+  scripts/cross-build.sh --allow-no-ui 2026.10.12 /tmp/dist-test >/dev/null 2>&1
 fi
 gate "V13 16KB p_align (cross-build assert)" sh -c 'readelf -lW /tmp/dist-test/111-aarch64-unknown-linux-musl | grep -q "0x4000"'
 gate "Termux assets dry-run" sh termux/tests/dryrun.sh
