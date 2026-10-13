@@ -1,2 +1,219 @@
 @import "tailwindcss";
-/* U1a owns this file: the ported design system (spec §3). */
+
+/*
+ * 111 dashboard design system (spec v2 §3, binding: website/docs/DESIGN.md).
+ * Ported from website/src/app/globals.css (the LIVE token file; the copy under
+ * website/src/styles/ is a stale shadcn decoy and must never be used).
+ * Dark-only, zero radius, monochrome. The ONLY colors outside the grayscale ladder
+ * are the three status-dot tokens below, and they may appear on status dots only.
+ */
+
+@custom-variant dark (&:is(.dark *));
+
+:root {
+  --background: #000000;
+  --foreground: #ffffff;
+  --card: #0a0a0a;
+  --card-foreground: #ffffff;
+  --popover: #0a0a0a;
+  --popover-foreground: #ffffff;
+  --primary: #ffffff;
+  --primary-foreground: #000000;
+  --secondary: #1a1a1a;
+  --secondary-foreground: #ffffff;
+  --muted: #1a1a1a;
+  --muted-foreground: #a0a0a0;
+  --accent: #1a1a1a;
+  --accent-foreground: #ffffff;
+  --destructive: #ff3333;
+  --destructive-foreground: #ffffff;
+  --border: #262626;
+  --input: #262626;
+  --ring: #ffffff;
+  --radius: 0rem;
+}
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-destructive: var(--destructive);
+  --color-destructive-foreground: var(--destructive-foreground);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+  /* Zero radius everywhere. The live file derived these with calc(radius - Npx), which goes negative. */
+  --radius-sm: var(--radius);
+  --radius-md: var(--radius);
+  --radius-lg: var(--radius);
+  --radius-xl: var(--radius);
+}
+
+/*
+ * `static` so these are always emitted: the fonts and the panel shadow are read through
+ * plain var() (inline style / @font-face stacks), which Tailwind's usage scan cannot see.
+ */
+@theme static {
+  --font-mono: "Geist Mono", ui-monospace, monospace;
+  --font-pixel-line: "Geist Pixel Line", "Geist Mono", monospace;
+  --font-pixel: "Silkscreen", "Geist Mono", monospace;
+
+  /* Status dots (D15, the one scoped color exception): the dot only, always with a text label. */
+  --color-status-live: #22c55e;
+  --color-status-unset: #a0a0a0;
+  --color-status-error: #ff3333;
+
+  /* The single layered shadow (DESIGN.md section 5), hoisted once. Use style={{ boxShadow: "var(--shadow-panel)" }}. */
+  --shadow-panel:
+    rgba(14, 63, 126, 0.04) 0px 0px 0px 1px,
+    rgba(42, 51, 69, 0.04) 0px 1px 1px -0.5px,
+    rgba(42, 51, 70, 0.04) 0px 3px 3px -1.5px,
+    rgba(42, 51, 70, 0.04) 0px 6px 6px -3px,
+    rgba(14, 63, 126, 0.04) 0px 12px 12px -6px,
+    rgba(14, 63, 126, 0.04) 0px 24px 24px -12px;
+}
+
+/* Self-hosted, no runtime network (spec section 2). Provenance and licenses: os/interface/FONTS.md */
+@font-face {
+  font-family: "Geist Mono";
+  font-style: normal;
+  font-weight: 100 900;
+  font-display: swap;
+  src: url("/fonts/GeistMono-Variable.woff2") format("woff2");
+}
+
+@font-face {
+  font-family: "Geist Pixel Line";
+  font-style: normal;
+  font-weight: 500;
+  font-display: swap;
+  src: url("/fonts/GeistPixel-Line.woff2") format("woff2");
+}
+
+/* Latin subset only (the logo is ASCII). Missing glyphs fall back to Geist Mono per --font-pixel. */
+@font-face {
+  font-family: "Silkscreen";
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url("/fonts/Silkscreen-400-latin.woff2") format("woff2");
+}
+
+@font-face {
+  font-family: "Silkscreen";
+  font-style: normal;
+  font-weight: 700;
+  font-display: swap;
+  src: url("/fonts/Silkscreen-700-latin.woff2") format("woff2");
+}
+
+@layer base {
+  * {
+    @apply border-border outline-ring/50;
+  }
+  html {
+    color-scheme: dark;
+  }
+  body {
+    @apply bg-background text-foreground;
+  }
+}
+
+@keyframes blink {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0;
+  }
+}
+
+@keyframes scanline {
+  0% {
+    transform: translateY(-100%);
+  }
+  100% {
+    transform: translateY(100vh);
+  }
+}
+
+@keyframes glitch {
+  0% {
+    transform: translate(0);
+  }
+  20% {
+    transform: translate(-2px, 2px);
+  }
+  40% {
+    transform: translate(-2px, -2px);
+  }
+  60% {
+    transform: translate(2px, 2px);
+  }
+  80% {
+    transform: translate(2px, -2px);
+  }
+  100% {
+    transform: translate(0);
+  }
+}
+
+.animate-blink {
+  animation: blink 1s ease-in-out infinite;
+}
+
+.animate-scanline {
+  animation: scanline 8s linear infinite;
+}
+
+/* Kill switch: the end state is rendered, nothing moves. */
+@media (prefers-reduced-motion: reduce) {
+  .animate-blink,
+  .animate-scanline {
+    animation: none;
+  }
+}
+
+/* Inverted selection. */
+::selection {
+  background: #ffffff;
+  color: #000000;
+}
+
+/* 4 px scrollbar. */
+::-webkit-scrollbar {
+  width: 4px;
+  height: 4px;
+}
+
+::-webkit-scrollbar-track {
+  background: #000000;
+}
+
+::-webkit-scrollbar-thumb {
+  background: #333333;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: #555555;
+}
+
+/* Firefox has no ::-webkit-scrollbar; Chrome would let these override the 4 px rules, so gate them. */
+@supports not selector(::-webkit-scrollbar) {
+  * {
+    scrollbar-width: thin;
+    scrollbar-color: #333333 #000000;
+  }
+}
