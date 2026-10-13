@@ -2,7 +2,23 @@
 import { describe, expect, it } from "vitest";
 import { buildFixtures } from "../src/lib/api/mock/fixtures";
 import type { ServiceRecord } from "../src/lib/api/types";
-import { agoText, flattenDetail, formatDuration, humanizeKey, NO_SETUP_SERVICES, servicePageState, sinceText } from "../src/views/services/model";
+import { ApiError } from "../src/lib/api/problem";
+import {
+  acceptRestart,
+  agoText,
+  beginRestart,
+  flattenDetail,
+  formatDuration,
+  humanizeKey,
+  NO_SETUP_SERVICES,
+  reasonText,
+  RESTART_IDLE,
+  restartButtonLabel,
+  restartErrorText,
+  servicePageState,
+  settleRestart,
+  sinceText,
+} from "../src/views/services/model";
 
 const NOW = Date.parse("2026-10-13T12:00:00Z");
 const fx = buildFixtures(NOW);
@@ -55,6 +71,19 @@ describe("servicePageState", () => {
     expect(p.handoff).toEqual({ goal: "fix", label: "Fix with the agent", mode: "agent" });
     expect(p.log).toBe(true);
     expect(p.restart).toBe(true);
+  });
+
+  it("error with child_degraded also links to Settings -> Restart node; other errors do not", () => {
+    expect(servicePageState(svc("agent", { state: "error", reason_code: "child_degraded" }), true).nodeRestartLink).toBe(true);
+    expect(servicePageState(svc("agent", { state: "error", reason_code: "child_backoff" }), true).nodeRestartLink).toBe(false);
+    expect(servicePageState(svc("agent", { state: "live", reason_code: "child_degraded" }), true).nodeRestartLink).toBe(false);
+  });
+
+  it("Restart is offered exactly when the registry lists the restart action (live and error)", () => {
+    expect(servicePageState(svc("model", { state: "error", actions: ["log"] }), true).restart).toBe(false);
+    expect(servicePageState(svc("model", { state: "error", actions: ["restart", "log"] }), true).restart).toBe(true);
+    expect(servicePageState(svc("model", { state: "live", actions: ["restart"] }), true).restart).toBe(true);
+    expect(servicePageState(svc("model", { state: "unset", actions: ["restart"] }), true).restart).toBe(false);
   });
 
   it("error with the agent not live (including the agent's own page): Show steps", () => {
@@ -166,5 +195,52 @@ describe("words and time", () => {
     expect(agoText(null, NOW)).toBe("unknown");
     expect(agoText("garbage", NOW)).toBe("unknown");
     expect(sinceText(at(7 * 3_600_000), NOW)).toBe("since 7 h ago");
+  });
+});
+
+describe("restart button phases", () => {
+  it("reads Restart, then Restarting… from the click until a newer service list arrives", () => {
+    expect(restartButtonLabel(RESTART_IDLE)).toBe("Restart");
+    const sending = beginRestart(4);
+    expect(restartButtonLabel(sending)).toBe("Restarting…");
+    expect(settleRestart(sending, 9)).toEqual(sending); // not accepted yet: a frame cannot end it
+    const waiting = acceptRestart(sending);
+    expect(waiting).toEqual({ kind: "waiting", rev: 4 });
+    expect(restartButtonLabel(waiting)).toBe("Restarting…");
+    expect(settleRestart(waiting, 4)).toEqual(waiting); // same list as at the click
+    expect(settleRestart(waiting, 5)).toEqual(RESTART_IDLE); // the next services frame
+  });
+
+  it("a frame that arrives before the 202 still ends the wait once the 202 lands", () => {
+    const waiting = acceptRestart(beginRestart(4));
+    expect(settleRestart(waiting, 6)).toEqual(RESTART_IDLE);
+    expect(acceptRestart(RESTART_IDLE)).toEqual(RESTART_IDLE);
+  });
+
+  it("explains a failed restart in plain words", () => {
+    const problem = (code: ConstructorParameters<typeof ApiError>[0]["code"], status: number, detail?: string) =>
+      new ApiError({ type: "about:blank", title: "Title", status, code, ...(detail ? { detail } : {}) });
+    expect(restartErrorText(problem("not_supervised", 409))).toMatch(/does not run this one itself/);
+    expect(restartErrorText(ApiError.network(new Error("x")))).toMatch(/could not be reached/);
+    expect(restartErrorText(problem("loopback_only", 403))).toBe("Available on the node itself.");
+    expect(restartErrorText(problem("internal", 500, "boom"))).toBe("boom");
+    expect(restartErrorText(new Error("odd"))).toBe("odd");
+    expect(restartErrorText("odd")).toBe("Something went wrong.");
+  });
+});
+
+describe("reasonText (NOT SET reads as unfinished, not as a failure)", () => {
+  const transport = (reason_code: string, state: ServiceRecord["state"] = "unset") =>
+    svc("transport", { state, reason_code, reason: "Mesh transport is off: python3 is installed, but the Reticulum environment could not be set up." });
+
+  it("rewords the transport's venv_unavailable and no_python while unset", () => {
+    expect(reasonText(transport("venv_unavailable"))).toBe("Python is installed. The Reticulum environment is not set up yet.");
+    expect(reasonText(transport("no_python"))).toBe("Python is not installed on this machine yet. The mesh transport needs it.");
+    expect(reasonText(transport("venv_unavailable"))).not.toMatch(/could not/);
+  });
+  it("leaves the daemon's text alone for every other code and for any state but unset", () => {
+    expect(reasonText(transport("venv_unavailable", "error"))).toMatch(/could not be set up/);
+    expect(reasonText(transport("no_radio"))).toMatch(/could not be set up/);
+    expect(reasonText(svc("radio"))).toBe(svc("radio").reason);
   });
 });

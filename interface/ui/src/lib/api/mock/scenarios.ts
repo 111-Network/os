@@ -4,7 +4,7 @@
 import { RADIO_BOARD_FOUND, RADIO_NO_BOARD, VERSION, heltecDevice, iso, logLine, type Fixtures } from "./fixtures";
 import type { AgentEvent, AgentStatus, DeviceRecord, Proposal, ServiceId, ServiceRecord, Settings, Status } from "../types";
 
-export const SCENARIO_NAMES = ["healthy", "first-run", "agent-down", "transport-error", "lan-unpaired", "updating", "new-device"] as const;
+export const SCENARIO_NAMES = ["healthy", "first-run", "agent-down", "transport-error", "lan-unpaired", "lan-locked", "updating", "new-device"] as const;
 export type ScenarioName = (typeof SCENARIO_NAMES)[number];
 
 /** The pair code `lan-unpaired` accepts (dashes, spaces and case are ignored, like the daemon). */
@@ -124,7 +124,7 @@ export const firstRun: ScenarioFn = (base) => {
   data.devices = data.devices.filter((d) => d.kind !== "companion");
   s.offer = { tier: "standard", state: "offered" };
   s.intelligence = { agent: "running", model_server: "absent", agent_url: "http://127.0.0.1:11182", agent_state: "unavailable", model_id: null };
-  data.settings = { schema: 1, alias: null, lan_enabled: false, offer: "offered" };
+  data.settings = { schema: 1, alias: null, lan_enabled: false, lan_locked: false, offer: "offered" };
   data.proposals = [];
   data.agentStatus = {
     ...data.agentStatus,
@@ -238,6 +238,21 @@ export const lanUnpaired: ScenarioFn = (base) => {
   };
 };
 
+export const lanLocked: ScenarioFn = (base) => {
+  const data = dataFrom(base);
+  // DASHBOARD_LAN in the node's environment file pins LAN sharing: a PATCH of lan_enabled answers 409 settings_locked.
+  data.settings.lan_enabled = false;
+  data.settings.lan_locked = true;
+  data.status.lan_enabled = false;
+  data.status.bind = { urls: ["http://111.localhost", "http://127.0.0.1:11180"], lan: false };
+  return {
+    name: "lan-locked",
+    summary: "LAN sharing is pinned off by DASHBOARD_LAN in the environment file: settings.lan_locked is true and PATCH lan_enabled answers 409 settings_locked.",
+    data,
+    script: [],
+  };
+};
+
 export const updating: ScenarioFn = (base) => {
   const data = dataFrom(base);
   const NEXT = "2026.10.14";
@@ -302,6 +317,7 @@ export const scenarios: Record<ScenarioName, ScenarioFn> = {
   "agent-down": agentDown,
   "transport-error": transportError,
   "lan-unpaired": lanUnpaired,
+  "lan-locked": lanLocked,
   updating,
   "new-device": newDevice,
 };

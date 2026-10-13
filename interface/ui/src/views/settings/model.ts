@@ -70,9 +70,18 @@ export function isLoopbackOnlyError(err: unknown): boolean {
   return isApiError(err) && err.code === "loopback_only";
 }
 
+/** Shown under the LAN toggle when DASHBOARD_LAN in the node's environment file pins LAN sharing. */
+export const LAN_LOCKED_TEXT = "Pinned by DASHBOARD_LAN in the node's environment file — change it there.";
+
+/** A `409 settings_locked` answer from the node (a PATCH of a setting the environment file pins). */
+export function isSettingsLockedError(err: unknown): boolean {
+  return isApiError(err) && err.code === "settings_locked";
+}
+
 /** Plain text for an action failure. A loopback-only refusal reads as the disabled-state text. */
 export function problemText(err: unknown): string {
   if (isLoopbackOnlyError(err)) return LOOPBACK_ONLY_TEXT;
+  if (isSettingsLockedError(err)) return LAN_LOCKED_TEXT;
   if (isApiError(err)) {
     if (err.code === "network") return "The node could not be reached. Check the connection and try again.";
     return err.problem.detail || err.problem.title || "The node refused the request.";
@@ -97,6 +106,24 @@ export function aliasPatchValue(draft: string): string | null {
 export function lanRestartPending(status: Status | null | undefined, settings: Settings | null | undefined): boolean {
   if (!status || !settings) return false;
   return settings.lan_enabled !== status.bind.lan;
+}
+
+export interface LanNote {
+  kind: "locked" | "restart";
+  text: string;
+}
+
+/**
+ * The sentence under the LAN toggle. It is derived from the settings the node last returned, never
+ * from the value that was requested, so the toggle and the sentence cannot disagree.
+ * `lockedSeen`: a PATCH answered 409 `settings_locked` before the settings were refetched.
+ */
+export function lanNote(status: Status | null | undefined, settings: Settings | null | undefined, lockedSeen = false): LanNote | null {
+  if (settings?.lan_locked || lockedSeen) return { kind: "locked", text: LAN_LOCKED_TEXT };
+  if (settings && lanRestartPending(status, settings)) {
+    return { kind: "restart", text: `LAN sharing ${settings.lan_enabled ? "on" : "off"}. Restart the node to apply.` };
+  }
+  return null;
 }
 
 export type OfferState = "offered" | "accepted" | "dismissed" | null;

@@ -333,6 +333,7 @@ describe("adapter <-> openapi.yaml", () => {
     listServices: (a) => a.services(),
     getService: (a) => a.service("agent"),
     getServiceLog: (a) => a.serviceLog("agent", 20),
+    restartService: (a) => a.restartService("model"),
     chat: (a) => collect(a.chat.send({ conversation_id: "conv-1", message: "hi", stream: false })),
     chatHistory: (a) => a.chat.history("conv-1"),
     listDevices: (a) => a.devices(),

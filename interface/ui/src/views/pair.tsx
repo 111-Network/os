@@ -61,10 +61,9 @@ export default function PairView() {
     try {
       const adapter = await getAdapter();
       await adapter.auth.pair(code);
-      // New cookie: restart the live stream now rather than waiting out its retry backoff, reload every
+      // New cookie: restart the live stream now (it was paused while we were unpaired), reload every
       // snapshot, and leave only once the store agrees we are in (otherwise the auth gate sends us back).
-      apiStore.attach(adapter);
-      await apiStore.refreshAll();
+      await apiStore.attach(adapter);
       if (apiStore.getState().meta.needsPair) {
         setFailure({ kind: "other", text: "Paired, but the node still refuses this browser. Check that cookies are enabled for this address." });
         return;

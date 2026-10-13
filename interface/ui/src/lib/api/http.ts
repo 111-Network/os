@@ -8,6 +8,7 @@ import type {
   ProposalFilter,
   RestartReply,
   SendOptions,
+  ServiceRestartReply,
   TaskAccepted,
   UpdateCheckReply,
 } from "./adapter";
@@ -169,6 +170,7 @@ export function createHttpAdapter(deps: HttpDeps = {}): Adapter {
     },
     service: (id: ServiceId) => call<ServiceRecord>("GET", `/services/${enc(id)}`),
     serviceLog: (id: ServiceId, n?: number) => call<LogTail>("GET", `/services/${enc(id)}/log`, { query: { n } }),
+    restartService: (id: ServiceId) => call<ServiceRestartReply>("POST", `/services/${enc(id)}/restart`),
 
     chat: {
       send: chatSend,

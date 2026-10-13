@@ -1,5 +1,6 @@
 // Pure logic for the service page and the shared time/word helpers (also used by Overview).
 // No React, so the state matrix is unit-tested in the node environment.
+import { isApiError } from "../../lib/api/problem";
 import { classifyHref, kbRoutePath, normalizeKbPath } from "../../lib/markdown";
 import type { ServiceRecord } from "../../lib/api/types";
 
@@ -127,8 +128,13 @@ export interface ServicePageState {
   embedUrl: string | null;
   /** The advanced log panel is offered. */
   log: boolean;
-  /** A restart action exists. There is no per-service restart route in v1, so it renders disabled. */
+  /** The registry lists `restart` (the daemon supervises this child): offer a Restart button. */
   restart: boolean;
+  /**
+   * The service is stuck in the supervisor's back-off (`child_degraded`): besides "Fix with the agent",
+   * point at Settings -> Restart node, which resets the supervisor itself.
+   */
+  nodeRestartLink: boolean;
 }
 
 /**
@@ -137,7 +143,6 @@ export interface ServicePageState {
  */
 export const NO_SETUP_SERVICES: ReadonlySet<string> = new Set(["gateway"]);
 
-export const RESTART_UNAVAILABLE = "per-service restart arrives with Layer 9";
 
 export function servicePageState(service: ServiceRecord, agentLive: boolean): ServicePageState {
   const body: ServiceBody =
@@ -160,7 +165,60 @@ export function servicePageState(service: ServiceRecord, agentLive: boolean): Se
     embedUrl: embed?.kind === "external" ? embed.href : null,
     log: running && service.actions.includes("log"),
     restart: (body === "live" || body === "error") && service.actions.includes("restart"),
+    nodeRestartLink: body === "error" && service.reason_code === "child_degraded",
   };
+}
+
+// ------------------------------------------------------------------------------------ restart
+
+/**
+ * The Restart button's life. `sending`: clicked, the request is in flight. `waiting`: the node said
+ * 202; the button keeps reading "Restarting…" until the next service list arrives (`rev` is the store's
+ * `servicesRev` when the click happened).
+ */
+export type RestartPhase = { kind: "idle" } | { kind: "sending"; rev: number } | { kind: "waiting"; rev: number };
+
+export const RESTART_IDLE: RestartPhase = { kind: "idle" };
+
+/** Longest the button shows "Restarting…" without a service list arriving (a restart that changes nothing). */
+export const RESTART_GIVE_UP_MS = 20_000;
+
+export const beginRestart = (rev: number): RestartPhase => ({ kind: "sending", rev });
+
+/** The node answered 202. */
+export const acceptRestart = (p: RestartPhase): RestartPhase => (p.kind === "sending" ? { kind: "waiting", rev: p.rev } : p);
+
+/** A service list arrived: a `waiting` restart is over once the list is newer than the click. */
+export const settleRestart = (p: RestartPhase, rev: number): RestartPhase => (p.kind === "waiting" && rev > p.rev ? RESTART_IDLE : p);
+
+export const restartButtonLabel = (p: RestartPhase): string => (p.kind === "idle" ? "Restart" : "Restarting…");
+
+/** Plain text for a failed restart. A 409 `not_supervised` means the node does not run this service itself. */
+export function restartErrorText(err: unknown): string {
+  if (isApiError(err)) {
+    if (err.code === "not_supervised") return "The node does not run this one itself, so it cannot restart it from here.";
+    if (err.code === "network") return "The node could not be reached. Check the connection and try again.";
+    if (err.code === "loopback_only") return "Available on the node itself.";
+    return err.problem.detail || err.problem.title || "The node refused the request.";
+  }
+  return err instanceof Error && err.message ? err.message : "Something went wrong.";
+}
+
+// ------------------------------------------------------------------------------------- reasons
+
+/**
+ * Reason text for a NOT SET service that reads as "not done yet" instead of as a failure. The daemon's
+ * wording for these ("...could not be set up") sounds like an error on a state that is just unfinished.
+ * Keyed by registry `reason_code`; only used while the service is `unset`. Everything else is shown as sent.
+ */
+const NOT_SET_REASON: Record<string, string> = {
+  venv_unavailable: "Python is installed. The Reticulum environment is not set up yet.",
+  no_python: "Python is not installed on this machine yet. The mesh transport needs it.",
+};
+
+/** What to show as the service's reason: the daemon's text, except for NOT SET codes reworded above. */
+export function reasonText(service: Pick<ServiceRecord, "state" | "reason" | "reason_code">): string {
+  return (service.state === "unset" ? NOT_SET_REASON[service.reason_code] : undefined) ?? service.reason;
 }
 
 export const KIND_LABEL: Record<ServiceRecord["kind"], string> = {

@@ -1,12 +1,14 @@
 // Service page (spec 6.6): one registry record as a status header plus a body that depends on its state.
-//   live       control panel built from `detail` (+ advanced: log tail, restart)
+//   live       control panel built from `detail`, Restart when the daemon supervises it (+ advanced: log tail)
 //   starting   the same panel with an honest "not answering yet" note
 //   unset      what it is, what it needs, "Set up with the agent" (or nothing, when this device cannot run it)
-//   error      reason, log lines, "Fix with the agent"
+//   error      reason, log lines, Restart, "Fix with the agent" (and the Settings -> Restart node link when back-off is stuck)
 // The prompt text always comes from the one builder in lib/prompts.ts; nothing here is per-service.
-import { useState } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import { useParams } from "wouter";
+import { redirectIfUnauthenticated } from "../../app/AuthGate";
 import { useNow } from "../../app/hooks";
+import { announce } from "../../app/LiveRegion";
 import { hrefTo, useAppLocation } from "../../app/location";
 import { Badge } from "../../components/badge";
 import { Button, ButtonLink } from "../../components/button";
@@ -17,13 +19,30 @@ import { Panel } from "../../components/panel";
 import { SectionHeader } from "../../components/section-header";
 import { SpecTable, type SpecRow } from "../../components/spec-table";
 import { StatusDot } from "../../components/status-dot";
-import { useConnection, useDevices, useServices, useStatus } from "../../lib/api/hooks";
+import { getAdapter } from "../../lib/api";
+import { useConnection, useDevices, useServices, useServicesRev, useStatus } from "../../lib/api/hooks";
 import type { DeviceRecord, ServiceRecord } from "../../lib/api/types";
 import { useMode, Adv } from "../../lib/mode";
 import { dotState } from "../../lib/nav";
 import { agentHrefFor, buildPrompt, MAX_LOG_LINES, stagePrompt } from "../../lib/prompts";
 import { fetchLogLines, LOG_POLL_MS, LogTail } from "./log";
-import { flattenDetail, KIND_LABEL, RESTART_UNAVAILABLE, servicePageState, sinceText, type Handoff, type ServicePageState } from "./model";
+import {
+  acceptRestart,
+  beginRestart,
+  flattenDetail,
+  KIND_LABEL,
+  reasonText,
+  RESTART_GIVE_UP_MS,
+  RESTART_IDLE,
+  restartButtonLabel,
+  restartErrorText,
+  servicePageState,
+  settleRestart,
+  sinceText,
+  type Handoff,
+  type RestartPhase,
+  type ServicePageState,
+} from "./model";
 import { RouteLink } from "./shared";
 
 const TEXT = "font-mono text-xs leading-relaxed text-muted-foreground";
@@ -31,7 +50,7 @@ const LABEL = "font-mono text-[10px] uppercase tracking-widest text-muted-foregr
 
 // ------------------------------------------------------------------------------------ hand-off
 
-function HandoffButton({ service, handoff, related }: { service: ServiceRecord; handoff: Handoff; related: DeviceRecord[] }) {
+function HandoffButton({ service, handoff, related, children }: { service: ServiceRecord; handoff: Handoff; related: DeviceRecord[]; children?: ReactNode }) {
   const status = useStatus();
   const [, navigate] = useAppLocation();
   const [busy, setBusy] = useState(false);
@@ -55,9 +74,12 @@ function HandoffButton({ service, handoff, related }: { service: ServiceRecord; 
 
   return (
     <div className="space-y-3">
-      <Button variant="primary" loading={busy} onClick={() => void onClick()} aria-expanded={handoff.mode === "steps" ? steps !== null : undefined}>
-        {steps !== null ? "Hide steps" : handoff.label}
-      </Button>
+      <div className="flex flex-wrap items-start gap-3">
+        <Button variant="primary" loading={busy} onClick={() => void onClick()} aria-expanded={handoff.mode === "steps" ? steps !== null : undefined}>
+          {steps !== null ? "Hide steps" : handoff.label}
+        </Button>
+        {children}
+      </div>
       {handoff.mode === "agent" ? (
         <p className={TEXT}>This opens the agent with a prepared message. Nothing is sent until you send it.</p>
       ) : (
@@ -75,6 +97,60 @@ function HandoffButton({ service, handoff, related }: { service: ServiceRecord; 
         </div>
       ) : null}
     </div>
+  );
+}
+
+// -------------------------------------------------------------------------------------- restart
+
+/**
+ * Restart one supervised child. The button reads "Restarting…" from the click until the next service
+ * list arrives (the node answers 202 at once; the new state comes as `services` frames).
+ */
+function RestartControl({ service }: { service: ServiceRecord }) {
+  const rev = useServicesRev();
+  const [phase, setPhase] = useState<RestartPhase>(RESTART_IDLE);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    setPhase((p) => settleRestart(p, rev));
+  }, [rev]);
+  useEffect(() => {
+    if (phase.kind !== "waiting") return;
+    const h = setTimeout(() => setPhase(RESTART_IDLE), RESTART_GIVE_UP_MS);
+    return () => clearTimeout(h);
+  }, [phase]);
+
+  const restart = async () => {
+    setError(null);
+    setPhase(beginRestart(rev));
+    try {
+      const adapter = await getAdapter();
+      await adapter.restartService(service.id);
+      setPhase(acceptRestart);
+      announce(`Restarting ${service.plain_name}.`);
+    } catch (err) {
+      if (redirectIfUnauthenticated(err)) return;
+      setPhase(RESTART_IDLE);
+      setError(restartErrorText(err));
+    }
+  };
+
+  return (
+    <span className="inline-flex flex-col items-start gap-2">
+      <Button
+        confirm={`Restart ${service.plain_name}`}
+        loading={phase.kind !== "idle"}
+        disabled={phase.kind !== "idle"}
+        onClick={() => void restart()}
+      >
+        {restartButtonLabel(phase)}
+      </Button>
+      {error ? (
+        <span role="alert" className="font-mono text-xs leading-relaxed text-destructive">
+          Problem: {error}
+        </span>
+      ) : null}
+    </span>
   );
 }
 
@@ -126,20 +202,10 @@ function Links({ page }: { page: ServicePageState }) {
 function AdvancedTools({ service, page }: { service: ServiceRecord; page: ServicePageState }) {
   return (
     <Adv>
-      {page.log || page.restart ? (
+      {page.log ? (
         <section className="space-y-3">
           <h2 className={LABEL}>advanced</h2>
-          {page.log ? <LogTail id={service.id} title={`${service.name} log`} lines={100} pollMs={LOG_POLL_MS} controls maxHeightClass="max-h-96" /> : null}
-          {page.restart ? (
-            <div className="flex flex-wrap items-center gap-3">
-              <Button size="sm" variant="destructive" confirm={`Restart ${service.plain_name}`} disabled title={RESTART_UNAVAILABLE} aria-describedby="restart-note">
-                Restart
-              </Button>
-              <span id="restart-note" className={TEXT}>
-                {RESTART_UNAVAILABLE}
-              </span>
-            </div>
-          ) : null}
+          <LogTail id={service.id} title={`${service.name} log`} lines={100} pollMs={LOG_POLL_MS} controls maxHeightClass="max-h-96" />
         </section>
       ) : null}
     </Adv>
@@ -168,7 +234,7 @@ function ServicePage({ service }: { service: ServiceRecord }) {
           <Badge>{KIND_LABEL[service.kind] ?? service.kind}</Badge>
           <span className={TEXT}>{sinceText(service.since, now)}</span>
         </div>
-        <p className="font-mono text-sm leading-relaxed text-foreground">{service.reason}</p>
+        <p className="font-mono text-sm leading-relaxed text-foreground">{reasonText(service)}</p>
         {disconnected ? <p className={TEXT}>Last known state. The node is not answering right now.</p> : null}
         <p className={TEXT}>{service.description}</p>
       </div>
@@ -176,6 +242,11 @@ function ServicePage({ service }: { service: ServiceRecord }) {
       {page.body === "live" ? (
         <>
           <ControlPanel service={service} devices={devices} />
+          {page.restart ? (
+            <div>
+              <RestartControl service={service} />
+            </div>
+          ) : null}
           <Links page={page} />
         </>
       ) : null}
@@ -229,7 +300,16 @@ function ServicePage({ service }: { service: ServiceRecord }) {
               <LogTail id={service.id} title={`${service.name} log`} lines={5} pollMs={0} />
             </Disclosure>
           ) : null}
-          {page.handoff ? <HandoffButton service={service} handoff={page.handoff} related={devices} /> : null}
+          {page.handoff ? (
+            <HandoffButton service={service} handoff={page.handoff} related={devices}>
+              {page.restart ? <RestartControl service={service} /> : null}
+              {page.nodeRestartLink ? <ButtonLink href={hrefTo("/settings")}>Settings {"->"} Restart node</ButtonLink> : null}
+            </HandoffButton>
+          ) : page.restart ? (
+            <div>
+              <RestartControl service={service} />
+            </div>
+          ) : null}
           <Links page={page} />
         </>
       ) : null}

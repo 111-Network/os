@@ -1,5 +1,5 @@
 // Sticky header (spec section 5): MENU (<lg), view title, attention badge, banner slots.
-import { useEffect, useRef } from "react";
+import { useEffect } from "react";
 import { AttentionBadge } from "../components/attention-badge";
 import { Button } from "../components/button";
 import { useApiMeta, useAttention, useConnection, useServices, useVersionChanged } from "../lib/api/hooks";
@@ -33,13 +33,8 @@ export function Header({ path, drawerOpen, desktop, onMenu }: HeaderProps) {
   const { disconnected, lastEventAt } = connection;
   const now = useNow(disconnected);
 
-  // Tell screen readers about changes the banners show (throttled to one per 2 s by the live region).
-  const wasDisconnected = useRef(false);
-  useEffect(() => {
-    if (disconnected === wasDisconnected.current) return;
-    wasDisconnected.current = disconnected;
-    announce(disconnected ? "Disconnected from the node. Showing the last known state." : "Reconnected to the node.");
-  }, [disconnected]);
+  // Connection changes are announced by the live region itself (it outlives this header, which is
+  // unmounted on /pair). The version banner is announced here (throttled to one per 2 s).
   useEffect(() => {
     if (versionChanged) announce("The node was updated. Reload to load the new version.");
   }, [versionChanged]);

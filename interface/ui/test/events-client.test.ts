@@ -31,6 +31,10 @@ function setup(over: { staleAfterMs?: number; noEventSource?: boolean } = {}) {
 const STATUS = { schema: 1, node: { version: "2026.10.13" } };
 
 describe("connectEvents", () => {
+  it("marks the stream stale after 45 s of silence, as the spec says", () => {
+    expect(DEFAULT_STALE_AFTER_MS).toBe(45_000);
+  });
+
   it("connects to the events URL, listens to every named event, reports connecting then open", () => {
     const t = setup();
     expect(t.instances).toHaveLength(1);

@@ -31,6 +31,9 @@ export const useProposals = (): Proposal[] | null => useSlice((s) => s.proposals
 
 export const useConnection = (): ConnectionSnapshot => useSlice((s) => s.connection);
 
+/** Moves every time a fresh service list arrives (stream frame or snapshot). */
+export const useServicesRev = (): number => useSlice((s) => s.servicesRev);
+
 /** Agent events, newest first (ring of 200). */
 export const useActivity = (): AgentEvent[] => useSlice((s) => s.activity);
 

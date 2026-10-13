@@ -57,6 +57,12 @@ export interface RestartReply {
   schema: number;
   restarting: boolean;
 }
+/** `202` from POST /services/{id}/restart. */
+export interface ServiceRestartReply {
+  schema: number;
+  id: string;
+  restarting: boolean;
+}
 export interface UpdateCheckReply {
   schema: number;
   started: boolean;
@@ -87,6 +93,11 @@ export interface Adapter {
   services(): Promise<ServiceRecord[]>;
   service(id: ServiceId): Promise<ServiceRecord>;
   serviceLog(id: ServiceId, n?: number): Promise<LogTail>;
+  /**
+   * Restart one child the daemon supervises (`actions` contains `restart`). Resolves when the daemon
+   * accepted the request; the new state arrives as `services` frames. 409 `not_supervised` otherwise.
+   */
+  restartService(id: ServiceId): Promise<ServiceRestartReply>;
 
   chat: {
     /**

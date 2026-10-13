@@ -470,7 +470,7 @@ Nothing to fix right now. If it repeats, ask me to check the Wi-Fi power-saving 
     services,
     devices: baseDevices(now),
     proposals,
-    settings: { schema: 1, alias: "Workshop laptop", lan_enabled: true, offer: "accepted" },
+    settings: { schema: 1, alias: "Workshop laptop", lan_enabled: true, lan_locked: false, offer: "accepted" },
     agentStatus: {
       schema: 1,
       state: "local",

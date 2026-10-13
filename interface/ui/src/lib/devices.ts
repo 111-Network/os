@@ -406,9 +406,13 @@ export interface PairingHelp {
   body: string;
   /** The command to run on the node for the pair code, only when pairing is possible. */
   command: string | null;
-  /** Addresses a phone on the same network can open, nicest first. Empty unless `state` is "on". */
+  /** Addresses a phone on the same network can open, `primaryUrl` first. Empty unless `state` is "on". */
   urls: string[];
-  /** The first address with the pair route on it, for the large display. */
+  /** The address to type first: the LAN IP, which every browser can open. Null unless `state` is "on". */
+  primaryUrl: string | null;
+  /** The other addresses (for example `http://111.local`), in node order. */
+  alsoUrls: string[];
+  /** The primary address with the pair route on it, for the large display. */
   pairUrl: string | null;
   /** Route to the setting that turns LAN sharing on, when that is the fix. */
   settingsHref: string | null;
@@ -425,12 +429,47 @@ export function isLoopbackUrl(url: string): boolean {
   return host === "localhost" || host.endsWith(".localhost") || host === "::1" || /^127\./.test(host);
 }
 
+/** True for a dotted-quad host such as `http://192.168.1.42`. */
+export function isNumericIpv4Url(url: string): boolean {
+  let host: string;
+  try {
+    host = new URL(url).hostname;
+  } catch {
+    return false;
+  }
+  const m = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(host);
+  return !!m && m.slice(1).every((o) => Number(o) <= 255);
+}
+
+/** True for an mDNS name (`111.local`). Android browsers cannot resolve these. */
+export function isMdnsUrl(url: string): boolean {
+  try {
+    return new URL(url).hostname.toLowerCase().endsWith(".local");
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * The address to show first: the first non-loopback URL whose host is a numeric IPv4, because
+ * `.local` names do not resolve on Android. With no IPv4 URL it falls back to the first non-loopback one.
+ */
+export function pickPrimaryUrl(urls: readonly string[]): string | null {
+  const reachable = urls.filter((u) => !isLoopbackUrl(u));
+  return reachable.find(isNumericIpv4Url) ?? reachable[0] ?? null;
+}
+
+/** The "also:" line for a secondary address. */
+export function alsoLabel(url: string): string {
+  return isMdnsUrl(url) ? `also: ${url} (not on Android)` : `also: ${url}`;
+}
+
 export const PAIR_COMMAND = "111 dashboard";
 
 /** What the "Control this node" row shows, from `status.lan_enabled` (configured) and `status.bind` (actually bound). */
 export function pairingHelp(status: Pick<Status, "lan_enabled" | "bind"> | null): PairingHelp {
   if (!status) {
-    return { state: "unknown", body: "The pairing details appear as soon as the node answers.", command: null, urls: [], pairUrl: null, settingsHref: null };
+    return { state: "unknown", body: "The pairing details appear as soon as the node answers.", command: null, urls: [], primaryUrl: null, alsoUrls: [], pairUrl: null, settingsHref: null };
   }
   if (!status.lan_enabled) {
     return {
@@ -438,6 +477,8 @@ export function pairingHelp(status: Pick<Status, "lan_enabled" | "bind"> | null)
       body: "LAN sharing is off — turn it on in Settings → Sharing (from the node itself).",
       command: null,
       urls: [],
+      primaryUrl: null,
+      alsoUrls: [],
       pairUrl: null,
       settingsHref: "/settings",
     };
@@ -448,27 +489,34 @@ export function pairingHelp(status: Pick<Status, "lan_enabled" | "bind"> | null)
       body: "LAN sharing is switched on, but it only takes effect when the node restarts.",
       command: null,
       urls: [],
+      primaryUrl: null,
+      alsoUrls: [],
       pairUrl: null,
       settingsHref: "/settings",
     };
   }
-  const urls = (status.bind.urls ?? []).filter((u) => !isLoopbackUrl(u));
-  if (urls.length === 0) {
+  const primary = pickPrimaryUrl(status.bind.urls ?? []);
+  if (primary === null) {
     return {
       state: "on",
       body: "No network address was found yet. Check that the node is connected to Wi-Fi or Ethernet.",
       command: null,
       urls: [],
+      primaryUrl: null,
+      alsoUrls: [],
       pairUrl: null,
       settingsHref: null,
     };
   }
+  const alsoUrls = (status.bind.urls ?? []).filter((u) => !isLoopbackUrl(u) && u !== primary);
   return {
     state: "on",
-    body: "On the phone or laptop, join the same network and open one of these addresses. On the node, run the command below for the pair code.",
+    body: "On the phone or laptop, join the same network and open this address. On the node, run the command below for the pair code.",
     command: PAIR_COMMAND,
-    urls,
-    pairUrl: `${urls[0]!.replace(/\/+$/, "")}/#/pair`,
+    urls: [primary, ...alsoUrls],
+    primaryUrl: primary,
+    alsoUrls,
+    pairUrl: `${primary.replace(/\/+$/, "")}/#/pair`,
     settingsHref: null,
   };
 }

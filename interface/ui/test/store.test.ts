@@ -349,3 +349,121 @@ describe("ApiStore subscription", () => {
     expect(store.getState().meta.ready).toBe(false);
   });
 });
+
+const unauthenticated = () => new ApiError({ type: "about:blank", title: "x", status: 401, code: "unauthenticated" });
+
+describe("ApiStore first load and the first reset frame", () => {
+  it("fetches each snapshot exactly once per attach: the daemon's first reset is a no-op while the load is in flight", async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((res) => (release = res));
+    const store = new ApiStore({ now: () => 1_000 });
+    const f = fakeAdapter({ status: async () => (await gate, clone(fx.status)) });
+    const loaded = store.attach(f.adapter);
+    f.frame({ event: "reset", data: { reason: "expired" } }); // the mandatory first frame, before the snapshots land
+    release();
+    await loaded;
+    await flush();
+    expect(f.calls).toMatchObject({ status: 1, services: 1, devices: 1 });
+    expect(f.calls.proposals).toEqual(["all"]);
+  });
+
+  it("a reset after the initial load still refetches (a real resync is never lost)", async () => {
+    const store = new ApiStore({ now: () => 1_000 });
+    const f = fakeAdapter();
+    await store.attach(f.adapter);
+    expect(f.calls.status).toBe(1);
+    f.frame({ event: "reset", data: { reason: "expired" } });
+    await flush();
+    expect(f.calls).toMatchObject({ status: 2, services: 2, devices: 2 });
+  });
+
+  it("the no-op rule is per attach: a second attach swallows its own first reset only", async () => {
+    const store = new ApiStore({ now: () => 1_000 });
+    const first = fakeAdapter();
+    await store.attach(first.adapter);
+    const second = fakeAdapter();
+    const loaded = store.attach(second.adapter);
+    second.frame({ event: "reset", data: { reason: "expired" } });
+    await loaded;
+    await flush();
+    expect(second.calls.status).toBe(1);
+    second.frame({ event: "reset", data: { reason: "restart" } });
+    await flush();
+    expect(second.calls.status).toBe(2);
+  });
+
+  it("attach() settles after the first load even when it fails", async () => {
+    const store = new ApiStore();
+    const f = fakeAdapter({ status: () => Promise.reject(unauthenticated()) });
+    await store.attach(f.adapter);
+    expect(store.getState().meta).toMatchObject({ ready: true, needsPair: true });
+  });
+});
+
+describe("ApiStore stream pause while unpaired", () => {
+  const eventsCalls = (a: Adapter) => (a.events as unknown as ReturnType<typeof vi.fn>).mock.calls.length;
+
+  it("stops the stream when a snapshot says 401 and starts it again once the node accepts us", async () => {
+    let paired = false;
+    const store = new ApiStore();
+    const f = fakeAdapter({ status: () => (paired ? Promise.resolve(clone(fx.status)) : Promise.reject(unauthenticated())) });
+    await store.attach(f.adapter);
+    expect(store.getState().meta.needsPair).toBe(true);
+    expect(f.calls.unsub).toBe(1); // EventSource closed: no retries against the 401
+    expect(eventsCalls(f.adapter)).toBe(1);
+
+    paired = true;
+    await store.refreshAll();
+    expect(store.getState().meta.needsPair).toBe(false);
+    expect(eventsCalls(f.adapter)).toBe(2); // resumed
+    expect(f.calls.unsub).toBe(1);
+
+    await store.refreshAll();
+    expect(eventsCalls(f.adapter)).toBe(2); // a healthy snapshot does not resubscribe again
+  });
+
+  it("a fatal close that turns out to be a lost session pauses the stream", async () => {
+    let calls = 0;
+    const { store, state, calls: c, adapter } = await started({
+      status: () => (++calls === 1 ? Promise.resolve(clone(fx.status)) : Promise.reject(unauthenticated())),
+    });
+    state("open");
+    state("closed");
+    await flush();
+    expect(store.getState().meta.needsPair).toBe(true);
+    expect(c.unsub).toBe(1);
+    expect(eventsCalls(adapter)).toBe(1);
+  });
+
+  it("an open stream that gets paused is reported closed (nothing is watching it any more)", async () => {
+    let calls = 0;
+    const { store, state } = await started({
+      status: () => (++calls === 1 ? Promise.resolve(clone(fx.status)) : Promise.reject(unauthenticated())),
+    });
+    state("open");
+    await store.refreshStatus();
+    expect(store.getState().meta.needsPair).toBe(true);
+    expect(store.getState().connection).toMatchObject({ state: "closed", disconnected: true });
+  });
+
+  it("never touches the stream while paired", async () => {
+    const { calls, adapter } = await started();
+    await Promise.resolve();
+    expect(calls.unsub).toBe(0);
+    expect(eventsCalls(adapter)).toBe(1);
+  });
+});
+
+describe("ApiStore servicesRev", () => {
+  it("moves on a services frame and on every service snapshot, not on other frames", async () => {
+    const { store, frame } = await started();
+    const rev0 = store.getState().servicesRev;
+    expect(rev0).toBeGreaterThan(0); // the initial snapshot
+    frame({ event: "status", data: clone(fx.status) });
+    expect(store.getState().servicesRev).toBe(rev0);
+    frame({ event: "services", data: { services: clone(fx.services) } });
+    expect(store.getState().servicesRev).toBe(rev0 + 1);
+    await store.refreshServices();
+    expect(store.getState().servicesRev).toBe(rev0 + 2);
+  });
+});

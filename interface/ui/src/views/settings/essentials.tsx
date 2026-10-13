@@ -21,7 +21,8 @@ import {
   aliasPatchValue,
   essentialRows,
   isLoopbackOnlyError,
-  lanRestartPending,
+  isSettingsLockedError,
+  lanNote,
   offerActions,
   offerLabel,
   problemText,
@@ -38,13 +39,16 @@ interface ActionState {
   pending: boolean;
   error: string | null;
   loopback: boolean;
+  /** 409 settings_locked: the node's environment file pins the setting. */
+  locked: boolean;
 }
 
-const IDLE: ActionState = { pending: false, error: null, loopback: false };
+const IDLE: ActionState = { pending: false, error: null, loopback: false, locked: false };
 
 /**
  * Runs one node action at a time and keeps its pending/problem state. A 401 sends the browser to
- * /pair; a 403 loopback_only is reported as `loopback` so the control can show the disabled text.
+ * /pair; a 403 loopback_only is reported as `loopback` so the control can show the disabled text,
+ * and a 409 settings_locked as `locked` for the pinned note.
  */
 function useAction(): [ActionState, <T>(fn: (a: Adapter) => Promise<T>) => Promise<T | undefined>] {
   const [state, setState] = useState<ActionState>(IDLE);
@@ -56,14 +60,14 @@ function useAction(): [ActionState, <T>(fn: (a: Adapter) => Promise<T>) => Promi
     };
   }, []);
   const run = useCallback(async <T,>(fn: (a: Adapter) => Promise<T>): Promise<T | undefined> => {
-    setState({ pending: true, error: null, loopback: false });
+    setState({ pending: true, error: null, loopback: false, locked: false });
     try {
       const result = await fn(await getAdapter());
       if (alive.current) setState(IDLE);
       return result;
     } catch (err) {
       if (redirectIfUnauthenticated(err)) return undefined;
-      if (alive.current) setState({ pending: false, error: problemText(err), loopback: isLoopbackOnlyError(err) });
+      if (alive.current) setState({ pending: false, error: problemText(err), loopback: isLoopbackOnlyError(err), locked: isSettingsLockedError(err) });
       return undefined;
     }
   }, []);
@@ -261,23 +265,33 @@ function SharingPanel({ settings, onSaved }: { settings: Settings | null; onSave
   const status = useStatus();
   const [lanAction, runLan] = useAction();
   const [offerAction, runOffer] = useAction();
-  const [lanNote, setLanNote] = useState<string | null>(null);
+  // A 409 settings_locked arrived before the settings were refetched.
+  const [lockedSeen, setLockedSeen] = useState(false);
+
+  useEffect(() => {
+    if (!lanAction.locked) return;
+    setLockedSeen(true);
+    // Show what the node actually runs with (the pinned value), not what was asked for.
+    void getAdapter()
+      .then((a) => a.settings())
+      .then(onSaved)
+      .catch(() => undefined);
+  }, [lanAction.locked, onSaved]);
 
   const gated = sharingDisabled(status) || lanAction.loopback || offerAction.loopback;
   const lanOn = settings?.lan_enabled ?? status?.lan_enabled ?? false;
   const known = settings !== null || status !== null;
   const offer = settings ? settings.offer : (status?.offer?.state ?? null);
   const actions = offerActions(offer);
-  const pending = lanRestartPending(status, settings);
+  const note = lanNote(status, settings, lockedSeen);
+  const locked = note?.kind === "locked";
 
   const toggleLan = async (next: boolean) => {
-    setLanNote(null);
     const result = await runLan((a) => a.patchSettings({ lan_enabled: next }));
     if (!result) return;
     onSaved(result);
-    const text = `LAN sharing ${next ? "on" : "off"}. Restart the node to apply.`;
-    setLanNote(text);
-    announce(text);
+    // What the node answered, not what was asked: a pinned value comes back unchanged.
+    announce(lanNote(status, result)?.text ?? `LAN sharing ${result.lan_enabled ? "on" : "off"}.`);
     void apiStore.refreshStatus();
   };
 
@@ -304,18 +318,18 @@ function SharingPanel({ settings, onSaved }: { settings: Settings | null; onSave
         <Toggle
           pressed={lanOn}
           onPressedChange={(next) => void toggleLan(next)}
-          disabled={gated || !known || lanAction.pending}
-          aria-describedby={gated ? "lan-gate" : undefined}
+          disabled={gated || locked || !known || lanAction.pending}
+          aria-describedby={gated ? "lan-gate" : locked ? "lan-note" : undefined}
         >
           <span>LAN sharing</span> <span aria-hidden="true">{lanOn ? "[ON]" : "[OFF]"}</span>
         </Toggle>
         {gated ? <Gate id="lan-gate" /> : null}
-        {!gated && (lanNote || pending) ? (
-          <p role="status" className={`mt-2 text-muted-foreground ${FEEDBACK}`}>
-            {lanNote ?? "Changed. Restart the node to apply."}
+        {!gated && note ? (
+          <p id="lan-note" role="status" className={`mt-2 text-muted-foreground ${FEEDBACK}`}>
+            {note.text}
           </p>
         ) : null}
-        {!gated ? <Feedback text={lanAction.error} problem /> : null}
+        {!gated && !lanAction.locked ? <Feedback text={lanAction.error} problem /> : null}
       </Row>
       <Row
         id="offer"

@@ -18,6 +18,7 @@ import { Adv } from "../../lib/mode";
 import { categoryLabel, dotState } from "../../lib/nav";
 import { agentHrefFor, buildPrompt, stagePrompt } from "../../lib/prompts";
 import { verdict, verdictDot } from "../../lib/verdict";
+import { reasonText } from "../services/model";
 import { RouteLink } from "../services/shared";
 import { devicesSummary, needsYou, nearbySentence, nodeFacts, NEEDS_YOU_ID, recentActivity, type ChecklistRow, type NeedItem } from "./model";
 
@@ -142,7 +143,7 @@ function ServiceCard({ service, disconnected }: { service: ServiceRecord; discon
           <span className="min-w-0 font-mono text-sm text-foreground">{service.plain_name}</span>
           <StatusDot state={dotState(service.state, disconnected)} />
         </div>
-        <p className={cx(TEXT, "line-clamp-2")}>{service.reason}</p>
+        <p className={cx(TEXT, "line-clamp-2")}>{reasonText(service)}</p>
       </Panel>
     </a>
   );

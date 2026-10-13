@@ -3,7 +3,7 @@
 import type { AgentEvent, DeviceRecord, Proposal, ServiceRecord, Status } from "../../lib/api/types";
 import type { DotState } from "../../components/status-dot";
 import { sanitizeLine } from "../../lib/prompts";
-import { agoText, formatDuration } from "../services/model";
+import { agoText, formatDuration, reasonText } from "../services/model";
 
 export const IDENTITY_BACKUP_COMMAND = "sudo -u node111 111 identity backup";
 export const NEEDS_YOU_ID = "needs-you";
@@ -51,7 +51,7 @@ function checklistFromService(id: ChecklistRow["id"], title: string, s: ServiceR
     case "error":
       return { id, title, state: "error", text: s.reason, href, done: false };
     default:
-      return { id, title, state: "unset", text: s.reason, href, done: false };
+      return { id, title, state: "unset", text: reasonText(s), href, done: false };
   }
 }
 

@@ -51,6 +51,11 @@ export interface StoreState {
   versionChanged: boolean;
   attention: Attention;
   meta: StoreMeta;
+  /**
+   * Bumped every time a fresh service list arrives (a `services` frame or a snapshot). A control that
+   * acted on a service (restart) waits for this to move before it stops showing "restarting".
+   */
+  servicesRev: number;
 }
 
 export function isDisconnected(state: ConnectionState, everOpened: boolean): boolean {
@@ -122,6 +127,7 @@ function initialState(): StoreState {
     versionChanged: false,
     attention: { count: 0, openProposals: 0, erroredServices: 0, erroredDevices: 0 },
     meta: { ready: false, needsPair: false, error: null },
+    servicesRev: 0,
   };
 }
 
@@ -130,6 +136,8 @@ export class ApiStore {
   private listeners = new Set<() => void>();
   private adapter: Adapter | null = null;
   private unsubscribe: (() => void) | null = null;
+  /** The snapshot load started by the latest `attach`, while it is still running. */
+  private initialLoad: Promise<void> | null = null;
   private readonly now: () => number;
 
   constructor(deps: { now?: () => number } = {}) {
@@ -155,21 +163,56 @@ export class ApiStore {
   }
 
   // --- lifecycle ------------------------------------------------------------------------------
-  /** Start (or restart) against an adapter: subscribe to the stream and load the snapshots. */
-  attach(adapter: Adapter): void {
+  /**
+   * Start (or restart) against an adapter: subscribe to the stream and load the snapshots. The returned
+   * promise settles when that first load has finished (it never rejects).
+   */
+  attach(adapter: Adapter): Promise<void> {
     this.detach();
     this.adapter = adapter;
-    this.unsubscribe = adapter.events({
-      onFrame: (f) => this.applyFrame(f),
-      onState: (s, info) => this.setConnection(s, info),
+    this.subscribeStream();
+    // Recorded before the stream can deliver anything: the daemon's mandatory first `reset` frame must
+    // not trigger a second load of what this one is already fetching.
+    const load = this.refreshAll();
+    this.initialLoad = load;
+    void load.finally(() => {
+      if (this.initialLoad === load) this.initialLoad = null;
     });
-    void this.refreshAll();
+    return load;
   }
 
   detach(): void {
     this.unsubscribe?.();
     this.unsubscribe = null;
     this.adapter = null;
+    this.initialLoad = null;
+  }
+
+  private subscribeStream(): void {
+    const a = this.adapter;
+    if (!a || this.unsubscribe) return;
+    this.unsubscribe = a.events({
+      onFrame: (f) => this.applyFrame(f),
+      onState: (s, info) => this.setConnection(s, info),
+    });
+  }
+
+  /**
+   * An unpaired visitor gets 401 from /events and the browser would retry it forever: stop the stream
+   * while `meta.needsPair` is set and start it again once the node accepts us. Runs after every snapshot.
+   */
+  private syncStream(): void {
+    if (!this.adapter) return;
+    if (this.state.meta.needsPair) {
+      if (!this.unsubscribe) return;
+      this.unsubscribe();
+      this.unsubscribe = null;
+      // The watchdog died with the stream: an "open" that nobody is watching any more is a lie.
+      const c = this.state.connection;
+      if (c.state === "open") this.commit({ connection: { ...c, state: "closed", disconnected: true } });
+    } else {
+      this.subscribeStream();
+    }
   }
 
   /** Back to the empty state (tests, and after logout). Listeners stay subscribed. */
@@ -185,7 +228,7 @@ export class ApiStore {
     if (prev.state === state && prev.lastEventAt === lastEventAt && prev.everOpened === everOpened) return;
     this.commit({ connection: { state, lastEventAt, everOpened, disconnected: isDisconnected(state, everOpened) } });
     // A fatal close is usually a lost session: probe so a 401 reaches the shell.
-    if (state === "closed") void this.refreshStatus();
+    if (state === "closed" && this.unsubscribe) void this.refreshStatus();
   }
 
   applyFrame(frame: EventsFrameWithId): void {
@@ -209,7 +252,10 @@ export class ApiStore {
         break;
       }
       case "services":
-        if (frame.data && Array.isArray(frame.data.services)) patch.services = reuse(this.state.services, frame.data.services);
+        if (frame.data && Array.isArray(frame.data.services)) {
+          patch.services = reuse(this.state.services, frame.data.services);
+          patch.servicesRev = this.state.servicesRev + 1;
+        }
         break;
       case "devices":
         if (frame.data && Array.isArray(frame.data.devices)) patch.devices = reuse(this.state.devices, frame.data.devices);
@@ -221,7 +267,9 @@ export class ApiStore {
         if (frame.data && typeof frame.data.seq === "number") Object.assign(patch, this.activityPatch(frame.data));
         break;
       case "reset":
-        refetchAll = true;
+        // The first reset after attach is the daemon saying "start from a snapshot". That snapshot is
+        // already on its way; only a reset after the initial load is a reason to load again.
+        refetchAll = this.initialLoad === null;
         break;
     }
     this.commit(patch);
@@ -260,12 +308,16 @@ export class ApiStore {
     if (this.adapter !== a) return; // detached or swapped while loading
     const patch: Partial<StoreState> = {};
     if (st.status === "fulfilled") Object.assign(patch, this.statusPatch(st.value));
-    if (sv.status === "fulfilled") patch.services = reuse(this.state.services, sv.value);
+    if (sv.status === "fulfilled") {
+      patch.services = reuse(this.state.services, sv.value);
+      patch.servicesRev = this.state.servicesRev + 1;
+    }
     if (dv.status === "fulfilled") patch.devices = reuse(this.state.devices, dv.value);
     if (pr.status === "fulfilled") patch.proposals = newestFirst(pr.value);
     const errors = [st, sv, dv, pr].flatMap((r) => (r.status === "rejected" ? [r.reason] : []));
     patch.meta = { ready: true, ...(this.fail(errors) as { needsPair: boolean; error: ApiError | null }) };
     this.commit(patch);
+    this.syncStream();
   });
 
   refreshStatus = coalesced(async () => {
@@ -281,6 +333,7 @@ export class ApiStore {
     if (this.adapter !== a) return;
     patch.meta = { ...this.state.meta, ...(err ? this.fail([err]) : { needsPair: false, error: null }) } as StoreMeta;
     this.commit(patch);
+    this.syncStream();
   });
 
   refreshServices = coalesced(async () => {
@@ -288,7 +341,7 @@ export class ApiStore {
     if (!a) return;
     try {
       const services = await a.services();
-      if (this.adapter === a) this.commit({ services: reuse(this.state.services, services) });
+      if (this.adapter === a) this.commit({ services: reuse(this.state.services, services), servicesRev: this.state.servicesRev + 1 });
     } catch {
       /* keep the previous snapshot; the connection state tells the user */
     }

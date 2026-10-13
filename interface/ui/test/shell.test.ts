@@ -2,7 +2,7 @@
 // route/location helpers, pair-code handling, banner text and the announcer throttle.
 import { describe, expect, it } from "vitest";
 import { disconnectedText, formatAgo } from "../src/app/format";
-import { createAnnouncer } from "../src/app/LiveRegion";
+import { DISCONNECTED_TEXT, RECONNECTED_TEXT, connectionAnnouncement, createAnnouncer } from "../src/app/LiveRegion";
 import { cleanPath, hrefTo, routeFragment } from "../src/app/location";
 import { formatPairCode, isCompletePairCode, retrySeconds } from "../src/app/pair-code";
 import type { ServiceRecord } from "../src/lib/api/types";
@@ -315,6 +315,30 @@ describe("banner text", () => {
   it("disconnectedText", () => {
     expect(disconnectedText(1_000, 31_000)).toBe("Disconnected — last update 30s ago");
     expect(disconnectedText(null, 31_000)).toBe("Disconnected — no update received yet");
+  });
+});
+
+describe("connectionAnnouncement", () => {
+  const up = { disconnected: false, everOpened: true, needsPair: false };
+  it("says Disconnected once, then Reconnected when the stream is back", () => {
+    let r = connectionAnnouncement(false, { ...up, disconnected: true });
+    expect(r).toEqual({ text: DISCONNECTED_TEXT, announced: true });
+    r = connectionAnnouncement(r.announced, { ...up, disconnected: true });
+    expect(r).toEqual({ text: null, announced: true });
+    r = connectionAnnouncement(r.announced, up);
+    expect(r).toEqual({ text: RECONNECTED_TEXT, announced: false });
+    expect(connectionAnnouncement(r.announced, up)).toEqual({ text: null, announced: false });
+  });
+  it("says nothing to a visitor who never connected (unpaired): there is no last known state", () => {
+    expect(connectionAnnouncement(false, { disconnected: true, everOpened: false, needsPair: true })).toEqual({ text: null, announced: false });
+    expect(connectionAnnouncement(false, { disconnected: true, everOpened: true, needsPair: true })).toEqual({ text: null, announced: false });
+  });
+  it("announces Reconnected after pairing even if the disconnect was announced before the header unmounted", () => {
+    const heard = connectionAnnouncement(false, { disconnected: true, everOpened: true, needsPair: false });
+    // the session expired: pairing required, the stream paused (still disconnected) ... then the user pairs
+    const paused = connectionAnnouncement(heard.announced, { disconnected: true, everOpened: true, needsPair: true });
+    expect(paused.text).toBeNull();
+    expect(connectionAnnouncement(paused.announced, up).text).toBe(RECONNECTED_TEXT);
   });
 });
 

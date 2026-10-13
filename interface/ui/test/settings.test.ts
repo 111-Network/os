@@ -9,11 +9,14 @@ import { cleanLines, emptyLogText, followText, hasNoSource, logServices, tailSum
 import {
   BACKUP_COMMAND,
   BACKUP_NOTE,
+  LAN_LOCKED_TEXT,
   LOOPBACK_ONLY_TEXT,
   aliasPatchValue,
   essentialRows,
   formatWhen,
   isLoopbackOnlyError,
+  isSettingsLockedError,
+  lanNote,
   lanRestartPending,
   layerAskPrompt,
   layerStatusRows,
@@ -109,9 +112,38 @@ describe("small rules", () => {
     expect(aliasPatchValue("   ")).toBeNull();
     expect(aliasPatchValue("  Roof node ")).toBe("Roof node");
   });
+  it("a 409 settings_locked reads as the pinned note, not a generic error", () => {
+    const e = problem("settings_locked", 409, "DASHBOARD_LAN pins it.");
+    expect(isSettingsLockedError(e)).toBe(true);
+    expect(isSettingsLockedError(problem("loopback_only", 403))).toBe(false);
+    expect(problemText(e)).toBe(LAN_LOCKED_TEXT);
+    expect(LAN_LOCKED_TEXT).toBe("Pinned by DASHBOARD_LAN in the node's environment file — change it there.");
+  });
+  it("the LAN note follows the settings the node returned, never the requested value", () => {
+    const s = status();
+    s.bind.lan = false;
+    const set: Settings = { schema: 1, alias: null, lan_enabled: true, lan_locked: false, offer: null };
+    // asked for off, node answered on (pinned): the sentence must say on, and the toggle reads on too
+    expect(lanNote(s, set)).toEqual({ kind: "restart", text: "LAN sharing on. Restart the node to apply." });
+    expect(lanNote(s, { ...set, lan_enabled: false })).toBeNull(); // matches the bind: nothing pending
+    s.bind.lan = true;
+    expect(lanNote(s, { ...set, lan_enabled: false })).toEqual({ kind: "restart", text: "LAN sharing off. Restart the node to apply." });
+    expect(lanNote(s, set)).toBeNull();
+    expect(lanNote(null, set)).toBeNull();
+    expect(lanNote(s, null)).toBeNull();
+  });
+  it("a pinned setting shows the locked note, whatever the bind says", () => {
+    const s = status();
+    s.bind.lan = false;
+    const set: Settings = { schema: 1, alias: null, lan_enabled: true, lan_locked: true, offer: null };
+    expect(lanNote(s, set)).toEqual({ kind: "locked", text: LAN_LOCKED_TEXT });
+    // a 409 seen before the settings were refetched counts too
+    expect(lanNote(s, { ...set, lan_locked: false }, true)).toEqual({ kind: "locked", text: LAN_LOCKED_TEXT });
+    expect(lanNote(null, null, true)).toEqual({ kind: "locked", text: LAN_LOCKED_TEXT });
+  });
   it("a LAN change is pending until the bind catches up", () => {
     const s = status();
-    const set: Settings = { schema: 1, alias: null, lan_enabled: true, offer: null };
+    const set: Settings = { schema: 1, alias: null, lan_enabled: true, lan_locked: false, offer: null };
     s.bind.lan = true;
     expect(lanRestartPending(s, set)).toBe(false);
     expect(lanRestartPending(s, { ...set, lan_enabled: false })).toBe(true);

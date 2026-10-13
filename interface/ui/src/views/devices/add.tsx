@@ -8,7 +8,7 @@ import { CopyButton } from "../../components/copy-button";
 import { Panel } from "../../components/panel";
 import { SectionHeader } from "../../components/section-header";
 import { useDevices, useServices, useStatus } from "../../lib/api/hooks";
-import { pairingHelp, registryPrompt, type PairingHelp } from "../../lib/devices";
+import { PAIR_COMMAND, alsoLabel, isMdnsUrl, pairingHelp, registryPrompt, type PairingHelp } from "../../lib/devices";
 import { AgentButton, useAgentReachable } from "./agent-button";
 
 const P = "max-w-prose font-mono text-xs leading-relaxed text-muted-foreground";
@@ -35,15 +35,22 @@ function ControlThisNode({ help }: { help: PairingHelp }) {
   return (
     <div className="flex flex-col gap-3">
       <p className={P}>{help.body}</p>
-      {help.urls.length > 0 ? (
+      {help.primaryUrl ? (
         <ul className="flex flex-col gap-2">
-          {help.urls.map((u) => (
-            <li key={u} className="flex flex-wrap items-center gap-2 font-mono text-xs text-foreground">
-              <span className="min-w-0 break-all">{u}</span>
+          <li className="flex flex-wrap items-center gap-2 font-mono text-xs text-foreground">
+            <span className="min-w-0 break-all">{help.primaryUrl}</span>
+            <CopyButton text={help.primaryUrl} ariaLabel={`Copy ${help.primaryUrl}`} />
+          </li>
+          {help.alsoUrls.map((u) => (
+            <li key={u} className="flex flex-wrap items-center gap-2 font-mono text-xs text-muted-foreground">
+              <span className="min-w-0 break-all">{alsoLabel(u)}</span>
               <CopyButton text={u} ariaLabel={`Copy ${u}`} />
             </li>
           ))}
         </ul>
+      ) : null}
+      {help.primaryUrl && isMdnsUrl(help.primaryUrl) ? (
+        <p className={P}>This node only has a .local name right now. Android browsers cannot open those. Connect the node to Wi-Fi or Ethernet to get a numeric address.</p>
       ) : null}
       {help.command ? (
         <p className={P}>
@@ -68,7 +75,9 @@ function ControlThisNode({ help }: { help: PairingHelp }) {
             {showPair ? (
               <>
                 <p className="font-pixel text-lg leading-snug break-all text-foreground md:text-2xl">{help.pairUrl}</p>
-                <p className={P}>Type this address on the phone, then enter the pair code from the node. A scannable QR code is not built yet.</p>
+                <p className={P}>
+                  Type this address on the phone, then enter the pair code from the node. Run <Code>{PAIR_COMMAND}</Code> on the node for a scannable code.
+                </p>
                 <CopyButton text={help.pairUrl} label="copy address" ariaLabel="Copy the pair address" />
               </>
             ) : null}

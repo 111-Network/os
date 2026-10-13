@@ -1,7 +1,7 @@
 // Dev-only mock adapter. Same contract as http.ts, no daemon needed:
 //   createMockAdapter({ scenario })  -> Adapter & { mock: MockControls }
 // Reached ONLY through the DEV-guarded dynamic import in ../index.ts; never import it statically.
-import type { Adapter, ChatInput, DevicePatch, EventsHandlers, ProposalFilter, RestartReply, SendOptions, TaskAccepted, UpdateCheckReply } from "../adapter";
+import type { Adapter, ChatInput, DevicePatch, EventsHandlers, ProposalFilter, RestartReply, SendOptions, ServiceRestartReply, TaskAccepted, UpdateCheckReply } from "../adapter";
 import { ApiError } from "../problem";
 import type {
   AuthSession,
@@ -279,6 +279,36 @@ export function createMockAdapter(opts: MockOptions = {}): MockAdapter {
     });
   }
 
+  /** How long a supervised child shows `starting` after POST /services/{id}/restart. */
+  const CHILD_RESTART_MS = 1500;
+
+  /**
+   * One supervised child restarts: `starting` now, `live` again after CHILD_RESTART_MS. A child that was
+   * in `error` comes back healthy (the supervisor's respawn clears the back-off), as the healthy fixture has it.
+   */
+  function restartChild(id: ServiceId): void {
+    const s = svc(id);
+    const was = { state: s.state, reason: s.reason, reason_code: s.reason_code, detail: structuredClone(s.detail) };
+    ctx.patchService(id, { state: "starting", reason_code: "starting", reason: "Restarting.", detail: { ...s.detail, child: "running" } });
+    later(CHILD_RESTART_MS, () => {
+      if (was.state !== "error") {
+        ctx.patchService(id, { state: "live", reason: was.reason, reason_code: was.reason_code, detail: was.detail });
+        return;
+      }
+      const base = buildFixtures(t0);
+      const healthy = base.services.find((x) => x.id === id);
+      if (healthy) ctx.patchService(id, { state: "live", reason: healthy.reason, reason_code: healthy.reason_code, detail: structuredClone(healthy.detail) });
+      ctx.patchStatus((st) => {
+        if (id === "agent") st.intelligence = { ...st.intelligence, agent: base.status.intelligence.agent, agent_state: base.status.intelligence.agent_state };
+        if (id === "model") st.intelligence = { ...st.intelligence, model_server: base.status.intelligence.model_server };
+        if (id === "transport") {
+          st.transport_state = base.status.transport_state;
+          st.health = structuredClone(base.status.health);
+        }
+      });
+    });
+  }
+
   function simulateTask(req: TaskRequest, taskId: string): void {
     later(400, () => ctx.emitAgent("task.submitted", { task_id: taskId, kind: req.kind }));
     later(3500, () => {
@@ -327,6 +357,15 @@ export function createMockAdapter(opts: MockOptions = {}): MockAdapter {
     status: () => rest(statusNow),
     services: () => rest(() => state.services),
     service: (id) => rest(() => svc(id)),
+    restartService: (id) =>
+      rest((): ServiceRestartReply => {
+        const s = svc(id);
+        if (!s.actions.includes("restart")) {
+          throw problem(409, "not_supervised", "This service is not supervised by the node", "The node does not run this one itself, so it cannot restart it.");
+        }
+        restartChild(id);
+        return { schema: 1, id, restarting: true };
+      }),
     serviceLog: (id, n) =>
       rest((): LogTail => {
         svc(id); // 404 for unknown ids
@@ -422,6 +461,9 @@ export function createMockAdapter(opts: MockOptions = {}): MockAdapter {
       rest((): Settings => {
         if (!state.auth.loopback && ("lan_enabled" in patch || "offer" in patch)) {
           throw problem(403, "loopback_only", "Available on the node itself", "Change this setting from the machine the node runs on.");
+        }
+        if ("lan_enabled" in patch && state.settings.lan_locked) {
+          throw problem(409, "settings_locked", "LAN sharing is pinned", "DASHBOARD_LAN in the node's environment file sets this. Change it there.");
         }
         if ("alias" in patch) {
           const a = patch.alias;

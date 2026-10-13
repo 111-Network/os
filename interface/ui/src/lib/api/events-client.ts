@@ -31,10 +31,9 @@ export interface EventsClientDeps {
 }
 
 /**
- * The spec says 20 s of silence, but EventSource cannot see the `: keep-alive` comments (every
- * 15 s) and the only visible heartbeat is `status` every 30 s. 20 s would flap "Disconnected"
- * on a healthy idle connection, so the default is the heartbeat plus a 15 s margin.
- * If the daemon ever heartbeats faster than 15 s, lower this to 20 000.
+ * The spec marks the stream stale after 45 s of silence. EventSource cannot see the `: keep-alive`
+ * comments (every 15 s), so the only visible heartbeat is the `status` frame every 30 s: 45 s is that
+ * heartbeat plus a 15 s margin, and a healthy idle connection never flaps to "Disconnected".
  */
 export const DEFAULT_STALE_AFTER_MS = 45_000;
 

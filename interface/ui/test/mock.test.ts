@@ -612,6 +612,52 @@ describe("mock actions", () => {
     expect(last(frames)!.event).toBe("services");
   });
 
+  it("restartService: starting now, live again after 1.5 s, one services frame each", async () => {
+    const { a, clock } = make("healthy");
+    const { frames } = listen(a);
+    await flush();
+    const before = frames.length;
+    const reply = await a.restartService("model");
+    expect(reply).toEqual({ schema: 1, id: "model", restarting: true });
+    expectValid("restartService", reply);
+    expect((await a.service("model")).state).toBe("starting");
+    expect(frames.slice(before).map((f) => f.event)).toEqual(["services"]);
+    await clock.advanceAsync(1_400, 100);
+    expect((await a.service("model")).state).toBe("starting");
+    await clock.advanceAsync(200, 100);
+    expect(await a.service("model")).toMatchObject({ state: "live", reason_code: "health_ok" });
+    expect(frames.slice(before).filter((f) => f.event === "services")).toHaveLength(2);
+    for (const f of frames) expect(validateAgainst(sse.events[f.event]!, f.data), f.event).toEqual([]);
+  });
+
+  it("restartService: an errored child comes back healthy and the agent works again", async () => {
+    const { a, clock } = make("agent-down");
+    expect((await failure(a.agentStatus())).code).toBe("agent_unavailable");
+    await a.restartService("agent");
+    await clock.advanceAsync(1_600, 100);
+    expect((await a.service("agent")).state).toBe("live");
+    expect((await a.status()).intelligence.agent).toBe("running");
+    expect((await a.agentStatus()).state).toBe("local");
+  });
+
+  it("restartService: 409 not_supervised without the restart action, 404 for an unknown id", async () => {
+    const { a } = make("healthy");
+    const e = await failure(a.restartService("kb"));
+    expect(e).toMatchObject({ status: 409, code: "not_supervised" });
+    expect(validateAgainst("Problem", e.problem)).toEqual([]);
+    expect(await failure(a.restartService("nope" as never))).toMatchObject({ status: 404, code: "not_found" });
+  });
+
+  it("lan-locked: settings say so, a PATCH of lan_enabled answers 409 settings_locked and changes nothing", async () => {
+    const { a } = make("lan-locked");
+    expect(await a.settings()).toMatchObject({ lan_enabled: false, lan_locked: true });
+    const e = await failure(a.patchSettings({ lan_enabled: true, alias: "Roof" }));
+    expect(e).toMatchObject({ status: 409, code: "settings_locked" });
+    expect(validateAgainst("Problem", e.problem)).toEqual([]);
+    expect(await a.settings()).toMatchObject({ lan_enabled: false, alias: "Workshop laptop" }); // not even the alias half applied
+    expect(await a.patchSettings({ alias: "Roof" })).toMatchObject({ alias: "Roof", lan_locked: true });
+  });
+
   it("kb: refuses traversal, 404s unknown paths", async () => {
     const { a } = make("healthy");
     for (const p of ["../etc/passwd", "projects/../../x", "/etc/passwd", "a\\..\\b", ""]) expect(await failure(a.kb.entry(p)), p).toMatchObject({ status: 400, code: "bad_request" });

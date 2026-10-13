@@ -11,15 +11,19 @@ import {
   devicePrompt,
   displayName,
   drivenBy,
+  alsoLabel,
   durationText,
   firmwareText,
   forgetConfirm,
   groupByKind,
   identityRows,
   isLoopbackUrl,
+  isMdnsUrl,
+  isNumericIpv4Url,
   kindTransport,
   kindWord,
   pairingHelp,
+  pickPrimaryUrl,
   presenceText,
   registryPrompt,
   showsFirmware,
@@ -289,13 +293,38 @@ describe("pairingHelp (Add device, Control this node)", () => {
     expect(h.body).toContain("restarts");
     expect(h.pairUrl).toBeNull();
   });
-  it("LAN on: lists reachable addresses only, with the pair route and the command", () => {
+  it("LAN on: the LAN IP is primary (Android cannot resolve .local); .local follows as an extra", () => {
     const h = pairingHelp(base);
     expect(h.state).toBe("on");
-    expect(h.urls).toEqual(["http://111.local", "http://192.168.1.42"]);
-    expect(h.pairUrl).toBe("http://111.local/#/pair");
+    expect(h.primaryUrl).toBe("http://192.168.1.42");
+    expect(h.alsoUrls).toEqual(["http://111.local"]);
+    expect(h.urls).toEqual(["http://192.168.1.42", "http://111.local"]);
+    expect(h.pairUrl).toBe("http://192.168.1.42/#/pair");
     expect(h.command).toBe("111 dashboard");
     expect(h.settingsHref).toBeNull();
+  });
+  it("LAN on with only a .local name: falls back to it as the primary address", () => {
+    const h = pairingHelp({ lan_enabled: true, bind: { urls: ["http://111.local", "http://127.0.0.1:11180"], lan: true } });
+    expect(h.primaryUrl).toBe("http://111.local");
+    expect(h.alsoUrls).toEqual([]);
+    expect(h.pairUrl).toBe("http://111.local/#/pair");
+  });
+  it("picks the first numeric IPv4 when several are bound", () => {
+    expect(pickPrimaryUrl(["http://111.local", "http://10.0.0.7", "http://192.168.1.42"])).toBe("http://10.0.0.7");
+    expect(pickPrimaryUrl(["http://127.0.0.1:11180", "http://111.localhost"])).toBeNull();
+    expect(pickPrimaryUrl([])).toBeNull();
+    // a port stays on the address; loopback IPv4 is never primary; an out-of-range quad is not an IP
+    expect(pickPrimaryUrl(["http://127.0.0.1:11180", "http://192.168.1.42:8080"])).toBe("http://192.168.1.42:8080");
+    expect(isNumericIpv4Url("http://999.1.1.1")).toBe(false);
+    expect(isNumericIpv4Url("http://192.168.1.42")).toBe(true);
+    expect(isNumericIpv4Url("http://111.local")).toBe(false);
+    expect(isNumericIpv4Url("not a url")).toBe(false);
+  });
+  it("labels the extra addresses, flagging .local as not working on Android", () => {
+    expect(alsoLabel("http://111.local")).toBe("also: http://111.local (not on Android)");
+    expect(alsoLabel("http://node.lan")).toBe("also: http://node.lan");
+    expect(isMdnsUrl("http://111.local")).toBe(true);
+    expect(isMdnsUrl("http://111.localhost")).toBe(false);
   });
   it("LAN on with only loopback addresses says no address was found", () => {
     const h = pairingHelp({ lan_enabled: true, bind: { urls: ["http://127.0.0.1:11180", "http://111.localhost"], lan: true } });
