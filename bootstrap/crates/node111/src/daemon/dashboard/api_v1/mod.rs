@@ -17,7 +17,7 @@
 //!   — the loopback browser is exactly who CSRF targets.
 //!
 //! The not-yet-built files (`status`, `services`, `settings`, `actions`, `kb`,
-//! `relay`, `proposals`) register their contract paths with [`not_built`] (501
+//! `relay`, `proposals`, `devices`) register their contract paths with [`not_built`] (501
 //! problem+json) so auth/CSRF behave correctly today. Filling one in = replacing
 //! its handlers; keep the paths.
 //!
@@ -36,6 +36,7 @@
 
 pub mod actions;
 pub mod auth;
+pub mod devices;
 pub mod events;
 pub mod kb;
 pub mod proposals;
@@ -216,6 +217,7 @@ pub fn router(state: Arc<ApiState>) -> axum::Router {
         .merge(events::router())
         .merge(status::router())
         .merge(services::router())
+        .merge(devices::router())
         .merge(settings::router())
         .merge(actions::router())
         .merge(kb::router())
