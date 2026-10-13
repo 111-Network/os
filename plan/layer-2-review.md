@@ -84,3 +84,13 @@ None outright. Two sub-suggestions partially deferred rather than adopted now: a
 ## Post-fix verdict
 
 All four judges' gating items resolved in spec v2 (fixes above). Spec locked as **v2** per D14.
+
+## Build-review ratifications (wave 2b, 2026-10-13)
+
+Implementation-level pins the module builders made where the spec pins the construction but not the bytes — ratified at review, recorded here so no later reader mistakes them for improvisation:
+
+- **seal (T3):** header serialization `version(1) ‖ crypto_mode(1) ‖ counter(8 LE) ‖ extra_len(1) ‖ extra` — the `extra_len` byte lets `open()` locate `epk` unambiguously and is itself AD-covered; inner plaintext layout `sender_node_id(32) ‖ plaintext` (§6.4 mandates the NodeId inside the ciphertext, not its offset). Ephemeral secrets drawn via `getrandom` with a typed error (no panic-on-entropy-failure path). Envelope `version` passes through ungated (L5's registry); `crypto_mode` gated 0x01 fail-closed before decryption.
+- **counters/store (T4):** restore floor semantics read as *stored = last-committed*: `set_restore_floor(f)` commits `announce_last = f + 1024`, so the first post-restore announce carries `f + 1025` (consistent with "initial 0 / genesis 1"). Unclean-reboot jump J = the batch interval N persisted in the file header. The pinning store persists to a new `peers` file (0600; §13 amended to name it); `receive_window` is dual-homed (authority = `counters`, mirrored into pin entries at batch points).
+- **backup/migrate (T5):** legacy quarantine is a **sibling** dir `<identity>.quarantine-d9[-n]` (not a subdir) because rename(2) cannot replace a non-empty dir without breaking §13's atomic temp-dir-then-rename; legacy files never deleted. Descriptor-absent restore derives the `encoding` byte from the actual word count; a contradicting supplied descriptor fails closed. The legacy `npub` is carried verbatim (bech32) into the migration log.
+- **attest (T6):** `transport_sig` is opaque bytes behind a verifier-trait seam (secp256k1/k256 is Layer 7's adoption — not in the frozen dep set); equal-`expiry_epoch` tie-break: byte-identical ⇒ idempotent duplicate, differing ⇒ conflict reject (fail-closed); `transport_id` registry fails closed on unknown values; expiry is `current >= expiry_epoch` (first dead epoch).
+- **Integration defect caught and fixed at review:** `backup.rs` hand-rolled an 8-byte `counters` file while `counters.rs` (built in parallel) owns a 34-byte-header format — a words-only restore would have failed `Corrupt("bad magic")` on first boot. Fixed by routing dir creation through `CounterStore::create` / `restore_pending` + `set_restore_floor`; a cross-module contract test now guards it.
