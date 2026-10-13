@@ -46,16 +46,17 @@ pub mod store;
 /// both sides; §8.4 restore floor + 1024 semantics.
 pub mod counters;
 
-/// §8.1–§8.3 — backup: the 4-byte self-describing descriptor
+/// §8.1–§8.4 — backup AND restore: the 4-byte self-describing descriptor
 /// (version‖curve‖derivation‖encoding, fail-closed on unknown fields, absent ⇒
 /// v1 defaults), ceremony artifacts (words + single-frame CompactSeedQR-style
 /// project QR payload = 4B descriptor ‖ raw entropy), verify-on-write-down.
 pub mod backup;
 
-/// §8.4 — restore & migration: descriptor check → SLIP-0010 derivation →
-/// atomic identity-dir write → NodeId confirmation surface; refusal against a
-/// live unquarantined dir; counter-floor rules; the D9-format Layer-1
-/// migration (legacy `secret.hex`/`npub` quarantine, old→new NodeId mapping).
+/// §8.4/§13/D14(d) — the D9-format Layer-1 migration: legacy dir detection,
+/// same-words/new-derivation keyset, atomic new file set, legacy dir
+/// quarantined as a sibling `<dir>.quarantine-d9` (Layer 1's own quarantine
+/// shape — never deleted), old→new NodeId mapping. Restore itself lives in
+/// `backup` (§8.4).
 pub mod migrate;
 
 /// §10 — transport attestation (F1): the 202B cross-signed format with domain
