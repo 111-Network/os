@@ -1,0 +1,24 @@
+{
+  "spec": "§2 + §14 — project keyset vectors: mnemonic -> NodeId (Ed25519 pubkey, B2) + X25519 pubkey",
+  "frozen": "2026-10-13",
+  "description": "Full keyset derivation known answers: BIP-39 words -> seed -> SLIP-0010 m/111'/0'/{0',1'} -> Ed25519 pubkey (this IS the NodeId, B2: raw 32 bytes, no hashing) and X25519 pubkey (RFC 7748 basepoint multiplication of the clamped scalar). public_keyset is the 64B wire/disk form (sign_pubkey || enc_pubkey); private_keyset is the 64B (signing seed || raw X25519 scalar) form. These mnemonics are PUBLIC well-known test phrases — never use them for a real node.",
+  "provenance": "canonical-12: harvested from keyset.rs::project_keyset_vector (--nocapture). canonical-24: generated through the public API for this freeze and cross-checked by crosscheck.py.",
+  "vectors": [
+    {
+      "name": "canonical-12",
+      "mnemonic": "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about",
+      "node_id": "6f1d5331e36e16d341fa06c9f622cc8569710f2a62d7491e9be8e953df844f01",
+      "x25519_public": "712678456644b8cba1389072ee5dec93d044875ca13c73e217157814bbb99218",
+      "public_keyset": "6f1d5331e36e16d341fa06c9f622cc8569710f2a62d7491e9be8e953df844f01712678456644b8cba1389072ee5dec93d044875ca13c73e217157814bbb99218",
+      "private_keyset": "718ffd7109b2318c3edea57191ed47c40b3bab75929efd82a319481e476ae2f5cc680150d6f0c6be2aa1f4d43f86fa4a722c0474f27244bef8e98f06a1038126"
+    },
+    {
+      "name": "canonical-24",
+      "mnemonic": "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon art",
+      "node_id": "5ddf5911edf0541c88e864d7590045c410f420d04e73f9d8507dc856591506b0",
+      "x25519_public": "350a6fafb96cd8936c8f6a2215c38d2f619a7f12ca1d97cff1f2da4dd8d4ba14",
+      "public_keyset": "5ddf5911edf0541c88e864d7590045c410f420d04e73f9d8507dc856591506b0350a6fafb96cd8936c8f6a2215c38d2f619a7f12ca1d97cff1f2da4dd8d4ba14",
+      "private_keyset": "1f9b16e0b5c70b8058bec974a3fe5446df0a66d35b70a1f0de73784d0cc4f0810d2ad2ffd3e1daa01dfe8c41dd474d8592bddeb5e10c4838c6597be019ec524d"
+    }
+  ]
+}

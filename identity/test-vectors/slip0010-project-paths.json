@@ -1,0 +1,42 @@
+{
+  "spec": "§2 + §8.1 + §14 — SLIP-0010 pinned-path vectors m/111'/0'/0' (Ed25519 signing seed) and m/111'/0'/1' (X25519 scalar), with the BIP-39 seed derivation they sit on",
+  "frozen": "2026-10-13",
+  "description": "Project-path vectors generated at build and frozen (section 14). For each canonical mnemonic: BIP-39 entropy -> words (English), PBKDF2-HMAC-SHA512 seed with the EMPTY passphrase (v1 has no passphrase, section 8.1), then SLIP-0010 hardened-only derivation at the two pinned paths. The 12-word values match the module-printed vectors of slip0010.rs and bip39.rs; the independent Python cross-check (test-vectors/crosscheck.py) re-derives all of them from scratch. The ECDH scalar is RAW (clamped at point of use).",
+  "provenance": "12-word: harvested from slip0010.rs::slip0010_project_path_vectors (--nocapture). 24-word: generated through the public API for this freeze and cross-checked by crosscheck.py.",
+  "paths": {
+    "signing": "m/111'/0'/0'",
+    "signing_indices": [111, 0, 0],
+    "ecdh": "m/111'/0'/1'",
+    "ecdh_indices": [111, 0, 1]
+  },
+  "vectors": [
+    {
+      "name": "canonical-12 (abandon x11 + about)",
+      "mnemonic": "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about",
+      "entropy": "00000000000000000000000000000000",
+      "bip39_seed": "5eb00bbddcf069084889a8ab9155568165f5c453ccb85e70811aaed6f6da5fc19a5ac40b389cd370d086206dec8aa6c43daea6690f20ad3d8d48b2d2ce9e38e4",
+      "signing_seed": "718ffd7109b2318c3edea57191ed47c40b3bab75929efd82a319481e476ae2f5",
+      "ecdh_scalar": "cc680150d6f0c6be2aa1f4d43f86fa4a722c0474f27244bef8e98f06a1038126"
+    },
+    {
+      "name": "canonical-24 (abandon x23 + art)",
+      "mnemonic": "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon art",
+      "entropy": "0000000000000000000000000000000000000000000000000000000000000000",
+      "bip39_seed": "408b285c123836004f4b8842c89324c1f01382450c0d439af345ba7fc49acf705489c6fc77dbd4e3dc1dd8cc6bc9f043db8ada1e243c4a0eafb290d399480840",
+      "signing_seed": "1f9b16e0b5c70b8058bec974a3fe5446df0a66d35b70a1f0de73784d0cc4f081",
+      "ecdh_scalar": "0d2ad2ffd3e1daa01dfe8c41dd474d8592bddeb5e10c4838c6597be019ec524d"
+    }
+  ],
+  "negatives": [
+    {
+      "name": "pre-hardened index is a caller bug (hardened-only API takes raw indices)",
+      "indices": [111, 2147483648],
+      "expect": "IndexOutOfRange:2147483648"
+    },
+    {
+      "name": "pre-hardened first index",
+      "indices": [2147483759, 0, 0],
+      "expect": "IndexOutOfRange:2147483759"
+    }
+  ]
+}

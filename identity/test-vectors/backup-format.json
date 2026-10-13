@@ -1,0 +1,203 @@
+{
+  "spec": "§8.2-§8.4 + §14 — versioned self-describing backup format: descriptor, QR payload, nodeid file, restore round-trip, descriptor-absent fallback, fail-closed refusals",
+  "frozen": "2026-10-13",
+  "description": "The 4-byte descriptor (version 0x01 || curve 0x01 = ed25519+x25519 dual || derivation 0x01 = SLIP-0010 m/111'/0'/{0',1'} || encoding 0x01 = BIP-39 English 12 words, 0x02 = 24 words); the CompactSeedQR-style project QR payload (descriptor || raw entropy, 20B at 12 words / 36B at 24); the section 13 identity-dir file bodies (mnemonic file = words + trailing newline, nodeid = 34B 0xed01 record, descriptor = 4B, keyset = 64B). Round-trip: mnemonic -> descriptor -> seed -> keyset -> restore -> identical NodeId. A restore with NO descriptor assumes the v1 defaults (encoding byte taken from the parsed word count). Unknown descriptor fields, bad lengths and contradictory QR payloads fail closed. Tokens are the Rust Debug names of the error variants.",
+  "provenance": "canonical-12 harvested from backup.rs::backup_format_kat (--nocapture); canonical-24 and all negatives generated through the public API for this freeze; expect tokens recorded at generation time.",
+  "kats": [
+    {
+      "name": "canonical-12",
+      "mnemonic": "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about",
+      "entropy": "00000000000000000000000000000000",
+      "descriptor": "01010101",
+      "qr_payload": "0101010100000000000000000000000000000000",
+      "node_id_hex": "6f1d5331e36e16d341fa06c9f622cc8569710f2a62d7491e9be8e953df844f01",
+      "node_id_bech32": "node1duw4xv0rdctdxs06qmylvgkvs45hzre2vtt5j85mar548huyfuqs44v6c9",
+      "label": "kq4f-kqqo-nj",
+      "nodeid_file": "ed016f1d5331e36e16d341fa06c9f622cc8569710f2a62d7491e9be8e953df844f01",
+      "mnemonic_file_body": "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about\n",
+      "keyset_file": "718ffd7109b2318c3edea57191ed47c40b3bab75929efd82a319481e476ae2f5cc680150d6f0c6be2aa1f4d43f86fa4a722c0474f27244bef8e98f06a1038126",
+      "descriptor_file": "01010101"
+    },
+    {
+      "name": "canonical-24",
+      "mnemonic": "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon art",
+      "entropy": "0000000000000000000000000000000000000000000000000000000000000000",
+      "descriptor": "01010102",
+      "qr_payload": "010101020000000000000000000000000000000000000000000000000000000000000000",
+      "node_id_hex": "5ddf5911edf0541c88e864d7590045c410f420d04e73f9d8507dc856591506b0",
+      "node_id_bech32": "node1th04jy0d7p2pez8gvnt4jqz9csg0ggxsfeelnkzs0hy9vkg4q6cqpkg7w5",
+      "label": "4bmz-ebxz-uh",
+      "nodeid_file": "ed015ddf5911edf0541c88e864d7590045c410f420d04e73f9d8507dc856591506b0",
+      "mnemonic_file_body": "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon art\n",
+      "keyset_file": "1f9b16e0b5c70b8058bec974a3fe5446df0a66d35b70a1f0de73784d0cc4f0810d2ad2ffd3e1daa01dfe8c41dd474d8592bddeb5e10c4838c6597be019ec524d",
+      "descriptor_file": "01010102"
+    }
+  ],
+  "descriptor_negatives": [
+    {
+      "name": "unknown version 0x02",
+      "bytes": "02010101",
+      "expect": "UnknownVersion(2)"
+    },
+    {
+      "name": "unknown version 0x00",
+      "bytes": "00010101",
+      "expect": "UnknownVersion(0)"
+    },
+    {
+      "name": "unknown curve 0x02",
+      "bytes": "01020101",
+      "expect": "UnknownCurve(2)"
+    },
+    {
+      "name": "unknown curve 0x00",
+      "bytes": "01000101",
+      "expect": "UnknownCurve(0)"
+    },
+    {
+      "name": "unknown derivation 0x7f (e.g. BIP32-Ed25519/Cardano is NOT assigned)",
+      "bytes": "01017f01",
+      "expect": "UnknownDerivation(127)"
+    },
+    {
+      "name": "unknown derivation 0x02",
+      "bytes": "01010201",
+      "expect": "UnknownDerivation(2)"
+    },
+    {
+      "name": "unknown encoding 0x00",
+      "bytes": "01010100",
+      "expect": "UnknownEncoding(0)"
+    },
+    {
+      "name": "unknown encoding 0x03 (e.g. 18 words, out of profile)",
+      "bytes": "01010103",
+      "expect": "UnknownEncoding(3)"
+    },
+    {
+      "name": "3-byte descriptor",
+      "bytes": "010101",
+      "expect": "BadLength(3)"
+    },
+    {
+      "name": "5-byte descriptor",
+      "bytes": "0101010101",
+      "expect": "BadLength(5)"
+    },
+    {
+      "name": "empty descriptor",
+      "bytes": "",
+      "expect": "BadLength(0)"
+    }
+  ],
+  "qr_negatives": [
+    {
+      "name": "0-byte payload (not 20 or 36)",
+      "payload": "",
+      "expect": "QrPayloadLength(0)"
+    },
+    {
+      "name": "4-byte payload (not 20 or 36)",
+      "payload": "01010101",
+      "expect": "QrPayloadLength(4)"
+    },
+    {
+      "name": "19-byte payload (not 20 or 36)",
+      "payload": "01010101010101010101010101010101010101",
+      "expect": "QrPayloadLength(19)"
+    },
+    {
+      "name": "21-byte payload (not 20 or 36)",
+      "payload": "010101010101010101010101010101010101010101",
+      "expect": "QrPayloadLength(21)"
+    },
+    {
+      "name": "35-byte payload (not 20 or 36)",
+      "payload": "0101010101010101010101010101010101010101010101010101010101010101010101",
+      "expect": "QrPayloadLength(35)"
+    },
+    {
+      "name": "37-byte payload (not 20 or 36)",
+      "payload": "01010101010101010101010101010101010101010101010101010101010101010101010101",
+      "expect": "QrPayloadLength(37)"
+    },
+    {
+      "name": "64-byte payload (not 20 or 36)",
+      "payload": "01010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101",
+      "expect": "QrPayloadLength(64)"
+    },
+    {
+      "name": "unknown descriptor curve inside the payload",
+      "payload": "0109010100000000000000000000000000000000",
+      "expect": "Descriptor(UnknownCurve(9))"
+    },
+    {
+      "name": "descriptor says 24 words but only 16B entropy",
+      "payload": "0101010200000000000000000000000000000000",
+      "expect": "QrEncodingMismatch"
+    },
+    {
+      "name": "descriptor says 12 words but 32B entropy",
+      "payload": "010101010000000000000000000000000000000000000000000000000000000000000000",
+      "expect": "QrEncodingMismatch"
+    }
+  ],
+  "restore_negatives": [
+    {
+      "name": "bad checksum (abandon x12)",
+      "words": "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon",
+      "expect": "Mnemonic:InvalidChecksum"
+    },
+    {
+      "name": "3 words",
+      "words": "abandon abandon abandon",
+      "expect": "Mnemonic:BadWordCount(3)"
+    },
+    {
+      "name": "unknown word",
+      "words": "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon zzz",
+      "expect": "Mnemonic:UnknownWord(11)"
+    },
+    {
+      "name": "checksum-valid 15-word phrase (outside the 12/24 profile)",
+      "words": "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon address",
+      "expect": "UnsupportedWordCount:15"
+    },
+    {
+      "name": "empty",
+      "words": "",
+      "expect": "Mnemonic:BadWordCount(0)"
+    }
+  ],
+  "input_hygiene": [
+    {
+      "name": "case + whitespace folded (tabs, newlines, runs, capitals)",
+      "words": "  ABANDON\tAbandon aBaNdOn abandon ABANDON abandon abandon\nabandon abandon abandon  abandon ABOUT \n",
+      "canonical": "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about"
+    },
+    {
+      "name": "NFKC: fullwidth Latin letters fold to ASCII",
+      "words": "ａｂａｎｄｏｎ abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about",
+      "canonical": "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about"
+    }
+  ],
+  "write_down": {
+    "mnemonic": "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about",
+    "positions": [0, 5, 11],
+    "answers": [
+      "abandon",
+      "abandon",
+      "about"
+    ],
+    "messy_answers": [
+      "  ABANDON ",
+      "Abandon",
+      "\tAbout\n"
+    ],
+    "wrong_answers": [
+      "abandon",
+      "abandon",
+      "zebra"
+    ]
+  }
+}

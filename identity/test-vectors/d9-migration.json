@@ -1,0 +1,116 @@
+{
+  "spec": "§8.4 + §13 + §14 (D14d) — D9-migration round-trip: provisional Layer-1 mnemonic -> L2 keyset -> quarantined legacy files",
+  "frozen": "2026-10-13",
+  "description": "A realistic Layer-1 D9 identity dir (secret.hex + npub + mnemonic - Layer 1's own published NIP-06 test values) is migrated: the preserved mnemonic is re-read (section 8.4 hygiene), the L2 keyset derived (same words, NEW derivation - the NodeId changes once, pre-accepted D9/D13), the legacy dir renamed ASIDE WHOLE to '<dir>.quarantine-d9' (never deleted; secret.hex and npub ride along), and the new section 13 file set written atomically with a fresh announce counter of 0 (a NodeId no peer has seen - the floor+1024 rule does not apply). Detection is fail-closed: partial legacy, mixed legacy+new, an unmigratable dir and a bad-checksum mnemonic are refused (the bad-checksum case leaves the legacy dir untouched). The secp256k1 secret and npub are carried as opaque files - id111 has no secp256k1 machinery. Expect tokens: NotLegacyDir | CorruptLegacy | MixedState | Mnemonic.",
+  "provenance": "Dir body from migrate.rs tests (Layer 1 NIP-06 values); new_node_id generated through migrate() for this freeze and independently re-derived by crosscheck.py.",
+  "legacy": {
+    "mnemonic": "leader monkey parrot ring guide accident before fence cannon height naive bean",
+    "secret_hex": "7f7ff03d123792d6ac594bfa67bf6d0c0ab55b6b1fdb6249303fe861f1ccba9a",
+    "npub": "npub1zutzeysacnf9rru6zqwmxd54mud0k44tst6l70ja5mhv8jjumytsd2x7nu"
+  },
+  "expect": {
+    "old_npub": "npub1zutzeysacnf9rru6zqwmxd54mud0k44tst6l70ja5mhv8jjumytsd2x7nu",
+    "new_node_id": "fc525b955941be2a205dfa5ec5a285907c58fe6d4e4c416356dbd1d7ff65dda0",
+    "descriptor": "01010101",
+    "announce_counter_init": 0,
+    "quarantine_suffix": ".quarantine-d9",
+    "quarantined_files": [
+      "secret.hex",
+      "npub",
+      "mnemonic"
+    ],
+    "new_files": [
+      "mnemonic",
+      "keyset",
+      "nodeid",
+      "descriptor",
+      "counters"
+    ],
+    "new_mnemonic_file_body": "leader monkey parrot ring guide accident before fence cannon height naive bean\n"
+  },
+  "negatives": [
+    {
+      "name": "empty dir",
+      "files": [],
+      "expect": "NotLegacyDir"
+    },
+    {
+      "name": "secret.hex only (partial legacy)",
+      "files": [
+        {
+          "name": "secret.hex",
+          "body": "7f7ff03d123792d6ac594bfa67bf6d0c0ab55b6b1fdb6249303fe861f1ccba9a\n"
+        }
+      ],
+      "expect": "CorruptLegacy"
+    },
+    {
+      "name": "secret.hex + mnemonic, npub missing",
+      "files": [
+        {
+          "name": "secret.hex",
+          "body": "7f7ff03d123792d6ac594bfa67bf6d0c0ab55b6b1fdb6249303fe861f1ccba9a\n"
+        },
+        {
+          "name": "mnemonic",
+          "body": "leader monkey parrot ring guide accident before fence cannon height naive bean\n"
+        }
+      ],
+      "expect": "CorruptLegacy"
+    },
+    {
+      "name": "secret.hex + npub, mnemonic missing (unmigratable)",
+      "files": [
+        {
+          "name": "secret.hex",
+          "body": "7f7ff03d123792d6ac594bfa67bf6d0c0ab55b6b1fdb6249303fe861f1ccba9a\n"
+        },
+        {
+          "name": "npub",
+          "body": "npub1zutzeysacnf9rru6zqwmxd54mud0k44tst6l70ja5mhv8jjumytsd2x7nu\n"
+        }
+      ],
+      "expect": "CorruptLegacy"
+    },
+    {
+      "name": "legacy trio beside a new-format file (mixed state)",
+      "files": [
+        {
+          "name": "secret.hex",
+          "body": "7f7ff03d123792d6ac594bfa67bf6d0c0ab55b6b1fdb6249303fe861f1ccba9a\n"
+        },
+        {
+          "name": "npub",
+          "body": "npub1zutzeysacnf9rru6zqwmxd54mud0k44tst6l70ja5mhv8jjumytsd2x7nu\n"
+        },
+        {
+          "name": "mnemonic",
+          "body": "leader monkey parrot ring guide accident before fence cannon height naive bean\n"
+        },
+        {
+          "name": "keyset",
+          "body": "00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
+        }
+      ],
+      "expect": "MixedState"
+    },
+    {
+      "name": "legacy trio with a bad-checksum mnemonic",
+      "files": [
+        {
+          "name": "secret.hex",
+          "body": "7f7ff03d123792d6ac594bfa67bf6d0c0ab55b6b1fdb6249303fe861f1ccba9a\n"
+        },
+        {
+          "name": "npub",
+          "body": "npub1zutzeysacnf9rru6zqwmxd54mud0k44tst6l70ja5mhv8jjumytsd2x7nu\n"
+        },
+        {
+          "name": "mnemonic",
+          "body": "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon\n"
+        }
+      ],
+      "expect": "Mnemonic"
+    }
+  ]
+}

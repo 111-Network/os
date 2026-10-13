@@ -1,0 +1,423 @@
+{
+  "spec": "§3 + §14 — edge/malleability vectors: strict Ed25519 predicate (non-canonical S/R/A, small-order A and R, malformed A) and X25519 low-order pubkey rejection",
+  "frozen": "2026-10-13",
+  "description": "Wycheproof-class Ed25519 edges for the fleet-wide strict verification predicate (section 3: canonical R/A encodings < 2^255-19, S < l, small-order A and R rejected; dalek default verify() is banned) plus the X25519 low-order blacklist class (RFC 7748 section 6.1 / libsodium). 'expect' is 'ok' or 'err:<VerifyError variant>'. Acceptance/rejection MUST match across implementations (Rust dalek vs Monocypher-C, T9); the specific error variant is Rust-specific diagnostics. NOTE: Monocypher's crypto_eddsa_check is a cofactored ZIP-215-style verifier and WILL accept some of the small-order cases the strict predicate rejects - T9 must wrap it with the strict pre-checks and record the delta in the smoke log (section 11/D14).",
+  "provenance": "Constants lifted from keyset.rs strict_predicate_* and x25519_low_order_rejected_on_ingress tests (RFC 8032 TEST 2 base triple, S+l, S=l, dual-encoding point, identity A/R, blacklist) and extended: the full 8-element torsion subgroup, non-canonical aliases, top-bit variants. Expect tokens recorded from the public verify_strict()/validate_x25519_public_key() at generation time and asserted to be rejections.",
+  "constants": {
+    "group_order_l_le": "edd3f55c1a631258d69cf7a2def9de1400000000000000000000000000000010",
+    "field_prime_p_le": "edffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f",
+    "dual_encoding_canonical_y": "0300000000000000000000000000000000000000000000000000000000000000",
+    "dual_encoding_noncanonical_y_plus_p": "f0ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f"
+  },
+  "torsion_subgroup": [
+    {
+      "name": "identity (y=1), order 1",
+      "encoding": "0100000000000000000000000000000000000000000000000000000000000000",
+      "order": "1"
+    },
+    {
+      "name": "y=-1 (p-1), order 2",
+      "encoding": "ecffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f",
+      "order": "2"
+    },
+    {
+      "name": "y=0, order 4",
+      "encoding": "0000000000000000000000000000000000000000000000000000000000000000",
+      "order": "4"
+    },
+    {
+      "name": "y=0 with x-sign bit, order 4",
+      "encoding": "0000000000000000000000000000000000000000000000000000000000000080",
+      "order": "4"
+    },
+    {
+      "name": "order 8 (a)",
+      "encoding": "c7176a703d4dd84fba3c0b760d10670f2a2053fa2c39ccc64ec7fd7792ac037a",
+      "order": "8"
+    },
+    {
+      "name": "order 8 (b)",
+      "encoding": "c7176a703d4dd84fba3c0b760d10670f2a2053fa2c39ccc64ec7fd7792ac03fa",
+      "order": "8"
+    },
+    {
+      "name": "order 8 (c)",
+      "encoding": "26e8958fc2b227b045c3f489f2ef98f0d5dfac05d3c63339b13802886d53fc05",
+      "order": "8"
+    },
+    {
+      "name": "order 8 (d)",
+      "encoding": "26e8958fc2b227b045c3f489f2ef98f0d5dfac05d3c63339b13802886d53fc85",
+      "order": "8"
+    }
+  ],
+  "ed25519_strict": [
+    {
+      "name": "control: RFC 8032 TEST 2 verifies",
+      "rationale": "positive control - the rejections below are due to the edge, not a broken harness",
+      "public_key": "3d4017c3e843895a92b70aa74d1b7ebc9c982ccf2ec4968cc0cd55f12af4660c",
+      "message": "72",
+      "signature": "92a009a9f0d4cab8720e820b5f642540a2b27b5416503f8fb3762223ebdb69da085ac1e43e15996e458f3613d0f11d8c387b2eaeb4302aeeb00d291612bb0c00",
+      "expect": "ok"
+    },
+    {
+      "name": "S + l (same integer mod l, non-canonical)",
+      "rationale": "malleability: S' = S + l verifies under cofactored/non-strict verifiers",
+      "public_key": "3d4017c3e843895a92b70aa74d1b7ebc9c982ccf2ec4968cc0cd55f12af4660c",
+      "message": "72",
+      "signature": "92a009a9f0d4cab8720e820b5f642540a2b27b5416503f8fb3762223ebdb69daf52db7415978abc61b2c2eb6aeebfca0387b2eaeb4302aeeb00d291612bb0c10",
+      "expect": "err:NonCanonicalS"
+    },
+    {
+      "name": "S = l exactly",
+      "rationale": "S must be < l",
+      "public_key": "3d4017c3e843895a92b70aa74d1b7ebc9c982ccf2ec4968cc0cd55f12af4660c",
+      "message": "72",
+      "signature": "92a009a9f0d4cab8720e820b5f642540a2b27b5416503f8fb3762223ebdb69daedd3f55c1a631258d69cf7a2def9de1400000000000000000000000000000010",
+      "expect": "err:NonCanonicalS"
+    },
+    {
+      "name": "S = 2^253",
+      "rationale": "S above l by the high bits",
+      "public_key": "3d4017c3e843895a92b70aa74d1b7ebc9c982ccf2ec4968cc0cd55f12af4660c",
+      "message": "72",
+      "signature": "92a009a9f0d4cab8720e820b5f642540a2b27b5416503f8fb3762223ebdb69da0000000000000000000000000000000000000000000000000000000000000020",
+      "expect": "err:NonCanonicalS"
+    },
+    {
+      "name": "S = 2^256 - 1",
+      "rationale": "all-ones S",
+      "public_key": "3d4017c3e843895a92b70aa74d1b7ebc9c982ccf2ec4968cc0cd55f12af4660c",
+      "message": "72",
+      "signature": "92a009a9f0d4cab8720e820b5f642540a2b27b5416503f8fb3762223ebdb69daffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+      "expect": "err:NonCanonicalS"
+    },
+    {
+      "name": "S = l - 1 (canonical range, wrong signature)",
+      "rationale": "boundary control: canonical but not the valid S",
+      "public_key": "3d4017c3e843895a92b70aa74d1b7ebc9c982ccf2ec4968cc0cd55f12af4660c",
+      "message": "72",
+      "signature": "92a009a9f0d4cab8720e820b5f642540a2b27b5416503f8fb3762223ebdb69daecd3f55c1a631258d69cf7a2def9de1400000000000000000000000000000010",
+      "expect": "err:InvalidSignature"
+    },
+    {
+      "name": "R = non-canonical alias (y + p) of a prime-order point",
+      "rationale": "R must be a canonical field element < 2^255 - 19",
+      "public_key": "3d4017c3e843895a92b70aa74d1b7ebc9c982ccf2ec4968cc0cd55f12af4660c",
+      "message": "72",
+      "signature": "f0ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f085ac1e43e15996e458f3613d0f11d8c387b2eaeb4302aeeb00d291612bb0c00",
+      "expect": "err:NonCanonicalR"
+    },
+    {
+      "name": "R = y=p (alias of y=0)",
+      "rationale": "non-canonical small-order alias in R",
+      "public_key": "3d4017c3e843895a92b70aa74d1b7ebc9c982ccf2ec4968cc0cd55f12af4660c",
+      "message": "72",
+      "signature": "edffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f085ac1e43e15996e458f3613d0f11d8c387b2eaeb4302aeeb00d291612bb0c00",
+      "expect": "err:NonCanonicalR"
+    },
+    {
+      "name": "R = y=p+1 (alias of the identity)",
+      "rationale": "non-canonical small-order alias in R",
+      "public_key": "3d4017c3e843895a92b70aa74d1b7ebc9c982ccf2ec4968cc0cd55f12af4660c",
+      "message": "72",
+      "signature": "eeffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f085ac1e43e15996e458f3613d0f11d8c387b2eaeb4302aeeb00d291612bb0c00",
+      "expect": "err:NonCanonicalR"
+    },
+    {
+      "name": "R = y=2^255-1 (highest alias)",
+      "rationale": "non-canonical small-order alias in R",
+      "public_key": "3d4017c3e843895a92b70aa74d1b7ebc9c982ccf2ec4968cc0cd55f12af4660c",
+      "message": "72",
+      "signature": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f085ac1e43e15996e458f3613d0f11d8c387b2eaeb4302aeeb00d291612bb0c00",
+      "expect": "err:NonCanonicalR"
+    },
+    {
+      "name": "A = non-canonical alias (y + p) of a prime-order point",
+      "rationale": "A must be a canonical field element",
+      "public_key": "f0ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f",
+      "message": "72",
+      "signature": "92a009a9f0d4cab8720e820b5f642540a2b27b5416503f8fb3762223ebdb69da085ac1e43e15996e458f3613d0f11d8c387b2eaeb4302aeeb00d291612bb0c00",
+      "expect": "err:NonCanonicalPublicKey"
+    },
+    {
+      "name": "A = y=p (alias of y=0)",
+      "rationale": "non-canonical small-order alias in A",
+      "public_key": "edffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f",
+      "message": "72",
+      "signature": "92a009a9f0d4cab8720e820b5f642540a2b27b5416503f8fb3762223ebdb69da085ac1e43e15996e458f3613d0f11d8c387b2eaeb4302aeeb00d291612bb0c00",
+      "expect": "err:NonCanonicalPublicKey"
+    },
+    {
+      "name": "A = y=p+1 (alias of the identity)",
+      "rationale": "non-canonical small-order alias in A",
+      "public_key": "eeffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f",
+      "message": "72",
+      "signature": "92a009a9f0d4cab8720e820b5f642540a2b27b5416503f8fb3762223ebdb69da085ac1e43e15996e458f3613d0f11d8c387b2eaeb4302aeeb00d291612bb0c00",
+      "expect": "err:NonCanonicalPublicKey"
+    },
+    {
+      "name": "small-order R: identity (y=1), order 1",
+      "rationale": "valid A, R replaced by a torsion point",
+      "public_key": "3d4017c3e843895a92b70aa74d1b7ebc9c982ccf2ec4968cc0cd55f12af4660c",
+      "message": "72",
+      "signature": "0100000000000000000000000000000000000000000000000000000000000000085ac1e43e15996e458f3613d0f11d8c387b2eaeb4302aeeb00d291612bb0c00",
+      "expect": "err:InvalidSignature"
+    },
+    {
+      "name": "small-order R: y=-1 (p-1), order 2",
+      "rationale": "valid A, R replaced by a torsion point",
+      "public_key": "3d4017c3e843895a92b70aa74d1b7ebc9c982ccf2ec4968cc0cd55f12af4660c",
+      "message": "72",
+      "signature": "ecffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f085ac1e43e15996e458f3613d0f11d8c387b2eaeb4302aeeb00d291612bb0c00",
+      "expect": "err:InvalidSignature"
+    },
+    {
+      "name": "small-order R: y=0, order 4",
+      "rationale": "valid A, R replaced by a torsion point",
+      "public_key": "3d4017c3e843895a92b70aa74d1b7ebc9c982ccf2ec4968cc0cd55f12af4660c",
+      "message": "72",
+      "signature": "0000000000000000000000000000000000000000000000000000000000000000085ac1e43e15996e458f3613d0f11d8c387b2eaeb4302aeeb00d291612bb0c00",
+      "expect": "err:InvalidSignature"
+    },
+    {
+      "name": "small-order R: y=0 with x-sign bit, order 4",
+      "rationale": "valid A, R replaced by a torsion point",
+      "public_key": "3d4017c3e843895a92b70aa74d1b7ebc9c982ccf2ec4968cc0cd55f12af4660c",
+      "message": "72",
+      "signature": "0000000000000000000000000000000000000000000000000000000000000080085ac1e43e15996e458f3613d0f11d8c387b2eaeb4302aeeb00d291612bb0c00",
+      "expect": "err:InvalidSignature"
+    },
+    {
+      "name": "small-order R: order 8 (a)",
+      "rationale": "valid A, R replaced by a torsion point",
+      "public_key": "3d4017c3e843895a92b70aa74d1b7ebc9c982ccf2ec4968cc0cd55f12af4660c",
+      "message": "72",
+      "signature": "c7176a703d4dd84fba3c0b760d10670f2a2053fa2c39ccc64ec7fd7792ac037a085ac1e43e15996e458f3613d0f11d8c387b2eaeb4302aeeb00d291612bb0c00",
+      "expect": "err:InvalidSignature"
+    },
+    {
+      "name": "small-order R: order 8 (b)",
+      "rationale": "valid A, R replaced by a torsion point",
+      "public_key": "3d4017c3e843895a92b70aa74d1b7ebc9c982ccf2ec4968cc0cd55f12af4660c",
+      "message": "72",
+      "signature": "c7176a703d4dd84fba3c0b760d10670f2a2053fa2c39ccc64ec7fd7792ac03fa085ac1e43e15996e458f3613d0f11d8c387b2eaeb4302aeeb00d291612bb0c00",
+      "expect": "err:InvalidSignature"
+    },
+    {
+      "name": "small-order R: order 8 (c)",
+      "rationale": "valid A, R replaced by a torsion point",
+      "public_key": "3d4017c3e843895a92b70aa74d1b7ebc9c982ccf2ec4968cc0cd55f12af4660c",
+      "message": "72",
+      "signature": "26e8958fc2b227b045c3f489f2ef98f0d5dfac05d3c63339b13802886d53fc05085ac1e43e15996e458f3613d0f11d8c387b2eaeb4302aeeb00d291612bb0c00",
+      "expect": "err:InvalidSignature"
+    },
+    {
+      "name": "small-order R: order 8 (d)",
+      "rationale": "valid A, R replaced by a torsion point",
+      "public_key": "3d4017c3e843895a92b70aa74d1b7ebc9c982ccf2ec4968cc0cd55f12af4660c",
+      "message": "72",
+      "signature": "26e8958fc2b227b045c3f489f2ef98f0d5dfac05d3c63339b13802886d53fc85085ac1e43e15996e458f3613d0f11d8c387b2eaeb4302aeeb00d291612bb0c00",
+      "expect": "err:InvalidSignature"
+    },
+    {
+      "name": "small-order A: identity (y=1), order 1 (R = identity, S = 0)",
+      "rationale": "classic cofactored/ZIP-215 acceptance case; strict predicate MUST reject",
+      "public_key": "0100000000000000000000000000000000000000000000000000000000000000",
+      "message": "616e79206d657373616765",
+      "signature": "01000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
+      "expect": "err:InvalidSignature"
+    },
+    {
+      "name": "small-order A: y=-1 (p-1), order 2 (R = identity, S = 0)",
+      "rationale": "classic cofactored/ZIP-215 acceptance case; strict predicate MUST reject",
+      "public_key": "ecffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f",
+      "message": "616e79206d657373616765",
+      "signature": "01000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
+      "expect": "err:InvalidSignature"
+    },
+    {
+      "name": "small-order A: y=0, order 4 (R = identity, S = 0)",
+      "rationale": "classic cofactored/ZIP-215 acceptance case; strict predicate MUST reject",
+      "public_key": "0000000000000000000000000000000000000000000000000000000000000000",
+      "message": "616e79206d657373616765",
+      "signature": "01000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
+      "expect": "err:InvalidSignature"
+    },
+    {
+      "name": "small-order A: y=0 with x-sign bit, order 4 (R = identity, S = 0)",
+      "rationale": "classic cofactored/ZIP-215 acceptance case; strict predicate MUST reject",
+      "public_key": "0000000000000000000000000000000000000000000000000000000000000080",
+      "message": "616e79206d657373616765",
+      "signature": "01000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
+      "expect": "err:InvalidSignature"
+    },
+    {
+      "name": "small-order A: order 8 (a) (R = identity, S = 0)",
+      "rationale": "classic cofactored/ZIP-215 acceptance case; strict predicate MUST reject",
+      "public_key": "c7176a703d4dd84fba3c0b760d10670f2a2053fa2c39ccc64ec7fd7792ac037a",
+      "message": "616e79206d657373616765",
+      "signature": "01000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
+      "expect": "err:InvalidSignature"
+    },
+    {
+      "name": "small-order A: order 8 (b) (R = identity, S = 0)",
+      "rationale": "classic cofactored/ZIP-215 acceptance case; strict predicate MUST reject",
+      "public_key": "c7176a703d4dd84fba3c0b760d10670f2a2053fa2c39ccc64ec7fd7792ac03fa",
+      "message": "616e79206d657373616765",
+      "signature": "01000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
+      "expect": "err:InvalidSignature"
+    },
+    {
+      "name": "small-order A: order 8 (c) (R = identity, S = 0)",
+      "rationale": "classic cofactored/ZIP-215 acceptance case; strict predicate MUST reject",
+      "public_key": "26e8958fc2b227b045c3f489f2ef98f0d5dfac05d3c63339b13802886d53fc05",
+      "message": "616e79206d657373616765",
+      "signature": "01000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
+      "expect": "err:InvalidSignature"
+    },
+    {
+      "name": "small-order A: order 8 (d) (R = identity, S = 0)",
+      "rationale": "classic cofactored/ZIP-215 acceptance case; strict predicate MUST reject",
+      "public_key": "26e8958fc2b227b045c3f489f2ef98f0d5dfac05d3c63339b13802886d53fc85",
+      "message": "616e79206d657373616765",
+      "signature": "01000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
+      "expect": "err:InvalidSignature"
+    },
+    {
+      "name": "small-order A = R = identity, S = 0 (empty message)",
+      "rationale": "the canonical universal forgery against non-strict verifiers",
+      "public_key": "0100000000000000000000000000000000000000000000000000000000000000",
+      "message": "",
+      "signature": "01000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
+      "expect": "err:InvalidSignature"
+    },
+    {
+      "name": "A not on the curve (smallest non-decompressible y)",
+      "rationale": "decompression failure",
+      "public_key": "0200000000000000000000000000000000000000000000000000000000000000",
+      "message": "72",
+      "signature": "92a009a9f0d4cab8720e820b5f642540a2b27b5416503f8fb3762223ebdb69da085ac1e43e15996e458f3613d0f11d8c387b2eaeb4302aeeb00d291612bb0c00",
+      "expect": "err:MalformedPublicKey"
+    },
+    {
+      "name": "wrong message",
+      "rationale": "control",
+      "public_key": "3d4017c3e843895a92b70aa74d1b7ebc9c982ccf2ec4968cc0cd55f12af4660c",
+      "message": "73",
+      "signature": "92a009a9f0d4cab8720e820b5f642540a2b27b5416503f8fb3762223ebdb69da085ac1e43e15996e458f3613d0f11d8c387b2eaeb4302aeeb00d291612bb0c00",
+      "expect": "err:InvalidSignature"
+    },
+    {
+      "name": "wrong key (RFC 8032 TEST 1 pubkey)",
+      "rationale": "control",
+      "public_key": "d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a",
+      "message": "72",
+      "signature": "92a009a9f0d4cab8720e820b5f642540a2b27b5416503f8fb3762223ebdb69da085ac1e43e15996e458f3613d0f11d8c387b2eaeb4302aeeb00d291612bb0c00",
+      "expect": "err:InvalidSignature"
+    },
+    {
+      "name": "R bit-flipped",
+      "rationale": "control",
+      "public_key": "3d4017c3e843895a92b70aa74d1b7ebc9c982ccf2ec4968cc0cd55f12af4660c",
+      "message": "72",
+      "signature": "93a009a9f0d4cab8720e820b5f642540a2b27b5416503f8fb3762223ebdb69da085ac1e43e15996e458f3613d0f11d8c387b2eaeb4302aeeb00d291612bb0c00",
+      "expect": "err:InvalidSignature"
+    },
+    {
+      "name": "A = identity with x-sign bit set",
+      "rationale": "x = 0 with sign bit 1 is an invalid encoding per RFC 8032 5.1.3 (dalek decompresses it); the strict predicate still rejects it via the small-order rule - implementations must reject it either way",
+      "public_key": "0100000000000000000000000000000000000000000000000000000000000080",
+      "message": "72",
+      "signature": "92a009a9f0d4cab8720e820b5f642540a2b27b5416503f8fb3762223ebdb69da085ac1e43e15996e458f3613d0f11d8c387b2eaeb4302aeeb00d291612bb0c00",
+      "expect": "err:InvalidSignature"
+    },
+    {
+      "name": "R = identity with x-sign bit set",
+      "rationale": "x = 0 with sign bit 1 is an invalid encoding per RFC 8032 5.1.3 (dalek decompresses it); the strict predicate still rejects it via the small-order rule - implementations must reject it either way",
+      "public_key": "3d4017c3e843895a92b70aa74d1b7ebc9c982ccf2ec4968cc0cd55f12af4660c",
+      "message": "72",
+      "signature": "0100000000000000000000000000000000000000000000000000000000000080085ac1e43e15996e458f3613d0f11d8c387b2eaeb4302aeeb00d291612bb0c00",
+      "expect": "err:InvalidSignature"
+    }
+  ],
+  "x25519_low_order": [
+    {
+      "name": "u = 0 (order 4)",
+      "u": "0000000000000000000000000000000000000000000000000000000000000000",
+      "expect": "LowOrderPublicKey"
+    },
+    {
+      "name": "u = 1 (order 4)",
+      "u": "0100000000000000000000000000000000000000000000000000000000000000",
+      "expect": "LowOrderPublicKey"
+    },
+    {
+      "name": "order-8 point (a)",
+      "u": "e0eb7a7c3b41b8ae1656e3faf19fc46ada098deb9c32b1fd866205165f49b800",
+      "expect": "LowOrderPublicKey"
+    },
+    {
+      "name": "order-8 point (b)",
+      "u": "5f9c95bca3508c24b1d0b1559c83ef5b04445cc4581c8e86d8224eddd09f1157",
+      "expect": "LowOrderPublicKey"
+    },
+    {
+      "name": "u = p - 1 (non-canonical wrap)",
+      "u": "ecffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f",
+      "expect": "LowOrderPublicKey"
+    },
+    {
+      "name": "u = p (non-canonical zero)",
+      "u": "edffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f",
+      "expect": "LowOrderPublicKey"
+    },
+    {
+      "name": "u = p + 1 (non-canonical one)",
+      "u": "eeffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f",
+      "expect": "LowOrderPublicKey"
+    },
+    {
+      "name": "u = 0, top bit set (ignored by X25519)",
+      "u": "0000000000000000000000000000000000000000000000000000000000000080",
+      "expect": "LowOrderPublicKey"
+    },
+    {
+      "name": "u = 1, top bit set (ignored by X25519)",
+      "u": "0100000000000000000000000000000000000000000000000000000000000080",
+      "expect": "LowOrderPublicKey"
+    },
+    {
+      "name": "order-8 point (a), top bit set",
+      "u": "e0eb7a7c3b41b8ae1656e3faf19fc46ada098deb9c32b1fd866205165f49b880",
+      "expect": "LowOrderPublicKey"
+    },
+    {
+      "name": "order-8 point (b), top bit set",
+      "u": "5f9c95bca3508c24b1d0b1559c83ef5b04445cc4581c8e86d8224eddd09f11d7",
+      "expect": "LowOrderPublicKey"
+    }
+  ],
+  "x25519_accepted_controls": [
+    {
+      "name": "RFC 7748 basepoint u = 9",
+      "u": "0900000000000000000000000000000000000000000000000000000000000000",
+      "expect": "ok"
+    },
+    {
+      "name": "RFC 7748 Alice public",
+      "u": "8520f0098930a754748b7ddcb43ef75a0dbf3a0d26381af4eba4a98eaa9b4e6a",
+      "expect": "ok"
+    },
+    {
+      "name": "RFC 7748 Bob public",
+      "u": "de9edb7d7b7dc1b4d35b61c2ece435373f8343c85b78674dadfc7e146f882b4f",
+      "expect": "ok"
+    },
+    {
+      "name": "project X25519 public",
+      "u": "712678456644b8cba1389072ee5dec93d044875ca13c73e217157814bbb99218",
+      "expect": "ok"
+    }
+  ]
+}

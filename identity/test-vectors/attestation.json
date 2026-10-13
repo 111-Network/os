@@ -1,0 +1,266 @@
+{
+  "spec": "§10 + §14 — transport attestation (F1) encode/verify round-trip and negatives (expired ordering, field-swap, cross-node transplant, superseded-but-replayed)",
+  "frozen": "2026-10-13",
+  "description": "The 202B cross-signed attestation: version(1) || node_pubkey(32) || transport_id(1; 0x01 = nostr-secp256k1) || transport_key(32) || expiry_epoch(LE u64, mesh-epoch) || node_sig(64) || transport_sig(64). node_sig covers '111/attest-node/v1' || version || node_pubkey || transport_key || transport_id || expiry_epoch (NOTE: transport_key BEFORE transport_id - differs from the wire order); transport_sig covers '111/attest-transport/v1' || node_pubkey and is OPAQUE bytes to id111 (secp256k1/BIP340 verification is Layer 7's, behind the TransportVerifier seam; the KAT carries a fixed placeholder 0xa0..0xdf). Per section 14 these vectors cover encoding + signature verification only: expiry SEMANTICS are untestable until the mesh-epoch source lands (section 15) - the expiry cases here pin only the stored-and-compared ordering (a caller-supplied epoch, dead at current >= expiry_epoch). Supersedure: per (node_pubkey, transport_id) the greatest expiry_epoch wins; re-publication of a superseded attestation is rejected. 'expect' tokens: ok | err:length:<n> | err:version:<v> | err:tid:<b> | err:node-sig:<VerifyError> | err:transport-sig | err:expired:<expiry>:<current> | err:superseded:<retained>:<offered> | err:conflict:<epoch> | ok:pinned | ok:supersedes:<previous> | ok:duplicate. Epochs are decimal strings (u64).",
+  "provenance": "KAT harvested from attest.rs::attestation_kat_for_t8 (--nocapture); negatives/expiry/supersedure generated through the public API (NodeLeg::issue/complete, Keyset::sign_with_tag for crafted node_sigs) with expect tokens recorded at generation time; crosscheck.py independently verifies the KAT node_sig over the tag-prefixed signed input.",
+  "tags": {
+    "node": "111/attest-node/v1",
+    "transport": "111/attest-transport/v1"
+  },
+  "signers": {
+    "a": {
+      "mnemonic": "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about",
+      "node_id": "6f1d5331e36e16d341fa06c9f622cc8569710f2a62d7491e9be8e953df844f01"
+    },
+    "b": {
+      "mnemonic": "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon art",
+      "node_id": "5ddf5911edf0541c88e864d7590045c410f420d04e73f9d8507dc856591506b0"
+    }
+  },
+  "kat": {
+    "signer": "a",
+    "node_pubkey": "6f1d5331e36e16d341fa06c9f622cc8569710f2a62d7491e9be8e953df844f01",
+    "transport_id": 1,
+    "transport_key": "e0e1e2e3e4e5e6e7e8e9eaebecedeeeff0f1f2f3f4f5f6f7f8f9fafbfcfdfeff",
+    "expiry_epoch": "1234605616436508552",
+    "expiry_epoch_le": "8877665544332211",
+    "transport_sig_opaque": "a0a1a2a3a4a5a6a7a8a9aaabacadaeafb0b1b2b3b4b5b6b7b8b9babbbcbdbebfc0c1c2c3c4c5c6c7c8c9cacbcccdcecfd0d1d2d3d4d5d6d7d8d9dadbdcdddedf",
+    "node_sig": "b7ed757d585966ebe924715493daee606b6e69865784e49fd3de4c0d1cf55a36055b88ffb7c2a909f0aecebb5d3a4af4af58fec400eae78a5583564378b16303",
+    "signed_input_node": "3131312f6174746573742d6e6f64652f7631016f1d5331e36e16d341fa06c9f622cc8569710f2a62d7491e9be8e953df844f01e0e1e2e3e4e5e6e7e8e9eaebecedeeeff0f1f2f3f4f5f6f7f8f9fafbfcfdfeff018877665544332211",
+    "signed_input_transport": "3131312f6174746573742d7472616e73706f72742f76316f1d5331e36e16d341fa06c9f622cc8569710f2a62d7491e9be8e953df844f01",
+    "wire": "016f1d5331e36e16d341fa06c9f622cc8569710f2a62d7491e9be8e953df844f0101e0e1e2e3e4e5e6e7e8e9eaebecedeeeff0f1f2f3f4f5f6f7f8f9fafbfcfdfeff8877665544332211b7ed757d585966ebe924715493daee606b6e69865784e49fd3de4c0d1cf55a36055b88ffb7c2a909f0aecebb5d3a4af4af58fec400eae78a5583564378b16303a0a1a2a3a4a5a6a7a8a9aaabacadaeafb0b1b2b3b4b5b6b7b8b9babbbcbdbebfc0c1c2c3c4c5c6c7c8c9cacbcccdcecfd0d1d2d3d4d5d6d7d8d9dadbdcdddedf"
+  },
+  "negatives": [
+    {
+      "name": "201 bytes",
+      "rationale": "fixed-field binary, exact length (section 12 rule 7)",
+      "wire": "016f1d5331e36e16d341fa06c9f622cc8569710f2a62d7491e9be8e953df844f0101e0e1e2e3e4e5e6e7e8e9eaebecedeeeff0f1f2f3f4f5f6f7f8f9fafbfcfdfeff8877665544332211b7ed757d585966ebe924715493daee606b6e69865784e49fd3de4c0d1cf55a36055b88ffb7c2a909f0aecebb5d3a4af4af58fec400eae78a5583564378b16303a0a1a2a3a4a5a6a7a8a9aaabacadaeafb0b1b2b3b4b5b6b7b8b9babbbcbdbebfc0c1c2c3c4c5c6c7c8c9cacbcccdcecfd0d1d2d3d4d5d6d7d8d9dadbdcddde",
+      "expect": "err:length:201"
+    },
+    {
+      "name": "203 bytes",
+      "rationale": "exact length",
+      "wire": "016f1d5331e36e16d341fa06c9f622cc8569710f2a62d7491e9be8e953df844f0101e0e1e2e3e4e5e6e7e8e9eaebecedeeeff0f1f2f3f4f5f6f7f8f9fafbfcfdfeff8877665544332211b7ed757d585966ebe924715493daee606b6e69865784e49fd3de4c0d1cf55a36055b88ffb7c2a909f0aecebb5d3a4af4af58fec400eae78a5583564378b16303a0a1a2a3a4a5a6a7a8a9aaabacadaeafb0b1b2b3b4b5b6b7b8b9babbbcbdbebfc0c1c2c3c4c5c6c7c8c9cacbcccdcecfd0d1d2d3d4d5d6d7d8d9dadbdcdddedf00",
+      "expect": "err:length:203"
+    },
+    {
+      "name": "empty",
+      "rationale": "exact length",
+      "wire": "",
+      "expect": "err:length:0"
+    },
+    {
+      "name": "unknown version 0x00",
+      "rationale": "unknown version => fail closed",
+      "wire": "006f1d5331e36e16d341fa06c9f622cc8569710f2a62d7491e9be8e953df844f0101e0e1e2e3e4e5e6e7e8e9eaebecedeeeff0f1f2f3f4f5f6f7f8f9fafbfcfdfeff8877665544332211b7ed757d585966ebe924715493daee606b6e69865784e49fd3de4c0d1cf55a36055b88ffb7c2a909f0aecebb5d3a4af4af58fec400eae78a5583564378b16303a0a1a2a3a4a5a6a7a8a9aaabacadaeafb0b1b2b3b4b5b6b7b8b9babbbcbdbebfc0c1c2c3c4c5c6c7c8c9cacbcccdcecfd0d1d2d3d4d5d6d7d8d9dadbdcdddedf",
+      "expect": "err:version:0"
+    },
+    {
+      "name": "unknown version 0x02",
+      "rationale": "unknown version => fail closed",
+      "wire": "026f1d5331e36e16d341fa06c9f622cc8569710f2a62d7491e9be8e953df844f0101e0e1e2e3e4e5e6e7e8e9eaebecedeeeff0f1f2f3f4f5f6f7f8f9fafbfcfdfeff8877665544332211b7ed757d585966ebe924715493daee606b6e69865784e49fd3de4c0d1cf55a36055b88ffb7c2a909f0aecebb5d3a4af4af58fec400eae78a5583564378b16303a0a1a2a3a4a5a6a7a8a9aaabacadaeafb0b1b2b3b4b5b6b7b8b9babbbcbdbebfc0c1c2c3c4c5c6c7c8c9cacbcccdcecfd0d1d2d3d4d5d6d7d8d9dadbdcdddedf",
+      "expect": "err:version:2"
+    },
+    {
+      "name": "unknown version 0xff",
+      "rationale": "unknown version => fail closed",
+      "wire": "ff6f1d5331e36e16d341fa06c9f622cc8569710f2a62d7491e9be8e953df844f0101e0e1e2e3e4e5e6e7e8e9eaebecedeeeff0f1f2f3f4f5f6f7f8f9fafbfcfdfeff8877665544332211b7ed757d585966ebe924715493daee606b6e69865784e49fd3de4c0d1cf55a36055b88ffb7c2a909f0aecebb5d3a4af4af58fec400eae78a5583564378b16303a0a1a2a3a4a5a6a7a8a9aaabacadaeafb0b1b2b3b4b5b6b7b8b9babbbcbdbebfc0c1c2c3c4c5c6c7c8c9cacbcccdcecfd0d1d2d3d4d5d6d7d8d9dadbdcdddedf",
+      "expect": "err:version:255"
+    },
+    {
+      "name": "unknown transport_id 0x00",
+      "rationale": "the L2-owned registry assigns only 0x01 in v1; unknown => fail closed",
+      "wire": "016f1d5331e36e16d341fa06c9f622cc8569710f2a62d7491e9be8e953df844f0100e0e1e2e3e4e5e6e7e8e9eaebecedeeeff0f1f2f3f4f5f6f7f8f9fafbfcfdfeff8877665544332211b7ed757d585966ebe924715493daee606b6e69865784e49fd3de4c0d1cf55a36055b88ffb7c2a909f0aecebb5d3a4af4af58fec400eae78a5583564378b16303a0a1a2a3a4a5a6a7a8a9aaabacadaeafb0b1b2b3b4b5b6b7b8b9babbbcbdbebfc0c1c2c3c4c5c6c7c8c9cacbcccdcecfd0d1d2d3d4d5d6d7d8d9dadbdcdddedf",
+      "expect": "err:tid:0"
+    },
+    {
+      "name": "unknown transport_id 0x02",
+      "rationale": "the L2-owned registry assigns only 0x01 in v1; unknown => fail closed",
+      "wire": "016f1d5331e36e16d341fa06c9f622cc8569710f2a62d7491e9be8e953df844f0102e0e1e2e3e4e5e6e7e8e9eaebecedeeeff0f1f2f3f4f5f6f7f8f9fafbfcfdfeff8877665544332211b7ed757d585966ebe924715493daee606b6e69865784e49fd3de4c0d1cf55a36055b88ffb7c2a909f0aecebb5d3a4af4af58fec400eae78a5583564378b16303a0a1a2a3a4a5a6a7a8a9aaabacadaeafb0b1b2b3b4b5b6b7b8b9babbbcbdbebfc0c1c2c3c4c5c6c7c8c9cacbcccdcecfd0d1d2d3d4d5d6d7d8d9dadbdcdddedf",
+      "expect": "err:tid:2"
+    },
+    {
+      "name": "unknown transport_id 0xff",
+      "rationale": "the L2-owned registry assigns only 0x01 in v1; unknown => fail closed",
+      "wire": "016f1d5331e36e16d341fa06c9f622cc8569710f2a62d7491e9be8e953df844f01ffe0e1e2e3e4e5e6e7e8e9eaebecedeeeff0f1f2f3f4f5f6f7f8f9fafbfcfdfeff8877665544332211b7ed757d585966ebe924715493daee606b6e69865784e49fd3de4c0d1cf55a36055b88ffb7c2a909f0aecebb5d3a4af4af58fec400eae78a5583564378b16303a0a1a2a3a4a5a6a7a8a9aaabacadaeafb0b1b2b3b4b5b6b7b8b9babbbcbdbebfc0c1c2c3c4c5c6c7c8c9cacbcccdcecfd0d1d2d3d4d5d6d7d8d9dadbdcdddedf",
+      "expect": "err:tid:255"
+    },
+    {
+      "name": "node_sig bit flipped",
+      "rationale": "node leg strict verify",
+      "wire": "016f1d5331e36e16d341fa06c9f622cc8569710f2a62d7491e9be8e953df844f0101e0e1e2e3e4e5e6e7e8e9eaebecedeeeff0f1f2f3f4f5f6f7f8f9fafbfcfdfeff8877665544332211b6ed757d585966ebe924715493daee606b6e69865784e49fd3de4c0d1cf55a36055b88ffb7c2a909f0aecebb5d3a4af4af58fec400eae78a5583564378b16303a0a1a2a3a4a5a6a7a8a9aaabacadaeafb0b1b2b3b4b5b6b7b8b9babbbcbdbebfc0c1c2c3c4c5c6c7c8c9cacbcccdcecfd0d1d2d3d4d5d6d7d8d9dadbdcdddedf",
+      "expect": "err:node-sig:InvalidSignature"
+    },
+    {
+      "name": "expiry_epoch tampered (field not re-signed)",
+      "rationale": "expiry is inside the node_sig signed region",
+      "wire": "016f1d5331e36e16d341fa06c9f622cc8569710f2a62d7491e9be8e953df844f0101e0e1e2e3e4e5e6e7e8e9eaebecedeeeff0f1f2f3f4f5f6f7f8f9fafbfcfdfeff8977665544332211b7ed757d585966ebe924715493daee606b6e69865784e49fd3de4c0d1cf55a36055b88ffb7c2a909f0aecebb5d3a4af4af58fec400eae78a5583564378b16303a0a1a2a3a4a5a6a7a8a9aaabacadaeafb0b1b2b3b4b5b6b7b8b9babbbcbdbebfc0c1c2c3c4c5c6c7c8c9cacbcccdcecfd0d1d2d3d4d5d6d7d8d9dadbdcdddedf",
+      "expect": "err:node-sig:InvalidSignature"
+    },
+    {
+      "name": "transport_key tampered",
+      "rationale": "transport_key is inside the node_sig signed region",
+      "wire": "016f1d5331e36e16d341fa06c9f622cc8569710f2a62d7491e9be8e953df844f0101e1e1e2e3e4e5e6e7e8e9eaebecedeeeff0f1f2f3f4f5f6f7f8f9fafbfcfdfeff8877665544332211b7ed757d585966ebe924715493daee606b6e69865784e49fd3de4c0d1cf55a36055b88ffb7c2a909f0aecebb5d3a4af4af58fec400eae78a5583564378b16303a0a1a2a3a4a5a6a7a8a9aaabacadaeafb0b1b2b3b4b5b6b7b8b9babbbcbdbebfc0c1c2c3c4c5c6c7c8c9cacbcccdcecfd0d1d2d3d4d5d6d7d8d9dadbdcdddedf",
+      "expect": "err:node-sig:InvalidSignature"
+    },
+    {
+      "name": "node_pubkey tampered",
+      "rationale": "node_pubkey is inside the node_sig signed region (and is the verification key)",
+      "wire": "016e1d5331e36e16d341fa06c9f622cc8569710f2a62d7491e9be8e953df844f0101e0e1e2e3e4e5e6e7e8e9eaebecedeeeff0f1f2f3f4f5f6f7f8f9fafbfcfdfeff8877665544332211b7ed757d585966ebe924715493daee606b6e69865784e49fd3de4c0d1cf55a36055b88ffb7c2a909f0aecebb5d3a4af4af58fec400eae78a5583564378b16303a0a1a2a3a4a5a6a7a8a9aaabacadaeafb0b1b2b3b4b5b6b7b8b9babbbcbdbebfc0c1c2c3c4c5c6c7c8c9cacbcccdcecfd0d1d2d3d4d5d6d7d8d9dadbdcdddedf",
+      "expect": "err:node-sig:MalformedPublicKey"
+    },
+    {
+      "name": "cross-node transplant: A's attestation re-labelled with B's node_pubkey",
+      "rationale": "an attestation cannot be moved to another node",
+      "wire": "015ddf5911edf0541c88e864d7590045c410f420d04e73f9d8507dc856591506b001e0e1e2e3e4e5e6e7e8e9eaebecedeeeff0f1f2f3f4f5f6f7f8f9fafbfcfdfeff8877665544332211b7ed757d585966ebe924715493daee606b6e69865784e49fd3de4c0d1cf55a36055b88ffb7c2a909f0aecebb5d3a4af4af58fec400eae78a5583564378b16303a0a1a2a3a4a5a6a7a8a9aaabacadaeafb0b1b2b3b4b5b6b7b8b9babbbcbdbebfc0c1c2c3c4c5c6c7c8c9cacbcccdcecfd0d1d2d3d4d5d6d7d8d9dadbdcdddedf",
+      "expect": "err:node-sig:InvalidSignature"
+    },
+    {
+      "name": "cross-node transplant: B's attestation re-labelled with A's node_pubkey",
+      "rationale": "an attestation cannot be moved to another node",
+      "wire": "016f1d5331e36e16d341fa06c9f622cc8569710f2a62d7491e9be8e953df844f0101e0e1e2e3e4e5e6e7e8e9eaebecedeeeff0f1f2f3f4f5f6f7f8f9fafbfcfdfeff8877665544332211047b6dbe598b9e66aecc9284c92c792ab14b0a5a7130b92d828031e70293b710640d4b5255285b9f7b1edcb978bc7616c4ac448646a08bb8550c616f8ec97403a0a1a2a3a4a5a6a7a8a9aaabacadaeafb0b1b2b3b4b5b6b7b8b9babbbcbdbebfc0c1c2c3c4c5c6c7c8c9cacbcccdcecfd0d1d2d3d4d5d6d7d8d9dadbdcdddedf",
+      "expect": "err:node-sig:InvalidSignature"
+    },
+    {
+      "name": "field-swap: node_sig over the WIRE-order body (transport_id before transport_key)",
+      "rationale": "section 10 pins the signed-input order, which differs from the wire order",
+      "wire": "016f1d5331e36e16d341fa06c9f622cc8569710f2a62d7491e9be8e953df844f0101e0e1e2e3e4e5e6e7e8e9eaebecedeeeff0f1f2f3f4f5f6f7f8f9fafbfcfdfeff8877665544332211943aa24a8c97cbe5f56c08574d018028b6893f56bd1636382f1949ecf93e8570688caaadb7f9dd2678ec8b19a8981cc84192a41721a2bcd2bb6d4ab2638b7c0ca0a1a2a3a4a5a6a7a8a9aaabacadaeafb0b1b2b3b4b5b6b7b8b9babbbcbdbebfc0c1c2c3c4c5c6c7c8c9cacbcccdcecfd0d1d2d3d4d5d6d7d8d9dadbdcdddedf",
+      "expect": "err:node-sig:InvalidSignature"
+    },
+    {
+      "name": "field-swap: node_pubkey and transport_key positions exchanged",
+      "rationale": "fields are positional and signed",
+      "wire": "01e0e1e2e3e4e5e6e7e8e9eaebecedeeeff0f1f2f3f4f5f6f7f8f9fafbfcfdfeff016f1d5331e36e16d341fa06c9f622cc8569710f2a62d7491e9be8e953df844f018877665544332211b7ed757d585966ebe924715493daee606b6e69865784e49fd3de4c0d1cf55a36055b88ffb7c2a909f0aecebb5d3a4af4af58fec400eae78a5583564378b16303a0a1a2a3a4a5a6a7a8a9aaabacadaeafb0b1b2b3b4b5b6b7b8b9babbbcbdbebfc0c1c2c3c4c5c6c7c8c9cacbcccdcecfd0d1d2d3d4d5d6d7d8d9dadbdcdddedf",
+      "expect": "err:node-sig:InvalidSignature"
+    },
+    {
+      "name": "field-swap: node_sig and transport_sig exchanged",
+      "rationale": "the transport_sig slot is opaque to id111; the node_sig slot must be the real Ed25519 node signature",
+      "wire": "016f1d5331e36e16d341fa06c9f622cc8569710f2a62d7491e9be8e953df844f0101e0e1e2e3e4e5e6e7e8e9eaebecedeeeff0f1f2f3f4f5f6f7f8f9fafbfcfdfeff8877665544332211a0a1a2a3a4a5a6a7a8a9aaabacadaeafb0b1b2b3b4b5b6b7b8b9babbbcbdbebfc0c1c2c3c4c5c6c7c8c9cacbcccdcecfd0d1d2d3d4d5d6d7d8d9dadbdcdddedfb7ed757d585966ebe924715493daee606b6e69865784e49fd3de4c0d1cf55a36055b88ffb7c2a909f0aecebb5d3a4af4af58fec400eae78a5583564378b16303",
+      "expect": "err:node-sig:NonCanonicalS"
+    },
+    {
+      "name": "domain-tag confusion: node_sig signed under 111/attest-transport/v1",
+      "rationale": "an artifact signed under another tag MUST fail",
+      "wire": "016f1d5331e36e16d341fa06c9f622cc8569710f2a62d7491e9be8e953df844f0101e0e1e2e3e4e5e6e7e8e9eaebecedeeeff0f1f2f3f4f5f6f7f8f9fafbfcfdfeff8877665544332211cea4225868625749cb94c362e9e813bd2ec81a182033e40fc54fcd3f1898515981aabc9e9af7be7cc751037afc78a8b951918843c217cc0ebd522ee855d13d0da0a1a2a3a4a5a6a7a8a9aaabacadaeafb0b1b2b3b4b5b6b7b8b9babbbcbdbebfc0c1c2c3c4c5c6c7c8c9cacbcccdcecfd0d1d2d3d4d5d6d7d8d9dadbdcdddedf",
+      "expect": "err:node-sig:InvalidSignature"
+    },
+    {
+      "name": "domain-tag confusion: node_sig signed under 111/announce/v1",
+      "rationale": "an artifact signed under another tag MUST fail",
+      "wire": "016f1d5331e36e16d341fa06c9f622cc8569710f2a62d7491e9be8e953df844f0101e0e1e2e3e4e5e6e7e8e9eaebecedeeeff0f1f2f3f4f5f6f7f8f9fafbfcfdfeff8877665544332211bf2c42d82eff3595799f296c9c44998a875e4157c6b629fdb0246f2e10a408d260de8083f9f65e90fd6f48687ed4e78e10032c3275193c36a8a8ad707c6d3a07a0a1a2a3a4a5a6a7a8a9aaabacadaeafb0b1b2b3b4b5b6b7b8b9babbbcbdbebfc0c1c2c3c4c5c6c7c8c9cacbcccdcecfd0d1d2d3d4d5d6d7d8d9dadbdcdddedf",
+      "expect": "err:node-sig:InvalidSignature"
+    },
+    {
+      "name": "domain-tag confusion: node_sig signed under empty tag",
+      "rationale": "an artifact signed under another tag MUST fail",
+      "wire": "016f1d5331e36e16d341fa06c9f622cc8569710f2a62d7491e9be8e953df844f0101e0e1e2e3e4e5e6e7e8e9eaebecedeeeff0f1f2f3f4f5f6f7f8f9fafbfcfdfeff88776655443322117b7344698aa63a8a5827b11d6571a7f9a202bf532ff150084dfb842beef8248eeddf4fee7bbead881d0211208d1423372e1b30e81345e6b5bd8f01a8953ec70da0a1a2a3a4a5a6a7a8a9aaabacadaeafb0b1b2b3b4b5b6b7b8b9babbbcbdbebfc0c1c2c3c4c5c6c7c8c9cacbcccdcecfd0d1d2d3d4d5d6d7d8d9dadbdcdddedf",
+      "expect": "err:node-sig:InvalidSignature"
+    },
+    {
+      "name": "node_sig non-canonical S (S + l)",
+      "rationale": "strict predicate",
+      "wire": "016f1d5331e36e16d341fa06c9f622cc8569710f2a62d7491e9be8e953df844f0101e0e1e2e3e4e5e6e7e8e9eaebecedeeeff0f1f2f3f4f5f6f7f8f9fafbfcfdfeff8877665544332211b7ed757d585966ebe924715493daee606b6e69865784e49fd3de4c0d1cf55a36f22e7e5cd225bc61c64bc65e3c342909b058fec400eae78a5583564378b16313a0a1a2a3a4a5a6a7a8a9aaabacadaeafb0b1b2b3b4b5b6b7b8b9babbbcbdbebfc0c1c2c3c4c5c6c7c8c9cacbcccdcecfd0d1d2d3d4d5d6d7d8d9dadbdcdddedf",
+      "expect": "err:node-sig:NonCanonicalS"
+    }
+  ],
+  "expiry": [
+    {
+      "current_epoch": "0",
+      "expect": "ok"
+    },
+    {
+      "current_epoch": "1234605616436508551",
+      "expect": "ok"
+    },
+    {
+      "current_epoch": "1234605616436508552",
+      "expect": "err:expired:1234605616436508552:1234605616436508552"
+    },
+    {
+      "current_epoch": "1234605616436508553",
+      "expect": "err:expired:1234605616436508552:1234605616436508553"
+    },
+    {
+      "current_epoch": "18446744073709551615",
+      "expect": "err:expired:1234605616436508552:18446744073709551615"
+    }
+  ],
+  "ordering": [
+    {
+      "name": "expired AND bad node_sig: the node-signature failure is reported (node leg is checked first)",
+      "wire": "016f1d5331e36e16d341fa06c9f622cc8569710f2a62d7491e9be8e953df844f0101e0e1e2e3e4e5e6e7e8e9eaebecedeeeff0f1f2f3f4f5f6f7f8f9fafbfcfdfeff8877665544332211b6ed757d585966ebe924715493daee606b6e69865784e49fd3de4c0d1cf55a36055b88ffb7c2a909f0aecebb5d3a4af4af58fec400eae78a5583564378b16303a0a1a2a3a4a5a6a7a8a9aaabacadaeafb0b1b2b3b4b5b6b7b8b9babbbcbdbebfc0c1c2c3c4c5c6c7c8c9cacbcccdcecfd0d1d2d3d4d5d6d7d8d9dadbdcdddedf",
+      "current_epoch": "18446744073709551615",
+      "transport_verifier": "accept",
+      "expect": "err:node-sig:InvalidSignature"
+    },
+    {
+      "name": "expired AND transport leg rejected: the transport failure is reported before expiry",
+      "wire": "016f1d5331e36e16d341fa06c9f622cc8569710f2a62d7491e9be8e953df844f0101e0e1e2e3e4e5e6e7e8e9eaebecedeeeff0f1f2f3f4f5f6f7f8f9fafbfcfdfeff8877665544332211b7ed757d585966ebe924715493daee606b6e69865784e49fd3de4c0d1cf55a36055b88ffb7c2a909f0aecebb5d3a4af4af58fec400eae78a5583564378b16303a0a1a2a3a4a5a6a7a8a9aaabacadaeafb0b1b2b3b4b5b6b7b8b9babbbcbdbebfc0c1c2c3c4c5c6c7c8c9cacbcccdcecfd0d1d2d3d4d5d6d7d8d9dadbdcdddedf",
+      "current_epoch": "18446744073709551615",
+      "transport_verifier": "reject",
+      "expect": "err:transport-sig"
+    },
+    {
+      "name": "valid at expiry-1",
+      "wire": "016f1d5331e36e16d341fa06c9f622cc8569710f2a62d7491e9be8e953df844f0101e0e1e2e3e4e5e6e7e8e9eaebecedeeeff0f1f2f3f4f5f6f7f8f9fafbfcfdfeff8877665544332211b7ed757d585966ebe924715493daee606b6e69865784e49fd3de4c0d1cf55a36055b88ffb7c2a909f0aecebb5d3a4af4af58fec400eae78a5583564378b16303a0a1a2a3a4a5a6a7a8a9aaabacadaeafb0b1b2b3b4b5b6b7b8b9babbbcbdbebfc0c1c2c3c4c5c6c7c8c9cacbcccdcecfd0d1d2d3d4d5d6d7d8d9dadbdcdddedf",
+      "current_epoch": "1234605616436508551",
+      "transport_verifier": "accept",
+      "expect": "ok"
+    },
+    {
+      "name": "dead exactly at expiry (first dead epoch)",
+      "wire": "016f1d5331e36e16d341fa06c9f622cc8569710f2a62d7491e9be8e953df844f0101e0e1e2e3e4e5e6e7e8e9eaebecedeeeff0f1f2f3f4f5f6f7f8f9fafbfcfdfeff8877665544332211b7ed757d585966ebe924715493daee606b6e69865784e49fd3de4c0d1cf55a36055b88ffb7c2a909f0aecebb5d3a4af4af58fec400eae78a5583564378b16303a0a1a2a3a4a5a6a7a8a9aaabacadaeafb0b1b2b3b4b5b6b7b8b9babbbcbdbebfc0c1c2c3c4c5c6c7c8c9cacbcccdcecfd0d1d2d3d4d5d6d7d8d9dadbdcdddedf",
+      "current_epoch": "1234605616436508552",
+      "transport_verifier": "accept",
+      "expect": "err:expired:1234605616436508552:1234605616436508552"
+    }
+  ],
+  "supersedure": [
+    {
+      "name": "first attestation, epoch 100",
+      "wire": "016f1d5331e36e16d341fa06c9f622cc8569710f2a62d7491e9be8e953df844f0101e0e1e2e3e4e5e6e7e8e9eaebecedeeeff0f1f2f3f4f5f6f7f8f9fafbfcfdfeff64000000000000006bb76e5c301f84424ce520d73c8a7efa01c21c935d3cbf5ac052f800c464b66e76746c13713d1c2f8306e4ae3374f29dfa4c3ee16bec80df12403c3d8e17640ca0a1a2a3a4a5a6a7a8a9aaabacadaeafb0b1b2b3b4b5b6b7b8b9babbbcbdbebfc0c1c2c3c4c5c6c7c8c9cacbcccdcecfd0d1d2d3d4d5d6d7d8d9dadbdcdddedf",
+      "expect": "ok:pinned"
+    },
+    {
+      "name": "greater expiry_epoch 200 supersedes 100 (rotation to a new transport key)",
+      "wire": "016f1d5331e36e16d341fa06c9f622cc8569710f2a62d7491e9be8e953df844f0101b5e1e2e3e4e5e6e7e8e9eaebecedeeeff0f1f2f3f4f5f6f7f8f9fafbfcfdfeffc8000000000000004fe14c7c4bf150c8a1a97aebc76dcf47aab56842d2fe5b7351dd8341db624b5cc3d9fee454ceba27e96338e57df3526c2282bfc98d8be6787c1c323f29e1a904a0a1a2a3a4a5a6a7a8a9aaabacadaeafb0b1b2b3b4b5b6b7b8b9babbbcbdbebfc0c1c2c3c4c5c6c7c8c9cacbcccdcecfd0d1d2d3d4d5d6d7d8d9dadbdcdddedf",
+      "expect": "ok:supersedes:100"
+    },
+    {
+      "name": "REPLAY of the superseded epoch-100 attestation",
+      "wire": "016f1d5331e36e16d341fa06c9f622cc8569710f2a62d7491e9be8e953df844f0101e0e1e2e3e4e5e6e7e8e9eaebecedeeeff0f1f2f3f4f5f6f7f8f9fafbfcfdfeff64000000000000006bb76e5c301f84424ce520d73c8a7efa01c21c935d3cbf5ac052f800c464b66e76746c13713d1c2f8306e4ae3374f29dfa4c3ee16bec80df12403c3d8e17640ca0a1a2a3a4a5a6a7a8a9aaabacadaeafb0b1b2b3b4b5b6b7b8b9babbbcbdbebfc0c1c2c3c4c5c6c7c8c9cacbcccdcecfd0d1d2d3d4d5d6d7d8d9dadbdcdddedf",
+      "expect": "err:superseded:200:100"
+    },
+    {
+      "name": "byte-identical re-receipt of the retained epoch-200 attestation (gossip duplicate)",
+      "wire": "016f1d5331e36e16d341fa06c9f622cc8569710f2a62d7491e9be8e953df844f0101b5e1e2e3e4e5e6e7e8e9eaebecedeeeff0f1f2f3f4f5f6f7f8f9fafbfcfdfeffc8000000000000004fe14c7c4bf150c8a1a97aebc76dcf47aab56842d2fe5b7351dd8341db624b5cc3d9fee454ceba27e96338e57df3526c2282bfc98d8be6787c1c323f29e1a904a0a1a2a3a4a5a6a7a8a9aaabacadaeafb0b1b2b3b4b5b6b7b8b9babbbcbdbebfc0c1c2c3c4c5c6c7c8c9cacbcccdcecfd0d1d2d3d4d5d6d7d8d9dadbdcdddedf",
+      "expect": "ok:duplicate"
+    },
+    {
+      "name": "same epoch 200, different transport key (unresolvable conflict, fail closed)",
+      "wire": "016f1d5331e36e16d341fa06c9f622cc8569710f2a62d7491e9be8e953df844f0101e0e1e2e3e4e5e6e7e8e9eaebecedeeeff0f1f2f3f4f5f6f7f8f9fafbfcfdfeffc80000000000000094a7cd75f3ccfafea15d5710ebebe00da37603a5d07905703d0224cfb75b5830a7666db2a3c516356c1bfa40baa97893a4976459b9ad514c9de64d17ac8b0c08a0a1a2a3a4a5a6a7a8a9aaabacadaeafb0b1b2b3b4b5b6b7b8b9babbbcbdbebfc0c1c2c3c4c5c6c7c8c9cacbcccdcecfd0d1d2d3d4d5d6d7d8d9dadbdcdddedf",
+      "expect": "err:conflict:200"
+    },
+    {
+      "name": "epoch 300 supersedes 200",
+      "wire": "016f1d5331e36e16d341fa06c9f622cc8569710f2a62d7491e9be8e953df844f0101e0e1e2e3e4e5e6e7e8e9eaebecedeeeff0f1f2f3f4f5f6f7f8f9fafbfcfdfeff2c01000000000000851a55805f865bcdda2ed5c2f5d33179d37515d1adc5be9897b27c27437e1ef9ddc513ffbdb2de239bb726737a843bdbbdc86d3abe235d8428ed84b43bd74201a0a1a2a3a4a5a6a7a8a9aaabacadaeafb0b1b2b3b4b5b6b7b8b9babbbcbdbebfc0c1c2c3c4c5c6c7c8c9cacbcccdcecfd0d1d2d3d4d5d6d7d8d9dadbdcdddedf",
+      "expect": "ok:supersedes:200"
+    },
+    {
+      "name": "a DIFFERENT node's epoch-1 attestation is an independent binding",
+      "wire": "015ddf5911edf0541c88e864d7590045c410f420d04e73f9d8507dc856591506b001e0e1e2e3e4e5e6e7e8e9eaebecedeeeff0f1f2f3f4f5f6f7f8f9fafbfcfdfeff0100000000000000fa128b000fd31c348a60abb1ccc0e8920be5ae30ec6add640e36b90383d9b0a2e3aa007aa65c1591fd0438e21a3cf5ebaf62c9ed99f66da55a0f38c44d2f0b05a0a1a2a3a4a5a6a7a8a9aaabacadaeafb0b1b2b3b4b5b6b7b8b9babbbcbdbebfc0c1c2c3c4c5c6c7c8c9cacbcccdcecfd0d1d2d3d4d5d6d7d8d9dadbdcdddedf",
+      "expect": "ok:pinned"
+    },
+    {
+      "name": "replay of epoch 200 again after 300",
+      "wire": "016f1d5331e36e16d341fa06c9f622cc8569710f2a62d7491e9be8e953df844f0101b5e1e2e3e4e5e6e7e8e9eaebecedeeeff0f1f2f3f4f5f6f7f8f9fafbfcfdfeffc8000000000000004fe14c7c4bf150c8a1a97aebc76dcf47aab56842d2fe5b7351dd8341db624b5cc3d9fee454ceba27e96338e57df3526c2282bfc98d8be6787c1c323f29e1a904a0a1a2a3a4a5a6a7a8a9aaabacadaeafb0b1b2b3b4b5b6b7b8b9babbbcbdbebfc0c1c2c3c4c5c6c7c8c9cacbcccdcecfd0d1d2d3d4d5d6d7d8d9dadbdcdddedf",
+      "expect": "err:superseded:300:200"
+    },
+    {
+      "name": "invalid node_sig at a would-be-winning epoch 999: rejected BEFORE any state change",
+      "wire": "016f1d5331e36e16d341fa06c9f622cc8569710f2a62d7491e9be8e953df844f0101e0e1e2e3e4e5e6e7e8e9eaebecedeeeff0f1f2f3f4f5f6f7f8f9fafbfcfdfeffe7030000000000007306fe35623e3bda6949506fca7253d465d274adb94f9fde1826238b09f88caf50b6f506832439947f05f0d9cc328b473779b1f1f31a81ce21108d60c47f1c0ba0a1a2a3a4a5a6a7a8a9aaabacadaeafb0b1b2b3b4b5b6b7b8b9babbbcbdbebfc0c1c2c3c4c5c6c7c8c9cacbcccdcecfd0d1d2d3d4d5d6d7d8d9dadbdcdddedf",
+      "expect": "err:node-sig:InvalidSignature"
+    }
+  ]
+}

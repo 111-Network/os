@@ -1,0 +1,241 @@
+{
+  "spec": "§7 + §14 — encodings & display: lowercase hex, BIP-173 bech32 (NOT bech32m, HRP node), 10-char base32 operator label, 34B multicodec records",
+  "frozen": "2026-10-13",
+  "description": "Known answers for every NodeId presentation form (hex machine string, bech32 human-transfer string, UPPERCASE QR form, grouped xxxx-xxxx-xx label, 0xed01 ed25519-pub and 0xec01 x25519-pub 34B records) over five keys, plus fail-closed decode negatives. 'expect' tokens: ok | InvalidLength:<expected>:<got> | UnknownPrefix:<hex> | InvalidHex | InvalidBech32 | WrongHrp | NonCanonicalBech32. The operator label is display-only and NEVER an authenticator (section 2 B2).",
+  "provenance": "sequential-key KATs: encoding.rs::kat_fixed_pubkey (cross-checked there against a from-scratch Python BIP-173 reference). project NodeId: backup.rs::backup_format_kat (--nocapture). Negatives: generated through the public API (bech32m/wrong-length/wrong-HRP strings built with the bech32 crate; the non-canonical-padding string with a local BIP-173 checksum routine); all values re-derived independently by crosscheck.py.",
+  "kats": [
+    {
+      "name": "sequential 0x00..0x1f",
+      "key": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+      "hex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+      "bech32": "node1qqqsyqcyq5rqwzqfpg9scrgwpugpzysnzs23v9ccrydpk8qarc0s2mc22u",
+      "bech32_qr": "NODE1QQQSYQCYQ5RQWZQFPG9SCRGWPUGPZYSNZS23V9CCRYDPK8QARC0S2MC22U",
+      "label": "mmg4-2klg-yq",
+      "record_ed25519": "ed01000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+      "record_x25519": "ec01000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f"
+    },
+    {
+      "name": "project NodeId (canonical-12)",
+      "key": "6f1d5331e36e16d341fa06c9f622cc8569710f2a62d7491e9be8e953df844f01",
+      "hex": "6f1d5331e36e16d341fa06c9f622cc8569710f2a62d7491e9be8e953df844f01",
+      "bech32": "node1duw4xv0rdctdxs06qmylvgkvs45hzre2vtt5j85mar548huyfuqs44v6c9",
+      "bech32_qr": "NODE1DUW4XV0RDCTDXS06QMYLVGKVS45HZRE2VTT5J85MAR548HUYFUQS44V6C9",
+      "label": "kq4f-kqqo-nj",
+      "record_ed25519": "ed016f1d5331e36e16d341fa06c9f622cc8569710f2a62d7491e9be8e953df844f01",
+      "record_x25519": "ec016f1d5331e36e16d341fa06c9f622cc8569710f2a62d7491e9be8e953df844f01"
+    },
+    {
+      "name": "all-zero key",
+      "key": "0000000000000000000000000000000000000000000000000000000000000000",
+      "hex": "0000000000000000000000000000000000000000000000000000000000000000",
+      "bech32": "node1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqr0ng29",
+      "bech32_qr": "NODE1QQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQR0NG29",
+      "label": "mzuh-vlpy-mk",
+      "record_ed25519": "ed010000000000000000000000000000000000000000000000000000000000000000",
+      "record_x25519": "ec010000000000000000000000000000000000000000000000000000000000000000"
+    },
+    {
+      "name": "all-0xff key",
+      "key": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+      "hex": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+      "bech32": "node1lllllllllllllllllllllllllllllllllllllllllllllllllllsp3serj",
+      "bech32_qr": "NODE1LLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLSP3SERJ",
+      "label": "v6lb-g5qp-oj",
+      "record_ed25519": "ed01ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+      "record_x25519": "ec01ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+    },
+    {
+      "name": "canonical-24 NodeId",
+      "key": "5ddf5911edf0541c88e864d7590045c410f420d04e73f9d8507dc856591506b0",
+      "hex": "5ddf5911edf0541c88e864d7590045c410f420d04e73f9d8507dc856591506b0",
+      "bech32": "node1th04jy0d7p2pez8gvnt4jqz9csg0ggxsfeelnkzs0hy9vkg4q6cqpkg7w5",
+      "bech32_qr": "NODE1TH04JY0D7P2PEZ8GVNT4JQZ9CSG0GGXSFEELNKZS0HY9VKG4Q6CQPKG7W5",
+      "label": "4bmz-ebxz-uh",
+      "record_ed25519": "ed015ddf5911edf0541c88e864d7590045c410f420d04e73f9d8507dc856591506b0",
+      "record_x25519": "ec015ddf5911edf0541c88e864d7590045c410f420d04e73f9d8507dc856591506b0"
+    }
+  ],
+  "negatives": {
+    "record": [
+      {
+        "name": "33-byte record (short)",
+        "record": "ed01000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e",
+        "expect": "InvalidLength:34:33"
+      },
+      {
+        "name": "35-byte record (long)",
+        "record": "ed01000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f00",
+        "expect": "InvalidLength:34:35"
+      },
+      {
+        "name": "empty record",
+        "record": "",
+        "expect": "InvalidLength:34:0"
+      },
+      {
+        "name": "unknown multicodec prefix 0000",
+        "record": "0000000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+        "expect": "UnknownPrefix:0000"
+      },
+      {
+        "name": "unknown multicodec prefix ed00",
+        "record": "ed00000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+        "expect": "UnknownPrefix:ed00"
+      },
+      {
+        "name": "unknown multicodec prefix ed02",
+        "record": "ed02000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+        "expect": "UnknownPrefix:ed02"
+      },
+      {
+        "name": "unknown multicodec prefix ec00",
+        "record": "ec00000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+        "expect": "UnknownPrefix:ec00"
+      },
+      {
+        "name": "unknown multicodec prefix 1601",
+        "record": "1601000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+        "expect": "UnknownPrefix:1601"
+      }
+    ],
+    "hex": [
+      {
+        "name": "uppercase hex",
+        "input": "000102030405060708090A0B0C0D0E0F101112131415161718191A1B1C1D1E1F",
+        "expect": "InvalidHex"
+      },
+      {
+        "name": "single uppercase nibble",
+        "input": "0001020304A5060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+        "expect": "InvalidHex"
+      },
+      {
+        "name": "non-hex character g",
+        "input": "g00102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+        "expect": "InvalidHex"
+      },
+      {
+        "name": "non-hex character z",
+        "input": "z00102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+        "expect": "InvalidHex"
+      },
+      {
+        "name": "0x-prefixed (66 chars)",
+        "input": "0x000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+        "expect": "InvalidLength:64:66"
+      },
+      {
+        "name": "63 chars",
+        "input": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1",
+        "expect": "InvalidLength:64:63"
+      },
+      {
+        "name": "66 chars",
+        "input": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f00",
+        "expect": "InvalidLength:64:66"
+      },
+      {
+        "name": "empty",
+        "input": "",
+        "expect": "InvalidLength:64:0"
+      }
+    ],
+    "bech32": [
+      {
+        "name": "bech32m checksum over the same payload (BANNED, section 7)",
+        "input": "node1qqqsyqcyq5rqwzqfpg9scrgwpugpzysnzs23v9ccrydpk8qarc0sl8gx07",
+        "expect": "InvalidBech32"
+      },
+      {
+        "name": "bech32m checksum, uppercase QR form",
+        "input": "NODE1QQQSYQCYQ5RQWZQFPG9SCRGWPUGPZYSNZS23V9CCRYDPK8QARC0SL8GX07",
+        "expect": "InvalidBech32"
+      },
+      {
+        "name": "valid bech32, right HRP, 0-byte data part (length enforcement, embedded#15)",
+        "input": "node1su9jf6",
+        "expect": "InvalidLength:32:0"
+      },
+      {
+        "name": "valid bech32, right HRP, 31-byte data part (length enforcement, embedded#15)",
+        "input": "node1tfd95kj6tfd95kj6tfd95kj6tfd95kj6tfd95kj6tfd95kj6tge7qgwk",
+        "expect": "InvalidLength:32:31"
+      },
+      {
+        "name": "valid bech32, right HRP, 33-byte data part (length enforcement, embedded#15)",
+        "input": "node1tfd95kj6tfd95kj6tfd95kj6tfd95kj6tfd95kj6tfd95kj6tfd95kd0d2p",
+        "expect": "InvalidLength:32:33"
+      },
+      {
+        "name": "valid bech32, right HRP, 64-byte data part (length enforcement, embedded#15)",
+        "input": "node1tfd95kj6tfd95kj6tfd95kj6tfd95kj6tfd95kj6tfd95kj6tfd95kj6tfd95kj6tfd95kj6tfd95kj6tfd95kj6tfd95kj6tfd95kss5w9uj",
+        "expect": "InvalidLength:32:64"
+      },
+      {
+        "name": "mixed case: leading capital",
+        "input": "Node1qqqsyqcyq5rqwzqfpg9scrgwpugpzysnzs23v9ccrydpk8qarc0s2mc22u",
+        "expect": "InvalidBech32"
+      },
+      {
+        "name": "mixed case: one lowercase char inside the QR form",
+        "input": "NODE1QQQSYqCYQ5RQWZQFPG9SCRGWPUGPZYSNZS23V9CCRYDPK8QARC0S2MC22U",
+        "expect": "InvalidBech32"
+      },
+      {
+        "name": "wrong HRP npub (npub/nsec reuse is BANNED)",
+        "input": "npub1qqqsyqcyq5rqwzqfpg9scrgwpugpzysnzs23v9ccrydpk8qarc0st5hsmq",
+        "expect": "WrongHrp"
+      },
+      {
+        "name": "wrong HRP test (npub/nsec reuse is BANNED)",
+        "input": "test1qqqsyqcyq5rqwzqfpg9scrgwpugpzysnzs23v9ccrydpk8qarc0srng6h3",
+        "expect": "WrongHrp"
+      },
+      {
+        "name": "wrong HRP nsec (npub/nsec reuse is BANNED)",
+        "input": "nsec1qqqsyqcyq5rqwzqfpg9scrgwpugpzysnzs23v9ccrydpk8qarc0s8zu3a4",
+        "expect": "WrongHrp"
+      },
+      {
+        "name": "tampered data character (checksum catches it)",
+        "input": "node1qqqsyqcyq5rqwzqxpg9scrgwpugpzysnzs23v9ccrydpk8qarc0s2mc22u",
+        "expect": "InvalidBech32"
+      },
+      {
+        "name": "character outside the bech32 charset",
+        "input": "node1qbqsyqcyq5rqwzqfpg9scrgwpugpzysnzs23v9ccrydpk8qarc0s2mc22u",
+        "expect": "InvalidBech32"
+      },
+      {
+        "name": "garbage \"\"",
+        "input": "",
+        "expect": "InvalidBech32"
+      },
+      {
+        "name": "garbage \"node\"",
+        "input": "node",
+        "expect": "InvalidBech32"
+      },
+      {
+        "name": "garbage \"node1\"",
+        "input": "node1",
+        "expect": "InvalidBech32"
+      },
+      {
+        "name": "garbage \"1qqqsyqcyq5\"",
+        "input": "1qqqsyqcyq5",
+        "expect": "InvalidBech32"
+      },
+      {
+        "name": "garbage \"node1QQQSYQCYQ5!\"",
+        "input": "node1QQQSYQCYQ5!",
+        "expect": "InvalidBech32"
+      },
+      {
+        "name": "valid checksum, non-canonical zero-padding (malleability alias)",
+        "input": "node1qqqsyqcyq5rqwzqfpg9scrgwpugpzysnzs23v9ccrydpk8qarc03hdvlhw",
+        "expect": "NonCanonicalBech32"
+      }
+    ]
+  }
+}

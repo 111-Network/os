@@ -1,0 +1,81 @@
+{
+  "spec": "§4.5 + §14 — weak-key self-test vectors",
+  "frozen": "2026-10-13",
+  "description": "64B private keysets (32B Ed25519 seed || 32B raw X25519 scalar) for the section 4.5 self-test: reject all-zero, uniform-byte and +/-1 byte counter-pattern halves (either half); accept ordinary keysets and a one-byte-perturbed pattern near-miss. 'expect' is the WeakKeyError variant. The fourth leg (derived X25519 public key is low-order) is unreachable with a clamped scalar - honestly clamped scalars never yield low-order public keys - so it has no vector; the low-order class itself is covered by edge-vectors.json x25519_low_order. Keyset::from_bytes (the section 13 load path) applies the same gate and maps to KeysetError::WeakKey.",
+  "provenance": "Constants lifted from keyset.rs::weak_key_self_test_vectors (zero, 0x11, ascending 0x00/0x40, descending 0xff) and extended with wrap-around and near-miss cases; expect tokens recorded from the public weak_key_self_test() at generation time.",
+  "reject": [
+    {
+      "name": "all-zero Ed25519 half",
+      "private_keyset": "000000000000000000000000000000000000000000000000000000000000000077076d0a7318a57d3c16c17251b26645df4c2f87ebc0992ab177fba51db92c2a",
+      "expect": "AllZero"
+    },
+    {
+      "name": "all-zero X25519 half",
+      "private_keyset": "9d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f600000000000000000000000000000000000000000000000000000000000000000",
+      "expect": "AllZero"
+    },
+    {
+      "name": "both halves all-zero",
+      "private_keyset": "00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
+      "expect": "AllZero"
+    },
+    {
+      "name": "uniform byte 0x11 Ed25519 half",
+      "private_keyset": "111111111111111111111111111111111111111111111111111111111111111177076d0a7318a57d3c16c17251b26645df4c2f87ebc0992ab177fba51db92c2a",
+      "expect": "UniformByte"
+    },
+    {
+      "name": "uniform byte 0xff X25519 half",
+      "private_keyset": "9d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f60ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+      "expect": "UniformByte"
+    },
+    {
+      "name": "uniform byte 0x01 X25519 half",
+      "private_keyset": "9d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f600101010101010101010101010101010101010101010101010101010101010101",
+      "expect": "UniformByte"
+    },
+    {
+      "name": "ascending counter from 0x00, X25519 half",
+      "private_keyset": "9d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f60000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+      "expect": "CounterPattern"
+    },
+    {
+      "name": "ascending counter from 0x40, Ed25519 half",
+      "private_keyset": "404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f77076d0a7318a57d3c16c17251b26645df4c2f87ebc0992ab177fba51db92c2a",
+      "expect": "CounterPattern"
+    },
+    {
+      "name": "ascending counter from 0xf0 (wraps), Ed25519 half",
+      "private_keyset": "f0f1f2f3f4f5f6f7f8f9fafbfcfdfeff000102030405060708090a0b0c0d0e0f77076d0a7318a57d3c16c17251b26645df4c2f87ebc0992ab177fba51db92c2a",
+      "expect": "CounterPattern"
+    },
+    {
+      "name": "descending counter from 0xff, Ed25519 half",
+      "private_keyset": "fffefdfcfbfaf9f8f7f6f5f4f3f2f1f0efeeedecebeae9e8e7e6e5e4e3e2e1e077076d0a7318a57d3c16c17251b26645df4c2f87ebc0992ab177fba51db92c2a",
+      "expect": "CounterPattern"
+    },
+    {
+      "name": "descending counter from 0x1f, X25519 half",
+      "private_keyset": "9d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f601f1e1d1c1b1a191817161514131211100f0e0d0c0b0a09080706050403020100",
+      "expect": "CounterPattern"
+    }
+  ],
+  "accept": [
+    {
+      "name": "RFC 8032 TEST 1 seed + RFC 7748 Alice scalar",
+      "private_keyset": "9d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f6077076d0a7318a57d3c16c17251b26645df4c2f87ebc0992ab177fba51db92c2a"
+    },
+    {
+      "name": "project canonical-12 keyset",
+      "private_keyset": "718ffd7109b2318c3edea57191ed47c40b3bab75929efd82a319481e476ae2f5cc680150d6f0c6be2aa1f4d43f86fa4a722c0474f27244bef8e98f06a1038126"
+    },
+    {
+      "name": "project canonical-24 keyset",
+      "private_keyset": "1f9b16e0b5c70b8058bec974a3fe5446df0a66d35b70a1f0de73784d0cc4f0810d2ad2ffd3e1daa01dfe8c41dd474d8592bddeb5e10c4838c6597be019ec524d"
+    },
+    {
+      "name": "near-miss: ascending counter with the last byte perturbed (not a pattern)",
+      "private_keyset": "9d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f60000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1e"
+    }
+  ]
+}

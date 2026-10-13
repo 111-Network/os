@@ -1,0 +1,298 @@
+{
+  "spec": "§6.2 + §14 — announce encode/verify round-trip, verification rules, and negatives (downgrade, stale counter, conflicting key, self-NodeId, domain-tag confusion)",
+  "frozen": "2026-10-13",
+  "description": "The 137-169B announce: version(1) || sign_pubkey(32 = NodeId) || enc_pubkey(32) || counter(LE u64) || appdata(0-32) || signature(64); the signature covers the ASCII tag '111/announce/v1' || all preceding wire bytes (the tag is never a wire field). 'kat' is the genesis announce of the canonical-12 keyset. 'malformed' entries are each processed alone against a fresh pinning store with own_node_id = canonical-24's NodeId and MUST leave the store empty. 'scenarios' are ordered step lists against one store. 'expect' tokens: ok:pinned | ok:updated:<previous> | err:length:<n> | err:version:<v> | err:loworder | err:sig:<VerifyError> | err:collision | err:stale:<last_seen>:<got> | err:conflict. Counters are decimal strings (u64).",
+  "provenance": "KAT harvested from announce.rs::announce_round_trip_and_kat (--nocapture); negatives/scenarios generated through the public API (hand-crafted wires signed with Keyset::sign_with_tag under arbitrary tags/heads) and their expect tokens recorded from process_announce() at generation time. crosscheck.py independently verifies the KAT and every positive signature under the tag-prefixed signed input.",
+  "tag": "111/announce/v1",
+  "signers": {
+    "a": {
+      "mnemonic": "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about",
+      "node_id": "6f1d5331e36e16d341fa06c9f622cc8569710f2a62d7491e9be8e953df844f01",
+      "enc_pubkey": "712678456644b8cba1389072ee5dec93d044875ca13c73e217157814bbb99218"
+    },
+    "b": {
+      "mnemonic": "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon art",
+      "node_id": "5ddf5911edf0541c88e864d7590045c410f420d04e73f9d8507dc856591506b0",
+      "enc_pubkey": "350a6fafb96cd8936c8f6a2215c38d2f619a7f12ca1d97cff1f2da4dd8d4ba14"
+    }
+  },
+  "kat": {
+    "signer": "a",
+    "counter": "1",
+    "appdata": "3131316e6574",
+    "signed_input": "3131312f616e6e6f756e63652f7631016f1d5331e36e16d341fa06c9f622cc8569710f2a62d7491e9be8e953df844f01712678456644b8cba1389072ee5dec93d044875ca13c73e217157814bbb9921801000000000000003131316e6574",
+    "signature": "281d57df1915d959986a57dd054360585a566bf225b4698cc26eb34e90e14cad4e4fd410a93b575a6dfc62d7266544f3dc5c19c4a9d4dd07e6b6297462fbca08",
+    "wire": "016f1d5331e36e16d341fa06c9f622cc8569710f2a62d7491e9be8e953df844f01712678456644b8cba1389072ee5dec93d044875ca13c73e217157814bbb9921801000000000000003131316e6574281d57df1915d959986a57dd054360585a566bf225b4698cc26eb34e90e14cad4e4fd410a93b575a6dfc62d7266544f3dc5c19c4a9d4dd07e6b6297462fbca08"
+  },
+  "positives": [
+    {
+      "name": "empty appdata, genesis counter 1 (137B base)",
+      "counter": "1",
+      "appdata": "",
+      "wire": "016f1d5331e36e16d341fa06c9f622cc8569710f2a62d7491e9be8e953df844f01712678456644b8cba1389072ee5dec93d044875ca13c73e217157814bbb99218010000000000000018b45a6b24b187e9451c7f4d939ca1605d1c21ee8498fa6a435c733e957cbaaa642adaf5c9e04a4ba49bd738fb450899c2f9a3a9a76f2ac9c7a880496c7db609"
+    },
+    {
+      "name": "6-byte appdata (the KAT, 143B)",
+      "counter": "1",
+      "appdata": "3131316e6574",
+      "wire": "016f1d5331e36e16d341fa06c9f622cc8569710f2a62d7491e9be8e953df844f01712678456644b8cba1389072ee5dec93d044875ca13c73e217157814bbb9921801000000000000003131316e6574281d57df1915d959986a57dd054360585a566bf225b4698cc26eb34e90e14cad4e4fd410a93b575a6dfc62d7266544f3dc5c19c4a9d4dd07e6b6297462fbca08"
+    },
+    {
+      "name": "max 32-byte appdata (169B)",
+      "counter": "7",
+      "appdata": "5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a",
+      "wire": "016f1d5331e36e16d341fa06c9f622cc8569710f2a62d7491e9be8e953df844f01712678456644b8cba1389072ee5dec93d044875ca13c73e217157814bbb9921807000000000000005a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a786eae1ef77b2414e49774489cb698751ecec34fb0fc3097a8aed9d410c42bb584ed8ab71fbf2b5addca102d2c9bed1f2ba6cd7bad5d43c00018f84f2c5f400c"
+    },
+    {
+      "name": "role/hint appdata, counter 2",
+      "counter": "2",
+      "appdata": "726f6c653d72656c61793b68696e743d6c6f7261",
+      "wire": "016f1d5331e36e16d341fa06c9f622cc8569710f2a62d7491e9be8e953df844f01712678456644b8cba1389072ee5dec93d044875ca13c73e217157814bbb992180200000000000000726f6c653d72656c61793b68696e743d6c6f7261197d9a0878af9fd5cb67f8a433800db0bb72124f4b7598d09f201807f42f4d4c860a893983066b4278518ac6f81b768153de8923b109f26b20974bfeea362f0d"
+    },
+    {
+      "name": "large counter 0x0102030405060708",
+      "counter": "72623859790382856",
+      "appdata": "",
+      "wire": "016f1d5331e36e16d341fa06c9f622cc8569710f2a62d7491e9be8e953df844f01712678456644b8cba1389072ee5dec93d044875ca13c73e217157814bbb992180807060504030201a9028f5f75df8eb940a4945cf31890961afebc62502f421d5fbdb549b5f952a0354df4853e8c37a9ba9d928f13c9afe740480162c563714fa5742cbc77886800"
+    },
+    {
+      "name": "counter u64::MAX",
+      "counter": "18446744073709551615",
+      "appdata": "",
+      "wire": "016f1d5331e36e16d341fa06c9f622cc8569710f2a62d7491e9be8e953df844f01712678456644b8cba1389072ee5dec93d044875ca13c73e217157814bbb99218ffffffffffffffff813705f527f3f2c4362d2b84ee3bd17afb1cd292ed3d7ae560023c8afab0aec860a161cccaf94c23eb86ad6199d213b6a0e8462397c6ba90dbe24c732e38c903"
+    }
+  ],
+  "malformed": [
+    {
+      "name": "domain-tag confusion: signed under 111/attest-node/v1",
+      "rationale": "an artifact signed under another tag MUST fail (section 6.1/14)",
+      "wire": "016f1d5331e36e16d341fa06c9f622cc8569710f2a62d7491e9be8e953df844f01712678456644b8cba1389072ee5dec93d044875ca13c73e217157814bbb9921801000000000000005c22f663e3bae884bb17112bb3ce4612524191a216d64fbdd6b0a33bf3f21718aba419f4276dd84a14b90ea7870303e588bb0361d2a95e94e89fd5a44c7cd501",
+      "expect": "err:sig:InvalidSignature"
+    },
+    {
+      "name": "domain-tag confusion: signed under 111/attest-transport/v1",
+      "rationale": "an artifact signed under another tag MUST fail (section 6.1/14)",
+      "wire": "016f1d5331e36e16d341fa06c9f622cc8569710f2a62d7491e9be8e953df844f01712678456644b8cba1389072ee5dec93d044875ca13c73e217157814bbb992180100000000000000ef262e26eddd71fc3907dcd3ce54008afbb8292cd7242c3796d40336e94dffe4295f67c8888288c6a59f6306d3fc4a1723b03afa1acb2598f1e74393492ccb0c",
+      "expect": "err:sig:InvalidSignature"
+    },
+    {
+      "name": "domain-tag confusion: signed under 111/seal/v1",
+      "rationale": "an artifact signed under another tag MUST fail (section 6.1/14)",
+      "wire": "016f1d5331e36e16d341fa06c9f622cc8569710f2a62d7491e9be8e953df844f01712678456644b8cba1389072ee5dec93d044875ca13c73e217157814bbb992180100000000000000e771aaa59e5e32879195499ef69c00a43fb16bba1b474ab3965fa9210ecaa2c67a7893e8d2b1a3e9c2347f46fd4073ae6c47b426e3df3cde5b9fcc0d9457f60c",
+      "expect": "err:sig:InvalidSignature"
+    },
+    {
+      "name": "domain-tag confusion: signed under 111/announce/v2 (near-miss tag)",
+      "rationale": "an artifact signed under another tag MUST fail (section 6.1/14)",
+      "wire": "016f1d5331e36e16d341fa06c9f622cc8569710f2a62d7491e9be8e953df844f01712678456644b8cba1389072ee5dec93d044875ca13c73e217157814bbb9921801000000000000006b7d594929aebd5a100049f7cdabf9e5e68a588889bb151d7d0c10cc8c1ad01c1bc278d52daf75b6da13ef98117d64804bdce35b9c5c1228e536d4bc27f7570b",
+      "expect": "err:sig:InvalidSignature"
+    },
+    {
+      "name": "domain-tag confusion: signed under empty tag (untagged signature)",
+      "rationale": "an artifact signed under another tag MUST fail (section 6.1/14)",
+      "wire": "016f1d5331e36e16d341fa06c9f622cc8569710f2a62d7491e9be8e953df844f01712678456644b8cba1389072ee5dec93d044875ca13c73e217157814bbb9921801000000000000009994c11fbd49f88412a24ce54945c162c2c95d44b3ddc85fa50bc5ad5383f7c53ada71d95fd596afbccba07ca1844cc66de0269e8f7fcbe89db76cab539ad30a",
+      "expect": "err:sig:InvalidSignature"
+    },
+    {
+      "name": "unknown version 0x00, validly re-signed (downgrade/unknown mode)",
+      "rationale": "unknown version => reject, even when the signature is valid (section 12 rule 1)",
+      "wire": "006f1d5331e36e16d341fa06c9f622cc8569710f2a62d7491e9be8e953df844f01712678456644b8cba1389072ee5dec93d044875ca13c73e217157814bbb992180100000000000000403ea75cf2bdbc32ab447b21c34502580185687e105e929ab739c0faa2d5fe659428db06412ed3ae92f4382574f657abd29ae114a2373e4b621b0d26c8f9420d",
+      "expect": "err:version:0"
+    },
+    {
+      "name": "unknown version 0x02, validly re-signed (downgrade/unknown mode)",
+      "rationale": "unknown version => reject, even when the signature is valid (section 12 rule 1)",
+      "wire": "026f1d5331e36e16d341fa06c9f622cc8569710f2a62d7491e9be8e953df844f01712678456644b8cba1389072ee5dec93d044875ca13c73e217157814bbb992180100000000000000b42767ab140dca0f4e968ddf58f7d6e7aec6dba945cbd1b29b0a6bcb516198c0fed0eac95774c9f1456420a71ab35f99cc272f88f762980ca2eceac7253c2a06",
+      "expect": "err:version:2"
+    },
+    {
+      "name": "unknown version 0xff, validly re-signed (downgrade/unknown mode)",
+      "rationale": "unknown version => reject, even when the signature is valid (section 12 rule 1)",
+      "wire": "ff6f1d5331e36e16d341fa06c9f622cc8569710f2a62d7491e9be8e953df844f01712678456644b8cba1389072ee5dec93d044875ca13c73e217157814bbb992180100000000000000933fc9717090125fc42180fe42835a85fab7ca67a4d9a310fbc4ff49c652808bc4cf87ee4e99cbc0efa141e92099d550bb39f35b2e9792dd438a040b239c7e02",
+      "expect": "err:version:255"
+    },
+    {
+      "name": "136 bytes (one short of base)",
+      "rationale": "length bound 137-169 (section 12 rule 7)",
+      "wire": "016f1d5331e36e16d341fa06c9f622cc8569710f2a62d7491e9be8e953df844f01712678456644b8cba1389072ee5dec93d044875ca13c73e217157814bbb99218010000000000000018b45a6b24b187e9451c7f4d939ca1605d1c21ee8498fa6a435c733e957cbaaa642adaf5c9e04a4ba49bd738fb450899c2f9a3a9a76f2ac9c7a880496c7db6",
+      "expect": "err:length:136"
+    },
+    {
+      "name": "empty",
+      "rationale": "length bound",
+      "wire": "",
+      "expect": "err:length:0"
+    },
+    {
+      "name": "170 bytes (one over max)",
+      "rationale": "length bound 137-169",
+      "wire": "016f1d5331e36e16d341fa06c9f622cc8569710f2a62d7491e9be8e953df844f01712678456644b8cba1389072ee5dec93d044875ca13c73e217157814bbb9921801000000000000000000000000000000000000000000000000000000000000000000000000000000363153838cb8066fc2d152159703b5820e7e51db16216ef5b1eff463c79883df3f52bd89c7190cb5f14425a76837669ab38d50971419cec5be0a59ac0050400600",
+      "expect": "err:length:170"
+    },
+    {
+      "name": "low-order enc_pubkey (all-zero), validly signed",
+      "rationale": "rejected at parse, before the signature check (section 3 ingress)",
+      "wire": "016f1d5331e36e16d341fa06c9f622cc8569710f2a62d7491e9be8e953df844f01000000000000000000000000000000000000000000000000000000000000000001000000000000000fd6e674903dc1e542d09715eadb6b4d4a2b2f8b38de4401f32f64a9684b25e82d7295568df4658075bf9b4034593c5cb16e973588bbf8358d956541bda1d707",
+      "expect": "err:loworder"
+    },
+    {
+      "name": "low-order enc_pubkey (u = 1), validly signed",
+      "rationale": "rejected at parse, before the signature check (section 3 ingress)",
+      "wire": "016f1d5331e36e16d341fa06c9f622cc8569710f2a62d7491e9be8e953df844f0101000000000000000000000000000000000000000000000000000000000000000100000000000000260afb2bbcd4c6b1bbfe53e0afe044a65c6642dccc796bb546b74ee91023bc7f67c4229ffd4a3bdd14055672df0e9f8314190fb8086a23def1a66120d049bd0f",
+      "expect": "err:loworder"
+    },
+    {
+      "name": "low-order enc_pubkey (order-8 point), validly signed",
+      "rationale": "rejected at parse, before the signature check (section 3 ingress)",
+      "wire": "016f1d5331e36e16d341fa06c9f622cc8569710f2a62d7491e9be8e953df844f01e0eb7a7c3b41b8ae1656e3faf19fc46ada098deb9c32b1fd866205165f49b8000100000000000000e93c9967be5ff44b9e93082775af1dd899e1a0382267739652cfcc13da8d34876b9f7a07031c3018d0db46b926db5a9ff9099ae34fbde9454240a43b29ee880f",
+      "expect": "err:loworder"
+    },
+    {
+      "name": "non-canonical S (S + l)",
+      "rationale": "malleability; accepted by non-strict verifiers",
+      "wire": "016f1d5331e36e16d341fa06c9f622cc8569710f2a62d7491e9be8e953df844f01712678456644b8cba1389072ee5dec93d044875ca13c73e217157814bbb99218010000000000000018b45a6b24b187e9451c7f4d939ca1605d1c21ee8498fa6a435c733e957cbaaa51fecf52e4435da37a38cfdbd93fe7adc2f9a3a9a76f2ac9c7a880496c7db619",
+      "expect": "err:sig:NonCanonicalS"
+    },
+    {
+      "name": "small-order R (identity)",
+      "rationale": "strict predicate rejects small-order R",
+      "wire": "016f1d5331e36e16d341fa06c9f622cc8569710f2a62d7491e9be8e953df844f01712678456644b8cba1389072ee5dec93d044875ca13c73e217157814bbb9921801000000000000000100000000000000000000000000000000000000000000000000000000000000642adaf5c9e04a4ba49bd738fb450899c2f9a3a9a76f2ac9c7a880496c7db609",
+      "expect": "err:sig:InvalidSignature"
+    },
+    {
+      "name": "tampered sign_pubkey byte (signed region)",
+      "rationale": "any change to the signed region invalidates the signature",
+      "wire": "016f1d5331e26e16d341fa06c9f622cc8569710f2a62d7491e9be8e953df844f01712678456644b8cba1389072ee5dec93d044875ca13c73e217157814bbb99218010000000000000018b45a6b24b187e9451c7f4d939ca1605d1c21ee8498fa6a435c733e957cbaaa642adaf5c9e04a4ba49bd738fb450899c2f9a3a9a76f2ac9c7a880496c7db609",
+      "expect": "err:sig:MalformedPublicKey"
+    },
+    {
+      "name": "tampered enc_pubkey byte (signed region)",
+      "rationale": "any change to the signed region invalidates the signature",
+      "wire": "016f1d5331e36e16d341fa06c9f622cc8569710f2a62d7491e9be8e953df844f01712678456644b8caa1389072ee5dec93d044875ca13c73e217157814bbb99218010000000000000018b45a6b24b187e9451c7f4d939ca1605d1c21ee8498fa6a435c733e957cbaaa642adaf5c9e04a4ba49bd738fb450899c2f9a3a9a76f2ac9c7a880496c7db609",
+      "expect": "err:sig:InvalidSignature"
+    },
+    {
+      "name": "tampered counter byte (signed region)",
+      "rationale": "any change to the signed region invalidates the signature",
+      "wire": "016f1d5331e36e16d341fa06c9f622cc8569710f2a62d7491e9be8e953df844f01712678456644b8cba1389072ee5dec93d044875ca13c73e217157814bbb99218000000000000000018b45a6b24b187e9451c7f4d939ca1605d1c21ee8498fa6a435c733e957cbaaa642adaf5c9e04a4ba49bd738fb450899c2f9a3a9a76f2ac9c7a880496c7db609",
+      "expect": "err:sig:InvalidSignature"
+    },
+    {
+      "name": "tampered appdata byte",
+      "rationale": "appdata is inside the signed region",
+      "wire": "016f1d5331e36e16d341fa06c9f622cc8569710f2a62d7491e9be8e953df844f01712678456644b8cba1389072ee5dec93d044875ca13c73e217157814bbb992180100000000000000606263a6499cc848f2b035b6cf6a9a7e19e5a1afefd41c805d8959d46a68b5c262b4edd1ffa25f355e456b25fe0c72cc1c1692fd36f5a2c8b2f48ccc9c6b7522ee5609",
+      "expect": "err:sig:InvalidSignature"
+    },
+    {
+      "name": "tampered signature byte",
+      "rationale": "signature bit flip",
+      "wire": "016f1d5331e36e16d341fa06c9f622cc8569710f2a62d7491e9be8e953df844f01712678456644b8cba1389072ee5dec93d044875ca13c73e217157814bbb99218010000000000000018b45a6b24b187e9451c7f4d939ca1605d1c21ee8498fa6a435c733e957cbaaa642adaf5c9e04a4ba49bd738fb450899c2f9a3a9a76f2ac9c7a880496c7db608",
+      "expect": "err:sig:InvalidSignature"
+    }
+  ],
+  "scenarios": [
+    {
+      "name": "pin, update, replay, older",
+      "rationale": "first-seen pins; higher counter updates; replay of the same counter and an older counter are stale (section 6.2)",
+      "own_node_id": "5ddf5911edf0541c88e864d7590045c410f420d04e73f9d8507dc856591506b0",
+      "steps": [
+        {
+          "wire": "016f1d5331e36e16d341fa06c9f622cc8569710f2a62d7491e9be8e953df844f01712678456644b8cba1389072ee5dec93d044875ca13c73e217157814bbb99218010000000000000018b45a6b24b187e9451c7f4d939ca1605d1c21ee8498fa6a435c733e957cbaaa642adaf5c9e04a4ba49bd738fb450899c2f9a3a9a76f2ac9c7a880496c7db609",
+          "expect": "ok:pinned"
+        },
+        {
+          "wire": "016f1d5331e36e16d341fa06c9f622cc8569710f2a62d7491e9be8e953df844f01712678456644b8cba1389072ee5dec93d044875ca13c73e217157814bbb992180200000000000000726f6c653d72656c61793b68696e743d6c6f7261197d9a0878af9fd5cb67f8a433800db0bb72124f4b7598d09f201807f42f4d4c860a893983066b4278518ac6f81b768153de8923b109f26b20974bfeea362f0d",
+          "expect": "ok:updated:1"
+        },
+        {
+          "wire": "016f1d5331e36e16d341fa06c9f622cc8569710f2a62d7491e9be8e953df844f01712678456644b8cba1389072ee5dec93d044875ca13c73e217157814bbb992180200000000000000726f6c653d72656c61793b68696e743d6c6f7261197d9a0878af9fd5cb67f8a433800db0bb72124f4b7598d09f201807f42f4d4c860a893983066b4278518ac6f81b768153de8923b109f26b20974bfeea362f0d",
+          "expect": "err:stale:2:2"
+        },
+        {
+          "wire": "016f1d5331e36e16d341fa06c9f622cc8569710f2a62d7491e9be8e953df844f01712678456644b8cba1389072ee5dec93d044875ca13c73e217157814bbb99218010000000000000018b45a6b24b187e9451c7f4d939ca1605d1c21ee8498fa6a435c733e957cbaaa642adaf5c9e04a4ba49bd738fb450899c2f9a3a9a76f2ac9c7a880496c7db609",
+          "expect": "err:stale:2:1"
+        }
+      ]
+    },
+    {
+      "name": "stale counter",
+      "rationale": "counter MUST exceed the last-seen value for that NodeId",
+      "own_node_id": "5ddf5911edf0541c88e864d7590045c410f420d04e73f9d8507dc856591506b0",
+      "steps": [
+        {
+          "wire": "016f1d5331e36e16d341fa06c9f622cc8569710f2a62d7491e9be8e953df844f01712678456644b8cba1389072ee5dec93d044875ca13c73e217157814bbb9921805000000000000007fa78a84fd61f112d75edd642bc405b624713c6c5c251d92859c727945564be06d845a9af2067d8513b02afedbb44949b8529a573c3341b10a798f3be539d006",
+          "expect": "ok:pinned"
+        },
+        {
+          "wire": "016f1d5331e36e16d341fa06c9f622cc8569710f2a62d7491e9be8e953df844f01712678456644b8cba1389072ee5dec93d044875ca13c73e217157814bbb9921805000000000000007fa78a84fd61f112d75edd642bc405b624713c6c5c251d92859c727945564be06d845a9af2067d8513b02afedbb44949b8529a573c3341b10a798f3be539d006",
+          "expect": "err:stale:5:5"
+        },
+        {
+          "wire": "016f1d5331e36e16d341fa06c9f622cc8569710f2a62d7491e9be8e953df844f01712678456644b8cba1389072ee5dec93d044875ca13c73e217157814bbb99218020000000000000095324b7f9746ecf2e3551d3d25102ac39c2cde2b2b059f4611bc42350fd1b2b33497387bb10aeb8591d25a0e7f06af612c363d891bc85e72d5644dd917f6b40d",
+          "expect": "err:stale:5:2"
+        },
+        {
+          "wire": "016f1d5331e36e16d341fa06c9f622cc8569710f2a62d7491e9be8e953df844f01712678456644b8cba1389072ee5dec93d044875ca13c73e217157814bbb9921806000000000000003ecb2b05da08ed122761e9649776e7d490d18f98d2228ea127ca9a7d538c74059376a26819bfd5467d0119f1bc276dae2a58e297688e6c767cfd6b84969f8508",
+          "expect": "ok:updated:5"
+        }
+      ]
+    },
+    {
+      "name": "conflicting key material",
+      "rationale": "A's NodeId presenting B's enc_pubkey, validly signed by A at a higher counter, is rejected: pinned key material is immutable (section 6.3)",
+      "own_node_id": "5ddf5911edf0541c88e864d7590045c410f420d04e73f9d8507dc856591506b0",
+      "steps": [
+        {
+          "wire": "016f1d5331e36e16d341fa06c9f622cc8569710f2a62d7491e9be8e953df844f01712678456644b8cba1389072ee5dec93d044875ca13c73e217157814bbb99218010000000000000018b45a6b24b187e9451c7f4d939ca1605d1c21ee8498fa6a435c733e957cbaaa642adaf5c9e04a4ba49bd738fb450899c2f9a3a9a76f2ac9c7a880496c7db609",
+          "expect": "ok:pinned"
+        },
+        {
+          "wire": "016f1d5331e36e16d341fa06c9f622cc8569710f2a62d7491e9be8e953df844f01350a6fafb96cd8936c8f6a2215c38d2f619a7f12ca1d97cff1f2da4dd8d4ba1402000000000000001a4674951d2de9397fa1a19328d1516ab85381d8add1c24badd81ffb6bdb341963435c93cba0a0ec29584b9f636ecc93de603d80f7b27d122c652f911b2ca809",
+          "expect": "err:conflict"
+        },
+        {
+          "wire": "016f1d5331e36e16d341fa06c9f622cc8569710f2a62d7491e9be8e953df844f01712678456644b8cba1389072ee5dec93d044875ca13c73e217157814bbb99218020000000000000095324b7f9746ecf2e3551d3d25102ac39c2cde2b2b059f4611bc42350fd1b2b33497387bb10aeb8591d25a0e7f06af612c363d891bc85e72d5644dd917f6b40d",
+          "expect": "ok:updated:1"
+        }
+      ]
+    },
+    {
+      "name": "self-NodeId => identity collision, never pinned",
+      "rationale": "an announce carrying the receiver's OWN NodeId surfaces the distinct identity-collision state (section 6.2, 8.4 duplicate-instance case); a FORGED self announce is a signature failure, not a false collision",
+      "own_node_id": "6f1d5331e36e16d341fa06c9f622cc8569710f2a62d7491e9be8e953df844f01",
+      "steps": [
+        {
+          "wire": "016f1d5331e36e16d341fa06c9f622cc8569710f2a62d7491e9be8e953df844f01712678456644b8cba1389072ee5dec93d044875ca13c73e217157814bbb99218010000000000000018b45a6b24b187e9451c7f4d939ca1605d1c21ee8498fa6a435c733e957cbaaa642adaf5c9e04a4ba49bd738fb450899c2f9a3a9a76f2ac9c7a880496c7db609",
+          "expect": "err:collision"
+        },
+        {
+          "wire": "016f1d5331e36e16d341fa06c9f622cc8569710f2a62d7491e9be8e953df844f01712678456644b8cba1389072ee5dec93d044875ca13c73e217157814bbb99218000000000000000018b45a6b24b187e9451c7f4d939ca1605d1c21ee8498fa6a435c733e957cbaaa642adaf5c9e04a4ba49bd738fb450899c2f9a3a9a76f2ac9c7a880496c7db609",
+          "expect": "err:sig:InvalidSignature"
+        },
+        {
+          "wire": "016f1d5331e36e16d341fa06c9f622cc8569710f2a62d7491e9be8e953df844f01712678456644b8cba1389072ee5dec93d044875ca13c73e217157814bbb99218020000000000000078dbdf190a54569c8c4a24f693c0a68869b195e6368e54a45023e909e2d6e948007f33f6a4bf6f6a46a0e2c346ac4e4496e4974ab64adabb5525db4dabd959530e",
+          "expect": "err:collision"
+        }
+      ]
+    },
+    {
+      "name": "two distinct peers pin independently",
+      "rationale": "A and B both pin at a third receiver C",
+      "own_node_id": "63d532205abf8c039566c69fa9a337bcb6a76ed2c94ed9d47eecad19aad0b63d",
+      "steps": [
+        {
+          "wire": "016f1d5331e36e16d341fa06c9f622cc8569710f2a62d7491e9be8e953df844f01712678456644b8cba1389072ee5dec93d044875ca13c73e217157814bbb99218010000000000000018b45a6b24b187e9451c7f4d939ca1605d1c21ee8498fa6a435c733e957cbaaa642adaf5c9e04a4ba49bd738fb450899c2f9a3a9a76f2ac9c7a880496c7db609",
+          "expect": "ok:pinned"
+        },
+        {
+          "wire": "015ddf5911edf0541c88e864d7590045c410f420d04e73f9d8507dc856591506b0350a6fafb96cd8936c8f6a2215c38d2f619a7f12ca1d97cff1f2da4dd8d4ba140100000000000000617181e814a87cd38a2170dbabfd1a9cf98034cc6c47bffe7f1d03d56e13f712c575f8b7b5e9224f7adcf8babfd695b9590a4f418cae96fe6d9662baec371209",
+          "expect": "ok:pinned"
+        },
+        {
+          "wire": "015ddf5911edf0541c88e864d7590045c410f420d04e73f9d8507dc856591506b0350a6fafb96cd8936c8f6a2215c38d2f619a7f12ca1d97cff1f2da4dd8d4ba140200000000000000f0e95d9f07fbfa6b464077d7baba70e2536bb62044badd043949f99f7b863cebeba8da8712cb73848524e444077dff729c0b8c14735ae7abdf849b8606675f0a",
+          "expect": "ok:updated:1"
+        }
+      ]
+    }
+  ]
+}

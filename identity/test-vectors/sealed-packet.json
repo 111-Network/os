@@ -1,0 +1,196 @@
+{
+  "spec": "§6.4 + §14 — sealed-packet known answer (esk/rpk/header/plaintext -> packet) and negatives (wrong recipient, tampered AD/mode/counter, low-order, truncation)",
+  "frozen": "2026-10-13",
+  "description": "The project-pinned sealed-packet composition (NOT libsodium crypto_box_seal): per-packet ephemeral X25519; shared = X25519(esk, rpk), abort on all-zero; key = BLAKE2b-256('111/seal/v1' || shared || epk || rpk); nonce = BLAKE2b-192('111/seal-n/v1' || epk || rpk) (derived, never transmitted); XChaCha20-Poly1305 over (sender_node_id(32) || plaintext) with AD = the exact cleartext header bytes (version || crypto_mode || counter(LE u64) || extra_len || extra); packet = header || epk(32) || ciphertext||tag(16). The KAT pins esk to RFC 7748 Alice's scalar so the packet is deterministic; the conformance suite re-computes it with an independent in-test model of the section 6.4 recipe AND opens it through the public seal::open. 'expect' tokens (open): ok | err:truncated | err:mode:<b> | err:ecdh:<EcdhError> | err:auth | err:short-plaintext. Counters are decimal strings (u64).",
+  "provenance": "KAT harvested from seal.rs::known_answer_vector (--nocapture; cross-verified there against an independent Python XChaCha20 reference and re-verified by crosscheck.py). Negatives generated through the public seal::open() against the frozen packet (single-bit mutations, mode rewrites, truncations, low-order epk, and one authentic packet built with the in-test recipe model whose inner plaintext is too short); expect tokens recorded at generation time.",
+  "recipient": {
+    "note": "keyset = (Ed25519 seed || X25519 scalar); only the X25519 half matters for opening",
+    "ed25519_seed": "9d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f60",
+    "x25519_scalar": "5dab087e624a8a4b79e17f8b83800ee66f3bb1292618b6fd1c2f8b27ff88e0eb",
+    "x25519_public": "de9edb7d7b7dc1b4d35b61c2ece435373f8343c85b78674dadfc7e146f882b4f"
+  },
+  "kat": {
+    "esk": "77076d0a7318a57d3c16c17251b26645df4c2f87ebc0992ab177fba51db92c2a",
+    "epk": "8520f0098930a754748b7ddcb43ef75a0dbf3a0d26381af4eba4a98eaa9b4e6a",
+    "rpk": "de9edb7d7b7dc1b4d35b61c2ece435373f8343c85b78674dadfc7e146f882b4f",
+    "shared": "4a5d9d5ba4ce2de1728e3bf480350f25e07e21c947d19e3376f09b3c1e161742",
+    "sender_node_id": "6f1d5331e36e16d341fa06c9f622cc8569710f2a62d7491e9be8e953df844f01",
+    "header": {
+      "version": 1,
+      "crypto_mode": 1,
+      "counter": "72623859790382856",
+      "extra": "4c35"
+    },
+    "header_bytes": "01010807060504030201024c35",
+    "key": "d24418a94959ff84cb6af44a729f996c59f366467474fe0848e8e7c54a2507d9",
+    "nonce": "e1c88fa1d26b9e4a4c7203836e7ffa7f45974dcdda0ea183",
+    "plaintext": "3131316e6574776f726b3a207365616c65642d7061636b6574204b4154",
+    "inner_plaintext": "6f1d5331e36e16d341fa06c9f622cc8569710f2a62d7491e9be8e953df844f013131316e6574776f726b3a207365616c65642d7061636b6574204b4154",
+    "ciphertext_and_tag": "40103faf6dcc15be827549e8e97013842bddf38f3d387abd5be52a306466e3616b0d6bbbe27ca4456f8551b58630c6baddbd6d80b6e2bc1e5450de58a0e24877149161f02b41fda0db2c09dcd1",
+    "packet": "01010807060504030201024c358520f0098930a754748b7ddcb43ef75a0dbf3a0d26381af4eba4a98eaa9b4e6a40103faf6dcc15be827549e8e97013842bddf38f3d387abd5be52a306466e3616b0d6bbbe27ca4456f8551b58630c6baddbd6d80b6e2bc1e5450de58a0e24877149161f02b41fda0db2c09dcd1"
+  },
+  "wrong_recipient": {
+    "note": "the KAT packet opened with a different recipient keyset (canonical-12 project keyset)",
+    "mnemonic": "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about",
+    "expect": "err:auth"
+  },
+  "negatives": [
+    {
+      "name": "tampered AD: version byte",
+      "rationale": "version is AD-covered",
+      "packet": "00010807060504030201024c358520f0098930a754748b7ddcb43ef75a0dbf3a0d26381af4eba4a98eaa9b4e6a40103faf6dcc15be827549e8e97013842bddf38f3d387abd5be52a306466e3616b0d6bbbe27ca4456f8551b58630c6baddbd6d80b6e2bc1e5450de58a0e24877149161f02b41fda0db2c09dcd1",
+      "expect": "err:auth"
+    },
+    {
+      "name": "tampered AD: counter byte 0",
+      "rationale": "counter is AD-covered",
+      "packet": "01010907060504030201024c358520f0098930a754748b7ddcb43ef75a0dbf3a0d26381af4eba4a98eaa9b4e6a40103faf6dcc15be827549e8e97013842bddf38f3d387abd5be52a306466e3616b0d6bbbe27ca4456f8551b58630c6baddbd6d80b6e2bc1e5450de58a0e24877149161f02b41fda0db2c09dcd1",
+      "expect": "err:auth"
+    },
+    {
+      "name": "tampered AD: counter byte 7",
+      "rationale": "counter is AD-covered",
+      "packet": "01010807060504030200024c358520f0098930a754748b7ddcb43ef75a0dbf3a0d26381af4eba4a98eaa9b4e6a40103faf6dcc15be827549e8e97013842bddf38f3d387abd5be52a306466e3616b0d6bbbe27ca4456f8551b58630c6baddbd6d80b6e2bc1e5450de58a0e24877149161f02b41fda0db2c09dcd1",
+      "expect": "err:auth"
+    },
+    {
+      "name": "tampered AD: extra_len byte",
+      "rationale": "extra_len is itself a cleartext header byte, AD-covered",
+      "packet": "01010807060504030201034c358520f0098930a754748b7ddcb43ef75a0dbf3a0d26381af4eba4a98eaa9b4e6a40103faf6dcc15be827549e8e97013842bddf38f3d387abd5be52a306466e3616b0d6bbbe27ca4456f8551b58630c6baddbd6d80b6e2bc1e5450de58a0e24877149161f02b41fda0db2c09dcd1",
+      "expect": "err:auth"
+    },
+    {
+      "name": "tampered AD: extra header byte",
+      "rationale": "all other cleartext header bytes are AD-covered",
+      "packet": "01010807060504030201024d358520f0098930a754748b7ddcb43ef75a0dbf3a0d26381af4eba4a98eaa9b4e6a40103faf6dcc15be827549e8e97013842bddf38f3d387abd5be52a306466e3616b0d6bbbe27ca4456f8551b58630c6baddbd6d80b6e2bc1e5450de58a0e24877149161f02b41fda0db2c09dcd1",
+      "expect": "err:auth"
+    },
+    {
+      "name": "tampered epk",
+      "rationale": "epk change => different shared secret/key/nonce",
+      "packet": "01010807060504030201024c358420f0098930a754748b7ddcb43ef75a0dbf3a0d26381af4eba4a98eaa9b4e6a40103faf6dcc15be827549e8e97013842bddf38f3d387abd5be52a306466e3616b0d6bbbe27ca4456f8551b58630c6baddbd6d80b6e2bc1e5450de58a0e24877149161f02b41fda0db2c09dcd1",
+      "expect": "err:auth"
+    },
+    {
+      "name": "tampered ciphertext",
+      "rationale": "AEAD integrity",
+      "packet": "01010807060504030201024c358520f0098930a754748b7ddcb43ef75a0dbf3a0d26381af4eba4a98eaa9b4e6a40103fae6dcc15be827549e8e97013842bddf38f3d387abd5be52a306466e3616b0d6bbbe27ca4456f8551b58630c6baddbd6d80b6e2bc1e5450de58a0e24877149161f02b41fda0db2c09dcd1",
+      "expect": "err:auth"
+    },
+    {
+      "name": "tampered tag",
+      "rationale": "AEAD integrity",
+      "packet": "01010807060504030201024c358520f0098930a754748b7ddcb43ef75a0dbf3a0d26381af4eba4a98eaa9b4e6a40103faf6dcc15be827549e8e97013842bddf38f3d387abd5be52a306466e3616b0d6bbbe27ca4456f8551b58630c6baddbd6d80b6e2bc1e5450de58a0e24877149161f02b41fda0db2c09dcd0",
+      "expect": "err:auth"
+    },
+    {
+      "name": "crypto_mode 0x00 (weaker/legacy), rejected BEFORE decryption",
+      "rationale": "downgrade: no legacy mode exists in v1 (Meshtastic CVE-2025-53627 lesson)",
+      "packet": "01000807060504030201024c358520f0098930a754748b7ddcb43ef75a0dbf3a0d26381af4eba4a98eaa9b4e6a40103faf6dcc15be827549e8e97013842bddf38f3d387abd5be52a306466e3616b0d6bbbe27ca4456f8551b58630c6baddbd6d80b6e2bc1e5450de58a0e24877149161f02b41fda0db2c09dcd1",
+      "expect": "err:mode:0"
+    },
+    {
+      "name": "crypto_mode 0x02 (unknown future), rejected BEFORE decryption",
+      "rationale": "unknown modes fail closed",
+      "packet": "01020807060504030201024c358520f0098930a754748b7ddcb43ef75a0dbf3a0d26381af4eba4a98eaa9b4e6a40103faf6dcc15be827549e8e97013842bddf38f3d387abd5be52a306466e3616b0d6bbbe27ca4456f8551b58630c6baddbd6d80b6e2bc1e5450de58a0e24877149161f02b41fda0db2c09dcd1",
+      "expect": "err:mode:2"
+    },
+    {
+      "name": "crypto_mode 0xff, rejected BEFORE decryption",
+      "rationale": "unknown modes fail closed",
+      "packet": "01ff0807060504030201024c358520f0098930a754748b7ddcb43ef75a0dbf3a0d26381af4eba4a98eaa9b4e6a40103faf6dcc15be827549e8e97013842bddf38f3d387abd5be52a306466e3616b0d6bbbe27ca4456f8551b58630c6baddbd6d80b6e2bc1e5450de58a0e24877149161f02b41fda0db2c09dcd1",
+      "expect": "err:mode:255"
+    },
+    {
+      "name": "trailing byte appended",
+      "rationale": "ciphertext length is part of the AEAD input",
+      "packet": "01010807060504030201024c358520f0098930a754748b7ddcb43ef75a0dbf3a0d26381af4eba4a98eaa9b4e6a40103faf6dcc15be827549e8e97013842bddf38f3d387abd5be52a306466e3616b0d6bbbe27ca4456f8551b58630c6baddbd6d80b6e2bc1e5450de58a0e24877149161f02b41fda0db2c09dcd100",
+      "expect": "err:auth"
+    },
+    {
+      "name": "truncated: tag cut by one byte",
+      "rationale": "AEAD integrity",
+      "packet": "01010807060504030201024c358520f0098930a754748b7ddcb43ef75a0dbf3a0d26381af4eba4a98eaa9b4e6a40103faf6dcc15be827549e8e97013842bddf38f3d387abd5be52a306466e3616b0d6bbbe27ca4456f8551b58630c6baddbd6d80b6e2bc1e5450de58a0e24877149161f02b41fda0db2c09dc",
+      "expect": "err:auth"
+    },
+    {
+      "name": "truncated: empty packet",
+      "rationale": "size-limit before parse (section 12 rule 7)",
+      "packet": "",
+      "expect": "err:truncated"
+    },
+    {
+      "name": "truncated: 10 bytes",
+      "rationale": "shorter than the fixed header",
+      "packet": "01010807060504030201",
+      "expect": "err:truncated"
+    },
+    {
+      "name": "truncated: MIN_PACKET_LEN - 1 (58 bytes)",
+      "rationale": "below 11 + 32 + 16",
+      "packet": "01010807060504030201024c358520f0098930a754748b7ddcb43ef75a0dbf3a0d26381af4eba4a98eaa9b4e6a40103faf6dcc15be827549e8e9",
+      "expect": "err:truncated"
+    },
+    {
+      "name": "extra_len 255 overruns the packet",
+      "rationale": "header length must fit inside the packet",
+      "packet": "01010807060504030201ff4c358520f0098930a754748b7ddcb43ef75a0dbf3a0d26381af4eba4a98eaa9b4e6a40103faf6dcc15be827549e8e97013",
+      "expect": "err:truncated"
+    },
+    {
+      "name": "low-order epk (all-zero), RFC 7748 6.1",
+      "rationale": "ingress low-order check on the wire epk",
+      "packet": "01010807060504030201024c35000000000000000000000000000000000000000000000000000000000000000040103faf6dcc15be827549e8e97013842bddf38f3d387abd5be52a306466e3616b0d6bbbe27ca4456f8551b58630c6baddbd6d80b6e2bc1e5450de58a0e24877149161f02b41fda0db2c09dcd1",
+      "expect": "err:ecdh:LowOrderPublicKey"
+    },
+    {
+      "name": "low-order epk (u = 1)",
+      "rationale": "ingress low-order check on the wire epk",
+      "packet": "01010807060504030201024c35010000000000000000000000000000000000000000000000000000000000000040103faf6dcc15be827549e8e97013842bddf38f3d387abd5be52a306466e3616b0d6bbbe27ca4456f8551b58630c6baddbd6d80b6e2bc1e5450de58a0e24877149161f02b41fda0db2c09dcd1",
+      "expect": "err:ecdh:LowOrderPublicKey"
+    },
+    {
+      "name": "authentic packet whose inner plaintext is 5 bytes (< 32B sender NodeId)",
+      "rationale": "the sender NodeId MUST travel inside the ciphertext",
+      "packet": "01010807060504030201024c358520f0098930a754748b7ddcb43ef75a0dbf3a0d26381af4eba4a98eaa9b4e6a84a6c73525fb8e0044d520b7d3edcf57e5b4b12d4e",
+      "expect": "err:short-plaintext"
+    }
+  ],
+  "seal_negatives": [
+    {
+      "name": "crypto_mode 0x02 refused at seal",
+      "crypto_mode": 2,
+      "extra_len": 0,
+      "recipient": "de9edb7d7b7dc1b4d35b61c2ece435373f8343c85b78674dadfc7e146f882b4f",
+      "expect": "UnsupportedCryptoMode:2"
+    },
+    {
+      "name": "crypto_mode 0x00 refused at seal",
+      "crypto_mode": 0,
+      "extra_len": 0,
+      "recipient": "de9edb7d7b7dc1b4d35b61c2ece435373f8343c85b78674dadfc7e146f882b4f",
+      "expect": "UnsupportedCryptoMode:0"
+    },
+    {
+      "name": "extra header of 256 bytes exceeds the u8 length prefix",
+      "crypto_mode": 1,
+      "extra_len": 256,
+      "recipient": "de9edb7d7b7dc1b4d35b61c2ece435373f8343c85b78674dadfc7e146f882b4f",
+      "expect": "HeaderTooLarge:256"
+    },
+    {
+      "name": "recipient enc_pubkey all-zero (low-order)",
+      "crypto_mode": 1,
+      "extra_len": 0,
+      "recipient": "0000000000000000000000000000000000000000000000000000000000000000",
+      "expect": "Ecdh:LowOrderPublicKey"
+    },
+    {
+      "name": "recipient enc_pubkey order-8 point",
+      "crypto_mode": 1,
+      "extra_len": 0,
+      "recipient": "e0eb7a7c3b41b8ae1656e3faf19fc46ada098deb9c32b1fd866205165f49b800",
+      "expect": "Ecdh:LowOrderPublicKey"
+    }
+  ]
+}

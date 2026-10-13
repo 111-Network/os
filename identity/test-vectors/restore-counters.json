@@ -1,0 +1,61 @@
+{
+  "spec": "§8.4 + §6.2 + §6.5 + §14 — restore wire-function vectors: restore->re-announce (counter floor + 1024, next = +1), restore->send (per-peer send-counter resumption), announce sync-commit, unclean-reboot forward jump",
+  "frozen": "2026-10-13",
+  "description": "State-ABSENT restore (words/QR only): the node MUST NOT announce until a counter floor is set; set_restore_floor(F) commits announce_last = F + 1024 and traffic_base = 1024 (fsync, before any announce); the first announce then uses F + 1025 and the first send counter to a new peer is 1025 (the same +1024 jump). Over-jumping is harmless (gaps only advance windows); under-jumping would strand the node at peers permanently. Section 6.2 sync-commit: next_announce_counter() persists the value BEFORE returning it, so after a crash (no shutdown) a reopened store never re-issues a transmitted counter. Section 6.5: after an UNCLEAN reboot both sides apply a forward jump J = batch_n (>= N) to per-peer send counters and receive high-waters AND to traffic_base (so peers first contacted < N ops before the crash, absent from the file, also resume above every uncommitted emission); the announce counter is never jumped. create() and set_restore_floor() persist CLEAN (no emission yet); the first emission marks the file running, so first_send_to_new_peer = 1025 holds after a clean shutdown/reopen. Counters are decimal strings (u64).",
+  "provenance": "Derived from counters.rs / backup.rs restore semantics and asserted against the live CounterStore at generation time (restore_pending -> set_restore_floor -> next_announce_counter).",
+  "restore_jump": 1024,
+  "restore_reannounce": [
+    {
+      "floor": "0",
+      "announce_last": "1024",
+      "first_announce": "1025",
+      "first_send_to_new_peer": "1025"
+    },
+    {
+      "floor": "41",
+      "announce_last": "1065",
+      "first_announce": "1066",
+      "first_send_to_new_peer": "1025"
+    },
+    {
+      "floor": "1000000",
+      "announce_last": "1001024",
+      "first_announce": "1001025",
+      "first_send_to_new_peer": "1025"
+    },
+    {
+      "floor": "4294967296",
+      "announce_last": "4294968320",
+      "first_announce": "4294968321",
+      "first_send_to_new_peer": "1025"
+    }
+  ],
+  "restore_edges": [
+    {
+      "name": "floor + 1024 == u64::MAX: floor commits, but the first announce overflows (no wrap)",
+      "floor": "18446744073709550591",
+      "announce_last": "18446744073709551615",
+      "expect_first_announce": "Overflow"
+    },
+    {
+      "name": "floor + 1024 overflows u64: set_restore_floor refuses",
+      "floor": "18446744073709550592",
+      "expect_set_floor": "Overflow"
+    }
+  ],
+  "sync_commit": {
+    "fresh_identity_announce_last": 0,
+    "genesis_announce_counter": 1,
+    "sequence": [1, 2, 3, 4, 5]
+  },
+  "unclean_reboot": {
+    "batch_n": 4,
+    "sends_before_crash": 6,
+    "last_committed_send": 4,
+    "first_send_after_reboot": 9,
+    "receives_before_crash": 6,
+    "last_committed_receive_high": 4,
+    "receive_high_water_after_reboot": 8,
+    "note": "send side: sends 5 and 6 were emitted but uncommitted; the reopened store jumps by J = batch_n = 4, so the next send (9) can never collide with an emitted counter. receive side (separate store): receives 5 and 6 were consumed but uncommitted; the reopened window high-water jumps from the committed 4 to 8 (J = 4). Batch commits fire every batch_n operations (sends and receives share the tick)."
+  }
+}
