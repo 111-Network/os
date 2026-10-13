@@ -39,6 +39,34 @@ paths:
       responses:
         "200": { description: OK, content: { application/json: { schema: { $ref: "#/components/schemas/LogTail" } } } }
         "404": { $ref: "#/components/responses/Problem" }
+  /api/v1/devices:
+    get:
+      operationId: listDevices
+      summary: Device registry — hardware attached to and devices paired with this node (never other people's nodes)
+      responses:
+        "200": { description: OK, content: { application/json: { schema: { type: object, required: [schema, devices], properties: { schema: { type: integer }, devices: { type: array, items: { $ref: "#/components/schemas/DeviceRecord" } } } } } } }
+  /api/v1/devices/{id}:
+    get:
+      operationId: getDevice
+      parameters: [ { $ref: "#/components/parameters/deviceId" } ]
+      responses:
+        "200": { description: OK, content: { application/json: { schema: { $ref: "#/components/schemas/DeviceRecord" } } } }
+        "404": { $ref: "#/components/responses/Problem" }
+    patch:
+      operationId: patchDevice
+      description: Rename (alias null clears). Stored in <root>/state/devices.json keyed by the stable id.
+      parameters: [ { $ref: "#/components/parameters/deviceId" } ]
+      requestBody: { required: true, content: { application/json: { schema: { type: object, properties: { alias: { type: [string, "null"], maxLength: 64 } } } } } }
+      responses:
+        "200": { description: OK, content: { application/json: { schema: { $ref: "#/components/schemas/DeviceRecord" } } } }
+        "404": { $ref: "#/components/responses/Problem" }
+    delete:
+      operationId: forgetDevice
+      description: Forget — drops alias and pairing record; detected hardware reappears when plugged in again; a companion loses its session.
+      parameters: [ { $ref: "#/components/parameters/deviceId" } ]
+      responses:
+        "204": { description: Forgotten }
+        "404": { $ref: "#/components/responses/Problem" }
   /api/v1/chat:
     post:
       operationId: chat
@@ -162,6 +190,7 @@ paths:
 components:
   parameters:
     serviceId: { name: id, in: path, required: true, schema: { $ref: "#/components/schemas/ServiceId" } }
+    deviceId: { name: id, in: path, required: true, schema: { type: string, pattern: "^[A-Za-z0-9_-]{4,64}$" } }
   responses:
     Problem: { description: problem+json, content: { application/problem+json: { schema: { $ref: "#/components/schemas/Problem" } } } }
   schemas:
@@ -372,11 +401,39 @@ components:
         detail: { type: object, additionalProperties: true }
     SseProposal: { type: object, required: [id, title, kind, created_at], properties: { id: { type: string }, title: { type: string }, kind: { type: string }, created_at: { type: string, format: date-time } } }
     SseReset: { type: object, required: [reason], properties: { reason: { type: string, enum: [expired, restart] } } }
+    DeviceKind: { type: string, enum: [radio, bluetooth, companion, node, analog, unknown] }
+    DeviceState: { type: string, enum: [connected, disconnected, needs_setup, error] }
+    DeviceTransport: { type: string, enum: [usb-serial, bluetooth, wifi, lan, audio, unknown] }
+    DeviceRecord:
+      type: object
+      required: [id, kind, alias, name, state, transport, first_seen, last_seen, reason_code, reason, capabilities, identity, actions, detail]
+      properties:
+        id: { type: string, description: "stable across reboots (hash of serial-by-id path / vendor:product:serial / BLE MAC / companion session id)" }
+        kind: { $ref: "#/components/schemas/DeviceKind" }
+        alias: { type: [string, "null"], description: "user-given name" }
+        name: { type: string, description: "detected product name or a plain fallback like 'USB serial device'" }
+        state: { $ref: "#/components/schemas/DeviceState" }
+        transport: { $ref: "#/components/schemas/DeviceTransport" }
+        first_seen: { type: string, format: date-time }
+        last_seen: { type: string, format: date-time }
+        reason_code: { type: string, description: "stable snake_case, e.g. present, unplugged, no_driver_service, service_error, session_active, session_idle" }
+        reason: { type: string, description: "one plain sentence" }
+        capabilities: { type: array, items: { type: string }, description: "e.g. lora, meshtastic-firmware, ble, dashboard-session" }
+        service_id: { $ref: "#/components/schemas/ServiceId", description: "the service that drives this device, if any" }
+        kb_entry: { type: string }
+        identity:
+          type: object
+          additionalProperties: true
+          description: "vendor_id, product_id, serial, port, mac, ip, user_agent — whatever was detected; untrusted strings"
+        actions: { type: array, items: { type: string, enum: [rename, forget, agent] } }
+        detail: { type: object, additionalProperties: true, description: "raw detection facts the panel renders; bounded" }
+    SseDevices: { type: object, required: [devices], properties: { devices: { type: array, items: { $ref: "#/components/schemas/DeviceRecord" } } } }
     SseServices: { type: object, required: [services], properties: { services: { type: array, items: { $ref: "#/components/schemas/ServiceRecord" } } } }
 x-sse-events:
   events:
     status: "#/components/schemas/Status"
     services: "#/components/schemas/SseServices"
+    devices: "#/components/schemas/SseDevices"
     proposal: "#/components/schemas/SseProposal"
     agent: "#/components/schemas/SseAgentEvent"
     reset: "#/components/schemas/SseReset"
