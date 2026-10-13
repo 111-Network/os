@@ -76,7 +76,7 @@ describe("fixtures", () => {
       if (s.kb_entry) expect(f.kbEntries[s.kb_entry], s.kb_entry).toBeTruthy();
       expect(s.reason_code).toMatch(/^[a-z0-9_]+$/);
     }
-    expect(f.services.find((s) => s.id === "radio")).toMatchObject({ kb_entry: "projects/meshtastic.md", reason_code: "meshtasticd_absent", can_run_here: true });
+    expect(f.services.find((s) => s.id === "radio")).toMatchObject({ kb_entry: "projects/meshtastic.md", reason_code: "radio_unbound", can_run_here: true });
     expect(f.services.find((s) => s.id === "transport")?.kb_entry).toBe("projects/reticulum.md");
     expect(f.services.find((s) => s.id === "model")?.kb_entry).toBe("projects/llama-cpp.md");
     expect(f.services.find((s) => s.id === "codeagent")?.kb_entry).toBe("projects/opencode.md");
@@ -337,7 +337,7 @@ describe("scenarios", () => {
     expect(list.map((d) => d.kind)).toEqual(["radio", "companion", "bluetooth", "unknown"]); // registry order is stable
     expect(list[0]).toMatchObject({ name: "Heltec WiFi LoRa 32 V3", state: "needs_setup", reason_code: "no_driver_service" });
     expect(await a.device("usb-7c1e0b94a2d3")).toMatchObject({ state: "needs_setup" });
-    expect(await a.service("radio")).toMatchObject({ reason_code: "meshtasticd_absent", can_run_here: true });
+    expect(await a.service("radio")).toMatchObject({ reason_code: "radio_unbound", can_run_here: true });
     expect(frames.filter((f) => f.event === "services")).toHaveLength(1);
     expect((await a.proposals()).length).toBe(1); // needs_setup is not an error, so nothing new needs attention
   });
