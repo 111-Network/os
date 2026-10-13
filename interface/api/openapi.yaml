@@ -1,0 +1,387 @@
+openapi: 3.1.0
+info:
+  title: 111 node dashboard API
+  version: "1"
+  description: |
+    Layer 4 contract between the embedded dashboard UI and `111d` (`/api/v1`). Additive-only
+    evolution; breaking changes bump the path prefix. Served same-origin by `111d`; `111d` relays
+    chat/agent routes to `111-agent` (:11182). See README.md in this folder for conventions
+    (auth, problem+json, SSE). The `x-sse-events` map at the bottom types the `/events` stream.
+servers:
+  - url: http://127.0.0.1:11180
+  - url: http://111.localhost
+paths:
+  /api/v1/status:
+    get:
+      operationId: getStatus
+      summary: Node status (superset of /api/status)
+      responses:
+        "200": { description: OK, content: { application/json: { schema: { $ref: "#/components/schemas/Status" } } } }
+        "401": { $ref: "#/components/responses/Problem" }
+  /api/v1/services:
+    get:
+      operationId: listServices
+      responses:
+        "200": { description: OK, content: { application/json: { schema: { type: object, required: [schema, services], properties: { schema: { type: integer, const: 1 }, services: { type: array, items: { $ref: "#/components/schemas/ServiceRecord" } } } } } } }
+  /api/v1/services/{id}:
+    get:
+      operationId: getService
+      parameters: [ { $ref: "#/components/parameters/serviceId" } ]
+      responses:
+        "200": { description: OK, content: { application/json: { schema: { $ref: "#/components/schemas/ServiceRecord" } } } }
+        "404": { $ref: "#/components/responses/Problem" }
+  /api/v1/services/{id}/log:
+    get:
+      operationId: getServiceLog
+      parameters:
+        - { $ref: "#/components/parameters/serviceId" }
+        - { name: n, in: query, schema: { type: integer, minimum: 1, maximum: 500, default: 100 } }
+      responses:
+        "200": { description: OK, content: { application/json: { schema: { $ref: "#/components/schemas/LogTail" } } } }
+        "404": { $ref: "#/components/responses/Problem" }
+  /api/v1/chat:
+    post:
+      operationId: chat
+      summary: Relay to 111-agent POST /v1/chat
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: "#/components/schemas/ChatRequest" } } }
+      responses:
+        "200":
+          description: Streamed reply (`stream:true`, default) or JSON (`stream:false`)
+          content:
+            text/event-stream: { schema: { type: string, description: "Named events: token, tool, done, error — see x-sse-events.chat" } }
+            application/json: { schema: { $ref: "#/components/schemas/ChatReply" } }
+        "400": { $ref: "#/components/responses/Problem" }
+        "503": { $ref: "#/components/responses/Problem" }
+  /api/v1/chat/history:
+    get:
+      operationId: chatHistory
+      parameters: [ { name: conversation_id, in: query, required: true, schema: { $ref: "#/components/schemas/ConversationId" } } ]
+      responses:
+        "200": { description: OK, content: { application/json: { schema: { $ref: "#/components/schemas/ChatHistory" } } } }
+        "503": { $ref: "#/components/responses/Problem" }
+  /api/v1/agent/status:
+    get:
+      operationId: agentStatus
+      responses:
+        "200": { description: Relay of 111-agent /v1/agent/status, content: { application/json: { schema: { $ref: "#/components/schemas/AgentStatus" } } } }
+        "503": { $ref: "#/components/responses/Problem" }
+  /api/v1/agent/task:
+    post:
+      operationId: agentTask
+      requestBody: { required: true, content: { application/json: { schema: { $ref: "#/components/schemas/TaskRequest" } } } }
+      responses:
+        "202": { description: Accepted, content: { application/json: { schema: { type: object, required: [schema, task_id], properties: { schema: { type: integer }, task_id: { type: string } } } } } }
+        "409": { $ref: "#/components/responses/Problem" }
+        "503": { $ref: "#/components/responses/Problem" }
+  /api/v1/proposals:
+    get:
+      operationId: listProposals
+      parameters: [ { name: status, in: query, schema: { type: string, enum: [open, decided, all], default: open } } ]
+      responses:
+        "200": { description: OK, content: { application/json: { schema: { type: object, required: [schema, proposals], properties: { schema: { type: integer }, proposals: { type: array, items: { $ref: "#/components/schemas/Proposal" } } } } } } }
+  /api/v1/proposals/{id}:
+    get:
+      operationId: getProposal
+      parameters: [ { name: id, in: path, required: true, schema: { type: string } } ]
+      responses:
+        "200": { description: OK, content: { application/json: { schema: { $ref: "#/components/schemas/Proposal" } } } }
+        "404": { $ref: "#/components/responses/Problem" }
+  /api/v1/proposals/{id}/decision:
+    post:
+      operationId: decideProposal
+      parameters: [ { name: id, in: path, required: true, schema: { type: string } } ]
+      requestBody: { required: true, content: { application/json: { schema: { type: object, required: [decision], properties: { decision: { $ref: "#/components/schemas/Decision" } } } } } }
+      responses:
+        "200": { description: Recorded, content: { application/json: { schema: { $ref: "#/components/schemas/Proposal" } } } }
+        "404": { $ref: "#/components/responses/Problem" }
+        "409": { description: already_decided, $ref: "#/components/responses/Problem" }
+  /api/v1/settings:
+    get:
+      operationId: getSettings
+      responses:
+        "200": { description: OK, content: { application/json: { schema: { $ref: "#/components/schemas/Settings" } } } }
+    patch:
+      operationId: patchSettings
+      description: Partial merge. `lan_enabled` and `offer` are loopback-only (403 loopback_only otherwise). `lan_enabled` takes effect on restart.
+      requestBody: { required: true, content: { application/json: { schema: { $ref: "#/components/schemas/SettingsPatch" } } } }
+      responses:
+        "200": { description: OK, content: { application/json: { schema: { $ref: "#/components/schemas/Settings" } } } }
+        "403": { $ref: "#/components/responses/Problem" }
+  /api/v1/node/restart:
+    post:
+      operationId: restartNode
+      description: Replies, then the daemon exits 0 and the supervisor restarts it.
+      responses:
+        "202": { description: Restarting, content: { application/json: { schema: { type: object, required: [schema, restarting], properties: { schema: { type: integer }, restarting: { type: boolean } } } } } }
+  /api/v1/update/check:
+    post:
+      operationId: updateCheck
+      description: Wakes the updater loop. Result lands in `/status.update`.
+      responses:
+        "202": { description: Check started, content: { application/json: { schema: { type: object, required: [schema, started], properties: { schema: { type: integer }, started: { type: boolean } } } } } }
+  /api/v1/kb:
+    get:
+      operationId: kbIndex
+      responses:
+        "200": { description: Root llms.txt, content: { text/plain: { schema: { type: string } } } }
+        "404": { $ref: "#/components/responses/Problem" }
+  /api/v1/kb/entry:
+    get:
+      operationId: kbEntry
+      parameters: [ { name: path, in: query, required: true, schema: { type: string, description: "relative path under share/kb, e.g. projects/meshtastic.md; traversal refused" } } ]
+      responses:
+        "200": { description: Markdown, content: { text/markdown: { schema: { type: string } } } }
+        "400": { $ref: "#/components/responses/Problem" }
+        "404": { $ref: "#/components/responses/Problem" }
+  /api/v1/auth/session:
+    get:
+      operationId: authSession
+      responses:
+        "200": { description: OK, content: { application/json: { schema: { $ref: "#/components/schemas/AuthSession" } } } }
+  /api/v1/auth/pair:
+    post:
+      operationId: authPair
+      requestBody: { required: true, content: { application/json: { schema: { type: object, required: [code], properties: { code: { type: string, description: "8 chars, dashes/spaces/case ignored" } } } } } }
+      responses:
+        "200": { description: Session cookie set, content: { application/json: { schema: { $ref: "#/components/schemas/AuthSession" } } } }
+        "401": { $ref: "#/components/responses/Problem" }
+        "429": { $ref: "#/components/responses/Problem" }
+  /api/v1/auth/logout:
+    post:
+      operationId: authLogout
+      responses:
+        "204": { description: Session revoked }
+  /api/v1/events:
+    get:
+      operationId: events
+      description: The one live stream. `id:` global monotonic; honors Last-Event-ID (ring 256) else emits `reset`. See x-sse-events.events.
+      responses:
+        "200": { description: text/event-stream, content: { text/event-stream: { schema: { type: string } } } }
+components:
+  parameters:
+    serviceId: { name: id, in: path, required: true, schema: { $ref: "#/components/schemas/ServiceId" } }
+  responses:
+    Problem: { description: problem+json, content: { application/problem+json: { schema: { $ref: "#/components/schemas/Problem" } } } }
+  schemas:
+    Problem:
+      type: object
+      required: [type, title, status, code]
+      properties:
+        type: { type: string, default: "about:blank" }
+        title: { type: string }
+        status: { type: integer }
+        detail: { type: string }
+        code:
+          type: string
+          enum: [unauthenticated, loopback_only, lan_read_only, agent_unavailable, model_unavailable, bad_request, not_found, rate_limited, already_decided, needs_hub, upstream_error, internal]
+        errors: { type: array, items: { type: object, required: [message], properties: { pointer: { type: string }, message: { type: string } } } }
+    ServiceId: { type: string, enum: [agent, model, transport, radio, kb, gateway, codeagent] }
+    ServiceState: { type: string, enum: [live, unset, error, starting] }
+    ServiceRecord:
+      type: object
+      required: [id, name, plain_name, kind, state, since, reason_code, reason, can_run_here, description, actions, detail]
+      properties:
+        id: { $ref: "#/components/schemas/ServiceId" }
+        name: { type: string, description: "technical name, e.g. 111-agent" }
+        plain_name: { type: string, description: "e.g. Local AI agent" }
+        kind: { type: string, enum: [child, detected, builtin] }
+        state: { $ref: "#/components/schemas/ServiceState" }
+        since: { type: string, format: date-time }
+        reason_code: { type: string, description: "stable snake_case, e.g. binary_absent, no_python, child_backoff, health_503, no_radio, wan_offline, verified" }
+        reason: { type: string, description: "one plain sentence" }
+        can_run_here: { type: boolean }
+        requires: { type: string }
+        description: { type: string, description: "2–3 plain sentences: what it is" }
+        kb_entry: { type: string, description: "relative KB path" }
+        embed_url: { type: string }
+        actions: { type: array, items: { type: string, enum: [restart, log] } }
+        detail: { type: object, additionalProperties: true }
+    Status:
+      type: object
+      required: [schema, node, transport_state, health, update, intelligence, bind, lan_enabled, auth, layers]
+      properties:
+        schema: { type: integer }
+        node:
+          type: object
+          required: [node_id, label, bech32, alias, category, version, uptime_sec]
+          properties:
+            node_id: { type: [string, "null"], description: "64 lowercase hex" }
+            label: { type: [string, "null"], description: "xxxx-xxxx-xx operator label (display only)" }
+            bech32: { type: [string, "null"], description: "node1… (lowercase)" }
+            alias: { type: [string, "null"], description: "local editable name" }
+            category: { type: [string, "null"], enum: [Relay1, Node2A, Node2B, Bridge3, Hub4A, Hub4B, null] }
+            version: { type: string }
+            uptime_sec: { type: integer }
+        kb: { type: [object, "null"], properties: { sha256: { type: string }, entries: { type: integer } } }
+        transport_state: { type: string, enum: ["no transport", isolated, joined, "transport degraded"] }
+        health:
+          type: object
+          properties:
+            status: { type: string, enum: [ok, error] }
+            components: { type: object, properties: { identity: { type: boolean }, kb: { type: boolean }, transport: { type: string, enum: [alive, absent, degraded, down] }, updater_idle: { type: boolean } } }
+        update:
+          type: object
+          required: [state, pending, last_check, clock_fault]
+          properties:
+            state: { type: string, enum: [idle, checking, staged, probation, reverting, failed] }
+            pending: { type: boolean }
+            pending_version: { type: [string, "null"] }
+            last_check: { type: [string, "null"], format: date-time }
+            last_result: { type: [string, "null"], enum: [up_to_date, staged, refused, degraded, null] }
+            floor: { type: [string, "null"] }
+            clock_fault: { type: boolean }
+        offer: { type: [object, "null"], properties: { tier: { type: string }, state: { type: string, enum: [offered, accepted, dismissed] } } }
+        error_state: { type: [object, "null"], properties: { kind: { type: string }, detail: { type: string } } }
+        intelligence:
+          type: object
+          properties:
+            agent: { $ref: "#/components/schemas/ChildState" }
+            model_server: { $ref: "#/components/schemas/ChildState" }
+            agent_url: { type: [string, "null"] }
+            agent_state: { type: [string, "null"], enum: [local, offloaded, unavailable, null] }
+            model_id: { type: [string, "null"] }
+        bind:
+          type: object
+          required: [urls, lan]
+          properties:
+            urls: { type: array, items: { type: string }, description: "URLs that actually bound, nicest first" }
+            lan: { type: boolean }
+        lan_enabled: { type: boolean, description: "configured value (takes effect on restart)" }
+        auth:
+          type: object
+          required: [loopback, paired]
+          properties: { loopback: { type: boolean }, paired: { type: boolean } }
+        layers:
+          type: array
+          description: which layers this node runs (0–9) as built today
+          items: { type: integer, minimum: 0, maximum: 9 }
+    ChildState: { type: string, enum: [absent, running, backoff, degraded, stopped] }
+    LogTail:
+      type: object
+      required: [schema, service, lines, source]
+      properties:
+        schema: { type: integer }
+        service: { $ref: "#/components/schemas/ServiceId" }
+        source: { type: string, description: "file path or 'none'" }
+        lines: { type: array, items: { type: string } }
+    ConversationId: { type: string, pattern: "^[A-Za-z0-9_-]{1,128}$" }
+    ChatRequest:
+      type: object
+      required: [conversation_id, message]
+      properties:
+        conversation_id: { $ref: "#/components/schemas/ConversationId" }
+        message: { type: string, minLength: 1, maxLength: 16000 }
+        stream: { type: boolean, default: true }
+    ChatReply:
+      type: object
+      required: [schema, conversation_id, reply, tool_trace]
+      properties:
+        schema: { type: integer }
+        conversation_id: { type: string }
+        reply: { type: string }
+        tool_trace: { type: array, items: { $ref: "#/components/schemas/ToolTrace" } }
+    ToolTrace: { type: object, required: [name, ok], properties: { name: { type: string }, ok: { type: boolean } } }
+    ChatHistory:
+      type: object
+      required: [schema, conversation_id, messages]
+      properties:
+        schema: { type: integer }
+        conversation_id: { type: string }
+        messages:
+          type: array
+          description: raw OpenAI-shaped messages from 111-agent; UI hides role=tool and null-content assistant rows
+          items:
+            type: object
+            required: [role]
+            properties:
+              role: { type: string, enum: [user, assistant, tool, system] }
+              content: { type: [string, "null"] }
+              tool_calls: { type: array, items: { type: object, additionalProperties: true } }
+    AgentStatus:
+      type: object
+      properties:
+        schema: { type: integer }
+        state: { type: string, enum: [local, offloaded, unavailable] }
+        model: { type: object, properties: { base: { type: string }, reachable: { type: boolean }, id: { type: string } } }
+        kb: { type: object, properties: { present: { type: boolean }, entries: { type: integer } } }
+        conversations: { type: integer }
+        tasks_open: { type: integer }
+        uptime_sec: { type: integer }
+        version: { type: string }
+        node_id: { type: [string, "null"] }
+        category: { type: string }
+    TaskRequest:
+      type: object
+      required: [kind]
+      properties:
+        kind: { type: string, enum: [diagnose, propose, patch] }
+        refs: { type: array, items: { type: string } }
+        note: { type: [string, "null"] }
+    Decision: { type: string, enum: [accepted, dismissed] }
+    Proposal:
+      type: object
+      required: [schema, id, node_id, task_id, kind, title, body, created_at, decision]
+      properties:
+        schema: { type: integer }
+        id: { type: string }
+        node_id: { type: [string, "null"] }
+        task_id: { type: [string, "null"] }
+        kind: { type: string, enum: [diagnose, propose, patch, chat] }
+        title: { type: string }
+        body: { type: string, description: markdown }
+        created_at: { type: string, format: date-time }
+        decision: { type: [object, "null"], properties: { decision: { $ref: "#/components/schemas/Decision" }, at: { type: string, format: date-time } } }
+    Settings:
+      type: object
+      required: [schema, alias, lan_enabled, offer]
+      properties:
+        schema: { type: integer }
+        alias: { type: [string, "null"], maxLength: 64 }
+        lan_enabled: { type: boolean }
+        offer: { type: [string, "null"], enum: [offered, accepted, dismissed, null] }
+    SettingsPatch:
+      type: object
+      properties:
+        alias: { type: [string, "null"], maxLength: 64 }
+        lan_enabled: { type: boolean }
+        offer: { type: string, enum: [accepted, dismissed] }
+    AuthSession:
+      type: object
+      required: [schema, loopback, paired, lan_enabled]
+      properties:
+        schema: { type: integer }
+        loopback: { type: boolean }
+        paired: { type: boolean }
+        lan_enabled: { type: boolean }
+        created: { type: [string, "null"], format: date-time }
+    # ---- SSE payloads (referenced by x-sse-events) ----
+    SseChatToken: { type: object, required: [text], properties: { text: { type: string } } }
+    SseChatTool: { type: object, required: [name], properties: { name: { type: string } } }
+    SseChatDone: { type: object, required: [conversation_id, reply, tool_trace], properties: { conversation_id: { type: string }, reply: { type: string }, tool_trace: { type: array, items: { $ref: "#/components/schemas/ToolTrace" } } } }
+    SseChatError: { type: object, required: [error], properties: { error: { type: string }, code: { type: string } } }
+    SseAgentEvent:
+      type: object
+      required: [schema, seq, ts, kind, detail]
+      properties:
+        schema: { type: integer }
+        seq: { type: integer }
+        ts: { type: string, format: date-time }
+        kind: { type: string, enum: [chat.turn, task.submitted, task.done, task.failed, task.refused, task.orphaned, proposal.written] }
+        detail: { type: object, additionalProperties: true }
+    SseProposal: { type: object, required: [id, title, kind, created_at], properties: { id: { type: string }, title: { type: string }, kind: { type: string }, created_at: { type: string, format: date-time } } }
+    SseReset: { type: object, required: [reason], properties: { reason: { type: string, enum: [expired, restart] } } }
+    SseServices: { type: object, required: [services], properties: { services: { type: array, items: { $ref: "#/components/schemas/ServiceRecord" } } } }
+x-sse-events:
+  events:
+    status: "#/components/schemas/Status"
+    services: "#/components/schemas/SseServices"
+    proposal: "#/components/schemas/SseProposal"
+    agent: "#/components/schemas/SseAgentEvent"
+    reset: "#/components/schemas/SseReset"
+  chat:
+    token: "#/components/schemas/SseChatToken"
+    tool: "#/components/schemas/SseChatTool"
+    done: "#/components/schemas/SseChatDone"
+    error: "#/components/schemas/SseChatError"
