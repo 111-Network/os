@@ -47,3 +47,49 @@ pub fn evaluate(c: &Components) -> (axum::http::StatusCode, HealthBody) {
         },
     )
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::http::StatusCode;
+
+    fn eval(model: bool, kb: bool, state_dir: bool) -> (StatusCode, &'static str) {
+        let (code, body) = evaluate(&Components {
+            model,
+            kb,
+            state_dir,
+        });
+        assert_eq!(body.schema, 1);
+        assert_eq!(body.components.model, model);
+        assert_eq!(body.components.kb, kb);
+        assert_eq!(body.components.state_dir, state_dir);
+        (code, body.status)
+    }
+
+    #[test]
+    fn state_dir_down_is_503_error() {
+        // state_dir unusable => the agent itself is broken, whatever the rest.
+        for (model, kb) in [(false, false), (true, false), (false, true), (true, true)] {
+            let (code, status) = eval(model, kb, false);
+            assert_eq!(code, StatusCode::SERVICE_UNAVAILABLE, "{model}/{kb}");
+            assert_eq!(status, "error", "{model}/{kb}");
+        }
+    }
+
+    #[test]
+    fn model_or_kb_down_is_200_degraded() {
+        // A dead hub or absent KB must not restart-loop the agent: 200.
+        for (model, kb) in [(false, false), (true, false), (false, true)] {
+            let (code, status) = eval(model, kb, true);
+            assert_eq!(code, StatusCode::OK, "{model}/{kb}");
+            assert_eq!(status, "degraded", "{model}/{kb}");
+        }
+    }
+
+    #[test]
+    fn all_up_is_200_ok() {
+        let (code, status) = eval(true, true, true);
+        assert_eq!(code, StatusCode::OK);
+        assert_eq!(status, "ok");
+    }
+}
