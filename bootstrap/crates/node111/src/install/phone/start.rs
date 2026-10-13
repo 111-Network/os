@@ -36,18 +36,24 @@ pub fn ensure_host_keypair(runner: &dyn Runner, keys_dir: &Path) -> anyhow::Resu
 }
 
 /// On-device keygen: the payload binary generates the phone identity; the
-/// secret NEVER leaves the phone. No-op when an identity already exists.
+/// secret NEVER leaves the phone. Idempotent (an existing identity is reported,
+/// never overwritten). Returns the NodeId hex — the only thing the host sees.
 pub fn on_device_keygen(adb: &Adb<'_>) -> anyhow::Result<String> {
-    let npub = runas::run_as_output(
+    let out = runas::run_as_output(
         adb,
-        "NODE111_ROOT=$PREFIX/var/lib/111 $PREFIX/var/lib/111/current/bin/111 identity generate 2>/dev/null || true; cat $PREFIX/var/lib/111/identity/npub 2>/dev/null",
+        "NODE111_ROOT=$PREFIX/var/lib/111 $PREFIX/var/lib/111/current/bin/111 identity generate",
     )?;
-    let npub = npub.trim().to_string();
+    let node_id = out
+        .lines()
+        .map(str::trim)
+        .rfind(|l| !l.is_empty())
+        .unwrap_or("")
+        .to_string();
     anyhow::ensure!(
-        npub.starts_with("npub1"),
-        "on-device keygen produced no npub: {npub:?}"
+        crate::identity::parse_node_id_hex(&node_id).is_some(),
+        "on-device keygen produced no NodeId: {out:?}"
     );
-    Ok(npub)
+    Ok(node_id)
 }
 
 /// sshd host keys ON-DEVICE + push only the user's authorized_keys.

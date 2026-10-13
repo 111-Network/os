@@ -117,7 +117,9 @@ struct StatusBody {
 
 #[derive(Serialize)]
 struct NodeBody {
-    npub: Option<String>,
+    /// §7 machine string — lowercase hex (L2 §13). Replaced the provisional
+    /// identity handle key at L1 v2.2 (Layer 4 codes against this name).
+    node_id: Option<String>,
     category: Option<String>,
     version: String,
     uptime_sec: u64,
@@ -142,7 +144,7 @@ async fn api_status(State(state): State<SharedState>) -> impl IntoResponse {
     let body = StatusBody {
         schema: 1,
         node: NodeBody {
-            npub: s.npub.clone(),
+            node_id: s.node_id.clone(),
             category: s.category.clone(),
             version: s.version.clone(),
             uptime_sec: s.uptime_sec(),

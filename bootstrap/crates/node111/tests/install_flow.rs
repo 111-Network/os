@@ -245,7 +245,9 @@ fn happy_path_end_to_end_and_idempotent_rerun() {
     assert_eq!(receipt.version, RELEASE);
     assert_eq!(receipt.category, "Node2A");
     assert!(receipt.gateway);
-    assert!(receipt.npub.starts_with("npub1"));
+    // L1 v2.2: the receipt carries the NodeId as the §7 machine string (hex).
+    let node_id = node111::identity::parse_node_id_hex(&receipt.node_id)
+        .unwrap_or_else(|| panic!("receipt.node_id is not 64 hex: {:?}", receipt.node_id));
     assert!(receipt
         .cache_hashes
         .contains_key("packages/python/rns-lock.txt"));
@@ -296,26 +298,32 @@ fn happy_path_end_to_end_and_idempotent_rerun() {
         .path()
         .join("etc/udev/rules.d/99-111-lora.rules")
         .exists());
-    // identity trio with perms
+    // L2 §13 identity file set with perms (written by id111's atomic writer)
     use std::os::unix::fs::PermissionsExt;
     let id_dir = root.join("identity");
+    let mode = |name: &str| id_dir.join(name).metadata().unwrap().permissions().mode() & 0o777;
     assert_eq!(
         id_dir.metadata().unwrap().permissions().mode() & 0o777,
         0o700
     );
+    assert_eq!(mode("mnemonic"), 0o600);
+    assert_eq!(mode("keyset"), 0o600);
+    assert_eq!(mode("nodeid"), 0o644);
+    assert_eq!(mode("descriptor"), 0o644);
+    assert_eq!(mode("counters"), 0o600);
+    // the nodeid record is `0xed 0x01 ‖ NodeId` and agrees with the receipt
+    let record = std::fs::read(id_dir.join("nodeid")).unwrap();
+    assert_eq!(&record[..2], &[0xed, 0x01]);
+    assert_eq!(&record[2..], node_id.as_bytes());
+    // no provisional-seam files, and the dir round-trips through the binding
     assert_eq!(
-        id_dir
-            .join("secret.hex")
-            .metadata()
-            .unwrap()
-            .permissions()
-            .mode()
-            & 0o777,
-        0o600
+        std::fs::read_dir(&id_dir).unwrap().count(),
+        5,
+        "exactly the five §13 files"
     );
     assert_eq!(
-        id_dir.join("npub").metadata().unwrap().permissions().mode() & 0o777,
-        0o644
+        node111::identity::load(&id_dir).unwrap().node_id_hex(),
+        receipt.node_id
     );
     runner.assert_exhausted();
 
@@ -326,11 +334,11 @@ fn happy_path_end_to_end_and_idempotent_rerun() {
         .unwrap_or_else(|e| panic!("re-run failed: {e:#}\ncalls: {:?}", runner2.calls()));
     assert_eq!(receipt2.version, RELEASE);
     // identity NOT regenerated
+    assert_eq!(receipt2.node_id, receipt.node_id);
     assert_eq!(
-        std::fs::read_to_string(root.join("identity/npub"))
-            .unwrap()
-            .trim(),
-        receipt.npub
+        std::fs::read(root.join("identity/nodeid")).unwrap(),
+        record,
+        "nodeid record unchanged by the re-run"
     );
     // offer not re-written
     let offer: serde_json::Value =

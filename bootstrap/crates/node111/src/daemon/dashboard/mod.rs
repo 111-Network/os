@@ -40,7 +40,8 @@ pub struct ErrorState {
 /// Everything the dashboard/API serves. Writers: daemon core (identity, kb,
 /// transport, health), updater (last-successful-check, pending), offer stub.
 pub struct DashboardState {
-    pub npub: Option<String>,
+    /// NodeId, §7 machine string (lowercase hex of the 32B Ed25519 public key).
+    pub node_id: Option<String>,
     pub category: Option<String>,
     pub version: String,
     pub started: Instant,
@@ -58,7 +59,7 @@ pub struct DashboardState {
 impl DashboardState {
     pub fn new(version: &str) -> Self {
         DashboardState {
-            npub: None,
+            node_id: None,
             category: None,
             version: version.to_string(),
             started: Instant::now(),

@@ -34,7 +34,7 @@
 
 <div class="card">
   <div class="row"><span class="k">health</span><span class="v" id="health">—</span></div>
-  <div class="row"><span class="k">npub</span><span class="v" id="npub">—</span></div>
+  <div class="row"><span class="k">node id</span><span class="v" id="node_id">—</span></div>
   <div class="row"><span class="k">category</span><span class="v" id="category">—</span></div>
   <div class="row"><span class="k">version</span><span class="v" id="version">—</span></div>
   <div class="row"><span class="k">uptime</span><span class="v" id="uptime">—</span></div>
@@ -73,7 +73,7 @@ async function refresh() {
     const s = await r.json();
     const ok = s.health.status === "ok";
     $("health").innerHTML = `<span class="${ok ? "ok" : "bad"} pill">${s.health.status}</span>`;
-    txt("npub", s.node.npub || "—");
+    txt("node_id", s.node.node_id || "—");
     txt("category", s.node.category || "—");
     txt("version", s.node.version);
     txt("uptime", fmtUptime(s.node.uptime_sec));

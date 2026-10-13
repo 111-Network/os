@@ -13,7 +13,7 @@ for shipping (spec) and must be run before the first release.
 | F1 | kill installer mid-extract → re-run heals | ✅ LOCALLY | `cargo test --test install_flow f1_torn_stage_heals` |
 | F2 | crash-before-READY release → auto-revert | ✅ LOCALLY | `cargo test --test helper_guard f2_crash_before_ready_guard_reverts` |
 | F3 | READY-but-503 release → auto-revert | ✅ LOCALLY | `cargo test --test helper_guard f3_ready_but_503_helper_reverts_on_daemon_request` |
-| F4 | corrupt identity → error state + recover | ✅ LOCALLY | `cargo test --lib identity::tests::corrupt_trio_quarantines_and_never_rekeys` |
+| F4 | corrupt identity → error state + `restore` (never silent re-key; a quarantined sibling blocks `generate` unless `--burn`) | ✅ LOCALLY | `cargo test --lib identity::tests::corrupt_trio_quarantines_and_never_rekeys identity::tests::quarantine_sibling_blocks_silent_generate_until_explicit_burn` |
 | F5 | skewed clock → clock-fault surfaced | ✅ LOCALLY | `cargo test --test install_flow clock_skew_refuses --test updater_stage clock_skew_writes_fault_marker` |
 | F6 | stale signed manifest → refusal (incl. RTC-less Pi) | ✅ LOCALLY | `cargo test --test updater_stage` (replay/stale cases) + Pi check in V8 runbook |
 | F7 | phone reboot mid-provision → resume | 🔶 RUNBOOK | ProvisionState markers (`cargo test --test phone_flow provision_state_resume_logic`) + physical resume pass in `phone/v1-v2-v11-runbook.md` |

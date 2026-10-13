@@ -18,12 +18,12 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 toml = "0.8"
 sha2 = "0.10"
-hmac = "0.12"
-k256 = { version = "0.14", features = ["schnorr"] }
-bip39 = "2"
-bech32 = "0.11"
-scrypt = "0.11"
-chacha20poly1305 = "0.10"
+# T10 (L1 v2.2, D14d): Layer 2's identity core replaces the provisional secp256k1
+# seam. Path dep (dep-policy sign-off recorded in os/identity/TASKS.md row T10).
+# k256 / bip39 2.x / bech32 0.11 / scrypt / chacha20poly1305 0.10 are dropped:
+# every call site was in the deleted identity/{bip32,nip49}.rs (mnemonic
+# ownership moved to id111's bip39 3.0.0 — converge, don't dual-pin).
+id111 = { path = "../../../identity/crates/id111" }
 minisign-verify = "0.2"
 ureq = { version = "3", default-features = false, features = ["rustls"] }
 webpki-roots = "1"
@@ -36,9 +36,10 @@ time = { version = "0.3", features = ["formatting", "parsing", "serde"] }
 libc = "0.2"
 anyhow = "1"
 tempfile = "3"
-# T3: NFKC/NFKD for NIP-49 passphrases + BIP-39 recovery input (spec-mandated
-# normalization; already in the dep graph as an optional bip39 dep — pure Rust, tiny).
-unicode-normalization = "0.1"
+# T10 review: hmac 0.12 + unicode-normalization removed (zero call sites after
+# the id111 seam swap). zeroize added (already in the graph via id111) to wipe
+# recovery words typed into `111 identity restore` — reviewer sign-off.
+zeroize = "1"
 # T10/T5: payload tarball extraction. Pure-Rust backends only (musl determinism):
 # flate2 with miniz_oxide (no zlib C), tar for the archive format.
 tar = "0.4"

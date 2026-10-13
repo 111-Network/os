@@ -1,5 +1,5 @@
-//! CLI surface: install · daemon · identity backup|export|recover · config ·
-//! uninstall · update-helper · update-guard.
+//! CLI surface: install · daemon · identity backup|restore (+ commission, T11) ·
+//! config · uninstall · update-helper · update-guard.
 //! Flags: --phone --serial --keep-adb --allow-degraded --min-installer-version
 //! --version (calver). Host install and --phone are mutually exclusive.
 
@@ -27,9 +27,12 @@ enum Cmd {
     Install(InstallArgs),
     Daemon,
     IdentityBackup,
-    IdentityExport,
-    IdentityRecover,
-    IdentityGenerate,
+    IdentityRestore,
+    /// Cat-1 commissioning ceremony, commissioner side (L2 §8.3) — T11 wires it.
+    IdentityCommission,
+    /// Internal (not in USAGE): idempotent keygen for the phone flow's
+    /// on-device step — prints the NodeId hex; never overwrites.
+    IdentityGenerate { burn: bool },
     Config(Vec<String>),
     Uninstall { phone: bool, serial: Option<String> },
     UpdateHelper,
@@ -90,10 +93,12 @@ fn parse(args: &[String]) -> anyhow::Result<Cmd> {
         "daemon" => Cmd::Daemon,
         "identity" => match args.get(1).map(String::as_str) {
             Some("backup") => Cmd::IdentityBackup,
-            Some("export") => Cmd::IdentityExport,
-            Some("recover") => Cmd::IdentityRecover,
-            Some("generate") => Cmd::IdentityGenerate,
-            other => anyhow::bail!("usage: 111 identity backup|export|recover (got {other:?})"),
+            Some("restore") => Cmd::IdentityRestore,
+            Some("commission") => Cmd::IdentityCommission,
+            Some("generate") => Cmd::IdentityGenerate {
+                burn: args.get(2).map(String::as_str) == Some("--burn"),
+            },
+            other => anyhow::bail!("usage: 111 identity backup|restore (got {other:?})"),
         },
         "config" => Cmd::Config(args[1..].to_vec()),
         "uninstall" => {
@@ -118,7 +123,7 @@ USAGE:
   111 install [--allow-degraded] [--min-installer-version=CALVER]
   111 install --phone [--serial SERIAL] [--keep-adb]
   111 daemon
-  111 identity backup|export|recover
+  111 identity backup|restore      (run as the node user: sudo -u node111 111 identity backup)
   111 config [show | dashboard.lan true|false | offer accept|dismiss]
   111 uninstall [--phone] [--serial SERIAL]
   111 update-helper | 111 update-guard     (root oneshots via systemd)
@@ -144,11 +149,9 @@ pub fn main_entry(args: Vec<String>) -> i32 {
         Cmd::Install(ia) => crate::install::run(ia),
         Cmd::Daemon => crate::daemon::run(),
         Cmd::IdentityBackup => identity_backup(),
-        Cmd::IdentityExport => identity_export(),
-        Cmd::IdentityRecover => identity_recover(),
-        Cmd::IdentityGenerate => crate::identity::generate(&identity_dir()).map(|id| {
-            println!("identity generated: {}", id.npub);
-        }),
+        Cmd::IdentityRestore => identity_restore(),
+        Cmd::IdentityCommission => Err(anyhow::anyhow!("identity commission: not yet wired (T11)")),
+        Cmd::IdentityGenerate { burn } => identity_generate(burn),
         Cmd::Config(rest) => crate::config::run(&rest),
         Cmd::Uninstall { phone, serial } => {
             if phone {
@@ -173,34 +176,138 @@ fn identity_dir() -> std::path::PathBuf {
     crate::util::paths::root().join("identity")
 }
 
+fn print_node_id(d: &id111::encoding::NodeIdDisplay) {
+    println!("  label   {}", d.label());
+    println!("  node1…  {}", d.bech32());
+    println!("  hex     {}", d.hex());
+}
+
+/// `111 identity backup` — the §8.3 local-TTY ceremony display (the TTY-only
+/// refusal lives in `identity::backup`, so no caller can bypass it). The QR
+/// frame and the verify-on-write-down gate arrive with the shared ceremony
+/// driver (T11).
 fn identity_backup() -> anyhow::Result<()> {
-    let words = crate::identity::backup(&identity_dir())?;
-    println!("Your 111 node identity (12 words — write them down, keep them secret):\n");
+    let view = crate::identity::backup(&identity_dir())?;
+    let words = view.artifacts.words();
+    println!(
+        "Your 111 node identity ({} words — write them down, keep them secret):\n",
+        words.split_whitespace().count()
+    );
     for (i, w) in words.split_whitespace().enumerate() {
         println!("  {:2}. {w}", i + 1);
     }
-    println!("\nRecover with: 111 identity recover");
-    Ok(())
-}
-
-fn identity_export() -> anyhow::Result<()> {
-    let ncryptsec = crate::identity::export_ncryptsec(&identity_dir())?;
-    println!("{ncryptsec}");
-    Ok(())
-}
-
-fn identity_recover() -> anyhow::Result<()> {
-    anyhow::ensure!(
-        unsafe { libc::isatty(0) } == 1,
-        "identity recover requires an interactive terminal"
+    println!(
+        "\nBackup descriptor (write it under the words): {}",
+        view.artifacts.descriptor
     );
-    eprint!("enter your 12 words: ");
+    println!("\nNodeId (record it — `111 identity restore` asks you to confirm it):");
+    print_node_id(&view.display());
+    println!("\nRestore with: 111 identity restore");
+    Ok(())
+}
+
+/// Read a line from the tty with echo disabled (termios ECHO toggle, restored
+/// on every path). Used for the recovery words — the master secret.
+fn read_hidden(prompt: &str) -> anyhow::Result<String> {
     use std::io::Write;
+    eprint!("{prompt}");
+    std::io::stderr().flush()?;
+
+    let mut old: libc::termios = unsafe { std::mem::zeroed() };
+    anyhow::ensure!(
+        unsafe { libc::tcgetattr(0, &mut old) } == 0,
+        "tcgetattr failed"
+    );
+    let mut new = old;
+    new.c_lflag &= !libc::ECHO;
+    unsafe { libc::tcsetattr(0, libc::TCSANOW, &new) };
+
+    let mut line = String::new();
+    let read_result = std::io::stdin().read_line(&mut line);
+
+    unsafe { libc::tcsetattr(0, libc::TCSANOW, &old) };
+    eprintln!(); // newline after the hidden input
+    read_result?;
+    Ok(line.trim_end_matches(['\r', '\n']).to_string())
+}
+
+fn read_visible(prompt: &str) -> anyhow::Result<String> {
+    use std::io::Write;
+    eprint!("{prompt}");
     std::io::stderr().flush()?;
     let mut line = String::new();
     std::io::stdin().read_line(&mut line)?;
-    let id = crate::identity::recover(&identity_dir(), line.trim())?;
-    println!("identity recovered: {}", id.npub);
+    Ok(line.trim().to_string())
+}
+
+fn confirm(prompt: &str) -> anyhow::Result<bool> {
+    let a = read_visible(&format!("{prompt} [y/N] "))?;
+    Ok(a.eq_ignore_ascii_case("y") || a.eq_ignore_ascii_case("yes"))
+}
+
+/// `111 identity restore` (L2 §8.4) — words on a local TTY only. Order matters:
+/// refuse a live dir BEFORE asking for words → hygiene + checksum + derive
+/// (writes nothing) → show the NodeId and require the operator's confirmation
+/// against their recorded reference → require old-instance retirement → only
+/// then the atomic write. Declining at any prompt leaves the disk untouched.
+fn identity_restore() -> anyhow::Result<()> {
+    anyhow::ensure!(
+        unsafe { libc::isatty(0) } == 1,
+        "identity restore requires an interactive terminal (words are never read from a pipe)"
+    );
+    let dir = identity_dir();
+    if crate::identity::is_live(&dir) {
+        return Err(crate::identity::IdentityError::Exists.into());
+    }
+    let words = zeroize::Zeroizing::new(read_hidden("enter your recovery words (12 or 24, input hidden): ")?);
+    let descriptor = crate::identity::parse_descriptor_hex(&read_visible(
+        "descriptor printed under the words (8 hex digits; Enter = v1 defaults): ",
+    )?)?;
+    let node_id = crate::identity::preview_restore(&words)?;
+    println!("These words derive NodeId:");
+    print_node_id(&id111::encoding::NodeIdDisplay::new(node_id.as_bytes()));
+    anyhow::ensure!(
+        confirm("Does this match the NodeId you recorded for this node?")?,
+        "restore aborted: NodeId not confirmed (nothing written)"
+    );
+    anyhow::ensure!(
+        confirm(
+            "Is the OLD instance of this identity retired (powered off / wiped)? \
+             Two live instances on one identity flap announces fleet-wide."
+        )?,
+        "restore aborted: old instance not confirmed retired (nothing written)"
+    );
+    let outcome = crate::identity::restore(&dir, &words, descriptor, true)?;
+    println!("identity restored:");
+    print_node_id(&outcome.display());
+    if outcome.counter_floor_pending {
+        println!(
+            "note: words-only recovery — the announce-counter floor is unknown (provisional {}); \
+             this node must not announce until the floor is learned from the mesh (v1 nodes do not announce yet).",
+            outcome.announce_counter_init
+        );
+    }
+    println!("Restart the node daemon to pick the identity up.");
+    Ok(())
+}
+
+/// Internal idempotent keygen (phone flow step 6): load; generate only when
+/// `Missing`; a corrupt identity is quarantined by `load` and surfaces as an
+/// error — never a silent re-key. Prints exactly one line: the NodeId hex.
+fn identity_generate(burn: bool) -> anyhow::Result<()> {
+    let dir = identity_dir();
+    let id = match crate::identity::load(&dir) {
+        Ok(id) => id,
+        Err(e) if crate::identity::is_missing(&e) => {
+            if burn {
+                crate::identity::generate_burn(&dir)?
+            } else {
+                crate::identity::generate(&dir)?
+            }
+        }
+        Err(e) => return Err(e),
+    };
+    println!("{}", id.node_id_hex());
     Ok(())
 }
 
@@ -228,7 +335,21 @@ mod tests {
         };
         assert!(ia.phone && ia.keep_adb);
         assert_eq!(ia.serial.as_deref(), Some("abc123"));
-        assert!(parse(&["identity".into(), "export".into()]).is_ok());
+        assert!(matches!(
+            parse(&["identity".into(), "backup".into()]).unwrap(),
+            Cmd::IdentityBackup
+        ));
+        assert!(matches!(
+            parse(&["identity".into(), "restore".into()]).unwrap(),
+            Cmd::IdentityRestore
+        ));
+        assert!(matches!(
+            parse(&["identity".into(), "commission".into()]).unwrap(),
+            Cmd::IdentityCommission
+        ));
+        // L2 §13: `recover` is subsumed by `restore`; NIP-49 `export` is deleted.
+        assert!(parse(&["identity".into(), "export".into()]).is_err());
+        assert!(parse(&["identity".into(), "recover".into()]).is_err());
         // shim passes --min-installer-version=X (with =) — must parse
         let ia2 = match parse(&[
             "install".into(),

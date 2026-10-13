@@ -27,12 +27,12 @@ Legend: ⬜ todo · 🔧 in flight · 🔁 bounced · ✅ verified + committed
 - `state/floor.json` (root-written): `{schema, highest_release, highest_manifest_date, highest_keychain_generation}`
 - `state/facts.json`: `{schema, facts: <Facts serde>, category, gateway, probed_at}`
 - `state/offer.json`: `{schema, tier: "standard", state: "offered"|"accepted"|"dismissed", recorded_at}`
-- `receipt.json` (root 0644): `{schema, version, installed_at, category, gateway, npub, cache_hashes: {relpath: sha256}, degrade_branches: [String], phone: null|{serial, model, sdk, oem, taps, bf_note}}` — untrusted on re-read.
+- `receipt.json` (root 0644): `{schema, version, installed_at, category, gateway, node_id (v2.2; was npub — `#[serde(default)]`, old receipts still parse), cache_hashes: {relpath: sha256}, degrade_branches: [String], phone: null|{serial, model, sdk, oem, taps, bf_note}}` — untrusted on re-read.
 - Payload tree manifest: `share/payload.manifest` inside the tarball, lines `sha256␠␠relpath`; verified on every extract/promote.
 
 **HTTP contracts:**
 - `GET /health` → always JSON `{schema:1, status:"ok"|"error", components:{identity:bool, kb:bool, transport:"alive"|"absent"|"degraded", updater_idle:bool}}`; 200 iff `ok`, else 503.
-- `GET /api/status` → `{schema:1, node:{npub,category,version,uptime_sec}, kb:{sha256,entries}, transport_state:"no transport"|"isolated"|"joined"|"transport degraded", health:<health body>, updates:{last_successful_check:null|RFC3339, pending:bool, floor}, clock_fault:bool, offer:null|{tier,state}, error_state:null|{kind,detail}}`. Additive-only; this is the Layer 4/9 seam.
+- `GET /api/status` → `{schema:1, node:{node_id,category,version,uptime_sec}  (v2.2: `node_id` = lowercase hex NodeId, was `npub`), kb:{sha256,entries}, transport_state:"no transport"|"isolated"|"joined"|"transport degraded", health:<health body>, updates:{last_successful_check:null|RFC3339, pending:bool, floor}, clock_fault:bool, offer:null|{tier,state}, error_state:null|{kind,detail}}`. Additive-only; this is the Layer 4/9 seam.
 - Dashboard page + both endpoints: GET-only (405), Host allowlist `127.0.0.1`/`localhost` (any port), bind `127.0.0.1:11180` default, LAN bind only via `111 config dashboard.lan true` with printed warning. No identity material on any endpoint.
 
 **Constants:** port 11180 · user `node111` · roots `/var/lib/111` `/etc/111` · symlink `/usr/local/bin/111` · unit names `111node.service` `111node-update.{path,service}` · calver `YYYY.MM.DD[.N]` (zero-padded, lexicographic) · min calver crate-compiled · rns lockfile `rns==1.5.6` hash-locked · Termux pins `termux-app v0.118.3` / `:Boot v0.8.1` / `:API v0.53.0`.
@@ -66,6 +66,8 @@ Legend: ⬜ todo · 🔧 in flight · 🔁 bounced · ✅ verified + committed
 - **Wave B**: T4 · T6 · T7 · T15
 - **Wave C**: T5 · T8 · T9 · T10 · T11 · T12 (all build against pinned contracts; T12 leans on T13 assets via paths only)
 - **Wave D**: T14 (final wiring) · T16 (harness) → then full `scripts/check.sh` + summary.
+
+| T17 | L1 v2.2 identity seam swap (D14d; built by the Layer 2 session, 2026-10-13) | `src/identity/mod.rs` (thin binding over `id111`; `bip32.rs`/`nip49.rs` deleted), `src/cli.rs`, `src/install/{mod,receipt}.rs`, `src/install/phone/start.rs`, `src/daemon/{mod,dashboard}`, `tests/install_flow.rs`, `Cargo.toml` (+`id111` path dep, +`zeroize`; −k256 −bip39 2.x −bech32 0.11 −scrypt −chacha20poly1305 0.10 −hmac −unicode-normalization), `verify/linux-e2e.sh`, `verify/README.md` | identity dir = mnemonic/keyset/nodeid/descriptor/counters (L2 §13); silent install keygen via `id111::backup::create_fresh_identity` (announce counter 0); boot quarantine + never-silent-re-key carried; **new guard:** a `identity.quarantine-*` sibling blocks `generate` (installer + CLI) with the §8.4 runbook — `restore` or explicit `generate --burn` only; D9-format dirs migrate on load (legacy quarantined as `identity.quarantine-d9`); verbs backup (TTY-only) / restore / commission (T11 stub) + hidden idempotent `generate [--burn]` for the phone flow; npub → `node_id` hex in receipt, install print, phone start, dashboard, `/api/status` | `cargo test` 124 green (18 identity tests incl. guard + migration + counter-zero); `cargo clippy --all-targets -D warnings` clean; grep zero hits for npub/secret.hex/nip49/bip32/k256; `verify/local-smoke.sh` | ✅ |
 
 ## Summary (filled at completion)
 

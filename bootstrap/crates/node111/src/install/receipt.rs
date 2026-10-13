@@ -25,7 +25,11 @@ pub struct Receipt {
     pub installed_at: String,
     pub category: String,
     pub gateway: bool,
-    pub npub: String,
+    /// The node's NodeId — §7 machine string (lowercase hex of the 32B Ed25519
+    /// public key). `default`: receipts written before L1 v2.2 carry the
+    /// provisional identity handle instead and must still parse (re-probe, never trust).
+    #[serde(default)]
+    pub node_id: String,
     /// sha256 of every cached offline artifact (relpath under cache/ → hash).
     pub cache_hashes: BTreeMap<String, String>,
     /// Degradations taken (no python3, container relay, unknown distro, …).
@@ -43,7 +47,7 @@ impl Receipt {
                 .unwrap_or_else(|_| "unknown".into()),
             category: String::new(),
             gateway: false,
-            npub: String::new(),
+            node_id: String::new(),
             cache_hashes: BTreeMap::new(),
             degrade_branches: Vec::new(),
             phone: None,
@@ -88,5 +92,22 @@ mod tests {
         assert_eq!(back.cache_hashes.len(), 1);
         std::fs::write(&p, b"{nope").unwrap();
         assert!(Receipt::read(&p).is_err());
+    }
+
+    #[test]
+    fn pre_v2_2_receipt_still_parses() {
+        // A receipt written by the provisional-identity build has no `node_id`
+        // (and an extra legacy handle field): it must still be readable.
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("receipt.json");
+        std::fs::write(
+            &p,
+            r#"{"schema":1,"version":"2026.10.12","installed_at":"x","category":"Node2A",
+                "gateway":true,"legacy_handle":"old","cache_hashes":{},"degrade_branches":[],"phone":null}"#,
+        )
+        .unwrap();
+        let r = Receipt::read(&p).unwrap().unwrap();
+        assert_eq!(r.node_id, "");
+        assert_eq!(r.version, "2026.10.12");
     }
 }

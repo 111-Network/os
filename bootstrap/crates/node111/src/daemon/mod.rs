@@ -162,14 +162,14 @@ async fn daemon_main() -> anyhow::Result<()> {
     // identity (corruption ⇒ distinct error state, never silent re-key)
     match crate::identity::load(&layout.identity_dir()) {
         Ok(id) => {
-            state.write().unwrap().npub = Some(id.npub);
+            state.write().unwrap().node_id = Some(id.node_id_hex());
             state.write().unwrap().components.identity = true;
         }
         Err(e) => {
             eprintln!("111 daemon: identity error: {e:#}");
             state.write().unwrap().error_state = Some(ErrorState {
                 kind: "identity".into(),
-                detail: "identity failed integrity check — `111 identity recover` required".into(),
+                detail: "identity failed integrity check — `111 identity restore` required".into(),
             });
         }
     }

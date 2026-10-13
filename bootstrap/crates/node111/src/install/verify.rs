@@ -1,6 +1,6 @@
 //! Step 8 — verify: `/health` 200 within 60s, dashboard reachable on
 //! 127.0.0.1:11180, socket asserted loopback-bound; then the final print
-//! (npub + dashboard URL + identity-backup hint).
+//! (NodeId + dashboard URL + identity-backup hint).
 
 use super::context::InstallContext;
 
@@ -50,12 +50,15 @@ fn assert_loopback_only(ctx: &InstallContext) {
     }
 }
 
-/// Final print per spec step 8.
-pub fn print_success(npub: &str, category: &str, version: &str) {
+/// Final print per spec step 8. `node_id` is the §7 machine string (hex); the
+/// human line carries the bech32 `node1…` transfer form (L2 §7/§13).
+pub fn print_success(node_id: &str, category: &str, version: &str) {
+    let human = crate::identity::node_id_bech32(node_id).unwrap_or_else(|| node_id.to_string());
     println!(
         "
 111 Network node installed.
-  npub:      {npub}
+  node id:   {human}
+  hex:       {node_id}
   category:  {category}
   version:   {version}
   dashboard: http://127.0.0.1:11180 (loopback only)

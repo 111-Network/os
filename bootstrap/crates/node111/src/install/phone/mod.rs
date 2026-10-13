@@ -248,11 +248,11 @@ pub fn run(args: InstallArgs) -> anyhow::Result<()> {
     });
 
     // 6. start now
-    let mut npub = String::new();
+    let mut node_id = String::new();
     step!(state, &marker, "start", {
         let keys = start::host_keys_dir();
         let host_key = start::ensure_host_keypair(&runner, &keys)?;
-        npub = start::on_device_keygen(&adb)?;
+        node_id = start::on_device_keygen(&adb)?;
         let pubkey = std::fs::read_to_string(format!("{}.pub", host_key.display()))?;
         start::setup_sshd(&adb, pubkey.trim())?;
         start::start_node(&adb)?;
@@ -305,8 +305,9 @@ pub fn run(args: InstallArgs) -> anyhow::Result<()> {
         );
     }
 
+    let human = crate::identity::node_id_bech32(&node_id).unwrap_or_else(|| node_id.clone());
     println!(
-        "\n111 phone provisioned:\n  npub:   {npub}\n  serial: {}\n  health: adb forward tcp:11180 tcp:11180 → http://127.0.0.1:11180\n  teardown: 111 uninstall --phone{}",
+        "\n111 phone provisioned:\n  node id: {human}\n  hex:     {node_id}\n  serial:  {}\n  health:   adb forward tcp:11180 tcp:11180 → http://127.0.0.1:11180\n  teardown: 111 uninstall --phone{}",
         pre.serial,
         if args.keep_adb { " (adb kept)" } else { " (over sshd)" }
     );

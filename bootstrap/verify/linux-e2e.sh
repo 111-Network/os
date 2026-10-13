@@ -110,19 +110,24 @@ check "udev rule"       "$T/stage/udev/rules.d/99-111-lora.rules"
 check "env"             "$T/stage/etc111/env"
 check "release binary"  "$T/stage/varlib111/releases/2026.10.12/bin/111"
 check "current link"    "$T/stage/varlib111/current"
-check "identity trio"   "$T/stage/varlib111/identity/npub"
-check "secret perms"    "$T/stage/varlib111/identity/secret.hex"
+check "identity mnemonic"   "$T/stage/varlib111/identity/mnemonic"
+check "identity keyset"     "$T/stage/varlib111/identity/keyset"
+check "identity nodeid"     "$T/stage/varlib111/identity/nodeid"
+check "identity descriptor" "$T/stage/varlib111/identity/descriptor"
+check "identity counters"   "$T/stage/varlib111/identity/counters"
 check "receipt"         "$T/stage/varlib111/receipt.json"
 check "floor"           "$T/stage/varlib111/state/floor.json"
 check "offer stub"      "$T/stage/varlib111/state/offer.json"
 check "symlink"         "$T/stage/bin/111"
-PERMS=$(stat -c %a "$T/stage/varlib111/identity/secret.hex" 2>/dev/null || echo "?")
-if [ "$PERMS" = "600" ]; then
-  echo "  ok: secret.hex 0600"
-else
-  echo "  BAD PERMS: $PERMS"
-  ok=0
-fi
+for f in keyset mnemonic counters; do
+  PERMS=$(stat -c %a "$T/stage/varlib111/identity/$f" 2>/dev/null || echo "?")
+  if [ "$PERMS" = "600" ]; then
+    echo "  ok: identity/$f 0600"
+  else
+    echo "  BAD PERMS: identity/$f $PERMS"
+    ok=0
+  fi
+done
 
 if [ "$ok" = 1 ]; then
   echo "V8-variant namespace e2e: PASS (real binary, fixture channel, full contract)"

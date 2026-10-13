@@ -57,7 +57,7 @@ pub fn run(args: crate::cli::InstallArgs) -> anyhow::Result<()> {
     let fetcher =
         crate::util::http::Fetcher::new(std::time::Duration::from_secs(60), 512 * 1024 * 1024)?;
     let receipt = run_with(&ctx, &fetcher)?;
-    verify::print_success(&receipt.npub, &receipt.category, &receipt.version);
+    verify::print_success(&receipt.node_id, &receipt.category, &receipt.version);
     Ok(())
 }
 
@@ -90,19 +90,16 @@ pub fn run_with(
         (facts, class)
     };
 
-    // 4. identity (never overwrite; corruption quarantines + instructs recover)
+    // 4. identity (never overwrite; a D9-format dir migrates on load; corruption
+    //    quarantines + instructs restore — silent keygen only when Missing)
     let identity_dir = ctx.layout.identity_dir();
     let identity = match crate::identity::load(&identity_dir) {
         Ok(id) => id,
+        Err(e) if crate::identity::is_missing(&e) => crate::identity::generate(&identity_dir)?,
         Err(e) => {
-            let msg = e.to_string();
-            if msg.contains("missing") {
-                crate::identity::generate(&identity_dir)?
-            } else {
-                return Err(e.context(
-                    "identity failed integrity check (quarantined) — run `111 identity recover` explicitly",
-                ));
-            }
+            return Err(e.context(
+                "identity failed integrity check (quarantined where corrupt) — run `111 identity restore` explicitly",
+            ));
         }
     };
 
@@ -127,7 +124,7 @@ pub fn run_with(
     packages::record_cache_hashes(&cache_root, &mut receipt)?;
     receipt.category = format!("{:?}", class.category);
     receipt.gateway = class.gateway;
-    receipt.npub = identity.npub.clone();
+    receipt.node_id = identity.node_id_hex();
     receipt.write(&ctx.layout.root.join("receipt.json"))?;
     if offer::offer_standard(ctx)? {
         offer::print_offer();

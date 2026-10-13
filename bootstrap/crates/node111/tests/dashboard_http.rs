@@ -45,6 +45,9 @@ async fn start_server(state: SharedState) -> u16 {
     panic!("server never came up");
 }
 
+/// A §7 machine-string NodeId (lowercase hex of a 32B Ed25519 public key).
+const NODE_ID_HEX: &str = "d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a";
+
 fn fresh_state() -> SharedState {
     Arc::new(RwLock::new(DashboardState::new("2026.10.12")))
 }
@@ -54,7 +57,7 @@ async fn page_and_api_contracts() {
     let state = fresh_state();
     {
         let mut s = state.write().unwrap();
-        s.npub = Some("npub1zutzeysacnf9rru6zqwmxd54mud0k44tst6l70ja5mhv8jjumytsd2x7nu".into());
+        s.node_id = Some(NODE_ID_HEX.into());
         s.category = Some("Node2A".into());
         s.transport_state = TransportState::NoTransport;
         s.components.transport = TransportHealth::DeliberatelyAbsent;
@@ -73,7 +76,7 @@ async fn page_and_api_contracts() {
     assert!(body.contains("111 node"));
 
     // identity-material grep over the rendered page: no key-bearing strings.
-    for banned in ["secret.hex", "mnemonic", "ncryptsec", "nsec1", "BIP-39"] {
+    for banned in ["mnemonic", "keyset", "BIP-39"] {
         assert!(!body.contains(banned), "page leaks {banned}");
     }
 
@@ -83,15 +86,18 @@ async fn page_and_api_contracts() {
     let v: serde_json::Value = serde_json::from_str(&body).unwrap();
     assert_eq!(v["schema"], 1);
     assert_eq!(v["node"]["version"], "2026.10.12");
-    assert_eq!(
-        v["node"]["npub"]
-            .as_str()
-            .unwrap()
-            .chars()
-            .take(5)
-            .collect::<String>(),
-        "npub1"
-    );
+    // L1 v2.2: `node.node_id` = the §7 machine string (lowercase hex). The node
+    // object is pinned to exactly these keys — the provisional-identity key is
+    // gone from the seam Layer 4 codes against, and nothing else was added.
+    assert_eq!(v["node"]["node_id"], NODE_ID_HEX);
+    let mut keys: Vec<&str> = v["node"]
+        .as_object()
+        .unwrap()
+        .keys()
+        .map(String::as_str)
+        .collect();
+    keys.sort_unstable();
+    assert_eq!(keys, ["category", "node_id", "uptime_sec", "version"]);
     assert_eq!(v["transport_state"], "no transport");
     assert_eq!(v["health"]["status"], "ok");
     assert_eq!(v["health"]["components"]["transport"], "absent");
@@ -101,7 +107,7 @@ async fn page_and_api_contracts() {
     assert!(v["error_state"].is_null());
     // identity material must not appear anywhere in the JSON
     let raw = v.to_string();
-    for banned in ["secret", "mnemonic", "ncryptsec"] {
+    for banned in ["secret", "mnemonic", "keyset"] {
         assert!(!raw.contains(banned), "api leaks {banned}: {raw}");
     }
 
