@@ -1,0 +1,96 @@
+{
+  "spec": "section 3 + section 14 (harness-local supplement; NOT a frozen vector file)",
+  "generated": "2026-10-13",
+  "description": "Cofactor-class edge inputs for the Monocypher harness: validly-signed inputs that make each section-3 wrapper leg load-bearing, plus the residual mixed-order R/A cases that a cofactored verifier accepts and the cofactorless strict predicate rejects. 'oracle' is the independent pure-Python cofactorless section-3 predicate in gen_supplement.py; 'cofactored_verifier' is what a cofactored, non-canonical-tolerant verifier (the Monocypher core) decides. kind = control-valid (raw and wrapper accept) | wrapper-bites (harness GATES: raw accepts where the oracle rejects, wrapper rejects with exactly oracle_variant) | wrapper-redundant (harness GATES: wrapper rejects with oracle_variant; raw may also reject) | residual-mixed-order (harness REPORTS as KNOWN-DELTA, never fails).",
+  "provenance": "python3 -I gen_supplement.py; RFC 8032 TEST 1 key; deterministic; id111 verify_strict agreement recorded in test-vectors/monocypher-smoke.md",
+  "vectors": [
+    {
+      "name": "control: honest RFC 8032 TEST 1 key signs the supplement message",
+      "kind": "control-valid",
+      "public_key": "d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a",
+      "message": "3131312f6d6f6e6f6379706865722d6861726e6573732f737570706c656d656e74",
+      "signature": "b972eb8005ba59dbce1fd6a5f00470019ff715b91d7c3cfcc5c061cebb9ce41f187d54812065843912814d951848e5245956b0712a6b3b0cb8d2dd0c6934210b",
+      "oracle": "accept",
+      "oracle_variant": "ok",
+      "cofactored_verifier": "accept",
+      "rationale": "positive control: both a strict and a cofactored verifier accept"
+    },
+    {
+      "name": "small-order R (identity), r = 0, S = h*a: equation holds",
+      "kind": "wrapper-bites",
+      "public_key": "d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a",
+      "message": "3131312f6d6f6e6f6379706865722d6861726e6573732f737570706c656d656e74",
+      "signature": "01000000000000000000000000000000000000000000000000000000000000002a8725e812225097244f162dfe9518b3af05ad1e758cac8b287f6e8a9534570d",
+      "oracle": "reject",
+      "oracle_variant": "InvalidSignature",
+      "cofactored_verifier": "accept",
+      "rationale": "R = identity is small-order; [S]B = [h]A so even the cofactorless equation holds - ONLY the small-order R leg rejects it"
+    },
+    {
+      "name": "non-canonical R alias (y = p + 1) of the identity, r = 0, S = h*a (h over the alias bytes)",
+      "kind": "wrapper-bites",
+      "public_key": "d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a",
+      "message": "3131312f6d6f6e6f6379706865722d6861726e6573732f737570706c656d656e74",
+      "signature": "eeffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f94b93910eee4ee168a3c1d118486ead4a780a3a2e8d8b2c991ffc73984ffd000",
+      "oracle": "reject",
+      "oracle_variant": "NonCanonicalR",
+      "cofactored_verifier": "accept",
+      "rationale": "Monocypher accepts non-canonical R encodings; the canonical-R leg must reject this validly-signed input"
+    },
+    {
+      "name": "order-8 torsion R, S = h*a: holds only after cofactor clearing",
+      "kind": "wrapper-bites",
+      "public_key": "d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a",
+      "message": "3131312f6d6f6e6f6379706865722d6861726e6573732f737570706c656d656e74",
+      "signature": "c7176a703d4dd84fba3c0b760d10670f2a2053fa2c39ccc64ec7fd7792ac037a36670cb6ba29bdcc57575c9d38ba65d1ece50169e5b28bfca2a23c5b50120d04",
+      "oracle": "reject",
+      "oracle_variant": "InvalidSignature",
+      "cofactored_verifier": "accept",
+      "rationale": "R is a small-order point of order 8: [8]-cleared equation holds (cofactored accepts); the small-order R leg must reject"
+    },
+    {
+      "name": "honest signature with S replaced by S + l",
+      "kind": "wrapper-redundant",
+      "public_key": "d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a",
+      "message": "3131312f6d6f6e6f6379706865722d6861726e6573732f737570706c656d656e74",
+      "signature": "b972eb8005ba59dbce1fd6a5f00470019ff715b91d7c3cfcc5c061cebb9ce41f05514ade3ac89691e81d4538f741c4395956b0712a6b3b0cb8d2dd0c6934211b",
+      "oracle": "reject",
+      "oracle_variant": "NonCanonicalS",
+      "cofactored_verifier": "reject",
+      "rationale": "malleability: S + l verifies in a non-S-checking verifier; Monocypher itself already rejects S >= l, so this leg is redundant with the core (recorded, not required to bite)"
+    },
+    {
+      "name": "mixed-order R = [r]B + order-8 torsion, S = r + h*a",
+      "kind": "residual-mixed-order",
+      "public_key": "d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a",
+      "message": "3131312f6d6f6e6f6379706865722d6861726e6573732f737570706c656d656e74",
+      "signature": "63533d9500caf7a652a91e1ed4ae4ab3e43c2f5184904ee51788478985ab11cbe815bf44fb1a59debb3bee3cee5ba507171828b5dbb88ca137adebc0467bd704",
+      "oracle": "reject",
+      "oracle_variant": "InvalidSignature",
+      "cofactored_verifier": "accept",
+      "rationale": "R is not small-order and canonical; cofactored equation holds, cofactorless fails by exactly the torsion component. dalek verify_strict rejects; a cofactored verifier accepts"
+    },
+    {
+      "name": "mixed-order R = [r]B + order-2 torsion, S = r + h*a",
+      "kind": "residual-mixed-order",
+      "public_key": "d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a",
+      "message": "3131312f6d6f6e6f6379706865722d6861726e6573732f737570706c656d656e74",
+      "signature": "348d147ffa45a62431e0295a0ffb8ffe6008ea46e283c3033a3f9e3144631be0eb99173e5ea7dab641e976dffcb67b97fc3e8c6da78aac6a1ee0acdda5ca2e05",
+      "oracle": "reject",
+      "oracle_variant": "InvalidSignature",
+      "cofactored_verifier": "accept",
+      "rationale": "R is not small-order and canonical; cofactored equation holds, cofactorless fails by exactly the torsion component. dalek verify_strict rejects; a cofactored verifier accepts"
+    },
+    {
+      "name": "mixed-order A' = A + order-8 torsion (attacker-chosen NodeId), honest signing key a",
+      "kind": "residual-mixed-order",
+      "public_key": "9158312a9a8d6e3b34c891d6d61444f8b8211c5117ebad15bdb0bd68b07e0245",
+      "message": "3131312f6d6f6e6f6379706865722d6861726e6573732f737570706c656d656e742f30",
+      "signature": "8642775bf1e1e02a42d0156a9964b1ca8318830891aa7469065312b3d2e830432bef97f0e9d644581d91d39ae192c10187f8c001aa74aebf751c7ffd2461ed00",
+      "oracle": "reject",
+      "oracle_variant": "InvalidSignature",
+      "cofactored_verifier": "accept",
+      "rationale": "A' is not small-order and canonical; the cofactored equation ignores the torsion part of A', the cofactorless one does not. A NodeId of this shape would verify on a cofactored (Monocypher) node and fail on a dalek verify_strict node"
+    }
+  ]
+}
