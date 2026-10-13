@@ -301,6 +301,11 @@ pub struct CounterStore {
     peers: HashMap<NodeId, PeerTraffic>,
     dirty_packets: u64,
     batch_n: u64,
+    /// True while the persisted flag says CLEAN (fresh create, restore floor
+    /// set, or clean shutdown — no emission since). The first traffic
+    /// operation flips the file to DIRTY_RUNNING before proceeding, so a
+    /// crash after any emission is always seen as unclean at the next open.
+    clean_on_disk: bool,
 }
 
 impl CounterStore {
@@ -312,7 +317,7 @@ impl CounterStore {
         if path.exists() {
             return Err(CounterError::AlreadyExists);
         }
-        let store = CounterStore {
+        let mut store = CounterStore {
             dir: dir.to_path_buf(),
             announce_last: 0,
             traffic_base: 0,
@@ -320,9 +325,12 @@ impl CounterStore {
             peers: HashMap::new(),
             dirty_packets: 0,
             batch_n: DEFAULT_BATCH_N,
+            clean_on_disk: false,
         };
-        // Initial commit: counter 0 durable, file marked dirty/running.
-        store.persist(DIRTY_RUNNING)?;
+        // Initial commit: counter 0 durable. Persisted CLEAN — nothing has been
+        // emitted yet, so the first open() must not read this as a crash
+        // (reviewer fix: the §6.5 unclean jump is for real crashes only).
+        store.persist(CLEAN_SHUTDOWN)?;
         Ok(store)
     }
 
@@ -350,6 +358,7 @@ impl CounterStore {
             peers: parsed.peers,
             dirty_packets: 0,
             batch_n: parsed.batch_n,
+            clean_on_disk: false,
         };
         if !parsed.clean {
             store.apply_unclean_jump();
@@ -377,6 +386,7 @@ impl CounterStore {
             peers: HashMap::new(),
             dirty_packets: 0,
             batch_n: DEFAULT_BATCH_N,
+            clean_on_disk: false,
         })
     }
 
@@ -397,7 +407,8 @@ impl CounterStore {
             .ok_or(CounterError::Overflow)?;
         self.traffic_base = RESTORE_JUMP;
         self.restore_pending = false;
-        self.persist(DIRTY_RUNNING)?;
+        // Quiescent state (no emissions yet) — persisted CLEAN, see create().
+        self.persist(CLEAN_SHUTDOWN)?;
         Ok(())
     }
 
@@ -408,6 +419,7 @@ impl CounterStore {
     /// back and no value is issued. Errors [`CounterError::RestoreFloorRequired`]
     /// while a state-absent restore has no floor set (§8.4).
     pub fn next_announce_counter(&mut self) -> Result<u64, CounterError> {
+        self.mark_running()?;
         if self.restore_pending {
             return Err(CounterError::RestoreFloorRequired);
         }
@@ -429,6 +441,7 @@ impl CounterStore {
     /// transmit the packet (the in-memory counter stays advanced — a gap is
     /// harmless, a reused counter is not).
     pub fn next_send_counter(&mut self, peer: &NodeId) -> Result<u64, CounterError> {
+        self.mark_running()?;
         let base = self.traffic_base;
         let entry = self.peer_entry(*peer, base)?;
         let next = entry.send_last.checked_add(1).ok_or(CounterError::Overflow)?;
@@ -440,6 +453,7 @@ impl CounterStore {
     /// §6.5 — offer a received packet counter: accepted (window advanced) or
     /// rejected as replay/too-old. Batch-committed with the send side.
     pub fn on_receive(&mut self, peer: &NodeId, counter: u64) -> Result<(), CounterError> {
+        self.mark_running()?;
         let base = self.traffic_base;
         let entry = self.peer_entry(*peer, base)?;
         entry.window.offer(counter).map_err(CounterError::Window)?;
@@ -529,10 +543,20 @@ impl CounterStore {
             entry.send_last = entry.send_last.saturating_add(jump);
             entry.window.jump_forward(jump);
         }
+        // §6.5 — the jump MUST cover every uncommitted emission, including
+        // sends to a peer first contacted fewer than N operations before the
+        // crash (that peer is ABSENT from the persisted file, so the per-peer
+        // loop above cannot reach it). Raising the base by J makes any peer
+        // created after this reopen start above those lost counters
+        // (reviewer fix, wave-3 finding T8#1: without it such a peer's send
+        // counter restarted at the old base and its first N packets were
+        // dropped as replays).
+        self.traffic_base = self.traffic_base.saturating_add(jump);
     }
 
     /// §13 — atomic write (temp + fsync + rename + dir fsync), 0600.
-    fn persist(&self, clean_flag: u8) -> Result<(), CounterError> {
+    fn persist(&mut self, clean_flag: u8) -> Result<(), CounterError> {
+        self.clean_on_disk = clean_flag == CLEAN_SHUTDOWN;
         let mut buf = Vec::with_capacity(HEADER_LEN + self.peers.len() * PEER_RECORD_LEN);
         buf.extend_from_slice(&MAGIC);
         buf.push(FORMAT_VERSION);
@@ -552,6 +576,17 @@ impl CounterStore {
             buf.extend_from_slice(&t.window.bitmap.to_le_bytes());
         }
         atomic_write_private(&self.dir, COUNTERS_FILE, &buf)?;
+        Ok(())
+    }
+
+    /// Flip the persisted flag to DIRTY_RUNNING before the first emission
+    /// after a clean state (one fsync per session start). Without this, sends
+    /// to a never-persisted peer before a crash would be invisible to
+    /// `open()`'s unclean detection (wave-3 reviewer fix, T8 finding).
+    fn mark_running(&mut self) -> Result<(), CounterError> {
+        if self.clean_on_disk {
+            self.persist(DIRTY_RUNNING)?;
+        }
         Ok(())
     }
 }
@@ -1043,5 +1078,32 @@ mod tests {
             store.next_send_counter(&NodeId::from(b)),
             Err(CounterError::TooManyPeers)
         ));
+    }
+    /// Wave-3 reviewer regression (T8 finding): a peer first contacted fewer
+    /// than N operations before an UNCLEAN reboot is absent from the persisted
+    /// file; its send counter MUST still resume above every uncommitted
+    /// emission (§6.5 "J ≥ N covers any uncommitted emission").
+    #[test]
+    fn unclean_reboot_covers_peers_absent_from_persisted_file() {
+        let tmp = TempDir::new("unknown-peer-jump");
+        let dir = tmp.0.clone();
+        let peer = NodeId::from([0x42u8; 32]);
+        let mut store = CounterStore::create(&dir).unwrap();
+        let n = store.batch_n();
+        // Three sends to a brand-new peer, no batch commit reached, no clean
+        // shutdown: the peer never hits disk.
+        let c1 = store.next_send_counter(&peer).unwrap();
+        let c2 = store.next_send_counter(&peer).unwrap();
+        let c3 = store.next_send_counter(&peer).unwrap();
+        assert_eq!((c1, c2, c3), (1, 2, 3));
+        drop(store); // simulated crash — no shutdown()
+
+        let mut reopened = CounterStore::open(&dir).unwrap();
+        assert!(reopened.peer_traffic(&peer).is_none(), "peer was never persisted");
+        let next = reopened.next_send_counter(&peer).unwrap();
+        assert!(
+            next > c3 && next > n,
+            "first post-crash send ({next}) must exceed every uncommitted counter (≤{c3}) and the jump N={n}"
+        );
     }
 }
