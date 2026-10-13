@@ -1,0 +1,32 @@
+#!/bin/sh
+# Fake `opencode` for tests/task_engine.rs. Stands in for the headless JSONL
+# run: `fake-opencode run --format json <prompt>`.
+#
+# Records its environment and argv into the CWD (the engine runs it inside
+# the task's work dir), echoes argv to stderr, prints a few JSONL lines (one
+# non-JSON line on purpose), then exits.
+#
+# Behaviour knobs, as env vars:  FAKE_OPENCODE_EXIT=<n>  FAKE_OPENCODE_SLEEP=<s>
+# The engine clears the child's env, so the same knobs are also honored as
+# directives inside the prompt argument (e.g. a task note containing
+# "FAKE_OPENCODE_EXIT=3").
+
+env > opencode-env.txt
+for a in "$@"; do printf '%s\n' "$a"; done > opencode-argv.txt
+echo "fake-opencode argv: $*" >&2
+
+args="$*"
+exit_code="${FAKE_OPENCODE_EXIT:-}"
+sleep_secs="${FAKE_OPENCODE_SLEEP:-}"
+[ -n "$exit_code" ] || exit_code=$(printf '%s\n' "$args" | sed -n 's/.*FAKE_OPENCODE_EXIT=\([0-9][0-9]*\).*/\1/p' | head -n 1)
+[ -n "$sleep_secs" ] || sleep_secs=$(printf '%s\n' "$args" | sed -n 's/.*FAKE_OPENCODE_SLEEP=\([0-9][0-9]*\).*/\1/p' | head -n 1)
+
+printf '%s\n' '{"type":"session.start","sessionID":"fake-1"}'
+printf '%s\n' '{"type":"text","part":{"text":"FAKE-OPENCODE-PATCH: retry the heartbeat loop with backoff"}}'
+printf '%s\n' 'plain stdout line, not JSON'
+printf '%s\n' '{"type":"session.end","tokens":{"input":1,"output":2}}'
+echo "fake-opencode: finished" >&2
+
+# exec so a timeout kill hits the sleeper itself, not an orphaned sh child.
+[ -z "$sleep_secs" ] || exec sleep "$sleep_secs"
+exit "${exit_code:-0}"
