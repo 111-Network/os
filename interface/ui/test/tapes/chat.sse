@@ -1,0 +1,9 @@
+event: token
+data: {"text":"Hello "}
+
+event: token
+data: {"text":"there"}
+
+event: done
+data: {"conversation_id":"conv-smoke-1","reply":"Hello there","tool_trace":[]}
+

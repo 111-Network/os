@@ -24,6 +24,23 @@ export NODE111_BUILD_VERSION="$VER"
 OUT=${2:-dist/releases/$VER}
 mkdir -p "$OUT"
 
+# Layer 4 UI: release builds embed interface/ui/dist at COMPILE time (rust-embed),
+# so build it before cargo. Without pnpm the release embeds whatever dist/ holds
+# now — or, when it is empty, `/` serves the "dashboard UI not built" notice.
+UI_DIR=../interface/ui
+if command -v pnpm >/dev/null 2>&1; then
+  echo "== build dashboard UI (pnpm → interface/ui/dist, embedded below) =="
+  if [ ! -f "$UI_DIR/node_modules/.modules.yaml" ]; then
+    pnpm --dir "$UI_DIR" install --frozen-lockfile
+  fi
+  pnpm --dir "$UI_DIR" build
+  [ -f "$UI_DIR/dist/index.html" ] || { echo "FAIL: UI build produced no dist/index.html" >&2; exit 1; }
+elif [ -f "$UI_DIR/dist/index.html" ]; then
+  echo "!! pnpm not found — NOT rebuilding the UI; the release embeds the existing interface/ui/dist as-is"
+else
+  echo "!! pnpm not found and interface/ui/dist is empty — the release serves the 'dashboard UI not built' notice at / (/v1 still works)"
+fi
+
 echo "== build x86_64-unknown-linux-musl (release) =="
 cargo build --release --target x86_64-unknown-linux-musl
 cp target/x86_64-unknown-linux-musl/release/111 "$OUT/111-x86_64-unknown-linux-musl"

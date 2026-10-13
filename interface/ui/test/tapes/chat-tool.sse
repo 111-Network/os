@@ -1,0 +1,18 @@
+event: token
+data: {"text":"Let me "}
+
+event: token
+data: {"text":"check. "}
+
+event: tool
+data: {"name":"kb.read"}
+
+event: token
+data: {"text":"Per the "}
+
+event: token
+data: {"text":"KB: found it."}
+
+event: done
+data: {"conversation_id":"conv-smoke-2","reply":"Per the KB: found it.","tool_trace":[{"name":"kb.read","ok":true}]}
+

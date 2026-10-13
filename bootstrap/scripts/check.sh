@@ -41,4 +41,14 @@ if command -v systemd-analyze >/dev/null 2>&1 && ls systemd/*.service >/dev/null
 else
   echo "no units yet — SKIP"
 fi
+echo "== ui =="
+# Layer 4 dashboard (embedded into `111`): typecheck, vitest, vite build, size budget.
+if command -v pnpm >/dev/null 2>&1; then
+  if [ ! -f ../interface/ui/node_modules/.modules.yaml ]; then
+    pnpm --dir ../interface/ui install --frozen-lockfile
+  fi
+  pnpm --dir ../interface/ui check
+else
+  echo "pnpm not found — UI checks SKIPPED (interface/ui: pnpm check = typecheck + test + build + budget)"
+fi
 echo "ALL GREEN"

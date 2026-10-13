@@ -50,6 +50,16 @@ else
   say "SKIPPED V8-variant namespace install (unshare unavailable) — VM runbook in verify/linux-e2e.sh"
 fi
 
+# Layer 4 end-to-end, last gate: UI build, `111 daemon` + `111-agent` + stub model
+# in a user/net/pid namespace, /api/v1 + LAN pairing + relay + events assertions.
+if ! command -v pnpm >/dev/null 2>&1; then
+  say "SKIPPED L4 interface smoke (pnpm not found — the UI cannot be built) — run ../interface/verify/smoke.sh where pnpm exists"
+elif ! unshare -rn true 2>/dev/null; then
+  say "SKIPPED L4 interface smoke (unprivileged unshare unavailable) — run ../interface/verify/smoke.sh where it is"
+else
+  gate "L4 interface smoke (../interface/verify/smoke.sh)" bash ../interface/verify/smoke.sh
+fi
+
 echo
 if [ "$FAILS" -eq 0 ]; then
   say "ALL LOCAL GATES GREEN"

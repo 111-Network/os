@@ -1,0 +1,3 @@
+event: error
+data: {"error":"model http status 500: {\"error\": \"upstream exploded\"}","code":"upstream_error"}
+
