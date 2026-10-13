@@ -2,7 +2,7 @@
 
 The capability layer that puts a local model behind the node's agent: one served model runtime, one thin always-on agent loop, and — on hub tiers — an adopted coding-agent harness for heavy work. It runs where device capacity allows and the user agrees: natively on AI-native terminals and hubs, while lighter devices use the same agent through a nearby hub over the local mesh.
 
-Status of this document: **spec v1 draft, minimal — pending adversarial review and user lock** (process: `os/plan/INDEX.md`; decisions: `os/plan/DECISIONS.md` D10). No new research was done for this layer: every adopted component is an existing Knowledge Layer entry.
+Status of this document: **spec v1 — built** (`agent111` crate; build log `TASKS.md`; decisions: `os/plan/DECISIONS.md` D10). No new research was done for this layer: every adopted component is an existing Knowledge Layer entry. The adversarial review pass on the spec is still queued; the build followed the spec as written plus the amendments listed in the appendix.
 
 ## Boundary: capability, not behavior
 
@@ -66,3 +66,21 @@ No WAN/cloud model calls and no API keys anywhere — opencode is configured wit
 ## Deferred
 
 Hub-ladder tuning beyond the default table · opencode as default on 2B · agent-to-agent mesh protocols (Layers 7/9) · GPU-specific llama.cpp builds beyond the CPU default · fine-grained tool ACLs · multimodal/voice interfaces.
+
+## Appendix — as built (v1)
+
+Crate `os/intelligence/crates/agent111`, binary `111-agent`, 88 tests, gate `scripts/check.sh` (fmt + clippy + tests + musl check). Full contracts: `TASKS.md` → Pinned contracts.
+
+**Process shape.** `111d` (Layer 1) spawns `111-agent` and `llama-server` as supervised children when their binaries exist in `current/bin/` (`llama-server` additionally needs a `.gguf` under `/var/lib/111/models/current/`); otherwise each is honestly `absent`. `/api/status.intelligence = {agent, model_server, agent_url}`. Verified end-to-end with the real binaries on a staged node root: agent spawned, KB grounded (the release's integrity-checked `share/kb/`), honest 503 on chat without a model, task failures journaled, clean SIGTERM shutdown of the child.
+
+**Configuration** (flags > `AGENT111_*` env > `/etc/111/agent.env` > defaults): `--port 11182`, `--model-base http://127.0.0.1:11181`, `--model-id qwen3-4b`, `--kb-dir`, `--state-dir /var/lib/111/agent`, `--category`, `--daemon-health-url`, `--opencode-path`, `--node-id`, `--lan`, `--env-file`. The model base is guarded at startup: loopback or private/mesh address only; any public IP is refused with no override (no WAN inference). `--lan` controls endpoint binding only.
+
+**API** (loopback, Host-allowlisted, GET routes GET-only): `GET /health` (`ok|degraded|error`; 503 only when the agent itself is broken, so a dead hub never restart-loops it) · `GET /v1/agent/status` (`local|offloaded|unavailable`, model, kb, node_id, category) · `POST /v1/chat` (SSE `delta|tool_call|done|error` or JSON) · `GET /v1/chat/history` · `GET /v1/agent/events` (SSE, replay 50) · `POST /v1/agent/task` (`diagnose|propose|patch` → 202; `patch` without opencode → 409 `needs hub`).
+
+**Tools** (fixed, shell-free): `kb.read` · `health.read` · `logs.read` · `proposal.write` · `task.submit`. Chat loop ≤4 tool rounds; turns persist atomically; KB absent ⇒ the system prompt states it and the agent says so.
+
+**Tasks.** `diagnose`/`propose` = one tool-less model call over gathered context (daemon health, journal tail, refs resolved through the KB) → proposal stamped with the node id. `patch` = opencode headless (`run --format json --pure -m local/<model>`) in a per-task work dir with a generated `opencode.json` declaring exactly one provider (the local endpoint) and a scrubbed environment; 10-min timeout; JSONL collected into a proposal. Leftover `running` tasks are marked `failed` on restart.
+
+**Amendments to the spec made during the build** (all recorded in `TASKS.md`): health tri-state (`degraded` is 200); env prefix `AGENT111_` (a leading digit is not a valid shell identifier); refused `patch` writes no task file; node id (not key material) flows from Layer 2 and proposal *signing* is deferred to Layer 9's PR packaging; `/v1/chat/history` added because Layer 4's UI talks only to `111d`, which relays.
+
+**Pre-hub verification gates (not yet passed — needed before a 4A/4B profile ships):** G1 real `llama-server` + qwen3-4b GGUF under `111d` on one machine, chat round-trip offline · G2 opencode offline: on first use opencode 1.18.18 fetches its provider SDK (`@ai-sdk/openai-compatible`) from the network — the hub profile must prefetch/pin it or the `patch` path hangs on an air-gapped hub (observed: it never contacted the local endpoint without network) · G3 2A → hub offload over a real LAN with the hub's `--lan` binding · G4 model swap via the signed channel manifest (Layer 1 updater owns the mechanics; a model section in the manifest is not yet defined).
