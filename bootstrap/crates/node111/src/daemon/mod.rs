@@ -3,9 +3,11 @@
 //! dashboard, updater, KB server, conditional rnsd child.
 
 pub mod dashboard;
+pub mod devices;
 pub mod health;
 pub mod intelligence;
 pub mod kb;
+pub mod services;
 pub mod supervise;
 pub mod transport;
 pub mod updater;
@@ -249,16 +251,6 @@ async fn daemon_main() -> anyhow::Result<()> {
         });
     }
 
-    // updater loop (fetch/verify/stage; never flips — root helper owns that)
-    {
-        let cfg = updater::fetch::UpdaterConfig::production(
-            version
-                .parse()
-                .unwrap_or_else(|_| "2026.01.01".parse().unwrap()),
-        );
-        tokio::spawn(updater::run(layout.clone(), Arc::clone(&state), cfg));
-    }
-
     // probation monitor (health-confirmed / revert-request signals)
     tokio::spawn(probation_monitor(layout.clone(), Arc::clone(&state)));
 
@@ -268,6 +260,50 @@ async fn daemon_main() -> anyhow::Result<()> {
     let lan = dashboard::bind::lan_configured(&env_pairs, &layout.state_dir());
     let dashboard = dashboard::start(Arc::clone(&state), layout.clone(), lan).await;
 
+    // updater loop (fetch/verify/stage; never flips — root helper owns that).
+    // Started after the dashboard so `POST /api/v1/update/check` can wake it
+    // (`ApiState::update_check`) and `/api/v1/status.update` can read it.
+    {
+        let cfg = updater::fetch::UpdaterConfig::production(
+            version
+                .parse()
+                .unwrap_or_else(|_| "2026.01.01".parse().unwrap()),
+        );
+        let hooks = updater::Hooks {
+            wake: Arc::clone(&dashboard.api.update_check),
+            status: Arc::new(updater::UpdaterStatus::default()),
+        };
+        dashboard.api.insert_ext(Arc::clone(&hooks.status));
+        tokio::spawn(updater::run_with_hooks(
+            layout.clone(),
+            Arc::clone(&state),
+            cfg,
+            hooks,
+        ));
+    }
+
+    // Layer 4 R2: services registry (§7 probes, `services` frames), the
+    // `status` heartbeat, and the dashboard's restart path (POST
+    // /api/v1/node/restart → graceful exit 0 below; the supervisor restarts).
+    services::probe::spawn(
+        Arc::clone(&dashboard.api),
+        services::probe::Sources {
+            intelligence: Arc::clone(&intelligence),
+            transport: Arc::clone(&transport),
+        },
+    );
+    dashboard::api_v1::status::spawn_heartbeat(Arc::clone(&dashboard.api));
+    let restart = Arc::new(tokio::sync::Notify::new());
+    let restart_signal = dashboard::api_v1::actions::RestartSignal(Arc::clone(&restart));
+    dashboard.api.insert_ext(restart_signal);
+    // device registry (Layer 4 R4): detection + paired sessions → /api/v1/devices
+    let _devices = devices::start(Arc::clone(&dashboard.api), {
+        let transport = Arc::clone(&transport);
+        move || transport.child_state() == Some(supervise::ChildState::Running)
+    });
+    // agent activity (Layer 4 R3): 111-agent /v1/agent/events → `agent` + `proposal` frames
+    let _agent_events = dashboard::api_v1::relay::start_events(&dashboard.api);
+
     // READY once serving (components may still be warming — /health reflects)
     watchdog::ready();
 
@@ -276,6 +312,9 @@ async fn daemon_main() -> anyhow::Result<()> {
     tokio::select! {
         _ = tokio::signal::ctrl_c() => {},
         _ = sigterm.recv() => {},
+        _ = restart.notified() => {
+            eprintln!("111 daemon: restart requested from the dashboard — exiting 0 for the supervisor");
+        },
     }
     dashboard.stop();
     transport.stop();

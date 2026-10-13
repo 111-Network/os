@@ -4,7 +4,7 @@
 //!   `::ffff:127.0.0.1`) bypasses auth.
 //! - **Everyone else needs a session**: cookie `s111=<64 hex>` whose sha256 is in
 //!   `<root>/state/dashboard-sessions.json` (`{schema, sessions:[{hash, created,
-//!   last_seen, peer}]}`), obtained by `POST /api/v1/auth/pair {code}` with the
+//!   last_seen, peer, user_agent?}]}`), obtained by `POST /api/v1/auth/pair {code}` with the
 //!   8-char pair code from `<root>/state/dashboard-pair.json` (`{schema, code,
 //!   created}`, generated at first daemon start, printed by `111 dashboard`).
 //! - **Rate limit:** 5 failed pairs per peer IP per minute → `429 rate_limited`;
@@ -196,6 +196,11 @@ pub struct SessionRec {
     pub created: String,
     pub last_seen: String,
     pub peer: String,
+    /// Browser `User-Agent` at pair time (sanitized, ≤ 256 chars); `None` for
+    /// sessions paired before R4 recorded it. Read by the device registry
+    /// (companions); never used for auth decisions.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub user_agent: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -466,6 +471,64 @@ impl AuthStore {
 
     /// Try a pair code from `peer`.
     pub fn pair(&self, peer: IpAddr, code: &str) -> Result<NewSession, PairError> {
+        self.pair_with_agent(peer, code, None)
+    }
+
+    /// Valid (unexpired) sessions as stored — read-only view for the device
+    /// registry (paired browsers are `companion` devices). Does not touch
+    /// `last_seen`.
+    pub fn sessions(&self) -> Vec<SessionRec> {
+        let mut inner = self.inner.lock().unwrap();
+        self.refresh(&mut inner);
+        let now = time::OffsetDateTime::now_utc();
+        inner
+            .sessions
+            .iter()
+            .filter(|s| {
+                parse_rfc3339(&s.created)
+                    .is_some_and(|c| (now - c).whole_seconds() <= SESSION_MAX_AGE_SECS as i64)
+            })
+            .cloned()
+            .collect()
+    }
+
+    /// Revoke the session whose stored hash is `hash` (forgetting a companion
+    /// device). Returns whether one was removed.
+    pub fn revoke_hash(&self, hash: &str) -> bool {
+        let mut inner = self.inner.lock().unwrap();
+        self.refresh(&mut inner);
+        let before = inner.sessions.len();
+        inner
+            .sessions
+            .retain(|s| !ct_eq(s.hash.as_bytes(), hash.as_bytes()));
+        let removed = inner.sessions.len() != before;
+        if removed {
+            self.persist_sessions(&mut inner);
+        }
+        removed
+    }
+
+    /// [`Self::pair`], recording the browser's `User-Agent` on the session
+    /// (control/bidi chars stripped, capped at 256 chars).
+    pub fn pair_with_agent(
+        &self,
+        peer: IpAddr,
+        code: &str,
+        user_agent: Option<&str>,
+    ) -> Result<NewSession, PairError> {
+        let user_agent = user_agent
+            .map(|ua| {
+                ua.chars()
+                    .filter(|c| {
+                        !c.is_control()
+                            && !matches!(c, '\u{200e}' | '\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}')
+                    })
+                    .take(256)
+                    .collect::<String>()
+                    .trim()
+                    .to_string()
+            })
+            .filter(|ua| !ua.is_empty());
         let mut inner = self.inner.lock().unwrap();
         self.refresh(&mut inner);
         let now = Instant::now();
@@ -508,6 +571,7 @@ impl AuthStore {
             created: created.clone(),
             last_seen: created.clone(),
             peer: peer.to_string(),
+            user_agent,
         });
         if inner.sessions.len() > MAX_SESSIONS {
             // drop the least recently seen (RFC 3339 UTC strings sort by time)
@@ -683,6 +747,7 @@ async fn session(
 async fn pair(
     State(api): State<Arc<ApiState>>,
     ext: Extensions,
+    headers: HeaderMap,
     body: axum::body::Bytes,
 ) -> Response {
     let Ok(req) = serde_json::from_slice::<PairReq>(&body) else {
@@ -696,7 +761,10 @@ async fn pair(
     let peer = peer_addr(&ext)
         .map(|a| a.ip().to_canonical())
         .unwrap_or(IpAddr::V4(Ipv4Addr::UNSPECIFIED));
-    match api.auth.pair(peer, &req.code) {
+    let user_agent = headers
+        .get(header::USER_AGENT)
+        .and_then(|v| v.to_str().ok());
+    match api.auth.pair_with_agent(peer, &req.code, user_agent) {
         Ok(s) => {
             let cookie = format!(
                 "{COOKIE}={}; HttpOnly; SameSite=Strict; Path=/; Max-Age={SESSION_MAX_AGE_SECS}",

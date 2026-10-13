@@ -20,6 +20,9 @@ use std::path::{Path, PathBuf};
 /// Loopback port `llama-server` listens on (the agent's default model base).
 pub const MODEL_PORT: u16 = 11181;
 
+/// Loopback port `111-agent` listens on (see [`AGENT_URL`]).
+pub const AGENT_PORT: u16 = 11182;
+
 /// Where the agent API listens (loopback only); published in `/api/status`
 /// while the agent is running so Layer 4 can relay to it.
 pub const AGENT_URL: &str = "http://127.0.0.1:11182";
@@ -76,6 +79,17 @@ impl IntelligenceHandle {
             model_server,
             agent_url,
         }
+    }
+
+    /// Current `111-agent` PID while running (Layer 4 services registry uses
+    /// PID changes to time its `starting` grace after each spawn).
+    pub fn agent_pid(&self) -> Option<u32> {
+        self.agent.as_ref().and_then(ChildHandle::pid)
+    }
+
+    /// Current `llama-server` PID while running (see [`Self::agent_pid`]).
+    pub fn model_pid(&self) -> Option<u32> {
+        self.model.as_ref().and_then(ChildHandle::pid)
     }
 
     /// SIGTERM both children and stop restarting them (daemon shutdown path).
@@ -175,6 +189,37 @@ fn agent_spec(
 /// Agent state + log directory (`<root>/agent`).
 fn agent_dir(layout: &DaemonLayout) -> PathBuf {
     layout.root.join("agent")
+}
+
+/// Paths the Layer 4 services registry reports (one source of truth with the
+/// child specs above).
+pub mod paths {
+    use super::*;
+
+    /// `current/bin/111-agent` (its presence = Layer 3 installed).
+    pub fn agent_binary(layout: &DaemonLayout) -> PathBuf {
+        layout.current_release().join("bin/111-agent")
+    }
+
+    /// `current/bin/llama-server`.
+    pub fn model_binary(layout: &DaemonLayout) -> PathBuf {
+        layout.current_release().join("bin/llama-server")
+    }
+
+    /// The model file `llama-server` is (or would be) started with.
+    pub fn model_file(layout: &DaemonLayout) -> Option<PathBuf> {
+        first_gguf(layout)
+    }
+
+    /// `<root>/agent/111-agent.log` (child stdout+stderr).
+    pub fn agent_log(layout: &DaemonLayout) -> PathBuf {
+        agent_dir(layout).join("111-agent.log")
+    }
+
+    /// `<root>/agent/llama-server.log` (child stdout+stderr).
+    pub fn model_log(layout: &DaemonLayout) -> PathBuf {
+        agent_dir(layout).join("llama-server.log")
+    }
 }
 
 /// Create the agent dir 0700 (and tighten it if it pre-existed wider). A

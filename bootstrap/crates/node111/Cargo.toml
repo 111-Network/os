@@ -53,6 +53,14 @@ qrcode = { version = "0.14", default-features = false }
 # Already in the graph (id111 / axum): session tokens + pair codes; SSE stream glue.
 getrandom = "0.2"
 futures-util = { version = "0.3", default-features = false, features = ["std"] }
+# Layer 4 R3: the `111d` → `111-agent` relay (loopback HTTP/1.1 client,
+# src/util/http_async.rs). hyper / hyper-util / http-body-util are already in
+# the graph via axum; this enables hyper's `client` + `http1` features (one
+# connection per request, no pool). hyper's `client` feature pulls `want` +
+# `try-lock` (tiny, hyper-ecosystem) — sign-off in os/bootstrap/TASKS.md.
+hyper = { version = "1", default-features = false, features = ["client", "http1"] }
+hyper-util = { version = "0.1", default-features = false, features = ["tokio"] }
+http-body-util = "0.1"
 
 [features]
 default = ["mdns"]

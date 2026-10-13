@@ -3,5 +3,6 @@
 pub mod fs;
 pub mod hash;
 pub mod http;
+pub mod http_async;
 pub mod paths;
 pub mod run;

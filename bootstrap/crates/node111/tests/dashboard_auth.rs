@@ -322,10 +322,12 @@ async fn lan_peer_pairs_401_then_200_then_logout() {
     assert_eq!(sf["sessions"][0]["peer"], "192.168.1.50");
     assert_eq!(sf["sessions"][0]["hash"].as_str().unwrap().len(), 64);
 
-    // paired: gated routes pass auth (stubs answer 501, events streams 200)
+    // paired: gated routes pass auth (R2's status answers 200, events streams 200)
     let cookie = format!("s111={token}");
     let r = get_with(lan, "/api/v1/status", &[("Cookie", &cookie)]);
-    r.problem(501, "internal");
+    assert_eq!(r.status, 200, "{}", r.body);
+    assert_eq!(r.json()["auth"]["paired"], true);
+    assert_eq!(r.json()["auth"]["loopback"], false);
     let sse = sse_read(lan, &[("Cookie", &cookie)], Duration::from_secs(3), |t| {
         t.contains("event: reset")
     });
@@ -483,14 +485,14 @@ async fn loopback_peers_bypass_auth() {
         t.contains("event: reset")
     });
     assert!(sse.starts_with("HTTP/1.1 200"), "{sse}");
-    get(real, "/api/v1/status").problem(501, "internal");
+    assert_eq!(get(real, "/api/v1/status").json()["auth"]["loopback"], true);
     let v = get(real, "/api/v1/auth/session").json();
     assert_eq!(v["loopback"], true);
     assert_eq!(v["paired"], false);
     // IPv6 loopback and v4-mapped loopback count too
     for peer in ["[::1]:5000", "[::ffff:127.0.0.1]:5000", "127.0.0.2:1"] {
         let p = serve(&n.api, Some(peer)).await;
-        get(p, "/api/v1/status").problem(501, "internal");
+        assert_eq!(get(p, "/api/v1/status").json()["auth"]["loopback"], true);
     }
     // a LAN peer does not
     let lan = serve(&n.api, Some("[fe80::1]:5000")).await;
