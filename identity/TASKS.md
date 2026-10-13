@@ -24,8 +24,25 @@ Model per roster: default k3-256k; T12 bulk → kimi-for-coding; T13 spec prose 
 | T11 | commission verb (commissioner side) | `identity/crates/id111/src/commission.rs`, `os/bootstrap/crates/node111/` commission wiring | `111 identity commission`: §8.3 ceremony driver (entropy-verified keygen, TTY words+QR display, verify-on-write-down gate, provisioning bundle export, challenge-nonce generation, commissioner wipe, event log); relay-side byte protocol = documented stub (§15) | ceremony end-to-end local test (bundle produced, wipe verified); TTY refusal test; `cargo test` green | ✅ (24 id111 + 9 node111 tests; real binary exercised under a pty: loopback happy path, dry run, 3× wrong words, non-TTY refusals; reviewer calls: dry run exits 1, bip39 `zeroize` feature enabled — **dep-feature sign-off recorded here**, no new crate) |
 | T12 | KB entries (§16 list) | `os/knowledge/projects/{monocypher,ed25519-dalek,curve25519-dalek,libsodium,bc-sskr}.md`, `os/knowledge/protocols/{slip-0010,bip-39,noise-framework,edhoc,reticulum-protocol}.md`, `os/knowledge/projects/{meshtastic-pki,meshcore,iroh-nodeid,briar-bramble}.md` (or case-study-appropriate folders per schema), `_meta/planned.md` | schema-valid per `os/knowledge/README.md`; content grounded in `/tmp/l2-findings/r*.json` research; relations wired to existing seeds (meshtastic, reticulum cross-linked); monocypher = `testing` with smoke-log reference (D14 exception); reticulum-protocol license-flagged | `python3 os/knowledge/_meta/build.py --check` clean; reviewer spot-reads 3 entries | ✅ (verified: 0 errors, 2 pre-existing N05 warnings; spot-read monocypher/reticulum-protocol/meshtastic-pki — all schema-valid, honestly flagged) |
 | T13 | bootstrap spec v2.2 amendment | `os/bootstrap/README.md` | §Identity replaced by pointer + contract summary (dir/verb/display per L2 §13); status line notes v2.2 per D14; nothing else touched | reviewer reads diff; consistency with L2 §13 | ✅ (verified: surgical diff read line-by-line; +1 reviewer line — §Security "transport keys" clarification) |
-| T14 | conformance + closeout | `identity/TASKS.md`, `plan/INDEX.md` | full suites green (`os/identity` + `os/bootstrap`); built/deferred summary appended below; INDEX Layer 2 → ✅ | all checks green | ⬜ |
+| T14 | conformance + closeout | `identity/TASKS.md`, `plan/INDEX.md` | full suites green (`os/identity` + `os/bootstrap`); built/deferred summary appended below; INDEX Layer 2 → ✅ | all checks green | ✅ (id111 161 unit + 44 conformance, clippy clean; node111 133 tests, clippy clean, `local-smoke.sh` ALL LOCAL GATES GREEN; harness 411/411; KB `--check` 0 errors; L1↔L2 checklist items 1–8 verified) |
 
-## Summary (filled at completion)
+## Summary (filled at completion — 2026-10-13)
 
-_built: — · deferred: —_
+**Built (v1, all 15 tasks ✅):**
+- `id111` crate (`os/identity/crates/id111`): keyset (Ed25519 + X25519 from one BIP-39 seed via pinned SLIP-0010 paths, strict verify predicate, low-order/all-zero X25519 guards, weak-key self-test) · seal (§6.4 sealed packet, byte-exact, crypto-mode 0x01 fail-closed) · announce + bounded TOFU pinning store + counters (sync-commit-before-transmit, batch commit, unclean-reboot jump, restore floor) · backup/restore/migrate (descriptor, words + project QR payload, D9 migration with sibling quarantine) · attest (§10, transport-sig seam) · encoding (hex / bech32 BIP-173 `node` / 10-char label) · commission (§8.3 ceremony state machine, relay-channel stub). 161 unit tests.
+- Frozen test vectors: 14 JSON files + 44 conformance tests + 420 independent Python cross-checks (`test-vectors/`).
+- Monocypher 4.0.3 C cross-vector harness (`monocypher-harness/`, hash-pinned vendor, 411/411 PASS) + rubric smoke log (`test-vectors/monocypher-smoke.md`).
+- Layer 1 wiring (v2.2, D14d): node111 `identity/` is a thin binding over id111; verbs `backup` / `restore` / `commission [--loopback-test]` / hidden `generate [--burn]`; NodeId hex replaces npub everywhere incl. `/api/status`; quarantine guard blocks silent re-key.
+- KB: 14 entries at `candidate`, `monocypher` at `testing` with the real smoke log.
+
+**Review fixes landed (defects found by the reviewer pass, not by the builders):** backup↔counters file-format drift; never-persisted-peer counter reuse after unclean reboot; fresh `generate` used the restore floor (+1024); silent re-key after quarantine; dead node111 deps; two wrong §3 claims about Monocypher 4.x behaviour.
+
+**Deferred (recorded in spec §15 / DECISIONS pending):**
+- §3 mixed-order residual (T9 F3) — **user decision pending** in `plan/DECISIONS.md`; recommended: accept now, decide torsion-free check at Cat-1 port time.
+- Relay-side commissioning byte protocol + real USB-UART / BLE `RelayChannel` impls (§15, with Cat-1 firmware); QR renderer in the CLI (payload shown as hex).
+- Cat-1 C core itself and on-device Monocypher benchmarks (no ESP32/nRF run yet — smoke log is x86-64 only).
+- Process-level secret hygiene in the CLI (mlock / core-dump suppression / scrollback clear) — outside the frozen dep set.
+- Recipient-mode encrypted export + SSKR guardian split (§8.5 phase 2); key rotation / revocation (lifecycle phase 2, machinery in §10).
+- `transport_sig` verifier (secp256k1) — Layer 7's adoption; mesh-epoch source — Layer 7.
+- Layer 4 must consume the `/api/status` rename `node.npub` → `node.node_id`.
+- Layer 0 hook activation (`git config core.hooksPath hooks`) — user to run.
