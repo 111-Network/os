@@ -258,8 +258,9 @@ async fn daemon_main() -> anyhow::Result<()> {
     // probation monitor (health-confirmed / revert-request signals)
     tokio::spawn(probation_monitor(layout.clone(), Arc::clone(&state)));
 
-    // dashboard (Layer 4, D15): loopback unless LAN sharing is on (env
-    // DASHBOARD_LAN=true OR state/settings.json lan_enabled); :11180 + :80
+    // dashboard (Layer 4, D15): loopback unless LAN sharing is on (settings.json
+    // lan_enabled, unless DASHBOARD_LAN in the env file overrides it —
+    // bind::lan_config); :11180 + :80
     // best-effort; pairing auth for non-loopback peers; mDNS when LAN.
     let lan = dashboard::bind::lan_configured(&env_pairs, &layout.state_dir());
     let dashboard = dashboard::start(Arc::clone(&state), layout.clone(), lan).await;

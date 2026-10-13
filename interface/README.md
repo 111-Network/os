@@ -402,8 +402,14 @@ deduped on `seq`) · `reset`. Chat tokens are **not** on this stream (they ride 
 
 ## 11. Auth (D15: token now)
 
-- **Loopback = trusted.** Requests whose peer address is loopback bypass auth (the Layer 1/2/3
-  threat model: whoever runs code on the node already owns it).
+- **Loopback = trusted (policy, not constant).** Requests whose peer address is loopback bypass
+  auth (the Layer 1/2/3 threat model: whoever runs code on the node already owns it) — **except on
+  Android/Termux**, where every app shares loopback: when `TERMUX_VERSION` is set or
+  `/data/data/com.termux/files/usr` exists, loopback peers need a session like LAN peers (the
+  phone's own browser pairs once; the phone installer opens `#/pair?code=…`). `DASHBOARD_TRUST_LOOPBACK=true|false`
+  in the env file overrides either way. `GET /auth/session` reports `loopback_trusted` so the UI
+  shows `/pair` to an untrusted loopback visitor; `/health`, `/` and `POST /auth/pair` stay open.
+  An untrusted loopback peer still counts as loopback for the loopback-only fields.
 - **Non-loopback needs a session.** `111d` generates `state/dashboard-pair.json` at first start:
   an 8-char pair code (Crockford base32, no vowels, shown `xxxx-xxxx`). `POST /api/v1/auth/pair
   {code}` → on success sets cookie `s111=<32 random bytes, hex>; HttpOnly; SameSite=Strict; Path=/;
@@ -420,9 +426,13 @@ deduped on `seq`) · `reset`. Chat tokens are **not** on this stream (they ride 
   (+ `111-N.local` mDNS renames) and, when LAN is on, any Host that is one of the node's own
   addresses. Refusals become `400 problem+json`.
 - **CLI:** `111 dashboard` prints the URLs that actually bound, the pair code, and (LAN on) a QR of
-  `http://111.local/#/pair?code=xxxx-xxxx`; `111 dashboard rotate` regenerates the code and revokes
+  the node's LAN-IP pair link (`http://<lan-ip>/#/pair?code=xxxx-xxxx`; Android browsers do not
+  resolve `.local`), with `111.local` and the local URL listed under it; `111 dashboard rotate` regenerates the code and revokes
   all sessions. `111 config dashboard.lan true` keeps its warning, reworded: "LAN visitors must
-  enter the pair code shown by `111 dashboard`; traffic is unencrypted on shared Wi-Fi."
+  enter the pair code shown by `111 dashboard`; traffic is unencrypted on shared Wi-Fi." LAN
+  sharing has one source of truth, `state/settings.json` `lan_enabled` (the CLI and the dashboard
+  toggle write the same file); `DASHBOARD_LAN` in the env file pins it (`Settings.lan_locked`,
+  PATCH → `409 settings_locked`, the UI disables the toggle).
 - Deferred: TLS, per-session labels/revocation UI, `.111` DNS on hub/AP nodes.
 
 ## 12. Install → dashboard
@@ -431,9 +441,15 @@ The install command's success block prints the real URLs (`http://111.localhost`
 bound, else `http://127.0.0.1:11180`) and the pair code line (`LAN sharing: off — enable with
 '111 config dashboard.lan true'`). Then, best-effort and never failing the install: on a graphical
 session (`DISPLAY`/`WAYLAND_DISPLAY` set, `xdg-open` present) open the URL **as the invoking user**
-(`SUDO_USER`, `runuser`/`sudo -u`), otherwise print "open this on the node: …". Phone path: before
-the adb lockdown, `adb shell am start -a android.intent.action.VIEW -d http://127.0.0.1:11180`
-(phone-local browser), and the final print carries the same URL + the backup hint it was missing.
+(`SUDO_USER` or `DOAS_USER`, `runuser`/`sudo -u`; a `wayland-*` socket in the user's runtime dir
+counts as graphical; "Opening…" is printed only once `xdg-open` succeeded), otherwise print the
+URL; with no display at all, print an SSH tunnel line (`ssh -L 11180:127.0.0.1:11180 user@host`)
+and the LAN steps. The install verify also GETs `/` and warns loudly if the "UI not built" notice
+is served. Phone path: the shim runs `--phone` **as the invoking user** (privilege only for the
+binary copy; prompts read `/dev/tty` and fail closed, `--yes` pre-answers), and before the adb
+lockdown `am start` opens `http://127.0.0.1:11180/#/pair?code=<code>` (phone-local browser; the
+phone pairs once because loopback is not trusted there), and the final print carries the pair
+code, the LAN-sharing line and the backup hint.
 `111 dashboard` reprints everything later.
 
 ## 13. `111d` changes this layer owns (Rust, `os/bootstrap/crates/node111`)

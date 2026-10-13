@@ -70,8 +70,9 @@ pub const KEEPALIVE: Duration = Duration::from_secs(15);
 #[derive(Debug, Clone)]
 pub struct ApiConfig {
     pub layout: DaemonLayout,
-    /// LAN sharing effective for this daemon lifetime (env `DASHBOARD_LAN=true`
-    /// OR `state/settings.json` `lan_enabled`; read once at start).
+    /// LAN sharing effective for this daemon lifetime (`state/settings.json`
+    /// `lan_enabled`, unless `DASHBOARD_LAN` in the env file overrides it —
+    /// `bind::lan_config`; read once at start).
     pub lan_enabled: bool,
     /// Persist pairing state under `<root>/state/` (daemon: true). `false` keeps
     /// the pair code + sessions in memory only (the compat `serve()` entry).

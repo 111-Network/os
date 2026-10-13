@@ -18,8 +18,9 @@
 //!   `state/clock-fault.json` present.
 //! - `intelligence.agent_state` / `model_id` — the services registry's cached
 //!   `GET :11182/v1/agent/status` (10 s), null while the agent is down.
-//! - `lan_enabled` — the *configured* value (env `DASHBOARD_LAN=true` OR
-//!   settings `lan_enabled`; takes effect on restart); `bind.lan` is the
+//! - `lan_enabled` — the *configured* value (settings.json `lan_enabled`, unless
+//!   `DASHBOARD_LAN` in the env file overrides it — `bind::lan_config`; takes
+//!   effect on restart); `bind.lan` is the
 //!   effective one.
 //! - `auth` — this request: `loopback` = loopback peer, `paired` = carries a
 //!   valid session cookie.
