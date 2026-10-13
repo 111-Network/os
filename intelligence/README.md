@@ -69,7 +69,7 @@ Hub-ladder tuning beyond the default table · opencode as default on 2B · agent
 
 ## Appendix — as built (v1)
 
-Crate `os/intelligence/crates/agent111`, binary `111-agent`, 88 tests, gate `scripts/check.sh` (fmt + clippy + tests + musl check). Full contracts: `TASKS.md` → Pinned contracts.
+Crate `os/intelligence/crates/agent111`, binary `111-agent`, 93 tests, gate `scripts/check.sh` (fmt + clippy + tests + musl check). Full contracts: `TASKS.md` → Pinned contracts.
 
 **Process shape.** `111d` (Layer 1) spawns `111-agent` and `llama-server` as supervised children when their binaries exist in `current/bin/` (`llama-server` additionally needs a `.gguf` under `/var/lib/111/models/current/`); otherwise each is honestly `absent`. `/api/status.intelligence = {agent, model_server, agent_url}`. Verified end-to-end with the real binaries on a staged node root: agent spawned, KB grounded (the release's integrity-checked `share/kb/`), honest 503 on chat without a model, task failures journaled, clean SIGTERM shutdown of the child.
 

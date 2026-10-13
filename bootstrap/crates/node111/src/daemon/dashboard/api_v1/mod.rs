@@ -16,10 +16,8 @@
 //!   its authority must equal `Host` (else 403). It applies to loopback peers too
 //!   — the loopback browser is exactly who CSRF targets.
 //!
-//! The not-yet-built files (`status`, `services`, `settings`, `actions`, `kb`,
-//! `relay`, `proposals`, `devices`) register their contract paths with [`not_built`] (501
-//! problem+json) so auth/CSRF behave correctly today. Filling one in = replacing
-//! its handlers; keep the paths.
+//! Every contract route is built (R1–R4). A future route still follows the same
+//! pattern: register the path in its submodule's `router()`, merge it below once.
 //!
 //! ## Shared state
 //!

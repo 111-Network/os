@@ -10,3 +10,4 @@ This repo (`os/`) is the operating layer of the 111network mesh OS: an offline-f
 - Layer 2 (Identity) spec: `identity/README.md` — locked v2; keyset, announces, backup/restore, agentic + transport hooks. Core crate: `identity/crates/id111`.
 - Build process and task plan: `plan/INDEX.md` (layer status) · `plan/DECISIONS.md` (every decision + rejected alternatives) · `plan/EXECUTION.md` (build protocol). Per-layer build boards: `<layer>/TASKS.md`.
 - Layer 3 (Local Intelligence) spec + as-built appendix: `intelligence/README.md`; build log/contracts: `intelligence/TASKS.md`.
+- Layer 4 (Interface & Dashboard) spec: `interface/README.md` — locked v2; HTTP contract `interface/api/openapi.yaml` (conventions `interface/api/README.md`); build board `interface/TASKS.md`. The UI is `interface/ui`; the Rust side lives in `bootstrap/crates/node111/src/daemon/dashboard/`.
