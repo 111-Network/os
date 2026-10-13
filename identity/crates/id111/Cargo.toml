@@ -37,7 +37,10 @@ pbkdf2 = "=0.13.0"
 # §8.1 — rust-bitcoin bip39: 2048-word English list, checksum-validating parse,
 # NFKC-normalized restore (`parse_in_normalized`/`to_seed_normalized`). No
 # "rand" feature: keygen draws entropy via §4 getrandom + `from_entropy`.
-bip39 = "=3.0.0"
+# `zeroize` feature (reviewer-approved at T11): makes `Mnemonic` ZeroizeOnDrop
+# so the word-index array is wiped, not just released; pulls no new crate
+# (zeroize 1.9.1 is already pinned below).
+bip39 = { version = "=3.0.0", features = ["zeroize"] }
 # §7 — BIP-173 bech32 ONLY (`Bech32` variant; bech32m is spec-banned), HRP "node".
 bech32 = "=0.12.0"
 # Secret hygiene for keyset/mnemonic material.

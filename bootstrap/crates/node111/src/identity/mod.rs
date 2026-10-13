@@ -26,6 +26,8 @@
 //! file away from node111. The counters byte format is validated by whoever
 //! owns the store at runtime (Layer 6/7); here it must exist and be non-empty.
 
+pub mod commission;
+
 use id111::backup::{
     self, BackupArtifacts, BackupDescriptor, CounterFloor, RestoreError, RestoreOptions,
     RestoreOutcome, COUNTERS_FILE, DESCRIPTOR_FILE, DESCRIPTOR_LEN, KEYSET_FILE, MNEMONIC_FILE,

@@ -1,4 +1,4 @@
-//! CLI surface: install · daemon · identity backup|restore (+ commission, T11) ·
+//! CLI surface: install · daemon · identity backup|restore|commission ·
 //! config · uninstall · update-helper · update-guard.
 //! Flags: --phone --serial --keep-adb --allow-degraded --min-installer-version
 //! --version (calver). Host install and --phone are mutually exclusive.
@@ -28,8 +28,9 @@ enum Cmd {
     Daemon,
     IdentityBackup,
     IdentityRestore,
-    /// Cat-1 commissioning ceremony, commissioner side (L2 §8.3) — T11 wires it.
-    IdentityCommission,
+    /// Cat-1 commissioning ceremony, commissioner side (L2 §8.3, T11).
+    /// `--loopback-test` runs step 4 against the in-process test relay.
+    IdentityCommission { loopback_test: bool },
     /// Internal (not in USAGE): idempotent keygen for the phone flow's
     /// on-device step — prints the NodeId hex; never overwrites.
     IdentityGenerate { burn: bool },
@@ -94,11 +95,20 @@ fn parse(args: &[String]) -> anyhow::Result<Cmd> {
         "identity" => match args.get(1).map(String::as_str) {
             Some("backup") => Cmd::IdentityBackup,
             Some("restore") => Cmd::IdentityRestore,
-            Some("commission") => Cmd::IdentityCommission,
+            Some("commission") => {
+                let mut loopback_test = false;
+                for flag in &args[2..] {
+                    match flag.as_str() {
+                        "--loopback-test" => loopback_test = true,
+                        other => anyhow::bail!("unknown identity commission flag {other:?}"),
+                    }
+                }
+                Cmd::IdentityCommission { loopback_test }
+            }
             Some("generate") => Cmd::IdentityGenerate {
                 burn: args.get(2).map(String::as_str) == Some("--burn"),
             },
-            other => anyhow::bail!("usage: 111 identity backup|restore (got {other:?})"),
+            other => anyhow::bail!("usage: 111 identity backup|restore|commission (got {other:?})"),
         },
         "config" => Cmd::Config(args[1..].to_vec()),
         "uninstall" => {
@@ -124,6 +134,7 @@ USAGE:
   111 install --phone [--serial SERIAL] [--keep-adb]
   111 daemon
   111 identity backup|restore      (run as the node user: sudo -u node111 111 identity backup)
+  111 identity commission [--loopback-test]   (Cat-1 relay ceremony; your own computer, needs a terminal)
   111 config [show | dashboard.lan true|false | offer accept|dismiss]
   111 uninstall [--phone] [--serial SERIAL]
   111 update-helper | 111 update-guard     (root oneshots via systemd)
@@ -150,7 +161,7 @@ pub fn main_entry(args: Vec<String>) -> i32 {
         Cmd::Daemon => crate::daemon::run(),
         Cmd::IdentityBackup => identity_backup(),
         Cmd::IdentityRestore => identity_restore(),
-        Cmd::IdentityCommission => Err(anyhow::anyhow!("identity commission: not yet wired (T11)")),
+        Cmd::IdentityCommission { loopback_test } => identity_commission(loopback_test),
         Cmd::IdentityGenerate { burn } => identity_generate(burn),
         Cmd::Config(rest) => crate::config::run(&rest),
         Cmd::Uninstall { phone, serial } => {
@@ -291,6 +302,43 @@ fn identity_restore() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// `111 identity commission` (L2 §8.3, Cat-1 ceremony, commissioner side).
+/// Runs on the operator's own computer — it touches no identity dir and no
+/// disk at all. TTY on stdin AND stdout is required BEFORE any keygen (the
+/// words are printed, the type-back is read hidden); the ceremony itself is
+/// `id111::commission`'s state machine, driven by `identity::commission`.
+///
+/// Exit status 0 means "a relay was provisioned and challenge-verified". Until
+/// the relay transport exists (§15) only `--loopback-test` can say that; the
+/// real path ends in a dry run and reports failure rather than letting a
+/// script mistake it for a commissioned relay.
+fn identity_commission(loopback_test: bool) -> anyhow::Result<()> {
+    use crate::identity::commission::{self as cer, Outcome, Transport};
+    cer::require_stdio_tty()?;
+    let transport = if loopback_test {
+        Transport::Loopback
+    } else {
+        Transport::Pending
+    };
+    let stdout = std::io::stdout();
+    let mut out = stdout.lock();
+    let mut hidden = |p: &str| read_hidden(p);
+    let mut visible = |p: &str| read_visible(p);
+    let mut log = |line: &str| eprintln!("111 identity commission: {line}");
+    let mut io = cer::Io {
+        out: &mut out,
+        read_hidden: &mut hidden,
+        read_visible: &mut visible,
+        log: &mut log,
+    };
+    match cer::run(transport, &mut io)? {
+        Outcome::Commissioned(_) => Ok(()),
+        Outcome::Pending(_) => Err(anyhow::anyhow!(
+            "relay transport pending (L2 §15): no relay was provisioned (dry run; commissioner copies wiped)"
+        )),
+    }
+}
+
 /// Internal idempotent keygen (phone flow step 6): load; generate only when
 /// `Missing`; a corrupt identity is quarantined by `load` and surfaces as an
 /// error — never a silent re-key. Prints exactly one line: the NodeId hex.
@@ -345,8 +393,27 @@ mod tests {
         ));
         assert!(matches!(
             parse(&["identity".into(), "commission".into()]).unwrap(),
-            Cmd::IdentityCommission
+            Cmd::IdentityCommission { loopback_test: false }
         ));
+        assert!(matches!(
+            parse(&[
+                "identity".into(),
+                "commission".into(),
+                "--loopback-test".into()
+            ])
+            .unwrap(),
+            Cmd::IdentityCommission { loopback_test: true }
+        ));
+        // unknown flags are refused, never ignored (a typo must not silently
+        // select the other transport mode)
+        assert!(parse(&["identity".into(), "commission".into(), "--loopbak-test".into()]).is_err());
+        assert!(parse(&[
+            "identity".into(),
+            "commission".into(),
+            "--loopback-test".into(),
+            "extra".into()
+        ])
+        .is_err());
         // L2 §13: `recover` is subsumed by `restore`; NIP-49 `export` is deleted.
         assert!(parse(&["identity".into(), "export".into()]).is_err());
         assert!(parse(&["identity".into(), "recover".into()]).is_err());
@@ -367,5 +434,16 @@ mod tests {
             parse(&["uninstall".into(), "--phone".into()]).unwrap(),
             Cmd::Uninstall { phone: true, .. }
         ));
+    }
+
+    #[test]
+    fn commission_refuses_without_a_terminal_before_any_keygen() {
+        if unsafe { libc::isatty(0) } == 1 && unsafe { libc::isatty(1) } == 1 {
+            return; // `--nocapture` on a real terminal: the refusal is not exercisable here
+        }
+        for loopback in [false, true] {
+            let err = identity_commission(loopback).unwrap_err().to_string();
+            assert!(err.contains("interactive terminal"), "{err}");
+        }
     }
 }
