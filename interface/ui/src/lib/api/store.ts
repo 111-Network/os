@@ -199,9 +199,15 @@ export class ApiStore {
     let refetchProposals = false;
     let refetchAll = false;
     switch (frame.event) {
-      case "status":
-        if (frame.data && typeof frame.data === "object" && frame.data.node) Object.assign(patch, this.statusPatch(frame.data));
+      case "status": {
+        // The stream is shared across subscribers, so a frame's `auth` block cannot be per-viewer:
+        // keep the `auth` we learned from our own GET /status (it only changes on pair/logout).
+        if (frame.data && typeof frame.data === "object" && frame.data.node) {
+          const auth = this.state.status?.auth ?? frame.data.auth;
+          Object.assign(patch, this.statusPatch({ ...frame.data, auth }));
+        }
         break;
+      }
       case "services":
         if (frame.data && Array.isArray(frame.data.services)) patch.services = reuse(this.state.services, frame.data.services);
         break;
