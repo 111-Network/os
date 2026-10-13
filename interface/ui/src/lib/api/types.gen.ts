@@ -621,12 +621,18 @@ export interface components {
                 [key: string]: unknown;
             };
         };
+        /** @description Fired when a proposal file appears AND when a decision is recorded (so other tabs refresh); `decision` is null for a new proposal. */
         SseProposal: {
             id: string;
             title: string;
             kind: string;
             /** Format: date-time */
             created_at: string;
+            decision?: {
+                decision?: components["schemas"]["Decision"];
+                /** Format: date-time */
+                at?: string;
+            } | null;
         };
         SseReset: {
             /** @enum {string} */

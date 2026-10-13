@@ -341,11 +341,16 @@ export const schemas: Record<string, JsonSchema> = {
   "SseProposal": {
     "type": "object",
     "required": ["id","title","kind","created_at"],
+    "description": "Fired when a proposal file appears AND when a decision is recorded (so other tabs refresh); `decision` is null for a new proposal.",
     "properties": {
       "id": {"type":"string"},
       "title": {"type":"string"},
       "kind": {"type":"string"},
-      "created_at": {"type":"string","format":"date-time"}
+      "created_at": {"type":"string","format":"date-time"},
+      "decision": {
+        "type": ["object","null"],
+        "properties": {"decision":{"$ref":"#/components/schemas/Decision"},"at":{"type":"string","format":"date-time"}}
+      }
     }
   },
   "SseReset": {
