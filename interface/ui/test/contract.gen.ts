@@ -38,6 +38,8 @@ export const schemas: Record<string, JsonSchema> = {
           "not_found",
           "rate_limited",
           "already_decided",
+          "not_supervised",
+          "settings_locked",
           "needs_hub",
           "upstream_error",
           "internal"
@@ -277,11 +279,18 @@ export const schemas: Record<string, JsonSchema> = {
   },
   "Settings": {
     "type": "object",
-    "required": ["schema","alias","lan_enabled","offer"],
+    "required": ["schema","alias","lan_enabled","lan_locked","offer"],
     "properties": {
       "schema": {"type":"integer"},
       "alias": {"type":["string","null"],"maxLength":64},
-      "lan_enabled": {"type":"boolean"},
+      "lan_enabled": {
+        "type": "boolean",
+        "description": "effective value: settings.json, or the DASHBOARD_LAN override when lan_locked"
+      },
+      "lan_locked": {
+        "type": "boolean",
+        "description": "true when DASHBOARD_LAN in the node's environment file overrides settings.json; the UI disables the toggle"
+      },
       "offer": {"type":["string","null"],"enum":["offered","accepted","dismissed",null]}
     }
   },
@@ -538,6 +547,28 @@ export const operations: Record<string, ContractOperation> = {
     "pathParams": ["id"],
     "errors": [404]
   },
+  "restartService": {
+    "method": "POST",
+    "path": "/api/v1/services/{id}/restart",
+    "success": 202,
+    "contentType": "application/json",
+    "schema": {
+      "type": "object",
+      "required": ["schema","id","restarting"],
+      "properties": {"schema":{"type":"integer"},"id":{"type":"string"},"restarting":{"type":"boolean"}}
+    },
+    "schemasByType": {
+      "application/json": {
+        "type": "object",
+        "required": ["schema","id","restarting"],
+        "properties": {"schema":{"type":"integer"},"id":{"type":"string"},"restarting":{"type":"boolean"}}
+      }
+    },
+    "requestSchema": null,
+    "query": [],
+    "pathParams": ["id"],
+    "errors": [404,409]
+  },
   "listDevices": {
     "method": "GET",
     "path": "/api/v1/devices",
@@ -741,7 +772,7 @@ export const operations: Record<string, ContractOperation> = {
     "requestSchema": {"$ref":"#/components/schemas/SettingsPatch"},
     "query": [],
     "pathParams": [],
-    "errors": [403]
+    "errors": [403,409]
   },
   "restartNode": {
     "method": "POST",
