@@ -1,6 +1,6 @@
 # Device-connection core — plan brief (Layer 6 opener)
 
-Status: 🧭 options brief, 2026-10-13 · task P1 (`os/interface/TASKS.md`) · decisions land as D-next at Layer 6 kickoff.
+Status: ✍️ brief with owner decisions (D17, 2026-10-14) · task P1 (`os/interface/TASKS.md`) · build at Layer 6 kickoff.
 Reads with: `os/README.md` (Cat 1–5, Layers 6–7) · D9/D12 (phone path, rnsd child, meshtasticd detection-only,
 phone multicast gap) · D10/D15 (agent tools, registry, prompts) · `interface/README.md` §6.3, §7.1, §8 ·
 `interface/api/openapi.yaml` (`DeviceRecord`).
@@ -270,23 +270,30 @@ New tags (`bluetooth`, `radio`, `ham`, `android`) go into `knowledge/_meta/vocab
 - Rule for U1b/U6 now: unknown enum values render as `unknown`, never crash — makes all enum growth additive.
 - Routes later: `POST /devices/{id}/identify`, `POST /devices/scan` (BLE, time-boxed), `POST /devices/{id}/pair`.
 
-## 7. Open decisions for the owner (defaults in bold)
+## 7. Owner decisions (decided 2026-10-14 — recorded as D17 in `DECISIONS.md`)
 
-1. Firmware default — **C: respect existing firmware; RNode offered for blank boards** (A/B/D rejected as defaults).
-2. Meshtastic coexistence — **read-only presence now (nodes heard → Nearby); message bridge after Layer 5**.
-3. Phone app — **Termux + TCP now; adopt Columba after smoke test; helper APK only for what Columba cannot do**.
-4. Phone-relay transport — **TCP to hub first**, hotspot pattern second, AutoInterface when an app holds the lock, BLE experimental.
-5. rnsd posture — **`share_instance = yes` everywhere; `enable_transport = yes` on Cat 3/4; TCP server only when LAN sharing is on**.
-6. Config home — **111d renders from `state/interfaces.toml`; the agent proposes typed actions**.
-7. Applier timing — **Layer 6 ships a narrow applier for the device action vocabulary (verify + auto-revert) ahead of
-   Layer 9**; agent `service.restart` of `111d` children allowed without approval, rate-limited.
-8. Active identify — **one human consent per device, remembered; never automatic on plug-in**.
-9. Firmware flashing — **human-confirmed only; images pinned in the signed manifest; no runtime downloads**.
+1. Firmware default — **offer flashing for blank boards only; a board that already runs something is left alone.** The
+   dashboard must make it *super clear* what will be written and erased; the user decides (confirmation flow built in
+   Layer 4: `flash_offer` + typed confirmation; the flashing core lands in Layer 6).
+2. Meshtastic coexistence — **ignore for now** (detect and name only); the bridge is parked in `parked.md` until the
+   layers it needs exist.
+3. Phone app — **Termux** (it is the agentic path). Parked idea: once the agent reaches a phone it can install and try
+   existing apps (Briar and the like), test their connectivity, make the phone a node there too, and bridge them with ours.
+4. Phone-relay transport — **TCP to a hub first**, hotspot pattern second, AutoInterface when an app holds the lock,
+   BLE experimental.
+5. rnsd posture — **a user-choosable setting** (Settings → Layer 6 page) with the default: `share_instance = yes`
+   everywhere; `enable_transport = yes` on Cat 3/4; TCP server only when LAN sharing is on.
+6. Config home — **111d renders from `state/interfaces.toml`; the agent proposes typed actions.**
+7. Applier timing — **yes to apply → verify → undo-on-failure, but not built now**; parked in `parked.md` for the
+   layer that owns self-healing (Layer 9) or an earlier narrow cut if Layer 6 needs it.
+8. Active identify — **one human consent per device, remembered; never automatic on plug-in.**
+9. Firmware flashing — **human-confirmed only; images pinned in the signed manifest; no runtime downloads.**
 10. Region and callsign — **asked once at first radio setup, stored node-level, per-device override; agent may suggest,
-    never sets**.
-11. Analog — **detect and explain now; experimental licensed plaintext tier after Layer 5**.
-12. Reticulum dependence — **accept running rnsd/rnodeconf and flashing RNode firmware (separate processes/binaries);
-    legal read before anything beyond the current pip-lock redistribution**.
+    never sets.**
+11. Analog — **out of scope for now**; recorded in `parked.md` as the worked example for a later layer.
+12. Reticulum dependence — **Reticulum is a connected service: used as-is and separately (own process, unmodified,
+    always the latest upstream release), like Meshtastic. Our own light mesh core must not depend on it — if it ever
+    does, plan a rewrite of our own in Rust. The boundary is stated in `os/LICENSING.md`.**
 
 ## 8. Sequencing
 

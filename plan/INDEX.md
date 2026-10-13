@@ -37,7 +37,7 @@ Provider note: the roster names above are the Kimi plan's. A session running on 
 | 3 | Local Intelligence | ✅ built — D10; `agent111` crate (`111-agent`): T0–T8 verified + committed, 93 tests, `check.sh` green; wired into L1 (`111d` spawns `111-agent`/`llama-server`, additive `/api/status.intelligence`), L2 (node id stamps proposals; no key material in agent), L0 (grounds in the release's verified `share/kb/`); real-binary e2e on a staged root passed. Open: adversarial pass on spec (queued), pre-hub gates G1–G4 (real llama-server, opencode offline SDK prefetch, LAN offload, model in manifest), L4 relay = L4 build item | `os/intelligence/README.md` (as-built appendix) · `os/intelligence/TASKS.md` ✅ |
 | 4 | Interface & Dashboard | ✅ built — spec v2 locked (D11+D15), as-built lock D16: UI (588 vitest, 147.6 KB gz) + daemon side in `node111` (314 cargo tests) + install→dashboard on Linux and phone; I3 = 3 fable judges, all findings fixed; `check.sh` ALL GREEN · `interface/verify/smoke.sh` 118 checks · `local-smoke.sh` green. Open: on-device phone gate V1, real-Android pair-link check | `os/interface/README.md` ✅ locked · `os/interface/TASKS.md` ✅ |
 | 5 | Messaging & Data | ⬜ pending | — |
-| 6 | Transport & Bridge | ⬜ pending — opener: device-connection core — brief `devices.md` | — |
+| 6 | Transport & Bridge | ⬜ pending — opener: device-connection core — brief `devices.md` with the 12 owner decisions (D17); parked ideas in `parked.md` | — |
 | 7 | Relay & Presence | ⬜ pending | — |
 | 8 | Storage & Shared State | ⬜ pending | — |
 | 9 | Self-Healing & Evolution | ⬜ pending | — |
