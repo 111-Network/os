@@ -78,7 +78,7 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** @description Restart one child that 111d supervises (`actions` contains `restart`). SIGTERM, grace, SIGKILL, then the supervisor's normal respawn (which also clears `child_degraded` back-off). Services 111d does not supervise (external daemons such as rnsd/meshtasticd/opencode) answer 409 `not_supervised`. Loopback or a paired session, like every write. */
+        /** @description Restart one child that 111d supervises (`actions` contains `restart`). SIGTERM, grace, SIGKILL, then the supervisor's normal respawn (which also clears `child_degraded` back-off). Supervised today: `agent` (111-agent), `model` (llama-server), `transport` while rnsd runs as a 111d child. Services 111d does not supervise (external daemons such as meshtasticd/opencode, the transport detection-only stub, radio/kb/gateway/codeagent) answer 409 `not_supervised`. Loopback or a paired session, like every write. */
         post: operations["restartService"];
         delete?: never;
         options?: never;
@@ -614,6 +614,10 @@ export interface components {
             lan_enabled: boolean;
             /** Format: date-time */
             created?: string | null;
+            /** @description policy: loopback peers are authenticated without pairing (false under Termux/Android or DASHBOARD_TRUST_LOOPBACK=false) */
+            loopback_trusted?: boolean;
+            /** @description the companion DeviceRecord id of the caller's own paired session, so the UI can say 'this browser' before forgetting it; null on loopback-trusted or unpaired calls */
+            device_id?: string | null;
         };
         SseChatToken: {
             text: string;

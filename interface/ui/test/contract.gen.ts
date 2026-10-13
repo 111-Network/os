@@ -310,7 +310,15 @@ export const schemas: Record<string, JsonSchema> = {
       "loopback": {"type":"boolean"},
       "paired": {"type":"boolean"},
       "lan_enabled": {"type":"boolean"},
-      "created": {"type":["string","null"],"format":"date-time"}
+      "created": {"type":["string","null"],"format":"date-time"},
+      "loopback_trusted": {
+        "type": "boolean",
+        "description": "policy: loopback peers are authenticated without pairing (false under Termux/Android or DASHBOARD_TRUST_LOOPBACK=false)"
+      },
+      "device_id": {
+        "type": ["string","null"],
+        "description": "the companion DeviceRecord id of the caller's own paired session, so the UI can say 'this browser' before forgetting it; null on loopback-trusted or unpaired calls"
+      }
     }
   },
   "SseChatToken": {"type":"object","required":["text"],"properties":{"text":{"type":"string"}}},
