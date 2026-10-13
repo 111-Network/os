@@ -11,10 +11,11 @@ const PKGS: &[&str] = &["com.termux", "com.termux.api", "com.termux.boot"];
 /// Teardown over adb (pre-lockdown path).
 pub fn via_adb(adb: &Adb<'_>) -> anyhow::Result<()> {
     // stop the node first
-    let _ = adb.shell("run-as com.termux sh -c 'pkill -f 111node; pkill -f \"111 daemon\"'");
+    let _ = super::runas::run_as(adb, "pkill -f 111node; pkill -f '111 daemon'");
     // node tree + boot script + service
-    let _ = adb.shell(
-        "run-as com.termux sh -c 'rm -rf $PREFIX/var/lib/111 $PREFIX/var/service/111node $HOME/.termux/boot/00-111-node.sh'",
+    let _ = super::runas::run_as(
+        adb,
+        "rm -rf $PREFIX/var/lib/111 $PREFIX/var/service/111node $HOME/.termux/boot/00-111-node.sh",
     );
     // whitelist + appops resets (best-effort)
     for pkg in PKGS {

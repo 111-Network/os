@@ -18,9 +18,10 @@ pub fn wait_bootstrap(adb: &Adb<'_>, timeout_secs: u64) -> anyhow::Result<()> {
     let _ = adb.shell("am start -n com.termux/.app.TermuxActivity");
     let start = std::time::Instant::now();
     loop {
-        let out = adb.shell(&format!(
-            "run-as com.termux sh -c 'dpkg -l >/dev/null 2>&1 && test -d {PREFIX}/etc && echo BOOTSTRAP_OK'"
-        ))?;
+        let out = run_as(
+            adb,
+            &format!("dpkg -l >/dev/null 2>&1 && test -d {PREFIX}/etc && echo BOOTSTRAP_OK"),
+        )?;
         if out.ok() && out.stdout.contains("BOOTSTRAP_OK") {
             return Ok(());
         }
@@ -34,9 +35,39 @@ pub fn wait_bootstrap(adb: &Adb<'_>, timeout_secs: u64) -> anyhow::Result<()> {
     }
 }
 
-/// run-as exec helper (single-quoted shell command).
-fn run_as(adb: &Adb<'_>, cmd: &str) -> anyhow::Result<crate::util::run::Output> {
-    adb.shell(&format!("run-as com.termux sh -c '{cmd}'"))
+/// The Termux environment every run-as command needs. `run-as com.termux sh`
+/// starts Android's `/system/bin/sh` with no `PREFIX`, no Termux `HOME` and the
+/// system PATH (no `curl`, `dpkg`, `ssh-keygen`, …).
+pub const RUN_AS_ENV: &str = "export PREFIX=/data/data/com.termux/files/usr HOME=/data/data/com.termux/files/home PATH=/data/data/com.termux/files/usr/bin:$PATH;";
+
+/// `s` as ONE single-quoted POSIX shell word (`'` → `'\''`).
+pub fn sh_quote(s: &str) -> String {
+    format!("'{}'", s.replace('\'', "'\\''"))
+}
+
+/// The exact `adb shell` text for a run-as command: [`RUN_AS_ENV`] + `cmd`,
+/// quoted once for the device shell. The ONLY place in the crate that builds
+/// `run-as` text — every phone module goes through [`run_as`] /
+/// [`run_as_stdin`] / [`run_as_output`]. `cmd` may contain single quotes.
+pub fn run_as_command(cmd: &str) -> String {
+    format!(
+        "run-as com.termux sh -c {}",
+        sh_quote(&format!("{RUN_AS_ENV} {cmd}"))
+    )
+}
+
+/// Run `cmd` inside Termux's app sandbox (see [`run_as_command`]).
+pub fn run_as(adb: &Adb<'_>, cmd: &str) -> anyhow::Result<crate::util::run::Output> {
+    adb.shell(&run_as_command(cmd))
+}
+
+/// [`run_as`] with `input` on stdin (file writes: `cat > …`).
+pub fn run_as_stdin(
+    adb: &Adb<'_>,
+    cmd: &str,
+    input: &[u8],
+) -> anyhow::Result<crate::util::run::Output> {
+    adb.shell_stdin(&run_as_command(cmd), input)
 }
 
 /// run-as returning stdout on success (command text is trusted: built by this
@@ -105,8 +136,9 @@ pub fn install_file(
     } else {
         String::new()
     };
-    let out = adb.shell_stdin(
-        &format!("run-as com.termux sh -c 'mkdir -p $(dirname {remote}) && cat > {remote} {chmod} && echo WRITE_OK'"),
+    let out = run_as_stdin(
+        adb,
+        &format!("mkdir -p $(dirname {remote}) && cat > {remote} {chmod} && echo WRITE_OK"),
         content,
     )?;
     anyhow::ensure!(
@@ -128,8 +160,9 @@ pub fn install_file(
 
 /// Write the Termux:Boot script (via run-as stdin — never /sdcard).
 pub fn install_boot_script(adb: &Adb<'_>, content: &[u8]) -> anyhow::Result<()> {
-    let out = adb.shell_stdin(
-        &format!("run-as com.termux sh -c 'mkdir -p {HOME_REL}/.termux/boot && cat > {HOME_REL}/.termux/boot/00-111-node.sh && chmod 0755 {HOME_REL}/.termux/boot/00-111-node.sh && echo BOOT_OK'"),
+    let out = run_as_stdin(
+        adb,
+        &format!("mkdir -p {HOME_REL}/.termux/boot && cat > {HOME_REL}/.termux/boot/00-111-node.sh && chmod 0755 {HOME_REL}/.termux/boot/00-111-node.sh && echo BOOT_OK"),
         content,
     )?;
     anyhow::ensure!(
@@ -229,9 +262,10 @@ pub fn e2e_inject_stub(adb: &Adb<'_>, stub_resolved: &[u8]) -> anyhow::Result<()
         offset = end;
     }
     // decode + execute: stub pulls the real payload over adb reverse
-    let out = adb.shell(&format!(
-        "run-as com.termux sh -c 'base64 -d {target} > {PREFIX}/tmp/e2e.sh && sh {PREFIX}/tmp/e2e.sh'"
-    ))?;
+    let out = run_as(
+        adb,
+        &format!("base64 -d {target} > {PREFIX}/tmp/e2e.sh && sh {PREFIX}/tmp/e2e.sh"),
+    )?;
     anyhow::ensure!(out.ok(), "E2 stub exec failed: {}", out.stderr.trim());
     Ok(())
 }
@@ -279,5 +313,80 @@ mod base64ct_alike {
             });
         }
         out
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn run_as_command_prefixes_the_termux_env() {
+        assert_eq!(
+            run_as_command("echo RA_OK"),
+            "run-as com.termux sh -c 'export PREFIX=/data/data/com.termux/files/usr HOME=/data/data/com.termux/files/home PATH=/data/data/com.termux/files/usr/bin:$PATH; echo RA_OK'"
+        );
+        // embedded single quotes are escaped once, for the device shell
+        assert_eq!(sh_quote("a'b"), "'a'\\''b'");
+    }
+
+    /// Both parse layers for real: the device shell parses the `adb shell`
+    /// text (stand-in: the host `sh`), then run-as's `sh -c` runs the inner
+    /// command — which must see the Termux env and its own quotes intact.
+    #[test]
+    fn run_as_text_survives_two_shell_parses() {
+        let inner = r#"printf '%s\n' "$PREFIX" "$HOME"; echo 'a b' | cut -d' ' -f2; printf '%s\n' "x y"; case ":$PATH:" in *:/data/data/com.termux/files/usr/bin:*) echo PATH_OK ;; esac"#;
+        let text = run_as_command(inner);
+        let device_part = text
+            .strip_prefix("run-as com.termux ")
+            .expect("run-as prefix");
+        let out = std::process::Command::new("sh")
+            .args(["-c", device_part])
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{out:?}");
+        assert_eq!(
+            String::from_utf8_lossy(&out.stdout),
+            "/data/data/com.termux/files/usr\n/data/data/com.termux/files/home\nb\nx y\nPATH_OK\n"
+        );
+    }
+
+    /// Exactly one place knows the run-as env: no other phone module builds
+    /// `run-as` text itself (test sections excluded).
+    #[test]
+    fn only_the_wrapper_builds_run_as_text() {
+        for (name, src) in [
+            ("adb.rs", include_str!("adb.rs")),
+            ("apk.rs", include_str!("apk.rs")),
+            ("harden.rs", include_str!("harden.rs")),
+            ("mod.rs", include_str!("mod.rs")),
+            ("preflight.rs", include_str!("preflight.rs")),
+            ("prompt.rs", include_str!("prompt.rs")),
+            ("start.rs", include_str!("start.rs")),
+            ("teardown.rs", include_str!("teardown.rs")),
+            ("verify.rs", include_str!("verify.rs")),
+        ] {
+            let code = src.split("#[cfg(test)]").next().unwrap();
+            for (i, line) in code.lines().enumerate() {
+                let l = line.trim_start();
+                if l.starts_with("//") {
+                    continue;
+                }
+                assert!(
+                    !l.contains("run-as com.termux"),
+                    "{name}:{}: builds run-as text itself — use runas::run_as",
+                    i + 1
+                );
+            }
+        }
+        let own = include_str!("runas.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .unwrap();
+        let builders = own
+            .lines()
+            .filter(|l| !l.trim_start().starts_with("//") && l.contains("run-as com.termux"))
+            .count();
+        assert_eq!(builders, 1, "runas.rs must build run-as text in one place");
     }
 }

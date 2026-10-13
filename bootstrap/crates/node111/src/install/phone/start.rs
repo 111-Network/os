@@ -251,7 +251,7 @@ mod tests {
     const AM_PAIR: &str = "adb -s S1 shell am start -a android.intent.action.VIEW -d 'http://127.0.0.1:11180/#/pair?code=7KQ2-XM9D'";
     const AM_PLAIN: &str =
         "adb -s S1 shell am start -a android.intent.action.VIEW -d 'http://127.0.0.1:11180'";
-    const CAT: &str = "adb -s S1 shell run-as com.termux sh -c 'cat /data/data/com.termux/files/usr/var/lib/111/state/dashboard-pair.json'";
+    const CAT: &str = "adb -s S1 shell run-as com.termux sh -c 'export PREFIX=/data/data/com.termux/files/usr HOME=/data/data/com.termux/files/home PATH=/data/data/com.termux/files/usr/bin:$PATH; cat /data/data/com.termux/files/usr/var/lib/111/state/dashboard-pair.json'";
 
     #[test]
     fn open_dashboard_is_best_effort() {

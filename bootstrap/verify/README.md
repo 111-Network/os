@@ -17,7 +17,7 @@ for shipping (spec) and must be run before the first release.
 | F5 | skewed clock → clock-fault surfaced | ✅ LOCALLY | `cargo test --test install_flow clock_skew_refuses --test updater_stage clock_skew_writes_fault_marker` |
 | F6 | stale signed manifest → refusal (incl. RTC-less Pi) | ✅ LOCALLY | `cargo test --test updater_stage` (replay/stale cases) + Pi check in V8 runbook |
 | F7 | phone reboot mid-provision → resume | 🔶 RUNBOOK | ProvisionState markers (`cargo test --test phone_flow provision_state_resume_logic`) + physical resume pass in `phone/v1-v2-v11-runbook.md` |
-| V1 | run-as end-to-end, Termux v0.118.3, PIN, Android 15 | 🔶 EXTERNAL-BLOCKER | `phone/v1-v2-v11-runbook.md` §V1 |
+| V1 | run-as end-to-end, Termux v0.118.3, PIN, Android 15 | 🔶 EXTERNAL-BLOCKER — **must also confirm the run-as env fix below** | `phone/v1-v2-v11-runbook.md` §V1 |
 | V2 | reboot autostart with PIN (Pixel+Samsung+Xiaomi) | 🔶 EXTERNAL-BLOCKER | runbook §V2 |
 | V3 | pip --require-hashes rns==1.5.6 in Termux from prefetched debs | 🔶 EXTERNAL-BLOCKER | runbook §V3 (settles the .deb closure list) |
 | V4 | phantom persistence across reboot | 🔶 RUNBOOK | runbook §V4 |
@@ -31,6 +31,22 @@ for shipping (spec) and must be run before the first release.
 | V12 | interrupted-unpack resume | ✅ LOCALLY | `cargo test --test install_flow` (resume/idempotent) |
 | V13 | 16KB emulator exec + Termux bootstrap | 🔶 EXTERNAL | runbook §V13; p_align assert is in `scripts/cross-build.sh` (LOCALLY ✅) |
 | V14 | adb-unplug survival post-start | 🔶 RUNBOOK | runbook §V14 |
+
+## Fixes awaiting on-device confirmation
+
+- **run-as Termux env (2026-10-14).** `run-as com.termux sh -c …` starts
+  Android's `/system/bin/sh` with no `PREFIX`, no Termux `HOME` and the system
+  PATH, so `$PREFIX/…` paths expanded to `/…` and `curl`/`dpkg`/`ssh-keygen`
+  were not found; embedded single quotes (`cut -d' '`, `grep -q '…'`, the
+  sshd_config `printf`) also split the command into several words. Every
+  run-as command now goes through `install/phone/runas.rs::run_as_command`,
+  which prefixes `export PREFIX=… HOME=… PATH=$PREFIX/bin:$PATH;` and quotes
+  the whole command as one word. LOCALLY verified only: `cargo test --lib
+  install::phone::runas` (two real shell parses, one-builder source guard) and
+  `cargo test --test phone_flow every_run_as_command_carries_the_termux_env`
+  (every run-as call of the flow parses to one valid command carrying the env).
+  Still needs the V1 on-device pass (keygen, sshd setup, node start,
+  on-device `/health`, pair-code read, teardown) before it counts as done.
 
 ## Locally-runnable subset
 

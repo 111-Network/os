@@ -8,8 +8,7 @@ use super::adb::Adb;
 /// On-device health via run-as curl (the on-device check — distinct from the
 /// host-side forward check in start.rs).
 pub fn on_device_health(adb: &Adb<'_>) -> anyhow::Result<()> {
-    let out =
-        adb.shell("run-as com.termux sh -c 'curl -fsS -m 10 http://127.0.0.1:11180/health'")?;
+    let out = super::runas::run_as(adb, "curl -fsS -m 10 http://127.0.0.1:11180/health")?;
     let ok_status = out.ok();
     let body = out.stdout;
     anyhow::ensure!(

@@ -20,6 +20,19 @@ fn adb_of(runner: &MockRunner) -> Adb<'_> {
     Adb::new(runner, Some("SER1".into()), "adb")
 }
 
+/// The Termux env every run-as command must carry (spelled out here, not
+/// borrowed from the crate, so a change there fails these tests).
+const TERMUX_ENV: &str = "export PREFIX=/data/data/com.termux/files/usr HOME=/data/data/com.termux/files/home PATH=/data/data/com.termux/files/usr/bin:$PATH;";
+
+/// Expected `adb shell` key for a run-as command: env + `inner`, one
+/// single-quoted word (`'` → `'\''`).
+fn ra(inner: &str) -> String {
+    format!(
+        "adb -s SER1 shell run-as com.termux sh -c '{TERMUX_ENV} {}'",
+        inner.replace('\'', "'\\''")
+    )
+}
+
 // ---------- preflight ----------
 
 fn happy_props(script: &mut Vec<(String, Output)>) {
@@ -353,8 +366,9 @@ fn runas_push_verified_and_tamper_refusal() {
             ("adb -s SER1 shell mkdir -p /data/local/tmp/111-stage".into(), out(0, "")),
             (format!("adb -s SER1 push {path_s} /data/local/tmp/111-stage/payload.bin"), out(0, "")),
             (
+                // literal on purpose: pins the exact quoting of `cut -d' '`
                 format!(
-                    "adb -s SER1 shell run-as com.termux sh -c 'sha256sum /data/local/tmp/111-stage/payload.bin | cut -d' ' -f1 | grep -qx {sha} && mkdir -p $(dirname /x/y) && cp /data/local/tmp/111-stage/payload.bin /x/y && echo PUSH_OK'"
+                    "adb -s SER1 shell run-as com.termux sh -c 'export PREFIX=/data/data/com.termux/files/usr HOME=/data/data/com.termux/files/home PATH=/data/data/com.termux/files/usr/bin:$PATH; sha256sum /data/local/tmp/111-stage/payload.bin | cut -d'\\'' '\\'' -f1 | grep -qx {sha} && mkdir -p $(dirname /x/y) && cp /data/local/tmp/111-stage/payload.bin /x/y && echo PUSH_OK'"
                 ),
                 out(if grep_ok { 0 } else { 1 }, if grep_ok { "PUSH_OK\n" } else { "" }),
             ),
@@ -378,15 +392,15 @@ fn boot_script_install_and_external_apps_violation() {
     let sha = node111::util::hash::sha256_bytes(content);
     let runner = MockRunner::new(vec![
         (
-            "adb -s SER1 shell run-as com.termux sh -c 'mkdir -p /data/data/com.termux/files/home/.termux/boot && cat > /data/data/com.termux/files/home/.termux/boot/00-111-node.sh && chmod 0755 /data/data/com.termux/files/home/.termux/boot/00-111-node.sh && echo BOOT_OK'".into(),
+            ra("mkdir -p /data/data/com.termux/files/home/.termux/boot && cat > /data/data/com.termux/files/home/.termux/boot/00-111-node.sh && chmod 0755 /data/data/com.termux/files/home/.termux/boot/00-111-node.sh && echo BOOT_OK"),
             out(0, "BOOT_OK\n"),
         ),
         (
-            format!("adb -s SER1 shell run-as com.termux sh -c 'sha256sum /data/data/com.termux/files/home/.termux/boot/00-111-node.sh | cut -d' ' -f1 | grep -qx {sha} && echo HASH_OK'"),
+            ra(&format!("sha256sum /data/data/com.termux/files/home/.termux/boot/00-111-node.sh | cut -d' ' -f1 | grep -qx {sha} && echo HASH_OK")),
             out(0, "HASH_OK\n"),
         ),
         (
-            "adb -s SER1 shell run-as com.termux sh -c 'grep -q 'allow-external-apps *= *true' /data/data/com.termux/files/home/.termux/termux.properties 2>/dev/null && echo VIOLATION || echo CLEAN'".into(),
+            ra("grep -q 'allow-external-apps *= *true' /data/data/com.termux/files/home/.termux/termux.properties 2>/dev/null && echo VIOLATION || echo CLEAN"),
             out(0, "VIOLATION\n"),
         ),
     ]);
@@ -540,12 +554,9 @@ fn phantom_order_android12() {
 #[test]
 fn teardown_via_adb_full_script() {
     let mut script = vec![
+        (ra("pkill -f 111node; pkill -f '111 daemon'"), out(0, "")),
         (
-            "adb -s SER1 shell run-as com.termux sh -c 'pkill -f 111node; pkill -f \"111 daemon\"'".into(),
-            out(0, ""),
-        ),
-        (
-            "adb -s SER1 shell run-as com.termux sh -c 'rm -rf $PREFIX/var/lib/111 $PREFIX/var/service/111node $HOME/.termux/boot/00-111-node.sh'".into(),
+            ra("rm -rf $PREFIX/var/lib/111 $PREFIX/var/service/111node $HOME/.termux/boot/00-111-node.sh"),
             out(0, ""),
         ),
     ];
@@ -603,4 +614,140 @@ fn provision_state_resume_logic() {
     // different serial = fresh state
     let s3 = node111::install::phone::ProvisionState::load(&marker, "OTHER");
     assert!(!s3.is_done("apks"));
+}
+
+// ---------- run-as env (every command, whole flow) ----------
+
+/// A permissive fake phone: every adb call succeeds with the marker its
+/// caller looks for; every invocation is recorded.
+#[derive(Default)]
+struct FakePhone {
+    calls: std::sync::Mutex<Vec<String>>,
+    /// E2: sha256 tail of the last typed chunk (echoed back by the UI dump).
+    tail: std::sync::Mutex<String>,
+}
+
+impl FakePhone {
+    fn answer(&self, cmd: String) -> anyhow::Result<Output> {
+        let stdout = if let Some(rest) = cmd.split("printf '%s' '").nth(1) {
+            let chunk = rest.split("' >>").next().unwrap();
+            let h = node111::util::hash::sha256_bytes(chunk.as_bytes());
+            *self.tail.lock().unwrap() = h[h.len() - 8..].to_string();
+            String::new()
+        } else if cmd.contains("uiautomator dump") {
+            self.tail.lock().unwrap().clone()
+        } else if cmd.contains("identity generate") {
+            "3b6a27bcceb6a42d62a3a8d02a6f0d73653215771de243a63ac048a18b59da29\n".into()
+        } else if cmd.contains("dashboard-pair.json") {
+            r#"{"schema":1,"code":"7KQ2-XM9D","created":"x"}"#.into()
+        } else if cmd.contains("/health") {
+            r#"{"schema":1,"status":"ok"}"#.into()
+        } else {
+            "RA_OK BOOTSTRAP_OK EXTRACT_OK WRITE_OK HASH_OK BOOT_OK PUSH_OK DPKG_OK CLEAN \
+             HOSTKEY_OK AUTHKEY_OK CFG_OK SSHD_OK START_OK Success\n"
+                .into()
+        };
+        self.calls.lock().unwrap().push(cmd);
+        Ok(Output {
+            status: 0,
+            stdout,
+            stderr: String::new(),
+        })
+    }
+}
+
+impl node111::util::run::Runner for FakePhone {
+    fn run(&self, program: &str, args: &[&str]) -> anyhow::Result<Output> {
+        self.answer(format!("{program} {}", args.join(" ")))
+    }
+    fn run_as(&self, _: &str, _: &str, _: &[&str]) -> anyhow::Result<Output> {
+        anyhow::bail!("the phone flow never uses host sudo")
+    }
+    fn run_stdin(&self, program: &str, args: &[&str], _: &[u8]) -> anyhow::Result<Output> {
+        self.answer(format!("{program} {}", args.join(" ")))
+    }
+}
+
+/// Every `run-as` command the phone flow issues carries the Termux env, and
+/// reaches run-as's `sh -c` as ONE intact, syntactically valid command (the
+/// device shell's parse is reproduced with the host `sh`).
+#[test]
+fn every_run_as_command_carries_the_termux_env() {
+    use node111::install::phone::{start, verify};
+    let phone = FakePhone::default();
+    let adb = Adb::new(&phone, Some("SER1".into()), "adb");
+    let dir = tempfile::tempdir().unwrap();
+    let payload = dir.path().join("payload.tar.gz");
+    std::fs::write(&payload, b"payload").unwrap();
+    let deb = dir.path().join("openssh.deb");
+    std::fs::write(&deb, b"deb-bytes").unwrap();
+    let deb_sha = node111::util::hash::sha256_bytes(b"deb-bytes");
+
+    // step 4: headless channel (run-as path, then the E2 fallback's exec)
+    runas::wait_bootstrap(&adb, 5).unwrap();
+    assert!(runas::run_as_works(&adb));
+    runas::install_boot_script(&adb, b"#!/bin/sh\n").unwrap();
+    runas::push_verified(
+        &adb,
+        &payload,
+        "$PREFIX/var/lib/111/releases/payload.tar.gz",
+        &node111::util::hash::sha256_bytes(b"payload"),
+    )
+    .unwrap();
+    runas::run_as_output(
+        &adb,
+        "mkdir -p $PREFIX/var/lib/111/releases/v && echo EXTRACT_OK",
+    )
+    .unwrap();
+    runas::install_file(&adb, b"X=1\n", "$PREFIX/var/lib/111/profile.env", false).unwrap();
+    runas::install_file(
+        &adb,
+        b"#!/bin/sh\n",
+        "$PREFIX/var/lib/111/sv/111node/run",
+        true,
+    )
+    .unwrap();
+    runas::install_debs(&adb, dir.path(), &[artifact("openssh", &deb_sha)]).unwrap();
+    runas::assert_no_external_apps(&adb).unwrap();
+    runas::e2e_inject_stub(&adb, b"#!/bin/sh\necho stub\n").unwrap();
+    // steps 6-7: start + verify + pair code
+    start::on_device_keygen(&adb).unwrap();
+    start::setup_sshd(&adb, "ssh-ed25519 AAAAC3Nz test@host").unwrap();
+    start::start_node(&adb).unwrap();
+    verify::on_device_health(&adb).unwrap();
+    assert_eq!(start::read_pair_code(&adb).as_deref(), Some("7KQ2-XM9D"));
+    // step 9: teardown
+    teardown::via_adb(&adb).unwrap();
+
+    let calls = phone.calls.lock().unwrap().clone();
+    let run_as: Vec<&String> = calls.iter().filter(|c| c.contains("run-as")).collect();
+    assert!(
+        run_as.len() >= 20,
+        "{} run-as calls: {run_as:#?}",
+        run_as.len()
+    );
+    let head = "adb -s SER1 shell run-as com.termux sh -c ";
+    for c in run_as {
+        let quoted = c
+            .strip_prefix(head)
+            .unwrap_or_else(|| panic!("not a wrapped run-as call: {c}"));
+        // what run-as's `sh -c` receives: the device shell's parse of `quoted`
+        let parsed = std::process::Command::new("sh")
+            .args(["-c", &format!("printf '%s\\n' {quoted}")])
+            .output()
+            .unwrap();
+        let text = String::from_utf8(parsed.stdout).unwrap();
+        let lines: Vec<&str> = text.lines().collect();
+        assert_eq!(lines.len(), 1, "split into several words: {c}");
+        let inner = lines[0];
+        assert!(
+            inner.starts_with(&format!("{TERMUX_ENV} ")),
+            "missing the Termux env: {inner}"
+        );
+        let syntax = std::process::Command::new("sh")
+            .args(["-n", "-c", inner])
+            .status()
+            .unwrap();
+        assert!(syntax.success(), "inner command is not valid sh: {inner}");
+    }
 }
