@@ -70,4 +70,4 @@ export const DEVICE_KINDS = ["radio", "bluetooth", "companion", "node", "analog"
 export const DEVICE_STATES = ["connected", "disconnected", "needs_setup", "error"] as const;
 export const DEVICE_TRANSPORTS = ["usb-serial", "spi", "bluetooth", "wifi", "lan", "tcp", "audio", "unknown"] as const;
 export const DECISIONS = ["accepted", "dismissed"] as const;
-export const PROBLEM_CODES = ["unauthenticated", "loopback_only", "lan_read_only", "agent_unavailable", "model_unavailable", "bad_request", "not_found", "rate_limited", "already_decided", "not_supervised", "settings_locked", "needs_hub", "upstream_error", "internal"] as const;
+export const PROBLEM_CODES = ["unauthenticated", "loopback_only", "lan_read_only", "agent_unavailable", "model_unavailable", "bad_request", "not_found", "rate_limited", "already_decided", "not_supervised", "settings_locked", "offer_stale", "needs_hub", "upstream_error", "internal"] as const;

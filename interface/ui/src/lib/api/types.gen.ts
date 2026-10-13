@@ -121,6 +121,26 @@ export interface paths {
         patch: operations["patchDevice"];
         trace?: never;
     };
+    "/api/v1/devices/{id}/flash": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Reserved for the Layer 6 core — 111d answers 404 not_found until it lands
+         * @description Flash the offered image onto the board. Requires the device's `flash_offer` and a body that repeats the image sha256 and carries the typed confirmation, so a stale offer or a mis-click cannot flash. Loopback or a paired session; CSRF rules apply. Until Layer 6 ships it, 111d has no such route (404 not_found) and the UI says flashing is not available on this node yet.
+         */
+        post: operations["flashDevice"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/chat": {
         parameters: {
             query?: never;
@@ -393,7 +413,7 @@ export interface components {
             status: number;
             detail?: string;
             /** @enum {string} */
-            code: "unauthenticated" | "loopback_only" | "lan_read_only" | "agent_unavailable" | "model_unavailable" | "bad_request" | "not_found" | "rate_limited" | "already_decided" | "not_supervised" | "settings_locked" | "needs_hub" | "upstream_error" | "internal";
+            code: "unauthenticated" | "loopback_only" | "lan_read_only" | "agent_unavailable" | "model_unavailable" | "bad_request" | "not_found" | "rate_limited" | "already_decided" | "not_supervised" | "settings_locked" | "offer_stale" | "needs_hub" | "upstream_error" | "internal";
             errors?: {
                 pointer?: string;
                 message: string;
@@ -682,6 +702,27 @@ export interface components {
             /** @enum {string} */
             source: "probe" | "user" | "agent" | "unknown";
         };
+        /** @description An offer to flash firmware, decided by a human in the dashboard (D17: human-confirmed only; images ship inside the signed release; no runtime downloads). */
+        FlashOffer: {
+            /**
+             * @description blank: no firmware answered; unknown: something answered but nothing we can drive
+             * @enum {string}
+             */
+            reason: "blank" | "unknown";
+            image: {
+                /** @enum {string} */
+                family: "rnode";
+                version: string;
+                /** @description path inside the signed release, e.g. share/firmware/rnode-heltec-v3-1.78.bin */
+                file: string;
+                /** @description hex; pinned in the release manifest */
+                sha256: string;
+                /** @description human board name the image targets */
+                board: string;
+            };
+            /** @description plain-language statement of what is lost (e.g. 'everything on the board, including any Meshtastic settings') */
+            erases: string;
+        };
         /** @description What drives this device right now. A USB Meshtastic board is NOT driven by meshtasticd (SPI HATs only); it is driven by rnsd's RNodeInterface (RNode firmware) or a Meshtastic client, or nothing yet. */
         DeviceDriver: {
             /** @enum {string|null} */
@@ -730,8 +771,10 @@ export interface components {
             identity: {
                 [key: string]: unknown;
             };
-            /** @description identify/pair/authorize are reserved for the Layer 6 core; clients render unknown values as disabled */
-            actions: ("rename" | "forget" | "agent" | "identify" | "pair" | "authorize")[];
+            /** @description identify/pair/authorize/flash are reserved for the Layer 6 core; clients render unknown values as disabled. `flash` appears only with a non-null `flash_offer`. */
+            actions: ("rename" | "forget" | "agent" | "identify" | "pair" | "authorize" | "flash")[];
+            /** @description Layer 6 (D17): present only for a board with no usable firmware (family none/unknown) when the signed release carries an image for it. Never for a board that already runs something. */
+            flash_offer?: components["schemas"]["FlashOffer"] | null;
             /** @description raw detection facts the panel renders; bounded */
             detail: {
                 [key: string]: unknown;
@@ -981,6 +1024,43 @@ export interface operations {
                 };
             };
             404: components["responses"]["Problem"];
+        };
+    };
+    flashDevice: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: components["parameters"]["deviceId"];
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": {
+                    sha256: string;
+                    /** @description the device's displayed name, typed by the user */
+                    confirm: string;
+                };
+            };
+        };
+        responses: {
+            /** @description Flashing started */
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        schema: number;
+                        id: string;
+                        flashing: boolean;
+                    };
+                };
+            };
+            404: components["responses"]["Problem"];
+            /** @description offer_stale (sha256 mismatch) or already flashing */
+            409: components["responses"]["Problem"];
         };
     };
     chat: {

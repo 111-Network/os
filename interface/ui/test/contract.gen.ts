@@ -40,6 +40,7 @@ export const schemas: Record<string, JsonSchema> = {
           "already_decided",
           "not_supervised",
           "settings_locked",
+          "offer_stale",
           "needs_hub",
           "upstream_error",
           "internal"
@@ -396,6 +397,36 @@ export const schemas: Record<string, JsonSchema> = {
       "source": {"type":"string","enum":["probe","user","agent","unknown"]}
     }
   },
+  "FlashOffer": {
+    "type": "object",
+    "required": ["reason","image","erases"],
+    "description": "An offer to flash firmware, decided by a human in the dashboard (D17: human-confirmed only; images ship inside the signed release; no runtime downloads).",
+    "properties": {
+      "reason": {
+        "type": "string",
+        "enum": ["blank","unknown"],
+        "description": "blank: no firmware answered; unknown: something answered but nothing we can drive"
+      },
+      "image": {
+        "type": "object",
+        "required": ["family","version","file","sha256","board"],
+        "properties": {
+          "family": {"type":"string","enum":["rnode"]},
+          "version": {"type":"string"},
+          "file": {
+            "type": "string",
+            "description": "path inside the signed release, e.g. share/firmware/rnode-heltec-v3-1.78.bin"
+          },
+          "sha256": {"type":"string","description":"hex; pinned in the release manifest"},
+          "board": {"type":"string","description":"human board name the image targets"}
+        }
+      },
+      "erases": {
+        "type": "string",
+        "description": "plain-language statement of what is lost (e.g. 'everything on the board, including any Meshtastic settings')"
+      }
+    }
+  },
   "DeviceDriver": {
     "type": "object",
     "required": ["stack","interface","live"],
@@ -468,8 +499,12 @@ export const schemas: Record<string, JsonSchema> = {
       },
       "actions": {
         "type": "array",
-        "items": {"type":"string","enum":["rename","forget","agent","identify","pair","authorize"]},
-        "description": "identify/pair/authorize are reserved for the Layer 6 core; clients render unknown values as disabled"
+        "items": {"type":"string","enum":["rename","forget","agent","identify","pair","authorize","flash"]},
+        "description": "identify/pair/authorize/flash are reserved for the Layer 6 core; clients render unknown values as disabled. `flash` appears only with a non-null `flash_offer`."
+      },
+      "flash_offer": {
+        "oneOf": [{"$ref":"#/components/schemas/FlashOffer"},{"type":"null"}],
+        "description": "Layer 6 (D17): present only for a board with no usable firmware (family none/unknown) when the signed release carries an image for it. Never for a board that already runs something."
       },
       "detail": {
         "type": "object",
@@ -640,6 +675,35 @@ export const operations: Record<string, ContractOperation> = {
     "query": [],
     "pathParams": ["id"],
     "errors": [404]
+  },
+  "flashDevice": {
+    "method": "POST",
+    "path": "/api/v1/devices/{id}/flash",
+    "success": 202,
+    "contentType": "application/json",
+    "schema": {
+      "type": "object",
+      "required": ["schema","id","flashing"],
+      "properties": {"schema":{"type":"integer"},"id":{"type":"string"},"flashing":{"type":"boolean"}}
+    },
+    "schemasByType": {
+      "application/json": {
+        "type": "object",
+        "required": ["schema","id","flashing"],
+        "properties": {"schema":{"type":"integer"},"id":{"type":"string"},"flashing":{"type":"boolean"}}
+      }
+    },
+    "requestSchema": {
+      "type": "object",
+      "required": ["sha256","confirm"],
+      "properties": {
+        "sha256": {"type":"string"},
+        "confirm": {"type":"string","description":"the device's displayed name, typed by the user"}
+      }
+    },
+    "query": [],
+    "pathParams": ["id"],
+    "errors": [404,409]
   },
   "chat": {
     "method": "POST",
