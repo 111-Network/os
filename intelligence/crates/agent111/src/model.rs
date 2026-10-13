@@ -47,11 +47,61 @@ impl ChatMessage {
 }
 
 /// A tool call requested by the model (OpenAI tool-calling protocol).
-#[derive(Debug, Clone, Serialize, Deserialize)]
+///
+/// In memory the arguments are parsed JSON; on the wire (an assistant message
+/// re-sent to the server) this serializes to the OpenAI shape
+/// `{id, type:"function", function:{name, arguments:"<json string>"}}` —
+/// a real llama-server rejects anything else.
+#[derive(Debug, Clone)]
 pub struct ToolCall {
     pub id: String,
     pub name: String,
     pub arguments: serde_json::Value,
+}
+
+#[derive(Serialize, Deserialize)]
+struct WireToolCall {
+    id: String,
+    #[serde(rename = "type")]
+    kind: String,
+    function: WireFunction,
+}
+
+#[derive(Serialize, Deserialize)]
+struct WireFunction {
+    name: String,
+    arguments: String,
+}
+
+impl Serialize for ToolCall {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        WireToolCall {
+            id: self.id.clone(),
+            kind: "function".to_string(),
+            function: WireFunction {
+                name: self.name.clone(),
+                arguments: serde_json::to_string(&self.arguments)
+                    .map_err(serde::ser::Error::custom)?,
+            },
+        }
+        .serialize(s)
+    }
+}
+
+impl<'de> Deserialize<'de> for ToolCall {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        let w = WireToolCall::deserialize(d)?;
+        let arguments = if w.function.arguments.trim().is_empty() {
+            serde_json::Value::Object(serde_json::Map::new())
+        } else {
+            serde_json::from_str(&w.function.arguments).map_err(serde::de::Error::custom)?
+        };
+        Ok(ToolCall {
+            id: w.id,
+            name: w.function.name,
+            arguments,
+        })
+    }
 }
 
 /// What a completed chat turn returned.
@@ -339,4 +389,52 @@ struct PartialToolCall {
     id: Option<String>,
     name: Option<String>,
     arguments: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tool_call_uses_openai_wire_shape() {
+        let call = ToolCall {
+            id: "call_1".into(),
+            name: "kb.read".into(),
+            arguments: serde_json::json!({"query": "alpha"}),
+        };
+        let v = serde_json::to_value(&call).unwrap();
+        assert_eq!(v["type"], "function");
+        assert_eq!(v["function"]["name"], "kb.read");
+        // arguments travel as a JSON *string*, not an object
+        assert_eq!(v["function"]["arguments"], "{\"query\":\"alpha\"}");
+        assert!(v.get("name").is_none() && v.get("arguments").is_none());
+
+        let back: ToolCall = serde_json::from_value(v).unwrap();
+        assert_eq!(back.id, "call_1");
+        assert_eq!(back.arguments["query"], "alpha");
+
+        let empty: ToolCall = serde_json::from_value(serde_json::json!({
+            "id": "c", "type": "function", "function": {"name": "health.read", "arguments": ""}
+        }))
+        .unwrap();
+        assert!(empty.arguments.as_object().is_some_and(|m| m.is_empty()));
+    }
+
+    #[test]
+    fn assistant_message_with_calls_round_trips() {
+        let msg = ChatMessage {
+            role: "assistant".into(),
+            content: None,
+            tool_calls: Some(vec![ToolCall {
+                id: "c1".into(),
+                name: "logs.read".into(),
+                arguments: serde_json::json!({"n": 5}),
+            }]),
+            tool_call_id: None,
+        };
+        let v = serde_json::to_value(&msg).unwrap();
+        assert_eq!(v["tool_calls"][0]["function"]["arguments"], "{\"n\":5}");
+        let back: ChatMessage = serde_json::from_value(v).unwrap();
+        assert_eq!(back.tool_calls.unwrap()[0].arguments["n"], 5);
+    }
 }
