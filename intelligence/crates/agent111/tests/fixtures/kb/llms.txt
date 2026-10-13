@@ -1,0 +1,7 @@
+# 111network knowledge snapshot (test fixture)
+
+Ritual: read this index, grep for a keyword, then open one entry at a time.
+
+- [Alpha Project](projects/alpha-project.md): Alpha mesh routing project overview.
+- [Beta Thing](projects/beta-thing.md): Beta firmware experiment notes.
+- [Gamma Device](devices/gamma-device.md): Gamma node hardware profile.
