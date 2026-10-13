@@ -6,4 +6,6 @@ This repo (`os/`) is the operating layer of the 111network mesh OS: an offline-f
 
 - Knowledge-base navigation contract: `knowledge/AGENTS.md` — read it before querying `knowledge/`.
 - Layer 0 (Knowledge Layer) spec: `knowledge/README.md` — locked; defines entry format, relations, status gates, indexes.
-- Build process and task plan: `plan/INDEX.md`.
+- Layer 1 (Bootstrap) spec: `bootstrap/README.md` — locked v2.2; the `111` binary, installer, daemon, updates.
+- Layer 2 (Identity) spec: `identity/README.md` — locked v2; keyset, announces, backup/restore, agentic + transport hooks. Core crate: `identity/crates/id111`.
+- Build process and task plan: `plan/INDEX.md` (layer status) · `plan/DECISIONS.md` (every decision + rejected alternatives) · `plan/EXECUTION.md` (build protocol). Per-layer build boards: `<layer>/TASKS.md`.
