@@ -82,3 +82,11 @@ All 7 forks decided (D19, 2026-10-14). Spec draft: `os/messaging/README.md`. Nex
   wiring (opus xhigh, last in the list). Resume: `Workflow({scriptPath, resumeFromRunId: "wf_97dba36d-e98"})`; delete
   finished calls before resuming (hash-chain cache). Then Wave 3: V1 netns smoke, V2 CDP panel lint, V3 gates + D22/INDEX,
   V4 fable integrated review.
+- **Crash #2 (≈22:06 → 23:10):** session died ~1 h 45 min into Wave 2. U2 and B1 had returned → verified and committed
+  (U2 `282bff8`: UI 1065 tests; B1 `09dc397`: gates, manifest entries, sign-off; agent-verified ALL GREEN on a clean tree).
+  F2 was mid-way (≈5.5k lines on disk, fixing test compile errors) → resumed alone under the same run id with a
+  RESUMPTION NOTICE (B1/U2 calls deleted from the script; task `wql91rj2e`). Carried to the Wave 2 review/bounce:
+  B1's three `verify_layer5_tree` call sites in the Layer 1 updater (update_helper.rs, install/stage.rs, updater/fetch.rs),
+  the OpenSSL native-code note in gen-notices.py, THIRD-PARTY-NOTICES regeneration after F2 (lead), release-checklist +
+  presence-venv build step rows, U1 mock's enroll bundle → `111HUB:` shape, U2's open questions (Panel auth-mode field,
+  restore-pending flag, Identify button on the device page).
