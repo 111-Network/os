@@ -90,3 +90,9 @@ All 7 forks decided (D19, 2026-10-14). Spec draft: `os/messaging/README.md`. Nex
   the OpenSSL native-code note in gen-notices.py, THIRD-PARTY-NOTICES regeneration after F2 (lead), release-checklist +
   presence-venv build step rows, U1 mock's enroll bundle → `111HUB:` shape, U2's open questions (Panel auth-mode field,
   restore-pending flag, Identify button on the device page).
+- **Wave 2 landed:** F2 `7554926` (daemon wiring; 269 lib + 7 integration tests), notices fix `43c98bd` (OpenSSL named),
+  board `99c5ede`. Full bootstrap `check.sh` run with F2 in (log `scratchpad/full-check-f2.log`): node111 stages, shellcheck,
+  notices, build-script gate, systemd green; mesh111/SQLCipher/presence/UI stages were green on the B1 and U2 runs.
+  **Review run `wf_938461a1-1cb`** (script `messaging/.workflow-wave-2-review.js`): B1 + U2 opus, F2 fable xhigh. Carried
+  into its triage: UI quota classes (msg/agent_op → 400), offerHub 409 in the contract, cancel route, updater
+  `verify_layer5_tree` call sites, release-checklist + presence-venv rows, mock enroll bundle `111HUB:`.
