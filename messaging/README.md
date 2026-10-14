@@ -311,7 +311,10 @@ user-added peers**; L2's 256-entry pin store is a cache of it (L2 amendment A7).
    announce inside the ciphertext (self-authenticating by the announce signature; `pair_mac` is verified after the card
    is pinned provisionally, in that order). The receiver files a **message request** (`trust = tofu`); the user accepts
    (contact created, message delivered to the thread) or ignores (kept in the request list, never auto-pruned while
-   pending, no ACK sent). Accepting a request never ACKs retroactively more than the messages shown.
+   pending, no ACK sent). Accepting a request never ACKs retroactively more than the messages shown. Pending requests
+   are **capacity-bounded** (a pending-request quota, default 256, and refusal at `store_full`): a refused INTRO is
+   dropped without an ACK and counted — otherwise anyone who can reach the node could mint identities until the disk
+   is full.
 
 ### 7.3 Enrollment with a home hub
 
@@ -435,12 +438,13 @@ are not encrypted), `auto_vacuum = INCREMENTAL` so pruning frees disk, `secure_d
 `contacts` (§7.1) · `messages` (`peer`, `sender`, `stream`, `epoch`, `n`, `dir own|in|transit`, `kind`, `class`, `size`, `local_seq`
 (the age hint), `state queued|sent|relayed|delivered`, `reason`, `received_local_seq`, `body` or blob refs, `pinned`) ·
 `tx_state` (`(peer, stream)` → next `n`, `epoch`) · `outbox` (sealed bytes awaiting a path, per fragment, outstanding count,
-SACK bitmap) · `rx_state` (`(peer, stream, epoch)` → prefix + ranges + partial bitmaps; newest 4 epochs kept) · `custody` (hub: `dest`,
+SACK bitmap) · `rx_state` (`(peer, stream, epoch)` → prefix + ranges; newest 4 epochs kept) · `rx_floor` (`(peer, stream)` → highest evicted epoch) · `partials` (fragment bitmaps **and the fragment bytes**, one FULL transaction, so a SACKed fragment survives a crash; capacity-evicted oldest-first) · `custody` (hub: `dest`,
 `custody_seq`, `pkt_ref`, bytes, `committed`) · `cursors` (member: hub → cursor) · `blobs` (`hash`, `size`,
 `refcount`, `public`, `object_key?`) · `requests` (pending INTROs) · `settings`.
 Bodies of `MSG` live in the DB (small); attachments (v1.1) and every bulk object are files under `fabric/blobs/` named
-by BLAKE3 root — private objects are encrypted once with a **random per-object `object_key`** (XChaCha20-Poly1305 in
-64 KiB chunks, nonce = LE chunk index ‖ zeros) and addressed by **ciphertext** hash, so relays and hubs verify what they
+by BLAKE3 root — private objects are encrypted once with a **random per-object `object_key`** generated inside the store (never
+caller-supplied; XChaCha20-Poly1305 in 64 KiB chunks, nonce = LE chunk index ‖ zeros, AD = chunk index ‖ last-chunk
+flag so a boundary truncation fails to decrypt); a relay or hub may hold the ciphertext keyless and addressed by **ciphertext** hash, so relays and hubs verify what they
 carry without reading it; public signed objects (`KB`, `UPDATE`, `PATCH`) are stored plain.
 
 ### 10.4 Pruning (capacity only — normative order)
