@@ -99,5 +99,5 @@ All 7 forks decided (D19, 2026-10-14). Spec draft: `os/messaging/README.md`. Nex
 - **Gate milestone (23:45):** `bootstrap/scripts/check.sh` **ALL GREEN** on `43c98bd` with Waves 0–2 in — node111 fmt/clippy/
   musl ×2/tests, shellcheck, notices (OpenSSL named), build-script gate, systemd, mesh111 fmt/clippy/tests/musl ×2, SQLCipher
   static link + run (x86_64) and link (aarch64, 8 static test binaries), presence sidecar (16 packages, 335 hashes), UI 1065
-  tests, D21 eager 102.8 / lazy 176.4 KB. Wave 3 launched alongside the review: `.workflow-wave-3.js` (V2 panel lint, V1
-  three-node smoke).
+  tests, D21 eager 102.8 / lazy 176.4 KB. Wave 3 launched alongside the review: **run `wf_e1d4170c-90d`** (`messaging/.workflow-wave-3.js`: V2 panel lint sonnet,
+  V1 three-node smoke opus xhigh); resume with `resumeFromRunId`, delete finished calls first.
