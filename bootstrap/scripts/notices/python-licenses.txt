@@ -1,0 +1,29 @@
+# python-licenses.txt: hand-maintained license list for the meshtastic-presence venv (spec messaging/README.md
+# section 14). Read by gen-notices.py, which fails (also under --check) when a package in
+# messaging/sidecars/meshtastic-presence/meshtastic-presence-lock.txt has no row here at the locked version,
+# or a row here has no package in the lock.
+#
+# One row per line:  name | version | SPDX | copyright | repository
+# Names are the lock's lowercase names. Fill the copyright column from the package's own license file in
+# its wheel/sdist (dist-info `licenses/`), at the version listed. A package with no copyright line in its
+# files shows its metadata author as "authors: ...".
+# The venv is built ON THE NODE by pip from this hash lock (we ship the lock, not the packages); this list
+# is for transparency and for the GPL source offer, not a claim that we redistribute these files.
+#
+# name | version | SPDX | copyright | repository
+meshtastic | 2.7.11 | GPL-3.0-only | authors: Meshtastic Developers | https://github.com/meshtastic/python
+async-timeout | 5.0.1 | Apache-2.0 | Copyright 2016-2020 aio-libs collaboration | https://github.com/aio-libs/async-timeout
+bleak | 3.0.2 | MIT | Copyright (c) 2020, Henrik Blidh | https://github.com/hbldh/bleak
+certifi | 2026.7.22 | MPL-2.0 | authors: Kenneth Reitz | https://github.com/certifi/python-certifi
+charset-normalizer | 3.5.2 | MIT | Copyright (c) 2025 TAHRI Ahmed R. | https://github.com/jawah/charset_normalizer
+dbus-fast | 5.0.26 | MIT | Copyright (c) 2022 Bluetooth Devices Authors | https://github.com/bluetooth-devices/dbus-fast
+idna | 3.20 | BSD-3-Clause | Copyright (c) 2013-2026, Kim Davies and contributors | https://github.com/kjd/idna
+packaging | 26.3 | Apache-2.0 OR BSD-2-Clause | Copyright (c) Donald Stufft and individual contributors | https://github.com/pypa/packaging
+protobuf | 7.36.2 | BSD-3-Clause | Copyright 2008 Google Inc. | https://github.com/protocolbuffers/protobuf
+pypubsub | 4.0.7 | BSD-2-Clause | Copyright (c) since 2006, Oliver Schoenborn | https://github.com/schollii/pypubsub
+pyserial | 3.5 | BSD-3-Clause | Copyright (c) 2001-2020 Chris Liechti | https://github.com/pyserial/pyserial
+pyyaml | 6.0.3 | MIT | Copyright (c) 2017-2021 Ingy döt Net; Copyright (c) 2006-2016 Kirill Simonov | https://github.com/yaml/pyyaml
+requests | 2.34.2 | Apache-2.0 | Copyright 2019 Kenneth Reitz | https://github.com/psf/requests
+tabulate | 0.9.0 | MIT | Copyright (c) 2011-2020 Sergey Astanin and contributors | https://github.com/astanin/python-tabulate
+typing-extensions | 4.16.0 | PSF-2.0 | authors: Guido van Rossum, Jukka Lehtosalo, Łukasz Langa, Michael Lee | https://github.com/python/typing_extensions
+urllib3 | 2.8.0 | MIT | Copyright (c) 2008-2020 Andrey Petrov and contributors | https://github.com/urllib3/urllib3

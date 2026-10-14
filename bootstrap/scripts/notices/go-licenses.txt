@@ -1,0 +1,27 @@
+# go-licenses.txt: hand-maintained license list for the meshmud Go closure (spec messaging/README.md
+# section 2, section 14 "GPL boundary"; read by gen-notices.py, gated by gen-notices.py --check and by
+# meshmud-build.sh, which fails a CI build whose `go version -m` lists a module that is not in this file).
+#
+# One row per line:  module | version | SPDX | copyright line(s) | repository
+# Rows cover EXACTLY the `require` entries of the pinned snapshot meshmud-<tag>.go.mod, plus the main
+# module (version = the pinned tag) and the Go standard library (`std`, linked statically into the binary).
+# Fill the copyright column from the module's own LICENSE file, read at the version listed (the Go module
+# proxy zip). When the pin moves: replace the snapshots, update every version here, re-read each LICENSE.
+#
+# module | version | SPDX | copyright | repository
+github.com/Rikonardo/meshmud | v1.0.0 | MIT | Copyright (c) 2026 Kai Shimizu | https://github.com/Rikonardo/meshmud
+std | go1.24 | BSD-3-Clause | Copyright 2009 The Go Authors | https://go.dev
+github.com/BurntSushi/toml | v1.6.0 | MIT | Copyright (c) 2013 TOML authors | https://github.com/BurntSushi/toml
+github.com/cenkalti/backoff | v2.2.1+incompatible | MIT | Copyright (c) 2014 Cenk Altı | https://github.com/cenkalti/backoff
+github.com/creack/goselect | v0.1.2 | MIT | Copyright (c) 2014 Guillaume J. Charmes | https://github.com/creack/goselect
+github.com/godbus/dbus/v5 | v5.2.2 | BSD-2-Clause | Copyright (c) 2013, Georg Reinke, Google | https://github.com/godbus/dbus
+github.com/grandcat/zeroconf | v1.0.0 | MIT | Copyright (c) 2016 Stefan Smarzly; Copyright (c) 2014 Oleksandr Lobunets | https://github.com/grandcat/zeroconf
+github.com/holoplot/go-avahi | v1.0.1 | MIT | Copyright (c) 2019 Holoplot GmbH | https://github.com/holoplot/go-avahi
+github.com/miekg/dns | v1.1.27 | BSD-3-Clause | Copyright (c) 2009 The Go Authors; Copyright (c) 2011 Miek Gieben | https://github.com/miekg/dns
+github.com/samber/lo | v1.53.0 | MIT | Copyright (c) 2022-2025 Samuel Berthe | https://github.com/samber/lo
+go.bug.st/serial | v1.6.4 | BSD-3-Clause | Copyright (c) 2014-2024, Cristian Maglie | https://github.com/bugst/go-serial
+golang.org/x/crypto | v0.12.0 | BSD-3-Clause | Copyright (c) 2009 The Go Authors | https://pkg.go.dev/golang.org/x/crypto
+golang.org/x/net | v0.10.0 | BSD-3-Clause | Copyright (c) 2009 The Go Authors | https://pkg.go.dev/golang.org/x/net
+golang.org/x/sys | v0.27.0 | BSD-3-Clause | Copyright 2009 The Go Authors | https://pkg.go.dev/golang.org/x/sys
+golang.org/x/text | v0.22.0 | BSD-3-Clause | Copyright 2009 The Go Authors | https://pkg.go.dev/golang.org/x/text
+gopkg.in/fifo.v0 | v0.0.1 | MIT | Copyright (c) 2024 The Aloha Authors | https://pkg.go.dev/gopkg.in/fifo.v0

@@ -1,0 +1,36 @@
+id = "meshtastic"                       # = ServiceId and KB link
+title = "Meshtastic"
+kb_entry = "projects/meshtastic-web"
+
+[source]
+kind = "static"                         # static | child | detected  (v1 implements static)
+bundle = "panels/meshtastic-web"        # unpacked from the hash-pinned release payload; SPA fallback for non-API paths
+shim = "meshtastic-http"                # built-in: /api/v1/toradio|fromradio reframed onto a meshmud TCP downlink (§14)
+
+[entry]
+path = "/"
+
+[health]
+listen = 11230                          # meshmud TCP downlink LISTEN (never a connect) + child state
+
+[frame]
+allow = ["serial", "bluetooth"]
+needs_secure_context = false
+sandbox = "default"
+secure_note = "USB or Bluetooth from this browser works only on the node itself and only for a radio this node has not bound; the bound board is reached through the panel's HTTP connection."
+
+[proxy]                                 # reserved for child/detected panels (P7); true here fails adoption in v1
+websocket = false
+sse = false
+max_body = "8MiB"
+
+[offline]
+optional_hosts = ["tiles.openfreemap.org", "api.meshtastic.org"]   # verified at the lint; shown to the user
+
+[auth]
+mode = "111-session"                    # 111-session | loopback-only
+
+[license]
+spdx = "GPL-3.0-only"
+served = "unmodified"
+source_offer = "THIRD-PARTY-NOTICES.md" # names the pinned tag; CI builds the bundle from the tag when upstream ships no complete asset
