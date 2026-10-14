@@ -18,7 +18,15 @@
 //!   stay open (a LAN visitor needs the UI to reach `/pair`).
 //! - Every response carries [`CSP`] (`/v1` adds the hash of its one inline
 //!   script), `X-Content-Type-Options: nosniff` and `Referrer-Policy:
-//!   no-referrer`.
+//!   no-referrer`. Layer 5 §13: the policy is **per request** — when panels
+//!   are enabled and listening, `frame-src` lists their origins on the
+//!   request's accepted host ([`dashboard_csp`]); `frame-ancestors 'none'`
+//!   stays. With no panel to frame the policy is exactly [`CSP`].
+//! - Layer 5 §13: the main listener answers `Host: localhost` with a `308` to
+//!   the same path on `127.0.0.1` ([`localhost_location`]), so panels never
+//!   see `localhost` (`[::1]` is matched bracketed and not redirected). The
+//!   Layer 1 machine contracts `/health` and `/api/status` are exempt (they
+//!   stay unchanged for any accepted Host).
 //! - Any `/api/*` error that is not already JSON (axum extractor rejections,
 //!   413, 405, unknown routes) is rewritten to `application/problem+json`
 //!   with the same status ([`api_problems`]).
@@ -73,12 +81,46 @@ frame-ancestors 'none'; base-uri 'self'; form-action 'self'";
 
 // ---------------------------------------------------------------- headers
 
+/// The dashboard CSP for a request (Layer 5 §13 "Dashboard side"): [`CSP`],
+/// plus `frame-src` naming the enabled, listening panel origins on the
+/// request's accepted host. No accepted host or no panel ⇒ exactly [`CSP`].
+pub fn dashboard_csp(api: &ApiState, headers: &HeaderMap) -> Cow<'static, str> {
+    let own = api.own_addrs();
+    let Some(host) = headers
+        .get(header::HOST)
+        .and_then(|v| v.to_str().ok())
+        .filter(|raw| host_allowed(raw, api.lan_enabled, &own))
+        .and_then(parse_host)
+        .map(|(h, _)| h)
+    else {
+        return Cow::Borrowed(CSP);
+    };
+    let Some(panels) = api.ext::<Arc<crate::daemon::panels::PanelHost>>() else {
+        return Cow::Borrowed(CSP);
+    };
+    let origins = panels.frame_origins(&host, api.lan_enabled, &own);
+    if origins.is_empty() {
+        Cow::Borrowed(CSP)
+    } else {
+        Cow::Owned(format!("{CSP}; frame-src {}", origins.join(" ")))
+    }
+}
+
 /// Security headers on every response (kept when a handler set its own).
-async fn security_headers(req: Request, next: Next) -> Response {
+async fn security_headers(State(api): State<Arc<ApiState>>, req: Request, next: Next) -> Response {
+    let csp = dashboard_csp(&api, req.headers());
     let mut resp = next.run(req).await;
     let h = resp.headers_mut();
+    if !h.contains_key(header::CONTENT_SECURITY_POLICY) {
+        let v = match &csp {
+            Cow::Borrowed(s) => HeaderValue::from_static(s),
+            Cow::Owned(s) => {
+                HeaderValue::from_str(s).unwrap_or_else(|_| HeaderValue::from_static(CSP))
+            }
+        };
+        h.insert(header::CONTENT_SECURITY_POLICY, v);
+    }
     for (name, value) in [
-        (header::CONTENT_SECURITY_POLICY, CSP),
         (header::X_CONTENT_TYPE_OPTIONS, "nosniff"),
         (header::REFERRER_POLICY, "no-referrer"),
     ] {
@@ -87,6 +129,41 @@ async fn security_headers(req: Request, next: Next) -> Response {
         }
     }
     resp
+}
+
+/// Where a `Host: localhost` request is sent (Layer 5 §13): the same path and
+/// query on `127.0.0.1`, same port. `None` for any other host and for the
+/// Layer 1 machine contracts (`/health`, `/api/status`).
+pub fn localhost_location(headers: &HeaderMap, uri: &axum::http::Uri) -> Option<String> {
+    if matches!(uri.path(), "/health" | "/api/status") {
+        return None;
+    }
+    let (host, port) = headers
+        .get(header::HOST)
+        .and_then(|v| v.to_str().ok())
+        .and_then(parse_host)?;
+    if host != "localhost" {
+        return None;
+    }
+    let port = port.map(|p| format!(":{p}")).unwrap_or_default();
+    let pq = uri.path_and_query().map(|p| p.as_str()).unwrap_or("/");
+    Some(format!("http://127.0.0.1{port}{pq}"))
+}
+
+/// `308` for `Host: localhost` ([`localhost_location`]).
+async fn localhost_redirect(req: Request, next: Next) -> Response {
+    match localhost_location(req.headers(), req.uri()) {
+        Some(location) => {
+            let mut r = StatusCode::PERMANENT_REDIRECT.into_response();
+            if let Ok(v) = HeaderValue::from_str(&location) {
+                r.headers_mut().insert(header::LOCATION, v);
+            }
+            r.headers_mut()
+                .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+            r
+        }
+        None => next.run(req).await,
+    }
 }
 
 /// Machine code for a framework-generated error status (contract enum).
@@ -390,8 +467,9 @@ pub fn app(api: Arc<ApiState>) -> axum::Router {
         .with_state(Arc::clone(&api))
         .merge(api_v1::router(Arc::clone(&api)))
         .layer(middleware::from_fn(api_problems))
-        .layer(middleware::from_fn_with_state(api, host_guard))
-        .layer(middleware::from_fn(security_headers))
+        .layer(middleware::from_fn(localhost_redirect))
+        .layer(middleware::from_fn_with_state(Arc::clone(&api), host_guard))
+        .layer(middleware::from_fn_with_state(api, security_headers))
 }
 
 /// Standard base64 (RFC 4648, padded) — CSP hash sources only.
