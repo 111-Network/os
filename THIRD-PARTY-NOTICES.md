@@ -31,8 +31,8 @@ c2724281b2643dbba247ee54bbc0739a6bd7111675bea35b3e2bdaa5b5c830da  bootstrap/Carg
 93b9b10f1fd806baeff102300e06e1a7532fae650043eb370283dbaf18793954  interface/ui/pnpm-lock.yaml
 ```
 
-Regenerate whenever a lockfile changes. The output is sorted and contains no timestamps, so identical inputs give identical output.
-The generator is not in the repo yet (open item in `LICENSING.md`); until it is, rerun the commands named above and rebuild this file from them.
+Regenerate with `python3 -I os/bootstrap/scripts/gen-notices.py` whenever a lockfile changes. `--check` (run by `os/bootstrap/scripts/check.sh`) fails when the hashes above no longer match.
+The output is sorted and contains no timestamps, so identical inputs give identical output.
 
 ## Summary
 

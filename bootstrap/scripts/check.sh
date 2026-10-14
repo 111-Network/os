@@ -29,6 +29,14 @@ if command -v shellcheck >/dev/null 2>&1; then
 else
   echo "shellcheck not found — SKIP"
 fi
+echo "== notices =="
+# THIRD-PARTY-NOTICES.md records the lockfile hashes it was generated from; fail when one moved.
+# Offline hash compare only. Fix: python3 -I scripts/gen-notices.py (needs cargo + pnpm, no network).
+if command -v python3 >/dev/null 2>&1; then
+  python3 -I scripts/gen-notices.py --check
+else
+  echo "python3 not found — notices check SKIPPED"
+fi
 echo "== systemd-analyze =="
 if command -v systemd-analyze >/dev/null 2>&1 && ls systemd/*.service >/dev/null 2>&1; then
   # verify resolves units by name — point it at a temp unit dir (systemd 249
