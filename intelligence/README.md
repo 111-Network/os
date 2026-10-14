@@ -20,7 +20,7 @@ Three. Nothing else.
 
 Both daemons are supervised children of `111d` — exactly the `rnsd` pattern from the bootstrap spec: `111d` spawns them, restarts them in place, and health-gates them; systemd/runit stay thin wrappers. Layer 3 adds no new supervisor.
 
-`111-agent` is deliberately thin: a single binary, no plugin system, a fixed enumerated tool set (`kb.read`, `health.read`, `logs.read`, `proposal.write`, `task.submit`), streaming chat via llama-server. It never gets a host shell. Multi-file patch generation is delegated to opencode where present; `111-agent` decides local-loop vs delegation, so callers never care which harness answered.
+`111-agent` is deliberately thin: a single binary, no plugin system, a fixed enumerated tool set (`kb.read`, `health.read`, `logs.read`, `proposal.write`, `task.submit`), streaming chat via llama-server. It never gets a host shell. Multi-file patch generation is delegated to opencode where present; `111-agent` decides local-loop vs delegation, so callers never care which harness answered. *[The tool set grows in Layer 5 (D20): see "Layer 5 amendments" below.]*
 
 ## Model profiles
 
@@ -45,7 +45,7 @@ The agent's only curated knowledge source is the local KB snapshot at `/var/lib/
 
 - **Chat → Layer 4.** `111-agent` owns the backend: `POST /v1/chat` (grounded multi-turn chat), `GET /v1/agent/events` (activity stream for the notifications surface), `GET /v1/agent/status`. Layer 4 renders; it never talks to llama-server directly. Localhost only until Layer 4 auth exists — LAN binding follows the bootstrap dashboard's explicit opt-in rule.
 - **Tasks → Layer 9.** `POST /v1/agent/task` `{kind: diagnose | propose | patch, refs…}` → task id; progress rides the events stream; the result is a proposal document under `/var/lib/111/agent/proposals/`. `patch` requires a hub (opencode); elsewhere it refuses with `needs hub` — the bootstrap refusal philosophy: clear message, never a silent skip.
-- **Offload ← Layers 5/7.** A model-less node's `111-agent` points its model base URL at a nearby hub discovered via the Service Discovery Registry (Layer 7 broadcasts hub role, model, load); traffic rides Layer 5's encrypted fabric. Layer 3 invents no mesh protocol, and a hub never proxies inference to the WAN.
+- **Offload ← Layers 5/7.** A model-less node's `111-agent` points its model base URL at a nearby hub discovered via the Service Discovery Registry (Layer 7 broadcasts hub role, model, load); traffic rides Layer 5's encrypted fabric. Layer 3 invents no mesh protocol, and a hub never proxies inference to the WAN. *[In v1 (Layer 5, D20) offload stays on the LAN binding + pairing auth — not v1 fabric traffic.]*
 - **Identity ← Layer 2.** The agent signs its outbound artifacts (proposals, patch PRs) with the node key; hub offload endpoints authenticate peers by node identity. Until Layer 2 lands, the provisional secp256k1 identity (D9) sits behind the same seam.
 - **State ← Layer 8.** Conversations, task journal, and proposals live under `/var/lib/111/agent/` in the encrypted local store — capacity-pruned, never policy-expired.
 - **Health ← Layer 1, → Layer 9.** Both children expose `/health` (200/503); `111d` restarts a dead child ≤10 s and owns the watchdog. Agent state is honest and distinct: `local | offloaded | unavailable`.
@@ -77,10 +77,34 @@ Crate `os/intelligence/crates/agent111`, binary `111-agent`, 93 tests, gate `scr
 
 **API** (loopback, Host-allowlisted, GET routes GET-only): `GET /health` (`ok|degraded|error`; 503 only when the agent itself is broken, so a dead hub never restart-loops it) · `GET /v1/agent/status` (`local|offloaded|unavailable`, model, kb, node_id, category) · `POST /v1/chat` (SSE `delta|tool_call|done|error` or JSON) · `GET /v1/chat/history` · `GET /v1/agent/events` (SSE, replay 50) · `POST /v1/agent/task` (`diagnose|propose|patch` → 202; `patch` without opencode → 409 `needs hub`).
 
-**Tools** (fixed, shell-free): `kb.read` · `health.read` · `logs.read` · `proposal.write` · `task.submit`. Chat loop ≤4 tool rounds; turns persist atomically; KB absent ⇒ the system prompt states it and the agent says so.
+**Tools** (fixed, shell-free): `kb.read` · `health.read` · `logs.read` · `proposal.write` · `task.submit`. Chat loop ≤4 tool rounds; turns persist atomically; KB absent ⇒ the system prompt states it and the agent says so. *[Layer 5 adds `messages.read`, `messages.send`, `contacts.read`, `fabric.read`, `nearby.read` — see "Layer 5 amendments" below.]*
 
 **Tasks.** `diagnose`/`propose` = one tool-less model call over gathered context (daemon health, journal tail, refs resolved through the KB) → proposal stamped with the node id. `patch` = opencode headless (`run --format json --pure -m local/<model>`) in a per-task work dir with a generated `opencode.json` declaring exactly one provider (the local endpoint) and a scrubbed environment; 10-min timeout; JSONL collected into a proposal. Leftover `running` tasks are marked `failed` on restart.
 
 **Amendments to the spec made during the build** (all recorded in `TASKS.md`): health tri-state (`degraded` is 200); env prefix `AGENT111_` (a leading digit is not a valid shell identifier); refused `patch` writes no task file; node id (not key material) flows from Layer 2 and proposal *signing* is deferred to Layer 9's PR packaging; `/v1/chat/history` added because Layer 4's UI talks only to `111d`, which relays.
 
 **Pre-hub verification gates (not yet passed — needed before a 4A/4B profile ships):** G1 real `llama-server` + qwen3-4b GGUF under `111d` on one machine, chat round-trip offline · G2 opencode offline: on first use opencode 1.18.18 fetches its provider SDK (`@ai-sdk/openai-compatible`) from the network — the hub profile must prefetch/pin it or the `patch` path hangs on an air-gapped hub (observed: it never contacted the local endpoint without network) · G3 2A → hub offload over a real LAN with the hub's `--lan` binding · G4 model swap via the signed channel manifest (Layer 1 updater owns the mechanics; a model section in the manifest is not yet defined).
+
+## Layer 5 amendments (D20, 2026-10-14)
+
+Additive (`os/messaging/README.md` §17, §19; built by Layer 5 task A1). The tool set stays fixed, shell-free and
+schema-validated (D10); `111-agent` still never gets a host shell.
+
+**Tools added** (the Layer 3 set grows by five):
+
+| Tool | Kind | Shape | Gate |
+|---|---|---|---|
+| `messages.read` | read | `{peer?, since_seq?, limit}` → threads/messages with states | none |
+| `messages.send` | write intent | `{to, text}` → **proposal** `kind: message`; the human accepts in the UI, `111d` sends | human accept; never autonomous |
+| `contacts.read` | read | → contacts + requests | none |
+| `fabric.read` | read | → links, hub, custody, store (same as `GET /api/v1/fabric`) | none |
+| `nearby.read` | read | → Meshtastic presence (messaging §14); names inside a labelled **untrusted block** | none |
+
+- **Daemon access.** The tools run inside `111-agent` and reach `111d`'s loopback `/api/v1` with a bearer token
+  (`Authorization: Bearer <AGENT111_DAEMON_TOKEN>`) — a per-spawn token `111d` mints into the child's environment beside the
+  existing `AGENT111_*`; `111d` accepts it from a loopback peer only (`os/interface/README.md` §11.1). Config gains
+  `daemon_api_url` (the loopback `/api/v1` base) and reads the token from the environment, with the existing precedence (flags >
+  `AGENT111_*` env > `/etc/111/agent.env` > defaults); the exact flag and key spellings are fixed at build in task A1.
+- **Writes** only via the proposal path: this layer's "only write path" rule is preserved, and `messages.send` never sends on its own.
+- **Untrusted text.** Names heard over Meshtastic are RF-origin strings, handed to the model inside a labelled untrusted block.
+- **Offload** is unchanged in v1: it stays on the LAN binding + pairing auth and is not v1 fabric traffic.

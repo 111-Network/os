@@ -162,6 +162,18 @@ opener; the enum slot stays.
    human click) → `exact`: lock the port, open with DTR/RTS held safe, try in order RNode detect (`rnodeconf --info`),
    Meshtastic client handshake (`meshtastic --info`), MeshCore companion query, then release. Adopted CLIs run from
    the existing rns venv (meshtastic/meshcore wheels added to the hash-locked closure); timeouts; ≤ 1 probe/30 s.
+
+   **Layer 5 amendment (D20, 2026-10-14) — the identify seam.** Layer 5 builds the **Meshtastic step** of this sequence now
+   (`os/messaging/README.md` §14): `POST /devices/{id}/identify` with the consent flag (decision 8) → the daemon's **port-owner
+   table** (`HashMap<port, Owner>`; a held port answers `409 port_busy`) → `meshmud` started on the port with the identify
+   profile → the presence reader's `my_node_info` through the TCP downlink → `DeviceRecord.firmware` set to
+   `{family: meshtastic, version, source: probe}`, `driver.stack = meshtastic`, `service_id = meshtastic`, and the **binding
+   persisted in `state/devices.json`**. The identify child becomes the service child in place (a profile swap, never a second
+   open), so the DTR/RTS reset risk is tied to this one consented step. For this step the handshake is `meshmud` plus the
+   presence reader (its own hash-locked venv), not `meshtastic --info` from the rns venv. The RNode (`rnodeconf --info`) and
+   MeshCore steps stay named seams; on phones `can_run_here = false` for USB boards, and a Wi-Fi board is bound by address. **Layer 6 completes the full
+   sequence** (RNode, Meshtastic, MeshCore; the port-owner table is reused) and **creates `state/interfaces.toml`, inheriting the
+   Meshtastic binding from `devices.json`.**
 3. **Authorize / pair.** BLE pairing via BlueZ agent with PIN typed in the dashboard; companions via the D15 pair code;
    phone USB permission is on-device (Android dialog) — surfaced as `needs_permission`.
 4. **Drive.** Bind device → stack: RNode → rnsd interface stanza; Meshtastic/MeshCore → a supervised client child
@@ -281,7 +293,7 @@ New tags (`bluetooth`, `radio`, `ham`, `android`) go into `knowledge/_meta/vocab
 - Enum growth: `DeviceTransport` + `spi`, `tcp` · `actions` + `identify`, `pair`, `authorize` · `reason_code` +
   `firmware_unknown`, `needs_region`, `needs_pairing`, `needs_permission`, `port_busy`, `needs_license`, `applying`.
 - Rule for U1b/U6 now: unknown enum values render as `unknown`, never crash — makes all enum growth additive.
-- Routes later: `POST /devices/{id}/identify`, `POST /devices/scan` (BLE, time-boxed), `POST /devices/{id}/pair`.
+- Routes later: `POST /devices/{id}/identify`, `POST /devices/scan` (BLE, time-boxed), `POST /devices/{id}/pair`. *[Layer 5 (D20) builds `identify` now for the Meshtastic step — see the §3 amendment.]*
 
 ## 7. Owner decisions (decided 2026-10-14 — recorded as D17 in `DECISIONS.md`)
 
@@ -321,17 +333,17 @@ New tags (`bluetooth`, `radio`, `ham`, `android`) go into `knowledge/_meta/vocab
 - U6: tolerant enums; device detail shows "Identified as … (likely)" and "Driven by …"; Add page splits phones into
   "control this node" (pair, exists), "make it a node" (install command), "message through this node" (coming with
   Layer 6); handheld card states licensed + plaintext-only.
-- Flag to Layer 4 owner: the `radio` service row (§7) is meshtasticd-only; USB Meshtastic boards need it reworded.
+- Flag to Layer 4 owner: the `radio` service row (§7) is meshtasticd-only; USB Meshtastic boards need it reworded. *[Resolved by Layer 5 (D20): the radio-row rule counts a `meshmud`-bound board as bound (messaging §14).]*
 
 **Layer 6 opener — device-connection core (in order):**
 1. `111d` `devices/` module: uevent hotplug, port ownership lock, ModemManager/brltty guards, consented `identify`
-   via adopted CLIs in the rns venv.
+   via adopted CLIs in the rns venv. *[The Meshtastic step is built by Layer 5 (D20): see the §3 amendment.]*
 2. Declarative `state/interfaces.toml` + rnsd renderer `schema-version = 2` (RNodeInterface stanzas, posture, LAN TCP
    server); region table from the KB concept entry.
 3. Agent tools (`devices.read`, `transport.read`, `device.identify`, `device.propose`, `service.restart`) + the narrow
    applier with verify/auto-revert; proposals render as device cards in the UI.
 4. Phone relay v1: TCP to hub, QR join, `role` on companions; Termux node gains a hub uplink.
-5. Meshtastic/MeshCore client children, read-only presence into Nearby.
+5. Meshtastic/MeshCore client children, read-only presence into Nearby. *[The Meshtastic child (`meshmud`) and its presence reader are built by Layer 5 (D18 #3, D19 g); MeshCore stays here.]*
 
 **Later:** Columba adoption or helper APK (MulticastLock, USB→TCP, LocalOnlyHotspot) · BLE pairing UI + RNode/Meshtastic
 over BLE · firmware flashing from manifest-pinned images · message bridges (after Layer 5) · analog experimental tier ·
@@ -342,3 +354,13 @@ owned-node linking (Layer 2 attestation + Layer 7) · SPI HAT meshtasticd instal
 images · G3 Termux rnsd `TCPClientInterface` to a hub reaches `joined` without multicast · G4 Android hotspot
 client-to-client traffic + AutoInterface on two OEMs · G5 Columba ↔ hub rnsd over TCP · G6 BlueZ pairing of a BLE
 RNode as `node111` under the systemd sandbox.
+
+## 9. Layer 5 hand-offs (D20, 2026-10-14)
+
+Pinned in `os/messaging/README.md` and owned by Layer 6 at kickoff: the **`Link` trait** (§8: `PathProfile` with
+`mtu_bytes`, framing, `reliable`, `broadcast`, `cost_class`, advertised airtime; `PeerAddr`; boxed-future `send`/`recv`)
+is the contract every driver here implements · the **MeshCore data-type range** for 111 `GRP_DATA` frames is registered
+with upstream (`number_allocations.md`) before this layer locks (D19 c) · **INTRO over LoRa** (card in fragment 0, a
+capacity-bounded pending-INTRO buffer) is deferred to this layer (messaging §21) · `interfaces.toml` is born here and
+inherits the Meshtastic binding from `devices.json`; the full identify sequence (RNode, Meshtastic, MeshCore) reuses the
+daemon port-owner table.

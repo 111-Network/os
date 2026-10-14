@@ -2,6 +2,10 @@
 
 Spec v2 (2026-10-13) · Decisions: D11, D15 (`os/plan/DECISIONS.md`) · Supersedes the v1 draft after the adversarial panel (`os/plan/layer-4-review.md`) and the owner's IA redirect.
 
+**Layer 5 amendments (D20, 2026-10-14):** additive blocks marked "Layer 5 delivers" (§5, §6.4, §6.5, §6.7) and "Layer 5
+amendments" (§6.6, §7.2, §10.2, §11.1) record what Layer 5 (`os/messaging/README.md`, locked v1.2) adds to this layer. The
+locked text is unchanged; a one-line pointer sits next to each sentence that is superseded.
+
 The dashboard is the node's face: a local, offline-first web app served by `111d` itself, opened in any
 browser. Two things are the core and are always one tap away: **Overview** (is my node OK, who is
 near, which services are live) and **Agent** (a plain chat box to the node's local AI). Everything
@@ -142,6 +146,11 @@ no typewriter on live data) · `sparkline` · `diff-view` · `json-block` · `co
 `/settings` (Essentials) · `/settings/l0` … `/settings/l9` (adv) · `/pair` (auth screen) ·
 `/kb/*` (entry viewer, linked from service pages).
 
+**Layer 5 delivers (D20, 2026-10-14):** the real MESSAGES and NEARBY views behind the entries §5 reserves as structural stubs
+(§6.4, §6.5; `os/messaging/README.md` §16 is normative). Routes added: `/messages/contacts` (Contacts) and `/settings/l5`
+(Settings → Messaging & Data, the Layer 5 page of the `/settings/l0` … `/settings/l9` family, §6.7). The `meshtastic` and `fabric`
+service rows join the sidebar's services list (§7.2).
+
 **Header** (sticky, thin): `MENU` (<lg) · view title · attention badge (open proposals + errored
 services) · disconnected banner slot.
 
@@ -221,10 +230,23 @@ Other people's nodes around you. v1 shows what `111d` knows (`transport_state`: 
 none/degraded) as one sentence + a reserved canvas with the ASCII radar placeholder ("radar and
 map views arrive with Layer 7"), and "Ask the agent who is nearby". No fake peers.
 
+> **Layer 5 delivers (D20, 2026-10-14):** the real list, grouped by source ("heard via Meshtastic on {board alias}"), from
+> `GET /api/v1/nearby` + SSE `nearby` (`os/messaging/README.md` §14): name, short name, SNR/RSSI, hops, position, channel
+> utilization, and `last_heard` shown as a hint. Names are untrusted RF-origin strings, rendered as text only. No fake peers; a
+> Meshtastic node is never a contact, and "Message them" is not offered until a bridge exists. Radar and map stay Layer 7.
+
 ### 6.5 Messages — `/messages` (stub)
 "Messaging arrives with Layer 5 (Messaging & Data)" + what it will do + "Ask the agent about
 messaging" prompt. Reserved as the third core item because the vision names human messaging the
 flagship service; no fake inbox.
+
+> **Layer 5 delivers (D20, 2026-10-14):** Messages becomes real (`os/messaging/README.md` §16, normative). Thread list (alias or
+> label, last line, state glyphs, unread) · a **requests** section (INTROs: accept / ignore) · composer ("attachments arrive
+> next") · per-message state in the exact copy of messaging §9, with the reason when `queued` or rejected · "received" time, the
+> unverified sender claim behind a disclosure · advanced appends raw `msg_id`, path, custody receipts. **Contacts**
+> (`/messages/contacts`): list; add by card/QR scan (`jsQR` over `getUserMedia` on loopback or secure origins, file-upload
+> fallback) or by pasting `node1…`; own card (QR drawn from the module bitmap, text, copy); pin / alias / forget. `jsQR`
+> (Apache-2.0) is this layer's dependency sign-off. Prompts (one `buildPrompt`, §8): `messaging.setup`, `messaging.fix`, `meshtastic.setup`, `panel.explain`.
 
 ### 6.6 Service page — `/services/:id`
 Header: dot + `LIVE|NOT SET|ERROR|STARTING`, plain name, `since`, one-line reason.
@@ -233,7 +255,7 @@ Header: dot + `LIVE|NOT SET|ERROR|STARTING`, plain name, `since`, one-line reaso
   children `111d` runs itself; every other service links to Settings → "Restart node" instead —
   and view log tail), KB entry link (`/kb/<path>`),
   and — when the registry supplies `embed_url` (e.g. a self-hosted Meshtastic web client) — an
-  "Open full client" link-out, never an iframe.
+  "Open full client" link-out, never an iframe. *[Narrowed by Layer 5, D20: a registry-declared panel is framed on its own origin — see the Panel tab block below.]*
 - **NOT SET** → `description` (what it is, 2–3 lines), `requires` (what it needs), primary button
   **"Set up with the agent"** → Agent with the prepared prompt (§8). If `can_run_here=false` the
   page explains the hardware needed and offers no button.
@@ -241,6 +263,32 @@ Header: dot + `LIVE|NOT SET|ERROR|STARTING`, plain name, `since`, one-line reaso
   agent"** → Agent with the prepared prompt.
 - When the agent is unavailable, both buttons become **"Show steps"** (same prompt text, copyable)
   plus the KB recipe link.
+
+#### Panel tab and hosted panels (Layer 5 amendments, D20, 2026-10-14)
+
+Normative text: `os/messaging/README.md` §13. This is the Layer 4 summary.
+- **D15 amendment (D19 d, D20 d).** The iframe ban narrows to "no iframe of any URL that is not a registry-declared panel";
+  `ServiceRecord.embed_url` is superseded for hosted projects by the additive `panel` object (§7.2) and is kept only for link-out;
+  one `ServiceId` per hosted project; the dashboard CSP keeps `frame-ancestors 'none'` and adds an exact `frame-src` list, per
+  request, of the enabled panel origins on the request's accepted host; no TLS in v1 stands.
+- **Rule.** The dashboard frames only registry-declared panels (`assets/panels/<id>.toml`, embedded, hash-pinned), each on its own
+  origin: one listener per enabled panel from the block 11190–11229, bound where the dashboard is bound. The UI builds the origin
+  from `location.hostname` and `panel.port`, never from a shared snapshot.
+- **Panel tab** (LIVE service page): an `<iframe>` with
+  `sandbox="allow-scripts allow-same-origin allow-forms allow-popups allow-modals allow-downloads"` — never `allow-top-navigation`
+  — and `allow=` taken from `panel.allow`; our chrome: title, health dot, reload, "Open full client" (new tab, re-mints a
+  session), "Ask the agent about this panel".
+- **Session.** `POST /api/v1/panels/{id}/session` → a one-time ticket URL (128-bit, single use, 30 s) → the panel listener swaps it
+  for the host-only cookie `p111_<id>`; no loopback skip. A spent or expired ticket answers `403 panel_ticket_expired` and the UI
+  re-mints.
+- **Guards on every panel request, every method:** exact Host (never `localhost`), cross-site refused, `OPTIONS` refused, every
+  `Access-Control-*` response header stripped; `X-Frame-Options` dropped and `frame-ancestors` replaced with the dashboard origins;
+  bodies never rewritten.
+- **Secure-context gate.** When `needs_secure_context` is true and the dashboard origin is not potentially trustworthy (LAN IP,
+  `111.local`), the tab shows "open the dashboard on the node itself" with the loopback URL instead of a frame. The `meshtastic`
+  page also lists the optional off-origin hosts ("offline: map blank") and says that what the user does in the panel goes to their
+  radio and is not seen or stored by 111.
+- v1 ships static panels plus the built-in Meshtastic shim; the generic reverse proxy (WebSocket/SSE) is specified but reserved.
 
 ### 6.7 Settings — `/settings` (Essentials; 5 rows) + `/settings/l0..l9` (advanced)
 Essentials: node name (alias, `PATCH /settings`) · mode (mirror) · identity backup (instruction
@@ -252,6 +300,11 @@ Layer pages: plain title first, `Layer N` second — Knowledge L0 · Install & u
 L2 · Intelligence L3 · Interface L4 · Messaging L5 · Transport L6 · Relay & presence L7 · Storage L8
 · Repairs L9. Each: one-paragraph description, the status fields that layer owns today (from
 `/status`), "configurable here (coming)", "Ask the agent". Structure only this cycle.
+
+> **Layer 5 delivers (D20, 2026-10-14):** `/settings/l5` "Messaging & Data" gets real rows (`os/messaging/README.md` §16): home hub
+> (the enrolled hub's card; enroll by QR or code) · "Let a node use this hub" (offer code, hub-role toggle, LAN listener) · custody
+> opt-in · store usage and quotas · export (a CLI instruction until the `age` export lands). Loopback-only rows are disabled over
+> LAN like Essentials; `POST /fabric/hub/offer` is loopback-only like `offer`.
 
 ### 6.8 Logs — `/logs` (advanced)
 Per-service tails (`GET /services/{id}/log?n=`), service tabs, follow (poll 5 s), copy. Daemon
@@ -286,6 +339,9 @@ reason, can_run_here, requires?, description, kb_entry?, embed_url?, detail{...}
 | `gateway` | Internet gateway | WAN probe 204 OK (every 60 s) | no internet (no setup action; `actions: []`) | — |
 | `codeagent` | Code agent (opencode) | hub category ∧ `opencode` on PATH | otherwise (`can_run_here=false` on non-hubs) | — |
 
+> **Amended by Layer 5 (D20, 2026-10-14):** the table gains the `fabric` and `meshtastic` rows, and the `radio` row's bound-rule
+> gains `meshmud` — see §7.2.
+
 `detail` carries the raw facts the panel renders (child state, ports, model id, transport_state,
 offer, kb sha/entries, radio ids, last probe). `actions` lists the registry actions the UI may
 offer; never identity material:
@@ -314,6 +370,23 @@ and forget-marks live in `<root>/state/devices.json` keyed by `id`. States: `con
 now) · `disconnected` (known, not present; kept until forgotten) · `needs_setup` (present, **no stack
 bound** — `driver.stack == null`) · `error` (present, bound stack in error, or the port exists but is
 unreadable). `driver` says what drives it ("Driven by: Mesh transport (RNode) / Meshtastic / nothing yet"). Snapshot published on the events bus as `devices` after a 2-tick debounce.
+
+### 7.2 Layer 5 amendments (D20, 2026-10-14) — services
+
+`ServiceId` grows by `fabric` ("Messaging") and `meshtastic`; the fixed-size registry arrays grow to 9
+(`os/messaging/README.md` §15, §14). Rules:
+
+| id | name | live when | unset when | error when |
+|---|---|---|---|---|
+| `fabric` | Messaging (`mesh111`, in-process) | the store is open ∧ (an enrolled hub is reachable ∨ this hub has ≥ 1 member or an attributed peer link) | the store is open but nothing is reachable: a hub with no members reads "waiting for the first node to enroll", a member "Set up with the agent" → enroll | store failure, or `store_full` |
+| `meshtastic` | Meshtastic (`child`: `meshmud` + the presence reader) | `meshmud` running ∧ the reader has produced a node DB | a Meshtastic board is identified but not bound ("Set up with the agent") | `meshmud` crash-loops, or the uplink is lost > 60 s |
+
+`meshtastic` `detail`: board, firmware version, nodes heard, channel utilization, panel state; actions `restart` (both children, the
+reader after `meshmud`) and `log`. **`radio` row rule:** `Facts.radio` gains `meshmud_bound: Vec<port>`; a board bound by `meshmud`
+counts as bound (`radio_bound_meshtastic`, detail "driven by meshmud"), so the `radio` and `meshtastic` rows never contradict.
+**`panel` object:** `ServiceRecord.panel = {id, port, entry, needs_secure_context, allow[], optional_hosts[], state} | null`
+(additive; `embed_url` is never set when `panel` is non-null; snapshots carry `panel.port`, never an origin). `GET /api/v1/panels`
+lists the declared panels and their slots.
 
 ## 8. Agent hand-off prompt (contract)
 
@@ -385,7 +458,7 @@ same prompts start *doing* instead of *telling* — the UI does not change.
 Errors: RFC-9457 `problem+json` `{type,title,status,detail,code,errors?[]}`; codes include
 `unauthenticated`, `lan_read_only` (unused in v1 but reserved), `agent_unavailable`,
 `model_unavailable`, `bad_request`, `not_found`, `rate_limited`, `loopback_only`,
-`already_decided`. `111d` normalizes the agent's plain-text 400/415/422 into this envelope.
+`already_decided`. `111d` normalizes the agent's plain-text 400/415/422 into this envelope. *[Layer 5 adds codes — §10.2.]*
 
 **Chat stream translation** (`111-agent` → UI): `{type:delta}` → `event: token {text}` ·
 `{type:tool_call}` → `event: tool {name}` · `{type:done}` → `event: done {conversation_id, reply,
@@ -398,7 +471,22 @@ of 256; `Last-Event-ID` → replay from the ring, else `event: reset` (client re
 `: keep-alive` every 15 s. Events: `status` (full `/status` snapshot, on change + every 30 s) ·
 `services` (full registry snapshot on change) · `devices` (full device registry snapshot on change) · `proposal` (`{id,title,kind,created_at}` on a new
 proposal file) · `agent` (pass-through of `111-agent /v1/agent/events` frames `{seq,ts,kind,detail}`,
-deduped on `seq`) · `reset`. Chat tokens are **not** on this stream (they ride the POST reply).
+deduped on `seq`) · `reset`. Chat tokens are **not** on this stream (they ride the POST reply). *[Layer 5 adds events — §10.2.]*
+
+### 10.2 Layer 5 amendments (D20, 2026-10-14) — contract growth
+
+Additive; binding form `api/openapi.yaml`, semantics in `os/messaging/README.md` §15.
+- **Routes** (under `/api/v1`): `GET /messages/threads` · `GET /messages/threads/{peer}` · `POST /messages` (202 `{id}`; stays `queued` until a path
+  exists) · `POST /messages/{id}/retry` · `GET|PATCH|DELETE /contacts[/{id}]` · `POST /contacts` · `GET /contacts/me/card` ·
+  `GET /fabric` · `POST /fabric/hub/enroll` · `POST /fabric/hub/offer` (loopback-only like `offer`) · `PATCH /fabric/settings` ·
+  `GET /nearby` · `GET /panels` · `POST /panels/{id}/session` · `POST /devices/{id}/identify` (consent flag in the body;
+  a held port answers `409 port_busy`).
+- **SSE** on the same `/events` stream (§10.1): `message` (state change, new message, request — coalesced per message per tick so a
+  16-fragment transfer never floods the 256-entry ring) · `contact` · `fabric` · `nearby` · `panels`.
+- **Enum growth:** `ServiceId` + `fabric`, `meshtastic` · `DeviceRecord.actions` + `identify` · `reason_code` + `store_full`,
+  `mailbox_full`, `waiting_for_key`, `hub_not_yours`, `port_busy` · `Problem.code` + `port_busy`, `panel_ticket_expired`,
+  `upstream_error`. Unknown enum values render as `unknown` (the U1b rule).
+- **Object:** `ServiceRecord.panel` (§7.2).
 
 ## 11. Auth (D15: token now)
 
@@ -434,6 +522,19 @@ deduped on `seq`) · `reset`. Chat tokens are **not** on this stream (they ride 
   toggle write the same file); `DASHBOARD_LAN` in the env file pins it (`Settings.lan_locked`,
   PATCH → `409 settings_locked`, the UI disables the toggle).
 - Deferred: TLS, per-session labels/revocation UI, `.111` DNS on hub/AP nodes.
+
+### 11.1 Layer 5 amendments (D20, 2026-10-14) — bearer token and `localhost`
+
+- **Bearer token** (`os/messaging/README.md` §17). `require_session` also accepts `Authorization: Bearer <token>` **from a loopback
+  peer only**; presented by a non-loopback peer it earns nothing and the session rules above apply. The token is the per-spawn
+  `AGENT111_DAEMON_TOKEN` that `111d` mints into `111-agent`'s environment, beside the existing `AGENT111_*`; the agent uses it to
+  reach `/api/v1` on loopback. **Loopback trust is never reopened:** under Termux (D16 a — every app shares loopback) loopback peers
+  still need a session; the token is a secret in the child's environment, not a loopback skip. Agent writes still go only through
+  proposals.
+- **`localhost` → `127.0.0.1`** (`os/messaging/README.md` §13). The main dashboard listener answers `Host: localhost` with a **308**
+  to the same path on `127.0.0.1` (`[::1]` is matched bracketed), so panels never see `localhost`: the same host with a different
+  port is same-site, so the frame, the ticket swap and same-origin fetches pass. The allowlist above is unchanged for the main
+  listener; a panel listener matches its Host exactly against the dashboard's accepted host list **minus `localhost`**.
 
 ## 12. Install → dashboard
 
@@ -485,4 +586,4 @@ Messaging (L5) · peers/transports/bridges/gateway detail panels (L6/L7) · stor
 automatic proposal application (L9 consumes `decisions/`) · per-layer settings panels · TLS ·
 `.111` DNS on hub/AP · Cmd-K palette (action registry seam exists) · e2e browser tests · i18n
 (logical properties in place) · PWA · identity backed-up marker (Layer 2 amendment) · Meshtastic
-native control panel beyond status (needs meshtasticd API work in Layer 6).
+native control panel beyond status (needs meshtasticd API work in Layer 6). *[Layer 5 (D20) delivers Messaging (§6.5) and hosts the Meshtastic web client as a panel (§6.6); Nearby radar/map stay Layer 7.]*

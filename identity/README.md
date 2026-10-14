@@ -4,6 +4,9 @@ Every node's cryptographic self: how a node's identity is generated, stored, use
 
 Status of this document: **spec v2.1 — LOCKED** (v2.1 = v2 + one §3 amendment, 2026-10-14: A and R MUST be torsion-free — owner decision, closes the T9 F3 mixed-order residual; decisions: `os/plan/DECISIONS.md` D13 + D14 lock amendments incl. three user calls at lock; panel triage: `os/plan/layer-2-review.md` — 4 judges, 71 raw findings, all gating items resolved in v2; options brief: `os/plan/layer-2-options.md`; research: 8-agent sweep `wf_73d7f290-f74`, 2026-10-12).
 
+**Layer 5 amendments (D20, 2026-10-14):** A1–A4 and A6–A11 are recorded additively in §13.1; the locked text is unchanged and
+carries a one-line pointer wherever a sentence is superseded (§6.2–§6.5, §8.4, §10, §13). A5 is asked later (§15).
+
 The keywords **MUST / MUST NOT / SHOULD / MAY** are normative (RFC 2119).
 
 ## 1. Scope & non-goals
@@ -95,11 +98,17 @@ The signature input is the ASCII domain tag `"111/announce/v1"` prepended to the
 
 Base 137B, max 169B — the lean ~100–170B class (MeshCore advert ≈ 100B; Reticulum announce ≈ 167B). Verification rules: the signature **MUST** verify under the §3 strict predicate before any state change (real nostr clients were caught skipping verification — EuroS&P 2025 forgery demos); `counter` **MUST** exceed the last-seen value for that NodeId (stale ⇒ drop); conflicting key material for a pinned NodeId ⇒ reject (§6.3). An announce carrying the receiver's **own** NodeId MUST NOT be pinned and MUST surface a distinct **identity-collision** error state (dashboard/`/api/status`) — two live nodes on one mnemonic is the §8.4 duplicate case, and the remedy is there.
 
+> **Amended by Layer 5 (A6, A8; §13.1):** "stale ⇒ drop" does not apply to an announce with identical key material (accepted
+> with no state change); the `appdata` v1 layout is pinned in §13.1.
+
 ### 6.3 Key distribution — TOFU + immutable key material, bounded store
 
 Keys distribute exclusively via signed announces; there is no registry. The pinning store holds `{sign_pubkey, enc_pubkey, highest_announce_counter, receive_window}` per peer (no redundant `node_id` field — it IS `sign_pubkey` under B2; ≈80–130B per peer). First-seen pins. **Pinned key material is immutable while held**: any announce presenting different key material for a known NodeId is rejected (Meshtastic CVE-2025-55293: NodeInfo packets could overwrite an established contact key). The store carries no wall-clock fields.
 
 Immutability binds **key material**, not **retention** (panel seams#6): the store is **bounded** — v1 default cap 256 peers (≈33KB flash — trivial on ESP32-S3), LRU eviction permitted. This is safe under B2 because NodeId = the public key itself: no attacker can impersonate an evicted NodeId, and re-appearance re-pins only the true key holder's material. Per-interface announce rate limits are handed to L6/7 (§13) — they gate mesh bandwidth, not store integrity.
+
+> **Amended by Layer 5 (A7; §13.1):** for user-added peers the Layer 5 `contacts` table is authoritative and this 256-entry
+> pin store is a cache of it.
 
 ### 6.4 Traffic protection — per-packet ephemeral X25519 + AEAD
 
@@ -118,11 +127,19 @@ This is a **project-pinned composition** of audited primitives — **NOT wire-co
 - The sender's NodeId **MUST** travel **inside** the ciphertext. A sealed box authenticates the channel, never authorship (either endpoint could have produced it); non-repudiation, if ever wanted, is a Layer-5 inner signature — MAC auth **MUST NOT** be presented as proof of authorship.
 - **Crypto-mode registry (panel complete#3):** `crypto_mode` `0x01` = the construction above, pinned here. Future modes are append-only and may never weaken below 0x01's bar; the registry is owned by this layer (L2), the envelope `version` field by L5, and changes to either require identity-layer sign-off (§13). Receivers **MUST** reject unknown or weaker-than-expected modes (Meshtastic CVE-2025-53627: silent PKI→legacy downgrade displayed as "encrypted"). No legacy mode exists in v1; none may ever be added silently.
 
+> **Amended by Layer 5 (A1, A2, A4; §13.1):** the AD is the sealed packet's own header only (the Layer 6 shim byte is outside
+> it); the inner layout is caller-owned, so the "sender's NodeId MUST travel inside the ciphertext" rule above is relaxed for Layer 5 — the full NodeId travels only inside an INTRO card, and the sender is authenticated by the pair_mac instead
+> traffic by `sender_ref(4)` plus an always-present `pair_mac` — the 32 B inner-NodeId form is a pre-release gate only.
+
 ### 6.5 Replay protection — counters, not clocks
 
 Per-peer **persistent 64-bit counter** carried in AEAD associated data (§6.4) + a **32-entry sliding acceptance window** (LoRaWAN/IPsec class; Briar confirms 32-entry windows at mesh scale). No wall-clock anywhere. Flash-wear rule (per-packet traffic counters only — the announce counter is §6.2's sync-commit rule): receive windows and send counters are **batch-committed** every N packets and on clean shutdown. After an unclean reboot, **both** sides apply a conservative forward jump with **J ≥ N** (send-side counter and receive-side high-water alike — panel crypto#7/seams#1): send-side jumps past any uncommitted emission, receive-side accepts the resulting gap harmlessly (a jump only advances the window). Residuals, stated honestly: counters do not stop delay-and-replay of still-valid frames, and a receiver's stale-by-≤N persisted window can re-accept already-consumed frames after unclean reboot — content-level idempotency (message IDs) covers both and is handed to Layer 5 (§13), with a §14 negative test.
 
 Counter state (announce counter + per-peer traffic counters/windows) is **protocol state, not secret**: it lives in the identity dir as `counters` (§13) / the Cat-1 NVS map, batch-committed as above. Restore semantics for a state-absent recovery are §8.4's.
+
+> **Amended by Layer 5 (A11; §13.1):** for kinds that carry a `msg_seq` the 32-entry window is not enforced below high-water;
+> replay authority is Layer 5's receive state, every packet is still offered to the window, and its fresh/stale verdict gates
+> attribution.
 
 ### 6.6 Online link upgrades
 
@@ -176,6 +193,9 @@ Two timings, by category (panel seams#4/complete#18 — the gate never blocks no
 - **State absent** (words-only disaster recovery): the node MUST NOT announce until a counter floor is set — learned from mesh-gossiped copies of its own prior announces where a mesh exists, else an operator-supplied floor, else 0 only for a never-before-deployed identity. It then sets `counter = floor + 1024` (safety margin; over-jumping is harmless — gaps only advance windows) and applies the same jump to per-peer traffic send-counters on new sessions. Restore→re-announce and restore→send conformance vectors: §14.
 - **Old-instance retirement:** the ceremony MUST instruct retiring/quarantining the old instance and MUST refuse to proceed until the operator confirms — two live instances on one keyset produce diverging counters and flapping announces fleet-wide (§6.2's rule reads each side stale after the other). If the old device powers back on anyway, §6.2's identity-collision state surfaces it.
 
+> **Amended by Layer 5 (A3; §13.1):** a restore floor set since the last run forces a new `msg_seq` epoch, and while the
+> identity holder reports `RestoreFloorRequired` Layer 5 seals nothing (outbox items stay `queued`, reason `restore_pending`).
+
 **Compromise & loss runbook (rotation/revocation stay deferred):** a compromised mnemonic's only remedy is a **burn**: new mnemonic, new NodeId (old pins rot at peers; the new NodeId is simply a new peer; §10's attestation lineage is the designed future). Identity lost without backup is **unrecoverable by design** — stated plainly.
 
 **Layer-1 migration (D9-format dirs):** on first run of the L2-wired binary against a provisional identity dir, a dedicated migration path reads the preserved `mnemonic` file, derives the L2 keyset (same words, new derivation — the NodeId changes once, pre-accepted D9/D13), writes the new-format files (§13), quarantines the legacy `secret.hex`/`npub`, and logs the old→new NodeId mapping. Reinstall is the alternative for throwaway dev nodes.
@@ -211,6 +231,9 @@ Node identity is transport-independent. Any global-transport credential (a nostr
 - **This machinery is the designed future rotation/revocation path** (the AT-proto rotation-key lesson, minus the registry): a rotation is a new attestation binding a successor key — and under B2 **rotation is key succession**: the successor key is a **new NodeId**, pinned fresh under §6.3 first-seen rules, with the old key's attestation providing verifiable lineage. A stable identifier across rotation is explicitly **NOT** provided under B2 (accepted with the user's B2 pick). Rotation itself stays deferred (§15) — the format is what ships.
 - Hard rules: a transport key **MUST NOT** share seed material with the node key — no common seed, no shared derivation branch (compromise cascade; F2 rejected) · a transport credential is **never** the root identity (nostr keys have zero lifecycle: no rotation, revocation, or recovery; five migration PRs unmerged since 2024) · **NIP-05 is never load-bearing** (requires DNS+HTTPS — dead air-gapped; it identifies, never verifies) · **NIP-26 is never load-bearing** (deprecated upstream) · presence/heartbeat publication uses per-purpose transport keys — a stable public key publicly tracks the node's timeline.
 - This layer defines the **format only**; Layer 7 decides transports and gateway publication policy.
+
+> **Amended by Layer 5 (A10; §13.1):** `transport_id` gains entries for bridge identities; a 64 B Reticulum key binds by hash;
+> link keys are never seed-derived.
 
 ## 11. Audit & the proven path (G1)
 
@@ -271,10 +294,84 @@ Plus two written residuals outside the table: **recipient-side harvest-now-decry
   - **`111id` module scope (normative — the v1 build deliverable, D13 H1 + panel embedded#7):** keygen · sign/verify (strict predicate, §3) · X25519 ECDH (all-zero abort) · sealed-packet construction (§6.4) · announce encode/verify · pinning store + counter state · backup/restore/migrate · attestation encode/verify · encodings (hex/bech32/label) · commission support. The host-side **Monocypher C vector/smoke harness** is an explicit deliverable alongside (it feeds §14's agreement gate and §11's smoke-test evidence).
 - **Layer 3 (Local Intelligence) consumes:** the E1 hook (§9) and the recorded signer-daemon + default-deny policy-engine pattern; in v1 the agent holds zero key material and requests signatures from the identity holder (`111id` core in the `111d` world). The signer IPC (socket path, request schema, policy-engine ownership) is Layer 3's to spec.
 - **Layer 4 (Interface) displays:** the §7 operator label (10 base32 chars, `xxxx-xxxx-xx`) + editable local alias, and the identity-backup action surface (CLI instruction only under the HTTP-never rule) plus the identity error states incl. identity-collision. Label and alias are display-only — never auth. Delivered 2026-10-13: the dashboard shows `node.label`, `node.bech32`, the editable local alias (`state/settings.json`), and the backup instruction card (CLI only). A non-secret 'backed up' marker remains a Layer 2 amendment (dashboard shows 'unknown — run the CLI' until then).
-- **Layer 5 (Messaging & Data) owns the full envelope.** Contracted identity hooks (§6.7): `signer_pubkey`, the delegation trailer (v1: absent; non-empty ⇒ reject), ratchet-field space (size pinned by L5 at envelope lock). Also handed to L5: authorship/non-repudiation (inner signatures if wanted), content message-ID idempotency (the §6.5 delay-and-replay + rollback residuals), and group/broadcast key distribution (never static-static on node keys). Announces are L2 artifacts, not L5 envelopes. Every future L5 signed artifact carries its own domain tag (§6.1).
-- **Layers 6/7 (Transport / Relay & Presence) — open questions handed over, not decided here:** Cat-1 relay announce-verification policy (verify-before-relay vs relay-blind; Ed25519 verify is Cat-1-feasible) · announce-as-routing vs announce-as-identity-only (the biggest cross-layer question the wire shape forces) · announce rate-limit policy (Reticulum caps ~2% interface bandwidth — announce flooding is the registry-free tax) · attestation gossip and gateway publication (§10) · the **mesh-epoch source** that §9/§10 expiries count in (v1 fail-mode pinned in §6.7: undefined ⇒ not evaluated, non-empty trailers rejected). `appdata` is 0–32B and versioned — the stated escape if L6/7's routing data outgrows it; transport-mutable data (hop counts) rides outside L2's signed blob. Safe to defer: v1 emits no announces at all (Layer 1's transport child has independent identity), so these gate L6/7's start, not v1's deployment.
+- **Layer 5 (Messaging & Data) owns the full envelope.** Contracted identity hooks (§6.7): `signer_pubkey`, the delegation trailer (v1: absent; non-empty ⇒ reject), ratchet-field space (size pinned by L5 at envelope lock). Also handed to L5: authorship/non-repudiation (inner signatures if wanted), content message-ID idempotency (the §6.5 delay-and-replay + rollback residuals), and group/broadcast key distribution (never static-static on node keys). Announces are L2 artifacts, not L5 envelopes. Every future L5 signed artifact carries its own domain tag (§6.1). *[Layer 5 is locked at `os/messaging/README.md` v1.2 (D20); its identity-side asks are recorded in §13.1.]*
+- **Layers 6/7 (Transport / Relay & Presence) — open questions handed over, not decided here:** Cat-1 relay announce-verification policy (verify-before-relay vs relay-blind; Ed25519 verify is Cat-1-feasible) · announce-as-routing vs announce-as-identity-only (the biggest cross-layer question the wire shape forces) · announce rate-limit policy (Reticulum caps ~2% interface bandwidth — announce flooding is the registry-free tax) · attestation gossip and gateway publication (§10) · the **mesh-epoch source** that §9/§10 expiries count in (v1 fail-mode pinned in §6.7: undefined ⇒ not evaluated, non-empty trailers rejected). `appdata` is 0–32B and versioned — the stated escape if L6/7's routing data outgrows it; transport-mutable data (hop counts) rides outside L2's signed blob. Safe to defer: v1 emits no announces at all (Layer 1's transport child has independent identity), so these gate L6/7's start, not v1's deployment. *[Superseded in part by Layer 5 A6, §13.1: v1 emits announces on demand — in a card, on link-up, inside an INTRO — and none unsolicited or periodic.]*
 - **Layer 0 (Knowledge):** receives the §16 entries at build.
 - **Cross-layer connection check:** the 20-item checklist this spec must be re-verified against when sibling layers land lives in `os/plan/layer-2-review.md`.
+
+### 13.1 Layer 5 amendments (D20, 2026-10-14)
+
+Requested by Layer 5 (`os/messaging/README.md` §19, locked v1.2) and landed as `id111` code (task I1) plus this text (task C5).
+Additive: the locked text above is unchanged and the Cat-1 harness vectors are untouched. A5 is asked later (§15).
+
+**A1 — AD scope (§6.4 step 4).** The AD is the sealed packet's own cleartext header, byte-exact:
+`version ‖ crypto_mode ‖ counter ‖ extra_len ‖ extra`. The Layer 6 shim byte (frame type, hop limit) sits outside the sealed
+packet, is mutable in transit and is never in the AD (messaging §3).
+
+**A2 — caller-owned inner layout (§6.4).** The sealed-packet construction is unchanged; the plaintext layout belongs to the
+caller: `seal_payload` / `open_payload` carry no inner NodeId. Layer 5's layout is `sender_ref(4)` (sender NodeId[0..4], resolved
+against contacts) ‖ `kind` ‖ `flags` ‖ `msg_seq` ‖ … ‖ `pair_mac(16)`; the full NodeId travels only inside an INTRO card. The sender is
+authenticated by Layer 5's `pair_mac`, always present and verified before any replay state is touched — this closes the Noise-"N"
+sender gap. §12 rule 12 holds: the pair key (a static-static ECDH run behind the identity handle; only the derived 32 B MAC key
+crosses, cached per contact and zeroized on forget) authenticates and never protects confidentiality. §12 rule 13 holds:
+`pair_mac` is deniable; authorship is the optional `sig` of SIGNED classes. The 32 B inner-NodeId form (`seal` / `open`) is a
+pre-release gate for the Cat-1 harness only, removed before the first signed release — one wire per version.
+
+**A3 — `msg_seq` epochs (§6.2, §8.4).** `msg_seq` is `epoch(varint) ‖ n(varint)`. The epoch is a freshly committed
+announce-counter value (`next_announce_counter()`, the §6.2 fsync rule), minted once per store open and shared by every stream
+started in that run, when: the clean-shutdown record is absent · the recorded `announce_last` differs from the live identity's · a
+restore floor was set since the last run (§8.4) · `n` would wrap 2^32. So a crashed sender never reuses a number for new content, a
+`store.db` restored onto a live identity gets a new epoch, and a second words-only restore never collides with the first. A minted
+epoch consumes an announce-counter value without emitting an announce. While the identity holder reports `RestoreFloorRequired`,
+nothing is sealed (messaging §4).
+
+**A4 — domain tags (§6.1).** Registered here; each tag leads its input, and each input is pinned:
+
+| Tag | Construction and input (`dest` = recipient NodeId for 1:1 kinds, `group_id` for group posts, 32 zero bytes for public classes) |
+|---|---|
+| `111/pair/v1` | `key = BLAKE2b-256(tag ‖ X25519(sender_enc_sk, recipient_enc_pk) ‖ sender_enc_pk ‖ recipient_enc_pk)`; `pair_mac = BLAKE2b-128(key, L2 header ‖ epk ‖ inner bytes before auth)` |
+| `111/msg/v1` | Ed25519 over `tag ‖ sender NodeId ‖ dest ‖ stream ‖ msg_seq ‖ kind ‖ flags ‖ BLAKE2b-256(payload)` |
+| `111/ack-sig/v1` | Ed25519 over `tag ‖ acker ‖ sender ‖ stream ‖ ack block bytes` |
+| `111/custody/v1` | `pkt_ref = BLAKE2b-128(tag ‖ exact sealed bytes of the item)` |
+| `111/custody-sig/v1` | Ed25519 over `tag ‖ hub ‖ dest ‖ status ‖ custody_seq ‖ pkt_ref` |
+| `111/enroll/v1` | `BLAKE2b-128(key = code_secret, data = tag ‖ member NodeId ‖ code)` |
+| `111/store/v1` | the `store_key` KDF input (A9) |
+| `111/obj/v1` | Ed25519 over `tag ‖ publisher ‖ hash ‖ size ‖ class` (public object adverts) |
+
+**A6 — announces on demand (§6.2, §13).** v1 emits no *unsolicited or periodic* announces; announces on demand are allowed — in a
+card, on link-up, inside an INTRO. Stale rule: an announce with the same key material and a counter ≤ the stored one is accepted with
+no state change (`PinStore::apply_announce` ⇒ `Ok(Unchanged)`, not `StaleCounter`); only a key conflict or a bad signature drops.
+Card requests are answered from **stored announce bytes**, never minted. This supersedes §13's "v1 emits no announces at all".
+
+**A7 — contacts authoritative (§6.3).** Layer 5's `contacts` table is authoritative for user-added peers; the 256-entry pin store is
+a cache of it. LRU eviction from the cache loses no peer, and unauthenticated announces that churn it are harmless. Immutability of
+key material (§6.3) is unchanged and binds both.
+
+**A8 — `appdata` v1 (§6.2).** `[ver=1][roles u16 LE][reserved]`: bit 0 mailbox (accepts custody) · bit 1 always-on hub · bit 2
+LoRa-attached; optionally an 8 B truncated home-hub id (a locator only). Layer 7 appends TLVs after v1; transport-mutable data still
+never rides in the signed blob.
+
+**A9 — store key (§5; messaging §10.2).** Mode S:
+`store_key = BLAKE2b-256(key = keyset-derived secret, data = "111/store/v1" ‖ NodeId)` — keyed BLAKE2b as the KDF with info
+`111/store/v1`, the same primitive family as §6.4: no second hash family, and not HKDF-SHA256 (D20 c). 32 B, computed behind the
+identity handle, handed to the store as a raw key, never written to disk; a DB copied elsewhere opens again after
+restore-from-words. Mode T (Cat 4 with TPM2 / SE050B) is a random 32 B key sealed in hardware (§5: the
+TPM holds the *storage* key, never the keyset); Mode S is its recovery path. A test vector is frozen with the store implementation
+(messaging tasks C3 / gate G4).
+
+**A10 — attestation registry (§10).** `transport_id` (registry owned here) gains entries for **bridge identities**: one bridge
+identity per foreign network, bound to the node by the §10 bidirectional attestation (messaging §8). A 64 B Reticulum key does not
+fit the 32 B `transport_key` field, so it is bound by hash. The `transport_id` values and the hash are assigned when a bridge
+lands (Layer 6/7; there is no bridge this cycle). Link keys for online links (§6.6) are random, bound by attestation, **never
+seed-derived** (F2 stays rejected) and never the identity key (§6.1). No Reticulum code is imported (D17 #12).
+
+**A11 — replay authority for `msg_seq` kinds (§6.5).** Under store-and-forward a custody item can arrive hundreds of counters behind
+a direct-path packet, so for kinds carrying `msg_seq` the 32-entry window is **not enforced below high-water**; replay protection is
+Layer 5's receive state (messaging §4) — the content-level idempotency §6.5 hands to Layer 5. Bookkeeping is unchanged: **every
+verified packet is still offered to the window** (`CounterStore::observe_counter`, high-water advanced) and processed for content
+whatever the verdict. The window's fresh/stale verdict gates *attribution* of a connection, card answers and proactive pushes; a
+replayed packet verifies but is never fresh. Control kinds (`msg_seq = 0`) are idempotent. Only a `pair_mac`-verified packet keys
+replay state; a valid `sig` never does. TLV `0x21` is reserved for `signer_pubkey` (§6.7).
 
 ## 14. Test vectors & conformance
 
@@ -297,6 +394,12 @@ All vectors live in `os/identity/test-vectors/` at build. Conformance gates:
 
 Full ratcheting (envelope version-space reserved; Reticulum per-destination ratchet lineage — NOT a Signal port; Signal-class prekey servers have no registry-free offline role) · EDHOC for constrained online handshakes (5+ formal-verification studies, young deployment — watch) · hybrid PQ KEM field space (Cat 2+ only; ML-KEM ~1–2KB cannot fit LoRa frames) · the B2 PQ-migration corner (raw-32B addressing hardcodes key size — accepted with the user's B2 pick) · UCAN/Biscuit adoption (unaudited, moving; scope-vocabulary alignment now) · phase-2 backup builds: recipient-mode encrypted export, SSKR guardian split (§8.5); operator-recovery-key export variant (§8.5) · BIP-85 child-secret subtree (reserved) · BIP-39 passphrase expert option (if ever: confirm-at-creation + NFKC mandatory) · bc-ur animated QRs (only if payloads exceed ~400B) · NIP-46 as agent↔signer IPC (only if nostr lands at Layer 7) · human key-verification UX + petnames (human-identity layer) · FROST threshold futures (drafts exist for both curves) · did:key interop shim (mintable from our pubkey anytime — free) · commissioned-audit procurement (NLnet-style; the §11 `proven` path) · Noise-implementation audit procurement (§11) · ESP32-S3 VFI/glitch-detector silicon-revision check · nRF5340-vs-nRF52840 TF-M ITS tradeoff · Cat-1 relay announce-verification policy and announce-as-routing vs identity-only (handed to L6/7, §13) · per-peer state budget refinement at the Cat-1-owning layer (v1 default: 256-peer cap, §6.3) · on-device Monocypher benchmark firmware (ESP32-S3 @240MHz Xtensa, nRF52840 @64MHz — published ms figures are cross-chip extrapolations) · the C/Monocypher Cat-1 core build itself (D13 H1: deferred-but-pinned until a layer owns ESP32 firmware; §14 vectors pre-determine it) · **commissioning channel protocol bytes** (channel minimums + ownership pinned in §8.3; byte-level protocol spec'd when Cat-1 firmware lands; owner: `111` CLI per D14) · LoRaWAN-style short-counter wire optimization (§6.4's honest 56B) · known-weak blocklist population path (empty in v1; manifest-distributed, §4.5) · agent-cert restore policy (certs disposable — re-issued post-restore, never re-derived) · SLIP-44/HRP registry collision re-checks as standing build gates (§2/§7 results recorded at build) · mesh-epoch source + expiry exercisability (Layer 7) · key rotation + compromised-key revocation as operational features (the whole deferred lifecycle phase — the machinery is §10, the activation is a future soft upgrade).
 
+**Layer 5 amendments (D20, 2026-10-14) — deferred additions:** A5 crypto-mode `0x02` (static-static folded into the KDF, the
+16 B saver) and the carve-out that hash-verified chunk frames of public or already-encrypted objects may travel unsealed on
+broadcast bearers — asked in v1.1, with identity-layer sign-off (§6.4) · rolling recipient ratchets (the RATCHET flag bit and ext
+TLV `0x10` are reserved by Layer 5) · removal of the 32 B inner-NodeId `seal` / `open` before the first signed release (A2) ·
+`transport_id` values and the hash for bridge identities (A10) · online Noise IK / TLS-RPK links (Layer 6).
+
 ## 16. KB adoption list (entries written at build)
 
 All enter `candidate` per D13 H1 (desk-research cap); Monocypher fast-tracks to `testing`. Existing seed entries (`meshtastic`, `reticulum`) are cross-linked/updated, not duplicated.
@@ -317,5 +420,9 @@ All enter `candidate` per D13 H1 (desk-research cap); Monocypher fast-tracks to 
 | `meshcore` | case study | `candidate` (verify license at drafting — research conflicted GPL-3.0/MIT) |
 | `iroh-nodeid` | case study | `candidate` (raw-pubkey NodeId proven at 200M+ endpoints) |
 | `briar-bramble` | case study | `candidate` (cited normatively in §6.5/§12; partial audits 2017/2023 noted) |
+
+**Layer 5 amendments (D20, 2026-10-14):** the table above is unchanged. Layer 5 writes its own entries at build (`os/messaging/README.md`
+§22) and updates the seed entries this list already cross-links — `meshtastic`, `reticulum` — plus `meshcore` (KISS modem,
+`GRP_DATA` flood, repeater as Cat-1).
 
 Build tasks: `os/identity/TASKS.md` (created at build start per `os/plan/EXECUTION.md`).

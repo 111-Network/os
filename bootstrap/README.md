@@ -119,6 +119,8 @@ Identity is Layer 2's contract, locked at `os/identity/README.md` v2 (D13/D14); 
 
 Provisioning host: downloads `~/.cache/111`; maintenance keys `~/.local/share/111/keys` 0600.
 
+> **Amended by Layer 5 (D20, 2026-10-14):** the writable tree gains `fabric/` and panel state files — see "Layer 5 amendments" below.
+
 ## Supervision
 
 **Linux** — `/etc/systemd/system/111node.service`: `Type=notify` · `User=node111` + `SupplementaryGroups=dialout|uucp` (getent-detected) · `AmbientCapabilities=CAP_NET_ADMIN CAP_NET_RAW CAP_NET_BIND_SERVICE` (= bounding set; **stripped in the degraded container drop-in**) · `NoNewPrivileges=true` · `ProtectSystem=strict` (StateDirectory=111 keeps `/var/lib/111` writable — the ONLY writable tree; updates stage/flip inside it) · `ProtectHome=true` `PrivateTmp=true` · `PrivateDevices=false` (LoRa hotplug) · `Restart=always` `RestartSec=5` · **`StartLimitIntervalSec=0`** (never give up permanently; bad releases are handled by probation, not burst caps) · `WatchdogSec=30` — the daemon heartbeats `WATCHDOG=1` ≤15s **unconditionally from a dedicated task** (health gates the dashboard/API, never the heartbeat); update windows extend the watchdog via `sd_notify WATCHDOG_USEC=` and restore after READY=1 · `After=network.target` only · `LogNamespace=111node` (100M cap on the namespace — no host-global journald mutation) · `ExecStartPre=+/usr/local/bin/111 update-guard` (root-prefixed: before every start, if a probation journal is pending and its deadline passed without confirmed health, flip `current` back and clear the failed state — the node can never be permanently dead on a bad release) · companion root units: `111node-update.path` (watches `state/*-request.json`) triggering oneshot `111node-update.service` (`111 update-helper` — the ONLY actor that promotes staged payloads into `releases/`, flips `current`, and writes journal/floor) · udev rule `ID_MM_DEVICE_IGNORE` for known LoRa IDs (+ brltty conflict documented). No sudoers, no polkit. Layer 9 self-restart primitive: voluntary `exit(0)`.
@@ -183,8 +185,34 @@ macOS/Windows (node and provisioning host) · ESP32/LoRa relays · manual Termux
 6. Phone (V1-passing device, PIN set): command → dashboard reachable via `adb forward`, sshd maintenance works on a fresh LAN, node starts after reboot+unlock, uninstall --phone tears down.
 7. Offline after install (WAN pulled): node runs, dashboard serves, KB snapshot present + integrity-verified at `current/share/kb/`, transport intact (rns rebuilds from cache if the venv is torn).
 
+## Layer 5 amendments (D20, 2026-10-14)
+
+Additive (`os/messaging/README.md` §2, §14, §19); the locked text above is unchanged. Dependency sign-offs and the manifest rows are
+recorded in `bootstrap/TASKS.md` at build (Layer 5 task B1).
+
+- **Ports.** `11183` fabric `tcp-lan` (LAN-bound only when the node acts as a hub or LAN sharing is on; loopback is never a peer) ·
+  `11190–11229` panel listeners, one per enabled panel, bound where the dashboard is bound · `11230` the `meshmud` TCP downlink
+  (loopback; no HTTP downlink is configured). Beside the existing `11180` / `11181` / `11182`.
+- **State** under `/var/lib/111`, still the only writable tree (owner `node111`): `fabric/store.db` (SQLCipher, 0600) ·
+  `fabric/blobs/<blake3>/` (0700) · `fabric/presence/meshtastic.json` (0644 within 0700) · `state/panels.json` (slot assignments) ·
+  `state/panel-sessions.json` (0600) · `state/devices.json` gains the Meshtastic binding (Layer 6 migrates it into `interfaces.toml`
+  when that file is born) · the presence venv under `venvs/`. `fabric/` is created at runtime, like `agent/`.
+- **Supervision.** `meshmud` and `meshtastic-presence` are supervised children of `111d` exactly like `rnsd` and `111-agent`
+  (`supervise.rs` `ChildSpec`, back-off, restart route); the fabric itself runs in-process.
+- **CLI verbs.** `111 fabric offer|enroll|status` join the subcommand set (Architecture).
+- **Dependencies** (sign-off recorded in `bootstrap/TASKS.md` at build, per its Dependency policy): `rusqlite` / `libsqlite3-sys`
+  (`bundled-sqlcipher-vendored-openssl`), `blake3`, `bao-tree`, `ciborium`. `scripts/check.sh` builds SQLCipher for both musl targets.
+- **Manifest entries** (signed channel manifest; nothing downloads at runtime): the `meshmud` binaries (CI-built from the pinned
+  upstream tarball, never copied into `os/`, conveyed as GPL-3.0) · the Meshtastic web bundle (CI-built from the pinned tag when
+  upstream ships no complete asset; unpacked from the hash-pinned release payload to `panels/meshtastic-web`) · the presence venv lock
+  (hash-locked, like `rns-lock.txt`). `gen-notices.py` gains a Go path and the GPL source offers name the pinned tags.
+- **`AGENT111_DAEMON_TOKEN`.** `111d` mints a per-spawn bearer token into `111-agent`'s environment, beside `AGENT111_*`;
+  `require_session` accepts it from a loopback peer only (`os/interface/README.md` §11.1).
+- **Updater intake (seam).** The updater gains an intake path for a staged payload at `fabric/blobs/<hash>`, verified by the same
+  minisign manifest — Layer 1's manifest stays the trust root; the wire transfer that fills it arrives in v1.1.
+
 ## Seams for later layers
 
-Layer 2: identity seam contract delivered — `os/identity/README.md` v2 (§Identity above) · Layer 3: offer hook (`state/offer.json` + dashboard element + `/api/status` field) + hub-offload endpoint · Layer 4: delivered — dashboard surface/port/auth + `/api/v1` (see `os/interface/README.md`) · Layer 5/6: rnsd child → real transport management (`/var/lib/111/rns`, config schema-version, netlink trigger, `transport_state` enum), radio table · Layer 7: gateway re-evaluation, KB git-sync, manifest gossip · Layer 9: supervision-tree handles, `/health` contract, exit(0)-restart, watchdog heartbeat, per-OEM phone watchdog channel.
+Layer 2: identity seam contract delivered — `os/identity/README.md` v2 (§Identity above) · Layer 3: offer hook (`state/offer.json` + dashboard element + `/api/status` field) + hub-offload endpoint · Layer 4: delivered — dashboard surface/port/auth + `/api/v1` (see `os/interface/README.md`) · Layer 5/6: rnsd child → real transport management (`/var/lib/111/rns`, config schema-version, netlink trigger, `transport_state` enum), radio table · Layer 7: gateway re-evaluation, KB git-sync, manifest gossip · Layer 9: supervision-tree handles, `/health` contract, exit(0)-restart, watchdog heartbeat, per-OEM phone watchdog channel. *[Layer 5 (D20): delivered as the amendments above — ports, `fabric/` state, `111 fabric` verbs, dependencies, manifest entries, token, updater intake.]*
 
 Build tasks: `os/bootstrap/TASKS.md` (created at build start per `os/plan/EXECUTION.md`).
