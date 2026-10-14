@@ -13,7 +13,7 @@ License 1.1; the license texts ship next to the files and are copied into `dist/
 | Licenses | `LICENSE-geist.txt` (4368), `LICENSE-silkscreen.txt` (4394) | | | OFL 1.1 texts. |
 
 Total font payload if every face loads: 105124 bytes (woff2 is already compressed, so this is also the
-transfer size). Fonts are not counted in the 200 KB JS+CSS budget; `pnpm budget` lists them separately.
+transfer size). Fonts are not counted in the JS+CSS budgets (256 KB eager + 256 KB lazy, D21); `pnpm budget` lists them separately.
 
 ## Provenance
 

@@ -208,6 +208,22 @@ ADR-lite. Every decision, its rejected alternatives, and why. Newest last; never
 - **Rejected:** nothing in triage — every panel and re-check finding was accepted, four with lead modifications recorded in `layer-5-review.md`.
 - **Why:** both passes found the architecture right and the defects textual (unbuildable receipt formats, a replay-attribution hole, an epoch rule that re-opened the custody-loss case, a `localhost` corner); fixing in place keeps every D19 decision intact and the contract additive, and the four scope cuts remove the only pieces no gate would have exercised this cycle.
 
+## D21 — UI bundle budget amended: 256 KB eager + lazy buckets
+
+- **Date:** 2026-10-14
+- **Decision (owner, polled after Wave 1 U1):** "raise to 256 and add lazy buckets". Encoded by the lead as **two budgets
+  of 256 KB gzip each** — *eager* (the first-paint download: entry script + every `modulepreload` + every `.css`) and *lazy*
+  (every chunk `index.html` neither loads nor preloads: the view routes, jsQR, the notices page) — plus a **64 KB cap per
+  lazy chunk**. `interface/ui/scripts/check-budget.mjs` classifies by reading `dist/index.html`; the grand total is printed
+  for information only. Measured at the decision: eager 101.2 KB · lazy 154.2 KB (largest chunks jsQR 47.2, notices 34.1).
+- **Lead detail, reversible:** the per-bucket reading (rather than 256 KB grand total) is the lead's; a grand-total cap
+  would have passed with 0.6 KB to spare and tripped again on Wave 2's three views. The 64 KB per-chunk cap is the lead's
+  guard. Either can be changed with a one-line edit to the gate.
+- **Rejected:** patching jsQR's Kanji table out (a dependency patch to maintain; the cap moves again next wave anyway) ·
+  dropping jsQR for the browser `BarcodeDetector` (Chrome/Android only) · keeping 200 KB total.
+- **Why:** the Layer 4 number guarded first-load weight on constrained devices; lazy chunks do not load until a feature is
+  used, so budgeting them apart keeps that guard honest while letting the dashboard grow a view per layer.
+
 ## Pending
 
 - Move deep architecture content out of `os/README.md` into per-layer specs (blocked on layer homes existing).

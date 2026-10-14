@@ -64,8 +64,12 @@ text notice with the node id and a link to `/v1` (the Layer 1 minimal page, kept
 `build.target: es2020`; `tsconfig` `lib: ["es2020","dom","dom.iterable"]` so newer built-ins fail
 typecheck.
 
-**Budget:** `pnpm budget` fails above **200 KB gzipped** JS+CSS (buckets reported: react core ≤105,
-icons ≤15, css ≤15, app ≤65). Fonts reported separately. The mock adapter is excluded from
+**Budget (D21, 2026-10-14):** `pnpm budget` keeps two budgets of **256 KB gzipped** each — **eager** (what
+the first paint downloads: the entry script, every `modulepreload`, every `.css`; buckets reported: react core,
+app, css) and **lazy** (chunks `index.html` neither loads nor preloads: the view routes, jsQR, the notices page),
+plus **64 KB per lazy chunk** so one on-demand dependency can never eat the lazy budget. The gate reads
+`dist/index.html` to tell eager from lazy; the total is printed for information. (Layer 4 shipped with a single
+200 KB total; Layer 5's Messages/Contacts views and the lazy jsQR decoder moved it.) Fonts reported separately. The mock adapter is excluded from
 production builds (`import.meta.env.DEV` gate + dynamic import), so fixtures never ship.
 
 ## 3. Design system (binding)
