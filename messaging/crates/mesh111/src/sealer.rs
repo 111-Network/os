@@ -109,4 +109,10 @@ pub trait Sealer: Send + Sync {
     /// §5 / §11: fresh random bytes (session tags, object keys) from the §4
     /// entropy discipline. Typed failure, never a silent weak fallback.
     fn random(&self, out: &mut [u8]) -> Result<(), SealerError>;
+
+    /// §10.2 Mode S: `store_secret = BLAKE2b-256(key = X25519 private key
+    /// (keyset bytes 32..64), data = "111/store-secret/v1")`, computed behind
+    /// the handle; the store derives `store_key` from it (`keys::ModeS`).
+    /// The private key never crosses; callers zeroize the secret after use.
+    fn store_secret(&self) -> Result<Key32, SealerError>;
 }

@@ -1,0 +1,12 @@
+{
+  "spec": "§10.2 Mode S store key (L2 amendment A9)",
+  "frozen": "2026-10-14",
+  "description": "store_key = BLAKE2b-256(key = store_secret (32 B), data = '111/store/v1' ‖ NodeId (32 B)) — RFC 7693 keyed mode, 32-byte digest; handed to SQLCipher as the raw key literal x'<64 hex>' (no PBKDF2 at open, §10.1). store_secret is the identity holder's (Sealer::store_secret); it is an input here.",
+  "provenance": "Computed independently with Python hashlib.blake2b(b'111/store/v1' + node_id, key=store_secret, digest_size=32); asserted by mesh111 keys::tests::store_kdf_vectors (task C3). Identities a/b are the canonical test identities of the other files here.",
+  "cases": [
+    {"name": "ascending secret, patterned NodeId", "store_secret": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f", "node_id": "a0a1a2a3a4a5a6a7a8a9aaabacadaeafa0a1a2a3a4a5a6a7a8a9aaabacadaeaf", "store_key": "0bb982a752ba4c3c85d4b6d4a7023e8163ebd32dc1a13ad89f8f6ef7bad3858f", "sqlcipher_key": "x'0bb982a752ba4c3c85d4b6d4a7023e8163ebd32dc1a13ad89f8f6ef7bad3858f'"},
+    {"name": "secret 0x42 repeated, NodeId 0x07 repeated", "store_secret": "4242424242424242424242424242424242424242424242424242424242424242", "node_id": "0707070707070707070707070707070707070707070707070707070707070707", "store_key": "e2f9f08d74efe9a9e56b2b6c6beef807e86e1cfc57287478f96e0d95e810779e", "sqlcipher_key": "x'e2f9f08d74efe9a9e56b2b6c6beef807e86e1cfc57287478f96e0d95e810779e'"},
+    {"name": "all-zero secret, identity a NodeId", "store_secret": "0000000000000000000000000000000000000000000000000000000000000000", "node_id": "6f1d5331e36e16d341fa06c9f622cc8569710f2a62d7491e9be8e953df844f01", "store_key": "462d3e27073c8337e526deb172d81a9113c6d7c950077185bca954a96dbd788a", "sqlcipher_key": "x'462d3e27073c8337e526deb172d81a9113c6d7c950077185bca954a96dbd788a'"},
+    {"name": "all-0xff secret, identity b NodeId", "store_secret": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff", "node_id": "5ddf5911edf0541c88e864d7590045c410f420d04e73f9d8507dc856591506b0", "store_key": "5dc4bd5366c829d20ca5a480e591055067c06dab413d6db5cf2eb2effb0dc1cc", "sqlcipher_key": "x'5dc4bd5366c829d20ca5a480e591055067c06dab413d6db5cf2eb2effb0dc1cc'"}
+  ]
+}

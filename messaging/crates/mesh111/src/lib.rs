@@ -26,3 +26,6 @@ pub mod link; // F1 — §8 Link trait, tcp-lan adapter, test links
 pub mod mailbox; // F1 — §9 mailbox client + hub role
 pub mod sealer; // T0 — the identity-holder handle (trait only)
 pub mod store; // C3 — §10 SQLCipher store, tx/rx state, pruning // F1 — the runtime that ties the above together
+
+#[cfg(test)]
+mod test_double; // C2 — in-memory `Sealer` double + frozen-vector reader (tests only)
