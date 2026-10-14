@@ -262,9 +262,14 @@ pub trait Link: Send + Sync {
     /// Currently reachable peers.
     fn peers(&self) -> Vec<PeerAddr>;
     /// Write one frame to `to`. `Ok` means the frame was handed to the
-    /// bearer (§9 `sent`: "frame written to a link").
+    /// bearer (§9 `sent`: "frame written to a link"). Must not wait on this
+    /// link's `recv` being drained: the fabric awaits `send` from the same
+    /// task that takes inbound frames (back-pressure, `fabric` module doc).
     fn send(&self, to: PeerAddr, frame: Frame) -> BoxFuture<'_, Result<(), LinkError>>;
-    /// The next inbound frame (pends while none).
+    /// The next inbound frame (pends while none). An adapter holds inbound
+    /// frames in a bounded queue and stops reading its bearer while it is
+    /// full, so a slow fabric pushes back on the sender instead of growing
+    /// memory.
     fn recv(&self) -> BoxFuture<'_, (PeerAddr, Frame)>;
     /// Current state.
     fn state(&self) -> LinkState;

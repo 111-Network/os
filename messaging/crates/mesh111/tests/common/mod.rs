@@ -50,11 +50,17 @@ pub struct Ident {
 
 impl Ident {
     pub fn new(label: &str, roles: u16) -> Arc<Ident> {
+        Ident::with_appdata(label, appdata(roles))
+    }
+
+    /// An identity whose announce carries `appdata` verbatim (e.g. a
+    /// home-hub hint after the roles).
+    pub fn with_appdata(label: &str, appdata: Vec<u8>) -> Arc<Ident> {
         let mut b = [0u8; 64];
         b[..32].copy_from_slice(&blake2b_256(&[b"f1-sign", label.as_bytes()]));
         b[32..].copy_from_slice(&blake2b_256(&[b"f1-ecdh", label.as_bytes()]));
         let keyset = Keyset::from_bytes(&b).expect("test keyset");
-        let announce = Announce::create(&keyset, 1, &appdata(roles))
+        let announce = Announce::create(&keyset, 1, &appdata)
             .expect("announce")
             .encode();
         Arc::new(Ident {

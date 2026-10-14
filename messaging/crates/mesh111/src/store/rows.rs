@@ -1,6 +1,7 @@
 //! §10.3 rows — typed access to `messages`, `contacts`, `outbox`, `custody`,
-//! `cursors` and `requests`, at plain integers/bytes (the envelope types of
-//! §3 live elsewhere; the store never parses a body or a sealed packet).
+//! `cursors`, `requests` and `pending_node_ids`, at plain integers/bytes (the
+//! envelope types of §3 live elsewhere; the store never parses a body or a
+//! sealed packet).
 //!
 //! Size limits are checked before anything is written.
 
@@ -350,6 +351,22 @@ pub(crate) fn insert_message(
     Ok(c.last_insert_rowid())
 }
 
+/// One thread's counts (§15 thread list), computed in SQL so a listing
+/// never loads a whole history.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ThreadCounts {
+    /// Own messages `queued`.
+    pub queued: u64,
+    /// Own messages `sent`.
+    pub sent: u64,
+    /// Own messages `relayed`.
+    pub relayed: u64,
+    /// Own messages `delivered`.
+    pub delivered: u64,
+    /// Incoming messages above the read mark (`local_seq > read_mark`).
+    pub unread: u64,
+}
+
 /// A §7.1 contact row. On upsert the store assigns `first_seen_seq` /
 /// `last_seen_seq` (local sequence); the values passed in are ignored.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -448,6 +465,77 @@ impl Store {
         ))?;
         let rows = st.query_map(
             params![&peer[..], i64::try_from(limit).unwrap_or(i64::MAX)],
+            message_from_row,
+        )?;
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(r?.into_row()?);
+        }
+        Ok(out)
+    }
+
+    /// The newest `limit` messages with `peer`, returned oldest first (a
+    /// thread page: one indexed range scan, never the whole history).
+    pub fn messages_newest(&self, peer: &[u8; 32], limit: usize) -> Result<Vec<MessageRow>> {
+        let mut st = self.conn.prepare(&format!(
+            "SELECT {MSG_COLS} FROM messages WHERE peer = ?1 ORDER BY local_seq DESC LIMIT ?2"
+        ))?;
+        let rows = st.query_map(
+            params![&peer[..], i64::try_from(limit).unwrap_or(i64::MAX)],
+            message_from_row,
+        )?;
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(r?.into_row()?);
+        }
+        out.reverse();
+        Ok(out)
+    }
+
+    /// Own messages per §9 state and incoming messages above `read_mark`
+    /// with `peer` (aggregates only; nothing is loaded).
+    pub fn thread_counts(&self, peer: &[u8; 32], read_mark: u64) -> Result<ThreadCounts> {
+        let mut st = self.conn.prepare(
+            "SELECT dir, state, count(*),
+                    coalesce(sum(CASE WHEN local_seq > ?2 THEN 1 ELSE 0 END), 0)
+             FROM messages WHERE peer = ?1 GROUP BY dir, state",
+        )?;
+        let rows = st.query_map(params![&peer[..], to_i64(read_mark, "read_mark")?], |r| {
+            Ok((
+                r.get::<_, i64>(0)?,
+                r.get::<_, i64>(1)?,
+                r.get::<_, i64>(2)?,
+                r.get::<_, i64>(3)?,
+            ))
+        })?;
+        let mut out = ThreadCounts::default();
+        for r in rows {
+            let (dir, state, n, above) = r?;
+            let n = to_u64(n, "count")?;
+            match (Dir::from_i64(dir)?, MsgState::from_i64(state)?) {
+                (Dir::Own, MsgState::Queued) => out.queued += n,
+                (Dir::Own, MsgState::Sent) => out.sent += n,
+                (Dir::Own, MsgState::Relayed) => out.relayed += n,
+                (Dir::Own, MsgState::Delivered) => out.delivered += n,
+                (Dir::In, _) => out.unread += to_u64(above, "count")?,
+                _ => {}
+            }
+        }
+        Ok(out)
+    }
+
+    /// Own, undelivered messages that have no outbox rows: a crash fell
+    /// between numbering them (§4, committed with the content) and writing
+    /// their fragments. The caller plans them again — never abandoned.
+    pub fn own_unplanned(&self) -> Result<Vec<MessageRow>> {
+        let mut st = self.conn.prepare(&format!(
+            "SELECT {MSG_COLS} FROM messages m
+             WHERE m.dir = ?1 AND m.state < ?2
+               AND NOT EXISTS (SELECT 1 FROM outbox o WHERE o.message_id = m.id)
+             ORDER BY m.local_seq"
+        ))?;
+        let rows = st.query_map(
+            params![Dir::Own as i64, MsgState::Delivered as i64],
             message_from_row,
         )?;
         let mut out = Vec::new();
@@ -742,6 +830,46 @@ impl Store {
         Ok(out)
     }
 
+    // -- pending NodeIds (§7.2 (2)) -----------------------------------------
+
+    /// Store a `node1…` contact waiting for its card (idempotent; committed
+    /// FULL — the user added it). Returns whether it was new.
+    pub fn pending_node_id_put(&mut self, node_id: &[u8; 32]) -> Result<bool> {
+        self.with_tx(Durability::Full, |tx| {
+            let seq = to_i64(next_local_seq(tx)?, "local_seq")?;
+            let n = tx.execute(
+                "INSERT INTO pending_node_ids (node_id, local_seq) VALUES (?1, ?2)
+                 ON CONFLICT (node_id) DO NOTHING",
+                params![&node_id[..], seq],
+            )?;
+            Ok(n > 0)
+        })
+    }
+
+    /// The card arrived, or the user forgot the contact. Returns whether a
+    /// row was removed.
+    pub fn pending_node_id_remove(&mut self, node_id: &[u8; 32]) -> Result<bool> {
+        self.with_tx(Durability::Full, |tx| {
+            Ok(tx.execute(
+                "DELETE FROM pending_node_ids WHERE node_id = ?1",
+                [&node_id[..]],
+            )? > 0)
+        })
+    }
+
+    /// Every `node1…` contact waiting for its card, oldest first.
+    pub fn pending_node_ids(&self) -> Result<Vec<[u8; 32]>> {
+        let mut st = self
+            .conn
+            .prepare("SELECT node_id FROM pending_node_ids ORDER BY local_seq")?;
+        let rows = st.query_map([], |r| r.get::<_, Vec<u8>>(0))?;
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(id32(r?, "pending_node_ids.node_id")?);
+        }
+        Ok(out)
+    }
+
     // -- outbox (§10.3) ----------------------------------------------------
 
     /// Put (or replace) one fragment of an own message awaiting a path.
@@ -961,6 +1089,23 @@ impl Store {
             )
             .optional()?;
         to_u64(v.unwrap_or(0), "custody seq")
+    }
+
+    /// The `ENROLL_OK` `custody_seq_floor` for `dest` (§7.3): just below
+    /// the lowest custody sequence still held **uncommitted** for it, so a
+    /// member that re-enrolls (a new device, a fresh offer) starts its
+    /// cursor below what waits for it; [`Store::custody_high`] when nothing
+    /// uncommitted is held (a first enrollment skips nobody's history).
+    pub fn custody_floor(&self, dest: &[u8; 32]) -> Result<u64> {
+        let low: Option<i64> = self.conn.query_row(
+            "SELECT min(custody_seq) FROM custody WHERE dest = ?1 AND committed = 0",
+            [&dest[..]],
+            |r| r.get(0),
+        )?;
+        match low {
+            Some(s) => Ok(to_u64(s, "custody_seq")?.saturating_sub(1)),
+            None => self.custody_high(),
+        }
     }
 
     /// `(count, bytes)` of custody held (`GET /fabric`).

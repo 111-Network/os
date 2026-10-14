@@ -28,7 +28,17 @@
 //!   `keepalive`; a connection silent for three intervals is closed. The
 //!   protocol above (fabric) has no timers.
 //! - **Reconnect** on link events with exponential back-off for addresses
-//!   the fabric asks to [`Dialer::maintain`].
+//!   the fabric asks to [`Dialer::maintain`]. A dial's `expected` NodeId is
+//!   checked against the peer's first announce inside the handshake: a
+//!   mismatch (a stale hub address, a mistyped enrollment address) is a
+//!   failed attempt — the back-off grows and no connection is reported —
+//!   so a misdial never becomes a redial loop with full handshakes.
+//! - **Back-pressure, not buffering:** frames read from every connection
+//!   wait in one bounded queue (`inbound_queue`) for [`Link::recv`]; a full
+//!   queue stops the readers, so TCP flow control pushes back on a peer that
+//!   sends faster than the fabric opens (the fabric's own frame queue is
+//!   bounded too). Memory held per adapter is at most `inbound_queue` frames
+//!   plus one frame per connection reader.
 //! - **Loopback is never a peer** (§2, §8.1): with `refuse_loopback` (the
 //!   default) inbound connections from, and dials to, loopback addresses are
 //!   refused. The listener is bound only where the caller says (the fabric
@@ -101,6 +111,9 @@ pub struct TcpLanConfig {
     pub backoff_max: Duration,
     /// Frames queued per connection before `send` reports back-pressure.
     pub write_queue: usize,
+    /// Frames read from all connections and not yet taken by `recv`
+    /// (capacity: a full queue stops the readers — module doc).
+    pub inbound_queue: usize,
 }
 
 impl TcpLanConfig {
@@ -115,6 +128,7 @@ impl TcpLanConfig {
             backoff_min: Duration::from_millis(500),
             backoff_max: Duration::from_secs(60),
             write_queue: 1024,
+            inbound_queue: 256,
         }
     }
 }
@@ -145,6 +159,9 @@ pub enum WireError {
     /// The announce failed to parse or verify, or the gate refused it.
     #[error("announce refused")]
     AnnounceRefused,
+    /// A dial was answered by another node than the one expected there.
+    #[error("the peer is not the node this address was dialed for")]
+    ClaimMismatch,
 }
 
 /// Check a declared frame length against its type's cap (before the body
@@ -289,7 +306,7 @@ impl TcpLan {
         events: EventSink,
         gate: Arc<dyn AnnounceGate>,
     ) -> Self {
-        let (inbound_tx, inbound_rx) = mpsc::channel(1024);
+        let (inbound_tx, inbound_rx) = mpsc::channel(cfg.inbound_queue.max(1));
         TcpLan {
             shared: Arc::new(Shared {
                 id,
@@ -411,6 +428,10 @@ async fn serve(
         let ann = verify_announce(&body).ok_or(WireError::AnnounceRefused)?;
         if !gate.admit(&ann) {
             return Err(WireError::AnnounceRefused);
+        }
+        // A misdial is a failed attempt, never a connection (module doc).
+        if expected.is_some_and(|e| e != ann.node_id()) {
+            return Err(WireError::ClaimMismatch);
         }
         Ok::<Vec<u8>, WireError>(body)
     };

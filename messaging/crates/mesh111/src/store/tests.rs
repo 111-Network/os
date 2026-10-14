@@ -1522,3 +1522,121 @@ fn every_allocated_n_names_a_stored_message() {
         .collect();
     assert_eq!(stored, seqs);
 }
+
+// ---------------------------------------------------------------------------
+// F1 bounce: §7.3 floor, §7.2 (2) pending NodeIds (schema v2), thread queries
+// ---------------------------------------------------------------------------
+
+#[test]
+fn custody_floor_sits_below_what_is_still_held_uncommitted() {
+    let (_t, mut s) = ready();
+    assert_eq!(s.custody_floor(&PEER).unwrap(), 0, "nothing ever issued");
+    for item in [&b"p-1"[..], b"p-2", b"p-3"] {
+        s.custody_put(&PEER, item).unwrap();
+    }
+    s.custody_put(&PEER2, b"q-4").unwrap();
+    // Nothing committed: a re-enrolling member starts below seq 1.
+    assert_eq!(s.custody_floor(&PEER).unwrap(), 0);
+    assert_eq!(s.custody_floor(&PEER2).unwrap(), 3);
+    // Committed items are below the floor; held ones stay above it.
+    s.custody_commit(&PEER, 2).unwrap();
+    assert_eq!(s.custody_floor(&PEER).unwrap(), 2);
+    s.custody_commit(&PEER, 3).unwrap();
+    assert_eq!(s.custody_floor(&PEER).unwrap(), s.custody_high().unwrap());
+    // A NodeId with nothing held: the high-water mark (a first enrollment).
+    assert_eq!(s.custody_floor(&[0xC0; 32]).unwrap(), 4);
+}
+
+#[test]
+fn pending_node_ids_persist_until_removed() {
+    let t = tempfile::tempdir().unwrap();
+    {
+        let (mut s, _) = open(t.path(), 1);
+        s.record_epoch(1).unwrap();
+        assert!(s.pending_node_id_put(&PEER).unwrap());
+        assert!(!s.pending_node_id_put(&PEER).unwrap(), "idempotent");
+        assert!(s.pending_node_id_put(&PEER2).unwrap());
+        // No clean close: the rows were committed FULL when added.
+        drop(s);
+    }
+    let (mut s, _) = open(t.path(), 1);
+    assert_eq!(s.pending_node_ids().unwrap(), vec![PEER, PEER2]);
+    assert!(s.pending_node_id_remove(&PEER).unwrap());
+    assert!(!s.pending_node_id_remove(&PEER).unwrap());
+    assert_eq!(s.pending_node_ids().unwrap(), vec![PEER2]);
+    s.close(1).unwrap();
+}
+
+#[test]
+fn a_v1_store_migrates_to_v2_in_place() {
+    let (t, s) = ready();
+    s.conn
+        .execute_batch("DROP TABLE pending_node_ids; PRAGMA user_version = 1;")
+        .unwrap();
+    s.close(1).unwrap();
+    let (mut s, _) = open(t.path(), 1);
+    assert_eq!(
+        pragma_int(&s.conn, "user_version").unwrap(),
+        schema::SCHEMA_VERSION
+    );
+    assert_eq!(schema::SCHEMA_VERSION, 2);
+    assert!(s.pending_node_id_put(&PEER).unwrap());
+    assert_eq!(s.pending_node_ids().unwrap(), vec![PEER]);
+}
+
+#[test]
+fn thread_queries_read_the_newest_page_and_counts_only() {
+    let (_t, mut s) = ready();
+    let mut own_ids = Vec::new();
+    for i in 0..3u8 {
+        own_ids.push(s.queue_own_message(&own(PEER, 0, &[i])).unwrap().0);
+    }
+    let mut received = Vec::new();
+    for n in 1..=4u64 {
+        let (_, id) = s
+            .receive_message(&inbound(PEER, &[0x40 + n as u8]), Seq { epoch: 1, n })
+            .unwrap();
+        received.push(s.message(id.unwrap()).unwrap().unwrap().local_seq);
+    }
+    s.queue_own_message(&own(PEER2, 0, b"elsewhere")).unwrap();
+    s.set_message_state(own_ids[0], MsgState::Delivered, None)
+        .unwrap();
+    s.set_message_state(own_ids[1], MsgState::Relayed, None)
+        .unwrap();
+
+    let all = s.messages_with(&PEER, 100).unwrap();
+    assert_eq!(all.len(), 7);
+    let page = s.messages_newest(&PEER, 3).unwrap();
+    assert_eq!(page, all[4..].to_vec(), "newest three, oldest first");
+    assert_eq!(s.messages_newest(&PEER, 100).unwrap(), all);
+    assert!(s.messages_newest(&[0xC0; 32], 5).unwrap().is_empty());
+
+    let c = s.thread_counts(&PEER, received[1]).unwrap();
+    assert_eq!(
+        c,
+        ThreadCounts {
+            queued: 1,
+            sent: 0,
+            relayed: 1,
+            delivered: 1,
+            unread: 2,
+        }
+    );
+    assert_eq!(s.thread_counts(&PEER, 0).unwrap().unread, 4);
+    assert_eq!(s.thread_counts(&PEER2, 0).unwrap().queued, 1);
+}
+
+#[test]
+fn own_unplanned_lists_numbered_messages_without_outbox_rows() {
+    let (_t, mut s) = ready();
+    let (planned, _) = s.queue_own_message(&own(PEER, 0, b"planned")).unwrap();
+    s.outbox_put(planned, 0, 1, &PEER, None).unwrap();
+    let (orphan, _) = s.queue_own_message(&own(PEER2, 0, b"orphan")).unwrap();
+    let (done, _) = s.queue_own_message(&own(PEER, 0, b"done")).unwrap();
+    s.set_message_state(done, MsgState::Delivered, None)
+        .unwrap();
+    s.receive_message(&inbound(PEER, b"in"), Seq { epoch: 1, n: 1 })
+        .unwrap();
+    let ids: Vec<i64> = s.own_unplanned().unwrap().iter().map(|m| m.id).collect();
+    assert_eq!(ids, vec![orphan]);
+}

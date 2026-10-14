@@ -44,7 +44,7 @@ pub use blobs::BlobRow;
 pub use prune::{DiskSpace, PruneReport, PruneStep, PrunedItem, PrunedRef, Watermarks};
 pub use rows::{
     Class, ContactRow, CustodyItem, CustodyPut, Dir, MessageRow, MsgState, NewMessage, OutboxFrag,
-    RequestPut, RequestRefusal, Trust,
+    RequestPut, RequestRefusal, ThreadCounts, Trust,
 };
 pub use rx::{FragOffer, Offer, Partial, PartialRef, RxEpoch};
 pub use tx::Seq;

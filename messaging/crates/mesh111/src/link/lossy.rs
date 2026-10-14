@@ -15,7 +15,9 @@
 //! fabric may send on the claim, like a dial to a configured address).
 //!
 //! Never constructed by the daemon. No timers, no threads: frames move
-//! inside `send`.
+//! inside `send`. Its in-process queues are unbounded (both ends are driven
+//! by the tests' own fabrics); the bounded-inbound rule of
+//! [`Link::recv`] is for real bearers.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};

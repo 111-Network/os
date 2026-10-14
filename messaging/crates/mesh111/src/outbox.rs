@@ -53,8 +53,8 @@ pub enum Reason {
     /// `sent`: the hub answered `REJECT_FULL` (§9).
     MailboxFull,
     /// `sent`: the hub answered `REJECT_UNENROLLED` (it no longer lists
-    /// this node). Not in the C1 contract's emitted set: renders `unknown`
-    /// until the contract grows it.
+    /// this node). Not yet in the C1 contract's emitted set (renders
+    /// `unknown`); F2 adds it with `cancelled` (Wave 2).
     NotEnrolled,
     /// The user cancelled before it left: an empty tombstone goes instead
     /// (§4 never-abandoned `n`).

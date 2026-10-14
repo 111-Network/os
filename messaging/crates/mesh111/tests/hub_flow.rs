@@ -1,8 +1,11 @@
 //! §20 G1 shapes, in process (two members + one hub over real `tcp-lan`
 //! sockets on loopback): the four delivery states, a non-member answered
 //! `REJECT_UNKNOWN_DEST`, `node1…` card requests, `REJECT_FULL`, the hub
-//! killed mid-transfer and resumed by cursor, replays on fresh sockets, and a
-//! sender crash with items in custody followed by a direct new-epoch packet.
+//! killed mid-transfer and resumed by cursor, replays on fresh sockets, a
+//! sender crash with items in custody followed by a direct new-epoch packet,
+//! re-enrollment on a new device fetching custody already held (§7.3 floor),
+//! a stale home-hub hint (a locator only), a direct write clearing a custody
+//! reject's reason, and forgetting the home hub.
 
 mod common;
 
@@ -14,7 +17,7 @@ use std::time::Duration;
 use common::*;
 use mesh111::contacts::{card_text, ROLE_ALWAYS_ON_HUB, ROLE_MAILBOX};
 use mesh111::fabric::{Fabric, FabricEvent, FabricSettings, HomeHub, MessageChange, SettingsPatch};
-use mesh111::link::lossy::LossyConfig;
+use mesh111::link::lossy::{DropFilter, LossyConfig};
 use mesh111::link::tcp_lan::{
     encode_frame, read_frame, read_hello, TcpLan, HELLO, T_ANNOUNCE, T_SEALED,
 };
@@ -43,7 +46,11 @@ async fn hub(d: &Dirs) -> (Node, SocketAddr) {
 
 /// A member enrolled at `h` (its fabric dials the hub and keeps it up).
 async fn member(d: &Dirs, name: &str, h: &Node, haddr: SocketAddr) -> Node {
-    let ident = Ident::new(name, 0);
+    member_as(d, name, Ident::new(name, 0), h, haddr).await
+}
+
+/// [`member`] with a given identity.
+async fn member_as(d: &Dirs, name: &str, ident: Arc<Ident>, h: &Node, haddr: SocketAddr) -> Node {
     let dir = d.node(name);
     let f = start(&ident, &dir, FabricSettings::default());
     let t = tcp(&f, &ident, "tcp");
@@ -434,4 +441,133 @@ async fn sender_crash_new_epoch_delivers_every_message_once() {
         .map(|m| m.seq.epoch)
         .collect();
     assert_eq!(epochs, vec![epoch2, epoch1, epoch1]);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn reenrolling_on_a_new_device_fetches_custody_already_held() {
+    let d = Dirs::new();
+    let (h, haddr) = hub(&d).await;
+    let a = member(&d, "alice", &h, haddr).await;
+    let b = member(&d, "bob", &h, haddr).await;
+    exchange_cards(&a.f, &b.f).await;
+    // History at the hub: one item streamed, delivered and committed.
+    let m0 = a.f.send(b.ident.id(), "zero", None).await.unwrap();
+    until_state(&a.f, m0, MsgState::Delivered, 10).await;
+
+    // Bob's device is gone for good; two items wait in custody for him.
+    b.f.shutdown().await.unwrap();
+    b.t.shutdown();
+    let m1 = a.f.send(b.ident.id(), "one", None).await.unwrap();
+    let m2 = a.f.send(b.ident.id(), "two", None).await.unwrap();
+    until_state(&a.f, m1, MsgState::Relayed, 10).await;
+    until_state(&a.f, m2, MsgState::Relayed, 10).await;
+
+    // Bob restores his identity on a new device (an empty store), re-adds
+    // Alice and re-enrolls with a fresh offer: the hub's floor sits below
+    // what it still holds for him, so his first fetch streams it (§7.3).
+    let b2 = start(&b.ident, &d.node("bob-new"), FabricSettings::default());
+    let t2 = tcp(&b2, &b.ident, "tcp");
+    add_tcp(&b2, &t2, true).await;
+    b2.add_contact_card(&a.f.card().await.unwrap().text)
+        .await
+        .unwrap();
+    let offer = h.f.offer(Some(haddr)).await.unwrap();
+    tokio::time::timeout(
+        Duration::from_secs(10),
+        b2.enroll(haddr, &offer.code, Some(offer.card.as_str())),
+    )
+    .await
+    .expect("enroll in time")
+    .expect("re-enrolled");
+    until_state(&a.f, m1, MsgState::Delivered, 15).await;
+    until_state(&a.f, m2, MsgState::Delivered, 15).await;
+    let got: Vec<String> = inbox(&b2, a.ident.id())
+        .await
+        .into_iter()
+        .filter_map(|m| m.text)
+        .collect();
+    assert_eq!(got, vec!["one", "two"]);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_stale_home_hub_hint_never_preempts_the_hub() {
+    let d = Dirs::new();
+    let (h, haddr) = hub(&d).await;
+    let a = member(&d, "alice", &h, haddr).await;
+    // Bob's card still hints at the hub he left; he is a member here now.
+    let mut app = appdata(0);
+    app.extend_from_slice(&[0xEE; 8]);
+    let b = member_as(&d, "bob", Ident::with_appdata("bob", app), &h, haddr).await;
+    exchange_cards(&a.f, &b.f).await;
+    assert_eq!(
+        a.f.contact(b.ident.id()).await.unwrap().home_hub,
+        Some(vec![0xEE; 8])
+    );
+    b.t.release(haddr);
+    // The hint is a locator only (§7.3): the hub's verdict decides.
+    let id = a.f.send(b.ident.id(), "you moved", None).await.unwrap();
+    let m = until_state(&a.f, id, MsgState::Relayed, 10).await;
+    assert_eq!(m.reason, None);
+    b.t.maintain(haddr, Some(h.ident.id()));
+    until_state(&a.f, id, MsgState::Delivered, 10).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_direct_write_clears_a_custody_reject_reason() {
+    let d = Dirs::new();
+    let (h, haddr) = hub(&d).await;
+    let a = member(&d, "alice", &h, haddr).await;
+    // Carol is not a member: the hub answers REJECT_UNKNOWN_DEST.
+    let ci = Ident::new("carol", 0);
+    let carol = start(&ci, &d.node("carol"), FabricSettings::default());
+    exchange_cards(&a.f, &carol).await;
+    let id = a.f.send(ci.id(), "hi carol", None).await.unwrap();
+    let m = until(10, || async {
+        let m = a.f.message(id).await.ok()?;
+        (m.reason == Some(Reason::HubNotYours)).then_some(m)
+    })
+    .await;
+    assert_eq!(m.state, MsgState::Sent);
+    // A direct path appears; Carol's ACKs are lost, so the message stays
+    // `sent` — but it was written to her directly, so the hub's reject no
+    // longer explains it.
+    let drop_all: DropFilter = Arc::new(|_| true);
+    let (_ea, _eb) = lossy_pair(
+        (&a.f, &a.ident),
+        (&carol, &ci),
+        LossyConfig::default(),
+        LossyConfig {
+            filter: Some(drop_all),
+            ..LossyConfig::default()
+        },
+    )
+    .await;
+    let m = until(10, || async {
+        let m = a.f.message(id).await.ok()?;
+        m.reason.is_none().then_some(m)
+    })
+    .await;
+    assert_eq!(m.state, MsgState::Sent);
+    assert_eq!(inbox(&carol, a.ident.id()).await.len(), 1);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn forgetting_the_home_hub_ends_the_membership_here() {
+    let d = Dirs::new();
+    let (h, haddr) = hub(&d).await;
+    let a = member(&d, "alice", &h, haddr).await;
+    assert_eq!(a.t.connection_count(), 1);
+    let mut events = a.f.subscribe();
+    a.f.forget_contact(h.ident.id()).await.unwrap();
+    assert_eq!(a.f.settings().await.unwrap().home_hub, None);
+    let st = a.f.status().await.unwrap();
+    assert!(!st.hub.enrolled && !st.hub.reachable);
+    assert!(drain_events(&mut events)
+        .iter()
+        .any(|e| matches!(e, FabricEvent::Settings(s) if s.home_hub.is_none())));
+    // The maintained dial is released: the connection closes and stays
+    // closed (no redial loop against a forgotten hub).
+    until(10, || async { (a.t.connection_count() == 0).then_some(()) }).await;
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    assert_eq!(a.t.connection_count(), 0);
 }

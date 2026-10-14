@@ -305,6 +305,15 @@ impl PushWindow {
         self.inflight.push_back(custody_seq);
     }
 
+    /// A streamed item's frame was not written (a send error): it and
+    /// everything after it leave the window, and the stream restarts just
+    /// below it (items go out in order, with no gaps — the member's cursor
+    /// is a high-water mark).
+    pub fn unpush(&mut self, custody_seq: u64) {
+        self.inflight.retain(|s| *s < custody_seq);
+        self.high = self.high.min(custody_seq.saturating_sub(1));
+    }
+
     /// A `MAILBOX_COMMIT {cursor}`: everything ≤ cursor leaves the window.
     pub fn commit(&mut self, cursor: u64) {
         self.inflight.retain(|s| *s > cursor);
@@ -397,5 +406,14 @@ mod tests {
         assert_eq!(w.high, 10 + PUSH_WINDOW as u64);
         w.fetch(5);
         assert_eq!((w.high, w.room()), (5, PUSH_WINDOW));
+        // A send error on item 8: 8 and later leave, the stream restarts at 7.
+        for s in 6..=9 {
+            w.pushed(s);
+        }
+        w.unpush(8);
+        assert_eq!(w.high, 7);
+        assert_eq!(w.inflight.iter().copied().collect::<Vec<_>>(), vec![6, 7]);
+        w.unpush(1);
+        assert_eq!((w.high, w.inflight.len()), (0, 0));
     }
 }

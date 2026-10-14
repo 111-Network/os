@@ -7,13 +7,29 @@
 //!
 //! One task (an actor) owns the store, the connection table and every piece
 //! of sender/receiver bookkeeping; nothing else touches them. Inputs reach it
-//! over one channel: frames from each link's `recv` loop, [`LinkEvent`]s from
-//! the adapters ([`Fabric::link_events`]), and commands from the typed API
-//! ([`Fabric`], what the daemon's routes call). The actor works in **ticks**:
-//! it takes every input that is ready, then flushes owed ACKs and mailbox
-//! commits, pumps the outbox of every touched peer, writes the queued frames
-//! to their links, and emits the tick's events — **coalesced per message per
-//! tick** (§15: a 16-fragment transfer never floods the SSE ring).
+//! over two channels:
+//!
+//! - **frames** from each link's `recv` loop, on a **bounded** queue
+//!   ([`FRAME_QUEUE`]) filled with `send().await`: when the actor falls
+//!   behind (every sealed frame costs it an X25519 + AEAD open), a link's
+//!   `recv` loop stops, the adapter's own bounded inbound queue fills
+//!   (`TcpLanConfig::inbound_queue`), its readers stop reading, and TCP flow
+//!   control pushes back on the sender — end to end. An unauthenticated LAN
+//!   peer (hello + any self-signed announce) streaming frames at line rate
+//!   gets a stalled socket, never the daemon's memory; nothing is dropped
+//!   for want of room. ([`Link::send`] must therefore never wait on its own
+//!   `recv` being drained: the actor awaits `send` while frames wait for it.)
+//! - **control**: [`LinkEvent`]s from the adapters ([`Fabric::link_events`];
+//!   connection facts, at most two per completed handshake) and commands
+//!   from the typed API ([`Fabric`], what the daemon's routes call). Within
+//!   a tick control inputs are taken first, so the API stays responsive
+//!   while a peer floods.
+//!
+//! The actor works in **ticks**: it takes every input that is ready (at most
+//! `TICK_BATCH`), then flushes owed ACKs and mailbox commits, pumps the
+//! outbox of every touched peer, writes the queued frames to their links,
+//! and emits the tick's events — **coalesced per message per tick** (§15: a
+//! 16-fragment transfer never floods the SSE ring).
 //!
 //! **No timers** (§1, §9): nothing here sleeps or schedules. Retries happen on
 //! link events (a connection's announce, a disconnect), contact events (a key
@@ -69,9 +85,54 @@
 //! - The window fills **fresh fragments first, then retransmissions**: under
 //!   "no timers" the receiver's SACKs of fresh fragments are the only loss
 //!   evidence, so keeping fresh data moving keeps that evidence flowing.
-//! - `node1…` contacts waiting for their card are kept in memory (the
-//!   contacts table needs key material) and rebuilt at start from the outbox.
-//! - Read marks (`ContactPatch::read_seq`) are in memory (no store column).
+//! - `node1…` contacts waiting for their card are **stored** (§7.2 (2): the
+//!   store's `pending_node_ids`, schema v2 — the contacts table needs key
+//!   material) and read back at start, together with every outbox peer that
+//!   still lacks a key. A row leaves when the card is pinned or the contact
+//!   is forgotten.
+//! - Read marks (`ContactPatch::read_seq`) live in memory only and reset to
+//!   "nothing read" at every start (v1, accepted by the lead's Wave 1 triage;
+//!   a `read_seq` column is a C3 wish if they must survive restarts).
+//! - A home-hub hint in a contact's announce (`appdata`, 8 B) is a locator
+//!   only (§7.3): with the home hub reachable the item is handed to it and
+//!   the hub's `CUSTODY_ACK` decides (`REJECT_UNKNOWN_DEST` ⇒ `sent` /
+//!   `hub_not_yours`); the hint only explains a `queued` message while the
+//!   hub is unreachable. A stale hint never keeps a message from a hub that
+//!   holds its recipient.
+//! - `relayed` evidence is the home hub's authenticated `CUSTODY_ACK`
+//!   `ACCEPTED` **or `DUPLICATE`** for every fragment: §6.2 names ACCEPTED,
+//!   but a DUPLICATE from the home hub means the same `pkt_ref` is already
+//!   held there for that member (a retried `CUSTODY_PUT` whose first ACK was
+//!   lost), which is the same fact §9 states ("a mailbox node saved it and
+//!   will hold it for them").
+//! - A successful **direct** write of a message already `sent` with a
+//!   custody reject's reason clears that reason: the hub's verdict no longer
+//!   explains where the message is.
+//! - Hub push: a `MAILBOX_ITEM` counts as streamed only once its frame is
+//!   queued for the link, and a send error rolls the connection's push
+//!   window back to just below it. Items stream in `custody_seq` order with
+//!   no gaps (the member's cursor is a high-water mark, so a gap would be
+//!   committed unseen): an item too large for the member's path stops that
+//!   connection's stream until the member fetches over a path that carries
+//!   it (unreachable with v1 `tcp-lan` sizes; L6 small-MTU hub links).
+//! - `ENROLL_OK`'s `custody_seq_floor` is just below the lowest custody
+//!   sequence still held uncommitted for the member (`custody_high` when
+//!   none): a member that re-enrolls — a new device after a restore, or a
+//!   fresh offer — fetches what waits for it. The member keeps its cursor's
+//!   `max()` semantics.
+//! - The member re-sends `MAILBOX_COMMIT {cursor}` beside every
+//!   `MAILBOX_FETCH` on hub link-up (the hub keeps `max(cursor)`, so it is
+//!   idempotent), and a commit owed while no hub connection exists stays
+//!   owed: a commit lost to a dropped socket or a restart is repaired at the
+//!   next link-up.
+//! - A crash between numbering an own message and writing its outbox rows
+//!   (an orphan, §4) re-plans it for the destination path's profile at start
+//!   (no link is registered yet then, so §5's 160 B default) — or, when the
+//!   text exceeds Tier 1 at that size, for a stream link (the only path that
+//!   could have accepted it).
+//! - Thread listings read the newest page and SQL aggregates
+//!   (`Store::messages_newest`, `Store::thread_counts`): no call loads a
+//!   whole history.
 //! - A message request (INTRO from an unknown sender) is filed in the store's
 //!   `requests` table; its messages are stored but never ACKed until the user
 //!   accepts; accepting ACKs exactly the receive state, i.e. what is shown.
@@ -84,12 +145,15 @@
 //! - Custody rejects keep `sent` with a reason: `REJECT_FULL` ⇒
 //!   `mailbox_full`; `REJECT_UNKNOWN_DEST` ⇒ `hub_not_yours` (the closest
 //!   contract code for §9's "your hub does not know them");
-//!   `REJECT_UNENROLLED` ⇒ `not_enrolled` (not yet in the contract's emitted
-//!   set, so clients render `unknown`).
+//!   `REJECT_UNENROLLED` ⇒ `not_enrolled`. `not_enrolled` and `cancelled`
+//!   are not yet in the contract's emitted `reason_code` set (clients render
+//!   `unknown`); the contract gains both with F2 (Wave 2, lead's triage).
 //! - Forgetting a contact leaves its undelivered messages queued
 //!   (`waiting_for_key`; numbers are never abandoned); after a restart such
-//!   a peer is listed again as a key-less contact, because the `node1…` set
-//!   is rebuilt from the outbox.
+//!   a peer is listed again as a key-less contact, because the outbox still
+//!   names it. Forgetting the **home hub** also ends the membership here:
+//!   `settings.home_hub` is cleared (a `Settings` event) and its maintained
+//!   dial released.
 //! - [`Fabric::enroll`] resolves on `ENROLL_OK`; it has no timeout of its
 //!   own (no timers here) — the route that calls it bounds the wait.
 //! - All handles dropped does not stop the actor: call
@@ -139,8 +203,9 @@ pub const PLAN_RESERVE: usize = 512;
 const STREAM_MTU: usize = 4096;
 /// Inputs handled per tick before the flush (bounded work per tick).
 const TICK_BATCH: usize = 256;
-/// Upper bound on a thread scan (`Store::messages_with`).
-const MAX_THREAD_SCAN: usize = 1_000_000;
+/// Frames buffered between the links' `recv` loops and the actor (module
+/// doc: a full queue stops the loops, and back-pressure reaches the sender).
+pub const FRAME_QUEUE: usize = 64;
 /// Flush/drain rounds per tick (a failed send may re-route once or twice).
 const DRAIN_ROUNDS: usize = 8;
 
@@ -483,6 +548,9 @@ pub struct Counters {
     pub refused_requests: u64,
     /// Fragment retransmissions (re-sealed).
     pub retransmits: u64,
+    /// Fragments presumed lost from ACK evidence (§5 loss inference: a
+    /// later-sent fragment was acknowledged first), never from an event.
+    pub inferred_lost: u64,
     /// The most fragments ever outstanding to one peer (§5: ≤ 16).
     pub max_outstanding: u64,
     /// SACK bits regressed after the receiver evicted a partial.
@@ -567,6 +635,7 @@ impl Fabric {
         let own = sealer.node_id();
         let own_announce = sealer.own_announce();
         let (input, rx) = mpsc::unbounded_channel();
+        let (frames, frames_rx) = mpsc::channel(FRAME_QUEUE);
         let (events, _) = broadcast::channel(1024);
         let (sink, mut sink_rx) = mpsc::unbounded_channel::<LinkEvent>();
         let keys = KeyCache::rebuild(&store.contacts()?);
@@ -602,7 +671,8 @@ impl Fabric {
             events: events.clone(),
             pending_events: BTreeMap::new(),
             outq: Vec::new(),
-            input: input.clone(),
+            _control: input.clone(),
+            frames,
             tasks: Tasks(Vec::new()),
         };
         core.recover(unclean)?;
@@ -615,7 +685,7 @@ impl Fabric {
             }
         });
         core.tasks.0.push(fwd);
-        let task = tokio::spawn(run(core, rx));
+        let task = tokio::spawn(run(core, rx, frames_rx));
         Ok(Fabric {
             inner: Arc::new(Handle {
                 input,
@@ -858,12 +928,15 @@ impl AnnounceGate for FabricGate {
 
 type Job = Box<dyn FnOnce(&mut Core) + Send>;
 
+/// One frame from a link's `recv` loop (the bounded queue, module doc).
+struct Inbound {
+    link: usize,
+    peer: PeerAddr,
+    frame: Frame,
+}
+
 enum Input {
-    Frame {
-        link: usize,
-        peer: PeerAddr,
-        frame: Frame,
-    },
+    Frame(Inbound),
     Link(LinkEvent),
     Run(Job),
     Shutdown(oneshot::Sender<Result<()>>),
@@ -880,11 +953,22 @@ impl Drop for Tasks {
     }
 }
 
-async fn run(mut core: Core, mut rx: mpsc::UnboundedReceiver<Input>) {
+/// The actor loop: control inputs and frames (module doc "Shape"). Both
+/// senders live in `core`, so neither channel closes while it runs.
+async fn run(
+    mut core: Core,
+    mut rx: mpsc::UnboundedReceiver<Input>,
+    mut frames: mpsc::Receiver<Inbound>,
+) {
     core.flush();
     core.drain_out().await;
     core.emit();
-    while let Some(first) = rx.recv().await {
+    loop {
+        let first = tokio::select! {
+            Some(input) = rx.recv() => input,
+            Some(f) = frames.recv() => Input::Frame(f),
+            else => return,
+        };
         let mut stop = None;
         let mut next = Some(first);
         let mut handled = 0usize;
@@ -900,7 +984,11 @@ async fn run(mut core: Core, mut rx: mpsc::UnboundedReceiver<Input>) {
             if handled >= TICK_BATCH {
                 break;
             }
-            next = rx.try_recv().ok();
+            // Control first: the API answers while a peer floods.
+            next = match rx.try_recv() {
+                Ok(input) => Some(input),
+                Err(_) => frames.try_recv().ok().map(Input::Frame),
+            };
         }
         core.flush();
         core.drain_out().await;
@@ -963,6 +1051,10 @@ enum Tag {
     None,
     Frag(i64, u8),
     Custody(i64, u8),
+    /// Hub: a `MAILBOX_ITEM` (its `custody_seq`) on a push stream.
+    Push(u64),
+    /// Member: a `MAILBOX_COMMIT {cursor}`.
+    Commit(u64),
 }
 
 struct Out {
@@ -1025,7 +1117,11 @@ struct Core {
     events: broadcast::Sender<FabricEvent>,
     pending_events: BTreeMap<EventKey, FabricEvent>,
     outq: Vec<Out>,
-    input: mpsc::UnboundedSender<Input>,
+    /// Keeps the control channel open while the actor runs (dropping every
+    /// handle does not stop it, module doc).
+    _control: mpsc::UnboundedSender<Input>,
+    /// The bounded frame queue's sender, cloned into each link's loop.
+    frames: mpsc::Sender<Inbound>,
     tasks: Tasks,
 }
 
@@ -1034,7 +1130,7 @@ impl Core {
 
     fn handle(&mut self, input: Input) {
         match input {
-            Input::Frame { link, peer, frame } => self.on_frame(link, peer, frame),
+            Input::Frame(f) => self.on_frame(f.link, f.peer, f.frame),
             Input::Link(ev) => self.on_link_event(ev),
             Input::Run(job) => {
                 // An API reply never precedes the events describing the
@@ -1056,10 +1152,25 @@ impl Core {
         for (peer, owed) in std::mem::take(&mut self.ack_owed) {
             self.send_ack(peer, &owed);
         }
-        if let Some(cursor) = self.commit_owed.take() {
-            if let Some(hub) = self.home_hub() {
-                if let Some(ck) = self.sendable_conn(&hub) {
-                    self.send_control(&ck, &hub, Kind::MailboxCommit, encode_cursor(cursor));
+        // A commit stays owed until its frame is queued (and comes back on
+        // a send error): a commit owed while the hub is unreachable goes
+        // out at the next link-up, beside the fetch.
+        if let Some(cursor) = self.commit_owed {
+            match self.home_hub() {
+                None => self.commit_owed = None,
+                Some(hub) => {
+                    if let Some(ck) = self.sendable_conn(&hub) {
+                        let payload = encode_cursor(cursor);
+                        if self.send_control_tagged(
+                            &ck,
+                            &hub,
+                            Kind::MailboxCommit,
+                            payload,
+                            Tag::Commit(cursor),
+                        ) {
+                            self.commit_owed = None;
+                        }
+                    }
                 }
             }
         }
@@ -1071,11 +1182,28 @@ impl Core {
             if outs.is_empty() {
                 return;
             }
+            // Connections whose push stream failed this round: later items
+            // would overtake the failed one (a gap the member's cursor would
+            // commit unseen, §9), so they are rolled back unsent.
+            let mut push_failed: HashSet<ConnKey> = HashSet::new();
             for o in outs {
                 let Some(link) = self.links.get(o.ck.0).map(|s| s.link.clone()) else {
+                    self.on_sent(&o.ck, o.tag, Err(LinkError::Closed));
                     continue;
                 };
+                let push = matches!(o.tag, Tag::Push(_));
+                if push && push_failed.contains(&o.ck) {
+                    let e = std::io::Error::new(
+                        std::io::ErrorKind::WouldBlock,
+                        "an earlier item on this connection was not written",
+                    );
+                    self.on_sent(&o.ck, o.tag, Err(LinkError::Io(e)));
+                    continue;
+                }
                 let r = link.send(o.ck.1.clone(), o.frame).await;
+                if push && r.is_err() {
+                    push_failed.insert(o.ck.clone());
+                }
                 self.on_sent(&o.ck, o.tag, r);
             }
             self.flush();
@@ -1159,6 +1287,17 @@ impl Core {
         for (peer, _) in self.store.rx_streams()? {
             self.heard.insert(NodeId::from(peer));
         }
+        // §7.2 (2): stored `node1…` contacts, plus every outbox peer that
+        // still lacks a key (a forgotten contact's queued messages).
+        for id in self.store.pending_node_ids()? {
+            let id = NodeId::from(id);
+            if self.keys.get(&id).is_some() {
+                // Pinned in a crash window before the row was removed.
+                self.store.pending_node_id_remove(id.as_bytes())?;
+            } else {
+                self.pending_keys.insert(id);
+            }
+        }
         let missing: Vec<NodeId> = self
             .tx
             .values()
@@ -1171,27 +1310,27 @@ impl Core {
     }
 
     /// After a crash: an own message numbered and stored but whose outbox
-    /// rows were not yet written is planned again (never abandoned, §4).
+    /// rows were not yet written is planned again (never abandoned, §4) —
+    /// for the destination path's profile (§5; at start no link is
+    /// registered, so the 160 B default), else for a stream link when the
+    /// text exceeds Tier 1 at that size (only a stream path could have
+    /// accepted it when it was queued).
     fn requeue_orphans(&mut self) -> Result<()> {
-        let mut peers: BTreeSet<[u8; 32]> =
-            self.store.contacts()?.iter().map(|c| c.node_id).collect();
-        peers.extend(self.store.outbox_peers()?);
-        for peer in peers {
-            for row in self.store.messages_with(&peer, MAX_THREAD_SCAN)? {
-                if row.dir != Dir::Own || row.state == MsgState::Delivered {
-                    continue;
-                }
-                if self.tx.contains_key(&row.id) {
-                    continue;
-                }
-                let len = row.body.as_ref().map_or(0, Vec::len);
-                let seq = msg_seq(&row);
-                let count = plan(len, MAX_PACKET_LEN - PLAN_RESERVE, false, seq).unwrap_or(1);
-                for idx in 0..count {
-                    self.store.outbox_put(row.id, idx, count, &peer, None)?;
-                }
-                self.index_own(&row, count);
+        for row in self.store.own_unplanned()? {
+            if self.tx.contains_key(&row.id) {
+                continue;
             }
+            let peer = NodeId::from(row.peer);
+            let len = row.body.as_ref().map_or(0, Vec::len);
+            let seq = msg_seq(&row);
+            let (mtu, shim) = self.plan_mtu(&peer);
+            let count = plan(len, mtu, shim, seq)
+                .or_else(|_| plan(len, MAX_PACKET_LEN - PLAN_RESERVE, false, seq))
+                .unwrap_or(1);
+            for idx in 0..count {
+                self.store.outbox_put(row.id, idx, count, &row.peer, None)?;
+            }
+            self.index_own(&row, count);
         }
         Ok(())
     }
@@ -1238,19 +1377,19 @@ impl Core {
     fn add_link(&mut self, link: Arc<dyn Link>, dialer: Option<Arc<dyn Dialer>>) -> usize {
         let idx = self.links.len();
         self.link_index.insert(link.id(), idx);
-        let input = self.input.clone();
+        let frames = self.frames.clone();
         let rx_link = link.clone();
+        // Waits while the frame queue is full: the link's own bounded queue
+        // then fills and its readers stop (back-pressure, module doc).
         let task = tokio::spawn(async move {
             loop {
                 let (peer, frame) = rx_link.recv().await;
-                if input
-                    .send(Input::Frame {
-                        link: idx,
-                        peer,
-                        frame,
-                    })
-                    .is_err()
-                {
+                let inbound = Inbound {
+                    link: idx,
+                    peer,
+                    frame,
+                };
+                if frames.send(inbound).await.is_err() {
                     return;
                 }
             }
@@ -1361,6 +1500,21 @@ impl Core {
         let Some(hub) = self.home_hub() else { return };
         let cursor = self.store.cursor(hub.as_bytes()).unwrap_or(0);
         self.send_control(ck, &hub, Kind::MailboxFetch, encode_cursor(cursor));
+        // §9: the hub keeps max(cursor), so committing the stored cursor
+        // beside every fetch is idempotent and repairs a commit lost with a
+        // socket or a restart.
+        if cursor > 0
+            && self.send_control_tagged(
+                ck,
+                &hub,
+                Kind::MailboxCommit,
+                encode_cursor(cursor),
+                Tag::Commit(cursor),
+            )
+            && self.commit_owed.is_some_and(|c| c <= cursor)
+        {
+            self.commit_owed = None;
+        }
         let wanted: Vec<NodeId> = self.pending_keys.iter().copied().collect();
         for w in wanted {
             self.outq.push(Out {
@@ -1453,18 +1607,24 @@ impl Core {
         if hub == *peer {
             return Route::None(None);
         }
-        // §9: a contact whose (hinted) hub is not ours stays queued.
-        if let Ok(Some(c)) = self.store.contact(peer.as_bytes()) {
-            if let Some(h) = &c.home_hub {
-                if h.len() == 8 && h[..] != hub.as_bytes()[..8] {
-                    return Route::None(Some(Reason::HubNotYours));
-                }
-            }
-        }
         match self.sendable_conn(&hub) {
+            // The hub decides (`REJECT_UNKNOWN_DEST`): a contact's hint is a
+            // locator only (§7.3) and may be stale (module doc).
             Some(ck) => Route::Hub(ck, hub),
-            None => Route::None(None),
+            // §9 "their hub is not yours": the hint explains a queued one.
+            None => Route::None(
+                self.hinted_elsewhere(peer, &hub)
+                    .then_some(Reason::HubNotYours),
+            ),
         }
+    }
+
+    /// The contact's announce hints at a home hub that is not `hub`.
+    fn hinted_elsewhere(&self, peer: &NodeId, hub: &NodeId) -> bool {
+        matches!(
+            self.store.contact(peer.as_bytes()),
+            Ok(Some(c)) if c.home_hub.as_ref().is_some_and(|h| h.len() == 8 && h[..] != hub.as_bytes()[..8])
+        )
     }
 
     /// §5: the MTU a new message to `peer` is planned for, and the shim.
@@ -1508,25 +1668,52 @@ impl Core {
 
     // -- sealing -----------------------------------------------------------
 
-    fn send_control(&mut self, ck: &ConnKey, to: &NodeId, kind: Kind, payload: Vec<u8>) {
-        if let Some(keys) = self.keys.get(to) {
-            self.send_control_keys(ck, &keys, kind, payload);
+    /// Seal a control payload to `to` and queue it on `ck`. Returns whether
+    /// the frame was queued (keys known, sealing allowed, it fits the path).
+    fn send_control(&mut self, ck: &ConnKey, to: &NodeId, kind: Kind, payload: Vec<u8>) -> bool {
+        self.send_control_tagged(ck, to, kind, payload, Tag::None)
+    }
+
+    fn send_control_tagged(
+        &mut self,
+        ck: &ConnKey,
+        to: &NodeId,
+        kind: Kind,
+        payload: Vec<u8>,
+        tag: Tag,
+    ) -> bool {
+        match self.keys.get(to) {
+            Some(keys) => self.send_control_keys(ck, &keys, kind, payload, tag),
+            None => false,
         }
     }
 
-    fn send_control_keys(&mut self, ck: &ConnKey, to: &PeerKeys, kind: Kind, payload: Vec<u8>) {
+    fn send_control_keys(
+        &mut self,
+        ck: &ConnKey,
+        to: &PeerKeys,
+        kind: Kind,
+        payload: Vec<u8>,
+        tag: Tag,
+    ) -> bool {
         if !self.can_seal() {
-            return;
+            return false;
         }
         let inner = Inner::new(&self.own, kind, MsgSeq::CONTROL, payload);
         match seal_envelope(&*self.sealer, to, Priority::Control, &inner) {
-            Ok(sealed) if sealed.len() <= self.room(ck) => self.outq.push(Out {
-                ck: ck.clone(),
-                frame: Frame::sealed(sealed),
-                tag: Tag::None,
-            }),
-            Ok(_) => {}
-            Err(_) => self.counters.errors += 1,
+            Ok(sealed) if sealed.len() <= self.room(ck) => {
+                self.outq.push(Out {
+                    ck: ck.clone(),
+                    frame: Frame::sealed(sealed),
+                    tag,
+                });
+                true
+            }
+            Ok(_) => false,
+            Err(_) => {
+                self.counters.errors += 1;
+                false
+            }
         }
     }
 
@@ -1852,7 +2039,18 @@ impl Core {
 
     fn on_sent(&mut self, ck: &ConnKey, tag: Tag, r: Result<(), LinkError>) {
         match (tag, r) {
-            (Tag::Frag(id, _), Ok(())) | (Tag::Custody(id, _), Ok(())) => {
+            (Tag::Frag(id, _), Ok(())) => {
+                // Written to the peer itself: `sent`, and a custody reject's
+                // reason no longer explains it (module doc).
+                let clear = self.tx.get(&id).is_some_and(|m| {
+                    m.state == MsgState::Queued
+                        || (m.state == MsgState::Sent && m.reason.is_some() && !m.cancelled)
+                });
+                if clear {
+                    self.set_state(id, MsgState::Sent, None);
+                }
+            }
+            (Tag::Custody(id, _), Ok(())) => {
                 if self
                     .tx
                     .get(&id)
@@ -1861,7 +2059,18 @@ impl Core {
                     self.set_state(id, MsgState::Sent, None);
                 }
             }
-            (Tag::None, Ok(())) => {}
+            (Tag::None | Tag::Push(_) | Tag::Commit(_), Ok(())) => {}
+            (Tag::Push(seq), Err(e)) => {
+                // Not written: the stream restarts just below it.
+                if let Some(c) = self.conns.get_mut(ck) {
+                    c.push.unpush(seq);
+                }
+                self.on_send_error(ck, &e);
+            }
+            (Tag::Commit(cursor), Err(e)) => {
+                self.commit_owed = Some(self.commit_owed.unwrap_or(0).max(cursor));
+                self.on_send_error(ck, &e);
+            }
             (Tag::Frag(id, idx), Err(e)) => {
                 self.tracker.set_outstanding(id, idx, false);
                 let _ = self.store.outbox_set_outstanding(id, idx, false);
@@ -1996,7 +2205,7 @@ impl Core {
         if self.pending_keys.contains(&id) {
             // §7.2 (2): the card answer, verified against the expected NodeId.
             if self.pin(&ann, bytes, Trust::Oob).is_ok() {
-                self.pending_keys.remove(&id);
+                // `pin` cleared the pending entry.
                 self.contact_event(id, ContactChange::Updated);
                 self.pump_set.insert(id);
             }
@@ -2024,7 +2233,8 @@ impl Core {
     }
 
     /// Pin a verified announce at `trust` (monotone: the store keeps the
-    /// stronger trust and the alias).
+    /// stronger trust and the alias); a pending `node1…` entry for it is
+    /// cleared.
     fn pin(&mut self, ann: &Announce, bytes: &[u8], trust: Trust) -> Result<()> {
         let id = ann.node_id();
         let mut row = contact_row(ann, bytes, trust);
@@ -2040,6 +2250,9 @@ impl Core {
             Err(e) => return Err(e.into()),
         }
         self.rebuild_keys();
+        // Keys are known now: a `node1…` contact is no longer waiting (an
+        // enrollment or an accepted request may pin it too).
+        self.pending_clear(&id);
         Ok(())
     }
 
@@ -2132,7 +2345,12 @@ impl Core {
             }
         }
         // It sealed to our key: it holds our card (no INTRO needed to it).
-        self.heard.insert(sender);
+        // Only a contact is remembered here; an INTRO sender only once its
+        // request is filed (`on_data`) — a refused one leaves nothing but a
+        // counter (§7.2 (3), §18.1).
+        if self.keys.get(&sender).is_some() {
+            self.heard.insert(sender);
+        }
         let attributed = ck
             .as_ref()
             .and_then(|k| self.conns.get(k))
@@ -2202,8 +2420,13 @@ impl Core {
                 return;
             };
             match self.store.request_put(&sb, card) {
-                Ok(RequestPut::Filed) => self.contact_event(sender, ContactChange::Request),
-                Ok(RequestPut::AlreadyPending) => {}
+                Ok(RequestPut::Filed) => {
+                    self.heard.insert(sender);
+                    self.contact_event(sender, ContactChange::Request);
+                }
+                Ok(RequestPut::AlreadyPending) => {
+                    self.heard.insert(sender);
+                }
                 Ok(RequestPut::Refused(_)) => {
                     // Dropped without an ACK and counted (§7.2 (3)).
                     self.counters.refused_requests += 1;
@@ -2369,6 +2592,7 @@ impl Core {
         }
         let frags = self.frags_of(sender);
         for (id, idx) in self.tracker.infer_losses(&frags, evidence) {
+            self.counters.inferred_lost += 1;
             let _ = self.store.outbox_set_outstanding(id, idx, false);
         }
         self.pump_set.insert(*sender);
@@ -2444,12 +2668,17 @@ impl Core {
             }
         };
         for it in items {
-            self.send_control(
+            // Streamed only once queued; an item that cannot be queued stops
+            // the stream (in order, no gaps — module doc).
+            if !self.send_control_tagged(
                 ck,
                 dest,
                 Kind::MailboxItem,
                 encode_item(it.custody_seq, &it.bytes),
-            );
+                Tag::Push(it.custody_seq),
+            ) {
+                break;
+            }
             self.counters.items_pushed += 1;
             if let Some(c) = self.conns.get_mut(ck) {
                 c.push.pushed(it.custody_seq);
@@ -2520,6 +2749,8 @@ impl Core {
                 Ok(ann) if ann.node_id() == member.node_id => {
                     match self.pin(&ann, card, Trust::Enrolled) {
                         Ok(()) => {
+                            // It sealed to our key: it holds our card.
+                            self.heard.insert(member.node_id);
                             self.contact_event(member.node_id, ContactChange::Added);
                             self.fabric_changed();
                             EnrollStatus::Ok
@@ -2533,16 +2764,24 @@ impl Core {
             (s, _) => s,
         };
         let answer = if status == EnrollStatus::Ok {
+            // §7.3: below what is still held for this member (module doc).
+            let floor = match self.store.custody_floor(member.node_id.as_bytes()) {
+                Ok(f) => f,
+                Err(_) => {
+                    self.counters.errors += 1;
+                    0
+                }
+            };
             EnrollOk {
                 status,
                 card: Some(self.own_announce.clone()),
-                custody_seq_floor: self.store.custody_high().unwrap_or(0),
+                custody_seq_floor: floor,
             }
         } else {
             EnrollOk::refusal(status)
         };
         if let Ok(bytes) = answer.encode() {
-            self.send_control_keys(ck, &member, Kind::EnrollOk, bytes);
+            self.send_control_keys(ck, &member, Kind::EnrollOk, bytes, Tag::None);
         }
     }
 
@@ -2618,6 +2857,7 @@ impl Core {
                 Some((Ok(ann), card)) if ann.node_id() == *sender => {
                     match self.pin(&ann, card, Trust::Enrolled) {
                         Ok(()) => {
+                            self.heard.insert(*sender);
                             self.settings.home_hub = Some(HomeHub {
                                 node_id: *sender,
                                 address: Some(en.address),
@@ -2794,52 +3034,53 @@ impl Core {
         Ok(peers)
     }
 
+    /// Thread list: per peer the newest message and SQL counts (never a
+    /// whole history in memory).
     fn threads(&self) -> Result<Vec<ThreadView>> {
         let mut out = Vec::new();
         for peer in self.thread_peers()? {
-            let rows = self.store.messages_with(peer.as_bytes(), MAX_THREAD_SCAN)?;
-            if rows.is_empty() {
+            let Some(last) = self.store.messages_newest(peer.as_bytes(), 1)?.pop() else {
                 continue;
-            }
+            };
             let read = self.read_marks.get(&peer).copied().unwrap_or(0);
-            let mut states = StateCounts::default();
-            let mut unread = 0;
-            for r in &rows {
-                match (r.dir, r.state) {
-                    (Dir::Own, MsgState::Queued) => states.queued += 1,
-                    (Dir::Own, MsgState::Sent) => states.sent += 1,
-                    (Dir::Own, MsgState::Relayed) => states.relayed += 1,
-                    (Dir::Own, MsgState::Delivered) => states.delivered += 1,
-                    (Dir::In, _) if r.local_seq > read => unread += 1,
-                    _ => {}
-                }
-            }
+            let c = self.store.thread_counts(peer.as_bytes(), read)?;
             let alias = self.store.contact(peer.as_bytes())?.and_then(|c| c.alias);
             out.push(ThreadView {
                 peer,
                 alias,
                 request: self.request_pending(&peer),
-                unread,
-                last: rows.last().map(message_view),
-                states,
+                unread: c.unread,
+                last: Some(message_view(&last)),
+                states: StateCounts {
+                    queued: c.queued,
+                    sent: c.sent,
+                    relayed: c.relayed,
+                    delivered: c.delivered,
+                },
             });
         }
         out.sort_by_key(|t| std::cmp::Reverse(t.last.as_ref().map_or(0, |m| m.local_seq)));
         Ok(out)
     }
 
+    /// The newest `limit` messages (one more is read to answer `more`).
     fn thread(&self, peer: NodeId, limit: usize) -> Result<ThreadPage> {
-        let rows = self.store.messages_with(peer.as_bytes(), MAX_THREAD_SCAN)?;
-        let known = self.thread_peers()?.contains(&peer);
-        if rows.is_empty() && !known {
+        let limit = limit.max(1);
+        let mut rows = self
+            .store
+            .messages_newest(peer.as_bytes(), limit.saturating_add(1))?;
+        if rows.is_empty() && !self.thread_peers()?.contains(&peer) {
             return Err(FabricError::NotFound);
         }
-        let skip = rows.len().saturating_sub(limit.max(1));
+        let more = rows.len() > limit;
+        if more {
+            rows.remove(0);
+        }
         Ok(ThreadPage {
             peer,
             request: self.request_pending(&peer),
-            messages: rows[skip..].iter().map(message_view).collect(),
-            more: skip > 0,
+            messages: rows.iter().map(message_view).collect(),
+            more,
         })
     }
 
@@ -2912,7 +3153,7 @@ impl Core {
             }
             AnnounceVerdict::Own => return Err(CardError::OwnCard.into()),
         }
-        if self.pending_keys.remove(&id) {
+        if self.pending_clear(&id) {
             self.contact_event(id, ContactChange::Updated);
         }
         if self.request_pending(&id) {
@@ -2932,7 +3173,10 @@ impl Core {
         if self.store.contact(id.as_bytes())?.is_some() || self.request_pending(&id) {
             return self.contact_view(&id);
         }
-        if self.pending_keys.insert(id) {
+        // §7.2 (2): "the node stores the NodeId" (FULL commit) before it is
+        // listed or asked for.
+        let stored = self.store.pending_node_id_put(id.as_bytes())?;
+        if self.pending_keys.insert(id) || stored {
             self.contact_event(id, ContactChange::Added);
             if let Some(hub) = self.home_hub() {
                 if let Some(ck) = self.sendable_conn(&hub) {
@@ -3018,13 +3262,58 @@ impl Core {
             self.store.request_remove(id.as_bytes())?;
             found = true;
         }
+        found |= self.store.pending_node_id_remove(id.as_bytes())?;
         found |= self.pending_keys.remove(&id);
         if !found {
             return Err(FabricError::NotFound);
         }
+        if Some(id) == self.home_hub() {
+            self.leave_hub();
+        }
+        if self.enrolling.as_ref().is_some_and(|e| e.hub == id) {
+            if let Some(mut e) = self.enrolling.take() {
+                if let Some(r) = e.reply.take() {
+                    let _ = r.send(Err(FabricError::Invalid("the hub was forgotten")));
+                }
+            }
+        }
         self.rebuild_keys();
         self.contact_event(id, ContactChange::Removed);
         Ok(())
+    }
+
+    /// Forgetting the home hub ends the membership here: no home hub in the
+    /// settings (persisted by the daemon), its dial released, nothing owed
+    /// to it; queued messages wait for a direct path.
+    fn leave_hub(&mut self) {
+        let Some(h) = self.settings.home_hub.take() else {
+            return;
+        };
+        if let (Some(addr), Some(d)) = (h.address, self.dialer()) {
+            d.release(addr);
+        }
+        self.commit_owed = None;
+        self.custody_inflight.clear();
+        self.custody_pending.clear();
+        for m in self.tx.values_mut() {
+            m.hub_rejected = false;
+        }
+        self.pump_all();
+        self.settings_changed();
+        self.fabric_changed();
+    }
+
+    /// The `node1…` contact's card arrived (or it was scanned): it leaves
+    /// the pending set, in memory and in the store (the in-memory set holds
+    /// every stored row after `recover`). Returns whether it was pending.
+    fn pending_clear(&mut self, id: &NodeId) -> bool {
+        if !self.pending_keys.remove(id) {
+            return false;
+        }
+        if self.store.pending_node_id_remove(id.as_bytes()).is_err() {
+            self.counters.errors += 1;
+        }
+        true
     }
 
     fn status(&self) -> Result<FabricStatus> {
@@ -3294,6 +3583,237 @@ fn pending_view(id: NodeId) -> ContactView {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::envelope::MIN_PACKET_LEN;
+    use crate::keys::StoreKey;
+    use crate::link::lossy::{self, EndSpec, LossyConfig};
+    use crate::store::OpenParams;
+    use crate::test_double::TestSealer;
+
+    struct TestNode {
+        sealer: Arc<TestSealer>,
+        f: Fabric,
+        _dir: tempfile::TempDir,
+    }
+
+    fn test_node(label: &str, settings: FabricSettings) -> TestNode {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let sealer = Arc::new(TestSealer::from_label(label));
+        let (store, decision) = Store::open(
+            dir.path(),
+            &StoreKey::from_bytes([0x5e; 32]),
+            &OpenParams {
+                announce_last: sealer.announce_last(),
+                restore_floor_set: false,
+            },
+        )
+        .expect("store");
+        let f = Fabric::start(sealer.clone(), store, decision, settings).expect("fabric");
+        TestNode {
+            sealer,
+            f,
+            _dir: dir,
+        }
+    }
+
+    /// Pin `who`'s card on `node` at `trust`.
+    async fn pin_on(node: &TestNode, who: &TestSealer, trust: Trust) {
+        let card = who.own_announce();
+        node.f
+            .call(move |c| {
+                let ann = verify_card(&card).expect("card");
+                c.pin(&ann, &card, trust).expect("pinned");
+            })
+            .await
+            .expect("actor");
+    }
+
+    #[tokio::test]
+    async fn a_refused_intro_leaves_no_heard_entry() {
+        let bob = test_node("bob", FabricSettings::default());
+        let carol = TestSealer::from_label("carol");
+        let intro = |n: u32| {
+            let mut inner = Inner::new(
+                &carol.node_id(),
+                Kind::Msg,
+                MsgSeq::new(1, n),
+                MessageBody::text("hi").encode(),
+            );
+            inner.card = Some(carol.own_announce());
+            seal_envelope(&carol, &bob.sealer.keys(), Priority::Interactive, &inner)
+                .expect("sealed")
+        };
+        let (first, second) = (intro(1), intro(2));
+        let id = carol.node_id();
+        let (refused_heard, refused, filed_heard) = bob
+            .f
+            .call(move |c| {
+                c.store.set_request_quota(Some(0)).expect("quota");
+                c.on_sealed(None, &first);
+                let after_refusal = c.heard.contains(&id);
+                let refused = c.counters.refused_requests;
+                c.store.set_request_quota(None).expect("quota");
+                c.on_sealed(None, &second);
+                (after_refusal, refused, c.heard.contains(&id))
+            })
+            .await
+            .expect("actor");
+        assert_eq!(refused, 1);
+        assert!(
+            !refused_heard,
+            "a refused INTRO leaves nothing but a counter"
+        );
+        assert!(filed_heard, "a filed request's sender holds our card");
+    }
+
+    #[tokio::test]
+    async fn a_commit_is_kept_until_queued_and_resent_beside_the_fetch() {
+        let hub = TestSealer::from_label("hub");
+        let settings = FabricSettings {
+            home_hub: Some(HomeHub {
+                node_id: hub.node_id(),
+                address: None,
+            }),
+            ..FabricSettings::default()
+        };
+        let m = test_node("member", settings);
+        pin_on(&m, &hub, Trust::Enrolled).await;
+        let hub_id = hub.node_id();
+        let ck: ConnKey = (7, PeerAddr::Opaque(b"hub".to_vec()));
+        let (kept, frames, owed_after) =
+            m.f.call(move |c| {
+                // The hub socket died just before the flush: still owed.
+                c.commit_owed = Some(5);
+                c.flush();
+                let kept = c.commit_owed;
+                // Link-up: the stored cursor is committed beside the fetch.
+                c.store
+                    .advance_cursor(hub_id.as_bytes(), 9)
+                    .expect("cursor");
+                c.conns.insert(
+                    ck.clone(),
+                    Conn {
+                        attributed: Some(hub_id),
+                        ..Conn::default()
+                    },
+                );
+                c.outq.clear();
+                c.hub_link_up(&ck);
+                c.flush();
+                let frames: Vec<Vec<u8>> = std::mem::take(&mut c.outq)
+                    .into_iter()
+                    .filter(|o| o.ck == ck)
+                    .map(|o| o.frame.bytes)
+                    .collect();
+                c.conns.remove(&ck);
+                (kept, frames, c.commit_owed)
+            })
+            .await
+            .expect("actor");
+        assert_eq!(kept, Some(5), "an unsent commit stays owed");
+        assert_eq!(owed_after, None);
+        let mk = m.sealer.keys();
+        let seen: Vec<(Kind, u64)> = frames
+            .iter()
+            .map(|b| {
+                let o = open_envelope(&hub, b, &|_| vec![mk]).expect("opens");
+                (
+                    o.inner.kind,
+                    decode_cursor(&o.inner.payload).expect("cursor"),
+                )
+            })
+            .collect();
+        assert_eq!(
+            seen,
+            vec![(Kind::MailboxFetch, 9), (Kind::MailboxCommit, 9)]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_push_counts_only_once_queued_and_rolls_back_on_a_send_error() {
+        let settings = FabricSettings {
+            hub_role: true,
+            ..FabricSettings::default()
+        };
+        let h = test_node("hub", settings);
+        let (m1, m2) = (TestSealer::from_label("m1"), TestSealer::from_label("m2"));
+        pin_on(&h, &m1, Trust::Enrolled).await;
+        pin_on(&h, &m2, Trust::Enrolled).await;
+        // A 400 B hub ↔ member path (an L6-sized link).
+        let (far_events, _far_rx) = mpsc::unbounded_channel();
+        let small = LossyConfig {
+            profile: PathProfile {
+                mtu_bytes: 400,
+                ..PathProfile::unknown()
+            },
+            ..LossyConfig::default()
+        };
+        let (end, _far) = lossy::pair(
+            EndSpec {
+                id: LinkId::new("small"),
+                announce: h.sealer.own_announce(),
+                events: h.f.link_events(),
+                cfg: small,
+            },
+            EndSpec {
+                id: LinkId::new("far"),
+                announce: m1.own_announce(),
+                events: far_events,
+                cfg: LossyConfig::default(),
+            },
+        );
+        let idx = h.f.add_link(end, None).await.expect("link");
+        let (id1, id2) = (m1.node_id(), m2.node_id());
+        let (stuck, streamed, rolled) =
+            h.f.call(move |c| {
+                let window = |c: &Core, ck: &ConnKey| {
+                    let w = &c.conns[ck].push;
+                    (w.high, w.inflight.len())
+                };
+                // m1: an item too large for this path, then one that fits.
+                let ck1: ConnKey = (idx, PeerAddr::Opaque(b"m1".to_vec()));
+                c.store
+                    .custody_put(id1.as_bytes(), &[1u8; 400])
+                    .expect("put");
+                c.store
+                    .custody_put(id1.as_bytes(), &[2u8; MIN_PACKET_LEN])
+                    .expect("put");
+                let conn = c.conns.entry(ck1.clone()).or_default();
+                conn.attributed = Some(id1);
+                conn.push.fetch(0);
+                c.outq.clear();
+                c.stream_items(&ck1, &id1);
+                let stuck = (window(c, &ck1), c.outq.len(), c.counters.items_pushed);
+                // m2: two items that fit; the first frame's write fails.
+                let ck2: ConnKey = (idx, PeerAddr::Opaque(b"m2".to_vec()));
+                c.store
+                    .custody_put(id2.as_bytes(), &[3u8; MIN_PACKET_LEN])
+                    .expect("put");
+                c.store
+                    .custody_put(id2.as_bytes(), &[4u8; MIN_PACKET_LEN])
+                    .expect("put");
+                let conn = c.conns.entry(ck2.clone()).or_default();
+                conn.attributed = Some(id2);
+                conn.push.fetch(0);
+                c.stream_items(&ck2, &id2);
+                let streamed = (window(c, &ck2), c.outq.len());
+                let e = std::io::Error::new(std::io::ErrorKind::WouldBlock, "write queue full");
+                c.on_sent(&ck2, Tag::Push(3), Err(LinkError::Io(e)));
+                let rolled = window(c, &ck2);
+                c.outq.clear();
+                c.conns.remove(&ck1);
+                c.conns.remove(&ck2);
+                (stuck, streamed, rolled)
+            })
+            .await
+            .expect("actor");
+        assert_eq!(
+            stuck,
+            ((0, 0), 0, 0),
+            "nothing counts as streamed, and nothing overtakes the stuck item"
+        );
+        assert_eq!(streamed, ((4, 2), 2));
+        assert_eq!(rolled, (2, 0), "the stream restarts just below item 3");
+    }
 
     #[test]
     fn sealed_len_matches_the_size_table() {

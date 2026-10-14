@@ -324,13 +324,13 @@ The member sends `ENROLL` sealed to the hub with the `INTRO` flag set — its ca
 provisionally and verifies `pair_mac` before parsing the payload (§7.2 (3)); the payload is `{code}`. The hub verifies
 `BLAKE2b-128(key = code_secret, data = "111/enroll/v1" ‖ member NodeId ‖ code)` in constant time (`code_secret` = 32
 random bytes minted with the offer), stores the contact as
-`enrolled`, answers `ENROLL_OK {hub card, custody_seq_floor}`. Code rules (mirroring the pair code, D15): single-use,
+`enrolled`, answers `ENROLL_OK {hub card, custody_seq_floor}` — *as built (F1 bounce):* `custody_seq_floor` = (lowest custody_seq still held uncommitted for that member) − 1 when any is held, else the hub's `custody_high`, so a member that re-enrols (new device, fresh offer) fetches what the hub already holds for it; the member applies `max(cursor, floor)`. Code rules (mirroring the pair code, D15): single-use,
 invalidated when the hub owner dismisses the offer, attempt lockout after 5 failures — a defense, carved out of "no
 policy limits" like the pair code; `DELETE /fabric/hub/offer` dismisses an outstanding offer (loopback-only). Enrollment is the owner's **access list**, not a rate policy; a hub refuses
 `CUSTODY_PUT` from unenrolled nodes with `REJECT_UNENROLLED`. A node has one home hub in v1 (replicas = deferred A+).
 
 `appdata` v1 (L2 amendment A8): `[ver=1][roles u16 LE][reserved]` — bit 0 mailbox (accepts custody) · bit 1 always-on
-hub · bit 2 LoRa-attached; optional 8 B truncated home-hub id (locator only). Layer 7 appends TLVs after v1.
+hub · bit 2 LoRa-attached; optional 8 B truncated home-hub id (locator only — *as built:* it never pre-empts routing; when our hub is reachable the `CUSTODY_PUT` is sent and the hub's `CUSTODY_ACK` decides, so a stale hint cannot strand a message; the hint only supplies the `hub_not_yours` reason while the hub is unreachable). Layer 7 appends TLVs after v1.
 
 ## 8. Links
 

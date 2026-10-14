@@ -1,12 +1,14 @@
 //! §5 / §6.1 over the test-only `lossy-loopback` link at a forced 160 B
 //! profile (§20 G1): Tier-1 fragments with loss and reorder (SACK
-//! retransmit, ≤ 16 outstanding), recovery after the receiver evicts more
+//! retransmit, ≤ 16 outstanding), a single loss inferred from later SACKs
+//! and resent with no event at all, recovery after the receiver evicts more
 //! than 16 partials, duplicates re-ACKed and never redelivered, the bounded
 //! range list (deferral) with every retransmitted packet acknowledged, and
 //! `restore_pending`.
 
 mod common;
 
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -42,7 +44,9 @@ async fn pair_nodes(
 
 /// Drive until every id is delivered. Retries happen only on events: when
 /// nothing moved for a while the harness plays the link event (held frames
-/// released, `retry_all`), as the daemon does on fabric events.
+/// released, `retry_all`), as the daemon does on fabric events. `retry_all`
+/// presumes everything lost but never counts an inferred loss
+/// (`Counters::inferred_lost`), so the tests can tell the two apart.
 async fn drive(a: &Fabric, ends: &[&Arc<LossyEnd>], ids: &[i64], secs: u64) {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(secs);
     let mut last = usize::MAX;
@@ -116,9 +120,48 @@ async fn tier1_over_lossy_loopback_with_loss_and_reorder() {
         "≤ 16 outstanding fragments per peer: {}",
         st.counters.max_outstanding
     );
-    assert!(st.counters.retransmits > 0, "SACK retransmit happened");
+    assert!(st.counters.retransmits > 0, "retransmissions happened");
+    // Losses were inferred from SACK evidence, which the harness's
+    // `retry_all` never counts: a broken `infer_losses` cannot hide behind
+    // the hammer. (The next test pins an inferred loss resent with no event
+    // at all.)
+    assert!(
+        st.counters.inferred_lost > 0,
+        "SACK-inferred losses: {:?}",
+        st.counters
+    );
     assert!(ea.stats().dropped > 0 && ea.stats().reordered > 0);
     assert!(eb.stats().sent > 0, "ACKs crossed the same lossy path");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_lost_fragment_is_inferred_from_later_sacks_and_resent_without_events() {
+    let d = Dirs::new();
+    // The third frame Alice writes (fragment 2 of 13) is lost once; nothing
+    // else is. Bob's SACKs of the later fragments are the only evidence.
+    let sent = Arc::new(AtomicUsize::new(0));
+    let seen = sent.clone();
+    let lose_third: DropFilter = Arc::new(move |_| seen.fetch_add(1, Ordering::SeqCst) == 2);
+    let cfg_a = LossyConfig {
+        filter: Some(lose_third),
+        ..LossyConfig::default()
+    };
+    let (_ai, a, bi, b, _ea, _eb) = pair_nodes(&d, cfg_a, LossyConfig::default()).await;
+    let text = format!("x:{}", "x".repeat(880));
+    let id = a.send(bi.id(), &text, None).await.unwrap();
+    // No harness event at all (no `retry`, no `retry_all`, no link change):
+    // only the SACK evidence can get the lost fragment resent.
+    until_state(&a, id, MsgState::Delivered, 30).await;
+    let c = a.status().await.unwrap().counters;
+    assert_eq!(
+        (c.inferred_lost, c.retransmits),
+        (1, 1),
+        "one loss inferred from SACK evidence, one fragment resent"
+    );
+    assert_eq!(sent.load(Ordering::SeqCst), 14, "13 fragments + 1 resend");
+    let got = inbox(&b, a.node_id()).await;
+    assert_eq!(got.len(), 1);
+    assert_eq!(got[0].text.as_deref(), Some(text.as_str()));
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

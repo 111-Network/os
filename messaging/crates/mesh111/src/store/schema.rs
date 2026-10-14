@@ -28,16 +28,22 @@
 //!   `local_seq`, `pinned`, `refetchable`, `superseded`, `present`). A public
 //!   object never carries an `object_key`; a private one may lack it (a relay
 //!   or hub holds the ciphertext keyless, §10.3 / §11).
+//! - v2 (F1 bounce): `pending_node_ids` — §7.2 (2) "the node **stores** the
+//!   NodeId": a contact added by `node1…` only, waiting for its card (no key
+//!   material yet, so it cannot be a `contacts` row). A row leaves when the
+//!   card is pinned or the user forgets the contact; never pruned (§10.4 (4):
+//!   contacts are never pruned). Read marks stay in memory in v1 (recorded in
+//!   the fabric module doc).
 
 use rusqlite::Connection;
 
 use super::{Result, StoreError};
 
 /// The schema version this build writes.
-pub const SCHEMA_VERSION: i64 = 1;
+pub const SCHEMA_VERSION: i64 = 2;
 
 /// Migration `i` takes `user_version` from `i` to `i + 1`.
-const MIGRATIONS: &[&str] = &[V1];
+const MIGRATIONS: &[&str] = &[V1, V2];
 
 const V1: &str = "
 CREATE TABLE settings (
@@ -168,6 +174,14 @@ CREATE TABLE blobs (
 CREATE TABLE requests (
     node_id   BLOB PRIMARY KEY NOT NULL CHECK (length(node_id) = 32),
     announce  BLOB NOT NULL,
+    local_seq INTEGER NOT NULL
+) STRICT, WITHOUT ROWID;
+";
+
+/// v2: `node1…` contacts waiting for their card (§7.2 (2), module doc).
+const V2: &str = "
+CREATE TABLE pending_node_ids (
+    node_id   BLOB PRIMARY KEY NOT NULL CHECK (length(node_id) = 32),
     local_seq INTEGER NOT NULL
 ) STRICT, WITHOUT ROWID;
 ";
