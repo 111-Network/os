@@ -41,3 +41,9 @@ All 7 forks decided (D19, 2026-10-14). Spec draft: `os/messaging/README.md`. Nex
   `crypto` (§3–§12, §18, L2 amendments) · `panels` (§13–§15 proxy + Meshtastic) · `integration` (scope, seams, buildability).
 - Reviews land in `plan/layer-5-review/{crypto,panels,integration}.md`; the lead's triage goes to `plan/layer-5-review.md`.
 - Resume: `Workflow({scriptPath: "<script copy, absolute>", resumeFromRunId: "wf_c4054cfb-f80"})`.
+
+## Run 4 — build Wave 0 (2026-10-14)
+
+- Workflow run id: `wf_3da6437a-9fa` · script copy: `messaging/.workflow-wave-0.js` · 8 agents: I1, C2, C3, C4 (opus) · C1, C5, C6, C7 (sonnet).
+- Resume: `Workflow({scriptPath: "<script copy, absolute>", resumeFromRunId: "wf_3da6437a-9fa"})`. Agents never commit; the lead
+  reviews each task (run its check, read the diff) and commits one per task — `messaging/TASKS.md` is the board.
