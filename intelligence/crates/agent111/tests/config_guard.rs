@@ -1,5 +1,7 @@
 //! T1 integration: config precedence matrix, env-file errors, flag errors,
 //! the model-base guard table, and `Store::init` permissions/idempotence.
+//! Layer 5 (messaging §17): the daemon API URL chain + loopback guard, and
+//! the daemon token (process environment only, validated, never echoed).
 //!
 //! Everything goes through the pure `Config::resolve` with in-memory env and
 //! filesystem closures — no test touches the real process env.
@@ -8,7 +10,10 @@ use std::collections::HashMap;
 use std::io;
 use std::path::PathBuf;
 
-use agent111::config::{host_is_loopback, host_is_private, Config, DEFAULT_ENV_FILE};
+use agent111::config::{
+    host_is_loopback, host_is_private, Config, DaemonToken, DAEMON_TOKEN_ENV,
+    DEFAULT_DAEMON_API_URL, DEFAULT_ENV_FILE,
+};
 use agent111::store::Store;
 
 fn resolve(env: &[(&str, &str)], argv: &[&str], files: &[(&str, &str)]) -> anyhow::Result<Config> {
@@ -290,4 +295,142 @@ fn store_init_under_a_fresh_tempdir() {
     for sub in ["conversations", "proposals", "tasks"] {
         assert!(dir.join(sub).is_dir(), "missing {sub}");
     }
+}
+
+// ------------------------------------------- Layer 5 daemon API (§17)
+
+const TOKEN: &str = "9d2e4f6a8b0c1d3e5f7a9b1c3d5e7f9a0b2c4d6e8f0a1b3c5d7e9f1a2b4c6d8e";
+
+#[test]
+fn daemon_api_defaults_to_loopback_and_no_token() {
+    let cfg = resolve(&[], &[], &[]).unwrap();
+    assert_eq!(cfg.daemon_api_url, DEFAULT_DAEMON_API_URL);
+    assert_eq!(cfg.daemon_api_url, "http://127.0.0.1:11180/api/v1");
+    assert!(cfg.daemon_token.is_none());
+    assert_eq!(DAEMON_TOKEN_ENV, "AGENT111_DAEMON_TOKEN");
+}
+
+#[test]
+fn daemon_api_url_follows_the_precedence_chain() {
+    let key = "AGENT111_DAEMON_API_URL";
+    let file = format!("{key}=http://127.0.0.2:11180/api/v1\n");
+    let from_file = resolve(&[], &[], &[(DEFAULT_ENV_FILE, &file)]).unwrap();
+    assert_eq!(from_file.daemon_api_url, "http://127.0.0.2:11180/api/v1");
+    let from_env = resolve(
+        &[(key, "http://127.0.0.3:11180/api/v1")],
+        &[],
+        &[(DEFAULT_ENV_FILE, &file)],
+    )
+    .unwrap();
+    assert_eq!(from_env.daemon_api_url, "http://127.0.0.3:11180/api/v1");
+    let from_flag = resolve(
+        &[(key, "http://127.0.0.3:11180/api/v1")],
+        &["--daemon-api-url=http://[::1]:11180/api/v1/"],
+        &[(DEFAULT_ENV_FILE, &file)],
+    )
+    .unwrap();
+    assert_eq!(
+        from_flag.daemon_api_url, "http://[::1]:11180/api/v1",
+        "trailing slash trimmed"
+    );
+}
+
+#[test]
+fn daemon_api_guard_accepts_loopback_ip_literals_only() {
+    for url in [
+        "http://127.0.0.1:11180/api/v1",
+        "http://127.0.0.1/api/v1",
+        "http://127.9.9.9:8080/api/v1",
+        "http://[::1]:11180/api/v1",
+        "http://[::1]/api/v1",
+    ] {
+        let cfg = resolve(&[], &["--daemon-api-url", url], &[]);
+        assert!(cfg.is_ok(), "{url}: {:#}", cfg.unwrap_err());
+    }
+    for (url, needle) in [
+        ("https://127.0.0.1:11180/api/v1", "http://"),
+        ("127.0.0.1:11180/api/v1", "http://"),
+        ("http://localhost:11180/api/v1", "not a loopback IP literal"),
+        ("http://111.localhost/api/v1", "not a loopback IP literal"),
+        (
+            "http://127.0.0.1.evil.example/api/v1",
+            "not a loopback IP literal",
+        ),
+        ("http://10.0.0.1:11180/api/v1", "not loopback"),
+        ("http://192.168.1.20:11180/api/v1", "not loopback"),
+        ("http://8.8.8.8/api/v1", "not loopback"),
+        ("http://[fe80::1]:11180/api/v1", "not loopback"),
+        ("http://user:pw@127.0.0.1:11180/api/v1", "userinfo"),
+        ("http://127.0.0.1:11180/api/v1?x=1", "query"),
+        ("http://127.0.0.1:11180/api/v1#frag", "query or fragment"),
+        ("http://127.0.0.1:99999/api/v1", "port"),
+        ("http://127.0.0.1:/api/v1", "port"),
+        ("http://", "loopback"),
+    ] {
+        let err = resolve(&[], &["--daemon-api-url", url], &[]).unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("refusing daemon API URL"), "{url}: {msg}");
+        assert!(msg.contains(needle), "{url}: {msg}");
+    }
+    // The LAN binding never widens it.
+    let err = resolve(
+        &[],
+        &[
+            "--lan",
+            "--daemon-api-url",
+            "http://192.168.1.20:11180/api/v1",
+        ],
+        &[],
+    )
+    .unwrap_err();
+    assert!(format!("{err:#}").contains("not loopback"));
+}
+
+#[test]
+fn daemon_token_comes_from_the_process_environment_only() {
+    let cfg = resolve(&[(DAEMON_TOKEN_ENV, TOKEN)], &[], &[]).unwrap();
+    assert_eq!(cfg.daemon_token.as_ref().unwrap().expose(), TOKEN);
+
+    // Empty means unset, like every other key.
+    let cfg = resolve(&[(DAEMON_TOKEN_ENV, "")], &[], &[]).unwrap();
+    assert!(cfg.daemon_token.is_none());
+
+    // The env file is not a token source (a per-spawn secret is never at rest).
+    let file = format!("{DAEMON_TOKEN_ENV}={TOKEN}\n");
+    let cfg = resolve(&[], &[], &[(DEFAULT_ENV_FILE, &file)]).unwrap();
+    assert!(cfg.daemon_token.is_none());
+
+    // No flag either: argv is readable by every local user.
+    let err = resolve(&[], &["--daemon-token", TOKEN], &[]).unwrap_err();
+    let msg = format!("{err:#}");
+    assert!(msg.contains("--daemon-token"), "{msg}");
+    assert!(msg.contains(DAEMON_TOKEN_ENV), "{msg}");
+    assert!(!msg.contains(TOKEN), "token echoed: {msg}");
+}
+
+#[test]
+fn malformed_daemon_token_is_refused_without_echoing_it() {
+    let long = "a".repeat(257);
+    for bad in [
+        "not-hex-at-all",
+        "abcd\r\nX-Injected: 1",
+        "abc def",
+        "\u{e9}\u{e9}",
+        long.as_str(),
+    ] {
+        let err = resolve(&[(DAEMON_TOKEN_ENV, bad)], &[], &[]).unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains(DAEMON_TOKEN_ENV), "{msg}");
+        assert!(msg.contains("malformed"), "{msg}");
+        assert!(!msg.contains(bad), "value echoed: {msg}");
+    }
+    assert!(DaemonToken::parse(&"A".repeat(256)).is_ok());
+}
+
+#[test]
+fn daemon_token_is_redacted_in_debug_output() {
+    let cfg = resolve(&[(DAEMON_TOKEN_ENV, TOKEN)], &[], &[]).unwrap();
+    let dbg = format!("{cfg:?}");
+    assert!(!dbg.contains(TOKEN), "{dbg}");
+    assert!(dbg.contains("DaemonToken(<redacted>)"), "{dbg}");
 }

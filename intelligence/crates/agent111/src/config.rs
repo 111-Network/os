@@ -1,16 +1,66 @@
 //! Configuration: defaults < env file (`/etc/111/agent.env`) < `AGENT111_*`
 //! env vars < CLI flags, plus the startup model-base guard (no WAN inference,
-//! ever; the `lan` flag never influences it).
+//! ever; the `lan` flag never influences it) and the daemon-API guard (Layer 5,
+//! `os/messaging/README.md` §17: `111d`'s `/api/v1` is reached on loopback
+//! only, with the per-spawn bearer token from `AGENT111_DAEMON_TOKEN`).
 //!
 //! Resolution is pure: [`Config::resolve`] takes the environment, argv, and
 //! the env-file reader as parameters, so tests never touch real process
 //! state. [`Config::load`] wires it to the real world.
 
 use std::collections::HashMap;
+use std::fmt;
 use std::net::IpAddr;
 use std::path::{Path, PathBuf};
 
 use anyhow::{anyhow, bail};
+
+/// Default `111d` `/api/v1` base the Layer 5 tools call (messaging §17); the
+/// same value node111 exports as `AGENT111_DAEMON_API_URL`.
+pub const DEFAULT_DAEMON_API_URL: &str = "http://127.0.0.1:11180/api/v1";
+
+/// Environment variable carrying the per-spawn daemon bearer (messaging §17).
+/// Read from the process environment only — never from a flag (argv is
+/// readable by every local user) and never from the env file (the token is
+/// minted per spawn; a file copy would be stale and a secret at rest).
+pub const DAEMON_TOKEN_ENV: &str = "AGENT111_DAEMON_TOKEN";
+
+/// Longest daemon token accepted (node111 mints 64 hex characters).
+const DAEMON_TOKEN_MAX: usize = 256;
+
+/// The per-spawn bearer `111d` mints into this process's environment
+/// (messaging §17). Hex only, so it can never smuggle anything into an HTTP
+/// header. `Debug` is redacted and there is no `Display`: the value never
+/// reaches a log line, a journal event, a tool result or an error message.
+#[derive(Clone, PartialEq, Eq)]
+pub struct DaemonToken(String);
+
+impl DaemonToken {
+    /// Accept 1..=256 ASCII hex digits; anything else is refused without
+    /// echoing the value.
+    pub fn parse(raw: &str) -> anyhow::Result<Self> {
+        if raw.is_empty()
+            || raw.len() > DAEMON_TOKEN_MAX
+            || !raw.bytes().all(|b| b.is_ascii_hexdigit())
+        {
+            bail!(
+                "{DAEMON_TOKEN_ENV} is malformed (expected hex digits, at most {DAEMON_TOKEN_MAX}); the value is not shown"
+            );
+        }
+        Ok(Self(raw.to_string()))
+    }
+
+    /// The token text, for the `Authorization: Bearer` header only.
+    pub fn expose(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Debug for DaemonToken {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("DaemonToken(<redacted>)")
+    }
+}
 
 #[derive(Debug, Clone)]
 pub struct Config {
@@ -25,6 +75,13 @@ pub struct Config {
     /// Node identity (Layer 2 NodeId hex), handed down by 111d; stamps proposals.
     pub node_id: Option<String>,
     pub lan: bool,
+    /// `111d`'s loopback `/api/v1` base (messaging §17), no trailing `/`.
+    /// Flag `--daemon-api-url`, key `AGENT111_DAEMON_API_URL`; guarded at
+    /// startup to an `http://` IP-literal loopback URL.
+    pub daemon_api_url: String,
+    /// Bearer for `daemon_api_url` from [`DAEMON_TOKEN_ENV`]; `None` ⇒ the
+    /// daemon tools answer "unavailable" without calling `111d`.
+    pub daemon_token: Option<DaemonToken>,
 }
 
 /// Default env-file path; overridden by `AGENT111_ENV_FILE` / `--env-file`.
@@ -43,6 +100,8 @@ impl Default for Config {
             opencode_path: PathBuf::from("opencode"),
             node_id: None,
             lan: false,
+            daemon_api_url: DEFAULT_DAEMON_API_URL.to_string(),
+            daemon_token: None,
         }
     }
 }
@@ -123,8 +182,21 @@ impl Config {
         } else if let Some(v) = pick(&None, env, &file_vars, "AGENT111_LAN") {
             cfg.lan = parse_truthy(&v);
         }
+        if let Some(v) = pick(
+            &flags.daemon_api_url,
+            env,
+            &file_vars,
+            "AGENT111_DAEMON_API_URL",
+        ) {
+            cfg.daemon_api_url = v;
+        }
+        // Process environment only (see DAEMON_TOKEN_ENV); empty = unset.
+        if let Some(v) = env(DAEMON_TOKEN_ENV).filter(|v| !v.is_empty()) {
+            cfg.daemon_token = Some(DaemonToken::parse(&v)?);
+        }
 
         guard_model_base(&cfg)?;
+        cfg.daemon_api_url = guard_daemon_api_url(&cfg.daemon_api_url)?;
         Ok(cfg)
     }
 }
@@ -195,6 +267,7 @@ struct Flags {
     opencode_path: Option<String>,
     node_id: Option<String>,
     env_file: Option<String>,
+    daemon_api_url: Option<String>,
     lan: bool,
 }
 
@@ -230,6 +303,11 @@ impl Flags {
                 "--opencode-path" => f.opencode_path = Some(value(&mut i)?),
                 "--node-id" => f.node_id = Some(value(&mut i)?),
                 "--env-file" => f.env_file = Some(value(&mut i)?),
+                "--daemon-api-url" => f.daemon_api_url = Some(value(&mut i)?),
+                "--daemon-token" => bail!(
+                    "flag --daemon-token is not accepted: argv is visible to every local user; \
+                     {DAEMON_TOKEN_ENV} in the environment carries the token"
+                ),
                 "--lan" => {
                     if inline.is_some() {
                         bail!("flag --lan does not take a value");
@@ -269,6 +347,54 @@ fn guard_model_base(cfg: &Config) -> anyhow::Result<()> {
             )
         }
     }
+}
+
+/// The daemon-API guard (messaging §17): the bearer token goes to `111d` on
+/// this machine and nowhere else. Accepted: `http://` + an IP-literal loopback
+/// host (127.0.0.0/8 or `[::1]`) + optional port + optional path. Refused:
+/// any other scheme or host, hostnames — `localhost` included, since `111d`
+/// redirects `Host: localhost` and a bearer never follows a redirect —
+/// userinfo, query and fragment. Returns the URL without trailing `/`.
+fn guard_daemon_api_url(url: &str) -> anyhow::Result<String> {
+    let refuse = |why: &str| anyhow!("refusing daemon API URL {url:?}: {why}");
+    let rest = url
+        .strip_prefix("http://")
+        .ok_or_else(|| refuse("only http:// to loopback is allowed"))?;
+    if rest.contains(['?', '#']) {
+        return Err(refuse("a query or fragment is not allowed"));
+    }
+    let authority = rest.split('/').next().unwrap_or_default();
+    if authority.contains('@') {
+        return Err(refuse("userinfo is not allowed"));
+    }
+    let host = host_part(url).unwrap_or_default();
+    let bare = host
+        .strip_prefix('[')
+        .and_then(|h| h.strip_suffix(']'))
+        .unwrap_or(&host);
+    match bare.parse::<IpAddr>() {
+        Ok(ip) if ip.is_loopback() => {}
+        Ok(ip) => {
+            return Err(refuse(&format!(
+                "{ip} is not loopback — 111d is reached on this machine only"
+            )))
+        }
+        Err(_) => {
+            return Err(refuse(&format!(
+                "host {host:?} is not a loopback IP literal (use 127.0.0.1 or [::1])"
+            )))
+        }
+    }
+    let port = if authority.ends_with(']') {
+        None
+    } else {
+        authority.rsplit_once(':').map(|(_, p)| p)
+    };
+    if let Some(port) = port {
+        port.parse::<u16>()
+            .map_err(|_| refuse(&format!("bad port {port:?}")))?;
+    }
+    Ok(url.trim_end_matches('/').to_string())
 }
 
 /// True when an OpenAI-compatible base URL points at loopback (local model).
