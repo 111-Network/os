@@ -7,6 +7,7 @@ pub mod devices;
 pub mod health;
 pub mod intelligence;
 pub mod kb;
+pub mod meshtastic;
 pub mod panels;
 pub mod ports;
 pub mod services;
@@ -296,26 +297,61 @@ async fn daemon_main() -> anyhow::Result<()> {
     // Layer 4 R2: services registry (§7 probes, `services` frames), the
     // `status` heartbeat, and the dashboard's restart path (POST
     // /api/v1/node/restart → graceful exit 0 below; the supervisor restarts).
-    services::probe::spawn(
-        Arc::clone(&dashboard.api),
-        services::probe::Sources::new(Arc::clone(&intelligence), Arc::clone(&transport)),
+    // Layer 5 §13: hosted panels — embedded declarations, slots, listeners of
+    // enabled panels, tickets/sessions; `PanelInfo` facts feed the registry.
+    // Built-in shims register here (`meshtastic-http`: the Meshtastic module).
+    let mut panel_shims = panels::ShimRegistry::new();
+    // Layer 5 §14: the Meshtastic module (meshmud + presence reader children,
+    // consented identify, Nearby, the `meshtastic-http` shim) and the
+    // daemon-wide port-owner table it claims board ports in.
+    let port_table = Arc::new(ports::PortTable::new());
+    dashboard.api.insert_ext(Arc::clone(&port_table));
+    let meshtastic = meshtastic::Meshtastic::new(
+        meshtastic::MeshtasticConfig::production(
+            &layout,
+            cfg!(target_os = "android")
+                || state.read().unwrap().category.as_deref() == Some("Node2A"),
+        ),
+        Arc::clone(&port_table),
     );
-    // POST /api/v1/services/{id}/restart: the children this daemon supervises
-    dashboard.api.insert_ext(Arc::new(
-        services::Supervised::default()
-            .with(services::ServiceId::Agent, intelligence.agent_control())
-            .with(services::ServiceId::Model, intelligence.model_control())
-            .with(services::ServiceId::Transport, transport.control()),
+    dashboard.api.insert_ext(Arc::clone(&meshtastic));
+    if let Err(e) = panel_shims.register(Arc::new(meshtastic.shim())) {
+        eprintln!("111 daemon: {e}");
+    }
+    let panel_host = Arc::new(panels::PanelHost::load(
+        panels::PanelsConfig::new(&layout),
+        &panel_shims,
+        dashboard.api.lan_enabled,
     ));
+    dashboard.api.insert_ext(Arc::clone(&panel_host));
+    let mut sources =
+        services::probe::Sources::new(Arc::clone(&intelligence), Arc::clone(&transport));
+    sources.panels = Some(panels::provider(&panel_host));
+    meshtastic.install_providers(&mut sources);
+    services::probe::spawn(Arc::clone(&dashboard.api), sources);
+    let _panels = panels::spawn(Arc::clone(&dashboard.api), Arc::clone(&panel_host));
+    // revoked Meshtastic panel sessions close their shim downlink; drop count
+    let _mesh_panels = meshtastic.attach_panels(&panel_host);
+    // POST /api/v1/services/{id}/restart: the children this daemon supervises
+    // (the Meshtastic module re-inserts it with meshmud + the reader added)
+    let supervised = services::Supervised::default()
+        .with(services::ServiceId::Agent, intelligence.agent_control())
+        .with(services::ServiceId::Model, intelligence.model_control())
+        .with(services::ServiceId::Transport, transport.control());
+    dashboard.api.insert_ext(Arc::new(supervised.clone()));
     dashboard::api_v1::status::spawn_heartbeat(Arc::clone(&dashboard.api));
     let restart = Arc::new(tokio::sync::Notify::new());
     let restart_signal = dashboard::api_v1::actions::RestartSignal(Arc::clone(&restart));
     dashboard.api.insert_ext(restart_signal);
     // device registry (Layer 4 R4): detection + paired sessions → /api/v1/devices
-    let _devices = devices::start(Arc::clone(&dashboard.api), {
+    let devices = devices::start(Arc::clone(&dashboard.api), {
         let transport = Arc::clone(&transport);
         move || transport.child_state() == Some(supervise::ChildState::Running)
     });
+    // meshmud + the presence reader from the devices.json binding (Layer 5 §14)
+    meshtastic
+        .start(Arc::clone(&dashboard.api), devices, supervised)
+        .await;
     // agent activity (Layer 4 R3): 111-agent /v1/agent/events → `agent` + `proposal` frames
     let _agent_events = dashboard::api_v1::relay::start_events(&dashboard.api);
 
@@ -337,6 +373,7 @@ async fn daemon_main() -> anyhow::Result<()> {
     tokio::join!(
         transport.stop_and_wait(CHILD_STOP_GRACE),
         intelligence.stop_and_wait(CHILD_STOP_GRACE),
+        meshtastic.stop_and_wait(CHILD_STOP_GRACE),
     );
     eprintln!("111 daemon: shutting down");
     Ok(())

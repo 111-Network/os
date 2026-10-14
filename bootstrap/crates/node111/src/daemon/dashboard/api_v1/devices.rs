@@ -12,13 +12,26 @@
 //!
 //! `{id}` must match `^[A-Za-z0-9_-]{4,64}$` (else `400`); an unknown or hidden
 //! id is `404 not_found`. Both mutations publish a `devices` frame at once.
+//!
+//! Layer 5 §14 adds `POST /devices/{id}/identify` — the consented Meshtastic
+//! step (`daemon::meshtastic::identify`). The body must be exactly
+//! `{"consent": true}` (anything else — missing, `false`, another type —
+//! `400 bad_request`; the check runs before anything is looked up or opened).
+//! A device that does not offer `identify` is `400`; a port with another
+//! owner `409 port_busy`; meshmud or the reader failing `502 upstream_error`;
+//! success answers the updated `DeviceRecord` (`200`). Same gate as every
+//! write (loopback or a paired session, CSRF/JSON rules). The step runs in
+//! its own task, so a client that disconnects mid-probe never leaves a child
+//! running or a port claimed.
 
 use super::{ApiRouter, ApiState, Problem};
 use crate::daemon::devices::{self, DeviceRegistry, MAX_ALIAS};
+use crate::daemon::meshtastic::identify::IdentifyError;
+use crate::daemon::meshtastic::Meshtastic;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
-use axum::routing::get;
+use axum::routing::{get, post};
 use axum::Json;
 use serde_json::{json, Value};
 use std::sync::Arc;
@@ -121,6 +134,48 @@ async fn forget(State(api): State<Arc<ApiState>>, Path(id): Path<String>) -> Res
     run().unwrap_or_else(IntoResponse::into_response)
 }
 
+/// The identify body: exactly `{"consent": true}` (other keys refused).
+fn parse_consent(body: &[u8]) -> Result<(), Problem> {
+    let need = || {
+        bad_request("identify needs the user's consent").detail(
+            "Send {\"consent\": true} once the user has agreed: opening the board's port can \
+             reset it.",
+        )
+    };
+    let v: Value = serde_json::from_slice(body).map_err(|_| need())?;
+    let obj = v.as_object().ok_or_else(need)?;
+    if obj.len() != 1 || obj.get("consent") != Some(&Value::Bool(true)) {
+        return Err(need());
+    }
+    Ok(())
+}
+
+async fn identify(
+    State(api): State<Arc<ApiState>>,
+    Path(id): Path<String>,
+    body: axum::body::Bytes,
+) -> Response {
+    if let Err(p) = check_id(&id).and_then(|()| parse_consent(&body)) {
+        return p.into_response();
+    }
+    if let Err(p) = registry(&api) {
+        return p.into_response();
+    }
+    let Some(m) = api.ext::<Arc<Meshtastic>>() else {
+        return IdentifyError::Unavailable.problem().into_response();
+    };
+    // the step runs to completion in its own task: a client that goes away
+    // mid-probe must not cancel it half-way (child running, port claimed)
+    let step = tokio::spawn(async move { m.identify(&id).await });
+    match step.await {
+        Ok(Ok(rec)) => Json(rec).into_response(),
+        Ok(Err(e)) => e.problem().into_response(),
+        Err(_) => IdentifyError::Upstream("the identify step failed".into())
+            .problem()
+            .into_response(),
+    }
+}
+
 pub fn router() -> ApiRouter {
     axum::Router::new()
         .route("/api/v1/devices", get(list))
@@ -128,6 +183,7 @@ pub fn router() -> ApiRouter {
             "/api/v1/devices/{id}",
             get(get_one).patch(patch).delete(forget),
         )
+        .route("/api/v1/devices/{id}/identify", post(identify))
 }
 
 #[cfg(test)]
@@ -154,6 +210,25 @@ mod tests {
             b"nope",
         ] {
             assert_eq!(parse_alias(bad).unwrap_err().code, "bad_request");
+        }
+    }
+
+    #[test]
+    fn identify_needs_exactly_consent_true() {
+        assert!(parse_consent(br#"{"consent":true}"#).is_ok());
+        for bad in [
+            &b""[..],
+            b"null",
+            b"true",
+            br#"{}"#,
+            br#"{"consent":false}"#,
+            br#"{"consent":"true"}"#,
+            br#"{"consent":1}"#,
+            br#"{"consent":true,"port":"/dev/sda"}"#,
+            br#"[{"consent":true}]"#,
+        ] {
+            let p = parse_consent(bad).unwrap_err();
+            assert_eq!((p.status, p.code), (400, "bad_request"), "{bad:?}");
         }
     }
 }

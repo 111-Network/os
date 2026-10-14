@@ -23,6 +23,22 @@
 //! - a companion → `{stack: dashboard, interface: session, live: true}`;
 //! - otherwise `null`.
 //!
+//! Layer 5 §14 (Meshtastic): a LoRa radio with a serial port (or an SPI bridge
+//! meshtasticd drives) offers the consented **`identify`** action while the
+//! Meshtastic module says this node can run it ([`MeshtasticView`]: meshmud
+//! and the presence reader installed; USB serial only off phones), nothing
+//! else drives or holds its port, and no Reticulum stanza names it. The
+//! identify result is persisted in `devices.json` ([`DeviceRegistry::record_identify`]):
+//! `firmware` from the probe overrides the sysfs `unknown`, and the device that
+//! holds the Meshtastic binding gets `service_id: meshtastic`, capability
+//! `meshtastic-firmware` and `driver {stack: meshtastic, interface: meshmud,
+//! live: <meshmud running>}` (so `stack_bound` / `stack_down` like any
+//! stack). A device whose port another owner holds in the port-owner table
+//! reads `port_busy`. The uplink a device would be identified on names its
+//! device node under `/dev` (`/dev/serial/by-id/<name>` when that passes the
+//! §14 path pattern, else `/dev/<tty>`), or `tcp://127.0.0.1:4403` for an SPI
+//! bridge.
+//!
 //! States: `error` when the tty is unreadable (`no_port_access`; `access(R|W)`
 //! denied — the unit grants `dialout`, so this is a real fault) or when a
 //! driver that was live in the published snapshot stops while still configured
@@ -38,14 +54,15 @@
 
 use super::detect::{self, BtAdapter, PortAccess, Roots, Scan, SerialPort, UsbInfo};
 use super::rns::{self, RnodeBinding};
-use super::store::{Store, Summary};
+use super::store::{Entry, MeshtasticBinding, Store, Summary};
 use super::{
     board_base, cap_detail, clean, companion_name, device_id, kb_slug, Confidence, DeviceDriver,
-    DeviceFirmware, DeviceKind, DeviceMatch, DeviceRecord, DeviceState, Stack, Transport,
-    MAX_ALIAS, MAX_FACT, MAX_PATH_FACT, MAX_USER_AGENT,
+    DeviceFirmware, DeviceKind, DeviceMatch, DeviceRecord, DeviceState, FirmwareFamily, Stack,
+    Transport, MAX_ALIAS, MAX_FACT, MAX_PATH_FACT, MAX_USER_AGENT,
 };
 use crate::daemon::dashboard::api_v1::auth::SessionRec;
 use crate::daemon::dashboard::ApiState;
+use crate::daemon::meshtastic::meshmud::Uplink;
 use crate::install::probe::{lora_table, RadioRule};
 use serde_json::{json, Map, Value};
 use std::collections::{HashMap, HashSet};
@@ -70,6 +87,49 @@ const SPI_BRIDGES: &[(&str, &str, &str)] = &[("1a86", "5512", "CH341 USB-to-SPI 
 
 const HARDWARE_ACTIONS: &[&str] = &["rename", "forget", "agent"];
 const COMPANION_ACTIONS: &[&str] = &["rename", "forget"];
+/// The consented identify step (Layer 5 §14; `POST /devices/{id}/identify`).
+pub const IDENTIFY_ACTION: &str = "identify";
+/// `service_id` of the device holding the Meshtastic binding.
+pub const MESHTASTIC_SERVICE: &str = "meshtastic";
+/// `driver.interface` of a meshmud-driven board.
+pub const MESHMUD_INTERFACE: &str = "meshmud";
+
+/// What the Meshtastic module (Layer 5 §14) tells the registry each tick. A
+/// cheap cached snapshot: the registry reads it under its own lock.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct MeshtasticView {
+    /// Identify can run here for a USB-serial board (meshmud + reader
+    /// installed, Linux, not a phone).
+    pub identify_usb: bool,
+    /// Identify can run here for a TCP uplink (meshtasticd).
+    pub identify_tcp: bool,
+    /// meshmud is up (the bound board's driver is live).
+    pub meshmud_running: bool,
+    /// The port-owner table: `(normalized port, holder task)`.
+    pub held: Vec<(String, String)>,
+}
+
+/// Why `identify` cannot run on a device.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TargetError {
+    NotFound,
+    /// The device does not offer `identify` (with a plain reason).
+    NotOffered(&'static str),
+    /// Its port has another owner (`409 port_busy`).
+    Busy {
+        port: String,
+        owner: String,
+    },
+}
+
+/// A device `identify` may run on.
+#[derive(Debug, Clone, PartialEq)]
+pub struct IdentifyTarget {
+    pub id: String,
+    pub uplink: Uplink,
+    /// The record as published when the target was taken.
+    pub record: DeviceRecord,
+}
 
 /// Where the registry looks (all injectable for tests).
 #[derive(Debug, Clone)]
@@ -178,6 +238,8 @@ struct Detected {
     /// The stack configured for this device even though it is not live now
     /// (an rns stanza while rnsd is down; meshtasticd for an SPI bridge).
     hint: Option<Hint>,
+    /// Layer 5 §14: the uplink an identify would open.
+    identify_port: Option<Uplink>,
 }
 
 /// `(stack, interface)` a device is configured for.
@@ -198,6 +260,7 @@ struct Draft {
     board: Option<String>,
     identity: Map<String, Value>,
     detail: Map<String, Value>,
+    identify_port: Option<Uplink>,
 }
 
 struct Inner {
@@ -208,14 +271,18 @@ struct Inner {
     absent_ticks: HashMap<String, u32>,
     /// companion id → session hash (from the last tick).
     sessions: HashMap<String, String>,
+    /// present device id → the uplink an identify would open (last tick).
+    identify_ports: HashMap<String, Uplink>,
 }
 
 type RunningFn = Arc<dyn Fn() -> bool + Send + Sync>;
+type ViewFn = Arc<dyn Fn() -> MeshtasticView + Send + Sync>;
 
 pub struct DeviceRegistry {
     cfg: RegistryConfig,
     rules: Vec<RadioRule>,
     rnsd_running: RwLock<Option<RunningFn>>,
+    meshtastic: RwLock<Option<ViewFn>>,
     inner: Mutex<Inner>,
 }
 
@@ -296,6 +363,112 @@ fn strs(v: &[&str]) -> Vec<String> {
     v.iter().map(|s| s.to_string()).collect()
 }
 
+/// The uplink an identify would open for a serial port: the by-id node when
+/// its name passes the §14 pattern, else the kernel tty (always under the
+/// real `/dev`, whatever tree detection read).
+fn serial_uplink(tty: &str, by_id: Option<&str>) -> Option<Uplink> {
+    by_id
+        .and_then(|b| Uplink::serial(&format!("/dev/serial/by-id/{b}")).ok())
+        .or_else(|| Uplink::serial(&format!("/dev/{tty}")).ok())
+}
+
+fn push_unique(v: &mut Vec<String>, s: &str) {
+    if !v.iter().any(|x| x == s) {
+        v.push(s.to_string());
+    }
+}
+
+/// Layer 5 §14: merge the persisted identify result and the Meshtastic
+/// binding into a hardware record, and decide whether `identify` is offered.
+/// Pure (the port-table lookup normalizes names through
+/// `daemon::ports::port_key`).
+fn apply_meshtastic(
+    r: &mut DeviceRecord,
+    summary: Option<&mut Summary>,
+    entry: Option<&Entry>,
+    view: &MeshtasticView,
+    identify_port: Option<&Uplink>,
+    rns_hint: bool,
+) {
+    if matches!(r.kind, DeviceKind::Companion | DeviceKind::Bluetooth) {
+        return;
+    }
+    let firmware = entry.and_then(|e| e.firmware.clone());
+    let binding: Option<&MeshtasticBinding> = entry.and_then(|e| e.meshtastic.as_ref());
+    if let Some(fw) = &firmware {
+        r.firmware = Some(fw.clone());
+    }
+    let meshtastic_fw = firmware
+        .as_ref()
+        .is_some_and(|f| f.family == FirmwareFamily::Meshtastic);
+    if meshtastic_fw {
+        push_unique(&mut r.capabilities, "meshtastic-firmware");
+    }
+    let mut actions = strs(HARDWARE_ACTIONS);
+    if let Some(b) = binding {
+        r.service_id = Some(MESHTASTIC_SERVICE.to_string());
+        r.detail
+            .insert("meshtastic_uplink".into(), b.uplink.display().into());
+        r.detail
+            .insert("meshtastic_node_id".into(), b.node_id.clone().into());
+        r.detail = cap_detail(std::mem::take(&mut r.detail));
+        if r.state.present() && r.reason_code != "no_port_access" {
+            let driver = DeviceDriver {
+                stack: Stack::Meshtastic,
+                interface: Some(MESHMUD_INTERFACE.into()),
+                live: view.meshmud_running,
+            };
+            let (state, code, reason) = driven_state(Some(&driver), ("", ""));
+            r.state = state;
+            r.reason_code = code.into();
+            r.reason = reason;
+            r.driver = Some(driver);
+        }
+    } else if r.kind == DeviceKind::Radio && r.state.present() {
+        if let Some(up) = identify_port {
+            let key = crate::daemon::ports::port_key(&up.port_name());
+            let self_task = format!("identify:{}", r.id);
+            let holder = view
+                .held
+                .iter()
+                .find(|(k, _)| *k == key)
+                .map(|(_, t)| t.clone());
+            let driver_ok = match up {
+                // a USB board: nothing may drive it yet
+                Uplink::Serial { .. } => r.driver.is_none() && view.identify_usb,
+                // an SPI bridge: identify goes through the meshtasticd that drives it
+                Uplink::Tcp { .. } => {
+                    view.identify_tcp
+                        && r.driver.as_ref().is_some_and(|d| {
+                            d.stack == Stack::Meshtastic
+                                && d.live
+                                && d.interface.as_deref() == Some("meshtasticd")
+                        })
+                }
+            };
+            match holder {
+                Some(task) if task != self_task => {
+                    if r.state == DeviceState::NeedsSetup {
+                        r.reason_code = "port_busy".into();
+                        r.reason = format!("Its port is in use by {task}.");
+                    }
+                }
+                Some(_) => {} // being identified right now
+                None if driver_ok && !rns_hint && r.reason_code != "no_port_access" => {
+                    actions.push(IDENTIFY_ACTION.to_string());
+                }
+                None => {}
+            }
+        }
+    }
+    r.actions = actions;
+    if let Some(s) = summary {
+        s.firmware = r.firmware.clone();
+        s.capabilities = r.capabilities.clone();
+        s.service_id = r.service_id.clone();
+    }
+}
+
 fn no_port_access() -> (DeviceState, &'static str, String) {
     (
         DeviceState::Error,
@@ -317,6 +490,9 @@ fn driven_state(
                 (Stack::Reticulum, Some(i)) => format!(
                     "Its Reticulum interface \u{201c}{i}\u{201d} is configured, but rnsd is not running."
                 ),
+                (Stack::Meshtastic, Some(i)) if i == MESHMUD_INTERFACE => {
+                    "meshmud drives it and is not running.".into()
+                }
                 (Stack::Meshtastic, _) => "meshtasticd drove it and stopped answering.".into(),
                 _ => "The stack that drives it is not running.".into(),
             },
@@ -327,6 +503,9 @@ fn driven_state(
             match (&d.stack, &d.interface) {
                 (Stack::Reticulum, Some(i)) => {
                     format!("Driven by the mesh transport (Reticulum interface \u{201c}{i}\u{201d}).")
+                }
+                (Stack::Meshtastic, Some(i)) if i == MESHMUD_INTERFACE => {
+                    "Driven by meshmud (Meshtastic).".into()
                 }
                 (Stack::Meshtastic, _) => "Driven by meshtasticd.".into(),
                 _ => "Driven by a running stack.".into(),
@@ -374,6 +553,7 @@ impl DeviceRegistry {
         DeviceRegistry {
             rules: lora_table(),
             rnsd_running: RwLock::new(None),
+            meshtastic: RwLock::new(None),
             inner: Mutex::new(Inner {
                 store,
                 published: None,
@@ -381,6 +561,7 @@ impl DeviceRegistry {
                 pending: None,
                 absent_ticks: HashMap::new(),
                 sessions: HashMap::new(),
+                identify_ports: HashMap::new(),
             }),
             cfg,
         }
@@ -399,6 +580,17 @@ impl DeviceRegistry {
     fn rnsd_running(&self) -> bool {
         let f = self.rnsd_running.read().unwrap().clone();
         f.is_some_and(|f| f())
+    }
+
+    /// Install the Meshtastic module's view (Layer 5 §14; default: identify
+    /// is never offered and no board is meshmud-driven).
+    pub fn set_meshtastic_view(&self, f: impl Fn() -> MeshtasticView + Send + Sync + 'static) {
+        *self.meshtastic.write().unwrap() = Some(Arc::new(f));
+    }
+
+    fn meshtastic_view(&self) -> MeshtasticView {
+        let f = self.meshtastic.read().unwrap().clone();
+        f.map(|f| f()).unwrap_or_default()
     }
 
     fn rule_for(&self, u: &UsbInfo) -> Option<&RadioRule> {
@@ -469,6 +661,7 @@ impl DeviceRegistry {
             first_seen_hint: None,
             session_hash: None,
             hint: d.hint,
+            identify_port: d.identify_port,
         }
     }
 
@@ -604,6 +797,7 @@ impl DeviceRegistry {
                 board: rule.map(|r| r.name.clone()),
                 identity,
                 detail,
+                identify_port: serial_uplink(&port.tty, port.by_id.as_deref()),
             },
             now,
         )
@@ -684,6 +878,7 @@ impl DeviceRegistry {
                 )
             };
         let state = driven_state(driver.as_ref(), unbound);
+        let identify_port = (transport == Transport::Spi).then(Uplink::meshtasticd);
         self.finish(
             Draft {
                 kind,
@@ -699,6 +894,7 @@ impl DeviceRegistry {
                 board,
                 identity,
                 detail,
+                identify_port,
             },
             now,
         )
@@ -750,6 +946,7 @@ impl DeviceRegistry {
                 board: None,
                 identity,
                 detail,
+                identify_port: None,
             },
             now,
         )
@@ -843,6 +1040,7 @@ impl DeviceRegistry {
             first_seen_hint: first_seen,
             session_hash: Some(s.hash.clone()),
             hint: None,
+            identify_port: None,
         }
     }
 
@@ -988,6 +1186,24 @@ impl DeviceRegistry {
         }
         drop(prev_drivers);
 
+        // Layer 5 §14: identify results, the Meshtastic binding, `identify`
+        let view = self.meshtastic_view();
+        inner.identify_ports.clear();
+        for d in &mut detected {
+            let rns_hint = matches!(d.hint, Some((Stack::Reticulum, _)));
+            apply_meshtastic(
+                &mut d.record,
+                Some(&mut d.summary),
+                inner.store.devices.get(&d.id),
+                &view,
+                d.identify_port.as_ref(),
+                rns_hint,
+            );
+            if let Some(up) = &d.identify_port {
+                inner.identify_ports.insert(d.id.clone(), up.clone());
+            }
+        }
+
         let mut records = Vec::new();
         let mut present: HashSet<String> = HashSet::new();
         inner.sessions.clear();
@@ -997,18 +1213,12 @@ impl DeviceRegistry {
             if let Some(h) = &d.session_hash {
                 inner.sessions.insert(d.id.clone(), h.clone());
             }
-            let entry =
-                inner
-                    .store
-                    .devices
-                    .entry(d.id.clone())
-                    .or_insert_with(|| super::store::Entry {
-                        alias: None,
-                        forgotten: false,
-                        first_seen: d.first_seen_hint.clone().unwrap_or_else(|| now_s.clone()),
-                        last_seen: d.record.last_seen.clone(),
-                        last_record_summary: None,
-                    });
+            let entry = inner.store.devices.entry(d.id.clone()).or_insert_with(|| {
+                Entry::new(
+                    d.first_seen_hint.clone().unwrap_or_else(|| now_s.clone()),
+                    d.record.last_seen.clone(),
+                )
+            });
             entry.last_seen = d.record.last_seen.clone();
             let mut changed = false;
             if entry.last_record_summary.as_ref() != Some(&d.summary) {
@@ -1063,6 +1273,9 @@ impl DeviceRegistry {
             }
             match &e.last_record_summary {
                 Some(s) => records.push(Self::remembered_record(&id, &e, s)),
+                // Layer 5 §14: a Meshtastic binding is configuration (e.g. a
+                // Wi-Fi board bound by address is never detected): kept
+                None if e.meshtastic.is_some() => {}
                 None => {
                     inner.store.devices.remove(&id);
                     inner.store.mark_dirty();
@@ -1196,6 +1409,9 @@ impl DeviceRegistry {
         } else if let Some(e) = inner.store.devices.get_mut(id) {
             e.forgotten = true;
             e.alias = None;
+            // forgetting a bound board unbinds it (the Meshtastic module stops
+            // meshmud on its next tick)
+            e.meshtastic = None;
         }
         inner.absent_ticks.remove(id);
         inner.store.mark_dirty();
@@ -1203,6 +1419,151 @@ impl DeviceRegistry {
         inner.published_fp = fingerprint(published);
         Self::emit(api, inner);
         Ok(())
+    }
+
+    // ------------------------------------------------------------ Layer 5 §14
+
+    /// The device `identify` may run on now, from the published snapshot.
+    /// A device driven by rnsd (or naming an RNode stanza) or held by meshmud
+    /// is [`TargetError::Busy`]; one that does not offer the action is
+    /// [`TargetError::NotOffered`].
+    pub fn identify_target(&self, id: &str) -> Result<IdentifyTarget, TargetError> {
+        let inner = self.inner.lock().unwrap();
+        let rec = inner
+            .published
+            .as_ref()
+            .and_then(|p| p.iter().find(|r| r.id == id))
+            .cloned()
+            .ok_or(TargetError::NotFound)?;
+        let port = inner.identify_ports.get(id).cloned();
+        let port_name = port.as_ref().map(Uplink::port_name).unwrap_or_default();
+        if rec.actions.iter().any(|a| a == IDENTIFY_ACTION) {
+            return match port {
+                Some(uplink) => Ok(IdentifyTarget {
+                    id: id.to_string(),
+                    uplink,
+                    record: rec,
+                }),
+                None => Err(TargetError::NotOffered("no port to probe")),
+            };
+        }
+        let busy = |owner: &str| TargetError::Busy {
+            port: port_name.clone(),
+            owner: owner.to_string(),
+        };
+        if let Some(d) = &rec.driver {
+            match (d.stack, d.interface.as_deref()) {
+                (Stack::Reticulum, _) => return Err(busy("rnsd")),
+                (Stack::Meshtastic, Some(MESHMUD_INTERFACE)) => return Err(busy("meshmud")),
+                _ => {}
+            }
+        }
+        if rec.detail.contains_key("rns_interface") {
+            return Err(busy("rnsd"));
+        }
+        if rec.reason_code == "port_busy" {
+            let owner = rec
+                .reason
+                .strip_prefix("Its port is in use by ")
+                .and_then(|r| r.strip_suffix('.'))
+                .unwrap_or("another program");
+            return Err(busy(owner));
+        }
+        Err(TargetError::NotOffered(match rec.kind {
+            DeviceKind::Radio if !rec.state.present() => "the board is not plugged in",
+            DeviceKind::Radio if port.is_none() => "the board has no port to probe",
+            DeviceKind::Radio => "identify cannot run on this node for this board",
+            _ => "only LoRa boards can be identified",
+        }))
+    }
+
+    /// Persist an identify result (Layer 5 §14): `firmware` (source probe)
+    /// and, for a Meshtastic board, the binding — at most one device holds
+    /// one, so any other binding is cleared. Publishes the updated record
+    /// at once and returns it.
+    pub fn record_identify(
+        &self,
+        api: &ApiState,
+        id: &str,
+        firmware: DeviceFirmware,
+        binding: Option<MeshtasticBinding>,
+    ) -> Result<DeviceRecord, NotFound> {
+        let view = self.meshtastic_view();
+        let mut guard = self.inner.lock().unwrap();
+        let inner = &mut *guard;
+        if !inner.store.devices.contains_key(id) {
+            return Err(NotFound);
+        }
+        if binding.is_some() {
+            for (other, e) in inner.store.devices.iter_mut() {
+                if other != id {
+                    e.meshtastic = None;
+                }
+            }
+        }
+        let entry = inner.store.devices.get_mut(id).ok_or(NotFound)?;
+        entry.firmware = Some(firmware);
+        entry.meshtastic = binding;
+        let entry = entry.clone();
+        inner.store.mark_dirty();
+        inner.store.flush(true);
+        let port = inner.identify_ports.get(id).cloned();
+        let published = inner.published.as_mut().ok_or(NotFound)?;
+        let rec = published.iter_mut().find(|r| r.id == id).ok_or(NotFound)?;
+        let rns_hint = rec.detail.contains_key("rns_interface");
+        apply_meshtastic(rec, None, Some(&entry), &view, port.as_ref(), rns_hint);
+        let out = rec.clone();
+        sort_records(published);
+        inner.published_fp = fingerprint(published);
+        Self::emit(api, inner);
+        Ok(out)
+    }
+
+    /// The device holding the Meshtastic binding (from `devices.json`).
+    pub fn meshtastic_binding(&self) -> Option<(String, MeshtasticBinding)> {
+        self.inner.lock().unwrap().store.meshtastic_binding()
+    }
+
+    /// A device identified as Meshtastic but not bound (Layer 5 §14 "NOT SET
+    /// when a Meshtastic board is identified but not bound"): `(id, uses a
+    /// USB serial port)`.
+    pub fn identified_unbound_meshtastic(&self) -> Option<(String, bool)> {
+        let inner = self.inner.lock().unwrap();
+        inner.store.devices.iter().find_map(|(id, e)| {
+            (e.meshtastic.is_none()
+                && !e.forgotten
+                && e.firmware.as_ref().map(|f| f.family) == Some(FirmwareFamily::Meshtastic))
+            .then(|| {
+                let usb = e
+                    .last_record_summary
+                    .as_ref()
+                    .is_some_and(|s| s.transport == Transport::UsbSerial);
+                (id.clone(), usb)
+            })
+        })
+    }
+
+    /// A display label for a device: its alias, else its name (published
+    /// snapshot first, then the remembered summary).
+    pub fn label(&self, id: &str) -> Option<String> {
+        let inner = self.inner.lock().unwrap();
+        if let Some(r) = inner
+            .published
+            .as_ref()
+            .and_then(|p| p.iter().find(|r| r.id == id))
+        {
+            return Some(r.alias.clone().unwrap_or_else(|| r.name.clone()));
+        }
+        let e = inner.store.devices.get(id)?;
+        e.alias
+            .clone()
+            .or_else(|| e.last_record_summary.as_ref().map(|s| s.name.clone()))
+    }
+
+    /// The stored identify result of a device.
+    pub fn stored_firmware(&self, id: &str) -> Option<DeviceFirmware> {
+        let inner = self.inner.lock().unwrap();
+        inner.store.devices.get(id).and_then(|e| e.firmware.clone())
     }
 }
 

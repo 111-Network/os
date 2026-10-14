@@ -2,8 +2,17 @@
 //!
 //! ```json
 //! {"schema": 1, "devices": {"<id>": {"alias": null, "forgotten": false,
-//!   "first_seen": "…", "last_seen": "…", "last_record_summary": {…}}}}
+//!   "first_seen": "…", "last_seen": "…", "last_record_summary": {…},
+//!   "firmware": {…}?, "meshtastic": {…}?}}}
 //! ```
+//!
+//! Layer 5 §14 adds two optional fields, written only by the consented
+//! identify step (`POST /devices/{id}/identify`): `firmware` (what the probe
+//! found, `source: probe`; it overrides the sysfs-only `unknown`) and
+//! `meshtastic` — **the Meshtastic binding** meshmud's config is rendered from
+//! (the validated uplink plus the board's own node number). At most one
+//! device carries a binding (one meshmud, one downlink); Layer 6 migrates it
+//! into `interfaces.toml` when that file is born.
 //!
 //! Written atomically (`util::fs::atomic_write`, 0600: it carries device
 //! serials and companion IPs). Structural changes (new device, alias, forget,
@@ -11,7 +20,11 @@
 //! [`LAST_SEEN_PERSIST`] (SD-card wear on Pi nodes). The file is re-validated
 //! on load (ids, alias caps) and a corrupt file is replaced, never trusted.
 
-use super::{clean, valid_id, DeviceFirmware, DeviceKind, DeviceMatch, Transport, MAX_ALIAS};
+use super::{
+    clean, valid_id, DeviceFirmware, DeviceKind, DeviceMatch, FirmwareFamily, Transport, MAX_ALIAS,
+    MAX_FACT,
+};
+use crate::daemon::meshtastic::meshmud::Uplink;
 use crate::util::fs::atomic_write;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
@@ -46,6 +59,71 @@ pub struct Summary {
     pub firmware: Option<DeviceFirmware>,
 }
 
+/// Cap for board-reported names kept in a binding (UTF-8 bytes, like §14's
+/// presence names; they are untrusted).
+pub const MAX_BOARD_NAME: usize = 40;
+
+/// The Meshtastic binding (Layer 5 §14): which uplink meshmud drives for
+/// this device, and who answered on it at identify time. Re-validated on
+/// every load; an invalid binding is dropped (never rendered).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MeshtasticBinding {
+    pub uplink: Uplink,
+    /// The board's own node number (`my_node_info.num`).
+    pub node_num: u32,
+    /// `!` + `node_num` as 8 hex digits (rebuilt, never copied).
+    pub node_id: String,
+    /// Board-reported hardware model (untrusted, display only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hw_model: Option<String>,
+    /// The board's own long name (untrusted, display only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub long_name: Option<String>,
+}
+
+impl MeshtasticBinding {
+    /// A binding for `uplink` and the identified node; `None` when the node
+    /// number is not a unicast Meshtastic number or the uplink is invalid.
+    pub fn new(
+        uplink: Uplink,
+        node_num: u32,
+        hw_model: Option<&str>,
+        long_name: Option<&str>,
+    ) -> Option<Self> {
+        let b = MeshtasticBinding {
+            uplink,
+            node_num,
+            node_id: format!("!{node_num:08x}"),
+            hw_model: hw_model.and_then(board_name),
+            long_name: long_name.and_then(board_name),
+        };
+        b.valid().then_some(b)
+    }
+
+    /// Every rule a loaded binding must still pass.
+    pub fn valid(&self) -> bool {
+        self.uplink.validate().is_ok()
+            && self.node_num > 0
+            && self.node_num < u32::MAX
+            && self.node_id == format!("!{:08x}", self.node_num)
+    }
+}
+
+/// An untrusted board-reported name → display-safe, ≤ [`MAX_BOARD_NAME`]
+/// UTF-8 bytes; `None` when nothing is left.
+pub fn board_name(s: &str) -> Option<String> {
+    let cleaned = clean(s, MAX_FACT)?;
+    let mut out = String::new();
+    for c in cleaned.chars() {
+        if out.len() + c.len_utf8() > MAX_BOARD_NAME {
+            break;
+        }
+        out.push(c);
+    }
+    let out = out.trim_end().to_string();
+    (!out.is_empty()).then_some(out)
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Entry {
     #[serde(default)]
@@ -56,6 +134,28 @@ pub struct Entry {
     pub last_seen: String,
     #[serde(default)]
     pub last_record_summary: Option<Summary>,
+    /// Layer 5 §14: what the consented identify probe found (overrides the
+    /// sysfs-only `unknown`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub firmware: Option<DeviceFirmware>,
+    /// Layer 5 §14: the Meshtastic binding (at most one device has one).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub meshtastic: Option<MeshtasticBinding>,
+}
+
+impl Entry {
+    /// A fresh entry first seen at `first_seen`.
+    pub fn new(first_seen: String, last_seen: String) -> Self {
+        Entry {
+            alias: None,
+            forgotten: false,
+            first_seen,
+            last_seen,
+            last_record_summary: None,
+            firmware: None,
+            meshtastic: None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -76,10 +176,38 @@ pub struct Store {
 
 fn sanitize(mut f: StoreFile) -> BTreeMap<String, Entry> {
     f.devices.retain(|id, _| valid_id(id));
-    for e in f.devices.values_mut() {
+    let mut bound = false;
+    for (id, e) in f.devices.iter_mut() {
         e.alias = e.alias.as_deref().and_then(|a| clean(a, MAX_ALIAS));
         if let Some(s) = &mut e.last_record_summary {
             s.name = clean(&s.name, 128).unwrap_or_else(|| "Device".into());
+        }
+        if let Some(fw) = &mut e.firmware {
+            fw.version = fw.version.as_deref().and_then(|v| clean(v, MAX_FACT));
+        }
+        if let Some(b) = e.meshtastic.take() {
+            // re-validated on every load; one binding only (the first by id)
+            if !b.valid() {
+                eprintln!("111 daemon: devices: dropping an invalid Meshtastic binding on {id}");
+            } else if bound {
+                eprintln!("111 daemon: devices: dropping a second Meshtastic binding on {id}");
+            } else {
+                bound = true;
+                e.meshtastic = Some(MeshtasticBinding {
+                    hw_model: b.hw_model.as_deref().and_then(board_name),
+                    long_name: b.long_name.as_deref().and_then(board_name),
+                    ..b
+                });
+                // a binding implies a Meshtastic identify result
+                if e.firmware.as_ref().map(|f| f.family) != Some(FirmwareFamily::Meshtastic) {
+                    e.meshtastic = None;
+                    bound = false;
+                    eprintln!(
+                        "111 daemon: devices: dropping a Meshtastic binding without a Meshtastic \
+                         identify result on {id}"
+                    );
+                }
+            }
         }
     }
     f.devices
@@ -119,13 +247,21 @@ impl Store {
         self.dirty = true;
     }
 
-    /// Drop the oldest absent entries beyond [`MAX_ENTRIES`].
+    /// The device holding the Meshtastic binding, if any.
+    pub fn meshtastic_binding(&self) -> Option<(String, MeshtasticBinding)> {
+        self.devices
+            .iter()
+            .find_map(|(id, e)| e.meshtastic.clone().map(|b| (id.clone(), b)))
+    }
+
+    /// Drop the oldest absent entries beyond [`MAX_ENTRIES`] (a bound device
+    /// is never dropped: its binding is configuration).
     pub fn gc(&mut self, present: &dyn Fn(&str) -> bool) {
         while self.devices.len() > MAX_ENTRIES {
             let oldest = self
                 .devices
                 .iter()
-                .filter(|(id, _)| !present(id))
+                .filter(|(id, e)| !present(id) && e.meshtastic.is_none())
                 .min_by(|a, b| a.1.last_seen.cmp(&b.1.last_seen))
                 .map(|(id, _)| id.clone());
             match oldest {
@@ -180,13 +316,7 @@ mod tests {
     use super::*;
 
     fn entry(last_seen: &str) -> Entry {
-        Entry {
-            alias: None,
-            forgotten: false,
-            first_seen: "2026-10-01T00:00:00Z".into(),
-            last_seen: last_seen.into(),
-            last_record_summary: None,
-        }
+        Entry::new("2026-10-01T00:00:00Z".into(), last_seen.into())
     }
 
     #[test]
@@ -233,5 +363,98 @@ mod tests {
         s.gc(&|id| id == "id00000");
         assert_eq!(s.devices.len(), MAX_ENTRIES);
         assert!(s.devices.contains_key("id00000"));
+    }
+
+    fn meshtastic_fw() -> DeviceFirmware {
+        DeviceFirmware {
+            family: FirmwareFamily::Meshtastic,
+            version: Some("2.7.11.abcdef0".into()),
+            source: super::super::FirmwareSource::Probe,
+        }
+    }
+
+    #[test]
+    fn bindings_persist_and_are_revalidated() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join(FILE);
+        let mut s = Store::load(&p);
+        let mut e = entry("2026-10-01T00:00:01Z");
+        e.firmware = Some(meshtastic_fw());
+        e.meshtastic = MeshtasticBinding::new(
+            Uplink::serial("/dev/serial/by-id/usb-Heltec-if00").unwrap(),
+            0x0a0a0a0a,
+            Some("HELTEC_V3"),
+            Some("My \u{7}Board"),
+        );
+        assert_eq!(e.meshtastic.as_ref().unwrap().node_id, "!0a0a0a0a");
+        assert_eq!(
+            e.meshtastic.as_ref().unwrap().long_name.as_deref(),
+            Some("My Board")
+        );
+        s.devices.insert("abcd1234abcd1234".into(), e.clone());
+        s.mark_dirty();
+        s.flush(true);
+        let again = Store::load(&p);
+        assert_eq!(again.devices["abcd1234abcd1234"], e);
+        assert_eq!(
+            again.meshtastic_binding().map(|(id, b)| (id, b.node_num)),
+            Some(("abcd1234abcd1234".into(), 0x0a0a0a0a))
+        );
+        // a binding is never GC'd even when absent and oldest
+        let mut s = again;
+        for i in 0..(MAX_ENTRIES + 3) {
+            s.devices
+                .insert(format!("id{i:05}"), entry("2026-10-02T00:00:00Z"));
+        }
+        s.gc(&|_| false);
+        assert!(s.devices.contains_key("abcd1234abcd1234"));
+
+        // hand-edited bindings: bad path, bad id, no identify result, a second one
+        let raw = serde_json::json!({"schema": 1, "devices": {
+            "aaaa0000aaaa0000": {"first_seen": "a", "last_seen": "b",
+                "firmware": {"family": "meshtastic", "version": "2.7", "source": "probe"},
+                "meshtastic": {"uplink": {"kind": "serial", "path": "/etc/shadow"},
+                               "node_num": 1, "node_id": "!00000001"}},
+            "bbbb0000bbbb0000": {"first_seen": "a", "last_seen": "b",
+                "firmware": {"family": "meshtastic", "version": "2.7", "source": "probe"},
+                "meshtastic": {"uplink": {"kind": "tcp", "host": "10.0.0.7", "port": 4403},
+                               "node_num": 2, "node_id": "!deadbeef"}},
+            "cccc0000cccc0000": {"first_seen": "a", "last_seen": "b",
+                "meshtastic": {"uplink": {"kind": "tcp", "host": "10.0.0.8", "port": 4403},
+                               "node_num": 3, "node_id": "!00000003"}},
+            "dddd0000dddd0000": {"first_seen": "a", "last_seen": "b",
+                "firmware": {"family": "meshtastic", "version": "2.7", "source": "probe"},
+                "meshtastic": {"uplink": {"kind": "tcp", "host": "10.0.0.9", "port": 4403},
+                               "node_num": 4, "node_id": "!00000004"}},
+            "eeee0000eeee0000": {"first_seen": "a", "last_seen": "b",
+                "firmware": {"family": "meshtastic", "version": "2.7", "source": "probe"},
+                "meshtastic": {"uplink": {"kind": "tcp", "host": "10.0.0.10", "port": 4403},
+                               "node_num": 5, "node_id": "!00000005"}}
+        }});
+        std::fs::write(&p, raw.to_string()).unwrap();
+        let s = Store::load(&p);
+        let bound: Vec<_> = s
+            .devices
+            .iter()
+            .filter(|(_, e)| e.meshtastic.is_some())
+            .map(|(id, _)| id.as_str())
+            .collect();
+        assert_eq!(
+            bound,
+            ["dddd0000dddd0000"],
+            "only the first valid binding survives"
+        );
+        assert_eq!(
+            s.devices.len(),
+            5,
+            "entries stay; only bindings are dropped"
+        );
+    }
+
+    #[test]
+    fn board_names_are_capped() {
+        assert_eq!(board_name("  \u{1b}[2J "), Some("[2J".into()));
+        assert_eq!(board_name(&"é".repeat(40)).unwrap().len(), 40);
+        assert_eq!(board_name(" \n "), None);
     }
 }
