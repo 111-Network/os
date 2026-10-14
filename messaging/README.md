@@ -468,7 +468,8 @@ under `111/obj/v1` for public classes; carries `object_key` for private ones) �
 → `OBJ_CHUNK` frames (§5 Tier 2), range-set requests so different carriers can bring different pieces, resume at any
 chunk boundary. The fabric treats bulk as `bulk-small` (≤ 64 KiB) or `bulk-large`; bulk classes route to `cost_class =
 Bulk` links by default and cross a `LowBandwidth` link only when the user or the agent explicitly asks (physics: a 32 KB
-KB delta is 5–9 min of LoRa airtime at 1 % duty; a 5.7 MB binary is 15–27 h). Consumers: attachments in `MSG` (v1.1),
+KB delta is 5–9 min of pure LoRa airtime at LongFast, which is 8–15 h of wall time under a 1 % duty cycle; a
+5.7 MB binary is 15–27 h of airtime, months at 1 %). Consumers: attachments in `MSG` (v1.1),
 `KB` deltas and git bundles (Layer 7), `UPDATE` payloads (Layer 1's minisign manifest stays the trust root; the updater
 gains an intake path for a staged payload at `fabric/blobs/<hash>`, §19), `PATCH` (Layer 9), `SYNC` ops for Layer 8's
 append-only log (opaque, idempotent ids, per-peer cursors — seam only).
@@ -529,7 +530,7 @@ mode = "111-session"                    # 111-session | loopback-only
 [license]
 spdx = "GPL-3.0-only"
 served = "unmodified"
-source_offer = "THIRD-PARTY-NOTICES.md" # names the pinned tag; CI builds the bundle from the tag when upstream ships no asset
+source_offer = "THIRD-PARTY-NOTICES.md" # names the pinned tag; CI builds the bundle from the tag when upstream ships no complete asset
 ```
 
 - **Listeners:** one per *enabled* panel from the block 11190–11229, slot stable in `state/panels.json`, bound
@@ -761,7 +762,7 @@ Termux). Tools run inside `111-agent`; writes only via the proposal path (L3 "on
   (`bundled-sqlcipher-vendored-openssl`), `blake3`, `bao-tree`, `ciborium`; new state dirs (`fabric/`, `fabric/blobs`,
   `fabric/presence`, the presence venv); ports §2; `111 fabric offer|enroll|status` CLI verbs; manifest entries for
   meshmud binaries (built in CI from the pinned tarball), the Meshtastic web bundle (CI-built from the pinned tag when
-  upstream ships no asset), the presence venv lock; `AGENT111_DAEMON_TOKEN` per spawn; `gen-notices.py` gains a Go
+  upstream ships no complete asset — v2.7.2's `build.tar` omits its `.wasm` and fonts), the presence venv lock; `AGENT111_DAEMON_TOKEN` per spawn; `gen-notices.py` gains a Go
   path (`go-licenses` or a hand list gated by `check.sh`) and names the pinned tags in the GPL source offers;
   `LICENSING.md` §3 rows for meshmud (+ Go closure, conveyed as GPL-3.0) and the reader venv, §4 wording kept true (no
   foreign source copied into `os/`); the updater gains an intake path for a staged payload at `fabric/blobs/<hash>`
