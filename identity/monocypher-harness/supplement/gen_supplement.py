@@ -8,15 +8,17 @@ non-canonical cases from RFC 8032 TEST 2's (R, S) with one field swapped, so the
 signature equation is already false for most of them; a cofactored verifier
 rejects them anyway. These supplement rows build inputs whose signature
 equation HOLDS under the cofactored check, to show (a) that each section-3
-wrapper leg is load-bearing against a validly-signed input, and (b) the residual:
-MIXED-ORDER R or A (prime-order part + a torsion component, i.e. not
-"small-order") is accepted by any cofactored verifier but rejected by dalek's
-cofactorless verify_strict.
+wrapper leg is load-bearing against a validly-signed input, and (b) the former
+residual (T9 F3): MIXED-ORDER R or A (prime-order part + a torsion component,
+i.e. not "small-order") is accepted by any cofactored verifier. Spec v2.1
+(2026-10-14) closed it by requiring A and R torsion-free ([l]P = O); the
+"residual-mixed-order" kind name is kept for continuity, and the harness now
+GATES those rows (the wrapper must reject them).
 
 The oracle below is an independent pure-Python implementation of the section 3
-predicate with the COFACTORLESS equation ([S]B == R + [h]A, point equality):
-canonical A/R (y < p), S < l, A decodes, R decodes, small-order R/A rejected.
-Deterministic: no randomness, no clock.
+predicate (v2.1) with the COFACTORLESS equation ([S]B == R + [h]A, point
+equality): canonical A/R (y < p), S < l, A decodes, R decodes, small-order R/A
+rejected, A and R torsion-free. Deterministic: no randomness, no clock.
 """
 import hashlib
 import json
@@ -112,8 +114,12 @@ def canonical(b):
     return (int.from_bytes(b, "little") & ((1 << 255) - 1)) < p
 
 
+def is_torsion_free(P):
+    return eq(mul(L, P), IDENT)
+
+
 def strict_oracle(pk, sig, msg):
-    """Section 3 predicate, cofactorless. Returns 'ok' or the VerifyError variant."""
+    """Section 3 predicate (v2.1), cofactorless. Returns 'ok' or the VerifyError variant."""
     R_enc, S_enc = sig[:32], sig[32:]
     if not canonical(pk):
         return "NonCanonicalPublicKey"
@@ -128,6 +134,8 @@ def strict_oracle(pk, sig, msg):
     if R is None:
         return "InvalidSignature"
     if is_small_order(R) or is_small_order(A):
+        return "InvalidSignature"
+    if not is_torsion_free(A) or not is_torsion_free(R):  # v2.1
         return "InvalidSignature"
     h = int.from_bytes(sha512(R_enc, pk, msg), "little") % L
     S = int.from_bytes(S_enc, "little")
@@ -240,12 +248,13 @@ doc = {
     "generated": "2026-10-13",
     "description": (
         "Cofactor-class edge inputs for the Monocypher harness: validly-signed inputs that make each section-3 wrapper leg "
-        "load-bearing, plus the residual mixed-order R/A cases that a cofactored verifier accepts and the cofactorless strict "
-        "predicate rejects. 'oracle' is the independent pure-Python cofactorless section-3 predicate in gen_supplement.py; "
+        "load-bearing, plus the mixed-order R/A cases that a cofactored verifier accepts and the strict predicate rejects "
+        "(the T9 F3 residual, closed by spec v2.1's torsion-free A/R leg on 2026-10-14; the same rows are frozen in "
+        "test-vectors/edge-vectors.json). 'oracle' is the independent pure-Python cofactorless section-3 v2.1 predicate in gen_supplement.py; "
         "'cofactored_verifier' is what a cofactored, non-canonical-tolerant verifier (the Monocypher core) decides. kind = "
         "control-valid (raw and wrapper accept) | wrapper-bites (harness GATES: raw accepts where the oracle rejects, wrapper rejects "
         "with exactly oracle_variant) | wrapper-redundant (harness GATES: wrapper rejects with oracle_variant; raw may also reject) | "
-        "residual-mixed-order (harness REPORTS as KNOWN-DELTA, never fails)."
+        "residual-mixed-order (harness prints a KNOWN-DELTA line and, since spec v2.1, GATES: the wrapper must reject with oracle_variant)."
     ),
     "provenance": "python3 -I gen_supplement.py; RFC 8032 TEST 1 key; deterministic; id111 verify_strict agreement recorded in test-vectors/monocypher-smoke.md",
     "vectors": rows,

@@ -7,7 +7,7 @@ tags: [identity, hardware, offline]
 platforms: [esp32, nrf52, linux, android]
 upstream: https://github.com/LoupVaillant/Monocypher
 license: CC0-1.0 OR BSD-2-Clause
-last_verified: 2026-10-13
+last_verified: 2026-10-14
 sources:
   - https://cure53.de/pentest-report_monocypher.pdf
   - https://www.opentech.fund/security-safety-audits/monocypher/
@@ -64,12 +64,15 @@ from what earlier drafts of this entry claimed): `crypto_x25519` returns
 void and does not reject an all-zero shared secret, and
 `crypto_ed25519_check` is cofactored and accepts non-canonical or
 small-order A and R. The identity spec's section 3 wrapper (canonical
-A/R, S below the group order, small-order rejection, low-order X25519
-blacklist plus all-zero abort) is therefore mandatory in any port; with
-it the library matches ed25519-dalek verify_strict on 36 of 36 edge
-vectors. One residual stays open: mixed-order points (torsion component,
-not small-order) pass the cofactored check and fail dalek's cofactorless
-one; a key holder can exploit only their own identity with it. Releases
+A/R, S below the group order, small-order rejection, torsion-free A and
+R, low-order X25519 blacklist plus all-zero abort) is therefore
+mandatory in any port. The cofactored check also accepts mixed-order
+points (a torsion component, not small-order), so since spec v2.1 the
+wrapper requires A and R in the prime-order subgroup. The public API
+cannot compute that check, so a port carries its own scalar
+multiplication by the group order. With the full wrapper the library
+matches the Rust identity core on 40 of 40 edge vectors, including four
+mixed-order rows that raw Monocypher accepts. Releases
 before 4.0.3 carry a published Ed25519 signing timing leak (fixed
 2026-06-15); pin 4.0.3 or later.
 
@@ -97,6 +100,10 @@ forkability recorded.
   411 of 411 cross-vector checks pass on the Rust dev host; the two
   wrong claims above were corrected and the mixed-order residual
   recorded.
+- 2026-10-14 — mixed-order residual closed by the identity spec v2.1
+  torsion-free rule: the harness wrapper rejects all four frozen
+  mixed-order rows; 442 of 442 checks pass. On the host, each
+  group-order check costs about 0.7 to 0.9 of a Monocypher verify.
 
 ### Smoke test
 
@@ -104,7 +111,7 @@ forkability recorded.
   reviewer before commit.
 - Device: Rust dev host only (x86-64, WSL2, gcc 11.4); no Cat 1 board
   yet, so no on-device footprint or latency figures.
-- Date: 2026-10-13.
+- Date: 2026-10-13; re-run 2026-10-14 after the spec v2.1 amendment.
 - Procedure: `bash os/identity/monocypher-harness/run.sh` verifies the
   SHA-256 pins of the vendored 4.0.3 sources, builds the harness, and
   re-executes every frozen vector file produced by the Rust core (RFC
@@ -112,9 +119,10 @@ forkability recorded.
   announce, sealed packet, attestation node leg) against Monocypher,
   demanding byte-exact agreement. Full log:
   identity/test-vectors/monocypher-smoke.md.
-- Result: PASS, 411 checks over 214 vector entries, 0 failures; ASan and
-  UBSan clean; 13 of 13 harness mutants killed. Findings F1 to F5 in the
-  log (API deltas and one open residual) are reflected in Details above.
+- Result: PASS, 442 checks over 219 vector entries, 0 failures; ASan and
+  UBSan clean; 17 of 17 harness mutants killed. Findings F1 to F5 in the
+  log (API deltas, and the mixed-order residual F3, closed 2026-10-14)
+  are reflected in Details above.
 
 ## Links
 

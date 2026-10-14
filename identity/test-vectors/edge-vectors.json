@@ -1,8 +1,9 @@
 {
-  "spec": "§3 + §14 — edge/malleability vectors: strict Ed25519 predicate (non-canonical S/R/A, small-order A and R, malformed A) and X25519 low-order pubkey rejection",
+  "spec": "§3 + §14 — edge/malleability vectors: strict Ed25519 predicate (non-canonical S/R/A, small-order A and R, mixed-order (torsion) A and R, malformed A) and X25519 low-order pubkey rejection",
   "frozen": "2026-10-13",
-  "description": "Wycheproof-class Ed25519 edges for the fleet-wide strict verification predicate (section 3: canonical R/A encodings < 2^255-19, S < l, small-order A and R rejected; dalek default verify() is banned) plus the X25519 low-order blacklist class (RFC 7748 section 6.1 / libsodium). 'expect' is 'ok' or 'err:<VerifyError variant>'. Acceptance/rejection MUST match across implementations (Rust dalek vs Monocypher-C, T9); the specific error variant is Rust-specific diagnostics. NOTE: Monocypher's crypto_eddsa_check is a cofactored ZIP-215-style verifier and WILL accept some of the small-order cases the strict predicate rejects - T9 must wrap it with the strict pre-checks and record the delta in the smoke log (section 11/D14).",
-  "provenance": "Constants lifted from keyset.rs strict_predicate_* and x25519_low_order_rejected_on_ingress tests (RFC 8032 TEST 2 base triple, S+l, S=l, dual-encoding point, identity A/R, blacklist) and extended: the full 8-element torsion subgroup, non-canonical aliases, top-bit variants. Expect tokens recorded from the public verify_strict()/validate_x25519_public_key() at generation time and asserted to be rejections.",
+  "amended": "2026-10-14 (spec v2.1: +4 mixed-order ed25519_strict rows; no existing row changed)",
+  "description": "Wycheproof-class Ed25519 edges for the fleet-wide strict verification predicate (section 3: canonical R/A encodings < 2^255-19, S < l, small-order A and R rejected, A and R torsion-free i.e. [l]P = O - spec v2.1; dalek default verify() is banned) plus the X25519 low-order blacklist class (RFC 7748 section 6.1 / libsodium). 'expect' is 'ok' or 'err:<VerifyError variant>'. Acceptance/rejection MUST match across implementations (Rust dalek vs Monocypher-C, T9); the specific error variant is Rust-specific diagnostics. NOTE: Monocypher's crypto_eddsa_check is a cofactored ZIP-215-style verifier and WILL accept some of the small-order cases the strict predicate rejects - T9 must wrap it with the strict pre-checks and record the delta in the smoke log (section 11/D14). Since spec v2.1 the wrapper also needs its own [l]P = O check: the cofactored equation cannot see a torsion component, so mixed-order A/R (the last four ed25519_strict rows) are accepted by raw Monocypher and must be rejected.",
+  "provenance": "Constants lifted from keyset.rs strict_predicate_* and x25519_low_order_rejected_on_ingress tests (RFC 8032 TEST 2 base triple, S+l, S=l, dual-encoding point, identity A/R, blacklist) and extended: the full 8-element torsion subgroup, non-canonical aliases, top-bit variants. Expect tokens recorded from the public verify_strict()/validate_x25519_public_key() at generation time and asserted to be rejections. Amended 2026-10-14 (spec v2.1, section 3 torsion-free amendment, owner decision): four mixed-order rows appended to ed25519_strict - the three residual-mixed-order rows of monocypher-harness/supplement/cofactor-edges.json byte-for-byte, plus a ground mixed-order A row (h = 0 mod 8) built with the same generator arithmetic; expect tokens from the independent pure-Python v2.1 predicate and asserted against id111 verify_strict after the amendment. No pre-existing row changed.",
   "constants": {
     "group_order_l_le": "edd3f55c1a631258d69cf7a2def9de1400000000000000000000000000000010",
     "field_prime_p_le": "edffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f",
@@ -338,6 +339,38 @@
       "public_key": "3d4017c3e843895a92b70aa74d1b7ebc9c982ccf2ec4968cc0cd55f12af4660c",
       "message": "72",
       "signature": "0100000000000000000000000000000000000000000000000000000000000080085ac1e43e15996e458f3613d0f11d8c387b2eaeb4302aeeb00d291612bb0c00",
+      "expect": "err:InvalidSignature"
+    },
+    {
+      "name": "mixed-order R = [r]B + order-8 torsion, S = r + h*a",
+      "rationale": "honest RFC 8032 TEST 1 key. spec v2.1 torsion-free R: R is canonical and not small-order but carries an order-8 component; the cofactored equation holds (Monocypher accepts raw), the cofactorless one fails by exactly the torsion. Only the torsion-free R leg rejects it in a cofactored verifier",
+      "public_key": "d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a",
+      "message": "3131312f6d6f6e6f6379706865722d6861726e6573732f737570706c656d656e74",
+      "signature": "63533d9500caf7a652a91e1ed4ae4ab3e43c2f5184904ee51788478985ab11cbe815bf44fb1a59debb3bee3cee5ba507171828b5dbb88ca137adebc0467bd704",
+      "expect": "err:InvalidSignature"
+    },
+    {
+      "name": "mixed-order R = [r]B + order-2 torsion, S = r + h*a",
+      "rationale": "spec v2.1 torsion-free R: as above with an order-2 component (R = [r]B + (0, -1)); signature malleability a cofactored verifier would otherwise allow",
+      "public_key": "d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a",
+      "message": "3131312f6d6f6e6f6379706865722d6861726e6573732f737570706c656d656e74",
+      "signature": "348d147ffa45a62431e0295a0ffb8ffe6008ea46e283c3033a3f9e3144631be0eb99173e5ea7dab641e976dffcb67b97fc3e8c6da78aac6a1ee0acdda5ca2e05",
+      "expect": "err:InvalidSignature"
+    },
+    {
+      "name": "mixed-order A' = A + order-8 torsion, h mod 8 != 0",
+      "rationale": "ghost NodeId A' signed by the honest key a. spec v2.1 torsion-free A: A' is canonical and not small-order; the cofactored equation ignores its torsion part (Monocypher accepts raw), the cofactorless one fails because [h]T != O. Only the torsion-free A leg rejects it in a cofactored verifier",
+      "public_key": "9158312a9a8d6e3b34c891d6d61444f8b8211c5117ebad15bdb0bd68b07e0245",
+      "message": "3131312f6d6f6e6f6379706865722d6861726e6573732f737570706c656d656e742f30",
+      "signature": "8642775bf1e1e02a42d0156a9964b1ca8318830891aa7469065312b3d2e830432bef97f0e9d644581d91d39ae192c10187f8c001aa74aebf751c7ffd2461ed00",
+      "expect": "err:InvalidSignature"
+    },
+    {
+      "name": "mixed-order A' = A + order-8 torsion, h ground to 0 mod 8",
+      "rationale": "ghost NodeId A' signed by the honest key a. spec v2.1 torsion-free A: the signer grinds r until h = 0 mod 8, so [h]T = O and even the COFACTORLESS equation [S]B = R + [h]A' holds; R = [r]B is torsion-free and nothing is small-order. The v2 predicate (dalek verify_strict) ACCEPTED this - a ghost NodeId on every node, one signature in eight - and only the torsion-free A leg rejects it",
+      "public_key": "9158312a9a8d6e3b34c891d6d61444f8b8211c5117ebad15bdb0bd68b07e0245",
+      "message": "3131312f6d6f6e6f6379706865722d6861726e6573732f737570706c656d656e742f67726f756e642f3130",
+      "signature": "07c3475540812b450c62860d15fbe683e1455a83c022fc46b257f1cdd89c4dfe1ee9bfa9a719aba96b36b2ba535b77a9fca2c2cb00bfe6b42cc88b9c7136690c",
       "expect": "err:InvalidSignature"
     }
   ],

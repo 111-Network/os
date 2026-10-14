@@ -1,7 +1,7 @@
 /*
  * harness.c -- Layer 2 (identity) host-side Monocypher C cross-vector harness (T9).
  *
- * Spec: os/identity/README.md v2 LOCKED, section 14 ("Rust <-> Monocypher-C
+ * Spec: os/identity/README.md v2.1 (v2 LOCKED + 2026-10-14 section 3 amendment), section 14 ("Rust <-> Monocypher-C
  * agreement vectors REQUIRED before any Cat-1 port") and section 11 / D14 (this
  * run doubles as Monocypher's rubric smoke-test log).
  *
@@ -31,12 +31,16 @@
  *     is wrapped by strict_verify(), which applies the section 3 pre-checks in
  *     the SAME ORDER as id111's keyset::verify_strict, giving the same
  *     VerifyError variant names: canonical A, canonical R, S < l, A decodes,
- *     R decodes, small-order R/A rejected, then the Monocypher equation. Raw
- *     (unwrapped) verdicts are recorded alongside to document the delta.
- *     RESIDUAL (not closed here, reported): the equation stays cofactored, so a
- *     MIXED-ORDER R or A (prime-order + torsion component, not small-order)
- *     that dalek's cofactorless verify_strict rejects is accepted. No frozen
- *     vector exercises it; supplement/cofactor-edges.json demonstrates it.
+ *     R decodes, small-order R/A rejected, A and R torsion-free ([l]P = O,
+ *     spec v2.1), then the Monocypher equation. Raw (unwrapped) verdicts are
+ *     recorded alongside to document the delta. The torsion-free leg closed
+ *     the T9 F3 residual (2026-10-14): the equation stays cofactored, but with
+ *     A and R in the prime-order subgroup a cofactored and a cofactorless
+ *     equation accept exactly the same inputs, so MIXED-ORDER R or A
+ *     (prime-order + torsion component, not small-order) is rejected here as
+ *     by id111. Monocypher's public API cannot express [l]P, so the harness
+ *     computes it with its own reference arithmetic (point_torsion_free).
+ *     edge-vectors.json freezes four mixed-order rows.
  *
  *  3. Monocypher 4.x crypto_x25519 returns void and does NOT reject all-zero
  *     output (changelog 4.0.0). ecdh() therefore applies the section 3 ingress
@@ -632,6 +636,266 @@ static int point_decodes(const uint8_t enc[32])
 	return crypto_eddsa_check_equation(probe, enc, h0) == 0;
 }
 
+/* ------------------------------------------------------------------------ */
+/* section 3 v2.1: torsion-free leg, [l]P = O  -- HOST REFERENCE ONLY        */
+/* ------------------------------------------------------------------------ */
+/*
+ * Monocypher 4.0.3's public API cannot compute [l]P for an arbitrary point:
+ * crypto_eddsa_check_equation multiplies by the cofactor 8 before comparing
+ * (a torsion component vanishes), crypto_eddsa_scalarbase multiplies only the
+ * base point, crypto_eddsa_mul_add is scalar arithmetic, and the X25519 entry
+ * points clamp the scalar to a multiple of 8 (torsion vanishes again). The
+ * vendored sources are hash-pinned and not touched, so the harness carries
+ * its own small Edwards arithmetic: TweetNaCl-shaped, 16 x 16-bit limbs in
+ * int64, extended coordinates, the complete a = -1 addition law (also used
+ * for doubling), plain double-and-add. Variable time and slow -- the inputs
+ * are public points and the scalar is the public constant l -- so it is a
+ * host reference for the agreement run, NOT the Cat-1 core's implementation
+ * (which owns its own; spec section 3). Every carry/shift below is defined
+ * behaviour (no left shift of negatives), so the --sanitize build covers it.
+ * Cross-checked at start-up against Monocypher (h_selftest): [s]B computed
+ * here must equal crypto_eddsa_scalarbase(s) byte-for-byte.
+ */
+typedef int64_t gf[16];
+
+static gf GF_0, GF_1, ED_D, ED_D2, ED_SQRTM1; /* filled by torsion_tables() */
+
+static void gf_set(gf o, const gf a)
+{
+	for (int i = 0; i < 16; i++) o[i] = a[i];
+}
+
+static void gf_unpack(gf o, const uint8_t e[32]) /* bit 255 (x sign) masked */
+{
+	for (int i = 0; i < 16; i++) o[i] = (int64_t)e[2 * i] + ((int64_t)e[2 * i + 1] << 8);
+	o[15] &= 0x7fff;
+}
+
+static int64_t floor_div65536(int64_t x)
+{
+	return x >= 0 ? x / 65536 : -((-x - 1) / 65536) - 1;
+}
+
+/* one carry pass; 2^256 = 38 (mod p) folds the top carry into limb 0 */
+static void gf_carry(gf o)
+{
+	for (int i = 0; i < 16; i++) {
+		int64_t c = floor_div65536(o[i]);
+		o[i] -= c * 65536;
+		if (i < 15) o[i + 1] += c;
+		else o[0] += 38 * c;
+	}
+}
+
+static void gf_add(gf o, const gf a, const gf b)
+{
+	for (int i = 0; i < 16; i++) o[i] = a[i] + b[i];
+}
+
+static void gf_sub(gf o, const gf a, const gf b)
+{
+	for (int i = 0; i < 16; i++) o[i] = a[i] - b[i];
+}
+
+static void gf_mul(gf o, const gf a, const gf b)
+{
+	int64_t t[31] = { 0 };
+	for (int i = 0; i < 16; i++)
+		for (int j = 0; j < 16; j++) t[i + j] += a[i] * b[j];
+	for (int i = 0; i < 15; i++) t[i] += 38 * t[i + 16];
+	for (int i = 0; i < 16; i++) o[i] = t[i];
+	gf_carry(o);
+	gf_carry(o);
+}
+
+/* canonical little-endian bytes of n mod p */
+static void gf_pack(uint8_t o[32], const gf n)
+{
+	gf t;
+	gf_set(t, n);
+	for (int k = 0; k < 4; k++) gf_carry(t);
+	for (int i = 0; i < 16; i++)
+		if (t[i] < 0 || t[i] > 0xffff) die("internal: [l]P reference: limb %d not normalised", i);
+	for (int round = 0; round < 2; round++) { /* t < 2^256 < 3p: subtract p at most twice */
+		gf m;
+		int64_t borrow = 0;
+		for (int i = 0; i < 16; i++) {
+			int64_t pi = i == 0 ? 0xffed : i == 15 ? 0x7fff : 0xffff;
+			m[i] = t[i] - pi - borrow;
+			borrow = m[i] < 0;
+			if (borrow) m[i] += 65536;
+		}
+		if (!borrow) gf_set(t, m);
+	}
+	for (int i = 0; i < 16; i++) {
+		o[2 * i] = (uint8_t)(t[i] & 0xff);
+		o[2 * i + 1] = (uint8_t)(t[i] >> 8);
+	}
+}
+
+static int gf_eq(const gf a, const gf b)
+{
+	uint8_t x[32], y[32];
+	gf_pack(x, a);
+	gf_pack(y, b);
+	return memcmp(x, y, 32) == 0;
+}
+
+static int gf_parity(const gf a)
+{
+	uint8_t x[32];
+	gf_pack(x, a);
+	return x[0] & 1;
+}
+
+static void gf_inv(gf o, const gf a) /* a^(p-2): p-2 = 2^255 - 21, bits 4 and 2 clear */
+{
+	gf c;
+	gf_set(c, a);
+	for (int i = 253; i >= 0; i--) {
+		gf_mul(c, c, c);
+		if (i != 2 && i != 4) gf_mul(c, c, a);
+	}
+	gf_set(o, c);
+}
+
+static void gf_pow2523(gf o, const gf a) /* a^((p-5)/8) = a^(2^252 - 3) */
+{
+	gf c;
+	gf_set(c, a);
+	for (int i = 250; i >= 0; i--) {
+		gf_mul(c, c, c);
+		if (i != 1) gf_mul(c, c, a);
+	}
+	gf_set(o, c);
+}
+
+static void torsion_tables(void)
+{
+	uint8_t b[32];
+	memset(GF_0, 0, sizeof GF_0);
+	memset(GF_1, 0, sizeof GF_1);
+	GF_1[0] = 1;
+	hex32(b, "a3785913ca4deb75abd841414d0a700098e879777940c78c73fe6f2bee6c0352"); /* d = -121665/121666 */
+	gf_unpack(ED_D, b);
+	hex32(b, "59f1b226949bd6eb56b183829a14e00030d1f3eef2808e19e7fcdf56dcd90624"); /* 2d */
+	gf_unpack(ED_D2, b);
+	hex32(b, "b0a00e4a271beec478e42fad0618432fa7d7fb3d99004d2b0bdfc14f8024832b"); /* sqrt(-1) */
+	gf_unpack(ED_SQRTM1, b);
+	/* the constants must satisfy their defining equations */
+	gf t, u;
+	gf_mul(t, ED_SQRTM1, ED_SQRTM1);
+	gf_sub(u, GF_0, GF_1);
+	if (!gf_eq(t, u)) die("internal: sqrt(-1) constant");
+	gf_add(t, ED_D, ED_D);
+	if (!gf_eq(t, ED_D2)) die("internal: 2d constant");
+	gf c121666 = { 0 }, c121665 = { 0 };
+	c121666[0] = 121666 & 0xffff, c121666[1] = 121666 >> 16;
+	c121665[0] = 121665 & 0xffff, c121665[1] = 121665 >> 16;
+	gf_mul(t, ED_D, c121666);
+	gf_add(t, t, c121665);
+	if (!gf_eq(t, GF_0)) die("internal: d constant");
+}
+
+/* extended coordinates (X : Y : Z : T), x = X/Z, y = Y/Z, xy = T/Z */
+static void ge_identity(gf p[4])
+{
+	gf_set(p[0], GF_0);
+	gf_set(p[1], GF_1);
+	gf_set(p[2], GF_1);
+	gf_set(p[3], GF_0);
+}
+
+/* p += q (complete law for a = -1, d non-square: valid for p == q and torsion) */
+static void ge_add(gf p[4], gf q[4])
+{
+	gf a, b, c, d, t, e, f, g, h;
+	gf_sub(a, p[1], p[0]);
+	gf_sub(t, q[1], q[0]);
+	gf_mul(a, a, t);
+	gf_add(b, p[0], p[1]);
+	gf_add(t, q[0], q[1]);
+	gf_mul(b, b, t);
+	gf_mul(c, p[3], q[3]);
+	gf_mul(c, c, ED_D2);
+	gf_mul(d, p[2], q[2]);
+	gf_add(d, d, d);
+	gf_sub(e, b, a);
+	gf_sub(f, d, c);
+	gf_add(g, d, c);
+	gf_add(h, b, a);
+	gf_mul(p[0], e, f);
+	gf_mul(p[1], h, g);
+	gf_mul(p[2], g, f);
+	gf_mul(p[3], e, h);
+}
+
+/* r = [s]P, s a 256-bit little-endian integer (NOT reduced, NOT clamped) */
+static void ge_scalarmult(gf r[4], gf P[4], const uint8_t s[32])
+{
+	ge_identity(r);
+	for (int i = 255; i >= 0; i--) {
+		ge_add(r, r);
+		if ((s[i >> 3] >> (i & 7)) & 1) ge_add(r, P);
+	}
+}
+
+/* RFC 8032 5.1.3 decoding (x sign from bit 255); -1 if y is not on the curve */
+static int ge_decode(gf p[4], const uint8_t e[32])
+{
+	gf y, num, den, den2, den4, den6, t, chk, x;
+	gf_unpack(y, e);
+	gf_mul(num, y, y);
+	gf_mul(den, num, ED_D);
+	gf_sub(num, num, GF_1); /* u = y^2 - 1 */
+	gf_add(den, den, GF_1); /* v = d y^2 + 1 */
+	gf_mul(den2, den, den);
+	gf_mul(den4, den2, den2);
+	gf_mul(den6, den4, den2);
+	gf_mul(t, den6, num);
+	gf_mul(t, t, den); /* u v^7 */
+	gf_pow2523(t, t);
+	gf_mul(t, t, num);
+	gf_mul(t, t, den);
+	gf_mul(t, t, den);
+	gf_mul(x, t, den); /* x = u v^3 (u v^7)^((p-5)/8) */
+	gf_mul(chk, x, x);
+	gf_mul(chk, chk, den);
+	if (!gf_eq(chk, num)) gf_mul(x, x, ED_SQRTM1);
+	gf_mul(chk, x, x);
+	gf_mul(chk, chk, den);
+	if (!gf_eq(chk, num)) return -1;
+	if (gf_parity(x) != (e[31] >> 7)) gf_sub(x, GF_0, x);
+	gf_set(p[0], x);
+	gf_set(p[1], y);
+	gf_set(p[2], GF_1);
+	gf_mul(p[3], x, y);
+	return 0;
+}
+
+static void ge_encode(uint8_t o[32], gf p[4])
+{
+	gf zi, x, y;
+	gf_inv(zi, p[2]);
+	gf_mul(x, p[0], zi);
+	gf_mul(y, p[1], zi);
+	gf_pack(o, y);
+	o[31] = (uint8_t)(o[31] | (gf_parity(x) << 7));
+}
+
+/* Spec v2.1: the point is in the prime-order subgroup, [l]P = O. Precondition:
+ * canonical and decodable (checked earlier); an own-decoder failure fails closed. */
+static int point_torsion_free(const uint8_t e[32])
+{
+	static const uint8_t identity[32] = { 1 };
+	gf P[4], Q[4];
+	uint8_t q[32];
+	if (ge_decode(P, e) != 0) return 0;
+	ge_scalarmult(Q, P, GROUP_L);
+	ge_encode(q, Q);
+	return memcmp(q, identity, 32) == 0;
+}
+
 static verdict strict_verify(const uint8_t sig[64], const uint8_t pk[32], const uint8_t *msg, size_t n)
 {
 	if (!point_canonical(pk)) return V_NONCANON_A;
@@ -640,6 +904,8 @@ static verdict strict_verify(const uint8_t sig[64], const uint8_t pk[32], const 
 	if (!point_decodes(pk)) return V_MALFORMED_A;
 	if (!point_decodes(sig)) return V_INVALID; /* R not on the curve (dalek: Verify) */
 	if (point_small_order(sig) || point_small_order(pk)) return V_INVALID;
+	if (!point_torsion_free(pk)) return V_INVALID;  /* v2.1: mixed-order A (ghost NodeId A + T) */
+	if (!point_torsion_free(sig)) return V_INVALID; /* v2.1: mixed-order R (malleability) */
 	if (crypto_ed25519_check(sig, pk, msg, n) != 0) return V_INVALID;
 	return V_OK;
 }
@@ -1000,7 +1266,43 @@ static void h_selftest(void)
 	uint8_t y2[32] = { 2 }, y3[32] = { 3 };
 	CHECK(!point_decodes(y2), "point_decodes: y=2 is not on the curve");
 	CHECK(point_decodes(y3), "point_decodes: y=3 decodes");
-	cur->vectors = cur->expected_vectors = 7;
+	/* the v2.1 [l]P reference arithmetic agrees with Monocypher's (8th KAT) */
+	uint8_t one[32] = { 1 }, benc[32], own[32];
+	gf B[4], Q[4];
+	crypto_eddsa_scalarbase(benc, one);
+	CHECK(ge_decode(B, benc) == 0, "[l]P reference: decodes Monocypher's base point");
+	ge_encode(own, B);
+	CHECK(memcmp(own, benc, 32) == 0, "[l]P reference: base point decode/encode round-trip");
+	CHECK(point_torsion_free(benc), "[l]P reference: [l]B = O");
+	for (int k = 0; k < 6; k++) {
+		/* arbitrary 256-bit scalars (not reduced, top bits set for k >= 3), and l - 1 */
+		uint8_t sc[32], mono[32];
+		crypto_blake2b(sc, 32, (const uint8_t *)&k, sizeof k);
+		if (k >= 3) sc[31] |= 0xf0;
+		if (k == 5) {
+			memcpy(sc, GROUP_L, 32);
+			sc[0]--; /* l - 1: [l-1]B = -B */
+		}
+		crypto_eddsa_scalarbase(mono, sc);
+		ge_decode(B, benc);
+		ge_scalarmult(Q, B, sc);
+		ge_encode(own, Q);
+		CHECK(memcmp(own, mono, 32) == 0, "[l]P reference: [s]B == crypto_eddsa_scalarbase(s), scalar %d", k);
+	}
+	/* a mixed-order point B + T8 is not torsion-free; its [8] multiple is */
+	uint8_t t8[32], mixed[32], cleared[32];
+	gf T[4];
+	hex32(t8, "c7176a703d4dd84fba3c0b760d10670f2a2053fa2c39ccc64ec7fd7792ac037a");
+	CHECK(ge_decode(T, t8) == 0 && ge_decode(B, benc) == 0, "[l]P reference: decodes T8");
+	ge_add(B, T);
+	ge_encode(mixed, B);
+	CHECK(!point_torsion_free(mixed) && !point_small_order(mixed), "[l]P reference: B + T8 is mixed-order");
+	uint8_t eight[32] = { 8 };
+	ge_decode(B, mixed);
+	ge_scalarmult(Q, B, eight);
+	ge_encode(cleared, Q);
+	CHECK(point_torsion_free(cleared), "[l]P reference: [8](B + T8) is torsion-free");
+	cur->vectors = cur->expected_vectors = 8;
 }
 
 static void h_ed25519(void)
@@ -1217,6 +1519,8 @@ static void h_edge(void)
 		jhexn(tors->kid[i], "encoding", e, 32);
 		CHECK(point_canonical(e) && point_small_order(e) && point_decodes(e), "torsion %s: canonical, decodes, small-order",
 		      jstr(tors->kid[i], "name"));
+		CHECK(point_torsion_free(e) == (strcmp(jstr(tors->kid[i], "order"), "1") == 0),
+		      "torsion %s: [l]T = O iff T is the identity (v2.1 leg)", jstr(tors->kid[i], "name"));
 	}
 
 	/* Ed25519 strict predicate: oracle vs wrapped vs raw */
@@ -1264,7 +1568,7 @@ static void h_edge(void)
 	       "wrapped accepted %d; exact variant match %d/%zu\n",
 	       ed->n, oracle_rej, raw_acc_of_rej, wrapped_acc_of_rej, exact_variant, ed->n);
 	printf("  [edge-vectors.json] rejecting leg histogram: NonCanonicalPublicKey=%d NonCanonicalR=%d NonCanonicalS=%d "
-	       "MalformedPublicKey=%d InvalidSignature(small-order/undecodable R/equation)=%d\n",
+	       "MalformedPublicKey=%d InvalidSignature(small-order/torsion/undecodable R/equation)=%d\n",
 	       leg[V_NONCANON_A], leg[V_NONCANON_R], leg[V_NONCANON_S], leg[V_MALFORMED_A], leg[V_INVALID]);
 
 	/* X25519 low-order class */
@@ -1614,7 +1918,7 @@ static void h_attestation(void)
 }
 
 /* ------------------------------------------------------------------------ */
-/* supplement (non-frozen, harness-local): mixed-order R                      */
+/* supplement (non-frozen, harness-local): cofactor-class edges              */
 /* ------------------------------------------------------------------------ */
 
 static int g_supp_rows, g_supp_bites, g_supp_redundant, g_supp_resid, g_supp_resid_raw, g_supp_resid_wrapped;
@@ -1658,14 +1962,16 @@ static void h_supplement(const char *path)
 			CHECK(strcmp(verdict_name(vd), ovar) == 0, "%s: wrapper rejects with %s (got %s; raw %s)", vname, ovar,
 			      verdict_name(vd), raw ? "accepts" : "rejects");
 		} else if (strcmp(kind, "residual-mixed-order") == 0) {
-			/* strict (cofactorless) oracle REJECTS; a cofactored verifier accepts.
-			 * Reported as a KNOWN DELTA, never a failure (and never silently dropped). */
+			/* strict oracle REJECTS; a cofactored verifier accepts. Until spec v2.1 this was
+			 * an open residual (reported, never failed). v2.1 makes A and R torsion-free
+			 * ([l]P = O), so the wrapper MUST reject: the row is now a gate. */
 			g_supp_resid++;
 			g_supp_resid_raw += raw;
 			g_supp_resid_wrapped += (vd == V_OK);
 			printf("  KNOWN-DELTA %s: oracle=%s raw Monocypher=%s wrapped=%s%s\n", vname, strcmp(ovar, "ok") ? "reject" : "accept",
 			       raw ? "ACCEPT" : "reject", vd == V_OK ? "ACCEPT" : "reject", vd == V_OK ? "  [OPEN: wrapper does not close it]" : "  [closed]");
 			CHECK(strcmp(jstr(v, "oracle"), "reject") == 0, "%s: supplement oracle says reject", vname);
+			CHECK(strcmp(verdict_name(vd), ovar) == 0, "%s: v2.1 wrapper rejects with %s (got %s)", vname, ovar, verdict_name(vd));
 		} else {
 			check_(0, "%s: unknown kind \"%s\"", vname, kind);
 		}
@@ -1722,6 +2028,7 @@ int main(int argc, char **argv)
 		return 0;
 	}
 	init_tables();
+	torsion_tables();
 
 	fstat st[NHANDLERS + 1];
 	memset(st, 0, sizeof st);
@@ -1782,9 +2089,9 @@ int main(int argc, char **argv)
 	       g_x_low_total, g_x_low_raw_zero, g_x_low_raw_nonzero);
 	if (supplement)
 		printf("SUPPLEMENT (cofactor-edges.json, non-frozen): %d rows = 1 control + %d wrapper-bites + %d wrapper-redundant + %d residual-mixed-order;\n"
-		       "  residual rows: raw Monocypher accepted %d/%d, wrapper accepted %d/%d (strict cofactorless oracle rejects all) -> OPEN residual\n",
+		       "  residual rows: raw Monocypher accepted %d/%d, wrapper accepted %d/%d (strict oracle rejects all) -> %s\n",
 		       g_supp_rows, g_supp_bites, g_supp_redundant, g_supp_resid, g_supp_resid_raw, g_supp_resid, g_supp_resid_wrapped,
-		       g_supp_resid);
+		       g_supp_resid, g_supp_resid_wrapped ? "OPEN residual" : "CLOSED (spec v2.1 torsion-free A/R leg)");
 	(void)shown;
 	free(g_allocs);
 	return total_fail ? 1 : 0;

@@ -1,6 +1,6 @@
 # Layer 2 — frozen test vectors (spec §14)
 
-Frozen **2026-10-13** (task T8). Spec: `../README.md` (v2 LOCKED, §14 "Test vectors & conformance"). Every file below freezes one §14 gate; `../crates/id111/tests/conformance.rs` loads **every** file and re-asserts it against the public `id111` API, so the vectors are live gates, not dead data. `crosscheck.py` re-derives them with no `id111` code at all.
+Frozen **2026-10-13** (task T8); amended **2026-10-14** under spec v2.1 (owner decision, §3 torsion-free A/R): four mixed-order rows appended to `edge-vectors.json`, no existing row changed. Spec: `../README.md` (v2.1 LOCKED, §14 "Test vectors & conformance"). Every file below freezes one §14 gate; `../crates/id111/tests/conformance.rs` loads **every** file and re-asserts it against the public `id111` API, so the vectors are live gates, not dead data. `crosscheck.py` re-derives them with no `id111` code at all.
 
 **Frozen means frozen.** A vector changes only with an identity-layer sign-off and a spec amendment, never as a side effect of a code change: if `cargo test` fails here, the implementation drifted (fix the code) — do not regenerate the file.
 
@@ -14,7 +14,7 @@ Frozen **2026-10-13** (task T8). Spec: `../README.md` (v2 LOCKED, §14 "Test vec
 | `slip0010-project-paths.json` | SLIP-0010 pinned-path vectors `m/111'/0'/0'` and `m/111'/0'/1'` from the canonical mnemonic (+ the BIP-39 seed they sit on) | `slip0010.rs::slip0010_project_path_vectors` (12-word, printed); 24-word generated for this freeze |
 | `keyset-project.json` | project keyset: mnemonic → NodeId + X25519 pub (+ 64B public/private keysets) | `keyset.rs::project_keyset_vector` (12-word, printed); 24-word generated for this freeze |
 | `encoding.json` | §7 encodings: hex / bech32 (BIP-173, **not** bech32m) / QR upper-case / 10-char label / 34B records; fail-closed decode negatives incl. bech32m rejection and data-part length enforcement | `encoding.rs::kat_fixed_pubkey` (sequential key); project NodeId from `backup.rs::backup_format_kat` (printed); negatives generated |
-| `edge-vectors.json` | **edge/malleability**: strict Ed25519 predicate (non-canonical S/R/A, all 8 small-order points as A and R, malformed A) + X25519 low-order blacklist | constants lifted from `keyset.rs` `strict_predicate_*` / `x25519_low_order_rejected_on_ingress`; extended (torsion subgroup, aliases, top-bit variants) |
+| `edge-vectors.json` | **edge/malleability**: strict Ed25519 predicate (non-canonical S/R/A, all 8 small-order points as A and R, malformed A, mixed-order A and R — v2.1) + X25519 low-order blacklist | constants lifted from `keyset.rs` `strict_predicate_*` / `x25519_low_order_rejected_on_ingress`; extended (torsion subgroup, aliases, top-bit variants); 2026-10-14: the three T9 smoke-log mixed-order rows (`../monocypher-harness/supplement/`) byte-for-byte + one ground `h ≡ 0 (mod 8)` mixed-order-A row |
 | `weak-key.json` | **weak-key self-test** (§4.5): all-zero / uniform / counter-pattern halves | `keyset.rs::weak_key_self_test_vectors` (lifted) + extended |
 | `announce.json` | **announce** encode/verify round-trip + negatives: downgrade (unknown version), stale counter, conflicting key, **self-NodeId**, **domain-tag confusion**, length, low-order enc, strict-predicate | `announce.rs::announce_round_trip_and_kat` (printed); negatives/scenarios generated and recorded from `process_announce()` |
 | `sealed-packet.json` | **sealed-packet** KAT (esk/rpk/header/plaintext → packet) + negatives: wrong recipient, tampered AD / mode / counter, low-order epk, truncation; Monocypher-agreement sealed-packet round-trip | `seal.rs::known_answer_vector` (printed) |
@@ -54,7 +54,7 @@ python3 -I test-vectors/crosscheck.py       # independent re-derivation (python3
 * sealed-packet → `sealed-packet.json` (`kat`: pinned `esk`, so the packet is deterministic; plus `negatives[]`)
 * strict-predicate / low-order edges → `edge-vectors.json`; announce wire → `announce.json`
 
-**Watch the cofactor:** Monocypher's `crypto_eddsa_check` is a *cofactored* (ZIP-215-style) verifier and will accept some small-order cases the §3 strict predicate rejects. The port must wrap it with the strict pre-checks (canonical A/R, S < ℓ, small-order A/R) and the agreement run must record the delta in the §11/D14 smoke log. `edge-vectors.json` is the oracle for exactly that.
+**Watch the cofactor:** Monocypher's `crypto_eddsa_check` is a *cofactored* (ZIP-215-style) verifier and will accept some small-order cases the §3 strict predicate rejects. The port must wrap it with the strict pre-checks (canonical A/R, S < ℓ, small-order A/R, and since v2.1 torsion-free A and R via its own `[ℓ]P = O`), and the agreement run must record the delta in the §11/D14 smoke log. `edge-vectors.json` is the oracle for exactly that. Its last four `ed25519_strict` rows are mixed-order: raw Monocypher accepts all four, and the last one (a ghost NodeId `A + T` with `h ≡ 0 mod 8`) was also accepted by dalek `verify_strict` alone, which is why `id111` checks `is_torsion_free()` before it.
 
 ## Honest limits (what these vectors cannot show)
 

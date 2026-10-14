@@ -215,7 +215,8 @@ pub enum VerifyError {
     /// The signature's S is non-canonical (S ≥ ℓ).
     NonCanonicalS,
     /// Everything parsed but the strict verification equation failed —
-    /// including small-order A or R (§3).
+    /// including small-order A or R, and mixed-order A or R (not
+    /// torsion-free, `[ℓ]P ≠ O`; §3 v2.1).
     InvalidSignature,
 }
 
@@ -233,7 +234,7 @@ impl fmt::Display for VerifyError {
             VerifyError::InvalidSignature => {
                 write!(
                     f,
-                    "§3: strict verification failed (bad signature or small-order A/R)"
+                    "§3: strict verification failed (bad signature, small-order or torsion A/R)"
                 )
             }
         }
@@ -561,10 +562,16 @@ fn is_canonical_point_encoding(enc: &[u8; 32]) -> bool {
 
 /// §3 (normative, fleet-wide) — the strict Ed25519 verification predicate:
 /// canonical encodings of R and A (field elements < 2²⁵⁵−19), S < ℓ,
-/// small-order A and R rejected — ed25519-dalek `verify_strict`-class rules,
-/// with the canonicality legs checked explicitly so acceptance does not
-/// depend on library decompression leniency. Dalek's default `verify()` is
-/// BANNED for wire artifacts (§3) and is never called here.
+/// small-order A and R rejected, A and R torsion-free (`[ℓ]P = O`, spec
+/// v2.1) — ed25519-dalek `verify_strict`-class rules plus the prime-order
+/// subgroup check, with the canonicality legs checked explicitly so
+/// acceptance does not depend on library decompression leniency. Dalek's
+/// default `verify()` is BANNED for wire artifacts (§3) and is never called
+/// here.
+///
+/// With A and R torsion-free the cofactored and cofactorless equations agree,
+/// so this predicate and the Cat-1 C core (cofactored Monocypher + its own
+/// `[ℓ]P` check) accept exactly the same inputs.
 ///
 /// `node` is the claimed signer's NodeId (B2: it IS the Ed25519 public key);
 /// `message` is the exact signed input (tagged artifacts: `tag ‖ bytes` —
@@ -593,6 +600,19 @@ pub fn verify_strict(
 
     let vk = ed25519_dalek::VerifyingKey::from_bytes(node.as_bytes())
         .map_err(|_| VerifyError::MalformedPublicKey)?;
+    // R must decode (dalek's verify_strict would reject it the same way).
+    let r_point = curve25519_dalek::edwards::CompressedEdwardsY(r_bytes)
+        .decompress()
+        .ok_or(VerifyError::InvalidSignature)?;
+    // §3 v2.1 — A and R torsion-free ([ℓ]P = O). Load-bearing for A: a
+    // mixed-order NodeId A' = A + T passes the cofactorless equation whenever
+    // [h]T = O (the signer grinds h ≡ 0 mod 8, one try in eight), so
+    // verify_strict alone accepts a ghost NodeId. For R it is implied by the
+    // cofactorless equation once A is torsion-free; it is checked anyway so
+    // the predicate reads exactly as the spec and the C wrapper do.
+    if !vk.to_edwards().is_torsion_free() || !r_point.is_torsion_free() {
+        return Err(VerifyError::InvalidSignature);
+    }
     let sig = ed25519_dalek::Signature::from_bytes(signature);
     // verify_strict rejects small-order A and R and applies the strict
     // (cofactorless) verification equation (§3).
@@ -889,6 +909,157 @@ mod tests {
             "d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a",
         ));
         assert!(verify_strict(&other, &msg, &sig).is_err());
+    }
+
+    // ------------------------------------------------------------------
+    // §3 v2.1 — torsion-free A and R (mixed-order points rejected).
+    // Byte-exact copies of the four mixed-order rows of
+    // test-vectors/edge-vectors.json (the first three are the T9 smoke-log
+    // KNOWN-DELTA constructions from monocypher-harness/supplement/).
+    // ------------------------------------------------------------------
+
+    /// RFC 8032 TEST 1 public key — the honest signer of the supplement rows.
+    const SUPP_PK: &str = "d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a";
+    /// b"111/monocypher-harness/supplement"
+    const SUPP_MSG: &str = "3131312f6d6f6e6f6379706865722d6861726e6573732f737570706c656d656e74";
+    /// A' = A + order-8 torsion: a ghost NodeId the honest key `a` can sign for.
+    const GHOST_PK: &str = "9158312a9a8d6e3b34c891d6d61444f8b8211c5117ebad15bdb0bd68b07e0245";
+
+    fn mixed_order_case(pk: &str, msg: &str, sig: &str) -> Result<(), VerifyError> {
+        verify_strict(&NodeId::from(hex32(pk)), &hex(msg), &hex64(sig))
+    }
+
+    #[test]
+    fn torsion_free_honest_signature_passes() {
+        // Same key and message as the mixed-order rows: only R/A differ.
+        assert_eq!(
+            mixed_order_case(
+                SUPP_PK,
+                SUPP_MSG,
+                "b972eb8005ba59dbce1fd6a5f00470019ff715b91d7c3cfcc5c061cebb9ce41f\
+                 187d54812065843912814d951848e5245956b0712a6b3b0cb8d2dd0c6934210b"
+            ),
+            Ok(())
+        );
+        let (node, msg, sig) = valid_triple();
+        assert_eq!(verify_strict(&node, &msg, &sig), Ok(()));
+    }
+
+    #[test]
+    fn mixed_order_r_order8_torsion_rejected() {
+        assert_eq!(
+            mixed_order_case(
+                SUPP_PK,
+                SUPP_MSG,
+                "63533d9500caf7a652a91e1ed4ae4ab3e43c2f5184904ee51788478985ab11cb\
+                 e815bf44fb1a59debb3bee3cee5ba507171828b5dbb88ca137adebc0467bd704"
+            ),
+            Err(VerifyError::InvalidSignature)
+        );
+    }
+
+    #[test]
+    fn mixed_order_r_order2_torsion_rejected() {
+        assert_eq!(
+            mixed_order_case(
+                SUPP_PK,
+                SUPP_MSG,
+                "348d147ffa45a62431e0295a0ffb8ffe6008ea46e283c3033a3f9e3144631be0\
+                 eb99173e5ea7dab641e976dffcb67b97fc3e8c6da78aac6a1ee0acdda5ca2e05"
+            ),
+            Err(VerifyError::InvalidSignature)
+        );
+    }
+
+    #[test]
+    fn mixed_order_a_order8_torsion_rejected() {
+        // h mod 8 != 0: the cofactorless equation already fails here.
+        assert_eq!(
+            mixed_order_case(
+                GHOST_PK,
+                "3131312f6d6f6e6f6379706865722d6861726e6573732f737570706c656d656e742f30",
+                "8642775bf1e1e02a42d0156a9964b1ca8318830891aa7469065312b3d2e83043\
+                 2bef97f0e9d644581d91d39ae192c10187f8c001aa74aebf751c7ffd2461ed00"
+            ),
+            Err(VerifyError::InvalidSignature)
+        );
+    }
+
+    #[test]
+    fn mixed_order_a_ground_h_rejected_only_by_torsion_leg() {
+        // h ≡ 0 mod 8: [h]T = O, so dalek's cofactorless verify_strict
+        // ACCEPTS this ghost-NodeId signature — the v2 predicate did too.
+        // b"111/monocypher-harness/supplement/ground/10"
+        let msg = "3131312f6d6f6e6f6379706865722d6861726e6573732f737570706c656d656e74\
+                   2f67726f756e642f3130"
+            .replace(' ', "");
+        let sig = "07c3475540812b450c62860d15fbe683e1455a83c022fc46b257f1cdd89c4dfe\
+                   1ee9bfa9a719aba96b36b2ba535b77a9fca2c2cb00bfe6b42cc88b9c7136690c"
+            .replace(' ', "");
+        let vk = ed25519_dalek::VerifyingKey::from_bytes(&hex32(GHOST_PK)).unwrap();
+        assert!(
+            vk.verify_strict(
+                &hex(&msg),
+                &ed25519_dalek::Signature::from_bytes(&hex64(&sig))
+            )
+            .is_ok(),
+            "the v2 gap: dalek verify_strict alone accepts the ground ghost-NodeId row"
+        );
+        assert_eq!(
+            mixed_order_case(GHOST_PK, &msg, &sig),
+            Err(VerifyError::InvalidSignature)
+        );
+    }
+
+    #[test]
+    fn mixed_order_a_ground_h_constructed_in_rust() {
+        // Independent of the frozen bytes: build A' = [a]B + T8, grind the
+        // nonce until h ≡ 0 mod 8, and show the gap the torsion leg closes.
+        use curve25519_dalek::constants::EIGHT_TORSION;
+        use curve25519_dalek::edwards::EdwardsPoint;
+        use curve25519_dalek::scalar::Scalar;
+        use sha2::{Digest, Sha512};
+
+        let a = Scalar::from_bytes_mod_order([0x2a; 32]);
+        let honest = EdwardsPoint::mul_base(&a);
+        let ghost = honest + EIGHT_TORSION[1];
+        assert!(!ghost.is_small_order() && !ghost.is_torsion_free());
+        let ghost_enc = ghost.compress();
+        let wide = |parts: &[&[u8]]| -> Scalar {
+            let mut d = Sha512::new();
+            for p in parts {
+                d.update(p);
+            }
+            let out: [u8; 64] = d.finalize().into();
+            Scalar::from_bytes_mod_order_wide(&out)
+        };
+        let mut found = false;
+        for ctr in 0u32..256 {
+            let msg = ctr.to_le_bytes();
+            let r = wide(&[b"nonce", &msg]);
+            let r_enc = EdwardsPoint::mul_base(&r).compress();
+            let h = wide(&[r_enc.as_bytes(), ghost_enc.as_bytes(), &msg]);
+            if h.as_bytes()[0] & 7 != 0 {
+                continue;
+            }
+            let s = r + h * a;
+            let mut sig = [0u8; 64];
+            sig[..32].copy_from_slice(r_enc.as_bytes());
+            sig[32..].copy_from_slice(s.as_bytes());
+            // The v2 gap: dalek's cofactorless verify_strict accepts it.
+            let vk = ed25519_dalek::VerifyingKey::from_bytes(ghost_enc.as_bytes()).unwrap();
+            assert!(vk
+                .verify_strict(&msg, &ed25519_dalek::Signature::from_bytes(&sig))
+                .is_ok());
+            // v2.1: the torsion-free A leg rejects it.
+            assert_eq!(
+                verify_strict(&NodeId::from(ghost_enc.to_bytes()), &msg, &sig),
+                Err(VerifyError::InvalidSignature)
+            );
+            found = true;
+            break;
+        }
+        assert!(found, "one nonce in eight gives h ≡ 0 mod 8");
     }
 
     // ------------------------------------------------------------------

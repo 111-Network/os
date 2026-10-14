@@ -134,9 +134,14 @@ def small_order(Pt):
     return peq(pmul(8, Pt), IDENT)
 
 
+def torsion_free(Pt):
+    """Spec v2.1: in the prime-order subgroup, [l]P = O."""
+    return peq(pmul(L, Pt), IDENT)
+
+
 def strict_verify(a_enc, msg, sig):
-    """Section 3 strict predicate, from the spec text; returns the crate's
-    VerifyError variant name or 'ok' (same check order as the crate)."""
+    """Section 3 strict predicate (spec v2.1), from the spec text; returns the
+    crate's VerifyError variant name or 'ok' (same check order as the crate)."""
     if (int.from_bytes(a_enc, "little") & ((1 << 255) - 1)) >= P:
         return "NonCanonicalPublicKey"
     if (int.from_bytes(sig[:32], "little") & ((1 << 255) - 1)) >= P:
@@ -149,6 +154,9 @@ def strict_verify(a_enc, msg, sig):
         return "MalformedPublicKey"
     R = decompress(sig[:32])
     if R is None or small_order(A) or small_order(R):
+        return "InvalidSignature"
+    # v2.1: A and R torsion-free (mixed-order points rejected)
+    if not torsion_free(A) or not torsion_free(R):
         return "InvalidSignature"
     k = int.from_bytes(hashlib.sha512(sig[:32] + a_enc + msg).digest(), "little") % L
     # cofactorless: [s]B == R + [k]A, compared on compressed encodings
