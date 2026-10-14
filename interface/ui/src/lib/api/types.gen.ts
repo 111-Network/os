@@ -141,6 +141,26 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/devices/{id}/identify": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Consented identify — the Meshtastic step (Layer 5 §14, D17
+         * @description Probe a USB or Wi-Fi board the user has agreed to have probed (`actions` contains `identify`). The body carries the consent flag; without it 400 bad_request. The daemon takes the port from its port-owner table (held by another owner → 409 `port_busy`, nothing is opened), starts meshmud on the port with the identify profile, reads `my_node_info` through the TCP downlink, then answers the updated record: `firmware {family: meshtastic, version, source: probe}`, `driver.stack = meshtastic`, `service_id = meshtastic`, binding persisted in `devices.json`; the identify child becomes the service child in place (never a second open, so a DTR/RTS reset happens at most once, at this consented step). A board that answers but is not Meshtastic returns 200 with the honest `firmware` it did find (family `unknown`), never a guess. Loopback or a paired session, like every write.
+         */
+        post: operations["identifyDevice"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/chat": {
         parameters: {
             query?: never;
@@ -385,6 +405,250 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/messages/threads": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Conversation list, most recent activity first (including message-request threads) */
+        get: operations["listThreads"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/messages/threads/{peer}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** @description One conversation, ascending by `local_seq` (receipt sequence — never by claimed time). Without `since_seq` the newest `limit` messages are returned; with it, the first `limit` messages above that sequence. `more` is true when messages exist beyond the window (older ones without `since_seq`, newer ones with it). For a pending message request the held messages are returned read-only (`request: true`); nothing is acknowledged to the sender until the contact is accepted. */
+        get: operations["getThread"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/messages": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** @description Queue a text message to a contact (add them first with POST /contacts). Always 202: the message is `queued` and stays so until a path exists (`reason_code` says why: waiting_for_key, hub_not_yours, restore_pending, store_full) — delivery is never promised by this call. A text that Tier 0/1 framing cannot carry (§5) is refused 400 bad_request, never truncated. Loopback or a paired session; the agent never calls this — it proposes (`kind: message`) and the human accepts in the UI. */
+        post: operations["sendMessage"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/messages/{id}/retry": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** @description Re-queue an own message that is still `queued` or `sent` (retries otherwise happen on link and contact events, never on timers). Any other state, or an incoming message, answers 409 (`bad_request`). */
+        post: operations["retryMessage"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/contacts": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Contacts, including pending message requests (`request: true`) */
+        get: operations["listContacts"];
+        put?: never;
+        /** @description Add a contact by `card` (the base32 text of a scanned or pasted card; `trust = oob`, works with zero connectivity) or by `node_id` alone (64 hex or `node1…`; stores the NodeId and asks the home hub for the card — `has_key` stays false and messages stay `queued` with reason_code `waiting_for_key` until the reply verifies against the expected NodeId). Exactly one of the two. A card whose keys conflict with the pinned keys of a known NodeId is rejected 409 (`bad_request`) and never replaces them. An already-known contact is returned unchanged. */
+        post: operations["addContact"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/contacts/me/card": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * This node's own card (public announce) as text and a QR module bitmap
+         * @description The genesis announce, from stored bytes (never minted, §7). `text` is the base32 form; `qr` is the module matrix the UI draws itself. No key material beyond the public announce.
+         */
+        get: operations["getOwnCard"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/contacts/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["getContact"];
+        put?: never;
+        post?: never;
+        /** @description Forget the contact (and, for a pending request, discard it). Key material for that NodeId is dropped and its cached pair key zeroized; message history is kept until capacity pruning (§10.4). */
+        delete: operations["forgetContact"];
+        options?: never;
+        head?: never;
+        /** @description Partial merge: rename (`alias` null clears), accept a pending message request (`accept: true` — creates the contact proper and delivers the held messages to the thread; accepting never ACKs more than the messages shown), pin (a pinned contact is never pruned), mark the thread read. */
+        patch: operations["patchContact"];
+        trace?: never;
+    };
+    "/api/v1/fabric": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Fabric status — links, home hub, custody, store, settings */
+        get: operations["getFabric"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/fabric/hub/enroll": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** @description Member side: enroll with a hub using its one-time code (`ENROLL`, §7.3). The hub's card is needed to seal the request — it rides in `card` when the hub is not already a contact (the hub's offer QR carries card, address and code together). A node has one home hub in v1: enrolling while enrolled answers 409 (`bad_request`). A hub that is unreachable or refuses answers 502 `upstream_error`; the hub's attempt lockout (5 failures) surfaces as 429 `rate_limited`. Success answers the new hub state. */
+        post: operations["enrollHub"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/fabric/hub/offer": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** @description Hub side: mint a one-time enrollment code (8 chars, single use, shown once) plus the hub's card and tcp-lan address as one QR/text bundle (Settings, Let a node use this hub). A new offer invalidates any outstanding code. Loopback-only, like the L4 `offer` (403 loopback_only otherwise). */
+        post: operations["offerHub"];
+        /** @description Hub side: dismiss the outstanding enrollment code (spec 7.3). Idempotent: 204 whether or not an offer was outstanding. Loopback-only (403 loopback_only otherwise). */
+        delete: operations["dismissHubOffer"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/fabric/settings": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        /** @description Partial merge of the fabric settings: hub role, LAN listener, custody opt-in, per-class quotas (capacity shaping — there are no per-sender limits). Loopback-only (403 loopback_only otherwise); `listen_lan` takes effect immediately for new connections. */
+        patch: operations["patchFabricSettings"];
+        trace?: never;
+    };
+    "/api/v1/nearby": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Presence per source (v1: Meshtastic nodes heard). Names are untrusted RF-origin strings */
+        get: operations["listNearby"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/panels": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Declared hosted panels and their listener slots (§13) */
+        get: operations["listPanels"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/panels/{id}/session": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** @description Mint a one-time ticket URL for a panel's own origin (128-bit, single use, 30 s). The panel listener swaps it for a host-only `p111_<id>` cookie and redirects to the entry path; a spent or expired ticket without a cookie answers 403 `panel_ticket_expired` on the panel origin (problem+json) and the dashboard re-mints. Behind the dashboard session; on trusted loopback the session is implicit and the ticket is still minted. Bound to the minting session. */
+        post: operations["openPanelSession"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/events": {
         parameters: {
             query?: never;
@@ -413,14 +677,14 @@ export interface components {
             status: number;
             detail?: string;
             /** @enum {string} */
-            code: "unauthenticated" | "loopback_only" | "lan_read_only" | "agent_unavailable" | "model_unavailable" | "bad_request" | "not_found" | "rate_limited" | "already_decided" | "not_supervised" | "settings_locked" | "offer_stale" | "needs_hub" | "upstream_error" | "internal";
+            code: "unauthenticated" | "loopback_only" | "lan_read_only" | "agent_unavailable" | "model_unavailable" | "bad_request" | "not_found" | "rate_limited" | "already_decided" | "not_supervised" | "settings_locked" | "offer_stale" | "needs_hub" | "upstream_error" | "internal" | "port_busy" | "panel_ticket_expired";
             errors?: {
                 pointer?: string;
                 message: string;
             }[];
         };
         /** @enum {string} */
-        ServiceId: "agent" | "model" | "transport" | "radio" | "kb" | "gateway" | "codeagent";
+        ServiceId: "agent" | "model" | "transport" | "radio" | "kb" | "gateway" | "codeagent" | "fabric" | "meshtastic";
         /** @enum {string} */
         ServiceState: "live" | "unset" | "error" | "starting";
         ServiceRecord: {
@@ -434,7 +698,7 @@ export interface components {
             state: components["schemas"]["ServiceState"];
             /** Format: date-time */
             since: string;
-            /** @description stable snake_case, display-only for clients. Emitted set (111d): healthy, health_pending, spawn_pending, child_degraded, child_stopped, child_backoff, health_error, health_503, health_unreachable, binary_absent, no_model, no_python, venv_unavailable, transport_degraded, joined, isolated, no_radio, radio_unbound, radio_bound_rnode, radio_bound_meshtastic, stack_waiting, stack_down, verify_failed, kb_absent, wan_ok, wan_unknown, wan_offline, not_hub, opencode_found, opencode_absent. */
+            /** @description stable snake_case, display-only for clients. Emitted set (111d): healthy, health_pending, spawn_pending, child_degraded, child_stopped, child_backoff, health_error, health_503, health_unreachable, binary_absent, no_model, no_python, venv_unavailable, transport_degraded, joined, isolated, no_radio, radio_unbound, radio_bound_rnode, radio_bound_meshtastic, stack_waiting, stack_down, verify_failed, kb_absent, wan_ok, wan_unknown, wan_offline, not_hub, opencode_found, opencode_absent. Layer 5 adds: store_full (fabric), port_busy (meshtastic); fabric and meshtastic rows add their own snake_case codes, additively. */
             reason_code: string;
             /** @description one plain sentence */
             reason: string;
@@ -444,7 +708,10 @@ export interface components {
             description: string;
             /** @description relative KB path */
             kb_entry?: string;
+            /** @description link-out URL. Never set when `panel` is non-null */
             embed_url?: string;
+            /** @description Layer 5 (§13): the hosted panel for this service's LIVE page, or null. Additive: absent on older daemons */
+            panel?: components["schemas"]["Panel"] | null;
             actions: ("restart" | "log")[];
             detail: {
                 [key: string]: unknown;
@@ -750,7 +1017,7 @@ export interface components {
             first_seen: string;
             /** Format: date-time */
             last_seen: string;
-            /** @description stable snake_case, display-only for clients. Emitted set (111d): stack_bound, stack_down, radio_unbound, unbound, no_port_access, adapter_idle, unidentified, session_active, session_idle, unplugged, not_detected. */
+            /** @description stable snake_case, display-only for clients. Emitted set (111d): stack_bound, stack_down, radio_unbound, unbound, no_port_access, adapter_idle, unidentified, session_active, session_idle, unplugged, not_detected. Layer 5 adds: port_busy (the port has another owner, so identify is refused). */
             reason_code: string;
             /** @description one plain sentence */
             reason: string;
@@ -771,7 +1038,7 @@ export interface components {
             identity: {
                 [key: string]: unknown;
             };
-            /** @description identify/pair/authorize/flash are reserved for the Layer 6 core; clients render unknown values as disabled. `flash` appears only with a non-null `flash_offer`. */
+            /** @description identify is live for Meshtastic-capable boards (Layer 5 §14; POST /devices/{id}/identify); pair/authorize/flash are reserved for the Layer 6 core; clients render unknown values as disabled. `flash` appears only with a non-null `flash_offer`. */
             actions: ("rename" | "forget" | "agent" | "identify" | "pair" | "authorize" | "flash")[];
             /** @description Layer 6 (D17): present only for a board with no usable firmware (family none/unknown) when the signed release carries an image for it. Never for a board that already runs something. */
             flash_offer?: components["schemas"]["FlashOffer"] | null;
@@ -785,6 +1052,343 @@ export interface components {
         };
         SseServices: {
             services: components["schemas"]["ServiceRecord"][];
+        };
+        /** @description a public NodeId, 64 lowercase hex; `label` and `bech32` are its display forms */
+        NodeId: string;
+        /** @description `msg-…`, minted by 111d for the local row. Not the wire msg_id (§4), which only Advanced views show (`Message.msg_id`) */
+        MessageId: string;
+        /**
+         * @description Delivery evidence (§9), own messages only. queued: no path, key missing, or the peer's hub is not yours (see `reason_code`). sent: a frame was written to a link, or a custody reject kept it here (see `reason_code`). relayed: an authenticated CUSTODY_ACK from a mailbox node for a known member — saved and held for them, not yet at them. delivered: the recipient's own ACK. Only that ACK releases the sender's copy.
+         * @enum {string}
+         */
+        MessageState: "queued" | "sent" | "relayed" | "delivered";
+        /**
+         * @description How the keys were learned (§7.1). oob: a card or QR, or a NodeId typed or scanned out of band. tofu: first seen through an INTRO (a message request until accepted). enrolled: hub and member after ENROLL.
+         * @enum {string}
+         */
+        ContactTrust: "oob" | "tofu" | "enrolled";
+        /** @description One message in a thread. Order is `local_seq`; `at` and `sent_at_claim` are display only and never order anything (no timestamp exists in the envelope, §4). */
+        Message: {
+            id: components["schemas"]["MessageId"];
+            /** @description the other party: the recipient for dir=own, the sender for dir=in */
+            peer: components["schemas"]["NodeId"];
+            /** @enum {string} */
+            dir: "own" | "in";
+            /** @description message body text. For dir=in this is peer-authored and untrusted: render as text only */
+            text: string;
+            /** @description dir=in is always `delivered` (it arrived here; a held message request is not acknowledged to its sender until accepted) */
+            state: components["schemas"]["MessageState"];
+            /** @description stable snake_case, display-only for clients, set while the state needs an explanation. Emitted set (111d): waiting_for_key (queued, the peer's card has not arrived), hub_not_yours (queued, their hub is not yours; delivered when you meet directly), restore_pending (queued, the identity holder reports a restore floor so nothing is sealed), store_full (queued, the local store refuses new work), mailbox_full (sent, the hub answered REJECT_FULL). null when nothing needs explaining. */
+            reason_code: string | null;
+            /** @description one plain sentence for `reason_code` */
+            reason: string | null;
+            /** @description local ordering sequence of the thread (the store's `local_seq`); strictly increasing per node */
+            local_seq: number;
+            /** @description local receipt sequence for dir=in; null for own messages */
+            received_seq: number | null;
+            /**
+             * Format: date-time
+             * @description the sender's own claim (`sent_at` in the body, §3.3), unverified: show it as such, behind a disclosure. null when absent or for own messages
+             */
+            sent_at_claim: string | null;
+            /**
+             * Format: date-time
+             * @description local wall-clock time this node stored the message (own: queued; in: received). Display only
+             */
+            at: string;
+            /** @description Advanced view: the wire msg_id components (§4); the sender and recipient are `peer` and this node */
+            msg_id?: {
+                stream: number;
+                epoch: number;
+                n: number;
+            };
+        };
+        /** @description Counts of this thread's own messages per delivery state */
+        ThreadStates: {
+            queued: number;
+            sent: number;
+            relayed: number;
+            delivered: number;
+        };
+        Thread: {
+            peer: components["schemas"]["NodeId"];
+            alias: string | null;
+            /** @description xxxx-xxxx-xx operator label of `peer` (display only) */
+            label: string;
+            /** @description true while the peer is an unaccepted message request (INTRO): accept or leave it pending */
+            request: boolean;
+            /** @description incoming messages above the thread's read mark (`ContactPatch.read_seq`) */
+            unread: number;
+            /** @description the most recent message by `local_seq` */
+            last: components["schemas"]["Message"] | null;
+            states: components["schemas"]["ThreadStates"];
+        };
+        SendMessageRequest: {
+            /** @description a contact's `node_id` */
+            to: components["schemas"]["NodeId"];
+            /** @description the message text. Refused (400) when Tier 0/1 framing cannot carry it (§5); attachments arrive in v1.1 */
+            text: string;
+        };
+        Contact: {
+            node_id: components["schemas"]["NodeId"];
+            /** @description node1… (lowercase) */
+            bech32: string;
+            /** @description xxxx-xxxx-xx operator label (display only) */
+            label: string;
+            /** @description local editable name */
+            alias: string | null;
+            trust: components["schemas"]["ContactTrust"];
+            /** @description pending message request: its messages are held and not acknowledged until accepted */
+            request: boolean;
+            /** @description never pruned */
+            pinned: boolean;
+            /** @description false while only the NodeId is known and the card request is outstanding; messages to them are queued with reason_code waiting_for_key */
+            has_key: boolean;
+            /** @description from the contact's announce appdata (§7.3), e.g. mailbox, always_on_hub, lora_attached. Unknown values are ignored */
+            roles?: string[];
+            /** @description locator hint from appdata: the contact's home hub id, truncated hex. Never an authenticator */
+            home_hub?: string | null;
+        };
+        ContactAddByCard: {
+            /** @description base32 card text as scanned or pasted (§7.2 (1)) */
+            card: string;
+        };
+        ContactAddByNodeId: {
+            /** @description a NodeId: 64 lowercase hex or node1… bech32 (63 chars), typed or scanned (§7.2 (2)) */
+            node_id: string;
+        };
+        /** @description Exactly one of `card` or `node_id`. */
+        ContactCreate: components["schemas"]["ContactAddByCard"] | components["schemas"]["ContactAddByNodeId"];
+        ContactPatch: {
+            alias?: string | null;
+            /**
+             * @description accept a pending message request; only `true` is valid
+             * @constant
+             */
+            accept?: true;
+            pinned?: boolean;
+            /** @description mark the thread read up to this `local_seq`; the read mark only moves forward, a lower value changes nothing */
+            read_seq?: number;
+        };
+        /** @description A QR module matrix the UI draws itself (no image is served). Quiet zone not included. */
+        QrMatrix: {
+            /** @description modules per side */
+            size: number;
+            /** @description `size` strings of `size` characters each, top row first; 1 is a dark module */
+            rows: string[];
+        };
+        /** @description A contact card: the public announce (L2 §6.2) as base32 text and as a QR matrix. Public material only. */
+        Card: {
+            text: string;
+            qr: components["schemas"]["QrMatrix"];
+        };
+        /** @enum {string} */
+        LinkKind: "tcp-lan" | "kiss-modem" | "meshtastic-client" | "rns-bridge" | "ble";
+        /** @enum {string} */
+        LinkState: "down" | "up" | "degraded";
+        /** @description What a link's path can carry (§8). The fabric never rate-limits; airtime is an advertised physical fact. */
+        FabricPathProfile: {
+            mtu_bytes: number;
+            /** @enum {string} */
+            framing: "stream" | "datagram";
+            reliable: boolean;
+            broadcast: boolean;
+            /** @enum {string} */
+            cost_class: "bulk" | "low_bandwidth";
+            airtime: {
+                duty_cycle_permille: number;
+                bits_per_s: number;
+            } | null;
+        };
+        FabricLink: {
+            id: string;
+            kind: components["schemas"]["LinkKind"];
+            state: components["schemas"]["LinkState"];
+            /** @description attributed peers on this link (0 unless up) */
+            peers: number;
+            /** @description why the link is degraded, one plain sentence */
+            detail: string | null;
+            profile: components["schemas"]["FabricPathProfile"];
+        };
+        /** @description Both ends of the hub relationship (§9): the member side (enrolled, reachable, cursor) and the hub side (members, offer_active). */
+        FabricHub: {
+            /** @description this node has a home hub */
+            enrolled: boolean;
+            /** @description an attributed link to the home hub is up */
+            reachable: boolean;
+            /** @description mailbox cursor committed with the home hub (the hub's own insertion sequence; no clock) */
+            cursor: number;
+            /** @description the home hub; null when not enrolled */
+            node_id: string | null;
+            /** @description host:port of the home hub's tcp-lan listener; null when not enrolled */
+            address: string | null;
+            /** @description hub role: enrolled members of this node (0 when it is not a hub) */
+            members: number;
+            /** @description hub role: an enrollment code is outstanding */
+            offer_active: boolean;
+        };
+        /** @description Sealed items this node holds for its members (hub role). It cannot read them. */
+        FabricCustody: {
+            count: number;
+            bytes: number;
+        };
+        /** @description The encrypted local store (§10). Pruned by capacity only; `store_full` means new custody and bulk are refused. */
+        FabricStore: {
+            open: boolean;
+            /** @description live bytes: DB pages minus freelist, plus the blob dir */
+            used: number;
+            /** @description the high watermark in bytes that triggers pruning */
+            watermark: number;
+            store_full: boolean;
+        };
+        FabricSettings: {
+            /** @description accept custody for enrolled members */
+            hub_role: boolean;
+            /** @description bind the tcp-lan listener on the LAN (otherwise loopback; loopback is never a peer) */
+            listen_lan: boolean;
+            /** @description an always-on laptop or a phone opts in to hold custody (Cat 4 hubs default on) */
+            custody_opt_in: boolean;
+            /** @description capacity shaping per stored-data class, in bytes (keys such as msg, agent_op, kb, update, patch); null or absent means no quota. Not a per-sender limit; those do not exist */
+            quotas: {
+                [key: string]: number | null;
+            };
+        };
+        /** @description Partial merge. In `quotas`, a class set to null drops its quota. */
+        FabricSettingsPatch: {
+            hub_role?: boolean;
+            listen_lan?: boolean;
+            custody_opt_in?: boolean;
+            quotas?: {
+                [key: string]: number | null;
+            };
+        };
+        FabricStatus: {
+            schema: number;
+            links: components["schemas"]["FabricLink"][];
+            hub: components["schemas"]["FabricHub"];
+            custody: components["schemas"]["FabricCustody"];
+            store: components["schemas"]["FabricStore"];
+            settings: components["schemas"]["FabricSettings"];
+        };
+        HubEnrollRequest: {
+            /** @description the hub's tcp-lan address, host:port */
+            address: string;
+            /** @description the hub's 8-character one-time code; dashes, spaces and case ignored */
+            code: string;
+            /** @description the hub's card text, needed to seal ENROLL when the hub is not already a contact (the offer bundle carries it) */
+            card?: string;
+        };
+        HubOffer: {
+            schema: number;
+            /** @description 8 characters, single use, attempt lockout after 5 failures; shown once */
+            code: string;
+            /** @description host:port of this hub's tcp-lan listener (the LAN IP); null while no LAN address is known */
+            address: string | null;
+            /** @description this hub's own card */
+            card: components["schemas"]["Card"];
+            /** @description what the member scans or pastes: the hub's card, address and code in one text and QR */
+            bundle: components["schemas"]["Card"];
+        };
+        /** @description One node heard through a source (§14). Every string is an untrusted RF-origin value (names truncated to 40 bytes, control characters stripped): render as text only, and hand it to the agent only inside a labelled untrusted block. Never a contact: Meshtastic is a different identity system. */
+        NearbyNode: {
+            /** @description the source's own node id, e.g. !a1b2c3d4 for Meshtastic */
+            id: string;
+            /** @description the node number */
+            num: number;
+            long_name: string;
+            short_name: string;
+            /** @description as the board reports it; display only */
+            pubkey?: string | null;
+            snr?: number | null;
+            rssi?: number | null;
+            hops_away?: number | null;
+            /**
+             * Format: date-time
+             * @description from the node's own clock; a display hint, never an ordering or a freshness proof
+             */
+            last_heard_hint: string | null;
+            position?: {
+                lat?: number;
+                lon?: number;
+                alt_m?: number | null;
+            } | null;
+            channel_utilization?: number | null;
+        };
+        /** @description A presence source. v1: one per identified Meshtastic board, grouped as 'heard via Meshtastic on <board alias>'. */
+        NearbySource: {
+            id: string;
+            /** @enum {string} */
+            kind: "meshtastic";
+            /** @description plain heading, e.g. heard via Meshtastic on Bench radio */
+            label: string;
+            /** @description the DeviceRecord this source reads through */
+            device_id: string | null;
+            nodes: components["schemas"]["NearbyNode"][];
+        };
+        PanelState: {
+            /** @description the panel is enabled; only enabled panels hold a listener */
+            enabled: boolean;
+            listening: boolean;
+            /**
+             * @description the upstream's child state (never a connect); 2-tick debounce like every service
+             * @enum {string}
+             */
+            health: "up" | "down" | "unknown";
+            /** @description shim panels: FromRadio frames dropped by the capacity-bounded drop-oldest buffer (§14) */
+            dropped?: number;
+        };
+        /** @description A hosted panel (§13): an adopted project's own web UI on its own origin `http://<host as typed>:<port>`. The UI builds the origin from `location.hostname` and `port`, never from a shared snapshot. The dashboard frames only registry-declared panels. */
+        Panel: {
+            /** @description = the service id and KB link */
+            id: components["schemas"]["ServiceId"];
+            /** @description the listener slot, stable in state/panels.json */
+            port: number;
+            /** @description entry path, e.g. / */
+            entry: string;
+            /** @description true: the tab shows the open-on-the-node message instead of a frame when the dashboard origin is not potentially trustworthy */
+            needs_secure_context: boolean;
+            /** @description iframe `allow` features, origin-scoped (e.g. serial, bluetooth) */
+            allow: string[];
+            /** @description off-origin hosts an internet-connected browser will contact (verified at the offline lint); shown to the user */
+            optional_hosts: string[];
+            state: components["schemas"]["PanelState"];
+            /** @description frame chrome title */
+            title?: string;
+            /** @description plain-language note on Web Serial/Bluetooth limits for this panel */
+            secure_note?: string | null;
+        };
+        PanelSession: {
+            schema: number;
+            /** @description one-time ticket URL on the panel origin (128-bit, single use) */
+            url: string;
+            /** @description seconds until the ticket expires (30) */
+            expires_in: number;
+        };
+        IdentifyRequest: {
+            /**
+             * @description the user agreed to this probe; only `true` is valid. Opening a serial port can reset the board (DTR/RTS)
+             * @constant
+             */
+            consent: true;
+        };
+        /** @description A new message, a state change, or a new message request. Coalesced per message per tick (a 16-fragment transfer emits one frame per tick, carrying the latest state), so `change` is the first change since the previous frame: a message new to the client stays `new`. */
+        SseMessage: {
+            /** @enum {string} */
+            change: "new" | "state" | "request";
+            peer: components["schemas"]["NodeId"];
+            message: components["schemas"]["Message"];
+        };
+        /** @description `removed` carries the contact as it was; `request` is a new message request (also a `message` frame for its held message). */
+        SseContact: {
+            /** @enum {string} */
+            change: "added" | "updated" | "removed" | "request";
+            contact: components["schemas"]["Contact"];
+        };
+        SseNearby: {
+            sources: components["schemas"]["NearbySource"][];
+        };
+        SsePanels: {
+            panels: components["schemas"]["Panel"][];
         };
     };
     responses: {
@@ -801,6 +1405,11 @@ export interface components {
     parameters: {
         serviceId: components["schemas"]["ServiceId"];
         deviceId: string;
+        peerId: components["schemas"]["NodeId"];
+        /** @description the contact's `node_id` */
+        contactId: components["schemas"]["NodeId"];
+        messageId: components["schemas"]["MessageId"];
+        panelId: components["schemas"]["ServiceId"];
     };
     requestBodies: never;
     headers: never;
@@ -1061,6 +1670,39 @@ export interface operations {
             404: components["responses"]["Problem"];
             /** @description offer_stale (sha256 mismatch) or already flashing */
             409: components["responses"]["Problem"];
+        };
+    };
+    identifyDevice: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: components["parameters"]["deviceId"];
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["IdentifyRequest"];
+            };
+        };
+        responses: {
+            /** @description The device record after the probe */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DeviceRecord"];
+                };
+            };
+            /** @description bad_request (consent missing or false; the device does not offer `identify`) */
+            400: components["responses"]["Problem"];
+            404: components["responses"]["Problem"];
+            /** @description port_busy (the port has another owner) */
+            409: components["responses"]["Problem"];
+            /** @description upstream_error: meshmud or the presence reader did not start or did not answer */
+            502: components["responses"]["Problem"];
         };
     };
     chat: {
@@ -1449,6 +2091,449 @@ export interface operations {
                 };
                 content?: never;
             };
+        };
+    };
+    listThreads: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        schema: number;
+                        threads: components["schemas"]["Thread"][];
+                    };
+                };
+            };
+        };
+    };
+    getThread: {
+        parameters: {
+            query?: {
+                since_seq?: number;
+                limit?: number;
+            };
+            header?: never;
+            path: {
+                peer: components["parameters"]["peerId"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        schema: number;
+                        peer: components["schemas"]["NodeId"];
+                        /** @description true while the peer is an unaccepted message request */
+                        request: boolean;
+                        messages: components["schemas"]["Message"][];
+                        more: boolean;
+                    };
+                };
+            };
+            400: components["responses"]["Problem"];
+            404: components["responses"]["Problem"];
+        };
+    };
+    sendMessage: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["SendMessageRequest"];
+            };
+        };
+        responses: {
+            /** @description Queued */
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        schema: number;
+                        id: components["schemas"]["MessageId"];
+                    };
+                };
+            };
+            400: components["responses"]["Problem"];
+            /** @description not_found (`to` is not a contact) */
+            404: components["responses"]["Problem"];
+        };
+    };
+    retryMessage: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: components["parameters"]["messageId"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The message after re-queueing */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Message"];
+                };
+            };
+            404: components["responses"]["Problem"];
+            /** @description bad_request: not retryable in its current state */
+            409: components["responses"]["Problem"];
+        };
+    };
+    listContacts: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        schema: number;
+                        contacts: components["schemas"]["Contact"][];
+                    };
+                };
+            };
+        };
+    };
+    addContact: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ContactCreate"];
+            };
+        };
+        responses: {
+            /** @description The contact (added now, or already known with no state change) */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Contact"];
+                };
+            };
+            400: components["responses"]["Problem"];
+            /** @description bad_request: key conflict with the pinned keys for that NodeId */
+            409: components["responses"]["Problem"];
+        };
+    };
+    getOwnCard: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Card"];
+                };
+            };
+        };
+    };
+    getContact: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description the contact's `node_id` */
+                id: components["parameters"]["contactId"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Contact"];
+                };
+            };
+            404: components["responses"]["Problem"];
+        };
+    };
+    forgetContact: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description the contact's `node_id` */
+                id: components["parameters"]["contactId"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Forgotten */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            404: components["responses"]["Problem"];
+        };
+    };
+    patchContact: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description the contact's `node_id` */
+                id: components["parameters"]["contactId"];
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ContactPatch"];
+            };
+        };
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Contact"];
+                };
+            };
+            400: components["responses"]["Problem"];
+            404: components["responses"]["Problem"];
+        };
+    };
+    getFabric: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["FabricStatus"];
+                };
+            };
+        };
+    };
+    enrollHub: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["HubEnrollRequest"];
+            };
+        };
+        responses: {
+            /** @description Enrolled */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["FabricHub"];
+                };
+            };
+            400: components["responses"]["Problem"];
+            /** @description bad_request: this node already has a home hub */
+            409: components["responses"]["Problem"];
+            429: components["responses"]["Problem"];
+            /** @description upstream_error: hub unreachable or refused */
+            502: components["responses"]["Problem"];
+        };
+    };
+    offerHub: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Offer minted */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HubOffer"];
+                };
+            };
+            403: components["responses"]["Problem"];
+        };
+    };
+    dismissHubOffer: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Dismissed */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            403: components["responses"]["Problem"];
+        };
+    };
+    patchFabricSettings: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["FabricSettingsPatch"];
+            };
+        };
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["FabricSettings"];
+                };
+            };
+            400: components["responses"]["Problem"];
+            403: components["responses"]["Problem"];
+        };
+    };
+    listNearby: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        schema: number;
+                        sources: components["schemas"]["NearbySource"][];
+                    };
+                };
+            };
+        };
+    };
+    listPanels: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        schema: number;
+                        panels: components["schemas"]["Panel"][];
+                    };
+                };
+            };
+        };
+    };
+    openPanelSession: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: components["parameters"]["panelId"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Ticket minted */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PanelSession"];
+                };
+            };
+            /** @description not_found (unknown panel, or its service is not set up) */
+            404: components["responses"]["Problem"];
         };
     };
     events: {

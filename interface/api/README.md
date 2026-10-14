@@ -24,7 +24,40 @@ the `x-sse-events` map) into `ui/src/lib/api/types.gen.ts` — never hand-edited
   upstream replays its last 50 on connect). `status` frames are shared by every subscriber, so
   their `auth` block is a placeholder — clients keep the `auth` from their own `GET /status`.
   `services`/`devices` frames are published on a **state** change (plus `since`); `detail`
-  refreshes on the next snapshot, not on every probe tick.
+  refreshes on the next snapshot, not on every probe tick. Layer 5 adds `message` (a new message, a
+  state change or a new request, **coalesced per message per tick** so a 16-fragment transfer cannot
+  flood the ring), `contact`, `fabric` (a full `FabricStatus` snapshot), `nearby` and `panels` (full
+  snapshots). After `reset` the Layer 5 views also refetch `/fabric`, `/messages/threads`, `/contacts`,
+  `/nearby` and `/panels`.
+- **Layer 5 additions (Messaging & Data; `os/messaging/README.md` §15, D20) — additive under `/api/v1`:**
+  - *Routes:* `GET /messages/threads`, `GET /messages/threads/{peer}`, `POST /messages`, `POST /messages/{id}/retry`,
+    `GET|POST /contacts`, `GET|PATCH|DELETE /contacts/{id}`, `GET /contacts/me/card`, `GET /fabric`,
+    `POST /fabric/hub/enroll`, `POST /fabric/hub/offer`, `PATCH /fabric/settings`, `GET /nearby`, `GET /panels`,
+    `POST /panels/{id}/session`, `POST /devices/{id}/identify`. Lists use the `{schema, <plural>}` envelope; single
+    resources are returned bare.
+  - *Ids and order:* a peer is always its `NodeId` (64 lowercase hex) in paths and bodies; `node1…` is accepted only as
+    `POST /contacts {node_id}`. Message ids are `msg-…`, minted by `111d` for the local row — not the wire `msg_id`
+    (§4), which only `Message.msg_id` (Advanced) exposes. A thread is ordered by `local_seq`; `Message.at` (local wall
+    clock) and `sent_at_claim` (the sender's unverified claim) are display only and never order anything.
+  - *States:* `Message.state` is `queued|sent|relayed|delivered` (§9) with `reason_code` + `reason` while it needs an
+    explanation: `waiting_for_key`, `hub_not_yours`, `restore_pending`, `store_full` (queued), `mailbox_full` (sent).
+    `POST /messages` always answers 202 and never promises delivery. The agent does not call it: it proposes
+    (`kind: message`) and the human accepts in the UI. Peer-authored strings (`Message.text`, `NearbyNode.*` names) are
+    untrusted: text-only rendering.
+  - *Writes that are loopback-only* (403 `loopback_only` otherwise): `PATCH /fabric/settings`, `POST /fabric/hub/offer`.
+    The rest follow the usual rule (loopback or a paired session).
+  - *Problem codes:* `port_busy` (409 on `identify` when the port has another owner), `panel_ticket_expired` (403, sent
+    by a **panel listener** on its own port, not by `/api/v1`: a spent or expired ticket without a cookie),
+    `upstream_error` (502: a panel shim whose upstream is down, a hub that is unreachable or refuses, meshmud that did not
+    answer an identify). Conflicts that have no dedicated code (not retryable, already enrolled, key conflict on a card)
+    are 409 `bad_request`.
+  - *Hosted panels (§13):* `ServiceRecord.panel` is `Panel | null`; `embed_url` is never set when it is non-null. The UI
+    builds the panel origin from `location.hostname` and `panel.port`; the `POST /panels/{id}/session` ticket URL is
+    single use, 30 s, bound to the minting session. Panel listeners answer their own errors as `problem+json` too.
+  - *Enum growth (all additive; unknown values render as `unknown`):* `ServiceId` + `fabric`, `meshtastic`;
+    `DeviceRecord.actions` has `identify` (now live for Meshtastic-capable boards); `reason_code` sets grow as above;
+    `Problem.code` + `port_busy`, `panel_ticket_expired`.
+  - *No key material:* `Card` and `HubOffer` carry the public announce and a one-time enrollment code only.
 - **Not gated:** `/`, static assets, `/health` (body is booleans) and `/api/v1/auth/*`. Everything
   else — including the Layer 1 seam `/api/status` and the `/v1` legacy page — needs loopback or a
   session.
@@ -35,4 +68,4 @@ the `x-sse-events` map) into `ui/src/lib/api/types.gen.ts` — never hand-edited
 - **Identity:** no key material on any route, ever (Layer 2 rule). `node.label`/`bech32` are
   display forms computed from the public id.
 - **Timestamps:** RFC 3339 UTC. **IDs:** `conv-…` minted by the client (`[A-Za-z0-9_-]{1,128}`);
-  `prop-…`/`task-…` minted by `111-agent`.
+  `prop-…`/`task-…` minted by `111-agent`; `msg-…` minted by `111d` (Layer 5).

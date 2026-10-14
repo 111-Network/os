@@ -43,7 +43,9 @@ export const schemas: Record<string, JsonSchema> = {
           "offer_stale",
           "needs_hub",
           "upstream_error",
-          "internal"
+          "internal",
+          "port_busy",
+          "panel_ticket_expired"
         ]
       },
       "errors": {
@@ -56,7 +58,10 @@ export const schemas: Record<string, JsonSchema> = {
       }
     }
   },
-  "ServiceId": {"type":"string","enum":["agent","model","transport","radio","kb","gateway","codeagent"]},
+  "ServiceId": {
+    "type": "string",
+    "enum": ["agent","model","transport","radio","kb","gateway","codeagent","fabric","meshtastic"]
+  },
   "ServiceState": {"type":"string","enum":["live","unset","error","starting"]},
   "ServiceRecord": {
     "type": "object",
@@ -83,14 +88,18 @@ export const schemas: Record<string, JsonSchema> = {
       "since": {"type":"string","format":"date-time"},
       "reason_code": {
         "type": "string",
-        "description": "stable snake_case, display-only for clients. Emitted set (111d): healthy, health_pending, spawn_pending, child_degraded, child_stopped, child_backoff, health_error, health_503, health_unreachable, binary_absent, no_model, no_python, venv_unavailable, transport_degraded, joined, isolated, no_radio, radio_unbound, radio_bound_rnode, radio_bound_meshtastic, stack_waiting, stack_down, verify_failed, kb_absent, wan_ok, wan_unknown, wan_offline, not_hub, opencode_found, opencode_absent."
+        "description": "stable snake_case, display-only for clients. Emitted set (111d): healthy, health_pending, spawn_pending, child_degraded, child_stopped, child_backoff, health_error, health_503, health_unreachable, binary_absent, no_model, no_python, venv_unavailable, transport_degraded, joined, isolated, no_radio, radio_unbound, radio_bound_rnode, radio_bound_meshtastic, stack_waiting, stack_down, verify_failed, kb_absent, wan_ok, wan_unknown, wan_offline, not_hub, opencode_found, opencode_absent. Layer 5 adds: store_full (fabric), port_busy (meshtastic); fabric and meshtastic rows add their own snake_case codes, additively."
       },
       "reason": {"type":"string","description":"one plain sentence"},
       "can_run_here": {"type":"boolean"},
       "requires": {"type":"string"},
       "description": {"type":"string","description":"2–3 plain sentences: what it is"},
       "kb_entry": {"type":"string","description":"relative KB path"},
-      "embed_url": {"type":"string"},
+      "embed_url": {"type":"string","description":"link-out URL. Never set when `panel` is non-null"},
+      "panel": {
+        "oneOf": [{"$ref":"#/components/schemas/Panel"},{"type":"null"}],
+        "description": "Layer 5 (§13): the hosted panel for this service's LIVE page, or null. Additive: absent on older daemons"
+      },
       "actions": {"type":"array","items":{"type":"string","enum":["restart","log"]}},
       "detail": {"type":"object","additionalProperties":true}
     }
@@ -471,7 +480,7 @@ export const schemas: Record<string, JsonSchema> = {
       "last_seen": {"type":"string","format":"date-time"},
       "reason_code": {
         "type": "string",
-        "description": "stable snake_case, display-only for clients. Emitted set (111d): stack_bound, stack_down, radio_unbound, unbound, no_port_access, adapter_idle, unidentified, session_active, session_idle, unplugged, not_detected."
+        "description": "stable snake_case, display-only for clients. Emitted set (111d): stack_bound, stack_down, radio_unbound, unbound, no_port_access, adapter_idle, unidentified, session_active, session_idle, unplugged, not_detected. Layer 5 adds: port_busy (the port has another owner, so identify is refused)."
       },
       "reason": {"type":"string","description":"one plain sentence"},
       "capabilities": {
@@ -500,7 +509,7 @@ export const schemas: Record<string, JsonSchema> = {
       "actions": {
         "type": "array",
         "items": {"type":"string","enum":["rename","forget","agent","identify","pair","authorize","flash"]},
-        "description": "identify/pair/authorize/flash are reserved for the Layer 6 core; clients render unknown values as disabled. `flash` appears only with a non-null `flash_offer`."
+        "description": "identify is live for Meshtastic-capable boards (Layer 5 §14; POST /devices/{id}/identify); pair/authorize/flash are reserved for the Layer 6 core; clients render unknown values as disabled. `flash` appears only with a non-null `flash_offer`."
       },
       "flash_offer": {
         "oneOf": [{"$ref":"#/components/schemas/FlashOffer"},{"type":"null"}],
@@ -522,6 +531,501 @@ export const schemas: Record<string, JsonSchema> = {
     "type": "object",
     "required": ["services"],
     "properties": {"services":{"type":"array","items":{"$ref":"#/components/schemas/ServiceRecord"}}}
+  },
+  "NodeId": {
+    "type": "string",
+    "pattern": "^[0-9a-f]{64}$",
+    "description": "a public NodeId, 64 lowercase hex; `label` and `bech32` are its display forms"
+  },
+  "MessageId": {
+    "type": "string",
+    "pattern": "^[A-Za-z0-9_-]{1,128}$",
+    "description": "`msg-…`, minted by 111d for the local row. Not the wire msg_id (§4), which only Advanced views show (`Message.msg_id`)"
+  },
+  "MessageState": {
+    "type": "string",
+    "enum": ["queued","sent","relayed","delivered"],
+    "description": "Delivery evidence (§9), own messages only. queued: no path, key missing, or the peer's hub is not yours (see `reason_code`). sent: a frame was written to a link, or a custody reject kept it here (see `reason_code`). relayed: an authenticated CUSTODY_ACK from a mailbox node for a known member — saved and held for them, not yet at them. delivered: the recipient's own ACK. Only that ACK releases the sender's copy."
+  },
+  "ContactTrust": {
+    "type": "string",
+    "enum": ["oob","tofu","enrolled"],
+    "description": "How the keys were learned (§7.1). oob: a card or QR, or a NodeId typed or scanned out of band. tofu: first seen through an INTRO (a message request until accepted). enrolled: hub and member after ENROLL."
+  },
+  "Message": {
+    "type": "object",
+    "required": ["id","peer","dir","text","state","reason_code","reason","local_seq","received_seq","sent_at_claim","at"],
+    "description": "One message in a thread. Order is `local_seq`; `at` and `sent_at_claim` are display only and never order anything (no timestamp exists in the envelope, §4).",
+    "properties": {
+      "id": {"$ref":"#/components/schemas/MessageId"},
+      "peer": {
+        "$ref": "#/components/schemas/NodeId",
+        "description": "the other party: the recipient for dir=own, the sender for dir=in"
+      },
+      "dir": {"type":"string","enum":["own","in"]},
+      "text": {
+        "type": "string",
+        "description": "message body text. For dir=in this is peer-authored and untrusted: render as text only"
+      },
+      "state": {
+        "$ref": "#/components/schemas/MessageState",
+        "description": "dir=in is always `delivered` (it arrived here; a held message request is not acknowledged to its sender until accepted)"
+      },
+      "reason_code": {
+        "type": ["string","null"],
+        "description": "stable snake_case, display-only for clients, set while the state needs an explanation. Emitted set (111d): waiting_for_key (queued, the peer's card has not arrived), hub_not_yours (queued, their hub is not yours; delivered when you meet directly), restore_pending (queued, the identity holder reports a restore floor so nothing is sealed), store_full (queued, the local store refuses new work), mailbox_full (sent, the hub answered REJECT_FULL). null when nothing needs explaining."
+      },
+      "reason": {"type":["string","null"],"description":"one plain sentence for `reason_code`"},
+      "local_seq": {
+        "type": "integer",
+        "minimum": 0,
+        "description": "local ordering sequence of the thread (the store's `local_seq`); strictly increasing per node"
+      },
+      "received_seq": {
+        "type": ["integer","null"],
+        "minimum": 0,
+        "description": "local receipt sequence for dir=in; null for own messages"
+      },
+      "sent_at_claim": {
+        "type": ["string","null"],
+        "format": "date-time",
+        "description": "the sender's own claim (`sent_at` in the body, §3.3), unverified: show it as such, behind a disclosure. null when absent or for own messages"
+      },
+      "at": {
+        "type": "string",
+        "format": "date-time",
+        "description": "local wall-clock time this node stored the message (own: queued; in: received). Display only"
+      },
+      "msg_id": {
+        "type": "object",
+        "required": ["stream","epoch","n"],
+        "description": "Advanced view: the wire msg_id components (§4); the sender and recipient are `peer` and this node",
+        "properties": {
+          "stream": {"type":"integer","minimum":0},
+          "epoch": {"type":"integer","minimum":0},
+          "n": {"type":"integer","minimum":0}
+        }
+      }
+    }
+  },
+  "ThreadStates": {
+    "type": "object",
+    "required": ["queued","sent","relayed","delivered"],
+    "description": "Counts of this thread's own messages per delivery state",
+    "properties": {
+      "queued": {"type":"integer","minimum":0},
+      "sent": {"type":"integer","minimum":0},
+      "relayed": {"type":"integer","minimum":0},
+      "delivered": {"type":"integer","minimum":0}
+    }
+  },
+  "Thread": {
+    "type": "object",
+    "required": ["peer","alias","label","request","unread","last","states"],
+    "properties": {
+      "peer": {"$ref":"#/components/schemas/NodeId"},
+      "alias": {"type":["string","null"],"maxLength":64},
+      "label": {"type":"string","description":"xxxx-xxxx-xx operator label of `peer` (display only)"},
+      "request": {
+        "type": "boolean",
+        "description": "true while the peer is an unaccepted message request (INTRO): accept or leave it pending"
+      },
+      "unread": {
+        "type": "integer",
+        "minimum": 0,
+        "description": "incoming messages above the thread's read mark (`ContactPatch.read_seq`)"
+      },
+      "last": {
+        "oneOf": [{"$ref":"#/components/schemas/Message"},{"type":"null"}],
+        "description": "the most recent message by `local_seq`"
+      },
+      "states": {"$ref":"#/components/schemas/ThreadStates"}
+    }
+  },
+  "SendMessageRequest": {
+    "type": "object",
+    "required": ["to","text"],
+    "properties": {
+      "to": {"$ref":"#/components/schemas/NodeId","description":"a contact's `node_id`"},
+      "text": {
+        "type": "string",
+        "minLength": 1,
+        "description": "the message text. Refused (400) when Tier 0/1 framing cannot carry it (§5); attachments arrive in v1.1"
+      }
+    }
+  },
+  "Contact": {
+    "type": "object",
+    "required": ["node_id","bech32","label","alias","trust","request","pinned","has_key"],
+    "properties": {
+      "node_id": {"$ref":"#/components/schemas/NodeId"},
+      "bech32": {"type":"string","pattern":"^node1[a-z0-9]+$","description":"node1… (lowercase)"},
+      "label": {"type":"string","description":"xxxx-xxxx-xx operator label (display only)"},
+      "alias": {"type":["string","null"],"maxLength":64,"description":"local editable name"},
+      "trust": {"$ref":"#/components/schemas/ContactTrust"},
+      "request": {
+        "type": "boolean",
+        "description": "pending message request: its messages are held and not acknowledged until accepted"
+      },
+      "pinned": {"type":"boolean","description":"never pruned"},
+      "has_key": {
+        "type": "boolean",
+        "description": "false while only the NodeId is known and the card request is outstanding; messages to them are queued with reason_code waiting_for_key"
+      },
+      "roles": {
+        "type": "array",
+        "items": {"type":"string"},
+        "description": "from the contact's announce appdata (§7.3), e.g. mailbox, always_on_hub, lora_attached. Unknown values are ignored"
+      },
+      "home_hub": {
+        "type": ["string","null"],
+        "description": "locator hint from appdata: the contact's home hub id, truncated hex. Never an authenticator"
+      }
+    }
+  },
+  "ContactAddByCard": {
+    "type": "object",
+    "required": ["card"],
+    "properties": {"card":{"type":"string","minLength":1,"description":"base32 card text as scanned or pasted (§7.2 (1))"}}
+  },
+  "ContactAddByNodeId": {
+    "type": "object",
+    "required": ["node_id"],
+    "properties": {
+      "node_id": {
+        "type": "string",
+        "minLength": 1,
+        "description": "a NodeId: 64 lowercase hex or node1… bech32 (63 chars), typed or scanned (§7.2 (2))"
+      }
+    }
+  },
+  "ContactCreate": {
+    "description": "Exactly one of `card` or `node_id`.",
+    "oneOf": [{"$ref":"#/components/schemas/ContactAddByCard"},{"$ref":"#/components/schemas/ContactAddByNodeId"}]
+  },
+  "ContactPatch": {
+    "type": "object",
+    "properties": {
+      "alias": {"type":["string","null"],"maxLength":64},
+      "accept": {"type":"boolean","const":true,"description":"accept a pending message request; only `true` is valid"},
+      "pinned": {"type":"boolean"},
+      "read_seq": {
+        "type": "integer",
+        "minimum": 0,
+        "description": "mark the thread read up to this `local_seq`; the read mark only moves forward, a lower value changes nothing"
+      }
+    }
+  },
+  "QrMatrix": {
+    "type": "object",
+    "required": ["size","rows"],
+    "description": "A QR module matrix the UI draws itself (no image is served). Quiet zone not included.",
+    "properties": {
+      "size": {"type":"integer","minimum":1,"description":"modules per side"},
+      "rows": {
+        "type": "array",
+        "items": {"type":"string","pattern":"^[01]+$"},
+        "description": "`size` strings of `size` characters each, top row first; 1 is a dark module"
+      }
+    }
+  },
+  "Card": {
+    "type": "object",
+    "required": ["text","qr"],
+    "description": "A contact card: the public announce (L2 §6.2) as base32 text and as a QR matrix. Public material only.",
+    "properties": {"text":{"type":"string"},"qr":{"$ref":"#/components/schemas/QrMatrix"}}
+  },
+  "LinkKind": {"type":"string","enum":["tcp-lan","kiss-modem","meshtastic-client","rns-bridge","ble"]},
+  "LinkState": {"type":"string","enum":["down","up","degraded"]},
+  "FabricPathProfile": {
+    "type": "object",
+    "required": ["mtu_bytes","framing","reliable","broadcast","cost_class","airtime"],
+    "description": "What a link's path can carry (§8). The fabric never rate-limits; airtime is an advertised physical fact.",
+    "properties": {
+      "mtu_bytes": {"type":"integer","minimum":1},
+      "framing": {"type":"string","enum":["stream","datagram"]},
+      "reliable": {"type":"boolean"},
+      "broadcast": {"type":"boolean"},
+      "cost_class": {"type":"string","enum":["bulk","low_bandwidth"]},
+      "airtime": {
+        "oneOf": [
+          {
+            "type": "object",
+            "required": ["duty_cycle_permille","bits_per_s"],
+            "properties": {"duty_cycle_permille":{"type":"integer","minimum":0},"bits_per_s":{"type":"integer","minimum":0}}
+          },
+          {"type":"null"}
+        ]
+      }
+    }
+  },
+  "FabricLink": {
+    "type": "object",
+    "required": ["id","kind","state","peers","detail","profile"],
+    "properties": {
+      "id": {"type":"string"},
+      "kind": {"$ref":"#/components/schemas/LinkKind"},
+      "state": {"$ref":"#/components/schemas/LinkState"},
+      "peers": {"type":"integer","minimum":0,"description":"attributed peers on this link (0 unless up)"},
+      "detail": {"type":["string","null"],"description":"why the link is degraded, one plain sentence"},
+      "profile": {"$ref":"#/components/schemas/FabricPathProfile"}
+    }
+  },
+  "FabricHub": {
+    "type": "object",
+    "required": ["enrolled","reachable","cursor","node_id","address","members","offer_active"],
+    "description": "Both ends of the hub relationship (§9): the member side (enrolled, reachable, cursor) and the hub side (members, offer_active).",
+    "properties": {
+      "enrolled": {"type":"boolean","description":"this node has a home hub"},
+      "reachable": {"type":"boolean","description":"an attributed link to the home hub is up"},
+      "cursor": {
+        "type": "integer",
+        "minimum": 0,
+        "description": "mailbox cursor committed with the home hub (the hub's own insertion sequence; no clock)"
+      },
+      "node_id": {
+        "type": ["string","null"],
+        "pattern": "^[0-9a-f]{64}$",
+        "description": "the home hub; null when not enrolled"
+      },
+      "address": {
+        "type": ["string","null"],
+        "description": "host:port of the home hub's tcp-lan listener; null when not enrolled"
+      },
+      "members": {
+        "type": "integer",
+        "minimum": 0,
+        "description": "hub role: enrolled members of this node (0 when it is not a hub)"
+      },
+      "offer_active": {"type":"boolean","description":"hub role: an enrollment code is outstanding"}
+    }
+  },
+  "FabricCustody": {
+    "type": "object",
+    "required": ["count","bytes"],
+    "description": "Sealed items this node holds for its members (hub role). It cannot read them.",
+    "properties": {"count":{"type":"integer","minimum":0},"bytes":{"type":"integer","minimum":0}}
+  },
+  "FabricStore": {
+    "type": "object",
+    "required": ["open","used","watermark","store_full"],
+    "description": "The encrypted local store (§10). Pruned by capacity only; `store_full` means new custody and bulk are refused.",
+    "properties": {
+      "open": {"type":"boolean"},
+      "used": {"type":"integer","minimum":0,"description":"live bytes: DB pages minus freelist, plus the blob dir"},
+      "watermark": {"type":"integer","minimum":0,"description":"the high watermark in bytes that triggers pruning"},
+      "store_full": {"type":"boolean"}
+    }
+  },
+  "FabricSettings": {
+    "type": "object",
+    "required": ["hub_role","listen_lan","custody_opt_in","quotas"],
+    "properties": {
+      "hub_role": {"type":"boolean","description":"accept custody for enrolled members"},
+      "listen_lan": {
+        "type": "boolean",
+        "description": "bind the tcp-lan listener on the LAN (otherwise loopback; loopback is never a peer)"
+      },
+      "custody_opt_in": {
+        "type": "boolean",
+        "description": "an always-on laptop or a phone opts in to hold custody (Cat 4 hubs default on)"
+      },
+      "quotas": {
+        "type": "object",
+        "additionalProperties": {"type":["integer","null"],"minimum":0},
+        "description": "capacity shaping per stored-data class, in bytes (keys such as msg, agent_op, kb, update, patch); null or absent means no quota. Not a per-sender limit; those do not exist"
+      }
+    }
+  },
+  "FabricSettingsPatch": {
+    "type": "object",
+    "description": "Partial merge. In `quotas`, a class set to null drops its quota.",
+    "properties": {
+      "hub_role": {"type":"boolean"},
+      "listen_lan": {"type":"boolean"},
+      "custody_opt_in": {"type":"boolean"},
+      "quotas": {"type":"object","additionalProperties":{"type":["integer","null"],"minimum":0}}
+    }
+  },
+  "FabricStatus": {
+    "type": "object",
+    "required": ["schema","links","hub","custody","store","settings"],
+    "properties": {
+      "schema": {"type":"integer"},
+      "links": {"type":"array","items":{"$ref":"#/components/schemas/FabricLink"}},
+      "hub": {"$ref":"#/components/schemas/FabricHub"},
+      "custody": {"$ref":"#/components/schemas/FabricCustody"},
+      "store": {"$ref":"#/components/schemas/FabricStore"},
+      "settings": {"$ref":"#/components/schemas/FabricSettings"}
+    }
+  },
+  "HubEnrollRequest": {
+    "type": "object",
+    "required": ["address","code"],
+    "properties": {
+      "address": {"type":"string","minLength":1,"description":"the hub's tcp-lan address, host:port"},
+      "code": {"type":"string","description":"the hub's 8-character one-time code; dashes, spaces and case ignored"},
+      "card": {
+        "type": "string",
+        "description": "the hub's card text, needed to seal ENROLL when the hub is not already a contact (the offer bundle carries it)"
+      }
+    }
+  },
+  "HubOffer": {
+    "type": "object",
+    "required": ["schema","code","address","card","bundle"],
+    "properties": {
+      "schema": {"type":"integer"},
+      "code": {"type":"string","description":"8 characters, single use, attempt lockout after 5 failures; shown once"},
+      "address": {
+        "type": ["string","null"],
+        "description": "host:port of this hub's tcp-lan listener (the LAN IP); null while no LAN address is known"
+      },
+      "card": {"$ref":"#/components/schemas/Card","description":"this hub's own card"},
+      "bundle": {
+        "$ref": "#/components/schemas/Card",
+        "description": "what the member scans or pastes: the hub's card, address and code in one text and QR"
+      }
+    }
+  },
+  "NearbyNode": {
+    "type": "object",
+    "required": ["id","num","long_name","short_name","last_heard_hint"],
+    "description": "One node heard through a source (§14). Every string is an untrusted RF-origin value (names truncated to 40 bytes, control characters stripped): render as text only, and hand it to the agent only inside a labelled untrusted block. Never a contact: Meshtastic is a different identity system.",
+    "properties": {
+      "id": {"type":"string","description":"the source's own node id, e.g. !a1b2c3d4 for Meshtastic"},
+      "num": {"type":"integer","minimum":0,"description":"the node number"},
+      "long_name": {"type":"string"},
+      "short_name": {"type":"string"},
+      "pubkey": {"type":["string","null"],"description":"as the board reports it; display only"},
+      "snr": {"type":["number","null"]},
+      "rssi": {"type":["integer","null"]},
+      "hops_away": {"type":["integer","null"],"minimum":0},
+      "last_heard_hint": {
+        "type": ["string","null"],
+        "format": "date-time",
+        "description": "from the node's own clock; a display hint, never an ordering or a freshness proof"
+      },
+      "position": {
+        "type": ["object","null"],
+        "properties": {"lat":{"type":"number"},"lon":{"type":"number"},"alt_m":{"type":["number","null"]}}
+      },
+      "channel_utilization": {"type":["number","null"]}
+    }
+  },
+  "NearbySource": {
+    "type": "object",
+    "required": ["id","kind","label","device_id","nodes"],
+    "description": "A presence source. v1: one per identified Meshtastic board, grouped as 'heard via Meshtastic on <board alias>'.",
+    "properties": {
+      "id": {"type":"string"},
+      "kind": {"type":"string","enum":["meshtastic"]},
+      "label": {"type":"string","description":"plain heading, e.g. heard via Meshtastic on Bench radio"},
+      "device_id": {"type":["string","null"],"description":"the DeviceRecord this source reads through"},
+      "nodes": {"type":"array","items":{"$ref":"#/components/schemas/NearbyNode"}}
+    }
+  },
+  "PanelState": {
+    "type": "object",
+    "required": ["enabled","listening","health"],
+    "properties": {
+      "enabled": {"type":"boolean","description":"the panel is enabled; only enabled panels hold a listener"},
+      "listening": {"type":"boolean"},
+      "health": {
+        "type": "string",
+        "enum": ["up","down","unknown"],
+        "description": "the upstream's child state (never a connect); 2-tick debounce like every service"
+      },
+      "dropped": {
+        "type": "integer",
+        "minimum": 0,
+        "description": "shim panels: FromRadio frames dropped by the capacity-bounded drop-oldest buffer (§14)"
+      }
+    }
+  },
+  "Panel": {
+    "type": "object",
+    "required": ["id","port","entry","needs_secure_context","allow","optional_hosts","state"],
+    "description": "A hosted panel (§13): an adopted project's own web UI on its own origin `http://<host as typed>:<port>`. The UI builds the origin from `location.hostname` and `port`, never from a shared snapshot. The dashboard frames only registry-declared panels.",
+    "properties": {
+      "id": {"$ref":"#/components/schemas/ServiceId","description":"= the service id and KB link"},
+      "port": {
+        "type": "integer",
+        "minimum": 11190,
+        "maximum": 11229,
+        "description": "the listener slot, stable in state/panels.json"
+      },
+      "entry": {"type":"string","description":"entry path, e.g. /"},
+      "needs_secure_context": {
+        "type": "boolean",
+        "description": "true: the tab shows the open-on-the-node message instead of a frame when the dashboard origin is not potentially trustworthy"
+      },
+      "allow": {
+        "type": "array",
+        "items": {"type":"string"},
+        "description": "iframe `allow` features, origin-scoped (e.g. serial, bluetooth)"
+      },
+      "optional_hosts": {
+        "type": "array",
+        "items": {"type":"string"},
+        "description": "off-origin hosts an internet-connected browser will contact (verified at the offline lint); shown to the user"
+      },
+      "state": {"$ref":"#/components/schemas/PanelState"},
+      "title": {"type":"string","description":"frame chrome title"},
+      "secure_note": {
+        "type": ["string","null"],
+        "description": "plain-language note on Web Serial/Bluetooth limits for this panel"
+      }
+    }
+  },
+  "PanelSession": {
+    "type": "object",
+    "required": ["schema","url","expires_in"],
+    "properties": {
+      "schema": {"type":"integer"},
+      "url": {"type":"string","description":"one-time ticket URL on the panel origin (128-bit, single use)"},
+      "expires_in": {"type":"integer","minimum":1,"description":"seconds until the ticket expires (30)"}
+    }
+  },
+  "IdentifyRequest": {
+    "type": "object",
+    "required": ["consent"],
+    "properties": {
+      "consent": {
+        "type": "boolean",
+        "const": true,
+        "description": "the user agreed to this probe; only `true` is valid. Opening a serial port can reset the board (DTR/RTS)"
+      }
+    }
+  },
+  "SseMessage": {
+    "type": "object",
+    "required": ["change","peer","message"],
+    "description": "A new message, a state change, or a new message request. Coalesced per message per tick (a 16-fragment transfer emits one frame per tick, carrying the latest state), so `change` is the first change since the previous frame: a message new to the client stays `new`.",
+    "properties": {
+      "change": {"type":"string","enum":["new","state","request"]},
+      "peer": {"$ref":"#/components/schemas/NodeId"},
+      "message": {"$ref":"#/components/schemas/Message"}
+    }
+  },
+  "SseContact": {
+    "type": "object",
+    "required": ["change","contact"],
+    "description": "`removed` carries the contact as it was; `request` is a new message request (also a `message` frame for its held message).",
+    "properties": {
+      "change": {"type":"string","enum":["added","updated","removed","request"]},
+      "contact": {"$ref":"#/components/schemas/Contact"}
+    }
+  },
+  "SseNearby": {
+    "type": "object",
+    "required": ["sources"],
+    "properties": {"sources":{"type":"array","items":{"$ref":"#/components/schemas/NearbySource"}}}
+  },
+  "SsePanels": {
+    "type": "object",
+    "required": ["panels"],
+    "properties": {"panels":{"type":"array","items":{"$ref":"#/components/schemas/Panel"}}}
   }
 };
 
@@ -704,6 +1208,18 @@ export const operations: Record<string, ContractOperation> = {
     "query": [],
     "pathParams": ["id"],
     "errors": [404,409]
+  },
+  "identifyDevice": {
+    "method": "POST",
+    "path": "/api/v1/devices/{id}/identify",
+    "success": 200,
+    "contentType": "application/json",
+    "schema": {"$ref":"#/components/schemas/DeviceRecord"},
+    "schemasByType": {"application/json":{"$ref":"#/components/schemas/DeviceRecord"}},
+    "requestSchema": {"$ref":"#/components/schemas/IdentifyRequest"},
+    "query": [],
+    "pathParams": ["id"],
+    "errors": [400,404,409,502]
   },
   "chat": {
     "method": "POST",
@@ -954,6 +1470,309 @@ export const operations: Record<string, ContractOperation> = {
     "pathParams": [],
     "errors": []
   },
+  "listThreads": {
+    "method": "GET",
+    "path": "/api/v1/messages/threads",
+    "success": 200,
+    "contentType": "application/json",
+    "schema": {
+      "type": "object",
+      "required": ["schema","threads"],
+      "properties": {"schema":{"type":"integer"},"threads":{"type":"array","items":{"$ref":"#/components/schemas/Thread"}}}
+    },
+    "schemasByType": {
+      "application/json": {
+        "type": "object",
+        "required": ["schema","threads"],
+        "properties": {
+          "schema": {"type":"integer"},
+          "threads": {"type":"array","items":{"$ref":"#/components/schemas/Thread"}}
+        }
+      }
+    },
+    "requestSchema": null,
+    "query": [],
+    "pathParams": [],
+    "errors": []
+  },
+  "getThread": {
+    "method": "GET",
+    "path": "/api/v1/messages/threads/{peer}",
+    "success": 200,
+    "contentType": "application/json",
+    "schema": {
+      "type": "object",
+      "required": ["schema","peer","request","messages","more"],
+      "properties": {
+        "schema": {"type":"integer"},
+        "peer": {"$ref":"#/components/schemas/NodeId"},
+        "request": {"type":"boolean","description":"true while the peer is an unaccepted message request"},
+        "messages": {"type":"array","items":{"$ref":"#/components/schemas/Message"}},
+        "more": {"type":"boolean"}
+      }
+    },
+    "schemasByType": {
+      "application/json": {
+        "type": "object",
+        "required": ["schema","peer","request","messages","more"],
+        "properties": {
+          "schema": {"type":"integer"},
+          "peer": {"$ref":"#/components/schemas/NodeId"},
+          "request": {"type":"boolean","description":"true while the peer is an unaccepted message request"},
+          "messages": {"type":"array","items":{"$ref":"#/components/schemas/Message"}},
+          "more": {"type":"boolean"}
+        }
+      }
+    },
+    "requestSchema": null,
+    "query": [{"name":"since_seq","required":false},{"name":"limit","required":false}],
+    "pathParams": ["peer"],
+    "errors": [400,404]
+  },
+  "sendMessage": {
+    "method": "POST",
+    "path": "/api/v1/messages",
+    "success": 202,
+    "contentType": "application/json",
+    "schema": {
+      "type": "object",
+      "required": ["schema","id"],
+      "properties": {"schema":{"type":"integer"},"id":{"$ref":"#/components/schemas/MessageId"}}
+    },
+    "schemasByType": {
+      "application/json": {
+        "type": "object",
+        "required": ["schema","id"],
+        "properties": {"schema":{"type":"integer"},"id":{"$ref":"#/components/schemas/MessageId"}}
+      }
+    },
+    "requestSchema": {"$ref":"#/components/schemas/SendMessageRequest"},
+    "query": [],
+    "pathParams": [],
+    "errors": [400,404]
+  },
+  "retryMessage": {
+    "method": "POST",
+    "path": "/api/v1/messages/{id}/retry",
+    "success": 200,
+    "contentType": "application/json",
+    "schema": {"$ref":"#/components/schemas/Message"},
+    "schemasByType": {"application/json":{"$ref":"#/components/schemas/Message"}},
+    "requestSchema": null,
+    "query": [],
+    "pathParams": ["id"],
+    "errors": [404,409]
+  },
+  "listContacts": {
+    "method": "GET",
+    "path": "/api/v1/contacts",
+    "success": 200,
+    "contentType": "application/json",
+    "schema": {
+      "type": "object",
+      "required": ["schema","contacts"],
+      "properties": {
+        "schema": {"type":"integer"},
+        "contacts": {"type":"array","items":{"$ref":"#/components/schemas/Contact"}}
+      }
+    },
+    "schemasByType": {
+      "application/json": {
+        "type": "object",
+        "required": ["schema","contacts"],
+        "properties": {
+          "schema": {"type":"integer"},
+          "contacts": {"type":"array","items":{"$ref":"#/components/schemas/Contact"}}
+        }
+      }
+    },
+    "requestSchema": null,
+    "query": [],
+    "pathParams": [],
+    "errors": []
+  },
+  "addContact": {
+    "method": "POST",
+    "path": "/api/v1/contacts",
+    "success": 200,
+    "contentType": "application/json",
+    "schema": {"$ref":"#/components/schemas/Contact"},
+    "schemasByType": {"application/json":{"$ref":"#/components/schemas/Contact"}},
+    "requestSchema": {"$ref":"#/components/schemas/ContactCreate"},
+    "query": [],
+    "pathParams": [],
+    "errors": [400,409]
+  },
+  "getOwnCard": {
+    "method": "GET",
+    "path": "/api/v1/contacts/me/card",
+    "success": 200,
+    "contentType": "application/json",
+    "schema": {"$ref":"#/components/schemas/Card"},
+    "schemasByType": {"application/json":{"$ref":"#/components/schemas/Card"}},
+    "requestSchema": null,
+    "query": [],
+    "pathParams": [],
+    "errors": []
+  },
+  "getContact": {
+    "method": "GET",
+    "path": "/api/v1/contacts/{id}",
+    "success": 200,
+    "contentType": "application/json",
+    "schema": {"$ref":"#/components/schemas/Contact"},
+    "schemasByType": {"application/json":{"$ref":"#/components/schemas/Contact"}},
+    "requestSchema": null,
+    "query": [],
+    "pathParams": ["id"],
+    "errors": [404]
+  },
+  "patchContact": {
+    "method": "PATCH",
+    "path": "/api/v1/contacts/{id}",
+    "success": 200,
+    "contentType": "application/json",
+    "schema": {"$ref":"#/components/schemas/Contact"},
+    "schemasByType": {"application/json":{"$ref":"#/components/schemas/Contact"}},
+    "requestSchema": {"$ref":"#/components/schemas/ContactPatch"},
+    "query": [],
+    "pathParams": ["id"],
+    "errors": [400,404]
+  },
+  "forgetContact": {
+    "method": "DELETE",
+    "path": "/api/v1/contacts/{id}",
+    "success": 204,
+    "contentType": null,
+    "schema": null,
+    "schemasByType": {},
+    "requestSchema": null,
+    "query": [],
+    "pathParams": ["id"],
+    "errors": [404]
+  },
+  "getFabric": {
+    "method": "GET",
+    "path": "/api/v1/fabric",
+    "success": 200,
+    "contentType": "application/json",
+    "schema": {"$ref":"#/components/schemas/FabricStatus"},
+    "schemasByType": {"application/json":{"$ref":"#/components/schemas/FabricStatus"}},
+    "requestSchema": null,
+    "query": [],
+    "pathParams": [],
+    "errors": []
+  },
+  "enrollHub": {
+    "method": "POST",
+    "path": "/api/v1/fabric/hub/enroll",
+    "success": 200,
+    "contentType": "application/json",
+    "schema": {"$ref":"#/components/schemas/FabricHub"},
+    "schemasByType": {"application/json":{"$ref":"#/components/schemas/FabricHub"}},
+    "requestSchema": {"$ref":"#/components/schemas/HubEnrollRequest"},
+    "query": [],
+    "pathParams": [],
+    "errors": [400,409,429,502]
+  },
+  "offerHub": {
+    "method": "POST",
+    "path": "/api/v1/fabric/hub/offer",
+    "success": 200,
+    "contentType": "application/json",
+    "schema": {"$ref":"#/components/schemas/HubOffer"},
+    "schemasByType": {"application/json":{"$ref":"#/components/schemas/HubOffer"}},
+    "requestSchema": null,
+    "query": [],
+    "pathParams": [],
+    "errors": [403]
+  },
+  "dismissHubOffer": {
+    "method": "DELETE",
+    "path": "/api/v1/fabric/hub/offer",
+    "success": 204,
+    "contentType": null,
+    "schema": null,
+    "schemasByType": {},
+    "requestSchema": null,
+    "query": [],
+    "pathParams": [],
+    "errors": [403]
+  },
+  "patchFabricSettings": {
+    "method": "PATCH",
+    "path": "/api/v1/fabric/settings",
+    "success": 200,
+    "contentType": "application/json",
+    "schema": {"$ref":"#/components/schemas/FabricSettings"},
+    "schemasByType": {"application/json":{"$ref":"#/components/schemas/FabricSettings"}},
+    "requestSchema": {"$ref":"#/components/schemas/FabricSettingsPatch"},
+    "query": [],
+    "pathParams": [],
+    "errors": [400,403]
+  },
+  "listNearby": {
+    "method": "GET",
+    "path": "/api/v1/nearby",
+    "success": 200,
+    "contentType": "application/json",
+    "schema": {
+      "type": "object",
+      "required": ["schema","sources"],
+      "properties": {
+        "schema": {"type":"integer"},
+        "sources": {"type":"array","items":{"$ref":"#/components/schemas/NearbySource"}}
+      }
+    },
+    "schemasByType": {
+      "application/json": {
+        "type": "object",
+        "required": ["schema","sources"],
+        "properties": {
+          "schema": {"type":"integer"},
+          "sources": {"type":"array","items":{"$ref":"#/components/schemas/NearbySource"}}
+        }
+      }
+    },
+    "requestSchema": null,
+    "query": [],
+    "pathParams": [],
+    "errors": []
+  },
+  "listPanels": {
+    "method": "GET",
+    "path": "/api/v1/panels",
+    "success": 200,
+    "contentType": "application/json",
+    "schema": {
+      "type": "object",
+      "required": ["schema","panels"],
+      "properties": {"schema":{"type":"integer"},"panels":{"type":"array","items":{"$ref":"#/components/schemas/Panel"}}}
+    },
+    "schemasByType": {
+      "application/json": {
+        "type": "object",
+        "required": ["schema","panels"],
+        "properties": {"schema":{"type":"integer"},"panels":{"type":"array","items":{"$ref":"#/components/schemas/Panel"}}}
+      }
+    },
+    "requestSchema": null,
+    "query": [],
+    "pathParams": [],
+    "errors": []
+  },
+  "openPanelSession": {
+    "method": "POST",
+    "path": "/api/v1/panels/{id}/session",
+    "success": 200,
+    "contentType": "application/json",
+    "schema": {"$ref":"#/components/schemas/PanelSession"},
+    "schemasByType": {"application/json":{"$ref":"#/components/schemas/PanelSession"}},
+    "requestSchema": null,
+    "query": [],
+    "pathParams": ["id"],
+    "errors": [404]
+  },
   "events": {
     "method": "GET",
     "path": "/api/v1/events",
@@ -976,7 +1795,12 @@ export const sse: { events: Record<string, string>; chat: Record<string, string>
     "devices": "SseDevices",
     "proposal": "SseProposal",
     "agent": "SseAgentEvent",
-    "reset": "SseReset"
+    "reset": "SseReset",
+    "message": "SseMessage",
+    "contact": "SseContact",
+    "fabric": "FabricStatus",
+    "nearby": "SseNearby",
+    "panels": "SsePanels"
   },
   "chat": {"token":"SseChatToken","tool":"SseChatTool","done":"SseChatDone","error":"SseChatError"}
 };

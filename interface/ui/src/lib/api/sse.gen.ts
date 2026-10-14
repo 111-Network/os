@@ -12,7 +12,12 @@ export type EventsFrame =
   | { event: "devices"; data: Schemas["SseDevices"] }
   | { event: "proposal"; data: Schemas["SseProposal"] }
   | { event: "agent"; data: Schemas["SseAgentEvent"] }
-  | { event: "reset"; data: Schemas["SseReset"] };
+  | { event: "reset"; data: Schemas["SseReset"] }
+  | { event: "message"; data: Schemas["SseMessage"] }
+  | { event: "contact"; data: Schemas["SseContact"] }
+  | { event: "fabric"; data: Schemas["FabricStatus"] }
+  | { event: "nearby"; data: Schemas["SseNearby"] }
+  | { event: "panels"; data: Schemas["SsePanels"] };
 
 /** Frames on the `POST /api/v1/chat` response stream. */
 export type ChatFrame =
@@ -24,7 +29,7 @@ export type ChatFrame =
 export type EventsEventName = EventsFrame["event"];
 export type ChatEventName = ChatFrame["event"];
 
-export const EVENTS_EVENT_NAMES = ["status", "services", "devices", "proposal", "agent", "reset"] as const;
+export const EVENTS_EVENT_NAMES = ["status", "services", "devices", "proposal", "agent", "reset", "message", "contact", "fabric", "nearby", "panels"] as const;
 export const CHAT_EVENT_NAMES = ["token", "tool", "done", "error"] as const;
 
 // Convenience aliases for the schemas the app uses.
@@ -60,14 +65,59 @@ export type ProposalEvent = Schemas["SseProposal"];
 export type ResetEvent = Schemas["SseReset"];
 export type ServicesEvent = Schemas["SseServices"];
 export type DevicesEvent = Schemas["SseDevices"];
+export type NodeId = Schemas["NodeId"];
+export type MessageId = Schemas["MessageId"];
+export type Message = Schemas["Message"];
+export type MessageState = Schemas["MessageState"];
+export type Thread = Schemas["Thread"];
+export type ThreadStates = Schemas["ThreadStates"];
+export type SendMessageRequest = Schemas["SendMessageRequest"];
+export type Contact = Schemas["Contact"];
+export type ContactTrust = Schemas["ContactTrust"];
+export type ContactCreate = Schemas["ContactCreate"];
+export type ContactPatch = Schemas["ContactPatch"];
+export type QrMatrix = Schemas["QrMatrix"];
+export type Card = Schemas["Card"];
+export type LinkKind = Schemas["LinkKind"];
+export type LinkState = Schemas["LinkState"];
+export type FabricPathProfile = Schemas["FabricPathProfile"];
+export type FabricLink = Schemas["FabricLink"];
+export type FabricHub = Schemas["FabricHub"];
+export type FabricCustody = Schemas["FabricCustody"];
+export type FabricStore = Schemas["FabricStore"];
+export type FabricSettings = Schemas["FabricSettings"];
+export type FabricSettingsPatch = Schemas["FabricSettingsPatch"];
+export type FabricStatus = Schemas["FabricStatus"];
+export type HubEnrollRequest = Schemas["HubEnrollRequest"];
+export type HubOffer = Schemas["HubOffer"];
+export type NearbyNode = Schemas["NearbyNode"];
+export type NearbySource = Schemas["NearbySource"];
+export type HostedPanel = Schemas["Panel"];
+export type PanelState = Schemas["PanelState"];
+export type PanelSession = Schemas["PanelSession"];
+export type IdentifyRequest = Schemas["IdentifyRequest"];
+export type MessageChangeEvent = Schemas["SseMessage"];
+export type ContactChangeEvent = Schemas["SseContact"];
+export type NearbyEvent = Schemas["SseNearby"];
+export type PanelsEvent = Schemas["SsePanels"];
 export type ProblemCode = Schemas["Problem"]["code"];
 
 // Enum tuples (runtime copies of the contract enums).
-export const SERVICE_IDS = ["agent", "model", "transport", "radio", "kb", "gateway", "codeagent"] as const;
+export const SERVICE_IDS = ["agent", "model", "transport", "radio", "kb", "gateway", "codeagent", "fabric", "meshtastic"] as const;
 export const SERVICE_STATES = ["live", "unset", "error", "starting"] as const;
 export const CHILD_STATES = ["absent", "running", "backoff", "degraded", "stopped"] as const;
 export const DEVICE_KINDS = ["radio", "bluetooth", "companion", "node", "analog", "unknown"] as const;
 export const DEVICE_STATES = ["connected", "disconnected", "needs_setup", "error"] as const;
 export const DEVICE_TRANSPORTS = ["usb-serial", "spi", "bluetooth", "wifi", "lan", "tcp", "audio", "unknown"] as const;
 export const DECISIONS = ["accepted", "dismissed"] as const;
-export const PROBLEM_CODES = ["unauthenticated", "loopback_only", "lan_read_only", "agent_unavailable", "model_unavailable", "bad_request", "not_found", "rate_limited", "already_decided", "not_supervised", "settings_locked", "offer_stale", "needs_hub", "upstream_error", "internal"] as const;
+export const PROBLEM_CODES = ["unauthenticated", "loopback_only", "lan_read_only", "agent_unavailable", "model_unavailable", "bad_request", "not_found", "rate_limited", "already_decided", "not_supervised", "settings_locked", "offer_stale", "needs_hub", "upstream_error", "internal", "port_busy", "panel_ticket_expired"] as const;
+export const DEVICE_ACTIONS = ["rename", "forget", "agent", "identify", "pair", "authorize", "flash"] as const;
+export const MESSAGE_STATES = ["queued", "sent", "relayed", "delivered"] as const;
+export const MESSAGE_DIRS = ["own", "in"] as const;
+export const CONTACT_TRUSTS = ["oob", "tofu", "enrolled"] as const;
+export const LINK_KINDS = ["tcp-lan", "kiss-modem", "meshtastic-client", "rns-bridge", "ble"] as const;
+export const LINK_STATES = ["down", "up", "degraded"] as const;
+export const NEARBY_KINDS = ["meshtastic"] as const;
+export const PANEL_HEALTHS = ["up", "down", "unknown"] as const;
+export const MESSAGE_CHANGES = ["new", "state", "request"] as const;
+export const CONTACT_CHANGES = ["added", "updated", "removed", "request"] as const;

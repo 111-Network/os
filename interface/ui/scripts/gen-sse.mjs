@@ -307,6 +307,44 @@ const ALIASES = [
   ["ResetEvent", "SseReset"],
   ["ServicesEvent", "SseServices"],
   ["DevicesEvent", "SseDevices"],
+  // Layer 5 (Messaging & Data, os/messaging/README.md §15). `Panel` is exported as HostedPanel:
+  // components/panel.tsx already owns the name `Panel` in the app.
+  ["NodeId", "NodeId"],
+  ["MessageId", "MessageId"],
+  ["Message", "Message"],
+  ["MessageState", "MessageState"],
+  ["Thread", "Thread"],
+  ["ThreadStates", "ThreadStates"],
+  ["SendMessageRequest", "SendMessageRequest"],
+  ["Contact", "Contact"],
+  ["ContactTrust", "ContactTrust"],
+  ["ContactCreate", "ContactCreate"],
+  ["ContactPatch", "ContactPatch"],
+  ["QrMatrix", "QrMatrix"],
+  ["Card", "Card"],
+  ["LinkKind", "LinkKind"],
+  ["LinkState", "LinkState"],
+  ["FabricPathProfile", "FabricPathProfile"],
+  ["FabricLink", "FabricLink"],
+  ["FabricHub", "FabricHub"],
+  ["FabricCustody", "FabricCustody"],
+  ["FabricStore", "FabricStore"],
+  ["FabricSettings", "FabricSettings"],
+  ["FabricSettingsPatch", "FabricSettingsPatch"],
+  ["FabricStatus", "FabricStatus"],
+  ["HubEnrollRequest", "HubEnrollRequest"],
+  ["HubOffer", "HubOffer"],
+  ["NearbyNode", "NearbyNode"],
+  ["NearbySource", "NearbySource"],
+  ["HostedPanel", "Panel"],
+  ["PanelState", "PanelState"],
+  ["PanelSession", "PanelSession"],
+  ["IdentifyRequest", "IdentifyRequest"],
+  // Layer 5 SSE payloads (the `fabric` frame carries a FabricStatus snapshot directly)
+  ["MessageChangeEvent", "SseMessage"],
+  ["ContactChangeEvent", "SseContact"],
+  ["NearbyEvent", "SseNearby"],
+  ["PanelsEvent", "SsePanels"],
 ];
 
 // Runtime enum tuples. [exportedName, schemaName, path inside the schema to the enum array]
@@ -319,6 +357,17 @@ const ENUMS = [
   ["DEVICE_TRANSPORTS", "DeviceTransport", []],
   ["DECISIONS", "Decision", []],
   ["PROBLEM_CODES", "Problem", ["properties", "code"]],
+  ["DEVICE_ACTIONS", "DeviceRecord", ["properties", "actions", "items"]],
+  // Layer 5
+  ["MESSAGE_STATES", "MessageState", []],
+  ["MESSAGE_DIRS", "Message", ["properties", "dir"]],
+  ["CONTACT_TRUSTS", "ContactTrust", []],
+  ["LINK_KINDS", "LinkKind", []],
+  ["LINK_STATES", "LinkState", []],
+  ["NEARBY_KINDS", "NearbySource", ["properties", "kind"]],
+  ["PANEL_HEALTHS", "PanelState", ["properties", "health"]],
+  ["MESSAGE_CHANGES", "SseMessage", ["properties", "change"]],
+  ["CONTACT_CHANGES", "SseContact", ["properties", "change"]],
 ];
 
 function schemaRefName(ref, schemas) {
