@@ -24,3 +24,13 @@ Sessions die (quota walls, restarts); this file is what the next session needs.
 
 Next step after the run: lead writes `layer-5-options.md` (options brief), owner decides → `DECISIONS.md` → spec draft
 `os/messaging/README.md` → fable adversarial panel → `TASKS.md` → build.
+
+## Run 2 — gap-3 scout (MeshMonitor vs web client + sidecar vs loopback Web Serial), 2026-10-14
+
+- Agent tool (sonnet), name `scout-meshmonitor`; report `layer-5-research/07-gap-3-meshmonitor.md`.
+- Critic gaps handled by the lead inside `layer-5-options.md`: G4 (online modality → not v1 fabric traffic; random link
+  key + attestation rule), G5 (one tiered fragmentation design sized against the built `seal.rs`), G6–G9 noted.
+
+## Status
+
+Options brief written: `layer-5-options.md` (§2.6 pending the gap-3 scout). Next: owner polls → D19 → spec draft.
