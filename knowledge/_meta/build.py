@@ -110,6 +110,10 @@ EVIDENCE_BY_STATUS = {
 
 # §Index contract — line grammar pieces.
 TALLY_OVERRIDE = "full catalog under Optional — read it first"
+# Concepts carry no status (schema F04), so they sit outside the proven/Optional
+# split: the concepts folder index lists them under this heading and the root
+# index points at that folder index with one line.
+CONCEPT_HEADING = "Concepts"
 
 # Shapes.
 SLUG_RE = re.compile(r"^[a-z0-9]+(-[a-z0-9]+)*$")
@@ -671,7 +675,10 @@ def check_staleness(entry: Entry, today: date, findings: list) -> None:
 def index_line(entry: Entry, from_folder: str | None) -> str:
     relpath = f"{entry.slug}.md" if from_folder == entry.folder else f"{entry.folder}/{entry.slug}.md"
     tags = ",".join(sorted(entry.tags)[:3])
-    return f"- [{entry.title}]({relpath}): {entry.summary} | {entry.status} | {tags}"
+    # Concepts have no status; the category fills the status slot so every
+    # line keeps the same three-field grammar.
+    state = entry.status or entry.category
+    return f"- [{entry.title}]({relpath}): {entry.summary} | {state} | {tags}"
 
 
 def render_root_index(vault: Vault, header: str | None) -> str:
@@ -699,6 +706,11 @@ def render_root_index(vault: Vault, header: str | None) -> str:
                       key=lambda e: e.slug.encode())
     parts += ["## Optional", ""]
     parts += [index_line(e, None) for e in optional]
+    n_concepts = len(by_cat["concept"])
+    if n_concepts:  # one pointer line; per-concept lines live in the folder index
+        parts += ["", f"## {CONCEPT_HEADING}", "",
+                  f"- [{CONCEPT_HEADING}](concepts/llms.txt): {n_concepts} timeless "
+                  f"design references, listed in the folder index."]
     return "\n".join(parts).rstrip("\n") + "\n"
 
 
@@ -709,6 +721,9 @@ def render_category_index(vault: Vault, folder: str) -> str:
     proven = [e for e in entries if e.status == "proven"]
     optional = [e for e in entries if e.status in ("candidate", "testing", "hold")]
     parts = [MARKER, "", f"# {folder.capitalize()}", ""]
+    if category == "concept":  # no lifecycle: one flat list under its own heading
+        parts += [f"## {CONCEPT_HEADING}", ""] + [index_line(e, folder) for e in entries]
+        return "\n".join(parts).rstrip("\n") + "\n"
     if proven:
         parts += ["## Proven", ""] + [index_line(e, folder) for e in proven] + [""]
     parts += ["## Optional", ""] + [index_line(e, folder) for e in optional]
@@ -746,10 +761,15 @@ def check_generated_files(vault: Vault, header: str | None, check_mode: bool,
         tokens = TOKEN(len(content))
         if rel == "llms.txt":
             n_lines = content.count("\n")
+            n_entries = sum(1 for ln in content.splitlines() if ln.startswith("- ["))
             if tokens > ROOT_INDEX_TOKEN_CEILING or n_lines > ROOT_INDEX_LINE_CEILING:
+                # Warning-only by design: the cap is reviewed at each layer's KB
+                # intake (README §Index contract), not enforced.
                 findings.append(Finding(rel, 0, "WARN",
                                         f"B09: root index ~{int(tokens)} tokens / {n_lines} "
-                                        f"lines (caps {ROOT_INDEX_TOKEN_CEILING}/{ROOT_INDEX_LINE_CEILING})"))
+                                        f"lines / {n_entries} entries (caps "
+                                        f"{ROOT_INDEX_TOKEN_CEILING}/{ROOT_INDEX_LINE_CEILING}; "
+                                        f"warning only, reviewed at each layer's KB intake)"))
         elif tokens > CATEGORY_INDEX_TOKEN_CEILING:
             findings.append(Finding(rel, 0, "WARN",
                                     f"B09: category index ~{int(tokens)} tokens exceeds "
@@ -824,6 +844,17 @@ def cmd_selftest(meta_dir: Path, today: date) -> int:
             failures.append("generated root index lacks the status tally")
         if first != second:
             failures.append("generation is not deterministic (second run differed)")
+        # concept entries carry no status; they must still be indexed.
+        concept_path = tmp_root / "concepts" / "llms.txt"
+        concept_idx = concept_path.read_text(encoding="utf-8") if concept_path.exists() else ""
+        if f"## {CONCEPT_HEADING}" not in concept_idx:
+            failures.append("concepts index lacks its own heading")
+        if "- [Test Concept](test-concept.md):" not in concept_idx:
+            failures.append("concept fixture entry missing from concepts/llms.txt")
+        if "](concepts/llms.txt)" not in first:
+            failures.append("root index does not point at the concepts folder index")
+        if "test-concept.md" in first:
+            failures.append("root index lists a per-concept line (pointer only expected)")
     invalid = fixture / "invalid"
     findings = run_vault(invalid, meta_dir, check_mode=False, write=False, today=today)
     invalid_errors = [f for f in findings if f.level == "ERROR"]

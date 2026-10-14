@@ -7,12 +7,15 @@ tags: [mesh, networking, offline]
 platforms: [linux, android, macos, windows]
 upstream: https://github.com/markqvist/Reticulum
 license: LicenseRef-Reticulum
-last_verified: 2026-10-12
+last_verified: 2026-10-14
 sources:
   - https://reticulum.network
   - https://github.com/markqvist/Reticulum
+  - https://raw.githubusercontent.com/markqvist/Reticulum/master/docs/source/interfaces.rst
+  - https://github.com/liamcottle/reticulum-meshchat
 relations:
   alternative_to: ["[[meshtastic]]"]
+  required_by: ["[[lxmf]]", "[[meshchatx]]"]
 ---
 
 Sovereign end-to-end encrypted networking stack; custom license needs legal review
@@ -58,6 +61,24 @@ independent of the transport underneath.
   of this entry.
 - The live world map at rmap.world shows a growing node population.
 
+No-import carriage (Layer 5; reports 01, 02, gap-1; as of 2026-10-14). 111 never imports RNS or LXMF; it
+reaches Reticulum only through an adopted program's external interface:
+
+- MeshChat HTTP and WebSocket API: `POST /api/v1/lxmf-messages/send` (content, image, audio, or file
+  attachments only, no arbitrary field), `GET /api/v1/lxmf-messages/conversation/{hash}`,
+  `/api/v1/lxmf/conversations`, `/api/v1/announces`, and WebSocket `/ws`. It has no authentication and
+  binds `127.0.0.1:8000` by default, so 111d would front it with pairing auth. See [[meshchatx]].
+- `lxmd` hook: the `on_inbound` option of its `[lxmf]` section receives the saved-message path, inbound only;
+  there is no send hook. See [[lxmf]].
+- `PipeInterface` runs a program and moves packets over its stdin and stdout, so rnsd rides on our links:
+  the reverse of what carrying our envelope through Reticulum needs. For a radio 111 owns, the documented
+  route is rnsd's `TCPClientInterface` with its `kiss_framing` option on and `fixed_mtu` set to 500, against a
+  loopback KISS server. rnsd's own `KISSInterface` must not point at an RNode: its timing bytes read as radio settings.
+- `rncp` moves files and `rnx` runs remote commands (rejected). The shared instance is on by default
+  (ports 37428 and 37429, AF_UNIX on Linux), so clients attach to our rnsd when `share_instance` is yes.
+- Independent reimplementations exist (Leviculum AGPL-3.0-or-later, Reticulum-rs MIT, go-reticulum MIT), but
+  none is upstream, and D17 #12 requires the latest upstream.
+
 ## Evidence
 
 ### Alternatives considered
@@ -67,6 +88,8 @@ independent of the transport underneath.
   cryptographic identities and transport-agnostic routing.
 - 2026-10-12: desk research from the project site and the GitHub mirror;
   versions and activity figures reported as of 2026-10.
+- 2026-10-14: Layer 5 research pass added the no-import carriage facts from interface documentation
+  and the MeshChat source; nothing was run.
 
 ## Links
 

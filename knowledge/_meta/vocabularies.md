@@ -31,3 +31,6 @@ Filtering vocabulary for the `tags:` frontmatter field — filtering only, never
 - storage — databases and persistence
 - hardware — devices and boards
 - offline — offline-first operation
+- messaging — message transport, delivery states, and message stores
+- panel — third-party web UIs hosted inside the dashboard
+- dtn — delay-tolerant networking and store-and-forward custody
