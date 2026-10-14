@@ -34,7 +34,7 @@ Inputs at generation time (SHA-256):
 ```
 c2724281b2643dbba247ee54bbc0739a6bd7111675bea35b3e2bdaa5b5c830da  bootstrap/Cargo.lock
 9f779bdf23242c905a0106412a0cc6aa7b1b90ad985547d18674f6639e0b1d47  intelligence/Cargo.lock
-93b9b10f1fd806baeff102300e06e1a7532fae650043eb370283dbaf18793954  interface/ui/pnpm-lock.yaml
+08c2709c1e59a5a9274d4ac88ff32ccfaa019b3e0042ea50c7f609e35d4fb225  interface/ui/pnpm-lock.yaml
 cf48326b784772c17f4528dc6739cf2678503e094f1b3aff09e4cbf91530eaaa  bootstrap/scripts/meshmud-build.sh#pins
 400cb0b51eeea71a1a14af6103fe79a87fc4aa0783a917aa28a694bb614e5c82  bootstrap/scripts/meshtastic-web-build.sh#pins
 b077e56d26a629af7093ffeb32862f9d31381c672030a7d66e1dcdea1fcdc4a1  bootstrap/scripts/notices/meshmud-v1.0.0.go.mod
@@ -53,7 +53,7 @@ The output is sorted and contains no timestamps, so identical inputs give identi
 | Group | Components |
 |---|---|
 | Rust crates | 187 |
-| JavaScript packages | 6 |
+| JavaScript packages | 7 |
 | Go modules (meshmud closure, CI-built binary) | 14 + meshmud + the Go standard library |
 | Python packages (presence venv) | 16 |
 | Web client bundle | 1 (Meshtastic web client, GPL-3.0-only, served unmodified) |
@@ -316,8 +316,9 @@ Notes:
 
 ## JavaScript packages (dashboard bundle)
 
-6 production packages from `interface/ui`.
+7 production packages from `interface/ui`.
 
+- `jsqr` 1.4.0 — Apache-2.0 — https://github.com/cozmo/jsQR — no copyright line found
 - `react` 19.3.0 — MIT — https://github.com/react/react.git — Copyright (c) Meta Platforms, Inc. and affiliates
 - `react-dom` 19.3.0 — MIT — https://github.com/react/react.git — Copyright (c) Meta Platforms, Inc. and affiliates
 - `regexparam` 3.0.0 — MIT — https://github.com/lukeed/regexparam — Copyright (c) Luke Edwards (lukeed.com)

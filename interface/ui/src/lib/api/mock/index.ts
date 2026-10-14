@@ -1,29 +1,50 @@
 // Dev-only mock adapter. Same contract as http.ts, no daemon needed:
 //   createMockAdapter({ scenario })  -> Adapter & { mock: MockControls }
 // Reached ONLY through the DEV-guarded dynamic import in ../index.ts; never import it statically.
-import type { Adapter, ChatInput, DevicePatch, EventsHandlers, FlashReply, FlashRequest, ProposalFilter, RestartReply, SendOptions, ServiceRestartReply, TaskAccepted, UpdateCheckReply } from "../adapter";
+import type { Adapter, ChatInput, DevicePatch, EventsHandlers, FlashReply, FlashRequest, MessageAccepted, ProposalFilter, RestartReply, SendOptions, ServiceRestartReply, TaskAccepted, ThreadQuery, UpdateCheckReply } from "../adapter";
+import { CARD_PROBLEM_TEXT, NODE_ID_PROBLEM_TEXT, parseCardText, parseNodeId } from "../contacts";
 import { ApiError } from "../problem";
 import type {
   AuthSession,
+  Card,
   ChatFrame,
   ChatHistory,
+  Contact,
+  ContactCreate,
+  ContactPatch,
   Decision,
   DeviceRecord,
+  FabricHub,
+  FabricSettings,
+  FabricSettingsPatch,
+  FabricStatus,
+  HostedPanel,
+  HubEnrollRequest,
+  HubOffer,
+  IdentifyRequest,
   LogTail,
+  Message,
+  NearbySource,
+  NodeId,
+  PanelSession,
   Problem,
   ProblemCode,
   Proposal,
+  SendMessageRequest,
   ServiceId,
   ServiceRecord,
   Settings,
   SettingsPatch,
   Status,
   TaskRequest,
+  Thread,
 } from "../types";
 import { SERVICE_IDS } from "../types";
 import { MockBus, realClock, type MockClock } from "./bus";
 import { finalSentence, pickReply, tokenize } from "./chat";
 import { buildFixtures, iso, logLine } from "./fixtures";
+import { HUB, MOCK_HUB_ADDRESS, MOCK_REASONS, buildNearby, buildPanels, fabricRow, hex64, makeContact, meshtasticLiveRow, pageOf, threadsOf } from "./messaging";
+import { cardFor } from "./qr";
 import { MOCK_PAIR_CODE, SCENARIO_NAMES, resolveScenario, scenarios, type MockData, type Scenario, type ScenarioName, type ScriptContext } from "./scenarios";
 
 export { SCENARIO_NAMES, resolveScenario, MOCK_PAIR_CODE };
@@ -154,6 +175,136 @@ export function createMockAdapter(opts: MockOptions = {}): MockAdapter {
     publishDevices();
   }
 
+  // --- Layer 5: messages, contacts, fabric, nearby, panels -----------------------------------------------
+  const M = state.messaging;
+  /** The longest text the mock carries; the daemon refuses what Tier 0/1 framing cannot (§5) with the same 400. */
+  const MAX_TEXT = 2000;
+  const contactOf = (id: string): Contact | undefined => M.contacts.find((c) => c.node_id === id);
+  const publishMessage = (m: Message, change: "new" | "state" | "request") =>
+    bus.publish({ event: "message", data: { change, peer: m.peer, message: structuredClone(m) } });
+  const publishContact = (c: Contact, change: "added" | "updated" | "removed" | "request") =>
+    bus.publish({ event: "contact", data: { change, contact: structuredClone(c) } });
+  const publishFabric = () => bus.publish({ event: "fabric", data: structuredClone(M.fabric) });
+  const publishNearby = () => bus.publish({ event: "nearby", data: { sources: structuredClone(M.nearby) } });
+  const publishPanels = () => bus.publish({ event: "panels", data: { panels: structuredClone(M.panels) } });
+  const loopbackOnly = () => {
+    if (!state.auth.loopback) throw problem(403, "loopback_only", "Available on the node itself", "Change this from the machine the node runs on.");
+  };
+
+  /** Re-derive the `fabric` row from the snapshot and publish both frames (the registry does this each tick in the daemon). */
+  function syncFabric(): void {
+    ctx.patchService("fabric", fabricRow(M.fabric));
+    publishFabric();
+  }
+
+  /** Why a message cannot leave right now, or null: the reason codes of §15, in the order the daemon checks them. */
+  function blockOf(peer: NodeId): string | null {
+    if (M.restorePending) return "restore_pending";
+    if (M.fabric.store.store_full) return "store_full";
+    const c = contactOf(peer);
+    if (!c || !c.has_key) return "waiting_for_key";
+    if ((M.routes[peer] ?? "direct") === "hub_not_yours") return "hub_not_yours";
+    return null;
+  }
+
+  function setMessage(m: Message, st: Message["state"], code: string | null): void {
+    m.state = st;
+    m.reason_code = code;
+    m.reason = code ? (MOCK_REASONS[code] ?? null) : null;
+    publishMessage(m, "state");
+  }
+
+  /** Message ids with a delivery chain running, so a retry never starts a second one. */
+  const inflight = new Set<string>();
+  const RANK: Record<string, number> = { queued: 0, sent: 1, relayed: 2, delivered: 3 };
+
+  /** Move one own message along: blocked stays queued with the reason; otherwise sent, then relayed or delivered by the route. */
+  function dispatch(m: Message): void {
+    if (m.dir !== "own" || (m.state !== "queued" && m.state !== "sent")) return;
+    const block = blockOf(m.peer);
+    if (block) {
+      if (m.state !== "queued" || m.reason_code !== block) setMessage(m, "queued", block);
+      return;
+    }
+    if (inflight.has(m.id)) return;
+    const route = M.routes[m.peer] ?? "direct";
+    const steps: [number, Message["state"], string | null][] =
+      route === "mailbox_full"
+        ? [[400, "sent", "mailbox_full"]]
+        : route === "mailbox"
+          ? [[400, "sent", null], [800, "relayed", null], [6000, "delivered", null]]
+          : [[400, "sent", null], [700, "delivered", null]];
+    const todo = steps.filter(([, st]) => RANK[st]! > RANK[m.state]! || (st === m.state && m.reason_code !== null && m.reason_code !== steps[0]?.[2]));
+    if (todo.length === 0) return;
+    if (m.state === "queued" && m.reason_code) setMessage(m, "queued", null);
+    inflight.add(m.id);
+    const next = (i: number) => {
+      const step = todo[i];
+      if (!step) {
+        inflight.delete(m.id);
+        return;
+      }
+      later(step[0], () => {
+        if (!M.messages.includes(m)) {
+          inflight.delete(m.id);
+          return;
+        }
+        setMessage(m, step[1], step[2]);
+        next(i + 1);
+      });
+    };
+    next(0);
+  }
+
+  /** Something changed that could unblock the outbox (a key arrived, space was freed, a restore finished). */
+  const reevaluate = () => {
+    for (const m of M.messages) if (m.dir === "own" && (m.state === "queued" || m.state === "sent")) dispatch(m);
+  };
+
+  const incoming = (peer: NodeId, text: string, claimOffsetMs: number | null, change: "new" | "request"): Message => {
+    const seq = M.nextSeq++;
+    const n = M.messages.filter((x) => x.peer === peer && x.dir === "in").length + 1;
+    const m: Message = {
+      id: `msg-01j9zd${(M.nextMsg++).toString().padStart(4, "0")}`,
+      peer,
+      dir: "in",
+      text,
+      state: "delivered",
+      reason_code: null,
+      reason: null,
+      local_seq: seq,
+      received_seq: M.nextRecv++,
+      sent_at_claim: claimOffsetMs === null ? null : iso(clock.now() + claimOffsetMs),
+      at: iso(clock.now()),
+      msg_id: { stream: 0, epoch: 9120, n },
+    };
+    M.messages.push(m);
+    publishMessage(m, change);
+    return m;
+  };
+
+  /** Asking the home hub for a typed NodeId's card: it answers, in the mock, when a hub is enrolled and reachable. */
+  function askHubForCard(id: NodeId): void {
+    later(4000, () => {
+      const c = contactOf(id);
+      if (!c || c.has_key || !(M.fabric.hub.enrolled && M.fabric.hub.reachable)) return;
+      c.has_key = true;
+      publishContact(c, "updated");
+      reevaluate();
+    });
+  }
+
+  const messageById = (id: string): Message => {
+    const m = M.messages.find((x) => x.id === id);
+    if (!m) throw problem(404, "not_found", "No such message", id);
+    return m;
+  };
+  const contactById = (id: string): Contact => {
+    const c = contactOf(id);
+    if (!c) throw problem(404, "not_found", "No such contact", id);
+    return c;
+  };
+
   const ctx: ScriptContext = {
     now: () => clock.now(),
     patchStatus(fn) {
@@ -185,6 +336,19 @@ export function createMockAdapter(opts: MockOptions = {}): MockAdapter {
       const lines = state.logs[id];
       lines.push(logLine(clock.now(), text));
       if (lines.length > 500) lines.splice(0, lines.length - 500);
+    },
+    receive(peer, text, o) {
+      incoming(peer, text, o?.claimOffsetMs ?? null, contactOf(peer)?.request ? "request" : "new");
+    },
+    introduce(contact, texts) {
+      M.contacts.push(structuredClone(contact));
+      publishContact(contact, "request");
+      for (const t of texts) incoming(contact.node_id, t, null, "request");
+    },
+    patchMessaging(fn) {
+      fn(M);
+      syncFabric();
+      reevaluate();
     },
   };
 
@@ -455,6 +619,34 @@ export function createMockAdapter(opts: MockOptions = {}): MockAdapter {
         return { schema: 1, id, flashing: true };
       }),
 
+    identifyDevice: (id: string, body: IdentifyRequest) =>
+      rest((): DeviceRecord => {
+        const d = device(id);
+        if (!body || (body as { consent?: unknown }).consent !== true) {
+          throw problem(400, "bad_request", "Consent is required", "Opening a serial port can reset the board. Say that you agree first.", [{ pointer: "/consent", message: "must be true" }]);
+        }
+        if (!d.actions.includes("identify")) throw problem(400, "bad_request", "This device cannot be identified", "It does not offer the identify step.");
+        // The probe finds Meshtastic: the board is bound, meshmud serves it, the reader fills Nearby, the panel is served.
+        d.firmware = { family: "meshtastic", version: "2.5.9", source: "probe" };
+        d.driver = { stack: "meshtastic", interface: "meshmud", live: true };
+        d.service_id = "meshtastic";
+        d.state = "connected";
+        d.reason_code = "stack_bound";
+        d.reason = "Meshtastic is on the board and meshmud drives it.";
+        d.actions = d.actions.filter((a) => a !== "identify");
+        d.last_seen = iso(clock.now());
+        publishDevices();
+        M.nearby = buildNearby(clock.now());
+        M.panels = buildPanels(true);
+        const name = (d.alias ?? "").trim() !== "" ? (d.alias as string) : d.name;
+        const live = meshtasticLiveRow(name, M.nearby.reduce((n, x) => n + x.nodes.length, 0));
+        ctx.patchService("meshtastic", { ...live, panel: structuredClone(M.panels[0]!) });
+        ctx.patchService("radio", { state: "live", reason_code: "radio_bound_meshtastic", reason: "A Meshtastic board is bound, driven by meshmud.", detail: { devices: [d.id], port: 4403, driven_by: "meshmud" } });
+        publishNearby();
+        publishPanels();
+        return d;
+      }),
+
     agentStatus: () =>
       rest(() => {
         const block = agentBlock();
@@ -551,6 +743,228 @@ export function createMockAdapter(opts: MockOptions = {}): MockAdapter {
         });
         return { schema: 1, started: true };
       }),
+
+    messages: {
+      threads: () => rest((): Thread[] => threadsOf(M)),
+      thread: (peer: NodeId, q: ThreadQuery = {}) =>
+        rest(() => {
+          if (!/^[0-9a-f]{64}$/.test(peer)) throw problem(400, "bad_request", "Invalid peer", undefined, [{ pointer: "/peer", message: "must be 64 lowercase hex characters" }]);
+          const limit = q.limit ?? 100;
+          if (!Number.isInteger(limit) || limit < 1 || limit > 500) throw problem(400, "bad_request", "Invalid limit", undefined, [{ pointer: "/limit", message: "must be between 1 and 500" }]);
+          if (q.sinceSeq !== undefined && (!Number.isInteger(q.sinceSeq) || q.sinceSeq < 0)) throw problem(400, "bad_request", "Invalid since_seq", undefined, [{ pointer: "/since_seq", message: "must be 0 or more" }]);
+          const known = contactOf(peer);
+          if (!known && !M.messages.some((m) => m.peer === peer)) throw problem(404, "not_found", "No such conversation", peer);
+          const page = pageOf(M, peer, q.sinceSeq, limit);
+          return { peer, request: known?.request === true, messages: page.messages, more: page.more };
+        }),
+      send: (req: SendMessageRequest) =>
+        rest((): MessageAccepted => {
+          const errors: NonNullable<Problem["errors"]> = [];
+          if (typeof req?.to !== "string") errors.push({ pointer: "/to", message: "must be a node id" });
+          if (typeof req?.text !== "string" || req.text.trim() === "") errors.push({ pointer: "/text", message: "must not be empty" });
+          else if (req.text.length > MAX_TEXT) errors.push({ pointer: "/text", message: `must be at most ${MAX_TEXT} characters` });
+          if (errors.length) throw problem(400, "bad_request", "Invalid message", "A text that the framing cannot carry is refused, never cut short.", errors);
+          const to = contactOf(req.to);
+          if (!to || to.request) throw problem(404, "not_found", "Not a contact", "Add them as a contact first.");
+          const code = blockOf(to.node_id);
+          const m: Message = {
+            id: `msg-01j9zd${(M.nextMsg++).toString().padStart(4, "0")}`,
+            peer: to.node_id,
+            dir: "own",
+            text: req.text,
+            state: "queued",
+            reason_code: code,
+            reason: code ? (MOCK_REASONS[code] ?? null) : null,
+            local_seq: M.nextSeq++,
+            received_seq: null,
+            sent_at_claim: null,
+            at: iso(clock.now()),
+            msg_id: { stream: 0, epoch: 9120, n: M.messages.filter((x) => x.peer === to.node_id && x.dir === "own").length + 1 },
+          };
+          M.messages.push(m);
+          publishMessage(m, "new");
+          dispatch(m);
+          return { schema: 1, id: m.id };
+        }),
+      retry: (id: string) =>
+        rest((): Message => {
+          const m = messageById(id);
+          if (m.dir !== "own" || (m.state !== "queued" && m.state !== "sent")) {
+            throw problem(409, "bad_request", "Not retryable", "Only an own message that is queued or sent can be retried.");
+          }
+          dispatch(m);
+          return m;
+        }),
+    },
+
+    contacts: {
+      list: () => rest((): Contact[] => M.contacts),
+      add: (body: ContactCreate) =>
+        rest((): Contact => {
+          const card = (body as { card?: unknown } | null)?.card;
+          const nodeId = (body as { node_id?: unknown } | null)?.node_id;
+          if ((card === undefined) === (nodeId === undefined)) {
+            throw problem(400, "bad_request", "Invalid contact", "Give a card or a node id, not both and not neither.");
+          }
+          if (card !== undefined) {
+            const parsed = typeof card === "string" ? parseCardText(card) : null;
+            if (!parsed || !parsed.ok) {
+              throw problem(400, "bad_request", "That is not a card", parsed ? CARD_PROBLEM_TEXT[parsed.problem] : undefined, [{ pointer: "/card", message: "not a card" }]);
+            }
+            if (parsed.card.toLowerCase() === M.card.text.toLowerCase()) throw problem(400, "bad_request", "That is this node's own card", "Share your card with others; there is nothing to add.");
+            const id = hex64(parsed.card.toLowerCase());
+            const known = contactOf(id);
+            if (known) return known;
+            const c = makeContact(id, { trust: "oob", has_key: true });
+            M.contacts.push(c);
+            M.routes[id] = "direct";
+            publishContact(c, "added");
+            return c;
+          }
+          const parsed = typeof nodeId === "string" ? parseNodeId(nodeId) : null;
+          if (!parsed || !parsed.ok) {
+            throw problem(400, "bad_request", "That is not a node id", parsed ? NODE_ID_PROBLEM_TEXT[parsed.problem] : undefined, [{ pointer: "/node_id", message: "not a node id" }]);
+          }
+          if (parsed.hex === M.ownNodeId) throw problem(400, "bad_request", "That is this node", "A node does not message itself.");
+          const known = contactOf(parsed.hex);
+          if (known) return known;
+          const c = makeContact(parsed.hex, { trust: "oob", has_key: false });
+          M.contacts.push(c);
+          M.routes[parsed.hex] = "direct";
+          publishContact(c, "added");
+          askHubForCard(parsed.hex);
+          return c;
+        }),
+      ownCard: () => rest((): Card => M.card),
+      get: (id: string) => rest((): Contact => contactById(id)),
+      patch: (id: string, patch: ContactPatch) =>
+        rest((): Contact => {
+          const c = contactById(id);
+          const errors: NonNullable<Problem["errors"]> = [];
+          if ("alias" in patch && patch.alias !== null && patch.alias !== undefined && (typeof patch.alias !== "string" || patch.alias.length > 64)) errors.push({ pointer: "/alias", message: "must be at most 64 characters" });
+          if ("accept" in patch && (patch as { accept?: unknown }).accept !== true) errors.push({ pointer: "/accept", message: "only true is valid" });
+          if ("pinned" in patch && typeof patch.pinned !== "boolean") errors.push({ pointer: "/pinned", message: "must be true or false" });
+          if ("read_seq" in patch && (!Number.isInteger(patch.read_seq) || (patch.read_seq as number) < 0)) errors.push({ pointer: "/read_seq", message: "must be 0 or more" });
+          if (errors.length) throw problem(400, "bad_request", "Invalid change", undefined, errors);
+          let changed = false;
+          if ("alias" in patch) {
+            const alias = typeof patch.alias === "string" && patch.alias.trim() !== "" ? patch.alias.trim() : null;
+            if (c.alias !== alias) changed = true;
+            c.alias = alias;
+          }
+          if (patch.accept === true && c.request) {
+            c.request = false;
+            changed = true;
+          }
+          if (typeof patch.pinned === "boolean" && c.pinned !== patch.pinned) {
+            c.pinned = patch.pinned;
+            changed = true;
+          }
+          if (typeof patch.read_seq === "number") M.readMarks[id] = Math.max(M.readMarks[id] ?? 0, patch.read_seq);
+          if (changed) publishContact(c, "updated");
+          return c;
+        }),
+      forget: (id: string) =>
+        rest(() => {
+          const c = contactById(id);
+          M.contacts = M.contacts.filter((x) => x !== c);
+          delete M.routes[id];
+          // A discarded request takes its held messages with it; a forgotten contact keeps its history (until capacity pruning).
+          if (c.request) M.messages = M.messages.filter((m) => m.peer !== id);
+          publishContact(c, "removed");
+        }).then(() => undefined),
+    },
+
+    fabric: {
+      status: () => rest((): FabricStatus => M.fabric),
+      enrollHub: (body: HubEnrollRequest) =>
+        rest((): FabricHub => {
+          const errors: NonNullable<Problem["errors"]> = [];
+          if (typeof body?.address !== "string" || !/^[A-Za-z0-9.[\]:-]+:\d{1,5}$/.test(body.address.trim())) errors.push({ pointer: "/address", message: "must be host:port" });
+          const code = typeof body?.code === "string" ? body.code.replace(/[\s-]/g, "").toUpperCase() : "";
+          if (code.length !== 8) errors.push({ pointer: "/code", message: "must be 8 characters" });
+          if (errors.length) throw problem(400, "bad_request", "Invalid enrollment", undefined, errors);
+          if (M.fabric.hub.enrolled) throw problem(409, "bad_request", "Already enrolled", "This node has one home hub. Forget it before enrolling with another.");
+          if (M.enrollFailures >= 5) throw problem(429, "rate_limited", "Too many attempts", "The hub locked this code after five failures. Ask its owner for a new one.");
+          if (code !== M.hubCode || body.address.trim() !== MOCK_HUB_ADDRESS) {
+            M.enrollFailures++;
+            throw problem(502, "upstream_error", "The hub did not accept that", "It could not be reached, or it refused the code.");
+          }
+          M.enrollFailures = 0;
+          M.fabric.hub = { ...M.fabric.hub, enrolled: true, reachable: true, cursor: 0, node_id: HUB, address: MOCK_HUB_ADDRESS };
+          M.fabric.links = M.fabric.links.map((l) => ({ ...l, state: "up", peers: Math.max(1, l.peers) }));
+          if (!contactOf(HUB)) {
+            const hub = makeContact(HUB, { alias: "Workshop hub", trust: "enrolled", roles: ["mailbox", "always_on_hub"], pinned: true });
+            M.contacts.push(hub);
+            M.routes[HUB] = "direct";
+            publishContact(hub, "added");
+          }
+          syncFabric();
+          reevaluate();
+          return M.fabric.hub;
+        }),
+      offerHub: () =>
+        rest((): HubOffer => {
+          loopbackOnly();
+          const code = `HUB${(++M.tickets).toString().padStart(5, "0")}`;
+          const address = "192.168.1.42:11183";
+          M.offer = { code };
+          M.fabric.hub = { ...M.fabric.hub, offer_active: true };
+          publishFabric();
+          return { schema: 1, code, address, card: M.card, bundle: cardFor(`111enroll:${address}:${code}:${M.card.text}`) };
+        }),
+      dismissHubOffer: () =>
+        rest(() => {
+          loopbackOnly();
+          M.offer = null;
+          if (M.fabric.hub.offer_active) {
+            M.fabric.hub = { ...M.fabric.hub, offer_active: false };
+            publishFabric();
+          }
+        }).then(() => undefined),
+      patchSettings: (patch: FabricSettingsPatch) =>
+        rest((): FabricSettings => {
+          loopbackOnly();
+          const errors: NonNullable<Problem["errors"]> = [];
+          for (const key of ["hub_role", "listen_lan", "custody_opt_in"] as const) {
+            if (key in patch && typeof patch[key] !== "boolean") errors.push({ pointer: `/${key}`, message: "must be true or false" });
+          }
+          if ("quotas" in patch) {
+            const q = patch.quotas as Record<string, unknown> | undefined;
+            if (!q || typeof q !== "object" || Object.values(q).some((v) => v !== null && (typeof v !== "number" || !Number.isFinite(v) || v < 0))) {
+              errors.push({ pointer: "/quotas", message: "must map classes to a number of bytes or null" });
+            }
+          }
+          if (errors.length) throw problem(400, "bad_request", "Invalid settings", undefined, errors);
+          const next = { ...M.fabric.settings };
+          if (typeof patch.hub_role === "boolean") next.hub_role = patch.hub_role;
+          if (typeof patch.listen_lan === "boolean") next.listen_lan = patch.listen_lan;
+          if (typeof patch.custody_opt_in === "boolean") next.custody_opt_in = patch.custody_opt_in;
+          if (patch.quotas) {
+            const quotas = { ...next.quotas };
+            for (const [k, v] of Object.entries(patch.quotas)) {
+              if (v === null) delete quotas[k];
+              else quotas[k] = v;
+            }
+            next.quotas = quotas;
+          }
+          M.fabric.settings = next;
+          syncFabric();
+          return M.fabric.settings;
+        }),
+    },
+
+    nearby: () => rest((): NearbySource[] => M.nearby),
+
+    panels: {
+      list: () => rest((): HostedPanel[] => M.panels),
+      openSession: (id: ServiceId) =>
+        rest((): PanelSession => {
+          const panel = M.panels.find((p) => p.id === id);
+          if (!panel || svc(id).state !== "live") throw problem(404, "not_found", "No such panel", "Unknown panel, or its service is not set up.");
+          return { schema: 1, url: `http://127.0.0.1:${panel.port}${panel.entry}?ticket=${hex64(`${id}:${++M.tickets}`).slice(0, 32)}`, expires_in: 30 };
+        }),
+    },
 
     kb: {
       index: () => rest(() => state.kbIndex),

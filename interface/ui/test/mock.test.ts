@@ -71,7 +71,7 @@ describe("fixtures", () => {
     expect(f.status.node.label).toMatch(/^[a-z0-9]{4}-[a-z0-9]{4}-[a-z0-9]{2}$/);
   });
 
-  it("has the seven services in registry order, each pointing at a real KB entry", () => {
+  it("has the nine services in registry order, each pointing at a real KB entry", () => {
     expect(f.services.map((s) => s.id)).toEqual([...SERVICE_IDS]);
     for (const s of f.services) {
       if (s.kb_entry) expect(f.kbEntries[s.kb_entry], s.kb_entry).toBeTruthy();
@@ -315,7 +315,7 @@ describe("scenarios", () => {
   it("healthy: everything that can run is live; radio and code agent are not available here", async () => {
     const { a } = make("healthy");
     const states = Object.fromEntries((await a.services()).map((s) => [s.id, s.state]));
-    expect(states).toEqual({ agent: "live", model: "live", transport: "live", radio: "unset", kb: "live", gateway: "live", codeagent: "unset" });
+    expect(states).toEqual({ agent: "live", model: "live", transport: "live", radio: "unset", kb: "live", gateway: "live", codeagent: "unset", fabric: "live", meshtastic: "unset" });
     const status = await a.status();
     expect(status.transport_state).toBe("joined");
     expect(status.health.status).toBe("ok");

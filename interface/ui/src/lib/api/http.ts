@@ -7,33 +7,53 @@ import type {
   EventsHandlers,
   FlashReply,
   FlashRequest,
+  MessageAccepted,
   ProposalFilter,
   RestartReply,
   SendOptions,
   ServiceRestartReply,
   TaskAccepted,
+  ThreadQuery,
   UpdateCheckReply,
 } from "./adapter";
 import { connectEvents, DEFAULT_STALE_AFTER_MS, type EventSourceCtor } from "./events-client";
 import { ApiError, errorFromResponse, synthProblem } from "./problem";
+import type { ThreadPage } from "./messages";
 import { parseSseStream } from "./sse";
 import {
   CHAT_EVENT_NAMES,
   type AgentStatus,
   type AuthSession,
+  type Card,
   type ChatFrame,
   type ChatHistory,
   type ChatReply,
+  type Contact,
+  type ContactCreate,
+  type ContactPatch,
   type Decision,
   type DeviceRecord,
+  type FabricHub,
+  type FabricSettings,
+  type FabricSettingsPatch,
+  type FabricStatus,
+  type HostedPanel,
+  type HubEnrollRequest,
+  type HubOffer,
+  type IdentifyRequest,
   type LogTail,
+  type Message,
+  type NearbySource,
+  type PanelSession,
   type Proposal,
+  type SendMessageRequest,
   type ServiceId,
   type ServiceRecord,
   type Settings,
   type SettingsPatch,
   type Status,
   type TaskRequest,
+  type Thread,
 } from "./types";
 
 export interface HttpDeps {
@@ -109,6 +129,14 @@ export function createHttpAdapter(deps: HttpDeps = {}): Adapter {
   }
 
   const enc = encodeURIComponent;
+
+  /** Unwrap `{schema, <key>: [...]}`; a reply without the list is a bad response, never an empty one. */
+  async function list<T>(path: string, key: string, what: string): Promise<T[]> {
+    const body = await call<Record<string, unknown>>("GET", path);
+    const items = body?.[key];
+    if (!Array.isArray(items)) throw new ApiError(synthProblem(200, "Bad response", `Missing ${what} list.`), { code: "upstream_error" });
+    return items as T[];
+  }
 
   async function* chatSend(req: ChatInput, opts?: SendOptions): AsyncGenerator<ChatFrame, void, void> {
     if (req.stream === false) {
@@ -189,6 +217,8 @@ export function createHttpAdapter(deps: HttpDeps = {}): Adapter {
     forgetDevice: (id: string) => call<void>("DELETE", `/devices/${enc(id)}`, { as: "none" }),
     flashDevice: (id: string, body: FlashRequest) => call<FlashReply>("POST", `/devices/${enc(id)}/flash`, { body }),
 
+    identifyDevice: (id: string, body: IdentifyRequest) => call<DeviceRecord>("POST", `/devices/${enc(id)}/identify`, { body }),
+
     agentStatus: () => call<AgentStatus>("GET", "/agent/status"),
     agentTask: (req: TaskRequest) => call<TaskAccepted>("POST", "/agent/task", { body: req }),
 
@@ -205,6 +235,41 @@ export function createHttpAdapter(deps: HttpDeps = {}): Adapter {
 
     restart: () => call<RestartReply>("POST", "/node/restart"),
     updateCheck: () => call<UpdateCheckReply>("POST", "/update/check"),
+
+    messages: {
+      threads: () => list<Thread>("/messages/threads", "threads", "threads"),
+      thread: async (peer: string, q: ThreadQuery = {}) => {
+        const body = await call<Partial<ThreadPage>>("GET", `/messages/threads/${enc(peer)}`, { query: { since_seq: q.sinceSeq, limit: q.limit } });
+        if (!Array.isArray(body?.messages)) throw new ApiError(synthProblem(200, "Bad response", "Missing messages list."), { code: "upstream_error" });
+        return { peer: body.peer ?? peer, request: body.request === true, messages: body.messages, more: body.more === true } satisfies ThreadPage;
+      },
+      send: (req: SendMessageRequest) => call<MessageAccepted>("POST", "/messages", { body: req }),
+      retry: (id: string) => call<Message>("POST", `/messages/${enc(id)}/retry`),
+    },
+
+    contacts: {
+      list: () => list<Contact>("/contacts", "contacts", "contacts"),
+      add: (body: ContactCreate) => call<Contact>("POST", "/contacts", { body }),
+      ownCard: () => call<Card>("GET", "/contacts/me/card"),
+      get: (id: string) => call<Contact>("GET", `/contacts/${enc(id)}`),
+      patch: (id: string, patch: ContactPatch) => call<Contact>("PATCH", `/contacts/${enc(id)}`, { body: patch }),
+      forget: (id: string) => call<void>("DELETE", `/contacts/${enc(id)}`, { as: "none" }),
+    },
+
+    fabric: {
+      status: () => call<FabricStatus>("GET", "/fabric"),
+      enrollHub: (body: HubEnrollRequest) => call<FabricHub>("POST", "/fabric/hub/enroll", { body }),
+      offerHub: () => call<HubOffer>("POST", "/fabric/hub/offer"),
+      dismissHubOffer: () => call<void>("DELETE", "/fabric/hub/offer", { as: "none" }),
+      patchSettings: (patch: FabricSettingsPatch) => call<FabricSettings>("PATCH", "/fabric/settings", { body: patch }),
+    },
+
+    nearby: () => list<NearbySource>("/nearby", "sources", "sources"),
+
+    panels: {
+      list: () => list<HostedPanel>("/panels", "panels", "panels"),
+      openSession: (id: ServiceId) => call<PanelSession>("POST", `/panels/${enc(id)}/session`),
+    },
 
     kb: {
       index: () => call<string>("GET", "/kb", { as: "text" }),

@@ -2,8 +2,11 @@
 // useSyncExternalStore. The store is the only consumer of the adapter's read side and of the
 // events stream: components read through hooks and never fetch snapshots themselves.
 import type { Adapter, ConnectionInfo, ConnectionState, EventsFrameWithId } from "./adapter";
+import { openRequests, removeContact, upsertContact } from "./contacts";
+import { applyMessageToPage, THREAD_PAGE_LIMIT, type ThreadPage } from "./messages";
+import { sameSources } from "./nearby";
 import { isApiError, type ApiError } from "./problem";
-import type { AgentEvent, DeviceRecord, Proposal, ServiceRecord, Status } from "./types";
+import type { AgentEvent, Card, Contact, ContactChangeEvent, DeviceRecord, FabricStatus, HostedPanel, MessageChangeEvent, NearbySource, NodeId, Proposal, ServiceRecord, Status, Thread } from "./types";
 
 export const ACTIVITY_RING = 200;
 
@@ -17,11 +20,13 @@ export interface ConnectionSnapshot {
 }
 
 export interface Attention {
-  /** open proposals + services in `error` + devices in `error`; drives the header badge. */
+  /** open proposals + services in `error` + devices in `error` + open message requests; drives the header badge. */
   count: number;
   openProposals: number;
   erroredServices: number;
   erroredDevices: number;
+  /** Pending message requests (INTROs, Layer 5 §7.2): contacts with `request: true`. */
+  openRequests: number;
 }
 
 export interface StoreMeta {
@@ -33,6 +38,13 @@ export interface StoreMeta {
   error: ApiError | null;
 }
 
+/** One conversation as the store holds it: loading, ready (`page`), or why it could not be loaded. */
+export interface ThreadSlot {
+  state: "loading" | "ready" | "missing" | "error";
+  page: ThreadPage | null;
+  error: ApiError | null;
+}
+
 export interface StoreState {
   status: Status | null;
   services: ServiceRecord[] | null;
@@ -40,6 +52,20 @@ export interface StoreState {
   devices: DeviceRecord[] | null;
   /** All proposals (open and decided), newest first. */
   proposals: Proposal[] | null;
+  /** Layer 5: conversations, most recent activity first (message requests included); null until loaded. */
+  threads: Thread[] | null;
+  /** Layer 5: conversations opened this page load, by peer NodeId. */
+  threadPages: Record<NodeId, ThreadSlot>;
+  /** Layer 5: contacts, pending message requests included (`request: true`); null until loaded. */
+  contacts: Contact[] | null;
+  /** Layer 5: this node's own card, loaded on first use. */
+  ownCard: Card | null;
+  /** Layer 5: links, home hub, custody, store, settings; null until loaded. */
+  fabric: FabricStatus | null;
+  /** Layer 5: presence per source; null until loaded. Names are untrusted RF-origin strings. */
+  nearby: NearbySource[] | null;
+  /** Layer 5: declared hosted panels and their listener slots; null until loaded. */
+  panels: HostedPanel[] | null;
   connection: ConnectionSnapshot;
   /** Agent events, newest first, at most ACTIVITY_RING, deduped on (seq, ts). */
   activity: AgentEvent[];
@@ -67,11 +93,13 @@ export function computeAttention(
   proposals: readonly Proposal[] | null,
   services: readonly ServiceRecord[] | null,
   devices: readonly DeviceRecord[] | null = null,
+  contacts: readonly Contact[] | null = null,
 ): Attention {
   const openProposals = proposals ? proposals.filter((p) => p.decision === null).length : 0;
   const erroredServices = services ? services.filter((s) => s.state === "error").length : 0;
   const erroredDevices = devices ? devices.filter((d) => d.state === "error").length : 0;
-  return { count: openProposals + erroredServices + erroredDevices, openProposals, erroredServices, erroredDevices };
+  const requests = openRequests(contacts).length;
+  return { count: openProposals + erroredServices + erroredDevices + requests, openProposals, erroredServices, erroredDevices, openRequests: requests };
 }
 
 export function openProposalsOf(proposals: readonly Proposal[] | null): Proposal[] {
@@ -120,12 +148,19 @@ function initialState(): StoreState {
     services: null,
     devices: null,
     proposals: null,
+    threads: null,
+    threadPages: {},
+    contacts: null,
+    ownCard: null,
+    fabric: null,
+    nearby: null,
+    panels: null,
     connection: INITIAL_CONNECTION,
     activity: [],
     baselineVersion: null,
     version: null,
     versionChanged: false,
-    attention: { count: 0, openProposals: 0, erroredServices: 0, erroredDevices: 0 },
+    attention: { count: 0, openProposals: 0, erroredServices: 0, erroredDevices: 0, openRequests: 0 },
     meta: { ready: false, needsPair: false, error: null },
     servicesRev: 0,
   };
@@ -139,6 +174,8 @@ export class ApiStore {
   /** The snapshot load started by the latest `attach`, while it is still running. */
   private initialLoad: Promise<void> | null = null;
   private readonly now: () => number;
+  /** The `limit` each loaded conversation was last fetched with, so a reload keeps the same window. */
+  private readonly pageLimits = new Map<NodeId, number>();
 
   constructor(deps: { now?: () => number } = {}) {
     this.now = deps.now ?? (() => Date.now());
@@ -155,8 +192,8 @@ export class ApiStore {
 
   private commit(patch: Partial<StoreState>): void {
     const next: StoreState = { ...this.state, ...patch };
-    if ("proposals" in patch || "services" in patch || "devices" in patch) {
-      next.attention = computeAttention(next.proposals, next.services, next.devices);
+    if ("proposals" in patch || "services" in patch || "devices" in patch || "contacts" in patch) {
+      next.attention = computeAttention(next.proposals, next.services, next.devices, next.contacts);
     }
     this.state = next;
     for (const l of [...this.listeners]) l();
@@ -217,6 +254,7 @@ export class ApiStore {
 
   /** Back to the empty state (tests, and after logout). Listeners stay subscribed. */
   reset(): void {
+    this.pageLimits.clear();
     this.commit(initialState());
   }
 
@@ -241,6 +279,7 @@ export class ApiStore {
     }
     let refetchProposals = false;
     let refetchAll = false;
+    let refetchThreads = false;
     switch (frame.event) {
       case "status": {
         // The stream is shared across subscribers, so a frame's `auth` block cannot be per-viewer:
@@ -266,6 +305,29 @@ export class ApiStore {
       case "agent":
         if (frame.data && typeof frame.data.seq === "number") Object.assign(patch, this.activityPatch(frame.data));
         break;
+      case "message":
+        // The conversation, if it is open, takes the message at once; the list (last line, unread, state counts) is
+        // cheaper to reload than to patch, and a coalesced reload is one request however many frames arrive.
+        if (isMessageFrame(frame.data)) {
+          Object.assign(patch, this.messagePatch(frame.data));
+          refetchThreads = true;
+        }
+        break;
+      case "contact":
+        if (isContactFrame(frame.data)) {
+          Object.assign(patch, this.contactPatch(frame.data));
+          refetchThreads = true; // alias, accepted requests and forgotten peers all change the thread list
+        }
+        break;
+      case "fabric":
+        if (frame.data && Array.isArray(frame.data.links)) patch.fabric = sameJson(this.state.fabric, frame.data) ? this.state.fabric : frame.data;
+        break;
+      case "nearby":
+        if (frame.data && Array.isArray(frame.data.sources)) patch.nearby = sameSources(this.state.nearby, frame.data.sources);
+        break;
+      case "panels":
+        if (frame.data && Array.isArray(frame.data.panels)) patch.panels = reuse(this.state.panels, frame.data.panels);
+        break;
       case "reset":
         // The first reset after attach is the daemon saying "start from a snapshot". That snapshot is
         // already on its way; only a reset after the initial load is a reason to load again.
@@ -274,7 +336,29 @@ export class ApiStore {
     }
     this.commit(patch);
     if (refetchAll) void this.refreshAll();
-    else if (refetchProposals) void this.refreshProposals();
+    else {
+      if (refetchProposals) void this.refreshProposals();
+      if (refetchThreads) void this.refreshThreads();
+    }
+  }
+
+  private messagePatch(ev: MessageChangeEvent): Partial<StoreState> {
+    const slot = this.state.threadPages[ev.peer];
+    if (!slot?.page) return {};
+    const page = applyMessageToPage(slot.page, ev.peer, ev.message, ev.change);
+    if (!page || page === slot.page) return {};
+    return { threadPages: { ...this.state.threadPages, [ev.peer]: { ...slot, page } } };
+  }
+
+  private contactPatch(ev: ContactChangeEvent): Partial<StoreState> {
+    const contacts = ev.change === "removed" ? removeContact(this.state.contacts, ev.contact.node_id) : upsertContact(this.state.contacts, ev.contact);
+    const patch: Partial<StoreState> = { contacts };
+    // A request that was accepted or a peer that changed: an open conversation follows the flag.
+    const slot = this.state.threadPages[ev.contact.node_id];
+    if (slot?.page && slot.page.request !== ev.contact.request && ev.change !== "removed") {
+      patch.threadPages = { ...this.state.threadPages, [ev.contact.node_id]: { ...slot, page: { ...slot.page, request: ev.contact.request } } };
+    }
+    return patch;
   }
 
   private statusPatch(status: Status): Partial<StoreState> {
@@ -304,7 +388,25 @@ export class ApiStore {
   refreshAll = coalesced(async () => {
     const a = this.adapter;
     if (!a) return;
-    const [st, sv, dv, pr] = await Promise.allSettled([a.status(), a.services(), a.devices(), a.proposals("all")]);
+    // Layer 5 reads are optional: an older daemon answers 404, and an adapter without them simply leaves the slice empty.
+    const optional = <T,>(read: (x: Adapter) => Promise<T>): Promise<T> => {
+      try {
+        return read(a);
+      } catch (e) {
+        return Promise.reject(e);
+      }
+    };
+    const [st, sv, dv, pr, th, ct, fb, nb, pn] = await Promise.allSettled([
+      a.status(),
+      a.services(),
+      a.devices(),
+      a.proposals("all"),
+      optional((x) => x.messages.threads()),
+      optional((x) => x.contacts.list()),
+      optional((x) => x.fabric.status()),
+      optional((x) => x.nearby()),
+      optional((x) => x.panels.list()),
+    ]);
     if (this.adapter !== a) return; // detached or swapped while loading
     const patch: Partial<StoreState> = {};
     if (st.status === "fulfilled") Object.assign(patch, this.statusPatch(st.value));
@@ -314,10 +416,19 @@ export class ApiStore {
     }
     if (dv.status === "fulfilled") patch.devices = reuse(this.state.devices, dv.value);
     if (pr.status === "fulfilled") patch.proposals = newestFirst(pr.value);
+    if (th.status === "fulfilled") patch.threads = reuse(this.state.threads, th.value);
+    if (ct.status === "fulfilled") patch.contacts = reuse(this.state.contacts, ct.value);
+    if (fb.status === "fulfilled") patch.fabric = sameJson(this.state.fabric, fb.value) ? this.state.fabric : fb.value;
+    if (nb.status === "fulfilled") patch.nearby = sameSources(this.state.nearby, nb.value);
+    if (pn.status === "fulfilled") patch.panels = reuse(this.state.panels, pn.value);
     const errors = [st, sv, dv, pr].flatMap((r) => (r.status === "rejected" ? [r.reason] : []));
+    // A Layer 5 read can only add the pairing signal: its other failures keep the previous slice and stay quiet.
+    for (const r of [th, ct, fb, nb, pn]) if (r.status === "rejected" && isApiError(r.reason) && r.reason.unauthenticated) errors.push(r.reason);
     patch.meta = { ready: true, ...(this.fail(errors) as { needsPair: boolean; error: ApiError | null }) };
     this.commit(patch);
     this.syncStream();
+    // Conversations that are open follow a reload, with the window they had.
+    for (const peer of Object.keys(this.state.threadPages)) void this.loadThread(peer, this.pageLimits.get(peer));
   });
 
   refreshStatus = coalesced(async () => {
@@ -368,6 +479,110 @@ export class ApiStore {
       /* keep the previous snapshot */
     }
   });
+
+  // --- Layer 5 snapshots (messages, contacts, fabric, nearby, panels) ---------------------------------
+
+  refreshThreads = coalesced(async () => {
+    const a = this.adapter;
+    if (!a) return;
+    try {
+      const threads = await a.messages.threads();
+      if (this.adapter === a) this.commit({ threads: reuse(this.state.threads, threads) });
+    } catch {
+      /* keep the previous list */
+    }
+  });
+
+  refreshContacts = coalesced(async () => {
+    const a = this.adapter;
+    if (!a) return;
+    try {
+      const contacts = await a.contacts.list();
+      if (this.adapter === a) this.commit({ contacts: reuse(this.state.contacts, contacts) });
+    } catch {
+      /* keep the previous list */
+    }
+  });
+
+  refreshFabric = coalesced(async () => {
+    const a = this.adapter;
+    if (!a) return;
+    try {
+      const fabric = await a.fabric.status();
+      if (this.adapter === a) this.commit({ fabric: sameJson(this.state.fabric, fabric) ? this.state.fabric : fabric });
+    } catch {
+      /* keep the previous snapshot */
+    }
+  });
+
+  refreshNearby = coalesced(async () => {
+    const a = this.adapter;
+    if (!a) return;
+    try {
+      const sources = await a.nearby();
+      if (this.adapter === a) this.commit({ nearby: sameSources(this.state.nearby, sources) });
+    } catch {
+      /* keep the previous snapshot */
+    }
+  });
+
+  refreshPanels = coalesced(async () => {
+    const a = this.adapter;
+    if (!a) return;
+    try {
+      const panels = await a.panels.list();
+      if (this.adapter === a) this.commit({ panels: reuse(this.state.panels, panels) });
+    } catch {
+      /* keep the previous snapshot */
+    }
+  });
+
+  /**
+   * Load one conversation (the newest `limit` messages, default 100). While it loads the slot is `loading` (or keeps the
+   * page it already had); a 404 reads `missing`. The result replaces the slot only when something changed.
+   */
+  async loadThread(peer: NodeId, limit: number = THREAD_PAGE_LIMIT): Promise<void> {
+    const a = this.adapter;
+    if (!a) return;
+    this.pageLimits.set(peer, limit);
+    const have = this.state.threadPages[peer];
+    if (!have) this.commit({ threadPages: { ...this.state.threadPages, [peer]: { state: "loading", page: null, error: null } } });
+    try {
+      const page = await a.messages.thread(peer, { limit });
+      if (this.adapter !== a) return;
+      const prev = this.state.threadPages[peer];
+      const slot: ThreadSlot = prev?.page && sameJson(prev.page, page) ? { ...prev, state: "ready", error: null } : { state: "ready", page, error: null };
+      this.commit({ threadPages: { ...this.state.threadPages, [peer]: slot } });
+    } catch (e) {
+      if (this.adapter !== a) return;
+      const error = isApiError(e) ? e : null;
+      const prev = this.state.threadPages[peer];
+      const next: ThreadSlot = error?.status === 404 ? { state: "missing", page: null, error } : { state: prev?.page ? "ready" : "error", page: prev?.page ?? null, error };
+      this.commit({ threadPages: { ...this.state.threadPages, [peer]: next } });
+    }
+  }
+
+  /** Load this node's own card once (public material; it only changes when the identity does). */
+  loadOwnCard = coalesced(async () => {
+    const a = this.adapter;
+    if (!a || this.state.ownCard) return;
+    try {
+      const card = await a.contacts.ownCard();
+      if (this.adapter === a) this.commit({ ownCard: card });
+    } catch {
+      /* the view says the card could not be loaded; asking again is a remount */
+    }
+  });
+}
+
+function isMessageFrame(d: unknown): d is MessageChangeEvent {
+  const x = d as Partial<MessageChangeEvent> | null;
+  return !!x && typeof x === "object" && typeof x.peer === "string" && !!x.message && typeof x.message === "object" && typeof x.message.id === "string";
+}
+
+function isContactFrame(d: unknown): d is ContactChangeEvent {
+  const x = d as Partial<ContactChangeEvent> | null;
+  return !!x && typeof x === "object" && !!x.contact && typeof x.contact === "object" && typeof x.contact.node_id === "string";
 }
 
 /** The app-wide store. Tests construct their own ApiStore. */

@@ -42,6 +42,8 @@ const adapterWith = (respond: (c: Call) => Response | Promise<Response>) => {
 };
 
 const STATUS = { schema: 1, node: { version: "1" } };
+/** A public NodeId: 64 lowercase hex. */
+const PEER = "ab".repeat(32);
 
 describe("request basics", () => {
   it("GETs JSON same-origin without caching", async () => {
@@ -327,6 +329,11 @@ describe("adapter <-> openapi.yaml", () => {
     "/api/v1/services": { schema: 1, services: [] },
     "/api/v1/proposals": { schema: 1, proposals: [] },
     "/api/v1/devices": { schema: 1, devices: [] },
+    "/api/v1/messages/threads": { schema: 1, threads: [] },
+    [`/api/v1/messages/threads/${PEER}`]: { schema: 1, peer: PEER, request: false, messages: [], more: false },
+    "/api/v1/contacts": { schema: 1, contacts: [] },
+    "/api/v1/nearby": { schema: 1, sources: [] },
+    "/api/v1/panels": { schema: 1, panels: [] },
   };
   const CALLS: Record<string, (a: Adapter) => Promise<unknown>> = {
     getStatus: (a) => a.status(),
@@ -341,6 +348,7 @@ describe("adapter <-> openapi.yaml", () => {
     patchDevice: (a) => a.patchDevice("usb-7c1e0b94a2d3", { alias: "Bench radio" }),
     forgetDevice: (a) => a.forgetDevice("usb-7c1e0b94a2d3"),
     flashDevice: (a) => a.flashDevice("usb-7c1e0b94a2d3", { sha256: "9f".repeat(32), confirm: "Bench radio" }),
+    identifyDevice: (a) => a.identifyDevice("usb-7c1e0b94a2d3", { consent: true }),
     agentStatus: (a) => a.agentStatus(),
     agentTask: (a) => a.agentTask({ kind: "diagnose", refs: ["svc:transport"], note: null }),
     listProposals: (a) => a.proposals("decided"),
@@ -355,6 +363,24 @@ describe("adapter <-> openapi.yaml", () => {
     authSession: (a) => a.auth.session(),
     authPair: (a) => a.auth.pair("AAAA-BBBB"),
     authLogout: (a) => a.auth.logout(),
+    listThreads: (a) => a.messages.threads(),
+    getThread: (a) => a.messages.thread(PEER, { sinceSeq: 4, limit: 50 }),
+    sendMessage: (a) => a.messages.send({ to: PEER, text: "hello" }),
+    retryMessage: (a) => a.messages.retry("msg-01j9z3k8m2q4"),
+    listContacts: (a) => a.contacts.list(),
+    addContact: (a) => a.contacts.add({ node_id: PEER }),
+    getOwnCard: (a) => a.contacts.ownCard(),
+    getContact: (a) => a.contacts.get(PEER),
+    patchContact: (a) => a.contacts.patch(PEER, { alias: "Sam", pinned: true, read_seq: 3 }),
+    forgetContact: (a) => a.contacts.forget(PEER),
+    getFabric: (a) => a.fabric.status(),
+    enrollHub: (a) => a.fabric.enrollHub({ address: "192.168.1.20:11260", code: "K7M29X4P" }),
+    offerHub: (a) => a.fabric.offerHub(),
+    dismissHubOffer: (a) => a.fabric.dismissHubOffer(),
+    patchFabricSettings: (a) => a.fabric.patchSettings({ hub_role: true, quotas: { msg: null } }),
+    listNearby: (a) => a.nearby(),
+    listPanels: (a) => a.panels.list(),
+    openPanelSession: (a) => a.panels.openSession("meshtastic"),
   };
   const toRegex = (tpl: string) => new RegExp(`^${tpl.replace(/\{[^}]+\}/g, "[^/]+")}$`);
 

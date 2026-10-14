@@ -2,9 +2,26 @@
 // script of timed events (relative to adapter creation). The adapter (index.ts) owns the live
 // state and implements ScriptContext; scenarios only describe what changes and when.
 import { RADIO_BOARD_FOUND, RADIO_NO_BOARD, VERSION, heltecDevice, iso, logLine, type Fixtures } from "./fixtures";
-import type { AgentEvent, AgentStatus, DeviceRecord, FlashOffer, Proposal, ServiceId, ServiceRecord, Settings, Status } from "../types";
+import { ADA, DOV, ELI, FAY, fabricRow, makeContact, type MessagingData } from "./messaging";
+import type { AgentEvent, AgentStatus, Contact, DeviceRecord, FlashOffer, NodeId, Proposal, ServiceId, ServiceRecord, Settings, Status } from "../types";
 
-export const SCENARIO_NAMES = ["healthy", "first-run", "agent-down", "transport-error", "lan-unpaired", "termux-unpaired", "lan-locked", "updating", "new-device", "blank-board"] as const;
+export const SCENARIO_NAMES = [
+  "healthy",
+  "first-run",
+  "agent-down",
+  "transport-error",
+  "lan-unpaired",
+  "termux-unpaired",
+  "lan-locked",
+  "updating",
+  "new-device",
+  "blank-board",
+  "messaging-new",
+  "requests",
+  "store-full",
+  "restore-pending",
+  "meshtastic",
+] as const;
 export type ScenarioName = (typeof SCENARIO_NAMES)[number];
 
 /** The pair code `lan-unpaired` accepts (dashes, spaces and case are ignored, like the daemon). */
@@ -42,6 +59,8 @@ export interface MockData {
   kbEntries: Record<string, string>;
   logs: Record<ServiceId, string[]>;
   auth: MockAuth;
+  /** Layer 5: contacts, conversations, fabric, nearby, panels. */
+  messaging: MessagingData;
 }
 
 /** What a script step may do. Every mutation publishes the matching frame on the bus. */
@@ -61,6 +80,15 @@ export interface ScriptContext {
   emitAgent(kind: AgentEvent["kind"], detail?: Record<string, unknown>): void;
   /** Append a line to a service's log tail. */
   log(id: ServiceId, text: string): void;
+  /** An incoming message from `peer` (a `message` frame; `request` while the peer is an unaccepted request). */
+  receive(peer: NodeId, text: string, opts?: { claimOffsetMs?: number }): void;
+  /** A new message request (INTRO, tofu): the contact with `request: true` and its held messages; `contact` and `message` frames. */
+  introduce(contact: Contact, texts: string[]): void;
+  /**
+   * Change the messaging data in place (restore floor, store, links, hub), then re-derive the `fabric` service row, re-run
+   * every queued message and publish the `fabric` and `services` frames.
+   */
+  patchMessaging(fn: (m: MessagingData) => void): void;
 }
 
 export interface TimedEvent {
@@ -93,6 +121,7 @@ function dataFrom(base: Fixtures): MockData {
     kbEntries: c.kbEntries,
     logs: c.logs,
     auth: { loopback: true, loopbackTrusted: true, requirePair: false, paired: false, created: null, deviceId: c.devices.find((d) => d.kind === "companion")?.id ?? null },
+    messaging: c.messaging,
   };
 }
 
@@ -366,6 +395,132 @@ export const blankBoard: ScenarioFn = (base) => {
   };
 };
 
+/** Re-derive the `fabric` service row from the messaging data (what 111d's registry does every tick). */
+function syncFabricRow(d: MockData): void {
+  Object.assign(svc(d, "fabric"), fabricRow(d.messaging.fabric));
+}
+
+export const messagingNew: ScenarioFn = (base) => {
+  const data = dataFrom(base);
+  const m = data.messaging;
+  // A node that has never messaged anyone: no hub, no contacts, no conversations; the first thing to do is enroll or add a card.
+  m.contacts = [];
+  m.messages = [];
+  m.routes = {};
+  m.readMarks = {};
+  m.nextSeq = 1;
+  m.nextRecv = 1;
+  m.nextMsg = 1;
+  m.fabric.hub = { enrolled: false, reachable: false, cursor: 0, node_id: null, address: null, members: 0, offer_active: false };
+  m.fabric.links = m.fabric.links.map((l) => ({ ...l, state: "down", peers: 0 }));
+  m.fabric.store.used = 120_000;
+  syncFabricRow(data);
+  return {
+    name: "messaging-new",
+    summary: "Messaging never used: no contacts, no conversations, no home hub (NOT SET). Enroll with the code K7M2-9X4P at 192.168.1.20:11183, or add a contact first.",
+    data,
+    script: [],
+  };
+};
+
+export const requests: ScenarioFn = (base) => {
+  const data = dataFrom(base);
+  const m = data.messaging;
+  const hold = (peer: NodeId, texts: string[], agoMs: number) => {
+    texts.forEach((text, i) => {
+      const seq = m.nextSeq++;
+      m.messages.push({
+        id: `msg-01j9zc${seq.toString().padStart(2, "0")}r1q7`,
+        peer,
+        dir: "in",
+        text,
+        state: "delivered",
+        reason_code: null,
+        reason: null,
+        local_seq: seq,
+        received_seq: m.nextRecv++,
+        sent_at_claim: i === 0 ? iso(base.now - agoMs - 3_600_000) : null,
+        at: iso(base.now - agoMs + i * 20_000),
+        msg_id: { stream: 0, epoch: 9120, n: i + 1 },
+      });
+    });
+  };
+  m.contacts.push(makeContact(DOV, { alias: null, trust: "tofu", request: true }), makeContact(ELI, { trust: "tofu", request: true }));
+  hold(DOV, ["Hi, I got your card from the meetup. Is this the workshop node?", "(if this is the wrong node, ignore me)"], 14 * 60_000);
+  hold(ELI, ["<script>alert('hi')</script> Free coin! Click here"], 3 * 60_000);
+  return {
+    name: "requests",
+    summary:
+      "Two pending message requests (INTROs from people not yet contacts), one of them junk. 6 s in a third request arrives; 9 s in a normal message arrives from Ada. Accepting makes the contact and moves the messages into a thread.",
+    data,
+    script: [
+      {
+        atMs: 6_000,
+        label: "a third message request arrives",
+        run: (ctx) => ctx.introduce(makeContact(FAY, { trust: "tofu", request: true }), ["Hello from the lake house! Is anyone on this channel?"]),
+      },
+      { atMs: 9_000, label: "Ada replies", run: (ctx) => ctx.receive(ADA, "Thanks, got your message. See you at 3.", { claimOffsetMs: -4_000 }) },
+    ],
+  };
+};
+
+export const storeFull: ScenarioFn = (base) => {
+  const data = dataFrom(base);
+  const m = data.messaging;
+  m.fabric.store = { ...m.fabric.store, used: m.fabric.store.watermark, store_full: true };
+  // The newest own messages cannot be saved to the outbox any more.
+  for (const msg of m.messages.filter((x) => x.dir === "own").slice(-2)) {
+    msg.state = "queued";
+    msg.reason_code = "store_full";
+    msg.reason = "This node's store is full; new messages wait until space is freed.";
+  }
+  syncFabricRow(data);
+  return {
+    name: "store-full",
+    summary: "The message store is full (the fabric service is in ERROR, store_full). The newest own messages are queued with reason store_full. 12 s in space is freed and the queue moves again.",
+    data,
+    script: [
+      {
+        atMs: 12_000,
+        label: "space is freed",
+        run: (ctx) => ctx.patchMessaging((x) => (x.fabric.store = { ...x.fabric.store, used: Math.round(x.fabric.store.watermark * 0.7), store_full: false })),
+      },
+    ],
+  };
+};
+
+export const restorePending: ScenarioFn = (base) => {
+  const data = dataFrom(base);
+  const m = data.messaging;
+  m.restorePending = true;
+  const last = m.messages.filter((x) => x.dir === "own" && x.peer === ADA).slice(-1)[0];
+  if (last) {
+    last.state = "queued";
+    last.reason_code = "restore_pending";
+    last.reason = "Waiting for the identity restore to finish; nothing is sent until it does.";
+  }
+  return {
+    name: "restore-pending",
+    summary: "The identity holder reports a restore floor: nothing is sealed, so own messages stay queued with reason restore_pending. 12 s in the restore finishes.",
+    data,
+    script: [{ atMs: 12_000, label: "restore finishes", run: (ctx) => ctx.patchMessaging((x) => (x.restorePending = false)) }],
+  };
+};
+
+export const meshtastic: ScenarioFn = (base) => {
+  const data = dataFrom(base);
+  // The same Heltec as everywhere, but one that Meshtastic could be on: it offers the consented identify probe.
+  const board = data.devices.find((d) => d.kind === "radio");
+  if (!board) throw new Error("mock: no radio fixture");
+  board.actions = ["rename", "forget", "agent", "identify"];
+  return {
+    name: "meshtastic",
+    summary: "A Heltec that offers `identify`. POST /devices/{id}/identify (consent true) binds it: the meshtastic service goes LIVE, Nearby fills with three nodes (one with a hostile name) and the panel is served.",
+    data,
+    script: [],
+  };
+};
+
 export const scenarios: Record<ScenarioName, ScenarioFn> = {
   healthy,
   "first-run": firstRun,
@@ -377,6 +532,11 @@ export const scenarios: Record<ScenarioName, ScenarioFn> = {
   updating,
   "new-device": newDevice,
   "blank-board": blankBoard,
+  "messaging-new": messagingNew,
+  requests,
+  "store-full": storeFull,
+  "restore-pending": restorePending,
+  meshtastic,
 };
 
 export function resolveScenario(name: string | null | undefined): ScenarioName {

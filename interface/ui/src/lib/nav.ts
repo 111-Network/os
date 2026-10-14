@@ -135,6 +135,7 @@ export function titleFor(path: string, services?: readonly ServiceRecord[] | nul
     "/devices/add": "Add device",
     "/nearby": "Nearby",
     "/messages": "Messages",
+    "/messages/contacts": "Contacts",
     "/logs": "Logs",
     "/settings": "Settings",
     "/settings/licenses": "Licenses",
@@ -149,6 +150,8 @@ export function titleFor(path: string, services?: readonly ServiceRecord[] | nul
   switch (head) {
     case "devices":
       return "Device";
+    case "messages":
+      return "Conversation";
     case "services": {
       const rec = services?.find((s) => s.id === rest);
       return rec?.plain_name ?? "Service";

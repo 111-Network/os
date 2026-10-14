@@ -3,11 +3,12 @@ import type { Attention } from "./api/store";
 
 const plural = (n: number, one: string, many: string): string => `${n} ${n === 1 ? one : many}`;
 
-/** "2 proposals, 1 service error, 1 device error". Nothing pending reads "Nothing needs you". */
-export function attentionSummary(a: Pick<Attention, "openProposals" | "erroredServices" | "erroredDevices">): string {
+/** "2 proposals, 1 service error, 1 device error, 1 message request". Nothing pending reads "Nothing needs you". */
+export function attentionSummary(a: Pick<Attention, "openProposals" | "erroredServices" | "erroredDevices"> & Partial<Pick<Attention, "openRequests">>): string {
   const parts: string[] = [];
   if (a.openProposals > 0) parts.push(plural(a.openProposals, "proposal", "proposals"));
   if (a.erroredServices > 0) parts.push(plural(a.erroredServices, "service error", "service errors"));
   if (a.erroredDevices > 0) parts.push(plural(a.erroredDevices, "device error", "device errors"));
+  if ((a.openRequests ?? 0) > 0) parts.push(plural(a.openRequests!, "message request", "message requests"));
   return parts.length > 0 ? parts.join(", ") : "Nothing needs you";
 }

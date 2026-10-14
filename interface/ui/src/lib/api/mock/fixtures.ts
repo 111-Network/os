@@ -2,6 +2,7 @@
 // data, shaped exactly like api/openapi.yaml. Scenarios (scenarios.ts) clone and bend these.
 // Nothing here is imported by production code: the mock is reached only via a DEV-guarded dynamic import.
 import type { AgentStatus, DeviceRecord, Proposal, ServiceId, ServiceRecord, Settings, Status } from "../types";
+import { buildMessaging, type MessagingData } from "./messaging";
 
 export const NODE_ID = "9f2c41d7a0b35e68c1d4f7092ab36e5d8c70f1e24b9a6d3057c8e1f2a4b6d9c3";
 export const NODE_LABEL = "k7m2-9x4p-aa";
@@ -27,6 +28,8 @@ export interface Fixtures {
   kbEntries: Record<string, string>;
   /** Log lines per service id; empty for services without a child process. */
   logs: Record<ServiceId, string[]>;
+  /** Layer 5: contacts, messages, fabric, nearby, panels (mock/messaging.ts). */
+  messaging: MessagingData;
 }
 
 const MIN = 60_000;
@@ -53,6 +56,11 @@ const LOG_TEMPLATES: Partial<Record<ServiceId, string[]>> = {
     "[Notice] Path to <6b2f9a4c0d> is 1 hop away",
   ],
   radio: ["INFO  no meshtasticd instance configured"],
+  meshtastic: [
+    "INFO  meshmud: downlink listening addr=127.0.0.1:11230",
+    "INFO  meshmud: uplink connected tcp://192.168.1.60:4403",
+    "INFO  presence: node database written nodes=3",
+  ],
 };
 
 function logLines(id: ServiceId, now: number, count = 120): string[] {
@@ -370,6 +378,47 @@ export function buildFixtures(now: number): Fixtures {
       actions: [],
       detail: { category: "Node2B", needs: "Hub4A or Hub4B" },
     }),
+    // Layer 5 (interface README 7.2; the wording mirrors the registry rules in 111d).
+    svc({
+      id: "fabric",
+      name: "mesh111",
+      plain_name: "Messaging",
+      kind: "builtin",
+      state: "live",
+      sinceMs: 7 * HOUR,
+      reason_code: "hub_reachable",
+      reason: "Your home hub is reachable; messages are delivered or held for you.",
+      can_run_here: true,
+      requires: "A home hub to enroll with, or another 111 node reachable on this network.",
+      description:
+        "Sealed messages between your nodes and your contacts. A message goes straight to the other node when it can be reached, or waits with your home hub until it comes back. It runs inside the node; only the two ends can read a message.",
+      actions: [],
+      detail: {
+        started: true,
+        store: { open: true, full: false },
+        hub: { enrolled: true, reachable: true },
+        hub_role: false,
+        members: null,
+        attributed_links: 1,
+      },
+    }),
+    svc({
+      id: "meshtastic",
+      name: "meshmud",
+      plain_name: "Meshtastic",
+      kind: "child",
+      state: "unset",
+      sinceMs: 4 * MIN,
+      reason_code: "no_meshtastic",
+      reason: "No Meshtastic board is set up on this node.",
+      can_run_here: true,
+      requires: "A Meshtastic board identified and bound to this node: plugged in by USB (Linux), or a Wi-Fi board reached by its address.",
+      description:
+        "Meshtastic's own web client for the Meshtastic board bound to this node, and the list of Meshtastic nodes it hears. What you do in that client goes to your radio and out over Meshtastic; 111 does not see or store it, and 111 itself never transmits on Meshtastic.",
+      kb_entry: "projects/meshtastic.md",
+      actions: [],
+      detail: { child: "absent", board: null },
+    }),
   ];
 
   const status: Status = {
@@ -461,7 +510,7 @@ Nothing to fix right now. If it repeats, ask me to check the Wi-Fi power-saving 
   ];
 
   const logs = Object.fromEntries(
-    (["agent", "model", "transport", "radio", "kb", "gateway", "codeagent"] as const).map((id) => [id, logLines(id, now)]),
+    (["agent", "model", "transport", "radio", "kb", "gateway", "codeagent", "fabric", "meshtastic"] as const).map((id) => [id, logLines(id, now)]),
   ) as Record<ServiceId, string[]>;
 
   return {
@@ -486,6 +535,7 @@ Nothing to fix right now. If it repeats, ask me to check the Wi-Fi power-saving 
     kbIndex: KB_INDEX,
     kbEntries: { ...KB_ENTRIES },
     logs,
+    messaging: buildMessaging(now, NODE_ID),
   };
 }
 

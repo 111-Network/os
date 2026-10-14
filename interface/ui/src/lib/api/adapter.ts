@@ -7,21 +7,41 @@
 import type {
   AgentStatus,
   AuthSession,
+  Card,
   ChatFrame,
   ChatHistory,
   ChatRequest,
+  Contact,
+  ContactCreate,
+  ContactPatch,
   Decision,
   DeviceRecord,
   EventsFrame,
+  FabricHub,
+  FabricSettings,
+  FabricSettingsPatch,
+  FabricStatus,
+  HostedPanel,
+  HubEnrollRequest,
+  HubOffer,
+  IdentifyRequest,
   LogTail,
+  Message,
+  MessageId,
+  NearbySource,
+  NodeId,
+  PanelSession,
   Proposal,
+  SendMessageRequest,
   ServiceId,
   ServiceRecord,
   Settings,
   SettingsPatch,
   Status,
   TaskRequest,
+  Thread,
 } from "./types";
+import type { ThreadPage } from "./messages";
 
 /**
  * connecting: no open connection yet, or the browser is retrying after a drop.
@@ -92,6 +112,18 @@ export interface FlashReply {
   flashing: boolean;
 }
 
+/** Query of `GET /messages/threads/{peer}`: `limit` defaults to 100 (max 500); `sinceSeq` pages forward from a sequence. */
+export interface ThreadQuery {
+  sinceSeq?: number;
+  limit?: number;
+}
+
+/** `202` from POST /messages: queued on this node. Delivery is never promised by this call (§9). */
+export interface MessageAccepted {
+  schema: number;
+  id: MessageId;
+}
+
 export interface SendOptions {
   /** Abort the in-flight request. Breaking out of the `for await` loop aborts it too. */
   signal?: AbortSignal;
@@ -135,6 +167,13 @@ export interface Adapter {
    */
   flashDevice(id: string, body: FlashRequest): Promise<FlashReply>;
 
+  /**
+   * The consented probe of a board (Layer 5 §14; `actions` contains `identify`). Opening a serial port can reset the
+   * board, so `consent: true` is required and typed as the literal. 409 `port_busy` when another owner holds the port;
+   * 502 `upstream_error` when meshmud or the presence reader did not answer.
+   */
+  identifyDevice(id: string, body: IdentifyRequest): Promise<DeviceRecord>;
+
   agentStatus(): Promise<AgentStatus>;
   agentTask(req: TaskRequest): Promise<TaskAccepted>;
 
@@ -148,6 +187,57 @@ export interface Adapter {
 
   restart(): Promise<RestartReply>;
   updateCheck(): Promise<UpdateCheckReply>;
+
+  /** Messages (Layer 5 §15, os/messaging/README.md §9). Order is `local_seq`; delivery evidence is `Message.state`. */
+  messages: {
+    /** Unwraps `{schema, threads}`: most recent activity first, including message-request threads. */
+    threads(): Promise<Thread[]>;
+    /** One conversation. Without `sinceSeq` the newest `limit` messages; `more` says older ones exist. */
+    thread(peer: NodeId, q?: ThreadQuery): Promise<ThreadPage>;
+    /** Queue a text to a contact. Always 202 `queued`; 404 when `to` is not a contact; 400 when the text cannot be carried. */
+    send(req: SendMessageRequest): Promise<MessageAccepted>;
+    /** Re-queue an own message that is `queued` or `sent`; 409 `bad_request` otherwise. */
+    retry(id: MessageId): Promise<Message>;
+  };
+
+  /** Contacts and message requests (§7, §15). */
+  contacts: {
+    /** Unwraps `{schema, contacts}`; pending message requests have `request: true`. */
+    list(): Promise<Contact[]>;
+    /** By `card` text or `node_id` alone; an already-known contact is returned unchanged; a key conflict is 409 `bad_request`. */
+    add(body: ContactCreate): Promise<Contact>;
+    /** This node's own card: base32 text and a QR module matrix the UI draws. */
+    ownCard(): Promise<Card>;
+    get(id: NodeId): Promise<Contact>;
+    /** Alias, accept a pending request (`accept: true`), pin, mark the thread read (`read_seq`). */
+    patch(id: NodeId, patch: ContactPatch): Promise<Contact>;
+    /** Forget (and, for a pending request, discard it). 204. */
+    forget(id: NodeId): Promise<void>;
+  };
+
+  /** The fabric: links, home hub, custody, store, settings (§8–§10, §15). */
+  fabric: {
+    status(): Promise<FabricStatus>;
+    /** Member side: enroll with a hub (`ENROLL`, §7.3). 409 already enrolled; 429 lockout; 502 hub unreachable or refused. */
+    enrollHub(body: HubEnrollRequest): Promise<FabricHub>;
+    /** Hub side, loopback-only: mint a one-time code with the hub's card and address as one bundle. */
+    offerHub(): Promise<HubOffer>;
+    /** Hub side, loopback-only: dismiss the outstanding code. Idempotent 204. */
+    dismissHubOffer(): Promise<void>;
+    /** Loopback-only partial merge of hub role, LAN listener, custody opt-in and per-class quotas. */
+    patchSettings(patch: FabricSettingsPatch): Promise<FabricSettings>;
+  };
+
+  /** Unwraps `{schema, sources}`: presence per source (v1: Meshtastic nodes heard). Names are untrusted RF-origin strings. */
+  nearby(): Promise<NearbySource[]>;
+
+  /** Hosted panels (§13). */
+  panels: {
+    /** Unwraps `{schema, panels}`: the declared panels and their listener slots. */
+    list(): Promise<HostedPanel[]>;
+    /** Mint a one-time ticket URL for a panel's own origin (single use, 30 s). 404 when unknown or its service is not set up. */
+    openSession(id: ServiceId): Promise<PanelSession>;
+  };
 
   kb: {
     /** Root llms.txt as text. */

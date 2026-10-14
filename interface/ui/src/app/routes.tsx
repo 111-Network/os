@@ -15,6 +15,7 @@ const Overview = lazy(() => import("../views/overview"));
 const Devices = lazy(() => import("../views/devices"));
 const Nearby = lazy(() => import("../views/nearby"));
 const Messages = lazy(() => import("../views/messages"));
+const Contacts = lazy(() => import("../views/contacts"));
 const Services = lazy(() => import("../views/services"));
 const Settings = lazy(() => import("../views/settings"));
 const Licenses = lazy(() => import("../views/licenses"));
@@ -36,6 +37,8 @@ export const ROUTES: RouteDef[] = [
   { path: "/devices/:id", View: Devices },
   { path: "/nearby", View: Nearby },
   { path: "/messages", View: Messages },
+  { path: "/messages/contacts", View: Contacts }, // before /messages/:peer, which would call it "no such conversation"
+  { path: "/messages/:peer", View: Messages },
   { path: "/services/:id", View: Services },
   { path: "/logs", View: Logs },
   { path: "/settings", View: Settings },

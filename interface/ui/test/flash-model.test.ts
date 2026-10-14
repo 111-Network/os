@@ -213,6 +213,6 @@ describe("flashStalled", () => {
 describe("attention", () => {
   it("an offered board is not counted again: the attention badge counts errors and proposals only", () => {
     const offered = { id: "usb-1", state: "needs_setup", flash_offer: offer } as unknown as DeviceRecord;
-    expect(computeAttention([], [], [offered])).toEqual({ count: 0, openProposals: 0, erroredServices: 0, erroredDevices: 0 });
+    expect(computeAttention([], [], [offered])).toEqual({ count: 0, openProposals: 0, erroredServices: 0, erroredDevices: 0, openRequests: 0 });
   });
 });

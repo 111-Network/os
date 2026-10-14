@@ -53,7 +53,7 @@ describe("hooks", () => {
     } as unknown as Adapter;
     apiStore.attach(adapter);
     await flush();
-    expect(render()).toEqual({ label: "k7m2-9x4p-aa", n: 7, radio: "unset", p: 3, d: 4, heltec: "needs_setup", gone: null, conn: "connecting", a: 0, attention: 1, changed: false, ready: true });
+    expect(render()).toEqual({ label: "k7m2-9x4p-aa", n: 9, radio: "unset", p: 3, d: 4, heltec: "needs_setup", gone: null, conn: "connecting", a: 0, attention: 1, changed: false, ready: true });
     handlers.current!.onState("open", { lastEventAt: 1 });
     const services = structuredClone(fx.services);
     services.find((s) => s.id === "radio")!.state = "error";

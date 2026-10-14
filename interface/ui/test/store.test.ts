@@ -54,13 +54,13 @@ async function started(over: Parameters<typeof fakeAdapter>[0] = {}, now = () =>
 
 describe("computeAttention", () => {
   it("counts open proposals plus services in error", () => {
-    expect(computeAttention(fx.proposals, fx.services)).toEqual({ count: 1, openProposals: 1, erroredServices: 0, erroredDevices: 0 });
+    expect(computeAttention(fx.proposals, fx.services)).toEqual({ count: 1, openProposals: 1, erroredServices: 0, erroredDevices: 0, openRequests: 0 });
     const services = clone(fx.services);
     services[0]!.state = "error";
     services[1]!.state = "error";
     services[2]!.state = "unset"; // unset and starting are not attention
     services[3]!.state = "starting";
-    expect(computeAttention(fx.proposals, services)).toEqual({ count: 3, openProposals: 1, erroredServices: 2, erroredDevices: 0 });
+    expect(computeAttention(fx.proposals, services)).toEqual({ count: 3, openProposals: 1, erroredServices: 2, erroredDevices: 0, openRequests: 0 });
   });
 
   it("also counts devices in error, but not needs_setup or disconnected ones", () => {
@@ -69,8 +69,8 @@ describe("computeAttention", () => {
     expect(computeAttention(fx.proposals, fx.services, devices).erroredDevices).toBe(0);
     devices[0]!.state = "error";
     devices[1]!.state = "disconnected";
-    expect(computeAttention(fx.proposals, fx.services, devices)).toEqual({ count: 2, openProposals: 1, erroredServices: 0, erroredDevices: 1 });
-    expect(computeAttention(null, null, devices)).toEqual({ count: 1, openProposals: 0, erroredServices: 0, erroredDevices: 1 });
+    expect(computeAttention(fx.proposals, fx.services, devices)).toEqual({ count: 2, openProposals: 1, erroredServices: 0, erroredDevices: 1, openRequests: 0 });
+    expect(computeAttention(null, null, devices)).toEqual({ count: 1, openProposals: 0, erroredServices: 0, erroredDevices: 1, openRequests: 0 });
     expect(computeAttention(null, null, null).erroredDevices).toBe(0);
   });
 
@@ -97,12 +97,12 @@ describe("ApiStore snapshots", () => {
     const { store, calls } = await started();
     const s = store.getState();
     expect(s.status?.node.label).toBe("k7m2-9x4p-aa");
-    expect(s.services).toHaveLength(7);
+    expect(s.services).toHaveLength(9);
     expect(s.devices?.map((d) => d.kind)).toEqual(["radio", "companion", "bluetooth", "unknown"]);
     expect(s.proposals?.map((p) => p.id)).toEqual(["prop-01j9z3k8m2q4", "prop-01j9y7c2d9f1", "prop-01j9x4t6h8w3"]);
     expect(calls.proposals).toEqual(["all"]);
     expect(s.meta).toEqual({ ready: true, needsPair: false, error: null });
-    expect(s.attention).toEqual({ count: 1, openProposals: 1, erroredServices: 0, erroredDevices: 0 });
+    expect(s.attention).toEqual({ count: 1, openProposals: 1, erroredServices: 0, erroredDevices: 0, openRequests: 0 });
     expect(s.version).toBe("2026.10.13");
     expect(s.baselineVersion).toBe("2026.10.13");
     expect(s.versionChanged).toBe(false);
@@ -222,7 +222,7 @@ describe("ApiStore frames", () => {
     expect(after.devices?.[0]?.state).toBe("error");
     expect(after.devices?.[1]).toBe(before.devices?.[1]); // unchanged record keeps its identity
     expect(after.devices?.[0]).not.toBe(before.devices?.[0]);
-    expect(after.attention).toEqual({ count: 2, openProposals: 1, erroredServices: 0, erroredDevices: 1 });
+    expect(after.attention).toEqual({ count: 2, openProposals: 1, erroredServices: 0, erroredDevices: 1, openRequests: 0 });
     // a device leaving (forgotten or unplugged) is reflected by the next snapshot
     frame({ event: "devices", data: { devices: devices.slice(1) }, id: "5" });
     expect(store.getState().devices).toHaveLength(3);
@@ -286,7 +286,7 @@ describe("ApiStore frames", () => {
       frame({ event: "status", data: {} as never });
       frame({ event: "agent", data: {} as never });
     }).not.toThrow();
-    expect(store.getState().services).toHaveLength(7);
+    expect(store.getState().services).toHaveLength(9);
     expect(store.getState().activity).toEqual([]);
   });
 });
