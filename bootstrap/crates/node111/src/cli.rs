@@ -1,5 +1,6 @@
 //! CLI surface: install · daemon · identity backup|restore|commission ·
-//! config · dashboard [rotate] · uninstall · update-helper · update-guard.
+//! config · dashboard [rotate] · fabric status|offer|enroll · uninstall ·
+//! update-helper · update-guard.
 //! Flags: --phone --serial --keep-adb --reboot-test --yes --allow-degraded --min-installer-version
 //! --version (calver). Host install and --phone are mutually exclusive.
 
@@ -47,6 +48,9 @@ enum Cmd {
     Dashboard {
         rotate: bool,
     },
+    /// `111 fabric status|offer|enroll` (Layer 5 §7.3, F2): over the
+    /// daemon's loopback API.
+    Fabric(crate::daemon::fabric::cli::FabricCmd),
     Uninstall {
         phone: bool,
         serial: Option<String>,
@@ -132,6 +136,7 @@ fn parse(args: &[String]) -> anyhow::Result<Cmd> {
             (Some("rotate"), 2) => Cmd::Dashboard { rotate: true },
             (other, _) => anyhow::bail!("usage: 111 dashboard [rotate] (got {other:?})"),
         },
+        "fabric" => Cmd::Fabric(crate::daemon::fabric::cli::parse(&args[1..])?),
         "uninstall" => {
             let phone = args[1..].iter().any(|a| a == "--phone");
             let serial = args[1..]
@@ -158,6 +163,8 @@ USAGE:
   111 identity commission [--loopback-test]   (Cat-1 relay ceremony; your own computer, needs a terminal)
   111 config [show | dashboard.lan true|false | offer accept|dismiss]
   111 dashboard [rotate]           (dashboard URLs + pair code; rotate = new code, sign everyone out)
+  111 fabric status | offer | enroll <CODE|111HUB:BUNDLE> [--address HOST:PORT] [--card CARD]
+                                   (messaging: home hub, offers, enrollment — via the running daemon)
   111 uninstall [--phone] [--serial SERIAL]
   111 update-helper | 111 update-guard     (root oneshots via systemd)
   111 --version";
@@ -187,6 +194,7 @@ pub fn main_entry(args: Vec<String>) -> i32 {
         Cmd::IdentityGenerate { burn } => identity_generate(burn),
         Cmd::Config(rest) => crate::config::run(&rest),
         Cmd::Dashboard { rotate } => dashboard_cmd(rotate),
+        Cmd::Fabric(f) => crate::daemon::fabric::cli::run(&f),
         Cmd::Uninstall { phone, serial } => {
             if phone {
                 crate::install::phone::teardown::run(serial)
@@ -676,6 +684,20 @@ mod tests {
             parse(&["identity".into(), "backup".into()]).unwrap(),
             Cmd::IdentityBackup
         ));
+        assert!(matches!(
+            parse(&["fabric".into(), "status".into()]).unwrap(),
+            Cmd::Fabric(crate::daemon::fabric::cli::FabricCmd::Status)
+        ));
+        assert!(matches!(
+            parse(&[
+                "fabric".into(),
+                "enroll".into(),
+                "111HUB:A:B:1.2.3.4:5".into()
+            ])
+            .unwrap(),
+            Cmd::Fabric(crate::daemon::fabric::cli::FabricCmd::Enroll { .. })
+        ));
+        assert!(parse(&["fabric".into()]).is_err());
         assert!(matches!(
             parse(&["identity".into(), "restore".into()]).unwrap(),
             Cmd::IdentityRestore

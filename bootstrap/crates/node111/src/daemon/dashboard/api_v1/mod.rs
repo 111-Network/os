@@ -39,9 +39,12 @@
 
 pub mod actions;
 pub mod auth;
+pub mod contacts;
 pub mod devices;
 pub mod events;
+pub mod fabric;
 pub mod kb;
+pub mod messages;
 pub mod nearby;
 pub mod panels;
 pub mod proposals;
@@ -236,6 +239,9 @@ pub fn router(state: Arc<ApiState>) -> axum::Router {
         .merge(proposals::router())
         .merge(nearby::router())
         .merge(panels::router())
+        .merge(messages::router())
+        .merge(contacts::router())
+        .merge(fabric::router())
         .route_layer(middleware::from_fn_with_state(
             Arc::clone(&state),
             auth::require_session,

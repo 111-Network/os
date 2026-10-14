@@ -679,6 +679,14 @@ least one member or an attributed peer link); NOT SET when the store is open but
 members reads "waiting for the first node to enroll", a member "Set up with the agent" → enroll; ERROR on store
 failure or `store_full`. `meshtastic`: §14.
 
+*As built (F2, contract additions):* `Problem.code` + `restore_pending` — `POST /messages` (and accepting a `kind:
+message` proposal) answers `409 restore_pending` while the identity holder reports a restore floor, because nothing is
+numbered then (§4; the message is not queued, so it carries no `reason_code`); `GET /contacts/me/card` and `POST
+/fabric/hub/offer` answer the same while no announce exists (an offer's bundle carries the card). The
+`Message.reason_code` emitted set gains `not_enrolled` (sent; the hub answered `REJECT_UNENROLLED`) and `cancelled`
+(queued; the empty tombstone of §4 goes instead). `Proposal.kind` gains `message` (§17). The contract has no cancel
+route yet (the fabric's `cancel` is wired but not exposed).
+
 ## 16. UI (Layer 4 tree; one component tree, density flags)
 
 - **Messages** (`/messages`, core): thread list (alias/label, last line, state glyphs, unread), **requests** section

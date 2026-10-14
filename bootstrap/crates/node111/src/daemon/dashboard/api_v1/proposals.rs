@@ -18,6 +18,19 @@
 //! Every `{id}` is checked against `^[A-Za-z0-9_-]{1,128}$` before any path is
 //! built; an id that fails can name no proposal, so it answers `404`.
 //!
+//! **`kind: message`** (Layer 5 §17, task F2): accepting a message proposal
+//! is applied, not just recorded — the A1 body contract (`"to: " + 64
+//! lowercase hex + "\n\n" + text`) is parsed, the node-id stamp must name
+//! this node, the recipient must be an accepted contact, then the fabric
+//! queues the message ([`crate::daemon::fabric::proposal`]). The decision
+//! file is written only after the store committed the message, with an
+//! additive `applied: {message_id}` field (the API's `decision` object keeps
+//! its contract shape). Every decision on a message proposal (accept or
+//! dismiss) is serialized under one async lock and refused to the agent's
+//! bearer (`401`: deciding is the human's act, §17), so a proposal is never sent
+//! twice and never sent after being dismissed; a refused acceptance leaves it
+//! open (the user may dismiss it).
+//!
 //! Events: a recorded decision publishes `event: proposal` with the
 //! `SseProposal` shape plus the new `decision` (`{id,title,kind,created_at,
 //! decision:{decision,at}}`) so other open tabs refetch. The relay's events
@@ -43,7 +56,9 @@ use time::OffsetDateTime;
 /// List cap (newest first).
 pub const MAX_LIST: usize = 200;
 /// `Proposal.kind` (contract enum).
-pub const KINDS: [&str; 4] = ["diagnose", "propose", "patch", "chat"];
+pub const KINDS: [&str; 5] = ["diagnose", "propose", "patch", "chat", "message"];
+/// `Proposal.kind` of a message the agent proposes (§17).
+pub const MESSAGE_KIND: &str = "message";
 /// Largest proposal/decision file read (bodies are model-written markdown).
 const MAX_FILE: u64 = 1 << 20;
 
@@ -336,6 +351,17 @@ static DECIDE_LOCK: Mutex<()> = Mutex::new(());
 /// Record `decision` for `id` (`accepted` | `dismissed`). 404 when no proposal,
 /// 409 `already_decided` when a valid decision exists.
 pub fn decide(layout: &DaemonLayout, id: &str, decision: &str) -> Result<Proposal, Problem> {
+    decide_applied(layout, id, decision, None)
+}
+
+/// [`decide`], with an `applied` record written into the decision file
+/// (message proposals: `{"message_id": "msg-…"}`).
+pub fn decide_applied(
+    layout: &DaemonLayout,
+    id: &str,
+    decision: &str,
+    applied: Option<Value>,
+) -> Result<Proposal, Problem> {
     let _guard = DECIDE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let Some(mut p) = get_checked(layout, id)? else {
         return Err(not_found());
@@ -361,7 +387,10 @@ pub fn decide(layout: &DaemonLayout, id: &str, decision: &str) -> Result<Proposa
             .create(&dir)
             .map_err(anyhow::Error::from)
             .and_then(|()| {
-                let body = json!({"schema": 1, "decision": rec.decision, "at": rec.at});
+                let mut body = json!({"schema": 1, "decision": rec.decision, "at": rec.at});
+                if let Some(a) = &applied {
+                    body["applied"] = a.clone();
+                }
                 crate::util::fs::atomic_write(
                     &dir.join(format!("{id}.json")),
                     format!("{body}\n").as_bytes(),
@@ -448,6 +477,76 @@ async fn get_handler(
     }
 }
 
+/// One async lock for every decision on a message proposal (module doc).
+static MESSAGE_DECIDE: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+/// Message proposals already applied this daemon lifetime whose decision
+/// file could not be written, keyed by (node root, proposal id): a retried
+/// accept records the decision again instead of sending a second time.
+static APPLIED: Mutex<Vec<(PathBuf, String, String)>> = Mutex::new(Vec::new());
+
+fn applied_before(root: &std::path::Path, id: &str) -> Option<String> {
+    APPLIED
+        .lock()
+        .ok()?
+        .iter()
+        .find(|(r, p, _)| r == root && p == id)
+        .map(|(_, _, m)| m.clone())
+}
+
+/// A decision on a `kind: message` proposal (module doc).
+async fn decide_message(
+    api: &ApiState,
+    p: Proposal,
+    decision: String,
+) -> Result<Proposal, Problem> {
+    let _one = MESSAGE_DECIDE.lock().await;
+    let layout = api.layout.clone();
+    let id = p.id.clone();
+    // Re-read under the lock: another request may have decided it.
+    let current = {
+        let (layout, id) = (layout.clone(), id.clone());
+        tokio::task::spawn_blocking(move || get_checked(&layout, &id))
+            .await
+            .map_err(internal)??
+    };
+    let Some(p) = current else {
+        return Err(not_found());
+    };
+    if p.decision.is_some() || decision != "accepted" {
+        let d = decision.clone();
+        return tokio::task::spawn_blocking(move || decide(&layout, &id, &d))
+            .await
+            .map_err(internal)?;
+    }
+    let root = layout.root.clone();
+    let message_id = match applied_before(&root, &id) {
+        Some(m) => m,
+        None => {
+            let handle = super::messages::handle(api)?;
+            let n = crate::daemon::fabric::proposal::apply(&handle, p.node_id.as_deref(), &p.body)
+                .await?;
+            let m = crate::daemon::fabric::json::msg_id(n);
+            if let Ok(mut a) = APPLIED.lock() {
+                a.push((root.clone(), id.clone(), m.clone()));
+            }
+            m
+        }
+    };
+    let applied = json!({ "message_id": message_id });
+    let (l2, id2) = (layout.clone(), id.clone());
+    let r =
+        tokio::task::spawn_blocking(move || decide_applied(&l2, &id2, "accepted", Some(applied)))
+            .await
+            .map_err(internal)?;
+    if r.is_ok() {
+        if let Ok(mut a) = APPLIED.lock() {
+            a.retain(|(rt, p, _)| !(*rt == root && *p == id));
+        }
+    }
+    r
+}
+
 #[derive(Deserialize)]
 struct DecisionReq {
     decision: Value,
@@ -456,6 +555,7 @@ struct DecisionReq {
 async fn decision_handler(
     State(api): State<Arc<ApiState>>,
     id: Result<Path<String>, PathRejection>,
+    headers: axum::http::HeaderMap,
     body: Bytes,
 ) -> Response {
     let Ok(Path(id)) = id else {
@@ -474,6 +574,27 @@ async fn decision_handler(
         }
     };
     let layout = api.layout.clone();
+    // A message proposal is applied on acceptance (module doc).
+    let peek = {
+        let (layout, id) = (layout.clone(), id.clone());
+        tokio::task::spawn_blocking(move || get_checked(&layout, &id)).await
+    };
+    if let Ok(Ok(Some(p))) = peek {
+        if p.kind == MESSAGE_KIND {
+            // §17/§18 rule 9: the human accepts; the agent's bearer passes
+            // `require_session` but never decides a message proposal.
+            if let Err(problem) = super::messages::refuse_bearer(&headers) {
+                return problem.into_response();
+            }
+            return match decide_message(&api, p, decision).await {
+                Ok(p) => {
+                    api.events.publish("proposal", &p.event());
+                    Json(p).into_response()
+                }
+                Err(problem) => problem.into_response(),
+            };
+        }
+    }
     match tokio::task::spawn_blocking(move || decide(&layout, &id, &decision)).await {
         Ok(Ok(p)) => {
             api.events.publish("proposal", &p.event());

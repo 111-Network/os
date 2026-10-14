@@ -1,0 +1,937 @@
+//! Layer 5 fabric wiring (`os/messaging/README.md` §2, §4, §9, §10.2, §15,
+//! §17; task F2): `mesh111` running inside `111d`.
+//!
+//! ## What [`start`] does, in order
+//!
+//! 1. **Identity handle** ([`sealer::IdentitySealer`]): the keyset loaded at
+//!    daemon start stays alive here for the daemon's lifetime (L2 §13 signer
+//!    pattern) with the identity dir's L2 counter store; `mesh111` gets the
+//!    handle, never key bytes. A missing `counters` file is L2 §8.4's
+//!    state-absent case: nothing is sealed (§4 `restore_pending`).
+//! 2. **Store** (§10): `fabric/` (0700, created at runtime like `agent/`),
+//!    `fabric/store.db` opened with the Mode S key (§10.2: `store_secret`
+//!    behind the handle → `mesh111::keys::ModeS`), the §4 epoch decision fed
+//!    the live `announce_last`. Opens are serialized process-wide.
+//! 3. **Own announce** (§7, A8): `fabric/announce`, re-minted only when its
+//!    `appdata` (roles from the settings, the home-hub hint) changed. Roles
+//!    and the hint follow settings changes at the next start (the fabric
+//!    reads its announce once).
+//! 4. **Fabric** (`Fabric::start`: epoch mint, `complete_partials` and
+//!    orphan recovery are the library's own), then the **`tcp-lan`** adapter
+//!    registered with its dialer (the fabric keeps the home hub dialed;
+//!    configured direct `peers` from `fabric/settings` are dialed here). No
+//!    link is registered while the node has no announce (restore pending).
+//! 5. **Listener** (§2, §8.1): `:11183` is bound on the LAN only while
+//!    `hub_role` or `listen_lan` is on (re-evaluated on every settings
+//!    change, so `PATCH /fabric/settings` takes effect immediately); with
+//!    both off nothing listens (loopback is never a peer, so no loopback
+//!    listener is bound either).
+//! 6. **Events** (§15 SSE): one task drains the fabric's subscription —
+//!    already coalesced per message per tick — in batches, coalesces again
+//!    per key (a message keeps its first change, a contact its last), and
+//!    publishes `message` / `contact` / `fabric` frames; `Settings` events
+//!    are persisted to `fabric/settings` (0600) and reconcile the listener.
+//! 7. **Housekeeping**: every few seconds the `fabric` service facts
+//!    ([`FabricHandle::provider`] → the registry rule) are refreshed from
+//!    `Fabric::status`; every minute a §10.4 capacity pass runs with the
+//!    filesystem's free/total bytes (`statvfs`; unknown ⇒ the store's
+//!    `DiskSpace::UNKNOWN`, the floor never triggers). This is capacity
+//!    monitoring, not a protocol timer: the fabric itself has none.
+//!
+//! [`FabricHandle::shutdown`] stops the link, closes the fabric cleanly
+//! (`Fabric::shutdown`: the store writes its clean-shutdown record with
+//! `announce_last`, §10.1) — `Fabric::abort` (unclean: the next open mints a
+//! new epoch) only when that does not finish within the grace — and then
+//! commits the L2 counters clean.
+//!
+//! Any failure leaves the handle **down** (`running() == false`, the reason
+//! logged once): routes answer `503`, `GET /fabric` reports `store.open:
+//! false`, and the `fabric` service row reads ERROR.
+
+pub mod cli;
+pub mod json;
+pub mod proposal;
+pub mod sealer;
+pub mod settings;
+pub mod times;
+
+use crate::daemon::dashboard::api_v1::{ApiState, Problem};
+use crate::daemon::services::probe::Provider;
+use crate::daemon::services::FabricFacts;
+use crate::daemon::DaemonLayout;
+use crate::identity::Identity;
+use axum::http::StatusCode;
+use id111::keyset::NodeId;
+use mesh111::contacts::{ROLE_ALWAYS_ON_HUB, ROLE_MAILBOX};
+use mesh111::fabric::{
+    ContactChange, Fabric, FabricError, FabricEvent, FabricSettings, FabricStatus, MessageChange,
+    MessageView,
+};
+use mesh111::keys::ModeS;
+use mesh111::link::tcp_lan::{TcpLan, TcpLanConfig, DEFAULT_PORT};
+use mesh111::link::{Dialer, LinkId};
+use mesh111::sealer::Sealer;
+use mesh111::store::{Class, DiskSpace, OpenParams, Store, StoreError};
+use sealer::{AnnounceOutcome, IdentitySealer};
+use serde_json::{json, Value};
+use std::collections::{BTreeMap, HashMap};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex, RwLock, Weak};
+use std::time::Duration;
+use tokio::sync::broadcast;
+use tokio::task::JoinHandle;
+use zeroize::Zeroizing;
+
+/// The fabric directory under the node root (§2).
+pub const FABRIC_DIR: &str = "fabric";
+/// Housekeeping ticks between capacity passes (≈ 1 min at 5 s).
+const PRUNE_EVERY: u64 = 12;
+/// Fabric events taken per SSE batch.
+const BATCH: usize = 1024;
+
+/// `tcp-lan` transport details (never protocol: §8.1).
+#[derive(Debug, Clone)]
+pub struct TcpTuning {
+    /// §2: loopback is never a peer (tests on one host turn it off).
+    pub refuse_loopback: bool,
+    pub backoff_min: Duration,
+    pub backoff_max: Duration,
+    pub handshake_timeout: Duration,
+    pub keepalive: Duration,
+}
+
+impl Default for TcpTuning {
+    fn default() -> Self {
+        let d = TcpLanConfig::new(Vec::new());
+        TcpTuning {
+            refuse_loopback: d.refuse_loopback,
+            backoff_min: d.backoff_min,
+            backoff_max: d.backoff_max,
+            handshake_timeout: d.handshake_timeout,
+            keepalive: d.keepalive,
+        }
+    }
+}
+
+/// Where and how the fabric runs.
+#[derive(Debug, Clone)]
+pub struct FabricConfig {
+    /// `<root>/fabric` (0700).
+    pub fabric_dir: PathBuf,
+    /// `<root>/identity` (the L2 `counters` file lives there).
+    pub identity_dir: PathBuf,
+    /// The `tcp-lan` listener address when the settings ask for one
+    /// (production: `0.0.0.0:11183`).
+    pub listen: SocketAddr,
+    pub tcp: TcpTuning,
+    /// `hub_role` when `fabric/settings` does not exist yet (Cat 4).
+    pub hub_default: bool,
+    /// `POST /fabric/hub/enroll` waits this long for `ENROLL_OK`.
+    pub enroll_timeout: Duration,
+    /// Facts refresh interval (capacity passes every [`PRUNE_EVERY`]).
+    pub housekeeping: Duration,
+    /// `Fabric::shutdown` grace before `Fabric::abort`.
+    pub shutdown_grace: Duration,
+    /// The host advertised in hub offers when the listener is bound to an
+    /// unspecified address (`None`: the first LAN IPv4).
+    pub offer_host: Option<IpAddr>,
+}
+
+impl FabricConfig {
+    /// The daemon's configuration for `layout` (Cat 4 ⇒ hub by default).
+    pub fn production(layout: &DaemonLayout, category: Option<&str>) -> FabricConfig {
+        FabricConfig {
+            fabric_dir: layout.root.join(FABRIC_DIR),
+            identity_dir: layout.identity_dir(),
+            listen: SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), DEFAULT_PORT),
+            tcp: TcpTuning::default(),
+            hub_default: settings::is_hub_category(category),
+            enroll_timeout: Duration::from_secs(20),
+            housekeeping: Duration::from_secs(5),
+            shutdown_grace: Duration::from_secs(5),
+            offer_host: None,
+        }
+    }
+}
+
+struct Live {
+    fabric: Fabric,
+    sealer: Arc<IdentitySealer>,
+    tcp: Option<TcpLan>,
+}
+
+/// The running (or down) fabric, shared by routes, SSE, the registry and
+/// the proposal path (`ApiState` ext: `Arc<FabricHandle>`).
+pub struct FabricHandle {
+    cfg: FabricConfig,
+    live: Option<Live>,
+    down: Option<String>,
+    persisted: Mutex<settings::Persisted>,
+    facts: RwLock<FabricFacts>,
+    times: Mutex<times::DisplayTimes>,
+    contacts: Mutex<HashMap<[u8; 32], Value>>,
+    listener: tokio::sync::Mutex<Option<SocketAddr>>,
+    tasks: Mutex<Vec<JoinHandle<()>>>,
+}
+
+impl std::fmt::Debug for FabricHandle {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("FabricHandle")
+            .field("running", &self.live.is_some())
+            .field("down", &self.down)
+            .finish_non_exhaustive()
+    }
+}
+
+/// `503` while the fabric is not running.
+pub fn not_running() -> Problem {
+    Problem::new(
+        StatusCode::SERVICE_UNAVAILABLE,
+        "internal",
+        "Messaging is not running on this node.",
+    )
+    .detail("The message store did not open; see the Messaging service page.")
+}
+
+/// The generic mapping of fabric failures onto contract problems (routes
+/// refine where the contract names a code).
+pub fn problem(e: &FabricError) -> Problem {
+    use mesh111::mailbox::EnrollStatus;
+    let p = |s: StatusCode, code: &'static str, title: &str| Problem::new(s, code, title);
+    match e {
+        FabricError::Stopped => not_running(),
+        FabricError::NotFound => p(StatusCode::NOT_FOUND, "not_found", "Not found."),
+        FabricError::KeyConflict => p(
+            StatusCode::CONFLICT,
+            "bad_request",
+            "Those keys conflict with the ones pinned for this node.",
+        )
+        .detail("A card with different keys for a known NodeId never replaces them (§7.1)."),
+        FabricError::Invalid(why) => p(
+            StatusCode::BAD_REQUEST,
+            "bad_request",
+            "The request was refused.",
+        )
+        .detail(*why),
+        FabricError::NotRetryable => p(
+            StatusCode::CONFLICT,
+            "bad_request",
+            "Not retryable in its current state.",
+        ),
+        FabricError::TooLarge(e) => p(
+            StatusCode::BAD_REQUEST,
+            "bad_request",
+            "The text is too long to send.",
+        )
+        .detail(format!("{e} (attachments arrive in v1.1).")),
+        FabricError::RestorePending => p(
+            StatusCode::CONFLICT,
+            "restore_pending",
+            "Nothing is sealed until the identity restore completes.",
+        )
+        .detail("The identity holder reports a restore floor (§4); messages wait."),
+        FabricError::Card(e) => p(
+            StatusCode::BAD_REQUEST,
+            "bad_request",
+            "That card or NodeId is not valid.",
+        )
+        .detail(e.to_string()),
+        FabricError::Enroll(EnrollStatus::LockedOut) => p(
+            StatusCode::TOO_MANY_REQUESTS,
+            "rate_limited",
+            "The hub locked this offer after 5 wrong codes.",
+        )
+        .detail("Ask the hub's owner for a new code."),
+        FabricError::Enroll(s) => p(
+            StatusCode::BAD_GATEWAY,
+            "upstream_error",
+            "The hub refused the enrollment.",
+        )
+        .detail(format!("{s:?}: the code is wrong, spent or dismissed.")),
+        FabricError::Code(e) => p(
+            StatusCode::BAD_REQUEST,
+            "bad_request",
+            "That enrollment code is not valid.",
+        )
+        .detail(e.to_string()),
+        FabricError::NoLink => p(
+            StatusCode::BAD_GATEWAY,
+            "upstream_error",
+            "No link can reach that address.",
+        ),
+        FabricError::Store(StoreError::StoreFull) => p(
+            StatusCode::CONFLICT,
+            "bad_request",
+            "The message store is full.",
+        )
+        .detail("New custody and bulk are refused until capacity is freed (§10.4)."),
+        FabricError::Store(e) => p(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "internal",
+            "The message store failed.",
+        )
+        .detail(e.to_string()),
+        FabricError::Sealer(e) => p(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "internal",
+            "The identity holder failed.",
+        )
+        .detail(e.to_string()),
+    }
+}
+
+/// Serializes store opens process-wide (one store per daemon; tests open
+/// several — mesh111's harness saw a rare SQLCipher failure on concurrent
+/// first opens).
+static OPEN_LOCK: Mutex<()> = Mutex::new(());
+
+/// Free/total bytes of the filesystem holding `path` (`statvfs`).
+pub fn disk_space(path: &Path) -> Option<DiskSpace> {
+    use std::os::unix::ffi::OsStrExt;
+    let c = std::ffi::CString::new(path.as_os_str().as_bytes()).ok()?;
+    let mut st: libc::statvfs = unsafe { std::mem::zeroed() };
+    if unsafe { libc::statvfs(c.as_ptr(), &mut st) } != 0 {
+        return None;
+    }
+    let frsize = st.f_frsize as u64;
+    Some(DiskSpace {
+        free: (st.f_bavail as u64).saturating_mul(frsize),
+        total: (st.f_blocks as u64).saturating_mul(frsize),
+    })
+}
+
+fn roles(s: &FabricSettings) -> u16 {
+    let mut r = 0;
+    if s.holds_custody() {
+        r |= ROLE_MAILBOX;
+    }
+    if s.hub_role {
+        r |= ROLE_ALWAYS_ON_HUB;
+    }
+    r
+}
+
+fn ensure_dir(dir: &Path) -> std::io::Result<()> {
+    use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+    std::fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(dir)?;
+    std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))
+}
+
+async fn boot(
+    cfg: &FabricConfig,
+    identity: Option<Identity>,
+    persisted: &settings::Persisted,
+) -> Result<Live, String> {
+    let identity = identity.ok_or("no identity is loaded")?;
+    let (counters, how) = sealer::open_counters(&cfg.identity_dir)
+        .map_err(|e| format!("identity counter store: {e}"))?;
+    if how == sealer::CounterOpen::RestorePending {
+        eprintln!(
+            "111 fabric: the identity counter state is absent (restore without a floor): \
+             nothing is sealed until it is set (§4 restore_pending)"
+        );
+    }
+    let sealer = Arc::new(IdentitySealer::new(identity, counters));
+    match boot_with(cfg, &sealer, persisted).await {
+        Ok(l) => Ok(l),
+        Err(e) => {
+            let _ = sealer.shutdown_counters();
+            Err(e)
+        }
+    }
+}
+
+async fn boot_with(
+    cfg: &FabricConfig,
+    sealer: &Arc<IdentitySealer>,
+    persisted: &settings::Persisted,
+) -> Result<Live, String> {
+    let node_id = sealer.node_id();
+    let secret = Zeroizing::new(
+        sealer
+            .store_secret()
+            .map_err(|e| format!("store secret: {e}"))?,
+    );
+    let provider = ModeS::new(secret, node_id.to_bytes());
+    let params = OpenParams {
+        announce_last: sealer.announce_last(),
+        restore_floor_set: false,
+    };
+    let dir = cfg.fabric_dir.clone();
+    let (store, decision) = tokio::task::spawn_blocking(move || {
+        let _one = OPEN_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        Store::open_with(&dir, &provider, &params)
+    })
+    .await
+    .map_err(|e| format!("store open task: {e}"))?
+    .map_err(|e| format!("store open: {e}"))?;
+
+    let app = sealer::appdata(
+        roles(&persisted.fabric),
+        persisted.fabric.home_hub.as_ref().map(|h| &h.node_id),
+    );
+    let announce = sealer.ensure_announce(&cfg.fabric_dir, &app);
+    let fabric = Fabric::start(
+        Arc::clone(sealer) as Arc<dyn Sealer>,
+        store,
+        decision,
+        persisted.fabric.clone(),
+    )
+    .map_err(|e| format!("fabric start: {e}"))?;
+    let tcp = if announce == AnnounceOutcome::Missing {
+        eprintln!("111 fabric: no own announce (restore pending): tcp-lan not started");
+        None
+    } else {
+        let mut tc = TcpLanConfig::new(sealer.own_announce());
+        tc.refuse_loopback = cfg.tcp.refuse_loopback;
+        tc.backoff_min = cfg.tcp.backoff_min;
+        tc.backoff_max = cfg.tcp.backoff_max;
+        tc.handshake_timeout = cfg.tcp.handshake_timeout;
+        tc.keepalive = cfg.tcp.keepalive;
+        let t = TcpLan::new(
+            LinkId::new("tcp-lan"),
+            tc,
+            fabric.link_events(),
+            fabric.gate(),
+        );
+        let link: Arc<dyn mesh111::link::Link> = Arc::new(t.clone());
+        let dialer: Arc<dyn Dialer> = Arc::new(t.clone());
+        if let Err(e) = fabric.add_link(link, Some(dialer)).await {
+            fabric.abort();
+            return Err(format!("tcp-lan link: {e}"));
+        }
+        for p in &persisted.peers {
+            if p.node_id != node_id {
+                t.maintain(p.address, Some(p.node_id));
+            }
+        }
+        Some(t)
+    };
+    Ok(Live {
+        fabric,
+        sealer: Arc::clone(sealer),
+        tcp,
+    })
+}
+
+/// Start the fabric (see the module doc). Never fails: a fabric that cannot
+/// run is returned down, with the reason logged.
+pub async fn start(
+    cfg: FabricConfig,
+    identity: Option<Identity>,
+    api: &Arc<ApiState>,
+) -> Arc<FabricHandle> {
+    let mut down = None;
+    let mut persisted = settings::Persisted::default();
+    let live = match ensure_dir(&cfg.fabric_dir) {
+        Err(e) => {
+            down = Some(format!("{}: {e}", cfg.fabric_dir.display()));
+            None
+        }
+        Ok(()) => {
+            persisted = settings::load(&cfg.fabric_dir, cfg.hub_default);
+            match boot(&cfg, identity, &persisted).await {
+                Ok(l) => Some(l),
+                Err(e) => {
+                    down = Some(e);
+                    None
+                }
+            }
+        }
+    };
+    if let Some(why) = &down {
+        eprintln!("111 fabric: not running: {why}");
+    }
+    let times = if live.is_some() {
+        times::DisplayTimes::load(&cfg.fabric_dir)
+    } else {
+        times::DisplayTimes::memory()
+    };
+    let handle = Arc::new(FabricHandle {
+        facts: RwLock::new(FabricFacts {
+            store_open: live.is_some(),
+            ..FabricFacts::default()
+        }),
+        cfg,
+        live,
+        down,
+        persisted: Mutex::new(persisted.clone()),
+        times: Mutex::new(times),
+        contacts: Mutex::new(HashMap::new()),
+        listener: tokio::sync::Mutex::new(None),
+        tasks: Mutex::new(Vec::new()),
+    });
+    if let Some(l) = &handle.live {
+        handle.reconcile_listener(&persisted.fabric).await;
+        if let Ok(all) = l.fabric.contacts().await {
+            if let Ok(mut c) = handle.contacts.lock() {
+                for v in &all {
+                    c.insert(v.node_id.to_bytes(), json::contact(v));
+                }
+            }
+        }
+        handle.refresh_facts().await;
+        let rx = l.fabric.subscribe();
+        let pump = tokio::spawn(pump(Arc::downgrade(&handle), Arc::downgrade(api), rx));
+        let house = tokio::spawn(housekeeping(Arc::downgrade(&handle), Arc::downgrade(api)));
+        if let Ok(mut t) = handle.tasks.lock() {
+            t.push(pump);
+            t.push(house);
+        }
+    }
+    handle
+}
+
+impl FabricHandle {
+    /// The running fabric.
+    pub fn fabric(&self) -> Option<&Fabric> {
+        self.live.as_ref().map(|l| &l.fabric)
+    }
+
+    /// The identity handle (tests, diagnostics).
+    pub fn sealer(&self) -> Option<&Arc<IdentitySealer>> {
+        self.live.as_ref().map(|l| &l.sealer)
+    }
+
+    /// How long `POST /fabric/hub/enroll` waits for `ENROLL_OK`.
+    pub fn enroll_timeout(&self) -> Duration {
+        self.cfg.enroll_timeout
+    }
+
+    /// Is the fabric running?
+    pub fn running(&self) -> bool {
+        self.live.is_some()
+    }
+
+    /// Why it is not running.
+    pub fn down_reason(&self) -> Option<&str> {
+        self.down.as_deref()
+    }
+
+    /// This node's stored announce (empty when none).
+    pub fn own_announce(&self) -> Vec<u8> {
+        self.live
+            .as_ref()
+            .map(|l| l.sealer.own_announce())
+            .unwrap_or_default()
+    }
+
+    /// The `tcp-lan` adapter (tests, diagnostics).
+    pub fn tcp(&self) -> Option<&TcpLan> {
+        self.live.as_ref().and_then(|l| l.tcp.as_ref())
+    }
+
+    /// The bound `tcp-lan` listener, if any.
+    pub async fn listen_addr(&self) -> Option<SocketAddr> {
+        *self.listener.lock().await
+    }
+
+    /// The persisted settings as last written.
+    pub fn persisted(&self) -> settings::Persisted {
+        self.persisted.lock().map(|p| p.clone()).unwrap_or_default()
+    }
+
+    /// The `fabric` service facts provider (registry rule, §15 Services).
+    pub fn provider(self: &Arc<Self>) -> Provider<FabricFacts> {
+        let me = Arc::downgrade(self);
+        Arc::new(move || {
+            me.upgrade()
+                .and_then(|h| h.facts.read().ok().map(|f| f.clone()))
+        })
+    }
+
+    /// Bind or release the listener per `s` (§2: hub role or LAN listener).
+    pub async fn reconcile_listener(&self, s: &FabricSettings) {
+        let Some(tcp) = self.tcp() else { return };
+        let want = s.hub_role || s.listen_lan;
+        let mut bound = self.listener.lock().await;
+        match (want, *bound) {
+            (true, None) => match tcp.listen(self.cfg.listen).await {
+                Ok(a) => *bound = Some(a),
+                Err(e) => eprintln!(
+                    "111 fabric: tcp-lan listener on {} failed: {e}",
+                    self.cfg.listen
+                ),
+            },
+            (false, Some(_)) => {
+                tcp.stop_listening();
+                *bound = None;
+            }
+            _ => {}
+        }
+    }
+
+    /// The `tcp-lan` address a hub offer advertises: the bound listener,
+    /// with an unspecified bind address replaced by the configured or first
+    /// LAN IPv4 (D16 e); `None` while nothing listens on the LAN.
+    pub async fn offer_address(&self) -> Option<SocketAddr> {
+        let a = self.listen_addr().await?;
+        if !a.ip().is_unspecified() {
+            return Some(a);
+        }
+        let ip = self.cfg.offer_host.or_else(|| {
+            crate::daemon::dashboard::bind::lan_ipv4s()
+                .first()
+                .map(|v4| IpAddr::V4(*v4))
+        })?;
+        Some(SocketAddr::new(ip, a.port()))
+    }
+
+    /// The display time of message `id` (recorded now when unseen).
+    pub fn at_of(&self, id: i64) -> i64 {
+        self.times
+            .lock()
+            .map(|mut t| t.get_or_record(id, times::now()))
+            .unwrap_or_else(|_| times::now())
+    }
+
+    /// `Message` JSON for a view.
+    pub fn message_json(&self, v: &MessageView) -> Value {
+        json::message(v, self.at_of(v.id))
+    }
+
+    /// Queue a text message (`POST /messages`, an accepted proposal): the
+    /// sender's `sent_at` claim is this node's clock (§3.3: display only,
+    /// shown to the recipient as unverified).
+    pub async fn send(&self, to: NodeId, text: &str) -> Result<i64, FabricError> {
+        let fabric = self.fabric().ok_or(FabricError::Stopped)?;
+        let now = times::now();
+        let id = fabric.send(to, text, u64::try_from(now).ok()).await?;
+        if let Ok(mut t) = self.times.lock() {
+            t.record(id, now);
+        }
+        Ok(id)
+    }
+
+    /// The store's quota per refusable class (`None` = unset).
+    pub async fn quotas(&self) -> Vec<(Class, Option<u64>)> {
+        let Some(f) = self.fabric() else {
+            return Vec::new();
+        };
+        f.with_store(|s| {
+            json::quota_classes()
+                .map(|c| (c, s.quota(c).ok().flatten()))
+                .collect::<Vec<_>>()
+        })
+        .await
+        .unwrap_or_default()
+    }
+
+    /// `GET /fabric` (`FabricStatus`; the down shape when not running).
+    pub async fn status_json(&self) -> Result<Value, FabricError> {
+        let Some(f) = self.fabric() else {
+            return Ok(json::status_down(&self.persisted().fabric));
+        };
+        let st = f.status().await?;
+        self.set_facts(&st);
+        let q = self.quotas().await;
+        Ok(json::status(&st, &q))
+    }
+
+    fn set_facts(&self, st: &FabricStatus) {
+        let facts = FabricFacts {
+            store_open: true,
+            store_full: st.store.store_full,
+            hub_reachable: st.hub.enrolled.then_some(st.hub.reachable),
+            members: st
+                .settings
+                .holds_custody()
+                .then(|| u32::try_from(st.hub.members).unwrap_or(u32::MAX)),
+            attributed_links: st
+                .links
+                .iter()
+                .map(|l| u32::try_from(l.peers).unwrap_or(u32::MAX))
+                .fold(0u32, u32::saturating_add),
+        };
+        if let Ok(mut f) = self.facts.write() {
+            *f = facts;
+        }
+    }
+
+    /// Refresh the service facts from `Fabric::status`.
+    pub async fn refresh_facts(&self) {
+        let Some(f) = self.fabric() else { return };
+        match f.status().await {
+            Ok(st) => self.set_facts(&st),
+            Err(e) => {
+                eprintln!("111 fabric: status: {e}");
+                if let Ok(mut x) = self.facts.write() {
+                    x.store_open = false;
+                }
+            }
+        }
+    }
+
+    /// Persist a settings change (the peers list kept) and apply it to the
+    /// listener.
+    async fn on_settings(&self, s: FabricSettings) {
+        let snapshot = match self.persisted.lock() {
+            Ok(mut p) => {
+                p.fabric = s.clone();
+                p.clone()
+            }
+            Err(_) => return,
+        };
+        if let Err(e) = settings::save(&self.cfg.fabric_dir, &snapshot) {
+            eprintln!("111 fabric: settings not saved: {e:#}");
+        }
+        self.reconcile_listener(&s).await;
+    }
+
+    /// Apply a settings patch now (the route answers after the listener
+    /// reflects it; the `Settings` event persists the same values again).
+    pub async fn patch_settings(
+        &self,
+        patch: mesh111::fabric::SettingsPatch,
+    ) -> Result<FabricSettings, FabricError> {
+        let f = self.fabric().ok_or(FabricError::Stopped)?;
+        let s = f.patch_settings(patch).await?;
+        self.on_settings(s.clone()).await;
+        Ok(s)
+    }
+
+    async fn contact_frame(&self, id: NodeId, change: ContactChange) -> Option<Value> {
+        let key = id.to_bytes();
+        let fetched = match change {
+            ContactChange::Removed => None,
+            _ => match self.fabric()?.contact(id).await {
+                Ok(v) => Some(json::contact(&v)),
+                Err(FabricError::NotFound) => None,
+                Err(e) => {
+                    eprintln!("111 fabric: contact event: {e}");
+                    return None;
+                }
+            },
+        };
+        let mut cache = self.contacts.lock().ok()?;
+        Some(match fetched {
+            Some(v) => {
+                cache.insert(key, v.clone());
+                let c = match change {
+                    ContactChange::Added => "added",
+                    ContactChange::Request => "request",
+                    _ => "updated",
+                };
+                json!({ "change": c, "contact": v })
+            }
+            None => {
+                let was = cache
+                    .remove(&key)
+                    .unwrap_or_else(|| json::contact_stub(&id));
+                json!({ "change": "removed", "contact": was })
+            }
+        })
+    }
+
+    async fn message_frame(&self, id: i64, change: MessageChange) -> Option<Value> {
+        if matches!(change, MessageChange::New | MessageChange::Request) {
+            if let Ok(mut t) = self.times.lock() {
+                t.record(id, times::now());
+            }
+        }
+        let v = match self.fabric()?.message(id).await {
+            Ok(v) => v,
+            Err(FabricError::NotFound) => return None,
+            Err(e) => {
+                eprintln!("111 fabric: message event: {e}");
+                return None;
+            }
+        };
+        if !json::shown(&v) {
+            return None;
+        }
+        let c = match change {
+            MessageChange::New => "new",
+            MessageChange::State => "state",
+            MessageChange::Request => "request",
+        };
+        Some(json!({
+            "change": c,
+            "peer": json::hex(&v.peer),
+            "message": self.message_json(&v),
+        }))
+    }
+
+    async fn publish_fabric(&self, api: &ApiState) {
+        match self.status_json().await {
+            Ok(v) => {
+                api.events.publish("fabric", &v);
+            }
+            Err(e) => eprintln!("111 fabric: status: {e}"),
+        }
+    }
+
+    /// Publish one batch of fabric events (see the module doc, step 6).
+    async fn publish(&self, api: &ApiState, batch: Vec<FabricEvent>) {
+        let mut messages: BTreeMap<i64, MessageChange> = BTreeMap::new();
+        let mut order: Vec<i64> = Vec::new();
+        let mut contacts: Vec<(NodeId, ContactChange)> = Vec::new();
+        let mut fabric = false;
+        let mut new_settings = None;
+        for ev in batch {
+            match ev {
+                FabricEvent::Message { id, change, .. } => {
+                    if let std::collections::btree_map::Entry::Vacant(e) = messages.entry(id) {
+                        e.insert(change);
+                        order.push(id);
+                    }
+                }
+                FabricEvent::Contact { node_id, change } => {
+                    contacts.retain(|(n, _)| *n != node_id);
+                    contacts.push((node_id, change));
+                }
+                FabricEvent::Fabric => fabric = true,
+                FabricEvent::Settings(s) => new_settings = Some(s),
+            }
+        }
+        if let Some(s) = new_settings {
+            self.on_settings(s).await;
+            fabric = true;
+        }
+        for (id, change) in contacts {
+            if let Some(v) = self.contact_frame(id, change).await {
+                api.events.publish("contact", &v);
+            }
+        }
+        for id in order {
+            if let Some(v) = self.message_frame(id, messages[&id]).await {
+                api.events.publish("message", &v);
+            }
+        }
+        if fabric {
+            self.publish_fabric(api).await;
+        }
+    }
+
+    /// One capacity pass (§10.4) with the filesystem's figures; a change of
+    /// `store_full` is published as a `fabric` frame.
+    pub async fn capacity_pass(&self, api: &ApiState) {
+        let Some(f) = self.fabric() else { return };
+        let disk = disk_space(&self.cfg.fabric_dir).unwrap_or(DiskSpace::UNKNOWN);
+        let r = f
+            .with_store(move |s| {
+                let before = s.store_full();
+                let r = s.prune(disk).map(|_| ());
+                (before, s.store_full(), r)
+            })
+            .await;
+        match r {
+            Ok((before, after, Ok(()))) => {
+                if before != after {
+                    self.publish_fabric(api).await;
+                }
+            }
+            Ok((_, _, Err(e))) => eprintln!("111 fabric: capacity pass: {e}"),
+            Err(e) => eprintln!("111 fabric: capacity pass: {e}"),
+        }
+    }
+
+    /// Clean stop (module doc).
+    pub async fn shutdown(&self) {
+        if let Ok(mut t) = self.tasks.lock() {
+            for h in t.drain(..) {
+                h.abort();
+            }
+        }
+        let Some(l) = &self.live else { return };
+        if let Some(t) = &l.tcp {
+            t.shutdown();
+        }
+        match tokio::time::timeout(self.cfg.shutdown_grace, l.fabric.shutdown()).await {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => {
+                eprintln!("111 fabric: clean close failed ({e}); stopping");
+                l.fabric.abort();
+            }
+            Err(_) => {
+                eprintln!("111 fabric: clean close timed out; stopping");
+                l.fabric.abort();
+            }
+        }
+        if let Err(e) = l.sealer.shutdown_counters() {
+            eprintln!("111 fabric: identity counters not closed cleanly: {e}");
+        }
+    }
+}
+
+/// Fabric events → SSE (module doc, step 6).
+async fn pump(
+    me: Weak<FabricHandle>,
+    api: Weak<ApiState>,
+    mut rx: broadcast::Receiver<FabricEvent>,
+) {
+    loop {
+        let first = match rx.recv().await {
+            Ok(e) => Some(e),
+            Err(broadcast::error::RecvError::Lagged(n)) => {
+                eprintln!("111 fabric: SSE pump lagged by {n} events; sending a snapshot");
+                None
+            }
+            Err(broadcast::error::RecvError::Closed) => return,
+        };
+        let mut batch: Vec<FabricEvent> = first.into_iter().collect();
+        let mut lagged = batch.is_empty();
+        while batch.len() < BATCH {
+            match rx.try_recv() {
+                Ok(e) => batch.push(e),
+                Err(broadcast::error::TryRecvError::Lagged(_)) => lagged = true,
+                Err(_) => break,
+            }
+        }
+        if lagged {
+            batch.push(FabricEvent::Fabric);
+        }
+        let (Some(me), Some(api)) = (me.upgrade(), api.upgrade()) else {
+            return;
+        };
+        me.publish(&api, batch).await;
+    }
+}
+
+/// Facts refresh + capacity passes (module doc, step 7).
+async fn housekeeping(me: Weak<FabricHandle>, api: Weak<ApiState>) {
+    let every = match me.upgrade() {
+        Some(h) => h.cfg.housekeeping,
+        None => return,
+    };
+    let mut tick = tokio::time::interval(every);
+    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    let mut n: u64 = 0;
+    loop {
+        tick.tick().await;
+        let (Some(h), Some(api)) = (me.upgrade(), api.upgrade()) else {
+            return;
+        };
+        if n.is_multiple_of(PRUNE_EVERY) {
+            h.capacity_pass(&api).await;
+        }
+        h.refresh_facts().await;
+        n = n.wrapping_add(1);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn roles_follow_settings() {
+        let mut s = FabricSettings::default();
+        assert_eq!(roles(&s), 0);
+        s.custody_opt_in = true;
+        assert_eq!(roles(&s), ROLE_MAILBOX);
+        s.hub_role = true;
+        assert_eq!(roles(&s), ROLE_MAILBOX | ROLE_ALWAYS_ON_HUB);
+    }
+
+    #[test]
+    fn statvfs_reports_something_for_tmp() {
+        let d = disk_space(&std::env::temp_dir()).unwrap();
+        assert!(d.total > 0 && d.free <= d.total);
+        assert!(disk_space(Path::new("/definitely/not/here")).is_none());
+    }
+}

@@ -4,6 +4,7 @@
 
 pub mod dashboard;
 pub mod devices;
+pub mod fabric;
 pub mod health;
 pub mod intelligence;
 pub mod kb;
@@ -169,11 +170,15 @@ async fn daemon_main() -> anyhow::Result<()> {
     let version = current_version(&layout);
     let state: SharedState = Arc::new(RwLock::new(DashboardState::new(&version)));
 
-    // identity (corruption ⇒ distinct error state, never silent re-key)
-    match crate::identity::load(&layout.identity_dir()) {
+    // identity (corruption ⇒ distinct error state, never silent re-key).
+    // Layer 5 F2: the loaded identity is kept (not dropped) and handed to
+    // the fabric below — the identity handle `mesh111` seals through (§1,
+    // L2 §13 signer pattern); nothing else holds the keyset.
+    let identity = match crate::identity::load(&layout.identity_dir()) {
         Ok(id) => {
             state.write().unwrap().node_id = Some(id.node_id_hex());
             state.write().unwrap().components.identity = true;
+            Some(id)
         }
         Err(e) => {
             eprintln!("111 daemon: identity error: {e:#}");
@@ -181,8 +186,9 @@ async fn daemon_main() -> anyhow::Result<()> {
                 kind: "identity".into(),
                 detail: "identity failed integrity check — `111 identity restore` required".into(),
             });
+            None
         }
-    }
+    };
 
     // KB snapshot (integrity-verify at start)
     match kb::verify_current(&layout.root) {
@@ -324,9 +330,22 @@ async fn daemon_main() -> anyhow::Result<()> {
         dashboard.api.lan_enabled,
     ));
     dashboard.api.insert_ext(Arc::clone(&panel_host));
+    // Layer 5 F2: the messaging fabric (store, identity handle, tcp-lan,
+    // routes' state, SSE `message`/`contact`/`fabric`, `fabric` service facts).
+    let fabric = {
+        let category = state.read().unwrap().category.clone();
+        fabric::start(
+            fabric::FabricConfig::production(&layout, category.as_deref()),
+            identity,
+            &dashboard.api,
+        )
+        .await
+    };
+    dashboard.api.insert_ext(Arc::clone(&fabric));
     let mut sources =
         services::probe::Sources::new(Arc::clone(&intelligence), Arc::clone(&transport));
     sources.panels = Some(panels::provider(&panel_host));
+    sources.fabric = Some(fabric.provider());
     meshtastic.install_providers(&mut sources);
     services::probe::spawn(Arc::clone(&dashboard.api), sources);
     let _panels = panels::spawn(Arc::clone(&dashboard.api), Arc::clone(&panel_host));
@@ -368,6 +387,8 @@ async fn daemon_main() -> anyhow::Result<()> {
         },
     }
     dashboard.stop();
+    // Layer 5: close the fabric cleanly (store clean record + L2 counters)
+    fabric.shutdown().await;
     // join every child (SIGTERM, grace, SIGKILL) before exiting: an orphaned
     // llama-server would keep the port and the RAM the next daemon needs
     tokio::join!(

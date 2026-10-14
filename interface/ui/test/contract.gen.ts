@@ -45,7 +45,8 @@ export const schemas: Record<string, JsonSchema> = {
           "upstream_error",
           "internal",
           "port_busy",
-          "panel_ticket_expired"
+          "panel_ticket_expired",
+          "restore_pending"
         ]
       },
       "errors": {
@@ -277,7 +278,11 @@ export const schemas: Record<string, JsonSchema> = {
       "id": {"type":"string"},
       "node_id": {"type":["string","null"]},
       "task_id": {"type":["string","null"]},
-      "kind": {"type":"string","enum":["diagnose","propose","patch","chat"]},
+      "kind": {
+        "type": "string",
+        "enum": ["diagnose","propose","patch","chat","message"],
+        "description": "Layer 5 adds `message` (§17 `messages.send`): the body is exactly `to: <64 lowercase hex>` + a blank line + the text verbatim; accepting it (POST /proposals/{id}/decision) makes 111d send it — only to an accepted contact and only when the proposal's `node_id` names this node — and the decision is recorded after the store committed the message"
+      },
       "title": {"type":"string"},
       "body": {"type":"string","description":"markdown"},
       "created_at": {"type":"string","format":"date-time"},
@@ -573,7 +578,7 @@ export const schemas: Record<string, JsonSchema> = {
       },
       "reason_code": {
         "type": ["string","null"],
-        "description": "stable snake_case, display-only for clients, set while the state needs an explanation. Emitted set (111d): waiting_for_key (queued, the peer's card has not arrived), hub_not_yours (queued, their hub is not yours; delivered when you meet directly), restore_pending (queued, the identity holder reports a restore floor so nothing is sealed), store_full (queued, the local store refuses new work), mailbox_full (sent, the hub answered REJECT_FULL). null when nothing needs explaining."
+        "description": "stable snake_case, display-only for clients, set while the state needs an explanation. Emitted set (111d): waiting_for_key (queued, the peer's card has not arrived), hub_not_yours (queued, their hub is not yours; delivered when you meet directly), restore_pending (queued, the identity holder reports a restore floor so nothing is sealed), store_full (queued, the local store refuses new work), mailbox_full (sent, the hub answered REJECT_FULL), not_enrolled (sent, the hub answered REJECT_UNENROLLED: it no longer lists this node), cancelled (queued, the user cancelled it before it left; an empty placeholder goes instead so no number is abandoned, §4). null when nothing needs explaining."
       },
       "reason": {"type":["string","null"],"description":"one plain sentence for `reason_code`"},
       "local_seq": {
@@ -1549,7 +1554,7 @@ export const operations: Record<string, ContractOperation> = {
     "requestSchema": {"$ref":"#/components/schemas/SendMessageRequest"},
     "query": [],
     "pathParams": [],
-    "errors": [400,404]
+    "errors": [400,404,409]
   },
   "retryMessage": {
     "method": "POST",

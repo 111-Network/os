@@ -152,7 +152,7 @@ export interface paths {
         put?: never;
         /**
          * Consented identify — the Meshtastic step (Layer 5 §14, D17
-         * @description Probe a USB or Wi-Fi board the user has agreed to have probed (`actions` contains `identify`). The body carries the consent flag; without it 400 bad_request. The daemon takes the port from its port-owner table (held by another owner → 409 `port_busy`, nothing is opened), starts meshmud on the port with the identify profile, reads `my_node_info` through the TCP downlink, then answers the updated record: `firmware {family: meshtastic, version, source: probe}`, `driver.stack = meshtastic`, `service_id = meshtastic`, binding persisted in `devices.json`; the identify child becomes the service child in place (never a second open, so a DTR/RTS reset happens at most once, at this consented step). A board that answers but is not Meshtastic returns 200 with the honest `firmware` it did find (family `unknown`), never a guess. Loopback or a paired session, like every write.
+         * @description Probe a USB board (Linux) or meshtasticd the user has agreed to have probed (Wi-Fi boards are bound by address in a later task) (`actions` contains `identify`). The body carries the consent flag; without it 400 bad_request. The daemon takes the port from its port-owner table (held by another owner → 409 `port_busy`, nothing is opened), starts meshmud on the port with the identify profile, reads `my_node_info` through the TCP downlink, then answers the updated record: `firmware {family: meshtastic, version, source: probe}`, `driver.stack = meshtastic`, `service_id = meshtastic`, binding persisted in `devices.json`; the identify child becomes the service child in place (never a second open, so a DTR/RTS reset happens at most once, at this consented step). A board that answers but is not Meshtastic returns 200 with the honest `firmware` it did find (family `unknown`), never a guess. Loopback or a paired session, like every write.
          */
         post: operations["identifyDevice"];
         delete?: never;
@@ -677,7 +677,7 @@ export interface components {
             status: number;
             detail?: string;
             /** @enum {string} */
-            code: "unauthenticated" | "loopback_only" | "lan_read_only" | "agent_unavailable" | "model_unavailable" | "bad_request" | "not_found" | "rate_limited" | "already_decided" | "not_supervised" | "settings_locked" | "offer_stale" | "needs_hub" | "upstream_error" | "internal" | "port_busy" | "panel_ticket_expired";
+            code: "unauthenticated" | "loopback_only" | "lan_read_only" | "agent_unavailable" | "model_unavailable" | "bad_request" | "not_found" | "rate_limited" | "already_decided" | "not_supervised" | "settings_locked" | "offer_stale" | "needs_hub" | "upstream_error" | "internal" | "port_busy" | "panel_ticket_expired" | "restore_pending";
             errors?: {
                 pointer?: string;
                 message: string;
@@ -865,8 +865,11 @@ export interface components {
             id: string;
             node_id: string | null;
             task_id: string | null;
-            /** @enum {string} */
-            kind: "diagnose" | "propose" | "patch" | "chat";
+            /**
+             * @description Layer 5 adds `message` (§17 `messages.send`): the body is exactly `to: <64 lowercase hex>` + a blank line + the text verbatim; accepting it (POST /proposals/{id}/decision) makes 111d send it — only to an accepted contact and only when the proposal's `node_id` names this node — and the decision is recorded after the store committed the message
+             * @enum {string}
+             */
+            kind: "diagnose" | "propose" | "patch" | "chat" | "message";
             title: string;
             /** @description markdown */
             body: string;
@@ -1078,7 +1081,7 @@ export interface components {
             text: string;
             /** @description dir=in is always `delivered` (it arrived here; a held message request is not acknowledged to its sender until accepted) */
             state: components["schemas"]["MessageState"];
-            /** @description stable snake_case, display-only for clients, set while the state needs an explanation. Emitted set (111d): waiting_for_key (queued, the peer's card has not arrived), hub_not_yours (queued, their hub is not yours; delivered when you meet directly), restore_pending (queued, the identity holder reports a restore floor so nothing is sealed), store_full (queued, the local store refuses new work), mailbox_full (sent, the hub answered REJECT_FULL). null when nothing needs explaining. */
+            /** @description stable snake_case, display-only for clients, set while the state needs an explanation. Emitted set (111d): waiting_for_key (queued, the peer's card has not arrived), hub_not_yours (queued, their hub is not yours; delivered when you meet directly), restore_pending (queued, the identity holder reports a restore floor so nothing is sealed), store_full (queued, the local store refuses new work), mailbox_full (sent, the hub answered REJECT_FULL), not_enrolled (sent, the hub answered REJECT_UNENROLLED: it no longer lists this node), cancelled (queued, the user cancelled it before it left; an empty placeholder goes instead so no number is abandoned, §4). null when nothing needs explaining. */
             reason_code: string | null;
             /** @description one plain sentence for `reason_code` */
             reason: string | null;
@@ -2178,6 +2181,8 @@ export interface operations {
             400: components["responses"]["Problem"];
             /** @description not_found (`to` is not a contact) */
             404: components["responses"]["Problem"];
+            /** @description restore_pending: the identity holder reports a restore floor, so nothing is numbered or sealed yet (§4); the message is not queued */
+            409: components["responses"]["Problem"];
         };
     };
     retryMessage: {
