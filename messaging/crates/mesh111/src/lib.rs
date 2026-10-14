@@ -12,17 +12,17 @@
 
 #![forbid(unsafe_code)]
 
-pub mod sealer; // T0 — the identity-holder handle (trait only)
-pub mod envelope; // C2 — §3 outer `extra`, inner layout, flags, kinds, TLVs
-pub mod ids; // C2 — §4 msg_id / msg_seq epochs
 pub mod ack; // C2 — §6.1 ACK block (+ ack-sig)
+pub mod blobs; // C3 — §11 BLAKE3/bao blob store (v1: addressing + outboard)
+pub mod contacts; // F1 — §7 contacts, cards, requests
 pub mod custody; // C2 — §6.2 custody receipts (+ custody-sig)
 pub mod enroll; // C2 — §7.3 enrollment keyed hash
-pub mod keys; // C3 — §10.2 KeyProvider seam (Mode S / Mode T)
-pub mod store; // C3 — §10 SQLCipher store, tx/rx state, pruning
-pub mod blobs; // C3 — §11 BLAKE3/bao blob store (v1: addressing + outboard)
+pub mod envelope; // C2 — §3 outer `extra`, inner layout, flags, kinds, TLVs
+pub mod fabric;
 pub mod frag; // F1 — §5 Tier 0/1 fragmentation + reassembly
+pub mod ids; // C2 — §4 msg_id / msg_seq epochs
+pub mod keys; // C3 — §10.2 KeyProvider seam (Mode S / Mode T)
 pub mod link; // F1 — §8 Link trait, tcp-lan adapter, test links
-pub mod contacts; // F1 — §7 contacts, cards, requests
 pub mod mailbox; // F1 — §9 mailbox client + hub role
-pub mod fabric; // F1 — the runtime that ties the above together
+pub mod sealer; // T0 — the identity-holder handle (trait only)
+pub mod store; // C3 — §10 SQLCipher store, tx/rx state, pruning // F1 — the runtime that ties the above together

@@ -66,7 +66,8 @@ pub trait Sealer: Send + Sync {
 
     /// §3: the pair key for `direction` with the peer whose X25519 key is
     /// `peer_enc_pubkey`. Cached per peer by the implementation.
-    fn pair_key(&self, peer_enc_pubkey: &Key32, direction: Direction) -> Result<Key32, SealerError>;
+    fn pair_key(&self, peer_enc_pubkey: &Key32, direction: Direction)
+        -> Result<Key32, SealerError>;
 
     /// Drop the cached pair key for a forgotten contact (zeroized).
     fn forget_pair_key(&self, peer_enc_pubkey: &Key32);
