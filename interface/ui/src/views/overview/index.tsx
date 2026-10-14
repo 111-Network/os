@@ -15,10 +15,12 @@ import { useActivity, useConnection, useDevices, useProposals, useServices, useS
 import type { ServiceRecord } from "../../lib/api/types";
 import { cx, FOCUS_RING } from "../../lib/cx";
 import { Adv } from "../../lib/mode";
+import { deviceDot } from "../../lib/devices";
 import { categoryLabel, dotState } from "../../lib/nav";
 import { agentHrefFor, buildPrompt, stagePrompt } from "../../lib/prompts";
 import { verdict, verdictDot } from "../../lib/verdict";
 import { reasonText } from "../services/model";
+import { NeedsFirmwareTag } from "../devices/needs-firmware";
 import { RouteLink } from "../services/shared";
 import { devicesSummary, needsYou, nearbySentence, nodeFacts, NEEDS_YOU_ID, recentActivity, type ChecklistRow, type NeedItem } from "./model";
 
@@ -264,6 +266,19 @@ export default function OverviewView() {
         <Panel title="devices" bodyClassName="space-y-3">
           <h2 className="sr-only">Devices</h2>
           <p className="font-mono text-sm leading-relaxed text-foreground">{dev.text}</p>
+          {dev.offers.length > 0 ? (
+            <ul className="flex flex-col">
+              {dev.offers.map((o) => (
+                <li key={o.id} className="flex flex-wrap items-center gap-x-2 gap-y-1">
+                  <StatusDot state={deviceDot(o.state, disconnected)} />
+                  <RouteLink to={`/devices/${encodeURIComponent(o.id)}`} className="inline-flex min-h-11 items-center break-all font-mono text-xs">
+                    {o.name}
+                  </RouteLink>
+                  <NeedsFirmwareTag />
+                </li>
+              ))}
+            </ul>
+          ) : null}
           <RouteLink to="/devices" className="inline-flex min-h-11 items-center font-mono text-xs">
             Manage devices
           </RouteLink>

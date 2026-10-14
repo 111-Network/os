@@ -43,6 +43,39 @@ describe("buildPrompt", () => {
   });
 });
 
+describe("flash offers in the device context", () => {
+  const offer = {
+    reason: "blank",
+    image: { family: "rnode", version: "1.78", file: "share/firmware/rnode-heltec-v3-1.78.bin", sha256: "f87a2e8af657f07642eee8206b15f83e295c58528c92e497b5d3b5ec8c84ed9c", board: "Heltec WiFi LoRa 32 V3" },
+    erases: "everything on the board, including any Meshtastic settings",
+  } as const;
+
+  it("a board with an offer carries it, in full and as data", () => {
+    const p = buildPrompt("setup", { kind: "device", device: { ...device, flash_offer: offer } }, { status });
+    expect(p).toContain('"flash_offer":{"reason":"blank","image":{"family":"rnode","version":"1.78","board":"Heltec WiFi LoRa 32 V3","file":"share/firmware/rnode-heltec-v3-1.78.bin","sha256":"f87a2e8a');
+    expect(p).toContain('"erases":"everything on the board, including any Meshtastic settings"');
+  });
+  it("a board without one gains nothing: the prompt is exactly what it was", () => {
+    const plain = buildPrompt("setup", { kind: "device", device }, { status });
+    expect(plain).not.toContain("flash_offer");
+    expect(buildPrompt("setup", { kind: "device", device: { ...device, flash_offer: null } }, { status })).toBe(plain);
+    expect(buildPrompt("connect", { kind: "registry", devices: [{ ...device, flash_offer: null }], services: [] }, { status })).not.toContain("flash_offer");
+  });
+  it("the registry prompt carries the offer of the board that has one", () => {
+    const p = buildPrompt("connect", { kind: "registry", devices: [{ ...device, flash_offer: offer }, { ...device, id: "usb-2" }], services: [] }, { status });
+    expect(p.match(/flash_offer/g)).toHaveLength(1);
+  });
+  it("strings are cleaned and cut, and the whole subject stays bounded", () => {
+    const evil = { ...offer, erases: `all\u0007${"x".repeat(5000)}`, image: { ...offer.image, file: "f".repeat(5000), board: "b\u202e".repeat(500) } };
+    const p = buildPrompt("setup", { kind: "device", device: { ...device, flash_offer: evil } }, { status });
+    expect(p).not.toMatch(/[\u0007\u202e]/);
+    expect(p).not.toContain("x".repeat(301));
+    expect(p).not.toContain("f".repeat(161));
+    const subject = p.split("\n").find((l) => l.startsWith("- subject:"))!;
+    expect(new TextEncoder().encode(subject).length).toBeLessThanOrEqual(4096 + 64);
+  });
+});
+
 describe("one goal per prompt", () => {
   const goals = ["Set up the", "Fix the", "Look at ", "Check this node end to end"];
   it("context emits the context block only, with no goal sentence", () => {

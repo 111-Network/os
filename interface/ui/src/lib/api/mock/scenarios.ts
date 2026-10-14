@@ -2,9 +2,9 @@
 // script of timed events (relative to adapter creation). The adapter (index.ts) owns the live
 // state and implements ScriptContext; scenarios only describe what changes and when.
 import { RADIO_BOARD_FOUND, RADIO_NO_BOARD, VERSION, heltecDevice, iso, logLine, type Fixtures } from "./fixtures";
-import type { AgentEvent, AgentStatus, DeviceRecord, Proposal, ServiceId, ServiceRecord, Settings, Status } from "../types";
+import type { AgentEvent, AgentStatus, DeviceRecord, FlashOffer, Proposal, ServiceId, ServiceRecord, Settings, Status } from "../types";
 
-export const SCENARIO_NAMES = ["healthy", "first-run", "agent-down", "transport-error", "lan-unpaired", "termux-unpaired", "lan-locked", "updating", "new-device"] as const;
+export const SCENARIO_NAMES = ["healthy", "first-run", "agent-down", "transport-error", "lan-unpaired", "termux-unpaired", "lan-locked", "updating", "new-device", "blank-board"] as const;
 export type ScenarioName = (typeof SCENARIO_NAMES)[number];
 
 /** The pair code `lan-unpaired` accepts (dashes, spaces and case are ignored, like the daemon). */
@@ -332,6 +332,40 @@ export const newDevice: ScenarioFn = (base) => {
   };
 };
 
+/** The image `blank-board` offers. The mock's flashDevice writes exactly this when the flash "finishes". */
+export const BLANK_BOARD_OFFER: FlashOffer = {
+  reason: "blank",
+  image: {
+    family: "rnode",
+    version: "1.78",
+    file: "share/firmware/rnode-heltec-v3-1.78.bin",
+    sha256: "f87a2e8af657f07642eee8206b15f83e295c58528c92e497b5d3b5ec8c84ed9c",
+    board: "Heltec WiFi LoRa 32 V3",
+  },
+  erases: "everything on the board, including any Meshtastic settings",
+};
+
+export const blankBoard: ScenarioFn = (base) => {
+  const data = dataFrom(base);
+  // The same Heltec as every other scenario, but nothing answered on it: no firmware, nothing bound, and the
+  // signed release carries an RNode image for it (Layer 6, D17). Everything else is unchanged.
+  const board = data.devices.find((d) => d.kind === "radio");
+  if (!board) throw new Error("mock: no radio fixture");
+  board.match = { confidence: "likely", rule: "lora-table 303a:1001" };
+  board.firmware = { family: "none", version: null, source: "probe" };
+  board.driver = null;
+  board.reason_code = "unbound";
+  board.reason = "The board is plugged in, but no firmware answered on it, so nothing can drive it yet.";
+  board.actions = ["rename", "forget", "agent", "flash"];
+  board.flash_offer = structuredClone(BLANK_BOARD_OFFER);
+  return {
+    name: "blank-board",
+    summary: "A Heltec WiFi LoRa 32 V3 with no firmware, offered an RNode image. POST /devices/{id}/flash answers 202; 2 s later the board reports RNode 1.78 and the offer is gone.",
+    data,
+    script: [],
+  };
+};
+
 export const scenarios: Record<ScenarioName, ScenarioFn> = {
   healthy,
   "first-run": firstRun,
@@ -342,6 +376,7 @@ export const scenarios: Record<ScenarioName, ScenarioFn> = {
   "lan-locked": lanLocked,
   updating,
   "new-device": newDevice,
+  "blank-board": blankBoard,
 };
 
 export function resolveScenario(name: string | null | undefined): ScenarioName {

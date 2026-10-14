@@ -340,6 +340,7 @@ describe("adapter <-> openapi.yaml", () => {
     getDevice: (a) => a.device("usb-7c1e0b94a2d3"),
     patchDevice: (a) => a.patchDevice("usb-7c1e0b94a2d3", { alias: "Bench radio" }),
     forgetDevice: (a) => a.forgetDevice("usb-7c1e0b94a2d3"),
+    flashDevice: (a) => a.flashDevice("usb-7c1e0b94a2d3", { sha256: "9f".repeat(32), confirm: "Bench radio" }),
     agentStatus: (a) => a.agentStatus(),
     agentTask: (a) => a.agentTask({ kind: "diagnose", refs: ["svc:transport"], note: null }),
     listProposals: (a) => a.proposals("decided"),

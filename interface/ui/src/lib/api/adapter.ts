@@ -79,6 +79,19 @@ export interface DevicePatch {
   alias?: string | null;
 }
 
+/** Body of POST /devices/{id}/flash: the offered image's sha256 and the device's name, typed by the user. */
+export interface FlashRequest {
+  sha256: string;
+  confirm: string;
+}
+
+/** `202` from POST /devices/{id}/flash. The new firmware shows up as a `devices` frame, not in this reply. */
+export interface FlashReply {
+  schema: number;
+  id: string;
+  flashing: boolean;
+}
+
 export interface SendOptions {
   /** Abort the in-flight request. Breaking out of the `for await` loop aborts it too. */
   signal?: AbortSignal;
@@ -116,6 +129,11 @@ export interface Adapter {
   patchDevice(id: string, patch: DevicePatch): Promise<DeviceRecord>;
   /** Forget: drops the alias and pairing record. Detected hardware reappears when plugged in again. */
   forgetDevice(id: string): Promise<void>;
+  /**
+   * Flash the board's `flash_offer` image (D17: human-confirmed only). Layer 6 core: until it ships the
+   * daemon answers 404 `not_found`; 409 `offer_stale` when the sha256 no longer matches or a flash already runs.
+   */
+  flashDevice(id: string, body: FlashRequest): Promise<FlashReply>;
 
   agentStatus(): Promise<AgentStatus>;
   agentTask(req: TaskRequest): Promise<TaskAccepted>;

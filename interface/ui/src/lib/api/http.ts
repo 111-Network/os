@@ -5,6 +5,8 @@ import type {
   ChatInput,
   DevicePatch,
   EventsHandlers,
+  FlashReply,
+  FlashRequest,
   ProposalFilter,
   RestartReply,
   SendOptions,
@@ -185,6 +187,7 @@ export function createHttpAdapter(deps: HttpDeps = {}): Adapter {
     device: (id: string) => call<DeviceRecord>("GET", `/devices/${enc(id)}`),
     patchDevice: (id: string, patch: DevicePatch) => call<DeviceRecord>("PATCH", `/devices/${enc(id)}`, { body: patch }),
     forgetDevice: (id: string) => call<void>("DELETE", `/devices/${enc(id)}`, { as: "none" }),
+    flashDevice: (id: string, body: FlashRequest) => call<FlashReply>("POST", `/devices/${enc(id)}/flash`, { body }),
 
     agentStatus: () => call<AgentStatus>("GET", "/agent/status"),
     agentTask: (req: TaskRequest) => call<TaskAccepted>("POST", "/agent/task", { body: req }),

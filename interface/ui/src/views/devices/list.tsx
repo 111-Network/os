@@ -25,6 +25,8 @@ import {
   summary,
 } from "../../lib/devices";
 import { AgentButton, useAgentReachable } from "./agent-button";
+import { needsFirmware } from "./flash-model";
+import { NeedsFirmwareTag } from "./needs-firmware";
 import { useOwnDeviceId, type OwnDeviceId } from "./own-device";
 
 export const detailHref = (id: string): string => hrefTo(`/devices/${encodeURIComponent(id)}`);
@@ -60,6 +62,7 @@ function columns(nodeDisconnected: boolean, now: number, wide: boolean, ownId: O
           <span className="min-w-0 break-words">{displayName(d)}</span>
           {confidenceLabel(d) === "likely" ? <Badge className="shrink-0">likely</Badge> : null}
           {isThisBrowser(d, ownId) ? <Badge className="shrink-0">this browser</Badge> : null}
+          {needsFirmware(d) ? <NeedsFirmwareTag /> : null}
         </span>
         <span className="ps-4 text-[11px] leading-snug text-muted-foreground">
           {stateLabel(d.state, nodeDisconnected)}

@@ -20,6 +20,8 @@ import { StatusDot, type DotState } from "../components/status-dot";
 import { Textarea } from "../components/textarea";
 import { TerminalChrome } from "../components/terminal-chrome";
 import { Toggle } from "../components/toggle";
+import type { FlashOffer } from "../lib/api/types";
+import { FlashPanelView, type FlashPanelViewProps } from "./devices/flash";
 
 const DOT_STATES: DotState[] = ["live", "unset", "error", "starting", "unknown"];
 
@@ -72,6 +74,28 @@ const SAMPLE_DIFF = `diff --git a/etc/111/node.toml b/etc/111/node.toml
 
 const SAMPLE_JSON = { node: { label: "111-7f3a", category: "phone" }, services: [{ id: "agent", state: "live" }], ok: true };
 
+// Firmware offer (Layer 6, D17): the panel and its confirmation step, without a node or the blank-board scenario.
+const FLASH_DEVICE: FlashPanelViewProps["device"] = {
+  alias: null,
+  name: "Heltec WiFi LoRa 32 V3",
+  kind: "radio",
+  transport: "usb-serial",
+  match: { confidence: "likely", rule: "lora-table 303a:1001" },
+  firmware: { family: "none", version: null, source: "probe" },
+};
+
+const FLASH_OFFER: FlashOffer = {
+  reason: "blank",
+  image: {
+    family: "rnode",
+    version: "1.78",
+    file: "share/firmware/rnode-heltec-v3-1.78.bin",
+    sha256: "f87a2e8af657f07642eee8206b15f83e295c58528c92e497b5d3b5ec8c84ed9c",
+    board: "Heltec WiFi LoRa 32 V3",
+  },
+  erases: "everything on the board, including any Meshtastic settings",
+};
+
 function Block({ name, note, children }: { name: string; note?: string; children: ReactNode }) {
   return (
     <section aria-label={name} className="flex flex-col gap-4">
@@ -113,6 +137,7 @@ export default function Gallery() {
   const [confirmed, setConfirmed] = useState("none yet");
   const [loading, setLoading] = useState(false);
   const [filter, setFilter] = useState("a");
+  const [flashed, setFlashed] = useState("nothing sent");
   useBreakClipboard(breakClipboard);
 
   return (
@@ -418,6 +443,43 @@ export default function Gallery() {
           <AttentionBadge count={1} />
           <AttentionBadge count={12} />
           <AttentionBadge count={120} />
+        </Row>
+      </Block>
+
+      <Block name="Firmware offer" note="devices / layer 6">
+        <Row label="blank board (reason: blank)">
+          <div className="w-full">
+            <FlashPanelView device={FLASH_DEVICE} offer={FLASH_OFFER} step="offer" agent={<Button>Ask the agent instead</Button>} />
+          </div>
+        </Row>
+        <Row label="confirmation step (nothing is sent from the gallery)">
+          <div className="w-full">
+            <FlashPanelView
+              device={FLASH_DEVICE}
+              offer={FLASH_OFFER}
+              step="confirm"
+              onCancel={() => setFlashed("cancelled")}
+              onFlash={(c) => setFlashed(`would send sha256 ${FLASH_OFFER.image.sha256.slice(0, 8)}… and confirm "${c.typed.trim()}"`)}
+            />
+          </div>
+          <span className="font-mono text-xs text-muted-foreground">last action: {flashed}</span>
+        </Row>
+        <Row label="something answered, but nothing usable (reason: unknown), board identified exactly">
+          <div className="w-full">
+            <FlashPanelView
+              device={{ ...FLASH_DEVICE, alias: "Bench radio", match: { confidence: "exact", rule: "probe" } }}
+              offer={{ ...FLASH_OFFER, reason: "unknown" }}
+              step="offer"
+            />
+          </div>
+        </Row>
+        <Row label="after Flash now: started, then done">
+          <div className="w-full">
+            <FlashPanelView device={FLASH_DEVICE} offer={FLASH_OFFER} step="started" />
+          </div>
+          <div className="w-full">
+            <FlashPanelView device={{ ...FLASH_DEVICE, firmware: { family: "rnode", version: "1.78", source: "probe" } }} offer={FLASH_OFFER} step="done" />
+          </div>
         </Row>
       </Block>
 

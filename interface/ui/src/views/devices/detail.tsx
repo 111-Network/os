@@ -41,6 +41,7 @@ import {
 import { kbRoutePath, normalizeKbPath } from "../../lib/markdown";
 import { Adv, useMode } from "../../lib/mode";
 import { AgentButton, useAgentReachable } from "./agent-button";
+import { FirmwareSection } from "./flash";
 import { useOwnDeviceId, type OwnDeviceId } from "./own-device";
 
 const BACK = (
@@ -280,6 +281,23 @@ export default function DeviceDetail({ id }: { id: string }) {
 
       <p className="max-w-prose font-mono text-sm leading-relaxed text-foreground">{device.reason}</p>
 
+      {/* A board with no usable firmware: what would be flashed and erased, and the user decides. Renders nothing without an offer. */}
+      <FirmwareSection
+        key={`flash-${device.id}`}
+        device={device}
+        agent={
+          <AgentButton
+            variant="default"
+            label="Ask the agent instead"
+            from={name.slice(0, 60)}
+            goal={action.goal}
+            reachable={reachable}
+            recipe={recipePath}
+            prompt={() => devicePrompt({ device, services: services ?? [], status }).text}
+          />
+        }
+      />
+
       {can("rename") ? (
         <RenameForm key={device.id} device={device} />
       ) : null}
@@ -287,6 +305,7 @@ export default function DeviceDetail({ id }: { id: string }) {
       {can("agent") ? (
         <div className="flex flex-col gap-2">
           <AgentButton
+            variant={device.flash_offer ? "default" : "primary"}
             label={action.label}
             from={name.slice(0, 60)}
             goal={action.goal}

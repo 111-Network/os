@@ -1,7 +1,7 @@
 // Dev-only mock adapter. Same contract as http.ts, no daemon needed:
 //   createMockAdapter({ scenario })  -> Adapter & { mock: MockControls }
 // Reached ONLY through the DEV-guarded dynamic import in ../index.ts; never import it statically.
-import type { Adapter, ChatInput, DevicePatch, EventsHandlers, ProposalFilter, RestartReply, SendOptions, ServiceRestartReply, TaskAccepted, UpdateCheckReply } from "../adapter";
+import type { Adapter, ChatInput, DevicePatch, EventsHandlers, FlashReply, FlashRequest, ProposalFilter, RestartReply, SendOptions, ServiceRestartReply, TaskAccepted, UpdateCheckReply } from "../adapter";
 import { ApiError } from "../problem";
 import type {
   AuthSession,
@@ -133,6 +133,25 @@ export function createMockAdapter(opts: MockOptions = {}): MockAdapter {
     const at = state.devices.findIndex((x) => rank(x.id) > rank(d.id));
     state.devices.splice(at < 0 ? state.devices.length : at, 0, d);
     originals.set(d.id, structuredClone(d));
+  }
+
+  /** How long a flash takes in the mock. The contract has no "flashing" device state, so the record stays as it was meanwhile. */
+  const FLASH_MS = 2000;
+  /** Boards a flash is running on: a second request answers 409 until it finishes. */
+  const flashing = new Set<string>();
+  function finishFlash(id: string): void {
+    flashing.delete(id);
+    const d = state.devices.find((x) => x.id === id);
+    const offer = d?.flash_offer;
+    if (!d || !offer) return; // forgotten (or changed) while flashing
+    d.firmware = { family: offer.image.family, version: offer.image.version, source: "probe" };
+    d.flash_offer = null;
+    d.actions = d.actions.filter((a) => a !== "flash");
+    d.reason_code = "radio_unbound";
+    d.reason = "RNode firmware is on the board, but nothing is bound to it yet.";
+    d.last_seen = iso(clock.now());
+    originals.set(d.id, structuredClone(d)); // a forgotten board that is plugged in again keeps its new firmware
+    publishDevices();
   }
 
   const ctx: ScriptContext = {
@@ -413,6 +432,28 @@ export function createMockAdapter(opts: MockOptions = {}): MockAdapter {
           });
         }
       }).then(() => undefined),
+
+    flashDevice: (id: string, body: FlashRequest) =>
+      rest((): FlashReply => {
+        const d = device(id);
+        const offer = d.flash_offer;
+        const stale = !offer || !d.actions.includes("flash") || body?.sha256 !== offer.image.sha256;
+        if (stale || flashing.has(id)) {
+          throw problem(
+            409,
+            "offer_stale",
+            "The flash offer changed",
+            !stale ? "A flash is already running on this board." : "The offer for this board is not the one you confirmed. Reload the device and read it again.",
+          );
+        }
+        const shown = (d.alias ?? "").trim() !== "" ? (d.alias as string) : d.name;
+        if (typeof body.confirm !== "string" || body.confirm.trim() !== shown.trim()) {
+          throw problem(400, "bad_request", "Invalid confirmation", undefined, [{ pointer: "/confirm", message: "must be the device's name, as shown" }]);
+        }
+        flashing.add(id);
+        later(FLASH_MS, () => finishFlash(id));
+        return { schema: 1, id, flashing: true };
+      }),
 
     agentStatus: () =>
       rest(() => {

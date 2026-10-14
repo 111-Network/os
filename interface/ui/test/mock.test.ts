@@ -204,6 +204,113 @@ describe.each(SCENARIO_NAMES)("scenario %s: every result validates against opena
   });
 });
 
+describe("blank-board and the flash route (Layer 6 contract, mocked)", () => {
+  const SHA = "f87a2e8af657f07642eee8206b15f83e295c58528c92e497b5d3b5ec8c84ed9c";
+  const ID = "usb-7c1e0b94a2d3";
+  const body = (confirm = "Heltec WiFi LoRa 32 V3", sha256 = SHA) => ({ sha256, confirm });
+
+  it("serves a Heltec with no firmware, nothing bound, a flash action and an offer that validates", async () => {
+    const { a } = make("blank-board");
+    const d = await a.device(ID);
+    expectValid("getDevice", d);
+    expect(d).toMatchObject({
+      kind: "radio",
+      name: "Heltec WiFi LoRa 32 V3",
+      state: "needs_setup",
+      firmware: { family: "none", version: null },
+      driver: null,
+      flash_offer: {
+        reason: "blank",
+        image: { family: "rnode", version: "1.78", file: "share/firmware/rnode-heltec-v3-1.78.bin", sha256: SHA, board: "Heltec WiFi LoRa 32 V3" },
+        erases: "everything on the board, including any Meshtastic settings",
+      },
+    });
+    expect(d.actions).toContain("flash");
+    expect(d.flash_offer!.image.sha256).toMatch(/^[0-9a-f]{64}$/);
+  });
+
+  it("no other scenario offers firmware, and none has a flash action", async () => {
+    for (const name of SCENARIO_NAMES) {
+      if (name === "blank-board") continue;
+      const { a } = make(name);
+      if (name === "lan-unpaired" || name === "termux-unpaired") await a.auth.pair(MOCK_PAIR_CODE);
+      for (const d of await a.devices()) {
+        expect(d.flash_offer ?? null, `${name}/${d.id}`).toBeNull();
+        expect(d.actions, `${name}/${d.id}`).not.toContain("flash");
+      }
+    }
+  });
+
+  it("answers 202, keeps the record as it was, then the board reports RNode and the offer goes away", async () => {
+    const { a, clock } = make("blank-board");
+    const { frames } = listen(a);
+    await flush();
+    const reply = await a.flashDevice(ID, body());
+    expect(reply).toEqual({ schema: 1, id: ID, flashing: true });
+    expect(validate(reply, operations.flashDevice!.schemasByType["application/json"]!)).toEqual([]);
+
+    await clock.advanceAsync(1_900, 100);
+    const during = await a.device(ID);
+    expect(during.state).toBe("needs_setup"); // the contract has no "flashing" state
+    expect(during.flash_offer).not.toBeNull();
+    expect(during.firmware).toMatchObject({ family: "none" });
+    expect(frames.filter((f) => f.event === "devices")).toHaveLength(0);
+
+    await clock.advanceAsync(300, 100);
+    const after = await a.device(ID);
+    expectValid("getDevice", after);
+    expect(after.firmware).toEqual({ family: "rnode", version: "1.78", source: "probe" });
+    expect(after.flash_offer).toBeNull();
+    expect(after.actions).not.toContain("flash");
+    expect(after.state).toBe("needs_setup");
+    const devicesFrames = frames.filter((f) => f.event === "devices");
+    expect(devicesFrames).toHaveLength(1);
+    expect(validateAgainst(sse.events.devices!, devicesFrames[0]!.data)).toEqual([]);
+  });
+
+  it("refuses a stale sha256, a spent offer and a second request while one runs: 409 offer_stale", async () => {
+    const { a, clock } = make("blank-board");
+    expect(await failure(a.flashDevice(ID, body("Heltec WiFi LoRa 32 V3", "0".repeat(64))))).toMatchObject({ status: 409, code: "offer_stale" });
+    await a.flashDevice(ID, body());
+    const again = await failure(a.flashDevice(ID, body()));
+    expect(again).toMatchObject({ status: 409, code: "offer_stale" });
+    expect(validateAgainst("Problem", again.problem)).toEqual([]);
+    await clock.advanceAsync(2_100, 100);
+    expect(await failure(a.flashDevice(ID, body()))).toMatchObject({ status: 409, code: "offer_stale" }); // the offer is gone
+  });
+
+  it("wants the device's displayed name, trimmed and case-sensitive", async () => {
+    const { a } = make("blank-board");
+    const bad = await failure(a.flashDevice(ID, body("heltec wifi lora 32 v3")));
+    expect(bad).toMatchObject({ status: 400, code: "bad_request" });
+    expect(bad.problem.errors?.[0]?.pointer).toBe("/confirm");
+    await a.patchDevice(ID, { alias: "Bench radio" });
+    expect(await failure(a.flashDevice(ID, body("Heltec WiFi LoRa 32 V3")))).toMatchObject({ code: "bad_request" }); // the alias is the displayed name now
+    expect((await a.flashDevice(ID, body("  Bench radio  "))).flashing).toBe(true);
+  });
+
+  it("404 for a device that is not there; 409 for a board that has no offer", async () => {
+    const { a } = make("blank-board");
+    expect(await failure(a.flashDevice("usb-nope", body()))).toMatchObject({ status: 404, code: "not_found" });
+    const phone = (await a.devices()).find((d) => d.kind === "companion")!;
+    expect(await failure(a.flashDevice(phone.id, body()))).toMatchObject({ status: 409, code: "offer_stale" });
+  });
+
+  it("is behind the pairing gate like every other route", async () => {
+    const { a } = make("lan-unpaired");
+    expect(await failure(a.flashDevice(ID, body()))).toMatchObject({ status: 401, code: "unauthenticated" });
+  });
+
+  it("a board forgotten after it was flashed comes back with its new firmware, not blank", async () => {
+    const { a, clock } = make("blank-board");
+    await a.flashDevice(ID, body());
+    await clock.advanceAsync(2_100, 100);
+    await a.forgetDevice(ID);
+    await clock.advanceAsync(15_100, 100);
+    expect(await a.device(ID)).toMatchObject({ firmware: { family: "rnode" }, flash_offer: null });
+  });
+});
+
 describe("scenarios", () => {
   it("healthy: everything that can run is live; radio and code agent are not available here", async () => {
     const { a } = make("healthy");

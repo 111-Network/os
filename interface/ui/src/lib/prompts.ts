@@ -118,6 +118,22 @@ function compactService(s: ServiceRecord) {
   };
 }
 
+/** A flash offer for the agent: strings cleaned and cut, so a hostile release manifest cannot flood the prompt. */
+function compactOffer(o: NonNullable<DeviceRecord["flash_offer"]>) {
+  const t = (v: unknown, max: number) => (typeof v === "string" ? sanitizeLine(v).slice(0, max) : "");
+  return {
+    reason: t(o.reason, 16),
+    image: {
+      family: t(o.image?.family, 24),
+      version: t(o.image?.version, 40),
+      board: t(o.image?.board, 80),
+      file: t(o.image?.file, 160),
+      sha256: t(o.image?.sha256, 80),
+    },
+    erases: t(o.erases, 300),
+  };
+}
+
 function compactDevice(d: DeviceRecord) {
   return {
     id: d.id,
@@ -135,6 +151,8 @@ function compactDevice(d: DeviceRecord) {
     service_id: d.service_id,
     identity: d.identity,
     kb_entry: d.kb_entry,
+    // Only a board that is offered firmware carries the key: every other prompt stays byte-for-byte as it was.
+    ...(d.flash_offer ? { flash_offer: compactOffer(d.flash_offer) } : {}),
   };
 }
 

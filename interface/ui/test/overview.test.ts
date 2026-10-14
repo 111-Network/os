@@ -217,6 +217,21 @@ describe("nearby, devices and node summaries", () => {
     expect(devicesSummary(fx.devices).text).toBe("4 devices: 3 connected, 1 needs setup.");
     expect(devicesSummary([]).text).toBe("Nothing attached or paired yet.");
     expect(devicesSummary(null).text).toMatch(/Waiting/);
+    expect(devicesSummary(d).offers).toEqual([]);
+  });
+
+  it("devicesSummary names the boards that are offered firmware without counting them twice", () => {
+    const offer = {
+      reason: "blank",
+      image: { family: "rnode", version: "1.78", file: "share/firmware/x.bin", sha256: "0".repeat(64), board: "Heltec" },
+      erases: "everything on the board",
+    } as const;
+    const [heltec, phone] = devices();
+    const d = [phone!, { ...heltec!, id: "usb-9", alias: "Bench", state: "needs_setup" as const, flash_offer: offer }];
+    const sum = devicesSummary(d);
+    expect(sum.offers).toEqual([{ id: "usb-9", name: "Bench", state: "needs_setup" }]);
+    expect(sum).toMatchObject({ total: 2, needSetup: 1, text: "2 devices: 1 connected, 1 needs setup." }); // one board, counted once
+    expect(needsYou(null, null, d, null).items).toEqual([]); // an offer is not an alarm
   });
 
   it("updateText names each updater state", () => {

@@ -3,7 +3,7 @@
 import type { AgentEvent, DeviceRecord, Proposal, ServiceRecord, Status } from "../../lib/api/types";
 import type { DotState } from "../../components/status-dot";
 import { IDENTITY_BACKUP_COMMAND } from "../../lib/commands";
-import { summary } from "../../lib/devices";
+import { displayName, summary } from "../../lib/devices";
 import { sanitizeLine } from "../../lib/prompts";
 import { agoText, formatDuration, reasonText } from "../services/model";
 
@@ -132,6 +132,11 @@ export interface DevicesSummary {
   needSetup: number;
   error: number;
   text: string;
+  /**
+   * Boards the node offers firmware for (Layer 6). They are already counted in `needSetup` and in `text`;
+   * this only says which ones, so the card can tag them. Not a second counter.
+   */
+  offers: { id: string; name: string; state: DeviceRecord["state"] }[];
 }
 
 export function devicesSummary(devices: readonly DeviceRecord[] | null): DevicesSummary {
@@ -140,7 +145,8 @@ export function devicesSummary(devices: readonly DeviceRecord[] | null): Devices
   const needSetup = list.filter((d) => d.state === "needs_setup").length;
   const error = list.filter((d) => d.state === "error").length;
   const text = devices === null ? "Waiting for the node to report." : list.length === 0 ? "Nothing attached or paired yet." : summary(list).sentence;
-  return { total: list.length, connected, needSetup, error, text };
+  const offers = list.filter((d) => !!d.flash_offer).map((d) => ({ id: d.id, name: displayName(d), state: d.state }));
+  return { total: list.length, connected, needSetup, error, text, offers };
 }
 
 // ------------------------------------------------------------------------------------ node facts
