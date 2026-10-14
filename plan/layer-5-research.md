@@ -33,4 +33,4 @@ Next step after the run: lead writes `layer-5-options.md` (options brief), owner
 
 ## Status
 
-Options brief written: `layer-5-options.md` (§2.6 pending the gap-3 scout). Next: owner polls → D19 → spec draft.
+All 7 forks decided (D19, 2026-10-14). Spec draft: `os/messaging/README.md`. Next: fable adversarial panel (`layer-5-review/`) → fixes → lock → `os/messaging/TASKS.md` → build.
