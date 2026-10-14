@@ -137,6 +137,7 @@ export function titleFor(path: string, services?: readonly ServiceRecord[] | nul
     "/messages": "Messages",
     "/logs": "Logs",
     "/settings": "Settings",
+    "/settings/licenses": "Licenses",
     "/pair": "Pair",
     "/kb": "Knowledge base",
     "/_gallery": "Gallery",

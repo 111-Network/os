@@ -1,3 +1,4 @@
+import { fileURLToPath } from "node:url";
 import { defineConfig } from "vitest/config";
 import react from "@vitejs/plugin-react";
 import tailwindcss from "@tailwindcss/vite";
@@ -12,6 +13,8 @@ export default defineConfig({
     reportCompressedSize: true,
   },
   server: {
+    // The Licenses page imports os/LICENSE.md and os/THIRD-PARTY-NOTICES.md (`?raw`), two levels above this project.
+    fs: { allow: [fileURLToPath(new URL("../..", import.meta.url))] },
     // Dev against a running 111d: everything under /api is same-origin in prod.
     proxy: { "/api": { target: "http://127.0.0.1:11180", changeOrigin: false } },
   },

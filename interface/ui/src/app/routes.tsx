@@ -17,6 +17,7 @@ const Nearby = lazy(() => import("../views/nearby"));
 const Messages = lazy(() => import("../views/messages"));
 const Services = lazy(() => import("../views/services"));
 const Settings = lazy(() => import("../views/settings"));
+const Licenses = lazy(() => import("../views/licenses"));
 const Logs = lazy(() => import("../views/logs"));
 const Kb = lazy(() => import("../views/kb"));
 // Dev gallery: the condition is a build-time constant, so production builds drop the import and the chunk.
@@ -38,6 +39,7 @@ export const ROUTES: RouteDef[] = [
   { path: "/services/:id", View: Services },
   { path: "/logs", View: Logs },
   { path: "/settings", View: Settings },
+  { path: "/settings/licenses", View: Licenses }, // before /settings/:layer, which would call it "no such layer"
   { path: "/settings/:layer", View: Settings },
   { path: "/kb", View: Kb },
   { path: "/kb/*", View: Kb },

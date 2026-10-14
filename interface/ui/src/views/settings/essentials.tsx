@@ -2,7 +2,8 @@
 import { useCallback, useEffect, useRef, useState, type FormEvent } from "react";
 import { redirectIfUnauthenticated } from "../../app/AuthGate";
 import { announce } from "../../app/LiveRegion";
-import { Button } from "../../components/button";
+import { hrefTo } from "../../app/location";
+import { Button, ButtonLink } from "../../components/button";
 import { CopyButton } from "../../components/copy-button";
 import { Input } from "../../components/input";
 import { Panel } from "../../components/panel";
@@ -403,6 +404,13 @@ export function Essentials() {
         ))}
       </Panel>
       <SharingPanel settings={settings} onSaved={setSettings} />
+      <Panel title="legal" flush>
+        <Row id="licenses" label="Licenses" help="This node's license and third-party notices.">
+          <ButtonLink href={hrefTo("/settings/licenses")} size="sm">
+            Open licenses
+          </ButtonLink>
+        </Row>
+      </Panel>
     </div>
   );
 }
