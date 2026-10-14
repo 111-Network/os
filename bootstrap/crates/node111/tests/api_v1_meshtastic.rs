@@ -362,7 +362,7 @@ exec sleep 120
 const FAKE_READER: &str = r#"
 # fake meshtastic-presence (tests/api_v1_meshtastic.rs): the real CLI's
 # arguments, the stub's framing, JSON payloads instead of protobufs.
-import json, os, socket, sys
+import json, os, socket, sys, time
 
 args = sys.argv[1:]
 
@@ -372,6 +372,9 @@ def opt(name):
 once = "--once" in args
 with open("@LAUNCHES@", "a") as f:
     f.write("reader %d %s\n" % (os.getpid(), "once" if once else "service"))
+# the tests hold the identify probe open while @HOLD@ exists
+while once and os.path.exists("@HOLD@"):
+    time.sleep(0.02)
 host, port = opt("--endpoint").rsplit(":", 1)
 s = socket.create_connection((host, int(port)), timeout=float(opt("--timeout") or 30))
 s.settimeout(None if not once else float(opt("--timeout") or 30))
@@ -445,14 +448,29 @@ struct H {
     stub: Stub,
     launches: PathBuf,
     crash: PathBuf,
+    /// While this file exists the fake reader's `--once` waits before it
+    /// connects (holds the identify probe open).
+    hold: PathBuf,
 }
 
-/// `None` (test skipped) when this machine has no `python3` for the fake
-/// reader.
+/// Set to `1` to skip the flow tests on purpose on a machine without
+/// `python3`; each skipped test then says so on stderr.
+const SKIP_ENV: &str = "NODE111_SKIP_PYTHON_TESTS";
+
+/// The flow-test harness. The fake presence reader needs `python3`; without
+/// it the tests **fail** (a silent pass would hide regressions in identify,
+/// restart, the states and the shim) unless [`SKIP_ENV`]`=1` asks for a
+/// visible skip (`None`).
 fn harness(o: Opts) -> Option<H> {
     let Some(py) = python3() else {
-        eprintln!("python3 not found — Meshtastic flow test SKIPPED");
-        return None;
+        if std::env::var_os(SKIP_ENV).is_some_and(|v| v == "1") {
+            eprintln!("python3 not found — Meshtastic flow test SKIPPED ({SKIP_ENV}=1)");
+            return None;
+        }
+        panic!(
+            "python3 not found: the Meshtastic flow tests need it for the fake presence reader \
+             (install python3, or set {SKIP_ENV}=1 to skip these tests on purpose)"
+        );
     };
     let dir = tempfile::tempdir().unwrap();
     let state = dir.path().join("state");
@@ -481,6 +499,7 @@ fn harness(o: Opts) -> Option<H> {
 
     let launches = dir.path().join("launches.log");
     let crash = dir.path().join("CRASH");
+    let hold = dir.path().join("HOLD");
     let bin = dir.path().join("fakebin/meshmud");
     w(
         &bin,
@@ -495,7 +514,9 @@ fn harness(o: Opts) -> Option<H> {
     let script = dir.path().join("reader/meshtastic_presence.py");
     w(
         &script,
-        &FAKE_READER.replace("@LAUNCHES@", launches.to_str().unwrap()),
+        &FAKE_READER
+            .replace("@LAUNCHES@", launches.to_str().unwrap())
+            .replace("@HOLD@", hold.to_str().unwrap()),
     );
 
     let stub = Stub::start(o.mode);
@@ -529,6 +550,7 @@ fn harness(o: Opts) -> Option<H> {
         stub,
         launches,
         crash,
+        hold,
     })
 }
 
@@ -571,6 +593,28 @@ impl H {
     fn meshmud_pids(&self) -> Vec<u32> {
         self.launched("meshmud")
             .iter()
+            .map(|l| l.split_whitespace().nth(1).unwrap().parse().unwrap())
+            .collect()
+    }
+
+    /// The meshmud launch PIDs once there are `n` of them. A spawned child
+    /// counts as running before its shell has written the launch line, so a
+    /// positive count is waited for, never read once.
+    async fn meshmud_launches(&self, n: usize) -> Vec<u32> {
+        wait_until(
+            &format!("{n} meshmud launch(es) logged"),
+            Duration::from_secs(5),
+            || self.meshmud_pids().len() >= n,
+        )
+        .await;
+        self.meshmud_pids()
+    }
+
+    /// PIDs of the reader launches whose mode is `mode` (`once`, `service`).
+    fn reader_pids(&self, mode: &str) -> Vec<u32> {
+        self.launched("reader")
+            .iter()
+            .filter(|l| l.ends_with(mode))
             .map(|l| l.split_whitespace().nth(1).unwrap().parse().unwrap())
             .collect()
     }
@@ -871,7 +915,7 @@ async fn identify_binds_the_board_and_the_identify_child_becomes_the_service() {
     );
 
     // one meshmud launch (0600 config), the --once reader through the downlink
-    let pids = h.meshmud_pids();
+    let pids = h.meshmud_launches(1).await;
     assert_eq!(pids.len(), 1, "{:?}", h.launched(""));
     assert!(h.launched("meshmud")[0].ends_with(" 600"));
     assert_eq!(
@@ -1119,6 +1163,7 @@ async fn identify_refusals_open_nothing_twice() {
     let port = h.serve().await;
     let board = h.by_name(HELTEC);
     assert_eq!(board.reason_code, "port_busy", "{board:?}");
+    assert_eq!(board.detail["port_held_by"], "rnsd", "{board:?}");
     assert!(!board.actions.iter().any(|a| a == "identify"));
     let path = format!("/api/v1/devices/{}/identify", board.id);
     let r = http(port, "POST", path.clone(), Some(r#"{"consent":true}"#)).await;
@@ -1182,7 +1227,7 @@ async fn identify_refusals_open_nothing_twice() {
     assert_eq!(rec["firmware"]["source"], "probe");
     assert_ne!(rec["service_id"], "meshtastic", "{rec}");
     assert!(rec["driver"].is_null(), "{rec}");
-    let pids = h.meshmud_pids();
+    let pids = h.meshmud_launches(1).await;
     assert_eq!(pids.len(), 1);
     assert!(!alive(pids[0]), "the identify meshmud was stopped");
     assert!(h.held().is_empty());
@@ -1192,6 +1237,124 @@ async fn identify_refusals_open_nothing_twice() {
     assert!(e.get("meshtastic").is_none());
     assert_eq!(h.meshtastic_row(false).reason_code, "no_meshtastic");
     h.stop().await;
+}
+
+/// Start an identify on `id` whose probe stays open (the fake reader's
+/// `--once` waits on HOLD); returns once that reader runs.
+async fn identify_held_open(h: &H, port: u16, id: &str) -> tokio::task::JoinHandle<Resp> {
+    std::fs::write(&h.hold, "").unwrap();
+    let step = tokio::spawn(http(
+        port,
+        "POST",
+        format!("/api/v1/devices/{id}/identify"),
+        Some(r#"{"consent":true}"#),
+    ));
+    wait_until("the identify reader", Duration::from_secs(10), || {
+        !h.reader_pids("once").is_empty()
+    })
+    .await;
+    step
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn forget_during_an_identify_wins_nothing_stays_bound_or_running() {
+    let Some(h) = harness(Opts::default()) else {
+        return;
+    };
+    h.start().await;
+    let port = h.serve().await;
+    let board = h.by_name(HELTEC);
+    let step = identify_held_open(&h, port, &board.id).await;
+
+    // the user forgets the board while the probe runs
+    let r = http(
+        port,
+        "DELETE",
+        format!("/api/v1/devices/{}", board.id),
+        None,
+    )
+    .await;
+    assert_eq!(r.status, 204, "{}", r.body);
+    // … then the board answers as Meshtastic
+    std::fs::remove_file(&h.hold).unwrap();
+    step.await.unwrap().problem(404, "not_found");
+
+    // nothing was written onto the forgotten entry
+    let e = &h.store()["devices"][&board.id];
+    assert_eq!(e["forgotten"], true, "{e}");
+    assert!(e.get("meshtastic").is_none(), "binding persisted: {e}");
+    assert!(e.get("firmware").is_none(), "firmware persisted: {e}");
+    assert!(h.reg.meshtastic_binding().is_none());
+    // the service the identify child was becoming is torn down at once
+    assert!(h.m.service_pids().is_none());
+    assert!(h.held().is_empty(), "{:?}", h.held());
+    let pids = h.meshmud_launches(1).await;
+    assert_eq!(pids.len(), 1, "{:?}", h.launched(""));
+    wait_until("meshmud stopped", Duration::from_secs(5), || {
+        !alive(pids[0])
+    })
+    .await;
+    for pid in h.reader_pids("service") {
+        wait_until("the service reader stopped", Duration::from_secs(5), || {
+            !alive(pid)
+        })
+        .await;
+    }
+    let sup = h.api.ext::<Arc<Supervised>>().unwrap();
+    assert!(sup.children(ServiceId::Meshtastic).is_empty());
+    let row = h.meshtastic_row(false);
+    assert_eq!(
+        (row.state, row.reason_code),
+        (ServiceState::Unset, "no_meshtastic")
+    );
+
+    // later ticks start nothing and the board stays hidden
+    h.m.tick_once().await;
+    h.reg.tick(&h.api).await;
+    h.reg.tick(&h.api).await;
+    h.m.tick_once().await;
+    assert!(h.m.service_pids().is_none());
+    assert_eq!(h.meshmud_pids().len(), 1);
+    assert!(h.held().is_empty(), "{:?}", h.held());
+    assert!(h.reg.list().unwrap().iter().all(|r| r.id != board.id));
+    h.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn shutdown_does_not_wait_for_an_identify_in_flight() {
+    let Some(h) = harness(Opts::default()) else {
+        return;
+    };
+    h.start().await;
+    let port = h.serve().await;
+    let board = h.by_name(HELTEC);
+    let step = identify_held_open(&h, port, &board.id).await;
+    let once = h.reader_pids("once");
+
+    // the harness gives the reader 20 s; shutdown must not wait for it
+    let t0 = std::time::Instant::now();
+    h.stop().await;
+    let took = t0.elapsed();
+    assert!(
+        took < Duration::from_secs(8),
+        "shutdown waited {took:?} for the identify step"
+    );
+    let r = step.await.unwrap();
+    r.problem(502, "upstream_error");
+    // the step ended fail-closed: children stopped, claims released, nothing kept
+    assert!(h.held().is_empty(), "{:?}", h.held());
+    assert!(h.m.service_pids().is_none());
+    let pids = h.meshmud_launches(1).await;
+    assert_eq!(pids.len(), 1);
+    for pid in pids.into_iter().chain(once) {
+        wait_until("identify children gone", Duration::from_secs(5), || {
+            !alive(pid)
+        })
+        .await;
+    }
+    let _ = std::fs::remove_file(&h.hold);
+    assert!(h.store()["devices"][&board.id].get("firmware").is_none());
+    assert!(h.reader_pids("service").is_empty());
 }
 
 fn seed_binding(id: &str, uplink: Value, firmware: bool) -> Value {
@@ -1270,7 +1433,7 @@ async fn service_states_follow_the_facts() {
         || h.m.facts().running,
     )
     .await;
-    assert_eq!(h.meshmud_pids().len(), 1);
+    assert_eq!(h.meshmud_launches(1).await.len(), 1);
     // the by-id node exists in the fake tree: the uplink is present
     h.m.tick_once().await;
     assert!(h.m.facts().uplink_lost_secs.is_none());
@@ -1358,13 +1521,49 @@ async fn service_states_follow_the_facts() {
     }) else {
         return;
     };
-    std::fs::remove_file(&h.m.config().meshmud_bin).unwrap();
+    let bin = h.m.config().meshmud_bin.clone();
+    let fake = std::fs::read(&bin).unwrap();
+    std::fs::remove_file(&bin).unwrap();
     h.start().await;
     let f = h.m.facts();
     assert_eq!(f.child_state, ChildDisplay::Absent);
     assert!(!f.running);
-    assert_ne!(h.meshtastic_row(false).state, ServiceState::Live);
+    assert!(f.bound && !f.installed, "{f:?}");
     assert!(h.held().is_empty(), "nothing claimed for an absent meshmud");
+    // the row names the real cause (not "set up with the agent")
+    let row = h.meshtastic_row(false);
+    assert_eq!(
+        (row.state, row.reason_code),
+        (ServiceState::Error, "binary_absent"),
+        "{row:?}"
+    );
+    assert!(
+        row.reason.contains("meshmud is not installed"),
+        "{}",
+        row.reason
+    );
+    assert!(h.launched("").is_empty());
+    // an upgrade installs the binary: the next monitor tick starts it
+    std::fs::write(&bin, &fake).unwrap();
+    std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+    h.m.tick_once().await;
+    wait_until(
+        "meshmud started once its binary appeared",
+        Duration::from_secs(5),
+        || h.m.facts().running,
+    )
+    .await;
+    assert_eq!(h.meshmud_launches(1).await.len(), 1);
+    assert!(
+        h.held()
+            .iter()
+            .any(|(k, t)| *k == heltec_uplink() && t == "meshmud"),
+        "{:?}",
+        h.held()
+    );
+    h.m.tick_once().await;
+    assert!(h.m.facts().installed);
+    assert_eq!(h.meshmud_pids().len(), 1, "started once, not every tick");
     h.stop().await;
 }
 
@@ -1677,7 +1876,12 @@ async fn shim_round_trip_buffer_and_session_lifecycle() {
     .await;
     assert_eq!(s.sessions(), 1);
     assert_eq!(get(&s, "a").await, Ok(Vec::new()));
-    assert_eq!(stub.accepted(), 3);
+    // the connect returns on the kernel handshake; the stub counts it when
+    // its accept thread gets there
+    wait_until("fresh connection a", Duration::from_secs(5), || {
+        stub.accepted() == 3
+    })
+    .await;
     // falling behind the revocation stream closes everything (fail closed)
     assert!(mt::on_revocation(
         &s,
@@ -1710,6 +1914,66 @@ async fn shim_round_trip_buffer_and_session_lifecycle() {
     assert!(matches!(e, ShimError::Upstream(_)));
     assert_eq!(e.problem().code, "upstream_error");
     assert_eq!(down.sessions(), 0);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn shim_skips_empty_frames_and_caps_sessions_strictly() {
+    let stub = Stub::start(Mode::Meshtastic);
+    let s = MeshtasticShim::new(ShimConfig {
+        downlink: stub.addr,
+        capacity: 4,
+        idle: Duration::from_secs(60),
+        max_sessions: 2,
+        connect_timeout: Duration::from_secs(2),
+        write_timeout: Duration::from_secs(2),
+    });
+
+    // a zero-length FromRadio is never queued: it would read as "queue
+    // empty" and end the client's poll loop with frames still behind it
+    assert_eq!(put(&s, "a", b"a1").await, Ok(200));
+    wait_until("connection a", Duration::from_secs(5), || {
+        stub.received().len() == 1
+    })
+    .await;
+    let mut burst = Vec::new();
+    for _ in 0..8 {
+        burst.extend(framed(b""));
+    }
+    burst.extend(framed(b"x"));
+    stub.send_all(&burst);
+    assert_eq!(next_frame(&s, "a").await, b"x");
+    assert_eq!(s.dropped(), 0, "empty frames neither queued nor dropped");
+    assert_eq!(get(&s, "a").await, Ok(Vec::new()));
+
+    // the session cap holds under concurrent first calls on distinct keys
+    s.close_all();
+    wait_until("connection a closed", Duration::from_secs(5), || {
+        stub.closed() == 1
+    })
+    .await;
+    let calls: Vec<_> = (0..8)
+        .map(|i| {
+            let s = s.clone();
+            tokio::spawn(async move { put(&s, &format!("k{i}"), b"k").await })
+        })
+        .collect();
+    let mut ok = 0;
+    for c in calls {
+        match c.await.unwrap() {
+            Ok(200) => ok += 1,
+            Ok(other) => panic!("status {other}"),
+            Err(e) => assert!(matches!(e, ShimError::Upstream(_)), "{e:?}"),
+        }
+    }
+    assert_eq!(ok, 2, "exactly max_sessions first calls succeed");
+    assert_eq!(s.sessions(), 2);
+    wait_until("two new connections", Duration::from_secs(5), || {
+        stub.accepted() >= 3
+    })
+    .await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert_eq!(stub.accepted(), 3, "a refused call opens no downlink");
+    s.close_all();
 }
 
 // ---------------------------------------------------------------- presence

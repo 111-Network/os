@@ -22,7 +22,13 @@
 //!   frames) and **drops the oldest** when full; every drop is counted, and the
 //!   total is surfaced in `panel.state.dropped` ([`MeshtasticShim::dropped`]).
 //! - The deframer skips anything that is not a frame (the board's debug
-//!   output) and resyncs on a declared length over 512.
+//!   output) and resyncs on a declared length over 512. A zero-length
+//!   `FromRadio` is never queued: its empty body would read as "nothing
+//!   queued" and end the client's poll loop with frames still behind it.
+//! - At most [`ShimConfig::max_sessions`] downlinks exist at once, strictly:
+//!   a first call takes its slot under the session-map lock before it
+//!   connects (concurrent first calls never exceed the cap) and gives it back
+//!   if the connect fails or the request goes away.
 //! - A closed or failing upstream answers `502 upstream_error` and drops the
 //!   session's connection; the next call opens a fresh one.
 
@@ -164,6 +170,17 @@ impl FrameQueue {
     }
 }
 
+/// Queue the frames one downlink read produced, skipping zero-length ones
+/// (an empty `GET /fromradio` body means "queue empty" to the client).
+/// Returns how many queued frames were dropped to make room.
+pub fn enqueue(q: &mut FrameQueue, frames: Vec<Vec<u8>>) -> u64 {
+    frames
+        .into_iter()
+        .filter(|f| !f.is_empty())
+        .map(|f| q.push(f))
+        .sum()
+}
+
 /// Shim tuning (production: [`ShimConfig::production`]).
 #[derive(Debug, Clone)]
 pub struct ShimConfig {
@@ -173,7 +190,8 @@ pub struct ShimConfig {
     pub capacity: usize,
     /// A session without a call this long loses its connection.
     pub idle: Duration,
-    /// Sessions with an open connection at once (more ⇒ `502`).
+    /// Sessions with an open (or opening) connection at once (more ⇒
+    /// `502`); a strict cap.
     pub max_sessions: usize,
     pub connect_timeout: Duration,
     pub write_timeout: Duration,
@@ -220,10 +238,62 @@ impl Session {
     }
 }
 
+/// The session map and the first calls connecting right now.
+#[derive(Default)]
+struct Sessions {
+    open: HashMap<String, Arc<Session>>,
+    /// First calls between taking their slot and inserting their session.
+    opening: usize,
+}
+
+impl Sessions {
+    fn live(&self, key: &str) -> Option<Arc<Session>> {
+        self.open
+            .get(key)
+            .filter(|s| !s.closed.load(Ordering::SeqCst))
+            .cloned()
+    }
+}
+
 struct Inner {
     cfg: ShimConfig,
-    sessions: Mutex<HashMap<String, Arc<Session>>>,
+    sessions: Mutex<Sessions>,
     dropped: AtomicU64,
+}
+
+impl Inner {
+    fn map(&self) -> std::sync::MutexGuard<'_, Sessions> {
+        self.sessions
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+}
+
+/// A slot under [`ShimConfig::max_sessions`] held while a first call
+/// connects. Dropped unreleased (connect failed, request cancelled) it gives
+/// the slot back.
+struct Reservation<'a> {
+    inner: &'a Inner,
+    held: bool,
+}
+
+impl Reservation<'_> {
+    /// Give the slot back under the already-held map lock (the caller then
+    /// inserts its session, or reuses a raced one, in the same critical
+    /// section, so the count never exceeds the cap).
+    fn release_in(mut self, map: &mut Sessions) {
+        map.opening = map.opening.saturating_sub(1);
+        self.held = false;
+    }
+}
+
+impl Drop for Reservation<'_> {
+    fn drop(&mut self) {
+        if self.held {
+            let mut map = self.inner.map();
+            map.opening = map.opening.saturating_sub(1);
+        }
+    }
 }
 
 /// The `meshtastic-http` shim (register it in the `ShimRegistry`).
@@ -251,7 +321,7 @@ impl MeshtasticShim {
         MeshtasticShim {
             inner: Arc::new(Inner {
                 cfg,
-                sessions: Mutex::new(HashMap::new()),
+                sessions: Mutex::new(Sessions::default()),
                 dropped: AtomicU64::new(0),
             }),
         }
@@ -261,11 +331,8 @@ impl MeshtasticShim {
         &self.inner.cfg
     }
 
-    fn map(&self) -> std::sync::MutexGuard<'_, HashMap<String, Arc<Session>>> {
-        self.inner
-            .sessions
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    fn map(&self) -> std::sync::MutexGuard<'_, Sessions> {
+        self.inner.map()
     }
 
     /// FromRadio frames dropped by full session queues since start
@@ -276,13 +343,13 @@ impl MeshtasticShim {
 
     /// Sessions holding a downlink connection now.
     pub fn sessions(&self) -> usize {
-        self.map().len()
+        self.map().open.len()
     }
 
     /// Close one session's connection (cookie revoked, panel disabled,
     /// LAN off — the panel listener calls this). Unknown sessions are a no-op.
     pub fn close_session(&self, session: &str) -> bool {
-        match self.map().remove(session) {
+        match self.map().open.remove(session) {
             Some(s) => {
                 s.shut();
                 true
@@ -293,29 +360,35 @@ impl MeshtasticShim {
 
     /// Close every session (meshmud restarted or unbound; daemon shutdown).
     pub fn close_all(&self) {
-        for (_, s) in self.map().drain() {
+        for (_, s) in self.map().open.drain() {
             s.shut();
         }
     }
 
-    /// The live session for `key`, or a new connection (first call).
+    /// The live session for `key`, or a new connection (first call). The
+    /// cap is checked and the slot taken in one critical section; the
+    /// connect runs outside the lock.
     async fn session(&self, key: &str) -> Result<Arc<Session>, ShimError> {
-        if let Some(s) = self.map().get(key) {
-            if !s.closed.load(Ordering::SeqCst) {
-                return Ok(Arc::clone(s));
-            }
-        }
         let cfg = &self.inner.cfg;
-        if self.map().len() >= cfg.max_sessions {
+        let slot = {
+            let mut map = self.map();
+            if let Some(s) = map.live(key) {
+                return Ok(s);
+            }
             // stale entries are removed by their tasks; count only live ones
-            self.map().retain(|_, s| !s.closed.load(Ordering::SeqCst));
-            if self.map().len() >= cfg.max_sessions {
+            map.open.retain(|_, s| !s.closed.load(Ordering::SeqCst));
+            if map.open.len() + map.opening >= cfg.max_sessions {
                 return Err(ShimError::Upstream(format!(
                     "too many open panel sessions (at most {})",
                     cfg.max_sessions
                 )));
             }
-        }
+            map.opening += 1;
+            Reservation {
+                inner: &self.inner,
+                held: true,
+            }
+        };
         let stream = tokio::time::timeout(cfg.connect_timeout, TcpStream::connect(cfg.downlink))
             .await
             .map_err(|_| upstream("connect timed out"))?
@@ -329,15 +402,15 @@ impl MeshtasticShim {
             closed: AtomicBool::new(false),
             close: tokio::sync::Notify::new(),
         });
-        // a concurrent first call may have raced us: keep one connection
+        // a concurrent first call on the same key may have raced us: keep
+        // one connection (ours closes when `s` drops)
         {
             let mut map = self.map();
-            if let Some(existing) = map.get(key) {
-                if !existing.closed.load(Ordering::SeqCst) {
-                    return Ok(Arc::clone(existing));
-                }
+            slot.release_in(&mut map);
+            if let Some(existing) = map.live(key) {
+                return Ok(existing);
             }
-            map.insert(key.to_string(), Arc::clone(&s));
+            map.open.insert(key.to_string(), Arc::clone(&s));
         }
         tokio::spawn(read_loop(
             Arc::clone(&self.inner),
@@ -350,8 +423,8 @@ impl MeshtasticShim {
     fn drop_session(&self, key: &str, s: &Arc<Session>) {
         s.shut();
         let mut map = self.map();
-        if map.get(key).is_some_and(|cur| Arc::ptr_eq(cur, s)) {
-            map.remove(key);
+        if map.open.get(key).is_some_and(|cur| Arc::ptr_eq(cur, s)) {
+            map.open.remove(key);
         }
     }
 
@@ -419,11 +492,9 @@ async fn read_loop(inner: Arc<Inner>, key: String, s: Arc<Session>) {
                         let frames = deframer.push(&chunk[..n]);
                         if !frames.is_empty() {
                             let mut q = s.queue.lock().unwrap_or_else(|e| e.into_inner());
-                            for f in frames {
-                                let d = q.push(f);
-                                if d > 0 {
-                                    inner.dropped.fetch_add(d, Ordering::Relaxed);
-                                }
+                            let d = enqueue(&mut q, frames);
+                            if d > 0 {
+                                inner.dropped.fetch_add(d, Ordering::Relaxed);
                             }
                         }
                     }
@@ -440,12 +511,9 @@ async fn read_loop(inner: Arc<Inner>, key: String, s: Arc<Session>) {
         }
     }
     s.closed.store(true, Ordering::SeqCst);
-    let mut map = inner
-        .sessions
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    if map.get(&key).is_some_and(|cur| Arc::ptr_eq(cur, &s)) {
-        map.remove(&key);
+    let mut map = inner.map();
+    if map.open.get(&key).is_some_and(|cur| Arc::ptr_eq(cur, &s)) {
+        map.open.remove(&key);
     }
     // dropping the last Arc<TcpStream> closes the connection
 }
@@ -525,6 +593,51 @@ mod tests {
         assert!(d.pending() <= 1);
         // a zero-length frame is a frame
         assert_eq!(d.push(&[0x94, 0xc3, 0, 0]), vec![Vec::<u8>::new()]);
+    }
+
+    #[test]
+    fn zero_length_frames_are_never_queued() {
+        let mut q = FrameQueue::new(2);
+        let frames = vec![vec![], b"a".to_vec(), vec![], vec![], b"b".to_vec()];
+        assert_eq!(enqueue(&mut q, frames), 0, "empties take no room");
+        assert_eq!(q.pop(), Some(b"a".to_vec()));
+        assert_eq!(q.pop(), Some(b"b".to_vec()));
+        assert_eq!(q.pop(), None);
+        assert_eq!(enqueue(&mut q, vec![vec![]; 5]), 0);
+        assert!(q.is_empty());
+        // real frames over capacity still drop the oldest, counted
+        assert_eq!(
+            enqueue(&mut q, vec![b"1".to_vec(), b"2".to_vec(), b"3".to_vec()]),
+            1
+        );
+        assert_eq!(q.pop(), Some(b"2".to_vec()));
+    }
+
+    #[test]
+    fn a_reservation_gives_its_slot_back() {
+        let inner = Inner {
+            cfg: ShimConfig::production("127.0.0.1:11230".parse().unwrap()),
+            sessions: Mutex::new(Sessions::default()),
+            dropped: AtomicU64::new(0),
+        };
+        inner.map().opening = 2;
+        // dropped unreleased (connect failed, request cancelled)
+        drop(Reservation {
+            inner: &inner,
+            held: true,
+        });
+        assert_eq!(inner.map().opening, 1);
+        // released under the lock: counted once, never twice
+        let r = Reservation {
+            inner: &inner,
+            held: true,
+        };
+        {
+            let mut map = inner.map();
+            r.release_in(&mut map);
+            assert_eq!(map.opening, 0);
+        }
+        assert_eq!(inner.map().opening, 0);
     }
 
     #[test]

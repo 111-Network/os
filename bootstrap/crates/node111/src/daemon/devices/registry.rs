@@ -34,10 +34,10 @@
 //! `meshtastic-firmware` and `driver {stack: meshtastic, interface: meshmud,
 //! live: <meshmud running>}` (so `stack_bound` / `stack_down` like any
 //! stack). A device whose port another owner holds in the port-owner table
-//! reads `port_busy`. The uplink a device would be identified on names its
-//! device node under `/dev` (`/dev/serial/by-id/<name>` when that passes the
-//! §14 path pattern, else `/dev/<tty>`), or `tcp://127.0.0.1:4403` for an SPI
-//! bridge.
+//! reads `port_busy`, with that owner's task in `detail.port_held_by`. The
+//! uplink a device would be identified on names its device node under `/dev`
+//! (`/dev/serial/by-id/<name>` when that passes the §14 path pattern, else
+//! `/dev/<tty>`), or `tcp://127.0.0.1:4403` for an SPI bridge.
 //!
 //! States: `error` when the tty is unreadable (`no_port_access`; `access(R|W)`
 //! denied — the unit grants `dialout`, so this is a real fault) or when a
@@ -451,6 +451,10 @@ fn apply_meshtastic(
                     if r.state == DeviceState::NeedsSetup {
                         r.reason_code = "port_busy".into();
                         r.reason = format!("Its port is in use by {task}.");
+                        // the structured fact `identify_target` reads (the
+                        // reason is display copy and may change)
+                        r.detail.insert("port_held_by".into(), task.into());
+                        r.detail = cap_detail(std::mem::take(&mut r.detail));
                     }
                 }
                 Some(_) => {} // being identified right now
@@ -1463,9 +1467,9 @@ impl DeviceRegistry {
         }
         if rec.reason_code == "port_busy" {
             let owner = rec
-                .reason
-                .strip_prefix("Its port is in use by ")
-                .and_then(|r| r.strip_suffix('.'))
+                .detail
+                .get("port_held_by")
+                .and_then(Value::as_str)
                 .unwrap_or("another program");
             return Err(busy(owner));
         }
@@ -1481,6 +1485,11 @@ impl DeviceRegistry {
     /// and, for a Meshtastic board, the binding — at most one device holds
     /// one, so any other binding is cleared. Publishes the updated record
     /// at once and returns it.
+    ///
+    /// The device must still be published and not forgotten: a forget that
+    /// landed while the probe ran wins, and [`NotFound`] is returned **before
+    /// anything is written** (a binding on a forgotten, hidden entry could
+    /// never be unbound through the API). Checked and written under one lock.
     pub fn record_identify(
         &self,
         api: &ApiState,
@@ -1491,7 +1500,12 @@ impl DeviceRegistry {
         let view = self.meshtastic_view();
         let mut guard = self.inner.lock().unwrap();
         let inner = &mut *guard;
-        if !inner.store.devices.contains_key(id) {
+        let live = inner.store.devices.get(id).is_some_and(|e| !e.forgotten)
+            && inner
+                .published
+                .as_ref()
+                .is_some_and(|p| p.iter().any(|r| r.id == id));
+        if !live {
             return Err(NotFound);
         }
         if binding.is_some() {

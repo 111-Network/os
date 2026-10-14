@@ -17,7 +17,8 @@
 //!
 //! [`Meshtastic`] owns both: it starts them from the binding in
 //! `state/devices.json` at daemon start, reconciles every tick (a binding
-//! removed by *forget* stops them; a port another owner held is retried),
+//! removed by *forget* stops them; a port another owner held is retried, and
+//! so is a binding whose meshmud binary was absent once the binary appears),
 //! claims the board port and the downlink in the daemon's port-owner table
 //! (`daemon::ports`, task `meshmud`), registers both children for
 //! `POST /services/meshtastic/restart` (meshmud first, then the reader —
@@ -156,6 +157,9 @@ struct Service {
     reader: Option<ChildHandle>,
     /// Another owner held the board port or the downlink at the last try.
     port_held_by: Option<String>,
+    /// meshmud could run here but its binary was absent at the last try
+    /// (retried once `current/bin/meshmud` appears, e.g. after an upgrade).
+    awaiting_binary: bool,
     /// `meshmud` is the identify child (identify profile: its first exit is
     /// final); swapped for a service-policy child once it exits.
     identify_born: bool,
@@ -174,6 +178,8 @@ struct Status {
     identify_usb: bool,
     identify_tcp: bool,
     bound_ports: Vec<String>,
+    /// `current/bin/meshmud` is a file (last refresh).
+    meshmud_installed: bool,
 }
 
 struct Ctx {
@@ -377,7 +383,7 @@ impl Meshtastic {
 
     /// `Facts.meshmud` (cheap: cached snapshots and child states).
     pub fn facts(&self) -> MeshmudFacts {
-        let (child_state, running, port_held_by) = {
+        let (child_state, running, port_held_by, bound) = {
             let svc = lock(&self.service);
             match svc.as_ref() {
                 Some(s) => match &s.meshmud {
@@ -385,16 +391,19 @@ impl Meshtastic {
                         ChildDisplay::from(Some(h.state())),
                         h.pid().is_some(),
                         s.port_held_by.clone(),
+                        true,
                     ),
-                    None => (ChildDisplay::Absent, false, s.port_held_by.clone()),
+                    None => (ChildDisplay::Absent, false, s.port_held_by.clone(), true),
                 },
-                None => (ChildDisplay::Absent, false, None),
+                None => (ChildDisplay::Absent, false, None, false),
             }
         };
         let st = lock(&self.status);
         MeshmudFacts {
             running,
             child_state,
+            bound,
+            installed: st.meshmud_installed,
             downlink_listening: st.downlink_listening,
             node_db_present: self.presence.present(),
             board: st.board.clone(),
@@ -558,22 +567,18 @@ impl Meshtastic {
         };
         if !same {
             if current.is_some() {
-                self.stop_service().await;
-                // the old board's node DB must never stand for the new one
-                self.remove_presence_file();
-                if self.presence.clear() {
-                    self.publish_nearby(&api);
-                }
+                self.drop_service(&api).await;
             }
             if let Some((id, b)) = desired {
                 self.start_service(&id, b.uplink);
             }
             self.install_supervised();
         } else if let Some((id, up, false)) = current {
-            // wanted but not running (port busy before): try again
-            let retry = lock(&self.service)
-                .as_ref()
-                .is_some_and(|s| s.port_held_by.is_some());
+            // wanted but not running: try again when the port was busy, or
+            // when the meshmud binary that was absent is there now
+            let retry = lock(&self.service).as_ref().is_some_and(|s| {
+                s.port_held_by.is_some() || (s.awaiting_binary && self.cfg.meshmud_installed())
+            });
             if retry {
                 *lock(&self.service) = None;
                 self.start_service(&id, up);
@@ -621,6 +626,28 @@ impl Meshtastic {
         ));
         if let Some(s) = lock(&self.service).as_mut() {
             s.meshmud = Some(child);
+        }
+        self.install_supervised();
+    }
+
+    /// Stop the service and drop what it served: both children joined, the
+    /// claims released, shim sessions closed, the old node DB removed (it
+    /// must never stand for another board), the cached board facts cleared
+    /// and the restart wiring updated. The binding is already gone (forget,
+    /// or an identify whose device was forgotten while it probed).
+    async fn drop_service(&self, api: &ApiState) {
+        self.stop_service().await;
+        self.remove_presence_file();
+        if self.presence.clear() {
+            self.publish_nearby(api);
+        }
+        {
+            let mut st = lock(&self.status);
+            st.board = None;
+            st.firmware_version = None;
+            st.usb_uplink = false;
+            st.uplink_down_since = None;
+            st.bound_ports.clear();
         }
         self.install_supervised();
     }
@@ -690,12 +717,18 @@ impl Meshtastic {
             meshmud: None,
             reader: None,
             port_held_by: None,
+            awaiting_binary: false,
             identify_born: false,
         };
-        if !self.runnable(&uplink) || !self.cfg.meshmud_installed() {
-            if !self.cfg.meshmud_installed() {
-                eprintln!("111 meshtastic: no meshmud in current/bin — meshtastic absent");
-            }
+        if !self.runnable(&uplink) {
+            *lock(&self.service) = Some(svc);
+            return;
+        }
+        if !self.cfg.meshmud_installed() {
+            eprintln!(
+                "111 meshtastic: no meshmud in current/bin — meshtastic waits for its binary"
+            );
+            svc.awaiting_binary = true;
             *lock(&self.service) = Some(svc);
             return;
         }
@@ -782,12 +815,13 @@ impl Meshtastic {
                 .log
                 .is_file()
                 .then(|| cfg.log.to_string_lossy().into_owned());
-            let identify = cfg.meshmud_installed() && cfg.reader_installed();
-            (listening, present, log, identify)
+            let installed = cfg.meshmud_installed();
+            let identify = installed && cfg.reader_installed();
+            (listening, present, log, identify, installed)
         })
         .await
-        .unwrap_or((false, None, None, false));
-        let (listening, present, log, identify) = observed;
+        .unwrap_or((false, None, None, false, false));
+        let (listening, present, log, identify, installed) = observed;
         // the node DB counts only while a board is bound (the file of an
         // unbound board is never read)
         let has_service = lock(&self.service).is_some();
@@ -823,6 +857,7 @@ impl Meshtastic {
             st.identify_usb = identify && !self.cfg.phone_like && cfg!(target_os = "linux");
             st.identify_tcp = identify;
             st.bound_ports = bound_ports;
+            st.meshmud_installed = installed;
         }
         if changed == Refresh::Changed {
             self.publish_nearby(&api);
@@ -830,7 +865,10 @@ impl Meshtastic {
     }
 
     /// Daemon shutdown: stop the monitor, stop and join both children,
-    /// release the claims.
+    /// release the claims. An identify in flight sees `stopping` within one
+    /// 50 ms poll, stops its own child and reader and releases its claims
+    /// before the transition lock is handed over — shutdown never waits for
+    /// the reader's `--once` timeout.
     pub async fn stop_and_wait(&self, grace: Duration) {
         self.stopping.store(true, Ordering::SeqCst);
         let _t = self.transition.lock().await;

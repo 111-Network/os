@@ -512,8 +512,13 @@ pub struct FabricFacts {
 pub struct MeshmudFacts {
     /// meshmud's process is up now (a live PID).
     pub running: bool,
-    /// meshmud's supervisor state; `Absent` = no binding, so no child.
+    /// meshmud's supervisor state; `Absent` = no child (no binding, or a
+    /// binding meshmud cannot run for — see `bound`, `installed`).
     pub child_state: ChildDisplay,
+    /// A board is bound (`devices.json` holds a Meshtastic binding).
+    pub bound: bool,
+    /// meshmud's binary (`current/bin/meshmud`) is installed.
+    pub installed: bool,
     /// Something LISTENs on [`MESHMUD_DOWNLINK_PORT`] (`/proc/net/tcp`,
     /// never a connect — §13 health).
     pub downlink_listening: bool,
@@ -1195,8 +1200,10 @@ fn fabric(f: &Facts) -> Computed {
 /// the presence reader has produced a node DB; NOT SET when no Meshtastic
 /// board is bound (identified-but-unbound boards point at the agent); ERROR
 /// when meshmud crash-loops, its uplink is lost for more than
-/// [`UPLINK_LOST_GRACE`], or another owner holds the bound port
-/// (`port_busy`). A USB board cannot be driven from a phone.
+/// [`UPLINK_LOST_GRACE`], another owner holds the bound port (`port_busy`),
+/// or a board is bound but meshmud's binary is not installed
+/// (`binary_absent`: an install or upgrade problem, not a set-up step). A USB
+/// board cannot be driven from a phone.
 fn meshtastic(f: &Facts) -> Computed {
     let id = ServiceId::Meshtastic;
     let none = || {
@@ -1227,6 +1234,20 @@ fn meshtastic(f: &Facts) -> Computed {
         )
     } else {
         match m.child_state {
+            ChildDisplay::Absent
+                if m.board.is_some()
+                    && m.bound
+                    && !m.installed
+                    && !(f.phone_like && m.usb_uplink) =>
+            {
+                Computed::new(
+                    id,
+                    ServiceState::Error,
+                    "binary_absent",
+                    "A Meshtastic board is set up, but meshmud is not installed on this node, so \
+                     it cannot run (reinstall or update 111).",
+                )
+            }
             ChildDisplay::Absent if m.board.is_some() => {
                 let mut c = Computed::new(
                     id,
@@ -1309,6 +1330,8 @@ fn meshtastic(f: &Facts) -> Computed {
         "uplink_lost_sec": m.uplink_lost_secs,
         "usb_uplink": m.usb_uplink,
         "port_held_by": m.port_held_by,
+        "bound": m.bound,
+        "meshmud_installed": m.installed,
         "log": m.log,
     });
     out
@@ -1604,6 +1627,8 @@ mod tests {
         MeshmudFacts {
             running: child == ChildDisplay::Running,
             child_state: child,
+            bound: child != ChildDisplay::Absent,
+            installed: true,
             downlink_listening: child == ChildDisplay::Running,
             node_db_present: true,
             board: Some("Heltec V3".into()),
@@ -1640,6 +1665,36 @@ mod tests {
         assert_eq!(st(&phone, id), (U, "meshtastic_unbound", false));
         phone.meshmud.as_mut().unwrap().usb_uplink = false;
         assert_eq!(st(&phone, id), (U, "meshtastic_unbound", true));
+        // bound, but meshmud's binary is missing: an install problem, not a
+        // set-up step (never "set up with the agent")
+        let missing = MeshmudFacts {
+            bound: true,
+            installed: false,
+            ..mm(ChildDisplay::Absent)
+        };
+        let c = row(&with(missing.clone()), id);
+        assert_eq!((c.state, c.reason_code), (E, "binary_absent"));
+        assert!(
+            c.reason.contains("meshmud is not installed"),
+            "{}",
+            c.reason
+        );
+        assert!(!c.reason.contains("agent"), "{}", c.reason);
+        assert_eq!(c.detail["meshmud_installed"], false);
+        assert_eq!(c.detail["bound"], true);
+        // … identified but unbound stays the set-up step
+        let unbound = MeshmudFacts {
+            bound: false,
+            ..missing.clone()
+        };
+        assert_eq!(st(&with(unbound), id), (U, "meshtastic_unbound", true));
+        // … a USB binding on a phone still reads "cannot run here"
+        let mut phone = with(MeshmudFacts {
+            usb_uplink: true,
+            ..missing
+        });
+        phone.phone_like = true;
+        assert_eq!(st(&phone, id), (U, "meshtastic_unbound", false));
         // LIVE: running + downlink + node DB
         let c = row(&with(mm(ChildDisplay::Running)), id);
         assert_eq!((c.state, c.reason_code), (L, "meshtastic_live"));

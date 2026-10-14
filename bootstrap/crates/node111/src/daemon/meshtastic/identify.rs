@@ -24,8 +24,16 @@
 //!    the claims released, and the honest result is persisted — `firmware
 //!    {family: unknown, source: probe}`, no binding (`200`).
 //! 7. Anything else (meshmud did not start or exited, no downlink, the reader
-//!    failed or timed out, malformed output): meshmud stopped, claims
-//!    released, nothing persisted, `502 upstream_error`.
+//!    failed or timed out, malformed output, the daemon shutting down):
+//!    meshmud stopped, claims released, nothing persisted,
+//!    `502 upstream_error`. The probe polls the module's `stopping` flag in
+//!    its 50 ms loops, so daemon shutdown never waits for the reader's
+//!    `--once` timeout (the reader is killed when its future is dropped).
+//! 8. A forget that lands while the probe runs wins: the registry refuses
+//!    the result before writing anything ([`DeviceRegistry::record_identify`]),
+//!    the service the identify child was becoming is torn down at once
+//!    (children stopped, claims released, node DB removed) and the answer is
+//!    `404 not_found`.
 
 use super::{meshmud, Meshtastic, MESHMUD_TASK};
 use crate::daemon::dashboard::api_v1::Problem;
@@ -40,6 +48,7 @@ use crate::daemon::supervise::{self, ChildHandle, ChildState};
 use axum::http::StatusCode;
 use serde::Deserialize;
 use std::fmt;
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -155,6 +164,10 @@ pub fn parse_once(stdout: &[u8]) -> Result<MyNodeInfo, String> {
     Ok(info)
 }
 
+fn shutting_down() -> IdentifyError {
+    IdentifyError::Upstream("the node is shutting down".into())
+}
+
 /// How the probe ended.
 enum Outcome {
     Meshtastic(MyNodeInfo),
@@ -170,6 +183,9 @@ impl Meshtastic {
     pub async fn identify(&self, device_id: &str) -> Result<DeviceRecord, IdentifyError> {
         let (api, reg) = self.identify_ctx()?;
         let _t = self.transition.lock().await;
+        if self.stopping.load(Ordering::SeqCst) {
+            return Err(shutting_down());
+        }
         let target = reg.identify_target(device_id).map_err(|e| match e {
             TargetError::NotFound => IdentifyError::NotFound,
             TargetError::NotOffered(why) => IdentifyError::NotOffered(why),
@@ -241,6 +257,7 @@ impl Meshtastic {
                     meshmud: Some(child),
                     reader,
                     port_held_by: None,
+                    awaiting_binary: false,
                     identify_born: true,
                 });
                 {
@@ -251,9 +268,15 @@ impl Meshtastic {
                     st.bound_ports = vec![target.uplink.display()];
                 }
                 self.install_supervised();
-                let rec = reg
-                    .record_identify(&api, device_id, firmware, Some(binding))
-                    .map_err(|_| IdentifyError::NotFound)?;
+                let Ok(rec) = reg.record_identify(&api, device_id, firmware, Some(binding)) else {
+                    // forgotten while the probe ran: nothing was persisted, so
+                    // nothing may keep running or holding the port either
+                    eprintln!(
+                        "111 meshtastic: {device_id} was forgotten during identify; meshmud stopped"
+                    );
+                    self.drop_service(&api).await;
+                    return Err(IdentifyError::NotFound);
+                };
                 eprintln!(
                     "111 meshtastic: {device_id} identified as Meshtastic ({}); meshmud now serves it",
                     rec.firmware
@@ -301,13 +324,16 @@ impl Meshtastic {
     }
 
     /// Wait for the downlink, then run the reader once — ending as soon as
-    /// meshmud exits.
+    /// meshmud exits or the daemon starts shutting down.
     async fn probe(&self, child: &ChildHandle) -> Result<Outcome, IdentifyError> {
         let died = || IdentifyError::Upstream("meshmud exited during identify".into());
         // 1. meshmud up and its downlink listening
         let deadline = tokio::time::Instant::now() + self.cfg.downlink_wait;
         let mut seen_running = false;
         loop {
+            if self.stopping.load(Ordering::SeqCst) {
+                return Err(shutting_down());
+            }
             match child.state() {
                 ChildState::Running => seen_running = true,
                 ChildState::Degraded | ChildState::Stopped => return Err(died()),
@@ -332,9 +358,13 @@ impl Meshtastic {
             }
             tokio::time::sleep(POLL).await;
         }
-        // 2. the reader, raced against meshmud exiting
+        // 2. the reader, raced against meshmud exiting and daemon shutdown
+        // (dropping `run_once` kills the reader: `kill_on_drop`)
         let watch = async {
             loop {
+                if self.stopping.load(Ordering::SeqCst) {
+                    return shutting_down();
+                }
                 if child.state() != ChildState::Running {
                     return died();
                 }

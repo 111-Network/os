@@ -186,9 +186,13 @@ fn sanitize(mut f: StoreFile) -> BTreeMap<String, Entry> {
             fw.version = fw.version.as_deref().and_then(|v| clean(v, MAX_FACT));
         }
         if let Some(b) = e.meshtastic.take() {
-            // re-validated on every load; one binding only (the first by id)
+            // re-validated on every load; one binding only (the first by id);
+            // a forgotten (hidden) device can never be unbound through the
+            // API, so it never holds one
             if !b.valid() {
                 eprintln!("111 daemon: devices: dropping an invalid Meshtastic binding on {id}");
+            } else if e.forgotten {
+                eprintln!("111 daemon: devices: dropping the Meshtastic binding of forgotten {id}");
             } else if bound {
                 eprintln!("111 daemon: devices: dropping a second Meshtastic binding on {id}");
             } else {
@@ -247,10 +251,12 @@ impl Store {
         self.dirty = true;
     }
 
-    /// The device holding the Meshtastic binding, if any.
+    /// The device holding the Meshtastic binding, if any (never a forgotten
+    /// one: forget clears the binding, and nothing binds a forgotten entry).
     pub fn meshtastic_binding(&self) -> Option<(String, MeshtasticBinding)> {
         self.devices
             .iter()
+            .filter(|(_, e)| !e.forgotten)
             .find_map(|(id, e)| e.meshtastic.clone().map(|b| (id.clone(), b)))
     }
 
@@ -409,8 +415,13 @@ mod tests {
         s.gc(&|_| false);
         assert!(s.devices.contains_key("abcd1234abcd1234"));
 
-        // hand-edited bindings: bad path, bad id, no identify result, a second one
+        // hand-edited bindings: forgotten, bad path, bad id, no identify
+        // result, a second one
         let raw = serde_json::json!({"schema": 1, "devices": {
+            "0000aaaa0000aaaa": {"first_seen": "a", "last_seen": "b", "forgotten": true,
+                "firmware": {"family": "meshtastic", "version": "2.7", "source": "probe"},
+                "meshtastic": {"uplink": {"kind": "tcp", "host": "10.0.0.6", "port": 4403},
+                               "node_num": 6, "node_id": "!00000006"}},
             "aaaa0000aaaa0000": {"first_seen": "a", "last_seen": "b",
                 "firmware": {"family": "meshtastic", "version": "2.7", "source": "probe"},
                 "meshtastic": {"uplink": {"kind": "serial", "path": "/etc/shadow"},
@@ -446,9 +457,17 @@ mod tests {
         );
         assert_eq!(
             s.devices.len(),
-            5,
+            6,
             "entries stay; only bindings are dropped"
         );
+        assert_eq!(
+            s.meshtastic_binding().map(|(id, _)| id),
+            Some("dddd0000dddd0000".to_string())
+        );
+        // in memory too: a forgotten entry's binding is never the binding
+        let mut s = s;
+        s.devices.get_mut("dddd0000dddd0000").unwrap().forgotten = true;
+        assert!(s.meshtastic_binding().is_none());
     }
 
     #[test]
