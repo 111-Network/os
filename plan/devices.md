@@ -43,7 +43,8 @@ and based on what it is."
    which is exactly our sealed envelope (L2 C1). Baofeng-class radios are not FRS/GMRS-certified in the US
    (FCC advisory DA 18-980, https://docs.fcc.gov/public/attachments/DA-18-980A1.pdf). The agent may suggest; a human confirms.
 7. **The best phone app candidate has an adoptable license; the reference app does not.** Sideband is CC BY-NC-SA 4.0
-   and its GitHub source is no longer updated (https://github.com/markqvist/Sideband) — it fails the KB's OSI gate.
+   (actively released — 2.2.0 on 2026-10-01; corrected 2026-10-14, the earlier "no longer updated" note was stale;
+   https://github.com/markqvist/Sideband) — it fails the KB's OSI gate on license alone.
    Columba is MPL-2.0, native Android, Reticulum/LXMF over BLE, TCP and RNode (https://github.com/torlando-tech/columba).
 
 ## 1. Scope & definitions
@@ -67,6 +68,14 @@ and based on what it is."
 
 ### 2.1 USB/serial LoRa boards (Heltec, LILYGO, RAK, Seeed …)
 
+**D19 (c) amendment, 2026-10-14:** one serial port has one owner — each board carries `owner = 111d | rnsd` in
+`state/interfaces.toml`. A **111-owned** board runs the **MeshCore KISS modem** firmware (MIT; documented raw-modem
+protocol: 255 B frames, CSMA, `SetRadio`, airtime report) and `111d` emits MeshCore `GRP_DATA` frames (163 B payload)
+that stock MeshCore repeaters flood blind — the Cat-1 relay is therefore the stock MeshCore repeater, and 111 writes no
+relay firmware. An **rnsd-owned** board runs RNode as before. Opt-in "shared" mode: 111d owns an RNode in HOST mode and
+rnsd attaches by loopback `TCPClientInterface kiss_framing=True` (111 frames are then RNode-framed and invisible to
+foreign repeaters). Full analysis: `layer-5-research/07-gap-1.md`; the fabric side: `layer-5-options.md` §2.3.
+
 Detection today: Layer 1's probe + R4 read sysfs VID:PID + product string against `lora-table.toml` (6 rows) and a
 udev rule sets `ID_MM_DEVICE_IGNORE`. That yields "likely a LoRa board", not "which firmware" (finding 1).
 
@@ -75,6 +84,7 @@ udev rule sets `ID_MM_DEVICE_IGNORE`. That yields "likely a LoRa board", not "wh
 | **RNode** (GPL-3.0; Heltec V3/V4, T-Beam, T3S3, T-Echo, RAK4631 … https://github.com/markqvist/RNode_Firmware) | dumb LoRa modem; host owns crypto + routing | rnsd `RNodeInterface` (`port` = serial path, `tcp://` for Wi-Fi RNodes, `ble://` once paired; `frequency`, `bandwidth`, `txpower`, `spreadingfactor`, `codingrate`; https://reticulum.network/manual/interfaces.html) | write one interface stanza with region-legal params; restart rnsd; verify interface up |
 | **Meshtastic** (GPL-3.0) | full mesh node; host is a client over serial/BLE/TCP (protobuf API) | meshtastic-python (CLI/lib), not meshtasticd | set region/preset/role via the client API; read nodes heard; bridge later |
 | **MeshCore companion** (MIT) | companion radio; one link per build (serial or BLE or Wi-Fi; https://github.com/meshcore-dev/meshcore-cli/wiki) | `meshcore` py lib / `meshcore-cli` (https://github.com/meshcore-dev/meshcore_py) | read contacts/adverts; bridge later |
+| **MeshCore KISS modem** (MIT; the *111 modem* profile, D19 c) | raw LoRa modem; host builds MeshCore `GRP_DATA` frames | `111d` (`mesh111` `kiss-modem` link) | CI-built, manifest-pinned image (no upstream release tag for the kiss-modem env); region set once (decision 10); stock MeshCore repeaters relay |
 | **blank / unknown** | — | none | offer a firmware (decision 1); flashing is destructive and human-gated |
 
 - `rnodeconf` (ships inside the `rns` wheel we already pin) does `--autoinstall`, `--info`, `--bluetooth-pair`,
@@ -182,6 +192,9 @@ within 30 s → keep or revert, result written to the proposal. Unknown action =
 
 ### 4.1 Firmware default for user LoRa boards
 
+_Outcome (D17 #1 + D19 c): option C with the 111 modem added — respect what is there; blank boards are offered the
+111 modem (MeshCore KISS) first, RNode and Meshtastic as alternatives._
+
 - **A. RNode everywhere** — board becomes an rnsd interface; one stack, host-side crypto/routing, `rnodeconf` already in
   the venv. Cost: reflash wipes the user's Meshtastic config; no interop with local Meshtastic users; deeper
   dependence on the Reticulum License (non-OSI field-of-use clauses incl. AI-training; we run it, do not train on it;
@@ -275,8 +288,12 @@ New tags (`bluetooth`, `radio`, `ham`, `android`) go into `knowledge/_meta/vocab
 1. Firmware default — **offer flashing for blank boards only; a board that already runs something is left alone.** The
    dashboard must make it *super clear* what will be written and erased; the user decides (confirmation flow built in
    Layer 4: `flash_offer` + typed confirmation; the flashing core lands in Layer 6).
+   **D19 (c) amendment (2026-10-14):** the blank-board offer lists the **111 modem (MeshCore KISS)** first, RNode
+   (Reticulum) and Meshtastic as the alternatives, one sentence on each; "RNode makes the board an rnsd interface" now
+   reads "a board is owned by 111d or by rnsd; rnsd attaches to a 111d-owned board only by loopback KISS on request."
 2. Meshtastic coexistence — **ignore for now** (detect and name only); the bridge is parked in `parked.md` until the
-   layers it needs exist.
+   layers it needs exist. **Superseded in part by D18 #3 (2026-10-14):** identified + service row with its hosted panel +
+   read-only presence into Nearby this cycle; the bridge stays parked (P1).
 3. Phone app — **Termux** (it is the agentic path). Parked idea: once the agent reaches a phone it can install and try
    existing apps (Briar and the like), test their connectivity, make the phone a node there too, and bridge them with ours.
 4. Phone-relay transport — **TCP to a hub first**, hotspot pattern second, AutoInterface when an app holds the lock,
