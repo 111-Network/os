@@ -3,7 +3,8 @@
 //!
 //! Request pipeline ([`app`]), every method, every path:
 //! 1. guards ([`guard::check`]): exact Host (minus `localhost`, the panel's own
-//!    port), `Sec-Fetch-Site`, Origin authority, `OPTIONS` refused;
+//!    port), `Sec-Fetch-Site` (same-origin only on API paths), Origin
+//!    authority, `OPTIONS` refused;
 //! 2. a ticket parameter ⇒ the swap: a request carrying a valid `p111_<id>`
 //!    ignores (and spends) the ticket and is redirected to `entry.path`;
 //!    otherwise a live ticket of this panel, this peer and a still-alive
@@ -11,8 +12,10 @@
 //!    expired or unknown ticket is `403 panel_ticket_expired`;
 //! 3. no valid `p111_<id>` ⇒ `401 unauthenticated` (no loopback skip);
 //! 4. `/api/*` on a shim panel ⇒ the shim (body capped at `[proxy]
-//!    max_body`; `502 upstream_error` when its upstream is down); everything
-//!    else ⇒ the static bundle with the SPA fallback for non-API paths;
+//!    max_body` and read under an absolute deadline, [`Timeouts::body`] —
+//!    `408` when it is not in by then; `502 upstream_error` when its upstream
+//!    is down); everything else ⇒ the static bundle with the SPA fallback for
+//!    non-API paths;
 //! 5. the response policy ([`headers::apply`]) on every answer.
 //!
 //! The generic reverse proxy (`[source] kind = child|detected`, WebSocket/SSE)
@@ -20,10 +23,14 @@
 //! arms. A proxy arm slots in beside the shim arm, applying
 //! [`headers::strip_request_cookies`] / [`headers::filter_upstream_set_cookie`].
 //!
-//! Serving ([`serve`]): HTTP/1.1 over hyper with a header-read timeout (which
-//! also bounds keep-alive idle) and an I/O idle timeout per connection, a cap
-//! on concurrent connections, and the peer address attached as
-//! `ConnectInfo<SocketAddr>` (what the auth helpers read).
+//! Serving ([`serve`], §13 "Header-read and idle timeouts on every
+//! listener"): HTTP/1.1 over hyper with a header-read timeout (re-armed for
+//! every request head, so it also bounds keep-alive idle) and an I/O idle
+//! timeout per connection, a cap on concurrent connections **and a smaller
+//! one per peer address** (one LAN host cannot take every slot), and the peer
+//! address attached as `ConnectInfo<SocketAddr>` (what the auth helpers
+//! read). The main dashboard listener is served by the same loop with
+//! [`Timeouts::dashboard`].
 //!
 //! Binding ([`bind`]): exactly where the dashboard binds — `127.0.0.1:<port>`,
 //! or `0.0.0.0:<port>` when LAN sharing is on, plus `[::1]:<port>` best effort;
@@ -64,6 +71,13 @@ pub struct Timeouts {
     pub idle: Duration,
     /// Concurrent connections per listener; more are closed on accept.
     pub max_conns: usize,
+    /// Concurrent connections per peer address (canonical IP) on one
+    /// listener; more are closed on accept.
+    pub max_conns_per_peer: usize,
+    /// A shim request body must be complete this long after its head was
+    /// accepted (absolute: a trickled body cannot hold a slot by touching the
+    /// idle clock). Only the panel shim arm reads it.
+    pub body: Duration,
 }
 
 impl Default for Timeouts {
@@ -72,6 +86,29 @@ impl Default for Timeouts {
             header_read: Duration::from_secs(10),
             idle: Duration::from_secs(60),
             max_conns: 128,
+            max_conns_per_peer: 16,
+            body: Duration::from_secs(30),
+        }
+    }
+}
+
+/// The main dashboard listener's I/O idle timeout: longer than its longest
+/// legitimately silent exchange (a non-streamed chat turn, whose relay budget
+/// is 10 min; SSE streams carry a keep-alive every 15 s).
+pub const DASHBOARD_IDLE: Duration = Duration::from_secs(11 * 60);
+
+impl Timeouts {
+    /// The main dashboard listener (§13 "every listener"): the same
+    /// header-read timeout (slow heads and idle keep-alive), an I/O idle
+    /// timeout of [`DASHBOARD_IDLE`], and no connection caps — the dashboard
+    /// never had any, and a cap there would let one peer lock the owner out
+    /// of the whole node UI. Its bodies are bounded by axum's body limit.
+    pub fn dashboard() -> Self {
+        Timeouts {
+            idle: DASHBOARD_IDLE,
+            max_conns: usize::MAX,
+            max_conns_per_peer: usize::MAX,
+            ..Timeouts::default()
         }
     }
 }
@@ -148,7 +185,13 @@ async fn respond(ctx: &PanelCtx, req: Request) -> (Option<AcceptedHost>, Respons
         own: &own,
         loopback_only: panel.manifest.auth == AuthMode::LoopbackOnly,
     };
-    let accepted = match guard::check(req.method(), req.headers(), panel.port, &policy) {
+    let accepted = match guard::check(
+        req.method(),
+        req.uri().path(),
+        req.headers(),
+        panel.port,
+        &policy,
+    ) {
         Ok(a) => a,
         Err(r) => return (None, r.problem().into_response()),
     };
@@ -248,6 +291,21 @@ fn is_length_limit(e: &axum::Error) -> bool {
     false
 }
 
+/// `408`: the shim request body was not complete within [`Timeouts::body`].
+/// The unread rest of the body makes hyper close the connection.
+fn body_timeout(deadline: Duration) -> Response {
+    Problem::new(
+        StatusCode::REQUEST_TIMEOUT,
+        "bad_request",
+        "request body too slow",
+    )
+    .detail(format!(
+        "The whole body must arrive within {} s.",
+        deadline.as_secs().max(1)
+    ))
+    .into_response()
+}
+
 /// Hand an `/api/*` request to the panel's shim.
 async fn dispatch(
     ctx: &PanelCtx,
@@ -266,16 +324,18 @@ async fn dispatch(
     if declared.is_some_and(|n| n > limit as u64) {
         return ShimError::TooLarge { limit }.problem().into_response();
     }
-    let body = match axum::body::to_bytes(body, limit).await {
-        Ok(b) => b,
-        Err(e) if is_length_limit(&e) => {
+    let deadline = ctx.host.cfg.timeouts.body;
+    let body = match tokio::time::timeout(deadline, axum::body::to_bytes(body, limit)).await {
+        Ok(Ok(b)) => b,
+        Ok(Err(e)) if is_length_limit(&e) => {
             return ShimError::TooLarge { limit }.problem().into_response()
         }
-        Err(_) => {
+        Ok(Err(_)) => {
             return ShimError::BadRequest("the request body could not be read".into())
                 .problem()
                 .into_response()
         }
+        Err(_) => return body_timeout(deadline),
     };
     let s = ShimSession {
         panel: ctx.panel.id().as_str().to_string(),
@@ -415,7 +475,9 @@ async fn serve_conn(stream: TcpStream, peer: SocketAddr, app: axum::Router, t: T
     builder
         .timer(TokioTimer::new())
         .header_read_timeout(t.header_read);
-    let conn = builder.serve_connection(io, svc);
+    // upgrades stay possible at the protocol level (axum's own `serve` allowed
+    // them); panels refuse every upgrade in [`respond`]
+    let conn = builder.serve_connection(io, svc).with_upgrades();
     tokio::pin!(conn);
     loop {
         let idle = activity.idle_for();
@@ -429,10 +491,65 @@ async fn serve_conn(stream: TcpStream, peer: SocketAddr, app: axum::Router, t: T
     }
 }
 
+/// Open connections per peer address of one listener.
+#[derive(Default)]
+struct PeerSlots {
+    open: std::sync::Mutex<std::collections::HashMap<IpAddr, usize>>,
+}
+
+/// One held per-peer slot; released when dropped (the connection task ends,
+/// is aborted, or unwinds).
+struct PeerSlot {
+    slots: Arc<PeerSlots>,
+    ip: IpAddr,
+}
+
+impl PeerSlots {
+    fn lock(&self) -> std::sync::MutexGuard<'_, std::collections::HashMap<IpAddr, usize>> {
+        self.open
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// Take a slot for `ip` unless it already holds `cap`.
+    fn take(self: &Arc<Self>, ip: IpAddr, cap: usize) -> Option<PeerSlot> {
+        let ip = ip.to_canonical();
+        let mut open = self.lock();
+        if open.get(&ip).copied().unwrap_or(0) >= cap {
+            return None; // never leaves an empty entry behind
+        }
+        *open.entry(ip).or_insert(0) += 1;
+        Some(PeerSlot {
+            slots: Arc::clone(self),
+            ip,
+        })
+    }
+
+    #[cfg(test)]
+    fn held(&self, ip: IpAddr) -> usize {
+        self.lock().get(&ip.to_canonical()).copied().unwrap_or(0)
+    }
+}
+
+impl Drop for PeerSlot {
+    fn drop(&mut self) {
+        let mut open = self.slots.lock();
+        if let Some(n) = open.get_mut(&self.ip) {
+            *n = n.saturating_sub(1);
+            if *n == 0 {
+                open.remove(&self.ip);
+            }
+        }
+    }
+}
+
 /// Serve `app` on `listener` until the task is aborted (aborting drops every
-/// open connection with it).
+/// open connection with it). A connection beyond [`Timeouts::max_conns`], or
+/// beyond [`Timeouts::max_conns_per_peer`] for its peer address, is closed on
+/// accept.
 pub async fn serve(listener: TcpListener, app: axum::Router, t: Timeouts) {
     let mut conns = tokio::task::JoinSet::new();
+    let slots = Arc::new(PeerSlots::default());
     loop {
         tokio::select! {
             accepted = listener.accept() => match accepted {
@@ -441,7 +558,15 @@ pub async fn serve(listener: TcpListener, app: axum::Router, t: Timeouts) {
                         drop(stream);
                         continue;
                     }
-                    conns.spawn(serve_conn(stream, peer, app.clone(), t));
+                    let Some(slot) = slots.take(peer.ip(), t.max_conns_per_peer) else {
+                        drop(stream);
+                        continue;
+                    };
+                    let app = app.clone();
+                    conns.spawn(async move {
+                        let _slot = slot;
+                        serve_conn(stream, peer, app, t).await;
+                    });
                 }
                 // EMFILE and friends: back off instead of spinning
                 Err(_) => tokio::time::sleep(Duration::from_millis(100)).await,
@@ -503,6 +628,39 @@ mod tests {
         assert_eq!(bind_ip(true, AuthMode::Session111), any);
         assert_eq!(bind_ip(false, AuthMode::LoopbackOnly), lo);
         assert_eq!(bind_ip(true, AuthMode::LoopbackOnly), lo);
+    }
+
+    #[test]
+    fn peer_slots_cap_and_release() {
+        let slots = Arc::new(PeerSlots::default());
+        let a: IpAddr = "192.168.1.9".parse().unwrap();
+        let mapped: IpAddr = "::ffff:192.168.1.9".parse().unwrap();
+        let b: IpAddr = "192.168.1.10".parse().unwrap();
+        let held: Vec<PeerSlot> = (0..3).map(|_| slots.take(a, 3).unwrap()).collect();
+        assert!(slots.take(a, 3).is_none(), "cap per peer");
+        assert!(slots.take(mapped, 3).is_none(), "one peer, either spelling");
+        let other = slots.take(b, 3).expect("another peer is unaffected");
+        assert_eq!((slots.held(a), slots.held(b)), (3, 1));
+        drop(held);
+        assert_eq!(slots.held(a), 0);
+        assert!(slots.take(a, 3).is_some(), "released on drop");
+        drop(other);
+        assert!(slots.lock().get(&b).is_none(), "no empty entries kept");
+        assert!(slots.take(b, 0).is_none());
+        assert!(slots.lock().is_empty(), "a refusal records nothing");
+    }
+
+    #[test]
+    fn dashboard_limits() {
+        let d = Timeouts::dashboard();
+        let p = Timeouts::default();
+        assert_eq!(d.header_read, p.header_read);
+        assert!(d.idle > Duration::from_secs(600), "a 10 min chat turn fits");
+        assert_eq!(
+            (d.max_conns, d.max_conns_per_peer),
+            (usize::MAX, usize::MAX)
+        );
+        assert!(p.max_conns_per_peer < p.max_conns);
     }
 
     #[test]

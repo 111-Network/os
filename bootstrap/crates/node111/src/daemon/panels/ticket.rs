@@ -3,10 +3,12 @@
 //!
 //! - **Ticket** ([`Tickets`]): minted by `POST /api/v1/panels/{id}/session`
 //!   behind the dashboard session (on trusted loopback the session is
-//!   implicit; the ticket is still minted). 128 bits from the OS random
-//!   source, single use, [`TICKET_TTL`] (30 s, monotonic clock), held in memory
-//!   only (by its sha256), bound to the minting session ([`Binding`]) and the
-//!   minting peer ([`PeerClass`]). Any presentation burns it.
+//!   implicit; the ticket is still minted) — never for a bearer caller: the
+//!   agent's daemon token opens no panel ([`mint_binding`]). 128 bits from the
+//!   OS random source, single use, [`TICKET_TTL`] (30 s, monotonic clock),
+//!   held in memory only (by its sha256), bound to the minting session
+//!   ([`Binding`]) and the minting peer ([`PeerClass`]). Any presentation
+//!   burns it.
 //! - **Cookie** `p111_<id>` ([`SessionStore`]): host-only (no `Domain`),
 //!   `HttpOnly`, `SameSite=Strict`, `Path=/`, a session cookie (no
 //!   `Max-Age`). 256 bits; only its sha256 is recorded, in
@@ -15,10 +17,13 @@
 //! - **Binding** ([`Binding`], [`binding_alive`]): a session minted under an
 //!   `s111` dashboard session lives while that session does (so `111 dashboard
 //!   rotate`, logout and forgetting the companion revoke it); one minted on
-//!   trusted loopback lives while loopback stays trusted and the pair code is
-//!   unchanged (a rotation changes the code). The peer is matched by class:
-//!   any loopback address is one class (`111.localhost` may resolve to either
-//!   `127.0.0.1` or `::1`), any other peer by exact address.
+//!   trusted loopback lives while loopback stays trusted and the pair-code
+//!   generation is unchanged — bound to the generation's random nonce
+//!   ([`AuthStore::pair_generation`]), never to anything derived from the
+//!   ~39-bit code, so a leaked record reveals nothing about the live code.
+//!   The peer is matched by class: any loopback address is one class
+//!   (`111.localhost` may resolve to either `127.0.0.1` or `::1`), any other
+//!   peer by exact address.
 //! - **Revocation:** binding loss (rotate), panel disable, LAN-off (sessions
 //!   minted while LAN sharing was on, or from a non-loopback peer, are dropped
 //!   when the daemon starts with LAN sharing off). Every revocation is
@@ -28,6 +33,8 @@
 //! No wall clock decides anything here: tickets expire on `Instant`, eviction
 //! order is a persisted counter; `created` is display-only.
 
+#[cfg(doc)]
+use crate::daemon::dashboard::api_v1::auth::AuthStore;
 use crate::daemon::dashboard::api_v1::auth::{self, ct_eq};
 use crate::daemon::dashboard::ApiState;
 use crate::daemon::services::ServiceId;
@@ -104,16 +111,6 @@ fn sha256_hex(s: &str) -> String {
 /// its sessions.
 pub fn session_hash(token: &str) -> String {
     sha256_hex(&token.to_ascii_lowercase())
-}
-
-/// The pair-code generation a trusted-loopback mint is bound to (a rotation
-/// changes the code). Domain-separated hash; as sensitive as the pair file
-/// itself and kept in the same 0600 class.
-pub fn pair_epoch(code: &str) -> String {
-    let mut h = Sha256::new();
-    h.update(b"111 panel epoch v1\0");
-    h.update(code.as_bytes());
-    hex(&h.finalize())
 }
 
 /// `p111_<id>`.
@@ -197,7 +194,10 @@ pub enum Binding {
     /// Minted under a dashboard `s111` session ([`session_hash`] of its token).
     Session { hash: String },
     /// Minted on trusted loopback (implicit session) during this pair-code
-    /// generation ([`pair_epoch`]).
+    /// generation: `epoch` is the generation's random nonce
+    /// ([`AuthStore::pair_generation`], 64 hex). Records written by builds
+    /// that stored a hash of the code here never match a nonce and are
+    /// revoked on the first sweep.
     Loopback { epoch: String },
 }
 
@@ -211,8 +211,8 @@ impl Binding {
 }
 
 /// Is the minting session still alive? (`111 dashboard rotate` empties the
-/// session file and changes the pair code; logout / forgetting a companion
-/// removes one session.)
+/// session file and starts a new pair-code generation; logout / forgetting a
+/// companion removes one session.)
 pub fn binding_alive(api: &ApiState, b: &Binding) -> bool {
     match b {
         Binding::Session { hash } => api
@@ -222,24 +222,37 @@ pub fn binding_alive(api: &ApiState, b: &Binding) -> bool {
             .any(|s| ct_eq(s.hash.as_bytes(), hash.as_bytes())),
         Binding::Loopback { epoch } => {
             api.auth.loopback_trusted()
-                && ct_eq(
-                    epoch.as_bytes(),
-                    pair_epoch(&api.auth.pair_code()).as_bytes(),
-                )
+                && ct_eq(epoch.as_bytes(), api.auth.pair_generation().as_bytes())
         }
     }
 }
 
-/// The binding for a mint from this request: trusted loopback ⇒ the implicit
-/// session; else the first valid `s111` cookie; else `None` (refuse).
+/// Why a mint has no binding (both answer `401 unauthenticated`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NoBinding {
+    /// An `Authorization: Bearer` was presented: bearer callers (the agent's
+    /// daemon token, Layer 5 §17) never mint, whatever else they carry — the
+    /// agent does not open panels (§18.9: a radio transmit goes through a
+    /// proposal, never through a panel session).
+    Bearer,
+    /// Neither trusted loopback nor a valid `s111` session.
+    NoSession,
+}
+
+/// The binding for a mint from this request: a bearer ⇒ refused; trusted
+/// loopback ⇒ the implicit session (this pair-code generation); else the
+/// first valid `s111` cookie; else refused.
 pub fn mint_binding(
     api: &ApiState,
     ext: &axum::http::Extensions,
     headers: &HeaderMap,
-) -> Option<Binding> {
+) -> Result<Binding, NoBinding> {
+    if !auth::bearer_tokens(headers).is_empty() {
+        return Err(NoBinding::Bearer);
+    }
     if auth::trusted_loopback(api, ext) {
-        return Some(Binding::Loopback {
-            epoch: pair_epoch(&api.auth.pair_code()),
+        return Ok(Binding::Loopback {
+            epoch: api.auth.pair_generation(),
         });
     }
     api.auth
@@ -247,6 +260,7 @@ pub fn mint_binding(
         .map(|(token, _)| Binding::Session {
             hash: session_hash(&token),
         })
+        .ok_or(NoBinding::NoSession)
 }
 
 // ---------------------------------------------------------------- tickets
@@ -630,7 +644,7 @@ mod tests {
 
     fn loopback() -> Binding {
         Binding::Loopback {
-            epoch: pair_epoch("ABCD-EFGH"),
+            epoch: "5e".repeat(32),
         }
     }
 

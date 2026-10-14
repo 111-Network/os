@@ -6,12 +6,18 @@
 //! - Plain files by extension ([`routes::content_type_for`]); a directory path
 //!   serves its `index.html`. `ETag` + `If-None-Match` → `304`,
 //!   `Cache-Control: no-cache` (the bundle's own file names may or may not be
-//!   hashed; we do not guess).
+//!   hashed; we do not guess). The `ETag` is derived from the opened file's
+//!   metadata (inode, mtime, length — [`etag_of`]), never from its bytes, and
+//!   the body is streamed in [`CHUNK`]-sized reads: a request costs one
+//!   `fstat` and a bounded buffer, not the whole file in memory plus a hash
+//!   (P1 review m4).
 //! - **SPA fallback for non-API paths only**: a missing path whose last segment
 //!   has no extension (a client route) or that a browser navigates to
 //!   (`Accept: text/html`) serves the bundle's root `index.html`. Under an API
-//!   path ([`is_api_path`]) it never does — a missing file there is a
-//!   problem+json `404` (shim panels answer API paths through the shim).
+//!   path it never does — a missing file there is a problem+json `404` (shim
+//!   panels answer API paths through the shim). "API path" is judged on the
+//!   raw **and** the percent-decoded path ([`is_api_request`]), so
+//!   `/%61pi/v1/x` is an API path too.
 //! - Paths are percent-decoded once; NUL, backslash, an encoded `/`, empty and
 //!   dot segments are refused; the resolved file must stay inside the bundle
 //!   directory after canonicalization (no symlink escapes).
@@ -23,14 +29,55 @@ use axum::body::Body;
 use axum::http::{header, HeaderMap, HeaderValue, Method, StatusCode};
 use axum::response::{IntoResponse, Response};
 use sha2::{Digest, Sha256};
+use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
+use std::pin::Pin;
+use std::task::Poll;
+use tokio::io::{AsyncRead, ReadBuf};
 
 /// Largest bundle file served (a larger one is a packaging error).
 pub const MAX_FILE_BYTES: u64 = 64 * 1024 * 1024;
 
+/// Bytes read per body chunk when streaming a bundle file.
+pub const CHUNK: usize = 64 * 1024;
+
 /// `/api` and everything under `/api/` (never the SPA fallback).
 pub fn is_api_path(path: &str) -> bool {
     path == "/api" || path.starts_with("/api/")
+}
+
+/// Every `%XX` decoded once (invalid escapes kept as written, invalid UTF-8
+/// replaced). Only for *classifying* a path — never for resolving a file
+/// ([`decode_rel`] does that, strictly).
+fn decode_lossy(path: &str) -> String {
+    let bytes = path.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        let hex = bytes
+            .get(i + 1..i + 3)
+            .filter(|h| h.iter().all(u8::is_ascii_hexdigit))
+            .and_then(|h| std::str::from_utf8(h).ok())
+            .and_then(|h| u8::from_str_radix(h, 16).ok());
+        match (bytes[i], hex) {
+            (b'%', Some(b)) => {
+                out.push(b);
+                i += 3;
+            }
+            (b, _) => {
+                out.push(b);
+                i += 1;
+            }
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+/// Is the request path (raw, still percent-encoded) an API path as sent
+/// **or** once decoded? Used by the guards (API paths are same-origin only)
+/// and by [`serve`] (never the SPA fallback there).
+pub fn is_api_request(raw: &str) -> bool {
+    is_api_path(raw) || is_api_path(&decode_lossy(raw))
 }
 
 /// Percent-decode a request path once and validate it as a relative bundle
@@ -113,6 +160,53 @@ fn not_found(api: bool) -> Response {
     }
 }
 
+/// A strong `ETag` for one version of a bundle file: a digest of (inode,
+/// mtime in ns, length) — a release swap or an in-place rewrite changes at
+/// least one of them. Hashed so the tag does not publish inode numbers.
+pub fn etag_of(meta: &std::fs::Metadata) -> String {
+    let mut h = Sha256::new();
+    h.update(b"111 panel etag v1\0");
+    h.update(meta.ino().to_le_bytes());
+    h.update(meta.mtime().to_le_bytes());
+    h.update(meta.mtime_nsec().to_le_bytes());
+    h.update(meta.len().to_le_bytes());
+    let d = h.finalize();
+    let hex: String = d[..16].iter().map(|b| format!("{b:02x}")).collect();
+    format!("\"{hex}\"")
+}
+
+/// The file's bytes as a body stream: at most `len` bytes in [`CHUNK`]-sized
+/// reads (a file that shrinks mid-stream ends early — the declared length
+/// then makes hyper close the connection; one that grows is cut at `len`).
+fn file_body(file: tokio::fs::File, len: u64) -> Body {
+    let stream = futures_util::stream::unfold((file, len), |(mut file, left)| async move {
+        if left == 0 {
+            return None;
+        }
+        let want = usize::try_from(left.min(CHUNK as u64)).unwrap_or(CHUNK);
+        let mut buf = vec![0u8; want];
+        let read = std::future::poll_fn(|cx| {
+            let mut rb = ReadBuf::new(&mut buf);
+            match Pin::new(&mut file).poll_read(cx, &mut rb) {
+                Poll::Ready(Ok(())) => Poll::Ready(Ok(rb.filled().len())),
+                Poll::Ready(Err(e)) => Poll::Ready(Err(e)),
+                Poll::Pending => Poll::Pending,
+            }
+        })
+        .await;
+        match read {
+            Ok(0) => None,
+            Ok(n) => {
+                buf.truncate(n);
+                let left = left.saturating_sub(n as u64);
+                Some((Ok(axum::body::Bytes::from(buf)), (file, left)))
+            }
+            Err(e) => Some((Err(e), (file, 0))),
+        }
+    });
+    Body::from_stream(stream)
+}
+
 async fn file_response(path: &Path, rel: &str, req_headers: &HeaderMap) -> Response {
     let unavailable = || {
         Problem::new(
@@ -122,23 +216,18 @@ async fn file_response(path: &Path, rel: &str, req_headers: &HeaderMap) -> Respo
         )
         .into_response()
     };
-    if !tokio::fs::metadata(path)
-        .await
-        .is_ok_and(|m| m.len() <= MAX_FILE_BYTES)
-    {
-        return unavailable();
-    }
-    let Ok(bytes) = tokio::fs::read(path).await else {
+    // metadata from the opened handle: the tag and the length describe
+    // exactly the bytes that are streamed
+    let Ok(file) = tokio::fs::File::open(path).await else {
         return unavailable();
     };
-    let digest = Sha256::digest(&bytes);
-    let etag = format!(
-        "\"{}\"",
-        digest[..16]
-            .iter()
-            .map(|b| format!("{b:02x}"))
-            .collect::<String>()
-    );
+    let Ok(meta) = file.metadata().await else {
+        return unavailable();
+    };
+    if !meta.is_file() || meta.len() > MAX_FILE_BYTES {
+        return unavailable();
+    }
+    let etag = etag_of(&meta);
     let not_modified = req_headers
         .get_all(header::IF_NONE_MATCH)
         .iter()
@@ -147,11 +236,13 @@ async fn file_response(path: &Path, rel: &str, req_headers: &HeaderMap) -> Respo
     let mut resp = if not_modified {
         StatusCode::NOT_MODIFIED.into_response()
     } else {
-        let mut r = Response::new(Body::from(bytes));
-        r.headers_mut().insert(
+        let mut r = Response::new(file_body(file, meta.len()));
+        let h = r.headers_mut();
+        h.insert(
             header::CONTENT_TYPE,
             HeaderValue::from_static(content_type_for(rel)),
         );
+        h.insert(header::CONTENT_LENGTH, HeaderValue::from(meta.len()));
         r
     };
     let h = resp.headers_mut();
@@ -175,7 +266,7 @@ pub async fn serve(bundle: &Path, method: &Method, path: &str, headers: &HeaderM
             .insert(header::ALLOW, HeaderValue::from_static("GET, HEAD"));
         return r;
     }
-    let api = is_api_path(path);
+    let api = is_api_request(path);
     let Some(rel) = decode_rel(path) else {
         return not_found(api);
     };
@@ -237,6 +328,28 @@ mod tests {
         }
         assert!(is_api_path("/api") && is_api_path("/api/v1/x"));
         assert!(!is_api_path("/apix") && !is_api_path("/x/api/"));
+        // classified on the raw and the decoded path
+        for p in [
+            "/api",
+            "/api/v1/x",
+            "/%61pi/v1/x",
+            "/%61%70%69",
+            "/api%2Fv1",
+            "/%61pi/",
+        ] {
+            assert!(is_api_request(p), "{p}");
+        }
+        for p in [
+            "/",
+            "/apix",
+            "/%2561pi/v1",
+            "/x/%61pi/",
+            "/%zz/api/",
+            "/%",
+            "/%+61pi",
+        ] {
+            assert!(!is_api_request(p), "{p}");
+        }
         assert!(looks_like_route("messages/1") && !looks_like_route("a/b.js"));
     }
 
@@ -298,8 +411,71 @@ mod tests {
         let r = serve(b, &Method::GET, "/devices/list.json", &h).await;
         let etag = r.headers().get(header::ETAG).unwrap().clone();
         let mut h2 = HeaderMap::new();
-        h2.insert(header::IF_NONE_MATCH, etag);
+        h2.insert(header::IF_NONE_MATCH, etag.clone());
         let r = serve(b, &Method::GET, "/devices/list.json", &h2).await;
         assert_eq!(r.status(), StatusCode::NOT_MODIFIED);
+        // a rewrite of the file is a new version
+        std::fs::write(b.join("devices/list.json"), "{\"devices\":[1]}").unwrap();
+        let r = serve(b, &Method::GET, "/devices/list.json", &h2).await;
+        assert_eq!(r.status(), StatusCode::OK);
+        assert_ne!(r.headers().get(header::ETAG), Some(&etag));
+        // encoded API paths are API paths: never the SPA, problem+json 404
+        for p in ["/%61pi/v1/fromradio", "/%61pi"] {
+            let (s, ct, t) = body(serve(b, &Method::GET, p, &h).await).await;
+            assert_eq!(
+                (s, ct.as_deref()),
+                (StatusCode::NOT_FOUND, Some("application/problem+json")),
+                "{p}"
+            );
+            assert_ne!(t, "<html>root</html>", "{p}");
+        }
+    }
+
+    #[tokio::test]
+    async fn etag_is_metadata_and_bodies_stream() {
+        let dir = tempfile::tempdir().unwrap();
+        let b = dir.path();
+        // a file larger than one chunk, not a multiple of it
+        let big: Vec<u8> = (0..(CHUNK * 3 + 17)).map(|i| (i % 251) as u8).collect();
+        std::fs::write(b.join("big.bin"), &big).unwrap();
+        std::fs::write(b.join("index.html"), "<html>root</html>").unwrap();
+        let meta = std::fs::metadata(b.join("big.bin")).unwrap();
+        let h = HeaderMap::new();
+        let r = serve(b, &Method::GET, "/big.bin", &h).await;
+        assert_eq!(r.status(), StatusCode::OK);
+        // the tag comes from (inode, mtime, length), never from the bytes
+        assert_eq!(
+            r.headers().get(header::ETAG).unwrap().to_str().unwrap(),
+            etag_of(&meta)
+        );
+        assert_eq!(
+            r.headers().get(header::CONTENT_LENGTH).unwrap(),
+            &HeaderValue::from(big.len() as u64)
+        );
+        // streamed: no exact in-memory body, and every byte arrives
+        assert_ne!(
+            axum::body::HttpBody::size_hint(r.body()).exact(),
+            Some(big.len() as u64),
+            "not buffered"
+        );
+        let got = axum::body::to_bytes(r.into_body(), 1 << 22).await.unwrap();
+        assert_eq!(got.as_ref(), big.as_slice());
+        // a 304 never opens a body
+        let mut h2 = HeaderMap::new();
+        h2.insert(
+            header::IF_NONE_MATCH,
+            HeaderValue::from_str(&etag_of(&meta)).unwrap(),
+        );
+        let r = serve(b, &Method::GET, "/big.bin", &h2).await;
+        assert_eq!(r.status(), StatusCode::NOT_MODIFIED);
+        let got = axum::body::to_bytes(r.into_body(), 16).await.unwrap();
+        assert!(got.is_empty());
+        // same metadata ⇒ same tag; another file ⇒ another tag
+        let other = std::fs::metadata(b.join("index.html")).unwrap();
+        assert_eq!(
+            etag_of(&meta),
+            etag_of(&std::fs::metadata(b.join("big.bin")).unwrap())
+        );
+        assert_ne!(etag_of(&meta), etag_of(&other));
     }
 }

@@ -104,16 +104,22 @@ impl DashboardState {
 
 pub type SharedState = Arc<RwLock<DashboardState>>;
 
-/// Serve `app` on `listener` with peer addresses attached (auth needs them).
+/// Serve `app` on `listener` with peer addresses attached (auth needs them),
+/// under Layer 5 §13's "header-read and idle timeouts on every listener": the
+/// panel listeners' HTTP/1.1 loop with [`Timeouts::dashboard`] (a 10 s
+/// header-read timeout re-armed per request head — slow heads and idle
+/// keep-alive connections are closed — and an I/O idle timeout longer than
+/// the longest silent exchange; no connection caps). axum's own `serve` has
+/// neither timeout. Runs until the task is dropped.
+///
+/// [`Timeouts::dashboard`]: crate::daemon::panels::listener::Timeouts::dashboard
 pub async fn serve_listener(
     listener: tokio::net::TcpListener,
     app: axum::Router,
 ) -> std::io::Result<()> {
-    axum::serve(
-        listener,
-        app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
-    )
-    .await
+    use crate::daemon::panels::listener as conn;
+    conn::serve(listener, app, conn::Timeouts::dashboard()).await;
+    Ok(())
 }
 
 /// Compat entry (tests, tools): serve on one address with an in-memory auth

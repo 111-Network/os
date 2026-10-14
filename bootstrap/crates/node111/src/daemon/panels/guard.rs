@@ -8,7 +8,14 @@
 //!   Host is refused.
 //! - **`Sec-Fetch-Site`:** `cross-site` is refused for any method and mode;
 //!   values other than `same-origin` / `same-site` / `none` are refused too
-//!   (fail closed).
+//!   (fail closed). **On an API path** ([`static_files::is_api_request`], raw
+//!   or decoded) only `same-origin` passes when the header is present: every
+//!   other origin on the node's host (the dashboard, another panel, any other
+//!   local service) is *same-site* with the panel and `SameSite=Strict` still
+//!   attaches the cookie, so a same-site `GET` would otherwise drive the API
+//!   (e.g. dequeue the shim's FromRadio frames) with the victim's cookie. A
+//!   panel's own JS is same-origin with it; the frame / tab navigation that is
+//!   legitimately same-site never targets `/api` (P1 review m1).
 //! - **Origin authority:** for non-GET/HEAD requests, WebSocket upgrades and
 //!   SSE opens, `Origin` (else `Referer`) must name exactly the request
 //!   authority (host **and** port). §13 asks for this when `Sec-Fetch-*` is
@@ -18,6 +25,7 @@
 //! - **`OPTIONS`** (and `TRACE` / `CONNECT`) are refused: there is no
 //!   legitimate preflight against a panel origin.
 
+use super::static_files;
 use crate::daemon::dashboard::api_v1::Problem;
 use crate::daemon::dashboard::routes;
 use axum::http::{header, HeaderMap, Method, StatusCode};
@@ -88,6 +96,9 @@ pub enum Refusal {
     Host,
     /// `Sec-Fetch-Site: cross-site` (or an unknown value).
     CrossSite,
+    /// An API path fetched from anything but the panel's own origin
+    /// (`Sec-Fetch-Site` present and not `same-origin`).
+    NotSameOrigin,
     /// Origin/Referer authority missing or not the request authority.
     Origin,
     /// `OPTIONS` / `TRACE` / `CONNECT`.
@@ -107,6 +118,12 @@ impl Refusal {
                 "bad_request",
                 "cross-site request refused",
             ),
+            Refusal::NotSameOrigin => Problem::new(
+                StatusCode::FORBIDDEN,
+                "bad_request",
+                "panel API refused to other origins",
+            )
+            .detail("Only the panel's own pages call its API."),
             Refusal::Origin => Problem::new(
                 StatusCode::FORBIDDEN,
                 "bad_request",
@@ -168,10 +185,12 @@ fn needs_origin(method: &Method, headers: &HeaderMap) -> bool {
     upgrade || sse
 }
 
-/// Run every guard. `Ok` carries the accepted authority (used for the
+/// Run every guard on a request for `path` (the raw request path, still
+/// percent-encoded). `Ok` carries the accepted authority (used for the
 /// response's `frame-ancestors`).
 pub fn check(
     method: &Method,
+    path: &str,
     headers: &HeaderMap,
     port: u16,
     policy: &HostPolicy<'_>,
@@ -180,13 +199,14 @@ pub fn check(
     if matches!(*method, Method::OPTIONS | Method::TRACE | Method::CONNECT) {
         return Err(Refusal::Method);
     }
+    let api = static_files::is_api_request(path);
     for v in headers.get_all("sec-fetch-site") {
         let v = v.to_str().map_err(|_| Refusal::CrossSite)?;
-        if !matches!(
-            v.trim().to_ascii_lowercase().as_str(),
-            "same-origin" | "same-site" | "none"
-        ) {
-            return Err(Refusal::CrossSite);
+        match v.trim().to_ascii_lowercase().as_str() {
+            "same-origin" => {}
+            "same-site" | "none" if !api => {}
+            "same-site" | "none" => return Err(Refusal::NotSameOrigin),
+            _ => return Err(Refusal::CrossSite),
         }
     }
     if needs_origin(method, headers) {
@@ -301,7 +321,7 @@ mod tests {
         let ok = |m: Method, extra: &[(&str, &str)]| {
             let mut v = vec![host];
             v.extend_from_slice(extra);
-            check(&m, &hm(&v), P, &p)
+            check(&m, "/", &hm(&v), P, &p)
         };
         // GET: fetch metadata only
         assert!(ok(Method::GET, &[]).is_ok());
@@ -376,9 +396,60 @@ mod tests {
         }
         // the Host guard runs first
         assert_eq!(
-            check(&Method::GET, &hm(&[("host", "localhost:11190")]), P, &p),
+            check(
+                &Method::GET,
+                "/",
+                &hm(&[("host", "localhost:11190")]),
+                P,
+                &p
+            ),
             Err(Refusal::Host)
         );
+    }
+
+    #[test]
+    fn api_paths_are_same_origin_only() {
+        let own = [];
+        let p = pol(false, &own, false);
+        let at = |path: &str, site: Option<&str>| {
+            let mut v = vec![("host", "127.0.0.1:11190")];
+            if let Some(s) = site {
+                v.push(("sec-fetch-site", s));
+            }
+            check(&Method::GET, path, &hm(&v), P, &p)
+        };
+        for path in [
+            "/api",
+            "/api/",
+            "/api/v1/fromradio",
+            "/%61pi/v1/fromradio",
+            "/api%2Fv1",
+        ] {
+            assert!(at(path, Some("same-origin")).is_ok(), "{path}");
+            // no Fetch Metadata (older browsers, curl): SameSite=Strict and
+            // the Origin rule for non-GET still apply
+            assert!(at(path, None).is_ok(), "{path}");
+            for site in ["same-site", "none", "Same-Site"] {
+                assert_eq!(
+                    at(path, Some(site)),
+                    Err(Refusal::NotSameOrigin),
+                    "{path} {site}"
+                );
+            }
+            assert_eq!(at(path, Some("cross-site")), Err(Refusal::CrossSite));
+        }
+        // the frame / tab navigation stays same-site on non-API paths
+        for path in ["/", "/messages/7", "/apix", "/x/api/v1", "/%2561pi/v1"] {
+            assert!(at(path, Some("same-site")).is_ok(), "{path}");
+            assert!(at(path, Some("none")).is_ok(), "{path}");
+        }
+        // a non-GET API call from the panel's own page passes
+        let v = [
+            ("host", "127.0.0.1:11190"),
+            ("sec-fetch-site", "same-origin"),
+            ("origin", "http://127.0.0.1:11190"),
+        ];
+        assert!(check(&Method::PUT, "/api/v1/toradio", &hm(&v), P, &p).is_ok());
     }
 
     #[test]
@@ -405,6 +476,7 @@ mod tests {
         for r in [
             Refusal::Host,
             Refusal::CrossSite,
+            Refusal::NotSameOrigin,
             Refusal::Origin,
             Refusal::Method,
         ] {

@@ -9,7 +9,10 @@
 //!   own origin: `http://<the dashboard host as the browser typed it>:<slot>
 //!   <entry.path>?p111_ticket=<128-bit hex>` — single use, 30 s, bound to the
 //!   minting session (trusted loopback ⇒ the implicit session; otherwise the
-//!   `s111` session; a bearer-only caller gets `401`) and the peer. The URL is
+//!   `s111` session) and the peer. A bearer caller gets `401` whatever else it
+//!   carries, on trusted loopback too: the agent's daemon token passes
+//!   `require_session` but never opens a panel (§18.9 — it sends only through
+//!   proposals; [`ticket::NoBinding::Bearer`]). The URL is
 //!   only ever in this reply (`Cache-Control: no-store`). `404 not_found` for
 //!   an unknown panel or one whose service is not set up; `403 loopback_only`
 //!   for a loopback-only panel asked for from a non-loopback dashboard host.
@@ -62,14 +65,25 @@ async fn open_session(
     let Some(peer) = auth::peer_addr(&ext).map(|a| a.ip()) else {
         return Problem::new(StatusCode::FORBIDDEN, "bad_request", "unknown peer").into_response();
     };
-    let Some(binding) = ticket::mint_binding(&api, &ext, &headers) else {
-        return Problem::new(
-            StatusCode::UNAUTHORIZED,
-            "unauthenticated",
-            "a dashboard session is required",
-        )
-        .detail("Panels open from a paired dashboard (or the node's own trusted browser).")
-        .into_response();
+    let binding = match ticket::mint_binding(&api, &ext, &headers) {
+        Ok(b) => b,
+        Err(why) => {
+            let detail = match why {
+                ticket::NoBinding::Bearer => {
+                    "Panels open from the dashboard, never with a bearer token."
+                }
+                ticket::NoBinding::NoSession => {
+                    "Panels open from a paired dashboard (or the node's own trusted browser)."
+                }
+            };
+            return Problem::new(
+                StatusCode::UNAUTHORIZED,
+                "unauthenticated",
+                "a dashboard session is required",
+            )
+            .detail(detail)
+            .into_response();
+        }
     };
     // the ticket URL is built on the host the browser typed (never a snapshot)
     let typed = headers

@@ -284,6 +284,13 @@ pub struct PairFile {
     /// Display form `XXXX-XXXX`.
     pub code: String,
     pub created: String,
+    /// Random nonce of this pair-code generation (32 bytes, lowercase hex),
+    /// new with every code. What "minted during this pair-code generation"
+    /// binds to (Layer 5 §13: trusted-loopback panel sessions die with a
+    /// rotation) without deriving anything from the ~39-bit code. Absent in
+    /// files written before it existed ([`AuthStore::pair_generation`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub generation: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -329,6 +336,7 @@ fn new_pair_file() -> PairFile {
         schema: 1,
         code: generate_code(),
         created: now_rfc3339(),
+        generation: Some(hex(&random_bytes::<32>())),
     }
 }
 
@@ -511,7 +519,12 @@ impl AuthStore {
             if st.is_some() && st != inner.pair_stamp {
                 match read_json::<PairFile>(&p) {
                     Ok(pf) => {
-                        if let Some(pf) = pf.filter(|pf| normalize_code(&pf.code).is_some()) {
+                        if let Some(mut pf) = pf.filter(|pf| normalize_code(&pf.code).is_some()) {
+                            // a file from before the nonce: one for this
+                            // lifetime (never written back — that could undo
+                            // a concurrent `111 dashboard rotate`)
+                            pf.generation
+                                .get_or_insert_with(|| hex(&random_bytes::<32>()));
                             inner.pair = pf;
                             inner.total_failures = 0;
                         }
@@ -592,6 +605,21 @@ impl AuthStore {
         let mut inner = self.inner.lock().unwrap();
         self.refresh(&mut inner);
         inner.pair.code.clone()
+    }
+
+    /// The current pair-code generation's nonce ([`PairFile::generation`]).
+    /// Changes with every new code (`111 dashboard rotate`, the failure
+    /// rotation); a pair file written before the nonce existed gets one for
+    /// this daemon lifetime only (so a restart counts as a new generation
+    /// until the next rotation writes one).
+    pub fn pair_generation(&self) -> String {
+        let mut inner = self.inner.lock().unwrap();
+        self.refresh(&mut inner);
+        inner
+            .pair
+            .generation
+            .get_or_insert_with(|| hex(&random_bytes::<32>()))
+            .clone()
     }
 
     /// Validate a cookie token. Returns the session's `created` timestamp.

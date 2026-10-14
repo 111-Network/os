@@ -9,13 +9,21 @@
 //! binding, untrusted loopback (Termux) still needing the ticket, and
 //! revocation on `111 dashboard rotate`, panel disable and LAN-off.
 //!
+//! P1 bounce (review `wf_c857767c-bde`, triage `plan/layer-5-review/wave-1.md`):
+//! API paths are same-origin only under Fetch Metadata (m1), bearer callers
+//! never mint (m2), encoded API paths never get the SPA and bundle files are
+//! streamed with a metadata ETag (m4), per-peer connection cap + absolute
+//! shim body deadline + the main listener's header-read timeout (m5), and the
+//! trusted-loopback binding is a random pair-generation nonce (m6).
+//!
 //! Harness: a temp node root with the shipped `meshtastic.toml` (optionally
 //! edited), a temp bundle under `<root>/current/panels/meshtastic-web`, a stub
 //! shim registered as `meshtastic-http`, the dashboard app on an ephemeral
 //! loopback port and the panel's own listener on a free port (its slot block
-//! narrowed to that one port). LAN peers are simulated on the dashboard with
-//! axum's `MockConnectInfo`; LAN sharing is simulated with `force_loopback`
-//! so no test opens a LAN socket.
+//! narrowed to that one port; a port another test bound first is retried with
+//! a fresh one, m3). LAN peers are simulated on the dashboard with axum's
+//! `MockConnectInfo`; LAN sharing is simulated with `force_loopback` so no
+//! test opens a LAN socket.
 
 use axum::extract::connect_info::MockConnectInfo;
 use futures_util::future::BoxFuture;
@@ -24,8 +32,8 @@ use node111::daemon::dashboard::{
     routes, serve_listener, ApiConfig, ApiState, DashboardState, SharedState,
 };
 use node111::daemon::panels::{
-    self, manifest, ticket, PanelHost, PanelsConfig, Shim, ShimError, ShimRegistry, ShimRequest,
-    ShimResponse, ShimSession,
+    self, listener::Timeouts, manifest, ticket, PanelHost, PanelsConfig, Shim, ShimError,
+    ShimRegistry, ShimRequest, ShimResponse, ShimSession,
 };
 use node111::daemon::services::ServiceId;
 use node111::daemon::DaemonLayout;
@@ -164,12 +172,57 @@ async fn wait_closed(port: u16) {
     panic!("listener on {port} still accepting");
 }
 
+/// A port that was free a moment ago — only a guess until something binds it
+/// (the fixture retries when another test got there first).
 fn free_port() -> u16 {
     std::net::TcpListener::bind(("127.0.0.1", 0))
         .unwrap()
         .local_addr()
         .unwrap()
         .port()
+}
+
+/// Is the panel's IPv4 loopback listener ours on `port`?
+fn bound_v4(host: &PanelHost, port: u16) -> bool {
+    host.bound_addrs(ServiceId::Meshtastic)
+        .iter()
+        .any(|a| a.is_ipv4() && a.port() == port)
+}
+
+/// How a raw exchange ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum End {
+    /// The server closed the connection (EOF or reset).
+    Closed,
+    /// Nothing more within the read timeout: the connection is still open.
+    TimedOut,
+}
+
+/// Raw bytes on `127.0.0.1:port`: what came back and how it ended.
+fn raw_exchange(port: u16, bytes: &[u8], wait: Duration) -> (String, End) {
+    let mut conn = TcpStream::connect(("127.0.0.1", port)).unwrap();
+    conn.set_read_timeout(Some(wait)).unwrap();
+    // a write into a connection the server already closed may fail: that is
+    // a close, read below
+    let _ = conn.write_all(bytes);
+    let mut raw = Vec::new();
+    let mut buf = [0u8; 4096];
+    let end = loop {
+        match conn.read(&mut buf) {
+            Ok(0) => break End::Closed,
+            Ok(n) => raw.extend_from_slice(&buf[..n]),
+            Err(e)
+                if matches!(
+                    e.kind(),
+                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                ) =>
+            {
+                break End::TimedOut
+            }
+            Err(_) => break End::Closed,
+        }
+    };
+    (String::from_utf8_lossy(&raw).into_owned(), end)
 }
 
 // ---------------------------------------------------------------- stub shim
@@ -220,6 +273,8 @@ struct Opts {
     ttl: Duration,
     force_loopback: bool,
     edit: fn(String) -> String,
+    /// Panel listener limits (default: the daemon's).
+    timeouts: Option<Timeouts>,
 }
 
 impl Default for Opts {
@@ -231,6 +286,7 @@ impl Default for Opts {
             ttl: ticket::TICKET_TTL,
             force_loopback: true,
             edit: |t| t,
+            timeouts: None,
         }
     }
 }
@@ -274,6 +330,9 @@ fn panel_config(layout: &DaemonLayout, port: u16, o: &Opts) -> PanelsConfig {
     c.ticket_ttl = o.ttl;
     c.proc_net = layout.root.join("no-proc-net");
     c.force_loopback = o.force_loopback;
+    if let Some(t) = o.timeouts {
+        c.timeouts = t;
+    }
     c
 }
 
@@ -294,17 +353,28 @@ async fn fixture(o: Opts) -> Fx {
     let stub = Arc::new(Stub::default());
     let mut shims = ShimRegistry::new();
     shims.register(Arc::clone(&stub) as Arc<dyn Shim>).unwrap();
-    let port = free_port();
     let text = (o.edit)(shipped_manifest());
-    let host = Arc::new(PanelHost::new(
-        panel_config(&layout, port, &o),
-        vec![("meshtastic.toml".into(), text.into_bytes())],
-        &shims,
-        o.lan,
-    ));
-    assert_eq!(host.registered().len(), 1, "the declaration registers");
-    api.insert_ext(Arc::clone(&host));
-    set_enabled(&host, &api, true).await;
+    // the panel's slot is a free-port guess: another test may bind it between
+    // the probe and the panel's bind (EADDRINUSE) — then try a fresh one
+    let mut tries = 0;
+    let (port, host) = loop {
+        tries += 1;
+        let port = free_port();
+        let host = Arc::new(PanelHost::new(
+            panel_config(&layout, port, &o),
+            vec![("meshtastic.toml".into(), text.clone().into_bytes())],
+            &shims,
+            o.lan,
+        ));
+        assert_eq!(host.registered().len(), 1, "the declaration registers");
+        api.insert_ext(Arc::clone(&host));
+        set_enabled(&host, &api, true).await;
+        if bound_v4(&host, port) {
+            break (port, host);
+        }
+        assert!(tries < 20, "no bindable panel port after {tries} tries");
+        set_enabled(&host, &api, false).await;
+    };
     let dash = serve_dash(&api, None).await;
     Fx {
         api,
@@ -321,6 +391,17 @@ async fn fixture(o: Opts) -> Fx {
 async fn set_enabled(host: &Arc<PanelHost>, api: &Arc<ApiState>, on: bool) {
     let setup = move |id: ServiceId| on && id == ServiceId::Meshtastic;
     host.reconcile(api, Some(&setup)).await;
+}
+
+/// Re-enable after a disable: the slot must bind again (fail loudly if some
+/// other test took the port in between, instead of talking to its listener).
+async fn reenable(fx: &Fx) {
+    set_enabled(&fx.host, &fx.api, true).await;
+    assert!(
+        bound_v4(&fx.host, fx.port),
+        "panel port {} rebinds",
+        fx.port
+    );
 }
 
 /// Serve the dashboard; `peer: Some(addr)` makes every request come from it.
@@ -930,8 +1011,17 @@ async fn spa_fallback_vs_api_paths() {
     }
     // upstream down → 502 upstream_error (problem+json)
     get("/api/v1/down").problem(502, "upstream_error");
-    // unknown API paths → problem 404, never the SPA
-    for p in ["/api/v1/nope", "/api", "/api/", "/api/v1/nope.html"] {
+    // unknown API paths → problem 404, never the SPA — judged on the decoded
+    // path too (`%61` = `a`)
+    for p in [
+        "/api/v1/nope",
+        "/api",
+        "/api/",
+        "/api/v1/nope.html",
+        "/%61pi/v1/nope",
+        "/%61pi/v1/fromradio",
+        "/%61%70%69",
+    ] {
         let r = fx.panel(
             "GET",
             p,
@@ -1033,7 +1123,7 @@ async fn dashboard_csp_is_per_host() {
     set_enabled(&fx.host, &fx.api, false).await;
     assert_eq!(csp(&format!("127.0.0.1:{d}")), routes::CSP);
     wait_closed(p).await;
-    set_enabled(&fx.host, &fx.api, true).await;
+    reenable(&fx).await;
     assert!(csp(&format!("127.0.0.1:{d}")).contains("frame-src"));
 
     // a loopback-only panel is never framed on a LAN host
@@ -1211,7 +1301,7 @@ async fn revocation_on_rotate_disable_and_lan_off() {
         (Some(false), Some(false))
     );
     // re-enabled: same slot, a fresh ticket works
-    set_enabled(&fx.host, &fx.api, true).await;
+    reenable(&fx).await;
     let c = cookie_header(&fx.open());
     assert_eq!(fx.panel("GET", "/", &[("Cookie", &c)]).status, 200);
 
@@ -1340,4 +1430,386 @@ async fn panel_list_slots_and_registry_facts() {
     );
     assert_eq!(r.json()["panels"], serde_json::json!([]));
     assert_eq!(r.header("content-security-policy"), Some(routes::CSP));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn api_paths_are_same_origin_only() {
+    // m1: every other origin on the node's host is same-site with the panel
+    // and SameSite=Strict still sends the cookie — such a GET must not drive
+    // the API (a `fromradio` GET dequeues the real panel's frames)
+    let fx = fixture(Opts::default()).await;
+    let c = cookie_header(&fx.open());
+    for site in ["same-site", "none"] {
+        for path in ["/api/v1/fromradio", "/%61pi/v1/fromradio", "/api"] {
+            for mode in ["no-cors", "navigate", "cors"] {
+                fx.panel(
+                    "GET",
+                    path,
+                    &[
+                        ("Cookie", &c),
+                        ("Sec-Fetch-Site", site),
+                        ("Sec-Fetch-Mode", mode),
+                    ],
+                )
+                .problem(403, "bad_request");
+            }
+        }
+    }
+    assert!(
+        fx.stub.seen.lock().unwrap().is_empty(),
+        "a same-site fetch never reached the shim"
+    );
+    // the frame / tab navigation (same-site, non-API) still works, and so do
+    // the panel's own same-origin calls
+    let r = fx.panel(
+        "GET",
+        "/",
+        &[
+            ("Cookie", &c),
+            ("Sec-Fetch-Site", "same-site"),
+            ("Sec-Fetch-Mode", "navigate"),
+        ],
+    );
+    assert_eq!((r.status, r.body.as_str()), (200, INDEX));
+    let t = fx.mint(&[]);
+    let r = fx.panel(
+        "GET",
+        &t,
+        &[
+            ("Sec-Fetch-Site", "same-site"),
+            ("Sec-Fetch-Mode", "navigate"),
+        ],
+    );
+    assert_eq!(r.status, 303, "the swap is a same-site navigation");
+    let r = fx.panel(
+        "GET",
+        "/api/v1/fromradio",
+        &[("Cookie", &c), ("Sec-Fetch-Site", "same-origin")],
+    );
+    assert_eq!(r.status, 200);
+    let r = send(
+        fx.port,
+        "PUT",
+        "/api/v1/toradio",
+        &fx.ph(),
+        &[
+            ("Cookie", &c),
+            ("Sec-Fetch-Site", "same-origin"),
+            ("Origin", &fx.origin()),
+        ],
+        Some("\u{1}"),
+    );
+    assert_eq!(r.status, 200);
+    assert_eq!(fx.stub.seen.lock().unwrap().len(), 2);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn bearer_callers_never_mint() {
+    // m2 (lead decision): the agent's daemon token passes require_session but
+    // never opens a panel — on trusted loopback too
+    let fx = fixture(Opts::default()).await;
+    let token = auth::DaemonToken::mint().unwrap();
+    fx.api.insert_ext(token.clone());
+    let bearer = format!("Bearer {}", token.as_str());
+    let dh = format!("127.0.0.1:{}", fx.dash);
+    // the bearer is accepted by the dashboard (it lists panels) …
+    let r = send(
+        fx.dash,
+        "GET",
+        "/api/v1/panels",
+        &dh,
+        &[("Authorization", &bearer)],
+        None,
+    );
+    assert_eq!(r.status, 200, "{}", r.body);
+    // … but cannot mint, whatever else it carries
+    fx.mint_on(fx.dash, &dh, &[("Authorization", &bearer)])
+        .problem(401, "unauthenticated");
+    assert!(fx.host.tickets.is_empty(), "no ticket minted");
+    // a wrong bearer stays the session gate's 401
+    fx.mint_on(fx.dash, &dh, &[("Authorization", "Bearer 00")])
+        .problem(401, "unauthenticated");
+    // the node's own browser (no bearer) still mints
+    assert_eq!(fx.mint_on(fx.dash, &dh, &[]).status, 200);
+
+    // untrusted loopback: a paired cookie plus the bearer is still refused
+    let tx = fixture(Opts {
+        trust_loopback: false,
+        ..Opts::default()
+    })
+    .await;
+    tx.api.insert_ext(token.clone());
+    let s = format!("s111={}", pair(tx.dash, &tx.api));
+    let th = format!("127.0.0.1:{}", tx.dash);
+    tx.mint_on(tx.dash, &th, &[("Cookie", &s), ("Authorization", &bearer)])
+        .problem(401, "unauthenticated");
+    assert_eq!(tx.mint_on(tx.dash, &th, &[("Cookie", &s)]).status, 200);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn bundle_files_stream_with_a_metadata_etag() {
+    // m4: the ETag comes from the file's metadata and the body is streamed
+    let fx = fixture(Opts::default()).await;
+    let c = cookie_header(&fx.open());
+    let bundle = fx.layout.root.join("current/panels/meshtastic-web");
+    let big: String = (0..300_000)
+        .map(|i| char::from(b'a' + (i % 26) as u8))
+        .collect();
+    std::fs::write(bundle.join("assets/big.js"), &big).unwrap();
+    let r = fx.panel("GET", "/assets/big.js", &[("Cookie", &c)]);
+    assert_eq!(r.status, 200);
+    assert_eq!(r.body.len(), big.len());
+    assert!(r.body == big, "every byte, in order");
+    let meta = std::fs::metadata(bundle.join("assets/big.js")).unwrap();
+    let etag = r.header("etag").expect("ETag").to_string();
+    assert_eq!(etag, panels::static_files::etag_of(&meta));
+    assert_eq!(r.header("cache-control"), Some("no-cache"));
+    // revalidation: 304 with no body
+    let r = fx.panel(
+        "GET",
+        "/assets/big.js",
+        &[("Cookie", &c), ("If-None-Match", &etag)],
+    );
+    assert_eq!((r.status, r.body.as_str()), (304, ""));
+    // a new version of the file is a new tag
+    std::fs::write(bundle.join("assets/big.js"), "console.log(2)").unwrap();
+    let r = fx.panel(
+        "GET",
+        "/assets/big.js",
+        &[("Cookie", &c), ("If-None-Match", &etag)],
+    );
+    assert_eq!((r.status, r.body.as_str()), (200, "console.log(2)"));
+    assert_ne!(r.header("etag"), Some(etag.as_str()));
+    // HEAD: the length without the body
+    let r = send(
+        fx.port,
+        "HEAD",
+        "/assets/big.js",
+        &fx.ph(),
+        &[("Cookie", &c)],
+        None,
+    );
+    assert_eq!(r.status, 200);
+    assert_eq!(r.header("content-length"), Some("14"));
+    assert_eq!(r.body, "");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn per_peer_cap_and_body_deadline() {
+    // m5: one peer cannot hold every slot; a trickled shim body cannot hold
+    // one for long (absolute deadline, not the per-byte idle clock)
+    let t = Timeouts {
+        max_conns_per_peer: 4,
+        body: Duration::from_millis(400),
+        ..Timeouts::default()
+    };
+    let fx = fixture(Opts {
+        timeouts: Some(t),
+        ..Opts::default()
+    })
+    .await;
+    let c = cookie_header(&fx.open());
+
+    // the peer's 4 idle connections hold its share; the 5th is closed on accept
+    let held: Vec<TcpStream> = (0..4)
+        .map(|_| TcpStream::connect(("127.0.0.1", fx.port)).unwrap())
+        .collect();
+    let refused = raw_exchange(
+        fx.port,
+        format!("GET / HTTP/1.1\r\nHost: {}\r\n\r\n", fx.ph()).as_bytes(),
+        Duration::from_secs(5),
+    );
+    assert_eq!(
+        refused,
+        (String::new(), End::Closed),
+        "closed on accept, unanswered"
+    );
+    // another peer address (127.0.0.2 is loopback too) is not affected
+    let other = tokio::net::TcpSocket::new_v4().unwrap();
+    other.bind("127.0.0.2:0".parse().unwrap()).unwrap();
+    let mut other = other
+        .connect(SocketAddr::from(([127, 0, 0, 1], fx.port)))
+        .await
+        .unwrap()
+        .into_std()
+        .unwrap();
+    other.set_nonblocking(false).unwrap();
+    other
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
+    other
+        .write_all(
+            format!(
+                "GET / HTTP/1.1\r\nHost: {}\r\nConnection: close\r\n\r\n",
+                fx.ph()
+            )
+            .as_bytes(),
+        )
+        .unwrap();
+    let mut answer = String::new();
+    other.read_to_string(&mut answer).unwrap();
+    assert!(answer.starts_with("HTTP/1.1 401"), "{answer}");
+    // the share comes back when its connections close
+    drop(held);
+    let mut served = false;
+    for _ in 0..100 {
+        let (answer, _) = raw_exchange(
+            fx.port,
+            format!(
+                "GET / HTTP/1.1\r\nHost: {}\r\nConnection: close\r\n\r\n",
+                fx.ph()
+            )
+            .as_bytes(),
+            Duration::from_secs(5),
+        );
+        if answer.starts_with("HTTP/1.1 401") {
+            served = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(served, "slots released");
+
+    // a shim body that is not complete within the deadline: 408, the shim
+    // never sees it, and the connection is closed
+    let started = std::time::Instant::now();
+    let head = format!(
+        "PUT /api/v1/toradio HTTP/1.1\r\nHost: {}\r\nCookie: {c}\r\nOrigin: {}\r\nContent-Length: 10\r\n\r\nx",
+        fx.ph(),
+        fx.origin()
+    );
+    let (answer, end) = raw_exchange(fx.port, head.as_bytes(), Duration::from_secs(10));
+    assert!(answer.starts_with("HTTP/1.1 408"), "{answer}");
+    assert_eq!(end, End::Closed, "the unread body closes the connection");
+    assert!(answer.contains("application/problem+json"), "{answer}");
+    assert!(
+        started.elapsed() < Duration::from_secs(5),
+        "{:?}",
+        started.elapsed()
+    );
+    assert!(fx.stub.seen.lock().unwrap().is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn main_listener_has_a_header_read_timeout() {
+    // m5: §13 "header-read and idle timeouts on every listener" — the main
+    // dashboard listener closes a connection whose request head never ends
+    let fx = fixture(Opts::default()).await;
+    let started = std::time::Instant::now();
+    let (_, end) = raw_exchange(
+        fx.dash,
+        b"GET /api/v1/panels HTTP/1.1\r\nHost: 127.0.0.1\r\n",
+        Duration::from_secs(25),
+    );
+    let took = started.elapsed();
+    assert_eq!(end, End::Closed, "still open after {took:?}");
+    assert!(took < Duration::from_secs(20), "closed after {took:?}");
+    assert!(
+        took >= Duration::from_secs(5),
+        "not before the timeout: {took:?}"
+    );
+    // a complete request is still served
+    let r = send(
+        fx.dash,
+        "GET",
+        "/api/v1/panels",
+        &format!("127.0.0.1:{}", fx.dash),
+        &[],
+        None,
+    );
+    assert_eq!(r.status, 200);
+    // the panel listener too (its timeout narrowed for the test)
+    let quick = fixture(Opts {
+        timeouts: Some(Timeouts {
+            header_read: Duration::from_millis(300),
+            ..Timeouts::default()
+        }),
+        ..Opts::default()
+    })
+    .await;
+    let started = std::time::Instant::now();
+    let (_, end) = raw_exchange(
+        quick.port,
+        b"GET / HTTP/1.1\r\nHost: 127.0.0.1\r\n",
+        Duration::from_secs(10),
+    );
+    assert_eq!(end, End::Closed);
+    assert!(started.elapsed() < Duration::from_secs(5));
+}
+
+/// The pre-bounce binding: sha256("111 panel epoch v1\0" || code), hex.
+fn code_hash(code: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let mut h = Sha256::new();
+    h.update(b"111 panel epoch v1\0");
+    h.update(code.as_bytes());
+    h.finalize().iter().map(|b| format!("{b:02x}")).collect()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn loopback_binding_is_a_random_generation_nonce() {
+    // m6: nothing recorded for a trusted-loopback session derives from the
+    // ~39-bit pair code; the generation survives a restart and dies with a
+    // rotation (CLI and the 20-failure rotation)
+    let fx = fixture(Opts::default()).await;
+    let _c = fx.open();
+    let state = fx.layout.state_dir();
+    let code = auth::read_pair_code(&state).unwrap().expect("pair code");
+    let rec = fx.host.sessions.snapshot()[0].clone();
+    let ticket::Binding::Loopback { epoch } = &rec.binding else {
+        panic!("{:?}", rec.binding)
+    };
+    assert_eq!(epoch.len(), 64);
+    assert_ne!(epoch, &code_hash(&code));
+    let text = std::fs::read_to_string(state.join(ticket::SESSIONS_FILE)).unwrap();
+    assert!(!text.contains(&code_hash(&code)), "{text}");
+    assert!(!text.contains(&code), "{text}");
+    // the nonce lives beside the code (0600 pair file), so a restart keeps
+    // the panel session
+    let pair: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(state.join(auth::PAIR_FILE)).unwrap()).unwrap();
+    assert_eq!(pair["generation"].as_str(), Some(epoch.as_str()));
+    let restart = || {
+        let dash: SharedState = Arc::new(RwLock::new(DashboardState::new("2026.10.14")));
+        let mut cfg = ApiConfig::new(fx.layout.clone(), false);
+        cfg.trust_loopback = true;
+        ApiState::new(dash, cfg)
+    };
+    assert!(ticket::binding_alive(&restart(), &rec.binding));
+    // the failure rotation (20 wrong codes from anyone) starts a new one
+    for i in 0..auth::FAILS_BEFORE_ROTATE {
+        let peer: IpAddr = format!("192.168.7.{}", i + 1).parse().unwrap();
+        assert!(fx.api.auth.pair(peer, "0000-0000").is_err());
+    }
+    assert_ne!(auth::read_pair_code(&state).unwrap().unwrap(), code);
+    assert!(!ticket::binding_alive(&fx.api, &rec.binding));
+    assert_eq!(fx.host.sweep(&fx.api), 1);
+    // and so does `111 dashboard rotate`
+    let _c = fx.open();
+    let rec = fx.host.sessions.snapshot()[0].clone();
+    assert!(ticket::binding_alive(&fx.api, &rec.binding));
+    auth::rotate_files(&state).unwrap();
+    assert!(!ticket::binding_alive(&fx.api, &rec.binding));
+    assert!(!ticket::binding_alive(&restart(), &rec.binding));
+
+    // a pair file from before the nonce: a random one for this lifetime,
+    // never written back (that could undo a concurrent rotate)
+    let legacy = serde_json::json!({
+        "schema": 1,
+        "code": "BCDF-GHJK",
+        "created": "2026-10-01T00:00:00Z"
+    });
+    let body = serde_json::to_vec(&legacy).unwrap();
+    std::fs::write(state.join(auth::PAIR_FILE), &body).unwrap();
+    let api = restart();
+    let g = api.auth.pair_generation();
+    assert_eq!(g.len(), 64);
+    assert_ne!(g, code_hash("BCDF-GHJK"));
+    assert_eq!(api.auth.pair_generation(), g, "stable within a lifetime");
+    assert_eq!(std::fs::read(state.join(auth::PAIR_FILE)).unwrap(), body);
+    assert_ne!(
+        restart().auth.pair_generation(),
+        g,
+        "a restart is a new one"
+    );
 }
