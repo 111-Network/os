@@ -101,3 +101,9 @@ All 7 forks decided (D19, 2026-10-14). Spec draft: `os/messaging/README.md`. Nex
   static link + run (x86_64) and link (aarch64, 8 static test binaries), presence sidecar (16 packages, 335 hashes), UI 1065
   tests, D21 eager 102.8 / lazy 176.4 KB. Wave 3 launched alongside the review: **run `wf_e1d4170c-90d`** (`messaging/.workflow-wave-3.js`: V2 panel lint sonnet,
   V1 three-node smoke opus xhigh); resume with `resumeFromRunId`, delete finished calls first.
+- **Wave 2 review returned** (F2 fix-then-lock 1/9 · U2 fix-then-lock 1/11 · B1 fix-then-lock 0/9; triage
+  `plan/layer-5-review/wave-2.md` with the lead's calls: additive `cancelMessage` route + UI control, manifest pkg/bundle
+  names parse-and-ignore (closure stays in verify), id111 gets the restore-pending persist guard). **Bounce run
+  `wf_ba5631d2-319`** (script `messaging/.workflow-wave-2-bounce.js`): B1 opus · U2 sonnet · F2 opus xhigh, parallel with
+  Wave 3 `wf_e1d4170c-90d`. Owner questions parked in the triage: manifest evolution path before the first signed release;
+  which command sets the Layer 2 restore floor; release-checklist + presence-venv rows.
