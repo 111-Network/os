@@ -59,19 +59,25 @@ pub trait Sealer: Send + Sync {
     /// This node's own announce, the stored bytes — never minted here (§7).
     fn own_announce(&self) -> Vec<u8>;
 
-    /// §3: seal `inner` (caller-owned layout — no inner NodeId, amendment A2)
+    /// §3: seal a caller-owned inner layout (no inner NodeId, amendment A2)
     /// to `recipient_enc_pubkey` under `header` (version, crypto-mode,
-    /// counter, `extra`). Returns the wire packet.
+    /// counter, `extra`). The implementation draws the fresh ephemeral key,
+    /// calls `inner` **once** with that `epk`, and AEADs whatever it returns —
+    /// because `pair_mac` (inside the ciphertext) covers
+    /// `header bytes ‖ epk ‖ inner-before-auth`, the caller must see the epk
+    /// before it can finish the inner bytes. Returns the wire packet.
     fn seal_payload(
         &self,
         recipient_enc_pubkey: &Key32,
         header: &SealHeader,
-        inner: &[u8],
+        inner: &mut dyn FnMut(&Key32) -> Vec<u8>,
     ) -> Result<Vec<u8>, SealerError>;
 
-    /// §3: open a packet sealed to this node. Returns the AD-verified header
-    /// and the inner bytes. Replay and sender checks are the caller's (§18.1).
-    fn open_payload(&self, packet: &[u8]) -> Result<(SealHeader, Vec<u8>), SealerError>;
+    /// §3: open a packet sealed to this node. Returns the AD-verified header,
+    /// the packet's `epk` (so the caller can recompute `pair_mac` over
+    /// `header bytes ‖ epk ‖ inner-before-auth` without re-parsing) and the
+    /// inner bytes. Replay and sender checks are the caller's (§18.1).
+    fn open_payload(&self, packet: &[u8]) -> Result<(SealHeader, Key32, Vec<u8>), SealerError>;
 
     /// §3: the pair key for `direction` with the peer whose X25519 key is
     /// `peer_enc_pubkey`. Cached per peer by the implementation.
