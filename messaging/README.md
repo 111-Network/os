@@ -55,7 +55,7 @@ never links into our Rust binary.
 | `111d` `daemon/panels/` | panel listeners: static serving, ticket auth, header policy, the Meshtastic HTTP shim; the generic reverse proxy is reserved (§13) | custom glue (`hyper`/`axum` already in the graph) | nodes with the dashboard |
 | SQLCipher via `rusqlite` | encrypted store engine (§10) | adopted: `knowledge/projects/rusqlite.md`, `sqlcipher.md` | same |
 | `blake3` + `bao-tree` | content addressing + verified streaming of bulk objects (§11) | adopted: `knowledge/projects/blake3-bao.md` | same |
-| `meshmud` | Meshtastic multiplexer: one serial/TCP uplink, many TCP downlinks | adopted: `knowledge/projects/meshmud.md` — own code MIT; the built binary links Meshtastic's GPL-3.0 Go protobufs and is conveyed as GPL-3.0 (verified at build); pinned by upstream tag + tarball sha256, CI-built, never copied into `os/` | nodes with a Meshtastic board (§14) |
+| `meshmud` | Meshtastic multiplexer: one serial/TCP uplink, many TCP downlinks | adopted: `knowledge/projects/meshmud.md` — own code MIT; the CI build records a license verdict and the binary is conveyed as GPL-3.0 only if its module list shows Meshtastic's GPL-3.0 Go protobufs linked (the v1.0.0 source as read on 2026-10-14 has none — a hand-written varint framing — so the expected verdict is MIT-only); pinned by upstream tag + tarball sha256 + commit, CI-built, only `go.mod`/`go.sum` data snapshots in `os/` | nodes with a Meshtastic board (§14) |
 | `meshtastic-presence` | tiny read-only presence reader on `meshtastic-python` | sidecar, GPL-3.0, own dir `os/messaging/sidecars/meshtastic-presence/`, own hash-locked venv | same |
 | Meshtastic web client | the hosted panel (static bundle) | adopted: `knowledge/projects/meshtastic-web.md` (GPL-3.0-only; served unmodified from disk, never `rust-embed`) | same |
 | `jsQR` | QR decoding in the dashboard (contact cards) | adopted (Apache-2.0), Layer 4 dependency sign-off | dashboard |
@@ -107,11 +107,12 @@ authenticator (L2 B2).
    msg_seq      epoch(varint) ‖ n(varint)   per (sender, recipient, stream) sequence (§4); stream 0 = the pair's
                     1:1 stream; control kinds carry 0 ‖ 0
    [frag_idx, frag_count]  varint ×2            if HAS_FRAG (§5)
-   [ext TLVs]              type(1) len(1) value  if HAS_EXT (unknown type ⇒ skip; 0x01 seen_peer_seq; 0x10 ratchet
-                                                 pubkey reserved; 0x20 delegation trailer ⇒ REJECT in v1 per L2 §6.7;
-                                                 0x21 signer_pubkey (32 B) reserved for L2 §6.7)
+   [n_ext(1) ‖ ext TLVs]   type(1) len(1) value  if HAS_EXT (n_ext ≥ 1; unknown type ⇒ skip; duplicate type ⇒
+                                                 reject; 0x01 seen_peer_seq; 0x10 ratchet pubkey and 0x21 signer_pubkey
+                                                 are reserved ⇒ REJECT in v1; 0x20 delegation trailer ⇒ REJECT per L2 §6.7)
    [ack block]             §6.1                  if PIGGYBACK_ACK (length-prefixed, before payload)
-   [card]                  137–169 B             if INTRO: the sender's own announce (§7; v1: tcp-lan only)
+   [card_len(1) ‖ card]    137–169 B             if INTRO: the sender's own announce (§7; v1: tcp-lan only; MSG and
+                                                 ENROLL only, never together with HAS_FRAG)
    payload      …
    auth         pair_mac(16) ‖ [sig(64) if SIGNED]
 ```
@@ -129,10 +130,13 @@ per contact and zeroized on forget. `pair_mac`
 is deniable (either party could have produced it) — intended for routine traffic (L2 rule 13); its KCI residual is in §18.
 
 **`sig` (authorship, transferable; present only when SIGNED, in addition to `pair_mac`):** Ed25519 over
-`"111/msg/v1" ‖ sender NodeId ‖ dest ‖ stream(varint) ‖ msg_seq(varint) ‖ kind ‖ flags ‖ BLAKE2b-256(payload)`, where
+`"111/msg/v1" ‖ sender NodeId ‖ dest ‖ stream(varint) ‖ msg_seq(epoch ‖ n varints) ‖ kind ‖ flags ‖ frag_idx ‖
+frag_count (varints, 0 ‖ 0 when unfragmented) ‖ BLAKE2b-256(payload)`, where
 `dest` = the recipient NodeId (32 B) for 1:1 kinds, the `group_id` (32 B) for group posts, 32 zero bytes for public
-classes. Covers content and addressee, not the sealed packet, so it survives re-sealing and re-fragmentation but can
-never be redirected to a third party. **Mandatory** for every stored-for-others, public or code class: group posts,
+classes. Covers this packet's payload, its transmitted flags byte and the addressee — not the sealed packet — so it
+survives re-sealing (retransmit) but can never be redirected to a third party. Only the originating sender fragments
+(relays never re-fragment, §5), so a fragmented SIGNED message carries one signature per fragment, each over that
+fragment's payload; re-fragmenting is re-signing, which only the author can do. **Mandatory** for every stored-for-others, public or code class: group posts,
 `AGENT_OP`, `KB`, `UPDATE`, `PATCH`, `BROADCAST`.
 
 **Sizes (what fits; the L6 shim byte is inside the bearer payload on broadcast bearers):**
@@ -151,7 +155,7 @@ before the first signed release; two inner layouts never share `version = 0x01`.
 ### 3.1 Domain tags (registered with L2 §6.1; each with its pinned signed/MAC input)
 
 `111/pair/v1` (§3) · `111/msg/v1` (§3) · `111/ack-sig/v1` (§6.1) · `111/custody/v1` and `111/custody-sig/v1` (§6.2) ·
-`111/enroll/v1` (§7.3) · `111/store/v1` (§10.2) · `111/obj/v1` (§11: `Ed25519("111/obj/v1" ‖ publisher ‖ hash ‖
+`111/enroll/v1` (§7.3) · `111/store-secret/v1` and `111/store/v1` (§10.2) · `111/obj/v1` (§11: `Ed25519("111/obj/v1" ‖ publisher ‖ hash ‖
 size ‖ class)` for public object adverts).
 
 ### 3.2 Kinds (1 B; unknown ⇒ drop and log, never best-effort)
@@ -182,7 +186,8 @@ size, name?, object_key(32)}` — the object moves by §11. Relays never parse b
 
 ## 4. Message identity, ordering, time
 
-- **`msg_id = (sender, recipient, stream, epoch, n)`.** `n` is a strictly increasing per-(peer, stream) counter
+- **`msg_id = (sender, recipient, stream, epoch, n)`.** `n` is a strictly
+  increasing per-(peer, stream) counter starting at 1 (so `0 ‖ 0` is only ever a control value)
   (`tx_state` is keyed by `(peer, stream)`: stream 0 is the pair's 1:1 stream, never a global counter), **committed to
   the store (`synchronous = FULL`) before the first fragment is sealed**. On the wire `msg_seq` is `epoch(varint) ‖
   n(varint)` — 2–4 B typical; every `seq` in ACK lists and `seen_peer_seq` uses the same two-varint form.
@@ -201,7 +206,13 @@ size, name?, object_key(32)}` — the object moves by §11. Relays never parse b
   delivery. A `pair_mac`-verified packet whose epoch **exceeds** the current one opens a new (prefix, ranges, partials)
   entry; the previous epoch's entry is **frozen and kept**, and old-epoch packets are still delivered against it
   (custody and multi-path legitimately deliver an earlier epoch after a later one). `rx_state` keeps the newest **4**
-  epochs per (peer, stream); older epochs are stale and dropped. Random ids and content hashes are rejected (both
+  epochs per (peer, stream); older epochs are stale and dropped, and a per-(peer, stream) **floor** records the
+  highest evicted epoch so an evicted epoch can never re-open. Range lists are bounded (8 per epoch): a packet that
+  would open a ninth isolated range is **deferred** — not recorded, not delivered, not ACKed; the sender keeps its copy
+  and retransmits — never evicted, so a delivered message is never forgotten; gap-filling and adjacent packets are
+  always accepted, so this cannot stall. An allocated `n` is never abandoned: only the atomic queue-and-allocate path
+  hands out numbers, and a message the user cancels before it leaves is sent as an empty tombstone, so no permanent
+  hole can wedge an epoch. Random ids and content hashes are rejected (both
   forget under pruning and then redeliver).
 - **Replay authority (L2 amendment A11).** For kinds carrying `msg_seq`, replay protection is this state, not the L2
   32-entry window — under store-and-forward a custody item can legitimately arrive hundreds of counters behind a
@@ -245,7 +256,10 @@ ack block = ack_len(varint) ‖ ack_epoch(varint) ‖ ack_prefix(varint)        
             ‖ n_strong(1, 0 allowed) ‖ [epoch, n (varint ×2), BLAKE2b-128(payload)]*
 ```
 
-for the (sender, stream) being acknowledged — the stream is the ACK's own stream (0 for 1:1). `ack_len` covers
+for the (sender, stream) being acknowledged — the stream is the ACK's own stream (0 for 1:1). The block carries at
+most 8 ranges across all kept epochs: the range containing the packet being acknowledged comes first, then the current
+epoch's ranges newest-first, then frozen epochs newest-first — so a retransmitted packet is always acknowledged and a
+sender can never be made to retransmit forever. `ack_len` covers
 everything after it, so a piggybacked block (placed before `payload`, §3) is unambiguous. Authentication is the
 packet's own `pair_mac`; `kind`/flags sit inside the authenticated region, so a data packet cannot be replayed as an
 ACK. A **transferable** receipt is produced only on request and only in a standalone `ACK` packet: `ack_sig =
@@ -262,7 +276,8 @@ custody_seq(varint) ‖ pkt_ref(16) = BLAKE2b-128("111/custody/v1" ‖ exact sea
 bytes proves the custodian **received** them (holding is a promise the store's "never prune undelivered custody for
 members" rule keeps). `ACCEPTED` from a **mailbox-role** node for a **known member** is the only evidence for the UI
 state `relayed`. Transferable form on request: `Ed25519("111/custody-sig/v1" ‖ hub ‖ dest ‖ status ‖ custody_seq ‖
-pkt_ref)`.
+pkt_ref)`, carried as the last 64 B of the `CUSTODY_ACK` payload. `custody_seq` is ≥ 1 for ACCEPTED/DUPLICATE and 0 for
+every REJECT.
 
 ## 7. Contacts, cards, announces
 
@@ -304,10 +319,11 @@ The hub shows a one-time **enrollment code** (8 chars from the L4 pair-code gene
 Messaging & Data → "Let a node use this hub") together with its card and `tcp-lan` address (the LAN IP, D16 e) as a QR.
 The member sends `ENROLL` sealed to the hub with the `INTRO` flag set — its card rides the §3 card slot, so the hub pins it
 provisionally and verifies `pair_mac` before parsing the payload (§7.2 (3)); the payload is `{code}`. The hub verifies
-`BLAKE2b-128(key = code_secret, data = "111/enroll/v1" ‖ member NodeId ‖ code)` in constant time, stores the contact as
+`BLAKE2b-128(key = code_secret, data = "111/enroll/v1" ‖ member NodeId ‖ code)` in constant time (`code_secret` = 32
+random bytes minted with the offer), stores the contact as
 `enrolled`, answers `ENROLL_OK {hub card, custody_seq_floor}`. Code rules (mirroring the pair code, D15): single-use,
 invalidated when the hub owner dismisses the offer, attempt lockout after 5 failures — a defense, carved out of "no
-policy limits" like the pair code. Enrollment is the owner's **access list**, not a rate policy; a hub refuses
+policy limits" like the pair code; `DELETE /fabric/hub/offer` dismisses an outstanding offer (loopback-only). Enrollment is the owner's **access list**, not a rate policy; a hub refuses
 `CUSTODY_PUT` from unenrolled nodes with `REJECT_UNENROLLED`. A node has one home hub in v1 (replicas = deferred A+).
 
 `appdata` v1 (L2 amendment A8): `[ver=1][roles u16 LE][reserved]` — bit 0 mailbox (accepts custody) · bit 1 always-on
@@ -403,9 +419,11 @@ are not encrypted), `auto_vacuum = INCREMENTAL` so pruning frees disk, `secure_d
 
 ### 10.2 Key custody (`KeyProvider` seam)
 
-- **Mode S (default; Cat 2/3/4 without a TPM; phones):** `store_key = BLAKE2b-256(key = L2 keyset-derived secret,
-  data = "111/store/v1" ‖ NodeId)` — keyed BLAKE2b as the KDF, the same primitive family as L2 §6.4 (no second hash
-  family); 32 B, computed by the identity holder and handed to the store as a raw key; never written to disk. A DB
+- **Mode S (default; Cat 2/3/4 without a TPM; phones):** two keyed-BLAKE2b steps, the same primitive family as L2
+  §6.4 (no second hash family): `store_secret = BLAKE2b-256(key = the X25519 private key (keyset bytes 32..64),
+  data = "111/store-secret/v1")`, computed behind the identity handle (`Sealer::store_secret`), then
+  `store_key = BLAKE2b-256(key = store_secret, data = "111/store/v1" ‖ NodeId)` in the store's `KeyProvider`; 32 B,
+  handed to SQLCipher as a raw key; never written to disk. A DB
   copied elsewhere opens again after restore-from-words. Limit, stated honestly: protects DB-only copies, backups and
   synced app dirs — not a stolen disk with a readable identity dir (L2 §12 residual). L2 amendment A9 (with a vector).
 - **Mode T (Cat 4 with TPM2 / SE050B):** a random 32 B key sealed in hardware (L2 §5: the TPM holds the *storage* key,
@@ -639,7 +657,7 @@ not see or store it** — this sentence is on the service page.
 | `/contacts/me/card` | GET | own card: `{text, qr: {size, rows}}` (module bitmap; the UI draws it) |
 | `/fabric` | GET | links (+profile, state), hub (enrolled, reachable, cursor), custody (count, bytes), store (used, watermark, `store_full`) |
 | `/fabric/hub/enroll` | POST | `{address, code}` (member side) |
-| `/fabric/hub/offer` | POST | hub side: mint an enrollment code (loopback-only like `offer`) |
+| `/fabric/hub/offer` | POST · DELETE | hub side: mint an enrollment code / dismiss the outstanding one (loopback-only like `offer`) |
 | `/fabric/settings` | PATCH | `hub_role`, `listen_lan`, `custody_opt_in`, per-class quotas |
 | `/nearby` | GET | §14 presence (per source) |
 | `/panels` · `/panels/{id}/session` | GET · POST | §13 |
