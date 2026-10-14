@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { Adapter } from "../src/lib/api/adapter";
-import { createHttpAdapter } from "../src/lib/api/http";
+import { createHttpAdapter, panelsSeenAtLoad, resetPanelsAtLoadForTests } from "../src/lib/api/http";
 import { ApiError } from "../src/lib/api/problem";
 import type { ChatFrame } from "../src/lib/api/types";
 import { operations } from "./contract.gen";
@@ -367,6 +367,8 @@ describe("adapter <-> openapi.yaml", () => {
     getThread: (a) => a.messages.thread(PEER, { sinceSeq: 4, limit: 50 }),
     sendMessage: (a) => a.messages.send({ to: PEER, text: "hello" }),
     retryMessage: (a) => a.messages.retry("msg-01j9z3k8m2q4"),
+    // F2's contract pass adds `cancelMessage` (POST /messages/{id}/cancel, 202); this table follows the contract either way
+    ...("cancelMessage" in operations ? { cancelMessage: (a: Adapter) => a.messages.cancel!("msg-01j9z3k8m2q4") } : {}),
     listContacts: (a) => a.contacts.list(),
     addContact: (a) => a.contacts.add({ node_id: PEER }),
     getOwnCard: (a) => a.contacts.ownCard(),
@@ -408,4 +410,57 @@ describe("adapter <-> openapi.yaml", () => {
       else expect(c.body).toBeUndefined();
     });
   }
+});
+
+
+describe("cancelling a queued message (POST /messages/{id}/cancel, spec 4)", () => {
+  it("posts to the cancel route of that message with the CSRF header and no body, and resolves on 202 without reading a reply", async () => {
+    const { adapter, calls } = adapterWith(() => new Response(null, { status: 202 }));
+    await expect(adapter.messages.cancel!("msg-01j9z3k8m2q4")).resolves.toBeUndefined();
+    expect(calls).toHaveLength(1);
+    expect(calls[0]).toMatchObject({ method: "POST", path: "/api/v1/messages/msg-01j9z3k8m2q4/cancel", body: undefined });
+    expect(calls[0]!.headers["Content-Type"]).toBe("application/json");
+  });
+
+  it("a JSON 202 is fine too, and the id is encoded into the path", async () => {
+    const { adapter, calls } = adapterWith(() => jsonResponse({ schema: 1, id: "x" }, 202));
+    await adapter.messages.cancel!("a/b c");
+    expect(calls[0]!.path).toBe("/api/v1/messages/a%2Fb%20c/cancel");
+  });
+
+  it("a refusal is the node's own problem: 409 once the message has left", async () => {
+    const { adapter } = adapterWith(() => problemResponse(409, "bad_request", "Not cancellable", "That message has already left this node."));
+    const err = await adapter.messages.cancel!("msg-1").catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(ApiError);
+    expect((err as ApiError).status).toBe(409);
+    expect((err as ApiError).code).toBe("bad_request");
+    expect((err as ApiError).problem.detail).toBe("That message has already left this node.");
+  });
+});
+
+describe("the first panel list of a page load", () => {
+  it("is remembered from the real adapter's GET /panels (the page's best evidence of the CSP it was loaded with); later lists do not replace it", async () => {
+    resetPanelsAtLoadForTests();
+    try {
+      const off = { id: "meshtastic", port: 11190, entry: "/", needs_secure_context: false, allow: [], optional_hosts: [], state: { enabled: false, listening: false, health: "unknown" } };
+      const on = { ...off, state: { enabled: true, listening: true, health: "up" } };
+      let list = [off];
+      const { adapter } = adapterWith(() => jsonResponse({ schema: 1, panels: list }));
+      expect(panelsSeenAtLoad()).toBeNull();
+      await adapter.panels.list();
+      expect([...panelsSeenAtLoad()!]).toEqual([["meshtastic", false]]);
+      list = [on];
+      expect(await adapter.panels.list()).toEqual([on]); // the caller gets the new list...
+      expect([...panelsSeenAtLoad()!]).toEqual([["meshtastic", false]]); // ...the page keeps what it first saw
+    } finally {
+      resetPanelsAtLoadForTests();
+    }
+  });
+
+  it("a failed first request records nothing", async () => {
+    resetPanelsAtLoadForTests();
+    const { adapter } = adapterWith(() => problemResponse(503, "upstream_error", "Unavailable"));
+    await adapter.panels.list().catch(() => undefined);
+    expect(panelsSeenAtLoad()).toBeNull();
+  });
 });

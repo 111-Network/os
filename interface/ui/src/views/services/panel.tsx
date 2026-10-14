@@ -2,7 +2,7 @@
 // its own origin. Our chrome is the title, a health dot, reload (a new one-time ticket), "Open full client" (a new tab with
 // its own ticket) and "Ask the agent about this panel". Only a registry-declared panel is ever framed; the ticket URL goes
 // into the frame's `src` and is never shown. Where the panel cannot be framed (not running, a secure page needed, a panel
-// that only opens on the node itself) the tab says so and there is no frame.
+// that only opens on the node itself, a page loaded before the panel was switched on) the tab says so and there is no frame.
 import { useEffect, useMemo, useState, useSyncExternalStore, type ReactNode } from "react";
 import { redirectIfUnauthenticated } from "../../app/AuthGate";
 import { announce } from "../../app/LiveRegion";
@@ -14,23 +14,30 @@ import { SpecTable } from "../../components/spec-table";
 import { StatusDot } from "../../components/status-dot";
 import { getAdapter } from "../../lib/api";
 import { useStatus } from "../../lib/api/hooks";
+import { panelsSeenAtLoad } from "../../lib/api/http";
+import { panelOrigin } from "../../lib/api/panels";
 import type { HostedPanel, ServiceRecord } from "../../lib/api/types";
 import { Adv, useMode } from "../../lib/mode";
 import { buildPrompt } from "../../lib/prompts";
 import { AgentButton, useAgentReachable } from "../devices/agent-button";
 import {
   allowAttr,
+  cspListedAtLoad,
   currentEnv,
   healthDot,
   LOAD_GRACE_S,
   loopbackDashboardUrl,
   optionalHostsText,
+  PANEL_CSP_TEXT,
+  PANEL_EXPIRED_HELP,
+  panelNodeAddress,
   PANEL_SANDBOX,
   panelGate,
   panelNotes,
   panelTitle,
   ticketSrc,
   UPSTREAM_DOWN_TEXT,
+  watchFrameBlock,
   type PanelEnv,
 } from "./panel-model";
 import { openFullClient, PanelSessionController, type OpenedWindow, type SessionState } from "./panel-session";
@@ -154,6 +161,47 @@ function LoopbackUrl({ url }: { url: string }) {
   );
 }
 
+/**
+ * What the panel's own page cannot say (spec 13, 14): the node address for the web client's connect dialog (the panel's own
+ * host and port, with a copy button), and that a panel which reports an expired session is fixed by Reload. The page cannot
+ * see inside the cross-origin frame, so it cannot re-mint by itself.
+ */
+export function PanelHelp({ panel, env }: { panel: Pick<HostedPanel, "port">; env: PanelEnv }) {
+  const address = panelNodeAddress(panel, env);
+  return (
+    <div className="flex flex-col gap-2" data-testid="panel-help">
+      <div className="flex flex-wrap items-center gap-3">
+        <p className={`max-w-prose ${TEXT}`}>
+          If the client asks for a node address, use{" "}
+          <code className="break-all border border-border bg-secondary/20 px-1.5 py-0.5 text-foreground" data-testid="panel-node-address">
+            {address}
+          </code>
+        </p>
+        <CopyButton text={address} label="copy address" ariaLabel="Copy the node address for the panel's connect dialog" />
+      </div>
+      <p className={`max-w-prose ${TEXT}`}>{PANEL_EXPIRED_HELP}</p>
+    </div>
+  );
+}
+
+/**
+ * Shown in place of the frame when this page's own security policy cannot allow it (the panel was switched on after the page
+ * loaded). `observed`: the browser has just refused the frame; otherwise the page expects it to (the panel was not on when it
+ * loaded) and has not tried. Reload is the only fix that keeps the frame inline: a document's policy never changes.
+ */
+export function PanelPolicyNotice({ observed, onReloadPage }: { observed: boolean; onReloadPage: () => void }) {
+  return (
+    <div className="flex flex-col gap-3 border border-dashed border-border p-4" role={observed ? "alert" : "status"} data-testid="panel-csp">
+      <p className="max-w-prose font-mono text-xs leading-relaxed text-foreground">{PANEL_CSP_TEXT}</p>
+      <div>
+        <Button size="sm" variant="primary" onClick={onReloadPage}>
+          Reload this page
+        </Button>
+      </div>
+    </div>
+  );
+}
+
 /** The framed panel: owns the session (mint on open, mint again on reload) and the "did it load" note. */
 function Framed({ service, panel, env }: { service: ServiceRecord; panel: HostedPanel; env: PanelEnv }) {
   const id = service.id;
@@ -165,7 +213,7 @@ function Framed({ service, panel, env }: { service: ServiceRecord; panel: Hosted
         onError: (err) => void redirectIfUnauthenticated(err),
       }),
     // A new slot or host is a new panel origin: a new session. The record itself changing (health, dropped) is not.
-    [id, panel.port, env.protocol, env.hostname],
+    [id, panel.port, env.protocol, env.hostname, env.port],
   );
   const state = useSyncExternalStore(controller.subscribe, controller.getState, controller.getState);
   const [slow, setSlow] = useState(false);
@@ -174,13 +222,26 @@ function Framed({ service, panel, env }: { service: ServiceRecord; panel: Hosted
   const [note, setNote] = useState<string | null>(null);
   const title = panelTitle(panel, service.plain_name);
 
+  // The page's own policy (section 13): `frame-src` was fixed when this document loaded and lists only the panels that were on
+  // then. `expected` is the page's guess from its first `GET /panels`; `refused` is the browser's own word. Either way the
+  // frame is not mounted (a blocked frame is the browser's blank error page and nothing else) and the tab says to reload.
+  const origin = panelOrigin(panel, env);
+  const expected = useMemo(() => cspListedAtLoad(panel.id, panelsSeenAtLoad()) === false, [panel.id]);
+  const [refused, setRefused] = useState(false);
+  const policyBlocked = expected || refused;
   useEffect(() => {
+    if (typeof document === "undefined") return;
+    return watchFrameBlock(document, origin, () => setRefused(true));
+  }, [origin]);
+
+  useEffect(() => {
+    if (expected) return; // nothing to mint a ticket for: no frame will be mounted
     void controller.start();
     return () => controller.dispose();
-  }, [controller]);
+  }, [controller, expected]);
 
   // A ticket is good for 30 s. A frame that has not loaded by then was handed a spent ticket: say so, and offer a new one.
-  const gen = state.kind === "ready" ? state.gen : -1;
+  const gen = state.kind === "ready" && !policyBlocked ? state.gen : -1;
   const expiresIn = state.kind === "ready" ? state.expiresIn : 0;
   const loaded = gen >= 0 && loadedGen === gen;
   useEffect(() => {
@@ -196,6 +257,7 @@ function Framed({ service, panel, env }: { service: ServiceRecord; panel: Hosted
     announce("Opening the panel again with a new session.");
     void controller.reload();
   };
+  const reloadPage = () => window.location.reload();
   const full = async () => {
     setNote(null);
     const r = await openFullClient(
@@ -215,9 +277,11 @@ function Framed({ service, panel, env }: { service: ServiceRecord; panel: Hosted
         actions={
           usable ? (
             <>
-              <Button size="sm" onClick={reload} loading={state.kind === "minting"}>
-                Reload
-              </Button>
+              {policyBlocked ? null : (
+                <Button size="sm" onClick={reload} loading={state.kind === "minting"}>
+                  Reload
+                </Button>
+              )}
               <Button size="sm" onClick={() => void full()}>
                 Open full client
               </Button>
@@ -237,13 +301,20 @@ function Framed({ service, panel, env }: { service: ServiceRecord; panel: Hosted
           {UPSTREAM_DOWN_TEXT}
         </p>
       ) : null}
-      <SessionStatus state={state} service={service} env={env} onRetry={reload} />
-      {state.kind === "ready" ? <PanelFrame key={state.gen} src={state.src} title={title} panel={panel} onLoad={() => setLoadedGen(state.gen)} /> : null}
-      {slow && !loaded ? (
-        <p role="status" className={`max-w-prose ${TEXT}`} data-testid="panel-slow">
-          The panel has not finished loading. Its session ticket only lasts 30 seconds; press Reload to get a fresh one.
-        </p>
-      ) : null}
+      {policyBlocked ? (
+        <PanelPolicyNotice observed={refused} onReloadPage={reloadPage} />
+      ) : (
+        <>
+          <SessionStatus state={state} service={service} env={env} onRetry={reload} />
+          {state.kind === "ready" ? <PanelFrame key={state.gen} src={state.src} title={title} panel={panel} onLoad={() => setLoadedGen(state.gen)} /> : null}
+          {slow && !loaded ? (
+            <p role="status" className={`max-w-prose ${TEXT}`} data-testid="panel-slow">
+              The panel has not finished loading. Its session ticket only lasts 30 seconds; press Reload to get a fresh one.
+            </p>
+          ) : null}
+          {state.kind !== "failed" ? <PanelHelp panel={panel} env={env} /> : null}
+        </>
+      )}
       <PanelNotes id={panel.id} optionalHosts={panel.optional_hosts} parts={["hosts"]} />
       <PanelAdvanced panel={panel} />
     </div>

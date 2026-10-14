@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Meshtastic web (lint placeholder)</title>
+<link rel="icon" href="logo.svg" type="image/svg+xml">
+<link rel="stylesheet" href="style.css">
+</head>
+<body data-state="loading">
+<!--
+  Placeholder for the Meshtastic web client bundle (interface/verify/panel-lint.sh).
+  It has the same API shape as the real client's HTTP transport — PUT /api/v1/toradio and
+  GET /api/v1/fromradio?all=true, both relative to its own origin — and nothing else:
+  no off-origin request, no WebSocket, no inline handler. The real-bundle run is the
+  external gate (set PANEL_LINT_BUNDLE=<dir> to lint a real build).
+-->
+<header><img src="logo.svg" alt="" width="24" height="24"><h1>Meshtastic (placeholder client)</h1></header>
+<main>
+  <label for="host">Connect to node</label>
+  <input id="host" type="text" readonly>
+  <p id="status" role="status">connecting</p>
+  <ul id="nodes"></ul>
+</main>
+<script src="app.js" defer></script>
+</body>
+</html>

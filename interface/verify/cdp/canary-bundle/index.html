@@ -1,0 +1,23 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Hostile panel (lint canary)</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter">
+<link rel="stylesheet" href="style.css">
+<script src="https://cdn.example.net/lib.js"></script>
+</head>
+<body data-state="loading">
+<!--
+  NOT a panel anyone ships: interface/verify/panel-lint.sh serves this in place of the placeholder
+  to prove the lint can fail. It reaches for a font CDN, an analytics pixel, a telemetry endpoint,
+  the dashboard origin, a WebSocket, and a declared optional host (which is allowed, with a note).
+-->
+<button onclick="void 0">inline handler</button>
+<img src="//analytics.example.org/pixel.gif" alt="" width="1" height="1">
+<input id="host" type="text" readonly>
+<p id="status">connecting</p>
+<ul id="nodes"></ul>
+<script src="app.js" defer></script>
+</body>
+</html>

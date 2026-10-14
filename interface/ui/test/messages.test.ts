@@ -5,6 +5,8 @@ import {
   cleanDeep,
   cleanPeerText,
   conversationThreads,
+  isCancellable,
+  isCancelled,
   isRetryable,
   MESSAGE_STATE_ORDER,
   mergeThreadPage,
@@ -18,11 +20,12 @@ import {
   upsertMessage,
   type ThreadPage,
 } from "../src/lib/api/messages";
-import { buildMessaging, MOCK_REASONS, threadsOf, pageOf, ADA, BRAM, CLEO, DANA, DOV } from "../src/lib/api/mock/messaging";
+import { buildMessaging, cancelQueued, MOCK_REASONS, threadsOf, pageOf, ADA, BRAM, CLEO, DANA, DOV } from "../src/lib/api/mock/messaging";
 import type { Message, MessageState, Thread } from "../src/lib/api/types";
 import {
   announceIncoming,
   bannerAgent,
+  CANCELLED_STATE_COPY,
   claimText,
   composeGate,
   draftProblem,
@@ -35,6 +38,7 @@ import {
   IGNORED_NOTE,
   lastLine,
   MAX_COMPOSE_CHARS,
+  messageStateCopy,
   messagingBanner,
   OFFER_QUESTION,
   oneLine,
@@ -132,6 +136,62 @@ describe("delivery states (section 9)", () => {
     ];
     for (const [dir, state, want] of table) expect(isRetryable({ dir, state }), `${dir} ${state}`).toBe(want);
   });
+
+  it("only an own message that is still queued can be cancelled, and a cancelled one is neither cancellable nor retryable", () => {
+    const table: [Message["dir"], MessageState, string | null, boolean][] = [
+      ["own", "queued", null, true],
+      ["own", "queued", "waiting_for_key", true],
+      ["own", "queued", "hub_not_yours", true],
+      ["own", "queued", "restore_pending", true],
+      ["own", "queued", "cancelled", false], // already done
+      ["own", "sent", null, false], // a frame was written: the words are out
+      ["own", "sent", "mailbox_full", false],
+      ["own", "relayed", null, false],
+      ["own", "delivered", null, false],
+      ["in", "delivered", null, false],
+      ["in", "queued", null, false],
+    ];
+    for (const [dir, state, reason_code, want] of table) expect(isCancellable({ dir, state, reason_code }), `${dir} ${state} ${reason_code}`).toBe(want);
+    // without a reason_code at all
+    expect(isCancellable({ dir: "own", state: "queued" })).toBe(true);
+    // nothing retries a cancelled message: its tombstone is the only thing that goes
+    expect(isRetryable({ dir: "own", state: "queued", reason_code: "cancelled" })).toBe(false);
+    expect(isRetryable({ dir: "own", state: "queued", reason_code: "waiting_for_key" })).toBe(true);
+    expect(isCancelled({ dir: "own", reason_code: "cancelled" })).toBe(true);
+    expect(isCancelled({ dir: "own", reason_code: "waiting_for_key" })).toBe(false);
+    expect(isCancelled({ dir: "in", reason_code: "cancelled" })).toBe(false);
+  });
+});
+
+describe("cancelling an own queued message (§4)", () => {
+  const seeded = () => buildMessaging(Date.parse("2026-10-14T09:00:00Z")).messages;
+
+  it("the cancelled message stays in the thread as queued, with the reason the node gives and this page's words for it", () => {
+    const m = seeded().find((x) => x.peer === CLEO && x.dir === "own")!;
+    expect(m).toMatchObject({ state: "queued", reason_code: "waiting_for_key" });
+    expect(cancelQueued(m)).toBe("cancelled");
+    expect(m).toMatchObject({ state: "queued", reason_code: "cancelled", reason: MOCK_REASONS.cancelled });
+    expect(cancelQueued(m)).toBe("not_queued"); // once
+    expect(reasonText(m)).toBe(REASON_COPY.cancelled);
+    expect(REASON_COPY.cancelled).toMatch(/You cancelled this before it left/);
+    expect(REASON_COPY.cancelled).toMatch(/empty placeholder/);
+    expect(messageStateCopy(m)).toBe(CANCELLED_STATE_COPY);
+    expect(messageStateCopy({ dir: "own", state: "queued", reason_code: "waiting_for_key" })).toBe(STATE_COPY.queued);
+    expect(evidenceName(m)).toMatch(/cancelled before it left/);
+    expect(evidenceName({ dir: "own", state: "queued", reason_code: null })).toMatch(/outbox/);
+  });
+
+  it("the mock refuses what the node refuses: a message that has left, and one that is not ours", () => {
+    const all = seeded();
+    const sent = all.find((x) => x.dir === "own" && x.state === "sent")!;
+    expect(cancelQueued(sent)).toBe("not_queued");
+    expect(sent.reason_code).not.toBe("cancelled");
+    const delivered = all.find((x) => x.dir === "own" && x.state === "delivered")!;
+    expect(cancelQueued(delivered)).toBe("not_queued");
+    const incoming = all.find((x) => x.dir === "in")!;
+    expect(cancelQueued(incoming)).toBe("not_own");
+    expect(incoming.reason_code).toBeNull();
+  });
 });
 
 describe("reasons", () => {
@@ -171,7 +231,7 @@ describe("reasons", () => {
   });
 
   it("a code the UI has no copy for shows the node's own sentence, in any state, so a new daemon reason is not hidden", () => {
-    for (const state of MESSAGE_STATE_ORDER) expect(reasonText({ state, reason_code: "cancelled", reason: "The node explains." }), state).toBe("The node explains.");
+    for (const state of MESSAGE_STATE_ORDER) expect(reasonText({ state, reason_code: "some_future_reason", reason: "The node explains." }), state).toBe("The node explains.");
   });
 
   it("cleans a node sentence before it is shown", () => {

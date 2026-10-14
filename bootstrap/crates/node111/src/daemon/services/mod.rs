@@ -495,6 +495,12 @@ pub struct AgentStatusProbe {
 pub struct FabricFacts {
     /// The store opened (§10.1). `false` with facts present = it failed.
     pub store_open: bool,
+    /// The fabric is down because no identity loaded (the node's identity
+    /// check failed: `111 identity restore`), not because of the store.
+    pub no_identity: bool,
+    /// The identity holder reports a restore floor (§4, L2 §8.4): nothing
+    /// is sealed and no link runs until it is set.
+    pub restore_pending: bool,
     /// Capacity pruning cannot make room (§10.4 `store_full`).
     pub store_full: bool,
     /// Home hub (§7.3): `None` = not enrolled with one; `Some(reachable)`.
@@ -1099,7 +1105,10 @@ fn codeagent(f: &Facts) -> Computed {
 /// enrolled hub is reachable, or this hub has a member, or a peer link is
 /// attributed; NOT SET when the store is open but nothing is reachable (a hub
 /// without members is "waiting for the first node to enroll"; a node with no
-/// hub is pointed at enrollment); ERROR on store failure or `store_full`.
+/// hub is pointed at enrollment); ERROR on store failure or `store_full`,
+/// and — each named for what it is, with the way out — when no identity
+/// loaded (`no_identity`) or the identity holder is restore-pending
+/// (`restore_pending`: its counters file is missing, so nothing is sealed).
 fn fabric(f: &Facts) -> Computed {
     let id = ServiceId::Fabric;
     let Some(x) = &f.fabric else {
@@ -1119,12 +1128,26 @@ fn fabric(f: &Facts) -> Computed {
             format!("{n} {many}")
         }
     };
-    let mut out = if !x.store_open {
+    let mut out = if !x.store_open && x.no_identity {
+        Computed::new(
+            id,
+            ServiceState::Error,
+            "no_identity",
+            "Messaging cannot start: this node's identity did not load. Run `111 identity restore` on the node.",
+        )
+    } else if !x.store_open {
         Computed::new(
             id,
             ServiceState::Error,
             "store_failed",
             "The message store could not be opened.",
+        )
+    } else if x.restore_pending {
+        Computed::new(
+            id,
+            ServiceState::Error,
+            "restore_pending",
+            "Identity restore floor missing: nothing is sent or received until it is set. Put this node's identity/counters file back, or restart the node and run `111 identity restore` when it asks.",
         )
     } else if x.store_full {
         Computed::new(
@@ -1185,6 +1208,7 @@ fn fabric(f: &Facts) -> Computed {
     out.detail = json!({
         "started": true,
         "store": { "open": x.store_open, "full": x.store_full },
+        "restore_pending": x.restore_pending,
         "hub": {
             "enrolled": x.hub_reachable.is_some(),
             "reachable": x.hub_reachable,
@@ -1621,6 +1645,26 @@ mod tests {
         assert_eq!(c.detail["store"]["full"], true);
         assert_eq!(c.detail["hub"]["enrolled"], true);
         assert!(c.actions.is_empty(), "built in: nothing to restart");
+        // F2 review m8: the down and restore-pending states are named, with
+        // the way out — never the generic store failure
+        f = with(FabricFacts {
+            store_open: false,
+            no_identity: true,
+            ..FabricFacts::default()
+        });
+        let c = row(&f, id);
+        assert_eq!((c.state, c.reason_code), (E, "no_identity"));
+        assert!(c.reason.contains("111 identity restore"), "{}", c.reason);
+        f = with(FabricFacts {
+            restore_pending: true,
+            hub_reachable: Some(true),
+            ..base.clone()
+        });
+        let c = row(&f, id);
+        assert_eq!((c.state, c.reason_code), (E, "restore_pending"));
+        assert!(c.reason.contains("restore floor missing"), "{}", c.reason);
+        assert!(c.reason.contains("identity/counters"), "{}", c.reason);
+        assert_eq!(c.detail["restore_pending"], true);
     }
 
     fn mm(child: ChildDisplay) -> MeshmudFacts {

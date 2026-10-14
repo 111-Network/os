@@ -11,6 +11,12 @@ done
 export PATH
 export CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER=x86_64-linux-musl-gcc
 export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER=aarch64-linux-musl-gcc
+# C compilers for SQLCipher + OpenSSL, pinned (the values bootstrap/scripts/musl-env.sh exports):
+# a missing cross compiler fails the musl check instead of cc-rs falling back to the host cc.
+export CC_x86_64_unknown_linux_musl=x86_64-linux-musl-gcc
+export AR_x86_64_unknown_linux_musl=x86_64-linux-musl-ar
+export CC_aarch64_unknown_linux_musl=aarch64-linux-musl-gcc
+export AR_aarch64_unknown_linux_musl=aarch64-linux-musl-ar
 
 echo "== fmt =="
 cargo fmt --all -- --check

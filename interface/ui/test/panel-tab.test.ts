@@ -5,25 +5,38 @@ import { createElement as h, type ReactElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { afterEach, describe, expect, it } from "vitest";
 import { createMockAdapter, type MockAdapter, type ScenarioName } from "../src/lib/api/mock";
+import { recordPanelsAtLoad, resetPanelsAtLoadForTests } from "../src/lib/api/http";
 import { ApiError } from "../src/lib/api/problem";
 import { apiStore } from "../src/lib/api/store";
 import type { HostedPanel, PanelSession } from "../src/lib/api/types";
 import { ModeProvider, resetModeForTests } from "../src/lib/mode";
 import ServicesView from "../src/views/services";
-import { PanelFrame, PanelTab } from "../src/views/services/panel";
+import { PanelFrame, PanelHelp, PanelPolicyNotice, PanelTab } from "../src/views/services/panel";
 import {
   allowAttr,
+  checkMintReply,
   classifyMint,
+  clampExpiresIn,
+  cspListedAtLoad,
+  dashboardPort,
+  isPanelFrameBlock,
   LOOPBACK_ONLY_PANEL_TEXT,
   loopbackDashboardUrl,
   mintFailureText,
   optionalHostsText,
+  PANEL_CSP_TEXT,
+  PANEL_EXPIRED_HELP,
+  PANEL_PORT_MAX,
+  PANEL_PORT_MIN,
   PANEL_SANDBOX,
   panelGate,
+  panelNodeAddress,
   panelNotes,
   panelTitle,
+  PanelUrlError,
   SECURE_CONTEXT_TEXT,
   ticketSrc,
+  watchFrameBlock,
   type PanelEnv,
 } from "../src/views/services/panel-model";
 import { openFullClient, PanelSessionController, type OpenedWindow } from "../src/views/services/panel-session";
@@ -119,6 +132,80 @@ describe("ticketSrc: only the panel origin this page computes is ever framed", (
     const v6: PanelEnv = { protocol: "http:", hostname: "[::1]", port: "11180" };
     expect(ticketSrc("http://[::1]:11190/?p111_ticket=abc", panel(), v6)).toBe("http://[::1]:11190/?p111_ticket=abc");
     expect(ticketSrc("http://[::2]:11190/?p111_ticket=abc", panel(), v6)).toBeNull();
+  });
+
+  it("a string that is not a URL is never framed as a path on the panel origin", () => {
+    // A relative reference resolves against the panel origin (documented): this is a path on 127.0.0.1:11190 and nothing else,
+    // never the raw string as an address. The node's own reply is shape-checked before it gets here (checkMintReply).
+    expect(ok("not a url at all %%%")).toBe("http://127.0.0.1:11190/not%20a%20url%20at%20all%20%%%");
+    for (const bad of [undefined, null, 0, 11190, {}, [], ["http://127.0.0.1:11190/"], true, ""] as unknown[]) {
+      expect(ticketSrc(bad, panel(), LOOPBACK), String(bad)).toBeNull();
+    }
+    expect(ticketSrc("   ", panel(), LOOPBACK)).toBeNull();
+  });
+
+  it("host tricks: userinfo before a host, protocol-relative, backslash and mixed-slash forms all fail closed", () => {
+    for (const bad of [
+      "http://127.0.0.1:11190@evil.com/",
+      "http://127.0.0.1:11190@evil.com:11190/",
+      "//evil.com:11190/?p111_ticket=abc",
+      "//127.0.0.1.evil.com:11190/",
+      "\\\\evil.com:11190\\",
+      "http:\\\\evil.com:11190\\x",
+      "http:/\\evil.com:11190/",
+      "/\\evil.com:11190/",
+      "http://evil.com\\@127.0.0.1:11190/",
+      "http://127.0.0.1:11190.evil.com/",
+      "http://[::ffff:127.0.0.1]:11190/",
+      "http://localhost:11190/",
+      "http://127.1:11190/",
+      "http://2130706433:11190/",
+      "http://127.0.0.1.:11190/",
+      "https://127.0.0.1:11190@evil.com",
+      "about:blank",
+      "blob:http://127.0.0.1:11190/uuid",
+      "javascript:alert(1)",
+      "java\tscript:alert(1)",
+      "data:text/html,<script>1</script>",
+    ]) {
+      const got = ticketSrc(bad, panel(), LOOPBACK);
+      // either refused outright, or rebuilt onto the one origin this page computes (never anything else)
+      expect(got === null || got.startsWith("http://127.0.0.1:11190/"), `${bad} -> ${got}`).toBe(true);
+      if (got !== null) expect(got, bad).not.toMatch(/evil/);
+    }
+    // the ones that name another host or carry credentials are refused, not merely normalised
+    for (const refused of ["http://127.0.0.1:11190@evil.com/", "//evil.com:11190/?p111_ticket=abc", "http://evil.com\\@127.0.0.1:11190/", "http://127.0.0.1:11190.evil.com/", "http://localhost:11190/"]) {
+      expect(ticketSrc(refused, panel(), LOOPBACK), refused).toBeNull();
+    }
+  });
+
+  it("a ticket on the https page is rebuilt onto the https origin, never framed as plain http", () => {
+    const p = panel();
+    // the node answers a URL on the right host and slot but with the other scheme: the frame still gets the page's own scheme
+    expect(ticketSrc("http://node.example:11190/?p111_ticket=abc#x", p, HTTPS)).toBe("https://node.example:11190/?p111_ticket=abc");
+    expect(ticketSrc("https://node.example:11190/?p111_ticket=abc", p, HTTPS)).toBe("https://node.example:11190/?p111_ticket=abc");
+    // and on the http page an https URL is rebuilt onto http
+    expect(ticketSrc("https://127.0.0.1:11190/?p111_ticket=abc", p, LOOPBACK)).toBe("http://127.0.0.1:11190/?p111_ticket=abc");
+  });
+
+  it("the panel's slot must be inside the contract's range and never the dashboard's own port", () => {
+    expect([PANEL_PORT_MIN, PANEL_PORT_MAX]).toEqual([11190, 11229]);
+    // the dashboard's own origin: a frame with allow-same-origin there would be a full sandbox escape
+    expect(ticketSrc("http://127.0.0.1:11180/?t", panel({ port: 11180 }), LOOPBACK)).toBeNull();
+    expect(ticketSrc("/?t", panel({ port: 11180 }), LOOPBACK)).toBeNull();
+    // in range, but it IS the port the dashboard is on (a dashboard moved onto a panel slot)
+    expect(ticketSrc("http://127.0.0.1:11195/?t", panel({ port: 11195 }), { ...LOOPBACK, port: "11195" })).toBeNull();
+    // the default port counts when the address bar shows none
+    expect(dashboardPort({ protocol: "http:", hostname: "h", port: "" })).toBe("80");
+    expect(dashboardPort({ protocol: "https:", hostname: "h", port: "" })).toBe("443");
+    expect(dashboardPort(LOOPBACK)).toBe("11180");
+    // outside the range, in either direction, or not a whole number
+    for (const port of [0, 80, 11189, 11230, 65535, -1, 11190.5, Number.NaN, Number.POSITIVE_INFINITY]) {
+      expect(ticketSrc(`http://127.0.0.1:${port}/?t`, panel({ port }), LOOPBACK), String(port)).toBeNull();
+    }
+    expect(ticketSrc("http://127.0.0.1:11190/?t", panel({ port: PANEL_PORT_MIN }), LOOPBACK)).not.toBeNull();
+    expect(ticketSrc("http://127.0.0.1:11229/?t", panel({ port: PANEL_PORT_MAX }), LOOPBACK)).not.toBeNull();
+    expect(ticketSrc("http://127.0.0.1:11190/?t", panel({ port: "11190" as unknown as number }), LOOPBACK)).toBeNull();
   });
 });
 
@@ -539,5 +626,249 @@ describe("the service page with a panel", () => {
     expect(servicePageState({ ...svc("fabric"), state: "error" }, true).handoff).toMatchObject({ goal: "messaging.fix" });
     expect(servicePageState({ ...svc("meshtastic"), state: "error" }, true).handoff).toMatchObject({ goal: "fix" });
     expect(servicePageState(svc("radio"), true).handoff).toMatchObject({ goal: "setup" });
+  });
+});
+
+
+// ------------------------------------------------------------------------------------------ the mint reply
+
+describe("the mint reply is data, not a promise", () => {
+  const src = (u: string) => ticketSrc(u, panel(), LOOPBACK);
+  const ticket = "http://127.0.0.1:11190/?p111_ticket=t1";
+
+  it("expires_in is a whole number of seconds from 1 to 300; anything else is the documented 30", () => {
+    expect(clampExpiresIn(30)).toBe(30);
+    expect(clampExpiresIn(30.9)).toBe(30);
+    expect(clampExpiresIn(0)).toBe(1);
+    expect(clampExpiresIn(-5)).toBe(1);
+    expect(clampExpiresIn(1e9)).toBe(300);
+    for (const odd of [undefined, null, "30", Number.NaN, Number.POSITIVE_INFINITY, {}, []] as unknown[]) expect(clampExpiresIn(odd), String(odd)).toBe(30);
+  });
+
+  it("a reply needs a non-empty string url", () => {
+    expect(checkMintReply({ schema: 1, url: ticket, expires_in: 30 })).toEqual({ url: ticket, expiresIn: 30 });
+    for (const bad of [undefined, null, 0, "x", {}, { url: 7 }, { url: {} }, { url: ["a"] }, { url: "" }, { url: "  " }, { schema: 1, expires_in: 30 }] as unknown[]) {
+      expect(checkMintReply(bad), JSON.stringify(bad)).toBeNull();
+    }
+  });
+
+  it("start(): a reply without a url (or with a non-string one) is a bad_url failure, never a frame at /undefined", async () => {
+    for (const reply of [{ schema: 1, expires_in: 30 }, { schema: 1, url: { href: ticket }, expires_in: 30 }, { schema: 1, url: 42, expires_in: 30 }, { schema: 1, url: "", expires_in: 30 }]) {
+      const c = new PanelSessionController({ mint: async () => reply as unknown as PanelSession, src });
+      await c.start();
+      expect(c.getState(), JSON.stringify(reply)).toMatchObject({ kind: "failed", why: "bad_url" });
+      expect(JSON.stringify(c.getState())).not.toMatch(/undefined|object/);
+    }
+  });
+
+  it("start(): a missing, absurd or non-numeric expires_in never reaches the slow-frame timer as NaN", async () => {
+    for (const [reply, want] of [
+      [{ schema: 1, url: ticket }, 30],
+      [{ schema: 1, url: ticket, expires_in: "soon" }, 30],
+      [{ schema: 1, url: ticket, expires_in: 0 }, 1],
+      [{ schema: 1, url: ticket, expires_in: 86_400 }, 300],
+    ] as const) {
+      const c = new PanelSessionController({ mint: async () => reply as unknown as PanelSession, src });
+      await c.start();
+      const state = c.getState();
+      expect(state, JSON.stringify(reply)).toMatchObject({ kind: "ready", expiresIn: want });
+      expect(Number.isInteger((state as { expiresIn: number }).expiresIn)).toBe(true);
+    }
+  });
+
+  it("fresh(): a malformed reply is a PanelUrlError the full-client path reports as bad_url", async () => {
+    const c = new PanelSessionController({ mint: async () => ({ schema: 1 }) as unknown as PanelSession, src });
+    await expect(c.fresh()).rejects.toBeInstanceOf(PanelUrlError);
+    expect(classifyMint(new PanelUrlError())).toBe("bad_url");
+    const win = { opener: "page" as unknown, closed: false, replaced: [] as string[], document: { body: { textContent: "" as string | null } }, location: { replace: (u: string) => void win.replaced.push(u) }, close: () => void (win.closed = true) };
+    const result = await openFullClient(() => c.fresh(), () => win as OpenedWindow);
+    expect(result).toMatchObject({ kind: "failed", why: "bad_url", text: mintFailureText("bad_url") });
+    expect(win.closed).toBe(true);
+    expect(win.replaced).toEqual([]);
+  });
+
+  it("fresh(): a failed mint reaches onError too, so a 401 from Open full client goes to the pairing page", async () => {
+    const errors: unknown[] = [];
+    const err = new ApiError({ type: "about:blank", title: "Unauthenticated", status: 401, code: "unauthenticated" });
+    const c = new PanelSessionController({ mint: () => Promise.reject(err), src, onError: (e) => errors.push(e) });
+    await expect(c.fresh()).rejects.toBe(err);
+    expect(errors).toEqual([err]);
+    // a reply the page would not frame is not an API error: onError is not told
+    const c2 = new PanelSessionController({ mint: async () => ({ schema: 1, url: "http://evil.example:11190/", expires_in: 30 }), src, onError: (e) => errors.push(e) });
+    await expect(c2.fresh()).rejects.toBeInstanceOf(PanelUrlError);
+    expect(errors).toEqual([err]);
+  });
+});
+
+// ----------------------------------------------------------------------- the page's own policy (section 13)
+
+describe("a panel switched on after the page loaded is refused by the page's own CSP", () => {
+  const ORIGIN = "http://192.168.1.42:11190";
+  const ticketUrl = `${ORIGIN}/?p111_ticket=00112233445566778899aabbccddeeff`;
+  /** A `securitypolicyviolation` event as a browser sends it, on a real EventTarget. */
+  const violation = (init: { effectiveDirective?: string; violatedDirective?: string; blockedURI?: string }): Event => Object.assign(new Event("securitypolicyviolation", { bubbles: true }), init);
+
+  it("the frame-type directives on the panel's origin are the page's own refusal", () => {
+    for (const directive of ["frame-src", "child-src", "default-src"]) {
+      expect(isPanelFrameBlock({ effectiveDirective: directive, blockedURI: ticketUrl }, ORIGIN), directive).toBe(true);
+    }
+    // older browsers only fill violatedDirective ("frame-src 'self'")
+    expect(isPanelFrameBlock({ violatedDirective: "frame-src 'self' http://192.168.1.99:11190", blockedURI: ticketUrl }, ORIGIN)).toBe(true);
+    // what headless Chrome sent for a framed http://127.0.0.1:19190/?p111_ticket=abc#frag under a CSP with no frame-src (checked by
+    // hand against a real page): the origin only in blockedURI, the ticket stripped by the browser itself, fired at the document
+    expect(isPanelFrameBlock({ effectiveDirective: "frame-src", violatedDirective: "frame-src", blockedURI: "http://127.0.0.1:19190" }, "http://127.0.0.1:19190")).toBe(true);
+    // the origin only is compared: path and query (the ticket) do not matter, and a bare origin is enough
+    expect(isPanelFrameBlock({ effectiveDirective: "frame-src", blockedURI: ORIGIN }, ORIGIN)).toBe(true);
+    expect(isPanelFrameBlock({ effectiveDirective: "frame-src", blockedURI: `${ORIGIN}/other` }, `${ORIGIN}/`)).toBe(true);
+  });
+
+  it("anything else is not: another origin, another port, another directive, an inline or unparsable blocked uri", () => {
+    expect(isPanelFrameBlock({ effectiveDirective: "frame-src", blockedURI: "http://192.168.1.42:11191/" }, ORIGIN)).toBe(false);
+    expect(isPanelFrameBlock({ effectiveDirective: "frame-src", blockedURI: "http://192.168.1.43:11190/" }, ORIGIN)).toBe(false);
+    expect(isPanelFrameBlock({ effectiveDirective: "frame-src", blockedURI: "https://192.168.1.42:11190/" }, ORIGIN)).toBe(false);
+    for (const directive of ["script-src", "script-src-elem", "style-src", "img-src", "connect-src", "frame-ancestors", "form-action", "base-uri", ""]) {
+      expect(isPanelFrameBlock({ effectiveDirective: directive, blockedURI: ticketUrl }, ORIGIN), directive).toBe(false);
+    }
+    for (const blockedURI of ["inline", "eval", "", "data", "about", "not a url", undefined, null, 7] as unknown[]) {
+      expect(isPanelFrameBlock({ effectiveDirective: "frame-src", blockedURI } as never, ORIGIN), String(blockedURI)).toBe(false);
+    }
+    expect(isPanelFrameBlock({ effectiveDirective: "frame-src", blockedURI: ticketUrl }, "not an origin")).toBe(false);
+  });
+
+  it("watchFrameBlock hears the document's violation event, once per refusal, and only for the panel's origin", () => {
+    const doc = new EventTarget();
+    let blocks = 0;
+    const off = watchFrameBlock(doc, ORIGIN, () => blocks++);
+    doc.dispatchEvent(violation({ effectiveDirective: "script-src", blockedURI: "inline" })); // unrelated
+    doc.dispatchEvent(violation({ effectiveDirective: "frame-src", blockedURI: "http://192.168.1.42:11191/" })); // another slot
+    expect(blocks).toBe(0);
+    doc.dispatchEvent(violation({ effectiveDirective: "frame-src", blockedURI: ticketUrl }));
+    expect(blocks).toBe(1);
+    doc.dispatchEvent(new Event("something-else"));
+    expect(blocks).toBe(1);
+    off();
+    doc.dispatchEvent(violation({ effectiveDirective: "frame-src", blockedURI: ticketUrl }));
+    expect(blocks).toBe(1); // unsubscribed
+  });
+
+  it("the ticket in the blocked uri is never kept: the callback gets nothing", () => {
+    const doc = new EventTarget();
+    const heard: unknown[][] = [];
+    watchFrameBlock(doc, ORIGIN, (...args: unknown[]) => void heard.push(args));
+    doc.dispatchEvent(violation({ effectiveDirective: "frame-src", blockedURI: ticketUrl }));
+    expect(heard).toEqual([[]]);
+  });
+
+  it("warns ahead only for a panel that the page's first GET /panels said was not enabled and listening", () => {
+    const at = new Map([["meshtastic", false], ["kb", true]]);
+    expect(cspListedAtLoad("meshtastic", at)).toBe(false);
+    expect(cspListedAtLoad("kb", at)).toBe(true);
+    expect(cspListedAtLoad("unknown-panel", at)).toBeNull();
+    expect(cspListedAtLoad("meshtastic", null)).toBeNull();
+    expect(cspListedAtLoad("meshtastic", undefined)).toBeNull();
+  });
+
+  it("the first panel list of a page load is remembered once; enabled and listening both count", () => {
+    resetPanelsAtLoadForTests();
+    recordPanelsAtLoad([
+      { id: "meshtastic", state: { enabled: true, listening: true, health: "up" } },
+      { id: "kb", state: { enabled: true, listening: false, health: "up" } },
+      { id: "fabric", state: { enabled: false, listening: false, health: "unknown" } },
+    ]);
+    recordPanelsAtLoad([{ id: "fabric", state: { enabled: true, listening: true, health: "up" } }]); // a later list does not rewrite history
+    return import("../src/lib/api/http").then(({ panelsSeenAtLoad }) => {
+      expect([...panelsSeenAtLoad()!]).toEqual([["meshtastic", true], ["kb", false], ["fabric", false]]);
+      resetPanelsAtLoadForTests();
+      expect(panelsSeenAtLoad()).toBeNull();
+    });
+  });
+
+  it("the notice says what happened in the page's own words and offers reload; the observed one is an alert", () => {
+    const seen = renderToStaticMarkup(h(PanelPolicyNotice, { observed: true, onReloadPage: () => undefined }));
+    expect(seen).toContain(PANEL_CSP_TEXT);
+    expect(PANEL_CSP_TEXT).toMatch(/loaded before the panel was switched on/);
+    expect(PANEL_CSP_TEXT).toMatch(/Reload the page/);
+    expect(seen).toContain("Reload this page");
+    expect(seen).toContain('role="alert"');
+    expect(seen).not.toContain("<iframe");
+    const warned = renderToStaticMarkup(h(PanelPolicyNotice, { observed: false, onReloadPage: () => undefined }));
+    expect(warned).toContain('role="status"');
+  });
+});
+
+describe("the Panel tab when the page's policy is known not to list the panel", () => {
+  const service = () => apiStore.getState().services!.find((s) => s.id === "meshtastic")!;
+  afterEach(() => resetPanelsAtLoadForTests());
+
+  it("a panel that was not on when the page loaded: no ticket is minted, no frame, the reload notice and Open full client", async () => {
+    await loadLive();
+    recordPanelsAtLoad([{ id: "meshtastic", state: { enabled: false, listening: false, health: "unknown" } }]);
+    const out = html(h(PanelTab, { service: service(), panel: panel() }), LOOPBACK);
+    expect(out).toContain('data-testid="panel-csp"');
+    expect(out).toContain(PANEL_CSP_TEXT);
+    expect(out).toContain("Reload this page");
+    expect(out).toContain("Open full client");
+    expect(out).not.toContain(">Reload<"); // a new ticket cannot get past the page's policy
+    expect(out).not.toContain("<iframe");
+    expect(out).not.toContain("Opening the panel"); // nothing is being minted
+    expect(out).not.toContain("If the client asks for a node address");
+    // the honest copy about what the panel transmits stays
+    expect(out).toContain("111 does not see it and does not store it");
+  });
+
+  it("a panel that was on when the page loaded takes the normal path", async () => {
+    await loadLive();
+    recordPanelsAtLoad([{ id: "meshtastic", state: { enabled: true, listening: true, health: "up" } }]);
+    const out = html(h(PanelTab, { service: service(), panel: panel() }), LOOPBACK);
+    expect(out).not.toContain('data-testid="panel-csp"');
+    expect(out).toContain(">Reload<");
+    expect(out).toContain("Opening the panel");
+  });
+
+  it("with no first answer the page does not guess", async () => {
+    await loadLive();
+    const out = html(h(PanelTab, { service: service(), panel: panel() }), LOOPBACK);
+    expect(out).not.toContain('data-testid="panel-csp"');
+    expect(out).toContain(">Reload<");
+  });
+});
+
+// ----------------------------------------------------------------- what the panel's own page cannot say
+
+describe("§13 'session expired' and §14 'node address' help under the chrome", () => {
+  it("the node address is the panel's own host:port, for the web client's connect dialog", () => {
+    expect(panelNodeAddress(panel(), LOOPBACK)).toBe("127.0.0.1:11190");
+    expect(panelNodeAddress(panel(), LAN)).toBe("192.168.1.42:11190");
+    expect(panelNodeAddress(panel(), MDNS)).toBe("111.local:11190");
+    expect(panelNodeAddress(panel(), HTTPS)).toBe("node.example:11190");
+    expect(panelNodeAddress(panel({ port: 11191 }), { protocol: "http:", hostname: "::1", port: "11180" })).toBe("[::1]:11191");
+  });
+
+  it("is shown with a copy button, and says Reload fixes an expired session", () => {
+    const out = renderToStaticMarkup(h(PanelHelp, { panel: panel(), env: LAN }));
+    expect(out).toContain("If the client asks for a node address, use");
+    expect(out).toContain('data-testid="panel-node-address"');
+    expect(out).toContain(">192.168.1.42:11190<");
+    expect(out).toContain("Copy the node address for the panel&#x27;s connect dialog");
+    expect(out).toContain(PANEL_EXPIRED_HELP);
+    expect(PANEL_EXPIRED_HELP).toMatch(/session expired/);
+    expect(PANEL_EXPIRED_HELP).toMatch(/press Reload/);
+  });
+
+  it("the framed tab carries it (on the address this page was opened on), the gated tabs do not", async () => {
+    const live = async () => {
+      const a = await load("meshtastic");
+      const board = (await a.devices()).find((d) => d.actions.includes("identify"))!;
+      await a.identifyDevice(board.id, { consent: true });
+      await flush(30);
+    };
+    await live();
+    const service = apiStore.getState().services!.find((s) => s.id === "meshtastic")!;
+    const framed = html(h(PanelTab, { service, panel: panel() }), LAN);
+    expect(framed).toContain("If the client asks for a node address, use");
+    expect(framed).toContain("192.168.1.42:11190");
+    expect(framed).toContain(PANEL_EXPIRED_HELP);
+    const off = html(h(PanelTab, { service, panel: panel({ state: { enabled: false, listening: false, health: "unknown" } }) }), LAN);
+    expect(off).not.toContain("If the client asks for a node address");
   });
 });

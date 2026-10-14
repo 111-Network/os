@@ -23,6 +23,15 @@
 //! - the listener is bound only while the settings ask for it;
 //! - `reason_code` `not_enrolled` / `cancelled` and `Problem.code`
 //!   `restore_pending` pass the contract validator.
+//!
+//! Wave 2 bounce (F2 review): restore-pending with a stored announce runs no
+//! link and leaves no `counters` file (M1, end to end); the production
+//! `refuse_loopback` rule on dials, accepts and enrollment; hand-configured
+//! `peers` with `listen_lan`; `cancelMessage`; the home hub persisted before
+//! the enroll answer and rebuilt from the store after a corrupt settings
+//! file; a bare enrollment code read through the CLI's terminal reader; the
+//! applied-proposal guard on disk (a pending record survives a restart); the
+//! announce re-minted on a settings change.
 
 use axum::extract::connect_info::MockConnectInfo;
 use mesh111::link::lossy::{self, EndSpec, LossyConfig, LossyEnd};
@@ -40,6 +49,7 @@ use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpStream};
 use std::sync::{Arc, OnceLock, RwLock};
 use std::time::Duration;
+use zeroize::Zeroizing;
 
 // ---------------------------------------------------------------- contract
 
@@ -368,16 +378,21 @@ impl Resp {
     }
 }
 
-fn dechunk(raw: &str) -> String {
-    let mut out = String::new();
+fn dechunk(raw: &[u8]) -> Vec<u8> {
+    let mut out = Vec::new();
     let mut rest = raw;
-    while let Some((size, after)) = rest.split_once("\r\n") {
-        let n = usize::from_str_radix(size.trim(), 16).unwrap_or(0);
-        if n == 0 || after.len() < n {
+    while let Some(eol) = rest.windows(2).position(|w| w == b"\r\n") {
+        let n = std::str::from_utf8(&rest[..eol])
+            .ok()
+            .and_then(|s| usize::from_str_radix(s.trim(), 16).ok())
+            .unwrap_or(0);
+        let after = &rest[eol + 2..];
+        let Some(chunk) = after.get(..n).filter(|_| n > 0) else {
             break;
-        }
-        out.push_str(&after[..n]);
-        rest = after[n..].trim_start_matches("\r\n");
+        };
+        out.extend_from_slice(chunk);
+        let tail = &after[n..];
+        rest = tail.strip_prefix(b"\r\n").unwrap_or(tail);
     }
     out
 }
@@ -410,8 +425,12 @@ fn http(
     conn.write_all(req.as_bytes()).unwrap();
     let mut raw = Vec::new();
     conn.read_to_end(&mut raw).unwrap();
-    let raw = String::from_utf8_lossy(&raw).into_owned();
-    let (head, body) = raw.split_once("\r\n\r\n").unwrap_or((&raw, ""));
+    let split = raw
+        .windows(4)
+        .position(|w| w == b"\r\n\r\n")
+        .unwrap_or(raw.len());
+    let head = String::from_utf8_lossy(&raw[..split]).into_owned();
+    let body = raw.get(split + 4..).unwrap_or(&[]);
     let mut lines = head.lines();
     let status = lines
         .next()
@@ -425,13 +444,14 @@ fn http(
     let chunked = headers.iter().any(|(k, v)| {
         k.eq_ignore_ascii_case("transfer-encoding") && v.eq_ignore_ascii_case("chunked")
     });
+    let body = if chunked {
+        dechunk(body)
+    } else {
+        body.to_vec()
+    };
     Resp {
         status,
-        body: if chunked {
-            dechunk(body)
-        } else {
-            body.to_string()
-        },
+        body: String::from_utf8_lossy(&body).into_owned(),
         headers,
     }
 }
@@ -440,10 +460,14 @@ fn http(
 
 const LAN_PEER: &str = "192.168.1.50:40000";
 
-#[derive(Clone, Copy, Default)]
+#[derive(Clone, Default)]
 struct Opts {
     hub: bool,
     drop_counters: bool,
+    /// The production rule (§2): loopback is never a peer.
+    refuse_loopback: bool,
+    /// `fabric/settings` written before the first start.
+    settings: Option<String>,
 }
 
 struct Node {
@@ -480,7 +504,9 @@ async fn serve(api: &Arc<ApiState>, peer: Option<&str>) -> u16 {
 fn test_config(layout: &DaemonLayout, o: Opts) -> FabricConfig {
     let mut c = FabricConfig::production(layout, None);
     c.listen = "127.0.0.1:0".parse().unwrap();
-    c.tcp.refuse_loopback = false; // every node of this test is on loopback
+    // every node of this test is on loopback; one test turns the
+    // production rule back on
+    c.tcp.refuse_loopback = o.refuse_loopback;
     c.tcp.backoff_min = Duration::from_millis(30);
     c.tcp.backoff_max = Duration::from_millis(200);
     c.tcp.handshake_timeout = Duration::from_secs(3);
@@ -501,6 +527,10 @@ async fn node(o: Opts) -> Node {
     let id = identity.node_id_hex();
     if o.drop_counters {
         std::fs::remove_file(layout.identity_dir().join("counters")).unwrap();
+    }
+    if let Some(s) = &o.settings {
+        std::fs::create_dir_all(layout.root.join("fabric")).unwrap();
+        std::fs::write(layout.root.join("fabric/settings"), s).unwrap();
     }
     let dash: SharedState = Arc::new(RwLock::new(DashboardState::new("2026.10.14")));
     dash.write().unwrap().node_id = Some(id.clone());
@@ -565,6 +595,57 @@ impl Node {
     fn sub(&self) -> tokio::sync::broadcast::Receiver<Arc<Frame>> {
         self.api.events.subscribe(Some(self.api.events.head())).rx
     }
+
+    /// Stop this node's fabric, run `between` on the stopped root (it may
+    /// hand back the identity to start with; otherwise it is re-read from
+    /// disk), and start the fabric again, serving the same dashboard app.
+    async fn restart(
+        &mut self,
+        o: Opts,
+        between: impl FnOnce(&DaemonLayout) -> Option<node111::identity::Identity>,
+    ) -> Arc<FabricHandle> {
+        self.fabric.shutdown().await;
+        let identity = between(&self.layout)
+            .unwrap_or_else(|| node111::identity::load(&self.layout.identity_dir()).unwrap());
+        let again = fabric::start(test_config(&self.layout, o), Some(identity), &self.api).await;
+        assert!(again.running(), "{:?}", again.down_reason());
+        self.api.insert_ext(Arc::clone(&again));
+        self.fabric = Arc::clone(&again);
+        again
+    }
+}
+
+/// The hello and the announce a `tcp-lan` listener opens a connection with.
+async fn opening_announce(at: SocketAddr) -> Vec<u8> {
+    use mesh111::link::tcp_lan::{read_frame, read_hello, T_ANNOUNCE};
+    let mut s = tokio::net::TcpStream::connect(at).await.unwrap();
+    read_hello(&mut s).await.unwrap();
+    let (ty, body) = read_frame(&mut s).await.unwrap();
+    assert_eq!(ty, T_ANNOUNCE);
+    body
+}
+
+/// A hub offer from `hub` (route) — `(code, card text, address)`.
+fn offer_of(hub: &Node) -> (String, String, String) {
+    let r = hub.post("/api/v1/fabric/hub/offer", json!({}));
+    check_op("offerHub", &r);
+    let o = r.json();
+    (
+        o["code"].as_str().unwrap().to_string(),
+        o["card"]["text"].as_str().unwrap().to_string(),
+        o["address"].as_str().unwrap().to_string(),
+    )
+}
+
+/// `member` enrolls with `hub` by route.
+fn enroll_by_route(member: &Node, hub: &Node) {
+    let (code, card, address) = offer_of(hub);
+    let r = member.post(
+        "/api/v1/fabric/hub/enroll",
+        json!({ "address": address, "code": code, "card": card }),
+    );
+    check_op("enrollHub", &r);
+    assert_eq!(r.status, 200, "{}", r.body);
 }
 
 /// Poll `f` (blocking HTTP inside) until it yields, up to `secs`.
@@ -669,6 +750,7 @@ async fn hub_offer_enroll_send_and_every_route() {
     .await;
     let b = node(Opts::default()).await;
     let d = node(Opts::default()).await;
+    let e = node(Opts::default()).await;
     let (mut sa, mut sb) = (a.sub(), b.sub());
 
     // listener bound only when the settings say so (A: Cat 4 hub default)
@@ -761,19 +843,46 @@ async fn hub_offer_enroll_send_and_every_route() {
     check_op("enrollHub", &r);
     r.problem(409, "bad_request");
 
-    // the member's settings are persisted (0600) with the home hub
-    let saved = until(5, "settings persisted", || {
-        let t = std::fs::read_to_string(b.layout.root.join("fabric/settings")).ok()?;
-        t.contains(&a.id).then_some(t)
-    })
-    .await;
+    // the member's settings are persisted (0600) with the home hub — before
+    // the enroll answer (F2 review m2: no wait for the SSE pump)
+    let saved = std::fs::read_to_string(b.layout.root.join("fabric/settings")).unwrap();
+    assert!(saved.contains(&a.id), "{saved}");
     assert!(saved.contains("\"home_hub\""), "{saved}");
+    assert!(saved.contains(&a_addr.to_string()), "{saved}");
     use std::os::unix::fs::PermissionsExt;
     let mode = std::fs::metadata(b.layout.root.join("fabric/settings"))
         .unwrap()
         .permissions()
         .mode();
     assert_eq!(mode & 0o777, 0o600);
+    // `111 fabric enroll --address … --card …` with the code read through
+    // the CLI's terminal reader, never argv (F2 review m4)
+    let (code, card_a, _) = offer_of(&a);
+    let (port_e, addr) = (e.port, a_addr.to_string());
+    let out = tokio::task::spawn_blocking(move || {
+        let cmd = fcli::parse(&[
+            "enroll".into(),
+            "--address".into(),
+            addr,
+            "--card".into(),
+            card_a,
+        ])
+        .unwrap();
+        let mut asked = 0;
+        let mut out = Vec::new();
+        fcli::run_with(port_e, &cmd, &mut out, &mut || {
+            asked += 1;
+            Ok(Zeroizing::new(code.clone()))
+        })
+        .unwrap();
+        assert_eq!(asked, 1, "the code is asked for once");
+        String::from_utf8(out).unwrap()
+    })
+    .await
+    .unwrap();
+    assert!(out.starts_with("Enrolled with hub"), "{out}");
+    assert!(e.fabric.persisted().fabric.home_hub.is_some());
+
     let r = a.delete("/api/v1/fabric/hub/offer");
     check_op("dismissHubOffer", &r);
     assert_eq!(r.status, 204);
@@ -906,6 +1015,25 @@ async fn hub_offer_enroll_send_and_every_route() {
     check_op("retryMessage", &r);
     assert_eq!(r.json()["state"], "queued");
     assert_eq!(r.json()["reason_code"], "waiting_for_key");
+    // cancelMessage (lead's additive route): an own message that has not
+    // left ⇒ 202, still `queued`, `reason_code: cancelled` (§4 tombstone)
+    let r = b.post(&format!("/api/v1/messages/{qid}/cancel"), json!({}));
+    check_op("cancelMessage", &r);
+    assert_eq!(r.status, 202, "{}", r.body);
+    assert_eq!(r.json()["id"], qid);
+    assert_eq!(r.json()["state"], "queued");
+    assert_eq!(r.json()["reason_code"], "cancelled");
+    // delivered, incoming, unknown
+    let r = b.post(&format!("/api/v1/messages/{mid}/cancel"), json!({}));
+    check_op("cancelMessage", &r);
+    r.problem(409, "bad_request");
+    let incoming = got["id"].as_str().unwrap().to_string();
+    a.post(&format!("/api/v1/messages/{incoming}/cancel"), json!({}))
+        .problem(409, "bad_request");
+    b.post("/api/v1/messages/msg-999999/cancel", json!({}))
+        .problem(404, "not_found");
+    b.post("/api/v1/messages/nope/cancel", json!({}))
+        .problem(404, "not_found");
     // send refusals
     b.post(
         "/api/v1/messages",
@@ -960,7 +1088,7 @@ async fn hub_offer_enroll_send_and_every_route() {
     until(5, "facts", || {
         let fa = (a.fabric.provider())()?;
         let fb = (b.fabric.provider())()?;
-        (fa.store_open && fa.members == Some(2) && fb.hub_reachable == Some(true)).then_some(())
+        (fa.store_open && fa.members == Some(3) && fb.hub_reachable == Some(true)).then_some(())
     })
     .await;
 
@@ -978,7 +1106,7 @@ async fn hub_offer_enroll_send_and_every_route() {
         "{ours:?}"
     );
 
-    for n in [&a, &b, &d] {
+    for n in [&a, &b, &d, &e] {
         n.fabric.shutdown().await;
     }
 }
@@ -1028,6 +1156,11 @@ async fn auth_matrix_session_bearer_nothing() {
         (
             "POST",
             "/api/v1/messages/msg-424242/retry".into(),
+            json!({}),
+        ),
+        (
+            "POST",
+            "/api/v1/messages/msg-424242/cancel".into(),
             json!({}),
         ),
         (
@@ -1287,6 +1420,31 @@ async fn message_proposals_are_checked_then_applied_once() {
     decide(&a, "prop-ok", "accepted").problem(409, "already_decided");
     assert_eq!(thread_of(&a, &bid)["messages"].as_array().unwrap().len(), 1);
 
+    // F2 review m6: the guard is the record on disk, not process memory. A
+    // crash after the pending record (before or after the send) leaves the
+    // proposal decided, `applied.pending` — a retried accept, in this or any
+    // later daemon, never sends it.
+    write_proposal(&a, "prop-crash", Some(&aid), &format!("to: {bid}\n\nonce"));
+    std::fs::write(
+        a.layout.root.join("agent/decisions/prop-crash.json"),
+        json!({"schema": 1, "decision": "accepted", "at": "2026-10-15T08:00:00Z",
+               "applied": {"pending": true}})
+        .to_string(),
+    )
+    .unwrap();
+    decide(&a, "prop-crash", "accepted").problem(409, "already_decided");
+    assert_eq!(thread_of(&a, &bid)["messages"].as_array().unwrap().len(), 1);
+    // the record is written before the send: no record, no send
+    write_proposal(&a, "prop-ro", Some(&aid), &format!("to: {bid}\n\nnever"));
+    let decisions = a.layout.root.join("agent/decisions");
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&decisions, std::fs::Permissions::from_mode(0o500)).unwrap();
+    let r = decide(&a, "prop-ro", "accepted");
+    std::fs::set_permissions(&decisions, std::fs::Permissions::from_mode(0o700)).unwrap();
+    r.problem(500, "internal");
+    assert_eq!(thread_of(&a, &bid)["messages"].as_array().unwrap().len(), 1);
+    assert!(a.get("/api/v1/proposals/prop-ro").json()["decision"].is_null());
+
     // the refused request proposal stayed open: once the human accepts C's
     // message request (PATCH accept), accepting it sends
     let t = thread_of(&a, &cid);
@@ -1353,8 +1511,273 @@ async fn restore_pending_answers_409_and_seals_nothing() {
         .as_array()
         .unwrap()
         .is_empty());
+    let st = r.get("/api/v1/fabric").json();
+    assert_eq!(st["store"]["restore_pending"], true);
+    assert_eq!(b.get("/api/v1/fabric").json()["store"]["restore_pending"], false);
     r.fabric.shutdown().await;
     b.fabric.shutdown().await;
+    // F2 review M1: the clean stop wrote no counters file (no reset)
+    let dir = r.layout.identity_dir();
+    assert!(!dir.join("counters").exists());
+    assert!(id111::counters::CounterStore::restore_pending(&dir).is_ok());
+}
+
+/// F2 review M1, end to end: a node whose `counters` file went missing
+/// while a valid announce is stored (and whose settings ask for a listener
+/// and a direct peer) runs no link at all, presents no card, reports
+/// `restore_pending` in `GET /fabric` and the service facts, and its clean
+/// stop leaves the identity dir state-absent — the floor stays settable and
+/// nothing re-issues announce counter 1.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn restore_pending_with_a_stored_announce_runs_no_link_and_resets_nothing() {
+    let other = node(Opts::default()).await;
+    let peers = json!({
+        "schema": 1, "hub_role": true, "listen_lan": true,
+        "peers": [{ "node_id": other.id, "address": "127.0.0.1:9" }],
+    })
+    .to_string();
+    let o = Opts {
+        hub: true,
+        settings: Some(peers),
+        ..Opts::default()
+    };
+    let mut r = node(o.clone()).await;
+    // a normal first run: an announce is minted and stored, tcp-lan runs
+    let stored = r.fabric.own_announce();
+    assert!(!stored.is_empty());
+    assert!(r.fabric.tcp().is_some() && r.fabric.listen_addr().await.is_some());
+    let dir = r.layout.identity_dir();
+    // after the clean stop the file goes missing; `111d`'s own identity
+    // check would refuse such a dir at start, so the identity is read first
+    let again = r
+        .restart(o, |l| {
+            let dir = l.identity_dir();
+            let identity = node111::identity::load(&dir).unwrap();
+            std::fs::remove_file(dir.join("counters")).unwrap();
+            Some(identity)
+        })
+        .await;
+    assert_eq!(
+        std::fs::read(r.layout.root.join("fabric/announce")).unwrap(),
+        stored,
+        "the valid announce is still on disk"
+    );
+    assert!(again.restore_pending());
+    assert!(again.own_announce().is_empty(), "never presented while pending");
+    assert!(again.tcp().is_none(), "no tcp-lan: no dial, no peers");
+    assert!(again.listen_addr().await.is_none(), "binds nothing");
+    r.get("/api/v1/contacts/me/card")
+        .problem(409, "restore_pending");
+    r.post("/api/v1/fabric/hub/offer", json!({}))
+        .problem(409, "restore_pending");
+    let st = r.get("/api/v1/fabric");
+    check_op("getFabric", &st);
+    assert_eq!(st.json()["store"]["restore_pending"], true);
+    assert_eq!(st.json()["links"], json!([]));
+    let facts = (again.provider())().unwrap();
+    assert!(facts.store_open && facts.restore_pending, "{facts:?}");
+    again.shutdown().await;
+    assert!(!dir.join("counters").exists(), "no counter reset on disk");
+    let mut floor = id111::counters::CounterStore::restore_pending(&dir).unwrap();
+    assert!(matches!(
+        floor.next_announce_counter(),
+        Err(id111::counters::CounterError::RestoreFloorRequired)
+    ));
+    other.fabric.shutdown().await;
+}
+
+/// F2 review m9 (test gap): the production rule — loopback is never a peer
+/// (§2) — on enrollment (literal and resolved name), on dials (`peers`) and
+/// on accepts.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn refuse_loopback_refuses_loopback_dials_accepts_and_enrollment() {
+    let hub = node(Opts {
+        hub: true,
+        ..Opts::default()
+    })
+    .await;
+    let hub_addr = hub.fabric.listen_addr().await.unwrap();
+    let card = hub.card();
+    let p = node(Opts {
+        refuse_loopback: true,
+        ..Opts::default()
+    })
+    .await;
+    assert!(p.fabric.refuse_loopback());
+    for address in [
+        hub_addr.to_string(),
+        format!("localhost:{}", hub_addr.port()),
+        format!("[::ffff:127.0.0.1]:{}", hub_addr.port()),
+    ] {
+        let r = p.post(
+            "/api/v1/fabric/hub/enroll",
+            json!({ "address": address, "code": "ABCDEFGH", "card": card }),
+        );
+        check_op("enrollHub", &r);
+        r.problem(400, "bad_request");
+        assert!(r.json()["detail"].as_str().unwrap().contains("loopback"), "{}", r.body);
+    }
+    for address in ["0.0.0.0:11183", "[::]:11183", "224.0.0.1:11183"] {
+        p.post(
+            "/api/v1/fabric/hub/enroll",
+            json!({ "address": address, "code": "ABCDEFGH", "card": card }),
+        )
+        .problem(400, "bad_request");
+    }
+    assert!(p.fabric.persisted().fabric.home_hub.is_none());
+    // accepts: P listens (its rule on); the hub dials it from loopback and is
+    // refused at accept — no connection ever comes up on either side
+    let r = p.patch("/api/v1/fabric/settings", json!({ "listen_lan": true }));
+    assert_eq!(r.status, 200, "{}", r.body);
+    let p_addr = p.fabric.listen_addr().await.expect("P listens");
+    use mesh111::link::Dialer;
+    let p_id = p.fabric.fabric().unwrap().node_id();
+    hub.fabric.tcp().unwrap().maintain(p_addr, Some(p_id));
+    tokio::time::sleep(Duration::from_millis(600)).await;
+    assert_eq!(p.fabric.tcp().unwrap().connection_count(), 0, "accept refused");
+    assert_eq!(hub.fabric.tcp().unwrap().connection_count(), 0);
+    // dials: a loopback `peers` entry makes the file invalid under the rule
+    // (moved aside, everything off) — nothing is dialed
+    let hub_id = hub.id.clone();
+    let settings = json!({
+        "schema": 1, "listen_lan": true,
+        "peers": [{ "node_id": hub_id, "address": hub_addr.to_string() }],
+    })
+    .to_string();
+    let q = node(Opts {
+        refuse_loopback: true,
+        settings: Some(settings),
+        ..Opts::default()
+    })
+    .await;
+    assert!(q.fabric.persisted().peers.is_empty());
+    assert!(!q.fabric.persisted().fabric.listen_lan, "fail closed");
+    assert!(q.layout.root.join("fabric/settings.invalid-1").exists());
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(q.fabric.tcp().unwrap().connection_count(), 0);
+    for n in [&hub, &p, &q] {
+        n.fabric.shutdown().await;
+    }
+}
+
+/// F2 review m9 (test gap): hand-configured direct `peers` — two members on
+/// one LAN without a hub; one listens (`listen_lan`), the other keeps a dial
+/// to it from its settings file, and a message is delivered over that link.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn peers_from_settings_dial_a_listen_lan_node() {
+    let a = node(Opts::default()).await;
+    let r = a.patch("/api/v1/fabric/settings", json!({ "listen_lan": true }));
+    assert_eq!(r.status, 200, "{}", r.body);
+    let a_addr = a.fabric.listen_addr().await.expect("listen_lan binds");
+    let settings = json!({
+        "schema": 1,
+        "peers": [{ "node_id": a.id, "address": a_addr.to_string() }],
+    })
+    .to_string();
+    let b = node(Opts {
+        settings: Some(settings),
+        ..Opts::default()
+    })
+    .await;
+    assert_eq!(b.fabric.persisted().peers.len(), 1);
+    assert!(b.fabric.listen_addr().await.is_none(), "B only dials");
+    until(10, "B's dial to A is up", || {
+        (b.fabric.tcp()?.connection_count() == 1).then_some(())
+    })
+    .await;
+    a.add(&b);
+    b.add(&a);
+    let r = b.post("/api/v1/messages", json!({ "to": a.id, "text": "direct" }));
+    assert_eq!(r.status, 202, "{}", r.body);
+    let mid = r.json()["id"].as_str().unwrap().to_string();
+    until(10, "delivered over the peers link", || {
+        let t = thread_of(&b, &a.id);
+        let m = t["messages"]
+            .as_array()?
+            .iter()
+            .find(|m| m["id"] == mid)?
+            .clone();
+        (m["state"] == "delivered").then_some(())
+    })
+    .await;
+    assert_eq!(thread_of(&a, &b.id)["messages"][0]["text"], "direct");
+    a.fabric.shutdown().await;
+    b.fabric.shutdown().await;
+}
+
+/// F2 review m3: a corrupt `fabric/settings` is moved aside and the member's
+/// home hub comes back from its `enrolled` contact (with the address when
+/// it can be salvaged from the bad file).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn corrupt_settings_are_moved_aside_and_the_home_hub_rebuilt() {
+    let hub = node(Opts {
+        hub: true,
+        ..Opts::default()
+    })
+    .await;
+    let hub_addr = hub.fabric.listen_addr().await.unwrap();
+    let mut m = node(Opts::default()).await;
+    enroll_by_route(&m, &hub);
+    let settings = m.layout.root.join("fabric/settings");
+    // one byte of damage: unparsable — the hub is rebuilt, address unknown
+    let mut bytes = std::fs::read(&settings).unwrap();
+    bytes[0] = b'#';
+    let damaged = bytes.clone();
+    let again = m
+        .restart(Opts::default(), |l| {
+            std::fs::write(l.root.join("fabric/settings"), &damaged).unwrap();
+            None
+        })
+        .await;
+    let h = again.persisted().fabric.home_hub.expect("rebuilt");
+    assert_eq!(fjson::hex(&h.node_id), hub.id);
+    assert_eq!(h.address, None);
+    assert_eq!(
+        std::fs::read(m.layout.root.join("fabric/settings.invalid-1")).unwrap(),
+        bytes,
+        "the bad file is kept"
+    );
+    let st = m.get("/api/v1/fabric").json();
+    assert_eq!(st["hub"]["enrolled"], true);
+    assert_eq!(st["hub"]["node_id"], hub.id);
+    let saved = std::fs::read_to_string(&settings).unwrap();
+    assert!(saved.contains(&hub.id), "rewritten: {saved}");
+    // a type error elsewhere: the address is salvaged too
+    let typed = json!({ "schema": 1, "hub_role": "yes",
+                        "home_hub": { "node_id": hub.id, "address": hub_addr.to_string() } })
+    .to_string();
+    let again = m
+        .restart(Opts::default(), |l| {
+            std::fs::write(l.root.join("fabric/settings"), &typed).unwrap();
+            None
+        })
+        .await;
+    let h = again.persisted().fabric.home_hub.expect("rebuilt");
+    assert_eq!(h.address, Some(hub_addr));
+    assert!(!again.persisted().fabric.hub_role, "fail closed");
+    assert!(m.layout.root.join("fabric/settings.invalid-2").exists());
+    until(10, "the hub is reachable again", || {
+        let st = m.get("/api/v1/fabric").json();
+        (st["hub"]["reachable"] == true).then_some(())
+    })
+    .await;
+    // the hub itself: its enrolled contacts are members — no home hub
+    let mut hub = hub;
+    let h2 = hub
+        .restart(
+            Opts {
+                hub: true,
+                ..Opts::default()
+            },
+            |l| {
+                std::fs::write(l.root.join("fabric/settings"), "{broken").unwrap();
+                None
+            },
+        )
+        .await;
+    assert!(h2.persisted().fabric.home_hub.is_none());
+    m.fabric.shutdown().await;
+    hub.fabric.shutdown().await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1363,8 +1786,18 @@ async fn restart_keeps_the_announce_store_and_settings() {
     // flag; the next start keeps the stored announce (never re-minted)
     let a = node(Opts::default()).await;
     let first = a.fabric.own_announce();
-    let r = a.patch("/api/v1/fabric/settings", json!({ "custody_opt_in": true }));
+    let r = a.patch(
+        "/api/v1/fabric/settings",
+        json!({ "custody_opt_in": true, "listen_lan": true }),
+    );
     assert_eq!(r.status, 200, "{}", r.body);
+    // F2 review m7: the roles changed, so the announce is re-minted now —
+    // the own card and every new tcp-lan connection carry it
+    let now = a.fabric.own_announce();
+    assert_ne!(now, first, "re-minted on the settings change");
+    assert_eq!(a.card(), mesh111::contacts::card_text(&now));
+    let at = a.fabric.listen_addr().await.unwrap();
+    assert_eq!(opening_announce(at).await, now);
     a.fabric.shutdown().await;
     // custody_opt_in changes the announce roles: the next start re-mints
     let id = node111::identity::load(&a.layout.identity_dir()).unwrap();
@@ -1372,6 +1805,7 @@ async fn restart_keeps_the_announce_store_and_settings() {
     assert!(again.running(), "{:?}", again.down_reason());
     let second = again.own_announce();
     assert_ne!(first, second, "roles changed ⇒ a new announce");
+    assert_eq!(second, now, "the re-minted announce was stored");
     assert!(again.persisted().fabric.custody_opt_in);
     again.shutdown().await;
     let id = node111::identity::load(&a.layout.identity_dir()).unwrap();

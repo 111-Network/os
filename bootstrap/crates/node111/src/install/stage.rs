@@ -1,6 +1,7 @@
 //! Step 6 — stage (install-time; the installer IS root, so it promotes directly —
 //! the daemon-time split with the root helper doesn't apply here): fetch payload
-//! → `releases/<ver>.tmp-<pid>/` → verify sha256 + extracted-tree manifest →
+//! → `releases/<ver>.tmp-<pid>/` → verify sha256 + extracted-tree manifest +
+//! Layer 5 pins (`ChannelManifest::verify_layer5_tree`) →
 //! fsync → rename → flip `current` (single atomic unit: KB rides inside the
 //! payload) → establish the initial floor. Prune to 2 only after probation —
 //! a fresh install has no probation, so nothing is pruned here.
@@ -25,9 +26,15 @@ pub fn run(
         .root
         .join("releases")
         .join(manifest.release().to_string());
-    // Content probe (never mere existence): a complete prior stage verifies.
+    // Content probe (never mere existence): a complete prior stage verifies —
+    // against its own payload manifest AND the Layer 5 pins (§19 L1), so a release
+    // dir carrying an unpinned or altered bin/meshmud, panel bundle or presence
+    // lock is re-extracted from the pinned tarball, never accepted as-is.
     if release_dir.join("bin/111").exists()
         && crate::daemon::updater::stage::verify_tree(&release_dir).is_ok()
+        && manifest
+            .verify_layer5_tree(&release_dir, crate::daemon::updater::fetch::TARGET_TRIPLE)
+            .is_ok()
     {
         eprintln!(
             "111 install: release {} already staged+verified",
@@ -69,6 +76,8 @@ pub fn run(
     let result = (|| -> anyhow::Result<()> {
         crate::daemon::updater::stage::safe_unpack(&tarball, &tmp)?;
         crate::daemon::updater::stage::verify_tree(&tmp)?;
+        // Layer 5 assets equal the signed manifest's pins (os/messaging/README.md §19 L1).
+        manifest.verify_layer5_tree(&tmp, crate::daemon::updater::fetch::TARGET_TRIPLE)?;
         Ok(())
     })();
     if let Err(e) = result {

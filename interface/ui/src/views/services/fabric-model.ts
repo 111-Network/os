@@ -7,6 +7,7 @@ import { formatBytes, hubSummary } from "../../lib/api/fabric";
 import { cleanPeerText } from "../../lib/api/messages";
 import { own } from "../../lib/api/own";
 import type { Contact, FabricCustody, FabricHub, FabricLink, FabricPathProfile } from "../../lib/api/types";
+import { MAX_NAME_CHARS, plain } from "../nearby/model";
 
 /** The link kinds of section 8, in words. An unknown kind (a newer daemon) reads "unknown link". */
 const LINK_LABEL = {
@@ -37,14 +38,17 @@ export function linkLine(l: Pick<FabricLink, "state" | "peers" | "detail">): str
   return `${linkStateWord(l.state)}${peers}${why}`;
 }
 
-/** The home hub's name: the contact's alias or label when it is a contact, else its short id. */
+/**
+ * The home hub's name: the contact's alias or label when it is a contact, else its short id. The label is written by the hub
+ * (a peer), so it is cleaned, flattened and cut to `MAX_NAME_CHARS`; the view draws it isolated (`PeerText`).
+ */
 export function hubName(hub: Pick<FabricHub, "node_id">, contacts: readonly Contact[] | null): string | null {
   if (!hub.node_id) return null;
   const c = contacts?.find((x) => x.node_id === hub.node_id);
-  return c ? cleanPeerText(contactName(c)) : `${hub.node_id.slice(0, 8)}…${hub.node_id.slice(-4)}`;
+  return c ? plain(contactName(c), MAX_NAME_CHARS) : `${hub.node_id.slice(0, 8)}…${hub.node_id.slice(-4)}`;
 }
 
-/** The home-hub phrase of the page: the summary, with the hub's name when this node is enrolled. */
+/** The home-hub phrase of the page as plain text: the summary, with the hub's name when this node is enrolled. */
 export function hubLine(hub: FabricHub, contacts: readonly Contact[] | null): string {
   const base = hubSummary(hub);
   const name = hubName(hub, contacts);
@@ -61,10 +65,10 @@ export function custodyText(c: FabricCustody, hubRole: boolean): string {
 // ---------------------------------------------------------------------------------------------- store
 
 export const STORE_FULL_TEXT =
-  "The store is full. This node refuses new messages and new mail for others until space is freed. Nothing that is still waiting to be delivered, held for a member, pending as a request or pinned is deleted to make room.";
+  "The store is full. This node refuses new messages and new mail for others until space is freed. It deletes nothing to make room: undelivered messages, mail it holds for members, pending requests, pinned items and contacts all stay.";
 export const STORE_CLOSED_TEXT = "The store is not open, so this node cannot save or send messages. Restarting the node tries to open it again; the agent can look at why it did not open.";
 export const STORE_PRUNE_TEXT =
-  "When the store passes its high-water mark it frees space in a fixed order: mail it held for others that has already been collected, then old data that newer data replaced. It never deletes a message that has not been delivered, mail it still holds for a member, a pending request or a pinned contact. Your own conversation history is only ever pruned at hard capacity, and only after an export is offered.";
+  "When the store passes its high-water mark it frees space in a fixed order: mail it held for others that has already been collected, then old data that newer data replaced. It never deletes a message that has not been delivered, mail it still holds for a member, a pending request, a pinned item or a contact. Your own conversation history is only ever pruned at hard capacity, and only after an export is offered.";
 
 /** The sentence beside the gauge: "3.4 MB of 256 MB". */
 export function storeUsageText(used: number, watermark: number): string {

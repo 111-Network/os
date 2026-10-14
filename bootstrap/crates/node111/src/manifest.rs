@@ -71,7 +71,14 @@
 //! `bin/111` and `share/kb/` — nothing is fetched separately and nothing downloads
 //! at runtime. The pins here name the CI-built bytes in the signed manifest, and
 //! [`ChannelManifest::verify_layer5_tree`] cross-checks an extracted payload tree
-//! against them (paths in [`layer5`]).
+//! against them (paths in [`layer5`]). The three Layer 1 actors call it right
+//! after their own `verify_tree`: the root helper on the tree it extracts itself
+//! (`update_helper.rs`, the authoritative check, D12), the installer on its fresh
+//! extraction and in its "already staged" content probe (`install/stage.rs`), and
+//! the updater on its staging tree (`daemon/updater/fetch.rs`, an early refusal
+//! that removes the staging bundle). The release generator
+//! (`manifest/gen-manifest.py`) runs the same check against each
+//! `payload-<triple>.tar.gz` before it writes the pins.
 //!
 //! ```toml
 //! [pkg.meshmud.target.x86_64-unknown-linux-musl]  # meshmud, built in CI from the pinned
@@ -93,12 +100,20 @@
 //! size = 123                # from it with `pip install --require-hashes`, like `rns-lock`
 //! ```
 //!
-//! Package names are closed (`111`, `meshmud`) and so are bundle names
-//! (`meshtastic-web`, the bundle the embedded panel declaration points at): an
-//! unknown one is refused like an unknown field. A `meshmud` target needs a `111`
+//! Package and bundle names are open, as `[pkg.*.target.*]` always was
+//! (`os/bootstrap/README.md`): a name this binary does not know parses — its pin
+//! is validated like any other — and is otherwise ignored, so a later release can
+//! add a package (D19 c's KISS-modem images) or a panel without stranding nodes
+//! that run this binary. The closure lives in [`ChannelManifest::verify_layer5_tree`]
+//! instead: every pinned bundle, known or not, must sit at `panels/<name>/` with
+//! its tree hash, and nothing unpinned may sit under `panels/` (Wave 2 review B1
+//! m6; lead decision, reversible by the owner). A bundle name must be one plain
+//! path component, since it names a directory. A `meshmud` target needs a `111`
 //! binary and a payload for the same triple (it rides in that payload).
 //! `manifest-version` stays 1: no signed release has shipped yet, and the first
-//! one carries these sections; any section added after it bumps the version.
+//! one carries these sections; how a reader learns of a newer layout (a
+//! reader-version field or side-by-side manifests) is an open owner question to
+//! settle before the first signed release.
 
 use crate::calver::Calver;
 use crate::floor::Floor;
@@ -107,16 +122,11 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
-/// Package names a manifest may pin under `[pkg.<name>.target.<triple>]`.
-pub const KNOWN_PACKAGES: [&str; 2] = ["111", MESHMUD_PACKAGE];
-
 /// The `meshmud` package (Layer 5 §14): the Meshtastic multiplexer, per target.
 pub const MESHMUD_PACKAGE: &str = "meshmud";
 
-/// Bundle names a manifest may pin under `[bundle.<name>]`: the static panel
-/// bundles the embedded panel declarations point at (`assets/panels/*.toml`
-/// `bundle = "panels/<name>"`, Layer 5 §13).
-pub const KNOWN_BUNDLES: [&str; 1] = ["meshtastic-web"];
+/// Longest bundle name (it names the directory `panels/<name>/`).
+const BUNDLE_NAME_MAX: usize = 64;
 
 /// Where the Layer 5 assets sit inside a payload tree (= `releases/<ver>/`, i.e.
 /// `current/`), and where the node builds the presence venv (Layer 5 §2, §13, §14;
@@ -292,6 +302,24 @@ fn validate_url(field: &str, url: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// A bundle name is one plain path component (`panels/<name>/`): 1–64 of
+/// `[a-z0-9._-]`, starting with a letter or digit (so never `.`, `..` or a path).
+fn validate_bundle_name(field: &str, name: &str) -> anyhow::Result<()> {
+    let first_ok = name
+        .chars()
+        .next()
+        .is_some_and(|c| c.is_ascii_lowercase() || c.is_ascii_digit());
+    anyhow::ensure!(
+        first_ok
+            && name.len() <= BUNDLE_NAME_MAX
+            && name.chars().all(|c| {
+                c.is_ascii_lowercase() || c.is_ascii_digit() || matches!(c, '.' | '_' | '-')
+            }),
+        "{field}: a bundle name must be 1-{BUNDLE_NAME_MAX} of [a-z0-9._-] starting with a letter or digit"
+    );
+    Ok(())
+}
+
 fn artifact(name: String, field: &str, raw: RawArtifact) -> anyhow::Result<PinnedArtifact> {
     validate_url(field, &raw.url)?;
     validate_sha256(field, &raw.sha256)?;
@@ -325,12 +353,9 @@ impl ChannelManifest {
             .map_err(|e| anyhow::anyhow!("manifest min-upgrade-from: {e}"))?;
 
         let mut packages = Vec::new();
+        // Open names (module doc): an unknown package parses and only its pin is
+        // validated; `binary_for` / `meshmud_for` select by name.
         for (pkg_name, pkg) in &raw.pkg {
-            anyhow::ensure!(
-                KNOWN_PACKAGES.contains(&pkg_name.as_str()),
-                "pkg.{pkg_name}: unknown package (known: {})",
-                KNOWN_PACKAGES.join(", ")
-            );
             for (target, art) in &pkg.target {
                 let field = format!("pkg.{pkg_name}.target.{target}");
                 let artifact = artifact(pkg_name.clone(), &field, art.clone())?;
@@ -372,11 +397,8 @@ impl ChannelManifest {
         let mut bundles = Vec::new();
         for (name, raw_bundle) in &raw.bundle {
             let field = format!("bundle.{name}");
-            anyhow::ensure!(
-                KNOWN_BUNDLES.contains(&name.as_str()),
-                "{field}: unknown bundle (known: {})",
-                KNOWN_BUNDLES.join(", ")
-            );
+            // Open names (module doc), but each one names `panels/<name>/`.
+            validate_bundle_name(&field, name)?;
             validate_sha256(&format!("{field}.tree-sha256"), &raw_bundle.tree_sha256)?;
             let artifact = artifact(
                 name.clone(),
@@ -564,22 +586,32 @@ impl ChannelManifest {
     /// must be present with exactly the pinned bytes, and an asset the manifest
     /// does not pin must not be in the tree.
     ///
-    /// - `bin/meshmud`: a regular file (never a link) whose size and sha256 equal
+    /// - `bin/meshmud`: a regular file whose size and sha256 equal
     ///   `pkg.meshmud.target.<triple>`; absent when that pin is absent.
     /// - `panels/<name>/`: a real directory whose [`bundle_tree_sha256`] equals
     ///   `bundle.<name>.tree-sha256` (every file is covered, so an extra, missing
-    ///   or altered file fails); nothing under `panels/` that is not pinned.
+    ///   or altered file fails) for every pinned bundle, known to this binary or
+    ///   not; nothing under `panels/` that is not pinned.
     /// - `share/meshtastic-presence/meshtastic-presence-lock.txt`: size and sha256
     ///   equal `presence-lock`; absent when that pin is absent.
     ///
-    /// Call it right after `daemon::updater::stage::verify_tree` (which checks the
-    /// tree against the payload's own `share/payload.manifest`).
+    /// Never a link anywhere on the way: every component between `tree` and each
+    /// target (`bin`, `share`, `share/meshtastic-presence`, `panels`,
+    /// `panels/<name>`) is `lstat`ed and must be a real directory, so a linked
+    /// parent can neither supply the pinned bytes nor hide an unpinned asset
+    /// (payloads are plain trees: `safe_unpack` refuses link entries too).
+    /// `panels` itself is checked before any bundle is hashed. `tree` itself may
+    /// be reached through a link (`current/`).
+    ///
+    /// Called right after `daemon::updater::stage::verify_tree` (which checks the
+    /// tree against the payload's own `share/payload.manifest`) by the root
+    /// helper, the installer and the updater (module doc).
     pub fn verify_layer5_tree(&self, tree: &Path, target_triple: &str) -> anyhow::Result<()> {
-        let bin = tree.join(layer5::MESHMUD_BIN);
         match self.meshmud_for(target_triple) {
-            Some(pkg) => check_pinned_file(&bin, &pkg.artifact, layer5::MESHMUD_BIN)?,
+            Some(pkg) => check_pinned_file(tree, layer5::MESHMUD_BIN, &pkg.artifact)?,
             None => ensure_absent(
-                &bin,
+                tree,
+                layer5::MESHMUD_BIN,
                 &format!(
                     "payload carries {} but the manifest pins no meshmud for {target_triple}",
                     layer5::MESHMUD_BIN
@@ -587,10 +619,23 @@ impl ChannelManifest {
             )?,
         }
 
-        let panels = tree.join(layer5::PANELS_DIR);
+        let panels = match lstat_beneath(tree, layer5::PANELS_DIR)? {
+            None => None,
+            Some(meta) if meta.file_type().is_dir() => Some(tree.join(layer5::PANELS_DIR)),
+            Some(_) => anyhow::bail!(
+                "payload {} is not a directory (links are refused)",
+                layer5::PANELS_DIR
+            ),
+        };
         for b in &self.bundles {
-            let dir = panels.join(&b.artifact.name);
             let rel = format!("{}/{}", layer5::PANELS_DIR, b.artifact.name);
+            let Some(panels) = &panels else {
+                anyhow::bail!(
+                    "payload lacks pinned bundle {rel}/: no {} directory",
+                    layer5::PANELS_DIR
+                );
+            };
+            let dir = panels.join(&b.artifact.name);
             let meta = std::fs::symlink_metadata(&dir)
                 .map_err(|e| anyhow::anyhow!("payload lacks pinned bundle {rel}/: {e}"))?;
             anyhow::ensure!(
@@ -604,33 +649,24 @@ impl ChannelManifest {
                 b.tree_sha256
             );
         }
-        match std::fs::symlink_metadata(&panels) {
-            Ok(meta) => {
+        if let Some(panels) = &panels {
+            for entry in std::fs::read_dir(panels)? {
+                let entry = entry?;
+                let name = entry.file_name();
+                let name = name.to_string_lossy();
                 anyhow::ensure!(
-                    meta.file_type().is_dir(),
-                    "payload {} is not a directory",
+                    self.bundle(&name).is_some(),
+                    "payload carries {}/{name} but the manifest pins no such bundle",
                     layer5::PANELS_DIR
                 );
-                for entry in std::fs::read_dir(&panels)? {
-                    let entry = entry?;
-                    let name = entry.file_name();
-                    let name = name.to_string_lossy();
-                    anyhow::ensure!(
-                        self.bundle(&name).is_some(),
-                        "payload carries {}/{name} but the manifest pins no such bundle",
-                        layer5::PANELS_DIR
-                    );
-                }
             }
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-            Err(e) => anyhow::bail!("payload {} unreadable: {e}", layer5::PANELS_DIR),
         }
 
-        let lock = tree.join(layer5::PRESENCE_LOCK);
         match &self.presence_lock {
-            Some(pin) => check_pinned_file(&lock, pin, layer5::PRESENCE_LOCK)?,
+            Some(pin) => check_pinned_file(tree, layer5::PRESENCE_LOCK, pin)?,
             None => ensure_absent(
-                &lock,
+                tree,
+                layer5::PRESENCE_LOCK,
                 &format!(
                     "payload carries {} but the manifest pins no presence-lock",
                     layer5::PRESENCE_LOCK
@@ -662,10 +698,42 @@ impl ChannelManifest {
     }
 }
 
-/// A pinned regular file in a payload tree: never a link, exact size, exact sha256.
-fn check_pinned_file(path: &Path, pin: &PinnedArtifact, rel: &str) -> anyhow::Result<()> {
-    let meta = std::fs::symlink_metadata(path)
-        .map_err(|e| anyhow::anyhow!("payload lacks pinned {rel}: {e}"))?;
+/// `lstat` of `tree/<rel>` (`rel` is `/`-separated) without following a link on
+/// the way: every parent component below `tree` must be a real directory — a
+/// link or any other kind of file there is refused — and the last component is
+/// `lstat`ed, never followed. `None` when the last component, or a parent, does
+/// not exist.
+fn lstat_beneath(tree: &Path, rel: &str) -> anyhow::Result<Option<std::fs::Metadata>> {
+    let parts: Vec<&str> = rel.split('/').collect();
+    let mut path = tree.to_path_buf();
+    for (i, part) in parts.iter().enumerate() {
+        path.push(part);
+        let shown = parts[..=i].join("/");
+        let meta = match std::fs::symlink_metadata(&path) {
+            Ok(meta) => meta,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(e) => anyhow::bail!("payload {shown} unreadable: {e}"),
+        };
+        if i + 1 == parts.len() {
+            return Ok(Some(meta));
+        }
+        anyhow::ensure!(
+            !meta.file_type().is_symlink(),
+            "payload {shown} is a link (payloads are plain trees; links are refused)"
+        );
+        anyhow::ensure!(
+            meta.file_type().is_dir(),
+            "payload {shown} is not a directory"
+        );
+    }
+    Ok(None)
+}
+
+/// A pinned regular file in a payload tree: no link on the way or at the end,
+/// exact size, exact sha256.
+fn check_pinned_file(tree: &Path, rel: &str, pin: &PinnedArtifact) -> anyhow::Result<()> {
+    let meta =
+        lstat_beneath(tree, rel)?.ok_or_else(|| anyhow::anyhow!("payload lacks pinned {rel}"))?;
     anyhow::ensure!(
         meta.file_type().is_file(),
         "payload {rel} is not a regular file (links are refused)"
@@ -676,7 +744,7 @@ fn check_pinned_file(path: &Path, pin: &PinnedArtifact, rel: &str) -> anyhow::Re
         meta.len(),
         pin.size
     );
-    let got = crate::util::hash::sha256_file(path)?;
+    let got = crate::util::hash::sha256_file(&tree.join(rel))?;
     anyhow::ensure!(
         got == pin.sha256,
         "payload {rel} sha256 {got} != manifest {}",
@@ -685,12 +753,11 @@ fn check_pinned_file(path: &Path, pin: &PinnedArtifact, rel: &str) -> anyhow::Re
     Ok(())
 }
 
-/// Nothing (not even a dangling link) at `path`.
-fn ensure_absent(path: &Path, why: &str) -> anyhow::Result<()> {
-    match std::fs::symlink_metadata(path) {
-        Ok(_) => anyhow::bail!("{why}"),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(e) => anyhow::bail!("{}: {e}", path.display()),
+/// Nothing (not even a dangling link) at `tree/<rel>`, and no link on the way.
+fn ensure_absent(tree: &Path, rel: &str, why: &str) -> anyhow::Result<()> {
+    match lstat_beneath(tree, rel)? {
+        None => Ok(()),
+        Some(_) => anyhow::bail!("{why}"),
     }
 }
 

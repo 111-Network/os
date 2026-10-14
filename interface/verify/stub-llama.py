@@ -10,35 +10,66 @@ Routes:
     GET  /health                 200 {"status":"ok"}  (what 111-agent and 111d probe)
     GET  /v1/models              one fake model
     POST /v1/chat/completions    scripted replies, streamed as OpenAI SSE deltas
+    stub-llama.py … --tool-log FILE          (smoke.sh --three-node: one JSON line per tool
+                                             result the agent sends back, {name, content})
 Script (keyed on the LAST user message, lowercased):
     "boom"                        -> 500 {"error":"upstream exploded"} (pre-stream failure)
-    last message role == tool     -> "Per the KB: found it."
+    last message role == tool     -> "Per the KB: found it." (and the result goes to --tool-log)
+    "@tool NAME {json}" + tools   -> one streamed NAME tool call with those arguments (Layer 5:
+                                     the smoke drives messages.read / messages.send / contacts.read /
+                                     fabric.read / nearby.read through the real 111-agent)
     contains "meshtastic" + tools -> text + one streamed kb.read tool call (args split over 2 deltas)
     request has no tools          -> "## Summary\\nstub diagnosis\\n" (agent task path)
     anything else                 -> "Hello there" in 2 deltas
 `"stream": false` gets the same text as one chat.completion JSON object.
 """
 import json
+import re
 import sys
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 
+TOOL_LOG = None
+TOOL_DIRECTIVE = re.compile(r"@tool\s+([A-Za-z_.]+)\s*(\{.*\})?\s*$", re.S)
+
+
 def parse_args(argv):
+    global TOOL_LOG
     host, port = "127.0.0.1", 11181
     i = 0
     while i < len(argv):
         a = argv[i]
-        if a in ("--host", "--port", "--model", "-m") and i + 1 < len(argv):
+        if a in ("--host", "--port", "--model", "-m", "--tool-log") and i + 1 < len(argv):
             if a == "--host":
                 host = argv[i + 1]
             elif a == "--port":
                 port = int(argv[i + 1])
+            elif a == "--tool-log":
+                TOOL_LOG = argv[i + 1]
             i += 2
             continue
         if a.isdigit():
             port = int(a)
         i += 1
     return host, port
+
+
+def log_tool_result(msgs):
+    """Append the trailing tool results (with their call's name) to --tool-log."""
+    if not TOOL_LOG:
+        return
+    names = {}
+    for m in msgs:
+        for c in m.get("tool_calls") or []:
+            names[c.get("id")] = (c.get("function") or {}).get("name")
+    tail = []
+    for m in reversed(msgs):
+        if m.get("role") != "tool":
+            break
+        tail.append(m)
+    with open(TOOL_LOG, "a", encoding="utf-8") as f:
+        for m in reversed(tail):
+            f.write(json.dumps({"name": names.get(m.get("tool_call_id")), "content": m.get("content")}) + "\n")
 
 
 def text_chunks(text):
@@ -109,8 +140,15 @@ class H(BaseHTTPRequestHandler):
             self.send_json(500, {"error": "upstream exploded"})
             return
         tool_call = None
+        directive = TOOL_DIRECTIVE.search(users[-1].get("content") or "") if users else None
         if last.get("role") == "tool":
+            log_tool_result(msgs)
             text = "Per the KB: found it."
+        elif directive and tools:
+            args = directive.group(2) or "{}"
+            cut = max(1, len(args) // 2)
+            text = "Let me look. "
+            tool_call = ("c1", directive.group(1), args[:cut], args[cut:])
         elif "meshtastic" in user and tools:
             text = "Let me check. "
             tool_call = ("c1", "kb.read", '{"query":', '"meshtastic"}')

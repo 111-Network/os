@@ -6,10 +6,15 @@
 #
 # SQLCipher (Layer 5, os/messaging/README.md §10.1, §19 L1): once node111 depends on `mesh111`, the
 # release links SQLCipher 4.x + a vendored OpenSSL 3 (rusqlite `bundled-sqlcipher-vendored-openssl`,
-# built from crate sources by cc-rs / openssl-src: no system libcrypto, nothing downloaded). CC/AR are
-# pinned per target below so a missing cross compiler is a hard error, never a silent host-gcc
-# fallback. The asserts then check the binary carries SQLCipher; without the dependency they say so.
-# The size of each binary is printed (Layer 5 binary-growth record: bootstrap/TASKS.md, B1).
+# built from crate sources by cc-rs / openssl-src: no system libcrypto, nothing downloaded). The env
+# comes from scripts/musl-env.sh (shared with scripts/check.sh): CC/AR/linkers pinned per target, so
+# a missing cross compiler is a hard error, never a silent host-gcc fallback, and the escape hatches
+# that would link a system SQLite or libcrypto (LIBSQLITE3_SYS_USE_PKG_CONFIG, OPENSSL_NO_VENDOR,
+# OPENSSL_DIR, … and their per-target forms) unset. The asserts then check both binaries are static
+# ELFs (no INTERP, no NEEDED) that carry strings only SQLCipher's and OpenSSL's C code has
+# (`cipher_plaintext_header_size`, `OpenSSL <ver> ` with <ver> from Cargo.lock's openssl-src);
+# without the dependency they say so. The size of each binary is printed (Layer 5 binary-growth
+# record: bootstrap/TASKS.md, B1).
 #
 # CARGO_TARGET_DIR is honoured (parallel builders keep private target dirs).
 #
@@ -33,19 +38,14 @@ case "$VER" in
 esac
 
 export PATH="$HOME/.cargo/bin:$PATH"
-for tc in "$HOME"/.local/toolchains/*/bin; do
-  [ -d "$tc" ] && PATH="$tc:$PATH"
-done
-export PATH
-
-export CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER=x86_64-linux-musl-gcc
-export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER=aarch64-linux-musl-gcc
-# C toolchain for SQLCipher + OpenSSL (cc-rs and openssl-src read these; same compilers cc-rs would
-# find by prefix in ../messaging/scripts/check.sh, named so a missing one fails instead of falling back).
-export CC_x86_64_unknown_linux_musl=x86_64-linux-musl-gcc
-export AR_x86_64_unknown_linux_musl=x86_64-linux-musl-ar
-export CC_aarch64_unknown_linux_musl=aarch64-linux-musl-gcc
-export AR_aarch64_unknown_linux_musl=aarch64-linux-musl-ar
+# musl toolchains + pinned CC/AR/linkers + escape hatches unset + the static_elf / sqlcipher_linked /
+# openssl_src_version assertions (the same env scripts/check.sh builds G2 with).
+# shellcheck source=scripts/musl-env.sh
+. scripts/musl-env.sh
+musl_toolchains_present || {
+  echo "FAIL: musl cross toolchains absent (~/.local/toolchains: x86_64- and aarch64-linux-musl-gcc/-ar)" >&2
+  exit 1
+}
 export NODE111_BUILD_VERSION="$VER"
 TARGET_DIR=${CARGO_TARGET_DIR:-target}
 
@@ -87,37 +87,25 @@ cargo build --release --target aarch64-unknown-linux-musl
 cp "$TARGET_DIR/aarch64-unknown-linux-musl/release/111" "$OUT/111-aarch64-unknown-linux-musl"
 
 echo "== asserts =="
-if file "$OUT/111-x86_64-unknown-linux-musl" | grep -q "static-pie linked\|statically linked"; then
-  echo "ok: x86_64 static"
-else
-  file "$OUT/111-x86_64-unknown-linux-musl"
-  echo "FAIL: x86_64 not static" >&2
-  exit 1
-fi
-if file "$OUT/111-aarch64-unknown-linux-musl" | grep -q "static-pie linked\|statically linked"; then
-  echo "ok: aarch64 static"
-else
-  file "$OUT/111-aarch64-unknown-linux-musl"
-  echo "FAIL: aarch64 not static" >&2
-  exit 1
-fi
+static_elf "$OUT/111-x86_64-unknown-linux-musl" X86-64
+echo "ok: x86_64 static (no INTERP, no NEEDED)"
+static_elf "$OUT/111-aarch64-unknown-linux-musl" AArch64
+echo "ok: aarch64 static AArch64 (no INTERP, no NEEDED)"
 
 ALIGN=$(readelf -lW "$OUT/111-aarch64-unknown-linux-musl" | awk '$1=="LOAD"{print $NF; exit}')
 echo "aarch64 LOAD align: $ALIGN"
 [ "$ALIGN" = "0x4000" ] || { echo "FAIL: expected p_align 0x4000 (16KB pages)" >&2; exit 1; }
 
-# SQLCipher rides in only through `mesh111` (Layer 5, task F2 adds the path dependency). When the lock
-# has it, both binaries must carry SQLCipher's codec (its `cipher_version` pragma name and the
-# `sqlcipher` banner) — a build that silently fell back to plain SQLite or dropped the store fails here.
+# SQLCipher rides in only through `mesh111` (Layer 5, F2's path dependency). When the lock has it, both
+# binaries must carry SQLCipher's codec and the vendored OpenSSL — strings only their C code carries
+# (scripts/musl-env.sh `sqlcipher_linked`), so a build that fell back to plain SQLite or a system
+# libcrypto, or dropped the store, fails here.
 if grep -q '^name = "mesh111"$' Cargo.lock; then
+  OSSL_VER=$(openssl_src_version Cargo.lock)
+  [ -n "$OSSL_VER" ] || { echo "FAIL: Cargo.lock has mesh111 but no openssl-src (+<OpenSSL version>)" >&2; exit 1; }
   for t in x86_64 aarch64; do
-    bin="$OUT/111-$t-unknown-linux-musl"
-    if LC_ALL=C grep -aq 'cipher_version' "$bin" && LC_ALL=C grep -aqi 'sqlcipher' "$bin"; then
-      echo "ok: $t links SQLCipher (vendored OpenSSL)"
-    else
-      echo "FAIL: $t binary carries no SQLCipher codec although node111 depends on mesh111" >&2
-      exit 1
-    fi
+    sqlcipher_linked "$OUT/111-$t-unknown-linux-musl" "$OSSL_VER"
+    echo "ok: $t links SQLCipher (cipher_plaintext_header_size) + OpenSSL $OSSL_VER, statically"
   done
 else
   echo "note: node111 does not depend on mesh111 yet (Layer 5 task F2) — SQLCipher assert not applicable"

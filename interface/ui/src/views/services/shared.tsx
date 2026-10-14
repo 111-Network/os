@@ -19,3 +19,16 @@ export function RouteLink({ to, className, children, ...rest }: RouteLinkProps) 
     </a>
   );
 }
+
+/**
+ * Text a peer or a radio supplied (a contact's label, a hub's name) inside a sentence of ours: it keeps its own direction
+ * (`dir="auto"`), is isolated from the words around it so right-to-left text cannot reorder them, and wraps wherever it must.
+ * The caller cleans and cuts it first (`plain`, `hubName`).
+ */
+export function PeerText({ children, className }: { children: ReactNode; className?: string }) {
+  return (
+    <span dir="auto" className={cx("[unicode-bidi:isolate] break-words", className)}>
+      {children}
+    </span>
+  );
+}

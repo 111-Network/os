@@ -412,9 +412,10 @@ describe("fabric, hub, identify, panels", () => {
 
   it("merges fabric settings and drops a quota with null", async () => {
     const { a } = make("healthy");
-    const s = await a.fabric.patchSettings({ hub_role: true, quotas: { msg: 1_000_000 } });
-    expect(s).toMatchObject({ hub_role: true, quotas: { msg: 1_000_000 } });
-    expect((await a.fabric.patchSettings({ quotas: { msg: null } })).quotas).toEqual({});
+    const s = await a.fabric.patchSettings({ hub_role: true, quotas: { kb: 1_000_000 } });
+    expect(s).toMatchObject({ hub_role: true, quotas: { kb: 1_000_000 } });
+    // the daemon keeps the class with null; the mock may drop the key. Either way no quota is set.
+    expect((await a.fabric.patchSettings({ quotas: { kb: null } })).quotas.kb ?? null).toBeNull();
     expect((await failure(a.fabric.patchSettings({ hub_role: "yes" as never }))).status).toBe(400);
   });
 

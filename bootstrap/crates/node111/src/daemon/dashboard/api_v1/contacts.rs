@@ -11,7 +11,9 @@
 //!   → `200 Contact` (an already-known contact is returned unchanged).
 //!   `409` when a card's keys conflict with the pinned ones (§7.1).
 //! - `GET /contacts/me/card` → `Card` (`{text, qr}`; stored announce bytes,
-//!   never minted — §7).
+//!   never minted — §7): the identity handle's current announce, so a
+//!   settings change that re-minted it (roles, home-hub hint) shows at once;
+//!   `409 restore_pending` while the node has none (§4).
 //! - `GET /contacts/{id}` · `PATCH /contacts/{id}` (`alias` (null clears,
 //!   ≤ 64), `accept: true`, `pinned`, `read_seq`) · `DELETE /contacts/{id}`
 //!   (`204`; the pair key is zeroized, history kept until capacity pruning).
@@ -111,14 +113,11 @@ async fn own_card(State(api): State<Arc<ApiState>>) -> Response {
         Ok(h) => h,
         Err(p) => return p.into_response(),
     };
-    let Some(f) = h.fabric() else {
+    if h.fabric().is_none() {
         return fabric::not_running().into_response();
-    };
-    let card = match f.card().await {
-        Ok(c) => c,
-        Err(e) => return fabric::problem(&e).into_response(),
-    };
-    if card.announce.is_empty() {
+    }
+    let announce = h.own_announce();
+    if announce.is_empty() {
         return Problem::new(
             StatusCode::CONFLICT,
             "restore_pending",
@@ -127,7 +126,7 @@ async fn own_card(State(api): State<Arc<ApiState>>) -> Response {
         .detail("Nothing is announced until the identity restore completes (§4).")
         .into_response();
     }
-    match json::card(&card.text) {
+    match json::card(&mesh111::contacts::card_text(&announce)) {
         Ok(v) => Json(v).into_response(),
         Err(e) => internal(e).into_response(),
     }

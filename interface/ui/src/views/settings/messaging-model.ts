@@ -5,7 +5,7 @@ import { formatPairCode } from "../../app/pair-code";
 import { isApiError } from "../../lib/api/problem";
 import { cleanPeerText } from "../../lib/api/messages";
 import type { FabricStatus, HubEnrollRequest, HubOffer, ServiceRecord, Thread } from "../../lib/api/types";
-import { formatBytes } from "../../lib/api/fabric";
+import { formatBytes, restoreFloor } from "../../lib/api/fabric";
 import type { PromptGoal } from "../../lib/prompts";
 
 // ---------------------------------------------------------------------------------------- enroll
@@ -72,6 +72,47 @@ export function parseEnrollBundle(text: string): EnrollBundle | null {
   return address.ok ? { card, code, address: address.address } : null;
 }
 
+/** What the enroll form holds: the typed (or read) address and code, and the hub's card when a whole enrollment text was read. */
+export interface EnrollFields {
+  address: string;
+  code: string;
+  card: string | null;
+}
+
+export const ADDRESS_EDITED_NOTE =
+  "The address was changed, so the hub's card from the text you pasted is no longer sent with it. If this node does not know the hub yet, paste the whole enrollment text again.";
+
+/**
+ * Take a scanned or pasted text into the form. A whole enrollment text fills the address, the code and the hub's card; a bare
+ * code fills the code and drops any card, because the card belongs to the hub the earlier text named and the code may be for
+ * another one (the node would seal the request to the wrong hub and answer a confusing 502). Anything else changes nothing.
+ */
+export function applyEnrollText(text: string, current: EnrollFields): { fields: EnrollFields; read: string } {
+  const bundle = parseEnrollBundle(text);
+  if (bundle) {
+    // A bundle without an address must not keep the address of a different hub that an earlier text filled in.
+    const keep = current.card !== null && current.card !== bundle.card ? "" : current.address;
+    return {
+      fields: { address: bundle.address !== "" ? bundle.address : keep, code: formatCode(bundle.code), card: bundle.card },
+      read:
+        bundle.address !== ""
+          ? "Read the hub's address and code. Check them, then press Enroll."
+          : "Read the hub's code and card, but the hub did not know its network address. Type it below, then press Enroll.",
+    };
+  }
+  const bare = normalizeCode(text);
+  if (text.trim().length <= CODE_LENGTH + 4 && bare.length === CODE_LENGTH) {
+    return { fields: { address: current.address, code: formatCode(bare), card: null }, read: "Read a code. Type the hub's address too." };
+  }
+  return { fields: current, read: "That text is not a hub's enrollment text. Type the hub's address and its code instead." };
+}
+
+/** The address box was edited: the hub's card read earlier no longer goes with it. `read` is the note to show when that dropped a card. */
+export function editEnrollAddress(current: EnrollFields, address: string): { fields: EnrollFields; read: string | null } {
+  if (current.card === null) return { fields: { ...current, address }, read: null };
+  return { fields: { ...current, address, card: null }, read: ADDRESS_EDITED_NOTE };
+}
+
 export type EnrollRequest = { ok: true; body: HubEnrollRequest } | { ok: false; text: string };
 
 /** The body of `POST /fabric/hub/enroll`, or the sentence that says what is missing. The card rides along when it was scanned or pasted. */
@@ -112,6 +153,33 @@ export function offerAddressText(offer: Pick<HubOffer, "address">): string {
 export const OFFER_NOTE =
   "Give the other node the QR code, or send it the text. The code works once. After five wrong tries the hub locks it. It is shown here only now: dismiss it when you are done, or when it is lost.";
 
+export const OFFER_GONE_TEXT = "The code was used or dismissed.";
+
+/**
+ * A code that is on screen was minted here, so the node held it (`offer_active`) from then on. When the node stops holding one
+ * (a member enrolled with it, or `111 fabric offer` replaced it, or it was dismissed elsewhere) the page must not keep
+ * showing a code that no longer works. `seen`: this page has seen the node hold the code it is showing.
+ */
+export const offerGone = (seen: boolean, outstanding: boolean): boolean => seen && !outstanding;
+
+/** What the offer row does when the node's `offer_active` (or the code on screen) changes. */
+export interface OfferStep {
+  /** The page has seen the node hold the code it is showing. */
+  seen: boolean;
+  /** Stop showing the code. */
+  clear: boolean;
+  /** Say "The code was used or dismissed." (not when the person is dismissing it right now: they know). */
+  say: boolean;
+}
+
+/** One step of the watch: `shown` a code is on screen; `seen` as above; `outstanding` the node holds one now; `dismissing` this page is dismissing it. */
+export function offerStep(shown: boolean, seen: boolean, outstanding: boolean, dismissing: boolean): OfferStep {
+  if (!shown) return { seen: false, clear: false, say: false };
+  if (outstanding) return { seen: true, clear: false, say: false };
+  if (!offerGone(seen, outstanding)) return { seen, clear: false, say: false };
+  return { seen: false, clear: true, say: !dismissing };
+}
+
 export const OUTSTANDING_NOTE =
   "A code is outstanding, but it was shown once and cannot be shown again. Dismiss it, or show a new one (that cancels this one).";
 
@@ -132,14 +200,21 @@ export const settingAnnouncement = (label: string, on: boolean): string => `${la
 
 // ------------------------------------------------------------------------------------------- quotas
 
-/** The stored-data classes of section 10.4 that have a quota (capacity shaping; per-sender limits do not exist). */
-export const QUOTA_CLASSES: ReadonlyArray<{ id: string; label: string }> = [
-  { id: "msg", label: "Messages" },
-  { id: "agent_op", label: "Agent operations" },
-  { id: "kb", label: "Knowledge base" },
-  { id: "update", label: "Updates" },
-  { id: "patch", label: "Patches" },
-];
+/**
+ * The classes the daemon puts a quota on (the refusable ones of section 10.4), in plain words. The node's `settings.quotas`
+ * names every one of them, `null` when none is set; a class it names that is not here is shown under its own cleaned name.
+ * `msg` and `agent_op` are not quota classes: the node refuses them.
+ */
+export const QUOTA_LABELS: Readonly<Record<string, string>> = {
+  kb: "Knowledge base",
+  update: "Updates",
+  patch: "Patches",
+  sync: "Synced operations",
+  object: "Files and attachments",
+  custody: "Mail held for others",
+};
+
+const QUOTA_ORDER = Object.keys(QUOTA_LABELS);
 
 const MB = 1_000_000;
 
@@ -152,14 +227,18 @@ export interface QuotaRow {
 
 const mbText = (bytes: number): string => String(Math.round((bytes / MB) * 100) / 100);
 
-/** The known classes first, then any other class the node reports (named as it names it, cleaned). */
+/**
+ * One row per class the node reports, nothing the page makes up: the known classes first in the daemon's order, then any other
+ * the node names. A class whose value is `null` has no quota yet and shows an empty box.
+ */
 export function quotaRows(quotas: Readonly<Record<string, number | null | undefined>>): QuotaRow[] {
-  const known = new Set(QUOTA_CLASSES.map((c) => c.id));
-  const rows: QuotaRow[] = QUOTA_CLASSES.map((c) => ({ id: c.id, label: c.label, mb: typeof quotas[c.id] === "number" ? mbText(quotas[c.id] as number) : "" }));
-  for (const [id, v] of Object.entries(quotas)) {
-    if (!known.has(id) && typeof v === "number") rows.push({ id, label: cleanPeerText(id).slice(0, 40), mb: mbText(v) });
-  }
-  return rows;
+  const ids = Object.keys(quotas);
+  const known = QUOTA_ORDER.filter((id) => ids.includes(id));
+  const other = ids.filter((id) => !QUOTA_ORDER.includes(id));
+  return [...known, ...other].map((id) => {
+    const v = quotas[id];
+    return { id, label: Object.prototype.hasOwnProperty.call(QUOTA_LABELS, id) ? QUOTA_LABELS[id]! : cleanPeerText(id).slice(0, 40), mb: typeof v === "number" ? mbText(v) : "" };
+  });
 }
 
 export type QuotaParse = { ok: true; bytes: number | null } | { ok: false; text: string };
@@ -194,13 +273,33 @@ export const quotaText = (bytes: number | null | undefined): string => (typeof b
 // ------------------------------------------------------------------------------------------ restore
 
 export const RESTORE_HELP =
-  "If this node was restored from its 12 words, it waits before it sends anything: it must be sure it never reuses a message number the old device already used. Messages you write meanwhile stay queued, with the reason shown, and go out by themselves when it is done.";
-export const RESTORE_PENDING_TEXT = "A restore is finishing on this node. Nothing is sealed or sent until it is done; what you write waits in the outbox.";
+  "If this node was restored from its 12 words, it waits before it sends anything: it must be sure it never reuses a message number the old device already used. Until that is settled the node refuses new messages, so you are told at once rather than finding them stuck; messages already in the outbox wait there, queued, and go out by themselves when it is done.";
+export const RESTORE_PENDING_TEXT =
+  "A restore is finishing on this node. Nothing is sealed or sent until it is done. New messages are refused until then; messages already in the outbox wait there.";
+export const RESTORE_CLEAR_TEXT = "Nothing is waiting on a restore.";
+export const RESTORE_UNKNOWN_TEXT = "This node did not report whether a restore is waiting.";
 
-/** The node reports a restore floor: the `fabric` row says so, or a message is queued for it (section 4, `restore_pending`). */
+/** The node reports a restore floor: the `fabric` row says so, or a message in the outbox is waiting for it (section 4, `restore_pending`). */
 export function restorePending(service: Pick<ServiceRecord, "reason_code"> | null | undefined, threads: readonly Thread[] | null): boolean {
   if (service?.reason_code === "restore_pending") return true;
   return (threads ?? []).some((t) => t.last?.dir === "own" && t.last.state === "queued" && t.last.reason_code === "restore_pending");
+}
+
+export type RestoreState = "pending" | "clear" | "unknown";
+
+/**
+ * Is a restore waiting? The store's own report (`FabricStore.restore_pending`) is the answer when it is there; the `fabric` row
+ * and a message waiting in the outbox also say "pending". Without any of them the page does not claim "nothing is waiting": a
+ * node that does not report it has not said no, and it refuses every new message while the floor is up (section 15 as built).
+ */
+export function restoreState(
+  service: Pick<ServiceRecord, "reason_code"> | null | undefined,
+  threads: readonly Thread[] | null,
+  fabric?: { store: object } | null,
+): RestoreState {
+  const reported = restoreFloor(fabric);
+  if (reported === true || restorePending(service, threads)) return "pending";
+  return reported === false ? "clear" : "unknown";
 }
 
 // -------------------------------------------------------------------------------------------- export

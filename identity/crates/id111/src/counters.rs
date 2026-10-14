@@ -30,6 +30,12 @@
 //! floor learned from mesh-gossiped copies of its own prior announces, else
 //! operator-supplied, else 0 only for a never-before-deployed identity — and
 //! applies the same jump to per-peer traffic send-counters on new sessions.
+//! Until the floor is set **nothing is written** to the `counters` file:
+//! [`CounterStore::shutdown`], [`CounterStore::commit`] and the batch commit
+//! refuse with [`CounterError::RestoreFloorRequired`]. A file written in that
+//! state would carry `announce_last = 0` and read as *state present* at the
+//! next open — the floor silently replaced by a counter reset (Layer 5
+//! Wave 2 hardening; `os/identity/README.md` §13.1, A3 note).
 //!
 //! Layer 5 amendments (`os/messaging/README.md` §4, §19):
 //!
@@ -239,7 +245,8 @@ pub enum CounterError {
     /// Fail-closed parse rejection (§12 rules 1/7).
     Corrupt(&'static str),
     /// §8.4 — a state-absent restore MUST NOT announce before the counter
-    /// floor is set (`set_restore_floor`).
+    /// floor is set (`set_restore_floor`), and writes no counter state
+    /// before it either (`shutdown` / `commit` / the batch commit refuse).
     RestoreFloorRequired,
     /// `set_restore_floor` called on a store not in the restore-pending state.
     FloorAlreadySet,
@@ -263,7 +270,10 @@ impl std::fmt::Display for CounterError {
             }
             CounterError::Corrupt(why) => write!(f, "§12: corrupt counters file: {why}"),
             CounterError::RestoreFloorRequired => {
-                write!(f, "§8.4: no announce before the restore floor is set")
+                write!(
+                    f,
+                    "§8.4: no announce and no counter commit before the restore floor is set"
+                )
             }
             CounterError::FloorAlreadySet => {
                 write!(f, "§8.4: restore floor already set / not restore-pending")
@@ -432,17 +442,24 @@ impl CounterStore {
     /// exists, else operator-supplied, else 0 only for a never-before-deployed
     /// identity. Committed (fsync) BEFORE returning — this state authorizes
     /// every future announce, so it takes the §6.2 sync-commit discipline.
+    /// A failed commit leaves the store restore-pending (nothing issued).
     pub fn set_restore_floor(&mut self, floor: u64) -> Result<(), CounterError> {
         if !self.restore_pending {
             return Err(CounterError::FloorAlreadySet);
         }
-        self.announce_last = floor
+        let announce_last = floor
             .checked_add(RESTORE_JUMP)
             .ok_or(CounterError::Overflow)?;
+        let prior = (self.announce_last, self.traffic_base);
+        self.announce_last = announce_last;
         self.traffic_base = RESTORE_JUMP;
         self.restore_pending = false;
         // Quiescent state (no emissions yet) — persisted CLEAN, see create().
-        self.persist(CLEAN_SHUTDOWN)?;
+        if let Err(e) = self.persist(CLEAN_SHUTDOWN) {
+            (self.announce_last, self.traffic_base) = prior;
+            self.restore_pending = true;
+            return Err(e);
+        }
         Ok(())
     }
 
@@ -557,6 +574,12 @@ impl CounterStore {
     /// §6.5 — clean-shutdown commit: uncommitted state is flushed and the
     /// file is marked clean, so the next [`Self::open`] applies NO forward
     /// jump. The host MUST call this on every orderly stop.
+    ///
+    /// While restore-pending (§8.4) it refuses with
+    /// [`CounterError::RestoreFloorRequired`] and writes nothing: the
+    /// state-absent case must still read as absent at the next start (a
+    /// clean file with `announce_last = 0` would re-issue counter 1). Hosts
+    /// check [`Self::is_restore_pending`] and skip the call.
     pub fn shutdown(&mut self) -> Result<(), CounterError> {
         self.persist(CLEAN_SHUTDOWN)?;
         self.dirty_packets = 0;
@@ -564,6 +587,11 @@ impl CounterStore {
     }
 
     /// Force a batch commit now (the file stays marked dirty/running).
+    /// Refuses with [`CounterError::RestoreFloorRequired`] while
+    /// restore-pending (§8.4: no file is written until the floor is set) —
+    /// as does the every-N batch commit inside the traffic calls, whose
+    /// in-memory state has then already advanced (the documented
+    /// commit-failure contract).
     pub fn commit(&mut self) -> Result<(), CounterError> {
         self.persist(DIRTY_RUNNING)?;
         self.dirty_packets = 0;
@@ -651,7 +679,11 @@ impl CounterStore {
     }
 
     /// §13 — atomic write (temp + fsync + rename + dir fsync), 0600.
+    /// Never while restore-pending (§8.4: no file until the floor is set).
     fn persist(&mut self, clean_flag: u8) -> Result<(), CounterError> {
+        if self.restore_pending {
+            return Err(CounterError::RestoreFloorRequired);
+        }
         self.clean_on_disk = clean_flag == CLEAN_SHUTDOWN;
         let mut buf = Vec::with_capacity(HEADER_LEN + self.peers.len() * PEER_RECORD_LEN);
         buf.extend_from_slice(&MAGIC);
@@ -1051,6 +1083,61 @@ mod tests {
             store.set_restore_floor(50),
             Err(CounterError::FloorAlreadySet)
         ));
+    }
+
+    /// Layer 5 Wave 2 hardening (F2 review M1): while restore-pending
+    /// NOTHING reaches disk — `shutdown`, `commit` and the batch commit
+    /// refuse — so an orderly stop can never turn the state-absent case into
+    /// a state-present file with `announce_last = 0` (whose next open would
+    /// re-issue announce counter 1, i.e. old `msg_seq` epochs).
+    #[test]
+    fn restore_pending_writes_nothing_until_the_floor() {
+        let tmp = TempDir::new("pending-no-write");
+        let file = tmp.path().join(COUNTERS_FILE);
+        let mut st = CounterStore::restore_pending(tmp.path()).unwrap();
+        assert!(matches!(
+            st.shutdown(),
+            Err(CounterError::RestoreFloorRequired)
+        ));
+        assert!(matches!(
+            st.commit(),
+            Err(CounterError::RestoreFloorRequired)
+        ));
+        assert!(!file.exists(), "shutdown/commit wrote nothing");
+        // traffic bookkeeping stays in memory; the batch commit refuses too
+        st.set_batch_n(nz(2));
+        let a = peer(0xc1);
+        assert_eq!(st.observe_counter(&a, 5).unwrap(), Freshness::Fresh);
+        assert!(matches!(
+            st.observe_counter(&a, 6),
+            Err(CounterError::RestoreFloorRequired)
+        ));
+        assert!(matches!(
+            st.next_send_counter(&a),
+            Err(CounterError::RestoreFloorRequired)
+        ));
+        assert!(!file.exists(), "the batch commit wrote nothing");
+        drop(st);
+        // the next start still sees the state-absent case: the floor can
+        // still be set, and nothing re-issues counter 1
+        assert!(matches!(
+            CounterStore::open(tmp.path()),
+            Err(CounterError::NotFound)
+        ));
+        let mut again = CounterStore::restore_pending(tmp.path()).unwrap();
+        assert!(again.is_restore_pending());
+        assert!(matches!(
+            again.next_announce_counter(),
+            Err(CounterError::RestoreFloorRequired)
+        ));
+        again.set_restore_floor(10).unwrap();
+        again.shutdown().unwrap();
+        let mut reopened = CounterStore::open(tmp.path()).unwrap();
+        assert!(!reopened.is_restore_pending());
+        assert_eq!(
+            reopened.next_announce_counter().unwrap(),
+            10 + RESTORE_JUMP + 1
+        );
     }
 
     #[test]

@@ -5,7 +5,7 @@
 // Every change is a call the node answers, and the page shows the answer: the switches read the fabric snapshot from the store,
 // which moves when the reply comes back (and again on the `fabric` frame), never before. Loopback-only rows are shown but
 // disabled over the LAN with the same words as Essentials.
-import { useId, useRef, useState, type FormEvent } from "react";
+import { useEffect, useId, useRef, useState, type FormEvent } from "react";
 import { redirectIfUnauthenticated } from "../../app/AuthGate";
 import { announce } from "../../app/LiveRegion";
 import { hrefTo } from "../../app/location";
@@ -31,14 +31,17 @@ import { cameraSupport, scanFile } from "../contacts/scan";
 import { Scanner } from "../contacts/scanner";
 import { AgentButton, useAgentReachable } from "../devices/agent-button";
 import { hubName, STORE_CLOSED_TEXT, STORE_FULL_TEXT, STORE_PRUNE_TEXT } from "../services/fabric-model";
+import { PeerText } from "../services/shared";
 import { StoreGauge } from "../services/store-gauge";
 import { reasonText } from "../services/model";
 import { useAction } from "./essentials";
 import { changeQuotas, changeSetting, dismissOffer, enrollWithHub, mintOffer } from "./messaging-actions";
 import {
+  applyEnrollText,
   CODE_LENGTH,
   codeComplete,
   CUSTODY_HELP,
+  editEnrollAddress,
   ENROLLED_TEXT,
   enrollErrorText,
   enrollRequest,
@@ -49,16 +52,19 @@ import {
   HUB_ROLE_HELP,
   LAN_LISTEN_HELP,
   normalizeCode,
+  OFFER_GONE_TEXT,
   OFFER_NOTE,
   offerAddressText,
   offerCodeText,
+  offerStep,
   OUTSTANDING_NOTE,
-  parseEnrollBundle,
   quotaPatch,
   quotaRows,
+  RESTORE_CLEAR_TEXT,
   RESTORE_HELP,
   RESTORE_PENDING_TEXT,
-  restorePending,
+  RESTORE_UNKNOWN_TEXT,
+  restoreState,
   settingAnnouncement,
   type SettingKey,
 } from "./messaging-model";
@@ -158,25 +164,15 @@ function EnrollForm() {
   const [done, setDone] = useState(false);
   const ids = useId();
 
-  /** Take a scanned or pasted text: a whole enrollment text fills everything; a bare code fills the code. */
+  /** Take a scanned or pasted text: a whole enrollment text fills everything; a bare code fills the code and drops any card. */
   const apply = (text: string) => {
     setError(null);
     setDone(false);
-    const bundle = parseEnrollBundle(text);
-    if (bundle) {
-      if (bundle.address !== "") setAddress(bundle.address);
-      setCode(formatCode(bundle.code));
-      setCard(bundle.card);
-      setRead(bundle.address !== "" ? "Read the hub's address and code. Check them, then press Enroll." : "Read the hub's code and card, but the hub did not know its network address. Type it below, then press Enroll.");
-      return;
-    }
-    const bare = normalizeCode(text);
-    if (text.trim().length <= CODE_LENGTH + 4 && bare.length === CODE_LENGTH) {
-      setCode(formatCode(bare));
-      setRead("Read a code. Type the hub's address too.");
-      return;
-    }
-    setRead("That text is not a hub's enrollment text. Type the hub's address and its code instead.");
+    const out = applyEnrollText(text, { address, code, card });
+    setAddress(out.fields.address);
+    setCode(out.fields.code);
+    setCard(out.fields.card);
+    setRead(out.read);
   };
 
   const submit = async (e: FormEvent) => {
@@ -237,7 +233,21 @@ function EnrollForm() {
           <label htmlFor={`${ids}-address`} className={H2}>
             hub address
           </label>
-          <Input id={`${ids}-address`} value={address} inputMode="url" autoComplete="off" spellCheck={false} placeholder="192.168.1.20:11183" onChange={(e) => setAddress(e.target.value)} />
+          <Input
+            id={`${ids}-address`}
+            value={address}
+            inputMode="url"
+            autoComplete="off"
+            spellCheck={false}
+            placeholder="192.168.1.20:11183"
+            onChange={(e) => {
+              // Editing the address after a whole enrollment text drops the hub's card: it belonged to the hub that text named.
+              const out = editEnrollAddress({ address, code, card }, e.target.value);
+              setAddress(out.fields.address);
+              setCard(out.fields.card);
+              if (out.read !== null) setRead(out.read);
+            }}
+          />
         </div>
         <div className="flex flex-col gap-1">
           <label htmlFor={`${ids}-code`} className={H2}>
@@ -270,7 +280,7 @@ function HomeHub({ fabric }: { fabric: FabricStatus }) {
   const { hub } = fabric;
   const name = hubName(hub, contacts);
   const rows: SpecRow[] = [
-    { label: "Home hub", value: name ?? "unknown" },
+    { label: "Home hub", value: name ? <PeerText>{name}</PeerText> : "unknown" },
     { label: "State", value: hubSummary(hub) },
     ...(hub.address ? [{ label: "Address", value: <span className="break-all">{hub.address}</span> }] : []),
     { label: "Mailbox position", value: String(hub.cursor), minMode: "advanced" as const },
@@ -300,24 +310,44 @@ function HomeHub({ fabric }: { fabric: FabricStatus }) {
 
 function OfferRow({ fabric, gated }: { fabric: FabricStatus; gated: boolean }) {
   const [offer, setOffer] = useState<HubOffer | null>(null);
+  const [gone, setGone] = useState(false);
   const [mint, runMint] = useAction();
   const [dismiss, runDismiss] = useAction();
   const outstanding = fabric.hub.offer_active;
   const blocked = gated || mint.loopback || dismiss.loopback;
+  /** The node has been seen holding the code that is on screen; and a dismissal this page made itself is under way. */
+  const seen = useRef(false);
+  const dismissing = useRef(false);
+
+  // A code on screen that the node no longer holds (a member used it, or it was dismissed from the CLI) is dead: stop showing it.
+  useEffect(() => {
+    const step = offerStep(offer !== null, seen.current, outstanding, dismissing.current);
+    seen.current = step.seen;
+    if (!step.clear) return;
+    setOffer(null);
+    if (step.say) {
+      setGone(true);
+      announce(OFFER_GONE_TEXT);
+    }
+  }, [offer, outstanding]);
 
   const show = async () => {
     const result = await runMint((a) => mintOffer(a, apiStore));
     if (!result) return;
+    setGone(false);
     setOffer(result);
     announce("A one-time code is shown. It works once.");
   };
   const remove = async () => {
+    dismissing.current = true;
     const ok = await runDismiss(async (a) => {
       await dismissOffer(a, apiStore);
       return true;
     });
+    dismissing.current = false;
     if (!ok) return;
     setOffer(null);
+    setGone(false);
     announce("The code was dismissed.");
   };
 
@@ -342,6 +372,11 @@ function OfferRow({ fabric, gated }: { fabric: FabricStatus; gated: boolean }) {
         {!blocked && !offer && outstanding ? (
           <p role="status" className={`max-w-prose text-foreground ${FEEDBACK}`} data-testid="offer-outstanding">
             {OUTSTANDING_NOTE}
+          </p>
+        ) : null}
+        {!blocked && gone && !offer && !outstanding ? (
+          <p role="status" className={`max-w-prose text-foreground ${FEEDBACK}`} data-testid="offer-gone">
+            {OFFER_GONE_TEXT}
           </p>
         ) : null}
         {offer ? <OfferCard offer={offer} /> : null}
@@ -411,6 +446,9 @@ function QuotaEditor({ fabric, gated }: { fabric: FabricStatus; gated: boolean }
     setSaved(true);
   };
 
+  if (rows.length === 0) {
+    return <p className={`max-w-prose text-muted-foreground ${FEEDBACK}`}>This node did not report any quota classes, so there is nothing to set.</p>;
+  }
   return (
     <form className="flex flex-col gap-3" onSubmit={(e) => void submit(e)} noValidate>
       <p className={`max-w-prose text-muted-foreground ${FEEDBACK}`}>
@@ -491,7 +529,7 @@ export function MessagingSettings() {
   const service = services?.find((s) => s.id === "fabric") ?? null;
   const gated = sharingDisabled(status);
   const agent = fabricAgent(service, fabric);
-  const waiting = restorePending(service, threads);
+  const restore = restoreState(service, threads, fabric);
 
   return (
     <div className="flex flex-col gap-6" data-testid="messaging-settings">
@@ -515,7 +553,7 @@ export function MessagingSettings() {
         <>
           <Panel title="home hub" suffix="your side" flush>
             <HomeHub fabric={fabric} />
-            {waiting ? (
+            {restore === "pending" ? (
               <Row id="restore-now" label="Restore">
                 <p role="status" className={`max-w-prose text-foreground ${FEEDBACK}`} data-testid="restore-pending">
                   {RESTORE_PENDING_TEXT}
@@ -534,7 +572,9 @@ export function MessagingSettings() {
           <Panel title="store" suffix="encrypted" flush>
             <StoreRow fabric={fabric} gated={gated} />
             <Row id="restore" label="After a restore" help={RESTORE_HELP}>
-              <p className={`text-muted-foreground ${FEEDBACK}`}>{waiting ? RESTORE_PENDING_TEXT : "Nothing is waiting on a restore."}</p>
+              <p className={`text-muted-foreground ${FEEDBACK}`} data-testid="restore-state">
+                {restore === "pending" ? RESTORE_PENDING_TEXT : restore === "clear" ? RESTORE_CLEAR_TEXT : RESTORE_UNKNOWN_TEXT}
+              </p>
             </Row>
             <Row id="export" label="Export" help={EXPORT_HELP}>
               <div className="flex flex-wrap items-center gap-3">

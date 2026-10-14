@@ -9,8 +9,10 @@ import type { NearbyNode, NearbySource } from "../src/lib/api/types";
 import { ModeProvider, resetModeForTests } from "../src/lib/mode";
 import NearbyView from "../src/views/nearby";
 import {
+  CLOCK_AHEAD_TEXT,
   clip,
   displayName,
+  heardLine,
   heardSummary,
   heardText,
   hopsText,
@@ -21,6 +23,7 @@ import {
   sortedNodes,
   sourceHeading,
   STALE_TEXT,
+  STARTING_STALE_TEXT,
   utilizationText,
 } from "../src/views/nearby/model";
 import { FakeClock, flush } from "./helpers/fakes";
@@ -207,6 +210,27 @@ describe("Nearby empty states", () => {
     expect(nearbyState(s, { state: "error", reason_code: "child_backoff", reason: "" }, false)).toMatchObject({ kind: "list", stale: true });
     expect(nearbyState(s, { state: "live", reason_code: "meshtastic_live", reason: "" }, true)).toMatchObject({ kind: "list", stale: true, text: STALE_TEXT });
   });
+
+  it("a starting service still serves the last snapshot, so the list is marked last known, not presented as live", () => {
+    const s = [source([node()])];
+    const starting = { state: "starting" as const, reason_code: "node_db_pending", reason: "meshmud is connected; waiting for the board's list of nodes." };
+    expect(nearbyState(s, starting, false)).toEqual({ kind: "list", stale: true, text: STARTING_STALE_TEXT });
+    expect(STARTING_STALE_TEXT).toMatch(/Last known list/);
+    expect(STARTING_STALE_TEXT).toMatch(/starting/);
+    // the lost connection still takes precedence in the words
+    expect(nearbyState(s, starting, true)).toMatchObject({ kind: "list", stale: true, text: STALE_TEXT });
+  });
+
+  it("the page marks a list shown while the service restarts, and still shows it", async () => {
+    await loadHeard();
+    expect(html(h(NearbyView))).not.toContain('data-testid="nearby-stale"');
+    const services = apiStore.getState().services!.map((x) => (x.id === "meshtastic" ? { ...x, state: "starting" as const, reason_code: "node_db_pending", reason: "meshmud is connected; waiting for the board's list of nodes." } : x));
+    apiStore.applyFrame({ event: "services", data: { services } });
+    const out = html(h(NearbyView));
+    expect(out).toContain('data-testid="nearby-stale"');
+    expect(out).toContain(STARTING_STALE_TEXT.replace(/'/g, "&#x27;"));
+    expect(out).toContain("Ridge repeater"); // still shown, never invented, never dropped
+  });
 });
 
 // ------------------------------------------------------------------------------------------- the model
@@ -265,6 +289,36 @@ describe("Nearby model: untrusted text", () => {
     expect(heardText(node({ last_heard_hint: new Date(NOW - 3 * 3600_000).toISOString() }), NOW)).toBe("3 h ago");
     expect(heardText(node({ last_heard_hint: null }), NOW)).toBe("not reported");
     expect(heardText(node({ last_heard_hint: "yesterday-ish" }), NOW)).toBe("unknown");
+  });
+
+  it("a hint in this node's future never reads 'just now': a board whose clock is ahead (or lying) is said to be", () => {
+    const at = (ms: number) => node({ last_heard_hint: new Date(NOW + ms).toISOString() });
+    expect(CLOCK_AHEAD_TEXT).toBe("clock ahead of this node");
+    // a few seconds ahead is ordinary skew between two clocks
+    expect(heardText(at(5_000), NOW)).toBe("just now");
+    expect(heardText(at(60_000), NOW)).toBe("just now");
+    // more than a minute ahead is not
+    expect(heardText(at(61_000), NOW)).toBe(CLOCK_AHEAD_TEXT);
+    expect(heardText(at(3 * 3600_000), NOW)).toBe(CLOCK_AHEAD_TEXT);
+    expect(heardText(at(400 * 86_400_000), NOW)).toBe(CLOCK_AHEAD_TEXT);
+    // the past is unchanged
+    expect(heardText(at(-10_000), NOW)).toBe("10 s ago");
+    expect(heardLine(at(-4 * 60_000), NOW)).toBe("last heard 4 min ago");
+    expect(heardLine(at(3600_000), NOW)).toBe("last heard: clock ahead of this node");
+    expect(heardLine(node({ last_heard_hint: null }), NOW)).toBe("last heard not reported");
+  });
+
+  it("the page shows it for a node whose clock is ahead, and a node heard a minute ago still reads normally", async () => {
+    await loadHeard();
+    const fresh = source([
+      node({ id: "!c10c", long_name: "Time traveller", last_heard_hint: new Date(NOW + 2 * 3600_000).toISOString() }),
+      node({ id: "!0a11", long_name: "Normal node", last_heard_hint: new Date(NOW - 60_000).toISOString() }),
+    ]);
+    apiStore.applyFrame({ event: "nearby", data: { sources: [fresh] } });
+    const out = html(h(NearbyView));
+    expect(out).toContain("last heard: clock ahead of this node");
+    expect(out).not.toContain("last heard just now");
+    expect(out).toContain("last heard 1 min ago");
   });
 
   it("order: hops, then name, then id; the clock hint never matters", () => {

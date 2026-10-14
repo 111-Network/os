@@ -2,7 +2,7 @@
 
 Every node's cryptographic self: how a node's identity is generated, stored, used, backed up, and recovered. The identity is a dual Ed25519+X25519 keyset derived from one seed; the 32-byte Ed25519 public key **is** the node (NodeId). It signs the node's announces and control artifacts, authenticates the node to peers, keys the per-packet encryption of node traffic, and anchors both the agentic-delegation hook and the transport-attestation bridge. Offline-first, registry-free, wallet-style backup — identical in kind across all six device categories, from an ESP32-S3 relay to a compute hub.
 
-Status of this document: **spec v2.1 — LOCKED** (v2.1 = v2 + one §3 amendment, 2026-10-14: A and R MUST be torsion-free — owner decision, closes the T9 F3 mixed-order residual; decisions: `os/plan/DECISIONS.md` D13 + D14 lock amendments incl. three user calls at lock; panel triage: `os/plan/layer-2-review.md` — 4 judges, 71 raw findings, all gating items resolved in v2; options brief: `os/plan/layer-2-options.md`; research: 8-agent sweep `wf_73d7f290-f74`, 2026-10-12).
+Status of this document: **spec v2.1 — LOCKED** (v2.1 = v2 + one §3 amendment, 2026-10-14: A and R MUST be torsion-free — owner decision, closes the T9 F3 mixed-order residual; decisions: `os/plan/DECISIONS.md` D13 + D14 lock amendments incl. three user calls at lock; panel triage: `os/plan/layers/02-identity/review/triage.md` — 4 judges, 71 raw findings, all gating items resolved in v2; options brief: `os/plan/layers/02-identity/options.md`; research: 8-agent sweep `wf_73d7f290-f74`, 2026-10-12).
 
 **Layer 5 amendments (D20, 2026-10-14):** A1–A4 and A6–A11 are recorded additively in §13.1; the locked text is unchanged and
 carries a one-line pointer wherever a sentence is superseded (§6.2–§6.5, §8.4, §10, §13). A5 is asked later (§15).
@@ -297,7 +297,7 @@ Plus two written residuals outside the table: **recipient-side harvest-now-decry
 - **Layer 5 (Messaging & Data) owns the full envelope.** Contracted identity hooks (§6.7): `signer_pubkey`, the delegation trailer (v1: absent; non-empty ⇒ reject), ratchet-field space (size pinned by L5 at envelope lock). Also handed to L5: authorship/non-repudiation (inner signatures if wanted), content message-ID idempotency (the §6.5 delay-and-replay + rollback residuals), and group/broadcast key distribution (never static-static on node keys). Announces are L2 artifacts, not L5 envelopes. Every future L5 signed artifact carries its own domain tag (§6.1). *[Layer 5 is locked at `os/messaging/README.md` v1.2 (D20); its identity-side asks are recorded in §13.1.]*
 - **Layers 6/7 (Transport / Relay & Presence) — open questions handed over, not decided here:** Cat-1 relay announce-verification policy (verify-before-relay vs relay-blind; Ed25519 verify is Cat-1-feasible) · announce-as-routing vs announce-as-identity-only (the biggest cross-layer question the wire shape forces) · announce rate-limit policy (Reticulum caps ~2% interface bandwidth — announce flooding is the registry-free tax) · attestation gossip and gateway publication (§10) · the **mesh-epoch source** that §9/§10 expiries count in (v1 fail-mode pinned in §6.7: undefined ⇒ not evaluated, non-empty trailers rejected). `appdata` is 0–32B and versioned — the stated escape if L6/7's routing data outgrows it; transport-mutable data (hop counts) rides outside L2's signed blob. Safe to defer: v1 emits no announces at all (Layer 1's transport child has independent identity), so these gate L6/7's start, not v1's deployment. *[Superseded in part by Layer 5 A6, §13.1: v1 emits announces on demand — in a card, on link-up, inside an INTRO — and none unsolicited or periodic.]*
 - **Layer 0 (Knowledge):** receives the §16 entries at build.
-- **Cross-layer connection check:** the 20-item checklist this spec must be re-verified against when sibling layers land lives in `os/plan/layer-2-review.md`.
+- **Cross-layer connection check:** the 20-item checklist this spec must be re-verified against when sibling layers land lives in `os/plan/layers/02-identity/review/triage.md`.
 
 ### 13.1 Layer 5 amendments (D20, 2026-10-14)
 
@@ -324,6 +324,10 @@ restore floor was set since the last run (§8.4) · `n` would wrap 2^32. So a cr
 `store.db` restored onto a live identity gets a new epoch, and a second words-only restore never collides with the first. A minted
 epoch consumes an announce-counter value without emitting an announce. While the identity holder reports `RestoreFloorRequired`,
 nothing is sealed (messaging §4).
+*A3 as built (Layer 5 Wave 2 bounce, 2026-10-15):* while restore-pending `CounterStore` writes **no** `counters` file — `shutdown`,
+`commit` and the every-N batch commit refuse with `RestoreFloorRequired` — so an orderly stop can never turn the state-absent case into
+a state-present file with `announce_last = 0` (a counter reset that re-issues old epochs); `set_restore_floor` is the only way out. The
+§14 restore vectors are unchanged (they set the floor before any commit).
 
 **A4 — domain tags (§6.1).** Registered here; each tag leads its input, and each input is pinned:
 

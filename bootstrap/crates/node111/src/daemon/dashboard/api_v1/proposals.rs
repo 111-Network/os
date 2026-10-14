@@ -23,13 +23,19 @@
 //! lowercase hex + "\n\n" + text`) is parsed, the node-id stamp must name
 //! this node, the recipient must be an accepted contact, then the fabric
 //! queues the message ([`crate::daemon::fabric::proposal`]). The decision
-//! file is written only after the store committed the message, with an
-//! additive `applied: {message_id}` field (the API's `decision` object keeps
-//! its contract shape). Every decision on a message proposal (accept or
+//! file carries an additive `applied` field (the API's `decision` object
+//! keeps its contract shape) and is written **twice**: first
+//! `applied: {pending: true}` before the send, then `applied: {message_id}`
+//! after the store committed the message. The record on disk is the guard:
+//! a proposal whose file exists reads decided, so after a crash, a failed
+//! finalise or a restart a retried accept answers `409 already_decided` — a
+//! half-applied proposal stays visibly `pending` on disk, it is never sent a
+//! second time. A refused send removes the pending record (the proposal
+//! stays open; the user may dismiss it); the cheap checks run before
+//! anything is written. Every decision on a message proposal (accept or
 //! dismiss) is serialized under one async lock and refused to the agent's
-//! bearer (`401`: deciding is the human's act, §17), so a proposal is never sent
-//! twice and never sent after being dismissed; a refused acceptance leaves it
-//! open (the user may dismiss it).
+//! bearer (`401`: deciding is the human's act, §17), so a proposal is never
+//! sent twice and never sent after being dismissed.
 //!
 //! Events: a recorded decision publishes `event: proposal` with the
 //! `SseProposal` shape plus the new `decision` (`{id,title,kind,created_at,
@@ -378,27 +384,7 @@ pub fn decide_applied(
         decision: decision.to_string(),
         at: rfc3339_now(),
     };
-    let dir = decisions_dir(layout);
-    let written = {
-        use std::os::unix::fs::DirBuilderExt;
-        std::fs::DirBuilder::new()
-            .recursive(true)
-            .mode(0o700)
-            .create(&dir)
-            .map_err(anyhow::Error::from)
-            .and_then(|()| {
-                let mut body = json!({"schema": 1, "decision": rec.decision, "at": rec.at});
-                if let Some(a) = &applied {
-                    body["applied"] = a.clone();
-                }
-                crate::util::fs::atomic_write(
-                    &dir.join(format!("{id}.json")),
-                    format!("{body}\n").as_bytes(),
-                    0o600,
-                )
-            })
-    };
-    if let Err(e) = written {
+    if let Err(e) = write_decision(layout, id, &rec, applied.as_ref()) {
         eprintln!("111 proposals: cannot record decision for {id}: {e:#}");
         return Err(Problem::new(
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -409,6 +395,31 @@ pub fn decide_applied(
     }
     p.decision = Some(rec);
     Ok(p)
+}
+
+/// Write `decisions/<id>.json` (`{schema, decision, at, applied?}`; the dir
+/// 0700, the file atomic 0600).
+fn write_decision(
+    layout: &DaemonLayout,
+    id: &str,
+    rec: &DecisionRec,
+    applied: Option<&Value>,
+) -> anyhow::Result<()> {
+    use std::os::unix::fs::DirBuilderExt;
+    let dir = decisions_dir(layout);
+    std::fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(&dir)?;
+    let mut body = json!({"schema": 1, "decision": rec.decision, "at": rec.at});
+    if let Some(a) = applied {
+        body["applied"] = a.clone();
+    }
+    crate::util::fs::atomic_write(
+        &dir.join(format!("{id}.json")),
+        format!("{body}\n").as_bytes(),
+        0o600,
+    )
 }
 
 fn not_found() -> Problem {
@@ -480,18 +491,9 @@ async fn get_handler(
 /// One async lock for every decision on a message proposal (module doc).
 static MESSAGE_DECIDE: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
-/// Message proposals already applied this daemon lifetime whose decision
-/// file could not be written, keyed by (node root, proposal id): a retried
-/// accept records the decision again instead of sending a second time.
-static APPLIED: Mutex<Vec<(PathBuf, String, String)>> = Mutex::new(Vec::new());
-
-fn applied_before(root: &std::path::Path, id: &str) -> Option<String> {
-    APPLIED
-        .lock()
-        .ok()?
-        .iter()
-        .find(|(r, p, _)| r == root && p == id)
-        .map(|(_, _, m)| m.clone())
+/// `applied` while a message acceptance is in flight (module doc).
+pub fn applied_pending() -> Value {
+    json!({ "pending": true })
 }
 
 /// A decision on a `kind: message` proposal (module doc).
@@ -519,32 +521,53 @@ async fn decide_message(
             .await
             .map_err(internal)?;
     }
-    let root = layout.root.clone();
-    let message_id = match applied_before(&root, &id) {
-        Some(m) => m,
-        None => {
-            let handle = super::messages::handle(api)?;
-            let n = crate::daemon::fabric::proposal::apply(&handle, p.node_id.as_deref(), &p.body)
-                .await?;
-            let m = crate::daemon::fabric::json::msg_id(n);
-            if let Ok(mut a) = APPLIED.lock() {
-                a.push((root.clone(), id.clone(), m.clone()));
+    use crate::daemon::fabric::proposal;
+    // checks 1–3 first: nothing is written for a proposal that cannot go
+    let handle = super::messages::handle(api)?;
+    let (to, text) = proposal::prepare(&handle, p.node_id.as_deref(), &p.body).await?;
+    // the pending record: from here a retry is `already_decided`
+    let accepted = {
+        let (layout, id) = (layout.clone(), id.clone());
+        tokio::task::spawn_blocking(move || {
+            decide_applied(&layout, &id, "accepted", Some(applied_pending()))
+        })
+        .await
+        .map_err(internal)??
+    };
+    let Some(rec) = accepted.decision.clone() else {
+        return Err(internal("the acceptance was not recorded"));
+    };
+    let n = match proposal::send(&handle, to, &text).await {
+        Ok(n) => n,
+        Err(problem) => {
+            // refused: nothing was sent, so the proposal reopens
+            let path = decisions_dir(&layout).join(format!("{id}.json"));
+            if let Err(e) = std::fs::remove_file(&path) {
+                eprintln!(
+                    "111 proposals: {id} was refused ({}) but its pending record {} stays: {e}",
+                    problem.code,
+                    path.display()
+                );
             }
-            m
+            return Err(problem);
         }
     };
+    let message_id = crate::daemon::fabric::json::msg_id(n);
     let applied = json!({ "message_id": message_id });
     let (l2, id2) = (layout.clone(), id.clone());
-    let r =
-        tokio::task::spawn_blocking(move || decide_applied(&l2, &id2, "accepted", Some(applied)))
+    let finalised =
+        tokio::task::spawn_blocking(move || write_decision(&l2, &id2, &rec, Some(&applied)))
             .await
-            .map_err(internal)?;
-    if r.is_ok() {
-        if let Ok(mut a) = APPLIED.lock() {
-            a.retain(|(rt, p, _)| !(*rt == root && *p == id));
-        }
+            .map_err(anyhow::Error::from)
+            .and_then(|r| r);
+    if let Err(e) = finalised {
+        // sent once and recorded as accepted: the record keeps saying
+        // `pending`, and a retry is still `already_decided`
+        eprintln!(
+            "111 proposals: {id} was sent as {message_id}; its decision record still reads pending: {e:#}"
+        );
     }
-    r
+    Ok(accepted)
 }
 
 #[derive(Deserialize)]

@@ -413,7 +413,10 @@ def collect_rust():
     for (name, ver), p in meta.items():
         if (name, ver) in crates and name not in own:
             dirs.setdefault(name, (ver, os.path.dirname(p["manifest_path"])))
-    return rows, dirs
+    # Every package's unpacked source, build-dependencies included (openssl-src: not in the normal
+    # closure, yet the OpenSSL it compiles is linked into `111`).
+    pkg_dirs = {(name, ver): os.path.dirname(p["manifest_path"]) for (name, ver), p in meta.items()}
+    return rows, dirs, pkg_dirs
 
 
 # ------------------------------------------------------------------ collect: JS
@@ -500,6 +503,55 @@ def build_texts(dirs):
     ]
 
 
+def sqlcipher_license(crate_dir):
+    """SQLCipher's own LICENSE as bundled in libsqlite3-sys, verbatim, and the SQLCipher / SQLite
+    versions from its amalgamation. Its clauses and disclaimer name Zetetic LLC, so binary
+    redistributions reproduce this text, not a generic BSD-3-Clause body."""
+    path = os.path.join(crate_dir, "sqlcipher", "LICENSE")
+    if not os.path.isfile(path):
+        die("libsqlite3-sys ships no sqlcipher/LICENSE: SQLCipher's license must be reproduced verbatim")
+    text = read(path).strip("\n")
+    if "Zetetic LLC" not in text or "Redistribution and use" not in text:
+        die("libsqlite3-sys sqlcipher/LICENSE is not the Zetetic BSD-style license; review it before shipping")
+    amalgamation = read(os.path.join(crate_dir, "sqlcipher", "sqlite3.c"))
+    cv = re.search(r"^#define CIPHER_VERSION_NUMBER ([\d.]+)$", amalgamation, re.M)
+    cb = re.search(r"^#define CIPHER_VERSION_BUILD (\w+)$", amalgamation, re.M)
+    sv = re.search(r'^#define SQLITE_VERSION\s+"([\d.]+)"$', amalgamation, re.M)
+    if not (cv and sv):
+        die("cannot read the SQLCipher / SQLite versions from libsqlite3-sys sqlcipher/sqlite3.c")
+    version = f"SQLCipher {cv.group(1)}" + (f" {cb.group(1)}" if cb else "") + f" on SQLite {sv.group(1)}"
+    return text, text.splitlines()[0].strip(), version
+
+
+def openssl_notice(src_dir, upstream):
+    """(copyright line, licence URL) for the OpenSSL that openssl-src vendors: the newest
+    `Copyright 1995-<year> The OpenSSL Project Authors` in its library sources, and the
+    tag-pinned LICENSE.txt. Apache-2.0 section 4(d) would also need a NOTICE file; there is none."""
+    root = os.path.join(src_dir, "openssl")
+    lic = os.path.join(root, "LICENSE.txt")
+    if not os.path.isfile(lic) or "Apache License" not in read(lic) or "Version 2.0" not in read(lic):
+        die(f"openssl-src: {lic} is not the Apache License 2.0; review it before shipping")
+    if any(f.upper().startswith("NOTICE") for f in os.listdir(root)):
+        die("openssl-src: OpenSSL now ships a NOTICE file; Apache-2.0 section 4(d) needs it reproduced")
+    pat = re.compile(r"Copyright 1995-(\d{4}) The OpenSSL Project Authors")
+    newest = 0
+    for sub_dir in ("crypto", "ssl", "include", "providers"):
+        for dirpath, dirnames, files in os.walk(os.path.join(root, sub_dir)):
+            dirnames.sort()
+            for f in sorted(files):
+                try:
+                    with open(os.path.join(dirpath, f), encoding="utf-8", errors="replace") as fh:
+                        head = fh.read(4096)
+                except OSError:
+                    continue
+                for y in pat.findall(head):
+                    newest = max(newest, int(y))
+    if not newest:
+        die("openssl-src: no `Copyright 1995-<year> The OpenSSL Project Authors` line in the OpenSSL sources")
+    return (f"Copyright 1995-{newest} The OpenSSL Project Authors. All Rights Reserved.",
+            f"https://github.com/openssl/openssl/blob/openssl-{upstream}/LICENSE.txt")
+
+
 def monocypher_entry():
     vendor = read(os.path.join(MONO_DIR, "VENDOR.md"))
     m = re.search(r"\|\s*Version\s*\|\s*\*\*([\d.]+)\*\*", vendor)
@@ -528,7 +580,7 @@ def font_rows():
 
 # ------------------------------------------------------------------ render
 def render():
-    rust_rows, dirs = collect_rust()
+    rust_rows, dirs, pkg_dirs = collect_rust()
     js_rows = collect_js()
     texts = build_texts(dirs)
     fonts, silk_line = font_rows()
@@ -633,12 +685,12 @@ def render():
         w(f"- `unicode-ident` {ver_of['unicode-ident']} ((MIT OR Apache-2.0) AND Unicode-3.0): the Unicode-3.0 part covers data files from Unicode, Inc.")
     if "webpki-roots" in ver_of:
         w(f"- `webpki-roots` {ver_of['webpki-roots']} (CDLA-Permissive-2.0): Mozilla's CA root certificates, embedded as data in the `111` binary for TLS. The agreement text is reproduced below, as its section 2.1 requires.")
+    sqlcipher = None
     if "libsqlite3-sys" in ver_of:
-        sc_dir = os.path.join(dirs["libsqlite3-sys"][1], "sqlcipher")
-        sc_cp = copyright_lines(sc_dir) if os.path.isdir(sc_dir) else []
-        w(f"- `libsqlite3-sys` {ver_of['libsqlite3-sys']} (MIT): compiles native sources bundled in the crate. With the `bundled-sqlcipher` features that is SQLCipher"
-          + (f" ({'; '.join(sc_cp[:2])}; BSD-3-Clause style license in the crate's `sqlcipher/LICENSE`)" if sc_cp else " (BSD-3-Clause style license in the crate's `sqlcipher/LICENSE`)")
-          + ", built on SQLite (public domain). The BSD-3-Clause text below covers the SQLCipher notice.")
+        sqlcipher = sqlcipher_license(dirs["libsqlite3-sys"][1])
+        w(f"- `libsqlite3-sys` {ver_of['libsqlite3-sys']} (MIT): compiles native sources bundled in the crate. With the `bundled-sqlcipher` features that is"
+          f" {sqlcipher[2]} ({sqlcipher[1]}; SQLite itself is public domain). SQLCipher's own license, a BSD-3-Clause-style text naming Zetetic LLC,"
+          " is reproduced verbatim under License texts, as its binary-redistribution clause requires.")
     # openssl-src is a build-dependency (absent from `cargo tree -e normal`), yet the OpenSSL it
     # compiles is linked into the static `111` binary as SQLCipher's crypto provider, so it is found
     # in the lockfile instead of the normal-dependency closure.
@@ -646,7 +698,12 @@ def render():
     if ossl:
         ossl_crate = ossl.group(1)
         ossl_upstream = ossl_crate.split("+", 1)[1] if "+" in ossl_crate else ossl_crate
-        w(f"- `openssl-src` {ossl_crate} (MIT OR Apache-2.0; a build-dependency, so not in the crate list above): bundles the OpenSSL {ossl_upstream} sources and compiles them into the static `111` binary as SQLCipher's crypto provider (`bundled-sqlcipher-vendored-openssl`); no system libcrypto is linked. OpenSSL {ossl_upstream} is Apache-2.0 (Copyright The OpenSSL Project Authors; see https://github.com/openssl/openssl/blob/master/LICENSE.txt); the Apache License 2.0 text below covers it.")
+        ossl_dir = pkg_dirs.get(("openssl-src", ossl_crate))
+        if ossl_dir is None:
+            die(f"openssl-src {ossl_crate} (bootstrap/Cargo.lock) has no unpacked source; run `cargo fetch` in os/bootstrap")
+        ossl_cp, ossl_url = openssl_notice(ossl_dir, ossl_upstream)
+        w(f"- `openssl-src` {ossl_crate} (MIT OR Apache-2.0; a build-dependency, so not in the crate list above): bundles the OpenSSL {ossl_upstream} sources and compiles them into the static `111` binary as SQLCipher's crypto provider (`bundled-sqlcipher-vendored-openssl`); no system libcrypto is linked.")
+        w(f"  OpenSSL {ossl_upstream} — {ossl_cp} Apache License 2.0 ({ossl_url}); the Apache License 2.0 text below covers it (the OpenSSL source tree carries no NOTICE file).")
     w("- Options named in expressions but not elected, so not reproduced: " + ", ".join(not_elected) + ".")
     w("")
 
@@ -749,6 +806,15 @@ def render():
         w("")
         w("```text")
         w(body)
+        w("```")
+        w("")
+    if sqlcipher:
+        w("### SQLCipher license (BSD-3-Clause style, Zetetic LLC)")
+        w("")
+        w(f"Verbatim copy of `libsqlite3-sys` {ver_of['libsqlite3-sys']} `sqlcipher/LICENSE`. Applies to {sqlcipher[2]}, compiled into the `111` binary.")
+        w("")
+        w("```text")
+        w(sqlcipher[0])
         w("```")
         w("")
     w("### Silkscreen copyright line (OFL-1.1)")

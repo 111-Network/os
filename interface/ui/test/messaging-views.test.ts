@@ -6,7 +6,8 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { afterEach, describe, expect, it } from "vitest";
 import { createMockAdapter, type MockAdapter, type ScenarioName } from "../src/lib/api/mock";
 import { buildFixtures } from "../src/lib/api/mock/fixtures";
-import { ADA, BRAM, CLEO, DANA, DOV, ELI, makeContact } from "../src/lib/api/mock/messaging";
+import { ADA, BRAM, CLEO, DANA, DOV, ELI, cancelQueued, makeContact } from "../src/lib/api/mock/messaging";
+import type { Message } from "../src/lib/api/types";
 import { requestSeq } from "../src/lib/api/requests";
 import { apiStore } from "../src/lib/api/store";
 import { Header } from "../src/app/Header";
@@ -15,9 +16,9 @@ import ContactsView from "../src/views/contacts";
 import { OwnCard } from "../src/views/contacts/own-card";
 import { AddContact } from "../src/views/contacts/add";
 import ThreadList from "../src/views/messages/list";
-import ThreadView from "../src/views/messages/thread";
+import ThreadView, { MessageRow } from "../src/views/messages/thread";
 import { MessagingBanner } from "../src/views/messages/banner";
-import { IGNORED_HERE_NOTE, IGNORED_NOTE, REASON_COPY, STATE_COPY } from "../src/views/messages/model";
+import { CANCEL_CONFIRM, CANCELLED_STATE_COPY, IGNORED_HERE_NOTE, IGNORED_NOTE, REASON_COPY, STATE_COPY } from "../src/views/messages/model";
 import { FakeClock, flush } from "./helpers/fakes";
 
 const made: MockAdapter[] = [];
@@ -252,6 +253,49 @@ describe("a conversation", () => {
     const out = html(h(ThreadView, { peer: ADA }));
     // Ada's thread: 2 delivered, 1 relayed, 1 sent -> exactly one retry (the sent one); relayed and delivered have none.
     expect(out.match(/retry now/g)?.length).toBe(1);
+  });
+
+  it("offers 'cancel sending' on a queued own message when the adapter can cancel, behind a two-step confirm; never on one that has left", async () => {
+    await load("healthy");
+    await apiStore.loadThread(CLEO);
+    await apiStore.loadThread(ADA);
+    const queued = apiStore.getState().threadPages[CLEO]!.page!.messages.find((m) => m.dir === "own" && m.state === "queued")!;
+    const sent = apiStore.getState().threadPages[ADA]!.page!.messages.find((m) => m.dir === "own" && m.state === "sent")!;
+    const row = (m: Message, cancellable: boolean) => html(h("ul", null, h(MessageRow, { m, now: Date.parse("2026-10-14T09:00:00Z"), onRetry: () => undefined, onCancel: cancellable ? () => undefined : undefined })));
+    const withCancel = row(queued, true);
+    expect(withCancel).toContain(`data-testid="cancel-${queued.id}"`);
+    expect(withCancel).toContain("cancel sending");
+    expect(withCancel).toContain("Cancel sending: Hello Cleo");
+    expect(withCancel).not.toContain(CANCEL_CONFIRM + "?"); // the confirmation only appears after the first press
+    expect(withCancel).toContain("retry now"); // both are still there for a message waiting on a path
+    // an adapter without the route offers nothing
+    expect(row(queued, false)).not.toContain("cancel sending");
+    // a message that was sent has left: no cancel, retry only
+    const sentRow = row(sent, true);
+    expect(sentRow).not.toContain("cancel sending");
+    expect(sentRow).toContain("retry now");
+    // the view itself offers none until it has asked the adapter (effects do not run in a static render)
+    expect(html(h(ThreadView, { peer: CLEO }))).not.toContain("cancel sending");
+  });
+
+  it("a cancelled message stays in the thread, says so in plain words, and offers neither cancel nor retry", async () => {
+    const a = await load("healthy");
+    await apiStore.loadThread(CLEO);
+    const queued = a.mock.state.messaging.messages.find((m) => m.peer === CLEO && m.dir === "own")!;
+    expect(cancelQueued(queued)).toBe("cancelled");
+    await apiStore.loadThread(CLEO);
+    const page = apiStore.getState().threadPages[CLEO]!.page!;
+    const m = page.messages.find((x) => x.id === queued.id)!;
+    expect(m).toMatchObject({ state: "queued", reason_code: "cancelled" });
+    const out = html(h("ul", null, h(MessageRow, { m, now: Date.parse("2026-10-14T09:00:00Z"), onRetry: () => undefined, onCancel: () => undefined })));
+    expect(out).toContain(REASON_COPY.cancelled);
+    expect(out).toContain(CANCELLED_STATE_COPY);
+    expect(out).toContain(">cancelled<"); // the glyph's word; the node's state is still queued, which is not "in the outbox" for it
+    expect(out).not.toContain(">queued<");
+    expect(out).not.toContain("cancel sending");
+    expect(out).not.toContain("retry now");
+    expect(out).not.toContain(STATE_COPY.queued);
+    expect(html(h(ThreadView, { peer: CLEO }))).toContain(REASON_COPY.cancelled);
   });
 
   it("Advanced appends the raw msg_id, epoch and n, the evidence, and the raw thread", async () => {

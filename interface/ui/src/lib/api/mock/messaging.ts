@@ -2,7 +2,7 @@
 // the fabric snapshot, Meshtastic presence and the hosted panel, all shaped like api/openapi.yaml. The adapter
 // (index.ts) holds the live copy; scenarios bend it. Nothing here is imported by production code.
 import { encodeNodeBech32 } from "../contacts";
-import type { Card, Contact, FabricStatus, HostedPanel, Message, NearbySource, NodeId, Thread } from "../types";
+import type { Card, Contact, FabricStatus, FabricStore, HostedPanel, Message, NearbySource, NodeId, Thread } from "../types";
 import { cardFor } from "./qr";
 
 // --- Peers -------------------------------------------------------------------------------------------------------
@@ -19,6 +19,12 @@ export const FAY = "a6d30f58c1e2749b0583d6e1fa9c47b2305e81d9a4c7f620b3e58d1a9c06
 /** The hub's one-time code and address, as `POST /fabric/hub/enroll` accepts them in the mock (case, dashes and spaces ignored). */
 export const MOCK_HUB_CODE = "K7M29X4P";
 export const MOCK_HUB_ADDRESS = "192.168.1.20:11183";
+
+/**
+ * A hub's enrollment text as the daemon builds it (`mesh111::contacts::HubBundle::text`, spec 7.3):
+ * `111HUB:<card>:<code>:<address>`, the address last because it may itself contain colons.
+ */
+export const hubBundleText = (cardText: string, code: string, address: string): string => `111HUB:${cardText}:${code}:${address}`;
 
 const LABEL_ALPHABET = "0123456789abcdefghjkmnpqrstvwxyz";
 
@@ -86,7 +92,20 @@ export const MOCK_REASONS: Record<string, string> = {
   restore_pending: "Waiting for the identity restore to finish; nothing is sent until it does.",
   mailbox_full: "Your hub's mailbox is full; your copy is kept.",
   store_full: "This node's store is full; new messages wait until space is freed.",
+  cancelled: "Cancelled before it left; an empty placeholder goes instead.",
 };
+
+/**
+ * `POST /messages/{id}/cancel` on the mock's data (spec 4): an own message that is still `queued` and not already cancelled
+ * stays in its thread, `queued`, with `reason_code: cancelled`. Returns what happened so the adapter can answer 202 or 409.
+ */
+export function cancelQueued(m: Message): "cancelled" | "not_own" | "not_queued" {
+  if (m.dir !== "own") return "not_own";
+  if (m.state !== "queued" || m.reason_code === "cancelled") return "not_queued";
+  m.reason_code = "cancelled";
+  m.reason = MOCK_REASONS.cancelled ?? null;
+  return "cancelled";
+}
 
 const CARD_ALPHABET = "abcdefghijklmnopqrstuvwxyz234567";
 
@@ -180,7 +199,12 @@ export function buildPanels(live: boolean): HostedPanel[] {
   ];
 }
 
+/** The refusable store classes the daemon reports a quota for (`null` when unset, spec 10.4): never `msg` or `agent_op`. */
+export const MOCK_QUOTA_CLASSES = ["kb", "update", "patch", "sync", "object", "custody"] as const;
+
 export function buildFabric(): FabricStatus {
+  // `restore_pending` is the identity holder's report (spec 15 as-built); the mock reports "no restore floor" like a healthy node.
+  const store: FabricStore = { open: true, used: 3_412_000, watermark: 256_000_000, store_full: false, restore_pending: false };
   return {
     schema: 1,
     links: [
@@ -195,8 +219,8 @@ export function buildFabric(): FabricStatus {
     ],
     hub: { enrolled: true, reachable: true, cursor: 41, node_id: HUB, address: MOCK_HUB_ADDRESS, members: 0, offer_active: false },
     custody: { count: 0, bytes: 0 },
-    store: { open: true, used: 3_412_000, watermark: 256_000_000, store_full: false },
-    settings: { hub_role: false, listen_lan: true, custody_opt_in: false, quotas: {} },
+    store,
+    settings: { hub_role: false, listen_lan: true, custody_opt_in: false, quotas: Object.fromEntries(MOCK_QUOTA_CLASSES.map((c) => [c, null])) },
   };
 }
 

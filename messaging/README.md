@@ -7,13 +7,13 @@ by policy. Plus the dashboard's power to **host** an adopted project's own panel
 Meshtastic.
 
 Status of this document: **spec v1.2 — locked (D20, 2026-10-14)** after the three-judge adversarial panel and the
-re-check (decisions D18, D19, D20 in `os/plan/DECISIONS.md`; options brief `os/plan/layer-5-options.md`; research
-`os/plan/layer-5-research/`; triage `os/plan/layer-5-review.md`, re-check `os/plan/layer-5-review/recheck.md`). Nothing here is built yet. Build tasks will live in `TASKS.md` per `os/plan/EXECUTION.md`.
+re-check (decisions D18, D19, D20 in `os/plan/DECISIONS.md`; options brief `os/plan/layers/05-messaging/options.md`; research
+`os/plan/layers/05-messaging/research/`; triage `os/plan/layers/05-messaging/review/triage.md`, re-check `os/plan/layers/05-messaging/review/recheck.md`). Nothing here is built yet. Build tasks will live in `TASKS.md` per `os/plan/EXECUTION.md`.
 
 Reads with: `os/README.md` §5 (vision) · `os/identity/README.md` §6, §8.4, §9, §10, §12, §13 (the sealed packet,
 announces, restore, delegation, attestation, hand-offs) · `os/interface/README.md` §5–§7, §10–§11 (dashboard, services,
-contract, auth) · `os/intelligence/README.md` (tools, task API) · `os/plan/devices.md` (Layer 6 brief, amended by D19 c)
-· `os/plan/layer-5-research/00-code-seams.md` (where this plugs in).
+contract, auth) · `os/intelligence/README.md` (tools, task API) · `os/plan/cross-layer/devices.md` (Layer 6 brief, amended by D19 c)
+· `os/plan/layers/05-messaging/research/00-code-seams.md` (where this plugs in).
 
 ## 1. Scope & non-goals
 
@@ -360,7 +360,7 @@ The fabric never rate-limits; airtime and duty-cycle are facts the adapter adver
 |---|---|---|---|---|
 | **`tcp-lan`** | TCP between 111 nodes: member ↔ hub (D17 #4), hub ↔ hub, laptop ↔ hub | stream; frames ≤ 65,535 B | **built with L5** | §8.1. Unicast: no MulticastLock needed on phones. No Noise/TLS in v1 (end-to-end seal; metadata leak stated in §18). |
 | `kiss-modem` | a 111-owned board running the **MeshCore KISS modem** (D19 c): 111d builds MeshCore `GRP_DATA` frames; stock MeshCore repeaters flood them | **160 B** payload per frame (163 B cap) | seam; Layer 6 builds | Region set once (D17 #10). Opt-in "shared" profile: an RNode in HOST mode, rnsd attached by loopback TCP-KISS. One owner per port. A data-type range is registered with MeshCore before Layer 6 locks (D19 c). |
-| `meshtastic-client` | a Meshtastic board via meshmud's TCP downlink, port `PRIVATE_APP` | 233 B (221 with PKI/AEAD channels) | seam; no bridge this cycle | The firmware rewrites `from`: a bridge speaks as its own Meshtastic node; one bridge identity per foreign network bound by L2 §10 attestation (A10). Routers in `CORE_PORTNUMS_ONLY` drop it. Never on amateur-licensed regions (sealed = "obscured", devices.md §0.6). |
+| `meshtastic-client` | a Meshtastic board via meshmud's TCP downlink, port `PRIVATE_APP` | 233 B (221 with PKI/AEAD channels) | seam; no bridge this cycle | The firmware rewrites `from`: a bridge speaks as its own Meshtastic node; one bridge identity per foreign network bound by L2 §10 attestation (A10). Routers in `CORE_PORTNUMS_ONLY` drop it. Never on amateur-licensed regions (sealed = "obscured", os/plan/cross-layer/devices.md §0.6). |
 | `rns-bridge` | LXMF via MeshChat(X) HTTP/WS or lxmd's inbound hook — envelope as an attachment; LXMF address = transport address, our NodeId stays inside | 287 B single packet, larger via Link | seam; deferred | No RNS import, ever. |
 | `ble` | Android helper app, later | ~ATT MTU | later | — |
 | online links (Noise IK / TLS-RPK, L2 §6.6) | interactive class, L3 offload over the mesh | stream | later (Layer 6) | **Link keys are random and bound by L2 §10 attestation — never seed-derived (F2 rejected), never the identity key (§6.1).** iroh is not in v1 (QUIC-only, +13 MB, blobs pre-production). |
@@ -684,8 +684,25 @@ message` proposal) answers `409 restore_pending` while the identity holder repor
 numbered then (§4; the message is not queued, so it carries no `reason_code`); `GET /contacts/me/card` and `POST
 /fabric/hub/offer` answer the same while no announce exists (an offer's bundle carries the card). The
 `Message.reason_code` emitted set gains `not_enrolled` (sent; the hub answered `REJECT_UNENROLLED`) and `cancelled`
-(queued; the empty tombstone of §4 goes instead). `Proposal.kind` gains `message` (§17). The contract has no cancel
-route yet (the fabric's `cancel` is wired but not exposed).
+(queued; the empty tombstone of §4 goes instead). `Proposal.kind` gains `message` (§17).
+
+*As built (F2 bounce, Wave 2 — contract regen):* `POST /messages/{id}/cancel` (`cancelMessage`, the lead's additive
+call) → `202 Message` for an own message still `queued` with nothing of it sent (`Fabric::cancel`: the §4 tombstone goes
+instead, `reason_code: cancelled`), `409 bad_request` otherwise, `404` for an unknown id. `FabricStatus.store` gains
+`restore_pending` (optional); `offerHub` lists `409` (`bad_request` without custody, `restore_pending` without a card),
+`getOwnCard` `409 restore_pending`, `decideProposal` the message-proposal outcomes (`409 bad_request` / `409
+restore_pending` / `502 upstream_error`; the proposal stays open); `quotas` keys are the refusable classes only (`kb`,
+`update`, `patch`, `sync`, `object`, `custody` — messages are never refused, §10.4). While the identity holder is
+restore-pending no link runs (no listener, no dial, no `peers`), no announce is presented, and no Layer 2 `counters`
+file is written — a clean stop never turns the missing floor into a counter reset (L2 §13.1, A3 note); the `fabric`
+row reads ERROR `restore_pending` (or `no_identity` when no identity loaded) with the way out. Accepting a message
+proposal records `applied: {pending: true}` before the send and the message id after it: a crash leaves a visibly
+half-applied proposal, never a second send. A settings change re-mints the own announce (roles, home-hub hint) for new
+`tcp-lan` connections and the own card at once; the fabric's INTRO and offer-bundle copy follow at the next start.
+`fabric/settings` that is invalid is moved aside (`settings.invalid-<n>`) and the home hub rebuilt from the
+`enrolled` contact; enrollment persists `home_hub` before it answers; dial targets that name no peer (unspecified,
+multicast, broadcast, loopback in production) are refused. `111 fabric enroll` never takes a bare code on argv (it is
+typed, hidden); the scanned `111HUB:` bundle may ride argv.
 
 ## 16. UI (Layer 4 tree; one component tree, density flags)
 
@@ -749,7 +766,7 @@ Termux). Tools run inside `111-agent`; writes only via the proposal path (L3 "on
    *board* through meshmud (the user's own radio, their decision), never to the fabric; no HTTP listener exists outside
    the guarded panel origin.
 9. Agent: reads freely (bearer-token loopback), sends only through proposals.
-10. Amateur-licensed regions: no sealed traffic on that radio (devices.md §0.6); region/callsign are human facts (D17 #10).
+10. Amateur-licensed regions: no sealed traffic on that radio (os/plan/cross-layer/devices.md §0.6); region/callsign are human facts (D17 #10).
 
 ## 19. Cross-layer seams & amendments
 
@@ -779,7 +796,7 @@ Termux). Tools run inside `111-agent`; writes only via the proposal path (L3 "on
 - **Layer 4:** D15 amendment §13; main listener 308 `Host: localhost` → `127.0.0.1`; `require_session` bearer rule (loopback only); Messages/Contacts/Nearby/Settings
   views §16; `jsQR` dependency; `ServiceId` growth (the fixed-size registry arrays grow to 9); `panel` object; per-request
   CSP; `relayed`/`queued` copy; `radio` row rule §14.
-- **Layer 6 (`devices.md`):** D19 c amendments (recorded); `Link` trait §8 is the contract its drivers implement;
+- **Layer 6 (`os/plan/cross-layer/devices.md`):** D19 c amendments (recorded); `Link` trait §8 is the contract its drivers implement;
   `interfaces.toml` is born there and inherits the Meshtastic binding from `devices.json`; the full identify sequence
   (RNode, Meshtastic, MeshCore; port-owner table reused); the MeshCore data-type range registration; INTRO over LoRa.
 - **Layer 7:** presence from announces/`nearby` sources; hub-to-hub replication (A+); `KB` consumer; `appdata` TLVs;

@@ -1,0 +1,16 @@
+id: 1792015741446025
+event: reset
+data: {"reason":"expired"}
+
+id: 1792015741446026
+event: message
+data: {"change":"new","message":{"at":"2026-10-14T22:09:18Z","dir":"own","id":"msg-5","local_seq":12,"msg_id":{"epoch":2,"n":1,"stream":0},"peer":"e1dcc5bb00c3f710dc43cbfb09dd18b9a5203f29a9cb65010eca3e512983d4e6","reason":null,"reason_code":null,"received_seq":null,"sent_at_claim":null,"state":"sent","text":"while you were away (held by the hub)"},"peer":"e1dcc5bb00c3f710dc43cbfb09dd18b9a5203f29a9cb65010eca3e512983d4e6"}
+
+id: 1792015741446027
+event: message
+data: {"change":"state","message":{"at":"2026-10-14T22:09:18Z","dir":"own","id":"msg-5","local_seq":12,"msg_id":{"epoch":2,"n":1,"stream":0},"peer":"e1dcc5bb00c3f710dc43cbfb09dd18b9a5203f29a9cb65010eca3e512983d4e6","reason":null,"reason_code":null,"received_seq":null,"sent_at_claim":null,"state":"relayed","text":"while you were away (held by the hub)"},"peer":"e1dcc5bb00c3f710dc43cbfb09dd18b9a5203f29a9cb65010eca3e512983d4e6"}
+
+id: 1792015741446028
+event: message
+data: {"change":"state","message":{"at":"2026-10-14T22:09:18Z","dir":"own","id":"msg-5","local_seq":12,"msg_id":{"epoch":2,"n":1,"stream":0},"peer":"e1dcc5bb00c3f710dc43cbfb09dd18b9a5203f29a9cb65010eca3e512983d4e6","reason":null,"reason_code":null,"received_seq":null,"sent_at_claim":null,"state":"delivered","text":"while you were away (held by the hub)"},"peer":"e1dcc5bb00c3f710dc43cbfb09dd18b9a5203f29a9cb65010eca3e512983d4e6"}
+

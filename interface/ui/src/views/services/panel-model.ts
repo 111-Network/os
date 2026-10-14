@@ -7,7 +7,7 @@
 import { own } from "../../lib/api/own";
 import { isSecureOrigin, panelOrigin, type PanelLocation } from "../../lib/api/panels";
 import { isApiError } from "../../lib/api/problem";
-import type { HostedPanel, ServiceId } from "../../lib/api/types";
+import type { HostedPanel, PanelSession, ServiceId } from "../../lib/api/types";
 
 // --------------------------------------------------------------------------------------------- the frame
 
@@ -52,14 +52,26 @@ export function loopbackDashboardUrl(env: PanelEnv, id: ServiceId): string {
 
 const bare = (host: string): string => host.replace(/^\[|\]$/g, "").toLowerCase();
 
+/** The listener slots a panel may be on (`Panel.port` in the contract, spec 13). The dashboard's own port is never among them. */
+export const PANEL_PORT_MIN = 11190;
+export const PANEL_PORT_MAX = 11229;
+
+/** The port the dashboard page itself is served on (the scheme's default when the address bar shows none). */
+export const dashboardPort = (env: PanelEnv): string => (env.port !== "" ? env.port : env.protocol === "https:" ? "443" : "80");
+
 /**
  * The ticket URL the frame may load, or null. `POST /panels/{id}/session` returns a URL on the host the browser typed;
  * the frame only ever loads the panel origin this page computes itself (`location.hostname` plus `panel.port`), so a URL
  * for any other host or port, any other scheme, or with credentials in it is refused rather than rewritten. A relative
- * URL resolves against that origin. The fragment is dropped.
+ * URL resolves against that origin. The fragment is dropped. The frame carries `allow-scripts allow-same-origin`, which is
+ * only safe on an origin that is not the dashboard's, so a panel slot outside the contract's range (11190-11229) or equal to
+ * the dashboard's own port is refused here too, whatever the node said: the page does not rely on the daemon alone for that.
  */
-export function ticketSrc(raw: string, panel: Pick<HostedPanel, "port">, loc: PanelLocation): string | null {
-  const origin = panelOrigin(panel, loc);
+export function ticketSrc(raw: unknown, panel: Pick<HostedPanel, "port">, env: PanelEnv): string | null {
+  if (typeof raw !== "string" || raw.trim() === "") return null;
+  if (!Number.isInteger(panel.port) || panel.port < PANEL_PORT_MIN || panel.port > PANEL_PORT_MAX) return null;
+  if (String(panel.port) === dashboardPort(env)) return null;
+  const origin = panelOrigin(panel, env);
   let u: URL;
   try {
     u = new URL(raw, `${origin}/`);
@@ -68,7 +80,7 @@ export function ticketSrc(raw: string, panel: Pick<HostedPanel, "port">, loc: Pa
   }
   if (u.protocol !== "http:" && u.protocol !== "https:") return null;
   if (u.username !== "" || u.password !== "") return null;
-  if (bare(u.hostname) !== bare(loc.hostname)) return null;
+  if (bare(u.hostname) !== bare(env.hostname)) return null;
   if (u.port !== String(panel.port)) return null;
   return `${origin}${u.pathname}${u.search}`;
 }
@@ -102,8 +114,17 @@ export function panelGate(panel: Pick<HostedPanel, "needs_secure_context" | "sta
 
 export type MintFailure = "loopback_only" | "not_found" | "network" | "bad_url" | "other";
 
+/** The node answered a ticket the page would not frame (another origin, a bad slot, or a reply that is not a URL). */
+export class PanelUrlError extends Error {
+  constructor() {
+    super(mintFailureText("bad_url"));
+    this.name = "PanelUrlError";
+  }
+}
+
 /** Why the ticket could not be minted, from the node's own answer. A 403 `loopback_only` is a loopback-only panel opened over the LAN. */
 export function classifyMint(err: unknown): MintFailure {
+  if (err instanceof PanelUrlError) return "bad_url";
   if (!isApiError(err)) return "other";
   if (err.code === "loopback_only") return "loopback_only";
   if (err.code === "not_found") return "not_found";
@@ -132,6 +153,89 @@ export function mintFailureText(why: MintFailure, detail?: string): string {
 
 /** A panel ticket lives 30 s (section 13); this is how long the page waits for the frame to load before it says so. */
 export const LOAD_GRACE_S = 5;
+
+/** The ticket's life when the node did not say, and the longest the page believes (a reply is data, not a promise). */
+export const TICKET_LIFE_S = 30;
+export const TICKET_LIFE_MAX_S = 300;
+
+/** `expires_in` as the page uses it: a whole number of seconds from 1 to 300; anything that is not a number is the 30 s of section 13. */
+export function clampExpiresIn(v: unknown): number {
+  if (typeof v !== "number" || !Number.isFinite(v)) return TICKET_LIFE_S;
+  return Math.min(TICKET_LIFE_MAX_S, Math.max(1, Math.floor(v)));
+}
+
+/**
+ * The part of a mint reply the page acts on, or null when the reply is not a ticket URL at all (a missing or non-string `url`
+ * would otherwise frame the panel's origin at `/undefined`, which the panel answers with its 403 page). The URL itself is
+ * checked by `ticketSrc`.
+ */
+export function checkMintReply(reply: unknown): { url: string; expiresIn: number } | null {
+  const r = reply as Partial<PanelSession> | null | undefined;
+  if (!r || typeof r !== "object" || typeof r.url !== "string" || r.url.trim() === "") return null;
+  return { url: r.url, expiresIn: clampExpiresIn(r.expires_in) };
+}
+
+// ------------------------------------------------------------------------------- the page's own policy
+
+/**
+ * The dashboard's Content-Security-Policy is fixed when the document is fetched, and its `frame-src` names only the panels that
+ * were enabled and listening then (section 13). Hash routing and the live stream mean the document is almost never fetched
+ * again, so a panel switched on afterwards is refused by this page's own policy: the browser shows its blocked-content page in
+ * the frame and says nothing else. Only a new document load (or the full client in its own tab) gets past it.
+ */
+export const PANEL_CSP_TEXT =
+  "This page was loaded before the panel was switched on, so its security policy does not list the panel yet and the browser will not show it here. Reload the page, then open this tab again. Open full client works without a reload.";
+
+/** A `securitypolicyviolation` event, as far as the page reads it. */
+export interface FrameBlockEvent {
+  effectiveDirective?: string;
+  violatedDirective?: string;
+  blockedURI?: string;
+}
+
+const FRAME_DIRECTIVES: ReadonlySet<string> = new Set(["frame-src", "child-src", "default-src"]);
+
+/**
+ * Did this violation refuse to frame the panel's origin? True for a frame-type directive (`frame-src`, or `child-src` and
+ * `default-src` that frame navigation falls back to) whose blocked URL is on `origin`. Only the origin of `blockedURI` is
+ * compared: it carries the one-time ticket in its query, which is never kept, shown or logged.
+ */
+export function isPanelFrameBlock(ev: FrameBlockEvent, origin: string): boolean {
+  const directive = (ev.effectiveDirective || ev.violatedDirective || "").trim().split(/\s+/)[0]?.toLowerCase() ?? "";
+  if (!FRAME_DIRECTIVES.has(directive)) return false;
+  const blocked = ev.blockedURI;
+  if (typeof blocked !== "string" || blocked === "") return false;
+  try {
+    return new URL(blocked).origin === new URL(origin).origin;
+  } catch {
+    return false;
+  }
+}
+
+/** Call `onBlock` when `target` (the document) reports that the page's own policy refused to frame `origin`. Returns the unsubscribe. */
+export function watchFrameBlock(target: Pick<EventTarget, "addEventListener" | "removeEventListener">, origin: string, onBlock: () => void): () => void {
+  const handler = (ev: Event): void => {
+    if (isPanelFrameBlock(ev as unknown as FrameBlockEvent, origin)) onBlock();
+  };
+  target.addEventListener("securitypolicyviolation", handler);
+  return () => target.removeEventListener("securitypolicyviolation", handler);
+}
+
+/**
+ * Was this panel's origin in the policy this page was loaded with? `false` when the first `GET /panels` of the page load said
+ * the panel was not enabled and listening (so the document's `frame-src` cannot name it); `true` when it said so; `null`
+ * when the page has no first answer or the panel was not in it. Only `false` is acted on: the page does not frame the panel
+ * and says to reload before the browser refuses it.
+ */
+export function cspListedAtLoad(id: string, atLoad: ReadonlyMap<string, boolean> | null | undefined): boolean | null {
+  if (!atLoad || !atLoad.has(id)) return null;
+  return atLoad.get(id) === true;
+}
+
+/** The address the web client's connect dialog wants: the panel's own `host:port` (section 14). */
+export const panelNodeAddress = (panel: Pick<HostedPanel, "port">, env: PanelEnv): string => panelOrigin(panel, env).replace(/^https?:\/\//, "");
+
+export const PANEL_EXPIRED_HELP = "If the panel says its session expired, press Reload: this page gets it a new one.";
 
 // --------------------------------------------------------------------------------------- chrome copy
 

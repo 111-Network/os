@@ -28,12 +28,26 @@ export function stateRank(state: string): number {
   return MESSAGE_STATE_ORDER.indexOf(state as MessageState);
 }
 
+/** The `reason_code` a message carries once the user cancelled it before it left (§4: an empty tombstone goes instead). */
+export const CANCELLED = "cancelled";
+
+/** Was this own message cancelled before it left? It stays in the thread as `queued` with this reason, and nothing more happens to it. */
+export const isCancelled = (m: Pick<Message, "dir" | "reason_code">): boolean => m.dir === "own" && m.reason_code === CANCELLED;
+
 /**
  * `POST /messages/{id}/retry` answers 409 unless an own message is still `queued` or `sent`
- * (retries otherwise happen on link and contact events, never on timers, §9).
+ * (retries otherwise happen on link and contact events, never on timers, §9). A cancelled message is done: nothing is retried.
  */
-export function isRetryable(m: Pick<Message, "dir" | "state">): boolean {
-  return m.dir === "own" && (m.state === "queued" || m.state === "sent");
+export function isRetryable(m: Pick<Message, "dir" | "state"> & Partial<Pick<Message, "reason_code">>): boolean {
+  return m.dir === "own" && (m.state === "queued" || m.state === "sent") && m.reason_code !== CANCELLED;
+}
+
+/**
+ * `POST /messages/{id}/cancel` (§4) works on an own message that is still `queued` and has not been cancelled already: once a
+ * frame has been written (`sent`) or a hub took it (`relayed`) the words are out and only the recipient's side is left.
+ */
+export function isCancellable(m: Pick<Message, "dir" | "state"> & Partial<Pick<Message, "reason_code">>): boolean {
+  return m.dir === "own" && m.state === "queued" && m.reason_code !== CANCELLED;
 }
 
 const BIDI_AND_CONTROLS = /[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F-\u009F\u2028\u2029\u202A-\u202E\u2066-\u2069\uFEFF]/g;

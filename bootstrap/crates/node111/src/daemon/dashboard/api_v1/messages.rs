@@ -1,5 +1,6 @@
 //! `/api/v1/messages*` (`os/messaging/README.md` §15; contract
-//! `listThreads`, `getThread`, `sendMessage`, `retryMessage`).
+//! `listThreads`, `getThread`, `sendMessage`, `retryMessage`,
+//! `cancelMessage`).
 //!
 //! - `GET /messages/threads` → `{schema: 1, threads: [Thread]}`, most recent
 //!   activity first (message-request threads included).
@@ -15,6 +16,12 @@
 //!   (nothing is numbered then — §4; additive contract code, F2).
 //! - `POST /messages/{id}/retry` → `200 Message` (`409` unless an own
 //!   message is `queued` or `sent`).
+//! - `POST /messages/{id}/cancel` → `202 Message` (additive, lead's
+//!   Wave 2 call): an own message still `queued` with nothing sent yet is
+//!   cancelled through `Fabric::cancel` — §4: an allocated number is never
+//!   abandoned, so an empty tombstone goes in its place and the message reads
+//!   `queued`, `reason_code: cancelled` until it leaves. Any other state, or
+//!   an incoming message, is `409 bad_request`; an unknown id `404`.
 //!
 //! Auth: behind `require_session` like every gated route; the agent's bearer
 //! may **read** (§17) but never send or retry — it proposes (`kind: message`)
@@ -48,6 +55,7 @@ pub fn router() -> ApiRouter {
         .route("/api/v1/messages/threads/{peer}", get(thread))
         .route("/api/v1/messages", post(send))
         .route("/api/v1/messages/{id}/retry", post(retry))
+        .route("/api/v1/messages/{id}/cancel", post(cancel))
 }
 
 /// The fabric handle, or the `503` problem.
@@ -313,6 +321,46 @@ async fn retry(
     match f.retry(id).await {
         Ok(v) => Json(h.message_json(&v)).into_response(),
         Err(FabricError::NotFound) => not_found("message").into_response(),
+        Err(e) => fabric::problem(&e).into_response(),
+    }
+}
+
+async fn cancel(
+    State(api): State<Arc<ApiState>>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+) -> Response {
+    if let Err(p) = refuse_bearer(&headers) {
+        return p.into_response();
+    }
+    let Some(id) = json::parse_msg_id(&id) else {
+        return not_found("message").into_response();
+    };
+    let h = match handle(&api) {
+        Ok(h) => h,
+        Err(p) => return p.into_response(),
+    };
+    let Some(f) = h.fabric() else {
+        return fabric::not_running().into_response();
+    };
+    let not_cancellable = || {
+        Problem::new(
+            StatusCode::CONFLICT,
+            "bad_request",
+            "Only your own message that has not left yet can be cancelled.",
+        )
+        .detail("It was already sent (or it is an incoming message); it cannot be called back.")
+    };
+    match f.cancel(id).await {
+        Ok(v) => (StatusCode::ACCEPTED, Json(h.message_json(&v))).into_response(),
+        // `NotFound` from the fabric: not an own message in flight — it
+        // exists (incoming, or done) ⇒ 409; it does not ⇒ 404
+        Err(FabricError::NotFound) => match f.message(id).await {
+            Ok(_) => not_cancellable().into_response(),
+            Err(FabricError::NotFound) => not_found("message").into_response(),
+            Err(e) => fabric::problem(&e).into_response(),
+        },
+        Err(FabricError::NotRetryable) => not_cancellable().into_response(),
         Err(e) => fabric::problem(&e).into_response(),
     }
 }

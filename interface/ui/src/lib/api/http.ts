@@ -69,6 +69,25 @@ export interface HttpDeps {
 
 type Query = Record<string, string | number | undefined>;
 
+// What the node said about each hosted panel the first time this page asked (`GET /panels` at boot): true = enabled and
+// listening. The dashboard's Content-Security-Policy is computed when the document is fetched and names only the panels that
+// were enabled and listening then (os/messaging/README.md section 13), so the first answer is the page's best evidence for
+// whether a panel's origin is in the `frame-src` this page is stuck with. Later answers never replace it.
+let panelsAtLoad: ReadonlyMap<string, boolean> | null = null;
+
+/** Remember the first panel list of this page load; later calls change nothing. */
+export function recordPanelsAtLoad(panels: ReadonlyArray<Pick<HostedPanel, "id" | "state">>): void {
+  panelsAtLoad ??= new Map(panels.map((p) => [p.id, p.state?.enabled === true && p.state?.listening === true] as const));
+}
+
+/** The first panel list of this page load (panel id -> enabled and listening), or null before one arrived. */
+export const panelsSeenAtLoad = (): ReadonlyMap<string, boolean> | null => panelsAtLoad;
+
+/** Test seam: forget the remembered first list. */
+export function resetPanelsAtLoadForTests(): void {
+  panelsAtLoad = null;
+}
+
 interface CallOptions {
   query?: Query;
   body?: unknown;
@@ -245,6 +264,10 @@ export function createHttpAdapter(deps: HttpDeps = {}): Adapter {
       },
       send: (req: SendMessageRequest) => call<MessageAccepted>("POST", "/messages", { body: req }),
       retry: (id: string) => call<Message>("POST", `/messages/${enc(id)}/retry`),
+      // The contract's `cancelMessage` (POST /messages/{id}/cancel, 202). Written against the route, not against a generated
+      // type, so it compiles whether or not types.gen.ts carries the operation; the reply (the message after cancelling) is not
+      // read: the new state is a `message` frame, and the view re-reads the thread.
+      cancel: (id: string) => call<void>("POST", `/messages/${enc(id)}/cancel`, { as: "none" }),
     },
 
     contacts: {
@@ -267,7 +290,11 @@ export function createHttpAdapter(deps: HttpDeps = {}): Adapter {
     nearby: () => list<NearbySource>("/nearby", "sources", "sources"),
 
     panels: {
-      list: () => list<HostedPanel>("/panels", "panels", "panels"),
+      list: async () => {
+        const panels = await list<HostedPanel>("/panels", "panels", "panels");
+        recordPanelsAtLoad(panels);
+        return panels;
+      },
       openSession: (id: ServiceId) => call<PanelSession>("POST", `/panels/${enc(id)}/session`),
     },
 

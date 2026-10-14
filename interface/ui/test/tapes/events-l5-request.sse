@@ -1,0 +1,20 @@
+id: 1792015742106019
+event: reset
+data: {"reason":"expired"}
+
+id: 1792015742106020
+event: contact
+data: {"change":"request","contact":{"alias":null,"bech32":"node1qw3fldy6f9vm0h4xwugusdyf82znrzrsdqp6q0egjg2ldlu37q9s5ay7cg","has_key":true,"home_hub":null,"label":"q2kg-3a2o-my","node_id":"03a29fb49a4959b7dea67711c834893a853188706803a03f289215f6ff91f00b","pinned":false,"request":true,"roles":[],"trust":"tofu"}}
+
+id: 1792015742106021
+event: message
+data: {"change":"request","message":{"at":"2026-10-14T22:09:15Z","dir":"in","id":"msg-3","local_seq":24,"msg_id":{"epoch":2,"n":1,"stream":0},"peer":"03a29fb49a4959b7dea67711c834893a853188706803a03f289215f6ff91f00b","reason":null,"reason_code":null,"received_seq":24,"sent_at_claim":"2026-10-14T22:09:15Z","state":"delivered","text":"hello A, this is C writing first"},"peer":"03a29fb49a4959b7dea67711c834893a853188706803a03f289215f6ff91f00b"}
+
+id: 1792015742106022
+event: fabric
+data: {"custody":{"bytes":0,"count":0},"hub":{"address":"10.111.0.10:11184","cursor":0,"enrolled":true,"members":0,"node_id":"6a64265e7995dc54c7c803d4d96f9ae21eb8cd9b721e732cee81f8cb6daa9d7e","offer_active":false,"reachable":true},"links":[{"detail":null,"id":"tcp-lan","kind":"tcp-lan","peers":3,"profile":{"airtime":null,"broadcast":false,"cost_class":"bulk","framing":"stream","mtu_bytes":65535,"reliable":true},"state":"up"}],"schema":1,"settings":{"custody_opt_in":false,"hub_role":false,"listen_lan":true,"quotas":{"custody":null,"kb":null,"object":null,"patch":null,"sync":null,"update":null}},"store":{"open":true,"store_full":false,"used":1122304,"watermark":536870912}}
+
+id: 1792015742106023
+event: contact
+data: {"change":"updated","contact":{"alias":null,"bech32":"node1qw3fldy6f9vm0h4xwugusdyf82znrzrsdqp6q0egjg2ldlu37q9s5ay7cg","has_key":true,"home_hub":null,"label":"q2kg-3a2o-my","node_id":"03a29fb49a4959b7dea67711c834893a853188706803a03f289215f6ff91f00b","pinned":false,"request":false,"roles":[],"trust":"tofu"}}
+

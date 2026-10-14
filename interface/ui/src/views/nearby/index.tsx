@@ -18,7 +18,7 @@ import { RouteLink } from "../services/shared";
 import {
   displayName,
   heardSummary,
-  heardText,
+  heardLine,
   hopsText,
   keyText,
   nearbyState,
@@ -53,7 +53,7 @@ function NodeItem({ node, now }: { node: NearbyNode; now: number }) {
             {short}
           </Badge>
         ) : null}
-        <span className="font-mono text-[10px] uppercase tracking-widest text-muted-foreground">last heard {heardText(node, now)}</span>
+        <span className="font-mono text-[10px] uppercase tracking-widest text-muted-foreground">{heardLine(node, now)}</span>
       </div>
       {facts.length > 0 ? <p className={TEXT}>{facts.join(" · ")}</p> : null}
       {position ? <p className={TEXT}>position, as it reports it: {position}</p> : null}

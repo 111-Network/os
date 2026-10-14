@@ -166,6 +166,17 @@ pub fn check_once(cfg: &UpdaterConfig, layout: &DaemonLayout) -> anyhow::Result<
         &layout.state_dir().join("staging"),
         &manifest.release(),
     )?;
+    // Layer 5 cross-check (os/messaging/README.md §19 L1): the staged tree's
+    // bin/meshmud, panel bundles and presence lock against the manifest's pins.
+    // Advisory here — the root helper repeats it on the tree it extracts itself
+    // (D12) — but a release whose payload disagrees with its own manifest is
+    // refused now, its staging bundle removed and the helper never asked.
+    if let Err(e) = manifest.verify_layer5_tree(&staged.join("tree"), TARGET_TRIPLE) {
+        let _ = std::fs::remove_dir_all(&staged);
+        return Ok(FetchOutcome::Refused {
+            reason: format!("payload disagrees with the manifest's Layer 5 pins: {e:#}"),
+        });
+    }
     // The root helper re-verifies from the staging bundle alone (D12): the
     // signed channel manifest + its minisig ride alongside the tarball.
     crate::util::fs::atomic_write(

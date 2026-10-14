@@ -256,6 +256,7 @@ pub fn status(st: &FabricStatus, quotas: &[(Class, Option<u64>)]) -> Value {
             "used": st.store.used,
             "watermark": st.store.watermark,
             "store_full": st.store.store_full,
+            "restore_pending": st.store.restore_pending,
         },
         "settings": settings(&st.settings, quotas),
     })
@@ -277,7 +278,13 @@ pub fn status_down(s: &FabricSettings) -> Value {
             "offer_active": false,
         },
         "custody": { "count": 0, "bytes": 0 },
-        "store": { "open": false, "used": 0, "watermark": 0, "store_full": false },
+        "store": {
+            "open": false,
+            "used": 0,
+            "watermark": 0,
+            "store_full": false,
+            "restore_pending": false,
+        },
         "settings": settings(s, &[]),
     })
 }

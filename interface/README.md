@@ -1,6 +1,6 @@
 # Layer 4 — Interface & Dashboard
 
-Spec v2 (2026-10-13) · Decisions: D11, D15 (`os/plan/DECISIONS.md`) · Supersedes the v1 draft after the adversarial panel (`os/plan/layer-4-review.md`) and the owner's IA redirect.
+Spec v2 (2026-10-13) · Decisions: D11, D15 (`os/plan/DECISIONS.md`) · Supersedes the v1 draft after the adversarial panel (`os/plan/layers/04-interface/review/triage.md`) and the owner's IA redirect.
 
 **Layer 5 amendments (D20, 2026-10-14):** additive blocks marked "Layer 5 delivers" (§5, §6.4, §6.5, §6.7) and "Layer 5
 amendments" (§6.6, §7.2, §10.2, §11.1) record what Layer 5 (`os/messaging/README.md`, locked v1.2) adds to this layer. The
@@ -213,7 +213,7 @@ and pairing records; the UI only reads it and edits aliases.
 - **List** grouped by kind — `radio` (LoRa/sub-GHz boards over USB/serial), `bluetooth`,
   `companion` (your phones/laptops paired with the control panel — today: paired dashboard
   sessions; later: light terminals joined over Wi-Fi/BLE), `node` (another 111 node you own,
-  linked), `analog` (handheld radios via audio/serial — class reserved, see `os/plan/devices.md`),
+  linked), `analog` (handheld radios via audio/serial — class reserved, see `os/plan/cross-layer/devices.md`),
   `unknown` (detected but unidentified serial/USB hardware). Each row: status dot
   (`connected|disconnected|needs_setup|error` → live/unset-hollow/unset/error), alias or detected
   name, kind, transport, last seen.
@@ -234,7 +234,7 @@ and pairing records; the UI only reads it and edits aliases.
   dashboard URL + "run `111 dashboard` on the node for the pair code", the pair QR when LAN sharing
   is on, a link to the LAN-sharing setting when off), **make it a node of its own** (the install
   command over USB-C — Layer 1, exists), **message through this node** (coming with Layer 6, see
-  `os/plan/devices.md`). *Handheld radio* says plainly: licensed operators only, plaintext-only on
+  `os/plan/cross-layer/devices.md`). *Handheld radio* says plainly: licensed operators only, plaintext-only on
   air (encrypted traffic is not allowed on amateur bands), detect-and-explain now, experimental tier
   later. Honest copy everywhere; no fake capabilities.
 
@@ -257,6 +257,11 @@ map views arrive with Layer 7"), and "Ask the agent who is nearby". No fake peer
 > built from the node's own status). Advanced adds the id, node number and public key. Empty states, by the `meshtastic` service row:
 > no board / identified but not set up / starting / error / listening and nobody heard / "did not report"; a list shown while the
 > connection is down or the service is in error is marked as the last known one. SSE `nearby` frames replace the list.
+>
+> **As built (U2 bounce):** a list is also marked as the last known one while the service is `starting` (the daemon still serves the
+> previous snapshot while the board's node list has not arrived again). A node whose `last_heard_hint` is more than a minute in this
+> node's future reads "last heard: clock ahead of this node" instead of "just now", so a wrong or hostile board clock never makes a
+> node look fresh.
 
 ### 6.5 Messages — `/messages` (stub)
 "Messaging arrives with Layer 5 (Messaging & Data)" + what it will do + "Ask the agent about
@@ -270,6 +275,13 @@ flagship service; no fake inbox.
 > (`/messages/contacts`): list; add by card/QR scan (`jsQR` over `getUserMedia` on loopback or secure origins, file-upload
 > fallback) or by pasting `node1…`; own card (QR drawn from the module bitmap, text, copy); pin / alias / forget. `jsQR`
 > (Apache-2.0) is this layer's dependency sign-off. Prompts (one `buildPrompt`, §8): `messaging.setup`, `messaging.fix`, `meshtastic.setup`, `panel.explain`.
+>
+> **As built (U2 bounce):** an own message that is still `queued` gets **cancel sending** (a two-step confirm, "Cancel sending this
+> message? Yes / No") when the adapter has `messages.cancel` (`POST /messages/{id}/cancel` -> 202, `cancelMessage` in the contract). A
+> cancelled message stays in its thread as `queued` with `reason_code: cancelled`, drawn as "cancelled" with "You cancelled this before it
+> left. Its words are not sent; an empty placeholder goes in their place so no message number is skipped" (§4), and offers neither cancel
+> nor retry. A message that has left (`sent` and beyond) has no cancel. A 409 from the node (it left while the button was on screen) is
+> shown in its own words under the conversation.
 
 ### 6.6 Service page — `/services/:id`
 Header: dot + `LIVE|NOT SET|ERROR|STARTING`, plain name, `since`, one-line reason.
@@ -332,6 +344,36 @@ Normative text: `os/messaging/README.md` §13. This is the Layer 4 summary.
 > cannot read them), the store gauge with the prune rules and the `store_full` copy, "How delivery is reported" (the section 9 sentences
 > for queued / sent / relayed / delivered), and links to Messages and to Settings. NOT SET and ERROR keep the generic hand-off, which asks
 > for `messaging.setup` / `messaging.fix`.
+>
+> **As built (U2 bounce) — the page's own CSP.** The dashboard's `frame-src` is computed when the document is fetched and names only
+> the panels that were enabled and listening then; hash routing and SSE mean the document is almost never fetched again, so a panel
+> switched on afterwards (the usual first-run order: open the dashboard, then bind the board) is refused by the page's own policy. The
+> tab handles it two ways, neither of which mounts a frame the browser will refuse. (1) *Reactive:* a `securitypolicyviolation` listener
+> on the document; a `frame-src` / `child-src` / `default-src` violation whose `blockedURI` is on the panel's origin (only the origin is
+> read: the ticket in the query is never kept) replaces the frame with "This page was loaded before the panel was switched on ... Reload
+> the page, then open this tab again" and a **Reload this page** button; **Open full client** stays (a top-level navigation is not
+> under the page's `frame-src`). (2) *Ahead of time:* the real adapter remembers the first `GET /panels` of the page load; a panel that
+> was not enabled and listening in it is shown the same notice at once, with no ticket minted. Reload (a new ticket) is not offered
+> while the policy blocks the frame: it cannot help. Chrome reports `effectiveDirective: "frame-src"`, the origin only in `blockedURI`,
+> fired at the document (checked by hand against a real page; the tests carry that shape). An owner question remains whether the daemon
+> should list every declared panel slot in `frame-src` rather than only the enabled ones (a §13 amendment); until then this is the
+> page's answer.
+>
+> **As built (U2 bounce) — the ticket and the reply.** `ticketSrc` also refuses a panel slot outside 11190-11229 and a slot equal to
+> the dashboard's own port (an `allow-same-origin` frame on the dashboard's origin would be a sandbox escape), so the page does not
+> rely on the daemon alone for "never same-origin with the dashboard". A mint reply must carry a non-empty string `url` (else `bad_url`);
+> `expires_in` is clamped to a whole number from 1 to 300 (the documented 30 when absent), so the slow-frame timer is never `NaN`; a
+> failed mint for **Open full client** reaches the pairing redirect on a 401 like the frame's does.
+>
+> **As built (U2 bounce) — what the panel's own page cannot say.** Under the chrome (when a frame is shown): "If the client asks for a
+> node address, use `<host:port>`" with a copy button (the panel's own host and port, §14: the address for the web client's connect
+> dialog), and "If the panel says its session expired, press Reload: this page gets it a new one" (§13: the page cannot see a 403
+> inside the cross-origin frame, so it cannot re-mint by itself).
+>
+> **As built (U2 bounce) — hub names.** The home hub's name (a contact's alias, else the hub's own card label, written by the hub) is
+> cleaned, flattened and cut to 40 characters, and drawn in a `dir="auto"` bidi-isolated span, on the fabric page and in Settings. The
+> prune and store-full copy lists all of §10.4 (4): undelivered messages, mail held for members, pending requests, pinned items and
+> contacts.
 
 ### 6.7 Settings — `/settings` (Essentials; 5 rows) + `/settings/l0..l9` (advanced)
 Essentials: node name (alias, `PATCH /settings`) · mode (mirror) · identity backup (instruction
@@ -357,6 +399,16 @@ L2 · Intelligence L3 · Interface L4 · Messaging L5 · Transport L6 · Relay &
 > `GET /fabric`; a switch shows the node's value and moves when the answer is in (never optimistic). The offer, the settings and the
 > quotas are loopback-only: over the LAN they are disabled with "available on the node itself"; enrolling is not. The code is shown once
 > (the reply is the only place it exists); a page opened with a code outstanding says so and offers dismiss / a new code.
+>
+> **As built (U2 bounce):** *Restore.* The page reads `FabricStatus.store.restore_pending` (the identity holder's report; optional in the
+> types until the contract carries it). Pending says "New messages are refused until then; messages already in the outbox wait there"
+> (§15 as built: `POST /messages` answers 409 `restore_pending` and queues nothing); a node that does not report it reads "This node did
+> not report whether a restore is waiting" rather than "Nothing is waiting". *Quotas.* The editor has one row per class in the node's
+> `settings.quotas` (the daemon's six refusable classes: knowledge base, updates, patches, synced operations, files and attachments,
+> mail held for others; `null` = no quota), never `msg` or `agent_op` (the node refuses them). *Code.* A code on screen is cleared, with
+> "The code was used or dismissed.", when `hub.offer_active` drops after the page saw the node hold it (a member enrolled with it, or the
+> CLI dismissed it). *Enroll.* A bare code, or an edit of the address after a whole enrollment text, drops the hub card that text
+> carried, so the request is never sealed to a different hub than the one the address names.
 
 ### 6.8 Logs — `/logs` (advanced)
 Per-service tails (`GET /services/{id}/log?n=`), service tabs, follow (poll 5 s), copy. Daemon
@@ -640,7 +692,7 @@ non-loopback address, chat relay streams `token`/`done`, `/events` replays on `L
 ## 15. Deferred (explicit)
 
 Device-connection core — pairing phones to each other over Wi-Fi/BLE, BLE device pairing, analog
-radio modems, device drivers (`os/plan/devices.md`, Layer 6 opener) · Nearby radar/map (L7) ·
+radio modems, device drivers (`os/plan/cross-layer/devices.md`, Layer 6 opener) · Nearby radar/map (L7) ·
 Messaging (L5) · peers/transports/bridges/gateway detail panels (L6/L7) · storage (L8) ·
 automatic proposal application (L9 consumes `decisions/`) · per-layer settings panels · TLS ·
 `.111` DNS on hub/AP · Cmd-K palette (action registry seam exists) · e2e browser tests · i18n

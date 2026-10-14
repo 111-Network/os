@@ -1,6 +1,8 @@
 //! T5 acceptance: Linux installer state machine end-to-end against a fixture
 //! HTTP server + scripted MockRunner + temp fs roots — happy path + idempotent
-//! re-run, downgrade refusal, degraded container path, clock-skew refusal.
+//! re-run, downgrade refusal, degraded container path, clock-skew refusal, and
+//! the stage step's Layer 5 cross-check (fresh extraction and the "already
+//! staged" content probe; os/messaging/README.md §19 L1).
 
 mod common;
 
@@ -439,4 +441,154 @@ fn supervise_unit_rendering_is_embedded() {
     ] {
         assert!(unit.contains(anchor), "unit missing {anchor}");
     }
+}
+
+const MESHMUD: &[u8] = b"meshmud v1.0.0 linux/amd64 static";
+
+/// Serve `payload` and return a parsed manifest pinning it (plus `extra`
+/// sections) — the stage step takes an already-verified manifest.
+fn stage_fixture(
+    payload: &[u8],
+    extra: &str,
+) -> (tempfile::TempDir, node111::manifest::ChannelManifest) {
+    let served = tempfile::tempdir().unwrap();
+    std::fs::write(served.path().join("payload.tar.gz"), payload).unwrap();
+    let port = common::serve_dir(served.path().to_path_buf(), None);
+    let text = format!(
+        r#"manifest-version = 1
+date = "{RELEASE}"
+channel = "stable"
+release = "{RELEASE}"
+min-upgrade-from = "2026.10.01"
+
+[pkg.111.target.x86_64-unknown-linux-musl]
+url = "https://example.invalid/111"
+sha256 = "{a64}"
+size = 100
+
+[payload.x86_64-unknown-linux-musl]
+url = "http://127.0.0.1:{port}/payload.tar.gz"
+sha256 = "{psha}"
+size = {plen}
+
+[rns-lock]
+url = "https://example.invalid/rns-lock.txt"
+sha256 = "{a64}"
+size = 100
+
+[kb]
+url = "https://example.invalid/kb.tar.gz"
+sha256 = "{a64}"
+size = 100
+
+[[keychain]]
+generation = 0
+pubkey = "RWRoot00000000000000000000000000000000000000000="
+{extra}"#,
+        a64 = "a".repeat(64),
+        psha = node111::util::hash::sha256_bytes(payload),
+        plen = payload.len(),
+    );
+    let manifest = node111::manifest::ChannelManifest::parse(&text).unwrap();
+    (served, manifest)
+}
+
+/// A context for the stage step alone (it runs no commands and probes nothing).
+fn stage_ctx<'a>(
+    layout: &DaemonLayout,
+    fs_root: &Path,
+    runner: &'a MockRunner,
+    env: &'a MapEnv,
+) -> InstallContext<'a> {
+    InstallContext {
+        layout: layout.clone(),
+        fs_root: fs_root.to_path_buf(),
+        runner,
+        env,
+        allow_degraded: false,
+        min_installer_version: "2026.10.01".parse::<Calver>().unwrap(),
+        manifest_base: String::new(),
+        manifest_fallback: None,
+        health_base: String::new(),
+        probe_204: Vec::new(),
+        check_root: false,
+    }
+}
+
+fn meshmud_pin(bytes: &[u8]) -> String {
+    format!(
+        "\n[pkg.meshmud.target.x86_64-unknown-linux-musl]\nurl = \"https://example.invalid/meshmud\"\nsha256 = \"{}\"\nsize = {}\n",
+        node111::util::hash::sha256_bytes(bytes),
+        bytes.len()
+    )
+}
+
+/// §19 L1 at the installer's extraction: a payload that disagrees with the
+/// manifest's Layer 5 pins is never promoted (no release dir, no debris, no flip).
+#[test]
+fn stage_refuses_payload_that_disagrees_with_layer5_pins() {
+    let payload = common::build_payload_with(&[("bin/meshmud", MESHMUD)]);
+    for (extra, needle) in [
+        (String::new(), "pins no meshmud"),
+        (meshmud_pin(b"another meshmud build"), "bin/meshmud size"),
+    ] {
+        let (_served, manifest) = stage_fixture(&payload, &extra);
+        let node = tempfile::tempdir().unwrap();
+        let fs_root = tempfile::tempdir().unwrap();
+        let layout = DaemonLayout {
+            root: node.path().join("var/lib/111"),
+            etc: fs_root.path().join("etc/111"),
+        };
+        std::fs::create_dir_all(layout.state_dir()).unwrap();
+        let runner = MockRunner::new(Vec::<(String, Output)>::new());
+        let env = MapEnv::new();
+        let ctx = stage_ctx(&layout, fs_root.path(), &runner, &env);
+        let fetcher = node111::util::http::Fetcher::new(Duration::from_secs(10), 64 << 20).unwrap();
+        let err = node111::install::stage::run(&ctx, &fetcher, &manifest).unwrap_err();
+        assert!(
+            err.to_string().contains(needle),
+            "wanted {needle:?} in: {err}"
+        );
+        let releases = layout.root.join("releases");
+        assert!(!releases.join(RELEASE).exists());
+        let debris: Vec<_> = std::fs::read_dir(&releases).unwrap().collect();
+        assert!(debris.is_empty(), "extraction debris left: {debris:?}");
+        assert!(!layout.current_release().exists());
+    }
+}
+
+/// The "already staged" content probe also checks the Layer 5 pins: a prior
+/// release dir that passes its own payload manifest but carries an unpinned
+/// bin/meshmud is re-extracted from the pinned tarball, not accepted as-is.
+#[test]
+fn stage_probe_rejects_a_release_dir_with_an_unpinned_layer5_asset() {
+    let (_served, manifest) = stage_fixture(&common::build_payload(), "");
+    let node = tempfile::tempdir().unwrap();
+    let fs_root = tempfile::tempdir().unwrap();
+    let layout = DaemonLayout {
+        root: node.path().join("var/lib/111"),
+        etc: fs_root.path().join("etc/111"),
+    };
+    std::fs::create_dir_all(layout.state_dir()).unwrap();
+    let runner = MockRunner::new(Vec::<(String, Output)>::new());
+    let env = MapEnv::new();
+    let ctx = stage_ctx(&layout, fs_root.path(), &runner, &env);
+    let fetcher = node111::util::http::Fetcher::new(Duration::from_secs(10), 64 << 20).unwrap();
+    let release = node111::install::stage::run(&ctx, &fetcher, &manifest).unwrap();
+    assert!(release.join("bin/111").exists());
+
+    // A planted asset the payload manifest does not list: verify_tree alone passes.
+    std::fs::write(release.join("bin/meshmud"), MESHMUD).unwrap();
+    assert!(node111::daemon::updater::stage::verify_tree(&release).is_ok());
+
+    let again = node111::install::stage::run(&ctx, &fetcher, &manifest).unwrap();
+    assert_eq!(again, release);
+    assert!(
+        !release.join("bin/meshmud").exists(),
+        "the probe must not accept a release dir carrying an unpinned meshmud"
+    );
+    assert!(release.join("bin/111").exists());
+    manifest
+        .verify_layer5_tree(&release, "x86_64-unknown-linux-musl")
+        .unwrap();
 }

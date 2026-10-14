@@ -1,0 +1,12 @@
+id: 1792015742106017
+event: reset
+data: {"reason":"expired"}
+
+id: 1792015742106018
+event: message
+data: {"change":"new","message":{"at":"2026-10-14T22:09:10Z","dir":"own","id":"msg-2","local_seq":21,"msg_id":{"epoch":2,"n":2,"stream":0},"peer":"28e681bb1fcebfa872c48ecb98a571add452d06d09bdba92c079aaa88e08b9ca","reason":null,"reason_code":null,"received_seq":null,"sent_at_claim":null,"state":"sent","text":"hello B, direct over tcp-lan"},"peer":"28e681bb1fcebfa872c48ecb98a571add452d06d09bdba92c079aaa88e08b9ca"}
+
+id: 1792015742106019
+event: message
+data: {"change":"state","message":{"at":"2026-10-14T22:09:10Z","dir":"own","id":"msg-2","local_seq":21,"msg_id":{"epoch":2,"n":2,"stream":0},"peer":"28e681bb1fcebfa872c48ecb98a571add452d06d09bdba92c079aaa88e08b9ca","reason":null,"reason_code":null,"received_seq":null,"sent_at_claim":null,"state":"delivered","text":"hello B, direct over tcp-lan"},"peer":"28e681bb1fcebfa872c48ecb98a571add452d06d09bdba92c079aaa88e08b9ca"}
+

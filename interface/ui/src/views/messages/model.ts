@@ -2,7 +2,7 @@
 // message waits, the "received" time with the sender's claim kept apart, and the one-line summaries of a thread.
 // Pure: no React, no clock of its own (every function that needs "now" takes it).
 import { parseNodeId } from "../../lib/api/contacts";
-import { cleanPeerText, conversationThreads, requestThreads } from "../../lib/api/messages";
+import { cleanPeerText, conversationThreads, isCancelled, requestThreads } from "../../lib/api/messages";
 import { own } from "../../lib/api/own";
 import { isApiError } from "../../lib/api/problem";
 import { isIgnored, requestSeq, type IgnoredRequests } from "../../lib/api/requests";
@@ -30,6 +30,7 @@ export const REASON_COPY: Record<string, string> = {
   restore_pending: "Waiting for the identity restore to finish. Nothing is sealed or sent until it does.",
   mailbox_full: "Mailbox full: your hub could not take it. Your copy is kept here.",
   store_full: "This node's store is full. New messages wait until space is freed.",
+  cancelled: "You cancelled this before it left. Its words are not sent; an empty placeholder goes in their place so no message number is skipped.",
 };
 
 /**
@@ -68,6 +69,17 @@ export function stateCopy(state: string): string {
   return own(STATE_COPY, state) ? STATE_COPY[state] : "This node reports a state this page does not know.";
 }
 
+/** What an own message that was cancelled before it left says about itself in place of "in the outbox" (§4: an empty tombstone goes). */
+export const CANCELLED_STATE_COPY = "Cancelled by you before it left this node. Nothing of it will be sent.";
+
+/** The details sentence of a message: its state's, or, for a cancelled own message, that it is cancelled. */
+export const messageStateCopy = (m: Pick<Message, "dir" | "state" | "reason_code">): string => (isCancelled(m) ? CANCELLED_STATE_COPY : stateCopy(m.state));
+
+/** The sentences around the cancel control (§4). */
+export const CANCEL_CONFIRM = "Cancel sending this message";
+export const CANCELLED_ANNOUNCEMENT = "Cancelled. It will not be sent; an empty placeholder goes in its place.";
+export const CANCEL_UNSUPPORTED_TEXT = "This node cannot cancel a message yet.";
+
 /** Reason text for a message that waits or was refused: this UI's copy for a known (state, code), the node's own sentence for others, else null. */
 export function reasonText(m: Pick<Message, "state" | "reason_code" | "reason">): string | null {
   const code = m.reason_code;
@@ -94,7 +106,7 @@ export function evidenceName(m: Pick<Message, "dir" | "state" | "reason_code">):
   if (m.dir === "in") return "received here (not acknowledged to the sender until the contact is accepted, if this was a request)";
   switch (m.state) {
     case "queued":
-      return "none: still in the outbox";
+      return m.reason_code === "cancelled" ? "none: cancelled before it left (an empty tombstone goes instead)" : "none: still in the outbox";
     case "sent":
       if (m.reason_code === "mailbox_full") return "CUSTODY_ACK REJECT_FULL from the hub";
       if (m.reason_code === "hub_not_yours") return "CUSTODY_ACK REJECT_UNKNOWN_DEST from the hub";

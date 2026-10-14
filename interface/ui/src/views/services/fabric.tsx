@@ -7,17 +7,35 @@ import { Disclosure } from "../../components/disclosure";
 import { Panel } from "../../components/panel";
 import { SpecTable, type SpecRow } from "../../components/spec-table";
 import { StatusDot, type DotState } from "../../components/status-dot";
+import { hubSummary } from "../../lib/api/fabric";
 import { useContacts, useFabric } from "../../lib/api/hooks";
 import { cleanPeerText, MESSAGE_STATE_ORDER } from "../../lib/api/messages";
-import type { FabricLink } from "../../lib/api/types";
+import type { Contact, FabricHub, FabricLink } from "../../lib/api/types";
 import { useMode } from "../../lib/mode";
 import { STATE_COPY } from "../messages/model";
-import { custodyText, hubLine, hubName, linkLabel, linkLine, profileSummary, STORE_CLOSED_TEXT, STORE_FULL_TEXT, STORE_PRUNE_TEXT } from "./fabric-model";
+import { custodyText, hubName, linkLabel, linkLine, profileSummary, STORE_CLOSED_TEXT, STORE_FULL_TEXT, STORE_PRUNE_TEXT } from "./fabric-model";
+import { PeerText } from "./shared";
 import { StoreGauge } from "./store-gauge";
 
 const TEXT = "max-w-prose font-mono text-xs leading-relaxed text-muted-foreground";
 
 const linkDot = (l: Pick<FabricLink, "state">): DotState => (l.state === "up" ? "live" : l.state === "degraded" ? "error" : "unset");
+
+/** "Home hub reachable: <name>": the name is the hub's own label when it is not aliased, so it is drawn isolated and cut. */
+export function HubLine({ hub, contacts }: { hub: FabricHub; contacts: readonly Contact[] | null }) {
+  const name = hubName(hub, contacts);
+  return (
+    <>
+      {hubSummary(hub)}
+      {hub.enrolled && name ? (
+        <>
+          {": "}
+          <PeerText>{name}</PeerText>
+        </>
+      ) : null}
+    </>
+  );
+}
 
 export function FabricDetails() {
   const fabric = useFabric();
@@ -52,7 +70,7 @@ export function FabricDetails() {
         }));
 
   const hubRows: SpecRow[] = [
-    { label: "Home hub", value: hubLine(hub, contacts) },
+    { label: "Home hub", value: <HubLine hub={hub} contacts={contacts} /> },
     ...(hub.enrolled && hub.address ? [{ label: "Hub address", value: <span className="break-all">{cleanPeerText(hub.address)}</span> }] : []),
     ...(settings.hub_role ? [{ label: "Nodes using this hub", value: String(hub.members) }] : []),
     ...(hub.offer_active ? [{ label: "Enrollment code", value: "one is outstanding (Settings shows how to dismiss it)" }] : []),

@@ -14,8 +14,12 @@
 //! 4. the fabric queues the message (its store commits it, `synchronous =
 //!    FULL`, before the call returns — §4).
 //!
-//! Only then does the caller record the decision (`proposals.rs`), so a
-//! proposal is marked applied only after the store committed the message.
+//! The caller (`proposals.rs`) runs checks 1–3 ([`prepare`]), records the
+//! acceptance as `applied: {pending: true}`, then sends ([`send`]) and
+//! finalises the record with the message id — so a crash between the send
+//! and the record leaves a visibly half-applied proposal, never a second
+//! send after a restart; a refused send removes the pending record (the
+//! proposal stays open).
 
 use super::FabricHandle;
 use crate::daemon::dashboard::api_v1::Problem;
@@ -99,13 +103,13 @@ impl Refusal {
     }
 }
 
-/// Apply an accepted message proposal: checks 1–3, then the send. Returns
-/// the queued message's store id (its store commit is done).
-pub async fn apply(
+/// Checks 1–3 of an accepted message proposal (nothing is written): the
+/// recipient and the verbatim text to send.
+pub async fn prepare(
     handle: &FabricHandle,
     node_id_stamp: Option<&str>,
     body: &str,
-) -> Result<i64, Problem> {
+) -> Result<(NodeId, String), Problem> {
     let (to, text) = parse_body(body).map_err(|r| r.problem())?;
     let fabric = handle.fabric().ok_or_else(super::not_running)?;
     check_stamp(node_id_stamp, &fabric.node_id()).map_err(|r| r.problem())?;
@@ -115,6 +119,12 @@ pub async fn apply(
         Err(FabricError::NotFound) => return Err(Refusal::NotContact.problem()),
         Err(e) => return Err(super::problem(&e)),
     }
+    Ok((to, text.to_string()))
+}
+
+/// Check 4: queue the prepared message. Returns its store id (its store
+/// commit is done).
+pub async fn send(handle: &FabricHandle, to: NodeId, text: &str) -> Result<i64, Problem> {
     handle.send(to, text).await.map_err(|e| match e {
         FabricError::NotFound => Refusal::NotContact.problem(),
         FabricError::TooLarge(_) | FabricError::Invalid(_) => Problem::new(

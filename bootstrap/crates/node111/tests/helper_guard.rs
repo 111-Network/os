@@ -1,7 +1,8 @@
 //! T11 acceptance: root update-helper + update-guard on temp roots with an
 //! injected clock + scripted systemctl — promote happy path, bad staged hash,
 //! replayed manifest, probation finalize + prune, prune-during-probation
-//! refused, F2 crash-before-READY revert, F3 READY-but-503 revert.
+//! refused, F2 crash-before-READY revert, F3 READY-but-503 revert, and the
+//! Layer 5 cross-check on the tree the helper extracts itself (§19 L1).
 
 mod common;
 
@@ -76,9 +77,13 @@ fn current_basename(root: &Path) -> String {
 
 /// Build a signed staging bundle (manifest + minisig + tarball) at staging/<ver>.
 fn make_staging(root: &Path, version: &str) {
+    make_staging_with(root, version, &common::build_payload(), "");
+}
+
+/// [`make_staging`] with a chosen tarball and extra manifest sections (Layer 5).
+fn make_staging_with(root: &Path, version: &str, tarball: &[u8], extra: &str) {
     let staged = root.join("state/staging").join(version);
     std::fs::create_dir_all(&staged).unwrap();
-    let tarball = common::build_payload();
     let manifest = format!(
         r#"manifest-version = 1
 date = "{version}"
@@ -114,12 +119,12 @@ pubkey = "RWRoot00000000000000000000000000000000000000000="
 generation = 1
 pubkey = "RWGen100000000000000000000000000000000000000000="
 signature_by_previous = "untrusted comment: fixture\\nplaceholder"
-"#,
+{extra}"#,
         a64 = "a".repeat(64),
-        tsha = node111::util::hash::sha256_bytes(&tarball),
+        tsha = node111::util::hash::sha256_bytes(tarball),
         tlen = tarball.len()
     );
-    std::fs::write(staged.join("payload.tar.gz"), &tarball).unwrap();
+    std::fs::write(staged.join("payload.tar.gz"), tarball).unwrap();
     let manifest_path = staged.join("channel-111-stable.toml");
     std::fs::write(&manifest_path, &manifest).unwrap();
     common::sign_file(&common::minisign_fixture_key(), &manifest_path);
@@ -189,6 +194,73 @@ fn tampered_staged_tarball_refused_no_flip() {
     assert!(Journal::read(&node.path().join("state/update.json"))
         .unwrap()
         .is_none());
+}
+
+const MESHMUD: &[u8] = b"meshmud v1.0.0 linux/amd64 static";
+
+fn meshmud_pin(bytes: &[u8]) -> String {
+    format!(
+        "\n[pkg.meshmud.target.x86_64-unknown-linux-musl]\nurl = \"https://example.invalid/meshmud\"\nsha256 = \"{}\"\nsize = {}\n",
+        node111::util::hash::sha256_bytes(bytes),
+        bytes.len()
+    )
+}
+
+/// The helper promotes a payload whose Layer 5 assets equal the signed pins.
+#[test]
+fn layer5_pinned_payload_promotes() {
+    let node = tempfile::tempdir().unwrap();
+    make_release(node.path(), "2026.10.01");
+    flip_to(node.path(), "2026.10.01");
+    let tarball = common::build_payload_with(&[("bin/meshmud", MESHMUD)]);
+    make_staging_with(node.path(), "2026.10.12", &tarball, &meshmud_pin(MESHMUD));
+    let layout = layout_at(node.path());
+    let runner =
+        node111::testkit::MockRunner::new(vec![("systemctl restart 111node.service", ok_out())]);
+    let report = update_helper::run_with(&layout, &runner, 1_760_000_000).unwrap();
+    assert!(report.actions.contains(&HelperAction::Promoted {
+        version: "2026.10.12".into()
+    }));
+    assert_eq!(
+        std::fs::read(node.path().join("releases/2026.10.12/bin/meshmud")).unwrap(),
+        MESHMUD
+    );
+    runner.assert_exhausted();
+}
+
+/// §19 L1 at the root helper (authoritative): a correctly signed and pinned
+/// tarball whose tree disagrees with the manifest's Layer 5 pins is never
+/// promoted — no release dir, no extraction debris, no flip, no journal.
+#[test]
+fn layer5_mismatch_refused_no_promote() {
+    let tarball = common::build_payload_with(&[("bin/meshmud", MESHMUD)]);
+    for (extra, needle) in [
+        (String::new(), "pins no meshmud"),
+        (meshmud_pin(b"another meshmud build"), "bin/meshmud size"),
+    ] {
+        let node = tempfile::tempdir().unwrap();
+        make_release(node.path(), "2026.10.01");
+        flip_to(node.path(), "2026.10.01");
+        make_staging_with(node.path(), "2026.10.12", &tarball, &extra);
+        let layout = layout_at(node.path());
+        let runner = node111::testkit::MockRunner::new(Vec::<(String, Output)>::new());
+        let err = update_helper::run_with(&layout, &runner, 1_760_000_000).unwrap_err();
+        assert!(
+            err.to_string().contains(needle),
+            "wanted {needle:?} in: {err}"
+        );
+        assert_eq!(current_basename(node.path()), "2026.10.01");
+        assert!(!node.path().join("releases/2026.10.12").exists());
+        let debris: Vec<String> = std::fs::read_dir(node.path().join("releases"))
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .filter(|n| n.starts_with('.'))
+            .collect();
+        assert!(debris.is_empty(), "extraction debris left: {debris:?}");
+        assert!(Journal::read(&node.path().join("state/update.json"))
+            .unwrap()
+            .is_none());
+    }
 }
 
 #[test]

@@ -92,6 +92,13 @@ pub fn sign_file(key: &std::path::Path, file: &std::path::Path) {
 
 /// Build a payload tarball (gz) with bin/111 + share/kb/* + share/payload.manifest.
 pub fn build_payload() -> Vec<u8> {
+    build_payload_with(&[])
+}
+
+/// [`build_payload`] plus `extra` files (relpath, bytes; 0o644, 0o755 under
+/// `bin/`), each listed in `share/payload.manifest` like every payload file — the
+/// Layer 5 assets (`bin/meshmud`, `panels/<bundle>/…`, `share/meshtastic-presence/…`).
+pub fn build_payload_with(extra: &[(&str, &[u8])]) -> Vec<u8> {
     let mut files: Vec<(String, Vec<u8>, u32)> = vec![
         (
             "bin/111".into(),
@@ -101,6 +108,14 @@ pub fn build_payload() -> Vec<u8> {
         ("share/kb/llms.txt".into(), b"index\n".to_vec(), 0o644),
         ("share/kb/reticulum.md".into(), b"entry\n".to_vec(), 0o644),
     ];
+    for (path, bytes) in extra {
+        let mode = if path.starts_with("bin/") {
+            0o755
+        } else {
+            0o644
+        };
+        files.push((path.to_string(), bytes.to_vec(), mode));
+    }
     let mut manifest = String::new();
     for (path, bytes, _) in &files {
         manifest.push_str(&format!(

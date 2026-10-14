@@ -1,0 +1,5 @@
+:root { color-scheme: light dark; font-family: ui-monospace, Menlo, Consolas, monospace; }
+body { margin: 0; padding: 16px; }
+header { display: flex; align-items: center; gap: 8px; }
+h1 { font-size: 16px; margin: 0; }
+#host { width: 100%; max-width: 24em; }

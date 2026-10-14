@@ -363,8 +363,9 @@ Notes:
 - `matchit` 0.8.4 (MIT AND BSD-3-Clause): the BSD-3-Clause part is code from `julienschmidt/httprouter` (its `LICENSE.httprouter`).
 - `unicode-ident` 1.0.27 ((MIT OR Apache-2.0) AND Unicode-3.0): the Unicode-3.0 part covers data files from Unicode, Inc.
 - `webpki-roots` 1.0.9 (CDLA-Permissive-2.0): Mozilla's CA root certificates, embedded as data in the `111` binary for TLS. The agreement text is reproduced below, as its section 2.1 requires.
-- `libsqlite3-sys` 0.38.2 (MIT): compiles native sources bundled in the crate. With the `bundled-sqlcipher` features that is SQLCipher (Copyright (c) 2008-2020 Zetetic LLC; BSD-3-Clause style license in the crate's `sqlcipher/LICENSE`), built on SQLite (public domain). The BSD-3-Clause text below covers the SQLCipher notice.
-- `openssl-src` 300.6.1+3.6.3 (MIT OR Apache-2.0; a build-dependency, so not in the crate list above): bundles the OpenSSL 3.6.3 sources and compiles them into the static `111` binary as SQLCipher's crypto provider (`bundled-sqlcipher-vendored-openssl`); no system libcrypto is linked. OpenSSL 3.6.3 is Apache-2.0 (Copyright The OpenSSL Project Authors; see https://github.com/openssl/openssl/blob/master/LICENSE.txt); the Apache License 2.0 text below covers it.
+- `libsqlite3-sys` 0.38.2 (MIT): compiles native sources bundled in the crate. With the `bundled-sqlcipher` features that is SQLCipher 4.14.0 community on SQLite 3.51.3 (Copyright (c) 2008-2020 Zetetic LLC; SQLite itself is public domain). SQLCipher's own license, a BSD-3-Clause-style text naming Zetetic LLC, is reproduced verbatim under License texts, as its binary-redistribution clause requires.
+- `openssl-src` 300.6.1+3.6.3 (MIT OR Apache-2.0; a build-dependency, so not in the crate list above): bundles the OpenSSL 3.6.3 sources and compiles them into the static `111` binary as SQLCipher's crypto provider (`bundled-sqlcipher-vendored-openssl`); no system libcrypto is linked.
+  OpenSSL 3.6.3 — Copyright 1995-2026 The OpenSSL Project Authors. All Rights Reserved. Apache License 2.0 (https://github.com/openssl/openssl/blob/openssl-3.6.3/LICENSE.txt); the Apache License 2.0 text below covers it (the OpenSSL source tree carries no NOTICE file).
 - Options named in expressions but not elected, so not reproduced: 0BSD, BSL-1.0, GPL-2.0-only, MIT-0, Zlib.
 
 ## JavaScript packages (dashboard bundle)
@@ -1886,6 +1887,37 @@ may consider it more useful to permit linking proprietary applications with
 the library.  If this is what you want to do, use the GNU Lesser General
 Public License instead of this License.  But first, please read
 <https://www.gnu.org/licenses/why-not-lgpl.html>.
+```
+
+### SQLCipher license (BSD-3-Clause style, Zetetic LLC)
+
+Verbatim copy of `libsqlite3-sys` 0.38.2 `sqlcipher/LICENSE`. Applies to SQLCipher 4.14.0 community on SQLite 3.51.3, compiled into the `111` binary.
+
+```text
+Copyright (c) 2008-2020 Zetetic LLC
+All rights reserved.
+
+Redistribution and use in source and binary forms, with or without
+modification, are permitted provided that the following conditions are met:
+    * Redistributions of source code must retain the above copyright
+      notice, this list of conditions and the following disclaimer.
+    * Redistributions in binary form must reproduce the above copyright
+      notice, this list of conditions and the following disclaimer in the
+      documentation and/or other materials provided with the distribution.
+    * Neither the name of the ZETETIC LLC nor the
+      names of its contributors may be used to endorse or promote products
+      derived from this software without specific prior written permission.
+
+THIS SOFTWARE IS PROVIDED BY ZETETIC LLC ''AS IS'' AND ANY
+EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
+WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+DISCLAIMED. IN NO EVENT SHALL ZETETIC LLC BE LIABLE FOR ANY
+DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES
+(INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
+LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND
+ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+(INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
+SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 ```
 
 ### Silkscreen copyright line (OFL-1.1)

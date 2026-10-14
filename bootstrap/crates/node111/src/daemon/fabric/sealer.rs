@@ -24,7 +24,21 @@
 //!   epoch source, A3) and `announce_last`. A missing `counters` file is the
 //!   L2 §8.4 state-absent case: the store opens in restore-pending mode and
 //!   every announce/epoch request answers `RestoreFloorRequired` — nothing is
-//!   sealed until a floor is set (`111 identity restore` writes one).
+//!   sealed until a floor is set. **Nothing is written either**:
+//!   [`IdentitySealer::shutdown_counters`] skips the clean-shutdown commit
+//!   while pending (a file with `announce_last = 0` would read as state
+//!   present at the next start — a counter reset, not a floor), the stored
+//!   announce is not presented ([`AnnounceOutcome::Missing`]), and the host
+//!   registers no link (no inbound packet can tick the window). In `111d`
+//!   the state is rare: a `counters` file missing at daemon start already
+//!   fails the identity integrity check (`crate::identity::load`
+//!   quarantines the dir and asks for `111 identity restore`, which writes
+//!   a provisional floor), so the handle meets it only when the file goes
+//!   missing between that check and the store open. No Layer 2 command sets
+//!   a floor on a live identity dir (`111 identity restore` refuses one):
+//!   the way out is the node's own `identity/counters` put back (state
+//!   present), or a restart into the restore flow — the `fabric` service
+//!   row says so.
 //! - **Randomness** is the §4 named source, `getrandom()` (typed failure,
 //!   never a weak fallback).
 //! - **`store_secret`** (§10.2 Mode S, L2 amendment A9) =
@@ -186,7 +200,9 @@ impl IdentitySealer {
     }
 
     /// Clean-shutdown commit of the counter store (L2 §6.5: the next open
-    /// applies no forward jump). Call after the fabric has stopped.
+    /// applies no forward jump). Call after the fabric has stopped. While
+    /// restore-pending nothing is written (module doc; L2 §8.4 — id111
+    /// refuses too) and this returns `Ok`.
     pub fn shutdown_counters(&self) -> Result<(), CounterError> {
         match self.counters.lock() {
             Ok(mut c) => c.shutdown(),
@@ -196,7 +212,9 @@ impl IdentitySealer {
 
     /// Make sure `fabric_dir/announce` holds a verified announce of this
     /// node carrying `appdata` (see the module doc), and keep it as the
-    /// bytes [`Sealer::own_announce`] returns.
+    /// bytes [`Sealer::own_announce`] returns. While restore-pending the node
+    /// presents no announce at all — not even a valid stored one (§8.4: it
+    /// MUST NOT announce until the floor is set) — and answers `Missing`.
     pub fn ensure_announce(&self, fabric_dir: &Path, appdata: &[u8]) -> AnnounceOutcome {
         let path = fabric_dir.join(ANNOUNCE_FILE);
         let stored = read_small(&path, id111::announce::MAX_LEN as u64)
@@ -471,6 +489,46 @@ mod tests {
         let sig = a.sign(b"111/test/v1", b"m");
         assert_eq!(sig.len(), 64);
         a.shutdown_counters().unwrap();
+    }
+
+    /// F2 review M1: a restore-pending handle presents no stored announce
+    /// and its clean stop writes no `counters` file (the floor stays
+    /// settable).
+    #[test]
+    fn restore_pending_hides_a_stored_announce_and_writes_no_counters() {
+        let t = tempfile::tempdir().unwrap();
+        let dir = t.path().join("identity");
+        let fabric = t.path().join("fabric");
+        std::fs::create_dir_all(&fabric).unwrap();
+        let id = identity(&dir);
+        let again = identity_load(&dir); // while `counters` is still there
+                                         // a first run mints and stores a valid announce
+        let (c, _) = open_counters(&dir).unwrap();
+        let s = IdentitySealer::new(id, c);
+        let plain = appdata(0, None);
+        assert_eq!(s.ensure_announce(&fabric, &plain), AnnounceOutcome::Minted);
+        s.shutdown_counters().unwrap();
+        drop(s);
+        // then the counters file goes missing (a partial identity copy)
+        let counters = dir.join(id111::counters::COUNTERS_FILE);
+        std::fs::remove_file(&counters).unwrap();
+        let (c, how) = open_counters(&dir).unwrap();
+        assert_eq!(how, CounterOpen::RestorePending);
+        let s = IdentitySealer::new(again, c);
+        assert_eq!(
+            s.ensure_announce(&fabric, &plain),
+            AnnounceOutcome::Missing,
+            "a valid stored announce is not presented while pending"
+        );
+        assert!(s.own_announce().is_empty());
+        assert_eq!(s.announce_last(), 0);
+        s.shutdown_counters().unwrap();
+        assert!(!counters.exists(), "no counter reset on a clean stop");
+        assert!(id111::counters::CounterStore::restore_pending(&dir).is_ok());
+    }
+
+    fn identity_load(dir: &Path) -> Identity {
+        crate::identity::load(dir).expect("identity loads")
     }
 
     #[test]

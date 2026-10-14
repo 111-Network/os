@@ -198,6 +198,15 @@ export interface Adapter {
     send(req: SendMessageRequest): Promise<MessageAccepted>;
     /** Re-queue an own message that is `queued` or `sent`; 409 `bad_request` otherwise. */
     retry(id: MessageId): Promise<Message>;
+    /**
+     * Cancel an own message that is still `queued` (`POST /messages/{id}/cancel`, spec 4: before it leaves, an empty
+     * tombstone goes instead, so no message number is abandoned). Resolves when the node accepted (202); the message stays in
+     * its thread as `queued` with `reason_code: cancelled`, and that arrives as a `message` frame (the contract's reply is the
+     * message after cancelling; the page does not read it and re-reads the thread). 409 `bad_request` once it has left or when it
+     * is not an own message. Optional on the type until every adapter carries the contract's `cancelMessage`: the thread view
+     * offers the control only where it is present.
+     */
+    cancel?(id: MessageId): Promise<void>;
   };
 
   /** Contacts and message requests (§7, §15). */

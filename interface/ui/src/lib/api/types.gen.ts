@@ -267,6 +267,7 @@ export interface paths {
         };
         get?: never;
         put?: never;
+        /** @description Record the human's decision. A `kind: message` proposal is applied on acceptance (Layer 5 §17): its body must be `to: <64 hex>` + a blank line + the text, its node-id stamp must name this node and the recipient must be an accepted contact; then 111d queues the message itself and the decision is recorded (the agent never sends). A refused acceptance answers the problem below and leaves the proposal open; the agent's bearer never decides a message proposal (401). */
         post: operations["decideProposal"];
         delete?: never;
         options?: never;
@@ -473,6 +474,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/messages/{id}/cancel": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** @description Cancel an own message that has not left yet (`queued`, nothing of it sent). An allocated number is never abandoned (§4): an empty placeholder goes in its place, and the message reads `queued` with `reason_code: cancelled` until that leaves. Any other state, or an incoming message, answers 409 (`bad_request`). Loopback or a paired session; the agent's bearer is refused (401). */
+        post: operations["cancelMessage"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/contacts": {
         parameters: {
             query?: never;
@@ -500,7 +518,7 @@ export interface paths {
         };
         /**
          * This node's own card (public announce) as text and a QR module bitmap
-         * @description The genesis announce, from stored bytes (never minted, §7). `text` is the base32 form; `qr` is the module matrix the UI draws itself. No key material beyond the public announce.
+         * @description This node's current announce, from stored bytes (never minted, §7; re-stored when a settings change alters its roles or home-hub hint). `text` is the base32 form; `qr` is the module matrix the UI draws itself. No key material beyond the public announce.
          */
         get: operations["getOwnCard"];
         put?: never;
@@ -594,7 +612,7 @@ export interface paths {
         delete?: never;
         options?: never;
         head?: never;
-        /** @description Partial merge of the fabric settings: hub role, LAN listener, custody opt-in, per-class quotas (capacity shaping — there are no per-sender limits). Loopback-only (403 loopback_only otherwise); `listen_lan` takes effect immediately for new connections. */
+        /** @description Partial merge of the fabric settings: hub role, LAN listener, custody opt-in, per-class quotas (capacity shaping — there are no per-sender limits; a quota key outside the refusable classes is 400). Loopback-only (403 loopback_only otherwise); `listen_lan` takes effect immediately for new connections. */
         patch: operations["patchFabricSettings"];
         trace?: never;
     };
@@ -958,7 +976,7 @@ export interface components {
         DeviceState: "connected" | "disconnected" | "needs_setup" | "error";
         /** @enum {string} */
         DeviceTransport: "usb-serial" | "spi" | "bluetooth" | "wifi" | "lan" | "tcp" | "audio" | "unknown";
-        /** @description How the record was identified. USB VID:PID names the serial chip, not the board or its firmware (os/plan/devices.md §0): table matches are 'likely' until a consented probe confirms. */
+        /** @description How the record was identified. USB VID:PID names the serial chip, not the board or its firmware (os/plan/cross-layer/devices.md §0): table matches are 'likely' until a consented probe confirms. */
         DeviceMatch: {
             /** @enum {string} */
             confidence: "exact" | "likely" | "unknown";
@@ -1243,20 +1261,22 @@ export interface components {
             /** @description the high watermark in bytes that triggers pruning */
             watermark: number;
             store_full: boolean;
+            /** @description the identity holder reports a restore floor (§4): nothing is sealed, new messages are refused 409 and no link runs until it is set. false when the store is not open; absent from older daemons */
+            restore_pending?: boolean;
         };
         FabricSettings: {
             /** @description accept custody for enrolled members */
             hub_role: boolean;
-            /** @description bind the tcp-lan listener on the LAN (otherwise loopback; loopback is never a peer) */
+            /** @description bind the tcp-lan listener on the LAN (the hub role binds it too; with both off nothing listens — loopback is never a peer) */
             listen_lan: boolean;
             /** @description an always-on laptop or a phone opts in to hold custody (Cat 4 hubs default on) */
             custody_opt_in: boolean;
-            /** @description capacity shaping per stored-data class, in bytes (keys such as msg, agent_op, kb, update, patch); null or absent means no quota. Not a per-sender limit; those do not exist */
+            /** @description capacity shaping per refusable stored-data class, in bytes: kb, update, patch, sync, object, custody (messages and agent ops are never refused, §10.4, so they take no quota); null means no quota. Not a per-sender limit; those do not exist */
             quotas: {
                 [key: string]: number | null;
             };
         };
-        /** @description Partial merge. In `quotas`, a class set to null drops its quota. */
+        /** @description Partial merge. In `quotas`, a class set to null drops its quota; only the refusable classes (kb, update, patch, sync, object, custody) take one — any other key is 400. */
         FabricSettingsPatch: {
             hub_role?: boolean;
             listen_lan?: boolean;
@@ -1885,9 +1905,9 @@ export interface operations {
                 };
             };
             404: components["responses"]["Problem"];
-            /** @description already_decided */
+            /** @description already_decided; for kind message also bad_request (the recipient is not a contact, or is a pending message request) and restore_pending (the identity holder reports a restore floor, so nothing is sealed yet) — the proposal stays open */
             409: components["responses"]["Problem"];
-            /** @description upstream_error: the agent wrote a kind outside the enum */
+            /** @description upstream_error: the agent wrote a kind outside the enum, or (kind message) a body that does not follow the `to:` contract or a node-id stamp that does not name this node */
             502: components["responses"]["Problem"];
         };
     };
@@ -2210,6 +2230,31 @@ export interface operations {
             409: components["responses"]["Problem"];
         };
     };
+    cancelMessage: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: components["parameters"]["messageId"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The message after cancelling */
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Message"];
+                };
+            };
+            404: components["responses"]["Problem"];
+            /** @description bad_request: not cancellable in its current state (already sent, or an incoming message) */
+            409: components["responses"]["Problem"];
+        };
+    };
     listContacts: {
         parameters: {
             query?: never;
@@ -2278,6 +2323,8 @@ export interface operations {
                     "application/json": components["schemas"]["Card"];
                 };
             };
+            /** @description restore_pending: the node has no announce yet — nothing is announced until the identity restore completes (§4) */
+            409: components["responses"]["Problem"];
         };
     };
     getContact: {
@@ -2397,11 +2444,12 @@ export interface operations {
                     "application/json": components["schemas"]["FabricHub"];
                 };
             };
+            /** @description bad_request: the body, or an address that names no peer (unspecified, multicast, broadcast; loopback where loopback is never a peer) */
             400: components["responses"]["Problem"];
             /** @description bad_request: this node already has a home hub */
             409: components["responses"]["Problem"];
             429: components["responses"]["Problem"];
-            /** @description upstream_error: hub unreachable or refused */
+            /** @description upstream_error: the hub is unreachable, did not answer within the wait, or refused the code; or its host name did not resolve */
             502: components["responses"]["Problem"];
         };
     };
@@ -2424,6 +2472,8 @@ export interface operations {
                 };
             };
             403: components["responses"]["Problem"];
+            /** @description bad_request: this node holds no custody (turn the hub role or custody opt-in on first); restore_pending: no card yet to put in the bundle (§4) */
+            409: components["responses"]["Problem"];
         };
     };
     dismissHubOffer: {

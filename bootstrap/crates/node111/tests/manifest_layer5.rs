@@ -1,8 +1,15 @@
 //! Layer 5 manifest entries (D20; `os/messaging/README.md` §2, §13, §14, §19 L1): the
 //! per-target `meshmud` binaries, the Meshtastic web bundle and the presence venv
-//! lock — parse rules, the payload-tree cross-check (`verify_layer5_tree`), the
-//! bundle hash's byte-compatibility with `scripts/meshtastic-web-build.sh`, and the
-//! generator round-trip (`manifest/gen-manifest.py`).
+//! lock — parse rules (open package/bundle names), the payload-tree cross-check
+//! (`verify_layer5_tree`, no link anywhere on the way), the bundle hash's
+//! byte-compatibility with `scripts/meshtastic-web-build.sh`, and the generator
+//! (`manifest/gen-manifest.py`): its round-trip and its refusal of payloads that
+//! disagree with the pins it writes.
+//!
+//! The tests that drive external tools (`sh`, coreutils, `python3`) fail when a tool
+//! is missing — a gate test never passes by skipping silently.
+
+mod common;
 
 use node111::manifest::{bundle_tree_sha256, layer5, ChannelManifest};
 use node111::util::hash::sha256_bytes;
@@ -161,13 +168,6 @@ fn layer5_parse_refusals() {
     let ok_tree = bundle_hash();
     let cases: Vec<(&str, String)> = vec![
         (
-            "unknown package",
-            format!(
-                "{base}\n{}",
-                meshmud_section(X86, MESHMUD_X86).replace("pkg.meshmud", "pkg.rnsd")
-            ),
-        ),
-        (
             "meshmud without a 111 binary / payload for the target",
             format!(
                 "{base}\n{}",
@@ -175,10 +175,40 @@ fn layer5_parse_refusals() {
             ),
         ),
         (
-            "unknown bundle",
+            "bundle name that climbs out of panels/",
             format!(
                 "{base}\n{}",
-                bundle_section(&ok_tree).replace("bundle.meshtastic-web", "bundle.other-web")
+                bundle_section(&ok_tree).replace("bundle.meshtastic-web", "bundle.\"../escape\"")
+            ),
+        ),
+        (
+            "bundle name with a path separator",
+            format!(
+                "{base}\n{}",
+                bundle_section(&ok_tree).replace("bundle.meshtastic-web", "bundle.\"a/b\"")
+            ),
+        ),
+        (
+            "hidden bundle name",
+            format!(
+                "{base}\n{}",
+                bundle_section(&ok_tree).replace("bundle.meshtastic-web", "bundle.\".web\"")
+            ),
+        ),
+        (
+            "uppercase bundle name",
+            format!(
+                "{base}\n{}",
+                bundle_section(&ok_tree).replace("bundle.meshtastic-web", "bundle.Web")
+            ),
+        ),
+        (
+            "unknown package with a bad pin",
+            format!(
+                "{base}\n{}",
+                meshmud_section(X86, MESHMUD_X86)
+                    .replace("pkg.meshmud", "pkg.kiss-modem")
+                    .replace("https://", "file://")
             ),
         ),
         (
@@ -233,6 +263,43 @@ fn layer5_parse_refusals() {
     }
     // Sanity: the unmodified sections parse.
     ChannelManifest::parse(&full_manifest()).unwrap();
+}
+
+/// Open names (Wave 2 review B1 m6, lead decision): a package or bundle this
+/// binary does not know parses and is otherwise ignored, so a later release can add
+/// one without stranding nodes; the closure stays in `verify_layer5_tree`.
+#[test]
+fn unknown_names_parse_and_are_ignored() {
+    let text = format!(
+        "{}{}{}",
+        full_manifest(),
+        meshmud_section(X86, b"a KISS modem image").replace("pkg.meshmud", "pkg.kiss-modem"),
+        bundle_section(&bundle_hash()).replace("bundle.meshtastic-web", "bundle.mesh-map")
+    );
+    let m = ChannelManifest::parse(&text).expect("unknown names must parse");
+    // Ignored by every lookup of a known name…
+    assert_eq!(m.binary_for(X86).unwrap().name, "111");
+    assert_eq!(
+        m.meshmud_for(X86).unwrap().artifact.sha256,
+        sha256_bytes(MESHMUD_X86)
+    );
+    assert_eq!(
+        m.bundle("meshtastic-web").unwrap().tree_sha256,
+        bundle_hash()
+    );
+    assert!(m.packages().iter().any(|p| p.name == "kiss-modem"));
+    // …but a pinned bundle is a pinned bundle: it must sit at panels/<name>/.
+    let t = full_tree();
+    refused(&m, t.path(), X86, "lacks pinned bundle panels/mesh-map");
+    write_bundle(&t.path().join("panels/mesh-map"));
+    m.verify_layer5_tree(t.path(), X86).unwrap();
+    std::fs::write(t.path().join("panels/mesh-map/extra.js"), b"x").unwrap();
+    refused(&m, t.path(), X86, "panels/mesh-map/ tree hash");
+    // Nothing unpinned under panels/, whatever this binary knows.
+    let t = full_tree();
+    write_bundle(&t.path().join("panels/mesh-map"));
+    write_bundle(&t.path().join("panels/other-web"));
+    refused(&m, t.path(), X86, "pins no such bundle");
 }
 
 #[test]
@@ -351,6 +418,69 @@ fn presence_lock_tampering_is_refused() {
     refused(&unpinned, t.path(), X86, "pins no presence-lock");
 }
 
+/// Every component between the tree and a target is lstat'ed (Wave 2 review B1
+/// m7): a linked parent can neither supply the pinned bytes nor hide an asset.
+#[test]
+fn linked_components_are_refused() {
+    use std::os::unix::fs::symlink;
+    let m = ChannelManifest::parse(&full_manifest()).unwrap();
+    let relink = |t: &tempfile::TempDir, rel: &str| {
+        let real = t.path().join(format!("real-{}", rel.replace('/', "-")));
+        std::fs::rename(t.path().join(rel), &real).unwrap();
+        symlink(&real, t.path().join(rel)).unwrap();
+    };
+
+    // bin/ as a link to a directory holding the exact pinned meshmud.
+    let t = full_tree();
+    relink(&t, "bin");
+    refused(&m, t.path(), X86, "payload bin is a link");
+
+    // share/ and share/meshtastic-presence/ as links to the right lock.
+    let t = full_tree();
+    relink(&t, "share");
+    refused(&m, t.path(), X86, "payload share is a link");
+    let t = full_tree();
+    relink(&t, layer5::PRESENCE_DIR);
+    refused(
+        &m,
+        t.path(),
+        X86,
+        "payload share/meshtastic-presence is a link",
+    );
+
+    // panels/ as a link is refused before any bundle is hashed (an unhashable
+    // name inside would otherwise be the first error).
+    let t = full_tree();
+    std::fs::write(t.path().join("panels/meshtastic-web/back\\slash.js"), b"x").unwrap();
+    relink(&t, "panels");
+    refused(&m, t.path(), X86, "payload panels is not a directory");
+
+    // Absence is judged without following a linked parent either.
+    let no_meshmud = ChannelManifest::parse(&format!(
+        "{}\n{}{}",
+        fixture(),
+        bundle_section(&bundle_hash()),
+        lock_section(LOCK)
+    ))
+    .unwrap();
+    let t = full_tree();
+    std::fs::remove_file(t.path().join(layer5::MESHMUD_BIN)).unwrap();
+    no_meshmud.verify_layer5_tree(t.path(), X86).unwrap();
+    relink(&t, "bin");
+    refused(&no_meshmud, t.path(), X86, "payload bin is a link");
+
+    // A parent that is not a directory at all.
+    let t = full_tree();
+    std::fs::remove_dir_all(t.path().join(layer5::PRESENCE_DIR)).unwrap();
+    std::fs::write(t.path().join(layer5::PRESENCE_DIR), b"not a dir").unwrap();
+    refused(
+        &m,
+        t.path(),
+        X86,
+        "payload share/meshtastic-presence is not a directory",
+    );
+}
+
 #[test]
 fn bundle_tree_hash_refuses_unhashable_names() {
     let d = tempfile::tempdir().unwrap();
@@ -367,18 +497,25 @@ fn bundle_tree_hash_refuses_unhashable_names() {
 /// The Rust bundle hash must equal the hash of the `.tree` file that
 /// `scripts/meshtastic-web-build.sh` writes (its `tree_manifest` function, taken
 /// verbatim from the script) — otherwise a CI pin could never verify on a node.
+/// A gate test's external tool must be on PATH: the test fails rather than
+/// passing by skipping (Wave 2 review B1 m8).
+fn require_tool(tool: &str) {
+    let found = Command::new("sh")
+        .args(["-c", &format!("command -v {tool}")])
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false);
+    assert!(
+        found,
+        "`{tool}` is required by this gate test and is not on PATH — install it (the test \
+         fails instead of skipping, so the check it carries never goes silently unrun)"
+    );
+}
+
 #[test]
 fn bundle_tree_hash_matches_the_build_script() {
     for tool in ["sh", "find", "sort", "xargs", "sha256sum", "sed"] {
-        if Command::new("sh")
-            .args(["-c", &format!("command -v {tool}")])
-            .output()
-            .map(|o| !o.status.success())
-            .unwrap_or(true)
-        {
-            eprintln!("{tool} absent — skipping the build-script compatibility check");
-            return;
-        }
+        require_tool(tool);
     }
     let script = std::fs::read_to_string(format!(
         "{}/../../scripts/meshtastic-web-build.sh",
@@ -419,77 +556,148 @@ fn bundle_tree_hash_matches_the_build_script() {
     assert_eq!(bundle_tree_sha256(&bundle).unwrap(), sha256_bytes(&listing));
 }
 
-/// T15 round-trip for the Layer 5 artifacts: the generator takes the build scripts'
-/// own output names and its pins verify a payload tree built from the same bytes.
-#[test]
-fn generator_round_trip_with_layer5() {
-    if Command::new("python3").arg("--version").output().is_err() {
-        eprintln!("python3 absent — skipping generator round-trip");
-        return;
+/// One tar member with an exact name: the tar crate strips a leading `./`, while
+/// the build script's `tar -C dir .` keeps it (and payloads must not have it).
+fn raw_member(b: &mut tar::Builder<&mut Vec<u8>>, name: &str, data: &[u8], dir: bool) {
+    let mut h = tar::Header::new_gnu();
+    h.as_old_mut().name[..name.len()].copy_from_slice(name.as_bytes());
+    h.set_size(data.len() as u64);
+    h.set_mode(if dir { 0o755 } else { 0o644 });
+    h.set_entry_type(if dir {
+        tar::EntryType::Directory
+    } else {
+        tar::EntryType::Regular
+    });
+    h.set_cksum();
+    b.append(&h, data).unwrap();
+}
+
+/// `meshtastic-web-<tag>.tar` as the build script writes it (`./`-prefixed names).
+fn bundle_tar(extra: &[(&str, &[u8])]) -> Vec<u8> {
+    let mut out = Vec::new();
+    {
+        let mut b = tar::Builder::new(&mut out);
+        for d in ["./", "./assets/", "./assets/fonts/"] {
+            raw_member(&mut b, d, b"", true);
+        }
+        for (rel, bytes) in BUNDLE.iter().chain(extra.iter()) {
+            raw_member(&mut b, &format!("./{rel}"), bytes, false);
+        }
+        b.finish().unwrap();
     }
-    let dir = tempfile::tempdir().unwrap();
-    let arts = dir.path().join("artifacts");
-    std::fs::create_dir_all(&arts).unwrap();
-    for (name, bytes) in [
-        ("111-x86_64-unknown-linux-musl", &b"fake binary x86"[..]),
-        ("111-aarch64-unknown-linux-musl", b"fake binary arm"),
-        (
-            "payload-x86_64-unknown-linux-musl.tar.gz",
-            b"fake payload x86",
-        ),
-        (
-            "payload-aarch64-unknown-linux-musl.tar.gz",
-            b"fake payload arm",
-        ),
-        ("rns-lock.txt", b"rns==1.5.6 --hash=sha256:ab\n"),
-        ("kb.tar.gz", b"fake kb"),
-        ("meshmud-v1.0.0-linux-amd64", MESHMUD_X86),
-        ("meshmud-v1.0.0-linux-arm64", MESHMUD_ARM),
-        ("meshtastic-web-v2.7.2.tar", b"deterministic tar bytes"),
-        ("meshtastic-presence-lock.txt", LOCK),
-    ] {
-        std::fs::write(arts.join(name), bytes).unwrap();
-    }
-    // The .tree file exactly as the build script writes it for this bundle.
-    let bundle = dir.path().join("bundle");
-    write_bundle(&bundle);
+    out
+}
+
+/// The `.tree` file the build script writes for [`BUNDLE`].
+fn tree_text() -> String {
     let mut rows: Vec<(String, String)> = BUNDLE
         .iter()
         .map(|(rel, bytes)| (rel.to_string(), sha256_bytes(bytes)))
         .collect();
     rows.sort_by(|a, b| a.0.as_bytes().cmp(b.0.as_bytes()));
-    let tree_text: String = rows
-        .iter()
+    rows.iter()
         .map(|(rel, sha)| format!("{sha}  {rel}\n"))
-        .collect();
-    std::fs::write(arts.join("meshtastic-web-v2.7.2.tree"), &tree_text).unwrap();
+        .collect()
+}
 
-    let gen = |out: &Path| {
-        Command::new("python3")
-            .arg("-I")
-            .arg(format!(
-                "{}/../../manifest/gen-manifest.py",
-                env!("CARGO_MANIFEST_DIR")
-            ))
-            .args([
-                "--version",
-                "2026.10.12",
-                "--artifacts-dir",
-                arts.to_str().unwrap(),
-                "--min-upgrade-from",
-                "2026.10.01",
-                "--url-base",
-                "https://example.invalid/v2026.10.12",
-                "--pubkey",
-                "RWTestKey000000000000000000000000000000000000000=",
-                "--out",
-                out.to_str().unwrap(),
-            ])
-            .output()
-            .unwrap()
-    };
+/// A release payload (bin/111, share/kb, share/payload.manifest) carrying the
+/// given Layer 5 assets; `bundle` lists the files placed under panels/meshtastic-web/.
+fn layer5_payload(
+    meshmud: Option<&[u8]>,
+    bundle: &[(&str, &[u8])],
+    lock: bool,
+    extra: &[(&str, &[u8])],
+) -> Vec<u8> {
+    let mut files: Vec<(String, Vec<u8>)> = Vec::new();
+    if let Some(bytes) = meshmud {
+        files.push((layer5::MESHMUD_BIN.into(), bytes.to_vec()));
+    }
+    for (rel, bytes) in bundle {
+        files.push((format!("panels/meshtastic-web/{rel}"), bytes.to_vec()));
+    }
+    if lock {
+        files.push((layer5::PRESENCE_LOCK.into(), LOCK.to_vec()));
+        files.push((
+            format!("{}/meshtastic_presence.py", layer5::PRESENCE_DIR),
+            b"# reader".to_vec(),
+        ));
+    }
+    for (rel, bytes) in extra {
+        files.push((rel.to_string(), bytes.to_vec()));
+    }
+    let refs: Vec<(&str, &[u8])> = files
+        .iter()
+        .map(|(r, b)| (r.as_str(), b.as_slice()))
+        .collect();
+    common::build_payload_with(&refs)
+}
+
+/// A complete release artifacts dir, every Layer 5 pin consistent with both payloads.
+fn release_artifacts() -> (tempfile::TempDir, PathBuf) {
+    let dir = tempfile::tempdir().unwrap();
+    let arts = dir.path().join("artifacts");
+    std::fs::create_dir_all(&arts).unwrap();
+    let payload_x86 = layer5_payload(Some(MESHMUD_X86), BUNDLE, true, &[]);
+    let payload_arm = layer5_payload(Some(MESHMUD_ARM), BUNDLE, true, &[]);
+    let tar = bundle_tar(&[]);
+    let tree = tree_text();
+    for (name, bytes) in [
+        ("111-x86_64-unknown-linux-musl", &b"fake binary x86"[..]),
+        ("111-aarch64-unknown-linux-musl", b"fake binary arm"),
+        (
+            "payload-x86_64-unknown-linux-musl.tar.gz",
+            payload_x86.as_slice(),
+        ),
+        (
+            "payload-aarch64-unknown-linux-musl.tar.gz",
+            payload_arm.as_slice(),
+        ),
+        ("rns-lock.txt", b"rns==1.5.6 --hash=sha256:ab\n"),
+        ("kb.tar.gz", b"fake kb"),
+        ("meshmud-v1.0.0-linux-amd64", MESHMUD_X86),
+        ("meshmud-v1.0.0-linux-arm64", MESHMUD_ARM),
+        ("meshtastic-web-v2.7.2.tar", tar.as_slice()),
+        ("meshtastic-web-v2.7.2.tree", tree.as_bytes()),
+        ("meshtastic-presence-lock.txt", LOCK),
+    ] {
+        std::fs::write(arts.join(name), bytes).unwrap();
+    }
+    (dir, arts)
+}
+
+fn gen_manifest(arts: &Path, out: &Path) -> std::process::Output {
+    require_tool("python3");
+    Command::new("python3")
+        .arg("-I")
+        .arg(format!(
+            "{}/../../manifest/gen-manifest.py",
+            env!("CARGO_MANIFEST_DIR")
+        ))
+        .args([
+            "--version",
+            "2026.10.12",
+            "--artifacts-dir",
+            arts.to_str().unwrap(),
+            "--min-upgrade-from",
+            "2026.10.01",
+            "--url-base",
+            "https://example.invalid/v2026.10.12",
+            "--pubkey",
+            "RWTestKey000000000000000000000000000000000000000=",
+            "--out",
+            out.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap()
+}
+
+/// T15 round-trip for the Layer 5 artifacts: the generator takes the build scripts'
+/// own output names, and its pins verify the payload a node extracts.
+#[test]
+fn generator_round_trip_with_layer5() {
+    let (dir, arts) = release_artifacts();
     let out = dir.path().join("channel-111-stable.toml");
-    let o = gen(&out);
+    let o = gen_manifest(&arts, &out);
     assert!(
         o.status.success(),
         "gen-manifest failed: {}",
@@ -504,23 +712,195 @@ fn generator_round_trip_with_layer5() {
         sha256_bytes(MESHMUD_ARM)
     );
     let b = m.bundle("meshtastic-web").unwrap();
-    assert_eq!(b.tree_sha256, sha256_bytes(tree_text.as_bytes()));
-    assert_eq!(b.tree_sha256, bundle_tree_sha256(&bundle).unwrap());
-    assert_eq!(b.artifact.sha256, sha256_bytes(b"deterministic tar bytes"));
-    assert_eq!(m.presence_lock().unwrap().sha256, sha256_bytes(LOCK));
-    // …and those pins verify a payload tree built from the same bytes.
-    m.verify_layer5_tree(full_tree().path(), X86).unwrap();
-
-    // A .tar without its .tree is refused by the generator.
-    std::fs::remove_file(arts.join("meshtastic-web-v2.7.2.tree")).unwrap();
-    let o = gen(&dir.path().join("broken.toml"));
-    assert!(
-        !o.status.success(),
-        "a bundle tar without its tree must fail"
+    assert_eq!(b.tree_sha256, sha256_bytes(tree_text().as_bytes()));
+    assert_eq!(b.tree_sha256, bundle_hash());
+    assert_eq!(
+        b.artifact.sha256,
+        sha256_bytes(&std::fs::read(arts.join("meshtastic-web-v2.7.2.tar")).unwrap())
     );
-    // Two meshmud builds for one arch are ambiguous.
-    std::fs::write(arts.join("meshtastic-web-v2.7.2.tree"), &tree_text).unwrap();
-    std::fs::write(arts.join("meshmud-v0.9.0-linux-amd64"), b"old").unwrap();
-    let o = gen(&dir.path().join("ambiguous.toml"));
-    assert!(!o.status.success(), "two meshmud amd64 builds must fail");
+    assert_eq!(m.presence_lock().unwrap().sha256, sha256_bytes(LOCK));
+    // …and those pins verify the payload as a node stages it (pin check, safe
+    // unpack, payload manifest) — for both targets.
+    for (triple, file) in [
+        (X86, "payload-x86_64-unknown-linux-musl.tar.gz"),
+        (ARM, "payload-aarch64-unknown-linux-musl.tar.gz"),
+    ] {
+        let staging = tempfile::tempdir().unwrap();
+        let staged = node111::daemon::updater::stage::stage_payload(
+            &std::fs::read(arts.join(file)).unwrap(),
+            m.payload_for(triple).unwrap(),
+            staging.path(),
+            &m.release(),
+        )
+        .unwrap();
+        m.verify_layer5_tree(&staged.join("tree"), triple).unwrap();
+    }
+    m.verify_layer5_tree(full_tree().path(), X86).unwrap();
+}
+
+/// The generator refuses to write pins its own payloads would fail on a node
+/// (Wave 2 review B1 m5), and the earlier artifact-set refusals still hold.
+#[test]
+fn generator_refuses_payloads_that_disagree_with_its_pins() {
+    let x86_payload = "payload-x86_64-unknown-linux-musl.tar.gz";
+    let altered_meshmud = layer5_payload(Some(b"other meshmud build"), BUNDLE, true, &[]);
+    let short_bundle = layer5_payload(Some(MESHMUD_X86), &BUNDLE[1..], true, &[]);
+    let extra_panel = layer5_payload(
+        Some(MESHMUD_X86),
+        BUNDLE,
+        true,
+        &[("panels/other-web/index.html", b"<!doctype html>")],
+    );
+    let other_lock = {
+        let mut files: Vec<(&str, &[u8])> = vec![(layer5::MESHMUD_BIN, MESHMUD_X86)];
+        let web: Vec<(String, &[u8])> = BUNDLE
+            .iter()
+            .map(|(r, b)| (format!("panels/meshtastic-web/{r}"), *b))
+            .collect();
+        files.extend(web.iter().map(|(r, b)| (r.as_str(), *b)));
+        files.push((layer5::PRESENCE_LOCK, b"meshtastic==0.0.1\n"));
+        common::build_payload_with(&files)
+    };
+    let dot_prefixed = {
+        let mut tar_bytes = Vec::new();
+        {
+            let mut b = tar::Builder::new(&mut tar_bytes);
+            raw_member(&mut b, "./bin/111", b"node binary", false);
+            b.finish().unwrap();
+        }
+        let mut gz = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+        std::io::Write::write_all(&mut gz, &tar_bytes).unwrap();
+        gz.finish().unwrap()
+    };
+    let with_link = {
+        let mut gz = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+        {
+            let mut b = tar::Builder::new(&mut gz);
+            let mut h = tar::Header::new_gnu();
+            h.set_entry_type(tar::EntryType::Symlink);
+            h.set_size(0);
+            h.set_cksum();
+            b.append_link(&mut h, "bin/meshmud", "/usr/bin/meshmud")
+                .unwrap();
+            b.finish().unwrap();
+        }
+        gz.finish().unwrap()
+    };
+
+    type Mutate = Box<dyn Fn(&Path)>;
+    let write = |name: &'static str, bytes: Vec<u8>| -> Mutate {
+        Box::new(move |arts: &Path| std::fs::write(arts.join(name), &bytes).unwrap())
+    };
+    let remove = |name: &'static str| -> Mutate {
+        Box::new(move |arts: &Path| std::fs::remove_file(arts.join(name)).unwrap())
+    };
+    let cases: Vec<(&str, Mutate, &str)> = vec![
+        (
+            "payload meshmud differs from the pinned build",
+            write(x86_payload, altered_meshmud),
+            "bin/meshmud (sha256",
+        ),
+        (
+            "payload bundle tree differs from the pinned .tree",
+            write(x86_payload, short_bundle),
+            "panels/meshtastic-web/ tree",
+        ),
+        (
+            "payload carries an unpinned bundle",
+            write(x86_payload, extra_panel),
+            "panels/other-web but the manifest pins no such bundle",
+        ),
+        (
+            "payload presence lock differs from the pinned lock",
+            write(x86_payload, other_lock),
+            "meshtastic-presence-lock.txt (sha256",
+        ),
+        (
+            "payload carries meshmud but no build is pinned for it",
+            remove("meshmud-v1.0.0-linux-amd64"),
+            "no meshmud build for x86_64-unknown-linux-musl is pinned",
+        ),
+        (
+            "payload carries the presence lock but none is pinned",
+            remove("meshtastic-presence-lock.txt"),
+            "no presence lock is pinned",
+        ),
+        (
+            "meshmud build for a triple with no payload",
+            remove("payload-aarch64-unknown-linux-musl.tar.gz"),
+            "payload-aarch64-unknown-linux-musl.tar.gz is missing",
+        ),
+        (
+            "meshmud build for a triple with no 111 binary",
+            remove("111-aarch64-unknown-linux-musl"),
+            "111-aarch64-unknown-linux-musl is missing",
+        ),
+        (
+            "the .tree does not describe the .tar beside it",
+            write(
+                "meshtastic-web-v2.7.2.tar",
+                bundle_tar(&[("assets/late.js", b"added after the .tree")]),
+            ),
+            "does not match the listing of meshtastic-web-v2.7.2.tar",
+        ),
+        (
+            "an unreadable payload while Layer 5 pins are written",
+            write(x86_payload, b"fake payload".to_vec()),
+            "not a readable .tar.gz",
+        ),
+        (
+            "a payload member the node refuses (./ prefix)",
+            write(x86_payload, dot_prefixed),
+            "starts with './'",
+        ),
+        (
+            "a link in the payload",
+            write(x86_payload, with_link),
+            "link or special file",
+        ),
+        (
+            "a bundle .tar without its .tree",
+            remove("meshtastic-web-v2.7.2.tree"),
+            "must both be present",
+        ),
+        (
+            "two meshmud builds for one arch",
+            write("meshmud-v0.9.0-linux-amd64", b"old".to_vec()),
+            "more than one artifact matches",
+        ),
+    ];
+    for (what, mutate, needle) in cases {
+        let (dir, arts) = release_artifacts();
+        mutate(&arts);
+        let out = dir.path().join("refused.toml");
+        let o = gen_manifest(&arts, &out);
+        let stderr = String::from_utf8_lossy(&o.stderr);
+        assert!(!o.status.success(), "{what}: gen-manifest must refuse");
+        assert!(
+            stderr.contains(needle),
+            "{what}: wanted {needle:?} in: {stderr}"
+        );
+        assert!(!out.exists(), "{what}: no manifest may be written");
+    }
+
+    // No Layer 5 artifact at all: a payload that is not a tarball passes through
+    // with a visible warning (nothing to cross-check; nodes refuse it at unpack).
+    let (dir, arts) = release_artifacts();
+    for name in [
+        "meshmud-v1.0.0-linux-amd64",
+        "meshmud-v1.0.0-linux-arm64",
+        "meshtastic-web-v2.7.2.tar",
+        "meshtastic-web-v2.7.2.tree",
+        "meshtastic-presence-lock.txt",
+        "payload-aarch64-unknown-linux-musl.tar.gz",
+    ] {
+        std::fs::remove_file(arts.join(name)).unwrap();
+    }
+    std::fs::write(arts.join(x86_payload), b"fake payload").unwrap();
+    let out = dir.path().join("plain.toml");
+    let o = gen_manifest(&arts, &out);
+    assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+    assert!(String::from_utf8_lossy(&o.stderr).contains("warning"));
+    let m = ChannelManifest::parse(&std::fs::read_to_string(&out).unwrap()).unwrap();
+    assert!(m.meshmud_for(X86).is_none() && m.bundles().is_empty());
 }

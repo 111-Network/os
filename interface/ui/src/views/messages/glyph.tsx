@@ -3,15 +3,19 @@
 import { cx } from "../../lib/cx";
 import { glyphFor, stateCopy } from "./model";
 
-export function StateGlyph({ state, className }: { state: string; className?: string }) {
+/**
+ * `copy` and `label` replace the state's own sentence and word for the one case the state alone does not tell: an own message
+ * that was cancelled is `queued` on the node, but "in the outbox" would be false of it (§4: an empty tombstone goes instead).
+ */
+export function StateGlyph({ state, className, copy, label }: { state: string; className?: string; copy?: string | undefined; label?: string | undefined }) {
   const g = glyphFor(state);
   const pips = g.known ? "■".repeat(g.filled) + "□".repeat(3 - g.filled) : "???";
   return (
-    <span className={cx("inline-flex items-center gap-1.5 whitespace-nowrap font-mono text-[11px] text-muted-foreground", className)} title={stateCopy(state)}>
+    <span className={cx("inline-flex items-center gap-1.5 whitespace-nowrap font-mono text-[11px] text-muted-foreground", className)} title={copy ?? stateCopy(state)}>
       <span aria-hidden="true" className="tracking-tighter">
         {pips}
       </span>
-      <span className="text-foreground">{g.label}</span>
+      <span className="text-foreground">{label ?? g.label}</span>
     </span>
   );
 }

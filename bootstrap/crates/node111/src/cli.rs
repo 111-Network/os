@@ -163,8 +163,9 @@ USAGE:
   111 identity commission [--loopback-test]   (Cat-1 relay ceremony; your own computer, needs a terminal)
   111 config [show | dashboard.lan true|false | offer accept|dismiss]
   111 dashboard [rotate]           (dashboard URLs + pair code; rotate = new code, sign everyone out)
-  111 fabric status | offer | enroll <CODE|111HUB:BUNDLE> [--address HOST:PORT] [--card CARD]
-                                   (messaging: home hub, offers, enrollment — via the running daemon)
+  111 fabric status | offer | enroll [111HUB:BUNDLE] [--address HOST:PORT] [--card CARD]
+                                   (messaging: home hub, offers, enrollment — via the running daemon;
+                                    without a bundle the one-time code is typed when asked, never on argv)
   111 uninstall [--phone] [--serial SERIAL]
   111 update-helper | 111 update-guard     (root oneshots via systemd)
   111 --version";
@@ -501,8 +502,9 @@ fn identity_backup() -> anyhow::Result<()> {
 }
 
 /// Read a line from the tty with echo disabled (termios ECHO toggle, restored
-/// on every path). Used for the recovery words — the master secret.
-fn read_hidden(prompt: &str) -> anyhow::Result<String> {
+/// on every path). Used for the recovery words — the master secret — and the
+/// hub's one-time enrollment code (`111 fabric enroll`, never argv).
+pub(crate) fn read_hidden(prompt: &str) -> anyhow::Result<String> {
     use std::io::Write;
     eprint!("{prompt}");
     std::io::stderr().flush()?;
@@ -698,6 +700,15 @@ mod tests {
             Cmd::Fabric(crate::daemon::fabric::cli::FabricCmd::Enroll { .. })
         ));
         assert!(parse(&["fabric".into()]).is_err());
+        // a bare enrollment code on argv is refused (F2 review m4)
+        assert!(parse(&[
+            "fabric".into(),
+            "enroll".into(),
+            "ABCD-EFGH".into(),
+            "--address".into(),
+            "10.0.0.1:11183".into()
+        ])
+        .is_err());
         assert!(matches!(
             parse(&["identity".into(), "restore".into()]).unwrap(),
             Cmd::IdentityRestore

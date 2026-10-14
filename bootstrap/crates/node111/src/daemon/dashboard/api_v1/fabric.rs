@@ -15,7 +15,13 @@
 //!   accept one) is resolved once, here, bounded by [`RESOLVE_TIMEOUT`],
 //!   and its first IPv4 answer (else the first answer) is dialed and
 //!   persisted (a name that does not resolve ⇒ `502 upstream_error`). The
-//!   home hub is then kept by address, not by name (v1).
+//!   home hub is then kept by address, not by name (v1). An address that
+//!   names no peer — unspecified (`0.0.0.0`, `::`: a connect reaches this
+//!   node itself), multicast, broadcast, or loopback while the adapter
+//!   refuses loopback peers (§2) — is `400` with the `host:port` hint, as a
+//!   literal and as a resolved name alike (`settings::dial_refusal`).
+//!   Enrollment success persists `home_hub` to `fabric/settings` before the
+//!   `200` (the `Settings` event writes it again).
 //!   A wait that times out leaves the enrollment pending inside the fabric
 //!   (its dial stays up): if the hub answers later the node still enrolls
 //!   and a `fabric` frame reports it.
@@ -34,7 +40,7 @@
 use super::auth::LoopbackOnly;
 use super::messages::{bad_request, handle, refuse_bearer};
 use super::{ApiRouter, ApiState, Problem};
-use crate::daemon::fabric::{self, json, FabricHandle};
+use crate::daemon::fabric::{self, json, settings::dial_refusal, FabricHandle};
 use axum::body::Bytes;
 use axum::extract::State;
 use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
@@ -88,14 +94,18 @@ impl std::fmt::Display for HubAddr {
     }
 }
 
-/// `host:port`: an IP literal, or a DNS-style name (letters, digits, `-`
-/// and `.`, starting and ending with a letter or digit, ≤ 253, a last label
-/// that is not all digits) and a port 1–65535. Anything else (a scheme, a
-/// path, a bare host, a malformed IP) is `None`.
+/// `host:port`: an IP literal that names a peer (not unspecified,
+/// multicast or broadcast — [`dial_refusal`]; loopback is judged by the
+/// route, which knows the adapter's rule), or a DNS-style name (letters,
+/// digits, `-` and `.`, starting and ending with a letter or digit, ≤ 253, a
+/// last label that is not all digits) and a port 1–65535. Anything else (a
+/// scheme, a path, a bare host, a malformed IP) is `None`.
 fn parse_hub_addr(raw: &str) -> Option<HubAddr> {
     let t = raw.trim();
     if let Ok(a) = t.parse::<SocketAddr>() {
-        return (a.port() != 0).then_some(HubAddr::Ip(a));
+        return dial_refusal(&a, false)
+            .is_none()
+            .then_some(HubAddr::Ip(a));
     }
     let (host, port) = t.rsplit_once(':')?;
     let port = port
@@ -165,6 +175,9 @@ async fn resolve(a: &HubAddr) -> Result<SocketAddr, Problem> {
     }
 }
 
+/// The `400` detail for an address that is not the hub's `host:port`.
+const ADDRESS_HINT: &str = "address must be the hub's host:port, like 192.168.1.20:11183 (no scheme, no path; not 0.0.0.0, multicast or broadcast).";
+
 struct EnrollReq {
     address: HubAddr,
     code: String,
@@ -191,11 +204,7 @@ fn parse_enroll(body: &[u8]) -> Result<EnrollReq, Problem> {
     let (Some(address), Some(code)) = (address, code) else {
         return Err(bad_request(shape));
     };
-    let address = parse_hub_addr(&address).ok_or_else(|| {
-        bad_request(
-            "address must be the hub's host:port, like 192.168.1.20:11183 (no scheme, no path).",
-        )
-    })?;
+    let address = parse_hub_addr(&address).ok_or_else(|| bad_request(ADDRESS_HINT))?;
     Ok(EnrollReq {
         address,
         code,
@@ -235,16 +244,32 @@ async fn enroll(State(api): State<Arc<ApiState>>, headers: HeaderMap, body: Byte
         Ok(a) => a,
         Err(p) => return p.into_response(),
     };
+    // a name may resolve to what a literal may not be; loopback per the
+    // adapter's rule (§2: never a peer in production)
+    if let Some(why) = dial_refusal(&address, h.refuse_loopback()) {
+        return bad_request(format!(
+            "{} ({address}): {why}. {ADDRESS_HINT}",
+            req.address
+        ))
+        .into_response();
+    }
     let wait = h.enroll_timeout();
     let r = tokio::time::timeout(wait, f.enroll(address, &req.code, req.card.as_deref())).await;
     match r {
-        Ok(Ok(())) => match f.status().await {
-            Ok(st) => {
-                h.refresh_facts().await;
-                Json(json::hub(&st.hub)).into_response()
+        Ok(Ok(())) => {
+            // home_hub on disk before the member says it is enrolled (the
+            // Settings event is the second writer)
+            if let Err(e) = h.sync_settings().await {
+                eprintln!("111 fabric: settings after enrollment: {e}");
             }
-            Err(e) => fabric::problem(&e).into_response(),
-        },
+            match f.status().await {
+                Ok(st) => {
+                    h.refresh_facts().await;
+                    Json(json::hub(&st.hub)).into_response()
+                }
+                Err(e) => fabric::problem(&e).into_response(),
+            }
+        }
         Ok(Err(e)) => fabric::problem(&e).into_response(),
         Err(_) => Problem::new(
             StatusCode::BAD_GATEWAY,
@@ -463,6 +488,13 @@ mod tests {
             br#"{"address":"1.2.3:11183","code":"x"}"#,
             br#"{"address":"999.1.1.1:11183","code":"x"}"#,
             br#"{"address":"123:11183","code":"x"}"#,
+            // F2 review m1: literals that name no peer
+            br#"{"address":"0.0.0.0:11183","code":"x"}"#,
+            br#"{"address":"[::]:11183","code":"x"}"#,
+            br#"{"address":"224.0.0.1:11183","code":"x"}"#,
+            br#"{"address":"255.255.255.255:11183","code":"x"}"#,
+            br#"{"address":"[ff02::1]:11183","code":"x"}"#,
+            br#"{"address":"[::ffff:0.0.0.0]:11183","code":"x"}"#,
             br#"{"code":"x"}"#,
             br#"{"address":"10.0.0.1:1","code":5}"#,
             br#"{"address":"10.0.0.1:1","code":"x","extra":1}"#,
@@ -473,6 +505,13 @@ mod tests {
                 String::from_utf8_lossy(bad)
             );
         }
+        let p = parse_enroll(br#"{"address":"0.0.0.0:11183","code":"x"}"#)
+            .err()
+            .expect("refused");
+        assert!(
+            p.detail.as_deref().unwrap().contains("host:port"),
+            "{p:?}"
+        );
         let long = format!("{}:1", "a".repeat(254));
         assert!(parse_hub_addr(&long).is_none());
         assert!(parse_hub_addr(&format!("{}:1", "a".repeat(253))).is_some());

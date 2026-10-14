@@ -53,7 +53,7 @@
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
 
 use futures::future::BoxFuture;
@@ -251,6 +251,9 @@ struct Target {
 struct Shared {
     id: LinkId,
     cfg: TcpLanConfig,
+    /// The announce sent first on each new connection: `cfg.own_announce`
+    /// until [`TcpLan::set_announce`] replaces it.
+    own: RwLock<Vec<u8>>,
     events: EventSink,
     gate: Arc<dyn AnnounceGate>,
     conns: Mutex<HashMap<SocketAddr, ConnHandle>>,
@@ -310,6 +313,7 @@ impl TcpLan {
         TcpLan {
             shared: Arc::new(Shared {
                 id,
+                own: RwLock::new(cfg.own_announce.clone()),
                 cfg,
                 events,
                 gate,
@@ -401,6 +405,17 @@ impl TcpLan {
     pub fn connection_count(&self) -> usize {
         self.shared.conn_count()
     }
+
+    /// Replace the own announce sent first on every **new** connection
+    /// (accepts, dials, reconnects) — the host re-minted it (§7.3 A8: its
+    /// roles or home-hub hint changed). The caller passes stored, verified
+    /// bytes (§7: never minted here); connections already up keep the one
+    /// they opened with.
+    pub fn set_announce(&self, announce: Vec<u8>) {
+        if let Ok(mut a) = self.shared.own.write() {
+            *a = announce;
+        }
+    }
 }
 
 /// One connection, start to end. Returns whether the handshake completed.
@@ -415,7 +430,11 @@ async fn serve(
     let slot = HandshakeSlot(&shared.handshaking);
     let _ = stream.set_nodelay(true);
     let (mut rd, mut wr) = stream.into_split();
-    let own = shared.cfg.own_announce.clone();
+    let own = shared
+        .own
+        .read()
+        .map(|a| a.clone())
+        .unwrap_or_else(|_| shared.cfg.own_announce.clone());
     let gate = shared.gate.clone();
     let handshake = async {
         wr.write_all(&HELLO).await?;
@@ -758,6 +777,35 @@ mod tests {
         assert!(matches!(read_frame(&mut ok).await, Err(WireError::Io(_))));
         let mut h: &[u8] = b"111G\x01";
         assert!(matches!(read_hello(&mut h).await, Err(WireError::BadHello)));
+    }
+
+    /// `set_announce`: a new connection opens with the replaced announce
+    /// (hello, then the announce frame, before anything is read).
+    #[tokio::test]
+    async fn set_announce_applies_to_new_connections() {
+        let first = vec![0xa1u8; announce::BASE_LEN];
+        let second = vec![0xb2u8; announce::BASE_LEN + 8];
+        let mut cfg = TcpLanConfig::new(first.clone());
+        cfg.refuse_loopback = false; // the test client is on loopback
+        let (events, _rx) = mpsc::unbounded_channel();
+        let t = TcpLan::new(
+            LinkId::new("tcp-lan"),
+            cfg,
+            events,
+            Arc::new(super::super::AdmitAll),
+        );
+        let at = t.listen("127.0.0.1:0".parse().unwrap()).await.unwrap();
+        async fn opening(at: SocketAddr) -> Vec<u8> {
+            let mut s = TcpStream::connect(at).await.unwrap();
+            read_hello(&mut s).await.unwrap();
+            let (ty, body) = read_frame(&mut s).await.unwrap();
+            assert_eq!(ty, T_ANNOUNCE);
+            body
+        }
+        assert_eq!(opening(at).await, first);
+        t.set_announce(second.clone());
+        assert_eq!(opening(at).await, second);
+        t.shutdown();
     }
 
     #[test]

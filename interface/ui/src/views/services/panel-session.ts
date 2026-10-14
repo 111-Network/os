@@ -5,7 +5,7 @@
 // every start is a new generation, the newest answer wins, and an answer that arrives after a newer start (or after the
 // tab closed) is dropped. The URL lives in this state and in the frame's `src`; nothing else holds it.
 import type { PanelSession } from "../../lib/api/types";
-import { classifyMint, mintFailureText, type MintFailure } from "./panel-model";
+import { checkMintReply, classifyMint, mintFailureText, PanelUrlError, type MintFailure } from "./panel-model";
 
 export type SessionState =
   | { kind: "idle" }
@@ -18,7 +18,7 @@ export interface SessionDeps {
   mint(): Promise<PanelSession>;
   /** The URL the frame may load for the node's answer, or null when it must not (see `ticketSrc`). */
   src(url: string): string | null;
-  /** Every failed mint, before it becomes state (the view sends a 401 to the pairing page). */
+  /** Every failed mint (the frame's and the full client's), before it becomes state (the view sends a 401 to the pairing page). */
   onError?(err: unknown): void;
 }
 
@@ -61,12 +61,15 @@ export class PanelSessionController {
     try {
       const session = await this.deps.mint();
       if (this.closed || gen !== this.gen) return;
-      const src = this.deps.src(session.url);
-      if (src === null) {
+      // The reply is data: no URL, or one the page would not frame, is a refusal, and a missing or absurd `expires_in` is the
+      // documented 30 s (or at most 300 s), so the "spent ticket" note is neither immediate nor never.
+      const reply = checkMintReply(session);
+      const src = reply ? this.deps.src(reply.url) : null;
+      if (reply === null || src === null) {
         this.set({ kind: "failed", gen, why: "bad_url", text: mintFailureText("bad_url") });
         return;
       }
-      this.set({ kind: "ready", gen, src, expiresIn: session.expires_in });
+      this.set({ kind: "ready", gen, src, expiresIn: reply.expiresIn });
     } catch (err) {
       if (this.closed || gen !== this.gen) return;
       this.deps.onError?.(err);
@@ -81,12 +84,20 @@ export class PanelSessionController {
 
   /**
    * A separate ticket for a separate window ("Open full client"). It does not touch the frame and is not remembered.
-   * Rejects when the node refuses or answers an address the page would not open.
+   * Rejects when the node refuses (after telling `onError`, so a 401 reaches the pairing page here too) or answers an
+   * address the page would not open (a `PanelUrlError`).
    */
   async fresh(): Promise<string> {
-    const session = await this.deps.mint();
-    const src = this.deps.src(session.url);
-    if (src === null) throw new Error(mintFailureText("bad_url"));
+    let session: PanelSession;
+    try {
+      session = await this.deps.mint();
+    } catch (err) {
+      this.deps.onError?.(err);
+      throw err;
+    }
+    const reply = checkMintReply(session);
+    const src = reply ? this.deps.src(reply.url) : null;
+    if (src === null) throw new PanelUrlError();
     return src;
   }
 

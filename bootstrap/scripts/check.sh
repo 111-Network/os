@@ -2,30 +2,35 @@
 # Aggregate verification for os/bootstrap. Run from the layer root.
 #
 # Stages: fmt · clippy · musl check ×2 · test · shellcheck · notices (+ the Layer 5 build-script gates)
-# · systemd-analyze · messaging (the mesh111 workspace: fmt/clippy/test/musl ×2, then the SQLCipher
-# static link — os/messaging/README.md §19 L1, §20 G2) · presence sidecar · ui. Any failure stops the run;
-# "ALL GREEN" is printed only when every stage passed (a stage whose tool is absent says SKIPPED).
+# · systemd-analyze · messaging (the mesh111 workspace: fmt/clippy/test/musl ×2) · G2, the SQLCipher
+# static link (os/messaging/README.md §19 L1, §20 G2: mesh111's test binaries linked for both musl
+# targets and asserted static, the mesh111 lib tests asserted to carry SQLCipher + the vendored
+# OpenSSL, the x86_64 ones run) · presence sidecar · ui. Any failure stops the run.
+#
+# The last line says what ran: "ALL GREEN" only when every stage ran and passed. A stage whose tool
+# is absent says SKIPPED and the run ends "GREEN (… SKIPPED — not a lock run)". G2 needs both musl
+# cross toolchains; REQUIRE_G2=1 (lock runs, the release checklist) fails instead of skipping it.
 #
 # CARGO_TARGET_DIR is honoured (parallel builders keep private target dirs).
 set -eu
 cd "$(dirname "$0")/.."
 export PATH="$HOME/.cargo/bin:$HOME/.local/bin:$PATH"
-# musl cross toolchains (no-sudo installs live here; see scripts/cross-build.sh)
-for tc in "$HOME"/.local/toolchains/*/bin; do
-  [ -d "$tc" ] && PATH="$tc:$PATH"
-done
-export PATH
+# musl cross toolchains, pinned CC/AR/linkers, the SQLite/OpenSSL escape hatches unset, and the
+# static_elf / sqlcipher_linked / openssl_src_version assertions: scripts/musl-env.sh, the env
+# scripts/cross-build.sh builds releases with (../messaging/scripts/check.sh exports the same CC/AR).
+# shellcheck source=scripts/musl-env.sh
+. scripts/musl-env.sh
 
-# SQLCipher + vendored OpenSSL (Layer 5, `mesh111`): libsqlite3-sys and openssl-src compile C through
-# cc-rs, which finds the musl cross compilers above by their target prefix (x86_64-linux-musl-gcc,
-# aarch64-linux-musl-gcc; AR likewise). The linkers are named here. This is the env
-# ../messaging/scripts/check.sh uses, unchanged, so the node111 → mesh111 path dependency builds the
-# same C objects in both workspaces. scripts/cross-build.sh pins CC/AR explicitly for release builds.
-export CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER=x86_64-linux-musl-gcc
-export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER=aarch64-linux-musl-gcc
+SKIPPED=""
+skipped() { # STAGE — record a stage that did not run (the last line names it)
+  SKIPPED="$SKIPPED${SKIPPED:+, }$1"
+}
 MUSL=0
-if command -v x86_64-linux-musl-gcc >/dev/null 2>&1 && command -v aarch64-linux-musl-gcc >/dev/null 2>&1; then
+if musl_toolchains_present; then
   MUSL=1
+elif [ "${REQUIRE_G2:-0}" = 1 ]; then
+  echo "FAIL: REQUIRE_G2=1 but the musl cross toolchains are absent (~/.local/toolchains: x86_64- and aarch64-linux-musl-gcc/-ar), so G2 cannot run" >&2
+  exit 1
 fi
 
 echo "== fmt =="
@@ -38,7 +43,8 @@ if [ "$MUSL" = 1 ]; then
   echo "== check (musl aarch64) =="
   cargo check --target aarch64-unknown-linux-musl
 else
-  echo "!! musl cross toolchains absent (~/.local/toolchains: x86_64- and aarch64-linux-musl-gcc) — musl checks SKIPPED"
+  echo "!! musl cross toolchains absent (~/.local/toolchains: x86_64- and aarch64-linux-musl-gcc/-ar) — musl checks SKIPPED"
+  skipped "musl checks"
 fi
 echo "== test (host) =="
 cargo test
@@ -48,8 +54,11 @@ if command -v shellcheck >/dev/null 2>&1; then
   # the Layer 5 scripts this gate runs
   shellcheck -s sh ../messaging/scripts/check.sh ../messaging/sidecars/meshtastic-presence/run-tests.sh
 else
-  echo "shellcheck not found — SKIP"
+  echo "shellcheck not found — SKIPPED"
+  skipped shellcheck
 fi
+echo "== gate assertions (scripts/musl-env.sh self-test: escape hatches, CC/AR pins, SQLCipher/OpenSSL/static asserts) =="
+sh scripts/musl-env-test.sh
 echo "== notices =="
 # THIRD-PARTY-NOTICES.md records the lockfile hashes it was generated from; fail when one moved.
 # Offline hash compare only. Fix: python3 -I scripts/gen-notices.py (needs cargo + pnpm, no network).
@@ -59,6 +68,7 @@ if command -v python3 >/dev/null 2>&1; then
   python3 -I -B -m unittest discover -s scripts/notices/tests
 else
   echo "python3 not found — notices check SKIPPED"
+  skipped notices
 fi
 echo "== build scripts (meshmud-build.sh / meshtastic-web-build.sh verify paths, hermetic) =="
 # Pins, tarball/asset sha256, tag commit, go.mod/go.sum snapshots vs the notices data, the
@@ -67,6 +77,7 @@ if command -v git >/dev/null 2>&1; then
   sh scripts/notices/tests/build-scripts-gate.sh
 else
   echo "git not found — build-scripts gate SKIPPED"
+  skipped "build-scripts gate"
 fi
 echo "== systemd-analyze =="
 if command -v systemd-analyze >/dev/null 2>&1 && ls systemd/*.service >/dev/null 2>&1; then
@@ -78,40 +89,66 @@ if command -v systemd-analyze >/dev/null 2>&1 && ls systemd/*.service >/dev/null
     grep -v "not executable\|not found\|netplan\|snapd\|Failed to create" || true
   rm -rf "$SC_T"
 else
-  echo "no units yet — SKIP"
+  echo "systemd-analyze or the units absent — SKIPPED"
+  skipped systemd-analyze
 fi
 echo "== messaging (mesh111 workspace) =="
 # fmt, clippy -D warnings, tests, musl check ×2 (SQLCipher + vendored OpenSSL compiled for both targets).
 sh ../messaging/scripts/check.sh
-if [ "$MUSL" = 1 ]; then
-  # §20 G2: the static link, not only the compile. x86_64-musl test binaries are static and run here —
-  # every store test opens, writes and prunes a real SQLCipher database inside a static musl binary.
-  # aarch64 links only (no emulator on this box: running it is the recorded external gate).
-  echo "== SQLCipher static link + run (mesh111 tests, musl x86_64) =="
-  (cd ../messaging && cargo test --workspace --quiet --target x86_64-unknown-linux-musl)
-  echo "== SQLCipher static link (mesh111 tests, musl aarch64; run = external gate G2) =="
-  LINK_JSON=$(mktemp)
-  (cd ../messaging && cargo test --workspace --no-run --target aarch64-unknown-linux-musl --message-format=json >"$LINK_JSON")
-  AARCH_BINS=$(python3 -I -c 'import json, sys
+
+# g2_link TRIPLE MACHINE — link (not run) mesh111's test binaries for TRIPLE; every one must be a
+# static MACHINE ELF, and the mesh111 lib-test binary (the store tests) must carry SQLCipher's codec
+# and the vendored OpenSSL. Sets G2_BINS (binaries) and G2_CIPHER (binaries carrying both).
+g2_link() {
+  g2_json=$(mktemp)
+  (cd ../messaging && cargo test --workspace --no-run --target "$1" --message-format=json >"$g2_json")
+  g2_list=$(mktemp)
+  python3 -I -c 'import json, sys
 for line in sys.stdin:
     try:
         m = json.loads(line)
     except ValueError:
         continue
     if m.get("reason") == "compiler-artifact" and m.get("executable"):
-        print(m["executable"])' <"$LINK_JSON")
-  rm -f "$LINK_JSON"
-  [ -n "$AARCH_BINS" ] || { echo "FAIL: no aarch64 test binaries were linked" >&2; exit 1; }
-  for b in $AARCH_BINS; do
-    if readelf -lW "$b" | grep -q INTERP || readelf -dW "$b" 2>/dev/null | grep -q NEEDED; then
-      echo "FAIL: $b is dynamically linked" >&2
-      exit 1
+        kinds = m["target"]["kind"]
+        kind = "lib" if "lib" in kinds else kinds[0]
+        print(kind, m["target"]["name"], m["executable"])' <"$g2_json" >"$g2_list"
+  rm -f "$g2_json"
+  G2_BINS=0
+  G2_CIPHER=0
+  g2_lib=0
+  while read -r kind name bin; do
+    G2_BINS=$((G2_BINS + 1))
+    static_elf "$bin" "$2"
+    if [ "$kind" = lib ] && [ "$name" = mesh111 ]; then
+      sqlcipher_linked "$bin" "$OSSL_VER"
+      g2_lib=1
     fi
-    readelf -hW "$b" | grep -q 'AArch64' || { echo "FAIL: $b is not an AArch64 binary" >&2; exit 1; }
-  done
-  echo "ok: $(printf '%s\n' "$AARCH_BINS" | wc -l) aarch64 test binaries, static, SQLCipher + OpenSSL linked"
+    if sqlcipher_linked "$bin" "$OSSL_VER" 2>/dev/null; then
+      G2_CIPHER=$((G2_CIPHER + 1))
+    fi
+  done <"$g2_list"
+  rm -f "$g2_list"
+  [ "$G2_BINS" -gt 0 ] || { echo "FAIL: no $1 test binaries were linked" >&2; exit 1; }
+  [ "$g2_lib" = 1 ] || { echo "FAIL: the mesh111 lib-test binary is not among the $1 test binaries" >&2; exit 1; }
+}
+
+if [ "$MUSL" = 1 ]; then
+  # The OpenSSL release openssl-src vendors (its `+<ver>` crate-version suffix), asserted in the binaries.
+  OSSL_VER=$(openssl_src_version ../messaging/Cargo.lock)
+  [ -n "$OSSL_VER" ] || { echo "FAIL: ../messaging/Cargo.lock lists no openssl-src (+<OpenSSL version>)" >&2; exit 1; }
+  # §20 G2: the static link, not only the compile. x86_64-musl test binaries are static and run here —
+  # every store test opens, writes and prunes a real SQLCipher database inside a static musl binary.
+  # aarch64 links only (no emulator on this box: running it is the recorded external gate).
+  echo "== G2: SQLCipher static link + run (mesh111 tests, musl x86_64) =="
+  g2_link x86_64-unknown-linux-musl X86-64
+  echo "ok: $G2_BINS x86_64 test binaries static X86-64 (no INTERP/NEEDED); $G2_CIPHER carry SQLCipher (cipher_plaintext_header_size) + OpenSSL $OSSL_VER, the mesh111 lib tests among them"
+  (cd ../messaging && cargo test --workspace --quiet --target x86_64-unknown-linux-musl)
+  echo "== G2: SQLCipher static link (mesh111 tests, musl aarch64; run = external gate G2) =="
+  g2_link aarch64-unknown-linux-musl AArch64
+  echo "ok: $G2_BINS aarch64 test binaries static AArch64 (no INTERP/NEEDED); $G2_CIPHER carry SQLCipher (cipher_plaintext_header_size) + OpenSSL $OSSL_VER, the mesh111 lib tests among them"
 else
-  echo "!! musl cross toolchains absent — SQLCipher static link SKIPPED"
+  echo "!! musl cross toolchains absent — G2 (SQLCipher static link) SKIPPED; REQUIRE_G2=1 makes this a failure"
 fi
 echo "== presence sidecar (meshtastic-presence: tests + venv lock structure) =="
 if command -v python3 >/dev/null 2>&1; then
@@ -119,6 +156,7 @@ if command -v python3 >/dev/null 2>&1; then
   python3 -I ../messaging/sidecars/meshtastic-presence/gen_lock.py --verify
 else
   echo "python3 not found — sidecar checks SKIPPED"
+  skipped "presence sidecar"
 fi
 echo "== ui =="
 # Layer 4 dashboard (embedded into `111`): typecheck, vitest, vite build, size budget (D21 gate as is).
@@ -129,5 +167,12 @@ if command -v pnpm >/dev/null 2>&1; then
   pnpm --dir ../interface/ui check
 else
   echo "pnpm not found — UI checks SKIPPED (interface/ui: pnpm check = typecheck + test + build + budget)"
+  skipped ui
 fi
-echo "ALL GREEN"
+if [ "$MUSL" != 1 ]; then
+  echo "GREEN (G2 SKIPPED — not a lock run)${SKIPPED:+; also skipped: $SKIPPED}"
+elif [ -n "$SKIPPED" ]; then
+  echo "GREEN ($SKIPPED SKIPPED — not a lock run)"
+else
+  echo "ALL GREEN"
+fi

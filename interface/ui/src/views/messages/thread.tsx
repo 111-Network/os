@@ -17,7 +17,7 @@ import { Textarea } from "../../components/textarea";
 import { apiStore, getAdapter } from "../../lib/api";
 import { contactName } from "../../lib/api/contacts";
 import { useApiMeta, useContacts, useIgnoredRequests, useThread, useThreads } from "../../lib/api/hooks";
-import { cleanDeep, cleanPeerText, isRetryable, newestIncomingSeq, newestReceivedSeq, THREAD_MAX_LIMIT, THREAD_PAGE_LIMIT } from "../../lib/api/messages";
+import { cleanDeep, cleanPeerText, isCancellable, isCancelled, isRetryable, newestIncomingSeq, newestReceivedSeq, THREAD_MAX_LIMIT, THREAD_PAGE_LIMIT } from "../../lib/api/messages";
 import { isIgnored, requestSeq } from "../../lib/api/requests";
 import type { Message, NodeId } from "../../lib/api/types";
 import { cx } from "../../lib/cx";
@@ -25,6 +25,9 @@ import { Adv } from "../../lib/mode";
 import { MessagingBanner } from "./banner";
 import { StateGlyph } from "./glyph";
 import {
+  CANCEL_CONFIRM,
+  CANCEL_UNSUPPORTED_TEXT,
+  CANCELLED_ANNOUNCEMENT,
   claimText,
   composeGate,
   type ComposeGate,
@@ -33,8 +36,8 @@ import {
   evidenceName,
   IGNORED_HERE_NOTE,
   MAX_COMPOSE_CHARS,
+  messageStateCopy,
   reasonText,
-  stateCopy,
   timeLabel,
   whenText,
 } from "./model";
@@ -42,7 +45,28 @@ import { RequestRow } from "./requests";
 
 const FOLLOW_SLACK_PX = 24;
 
-function MessageRow({ m, now, onRetry }: { m: Message; now: number; onRetry: (id: string) => void }) {
+/**
+ * Does the adapter in use carry `messages.cancel` (`POST /messages/{id}/cancel`)? The control is offered only where it does:
+ * a node or mock built before the route existed has none, and a button that cannot work is worse than no button.
+ */
+function useCanCancel(): boolean {
+  const [can, setCan] = useState(false);
+  useEffect(() => {
+    let live = true;
+    getAdapter().then(
+      (a) => {
+        if (live) setCan(typeof a.messages.cancel === "function");
+      },
+      () => undefined,
+    );
+    return () => {
+      live = false;
+    };
+  }, []);
+  return can;
+}
+
+export function MessageRow({ m, now, onRetry, onCancel }: { m: Message; now: number; onRetry: (id: string) => void; onCancel?: ((id: string) => void) | undefined }) {
   const own = m.dir === "own";
   const reason = own ? reasonText(m) : null;
   const claim = claimText(m, now);
@@ -57,7 +81,7 @@ function MessageRow({ m, now, onRetry }: { m: Message; now: number; onRetry: (id
         className="max-w-[85%] text-[11px] text-muted-foreground"
         summary={
           <span className="flex flex-wrap items-center gap-x-3 gap-y-1">
-            {own ? <StateGlyph state={m.state} /> : null}
+            {own ? <StateGlyph state={m.state} copy={messageStateCopy(m)} label={isCancelled(m) ? "cancelled" : undefined} /> : null}
             <span>
               {timeLabel(m)} {whenText(m.at, now)}
             </span>
@@ -66,7 +90,7 @@ function MessageRow({ m, now, onRetry }: { m: Message; now: number; onRetry: (id
         }
       >
         <div className="flex flex-col gap-1 border border-border p-3 leading-relaxed">
-          {own ? <p>{stateCopy(m.state)}</p> : <p>Arrived on this node. Messages are ordered by when they arrived here.</p>}
+          {own ? <p>{messageStateCopy(m)}</p> : <p>Arrived on this node. Messages are ordered by when they arrived here.</p>}
           {claim ? (
             <p>
               <span className="uppercase tracking-widest">unverified sender time</span> {claim}
@@ -83,10 +107,19 @@ function MessageRow({ m, now, onRetry }: { m: Message; now: number; onRetry: (id
           {evidenceName(m)}
         </p>
       </Adv>
-      {isRetryable(m) ? (
-        <Button size="sm" onClick={() => onRetry(m.id)} aria-label={`Retry sending: ${cleanPeerText(m.text).slice(0, 40)}`}>
-          retry now
-        </Button>
+      {isRetryable(m) || (onCancel && isCancellable(m)) ? (
+        <div className="flex flex-wrap items-center justify-end gap-2">
+          {isRetryable(m) ? (
+            <Button size="sm" onClick={() => onRetry(m.id)} aria-label={`Retry sending: ${cleanPeerText(m.text).slice(0, 40)}`}>
+              retry now
+            </Button>
+          ) : null}
+          {onCancel && isCancellable(m) ? (
+            <Button size="sm" confirm={CANCEL_CONFIRM} onClick={() => onCancel(m.id)} aria-label={`Cancel sending: ${cleanPeerText(m.text).slice(0, 40)}`} data-testid={`cancel-${m.id}`}>
+              cancel sending
+            </Button>
+          ) : null}
+        </div>
       ) : null}
     </li>
   );
@@ -171,6 +204,8 @@ export default function ThreadView({ peer }: { peer: NodeId }) {
   const ignoredRequests = useIgnoredRequests();
   const { ready } = useApiMeta();
   const now = useNow(true, 30_000);
+  const canCancel = useCanCancel();
+  const [cancelError, setCancelError] = useState<string | null>(null);
   const page = slot.page;
 
   const thread = threads?.find((t) => t.peer === peer) ?? null;
@@ -225,6 +260,29 @@ export default function ThreadView({ peer }: { peer: NodeId }) {
       } catch (err) {
         if (redirectIfUnauthenticated(err)) return;
         announce(errorSentence(err, "Could not retry that message."));
+      }
+    },
+    [peer, limit],
+  );
+
+  const cancel = useCallback(
+    async (id: string) => {
+      setCancelError(null);
+      try {
+        const adapter = await getAdapter();
+        if (!adapter.messages.cancel) {
+          setCancelError(CANCEL_UNSUPPORTED_TEXT);
+          return;
+        }
+        await adapter.messages.cancel(id);
+        announce(CANCELLED_ANNOUNCEMENT);
+        void apiStore.loadThread(peer, limit);
+        void apiStore.refreshThreads();
+      } catch (err) {
+        if (redirectIfUnauthenticated(err)) return;
+        // A 409 means it left (or was never ours to cancel) while the button was on screen: the node's own words say which.
+        setCancelError(errorSentence(err, "Could not cancel that message."));
+        void apiStore.loadThread(peer, limit);
       }
     },
     [peer, limit],
@@ -318,11 +376,16 @@ export default function ThreadView({ peer }: { peer: NodeId }) {
           ) : (
             <ul className="flex flex-col gap-4">
               {messages.map((m) => (
-                <MessageRow key={m.id} m={m} now={now} onRetry={(id) => void retry(id)} />
+                <MessageRow key={m.id} m={m} now={now} onRetry={(id) => void retry(id)} onCancel={canCancel ? (id) => void cancel(id) : undefined} />
               ))}
             </ul>
           )}
         </div>
+        {cancelError ? (
+          <p role="alert" className="border-t border-border px-4 py-2 text-xs text-destructive" data-testid="cancel-error">
+            {cancelError}
+          </p>
+        ) : null}
         {slot.state === "error" ? (
           <p role="status" className="border-t border-border px-4 py-2 text-xs text-muted-foreground">
             The latest messages could not be loaded.{" "}

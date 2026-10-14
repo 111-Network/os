@@ -396,7 +396,7 @@ export const schemas: Record<string, JsonSchema> = {
   "DeviceMatch": {
     "type": "object",
     "required": ["confidence","rule"],
-    "description": "How the record was identified. USB VID:PID names the serial chip, not the board or its firmware (os/plan/devices.md §0): table matches are 'likely' until a consented probe confirms.",
+    "description": "How the record was identified. USB VID:PID names the serial chip, not the board or its firmware (os/plan/cross-layer/devices.md §0): table matches are 'likely' until a consented probe confirms.",
     "properties": {
       "confidence": {"type":"string","enum":["exact","likely","unknown"]},
       "rule": {"type":"string","description":"e.g. lora-table 303a:1001, serial-by-id, session, probe"}
@@ -819,7 +819,11 @@ export const schemas: Record<string, JsonSchema> = {
       "open": {"type":"boolean"},
       "used": {"type":"integer","minimum":0,"description":"live bytes: DB pages minus freelist, plus the blob dir"},
       "watermark": {"type":"integer","minimum":0,"description":"the high watermark in bytes that triggers pruning"},
-      "store_full": {"type":"boolean"}
+      "store_full": {"type":"boolean"},
+      "restore_pending": {
+        "type": "boolean",
+        "description": "the identity holder reports a restore floor (§4): nothing is sealed, new messages are refused 409 and no link runs until it is set. false when the store is not open; absent from older daemons"
+      }
     }
   },
   "FabricSettings": {
@@ -829,7 +833,7 @@ export const schemas: Record<string, JsonSchema> = {
       "hub_role": {"type":"boolean","description":"accept custody for enrolled members"},
       "listen_lan": {
         "type": "boolean",
-        "description": "bind the tcp-lan listener on the LAN (otherwise loopback; loopback is never a peer)"
+        "description": "bind the tcp-lan listener on the LAN (the hub role binds it too; with both off nothing listens — loopback is never a peer)"
       },
       "custody_opt_in": {
         "type": "boolean",
@@ -838,13 +842,13 @@ export const schemas: Record<string, JsonSchema> = {
       "quotas": {
         "type": "object",
         "additionalProperties": {"type":["integer","null"],"minimum":0},
-        "description": "capacity shaping per stored-data class, in bytes (keys such as msg, agent_op, kb, update, patch); null or absent means no quota. Not a per-sender limit; those do not exist"
+        "description": "capacity shaping per refusable stored-data class, in bytes: kb, update, patch, sync, object, custody (messages and agent ops are never refused, §10.4, so they take no quota); null means no quota. Not a per-sender limit; those do not exist"
       }
     }
   },
   "FabricSettingsPatch": {
     "type": "object",
-    "description": "Partial merge. In `quotas`, a class set to null drops its quota.",
+    "description": "Partial merge. In `quotas`, a class set to null drops its quota; only the refusable classes (kb, update, patch, sync, object, custody) take one — any other key is 400.",
     "properties": {
       "hub_role": {"type":"boolean"},
       "listen_lan": {"type":"boolean"},
@@ -1568,6 +1572,18 @@ export const operations: Record<string, ContractOperation> = {
     "pathParams": ["id"],
     "errors": [404,409]
   },
+  "cancelMessage": {
+    "method": "POST",
+    "path": "/api/v1/messages/{id}/cancel",
+    "success": 202,
+    "contentType": "application/json",
+    "schema": {"$ref":"#/components/schemas/Message"},
+    "schemasByType": {"application/json":{"$ref":"#/components/schemas/Message"}},
+    "requestSchema": null,
+    "query": [],
+    "pathParams": ["id"],
+    "errors": [404,409]
+  },
   "listContacts": {
     "method": "GET",
     "path": "/api/v1/contacts",
@@ -1618,7 +1634,7 @@ export const operations: Record<string, ContractOperation> = {
     "requestSchema": null,
     "query": [],
     "pathParams": [],
-    "errors": []
+    "errors": [409]
   },
   "getContact": {
     "method": "GET",
@@ -1690,7 +1706,7 @@ export const operations: Record<string, ContractOperation> = {
     "requestSchema": null,
     "query": [],
     "pathParams": [],
-    "errors": [403]
+    "errors": [403,409]
   },
   "dismissHubOffer": {
     "method": "DELETE",

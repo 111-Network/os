@@ -65,8 +65,27 @@ export function utilizationText(n: Pick<NearbyNode, "channel_utilization">): str
   return finite(u) && u >= 0 ? `${Math.round(u * 10) / 10}% of the channel in use` : null;
 }
 
-/** The node's own report of when it was last heard: "12 min ago" by the node's clock, which is a hint and nothing more. */
-export const heardText = (n: Pick<NearbyNode, "last_heard_hint">, now: number): string => (n.last_heard_hint ? agoText(n.last_heard_hint, now) : "not reported");
+/** A hint further than this ahead of this node's clock is not "just now": the board's clock (or its owner) is wrong or lying. */
+export const CLOCK_AHEAD_MS = 60_000;
+export const CLOCK_AHEAD_TEXT = "clock ahead of this node";
+
+/**
+ * The node's own report of when it was last heard: "12 min ago" by the node's clock, which is a hint and nothing more. A hint
+ * more than a minute in this node's future reads "clock ahead of this node" instead of "just now", so a wrong or hostile clock
+ * never makes a node look fresh.
+ */
+export function heardText(n: Pick<NearbyNode, "last_heard_hint">, now: number): string {
+  if (!n.last_heard_hint) return "not reported";
+  const at = Date.parse(n.last_heard_hint);
+  if (Number.isFinite(at) && at - now > CLOCK_AHEAD_MS) return CLOCK_AHEAD_TEXT;
+  return agoText(n.last_heard_hint, now);
+}
+
+/** "last heard 4 min ago", or "last heard: clock ahead of this node" (a colon, because that is a remark and not a time). */
+export const heardLine = (n: Pick<NearbyNode, "last_heard_hint">, now: number): string => {
+  const t = heardText(n, now);
+  return t === CLOCK_AHEAD_TEXT ? `last heard: ${t}` : `last heard ${t}`;
+};
 
 /** A public key as the board reports it, shortened (Advanced). */
 export const keyText = (n: Pick<NearbyNode, "pubkey">): string | null => (n.pubkey ? plain(n.pubkey, 24) : null);
@@ -115,6 +134,7 @@ export type NearbyState =
   | { kind: "list"; stale: boolean; text: string | null };
 
 export const STALE_TEXT = "Last known list. The node is not answering right now, so nobody here is confirmed to be in range.";
+export const STARTING_STALE_TEXT = "Last known list. Meshtastic is starting, so the board's newest list of nodes has not arrived yet and nobody here is confirmed to be in range.";
 
 /**
  * Which empty state or list the page shows. `service` is the `meshtastic` registry row (null before the registry arrived or on a
@@ -127,7 +147,16 @@ export function nearbyState(
   ready = true,
 ): NearbyState {
   const nodes = (sources ?? []).reduce((n, s) => n + s.nodes.length, 0);
-  if (nodes > 0) return { kind: "list", stale: disconnected || service?.state === "error", text: disconnected ? STALE_TEXT : service?.state === "error" ? "The Meshtastic service has a problem, so this is the last list it heard." : null };
+  if (nodes > 0) {
+    // While the service restarts the daemon still serves the last snapshot (the board's list has not arrived again): last known.
+    const starting = service?.state === "starting";
+    const error = service?.state === "error";
+    return {
+      kind: "list",
+      stale: disconnected || error || starting,
+      text: disconnected ? STALE_TEXT : error ? "The Meshtastic service has a problem, so this is the last list it heard." : starting ? STARTING_STALE_TEXT : null,
+    };
+  }
   if (sources === null) {
     return ready
       ? { kind: "unavailable", text: "This node did not report who it hears. The list appears here as soon as it does." }

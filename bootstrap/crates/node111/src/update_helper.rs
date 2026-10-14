@@ -3,6 +3,8 @@
 //! the probation journal + monotonic floor. Re-verifies manifest minisig + tarball
 //! pin, and promotes a tree IT extracted itself — the daemon's staged tree is only
 //! a hint; node111→root trust never flows through daemon-writable content (D12).
+//! The extracted tree is checked against its own `share/payload.manifest` and then
+//! against the manifest's Layer 5 pins (`ChannelManifest::verify_layer5_tree`).
 
 use crate::calver::Calver;
 use crate::daemon::updater::stage::safe_unpack;
@@ -177,6 +179,10 @@ fn handle_update_request(
     let extract_result = (|| -> anyhow::Result<()> {
         safe_unpack(&tarball, &tmp)?;
         crate::daemon::updater::stage::verify_tree(&tmp)?;
+        // Layer 5 (os/messaging/README.md §19 L1): bin/meshmud, panels/<bundle>/ and
+        // the presence lock must equal the signed manifest's pins, and nothing unpinned
+        // rides along. This is the authoritative check — on the tree WE extracted.
+        manifest.verify_layer5_tree(&tmp, crate::daemon::updater::fetch::TARGET_TRIPLE)?;
         Ok(())
     })();
     if let Err(e) = extract_result {

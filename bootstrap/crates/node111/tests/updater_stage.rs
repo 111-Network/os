@@ -1,7 +1,8 @@
 //! T10 acceptance: updater fetch/verify/stage against a fixture HTTP server —
 //! happy path, stale manifest, bad minisig, replayed keychain generation,
-//! tampered payload, clock-skew marker. Asserts the daemon never writes
-//! outside state/staging (no releases/, no `current`).
+//! tampered payload, clock-skew marker, and the Layer 5 cross-check
+//! (`verify_layer5_tree` after staging, os/messaging/README.md §19 L1). Asserts
+//! the daemon never writes outside state/staging (no releases/, no `current`).
 
 mod common;
 
@@ -16,8 +17,9 @@ fn sha(b: &[u8]) -> String {
     node111::util::hash::sha256_bytes(b)
 }
 
-/// Write a channel manifest (fixture-signed) + payload into a served dir.
-fn make_served(dir: &Path, release: &str, payload_bytes: &[u8]) {
+/// Write a channel manifest (fixture-signed) + payload into a served dir;
+/// `extra` is appended to the manifest (Layer 5 sections).
+fn make_served(dir: &Path, release: &str, payload_bytes: &[u8], extra: &str) {
     let payload_sha = sha(payload_bytes);
     let payload_len = payload_bytes.len();
     let manifest = format!(
@@ -55,7 +57,7 @@ pubkey = "RWRoot00000000000000000000000000000000000000000="
 generation = 1
 pubkey = "RWGen100000000000000000000000000000000000000000="
 signature_by_previous = "untrusted comment: fixture\\nplaceholder"
-"#,
+{extra}"#,
         a64 = "a".repeat(64)
     );
     std::fs::write(dir.join("payload.tar.gz"), payload_bytes).unwrap();
@@ -78,10 +80,26 @@ struct Fixture {
 }
 
 fn setup(release: &str, sign_with: &Path, date_header: Option<String>) -> Fixture {
+    setup_with(
+        release,
+        sign_with,
+        date_header,
+        &common::build_payload(),
+        "",
+    )
+}
+
+/// [`setup`] with a chosen payload and extra manifest sections.
+fn setup_with(
+    release: &str,
+    sign_with: &Path,
+    date_header: Option<String>,
+    payload: &[u8],
+    extra: &str,
+) -> Fixture {
     let served = tempfile::tempdir().unwrap();
     let node = tempfile::tempdir().unwrap();
-    let payload = common::build_payload();
-    make_served(served.path(), release, &payload);
+    make_served(served.path(), release, payload, extra);
     let port = common::serve_dir(served.path().to_path_buf(), date_header);
     // Patch the payload URL now that the port is known, then sign.
     let manifest_path = served.path().join("channel-111-stable.toml");
@@ -302,4 +320,74 @@ fn symlink_payload_entry_refused() {
     )
     .unwrap_err();
     assert!(err.to_string().contains("unsafe path"), "{err}");
+}
+
+const MESHMUD: &[u8] = b"meshmud v1.0.0 linux/amd64 static";
+
+/// `[pkg.meshmud.target.x86_64-unknown-linux-musl]` pinning `bytes`.
+fn meshmud_pin(bytes: &[u8]) -> String {
+    format!(
+        "\n[pkg.meshmud.target.x86_64-unknown-linux-musl]\nurl = \"https://example.invalid/meshmud\"\nsha256 = \"{}\"\nsize = {}\n",
+        sha(bytes),
+        bytes.len()
+    )
+}
+
+/// A payload whose Layer 5 asset equals the manifest's pin stages as before.
+#[test]
+fn layer5_pinned_meshmud_stages() {
+    let payload = common::build_payload_with(&[("bin/meshmud", MESHMUD)]);
+    let fx = setup_with(
+        "2026.10.12",
+        &common::minisign_fixture_key(),
+        None,
+        &payload,
+        &meshmud_pin(MESHMUD),
+    );
+    let layout = layout_at(fx.node.path());
+    let outcome = check_once(&cfg(fx.port, "2026.10.01"), &layout).unwrap();
+    assert!(
+        matches!(outcome, FetchOutcome::Staged { .. }),
+        "{outcome:?}"
+    );
+    let staged = layout.state_dir().join("staging/2026.10.12");
+    assert_eq!(
+        std::fs::read(staged.join("tree/bin/meshmud")).unwrap(),
+        MESHMUD
+    );
+    assert!(layout.state_dir().join("update-request.json").exists());
+}
+
+/// §19 L1 at the updater: a signed manifest whose payload carries a meshmud it
+/// does not pin — or other bytes than it pins — is refused after staging; the
+/// staging bundle is removed and the root helper is never asked.
+#[test]
+fn layer5_mismatch_is_refused_and_unstaged() {
+    let payload = common::build_payload_with(&[("bin/meshmud", MESHMUD)]);
+    for (extra, needle) in [
+        (String::new(), "pins no meshmud"),
+        (meshmud_pin(b"another meshmud build"), "bin/meshmud size"),
+    ] {
+        let fx = setup_with(
+            "2026.10.12",
+            &common::minisign_fixture_key(),
+            None,
+            &payload,
+            &extra,
+        );
+        let layout = layout_at(fx.node.path());
+        let outcome = check_once(&cfg(fx.port, "2026.10.01"), &layout).unwrap();
+        match outcome {
+            FetchOutcome::Refused { reason } => {
+                assert!(reason.contains("Layer 5"), "{reason}");
+                assert!(reason.contains(needle), "wanted {needle:?} in: {reason}");
+            }
+            other => panic!("expected Refused, got {other:?}"),
+        }
+        assert!(!layout.state_dir().join("update-request.json").exists());
+        assert!(!layout.state_dir().join("staging/2026.10.12").exists());
+        // D12 still holds on the refusal path.
+        assert!(!layout.root.join("releases").exists());
+        assert!(!layout.root.join("current").exists());
+    }
 }

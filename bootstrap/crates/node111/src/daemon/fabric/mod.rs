@@ -7,20 +7,31 @@
 //!    daemon start stays alive here for the daemon's lifetime (L2 §13 signer
 //!    pattern) with the identity dir's L2 counter store; `mesh111` gets the
 //!    handle, never key bytes. A missing `counters` file is L2 §8.4's
-//!    state-absent case: nothing is sealed (§4 `restore_pending`).
+//!    state-absent case: nothing is sealed (§4 `restore_pending`) and
+//!    nothing is written to the identity dir (see step 4 and
+//!    [`FabricHandle::shutdown`]).
 //! 2. **Store** (§10): `fabric/` (0700, created at runtime like `agent/`),
 //!    `fabric/store.db` opened with the Mode S key (§10.2: `store_secret`
 //!    behind the handle → `mesh111::keys::ModeS`), the §4 epoch decision fed
-//!    the live `announce_last`. Opens are serialized process-wide.
+//!    the live `announce_last`. Opens are serialized process-wide. When
+//!    `fabric/settings` was absent or invalid (moved aside), the home hub is
+//!    rebuilt from the store's `enrolled` contact here
+//!    ([`settings::rebuild_home_hub`]) and the file rewritten.
 //! 3. **Own announce** (§7, A8): `fabric/announce`, re-minted only when its
-//!    `appdata` (roles from the settings, the home-hub hint) changed. Roles
-//!    and the hint follow settings changes at the next start (the fabric
-//!    reads its announce once).
+//!    `appdata` (roles from the settings, the home-hub hint) changed — at
+//!    start, and again on every `Settings` event, when the re-minted bytes
+//!    go to `tcp-lan` for new connections ([`TcpLan::set_announce`]). The
+//!    fabric's own copy (card answers inside INTROs, the offer bundle) is
+//!    the one read at start until the next start; `GET /contacts/me/card`
+//!    shows the current one. While restore-pending no announce is presented
+//!    at all, not even a valid stored one.
 //! 4. **Fabric** (`Fabric::start`: epoch mint, `complete_partials` and
 //!    orphan recovery are the library's own), then the **`tcp-lan`** adapter
 //!    registered with its dialer (the fabric keeps the home hub dialed;
 //!    configured direct `peers` from `fabric/settings` are dialed here). No
-//!    link is registered while the node has no announce (restore pending).
+//!    link is registered while the node has no announce or the identity
+//!    holder is restore-pending: no listener, no dial, no `peers` — so no
+//!    inbound packet ever reaches the L2 window (§4, L2 §8.4).
 //! 5. **Listener** (§2, §8.1): `:11183` is bound on the LAN only while
 //!    `hub_role` or `listen_lan` is on (re-evaluated on every settings
 //!    change, so `PATCH /fabric/settings` takes effect immediately); with
@@ -42,7 +53,9 @@
 //! (`Fabric::shutdown`: the store writes its clean-shutdown record with
 //! `announce_last`, §10.1) — `Fabric::abort` (unclean: the next open mints a
 //! new epoch) only when that does not finish within the grace — and then
-//! commits the L2 counters clean.
+//! commits the L2 counters clean (skipped while restore-pending: a counters
+//! file written then would carry `announce_last = 0` and read as state
+//! present at the next start — a counter reset, never a floor).
 //!
 //! Any failure leaves the handle **down** (`running() == false`, the reason
 //! logged once): routes answer `503`, `GET /fabric` reports `store.open:
@@ -71,7 +84,7 @@ use mesh111::keys::ModeS;
 use mesh111::link::tcp_lan::{TcpLan, TcpLanConfig, DEFAULT_PORT};
 use mesh111::link::{Dialer, LinkId};
 use mesh111::sealer::Sealer;
-use mesh111::store::{Class, DiskSpace, OpenParams, Store, StoreError};
+use mesh111::store::{Class, DiskSpace, OpenParams, Store, StoreError, Trust};
 use sealer::{AnnounceOutcome, IdentitySealer};
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, HashMap};
@@ -172,6 +185,8 @@ pub struct FabricHandle {
     times: Mutex<times::DisplayTimes>,
     contacts: Mutex<HashMap<[u8; 32], Value>>,
     listener: tokio::sync::Mutex<Option<SocketAddr>>,
+    /// Serializes announce re-mints on settings changes.
+    remint: tokio::sync::Mutex<()>,
     tasks: Mutex<Vec<JoinHandle<()>>>,
 }
 
@@ -324,7 +339,8 @@ fn ensure_dir(dir: &Path) -> std::io::Result<()> {
 async fn boot(
     cfg: &FabricConfig,
     identity: Option<Identity>,
-    persisted: &settings::Persisted,
+    persisted: &mut settings::Persisted,
+    recover: Option<&settings::Recover>,
 ) -> Result<Live, String> {
     let identity = identity.ok_or("no identity is loaded")?;
     let (counters, how) = sealer::open_counters(&cfg.identity_dir)
@@ -336,11 +352,72 @@ async fn boot(
         );
     }
     let sealer = Arc::new(IdentitySealer::new(identity, counters));
-    match boot_with(cfg, &sealer, persisted).await {
+    match boot_with(cfg, &sealer, persisted, recover).await {
         Ok(l) => Ok(l),
         Err(e) => {
+            // a no-op while restore-pending (no counter reset, L2 §8.4)
             let _ = sealer.shutdown_counters();
             Err(e)
+        }
+    }
+}
+
+/// The store's `enrolled` contacts, for [`settings::rebuild_home_hub`].
+fn enrolled_contacts(store: &Store) -> Vec<settings::Enrolled> {
+    match store.contacts() {
+        Ok(rows) => rows
+            .into_iter()
+            .filter(|c| c.trust == Trust::Enrolled)
+            .map(|c| settings::Enrolled {
+                node_id: NodeId::from(c.node_id),
+                custody: c.roles & ROLE_MAILBOX != 0,
+                cursor: store.cursor(&c.node_id).unwrap_or(0),
+            })
+            .collect(),
+        Err(e) => {
+            eprintln!("111 fabric: contacts unreadable for the home-hub rebuild: {e}");
+            Vec::new()
+        }
+    }
+}
+
+/// Settings file absent or invalid: rebuild the home hub from the store and
+/// rewrite the file when there is something to keep (module doc, step 2).
+fn recover_settings(
+    cfg: &FabricConfig,
+    persisted: &mut settings::Persisted,
+    recover: &settings::Recover,
+    enrolled: &[settings::Enrolled],
+) {
+    if persisted.fabric.home_hub.is_none() {
+        if let Some(h) = settings::rebuild_home_hub(enrolled, recover.hint.as_ref()) {
+            eprintln!(
+                "111 fabric: home hub {} rebuilt from its enrolled contact{}",
+                json::hex(&h.node_id),
+                match h.address {
+                    Some(a) => format!(" at {a}"),
+                    None => " (its address is unknown: nothing dials it until a fresh offer)"
+                        .to_string(),
+                }
+            );
+            persisted.fabric.home_hub = Some(h);
+        } else if !enrolled.is_empty() && recover.invalid {
+            eprintln!(
+                "111 fabric: no home hub could be identified among {} enrolled contact(s)",
+                enrolled.len()
+            );
+        }
+    }
+    // An invalid file that was moved aside is replaced now; an absent one
+    // is written only when it gained a home hub (absent = the defaults).
+    let rewrite = if recover.invalid {
+        recover.moved_to.is_some()
+    } else {
+        persisted.fabric.home_hub.is_some()
+    };
+    if rewrite {
+        if let Err(e) = settings::save(&cfg.fabric_dir, persisted) {
+            eprintln!("111 fabric: settings not saved: {e:#}");
         }
     }
 }
@@ -348,7 +425,8 @@ async fn boot(
 async fn boot_with(
     cfg: &FabricConfig,
     sealer: &Arc<IdentitySealer>,
-    persisted: &settings::Persisted,
+    persisted: &mut settings::Persisted,
+    recover: Option<&settings::Recover>,
 ) -> Result<Live, String> {
     let node_id = sealer.node_id();
     let secret = Zeroizing::new(
@@ -362,18 +440,29 @@ async fn boot_with(
         restore_floor_set: false,
     };
     let dir = cfg.fabric_dir.clone();
-    let (store, decision) = tokio::task::spawn_blocking(move || {
+    let want_hubs = recover.is_some() && persisted.fabric.home_hub.is_none();
+    let (store, decision, enrolled) = tokio::task::spawn_blocking(move || {
         let _one = OPEN_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        Store::open_with(&dir, &provider, &params)
+        let (store, decision) = Store::open_with(&dir, &provider, &params)?;
+        let enrolled = if want_hubs {
+            enrolled_contacts(&store)
+        } else {
+            Vec::new()
+        };
+        Ok::<_, StoreError>((store, decision, enrolled))
     })
     .await
     .map_err(|e| format!("store open task: {e}"))?
     .map_err(|e| format!("store open: {e}"))?;
+    if let Some(r) = recover {
+        recover_settings(cfg, persisted, r, &enrolled);
+    }
 
     let app = sealer::appdata(
         roles(&persisted.fabric),
         persisted.fabric.home_hub.as_ref().map(|h| &h.node_id),
     );
+    // Restore-pending ⇒ `Missing`, even with a valid stored announce.
     let announce = sealer.ensure_announce(&cfg.fabric_dir, &app);
     let fabric = Fabric::start(
         Arc::clone(sealer) as Arc<dyn Sealer>,
@@ -383,7 +472,10 @@ async fn boot_with(
     )
     .map_err(|e| format!("fabric start: {e}"))?;
     let tcp = if announce == AnnounceOutcome::Missing {
-        eprintln!("111 fabric: no own announce (restore pending): tcp-lan not started");
+        eprintln!(
+            "111 fabric: no own announce (restore pending): tcp-lan not started — \
+             no listener, no dial, no peers"
+        );
         None
     } else {
         let mut tc = TcpLanConfig::new(sealer.own_announce());
@@ -427,14 +519,17 @@ pub async fn start(
 ) -> Arc<FabricHandle> {
     let mut down = None;
     let mut persisted = settings::Persisted::default();
+    let no_identity = identity.is_none();
     let live = match ensure_dir(&cfg.fabric_dir) {
         Err(e) => {
             down = Some(format!("{}: {e}", cfg.fabric_dir.display()));
             None
         }
         Ok(()) => {
-            persisted = settings::load(&cfg.fabric_dir, cfg.hub_default);
-            match boot(&cfg, identity, &persisted).await {
+            let loaded =
+                settings::load(&cfg.fabric_dir, cfg.hub_default, cfg.tcp.refuse_loopback);
+            persisted = loaded.persisted;
+            match boot(&cfg, identity, &mut persisted, loaded.recover.as_ref()).await {
                 Ok(l) => Some(l),
                 Err(e) => {
                     down = Some(e);
@@ -454,6 +549,8 @@ pub async fn start(
     let handle = Arc::new(FabricHandle {
         facts: RwLock::new(FabricFacts {
             store_open: live.is_some(),
+            no_identity: live.is_none() && no_identity,
+            restore_pending: live.as_ref().is_some_and(|l| l.sealer.restore_pending()),
             ..FabricFacts::default()
         }),
         cfg,
@@ -463,6 +560,7 @@ pub async fn start(
         times: Mutex::new(times),
         contacts: Mutex::new(HashMap::new()),
         listener: tokio::sync::Mutex::new(None),
+        remint: tokio::sync::Mutex::new(()),
         tasks: Mutex::new(Vec::new()),
     });
     if let Some(l) = &handle.live {
@@ -505,6 +603,19 @@ impl FabricHandle {
     /// Is the fabric running?
     pub fn running(&self) -> bool {
         self.live.is_some()
+    }
+
+    /// The identity holder reports a restore floor (§4): nothing is sealed,
+    /// no link runs.
+    pub fn restore_pending(&self) -> bool {
+        self.live
+            .as_ref()
+            .is_some_and(|l| l.sealer.restore_pending())
+    }
+
+    /// The `tcp-lan` adapter refuses loopback peers (production, §2).
+    pub fn refuse_loopback(&self) -> bool {
+        self.cfg.tcp.refuse_loopback
     }
 
     /// Why it is not running.
@@ -626,7 +737,10 @@ impl FabricHandle {
         let Some(f) = self.fabric() else {
             return Ok(json::status_down(&self.persisted().fabric));
         };
-        let st = f.status().await?;
+        let mut st = f.status().await?;
+        // the store reports it after a refused epoch mint; the identity
+        // holder is the authority (L2 §8.4)
+        st.store.restore_pending |= self.restore_pending();
         self.set_facts(&st);
         let q = self.quotas().await;
         Ok(json::status(&st, &q))
@@ -635,6 +749,8 @@ impl FabricHandle {
     fn set_facts(&self, st: &FabricStatus) {
         let facts = FabricFacts {
             store_open: true,
+            no_identity: false,
+            restore_pending: st.store.restore_pending || self.restore_pending(),
             store_full: st.store.store_full,
             hub_reachable: st.hub.enrolled.then_some(st.hub.reachable),
             members: st
@@ -666,8 +782,8 @@ impl FabricHandle {
         }
     }
 
-    /// Persist a settings change (the peers list kept) and apply it to the
-    /// listener.
+    /// Persist a settings change (the peers list kept), apply it to the
+    /// listener, and re-mint the own announce when its `appdata` changed.
     async fn on_settings(&self, s: FabricSettings) {
         let snapshot = match self.persisted.lock() {
             Ok(mut p) => {
@@ -680,6 +796,41 @@ impl FabricHandle {
             eprintln!("111 fabric: settings not saved: {e:#}");
         }
         self.reconcile_listener(&s).await;
+        self.refresh_announce(&s).await;
+    }
+
+    /// Re-mint the own announce for `s` (§7.3 A8: roles, home-hub hint —
+    /// `ensure_announce` keeps the stored one when its `appdata` already
+    /// matches; a new one is counter-committed first, §6.2) and give it to
+    /// `tcp-lan` for new connections. Nothing without a link (no announce
+    /// is presented while restore-pending).
+    async fn refresh_announce(&self, s: &FabricSettings) {
+        let Some(l) = &self.live else { return };
+        let Some(tcp) = &l.tcp else { return };
+        let _one = self.remint.lock().await;
+        let app = sealer::appdata(roles(s), s.home_hub.as_ref().map(|h| &h.node_id));
+        let (handle, dir) = (Arc::clone(&l.sealer), self.cfg.fabric_dir.clone());
+        match tokio::task::spawn_blocking(move || handle.ensure_announce(&dir, &app)).await {
+            Ok(AnnounceOutcome::Missing) => {}
+            Ok(_) => {
+                let bytes = l.sealer.own_announce();
+                if !bytes.is_empty() {
+                    tcp.set_announce(bytes);
+                }
+            }
+            Err(e) => eprintln!("111 fabric: announce re-mint: {e}"),
+        }
+    }
+
+    /// Persist and apply the fabric's current settings now — the enroll
+    /// route calls it before answering, so `home_hub` is on disk when the
+    /// member reports itself enrolled (the `Settings` event writes the same
+    /// values again).
+    pub async fn sync_settings(&self) -> Result<FabricSettings, FabricError> {
+        let f = self.fabric().ok_or(FabricError::Stopped)?;
+        let s = f.settings().await?;
+        self.on_settings(s.clone()).await;
+        Ok(s)
     }
 
     /// Apply a settings patch now (the route answers after the listener
@@ -852,6 +1003,7 @@ impl FabricHandle {
                 l.fabric.abort();
             }
         }
+        // A no-op while restore-pending: no counters file is written then.
         if let Err(e) = l.sealer.shutdown_counters() {
             eprintln!("111 fabric: identity counters not closed cleanly: {e}");
         }

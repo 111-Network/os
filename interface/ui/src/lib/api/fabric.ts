@@ -5,6 +5,16 @@ import type { FabricHub, FabricStatus, FabricStore } from "./types";
 /** The store is full: new custody and bulk are refused, and new messages wait (§10.4). */
 export const isStoreFull = (f: Pick<FabricStatus, "store"> | null | undefined): boolean => f?.store.store_full === true;
 
+/**
+ * Does the identity holder report a restore floor (§4, §15 as-built)? `true`: nothing is numbered or sealed, and new messages
+ * are refused (409 `restore_pending`) until it is lifted. `false`: no floor. `null`: this node did not say (the contract's
+ * `FabricStore.restore_pending` is optional, and a node older than it omits it), which is not the same as "no".
+ */
+export function restoreFloor(f: { store: object } | null | undefined): boolean | null {
+  const v = (f?.store as { restore_pending?: unknown } | undefined)?.restore_pending;
+  return typeof v === "boolean" ? v : null;
+}
+
 /** The store is not open (it failed to open, or the daemon has not started the fabric yet). */
 export const isStoreOpen = (f: Pick<FabricStatus, "store"> | null | undefined): boolean => f?.store.open === true;
 
