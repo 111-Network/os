@@ -109,7 +109,7 @@ pub enum Transport {
 
 /// How sure the identification is (`DeviceMatch.confidence`). A USB VID:PID
 /// names the serial chip, not the board or its firmware, so a LoRa-table hit
-/// is only ever `likely` (`os/plan/devices.md` §0).
+/// is only ever `likely` (`os/plan/cross-layer/devices.md` §0).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, serde::Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Confidence {

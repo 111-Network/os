@@ -2,7 +2,7 @@
 
 The single entry point: **one command** that turns a Linux machine — or an Android phone connected over USB-C — into a running 111 Network node. It detects hardware and environment, assigns the device category, generates the node's cryptographic identity, installs only what the device needs, prefetches a minimal offline cache, and leaves a **running minimal node** with a reachable dashboard. The only interaction is privilege escalation (sudo/doas/su) and, on phones, the unavoidable on-device taps.
 
-Status of this document: **spec v2.2 — LOCKED** (decisions: `os/plan/DECISIONS.md` D9 + D12 lock amendments · D14(d): provisional identity seam replaced by Layer 2's locked contract — `os/identity/README.md`; panel triage: `os/plan/layer-1-review.md`; research: `os/plan/layer-1-options.md`).
+Status of this document: **spec v2.2 — LOCKED** (decisions: `os/plan/DECISIONS.md` D9 + D12 lock amendments · D14(d): provisional identity seam replaced by Layer 2's locked contract — `os/identity/README.md`; panel triage: `os/plan/layers/01-bootstrap/review/triage.md`; research: `os/plan/layers/01-bootstrap/options.md`).
 
 ## The one command
 

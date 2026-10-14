@@ -1,6 +1,6 @@
 # Layer 2 — Build tasks
 
-Execution per `os/plan/EXECUTION.md`. Spec: `os/identity/README.md` (locked v2 — D13 + D14, amended to v2.1 on 2026-10-14: §3 torsion-free A/R; panel triage `os/plan/layer-2-review.md`).
+Execution per `os/plan/EXECUTION.md`. Spec: `os/identity/README.md` (locked v2 — D13 + D14, amended to v2.1 on 2026-10-14: §3 torsion-free A/R; panel triage `os/plan/layers/02-identity/review/triage.md`).
 Subagents write files only; the reviewer (main session) runs checks, reads diffs, bounces failures with specific fixes, and commits each verified task. No attribution lines in commits.
 
 Legend: ⬜ todo · 🔧 in flight · 🔁 bounced · ✅ verified + committed

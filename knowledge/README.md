@@ -2,7 +2,7 @@
 
 The curated, AI-readable knowledge base every other layer of the OS reads from. It catalogs external projects, device/hardware profiles, protocols, models, and the project's own design references — and it powers the adopt-vs-build rule: *if a solid project exists, we use it*. Primary reader is an agent (down to 1B–8B local models); secondary reader is a human, often in Obsidian.
 
-Status: **spec v2 — LOCKED 2026-10-12** after a 4-judge adversarial panel (triage: `os/plan/layer-0-review.md`) and user sign-off. Process: `os/plan/INDEX.md`; decisions: `os/plan/DECISIONS.md` D6-D7.
+Status: **spec v2 — LOCKED 2026-10-12** after a 4-judge adversarial panel (triage: `os/plan/layers/00-knowledge/review/triage.md`) and user sign-off. Process: `os/plan/INDEX.md`; decisions: `os/plan/DECISIONS.md` D6-D7.
 
 All paths in this document are relative to the `os/` git repository root.
 
@@ -138,6 +138,6 @@ Machinery above + 9 seed entries, all entering as `candidate` with desk-research
 | Heltec WiFi LoRa 32 V3 | `devices/heltec-wifi-lora-32-v3.md` | device |
 | Install Meshtastic on Heltec V3 | `recipes/install-meshtastic-on-heltec-wifi-lora-32-v3.md` | recipe |
 
-## Deferred (details in `os/plan/layer-0-options.md` and `layer-0-review.md`)
+## Deferred (details in `os/plan/layers/00-knowledge/options.md` and `os/plan/layers/00-knowledge/review/triage.md`)
 
 Identity-systems inventory (**required before Layer 2 build**; the Layer 2 research session drafts the entries) · full ~35-entry seed inventory · further recipes/concepts · `skills/` dir for agent procedures · hub-side MCP wrapper · Foam link-reference definitions for GitHub browsing · llms-full/category bundles · monthly LLM freshness audit · publish pipeline + CI wiring.
