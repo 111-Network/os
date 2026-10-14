@@ -12,6 +12,15 @@ use id111::seal::{OpenError, SealError, SealHeader};
 /// A 32-byte key or key-derived value.
 pub type Key32 = [u8; 32];
 
+/// The L2 window's verdict on a verified packet (spec §4, A11): bookkeeping,
+/// never rejection, for `msg_seq` kinds. `Fresh` gates connection attribution,
+/// card answers and proactive pushes; a replayed packet is never `Fresh`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Freshness {
+    Fresh,
+    Stale,
+}
+
 /// Which way a pair key runs (spec §3):
 /// `key = BLAKE2b-256("111/pair/v1" ‖ ss ‖ sender_enc_pk ‖ recipient_enc_pk)`.
 /// `Outbound` = this node is the sender; `Inbound` = the peer is the sender.
@@ -78,11 +87,18 @@ pub trait Sealer: Send + Sync {
     /// L2 §6.5: the next strictly increasing send counter for `peer`.
     fn next_send_counter(&self, peer: &NodeId) -> Result<u64, SealerError>;
 
-    /// A11: record `counter` as seen from `peer` (high-water only; no window).
-    fn observe_counter(&self, peer: &NodeId, counter: u64) -> Result<(), SealerError>;
+    /// A11: offer `counter` from `peer` to the L2 window and record it
+    /// (high-water advanced either way); returns the freshness verdict.
+    fn observe_counter(&self, peer: &NodeId, counter: u64) -> Result<Freshness, SealerError>;
 
-    /// §4 epoch source: a freshly committed announce-counter value.
+    /// §4 epoch source: a freshly committed announce-counter value. Errors
+    /// while a restore floor is pending (`RestoreFloorRequired`): nothing is
+    /// sealed until it clears.
     fn next_announce_counter(&self) -> Result<u64, SealerError>;
+
+    /// §4: the identity's current `announce_last`, recorded at clean close and
+    /// compared at open to decide whether a new epoch is minted.
+    fn announce_last(&self) -> u64;
 
     /// §5 / §11: fresh random bytes (session tags, object keys) from the §4
     /// entropy discipline. Typed failure, never a silent weak fallback.

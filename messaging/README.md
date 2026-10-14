@@ -6,9 +6,9 @@ latency second**, store-and-forward across whatever links exist, and an encrypte
 by policy. Plus the dashboard's power to **host** an adopted project's own panel, and the first hosted project:
 Meshtastic.
 
-Status of this document: **spec v1.1 — after the adversarial panel, pending re-check** (decisions D18, D19 in
-`os/plan/DECISIONS.md`; options brief `os/plan/layer-5-options.md`; research `os/plan/layer-5-research/`; panel triage
-`os/plan/layer-5-review.md`). Nothing here is built yet. Build tasks will live in `TASKS.md` per `os/plan/EXECUTION.md`.
+Status of this document: **spec v1.2 — locked (D20, 2026-10-14)** after the three-judge adversarial panel and the
+re-check (decisions D18, D19, D20 in `os/plan/DECISIONS.md`; options brief `os/plan/layer-5-options.md`; research
+`os/plan/layer-5-research/`; triage `os/plan/layer-5-review.md`, re-check `os/plan/layer-5-review/recheck.md`). Nothing here is built yet. Build tasks will live in `TASKS.md` per `os/plan/EXECUTION.md`.
 
 Reads with: `os/README.md` §5 (vision) · `os/identity/README.md` §6, §8.4, §9, §10, §12, §13 (the sealed packet,
 announces, restore, delegation, attestation, hand-offs) · `os/interface/README.md` §5–§7, §10–§11 (dashboard, services,
@@ -79,8 +79,8 @@ fields in the places L2 reserved. Byte order LE unless stated; varints are unsig
 
 ```
 [L6 shim, 1 B — ONLY on broadcast bearers, never on tcp-lan; outside the sealed packet; mutable; never in AD]
-   bits 7–6 frame_type (0 reserved, 1 sealed, 2 public: announce / card request / chunk, 3 foreign)
-   bits 5–3 hop_limit · bits 2–0 reserved (0)
+   bits 7–6 frame_type (0 reserved, 1 sealed, 2 public, 3 foreign) · bits 5–3 hop_limit
+   bits 2–0: reserved (0) for frame_type 1; for frame_type 2 the public sub-type (0 announce · 1 card request · 2 chunk)
 
 [sealed packet — L2 header, AD-covered byte-exact]
    version      1   0x01 (Layer 5 owns this field; unknown ⇒ drop, fail closed)
@@ -104,7 +104,8 @@ authenticator (L2 B2).
    kind         1   §3.2 registry
    flags        1   bit0 HAS_FRAG · bit1 HAS_EXT · bit2 PIGGYBACK_ACK · bit3 SIGNED · bit4 RECEIPT_STRONG ·
                     bit5 INTRO · bits 6–7 reserved, MUST be 0 (set ⇒ reject)
-   msg_seq      varint   per (sender, stream) sequence (§4); stream 0 = the 1:1 conversation; control kinds carry 0
+   msg_seq      epoch(varint) ‖ n(varint)   per (sender, recipient, stream) sequence (§4); stream 0 = the pair's
+                    1:1 stream; control kinds carry 0 ‖ 0
    [frag_idx, frag_count]  varint ×2            if HAS_FRAG (§5)
    [ext TLVs]              type(1) len(1) value  if HAS_EXT (unknown type ⇒ skip; 0x01 seen_peer_seq; 0x10 ratchet
                                                  pubkey reserved; 0x20 delegation trailer ⇒ REJECT in v1 per L2 §6.7;
@@ -122,7 +123,9 @@ the recipient learns that *someone holding its announced key* sealed the packet,
 the key order `sender ‖ recipient` makes it direction-bound (no reflection). The receiver MUST verify `pair_mac`
 **before** touching replay state or any store — a forged `sender_ref` never advances the claimed sender's state, and
 **only `pair_mac` keys replay state; a valid `sig` never does** (a signed plaintext is re-sealable by anyone who holds
-it). The identity handle caches the per-contact pair key (computed once per contact, zeroized on forget). `pair_mac`
+it). The identity handle derives the per-contact pair key once (the ECDH runs behind the handle) and hands the **derived
+symmetric key** to `mesh111`, which runs the MAC; the keyset and the ECDH secret never cross (§18.3); the key is cached
+per contact and zeroized on forget. `pair_mac`
 is deniable (either party could have produced it) — intended for routine traffic (L2 rule 13); its KCI residual is in §18.
 
 **`sig` (authorship, transferable; present only when SIGNED, in addition to `pair_mac`):** Ed25519 over
@@ -134,15 +137,15 @@ never be redirected to a third party. **Mandatory** for every stored-for-others,
 
 **Sizes (what fits; the L6 shim byte is inside the bearer payload on broadcast bearers):**
 
-| Bearer payload | Shim | Outer (16 hdr + 32 epk + 16 tag) | Inner hdr (≈7–9) + `pair_mac` | Payload, pair-auth | Payload, SIGNED (+64) |
+| Bearer payload | Shim | Outer (16 hdr + 32 epk + 16 tag) | Inner hdr (≈8–10) + `pair_mac` | Payload, pair-auth | Payload, SIGNED (+64) |
 |---|---|---|---|---|---|
-| 160 B (flood floor: MeshCore `GRP_DATA` 163 B) | 1 | 64 | 23–25 | **≈ 70–72 B** (Tier 1 with frag fields: 68–70) | ≈ 6–8 B |
-| 233 B (Meshtastic `PRIVATE_APP`; RNode single frame ≈ 254) | 1 | 64 | 23–25 | **≈ 143–145 B** | ≈ 79–81 B |
-| TCP (`tcp-lan`) | 0 | 64 | 23–25 | up to 65,535 − 89 per frame | — |
+| 160 B (flood floor: MeshCore `GRP_DATA` 163 B) | 1 | 64 | 24–26 | **≈ 69–71 B** (Tier 1 with frag fields: 67–69) | ≈ 5–7 B |
+| 233 B (Meshtastic `PRIVATE_APP`; RNode single frame ≈ 254) | 1 | 64 | 24–26 | **≈ 142–144 B** | ≈ 78–80 B |
+| TCP (`tcp-lan`) | 0 | 64 | 24–26 | up to 65,535 − 90 per frame | — |
 
 SIGNED classes are Tier-2 or TCP traffic in practice; the 160 B SIGNED column is stated for honesty. If the L2 panel
 rejects amendment A2 (4 B `sender_ref` instead of the 32 B inner NodeId as built), subtract 28 B from every payload
-column (43–45 B at 160 B). **One wire per version:** the 32 B form is a pre-release build gate only and is removed
+column (41–43 B at 160 B). **One wire per version:** the 32 B form is a pre-release build gate only and is removed
 before the first signed release; two inner layouts never share `version = 0x01`.
 
 ### 3.1 Domain tags (registered with L2 §6.1; each with its pinned signed/MAC input)
@@ -179,22 +182,35 @@ size, name?, object_key(32)}` — the object moves by §11. Relays never parse b
 
 ## 4. Message identity, ordering, time
 
-- **`msg_id = (sender NodeId, stream, msg_seq)`**, `msg_seq = (epoch << 32) | n` (u64 varint): `n` is a strictly
-  increasing per-(sender, stream) counter, **committed to the store (`synchronous = FULL`) before the first fragment
-  is sealed**; `epoch` is a freshly committed L2 announce-counter value (`next_announce_counter()`, fsync) taken at
-  stream (re)start — on a store opened without its clean-shutdown flag, and on restore (L2 §8.4's floor + jump keeps
-  it monotone across disaster recovery). So a crashed sender never reuses a number for new content, and a second
-  words-only restore never collides with the first (L2 amendment A3). Wire cost 1–5 B.
-- Receiver state per (sender, stream): a contiguous delivered prefix plus a bounded range list (≈ 24–48 B). **Below the
-  prefix nothing is ever forgotten**: a duplicate is re-ACKed and never redelivered — this is the content-level
-  idempotency L2 §6.5 hands to this layer, and it also covers flood-mesh duplicates and multi-path delivery. A gap
-  ≥ 2^32 from an authenticated sender (a new epoch) collapses the prefix to `seq − 1`; old-epoch stragglers are then
-  dropped as below-prefix. Random ids and content hashes are rejected (both forget under pruning and then redeliver).
-- **Replay authority (L2 amendment A11):** for kinds carrying `msg_seq`, replay protection is this state, not the L2
+- **`msg_id = (sender, recipient, stream, epoch, n)`.** `n` is a strictly increasing per-(peer, stream) counter
+  (`tx_state` is keyed by `(peer, stream)`: stream 0 is the pair's 1:1 stream, never a global counter), **committed to
+  the store (`synchronous = FULL`) before the first fragment is sealed**. On the wire `msg_seq` is `epoch(varint) ‖
+  n(varint)` — 2–4 B typical; every `seq` in ACK lists and `seen_peer_seq` uses the same two-varint form.
+- **Epochs.** `epoch` is a freshly committed L2 announce-counter value (`next_announce_counter()`, fsync), **minted
+  once per store open and shared by every stream started in that run**, when any of these holds: the clean-shutdown
+  record is absent; the recorded `announce_last` differs from the live identity's; a restore floor was set since the
+  last run (L2 §8.4); `n` would wrap 2^32. The store records L2 `announce_last` at clean close (§10.1). So a crashed
+  sender never reuses a number for new content, a `store.db` restored from a backup onto a live identity gets a new
+  epoch even though it closed cleanly, and a second words-only restore never collides with the first (L2 amendment
+  A3). While the identity holder reports `RestoreFloorRequired`, **nothing is sealed**: outbox items stay `queued`,
+  reason `restore_pending`. Residual, stated: one consistent older image of store **and** identity dir together is L2
+  §8.4's state-present case and is undetectable locally.
+- **Receiver state** per (peer, stream, epoch): a contiguous delivered prefix plus a bounded range list (≈ 24–48 B).
+  **Below a prefix nothing is ever forgotten**: a duplicate is re-ACKed and never redelivered — this is the
+  content-level idempotency L2 §6.5 hands to this layer, and it also covers flood-mesh duplicates and multi-path
+  delivery. A `pair_mac`-verified packet whose epoch **exceeds** the current one opens a new (prefix, ranges, partials)
+  entry; the previous epoch's entry is **frozen and kept**, and old-epoch packets are still delivered against it
+  (custody and multi-path legitimately deliver an earlier epoch after a later one). `rx_state` keeps the newest **4**
+  epochs per (peer, stream); older epochs are stale and dropped. Random ids and content hashes are rejected (both
+  forget under pruning and then redeliver).
+- **Replay authority (L2 amendment A11).** For kinds carrying `msg_seq`, replay protection is this state, not the L2
   32-entry window — under store-and-forward a custody item can legitimately arrive hundreds of counters behind a
-  packet that took a direct path. The L2 counter stays AD-covered and strictly increasing on the send side; the
-  receive window is **not enforced below high-water** for such kinds. Control kinds are idempotent (§3.2). Residual,
-  stated: delay-and-replay of a never-delivered old packet delivers it once — DTN behaviour, not a hole.
+  packet that took a direct path. A11 relaxes *rejection*, not bookkeeping: **every verified packet is still offered to
+  the L2 window** (`observe_counter`, high-water advanced), and `msg_seq` kinds are processed for content whatever the
+  verdict; but **attribution of a connection, card answers and proactive pushes require a packet the window judged
+  fresh** (§8.1) — a replayed packet verifies but is never fresh (L2's unclean-reboot jump covers the last-N replays).
+  Control kinds are idempotent (§3.2). Residual, stated: delay-and-replay of a never-delivered old packet delivers it
+  once — DTN behaviour, not a hole.
 - **Blobs** are content-addressed by BLAKE3 root (§11); `object_id` never identifies a message.
 - **No timestamp field anywhere in the envelope.** Order within a conversation = `msg_seq` per direction plus
   `seen_peer_seq` (ext TLV 0x01, varint: the highest `msg_seq` the sender had seen from the peer), which gives
@@ -208,7 +224,7 @@ size, name?, object_key(32)}` — the object moves by §11. Relays never parse b
 | Tier | When | How | Overhead |
 |---|---|---|---|
 | **0** | message fits one bearer frame (the chat case) | one sealed packet, no `HAS_FRAG` | 0 |
-| **1** | ≤ 16 fragments (≈ 1.1 KB at the 160 B floor, ≈ 2.3 KB at 233 B) | **fragment-then-seal**: every fragment is a complete sealed packet (`frag_idx < frag_count ≤ 16`), independently authenticated, resumable, no fragment poisoning. Sender keeps ≤ **16 outstanding** unACKed fragments per peer and **re-seals on retransmit** (fresh epk + counter). Reassembly at the destination only; the receiver ACKs fragments by SACK bitmap (§6.1). Partial reassemblies are bounded by capacity, evicted oldest-first. **INTRO in v1 is `tcp-lan`-only** (a card never fits a flood frame; the card-in-fragment-0 design for LoRa first contact is recorded in §21). | ≈ 35–45 % at 160 B; the price of verifiable fragments |
+| **1** | ≤ 16 fragments (≈ 1.07 KB at the 160 B floor, ≈ 2.2 KB at 233 B) | **fragment-then-seal**: every fragment is a complete sealed packet (`frag_idx < frag_count ≤ 16`), independently authenticated, resumable, no fragment poisoning. Sender keeps ≤ **16 outstanding** unACKed fragments per peer and **re-seals on retransmit** (fresh epk + counter). Reassembly at the destination only; the receiver ACKs fragments by SACK bitmap (§6.1). Partial reassemblies are bounded by capacity, evicted oldest-first. **INTRO in v1 is `tcp-lan`-only** (a card never fits a flood frame; the card-in-fragment-0 design for LoRa first contact is recorded in §21). | ≈ 35–45 % at 160 B; the price of verifiable fragments |
 | **2** | larger objects and every bulk class | sealed **`OBJ_ADVERT`** (`{hash, size, chunk_group, coding, object_key?}`, SIGNED when the class requires), sealed `OBJ_REQ {hash, ranges, session_tag}` where `session_tag` = 8 random bytes chosen by the requester (never hash-derived: no linkability across fetches), then **hash-verified chunks** (§11): `OBJ_CHUNK` frames (`session_tag ‖ chunk_idx ‖ bao-verified bytes`) **unsealed** when the object is public or already encrypted to its recipient, sealed otherwise. Unsealed chunks ride `tcp-lan` frame `0x05` and shim type 2 with a sub-type byte. Pinned here; **built in v1.1** (J5); the L2 carve-out for unsealed chunks on broadcast bearers is asked then, not now. | ≈ 22 B per chunk |
 
 **Seal-once-then-fragment is rejected** (raw slices cannot be verified; one bad slice forces a whole-message
@@ -223,16 +239,18 @@ retransmit; counters per fragment would be unavailable). Erasure coding: `coding
 ### 6.1 Delivery ACK (`kind = ACK`, or the piggybacked block)
 
 ```
-ack block = ack_len(varint) ‖ ack_prefix(varint) ‖ n_ranges(1, ≤ 4) ‖ [start, len](varint ×2)*
-            ‖ n_partial(1) ‖ [seq(varint), frag_bitmap(u16 LE)]*          -- fragments received of in-flight messages
-            ‖ n_strong(1, 0 allowed) ‖ [seq(varint), BLAKE2b-128(payload)]*
+ack block = ack_len(varint) ‖ ack_epoch(varint) ‖ ack_prefix(varint)        -- current epoch, delivered prefix n
+            ‖ n_ranges(1, ≤ 8) ‖ [epoch, start_n, len](varint ×3)*           -- current-epoch ranges + frozen epochs, absolute
+            ‖ n_partial(1) ‖ [epoch, n (varint ×2), frag_bitmap(u16 LE)]*    -- fragments received of in-flight messages
+            ‖ n_strong(1, 0 allowed) ‖ [epoch, n (varint ×2), BLAKE2b-128(payload)]*
 ```
 
 for the (sender, stream) being acknowledged — the stream is the ACK's own stream (0 for 1:1). `ack_len` covers
 everything after it, so a piggybacked block (placed before `payload`, §3) is unambiguous. Authentication is the
 packet's own `pair_mac`; `kind`/flags sit inside the authenticated region, so a data packet cannot be replayed as an
-ACK. A **transferable** receipt is produced only on request: `ack_sig = Ed25519("111/ack-sig/v1" ‖ acker ‖ sender ‖
-stream ‖ ack block bytes)` appended after the block. `RECEIPT_STRONG` on a message asks for its payload hash in the
+ACK. A **transferable** receipt is produced only on request and only in a standalone `ACK` packet: `ack_sig =
+Ed25519("111/ack-sig/v1" ‖ acker ‖ sender ‖ stream ‖ ack block bytes)` as the last 64 B of that packet's payload,
+outside `ack_len`; never piggybacked. `RECEIPT_STRONG` on a message asks for its payload hash in the
 ACK (proof the recipient decrypted *this* content; used for `AGENT_OP`, `PATCH`). Duplicates are re-ACKed. **Only the
 recipient's ACK moves a message to `delivered` and releases the sender's copy.** Hop-by-hop link ACKs are the link's
 business (Layer 6).
@@ -270,8 +288,8 @@ user-added peers**; L2's 256-entry pin store is a cache of it (L2 amendment A7).
    loopback origin via `jsQR`, or file upload) adds the contact with `trust = oob`. Works with zero connectivity.
 2. **`node1…` only** — typed or scanned (63 chars). The node stores the NodeId and sends a **cleartext card request**
    (`tcp-lan` frame `0x04`: the wanted NodeId; it cannot be sealed, since the requester has no key yet) to its hub; a hub
-   answers **only for its enrolled contacts, only to a peer past the announce hello, from stored bytes, and never
-   forwards the request** (§18: the request is a membership oracle, bounded to members). The reply is an announce frame,
+   answers **only for its enrolled contacts, only to a member on an attributed connection (§8.1), from stored bytes,
+   and never forwards the request** (§18: the request is a membership oracle, bounded to members). The reply is an announce frame,
    verified **against the expected NodeId**, then pinned. Until then messages stay `queued`, reason "waiting for their
    key". (Delta Chat SecureJoin shape: one out-of-band fact, the rest over an untrusted channel.)
 3. **INTRO** (`tcp-lan` only in v1) — a first message to a never-contacted peer sets `INTRO` and carries the sender's
@@ -284,7 +302,8 @@ user-added peers**; L2's 256-entry pin store is a cache of it (L2 amendment A7).
 
 The hub shows a one-time **enrollment code** (8 chars from the L4 pair-code generator; `111 fabric offer` or Settings →
 Messaging & Data → "Let a node use this hub") together with its card and `tcp-lan` address (the LAN IP, D16 e) as a QR.
-The member sends `ENROLL {card, code}` sealed to the hub; the hub verifies
+The member sends `ENROLL` sealed to the hub with the `INTRO` flag set — its card rides the §3 card slot, so the hub pins it
+provisionally and verifies `pair_mac` before parsing the payload (§7.2 (3)); the payload is `{code}`. The hub verifies
 `BLAKE2b-128(key = code_secret, data = "111/enroll/v1" ‖ member NodeId ‖ code)` in constant time, stores the contact as
 `enrolled`, answers `ENROLL_OK {hub card, custody_seq_floor}`. Code rules (mirroring the pair code, D15): single-use,
 invalidated when the hub owner dismisses the offer, attempt lockout after 5 failures — a defense, carved out of "no
@@ -335,7 +354,8 @@ announce (cleartext; `id111::process_announce` with the §7 stale rule, before a
 announce) · `0x03` keepalive (empty) · `0x04` card request (32 B NodeId; §7.2) · `0x05` chunk (reserved, §5 Tier 2).
 Each side sends its announce first; a peer whose announce fails signature verification or conflicts with pinned keys
 is dropped. **Hello and announce authenticate nothing**: a connection is attributed to node X only after a
-`pair_mac`-verified packet from X has arrived on it; proactive mailbox pushes, card answers and card forwarding all gate
+`pair_mac`-verified packet from X **that the L2 window judged fresh** (§4) has arrived on it — a replayed packet
+verifies but is never fresh; proactive mailbox pushes, card answers and card forwarding all gate
 on attribution (an attacker replaying a public announce gets nothing but a silent socket). Frames above the length
 cap are refused; reconnect on link events with back-off; no timers in the protocol itself (keepalive interval is a
 transport detail). The stream leaks `dest_hint`, counters and sizes to an on-path observer (§18); content, sender and
@@ -378,8 +398,8 @@ never on wall-clock timers; the sender's copy is kept until `delivered`.
 x86_64 and aarch64 — measured +6.4 / +5.4 MB). **File format pinned to SQLCipher 4** (`PRAGMA cipher_compatibility =
 4`); 5.0 migration planned via `cipher_migrate` behind the Layer 1 updater. Raw key (`PRAGMA key = "x'…'"`, no
 PBKDF2 at open), WAL, `synchronous = FULL` on sequence-allocating transactions, `temp_store = MEMORY` (transient files
-are not encrypted), `auto_vacuum = INCREMENTAL` so pruning frees disk, `secure_delete = ON`, a clean-shutdown flag
-(`settings.clean = 1` written on close; absent at open ⇒ new epoch, §4). One DB: `fabric/store.db`, 0600, owner `node111`.
+are not encrypted), `auto_vacuum = INCREMENTAL` so pruning frees disk, `secure_delete = ON`, a clean-shutdown record
+(`settings.clean = 1` **and** the L2 `announce_last` value, written on close; the §4 epoch rules read both at open). One DB: `fabric/store.db`, 0600, owner `node111`.
 
 ### 10.2 Key custody (`KeyProvider` seam)
 
@@ -394,10 +414,10 @@ are not encrypted), `auto_vacuum = INCREMENTAL` so pruning frees disk, `secure_d
 
 ### 10.3 Schema (v1, migrations via `PRAGMA user_version`)
 
-`contacts` (§7.1) · `messages` (`sender`, `stream`, `seq`, `dir own|in|transit`, `kind`, `class`, `size`, `local_seq`
+`contacts` (§7.1) · `messages` (`peer`, `sender`, `stream`, `epoch`, `n`, `dir own|in|transit`, `kind`, `class`, `size`, `local_seq`
 (the age hint), `state queued|sent|relayed|delivered`, `reason`, `received_local_seq`, `body` or blob refs, `pinned`) ·
-`tx_state` (`(stream)` → next `n`, `epoch`) · `outbox` (sealed bytes awaiting a path, per fragment, outstanding count,
-SACK bitmap) · `rx_state` (`(peer, stream)` → prefix + ranges + partial bitmaps) · `custody` (hub: `dest`,
+`tx_state` (`(peer, stream)` → next `n`, `epoch`) · `outbox` (sealed bytes awaiting a path, per fragment, outstanding count,
+SACK bitmap) · `rx_state` (`(peer, stream, epoch)` → prefix + ranges + partial bitmaps; newest 4 epochs kept) · `custody` (hub: `dest`,
 `custody_seq`, `pkt_ref`, bytes, `committed`) · `cursors` (member: hub → cursor) · `blobs` (`hash`, `size`,
 `refcount`, `public`, `object_key?`) · `requests` (pending INTROs) · `settings`.
 Bodies of `MSG` live in the DB (small); attachments (v1.1) and every bulk object are files under `fabric/blobs/` named
@@ -491,14 +511,19 @@ source_offer = "THIRD-PARTY-NOTICES.md" # names the pinned tag; CI builds the bu
 ```
 
 - **Listeners:** one per *enabled* panel from the block 11190–11229, slot stable in `state/panels.json`, bound
-  exactly where the dashboard is bound (loopback; LAN when LAN sharing is on). Origin = `http://<host as typed>:<port>`;
-  the UI builds it from `location.hostname` and the `panel.port` field (never from a shared snapshot).
+  exactly where the dashboard is bound (loopback; LAN when LAN sharing is on); `[auth] mode = "loopback-only"` means
+  the listener binds loopback regardless of LAN sharing, with the ticket flow unchanged. Origin =
+  `http://<host as typed>:<port>`; the UI builds it from `location.hostname` and the `panel.port` field (never from a
+  shared snapshot). The **main dashboard listener answers `Host: localhost` with a 308 to the same path on
+  `127.0.0.1`**, so panels never see `localhost` (same host + different port is same-site, so the frame, the ticket
+  swap and same-origin fetches pass); `[::1]` is matched bracketed.
 - **Auth (ticket → cookie, everywhere — no loopback skip):** the dashboard calls `POST /api/v1/panels/{id}/session`
   (behind the dashboard session; on trusted loopback the session is implicit, the ticket is still minted) and receives
   a one-time ticket URL (128-bit, single use, 30 s). The panel listener swaps it for the host-only cookie `p111_<id>`
   (HttpOnly, SameSite=Strict, no `Domain`, Path=/) and redirects to `entry.path`. Lifecycle: a request carrying a valid
   `p111_<id>` ignores any ticket parameter and redirects to `entry.path` (reload/back after the swap); a spent or
-  expired ticket without a cookie answers `403 panel_ticket_expired` and the dashboard re-mints; tickets and cookies
+  expired ticket without a cookie answers `403 panel_ticket_expired` and the dashboard re-mints; a ticket ignored
+  because a valid cookie is present is also spent; tickets and cookies
   are bound to the minting session (peer, session hash); `p111_*` are session cookies recorded in
   `state/panel-sessions.json` (0600) and revoked on `111 dashboard rotate`, panel disable and LAN-off; the ticket query
   is redacted from logs. Each cookie is read by exact name and every copy is tried (D16 f).
@@ -559,7 +584,9 @@ not see or store it** — this sentence is on the service page.
   HTTP downlink is configured**: `111d`'s built-in **shim** serves `PUT /api/v1/toradio` and `GET /api/v1/fromradio`
   on the panel origin by reframing bodies onto a per-panel-session meshmud TCP connection (the same ToRadio/FromRadio
   bytes behind the 4-byte `0x94 0xC3 len` header — no protobuf decode, no GPL in our binary), so nothing
-  browser-speakable listens outside the guarded panel origin and several viewers each own a downlink. Config rendered
+  browser-speakable listens outside the guarded panel origin and several viewers each own a downlink. A session's
+  downlink opens on its first `/api/v1/*` call and closes on cookie revocation or idle; its `FromRadio` buffer is
+  capacity-bounded, drop-oldest, with the drop count surfaced in `panel.state`. Config rendered
   by `111d` from the binding in `devices.json`: uplink path validated against `^/dev/(serial/by-id/)?[A-Za-z0-9_.:-]+$`
   or a parsed `host:port`, `advertise = false` (no unrequested mDNS), file 0600. Supervised child; CI-built static
   binaries pinned in the channel manifest.
@@ -663,17 +690,20 @@ Termux). Tools run inside `111-agent`; writes only via the proposal path (L3 "on
 
 ## 18. Security & threat model (hard rules)
 
-1. Verify before state: `pair_mac` → `msg_seq` dedup (or the kind's idempotency rule) → store. A failure at any step
+1. Verify before state: `pair_mac` → L2 window verdict (bookkeeping only for `msg_seq` kinds: fresh or stale, never
+   rejection; the verdict gates attribution, card answers and pushes) → `msg_seq` dedup (or the kind's idempotency
+   rule) → store. A failure at any step
    leaves no trace except a bounded log counter. A valid `sig` alone never advances any state.
 2. Fail closed on unknown `version`, `crypto_mode`, reserved bits (outer and inner), unknown `kind`, non-empty
    delegation trailer, `frag_count > 16`, `frag_idx ≥ frag_count`.
 3. The keyset never enters `mesh111`; sealing, opening, signing and the pair-key ECDH happen behind the identity
-   holder's handle inside `111d` (pair keys cached per contact, zeroized on forget). No key material on any HTTP
-   endpoint, ever.
+   holder's handle inside `111d`; the derived per-contact pair key (a symmetric 32 B MAC key) does cross into
+   `mesh111` so the MAC runs there, cached per contact and zeroized on forget — the keyset and ECDH secrets never do.
+   No key material on any HTTP endpoint, ever.
 4. Metadata stated honestly: `dest_hint` (4 B), counters, sizes and `prio_flags` are cleartext; `tcp-lan` has no
    transport encryption in v1, so an on-path observer learns who talks to which hub and how much; hello and announce
-   frames authenticate nothing (§8.1); a card request is a membership oracle bounded to enrolled contacts and peers
-   past hello; unauthenticated announces can churn the L2 pin cache (harmless under A7: contacts are authoritative).
+   frames authenticate nothing (§8.1); a card request is a membership oracle bounded to enrolled contacts and members
+   on attributed connections; unauthenticated announces can churn the L2 pin cache (harmless under A7: contacts are authoritative).
    Hubs see `dest`, sizes and timing of custody items. Content, sender and kind are sealed.
 5. Forward secrecy = L2's: sender-side per packet; recipient-side residual until ratchets (§21). **KCI residual of
    `pair_mac`:** a recipient whose X25519 key leaks can be fed forged pair-authenticated traffic "from" any contact;
@@ -695,14 +725,14 @@ Termux). Tools run inside `111-agent`; writes only via the proposal path (L3 "on
 - **Layer 2 (identity) — amendments this spec needs (panel crypto judge; v1 ask):** A1 AD scope = the sealed packet's
   own header; the L6 shim is outside and mutable · A2 inner `sender_node_id(32)` → `sender_ref(4)` + `pair_mac(16)`
   always present (§3; fixes the Noise-"N" sender gap; replay state keyed by the authenticated sender; full NodeId only
-  in INTRO) · A3 `msg_seq = (epoch << 32) | n` with the epoch from a freshly committed announce counter at stream
-  (re)start and `n` committed before seal (§4) · A4 domain tags §3.1 with their pinned inputs · A6 §13 wording: v1
+  in INTRO) · A3 `msg_seq` = `(epoch, n)` on the wire as two varints, the epoch a freshly committed announce-counter value
+  minted once per store open under §4's conditions, `n` committed before seal, frozen old-epoch receive state (§4) · A4 domain tags §3.1 with their pinned inputs · A6 §13 wording: v1
   emits no *unsolicited or periodic* announces; on-demand announces allowed; stale-with-identical-keys announces are
   accepted without state change; card requests served from stored bytes · A7 L5 `contacts` authoritative, pin store a
   cache · A8 `appdata` v1 layout · A9 store-key KDF = keyed BLAKE2b off a keyset-derived secret (`111/store/v1`) with a
   test vector · A10 `transport_id` entries for bridge identities + hash binding for 64 B RNS keys; link keys never
   seed-derived · **A11** replay authority for `msg_seq` kinds = the §4 state; the §6.5 window is not enforced below
-  high-water for them; TLV `0x21` reserved for `signer_pubkey`. **Asked later (v1.1):** A5 crypto-mode `0x02`
+  high-water for them, but every packet is still offered to it and its fresh/stale verdict gates attribution and pushes; TLV `0x21` reserved for `signer_pubkey`. **Asked later (v1.1):** A5 crypto-mode `0x02`
   (static-static folded into the KDF, the 16 B saver) and the carve-out that hash-verified chunk frames of public or
   already-encrypted objects may travel unsealed on broadcast bearers.
 - **Layer 1 (bootstrap):** new deps with sign-off recorded in `bootstrap/TASKS.md` — `rusqlite`/`libsqlite3-sys`
@@ -715,7 +745,7 @@ Termux). Tools run inside `111-agent`; writes only via the proposal path (L3 "on
   foreign source copied into `os/`); the updater gains an intake path for a staged payload at `fabric/blobs/<hash>`
   verified by the same minisign manifest (seam); `check.sh` builds SQLCipher for both targets.
 - **Layer 3:** tools §17 + the bearer token; offload stays on the LAN binding + pairing auth (not v1 fabric traffic).
-- **Layer 4:** D15 amendment §13; `require_session` bearer rule (loopback only); Messages/Contacts/Nearby/Settings
+- **Layer 4:** D15 amendment §13; main listener 308 `Host: localhost` → `127.0.0.1`; `require_session` bearer rule (loopback only); Messages/Contacts/Nearby/Settings
   views §16; `jsQR` dependency; `ServiceId` growth (the fixed-size registry arrays grow to 9); `panel` object; per-request
   CSP; `relayed`/`queued` copy; `radio` row rule §14.
 - **Layer 6 (`devices.md`):** D19 c amendments (recorded); `Link` trait §8 is the contract its drivers implement;
@@ -733,16 +763,18 @@ a veth bridge, real `111d` binaries): two members + one hub — card exchange, `
 `queued → sent → relayed → delivered`, a message to a non-member answered `REJECT_UNKNOWN_DEST` and shown honestly, hub
 killed mid-transfer and resumed by cursor, duplicates re-ACKed not redelivered, Tier-1 fragments over a test-only
 `lossy-loopback` link at a forced 160 B profile with loss injection and SACK retransmit, `store_full` refusal path, a
-replayed announce on a fresh socket receives no push · G2 SQLCipher static builds (x86_64 + aarch64) in `check.sh`;
+replayed announce on a fresh socket receives no push, a replayed sealed packet on a fresh socket never attributes it, a
+sender crash with items in custody followed by a direct new-epoch packet delivers every message exactly once · G2 SQLCipher static builds (x86_64 + aarch64) in `check.sh`;
 the aarch64 binary opens, writes and prunes a store in an Android emulator in CI (or recorded as an external gate
 where no emulator runs) · G3 the Meshtastic panel runs offline in the netns against a **stub** meshmud TCP downlink:
 bundle served, ticket → cookie → iframe, shim round-trip (`PUT /toradio`, `GET /fromradio`), framing headers rewritten,
 CORS headers absent, a cross-site `GET /fromradio` from a second netns origin returns no body and dequeues nothing, a
 drive-by POST refused, a spent ticket answers 403 and the dashboard re-mints, the offline lint's CDP recording shows
-only declared optional hosts, the connect-dialog prefill equals the panel authority · G4 envelope test vectors (frozen
+only declared optional hosts, the connect-dialog prefill equals the panel authority, the dashboard opened on `http://localhost` frames the panel
+after the 308 · G4 envelope test vectors (frozen
 files like `id111`'s): seal/open with `sender_ref` + `pair_mac`, SIGNED classes with `dest`, a re-sealed valid
 signature never advances any state, forged `sender_ref` never touches a window, reserved-bit rejection, fragment bounds,
-ACK block round-trip incl. partial bitmaps and piggyback, custody receipt vectors, enrollment keyed hash, store KDF ·
+ACK block round-trip incl. partial bitmaps, piggyback and a two-epoch ACK (frozen ranges), custody receipt vectors, enrollment keyed hash, store KDF ·
 G5 fable re-check of §3–§9, §13–§14, §18–§19 against the panel's accepted fixes.
 
 **External gates before the first signed release (hardware):** meshmud with a real Meshtastic board — serial open

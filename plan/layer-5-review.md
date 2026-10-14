@@ -59,7 +59,17 @@ Legend: ✅ accepted as proposed · ✅* accepted with a lead modification · �
 1. Attachments in messages → v1.1 (J5 a). 2. Generic reverse proxy + WebSocket/SSE → reserved; v1 = static panels +
 built-in Meshtastic shim (P2 i, J6). 3. INTRO over LoRa → Layer 6 (M7). 4. Identify = Meshtastic step only (J4).
 
-## Re-check
+## Re-check (fable, `layer-5-review/recheck.md`)
 
-One fable re-check (crypto + panels lenses) verifies that every accepted fix landed in v1.1 and introduced no new
-hole, then the spec locks (D20).
+Verdict **fix-then-lock**: 53 fixes landed, 4 partial, 0 missing. New findings, all accepted into **v1.2**:
+N1 (blocking) frozen old-epoch receive state, newest 4 epochs, ACK ranges absolute `[epoch, start, len]` (≤ 8) ·
+N2 every verified packet is still offered to the L2 window; attribution, card answers and pushes need a **fresh**
+verdict · N3 `msg_seq` on the wire = `epoch ‖ n` varints; sizes table re-done (inner hdr 8–10) · N4 `tx_state` keyed
+`(peer, stream)`; `msg_id` gains the recipient · N5 epoch minted once per open on: no clean record, `announce_last`
+mismatch, restore floor set, `n` wrap; `restore_pending` while the floor is pending · N6 main listener 308
+`localhost` → `127.0.0.1` · N7 card answers only to members on attributed connections · N8 `ENROLL` rides the INTRO
+card slot, payload `{code}` · N9 `ack_sig` standalone only · N10 `loopback-only` defined · N11 shim downlink lifecycle
++ bounded buffer · N12 shim sub-type in bits 2–0 of frame_type 2 · N13 D20 lists the D19 deltas. Partials closed by
+N1/N3/N5 (M4), N2/N7 (M6, m7), and the §3/§18.3 sentence that the derived pair key crosses into `mesh111` (m10).
+Clean per the re-check: same-site iframe path, CORS stripping, Referer/ticket leak, genesis-over-newer pin.
+
