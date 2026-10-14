@@ -12,7 +12,9 @@
 //! §3 strict predicate BEFORE any state change; an announce carrying the
 //! receiver's OWN NodeId ⇒ the distinct [`AnnounceError::IdentityCollision`]
 //! state, never pinned (the §8.4 duplicate-instance case); then the pinning
-//! store applies stale-counter drop and key-material immutability (§6.3).
+//! store applies key-material immutability (§6.3) and the stale-counter rule
+//! (a same-key stale announce is never applied; since L5 amendment A6 it is
+//! reported as `PinOutcome::Unchanged`, not an error).
 //!
 //! The announce counter is the ANNOUNCE sequence — distinct from §6.5's
 //! per-peer traffic counters — and is committed synchronously (fsync) BEFORE
@@ -75,6 +77,9 @@ pub enum AnnounceError {
     /// dashboard/`/api/status`, §13; the §8.4 duplicate-instance case).
     IdentityCollision,
     /// §6.2 — the counter did not exceed the last-seen value (stale ⇒ drop).
+    /// Not produced by [`process_announce`] since L5 amendment A6 (see
+    /// [`crate::store::StoreError::StaleCounter`]); retained for the L2
+    /// vocabulary.
     StaleCounter { last_seen: u64, got: u64 },
     /// §6.3/§12 rule 3 — conflicting key material for a pinned NodeId.
     KeyConflict,
@@ -286,8 +291,11 @@ impl Announce {
 ///    checked after verification so a forged garbage-signature "collision"
 ///    cannot surface a false collision state;
 /// 4. the pinning store applies the remaining rules atomically with the
-///    mutation: stale counter ⇒ drop, conflicting key material ⇒ reject
-///    (§6.3), else first-seen pin / counter update.
+///    mutation: conflicting key material ⇒ reject at any counter (§6.3);
+///    identical key material at a counter ≤ last-seen ⇒
+///    `Ok(PinOutcome::Unchanged)`, no state change (L5 amendment A6 — the
+///    stale announce is still never applied, it is just not an error); else
+///    first-seen pin / counter update.
 pub fn process_announce(
     store: &mut PinStore,
     own_node_id: &NodeId,
@@ -512,28 +520,24 @@ mod tests {
         let own = keyset_b().node_id();
         let wire1 = Announce::create(&a, 5, b"").unwrap().encode();
         process_announce(&mut store, &own, &wire1).unwrap();
-        // Replay the exact same announce: counter 5 ≤ last-seen 5 ⇒ drop.
-        assert!(matches!(
-            process_announce(&mut store, &own, &wire1),
-            Err(AnnounceError::StaleCounter {
-                last_seen: 5,
-                got: 5
-            })
-        ));
+        // Replay the exact same announce: counter 5 ≤ last-seen 5 ⇒ never
+        // applied. Since L5 amendment A6 (identical key material) this is
+        // Ok(Unchanged), not an error.
+        assert_eq!(
+            process_announce(&mut store, &own, &wire1).unwrap(),
+            PinOutcome::Unchanged { last_seen: 5 }
+        );
         // An older counter too.
         let wire0 = Announce::create(&a, 2, b"").unwrap().encode();
-        assert!(matches!(
-            process_announce(&mut store, &own, &wire0),
-            Err(AnnounceError::StaleCounter {
-                last_seen: 5,
-                got: 2
-            })
-        ));
-        // Nothing changed.
         assert_eq!(
-            store.get(&a.node_id()).unwrap().highest_announce_counter(),
-            5
+            process_announce(&mut store, &own, &wire0).unwrap(),
+            PinOutcome::Unchanged { last_seen: 5 }
         );
+        // Nothing changed: Unchanged performs no state change — the counter
+        // and the pinned key material are exactly as before.
+        let e = store.get(&a.node_id()).unwrap();
+        assert_eq!(e.highest_announce_counter(), 5);
+        assert_eq!(e.enc_pubkey(), a.public().enc_pubkey());
     }
 
     #[test]

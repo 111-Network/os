@@ -1,0 +1,198 @@
+{
+  "spec": "messaging section 7 + section 19 amendment A6; identity sections 6.2/6.3 - an announce with IDENTICAL key material and a counter <= the stored one is accepted with no state change",
+  "frozen": "2026-10-14",
+  "description": "Announce wire as announce.json (version(1) || sign_pubkey(32 = NodeId) || enc_pubkey(32) || counter(LE u64) || appdata(0-32) || Ed25519 signature over '111/announce/v1' || all preceding bytes). Each scenario is an ordered step list against ONE fresh pinning store, processed with own_node_id = signers.b.node_id. Rule order: parse, strict-predicate signature, own-NodeId collision, then the store: different enc_pubkey for a pinned NodeId => err:conflict at ANY counter; same key material and counter <= last-seen => ok:unchanged:<last_seen> (A6 - accepted, no state change: no counter move, no LRU touch, no persist); fresher => ok:updated:<previous>; unknown NodeId => ok:pinned. 'after' is signer a's pin after the step (null = not pinned). Tokens: ok:pinned | ok:updated:<previous> | ok:unchanged:<last_seen> | err:conflict | err:collision | err:sig:<VerifyError> | (announce.json's parse tokens). Relation to the frozen L2 file: announce.json (Cat-1 harness contract, untouched) still names this outcome err:stale:<last_seen>:<got>; under A6 that token maps to ok:unchanged:<last_seen> ONLY for identical key material - a key conflict is err:conflict in both files.",
+  "provenance": "Generated 2026-10-14 (task L5-I1): wires signed with crosscheck.py's ed_sign (OpenSSL Ed25519, independent of dalek) and checked by its from-scratch strict predicate, from the public canonical-12 / canonical-24 test mnemonics, expect/after recorded from an independent Python model of the A6 rule. Asserted against id111::announce::process_announce + PinStore by tests/layer5_amendments.rs; re-derived by crosscheck.py (check_layer5_announce).",
+  "signers": {
+    "a": {
+      "mnemonic": "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about",
+      "node_id": "6f1d5331e36e16d341fa06c9f622cc8569710f2a62d7491e9be8e953df844f01",
+      "enc_pubkey": "712678456644b8cba1389072ee5dec93d044875ca13c73e217157814bbb99218"
+    },
+    "b": {
+      "mnemonic": "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon art",
+      "node_id": "5ddf5911edf0541c88e864d7590045c410f420d04e73f9d8507dc856591506b0",
+      "enc_pubkey": "350a6fafb96cd8936c8f6a2215c38d2f619a7f12ca1d97cff1f2da4dd8d4ba14"
+    }
+  },
+  "own_node_id": "5ddf5911edf0541c88e864d7590045c410f420d04e73f9d8507dc856591506b0",
+  "scenarios": [
+    {
+      "name": "reconnect re-presents the stored announce",
+      "rationale": "link-up re-sends the announce the peer already pinned: accepted, no state change (A6); a different appdata at a stale counter is still the same key material",
+      "steps": [
+        {
+          "step": "first contact pins at counter 3",
+          "wire": "016f1d5331e36e16d341fa06c9f622cc8569710f2a62d7491e9be8e953df844f01712678456644b8cba1389072ee5dec93d044875ca13c73e217157814bbb9921803000000000000004efe2e39ea58c8061a0b7bbd9ac17ab7c30d5fc9a33434369815a728519fac78745b4ee0555a28fa0f6b0ce662c8ab58eadfcc0ef1bbd4e9fc153990e00da809",
+          "expect": "ok:pinned",
+          "after": {
+            "enc_pubkey": "712678456644b8cba1389072ee5dec93d044875ca13c73e217157814bbb99218",
+            "counter": "3"
+          }
+        },
+        {
+          "step": "reconnect: the identical announce again",
+          "wire": "016f1d5331e36e16d341fa06c9f622cc8569710f2a62d7491e9be8e953df844f01712678456644b8cba1389072ee5dec93d044875ca13c73e217157814bbb9921803000000000000004efe2e39ea58c8061a0b7bbd9ac17ab7c30d5fc9a33434369815a728519fac78745b4ee0555a28fa0f6b0ce662c8ab58eadfcc0ef1bbd4e9fc153990e00da809",
+          "expect": "ok:unchanged:3",
+          "after": {
+            "enc_pubkey": "712678456644b8cba1389072ee5dec93d044875ca13c73e217157814bbb99218",
+            "counter": "3"
+          }
+        },
+        {
+          "step": "an older announce with the same keys",
+          "wire": "016f1d5331e36e16d341fa06c9f622cc8569710f2a62d7491e9be8e953df844f01712678456644b8cba1389072ee5dec93d044875ca13c73e217157814bbb99218020000000000000095324b7f9746ecf2e3551d3d25102ac39c2cde2b2b059f4611bc42350fd1b2b33497387bb10aeb8591d25a0e7f06af612c363d891bc85e72d5644dd917f6b40d",
+          "expect": "ok:unchanged:3",
+          "after": {
+            "enc_pubkey": "712678456644b8cba1389072ee5dec93d044875ca13c73e217157814bbb99218",
+            "counter": "3"
+          }
+        },
+        {
+          "step": "same keys, counter 3, different appdata",
+          "wire": "016f1d5331e36e16d341fa06c9f622cc8569710f2a62d7491e9be8e953df844f01712678456644b8cba1389072ee5dec93d044875ca13c73e217157814bbb992180300000000000000010100eaf2a9532a3612c7c127ff6a69559aec84a85593afef77622ade763626cef2d11b5c23099fa2d914bd3fab0cfe9ff2f8e39d62ecf6506c09c74384ee21ae9905",
+          "expect": "ok:unchanged:3",
+          "after": {
+            "enc_pubkey": "712678456644b8cba1389072ee5dec93d044875ca13c73e217157814bbb99218",
+            "counter": "3"
+          }
+        },
+        {
+          "step": "a fresher announce still updates",
+          "wire": "016f1d5331e36e16d341fa06c9f622cc8569710f2a62d7491e9be8e953df844f01712678456644b8cba1389072ee5dec93d044875ca13c73e217157814bbb99218040000000000000058e045ea12a970cc574d69d649f4c8da28ae7f4186f8c09602ad3827018ddcaa19a16f252a05609ab3d083e7bf903167f3668b132fc1a9495600bb1b2fdce00c",
+          "expect": "ok:updated:3",
+          "after": {
+            "enc_pubkey": "712678456644b8cba1389072ee5dec93d044875ca13c73e217157814bbb99218",
+            "counter": "4"
+          }
+        }
+      ]
+    },
+    {
+      "name": "genesis card after a newer announce",
+      "rationale": "a card carries the genesis announce (counter 1); scanning it after a link-up pinned a newer one never overwrites (A6)",
+      "steps": [
+        {
+          "step": "link-up pins counter 7",
+          "wire": "016f1d5331e36e16d341fa06c9f622cc8569710f2a62d7491e9be8e953df844f01712678456644b8cba1389072ee5dec93d044875ca13c73e217157814bbb992180700000000000000240fef365e84759287865e18de1a65d0e9e295aa75ab5525564b5ab4ac404d790d781ee8ded0ff67772d7ccca5fd5b0d2db92b9e40a7a25755eeaa3add797601",
+          "expect": "ok:pinned",
+          "after": {
+            "enc_pubkey": "712678456644b8cba1389072ee5dec93d044875ca13c73e217157814bbb99218",
+            "counter": "7"
+          }
+        },
+        {
+          "step": "genesis card (counter 1) scanned later",
+          "wire": "016f1d5331e36e16d341fa06c9f622cc8569710f2a62d7491e9be8e953df844f01712678456644b8cba1389072ee5dec93d044875ca13c73e217157814bbb99218010000000000000018b45a6b24b187e9451c7f4d939ca1605d1c21ee8498fa6a435c733e957cbaaa642adaf5c9e04a4ba49bd738fb450899c2f9a3a9a76f2ac9c7a880496c7db609",
+          "expect": "ok:unchanged:7",
+          "after": {
+            "enc_pubkey": "712678456644b8cba1389072ee5dec93d044875ca13c73e217157814bbb99218",
+            "counter": "7"
+          }
+        },
+        {
+          "step": "the counter-7 announce re-presented",
+          "wire": "016f1d5331e36e16d341fa06c9f622cc8569710f2a62d7491e9be8e953df844f01712678456644b8cba1389072ee5dec93d044875ca13c73e217157814bbb992180700000000000000240fef365e84759287865e18de1a65d0e9e295aa75ab5525564b5ab4ac404d790d781ee8ded0ff67772d7ccca5fd5b0d2db92b9e40a7a25755eeaa3add797601",
+          "expect": "ok:unchanged:7",
+          "after": {
+            "enc_pubkey": "712678456644b8cba1389072ee5dec93d044875ca13c73e217157814bbb99218",
+            "counter": "7"
+          }
+        },
+        {
+          "step": "counter 8 updates",
+          "wire": "016f1d5331e36e16d341fa06c9f622cc8569710f2a62d7491e9be8e953df844f01712678456644b8cba1389072ee5dec93d044875ca13c73e217157814bbb99218080000000000000062949251e8400424a72aac16c5f262044f6ba225a10948fefe240eeeea489e85233bcaa1a2e3589750aa022642fee6534891298eab8982a6b8a2e417da9b1407",
+          "expect": "ok:updated:7",
+          "after": {
+            "enc_pubkey": "712678456644b8cba1389072ee5dec93d044875ca13c73e217157814bbb99218",
+            "counter": "8"
+          }
+        }
+      ]
+    },
+    {
+      "name": "conflicting keys stay a hard rejection at any counter",
+      "rationale": "A's NodeId with B's enc_pubkey, validly signed by A: rejected at a lower, an equal and a higher counter (identity section 6.3 immutability); A6 applies only to IDENTICAL key material",
+      "steps": [
+        {
+          "step": "A pins at counter 5",
+          "wire": "016f1d5331e36e16d341fa06c9f622cc8569710f2a62d7491e9be8e953df844f01712678456644b8cba1389072ee5dec93d044875ca13c73e217157814bbb9921805000000000000007fa78a84fd61f112d75edd642bc405b624713c6c5c251d92859c727945564be06d845a9af2067d8513b02afedbb44949b8529a573c3341b10a798f3be539d006",
+          "expect": "ok:pinned",
+          "after": {
+            "enc_pubkey": "712678456644b8cba1389072ee5dec93d044875ca13c73e217157814bbb99218",
+            "counter": "5"
+          }
+        },
+        {
+          "step": "conflict at a LOWER counter (2)",
+          "wire": "016f1d5331e36e16d341fa06c9f622cc8569710f2a62d7491e9be8e953df844f01350a6fafb96cd8936c8f6a2215c38d2f619a7f12ca1d97cff1f2da4dd8d4ba1402000000000000001a4674951d2de9397fa1a19328d1516ab85381d8add1c24badd81ffb6bdb341963435c93cba0a0ec29584b9f636ecc93de603d80f7b27d122c652f911b2ca809",
+          "expect": "err:conflict",
+          "after": {
+            "enc_pubkey": "712678456644b8cba1389072ee5dec93d044875ca13c73e217157814bbb99218",
+            "counter": "5"
+          }
+        },
+        {
+          "step": "conflict at an EQUAL counter (5)",
+          "wire": "016f1d5331e36e16d341fa06c9f622cc8569710f2a62d7491e9be8e953df844f01350a6fafb96cd8936c8f6a2215c38d2f619a7f12ca1d97cff1f2da4dd8d4ba140500000000000000616207634e86ce549e932b877c0763dde3a59f2da4ed691e2e66f6674889c355d50aeba1f7147f1ff7ca6c0dfa27ed884e8b8cd21d57b2f9abb59432846f7e03",
+          "expect": "err:conflict",
+          "after": {
+            "enc_pubkey": "712678456644b8cba1389072ee5dec93d044875ca13c73e217157814bbb99218",
+            "counter": "5"
+          }
+        },
+        {
+          "step": "conflict at a HIGHER counter (9)",
+          "wire": "016f1d5331e36e16d341fa06c9f622cc8569710f2a62d7491e9be8e953df844f01350a6fafb96cd8936c8f6a2215c38d2f619a7f12ca1d97cff1f2da4dd8d4ba140900000000000000a9b15d676fc2d0b77308964a61248f35a5e008309c4aeac054c66fdc848bba684502f23bf6728d9b2454d9338cec20bb33cbee08e476204134434f2d98da4d05",
+          "expect": "err:conflict",
+          "after": {
+            "enc_pubkey": "712678456644b8cba1389072ee5dec93d044875ca13c73e217157814bbb99218",
+            "counter": "5"
+          }
+        },
+        {
+          "step": "the true announce re-presented: unchanged",
+          "wire": "016f1d5331e36e16d341fa06c9f622cc8569710f2a62d7491e9be8e953df844f01712678456644b8cba1389072ee5dec93d044875ca13c73e217157814bbb9921805000000000000007fa78a84fd61f112d75edd642bc405b624713c6c5c251d92859c727945564be06d845a9af2067d8513b02afedbb44949b8529a573c3341b10a798f3be539d006",
+          "expect": "ok:unchanged:5",
+          "after": {
+            "enc_pubkey": "712678456644b8cba1389072ee5dec93d044875ca13c73e217157814bbb99218",
+            "counter": "5"
+          }
+        }
+      ]
+    },
+    {
+      "name": "signature is verified before the stale rule",
+      "rationale": "a stale same-key announce with a broken signature is dropped as a bad signature, never reported unchanged (verification before any state rule)",
+      "steps": [
+        {
+          "step": "A pins at counter 5",
+          "wire": "016f1d5331e36e16d341fa06c9f622cc8569710f2a62d7491e9be8e953df844f01712678456644b8cba1389072ee5dec93d044875ca13c73e217157814bbb9921805000000000000007fa78a84fd61f112d75edd642bc405b624713c6c5c251d92859c727945564be06d845a9af2067d8513b02afedbb44949b8529a573c3341b10a798f3be539d006",
+          "expect": "ok:pinned",
+          "after": {
+            "enc_pubkey": "712678456644b8cba1389072ee5dec93d044875ca13c73e217157814bbb99218",
+            "counter": "5"
+          }
+        },
+        {
+          "step": "counter byte rewritten 2 -> 3 under the counter-2 signature",
+          "wire": "016f1d5331e36e16d341fa06c9f622cc8569710f2a62d7491e9be8e953df844f01712678456644b8cba1389072ee5dec93d044875ca13c73e217157814bbb99218030000000000000095324b7f9746ecf2e3551d3d25102ac39c2cde2b2b059f4611bc42350fd1b2b33497387bb10aeb8591d25a0e7f06af612c363d891bc85e72d5644dd917f6b40d",
+          "expect": "err:sig:InvalidSignature",
+          "after": {
+            "enc_pubkey": "712678456644b8cba1389072ee5dec93d044875ca13c73e217157814bbb99218",
+            "counter": "5"
+          }
+        },
+        {
+          "step": "the receiver's own NodeId is a collision, never pinned",
+          "wire": "015ddf5911edf0541c88e864d7590045c410f420d04e73f9d8507dc856591506b0350a6fafb96cd8936c8f6a2215c38d2f619a7f12ca1d97cff1f2da4dd8d4ba140100000000000000617181e814a87cd38a2170dbabfd1a9cf98034cc6c47bffe7f1d03d56e13f712c575f8b7b5e9224f7adcf8babfd695b9590a4f418cae96fe6d9662baec371209",
+          "expect": "err:collision",
+          "after": {
+            "enc_pubkey": "712678456644b8cba1389072ee5dec93d044875ca13c73e217157814bbb99218",
+            "counter": "5"
+          }
+        }
+      ]
+    }
+  ]
+}

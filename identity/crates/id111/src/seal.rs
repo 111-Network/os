@@ -43,6 +43,33 @@
 //! authenticates the channel, never authorship (§12 rule 13: MAC auth is not
 //! authorship; non-repudiation, if ever wanted, is a Layer-5 inner signature).
 //!
+//! **Caller-owned inner layout — Layer 5 amendment A2** (`os/messaging/
+//! README.md` §3, §19): [`seal_payload`] / [`open_payload`] run the SAME
+//! construction (same ephemeral discipline, KDFs, derived nonce, AD = the
+//! exact header slice, `crypto_mode` `0x01` gate before decryption, the
+//! [`MIN_PACKET_LEN`] size-limit-before-parse rule) but the AEAD plaintext is
+//! the caller's bytes verbatim — NO 32-byte sender NodeId is prepended or
+//! stripped. Layer 5 authenticates the sender itself (its inner `sender_ref`
+//! plus a direction-bound `pair_mac` keyed by the static-static pair key, L5
+//! §3), so the Noise-"N" sender gap that the 32 B field papered over is
+//! closed above this layer, at 28 B less per packet. Because `pair_mac`
+//! covers `header ‖ epk ‖ inner`, [`seal_payload`] takes the inner as a
+//! closure that receives the packet's fresh `epk`, and [`open_payload`]
+//! returns the wire `epk` beside the header and inner. An empty inner is
+//! legal here (a bare-tag packet of exactly [`MIN_PACKET_LEN`] + `extra`
+//! bytes).
+//!
+//! **One wire per version.** The two inner layouts are indistinguishable on
+//! the wire — an [`open_payload`] of a [`seal`] packet simply returns
+//! `sender_node_id ‖ plaintext` as opaque bytes, and an [`open`] of a
+//! [`seal_payload`] packet misreads the caller's first 32 bytes as a NodeId.
+//! Nothing in the header tells them apart, so **two inner layouts never share
+//! a `version` value on a signed release**: the 32 B form ([`seal`] /
+//! [`open`] and the frozen `sealed-packet.json` vectors) is a pre-release
+//! gate only, kept for the Cat-1 Monocypher harness, and is removed before
+//! the first signed release (L5 spec §3). A host speaks exactly one layout
+//! per `version`.
+//!
 //! **Counter boundary (§6.5):** the counter VALUE is passed into [`seal`] and
 //! parsed out of the authenticated header by [`open`]; counter STATE
 //! (monotonicity, the 32-entry sliding acceptance window, batch-commit, the
@@ -249,7 +276,8 @@ pub enum OpenError {
     /// header/AD, epk, ciphertext, or tag.
     AuthFailed,
     /// The decrypted inner plaintext is shorter than the 32B sender NodeId —
-    /// not a §6.4 plaintext.
+    /// not a §6.4 plaintext. Produced by [`open`] only; [`open_payload`]
+    /// (caller-owned inner, L5 amendment A2) has no inner minimum.
     PlaintextTooShort,
 }
 
@@ -361,6 +389,58 @@ fn seal_with_ephemeral(
     plaintext: &[u8],
     esk_bytes: &[u8; 32],
 ) -> Result<Vec<u8>, SealError> {
+    // Inner pin (32 B form): sender ‖ plaintext — independent of `epk`.
+    seal_core(recipient_enc_pubkey, header, esk_bytes, |_epk| {
+        let mut inner = Vec::with_capacity(SENDER_NODE_ID_LEN + plaintext.len());
+        inner.extend_from_slice(sender.as_bytes());
+        inner.extend_from_slice(plaintext);
+        inner
+    })
+}
+
+/// L5 amendment A2 (messaging spec §3) — seal a packet whose inner plaintext
+/// layout is caller-owned: the bytes returned by `inner` are encrypted
+/// verbatim, with NO 32-byte sender NodeId prepended (Layer 5 authenticates
+/// the sender with its own `pair_mac`).
+///
+/// `inner` is called exactly once, after the crypto-mode, header-size,
+/// recipient low-order and contributory-ECDH checks have passed, with this
+/// packet's fresh ephemeral public key `epk` — the 32 bytes that
+/// sit on the wire between the header and the ciphertext. Layer 5 needs it
+/// because `pair_mac` covers `L2 header bytes ‖ epk ‖ inner bytes before
+/// auth` (L5 §3); the header bytes are the caller's own [`SealHeader`]
+/// serialized per the wire pin above. The closure sees nothing secret. Its
+/// returned buffer is zeroized once encrypted.
+///
+/// Otherwise identical to [`seal`]: a fresh ephemeral per call drawn by
+/// `getrandom()` (§4.2; entropy failure is a typed loud abort), the
+/// recipient key re-checked against the §3 low-order rule, the same
+/// `"111/seal/v1"` / `"111/seal-n/v1"` KDFs, AD = the exact header bytes, and
+/// `header.crypto_mode` MUST be [`CRYPTO_MODE_V1`] (fail closed, §12 rule
+/// 1). `header.counter` is the §6.5 counter VALUE from the caller's
+/// [`crate::counters::CounterStore`]; `header.version` is L5's passthrough
+/// field. An empty inner is legal. See the module docs for the
+/// one-layout-per-`version` rule.
+pub fn seal_payload(
+    recipient_enc_pubkey: &[u8; 32],
+    header: &SealHeader,
+    inner: impl FnOnce(&[u8; 32]) -> Vec<u8>,
+) -> Result<Vec<u8>, SealError> {
+    let mut esk_bytes = Zeroizing::new([0u8; 32]);
+    getrandom::getrandom(&mut esk_bytes[..]).map_err(SealError::Entropy)?;
+    seal_core(recipient_enc_pubkey, header, &esk_bytes, inner)
+}
+
+/// The shared §6.4 construction. `inner(epk)` yields the AEAD plaintext:
+/// [`seal_with_ephemeral`] returns `sender ‖ plaintext` (ignoring `epk`),
+/// [`seal_payload`] forwards the caller's closure. Byte-for-byte the recipe
+/// the frozen `sealed-packet.json` KAT pins.
+fn seal_core(
+    recipient_enc_pubkey: &[u8; 32],
+    header: &SealHeader,
+    esk_bytes: &[u8; 32],
+    inner: impl FnOnce(&[u8; 32]) -> Vec<u8>,
+) -> Result<Vec<u8>, SealError> {
     if header.crypto_mode != CRYPTO_MODE_V1 {
         return Err(SealError::UnsupportedCryptoMode(header.crypto_mode));
     }
@@ -386,22 +466,20 @@ fn seal_with_ephemeral(
     let key = derive_key(&shared, &epk, recipient_enc_pubkey);
     let nonce = derive_nonce(&epk, recipient_enc_pubkey);
 
-    // Step 4: XChaCha20-Poly1305 over (sender ‖ plaintext) with AD = the
-    // exact header bytes (every cleartext header byte AD-covered).
-    let mut inner = Vec::with_capacity(SENDER_NODE_ID_LEN + plaintext.len());
-    inner.extend_from_slice(sender.as_bytes());
-    inner.extend_from_slice(plaintext);
+    // Step 4: XChaCha20-Poly1305 over the AEAD plaintext with AD = the
+    // exact header bytes (every cleartext header byte AD-covered). The
+    // plaintext buffer is wiped on every exit path.
+    let aead_pt = Zeroizing::new(inner(&epk));
     let cipher = XChaCha20Poly1305::new((&*key).into());
     let ciphertext = cipher
         .encrypt(
             (&nonce).into(),
             Payload {
-                msg: &inner,
+                msg: &aead_pt,
                 aad: &header_bytes,
             },
         )
         .map_err(|_| SealError::PlaintextTooLarge)?;
-    inner.zeroize();
 
     // Step 5: packet = header ‖ epk ‖ ciphertext+tag.
     let mut packet = Vec::with_capacity(header_bytes.len() + EPK_LEN + ciphertext.len());
@@ -420,6 +498,56 @@ fn seal_with_ephemeral(
 /// against the 32-entry acceptance window is the CALLER's counters-module
 /// duty — a replayed packet decrypts identically, by design of this layer.
 pub fn open(recipient: &Keyset, packet: &[u8]) -> Result<OpenedPacket, OpenError> {
+    let (header, _epk, inner) = open_raw(recipient, packet)?;
+    // The decrypted inner is wiped once split (the plaintext copy is the
+    // caller's to keep).
+    let inner = Zeroizing::new(inner);
+
+    // Inner pin: sender_node_id(32) ‖ plaintext.
+    if inner.len() < SENDER_NODE_ID_LEN {
+        return Err(OpenError::PlaintextTooShort);
+    }
+    let mut sender = [0u8; 32];
+    sender.copy_from_slice(&inner[..SENDER_NODE_ID_LEN]);
+    let plaintext = inner[SENDER_NODE_ID_LEN..].to_vec();
+
+    Ok(OpenedPacket {
+        header,
+        sender: NodeId::from(sender),
+        plaintext,
+    })
+}
+
+/// L5 amendment A2 (messaging spec §3) — open a packet whose inner layout is
+/// caller-owned: returns the AD-authenticated header, the wire `epk` (32 B,
+/// the input Layer 5's `pair_mac` covers between the header and the inner
+/// bytes, L5 §3), and the decrypted inner bytes verbatim (NO 32-byte sender
+/// NodeId is split off; an empty inner is legal).
+///
+/// Same gates as [`open`], in the same order: size-limit before parse
+/// ([`MIN_PACKET_LEN`], then `extra_len` against the packet length — §12 rule
+/// 7), `crypto_mode != 0x01` rejected BEFORE any ECDH or decryption (fail
+/// closed), the §3 low-order / RFC 7748 §6.1 all-zero checks on the wire
+/// `epk`, AD = the exact wire header slice. The header's `counter` is NOT
+/// freshness-checked here — offer it to
+/// [`crate::counters::CounterStore::observe_counter`] (L5 amendment A11) or
+/// [`crate::counters::CounterStore::on_receive`]; sender authentication is the
+/// caller's `pair_mac` (L5 §3), which MUST be verified before any replay or
+/// store state is touched.
+pub fn open_payload(
+    recipient: &Keyset,
+    packet: &[u8],
+) -> Result<(SealHeader, [u8; 32], Vec<u8>), OpenError> {
+    open_raw(recipient, packet)
+}
+
+/// The shared §6.4 open: parse + gate + decrypt, returning the header, the
+/// wire `epk` and the raw AEAD plaintext. [`open`] splits the 32 B sender off
+/// it; [`open_payload`] returns it whole.
+fn open_raw(
+    recipient: &Keyset,
+    packet: &[u8],
+) -> Result<(SealHeader, [u8; 32], Vec<u8>), OpenError> {
     // §12 rule 7 — size-limit before any parse.
     if packet.len() < MIN_PACKET_LEN {
         return Err(OpenError::Truncated);
@@ -465,24 +593,16 @@ pub fn open(recipient: &Keyset, packet: &[u8]) -> Result<OpenedPacket, OpenError
         )
         .map_err(|_| OpenError::AuthFailed)?;
 
-    // Inner pin: sender_node_id(32) ‖ plaintext.
-    if inner.len() < SENDER_NODE_ID_LEN {
-        return Err(OpenError::PlaintextTooShort);
-    }
-    let mut sender = [0u8; 32];
-    sender.copy_from_slice(&inner[..SENDER_NODE_ID_LEN]);
-    let plaintext = inner[SENDER_NODE_ID_LEN..].to_vec();
-
-    Ok(OpenedPacket {
-        header: SealHeader {
+    Ok((
+        SealHeader {
             version,
             crypto_mode,
             counter,
             extra: extra.to_vec(),
         },
-        sender: NodeId::from(sender),
-        plaintext,
-    })
+        epk,
+        inner,
+    ))
 }
 
 #[cfg(test)]
@@ -841,6 +961,288 @@ mod tests {
         let replayed = open(&bob, &packet).unwrap();
         assert_eq!(first, replayed);
         assert_eq!(first.header.counter, 100);
+    }
+
+    // ------------------------------------------------------------------
+    // L5 amendment A2 — seal_payload / open_payload (caller-owned inner).
+    // ------------------------------------------------------------------
+
+    /// RFC 7748 §5.2 first scalar-multiplication input — the A2 KAT's esk
+    /// (distinct from the 32 B-form KAT's esk, so no two frozen vectors share
+    /// a key/nonce pair).
+    const RFC7748_S52_SCALAR1: &str =
+        "a546e36bf0527c9d3b16154b82465edd62144c0ac1fc5a18506a2244ba449ac4";
+
+    /// The L5-shaped `extra` (messaging §3): `prio_flags(1) ‖ dest_hint(4)`,
+    /// prio = interactive (bits 7–6 = 01), dest_hint = Bob's NodeId[0..4].
+    fn l5_extra(bob: &Keyset) -> Vec<u8> {
+        let mut extra = vec![0x40u8];
+        extra.extend_from_slice(&bob.node_id().as_bytes()[..4]);
+        extra
+    }
+
+    /// A closure that ignores `epk` and yields fixed inner bytes.
+    fn fixed(inner: &[u8]) -> impl FnOnce(&[u8; 32]) -> Vec<u8> + '_ {
+        move |_epk| inner.to_vec()
+    }
+
+    #[test]
+    fn payload_round_trip_has_no_inner_node_id() {
+        let bob = bob_keyset();
+        let header = SealHeader {
+            version: VERSION_V1,
+            crypto_mode: CRYPTO_MODE_V1,
+            counter: 0x0102_0304_0506_0708,
+            extra: l5_extra(&bob),
+        };
+        let inner = b"caller-owned inner bytes";
+        let packet = seal_payload(&bob.x25519_public(), &header, fixed(inner)).unwrap();
+        // Wire shape: header(11 + 5) ‖ epk(32) ‖ ct(inner, verbatim) ‖ tag(16)
+        // — 32 B smaller than the seal() form for the same plaintext.
+        assert_eq!(packet.len(), 11 + 5 + EPK_LEN + inner.len() + TAG_LEN);
+        let (h, epk, got) = open_payload(&bob, &packet).unwrap();
+        assert_eq!(h, header);
+        assert_eq!(&epk[..], &packet[16..16 + EPK_LEN]);
+        assert_eq!(got, inner);
+    }
+
+    #[test]
+    fn payload_closure_sees_the_wire_epk_exactly_once() {
+        // L5's pair_mac covers `header ‖ epk ‖ inner-before-auth` (messaging
+        // §3): the closure is handed the packet's own epk, the receiver gets
+        // the same 32 bytes back from open_payload, and an inner computed
+        // from it round-trips.
+        let bob = bob_keyset();
+        let header = SealHeader::v1(9);
+        let mut calls = 0u32;
+        let mut seen = [0u8; 32];
+        let packet = seal_payload(&bob.x25519_public(), &header, |epk| {
+            calls += 1;
+            seen = *epk;
+            let mut inner = b"mac-over:".to_vec();
+            inner.extend_from_slice(epk);
+            inner
+        })
+        .unwrap();
+        assert_eq!(calls, 1);
+        assert_eq!(&packet[HEADER_FIXED_LEN..HEADER_FIXED_LEN + EPK_LEN], &seen);
+        let (_, epk, inner) = open_payload(&bob, &packet).unwrap();
+        assert_eq!(epk, seen);
+        assert_eq!(&inner[9..], &seen);
+        // The closure is never invoked for a packet that is refused up front.
+        let mut invoked = false;
+        let bad = SealHeader {
+            crypto_mode: 0x02,
+            ..SealHeader::v1(0)
+        };
+        assert!(seal_payload(&bob.x25519_public(), &bad, |_| {
+            invoked = true;
+            Vec::new()
+        })
+        .is_err());
+        assert!(seal_payload(&[0u8; 32], &header, |_| {
+            invoked = true;
+            Vec::new()
+        })
+        .is_err());
+        assert!(!invoked);
+    }
+
+    #[test]
+    fn payload_empty_inner_is_a_bare_tag_packet() {
+        let bob = bob_keyset();
+        let packet = seal_payload(&bob.x25519_public(), &SealHeader::v1(0), fixed(b"")).unwrap();
+        // The MIN_PACKET_LEN rule: header(11) ‖ epk(32) ‖ tag(16) = 59 B is
+        // the smallest well-formed packet, and for open_payload it is valid.
+        assert_eq!(packet.len(), MIN_PACKET_LEN);
+        let (h, _, got) = open_payload(&bob, &packet).unwrap();
+        assert_eq!(h, SealHeader::v1(0));
+        assert!(got.is_empty());
+    }
+
+    #[test]
+    fn payload_max_extra_and_version_passthrough() {
+        let bob = bob_keyset();
+        let header = SealHeader {
+            version: 0x07, // L5's field: AD-covered, passed through, not gated here
+            crypto_mode: CRYPTO_MODE_V1,
+            counter: u64::MAX,
+            extra: vec![0xabu8; MAX_EXTRA_LEN],
+        };
+        let packet = seal_payload(&bob.x25519_public(), &header, fixed(b"x")).unwrap();
+        assert_eq!(
+            packet.len(),
+            HEADER_FIXED_LEN + MAX_EXTRA_LEN + EPK_LEN + 1 + TAG_LEN
+        );
+        let (h, _, got) = open_payload(&bob, &packet).unwrap();
+        assert_eq!(h, header);
+        assert_eq!(got, b"x");
+        // One byte over the u8 prefix is refused at seal.
+        let too_big = SealHeader {
+            extra: vec![0u8; MAX_EXTRA_LEN + 1],
+            ..header
+        };
+        assert!(matches!(
+            seal_payload(&bob.x25519_public(), &too_big, fixed(b"x")),
+            Err(SealError::HeaderTooLarge(256))
+        ));
+    }
+
+    #[test]
+    fn payload_fresh_ephemeral_and_wrong_recipient() {
+        let bob = bob_keyset();
+        let alice = alice_keyset();
+        let header = SealHeader::v1(3);
+        let p1 = seal_payload(&bob.x25519_public(), &header, fixed(b"same")).unwrap();
+        let p2 = seal_payload(&bob.x25519_public(), &header, fixed(b"same")).unwrap();
+        assert_ne!(p1, p2, "§6.4 step 1: a fresh ephemeral per packet");
+        assert_eq!(open_payload(&bob, &p1).unwrap().2, b"same");
+        assert_eq!(open_payload(&bob, &p2).unwrap().2, b"same");
+        assert!(matches!(
+            open_payload(&alice, &p1),
+            Err(OpenError::AuthFailed)
+        ));
+    }
+
+    #[test]
+    fn payload_wrong_mode_rejected_before_decryption() {
+        let bob = bob_keyset();
+        for mode in [0x00u8, 0x02, 0xff] {
+            let bad = SealHeader {
+                crypto_mode: mode,
+                ..SealHeader::v1(0)
+            };
+            assert!(matches!(
+                seal_payload(&bob.x25519_public(), &bad, fixed(b"x")),
+                Err(SealError::UnsupportedCryptoMode(m)) if m == mode
+            ));
+        }
+        let packet = seal_payload(&bob.x25519_public(), &SealHeader::v1(1), fixed(b"x")).unwrap();
+        for mode in [0x00u8, 0x02, 0xff] {
+            let mut forged = packet.clone();
+            forged[1] = mode;
+            // Even with a low-order epk the mode gate fires first: no ECDH,
+            // no AEAD work on a downgraded packet.
+            forged[HEADER_FIXED_LEN..HEADER_FIXED_LEN + EPK_LEN].copy_from_slice(&[0u8; 32]);
+            assert!(matches!(
+                open_payload(&bob, &forged),
+                Err(OpenError::UnsupportedCryptoMode(m)) if m == mode
+            ));
+        }
+    }
+
+    #[test]
+    fn payload_truncation_tamper_and_low_order_fail_closed() {
+        let bob = bob_keyset();
+        let header = SealHeader {
+            version: VERSION_V1,
+            crypto_mode: CRYPTO_MODE_V1,
+            counter: 77,
+            extra: l5_extra(&bob),
+        };
+        let packet = seal_payload(&bob.x25519_public(), &header, fixed(b"inner")).unwrap();
+        // Every strict prefix is a typed error — below MIN_PACKET_LEN it is
+        // Truncated before any parse (§12 rule 7) — never a panic.
+        for len in 0..packet.len() {
+            let r = open_payload(&bob, &packet[..len]);
+            assert!(r.is_err(), "prefix {len}");
+            if len < MIN_PACKET_LEN {
+                assert!(matches!(r, Err(OpenError::Truncated)), "prefix {len}");
+            }
+        }
+        // Every single-bit flip fails (AD, epk, ciphertext, tag).
+        for i in 0..packet.len() {
+            let mut p = packet.clone();
+            p[i] ^= 0x01;
+            assert!(open_payload(&bob, &p).is_err(), "byte {i}");
+        }
+        // A trailing byte breaks the tag; an overrunning extra_len truncates.
+        let mut longer = packet.clone();
+        longer.push(0);
+        assert!(matches!(
+            open_payload(&bob, &longer),
+            Err(OpenError::AuthFailed)
+        ));
+        let mut overrun = packet[..MIN_PACKET_LEN].to_vec();
+        overrun[10] = 0xff;
+        assert!(matches!(
+            open_payload(&bob, &overrun),
+            Err(OpenError::Truncated)
+        ));
+        // Low-order recipient (seal) and low-order wire epk (open).
+        assert!(matches!(
+            seal_payload(&[0u8; 32], &header, fixed(b"x")),
+            Err(SealError::Ecdh(EcdhError::LowOrderPublicKey))
+        ));
+        let mut forged = packet;
+        let hl = HEADER_FIXED_LEN + header.extra.len();
+        forged[hl..hl + EPK_LEN].copy_from_slice(&[0u8; 32]);
+        assert!(matches!(
+            open_payload(&bob, &forged),
+            Err(OpenError::Ecdh(EcdhError::LowOrderPublicKey))
+        ));
+    }
+
+    #[test]
+    fn the_two_inner_layouts_are_indistinguishable_on_the_wire() {
+        // Why "two inner layouts never share a version" (module docs; L5 §3):
+        // nothing on the wire tells them apart.
+        let bob = bob_keyset();
+        let sender = NodeId::from(hex32(PROJECT_NODE_ID));
+        let p32 = seal(&bob.x25519_public(), &SealHeader::v1(5), &sender, b"pt").unwrap();
+        let (_, _, inner) = open_payload(&bob, &p32).unwrap();
+        assert_eq!(&inner[..32], sender.as_bytes());
+        assert_eq!(&inner[32..], b"pt");
+        // …and the reverse misreads caller bytes as a NodeId, or (short
+        // inner) fails the 32 B form's minimum.
+        let caller = [0x5au8; 40];
+        let pp = seal_payload(&bob.x25519_public(), &SealHeader::v1(6), fixed(&caller)).unwrap();
+        let misread = open(&bob, &pp).unwrap();
+        assert_eq!(misread.sender.as_bytes(), &[0x5au8; 32]);
+        let short = seal_payload(&bob.x25519_public(), &SealHeader::v1(7), fixed(b"")).unwrap();
+        assert!(matches!(
+            open(&bob, &short),
+            Err(OpenError::PlaintextTooShort)
+        ));
+    }
+
+    /// The A2 known answer (frozen in `test-vectors/layer5/sealed-payload.json`
+    /// as `kats[0]`, re-derived there by `crosscheck.py` from the spec text
+    /// and by `tests/layer5_amendments.rs` from the primitive crates).
+    #[test]
+    fn payload_known_answer_vector() {
+        let bob = bob_keyset();
+        let header = SealHeader {
+            version: VERSION_V1,
+            crypto_mode: CRYPTO_MODE_V1,
+            counter: 1025,
+            extra: l5_extra(&bob),
+        };
+        let inner = b"111network: sealed-payload KAT (L5 A2)";
+        let packet = seal_core(
+            &hex32(RFC7748_BOB_PUB),
+            &header,
+            &hex32(RFC7748_S52_SCALAR1),
+            fixed(inner),
+        )
+        .unwrap();
+        let (h, epk, got) = open_payload(&bob, &packet).unwrap();
+        assert_eq!(h, header);
+        assert_eq!(got, inner);
+        assert_eq!(
+            to_hex(&epk),
+            "1c9fd88f45606d932a80c71824ae151d15d73e77de38e8e000852e614fae7019"
+        );
+        // Frozen wire bytes — byte-equal to the from-scratch Python
+        // derivation that generated the vector file.
+        let want = hex(concat!(
+            "010101040000000000000540d75a9801", // header: v1, mode 1, counter 1025 LE, extra_len 5, prio 0x40 ‖ dest_hint
+            "1c9fd88f45606d932a80c71824ae151d15d73e77de38e8e000852e614fae7019", // epk = X25519(RFC 7748 §5.2 scalar 1)
+            "d8cf83ea5129cfdd601646f970784ddaf5f456ddefc8fc2a2d2d2a0907127e259e8bb70bebce", // ct (38 B inner, verbatim)
+            "f0616d814520981323cc56a11afd0673", // tag(16B)
+        ));
+        assert_eq!(packet, want, "A2 KAT regression — recipe drift");
+        println!("A2 sealed-payload KAT packet = {}", to_hex(&packet));
     }
 
     // ------------------------------------------------------------------

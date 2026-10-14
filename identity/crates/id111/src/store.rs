@@ -8,7 +8,16 @@
 //!
 //! First-seen pins. **Pinned key material is immutable while held**: any
 //! announce presenting different key material for a known NodeId is rejected
-//! (Meshtastic CVE-2025-55293). The store is bounded — v1 default cap 256
+//! (Meshtastic CVE-2025-55293).
+//!
+//! **Layer 5 amendment A6** (`os/messaging/README.md` §7, §19): an announce
+//! whose key material is IDENTICAL to the pin and whose counter is ≤ the
+//! stored one is accepted with no state change ([`PinOutcome::Unchanged`])
+//! rather than reported as an error — reconnects and genesis cards
+//! legitimately re-present announces the store already holds. Different key
+//! material stays a hard [`StoreError::KeyConflict`] at any counter, and the
+//! announce signature is still verified before the store is consulted
+//! (`announce::process_announce`). The store is bounded — v1 default cap 256
 //! peers (≈33KB flash, trivial on ESP32-S3) with LRU eviction permitted.
 //! Eviction is safe under B2 (§6.3): the NodeId IS the public key itself, so
 //! no attacker can impersonate an evicted NodeId, and a re-appearance
@@ -107,15 +116,20 @@ impl PeerEntry {
 // Errors & outcomes
 // ---------------------------------------------------------------------------
 
-/// Pinning-store errors. Key-material conflicts and stale counters are
-/// rejections, not mutations: the held pin is never changed by them.
+/// Pinning-store errors. Key-material conflicts are rejections, not
+/// mutations: the held pin is never changed by them.
 #[derive(Debug)]
 pub enum StoreError {
     /// §6.3/§12 rule 3 — an announce presented different key material for a
     /// pinned NodeId (CVE-2025-55293 class). Rejected; the pin is unchanged.
     KeyConflict,
     /// §6.2 — the announce counter did not exceed the last-seen value
-    /// (stale ⇒ drop).
+    /// (stale ⇒ drop). **Not produced by [`PinStore::apply_announce`] since
+    /// L5 amendment A6** (a same-key stale announce is
+    /// [`PinOutcome::Unchanged`]; a different-key one is
+    /// [`StoreError::KeyConflict`]). Retained so the L2 vocabulary — the
+    /// frozen `announce.json` `err:stale:<last_seen>:<got>` token the Cat-1
+    /// harness replays — stays expressible and the public enum stays stable.
     StaleCounter { last_seen: u64, got: u64 },
     /// Fail-closed parse rejection (§12 rules 1/7).
     Corrupt(&'static str),
@@ -164,6 +178,13 @@ pub enum PinOutcome {
     /// Known peer, same key material, fresher counter: the stored
     /// highest-announce-counter advanced from `previous`.
     CounterUpdated { previous: u64 },
+    /// L5 amendment A6 — known peer, IDENTICAL key material, counter ≤
+    /// `last_seen` (a reconnect or a card re-presenting an announce the
+    /// store already holds). Accepted with no state change: the counter,
+    /// the keys, the LRU order and the persisted file are all untouched.
+    /// The L2 §6.2 freshness rule still holds — a stale announce never
+    /// moves the pin; it is simply not an error.
+    Unchanged { last_seen: u64 },
 }
 
 // ---------------------------------------------------------------------------
@@ -249,9 +270,12 @@ impl PinStore {
     /// state change — `announce::process_announce` orders it so):
     ///
     /// - known NodeId, different `enc_pubkey` ⇒ [`StoreError::KeyConflict`]
-    ///   (pinned key material is immutable while held, §12 rule 3);
-    /// - known NodeId, `counter` ≤ last-seen ⇒ [`StoreError::StaleCounter`]
-    ///   (stale ⇒ drop);
+    ///   at ANY counter — lower, equal or higher (pinned key material is
+    ///   immutable while held, §12 rule 3); checked first;
+    /// - known NodeId, identical key material, `counter` ≤ last-seen ⇒
+    ///   `Ok(`[`PinOutcome::Unchanged`]`)` with no state change (L5
+    ///   amendment A6: reconnects and genesis cards re-present stored
+    ///   announces; the pin never moves backwards, and it is not an error);
     /// - known NodeId, fresher counter ⇒ counter update (+ persist);
     /// - unknown NodeId ⇒ first-seen pin (+ LRU eviction at the cap +
     ///   persist).
@@ -270,9 +294,10 @@ impl PinStore {
                 return Err(StoreError::KeyConflict);
             }
             if counter <= entry.highest_announce_counter {
-                return Err(StoreError::StaleCounter {
+                // A6: same keys, not fresher — accepted, nothing changes (no
+                // counter move, no LRU touch, no persist).
+                return Ok(PinOutcome::Unchanged {
                     last_seen: entry.highest_announce_counter,
-                    got: counter,
                 });
             }
             let previous = entry.highest_announce_counter;
@@ -467,30 +492,111 @@ mod tests {
     }
 
     #[test]
-    fn stale_counter_dropped() {
+    fn stale_same_keys_is_unchanged_with_no_state_change() {
+        // L5 amendment A6: equal or lower counter with IDENTICAL key
+        // material ⇒ Ok(Unchanged), never an error, and nothing moves.
         let tmp = TempDir::new("stale");
-        let mut store = PinStore::open(tmp.path()).unwrap();
-        let a = id(0xa2);
+        let mut store = PinStore::open_with_cap(tmp.path(), cap(2)).unwrap();
+        let (a, b) = (id(0xa2), id(0xa4));
         let enc_a = enc_key(1);
         store.apply_announce(a, enc_a, 3).unwrap();
-        // Equal is stale (the rule is MUST EXCEED)…
+        store.apply_announce(b, enc_key(2), 1).unwrap(); // b is now MRU
+        let file = || fs::read(tmp.path().join(PEERS_FILE)).unwrap();
+        let before = file();
+        // Equal (a reconnect re-presenting the stored announce)…
+        assert_eq!(
+            store.apply_announce(a, enc_a, 3).unwrap(),
+            PinOutcome::Unchanged { last_seen: 3 }
+        );
+        // …and lower (a genesis card scanned after a newer announce).
+        assert_eq!(
+            store.apply_announce(a, enc_a, 1).unwrap(),
+            PinOutcome::Unchanged { last_seen: 3 }
+        );
+        // No state change: counter, keys, persisted bytes…
+        let e = store.get(&a).unwrap();
+        assert_eq!(e.highest_announce_counter(), 3);
+        assert_eq!(e.enc_pubkey(), &enc_a);
+        assert_eq!(file(), before, "Unchanged never persists");
+        // …and LRU order: a is still the least-recently-used, so the next
+        // first-seen pin evicts it (an Unchanged is not a touch).
+        assert_eq!(
+            store.apply_announce(id(0xa5), enc_key(3), 1).unwrap(),
+            PinOutcome::Pinned { evicted: Some(a) }
+        );
+    }
+
+    #[test]
+    fn reconnect_and_genesis_card_through_process_announce() {
+        // The two A6 cases end to end, with real signed announces: verify
+        // first, then the store rule.
+        use crate::announce::{process_announce, Announce, AnnounceError};
+        use crate::keyset::Keyset;
+        let tmp = TempDir::new("a6-e2e");
+        let mut store = PinStore::open(tmp.path()).unwrap();
+        let peer = Keyset::derive_from_mnemonic(
+            "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about",
+        )
+        .unwrap();
+        let me = id(0x99);
+        let wire = |c: u64| Announce::create(&peer, c, b"").unwrap().encode();
+
+        // Reconnect: the stored announce re-presented verbatim.
+        assert_eq!(
+            process_announce(&mut store, &me, &wire(4)).unwrap(),
+            PinOutcome::Pinned { evicted: None }
+        );
+        assert_eq!(
+            process_announce(&mut store, &me, &wire(4)).unwrap(),
+            PinOutcome::Unchanged { last_seen: 4 }
+        );
+        // Genesis card (counter 1) after the newer announce: never overwrites.
+        assert_eq!(
+            process_announce(&mut store, &me, &wire(1)).unwrap(),
+            PinOutcome::Unchanged { last_seen: 4 }
+        );
+        let e = store.get(&peer.node_id()).unwrap();
+        assert_eq!(e.highest_announce_counter(), 4);
+        assert_eq!(e.enc_pubkey(), &peer.x25519_public());
+        // A stale announce with a broken signature is a signature failure,
+        // never Unchanged: verification precedes the store rule.
+        let mut forged = wire(2);
+        let last = forged.len() - 1;
+        forged[last] ^= 0x01;
         assert!(matches!(
-            store.apply_announce(a, enc_a, 3),
-            Err(StoreError::StaleCounter {
-                last_seen: 3,
-                got: 3
-            })
+            process_announce(&mut store, &me, &forged),
+            Err(AnnounceError::InvalidSignature(_))
         ));
-        // …and so is lower.
-        assert!(matches!(
-            store.apply_announce(a, enc_a, 2),
-            Err(StoreError::StaleCounter {
-                last_seen: 3,
-                got: 2
-            })
-        ));
-        // The entry is untouched.
-        assert_eq!(store.get(&a).unwrap().highest_announce_counter(), 3);
+        // Fresher still updates.
+        assert_eq!(
+            process_announce(&mut store, &me, &wire(5)).unwrap(),
+            PinOutcome::CounterUpdated { previous: 4 }
+        );
+    }
+
+    #[test]
+    fn conflict_at_lower_equal_or_higher_counter_stays_rejected() {
+        // A6 applies ONLY to identical key material: a different enc_pubkey
+        // is a hard rejection whatever the counter, and changes nothing.
+        let tmp = TempDir::new("a6-conflict");
+        let mut store = PinStore::open(tmp.path()).unwrap();
+        let a = id(0xa6);
+        let enc_a = enc_key(1);
+        store.apply_announce(a, enc_a, 5).unwrap();
+        let before = fs::read(tmp.path().join(PEERS_FILE)).unwrap();
+        for counter in [2u64, 5, 9] {
+            assert!(
+                matches!(
+                    store.apply_announce(a, enc_key(2), counter),
+                    Err(StoreError::KeyConflict)
+                ),
+                "counter {counter}"
+            );
+        }
+        let e = store.get(&a).unwrap();
+        assert_eq!(e.enc_pubkey(), &enc_a);
+        assert_eq!(e.highest_announce_counter(), 5);
+        assert_eq!(fs::read(tmp.path().join(PEERS_FILE)).unwrap(), before);
     }
 
     #[test]

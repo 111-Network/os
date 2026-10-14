@@ -31,6 +31,24 @@
 //! operator-supplied, else 0 only for a never-before-deployed identity — and
 //! applies the same jump to per-peer traffic send-counters on new sessions.
 //!
+//! Layer 5 amendments (`os/messaging/README.md` §4, §19):
+//!
+//! - **A11 — verdict, not rejection.** [`CounterStore::observe_counter`]
+//!   offers a verified packet's counter to the same 32-entry window as
+//!   [`CounterStore::on_receive`], advancing it exactly as `on_receive` would
+//!   for an accepted counter, but reports a counter the window would reject
+//!   as [`Freshness::Stale`] (no state change) instead of an error. For
+//!   `msg_seq` kinds replay authority is Layer 5's own receive state; the
+//!   verdict only gates connection attribution, card answers and proactive
+//!   pushes (L5 §4, §8.1). `on_receive` keeps the §6.5 rejecting contract.
+//! - **A3 — the `msg_seq` epoch source.** [`CounterStore::next_announce_counter`]
+//!   is the §4 epoch source: each call returns a fresh, strictly greater
+//!   value that is already durable (fsync) when returned, and refuses with
+//!   [`CounterError::RestoreFloorRequired`] while a state-absent restore has
+//!   no floor — during which **nothing is sealed** (L5 queues outbound work
+//!   as `restore_pending`). [`CounterStore::announce_last`] is the read-only
+//!   value L5 records at clean close and compares at the next open.
+//!
 //! Counter state is protocol state, not secret (§13 `counters` file, 0600 /
 //! the Cat-1 NVS map) — no zeroize handling in this module.
 //!
@@ -119,6 +137,22 @@ impl std::fmt::Display for WindowReject {
 }
 
 impl std::error::Error for WindowReject {}
+
+/// L5 amendment A11 — the window's verdict on a verified packet's counter
+/// ([`CounterStore::observe_counter`]). Bookkeeping, never rejection: the
+/// caller processes `msg_seq` content whatever the verdict (its own §4
+/// receive state is the replay authority), and only a `Fresh` packet may
+/// attribute a connection, answer a card request or trigger a push.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Freshness {
+    /// The window accepted the counter (above high-water, or an unseen slot
+    /// inside the window); its state advanced exactly as
+    /// [`CounterStore::on_receive`] would have.
+    Fresh,
+    /// The window would reject the counter (already seen, or 32 or more
+    /// behind high-water); nothing changed.
+    Stale,
+}
 
 impl ReceiveWindow {
     /// A fresh window (nothing received yet).
@@ -418,6 +452,16 @@ impl CounterStore {
     /// state (panel seams#1). On any commit failure the in-memory value rolls
     /// back and no value is issued. Errors [`CounterError::RestoreFloorRequired`]
     /// while a state-absent restore has no floor set (§8.4).
+    ///
+    /// **Also the Layer 5 `msg_seq` epoch source (L5 §4, amendment A3).** A
+    /// value returned here is fresh (strictly greater than every value issued
+    /// before it, across clean and unclean restarts and across a floored
+    /// restore — floor + 1024 + 1 at least) and already durable, so an epoch
+    /// minted from it can never repeat for new content. L5 mints one per store
+    /// open under its §4 conditions; the call costs one fsync. Callers MUST
+    /// treat [`CounterError::RestoreFloorRequired`] as "seal nothing": no
+    /// announce, no epoch, no traffic until [`Self::set_restore_floor`] has
+    /// committed (L5 keeps outbound items queued, reason `restore_pending`).
     pub fn next_announce_counter(&mut self) -> Result<u64, CounterError> {
         self.mark_running()?;
         if self.restore_pending {
@@ -464,6 +508,52 @@ impl CounterStore {
         Ok(())
     }
 
+    /// L5 amendment A11 — offer a verified packet's counter to the §6.5
+    /// window and report the verdict instead of rejecting.
+    ///
+    /// A counter the window accepts advances it exactly as
+    /// [`Self::on_receive`] does (same window logic, same dirty-mark, same
+    /// batch-commit tick) and returns [`Freshness::Fresh`]. A counter the
+    /// window would reject — already seen, or [`WINDOW_SIZE`] or more behind
+    /// high-water — returns `Ok(`[`Freshness::Stale`]`)` and changes NOTHING
+    /// (not the window, not the batch tick, not the on-disk clean flag).
+    ///
+    /// Errors are the store's own, never a replay verdict:
+    /// [`CounterError::TooManyPeers`] for a new peer past the guard, and
+    /// commit/I-O failures — from the dirty-mark (nothing advanced) or from
+    /// the batch commit (the in-memory window has already advanced, exactly
+    /// as with `on_receive`).
+    ///
+    /// Call it only AFTER the packet's sender authentication has verified
+    /// (L5 §3: `pair_mac` first — a forged sender must never move a peer's
+    /// window).
+    pub fn observe_counter(
+        &mut self,
+        peer: &NodeId,
+        counter: u64,
+    ) -> Result<Freshness, CounterError> {
+        // Read-only verdict first: a stale counter touches no state at all. A
+        // peer with no entry yet has an empty window, which accepts any
+        // counter (§6.5), so only known peers can be stale.
+        if let Some(t) = self.peers.get(peer) {
+            let mut probe = t.window;
+            if probe.offer(counter).is_err() {
+                return Ok(Freshness::Stale);
+            }
+        }
+        // Fresh: exactly the on_receive path.
+        self.mark_running()?;
+        let base = self.traffic_base;
+        let entry = self.peer_entry(*peer, base)?;
+        if entry.window.offer(counter).is_err() {
+            // Unreachable after the probe above (single-writer store); kept
+            // typed so no input can panic.
+            return Ok(Freshness::Stale);
+        }
+        self.tick_and_maybe_commit()?;
+        Ok(Freshness::Fresh)
+    }
+
     /// §6.5 — clean-shutdown commit: uncommitted state is flushed and the
     /// file is marked clean, so the next [`Self::open`] applies NO forward
     /// jump. The host MUST call this on every orderly stop.
@@ -481,6 +571,9 @@ impl CounterStore {
     }
 
     /// The last committed announce counter (next announce uses +1).
+    /// Read-only: never mints or commits. L5 §4 records this value at clean
+    /// close and compares it at the next store open — a mismatch (e.g. a
+    /// `store.db` restored onto a live identity) mints a new epoch (A3).
     pub fn announce_last(&self) -> u64 {
         self.announce_last
     }
@@ -1091,6 +1184,156 @@ mod tests {
             Err(CounterError::TooManyPeers)
         ));
     }
+    // ------------------------------------------------------------------
+    // L5 amendment A11 — observe_counter: verdict, never rejection.
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn observe_counter_mirrors_on_receive_without_rejecting() {
+        // Twin stores fed the same counters: observe_counter's verdict is
+        // Fresh exactly where on_receive accepts, Stale exactly where it
+        // rejects, and the windows stay identical after every step.
+        let (ta, tb) = (TempDir::new("obs-a"), TempDir::new("obs-b"));
+        let mut obs = CounterStore::create(ta.path()).unwrap();
+        let mut rcv = CounterStore::create(tb.path()).unwrap();
+        let a = peer(0xc1);
+        for c in [1u64, 1, 3, 2, 2, 40, 8, 9, 9, 41, 0, 1000, 700, 999, 999] {
+            let verdict = obs.observe_counter(&a, c).unwrap();
+            let accepted = rcv.on_receive(&a, c);
+            match verdict {
+                Freshness::Fresh => assert!(accepted.is_ok(), "counter {c}"),
+                Freshness::Stale => assert!(
+                    matches!(accepted, Err(CounterError::Window(_))),
+                    "counter {c}"
+                ),
+            }
+            assert_eq!(
+                obs.peer_traffic(&a).unwrap().receive_window(),
+                rcv.peer_traffic(&a).unwrap().receive_window(),
+                "window parity after {c}"
+            );
+        }
+    }
+
+    #[test]
+    fn observe_counter_custody_late_arrival_is_stale_not_an_error() {
+        // L5 §4: a custody item can arrive hundreds of counters behind a
+        // packet that took the direct path — reported, never rejected.
+        let tmp = TempDir::new("obs-late");
+        let mut store = CounterStore::create(tmp.path()).unwrap();
+        let a = peer(0xc2);
+        assert_eq!(store.observe_counter(&a, 1000).unwrap(), Freshness::Fresh);
+        let before = store.peer_traffic(&a).unwrap();
+        assert_eq!(store.observe_counter(&a, 700).unwrap(), Freshness::Stale);
+        assert_eq!(store.observe_counter(&a, 1000).unwrap(), Freshness::Stale);
+        assert_eq!(store.peer_traffic(&a).unwrap(), before, "no state change");
+        // An unseen slot inside the window is still fresh.
+        assert_eq!(store.observe_counter(&a, 999).unwrap(), Freshness::Fresh);
+        let w = store.peer_traffic(&a).unwrap().receive_window();
+        assert_eq!((w.high(), w.bitmap()), (1000, 0b11));
+        // A first counter from an unknown peer is always fresh (empty window).
+        assert_eq!(
+            store.observe_counter(&peer(0xc3), 0).unwrap(),
+            Freshness::Fresh
+        );
+    }
+
+    #[test]
+    fn observe_counter_stale_touches_neither_disk_flag_nor_batch_tick() {
+        let tmp = TempDir::new("obs-nostate");
+        let path = tmp.path().join(COUNTERS_FILE);
+        let a = peer(0xc4);
+        let mut store = CounterStore::create(tmp.path()).unwrap();
+        store.set_batch_n(nz(2));
+        assert_eq!(store.observe_counter(&a, 100).unwrap(), Freshness::Fresh);
+        store.shutdown().unwrap(); // flag CLEAN, batch tick reset
+        let clean = fs::read(&path).unwrap();
+        assert_eq!(clean[5], CLEAN_SHUTDOWN);
+        // Stale observations: the file is not rewritten (still CLEAN — a
+        // crash now is correctly a clean state) and no batch tick accrues.
+        for _ in 0..5 {
+            assert_eq!(store.observe_counter(&a, 100).unwrap(), Freshness::Stale);
+            assert_eq!(store.observe_counter(&a, 50).unwrap(), Freshness::Stale);
+        }
+        assert_eq!(fs::read(&path).unwrap(), clean);
+        // The first fresh one marks the file running, exactly as on_receive.
+        assert_eq!(store.observe_counter(&a, 101).unwrap(), Freshness::Fresh);
+        assert_eq!(fs::read(&path).unwrap()[5], DIRTY_RUNNING);
+        // One fresh tick so far (N = 2): the 2nd fresh one batch-commits.
+        let persisted = |p: &Path| parse_file(&fs::read(p).unwrap()).unwrap().peers[&a];
+        assert_eq!(persisted(&path).window.high(), 100);
+        assert_eq!(store.observe_counter(&a, 102).unwrap(), Freshness::Fresh);
+        assert_eq!(persisted(&path).window.high(), 102);
+    }
+
+    #[test]
+    fn observe_counter_peer_guard_is_a_store_error_not_a_verdict() {
+        let tmp = TempDir::new("obs-guard");
+        let mut store = CounterStore::create(tmp.path()).unwrap();
+        for i in 0..MAX_COUNTER_PEERS {
+            let mut b = [0u8; 32];
+            b[0..2].copy_from_slice(&(i as u16).to_le_bytes());
+            b[31] = 0xee;
+            store.observe_counter(&NodeId::from(b), 1).unwrap();
+        }
+        assert!(matches!(
+            store.observe_counter(&peer(0x01), 1),
+            Err(CounterError::TooManyPeers)
+        ));
+    }
+
+    // ------------------------------------------------------------------
+    // L5 amendment A3 — next_announce_counter as the msg_seq epoch source.
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn epoch_source_is_fresh_and_durable_across_restarts() {
+        let tmp = TempDir::new("epoch");
+        let mut store = CounterStore::create(tmp.path()).unwrap();
+        let e1 = store.next_announce_counter().unwrap();
+        assert_eq!(store.announce_last(), e1);
+        // Unclean stop: the minted epoch was already durable.
+        drop(store);
+        let mut store = CounterStore::open(tmp.path()).unwrap();
+        assert_eq!(store.announce_last(), e1);
+        let e2 = store.next_announce_counter().unwrap();
+        assert!(e2 > e1);
+        // Clean stop: announce_last is what L5 compares at the next open.
+        store.shutdown().unwrap();
+        let mut store = CounterStore::open(tmp.path()).unwrap();
+        assert_eq!(store.announce_last(), e2);
+        assert!(store.next_announce_counter().unwrap() > e2);
+    }
+
+    #[test]
+    fn epoch_source_refuses_while_restore_pending_and_restores_never_collide() {
+        // First words-only restore: nothing may be sealed until the floor
+        // commits — the epoch source refuses and announce_last stays put.
+        let t1 = TempDir::new("epoch-r1");
+        let mut r1 = CounterStore::restore_pending(t1.path()).unwrap();
+        for _ in 0..3 {
+            assert!(matches!(
+                r1.next_announce_counter(),
+                Err(CounterError::RestoreFloorRequired)
+            ));
+        }
+        assert_eq!(r1.announce_last(), 0);
+        assert!(!t1.path().join(COUNTERS_FILE).exists(), "nothing committed");
+        r1.set_restore_floor(500).unwrap();
+        let first_epoch = r1.next_announce_counter().unwrap();
+        assert_eq!(first_epoch, 500 + RESTORE_JUMP + 1);
+        let last_of_r1 = r1.next_announce_counter().unwrap();
+
+        // A second words-only restore whose floor is learned from the first
+        // run's announces (the §8.4 gossip floor) mints strictly above every
+        // epoch the first restore ever used (L2 amendment A3).
+        let t2 = TempDir::new("epoch-r2");
+        let mut r2 = CounterStore::restore_pending(t2.path()).unwrap();
+        r2.set_restore_floor(last_of_r1).unwrap();
+        let e = r2.next_announce_counter().unwrap();
+        assert!(e > last_of_r1 && e > first_epoch);
+    }
+
     /// Wave-3 reviewer regression (T8 finding): a peer first contacted fewer
     /// than N operations before an UNCLEAN reboot is absent from the persisted
     /// file; its send counter MUST still resume above every uncommitted

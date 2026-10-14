@@ -1,0 +1,165 @@
+{
+  "spec": "messaging section 4 + section 19 amendment A11; identity section 6.5 - CounterStore::observe_counter: the 32-entry window as a fresh/stale verdict, never a rejection",
+  "frozen": "2026-10-14",
+  "description": "Each sequence runs against ONE fresh CounterStore and ONE peer (any NodeId). observe_counter offers the counter to the identity section 6.5 window exactly as on_receive does: a counter above high-water slides the window (shift >= 32 resets the bitmap to 1); a counter inside the window whose bit is clear sets it; either is 'fresh' and the state advances. A counter already seen, or 32 or more behind high-water, is 'stale': Ok(Stale), NO state change (on_receive would return Err(Window) for exactly these). 'high' (decimal string) and 'bitmap' (bit i = counter high - i seen) are the window AFTER the step. A11: replay authority for msg_seq kinds is Layer 5's own state; the verdict gates connection attribution, card answers and proactive pushes only.",
+  "provenance": "Generated 2026-10-14 (task L5-I1) from an independent Python model of the identity section 6.5 window; asserted against id111::counters::CounterStore (observe_counter verdict + window, and on_receive parity on a twin store) by tests/layer5_amendments.rs; re-derived by crosscheck.py (check_layer5_counters).",
+  "window_size": 32,
+  "sequences": [
+    {
+      "name": "in-order, duplicate, gap fill, window edge",
+      "rationale": "the section 6.5 window semantics, reported as verdicts",
+      "steps": [
+        {
+          "counter": "1",
+          "expect": "fresh",
+          "high": "1",
+          "bitmap": 1
+        },
+        {
+          "counter": "1",
+          "expect": "stale",
+          "high": "1",
+          "bitmap": 1
+        },
+        {
+          "counter": "3",
+          "expect": "fresh",
+          "high": "3",
+          "bitmap": 5
+        },
+        {
+          "counter": "2",
+          "expect": "fresh",
+          "high": "3",
+          "bitmap": 7
+        },
+        {
+          "counter": "2",
+          "expect": "stale",
+          "high": "3",
+          "bitmap": 7
+        },
+        {
+          "counter": "40",
+          "expect": "fresh",
+          "high": "40",
+          "bitmap": 1
+        },
+        {
+          "counter": "8",
+          "expect": "stale",
+          "high": "40",
+          "bitmap": 1
+        },
+        {
+          "counter": "9",
+          "expect": "fresh",
+          "high": "40",
+          "bitmap": 2147483649
+        },
+        {
+          "counter": "9",
+          "expect": "stale",
+          "high": "40",
+          "bitmap": 2147483649
+        },
+        {
+          "counter": "41",
+          "expect": "fresh",
+          "high": "41",
+          "bitmap": 3
+        }
+      ]
+    },
+    {
+      "name": "custody item hundreds of counters behind a direct-path packet",
+      "rationale": "store-and-forward legitimately delivers an old counter late: stale verdict, no state change, content still processed by Layer 5 (A11)",
+      "steps": [
+        {
+          "counter": "1000",
+          "expect": "fresh",
+          "high": "1000",
+          "bitmap": 1
+        },
+        {
+          "counter": "700",
+          "expect": "stale",
+          "high": "1000",
+          "bitmap": 1
+        },
+        {
+          "counter": "1001",
+          "expect": "fresh",
+          "high": "1001",
+          "bitmap": 3
+        },
+        {
+          "counter": "999",
+          "expect": "fresh",
+          "high": "1001",
+          "bitmap": 7
+        },
+        {
+          "counter": "700",
+          "expect": "stale",
+          "high": "1001",
+          "bitmap": 7
+        },
+        {
+          "counter": "969",
+          "expect": "stale",
+          "high": "1001",
+          "bitmap": 7
+        },
+        {
+          "counter": "970",
+          "expect": "fresh",
+          "high": "1001",
+          "bitmap": 2147483655
+        }
+      ]
+    },
+    {
+      "name": "counter 0 and u64::MAX",
+      "rationale": "0 is a legal first counter; u64::MAX slides the window without overflow",
+      "steps": [
+        {
+          "counter": "0",
+          "expect": "fresh",
+          "high": "0",
+          "bitmap": 1
+        },
+        {
+          "counter": "0",
+          "expect": "stale",
+          "high": "0",
+          "bitmap": 1
+        },
+        {
+          "counter": "18446744073709551615",
+          "expect": "fresh",
+          "high": "18446744073709551615",
+          "bitmap": 1
+        },
+        {
+          "counter": "0",
+          "expect": "stale",
+          "high": "18446744073709551615",
+          "bitmap": 1
+        },
+        {
+          "counter": "18446744073709551615",
+          "expect": "stale",
+          "high": "18446744073709551615",
+          "bitmap": 1
+        },
+        {
+          "counter": "18446744073709551614",
+          "expect": "fresh",
+          "high": "18446744073709551615",
+          "bitmap": 3
+        }
+      ]
+    }
+  ]
+}

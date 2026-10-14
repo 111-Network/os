@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""Independent cross-check of the frozen Layer 2 section 14 vectors (task T8).
+"""Independent cross-check of the frozen Layer 2 section 14 vectors (task T8)
+and the Layer 5 amendment vectors under layer5/ (task L5-I1).
 
 The Rust conformance suite (crates/id111/tests/conformance.rs) proves the
 vectors against the id111 crate. This script is the third leg: it re-derives
@@ -738,10 +739,142 @@ def check_d9():
     eq(d["expect"]["announce_counter_init"], 0, "fresh counter")
 
 
+# ---------------------------------------- Layer 5 amendments (layer5/, L5-I1) ---
+def payload_open_token(rsk, packet):
+    """A2 open_payload from the spec text: the section 6.4 gates in order, inner
+    returned verbatim (no 32 B NodeId, no inner minimum)."""
+    if len(packet) < 11 + 32 + 16:
+        return "err:truncated", None
+    if packet[1] != 1:
+        return "err:mode:%d" % packet[1], None
+    hl = 11 + packet[10]
+    if len(packet) < hl + 32 + 16:
+        return "err:truncated", None
+    epk = packet[hl : hl + 32]
+    if low_order_x25519(epk):
+        return "err:ecdh:LowOrderPublicKey", None
+    shared = x_dh(rsk, epk)
+    if shared == b"\0" * 32:
+        return "err:ecdh:NonContributory", None
+    key, nonce = seal_kdf(shared, epk, x_pub(rsk))
+    try:
+        inner = xchacha_decrypt(key, nonce, packet[hl + 32 :], packet[:hl])
+    except Exception:
+        return "err:auth", None
+    return "ok", inner
+
+
+def check_layer5_sealed():
+    d = load("layer5/sealed-payload.json")
+    eq(d["frozen"], "2026-10-14", "layer5 sealed frozen date")
+    r = d["recipient"]
+    rsk = h(r["x25519_scalar"])
+    eq(x_pub(rsk), h(r["x25519_public"]), "A2 recipient pub")
+    eq(ed_pub(h(r["ed25519_seed"])), h(r["node_id"]), "A2 recipient NodeId")
+    for k in d["kats"]:
+        n = "A2 " + k["name"]
+        esk, rpk = h(k["esk"]), h(k["rpk"])
+        epk, shared = x_pub(esk), x_dh(esk, rpk)
+        eq(epk, h(k["epk"]), n + ": epk")
+        eq(shared, h(k["shared"]), n + ": shared")
+        key, nonce = seal_kdf(shared, epk, rpk)
+        eq(key.hex(), k["key"], n + ": key")
+        eq(nonce.hex(), k["nonce"], n + ": nonce")
+        hd = k["header"]
+        extra = h(hd["extra"])
+        hb = bytes([hd["version"], hd["crypto_mode"]]) + struct.pack("<Q", int(hd["counter"])) + bytes([len(extra)]) + extra
+        eq(hb, h(k["header_bytes"]), n + ": header bytes")
+        inner = h(k["inner"])
+        ct = xchacha_encrypt(key, nonce, inner, hb)  # the inner verbatim: no NodeId prefix
+        eq(ct, h(k["ciphertext_and_tag"]), n + ": ciphertext||tag")
+        eq(hb + epk + ct, h(k["packet"]), n + ": packet")
+        eq(len(h(k["packet"])), len(hb) + 32 + len(inner) + 16, n + ": size")
+        eq(payload_open_token(rsk, h(k["packet"])), ("ok", inner), n + ": opens")
+    sizes = [len(h(k["packet"])) for k in d["kats"]]
+    ok(11 + 32 + 16 in sizes, "A2: a KAT sits exactly on MIN_PACKET_LEN")
+    other = derive_keyset(d["wrong_recipient"]["mnemonic"])
+    eq(payload_open_token(other["scalar"], h(d["kats"][0]["packet"]))[0], d["wrong_recipient"]["expect"], "A2 wrong recipient")
+    for v in d["negatives"]:
+        eq(payload_open_token(rsk, h(v["packet"]))[0], v["expect"], "A2 negative: " + v["name"])
+    for v in d["seal_negatives"]:
+        if v["crypto_mode"] != 1:
+            want = "UnsupportedCryptoMode:%d" % v["crypto_mode"]
+        elif v["extra_len"] > 255:
+            want = "HeaderTooLarge:%d" % v["extra_len"]
+        elif low_order_x25519(h(v["recipient"])):
+            want = "Ecdh:LowOrderPublicKey"
+        else:
+            want = "ok"
+        eq(want, v["expect"], "A2 seal negative: " + v["name"])
+    la = d["layout_ambiguity"]
+    a = la["payload_open_of_32b_kat"]
+    eq(payload_open_token(rsk, h(a["packet"])), (a["expect"], h(a["expect_inner"])), "A2 layout: open_payload of a 32 B-form packet")
+    eq(a["packet"], load("sealed-packet.json")["kat"]["packet"], "A2 layout: the frozen 32 B KAT")
+    eq(seal_open_token(rsk, h(la["open_of_bare_tag_kat"]["packet"])), la["open_of_bare_tag_kat"]["expect"], "A2 layout: open of a bare-tag packet")
+
+
+def check_layer5_announce():
+    d = load("layer5/announce-a6.json")
+    eq(d["frozen"], "2026-10-14", "layer5 announce frozen date")
+    for who in ("a", "b"):
+        s = d["signers"][who]
+        k = derive_keyset(s["mnemonic"])
+        eq(k["node"].hex(), s["node_id"], "A6 signer NodeId")
+        eq(k["xpub"].hex(), s["enc_pubkey"], "A6 signer enc pubkey")
+    own, a_node = h(d["own_node_id"]), h(d["signers"]["a"]["node_id"])
+    for sc in d["scenarios"]:
+        pins = {}
+        for st in sc["steps"]:
+            w = h(st["wire"])
+            t = ann_parse_token(w, own)
+            if t is None:
+                node, enc, ctr = w[1:33], w[33:65], struct.unpack("<Q", w[65:73])[0]
+                if node in pins:
+                    penc, pctr = pins[node]
+                    if penc != enc:
+                        t = "err:conflict"  # identity section 6.3: any counter
+                    elif ctr <= pctr:
+                        t = "ok:unchanged:%d" % pctr  # messaging A6: no state change
+                    else:
+                        pins[node] = (enc, ctr)
+                        t = "ok:updated:%d" % pctr
+                else:
+                    pins[node] = (enc, ctr)
+                    t = "ok:pinned"
+            n = "A6 %s: %s" % (sc["name"], st["step"])
+            eq(t, st["expect"], n)
+            pin = pins.get(a_node)
+            want = None if pin is None else {"enc_pubkey": pin[0].hex(), "counter": str(pin[1])}
+            eq(st["after"], want, n + " (after)")
+
+
+def check_layer5_counters():
+    d = load("layer5/observe-counter.json")
+    eq(d["frozen"], "2026-10-14", "layer5 counters frozen date")
+    eq(d["window_size"], 32, "A11 window size")
+    for sq in d["sequences"]:
+        high, bitmap = 0, 0
+        for i, st in enumerate(sq["steps"]):
+            c = int(st["counter"])
+            if c > high:
+                shift = c - high
+                bitmap = 1 if shift >= 32 else ((bitmap << shift) | 1) & 0xFFFFFFFF
+                high, verdict = c, "fresh"
+            elif high - c >= 32 or bitmap & (1 << (high - c)):
+                verdict = "stale"  # no state change
+            else:
+                bitmap |= 1 << (high - c)
+                verdict = "fresh"
+            n = "A11 %s step %d" % (sq["name"], i)
+            eq(verdict, st["expect"], n)
+            eq((str(high), bitmap), (st["high"], st["bitmap"]), n + " (window)")
+
+
 def main():
     for fn in (check_ed25519, check_x25519, check_slip10, check_keyset, check_encoding, check_edges,
                check_weak, check_announce, check_sealed, check_backup, check_attestation,
-               check_counters, check_d9):
+               check_counters, check_d9, check_layer5_sealed, check_layer5_announce,
+               check_layer5_counters):
         fn()
         print("ok  %s" % fn.__name__[len("check_"):])
     print("%d independent checks, %d failures" % (CHECKS, len(FAILS)))

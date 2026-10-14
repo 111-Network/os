@@ -25,6 +25,20 @@ Frozen **2026-10-13** (task T8); amended **2026-10-14** under spec v2.1 (owner d
 
 `crosscheck.py` is tooling, not a gate file.
 
+## Layer 5 amendment vectors — `layer5/` (frozen 2026-10-14, task L5-I1)
+
+The Layer 5 spec (`../../messaging/README.md` v1.2, D20) asks Layer 2 for amendments A2, A3, A6 and A11 (§19 there). They land as `id111` code and these vectors, in a **subdirectory on purpose**: the top-level set above is the Cat-1 Monocypher harness contract and stays byte-identical (D20 — "the Cat-1 harness vectors are untouched"); `monocypher-harness/run.sh` and `conformance.rs` inventory the top level only. `../crates/id111/tests/layer5_amendments.rs` loads **every** `layer5/*.json` (its own inventory, frozen date `2026-10-14`) and re-asserts it against the public API; `crosscheck.py` (`check_layer5_*`) re-derives it with no `id111` code.
+
+| File | Amendment | What it freezes |
+|---|---|---|
+| `layer5/sealed-payload.json` | **A2** — `seal::seal_payload` / `seal::open_payload` | the §6.4 recipe with a **caller-owned inner** (no 32 B sender NodeId): three KATs with pinned `esk` (L5-shaped `extra` = `prio_flags ‖ dest_hint`; empty inner = the 59 B `MIN_PACKET_LEN` packet; 255 B `extra` + counter `u64::MAX`), 22 `open_payload` negatives (tampered AD/epk/ct/tag, wrong mode incl. mode-before-ECDH, truncation, extra overrun, low-order epk), wrong recipient, seal-side refusals (which never invoke the inner closure), and the **layout ambiguity** that forces "one inner layout per `version`" |
+| `layer5/announce-a6.json` | **A6** — `PinOutcome::Unchanged` | same key material at a counter ≤ the pin ⇒ `ok:unchanged:<last_seen>`, no state change (reconnect, genesis card after a newer announce, different appdata); different key material ⇒ `err:conflict` at a lower, equal **and** higher counter; signature verified before the stale rule; per-step pin state (`after`) |
+| `layer5/observe-counter.json` | **A11** — `CounterStore::observe_counter` | the §6.5 window as a `fresh`/`stale` verdict with the window state after each step (gap fill, window edge, a custody item hundreds behind, counter 0 and `u64::MAX`); `on_receive` parity is asserted alongside |
+
+A3 (`next_announce_counter` as the L5 `msg_seq` epoch source) adds no wire; it is documented and unit-tested in `counters.rs`.
+
+**Relation to the frozen L2 announce vectors.** `announce.json` still names a stale announce `err:stale:<last_seen>:<got>` (the Cat-1 harness replays exactly that). Since A6 `id111` reports the same no-state-change outcome as `Ok(Unchanged)`; `conformance.rs` maps the frozen token to `ok:unchanged:<last_seen>` **only when the announce's key material is identical to the pinned material** (a key conflict is `err:conflict` under both rules) and asserts the pin did not move. The 32 B-NodeId `seal`/`open` and `sealed-packet.json` stay as the pre-release Cat-1 gate and are removed before the first signed release (L5 §3 "one wire per version").
+
 ## Format
 
 * Plain JSON, UTF-8. Every file starts with `spec` (the §-reference(s) it freezes), `frozen` (`2026-10-13`), `description`, `provenance`.

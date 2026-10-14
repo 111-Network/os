@@ -391,6 +391,7 @@ fn ann_tok(r: Result<PinOutcome, AnnounceError>) -> String {
         Ok(PinOutcome::Pinned { evicted: None }) => "ok:pinned".into(),
         Ok(PinOutcome::Pinned { evicted: Some(_) }) => "ok:pinned+evicted".into(),
         Ok(PinOutcome::CounterUpdated { previous }) => format!("ok:updated:{previous}"),
+        Ok(PinOutcome::Unchanged { last_seen }) => format!("ok:unchanged:{last_seen}"),
         Err(AnnounceError::MalformedLength { got }) => format!("err:length:{got}"),
         Err(AnnounceError::UnsupportedVersion(v)) => format!("err:version:{v}"),
         Err(AnnounceError::LowOrderEncKey) => "err:loworder".into(),
@@ -1330,17 +1331,56 @@ fn announce_negatives_each_rejected_before_any_state_change() {
     }
 }
 
+/// L5 amendment A6 (`os/messaging/README.md` §7, §19) over the FROZEN L2
+/// file. `announce.json` is the Cat-1 harness contract and stays
+/// byte-identical (D20); it names a stale announce `err:stale:<last>:<got>`.
+/// Since A6, `id111` reports that outcome as `ok:unchanged:<last>` — but ONLY
+/// when the announce's key material is identical to the pinned material. A
+/// different key is `err:conflict` under both rules (checked first), so any
+/// other frozen token, or a stale token whose keys differ, is expected
+/// verbatim (fail closed: a would-be mapping never hides a conflict).
+fn a6_expect(frozen: &str, store: &PinStore, wire: &[u8]) -> String {
+    let Some(rest) = frozen.strip_prefix("err:stale:") else {
+        return frozen.to_string();
+    };
+    let Ok(ann) = Announce::parse(wire) else {
+        return frozen.to_string();
+    };
+    match store.get(&ann.node_id()) {
+        Some(pin) if pin.enc_pubkey() == ann.enc_pubkey() => {
+            let last = rest.split(':').next().expect("err:stale:<last>:<got>");
+            format!("ok:unchanged:{last}")
+        }
+        _ => frozen.to_string(),
+    }
+}
+
 #[test]
 fn announce_stateful_scenarios() {
     let v = load("announce.json");
+    let mut mapped = 0;
     for sc in v.get("scenarios").arr() {
         let name = sc.get("name").str();
         let own = NodeId::from(sc.get("own_node_id").h32());
         let t = TempDir::new("annscn");
         let mut store = PinStore::open(t.path()).unwrap();
         for (i, step) in sc.get("steps").arr().iter().enumerate() {
-            let tok = ann_tok(process_announce(&mut store, &own, &step.get("wire").hex()));
-            assert_eq!(tok, step.get("expect").str(), "{name}: step {i}");
+            let wire = step.get("wire").hex();
+            let frozen = step.get("expect").str();
+            let want = a6_expect(frozen, &store, &wire);
+            let node = Announce::parse(&wire).ok().map(|a| a.node_id());
+            let before = node.and_then(|n| store.get(&n).copied());
+            let tok = ann_tok(process_announce(&mut store, &own, &wire));
+            assert_eq!(tok, want, "{name}: step {i} (frozen {frozen})");
+            if want != frozen {
+                mapped += 1;
+                // Unchanged performs no state change: counter and keys as before.
+                let after = node.and_then(|n| store.get(&n).copied());
+                assert_eq!(
+                    after, before,
+                    "{name}: step {i}: A6 Unchanged moved the pin"
+                );
+            }
         }
         // reload from disk: the pins survived with the exact counters.
         drop(store);
@@ -1354,6 +1394,11 @@ fn announce_stateful_scenarios() {
             assert!(!reopened.is_empty());
         }
     }
+    // The four frozen same-key stale steps (two scenarios) are the A6 cases.
+    assert_eq!(
+        mapped, 4,
+        "A6 mapping applies to exactly the same-key stale steps"
+    );
 }
 
 #[test]
@@ -2345,6 +2390,8 @@ fn under_floored_restore_is_stale_at_peers() {
     // Negative control for the rule above: if a node whose peers saw counter
     // 5000 restored as "never deployed" (floor 0 -> first announce 1025) it
     // would be silently ignored by every peer (stale) until it out-counted 5000.
+    // Since L5 amendment A6 "ignored" is reported as Ok(Unchanged) (same keys,
+    // counter <= last-seen): still no state change, just not an error.
     let me = keyset_words("abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about");
     let other =
         keyset_words("legal winner thank year wave sausage worth useful legal winner thank yellow")
@@ -2365,7 +2412,12 @@ fn under_floored_restore_is_stale_at_peers() {
     let wire = Announce::create(&me, wrong_first, b"").unwrap().encode();
     assert_eq!(
         ann_tok(process_announce(&mut store, &other, &wire)),
-        "err:stale:5000:1025"
+        "ok:unchanged:5000"
+    );
+    assert_eq!(
+        store.get(&me.node_id()).unwrap().highest_announce_counter(),
+        5000,
+        "the stale restore never moved the pin"
     );
 }
 
