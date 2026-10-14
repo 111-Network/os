@@ -1,0 +1,437 @@
+//! §20 G1 shapes, in process (two members + one hub over real `tcp-lan`
+//! sockets on loopback): the four delivery states, a non-member answered
+//! `REJECT_UNKNOWN_DEST`, `node1…` card requests, `REJECT_FULL`, the hub
+//! killed mid-transfer and resumed by cursor, replays on fresh sockets, and a
+//! sender crash with items in custody followed by a direct new-epoch packet.
+
+mod common;
+
+use std::net::SocketAddr;
+use std::path::PathBuf;
+use std::sync::Arc;
+use std::time::Duration;
+
+use common::*;
+use mesh111::contacts::{card_text, ROLE_ALWAYS_ON_HUB, ROLE_MAILBOX};
+use mesh111::fabric::{Fabric, FabricEvent, FabricSettings, HomeHub, MessageChange, SettingsPatch};
+use mesh111::link::lossy::LossyConfig;
+use mesh111::link::tcp_lan::{
+    encode_frame, read_frame, read_hello, TcpLan, HELLO, T_ANNOUNCE, T_SEALED,
+};
+use mesh111::link::Dialer;
+use mesh111::outbox::Reason;
+use mesh111::store::{Class, MsgState};
+use tokio::io::AsyncWriteExt;
+use tokio::net::TcpStream;
+
+struct Node {
+    ident: Arc<Ident>,
+    f: Fabric,
+    t: TcpLan,
+    dir: PathBuf,
+}
+
+async fn hub(d: &Dirs) -> (Node, SocketAddr) {
+    let ident = Ident::new("hub", ROLE_MAILBOX | ROLE_ALWAYS_ON_HUB);
+    let dir = d.node("hub");
+    let f = start(&ident, &dir, hub_settings());
+    let t = tcp(&f, &ident, "tcp");
+    add_tcp(&f, &t, true).await;
+    let addr = listen(&t, 0).await;
+    (Node { ident, f, t, dir }, addr)
+}
+
+/// A member enrolled at `h` (its fabric dials the hub and keeps it up).
+async fn member(d: &Dirs, name: &str, h: &Node, haddr: SocketAddr) -> Node {
+    let ident = Ident::new(name, 0);
+    let dir = d.node(name);
+    let f = start(&ident, &dir, FabricSettings::default());
+    let t = tcp(&f, &ident, "tcp");
+    add_tcp(&f, &t, true).await;
+    let offer = h.f.offer(Some(haddr)).await.expect("offer");
+    tokio::time::timeout(
+        Duration::from_secs(10),
+        f.enroll(haddr, &offer.code, Some(offer.card.as_str())),
+    )
+    .await
+    .expect("enroll in time")
+    .expect("enrolled");
+    let s = f.settings().await.unwrap();
+    assert_eq!(s.home_hub.map(|h| h.node_id), Some(h.ident.id()));
+    Node { ident, f, t, dir }
+}
+
+fn member_settings(h: &Node) -> FabricSettings {
+    FabricSettings {
+        home_hub: Some(HomeHub {
+            node_id: h.ident.id(),
+            address: None,
+        }),
+        ..FabricSettings::default()
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn two_members_and_a_hub_through_all_four_states() {
+    let d = Dirs::new();
+    let (h, haddr) = hub(&d).await;
+    let b = member(&d, "bob", &h, haddr).await;
+    // Bob goes away: the hub will hold his mail.
+    b.t.release(haddr);
+    let a_ident = Ident::new("alice", 0);
+    let a = start(&a_ident, &d.node("alice"), FabricSettings::default());
+    let at = tcp(&a, &a_ident, "tcp");
+    add_tcp(&a, &at, true).await;
+    exchange_cards(&a, &b.f).await;
+
+    // queued: no path yet.
+    let mut events = a.subscribe();
+    let id = a.send(b.ident.id(), "hello bob", None).await.unwrap();
+    let m = a.message(id).await.unwrap();
+    assert_eq!(m.state, MsgState::Queued);
+    assert_eq!(m.text.as_deref(), Some("hello bob"));
+
+    // Alice enrolls: CUSTODY_PUT written (sent), CUSTODY_ACK ACCEPTED (relayed).
+    let offer = h.f.offer(Some(haddr)).await.unwrap();
+    a.enroll(haddr, &offer.code, Some(offer.card.as_str()))
+        .await
+        .unwrap();
+    until_state(&a, id, MsgState::Relayed, 10).await;
+    assert_eq!(h.f.status().await.unwrap().custody.0, 1);
+
+    // Bob comes back: fetch on link-up, delivered, his ACK through the hub.
+    b.t.maintain(haddr, Some(h.ident.id()));
+    until_state(&a, id, MsgState::Delivered, 10).await;
+    let got = inbox(&b.f, a_ident.id()).await;
+    assert_eq!(got.len(), 1);
+    assert_eq!(got[0].text.as_deref(), Some("hello bob"));
+    assert_eq!(got[0].state, MsgState::Delivered);
+
+    // Coalesced per message per tick: New first, then one State frame per
+    // tick that changed it (sent, relayed, delivered).
+    let mine: Vec<MessageChange> = drain_events(&mut events)
+        .into_iter()
+        .filter_map(|e| match e {
+            FabricEvent::Message { id: i, change, .. } if i == id => Some(change),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(mine.first(), Some(&MessageChange::New));
+    assert!(
+        mine.iter().filter(|c| **c == MessageChange::State).count() >= 3,
+        "{mine:?}"
+    );
+
+    // A non-member (a card Alice holds, never enrolled at this hub):
+    // REJECT_UNKNOWN_DEST keeps `sent` with the reason.
+    let carol = Ident::new("carol", 0);
+    a.add_contact_card(&card_text(&carol.announce_bytes()))
+        .await
+        .unwrap();
+    let id2 = a.send(carol.id(), "hi carol", None).await.unwrap();
+    let m2 = until(10, || async {
+        let m = a.message(id2).await.ok()?;
+        (m.reason == Some(Reason::HubNotYours)).then_some(m)
+    })
+    .await;
+    assert_eq!(m2.state, MsgState::Sent);
+
+    // `node1…` only: the hub answers the card request for its member Dave.
+    let dave = member(&d, "dave", &h, haddr).await;
+    let bech = id111::encoding::bech32_encode(dave.ident.id().as_bytes());
+    let c = a.add_contact_node_id(&bech).await.unwrap();
+    assert!(!c.has_key);
+    let id3 = a.send(dave.ident.id(), "hi dave", None).await.unwrap();
+    until(10, || async {
+        let c = a.contact(dave.ident.id()).await.ok()?;
+        c.has_key.then_some(())
+    })
+    .await;
+    // Dave never met Alice: her first message rides INTRO through the
+    // mailbox and is held as a message request (no ACK) until he accepts.
+    until(10, || async {
+        let c = dave.f.contact(a_ident.id()).await.ok()?;
+        c.request.then_some(())
+    })
+    .await;
+    until_state(&a, id3, MsgState::Relayed, 10).await;
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert_eq!(
+        a.message(id3).await.unwrap().state,
+        MsgState::Relayed,
+        "a held request is never ACKed"
+    );
+    dave.f
+        .patch_contact(
+            a_ident.id(),
+            mesh111::fabric::ContactPatch {
+                accept: true,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    until_state(&a, id3, MsgState::Delivered, 10).await;
+    assert_eq!(inbox(&dave.f, a_ident.id()).await.len(), 1);
+    let st = h.f.status().await.unwrap();
+    assert_eq!(st.hub.members, 3);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn mailbox_full_keeps_sent_with_its_reason() {
+    let d = Dirs::new();
+    let (h, haddr) = hub(&d).await;
+    let a = member(&d, "alice", &h, haddr).await;
+    let b = member(&d, "bob", &h, haddr).await;
+    exchange_cards(&a.f, &b.f).await;
+    b.t.release(haddr);
+    h.f.patch_settings(SettingsPatch {
+        quotas: vec![(Class::Custody, Some(1))],
+        ..SettingsPatch::default()
+    })
+    .await
+    .unwrap();
+    let id = a.f.send(b.ident.id(), "no room", None).await.unwrap();
+    let m = until(10, || async {
+        let m = a.f.message(id).await.ok()?;
+        (m.reason == Some(Reason::MailboxFull)).then_some(m)
+    })
+    .await;
+    assert_eq!(m.state, MsgState::Sent);
+    // Capacity frees: the next fabric event retries and the hub holds it.
+    h.f.patch_settings(SettingsPatch {
+        quotas: vec![(Class::Custody, None)],
+        ..SettingsPatch::default()
+    })
+    .await
+    .unwrap();
+    a.f.retry(id).await.unwrap();
+    until_state(&a.f, id, MsgState::Relayed, 10).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn hub_killed_mid_transfer_resumes_by_cursor() {
+    let d = Dirs::new();
+    let (h, haddr) = hub(&d).await;
+    let a = member(&d, "alice", &h, haddr).await;
+    let b = member(&d, "bob", &h, haddr).await;
+    exchange_cards(&a.f, &b.f).await;
+
+    let m1 = a.f.send(b.ident.id(), "one", None).await.unwrap();
+    until_state(&a.f, m1, MsgState::Delivered, 10).await;
+    let c1 = b.f.status().await.unwrap().hub.cursor;
+    assert!(c1 > 0, "bob committed his cursor");
+    let items_before = b.f.status().await.unwrap().counters.items_received;
+
+    // Bob leaves; two more go into custody.
+    b.t.release(haddr);
+    let m2 = a.f.send(b.ident.id(), "two", None).await.unwrap();
+    let m3 = a.f.send(b.ident.id(), "three", None).await.unwrap();
+    until_state(&a.f, m2, MsgState::Relayed, 10).await;
+    until_state(&a.f, m3, MsgState::Relayed, 10).await;
+
+    // The hub dies (no clean close) and comes back on the same port.
+    h.f.abort();
+    h.t.shutdown();
+    let h2 = start(&h.ident, &h.dir, hub_settings());
+    let t2 = tcp(&h2, &h.ident, "tcp");
+    add_tcp(&h2, &t2, true).await;
+    listen(&t2, haddr.port()).await;
+
+    // Bob returns and fetches from his cursor: only what he has not seen.
+    b.t.maintain(haddr, Some(h.ident.id()));
+    until_state(&a.f, m2, MsgState::Delivered, 15).await;
+    until_state(&a.f, m3, MsgState::Delivered, 15).await;
+    let got: Vec<String> = inbox(&b.f, a.ident.id())
+        .await
+        .into_iter()
+        .filter_map(|m| m.text)
+        .collect();
+    assert_eq!(got, vec!["one", "two", "three"]);
+    let st = b.f.status().await.unwrap();
+    assert_eq!(
+        st.counters.items_received - items_before,
+        2,
+        "items above the cursor only"
+    );
+    assert!(st.hub.cursor > c1);
+}
+
+/// Read every frame a raw `tcp-lan` peer receives within `ms`.
+async fn frames_seen(sock: &mut TcpStream, ms: u64) -> Vec<u8> {
+    let mut types = Vec::new();
+    let deadline = tokio::time::Instant::now() + Duration::from_millis(ms);
+    loop {
+        let left = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if left.is_zero() {
+            return types;
+        }
+        match tokio::time::timeout(left, read_frame(sock)).await {
+            Ok(Ok((ty, _))) => types.push(ty),
+            _ => return types,
+        }
+    }
+}
+
+async fn raw_peer(haddr: SocketAddr, announce: &[u8], sealed: Option<&[u8]>) -> TcpStream {
+    let mut s = TcpStream::connect(haddr).await.unwrap();
+    s.write_all(&HELLO).await.unwrap();
+    s.write_all(&encode_frame(T_ANNOUNCE, announce).unwrap())
+        .await
+        .unwrap();
+    if let Some(p) = sealed {
+        s.write_all(&encode_frame(T_SEALED, p).unwrap())
+            .await
+            .unwrap();
+    }
+    read_hello(&mut s).await.unwrap();
+    let (ty, _) = read_frame(&mut s).await.unwrap();
+    assert_eq!(ty, T_ANNOUNCE, "the hub announces first");
+    s
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn replays_on_fresh_sockets_never_attribute_or_get_pushes() {
+    let d = Dirs::new();
+    let (h, haddr) = hub(&d).await;
+    let a = member(&d, "alice", &h, haddr).await;
+    let b = member(&d, "bob", &h, haddr).await;
+    exchange_cards(&a.f, &b.f).await;
+    // A packet Bob really sealed to the hub (his last fetch or commit).
+    let captured = b
+        .ident
+        .sealed_to(&h.ident.enc())
+        .pop()
+        .expect("bob sealed to the hub");
+    b.t.release(haddr);
+    until(10, || async {
+        let s = h.f.status().await.ok()?;
+        (s.links[0].peers == 1).then_some(())
+    })
+    .await;
+    let stale_before = h.f.status().await.unwrap().counters.stale;
+
+    // A replayed public announce, and a replayed sealed packet, each on a
+    // fresh socket claiming to be Bob.
+    let mut ann_sock = raw_peer(haddr, &b.ident.announce_bytes(), None).await;
+    let mut seal_sock = raw_peer(haddr, &b.ident.announce_bytes(), Some(&captured)).await;
+    until(10, || async {
+        let s = h.f.status().await.ok()?;
+        (s.counters.stale > stale_before).then_some(())
+    })
+    .await;
+
+    // Mail for Bob arrives at the hub while only the impostors are there.
+    let id = a.f.send(b.ident.id(), "for bob only", None).await.unwrap();
+    until_state(&a.f, id, MsgState::Relayed, 10).await;
+    let seen_ann = frames_seen(&mut ann_sock, 600).await;
+    let seen_seal = frames_seen(&mut seal_sock, 100).await;
+    assert!(
+        !seen_ann.contains(&T_SEALED),
+        "a replayed announce gets no push: {seen_ann:?}"
+    );
+    assert!(
+        !seen_seal.contains(&T_SEALED),
+        "a replayed sealed packet never attributes: {seen_seal:?}"
+    );
+    let st = h.f.status().await.unwrap();
+    assert_eq!(st.links[0].peers, 1, "only Alice is attributed");
+
+    // The real Bob, attributed by a fresh packet, gets it.
+    b.t.maintain(haddr, Some(h.ident.id()));
+    until_state(&a.f, id, MsgState::Delivered, 10).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn sender_crash_new_epoch_delivers_every_message_once() {
+    let d = Dirs::new();
+    let (h, haddr) = hub(&d).await;
+    let a = member(&d, "alice", &h, haddr).await;
+    let b = member(&d, "bob", &h, haddr).await;
+    exchange_cards(&a.f, &b.f).await;
+    let epoch1 = a.f.status().await.unwrap().store.epoch.unwrap();
+
+    // Bob stops cleanly; two messages go into custody.
+    b.f.shutdown().await.unwrap();
+    b.t.shutdown();
+    let m1 =
+        a.f.send(b.ident.id(), "first-in-custody", None)
+            .await
+            .unwrap();
+    let m2 =
+        a.f.send(b.ident.id(), "second-in-custody", None)
+            .await
+            .unwrap();
+    until_state(&a.f, m1, MsgState::Relayed, 10).await;
+    until_state(&a.f, m2, MsgState::Relayed, 10).await;
+
+    // Alice crashes and restarts: a new epoch.
+    a.f.abort();
+    a.t.shutdown();
+    let a2 = start(&a.ident, &a.dir, member_settings(&h));
+    let epoch2 = a2.status().await.unwrap().store.epoch.unwrap();
+    assert!(epoch2 > epoch1, "an unclean open mints a new epoch");
+    let b2 = start(&b.ident, &b.dir, member_settings(&h));
+
+    // A direct lossy link where only the new-epoch packet gets through (the
+    // custody messages' frames are shorter and dropped).
+    let filter: mesh111::link::lossy::DropFilter = Arc::new(|f| f.bytes.len() < 120);
+    let cfg_a = LossyConfig {
+        filter: Some(filter),
+        ..LossyConfig::default()
+    };
+    let (ea, _eb) = lossy_pair(
+        (&a2, &a.ident),
+        (&b2, &b.ident),
+        cfg_a,
+        LossyConfig::default(),
+    )
+    .await;
+    let m3 = a2
+        .send(b.ident.id(), "third-direct-new-epoch-xxxxxxxxx", None)
+        .await
+        .unwrap();
+    until(10, || async {
+        let got = inbox(&b2, a.ident.id()).await;
+        (got.len() == 1).then_some(())
+    })
+    .await;
+    let first = inbox(&b2, a.ident.id()).await;
+    assert_eq!(first[0].seq.epoch, epoch2);
+
+    // Bob fetches custody: the older epoch is delivered against a frozen entry.
+    let bt = tcp(&b2, &b.ident, "tcp");
+    add_tcp(&b2, &bt, false).await;
+    bt.maintain(haddr, Some(h.ident.id()));
+    for id in [m1, m2] {
+        until_state(&a2, id, MsgState::Delivered, 15).await;
+    }
+    until_state(&a2, m3, MsgState::Delivered, 15).await;
+
+    // The direct path opens up; retransmissions of anything still pending
+    // would be re-ACKed, never redelivered.
+    ea.set_filter(None);
+    a2.retry_all().await.unwrap();
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let mut texts: Vec<String> = inbox(&b2, a.ident.id())
+        .await
+        .into_iter()
+        .filter_map(|m| m.text)
+        .collect();
+    texts.sort();
+    assert_eq!(
+        texts,
+        vec![
+            "first-in-custody",
+            "second-in-custody",
+            "third-direct-new-epoch-xxxxxxxxx"
+        ],
+        "every message exactly once"
+    );
+    let epochs: Vec<u64> = inbox(&b2, a.ident.id())
+        .await
+        .iter()
+        .map(|m| m.seq.epoch)
+        .collect();
+    assert_eq!(epochs, vec![epoch2, epoch1, epoch1]);
+}

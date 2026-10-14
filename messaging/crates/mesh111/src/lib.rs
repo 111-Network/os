@@ -24,6 +24,7 @@ pub mod ids; // C2 — §4 msg_id / msg_seq epochs
 pub mod keys; // C3 — §10.2 KeyProvider seam (Mode S / Mode T)
 pub mod link; // F1 — §8 Link trait, tcp-lan adapter, test links
 pub mod mailbox; // F1 — §9 mailbox client + hub role
+pub mod outbox; // F1 — §6.1 ACK construction, §9 states/reasons, §3.3 MSG body
 pub mod sealer; // T0 — the identity-holder handle (trait only)
 pub mod store; // C3 — §10 SQLCipher store, tx/rx state, pruning // F1 — the runtime that ties the above together
 
