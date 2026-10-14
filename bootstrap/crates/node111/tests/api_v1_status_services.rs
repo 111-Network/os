@@ -1018,6 +1018,7 @@ async fn services_routes_and_frames() {
     assert_eq!(list["schema"], 1);
     let recs = list["services"].as_array().unwrap();
     let ids: Vec<_> = recs.iter().map(|r| r["id"].as_str().unwrap()).collect();
+    // Layer 5 §15/§19: nine ids, `fabric` and `meshtastic` appended
     assert_eq!(
         ids,
         [
@@ -1027,7 +1028,9 @@ async fn services_routes_and_frames() {
             "radio",
             "kb",
             "gateway",
-            "codeagent"
+            "codeagent",
+            "fabric",
+            "meshtastic"
         ]
     );
     for r in recs {
@@ -1064,6 +1067,8 @@ async fn services_routes_and_frames() {
         if let Some(k) = r.get("kb_entry") {
             assert!(k.as_str().unwrap().ends_with(".md"));
         }
+        // Layer 5 §13: `panel` is always present, `null` without a panel
+        assert_eq!(r["panel"], Value::Null, "{r}");
     }
     let agent = get(port, "/api/v1/services/agent").json();
     assert_eq!(agent["state"], "live");
@@ -1079,7 +1084,34 @@ async fn services_routes_and_frames() {
     let radio = get(port, "/api/v1/services/radio").json();
     assert_eq!(radio["kb_entry"], "projects/reticulum.md");
     assert_eq!(radio["reason_code"], "no_radio");
-    get(port, "/api/v1/services/nope").problem(404, "not_found");
+    // Layer 5 rows with no provider installed read NOT SET honestly
+    let fabric = get(port, "/api/v1/services/fabric").json();
+    assert_eq!(
+        (
+            &fabric["plain_name"],
+            &fabric["state"],
+            &fabric["reason_code"]
+        ),
+        (&json!("Messaging"), &json!("unset"), &json!("fabric_off"))
+    );
+    assert_eq!(fabric["kind"], "builtin");
+    let mesh = get(port, "/api/v1/services/meshtastic").json();
+    assert_eq!(
+        (&mesh["plain_name"], &mesh["state"], &mesh["reason_code"]),
+        (
+            &json!("Meshtastic"),
+            &json!("unset"),
+            &json!("no_meshtastic")
+        )
+    );
+    assert_eq!(mesh["kind"], "child");
+    assert_eq!(mesh["kb_entry"], "projects/meshtastic-web.md");
+    let r = get(port, "/api/v1/services/nope");
+    r.problem(404, "not_found");
+    let detail = r.json()["detail"].as_str().unwrap().to_string();
+    for id in ServiceId::ALL {
+        assert!(detail.contains(id.as_str()), "{detail}");
+    }
     get(port, "/api/v1/services/Agent").problem(404, "not_found");
 
     // frames: only on a published change
@@ -1127,7 +1159,16 @@ async fn service_log_tail() {
     get(port, "/api/v1/services/nope/log").problem(404, "not_found");
 
     // services without a log file, and a child whose file does not exist yet
-    for id in ["radio", "kb", "gateway", "codeagent", "model", "transport"] {
+    for id in [
+        "radio",
+        "kb",
+        "gateway",
+        "codeagent",
+        "model",
+        "transport",
+        "fabric",
+        "meshtastic",
+    ] {
         let r = get(port, &format!("/api/v1/services/{id}/log")).json();
         assert_eq!(r["source"], "none", "{id}");
         assert_eq!(r["lines"], json!([]), "{id}");
@@ -1140,6 +1181,14 @@ async fn service_log_tail() {
     n.write("agent/llama-server.log", "loading model\n");
     let r = get(port, "/api/v1/services/model/log?n=5").json();
     assert_eq!(r["lines"], json!(["loading model"]));
+    // Layer 5 §14: meshmud's log (the path its child spec appends to)
+    n.write("meshtastic/meshmud.log", "uplink /dev/ttyACM0 open\n");
+    let r = get(port, "/api/v1/services/meshtastic/log").json();
+    assert!(r["source"]
+        .as_str()
+        .unwrap()
+        .ends_with("meshtastic/meshmud.log"));
+    assert_eq!(r["lines"], json!(["uplink /dev/ttyACM0 open"]));
 }
 
 // ---------------------------------------------------------------- settings
@@ -1554,6 +1603,49 @@ async fn service_restart_route() {
     model.stop_and_wait(Duration::from_secs(5)).await;
     send_json(port, "POST", "/api/v1/services/model/restart", "{}", None)
         .problem(409, "not_supervised");
+
+    // Layer 5 §14: `meshtastic` owns two children — both restart, meshmud
+    // first, then the presence reader
+    let meshmud = supervise::spawn_child(sleeper("meshmud"));
+    let reader = supervise::spawn_child(sleeper("meshtastic-presence"));
+    assert!(
+        wait_until(Duration::from_secs(3), || meshmud.pid().is_some()
+            && reader.pid().is_some())
+        .await
+    );
+    let (old_m, old_r) = (meshmud.pid().unwrap(), reader.pid().unwrap());
+    n.api
+        .insert_ext(Arc::new(services::Supervised::default().with_children(
+            ServiceId::Meshtastic,
+            vec![meshmud.control(), reader.control()],
+        )));
+    let r = send_json(
+        port,
+        "POST",
+        "/api/v1/services/meshtastic/restart",
+        "{}",
+        None,
+    );
+    assert_eq!(r.status, 202, "{}", r.body);
+    assert!(
+        wait_until(Duration::from_secs(10), || meshmud
+            .pid()
+            .is_some_and(|p| p != old_m)
+            && reader.pid().is_some_and(|p| p != old_r))
+        .await,
+        "both children respawned"
+    );
+    // the primary stopped for good ⇒ the service is no longer restartable
+    meshmud.stop_and_wait(Duration::from_secs(5)).await;
+    send_json(
+        port,
+        "POST",
+        "/api/v1/services/meshtastic/restart",
+        "{}",
+        None,
+    )
+    .problem(409, "not_supervised");
+    reader.stop_and_wait(Duration::from_secs(5)).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

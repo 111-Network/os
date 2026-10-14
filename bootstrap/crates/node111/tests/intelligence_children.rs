@@ -67,6 +67,7 @@ async fn both_absent_is_honest_not_an_error() {
     assert_eq!(h.state().agent, ChildDisplay::Absent);
     assert_eq!(h.state().model_server, ChildDisplay::Absent);
     assert_eq!(h.state().agent_url, None);
+    assert!(h.daemon_token().is_none(), "no agent, no bearer token");
     assert!(
         !dir.path().join("agent").exists(),
         "nothing spawned, nothing created"
@@ -124,6 +125,14 @@ async fn agent_spawns_with_expected_env() {
         format!("AGENT111_STATE_DIR={}/agent", root.display()),
         format!("AGENT111_ENV_FILE={}/etc/agent.env", root.display()),
         format!("AGENT111_NODE_ID={NODE_ID_HEX}"),
+        // Layer 5 §17: loopback API base + the per-spawn bearer token
+        "AGENT111_DAEMON_API_URL=http://127.0.0.1:11180/api/v1".to_string(),
+        format!(
+            "AGENT111_DAEMON_TOKEN={}",
+            h.daemon_token()
+                .expect("minted for a spawned agent")
+                .as_str()
+        ),
     ] {
         assert!(lines.contains(&want.as_str()), "missing {want:?} in {env}");
     }

@@ -16,10 +16,16 @@
 //! therefore checked by reading `/proc/net/tcp{,6}` for a LISTEN socket
 //! ([`port_listening`]); only where procfs is unreadable does a connect probe
 //! run instead.
+//!
+//! Layer 5 facts (`fabric`, `meshmud`, meshmud's bound ports, hosted panels)
+//! come from optional [`Provider`]s on [`Sources`], installed by the modules
+//! that own them; a provider that is not installed (or answers `None`) leaves
+//! the fact empty and the rows read NOT SET honestly. Providers are called on
+//! the tick task and must return a cached snapshot without blocking.
 
 use super::{
-    rfc3339_now, AgentStatusProbe, ChildFacts, Facts, GatewayFacts, Probe, Radio, RadioFacts,
-    Registry, RnodeBound, MESHTASTIC_PORT,
+    rfc3339_now, AgentStatusProbe, ChildFacts, FabricFacts, Facts, GatewayFacts, MeshmudFacts,
+    PanelInfo, Probe, Radio, RadioFacts, Registry, RnodeBound, MESHTASTIC_PORT,
 };
 use crate::daemon::dashboard::ApiState;
 use crate::daemon::devices::detect::{self, Roots, Scan, UsbInfo};
@@ -42,10 +48,42 @@ pub const WAN_TIMEOUT: Duration = Duration::from_secs(3);
 /// Ticks between the slower probes (agent status, PATH, sysfs): 10 s.
 const SLOW_EVERY: u64 = 5;
 
-/// Live handles the registry reads (daemon start hook).
+/// A fact provider (Layer 5): a cheap, non-blocking snapshot read called
+/// once per tick; `None` = nothing known this tick.
+pub type Provider<T> = Arc<dyn Fn() -> Option<T> + Send + Sync>;
+
+/// Live handles the registry reads (daemon start hook). The Layer 5
+/// providers default to `None` ([`Sources::new`]).
 pub struct Sources {
     pub intelligence: Arc<IntelligenceHandle>,
     pub transport: Arc<TransportHandle>,
+    /// §15 `fabric` facts (the fabric module).
+    pub fabric: Option<Provider<FabricFacts>>,
+    /// §14 meshmud + presence facts (the Meshtastic module).
+    pub meshmud: Option<Provider<MeshmudFacts>>,
+    /// §14 ports meshmud is bound to (`radio` counts them as bound).
+    pub meshmud_bound: Option<Provider<Vec<String>>>,
+    /// §13 hosted panels (the panels module).
+    pub panels: Option<Provider<Vec<PanelInfo>>>,
+}
+
+impl Sources {
+    /// The Layer 4 handles with no Layer 5 provider installed.
+    pub fn new(intelligence: Arc<IntelligenceHandle>, transport: Arc<TransportHandle>) -> Self {
+        Sources {
+            intelligence,
+            transport,
+            fabric: None,
+            meshmud: None,
+            meshmud_bound: None,
+            panels: None,
+        }
+    }
+}
+
+/// Ask an optional provider (absent provider ⇒ `None`).
+pub fn provided<T>(p: &Option<Provider<T>>) -> Option<T> {
+    p.as_ref().and_then(|f| f())
 }
 
 // ---------------------------------------------------------------- loopback HTTP
@@ -394,6 +432,20 @@ fn slow_facts(layout: &DaemonLayout) -> SlowFacts {
     }
 }
 
+/// One tick's radio-stack observation for [`StackWatch::observe`].
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct StackObs {
+    /// An RNode stanza names a present serial port.
+    pub rnode_configured: bool,
+    pub rnsd_running: bool,
+    /// Something LISTENs on meshtasticd's port.
+    pub meshtastic_open: bool,
+    /// meshmud is bound to a board (Layer 5 §14).
+    pub meshmud_bound: bool,
+    /// meshmud is up (process running, supervisor agrees).
+    pub meshmud_running: bool,
+}
+
 /// Tracks whether a radio stack is bound and for how long a bound stack has
 /// not been answering.
 #[derive(Debug, Default)]
@@ -404,18 +456,15 @@ pub struct StackWatch {
 
 impl StackWatch {
     /// One observation → `(meshtastic_seen, down_for)`. Bound = an RNode
-    /// stanza on a present port, or meshtasticd answered this lifetime; live
-    /// = rnsd running with such a stanza, or meshtasticd answering now.
-    pub fn observe(
-        &mut self,
-        rnode_configured: bool,
-        rnsd_running: bool,
-        meshtastic_open: bool,
-        now: Instant,
-    ) -> (bool, Option<Duration>) {
-        self.meshtastic_seen |= meshtastic_open;
-        let live = (rnode_configured && rnsd_running) || meshtastic_open;
-        let bound = rnode_configured || self.meshtastic_seen;
+    /// stanza on a present port, meshtasticd answered this lifetime, or a
+    /// meshmud binding; live = rnsd running with such a stanza, meshtasticd
+    /// answering now, or meshmud running on its binding.
+    pub fn observe(&mut self, o: StackObs, now: Instant) -> (bool, Option<Duration>) {
+        self.meshtastic_seen |= o.meshtastic_open;
+        let live = (o.rnode_configured && o.rnsd_running)
+            || o.meshtastic_open
+            || (o.meshmud_bound && o.meshmud_running);
+        let bound = o.rnode_configured || self.meshtastic_seen || o.meshmud_bound;
         self.down_since = if live || !bound {
             None
         } else {
@@ -443,6 +492,12 @@ struct FileFacts {
 /// `<root>/rns/rnsd.log` (the rnsd child spec's stdout log).
 pub fn rnsd_log(layout: &DaemonLayout) -> PathBuf {
     layout.root.join("rns/rnsd.log")
+}
+
+/// `<root>/meshtastic/meshmud.log` — where the meshmud child spec (Layer 5
+/// §14) appends its stdout+stderr; `GET /services/meshtastic/log` tails it.
+pub fn meshmud_log(layout: &DaemonLayout) -> PathBuf {
+    layout.root.join("meshtastic/meshmud.log")
 }
 
 fn file_facts(layout: &DaemonLayout) -> FileFacts {
@@ -555,8 +610,20 @@ pub fn spawn(api: Arc<ApiState>, src: Sources) -> Arc<Registry> {
                 let (agent_pid, model_pid) =
                     (src.intelligence.agent_pid(), src.intelligence.model_pid());
                 let rnsd_running = src.transport.child_state() == Some(ChildState::Running);
-                let (meshtastic_seen, down_for) =
-                    stack.observe(!slow.rnode.is_empty(), rnsd_running, port_open, now);
+                let fabric = provided(&src.fabric);
+                let meshmud = provided(&src.meshmud);
+                let meshmud_bound = provided(&src.meshmud_bound).unwrap_or_default();
+                let panels = provided(&src.panels).unwrap_or_default();
+                let (meshtastic_seen, down_for) = stack.observe(
+                    StackObs {
+                        rnode_configured: !slow.rnode.is_empty(),
+                        rnsd_running,
+                        meshtastic_open: port_open,
+                        meshmud_bound: !meshmud_bound.is_empty(),
+                        meshmud_running: meshmud.as_ref().is_some_and(MeshmudFacts::up),
+                    },
+                    now,
+                );
 
                 let facts = {
                     let d = api.dash.read().unwrap();
@@ -594,12 +661,16 @@ pub fn spawn(api: Arc<ApiState>, src: Sources) -> Arc<Registry> {
                             rnsd_running,
                             meshtastic_open: port_open,
                             meshtastic_seen,
+                            meshmud_bound,
                             down_for,
                         },
                         kb: d.kb.clone(),
                         kb_payload_present: files.kb_payload_present,
                         gateway: gateway.lock().unwrap().clone(),
                         opencode: slow.opencode.clone(),
+                        fabric,
+                        meshmud,
+                        panels,
                     }
                 };
                 super::tick_and_publish(&api, &registry, &facts, &rfc3339_now());
@@ -736,37 +807,89 @@ mod tests {
         assert_eq!(bound[0].port, "/dev/ttyACM0");
     }
 
+    /// `StackObs` from the legacy positional triple (+ meshmud pair).
+    fn obs(rnode: bool, rnsd: bool, mt: bool) -> StackObs {
+        StackObs {
+            rnode_configured: rnode,
+            rnsd_running: rnsd,
+            meshtastic_open: mt,
+            ..StackObs::default()
+        }
+    }
+
     #[test]
     fn stack_watch_bound_and_down_time() {
         let t0 = Instant::now();
         let s = |n: u64| t0 + Duration::from_secs(n);
         let mut w = StackWatch::default();
         // nothing bound: never down
-        assert_eq!(w.observe(false, false, false, s(0)), (false, None));
+        assert_eq!(w.observe(obs(false, false, false), s(0)), (false, None));
         // RNode stanza, rnsd up: live
-        assert_eq!(w.observe(true, true, false, s(1)), (false, None));
+        assert_eq!(w.observe(obs(true, true, false), s(1)), (false, None));
         // rnsd stops: down time counts from here
         assert_eq!(
-            w.observe(true, false, false, s(2)),
+            w.observe(obs(true, false, false), s(2)),
             (false, Some(Duration::ZERO))
         );
         assert_eq!(
-            w.observe(true, false, false, s(70)),
+            w.observe(obs(true, false, false), s(70)),
             (false, Some(Duration::from_secs(68)))
         );
         // stanza removed: nothing bound any more
-        assert_eq!(w.observe(false, false, false, s(71)), (false, None));
+        assert_eq!(w.observe(obs(false, false, false), s(71)), (false, None));
         // meshtasticd answers once, then stops: bound by memory
-        assert_eq!(w.observe(false, false, true, s(80)), (true, None));
+        assert_eq!(w.observe(obs(false, false, true), s(80)), (true, None));
         assert_eq!(
-            w.observe(false, false, false, s(85)),
+            w.observe(obs(false, false, false), s(85)),
             (true, Some(Duration::ZERO))
         );
         assert_eq!(
-            w.observe(false, false, false, s(150)),
+            w.observe(obs(false, false, false), s(150)),
             (true, Some(Duration::from_secs(65)))
         );
-        assert_eq!(w.observe(false, false, true, s(151)), (true, None));
+        assert_eq!(w.observe(obs(false, false, true), s(151)), (true, None));
+    }
+
+    #[test]
+    fn stack_watch_counts_a_meshmud_binding() {
+        let t0 = Instant::now();
+        let s = |n: u64| t0 + Duration::from_secs(n);
+        let mut w = StackWatch::default();
+        let mm = |running: bool| StackObs {
+            meshmud_bound: true,
+            meshmud_running: running,
+            ..StackObs::default()
+        };
+        // bound and running: live, never down; meshtasticd is not "seen"
+        assert_eq!(w.observe(mm(true), s(0)), (false, None));
+        // meshmud stops: the binding keeps it bound, down time counts
+        assert_eq!(w.observe(mm(false), s(1)), (false, Some(Duration::ZERO)));
+        assert_eq!(
+            w.observe(mm(false), s(62)),
+            (false, Some(Duration::from_secs(61)))
+        );
+        assert_eq!(w.observe(mm(true), s(63)), (false, None));
+        // running without a binding is not a bound radio
+        let unbound = StackObs {
+            meshmud_running: true,
+            ..StackObs::default()
+        };
+        assert_eq!(w.observe(unbound, s(64)), (false, None));
+    }
+
+    #[test]
+    fn providers_default_to_nothing() {
+        let none: Option<Provider<FabricFacts>> = None;
+        assert_eq!(provided(&none), None);
+        let p: Option<Provider<FabricFacts>> = Some(Arc::new(|| {
+            Some(FabricFacts {
+                store_open: true,
+                ..FabricFacts::default()
+            })
+        }));
+        assert!(provided(&p).is_some_and(|f| f.store_open));
+        let silent: Option<Provider<Vec<String>>> = Some(Arc::new(|| None));
+        assert_eq!(provided(&silent), None);
     }
 
     #[test]

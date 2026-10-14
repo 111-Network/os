@@ -18,6 +18,15 @@
 //!   for the trade-off.
 //! - **CSRF** ([`csrf_guard`]): mutating requests must be `application/json` and,
 //!   when `Origin` is present, its authority must equal `Host`.
+//! - **Daemon bearer token** (Layer 5 §17, D20 e): `111d` mints one
+//!   [`DaemonToken`] per agent spawn (`intelligence::start`, exported to
+//!   `111-agent` as `AGENT111_DAEMON_TOKEN`) and keeps it in [`ApiState`] ext.
+//!   [`require_session`] accepts `Authorization: Bearer <token>` **only from a
+//!   loopback peer and only when it equals that token** (constant time). A
+//!   bearer from any other peer, a wrong or ambiguous bearer, or a bearer while
+//!   no token was minted is `401` — a presented credential is never ignored.
+//!   Loopback trust is not reopened by this (D16 a stands under Termux): the
+//!   token is what lets the agent in where loopback is untrusted.
 //!
 //! Both files are re-read when they change on disk (inode/mtime/len stamp), so
 //! `111 dashboard rotate` takes effect on a running daemon without a restart.
@@ -41,6 +50,7 @@ use axum::Json;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, VecDeque};
+use std::fmt;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
@@ -759,6 +769,125 @@ impl AuthStore {
     }
 }
 
+// ---------------------------------------------------------------- daemon token (L5 §17)
+
+/// Child-environment name of the per-spawn daemon token (Layer 5 §17).
+pub const DAEMON_TOKEN_ENV: &str = "AGENT111_DAEMON_TOKEN";
+
+/// Bytes of OS randomness in a [`DaemonToken`] (hex-encoded: 64 chars).
+pub const DAEMON_TOKEN_BYTES: usize = 32;
+
+/// The OS random source failed while minting a [`DaemonToken`].
+#[derive(Debug)]
+pub struct TokenError(getrandom::Error);
+
+impl fmt::Display for TokenError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "cannot mint the daemon token: OS randomness: {}", self.0)
+    }
+}
+
+impl std::error::Error for TokenError {}
+
+/// The per-spawn bearer secret `111d` hands `111-agent` (Layer 5 §17):
+/// [`DAEMON_TOKEN_BYTES`] bytes from the OS random source, lowercase hex.
+///
+/// Lives in [`ApiState`] ext (inserted by the daemon start hook) and in the
+/// agent child's environment only — never on disk, never in a log (`Debug` is
+/// redacted). This copy is wiped when the last clone drops; the agent's child
+/// spec keeps its own copy for respawns while the supervisor lives.
+#[derive(Clone)]
+pub struct DaemonToken(Arc<zeroize::Zeroizing<String>>);
+
+impl DaemonToken {
+    /// Mint a fresh token (once per daemon start, before the agent spawns).
+    pub fn mint() -> Result<Self, TokenError> {
+        let mut raw = zeroize::Zeroizing::new([0u8; DAEMON_TOKEN_BYTES]);
+        getrandom::getrandom(raw.as_mut_slice()).map_err(TokenError)?;
+        let mut text = zeroize::Zeroizing::new(String::with_capacity(2 * DAEMON_TOKEN_BYTES));
+        for b in raw.iter() {
+            text.push(char::from(HEX_DIGITS[usize::from(b >> 4)]));
+            text.push(char::from(HEX_DIGITS[usize::from(b & 0x0f)]));
+        }
+        Ok(DaemonToken(Arc::new(text)))
+    }
+
+    /// The token text (64 lowercase hex) — for the agent's child environment.
+    pub fn as_str(&self) -> &str {
+        self.0.as_str()
+    }
+
+    /// Does `presented` equal this token? Constant time in the token bytes
+    /// (the length, 64, is public).
+    pub fn matches(&self, presented: &str) -> bool {
+        ct_eq(presented.as_bytes(), self.0.as_bytes())
+    }
+}
+
+impl fmt::Debug for DaemonToken {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("DaemonToken(<redacted>)")
+    }
+}
+
+const HEX_DIGITS: &[u8; 16] = b"0123456789abcdef";
+
+/// Every `Authorization: Bearer` credential, in header order (scheme matched
+/// case-insensitively, RFC 9110 §11.1; a bare `Bearer` yields `""`). Other
+/// schemes and non-ASCII header values are not bearer credentials.
+pub fn bearer_tokens(headers: &HeaderMap) -> Vec<&str> {
+    headers
+        .get_all(header::AUTHORIZATION)
+        .iter()
+        .filter_map(|v| v.to_str().ok())
+        .filter_map(|v| {
+            let v = v.trim();
+            match v.split_once([' ', '\t']) {
+                Some((scheme, rest)) if scheme.eq_ignore_ascii_case("bearer") => Some(rest.trim()),
+                None if v.eq_ignore_ascii_case("bearer") => Some(""),
+                _ => None,
+            }
+        })
+        .collect()
+}
+
+/// What a request's bearer credentials decide (Layer 5 §17).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BearerVerdict {
+    /// No bearer presented: the loopback-trust / cookie rules decide.
+    Absent,
+    /// Exactly one bearer, from a loopback peer, equal to the daemon token.
+    Accepted,
+    /// A bearer was presented and fails: non-loopback peer, no token minted
+    /// this lifetime, wrong token, or more than one bearer header.
+    Refused,
+}
+
+/// The bearer rule as a pure function (see [`BearerVerdict`]). The token is
+/// compared only after the peer check, so a LAN peer learns nothing from
+/// timing.
+pub fn bearer_verdict(
+    headers: &HeaderMap,
+    peer_loopback: bool,
+    token: Option<&DaemonToken>,
+) -> BearerVerdict {
+    let presented = bearer_tokens(headers);
+    match (presented.as_slice(), peer_loopback, token) {
+        ([], _, _) => BearerVerdict::Absent,
+        ([one], true, Some(t)) if t.matches(one) => BearerVerdict::Accepted,
+        _ => BearerVerdict::Refused,
+    }
+}
+
+fn bearer_refused() -> Problem {
+    Problem::new(
+        StatusCode::UNAUTHORIZED,
+        "unauthenticated",
+        "bearer token refused",
+    )
+    .detail("Bearer tokens are accepted only from the node itself, and only the daemon's own.")
+}
+
 // ---------------------------------------------------------------- middleware
 
 /// Every `s111` cookie value, in header order (all `Cookie` headers are
@@ -811,12 +940,24 @@ pub fn companion_device_id(token: &str) -> String {
 }
 
 /// Gate for every `/api/v1/*` route except `/api/v1/auth/*` (and the Layer 1
-/// `/api/status` + `/v1`).
+/// `/api/status` + `/v1`). Order: a presented bearer decides first
+/// ([`bearer_verdict`]: loopback peer + the daemon token, else `401`); then a
+/// trusted loopback peer passes; then a valid `s111` session cookie.
 pub async fn require_session(
     State(api): State<Arc<ApiState>>,
     req: Request,
     next: Next,
 ) -> Response {
+    let token = api.ext::<DaemonToken>();
+    match bearer_verdict(
+        req.headers(),
+        peer_is_loopback(req.extensions()),
+        token.as_ref(),
+    ) {
+        BearerVerdict::Accepted => return next.run(req).await,
+        BearerVerdict::Refused => return bearer_refused().into_response(),
+        BearerVerdict::Absent => {}
+    }
     if trusted_loopback(&api, req.extensions()) {
         return next.run(req).await;
     }
@@ -1248,6 +1389,95 @@ mod tests {
             store.pair(peer, &code),
             Err(PairError::RateLimited { .. })
         ));
+    }
+
+    #[test]
+    fn daemon_token_is_fresh_hex_and_redacted() {
+        let a = DaemonToken::mint().unwrap();
+        let b = DaemonToken::mint().unwrap();
+        assert_eq!(a.as_str().len(), 2 * DAEMON_TOKEN_BYTES);
+        assert!(a
+            .as_str()
+            .bytes()
+            .all(|c| c.is_ascii_digit() || (b'a'..=b'f').contains(&c)));
+        assert_ne!(a.as_str(), b.as_str(), "minted per spawn");
+        assert!(a.matches(a.as_str()));
+        assert!(a.clone().matches(a.as_str()), "clones share the secret");
+        assert!(!a.matches(b.as_str()));
+        assert!(!a.matches(""));
+        assert!(!a.matches(&a.as_str()[..63]));
+        assert!(!a.matches(&a.as_str().to_uppercase()), "exact bytes only");
+        let dbg = format!("{a:?}");
+        assert!(!dbg.contains(a.as_str()), "{dbg}");
+        assert_eq!(DAEMON_TOKEN_ENV, "AGENT111_DAEMON_TOKEN");
+    }
+
+    fn auth_headers(values: &[&str]) -> HeaderMap {
+        let mut h = HeaderMap::new();
+        for v in values {
+            h.append(header::AUTHORIZATION, HeaderValue::from_str(v).unwrap());
+        }
+        h
+    }
+
+    #[test]
+    fn bearer_parsing() {
+        assert!(bearer_tokens(&HeaderMap::new()).is_empty());
+        assert_eq!(bearer_tokens(&auth_headers(&["Bearer abc"])), ["abc"]);
+        assert_eq!(bearer_tokens(&auth_headers(&["bearer  abc "])), ["abc"]);
+        assert_eq!(bearer_tokens(&auth_headers(&["BEARER\tabc"])), ["abc"]);
+        assert_eq!(bearer_tokens(&auth_headers(&["Bearer"])), [""]);
+        assert!(bearer_tokens(&auth_headers(&["Basic YTpi"])).is_empty());
+        assert!(bearer_tokens(&auth_headers(&["Bearerabc"])).is_empty());
+        assert_eq!(
+            bearer_tokens(&auth_headers(&["Basic x", "Bearer one", "Bearer two"])),
+            ["one", "two"]
+        );
+    }
+
+    #[test]
+    fn bearer_rule_is_loopback_only_and_exact() {
+        use BearerVerdict::{Absent, Accepted, Refused};
+        let t = DaemonToken::mint().unwrap();
+        let good = format!("Bearer {}", t.as_str());
+        let other = DaemonToken::mint().unwrap();
+        let wrong = format!("Bearer {}", other.as_str());
+        // nothing presented: the other rules decide, wherever the peer is
+        for lo in [true, false] {
+            assert_eq!(bearer_verdict(&HeaderMap::new(), lo, Some(&t)), Absent);
+            assert_eq!(
+                bearer_verdict(&auth_headers(&["Basic YTpi"]), lo, Some(&t)),
+                Absent
+            );
+        }
+        // the right token from loopback: in
+        assert_eq!(
+            bearer_verdict(&auth_headers(&[&good]), true, Some(&t)),
+            Accepted
+        );
+        // the right token from anywhere else: refused, never ignored
+        assert_eq!(
+            bearer_verdict(&auth_headers(&[&good]), false, Some(&t)),
+            Refused
+        );
+        // wrong / empty / duplicated / no token minted: refused
+        assert_eq!(
+            bearer_verdict(&auth_headers(&[&wrong]), true, Some(&t)),
+            Refused
+        );
+        assert_eq!(
+            bearer_verdict(&auth_headers(&["Bearer"]), true, Some(&t)),
+            Refused
+        );
+        assert_eq!(
+            bearer_verdict(&auth_headers(&[&good, &good]), true, Some(&t)),
+            Refused
+        );
+        assert_eq!(
+            bearer_verdict(&auth_headers(&[&wrong, &good]), true, Some(&t)),
+            Refused
+        );
+        assert_eq!(bearer_verdict(&auth_headers(&[&good]), true, None), Refused);
     }
 
     #[test]

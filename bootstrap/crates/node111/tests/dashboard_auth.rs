@@ -1210,3 +1210,138 @@ async fn trusted_loopback_session_view() {
         auth::companion_device_id(cookie.strip_prefix("s111=").unwrap())
     );
 }
+
+// ---------------------------------------------------------------- daemon bearer (Layer 5 §17)
+
+/// `Authorization: Bearer <token>` header for `t`.
+fn bearer(t: &auth::DaemonToken) -> String {
+    format!("Bearer {}", t.as_str())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn daemon_bearer_is_loopback_only() {
+    // Termux policy (loopback untrusted): the bearer is the agent's way in
+    let n = node_with(false, |c| c.trust_loopback = false);
+    let token = auth::DaemonToken::mint().unwrap();
+    let other = auth::DaemonToken::mint().unwrap();
+    let lo = serve(&n.api, None).await;
+    let lan = serve(&n.api, Some("192.168.1.50:40000")).await;
+    let good = bearer(&token);
+    let wrong = bearer(&other);
+
+    // no token minted this lifetime (no agent): every bearer is refused
+    get_with(lo, "/api/v1/status", &[("Authorization", &good)]).problem(401, "unauthenticated");
+
+    n.api.insert_ext(token.clone());
+    // loopback without a credential: 401 as before (loopback trust not reopened)
+    get(lo, "/api/v1/status").problem(401, "unauthenticated");
+    // loopback + the daemon token: gated routes open, the event stream too
+    for path in ["/api/v1/status", "/api/v1/settings", "/api/status"] {
+        let r = get_with(lo, path, &[("Authorization", &good)]);
+        assert_eq!(r.status, 200, "{path}: {}", r.body);
+    }
+    let sse = sse_read(
+        lo,
+        &[("Authorization", &good)],
+        Duration::from_secs(3),
+        |t| t.contains("event: reset"),
+    );
+    assert!(sse.starts_with("HTTP/1.1 200"), "{sse}");
+    // the scheme is case-insensitive; the token is exact
+    let lower = format!("bearer {}", token.as_str());
+    assert_eq!(
+        get_with(lo, "/api/v1/status", &[("Authorization", &lower)]).status,
+        200
+    );
+    let upper = format!("Bearer {}", token.as_str().to_uppercase());
+    get_with(lo, "/api/v1/status", &[("Authorization", &upper)]).problem(401, "unauthenticated");
+    // wrong, empty or duplicated bearers from loopback: refused
+    get_with(lo, "/api/v1/status", &[("Authorization", &wrong)]).problem(401, "unauthenticated");
+    get_with(lo, "/api/v1/status", &[("Authorization", "Bearer ")]).problem(401, "unauthenticated");
+    get_with(
+        lo,
+        "/api/v1/status",
+        &[("Authorization", &good), ("Authorization", &good)],
+    )
+    .problem(401, "unauthenticated");
+    // the bearer does not exempt a write from CSRF
+    request(
+        lo,
+        "POST",
+        "/api/v1/update/check",
+        Some("127.0.0.1"),
+        &[("Authorization", &good), ("Content-Type", "text/plain")],
+        Some("{}"),
+    )
+    .problem(415, "bad_request");
+
+    // a LAN peer with the right token: refused
+    let r = get_with(lan, "/api/v1/status", &[("Authorization", &good)]);
+    r.problem(401, "unauthenticated");
+    assert!(
+        !r.body.contains(token.as_str()),
+        "the token is never echoed"
+    );
+    // ... even alongside a valid session cookie: a presented bearer is never
+    // ignored, the cookie alone still works
+    let code = pair_code(&n.api);
+    let paired = post_json(
+        lan,
+        "/api/v1/auth/pair",
+        &format!(r#"{{"code":"{code}"}}"#),
+        &[],
+    );
+    assert_eq!(paired.status, 200, "{}", paired.body);
+    let cookie = format!("s111={}", cookie_of(&paired));
+    get_with(
+        lan,
+        "/api/v1/status",
+        &[("Cookie", &cookie), ("Authorization", &good)],
+    )
+    .problem(401, "unauthenticated");
+    assert_eq!(
+        get_with(lan, "/api/v1/status", &[("Cookie", &cookie)]).status,
+        200
+    );
+    // the open auth routes are unaffected by a bearer
+    assert_eq!(
+        get_with(lan, "/api/v1/auth/session", &[("Authorization", &good)]).status,
+        200
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn daemon_bearer_on_a_trusted_loopback_node() {
+    // plain Linux (loopback trusted): no bearer needed on loopback, but a
+    // presented one must be the daemon's; LAN peers are refused either way
+    let n = node();
+    let token = auth::DaemonToken::mint().unwrap();
+    n.api.insert_ext(token.clone());
+    let lo = serve(&n.api, None).await;
+    let lan = serve(&n.api, Some("10.0.0.7:5000")).await;
+    assert_eq!(get(lo, "/api/v1/status").status, 200);
+    assert_eq!(
+        get_with(lo, "/api/v1/status", &[("Authorization", &bearer(&token))]).status,
+        200
+    );
+    let wrong = bearer(&auth::DaemonToken::mint().unwrap());
+    get_with(lo, "/api/v1/status", &[("Authorization", &wrong)]).problem(401, "unauthenticated");
+    // other schemes are not bearer credentials: loopback trust decides
+    assert_eq!(
+        get_with(lo, "/api/v1/status", &[("Authorization", "Basic YTpi")]).status,
+        200
+    );
+    get_with(lan, "/api/v1/status", &[("Authorization", &bearer(&token))])
+        .problem(401, "unauthenticated");
+    // a v4-mapped loopback peer (::ffff:127.0.0.1) is loopback too
+    let mapped = serve(&n.api, Some("[::ffff:127.0.0.1]:6000")).await;
+    assert_eq!(
+        get_with(
+            mapped,
+            "/api/v1/status",
+            &[("Authorization", &bearer(&token))]
+        )
+        .status,
+        200
+    );
+}

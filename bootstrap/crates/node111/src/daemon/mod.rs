@@ -7,6 +7,8 @@ pub mod devices;
 pub mod health;
 pub mod intelligence;
 pub mod kb;
+pub mod panels;
+pub mod ports;
 pub mod services;
 pub mod supervise;
 pub mod transport;
@@ -264,6 +266,10 @@ async fn daemon_main() -> anyhow::Result<()> {
     // best-effort; pairing auth for non-loopback peers; mDNS when LAN.
     let lan = dashboard::bind::lan_configured(&env_pairs, &layout.state_dir());
     let dashboard = dashboard::start(Arc::clone(&state), layout.clone(), lan).await;
+    // Layer 5 §17: the agent's per-spawn bearer token, checked by require_session
+    if let Some(token) = intelligence.daemon_token() {
+        dashboard.api.insert_ext(token);
+    }
 
     // updater loop (fetch/verify/stage; never flips — root helper owns that).
     // Started after the dashboard so `POST /api/v1/update/check` can wake it
@@ -292,10 +298,7 @@ async fn daemon_main() -> anyhow::Result<()> {
     // /api/v1/node/restart → graceful exit 0 below; the supervisor restarts).
     services::probe::spawn(
         Arc::clone(&dashboard.api),
-        services::probe::Sources {
-            intelligence: Arc::clone(&intelligence),
-            transport: Arc::clone(&transport),
-        },
+        services::probe::Sources::new(Arc::clone(&intelligence), Arc::clone(&transport)),
     );
     // POST /api/v1/services/{id}/restart: the children this daemon supervises
     dashboard.api.insert_ext(Arc::new(

@@ -5,10 +5,12 @@
 //! - The registry is started by the daemon hook (`services::probe::spawn`) and
 //!   read from `ApiState` ext; without it (compat `serve()`, tools) the list
 //!   routes answer `503`.
-//! - Unknown ids are `404 not_found` (problem+json).
+//! - Unknown ids are `404 not_found` (problem+json); the detail lists every
+//!   id of [`ServiceId::ALL`] (nine since Layer 5: + `fabric`, `meshtastic`).
 //! - Log tails: `n` clamps to 1..=500 (default 100; a non-integer is `400`).
 //!   `agent` → `<root>/agent/111-agent.log`, `model` →
-//!   `<root>/agent/llama-server.log`, `transport` → `<root>/rns/rnsd.log`.
+//!   `<root>/agent/llama-server.log`, `transport` → `<root>/rns/rnsd.log`,
+//!   `meshtastic` → `<root>/meshtastic/meshmud.log` (Layer 5 §14).
 //!   Services without a log file — or whose file does not exist yet — answer
 //!   `source: "none"` with no lines. Lines are sanitized (control chars except
 //!   `\t` stripped) by `services::log`. Log tails work without the registry.
@@ -16,7 +18,9 @@
 //!   in `ApiState` ext: agent, model, transport while rnsd is a child) →
 //!   `202 {schema, id, restarting}` at once; the restart runs in the
 //!   background (SIGTERM, [`RESTART_GRACE`], SIGKILL, immediate respawn with
-//!   the back-off cleared — also out of `child_degraded`). Anything else →
+//!   the back-off cleared — also out of `child_degraded`). A service with
+//!   several children restarts them one after another in registration order
+//!   (Layer 5 §14: meshmud, then the presence reader). Anything else →
 //!   `409 not_supervised`. Same gate as every write (loopback or session,
 //!   CSRF).
 
@@ -54,6 +58,9 @@ fn not_supervised(id: ServiceId) -> Response {
         ServiceId::Transport => "Mesh transport runs as the detection-only stub here (no python3 \
             or Reticulum environment), so there is no rnsd process to restart."
             .to_string(),
+        ServiceId::Meshtastic => "No Meshtastic board is bound to this node, so meshmud is not \
+            running and there is nothing to restart."
+            .to_string(),
         other => format!(
             "{} is not a process the node runs; use \"Restart node\" in Settings to restart \
              everything.",
@@ -73,20 +80,29 @@ async fn restart(State(api): State<Arc<ApiState>>, Path(id): Path<String>) -> Re
     let Some(sid) = ServiceId::parse(&id) else {
         return unknown(&id);
     };
-    let child = api
+    let children = api
         .ext::<Arc<Supervised>>()
-        .and_then(|s| s.get(sid).cloned())
-        .filter(|c| c.state() != ChildState::Stopped);
-    let Some(child) = child else {
+        .map(|s| s.children(sid).to_vec())
+        .unwrap_or_default();
+    // the primary child decides: stopped for good (shutdown) ⇒ not supervised
+    if children
+        .first()
+        .is_none_or(|c| c.state() == ChildState::Stopped)
+    {
         return not_supervised(sid);
-    };
+    }
+    let names: Vec<_> = children.iter().map(|c| c.name().to_string()).collect();
     eprintln!(
         "111 daemon: restart of {} ({}) requested from the dashboard",
         sid.as_str(),
-        child.name()
+        names.join(", ")
     );
     tokio::spawn(async move {
-        child.restart(RESTART_GRACE).await;
+        for child in children {
+            if child.state() != ChildState::Stopped {
+                child.restart(RESTART_GRACE).await;
+            }
+        }
     });
     (
         StatusCode::ACCEPTED,
@@ -105,9 +121,11 @@ fn registry_down() -> Response {
 }
 
 fn unknown(id: &str) -> Response {
+    let known: Vec<_> = ServiceId::ALL.iter().map(|i| i.as_str()).collect();
     Problem::new(StatusCode::NOT_FOUND, "not_found", "no such service")
         .detail(format!(
-            "unknown service id {id:?} (one of: agent, model, transport, radio, kb, gateway, codeagent)"
+            "unknown service id {id:?} (one of: {})",
+            known.join(", ")
         ))
         .into_response()
 }
@@ -143,7 +161,12 @@ pub fn log_path(api: &ApiState, id: ServiceId) -> Option<PathBuf> {
         ServiceId::Agent => Some(intelligence::paths::agent_log(&api.layout)),
         ServiceId::Model => Some(intelligence::paths::model_log(&api.layout)),
         ServiceId::Transport => Some(services::probe::rnsd_log(&api.layout)),
-        _ => None,
+        ServiceId::Meshtastic => Some(services::probe::meshmud_log(&api.layout)),
+        ServiceId::Radio
+        | ServiceId::Kb
+        | ServiceId::Gateway
+        | ServiceId::Codeagent
+        | ServiceId::Fabric => None,
     }
 }
 

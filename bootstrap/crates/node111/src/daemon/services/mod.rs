@@ -1,11 +1,15 @@
-//! Services registry (Layer 4 spec §7, `os/interface/README.md`): the seven
-//! `ServiceRecord`s behind `GET /api/v1/services`, computed by `111d` from
-//! deterministic probes. The UI and the agent only read it.
+//! Services registry (Layer 4 spec §7, `os/interface/README.md`; grown to nine
+//! ids by Layer 5 §15/§19): the `ServiceRecord`s behind
+//! `GET /api/v1/services`, computed by `111d` from deterministic probes. The UI
+//! and the agent only read it.
 //!
 //! Split so the rules are testable without processes or sockets:
 //! - [`Facts`] — everything one tick observed (child states, health probes,
-//!   radio/WAN/PATH facts). Production fills it in [`probe`]; tests build it.
-//! - [`compute`] — the §7 table as a pure function `Facts → [Computed; 7]`.
+//!   radio/WAN/PATH facts, and the Layer 5 `fabric` / `meshmud` / panel facts
+//!   from optional providers). Production fills it in [`probe`]; tests build
+//!   it.
+//! - [`compute`] — the §7 table as a pure function
+//!   `Facts → [Computed; ServiceId::COUNT]`.
 //! - [`Registry`] — the debounce: a `(state, reason_code, can_run_here)` change
 //!   is published only after **two consecutive identical ticks**; `since` is
 //!   when the published state last changed. The first tick publishes as-is.
@@ -30,6 +34,15 @@
 //! Board detection reuses Layer 4 R4's enumeration (`devices::detect::scan`,
 //! `devices::rns::bindings`) with the installer's LoRa-table rule; it does not
 //! read R4's registry snapshot, so the two never wait on each other's ticks.
+//! Layer 5 §14: a board **meshmud** is bound to ([`RadioFacts::meshmud_bound`])
+//! counts as bound too — live (`radio_bound_meshtastic`, "driven by meshmud")
+//! while meshmud runs — so `radio` and `meshtastic` never contradict.
+//!
+//! Layer 5 rows: `fabric` ("Messaging", §15) over [`FabricFacts`] and
+//! `meshtastic` (§14) over [`MeshmudFacts`]. Without a provider the facts are
+//! `None` and both rows read NOT SET honestly. A service with a hosted panel
+//! (§13, [`PanelInfo`] by service id) carries it in `panel`; `embed_url` is
+//! then never set.
 
 pub mod log;
 pub mod probe;
@@ -54,6 +67,12 @@ pub const MESHTASTIC_PORT: u16 = 4403;
 /// `requires` of the radio row once a board is present.
 pub const RADIO_STACK_REQUIRES: &str =
     "a mesh stack bound to the board — Reticulum RNode interface or Meshtastic";
+/// meshmud's TCP downlink (Layer 5 §2/§14: loopback only; LISTEN-checked,
+/// never connected to by a probe).
+pub const MESHMUD_DOWNLINK_PORT: u16 = 11230;
+/// meshmud without its uplink this long ⇒ `meshtastic` is `error` (§14:
+/// "uplink lost > 60 s").
+pub const UPLINK_LOST_GRACE: Duration = Duration::from_secs(60);
 
 /// `ServiceId` (contract enum), in display order.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
@@ -66,10 +85,17 @@ pub enum ServiceId {
     Kb,
     Gateway,
     Codeagent,
+    /// Layer 5 §15: the messaging fabric ("Messaging").
+    Fabric,
+    /// Layer 5 §14: meshmud + the hosted Meshtastic web client.
+    Meshtastic,
 }
 
 impl ServiceId {
-    pub const ALL: [ServiceId; 7] = [
+    /// Number of services (the fixed size of every per-service array).
+    pub const COUNT: usize = 9;
+
+    pub const ALL: [ServiceId; ServiceId::COUNT] = [
         ServiceId::Agent,
         ServiceId::Model,
         ServiceId::Transport,
@@ -77,6 +103,8 @@ impl ServiceId {
         ServiceId::Kb,
         ServiceId::Gateway,
         ServiceId::Codeagent,
+        ServiceId::Fabric,
+        ServiceId::Meshtastic,
     ];
 
     pub fn as_str(self) -> &'static str {
@@ -88,6 +116,8 @@ impl ServiceId {
             ServiceId::Kb => "kb",
             ServiceId::Gateway => "gateway",
             ServiceId::Codeagent => "codeagent",
+            ServiceId::Fabric => "fabric",
+            ServiceId::Meshtastic => "meshtastic",
         }
     }
 
@@ -132,25 +162,93 @@ pub enum Action {
 
 /// The children 111d supervises, by service. The daemon start hook inserts an
 /// `Arc<Supervised>` into `ApiState` ext; `POST /services/{id}/restart` reads
-/// it (no entry ⇒ `409 not_supervised`).
+/// it (no entry ⇒ `409 not_supervised`). A service may own several children,
+/// restarted in registration order (Layer 5 §14: `meshtastic` = meshmud, then
+/// the presence reader).
 #[derive(Clone, Default)]
 pub struct Supervised {
-    children: Vec<(ServiceId, ChildControl)>,
+    children: Vec<(ServiceId, Vec<ChildControl>)>,
 }
 
 impl Supervised {
     /// Add `id`'s child when there is one (`None`: absent, stub).
-    pub fn with(mut self, id: ServiceId, child: Option<ChildControl>) -> Self {
-        if let Some(c) = child {
+    pub fn with(self, id: ServiceId, child: Option<ChildControl>) -> Self {
+        self.with_children(id, child.into_iter().collect())
+    }
+
+    /// Set `id`'s children, first = primary (the one whose state decides
+    /// whether the service is restartable); an empty list registers nothing.
+    pub fn with_children(mut self, id: ServiceId, children: Vec<ChildControl>) -> Self {
+        if !children.is_empty() {
             self.children.retain(|(i, _)| *i != id);
-            self.children.push((id, c));
+            self.children.push((id, children));
         }
         self
     }
 
+    /// `id`'s primary child.
     pub fn get(&self, id: ServiceId) -> Option<&ChildControl> {
-        self.children.iter().find(|(i, _)| *i == id).map(|(_, c)| c)
+        self.children(id).first()
     }
+
+    /// Every child of `id`, in restart order (empty when unsupervised).
+    pub fn children(&self, id: ServiceId) -> &[ChildControl] {
+        self.children
+            .iter()
+            .find(|(i, _)| *i == id)
+            .map(|(_, c)| c.as_slice())
+            .unwrap_or(&[])
+    }
+}
+
+/// `PanelState.health` (contract enum): the upstream's child state, never a
+/// connect (§13 health).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum PanelHealth {
+    Up,
+    Down,
+    Unknown,
+}
+
+/// `PanelState` (contract schema, Layer 5 §13).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct PanelState {
+    /// Only enabled panels hold a listener.
+    pub enabled: bool,
+    pub listening: bool,
+    pub health: PanelHealth,
+    /// Shim panels: `FromRadio` frames dropped by the bounded drop-oldest
+    /// buffer (§14 "drop count surfaced in `panel.state`").
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dropped: Option<u64>,
+}
+
+/// A hosted panel attached to a service record (`Panel`, Layer 5 §13:
+/// `ServiceRecord.panel = {id, port, entry, needs_secure_context, allow[],
+/// optional_hosts[], state} | null`). Filled by the panels module through the
+/// registry's panel provider; attached to the service whose id it carries.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct PanelInfo {
+    /// Panel id = its service id (manifest `id`).
+    pub id: ServiceId,
+    /// The panel listener's port (from the 11190–11229 block); the UI builds
+    /// the origin from `location.hostname` + this, never from a snapshot.
+    pub port: u16,
+    /// Manifest `[entry] path`.
+    pub entry: String,
+    pub needs_secure_context: bool,
+    /// Manifest `[frame] allow` (iframe `allow` features).
+    pub allow: Vec<String>,
+    /// Manifest `[offline] optional_hosts` (shown to the user).
+    pub optional_hosts: Vec<String>,
+    pub state: PanelState,
+    /// Manifest `title` (frame chrome).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    /// Manifest `[frame] secure_note`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub secure_note: Option<String>,
 }
 
 /// One `ServiceRecord` (contract schema; optional fields omitted when unset).
@@ -173,6 +271,8 @@ pub struct ServiceRecord {
     pub kb_entry: Option<&'static str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub embed_url: Option<String>,
+    /// Layer 5 §13: the hosted panel, `null` when the service has none.
+    pub panel: Option<PanelInfo>,
     pub actions: Vec<Action>,
     pub detail: Value,
 }
@@ -255,6 +355,33 @@ pub fn catalogue(id: ServiceId) -> Catalogue {
                 runs on hub-class machines that have the opencode tool installed.",
             kb_entry: Some("projects/opencode.md"),
         },
+        ServiceId::Fabric => Catalogue {
+            name: "mesh111",
+            plain_name: "Messaging",
+            kind: Kind::Builtin,
+            requires: Some(
+                "A home hub to enroll with, or another 111 node reachable on this network.",
+            ),
+            description: "Sealed messages between your nodes and your contacts. A message goes \
+                straight to the other node when it can be reached, or waits with your home hub \
+                until it comes back. It runs inside the node; only the two ends can read a \
+                message.",
+            kb_entry: None,
+        },
+        ServiceId::Meshtastic => Catalogue {
+            name: "meshmud",
+            plain_name: "Meshtastic",
+            kind: Kind::Child,
+            requires: Some(
+                "A Meshtastic board identified and bound to this node: plugged in by USB (Linux), \
+                 or a Wi-Fi board reached by its address.",
+            ),
+            description: "Meshtastic's own web client for the Meshtastic board bound to this \
+                node, and the list of Meshtastic nodes it hears. What you do in that client goes \
+                to your radio and out over Meshtastic; 111 does not see or store it, and 111 \
+                itself never transmits on Meshtastic.",
+            kb_entry: Some("projects/meshtastic-web.md"),
+        },
     }
 }
 
@@ -336,6 +463,9 @@ pub struct RadioFacts {
     /// meshtasticd answered at some point this daemon lifetime (its binding
     /// is only knowable by it answering).
     pub meshtastic_seen: bool,
+    /// Ports meshmud is bound to (Layer 5 §14, from the `devices.json`
+    /// binding): such a board counts as bound.
+    pub meshmud_bound: Vec<String>,
     /// How long a bound stack has not been answering (`None` while live or
     /// when nothing is bound).
     pub down_for: Option<Duration>,
@@ -357,6 +487,62 @@ pub struct AgentStatusProbe {
     /// `local | offloaded | unavailable`.
     pub state: Option<String>,
     pub model_id: Option<String>,
+}
+
+/// The messaging fabric as `111d` sees it this tick (Layer 5 §15; filled by
+/// the fabric module's provider).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct FabricFacts {
+    /// The store opened (§10.1). `false` with facts present = it failed.
+    pub store_open: bool,
+    /// Capacity pruning cannot make room (§10.4 `store_full`).
+    pub store_full: bool,
+    /// Home hub (§7.3): `None` = not enrolled with one; `Some(reachable)`.
+    pub hub_reachable: Option<bool>,
+    /// Hub role (§9): `None` = this node is not a hub; `Some(n)` = a hub with
+    /// `n` enrolled members.
+    pub members: Option<u32>,
+    /// Peer links attributed (a `pair_mac`-verified packet seen, §8.1) now.
+    pub attributed_links: u32,
+}
+
+/// meshmud and the presence reader as `111d` sees them this tick (Layer 5
+/// §14; filled by the Meshtastic module's provider).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct MeshmudFacts {
+    /// meshmud's process is up now (a live PID).
+    pub running: bool,
+    /// meshmud's supervisor state; `Absent` = no binding, so no child.
+    pub child_state: ChildDisplay,
+    /// Something LISTENs on [`MESHMUD_DOWNLINK_PORT`] (`/proc/net/tcp`,
+    /// never a connect — §13 health).
+    pub downlink_listening: bool,
+    /// The presence reader produced a valid node DB (§14 ingest).
+    pub node_db_present: bool,
+    /// The identified Meshtastic board (alias or model); `None` = none.
+    pub board: Option<String>,
+    pub firmware_version: Option<String>,
+    /// Nodes in the current node DB.
+    pub nodes_heard: u32,
+    /// Seconds since meshmud lost its uplink to the board; `None` while
+    /// connected.
+    pub uplink_lost_secs: Option<u64>,
+    /// Board-reported channel utilization (%), display only.
+    pub channel_utilization: Option<f64>,
+    /// The binding's uplink is a USB serial port (phones cannot open one).
+    pub usb_uplink: bool,
+    /// Another owner holds the bound port in the port-owner table
+    /// (`daemon::ports`), so meshmud cannot open it: that holder's task.
+    pub port_held_by: Option<String>,
+    /// meshmud's log file, when it exists.
+    pub log: Option<String>,
+}
+
+impl MeshmudFacts {
+    /// meshmud is up: its process runs and its supervisor agrees.
+    pub fn up(&self) -> bool {
+        self.running && self.child_state == ChildDisplay::Running
+    }
 }
 
 /// Everything one registry tick observed.
@@ -389,6 +575,12 @@ pub struct Facts {
     /// opencode path when found (PATH, then the usual install directories:
     /// `probe::opencode_dirs`).
     pub opencode: Option<String>,
+    /// Layer 5 §15; `None` = no fabric provider (the row reads NOT SET).
+    pub fabric: Option<FabricFacts>,
+    /// Layer 5 §14; `None` = no Meshtastic provider (NOT SET).
+    pub meshmud: Option<MeshmudFacts>,
+    /// Layer 5 §13: hosted panels, matched to services by `PanelInfo::id`.
+    pub panels: Vec<PanelInfo>,
 }
 
 impl Default for Facts {
@@ -413,6 +605,9 @@ impl Default for Facts {
             kb_payload_present: false,
             gateway: GatewayFacts::default(),
             opencode: None,
+            fabric: None,
+            meshmud: None,
+            panels: Vec::new(),
         }
     }
 }
@@ -429,6 +624,9 @@ pub struct Computed {
     pub can_run_here: bool,
     pub actions: Vec<Action>,
     pub embed_url: Option<String>,
+    /// Layer 5 §13 hosted panel (attached by [`compute`]; when set,
+    /// `embed_url` is `None`).
+    pub panel: Option<PanelInfo>,
     /// Overrides the catalogue's `requires` / `kb_entry` for this state.
     pub requires: Option<&'static str>,
     pub kb_entry: Option<&'static str>,
@@ -450,6 +648,7 @@ impl Computed {
             can_run_here: true,
             actions: Vec::new(),
             embed_url: None,
+            panel: None,
             requires: None,
             kb_entry: None,
             detail: json!({}),
@@ -690,7 +889,18 @@ fn radio(f: &Facts) -> Computed {
     let r = &f.radio;
     let boards: &[Radio] = r.boards.as_deref().unwrap_or(&[]);
     let rnode_live = r.rnsd_running && !r.rnode.is_empty();
-    let bound = !r.rnode.is_empty() || r.meshtastic_seen;
+    let meshmud_bound = !r.meshmud_bound.is_empty();
+    let meshmud_live = meshmud_bound && f.meshmud.as_ref().is_some_and(MeshmudFacts::up);
+    let bound = !r.rnode.is_empty() || r.meshtastic_seen || meshmud_bound;
+    let driven_by = if rnode_live {
+        Some("rnsd")
+    } else if meshmud_live {
+        Some("meshmud")
+    } else if r.meshtastic_open {
+        Some("meshtasticd")
+    } else {
+        None
+    };
     let mut out = if rnode_live {
         Computed::new(
             id,
@@ -698,6 +908,16 @@ fn radio(f: &Facts) -> Computed {
             "radio_bound_rnode",
             "The LoRa board is bound to the mesh transport (Reticulum RNode interface).",
         )
+    } else if meshmud_live {
+        // §14 / review J2: one rule, so `radio` and `meshtastic` never disagree
+        let mut c = Computed::new(
+            id,
+            ServiceState::Live,
+            "radio_bound_meshtastic",
+            "The LoRa board runs Meshtastic, driven by meshmud.",
+        );
+        c.kb_entry = Some("projects/meshtastic.md");
+        c
     } else if r.meshtastic_open {
         let mut c = Computed::new(
             id,
@@ -708,10 +928,12 @@ fn radio(f: &Facts) -> Computed {
         c.kb_entry = Some("projects/meshtastic.md");
         c
     } else if bound {
-        let what = if r.rnode.is_empty() {
-            "meshtasticd"
-        } else {
+        let what = if !r.rnode.is_empty() {
             "The Reticulum process (rnsd)"
+        } else if meshmud_bound {
+            "meshmud"
+        } else {
+            "meshtasticd"
         };
         if r.down_for.unwrap_or_default() >= STACK_DOWN_GRACE {
             Computed::new(
@@ -759,6 +981,8 @@ fn radio(f: &Facts) -> Computed {
             "open": r.meshtastic_open,
             "seen": r.meshtastic_seen,
         },
+        "meshmud_bound": r.meshmud_bound,
+        "driven_by": driven_by,
         "down_for_sec": r.down_for.map(|d| d.as_secs()),
     });
     out
@@ -866,9 +1090,235 @@ fn codeagent(f: &Facts) -> Computed {
     out
 }
 
+/// Layer 5 §15 `fabric` ("Messaging"): LIVE when the store is open and an
+/// enrolled hub is reachable, or this hub has a member, or a peer link is
+/// attributed; NOT SET when the store is open but nothing is reachable (a hub
+/// without members is "waiting for the first node to enroll"; a node with no
+/// hub is pointed at enrollment); ERROR on store failure or `store_full`.
+fn fabric(f: &Facts) -> Computed {
+    let id = ServiceId::Fabric;
+    let Some(x) = &f.fabric else {
+        let mut c = Computed::new(
+            id,
+            ServiceState::Unset,
+            "fabric_off",
+            "Messaging has not started on this node.",
+        );
+        c.detail = json!({ "started": false });
+        return c;
+    };
+    let plural = |n: u32, one: &str, many: &str| {
+        if n == 1 {
+            format!("1 {one}")
+        } else {
+            format!("{n} {many}")
+        }
+    };
+    let mut out = if !x.store_open {
+        Computed::new(
+            id,
+            ServiceState::Error,
+            "store_failed",
+            "The message store could not be opened.",
+        )
+    } else if x.store_full {
+        Computed::new(
+            id,
+            ServiceState::Error,
+            "store_full",
+            "The message store is full; new messages cannot be saved until space is freed.",
+        )
+    } else if x.hub_reachable == Some(true) {
+        Computed::new(
+            id,
+            ServiceState::Live,
+            "hub_reachable",
+            "Your home hub is reachable; messages are delivered or held for you.",
+        )
+    } else if let Some(n) = x.members.filter(|n| *n > 0) {
+        Computed::new(
+            id,
+            ServiceState::Live,
+            "hub_serving",
+            format!(
+                "This node is a home hub for {}.",
+                plural(n, "member node", "member nodes")
+            ),
+        )
+    } else if x.attributed_links > 0 {
+        Computed::new(
+            id,
+            ServiceState::Live,
+            "peer_linked",
+            format!(
+                "Connected directly to {}.",
+                plural(x.attributed_links, "other 111 node", "other 111 nodes")
+            ),
+        )
+    } else if x.members == Some(0) {
+        Computed::new(
+            id,
+            ServiceState::Unset,
+            "hub_waiting",
+            "This node is a home hub, waiting for the first node to enroll.",
+        )
+    } else if x.hub_reachable == Some(false) {
+        Computed::new(
+            id,
+            ServiceState::Unset,
+            "hub_unreachable",
+            "Your home hub cannot be reached right now; messages wait until it can.",
+        )
+    } else {
+        Computed::new(
+            id,
+            ServiceState::Unset,
+            "not_enrolled",
+            "No home hub and no other node reachable yet. Set up with the agent to enroll with a hub.",
+        )
+    };
+    out.detail = json!({
+        "started": true,
+        "store": { "open": x.store_open, "full": x.store_full },
+        "hub": {
+            "enrolled": x.hub_reachable.is_some(),
+            "reachable": x.hub_reachable,
+        },
+        "hub_role": x.members.is_some(),
+        "members": x.members,
+        "attributed_links": x.attributed_links,
+    });
+    out
+}
+
+/// Layer 5 §14 `meshtastic`: LIVE when meshmud runs (downlink listening) and
+/// the presence reader has produced a node DB; NOT SET when no Meshtastic
+/// board is bound (identified-but-unbound boards point at the agent); ERROR
+/// when meshmud crash-loops, its uplink is lost for more than
+/// [`UPLINK_LOST_GRACE`], or another owner holds the bound port
+/// (`port_busy`). A USB board cannot be driven from a phone.
+fn meshtastic(f: &Facts) -> Computed {
+    let id = ServiceId::Meshtastic;
+    let none = || {
+        Computed::new(
+            id,
+            ServiceState::Unset,
+            "no_meshtastic",
+            "No Meshtastic board is set up on this node.",
+        )
+    };
+    let Some(m) = &f.meshmud else {
+        let mut c = none();
+        c.detail = json!({ "child": display_str(ChildDisplay::Absent), "board": null });
+        return c;
+    };
+    let lost = m.uplink_lost_secs;
+    // a running meshmud owns its port; otherwise another holder blocks it
+    let held_by = m
+        .port_held_by
+        .as_deref()
+        .filter(|_| m.child_state != ChildDisplay::Running);
+    let mut out = if let Some(holder) = held_by {
+        Computed::new(
+            id,
+            ServiceState::Error,
+            "port_busy",
+            format!("The board's port is in use by {holder}, so meshmud cannot open it."),
+        )
+    } else {
+        match m.child_state {
+            ChildDisplay::Absent if m.board.is_some() => {
+                let mut c = Computed::new(
+                    id,
+                    ServiceState::Unset,
+                    "meshtastic_unbound",
+                    "A Meshtastic board is identified but not set up yet. Set up with the agent.",
+                );
+                if f.phone_like && m.usb_uplink {
+                    c.can_run_here = false;
+                    c.reason =
+                        "This device cannot drive a USB board; a Wi-Fi Meshtastic board can be \
+                    set up by its address."
+                            .into();
+                }
+                c
+            }
+            ChildDisplay::Absent => none(),
+            ChildDisplay::Degraded => Computed::new(
+                id,
+                ServiceState::Error,
+                "child_degraded",
+                "meshmud kept crashing, so the node stopped restarting it.",
+            ),
+            ChildDisplay::Stopped => Computed::new(
+                id,
+                ServiceState::Error,
+                "child_stopped",
+                "meshmud was stopped.",
+            ),
+            ChildDisplay::Backoff => Computed::new(
+                id,
+                ServiceState::Error,
+                "child_backoff",
+                "meshmud crashed and is being restarted.",
+            ),
+            ChildDisplay::Running if lost.is_some_and(|s| s > UPLINK_LOST_GRACE.as_secs()) => {
+                Computed::new(
+                    id,
+                    ServiceState::Error,
+                    "uplink_lost",
+                    "meshmud lost its connection to the board over a minute ago.",
+                )
+            }
+            ChildDisplay::Running if lost.is_some() => Computed::new(
+                id,
+                ServiceState::Starting,
+                "uplink_waiting",
+                "meshmud lost its connection to the board and is reconnecting.",
+            ),
+            ChildDisplay::Running if !m.running || !m.downlink_listening => Computed::new(
+                id,
+                ServiceState::Starting,
+                "downlink_pending",
+                "meshmud is starting.",
+            ),
+            ChildDisplay::Running if !m.node_db_present => Computed::new(
+                id,
+                ServiceState::Starting,
+                "node_db_pending",
+                "meshmud is connected; waiting for the board's list of nodes.",
+            ),
+            ChildDisplay::Running => Computed::new(
+                id,
+                ServiceState::Live,
+                "meshtastic_live",
+                "meshmud is connected to the board and its list of nodes is in.",
+            ),
+        }
+    };
+    out.actions = child_actions(m.child_state, m.log.is_some());
+    out.detail = json!({
+        "child": display_str(m.child_state),
+        "running": m.running,
+        "downlink": { "port": MESHMUD_DOWNLINK_PORT, "listening": m.downlink_listening },
+        "node_db_present": m.node_db_present,
+        "board": m.board,
+        "firmware_version": m.firmware_version,
+        "nodes_heard": m.nodes_heard,
+        "channel_utilization": m.channel_utilization,
+        "uplink_lost_sec": m.uplink_lost_secs,
+        "usb_uplink": m.usb_uplink,
+        "port_held_by": m.port_held_by,
+        "log": m.log,
+    });
+    out
+}
+
 /// The §7 table: one [`Computed`] per service, in [`ServiceId::ALL`] order.
-pub fn compute(f: &Facts) -> [Computed; 7] {
-    [
+/// A panel in `f.panels` attaches to the service of the same id (Layer 5
+/// §13) and clears that record's `embed_url`.
+pub fn compute(f: &Facts) -> [Computed; ServiceId::COUNT] {
+    let mut out = [
         agent(f),
         model(f),
         transport(f),
@@ -876,7 +1326,16 @@ pub fn compute(f: &Facts) -> [Computed; 7] {
         kb(f),
         gateway(f),
         codeagent(f),
-    ]
+        fabric(f),
+        meshtastic(f),
+    ];
+    for c in &mut out {
+        c.panel = f.panels.iter().find(|p| p.id == c.id).cloned();
+        if c.panel.is_some() {
+            c.embed_url = None;
+        }
+    }
+    out
 }
 
 // ---------------------------------------------------------------- registry
@@ -909,7 +1368,7 @@ impl Registry {
     /// Feed one tick. Returns `true` when the published set changed (first
     /// tick, or a state flip confirmed by two identical ticks) — the caller
     /// publishes a `services` frame then. Detail refreshes every tick.
-    pub fn tick(&self, computed: [Computed; 7], now: &str) -> bool {
+    pub fn tick(&self, computed: [Computed; ServiceId::COUNT], now: &str) -> bool {
         let mut slots = self.slots.write().unwrap();
         let Some(slots) = slots.as_mut() else {
             *slots = Some(
@@ -938,6 +1397,7 @@ impl Registry {
             } else {
                 slot.pending = Some(k);
                 slot.published.detail = c.detail;
+                slot.published.panel = c.panel;
             }
         }
         changed
@@ -989,6 +1449,7 @@ fn record(slot: &Slot) -> ServiceRecord {
         description: cat.description,
         kb_entry: c.kb_entry.or(cat.kb_entry),
         embed_url: c.embed_url.clone(),
+        panel: c.panel.clone(),
         actions: c.actions.clone(),
         detail: c.detail.clone(),
     }
@@ -1032,9 +1493,12 @@ mod tests {
                 "radio",
                 "kb",
                 "gateway",
-                "codeagent"
+                "codeagent",
+                "fabric",
+                "meshtastic"
             ]
         );
+        assert_eq!(ServiceId::ALL.len(), ServiceId::COUNT);
         for id in ServiceId::ALL {
             assert_eq!(ServiceId::parse(id.as_str()), Some(id));
             assert_eq!(
@@ -1051,5 +1515,300 @@ mod tests {
         for (c, id) in out.iter().zip(ServiceId::ALL) {
             assert_eq!(c.id, id);
         }
+    }
+
+    fn row(f: &Facts, id: ServiceId) -> Computed {
+        compute(f).into_iter().find(|c| c.id == id).unwrap()
+    }
+
+    fn st(f: &Facts, id: ServiceId) -> (ServiceState, &'static str, bool) {
+        let c = row(f, id);
+        (c.state, c.reason_code, c.can_run_here)
+    }
+
+    use ServiceState::{Error as E, Live as L, Starting as S, Unset as U};
+
+    #[test]
+    fn fabric_rule_matrix() {
+        let id = ServiceId::Fabric;
+        let mut f = Facts::default();
+        // no provider: NOT SET, honestly
+        assert_eq!(st(&f, id), (U, "fabric_off", true));
+        assert_eq!(row(&f, id).detail["started"], false);
+        let base = FabricFacts {
+            store_open: true,
+            ..FabricFacts::default()
+        };
+        let with = |x: FabricFacts| Facts {
+            fabric: Some(x),
+            ..Facts::default()
+        };
+        // store open, nothing reachable, no hub: point at enrollment
+        f = with(base.clone());
+        assert_eq!(st(&f, id), (U, "not_enrolled", true));
+        assert!(row(&f, id).reason.contains("Set up with the agent"));
+        // a hub with no members: waiting for the first node to enroll
+        f = with(FabricFacts {
+            members: Some(0),
+            ..base.clone()
+        });
+        assert_eq!(st(&f, id), (U, "hub_waiting", true));
+        assert!(row(&f, id)
+            .reason
+            .contains("waiting for the first node to enroll"));
+        // enrolled, hub unreachable: NOT SET (nothing reachable)
+        f = with(FabricFacts {
+            hub_reachable: Some(false),
+            ..base.clone()
+        });
+        assert_eq!(st(&f, id), (U, "hub_unreachable", true));
+        // LIVE: hub reachable · a member · an attributed link
+        f = with(FabricFacts {
+            hub_reachable: Some(true),
+            ..base.clone()
+        });
+        assert_eq!(st(&f, id), (L, "hub_reachable", true));
+        f = with(FabricFacts {
+            members: Some(2),
+            ..base.clone()
+        });
+        assert_eq!(st(&f, id), (L, "hub_serving", true));
+        assert!(row(&f, id).reason.contains("2 member nodes"));
+        f = with(FabricFacts {
+            hub_reachable: Some(false),
+            attributed_links: 1,
+            ..base.clone()
+        });
+        assert_eq!(st(&f, id), (L, "peer_linked", true));
+        assert!(row(&f, id).reason.contains("1 other 111 node."));
+        // ERROR: store failure, store_full (wins over reachability)
+        f = with(FabricFacts {
+            store_open: false,
+            hub_reachable: Some(true),
+            ..FabricFacts::default()
+        });
+        assert_eq!(st(&f, id), (E, "store_failed", true));
+        f = with(FabricFacts {
+            store_full: true,
+            hub_reachable: Some(true),
+            ..base.clone()
+        });
+        let c = row(&f, id);
+        assert_eq!((c.state, c.reason_code), (E, "store_full"));
+        assert_eq!(c.detail["store"]["full"], true);
+        assert_eq!(c.detail["hub"]["enrolled"], true);
+        assert!(c.actions.is_empty(), "built in: nothing to restart");
+    }
+
+    fn mm(child: ChildDisplay) -> MeshmudFacts {
+        MeshmudFacts {
+            running: child == ChildDisplay::Running,
+            child_state: child,
+            downlink_listening: child == ChildDisplay::Running,
+            node_db_present: true,
+            board: Some("Heltec V3".into()),
+            firmware_version: Some("2.6.11".into()),
+            nodes_heard: 12,
+            log: Some("/x/meshmud.log".into()),
+            ..MeshmudFacts::default()
+        }
+    }
+
+    #[test]
+    fn meshtastic_rule_matrix() {
+        let id = ServiceId::Meshtastic;
+        let with = |m: MeshmudFacts| Facts {
+            meshmud: Some(m),
+            ..Facts::default()
+        };
+        // no provider / nothing identified: NOT SET
+        assert_eq!(st(&Facts::default(), id), (U, "no_meshtastic", true));
+        let mut m = mm(ChildDisplay::Absent);
+        m.board = None;
+        assert_eq!(st(&with(m), id), (U, "no_meshtastic", true));
+        // identified, not bound: NOT SET, agent set-up
+        let c = row(&with(mm(ChildDisplay::Absent)), id);
+        assert_eq!((c.state, c.reason_code), (U, "meshtastic_unbound"));
+        assert!(c.reason.contains("Set up with the agent"));
+        assert!(c.actions.contains(&Action::Log) && !c.actions.contains(&Action::Restart));
+        // a USB board on a phone cannot run here; a Wi-Fi one can
+        let mut phone = with(MeshmudFacts {
+            usb_uplink: true,
+            ..mm(ChildDisplay::Absent)
+        });
+        phone.phone_like = true;
+        assert_eq!(st(&phone, id), (U, "meshtastic_unbound", false));
+        phone.meshmud.as_mut().unwrap().usb_uplink = false;
+        assert_eq!(st(&phone, id), (U, "meshtastic_unbound", true));
+        // LIVE: running + downlink + node DB
+        let c = row(&with(mm(ChildDisplay::Running)), id);
+        assert_eq!((c.state, c.reason_code), (L, "meshtastic_live"));
+        assert_eq!(c.actions, [Action::Restart, Action::Log]);
+        assert_eq!(c.detail["downlink"]["port"], 11230);
+        assert_eq!(c.detail["board"], "Heltec V3");
+        assert_eq!(c.detail["nodes_heard"], 12);
+        // starting: downlink not yet listening / no node DB yet / uplink blip
+        let mut m = mm(ChildDisplay::Running);
+        m.downlink_listening = false;
+        assert_eq!(st(&with(m), id), (S, "downlink_pending", true));
+        let mut m = mm(ChildDisplay::Running);
+        m.running = false;
+        assert_eq!(st(&with(m), id), (S, "downlink_pending", true));
+        let mut m = mm(ChildDisplay::Running);
+        m.node_db_present = false;
+        assert_eq!(st(&with(m), id), (S, "node_db_pending", true));
+        let mut m = mm(ChildDisplay::Running);
+        m.uplink_lost_secs = Some(60);
+        assert_eq!(st(&with(m), id), (S, "uplink_waiting", true));
+        // ERROR: uplink lost > 60 s, crash loop, backoff, stopped
+        let mut m = mm(ChildDisplay::Running);
+        m.uplink_lost_secs = Some(61);
+        assert_eq!(st(&with(m), id), (E, "uplink_lost", true));
+        assert_eq!(
+            st(&with(mm(ChildDisplay::Degraded)), id),
+            (E, "child_degraded", true)
+        );
+        assert_eq!(
+            st(&with(mm(ChildDisplay::Backoff)), id),
+            (E, "child_backoff", true)
+        );
+        assert_eq!(
+            st(&with(mm(ChildDisplay::Stopped)), id),
+            (E, "child_stopped", true)
+        );
+        // the bound port has another owner: meshmud cannot open it
+        let busy = |child| MeshmudFacts {
+            port_held_by: Some("rnsd".into()),
+            ..mm(child)
+        };
+        let c = row(&with(busy(ChildDisplay::Absent)), id);
+        assert_eq!((c.state, c.reason_code), (E, "port_busy"));
+        assert!(c.reason.contains("rnsd"), "{}", c.reason);
+        assert_eq!(c.detail["port_held_by"], "rnsd");
+        assert_eq!(
+            st(&with(busy(ChildDisplay::Backoff)), id),
+            (E, "port_busy", true)
+        );
+        // a running meshmud owns its port: the fact is stale, not a conflict
+        assert_eq!(
+            st(&with(busy(ChildDisplay::Running)), id),
+            (L, "meshtastic_live", true)
+        );
+    }
+
+    #[test]
+    fn radio_counts_a_meshmud_bound_board() {
+        let id = ServiceId::Radio;
+        let board = Radio {
+            vid: "10c4".into(),
+            pid: "ea60".into(),
+            product: "CP2102".into(),
+            name: "Heltec WiFi LoRa 32 V3 (CP2102)".into(),
+            tty: Some("ttyUSB0".into()),
+            by_id: None,
+        };
+        let mut f = Facts::default();
+        f.radio.boards = Some(vec![board]);
+        assert_eq!(st(&f, id), (U, "radio_unbound", true));
+        // bound + meshmud up: live, driven by meshmud — agrees with `meshtastic`
+        f.radio.meshmud_bound = vec!["/dev/ttyUSB0".into()];
+        f.meshmud = Some(mm(ChildDisplay::Running));
+        let c = row(&f, id);
+        assert_eq!((c.state, c.reason_code), (L, "radio_bound_meshtastic"));
+        assert!(c.reason.contains("driven by meshmud"));
+        assert_eq!(c.detail["driven_by"], "meshmud");
+        assert_eq!(c.detail["meshmud_bound"][0], "/dev/ttyUSB0");
+        assert_eq!(c.kb_entry, Some("projects/meshtastic.md"));
+        assert_eq!(st(&f, ServiceId::Meshtastic).0, L);
+        // meshmud down: still bound — waiting, then stack_down
+        f.meshmud = Some(mm(ChildDisplay::Backoff));
+        f.radio.down_for = Some(Duration::from_secs(5));
+        let c = row(&f, id);
+        assert_eq!((c.state, c.reason_code), (S, "stack_waiting"));
+        assert!(c.reason.starts_with("meshmud"), "{}", c.reason);
+        f.radio.down_for = Some(STACK_DOWN_GRACE);
+        assert_eq!(st(&f, id), (E, "stack_down", true));
+        // meshmud running without a binding does not bind the radio
+        f.radio.meshmud_bound.clear();
+        f.radio.down_for = None;
+        f.meshmud = Some(mm(ChildDisplay::Running));
+        assert_eq!(st(&f, id), (U, "radio_unbound", true));
+        assert_eq!(row(&f, id).detail["driven_by"], Value::Null);
+    }
+
+    #[test]
+    fn panels_attach_by_id_and_clear_embed_url() {
+        let panel = PanelInfo {
+            id: ServiceId::Meshtastic,
+            port: 11190,
+            entry: "/".into(),
+            needs_secure_context: false,
+            allow: vec!["serial".into(), "bluetooth".into()],
+            optional_hosts: vec!["tiles.openfreemap.org".into()],
+            state: PanelState {
+                enabled: true,
+                listening: true,
+                health: PanelHealth::Up,
+                dropped: Some(0),
+            },
+            title: Some("Meshtastic".into()),
+            secure_note: None,
+        };
+        let f = Facts {
+            panels: vec![panel.clone()],
+            ..Facts::default()
+        };
+        let out = compute(&f);
+        for c in &out {
+            if c.id == ServiceId::Meshtastic {
+                assert_eq!(c.panel.as_ref(), Some(&panel));
+                assert_eq!(c.embed_url, None);
+            } else {
+                assert_eq!(c.panel, None, "{:?}", c.id);
+            }
+        }
+        // the record carries it; `null` when absent (contract `| null`)
+        let reg = Registry::new();
+        reg.tick(out, "t0");
+        let rec = serde_json::to_value(reg.get(ServiceId::Meshtastic).unwrap()).unwrap();
+        assert_eq!(
+            rec["panel"],
+            json!({
+                "id": "meshtastic",
+                "port": 11190,
+                "entry": "/",
+                "needs_secure_context": false,
+                "allow": ["serial", "bluetooth"],
+                "optional_hosts": ["tiles.openfreemap.org"],
+                "state": {"enabled": true, "listening": true, "health": "up", "dropped": 0},
+                "title": "Meshtastic",
+            })
+        );
+        assert!(rec.get("embed_url").is_none());
+        let kb = serde_json::to_value(reg.get(ServiceId::Kb).unwrap()).unwrap();
+        assert_eq!(kb["panel"], Value::Null);
+    }
+
+    #[test]
+    fn layer5_catalogue_entries() {
+        let f = catalogue(ServiceId::Fabric);
+        assert_eq!((f.plain_name, f.kind), ("Messaging", Kind::Builtin));
+        let m = catalogue(ServiceId::Meshtastic);
+        assert_eq!((m.plain_name, m.kind), ("Meshtastic", Kind::Child));
+        assert_eq!(m.kb_entry, Some("projects/meshtastic-web.md"));
+        for id in ServiceId::ALL {
+            let c = catalogue(id);
+            assert!(c.description.len() > 40, "{id:?}");
+            assert!(c.kb_entry.is_none_or(|k| k.ends_with(".md")), "{id:?}");
+        }
+    }
+
+    #[test]
+    fn supervised_children_keep_order_and_primary() {
+        let s = Supervised::default().with(ServiceId::Model, None);
+        assert!(s.get(ServiceId::Model).is_none());
+        assert!(s.children(ServiceId::Meshtastic).is_empty());
+        let s = s.with_children(ServiceId::Meshtastic, Vec::new());
+        assert!(s.children(ServiceId::Meshtastic).is_empty());
     }
 }

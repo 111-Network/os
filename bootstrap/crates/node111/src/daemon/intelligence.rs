@@ -10,8 +10,18 @@
 //! - `111-agent` runs iff `current/bin/111-agent` exists. Its environment
 //!   carries category, KB dir, state dir, env file, and the PUBLIC node id.
 //!   No key material ever reaches it.
+//! - Layer 5 §17: the agent reaches `111d`'s own `/api/v1` on loopback
+//!   ([`DAEMON_API_URL`], env `AGENT111_DAEMON_API_URL`) with a bearer token
+//!   minted when the agent is spawned ([`DaemonToken::mint`], env
+//!   `AGENT111_DAEMON_TOKEN`). The token is a session credential for that API,
+//!   not key material: it never touches disk, and `require_session` accepts it
+//!   from a loopback peer only. The supervisor reuses the spawn's environment
+//!   for crash restarts, so one token lives as long as this handle; the daemon
+//!   start hook puts the same token into `ApiState` ext
+//!   ([`IntelligenceHandle::daemon_token`]).
 //! - Both log to `<root>/agent/`, which is created 0700.
 
+use crate::daemon::dashboard::api_v1::auth::{DaemonToken, DAEMON_TOKEN_ENV};
 use crate::daemon::supervise::{
     self, BackoffPolicy, ChildControl, ChildHandle, ChildSpec, ChildState,
 };
@@ -28,6 +38,13 @@ pub const AGENT_PORT: u16 = 11182;
 /// Where the agent API listens (loopback only); published in `/api/status`
 /// while the agent is running so Layer 4 can relay to it.
 pub const AGENT_URL: &str = "http://127.0.0.1:11182";
+
+/// `111d`'s own `/api/v1` base as the agent reaches it (loopback, the
+/// dashboard's [`crate::daemon::dashboard::DEFAULT_PORT`]; Layer 5 §17).
+pub const DAEMON_API_URL: &str = "http://127.0.0.1:11180/api/v1";
+
+/// Child-environment name of [`DAEMON_API_URL`].
+pub const DAEMON_API_URL_ENV: &str = "AGENT111_DAEMON_API_URL";
 
 /// Display state of one Layer 3 child (pinned strings in `/api/status`).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
@@ -68,6 +85,9 @@ pub struct IntelligenceState {
 pub struct IntelligenceHandle {
     agent: Option<ChildHandle>,
     model: Option<ChildHandle>,
+    /// The agent's bearer token (Layer 5 §17); `None` when no agent was
+    /// spawned or the OS random source failed (then no bearer is accepted).
+    daemon_token: Option<DaemonToken>,
 }
 
 impl IntelligenceHandle {
@@ -102,6 +122,13 @@ impl IntelligenceHandle {
     /// Control of the `llama-server` child (`None` when absent).
     pub fn model_control(&self) -> Option<ChildControl> {
         self.model.as_ref().map(ChildHandle::control)
+    }
+
+    /// The bearer token handed to the agent at spawn (Layer 5 §17). The daemon
+    /// start hook inserts it into `ApiState` ext so `require_session` can
+    /// check it; `None` ⇒ every bearer is refused.
+    pub fn daemon_token(&self) -> Option<DaemonToken> {
+        self.daemon_token.clone()
     }
 
     /// SIGTERM both children and stop restarting them, without waiting.
@@ -173,6 +200,7 @@ fn agent_spec(
     layout: &DaemonLayout,
     category: Option<&str>,
     node_id: Option<&str>,
+    daemon_token: Option<&DaemonToken>,
 ) -> Option<ChildSpec> {
     let program = layout.current_release().join("bin/111-agent");
     if !program.is_file() {
@@ -200,7 +228,11 @@ fn agent_spec(
             "AGENT111_ENV_FILE".to_string(),
             path_str(layout.etc.join("agent.env")),
         ),
+        (DAEMON_API_URL_ENV.to_string(), DAEMON_API_URL.to_string()),
     ];
+    if let Some(token) = daemon_token {
+        env.push((DAEMON_TOKEN_ENV.to_string(), token.as_str().to_string()));
+    }
     if let Some(id) = node_id.filter(|i| !i.is_empty()) {
         env.push(("AGENT111_NODE_ID".to_string(), id.to_string()));
     }
@@ -275,13 +307,26 @@ pub fn start(
     node_id: Option<&str>,
 ) -> IntelligenceHandle {
     let llama = llama_server_spec(layout);
-    let agent = agent_spec(layout, category, node_id);
+    // Minted only when an agent will be spawned (Layer 5 §17): no agent, no
+    // token, no bearer accepted.
+    let daemon_token = if paths::agent_binary(layout).is_file() {
+        DaemonToken::mint()
+            .inspect_err(|e| {
+                eprintln!("111 intelligence: {e} — the agent starts without daemon API access")
+            })
+            .ok()
+    } else {
+        None
+    };
+    let agent = agent_spec(layout, category, node_id, daemon_token.as_ref());
     if llama.is_some() || agent.is_some() {
         ensure_private_dir(&agent_dir(layout));
     }
+    let daemon_token = daemon_token.filter(|_| agent.is_some());
     IntelligenceHandle {
         model: llama.map(supervise::spawn_child),
         agent: agent.map(supervise::spawn_child),
+        daemon_token,
     }
 }
 
@@ -389,11 +434,12 @@ mod tests {
     fn agent_spec_env_contract() {
         let dir = tempfile::tempdir().unwrap();
         let l = layout(dir.path());
-        assert!(agent_spec(&l, Some("Node2A"), None).is_none());
+        assert!(agent_spec(&l, Some("Node2A"), None, None).is_none());
 
         touch_exec(&dir.path().join("current/bin/111-agent"));
         let root = dir.path().display();
-        let spec = agent_spec(&l, Some("Node2A"), Some("abc123")).unwrap();
+        let token = DaemonToken::mint().unwrap();
+        let spec = agent_spec(&l, Some("Node2A"), Some("abc123"), Some(&token)).unwrap();
         assert_eq!(spec.name, "111-agent");
         assert!(spec.args.is_empty());
         assert_eq!(
@@ -409,6 +455,14 @@ mod tests {
                     "AGENT111_ENV_FILE".to_string(),
                     format!("{root}/etc/agent.env")
                 ),
+                (
+                    "AGENT111_DAEMON_API_URL".to_string(),
+                    "http://127.0.0.1:11180/api/v1".to_string()
+                ),
+                (
+                    "AGENT111_DAEMON_TOKEN".to_string(),
+                    token.as_str().to_string()
+                ),
                 ("AGENT111_NODE_ID".to_string(), "abc123".to_string()),
             ]
         );
@@ -417,13 +471,26 @@ mod tests {
             Some(dir.path().join("agent/111-agent.log"))
         );
 
-        // Unknown category, no node id: category defaults, node id omitted.
+        // Unknown category, no node id, no token: category defaults, node id
+        // and token omitted (the API URL is always there).
         for (cat, id) in [(None, None), (Some(""), Some(""))] {
-            let spec = agent_spec(&l, cat, id).unwrap();
-            assert_eq!(spec.env.len(), 4, "{:?}", spec.env);
+            let spec = agent_spec(&l, cat, id, None).unwrap();
+            assert_eq!(spec.env.len(), 5, "{:?}", spec.env);
             assert_eq!(spec.env[0].1, "unknown");
             assert!(spec.env.iter().all(|(k, _)| k != "AGENT111_NODE_ID"));
+            assert!(spec.env.iter().all(|(k, _)| k != DAEMON_TOKEN_ENV));
         }
+    }
+
+    #[test]
+    fn daemon_api_url_is_the_dashboard_port_on_loopback() {
+        assert_eq!(
+            DAEMON_API_URL,
+            format!(
+                "http://127.0.0.1:{}/api/v1",
+                crate::daemon::dashboard::DEFAULT_PORT
+            )
+        );
     }
 
     #[test]
