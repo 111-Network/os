@@ -71,3 +71,8 @@ All 7 forks decided (D19, 2026-10-14). Spec draft: `os/messaging/README.md`. Nex
 - **Wave 1 landed** (2026-10-14 evening): F1 `c8a093c` · P1 `79ca52d` · M1 `99f5e0a` · U1 `858077f` (board `f283c9a`). Every
   check green except the UI bundle budget (255.4 KB vs 200 KB; owner decision pending). Review run `wf_c857767c-bde`
   (script `messaging/.workflow-wave-1-review.js`): F1/P1/M1 fable xhigh, U1 opus; findings only → lead bounces via fresh agents.
+- **Wave 1 review returned** (F1 fix-then-lock 2/13 · P1 ready 0/6 · M1 fix-then-lock 1/9 · U1 fix-then-lock 1/16; triage
+  `plan/layer-5-review/wave-1.md` with the lead's calls: ignore = client-side fold, bearer never mints, contract text →
+  F2). Bounce run `wf_62ea271c-e73` (script `messaging/.workflow-wave-1-bounce.js`): fresh agents P1 M1 U1 (opus/sonnet)
+  + F1 (opus xhigh) on disjoint files; lead re-checks + commits per bounce. Wave 2 script drafted:
+  `messaging/.workflow-wave-2.js` (B1, U2, F2 — F2 carries the contract additions).
