@@ -34,3 +34,10 @@ Next step after the run: lead writes `layer-5-options.md` (options brief), owner
 ## Status
 
 All 7 forks decided (D19, 2026-10-14). Spec draft: `os/messaging/README.md`. Next: fable adversarial panel (`layer-5-review/`) → fixes → lock → `os/messaging/TASKS.md` → build.
+
+## Run 3 — adversarial panel on the spec draft (2026-10-14)
+
+- Workflow run id: `wf_c4054cfb-f80` · script copy: `plan/layer-5-review/workflow-review.js` · 3 fable judges (xhigh):
+  `crypto` (§3–§12, §18, L2 amendments) · `panels` (§13–§15 proxy + Meshtastic) · `integration` (scope, seams, buildability).
+- Reviews land in `plan/layer-5-review/{crypto,panels,integration}.md`; the lead's triage goes to `plan/layer-5-review.md`.
+- Resume: `Workflow({scriptPath: "<script copy, absolute>", resumeFromRunId: "wf_c4054cfb-f80"})`.
