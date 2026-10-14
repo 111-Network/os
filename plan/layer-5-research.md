@@ -96,3 +96,8 @@ All 7 forks decided (D19, 2026-10-14). Spec draft: `os/messaging/README.md`. Nex
   **Review run `wf_938461a1-1cb`** (script `messaging/.workflow-wave-2-review.js`): B1 + U2 opus, F2 fable xhigh. Carried
   into its triage: UI quota classes (msg/agent_op → 400), offerHub 409 in the contract, cancel route, updater
   `verify_layer5_tree` call sites, release-checklist + presence-venv rows, mock enroll bundle `111HUB:`.
+- **Gate milestone (23:45):** `bootstrap/scripts/check.sh` **ALL GREEN** on `43c98bd` with Waves 0–2 in — node111 fmt/clippy/
+  musl ×2/tests, shellcheck, notices (OpenSSL named), build-script gate, systemd, mesh111 fmt/clippy/tests/musl ×2, SQLCipher
+  static link + run (x86_64) and link (aarch64, 8 static test binaries), presence sidecar (16 packages, 335 hashes), UI 1065
+  tests, D21 eager 102.8 / lazy 176.4 KB. Wave 3 launched alongside the review: `.workflow-wave-3.js` (V2 panel lint, V1
+  three-node smoke).
