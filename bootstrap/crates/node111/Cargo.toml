@@ -2,7 +2,7 @@
 name = "node111"
 version = "0.0.0" # calver stamped at release time; see scripts/release.sh
 edition.workspace = true
-license.workspace = true
+license-file = "../../../LICENSE.md" # DRAFT project license (os/LICENSE.md); see os/LICENSING.md
 
 [[bin]]
 name = "111"

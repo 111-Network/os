@@ -2,7 +2,7 @@
 name = "id111"
 version = "0.0.0" # calver stamped at release time, mirroring node111
 edition.workspace = true
-license.workspace = true
+license-file = "../../../LICENSE.md" # DRAFT project license (os/LICENSE.md); see os/LICENSING.md
 
 # Dependency policy (os/identity/TASKS.md): this set is frozen; additions need
 # reviewer sign-off recorded in the task row.

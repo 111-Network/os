@@ -1,6 +1,6 @@
 # Mesh Self-Healing Agentic Operating System
 
-A minimal, open-source operating layer that connects local AI with existing mesh and offline networks — empowering any device, from a dedicated radio relay to a laptop or an old phone, with offline-first communication, local intelligence, and self-healing.
+A minimal, source-available operating layer (free for personal, non-commercial, non-military use) that connects local AI with existing mesh and offline networks — empowering any device, from a dedicated radio relay to a laptop or an old phone, with offline-first communication, local intelligence, and self-healing.
 
 ## Vision
 
@@ -74,7 +74,7 @@ The node serves it locally; the user opens it in any browser on the laptop or ph
 
 End-to-end-encrypted, signed payloads with reliable delivery first and latency secondary. Store-and-forward across heterogeneous transports; messages stored encrypted on the device.
 
-The OS imposes no usage policies of its own: no rate limits, no forced expiry, no governance rules. Payload size and timing are shaped by what the underlying transports can physically carry, not by invented restrictions. Local pruning is capacity-based, not policy-based.
+The OS imposes no usage policies at runtime: no rate limits, no forced expiry, no governance rules. Payload size and timing are shaped by what the underlying transports can physically carry, not by invented restrictions. Local pruning is capacity-based, not policy-based.
 
 The same fabric carries every kind of traffic the layers need: human messages, agent operations, knowledge-base synchronization, software updates, and validated patches.
 
@@ -166,7 +166,9 @@ Category 5 is not shown as a column: it is an overlay role (see below) that adds
 - Code that can be avoided should be avoided.
 - Existing networks, tools, and projects for secure offline communication are ALL assets, not competitors.
 - Adopt, don't reinvent: wherever a proven project exists, integrate it; write custom code only where nothing proven fits.
-- The OS imposes no usage policies of its own — limits come from hardware and physics, never from invented governance.
+- The software imposes no usage policies at runtime — no telemetry, no content policy, no policing of how a node is used. Limits come from hardware and physics, never from invented governance. The license terms (`LICENSE.md`) are a separate matter: they say who may use the software and for what, not what a running node allows.
 - The agent is both servant and guardian of the node.
 - Identity is automatic and cryptographic by default.
 - Autonomy is progressive and always human-supervised at the final step.
+
+License (draft, pending legal review): [LICENSE.md](LICENSE.md). Third-party licensing and the dependency boundary (including how Reticulum is used as a separate, unmodified service): [LICENSING.md](LICENSING.md). Third-party notices and license texts: [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md).
