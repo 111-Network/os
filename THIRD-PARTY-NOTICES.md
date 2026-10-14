@@ -32,7 +32,7 @@ this list is in `LICENSING.md`.
 Inputs at generation time (SHA-256):
 
 ```
-c2724281b2643dbba247ee54bbc0739a6bd7111675bea35b3e2bdaa5b5c830da  bootstrap/Cargo.lock
+dd22efdd5cd346caf22d784fcce48d3840dc157439e3ee1c040695116c2c1702  bootstrap/Cargo.lock
 9f779bdf23242c905a0106412a0cc6aa7b1b90ad985547d18674f6639e0b1d47  intelligence/Cargo.lock
 08c2709c1e59a5a9274d4ac88ff32ccfaa019b3e0042ea50c7f609e35d4fb225  interface/ui/pnpm-lock.yaml
 cf48326b784772c17f4528dc6739cf2678503e094f1b3aff09e4cbf91530eaaa  bootstrap/scripts/meshmud-build.sh#pins
@@ -52,7 +52,7 @@ The output is sorted and contains no timestamps, so identical inputs give identi
 
 | Group | Components |
 |---|---|
-| Rust crates | 187 |
+| Rust crates | 223 |
 | JavaScript packages | 7 |
 | Go modules (meshmud closure, CI-built binary) | 14 + meshmud + the Go standard library |
 | Python packages (presence venv) | 16 |
@@ -63,7 +63,7 @@ The output is sorted and contains no timestamps, so identical inputs give identi
 
 ## Rust crates
 
-187 crates, grouped by the license expression in their `Cargo.toml`. The last field says which binary links the crate:
+223 crates, grouped by the license expression in their `Cargo.toml`. The last field says which binary links the crate:
 `111`, `111-agent` or `both`.
 
 
@@ -75,13 +75,20 @@ The output is sorted and contains no timestamps, so identical inputs give identi
 
 - `adler2` 2.0.1 — https://github.com/oyvindln/adler2 — Copyright (C) Jonas Schievink — 111
 
-### Apache-2.0 (1)
+### Apache-2.0 (4)
 
+- `ciborium` 0.2.2 — https://github.com/enarx/ciborium — authors: Nathaniel McCallum — 111
+- `ciborium-io` 0.2.2 — https://github.com/enarx/ciborium — authors: Nathaniel McCallum — 111
+- `ciborium-ll` 0.2.2 — https://github.com/enarx/ciborium — authors: Nathaniel McCallum — 111
 - `sync_wrapper` 1.0.2 — https://github.com/Actyx/sync_wrapper — authors: Actyx AG — both
 
 ### Apache-2.0 AND ISC (1)
 
 - `ring` 0.17.14 — https://github.com/briansmith/ring — Copyright 2015-2025 Brian Smith — 111
+
+### Apache-2.0 OR Apache-2.0 WITH LLVM-exception OR CC0-1.0 (1)
+
+- `blake3` 1.8.7 — https://github.com/BLAKE3-team/BLAKE3 — Copyright 2019 Jack O'Connor and Samuel Neves — 111
 
 ### Apache-2.0 OR Apache-2.0 WITH LLVM-exception OR MIT (4)
 
@@ -90,21 +97,36 @@ The output is sorted and contains no timestamps, so identical inputs give identi
 - `rustix` 0.38.44 — https://github.com/bytecodealliance/rustix — Copyrights in the `rustix` project are retained by their contributors — 111
 - `rustix` 1.1.5 — https://github.com/bytecodealliance/rustix — Copyrights in the `rustix` project are retained by their contributors — 111
 
+### Apache-2.0 OR BSD-2-Clause OR MIT (2)
+
+- `zerocopy` 0.8.63 — https://github.com/google/zerocopy — Copyright 2023 The Fuchsia Authors; Copyright 2019 The Fuchsia Authors — 111
+- `zerocopy-derive` 0.8.63 — https://github.com/google/zerocopy — Copyright 2023 The Fuchsia Authors; Copyright 2019 The Fuchsia Authors — 111
+
 ### Apache-2.0 OR BSL-1.0 (1)
 
 - `ryu` 1.0.23 — https://github.com/dtolnay/ryu — authors: David Tolnay — both
+
+### Apache-2.0 OR CC0-1.0 OR MIT-0 (1)
+
+- `constant_time_eq` 0.4.2 — https://github.com/cesarb/constant_time_eq — authors: Cesar Eduardo Barros — 111
+
+### Apache-2.0 OR GPL-2.0-only (1)
+
+- `self_cell` 1.3.0 — https://github.com/Voultapher/self_cell — Copyright (C) 1989, 1991 Free Software Foundation, Inc., — 111
 
 ### Apache-2.0 OR ISC OR MIT (1)
 
 - `rustls` 0.23.45 — https://github.com/rustls/rustls — Copyright (c) 2016, Joseph Birr-Pixton; Copyright (c) 2016 Joseph Birr-Pixton — 111
 
-### Apache-2.0 OR MIT (117)
+### Apache-2.0 OR MIT (139)
 
 - `aead` 0.6.1 — https://github.com/RustCrypto/traits — Copyright (c) 2019-2026 The RustCrypto Project Developers; Copyright (c) 2019 MobileCoin, LLC — 111
 - `anyhow` 1.0.104 — https://github.com/dtolnay/anyhow — authors: David Tolnay — both
 - `arrayvec` 0.7.8 — https://github.com/bluss/arrayvec — Copyright (c) Ulrik Sverdrup "bluss" 2015-2023 — 111
 - `atomic-waker` 1.1.2 — https://github.com/smol-rs/atomic-waker — Copyright (c) 2016 Alex Crichton; Copyright (c) 2017 The Tokio Authors — both
+- `bao-tree` 0.16.1 — https://github.com/n0-computer/bao-tree — Copyright [2025] [N0, INC]; Copyright 2025 N0, INC — 111
 - `base64` 0.23.1 — https://github.com/marshallpierce/rust-base64 — Copyright (c) 2025 Alice Maz, Marshall Pierce — both
+- `binary-merge` 0.1.2 — https://github.com/rklaehn/binary-merge — authors: Rüdiger Klaehn — 111
 - `bitflags` 2.13.2 — https://github.com/bitflags/bitflags — Copyright (c) 2014 The Rust Project Developers — 111
 - `blake2` 0.11.0 — https://github.com/RustCrypto/hashes — Copyright (c) 2017-2026 The RustCrypto Project Developers; Copyright (c) 2017 Artyom Pavlov; Copyright (c) 2015-2016 The blake2-rfc Developers, Cesar Barros — 111
 - `block-buffer` 0.10.4 — https://github.com/RustCrypto/utils — Copyright (c) 2018-2019 The RustCrypto Project Developers — 111
@@ -132,6 +154,8 @@ The output is sorted and contains no timestamps, so identical inputs give identi
 - `either` 1.19.0 — https://github.com/rayon-rs/either — Copyright (c) 2015 — 111
 - `equivalent` 1.0.2 — https://github.com/indexmap-rs/equivalent — Copyright (c) 2016--2023 — 111
 - `errno` 0.3.14 — https://github.com/lambda-fairy/rust-errno — Copyright (c) 2014 Chris Wong — both
+- `fallible-iterator` 0.3.0 — https://github.com/sfackler/rust-fallible-iterator — Copyright (c) 2015 The rust-openssl-verify Developers — 111
+- `fallible-streaming-iterator` 0.1.9 — https://github.com/sfackler/fallible-streaming-iterator — Copyright (c) 2016 The fallible-streaming-iterator Developers — 111
 - `fastrand` 2.5.0 — https://github.com/smol-rs/fastrand — authors: Stjepan Glavina — 111
 - `filetime` 0.2.29 — https://github.com/alexcrichton/filetime — Copyright (c) 2014 Alex Crichton — 111
 - `flate2` 1.1.10 — https://github.com/rust-lang/flate2-rs — Copyright (c) 2014-2026 Alex Crichton — 111
@@ -142,13 +166,18 @@ The output is sorted and contains no timestamps, so identical inputs give identi
 - `futures-core` 0.3.34 — https://github.com/rust-lang/futures-rs — Copyright (c) 2016 Alex Crichton; Copyright (c) 2017 The Tokio Authors — both
 - `futures-executor` 0.3.34 — https://github.com/rust-lang/futures-rs — Copyright (c) 2016 Alex Crichton; Copyright (c) 2017 The Tokio Authors — 111
 - `futures-io` 0.3.34 — https://github.com/rust-lang/futures-rs — Copyright (c) 2016 Alex Crichton; Copyright (c) 2017 The Tokio Authors — 111
+- `futures-lite` 2.6.1 — https://github.com/smol-rs/futures-lite — Copyright (c) 2016 Alex Crichton; Copyright (c) 2017 The Tokio Authors — 111
 - `futures-macro` 0.3.34 — https://github.com/rust-lang/futures-rs — Copyright (c) 2016 Alex Crichton; Copyright (c) 2017 The Tokio Authors — 111
 - `futures-sink` 0.3.34 — https://github.com/rust-lang/futures-rs — Copyright (c) 2016 Alex Crichton; Copyright (c) 2017 The Tokio Authors — both
 - `futures-task` 0.3.34 — https://github.com/rust-lang/futures-rs — Copyright (c) 2016 Alex Crichton; Copyright (c) 2017 The Tokio Authors — both
 - `futures-util` 0.3.34 — https://github.com/rust-lang/futures-rs — Copyright (c) 2016 Alex Crichton; Copyright (c) 2017 The Tokio Authors — both
+- `genawaiter-macro` 0.99.1 — https://github.com/whatisaphone/genawaiter — authors: Devin R — 111
+- `genawaiter-proc-macro` 0.99.1 — https://github.com/whatisaphone/genawaiter — authors: Devin R — 111
 - `getrandom` 0.2.17 — https://github.com/rust-random/getrandom — Copyright (c) 2018-2024 The rust-random Project Developers; Copyright (c) 2014 The Rust Project Developers — 111
 - `getrandom` 0.4.3 — https://github.com/rust-random/getrandom — Copyright (c) 2018-2026 The rust-random Project Developers; Copyright (c) 2014 The Rust Project Developers — 111
+- `half` 2.7.1 — https://github.com/VoidStarKat/half-rs — authors: Kathryn Long — 111
 - `hashbrown` 0.17.1 — https://github.com/rust-lang/hashbrown — Copyright (c) 2016 Amanieu d'Antras — 111
+- `hashlink` 0.12.2 — https://github.com/djc/hashlink — no copyright line in package; see repository — 111
 - `hmac` 0.13.0 — https://github.com/RustCrypto/MACs — Copyright (c) 2017 Artyom Pavlov — 111
 - `http` 1.5.0 — https://github.com/hyperium/http — Copyright 2017 http-rs authors; Copyright (c) 2017 http-rs authors — both
 - `httparse` 1.10.1 — https://github.com/seanmonstar/httparse — Copyright (c) 2015-2025 Sean McArthur — both
@@ -156,6 +185,8 @@ The output is sorted and contains no timestamps, so identical inputs give identi
 - `hybrid-array` 0.4.15 — https://github.com/RustCrypto/hybrid-array — Copyright (c) 2022-2026 The RustCrypto Project Developers — 111
 - `indexmap` 2.14.2 — https://github.com/indexmap-rs/indexmap — Copyright (c) 2016--2017 — 111
 - `inout` 0.2.2 — https://github.com/RustCrypto/utils — Copyright (c) 2022-2025 The RustCrypto Project Developers; Copyright (c) 2022 Artyom Pavlov — 111
+- `inplace-vec-builder` 0.1.1 — https://github.com/rklaehn/inplace-vec-builder — authors: Rüdiger Klaehn — 111
+- `iroh-io` 0.6.2 — https://github.com/n0-computer/iroh — Copyright (c) 2023 — 111
 - `itoa` 1.0.18 — https://github.com/dtolnay/itoa — authors: David Tolnay — both
 - `libc` 0.2.190 — https://github.com/rust-lang/libc — Copyright (c) The Rust Project Developers — both
 - `lock_api` 0.4.14 — https://github.com/Amanieu/parking_lot — Copyright (c) 2016 The Rust Project Developers — 111
@@ -165,18 +196,27 @@ The output is sorted and contains no timestamps, so identical inputs give identi
 - `num-conv` 0.2.2 — https://github.com/jhpratt/num-conv — Copyright (c) Jacob Pratt — both
 - `nusb` 0.1.14 — https://github.com/kevinmehall/nusb — authors: Kevin Mehall — 111
 - `once_cell` 1.21.4 — https://github.com/matklad/once_cell — authors: Aleksey Kladov — both
+- `parking` 2.2.1 — https://github.com/smol-rs/parking — Copyright 2014-2020 The Rust Project Developers — 111
 - `paste` 1.0.15 — https://github.com/dtolnay/paste — authors: David Tolnay — 111
 - `pbkdf2` 0.13.0 — https://github.com/RustCrypto/password-hashes — Copyright (c) 2017 Artyom Pavlov; Copyright (c) 2018-2023 The RustCrypto Project Developers — 111
 - `percent-encoding` 2.3.2 — https://github.com/servo/rust-url/ — Copyright (c) 2013-2025 The rust-url developers — both
+- `pin-project` 1.1.13 — https://github.com/taiki-e/pin-project — no copyright line in package; see repository — 111
+- `pin-project-internal` 1.1.13 — https://github.com/taiki-e/pin-project — no copyright line in package; see repository — 111
 - `pin-project-lite` 0.2.17 — https://github.com/taiki-e/pin-project-lite — no copyright line in package; see repository — both
 - `poly1305` 0.9.1 — https://github.com/RustCrypto/universal-hashes — Copyright (c) 2015-2026 The RustCrypto Project Developers — 111
 - `powerfmt` 0.2.1 — https://github.com/jhpratt/powerfmt — Copyright 2023 Jacob Pratt et al; Copyright (c) 2023 Jacob Pratt et al — both
+- `proc-macro-error` 0.4.12 — https://gitlab.com/CreepySkeleton/proc-macro-error — Copyright 2019 CreepySkeleton; Copyright (c) 2019 CreepySkeleton — 111
+- `proc-macro-error-attr` 0.4.12 — https://gitlab.com/CreepySkeleton/proc-macro-error — Copyright 2019-2020 CreepySkeleton; Copyright (c) 2019-2020 CreepySkeleton — 111
+- `proc-macro-hack` 0.5.20+deprecated — https://github.com/dtolnay/proc-macro-hack — Copyright (c) 2018 David Tolnay — 111
 - `proc-macro2` 1.0.107 — https://github.com/dtolnay/proc-macro2 — authors: David Tolnay, Alex Crichton — both
 - `qrcode` 0.14.1 — https://github.com/kennytm/qrcode-rust — Copyright (c) 2016 kennytm — 111
 - `quote` 1.0.47 — https://github.com/dtolnay/quote — authors: David Tolnay — both
 - `rand_core` 0.6.4 — https://github.com/rust-random/rand — Copyrights in the Rand project are retained by their contributors. No; Copyright 2018 Developers of the Rand project; Copyright (c) 2014 The Rust Project Developers — 111
+- `range-collections` 0.4.6 — https://github.com/rklaehn/range-collections — Copyright (c) 2019 Rüdiger Klaehn — 111
 - `rayon` 1.12.0 — https://github.com/rayon-rs/rayon — Copyright (c) 2010 The Rust Project Developers — 111
 - `rayon-core` 1.13.0 — https://github.com/rayon-rs/rayon — Copyright (c) 2010 The Rust Project Developers — 111
+- `ref-cast` 1.0.27 — https://github.com/dtolnay/ref-cast — authors: David Tolnay — 111
+- `ref-cast-impl` 1.0.27 — https://github.com/dtolnay/ref-cast — authors: David Tolnay — 111
 - `rustls-pki-types` 1.15.1 — https://github.com/rustls/pki-types — Copyright 2023 Dirkjan Ochtman; Copyright (c) 2023 Dirkjan Ochtman — 111
 - `scopeguard` 1.2.0 — https://github.com/bluss/scopeguard — Copyright (c) 2016-2019 Ulrik Sverdrup "bluss" and scopeguard developers — 111
 - `sd-notify` 0.4.5 — https://github.com/lnicola/sd-notify — Copyright (c) 2019 Laurențiu Nicola — 111
@@ -193,8 +233,10 @@ The output is sorted and contains no timestamps, so identical inputs give identi
 - `signature` 2.2.0 — https://github.com/RustCrypto/traits/tree/master/signature — Copyright (c) 2018-2023 RustCrypto Developers — 111
 - `smallvec` 1.16.3 — https://github.com/servo/rust-smallvec — Copyright (c) 2018 The Servo Project Developers — both
 - `socket2` 0.6.5 — https://github.com/rust-lang/socket2 — Copyright (c) 2014 Alex Crichton — both
+- `syn` 1.0.109 — https://github.com/dtolnay/syn — authors: David Tolnay — 111
 - `syn` 2.0.119 — https://github.com/dtolnay/syn — authors: David Tolnay — 111
 - `syn` 3.0.8 — https://github.com/dtolnay/syn — authors: David Tolnay — both
+- `syn-mid` 0.5.4 — https://github.com/taiki-e/syn-mid — no copyright line in package; see repository — 111
 - `tar` 0.4.46 — https://github.com/composefs/tar-rs — Copyright (c) The tar-rs Project Contributors — 111
 - `tempfile` 3.27.0 — https://github.com/Stebalien/tempfile — Copyright (c) 2015 Steven Allen — 111
 - `thiserror` 1.0.69 — https://github.com/dtolnay/thiserror — authors: David Tolnay — 111
@@ -249,17 +291,19 @@ The output is sorted and contains no timestamps, so identical inputs give identi
 - `rustls-webpki` 0.103.15 — https://github.com/rustls/webpki — Copyright 2015 Brian Smith — 111
 - `untrusted` 0.9.0 — https://github.com/briansmith/untrusted — authors: Brian Smith — 111
 
-### MIT (42)
+### MIT (47)
 
 - `axum` 0.8.9 — https://github.com/tokio-rs/axum — Copyright (c) 2019 axum Contributors — both
 - `axum-core` 0.5.6 — https://github.com/tokio-rs/axum — Copyright (c) 2019–2025 axum Contributors — both
 - `bech32` 0.12.0 — https://github.com/rust-bitcoin/rust-bech32 — Copyright (c) 2017 Clark Moody — 111
 - `bytes` 1.12.1 — https://github.com/tokio-rs/bytes — Copyright (c) 2018 Carl Lerche — both
+- `genawaiter` 0.99.1 — https://github.com/whatisaphone/genawaiter — authors: John Simon — 111
 - `generic-array` 0.14.7 — https://github.com/fizyk20/generic-array.git — Copyright (c) 2015 Bartłomiej Kamiński — 111
 - `http-body` 1.1.0 — https://github.com/hyperium/http-body — Copyright (c) 2019-2026 Sean McArthur & Hyper Contributors — both
 - `http-body-util` 0.1.5 — https://github.com/hyperium/http-body — Copyright (c) 2019-2026 Sean McArthur & Hyper Contributors — both
 - `hyper` 1.12.0 — https://github.com/hyperium/hyper — Copyright (c) 2014-2026 Sean McArthur — both
 - `hyper-util` 0.1.21 — https://github.com/hyperium/hyper-util — Copyright (c) 2023-2025 Sean McArthur — both
+- `libsqlite3-sys` 0.38.2 — https://github.com/rusqlite/rusqlite — Copyright (c) 2014 The rusqlite developers — 111
 - `mime_guess` 2.0.5 — https://github.com/abonander/mime_guess — Copyright (c) 2015 Austin Bonander — 111
 - `minisign-verify` 0.2.5 — https://github.com/jedisct1/rust-minisign-verify — Copyright (c) 2019-2025 Frank Denis; Copyright (c) 2006-2009 Graydon Hoare; Copyright (c) 2009-2013 Mozilla Foundation — 111
 - `mio` 1.2.4 — https://github.com/tokio-rs/mio — Copyright (c) 2014 Carl Lerche and other MIO contributors — both
@@ -270,8 +314,11 @@ The output is sorted and contains no timestamps, so identical inputs give identi
 - `netlink-sys` 0.8.8 — https://github.com/rust-netlink/netlink-sys — authors: Corentin Henry — 111
 - `nix` 0.27.1 — https://github.com/nix-rust/nix — Copyright (c) 2015 Carl Lerche + nix-rust Authors — 111
 - `nix` 0.31.3 — https://github.com/nix-rust/nix — Copyright (c) 2015 Carl Lerche + nix-rust Authors — 111
+- `openssl-sys` 0.9.117 — https://github.com/rust-openssl/rust-openssl — Copyright (c) 2014 Alex Crichton — 111
 - `os_info` 3.15.0 — https://github.com/stanislav-tkach/os_info — Copyright (c) 2017 Stanislav Tkach — 111
+- `positioned-io` 0.3.5 — https://github.com/vasi/positioned-io — Copyright (c) 2016 Dave Vasilevsky — 111
 - `rtnetlink` 0.14.1 — https://github.com/rust-netlink/rtnetlink — authors: Corentin Henry — 111
+- `rusqlite` 0.40.2 — https://github.com/rusqlite/rusqlite — Copyright (c) 2014 The rusqlite developers — 111
 - `rust-embed` 8.13.0 — https://pyrossh.dev/repos/rust-embed — Copyright (c) 2018 pyros2097 — 111
 - `rust-embed-impl` 8.13.0 — https://pyrossh.dev/repos/rust-embed — Copyright (c) 2018 pyros2097 — 111
 - `rust-embed-utils` 8.13.0 — https://pyrossh.dev/repos/rust-embed — Copyright (c) 2018 pyros2097 — 111
@@ -305,6 +352,10 @@ The output is sorted and contains no timestamps, so identical inputs give identi
 - `same-file` 1.0.6 — https://github.com/BurntSushi/same-file — Copyright (c) 2017 Andrew Gallant — 111
 - `walkdir` 2.5.0 — https://github.com/BurntSushi/walkdir — Copyright (c) 2015 Andrew Gallant — 111
 
+### Zlib (1)
+
+- `foldhash` 0.2.0 — https://github.com/orlp/foldhash — Copyright (c) 2024 Orson Peters — 111
+
 Notes:
 
 - `ring` 0.17.14 (Apache-2.0 AND ISC): its own code is ISC (Copyright 2015-2025 Brian Smith). Code taken from BoringSSL is under Apache-2.0 or ISC as stated at the top of each file.
@@ -312,7 +363,9 @@ Notes:
 - `matchit` 0.8.4 (MIT AND BSD-3-Clause): the BSD-3-Clause part is code from `julienschmidt/httprouter` (its `LICENSE.httprouter`).
 - `unicode-ident` 1.0.27 ((MIT OR Apache-2.0) AND Unicode-3.0): the Unicode-3.0 part covers data files from Unicode, Inc.
 - `webpki-roots` 1.0.9 (CDLA-Permissive-2.0): Mozilla's CA root certificates, embedded as data in the `111` binary for TLS. The agreement text is reproduced below, as its section 2.1 requires.
-- Options named in expressions but not elected, so not reproduced: 0BSD, BSL-1.0, Zlib.
+- `libsqlite3-sys` 0.38.2 (MIT): compiles native sources bundled in the crate. With the `bundled-sqlcipher` features that is SQLCipher (Copyright (c) 2008-2020 Zetetic LLC; BSD-3-Clause style license in the crate's `sqlcipher/LICENSE`), built on SQLite (public domain). The BSD-3-Clause text below covers the SQLCipher notice.
+- `openssl-src` 300.6.1+3.6.3 (MIT OR Apache-2.0; a build-dependency, so not in the crate list above): bundles the OpenSSL 3.6.3 sources and compiles them into the static `111` binary as SQLCipher's crypto provider (`bundled-sqlcipher-vendored-openssl`); no system libcrypto is linked. OpenSSL 3.6.3 is Apache-2.0 (Copyright The OpenSSL Project Authors; see https://github.com/openssl/openssl/blob/master/LICENSE.txt); the Apache License 2.0 text below covers it.
+- Options named in expressions but not elected, so not reproduced: 0BSD, BSL-1.0, GPL-2.0-only, MIT-0, Zlib.
 
 ## JavaScript packages (dashboard bundle)
 

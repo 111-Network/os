@@ -639,8 +639,14 @@ def render():
         w(f"- `libsqlite3-sys` {ver_of['libsqlite3-sys']} (MIT): compiles native sources bundled in the crate. With the `bundled-sqlcipher` features that is SQLCipher"
           + (f" ({'; '.join(sc_cp[:2])}; BSD-3-Clause style license in the crate's `sqlcipher/LICENSE`)" if sc_cp else " (BSD-3-Clause style license in the crate's `sqlcipher/LICENSE`)")
           + ", built on SQLite (public domain). The BSD-3-Clause text below covers the SQLCipher notice.")
-    if "openssl-src" in ver_of:
-        w(f"- `openssl-src` {ver_of['openssl-src']} (MIT OR Apache-2.0): the crate bundles the OpenSSL 3.x source and builds it statically (`vendored-openssl`); OpenSSL 3.x is Apache-2.0, text below.")
+    # openssl-src is a build-dependency (absent from `cargo tree -e normal`), yet the OpenSSL it
+    # compiles is linked into the static `111` binary as SQLCipher's crypto provider, so it is found
+    # in the lockfile instead of the normal-dependency closure.
+    ossl = re.search(r'name = "openssl-src"\nversion = "([^"]+)"', read(os.path.join(OS_DIR, "bootstrap", "Cargo.lock")))
+    if ossl:
+        ossl_crate = ossl.group(1)
+        ossl_upstream = ossl_crate.split("+", 1)[1] if "+" in ossl_crate else ossl_crate
+        w(f"- `openssl-src` {ossl_crate} (MIT OR Apache-2.0; a build-dependency, so not in the crate list above): bundles the OpenSSL {ossl_upstream} sources and compiles them into the static `111` binary as SQLCipher's crypto provider (`bundled-sqlcipher-vendored-openssl`); no system libcrypto is linked. OpenSSL {ossl_upstream} is Apache-2.0 (Copyright The OpenSSL Project Authors; see https://github.com/openssl/openssl/blob/master/LICENSE.txt); the Apache License 2.0 text below covers it.")
     w("- Options named in expressions but not elected, so not reproduced: " + ", ".join(not_elected) + ".")
     w("")
 
