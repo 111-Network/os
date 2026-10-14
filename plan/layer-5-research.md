@@ -76,3 +76,9 @@ All 7 forks decided (D19, 2026-10-14). Spec draft: `os/messaging/README.md`. Nex
   F2). Bounce run `wf_62ea271c-e73` (script `messaging/.workflow-wave-1-bounce.js`): fresh agents P1 M1 U1 (opus/sonnet)
   + F1 (opus xhigh) on disjoint files; lead re-checks + commits per bounce. Wave 2 script drafted:
   `messaging/.workflow-wave-2.js` (B1, U2, F2 — F2 carries the contract additions).
+- **Wave 1 bounces landed** (F1 `db6159d` · P1 `0c6fb0d` · M1 `6697379` · U1 `cac21e8`; board `38a963b`); bootstrap
+  `check.sh` ALL GREEN end to end (every cargo stage, shellcheck, notices, systemd, UI 945 tests + D21 budget).
+  **Wave 2 = run `wf_97dba36d-e98`** (script `messaging/.workflow-wave-2.js`): B1 gates (opus) · U2 UI (sonnet) · F2 daemon
+  wiring (opus xhigh, last in the list). Resume: `Workflow({scriptPath, resumeFromRunId: "wf_97dba36d-e98"})`; delete
+  finished calls before resuming (hash-chain cache). Then Wave 3: V1 netns smoke, V2 CDP panel lint, V3 gates + D22/INDEX,
+  V4 fable integrated review.
