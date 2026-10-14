@@ -33,6 +33,9 @@ const NOUN: Record<string, string> = {
   kb: "knowledge base",
   gateway: "internet gateway",
   codeagent: "code agent",
+  // Layer 5: the `fabric` row only goes to ERROR for a store that failed to open or is full.
+  fabric: "message store",
+  meshtastic: "Meshtastic board",
 };
 
 const noun = (s: Pick<ServiceRecord, "id" | "plain_name">): string => NOUN[s.id] ?? s.plain_name;

@@ -13,8 +13,8 @@ export const NEEDS_YOU_ID = "needs-you";
 
 export interface NeedItem {
   key: string;
-  kind: "proposal" | "service" | "device";
-  /** Title of the proposal, plain name of the service, alias or name of the device. */
+  kind: "proposal" | "service" | "device" | "request";
+  /** Title of the proposal, plain name of the service, alias or name of the device; "N message requests" for requests. */
   label: string;
   detail: string;
   /** Route path (no `#`). Proposals open the Agent view, where they render as cards. */
@@ -56,17 +56,37 @@ function checklistFromService(id: ChecklistRow["id"], title: string, s: ServiceR
   }
 }
 
+/** The Needs-you row for pending message requests (Layer 5, section 7.2): people not yet contacts wrote to this node. */
+export function requestsItem(count: number): NeedItem | null {
+  if (!Number.isFinite(count) || count < 1) return null;
+  const n = Math.floor(count);
+  return {
+    key: "requests",
+    kind: "request",
+    label: n === 1 ? "1 message request" : `${n} message requests`,
+    detail: "Someone you have not added wrote to you. Nothing is sent back until you accept.",
+    href: "/messages",
+  };
+}
+
+/**
+ * `requests` is the number of open message requests that still need the person (`Attention.openRequests`: the ones ignored on
+ * this device are not counted). It is a count, never what the senders wrote.
+ */
 export function needsYou(
   status: Status | null,
   services: readonly ServiceRecord[] | null,
   devices: readonly DeviceRecord[] | null,
   proposals: readonly Proposal[] | null,
+  requests = 0,
 ): NeedsYou {
   const items: NeedItem[] = [];
   for (const p of proposals ?? []) {
     if (p.decision !== null) continue;
     items.push({ key: `proposal:${p.id}`, kind: "proposal", label: p.title, detail: `${p.kind} proposal from the agent`, href: "/" });
   }
+  const asked = requestsItem(requests);
+  if (asked) items.push(asked);
   for (const s of services ?? []) {
     if (s.state === "error") items.push({ key: `service:${s.id}`, kind: "service", label: s.plain_name, detail: s.reason, href: `/services/${s.id}` });
   }

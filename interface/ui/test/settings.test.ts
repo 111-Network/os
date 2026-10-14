@@ -250,9 +250,22 @@ describe("layerStatusRows matrix", () => {
     expect(rows.map((r) => r.label)).toEqual(["Listening on", "Loopback session", "Paired session", "LAN sharing (configured)"]);
     expect(rows.slice(1).map((r) => r.value)).toEqual(["no", "yes", "off"]);
   });
-  it("L5 and L8 say when they arrive, even without status", () => {
-    expect(layerStatusRows(5, null)).toEqual([{ label: "Status", value: "arrives with Layer 5" }]);
+  it("L8 says when it arrives, even without status", () => {
     expect(layerStatusRows(8, status())).toEqual([{ label: "Status", value: "arrives with Layer 8" }]);
+  });
+  it("L5 reads the messaging service and the fabric snapshot, and says loading until they arrive", () => {
+    expect(layerStatusRows(5, null)).toEqual([{ label: "Messaging service", value: "loading" }]);
+    expect(layerStatusRows(5, null, { services: [] })).toEqual([{ label: "Messaging service", value: "not reported by this node" }]);
+    const fabric = fx.messaging.fabric;
+    const svc = services().find((s) => s.id === "fabric")!;
+    const rows = layerStatusRows(5, null, { services: [svc], fabric });
+    expect(rows.map((r) => r.label)).toEqual(["Messaging service", "Reason", "Home hub", "Store"]);
+    expect(rows[0]!.value).toBe(svc.state);
+    expect(rows[2]!.value).toBe("Home hub reachable");
+    expect(rows[3]!.value).toMatch(/^\d+% of /);
+    const full = layerStatusRows(5, null, { fabric: { ...fabric, store: { ...fabric.store, store_full: true } } });
+    expect(full.find((r) => r.label === "Store")!.value).toMatch(/, full$/);
+    expect(layerStatusRows(5, null, { fabric: { ...fabric, store: { ...fabric.store, open: false } } }).find((r) => r.label === "Store")!.value).toBe("not open");
   });
   it("L6 shows transport state and the component when present", () => {
     expect(layerStatusRows(6, status())).toEqual([

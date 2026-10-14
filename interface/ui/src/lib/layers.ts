@@ -47,8 +47,8 @@ export const LAYERS: readonly LayerInfo[] = [
   {
     n: 5,
     slug: "l5",
-    title: "Messaging",
-    description: "End-to-end-encrypted, signed messages with store-and-forward delivery across whichever transports are available.",
+    title: "Messaging & data",
+    description: "End-to-end-encrypted, signed messages with store-and-forward delivery across whichever transports are available, and the encrypted store they are kept in.",
   },
   {
     n: 6,

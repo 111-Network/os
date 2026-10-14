@@ -36,7 +36,7 @@ import { Feedback, Row, FEEDBACK } from "./row";
 
 // ---------------------------------------------------------------- shared hooks
 
-interface ActionState {
+export interface ActionState {
   pending: boolean;
   error: string | null;
   loopback: boolean;
@@ -51,7 +51,7 @@ const IDLE: ActionState = { pending: false, error: null, loopback: false, locked
  * /pair; a 403 loopback_only is reported as `loopback` so the control can show the disabled text,
  * and a 409 settings_locked as `locked` for the pinned note.
  */
-function useAction(): [ActionState, <T>(fn: (a: Adapter) => Promise<T>) => Promise<T | undefined>] {
+export function useAction(): [ActionState, <T>(fn: (a: Adapter) => Promise<T>) => Promise<T | undefined>] {
   const [state, setState] = useState<ActionState>(IDLE);
   const alive = useRef(true);
   useEffect(() => {

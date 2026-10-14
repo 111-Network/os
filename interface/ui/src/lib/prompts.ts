@@ -4,9 +4,15 @@
 // produces every prepared prompt; only the context object differs. The agent identifies the thing
 // from facts + KB and decides the steps. Prompts are rendered editable and never auto-sent.
 
-import type { DeviceRecord, ServiceRecord, Status } from "./api/sse.gen";
+import type { DeviceRecord, HostedPanel, ServiceId, ServiceRecord, Status } from "./api/sse.gen";
 
-export type PromptGoal = "setup" | "fix" | "connect" | "check";
+/**
+ * The four generic goals, plus the four Layer 5 context goals (os/messaging/README.md section 16): `messaging.setup`
+ * (enroll with a hub, or let a node use this one), `messaging.fix` (a full store, a hub that cannot be reached),
+ * `meshtastic.setup` (identify the board, bind it) and `panel.explain` (what a hosted panel is and does). They are goal
+ * sentences only: the context block stays the one builder's, and no text a peer or a radio sent is ever in it.
+ */
+export type PromptGoal = "setup" | "fix" | "connect" | "check" | "messaging.setup" | "messaging.fix" | "meshtastic.setup" | "panel.explain";
 
 /**
  * What `buildPrompt` accepts. `context` emits the context block only, no goal sentence: for a prompt that
@@ -100,7 +106,38 @@ export function goalSentence(goal: PromptGoal, subject: PromptSubject): string {
       return `Look at ${name}: identify what each thing is, set up what is needed, and fix any errors so it works on the mesh.`;
     case "check":
       return `Check this node end to end and tell me what needs attention.`;
+    case "messaging.setup":
+      return "Set up messaging on this node and test it. If this node should use a home hub, walk me through enrolling with it (the hub's address and its one-time code); if this node is the hub, walk me through giving another node a code to enroll with. Then check that a test message goes through.";
+    case "messaging.fix":
+      return "Fix messaging on this node. Find out why it is not working (a home hub that cannot be reached, or a message store that is full), and tell me the steps to fix it. Do not delete anything that has not been delivered.";
+    case "meshtastic.setup":
+      return "Set up the Meshtastic board on this node: identify it, bind it to meshmud, and check that the nodes it hears show up under Nearby and that the Meshtastic panel opens. Opening a board's serial port can reset it, so ask me before any step that does.";
+    case "panel.explain":
+      return `Explain the ${name} panel on this node: what it is, what I can do in it, what it can send out over my radio or the network, which outside websites my browser may contact when it is open, and what I need to do to use it.`;
   }
+}
+
+/**
+ * The goal a service page's hand-off button uses: the generic `setup` / `fix` for most services, the Layer 5 context
+ * goals for the two services that have them (`fabric` is "Messaging"; a Meshtastic fix stays the generic one).
+ */
+export function serviceGoal(id: ServiceId, base: "setup" | "fix"): PromptGoal {
+  if (id === "fabric") return base === "setup" ? "messaging.setup" : "messaging.fix";
+  if (id === "meshtastic" && base === "setup") return "meshtastic.setup";
+  return base;
+}
+
+/** A hosted panel for the agent: all of it comes from the release manifest and the daemon, none of it from a peer. */
+function compactPanel(p: HostedPanel) {
+  return {
+    id: p.id,
+    port: p.port,
+    entry: p.entry,
+    needs_secure_context: p.needs_secure_context,
+    allow: p.allow,
+    optional_hosts: p.optional_hosts,
+    state: p.state,
+  };
 }
 
 function compactService(s: ServiceRecord) {
@@ -115,6 +152,8 @@ function compactService(s: ServiceRecord) {
     requires: s.requires,
     kb_entry: s.kb_entry,
     detail: s.detail,
+    // Only a service with a hosted panel carries the key: every other prompt stays byte-for-byte as it was.
+    ...(s.panel ? { panel: compactPanel(s.panel) } : {}),
   };
 }
 

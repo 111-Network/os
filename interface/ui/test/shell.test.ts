@@ -71,12 +71,14 @@ describe("resolveMode", () => {
 });
 
 describe("visibleNav", () => {
-  it("simple mode shows the core, no Logs, no layer pages", () => {
+  it("simple mode shows the core, no Logs, and only Messaging & data among the layer pages", () => {
     const n = visibleNav("simple", SERVICES);
     expect(n.core.map((i) => i.label)).toEqual(["Overview", "Agent", "Devices", "Nearby", "Messages"]);
     expect(n.core.map((i) => i.href)).toEqual(["/overview", "/", "/devices", "/nearby", "/messages"]);
     expect(n.advanced).toEqual([]);
-    expect(n.settings.map((i) => i.href)).toEqual(["/settings"]);
+    // Layer 5's page holds the first step of messaging (enroll with a hub): reachable without advanced mode.
+    expect(n.settings.map((i) => i.href)).toEqual(["/settings", "/settings/l5"]);
+    expect(n.settings[1]?.label).toBe("Messaging & data · L5");
   });
 
   it("advanced mode appends Logs and the ten layer pages", () => {
@@ -86,6 +88,12 @@ describe("visibleNav", () => {
     expect(n.settings[0]?.label).toBe("Essentials");
     expect(n.settings.slice(1).map((i) => i.href)).toEqual(LAYERS.map((l) => `/settings/${l.slug}`));
     expect(n.settings[1]?.label).toBe("Knowledge · L0");
+  });
+
+  it("the Layer 5 settings page is not an advanced view; the other layer pages are", () => {
+    expect(minModeFor("/settings/l5")).toBeUndefined();
+    expect(minModeFor("/settings/l3")).toBe("advanced");
+    expect(titleFor("/settings/l5")).toBe("Messaging & data · L5");
   });
 
   it("builds one service row per runnable record and groups the rest", () => {
@@ -225,7 +233,7 @@ describe("layers catalogue", () => {
       "Identity",
       "Intelligence",
       "Interface",
-      "Messaging",
+      "Messaging & data",
       "Transport",
       "Relay & presence",
       "Storage",

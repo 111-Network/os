@@ -66,3 +66,28 @@ describe("where the header badge leads", () => {
     expect(attentionHref({ ...none, openRequests: 0 })).toBe("/overview#needs-you");
   });
 });
+
+describe("Layer 5 pages (U2): Nearby and Settings -> Messaging & data", () => {
+  const paths = ROUTES.map((r) => r.path);
+
+  it("Nearby and the layer pages are routes; /settings/l5 is served by the layer route, after Licenses", () => {
+    expect(paths).toContain("/nearby");
+    expect(paths).toContain("/settings/:layer");
+    expect(paths.indexOf("/settings/licenses")).toBeLessThan(paths.indexOf("/settings/:layer"));
+  });
+
+  it("titles", () => {
+    expect(titleFor("/nearby")).toBe("Nearby");
+    expect(titleFor("/settings/l5")).toBe("Messaging & data · L5");
+    expect(titleFor("/services/fabric", [{ id: "fabric", plain_name: "Messaging" } as never])).toBe("Messaging");
+    expect(titleFor("/services/meshtastic", [{ id: "meshtastic", plain_name: "Meshtastic" } as never])).toBe("Meshtastic");
+  });
+
+  it("the Messaging & data page is reachable in simple mode and never marked 'advanced view'; the other layer pages are advanced", () => {
+    expect(minModeFor("/settings/l5")).toBeUndefined();
+    expect(visibleNav("simple", null).settings.map((i) => i.href)).toEqual(["/settings", "/settings/l5"]);
+    expect(visibleNav("advanced", null).settings.map((i) => i.href)).toContain("/settings/l5");
+    for (const n of [0, 1, 2, 3, 4, 6, 7, 8, 9]) expect(minModeFor(`/settings/l${n}`)).toBe("advanced");
+    expect(isActive("/settings/l5", "/settings/l5")).toBe(true);
+  });
+});

@@ -2,7 +2,8 @@
 // per-layer status rows and the "ask the agent" prompt. No React, so it runs in the node test
 // environment. The views map these plain values onto primitives.
 import { isApiError } from "../../lib/api/problem";
-import type { ServiceRecord, Settings, Status } from "../../lib/api/types";
+import { formatBytes, hubSummary, storePercent } from "../../lib/api/fabric";
+import type { FabricStatus, ServiceRecord, Settings, Status } from "../../lib/api/types";
 import { questionPrompt, type PromptGoal } from "../../lib/prompts";
 
 /** Text shown in place of a control that only works on the node itself (paired LAN session). */
@@ -189,6 +190,8 @@ export interface LayerCtx {
   services?: readonly ServiceRecord[] | null;
   /** Count of open proposals (for Repairs); null while loading. */
   openProposals?: number | null;
+  /** Links, hub, custody and store (for Messaging); null while loading. */
+  fabric?: FabricStatus | null;
 }
 
 const WAITING: FactRow[] = [{ label: "Status", value: "waiting for the node" }];
@@ -201,7 +204,20 @@ const shortHash = (h: string): string => (h.length > 16 ? `${h.slice(0, 16)}…`
 /** The status fields layer `n` owns today, from /status. Never throws; null status yields a waiting row. */
 export function layerStatusRows(n: number, status: Status | null | undefined, ctx: LayerCtx = {}): FactRow[] {
   switch (n) {
-    case 5:
+    case 5: {
+      const svc = ctx.services?.find((s) => s.id === "fabric");
+      const f = ctx.fabric;
+      if (!svc && !f) return [{ label: "Messaging service", value: ctx.services === null || ctx.services === undefined ? "loading" : "not reported by this node" }];
+      const rows: FactRow[] = [];
+      if (svc) rows.push({ label: "Messaging service", value: svc.state }, { label: "Reason", value: svc.reason || "none" });
+      if (f) {
+        rows.push(
+          { label: "Home hub", value: hubSummary(f.hub) },
+          { label: "Store", value: f.store.open ? `${storePercent(f.store)}% of ${formatBytes(f.store.watermark)}${f.store.store_full ? ", full" : ""}` : "not open" },
+        );
+      }
+      return rows;
+    }
     case 8:
       return [{ label: "Status", value: `arrives with Layer ${n}` }];
     case 9: {

@@ -4,6 +4,11 @@
 //   unset      what it is, what it needs, "Set up with the agent" (or nothing, when this device cannot run it)
 //   error      reason, log lines, Restart, "Fix with the agent" (and the Settings -> Restart node link when back-off is stuck)
 // The prompt text always comes from the one builder in lib/prompts.ts; nothing here is per-service.
+//
+// Layer 5 (os/messaging/README.md section 13, 14, 16) adds to it without changing that shape:
+//   a LIVE service with a hosted panel gets a Panel tab (panel.tsx) beside the details;
+//   `fabric` ("Messaging") shows its links, hub, custody and store (fabric.tsx) in place of the raw detail table;
+//   `meshtastic` adds the nodes heard and the honest copy about its panel (meshtastic.tsx).
 import { useEffect, useId, useState, type ReactNode } from "react";
 import { useParams } from "wouter";
 import { redirectIfUnauthenticated } from "../../app/AuthGate";
@@ -20,12 +25,16 @@ import { SectionHeader } from "../../components/section-header";
 import { SpecTable, type SpecRow } from "../../components/spec-table";
 import { StatusDot } from "../../components/status-dot";
 import { getAdapter } from "../../lib/api";
-import { useConnection, useDevices, useServices, useServicesRev, useStatus } from "../../lib/api/hooks";
-import type { DeviceRecord, ServiceRecord } from "../../lib/api/types";
+import { useConnection, useDevices, usePanels, useServices, useServicesRev, useStatus } from "../../lib/api/hooks";
+import { panelFor } from "../../lib/api/panels";
+import type { DeviceRecord, HostedPanel, ServiceRecord } from "../../lib/api/types";
 import { useMode, Adv } from "../../lib/mode";
 import { dotState } from "../../lib/nav";
 import { agentHrefFor, buildPrompt, MAX_LOG_LINES, stagePrompt } from "../../lib/prompts";
+import { FabricDetails } from "./fabric";
 import { fetchLogLines, LOG_POLL_MS, LogTail } from "./log";
+import { MeshtasticDetails } from "./meshtastic";
+import { PanelTab } from "./panel";
 import {
   acceptRestart,
   beginRestart,
@@ -47,6 +56,7 @@ import {
   type ServicePageState,
 } from "./model";
 import { RouteLink } from "./shared";
+import { Tabs } from "./tabs";
 
 const TEXT = "font-mono text-xs leading-relaxed text-muted-foreground";
 const LABEL = "font-mono text-[10px] uppercase tracking-widest text-muted-foreground";
@@ -216,6 +226,50 @@ function ControlPanel({ service, devices }: { service: ServiceRecord; devices: D
   );
 }
 
+/**
+ * What the page shows about a running service. The generic control panel (built from `detail`) for most; for `fabric` the
+ * messaging details with the raw registry table kept for Advanced; `meshtastic` adds its nodes-heard and honest copy.
+ */
+function ServiceDetails({ service, devices, panel }: { service: ServiceRecord; devices: DeviceRecord[]; panel: HostedPanel | null }) {
+  if (service.id === "fabric") {
+    return (
+      <>
+        <FabricDetails />
+        <Adv>
+          <ControlPanel service={service} devices={devices} />
+        </Adv>
+      </>
+    );
+  }
+  return (
+    <>
+      <ControlPanel service={service} devices={devices} />
+      {service.id === "meshtastic" ? <MeshtasticDetails panel={panel} /> : null}
+    </>
+  );
+}
+
+type TabId = "details" | "panel";
+const TAB_DEFS = [
+  { id: "details", label: "Details" },
+  { id: "panel", label: "Panel" },
+] as const;
+
+/** A LIVE service with a hosted panel: Details | Panel. The panel is mounted when its tab is first opened and kept after that. */
+function WithPanelTab({ service, panel, children }: { service: ServiceRecord; panel: HostedPanel; children: ReactNode }) {
+  const [tab, setTab] = useState<TabId>("details");
+  const [opened, setOpened] = useState(false);
+  const choose = (next: TabId) => {
+    setTab(next);
+    if (next === "panel") setOpened(true);
+  };
+  return (
+    <Tabs<TabId> label={`${service.plain_name} sections`} tabs={TAB_DEFS} value={tab} onChange={choose}>
+      {(id) => (id === "details" ? children : opened ? <PanelTab service={service} panel={panel} /> : null)}
+    </Tabs>
+  );
+}
+
 function Links({ page, skipRecipe = false }: { page: ServicePageState; skipRecipe?: boolean }) {
   const recipe = skipRecipe ? null : page.kbPath;
   if (!recipe && !page.embedUrl) return null;
@@ -255,6 +309,21 @@ function ServicePage({ service }: { service: ServiceRecord }) {
   const agentLive = services?.find((s) => s.id === "agent")?.state === "live";
   const page = servicePageState(service, agentLive);
   const devices = (allDevices ?? []).filter((d) => d.service_id === service.id);
+  const panels = usePanels();
+  // The record on the service is the registry's; the `panels` list is the fresher state of the same panel (SSE `panels`).
+  const panel: HostedPanel | null = page.panelTab ? (panelFor(panels, service.id) ?? service.panel ?? null) : null;
+
+  const live = (
+    <>
+      <ServiceDetails service={service} devices={devices} panel={panel} />
+      {page.restart ? (
+        <div>
+          <RestartControl service={service} />
+        </div>
+      ) : null}
+      <Links page={page} />
+    </>
+  );
 
   return (
     <div className="space-y-6">
@@ -272,15 +341,13 @@ function ServicePage({ service }: { service: ServiceRecord }) {
       </div>
 
       {page.body === "live" ? (
-        <>
-          <ControlPanel service={service} devices={devices} />
-          {page.restart ? (
-            <div>
-              <RestartControl service={service} />
-            </div>
-          ) : null}
-          <Links page={page} />
-        </>
+        panel ? (
+          <WithPanelTab service={service} panel={panel}>
+            <div className="flex flex-col gap-6">{live}</div>
+          </WithPanelTab>
+        ) : (
+          live
+        )
       ) : null}
 
       {page.body === "starting" ? (
@@ -288,7 +355,7 @@ function ServicePage({ service }: { service: ServiceRecord }) {
           <p className="font-mono text-xs leading-relaxed text-foreground">
             It was started a moment ago and is not answering its health check yet. This normally takes up to a couple of minutes.
           </p>
-          <ControlPanel service={service} devices={devices} />
+          <ServiceDetails service={service} devices={devices} panel={null} />
           <Links page={page} />
         </>
       ) : null}
@@ -311,6 +378,7 @@ function ServicePage({ service }: { service: ServiceRecord }) {
               <p className={TEXT}>There is no setup step for this one. It turns live by itself once the condition above is met.</p>
             )}
           </Panel>
+          {service.id === "fabric" ? <FabricDetails /> : null}
           <Links page={page} skipRecipe={page.handoff?.mode === "request" && page.kbPath !== null} />
         </>
       ) : null}
@@ -326,7 +394,7 @@ function ServicePage({ service }: { service: ServiceRecord }) {
 
       {page.body === "error" ? (
         <>
-          <ControlPanel service={service} devices={devices} />
+          <ServiceDetails service={service} devices={devices} panel={null} />
           {page.log && mode === "simple" ? (
             <Disclosure summary="Last log lines">
               <LogTail id={service.id} title={`${service.name} log`} lines={5} pollMs={0} />

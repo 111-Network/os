@@ -5,6 +5,7 @@ import type { AgentEvent, DeviceRecord, ServiceRecord, Status } from "../src/lib
 import { IDENTITY_BACKUP_COMMAND } from "../src/lib/commands";
 import { verdict, verdictDot } from "../src/lib/verdict";
 import {
+  requestsItem,
   activityLine,
   detailText,
   devicesSummary,
@@ -304,5 +305,40 @@ describe("agent activity lines", () => {
     expect(lines).toHaveLength(3);
     expect(lines[0]).toContain("n=3");
     expect(lines[2]).toContain("n=5");
+  });
+});
+
+describe("Needs you: message requests (Layer 5, U2)", () => {
+  it("a count of open requests is one row that opens Messages, in plain words, never what the senders wrote", () => {
+    expect(requestsItem(0)).toBeNull();
+    expect(requestsItem(-3)).toBeNull();
+    expect(requestsItem(Number.NaN)).toBeNull();
+    expect(requestsItem(1)).toEqual({
+      key: "requests",
+      kind: "request",
+      label: "1 message request",
+      detail: "Someone you have not added wrote to you. Nothing is sent back until you accept.",
+      href: "/messages",
+    });
+    expect(requestsItem(3)!.label).toBe("3 message requests");
+    expect(requestsItem(2.9)!.label).toBe("2 message requests");
+  });
+
+  it("needsYou lists it after the proposals and before the errors, and counts it as something that needs the person", () => {
+    const withProposal = structuredClone(fx.proposals).slice(0, 1);
+    const need = needsYou(status(), services({ radio: ERR }), devices(), withProposal, 2);
+    const keys = need.items.map((i) => i.key);
+    expect(keys[0]!.startsWith("proposal:")).toBe(true);
+    expect(keys[1]).toBe("requests");
+    expect(keys[2]).toBe("service:radio");
+    expect(need.open).toBe(true);
+    const only = needsYou(status(), services(), devices(), [], 1);
+    expect(only.items.map((i) => i.key)).toEqual(["requests"]);
+    expect(only.open).toBe(true);
+  });
+
+  it("without requests nothing changes: the same items as before the argument existed", () => {
+    expect(needsYou(status(), services(), devices(), [])).toEqual(needsYou(status(), services(), devices(), [], 0));
+    expect(needsYou(status(), services(), devices(), []).items.find((i) => i.kind === "request")).toBeUndefined();
   });
 });

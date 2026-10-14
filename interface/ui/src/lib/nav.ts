@@ -20,6 +20,9 @@ export interface NavItem {
 /** The label of the collapsible group in the sidebar. */
 export const SETTINGS_LABEL = "Settings";
 
+/** The one layer page shown in simple mode (Messaging & data, `/settings/l5`). */
+export const SIMPLE_LAYER_PAGE = "l5";
+
 export const NAV: readonly NavItem[] = [
   { id: "overview", label: "Overview", href: "/overview", section: "core" },
   { id: "agent", label: "Agent", href: "/", section: "core" },
@@ -33,7 +36,9 @@ export const NAV: readonly NavItem[] = [
       id: `settings-${l.slug}`,
       label: `${l.title} · L${l.n}`,
       href: `/settings/${l.slug}`,
-      minMode: "advanced",
+      // Layer 5's page holds the first step of messaging (enroll with a hub), and Messages is a core view: it is
+      // reachable in both modes. Every other layer page is advanced.
+      ...(l.slug === SIMPLE_LAYER_PAGE ? {} : { minMode: "advanced" as const }),
       section: "settings",
     }),
   ),

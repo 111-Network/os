@@ -11,7 +11,7 @@ import { Panel } from "../../components/panel";
 import { SectionHeader } from "../../components/section-header";
 import { SpecTable, type SpecRow } from "../../components/spec-table";
 import { StatusDot } from "../../components/status-dot";
-import { useActivity, useConnection, useDevices, useProposals, useServices, useStatus } from "../../lib/api/hooks";
+import { useActivity, useAttention, useConnection, useDevices, useProposals, useServices, useStatus } from "../../lib/api/hooks";
 import type { ServiceRecord } from "../../lib/api/types";
 import { cx, FOCUS_RING } from "../../lib/cx";
 import { Adv } from "../../lib/mode";
@@ -27,7 +27,7 @@ import { devicesSummary, needsYou, nearbySentence, nodeFacts, NEEDS_YOU_ID, rece
 const LABEL = "font-mono text-[10px] uppercase tracking-widest text-muted-foreground";
 const TEXT = "font-mono text-xs leading-relaxed text-muted-foreground";
 
-const KIND_LABEL: Record<NeedItem["kind"], string> = { proposal: "proposal", service: "service", device: "device" };
+const KIND_LABEL: Record<NeedItem["kind"], string> = { proposal: "proposal", service: "service", device: "device", request: "messages" };
 
 function ChecklistList({ rows }: { rows: ChecklistRow[] }) {
   return (
@@ -62,7 +62,8 @@ function NeedsYouPanel() {
   const services = useServices();
   const devices = useDevices();
   const proposals = useProposals();
-  const need = useMemo(() => needsYou(status, services, devices, proposals), [status, services, devices, proposals]);
+  const { openRequests } = useAttention();
+  const need = useMemo(() => needsYou(status, services, devices, proposals, openRequests), [status, services, devices, proposals, openRequests]);
   const done = need.checklist.filter((r) => r.done).length;
   const unknown = need.checklist.filter((r) => r.state === "unknown").length;
   // Until the derivable steps are done the checklist is the point; afterwards it folds away.
@@ -101,7 +102,7 @@ function NeedsYouPanel() {
         <ul className="divide-y divide-border border border-border">
           {need.items.map((item) => (
             <li key={item.key} className="flex items-start gap-3 px-3 py-2.5 font-mono text-xs leading-relaxed">
-              {item.kind === "proposal" ? (
+              {item.kind === "proposal" || item.kind === "request" ? (
                 <span aria-hidden="true" className="mt-1 inline-block h-2 w-2 shrink-0 border border-foreground" />
               ) : (
                 <StatusDot state="error" label={false} name={item.label} className="mt-1" />

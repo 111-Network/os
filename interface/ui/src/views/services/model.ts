@@ -2,6 +2,7 @@
 // No React, so the state matrix is unit-tested in the node environment.
 import { isApiError } from "../../lib/api/problem";
 import { classifyHref, kbRoutePath, normalizeKbPath } from "../../lib/markdown";
+import { serviceGoal, type PromptGoal } from "../../lib/prompts";
 import type { ServiceRecord } from "../../lib/api/types";
 
 // ------------------------------------------------------------------------------------------ time
@@ -113,7 +114,8 @@ export function flattenDetail(detail: Record<string, unknown> | null | undefined
 export type ServiceBody = "live" | "starting" | "unset" | "unavailable" | "error";
 
 export interface Handoff {
-  goal: "setup" | "fix";
+  /** `setup` / `fix`, or the Layer 5 context goal for the service that has one (`fabric`, `meshtastic`). */
+  goal: PromptGoal;
   /** The button text: with the agent live it hands off; otherwise it reveals the request it would have sent. */
   label: string;
   mode: "agent" | "request";
@@ -135,6 +137,8 @@ export interface ServicePageState {
    * point at Settings -> Restart node, which resets the supervisor itself.
    */
   nodeRestartLink: boolean;
+  /** The service is LIVE and carries a hosted panel (Layer 5, section 13): the page gains a Panel tab. */
+  panelTab: boolean;
 }
 
 /**
@@ -162,9 +166,9 @@ export function servicePageState(service: ServiceRecord, agentLive: boolean): Se
 
   let handoff: Handoff | null = null;
   if (body === "unset" && !NO_SETUP_SERVICES.has(service.id)) {
-    handoff = { goal: "setup", label: agentLive ? "Set up with the agent" : REQUEST_LABEL, mode: agentLive ? "agent" : "request" };
+    handoff = { goal: serviceGoal(service.id, "setup"), label: agentLive ? "Set up with the agent" : REQUEST_LABEL, mode: agentLive ? "agent" : "request" };
   } else if (body === "error") {
-    handoff = { goal: "fix", label: agentLive ? "Fix with the agent" : REQUEST_LABEL, mode: agentLive ? "agent" : "request" };
+    handoff = { goal: serviceGoal(service.id, "fix"), label: agentLive ? "Fix with the agent" : REQUEST_LABEL, mode: agentLive ? "agent" : "request" };
   }
 
   const kb = service.kb_entry ? normalizeKbPath(service.kb_entry) : null;
@@ -178,6 +182,7 @@ export function servicePageState(service: ServiceRecord, agentLive: boolean): Se
     log: running && service.actions.includes("log"),
     restart: (body === "live" || body === "error") && service.actions.includes("restart"),
     nodeRestartLink: body === "error" && service.reason_code === "child_degraded",
+    panelTab: body === "live" && !!service.panel,
   };
 }
 

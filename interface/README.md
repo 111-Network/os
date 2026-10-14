@@ -155,6 +155,11 @@ no typewriter on live data) · `sparkline` · `diff-view` · `json-block` · `co
 (Settings → Messaging & Data, the Layer 5 page of the `/settings/l0` … `/settings/l9` family, §6.7). The `meshtastic` and `fabric`
 service rows join the sidebar's services list (§7.2).
 
+> **As built (U2):** `/nearby` and `/settings/l5` are lazy routes (`/settings/l5` is served by the `/settings/:layer` route; its
+> page replaces the structure-only layer page). Unlike the other layer pages, **Messaging & data · L5 is shown in simple mode** (its
+> sidebar row has no `minMode` and a deep link carries no "advanced view" badge): enrolling with a hub is the first step of
+> messaging, which is a core view. The L5 title is "Messaging & data".
+
 **Header** (sticky, thin): `MENU` (<lg) · view title · attention badge (open proposals + errored
 services) · disconnected banner slot.
 
@@ -197,6 +202,10 @@ one-line state) · **Node** spec table (label, bech32 id with
 copy, category/role, version, uptime, update state, last check, gateway) · **Agent activity** feed
 (from `agent` events). Advanced appends: raw `/api/v1/status` JSON, full event feed.
 
+> **Layer 5 delivers (U2):** the Needs-you block gains one row, "N message requests", linking to `/messages` (the count is
+> `Attention.openRequests`: requests ignored on this device are not counted, so the row and the header badge agree; it is a count and
+> never what a sender wrote).
+
 ### 6.3 Devices — `/devices` (core)
 Everything the user owns and has attached to or paired with this node — never other people's nodes
 (those are Nearby). Source: `GET /api/v1/devices` (§7.1), computed by `111d` from detection facts
@@ -238,6 +247,16 @@ map views arrive with Layer 7"), and "Ask the agent who is nearby". No fake peer
 > `GET /api/v1/nearby` + SSE `nearby` (`os/messaging/README.md` §14): name, short name, SNR/RSSI, hops, position, channel
 > utilization, and `last_heard` shown as a hint. Names are untrusted RF-origin strings, rendered as text only. No fake peers; a
 > Meshtastic node is never a contact, and "Message them" is not offered until a bridge exists. Radar and map stay Layer 7.
+>
+> **As built (U2):** one panel per source headed by the daemon's label ("heard via Meshtastic on <board>"; if it is empty the heading
+> is built from the board's alias in the device list, then a plain "heard via Meshtastic"). Each node: display name (long, else short,
+> else id), the short name as a badge, hops ("direct", "3 hops away"), SNR/RSSI, channel use, position as text ("as it reports it"),
+> and "last heard N min ago" through `agoText` from the node's own clock (a hint: it never orders anything; the list is ordered by hops,
+> then name, then id). Every string is cleaned (`cleanPeerText`), flattened and cut (names 40 characters, short names 8, headings 80),
+> drawn with `dir="auto"` and never as markup or a link, and never reaches a prompt (the "Ask the agent who is nearby" question is
+> built from the node's own status). Advanced adds the id, node number and public key. Empty states, by the `meshtastic` service row:
+> no board / identified but not set up / starting / error / listening and nobody heard / "did not report"; a list shown while the
+> connection is down or the service is in error is marked as the last known one. SSE `nearby` frames replace the list.
 
 ### 6.5 Messages — `/messages` (stub)
 "Messaging arrives with Layer 5 (Messaging & Data)" + what it will do + "Ask the agent about
@@ -294,6 +313,26 @@ Normative text: `os/messaging/README.md` §13. This is the Layer 4 summary.
   radio and is not seen or stored by 111.
 - v1 ships static panels plus the built-in Meshtastic shim; the generic reverse proxy (WebSocket/SSE) is specified but reserved.
 
+> **As built (U2):** a LIVE service whose record carries `panel` gets tabs **Details | Panel**; the frame is mounted when the Panel
+> tab is first opened and kept (hidden) afterwards, so switching tabs does not drop the panel's state. The frame's `src` is the ticket
+> URL from `POST /panels/{id}/session`, never displayed or copied; the page loads only a URL on the origin it computes itself
+> (`location.hostname` + `panel.port`) and refuses any other host, port, scheme or a URL with credentials. `allow` takes only plain
+> feature names from `panel.allow` (`serial; bluetooth`); `referrerpolicy="no-referrer"`. **Reload** and **Open full client** each
+> mint a new ticket (the latter opens the new tab inside the click, cuts it off with `opener = null`, then points it at the ticket). A
+> frame that has not loaded after the ticket's 30 s (+5 s) is said to have a spent ticket, with Reload. Gates, in order: panel not
+> enabled / not listening (text, no frame); `needs_secure_context` on an insecure origin (the secure-context text and the loopback URL
+> `http://127.0.0.1:<dashboard port>/#/services/<id>`, no frame); a `403 loopback_only` from the mint (a loopback-only panel over the
+> LAN: "only opens on the node itself", the same URL, no frame). `panel.state.health = down` adds a line above the frame;
+> `PanelState.dropped` is shown in Advanced with the panel's slot and flags. `meshtastic` also shows, on Details, the nodes-heard count
+> (the list is Nearby), "this panel transmits ... 111 does not see it and does not store it", the "own keys / default channel key is
+> public / nothing here is 111-sealed" line, the optional off-origin hosts, and the phone residual (D16 a).
+>
+> **`fabric` ("Messaging") page (U2):** links (kind, state, peers, what the path can carry; airtime in Advanced), home hub (name from
+> Contacts, address, members, an outstanding code; mailbox position and node id in Advanced), "mail held for others" (count, bytes: it
+> cannot read them), the store gauge with the prune rules and the `store_full` copy, "How delivery is reported" (the section 9 sentences
+> for queued / sent / relayed / delivered), and links to Messages and to Settings. NOT SET and ERROR keep the generic hand-off, which asks
+> for `messaging.setup` / `messaging.fix`.
+
 ### 6.7 Settings — `/settings` (Essentials; 5 rows) + `/settings/l0..l9` (advanced)
 Essentials: node name (alias, `PATCH /settings`) · mode (mirror) · identity backup (instruction
 card: the exact CLI command; never a reveal) · restart node (2-step confirm, names the node) ·
@@ -309,6 +348,15 @@ L2 · Intelligence L3 · Interface L4 · Messaging L5 · Transport L6 · Relay &
 > (the enrolled hub's card; enroll by QR or code) · "Let a node use this hub" (offer code, hub-role toggle, LAN listener) · custody
 > opt-in · store usage and quotas · export (a CLI instruction until the `age` export lands). Loopback-only rows are disabled over
 > LAN like Essentials; `POST /fabric/hub/offer` is loopback-only like `offer`.
+>
+> **As built (U2):** panels *home hub* (an enrolled hub's card, or the enroll form: paste or scan the hub's whole enrollment text — it
+> fills address, code and the hub's card — or type address + code), *hub for other nodes* ("Show a one-time code" with the code, address
+> and QR drawn from the bundle, "Dismiss the code" = `DELETE /fabric/hub/offer`; hub role; LAN listener; custody opt-in), *store*
+> (gauge, prune rules, `store_full` / closed-store copy with the agent's fix, quotas in Advanced, the restore wait, export). Every change is
+> a call the node answers (`PATCH /fabric/settings`, `POST/DELETE /fabric/hub/offer`, `POST /fabric/hub/enroll`) followed by a read of
+> `GET /fabric`; a switch shows the node's value and moves when the answer is in (never optimistic). The offer, the settings and the
+> quotas are loopback-only: over the LAN they are disabled with "available on the node itself"; enrolling is not. The code is shown once
+> (the reply is the only place it exists); a page opened with a code outstanding says so and offers dismiss / a new code.
 
 ### 6.8 Logs — `/logs` (advanced)
 Per-service tails (`GET /services/{id}/log?n=`), service tabs, follow (poll 5 s), copy. Daemon
@@ -402,6 +450,13 @@ test it"), `fix` ("fix … "), `connect` ("look at everything connected or paire
 identify it, set up what is needed, fix errors"), `check` ("check this node end to end and tell me
 what needs attention"). Subjects: a service, a device, the device registry, the node. Rendered
 editable in the Agent input; the user sends it; never auto-sent.
+
+> **Layer 5 goals (U2):** `PromptGoal` gains `messaging.setup` (enroll with a hub, or give another node a code), `messaging.fix` (a
+> full store, an unreachable hub), `meshtastic.setup` (identify, bind; ask before anything that opens the serial port) and
+> `panel.explain` (what the panel is, what it transmits, which outside hosts a browser may contact). They are goal sentences only,
+> through the same builder; a service that carries a hosted panel adds its panel facts (id, port, flags, health) to the subject. No
+> text a peer or a radio sent is ever in a prompt. The service page's hand-off picks them by service (`serviceGoal`: `fabric` ->
+> `messaging.*`, `meshtastic` set-up -> `meshtastic.setup`), the Messages banner uses `messaging.*`.
 
 ```
 {goal sentence for the subject}
