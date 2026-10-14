@@ -68,3 +68,6 @@ All 7 forks decided (D19, 2026-10-14). Spec draft: `os/messaging/README.md`. Nex
   nothing on disk changed); moving A1 first changed its index, so it re-ran again. Fix that worked: delete the finished
   call from the script and take its result from `journal.jsonl`. Current run = 4 live agents F1 P1 M1 U1
   (task `wdhag90l2`). Put bounce-prone tasks LAST in a fan-out.
+- **Wave 1 landed** (2026-10-14 evening): F1 `c8a093c` · P1 `79ca52d` · M1 `99f5e0a` · U1 `858077f` (board `f283c9a`). Every
+  check green except the UI bundle budget (255.4 KB vs 200 KB; owner decision pending). Review run `wf_c857767c-bde`
+  (script `messaging/.workflow-wave-1-review.js`): F1/P1/M1 fable xhigh, U1 opus; findings only → lead bounces via fresh agents.
