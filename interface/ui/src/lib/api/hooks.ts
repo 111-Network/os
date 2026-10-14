@@ -2,6 +2,7 @@
 // state object, so references are stable between unrelated changes.
 import { useEffect, useSyncExternalStore } from "react";
 import { apiStore, type Attention, type ConnectionSnapshot, type StoreMeta, type StoreState, type ThreadSlot } from "./store";
+import type { IgnoredRequests } from "./requests";
 import type { AgentEvent, Card, Contact, DeviceRecord, FabricStatus, HostedPanel, NearbySource, NodeId, Proposal, ServiceId, ServiceRecord, Status, Thread } from "./types";
 
 function useSlice<T>(select: (s: StoreState) => T): T {
@@ -52,6 +53,9 @@ export const useThreads = (): Thread[] | null => useSlice((s) => s.threads);
 
 /** Contacts, pending message requests included (`request: true`); null until loaded. */
 export const useContacts = (): Contact[] | null => useSlice((s) => s.contacts);
+
+/** Message requests the user ignored on this device (`peer -> newest received_seq`); they stay pending on the node. */
+export const useIgnoredRequests = (): IgnoredRequests => useSlice((s) => s.ignored);
 
 /** One contact by NodeId; null while loading or when unknown. */
 export const useContact = (id: NodeId): Contact | null => useSlice((s) => s.contacts?.find((c) => c.node_id === id) ?? null);

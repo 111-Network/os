@@ -5,8 +5,11 @@ import { createElement as h, type ReactElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { afterEach, describe, expect, it } from "vitest";
 import { createMockAdapter, type MockAdapter, type ScenarioName } from "../src/lib/api/mock";
-import { ADA, BRAM, CLEO, DANA, DOV, ELI } from "../src/lib/api/mock/messaging";
+import { buildFixtures } from "../src/lib/api/mock/fixtures";
+import { ADA, BRAM, CLEO, DANA, DOV, ELI, makeContact } from "../src/lib/api/mock/messaging";
+import { requestSeq } from "../src/lib/api/requests";
 import { apiStore } from "../src/lib/api/store";
+import { Header } from "../src/app/Header";
 import { ModeProvider, resetModeForTests } from "../src/lib/mode";
 import ContactsView from "../src/views/contacts";
 import { OwnCard } from "../src/views/contacts/own-card";
@@ -14,7 +17,7 @@ import { AddContact } from "../src/views/contacts/add";
 import ThreadList from "../src/views/messages/list";
 import ThreadView from "../src/views/messages/thread";
 import { MessagingBanner } from "../src/views/messages/banner";
-import { REASON_COPY, STATE_COPY } from "../src/views/messages/model";
+import { IGNORED_HERE_NOTE, IGNORED_NOTE, REASON_COPY, STATE_COPY } from "../src/views/messages/model";
 import { FakeClock, flush } from "./helpers/fakes";
 
 const made: MockAdapter[] = [];
@@ -84,6 +87,61 @@ describe("Messages list", () => {
     expect(out).toMatch(/[a-z0-9]{4}-[a-z0-9]{4}-[a-z0-9]{2}/);
   });
 
+  it("'ignore' folds a request on this device: it leaves the open list, waits under 'ignored requests', and is not deleted", async () => {
+    const a = await load("requests");
+    expect(apiStore.getState().attention.openRequests).toBe(2);
+    const eli = apiStore.getState().threads!.find((t) => t.peer === ELI)!;
+    apiStore.ignoreRequest(ELI, requestSeq(eli));
+    const out = html(h(ThreadList));
+    expect(out).toContain("message requests (1)");
+    expect(out).toContain("ignored requests (1)");
+    expect(out).toContain(IGNORED_NOTE);
+    expect(out).toMatch(/>show again</);
+    expect(out).toMatch(/>ignore</); // Dov's, still open
+    expect(out).toMatch(/>forget request</);
+    // The ignored one is inside the fold: after the disclosure opens, not in the open list before it.
+    const open = out.slice(0, out.indexOf("ignored requests (1)"));
+    const folded = out.slice(out.indexOf("ignored requests (1)"));
+    expect(open).toContain("(if this is the wrong node, ignore me)");
+    expect(open).not.toContain("Free coin");
+    expect(folded).toContain("Free coin");
+    // It is still pending on the node, and the badge no longer counts it.
+    expect((await a.contacts.list()).find((c) => c.node_id === ELI)).toMatchObject({ request: true });
+    expect(apiStore.getState().attention.openRequests).toBe(1);
+  });
+
+  it("ignoring every request leaves 'No new requests.' and the fold; the Contacts page shows the same fold", async () => {
+    await load("requests");
+    for (const t of apiStore.getState().threads!.filter((x) => x.request)) apiStore.ignoreRequest(t.peer, requestSeq(t));
+    const list = html(h(ThreadList));
+    expect(list).toContain("message requests (0)");
+    expect(list).toContain("No new requests.");
+    expect(list).toContain("ignored requests (2)");
+    const contacts = html(h(ContactsView));
+    expect(contacts).toContain("ignored requests (2)");
+    expect(contacts).toContain("No new requests.");
+    apiStore.restoreRequest(ELI);
+    expect(html(h(ThreadList))).toContain("message requests (1)");
+  });
+
+  it("a request that writes again is no longer folded", async () => {
+    const a = await load("requests");
+    const eli = apiStore.getState().threads!.find((t) => t.peer === ELI)!;
+    apiStore.ignoreRequest(ELI, requestSeq(eli));
+    expect(html(h(ThreadList))).toContain("ignored requests (1)");
+    // The sender writes again: the node stores the message and publishes it.
+    const M = a.mock.state.messaging;
+    const again = { ...peerMessage("one more thing"), id: "msg-again", peer: ELI, local_seq: M.nextSeq++, received_seq: M.nextRecv++ };
+    M.messages.push(again);
+    a.mock.bus.publish({ event: "message", data: { change: "request", peer: ELI, message: again } });
+    await flush(30); // the frame reloads the list
+    expect(apiStore.getState().ignored).toEqual({});
+    expect(apiStore.getState().attention.openRequests).toBe(2);
+    const out = html(h(ThreadList));
+    expect(out).toContain("message requests (2)");
+    expect(out).not.toContain("ignored requests");
+  });
+
   it("is honest when empty: it says so and offers to add a contact", async () => {
     await load("messaging-new");
     const out = html(h(ThreadList));
@@ -99,6 +157,23 @@ describe("Messages list", () => {
     expect(out).toContain("messaging problem");
     expect(out).toMatch(/store is full/i);
     expect(out).toContain("Ask the agent to fix it");
+  });
+
+  it("asks the agent by reason code: a hub with no members is offered 'let a node use this hub', an unreachable hub is a fix", async () => {
+    await load("messaging-new");
+    const services = apiStore.getState().services!;
+    const setRow = (reason_code: string, reason: string) => {
+      apiStore.applyFrame({ id: "9", event: "services", data: { services: services.map((s) => (s.id === "fabric" ? { ...s, state: "unset" as const, reason_code, reason } : s)) } });
+      return html(h(MessagingBanner));
+    };
+    const waiting = setRow("hub_waiting", "This node is a home hub, waiting for the first node to enroll.");
+    expect(waiting).toContain("Let a node use this hub, with the agent");
+    expect(waiting).not.toContain("Set up messaging with the agent");
+    const unreachable = setRow("hub_unreachable", "Your home hub cannot be reached right now; messages wait until it can.");
+    expect(unreachable).toContain("Ask the agent to fix it");
+    expect(unreachable).not.toContain("Set up messaging with the agent");
+    const notEnrolled = setRow("not_enrolled", "No home hub and no other node reachable yet.");
+    expect(notEnrolled).toContain("Set up messaging with the agent");
   });
 
   it("says nothing extra while messaging is live", async () => {
@@ -119,6 +194,21 @@ describe("Messages list", () => {
     expect(adv).toContain("waiting:");
     expect(adv).toContain(ADA.slice(0, 8));
   });
+});
+
+/** An incoming message as the node would publish it, for frames. */
+const peerMessage = (text: string) => ({
+  id: `msg-test-${text.length}-${text.charCodeAt(0)}`,
+  peer: ADA,
+  dir: "in" as const,
+  text,
+  state: "delivered" as const,
+  reason_code: null,
+  reason: null,
+  local_seq: 800,
+  received_seq: 800,
+  sent_at_claim: null,
+  at: "2026-10-14T09:00:00Z",
 });
 
 describe("a conversation", () => {
@@ -170,19 +260,76 @@ describe("a conversation", () => {
     expect(html(h(ThreadView, { peer: ADA }))).not.toContain("msg_id stream");
     const adv = html(h(ThreadView, { peer: ADA }), "advanced");
     expect(adv).toMatch(/msg_id stream 0 epoch 7340 n \d+/);
-    expect(adv).toContain("evidence: ACK from the recipient");
+    expect(adv).toContain("what this state means: ACK from the recipient");
+    expect(adv).not.toContain("evidence:");
     expect(adv).toContain("CUSTODY_ACK ACCEPTED");
     expect(adv).toContain("raw thread");
   });
 
-  it("a pending request is read-only: no composer, the reason is given, accept and ignore are offered", async () => {
+  it("a pending request is read-only: no composer, the reason is given, accept, ignore and forget request are offered", async () => {
     await load("requests");
     await apiStore.loadThread(DOV);
     const out = html(h(ThreadView, { peer: DOV }));
     expect(out).not.toContain('aria-label="Message"');
     expect(out).toContain("Accept it to reply");
     expect(out).toMatch(/>accept</);
+    expect(out).toMatch(/>ignore</);
+    expect(out).toMatch(/>forget request</);
+    expect(out).not.toContain(IGNORED_HERE_NOTE);
     expect(out).toContain("Is this the workshop node?");
+  });
+
+  it("an ignored request says so in its conversation, offers 'show again', and is still read-only and acceptable", async () => {
+    await load("requests");
+    await apiStore.loadThread(DOV);
+    apiStore.ignoreRequest(DOV, requestSeq(apiStore.getState().threads!.find((t) => t.peer === DOV)!));
+    const out = html(h(ThreadView, { peer: DOV }));
+    expect(out).toContain(IGNORED_HERE_NOTE);
+    expect(out).toMatch(/>show again</);
+    expect(out).not.toMatch(/>ignore</);
+    expect(out).toMatch(/>accept</);
+    expect(out).toMatch(/>forget request</);
+    expect(out).not.toContain('aria-label="Message"');
+  });
+
+  it("peer text is isolated for its own direction (dir=auto), so Persian reads right to left inside an LTR page", async () => {
+    await load("healthy");
+    await apiStore.loadThread(ADA);
+    apiStore.applyFrame({ id: "9", event: "message", data: { change: "new", peer: ADA, message: peerMessage("سلام، حالت چطوره؟ ۱۲۳") } });
+    const out = html(h(ThreadView, { peer: ADA }));
+    expect(out).toMatch(/<div dir="auto"[^>]*>سلام، حالت چطوره؟ ۱۲۳<\/div>/);
+    expect(out.match(/<div dir="auto"/g)!.length).toBeGreaterThanOrEqual(6); // every bubble, own and incoming
+  });
+
+  it("previews of held requests and last lines are isolated for their own direction too", async () => {
+    await load("requests");
+    const out = html(h(ThreadList));
+    expect(out).toMatch(/<p dir="auto"[^>]*>[^<]*Free coin/);
+    expect(out).toMatch(/<span dir="auto"[^>]*>[^<]*Thanks|<span dir="auto"[^>]*>you: /);
+  });
+
+  it("the Advanced raw block carries no bidi override that the bubbles have stripped", async () => {
+    await load("healthy");
+    await apiStore.loadThread(ADA);
+    apiStore.applyFrame({ id: "9", event: "message", data: { change: "new", peer: ADA, message: peerMessage("abc‮def⁦ghi") } });
+    const adv = html(h(ThreadView, { peer: ADA }), "advanced");
+    expect(adv).toContain("raw thread");
+    expect(adv).toContain("abcdefghi");
+    expect(adv).not.toMatch(/[\u202A-\u202E\u2066-\u2069]/);
+  });
+
+  it("the per-message time line is the shared disclosure: a visible '>' marker, a focus ring and a 44 px target", async () => {
+    await load("healthy");
+    await apiStore.loadThread(ADA);
+    const out = html(h(ThreadView, { peer: ADA }));
+    const summaries = out.match(/<summary[^>]*>/g)!;
+    expect(summaries.length).toBeGreaterThanOrEqual(6);
+    for (const s of summaries) {
+      expect(s).toContain("min-h-11");
+      expect(s).toContain("focus-visible:ring-2");
+    }
+    expect(out).toMatch(/<summary[^>]*>.{0,120}class="inline-block w-3 shrink-0 text-center">&gt;<\/span>/);
+    expect(out).not.toContain("min-h-8");
   });
 
   it("escapes hostile text in a conversation", async () => {
@@ -223,6 +370,22 @@ describe("Contacts", () => {
     for (const a of ["message", "rename", "unpin", "forget"]) expect(out).toContain(`>${a}<`);
     expect(out).toContain("Add a contact".toLowerCase());
     expect(out).toContain("your card");
+  });
+
+  it("the header badge opens Messages when message requests are all it counts, and Overview otherwise", async () => {
+    const header = () => html(h(Header, { path: "/messages", drawerOpen: false, desktop: true, onMenu: () => undefined }));
+    expect(header()).not.toContain("needs-you");
+    apiStore.applyFrame({ id: "1", event: "contact", data: { change: "request", contact: makeContact(DOV, { trust: "tofu", request: true }) } });
+    expect(apiStore.getState().attention).toMatchObject({ count: 1, openRequests: 1, openProposals: 0 });
+    const only = header();
+    expect(only).toContain('href="#/messages"');
+    expect(only).not.toContain("needs-you");
+    expect(only).toContain("1 message request");
+    // Something else needs the person too: the badge goes back to the block that lists it.
+    const services = buildFixtures(Date.parse("2026-10-14T09:00:00Z")).services;
+    apiStore.applyFrame({ id: "2", event: "services", data: { services: services.map((s, i) => (i === 0 ? { ...s, state: "error" as const } : s)) } });
+    expect(apiStore.getState().attention).toMatchObject({ count: 2, openRequests: 1, erroredServices: 1 });
+    expect(header()).toContain('href="#/overview#needs-you"');
   });
 
   it("shows requests above the list, and a node-id-less honest empty state", async () => {

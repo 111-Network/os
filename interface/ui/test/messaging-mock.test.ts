@@ -149,7 +149,26 @@ describe("the request flow", () => {
     expect(validateAgainst("Problem", e.problem)).toEqual([]);
   });
 
-  it("ignoring discards the request and its held messages, silently (nothing is sent back)", async () => {
+  it("a pending request is kept as it is: time passing prunes nothing, sends nothing back, and `ignore` is not an operation of the node (section 7.2)", async () => {
+    const { a, clock } = make("requests");
+    const { frames } = listen(a);
+    await flush();
+    expect((a as unknown as Record<string, unknown>).ignore).toBeUndefined();
+    expect((a.contacts as unknown as Record<string, unknown>).ignore).toBeUndefined();
+    const held = (await a.messages.thread(DOV)).messages.map((m) => m.id);
+    await clock.advanceAsync(10 * 60_000, 5_000); // ten minutes with nobody answering
+    for (const peer of [DOV, ELI]) {
+      expect((await a.contacts.list()).find((c) => c.node_id === peer), peer).toMatchObject({ request: true });
+      expect((await a.messages.threads()).find((t) => t.peer === peer), peer).toMatchObject({ request: true });
+    }
+    expect((await a.messages.thread(DOV)).messages.map((m) => m.id)).toEqual(held);
+    expect(frames.some((f) => f.event === "contact" && (f.data as { change: string }).change === "removed")).toBe(false);
+    // Nothing went back to a sender: no own message was created, no ACK-shaped state change was published.
+    expect(frames.some((f) => f.event === "message" && (f.data as { message: { dir: string } }).message.dir === "own")).toBe(false);
+    expect((await a.messages.thread(DOV)).messages.every((m) => m.dir === "in")).toBe(true);
+  });
+
+  it("forgetting a request discards it and its held messages, silently (nothing is sent back)", async () => {
     const { a } = make("requests");
     const { frames } = listen(a);
     await flush();
@@ -159,6 +178,28 @@ describe("the request flow", () => {
     expect(frames.some((f) => f.event === "contact" && (f.data as { change: string }).change === "removed")).toBe(true);
     expect(frames.some((f) => f.event === "message" && (f.data as { message: { dir: string } }).message.dir === "own")).toBe(false);
     expect((await failure(a.contacts.get(ELI))).status).toBe(404);
+  });
+
+  it("a forgotten request comes back when its sender retransmits (it was never ACKed), as a fresh request with the same words", async () => {
+    const { a, clock } = make("requests");
+    const { frames } = listen(a);
+    await flush();
+    const words = (await a.messages.thread(ELI)).messages.map((m) => m.text);
+    await a.contacts.forget(ELI);
+    await clock.advanceAsync(20_000, 5_000); // before the retransmission
+    expect((await a.contacts.list()).some((c) => c.node_id === ELI)).toBe(false);
+    await clock.advanceAsync(15_000, 5_000);
+    expect((await a.contacts.list()).find((c) => c.node_id === ELI)).toMatchObject({ request: true, trust: "tofu" });
+    expect((await a.messages.thread(ELI)).messages.map((m) => m.text)).toEqual(words);
+    expect(frames.filter((f) => f.event === "contact" && (f.data as { change: string; contact: { node_id: string } }).contact.node_id === ELI).map((f) => (f.data as { change: string }).change)).toEqual(["removed", "request"]);
+    // Accepted in the meantime, it is not re-introduced a second time.
+    const again = make("requests");
+    await flush();
+    await again.a.contacts.forget(DOV);
+    await again.a.contacts.add({ node_id: DOV });
+    await again.clock.advanceAsync(40_000, 5_000);
+    expect((await again.a.contacts.list()).filter((c) => c.node_id === DOV)).toHaveLength(1);
+    expect((await again.a.contacts.get(DOV)).request).toBe(false);
   });
 
   it("accept accepts only `true`", async () => {

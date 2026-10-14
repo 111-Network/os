@@ -179,6 +179,8 @@ export function createMockAdapter(opts: MockOptions = {}): MockAdapter {
   const M = state.messaging;
   /** The longest text the mock carries; the daemon refuses what Tier 0/1 framing cannot (§5) with the same 400. */
   const MAX_TEXT = 2000;
+  /** How long after a forgotten request its un-ACKed sender retransmits the INTRO. */
+  const RETRANSMIT_MS = 30_000;
   const contactOf = (id: string): Contact | undefined => M.contacts.find((c) => c.node_id === id);
   const publishMessage = (m: Message, change: "new" | "state" | "request") =>
     bus.publish({ event: "message", data: { change, peer: m.peer, message: structuredClone(m) } });
@@ -869,8 +871,17 @@ export function createMockAdapter(opts: MockOptions = {}): MockAdapter {
           const c = contactById(id);
           M.contacts = M.contacts.filter((x) => x !== c);
           delete M.routes[id];
-          // A discarded request takes its held messages with it; a forgotten contact keeps its history (until capacity pruning).
-          if (c.request) M.messages = M.messages.filter((m) => m.peer !== id);
+          // "Forget request" (the UI's "ignore" never reaches the node, §7.2): a discarded request takes its held
+          // messages with it; a forgotten contact keeps its history (until capacity pruning).
+          if (c.request) {
+            const held = M.messages.filter((m) => m.peer === id && m.dir === "in").map((m) => m.text);
+            M.messages = M.messages.filter((m) => m.peer !== id);
+            // The sender was never ACKed (§9: kept until delivered), so it still has its copy and retransmits on its
+            // next link event: the request comes back, as a fresh INTRO with the same words.
+            later(RETRANSMIT_MS, () => {
+              if (!contactOf(id)) ctx.introduce({ ...c, request: true }, held);
+            });
+          }
           publishContact(c, "removed");
         }).then(() => undefined),
     },

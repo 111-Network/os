@@ -2,14 +2,18 @@
 import { describe, expect, it } from "vitest";
 import {
   applyMessageToPage,
+  cleanDeep,
   cleanPeerText,
   conversationThreads,
   isRetryable,
   MESSAGE_STATE_ORDER,
+  mergeThreadPage,
   newestIncomingSeq,
+  newestReceivedSeq,
   pendingOwn,
   requestThreads,
   stateRank,
+  trimPage,
   unreadTotal,
   upsertMessage,
   type ThreadPage,
@@ -17,22 +21,35 @@ import {
 import { buildMessaging, MOCK_REASONS, threadsOf, pageOf, ADA, BRAM, CLEO, DANA, DOV } from "../src/lib/api/mock/messaging";
 import type { Message, MessageState, Thread } from "../src/lib/api/types";
 import {
+  announceIncoming,
+  bannerAgent,
   claimText,
   composeGate,
   draftProblem,
   errorSentence,
   evidenceName,
+  FIX_QUESTION,
+  FORGET_REQUEST_CONFIRM,
   glyphFor,
+  IGNORED_HERE_NOTE,
+  IGNORED_NOTE,
   lastLine,
   MAX_COMPOSE_CHARS,
   messagingBanner,
+  OFFER_QUESTION,
   oneLine,
   peerFromParam,
   reasonText,
   REASON_COPY,
+  REASON_COPY_BY_STATE,
+  REQUEST_NOTE,
+  requestAnnouncement,
+  requestItemOf,
   requestPreview,
+  SETUP_QUESTION,
   shortId,
   statusLine,
+  stateCopy,
   STATE_COPY,
   threadGlyphState,
   threadName,
@@ -93,6 +110,17 @@ describe("delivery states (section 9)", () => {
     expect(statusLine({ state: "teleported" as MessageState, reason_code: null, reason: null }).detail).toMatch(/does not know/i);
   });
 
+  it("an unknown value never resolves to an Object.prototype member (the U1b rule holds for 'constructor' and friends)", () => {
+    for (const odd of ["constructor", "toString", "hasOwnProperty", "__proto__", "valueOf"]) {
+      expect(glyphFor(odd), odd).toEqual({ filled: 0, label: "unknown", known: false });
+      expect(stateCopy(odd), odd).toBe("This node reports a state this page does not know.");
+      expect(typeof reasonText({ state: odd as MessageState, reason_code: odd, reason: "the node's own words" }), odd).toBe("string");
+      expect(reasonText({ state: odd as MessageState, reason_code: odd, reason: "the node's own words" }), odd).toBe("the node's own words");
+      expect(reasonText({ state: odd as MessageState, reason_code: odd, reason: null }), odd).toBeNull();
+      expect(statusLine({ state: odd as MessageState, reason_code: odd, reason: null }).label, odd).toBe("unknown");
+    }
+  });
+
   it("only an own message that is queued or sent can be retried", () => {
     const table: [Message["dir"], MessageState, boolean][] = [
       ["own", "queued", true],
@@ -123,23 +151,38 @@ describe("reasons", () => {
     const states: MessageState[] = ["queued", "sent"];
     for (const state of states) {
       for (const code of Object.keys(REASON_COPY)) {
-        expect(reasonText({ reason_code: code, reason: "node sentence" }), `${state} ${code}`).toBe(REASON_COPY[code]);
+        const want = REASON_COPY_BY_STATE[state]?.[code] ?? REASON_COPY[code];
+        expect(reasonText({ state, reason_code: code, reason: "node sentence" }), `${state} ${code}`).toBe(want);
       }
-      expect(reasonText({ reason_code: "brand_new_code", reason: "The node explains." })).toBe("The node explains.");
-      expect(reasonText({ reason_code: "brand_new_code", reason: null })).toBeNull();
-      expect(reasonText({ reason_code: null, reason: null })).toBeNull();
+      expect(reasonText({ state, reason_code: "brand_new_code", reason: "The node explains." })).toBe("The node explains.");
+      expect(reasonText({ state, reason_code: "brand_new_code", reason: null })).toBeNull();
+      expect(reasonText({ state, reason_code: null, reason: null })).toBeNull();
       expect(statusLine({ state, reason_code: null, reason: null }).reason).toBeNull();
     }
   });
 
+  it("a custody REJECT_UNKNOWN_DEST (sent, hub_not_yours) says the hub does not know them, not the queued sentence", () => {
+    const queued = reasonText({ state: "queued", reason_code: "hub_not_yours", reason: "node sentence" });
+    const sent = reasonText({ state: "sent", reason_code: "hub_not_yours", reason: "node sentence" });
+    expect(queued).toBe(REASON_COPY.hub_not_yours);
+    expect(sent).toMatch(/your hub does not know them/i);
+    expect(sent).not.toBe(queued);
+    expect(statusLine({ state: "sent", reason_code: "hub_not_yours", reason: null }).reason).toBe(sent);
+  });
+
+  it("a code the UI has no copy for shows the node's own sentence, in any state, so a new daemon reason is not hidden", () => {
+    for (const state of MESSAGE_STATE_ORDER) expect(reasonText({ state, reason_code: "cancelled", reason: "The node explains." }), state).toBe("The node explains.");
+  });
+
   it("cleans a node sentence before it is shown", () => {
-    expect(reasonText({ reason_code: "x", reason: "a‮b" })).toBe("ab");
+    expect(reasonText({ state: "queued", reason_code: "x", reason: "a‮b" })).toBe("ab");
   });
 
   it("names the evidence behind each state for Advanced", () => {
     expect(evidenceName({ dir: "own", state: "queued", reason_code: null })).toMatch(/outbox/);
     expect(evidenceName({ dir: "own", state: "sent", reason_code: null })).toMatch(/link/);
     expect(evidenceName({ dir: "own", state: "sent", reason_code: "mailbox_full" })).toMatch(/REJECT_FULL/);
+    expect(evidenceName({ dir: "own", state: "sent", reason_code: "hub_not_yours" })).toMatch(/REJECT_UNKNOWN_DEST/);
     expect(evidenceName({ dir: "own", state: "relayed", reason_code: null })).toMatch(/CUSTODY_ACK ACCEPTED/);
     expect(evidenceName({ dir: "own", state: "delivered", reason_code: null })).toMatch(/ACK from the recipient/);
     expect(evidenceName({ dir: "in", state: "delivered", reason_code: null })).toMatch(/received here/);
@@ -192,6 +235,15 @@ describe("peer text", () => {
 
   it("is plain text: markup is not interpreted (React escapes it; nothing here turns it into HTML)", () => {
     expect(cleanPeerText("<script>alert(1)</script>")).toBe("<script>alert(1)</script>");
+  });
+
+  it("cleans every string in a block that is printed as JSON (stringify leaves U+202E and the isolates alone)", () => {
+    const raw = { peer: ADA, count: 2, ok: true, none: null, messages: [{ text: "a‮b⁦c", reason: "x\u202Ay", nested: { deep: ["\u2067z"] } }] };
+    expect(JSON.stringify(raw)).toMatch(/\u202e|‮/);
+    const cleaned = cleanDeep(raw);
+    expect(cleaned).toEqual({ peer: ADA, count: 2, ok: true, none: null, messages: [{ text: "abc", reason: "xy", nested: { deep: ["z"] } }] });
+    expect(JSON.stringify(cleaned)).not.toMatch(/[\u202A-\u202E\u2066-\u2069]/);
+    expect(raw.messages[0]!.text).toBe("a‮b⁦c"); // a copy; the input is untouched
   });
 
   it("makes a one-line summary: flat, cut with an ellipsis, cleaned", () => {
@@ -325,6 +377,75 @@ describe("folding frames into a loaded conversation", () => {
     expect(newestIncomingSeq([msg({ local_seq: 1 }), msg({ id: "i1", dir: "in", local_seq: 2 }), msg({ id: "i2", dir: "in", local_seq: 7 }), msg({ local_seq: 9 })])).toBe(7);
     expect(newestIncomingSeq([msg()])).toBeNull();
   });
+
+  it("finds the newest received sequence, which is what an ignored request is keyed on", () => {
+    expect(newestReceivedSeq([msg({ id: "i1", dir: "in", local_seq: 2, received_seq: 4 }), msg({ id: "i2", dir: "in", local_seq: 7, received_seq: 9 }), msg({ local_seq: 9 })])).toBe(9);
+    expect(newestReceivedSeq([msg()])).toBeNull();
+  });
+});
+
+describe("an open conversation keeps to its window", () => {
+  const own = (n: number): Message => msg({ id: `m${n}`, local_seq: n });
+  const window = (n: number): ThreadPage => ({ peer: ADA, request: false, messages: Array.from({ length: n }, (_, i) => own(i + 1)), more: false });
+
+  it("drops the oldest and says there are earlier ones once frames push it past the limit", () => {
+    let page: ThreadPage | undefined = window(3);
+    for (let n = 4; n <= 10; n++) page = applyMessageToPage(page, ADA, own(n), "new", 3);
+    expect(page?.messages.map((m) => m.id)).toEqual(["m8", "m9", "m10"]);
+    expect(page?.more).toBe(true);
+  });
+
+  it("a long-lived page never holds more than its limit, whatever the number of frames", () => {
+    let page: ThreadPage | undefined = window(100);
+    for (let n = 101; n <= 1100; n++) page = applyMessageToPage(page, ADA, own(n), "new", 100);
+    expect(page?.messages).toHaveLength(100);
+    expect(page?.messages[0]?.id).toBe("m1001");
+    expect(page?.messages[99]?.id).toBe("m1100");
+  });
+
+  it("a state frame inside the window changes nothing about its size, and a page under its limit is left alone", () => {
+    const page = window(3);
+    expect(trimPage(page, 3)).toBe(page);
+    expect(trimPage(page, 100)).toBe(page);
+    const next = applyMessageToPage(page, ADA, { ...own(2), state: "sent" }, "state", 3);
+    expect(next?.messages).toHaveLength(3);
+    expect(next?.more).toBe(false);
+  });
+
+  it("a message older than a full window is not kept", () => {
+    const full: ThreadPage = { peer: ADA, request: false, messages: [own(10), own(11), own(12)], more: true };
+    const next = applyMessageToPage(full, ADA, own(5), "new", 3);
+    expect(next?.messages.map((m) => m.id)).toEqual(["m10", "m11", "m12"]);
+  });
+});
+
+describe("an older response never overwrites newer knowledge (mergeThreadPage)", () => {
+  const own = (n: number, state: MessageState = "queued"): Message => msg({ id: `m${n}`, local_seq: n, state });
+  const page = (messages: Message[], more = false): ThreadPage => ({ peer: ADA, request: false, messages, more });
+
+  it("keeps a message a frame added after the snapshot was taken", () => {
+    const merged = mergeThreadPage(page([own(1), own(2), own(3)]), page([own(1), own(2)]));
+    expect(merged.messages.map((m) => m.id)).toEqual(["m1", "m2", "m3"]);
+  });
+
+  it("never lowers the evidence a message already has", () => {
+    const merged = mergeThreadPage(page([own(1, "delivered")]), page([own(1, "sent")]));
+    expect(merged.messages[0]!.state).toBe("delivered");
+    expect(mergeThreadPage(page([own(1, "sent")]), page([own(1, "delivered")])).messages[0]!.state).toBe("delivered");
+  });
+
+  it("takes the response's window otherwise: older messages outside it go, its `more` stands", () => {
+    const merged = mergeThreadPage(page([own(1), own(2), own(3)]), page([own(3), own(4)], true));
+    expect(merged.messages.map((m) => m.id)).toEqual(["m3", "m4"]);
+    expect(merged.more).toBe(true);
+  });
+
+  it("is the response itself when there is nothing to protect, and when the peer differs", () => {
+    const fetched = page([own(1), own(2)]);
+    expect(mergeThreadPage(null, fetched)).toBe(fetched);
+    expect(mergeThreadPage(page([own(1), own(2)]), fetched)).toBe(fetched);
+    expect(mergeThreadPage({ ...page([own(9)]), peer: BRAM }, fetched)).toBe(fetched);
+  });
 });
 
 describe("composer rules", () => {
@@ -373,6 +494,107 @@ describe("the messaging line above the list", () => {
     const b = messagingBanner(live, store(true));
     expect(b).toMatchObject({ kind: "error", fixable: true });
     expect(b?.text).toMatch(/store is full/i);
+  });
+
+  describe("what the agent button asks follows the node's reason code", () => {
+    const unset = messagingBanner({ state: "unset", reason: "x", reason_code: "not_enrolled" }, null)!;
+
+    it("a member that is not enrolled is asked to set up (enroll with a hub)", () => {
+      const a = bannerAgent(unset, "not_enrolled");
+      expect(a).toMatchObject({ goal: "setup", question: SETUP_QUESTION, primary: true });
+      expect(a?.label).toMatch(/set up messaging/i);
+      expect(bannerAgent(unset, undefined)?.question).toBe(SETUP_QUESTION); // an unknown or missing code is the general set-up
+      expect(bannerAgent(unset, "something_new")?.question).toBe(SETUP_QUESTION);
+    });
+
+    it("an unreachable home hub is a fix, although the node reports it as NOT SET", () => {
+      const a = bannerAgent(unset, "hub_unreachable");
+      expect(a).toMatchObject({ goal: "fix", question: FIX_QUESTION, primary: false });
+      expect(a?.label).toMatch(/fix/i);
+    });
+
+    it("a hub with no members is offered 'let a node use this hub', not asked to enroll", () => {
+      const a = bannerAgent(unset, "hub_waiting");
+      expect(a?.question).toBe(OFFER_QUESTION);
+      expect(a?.label).toMatch(/let a node use this hub/i);
+      expect(a?.question).not.toMatch(/enrolling with a home hub/i);
+      expect(a?.goal).toBe("setup");
+    });
+
+    it("an error is a fix, and a banner that cannot be fixed (starting) offers nothing", () => {
+      expect(bannerAgent(messagingBanner({ state: "error", reason: "x", reason_code: "store_full" }, null)!, "store_full")).toMatchObject({ goal: "fix" });
+      expect(bannerAgent(messagingBanner({ state: "starting", reason: "", reason_code: "starting" }, null)!, "starting")).toBeNull();
+    });
+  });
+});
+
+describe("what a screen reader is told about a changed list", () => {
+  const thread = (peer: string, over: Partial<Thread> = {}): Thread => ({
+    peer,
+    alias: null,
+    label: "abcd-efgh-ij",
+    request: false,
+    unread: 0,
+    last: null,
+    states: { queued: 0, sent: 0, relayed: 0, delivered: 0 },
+    ...over,
+  });
+  const request = (peer: string, seq: number): Thread => thread(peer, { request: true, last: msg({ dir: "in", state: "delivered", received_seq: seq }) });
+
+  it("says nothing about what was already there at load", () => {
+    const first = announceIncoming(null, [thread(ADA, { unread: 3 }), request(DOV, 4)], {});
+    expect(first.say).toBeNull();
+  });
+
+  it("announces a new request, and new unread messages in a conversation", () => {
+    const base = announceIncoming(null, [thread(ADA)], {}).seen;
+    const withRequest = announceIncoming(base, [thread(ADA), request(DOV, 4)], {});
+    expect(withRequest.say).toBe("New message request.");
+    expect(announceIncoming(withRequest.seen, [thread(ADA), request(DOV, 4)], {}).say).toBeNull();
+    expect(announceIncoming(base, [thread(ADA, { unread: 1, alias: "Ada" })], {}).say).toBe("New message from Ada.");
+  });
+
+  it("an ignored request that writes again is announced, as the new request it is; ignoring and 'show again' are not", () => {
+    const list = [request(DOV, 4)];
+    const open = announceIncoming(null, list, {}).seen;
+    // The user ignores it: nothing to say.
+    const ignoredNow = announceIncoming(open, list, { [DOV]: 4 });
+    expect(ignoredNow.say).toBeNull();
+    // They show it again: same newest receipt, nothing to say.
+    expect(announceIncoming(ignoredNow.seen, list, {}).say).toBeNull();
+    // It stays ignored while it holds nothing newer.
+    expect(announceIncoming(ignoredNow.seen, list, { [DOV]: 4 }).say).toBeNull();
+    // The sender writes again: the fold lifts (the store drops the entry) and the screen reader hears of it.
+    expect(announceIncoming(ignoredNow.seen, [request(DOV, 5)], {}).say).toBe("New message request.");
+    // A message to a request that is not ignored is not a new request.
+    expect(announceIncoming(open, [request(DOV, 5)], {}).say).toBeNull();
+  });
+
+  it("a request the user already ignored on this device is not announced when it first appears in the list", () => {
+    const base = announceIncoming(null, [thread(ADA)], {}).seen;
+    expect(announceIncoming(base, [thread(ADA), request(DOV, 4)], { [DOV]: 4 }).say).toBeNull();
+  });
+});
+
+describe("ignoring a message request (section 7.2: kept, never auto-pruned, no ACK)", () => {
+  const t = { peer: DOV, label: "abcd-efgh-ij", last: msg({ dir: "in", state: "delivered", text: "hi there", received_seq: 7 }) };
+
+  it("says ignore keeps the request pending on the node and only forget request discards it", () => {
+    expect(REQUEST_NOTE).toMatch(/ignore .*stays pending on the node/i);
+    expect(REQUEST_NOTE).toMatch(/nothing is sent/i);
+    expect(IGNORED_NOTE).toMatch(/stay pending on the node/i);
+    expect(IGNORED_NOTE).toMatch(/nothing was sent/i);
+    expect(IGNORED_NOTE).toMatch(/new message from one of them brings its request back/i);
+    expect(IGNORED_HERE_NOTE).toMatch(/stays pending on the node/i);
+    expect(FORGET_REQUEST_CONFIRM).toMatch(/their held words are discarded/);
+    expect(FORGET_REQUEST_CONFIRM).toMatch(/if they write again it comes back/);
+    expect(requestAnnouncement.ignored("Dov")).toMatch(/stays pending/);
+    expect(requestAnnouncement.forgotten("Dov")).toMatch(/discarded/);
+  });
+
+  it("builds a list item with the newest receipt it holds", () => {
+    expect(requestItemOf(t)).toEqual({ peer: DOV, label: "abcd-efgh-ij", preview: "hi there", seq: 7 });
+    expect(requestItemOf({ ...t, last: null })).toMatchObject({ preview: "no message held", seq: 0 });
   });
 });
 

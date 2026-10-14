@@ -2,9 +2,12 @@
 // message waits, the "received" time with the sender's claim kept apart, and the one-line summaries of a thread.
 // Pure: no React, no clock of its own (every function that needs "now" takes it).
 import { parseNodeId } from "../../lib/api/contacts";
-import { cleanPeerText } from "../../lib/api/messages";
+import { cleanPeerText, conversationThreads, requestThreads } from "../../lib/api/messages";
+import { own } from "../../lib/api/own";
 import { isApiError } from "../../lib/api/problem";
+import { isIgnored, requestSeq, type IgnoredRequests } from "../../lib/api/requests";
 import type { Contact, FabricStatus, Message, MessageState, NodeId, ServiceRecord, Thread } from "../../lib/api/types";
+import type { PromptGoal } from "../../lib/prompts";
 
 // --- Delivery evidence (§9) -----------------------------------------------------------------------------------------
 
@@ -16,13 +19,28 @@ export const STATE_COPY: Record<MessageState, string> = {
   delivered: "Their node acknowledged it. Only that acknowledgement says delivered.",
 };
 
-/** Why a message waits or was refused (§9, §15). The API sends the same reasons as `reason_code`; unknown codes fall back to its sentence. */
+/**
+ * Why a message waits or was refused (§9, §15), by `reason_code`: the wording for the state the code is emitted with
+ * (queued, except `mailbox_full`). The API sends the same reasons as `reason`; a code or a (state, code) pair this table
+ * does not know falls back to the node's own sentence.
+ */
 export const REASON_COPY: Record<string, string> = {
   waiting_for_key: "Waiting for their key. The message goes out once their card arrives.",
   hub_not_yours: "Their hub is not yours; it is delivered when you meet directly.",
   restore_pending: "Waiting for the identity restore to finish. Nothing is sealed or sent until it does.",
   mailbox_full: "Mailbox full: your hub could not take it. Your copy is kept here.",
   store_full: "This node's store is full. New messages wait until space is freed.",
+};
+
+/**
+ * The same code can read differently in another state. A hub that answers CUSTODY_PUT with REJECT_UNKNOWN_DEST leaves
+ * the message `sent` with `hub_not_yours` (§9: "your hub does not know them"), where a queued message with that code
+ * is waiting for a direct meeting. Keyed (state, code); consulted before `REASON_COPY`.
+ */
+export const REASON_COPY_BY_STATE: Partial<Record<MessageState, Record<string, string>>> = {
+  sent: {
+    hub_not_yours: "Your hub does not know them, so it cannot hold this for them. Your copy is kept here; it is delivered when you meet directly.",
+  },
 };
 
 export interface StateGlyph {
@@ -42,17 +60,22 @@ const GLYPHS: Record<MessageState, StateGlyph> = {
 
 /** Unknown enum values render as `unknown` (the U1b rule). */
 export function glyphFor(state: string): StateGlyph {
-  return GLYPHS[state as MessageState] ?? { filled: 0, label: "unknown", known: false };
+  return own(GLYPHS, state) ? GLYPHS[state] : { filled: 0, label: "unknown", known: false };
 }
 
 /** The sentence under a state; for an unknown state, that it is unknown. */
 export function stateCopy(state: string): string {
-  return STATE_COPY[state as MessageState] ?? "This node reports a state this page does not know.";
+  return own(STATE_COPY, state) ? STATE_COPY[state] : "This node reports a state this page does not know.";
 }
 
-/** Reason text for a message that waits or was refused: this UI's copy for the known codes, the node's own sentence for others, else null. */
-export function reasonText(m: Pick<Message, "reason_code" | "reason">): string | null {
-  if (m.reason_code && m.reason_code in REASON_COPY) return REASON_COPY[m.reason_code]!;
+/** Reason text for a message that waits or was refused: this UI's copy for a known (state, code), the node's own sentence for others, else null. */
+export function reasonText(m: Pick<Message, "state" | "reason_code" | "reason">): string | null {
+  const code = m.reason_code;
+  if (code) {
+    const byState = own(REASON_COPY_BY_STATE, m.state) ? REASON_COPY_BY_STATE[m.state] : undefined;
+    if (byState && own(byState, code)) return byState[code]!;
+    if (own(REASON_COPY, code)) return REASON_COPY[code]!;
+  }
   const given = m.reason ? cleanPeerText(m.reason).trim() : "";
   return given !== "" ? given : null;
 }
@@ -62,14 +85,20 @@ export function statusLine(m: Pick<Message, "state" | "reason_code" | "reason">)
   return { label: glyphFor(m.state).label, detail: stateCopy(m.state), reason: reasonText(m) };
 }
 
-/** Advanced: the evidence a state rests on, named by the protocol (§6, §9). Derived from the state and reason; the API carries no raw receipts. */
+/**
+ * Advanced: what a state means, in the protocol's own names (§6, §9). Derived from the state and reason; the API carries
+ * no raw receipts, and none is shown or implied. §16 also lists the `path` a message took under "Advanced appends", but
+ * the contract's `Message` has no path field, so none is shown (recorded for C1: the node would have to report it).
+ */
 export function evidenceName(m: Pick<Message, "dir" | "state" | "reason_code">): string {
   if (m.dir === "in") return "received here (not acknowledged to the sender until the contact is accepted, if this was a request)";
   switch (m.state) {
     case "queued":
       return "none: still in the outbox";
     case "sent":
-      return m.reason_code === "mailbox_full" ? "CUSTODY_ACK REJECT_FULL from the hub" : "frame written to a link";
+      if (m.reason_code === "mailbox_full") return "CUSTODY_ACK REJECT_FULL from the hub";
+      if (m.reason_code === "hub_not_yours") return "CUSTODY_ACK REJECT_UNKNOWN_DEST from the hub";
+      return "frame written to a link";
     case "relayed":
       return "CUSTODY_ACK ACCEPTED from a mailbox-role node for a known member";
     case "delivered":
@@ -201,6 +230,35 @@ export function messagingBanner(service: Pick<ServiceRecord, "state" | "reason" 
   return { kind: "unset", text: reason || "Messaging is not set up yet.", fixable: true };
 }
 
+// --- What the agent is asked, by the node's own reason code ----------------------------------------------------------------
+
+/** Enrolling this node with a home hub (a member's set-up, §15). */
+export const SETUP_QUESTION = "Messaging on this node is not working yet. Check why, and walk me through setting it up: enrolling with a home hub, or connecting another 111 node.";
+/** A problem with messaging that is already set up (§16 `messaging.fix`: an unreachable home hub, a full store). */
+export const FIX_QUESTION = "Messaging on this node has a problem. Check what is wrong (an unreachable home hub, or a full message store) and tell me the steps to fix it.";
+/** A node that is a home hub with no members yet (§15: it is offered "Let a node use this hub", not asked to enroll). */
+export const OFFER_QUESTION = "This node is a home hub and no node has enrolled with it yet. Walk me through letting another node use this hub: the enrollment code and address to give them, and how they enroll.";
+
+export interface BannerAgent {
+  label: string;
+  goal: PromptGoal;
+  question: string;
+  /** The set-up and offer paths are the main action of the banner; a fix is the quieter one. */
+  primary: boolean;
+}
+
+/**
+ * What the banner's agent button asks, chosen by the node's `reason_code` until U2's `messaging.*` goals land. The
+ * node reports an unreachable home hub and a hub with no members as NOT SET, but neither is a set-up for an enrolling
+ * member: an unreachable hub is a fix (§16), and a hub with no members is offered "Let a node use this hub" (§15).
+ */
+export function bannerAgent(banner: MessagingBanner, reasonCode: string | null | undefined): BannerAgent | null {
+  if (!banner.fixable) return null;
+  if (banner.kind === "error" || reasonCode === "hub_unreachable") return { label: "Ask the agent to fix it", goal: "fix", question: FIX_QUESTION, primary: false };
+  if (reasonCode === "hub_waiting") return { label: "Let a node use this hub, with the agent", goal: "setup", question: OFFER_QUESTION, primary: true };
+  return { label: "Set up messaging with the agent", goal: "setup", question: SETUP_QUESTION, primary: true };
+}
+
 // --- Errors ------------------------------------------------------------------------------------------------------------
 
 /** One sentence for a failed action: the node's own words when it gave them, a plain fallback otherwise. */
@@ -212,9 +270,66 @@ export function errorSentence(err: unknown, fallback: string): string {
 
 // --- Requests (INTROs, §7.2) -------------------------------------------------------------------------------------------
 
-/** What to say next to a pending request. Nothing is acknowledged to the sender until the user accepts. */
+/**
+ * What to say next to a pending request. Nothing is acknowledged to the sender until the user accepts. "Ignore" keeps the
+ * request pending on the node (§7.2: kept, never auto-pruned, no ACK); only "forget request" discards it.
+ */
 export const REQUEST_NOTE =
-  "Someone you have not added wrote to you. Their words are shown as text only and nothing is sent back until you accept. Their name here is only a label made from their id.";
+  "Someone you have not added wrote to you. Their words are shown as text only and nothing is sent back until you accept. Ignore moves a request out of the way on this device; it stays pending on the node and nothing is sent. Their name here is only a label made from their id.";
+
+/** Above the folded requests: what ignoring did and what brings a request back. */
+export const IGNORED_NOTE =
+  "You ignored these on this device. They stay pending on the node and nothing was sent to them, and they are not counted in the badge. A new message from one of them brings its request back.";
+
+/** In an open conversation whose request is ignored on this device. */
+export const IGNORED_HERE_NOTE = "You ignored this request on this device. It stays pending on the node and nothing was sent to them. A new message from them brings it back.";
+
+/** The two-step confirmation of "forget request": the DELETE is the only thing that discards the held words, and it is not final. */
+export const FORGET_REQUEST_CONFIRM = "forget this request (their held words are discarded; if they write again it comes back)";
+
+/** Spoken after an action on a request. */
+export const requestAnnouncement = {
+  accepted: (label: string): string => `Accepted the request from ${label}.`,
+  ignored: (label: string): string => `Ignored the request from ${label}. It stays pending on the node and nothing was sent.`,
+  restored: (label: string): string => `Showing the request from ${label} again.`,
+  forgotten: (label: string): string => `Forgot the request from ${label}. Their held words are discarded; if they write again it comes back.`,
+};
 
 /** The first lines a request holds, for the card: the thread's last line (the request has no alias to show). */
 export const requestPreview = (t: Pick<Thread, "last">): string => (t.last ? oneLine(t.last.text, 140) : "no message held");
+
+/** What the Messages list had last time it told a screen reader something. */
+export interface SeenThreads {
+  unread: Map<string, number>;
+  requests: Map<string, { seq: number; folded: boolean }>;
+}
+
+/**
+ * What to tell a screen reader about a new thread list, if anything: a new request, a request the user had ignored that
+ * wrote again (that is what lifts its fold), or new unread messages. Never about what was already there at load, and
+ * not about "show again" or an ignore (the same newest receipt). Returns the state to remember.
+ */
+export function announceIncoming(prev: SeenThreads | null, threads: readonly Thread[], ignored: IgnoredRequests): { say: string | null; seen: SeenThreads } {
+  const unread = new Map(threads.filter((t) => !t.request).map((t) => [t.peer, t.unread] as const));
+  const requests = new Map(requestThreads(threads).map((t) => [t.peer, { seq: requestSeq(t), folded: isIgnored(ignored, t.peer, requestSeq(t)) }] as const));
+  const seen = { unread, requests };
+  if (!prev) return { say: null, seen };
+  const fresh = [...requests].some(([peer, r]) => {
+    const before = prev.requests.get(peer);
+    return !r.folded && (before === undefined || (before.folded && r.seq > before.seq));
+  });
+  if (fresh) return { say: "New message request.", seen };
+  const more = conversationThreads(threads).find((t) => t.unread > (prev.unread.get(t.peer) ?? 0));
+  return { say: more ? `New message from ${threadName(more)}.` : null, seen };
+}
+
+/** One pending request as the lists draw it. `seq` is its newest `received_seq` (null when its thread is not loaded: then it cannot be ignored). */
+export interface RequestItem {
+  peer: NodeId;
+  label: string;
+  preview: string | null;
+  seq: number | null;
+}
+
+/** A request thread as a list item. */
+export const requestItemOf = (t: Pick<Thread, "peer" | "label" | "last">): RequestItem => ({ peer: t.peer, label: t.label, preview: requestPreview(t), seq: requestSeq(t) });

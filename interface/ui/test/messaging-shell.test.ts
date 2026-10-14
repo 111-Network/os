@@ -1,7 +1,7 @@
 // Shell wiring for Layer 5 (U1): routes, titles, the sidebar row, and the header badge text for message requests.
 import { describe, expect, it } from "vitest";
 import { ROUTES } from "../src/app/routes";
-import { attentionSummary } from "../src/lib/attention";
+import { attentionHref, attentionSummary } from "../src/lib/attention";
 import { isActive, minModeFor, NAV, titleFor, visibleNav } from "../src/lib/nav";
 
 describe("routes", () => {
@@ -47,5 +47,22 @@ describe("the header badge text", () => {
   it("is unchanged when there are none, and tolerates an attention object without the field", () => {
     expect(attentionSummary({ openProposals: 0, erroredServices: 0, erroredDevices: 0, openRequests: 0 })).toBe("Nothing needs you");
     expect(attentionSummary({ openProposals: 2, erroredServices: 1, erroredDevices: 1 })).toBe("2 proposals, 1 service error, 1 device error");
+  });
+});
+
+describe("where the header badge leads", () => {
+  const none = { openProposals: 0, erroredServices: 0, erroredDevices: 0 };
+
+  it("opens Messages when message requests are all it counts (Overview's block does not list them)", () => {
+    expect(attentionHref({ ...none, openRequests: 1 })).toBe("/messages");
+    expect(attentionHref({ ...none, openRequests: 5 })).toBe("/messages");
+  });
+
+  it("opens Overview's 'Needs you' whenever anything it lists is pending, requests or not", () => {
+    expect(attentionHref({ ...none, openProposals: 1, openRequests: 0 })).toBe("/overview#needs-you");
+    expect(attentionHref({ ...none, erroredServices: 1, openRequests: 2 })).toBe("/overview#needs-you");
+    expect(attentionHref({ ...none, erroredDevices: 1, openRequests: 2 })).toBe("/overview#needs-you");
+    expect(attentionHref({ ...none })).toBe("/overview#needs-you");
+    expect(attentionHref({ ...none, openRequests: 0 })).toBe("/overview#needs-you");
   });
 });

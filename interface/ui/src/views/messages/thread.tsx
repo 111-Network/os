@@ -8,6 +8,7 @@ import { useNow } from "../../app/hooks";
 import { hrefTo } from "../../app/location";
 import { Button, ButtonLink } from "../../components/button";
 import { CopyButton } from "../../components/copy-button";
+import { Disclosure } from "../../components/disclosure";
 import { Empty } from "../../components/empty";
 import { JsonBlock } from "../../components/json-block";
 import { Panel } from "../../components/panel";
@@ -15,8 +16,9 @@ import { SectionHeader } from "../../components/section-header";
 import { Textarea } from "../../components/textarea";
 import { apiStore, getAdapter } from "../../lib/api";
 import { contactName } from "../../lib/api/contacts";
-import { useApiMeta, useContacts, useThread, useThreads } from "../../lib/api/hooks";
-import { cleanPeerText, isRetryable, newestIncomingSeq, THREAD_MAX_LIMIT, THREAD_PAGE_LIMIT } from "../../lib/api/messages";
+import { useApiMeta, useContacts, useIgnoredRequests, useThread, useThreads } from "../../lib/api/hooks";
+import { cleanDeep, cleanPeerText, isRetryable, newestIncomingSeq, newestReceivedSeq, THREAD_MAX_LIMIT, THREAD_PAGE_LIMIT } from "../../lib/api/messages";
+import { isIgnored, requestSeq } from "../../lib/api/requests";
 import type { Message, NodeId } from "../../lib/api/types";
 import { cx } from "../../lib/cx";
 import { Adv } from "../../lib/mode";
@@ -29,6 +31,7 @@ import {
   draftProblem,
   errorSentence,
   evidenceName,
+  IGNORED_HERE_NOTE,
   MAX_COMPOSE_CHARS,
   reasonText,
   stateCopy,
@@ -46,19 +49,23 @@ function MessageRow({ m, now, onRetry }: { m: Message; now: number; onRetry: (id
   const wire = m.msg_id;
   return (
     <li className={cx("flex flex-col gap-1", own ? "items-end" : "items-start")} data-testid={`msg-${m.id}`}>
-      <div className={cx("max-w-[85%] whitespace-pre-wrap break-words border px-3 py-2 text-sm leading-relaxed", own ? "border-border bg-secondary text-foreground" : "border-border text-foreground")}>
+      <div dir="auto" className={cx("max-w-[85%] whitespace-pre-wrap break-words border px-3 py-2 text-sm leading-relaxed", own ? "border-border bg-secondary text-foreground" : "border-border text-foreground")}>
         {cleanPeerText(m.text)}
       </div>
       {reason ? <p className="max-w-[85%] text-end text-xs leading-snug text-muted-foreground">{reason}</p> : null}
-      <details className="max-w-[85%] text-[11px] text-muted-foreground">
-        <summary className={cx("flex min-h-8 cursor-pointer list-none flex-wrap items-center gap-x-3 gap-y-1 hover:text-foreground [&::-webkit-details-marker]:hidden", own && "justify-end")}>
-          {own ? <StateGlyph state={m.state} /> : null}
-          <span>
-            {timeLabel(m)} {whenText(m.at, now)}
+      <Disclosure
+        className="max-w-[85%] text-[11px] text-muted-foreground"
+        summary={
+          <span className="flex flex-wrap items-center gap-x-3 gap-y-1">
+            {own ? <StateGlyph state={m.state} /> : null}
+            <span>
+              {timeLabel(m)} {whenText(m.at, now)}
+            </span>
+            <span className="sr-only">(show details)</span>
           </span>
-          <span className="sr-only">(show details)</span>
-        </summary>
-        <div className="mt-1 flex flex-col gap-1 border border-border p-3 leading-relaxed">
+        }
+      >
+        <div className="flex flex-col gap-1 border border-border p-3 leading-relaxed">
           {own ? <p>{stateCopy(m.state)}</p> : <p>Arrived on this node. Messages are ordered by when they arrived here.</p>}
           {claim ? (
             <p>
@@ -66,13 +73,13 @@ function MessageRow({ m, now, onRetry }: { m: Message; now: number; onRetry: (id
             </p>
           ) : null}
         </div>
-      </details>
+      </Disclosure>
       <Adv>
         <p className="max-w-[85%] break-all text-[11px] leading-snug text-muted-foreground" data-testid={`raw-${m.id}`}>
           {m.id}
           {wire ? ` · msg_id stream ${wire.stream} epoch ${wire.epoch} n ${wire.n}` : ""} · seq {m.local_seq}
           {m.received_seq !== null ? ` · received seq ${m.received_seq}` : ""}
-          {" · evidence: "}
+          {" · what this state means: "}
           {evidenceName(m)}
         </p>
       </Adv>
@@ -161,6 +168,7 @@ export default function ThreadView({ peer }: { peer: NodeId }) {
   const contacts = useContacts();
   const contact = contacts?.find((c) => c.node_id === peer) ?? null;
   const threads = useThreads();
+  const ignoredRequests = useIgnoredRequests();
   const { ready } = useApiMeta();
   const now = useNow(true, 30_000);
   const page = slot.page;
@@ -222,7 +230,12 @@ export default function ThreadView({ peer }: { peer: NodeId }) {
     [peer, limit],
   );
 
-  const raw = useMemo(() => (page ? { peer: page.peer, request: page.request, more: page.more, count: page.messages.length, messages: page.messages.slice(-20) } : null), [page]);
+  // Peer text goes into the Advanced JSON block cleaned: JSON.stringify leaves U+202E and the isolates unescaped.
+  const raw = useMemo(() => (page ? cleanDeep({ peer: page.peer, request: page.request, more: page.more, count: page.messages.length, messages: page.messages.slice(-20) }) : null), [page]);
+
+  // The request's newest receipt (what "ignore" is keyed on): the open page is the freshest source, then the list.
+  const requestNewest = page ? newestReceivedSeq(page.messages) ?? (thread ? requestSeq(thread) : 0) : thread ? requestSeq(thread) : null;
+  const requestIgnored = isIgnored(ignoredRequests, peer, requestNewest);
 
   const back = (
     <ButtonLink href={hrefTo("/messages")} size="sm">
@@ -275,8 +288,9 @@ export default function ThreadView({ peer }: { peer: NodeId }) {
       {page?.request || contact?.request ? (
         <div className="border border-border">
           <ul>
-            <RequestRow peer={peer} label={thread?.label ?? contact?.label ?? peer.slice(0, 8)} preview={null} />
+            <RequestRow peer={peer} label={thread?.label ?? contact?.label ?? peer.slice(0, 8)} preview={null} seq={requestNewest} ignored={requestIgnored} />
           </ul>
+          {requestIgnored ? <p className="border-t border-border px-4 py-2 font-mono text-xs leading-relaxed text-muted-foreground">{IGNORED_HERE_NOTE}</p> : null}
         </div>
       ) : null}
 

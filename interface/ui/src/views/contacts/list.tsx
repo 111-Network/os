@@ -10,6 +10,7 @@ import { CopyButton } from "../../components/copy-button";
 import { Empty } from "../../components/empty";
 import { Input } from "../../components/input";
 import { apiStore, getAdapter } from "../../lib/api";
+import { cleanPeerText } from "../../lib/api/messages";
 import type { Contact } from "../../lib/api/types";
 import { Adv } from "../../lib/mode";
 import { errorSentence, shortId } from "../messages/model";
@@ -116,8 +117,8 @@ function ContactRow({ c }: { c: Contact }) {
           </span>
           <span>
             {c.label} · {shortId(c.node_id)} · trust {c.trust}
-            {c.roles && c.roles.length > 0 ? ` · roles ${c.roles.join(", ")}` : ""}
-            {c.home_hub ? ` · home hub hint ${c.home_hub}` : ""}
+            {c.roles && c.roles.length > 0 ? ` · roles ${c.roles.map(cleanPeerText).join(", ")}` : ""}
+            {c.home_hub ? ` · home hub hint ${cleanPeerText(c.home_hub)}` : ""}
           </span>
         </div>
       </Adv>

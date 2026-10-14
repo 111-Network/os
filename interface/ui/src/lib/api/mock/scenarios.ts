@@ -451,7 +451,7 @@ export const requests: ScenarioFn = (base) => {
   return {
     name: "requests",
     summary:
-      "Two pending message requests (INTROs from people not yet contacts), one of them junk. 6 s in a third request arrives; 9 s in a normal message arrives from Ada. Accepting makes the contact and moves the messages into a thread.",
+      "Two pending message requests (INTROs from people not yet contacts), one of them junk. 6 s in a third request arrives; 9 s in a normal message arrives from Ada. Accepting makes the contact and moves the messages into a thread. Forgetting a request discards its held words; its sender (never ACKed) retransmits 30 s later and the request comes back.",
     data,
     script: [
       {

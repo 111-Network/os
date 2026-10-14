@@ -7,7 +7,8 @@ import { SectionHeader } from "../../components/section-header";
 import { useApiMeta, useContacts, useThreads } from "../../lib/api/hooks";
 import { openRequests } from "../../lib/api/contacts";
 import { requestPreview } from "../messages/model";
-import { RequestNote, RequestRow } from "../messages/requests";
+import { requestSeq } from "../../lib/api/requests";
+import { RequestsSection } from "../messages/requests";
 import { AddContact } from "./add";
 import { ContactList } from "./list";
 import { sortedContacts } from "./model";
@@ -24,27 +25,18 @@ export default function ContactsView() {
     </ButtonLink>
   );
 
-  const requests = openRequests(contacts);
+  // A request's newest receipt comes from its thread; without the thread it is shown but cannot be ignored.
+  const requests = openRequests(contacts).map((c) => {
+    const t = threads?.find((x) => x.peer === c.node_id) ?? null;
+    return { peer: c.node_id, label: c.label, preview: t ? requestPreview(t) : null, seq: t ? requestSeq(t) : null };
+  });
 
   return (
     <div className="flex flex-col gap-6">
       <SectionHeader kicker="messages" title="Contacts" level={1} end={back} />
       <div className="grid gap-6 lg:grid-cols-[minmax(0,1fr)_minmax(0,24rem)]">
         <div className="flex min-w-0 flex-col gap-6">
-          {requests.length > 0 ? (
-            <section aria-labelledby="contact-requests-h" className="flex flex-col gap-2">
-              <h2 id="contact-requests-h" className="font-mono text-[10px] uppercase tracking-widest text-muted-foreground">
-                message requests ({requests.length})
-              </h2>
-              <RequestNote />
-              <ul className="border border-border">
-                {requests.map((c) => {
-                  const t = threads?.find((x) => x.peer === c.node_id) ?? null;
-                  return <RequestRow key={c.node_id} peer={c.node_id} label={c.label} preview={t ? requestPreview(t) : null} />;
-                })}
-              </ul>
-            </section>
-          ) : null}
+          <RequestsSection items={requests} headingId="contact-requests-h" />
           <section aria-labelledby="contact-list-h" className="flex flex-col gap-2">
             <h2 id="contact-list-h" className="font-mono text-[10px] uppercase tracking-widest text-muted-foreground">
               contacts

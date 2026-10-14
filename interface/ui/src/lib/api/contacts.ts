@@ -4,6 +4,7 @@
 // Nothing here is authoritative: the daemon validates a card against its own announce rules and a NodeId against
 // the expected length. These checks only catch typos before a request leaves the page, and every one fails closed
 // (an input that cannot be classified is refused with a plain sentence, never guessed at).
+import { own } from "./own";
 import type { Card, Contact, ContactCreate, NodeId } from "./types";
 
 /** The two request bodies of `POST /contacts` (exactly one of the keys). */
@@ -122,20 +123,25 @@ export const NODE_ID_PROBLEM_TEXT: Record<NodeIdProblem, string> = {
 
 // --- Card text: the base32 form of the node's announce (§7.2 (1)) -------------------------------------------------
 
-/** A genesis announce is 137–169 bytes (L2 §6.2): about 220–271 base32 characters. The bounds leave room for grouping. */
+/** A genesis announce is 137–169 bytes (L2 §6.2): about 220–271 base32 characters. */
 export const CARD_MIN_CHARS = 120;
-export const CARD_MAX_CHARS = 2048;
+/** The daemon's `MAX_CARD_TEXT` (mesh111 contacts.rs): the longest card text it accepts. The card the page sends has no separators. */
+export const CARD_MAX_CHARS = 512;
+/** Pasted text longer than this is refused before any pattern runs: the card cap plus room for the grouping marks people add. */
+export const CARD_RAW_MAX_CHARS = CARD_MAX_CHARS + 256;
 
 export type CardProblem = "empty" | "too_short" | "too_long" | "bad_character";
 
 export type CardResult = { ok: true; card: string } | { ok: false; problem: CardProblem };
 
 /**
- * Normalize pasted or scanned card text: whitespace and the dashes people group it with are dropped; what is left
- * must be plain letters and digits. The daemon decodes and verifies the announce itself.
+ * Normalize pasted or scanned card text the way the daemon's `parse_card_text` reads it: whitespace, the dashes people
+ * group it with and `=` padding are dropped (any case is fine); what is left must be plain letters and digits and fit
+ * the daemon's cap. The daemon decodes and verifies the announce itself.
  */
 export function parseCardText(input: string): CardResult {
-  const card = input.replace(/[\s-]+/g, "");
+  if (input.length > CARD_RAW_MAX_CHARS) return { ok: false, problem: "too_long" };
+  const card = input.replace(/[\s=-]+/g, "");
   if (card === "") return { ok: false, problem: "empty" };
   if (!/^[A-Za-z0-9]+$/.test(card)) return { ok: false, problem: "bad_character" };
   if (card.length < CARD_MIN_CHARS) return { ok: false, problem: "too_short" };
@@ -161,6 +167,7 @@ export type AddInput =
  * canonical form, §7.2 (2)); a card as the cleaned text. Anything else is refused with a sentence.
  */
 export function classifyAddInput(input: string): AddInput {
+  if (input.length > CARD_RAW_MAX_CHARS) return { kind: "invalid", problem: CARD_PROBLEM_TEXT.too_long };
   const raw = input.trim();
   if (raw === "") return { kind: "invalid", problem: NODE_ID_PROBLEM_TEXT.empty };
   const compact = raw.replace(/\s+/g, "");
@@ -257,7 +264,7 @@ export const ROLE_LABEL: Record<string, string> = {
 
 /** Plain labels for the roles this UI knows, in the order the contact lists them. */
 export function roleLabels(roles: readonly string[] | undefined): string[] {
-  return (roles ?? []).flatMap((r) => (r in ROLE_LABEL ? [ROLE_LABEL[r]!] : []));
+  return (roles ?? []).flatMap((r) => (own(ROLE_LABEL, r) ? [ROLE_LABEL[r]!] : []));
 }
 
 /** How the keys were learned, in words (§7.1). Unknown values read as "unknown". */

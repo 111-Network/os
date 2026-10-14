@@ -1,8 +1,9 @@
 // The camera scanner: a live preview, one decode attempt every SCAN_INTERVAL_MS, and the camera released the moment a
-// code is read, the dialog is closed or the view goes away. Offered only where `cameraSupport` says so.
+// code is read, the dialog is closed or the view goes away. Offered only where `cameraSupport` says so. The decoder is
+// loaded before the camera is asked for (`openCapture`), so a chunk that fails to load never leaves a camera on.
 import { useEffect, useRef, useState } from "react";
 import { Button } from "../../components/button";
-import { cameraErrorText, decodeFrame, fitScale, loadDecoder, SCAN_INTERVAL_MS } from "./scan";
+import { cameraErrorText, decodeFrame, fitScale, loadDecoder, openCapture, SCAN_INTERVAL_MS } from "./scan";
 
 export function Scanner({ onText, onClose }: { onText: (text: string) => void; onClose: () => void }) {
   const video = useRef<HTMLVideoElement>(null);
@@ -25,14 +26,13 @@ export function Scanner({ onText, onClose }: { onText: (text: string) => void; o
     };
     void (async () => {
       try {
-        const [decode, media] = await Promise.all([
-          loadDecoder(),
-          navigator.mediaDevices.getUserMedia({ video: { facingMode: "environment" }, audio: false }),
-        ]);
-        if (stopped) {
-          media.getTracks().forEach((t) => t.stop());
-          return;
-        }
+        const opened = await openCapture({
+          decoder: loadDecoder,
+          media: () => navigator.mediaDevices.getUserMedia({ video: { facingMode: "environment" }, audio: false }),
+          stopped: () => stopped,
+        });
+        if (!opened) return; // closed while it started; openCapture already released the camera
+        const { decode, stream: media } = opened;
         stream = media;
         const el = video.current;
         if (!el) return stop();

@@ -3,7 +3,7 @@ import { useEffect } from "react";
 import { AttentionBadge } from "../components/attention-badge";
 import { Button } from "../components/button";
 import { useApiMeta, useAttention, useConnection, useServices, useVersionChanged } from "../lib/api/hooks";
-import { attentionSummary } from "../lib/attention";
+import { attentionHref, attentionSummary } from "../lib/attention";
 import { cx, FOCUS_RING } from "../lib/cx";
 import { titleFor } from "../lib/nav";
 import { PAIR_PATH } from "./AuthGate";
@@ -57,7 +57,7 @@ export function Header({ path, drawerOpen, desktop, onMenu }: HeaderProps) {
         <p className="min-w-0 flex-1 truncate font-pixel-line text-lg text-foreground">{titleFor(path, services)}</p>
         {attention.count > 0 ? (
           <a
-            href={hrefTo("/overview#needs-you")}
+            href={hrefTo(attentionHref(attention))}
             title={attentionSummary(attention)}
             className={cx("inline-flex min-h-11 min-w-11 items-center justify-center", FOCUS_RING)}
           >

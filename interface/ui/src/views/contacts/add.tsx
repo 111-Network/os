@@ -9,7 +9,7 @@ import { Textarea } from "../../components/textarea";
 import { apiStore, getAdapter } from "../../lib/api";
 import { classifyAddInput, createBody } from "../../lib/api/contacts";
 import type { Contact } from "../../lib/api/types";
-import { addedSentence, addFailureSentence, understood } from "./model";
+import { addedSentence, addFailureSentence, addPrior, understood } from "./model";
 import { cameraSupport, scanFile } from "./scan";
 import { Scanner } from "./scanner";
 
@@ -59,10 +59,10 @@ export function AddContact() {
     setMessage(null);
     try {
       const adapter = await getAdapter();
-      const before = new Set(apiStore.getState().contacts?.map((c) => c.node_id));
+      const before = apiStore.getState().contacts;
       const contact = await adapter.contacts.add(body);
       setText("");
-      setMessage({ kind: "ok", text: addedSentence(contact, before.has(contact.node_id)), contact });
+      setMessage({ kind: "ok", text: addedSentence(contact, addPrior(before, contact.node_id)), contact });
       await Promise.all([apiStore.refreshContacts(), apiStore.refreshThreads()]);
     } catch (err) {
       if (redirectIfUnauthenticated(err)) return;
@@ -121,7 +121,7 @@ export function AddContact() {
         {message?.contact ? (
           <div>
             <ButtonLink size="sm" href={hrefTo(`/messages/${message.contact.node_id}`)}>
-              Write to them
+              {message.contact.request ? "Read the request" : "Write to them"}
             </ButtonLink>
           </div>
         ) : null}

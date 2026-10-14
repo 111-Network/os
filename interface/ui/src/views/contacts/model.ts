@@ -41,11 +41,26 @@ export function understood(input: string): { kind: "none" | "ok" | "problem"; te
   return { kind: "ok", text: `A card (${a.body.card.length} characters). Their keys come with it.` };
 }
 
-/** The sentence after a successful add. A contact without a key waits for its card; messages wait in the outbox. */
-export function addedSentence(c: Pick<Contact, "alias" | "label" | "has_key">, already: boolean): string {
+/** What the page knew of the peer before the add: `unknown` when the contact list had not loaded. */
+export type AddPrior = "new" | "contact" | "unknown";
+
+/**
+ * The sentence after a successful add. It branches on what the node returned: a peer that already wrote to us comes back as a
+ * pending request (nothing changed, and it cannot be written to until accepted); `prior` says whether a real contact was
+ * known before, or that the page could not tell. A contact without a key waits for its card; messages wait in the outbox.
+ */
+export function addedSentence(c: Pick<Contact, "alias" | "label" | "has_key"> & Partial<Pick<Contact, "request">>, prior: AddPrior): string {
   const name = rowName(c);
-  if (already) return `${name} is already a contact. Nothing changed.`;
-  return c.has_key ? `Added ${name}. You can write to them now.` : `Added ${name}. Their card is being asked for from your home hub; messages wait in the outbox until it arrives.`;
+  if (c.request) return `${name} already wrote to you, so this is a message request. Accept it under message requests to write back. Nothing was sent to them.`;
+  if (prior === "contact") return `${name} is already a contact. Nothing changed.`;
+  const keyed = c.has_key ? "You can write to them now." : "Their card is being asked for from your home hub; messages wait in the outbox until it arrives.";
+  return prior === "unknown" ? `${name} is in your contacts. ${keyed}` : `Added ${name}. ${keyed}`;
+}
+
+/** Classify the peer from the contact list as the page held it before the add. Requests are not contacts yet. */
+export function addPrior(before: readonly Pick<Contact, "node_id" | "request">[] | null | undefined, nodeId: string): AddPrior {
+  if (!before) return "unknown";
+  return before.some((c) => c.node_id === nodeId && !c.request) ? "contact" : "new";
 }
 
 /** The sentence after a failed add: a key conflict is spelled out because it is the one a person must act on. */
@@ -54,5 +69,10 @@ export function addFailureSentence(err: unknown): string {
   return /conflict|different keys|do not match/i.test(text) ? `${text} The stored keys were not changed.` : text;
 }
 
-/** Forgetting drops their keys from this node; the history stays until space is needed (API: forgetContact). */
-export const FORGET_NOTE = "Forgetting drops their keys from this node. The messages you already have stay until the space is needed.";
+/**
+ * Forgetting drops their keys from this node; the history stays until space is needed (API: forgetContact). Messages still
+ * waiting to go out are not dropped: they stay in the outbox (waiting for a key), and after a restart the peer is listed
+ * again as a contact without keys (mesh111 fabric forget).
+ */
+export const FORGET_NOTE =
+  "Forgetting drops their keys from this node. The messages you already have stay until the space is needed. Messages still waiting to go out stay in the outbox; after a restart the person shows up again as a contact without keys.";

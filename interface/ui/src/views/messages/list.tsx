@@ -8,15 +8,16 @@ import { Badge } from "../../components/badge";
 import { ButtonLink } from "../../components/button";
 import { Empty } from "../../components/empty";
 import { SectionHeader } from "../../components/section-header";
-import { useApiMeta, useThreads } from "../../lib/api/hooks";
+import { useApiMeta, useIgnoredRequests, useThreads } from "../../lib/api/hooks";
 import { conversationThreads, requestThreads } from "../../lib/api/messages";
+import type { IgnoredRequests } from "../../lib/api/requests";
 import type { Thread } from "../../lib/api/types";
 import { cx, FOCUS_RING } from "../../lib/cx";
 import { Adv } from "../../lib/mode";
 import { MessagingBanner } from "./banner";
 import { StateGlyph } from "./glyph";
-import { lastLine, requestPreview, shortId, threadGlyphState, threadName, unreadText, unresolved, whenText } from "./model";
-import { RequestNote, RequestRow } from "./requests";
+import { announceIncoming, lastLine, requestItemOf, shortId, type SeenThreads, threadGlyphState, threadName, unreadText, unresolved, whenText } from "./model";
+import { RequestsSection } from "./requests";
 
 export const threadHref = (peer: string): string => hrefTo(`/messages/${peer}`);
 
@@ -31,7 +32,9 @@ function ThreadRow({ t, now }: { t: Thread; now: number }) {
           <span className="shrink-0 text-[11px] text-muted-foreground">{t.last ? whenText(t.last.at, now) : ""}</span>
         </span>
         <span className="flex items-center justify-between gap-3">
-          <span className="min-w-0 truncate text-xs text-muted-foreground">{lastLine(t)}</span>
+          <span dir="auto" className="min-w-0 truncate text-xs text-muted-foreground">
+            {lastLine(t)}
+          </span>
           <span className="flex shrink-0 items-center gap-2">
             {t.unread > 0 ? <Badge className="border-foreground text-foreground">{unreadText(t.unread)}</Badge> : null}
             {glyph ? <StateGlyph state={glyph} /> : null}
@@ -49,30 +52,22 @@ function ThreadRow({ t, now }: { t: Thread; now: number }) {
 }
 
 /** Tell a screen reader about new unread messages and new requests, not about what was already there at load. */
-function useIncomingAnnouncements(threads: Thread[] | null): void {
-  const seen = useRef<{ unread: Map<string, number>; requests: Set<string> } | null>(null);
+function useIncomingAnnouncements(threads: Thread[] | null, ignored: IgnoredRequests): void {
+  const seen = useRef<SeenThreads | null>(null);
   useEffect(() => {
     if (threads === null) return;
-    const unread = new Map(threads.filter((t) => !t.request).map((t) => [t.peer, t.unread]));
-    const requests = new Set(threads.filter((t) => t.request).map((t) => t.peer));
-    const prev = seen.current;
-    if (prev) {
-      const fresh = requestThreads(threads).find((t) => !prev.requests.has(t.peer));
-      if (fresh) announce("New message request.");
-      else {
-        const more = conversationThreads(threads).find((t) => t.unread > (prev.unread.get(t.peer) ?? 0));
-        if (more) announce(`New message from ${threadName(more)}.`);
-      }
-    }
-    seen.current = { unread, requests };
-  }, [threads]);
+    const next = announceIncoming(seen.current, threads, ignored);
+    if (next.say) announce(next.say);
+    seen.current = next.seen;
+  }, [threads, ignored]);
 }
 
 export default function ThreadList() {
   const threads = useThreads();
   const { ready } = useApiMeta();
   const now = useNow(true, 30_000);
-  useIncomingAnnouncements(threads);
+  const ignored = useIgnoredRequests();
+  useIncomingAnnouncements(threads, ignored);
 
   const contactsLink = (
     <ButtonLink href={hrefTo("/messages/contacts")} size="sm">
@@ -98,7 +93,7 @@ export default function ThreadList() {
     );
   }
 
-  const requests = requestThreads(threads);
+  const requests = requestThreads(threads).map(requestItemOf);
   const conversations = conversationThreads(threads);
 
   return (
@@ -106,19 +101,7 @@ export default function ThreadList() {
       <SectionHeader kicker="messages" title="Messages" level={1} end={contactsLink} />
       <MessagingBanner />
 
-      {requests.length > 0 ? (
-        <section aria-labelledby="requests-h" className="flex flex-col gap-2">
-          <h2 id="requests-h" className="font-mono text-[10px] uppercase tracking-widest text-muted-foreground">
-            message requests ({requests.length})
-          </h2>
-          <RequestNote />
-          <ul className="border border-border">
-            {requests.map((t) => (
-              <RequestRow key={t.peer} peer={t.peer} label={t.label} preview={requestPreview(t)} openAfterAccept />
-            ))}
-          </ul>
-        </section>
-      ) : null}
+      <RequestsSection items={requests} headingId="requests-h" openAfterAccept />
 
       <section aria-labelledby="conversations-h" className="flex flex-col gap-2">
         <h2 id="conversations-h" className="font-mono text-[10px] uppercase tracking-widest text-muted-foreground">

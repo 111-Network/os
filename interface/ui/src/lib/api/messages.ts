@@ -48,6 +48,18 @@ export function cleanPeerText(text: string): string {
   return text.replace(BIDI_AND_CONTROLS, "");
 }
 
+/**
+ * `cleanPeerText` over every string inside a value (objects, arrays, nested). For a block that is printed as JSON:
+ * `JSON.stringify` escapes C0 controls but not U+202E or U+2066, so an override in a peer's text would still reorder
+ * the Advanced raw view. Returns a copy; numbers, booleans and null pass through.
+ */
+export function cleanDeep<T>(value: T): T {
+  if (typeof value === "string") return cleanPeerText(value) as T;
+  if (Array.isArray(value)) return value.map((v) => cleanDeep(v)) as T;
+  if (value && typeof value === "object") return Object.fromEntries(Object.entries(value).map(([k, v]) => [cleanPeerText(k), cleanDeep(v)])) as T;
+  return value;
+}
+
 /** Keep a list ordered by `local_seq` after inserting or replacing `message` (matched by `id`). */
 export function upsertMessage(messages: readonly Message[], message: Message): Message[] {
   const at = messages.findIndex((m) => m.id === message.id);
@@ -65,15 +77,57 @@ export function upsertMessage(messages: readonly Message[], message: Message): M
 }
 
 /**
- * Fold a `message` frame into a loaded conversation. A conversation that was never loaded stays unloaded
- * (the frame is not enough to show a thread). A frame for a different peer changes nothing.
+ * Keep a window at most `limit` messages: the oldest fall off and `more` says so. A page loaded as "the newest N"
+ * stays that window while frames append to it, so a long-lived tab on a chatty thread does not grow without bound.
  */
-export function applyMessageToPage(page: ThreadPage | undefined, peer: NodeId, message: Message, change: "new" | "state" | "request"): ThreadPage | undefined {
+export function trimPage(page: ThreadPage, limit: number): ThreadPage {
+  if (!(limit >= 1) || page.messages.length <= limit) return page;
+  return { ...page, more: true, messages: page.messages.slice(page.messages.length - limit) };
+}
+
+/**
+ * Fold a `message` frame into a loaded conversation. A conversation that was never loaded stays unloaded
+ * (the frame is not enough to show a thread). A frame for a different peer changes nothing. The result keeps to the
+ * window the page was loaded with (`limit`, the newest N).
+ */
+export function applyMessageToPage(
+  page: ThreadPage | undefined,
+  peer: NodeId,
+  message: Message,
+  change: "new" | "state" | "request",
+  limit: number = THREAD_MAX_LIMIT,
+): ThreadPage | undefined {
   if (!page || page.peer !== peer) return page;
   const messages = upsertMessage(page.messages, message);
   const request = change === "request" ? true : page.request;
   if (messages === page.messages && request === page.request) return page;
-  return { ...page, request, messages };
+  return trimPage({ ...page, request, messages }, limit);
+}
+
+/**
+ * Lay a fetched page over the one the store already holds, never going back in time. A response can arrive after a
+ * `message` frame that is newer than its snapshot, so: messages the response does not know and that are newer than its
+ * newest are kept, and a message never steps down the evidence ladder (a `delivered` stays `delivered` when an older
+ * snapshot says `sent`). Everything else is the response's: it is the node's own account of the window.
+ */
+export function mergeThreadPage(current: ThreadPage | null | undefined, fetched: ThreadPage): ThreadPage {
+  if (!current || current.peer !== fetched.peer) return fetched;
+  const have = new Map(current.messages.map((m) => [m.id, m] as const));
+  const got = new Set(fetched.messages.map((m) => m.id));
+  let top = -1;
+  for (const m of fetched.messages) if (m.local_seq > top) top = m.local_seq;
+  let changed = false;
+  const messages = fetched.messages.map((m) => {
+    const mine = have.get(m.id);
+    if (mine && stateRank(mine.state) > stateRank(m.state)) {
+      changed = true;
+      return mine;
+    }
+    return m;
+  });
+  const newer = current.messages.filter((m) => m.local_seq > top && !got.has(m.id));
+  if (!changed && newer.length === 0) return fetched;
+  return { ...fetched, messages: [...messages, ...newer].sort((a, b) => a.local_seq - b.local_seq) };
 }
 
 /** Threads that are pending message requests (INTROs, §7.2), most recent first as the daemon sorted them. */
@@ -91,6 +145,13 @@ export function unreadTotal(threads: readonly Thread[] | null): number {
 export function newestIncomingSeq(messages: readonly Message[]): number | null {
   let top: number | null = null;
   for (const m of messages) if (m.dir === "in" && (top === null || m.local_seq > top)) top = m.local_seq;
+  return top;
+}
+
+/** The highest `received_seq` of an incoming message (what an ignored request is keyed on); null when none arrived. */
+export function newestReceivedSeq(messages: readonly Message[]): number | null {
+  let top: number | null = null;
+  for (const m of messages) if (m.dir === "in" && m.received_seq !== null && (top === null || m.received_seq > top)) top = m.received_seq;
   return top;
 }
 
