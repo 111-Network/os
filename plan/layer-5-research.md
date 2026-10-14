@@ -47,3 +47,17 @@ All 7 forks decided (D19, 2026-10-14). Spec draft: `os/messaging/README.md`. Nex
 - Workflow run id: `wf_3da6437a-9fa` · script copy: `messaging/.workflow-wave-0.js` · 8 agents: I1, C2, C3, C4 (opus) · C1, C5, C6, C7 (sonnet).
 - Resume: `Workflow({scriptPath: "<script copy, absolute>", resumeFromRunId: "wf_3da6437a-9fa"})`. Agents never commit; the lead
   reviews each task (run its check, read the diff) and commits one per task — `messaging/TASKS.md` is the board.
+
+## Run 5 — build Wave 1 (2026-10-14)
+
+- Wave 0 closed at `a14736b` (C2 + C3 landed together after their bounces; identity I1, contract C1, node111 plumbing C4, docs C5,
+  knowledge C6, sidecar/assets C7 committed earlier). Known interim red: `pnpm test` in `interface/ui` (12 adapter/mock tests)
+  until U1 lands; bootstrap `check.sh` stops at its UI stage for the same reason.
+- Workflow run id: `wf_f537132f-cdb` · script copy: `messaging/.workflow-wave-1.js` · 5 agents in parallel on disjoint files:
+  F1 fabric runtime (opus, xhigh) · P1 hosted panels (opus) · M1 Meshtastic (opus) · U1 UI data layer + Messages + Contacts
+  (sonnet) · A1 agent tools (opus). The F1 brief names the store API as landed after C3 (`receive_message` is the only
+  production path that records a peer's `n`; `Store::offer` is test-only; `complete_partials` for the restart path) and the
+  evicted-partial / SACK interaction to resolve in `frag.rs`/`outbox.rs`.
+- Resume: `Workflow({scriptPath: "<script copy, absolute>", resumeFromRunId: "wf_f537132f-cdb"})`. Never message in-flight
+  workflow agents (a SendMessage forks them). The lead reviews each task (check + diff), bounces via a fresh agent, commits one
+  per task; then Wave 2 (F2, U2, B1), Wave 3 (V1–V4).
