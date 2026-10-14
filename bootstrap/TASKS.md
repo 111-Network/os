@@ -20,6 +20,53 @@ Legend: ⬜ todo · 🔧 in flight · 🔁 bounced · ✅ verified + committed
   - `hyper 1` (`default-features = false, features = ["client", "http1"]`), `hyper-util 0.1` (`features = ["tokio"]`), `http-body-util 0.1` — all already in the graph via `axum`; now direct deps for the client side. +0 crates by themselves.
   - hyper's `client` feature unconditionally pulls `want 0.3.2` (MIT, ~600 lines, seanmonstar) → `try-lock 0.2.5` (MIT, ~270 lines, zero deps). **+2 crates.** The spec assumed "hyper-util client, no new crate"; that is not possible — every hyper client path (conn API, `hyper-util` `client`/`client-legacy`) goes through `hyper/client` → `want`. The conn API was chosen over `client-legacy` because it adds nothing else (`client-legacy` would also wire in `socket2`/`libc`/`futures-channel`/`tracing`). The alternative was a hand-rolled HTTP/1.1 client (chunked decoding included) over `httparse` — more code to own than these two tiny crates from hyper's author. `reqwest` was not considered (policy).
 
+- **Layer 5 additions (D19 e / D20; `os/messaging/TASKS.md` rows F2 + B1) — pre-approved by D19 (store engine, bulk primitive) and D20 (spec v1.2 lock, §19 L1); sign-off recorded by B1 (2026-10-14) against F2's `Cargo.lock`:** `mesh111` (path dep, `os/messaging/crates/mesh111`, `daemon/fabric/` its only caller) brings **39 third-party crates compiled for the musl targets** (table below; 12 of them compile-time only: proc-macros, the crates only they use, and build-script helpers) plus 11 target-gated lockfile entries never compiled for `x86_64`/`aarch64-unknown-linux-musl`. Already in the graph at the same pins: `id111`, `blake2 =0.11.0`, `chacha20poly1305 =0.11.0`, `getrandom 0.2`, `serde`, `thiserror 2`, `zeroize`, `tokio` and `futures` (feature unification only). Native code: **SQLCipher 4.14.0 community** (on SQLite 3.51.3; BSD-3-Clause, Zetetic LLC + public domain) bundled in `libsqlite3-sys`, and **OpenSSL 3.6.3** (Apache-2.0) compiled from `openssl-src` as SQLCipher's crypto provider — both built from crate sources by cc-rs / `perl Configure` with the musl cross compilers (`scripts/cross-build.sh` pins `CC_*`/`AR_*`; build hosts need `perl` + `make`); no system library, nothing downloaded. **Binary growth** (release, LTO thin, stripped; measured 2026-10-14 by linking the store + fabric runtime + `tcp-lan` + blobs into the `111` binary, the paths F2 wires): x86_64 8 353 032 → 15 562 168 B (**+7.2 MB, +86 %**; store alone +6.45 MB), aarch64 7 082 664 → 13 062 536 B (**+6.0 MB, +84 %**; store alone +5.37 MB) — almost all of it SQLCipher + the static OpenSSL 3 libcrypto with its default provider; the fabric itself (bao-tree, ciborium, blake3, links) is ≈ +0.6–0.8 MB. The probe binary delivered a message between two SQLCipher stores over `tcp-lan` when run (x86_64 static), and its `store.db` starts with ciphertext, not `SQLite format 3`. `scripts/cross-build.sh` itself, on HEAD with F2's dependency lines and a store open in `main`: x86_64 8 348 936 → 14 796 184 B, aarch64 7 082 664 → 12 456 328 B, both static, aarch64 `p_align` 0x4000, the new SQLCipher assert passing on both.
+
+| Crate | Version | License (as declared) | Why (pulled by) | Audit note |
+|---|---|---|---|---|
+| `mesh111` | 0.0.0 | ours (`os/LICENSE.md` draft) | node111 → `daemon/fabric/` | Layer 5 library, `#![forbid(unsafe_code)]`; never holds key bytes (the `Sealer` handle) |
+| `rusqlite` | 0.40.2 | MIT | mesh111 §10.1 store | feature `bundled-sqlcipher-vendored-openssl` only; safe wrapper; rusqlite org |
+| `libsqlite3-sys` | 0.38.2 | MIT (bundled SQLCipher: BSD-3-Clause; SQLite: public domain) | rusqlite | compiles the SQLCipher 4.14.0 amalgamation (C); `gen-notices.py` names it and reproduces the BSD-3-Clause text |
+| `openssl-sys` | 0.9.117 | MIT | libsqlite3-sys (SQLCipher crypto provider) | FFI only; `vendored` via openssl-src, so no system libcrypto in the static binary |
+| `openssl-src` | 300.6.1+3.6.3 | MIT/Apache-2.0 (OpenSSL itself: Apache-2.0) | openssl-sys (build-dependency) | build host only: configures + compiles OpenSSL 3.6.3 from the crate's sources; the linked libcrypto is Apache-2.0 — `THIRD-PARTY-NOTICES.md` must name it (gap reported by B1) |
+| `pkg-config` | 0.3.34 | MIT OR Apache-2.0 | libsqlite3-sys, openssl-sys (build-dependency) | build scripts only; probing is bypassed by the bundled/vendored features; not linked |
+| `vcpkg` | 0.2.15 | MIT/Apache-2.0 | libsqlite3-sys, openssl-sys (build-dependency) | build scripts only (Windows MSVC probing, inert here); not linked |
+| `hashlink` | 0.12.2 | MIT OR Apache-2.0 | rusqlite (statement cache) | small, safe; uses `hashbrown 0.17` (already in the graph) |
+| `foldhash` | 0.2.0 | Zlib | hashbrown 0.17 default hasher (via hashlink) | non-cryptographic hasher for in-memory maps only; Zlib notice carried by `gen-notices.py` |
+| `fallible-iterator` | 0.3.0 | MIT/Apache-2.0 | rusqlite | tiny; sfackler |
+| `fallible-streaming-iterator` | 0.1.9 | MIT/Apache-2.0 | rusqlite | tiny; sfackler |
+| `blake3` | 1.8.7 | CC0-1.0 OR Apache-2.0 OR Apache-2.0 WITH LLVM-exception | mesh111 §11 content addressing; bao-tree | official BLAKE3 team crate; build script compiles its SIMD C/asm kernels with cc-rs (same cross compilers) |
+| `constant_time_eq` | 0.4.2 | CC0-1.0 OR MIT-0 OR Apache-2.0 | blake3 (`Hash` equality) | tiny |
+| `bao-tree` | 0.16.1 | MIT OR Apache-2.0 | mesh111 §11 verified streaming (D19 a) | n0-computer; v1 uses outboards only (no wire transfer); brings the closure below |
+| `iroh-io` | 0.6.2 | Apache-2.0 OR MIT | bao-tree (async positional I/O traits) | n0-computer |
+| `positioned-io` | 0.3.5 | MIT | bao-tree | positional file reads |
+| `range-collections` | 0.4.6 | MIT OR Apache-2.0 | bao-tree (chunk ranges) | rklaehn (n0) |
+| `binary-merge` | 0.1.2 | MIT OR Apache-2.0 | range-collections | rklaehn; tiny |
+| `inplace-vec-builder` | 0.1.1 | MIT OR Apache-2.0 | range-collections | rklaehn; tiny |
+| `ref-cast` | 1.0.27 | MIT OR Apache-2.0 | range-collections | dtolnay |
+| `ref-cast-impl` | 1.0.27 | MIT OR Apache-2.0 | ref-cast | proc-macro, compile time only |
+| `self_cell` | 1.3.0 | Apache-2.0 OR GPL-2.0-only | bao-tree | we elect **Apache-2.0** (the GPL option is not taken) |
+| `genawaiter` | 0.99.1 | MIT | bao-tree (generator-based encoder/decoder) | stable but unmaintained upstream (last release 2020) — watch item; used only inside bao-tree |
+| `genawaiter-macro` | 0.99.1 | MIT/Apache-2.0 | genawaiter | macro_rules helpers |
+| `genawaiter-proc-macro` | 0.99.1 | MIT/Apache-2.0 | genawaiter | proc-macro, compile time only |
+| `proc-macro-hack` | 0.5.20+deprecated | MIT OR Apache-2.0 | genawaiter, genawaiter-proc-macro | compile time only; deprecated upstream (obsolete on modern Rust) |
+| `proc-macro-error` | 0.4.12 | MIT OR Apache-2.0 | genawaiter-proc-macro | compile time only; RustSec lists proc-macro-error as unmaintained (informational, RUSTSEC-2024-0370 — no `cargo audit` on this box, re-check in CI) |
+| `proc-macro-error-attr` | 0.4.12 | MIT OR Apache-2.0 | proc-macro-error | proc-macro, compile time only |
+| `syn` | 1.0.109 | MIT OR Apache-2.0 | genawaiter-proc-macro, proc-macro-error(-attr), syn-mid | compile time only; a second `syn` major in the build graph (build time, not binary size) |
+| `syn-mid` | 0.5.4 | Apache-2.0 OR MIT | proc-macro-error-attr | compile time only |
+| `futures-lite` | 2.6.1 | Apache-2.0 OR MIT | bao-tree, iroh-io | smol-rs |
+| `parking` | 2.2.1 | Apache-2.0 OR MIT | futures-lite | smol-rs; thread parking primitive |
+| `pin-project` | 1.1.13 | Apache-2.0 OR MIT | iroh-io | taiki-e |
+| `pin-project-internal` | 1.1.13 | Apache-2.0 OR MIT | pin-project | proc-macro, compile time only |
+| `ciborium` | 0.2.2 | Apache-2.0 | mesh111 §3.3 deterministic CBOR bodies | enarx project |
+| `ciborium-io` | 0.2.2 | Apache-2.0 | ciborium, ciborium-ll | enarx |
+| `ciborium-ll` | 0.2.2 | Apache-2.0 | ciborium | enarx |
+| `half` | 2.7.1 | MIT OR Apache-2.0 | ciborium-ll (f16) | small |
+| `zerocopy` | 0.8.63 | BSD-2-Clause OR Apache-2.0 OR MIT | half | Google; we elect Apache-2.0/MIT |
+| `zerocopy-derive` | 0.8.63 | BSD-2-Clause OR Apache-2.0 OR MIT | zerocopy | proc-macro, compile time only |
+
+Target-gated lockfile entries (resolved by Cargo, **never compiled** for the two musl targets; listed so the lock diff is fully signed off): `sqlite-wasm-rs` 0.5.5 (MIT; rusqlite, `wasm32-unknown-unknown` only) → `rsqlite-vfs` 0.1.1 (MIT), `hashbrown` 0.16.1, `js-sys` 0.3.106, `wasm-bindgen` 0.2.129 (+ `-macro`, `-macro-support`, `-shared`), `bumpalo` 3.20.3, `rustversion` 1.0.23 (all MIT OR Apache-2.0); `crunchy` 0.2.4 (MIT; `half`, `spirv` only).
+
 **Module stubs** (created in T0, tasks fill them): `util/{fs,hash,http,run}` · `calver` · `manifest` · `minisign` · `floor` · `identity/{mod,bip32,nip49}` · `install/{mod,preflight,probe,categorize,packages,stage,supervise,verify,offer,receipt}` · `install/phone/{mod,adb,preflight,apk,runas,harden,start,verify,teardown}` · `daemon/{mod,supervise,watchdog,health,kb}` · `daemon/dashboard/{mod,routes}` · `daemon/transport/{mod,venv,config,netlink}` · `daemon/updater/{mod,fetch,stage}` · `update_helper` · `update_guard` · `probation` · `cli` · `config` · `uninstall`.
 
 **Cross-module APIs** (frozen at T0; signatures may gain `&self`-style plumbing but not change semantics):

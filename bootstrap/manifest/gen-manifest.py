@@ -11,8 +11,21 @@ Usage:
       --keychain-gen 1 --pubkey 'RW...' [--sig-by-prev '...'] \
       --url-base https://github.com/111-Network/os/releases/download/v2026.10.12 \
       --out dist/channel-111-stable.toml
+
+Layer 5 artifacts (D20; os/messaging/README.md section 19 L1) are optional and taken under the
+names their CI build scripts give them, so the tag stays in the published file name:
+  meshmud-<tag>-linux-amd64 / -linux-arm64      scripts/meshmud-build.sh
+      -> [pkg.meshmud.target.x86_64-unknown-linux-musl] / [...aarch64-unknown-linux-musl]
+  meshtastic-web-<tag>.tar + meshtastic-web-<tag>.tree    scripts/meshtastic-web-build.sh
+      -> [bundle.meshtastic-web], tree-sha256 = sha256 of the .tree file (the bundle hash)
+  meshtastic-presence-lock.txt                  messaging/sidecars/meshtastic-presence/
+      -> [presence-lock]
+At most one file per pattern; a .tar without its .tree (or the reverse) is an error. The same
+bytes ride inside the payloads (bin/meshmud, panels/meshtastic-web/, share/meshtastic-presence/),
+which the node cross-checks against these pins (manifest.rs `verify_layer5_tree`).
 """
 import argparse
+import glob
 import hashlib
 import os
 import sys
@@ -29,7 +42,23 @@ ARTIFACTS = {
     "termux-api.apk": ("apk.termux-api", "termux-api"),
     "rns-lock.txt": ("rns-lock", "rns-lock.txt"),
     "kb.tar.gz": ("kb", "kb.tar.gz"),
+    "meshtastic-presence-lock.txt": ("presence-lock", "meshtastic-presence-lock.txt"),
 }
+
+# Layer 5 meshmud binaries: Go arch suffix of meshmud-build.sh -> target triple of the payload it rides in.
+MESHMUD_ARCH = {
+    "amd64": "x86_64-unknown-linux-musl",
+    "arm64": "aarch64-unknown-linux-musl",
+}
+
+
+def one_match(artifacts_dir, pattern):
+    """The single file matching pattern in artifacts_dir, or None; more than one is an error."""
+    hits = sorted(glob.glob(os.path.join(glob.escape(artifacts_dir), pattern)))
+    hits = [h for h in hits if os.path.isfile(h)]
+    if len(hits) > 1:
+        sys.exit(f"more than one artifact matches {pattern}: {', '.join(os.path.basename(h) for h in hits)}")
+    return hits[0] if hits else None
 
 
 def sha256_of(path):
@@ -79,6 +108,36 @@ def main():
         ]
     if not found_any:
         sys.exit("no artifacts found in " + a.artifacts_dir)
+
+    for arch, triple in MESHMUD_ARCH.items():
+        path = one_match(a.artifacts_dir, f"meshmud-*-linux-{arch}")
+        if path is None:
+            continue
+        fname = os.path.basename(path)
+        lines += [
+            f"[pkg.meshmud.target.{triple}]",
+            f'url = "{a.url_base}/{fname}"',
+            f'sha256 = "{sha256_of(path)}"',
+            f"size = {os.path.getsize(path)}",
+            "",
+        ]
+
+    web_tar = one_match(a.artifacts_dir, "meshtastic-web-*.tar")
+    web_tree = one_match(a.artifacts_dir, "meshtastic-web-*.tree")
+    if (web_tar is None) != (web_tree is None):
+        sys.exit("meshtastic-web: the .tar and its .tree must both be present (or neither)")
+    if web_tar is not None:
+        if web_tar[: -len(".tar")] != web_tree[: -len(".tree")]:
+            sys.exit(f"meshtastic-web: {os.path.basename(web_tar)} and {os.path.basename(web_tree)} name different tags")
+        fname = os.path.basename(web_tar)
+        lines += [
+            "[bundle.meshtastic-web]",
+            f'url = "{a.url_base}/{fname}"',
+            f'sha256 = "{sha256_of(web_tar)}"',
+            f"size = {os.path.getsize(web_tar)}",
+            f'tree-sha256 = "{sha256_of(web_tree)}"',
+            "",
+        ]
 
     if a.debs_dir and os.path.isdir(a.debs_dir):
         for fname in sorted(os.listdir(a.debs_dir)):

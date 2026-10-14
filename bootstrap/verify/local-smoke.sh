@@ -44,6 +44,18 @@ gate "V13 16KB p_align (cross-build assert)" sh -c 'readelf -lW /tmp/dist-test/1
 gate "Termux assets dry-run" sh termux/tests/dryrun.sh
 gate "full cargo suite (all modules)" cargo test --quiet
 
+say "== Layer 5 local verification (os/messaging/README.md §19 L1, §20) =="
+# mesh111 workspace: fmt, clippy, tests (two nodes + hub in-process, loss injection), musl check ×2
+# with SQLCipher + vendored OpenSSL compiled for both targets.
+gate "L5 messaging check (mesh111: fmt/clippy/test/musl ×2)" sh ../messaging/scripts/check.sh
+gate "L5 manifest entries (meshmud / web bundle / presence lock)" cargo test --test manifest_layer5 -- --quiet
+gate "L5 build-script gates (meshmud / meshtastic-web pins)" sh scripts/notices/tests/build-scripts-gate.sh
+if command -v python3 >/dev/null 2>&1; then
+  gate "L5 presence sidecar (no send path, hardened output)" sh ../messaging/sidecars/meshtastic-presence/run-tests.sh
+else
+  say "SKIPPED L5 presence sidecar (python3 not found)"
+fi
+
 # namespace e2e attempt (V8-variant) — SKIP when unshare is unavailable
 if command -v unshare >/dev/null 2>&1 && unshare -rm true 2>/dev/null; then
   gate "V8-variant namespace install" sh verify/linux-e2e.sh --namespace

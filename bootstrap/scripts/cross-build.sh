@@ -4,6 +4,15 @@
 # aarch64 links with -z max-page-size=16384 (16KB-page Android kernels) and the
 # script asserts p_align=0x4000 (spec CI assert).
 #
+# SQLCipher (Layer 5, os/messaging/README.md §10.1, §19 L1): once node111 depends on `mesh111`, the
+# release links SQLCipher 4.x + a vendored OpenSSL 3 (rusqlite `bundled-sqlcipher-vendored-openssl`,
+# built from crate sources by cc-rs / openssl-src: no system libcrypto, nothing downloaded). CC/AR are
+# pinned per target below so a missing cross compiler is a hard error, never a silent host-gcc
+# fallback. The asserts then check the binary carries SQLCipher; without the dependency they say so.
+# The size of each binary is printed (Layer 5 binary-growth record: bootstrap/TASKS.md, B1).
+#
+# CARGO_TARGET_DIR is honoured (parallel builders keep private target dirs).
+#
 # usage: scripts/cross-build.sh [--allow-no-ui] CALVER [OUTDIR]
 # The release embeds interface/ui/dist. With pnpm the UI is always rebuilt;
 # without pnpm the build FAILS unless dist/ exists and is newer than every UI
@@ -31,7 +40,14 @@ export PATH
 
 export CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER=x86_64-linux-musl-gcc
 export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER=aarch64-linux-musl-gcc
+# C toolchain for SQLCipher + OpenSSL (cc-rs and openssl-src read these; same compilers cc-rs would
+# find by prefix in ../messaging/scripts/check.sh, named so a missing one fails instead of falling back).
+export CC_x86_64_unknown_linux_musl=x86_64-linux-musl-gcc
+export AR_x86_64_unknown_linux_musl=x86_64-linux-musl-ar
+export CC_aarch64_unknown_linux_musl=aarch64-linux-musl-gcc
+export AR_aarch64_unknown_linux_musl=aarch64-linux-musl-ar
 export NODE111_BUILD_VERSION="$VER"
+TARGET_DIR=${CARGO_TARGET_DIR:-target}
 
 OUT=${2:-dist/releases/$VER}
 mkdir -p "$OUT"
@@ -64,11 +80,11 @@ fi
 
 echo "== build x86_64-unknown-linux-musl (release) =="
 cargo build --release --target x86_64-unknown-linux-musl
-cp target/x86_64-unknown-linux-musl/release/111 "$OUT/111-x86_64-unknown-linux-musl"
+cp "$TARGET_DIR/x86_64-unknown-linux-musl/release/111" "$OUT/111-x86_64-unknown-linux-musl"
 
 echo "== build aarch64-unknown-linux-musl (release, 16KB pages) =="
 cargo build --release --target aarch64-unknown-linux-musl
-cp target/aarch64-unknown-linux-musl/release/111 "$OUT/111-aarch64-unknown-linux-musl"
+cp "$TARGET_DIR/aarch64-unknown-linux-musl/release/111" "$OUT/111-aarch64-unknown-linux-musl"
 
 echo "== asserts =="
 if file "$OUT/111-x86_64-unknown-linux-musl" | grep -q "static-pie linked\|statically linked"; then
@@ -89,6 +105,28 @@ fi
 ALIGN=$(readelf -lW "$OUT/111-aarch64-unknown-linux-musl" | awk '$1=="LOAD"{print $NF; exit}')
 echo "aarch64 LOAD align: $ALIGN"
 [ "$ALIGN" = "0x4000" ] || { echo "FAIL: expected p_align 0x4000 (16KB pages)" >&2; exit 1; }
+
+# SQLCipher rides in only through `mesh111` (Layer 5, task F2 adds the path dependency). When the lock
+# has it, both binaries must carry SQLCipher's codec (its `cipher_version` pragma name and the
+# `sqlcipher` banner) — a build that silently fell back to plain SQLite or dropped the store fails here.
+if grep -q '^name = "mesh111"$' Cargo.lock; then
+  for t in x86_64 aarch64; do
+    bin="$OUT/111-$t-unknown-linux-musl"
+    if LC_ALL=C grep -aq 'cipher_version' "$bin" && LC_ALL=C grep -aqi 'sqlcipher' "$bin"; then
+      echo "ok: $t links SQLCipher (vendored OpenSSL)"
+    else
+      echo "FAIL: $t binary carries no SQLCipher codec although node111 depends on mesh111" >&2
+      exit 1
+    fi
+  done
+else
+  echo "note: node111 does not depend on mesh111 yet (Layer 5 task F2) — SQLCipher assert not applicable"
+fi
+
+echo "== sizes (bytes; Layer 5 growth is recorded in bootstrap/TASKS.md, B1) =="
+for t in x86_64 aarch64; do
+  printf '%s %s\n' "$t" "$(wc -c <"$OUT/111-$t-unknown-linux-musl" | tr -d ' ')"
+done
 
 GOT=$("$OUT/111-x86_64-unknown-linux-musl" --version)
 [ "$GOT" = "$VER" ] || { echo "FAIL: --version printed $GOT, want $VER" >&2; exit 1; }
