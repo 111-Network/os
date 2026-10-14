@@ -170,6 +170,16 @@ ADR-lite. Every decision, its rejected alternatives, and why. Newest last; never
 - **Rejected:** trusting loopback on Android; deferring the Layer 2 residual to Cat-1 port time (owner chose to close it); automatic identify on plug-in; agent-set region; runtime firmware downloads; building the Meshtastic bridge, analog tier or applier now.
 - **Why:** the owner wants a clean checkpoint through Layer 4 with nothing provisional left: every open question answered, built where it touches Layers 0–4, parked explicitly (`parked.md`) where it belongs to a later layer.
 
+## D18 — Layer 5 (Messaging & Data) scope lock: next layer, hosted panels, Meshtastic this cycle
+
+- **Date:** 2026-10-14
+- **Decision (owner, at kickoff, before research):**
+  - **(1) Next layer = Layer 5, "with Layer 6 in mind."** The messaging/data fabric must plug into the device-connection core (`devices.md`: RNode/Meshtastic/MeshCore boards, phone relay over TCP to a hub, BLE later) without redesign; Layer 6 follows on top of it.
+  - **(2) Hosting principle for the dashboard (verbatim):** "its important that we do ALL the heavy lifting and give users the unified dashboard the literally can host any mesh and offline project." Adopted projects appear **inside** our dashboard with their own panel; we maintain the integration and never rebuild their UI. This reopens D15's link-out-only / no-iframe rule: the hosting mechanics are a research item (lens 3 of the Layer 5 sweep) and the D15 amendment is decided together with the Layer 5 options brief.
+  - **(3) Meshtastic this cycle:** identified (consented probe, D17 #8) + a service row with its hosted panel + read-only presence (nodes it hears) into Nearby; **no message bridge** (`parked.md` P1 stays parked until the envelope exists). Supersedes the "detect and name only" part of D17 #2.
+- **Rejected:** Layer 6 opener first (owner chose messaging first); a full Meshtastic bridge now (needs the Layer 5 envelope); keeping Meshtastic at detect-and-name.
+- **Why:** human messaging is the flagship service (README §5) and the owner wants one dashboard to be where every network lives; the device core (Layer 6) then binds real radios to a fabric that already exists.
+
 ## Pending
 
 - Move deep architecture content out of `os/README.md` into per-layer specs (blocked on layer homes existing).
