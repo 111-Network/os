@@ -1,0 +1,42 @@
+[package]
+name = "mesh111"
+version = "0.0.0" # calver stamped at release time, mirroring node111
+edition.workspace = true
+license-file = "../../../LICENSE.md" # DRAFT project license (os/LICENSE.md); see os/LICENSING.md
+
+# Dependency policy (os/messaging/TASKS.md): this set is the spec's §2/§19 list
+# (D19 e store engine, D19 a bulk primitive); additions need reviewer sign-off
+# recorded in the task row. Exact versions are pinned by Cargo.lock at T0.
+[dependencies]
+# Layer 2 crypto surface (spec §3): seal/open variants, announces, pin store,
+# counters, strict Ed25519 verify. Never key bytes — only through the Sealer
+# handle (src/sealer.rs).
+id111 = { path = "../../../identity/crates/id111" }
+# §10 store engine (D19 e): SQLCipher 4.x community + vendored OpenSSL so the
+# musl-static binary has no dynamic libcrypto (research 05, finding 1).
+rusqlite = { version = "0.40", features = ["bundled-sqlcipher-vendored-openssl"] }
+# §11 content addressing + verified streaming (D19 a adopts, never reinvents).
+blake3 = "1"
+bao-tree = "0.16"
+# §3.3 deterministic CBOR message bodies (Cat 2+).
+ciborium = "0.2"
+# §3 pair_mac (keyed BLAKE2b-128), §10.2 store KDF — the same hash family as L2.
+blake2 = "=0.11.0"
+# §10.3 private blob AEAD (object_key, XChaCha20-Poly1305, derived nonces).
+chacha20poly1305 = { version = "=0.11.0", default-features = false, features = ["alloc"] }
+# §5/§11 random session tags and object keys; §4 entropy discipline via getrandom.
+getrandom = "0.2"
+serde = { version = "1", features = ["derive"] }
+thiserror = "2"
+zeroize = { version = "1", features = ["derive"] }
+# §8 Link trait (boxed futures, object-safe) and the tcp-lan adapter.
+tokio = { version = "1", features = ["rt", "net", "sync", "time", "io-util", "macros"] }
+futures = { version = "0.3", default-features = false, features = ["std"] }
+
+[dev-dependencies]
+tempfile = "3"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "test-util"] }
+
+[lib]
+name = "mesh111"
+path = "src/lib.rs"
