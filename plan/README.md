@@ -49,14 +49,14 @@ and `os/NN-<slug>/TASKS.md`, where the layer's code is.
 | 3 Local Intelligence | none | no plan material: no research sweep or panel was run; see D10 and `os/30-intelligence/` |
 | 4 Interface & Dashboard | `layers/40-interface/` | options, triage |
 | 5 Messaging & Data | `layers/50-messaging/` | full set: research, options, review, runs |
-| 6 Transport & Bridge | none yet | opener brief is [`cross-layer/devices.md`](cross-layer/devices.md); folder `layers/60-transport/` is created at Layer 6 kickoff |
+| 6 Transport & Bridge | `layers/60-transport/` | research, coordinates, runs (kickoff 2026-10-19, D23); opener brief [`cross-layer/devices.md`](cross-layer/devices.md) |
 | 7 Relay & Presence | none yet | reserved name `70-relay`; pending |
 | 8 Storage & Shared State | none yet | reserved name `80-storage`; pending |
 | 9 Self-Healing & Evolution | none yet | reserved name `90-evolution`; pending |
 
 ## Naming conventions
 
-- **Layer folder:** `layers/NN-<slug>/`, where `NN` is the layer number from `INDEX.md` times 10 and the name is identical to the layer's own folder under `os/`. Current names: `00-knowledge`, `10-bootstrap`, `20-identity`, `40-interface`, `50-messaging` (Layer 3, `30-intelligence`, has no plan material, so no plan folder). Reserved for layers not started yet: `60-transport`, `70-relay`, `80-storage`, `90-evolution`. `plan/` and `hooks/` are not layers and stay unnumbered.
+- **Layer folder:** `layers/NN-<slug>/`, where `NN` is the layer number from `INDEX.md` times 10 and the name is identical to the layer's own folder under `os/`. Current names: `00-knowledge`, `10-bootstrap`, `20-identity`, `40-interface`, `50-messaging`, `60-transport` (Layer 3, `30-intelligence`, has no plan material, so no plan folder). Reserved for layers not started yet: `70-relay`, `80-storage`, `90-evolution`. `plan/` and `hooks/` are not layers and stay unnumbered.
 - **Fixed names inside a layer folder:** `NN-<slug>/README.md`, `NN-<slug>/options.md`, `NN-<slug>/research/coordinates.md`, `NN-<slug>/review/triage.md`. A layer that lacks one of these simply has not produced it.
 - **Research reports:** `research/NN-<topic>.md`, numbered in run order. Gap-fill reports reuse one number and add a suffix (07-gap-1, 07-gap-2, ...).
 - **Review reports:** `review/<lens>.md` for each judge of the spec panel (crypto, panels, integration), `NN-<slug>/review/recheck.md` for the re-check, `NN-<slug>/review/wave-N.md` for the triage of build wave N.

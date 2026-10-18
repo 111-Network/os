@@ -240,6 +240,33 @@ ADR-lite. Every decision, its rejected alternatives, and why. Newest last; never
   matches "free secure communication is everyone's right", and it sits naturally beside the GPL-3.0 neighbours 111 hosts (Meshtastic firmware and web client,
   meshtastic-python). Follow-up: the release checklist must publish the tagged Corresponding Source beside every binary release (`LICENSING.md` section 8).
 
+## D23 — Layer 6 (Transport & Bridge) kickoff: sequencing, bridge semantics, v1 networks, hardware
+
+- **Date:** 2026-10-19
+- **Decision (owner, at kickoff):**
+  - **(1) Sequencing.** Layer 6 research and its options brief start now; the Layer 5 closure (Wave 2 bounce, V1–V4, lock entry, tag)
+    runs alongside with at most two or three build agents; the Layer 6 build starts only after the Layer 5 lock. The plan folder is
+    updated as work lands (`plan/layers/60-transport/`).
+  - **(2) What "bridge" means.** Readable text flows both ways between our network and the foreign ones. Owner's words: "the chances
+    are that people will get used to our network fully, even the dashboard. The UI of other services must be available fully, but
+    still text appears in ours, in the Messages view, from different networks. Keep it categorized for other networks." So: the
+    foreign networks' own UIs stay hosted as panels (Layer 5 §13), **and** their messages appear in our Messages view under their own
+    per-network categories (never merged into 111 threads); our users can send into those networks in each one's native format; a
+    node on several networks relays between them (per-channel opt-in, loop guard; design in the Layer 6 spec). Sealed 111 traffic
+    keeps riding those radios opaquely between 111 nodes through the Layer 5 §8 link seams (`meshtastic-client`, `rns-bridge`).
+    This supersedes the Layer 5 "no message bridge" scope line (D18 #3, D20) and the §14 "111 never transmits on the Meshtastic
+    mesh" promise, which the Layer 6 spec restates honestly as "111 transmits only what the user sends or bridges".
+  - **(3) v1 networks.** Meshtastic, Reticulum/LXMF, and phone apps reached through Termux (parked P2: Briar and the like; the research
+    sweep maps what is honestly feasible before anything is promised). The MeshCore *network* was not selected as a bridge target;
+    the 111 KISS modem on MeshCore firmware (D19 c) stays a Layer 6 transport item, sequenced by the options brief.
+  - **(4) Hardware.** No LoRa boards are available yet. The owner will set up a full test setup later to test everything fully; until
+    then every radio path is built and verified against stubs in network namespaces, and the hardware gates stay in the runbooks.
+- **Rejected:** closing Layer 5 before any Layer 6 work (owner wants progress on both) · Layer 6 only, leaving Layer 5 open · carrier-only
+  bridging (foreign meshes carry sealed 111 envelopes, nothing readable) · inbound-only content bridging · MeshCore as a v1 bridge target.
+- **Why:** the bridge is the point of the layer ("we can send the same message in several networks, we receive from other networks and
+  bridge; the bridge function is super important"); users may end up living in our dashboard, so our Messages view must carry every
+  network, while the adopted projects' own UIs remain available unmodified (adopt, don't reinvent).
+
 ## Pending
 
 - Move deep architecture content out of `os/README.md` into per-layer specs (blocked on layer homes existing).
