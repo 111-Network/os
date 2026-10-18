@@ -35,6 +35,8 @@ If a solid project exists, we use it. A custom piece exists only where nothing p
 
 Layers are modular: not every device can run — or needs — every layer. Each device takes, operates, and improves only the layers its hardware and its user's choices allow. The layer-to-category mapping is defined below.
 
+In the repository, each layer is a folder named `NN-<slug>`, `NN` being the layer number times ten (`00-knowledge`, `10-bootstrap`, `20-identity`, `30-intelligence`, `40-interface`, `50-messaging`), so the tree reads top to bottom in this order and leaves room between layers.
+
 ### 0. Knowledge Layer
 
 The foundation every other layer reads from. A curated, AI-readable knowledge base covering:

@@ -4,6 +4,7 @@ This repo (`os/`) is the operating layer of the 111network mesh OS: an offline-f
 
 ## Read first
 
+- Layer folders are `NN-<slug>` with `NN` = layer number × 10 (`00-knowledge`, `10-bootstrap`, `20-identity`, `30-intelligence`, `40-interface`, `50-messaging`); `plan/layers/` uses the same names.
 - Knowledge-base navigation contract: `00-knowledge/AGENTS.md` — read it before querying `00-knowledge/`.
 - Layer 0 (Knowledge Layer) spec: `00-knowledge/README.md` — locked; defines entry format, relations, status gates, indexes.
 - Layer 1 (Bootstrap) spec: `10-bootstrap/README.md` — locked v2.2; the `111` binary, installer, daemon, updates.
@@ -11,4 +12,5 @@ This repo (`os/`) is the operating layer of the 111network mesh OS: an offline-f
 - Build process and task plan: `plan/INDEX.md` (layer status) · `plan/DECISIONS.md` (every decision + rejected alternatives) · `plan/EXECUTION.md` (build protocol). Per-layer build boards: `<layer>/TASKS.md`.
 - Layer 3 (Local Intelligence) spec + as-built appendix: `30-intelligence/README.md`; build log/contracts: `30-intelligence/TASKS.md`.
 - Layer 4 (Interface & Dashboard) spec: `40-interface/README.md` — locked v2; HTTP contract `40-interface/api/openapi.yaml` (conventions `40-interface/api/README.md`); build board `40-interface/TASKS.md`. The UI is `40-interface/ui`; the Rust side lives in `10-bootstrap/crates/node111/src/daemon/dashboard/`.
+- Layer 5 (Messaging & Data) spec: `50-messaging/README.md` — locked v1.2 (D20); build board `50-messaging/TASKS.md`. Core crate: `50-messaging/crates/mesh111`. The daemon side (fabric, hosted panels, Meshtastic) lives in `10-bootstrap/crates/node111/src/daemon/{fabric,panels,meshtastic}/`; the presence sidecar is `50-messaging/sidecars/meshtastic-presence/`.
 - Licensing: our own license is `LICENSE.md` (draft, pending legal review). Third-party licensing and dependency boundaries (Reticulum is a separate service, never incorporated): `LICENSING.md` — update it when a dependency, vendored file, or pinned external program changes. Third-party notices and license texts: `THIRD-PARTY-NOTICES.md` — regenerate it when a lockfile changes.
