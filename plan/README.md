@@ -227,6 +227,9 @@ unchanged:
   `10-bootstrap/verify/local-smoke.sh`. It already failed at HEAD: `cross-build.sh` sources `scripts/musl-env.sh`, which that
   test's synthetic tree never copies (the B1 bounce is in flight). Only the test's synthetic-tree paths were updated.
 
+All three reds were closed on 2026-10-19 by the Wave 2 bounce, attempt 2 (`plan/layers/50-messaging/research/coordinates.md`,
+"Run — Wave 2 bounce, attempt 2"); the full gate is ALL GREEN again, G2 on both targets.
+
 Everything else is green: clippy, musl ×2, notices + 19 tests, build-scripts gate, systemd-analyze, mesh111 workspace,
 G2 ×2, presence sidecar (69 tests), UI (1147 tests + budget), intelligence check, id111 (185 + 44 + 7), KB check (0 errors),
 `hooks/pre-commit`, single-node smoke (118/118).

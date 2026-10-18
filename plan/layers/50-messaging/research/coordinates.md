@@ -121,3 +121,11 @@ All 7 forks decided (D19, 2026-10-14). Spec draft: `os/50-messaging/README.md`. 
 - Runs alongside the Layer 6 research sweep `wf_7407f773-81c` (read-only). Next: lead re-checks + commits per bounce, then V1/V2
   verification, the P1 guard fix + smoke.sh `jq -e` fix, V3 gates + lock entry (the lock will be D24; D22 went to the relicense,
   D23 to the Layer 6 kickoff), V4 fable review.
+- **Landed (2026-10-19):** U2m `596da10` · F2 `913bf19` · B1 `0e0b1d3`. Lead gate `10-bootstrap/scripts/check.sh` ALL GREEN on the bounced
+  tree (792 cargo tests, UI 1153, G2 on both targets, hermetic gate tests 12 + 6 + 11 cases). F2's owner question (m8): no Layer 2 command sets
+  a learned restore floor; a node whose counters file vanishes while running stays restore-pending (held safely) until the file is put back or a
+  restart enters quarantine + words-only restore (asked with the lock questions). F2 residual: a hub whose only enrolled contact is a custody-opted
+  member shows it as home hub after a lost settings file (mesh111 follow-up: store-side hub/member marker).
+- **Wave 3 fix wave** `plan/layers/50-messaging/runs/workflows/wave-3-fix.js`: phase A = P1g guard Fetch-Metadata fallback (opus) ‖ DOCS
+  (release-checklist rows, Overview copy; sonnet); phase B = VENV presence venv build (opus) ‖ V1v smoke verification + `jq -e` audit (opus xhigh).
+  Run id recorded below once launched. Then the lead: panel-lint.sh, every gate, D24 lock entry, INDEX, tag; then V4 fable review.
