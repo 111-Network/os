@@ -128,4 +128,4 @@ All 7 forks decided (D19, 2026-10-14). Spec draft: `os/50-messaging/README.md`. 
   member shows it as home hub after a lost settings file (mesh111 follow-up: store-side hub/member marker).
 - **Wave 3 fix wave** `plan/layers/50-messaging/runs/workflows/wave-3-fix.js`: phase A = P1g guard Fetch-Metadata fallback (opus) ‖ DOCS
   (release-checklist rows, Overview copy; sonnet); phase B = VENV presence venv build (opus) ‖ V1v smoke verification + `jq -e` audit (opus xhigh).
-  Run id recorded below once launched. Then the lead: panel-lint.sh, every gate, D24 lock entry, INDEX, tag; then V4 fable review.
+  Run id `wf_8f3fabca-305` (launched 2026-10-19 02:45 CEST from `c84d834`). Then the lead: panel-lint.sh, every gate, D24 lock entry, INDEX, tag; then V4 fable review.
