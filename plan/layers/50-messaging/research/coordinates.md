@@ -107,3 +107,17 @@ All 7 forks decided (D19, 2026-10-14). Spec draft: `os/50-messaging/README.md`. 
   `wf_ba5631d2-319`** (script `layers/50-messaging/runs/workflows/wave-2-bounce.js`): B1 opus · U2 sonnet · F2 opus xhigh, parallel with
   Wave 3 `wf_e1d4170c-90d`. Owner questions parked in the triage: manifest evolution path before the first signed release;
   which command sets the Layer 2 restore floor; release-checklist + presence-venv rows.
+
+## Run — Wave 2 bounce, attempt 2 (2026-10-19)
+
+- Context: the 2026-10-15 crash cut off the F2 and B1 fix agents (partial work in WIP commit `6b4f0e5`, folder-renamed on
+  2026-10-18). Tree at launch: `13ef253` (after the relicense D22 and the Layer 6 kickoff D23). `10-bootstrap/scripts/check.sh`
+  red at its first stage (cargo fmt on four F2 files); the two `restore_pending` tests red; the hermetic cross-build UI gate red.
+- Script: `plan/layers/50-messaging/runs/workflows/wave-2-bounce-2.js` · run id `wf_a95026da-e58` · harness transcript dir
+  `~/.claude/projects/-home-kia-projects-111network-os/af41ab70-058e-4e3c-bc5e-eec7688f5c7a/subagents/workflows/wf_a95026da-e58/`.
+- Shape: phase A = U2m (sonnet; the two mock items `mock/index.ts`) ‖ F2 (opus xhigh, resumed with a RESUMPTION NOTICE);
+  phase B = B1 (opus, resumed) after F2 returns, so at most two cargo builds overlap (12 GB box; `CARGO_BUILD_JOBS=6`, private
+  target dirs under the session scratchpad). Journals are the repo copies under `runs/journals/`.
+- Runs alongside the Layer 6 research sweep `wf_7407f773-81c` (read-only). Next: lead re-checks + commits per bounce, then V1/V2
+  verification, the P1 guard fix + smoke.sh `jq -e` fix, V3 gates + lock entry (the lock will be D24; D22 went to the relicense,
+  D23 to the Layer 6 kickoff), V4 fable review.
