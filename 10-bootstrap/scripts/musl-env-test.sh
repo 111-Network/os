@@ -66,14 +66,18 @@ sqlcipher_linked "$T/both" 3.6.3 || fail "sqlcipher_linked refused a binary carr
 
 # 4. static_elf refuses a dynamically linked ELF and a non-ELF.
 if command -v readelf >/dev/null 2>&1; then
-  for dyn in /bin/sh /usr/bin/env; do
+  dyn_found=0
+  for dyn in /bin/sh /usr/bin/env /bin/ls /usr/bin/ls; do
     if [ -f "$dyn" ] && readelf -lW "$dyn" 2>/dev/null | grep -q INTERP; then
+      dyn_found=1
       if static_elf "$dyn" X86-64 2>/dev/null || static_elf "$dyn" AArch64 2>/dev/null; then
         fail "static_elf accepted the dynamic $dyn"
       fi
       break
     fi
   done
+  # Never a silent pass: without a dynamic host binary the refusal above went untested.
+  [ "$dyn_found" = 1 ] || fail "no dynamically linked host binary found to test static_elf's refusal against"
   if static_elf "$T/both" X86-64 2>/dev/null; then fail "static_elf accepted a non-ELF file"; fi
 else
   fail "readelf is required (binutils): static_elf cannot be tested"

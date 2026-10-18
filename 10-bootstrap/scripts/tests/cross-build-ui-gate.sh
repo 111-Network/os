@@ -1,25 +1,37 @@
 #!/bin/sh
 # cross-build UI gate: a release build must fail without a fresh
-# 40-interface/ui/dist unless --allow-no-ui is given. Hermetic: copies
-# cross-build.sh into a scratch tree with a fake UI, a stub `cargo` that stops
-# the build right after the gate, and (per case) a stub `pnpm`.
+# 40-interface/ui/dist unless --allow-no-ui is given, and without both musl
+# cross toolchains it must fail before anything is built. Hermetic: copies
+# cross-build.sh and the scripts/musl-env.sh it sources into a scratch tree
+# with a fake UI, stub cross toolchains, a stub `cargo` that stops the build
+# right after the gate, and (per case) a stub `pnpm`. The build's PATH holds
+# only links to the host tools it needs (scripts/tests/fakes.sh `sysbin`), so
+# a system pnpm cannot leak in and no case is ever skipped.
 set -u
 
-SRC="$(cd "$(dirname "$0")/.." && pwd)/cross-build.sh"
+HERE="$(cd "$(dirname "$0")" && pwd)"
+SCRIPTS="$(dirname "$HERE")"
+# shellcheck source=scripts/tests/fakes.sh
+. "$HERE/fakes.sh"
 T=$(mktemp -d /tmp/111-xbuild-gate.XXXXXX)
 trap 'rm -rf "$T"' EXIT
 FAILS=0
 pass() { printf '%s\n' "ui-gate: ok: $*"; }
 fail() { printf '%s\n' "ui-gate: FAIL: $*" >&2; FAILS=$((FAILS + 1)); }
 
-mkdir -p "$T/10-bootstrap/scripts" "$T/stubs" "$T/pnpm" "$T/home"
-cp "$SRC" "$T/10-bootstrap/scripts/cross-build.sh"
+mkdir -p "$T/10-bootstrap/scripts" "$T/home" "$T/home-bare"
+cp "$SCRIPTS/cross-build.sh" "$SCRIPTS/musl-env.sh" "$T/10-bootstrap/scripts/"
 UI="$T/40-interface/ui"
-printf '#!/bin/sh\necho CARGO-REACHED\nexit 3\n' > "$T/stubs/cargo"
+SH=$(command -v sh)
+sysbin "$T/sysbin" dirname mkdir find head || exit 1
+fake_toolchains "$T/home" x86_64 aarch64
+stub cargo "$T/stubs" 'echo CARGO-REACHED
+exit 3'
 # $2/$3 expand inside the stub, not here.
 # shellcheck disable=SC2016
-printf '#!/bin/sh\n[ "$3" = build ] && mkdir -p "$2/dist" && echo built > "$2/dist/index.html"\nexit 0\n' > "$T/pnpm/pnpm"
-chmod 0755 "$T/stubs/cargo" "$T/pnpm/pnpm"
+stub pnpm "$T/pnpm" 'echo PNPM-REACHED
+[ "$3" = build ] && mkdir -p "$2/dist" && echo built > "$2/dist/index.html"
+exit 0'
 
 reset_ui() {
 	rm -rf "$UI"
@@ -30,18 +42,13 @@ reset_ui() {
 	echo 'export {}' > "$UI/src/main.ts"
 }
 
-# HOME points at an empty dir: no ~/.cargo/bin or ~/.local/toolchains leak in.
+# HOME holds only the stub toolchains: no ~/.cargo/bin or real toolchains leak in.
 build() { # extra PATH dir ("" = none); then cross-build args
 	_extra=$1
 	shift
-	HOME="$T/home" PATH="${_extra:+$_extra:}$T/stubs:/usr/bin:/bin" \
-		sh "$T/10-bootstrap/scripts/cross-build.sh" "$@" 2026.10.14 "$T/out" 2>&1
+	env -i HOME="${XB_HOME:-$T/home}" PATH="${_extra:+$_extra:}$T/stubs:$T/sysbin" \
+		"$SH" "$T/10-bootstrap/scripts/cross-build.sh" "$@" 2026.10.14 "$T/out" 2>&1
 }
-
-if (PATH=/usr/bin:/bin && command -v pnpm >/dev/null 2>&1); then
-	printf '%s\n' "ui-gate: SKIPPED (a system pnpm in /usr/bin or /bin makes the no-pnpm cases unreachable)"
-	exit 0
-fi
 
 reset_ui
 OUT=$(build "")
@@ -91,6 +98,18 @@ if echo "$OUT" | grep -q CARGO-REACHED && [ -f "$UI/dist/index.html" ]; then
 	pass "pnpm present → UI rebuilt, build proceeds"
 else
 	fail "pnpm rebuild"
+	echo "$OUT" >&2
+fi
+
+# No cross toolchains: refused before the UI build and before cargo, whatever the UI state.
+reset_ui
+OUT=$(XB_HOME="$T/home-bare" build "$T/pnpm")
+RC=$?
+if [ $RC -eq 1 ] && echo "$OUT" | grep -q "musl cross toolchains absent" &&
+	! echo "$OUT" | grep -q "CARGO-REACHED\|PNPM-REACHED"; then
+	pass "no musl cross toolchains → refused before the UI build and cargo"
+else
+	fail "missing toolchains (rc=$RC)"
 	echo "$OUT" >&2
 fi
 

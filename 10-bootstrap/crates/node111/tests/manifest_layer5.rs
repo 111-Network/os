@@ -494,9 +494,6 @@ fn bundle_tree_hash_refuses_unhashable_names() {
     assert!(bundle_tree_sha256(d.path()).is_err());
 }
 
-/// The Rust bundle hash must equal the hash of the `.tree` file that
-/// `scripts/meshtastic-web-build.sh` writes (its `tree_manifest` function, taken
-/// verbatim from the script) — otherwise a CI pin could never verify on a node.
 /// A gate test's external tool must be on PATH: the test fails rather than
 /// passing by skipping (Wave 2 review B1 m8).
 fn require_tool(tool: &str) {
@@ -512,6 +509,9 @@ fn require_tool(tool: &str) {
     );
 }
 
+/// The Rust bundle hash must equal the hash of the `.tree` file that
+/// `scripts/meshtastic-web-build.sh` writes (its `tree_manifest` function, taken
+/// verbatim from the script) — otherwise a CI pin could never verify on a node.
 #[test]
 fn bundle_tree_hash_matches_the_build_script() {
     for tool in ["sh", "find", "sort", "xargs", "sha256sum", "sed"] {

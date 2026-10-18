@@ -24,12 +24,19 @@ echo "== clippy =="
 cargo clippy --workspace --all-targets -- -D warnings
 echo "== test =="
 cargo test --workspace
-if command -v x86_64-linux-musl-gcc >/dev/null 2>&1; then
+# Both cross toolchains or neither (10-bootstrap/scripts/check.sh decides G2 the same way): with one
+# missing, the pinned CC above would fail that target's check rather than skip it.
+MUSL=1
+for t in x86_64-linux-musl-gcc x86_64-linux-musl-ar aarch64-linux-musl-gcc aarch64-linux-musl-ar; do
+  command -v "$t" >/dev/null 2>&1 || MUSL=0
+done
+if [ "$MUSL" = 1 ]; then
   echo "== check (musl x86_64) =="
   cargo check --workspace --target x86_64-unknown-linux-musl
   echo "== check (musl aarch64) =="
   cargo check --workspace --target aarch64-unknown-linux-musl
+  echo "check.sh: all green"
 else
-  echo "!! musl cross toolchains absent (~/.local/toolchains) — musl checks SKIPPED"
+  echo "!! musl cross toolchains absent (~/.local/toolchains: x86_64- and aarch64-linux-musl-gcc/-ar) — musl checks SKIPPED"
+  echo "check.sh: green (musl checks SKIPPED)"
 fi
-echo "check.sh: all green"

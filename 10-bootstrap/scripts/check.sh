@@ -57,15 +57,22 @@ else
   echo "shellcheck not found — SKIPPED"
   skipped shellcheck
 fi
-echo "== gate assertions (scripts/musl-env.sh self-test: escape hatches, CC/AR pins, SQLCipher/OpenSSL/static asserts) =="
+echo "== gate assertions (hermetic: musl-env.sh self-test, this script's summary + G2 asserts, cross-build UI gate + release asserts) =="
+# scripts/musl-env.sh: escape hatches unset, CC/AR pins (same as messaging), SQLCipher/OpenSSL/static asserts.
 sh scripts/musl-env-test.sh
+# This script's last line and G2 asserts, and messaging's musl gate, on a synthetic tree (B1 m2, m3).
+sh scripts/tests/check-summary-gate.sh
+# cross-build.sh: the UI gate and the toolchain refusal before any build; the release asserts (B1 m1).
+sh scripts/tests/cross-build-ui-gate.sh
+sh scripts/tests/cross-build-asserts-gate.sh
 echo "== notices =="
 # THIRD-PARTY-NOTICES.md records the lockfile hashes it was generated from; fail when one moved.
 # Offline hash compare only. Fix: python3 -I scripts/gen-notices.py (needs cargo + pnpm, no network).
 if command -v python3 >/dev/null 2>&1; then
   python3 -I scripts/gen-notices.py --check
-  echo "== notices generator tests (Go / Python-venv / pin paths) =="
+  echo "== notices generator tests (Go / Python-venv / pin paths; SQLCipher + OpenSSL notices) =="
   python3 -I -B -m unittest discover -s scripts/notices/tests
+  python3 -I -B -m unittest discover -s scripts/tests -p 'test_*.py'
 else
   echo "python3 not found — notices check SKIPPED"
   skipped notices
