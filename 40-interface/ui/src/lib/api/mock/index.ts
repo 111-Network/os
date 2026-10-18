@@ -43,7 +43,7 @@ import { SERVICE_IDS } from "../types";
 import { MockBus, realClock, type MockClock } from "./bus";
 import { finalSentence, pickReply, tokenize } from "./chat";
 import { buildFixtures, iso, logLine } from "./fixtures";
-import { HUB, MOCK_HUB_ADDRESS, MOCK_REASONS, buildNearby, buildPanels, fabricRow, hex64, makeContact, meshtasticLiveRow, pageOf, threadsOf } from "./messaging";
+import { HUB, MOCK_HUB_ADDRESS, MOCK_REASONS, buildNearby, buildPanels, cancelQueued, fabricRow, hex64, hubBundleText, makeContact, meshtasticLiveRow, pageOf, threadsOf } from "./messaging";
 import { cardFor } from "./qr";
 import { MOCK_PAIR_CODE, SCENARIO_NAMES, resolveScenario, scenarios, type MockData, type Scenario, type ScenarioName, type ScriptContext } from "./scenarios";
 
@@ -220,9 +220,14 @@ export function createMockAdapter(opts: MockOptions = {}): MockAdapter {
   const inflight = new Set<string>();
   const RANK: Record<string, number> = { queued: 0, sent: 1, relayed: 2, delivered: 3 };
 
-  /** Move one own message along: blocked stays queued with the reason; otherwise sent, then relayed or delivered by the route. */
+  /**
+   * Move one own message along: blocked stays queued with the reason; otherwise sent, then relayed or delivered by the route.
+   * A cancelled message (spec 4: `queued`, `reason_code: cancelled`, an empty placeholder goes in its place) is never moved
+   * again, so a later retry or re-evaluation of the outbox does not overwrite that reason.
+   */
   function dispatch(m: Message): void {
     if (m.dir !== "own" || (m.state !== "queued" && m.state !== "sent")) return;
+    if (m.reason_code === "cancelled") return;
     const block = blockOf(m.peer);
     if (block) {
       if (m.state !== "queued" || m.reason_code !== block) setMessage(m, "queued", block);
@@ -247,7 +252,8 @@ export function createMockAdapter(opts: MockOptions = {}): MockAdapter {
         return;
       }
       later(step[0], () => {
-        if (!M.messages.includes(m)) {
+        // Gone, or cancelled while this step was waiting (it was still queued, so it never leaves): the chain stops here.
+        if (!M.messages.includes(m) || m.reason_code === "cancelled") {
           inflight.delete(m.id);
           return;
         }
@@ -797,6 +803,16 @@ export function createMockAdapter(opts: MockOptions = {}): MockAdapter {
           dispatch(m);
           return m;
         }),
+      // POST /messages/{id}/cancel (spec 4): an own message that is still queued stays in its thread, queued, with
+      // reason_code cancelled; 409 once it has left, when it is not ours, or when it was cancelled already; 404 when unknown.
+      cancel: (id: string) =>
+        rest((): void => {
+          const m = messageById(id);
+          if (cancelQueued(m) !== "cancelled") {
+            throw problem(409, "bad_request", "Not cancellable", "Only an own message that is still queued can be cancelled.");
+          }
+          publishMessage(m, "state");
+        }),
     },
 
     contacts: {
@@ -922,7 +938,7 @@ export function createMockAdapter(opts: MockOptions = {}): MockAdapter {
           M.offer = { code };
           M.fabric.hub = { ...M.fabric.hub, offer_active: true };
           publishFabric();
-          return { schema: 1, code, address, card: M.card, bundle: cardFor(`111enroll:${address}:${code}:${M.card.text}`) };
+          return { schema: 1, code, address, card: M.card, bundle: cardFor(hubBundleText(M.card.text, code, address)) };
         }),
       dismissHubOffer: () =>
         rest(() => {

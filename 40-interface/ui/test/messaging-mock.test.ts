@@ -4,8 +4,10 @@ import { afterEach, describe, expect, it } from "vitest";
 import type { EventsFrameWithId } from "../src/lib/api/adapter";
 import { classifyAddInput } from "../src/lib/api/contacts";
 import { MOCK_PAIR_CODE, SCENARIO_NAMES, createMockAdapter, type MockAdapter, type MockOptions, type ScenarioName } from "../src/lib/api/mock";
+import { cardFor } from "../src/lib/api/mock/qr";
 import { ADA, BRAM, CLEO, DANA, DOV, ELI, FAY, HUB, MOCK_HUB_ADDRESS, MOCK_HUB_CODE, mockCardText } from "../src/lib/api/mock/messaging";
 import { ApiError } from "../src/lib/api/problem";
+import { parseEnrollBundle } from "../src/views/settings/messaging-model";
 import { operations, sse } from "./contract.gen";
 import { FakeClock, flush } from "./helpers/fakes";
 import { validate, validateAgainst } from "./helpers/validate";
@@ -287,6 +289,70 @@ describe("sending", () => {
     expect((await failure(a.messages.retry("msg-nope"))).status).toBe(404);
   });
 
+  it("the adapter carries messages.cancel, so the thread view offers the control in mock mode", () => {
+    const { a } = make("healthy");
+    expect(typeof a.messages.cancel).toBe("function");
+  });
+
+  it("cancel keeps a queued own message in its thread, queued, with reason_code cancelled, and publishes it as a state frame", async () => {
+    const { a, clock } = make("healthy");
+    const { frames } = listen(a);
+    await flush();
+    const held = (await a.messages.thread(BRAM)).messages.find((m) => m.dir === "own" && m.state === "queued")!;
+    expect(held.reason_code).toBe("hub_not_yours");
+    await a.messages.cancel!(held.id);
+    const after = (await a.messages.thread(BRAM)).messages.find((m) => m.id === held.id)!;
+    expect(after).toMatchObject({ state: "queued", reason_code: "cancelled", dir: "own", text: held.text });
+    expect(after.reason).toMatch(/cancelled/i);
+    expectValid("getThread", { schema: 1, ...(await a.messages.thread(BRAM)) });
+    const sent = frames.filter((f) => f.event === "message" && (f.data as { message: { id: string } }).message.id === held.id);
+    expect(sent.length).toBeGreaterThan(0);
+    expect(sent[sent.length - 1]!.data).toMatchObject({ change: "state", peer: BRAM, message: { state: "queued", reason_code: "cancelled" } });
+    // a retry or a later look at the outbox neither moves it nor overwrites the reason
+    await a.messages.retry(held.id);
+    await clock.advanceAsync(10_000, 500);
+    expect((await a.messages.thread(BRAM)).messages.find((m) => m.id === held.id)).toMatchObject({ state: "queued", reason_code: "cancelled" });
+  });
+
+  it("a message cancelled while its first step is still waiting never leaves", async () => {
+    const { a, clock } = make("healthy");
+    const accepted = await a.messages.send({ to: HUB, text: "ping" });
+    expect((await a.messages.thread(HUB)).messages.find((m) => m.id === accepted.id)).toMatchObject({ state: "queued", reason_code: null });
+    await a.messages.cancel!(accepted.id);
+    await clock.advanceAsync(5_000, 250);
+    expect((await a.messages.thread(HUB)).messages.find((m) => m.id === accepted.id)).toMatchObject({ state: "queued", reason_code: "cancelled" });
+  });
+
+  it("a cancelled message stays cancelled when the hold lifts, while the others held with it go on", async () => {
+    const { a, clock } = make("restore-pending");
+    const held = (await a.messages.thread(ADA)).messages.filter((m) => m.dir === "own" && m.reason_code === "restore_pending");
+    expect(held.length).toBeGreaterThan(0);
+    const [gone, ...rest] = held;
+    await a.messages.cancel!(gone!.id);
+    expect((await a.messages.thread(ADA)).messages.find((m) => m.id === gone!.id)).toMatchObject({ state: "queued", reason_code: "cancelled" });
+    await clock.advanceAsync(20_000, 500); // the restore finishes at 12 s and the outbox is looked at again
+    const after = (await a.messages.thread(ADA)).messages;
+    expect(after.find((m) => m.id === gone!.id)).toMatchObject({ state: "queued", reason_code: "cancelled" });
+    for (const m of rest) expect(after.find((x) => x.id === m.id)!.state).not.toBe("queued");
+  });
+
+  it("cancel refuses with 409 once a message has left, for an incoming message and for one cancelled already; 404 for an unknown id", async () => {
+    const { a } = make("healthy");
+    const delivered = (await a.messages.thread(ADA)).messages.find((m) => m.dir === "own" && m.state === "delivered")!;
+    const left = await failure(a.messages.cancel!(delivered.id));
+    expect(left.status).toBe(409);
+    expect(validateAgainst("Problem", left.problem)).toEqual([]);
+    expect(left.problem.code).toBe("bad_request");
+    const incoming = (await a.messages.thread(ADA)).messages.find((m) => m.dir === "in")!;
+    expect((await failure(a.messages.cancel!(incoming.id))).status).toBe(409);
+    const held = (await a.messages.thread(BRAM)).messages.find((m) => m.dir === "own" && m.state === "queued")!;
+    await a.messages.cancel!(held.id);
+    expect((await failure(a.messages.cancel!(held.id))).status).toBe(409);
+    expect((await failure(a.messages.cancel!("msg-nope"))).status).toBe(404);
+    // the refusals changed nothing
+    expect((await a.messages.thread(ADA)).messages.find((m) => m.id === delivered.id)).toMatchObject({ state: "delivered", reason_code: null });
+  });
+
   it("validates the body: empty text and an over-long text are 400, an unknown contact 404", async () => {
     const { a } = make("healthy");
     expect((await failure(a.messages.send({ to: ADA, text: "   " }))).status).toBe(400);
@@ -408,6 +474,17 @@ describe("fabric, hub, identify, panels", () => {
     await lan.auth.pair(MOCK_PAIR_CODE);
     expect((await failure(lan.fabric.offerHub())).status).toBe(403);
     expect((await failure(lan.fabric.patchSettings({ hub_role: true }))).status).toBe(403);
+  });
+
+  it("the offer's bundle is the daemon's 111HUB:<card>:<code>:<address> text (section 7.3), not the retired 111enroll: form", async () => {
+    const { a } = make("healthy");
+    const offer = await a.fabric.offerHub();
+    expect(offer.bundle.text).toBe(`111HUB:${offer.card.text}:${offer.code}:${offer.address}`);
+    expect(offer.bundle.text).not.toContain("111enroll");
+    expect(parseEnrollBundle(offer.bundle.text)).toEqual({ card: offer.card.text, code: offer.code, address: offer.address });
+    // the QR holds the same text, so scanning it yields the bundle the page reads
+    expect(offer.bundle.qr.size).toBeGreaterThan(0);
+    expect(offer.bundle).toEqual(cardFor(offer.bundle.text));
   });
 
   it("merges fabric settings and drops a quota with null", async () => {
