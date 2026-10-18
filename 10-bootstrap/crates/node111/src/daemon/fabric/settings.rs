@@ -23,9 +23,10 @@
 //! The home hub is the one fact a member cannot re-derive from its own
 //! switches, so a member whose file is absent or invalid gets it back from
 //! the store ([`rebuild_home_hub`], run by the fabric once the store is
-//! open): the single `enrolled` contact that is a custody holder (its card
-//! carries the mailbox role) or holds this node's mailbox cursor, preferring
-//! a `home_hub` salvaged from the invalid file when that names one. The hub's
+//! open): the single `enrolled` contact that holds this node's mailbox
+//! cursor, else the node's only `enrolled` contact when it is a custody
+//! holder (its card carries the mailbox role), preferring a `home_hub`
+//! salvaged from the invalid file when that names one. The hub's
 //! address comes back only from such a salvage; without it nothing dials
 //! the hub until a fresh offer (the contact keeps it `enrolled`).
 //!
@@ -275,7 +276,10 @@ pub fn load(fabric_dir: &Path, hub_default: bool, refuse_loopback: bool) -> Load
                 p.display(),
                 to.display()
             ),
-            None => eprintln!("111 fabric: {} invalid ({why}); everything off", p.display()),
+            None => eprintln!(
+                "111 fabric: {} invalid ({why}); everything off",
+                p.display()
+            ),
         }
         Loaded {
             persisted: Persisted::default(),
@@ -346,24 +350,33 @@ pub struct Enrolled {
 }
 
 /// The home hub of a member whose settings file was absent or invalid
-/// (module doc): the salvaged `hint` when it names an `enrolled` contact,
-/// else the single `enrolled` contact that holds custody or this node's
-/// mailbox cursor. On a hub its `enrolled` contacts are members — they hold
-/// no custody and no cursor of this node, so nothing is rebuilt there.
+/// (module doc): the salvaged `hint` when it names an `enrolled` contact;
+/// else the single `enrolled` contact that holds this node's mailbox cursor
+/// (this node fetched from it — decisive); else, when nothing was fetched
+/// yet, the node's only `enrolled` contact if its card carries the mailbox
+/// role (a v1 member has exactly one). Anything else is ambiguous and
+/// nothing is guessed. Both sides of an enrollment pin each other
+/// `enrolled`, so on a hub its `enrolled` contacts are members: they hold no
+/// cursor of this node, and a member that itself opted into custody counts
+/// only when it is the hub's sole contact (the one residual — that hub then
+/// shows a home hub it never dials, since the address is unknown, until its
+/// settings are fixed).
 pub fn rebuild_home_hub(enrolled: &[Enrolled], hint: Option<&HomeHub>) -> Option<HomeHub> {
     if let Some(h) = hint {
         if enrolled.iter().any(|e| e.node_id == h.node_id) {
             return Some(*h);
         }
     }
-    let mut hubs = enrolled.iter().filter(|e| e.custody || e.cursor > 0);
-    match (hubs.next(), hubs.next()) {
-        (Some(one), None) => Some(HomeHub {
-            node_id: one.node_id,
-            address: None,
-        }),
+    let fetched: Vec<&Enrolled> = enrolled.iter().filter(|e| e.cursor > 0).collect();
+    let pick = match (fetched.as_slice(), enrolled) {
+        ([one], _) => Some(*one),
+        ([], [only]) if only.custody => Some(only),
         _ => None,
-    }
+    };
+    pick.map(|e| HomeHub {
+        node_id: e.node_id,
+        address: None,
+    })
 }
 
 /// Write `fabric/settings` atomically (0600).
@@ -379,7 +392,10 @@ mod tests {
     fn defaults_round_trip_and_fail_closed() {
         let t = tempfile::tempdir().unwrap();
         let d = t.path();
-        assert!(load(d, true, true).persisted.fabric.hub_role, "Cat 4 default");
+        assert!(
+            load(d, true, true).persisted.fabric.hub_role,
+            "Cat 4 default"
+        );
         assert!(!load(d, false, true).persisted.fabric.hub_role);
         let hub = NodeId::from([0xabu8; 32]);
         let s = Persisted {
@@ -479,7 +495,8 @@ mod tests {
                 assert!(load(d, false, false).recover.unwrap().invalid, "{text}");
             }
         }
-        let lo = format!(r#"{{"schema":1,"peers":[{{"node_id":"{hub}","address":"127.0.0.1:1"}}]}}"#);
+        let lo =
+            format!(r#"{{"schema":1,"peers":[{{"node_id":"{hub}","address":"127.0.0.1:1"}}]}}"#);
         assert!(decode(&lo, true).is_err(), "loopback refused in production");
         assert!(decode(&lo, false).is_ok(), "allowed when tests turn it off");
     }
@@ -515,6 +532,24 @@ mod tests {
             rebuild_home_hub(&[e(hub, true, 0), e(other, true, 0)], None),
             None
         );
+        // a hub whose members include one that opted into custody: that
+        // member is no home hub (the custody bit counts only for a sole
+        // contact)
+        assert_eq!(
+            rebuild_home_hub(&[e(member, true, 0), e(other, false, 0)], None),
+            None
+        );
+        // the mailbox cursor is decisive: a custody-holding member of its
+        // own (a laptop that opted in) still finds its hub
+        assert_eq!(
+            rebuild_home_hub(&[e(hub, true, 3), e(member, true, 0)], None).map(|h| h.node_id),
+            Some(hub)
+        );
+        // two cursors: ambiguous
+        assert_eq!(
+            rebuild_home_hub(&[e(hub, true, 3), e(other, true, 1)], None),
+            None
+        );
         // a salvaged hint wins when it names an enrolled contact
         let hint = HomeHub {
             node_id: hub,
@@ -528,7 +563,10 @@ mod tests {
             node_id: NodeId::from([0x77; 32]),
             ..hint
         };
-        assert_eq!(rebuild_home_hub(&[e(hub, true, 0)], Some(&stranger)).map(|h| h.address), Some(None));
+        assert_eq!(
+            rebuild_home_hub(&[e(hub, true, 0)], Some(&stranger)).map(|h| h.address),
+            Some(None)
+        );
         // salvage reads a type-broken file's home_hub (and refuses a bad address)
         let t = tempfile::tempdir().unwrap();
         let d = t.path();

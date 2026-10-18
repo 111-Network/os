@@ -103,9 +103,7 @@ impl std::fmt::Display for HubAddr {
 fn parse_hub_addr(raw: &str) -> Option<HubAddr> {
     let t = raw.trim();
     if let Ok(a) = t.parse::<SocketAddr>() {
-        return dial_refusal(&a, false)
-            .is_none()
-            .then_some(HubAddr::Ip(a));
+        return dial_refusal(&a, false).is_none().then_some(HubAddr::Ip(a));
     }
     let (host, port) = t.rsplit_once(':')?;
     let port = port
@@ -312,7 +310,7 @@ async fn offer(
         .into_response();
     }
     let address = h.offer_address().await;
-    let view = match f.offer(address).await {
+    let mut view = match f.offer(address).await {
         Ok(v) => v,
         Err(FabricError::Invalid(_)) => return Problem::new(
             StatusCode::CONFLICT,
@@ -326,6 +324,7 @@ async fn offer(
         .into_response(),
         Err(e) => return fabric::problem(&e).into_response(),
     };
+    with_current_card(&mut view, &h.own_announce());
     match json::offer(&view) {
         Ok(v) => {
             let mut resp = Json(v).into_response();
@@ -341,6 +340,36 @@ async fn offer(
         .detail(e)
         .into_response(),
     }
+}
+
+/// Put the current own card into an offer (§7.3 A8). The fabric's copy is
+/// the announce read at its start; a settings change since (the hub role or
+/// custody turned on) re-minted it, and the bundle a member scans must carry
+/// the re-minted card (its roles say "hub"). A bundle that does not parse is
+/// left as the fabric drew it.
+fn with_current_card(view: &mut mesh111::fabric::OfferView, announce: &[u8]) {
+    use mesh111::contacts::{card_text, HubBundle};
+    if announce.is_empty() {
+        return;
+    }
+    let card = card_text(announce);
+    if view.card == card {
+        return;
+    }
+    match view.bundle.as_deref().map(HubBundle::parse) {
+        Some(None) => return,
+        Some(Some(b)) => {
+            view.bundle = Some(
+                HubBundle {
+                    card: card.clone(),
+                    ..b
+                }
+                .text(),
+            );
+        }
+        None => {}
+    }
+    view.card = card;
 }
 
 async fn dismiss(
@@ -508,10 +537,7 @@ mod tests {
         let p = parse_enroll(br#"{"address":"0.0.0.0:11183","code":"x"}"#)
             .err()
             .expect("refused");
-        assert!(
-            p.detail.as_deref().unwrap().contains("host:port"),
-            "{p:?}"
-        );
+        assert!(p.detail.as_deref().unwrap().contains("host:port"), "{p:?}");
         let long = format!("{}:1", "a".repeat(254));
         assert!(parse_hub_addr(&long).is_none());
         assert!(parse_hub_addr(&format!("{}:1", "a".repeat(253))).is_some());

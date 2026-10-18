@@ -1513,7 +1513,10 @@ async fn restore_pending_answers_409_and_seals_nothing() {
         .is_empty());
     let st = r.get("/api/v1/fabric").json();
     assert_eq!(st["store"]["restore_pending"], true);
-    assert_eq!(b.get("/api/v1/fabric").json()["store"]["restore_pending"], false);
+    assert_eq!(
+        b.get("/api/v1/fabric").json()["store"]["restore_pending"],
+        false
+    );
     r.fabric.shutdown().await;
     b.fabric.shutdown().await;
     // F2 review M1: the clean stop wrote no counters file (no reset)
@@ -1563,7 +1566,10 @@ async fn restore_pending_with_a_stored_announce_runs_no_link_and_resets_nothing(
         "the valid announce is still on disk"
     );
     assert!(again.restore_pending());
-    assert!(again.own_announce().is_empty(), "never presented while pending");
+    assert!(
+        again.own_announce().is_empty(),
+        "never presented while pending"
+    );
     assert!(again.tcp().is_none(), "no tcp-lan: no dial, no peers");
     assert!(again.listen_addr().await.is_none(), "binds nothing");
     r.get("/api/v1/contacts/me/card")
@@ -1615,7 +1621,11 @@ async fn refuse_loopback_refuses_loopback_dials_accepts_and_enrollment() {
         );
         check_op("enrollHub", &r);
         r.problem(400, "bad_request");
-        assert!(r.json()["detail"].as_str().unwrap().contains("loopback"), "{}", r.body);
+        assert!(
+            r.json()["detail"].as_str().unwrap().contains("loopback"),
+            "{}",
+            r.body
+        );
     }
     for address in ["0.0.0.0:11183", "[::]:11183", "224.0.0.1:11183"] {
         p.post(
@@ -1634,7 +1644,11 @@ async fn refuse_loopback_refuses_loopback_dials_accepts_and_enrollment() {
     let p_id = p.fabric.fabric().unwrap().node_id();
     hub.fabric.tcp().unwrap().maintain(p_addr, Some(p_id));
     tokio::time::sleep(Duration::from_millis(600)).await;
-    assert_eq!(p.fabric.tcp().unwrap().connection_count(), 0, "accept refused");
+    assert_eq!(
+        p.fabric.tcp().unwrap().connection_count(),
+        0,
+        "accept refused"
+    );
     assert_eq!(hub.fabric.tcp().unwrap().connection_count(), 0);
     // dials: a loopback `peers` entry makes the file invalid under the rule
     // (moved aside, everything off) — nothing is dialed
@@ -1798,6 +1812,18 @@ async fn restart_keeps_the_announce_store_and_settings() {
     assert_eq!(a.card(), mesh111::contacts::card_text(&now));
     let at = a.fabric.listen_addr().await.unwrap();
     assert_eq!(opening_announce(at).await, now);
+    // … and the hub offer: its card and the bundle a member scans carry the
+    // re-minted card (the fabric's own copy is the start-time one)
+    let r = a.post("/api/v1/fabric/hub/offer", json!({}));
+    check_op("offerHub", &r);
+    let o = r.json();
+    let current = mesh111::contacts::card_text(&now);
+    assert_eq!(o["card"]["text"], current.as_str());
+    let bundle = mesh111::contacts::HubBundle::parse(o["bundle"]["text"].as_str().unwrap())
+        .expect("a bundle with the listener's address");
+    assert_eq!(bundle.card, current);
+    assert_eq!(bundle.address, at.to_string());
+    a.delete("/api/v1/fabric/hub/offer");
     a.fabric.shutdown().await;
     // custody_opt_in changes the announce roles: the next start re-mints
     let id = node111::identity::load(&a.layout.identity_dir()).unwrap();

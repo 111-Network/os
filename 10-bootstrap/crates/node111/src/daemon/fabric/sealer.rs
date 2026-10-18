@@ -154,11 +154,14 @@ pub enum AnnounceOutcome {
     Kept,
     /// A new announce was minted (counter committed) and stored.
     Minted,
-    /// The stored announce is valid but its `appdata` is out of date; no
-    /// counter could be issued (restore pending) — it is used as is.
+    /// The stored announce is valid but its `appdata` is out of date and no
+    /// counter could be issued (the counter commit failed, or the counter
+    /// space is exhausted) — it is used as is. Never while restore-pending.
     Stale,
-    /// No usable announce and none could be minted: the node presents no
-    /// card and no `tcp-lan` link is registered (§4 restore pending).
+    /// No usable announce and none could be minted, or the identity holder
+    /// is restore-pending (§8.4: even a valid stored announce is not
+    /// presented): the node presents no card and no `tcp-lan` link is
+    /// registered (§4 restore pending).
     Missing,
 }
 
@@ -205,6 +208,7 @@ impl IdentitySealer {
     /// refuses too) and this returns `Ok`.
     pub fn shutdown_counters(&self) -> Result<(), CounterError> {
         match self.counters.lock() {
+            Ok(c) if c.is_restore_pending() => Ok(()),
             Ok(mut c) => c.shutdown(),
             Err(_) => Err(CounterError::Corrupt("counter store lock poisoned")),
         }
@@ -216,6 +220,10 @@ impl IdentitySealer {
     /// presents no announce at all — not even a valid stored one (§8.4: it
     /// MUST NOT announce until the floor is set) — and answers `Missing`.
     pub fn ensure_announce(&self, fabric_dir: &Path, appdata: &[u8]) -> AnnounceOutcome {
+        if self.restore_pending() {
+            self.set_announce(Vec::new());
+            return AnnounceOutcome::Missing;
+        }
         let path = fabric_dir.join(ANNOUNCE_FILE);
         let stored = read_small(&path, id111::announce::MAX_LEN as u64)
             .and_then(|b| self.own_valid(&b).then_some(b));

@@ -153,8 +153,9 @@ pub fn enroll_body(
     card: Option<&str>,
 ) -> anyhow::Result<Value> {
     let (b_card, b_code, b_address) = match bundle {
-        Some(text) => split_bundle(text)
-            .ok_or_else(|| anyhow::anyhow!("that is not a 111HUB: bundle"))?,
+        Some(text) => {
+            split_bundle(text).ok_or_else(|| anyhow::anyhow!("that is not a 111HUB: bundle"))?
+        }
         None => (String::new(), String::new(), None),
     };
     let code = match bundle {
@@ -165,7 +166,9 @@ pub fn enroll_body(
     };
     anyhow::ensure!(!code.trim().is_empty(), "no enrollment code was entered");
     let address = address.map(str::to_string).or(b_address).ok_or_else(|| {
-        anyhow::anyhow!("enrolling needs the hub's --address HOST:PORT (or its whole 111HUB: bundle)")
+        anyhow::anyhow!(
+            "enrolling needs the hub's --address HOST:PORT (or its whole 111HUB: bundle)"
+        )
     })?;
     let mut body = serde_json::json!({ "address": address, "code": code });
     if let Some(c) = card
@@ -522,7 +525,13 @@ mod tests {
         );
         // an address-less bundle (hub not on the LAN yet) needs --address
         assert!(parse(&s(&["enroll", "111HUB:CARD:CODE:"])).is_err());
-        assert!(parse(&s(&["enroll", "111HUB:CARD:CODE:", "--address", "10.0.0.1:1"])).is_ok());
+        assert!(parse(&s(&[
+            "enroll",
+            "111HUB:CARD:CODE:",
+            "--address",
+            "10.0.0.1:1"
+        ]))
+        .is_ok());
         for bad in [
             &["status", "x"][..],
             &["offer", "now"],
@@ -560,12 +569,18 @@ mod tests {
         assert_eq!(b["code"], "ABCDEFGH");
         assert_eq!(b["card"], "CARDTEXT");
         let b = enroll_body(Some(BUNDLE), None, Some("10.0.0.9:1"), Some("OTHER")).unwrap();
-        assert_eq!((b["address"].as_str(), b["card"].as_str()), (Some("10.0.0.9:1"), Some("OTHER")));
+        assert_eq!(
+            (b["address"].as_str(), b["card"].as_str()),
+            (Some("10.0.0.9:1"), Some("OTHER"))
+        );
         let b = enroll_body(None, Some("ABCD-EFGH"), Some("10.0.0.1:11183"), None).unwrap();
         assert_eq!(b["code"], "ABCD-EFGH");
         assert!(b.get("card").is_none());
         let b = enroll_body(Some("111HUB:CARD:CODE:"), None, Some("10.0.0.1:1"), None).unwrap();
-        assert_eq!((b["code"].as_str(), b["card"].as_str()), (Some("CODE"), Some("CARD")));
+        assert_eq!(
+            (b["code"].as_str(), b["card"].as_str()),
+            (Some("CODE"), Some("CARD"))
+        );
         assert!(enroll_body(None, Some("ABCD-EFGH"), None, None).is_err());
         assert!(enroll_body(None, None, Some("10.0.0.1:1"), None).is_err());
         assert!(enroll_body(None, Some("  "), Some("10.0.0.1:1"), None).is_err());
@@ -581,7 +596,11 @@ mod tests {
             "é —".as_bytes()
         );
         assert_eq!(dechunk(b"4;ext=1\r\nabcd\r\n0\r\n\r\n"), b"abcd");
-        assert_eq!(dechunk(b"10\r\n\xc3\xa9"), b"", "a chunk shorter than its size");
+        assert_eq!(
+            dechunk(b"10\r\n\xc3\xa9"),
+            b"",
+            "a chunk shorter than its size"
+        );
         assert_eq!(dechunk(b"zz\r\nabc"), b"");
         assert_eq!(dechunk(b"\xff\xfe\r\n"), b"");
         assert_eq!(dechunk(b""), b"");

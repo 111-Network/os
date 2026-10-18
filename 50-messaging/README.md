@@ -698,9 +698,9 @@ file is written — a clean stop never turns the missing floor into a counter re
 row reads ERROR `restore_pending` (or `no_identity` when no identity loaded) with the way out. Accepting a message
 proposal records `applied: {pending: true}` before the send and the message id after it: a crash leaves a visibly
 half-applied proposal, never a second send. A settings change re-mints the own announce (roles, home-hub hint) for new
-`tcp-lan` connections and the own card at once; the fabric's INTRO and offer-bundle copy follow at the next start.
-`fabric/settings` that is invalid is moved aside (`settings.invalid-<n>`) and the home hub rebuilt from the
-`enrolled` contact; enrollment persists `home_hub` before it answers; dial targets that name no peer (unspecified,
+`tcp-lan` connections, the own card and hub offers (card and `111HUB:` bundle) at once; the fabric's INTRO card copy
+follows at the next start. `fabric/settings` that is invalid is moved aside (`settings.invalid-<n>`) and the home hub
+rebuilt from the `enrolled` contact (the one holding this node's mailbox cursor, else a sole custody holder); enrollment persists `home_hub` before it answers; dial targets that name no peer (unspecified,
 multicast, broadcast, loopback in production) are refused. `111 fabric enroll` never takes a bare code on argv (it is
 typed, hidden); the scanned `111HUB:` bundle may ride argv.
 

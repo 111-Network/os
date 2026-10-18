@@ -21,10 +21,11 @@
 //!    `appdata` (roles from the settings, the home-hub hint) changed — at
 //!    start, and again on every `Settings` event, when the re-minted bytes
 //!    go to `tcp-lan` for new connections ([`TcpLan::set_announce`]). The
-//!    fabric's own copy (card answers inside INTROs, the offer bundle) is
-//!    the one read at start until the next start; `GET /contacts/me/card`
-//!    shows the current one. While restore-pending no announce is presented
-//!    at all, not even a valid stored one.
+//!    fabric's own copy (card answers inside INTROs) is the one read at
+//!    start until the next start; `GET /contacts/me/card` and the hub offer
+//!    (`POST /fabric/hub/offer`: its card and `111HUB:` bundle) carry the
+//!    current one. While restore-pending no announce is presented at all,
+//!    not even a valid stored one.
 //! 4. **Fabric** (`Fabric::start`: epoch mint, `complete_partials` and
 //!    orphan recovery are the library's own), then the **`tcp-lan`** adapter
 //!    registered with its dialer (the fabric keeps the home hub dialed;
@@ -471,7 +472,9 @@ async fn boot_with(
         persisted.fabric.clone(),
     )
     .map_err(|e| format!("fabric start: {e}"))?;
-    let tcp = if announce == AnnounceOutcome::Missing {
+    // Restore-pending is checked on its own too (belt and braces): no link
+    // ⇒ no inbound packet can ever tick the L2 window (L2 §8.4).
+    let tcp = if announce == AnnounceOutcome::Missing || sealer.restore_pending() {
         eprintln!(
             "111 fabric: no own announce (restore pending): tcp-lan not started — \
              no listener, no dial, no peers"
@@ -526,8 +529,7 @@ pub async fn start(
             None
         }
         Ok(()) => {
-            let loaded =
-                settings::load(&cfg.fabric_dir, cfg.hub_default, cfg.tcp.refuse_loopback);
+            let loaded = settings::load(&cfg.fabric_dir, cfg.hub_default, cfg.tcp.refuse_loopback);
             persisted = loaded.persisted;
             match boot(&cfg, identity, &mut persisted, loaded.recover.as_ref()).await {
                 Ok(l) => Some(l),
