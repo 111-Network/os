@@ -1,6 +1,6 @@
 # Mesh Self-Healing Agentic Operating System
 
-A minimal, source-available operating layer (free for personal, non-commercial, non-military use) that connects local AI with existing mesh and offline networks — empowering any device, from a dedicated radio relay to a laptop or an old phone, with offline-first communication, local intelligence, and self-healing.
+A minimal, open-source operating layer (GPL-3.0-or-later: free for anyone, for any purpose, including commercial use) that connects local AI with existing mesh and offline networks — empowering any device, from a dedicated radio relay to a laptop or an old phone, with offline-first communication, local intelligence, and self-healing.
 
 ## Vision
 
@@ -168,9 +168,9 @@ Category 5 is not shown as a column: it is an overlay role (see below) that adds
 - Code that can be avoided should be avoided.
 - Existing networks, tools, and projects for secure offline communication are ALL assets, not competitors.
 - Adopt, don't reinvent: wherever a proven project exists, integrate it; write custom code only where nothing proven fits.
-- The software imposes no usage policies at runtime — no telemetry, no content policy, no policing of how a node is used. Limits come from hardware and physics, never from invented governance. The license terms (`LICENSE.md`) are a separate matter: they say who may use the software and for what, not what a running node allows.
+- The software imposes no usage policies at runtime — no telemetry, no content policy, no policing of how a node is used. Limits come from hardware and physics, never from invented governance. The license terms (`LICENSE.md`) are a separate matter: they say on what terms the software may be shared and changed, not what a running node allows.
 - The agent is both servant and guardian of the node.
 - Identity is automatic and cryptographic by default.
 - Autonomy is progressive and always human-supervised at the final step.
 
-License (draft, pending legal review): [LICENSE.md](LICENSE.md). Third-party licensing and the dependency boundary (including how Reticulum is used as a separate, unmodified service): [LICENSING.md](LICENSING.md). Third-party notices and license texts: [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md).
+License: [LICENSE.md](LICENSE.md), the GNU General Public License v3 or (at your option) any later version. Free secure communication is everyone's right: anyone may use, study, change and share 111network for any purpose, including commercial use, and distributed changes stay under the same license with their source. Contributions of any kind are appreciated. Third-party licensing and the dependency boundary (including how Reticulum is used as a separate, unmodified service): [LICENSING.md](LICENSING.md). Third-party notices and license texts: [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md).

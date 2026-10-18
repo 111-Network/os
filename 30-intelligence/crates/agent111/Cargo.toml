@@ -3,7 +3,7 @@ name = "agent111"
 version = "0.1.0"
 edition = "2021"
 description = "111-agent: thin local-intelligence loop for the 111network mesh OS (Layer 3)"
-license-file = "../../../LICENSE.md" # DRAFT project license (os/LICENSE.md); see os/LICENSING.md
+license = "GPL-3.0-or-later" # project license: os/LICENSE.md; third-party boundaries: os/LICENSING.md
 
 [[bin]]
 name = "111-agent"

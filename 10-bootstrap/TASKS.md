@@ -24,7 +24,7 @@ Legend: ⬜ todo · 🔧 in flight · 🔁 bounced · ✅ verified + committed
 
 | Crate | Version | License (as declared) | Why (pulled by) | Audit note |
 |---|---|---|---|---|
-| `mesh111` | 0.0.0 | ours (`os/LICENSE.md` draft) | node111 → `daemon/fabric/` | Layer 5 library, `#![forbid(unsafe_code)]`; never holds key bytes (the `Sealer` handle) |
+| `mesh111` | 0.0.0 | ours (GPL-3.0-or-later, `os/LICENSE.md`) | node111 → `daemon/fabric/` | Layer 5 library, `#![forbid(unsafe_code)]`; never holds key bytes (the `Sealer` handle) |
 | `rusqlite` | 0.40.2 | MIT | mesh111 §10.1 store | feature `bundled-sqlcipher-vendored-openssl` only; safe wrapper; rusqlite org |
 | `libsqlite3-sys` | 0.38.2 | MIT (bundled SQLCipher: BSD-3-Clause; SQLite: public domain) | rusqlite | compiles the SQLCipher 4.14.0 amalgamation (C); `gen-notices.py` names it and reproduces the BSD-3-Clause text |
 | `openssl-sys` | 0.9.117 | MIT | libsqlite3-sys (SQLCipher crypto provider) | FFI only; `vendored` via openssl-src, so no system libcrypto in the static binary |

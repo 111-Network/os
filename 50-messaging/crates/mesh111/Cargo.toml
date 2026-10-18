@@ -2,7 +2,7 @@
 name = "mesh111"
 version = "0.0.0" # calver stamped at release time, mirroring node111
 edition.workspace = true
-license-file = "../../../LICENSE.md" # DRAFT project license (os/LICENSE.md); see os/LICENSING.md
+license = "GPL-3.0-or-later" # project license: os/LICENSE.md; third-party boundaries: os/LICENSING.md
 
 # Dependency policy (os/50-messaging/TASKS.md): this set is the spec's §2/§19 list
 # (D19 e store engine, D19 a bulk primitive); additions need reviewer sign-off

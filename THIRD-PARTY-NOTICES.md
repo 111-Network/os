@@ -1,7 +1,7 @@
 # Third-party notices
 
 The 111network OS includes the third-party components listed below. Each keeps its own license; the licenses are reproduced here
-so that their notice and attribution requirements are met. 111network's own license is in `LICENSE.md` (draft). The reasoning behind
+so that their notice and attribution requirements are met. 111network's own license is in `LICENSE.md` (GPL-3.0-or-later). The reasoning behind
 this list is in `LICENSING.md`.
 
 **Release requirements (follow-ups for the lead, not done by this file):**

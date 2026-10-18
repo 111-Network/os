@@ -1,13 +1,14 @@
 # Third-party licensing and dependency boundaries
 
-Status: draft of 2026-10-14, compiled from files in this repo and from locally readable package metadata
-(`cargo metadata`, `cargo tree`, `pnpm licenses`). It is a statement of facts and boundaries, not legal advice.
+Status: 2026-10-19 (dependency facts compiled 2026-10-14 from files in this repo and from locally readable package metadata:
+`cargo metadata`, `cargo tree`, `pnpm licenses`). It is a statement of facts and boundaries, not legal advice.
 Anything not verifiable from the repo or local metadata is marked (verified 2026-10-14: upstream `LICENSE` = 0BSD for the fork's changes plus MIT for the MeshChat parts).
 
-**Our own license (owner decision, 2026-10-14):** free secure communication is everyone's right; free for personal, non-military and non-commercial use.
-A **draft** is in `LICENSE.md` (PolyForm Noncommercial 1.0.0 as the base, plus a narrow no-military-use condition, commercial use by separate agreement).
-It is marked "needs a lawyer's review before the first signed release", and its Required Notice names `https://111.network`. The official PolyForm text is pasted into Part A verbatim. Section 7 checks that our
-dependencies allow this.
+**Our own license (owner decision, 2026-10-19, `plan/DECISIONS.md` D22):** free secure communication is everyone's right. 111network's own code is free software
+under the **GNU General Public License, version 3 or (at your option) any later version** (`GPL-3.0-or-later`; verbatim text and copyright notice in `LICENSE.md`):
+free for anyone, for any purpose, including commercial use; whoever distributes a changed version must do so under the same license, with the source.
+The earlier source-available draft (PolyForm Noncommercial 1.0.0 plus a no-military-use condition, 2026-10-14 to 2026-10-19) is withdrawn; it was never part of a release.
+**Contributions of any kind are appreciated**; they are accepted under the same license (section 9 item 10). Section 7 checks that our dependencies allow this.
 
 ## 1. Purpose and the boundary principle
 
@@ -42,10 +43,9 @@ no crate depends on Reticulum; `node111` only writes/reads rnsd's INI config and
 
 `website/` is outside `os/` and is not covered here.
 
-**License declarations in manifests (changed 2026-10-14).** The Cargo manifests used to declare `license = "MIT OR Apache-2.0"` (workspace
-files in `10-bootstrap/` and `20-identity/`, and `agent111`). That contradicted the owner's decision and was removed. `node111`, `id111` and `agent111` now set
-`license-file = "../../../LICENSE.md"` (the draft), and `40-interface/ui/package.json` sets `"license": "SEE LICENSE IN ../../LICENSE.md"`.
-`cargo metadata` parses in all three workspaces.
+**License declarations in manifests (changed 2026-10-19).** Until 2026-10-14 the Cargo manifests declared `license = "MIT OR Apache-2.0"`; from
+2026-10-14 to 2026-10-19 they pointed at the source-available draft through `license-file`. Since 2026-10-19 `node111`, `id111`, `agent111` and `mesh111`
+declare `license = "GPL-3.0-or-later"`, and `40-interface/ui/package.json` sets `"license": "GPL-3.0-or-later"`. `cargo metadata` parses in all four workspaces.
 
 ## 3. Connected services (separate programs; not linked, not vendored)
 
@@ -150,45 +150,56 @@ basement.studio) and Silkscreen 400 and 700 (SIL OFL 1.1, Copyright 2001 The Sil
 
 ## 7. Compatibility with our own license
 
-The draft `LICENSE.md` limits commercial and military use of our code. That works only if nothing **copyleft** (GPL, LGPL linked statically or
-bundled, AGPL, SSPL) is linked into our binaries or bundled into the dashboard, because copyleft would force its own terms on the combined work.
+Our own code is `GPL-3.0-or-later` (`LICENSE.md`). Two things follow for dependencies:
 
-**Scan, 2026-10-14.** Every license field of all packages in the three Cargo lock graphs (255 + 64 + 108, all platforms, dev and build included) and all 146 JS
+1. **Everything linked into `111` or `111-agent`, or bundled into the dashboard, must be GPL-3.0-compatible**: released under terms that let the combined work be
+   conveyed under GPL-3.0. Compatible: the permissive licenses (MIT, BSD-2/3-Clause, ISC, Zlib, Unlicense, CC0, Apache-2.0, Unicode-3.0, BSL-1.0, CDLA-Permissive-2.0 for data),
+   MPL-2.0 (through its section 3.3 secondary-license clause), LGPL, and GPL-3.0 itself. **Incompatible, so a BLOCKER:** proprietary, source-available or field-of-use-restricted
+   terms (SSPL, BUSL, PolyForm, Commons Clause, the Reticulum License, CC-BY-NC), GPL-2.0-only, EPL-1.0, CDDL, OSL, CC-BY-SA, and the original 4-clause BSD.
+2. **The copyleft is ours to honour.** Every conveyed binary of our own code must come with its Corresponding Source or a GPL section 6 offer (section 8).
+
+**Scan, 2026-10-14; re-read against rule 1 on 2026-10-19.** Every license field of all packages in the three Cargo lock graphs (255 + 64 + 108, all platforms, dev and build included) and all 146 JS
 package versions, matched for GPL, LGPL, AGPL, SSPL, MPL, EPL, CDDL, EUPL, OSL, CC-BY-SA, BUSL, Elastic, NC and custom or missing licenses.
 
-**Result: zero BLOCKERs.** No copyleft crate is linked into `111` or `111-agent`, and no copyleft package is bundled into the dashboard. Hits that are not blockers:
+**Result: zero BLOCKERs.** Every crate linked into `111` or `111-agent` and every package bundled into the dashboard is under a GPL-3.0-compatible license (section 5). Hits that needed a second look:
 
 | Item | License | Why it is not a blocker | If it ever changes |
 |---|---|---|---|
-| `r-efi` 6.0.0 | `MIT OR Apache-2.0 OR LGPL-2.1-or-later` | Not in the Linux musl dependency trees (`cargo tree -i` finds nothing). Pulled by `getrandom` for UEFI only. We take MIT or Apache-2.0 | Elect MIT or Apache-2.0 |
-| `lightningcss` 1.32.0 and its Linux binary | MPL-2.0 (file-level copyleft) | Dev-only build tool under Tailwind and Vite. Not in `dist/` and never distributed by us | Do not ship it; keep it out of the payload |
-| `caniuse-lite`, `argparse` | CC-BY-4.0 (data), Python-2.0 | Dev-only; attribution or permissive, not copyleft | n/a |
-| Fonts | SIL OFL 1.1 | OFL allows bundling with software under any license. The font files stay OFL and may not be sold on their own | Keep the OFL texts beside the files |
-| `ring`, `libc` and the static musl build | native C and asm: ISC, BoringSSL parts; musl libc and compiler runtime: license not recorded in the repo | `ring`'s C and asm are permissive. Whether any GPL or LGPL runtime library is linked into the static binaries is not checked by anything today **(unverified — check the link step)** | Confirm that only permissive or runtime-exception code is linked |
+| Apache-2.0 crates (`sync_wrapper`, `ciborium`, `ring`'s BoringSSL parts, OpenSSL 3.x through `openssl-src`) | Apache-2.0 | Compatible with GPL-3.0 (it is not compatible with GPL-2.0: one reason our license is version 3 "or later", never 2) | Keep "version 3 or later" |
+| `r-efi` 6.0.0 | `MIT OR Apache-2.0 OR LGPL-2.1-or-later` | All three options are compatible. Not in the Linux musl dependency trees anyway (`cargo tree -i` finds nothing; UEFI only) | n/a |
+| `lightningcss` 1.32.0 and its Linux binary | MPL-2.0 (file-level copyleft) | Dev-only build tool under Tailwind and Vite, not in `dist/`; MPL-2.0 is GPL-compatible in any case | n/a |
+| `caniuse-lite`, `argparse` | CC-BY-4.0 (data), Python-2.0 | Dev-only, never shipped | n/a |
+| Fonts | SIL OFL 1.1 | OFL is not itself GPL-compatible, but the font files are data placed beside the program, not part of it, and OFL allows bundling with software under any license. The font files stay OFL and may not be sold on their own | Keep the OFL texts beside the files |
+| `webpki-roots` | CDLA-Permissive-2.0 (data) | Permissive; the agreement text must accompany the data (clause 2.1) | Keep the text in the notices |
+| `ring`, `libc` and the static musl build | native C and asm: ISC, BoringSSL parts; musl libc (MIT) and compiler runtime: license not recorded in the repo | `ring`'s C and asm are permissive; musl is MIT. Whether every runtime library the static link pulls in is permissive or carries a runtime exception is not checked by anything today **(unverified — check the link step)** | Confirm the link step |
 
-Every other dependency is MIT, Apache-2.0, BSD, ISC, CC0, Unlicense, Zlib, Unicode-3.0 or CDLA-Permissive-2.0 (section 5). These allow us to ship the combined work
-under our own terms as long as their notices travel with it (section 8). **Rule for new dependencies:** any GPL, LGPL (static or bundled), AGPL or SSPL crate,
-package or vendored file is a **BLOCKER**. The fix is to replace it, or to move it behind a process boundary. No such check runs in `scripts/check.sh` today.
+**Rule for new dependencies:** any crate, package or vendored file whose license is not GPL-3.0-compatible (rule 1) is a **BLOCKER**. The fix is to replace it, or to
+move it behind a process boundary (a separate program talked to over its own interfaces). No such check runs in `scripts/check.sh` today (section 9 item 11).
 
-**GPL programs as separate processes are fine, and must stay separate.** `meshtasticd`, the Termux app and packages, the RNode firmware, the Meshtastic web client bundle, the `meshtastic-presence` reader with `meshtastic-python`, and any later Dire Wolf or Briar run as
-their own programs. We start them, talk to them over their own interfaces, redistribute them unmodified and next to our code, and never link, merge or patch them.
-Distribution next to our code is mere aggregation under the usual GPL-3.0 terms, which the repo does not contain a copy of **(legal read to confirm)**.
+**GPL programs as separate processes.** `meshtasticd`, the Termux app and packages, the RNode firmware, the Meshtastic web client bundle, the `meshtastic-presence` reader with `meshtastic-python`, `meshmud`, and any later Dire Wolf or Briar run as
+their own programs: we start them, talk to them over their own interfaces, redistribute them unmodified and next to our code, and never patch them. Since 2026-10-19 that boundary is a
+**design decision** (D17, D19, D20: adopt upstream unmodified, never vendor, never fork), no longer something our license forces: their GPL-3.0 terms are the same as ours, so linking
+one would be license-compatible. The redistribution duties are unchanged (license text, source offer, no modification; section 8).
+
+**The Reticulum boundary is the one that stays license-forced.** The Reticulum License is neither open source nor GPL-compatible, so no Reticulum code may ever be incorporated, linked or
+derived in our code (sections 1 and 8). It stays a separate, unmodified, latest-upstream program that the user installs from PyPI; the Reticulum License is an agreement between the user and upstream.
 
 **Other policies do not conflict.**
-- The KB rubric's OSI-license gate (`00-knowledge/README.md`) applies to *adopted components*, not to our own license. A source-available license on our code does not
-  affect it. It does mean the project must not describe itself as "open source"; the README was reworded accordingly (open item 8).
-- The Reticulum boundary is unchanged: separate process, unmodified, latest upstream, no code incorporated. Our noncommercial and no-military terms do not relicense or
-  restrict Reticulum, and the Reticulum License stays an agreement between the user and upstream.
+- The KB rubric's OSI-license gate (`00-knowledge/README.md`) applies to *adopted components*, not to our own license. Our license is OSI-approved, so the project may describe itself as
+  open source; the README says so (section 9 item 8).
+- The Reticulum boundary is unchanged (above).
 
 ## 8. Obligations we actually have to meet
 
 - [ ] **Third-party notices in every release.** `THIRD-PARTY-NOTICES.md` now exists: 187 Rust crates, 6 JS packages (5 MIT plus `wouter`), the 4 font files,
   Monocypher, the Layer 5 additions (14 Go modules of `meshmud`, 16 Python packages of the presence venv, the Meshtastic web client bundle, GPL source offers naming the pinned tags), and the license texts including the CDLA agreement for `webpki-roots` and the GPL-3.0 text. Generated by `10-bootstrap/scripts/gen-notices.py` and gated by `check.sh`. Still to do: ship it in the release payload as a manifest item and link it from the
   dashboard (Settings, Essentials, "Licenses").
-- [ ] **Our own license:** ship `LICENSE.md` (drafting notes removed, Required Notice URL confirmed) beside the third-party notices in every release, and keep the Required Notice line.
+- [ ] **Our own license (GPL-3.0-or-later):** ship `LICENSE.md` beside the third-party notices in every release. For every conveyed binary of our own code, publish the
+  Corresponding Source of that exact release from the same place as the binaries (the tagged source at the release's commit; GPL-3.0 section 6(d)) and name the tag and
+  commit in the release notes. Keep the copyright notice and the "no warranty" statement intact in anything we ship (GPL-3.0 sections 4 and 5). The release checklist does not record this yet.
 - [ ] **OFL fonts:** keep copyright and license text beside the font files, never sell the fonts alone, keep them unmodified (OFL clause 3 restricts reserved font names on modified versions). Met today.
 - [ ] **Monocypher:** keep `LICENCE.md` with the vendored sources. If a C port ever ships in firmware, carry the BSD-2-Clause notice or elect CC0. Met today (test-only).
-- [ ] **GPL components stay separate programs.** Termux APKs and debs, RNode firmware if ever pinned, and `meshtasticd` are never linked or merged into our code. For
+- [ ] **GPL components stay separate programs (design rule; see section 7).** Termux APKs and debs, RNode firmware if ever pinned, and `meshtasticd` are never linked, merged or patched. For
   anything GPL that we redistribute (APKs, debs, firmware): ship the license text, point to the exact upstream source for that version, and never modify it. Not yet written into the release process.
 - [ ] **Reticulum:**
   - no Reticulum code in our tree, and no import, link or copy of its source, docs text or data;
@@ -205,7 +216,9 @@ Distribution next to our code is mere aggregation under the usual GPL-3.0 terms,
 
 ## 9. Open items for the owner
 
-1. **Project license.** Review and accept the draft `LICENSE.md`. Part A now holds the verbatim PolyForm Noncommercial 1.0.0 text. Still open: fill in the Licensor and commercial-contact placeholders, and get the lawyer's review before the first signed release (D17). The scope (charities, schools and public bodies allowed), armed forces doing relief, and contributor terms are listed as open points in the drafting notes.
+1. **Project license (done 2026-10-19).** Relicensed to `GPL-3.0-or-later` (owner decision, `plan/DECISIONS.md` D22); `LICENSE.md` holds the verbatim FSF text and the copyright notice
+   ("111network contributors"). A standard, unchanged FSF license needs no lawyer's review of its own text; the legal reads that remain are the third-party ones (items 2, 4 and 14).
+   Still to do: the release-time source offer (section 8) and, optionally, an SPDX header line in our own source files.
 2. **Legal read: RNode firmware redistribution.** Needed before any firmware image is pinned in the manifest (section 3). Includes confirming upstream's current license text.
 3. **Latest-upstream rule (decided, 2026-10-14).** Each 111 release pins the *then-latest* upstream Reticulum release by hash, and the updater refreshes that pin on every 111 release.
    The hash protects integrity; it does not freeze the version. Nothing is vendored and nothing is patched, so `rns-lock.txt` stays a requirements file with hashes. Between 111 releases the
@@ -218,10 +231,10 @@ Distribution next to our code is mere aggregation under the usual GPL-3.0 terms,
    `gen-notices.py --check` compares the lockfile SHA-256s recorded in that file with the current lockfiles and fails when they differ. It runs as the "notices" step in `10-bootstrap/scripts/check.sh`.
    Layer 5 adds a Go path (the pinned `meshmud` tag's `go.mod` / `go.sum` snapshot plus `10-bootstrap/scripts/notices/go-licenses.txt`) and a Python-venv path (the presence lock plus `python-licenses.txt`); `--check` also hashes those, the build-script pins, and fails when a Go module or locked package has no license row.
    Still to do: a release-checklist step that ships the file in the payload, the dashboard "Licenses" link, and the components not shipped yet (GPL-3.0 text and source offer for Termux APKs and debs, MIT notices for `llama-server` and `opencode`, the model license).
-8. **Wording that conflicted with the draft license (done 2026-10-14).** `os/README.md` now says "source-available operating layer (free for personal, non-commercial, non-military use)". Its two statements about usage policies now say the software imposes none *at runtime* (no telemetry, no content policy, no policing), and that the license terms are a separate matter.
-9. **Manifests (done 2026-10-14).** The three crates point at `LICENSE.md` through `license-file`, and `package.json` uses `SEE LICENSE IN`. If a registry ever needs an SPDX string, use `LicenseRef-111network`.
-10. **Contributor terms.** Offering commercial agreements needs a contributor license or assignment; none exists.
-11. **Automate the copyleft gate.** Add a license allow-list check (for example `cargo deny` and a JS license export) to `scripts/check.sh` so a copyleft dependency fails the build, and confirm which runtime libraries the static musl link pulls in.
+8. **README wording (updated 2026-10-19).** `os/README.md` now says "open-source operating layer (GPL-3.0-or-later: free for anyone, for any purpose, including commercial use)" and that contributions of any kind are appreciated. Its statements about usage policies still say the software imposes none *at runtime* (no telemetry, no content policy, no policing), and that the license terms are a separate matter.
+9. **Manifests (updated 2026-10-19).** The four crates declare `license = "GPL-3.0-or-later"` and `package.json` sets the same SPDX id. `LicenseRef-111network` is no longer needed.
+10. **Contributor terms (resolved by the license, 2026-10-19).** Contributions are accepted under `GPL-3.0-or-later`, the same terms the project is published under (inbound = outbound). No copyright assignment and no contributor license agreement; contributors keep their copyright. Any sort of contribution is appreciated. Optional later: a Developer Certificate of Origin sign-off line.
+11. **Automate the compatibility gate.** Add a license allow-list check (for example `cargo deny` with the GPL-3.0-compatible set of section 7, and a JS license export) to `scripts/check.sh` so an incompatible dependency fails the build, and confirm which runtime libraries the static musl link pulls in.
 12. **meshmud conveyance (D20 b says "conveyed as GPL-3.0, verified at build").** The v1.0.0 source shows no Meshtastic protobuf in the closure (own wire parser; `go.mod` lists none), so the binary looks like MIT plus permissive modules. `meshmud-build.sh` writes the verdict per build. Owner: keep the GPL-3.0 conveyance wording as the safe default, or record the MIT result once the CI verdict has been seen. The source offer is in the notices either way.
 13. **Web bundle: upstream asset and third-party notices.** (a) Upstream's `build.tar` for v2.7.2 omits the sqlite `.wasm` and the Inter fonts, so we build from the tag (byte-identical where they overlap); re-check at each pin move, and tell upstream. (b) The bundle's minified third-party JavaScript carries no license banners; `meshtastic-web-build.sh --licenses FILE` lists the workspace's production packages (793 versions at v2.7.2, a superset of what is bundled). Decide whether to reproduce a trimmed list in `THIRD-PARTY-NOTICES.md`.
 14. **GPL source-offer form.** `THIRD-PARTY-NOTICES.md` names the upstream tags and commits for the web bundle, `meshmud` (if GPL) and `meshtastic-python`. Whether pointing at upstream satisfies GPL-3.0 section 6 for files we host in our own release (as opposed to a written offer or a mirror of the source) needs the same legal read as items 2 and 4.

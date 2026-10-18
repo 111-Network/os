@@ -62,9 +62,13 @@ describe("the two documents the page ships", () => {
     for (const text of [license, notices]) {
       const doc = parseMarkdown(text);
       expect(doc.truncated).toBe(false);
-      expect(doc.blocks.length).toBeGreaterThan(10);
+      expect(doc.blocks.length).toBeGreaterThan(5);
       expect(doc.blocks[0]?.t).not.toBe("heading"); // the leading `# Title` is not repeated in the body
     }
+    // The license is a short preamble plus the verbatim GPL-3.0 text in one fenced block; the notices are long prose.
+    const gpl = parseMarkdown(license).blocks.find((b) => b.t === "code");
+    expect(gpl?.t === "code" && gpl.text.startsWith("                    GNU GENERAL PUBLIC LICENSE")).toBe(true);
+    expect(parseMarkdown(notices).blocks.length).toBeGreaterThan(10);
   });
 });
 

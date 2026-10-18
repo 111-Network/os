@@ -224,8 +224,24 @@ ADR-lite. Every decision, its rejected alternatives, and why. Newest last; never
 - **Why:** the Layer 4 number guarded first-load weight on constrained devices; lazy chunks do not load until a feature is
   used, so budgeting them apart keeps that guard honest while letting the dashboard grow a view per layer.
 
+## D22 — Relicensed to GPL-3.0-or-later: open source, commercial use allowed, no military clause
+
+- **Date:** 2026-10-19
+- **Decision (owner):** 111network's own code is free software under the **GNU General Public License, version 3 or (at your option) any later
+  version** (`GPL-3.0-or-later`). Copyright holder on the notice: "111network contributors". The source-available draft of D17 (PolyForm Noncommercial 1.0.0
+  plus a no-military-use condition, commercial use by separate agreement) is withdrawn; it was never part of a release. Applies to `os/` and to the website
+  repo (`LICENSE` added there). `os/LICENSE.md` carries the verbatim FSF text; the four crate manifests and `package.json` declare the SPDX id instead of
+  `license-file`; `LICENSING.md` section 7 now checks GPL-3.0 compatibility of dependencies instead of excluding copyleft; contributions are accepted under
+  the same license (inbound = outbound, no assignment, no CLA), and any sort of contribution is appreciated (README, `LICENSE.md`, `LICENSING.md`).
+- **Rejected:** Apache-2.0, MIT and MIT OR Apache-2.0 (permissive: distributed forks could go closed) · keeping the military ban as an added condition (an
+  OSI-approved license may not restrict fields of use, so the project could not call itself open source) · keeping the draft pending a lawyer's review (a
+  standard, unchanged FSF license needs none; the legal reads that remain are the third-party ones in `LICENSING.md` section 9).
+- **Why:** the owner wants the project to be open source in the OSI sense with commercial use allowed; copyleft keeps every distributed change free, which
+  matches "free secure communication is everyone's right", and it sits naturally beside the GPL-3.0 neighbours 111 hosts (Meshtastic firmware and web client,
+  meshtastic-python). Follow-up: the release checklist must publish the tagged Corresponding Source beside every binary release (`LICENSING.md` section 8).
+
 ## Pending
 
 - Move deep architecture content out of `os/README.md` into per-layer specs (blocked on layer homes existing).
 - **Layer 0 hook activation** — owner chose to leave it off (D17); `build.py --check` stays manual per task.
-- **Project license** — `os/LICENSE.md` is a draft (D17); needs a lawyer's review before the first signed release.
+- **Release source offer** — the release checklist must publish the tagged Corresponding Source beside every binary release (D22; `LICENSING.md` section 8).
