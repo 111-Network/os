@@ -1,6 +1,6 @@
 # 111network License
 
-> **DRAFT — needs a lawyer's review before the first signed release.**
+> **DRAFT — last update 17.10.2026.**
 > Until that review, the owner's words in "Our philosophy" below win over any inconsistency in the legal terms that follow.
 > Placeholders in [square brackets] are for the owner to fill in. Third-party components are not covered (see "What this covers").
 
