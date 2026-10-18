@@ -112,13 +112,13 @@ forkability recorded.
 - Device: Rust dev host only (x86-64, WSL2, gcc 11.4); no Cat 1 board
   yet, so no on-device footprint or latency figures.
 - Date: 2026-10-13; re-run 2026-10-14 after the spec v2.1 amendment.
-- Procedure: `bash os/identity/monocypher-harness/run.sh` verifies the
+- Procedure: `bash os/20-identity/monocypher-harness/run.sh` verifies the
   SHA-256 pins of the vendored 4.0.3 sources, builds the harness, and
   re-executes every frozen vector file produced by the Rust core (RFC
   8032, RFC 7748, SLIP-0010, keyset, edge and malleability suite,
   announce, sealed packet, attestation node leg) against Monocypher,
   demanding byte-exact agreement. Full log:
-  identity/test-vectors/monocypher-smoke.md.
+  20-identity/test-vectors/monocypher-smoke.md.
 - Result: PASS, 442 checks over 219 vector entries, 0 failures; ASan and
   UBSan clean; 17 of 17 harness mutants killed. Findings F1 to F5 in the
   log (API deltas, and the mixed-order residual F3, closed 2026-10-14)

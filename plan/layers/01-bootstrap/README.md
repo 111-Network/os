@@ -2,7 +2,7 @@
 
 **Status** (copied from [`INDEX.md`](../../INDEX.md) row 1, which stays the source of truth): ✅ built — spec v2.2 (D9 + D12 + D14d identity-seam amendment), all 17 tasks done: ~90 cargo tests + 21 shim cases + namespace e2e green; `verify/local-smoke.sh` ALL LOCAL GATES GREEN; external HW gates (V1–V3, V8, V11) in runbooks before first signed release
 
-**Spec and build:** [`os/bootstrap/README.md`](../../../bootstrap/README.md) · [`os/bootstrap/TASKS.md`](../../../bootstrap/TASKS.md)
+**Spec and build:** [`os/10-bootstrap/README.md`](../../../10-bootstrap/README.md) · [`os/10-bootstrap/TASKS.md`](../../../10-bootstrap/TASKS.md)
 
 **Decisions:** D9, D12 in [`DECISIONS.md`](../../DECISIONS.md). Build protocol: [`EXECUTION.md`](../../EXECUTION.md).
 

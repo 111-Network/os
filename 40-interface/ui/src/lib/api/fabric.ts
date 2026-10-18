@@ -1,4 +1,4 @@
-// Fabric slice (os/messaging/README.md §8–§10, §15): pure helpers over FabricStatus. The store keeps the snapshot
+// Fabric slice (os/50-messaging/README.md §8–§10, §15): pure helpers over FabricStatus. The store keeps the snapshot
 // (`GET /fabric`, replaced by each `fabric` frame); views and the Settings page read these summaries.
 import type { FabricHub, FabricStatus, FabricStore } from "./types";
 

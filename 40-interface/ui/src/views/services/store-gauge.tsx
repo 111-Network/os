@@ -1,4 +1,4 @@
-// The store gauge (os/messaging/README.md section 10): live bytes against the high watermark, as a bar and as words. Colour
+// The store gauge (os/50-messaging/README.md section 10): live bytes against the high watermark, as a bar and as words. Colour
 // is never used for it (DESIGN.md: colour lives on status dots only); a full store is said in words and by the service's
 // ERROR dot, and the bar is solid when there is no room left.
 import type { FabricStore } from "../../lib/api/types";

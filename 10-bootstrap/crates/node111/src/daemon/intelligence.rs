@@ -4,7 +4,7 @@
 //! release/model install put on disk; a missing piece is an honest `absent`
 //! (relay and Tier-2A nodes carry no model), never an error.
 //!
-//! Wiring contract (os/intelligence/TASKS.md "Cross-layer wiring"):
+//! Wiring contract (os/30-intelligence/TASKS.md "Cross-layer wiring"):
 //! - `llama-server` runs iff `current/bin/llama-server` exists AND a `*.gguf`
 //!   exists directly under `<root>/models/current/` (first by file name).
 //! - `111-agent` runs iff `current/bin/111-agent` exists. Its environment

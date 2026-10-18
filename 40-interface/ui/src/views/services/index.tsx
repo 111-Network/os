@@ -5,7 +5,7 @@
 //   error      reason, log lines, Restart, "Fix with the agent" (and the Settings -> Restart node link when back-off is stuck)
 // The prompt text always comes from the one builder in lib/prompts.ts; nothing here is per-service.
 //
-// Layer 5 (os/messaging/README.md section 13, 14, 16) adds to it without changing that shape:
+// Layer 5 (os/50-messaging/README.md section 13, 14, 16) adds to it without changing that shape:
 //   a LIVE service with a hosted panel gets a Panel tab (panel.tsx) beside the details;
 //   `fabric` ("Messaging") shows its links, hub, custody and store (fabric.tsx) in place of the raw detail table;
 //   `meshtastic` adds the nodes heard and the honest copy about its panel (meshtastic.tsx).

@@ -1,6 +1,6 @@
 # SSE tapes
 
-Byte-for-byte recordings of what a real `111 daemon` sent, made by `interface/verify/smoke.sh`.
+Byte-for-byte recordings of what a real `111 daemon` sent, made by `40-interface/verify/smoke.sh`.
 Never hand-written, never edited: the only rewrite is the scratch root path → `/var/lib/111`.
 `test/tapes.test.ts` replays every `*.sse` here through the real parser and frame mappers and
 validates each frame against the contract (`openapi.yaml` `x-sse-events`).

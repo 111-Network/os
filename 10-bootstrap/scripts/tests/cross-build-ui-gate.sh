@@ -1,6 +1,6 @@
 #!/bin/sh
 # cross-build UI gate: a release build must fail without a fresh
-# interface/ui/dist unless --allow-no-ui is given. Hermetic: copies
+# 40-interface/ui/dist unless --allow-no-ui is given. Hermetic: copies
 # cross-build.sh into a scratch tree with a fake UI, a stub `cargo` that stops
 # the build right after the gate, and (per case) a stub `pnpm`.
 set -u
@@ -12,9 +12,9 @@ FAILS=0
 pass() { printf '%s\n' "ui-gate: ok: $*"; }
 fail() { printf '%s\n' "ui-gate: FAIL: $*" >&2; FAILS=$((FAILS + 1)); }
 
-mkdir -p "$T/bootstrap/scripts" "$T/stubs" "$T/pnpm" "$T/home"
-cp "$SRC" "$T/bootstrap/scripts/cross-build.sh"
-UI="$T/interface/ui"
+mkdir -p "$T/10-bootstrap/scripts" "$T/stubs" "$T/pnpm" "$T/home"
+cp "$SRC" "$T/10-bootstrap/scripts/cross-build.sh"
+UI="$T/40-interface/ui"
 printf '#!/bin/sh\necho CARGO-REACHED\nexit 3\n' > "$T/stubs/cargo"
 # $2/$3 expand inside the stub, not here.
 # shellcheck disable=SC2016
@@ -35,7 +35,7 @@ build() { # extra PATH dir ("" = none); then cross-build args
 	_extra=$1
 	shift
 	HOME="$T/home" PATH="${_extra:+$_extra:}$T/stubs:/usr/bin:/bin" \
-		sh "$T/bootstrap/scripts/cross-build.sh" "$@" 2026.10.14 "$T/out" 2>&1
+		sh "$T/10-bootstrap/scripts/cross-build.sh" "$@" 2026.10.14 "$T/out" 2>&1
 }
 
 if (PATH=/usr/bin:/bin && command -v pnpm >/dev/null 2>&1); then

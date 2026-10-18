@@ -1,4 +1,4 @@
-// Contacts (os/messaging/README.md section 16, at /messages/contacts): message requests, the contact list, add by card /
+// Contacts (os/50-messaging/README.md section 16, at /messages/contacts): message requests, the contact list, add by card /
 // QR / node id, and this node's own card.
 import { hrefTo } from "../../app/location";
 import { ButtonLink } from "../../components/button";

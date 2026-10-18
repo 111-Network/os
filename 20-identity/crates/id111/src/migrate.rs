@@ -307,7 +307,7 @@ mod tests {
     use super::*;
     use std::sync::atomic::{AtomicU64, Ordering};
 
-    /// Layer 1's own published NIP-06 test values (os/bootstrap identity
+    /// Layer 1's own published NIP-06 test values (os/10-bootstrap identity
     /// tests) — a realistic D9 dir body.
     const V1_WORDS: &str =
         "leader monkey parrot ring guide accident before fence cannon height naive bean";

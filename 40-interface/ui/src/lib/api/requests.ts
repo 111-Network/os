@@ -1,4 +1,4 @@
-// Ignored message requests (os/messaging/README.md section 7.2): the user "ignores" a request and it is "kept in the
+// Ignored message requests (os/50-messaging/README.md section 7.2): the user "ignores" a request and it is "kept in the
 // request list, never auto-pruned while pending, no ACK sent". The node has no such operation, and calling DELETE on the
 // contact would discard the held words and let the sender's next retransmission bring the request back. So ignoring is
 // a fold the page keeps for itself, per device: a set of `(peer, newest received_seq)` pairs. The request stays pending

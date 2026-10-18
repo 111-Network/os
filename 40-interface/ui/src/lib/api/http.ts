@@ -71,7 +71,7 @@ type Query = Record<string, string | number | undefined>;
 
 // What the node said about each hosted panel the first time this page asked (`GET /panels` at boot): true = enabled and
 // listening. The dashboard's Content-Security-Policy is computed when the document is fetched and names only the panels that
-// were enabled and listening then (os/messaging/README.md section 13), so the first answer is the page's best evidence for
+// were enabled and listening then (os/50-messaging/README.md section 13), so the first answer is the page's best evidence for
 // whether a panel's origin is in the `frame-src` this page is stuck with. Later answers never replace it.
 let panelsAtLoad: ReadonlyMap<string, boolean> | null = null;
 

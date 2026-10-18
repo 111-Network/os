@@ -1,6 +1,6 @@
 #!/bin/sh
 # meshmud-build: build meshmud (the Meshtastic multiplexer, adopted) from a PINNED upstream
-# source tarball into static linux/amd64 + linux/arm64 binaries (spec messaging/README.md
+# source tarball into static linux/amd64 + linux/arm64 binaries (spec 50-messaging/README.md
 # section 2 and section 14, D19 g / D20 b).
 #
 # CI ONLY. Go is a CI-only toolchain: no Go is installed on a dev box or a node, nothing here runs

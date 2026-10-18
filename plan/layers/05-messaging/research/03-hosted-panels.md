@@ -129,7 +129,7 @@ Meshtastic panel first (matches the owner's scope): static bundle, proxy, ticket
 
 ## 6. Sources
 
-Repo: `os/README.md` · `os/interface/README.md` §1, §6.6, §7, §11 · `os/plan/DECISIONS.md` D15–D17 · `os/plan/cross-layer/devices.md` · `os/LICENSING.md` · `node111/src/daemon/dashboard/routes.rs` · `interface/api/openapi.yaml` · KB `briar-bramble`, `meshtastic`, `meshcore`.
+Repo: `os/README.md` · `os/40-interface/README.md` §1, §6.6, §7, §11 · `os/plan/DECISIONS.md` D15–D17 · `os/plan/cross-layer/devices.md` · `os/LICENSING.md` · `node111/src/daemon/dashboard/routes.rs` · `40-interface/api/openapi.yaml` · KB `briar-bramble`, `meshtastic`, `meshcore`.
 
 - https://developers.home-assistant.io/docs/add-ons/presentation/
 - https://developers.home-assistant.io/docs/add-ons/configuration/

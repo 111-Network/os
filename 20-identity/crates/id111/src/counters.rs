@@ -35,9 +35,9 @@
 //! refuse with [`CounterError::RestoreFloorRequired`]. A file written in that
 //! state would carry `announce_last = 0` and read as *state present* at the
 //! next open — the floor silently replaced by a counter reset (Layer 5
-//! Wave 2 hardening; `os/identity/README.md` §13.1, A3 note).
+//! Wave 2 hardening; `os/20-identity/README.md` §13.1, A3 note).
 //!
-//! Layer 5 amendments (`os/messaging/README.md` §4, §19):
+//! Layer 5 amendments (`os/50-messaging/README.md` §4, §19):
 //!
 //! - **A11 — verdict, not rejection.** [`CounterStore::observe_counter`]
 //!   offers a verified packet's counter to the same 32-entry window as

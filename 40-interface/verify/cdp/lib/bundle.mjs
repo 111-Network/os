@@ -1,4 +1,4 @@
-// Static (offline) lint of a panel bundle directory — what the daemon serves unmodified (os/messaging/README.md
+// Static (offline) lint of a panel bundle directory — what the daemon serves unmodified (os/50-messaging/README.md
 // section 13 "Offline lint"). No browser: it reads the files.
 //
 //   - every <script src>, <link href>, <img src|srcset>, <source>, <iframe>, <video|audio|track>, <object|embed>,

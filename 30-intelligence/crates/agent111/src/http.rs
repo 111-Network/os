@@ -1,5 +1,5 @@
 //! HTTP surface: routes + Host allowlist (loopback trust model, mirroring
-//! the bootstrap dashboard contract). Full contract in intelligence/TASKS.md.
+//! the bootstrap dashboard contract). Full contract in 30-intelligence/TASKS.md.
 
 use std::sync::Arc;
 

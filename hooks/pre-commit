@@ -2,4 +2,4 @@
 # Pre-commit: validate the knowledge base (schema, relations, staleness)
 # and fail if any generated llms.txt index is stale. Zero errors required.
 cd "$(git rev-parse --show-toplevel)" || exit 1
-python3 knowledge/_meta/build.py --check
+python3 00-knowledge/_meta/build.py --check

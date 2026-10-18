@@ -22,8 +22,8 @@ This section states intent. The binding terms are Parts A to C.
 
 ## What this covers
 
-This license covers 111network's own code and documents: the trees listed in `LICENSING.md` section 2 (`bootstrap/`, `identity/`,
-`intelligence/`, `interface/`, `knowledge/`, `plan/` and the READMEs). It does **not** cover third-party software that 111network runs,
+This license covers 111network's own code and documents: the trees listed in `LICENSING.md` section 2 (`10-bootstrap/`, `20-identity/`,
+`30-intelligence/`, `40-interface/`, `00-knowledge/`, `plan/` and the READMEs). It does **not** cover third-party software that 111network runs,
 bundles or links. Each of those keeps its own license, listed in `LICENSING.md`. Nothing here relicenses or restricts any third-party component.
 
 This is a source-available license. It is **not** an OSI-approved open-source license, because it limits commercial and military use.

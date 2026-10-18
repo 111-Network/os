@@ -1,4 +1,4 @@
-//! `/api/v1/messages*` (`os/messaging/README.md` §15; contract
+//! `/api/v1/messages*` (`os/50-messaging/README.md` §15; contract
 //! `listThreads`, `getThread`, `sendMessage`, `retryMessage`,
 //! `cancelMessage`).
 //!

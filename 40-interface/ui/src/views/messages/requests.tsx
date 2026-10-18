@@ -1,4 +1,4 @@
-// Pending message requests (an INTRO, os/messaging/README.md section 7.2): the held words as text only, and what a person
+// Pending message requests (an INTRO, os/50-messaging/README.md section 7.2): the held words as text only, and what a person
 // can do with them.
 //
 //   accept          makes the contact and delivers the held messages to the thread.

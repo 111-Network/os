@@ -1,7 +1,7 @@
 //! Configuration: defaults < env file (`/etc/111/agent.env`) < `AGENT111_*`
 //! env vars < CLI flags, plus the startup model-base guard (no WAN inference,
 //! ever; the `lan` flag never influences it) and the daemon-API guard (Layer 5,
-//! `os/messaging/README.md` §17: `111d`'s `/api/v1` is reached on loopback
+//! `os/50-messaging/README.md` §17: `111d`'s `/api/v1` is reached on loopback
 //! only, with the per-spawn bearer token from `AGENT111_DAEMON_TOKEN`).
 //!
 //! Resolution is pure: [`Config::resolve`] takes the environment, argv, and

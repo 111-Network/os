@@ -1,11 +1,11 @@
-//! Layer 5 F2 acceptance (`os/messaging/README.md` §2, §4, §9, §10.2, §15,
-//! §17; `os/messaging/TASKS.md` row F2): the fabric wired into `111d` with
+//! Layer 5 F2 acceptance (`os/50-messaging/README.md` §2, §4, §9, §10.2, §15,
+//! §17; `os/50-messaging/TASKS.md` row F2): the fabric wired into `111d` with
 //! the real identity handle (a fresh `id111` identity on a temp root, its
 //! counter store, SQLCipher Mode S), driven through the real dashboard app
 //! on loopback sockets.
 //!
 //! - every §15 route's happy path, each 2xx body and every problem checked
-//!   against the contract digest (`interface/ui/test/contract.gen.ts`,
+//!   against the contract digest (`40-interface/ui/test/contract.gen.ts`,
 //!   generated from `openapi.yaml`) by a port of the UI's JSON-Schema-subset
 //!   validator — including the SSE `message` / `contact` / `fabric` frames;
 //! - hub offer → member enrollment over a real `tcp-lan` link (and the same
@@ -72,7 +72,7 @@ fn contract() -> &'static Contract {
     static C: OnceLock<Contract> = OnceLock::new();
     C.get_or_init(|| {
         let path = format!(
-            "{}/../../../interface/ui/test/contract.gen.ts",
+            "{}/../../../40-interface/ui/test/contract.gen.ts",
             env!("CARGO_MANIFEST_DIR")
         );
         let text = std::fs::read_to_string(path).expect("contract.gen.ts");
@@ -199,7 +199,7 @@ fn type_ok(v: &Value, t: &str) -> bool {
     }
 }
 
-/// A port of `interface/ui/test/helpers/validate.ts` (same subset).
+/// A port of `40-interface/ui/test/helpers/validate.ts` (same subset).
 fn validate(v: &Value, schema: &Value, path: &str, errs: &mut Vec<String>) {
     let c = contract();
     if let Some(r) = schema.get("$ref").and_then(Value::as_str) {
@@ -1853,7 +1853,7 @@ fn contract_codes_pass_the_validator() {
     }
     // the emitted set names both codes, and Problem.code has restore_pending
     let yaml = std::fs::read_to_string(format!(
-        "{}/../../../interface/api/openapi.yaml",
+        "{}/../../../40-interface/api/openapi.yaml",
         env!("CARGO_MANIFEST_DIR")
     ))
     .unwrap();

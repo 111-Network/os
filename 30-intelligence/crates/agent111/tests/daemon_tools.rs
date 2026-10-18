@@ -1,4 +1,4 @@
-//! Layer 5 agent tools (`os/messaging/README.md` §17) against a stub `111d`:
+//! Layer 5 agent tools (`os/50-messaging/README.md` §17) against a stub `111d`:
 //! `messages.read`, `messages.send`, `contacts.read`, `fabric.read`,
 //! `nearby.read`. The stub is the std `TcpListener` helper in `common/`,
 //! serving `/api/v1/*` on an ephemeral loopback port and recording every

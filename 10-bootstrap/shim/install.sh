@@ -1,7 +1,7 @@
 #!/bin/sh
 # ==========================================================================
 # 111 Network — POSIX bootstrap shim (install.sh)
-# Spec: os/bootstrap/README.md v2.1, "Architecture" §1.
+# Spec: os/10-bootstrap/README.md v2.1, "Architecture" §1.
 #
 # One-command install:
 #   curl -fsSL https://install.111.network/install.sh | sh

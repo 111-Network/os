@@ -16,17 +16,17 @@ call uses --locked --offline, pnpm reads the installed node_modules.
 Inputs
   Rust   `cargo metadata` (repository, authors, crate dirs) and
          `cargo tree -e normal --target <musl triple>` (the shipped set) in
-         os/bootstrap (binary `111`, includes id111) and os/intelligence
-         (binary `111-agent`). os/identity is not an input: id111 is built
-         inside the bootstrap workspace and resolved by bootstrap/Cargo.lock.
-  JS     `pnpm licenses list --prod --json` in os/interface/ui.
+         os/10-bootstrap (binary `111`, includes id111) and os/30-intelligence
+         (binary `111-agent`). os/20-identity is not an input: id111 is built
+         inside the bootstrap workspace and resolved by 10-bootstrap/Cargo.lock.
+  JS     `pnpm licenses list --prod --json` in os/40-interface/ui.
   Go     (Layer 5) the meshmud closure: a go.mod / go.sum snapshot of the pinned upstream tag plus a
-         hand-maintained license list, both under bootstrap/scripts/notices/. Go is a CI-only
+         hand-maintained license list, both under 10-bootstrap/scripts/notices/. Go is a CI-only
          toolchain, so nothing here runs `go`; meshmud-build.sh checks the real binary against the
          same list. The pins (tag, commit, tarball sha256) are read from meshmud-build.sh.
   Python (Layer 5) the meshtastic-presence venv: the hash lock under
-         messaging/sidecars/meshtastic-presence/ plus a hand-maintained license list
-         (bootstrap/scripts/notices/python-licenses.txt). Every locked package needs a row.
+         50-messaging/sidecars/meshtastic-presence/ plus a hand-maintained license list
+         (10-bootstrap/scripts/notices/python-licenses.txt). Every locked package needs a row.
   Web    (Layer 5) the Meshtastic web client bundle: tag, commit and hashes read from
          meshtastic-web-build.sh.
   Other  the four dashboard font files and their OFL texts, vendored Monocypher.
@@ -47,21 +47,21 @@ OS_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file_
 OUT_DEFAULT = os.path.join(OS_DIR, "THIRD-PARTY-NOTICES.md")
 
 # (workspace dir, binary tag) — order does not matter, output is sorted
-CARGO_WORKSPACES = (("bootstrap", "111"), ("intelligence", "111-agent"))
+CARGO_WORKSPACES = (("10-bootstrap", "111"), ("30-intelligence", "111-agent"))
 TARGETS = ("x86_64-unknown-linux-musl", "aarch64-unknown-linux-musl")
-UI_DIR = os.path.join(OS_DIR, "interface", "ui")
-LOCKFILES = ("bootstrap/Cargo.lock", "intelligence/Cargo.lock", "interface/ui/pnpm-lock.yaml")
+UI_DIR = os.path.join(OS_DIR, "40-interface", "ui")
+LOCKFILES = ("10-bootstrap/Cargo.lock", "30-intelligence/Cargo.lock", "40-interface/ui/pnpm-lock.yaml")
 FONT_DIR = os.path.join(UI_DIR, "public", "fonts")
-MONO_DIR = os.path.join(OS_DIR, "identity", "monocypher-harness")
+MONO_DIR = os.path.join(OS_DIR, "20-identity", "monocypher-harness")
 
 # Layer 5 inputs (Go closure of meshmud, presence venv, web bundle pins)
-SCRIPTS_DIR = os.path.join(OS_DIR, "bootstrap", "scripts")
+SCRIPTS_DIR = os.path.join(OS_DIR, "10-bootstrap", "scripts")
 NOTICES_DIR = os.path.join(SCRIPTS_DIR, "notices")
 MESHMUD_SCRIPT = os.path.join(SCRIPTS_DIR, "meshmud-build.sh")
 WEB_SCRIPT = os.path.join(SCRIPTS_DIR, "meshtastic-web-build.sh")
 GO_LICENSES = os.path.join(NOTICES_DIR, "go-licenses.txt")
 PY_LICENSES = os.path.join(NOTICES_DIR, "python-licenses.txt")
-PRESENCE_DIR = os.path.join(OS_DIR, "messaging", "sidecars", "meshtastic-presence")
+PRESENCE_DIR = os.path.join(OS_DIR, "50-messaging", "sidecars", "meshtastic-presence")
 PRESENCE_LOCK = os.path.join(PRESENCE_DIR, "meshtastic-presence-lock.txt")
 PRESENCE_LICENSE = os.path.join(PRESENCE_DIR, "LICENSE")
 
@@ -108,13 +108,13 @@ def pins_digest(pins):
 def meshmud_pins():
     pins = read_pins(MESHMUD_SCRIPT, "MESHMUD")
     need_pins(pins, ("MESHMUD_REPO", "MESHMUD_TAG", "MESHMUD_COMMIT", "MESHMUD_TARBALL_SHA256"),
-              "bootstrap/scripts/meshmud-build.sh")
+              "10-bootstrap/scripts/meshmud-build.sh")
     return pins
 
 
 def web_pins():
     pins = read_pins(WEB_SCRIPT, "WEB")
-    need_pins(pins, ("WEB_REPO", "WEB_TAG", "WEB_COMMIT"), "bootstrap/scripts/meshtastic-web-build.sh")
+    need_pins(pins, ("WEB_REPO", "WEB_TAG", "WEB_COMMIT"), "10-bootstrap/scripts/meshtastic-web-build.sh")
     return pins
 
 
@@ -129,8 +129,8 @@ def input_records():
         path = os.path.join(OS_DIR, rel)
         recs.append((sha256(path) if os.path.isfile(path) else None, rel))
     mp, wp = meshmud_pins(), web_pins()
-    recs.append((pins_digest(mp), "bootstrap/scripts/meshmud-build.sh#pins"))
-    recs.append((pins_digest(wp), "bootstrap/scripts/meshtastic-web-build.sh#pins"))
+    recs.append((pins_digest(mp), "10-bootstrap/scripts/meshmud-build.sh#pins"))
+    recs.append((pins_digest(wp), "10-bootstrap/scripts/meshtastic-web-build.sh#pins"))
     gomod, gosum = go_snapshot_paths(mp["MESHMUD_TAG"])
     extra = (gomod, gosum, GO_LICENSES, PY_LICENSES, PRESENCE_LOCK, PRESENCE_LICENSE)
     for path in extra:
@@ -289,11 +289,11 @@ RECORD = re.compile(r"^([0-9a-f]{64})  (\S+)$", re.M)
 
 def check(out_path):
     if not os.path.isfile(out_path):
-        die(f"{out_path} is missing — run: python3 -I os/bootstrap/scripts/gen-notices.py")
+        die(f"{out_path} is missing — run: python3 -I os/10-bootstrap/scripts/gen-notices.py")
     text = read(out_path)
     marker = text.find("Inputs at generation time")
     if marker < 0:
-        die("no 'Inputs at generation time' block in the notices file — run: python3 -I os/bootstrap/scripts/gen-notices.py")
+        die("no 'Inputs at generation time' block in the notices file — run: python3 -I os/10-bootstrap/scripts/gen-notices.py")
     block = text[marker:text.find("```", text.find("```", marker) + 3)]
     recorded = {rel: h for h, rel in RECORD.findall(block)}
     # the coverage checks first: they name the missing row, which is more useful than "changed"
@@ -310,7 +310,7 @@ def check(out_path):
     if stale:
         sys.stderr.write("THIRD-PARTY-NOTICES.md is stale — an input changed since it was generated:\n")
         sys.stderr.write("\n".join(stale) + "\n")
-        sys.stderr.write("Run: python3 -I os/bootstrap/scripts/gen-notices.py   (then review and commit the result)\n")
+        sys.stderr.write("Run: python3 -I os/10-bootstrap/scripts/gen-notices.py   (then review and commit the result)\n")
         sys.exit(1)
     print("THIRD-PARTY-NOTICES.md is current (input hashes match; Go and Python license lists cover their locks)")
 
@@ -483,10 +483,10 @@ def build_texts(dirs):
     cdla_ver, cdla = crate_file("webpki-roots", "LICENSE")
     cdla = cdla.strip("\n")
     if not os.path.isfile(PRESENCE_LICENSE):
-        die("messaging/sidecars/meshtastic-presence/LICENSE (the GPL-3.0 text) is missing")
+        die("50-messaging/sidecars/meshtastic-presence/LICENSE (the GPL-3.0 text) is missing")
     gpl = read(PRESENCE_LICENSE).strip("\n")
     if "GNU GENERAL PUBLIC LICENSE" not in gpl or "Version 3, 29 June 2007" not in gpl:
-        die("messaging/sidecars/meshtastic-presence/LICENSE is not the GPL-3.0 text")
+        die("50-messaging/sidecars/meshtastic-presence/LICENSE is not the GPL-3.0 text")
 
     return [
         ("MIT", "https://spdx.org/licenses/MIT.html", f"template body from a local copy (`byteorder` {mit_ver} `LICENSE-MIT`); the copyright line is generic and each component's own line is listed above", mit),
@@ -497,9 +497,9 @@ def build_texts(dirs):
         ("CC0-1.0", "https://creativecommons.org/publicdomain/zero/1.0/legalcode", f"full text from a local copy (`bip39` {bip_ver} `LICENSE`)", cc0),
         ("Unlicense", "https://unlicense.org/", f"full text from a local copy (`byteorder` {mit_ver} `UNLICENSE`)", unlicense),
         ("Unicode-3.0", "https://www.unicode.org/license.txt", f"full text from a local copy (`unicode-ident` {uni_ver} `LICENSE-UNICODE`)", unicode),
-        ("OFL-1.1", "https://openfontlicense.org/open-font-license-official-text/", "full text as shipped with Geist (`interface/ui/public/fonts/LICENSE-geist.txt`). The Silkscreen file differs only in its copyright line and trivial typography, shown under Fonts", ofl),
+        ("OFL-1.1", "https://openfontlicense.org/open-font-license-official-text/", "full text as shipped with Geist (`40-interface/ui/public/fonts/LICENSE-geist.txt`). The Silkscreen file differs only in its copyright line and trivial typography, shown under Fonts", ofl),
         ("CDLA-Permissive-2.0", "https://cdla.dev/permissive-2-0/", f"full text from a local copy (`webpki-roots` {cdla_ver} `LICENSE`). Applies to the embedded Mozilla CA root data", cdla),
-        ("GPL-3.0", "https://www.gnu.org/licenses/gpl-3.0.txt", "full text, unmodified, from `messaging/sidecars/meshtastic-presence/LICENSE` (the same text as the LICENSE of the pinned Meshtastic web client). Applies to the GPL-3.0-only and GPL-3.0-or-later components under Source offers", gpl),
+        ("GPL-3.0", "https://www.gnu.org/licenses/gpl-3.0.txt", "full text, unmodified, from `50-messaging/sidecars/meshtastic-presence/LICENSE` (the same text as the LICENSE of the pinned Meshtastic web client). Applies to the GPL-3.0-only and GPL-3.0-or-later components under Source offers", gpl),
     ]
 
 
@@ -556,7 +556,7 @@ def monocypher_entry():
     vendor = read(os.path.join(MONO_DIR, "VENDOR.md"))
     m = re.search(r"\|\s*Version\s*\|\s*\*\*([\d.]+)\*\*", vendor)
     if not m:
-        die("cannot read the Monocypher version from identity/monocypher-harness/VENDOR.md")
+        die("cannot read the Monocypher version from 20-identity/monocypher-harness/VENDOR.md")
     lic = read(os.path.join(MONO_DIR, "vendor", "LICENCE.md"))
     cps = [re.sub(r"^(Copyright \(c\) [\d-]+),", r"\1", ln.strip())
            for ln in lic.splitlines() if ln.startswith("Copyright (c)")]
@@ -616,14 +616,14 @@ def render():
     w("")
     w("- **Rust:** all normal dependencies of `111` (crate `node111`, which includes `id111`) and `111-agent` (crate `agent111`) for the Linux musl")
     w("  targets `x86_64-unknown-linux-musl` and `aarch64-unknown-linux-musl`, excluding our own crates. It includes compile-time proc-macro crates.")
-    w("  Source: `cargo metadata` and `cargo tree -e normal --target <triple>` in `os/bootstrap` and `os/intelligence`.")
-    w("- **JavaScript:** the production dependencies of the dashboard, from `pnpm licenses list --prod --json` in `os/interface/ui`.")
+    w("  Source: `cargo metadata` and `cargo tree -e normal --target <triple>` in `os/10-bootstrap` and `os/30-intelligence`.")
+    w("- **JavaScript:** the production dependencies of the dashboard, from `pnpm licenses list --prod --json` in `os/40-interface/ui`.")
     w("- **Go (Layer 5):** the module closure of `meshmud`, the Meshtastic multiplexer, built in CI from a pinned upstream tarball into static")
-    w("  binaries. Source: a snapshot of the tag's `go.mod` / `go.sum` and the hand-maintained `bootstrap/scripts/notices/go-licenses.txt`; the CI build")
+    w("  binaries. Source: a snapshot of the tag's `go.mod` / `go.sum` and the hand-maintained `10-bootstrap/scripts/notices/go-licenses.txt`; the CI build")
     w("  fails when the real binary links a module that list does not cover. Go is a CI-only toolchain, so this generator never runs `go`.")
-    w("- **Python (Layer 5):** the packages locked for the `meshtastic-presence` venv (`messaging/sidecars/meshtastic-presence/meshtastic-presence-lock.txt`),")
-    w("  with the hand-maintained `bootstrap/scripts/notices/python-licenses.txt`. Every locked package needs a row at its locked version.")
-    w("- **Web client bundle (Layer 5):** the Meshtastic web client, tag and commit from `bootstrap/scripts/meshtastic-web-build.sh`.")
+    w("- **Python (Layer 5):** the packages locked for the `meshtastic-presence` venv (`50-messaging/sidecars/meshtastic-presence/meshtastic-presence-lock.txt`),")
+    w("  with the hand-maintained `10-bootstrap/scripts/notices/python-licenses.txt`. Every locked package needs a row at its locked version.")
+    w("- **Web client bundle (Layer 5):** the Meshtastic web client, tag and commit from `10-bootstrap/scripts/meshtastic-web-build.sh`.")
     w("- **Fonts, vendored code, embedded data:** see their sections.")
     w("- **Copyright lines** are taken from each component's license files (Rust: the unpacked crate in the cargo registry; JS: the installed package). Where")
     w("  a component's license files have no copyright line, its `authors` metadata is shown instead.")
@@ -641,7 +641,7 @@ def render():
         w(f"{h}  {rel}")
     w("```")
     w("")
-    w("Regenerate with `python3 -I os/bootstrap/scripts/gen-notices.py` whenever an input above changes (a `#pins` entry is a hash of the pin lines of that build script). `--check` (run by `os/bootstrap/scripts/check.sh`) fails when the hashes above no longer match or a Go or Python license list no longer covers its lock.")
+    w("Regenerate with `python3 -I os/10-bootstrap/scripts/gen-notices.py` whenever an input above changes (a `#pins` entry is a hash of the pin lines of that build script). `--check` (run by `os/10-bootstrap/scripts/check.sh`) fails when the hashes above no longer match or a Go or Python license list no longer covers its lock.")
     w("The output is sorted and contains no timestamps, so identical inputs give identical output.")
     w("")
 
@@ -694,13 +694,13 @@ def render():
     # openssl-src is a build-dependency (absent from `cargo tree -e normal`), yet the OpenSSL it
     # compiles is linked into the static `111` binary as SQLCipher's crypto provider, so it is found
     # in the lockfile instead of the normal-dependency closure.
-    ossl = re.search(r'name = "openssl-src"\nversion = "([^"]+)"', read(os.path.join(OS_DIR, "bootstrap", "Cargo.lock")))
+    ossl = re.search(r'name = "openssl-src"\nversion = "([^"]+)"', read(os.path.join(OS_DIR, "10-bootstrap", "Cargo.lock")))
     if ossl:
         ossl_crate = ossl.group(1)
         ossl_upstream = ossl_crate.split("+", 1)[1] if "+" in ossl_crate else ossl_crate
         ossl_dir = pkg_dirs.get(("openssl-src", ossl_crate))
         if ossl_dir is None:
-            die(f"openssl-src {ossl_crate} (bootstrap/Cargo.lock) has no unpacked source; run `cargo fetch` in os/bootstrap")
+            die(f"openssl-src {ossl_crate} (10-bootstrap/Cargo.lock) has no unpacked source; run `cargo fetch` in os/10-bootstrap")
         ossl_cp, ossl_url = openssl_notice(ossl_dir, ossl_upstream)
         w(f"- `openssl-src` {ossl_crate} (MIT OR Apache-2.0; a build-dependency, so not in the crate list above): bundles the OpenSSL {ossl_upstream} sources and compiles them into the static `111` binary as SQLCipher's crypto provider (`bundled-sqlcipher-vendored-openssl`); no system libcrypto is linked.")
         w(f"  OpenSSL {ossl_upstream} — {ossl_cp} Apache License 2.0 ({ossl_url}); the Apache License 2.0 text below covers it (the OpenSSL source tree carries no NOTICE file).")
@@ -709,7 +709,7 @@ def render():
 
     w("## JavaScript packages (dashboard bundle)")
     w("")
-    w(f"{len(js_rows)} production packages from `interface/ui`.")
+    w(f"{len(js_rows)} production packages from `40-interface/ui`.")
     w("")
     for lic, name, ver, repo, cp in js_rows:
         w(f"- `{name}` {ver} — {lic} — {repo} — {cp}")
@@ -722,7 +722,7 @@ def render():
     mp = go["pins"]
     w(f"`meshmud` {mp['MESHMUD_TAG']} ({mp['MESHMUD_REPO']}), the Meshtastic multiplexer, is built in CI from the pinned upstream tarball (sha256 `{mp['MESHMUD_TARBALL_SHA256']}`,")
     w(f"commit `{mp['MESHMUD_COMMIT']}`) into static linux/amd64 and linux/arm64 binaries and runs as a separate supervised process. Its source is never copied into this repository.")
-    w(f"The closure is the `require` list of the tag's go.mod ({len(go['closure'])} modules; snapshots in `bootstrap/scripts/notices/`); `meshmud-build.sh` fails the CI build when the built binary")
+    w(f"The closure is the `require` list of the tag's go.mod ({len(go['closure'])} modules; snapshots in `10-bootstrap/scripts/notices/`); `meshmud-build.sh` fails the CI build when the built binary")
     w("links a module that is not listed here.")
     w("")
     mm = go["main"]
@@ -742,7 +742,7 @@ def render():
 
     w("## Python packages (meshtastic-presence venv)")
     w("")
-    w(f"{len(py['rows'])} packages locked in `messaging/sidecars/meshtastic-presence/meshtastic-presence-lock.txt` (every published file of each version hashed). The venv is built on the node by")
+    w(f"{len(py['rows'])} packages locked in `50-messaging/sidecars/meshtastic-presence/meshtastic-presence-lock.txt` (every published file of each version hashed). The venv is built on the node by")
     w("`pip install --require-hashes`; we ship the lock and the reader's own source, not these packages. They are listed so the GPL source offer and the licenses are in one place.")
     w("")
     for name, ver, lic, cp, repo in py["rows"]:
@@ -757,7 +757,7 @@ def render():
     w("")
     w(f"- **Meshtastic web client** {web['WEB_TAG']} — GPL-3.0-only — {web['WEB_REPO']}/tree/{web['WEB_TAG']} (commit `{web['WEB_COMMIT']}`)")
     w("  Hosted by the dashboard as a panel from its own directory, **served unmodified** and never embedded in the `111` binary. The bundle comes from the upstream release asset when it is complete,")
-    w("  otherwise from a build of the pinned tag (`bootstrap/scripts/meshtastic-web-build.sh`); both are the same bytes where they overlap." +
+    w("  otherwise from a build of the pinned tag (`10-bootstrap/scripts/meshtastic-web-build.sh`); both are the same bytes where they overlap." +
       (f" Release asset `build.tar` sha256 `{web['WEB_ASSET_SHA256']}`." if web.get("WEB_ASSET_SHA256") else " Upstream ships no release asset for this tag."))
     if web.get("WEB_TREE_SHA256"):
         w(f"  Pinned bundle tree hash (`sha256` of the sorted `sha256  path` list): `{web['WEB_TREE_SHA256']}`.")
@@ -767,7 +767,7 @@ def render():
 
     w("## Fonts")
     w("")
-    w("Self-hosted woff2 files in the dashboard, unmodified copies (provenance in `interface/FONTS.md`). All four are under the SIL Open Font License 1.1.")
+    w("Self-hosted woff2 files in the dashboard, unmodified copies (provenance in `40-interface/FONTS.md`). All four are under the SIL Open Font License 1.1.")
     w("")
     w("| Font | File | SHA-256 | Copyright | Source |")
     w("|---|---|---|---|---|")
@@ -781,8 +781,8 @@ def render():
     w("## Vendored source")
     w("")
     w(f"- **Monocypher** {mono_ver} — `BSD-2-Clause OR CC0-1.0` — https://monocypher.org — {mono_cp}")
-    w("  Files: `identity/monocypher-harness/vendor/monocypher.{c,h}` and `optional/monocypher-ed25519.{c,h}`, hash-pinned in `SHA256SUMS`. It is used only by a host-side test harness and is not linked into any")
-    w("  shipped binary. Its full dual license is `identity/monocypher-harness/vendor/LICENCE.md`; the BSD-2-Clause and CC0-1.0 texts are reproduced below.")
+    w("  Files: `20-identity/monocypher-harness/vendor/monocypher.{c,h}` and `optional/monocypher-ed25519.{c,h}`, hash-pinned in `SHA256SUMS`. It is used only by a host-side test harness and is not linked into any")
+    w("  shipped binary. Its full dual license is `20-identity/monocypher-harness/vendor/LICENCE.md`; the BSD-2-Clause and CC0-1.0 texts are reproduced below.")
     w("")
 
     w("## Source offers (GPL-3.0 components)")
@@ -791,10 +791,10 @@ def render():
     w("is the pinned upstream source named here, plus our own reader source in this repository. The GPL-3.0 text is reproduced under License texts. (A lawyer's read of the offer")
     w("form is an open item, `LICENSING.md` section 9.)")
     w("")
-    w(f"- **Meshtastic web client** {web['WEB_TAG']}: {web['WEB_REPO']}/tree/{web['WEB_TAG']} (commit `{web['WEB_COMMIT']}`). Build recipe: `bootstrap/scripts/meshtastic-web-build.sh`.")
-    w(f"- **meshmud** {mp['MESHMUD_TAG']} (courtesy source pointer — its own code is MIT and its Go closure is permissive, so it is conveyed under MIT with the notices above; this entry becomes a GPL-3.0 source offer only if the build-time scan in `meshmud-build.sh` ever finds a Meshtastic protobuf module linked, recorded in the `.verdict` file): {mp['MESHMUD_REPO']}/tree/{mp['MESHMUD_TAG']} (commit `{mp['MESHMUD_COMMIT']}`, tarball sha256 `{mp['MESHMUD_TARBALL_SHA256']}`). Build recipe: `bootstrap/scripts/meshmud-build.sh`; module sources via the Go module proxy at the versions in `go.sum`.")
+    w(f"- **Meshtastic web client** {web['WEB_TAG']}: {web['WEB_REPO']}/tree/{web['WEB_TAG']} (commit `{web['WEB_COMMIT']}`). Build recipe: `10-bootstrap/scripts/meshtastic-web-build.sh`.")
+    w(f"- **meshmud** {mp['MESHMUD_TAG']} (courtesy source pointer — its own code is MIT and its Go closure is permissive, so it is conveyed under MIT with the notices above; this entry becomes a GPL-3.0 source offer only if the build-time scan in `meshmud-build.sh` ever finds a Meshtastic protobuf module linked, recorded in the `.verdict` file): {mp['MESHMUD_REPO']}/tree/{mp['MESHMUD_TAG']} (commit `{mp['MESHMUD_COMMIT']}`, tarball sha256 `{mp['MESHMUD_TARBALL_SHA256']}`). Build recipe: `10-bootstrap/scripts/meshmud-build.sh`; module sources via the Go module proxy at the versions in `go.sum`.")
     w(f"- **meshtastic-python** {py['lock']['meshtastic'][0]} and its pip closure: https://pypi.org/project/meshtastic/{py['lock']['meshtastic'][0]}/ and https://github.com/meshtastic/python ; the exact files are pinned by hash in the lock.")
-    w("- **meshtastic-presence** (our own reader, GPL-3.0-or-later): `os/messaging/sidecars/meshtastic-presence/` in this repository, at the same release tag as the binary that conveys it.")
+    w("- **meshtastic-presence** (our own reader, GPL-3.0-or-later): `os/50-messaging/sidecars/meshtastic-presence/` in this repository, at the same release tag as the binary that conveys it.")
     w("")
 
     w("## License texts")

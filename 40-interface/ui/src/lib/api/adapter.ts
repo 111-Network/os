@@ -188,7 +188,7 @@ export interface Adapter {
   restart(): Promise<RestartReply>;
   updateCheck(): Promise<UpdateCheckReply>;
 
-  /** Messages (Layer 5 §15, os/messaging/README.md §9). Order is `local_seq`; delivery evidence is `Message.state`. */
+  /** Messages (Layer 5 §15, os/50-messaging/README.md §9). Order is `local_seq`; delivery evidence is `Message.state`. */
   messages: {
     /** Unwraps `{schema, threads}`: most recent activity first, including message-request threads. */
     threads(): Promise<Thread[]>;

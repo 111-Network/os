@@ -47,7 +47,7 @@ import {
 } from "../src/views/contacts/scan";
 import { ApiError, synthProblem } from "../src/lib/api/problem";
 
-// The identity layer's known answers and negatives, loaded from the file itself (os/identity/test-vectors/encoding.json)
+// The identity layer's known answers and negatives, loaded from the file itself (os/20-identity/test-vectors/encoding.json)
 // so this test cannot drift from them: BIP-173 bech32, hrp "node", NOT bech32m.
 interface Vector {
   name: string;
@@ -60,7 +60,7 @@ interface Negative {
   input: string;
   expect: string;
 }
-const VECTORS = JSON.parse(readFileSync(fileURLToPath(new URL("../../../identity/test-vectors/encoding.json", import.meta.url)), "utf8")) as {
+const VECTORS = JSON.parse(readFileSync(fileURLToPath(new URL("../../../20-identity/test-vectors/encoding.json", import.meta.url)), "utf8")) as {
   kats: Vector[];
   negatives: { hex: Negative[]; bech32: Negative[]; record: unknown[] };
 };

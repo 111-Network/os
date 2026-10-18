@@ -1,6 +1,6 @@
 # Layer 5 review — lens: hosted-panel proxy security + Meshtastic integration
 
-Judge: fable · 2026-10-14 · spec `os/messaging/README.md` v1 draft §13–§15, §18.7–8, §20 G3 · read: D15–D19, `interface/README.md` §6.6/§7/§11, `routes.rs`, `api_v1/auth.rs`, `layers/05-messaging/research/00-code-seams.md`, research 03 and 07. "verified" = a real check; "reasoned" = argued from quoted text and sources.
+Judge: fable · 2026-10-14 · spec `os/50-messaging/README.md` v1 draft §13–§15, §18.7–8, §20 G3 · read: D15–D19, `40-interface/README.md` §6.6/§7/§11, `routes.rs`, `api_v1/auth.rs`, `layers/50-messaging/research/00-code-seams.md`, research 03 and 07. "verified" = a real check; "reasoned" = argued from quoted text and sources.
 
 ## 1. Verdict: **fix-then-lock**
 

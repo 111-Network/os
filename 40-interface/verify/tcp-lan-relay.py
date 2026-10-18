@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """tcp-lan pass-through relay, frame reader and replayer for smoke.sh --three-node (stdlib only).
 
-The Layer 5 `tcp-lan` wire (os/messaging/README.md §8.1): both sides send
+The Layer 5 `tcp-lan` wire (os/50-messaging/README.md §8.1): both sides send
 hello = "111F" 0x01, then frames type(1) | len(2 BE) | body
 (0x01 sealed · 0x02 announce · 0x03 keepalive · 0x04 card request · 0x05 chunk).
 

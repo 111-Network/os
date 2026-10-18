@@ -2,7 +2,7 @@
 
 The single entry point: **one command** that turns a Linux machine — or an Android phone connected over USB-C — into a running 111 Network node. It detects hardware and environment, assigns the device category, generates the node's cryptographic identity, installs only what the device needs, prefetches a minimal offline cache, and leaves a **running minimal node** with a reachable dashboard. The only interaction is privilege escalation (sudo/doas/su) and, on phones, the unavoidable on-device taps.
 
-Status of this document: **spec v2.2 — LOCKED** (decisions: `os/plan/DECISIONS.md` D9 + D12 lock amendments · D14(d): provisional identity seam replaced by Layer 2's locked contract — `os/identity/README.md`; panel triage: `os/plan/layers/01-bootstrap/review/triage.md`; research: `os/plan/layers/01-bootstrap/options.md`).
+Status of this document: **spec v2.2 — LOCKED** (decisions: `os/plan/DECISIONS.md` D9 + D12 lock amendments · D14(d): provisional identity seam replaced by Layer 2's locked contract — `os/20-identity/README.md`; panel triage: `os/plan/layers/10-bootstrap/review/triage.md`; research: `os/plan/layers/10-bootstrap/options.md`).
 
 ## The one command
 
@@ -49,7 +49,7 @@ State machine; every step probes content first, resumes on partial failure, reco
 1. **Preflight:** systemd present (`/run/systemd/system`) else refuse with docs pointer · privilege contract (above) · free space ≥ (payload + packages) ×2 · clock sanity: HTTP `Date` header of the connectivity probe vs local time (loud refusal beyond threshold — Pi has no RTC) · connectivity = HTTPS HEAD against the real artifact endpoints + HTTP-204 ×2 + DNS + default route (probe endpoints named: `install.111.network/204` + own-domain fallback only) · WSL/container: systemd-less containers refuse; systemd-ful WSL/containers warn and cap at degraded relay (`--allow-degraded` silences the warn) with a degraded unit drop-in (AmbientCapabilities stripped to the container's CapBnd).
 2. **Probe:** facts from `/proc`+`/sysfs` (rule table below). All facts degradable to "unknown".
 3. **Categorize** (deterministic table below) + record gateway capability (install-time internet is guaranteed, so this records intent for later layers).
-4. **Identity:** BIP-39 mnemonic (12 words) → SLIP-0010 hardened-only derivation → Ed25519+X25519 keyset (paths `m/111'/0'/{0',1'}` per `os/identity/README.md` v2); file set (`mnemonic` 0600, `keyset` 0600, `nodeid` 0644, `descriptor` 0644, `counters` 0600) written to a temp dir and **atomically renamed** into `identity/` (0700, node111); never overwrite. Keygen runs at install, system RNG seeded.
+4. **Identity:** BIP-39 mnemonic (12 words) → SLIP-0010 hardened-only derivation → Ed25519+X25519 keyset (paths `m/111'/0'/{0',1'}` per `os/20-identity/README.md` v2); file set (`mnemonic` 0600, `keyset` 0600, `nodeid` 0644, `descriptor` 0644, `counters` 0600) written to a temp dir and **atomically renamed** into `identity/` (0700, node111); never overwrite. Keygen runs at install, system RNG seeded.
 5. **Packages (online):** best-effort `apt-get update` first; then **install** `python3 python3-venv iw ca-certificates` (dnf5/pacman equivalents per family: Fedora `python3 iw ca-certificates`, Arch `python iw ca-certificates`) — documented host mutation, and what makes Bundle B real on fresh images. The resolved closure is also **downloaded** into `cache/packages/` (root-owned 0755) via `apt-get download` on the closure / `dnf5 download --resolve` + createrepo_c / `pacman -Sw` — offline reinstall/rollback assets. Plus `pip download` of the rns lockfile closure into `cache/packages/python/` (offline venv rebuild path). Every cached artifact hash-recorded in the receipt.
 6. **Stage:** fetch release payload tarball → `releases/<ver>.tmp-<pid>/`, verify sha256 + extracted-tree manifest, fsync, rename to `releases/<ver>/`; flip `current` symlink (single atomic unit — KB rides inside the payload, so binary+KB can never split-brain). Prune to exactly 2 releases, only after probation passes (never delete an open probation's revert target).
 7. **Supervise:** create `node111` system user (dialout/uucp by `getent`); write unit + distro drop-in + udev rule; `daemon-reload`; `udevadm control --reload --trigger`; `systemctl restart systemd-logind`-free (LogNamespace needs no global restart); `enable --now`.
@@ -90,9 +90,9 @@ First match wins (thresholds = D9 defaults):
 | 7 | Pi 3/4, or fallback ≥1GB RAM | 1 relay / 2A |
 | overlay | internet up at detect time | + 5 gateway capability (recorded; re-evaluated by later layers) |
 
-## Identity (contract locked by Layer 2 — `os/identity/README.md` v2, D13/D14)
+## Identity (contract locked by Layer 2 — `os/20-identity/README.md` v2, D13/D14)
 
-Identity is Layer 2's contract, locked at `os/identity/README.md` v2 (D13/D14); this section summarizes what Layer 1 implements against.
+Identity is Layer 2's contract, locked at `os/20-identity/README.md` v2 (D13/D14); this section summarizes what Layer 1 implements against.
 
 - Silent install-time keygen preserved: BIP-39 mnemonic → SLIP-0010 hardened-only derivation → Ed25519 signing + X25519 ECDH keyset per the L2 spec (RNG seeded — CVE-2025-52464 lesson).
 - `identity/` 0700 node111: `mnemonic` 0600 · `keyset` 0600 (64B private keyset; derived cache, regenerable from the mnemonic) · `nodeid` 0644 (34B record: `0xed 0x01` ‖ 32B pubkey) · `descriptor` 0644 (4B backup descriptor) · `counters` 0600 (announce + per-peer traffic counters — protocol state, not secret) — atomic temp-dir-then-rename write, never overwrite.
@@ -131,7 +131,7 @@ Provisioning host: downloads `~/.cache/111`; maintenance keys `~/.local/share/11
 
 ## Dashboard (Layer 4 owns it)
 
-Layer 1 ships the daemon's HTTP surface; Layer 4 owns what it serves (`os/interface/README.md`, D15). `/` is the Layer 4 UI, embedded from `interface/ui/dist` (a build without the UI serves a short notice instead). The v1 minimal page — NodeId, category, version, KB sha, transport state (`no transport`/`isolated`/`joined`/`transport degraded`), uptime/health, last-successful-update-check, clock-fault state when present, standard-tier offer (intent-recording stub) — stays at `/v1` for old browsers. `/health` (200/503 per the component checklist) + `/api/status` (JSON; schema pinned in TASKS.md — the Layer 4/9 seam) are unchanged, **still strictly GET-only** (405 otherwise) and need no session. `/api/v1/*` is Layer 4's contract (`os/interface/api/openapi.yaml`): REST plus one SSE stream, with the POST/PATCH/DELETE routes the GET-only clause no longer covers; it includes read-only KB browsing (`/api/v1/kb`). The relay to `111-agent` (`:11182`) lives in 111d — the browser never sees it. Identity material is never on any endpoint.
+Layer 1 ships the daemon's HTTP surface; Layer 4 owns what it serves (`os/40-interface/README.md`, D15). `/` is the Layer 4 UI, embedded from `40-interface/ui/dist` (a build without the UI serves a short notice instead). The v1 minimal page — NodeId, category, version, KB sha, transport state (`no transport`/`isolated`/`joined`/`transport degraded`), uptime/health, last-successful-update-check, clock-fault state when present, standard-tier offer (intent-recording stub) — stays at `/v1` for old browsers. `/health` (200/503 per the component checklist) + `/api/status` (JSON; schema pinned in TASKS.md — the Layer 4/9 seam) are unchanged, **still strictly GET-only** (405 otherwise) and need no session. `/api/v1/*` is Layer 4's contract (`os/40-interface/api/openapi.yaml`): REST plus one SSE stream, with the POST/PATCH/DELETE routes the GET-only clause no longer covers; it includes read-only KB browsing (`/api/v1/kb`). The relay to `111-agent` (`:11182`) lives in 111d — the browser never sees it. Identity material is never on any endpoint.
 
 **Binds:** `:11180` always, plus `:80` best-effort (`CAP_NET_BIND_SERVICE` from the unit; a failed `:80` bind is logged once and never fails startup — stripped in the degraded container drop-in, impossible on Termux). Loopback by default (`127.0.0.1`, plus `[::1]` best effort because `111.localhost` resolves to `::1` on many hosts); IPv4 `0.0.0.0` only with LAN sharing on. LAN sharing has one source of truth, `state/settings.json` `lan_enabled`, written by both `sudo 111 config dashboard.lan true|false` and the dashboard's Settings toggle (loopback-only to change); it is read once at daemon start, so a change applies after `sudo systemctl restart 111node`. `DASHBOARD_LAN` in `/etc/111/env`, when present, is an explicit override (`true` = on, anything else = off): the dashboard shows the toggle locked (`lan_locked`, a PATCH answers 409 `settings_locked`) and `111 dashboard` says "pinned by DASHBOARD_LAN". `111 config dashboard.lan` deletes that line, so the CLI always wins back control. With LAN on, 111d announces `111.local` over mDNS (renamed `111-N.local` on a name conflict). No TLS in v1. `111 config dashboard.lan true` prints: "WARNING: LAN visitors must enter the pair code shown by `111 dashboard`; traffic is unencrypted on shared Wi-Fi."
 
@@ -187,8 +187,8 @@ macOS/Windows (node and provisioning host) · ESP32/LoRa relays · manual Termux
 
 ## Layer 5 amendments (D20, 2026-10-14)
 
-Additive (`os/messaging/README.md` §2, §14, §19); the locked text above is unchanged. Dependency sign-offs and the manifest rows are
-recorded in `bootstrap/TASKS.md` at build (Layer 5 task B1).
+Additive (`os/50-messaging/README.md` §2, §14, §19); the locked text above is unchanged. Dependency sign-offs and the manifest rows are
+recorded in `10-bootstrap/TASKS.md` at build (Layer 5 task B1).
 
 - **Ports.** `11183` fabric `tcp-lan` (LAN-bound only when the node acts as a hub or LAN sharing is on; loopback is never a peer) ·
   `11190–11229` panel listeners, one per enabled panel, bound where the dashboard is bound · `11230` the `meshmud` TCP downlink
@@ -200,19 +200,19 @@ recorded in `bootstrap/TASKS.md` at build (Layer 5 task B1).
 - **Supervision.** `meshmud` and `meshtastic-presence` are supervised children of `111d` exactly like `rnsd` and `111-agent`
   (`supervise.rs` `ChildSpec`, back-off, restart route); the fabric itself runs in-process.
 - **CLI verbs.** `111 fabric offer|enroll|status` join the subcommand set (Architecture).
-- **Dependencies** (sign-off recorded in `bootstrap/TASKS.md` at build, per its Dependency policy): `rusqlite` / `libsqlite3-sys`
+- **Dependencies** (sign-off recorded in `10-bootstrap/TASKS.md` at build, per its Dependency policy): `rusqlite` / `libsqlite3-sys`
   (`bundled-sqlcipher-vendored-openssl`), `blake3`, `bao-tree`, `ciborium`. `scripts/check.sh` builds SQLCipher for both musl targets.
 - **Manifest entries** (signed channel manifest; nothing downloads at runtime): the `meshmud` binaries (CI-built from the pinned
   upstream tarball, never copied into `os/`, conveyed as GPL-3.0) · the Meshtastic web bundle (CI-built from the pinned tag when
   upstream ships no complete asset; unpacked from the hash-pinned release payload to `panels/meshtastic-web`) · the presence venv lock
   (hash-locked, like `rns-lock.txt`). `gen-notices.py` gains a Go path and the GPL source offers name the pinned tags.
 - **`AGENT111_DAEMON_TOKEN`.** `111d` mints a per-spawn bearer token into `111-agent`'s environment, beside `AGENT111_*`;
-  `require_session` accepts it from a loopback peer only (`os/interface/README.md` §11.1).
+  `require_session` accepts it from a loopback peer only (`os/40-interface/README.md` §11.1).
 - **Updater intake (seam).** The updater gains an intake path for a staged payload at `fabric/blobs/<hash>`, verified by the same
   minisign manifest — Layer 1's manifest stays the trust root; the wire transfer that fills it arrives in v1.1.
 
 ## Seams for later layers
 
-Layer 2: identity seam contract delivered — `os/identity/README.md` v2 (§Identity above) · Layer 3: offer hook (`state/offer.json` + dashboard element + `/api/status` field) + hub-offload endpoint · Layer 4: delivered — dashboard surface/port/auth + `/api/v1` (see `os/interface/README.md`) · Layer 5/6: rnsd child → real transport management (`/var/lib/111/rns`, config schema-version, netlink trigger, `transport_state` enum), radio table · Layer 7: gateway re-evaluation, KB git-sync, manifest gossip · Layer 9: supervision-tree handles, `/health` contract, exit(0)-restart, watchdog heartbeat, per-OEM phone watchdog channel. *[Layer 5 (D20): delivered as the amendments above — ports, `fabric/` state, `111 fabric` verbs, dependencies, manifest entries, token, updater intake.]*
+Layer 2: identity seam contract delivered — `os/20-identity/README.md` v2 (§Identity above) · Layer 3: offer hook (`state/offer.json` + dashboard element + `/api/status` field) + hub-offload endpoint · Layer 4: delivered — dashboard surface/port/auth + `/api/v1` (see `os/40-interface/README.md`) · Layer 5/6: rnsd child → real transport management (`/var/lib/111/rns`, config schema-version, netlink trigger, `transport_state` enum), radio table · Layer 7: gateway re-evaluation, KB git-sync, manifest gossip · Layer 9: supervision-tree handles, `/health` contract, exit(0)-restart, watchdog heartbeat, per-OEM phone watchdog channel. *[Layer 5 (D20): delivered as the amendments above — ports, `fabric/` state, `111 fabric` verbs, dependencies, manifest entries, token, updater intake.]*
 
-Build tasks: `os/bootstrap/TASKS.md` (created at build start per `os/plan/EXECUTION.md`).
+Build tasks: `os/10-bootstrap/TASKS.md` (created at build start per `os/plan/EXECUTION.md`).

@@ -307,7 +307,7 @@ const ALIASES = [
   ["ResetEvent", "SseReset"],
   ["ServicesEvent", "SseServices"],
   ["DevicesEvent", "SseDevices"],
-  // Layer 5 (Messaging & Data, os/messaging/README.md §15). `Panel` is exported as HostedPanel:
+  // Layer 5 (Messaging & Data, os/50-messaging/README.md §15). `Panel` is exported as HostedPanel:
   // components/panel.tsx already owns the name `Panel` in the app.
   ["NodeId", "NodeId"],
   ["MessageId", "MessageId"],

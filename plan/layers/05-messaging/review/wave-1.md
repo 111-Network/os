@@ -1,6 +1,6 @@
 # Layer 5 — Wave 1 review triage (2026-10-14)
 
-Review run `wf_c857767c-bde` (script `layers/05-messaging/runs/workflows/wave-1-review.js`): F1 / P1 / M1 by fable (xhigh), U1 by opus.
+Review run `wf_c857767c-bde` (script `layers/50-messaging/runs/workflows/wave-1-review.js`): F1 / P1 / M1 by fable (xhigh), U1 by opus.
 Full findings: the run's `journal.jsonl` (one result line per task). Commits reviewed: F1 `c8a093c` · P1 `79ca52d` ·
 M1 `99f5e0a` · U1 `858077f`. Every finding below is accepted unless marked; bounces run as fresh agents (one per task,
 disjoint files), the lead re-runs each check, reads the diff and commits per bounce.

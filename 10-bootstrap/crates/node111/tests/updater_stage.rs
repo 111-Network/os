@@ -1,7 +1,7 @@
 //! T10 acceptance: updater fetch/verify/stage against a fixture HTTP server —
 //! happy path, stale manifest, bad minisig, replayed keychain generation,
 //! tampered payload, clock-skew marker, and the Layer 5 cross-check
-//! (`verify_layer5_tree` after staging, os/messaging/README.md §19 L1). Asserts
+//! (`verify_layer5_tree` after staging, os/50-messaging/README.md §19 L1). Asserts
 //! the daemon never writes outside state/staging (no releases/, no `current`).
 
 mod common;

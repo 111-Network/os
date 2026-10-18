@@ -1,7 +1,7 @@
 // The Panel tab's session: mint a one-time ticket, point the frame at it, mint a new one on reload. Plain TypeScript with
 // the network call injected, so "a reload asks the node for a fresh ticket" is tested without a browser.
 //
-// A ticket is single use and lives 30 s (os/messaging/README.md section 13), so a frame is never pointed at an old one:
+// A ticket is single use and lives 30 s (os/50-messaging/README.md section 13), so a frame is never pointed at an old one:
 // every start is a new generation, the newest answer wins, and an answer that arrives after a newer start (or after the
 // tab closed) is dropped. The URL lives in this state and in the frame's `src`; nothing else holds it.
 import type { PanelSession } from "../../lib/api/types";

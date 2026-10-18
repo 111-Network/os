@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Stub Meshtastic stack for interface/verify/panel-lint.sh (stdlib only; Layer 5 §14, G3).
+"""Stub Meshtastic stack for 40-interface/verify/panel-lint.sh (stdlib only; Layer 5 §14, G3).
 
 meshmud (Go) is CI-built and there is no Go on the dev box, so the panel lint runs
 111d against this stand-in. One file, three roles (select with --role; the wrappers

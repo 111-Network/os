@@ -1,4 +1,4 @@
-//! Layer 4 R4 acceptance (os/interface/README.md §6.3, §7.1): the device
+//! Layer 4 R4 acceptance (os/40-interface/README.md §6.3, §7.1): the device
 //! registry over a fake `/sys` + `/dev` tree in a temp dir — detection, LoRa
 //! table match, stable ids, companions from dashboard sessions, alias PATCH,
 //! forget (+ session revoke, incl. your own session), reappear, disconnected

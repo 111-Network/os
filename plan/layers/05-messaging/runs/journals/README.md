@@ -16,5 +16,5 @@ a device switch (the originals live only under `~/.claude/projects/…/subagents
 | `wave-2-bounce.*` | fix agents — **only U2 finished** before the crash | 1 | [`wave-2-bounce.js`](../workflows/wave-2-bounce.js) |
 | `wave-3-verify.*` | V1 smoke, V2 panel lint — **only V2 (partial) finished** | 1 | [`wave-3.js`](../workflows/wave-3.js) |
 
-The workflow scripts (`../workflows/*.js`; moved here from `os/messaging/` on 2026-10-15, see the move table in [`plan/README.md`](../../../../README.md)) point their `JOURNAL` constants at the local store; on another machine
+The workflow scripts (`../workflows/*.js`; moved here from `os/50-messaging/` on 2026-10-15, see the move table in [`plan/README.md`](../../../../README.md)) point their `JOURNAL` constants at the local store; on another machine
 point them at these files instead (same line format: the reviewer/fixer prompts only read `result.*`).

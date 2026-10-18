@@ -1,4 +1,4 @@
-//! `111 fabric offer | enroll [bundle] | status` (`os/messaging/README.md`
+//! `111 fabric offer | enroll [bundle] | status` (`os/50-messaging/README.md`
 //! §7.3: "`111 fabric offer` or Settings → Messaging & Data → Let a node use
 //! this hub"). The CLI owns no fabric state: it calls the running daemon's
 //! loopback `/api/v1` exactly like the dashboard on the node does —

@@ -9,7 +9,7 @@ export const meta = {
 }
 
 const ROOT = '/home/kia/projects/111network/os'
-const OUT = ROOT + '/plan/layers/05-messaging/research'
+const OUT = ROOT + '/plan/layers/50-messaging/research'
 
 const CTX = `
 You are a research scout for the 111network OS build (repo root: ${ROOT}). Today is 2026-10-14.
@@ -21,20 +21,20 @@ show; custom code is only glue. A local AI agent is the interface and the self-h
 are its neighbours, and the Device Categories (Cat 1 relay … Cat 4 hub, Cat 5 gateway overlay) are the fleet.
 
 WHAT IS ALREADY BUILT (Layers 0–4, locked; do not re-research them, wire to them):
-- L0 Knowledge base at ${ROOT}/knowledge/ (entries with YAML frontmatter; rubric candidate→testing→proven in
-  knowledge/README.md; an entry needs: upstream URL, SPDX license, platforms, last_verified, sources). Existing entries you
+- L0 Knowledge base at ${ROOT}/00-knowledge/ (entries with YAML frontmatter; rubric candidate→testing→proven in
+  00-knowledge/README.md; an entry needs: upstream URL, SPDX license, platforms, last_verified, sources). Existing entries you
   may cite: projects/{reticulum,meshtastic,meshcore,briar-bramble,automerge,iroh-nodeid,llama-cpp,opencode,...}.
 - L1 Bootstrap: Rust daemon "111d" (crate node111) supervises children; runs Reticulum's "rnsd" as a child from a
   hash-locked Python venv with the config it renders (assets/rns/config.tmpl: AutoInterface, share_instance=no,
   enable_transport=no); netlink-triggered regeneration; "transport_state" = no transport|isolated|joined|degraded.
-- L2 Identity (${ROOT}/identity/README.md): Ed25519 signing + X25519 ECDH from one seed; NodeId = raw 32-byte Ed25519
+- L2 Identity (${ROOT}/20-identity/README.md): Ed25519 signing + X25519 ECDH from one seed; NodeId = raw 32-byte Ed25519
   pubkey; wire contract §6: signed announces (137–169 B) distribute keys, TOFU-pinned; routine traffic = per-packet
   ephemeral X25519 + XChaCha20-Poly1305 "sealed packet" (56 B overhead; nonce derived; AD covers cleartext header);
   per-peer 64-bit counters + 32-entry window, no wall clocks. §6.7 + §13 hand to Layer 5: the full envelope, signer_pubkey
   field, delegation trailer (v1 absent), ratchet-field space (size pinned by L5), message-id idempotency, authorship
   (inner signatures, domain-tagged), group/broadcast key distribution. READ §6 and §13 of that file.
 - L3 Intelligence: "111-agent" (Rust, :11182) with fixed shell-free tools; llama-server :11181; opencode on hubs.
-- L4 Dashboard (${ROOT}/interface/README.md §5–§7; contract interface/api/openapi.yaml): React UI embedded in 111d,
+- L4 Dashboard (${ROOT}/40-interface/README.md §5–§7; contract 40-interface/api/openapi.yaml): React UI embedded in 111d,
   /api/v1 REST + one SSE stream, pairing auth, services registry (agent, model, transport, radio, kb, gateway, codeagent)
   with LIVE/NOT SET/ERROR pages, device registry, a Messages route that is a stub for Layer 5, Nearby stub for Layer 7.
 - Layer 6 brief with 12 owner decisions: ${ROOT}/plan/cross-layer/devices.md (read §0 findings, §2 device classes, §7 decisions).
@@ -133,7 +133,7 @@ Report path: ${OUT}/02-bridges-and-budgets.md`,
     file: '03-hosted-panels.md',
     prompt: `LENS 3 — ONE UNIFIED DASHBOARD THAT HOSTS ANY PROJECT'S OWN PANEL.
 Owner: "we do ALL the heavy lifting and give users the unified dashboard that literally can host any mesh and offline
-project." Layer 4 (interface/README.md §6.6, §7) today links OUT to a project's UI and bans iframes (D15 reasons:
+project." Layer 4 (40-interface/README.md §6.6, §7) today links OUT to a project's UI and bans iframes (D15 reasons:
 mixed content, framing headers, secure-context APIs). Research how proven projects host third-party web UIs inside one
 dashboard and pin the mechanics: Home Assistant Ingress (supervisor reverse-proxy under HA's origin + iframe panel; auth
 session; websocket proxying; path-rewrite rules add-ons must follow), Sandstorm (capability-token iframes, per-app
@@ -157,7 +157,7 @@ proposal for Layer 4 D15 (what changes, what stays), and the panel inventory tab
     key: 'envelope',
     file: '04-envelope.md',
     prompt: `LENS 4 — COMPLETING THE MESSAGE ENVELOPE ON TOP OF LAYER 2.
-Read identity/README.md §6 (all subsections) and §13 "Layer 5 owns the full envelope" FIRST. Layer 5 must pin, on top of
+Read 20-identity/README.md §6 (all subsections) and §13 "Layer 5 owns the full envelope" FIRST. Layer 5 must pin, on top of
 the fixed sealed-packet construction: (1) message identity + idempotency (content hash vs random id; dedup window sizes
 in Briar/Bramble, LXMF, Meshtastic, BPv7); (2) fragmentation/reassembly over ~200–500 B MTUs — compare how LXMF,
 Reticulum Link/Resource, Meshtastic, Bundle Protocol v7 (RFC 9171 fragmentation), Bramble (BSP/BTP), MeshCore do it;
@@ -185,7 +185,7 @@ fork exists. Report path: ${OUT}/04-envelope.md`,
     prompt: `LENS 5 — THE DATA HALF: ENCRYPTED LOCAL STORE, CAPACITY PRUNING, BULK PAYLOADS.
 (1) Encrypted-at-rest message/data store for a musl-static Rust daemon on Linux + Android/Termux: SQLCipher via rusqlite
 ("bundled-sqlcipher" / "bundled-sqlcipher-vendored-openssl": license, static-build viability, binary size, maintenance),
-SQLite + per-record AEAD (key via HKDF from the node seed — check L2's reserved BIP-85 subtree note in identity/README.md
+SQLite + per-record AEAD (key via HKDF from the node seed — check L2's reserved BIP-85 subtree note in 20-identity/README.md
 §15) using redb or sled or fjall, "age"-style file encryption for blobs; how Briar, Delta Chat (its Rust core), Signal
 desktop, Sideband/LXMF store messages at rest; key-at-rest custody (node keyset vs OS keystore vs TPM per L2 §5).
 (2) Capacity-based pruning: patterns from LXMF propagation nodes (storage limits, priority), Briar, Bundle Protocol

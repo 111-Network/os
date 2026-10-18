@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Stub llama-server for interface/verify/smoke.sh (OpenAI-compatible, stdlib only).
+"""Stub llama-server for 40-interface/verify/smoke.sh (OpenAI-compatible, stdlib only).
 
 Origin: the Layer 4 scouts' mock (scratchpad mockllama.py), owned here since I1.
 Accepts llama-server's own flags so 111d can supervise it as current/bin/llama-server:

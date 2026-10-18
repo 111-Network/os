@@ -1,4 +1,4 @@
-//! `Message.at` (`interface/api/openapi.yaml`): "local wall-clock time this
+//! `Message.at` (`40-interface/api/openapi.yaml`): "local wall-clock time this
 //! node stored the message (own: queued; in: received). Display only".
 //!
 //! The store carries no wall clock (§4: nothing is ordered or decided by a

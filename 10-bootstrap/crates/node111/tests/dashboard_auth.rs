@@ -1,4 +1,4 @@
-//! Layer 4 R1 acceptance (os/interface/README.md §1, §11; api/README.md):
+//! Layer 4 R1 acceptance (os/40-interface/README.md §1, §11; api/README.md):
 //! pairing auth (401 → pair → 200, wrong code, rate limit, rotation, logout),
 //! loopback bypass, Host guard matrix, CSRF (content-type + Origin/Host),
 //! static UI serving (fixture dist + embedded/notice), the `/v1` legacy page,

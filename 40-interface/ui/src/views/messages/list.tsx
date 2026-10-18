@@ -1,4 +1,4 @@
-// The Messages list (os/messaging/README.md section 16): requests first (they need an answer), then conversations,
+// The Messages list (os/50-messaging/README.md section 16): requests first (they need an answer), then conversations,
 // newest activity first. Every row says who, the last line, how far the last own message got, and what is unread.
 import { useEffect, useRef } from "react";
 import { announce } from "../../app/LiveRegion";

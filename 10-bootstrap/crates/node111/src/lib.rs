@@ -1,5 +1,5 @@
 //! 111 — the 111 Network node binary: installer, daemon, identity, config, uninstall.
-//! Module tree frozen at T0 per os/bootstrap/TASKS.md; stubs are filled by their
+//! Module tree frozen at T0 per os/10-bootstrap/TASKS.md; stubs are filled by their
 //! owning tasks. Cross-module contracts live in the pinned types (see TASKS.md).
 
 /// Compiled-in minimum installer version (calver). Stale-shim redirects cannot

@@ -2,12 +2,12 @@
 # musl-env — the musl cross-toolchain environment and the static-link assertions shared by
 # scripts/check.sh and scripts/cross-build.sh. Sourced (`. scripts/musl-env.sh`), never run.
 #
-# SQLCipher + a vendored OpenSSL (Layer 5 `mesh111`; os/messaging/README.md §10.1, §19 L1, §20 G2)
+# SQLCipher + a vendored OpenSSL (Layer 5 `mesh111`; os/50-messaging/README.md §10.1, §19 L1, §20 G2)
 # are C code that cc-rs / openssl-src compile for each musl target:
 #
 # - PATH gains the no-sudo cross toolchains at ~/.local/toolchains/*/bin.
 # - Linkers, CC and AR are pinned per target, so a missing cross compiler is a hard error, never a
-#   silent fallback to the host cc. ../messaging/scripts/check.sh exports the same values: identical
+#   silent fallback to the host cc. ../50-messaging/scripts/check.sh exports the same values: identical
 #   env, so neither workspace rebuilds the C objects because the other one ran.
 # - The escape hatches that would link a system SQLite or a system libcrypto instead of the bundled
 #   SQLCipher and the vendored OpenSSL are unset: LIBSQLITE3_SYS_USE_PKG_CONFIG and its SQLCIPHER_*

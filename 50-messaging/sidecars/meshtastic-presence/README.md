@@ -1,6 +1,6 @@
 # meshtastic-presence
 
-Read-only Meshtastic presence reader for Layer 5 (spec `os/messaging/README.md` section 14). It connects to **one**
+Read-only Meshtastic presence reader for Layer 5 (spec `os/50-messaging/README.md` section 14). It connects to **one**
 Meshtastic TCP client-API endpoint (meshmud's TCP downlink, `127.0.0.1:11230`), asks the node for its configuration
 once, listens to NodeInfo / position / telemetry events, and writes `<out>/meshtastic.json` atomically for `111d`
 to validate and publish as the **Nearby** list. It also has an identify mode (`--once`) that prints the node's own
@@ -115,7 +115,7 @@ python3 gen_lock.py --verify                    # offline structural check
 Resolve on the **oldest supported CPython (3.10)**, Linux. The closure of `meshtastic` is 16 packages including a BLE
 stack (`bleak`, and `dbus-fast` on Linux) that the reader never imports. A package that every dependency edge reaches
 only through a marker keeps that marker (`async-timeout`, `typing-extensions`, `dbus-fast`). After changing the pin,
-also update `os/bootstrap/scripts/notices/python-licenses.txt` and run `python3 -I os/bootstrap/scripts/gen-notices.py`.
+also update `os/10-bootstrap/scripts/notices/python-licenses.txt` and run `python3 -I os/10-bootstrap/scripts/gen-notices.py`.
 
 **Termux (external gate, spec section 20):** `dbus-fast` ships compiled wheels for glibc/musl only; on Android pip may
 fall back to a source build, which the hash lock does not cover. Check it with the Termux venv build before the first
@@ -129,5 +129,5 @@ PYTHON=/var/lib/111/venvs/presence/bin/python ./run-tests.sh      # also runs th
 ```
 
 Without `meshtastic-python` the real-library tests (`tests/test_real_library.py`) skip themselves; every other test runs. The lock test (`tests/test_lock_and_manifest.py`)
-also checks the panel declaration `bootstrap/crates/node111/assets/panels/meshtastic.toml` against the spec section 13 block
+also checks the panel declaration `10-bootstrap/crates/node111/assets/panels/meshtastic.toml` against the spec section 13 block
 (line-grammar parser on Python < 3.11, `tomllib` / `tomli` when available).

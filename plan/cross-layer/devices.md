@@ -1,9 +1,9 @@
 # Device-connection core — plan brief (Layer 6 opener)
 
-Status: ✍️ brief with owner decisions (D17, 2026-10-14) · task P1 (`os/interface/TASKS.md`) · build at Layer 6 kickoff.
+Status: ✍️ brief with owner decisions (D17, 2026-10-14) · task P1 (`os/40-interface/TASKS.md`) · build at Layer 6 kickoff.
 Reads with: `os/README.md` (Cat 1–5, Layers 6–7) · D9/D12 (phone path, rnsd child, meshtasticd detection-only,
-phone multicast gap) · D10/D15 (agent tools, registry, prompts) · `interface/README.md` §6.3, §7.1, §8 ·
-`interface/api/openapi.yaml` (`DeviceRecord`).
+phone multicast gap) · D10/D15 (agent tools, registry, prompts) · `40-interface/README.md` §6.3, §7.1, §8 ·
+`40-interface/api/openapi.yaml` (`DeviceRecord`).
 
 Owner intent (verbatim): "its super important to have a section for connected devices as well where user can also
 name them, the details of the connected devices. e.g. users should be able to make an old phones wifi to connect
@@ -74,7 +74,7 @@ protocol: 255 B frames, CSMA, `SetRadio`, airtime report) and `111d` emits MeshC
 that stock MeshCore repeaters flood blind — the Cat-1 relay is therefore the stock MeshCore repeater, and 111 writes no
 relay firmware. An **rnsd-owned** board runs RNode as before. Opt-in "shared" mode: 111d owns an RNode in HOST mode and
 rnsd attaches by loopback `TCPClientInterface kiss_framing=True` (111 frames are then RNode-framed and invisible to
-foreign repeaters). Full analysis: `layers/05-messaging/research/07-gap-1.md`; the fabric side: `layers/05-messaging/options.md` §2.3.
+foreign repeaters). Full analysis: `layers/50-messaging/research/07-gap-1.md`; the fabric side: `layers/50-messaging/options.md` §2.3.
 
 Detection today: Layer 1's probe + R4 read sysfs VID:PID + product string against `lora-table.toml` (6 rows) and a
 udev rule sets `ID_MM_DEVICE_IGNORE`. That yields "likely a LoRa board", not "which firmware" (finding 1).
@@ -164,7 +164,7 @@ opener; the enum slot stays.
    the existing rns venv (meshtastic/meshcore wheels added to the hash-locked closure); timeouts; ≤ 1 probe/30 s.
 
    **Layer 5 amendment (D20, 2026-10-14) — the identify seam.** Layer 5 builds the **Meshtastic step** of this sequence now
-   (`os/messaging/README.md` §14): `POST /devices/{id}/identify` with the consent flag (decision 8) → the daemon's **port-owner
+   (`os/50-messaging/README.md` §14): `POST /devices/{id}/identify` with the consent flag (decision 8) → the daemon's **port-owner
    table** (`HashMap<port, Owner>`; a held port answers `409 port_busy`) → `meshmud` started on the port with the identify
    profile → the presence reader's `my_node_info` through the TCP downlink → `DeviceRecord.firmware` set to
    `{family: meshtastic, version, source: probe}`, `driver.stack = meshtastic`, `service_id = meshtastic`, and the **binding
@@ -276,7 +276,7 @@ _Outcome (D17 #1 + D19 c): option C with the 111 modem added — respect what is
 | `m17` | protocol | watch list for open digital handhelds |
 | `usb-serial-identification`, `amateur-radio-encryption-rule`, `lora-regional-parameters` | concept | the three facts the agent must never guess (findings 1, 6) |
 
-New tags (`bluetooth`, `radio`, `ham`, `android`) go into `knowledge/_meta/vocabularies.md` first.
+New tags (`bluetooth`, `radio`, `ham`, `android`) go into `00-knowledge/_meta/vocabularies.md` first.
 
 ## 6. Registry contract check (additive only)
 
@@ -357,7 +357,7 @@ RNode as `node111` under the systemd sandbox.
 
 ## 9. Layer 5 hand-offs (D20, 2026-10-14)
 
-Pinned in `os/messaging/README.md` and owned by Layer 6 at kickoff: the **`Link` trait** (§8: `PathProfile` with
+Pinned in `os/50-messaging/README.md` and owned by Layer 6 at kickoff: the **`Link` trait** (§8: `PathProfile` with
 `mtu_bytes`, framing, `reliable`, `broadcast`, `cost_class`, advertised airtime; `PeerAddr`; boxed-future `send`/`recv`)
 is the contract every driver here implements · the **MeshCore data-type range** for 111 `GRP_DATA` frames is registered
 with upstream (`number_allocations.md`) before this layer locks (D19 c) · **INTRO over LoRa** (card in fragment 0, a

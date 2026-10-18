@@ -297,7 +297,7 @@ pub fn render_config(uplink: &Uplink, downlink: SocketAddr) -> Result<String, Up
     let body = toml::to_string(&cfg).map_err(|e| UplinkError::BadAddress(e.to_string()))?;
     Ok(format!(
         "# Rendered by 111d from the Meshtastic binding in state/devices.json \
-         (os/messaging/README.md §14).\n# Do not edit: it is rewritten before every start.\n{body}"
+         (os/50-messaging/README.md §14).\n# Do not edit: it is rewritten before every start.\n{body}"
     ))
 }
 

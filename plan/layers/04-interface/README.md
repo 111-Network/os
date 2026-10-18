@@ -1,8 +1,8 @@
 # Layer 4 — Interface & Dashboard: plan folder
 
-**Status** (copied from [`INDEX.md`](../../INDEX.md) row 4, which stays the source of truth): ✅ built — spec v2 locked (D11+D15), as-built lock D16: UI (588 vitest, 147.6 KB gz) + daemon side in `node111` (314 cargo tests) + install→dashboard on Linux and phone; I3 = 3 fable judges, all findings fixed; `check.sh` ALL GREEN · `interface/verify/smoke.sh` 118 checks · `local-smoke.sh` green. Open: on-device phone gate V1, real-Android pair-link check
+**Status** (copied from [`INDEX.md`](../../INDEX.md) row 4, which stays the source of truth): ✅ built — spec v2 locked (D11+D15), as-built lock D16: UI (588 vitest, 147.6 KB gz) + daemon side in `node111` (314 cargo tests) + install→dashboard on Linux and phone; I3 = 3 fable judges, all findings fixed; `check.sh` ALL GREEN · `40-interface/verify/smoke.sh` 118 checks · `local-smoke.sh` green. Open: on-device phone gate V1, real-Android pair-link check
 
-**Spec and build:** [`os/interface/README.md`](../../../interface/README.md) · [`os/interface/TASKS.md`](../../../interface/TASKS.md)
+**Spec and build:** [`os/40-interface/README.md`](../../../40-interface/README.md) · [`os/40-interface/TASKS.md`](../../../40-interface/TASKS.md)
 
 **Decisions:** D11, D15, D16 in [`DECISIONS.md`](../../DECISIONS.md). Build protocol: [`EXECUTION.md`](../../EXECUTION.md).
 

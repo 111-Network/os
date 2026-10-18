@@ -14,7 +14,7 @@
 #
 # This program imports meshtastic-python (GPL-3.0-only), which is why it is a GPL
 # program in its own directory, run as a separate process in its own hash-locked venv.
-# No part of it is linked into the 111 binaries (spec messaging/README.md section 14,
+# No part of it is linked into the 111 binaries (spec 50-messaging/README.md section 14,
 # "GPL boundary").
 """meshtastic-presence: read-only presence reader (spec section 14).
 

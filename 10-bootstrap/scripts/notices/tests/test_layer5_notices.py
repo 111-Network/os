@@ -4,7 +4,7 @@
 Hermetic: every test works on a COPY of the real inputs in a temp tree laid out like os/, so
 nothing here touches the real notices. No network, no cargo, no pnpm, no go.
 
-  python3 -I -m unittest discover -s bootstrap/scripts/notices/tests      (from os/)
+  python3 -I -m unittest discover -s 10-bootstrap/scripts/notices/tests      (from os/)
 """
 import contextlib
 import importlib.util
@@ -16,24 +16,24 @@ import tempfile
 import unittest
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-SCRIPTS = os.path.dirname(os.path.dirname(HERE))          # os/bootstrap/scripts
+SCRIPTS = os.path.dirname(os.path.dirname(HERE))          # os/10-bootstrap/scripts
 OS_DIR = os.path.dirname(os.path.dirname(SCRIPTS))        # os/
-PRESENCE = os.path.join("messaging", "sidecars", "meshtastic-presence")
+PRESENCE = os.path.join("50-messaging", "sidecars", "meshtastic-presence")
 
 
 def copy_tree(dst):
     """A minimal os/ tree holding only the Layer 5 inputs."""
-    for rel in ("bootstrap/scripts/gen-notices.py", "bootstrap/scripts/meshmud-build.sh",
-                "bootstrap/scripts/meshtastic-web-build.sh",
+    for rel in ("10-bootstrap/scripts/gen-notices.py", "10-bootstrap/scripts/meshmud-build.sh",
+                "10-bootstrap/scripts/meshtastic-web-build.sh",
                 PRESENCE + "/meshtastic-presence-lock.txt", PRESENCE + "/LICENSE"):
         os.makedirs(os.path.dirname(os.path.join(dst, rel)), exist_ok=True)
         shutil.copy(os.path.join(OS_DIR, rel), os.path.join(dst, rel))
-    shutil.copytree(os.path.join(SCRIPTS, "notices"), os.path.join(dst, "bootstrap/scripts/notices"),
+    shutil.copytree(os.path.join(SCRIPTS, "notices"), os.path.join(dst, "10-bootstrap/scripts/notices"),
                     ignore=shutil.ignore_patterns("tests", "__pycache__"))
 
 
 def load(dst):
-    spec = importlib.util.spec_from_file_location("gn_under_test", os.path.join(dst, "bootstrap/scripts/gen-notices.py"))
+    spec = importlib.util.spec_from_file_location("gn_under_test", os.path.join(dst, "10-bootstrap/scripts/gen-notices.py"))
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
     return mod
@@ -72,8 +72,8 @@ class Base(unittest.TestCase):
 
 
 class GoClosureTests(Base):
-    LIC = "bootstrap/scripts/notices/go-licenses.txt"
-    MOD = "bootstrap/scripts/notices/meshmud-v1.0.0.go.mod"
+    LIC = "10-bootstrap/scripts/notices/go-licenses.txt"
+    MOD = "10-bootstrap/scripts/notices/meshmud-v1.0.0.go.mod"
 
     def test_the_real_inputs_are_consistent(self):
         go = self.gn.collect_go()
@@ -95,7 +95,7 @@ class GoClosureTests(Base):
         self.dies(self.gn.collect_go, "github.com/example/gone")
 
     def test_missing_go_sum_hash_is_refused(self):
-        self.edit("bootstrap/scripts/notices/meshmud-v1.0.0.go.sum",
+        self.edit("10-bootstrap/scripts/notices/meshmud-v1.0.0.go.sum",
                   lambda t: "".join(l for l in t.splitlines(True) if not l.startswith("github.com/samber/lo v1.53.0 h1:")))
         self.dies(self.gn.collect_go, "go.sum", "github.com/samber/lo")
 
@@ -117,7 +117,7 @@ class GoClosureTests(Base):
 
 
 class PythonLockTests(Base):
-    LIC = "bootstrap/scripts/notices/python-licenses.txt"
+    LIC = "10-bootstrap/scripts/notices/python-licenses.txt"
     LOCK = PRESENCE + "/meshtastic-presence-lock.txt"
 
     def test_the_real_inputs_are_consistent(self):
@@ -162,21 +162,21 @@ class PinTests(Base):
         self.assertRegex(wp["WEB_TREE_SHA256"], r"^[0-9a-f]{64}$")
 
     def test_a_missing_pin_is_refused(self):
-        self.edit("bootstrap/scripts/meshmud-build.sh", lambda t: re.sub(r'(?m)^MESHMUD_COMMIT=.*\n', "", t))
+        self.edit("10-bootstrap/scripts/meshmud-build.sh", lambda t: re.sub(r'(?m)^MESHMUD_COMMIT=.*\n', "", t))
         self.dies(self.gn.meshmud_pins, "MESHMUD_COMMIT")
 
     def test_changing_a_pin_changes_its_digest_and_other_script_edits_do_not(self):
         before = self.gn.pins_digest(self.gn.meshmud_pins())
-        self.edit("bootstrap/scripts/meshmud-build.sh", lambda t: t.replace("# CI ONLY.", "# CI ONLY (edited comment)."))
+        self.edit("10-bootstrap/scripts/meshmud-build.sh", lambda t: t.replace("# CI ONLY.", "# CI ONLY (edited comment)."))
         self.assertEqual(self.gn.pins_digest(self.gn.meshmud_pins()), before)
-        self.edit("bootstrap/scripts/meshmud-build.sh", lambda t: t.replace('MESHMUD_TAG="v1.0.0"', 'MESHMUD_TAG="v1.0.1"'))
+        self.edit("10-bootstrap/scripts/meshmud-build.sh", lambda t: t.replace('MESHMUD_TAG="v1.0.0"', 'MESHMUD_TAG="v1.0.1"'))
         self.assertNotEqual(self.gn.pins_digest(self.gn.meshmud_pins()), before)
 
     def test_input_records_cover_every_layer5_input(self):
         labels = [rel for _h, rel in self.gn.input_records()]
-        for needed in ("bootstrap/scripts/meshmud-build.sh#pins", "bootstrap/scripts/meshtastic-web-build.sh#pins",
-                       "bootstrap/scripts/notices/meshmud-v1.0.0.go.mod", "bootstrap/scripts/notices/meshmud-v1.0.0.go.sum",
-                       "bootstrap/scripts/notices/go-licenses.txt", "bootstrap/scripts/notices/python-licenses.txt",
+        for needed in ("10-bootstrap/scripts/meshmud-build.sh#pins", "10-bootstrap/scripts/meshtastic-web-build.sh#pins",
+                       "10-bootstrap/scripts/notices/meshmud-v1.0.0.go.mod", "10-bootstrap/scripts/notices/meshmud-v1.0.0.go.sum",
+                       "10-bootstrap/scripts/notices/go-licenses.txt", "10-bootstrap/scripts/notices/python-licenses.txt",
                        PRESENCE + "/meshtastic-presence-lock.txt", PRESENCE + "/LICENSE"):
             self.assertIn(needed, labels)
 

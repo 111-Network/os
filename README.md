@@ -46,7 +46,7 @@ The foundation every other layer reads from. A curated, AI-readable knowledge ba
 
 Format follows AI-readability best practice: Markdown only, one topic per file, short lines, YAML frontmatter with tags/category/status (`proven`, `testing`, `candidate`), wikilinks between entries, a lightweight agent-readable index, and many small files rather than few large ones — structured so the knowledge can be graphed later.
 
-The source of truth lives at the operating-system level in `os/knowledge/`. The website has its own clear job; the knowledge base is published to it later via CI.
+The source of truth lives at the operating-system level in `os/00-knowledge/`. The website has its own clear job; the knowledge base is published to it later via CI.
 
 This layer drives adoption decisions ("if a solid project exists, we use it"), grounds the local agent's reasoning, and provides the per-device install recipes the Bootstrap Layer consumes.
 

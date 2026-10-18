@@ -1,4 +1,4 @@
-// Add a contact (os/messaging/README.md section 7.2): paste a card or a node1... id, scan a QR with the camera
+// Add a contact (os/50-messaging/README.md section 7.2): paste a card or a node1... id, scan a QR with the camera
 // (secure origins only) or read one from a picture. A scan fills the box and stops there: the person looks, then adds.
 import { useId, useRef, useState, type FormEvent } from "react";
 import { redirectIfUnauthenticated } from "../../app/AuthGate";

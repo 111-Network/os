@@ -19,10 +19,10 @@ use id111::seal::{OpenError, SealHeader};
 use crate::envelope::{blake2b_256, derive_pair_key, header_bytes, keyed_blake2b_128, PeerKeys};
 use crate::sealer::{Direction, Freshness, Key32, Sealer, SealerError};
 
-/// Canonical-12 test identity (same as `identity/test-vectors`).
+/// Canonical-12 test identity (same as `20-identity/test-vectors`).
 pub const MNEMONIC_A: &str =
     "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about";
-/// Canonical-24 test identity (same as `identity/test-vectors`).
+/// Canonical-24 test identity (same as `20-identity/test-vectors`).
 pub const MNEMONIC_B: &str = "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon art";
 
 pub struct TestSealer {

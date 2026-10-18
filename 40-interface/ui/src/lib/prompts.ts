@@ -7,7 +7,7 @@
 import type { DeviceRecord, HostedPanel, ServiceId, ServiceRecord, Status } from "./api/sse.gen";
 
 /**
- * The four generic goals, plus the four Layer 5 context goals (os/messaging/README.md section 16): `messaging.setup`
+ * The four generic goals, plus the four Layer 5 context goals (os/50-messaging/README.md section 16): `messaging.setup`
  * (enroll with a hub, or let a node use this one), `messaging.fix` (a full store, a hub that cannot be reached),
  * `meshtastic.setup` (identify the board, bind it) and `panel.explain` (what a hosted panel is and does). They are goal
  * sentences only: the context block stays the one builder's, and no text a peer or a radio sent is ever in it.

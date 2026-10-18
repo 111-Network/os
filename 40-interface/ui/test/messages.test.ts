@@ -1,4 +1,4 @@
-// Messages: the delivery-state matrix (os/messaging/README.md section 9), reasons, times, peer text, thread folding.
+// Messages: the delivery-state matrix (os/50-messaging/README.md section 9), reasons, times, peer text, thread folding.
 import { describe, expect, it } from "vitest";
 import {
   applyMessageToPage,

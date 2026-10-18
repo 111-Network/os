@@ -1,6 +1,6 @@
 # Layer 5 sweep: completeness critique
 
-Critic run 2026-10-14. Checked 00 to 05 against README §5, identity §6/§10/§13, cross-layer/devices.md, D17/D18, the L3 offload seam (intelligence/README.md:48), the L4 Messages stub and LICENSING.md, plus four web checks. Full scout prompts are in the structured return.
+Critic run 2026-10-14. Checked 00 to 05 against README §5, identity §6/§10/§13, cross-layer/devices.md, D17/D18, the L3 offload seam (30-intelligence/README.md:48), the L4 Messages stub and LICENSING.md, plus four web checks. Full scout prompts are in the structured return.
 
 ## Verdict
 

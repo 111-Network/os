@@ -1,4 +1,4 @@
-// Messages view model (os/messaging/README.md §9, §16): the words and glyphs for delivery evidence, the reason a
+// Messages view model (os/50-messaging/README.md §9, §16): the words and glyphs for delivery evidence, the reason a
 // message waits, the "received" time with the sender's claim kept apart, and the one-line summaries of a thread.
 // Pure: no React, no clock of its own (every function that needs "now" takes it).
 import { parseNodeId } from "../../lib/api/contacts";

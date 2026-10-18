@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# interface/verify/panel-lint.sh — panel offline lint + G3 (os/messaging/README.md section 13 "Offline lint", section 20 G3,
+# 40-interface/verify/panel-lint.sh — panel offline lint + G3 (os/50-messaging/README.md section 13 "Offline lint", section 20 G3,
 # TASKS.md V2).
 #
 #   0. Self-test   cdp/selftest.mjs: the lint's rules flag every hostile mutation of a clean recording (no browser).
@@ -36,8 +36,8 @@ set -euo pipefail
 
 HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 OS=$(cd "$HERE/../.." && pwd)
-UI=$OS/interface/ui
-BOOT=$OS/bootstrap
+UI=$OS/40-interface/ui
+BOOT=$OS/10-bootstrap
 CDP=$HERE/cdp
 STUB=$HERE/stub-meshmud.py
 MANIFEST=$BOOT/crates/node111/assets/panels/meshtastic.toml
@@ -383,7 +383,7 @@ inner() {
     --lan-host "$LANIP" --cross-host "$CROSSIP" --attacker-port 11300 --manifest "$MANIFEST" \
     --tables-file "$W/cdp/tables.txt" \
     --bundle-kind "$([ -n "${PANEL_LINT_BUNDLE:-}" ] && echo real || echo placeholder)" \
-    --bundle-label "${PANEL_LINT_BUNDLE:-placeholder (interface/verify/cdp/placeholder-bundle)}" \
+    --bundle-label "${PANEL_LINT_BUNDLE:-placeholder (40-interface/verify/cdp/placeholder-bundle)}" \
     2>&1 | tee "$W/cdp.out" || cdp_rc=$?
   t "the CDP driver ran to the end (exit $cdp_rc)" '[ "$(grep -c "^DRIVER FAILS=" "$W/cdp.out")" = 1 ]'
   local left=""
@@ -451,7 +451,7 @@ trap cleanup EXIT
 LOGS=$WORK/logs
 mkdir -p "$LOGS"
 
-echo "interface/verify/panel-lint.sh — panel offline lint + G3 (scratch $WORK)"
+echo "40-interface/verify/panel-lint.sh — panel offline lint + G3 (scratch $WORK)"
 if [ "$KNOWN_GAPS" = 1 ]; then
   note "PANEL_LINT_KNOWN_GAPS=1 — checks labelled GAP print as notes instead of FAIL; everything else is strict"
 fi

@@ -1,4 +1,4 @@
-// Placeholder Meshtastic web client transport (interface/verify/cdp): the HTTP API of the
+// Placeholder Meshtastic web client transport (40-interface/verify/cdp): the HTTP API of the
 // real client, against its own origin only. The downlink frames are JSON here (the lint's
 // stub meshmud stands protobufs in with JSON; 111d never decodes either).
 "use strict";

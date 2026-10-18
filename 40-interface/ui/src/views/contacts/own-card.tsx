@@ -1,4 +1,4 @@
-// This node's own card (os/messaging/README.md section 7.2): the public announce as a QR the page draws itself from
+// This node's own card (os/50-messaging/README.md section 7.2): the public announce as a QR the page draws itself from
 // the module bitmap, and as text with a copy button. Public material only: it holds no secret.
 import { useEffect, useMemo, useRef } from "react";
 import { CopyButton } from "../../components/copy-button";

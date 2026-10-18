@@ -13,6 +13,6 @@ which layer picks it up, and what it needs. Keep entries short; move an entry in
 | P6 | **rnsd posture as a user setting** | Layer 6 settings page | Layer 6 | Default fixed by D17 #5; the setting UI lives on Settings → Layer 6. |
 | P7 | **MeshChatX panel** — Reticulum/LXMF messaging inside the dashboard (0BSD+MIT fork of MeshChat, Reticulum-manual-listed; headless, `--no-https`, `--auth`, proxy-aware) | The panel proxy (Layer 5 build) + owner go | Layer 5 follow-up or Layer 6/7 | Owner chose Meshtastic as the only hosted panel this cycle (D19 f). Needs `share_instance = yes` (D17 #5), its own venv with `rns` from PyPI (separate adopted program; add a line to `LICENSING.md`), provenance check of the fork. Original MeshChat (MIT, no auth) is the fallback. |
 
-Open hardware gates (not ideas, but also waiting): on-device phone run (`bootstrap/verify/README.md` V1: run-as env,
+Open hardware gates (not ideas, but also waiting): on-device phone run (`10-bootstrap/verify/README.md` V1: run-as env,
 pair link, `.local` on Android) · real-Android check of the LAN-IP pair link · keyboard-aware Agent view
 (`interactive-widget=resizes-content`) on a real phone.

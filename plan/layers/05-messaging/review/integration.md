@@ -1,6 +1,6 @@
 # Layer 5 — adversarial review: integration · scope honesty · buildability · adopt-don't-reinvent
 
-Lens: integration/seams, scope honesty, buildability, adopt-don't-reinvent. 2026-10-14. Spec: `os/messaging/README.md`
+Lens: integration/seams, scope honesty, buildability, adopt-don't-reinvent. 2026-10-14. Spec: `os/50-messaging/README.md`
 v1 draft. Real checks: byte-budget arithmetic (python); reads of `services/mod.rs`, `api_v1/services.rs`, node111 and
 agent111 `Cargo.toml`, agent111 `config.rs`, `install/supervise.rs`, `111node.service`, `openapi.yaml`, `smoke.sh`,
 `ui/package.json`, id111 `seal.rs`/`announce.rs`/`counters.rs`/`store.rs` headers. No TOML parser available

@@ -1,4 +1,4 @@
-//! `GET /api/v1/status` — the `Status` schema (`os/interface/api/openapi.yaml`):
+//! `GET /api/v1/status` — the `Status` schema (`os/40-interface/api/openapi.yaml`):
 //! a strict superset of `/api/status` (every key it has, same values) plus
 //! `node.label/bech32/alias`, `update`, `intelligence.agent_state/model_id`,
 //! `bind`, `lan_enabled`, `auth` and `layers`. Owned by Layer 4 task R2.

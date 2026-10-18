@@ -26,7 +26,7 @@ use crate::model::{ChatMessage, Client};
 use crate::store::{new_id, Store, Task, TaskState};
 
 /// opencode's headless JSONL invocation: `<opencode_path> <OPENCODE_ARGV…>
-/// <prompt>`. See knowledge/projects/opencode.md (headless JSONL is the
+/// <prompt>`. See 00-knowledge/projects/opencode.md (headless JSONL is the
 /// delegation seam). The exact subcommand/flags drift across opencode
 /// releases (the 2.x line moves fast), so pinning a version is one edit here.
 const OPENCODE_ARGV: &[&str] = &["run", "--format", "json", "--pure"];

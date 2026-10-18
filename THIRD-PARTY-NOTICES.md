@@ -13,14 +13,14 @@ this list is in `LICENSING.md`.
 
 - **Rust:** all normal dependencies of `111` (crate `node111`, which includes `id111`) and `111-agent` (crate `agent111`) for the Linux musl
   targets `x86_64-unknown-linux-musl` and `aarch64-unknown-linux-musl`, excluding our own crates. It includes compile-time proc-macro crates.
-  Source: `cargo metadata` and `cargo tree -e normal --target <triple>` in `os/bootstrap` and `os/intelligence`.
-- **JavaScript:** the production dependencies of the dashboard, from `pnpm licenses list --prod --json` in `os/interface/ui`.
+  Source: `cargo metadata` and `cargo tree -e normal --target <triple>` in `os/10-bootstrap` and `os/30-intelligence`.
+- **JavaScript:** the production dependencies of the dashboard, from `pnpm licenses list --prod --json` in `os/40-interface/ui`.
 - **Go (Layer 5):** the module closure of `meshmud`, the Meshtastic multiplexer, built in CI from a pinned upstream tarball into static
-  binaries. Source: a snapshot of the tag's `go.mod` / `go.sum` and the hand-maintained `bootstrap/scripts/notices/go-licenses.txt`; the CI build
+  binaries. Source: a snapshot of the tag's `go.mod` / `go.sum` and the hand-maintained `10-bootstrap/scripts/notices/go-licenses.txt`; the CI build
   fails when the real binary links a module that list does not cover. Go is a CI-only toolchain, so this generator never runs `go`.
-- **Python (Layer 5):** the packages locked for the `meshtastic-presence` venv (`messaging/sidecars/meshtastic-presence/meshtastic-presence-lock.txt`),
-  with the hand-maintained `bootstrap/scripts/notices/python-licenses.txt`. Every locked package needs a row at its locked version.
-- **Web client bundle (Layer 5):** the Meshtastic web client, tag and commit from `bootstrap/scripts/meshtastic-web-build.sh`.
+- **Python (Layer 5):** the packages locked for the `meshtastic-presence` venv (`50-messaging/sidecars/meshtastic-presence/meshtastic-presence-lock.txt`),
+  with the hand-maintained `10-bootstrap/scripts/notices/python-licenses.txt`. Every locked package needs a row at its locked version.
+- **Web client bundle (Layer 5):** the Meshtastic web client, tag and commit from `10-bootstrap/scripts/meshtastic-web-build.sh`.
 - **Fonts, vendored code, embedded data:** see their sections.
 - **Copyright lines** are taken from each component's license files (Rust: the unpacked crate in the cargo registry; JS: the installed package). Where
   a component's license files have no copyright line, its `authors` metadata is shown instead.
@@ -32,20 +32,20 @@ this list is in `LICENSING.md`.
 Inputs at generation time (SHA-256):
 
 ```
-dd22efdd5cd346caf22d784fcce48d3840dc157439e3ee1c040695116c2c1702  bootstrap/Cargo.lock
-9f779bdf23242c905a0106412a0cc6aa7b1b90ad985547d18674f6639e0b1d47  intelligence/Cargo.lock
-08c2709c1e59a5a9274d4ac88ff32ccfaa019b3e0042ea50c7f609e35d4fb225  interface/ui/pnpm-lock.yaml
-cf48326b784772c17f4528dc6739cf2678503e094f1b3aff09e4cbf91530eaaa  bootstrap/scripts/meshmud-build.sh#pins
-400cb0b51eeea71a1a14af6103fe79a87fc4aa0783a917aa28a694bb614e5c82  bootstrap/scripts/meshtastic-web-build.sh#pins
-b077e56d26a629af7093ffeb32862f9d31381c672030a7d66e1dcdea1fcdc4a1  bootstrap/scripts/notices/meshmud-v1.0.0.go.mod
-04da60cb82ff98f912b9efc2db6d65639f0f3be1086f4f201a93d050df68f083  bootstrap/scripts/notices/meshmud-v1.0.0.go.sum
-6e9102d2de67eeb802b5093873c6466b69497ef89e9ced87c90d39bd24678dfd  bootstrap/scripts/notices/go-licenses.txt
-65d38d4230c370b44693a16e399900107a013288a35ca207ae7e5ecaab1a3eb9  bootstrap/scripts/notices/python-licenses.txt
-6606833e36e9b3e9fd13b1a98ee210fd482008cfa3ed85c12f8f589a070d2ca3  messaging/sidecars/meshtastic-presence/meshtastic-presence-lock.txt
-3972dc9744f6499f0f9b2dbf76696f2ae7ad8af9b23dde66d6af86c9dfb36986  messaging/sidecars/meshtastic-presence/LICENSE
+dd22efdd5cd346caf22d784fcce48d3840dc157439e3ee1c040695116c2c1702  10-bootstrap/Cargo.lock
+9f779bdf23242c905a0106412a0cc6aa7b1b90ad985547d18674f6639e0b1d47  30-intelligence/Cargo.lock
+08c2709c1e59a5a9274d4ac88ff32ccfaa019b3e0042ea50c7f609e35d4fb225  40-interface/ui/pnpm-lock.yaml
+cf48326b784772c17f4528dc6739cf2678503e094f1b3aff09e4cbf91530eaaa  10-bootstrap/scripts/meshmud-build.sh#pins
+400cb0b51eeea71a1a14af6103fe79a87fc4aa0783a917aa28a694bb614e5c82  10-bootstrap/scripts/meshtastic-web-build.sh#pins
+b077e56d26a629af7093ffeb32862f9d31381c672030a7d66e1dcdea1fcdc4a1  10-bootstrap/scripts/notices/meshmud-v1.0.0.go.mod
+04da60cb82ff98f912b9efc2db6d65639f0f3be1086f4f201a93d050df68f083  10-bootstrap/scripts/notices/meshmud-v1.0.0.go.sum
+a0d451389ab00fe1a687f96371a9f62c64360272b3fdad165ec4d86496d50494  10-bootstrap/scripts/notices/go-licenses.txt
+bb358dd46ada28d8ee534b654736ed448d979f629cb1f0535b8a761587f300f2  10-bootstrap/scripts/notices/python-licenses.txt
+6606833e36e9b3e9fd13b1a98ee210fd482008cfa3ed85c12f8f589a070d2ca3  50-messaging/sidecars/meshtastic-presence/meshtastic-presence-lock.txt
+3972dc9744f6499f0f9b2dbf76696f2ae7ad8af9b23dde66d6af86c9dfb36986  50-messaging/sidecars/meshtastic-presence/LICENSE
 ```
 
-Regenerate with `python3 -I os/bootstrap/scripts/gen-notices.py` whenever an input above changes (a `#pins` entry is a hash of the pin lines of that build script). `--check` (run by `os/bootstrap/scripts/check.sh`) fails when the hashes above no longer match or a Go or Python license list no longer covers its lock.
+Regenerate with `python3 -I os/10-bootstrap/scripts/gen-notices.py` whenever an input above changes (a `#pins` entry is a hash of the pin lines of that build script). `--check` (run by `os/10-bootstrap/scripts/check.sh`) fails when the hashes above no longer match or a Go or Python license list no longer covers its lock.
 The output is sorted and contains no timestamps, so identical inputs give identical output.
 
 ## Summary
@@ -370,7 +370,7 @@ Notes:
 
 ## JavaScript packages (dashboard bundle)
 
-7 production packages from `interface/ui`.
+7 production packages from `40-interface/ui`.
 
 - `jsqr` 1.4.0 — Apache-2.0 — https://github.com/cozmo/jsQR — no copyright line found
 - `react` 19.3.0 — MIT — https://github.com/react/react.git — Copyright (c) Meta Platforms, Inc. and affiliates
@@ -386,7 +386,7 @@ Notes:
 
 `meshmud` v1.0.0 (https://github.com/Rikonardo/meshmud), the Meshtastic multiplexer, is built in CI from the pinned upstream tarball (sha256 `bb05a46cab567899c6cf71a03cdd61438b8bec52f761db64fd8cea96a9b47c2d`,
 commit `6d08378cf09c90e867babd4184546cbaaf11f679`) into static linux/amd64 and linux/arm64 binaries and runs as a separate supervised process. Its source is never copied into this repository.
-The closure is the `require` list of the tag's go.mod (14 modules; snapshots in `bootstrap/scripts/notices/`); `meshmud-build.sh` fails the CI build when the built binary
+The closure is the `require` list of the tag's go.mod (14 modules; snapshots in `10-bootstrap/scripts/notices/`); `meshmud-build.sh` fails the CI build when the built binary
 links a module that is not listed here.
 
 - **meshmud** v1.0.0 — MIT — https://github.com/Rikonardo/meshmud — Copyright (c) 2026 Kai Shimizu (the main module; its own code is MIT)
@@ -411,7 +411,7 @@ The go.mod snapshot lists no Meshtastic module, so no Meshtastic Go protobufs ar
 
 ## Python packages (meshtastic-presence venv)
 
-16 packages locked in `messaging/sidecars/meshtastic-presence/meshtastic-presence-lock.txt` (every published file of each version hashed). The venv is built on the node by
+16 packages locked in `50-messaging/sidecars/meshtastic-presence/meshtastic-presence-lock.txt` (every published file of each version hashed). The venv is built on the node by
 `pip install --require-hashes`; we ship the lock and the reader's own source, not these packages. They are listed so the GPL source offer and the licenses are in one place.
 
 - `async-timeout` 5.0.1 — Apache-2.0 — https://github.com/aio-libs/async-timeout — Copyright 2016-2020 aio-libs collaboration — only when `python_full_version < '3.11'`
@@ -438,14 +438,14 @@ Canonical texts: https://www.mozilla.org/MPL/2.0/ and https://docs.python.org/3/
 
 - **Meshtastic web client** v2.7.2 — GPL-3.0-only — https://github.com/meshtastic/web/tree/v2.7.2 (commit `ee5243a2059126ecd799927d21e052b5f5745974`)
   Hosted by the dashboard as a panel from its own directory, **served unmodified** and never embedded in the `111` binary. The bundle comes from the upstream release asset when it is complete,
-  otherwise from a build of the pinned tag (`bootstrap/scripts/meshtastic-web-build.sh`); both are the same bytes where they overlap. Release asset `build.tar` sha256 `62657b85b4c24af4d44da2932b64143abdbf6e65a79fcb51fd0801d9540616e2`.
+  otherwise from a build of the pinned tag (`10-bootstrap/scripts/meshtastic-web-build.sh`); both are the same bytes where they overlap. Release asset `build.tar` sha256 `62657b85b4c24af4d44da2932b64143abdbf6e65a79fcb51fd0801d9540616e2`.
   Pinned bundle tree hash (`sha256` of the sorted `sha256  path` list): `39f54e5eb79ecd398c17ef66a48b58f38cbe72102ab8980641f660d01f46e28b`.
   The bundle contains minified third-party JavaScript (React, Radix UI, maplibre-gl, sqlite-wasm and others, mostly MIT/ISC/BSD/Apache-2.0) that keeps its own licenses;
   `meshtastic-web-build.sh --licenses FILE` writes the `pnpm licenses` list of the tagged workspace for review (open item in `LICENSING.md` section 9).
 
 ## Fonts
 
-Self-hosted woff2 files in the dashboard, unmodified copies (provenance in `interface/FONTS.md`). All four are under the SIL Open Font License 1.1.
+Self-hosted woff2 files in the dashboard, unmodified copies (provenance in `40-interface/FONTS.md`). All four are under the SIL Open Font License 1.1.
 
 | Font | File | SHA-256 | Copyright | Source |
 |---|---|---|---|---|
@@ -460,8 +460,8 @@ The fonts may be bundled with software under any license but may not be sold on 
 ## Vendored source
 
 - **Monocypher** 4.0.3 — `BSD-2-Clause OR CC0-1.0` — https://monocypher.org — Copyright (c) 2017-2023 Loup Vaillant; Copyright (c) 2017-2019 Michael Savage; Copyright (c) 2017-2023 Fabio Scotoni.
-  Files: `identity/monocypher-harness/vendor/monocypher.{c,h}` and `optional/monocypher-ed25519.{c,h}`, hash-pinned in `SHA256SUMS`. It is used only by a host-side test harness and is not linked into any
-  shipped binary. Its full dual license is `identity/monocypher-harness/vendor/LICENCE.md`; the BSD-2-Clause and CC0-1.0 texts are reproduced below.
+  Files: `20-identity/monocypher-harness/vendor/monocypher.{c,h}` and `optional/monocypher-ed25519.{c,h}`, hash-pinned in `SHA256SUMS`. It is used only by a host-side test harness and is not linked into any
+  shipped binary. Its full dual license is `20-identity/monocypher-harness/vendor/LICENCE.md`; the BSD-2-Clause and CC0-1.0 texts are reproduced below.
 
 ## Source offers (GPL-3.0 components)
 
@@ -469,10 +469,10 @@ The GPL-3.0 programs below are conveyed or installed next to our code as separat
 is the pinned upstream source named here, plus our own reader source in this repository. The GPL-3.0 text is reproduced under License texts. (A lawyer's read of the offer
 form is an open item, `LICENSING.md` section 9.)
 
-- **Meshtastic web client** v2.7.2: https://github.com/meshtastic/web/tree/v2.7.2 (commit `ee5243a2059126ecd799927d21e052b5f5745974`). Build recipe: `bootstrap/scripts/meshtastic-web-build.sh`.
-- **meshmud** v1.0.0 (courtesy source pointer — its own code is MIT and its Go closure is permissive, so it is conveyed under MIT with the notices above; this entry becomes a GPL-3.0 source offer only if the build-time scan in `meshmud-build.sh` ever finds a Meshtastic protobuf module linked, recorded in the `.verdict` file): https://github.com/Rikonardo/meshmud/tree/v1.0.0 (commit `6d08378cf09c90e867babd4184546cbaaf11f679`, tarball sha256 `bb05a46cab567899c6cf71a03cdd61438b8bec52f761db64fd8cea96a9b47c2d`). Build recipe: `bootstrap/scripts/meshmud-build.sh`; module sources via the Go module proxy at the versions in `go.sum`.
+- **Meshtastic web client** v2.7.2: https://github.com/meshtastic/web/tree/v2.7.2 (commit `ee5243a2059126ecd799927d21e052b5f5745974`). Build recipe: `10-bootstrap/scripts/meshtastic-web-build.sh`.
+- **meshmud** v1.0.0 (courtesy source pointer — its own code is MIT and its Go closure is permissive, so it is conveyed under MIT with the notices above; this entry becomes a GPL-3.0 source offer only if the build-time scan in `meshmud-build.sh` ever finds a Meshtastic protobuf module linked, recorded in the `.verdict` file): https://github.com/Rikonardo/meshmud/tree/v1.0.0 (commit `6d08378cf09c90e867babd4184546cbaaf11f679`, tarball sha256 `bb05a46cab567899c6cf71a03cdd61438b8bec52f761db64fd8cea96a9b47c2d`). Build recipe: `10-bootstrap/scripts/meshmud-build.sh`; module sources via the Go module proxy at the versions in `go.sum`.
 - **meshtastic-python** 2.7.11 and its pip closure: https://pypi.org/project/meshtastic/2.7.11/ and https://github.com/meshtastic/python ; the exact files are pinned by hash in the lock.
-- **meshtastic-presence** (our own reader, GPL-3.0-or-later): `os/messaging/sidecars/meshtastic-presence/` in this repository, at the same release tag as the binary that conveys it.
+- **meshtastic-presence** (our own reader, GPL-3.0-or-later): `os/50-messaging/sidecars/meshtastic-presence/` in this repository, at the same release tag as the binary that conveys it.
 
 ## License texts
 
@@ -1043,7 +1043,7 @@ authorization of the copyright holder.
 
 ### OFL-1.1
 
-Canonical: https://openfontlicense.org/open-font-license-official-text/. Source of this copy: full text as shipped with Geist (`interface/ui/public/fonts/LICENSE-geist.txt`). The Silkscreen file differs only in its copyright line and trivial typography, shown under Fonts.
+Canonical: https://openfontlicense.org/open-font-license-official-text/. Source of this copy: full text as shipped with Geist (`40-interface/ui/public/fonts/LICENSE-geist.txt`). The Silkscreen file differs only in its copyright line and trivial typography, shown under Fonts.
 
 ```text
 Copyright (c) 2023 Vercel, in collaboration with basement.studio
@@ -1210,7 +1210,7 @@ insights.
 
 ### GPL-3.0
 
-Canonical: https://www.gnu.org/licenses/gpl-3.0.txt. Source of this copy: full text, unmodified, from `messaging/sidecars/meshtastic-presence/LICENSE` (the same text as the LICENSE of the pinned Meshtastic web client). Applies to the GPL-3.0-only and GPL-3.0-or-later components under Source offers.
+Canonical: https://www.gnu.org/licenses/gpl-3.0.txt. Source of this copy: full text, unmodified, from `50-messaging/sidecars/meshtastic-presence/LICENSE` (the same text as the LICENSE of the pinned Meshtastic web client). Applies to the GPL-3.0-only and GPL-3.0-or-later components under Source offers.
 
 ```text
                     GNU GENERAL PUBLIC LICENSE

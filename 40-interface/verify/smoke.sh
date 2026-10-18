@@ -1,17 +1,17 @@
 #!/usr/bin/env bash
-# interface/verify/smoke.sh — Layer 4 end-to-end smoke (spec §14, TASKS.md I1), and with
-# --three-node the Layer 5 three-node harness (os/messaging/README.md §20 G1, TASKS.md V1).
+# 40-interface/verify/smoke.sh — Layer 4 end-to-end smoke (spec §14, TASKS.md I1), and with
+# --three-node the Layer 5 three-node harness (os/50-messaging/README.md §20 G1, TASKS.md V1).
 #
-#   bash interface/verify/smoke.sh               single node (Layer 4; steps 1–5 below)
-#   bash interface/verify/smoke.sh --three-node  hub + members + requester (Layer 5; see
+#   bash 40-interface/verify/smoke.sh               single node (Layer 4; steps 1–5 below)
+#   bash 40-interface/verify/smoke.sh --three-node  hub + members + requester (Layer 5; see
 #                                                "three-node mode" further down)
 #
 #   1. UI      pnpm install (only when node_modules is stale) + pnpm build → ui/dist
-#   2. Rust    cargo build (debug) of `111` (os/bootstrap) and `111-agent` (os/intelligence).
+#   2. Rust    cargo build (debug) of `111` (os/10-bootstrap) and `111-agent` (os/30-intelligence).
 #              A debug `111` reads ui/dist from disk per request (rust-embed debug mode),
 #              so a UI rebuild needs no Rust rebuild — asserted below with a probe file.
 #   3. Root    a scratch NODE111_ROOT: identity (`111 identity generate`), releases/<ver>
-#              with the KB (os/knowledge entries) + payload manifest, `111-agent`, and
+#              with the KB (os/00-knowledge entries) + payload manifest, `111-agent`, and
 #              `stub-llama.py` installed as `bin/llama-server`; a dummy .gguf; LAN on.
 #   4. Run     inside `unshare -rnpf` (user + net + pid namespaces: loopback plus
 #              dummy0 192.168.77.5/24, no internet): `111 daemon`, which itself
@@ -60,9 +60,9 @@ set -euo pipefail
 
 HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 OS=$(cd "$HERE/../.." && pwd)
-UI=$OS/interface/ui
-BOOT=$OS/bootstrap
-INTEL=$OS/intelligence
+UI=$OS/40-interface/ui
+BOOT=$OS/10-bootstrap
+INTEL=$OS/30-intelligence
 TAPES=$UI/test/tapes
 export PATH="$HOME/.cargo/bin:$PATH:/usr/sbin:/sbin"
 
@@ -490,7 +490,7 @@ inner() {
   now=$(date -u +%Y-%m-%dT%H:%M:%SZ)
   mkdir -p "$pdir"
   jq -n --arg now "$now" --arg nid "${SMOKE_NODE_ID:-}" \
-    '{schema:1, id:"prop-smoke", node_id:$nid, task_id:null, kind:"propose", title:"Smoke proposal", body:"## Smoke\nwritten by interface/verify/smoke.sh", created_at:$now}' \
+    '{schema:1, id:"prop-smoke", node_id:$nid, task_id:null, kind:"propose", title:"Smoke proposal", body:"## Smoke\nwritten by 40-interface/verify/smoke.sh", created_at:$now}' \
     >"$pdir/prop-smoke.json"
   req GET "$B/api/v1/proposals"
   t "GET /api/v1/proposals → includes prop-smoke (open, decision:null)" \
@@ -1353,7 +1353,7 @@ case "${1:-}" in
   --three-node) MODE=three ;;
   "") MODE=single ;;
   *)
-    echo "usage: bash interface/verify/smoke.sh [--three-node]" >&2
+    echo "usage: bash 40-interface/verify/smoke.sh [--three-node]" >&2
     exit 2
     ;;
 esac
@@ -1384,9 +1384,9 @@ LOGS=$WORK/logs
 mkdir -p "$LOGS"
 
 if [ "$MODE" = three ]; then
-  echo "interface/verify/smoke.sh --three-node — Layer 5 three-node harness (scratch $WORK)"
+  echo "40-interface/verify/smoke.sh --three-node — Layer 5 three-node harness (scratch $WORK)"
 else
-  echo "interface/verify/smoke.sh — Layer 4 end-to-end (scratch $WORK)"
+  echo "40-interface/verify/smoke.sh — Layer 4 end-to-end (scratch $WORK)"
 fi
 
 # ------------------------------------------------------------------ 1. UI
@@ -1474,11 +1474,11 @@ EOF
   chmod 755 "$rel/bin/llama-server"
   printf 'GGUF smoke placeholder — never loaded (the stub ignores --model)\n' >"$root/models/current/stub.gguf"
   # KB = the knowledge tree's entries (what a release packs into share/kb), no _meta/docs
-  (cd "$OS/knowledge" && find . -path ./_meta -prune -o -type f \( -name '*.md' -o -name 'llms.txt' \) -print) |
+  (cd "$OS/00-knowledge" && find . -path ./_meta -prune -o -type f \( -name '*.md' -o -name 'llms.txt' \) -print) |
     while read -r f; do
       case $f in ./AGENTS.md | ./README.md | ./TASKS.md) continue ;; esac
       mkdir -p "$kb/$(dirname "$f")"
-      cp "$OS/knowledge/$f" "$kb/$f"
+      cp "$OS/00-knowledge/$f" "$kb/$f"
     done
   (cd "$rel" && find share/kb -type f -print0 | sort -z | xargs -0 sha256sum) >"$rel/share/payload.manifest"
   printf '%s\n' "$envtext" >"$root/etc/env"
@@ -1498,7 +1498,7 @@ if [ "$MODE" = three ]; then
   phase "3. scratch roots H A B C (identities, fabric/settings, H's Meshtastic binding)"
   STUB_MM=$HERE/stub-meshmud.py
   if [ ! -f "$STUB_MM" ]; then
-    fail "interface/verify/stub-meshmud.py (V2's stub meshmud) is missing — scenario (9) cannot run"
+    fail "40-interface/verify/stub-meshmud.py (V2's stub meshmud) is missing — scenario (9) cannot run"
   fi
   for n in H A B C; do
     make_root "$WORK/$n" "# three-node smoke: dashboard on loopback; the fabric listener follows fabric/settings" \

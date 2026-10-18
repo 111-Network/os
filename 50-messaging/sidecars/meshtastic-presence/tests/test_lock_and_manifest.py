@@ -17,8 +17,8 @@ sys.path.insert(0, ROOT)
 
 LOCK = os.path.join(ROOT, "meshtastic-presence-lock.txt")
 REQ_IN = os.path.join(ROOT, "requirements.in")
-PANEL = os.path.join(OS_DIR, "bootstrap", "crates", "node111", "assets", "panels", "meshtastic.toml")
-SPEC = os.path.join(OS_DIR, "messaging", "README.md")
+PANEL = os.path.join(OS_DIR, "10-bootstrap", "crates", "node111", "assets", "panels", "meshtastic.toml")
+SPEC = os.path.join(OS_DIR, "50-messaging", "README.md")
 
 _spec = importlib.util.spec_from_file_location("gen_lock", os.path.join(ROOT, "gen_lock.py"))
 gen_lock = importlib.util.module_from_spec(_spec)

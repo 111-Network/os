@@ -1,5 +1,5 @@
-//! Layer 4 R2 acceptance (`os/interface/README.md` §7, §10;
-//! `os/interface/api/openapi.yaml`): `/api/v1/status` schema pins + superset of
+//! Layer 4 R2 acceptance (`os/40-interface/README.md` §7, §10;
+//! `os/40-interface/api/openapi.yaml`): `/api/v1/status` schema pins + superset of
 //! `/api/status`, the `update` block from state files and the live updater,
 //! the services registry (§7 rows from injected facts, 2-tick debounce,
 //! `starting` grace, `since`, `services` frames), log tails, settings (merge,

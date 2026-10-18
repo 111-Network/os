@@ -1,4 +1,4 @@
-//! Device registry (Layer 4 R4, spec `os/interface/README.md` §6.3, §7.1):
+//! Device registry (Layer 4 R4, spec `os/40-interface/README.md` §6.3, §7.1):
 //! hardware the user attached to THIS node and devices they paired with its
 //! control panel — never other people's nodes (those are Nearby, Layer 7).
 //!

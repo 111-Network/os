@@ -84,7 +84,7 @@
     rgba(14, 63, 126, 0.04) 0px 24px 24px -12px;
 }
 
-/* Self-hosted, no runtime network (spec section 2). Provenance and licenses: os/interface/FONTS.md */
+/* Self-hosted, no runtime network (spec section 2). Provenance and licenses: os/40-interface/FONTS.md */
 @font-face {
   font-family: "Geist Mono";
   font-style: normal;

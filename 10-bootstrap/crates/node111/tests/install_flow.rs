@@ -2,7 +2,7 @@
 //! HTTP server + scripted MockRunner + temp fs roots — happy path + idempotent
 //! re-run, downgrade refusal, degraded container path, clock-skew refusal, and
 //! the stage step's Layer 5 cross-check (fresh extraction and the "already
-//! staged" content probe; os/messaging/README.md §19 L1).
+//! staged" content probe; os/50-messaging/README.md §19 L1).
 
 mod common;
 

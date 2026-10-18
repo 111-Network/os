@@ -1,6 +1,6 @@
 //! Layer 2 §14 conformance suite — the frozen test vectors as LIVE gates.
 //!
-//! Every file in `os/identity/test-vectors/` (frozen 2026-10-13, task T8) is
+//! Every file in `os/20-identity/test-vectors/` (frozen 2026-10-13, task T8) is
 //! loaded here and re-asserted against the PUBLIC `id111` API, so a vector
 //! can never rot into dead data and an implementation drift can never slip
 //! past a frozen answer. Only the public API is used: this suite sees the
@@ -1331,7 +1331,7 @@ fn announce_negatives_each_rejected_before_any_state_change() {
     }
 }
 
-/// L5 amendment A6 (`os/messaging/README.md` §7, §19) over the FROZEN L2
+/// L5 amendment A6 (`os/50-messaging/README.md` §7, §19) over the FROZEN L2
 /// file. `announce.json` is the Cat-1 harness contract and stays
 /// byte-identical (D20); it names a stale announce `err:stale:<last>:<got>`.
 /// Since A6, `id111` reports that outcome as `ok:unchanged:<last>` — but ONLY

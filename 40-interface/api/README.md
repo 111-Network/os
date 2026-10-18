@@ -29,7 +29,7 @@ the `x-sse-events` map) into `ui/src/lib/api/types.gen.ts` — never hand-edited
   flood the ring), `contact`, `fabric` (a full `FabricStatus` snapshot), `nearby` and `panels` (full
   snapshots). After `reset` the Layer 5 views also refetch `/fabric`, `/messages/threads`, `/contacts`,
   `/nearby` and `/panels`.
-- **Layer 5 additions (Messaging & Data; `os/messaging/README.md` §15, D20) — additive under `/api/v1`:**
+- **Layer 5 additions (Messaging & Data; `os/50-messaging/README.md` §15, D20) — additive under `/api/v1`:**
   - *Routes:* `GET /messages/threads`, `GET /messages/threads/{peer}`, `POST /messages`, `POST /messages/{id}/retry`,
     `GET|POST /contacts`, `GET|PATCH|DELETE /contacts/{id}`, `GET /contacts/me/card`, `GET /fabric`,
     `POST /fabric/hub/enroll`, `POST /fabric/hub/offer`, `PATCH /fabric/settings`, `GET /nearby`, `GET /panels`,

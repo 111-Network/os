@@ -44,11 +44,11 @@ and `os/<slug>/TASKS.md`, where the layer's code is.
 | Layer | Folder | Notes |
 |---|---|---|
 | 0 Knowledge | `layers/00-knowledge/` | options, triage |
-| 1 Bootstrap | `layers/01-bootstrap/` | options, triage |
-| 2 Identity | `layers/02-identity/` | options, research coordinates, triage |
-| 3 Local Intelligence | none | no plan material: no research sweep or panel was run; see D10 and `os/intelligence/` |
-| 4 Interface & Dashboard | `layers/04-interface/` | options, triage |
-| 5 Messaging & Data | `layers/05-messaging/` | full set: research, options, review, runs |
+| 1 Bootstrap | `layers/10-bootstrap/` | options, triage |
+| 2 Identity | `layers/20-identity/` | options, research coordinates, triage |
+| 3 Local Intelligence | none | no plan material: no research sweep or panel was run; see D10 and `os/30-intelligence/` |
+| 4 Interface & Dashboard | `layers/40-interface/` | options, triage |
+| 5 Messaging & Data | `layers/50-messaging/` | full set: research, options, review, runs |
 | 6 Transport & Bridge | none yet | opener brief is [`cross-layer/devices.md`](cross-layer/devices.md); folder is created at Layer 6 kickoff |
 | 7 to 9 | none yet | pending |
 
@@ -65,7 +65,7 @@ and `os/<slug>/TASKS.md`, where the layer's code is.
 ### How paths are written inside plan documents
 
 - Markdown links are relative to the file that contains them.
-- Backticked plan paths are written from the plan root (`layers/05-messaging/options.md`) or from the repo (`os/plan/layers/05-messaging/options.md`, `plan/layers/...`). Documents outside `plan/` always use the `os/plan/...` or `plan/...` form.
+- Backticked plan paths are written from the plan root (`layers/50-messaging/options.md`) or from the repo (`os/plan/layers/50-messaging/options.md`, `plan/layers/...`). Documents outside `plan/` always use the `os/plan/...` or `plan/...` form.
 - A bare file name such as `DECISIONS.md` or `INDEX.md` means the top-level file of that name.
 
 ## Where does X go?

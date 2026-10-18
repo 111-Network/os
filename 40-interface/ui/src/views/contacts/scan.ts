@@ -1,4 +1,4 @@
-// QR scanning for "add a contact" (os/messaging/README.md sections 7.2 and 16). The decoder is jsQR, loaded on the
+// QR scanning for "add a contact" (os/50-messaging/README.md sections 7.2 and 16). The decoder is jsQR, loaded on the
 // first scan only (it is a separate chunk), and nothing leaves the browser: pixels go in, a string comes out.
 //
 // Two inputs: a camera, which needs a secure context (HTTPS or the node's own loopback origin, so a node opened over a

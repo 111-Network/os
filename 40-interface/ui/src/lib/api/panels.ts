@@ -1,4 +1,4 @@
-// Panels slice (os/messaging/README.md §13, §15): helpers over the declared hosted panels. A panel lives on its own
+// Panels slice (os/50-messaging/README.md §13, §15): helpers over the declared hosted panels. A panel lives on its own
 // origin `http://<host as typed>:<port>`; the dashboard builds that from `location.hostname` and the panel's `port`,
 // never from a shared snapshot, and frames only registry-declared panels.
 import type { HostedPanel, ServiceId } from "./types";

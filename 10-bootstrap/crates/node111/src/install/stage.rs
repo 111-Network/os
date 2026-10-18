@@ -76,7 +76,7 @@ pub fn run(
     let result = (|| -> anyhow::Result<()> {
         crate::daemon::updater::stage::safe_unpack(&tarball, &tmp)?;
         crate::daemon::updater::stage::verify_tree(&tmp)?;
-        // Layer 5 assets equal the signed manifest's pins (os/messaging/README.md §19 L1).
+        // Layer 5 assets equal the signed manifest's pins (os/50-messaging/README.md §19 L1).
         manifest.verify_layer5_tree(&tmp, crate::daemon::updater::fetch::TARGET_TRIPLE)?;
         Ok(())
     })();

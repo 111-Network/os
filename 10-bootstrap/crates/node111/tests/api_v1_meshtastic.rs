@@ -1,4 +1,4 @@
-//! Layer 5 M1 acceptance (os/messaging/README.md §14, TASKS.md row M1):
+//! Layer 5 M1 acceptance (os/50-messaging/README.md §14, TASKS.md row M1):
 //! Meshtastic in `111d` without hardware.
 //!
 //! - A **stub meshmud** TCP server (in-process, std threads) plays meshmud's

@@ -33,7 +33,7 @@ pub fn wait_healthy(ctx: &InstallContext, deadline_secs: u64) -> anyhow::Result<
     }
 }
 
-/// What `/` serves when the binary was built without `interface/ui/dist`
+/// What `/` serves when the binary was built without `40-interface/ui/dist`
 /// (`daemon::dashboard::routes` NOT_BUILT notice).
 pub const UI_NOT_BUILT_MARKER: &str = "dashboard UI not built";
 
@@ -53,7 +53,7 @@ fn check_ui(fetcher: &crate::util::http::Fetcher, base: &str) {
 111 install: WARNING: this 111 build has NO dashboard UI.
 111 install:   {base}/ shows the \"dashboard UI not built\" notice, not the app.
 111 install:   The node runs; the minimal status page is at {base}/v1.
-111 install:   The release was built without interface/ui/dist: report it.
+111 install:   The release was built without 40-interface/ui/dist: report it.
 111 install: ================================================================"
         ),
         Ok(_) => {}

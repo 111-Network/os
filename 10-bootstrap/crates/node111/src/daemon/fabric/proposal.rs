@@ -1,4 +1,4 @@
-//! Accepting a `kind: message` proposal (`os/messaging/README.md` §17,
+//! Accepting a `kind: message` proposal (`os/50-messaging/README.md` §17,
 //! §18 rule 9: the agent never sends — it proposes, the human accepts in the
 //! dashboard, and `111d` sends). The proposal file is untrusted agent output;
 //! acceptance checks, in order:

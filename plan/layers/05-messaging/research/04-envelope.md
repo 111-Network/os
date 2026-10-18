@@ -1,6 +1,6 @@
 # Layer 5 research, lens 4: completing the message envelope on top of Layer 2
 
-Date 2026-10-14. Scope: identity/README.md section 6 and 13 hand Layer 5 the full envelope. Marked (unverified) = not confirmed from a fetched source this session. Marked (derived) = my arithmetic or analysis from fetched facts, not a quote.
+Date 2026-10-14. Scope: 20-identity/README.md section 6 and 13 hand Layer 5 the full envelope. Marked (unverified) = not confirmed from a fetched source this session. Marked (derived) = my arithmetic or analysis from fetched facts, not a quote.
 
 ## 1. Summary
 
@@ -32,7 +32,7 @@ Date 2026-10-14. Scope: identity/README.md section 6 and 13 hand Layer 5 the ful
 
 ## 3. Findings that change the plan
 
-1. **L2 sealed packet = Noise "N": Source authentication level 0, "anyone, including an active attacker, could have sent the payload".** Noise "K" (`-> e, es, ss`) reaches level 1 with the sender's static key already known (it is pinned from announces), and costs no wire bytes. https://noiseprotocol.org/noise.html . L2 section 6.4 says the sender id travels inside the ciphertext and section 6.5 windows are per peer, so a forged claim reaches window state (derived from identity/README.md 6.4, 6.5).
+1. **L2 sealed packet = Noise "N": Source authentication level 0, "anyone, including an active attacker, could have sent the payload".** Noise "K" (`-> e, es, ss`) reaches level 1 with the sender's static key already known (it is pinned from announces), and costs no wire bytes. https://noiseprotocol.org/noise.html . L2 section 6.4 says the sender id travels inside the ciphertext and section 6.5 windows are per peer, so a forged claim reaches window state (derived from 20-identity/README.md 6.4, 6.5).
 2. **Mutable fields cannot be in the AD.** L2 section 6.4 AD-covers "every cleartext header byte". Meshtastic mutates hop_limit and relay_node per hop (https://meshtastic.org/docs/overview/mesh-algo/); MeshCore carries a hop-count-sized `path` of per-hop hashes (https://github.com/meshcore-dev/MeshCore/blob/main/docs/packet_format.md). If those sat in the L5 header, relaying would break the AEAD. They belong to an L6 shim.
 3. **A relay-side packet id already exists for free:** epk is a fresh random 32 B per sealed packet. `epk[0..8]` is a dedup key with no extra field (derived). Meshtastic dedups on (sender, 32-bit id), id "only needs to be unique per sender ... for a few minutes" (https://raw.githubusercontent.com/meshtastic/protobufs/master/meshtastic/mesh.proto, https://raw.githubusercontent.com/meshtastic/firmware/master/src/mesh/PacketHistory.h). That is flood suppression, not idempotency.
 4. **Meshtastic moved since the L2 research:** the proto now has `Routing.ack_proof` (HMAC-SHA256, first 8 B, key = SHA-256 of the static-static X25519 secret) and `xeddsa_signed`; broadcasts are signed from firmware 2.8 at +66 B; `ack_proof_status` is "reported only and not enforced". Its `priority` is "never sent over the air", so relays cannot see class. Sources: mesh.proto above; https://meshtastic.org/docs/overview/encryption/ . Channel PSK stays AES-CTR, published default `AQ==`, no forward secrecy, any key holder can forge.
@@ -117,7 +117,7 @@ Shim (frame_type, hop_limit); `prio_flags`; `dest_hint` only if it is also an en
 
 ## 6. Sources
 
-Repo: identity/README.md (6, 8.4, 12, 13, 15), LICENSING.md, plan/cross-layer/devices.md, plan/DECISIONS.md (D13, D17), knowledge/ entries for briar-bramble, meshcore, reticulum-protocol.
+Repo: 20-identity/README.md (6, 8.4, 12, 13, 15), LICENSING.md, plan/cross-layer/devices.md, plan/DECISIONS.md (D13, D17), 00-knowledge/ entries for briar-bramble, meshcore, reticulum-protocol.
 - https://github.com/meshcore-dev/MeshCore/blob/main/docs/packet_format.md
 - https://github.com/meshcore-dev/MeshCore/blob/main/docs/payloads.md
 - https://meshtastic.org/docs/overview/mesh-algo/

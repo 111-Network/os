@@ -1324,7 +1324,7 @@ mod tests {
         let att = NodeLeg::issue(&ks, TID, tkey, expiry).complete(tsig);
         let wire = att.to_bytes();
 
-        println!("Attestation KAT (frozen by T8 into os/identity/test-vectors/):");
+        println!("Attestation KAT (frozen by T8 into os/20-identity/test-vectors/):");
         println!("  node mnemonic   = abandon×11 about (BIP-39, empty passphrase)");
         println!("  node_pubkey     = {}", to_hex(ks.node_id().as_bytes()));
         println!("  transport_id    = 0x01 (nostr-secp256k1)");

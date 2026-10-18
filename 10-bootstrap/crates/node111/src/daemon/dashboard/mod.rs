@@ -1,7 +1,7 @@
 //! Dashboard (Layer 1 seam, Layer 4 surface — D15). `111d` serves the embedded
 //! Layer 4 UI on `:11180` (+ `:80` best-effort), `/health` + `/api/status` per
 //! the pinned Layer 1 contracts, the Layer 1 minimal page at `/v1`, and the
-//! `/api/v1` contract (`os/interface/api/openapi.yaml`) with pairing auth.
+//! `/api/v1` contract (`os/40-interface/api/openapi.yaml`) with pairing auth.
 //!
 //! - `routes`  — app assembly, Host guard, static UI, legacy routes
 //! - `api_v1`  — `/api/v1/*` (auth, events bus, R2/R3 submodules)

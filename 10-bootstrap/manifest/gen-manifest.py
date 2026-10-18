@@ -12,13 +12,13 @@ Usage:
       --url-base https://github.com/111-Network/os/releases/download/v2026.10.12 \
       --out dist/channel-111-stable.toml
 
-Layer 5 artifacts (D20; os/messaging/README.md section 19 L1) are optional and taken under the
+Layer 5 artifacts (D20; os/50-messaging/README.md section 19 L1) are optional and taken under the
 names their CI build scripts give them, so the tag stays in the published file name:
   meshmud-<tag>-linux-amd64 / -linux-arm64      scripts/meshmud-build.sh
       -> [pkg.meshmud.target.x86_64-unknown-linux-musl] / [...aarch64-unknown-linux-musl]
   meshtastic-web-<tag>.tar + meshtastic-web-<tag>.tree    scripts/meshtastic-web-build.sh
       -> [bundle.meshtastic-web], tree-sha256 = sha256 of the .tree file (the bundle hash)
-  meshtastic-presence-lock.txt                  messaging/sidecars/meshtastic-presence/
+  meshtastic-presence-lock.txt                  50-messaging/sidecars/meshtastic-presence/
       -> [presence-lock]
 At most one file per pattern; a .tar without its .tree (or the reverse) is an error. The same
 bytes ride inside the payloads (bin/meshmud, panels/meshtastic-web/, share/meshtastic-presence/).

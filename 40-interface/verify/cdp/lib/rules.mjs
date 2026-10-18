@@ -1,4 +1,4 @@
-// The G3 / offline-lint assertions (os/messaging/README.md section 13 "Offline lint", section 20 G3) as a pure
+// The G3 / offline-lint assertions (os/50-messaging/README.md section 13 "Offline lint", section 20 G3) as a pure
 // function over what the driver recorded, so selftest.mjs can prove each rule fails on a hostile recording.
 //
 //   evaluate(ctx) -> [{ id, level: "ok" | "FAIL" | "note", text }]

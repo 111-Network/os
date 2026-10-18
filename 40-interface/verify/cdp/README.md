@@ -1,4 +1,4 @@
-# interface/verify/cdp — the panel lint's browser harness
+# 40-interface/verify/cdp — the panel lint's browser harness
 
 Driven by `../panel-lint.sh` (V2, Layer 5 §13 "Offline lint" and §20 G3). No npm dependencies: Node >= 22 (built-in
 `WebSocket`) and a Chrome/Chromium (`$CHROME`, `/usr/bin/google-chrome`, then playwright's chromium).

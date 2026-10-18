@@ -10,7 +10,7 @@
 //! announce presenting different key material for a known NodeId is rejected
 //! (Meshtastic CVE-2025-55293).
 //!
-//! **Layer 5 amendment A6** (`os/messaging/README.md` §7, §19): an announce
+//! **Layer 5 amendment A6** (`os/50-messaging/README.md` §7, §19): an announce
 //! whose key material is IDENTICAL to the pin and whose counter is ≤ the
 //! stored one is accepted with no state change ([`PinOutcome::Unchanged`])
 //! rather than reported as an error — reconnects and genesis cards

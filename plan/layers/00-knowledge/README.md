@@ -2,7 +2,7 @@
 
 **Status** (copied from [`INDEX.md`](../../INDEX.md) row 0, which stays the source of truth): ✅ built — spec locked (D7), all 13 tasks done: 9 candidate seed entries, generator + `--check` green (0 errors), hook committed (activation: `git config core.hooksPath hooks`)
 
-**Spec and build:** [`os/knowledge/README.md`](../../../knowledge/README.md) · [`os/knowledge/TASKS.md`](../../../knowledge/TASKS.md)
+**Spec and build:** [`os/00-knowledge/README.md`](../../../00-knowledge/README.md) · [`os/00-knowledge/TASKS.md`](../../../00-knowledge/TASKS.md)
 
 **Decisions:** D4, D6, D7, D8 in [`DECISIONS.md`](../../DECISIONS.md). Build protocol: [`EXECUTION.md`](../../EXECUTION.md).
 

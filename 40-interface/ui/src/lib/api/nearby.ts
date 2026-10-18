@@ -1,4 +1,4 @@
-// Nearby slice (os/messaging/README.md §14, §15): presence per source. Every string a source reports is an untrusted
+// Nearby slice (os/50-messaging/README.md §14, §15): presence per source. Every string a source reports is an untrusted
 // RF-origin value (names truncated to 40 bytes and control characters stripped by the daemon): render as text only, and
 // hand it to the agent only inside a labelled untrusted block. A node heard here is never a contact.
 import { cleanPeerText } from "./messages";

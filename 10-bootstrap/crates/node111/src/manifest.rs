@@ -63,7 +63,7 @@
 //! fixtures), keychain generations strictly consecutive starting at 0, unknown
 //! fields rejected (`deny_unknown_fields` — evolution bumps `manifest-version`).
 //!
-//! ## Layer 5 entries (D20; `os/messaging/README.md` §2, §13, §14, §19 L1)
+//! ## Layer 5 entries (D20; `os/50-messaging/README.md` §2, §13, §14, §19 L1)
 //!
 //! Optional and additive. Each one rides **inside** the release payload as well, so
 //! the updater, the root helper and the installer receive it only through the
@@ -101,7 +101,7 @@
 //! ```
 //!
 //! Package and bundle names are open, as `[pkg.*.target.*]` always was
-//! (`os/bootstrap/README.md`): a name this binary does not know parses — its pin
+//! (`os/10-bootstrap/README.md`): a name this binary does not know parses — its pin
 //! is validated like any other — and is otherwise ignored, so a later release can
 //! add a package (D19 c's KISS-modem images) or a panel without stranding nodes
 //! that run this binary. The closure lives in [`ChannelManifest::verify_layer5_tree`]
@@ -130,7 +130,7 @@ const BUNDLE_NAME_MAX: usize = 64;
 
 /// Where the Layer 5 assets sit inside a payload tree (= `releases/<ver>/`, i.e.
 /// `current/`), and where the node builds the presence venv (Layer 5 §2, §13, §14;
-/// `os/bootstrap/README.md` "Layer 5 amendments").
+/// `os/10-bootstrap/README.md` "Layer 5 amendments").
 pub mod layer5 {
     /// meshmud's binary (`current/bin/meshmud`, Layer 5 §14).
     pub const MESHMUD_BIN: &str = "bin/meshmud";
@@ -582,7 +582,7 @@ impl ChannelManifest {
 
     /// Cross-check an extracted payload tree (`releases/<ver>/` or a staging
     /// `tree/`) for `target_triple` against this manifest's Layer 5 pins
-    /// (`os/messaging/README.md` §19 L1). Fails closed both ways: a pinned asset
+    /// (`os/50-messaging/README.md` §19 L1). Fails closed both ways: a pinned asset
     /// must be present with exactly the pinned bytes, and an asset the manifest
     /// does not pin must not be in the tree.
     ///

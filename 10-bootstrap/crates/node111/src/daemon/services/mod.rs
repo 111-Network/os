@@ -1,4 +1,4 @@
-//! Services registry (Layer 4 spec §7, `os/interface/README.md`; grown to nine
+//! Services registry (Layer 4 spec §7, `os/40-interface/README.md`; grown to nine
 //! ids by Layer 5 §15/§19): the `ServiceRecord`s behind
 //! `GET /api/v1/services`, computed by `111d` from deterministic probes. The UI
 //! and the agent only read it.

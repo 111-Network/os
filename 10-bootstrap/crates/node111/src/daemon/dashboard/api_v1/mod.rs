@@ -1,5 +1,5 @@
-//! `/api/v1` — the Layer 4 dashboard contract (`os/interface/api/openapi.yaml`,
-//! conventions in `os/interface/api/README.md`).
+//! `/api/v1` — the Layer 4 dashboard contract (`os/40-interface/api/openapi.yaml`,
+//! conventions in `os/40-interface/api/README.md`).
 //!
 //! ## How the router is assembled (R2/R3: read this, then edit only your file)
 //!
@@ -82,7 +82,7 @@ pub struct ApiConfig {
     /// Persist pairing state under `<root>/state/` (daemon: true). `false` keeps
     /// the pair code + sessions in memory only (the compat `serve()` entry).
     pub persist_auth: bool,
-    /// Serve the UI from this directory instead of the embedded `interface/ui/dist`
+    /// Serve the UI from this directory instead of the embedded `40-interface/ui/dist`
     /// (tests use a fixture dist; production leaves it `None`).
     pub ui_dir: Option<PathBuf>,
     /// `/api/v1/events` keep-alive interval (tests shorten it).

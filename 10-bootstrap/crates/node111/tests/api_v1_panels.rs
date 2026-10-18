@@ -1,4 +1,4 @@
-//! Layer 5 P1 acceptance (os/messaging/README.md §13 "Hosted panels", §15
+//! Layer 5 P1 acceptance (os/50-messaging/README.md §13 "Hosted panels", §15
 //! `listPanels` / `openPanelSession`): the ticket → cookie flow (spent ticket
 //! `403` + re-mint, a ticket presented with a valid cookie is spent), guards on
 //! every request (cross-site refused, no CORS headers ever, the Host/Origin
@@ -9,7 +9,7 @@
 //! binding, untrusted loopback (Termux) still needing the ticket, and
 //! revocation on `111 dashboard rotate`, panel disable and LAN-off.
 //!
-//! P1 bounce (review `wf_c857767c-bde`, triage `plan/layers/05-messaging/review/wave-1.md`):
+//! P1 bounce (review `wf_c857767c-bde`, triage `plan/layers/50-messaging/review/wave-1.md`):
 //! API paths are same-origin only under Fetch Metadata (m1), bearer callers
 //! never mint (m2), encoded API paths never get the SPA and bundle files are
 //! streamed with a metadata ETag (m4), per-peer connection cap + absolute

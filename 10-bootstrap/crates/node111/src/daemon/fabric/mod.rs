@@ -1,4 +1,4 @@
-//! Layer 5 fabric wiring (`os/messaging/README.md` §2, §4, §9, §10.2, §15,
+//! Layer 5 fabric wiring (`os/50-messaging/README.md` §2, §4, §9, §10.2, §15,
 //! §17; task F2): `mesh111` running inside `111d`.
 //!
 //! ## What [`start`] does, in order

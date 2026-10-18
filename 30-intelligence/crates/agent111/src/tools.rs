@@ -1,5 +1,5 @@
 //! The fixed tool set — no shell, no plugins, ever. Schemas are contract
-//! (frozen at T0; grown by exactly five in Layer 5, `os/messaging/README.md`
+//! (frozen at T0; grown by exactly five in Layer 5, `os/50-messaging/README.md`
 //! §17); `dispatch` runs one call against the node's own state.
 //! Every tool is a plain function over `ToolCtx`: nothing here spawns a
 //! subprocess.

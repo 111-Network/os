@@ -1,4 +1,4 @@
-// Messages (os/messaging/README.md section 16). The router sends /messages and /messages/:peer here; this view
+// Messages (os/50-messaging/README.md section 16). The router sends /messages and /messages/:peer here; this view
 // branches on the route. /messages/contacts is its own view.
 import { useParams } from "wouter";
 import { ButtonLink } from "../../components/button";

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # run.sh -- build and run the Monocypher C cross-vector harness (T9).
 #
-#   bash os/identity/monocypher-harness/run.sh [--sanitize] [--log FILE] [--no-supplement]
+#   bash os/20-identity/monocypher-harness/run.sh [--sanitize] [--log FILE] [--no-supplement]
 #
 # Steps: (1) verify the vendored Monocypher files against SHA256SUMS,
 # (2) build harness.c + vendored monocypher with

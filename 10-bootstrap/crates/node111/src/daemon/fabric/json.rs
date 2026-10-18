@@ -1,4 +1,4 @@
-//! The contract shapes (`interface/api/openapi.yaml` Layer 5 schemas) built
+//! The contract shapes (`40-interface/api/openapi.yaml` Layer 5 schemas) built
 //! from `mesh111`'s typed views: `Message`, `Thread`, `Contact`, `Card`
 //! (+ `QrMatrix`), `FabricStatus`, `FabricHub`, `FabricSettings`,
 //! `HubOffer`. One place, so routes and SSE frames agree byte for byte.

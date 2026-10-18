@@ -1,8 +1,8 @@
 # Layer 5 — Messaging & Data: plan folder
 
-**Status** (copied from [`INDEX.md`](../../INDEX.md) row 5, which stays the source of truth): 🔨 building — spec v1.2 locked (D20, 2026-10-14) after a 3-judge fable panel + re-check; `mesh111` scaffold (T0) green on host + musl ×2; `os/messaging/TASKS.md` Wave 0 (8 tasks) ✅ landed at a14736b (identity amendments, contract, codec + store with 96 tests, node111 plumbing, docs, KB, sidecar/assets); Wave 1 ✅ landed, fable/opus-reviewed and bounced (A1 agent tools · F1 fabric · P1 panels · M1 Meshtastic · U1 UI; bootstrap `check.sh` ALL GREEN incl. the D21 budget); Wave 2 ✅ landed (B1 gates · U2 Panel tab/Nearby/Settings · F2 daemon wiring: the fabric runs inside 111d behind the §15 routes); review + bounce next, then Wave 3 verification (netns smoke, panel lint, fable integrated review)
+**Status** (copied from [`INDEX.md`](../../INDEX.md) row 5, which stays the source of truth): 🔨 building — spec v1.2 locked (D20, 2026-10-14) after a 3-judge fable panel + re-check; `mesh111` scaffold (T0) green on host + musl ×2; `os/50-messaging/TASKS.md` Wave 0 (8 tasks) ✅ landed at a14736b (identity amendments, contract, codec + store with 96 tests, node111 plumbing, docs, KB, sidecar/assets); Wave 1 ✅ landed, fable/opus-reviewed and bounced (A1 agent tools · F1 fabric · P1 panels · M1 Meshtastic · U1 UI; bootstrap `check.sh` ALL GREEN incl. the D21 budget); Wave 2 ✅ landed (B1 gates · U2 Panel tab/Nearby/Settings · F2 daemon wiring: the fabric runs inside 111d behind the §15 routes); review + bounce next, then Wave 3 verification (netns smoke, panel lint, fable integrated review)
 
-**Spec and build:** [`os/messaging/README.md`](../../../messaging/README.md) · [`os/messaging/TASKS.md`](../../../messaging/TASKS.md)
+**Spec and build:** [`os/50-messaging/README.md`](../../../50-messaging/README.md) · [`os/50-messaging/TASKS.md`](../../../50-messaging/TASKS.md)
 
 **Decisions:** D18, D19, D20, D21 (and D17 for the device decisions it builds on) in [`DECISIONS.md`](../../DECISIONS.md). Build protocol: [`EXECUTION.md`](../../EXECUTION.md).
 

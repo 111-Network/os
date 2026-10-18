@@ -1,4 +1,4 @@
-//! Layer 4 R3 acceptance (os/interface/README.md §10, §10.1; api/README.md):
+//! Layer 4 R3 acceptance (os/40-interface/README.md §10, §10.1; api/README.md):
 //! the `111d` → `111-agent` relay against a scripted stub agent (std
 //! `TcpListener`, raw HTTP/1.1 — TASKS.md bars test-server crates).
 //!

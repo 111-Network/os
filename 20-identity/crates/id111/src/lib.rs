@@ -1,9 +1,9 @@
 //! id111 — the 111 Network identity core (the spec's `111id` module, §13/D13 H1):
-//! every node's cryptographic self per `os/identity/README.md` (spec v2, LOCKED —
+//! every node's cryptographic self per `os/20-identity/README.md` (spec v2, LOCKED —
 //! D13/D14). One BIP-39 root secret, one SLIP-0010-derived dual Ed25519+X25519
 //! keyset; NodeId = the raw 32-byte Ed25519 public key.
 //!
-//! Module tree frozen at T1 per `os/identity/TASKS.md`; stubs are filled by their
+//! Module tree frozen at T1 per `os/20-identity/TASKS.md`; stubs are filled by their
 //! owning tasks (W2). Each module doc names the spec section it implements.
 
 /// §2–§4 — the dual keyset: Ed25519 signing + X25519 ECDH from one seed;

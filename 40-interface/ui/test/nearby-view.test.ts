@@ -1,4 +1,4 @@
-// Nearby (os/messaging/README.md section 14, 16): the real list per source, rendered from the mock's `meshtastic` scenario through
+// Nearby (os/50-messaging/README.md section 14, 16): the real list per source, rendered from the mock's `meshtastic` scenario through
 // the real store. Names are untrusted RF-origin strings: escaped, cut, never a link, never in a prompt.
 import { createElement as h, type ReactElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
