@@ -52,7 +52,7 @@ G6"; integration `ServiceId` — the MeshChatX panel id is `meshchatx` (the `tra
 defined once (`111`, `meshtastic`, `lxmf`, `app:deltachat`, `app:simplex`); `transport.read` runs `rnstatus` on a tick with a cache, never on the request
 path; two stale citations fixed (`manifest.rs:10-11`, `API:919`); the presence reader's heartbeat cited as built.
 
-## Owner questions (consolidated; lead recommendation first)
+## Owner questions (consolidated; lead recommendation first) — **answered 2026-10-19, recorded as D26**
 
 1. **Optional component bytes (carriers B1, integration B3).** Recommend: `111 install` pre-downloads the hash-locked payloads into `cache/packages/`
    when online (≈ 33 MB slim closure; + ≈ 47 MB CPython 3.11 only on hosts with `python3 < 3.11`); nothing installed or running until a human enables
@@ -68,6 +68,14 @@ path; two stale citations fixed (`manifest.rs:10-11`, `API:919`); the presence r
    the owner's hand-selection after the build review (`undecided` in v1). Alternative: a legal read now so a native MeshChatX may carry the wheels.
 6. **Delta Chat if the Madmail gate fails (carriers M8, integration M8).** Recommend: a netns spike first; if it fails, Delta Chat leaves R-B (bridge-first
    = Meshtastic + LXMF) and returns with the phone bench. Alternative: ship it online-only with the public chatmail relay as an opt-in.
+
+## Owner answers (D26)
+
+1. Install-time cache (as recommended). 2. Every restart is a proposal (as recommended). 3. A10 bytes + verifier now, labels in the second release (as
+recommended). 4. **Neither MeshChatX nor a wait: our own thin LXMF helper** (the brief's option C), attributing Reticulum's work; the owner contacts
+upstream; MeshChatX, its closure and the bundled interpreter leave the draft. 5. **Always download, never bundle**; across all licensing the user
+installs third-party software after a short licence notice and acknowledgement; the author stays safe. 6. Spike first; drop Delta Chat from R-B if it
+fails (as recommended).
 
 ## Next
 

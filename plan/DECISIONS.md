@@ -325,6 +325,46 @@ ADR-lite. Every decision, its rejected alternatives, and why. Newest last; never
   device probes need boards the owner does not have yet; the owner's rules for adopted programs (separate, on demand, no weight when off,
   users hooked on our UI with the native UIs one click away) decide every adapter's shape.
 
+## D26 — Layer 6 spec amendments after the fable panel: own LXMF helper, install-time component cache, every restart a proposal, licensing posture
+
+- **Date:** 2026-10-19
+- **Context:** draft v0.1 (`23283ba`) went to three fable judges (bridge · carriers · integration), all **amend-then-lock**; the lead's triage
+  (`plan/layers/60-transport/review/triage.md`) accepts every finding except where the owner had to decide. The owner's answers:
+- **Decision (owner):**
+  - **(1) Optional component bytes — install-time cache.** `111 install` pre-downloads each declared optional component's hash-locked payload into
+    `cache/packages/<id>/` when online (the existing rns / presence pattern); nothing is installed, loaded or running until a human enables the
+    component; the cached size is shown. "Zero weight" means runtime weight (no process, listener, loaded code, timer or open file), not disk.
+  - **(2) Agent restarts — every restart is a proposal.** No bearer exception at all; one global rule: the agent's bearer is refused on every write
+    (an explicit gate in `require_session`), `identify` included; G1 asserts it on every Layer 6 write.
+  - **(3) Attestation — bytes and verifier now, labels later.** A10 transport ids `0x02`/`0x03` and the `TransportVerifier` plug land in Wave 0; the
+    gossip kind, the `attested-111` label, "already bridged by node X" and "Open the sealed thread" move to the second release.
+  - **(4) LXMF carrier — our own thin helper, not MeshChatX.** Owner: "lets make our own helper, attribute their work, I will contact them to find
+    out if we are ok." The carrier is a small sidecar of ours (the brief's option C): a separate process in its own hash-locked venv that imports the
+    **user-installed** `rns` / `lxmf` packages, speaks JSON Lines to `111d`, and credits the Reticulum project; `111d` still imports nothing of
+    Reticulum. MeshChatX is dropped as the carrier (and with it the 128 MiB slim closure, the bundled CPython 3.11 and the 2027 sunset); it may return
+    later as an optional hosted panel only. The licensing row for the helper is **pending the owner's contact with upstream**; until that answer the
+    helper ships behind the same enable gate as every optional component, with the notice below. D17 #12 is amended accordingly: Reticulum stays a
+    separate service never incorporated into `111d`; the helper is the one named program of ours that imports it, as a separate process.
+  - **(5) Reticulum wheels and licensing posture — always download, never bundle; the user installs.** `rns` / `lxmf` (and every other third-party
+    program a component needs) are downloaded hash-locked from their public index at install or enable time and never ride in a 111 release payload.
+    Across the whole licensing story the **user is the one who installs third-party software**: before any such download or enable, 111 shows a short
+    notice naming the program, its licence and where to read it, and the user acknowledges it (recorded); 111 and its author are not the distributor.
+    Owner: "always download, never bundle. also, in the whole licensing, try to make the user responsible and keep me as the author safe … make
+    little notice to read their licence etc of that app." Applies to the Layer 1 rns venv at install as well (one notice line; a Layer 1 doc/UX item).
+  - **(6) Delta Chat — sandbox spike first; drop from R-B if it fails.** A netns spike (`deltachat-rpc-server` + Madmail) precedes any build task;
+    if it fails, Delta Chat leaves the first release and returns with the phone bench. Bridge-first in R-B = Meshtastic + LXMF (+ Delta Chat only on a
+    passed spike).
+  - **(7) Everything the triage marks ✅** (marker alphabet and marker-first parts, tick retries with capped back-off, post-air NAK honesty, live
+    consent with pause, `relayed_seq`, Foreign shaping quota and user-first queueing, preformatted proposal bodies, Cc+Cf stripping, 0600 rnsd
+    config, child ordering, batched foreign ingest, the gate script homes, `interfaces.toml` as the single source, `ForeignMessageState`, the pin
+    list, two stale citations) goes into draft v0.2, then one fable re-check, then the lock entry.
+  - **Owner's framing for the round:** "finalize this round without over engineering but wired to previous layers."
+- **Rejected:** MeshChatX as the carrier (sunset, closure weight, a second interpreter) · bundling Reticulum wheels or any third-party program in a 111
+  payload · a direct bearer restart route · attestation gossip in R-B · USB-only component payloads (no stock path) · shipping Delta Chat on doc-only
+  evidence.
+- **Why:** the owner wants a thin layer of our own wired to the built layers, users responsible for the third-party software they choose to install,
+  and the author kept safe; the panel's blockers were all seams, not design, and these answers close every one.
+
 ## Pending
 
 - Move deep architecture content out of `os/README.md` into per-layer specs (blocked on layer homes existing).
