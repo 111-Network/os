@@ -552,8 +552,13 @@ source_offer = "THIRD-PARTY-NOTICES.md" # names the pinned tag; CI builds the bu
   is redacted from logs. Each cookie is read by exact name and every copy is tried (D16 f).
 - **Guards on every panel request, every method:** exact Host match against the dashboard's accepted host list
   (`localhost` excluded — the client prefills its connect dialog from it); refuse `Sec-Fetch-Site: cross-site` for any
-  method and mode; when `Sec-Fetch-*` is absent, `Origin`/`Referer` authority (host **and** port) must equal the
-  request authority for non-GET, WebSocket upgrades and SSE opens; `OPTIONS` is refused (a panel's JS is same-origin
+  method and mode, and on API paths anything but `same-origin`; when `Sec-Fetch-*` is absent (browsers send none to a
+  non-trustworthy origin such as `http://<LAN IP>` or `http://111.local`), `Origin` (else `Referer`) authority (host
+  **and** port) must equal the request authority for non-GET, WebSocket upgrades and SSE opens, and on API paths for
+  every method whenever either header is present. Residual, accepted at lock (D24): an API request carrying neither
+  header is accepted, because over plain HTTP on a LAN IP a same-site `no-cors` GET sent with `referrerPolicy:
+  no-referrer` is byte-identical to the panel's own GET (panels answer `Referrer-Policy: no-referrer`); only a
+  trustworthy panel origin or a per-origin proof closes it. `OPTIONS` is refused (a panel's JS is same-origin
   with it; there is no legitimate preflight); **every `Access-Control-*` response header is stripped** so no other
   origin can read a panel response; `SameSite=Strict` withholds the cookie from cross-site fetches on browsers without
   `Sec-Fetch-*`. Header-read and idle timeouts on every listener.
