@@ -42,3 +42,9 @@ Next after the run: lead writes `layers/60-transport/options.md` → owner decid
   zero weight when off, users free" rule (lead picks: MeshChatX slim on-demand child; Delta Chat + Madmail first) · F5 bridge-first, R-B ·
   F6 second release · F7 three defaults accepted, `ok_to_mqtt` filter per-edge off · optional components: thin own layer, hand-selected natives
   after a full review. Next: spec `os/60-transport/README.md` (sonnet draft, lead review) → fable panel → `TASKS.md`; build after the L5 lock.
+- **Spec draft v0.1 (2026-10-19):** `os/60-transport/README.md`, 867 lines, sonnet agent `spec-l6` from the lead's 19-section brief (D25 as law).
+  Lead read: consistent with D25; items handed to the panel — wave order vs bridge-first (§1), the `service.restart` bearer exception (§13),
+  `enable_transport = yes` on Cat 3/4 (§11, D17 #5 vs R02), the compiled-in crate vs "zero weight" (§2.1), the MeshChatX auth window (§6 rule 2),
+  the one-sided Meshtastic A10 (§14), frame budgets by arithmetic (§4/§16 G2). **Panel:** three fable judges as Agent-tool subagents (read-only; no
+  builds — the Layer 5 V4 judge holds the box): lenses bridge · carriers · integration → `review/{bridge,carriers,integration}.md` → lead triage.
+

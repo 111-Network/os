@@ -1,8 +1,8 @@
 # Layer 6 — Transport & Bridge: plan folder
 
-**Status** (copied from [`INDEX.md`](../../INDEX.md) row 6, which stays the source of truth): 🧭 deciding — options brief `layers/60-transport/options.md` (2026-10-19) from the 8-agent sweep (6 scouts, critic, gap-fill: MeshChatX run in netns): 8 polled forks with picks (foreign tables in the mesh111 store, Meshtastic via the official crate in-binary, LXMF via headless MeshChatX slim + bundled CPython on old distros, phone apps = Delta Chat + Madmail first, bridge-first sequencing, sealed carriage second release, explicit relay edges, per-target fan-out); owner decides → spec + fable panel; build after the Layer 5 lock. Kickoff D23; no hardware yet
+**Status** (copied from [`INDEX.md`](../../INDEX.md) row 6, which stays the source of truth): ✍️ speccing — spec draft v0.1 `os/60-transport/README.md` (2026-10-19, 19 sections, sonnet-drafted from D25 + the options brief + research 00–07, every `file:line` re-read) under a 3-judge fable panel (bridge semantics and relay safety · carriers, components and licensing · integration, buildability and verification honesty); triage → amendments → lock (D26); build after the Layer 5 lock. Kickoff D23, decisions D25; no hardware yet
 
-**Spec and build:** `os/60-transport/README.md` and `os/60-transport/TASKS.md` do not exist yet; they are written after the options brief is decided.
+**Spec and build:** [`os/60-transport/README.md`](../../../60-transport/README.md) (draft v0.1, under review) · `os/60-transport/TASKS.md` is written after the lock.
 
 **Opener brief:** [`cross-layer/devices.md`](../../cross-layer/devices.md) (device-connection core, D17 decisions, §9 Layer 5 hand-offs). Parked ideas picked up here: P1 Meshtastic bridge, P2 phone apps ([`cross-layer/parked.md`](../../cross-layer/parked.md)).
 
@@ -23,6 +23,7 @@
 | [`research/07-gap-1.md`](research/07-gap-1.md) | Gap 1: MeshChatX actually run as the LXMF carrier; Python floor matrix; hybrid interpreter; slim closure. |
 | [`options.md`](options.md) | Options brief for the owner: 18 settled facts, 8 polled forks with picks, detail picks, plan corrections, critic digest. |
 | [`runs/workflows/`](runs/workflows/) | Workflow scripts, one per run: `research.js` first. |
+| `review/` | Fable panel on draft v0.1: `bridge.md` · `carriers.md` · `integration.md`, then the lead's `triage.md` (written as the panel returns). |
 | [`runs/journals/`](runs/journals/) | Exported run journals (`<label>.<wf_id>.jsonl`): `research.wf_7407f773-81c.jsonl` (6 scouts, critic, gap 1); see its README. |
 
 Workflow scripts are launched by their path under `runs/workflows/`; they hard-code `ROOT = /home/kia/projects/111network/os`.
