@@ -2180,17 +2180,43 @@ fn attestation_kat_round_trip() {
     assert!(parsed.verify_transport_leg(&RejectAll).is_err());
 }
 
+/// Layer 6 amendment A10 (§13.1; `os/60-transport/README.md` §14, D26 #3,
+/// 2026-10-19) over the FROZEN L2 file. `attestation.json` is the Cat-1
+/// harness contract and stays byte-identical (D20); it names a `0x02` record
+/// `err:tid:2` (unassigned then — and still so for a Cat-1 core that has not
+/// taken the amendment, which is why the C harness keeps that token). Since
+/// A10, `0x02` (meshtastic) and `0x03` (reticulum) parse, so the frozen
+/// record reaches the node leg and fails there: its `node_sig` was made over
+/// `transport_id = 0x01`. Still a rejection (fail closed); every other frozen
+/// token is expected verbatim.
+fn a10_expect(frozen: &str) -> &str {
+    match frozen {
+        "err:tid:2" | "err:tid:3" => "err:node-sig:InvalidSignature",
+        other => other,
+    }
+}
+
 #[test]
 fn attestation_negatives() {
     let v = load("attestation.json");
     let negs = v.get("negatives").arr();
     assert!(negs.len() >= 20);
     let mut classes = BTreeSet::new();
+    let mut a10_mapped = 0;
     for e in negs {
         let tok = att_wire_tok(&e.get("wire").hex());
-        assert_eq!(tok, e.get("expect").str(), "{}", e.get("name").str());
+        let frozen = e.get("expect").str();
+        let want = a10_expect(frozen);
+        if want != frozen {
+            a10_mapped += 1;
+        }
+        assert_eq!(tok, want, "{}", e.get("name").str());
         classes.insert(class_of(&tok));
     }
+    assert_eq!(
+        a10_mapped, 1,
+        "A10 mapping applies to exactly the frozen 0x02 step"
+    );
     for want in [
         "err:length",
         "err:version",

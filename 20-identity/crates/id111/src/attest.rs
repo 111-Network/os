@@ -146,17 +146,58 @@ impl fmt::Display for MeshEpoch {
 /// an unknown `transport_id` is rejected (§12 rule 1), so adding a transport
 /// is a soft upgrade — un-upgraded peers refuse attestations naming it.
 /// Append-only: assigned ids are never reused or weakened.
+///
+/// A10 (§13.1) assigned `0x02` and `0x03` for **bridge identities** (Layer 6,
+/// `os/60-transport/README.md` §14; D26 #3, 2026-10-19). This crate carries
+/// the bytes and the binding rules below; it grows no verifier for them —
+/// the [`TransportVerifier`] plug lives in `node111` (the trait is the seam).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum TransportId {
     /// `0x01` — a nostr secp256k1 public key (the npub's raw 32B x-only key).
     NostrSecp256k1,
+    /// `0x02` — a Meshtastic board (A10; Layer 6 §14). `transport_key` = the
+    /// board's X25519 public key (32 B; the node number is learned from
+    /// NodeInfo, never carried). A 2.7.x board cannot sign (X25519 only), so
+    /// `transport_sig` is **64 zero bytes** and the record is **one-sided**:
+    /// `node_sig` only. A one-sided record never yields `attested-111` —
+    /// anyone can write a record naming a victim's board key. A 2.8
+    /// XEdDSA-signed broadcast over `"111/attest-transport/v1" ‖ node_pubkey`
+    /// may fill the field later; no verifier for it exists in v1, so a
+    /// non-zero `transport_sig` under `0x02` is rejected by the plug.
+    Meshtastic,
+    /// `0x03` — a Reticulum identity (A10; Layer 6 §14). The 64 B Reticulum
+    /// public key (`X25519 ‖ Ed25519`) does not fit the 32 B field, so
+    /// `transport_key` = SHA-256 of the whole 64 B key
+    /// ([`reticulum_transport_key`]; the hash covers both halves).
+    /// `transport_sig` = Ed25519 by the identity's signing key (the second
+    /// 32 B) over the same input `"111/attest-transport/v1" ‖ node_pubkey`:
+    /// **both signatures**. The 64 B key is carried (the helper's
+    /// `ready.pubkey`), never derived.
+    Reticulum,
 }
+
+/// §10 + A10 (§13.1; Layer 6 §14) — the `transport_key` of a Reticulum
+/// bridge identity (`transport_id` `0x03`): SHA-256 of the full 64 B public
+/// key `X25519(32) ‖ Ed25519(32)` as carried from the helper. A pure binding
+/// helper — not a verifier, and no Reticulum arithmetic (no address or
+/// destination-hash derivation).
+pub fn reticulum_transport_key(pubkey64: &[u8; 64]) -> [u8; 32] {
+    use sha2::{Digest, Sha256};
+    Sha256::digest(pubkey64).into()
+}
+
+/// A10 (Layer 6 §14) — the `transport_sig` a 2.7.x Meshtastic board leaves
+/// in a `0x02` record: 64 zero bytes (it cannot sign). Marks the record
+/// one-sided; it is not a signature.
+pub const MESHTASTIC_UNSIGNED: [u8; 64] = [0u8; 64];
 
 impl TransportId {
     /// The registry byte (§10).
     pub fn to_byte(self) -> u8 {
         match self {
             TransportId::NostrSecp256k1 => 0x01,
+            TransportId::Meshtastic => 0x02,
+            TransportId::Reticulum => 0x03,
         }
     }
 
@@ -164,6 +205,8 @@ impl TransportId {
     pub fn from_byte(b: u8) -> Option<Self> {
         match b {
             0x01 => Some(TransportId::NostrSecp256k1),
+            0x02 => Some(TransportId::Meshtastic),
+            0x03 => Some(TransportId::Reticulum),
             _ => None,
         }
     }
@@ -173,6 +216,8 @@ impl fmt::Display for TransportId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             TransportId::NostrSecp256k1 => write!(f, "nostr-secp256k1 (0x01)"),
+            TransportId::Meshtastic => write!(f, "meshtastic (0x02)"),
+            TransportId::Reticulum => write!(f, "reticulum (0x03)"),
         }
     }
 }
@@ -190,8 +235,9 @@ pub enum AttestError {
     InvalidLength { expected: usize, got: usize },
     /// §10 — unknown `version`; fail closed (no silent downgrade).
     UnknownVersion(u8),
-    /// §10 — unknown `transport_id`; the L2-owned registry assigns only
-    /// `0x01` in v1, and unknown registry entries fail closed (§12 rule 1).
+    /// §10 — unknown `transport_id`; the L2-owned registry assigns `0x01`
+    /// (and, since A10, `0x02` / `0x03`); unknown entries fail closed (§12
+    /// rule 1).
     UnknownTransportId(u8),
     /// §3 — `node_sig` failed the strict Ed25519 predicate.
     InvalidNodeSignature(VerifyError),
@@ -872,7 +918,8 @@ mod tests {
 
     #[test]
     fn unknown_version_fails_closed() {
-        for bad in [0x00u8, 0x02, 0xff] {
+        // 0x02 / 0x03 are assigned since A10 (Layer 6 §14); 0x04.. stay closed.
+        for bad in [0x00u8, 0x04, 0x05, 0x80, 0xff] {
             let mut wire = valid_wire();
             wire[0] = bad;
             assert_eq!(
@@ -884,7 +931,8 @@ mod tests {
 
     #[test]
     fn unknown_transport_id_fails_closed() {
-        for bad in [0x00u8, 0x02, 0xff] {
+        // 0x02 / 0x03 are assigned since A10 (Layer 6 §14); 0x04.. stay closed.
+        for bad in [0x00u8, 0x04, 0x05, 0x80, 0xff] {
             let mut wire = valid_wire();
             wire[33] = bad;
             assert_eq!(
@@ -893,6 +941,47 @@ mod tests {
             );
         }
         assert_eq!(TransportId::from_byte(0x01), Some(TID));
+    }
+
+    #[test]
+    fn a10_registry_values_round_trip() {
+        for (b, t, d) in [
+            (
+                0x01u8,
+                TransportId::NostrSecp256k1,
+                "nostr-secp256k1 (0x01)",
+            ),
+            (0x02, TransportId::Meshtastic, "meshtastic (0x02)"),
+            (0x03, TransportId::Reticulum, "reticulum (0x03)"),
+        ] {
+            assert_eq!(TransportId::from_byte(b), Some(t));
+            assert_eq!(t.to_byte(), b);
+            assert_eq!(t.to_string(), d);
+        }
+        for b in 0x04..=0xffu8 {
+            assert_eq!(TransportId::from_byte(b), None, "0x{b:02x}");
+        }
+        assert_eq!(TransportId::from_byte(0x00), None);
+    }
+
+    #[test]
+    fn reticulum_transport_key_hashes_both_halves() {
+        let mut k = [0u8; 64];
+        for (i, b) in k.iter_mut().enumerate() {
+            *b = i as u8;
+        }
+        let h = reticulum_transport_key(&k);
+        // FIPS 180-4 SHA-256 of 0x00..0x3f.
+        assert_eq!(
+            to_hex(&h),
+            "fdeab9acf3710362bd2658cdc9a29e8f9c757fcf9811603a8c447cd1d9151108"
+        );
+        let mut x = k;
+        x[0] ^= 1; // X25519 half
+        assert_ne!(reticulum_transport_key(&x), h);
+        let mut e = k;
+        e[63] ^= 1; // Ed25519 half
+        assert_ne!(reticulum_transport_key(&e), h);
     }
 
     #[test]

@@ -14,6 +14,8 @@
 //! foreign network only by the user's explicit act · no wall clock in any ordering decision
 //! (`local_seq` and the monotonic tick only) · an adapter's `send` never blocks the core.
 
+pub mod attest;
+
 use futures_util::future::BoxFuture;
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
