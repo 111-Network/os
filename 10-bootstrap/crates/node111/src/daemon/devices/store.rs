@@ -12,7 +12,9 @@
 //! `meshtastic` — **the Meshtastic binding** meshmud's config is rendered from
 //! (the validated uplink plus the board's own node number). At most one
 //! device carries a binding (one meshmud, one downlink); Layer 6 migrates it
-//! into `interfaces.toml` when that file is born.
+//! into `interfaces.toml` when that file is born, and from then on this copy
+//! is a **write-only mirror** of the TOML ([`mirror_meshtastic_binding`],
+//! Layer 6 §11: kept for a Layer 5 rollback, never read by Layer 6).
 //!
 //! Written atomically (`util::fs::atomic_write`, 0600: it carries device
 //! serials and companion IPs). Structural changes (new device, alias, forget,
@@ -260,6 +262,72 @@ impl Store {
             .find_map(|(id, e)| e.meshtastic.clone().map(|b| (id.clone(), b)))
     }
 
+    /// Layer 6 §11 (integration M7): copy the binding that
+    /// `state/interfaces.toml` holds into this store, the **write-only
+    /// mirror** kept for a Layer 5 rollback (Layer 6 never reads the binding
+    /// from here). `want = Some((id, binding))` binds `id` (creating its
+    /// entry when absent, un-forgetting it and marking it a Meshtastic
+    /// board, because `sanitize` drops a binding without either) and clears
+    /// every other binding; `None` clears them all. Returns the divergence
+    /// line (one line naming both values, "interfaces.toml wins") when the
+    /// store held something else; persists only then.
+    pub fn mirror_meshtastic_binding(
+        &mut self,
+        want: Option<(&str, &MeshtasticBinding)>,
+    ) -> Option<String> {
+        let had = self.meshtastic_binding();
+        let same = match (&had, &want) {
+            (None, None) => true,
+            (Some((hid, hb)), Some((wid, wb))) => hid == wid && hb == *wb,
+            _ => false,
+        };
+        // a binding hidden on a forgotten entry is cleared too
+        let stray = self
+            .devices
+            .values()
+            .any(|e| e.forgotten && e.meshtastic.is_some());
+        if same && !stray {
+            return None;
+        }
+        for (id, e) in self.devices.iter_mut() {
+            if want.is_none_or(|(wid, _)| wid != id.as_str()) {
+                e.meshtastic = None;
+            }
+        }
+        if let Some((id, b)) = want {
+            let entry = self.devices.entry(id.to_string()).or_insert_with(|| {
+                let now = time::OffsetDateTime::now_utc()
+                    .format(&time::format_description::well_known::Rfc3339)
+                    .unwrap_or_else(|_| "unknown".into());
+                Entry::new(now.clone(), now)
+            });
+            entry.forgotten = false;
+            if entry.firmware.as_ref().map(|f| f.family) != Some(FirmwareFamily::Meshtastic) {
+                entry.firmware = Some(DeviceFirmware {
+                    family: FirmwareFamily::Meshtastic,
+                    version: None,
+                    source: super::FirmwareSource::Unknown,
+                });
+            }
+            entry.meshtastic = Some(b.clone());
+        }
+        self.mark_dirty();
+        self.flush(true);
+        if same {
+            return None;
+        }
+        let show = |b: &Option<(String, MeshtasticBinding)>| match b {
+            Some((id, b)) => format!("{id} {} {}", b.uplink.display(), b.node_id),
+            None => "none".into(),
+        };
+        Some(format!(
+            "the Meshtastic binding in devices.json ({}) differs from interfaces.toml ({}); \
+             interfaces.toml wins and devices.json now mirrors it",
+            show(&had),
+            show(&want.map(|(id, b)| (id.to_string(), b.clone())))
+        ))
+    }
+
     /// Drop the oldest absent entries beyond [`MAX_ENTRIES`] (a bound device
     /// is never dropped: its binding is configuration).
     pub fn gc(&mut self, present: &dyn Fn(&str) -> bool) {
@@ -315,6 +383,25 @@ impl Store {
             }
         }
     }
+}
+
+/// [`Store::mirror_meshtastic_binding`] on the file at `path` (Layer 6 §11:
+/// called after every save of `state/interfaces.toml` while no in-memory
+/// registry store is wired; the file is loaded, re-validated, mirrored and
+/// written only when it diverged). Returns the divergence line.
+pub fn mirror_meshtastic_binding(
+    path: &Path,
+    want: Option<(&str, &MeshtasticBinding)>,
+) -> Option<String> {
+    let mut store = Store::load(path);
+    let line = store.mirror_meshtastic_binding(want);
+    if line.is_some() && store.dirty {
+        eprintln!(
+            "111 daemon: devices: the mirrored binding could not be written to {}",
+            path.display()
+        );
+    }
+    line
 }
 
 #[cfg(test)]
@@ -468,6 +555,55 @@ mod tests {
         let mut s = s;
         s.devices.get_mut("dddd0000dddd0000").unwrap().forgotten = true;
         assert!(s.meshtastic_binding().is_none());
+    }
+
+    #[test]
+    fn mirror_is_write_only_and_reports_divergence() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join(FILE);
+        let b = MeshtasticBinding::new(
+            Uplink::serial("/dev/serial/by-id/usb-Heltec-if00").unwrap(),
+            0x0a0a0a0a,
+            None,
+            None,
+        )
+        .unwrap();
+        // absent file, nothing wanted: nothing written
+        assert_eq!(mirror_meshtastic_binding(&p, None), None);
+        assert!(!p.exists());
+        // a binding for a device the store has never seen: entry created,
+        // marked Meshtastic so a Layer 5 load keeps it
+        let line = mirror_meshtastic_binding(&p, Some(("abcd1234abcd1234", &b))).unwrap();
+        assert!(line.contains("(none)"), "{line}");
+        assert!(line.contains("abcd1234abcd1234 /dev/serial/by-id/usb-Heltec-if00 !0a0a0a0a"));
+        let s = Store::load(&p);
+        assert_eq!(
+            s.meshtastic_binding(),
+            Some(("abcd1234abcd1234".to_string(), b.clone()))
+        );
+        // the same value again: no divergence, no rewrite
+        let before = std::fs::metadata(&p).unwrap().modified().unwrap();
+        assert_eq!(
+            mirror_meshtastic_binding(&p, Some(("abcd1234abcd1234", &b))),
+            None
+        );
+        assert_eq!(std::fs::metadata(&p).unwrap().modified().unwrap(), before);
+        // a Layer 5 write moved the binding: the TOML wins, one line names both
+        let mut s = Store::load(&p);
+        let other =
+            MeshtasticBinding::new(Uplink::tcp("10.0.0.6:4403").unwrap(), 6, None, None).unwrap();
+        s.devices.get_mut("abcd1234abcd1234").unwrap().meshtastic = Some(other);
+        s.mark_dirty();
+        s.flush(true);
+        let line = mirror_meshtastic_binding(&p, Some(("abcd1234abcd1234", &b))).unwrap();
+        assert!(line.contains("10.0.0.6:4403"), "{line}");
+        assert!(line.contains("!0a0a0a0a"), "{line}");
+        assert_eq!(Store::load(&p).meshtastic_binding().unwrap().1, b);
+        // cleared in the TOML: cleared here
+        assert!(mirror_meshtastic_binding(&p, None).is_some());
+        assert!(Store::load(&p).meshtastic_binding().is_none());
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(p.metadata().unwrap().permissions().mode() & 0o777, 0o600);
     }
 
     #[test]

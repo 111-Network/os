@@ -1,0 +1,36 @@
+
+ Shared Instance[rns/111]
+    Status    : Up
+    Serving   : 1 program
+    Rate      : 1.00 Gbps
+    Traffic   : ↑12.40 KB  0 bps
+                ↓11.98 KB  0 bps
+
+ AutoInterface[Auto Interface]
+    Status    : Up
+    Mode      : Full
+    Rate      : 10.00 Mbps
+    Peers     : 2 reachable
+    Traffic   : ↑3.21 KB  0 bps
+                ↓2.20 KB  0 bps
+
+ BackboneInterface[111 LAN Backbone/0.0.0.0:4242]
+    Network   : 111-lan
+    Status    : Up
+    Clients   : 1
+    Mode      : Full
+    Rate      : 10.00 Mbps
+    Traffic   : ↑980 B    0 bps
+                ↓1.50 KB  0 bps
+
+ RNodeInterface[Roof RNode]
+    Status    : Down
+    Mode      : Full
+    Rate      : 5.47 kbps
+    Airtime   : 0.0% (15s), 0.0% (1h)
+    Traffic   : ↑0 B  0 bps
+                ↓0 B  0 bps
+
+ Transport Instance <5a2b1c9e0f3d4e6a7b8c9d0e1f2a3b4c> running
+ Uptime is 3 hours and 2 minutes
+

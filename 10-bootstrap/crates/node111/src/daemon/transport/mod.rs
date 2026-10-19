@@ -1,17 +1,32 @@
-//! Conditional transport (Bundle B): hash-locked rnsd child of the daemon when
-//! python3+venv exist; detection-only stub otherwise. rns identity is independent
-//! of node identity in v1.
+//! Conditional transport (Bundle B; Layer 6 transport spine,
+//! `os/60-transport/README.md` §11): hash-locked rnsd child of the daemon when
+//! python3+venv exist; detection-only stub otherwise. rns identity is
+//! independent of node identity in v1.
+//!
+//! Layer 6 (B4): `state/interfaces.toml` ([`interfaces`]) is the source of
+//! truth; rnsd's config is rendered from it ([`config`], renderer v2, 0600);
+//! changes go through the [`posture::Spine`] (re-render → diff →
+//! `rnstatus --attach|--detach|--reload`, or an rnsd restart with its
+//! dependants in order — never `pkill`); interface facts come from a
+//! tick-driven [`rnstatus`] cache ([`TransportHandle::facts`]); the phone
+//! relay's descriptor and client entry are [`join`]'s.
 
 pub mod config;
+pub mod interfaces;
+pub mod join;
 pub mod netlink;
+pub mod posture;
+pub mod rnstatus;
 pub mod venv;
 
 use crate::daemon::health::TransportHealth;
 use crate::daemon::supervise::{self, ChildControl, ChildHandle, ChildSpec};
 use crate::daemon::DaemonLayout;
 use crate::util::run::Runner;
+use posture::Spine;
+use rnstatus::{FactsCache, FactsSnapshot, Rnstatus, TickConfig};
 use std::path::PathBuf;
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, Mutex, RwLock};
 
 /// Transport bring-up inputs (constructed by the daemon at start).
 pub struct TransportArgs<'a> {
@@ -27,6 +42,9 @@ pub struct TransportHandle {
     child: RwLock<Option<ChildHandle>>,
     peers: Arc<RwLock<PeerState>>,
     stub: bool,
+    spine: Arc<Spine>,
+    facts: Arc<FactsCache>,
+    tasks: Mutex<Vec<tokio::task::JoinHandle<()>>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -51,8 +69,36 @@ impl TransportHandle {
             .map(ChildHandle::control)
     }
 
+    /// The transport spine (`interfaces.toml`, posture, applies, join).
+    pub fn spine(&self) -> Arc<Spine> {
+        Arc::clone(&self.spine)
+    }
+
+    /// `transport.read` (§11): the cached rnstatus facts. Never runs
+    /// rnstatus; a stale cache wakes the tick.
+    pub fn facts(&self) -> FactsSnapshot {
+        self.facts.snapshot()
+    }
+
+    /// The facts cache (the component runner may read `serving()` from it).
+    pub fn facts_cache(&self) -> Arc<FactsCache> {
+        Arc::clone(&self.facts)
+    }
+
+    fn abort_tasks(&self) {
+        for t in self
+            .tasks
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .drain(..)
+        {
+            t.abort();
+        }
+    }
+
     /// Stop the rnsd child without waiting.
     pub fn stop(&self) {
+        self.abort_tasks();
         if let Some(c) = self.child.write().unwrap().take() {
             c.stop();
         }
@@ -61,6 +107,7 @@ impl TransportHandle {
     /// Daemon shutdown: stop the rnsd child and join it (SIGTERM, `grace`,
     /// SIGKILL — [`ChildControl::stop_and_wait`]).
     pub async fn stop_and_wait(&self, grace: std::time::Duration) {
+        self.abort_tasks();
         let child = self.child.write().unwrap().take();
         if let Some(c) = child {
             c.stop_and_wait(grace).await;
@@ -73,28 +120,33 @@ impl TransportHandle {
         }
         let child = self.child.read().unwrap();
         match child.as_ref().map(|c| c.state()) {
-            Some(supervise::ChildState::Running) => match *self.peers.read().unwrap() {
-                PeerState::Joined => TransportHealth::Alive,
-                _ => TransportHealth::Alive, // rnsd up; peers refine the display state
-            },
+            Some(supervise::ChildState::Running) => TransportHealth::Alive, // peers refine the display state
             Some(supervise::ChildState::Backoff) => TransportHealth::Alive,
             Some(supervise::ChildState::Degraded) => TransportHealth::Degraded,
             Some(supervise::ChildState::Stopped) | None => TransportHealth::Down,
         }
     }
 
-    /// Dashboard display state (pinned enum values).
+    /// Dashboard display state (pinned enum values): "joined" from a fresh
+    /// rnstatus reading, else the rnsd.log heuristic (kept until facts exist).
     pub fn display_state(&self) -> crate::daemon::dashboard::TransportState {
+        use crate::daemon::dashboard::TransportState;
         if self.stub {
-            return crate::daemon::dashboard::TransportState::NoTransport;
+            return TransportState::NoTransport;
         }
         match self.health() {
-            TransportHealth::Degraded => crate::daemon::dashboard::TransportState::Degraded,
-            TransportHealth::Down => crate::daemon::dashboard::TransportState::Degraded,
-            _ => match *self.peers.read().unwrap() {
-                PeerState::Joined => crate::daemon::dashboard::TransportState::Joined,
-                _ => crate::daemon::dashboard::TransportState::Isolated,
-            },
+            TransportHealth::Degraded | TransportHealth::Down => TransportState::Degraded,
+            _ => {
+                let joined = self
+                    .facts
+                    .joined()
+                    .unwrap_or(*self.peers.read().unwrap() == PeerState::Joined);
+                if joined {
+                    TransportState::Joined
+                } else {
+                    TransportState::Isolated
+                }
+            }
         }
     }
 }
@@ -113,18 +165,41 @@ fn rnsd_spec(layout: &DaemonLayout, venv: &std::path::Path) -> ChildSpec {
     }
 }
 
-/// Bring transport up per spec: python3 probe → venv ensure (integrity check →
-/// rebuild from cache when torn) → config render → supervised rnsd child →
-/// netlink-triggered config regen → peer watch. Degrades, never panics:
-/// no python3 ⇒ `no transport` stub (receipt records the degrade branch).
+/// Bring transport up per spec: `interfaces.toml` (load, or migrate on the
+/// first Layer 6 start) → python3 probe → venv ensure (integrity check →
+/// rebuild from cache when torn) → config render v2 → supervised rnsd child →
+/// netlink-triggered re-render/diff/`--reload` → the rnstatus facts tick.
+/// Degrades, never panics: no python3 ⇒ `no transport` stub (the spine still
+/// holds the file and the Meshtastic binding).
 pub async fn start(args: TransportArgs<'_>) -> TransportHandle {
+    let layout = args.layout.clone();
+    let state_dir = layout.state_dir();
+    let startup = interfaces::startup(
+        &state_dir,
+        &state_dir.join(crate::daemon::devices::store::FILE),
+        &config::config_path(&layout),
+    );
+    let rn = Arc::new(Rnstatus::production(&layout.root));
+    let spine = Spine::new(
+        layout.clone(),
+        startup,
+        Arc::clone(&rn),
+        config::lan_sharing(&layout),
+        config::category_of(&layout),
+    );
+    let facts = FactsCache::new(TickConfig::default());
+    let stub = |spine: Arc<Spine>, facts: Arc<FactsCache>| TransportHandle {
+        child: RwLock::new(None),
+        peers: Arc::new(RwLock::new(PeerState::Isolated)),
+        stub: true,
+        spine,
+        facts,
+        tasks: Mutex::new(Vec::new()),
+    };
+
     if !venv::python3_present(args.runner) {
         eprintln!("111 transport: python3 absent — detection-only stub (no transport)");
-        return TransportHandle {
-            child: RwLock::new(None),
-            peers: Arc::new(RwLock::new(PeerState::Isolated)),
-            stub: true,
-        };
+        return stub(spine, facts);
     }
 
     let venv = match venv::ensure(
@@ -137,68 +212,87 @@ pub async fn start(args: TransportArgs<'_>) -> TransportHandle {
         Ok(v) => v,
         Err(e) => {
             eprintln!("111 transport: venv unavailable: {e:#} — no transport");
-            return TransportHandle {
-                child: RwLock::new(None),
-                peers: Arc::new(RwLock::new(PeerState::Isolated)),
-                stub: true,
-            };
+            return stub(spine, facts);
         }
     };
 
-    // Config: regenerate unless a newer schema-version owns the file (Layer 6 seam).
-    match config::existing_schema_version(&args.layout) {
-        Some(v) if v > config::SCHEMA_VERSION => {
-            eprintln!("111 transport: rns config schema-version {v} > v1 — Layer 6 owns it, not regenerating");
+    // Config: render v2 unless a newer schema-version owns the file.
+    let prior = config::existing_schema_version(&layout);
+    match spine.write_config() {
+        Ok(_) => {
+            if matches!(prior, Some(v) if v < config::SCHEMA_VERSION) {
+                eprintln!(
+                    "111 transport: rns config schema-version {} → {}: rendered from \
+                     state/interfaces.toml (share_instance = yes, rpc_key); rnsd starts once with \
+                     the new posture after this upgrade",
+                    prior.unwrap_or(0),
+                    config::SCHEMA_VERSION
+                );
+            }
         }
-        _ => {
-            let _ = config::write_if_changed(&args.layout);
-        }
+        Err(posture::ApplyError::NewerConfig) => eprintln!(
+            "111 transport: rns config schema-version {} > {} — a newer release owns it, not \
+             regenerating",
+            prior.unwrap_or(0),
+            config::SCHEMA_VERSION
+        ),
+        Err(e) => eprintln!("111 transport: {e}"),
     }
 
     let child = supervise::spawn_child(rnsd_spec(&args.layout, &venv));
+    let control = child.control();
+    spine.set_rnsd(Arc::new(control.clone()));
     let handle = TransportHandle {
         child: RwLock::new(Some(child)),
         peers: Arc::new(RwLock::new(PeerState::Unknown)),
         stub: false,
+        spine: Arc::clone(&spine),
+        facts: Arc::clone(&facts),
+        tasks: Mutex::new(Vec::new()),
     };
+    let mut tasks = Vec::new();
 
-    // netlink → debounced config regen + child restart (skip when Layer 6 owns the file).
+    // netlink → debounced re-render → diff → --reload the AutoInterface
+    // (restart only for posture), never pkill (§11).
     if let Ok(events) = netlink::NetlinkEvents::new() {
-        let layout = args.layout.clone();
-        tokio::spawn(async move {
+        let spine = Arc::clone(&spine);
+        tasks.push(tokio::spawn(async move {
             netlink::debounced(events, std::time::Duration::from_secs(2), || {
-                match config::existing_schema_version(&layout) {
-                    Some(v) if v > config::SCHEMA_VERSION => {}
-                    _ => {
-                        if let Ok(true) = config::write_if_changed(&layout) {
-                            eprintln!("111 transport: interfaces changed — rnsd config regenerated; restart picks it up");
-                            // rnsd reads config at process start: terminate and let
-                            // the supervisor respawn with the fresh config.
-                            let rnsd = layout.root.join("venvs/rns/bin/rnsd");
-                            let _ = std::process::Command::new("pkill")
-                                .arg("-f")
-                                .arg(rnsd.to_string_lossy().into_owned())
-                                .status();
-                        }
+                let spine = Arc::clone(&spine);
+                tokio::spawn(async move {
+                    match spine.on_link_change().await {
+                        Ok(a) if a.restarted || !a.diff.is_empty() => eprintln!(
+                            "111 transport: interfaces changed — {}",
+                            a.actions.join(", ")
+                        ),
+                        Ok(_) | Err(posture::ApplyError::NewerConfig) => {}
+                        Err(e) => eprintln!("111 transport: link change: {e}"),
                     }
-                }
+                });
             })
             .await;
-        });
+        }));
     }
 
-    // peer watch: "joined" = a peer discovery line in the last 60s of rnsd.log.
+    // the facts tick (rnstatus into the cache); the rnsd.log heuristic is
+    // the display fallback until a fresh reading exists
     {
         let peers = Arc::clone(&handle.peers);
-        let log = args.layout.root.join("rns/rnsd.log");
-        tokio::spawn(async move {
-            let mut tick = tokio::time::interval(std::time::Duration::from_secs(30));
-            loop {
-                tick.tick().await;
-                *peers.write().unwrap() = peer_state_from_log(&log, 60);
-            }
-        });
+        let log = layout.root.join("rns/rnsd.log");
+        let running: Arc<dyn Fn() -> bool + Send + Sync> =
+            Arc::new(move || control.state() == supervise::ChildState::Running);
+        tasks.push(tokio::spawn(rnstatus::tick(
+            Arc::clone(&facts),
+            rn,
+            running,
+            move |cache: &FactsCache| {
+                if cache.joined().is_none() {
+                    *peers.write().unwrap() = peer_state_from_log(&log, 60);
+                }
+            },
+        )));
     }
+    *handle.tasks.lock().unwrap_or_else(|p| p.into_inner()) = tasks;
 
     handle
 }
