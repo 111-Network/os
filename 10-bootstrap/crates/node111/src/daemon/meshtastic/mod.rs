@@ -79,7 +79,8 @@ pub struct MeshtasticConfig {
     pub downlink: SocketAddr,
     /// `current/bin/meshmud`.
     pub meshmud_bin: PathBuf,
-    /// `venvs/presence/bin/python` (built by the installer from the lock).
+    /// `venvs/presence/bin/python` (built from the release's lock:
+    /// `transport::venv::presence`).
     pub reader_python: PathBuf,
     /// `current/share/meshtastic-presence/meshtastic_presence.py`.
     pub reader_script: PathBuf,
@@ -686,9 +687,21 @@ impl Meshtastic {
     }
 
     fn spawn_reader(&self) -> Option<ChildHandle> {
+        // why the venv is missing or stale, as its build recorded it
+        // (`venvs/presence.status.json`, `transport::venv::presence`)
+        let venv_reason =
+            crate::daemon::transport::venv::presence::unavailable_reason(&self.cfg.root);
         if !self.cfg.reader_installed() {
-            eprintln!("111 meshtastic: presence reader not installed — Nearby stays empty");
+            match venv_reason {
+                Some(why) => eprintln!("111 meshtastic: {why} Nearby stays empty."),
+                None => {
+                    eprintln!("111 meshtastic: presence reader not installed — Nearby stays empty")
+                }
+            }
             return None;
+        }
+        if let Some(why) = venv_reason {
+            eprintln!("111 meshtastic: {why}");
         }
         if let Err(e) = meshmud::ensure_private_dir(&self.cfg.presence_dir) {
             eprintln!(

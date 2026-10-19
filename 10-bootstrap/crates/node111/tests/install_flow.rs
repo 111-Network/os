@@ -2,17 +2,24 @@
 //! HTTP server + scripted MockRunner + temp fs roots — happy path + idempotent
 //! re-run, downgrade refusal, degraded container path, clock-skew refusal, and
 //! the stage step's Layer 5 cross-check (fresh extraction and the "already
-//! staged" content probe; os/50-messaging/README.md §19 L1).
+//! staged" content probe; os/50-messaging/README.md §19 L1). Then the presence
+//! venv (os/50-messaging/README.md §14) with a fake python3/pip
+//! (`fake_python`): a fresh install builds it from the pinned lock before step 7
+//! hands `venvs/` to node111, a re-run leaves it alone, and a failed build
+//! never fails the install.
 
 mod common;
+mod fake_python;
 
 use node111::calver::Calver;
+use node111::daemon::transport::venv::presence::{self, Outcome, PresenceVenvError};
 use node111::daemon::DaemonLayout;
 use node111::install::context::InstallContext;
 use node111::install::receipt::Receipt;
 use node111::install::{run_with, supervise};
+use node111::manifest::layer5;
 use node111::testkit::{MapEnv, MockRunner};
-use node111::util::run::Output;
+use node111::util::run::{Output, Runner};
 use std::path::Path;
 use std::time::Duration;
 
@@ -26,10 +33,10 @@ fn out(status: i32, stdout: &str) -> Output {
 
 const RELEASE: &str = "2026.10.12";
 
-/// Build a served dir: signed manifest + payload + rns-lock + health + 204.
-fn served_dir(release: &str) -> (tempfile::TempDir, Vec<u8>) {
+/// Build a served dir: signed manifest (`extra` sections appended after the
+/// keychain) + `payload` + rns-lock + health + 204.
+fn served_dir_with(release: &str, payload: Vec<u8>, extra: &str) -> (tempfile::TempDir, Vec<u8>) {
     let dir = tempfile::tempdir().unwrap();
-    let payload = common::build_payload();
     let rns_lock = b"rns==1.5.6 --hash=sha256:abcdef\n".to_vec();
     std::fs::write(dir.path().join("rns-lock.txt"), &rns_lock).unwrap();
     std::fs::write(
@@ -72,7 +79,7 @@ pubkey = "RWRoot00000000000000000000000000000000000000000="
 generation = 1
 pubkey = "RWGen100000000000000000000000000000000000000000="
 signature_by_previous = "untrusted comment: fixture\\nplaceholder"
-"#,
+{extra}"#,
         a64 = "a".repeat(64),
         psha = node111::util::hash::sha256_bytes(&payload),
         plen = payload.len(),
@@ -130,7 +137,12 @@ struct Flow {
 }
 
 fn setup(date_header: Option<String>) -> Flow {
-    let (served, _) = served_dir(RELEASE);
+    setup_with(date_header, common::build_payload(), "")
+}
+
+/// [`setup`] serving `payload` with `extra` manifest sections.
+fn setup_with(date_header: Option<String>, payload: Vec<u8>, extra: &str) -> Flow {
+    let (served, _) = served_dir_with(RELEASE, payload, extra);
     let port = common::serve_dir(served.path().to_path_buf(), date_header);
     sign_served(served.path(), port);
     let node = tempfile::tempdir().unwrap();
@@ -213,7 +225,7 @@ fn script(
 
 fn ctx_for<'a>(
     flow: &'a Flow,
-    runner: &'a MockRunner,
+    runner: &'a dyn Runner,
     env: &'a MapEnv,
     allow_degraded: bool,
 ) -> InstallContext<'a> {
@@ -497,7 +509,7 @@ pubkey = "RWRoot00000000000000000000000000000000000000000="
 fn stage_ctx<'a>(
     layout: &DaemonLayout,
     fs_root: &Path,
-    runner: &'a MockRunner,
+    runner: &'a dyn Runner,
     env: &'a MapEnv,
 ) -> InstallContext<'a> {
     InstallContext {
@@ -591,4 +603,204 @@ fn stage_probe_rejects_a_release_dir_with_an_unpinned_layer5_asset() {
     manifest
         .verify_layer5_tree(&release, "x86_64-unknown-linux-musl")
         .unwrap();
+}
+
+// --- the presence venv (Layer 5 §14) ----------------------------------------
+
+const PRESENCE_LOCK: &[u8] = b"meshtastic==2.7.11 --hash=sha256:abcd\n";
+
+/// `[presence-lock]` pinning `bytes`.
+fn presence_pin(bytes: &[u8]) -> String {
+    format!(
+        "\n[presence-lock]\nurl = \"https://example.invalid/meshtastic-presence-lock.txt\"\nsha256 = \"{}\"\nsize = {}\n",
+        node111::util::hash::sha256_bytes(bytes),
+        bytes.len()
+    )
+}
+
+/// The install script without its `python3` steps (the fake python runs them).
+fn without_python(script: Vec<(String, Output)>) -> Vec<(String, Output)> {
+    script
+        .into_iter()
+        .filter(|(cmd, _)| !cmd.starts_with("python3 "))
+        .collect()
+}
+
+/// A fresh install builds `venvs/presence` from the lock the signed manifest
+/// pins (the build venv's own pip downloads the closure into the cache, then
+/// installs from it only), before step 7 hands `venvs/` to node111; a re-run of
+/// the same release leaves the venv alone.
+#[test]
+fn install_builds_the_presence_venv_from_the_pinned_lock() {
+    let payload = common::build_payload_with(&[(layer5::PRESENCE_LOCK, PRESENCE_LOCK)]);
+    let flow = setup_with(None, payload, &presence_pin(PRESENCE_LOCK));
+    let env = base_env("debian");
+    let py = fake_python::FakePython::new();
+    let mock = MockRunner::new(without_python(script(&flow.layout, false, true)));
+    let runner = fake_python::Routed::new(&mock, &py);
+    let ctx = ctx_for(&flow, &runner, &env, false);
+    let fetcher = node111::util::http::Fetcher::new(Duration::from_secs(10), 64 << 20).unwrap();
+    let receipt = run_with(&ctx, &fetcher)
+        .unwrap_or_else(|e| panic!("install failed: {e:#}\ncalls: {:?}", runner.order()));
+    assert_eq!(receipt.version, RELEASE);
+    mock.assert_exhausted();
+
+    let root = &flow.layout.root;
+    let lock = root
+        .join("releases")
+        .join(RELEASE)
+        .join(layer5::PRESENCE_LOCK);
+    let cache = presence::cache_dir(root);
+    let calls = py.calls();
+    let find = |want: &dyn Fn(&str) -> bool| {
+        calls
+            .iter()
+            .position(|c| want(c))
+            .unwrap_or_else(|| panic!("call missing: {calls:?}"))
+    };
+    let builds = presence::builds_dir(root);
+    let venv = find(&|c: &str| c.starts_with(&format!("python3 -m venv {}/", builds.display())));
+    let download = find(&|c: &str| {
+        c.starts_with(&builds.to_string_lossy().into_owned())
+            && c.ends_with(&format!(
+                "/bin/pip download --require-hashes -r {} -d {}",
+                lock.display(),
+                cache.display()
+            ))
+    });
+    let install = find(&|c: &str| {
+        c.ends_with(&format!(
+            "/bin/pip install --require-hashes -r {} --no-index --find-links {}",
+            lock.display(),
+            cache.display()
+        ))
+    });
+    assert!(venv < download && download < install, "{calls:?}");
+    // built while the installer still holds the tree; step 7 then chowns it
+    let built = runner.position("python3 -m venv").unwrap();
+    let chown = runner
+        .position(&format!(
+            "chown -R node111:node111 {}/venvs",
+            root.display()
+        ))
+        .unwrap();
+    assert!(built < chown, "{:?}", runner.order());
+
+    let target = std::fs::read_link(presence::venv_dir(root)).unwrap();
+    assert!(target.starts_with("presence.d"), "{target:?}");
+    assert!(presence::python(root).is_file());
+    assert_eq!(
+        std::fs::read(presence::venv_dir(root).join("installed-lock.txt")).unwrap(),
+        PRESENCE_LOCK
+    );
+    assert!(presence::integrity_ok(root, &lock));
+    let status = presence::status(root).unwrap();
+    assert!(status.ok, "{status:?}");
+    assert_eq!(
+        status.lock_sha256,
+        node111::util::hash::sha256_bytes(PRESENCE_LOCK)
+    );
+    // the reader's interpreter, as the daemon will look for it
+    assert_eq!(
+        node111::daemon::meshtastic::MeshtasticConfig::production(&flow.layout, false)
+            .reader_python,
+        presence::python(root)
+    );
+
+    // --- re-run of the same release: the venv is intact, nothing rebuilds ---
+    let before = py.calls().len();
+    let mock2 = MockRunner::new(without_python(script(&flow.layout, true, true)));
+    let runner2 = fake_python::Routed::new(&mock2, &py);
+    let ctx2 = ctx_for(&flow, &runner2, &env, false);
+    run_with(&ctx2, &fetcher)
+        .unwrap_or_else(|e| panic!("re-run failed: {e:#}\ncalls: {:?}", runner2.order()));
+    mock2.assert_exhausted();
+    let rerun = py.calls()[before..].to_vec();
+    assert!(
+        !rerun
+            .iter()
+            .any(|c| c.contains("-m venv") || c.contains("/bin/pip")),
+        "the re-run touched the presence venv: {rerun:?}"
+    );
+    assert_eq!(
+        std::fs::read_link(presence::venv_dir(root)).unwrap(),
+        target
+    );
+}
+
+/// A presence venv that cannot be built never fails the install: the release
+/// is staged and promoted, no venv appears, and the status says why (a hash
+/// mismatch after a failed download; then no python3). Once fixed, the next
+/// run — the "already staged" path — builds it.
+#[test]
+fn install_survives_a_presence_venv_failure() {
+    let payload = common::build_payload_with(&[(layer5::PRESENCE_LOCK, PRESENCE_LOCK)]);
+    let (_served, manifest) = stage_fixture(&payload, &presence_pin(PRESENCE_LOCK));
+    let node = tempfile::tempdir().unwrap();
+    let fs_root = tempfile::tempdir().unwrap();
+    let layout = DaemonLayout {
+        root: node.path().join("var/lib/111"),
+        etc: fs_root.path().join("etc/111"),
+    };
+    std::fs::create_dir_all(layout.state_dir()).unwrap();
+    let py = fake_python::FakePython::new();
+    py.fail_download(true);
+    py.fail_install(true);
+    let env = MapEnv::new();
+    let ctx = stage_ctx(&layout, fs_root.path(), &py, &env);
+    let fetcher = node111::util::http::Fetcher::new(Duration::from_secs(10), 64 << 20).unwrap();
+    let root = &layout.root;
+
+    let release = node111::install::stage::run(&ctx, &fetcher, &manifest)
+        .unwrap_or_else(|e| panic!("a presence failure failed the stage step: {e:#}"));
+    assert!(release.join("bin/111").exists());
+    assert!(layout.current_release().join("bin/111").exists());
+    assert!(std::fs::symlink_metadata(presence::venv_dir(root)).is_err());
+    assert_eq!(
+        std::fs::read_dir(presence::builds_dir(root))
+            .unwrap()
+            .count(),
+        0,
+        "the failed build is removed"
+    );
+    let status = presence::status(root).unwrap();
+    assert!(!status.ok && !status.previous_kept, "{status:?}");
+    assert_eq!(status.code, "presence_venv_failed");
+    let reason = presence::unavailable_reason(root).unwrap();
+    assert!(reason.starts_with("The presence reader is off"), "{reason}");
+    assert!(reason.contains("DO NOT MATCH THE HASHES"), "{reason}");
+    assert!(reason.contains("downloading them failed too"), "{reason}");
+
+    // no python3 at all: recorded as such, still not fatal
+    py.set_missing(true);
+    assert_eq!(
+        node111::install::stage::presence_venv(&ctx, &manifest, &release),
+        Outcome::Unavailable {
+            error: PresenceVenvError::NoPython3,
+            previous_kept: false
+        }
+    );
+    assert_eq!(presence::status(root).unwrap().code, "presence_no_python");
+
+    // fixed: the next install run (already staged) builds it
+    py.set_missing(false);
+    py.fail_download(false);
+    py.fail_install(false);
+    let again = node111::install::stage::run(&ctx, &fetcher, &manifest).unwrap();
+    assert_eq!(again, release);
+    assert!(presence::integrity_ok(
+        root,
+        &release.join(layer5::PRESENCE_LOCK)
+    ));
+    assert_eq!(presence::unavailable_reason(root), None);
+
+    // a manifest without the reader runs no python at all
+    let (_served2, plain) = stage_fixture(&common::build_payload(), "");
+    let silent = MockRunner::new(Vec::<(String, Output)>::new());
+    let ctx2 = stage_ctx(&layout, fs_root.path(), &silent, &env);
+    assert_eq!(
+        node111::install::stage::presence_venv(&ctx2, &plain, &release),
+        Outcome::NotShipped
+    );
+    silent.assert_exhausted();
 }

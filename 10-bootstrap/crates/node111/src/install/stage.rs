@@ -4,14 +4,19 @@
 //! Layer 5 pins (`ChannelManifest::verify_layer5_tree`) →
 //! fsync → rename → flip `current` (single atomic unit: KB rides inside the
 //! payload) → establish the initial floor. Prune to 2 only after probation —
-//! a fresh install has no probation, so nothing is pruned here.
+//! a fresh install has no probation, so nothing is pruned here. Then, when the
+//! release ships the Meshtastic presence reader, its venv (`venvs/presence`,
+//! os/50-messaging/README.md §14) is built from the pinned lock in that tree
+//! ([`presence_venv`]; never fails the install).
 
 use super::context::InstallContext;
 use crate::calver::Calver;
 use crate::floor::Floor;
 use crate::manifest::ChannelManifest;
 
-/// Download + verify + promote the release payload. Returns the release dir.
+/// Download + verify + promote the release payload, then build the presence
+/// venv from it ([`presence_venv`], on both the fresh and the "already staged"
+/// path). Returns the release dir.
 pub fn run(
     ctx: &InstallContext,
     fetcher: &crate::util::http::Fetcher,
@@ -40,6 +45,7 @@ pub fn run(
             "111 install: release {} already staged+verified",
             manifest.release()
         );
+        presence_venv(ctx, manifest, &release_dir);
         return Ok(release_dir);
     }
 
@@ -119,7 +125,51 @@ pub fn run(
     let _ = std::fs::remove_file(&link);
     std::os::unix::fs::symlink(ctx.layout.current_release().join("bin/111"), &link)?;
 
+    presence_venv(ctx, manifest, &release_dir);
     Ok(release_dir)
+}
+
+/// The presence reader's venv for the staged release (os/50-messaging/README.md
+/// §14, §19 L1): when the manifest pins `[presence-lock]`, the lock in
+/// `release_dir` (already checked against that pin by `verify_layer5_tree`)
+/// drives `daemon::transport::venv::presence::ensure` in install mode — the
+/// build venv's pip downloads the locked closure into
+/// `cache/packages/presence/` (offline rebuild assets, hash-recorded in the
+/// receipt with the rest of `cache/`), then installs from there only.
+/// Fail closed and never fatal: no python3, a bad hash or a failed download
+/// leaves the previous venv in place and is recorded in
+/// `venvs/presence.status.json`, where the meshtastic service reads it; the
+/// node runs (without Nearby when no earlier venv exists). Step 7 hands
+/// `venvs/` to node111 afterwards.
+pub fn presence_venv(
+    ctx: &InstallContext,
+    manifest: &ChannelManifest,
+    release_dir: &std::path::Path,
+) -> crate::daemon::transport::venv::presence::Outcome {
+    use crate::daemon::transport::venv::presence::{self, Mode, Outcome};
+    if manifest.presence_lock().is_none() {
+        return Outcome::NotShipped;
+    }
+    let root = &ctx.layout.root;
+    let outcome = presence::ensure(
+        root,
+        ctx.runner,
+        &presence::lockfile(release_dir),
+        &presence::cache_dir(root),
+        Mode::Install,
+    );
+    match &outcome {
+        Outcome::NotShipped | Outcome::Unchanged => {}
+        Outcome::Built => eprintln!("111 install: presence venv built (venvs/presence)"),
+        Outcome::Unavailable {
+            error,
+            previous_kept: true,
+        } => eprintln!("111 install: presence venv not rebuilt: {error} — the previous one stays"),
+        Outcome::Unavailable { error, .. } => eprintln!(
+            "111 install: presence venv not built: {error} — the node runs; Nearby stays empty"
+        ),
+    }
+    outcome
 }
 
 /// rns-lock.txt from the signed manifest (fetched + pin-verified) — input to

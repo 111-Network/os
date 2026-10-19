@@ -196,7 +196,12 @@ recorded in `10-bootstrap/TASKS.md` at build (Layer 5 task B1).
 - **State** under `/var/lib/111`, still the only writable tree (owner `node111`): `fabric/store.db` (SQLCipher, 0600) ·
   `fabric/blobs/<blake3>/` (0700) · `fabric/presence/meshtastic.json` (0644 within 0700) · `state/panels.json` (slot assignments) ·
   `state/panel-sessions.json` (0600) · `state/devices.json` gains the Meshtastic binding (Layer 6 migrates it into `interfaces.toml`
-  when that file is born) · the presence venv under `venvs/`. `fabric/` is created at runtime, like `agent/`.
+  when that file is born) · the presence venv `venvs/presence` (a link to one complete build in `venvs/presence.d/`, made
+  with `pip install --require-hashes` from the lock the release carries at `share/meshtastic-presence/` and the manifest
+  pins; `111 install` downloads its closure into `cache/packages/presence/` with the build venv's own pip, later rebuilds
+  after a lock change are offline from that cache; fail closed — a failed build leaves the venv in place — and its result,
+  with a plain-language reason, is in `venvs/presence.status.json`, which the `meshtastic` service reads). `fabric/` is
+  created at runtime, like `agent/`.
 - **Supervision.** `meshmud` and `meshtastic-presence` are supervised children of `111d` exactly like `rnsd` and `111-agent`
   (`supervise.rs` `ChildSpec`, back-off, restart route); the fabric itself runs in-process.
 - **CLI verbs.** `111 fabric offer|enroll|status` join the subcommand set (Architecture).

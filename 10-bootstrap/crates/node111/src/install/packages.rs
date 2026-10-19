@@ -2,7 +2,10 @@
 //! transport prerequisites per distro family AND download the resolved closure
 //! into `cache/packages/` (root-owned, offline reinstall assets) + the rns pip
 //! closure into `cache/packages/python/`. Every cached artifact is hash-recorded
-//! in the receipt.
+//! in the receipt. The Meshtastic presence reader's closure (Layer 5 §14) is not
+//! fetched here: its lock rides in the release payload, so the stage step
+//! downloads it into `cache/packages/presence/` with the build venv's own pip
+//! (`stage::presence_venv`).
 
 use super::context::InstallContext;
 use super::receipt::Receipt;
