@@ -267,6 +267,59 @@ ADR-lite. Every decision, its rejected alternatives, and why. Newest last; never
   bridge; the bridge function is super important"); users may end up living in our dashboard, so our Messages view must carry every
   network, while the adopted projects' own UIs remain available unmodified (adopt, don't reinvent).
 
+## D24 — Layer 5 locked (as built); V4 fix-wave amendments
+
+- **Date:** 2026-10-19
+- **Decision:** Layer 5 (Messaging & Data) is **built and locked** at spec v1.2 (D20) plus the as-built amendments below. V4 = one fable judge on the
+  running system (single-node smoke, three-node smoke, panel lint, the full bootstrap gate, then the as-built code read with an attacker's and a
+  phone user's eyes; `plan/layers/50-messaging/review/integrated.md`): **fix-then-lock** — every gate green, one major (M1) demonstrated
+  deterministically, eight minors. The fix wave ran as four agents on disjoint files (A: id111 · B: fabric · C: supervisor, sidecar, manifest, docs ·
+  D: reachability copy), each verified by the lead and committed separately (`fed2ee9`, `7071c07`, `989fe32`, `e8850c4`, lead reversal `82e7e57`);
+  then the lock gates: `10-bootstrap/scripts/check.sh` ALL GREEN (834 cargo tests, UI 1201, G2 on both targets), smoke 118, **three-node 159 / 157 /
+  157 three times in a row with no leftover process**, panel-lint 144; identity 193 + 44 + 7 + the Monocypher harness, intelligence, knowledge and the
+  presence sidecar green.
+  - **(a) Layer 2 amendment A12 — the unclean-reboot verdict (M1).** After a hub's unclean restart the §6.5 jump (+64) moved every persisted member's
+    receive window ahead of the member's live counter, so its next ≤ 32 packets verified but read *stale*: the hub attributed nothing and ignored its
+    `MAILBOX_FETCH`, `CUSTODY_PUT` and `ENROLL` (the 1-in-3 step-13b flake). `observe_counter` now judges a counter in that gap against the peer's
+    high-water as persisted (an in-memory *unclean floor* with a §6.5 window on the un-jumped timeline); `on_receive`, the send side, the file format and
+    the frozen vectors are unchanged (`20-identity/README.md` §13.1 A12). **Residual, stated:** one of the last ≤ N pre-crash packets replayed after the
+    crash can attribute a socket once (the bounded A11 residual). **Limit, accepted:** the floor lives in memory; a second restart before the member
+    catches up stalls it as before A12 (persisting it would change the file format and weaken `on_receive` across a double crash).
+  - **(b) "Hub reachable" is the hub's answer, never self-judged (m3).** `FabricHub.reachable` is true only while a connection is attributed to the home
+    hub (a verified, window-fresh hub packet arrived on it since link-up); `FabricHub.connected` (new, additive) is the dialed-and-announced socket. §9
+    **as built:** a hub answers every `MAILBOX_FETCH` it serves — an empty mailbox with one item-less `MAILBOX_ITEM {custody_seq = cursor}` (an existing
+    kind; older members drop it harmlessly). A connected-but-unanswered member reads NOT SET `hub_waiting_answer` in the service row, the CLI and the
+    UI, which asks the agent to check the hub, never to re-enroll.
+  - **(c) Retry (m1).** `Fabric::retry` forgets a message's in-flight custody so the next pump re-PUTs; **`retry_all` stays an operator action and is
+    never called automatically** — the lead reversed the fix wave's connectivity-gain trigger after the three-node wire count showed a 16-fragment
+    transfer re-sent in flight (31 frames). Members re-fetch on link-up by themselves.
+  - **(d) `leave_hub` keeps a configured direct peer's dial** (m2) — the `dial_held` rule applies to leaving as to enrolment ends.
+  - **(e) Children die with `111d` (m4).** Every supervised child is forked by one dedicated forker thread with `PR_SET_PDEATHSIG = SIGTERM`, so a
+    `kill -9`, OOM kill or abort takes rnsd, the agent, the model, meshmud and the reader with it (three-node asserts no survivor after 5 s). Not covered:
+    a child's own children, a child ignoring SIGTERM, set-uid programs — the service manager's cgroup kill is the backstop (Layer 1 README).
+  - **(f) Presence reader (m5):** a 5 s write timeout on the keep-alive (`SO_SNDTIMEO`) and `_socket_shutdown` before close — a silent meshmud means
+    "link lost", never a hang.
+  - **(g) `gen-manifest` compares each listed sha256 with the tarball member** (m7); a wrong hash is refused like a missing entry.
+  - **(h) Docs (m8):** artifacts per release listed; `LICENSING.md` §8 names the checklist's source-offer step.
+  - **(i) Earlier at this lock:** panel-guard residual #2 **accepted by the owner** and stated in §13 (a header-less same-site GET on a plain-HTTP LAN
+    origin is byte-identical to the panel's own); the restore floor **accepted as is** (a words-only restore keeps announcing from the provisional
+    floor; the hub-learned floor is Layer 7's); the manifest evolution path is the lead's reversible call (unknown names parse and are ignored); the
+    three-node harness corrected (a configured-peer link is attributed only by a sealed packet — the earlier pass came from a leaked hub dial the polish
+    wave closed; `fab_diag` notes on a failed delivery wait); the polish wave (presence allow-list + keep-alive, enroll end/abandon, presence venv at
+    daemon start, manifest listing, UI mocks) landed one commit per task.
+- **Rejected:** an automatic `retry_all` on connectivity gains (re-sends in-flight fragments) · a new wire kind for the empty-fetch answer (an item-less
+  `MAILBOX_ITEM` suffices and old members ignore it) · persisting the unclean floor (file format; `on_receive` across a double crash) · reading the
+  peer's hello before sending ours (m6: cleartext announces are spec-conformant §8.1/§18.4; recorded as a residual — any LAN connector can harvest the
+  NodeId and keys of a listening node) · a fabric-side attribution rule instead of A12 (one crate further from the window).
+- **Why:** the judge's one major was a liveness defect in the layer's non-negotiable promise (delivery after the normal Cat-4 failure, power loss on a
+  hub), found by reasoning from a flake the lead had only recorded; the fix sits where the window lives, and the minors made the service row honest.
+  Everything else held under the paths that can be exercised without hardware.
+- **Open (external gates, not blockers; before the first signed release):** meshmud with a real Meshtastic board (serial open without reset, config
+  fan-out to a second client, per-session downlinks) · Termux builds of meshmud and the presence venv · the real Meshtastic web bundle under
+  `panel-lint.sh` · the presence venv from a real pip closure, and post-promotion wheel availability · aarch64 store open/write/prune on Android · Go
+  toolchain in CI for `meshmud-build.sh` · payload assembly and signing end to end (`release.sh` does not exist) · the two-board MeshCore bench (Layer 6)
+  · the hub-learned custody floor (Layer 7) · residuals (a), m6. The owner's full test setup is noted (D23 #4).
+
 ## D25 — Layer 6 (Transport & Bridge) design decisions
 
 - **Date:** 2026-10-19

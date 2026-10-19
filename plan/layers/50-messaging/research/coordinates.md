@@ -149,3 +149,9 @@ All 7 forks decided (D19, 2026-10-14). Spec draft: `os/50-messaging/README.md`. 
   corrected `b0f8c52`, 156 checks GREEN; one flake seen in three runs (hub-crash delivery wait, `fab_diag` notes added). **V4** fable judge
   launched as an Agent-tool subagent (prompt = `runs/workflows/wave-4-review.js`, adapted for today's tree) → `review/integrated.md`;
   then D24, board summary, INDEX row 5 ✅, tag `checkpoint-layer-5`.
+- **V4 + lock (2026-10-19, evening):** integrated review `4bec9b6` (fix-then-lock: M1 unclean-restart stall, m1–m8) → fix wave A `fed2ee9` (id111 A12) ·
+  B `7071c07` (reachable = hub answered, §9 empty-fetch answer, retry custody, leave_hub dial) · D `989fe32` (reachability copy, `FabricHub.connected`) ·
+  C `e8850c4` (PDEATHSIG forker thread, keep-alive timeout, manifest hashes, docs) · lead reversal `82e7e57` (no automatic retry_all: 31 frames on the wire).
+  Lock gates on `82e7e57`: check.sh ALL GREEN (834 cargo, 1201 UI), smoke 118, three-node 159/157/157, panel-lint 144, no leftovers. **D24 written, INDEX
+  row 5 ✅, tag `checkpoint-layer-5`.** Layer 6 build may start.
+

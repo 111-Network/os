@@ -1,10 +1,10 @@
 # Layer 5 — Messaging & Data: plan folder
 
-**Status** (copied from [`INDEX.md`](../../INDEX.md) row 5, which stays the source of truth): 🔨 building — spec v1.2 locked (D20, 2026-10-14) after a 3-judge fable panel + re-check; `mesh111` scaffold (T0) green on host + musl ×2; `os/50-messaging/TASKS.md` Wave 0 (8 tasks) ✅ landed at a14736b (identity amendments, contract, codec + store with 96 tests, node111 plumbing, docs, KB, sidecar/assets); Wave 1 ✅ landed, fable/opus-reviewed and bounced (A1 agent tools · F1 fabric · P1 panels · M1 Meshtastic · U1 UI; bootstrap `check.sh` ALL GREEN incl. the D21 budget); Wave 2 ✅ landed (B1 gates · U2 Panel tab/Nearby/Settings · F2 daemon wiring: the fabric runs inside 111d behind the §15 routes); review + bounce next, then Wave 3 verification (netns smoke, panel lint, fable integrated review)
+**Status** (copied from [`INDEX.md`](../../INDEX.md) row 5, which stays the source of truth): ✅ built — spec v1.2 locked (D20) + as-built lock **D24** (2026-10-19): `mesh111` store/envelope/fabric/`tcp-lan` (163 tests + musl G2 run), the fabric inside `111d` behind additive `/api/v1` + SSE, hosted panels with guards and offline lint, Meshtastic service (meshmud, shim, GPL presence reader in a hash-locked venv), agent tools with the loopback bearer, Messages/Contacts/Nearby/Panel/Settings UI (1201 vitest); V4 = one fable judge on the running system → fix-then-lock → fixed (Layer 2 A12 unclean-reboot verdict, honest hub reachability + §9 empty-fetch answer, children die with 111d, keep-alive timeout, manifest hashes); gates: `check.sh` ALL GREEN (834 cargo), smoke 118, three-node ×3 green, panel-lint 144; tag `checkpoint-layer-5`. Open: external hardware/CI gates (D24)
 
 **Spec and build:** [`os/50-messaging/README.md`](../../../50-messaging/README.md) · [`os/50-messaging/TASKS.md`](../../../50-messaging/TASKS.md)
 
-**Decisions:** D18, D19, D20, D21 (and D17 for the device decisions it builds on) in [`DECISIONS.md`](../../DECISIONS.md). Build protocol: [`EXECUTION.md`](../../EXECUTION.md).
+**Decisions:** D18, D19, D20, D21, **D24** (the lock) (and D17 for the device decisions it builds on) in [`DECISIONS.md`](../../DECISIONS.md). Build protocol: [`EXECUTION.md`](../../EXECUTION.md).
 
 ## Files
 
@@ -29,6 +29,7 @@
 | [`review/recheck.md`](review/recheck.md) | Fable re-check of spec v1.1 (crypto and panels lenses). |
 | [`review/wave-1.md`](review/wave-1.md) | Wave 1 review triage with the lead's standing calls. |
 | [`review/wave-2.md`](review/wave-2.md) | Wave 2 review triage (open bounce items). |
+| [`review/integrated.md`](review/integrated.md) | V4: the fable integrated review of the running system (fix-then-lock → fixed, D24). |
 | [`runs/workflows/`](runs/workflows/) | Workflow scripts, one per run: `research.js`, `spec-review.js`, `wave-0.js`, `wave-1.js`, `wave-1-review.js`, `wave-1-bounce.js`, `wave-2.js`, `wave-2-review.js`, `wave-2-bounce.js`, `wave-2-bounce-2.js`, `wave-3.js`, `wave-3-fix.js`, `wave-3-polish.js`, `wave-4-review.js`. |
 | [`runs/journals/README.md`](runs/journals/README.md) | Index of the exported workflow journals (`*.jsonl`, one line per finished agent) and which script produced each. |
 
