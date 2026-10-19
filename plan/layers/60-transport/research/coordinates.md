@@ -71,4 +71,7 @@ Next after the run: lead writes `layers/60-transport/options.md` → owner decid
   B4 + B5): `wf_b2b6ec75-68f`. **Reviews:** S1-bounce + B1 `wf_182b25dc-d01`. Lead fixes from the S3/S4 reviews (version test, rnstatus re-probe
   back-off, `write_line` stdin poisoning) ride a lead commit after the Wave 1 launch (`19bc979`).
 - **Wave 1 landing:** B5 `cfa065d` (review `wf_6dd8e7a4-3f0`). **Run — B1 bounce** (`wave-1-bounce.js`: the B1 review major + the S1-bounce/B1
-  minors): `wf_f9c6bf9d-b98`. The B5 agent found the chat preamble and the Layer 3 tools line outside its ownership; the lead extended both.
+  minors): `wf_f9c6bf9d-b98` (landed `da0c8a0`; node111 fabric verified on a HEAD overlay while B2/B4 held the tree). B5 review minors `edfd8bf`.
+- **Wave 2 started early for the non-Rust tasks** (they depend on the landed contract and the spec only): `wave-2a.js` (C2 UI + C3py helper)
+  `wf_3fd1e4f0-857`, launched beside B2/B3/B4. `wave-2.js` is now C1 alone (after B2/B4 land); `wave-2b.js` C4 + C3rs + C5 after that.
+  Lesson: a backtick inside a brief closes the template literal — `node --check` accepts the result (tagged templates), the Workflow parser does not.
