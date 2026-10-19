@@ -18,7 +18,7 @@ lock = "lxmf.lock.txt"
 venv = "lxmf"                           # venvs/lxmf, a link to venvs/lxmf.d/<build> (the L1 presence pattern)
 
 [requires]
-python = "3.7"                          # rns and lxmf need Python >= 3.7 (§6)
+python = "3.10"                         # the hash-locked closure resolves cffi/pycparser for >= 3.10 (rns and lxmf alone need 3.7, §6)
 service = "transport"                   # rnsd must serve the shared instance before the helper starts (§6 "Start order")
 
 [run]
