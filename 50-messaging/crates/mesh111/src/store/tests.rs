@@ -1568,10 +1568,14 @@ fn pending_node_ids_persist_until_removed() {
 }
 
 #[test]
-fn a_v1_store_migrates_to_v2_in_place() {
+fn a_v1_store_migrates_to_the_current_schema_in_place() {
     let (t, s) = ready();
     s.conn
-        .execute_batch("DROP TABLE pending_node_ids; PRAGMA user_version = 1;")
+        .execute_batch(
+            "DROP TABLE foreign_seen; DROP TABLE relay_edges; DROP TABLE foreign_messages;
+             DROP TABLE send_groups; DROP TABLE foreign_conversations;
+             DROP TABLE pending_node_ids; PRAGMA user_version = 1;",
+        )
         .unwrap();
     s.close(1).unwrap();
     let (mut s, _) = open(t.path(), 1);
@@ -1579,9 +1583,11 @@ fn a_v1_store_migrates_to_v2_in_place() {
         pragma_int(&s.conn, "user_version").unwrap(),
         schema::SCHEMA_VERSION
     );
-    assert_eq!(schema::SCHEMA_VERSION, 2);
+    assert_eq!(schema::SCHEMA_VERSION, 3);
     assert!(s.pending_node_id_put(&PEER).unwrap());
     assert_eq!(s.pending_node_ids().unwrap(), vec![PEER]);
+    s.foreign_conversation_upsert("lxmf", "me", ForeignKind::Dm, "dm:ab", None)
+        .unwrap();
 }
 
 #[test]
@@ -1639,4 +1645,1021 @@ fn own_unplanned_lists_numbered_messages_without_outbox_rows() {
         .unwrap();
     let ids: Vec<i64> = s.own_unplanned().unwrap().iter().map(|m| m.id).collect();
     assert_eq!(ids, vec![orphan]);
+}
+
+// ---------------------------------------------------------------------------
+// Layer 6 §3 — schema v3, the foreign message model
+// ---------------------------------------------------------------------------
+
+const BOARD: &str = "board-1";
+
+fn fconv(s: &mut Store, net: &str, kind: ForeignKind, native: &str) -> i64 {
+    s.foreign_conversation_upsert(net, BOARD, kind, native, None)
+        .unwrap()
+}
+
+fn fin(conv: i64, sender: &str, id: Option<&str>, body: &str, unique: bool) -> ForeignInsert {
+    ForeignInsert {
+        conv,
+        sender_native: sender.into(),
+        sender_name: Some("W1AW".into()),
+        auth: ForeignAuth::ChannelKey,
+        native_msg_id: id.map(Into::into),
+        body: body.into(),
+        claim_ts: None,
+        meta: None,
+        id_globally_unique: unique,
+    }
+}
+
+/// One inbound row; its id.
+fn ingest1(s: &mut Store, row: ForeignInsert) -> i64 {
+    s.foreign_insert_batch(vec![row]).unwrap()[0].unwrap()
+}
+
+fn consent() -> EdgeConsent<'static> {
+    EdgeConsent {
+        consent_hash: "sha256:warning",
+        enabled_by: "loopback",
+    }
+}
+
+fn mk_edge(s: &mut Store, src: i64, dst: i64) -> i64 {
+    s.edge_create(&EdgeNew {
+        src_conv: src,
+        dst_conv: dst,
+        honour_ok_to_mqtt: false,
+        oversize: EdgeOversize::Refuse,
+        consent: consent(),
+    })
+    .unwrap()
+}
+
+fn copy_send<'a>(
+    edge: i64,
+    origin: i64,
+    dst: i64,
+    text: &'a str,
+    k: u32,
+    n: u32,
+) -> ForeignSend<'a> {
+    ForeignSend {
+        conv: dst,
+        text,
+        group_id: None,
+        part_k: k,
+        part_n: n,
+        origin_msg: Some(origin),
+        edge_id: Some(edge),
+    }
+}
+
+/// A user-composed one-target send; the row id.
+fn user_send(s: &mut Store, conv: i64, text: &str) -> i64 {
+    let (_, ids) = s
+        .send_group_create(
+            text,
+            "{\"targets\":[]}",
+            &[GroupPart {
+                conv,
+                text,
+                part_k: 1,
+                part_n: 1,
+            }],
+        )
+        .unwrap();
+    ids[0]
+}
+
+fn fseq(s: &Store, id: i64) -> u64 {
+    s.foreign_message(id).unwrap().unwrap().local_seq
+}
+
+#[test]
+fn class_foreign_is_pinned_never_from_a_kind_and_never_refusable() {
+    assert_eq!(Class::ALL.len(), 10);
+    assert_eq!(Class::Foreign as u8, 9);
+    assert_eq!(Class::ALL[9], Class::Foreign);
+    assert!((0..=255u8).all(|k| Class::from_kind(k) != Class::Foreign));
+    assert!(!Class::Foreign.is_refusable());
+    assert!(Class::Foreign.has_quota());
+    assert!(!Class::Human.has_quota() && !Class::Control.has_quota());
+    assert_eq!(Class::Foreign.name(), "foreign");
+    assert_eq!(Class::from_i64(9).unwrap(), Class::Foreign);
+    let (_t, mut s) = ready();
+    s.set_quota(Class::Foreign, Some(1000)).unwrap();
+    assert_eq!(s.quota(Class::Foreign).unwrap(), Some(1000));
+    assert!(matches!(
+        s.set_quota(Class::Agent, Some(1)),
+        Err(StoreError::Invalid(_))
+    ));
+}
+
+/// A V2 store written by the V2 migrations alone (the shape a V2 build
+/// leaves on disk).
+fn write_v2_fixture(dir: &Path) {
+    fs::create_dir_all(dir).unwrap();
+    let conn = rusqlite::Connection::open(dir.join(DB_FILE)).unwrap();
+    apply_key_and_pragmas(&conn, &key()).unwrap();
+    for (i, sql) in schema::MIGRATIONS[..2].iter().enumerate() {
+        conn.execute_batch(sql).unwrap();
+        conn.pragma_update(None, "user_version", i as i64 + 1)
+            .unwrap();
+    }
+    conn.execute(
+        "INSERT INTO pending_node_ids (node_id, local_seq) VALUES (?1, 1)",
+        [&PEER2[..]],
+    )
+    .unwrap();
+    assert_eq!(pragma_int(&conn, "user_version").unwrap(), 2);
+    conn.close().unwrap();
+}
+
+#[test]
+fn a_v2_store_opens_at_v3_and_keeps_its_rows() {
+    let t = tempfile::tempdir().unwrap();
+    write_v2_fixture(t.path());
+    let (mut s, _) = open(t.path(), 1);
+    assert_eq!(pragma_int(&s.conn, "user_version").unwrap(), 3);
+    assert_eq!(s.pending_node_ids().unwrap(), vec![PEER2]);
+    s.record_epoch(1).unwrap();
+    let c = fconv(&mut s, "meshtastic", ForeignKind::Channel, "ch:LongFast:00");
+    ingest1(&mut s, fin(c, "!a1b2c3d4", Some("1"), "hello", false));
+    s.close(1).unwrap();
+    let (s, _) = open(t.path(), 1);
+    assert_eq!(s.foreign_conversation(c).unwrap().unwrap().messages, 1);
+}
+
+#[test]
+fn a_store_newer_than_v3_is_refused() {
+    // The "V3 refused by a V2 build" rule is the same check one version up:
+    // this build refuses user_version 4.
+    let (t, s) = ready();
+    s.conn.pragma_update(None, "user_version", 4).unwrap();
+    s.close(1).unwrap();
+    assert!(matches!(
+        Store::open(t.path(), &key(), &params(1)),
+        Err(StoreError::SchemaTooNew {
+            found: 4,
+            supported: 3
+        })
+    ));
+}
+
+#[test]
+fn conversations_upsert_by_identity_and_refuse_bad_ids() {
+    let (_t, mut s) = ready();
+    let a = s
+        .foreign_conversation_upsert(
+            "meshtastic",
+            BOARD,
+            ForeignKind::Channel,
+            "ch:a:1",
+            Some("A"),
+        )
+        .unwrap();
+    let again = s
+        .foreign_conversation_upsert("meshtastic", BOARD, ForeignKind::Channel, "ch:a:1", None)
+        .unwrap();
+    assert_eq!(a, again);
+    assert_eq!(
+        s.foreign_conversation(a).unwrap().unwrap().title.as_deref(),
+        Some("A")
+    );
+    let other_board = s
+        .foreign_conversation_upsert(
+            "meshtastic",
+            "board-2",
+            ForeignKind::Channel,
+            "ch:a:1",
+            None,
+        )
+        .unwrap();
+    assert_ne!(a, other_board);
+    for bad in ["", "111", "Mesh", "a b", &"x".repeat(33)] {
+        assert!(
+            matches!(
+                s.foreign_conversation_upsert(bad, BOARD, ForeignKind::Dm, "dm:1", None),
+                Err(StoreError::Invalid(_))
+            ),
+            "{bad:?}"
+        );
+    }
+    assert!(matches!(
+        s.foreign_conversation_upsert("lxmf", BOARD, ForeignKind::Dm, "", None),
+        Err(StoreError::Invalid(_))
+    ));
+    let lx = fconv(&mut s, "lxmf", ForeignKind::Dm, "dm:ab");
+    let mesh: Vec<i64> = s
+        .foreign_conversations(Some("meshtastic"))
+        .unwrap()
+        .iter()
+        .map(|c| c.id)
+        .collect();
+    assert_eq!(mesh.len(), 2);
+    assert!(!mesh.contains(&lx));
+    assert_eq!(s.foreign_conversations(None).unwrap().len(), 3);
+}
+
+#[test]
+fn ingest_batches_are_bounded_one_transaction_with_contiguous_seqs() {
+    let (_t, mut s) = ready();
+    let c = fconv(&mut s, "meshtastic", ForeignKind::Channel, "ch:LongFast:00");
+    let before = s.local_seq().unwrap();
+    let rows = |n: usize| -> Vec<ForeignInsert> {
+        (0..n)
+            .map(|i| fin(c, "!a1", Some(&i.to_string()), "x", false))
+            .collect()
+    };
+    assert!(matches!(
+        s.foreign_insert_batch(rows(300)),
+        Err(StoreError::Invalid(_))
+    ));
+    assert_eq!(s.local_seq().unwrap(), before);
+    // One bad row (meta not an object) writes nothing.
+    for meta in ["[1]", "{", "not json", "\"str\""] {
+        let mut bad = rows(5);
+        bad[3].meta = Some(meta.into());
+        assert!(
+            matches!(s.foreign_insert_batch(bad), Err(StoreError::Invalid(_))),
+            "{meta}"
+        );
+    }
+    let mut big = rows(1);
+    big[0].body = "y".repeat(MAX_FOREIGN_BODY + 1);
+    assert!(matches!(
+        s.foreign_insert_batch(big),
+        Err(StoreError::Invalid(_))
+    ));
+    assert_eq!(s.local_seq().unwrap(), before);
+    assert_eq!(s.foreign_conversation(c).unwrap().unwrap().messages, 0);
+
+    let ids = s.foreign_insert_batch(rows(256)).unwrap();
+    assert_eq!(ids.len(), 256);
+    let seqs: Vec<u64> = ids.iter().map(|id| fseq(&s, id.unwrap())).collect();
+    assert_eq!(seqs, (before + 1..=before + 256).collect::<Vec<_>>());
+    let conv = s.foreign_conversation(c).unwrap().unwrap();
+    assert_eq!(
+        (conv.messages, conv.unread, conv.last_seq),
+        (256, 256, before + 256)
+    );
+    let mut max = rows(1);
+    max[0].body = "y".repeat(MAX_FOREIGN_BODY);
+    max[0].native_msg_id = Some("max".into());
+    max[0].meta = Some("{\"truncated\":true,\"snr\":-7}".into());
+    let id = s.foreign_insert_batch(max).unwrap()[0].unwrap();
+    let row = s.foreign_message(id).unwrap().unwrap();
+    assert_eq!(row.body.len(), MAX_FOREIGN_BODY);
+    assert_eq!(row.state, ForeignState::Delivered);
+    assert_eq!(row.dir, ForeignDir::In);
+    // Pages and the since_seq read.
+    assert_eq!(s.foreign_thread_page(c, 3).unwrap().last().unwrap().id, id);
+    let since = s.foreign_messages(c, before + 250, 100).unwrap();
+    assert_eq!(since.len(), 7);
+    assert!(since.windows(2).all(|w| w[0].local_seq < w[1].local_seq));
+    s.foreign_conversation_mark_read(c).unwrap();
+    assert_eq!(s.foreign_conversation(c).unwrap().unwrap().unread, 0);
+    assert!(matches!(
+        s.foreign_insert_batch(vec![fin(c + 99, "!a1", None, "x", false)]),
+        Err(StoreError::NotFound)
+    ));
+}
+
+#[test]
+fn dedupe_matrix_repeating_ids_need_the_body_in_the_window() {
+    let (_t, mut s) = ready();
+    let mesh = fconv(&mut s, "meshtastic", ForeignKind::Channel, "ch:LongFast:00");
+    let lx = fconv(&mut s, "lxmf", ForeignKind::Dm, "dm:ab");
+    // Meshtastic: key + body within the last 32 rows.
+    let first = s
+        .foreign_insert_batch(vec![
+            fin(mesh, "!a1", Some("7"), "hi", false),
+            fin(mesh, "!a1", Some("7"), "hi", false), // same batch: duplicate
+            fin(mesh, "!a1", Some("7"), "other", false), // id reused: new text
+            fin(mesh, "!b2", Some("7"), "hi", false), // another sender
+            fin(mesh, "!a1", None, "hi", false),      // no id: never a duplicate
+            fin(mesh, "!a1", None, "hi", false),
+        ])
+        .unwrap();
+    let pattern: Vec<bool> = first.iter().map(Option::is_some).collect();
+    assert_eq!(pattern, [true, false, true, true, true, true]);
+    assert_eq!(
+        s.foreign_insert_batch(vec![fin(mesh, "!a1", Some("7"), "hi", false)])
+            .unwrap(),
+        [None]
+    );
+    // 32 newer rows push the original out of the window: a repeat is new.
+    let filler: Vec<ForeignInsert> = (0..32)
+        .map(|i| fin(mesh, "!c3", Some(&format!("f{i}")), "fill", false))
+        .collect();
+    s.foreign_insert_batch(filler).unwrap();
+    assert!(s
+        .foreign_insert_batch(vec![fin(mesh, "!a1", Some("7"), "hi", false)])
+        .unwrap()[0]
+        .is_some());
+    // LXMF: the hash is globally unique — the key alone, any distance.
+    assert!(s
+        .foreign_insert_batch(vec![fin(lx, "ab", Some("h1"), "one", true)])
+        .unwrap()[0]
+        .is_some());
+    let filler: Vec<ForeignInsert> = (0..40)
+        .map(|i| fin(lx, "ab", Some(&format!("g{i}")), "fill", true))
+        .collect();
+    s.foreign_insert_batch(filler).unwrap();
+    assert_eq!(
+        s.foreign_insert_batch(vec![fin(lx, "ab", Some("h1"), "changed", true)])
+            .unwrap(),
+        [None]
+    );
+    // The key is per conversation.
+    assert!(s
+        .foreign_insert_batch(vec![fin(mesh, "ab", Some("h1"), "one", true)])
+        .unwrap()[0]
+        .is_some());
+}
+
+#[test]
+fn foreign_states_are_monotone() {
+    let (_t, mut s) = ready();
+    let dm = fconv(&mut s, "meshtastic", ForeignKind::Dm, "dm:!a1");
+    let id = user_send(&mut s, dm, "hello");
+    use ForeignState::*;
+    let st = |s: &Store| s.foreign_message(id).unwrap().unwrap().state;
+    assert_eq!(st(&s), Queued);
+    let steps: [(ForeignState, Option<&str>, StateChange, ForeignState); 9] = [
+        (
+            Sent,
+            Some("accepted by the radio"),
+            StateChange::Changed,
+            Sent,
+        ),
+        (Queued, None, StateChange::Unchanged, Sent),
+        (Relayed, Some("implicit ack"), StateChange::Changed, Relayed),
+        (Sent, None, StateChange::Unchanged, Relayed),
+        (Failed, Some("NO_CHANNEL"), StateChange::Changed, Failed),
+        (Relayed, None, StateChange::Unchanged, Failed),
+        // A later delivered overrides failed …
+        (
+            Delivered,
+            Some("the recipient confirmed"),
+            StateChange::Changed,
+            Delivered,
+        ),
+        // … and delivered never regresses.
+        (Failed, Some("late NAK"), StateChange::Unchanged, Delivered),
+        (Sent, None, StateChange::Unchanged, Delivered),
+    ];
+    for (to, ev, want, now) in steps {
+        assert_eq!(
+            s.foreign_set_state(id, to, ev, None).unwrap(),
+            want,
+            "{to:?}"
+        );
+        assert_eq!(st(&s), now);
+    }
+    // Same state: only a different evidence is a change.
+    assert_eq!(
+        s.foreign_set_state(id, Delivered, Some("the recipient confirmed"), None)
+            .unwrap(),
+        StateChange::Unchanged
+    );
+    assert_eq!(
+        s.foreign_set_state(id, Delivered, Some("read receipt"), None)
+            .unwrap(),
+        StateChange::Changed
+    );
+    // A reason travels with the state.
+    let q = user_send(&mut s, dm, "two");
+    assert_eq!(
+        s.foreign_set_state(
+            q,
+            Queued,
+            Some("waiting for the radio"),
+            Some("region_unset")
+        )
+        .unwrap(),
+        StateChange::Changed
+    );
+    let row = s.foreign_message(q).unwrap().unwrap();
+    assert_eq!(row.reason_code.as_deref(), Some("region_unset"));
+    // Inbound rows have no send state; unknown ids are NotFound.
+    let inbound = ingest1(&mut s, fin(dm, "!a1", Some("9"), "hey", false));
+    assert!(matches!(
+        s.foreign_set_state(inbound, Sent, None, None),
+        Err(StoreError::Invalid(_))
+    ));
+    assert!(matches!(
+        s.foreign_set_state(9999, Sent, None, None),
+        Err(StoreError::NotFound)
+    ));
+}
+
+#[test]
+fn queue_order_puts_user_composed_rows_first_and_holds_pending_handoffs() {
+    let (_t, mut s) = ready();
+    let src = fconv(&mut s, "lxmf", ForeignKind::Group, "list:ops");
+    let dst = fconv(&mut s, "meshtastic", ForeignKind::Channel, "ch:LongFast:00");
+    let dm = fconv(&mut s, "meshtastic", ForeignKind::Dm, "dm:!a1");
+    let lx_dm = fconv(&mut s, "lxmf", ForeignKind::Dm, "dm:ab");
+    let e = mk_edge(&mut s, src, dst);
+    let o1 = ingest1(&mut s, fin(src, "ab", Some("h1"), "one", true));
+    let o2 = ingest1(&mut s, fin(src, "ab", Some("h2"), "two", true));
+    let c1 = s
+        .foreign_queue_send(&copy_send(e, o1, dst, "[ab/LX] one", 1, 1))
+        .unwrap();
+    let c2 = s
+        .foreign_queue_sends(&[
+            copy_send(e, o2, dst, "[ab/LX] (1/2) tw", 1, 2),
+            copy_send(e, o2, dst, "[ab/LX] (2/2) o", 2, 2),
+        ])
+        .unwrap();
+    let u1 = user_send(&mut s, dm, "mine");
+    let u2 = user_send(&mut s, dst, "mine too");
+    user_send(&mut s, lx_dm, "other network");
+    let ids = |s: &Store| -> Vec<i64> {
+        s.foreign_queued("meshtastic", 100)
+            .unwrap()
+            .iter()
+            .map(|m| m.id)
+            .collect()
+    };
+    assert_eq!(ids(&s), vec![u1, u2, c1, c2[0], c2[1]]);
+    assert_eq!(ids(&s)[..2], [u1, u2]);
+    assert_eq!(s.foreign_queued("meshtastic", 2).unwrap().len(), 2);
+    // A pending handoff is never offered again (§4 at most once) …
+    s.foreign_handoff_begin(u1).unwrap();
+    assert!(s.foreign_message(u1).unwrap().unwrap().handoff_pending);
+    assert_eq!(ids(&s), vec![u2, c1, c2[0], c2[1]]);
+    // … and Accepted clears it and records the native id.
+    s.foreign_accepted(u1, "0x1234").unwrap();
+    let row = s.foreign_message(u1).unwrap().unwrap();
+    assert!(!row.handoff_pending);
+    assert_eq!(row.native_msg_id.as_deref(), Some("0x1234"));
+    s.foreign_set_state(u1, ForeignState::Sent, None, None)
+        .unwrap();
+    // A paused or disabled edge holds its copies back.
+    assert!(s.edge_set_paused(e, true, None).unwrap());
+    assert_eq!(ids(&s), vec![u2]);
+    assert!(matches!(
+        s.edge_set_paused(e, false, None),
+        Err(StoreError::Invalid(_))
+    ));
+    assert!(s.edge_set_paused(e, false, Some(&consent())).unwrap());
+    assert_eq!(ids(&s), vec![u2, c1, c2[0], c2[1]]);
+    // A handoff only of a queued own row.
+    assert!(matches!(
+        s.foreign_handoff_begin(u1),
+        Err(StoreError::Invalid(_))
+    ));
+    // meta fields round-trip; keys are restricted.
+    assert!(s
+        .foreign_set_meta(u2, "via_mqtt", Some(MetaValue::Bool(true)))
+        .unwrap());
+    assert!(s
+        .foreign_set_meta(u2, "hops", Some(MetaValue::Int(3)))
+        .unwrap());
+    assert!(s.foreign_set_meta(u2, "hops", None).unwrap());
+    assert_eq!(
+        s.foreign_message(u2).unwrap().unwrap().meta,
+        "{\"via_mqtt\":true}"
+    );
+    assert!(matches!(
+        s.foreign_set_meta(u2, "a.b", Some(MetaValue::Str("x"))),
+        Err(StoreError::Invalid(_))
+    ));
+    assert!(!s
+        .foreign_set_meta(9999, "hops", Some(MetaValue::Int(1)))
+        .unwrap());
+}
+
+#[test]
+fn own_rows_are_either_user_composed_or_a_copy_on_a_live_edge() {
+    let (_t, mut s) = ready();
+    let a = fconv(&mut s, "meshtastic", ForeignKind::Channel, "ch:a:1");
+    let b = fconv(&mut s, "meshtastic", ForeignKind::Channel, "ch:b:1");
+    let dm = fconv(&mut s, "meshtastic", ForeignKind::Dm, "dm:!a1");
+    let e = mk_edge(&mut s, a, b);
+    let o = ingest1(&mut s, fin(a, "!a1", Some("1"), "x", false));
+    let neither = ForeignSend {
+        conv: b,
+        text: "x",
+        group_id: None,
+        part_k: 1,
+        part_n: 1,
+        origin_msg: None,
+        edge_id: None,
+    };
+    let both = ForeignSend {
+        group_id: Some(1),
+        ..copy_send(e, o, b, "x", 1, 1)
+    };
+    for bad in [
+        neither,
+        both,
+        copy_send(e, o, b, "x", 2, 1),  // k > n
+        copy_send(e, o, b, "x", 0, 1),  // k = 0
+        copy_send(e, o, a, "x", 1, 1),  // not the edge's destination
+        copy_send(e, o, dm, "x", 1, 1), // not the edge's destination
+    ] {
+        assert!(
+            matches!(s.foreign_queue_send(&bad), Err(StoreError::Invalid(_))),
+            "{bad:?}"
+        );
+    }
+    let text = "y".repeat(MAX_FOREIGN_BODY + 1);
+    assert!(matches!(
+        s.foreign_queue_send(&copy_send(e, o, b, &text, 1, 1)),
+        Err(StoreError::Invalid(_))
+    ));
+    // A copy's origin must be inbound on the edge's source.
+    let own = user_send(&mut s, a, "mine");
+    assert!(matches!(
+        s.foreign_queue_send(&copy_send(e, own, b, "x", 1, 1)),
+        Err(StoreError::Invalid(_))
+    ));
+    // Send groups validate atomically: one bad part queues nothing.
+    let before = s.local_seq().unwrap();
+    assert!(matches!(
+        s.send_group_create(
+            "t",
+            "{}",
+            &[
+                GroupPart {
+                    conv: dm,
+                    text: "t",
+                    part_k: 1,
+                    part_n: 1
+                },
+                GroupPart {
+                    conv: 9999,
+                    text: "t",
+                    part_k: 1,
+                    part_n: 1
+                },
+            ],
+        ),
+        Err(StoreError::NotFound)
+    ));
+    assert!(matches!(
+        s.send_group_create("t", "not json", &[]),
+        Err(StoreError::Invalid(_))
+    ));
+    assert_eq!(s.local_seq().unwrap(), before);
+    let (g, rows) = s
+        .send_group_create(
+            "long text",
+            "{\"targets\":[\"fc-1\",\"msg\"]}",
+            &[
+                GroupPart {
+                    conv: dm,
+                    text: "(1/2) long",
+                    part_k: 1,
+                    part_n: 2,
+                },
+                GroupPart {
+                    conv: dm,
+                    text: "(2/2) text",
+                    part_k: 2,
+                    part_n: 2,
+                },
+                GroupPart {
+                    conv: b,
+                    text: "long text",
+                    part_k: 1,
+                    part_n: 1,
+                },
+            ],
+        )
+        .unwrap();
+    let group = s.send_group(g).unwrap().unwrap();
+    assert_eq!(group.text, "long text");
+    assert_eq!(group.local_seq, before + 1);
+    let held: Vec<i64> = s.send_group_rows(g).unwrap().iter().map(|m| m.id).collect();
+    assert_eq!(held, rows);
+    let r0 = s.foreign_message(rows[0]).unwrap().unwrap();
+    assert_eq!(
+        (
+            r0.dir,
+            r0.state,
+            r0.group_id,
+            r0.part_k,
+            r0.part_n,
+            r0.sender_native.as_str()
+        ),
+        (ForeignDir::Own, ForeignState::Queued, Some(g), 1, 2, BOARD)
+    );
+    // A single send into an existing group.
+    let extra = s
+        .foreign_queue_send(&ForeignSend {
+            group_id: Some(g),
+            ..neither
+        })
+        .unwrap();
+    assert_eq!(s.send_group_rows(g).unwrap().len(), 4);
+    assert!(s.send_group_rows(g).unwrap().iter().any(|m| m.id == extra));
+    assert!(matches!(
+        s.foreign_queue_send(&ForeignSend {
+            group_id: Some(g + 50),
+            ..neither
+        }),
+        Err(StoreError::NotFound)
+    ));
+}
+
+#[test]
+fn edge_inputs_honour_cursor_and_relayed_seq_and_skip_copies() {
+    let (_t, mut s) = ready();
+    let a = fconv(&mut s, "meshtastic", ForeignKind::Channel, "ch:a:1");
+    let b = fconv(&mut s, "app:deltachat", ForeignKind::Group, "grp:9");
+    let dm = fconv(&mut s, "meshtastic", ForeignKind::Dm, "dm:!a1");
+    let history = ingest1(&mut s, fin(a, "!a1", Some("1"), "old", false));
+    // Endpoints: never a DM, never one conversation, never twice.
+    for (src, dst) in [(a, dm), (dm, b), (a, a), (a, 9999)] {
+        assert!(s
+            .edge_create(&EdgeNew {
+                src_conv: src,
+                dst_conv: dst,
+                honour_ok_to_mqtt: false,
+                oversize: EdgeOversize::Split,
+                consent: consent(),
+            })
+            .is_err());
+    }
+    let e = mk_edge(&mut s, a, b);
+    assert!(matches!(
+        s.edge_create(&EdgeNew {
+            src_conv: a,
+            dst_conv: b,
+            honour_ok_to_mqtt: true,
+            oversize: EdgeOversize::Split,
+            consent: consent(),
+        }),
+        Err(StoreError::Invalid(_))
+    ));
+    let back = mk_edge(&mut s, b, a); // the reverse direction is its own edge
+    let edge = s.edge(e).unwrap().unwrap();
+    assert_eq!(edge.cursor_seq, fseq(&s, history));
+    assert_eq!(
+        (
+            edge.src_kind,
+            edge.dst_kind,
+            edge.oversize,
+            edge.enabled,
+            edge.paused
+        ),
+        (
+            ForeignKind::Channel,
+            ForeignKind::Group,
+            EdgeOversize::Refuse,
+            true,
+            false
+        )
+    );
+    let i1 = ingest1(&mut s, fin(a, "!a1", Some("2"), "new 1", false));
+    let i2 = ingest1(&mut s, fin(a, "!b2", Some("3"), "new 2", false));
+    let i3 = ingest1(&mut s, fin(a, "!b2", Some("4"), "new 3", false));
+    let inputs = |s: &Store, e: i64| -> Vec<i64> {
+        s.edge_inputs(e, 100)
+            .unwrap()
+            .iter()
+            .map(|m| m.id)
+            .collect()
+    };
+    // History (at or below cursor_seq) is never an input, never a copy.
+    assert_eq!(inputs(&s, e), vec![i1, i2, i3]);
+    assert!(matches!(
+        s.foreign_queue_send(&copy_send(e, history, b, "x", 1, 1)),
+        Err(StoreError::Invalid(_))
+    ));
+    // Queueing a copy advances relayed_seq past its origin in the same
+    // transaction.
+    let c1 = s
+        .foreign_queue_send(&copy_send(e, i1, b, "[!a1/M] new 1", 1, 1))
+        .unwrap();
+    assert_eq!(s.edge(e).unwrap().unwrap().relayed_seq, fseq(&s, i1));
+    assert_eq!(inputs(&s, e), vec![i2, i3]);
+    // A refused input is skipped by advancing the mark explicitly.
+    assert_eq!(
+        s.edge_advance_relayed_seq(e, fseq(&s, i2)).unwrap(),
+        fseq(&s, i2)
+    );
+    s.edge_count(e, EdgeCounter::Refused, 1).unwrap();
+    assert_eq!(inputs(&s, e), vec![i3]);
+    // Never backwards.
+    assert_eq!(s.edge_advance_relayed_seq(e, 1).unwrap(), fseq(&s, i2));
+    // The copy (own, in b) is never an input of the reverse edge; inbound
+    // traffic in b is.
+    let rb = ingest1(&mut s, fin(b, "bob@x", Some("m1"), "from dc", true));
+    assert_eq!(inputs(&s, back), vec![rb]);
+    let copy = s.foreign_message(c1).unwrap().unwrap();
+    assert_eq!((copy.origin_msg, copy.edge_id), (Some(i1), Some(e)));
+    // Disabled: no copies; re-enable needs consent and moves the cursor,
+    // so what arrived while off is history.
+    assert!(s.edge_set_enabled(e, false, None).unwrap());
+    let off = ingest1(&mut s, fin(a, "!a1", Some("5"), "while off", false));
+    assert!(matches!(
+        s.foreign_queue_send(&copy_send(e, i3, b, "x", 1, 1)),
+        Err(StoreError::Invalid(_))
+    ));
+    assert!(matches!(
+        s.edge_set_enabled(e, true, None),
+        Err(StoreError::Invalid(_))
+    ));
+    assert!(s.edge_set_enabled(e, true, Some(&consent())).unwrap());
+    assert!(!s.edge_set_enabled(e, true, Some(&consent())).unwrap());
+    assert!(s.edge(e).unwrap().unwrap().cursor_seq >= fseq(&s, off));
+    assert!(inputs(&s, e).is_empty());
+    s.edge_count(e, EdgeCounter::Relayed, 2).unwrap();
+    assert_eq!(s.edge(e).unwrap().unwrap().relayed, 2);
+    assert_eq!(s.edge_list().unwrap().len(), 2);
+    // Delete: the edge, its keys and its never-handed copies go.
+    s.foreign_seen_insert(e, a, "!a1", "2", fseq(&s, i1))
+        .unwrap();
+    assert!(s.edge_delete(e).unwrap());
+    assert!(!s.edge_delete(e).unwrap());
+    assert!(s.foreign_message(c1).unwrap().is_none());
+    assert_eq!(s.foreign_seen_count(e).unwrap(), 0);
+    assert!(matches!(
+        s.edge_count(e, EdgeCounter::Shed, 1),
+        Err(StoreError::NotFound)
+    ));
+}
+
+#[test]
+fn foreign_seen_is_bounded_per_edge_and_evicts_the_oldest() {
+    let (_t, mut s) = ready();
+    let a = fconv(&mut s, "meshtastic", ForeignKind::Channel, "ch:a:1");
+    let b = fconv(&mut s, "meshtastic", ForeignKind::Channel, "ch:b:1");
+    let e = mk_edge(&mut s, a, b);
+    let f = mk_edge(&mut s, b, a);
+    s.foreign_seen_insert(f, b, "!z", "keep", 1).unwrap();
+    let total = FOREIGN_SEEN_CAP + 4;
+    for i in 0..total {
+        s.foreign_seen_insert(e, a, "!a1", &i.to_string(), 100 + i)
+            .unwrap();
+    }
+    assert_eq!(s.foreign_seen_count(e).unwrap(), FOREIGN_SEEN_CAP);
+    for i in 0..4u64 {
+        assert!(!s
+            .foreign_seen_contains(Some(e), a, "!a1", &i.to_string())
+            .unwrap());
+    }
+    assert!(s.foreign_seen_contains(Some(e), a, "!a1", "4").unwrap());
+    assert!(s
+        .foreign_seen_contains(Some(e), a, "!a1", &(total - 1).to_string())
+        .unwrap());
+    // Bounded per edge: the other edge keeps its key.
+    assert_eq!(s.foreign_seen_count(f).unwrap(), 1);
+    assert!(s.foreign_seen_contains(None, b, "!z", "keep").unwrap());
+    assert!(!s.foreign_seen_contains(Some(e), b, "!z", "keep").unwrap());
+    // A repeated key keeps the newer local_seq (it is not evicted next).
+    s.foreign_seen_insert(e, a, "!a1", "4", 1_000_000).unwrap();
+    s.foreign_seen_insert(e, a, "!a1", "new", 1_000_001)
+        .unwrap();
+    assert!(s.foreign_seen_contains(Some(e), a, "!a1", "4").unwrap());
+    assert!(!s.foreign_seen_contains(Some(e), a, "!a1", "5").unwrap());
+    assert!(matches!(
+        s.foreign_seen_insert(9999, a, "!a1", "x", 1),
+        Err(StoreError::NotFound)
+    ));
+}
+
+/// The Layer 6 prune fixture: every 2a/2b category and every "never" item.
+struct ForeignFixture {
+    conv_a: i64,
+    custody: u64,
+    blob_superseded: BlobHash,
+    edge: i64,
+    edge_pinned_src: i64,
+    a1: i64,
+    a2: i64,
+    a3: i64,
+    c1: i64,
+    c2: [i64; 2],
+    c3_sent: i64,
+    cp1: i64,
+    p1: i64,
+    user_queued: i64,
+    user_failed: i64,
+}
+
+fn foreign_fixture(s: &mut Store) -> ForeignFixture {
+    let custody = match s.custody_put(&PEER, &[8; 1000]).unwrap() {
+        CustodyPut::Accepted(q) => q,
+        other => panic!("{other:?}"),
+    };
+    s.custody_commit(&PEER, custody).unwrap();
+    let blob_superseded = s
+        .blob_put_public(&sample(3000, 3), Class::Update, false)
+        .unwrap();
+    s.blob_mark_superseded(&blob_superseded).unwrap();
+
+    let a = fconv(s, "meshtastic", ForeignKind::Channel, "ch:a:1");
+    let b = fconv(s, "meshtastic", ForeignKind::Channel, "ch:b:1");
+    let p = fconv(s, "meshtastic", ForeignKind::Channel, "ch:pinned:1");
+    let dm = fconv(s, "meshtastic", ForeignKind::Dm, "dm:!a1");
+    s.foreign_conversation_set_pinned(p, true).unwrap();
+    let edge = mk_edge(s, a, b);
+    let edge_pinned_src = mk_edge(s, p, b);
+    let a1 = ingest1(s, fin(a, "!a1", Some("1"), &"s".repeat(100), false));
+    let a2 = ingest1(s, fin(a, "!a1", Some("2"), &"L".repeat(5000), false));
+    let a3 = ingest1(s, fin(a, "!a1", Some("3"), &"m".repeat(300), false));
+    let p1 = ingest1(s, fin(p, "!p1", Some("1"), "pinned", false));
+    let c1 = s
+        .foreign_queue_send(&copy_send(edge, a1, b, "[a1/M] s", 1, 1))
+        .unwrap();
+    let c2 = s
+        .foreign_queue_sends(&[
+            copy_send(edge, a2, b, "[a1/M] (1/2) L", 1, 2),
+            copy_send(edge, a2, b, "[a1/M] (2/2) L", 2, 2),
+        ])
+        .unwrap();
+    let c3_sent = s
+        .foreign_queue_send(&copy_send(edge, a3, b, "[a1/M] m", 1, 1))
+        .unwrap();
+    s.foreign_set_state(c3_sent, ForeignState::Sent, None, None)
+        .unwrap();
+    let cp1 = s
+        .foreign_queue_send(&copy_send(edge_pinned_src, p1, b, "[p1/M] pinned", 1, 1))
+        .unwrap();
+    let user_queued = user_send(s, dm, "never pruned while undelivered");
+    let user_failed = user_send(s, dm, "failed is undelivered too");
+    s.foreign_set_state(user_failed, ForeignState::Failed, None, Some("NO_CHANNEL"))
+        .unwrap();
+    s.foreign_seen_insert(edge, a, "!a1", "1", fseq(s, a1))
+        .unwrap();
+    ForeignFixture {
+        conv_a: a,
+        custody,
+        blob_superseded,
+        edge,
+        edge_pinned_src,
+        a1,
+        a2,
+        a3,
+        c1,
+        c2: [c2[0], c2[1]],
+        c3_sent,
+        cp1,
+        p1,
+        user_queued,
+        user_failed,
+    }
+}
+
+#[test]
+fn pruning_runs_2a_then_2b_between_steps_2_and_3_and_keeps_the_never_list() {
+    let (_t, mut s) = ready();
+    let fx = foreign_fixture(&mut s);
+    assert!(s.class_bytes(Class::Foreign).unwrap() > 5000);
+    // Simulate a mark that lags the copy (the shed must advance it).
+    s.conn
+        .execute(
+            "UPDATE relay_edges SET relayed_seq = 0 WHERE id = ?1",
+            [fx.edge_pinned_src],
+        )
+        .unwrap();
+    s.set_watermarks(Watermarks { high: 0, low: 0 }).unwrap();
+    let r = s.prune(DiskSpace::UNKNOWN).unwrap();
+    assert!(r.triggered && r.store_full);
+    let steps: Vec<PruneStep> = r.pruned.iter().map(|p| p.step).collect();
+    assert_eq!(
+        steps,
+        [
+            PruneStep::Evictable,
+            PruneStep::Superseded,
+            PruneStep::ForeignInbound,
+            PruneStep::ForeignInbound,
+            PruneStep::ForeignInbound,
+            PruneStep::ForeignInbound,
+            PruneStep::RelayBacklog,
+            PruneStep::RelayBacklog,
+            PruneStep::RelayBacklog,
+        ]
+    );
+    assert_eq!(r.pruned[0].item, PrunedRef::Custody(fx.custody));
+    assert_eq!(r.pruned[1].item, PrunedRef::Blob(fx.blob_superseded));
+    // 2a: size × age, the 5 KB row first; handed copies go with 2a.
+    assert_eq!(r.pruned[2].item, PrunedRef::Foreign(fx.a2));
+    let mut two_a: Vec<i64> = r.pruned[2..6]
+        .iter()
+        .map(|p| match p.item {
+            PrunedRef::Foreign(id) => id,
+            other => panic!("{other:?}"),
+        })
+        .collect();
+    two_a.sort_unstable();
+    let mut want = vec![fx.a1, fx.a2, fx.a3, fx.c3_sent];
+    want.sort_unstable();
+    assert_eq!(two_a, want);
+    // 2b: oldest copy first; both parts of the split copy go together.
+    assert_eq!(
+        r.pruned[6..].iter().map(|p| p.item).collect::<Vec<_>>(),
+        [
+            PrunedRef::RelayCopy(fx.c1),
+            PrunedRef::RelayCopy(fx.c2[0]),
+            PrunedRef::RelayCopy(fx.cp1),
+        ]
+    );
+    for id in [fx.c1, fx.c2[0], fx.c2[1], fx.cp1] {
+        assert!(s.foreign_message(id).unwrap().is_none(), "{id}");
+    }
+    // Each shed is counted on its edge; relayed_seq moves past the origin.
+    let edge = s.edge(fx.edge).unwrap().unwrap();
+    assert_eq!(edge.shed, 2);
+    let pinned_src = s.edge(fx.edge_pinned_src).unwrap().unwrap();
+    assert_eq!(pinned_src.shed, 1);
+    assert_eq!(pinned_src.relayed_seq, fseq(&s, fx.p1));
+    assert!(s.edge_inputs(fx.edge_pinned_src, 10).unwrap().is_empty());
+    // Never: undelivered user sends, pinned conversations, foreign_seen.
+    for id in [fx.user_queued, fx.user_failed, fx.p1] {
+        assert!(s.foreign_message(id).unwrap().is_some(), "{id}");
+    }
+    assert!(s
+        .foreign_seen_contains(Some(fx.edge), fx.conv_a, "!a1", "1")
+        .unwrap());
+    assert_eq!(s.foreign_seen_count(fx.edge).unwrap(), 1);
+    // Counters follow what is left (every inbound row of `a` is gone).
+    let a = s.foreign_conversation(fx.conv_a).unwrap().unwrap();
+    assert_eq!((a.messages, a.unread), (0, 0));
+    let all = s.foreign_conversations(Some("meshtastic")).unwrap();
+    assert!(all.iter().all(|c| c.unread <= c.messages));
+    // A second pass finds nothing more of ours to shed.
+    let r = s.prune(DiskSpace::UNKNOWN).unwrap();
+    assert!(r
+        .pruned
+        .iter()
+        .all(|p| !matches!(p.item, PrunedRef::Foreign(_) | PrunedRef::RelayCopy(_))));
+    // Foreign rows are never refused, even with the store full.
+    let c = s.foreign_message(fx.p1).unwrap().unwrap().conv;
+    assert!(s
+        .foreign_insert_batch(vec![fin(c, "!p1", Some("2"), "still ok", false)])
+        .unwrap()[0]
+        .is_some());
+}
+
+#[test]
+fn the_foreign_shaping_quota_evicts_first_and_never_refuses() {
+    let (_t, mut s) = ready();
+    let c = fconv(&mut s, "meshtastic", ForeignKind::Channel, "ch:mqtt:1");
+    let p = fconv(&mut s, "meshtastic", ForeignKind::Channel, "ch:pin:1");
+    s.foreign_conversation_set_pinned(p, true).unwrap();
+    // Committed custody over its own quota as well.
+    for i in 0..3u8 {
+        s.custody_put(&PEER, &[i; 2000]).unwrap();
+    }
+    s.custody_commit(&PEER, 3).unwrap();
+    s.set_quota(Class::Custody, Some(2500)).unwrap();
+    let rows: Vec<ForeignInsert> = (0..20)
+        .map(|i| fin(c, "!a1", Some(&i.to_string()), &"q".repeat(1000), false))
+        .collect();
+    s.foreign_insert_batch(rows).unwrap();
+    ingest1(&mut s, fin(p, "!p", Some("1"), &"z".repeat(3000), false));
+    s.set_quota(Class::Foreign, Some(8000)).unwrap();
+    let r = s.prune(DiskSpace::UNKNOWN).unwrap();
+    assert!(!r.triggered, "global capacity is fine; quotas shaped it");
+    let first_custody = r
+        .pruned
+        .iter()
+        .position(|p| p.step == PruneStep::Quota(Class::Custody))
+        .unwrap();
+    assert!(first_custody > 0);
+    assert!(r.pruned[..first_custody]
+        .iter()
+        .all(|p| p.step == PruneStep::Quota(Class::Foreign)
+            && matches!(p.item, PrunedRef::Foreign(_))));
+    assert!(s.class_bytes(Class::Foreign).unwrap() <= 8000);
+    // Only the pinned row is left over a tiny quota: still never refused,
+    // never a full class.
+    s.set_quota(Class::Foreign, Some(1)).unwrap();
+    let r = s.prune(DiskSpace::UNKNOWN).unwrap();
+    assert!(!r.full_classes.contains(&Class::Foreign));
+    assert!(!s.full_classes().contains(&Class::Foreign));
+    assert_eq!(s.foreign_conversation(c).unwrap().unwrap().messages, 0);
+    assert_eq!(s.foreign_conversation(p).unwrap().unwrap().messages, 1);
+    assert_eq!(s.foreign_conversation(c).unwrap().unwrap().unread, 0);
+    assert!(s
+        .foreign_insert_batch(vec![fin(c, "!a1", Some("new"), "fits anyway", false)])
+        .unwrap()[0]
+        .is_some());
+    s.set_quota(Class::Foreign, None).unwrap();
+    assert_eq!(s.quota(Class::Foreign).unwrap(), None);
+}
+
+#[test]
+fn foreign_rows_share_the_one_local_seq_with_111_rows() {
+    let (_t, mut s) = ready();
+    let c = fconv(&mut s, "lxmf", ForeignKind::Dm, "dm:ab");
+    let (m1, _) = s.queue_own_message(&own(PEER, 0, b"111")).unwrap();
+    let f1 = ingest1(&mut s, fin(c, "ab", Some("h1"), "lx", true));
+    let (m2, _) = s.queue_own_message(&own(PEER, 0, b"111 again")).unwrap();
+    let f2 = user_send(&mut s, c, "reply");
+    let l = |id: i64| s.message(id).unwrap().unwrap().local_seq;
+    let (l1, l2) = (l(m1), l(m2));
+    let (fl1, fl2) = (fseq(&s, f1), fseq(&s, f2));
+    assert!(l1 < fl1 && fl1 < l2 && l2 < fl2);
+    // The send group drew one too, just before its row.
+    let g = s.foreign_message(f2).unwrap().unwrap().group_id.unwrap();
+    assert_eq!(s.send_group(g).unwrap().unwrap().local_seq + 1, fl2);
+    assert_eq!(s.local_seq().unwrap(), fl2);
 }

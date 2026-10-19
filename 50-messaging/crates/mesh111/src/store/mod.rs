@@ -18,6 +18,10 @@
 //! - **Schema (§10.3)** with migrations via `PRAGMA user_version`
 //!   ([`schema`]); tx/rx state ([`tx`], [`rx`]); rows ([`rows`]); blob
 //!   refcounts ([`blobs`]); capacity-only pruning ([`prune`], §10.4).
+//! - **Foreign messages (Layer 6 §3, schema v3)** ([`foreign`]): the bridge's
+//!   conversations, messages, relay edges, loop-guard keys and send groups.
+//!   They draw `local_seq` from the same counter ([`next_local_seq`]): one
+//!   store-wide sequence, never a second one.
 //!
 //! No wall clock anywhere: ages are the store's local insertion sequence.
 
@@ -31,6 +35,7 @@ use crate::blobs::{BlobDir, BlobError};
 use crate::keys::{KeyError, KeyProvider, StoreKey};
 
 pub mod blobs;
+pub mod foreign;
 pub mod prune;
 pub mod rows;
 pub mod rx;
@@ -41,6 +46,12 @@ pub mod tx;
 mod tests;
 
 pub use blobs::BlobRow;
+pub use foreign::{
+    EdgeConsent, EdgeCounter, EdgeNew, EdgeOversize, EdgeRow, ForeignAuth, ForeignConversationRow,
+    ForeignDir, ForeignInsert, ForeignKind, ForeignMessageRow, ForeignSend, ForeignState,
+    GroupPart, MetaValue, SendGroupRow, StateChange, FOREIGN_SEEN_CAP, MAX_FOREIGN_BATCH,
+    MAX_FOREIGN_BODY,
+};
 pub use prune::{DiskSpace, PruneReport, PruneStep, PrunedItem, PrunedRef, Watermarks};
 pub use rows::{
     Class, ContactRow, CustodyItem, CustodyPut, Dir, MessageRow, MsgState, NewMessage, OutboxFrag,
@@ -513,7 +524,9 @@ pub(crate) fn del(c: &Connection, key: &str) -> Result<()> {
 }
 
 /// The next local insertion sequence — the store's only notion of age
-/// (§10.4: never a clock). Must run inside the caller's transaction.
+/// (§10.4: never a clock). Must run inside the caller's transaction. The
+/// **one** store-wide counter: 111 rows and every Layer 6 foreign row
+/// (`foreign_messages`, `send_groups`, §3 "Order and time") draw from it.
 pub(crate) fn next_local_seq(c: &Connection) -> Result<u64> {
     let next = get_u64(c, K_LOCAL_SEQ)?.unwrap_or(0) + 1;
     set_u64(c, K_LOCAL_SEQ, next)?;

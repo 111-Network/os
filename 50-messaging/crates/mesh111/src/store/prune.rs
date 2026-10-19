@@ -11,19 +11,47 @@
 //!    and large first; age = local-sequence distance;
 //! 2. superseded release/KB objects (below the Layer 1 floor), fully fetched
 //!    deltas — marked by their consumer ([`Store::blob_mark_superseded`]);
+//!
+//!    **2a** (Layer 6 §3) foreign inbound rows of conversations that are not
+//!    pinned, weight = size × `local_seq` distance (as step 1), together
+//!    with relay copies already handed to a carrier (`edge_id` set, no
+//!    longer `queued`; module note below);
+//!
+//!    **2b** (Layer 6 §3) relay backlog copies (`dir own`, `edge_id` set,
+//!    `queued`) oldest first; the queued parts of one copy go together, the
+//!    shed is counted on its edge (`shed += 1`) and the edge's `relayed_seq`
+//!    is advanced past the copy's origin, so shedding never makes history
+//!    relayable again;
 //! 3. own conversation history oldest-first — **only at hard capacity**
 //!    (the store itself still short after 1–2; never to make room for an
 //!    incoming custody or bulk item, which is refused instead) **and only
 //!    after an export offer** ([`Store::set_export_offered`]); otherwise
 //!    `export_offer_needed`;
 //! 4. **never** undelivered outbound, uncommitted custody, pending requests,
-//!    pinned items or contacts — instead `store_full` is raised and new
-//!    custody, new bulk and new message requests are refused (messages are
-//!    never refused).
+//!    pinned items or contacts — nor (Layer 6 §3) a user-composed foreign
+//!    send (`group_id` set) while undelivered, the rows of a pinned foreign
+//!    conversation, or the bounded `foreign_seen` keys — instead
+//!    `store_full` is raised and new custody, new bulk and new message
+//!    requests are refused (messages, foreign rows included, are never
+//!    refused).
 //!
 //! **Per-class quotas** (settings, configurable) shape capacity for the
 //! refusable classes (custody and bulk): a class above its quota loses its
 //! step-1/2 items first; if still above, new items of that class are refused.
+//! [`Class::Foreign`] has a **shaping quota only** (Layer 6 §3, settings key
+//! `quota.foreign`, unset = unlimited): over it, its step-2a/2b items are
+//! evicted **first**, before any other quota or step, and it never refuses
+//! (it is never in `full_classes`).
+//!
+//! **Live bytes** are DB pages, so the v3 foreign tables count as soon as
+//! they hold rows; [`Store::class_bytes`] of `Foreign` is the rows' body and
+//! `meta` bytes plus the per-row overhead.
+//!
+//! *Note (as-built reading of Layer 6 §3):* relay copies that a carrier has
+//! already taken (`sent` and later) are not in the "never" list and are not
+//! 2b's backlog; they are evicted with 2a (same weight), so an active edge
+//! cannot grow the store without bound. Delivered user-composed rows are in
+//! no step (human-rate bounded, like own history before an export offer).
 //! Pending message requests have a count quota ([`Store::request_quota`],
 //! default [`DEFAULT_REQUEST_QUOTA`]).
 //!
@@ -31,7 +59,7 @@
 //! figures are written to `settings` by every pass and read back at open, so
 //! a full store stays full across a restart until a pass with room clears it.
 
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, OptionalExtension};
 
 use crate::blobs::BlobHash;
 
@@ -113,6 +141,10 @@ pub enum PruneStep {
     Evictable,
     /// Step 2: superseded objects.
     Superseded,
+    /// Step 2a (Layer 6 §3): foreign inbound rows (and handed relay copies).
+    ForeignInbound,
+    /// Step 2b (Layer 6 §3): relay backlog copies (queued), oldest first.
+    RelayBacklog,
     /// Step 3: own conversation history (after an export offer).
     History,
 }
@@ -123,6 +155,11 @@ pub enum PrunedRef {
     Custody(u64),
     Blob(BlobHash),
     Message(i64),
+    /// A `foreign_messages` row (step 2a).
+    Foreign(i64),
+    /// A queued relay copy (step 2b): the id of its first queued part; its
+    /// other queued parts went with it.
+    RelayCopy(i64),
 }
 
 /// One removed item.
@@ -176,6 +213,8 @@ fn key(r: &PrunedRef) -> (u8, i128, [u8; 32]) {
         PrunedRef::Custody(s) => (0, i128::from(*s), [0; 32]),
         PrunedRef::Blob(h) => (1, 0, h.0),
         PrunedRef::Message(id) => (2, i128::from(*id), [0; 32]),
+        PrunedRef::Foreign(id) => (3, i128::from(*id), [0; 32]),
+        PrunedRef::RelayCopy(id) => (4, i128::from(*id), [0; 32]),
     }
 }
 
@@ -221,6 +260,109 @@ fn superseded(c: &Connection) -> Result<Vec<Candidate>> {
         c,
         "superseded = 1 AND present = 1 AND pinned = 0 AND NOT (public = 1 AND refetchable = 1)",
     )
+}
+
+/// Bytes one foreign row accounts for (SQL expression over alias `m`).
+const FOREIGN_ROW_BYTES: &str = "octet_length(m.body) + octet_length(m.meta)";
+
+/// Step 2a candidates (Layer 6 §3): foreign inbound of unpinned
+/// conversations, plus relay copies already handed to a carrier.
+fn foreign_inbound(c: &Connection) -> Result<Vec<Candidate>> {
+    let mut st = c.prepare(&format!(
+        "SELECT m.id, {FOREIGN_ROW_BYTES}, m.local_seq FROM foreign_messages m
+         JOIN foreign_conversations fc ON fc.id = m.conv
+         WHERE fc.pinned = 0
+           AND (m.dir = 'in' OR (m.edge_id IS NOT NULL AND m.state <> 'queued'))"
+    ))?;
+    let rows = st.query_map([], |r| {
+        Ok((
+            r.get::<_, i64>(0)?,
+            r.get::<_, i64>(1)?,
+            r.get::<_, i64>(2)?,
+        ))
+    })?;
+    let mut out = Vec::new();
+    for r in rows {
+        let (id, len, local) = r?;
+        out.push(Candidate {
+            item: PrunedRef::Foreign(id),
+            bytes: to_u64(len, "foreign.len")? + ROW_OVERHEAD,
+            local_seq: to_u64(local, "foreign.local_seq")?,
+            class: Class::Foreign,
+        });
+    }
+    Ok(out)
+}
+
+/// Step 2b candidates (Layer 6 §3): queued relay copies of unpinned
+/// conversations, one candidate per copy (all its queued parts), oldest
+/// first.
+fn relay_backlog(c: &Connection) -> Result<Vec<Candidate>> {
+    let mut st = c.prepare(&format!(
+        "SELECT min(m.id), sum({FOREIGN_ROW_BYTES} + ?1), min(m.local_seq)
+         FROM foreign_messages m
+         JOIN foreign_conversations fc ON fc.id = m.conv
+         WHERE fc.pinned = 0 AND m.dir = 'own' AND m.edge_id IS NOT NULL
+           AND m.state = 'queued'
+         GROUP BY m.edge_id, m.origin_msg
+         ORDER BY min(m.local_seq), min(m.id)"
+    ))?;
+    let rows = st.query_map([ROW_OVERHEAD as i64], |r| {
+        Ok((
+            r.get::<_, i64>(0)?,
+            r.get::<_, i64>(1)?,
+            r.get::<_, i64>(2)?,
+        ))
+    })?;
+    let mut out = Vec::new();
+    for r in rows {
+        let (id, len, local) = r?;
+        out.push(Candidate {
+            item: PrunedRef::RelayCopy(id),
+            bytes: to_u64(len, "foreign.len")?,
+            local_seq: to_u64(local, "foreign.local_seq")?,
+            class: Class::Foreign,
+        });
+    }
+    Ok(out)
+}
+
+/// Shed one queued relay copy (step 2b): delete its queued parts, count the
+/// shed on its edge and advance the edge's `relayed_seq` past the origin
+/// (when the origin row is still held; queueing the copy already advanced
+/// it, Layer 6 §8).
+fn shed_copy(c: &Connection, first: i64) -> Result<()> {
+    let row: Option<(Option<i64>, Option<i64>)> = c
+        .query_row(
+            "SELECT edge_id, origin_msg FROM foreign_messages WHERE id = ?1",
+            [first],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()?;
+    let Some((Some(edge), Some(origin))) = row else {
+        return Ok(());
+    };
+    let origin_seq: Option<i64> = c
+        .query_row(
+            "SELECT local_seq FROM foreign_messages WHERE id = ?1",
+            [origin],
+            |r| r.get(0),
+        )
+        .optional()?;
+    let n = c.execute(
+        "DELETE FROM foreign_messages
+         WHERE edge_id = ?1 AND origin_msg = ?2 AND dir = 'own' AND state = 'queued'",
+        params![edge, origin],
+    )?;
+    if n > 0 {
+        c.execute(
+            "UPDATE relay_edges
+             SET shed = shed + 1, relayed_seq = max(relayed_seq, coalesce(?2, relayed_seq))
+             WHERE id = ?1",
+            params![edge, origin_seq],
+        )?;
+    }
+    Ok(())
 }
 
 /// Step 3 candidates, oldest first: delivered own/inbound history, never
@@ -304,6 +446,10 @@ fn remove(c: &Connection, item: &PrunedRef) -> Result<()> {
         PrunedRef::Message(id) => {
             c.execute("DELETE FROM messages WHERE id = ?1", [id])?;
         }
+        PrunedRef::Foreign(id) => {
+            c.execute("DELETE FROM foreign_messages WHERE id = ?1", [id])?;
+        }
+        PrunedRef::RelayCopy(id) => shed_copy(c, *id)?,
     }
     Ok(())
 }
@@ -328,6 +474,12 @@ pub(crate) fn class_bytes(c: &Connection, class: Class) -> Result<u64> {
     let v: i64 = if class == Class::Custody {
         c.query_row(
             "SELECT coalesce(sum(length(bytes) + ?1), 0) FROM custody",
+            [ROW_OVERHEAD as i64],
+            |r| r.get(0),
+        )?
+    } else if class == Class::Foreign {
+        c.query_row(
+            &format!("SELECT coalesce(sum({FOREIGN_ROW_BYTES} + ?1), 0) FROM foreign_messages m"),
             [ROW_OVERHEAD as i64],
             |r| r.get(0),
         )?
@@ -383,11 +535,13 @@ impl Store {
     }
 
     /// Set or clear the quota of a refusable class (custody or bulk;
-    /// messages are never refused, so quotas on them are invalid).
+    /// messages are never refused, so quotas on them are invalid), or the
+    /// shaping quota of [`Class::Foreign`] (evict first, never refuse;
+    /// Layer 6 §3).
     pub fn set_quota(&mut self, class: Class, quota: Option<u64>) -> Result<()> {
-        if !class.is_refusable() {
+        if !class.has_quota() {
             return Err(StoreError::Invalid(
-                "quotas apply to custody and bulk classes",
+                "quotas apply to custody, bulk and the foreign shaping quota",
             ));
         }
         let k = quota_key(class);
@@ -458,7 +612,12 @@ impl Store {
         let live_before = self.live_bytes()?;
         let incoming = extra.map_or(0, |e| e.1);
         let export_offered = self.export_offered()?;
+        // The foreign shaping quota evicts first (Layer 6 §3), then the
+        // refusable classes in `Class::ALL` order.
         let mut quotas = Vec::new();
+        if let Some(q) = self.quota(Class::Foreign)? {
+            quotas.push((Class::Foreign, q));
+        }
         for class in Class::ALL.into_iter().filter(|c| c.is_refusable()) {
             if let Some(q) = self.quota(class)? {
                 quotas.push((class, q));
@@ -478,9 +637,12 @@ impl Store {
             sort_by_weight(&mut step1, now);
             let mut step2 = superseded(tx)?;
             sort_by_weight(&mut step2, now);
+            let mut step2a = foreign_inbound(tx)?;
+            sort_by_weight(&mut step2a, now);
+            let step2b = relay_backlog(tx)?; // oldest first, as queried
             let mut gone: Vec<PrunedRef> = Vec::new();
 
-            // Quotas: per refusable class, steps 1–2 restricted to it.
+            // Quotas: per class with a quota, steps 1–2b restricted to it.
             for (class, quota) in &quotas {
                 let extra_here = match extra {
                     Some((Some(c), b)) if c == *class => b,
@@ -492,8 +654,10 @@ impl Store {
                 }
                 for cand in step1
                     .iter()
+                    .chain(step2.iter())
+                    .chain(step2a.iter())
+                    .chain(step2b.iter())
                     .map(|c| (PruneStep::Quota(*class), c))
-                    .chain(step2.iter().map(|c| (PruneStep::Quota(*class), c)))
                 {
                     if used.saturating_add(extra_here) <= *quota {
                         break;
@@ -511,7 +675,8 @@ impl Store {
                         bytes: cand.bytes,
                     });
                 }
-                if used > *quota {
+                // A shaping-only quota (Foreign) never refuses.
+                if used > *quota && class.is_refusable() {
                     full_classes.push(*class);
                 }
                 // Only the incoming item's own class can refuse it.
@@ -542,6 +707,8 @@ impl Store {
                 for (step, list) in [
                     (PruneStep::Evictable, &step1),
                     (PruneStep::Superseded, &step2),
+                    (PruneStep::ForeignInbound, &step2a),
+                    (PruneStep::RelayBacklog, &step2b),
                 ] {
                     for cand in list.iter() {
                         if freed >= need_all {
@@ -560,7 +727,7 @@ impl Store {
                         });
                     }
                 }
-                // Hard capacity: steps 1–2 exhausted and the store itself is
+                // Hard capacity: steps 1–2b exhausted and the store itself is
                 // still short. Own history is pruned only for that pressure,
                 // never to make room for incoming custody or bulk.
                 if freed < need_base {
@@ -588,6 +755,12 @@ impl Store {
                 if freed < need_all {
                     fits = false;
                 }
+            }
+            if pruned
+                .iter()
+                .any(|p| matches!(p.item, PrunedRef::Foreign(_) | PrunedRef::RelayCopy(_)))
+            {
+                clamp_unread(tx)?;
             }
             // Persist the outcome: a full store is still full after a restart.
             save_capacity(tx, store_full, &full_classes, disk)
@@ -666,6 +839,19 @@ impl Store {
         };
         Ok(())
     }
+}
+
+/// After foreign rows were pruned: no conversation counts more unread rows
+/// than it still holds inbound.
+fn clamp_unread(c: &Connection) -> Result<()> {
+    c.execute(
+        "UPDATE foreign_conversations
+         SET unread = min(unread, (SELECT count(*) FROM foreign_messages m
+                                   WHERE m.conv = foreign_conversations.id AND m.dir = 'in'))
+         WHERE unread > 0",
+        [],
+    )?;
+    Ok(())
 }
 
 /// Persist one pass's capacity outcome (inside the pass's transaction).

@@ -11,14 +11,22 @@
 //! at most [`CAP`] entries are kept (newest ids); the file is compacted when
 //! it grows past twice that, and a file larger than [`MAX_FILE`] is ignored.
 //! Never used for ordering, freshness or anything cryptographic.
+//!
+//! **A second instance (Layer 6 §3):** foreign rows (`foreign_messages`) have
+//! their own row-id space, so their "received" display time lives in
+//! `fabric/display-times.foreign` ([`FOREIGN_TIMES_FILE`]): the same record
+//! format, API and bounds, opened with [`DisplayTimes::open`], so a foreign
+//! id can never collide with a 111 message id.
 
 use std::collections::HashMap;
 use std::io::Write;
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 
-/// File name inside the fabric directory.
+/// File name inside the fabric directory (111 `messages` row ids).
 pub const TIMES_FILE: &str = "display-times";
+/// The second instance's file (Layer 6 §3: `foreign_messages` row ids).
+pub const FOREIGN_TIMES_FILE: &str = "display-times.foreign";
 /// Entries kept.
 pub const CAP: usize = 100_000;
 /// One record.
@@ -63,7 +71,14 @@ impl DisplayTimes {
     /// Load `fabric_dir/display-times` (a missing, oversize or symlinked
     /// file starts empty).
     pub fn load(fabric_dir: &Path) -> DisplayTimes {
-        let path = fabric_dir.join(TIMES_FILE);
+        DisplayTimes::open(fabric_dir, TIMES_FILE)
+    }
+
+    /// Load `fabric_dir/<file>` — [`TIMES_FILE`] or [`FOREIGN_TIMES_FILE`]
+    /// (a missing, oversize or symlinked file starts empty). `file` is one
+    /// of this module's names, never caller input.
+    pub fn open(fabric_dir: &Path, file: &str) -> DisplayTimes {
+        let path = fabric_dir.join(file);
         let mut t = DisplayTimes {
             path: Some(path.clone()),
             map: HashMap::new(),
@@ -177,6 +192,33 @@ mod tests {
         assert_eq!(b.get_or_record(8, 0), 1_700_000_100);
         assert_eq!(rfc3339(0), "1970-01-01T00:00:00Z");
         assert_eq!(rfc3339(1_700_000_000), "2023-11-14T22:13:20Z");
+    }
+
+    #[test]
+    fn the_foreign_instance_is_a_separate_file_with_the_same_format() {
+        let t = tempfile::tempdir().unwrap();
+        let mut ours = DisplayTimes::load(t.path());
+        let mut foreign = DisplayTimes::open(t.path(), FOREIGN_TIMES_FILE);
+        // The same row id in both spaces never collides.
+        assert_eq!(ours.get_or_record(7, 1_700_000_000), 1_700_000_000);
+        assert_eq!(foreign.get_or_record(7, 1_800_000_000), 1_800_000_000);
+        foreign.record(9, 1_800_000_009);
+        let mut ours = DisplayTimes::open(t.path(), TIMES_FILE);
+        let mut foreign = DisplayTimes::open(t.path(), FOREIGN_TIMES_FILE);
+        assert_eq!((ours.len(), foreign.len()), (1, 2));
+        assert_eq!(ours.get_or_record(7, 0), 1_700_000_000);
+        assert_eq!(foreign.get_or_record(7, 0), 1_800_000_000);
+        // Same record format: 16-byte little-endian `id ‖ secs` records.
+        let bytes = std::fs::read(t.path().join(FOREIGN_TIMES_FILE)).unwrap();
+        assert_eq!(bytes.len(), 2 * REC);
+        assert_eq!(&bytes[..8], &7i64.to_le_bytes());
+        assert_eq!(&bytes[8..16], &1_800_000_000i64.to_le_bytes());
+        // A symlinked file is ignored (starts empty), as for the 111 file.
+        let other = t.path().join("elsewhere");
+        std::fs::write(&other, &bytes).unwrap();
+        let d = tempfile::tempdir().unwrap();
+        std::os::unix::fs::symlink(&other, d.path().join(FOREIGN_TIMES_FILE)).unwrap();
+        assert!(DisplayTimes::open(d.path(), FOREIGN_TIMES_FILE).is_empty());
     }
 
     #[test]

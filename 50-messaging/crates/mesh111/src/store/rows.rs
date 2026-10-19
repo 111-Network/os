@@ -48,11 +48,17 @@ pub enum Class {
     Object = 7,
     /// Transit custody held for members (hub role, §9).
     Custody = 8,
+    /// Foreign messages (Layer 6 §3, amends §10.4): the `foreign_messages`
+    /// rows of the bridge. Never produced by [`Class::from_kind`] (no §3.2
+    /// kind maps onto it) and never refusable: foreign inbound is evicted
+    /// (prune steps 2a/2b), never refused. It has a shaping quota
+    /// ([`Class::has_quota`]): over it, this class is evicted first.
+    Foreign = 9,
 }
 
 impl Class {
     /// Every class.
-    pub const ALL: [Class; 9] = [
+    pub const ALL: [Class; 10] = [
         Class::Control,
         Class::Human,
         Class::Agent,
@@ -62,9 +68,11 @@ impl Class {
         Class::Sync,
         Class::Object,
         Class::Custody,
+        Class::Foreign,
     ];
 
-    /// The class of a §3.2 kind byte.
+    /// The class of a §3.2 kind byte. Never [`Class::Foreign`]: foreign
+    /// rows have no 111 kind (Layer 6 §3).
     pub fn from_kind(kind: u8) -> Class {
         match kind {
             0x01 => Class::Human,
@@ -79,12 +87,21 @@ impl Class {
     }
 
     /// Bulk and custody classes: the ones capacity may refuse and quotas
-    /// shape (§10.4: "refuses new custody and new bulk").
+    /// shape (§10.4: "refuses new custody and new bulk"). False for
+    /// [`Class::Foreign`] (Layer 6 §3: evicted, never refused).
     pub fn is_refusable(self) -> bool {
         matches!(
             self,
             Class::Kb | Class::Update | Class::Patch | Class::Sync | Class::Object | Class::Custody
         )
+    }
+
+    /// Classes a quota may be set on: the refusable ones (shape, then
+    /// refuse) plus [`Class::Foreign`]'s shaping quota (Layer 6 §3, settings
+    /// key `quota.foreign`, default none = unlimited: evicted first, never
+    /// refused).
+    pub fn has_quota(self) -> bool {
+        self.is_refusable() || self == Class::Foreign
     }
 
     /// Stable lower-case name (settings keys, logs).
@@ -99,6 +116,7 @@ impl Class {
             Class::Sync => "sync",
             Class::Object => "object",
             Class::Custody => "custody",
+            Class::Foreign => "foreign",
         }
     }
 
