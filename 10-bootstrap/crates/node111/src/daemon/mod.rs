@@ -2,6 +2,7 @@
 //! Restart=always wrappers, never the supervisor of record), watchdog heartbeat,
 //! dashboard, updater, KB server, conditional rnsd child.
 
+pub mod bridge;
 pub mod dashboard;
 pub mod devices;
 pub mod fabric;

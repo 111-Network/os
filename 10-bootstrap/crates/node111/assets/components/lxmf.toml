@@ -1,0 +1,32 @@
+# Optional component manifest (Layer 6 §2.1, draft proposal for the format; parsed with deny_unknown_fields
+# like assets/panels/<id>.toml — an unknown key or invalid file ⇒ not registered). The release carries no
+# third-party bytes: the payload is downloaded hash-locked at install into cache/packages/<id>/ after the
+# licence notice, installed only when a human enables the component (409 consent_required otherwise).
+id = "lxmf"
+adapter = "lxmf"                        # the network id this component serves (§3)
+title = "Reticulum / LXMF helper"
+kb_entry = "projects/lxmf"
+
+[payload]
+kind = "pip"                            # pip | binary
+lock = "share/lxmf-sidecar/lxmf-sidecar-lock.txt"   # hash-locked closure in the signed manifest (hashes only)
+venv = "lxmf"                           # venvs/lxmf (a link to venvs/lxmf.d/<build>, the L1 presence pattern)
+
+[requires]
+python = "3.7"
+service = "transport"                   # rnsd must be serving the shared instance before the helper starts (§6)
+
+[run]
+program = "lxmf_sidecar.py"             # python3 -I <share>/lxmf-sidecar/lxmf_sidecar.py, piped stdio (§6)
+ports = []                              # the helper listens on no port (§15.7)
+health = "ready"                        # the first `ready` line within the start timeout
+
+[weight]
+cached_bytes = 0                        # recorded at pin time (C3); 0 = not measured
+installed_bytes = 0
+rss_bytes = 0
+
+[license]
+spdx = "Reticulum-License"              # rns + lxmf: the Reticulum License (non-OSI; LICENSING.md §8)
+read_at = "https://github.com/markqvist/Reticulum/blob/master/LICENSE"
+notice = "This installs Reticulum (rns) and LXMF from PyPI, the work of the Reticulum project (reticulum.network), under the Reticulum License. 111 is not affiliated and is not the distributor: you install it. Read the licence before enabling."

@@ -1,0 +1,5 @@
+# Top-level requirements of the lxmf-sidecar venv (spec §6). `rns` must resolve to the same version as the
+# Layer 1 rns-lock.txt at release time (two rns copies share one instance protocol); gen-notices.py --check
+# or the release checklist asserts it. The closure and every file hash live in lxmf-sidecar-lock.txt (C3).
+rns==1.5.6
+lxmf==1.2.1

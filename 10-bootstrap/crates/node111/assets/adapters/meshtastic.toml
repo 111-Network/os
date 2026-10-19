@@ -1,0 +1,22 @@
+# Adapter manifest (Layer 6 §4 `caps().copy`, draft proposal): the honest copy the UI shows for a network,
+# so the UI holds no per-network code. Loaded by the bridge core; parsed with deny_unknown_fields.
+id = "meshtastic"                       # network id (§3)
+label = "Meshtastic"
+chip = "M"                              # the Messages chip
+tag = "M"                               # relay marker TAG: one to three ASCII letters (§8)
+
+[auth]                                  # `auth` labels this adapter can report (§3) and their copy
+channel-key = "anyone with this channel key can use any name"
+pki = "the board's PKI proved the sender key, not the name"
+
+[copy]
+banner = "Messages here are Meshtastic texts received by your board's own node; they are not 111-sealed and are labelled with their Meshtastic sender."
+send_warning = "111 transmits on Meshtastic only what you send or choose to bridge, as a normal text from your board's own node. Anyone on that channel can read it: the default channel's key is public."
+uplink_warning = "this channel is published to the internet by your board"
+dm_hint = "Send a Meshtastic DM from this node (readable, not 111-sealed)"
+service = "111 transmits on Meshtastic only what you send or choose to bridge, as a normal text from your board's own node. Anyone on that channel can read it: Meshtastic protects channel messages with the channel's key, and the default channel's key is public. If your board uploads to an MQTT server, messages on channels with uplink enabled are published there. Messages from Meshtastic that appear in 111 are not 111-sealed and are labelled with their Meshtastic sender. Meshtastic is a registered mark, used nominatively."
+
+[limits]                                # §5: bytes per text, by kind and mode (conservative, bitfield counted)
+channel = 232
+dm = 220
+dm_licensed = 232
