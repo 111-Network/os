@@ -15,6 +15,8 @@ a device switch (the originals live only under `~/.claude/projects/…/subagents
 | `wave-2-review.*` | review of B1 U2 F2 | 3 | [`wave-2-review.js`](../workflows/wave-2-review.js) |
 | `wave-2-bounce.*` | fix agents — **only U2 finished** before the crash | 1 | [`wave-2-bounce.js`](../workflows/wave-2-bounce.js) |
 | `wave-3-verify.*` | V1 smoke, V2 panel lint — **only V2 (partial) finished** | 1 | [`wave-3.js`](../workflows/wave-3.js) |
+| `wave-3-fix.*` | fix wave: P1g guard fallback, DOCS, VENV presence venv, V1v smoke verification (exported 2026-10-19) | 4 | [`wave-3-fix.js`](../workflows/wave-3-fix.js) |
+| `wave-3-polish.*` | polish wave: VENVW, F2P, UIP, HB, MANP — all 5 finished before the session ended (exported 2026-10-19) | 5 | [`wave-3-polish.js`](../workflows/wave-3-polish.js) |
 
 The workflow scripts (`../workflows/*.js`; moved here from `os/50-messaging/` on 2026-10-15, see the move table in [`plan/README.md`](../../../../README.md)) point their `JOURNAL` constants at the local store; on another machine
 point them at these files instead (same line format: the reviewer/fixer prompts only read `result.*`).

@@ -29,7 +29,7 @@
 | [`review/recheck.md`](review/recheck.md) | Fable re-check of spec v1.1 (crypto and panels lenses). |
 | [`review/wave-1.md`](review/wave-1.md) | Wave 1 review triage with the lead's standing calls. |
 | [`review/wave-2.md`](review/wave-2.md) | Wave 2 review triage (open bounce items). |
-| [`runs/workflows/`](runs/workflows/) | Workflow scripts, one per run: `research.js`, `spec-review.js`, `wave-0.js`, `wave-1.js`, `wave-1-review.js`, `wave-1-bounce.js`, `wave-2.js`, `wave-2-review.js`, `wave-2-bounce.js`, `wave-3.js`. |
+| [`runs/workflows/`](runs/workflows/) | Workflow scripts, one per run: `research.js`, `spec-review.js`, `wave-0.js`, `wave-1.js`, `wave-1-review.js`, `wave-1-bounce.js`, `wave-2.js`, `wave-2-review.js`, `wave-2-bounce.js`, `wave-2-bounce-2.js`, `wave-3.js`, `wave-3-fix.js`, `wave-3-polish.js`, `wave-4-review.js`. |
 | [`runs/journals/README.md`](runs/journals/README.md) | Index of the exported workflow journals (`*.jsonl`, one line per finished agent) and which script produced each. |
 
 Workflow scripts are launched by their path under `runs/workflows/`. They hard-code `ROOT` and a local `JOURNAL` path; see `runs/journals/README.md` for re-pointing them on another machine.
