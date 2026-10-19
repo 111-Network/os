@@ -1979,6 +1979,51 @@ fn dedupe_matrix_repeating_ids_need_the_body_in_the_window() {
 }
 
 #[test]
+fn the_dedupe_window_counts_inbound_rows_only() {
+    let (_t, mut s) = ready();
+    let a = fconv(&mut s, "meshtastic", ForeignKind::Channel, "ch:a:1");
+    let b = fconv(&mut s, "meshtastic", ForeignKind::Channel, "ch:b:1");
+    let e = mk_edge(&mut s, b, a);
+    ingest1(&mut s, fin(a, "!a1", Some("7"), "hi", false));
+    // 20 inbound rows interleaved with 40 own rows (user sends and relay
+    // copies into `a`): 60 rows, but only 20 inbound ones.
+    for i in 0..20 {
+        ingest1(&mut s, fin(a, "!c3", Some(&format!("f{i}")), "fill", false));
+        user_send(&mut s, a, "mine");
+        let o = ingest1(
+            &mut s,
+            fin(b, "!b2", Some(&format!("o{i}")), "relay me", false),
+        );
+        s.foreign_queue_send(&copy_send(e, o, a, "[!b2/M] relay me", 1, 1))
+            .unwrap();
+    }
+    assert_eq!(s.foreign_conversation(a).unwrap().unwrap().messages, 61);
+    // Still within the last 32 inbound rows: a duplicate.
+    assert_eq!(
+        s.foreign_insert_batch(vec![fin(a, "!a1", Some("7"), "hi", false)])
+            .unwrap(),
+        [None]
+    );
+    // An own row never matches as an inbound duplicate.
+    let own = user_send(&mut s, a, "echo");
+    s.foreign_handoff_begin(own).unwrap();
+    s.foreign_accepted(own, "99").unwrap();
+    assert!(s
+        .foreign_insert_batch(vec![fin(a, BOARD, Some("99"), "echo", false)])
+        .unwrap()[0]
+        .is_some());
+    // 11 more inbound rows (32 newer than the original) push it out.
+    let filler: Vec<ForeignInsert> = (0..11)
+        .map(|i| fin(a, "!c3", Some(&format!("g{i}")), "fill", false))
+        .collect();
+    s.foreign_insert_batch(filler).unwrap();
+    assert!(s
+        .foreign_insert_batch(vec![fin(a, "!a1", Some("7"), "hi", false)])
+        .unwrap()[0]
+        .is_some());
+}
+
+#[test]
 fn foreign_states_are_monotone() {
     let (_t, mut s) = ready();
     let dm = fconv(&mut s, "meshtastic", ForeignKind::Dm, "dm:!a1");
@@ -1986,7 +2031,7 @@ fn foreign_states_are_monotone() {
     use ForeignState::*;
     let st = |s: &Store| s.foreign_message(id).unwrap().unwrap().state;
     assert_eq!(st(&s), Queued);
-    let steps: [(ForeignState, Option<&str>, StateChange, ForeignState); 9] = [
+    let steps: [(ForeignState, Option<&str>, StateChange, ForeignState); 8] = [
         (
             Sent,
             Some("accepted by the radio"),
@@ -1996,16 +2041,16 @@ fn foreign_states_are_monotone() {
         (Queued, None, StateChange::Unchanged, Sent),
         (Relayed, Some("implicit ack"), StateChange::Changed, Relayed),
         (Sent, None, StateChange::Unchanged, Relayed),
-        (Failed, Some("NO_CHANNEL"), StateChange::Changed, Failed),
-        (Relayed, None, StateChange::Unchanged, Failed),
-        // A later delivered overrides failed …
+        // §4: failed is only a refusal before air; a relayed row was
+        // transmitted, so a late NAK leaves it relayed.
+        (Failed, Some("NO_CHANNEL"), StateChange::Unchanged, Relayed),
         (
             Delivered,
             Some("the recipient confirmed"),
             StateChange::Changed,
             Delivered,
         ),
-        // … and delivered never regresses.
+        // Delivered never regresses.
         (Failed, Some("late NAK"), StateChange::Unchanged, Delivered),
         (Sent, None, StateChange::Unchanged, Delivered),
     ];
@@ -2017,6 +2062,28 @@ fn foreign_states_are_monotone() {
         );
         assert_eq!(st(&s), now);
     }
+    // sent → failed stays (a NAK to a packet the radio queued is still
+    // before air); failed is left only by a later delivered.
+    let nak = user_send(&mut s, dm, "nak");
+    let nst = |s: &Store| s.foreign_message(nak).unwrap().unwrap().state;
+    let steps: [(ForeignState, Option<&str>, StateChange, ForeignState); 4] = [
+        (Sent, None, StateChange::Changed, Sent),
+        (Failed, Some("GOT_NAK"), StateChange::Changed, Failed),
+        (Relayed, None, StateChange::Unchanged, Failed),
+        (Delivered, None, StateChange::Changed, Delivered),
+    ];
+    for (to, reason, want, now) in steps {
+        assert_eq!(
+            s.foreign_set_state(nak, to, None, reason).unwrap(),
+            want,
+            "{to:?}"
+        );
+        assert_eq!(nst(&s), now);
+    }
+    assert!(ForeignState::Sent.may_become(Failed));
+    assert!(!ForeignState::Relayed.may_become(Failed));
+    assert!(!ForeignState::Failed.may_become(Relayed));
+    assert!(ForeignState::Failed.may_become(Delivered));
     // Same state: only a different evidence is a change.
     assert_eq!(
         s.foreign_set_state(id, Delivered, Some("the recipient confirmed"), None)
@@ -2662,4 +2729,207 @@ fn foreign_rows_share_the_one_local_seq_with_111_rows() {
     let g = s.foreign_message(f2).unwrap().unwrap().group_id.unwrap();
     assert_eq!(s.send_group(g).unwrap().unwrap().local_seq + 1, fl2);
     assert_eq!(s.local_seq().unwrap(), fl2);
+}
+
+#[test]
+fn a_second_copy_of_one_origin_on_one_edge_is_refused() {
+    let (_t, mut s) = ready();
+    let a = fconv(&mut s, "meshtastic", ForeignKind::Channel, "ch:a:1");
+    let b = fconv(&mut s, "meshtastic", ForeignKind::Channel, "ch:b:1");
+    let e = mk_edge(&mut s, a, b);
+    let o1 = ingest1(&mut s, fin(a, "!a1", Some("1"), "one", false));
+    let o2 = ingest1(&mut s, fin(a, "!a1", Some("2"), "two", false));
+    let c1 = s
+        .foreign_queue_send(&copy_send(e, o1, b, "[!a1/M] one", 1, 1))
+        .unwrap();
+    // §8 guard 6: the same origin again on the same edge fails closed,
+    // alone or as a fresh split.
+    let before = s.local_seq().unwrap();
+    assert!(matches!(
+        s.foreign_queue_send(&copy_send(e, o1, b, "[!a1/M] one", 1, 1)),
+        Err(StoreError::Invalid(_))
+    ));
+    assert!(matches!(
+        s.foreign_queue_sends(&[
+            copy_send(e, o1, b, "(1/2) o", 1, 2),
+            copy_send(e, o1, b, "(2/2) ne", 2, 2),
+        ]),
+        Err(StoreError::Invalid(_))
+    ));
+    assert_eq!(s.local_seq().unwrap(), before);
+    // The split parts of one copy still go together in one call.
+    let parts = s
+        .foreign_queue_sends(&[
+            copy_send(e, o2, b, "(1/2) t", 1, 2),
+            copy_send(e, o2, b, "(2/2) wo", 2, 2),
+        ])
+        .unwrap();
+    assert_eq!(parts.len(), 2);
+    assert_eq!(s.edge(e).unwrap().unwrap().relayed_seq, fseq(&s, o2));
+    // A further part of that copy in a later call is refused.
+    assert!(matches!(
+        s.foreign_queue_send(&copy_send(e, o2, b, "(3/3) x", 3, 3)),
+        Err(StoreError::Invalid(_))
+    ));
+    // A part twice is unrepresentable (the UNIQUE index) and the batch
+    // writes nothing.
+    let o3 = ingest1(&mut s, fin(a, "!a1", Some("3"), "three", false));
+    let before = s.local_seq().unwrap();
+    assert!(s
+        .foreign_queue_sends(&[
+            copy_send(e, o3, b, "(1/2) th", 1, 2),
+            copy_send(e, o3, b, "(1/2) th", 1, 2),
+        ])
+        .is_err());
+    assert_eq!(s.local_seq().unwrap(), before);
+    assert_eq!(s.edge(e).unwrap().unwrap().relayed_seq, fseq(&s, o2));
+    // Several origins in ascending order in one call are fine.
+    let o4 = ingest1(&mut s, fin(a, "!a1", Some("4"), "four", false));
+    s.foreign_queue_sends(&[
+        copy_send(e, o3, b, "[!a1/M] three", 1, 1),
+        copy_send(e, o4, b, "[!a1/M] four", 1, 1),
+    ])
+    .unwrap();
+    // A cancelled copy is never queued again (the mark holds).
+    s.foreign_cancel(c1).unwrap();
+    assert!(matches!(
+        s.foreign_queue_send(&copy_send(e, o1, b, "[!a1/M] one", 1, 1)),
+        Err(StoreError::Invalid(_))
+    ));
+    // Below the API the index refuses a duplicate part too.
+    let raw = s.conn.execute(
+        "INSERT INTO foreign_messages (conv, dir, sender_native, auth, body, local_seq, state,
+                                       part_k, part_n, origin_msg, edge_id)
+         VALUES (?1, 'own', 'x', 'none', 'dup', 999999, 'queued', 1, 2, ?2, ?3)",
+        rusqlite::params![b, o2, e],
+    );
+    assert!(raw.is_err());
+}
+
+#[test]
+fn cancel_drops_unsent_parts_only_one_by_one() {
+    let (_t, mut s) = ready();
+    let dm = fconv(&mut s, "meshtastic", ForeignKind::Dm, "dm:!a1");
+    let parts: Vec<GroupPart<'_>> = (1..=4)
+        .map(|k| GroupPart {
+            conv: dm,
+            text: "part",
+            part_k: k,
+            part_n: 4,
+        })
+        .collect();
+    let (g, ids) = s.send_group_create("long", "{}", &parts).unwrap();
+    // Part 1 was handed and accepted; part 2's handoff is pending (may have
+    // been sent).
+    s.foreign_handoff_begin(ids[0]).unwrap();
+    s.foreign_accepted(ids[0], "0x1").unwrap();
+    s.foreign_set_state(ids[0], ForeignState::Sent, None, None)
+        .unwrap();
+    s.foreign_handoff_begin(ids[1]).unwrap();
+    for sent in [ids[0], ids[1]] {
+        assert!(matches!(
+            s.foreign_cancel(sent),
+            Err(StoreError::Invalid(_))
+        ));
+    }
+    // The unsent parts go, one per call.
+    s.foreign_cancel(ids[2]).unwrap();
+    let held: Vec<i64> = s.send_group_rows(g).unwrap().iter().map(|m| m.id).collect();
+    assert_eq!(held, [ids[0], ids[1], ids[3]]);
+    s.foreign_cancel(ids[3]).unwrap();
+    let held: Vec<i64> = s.send_group_rows(g).unwrap().iter().map(|m| m.id).collect();
+    assert_eq!(held, [ids[0], ids[1]]);
+    assert!(matches!(
+        s.foreign_cancel(ids[3]),
+        Err(StoreError::NotFound)
+    ));
+    assert_eq!(s.foreign_conversation(dm).unwrap().unwrap().queued, 1);
+    // An inbound row is not cancelled; an unknown id is NotFound.
+    let inbound = ingest1(&mut s, fin(dm, "!a1", Some("9"), "hey", false));
+    assert!(matches!(
+        s.foreign_cancel(inbound),
+        Err(StoreError::Invalid(_))
+    ));
+    assert!(matches!(s.foreign_cancel(9999), Err(StoreError::NotFound)));
+    // A cancelled row's id is never reused (AUTOINCREMENT): the newest
+    // row was cancelled, and the next row still draws a fresh id.
+    let last = user_send(&mut s, dm, "last");
+    s.foreign_cancel(last).unwrap();
+    let next = ingest1(&mut s, fin(dm, "!a1", Some("10"), "next", false));
+    assert!(next > last);
+    assert!(s.foreign_message(last).unwrap().is_none());
+}
+
+#[test]
+fn disabling_an_edge_drops_its_never_handed_copies() {
+    let (_t, mut s) = ready();
+    let a = fconv(&mut s, "meshtastic", ForeignKind::Channel, "ch:a:1");
+    let b = fconv(&mut s, "meshtastic", ForeignKind::Channel, "ch:b:1");
+    let e = mk_edge(&mut s, a, b);
+    let o1 = ingest1(&mut s, fin(a, "!a1", Some("1"), "one", false));
+    let o2 = ingest1(&mut s, fin(a, "!a1", Some("2"), "two", false));
+    let o3 = ingest1(&mut s, fin(a, "!a1", Some("3"), "three", false));
+    let backlog = s
+        .foreign_queue_send(&copy_send(e, o1, b, "[!a1/M] one", 1, 1))
+        .unwrap();
+    let pending = s
+        .foreign_queue_send(&copy_send(e, o2, b, "[!a1/M] two", 1, 1))
+        .unwrap();
+    s.foreign_handoff_begin(pending).unwrap();
+    let sent = s
+        .foreign_queue_send(&copy_send(e, o3, b, "[!a1/M] three", 1, 1))
+        .unwrap();
+    s.foreign_handoff_begin(sent).unwrap();
+    s.foreign_accepted(sent, "0x3").unwrap();
+    s.foreign_set_state(sent, ForeignState::Sent, None, None)
+        .unwrap();
+    assert!(s.edge_set_enabled(e, false, None).unwrap());
+    // A disabled edge has no backlog; a pending or handed copy is kept.
+    assert!(s.foreign_message(backlog).unwrap().is_none());
+    assert!(s.foreign_message(pending).unwrap().unwrap().handoff_pending);
+    assert!(s.foreign_message(sent).unwrap().is_some());
+    // Nothing dropped comes back: re-enabling moves the cursor.
+    assert!(s.edge_set_enabled(e, true, Some(&consent())).unwrap());
+    assert!(s.edge_inputs(e, 10).unwrap().is_empty());
+    assert!(matches!(
+        s.foreign_queue_send(&copy_send(e, o1, b, "[!a1/M] one", 1, 1)),
+        Err(StoreError::Invalid(_))
+    ));
+    // edge_delete draws the same line.
+    assert!(s.edge_delete(e).unwrap());
+    assert!(s.foreign_message(pending).unwrap().is_some());
+    assert!(s.foreign_message(sent).unwrap().is_some());
+}
+
+#[test]
+fn a_copy_with_a_pending_handoff_is_pruned_as_handed_never_shed() {
+    let (_t, mut s) = ready();
+    let a = fconv(&mut s, "meshtastic", ForeignKind::Channel, "ch:a:1");
+    let b = fconv(&mut s, "meshtastic", ForeignKind::Channel, "ch:b:1");
+    let e = mk_edge(&mut s, a, b);
+    let o1 = ingest1(&mut s, fin(a, "!a1", Some("1"), "one", false));
+    let o2 = ingest1(&mut s, fin(a, "!a1", Some("2"), "two", false));
+    let pending = s
+        .foreign_queue_send(&copy_send(e, o1, b, "[!a1/M] one", 1, 1))
+        .unwrap();
+    s.foreign_handoff_begin(pending).unwrap();
+    let backlog = s
+        .foreign_queue_send(&copy_send(e, o2, b, "[!a1/M] two", 1, 1))
+        .unwrap();
+    s.set_watermarks(Watermarks { high: 0, low: 0 }).unwrap();
+    let r = s.prune(DiskSpace::UNKNOWN).unwrap();
+    let step_of = |item: PrunedRef| r.pruned.iter().find(|p| p.item == item).map(|p| p.step);
+    assert_eq!(
+        step_of(PrunedRef::Foreign(pending)),
+        Some(PruneStep::ForeignInbound)
+    );
+    assert_eq!(step_of(PrunedRef::RelayCopy(pending)), None);
+    assert_eq!(
+        step_of(PrunedRef::RelayCopy(backlog)),
+        Some(PruneStep::RelayBacklog)
+    );
+    // Only the never-handed copy counts as a shed.
+    assert_eq!(s.edge(e).unwrap().unwrap().shed, 1);
+    assert!(s.foreign_message(pending).unwrap().is_none());
+    assert!(s.foreign_message(backlog).unwrap().is_none());
 }

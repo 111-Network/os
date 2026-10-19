@@ -15,10 +15,12 @@
 //!    **2a** (Layer 6 §3) foreign inbound rows of conversations that are not
 //!    pinned, weight = size × `local_seq` distance (as step 1), together
 //!    with relay copies already handed to a carrier (`edge_id` set, no
-//!    longer `queued`; module note below);
+//!    longer `queued`, or `queued` with `meta.handoff = "pending"`; module
+//!    note below);
 //!
 //!    **2b** (Layer 6 §3) relay backlog copies (`dir own`, `edge_id` set,
-//!    `queued`) oldest first; the queued parts of one copy go together, the
+//!    `queued`, no pending handoff) oldest first; the queued parts of one
+//!    copy go together, the
 //!    shed is counted on its edge (`shed += 1`) and the edge's `relayed_seq`
 //!    is advanced past the copy's origin, so shedding never makes history
 //!    relayable again;
@@ -50,7 +52,11 @@
 //! *Note (as-built reading of Layer 6 §3):* relay copies that a carrier has
 //! already taken (`sent` and later) are not in the "never" list and are not
 //! 2b's backlog; they are evicted with 2a (same weight), so an active edge
-//! cannot grow the store without bound. Delivered user-composed rows are in
+//! cannot grow the store without bound. A copy still `queued` but with
+//! `meta.handoff = "pending"` may have been transmitted, so it counts as
+//! handed too (a 2a row, never a shed counted on the edge) — the same line
+//! [`Store::edge_delete`] and [`Store::edge_set_enabled`] draw, which drop
+//! only never-handed copies and keep pending ones. Delivered user-composed rows are in
 //! no step (human-rate bounded, like own history before an export offer).
 //! Pending message requests have a count quota ([`Store::request_quota`],
 //! default [`DEFAULT_REQUEST_QUOTA`]).
@@ -266,13 +272,17 @@ fn superseded(c: &Connection) -> Result<Vec<Candidate>> {
 const FOREIGN_ROW_BYTES: &str = "octet_length(m.body) + octet_length(m.meta)";
 
 /// Step 2a candidates (Layer 6 §3): foreign inbound of unpinned
-/// conversations, plus relay copies already handed to a carrier.
+/// conversations, plus relay copies already handed to a carrier (past
+/// `queued`, or `queued` with a pending handoff: may have been sent).
 fn foreign_inbound(c: &Connection) -> Result<Vec<Candidate>> {
     let mut st = c.prepare(&format!(
         "SELECT m.id, {FOREIGN_ROW_BYTES}, m.local_seq FROM foreign_messages m
          JOIN foreign_conversations fc ON fc.id = m.conv
          WHERE fc.pinned = 0
-           AND (m.dir = 'in' OR (m.edge_id IS NOT NULL AND m.state <> 'queued'))"
+           AND (m.dir = 'in'
+                OR (m.edge_id IS NOT NULL
+                    AND (m.state <> 'queued'
+                         OR json_extract(m.meta, '$.handoff') IS 'pending')))"
     ))?;
     let rows = st.query_map([], |r| {
         Ok((
@@ -295,15 +305,15 @@ fn foreign_inbound(c: &Connection) -> Result<Vec<Candidate>> {
 }
 
 /// Step 2b candidates (Layer 6 §3): queued relay copies of unpinned
-/// conversations, one candidate per copy (all its queued parts), oldest
-/// first.
+/// conversations never handed (no pending handoff), one candidate per copy
+/// (all such parts), oldest first.
 fn relay_backlog(c: &Connection) -> Result<Vec<Candidate>> {
     let mut st = c.prepare(&format!(
         "SELECT min(m.id), sum({FOREIGN_ROW_BYTES} + ?1), min(m.local_seq)
          FROM foreign_messages m
          JOIN foreign_conversations fc ON fc.id = m.conv
          WHERE fc.pinned = 0 AND m.dir = 'own' AND m.edge_id IS NOT NULL
-           AND m.state = 'queued'
+           AND m.state = 'queued' AND json_extract(m.meta, '$.handoff') IS NOT 'pending'
          GROUP BY m.edge_id, m.origin_msg
          ORDER BY min(m.local_seq), min(m.id)"
     ))?;
@@ -351,7 +361,8 @@ fn shed_copy(c: &Connection, first: i64) -> Result<()> {
         .optional()?;
     let n = c.execute(
         "DELETE FROM foreign_messages
-         WHERE edge_id = ?1 AND origin_msg = ?2 AND dir = 'own' AND state = 'queued'",
+         WHERE edge_id = ?1 AND origin_msg = ?2 AND dir = 'own' AND state = 'queued'
+           AND json_extract(meta, '$.handoff') IS NOT 'pending'",
         params![edge, origin],
     )?;
     if n > 0 {

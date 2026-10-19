@@ -206,6 +206,14 @@ CREATE TABLE pending_node_ids (
 ///   `origin_msg` set), never both, never neither.
 /// - The dedupe key `(conv, sender_native, native_msg_id)` is an index, not a
 ///   `UNIQUE`: a Meshtastic packet id repeats (§3 dedupe).
+/// - A relay copy part is unique per `(edge_id, origin_msg, part_k)` (partial
+///   `UNIQUE` index over copies): a second copy of one origin on one edge is
+///   unrepresentable (§8 guard 6; the store is the ID map and fails closed).
+/// - `foreign_messages.id` and `relay_edges.id` are `AUTOINCREMENT`: a
+///   deleted row's id (a cancelled, shed or pruned row, a deleted edge) is
+///   never reused, so an `fm-`/`be-` id the UI holds never names another
+///   row, and a handed copy's dangling `edge_id`/`origin_msg` never matches
+///   a later edge or origin (the copy-part index above stays exact).
 /// - `foreign_seen` holds keys only (bodies are prunable), bounded per edge
 ///   by the writer ([`super::foreign::FOREIGN_SEEN_CAP`]).
 const V3: &str = "
@@ -230,7 +238,7 @@ CREATE TABLE send_groups (
 ) STRICT;
 
 CREATE TABLE foreign_messages (
-    id            INTEGER PRIMARY KEY,
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
     conv          INTEGER NOT NULL REFERENCES foreign_conversations (id) ON DELETE CASCADE,
     dir           TEXT NOT NULL CHECK (dir IN ('in', 'own')),
     sender_native TEXT NOT NULL,
@@ -264,9 +272,11 @@ CREATE INDEX foreign_messages_queued ON foreign_messages (local_seq)
     WHERE dir = 'own' AND state = 'queued';
 CREATE INDEX foreign_messages_by_group ON foreign_messages (group_id)
     WHERE group_id IS NOT NULL;
+CREATE UNIQUE INDEX foreign_messages_copy_part ON foreign_messages (edge_id, origin_msg, part_k)
+    WHERE edge_id IS NOT NULL;
 
 CREATE TABLE relay_edges (
-    id                INTEGER PRIMARY KEY,
+    id                INTEGER PRIMARY KEY AUTOINCREMENT,
     src_conv          INTEGER NOT NULL REFERENCES foreign_conversations (id) ON DELETE CASCADE,
     dst_conv          INTEGER NOT NULL REFERENCES foreign_conversations (id) ON DELETE CASCADE,
     src_kind          TEXT NOT NULL CHECK (src_kind IN ('channel', 'group')),

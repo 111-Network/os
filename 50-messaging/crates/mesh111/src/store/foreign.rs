@@ -20,21 +20,40 @@
 //!   whose id is globally unique (LXMF hash, app-peer ids) is a duplicate on
 //!   the key alone; otherwise (Meshtastic: 32-bit packet ids repeat) only
 //!   when the key **and** the body match within the last
-//!   [`DEDUPE_WINDOW`] rows of the conversation (exact body equality: the
-//!   strongest form of the spec's body-hash match).
-//! - **Monotone states (§4).** [`ForeignState::rank`]: `queued` < `sent` <
-//!   `relayed` < `failed` < `delivered`. A lower state is ignored
+//!   [`DEDUPE_WINDOW`] **inbound** rows of the conversation (exact body
+//!   equality: the strongest form of the spec's body-hash match). Own rows
+//!   never count in the window, so a burst of our own sends or relay copies
+//!   cannot push an inbound row out of it; recognising our own echo is §8
+//!   guard 2's (the native id [`Store::foreign_accepted`] records).
+//! - **Monotone states (§4).** [`ForeignState::may_become`] over
+//!   [`ForeignState::rank`]: `queued` < `sent` < `relayed` < `failed` <
+//!   `delivered`, with one exception: `failed` is refused once a row is
+//!   `relayed` (`failed` is only a refusal **before air**; a post-air NAK
+//!   leaves `relayed`). A refused move is ignored
 //!   ([`StateChange::Unchanged`]); `delivered` never regresses; a later
 //!   `delivered` overrides `failed`.
 //! - **At most once per user act (§4).** `meta.handoff = "pending"` is
 //!   written durably before a handoff ([`Store::foreign_handoff_begin`]) and
 //!   cleared by `Accepted` ([`Store::foreign_accepted`]); a pending row is
-//!   never offered again by [`Store::foreign_queued`].
+//!   never offered again by [`Store::foreign_queued`], never cancelled
+//!   ([`Store::foreign_cancel`]) and never shed as backlog (prune 2b).
 //! - **Relay edges (§8).** Inputs are inbound rows of the source with
 //!   `local_seq > max(cursor_seq, relayed_seq)` that are not relayed copies
 //!   ([`Store::edge_inputs`]); queueing a copy advances `relayed_seq` past
 //!   its origin in the same transaction, so a crash can never make an origin
 //!   relayable twice; history before `cursor_seq` is never relayed.
+//! - **One copy per origin per edge (§8 guard 6; the store is the ID map and
+//!   fails closed).** A copy whose origin is at or below the edge's
+//!   `relayed_seq` is refused, except for the further parts of a split copy
+//!   queued in the same [`Store::foreign_queue_sends`] call; the partial
+//!   `UNIQUE (edge_id, origin_msg, part_k)` index makes a duplicate part
+//!   unrepresentable.
+//! - **Disabling an edge drops its backlog.** [`Store::edge_set_enabled`]
+//!   `(false)` deletes the edge's copies still `queued` without a pending
+//!   handoff (never handed to a carrier), as [`Store::edge_delete`] does: a
+//!   disabled edge has no backlog, and re-enabling moves `cursor_seq` to the
+//!   current `local_seq` anyway, so nothing dropped is ever re-queued. Copies
+//!   with a pending handoff (may have been transmitted) are kept.
 //!
 //! Ids are plain row ids; the `fc-`/`fm-`/`be-`/`sg-` prefixes are the
 //! daemon's (contract layer).
@@ -144,9 +163,10 @@ text_enum!(
 );
 
 impl ForeignState {
-    /// The §4 monotone order: `queued` 0 < `sent` 1 < `relayed` 2 <
-    /// `failed` 3 < `delivered` 4. `failed` is terminal unless a later
-    /// `delivered` arrives; `delivered` never regresses.
+    /// The §4 order: `queued` 0 < `sent` 1 < `relayed` 2 < `failed` 3 <
+    /// `delivered` 4. `failed` is terminal unless a later `delivered`
+    /// arrives; `delivered` never regresses. Which moves are taken is
+    /// [`ForeignState::may_become`] (the order with one exception).
     pub fn rank(self) -> u8 {
         match self {
             ForeignState::Queued => 0,
@@ -154,6 +174,23 @@ impl ForeignState {
             ForeignState::Relayed => 2,
             ForeignState::Failed => 3,
             ForeignState::Delivered => 4,
+        }
+    }
+
+    /// Whether a row in `self` takes `next` (§4 monotone states). The same
+    /// state is taken (only a differing evidence / reason is then written);
+    /// otherwise only a higher [`rank`](ForeignState::rank), except
+    /// `relayed` → `failed`: `failed` is only a refusal **before air**, and
+    /// a `relayed` row was transmitted (a post-air NAK leaves `relayed` with
+    /// "transmitted, not confirmed"). `sent` → `failed` stays: a NAK to a
+    /// packet the radio accepted into its queue is still before air.
+    pub fn may_become(self, next: ForeignState) -> bool {
+        if next == self {
+            return true;
+        }
+        match (self, next) {
+            (ForeignState::Relayed, ForeignState::Failed) => false,
+            _ => next.rank() > self.rank(),
         }
     }
 }
@@ -686,7 +723,8 @@ fn is_duplicate(c: &Connection, row: &ForeignInsert) -> Result<bool> {
     } else {
         c.query_row(
             "SELECT 1 FROM (SELECT sender_native, native_msg_id, body FROM foreign_messages
-                            WHERE conv = ?1 ORDER BY local_seq DESC LIMIT ?5)
+                            WHERE conv = ?1 AND dir = 'in'
+                            ORDER BY local_seq DESC LIMIT ?5)
              WHERE sender_native = ?2 AND native_msg_id = ?3 AND body = ?4 LIMIT 1",
             params![row.conv, row.sender_native, native, row.body, DEDUPE_WINDOW],
             |r| r.get(0),
@@ -708,8 +746,10 @@ fn check_send(s: &ForeignSend<'_>) -> Result<()> {
 }
 
 /// Queue one own row inside the caller's transaction (validated by
-/// [`check_send`] first).
-fn queue_one(c: &Connection, s: &ForeignSend<'_>) -> Result<i64> {
+/// [`check_send`] first). `copies` holds the `(edge, origin)` pairs queued
+/// earlier in this transaction: only they may queue a further part of a
+/// copy whose origin is already at or below `relayed_seq`.
+fn queue_one(c: &Connection, s: &ForeignSend<'_>, copies: &mut Vec<(i64, i64)>) -> Result<i64> {
     let (account, _) = conv_facts(c, s.conv)?;
     if let Some(g) = s.group_id {
         let found: Option<i64> = c
@@ -740,8 +780,20 @@ fn queue_one(c: &Connection, s: &ForeignSend<'_>) -> Result<i64> {
                 "a relay origin is inbound on the edge's source",
             ));
         }
-        if to_u64(oseq, "foreign_messages.local_seq")? <= e.cursor_seq {
+        let oseq_u = to_u64(oseq, "foreign_messages.local_seq")?;
+        if oseq_u <= e.cursor_seq {
             return Err(StoreError::Invalid("history is never relayed"));
+        }
+        // §8 guard 6: one copy per origin per edge. At or below the mark
+        // only the further parts of the copy this transaction queued.
+        let further_part = copies.contains(&(edge, origin));
+        if oseq_u <= e.relayed_seq && !further_part {
+            return Err(StoreError::Invalid(
+                "this origin was already relayed (or shed) on this edge",
+            ));
+        }
+        if !further_part {
+            copies.push((edge, origin));
         }
         // §8: the copy and the high-water mark commit together.
         c.execute(
@@ -769,6 +821,19 @@ fn queue_one(c: &Connection, s: &ForeignSend<'_>) -> Result<i64> {
     let id = c.last_insert_rowid();
     bump_conv(c, s.conv, local, false)?;
     Ok(id)
+}
+
+/// Delete the edge's copies never handed to a carrier (`queued`, no
+/// pending handoff); a copy with a pending handoff may have been sent and
+/// is kept (prune treats it as handed, step 2a).
+fn drop_backlog(c: &Connection, edge: i64) -> Result<()> {
+    c.execute(
+        "DELETE FROM foreign_messages
+         WHERE edge_id = ?1 AND dir = 'own' AND state = 'queued'
+           AND json_extract(meta, '$.handoff') IS NOT 'pending'",
+        [edge],
+    )?;
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -923,9 +988,9 @@ impl Store {
 
     /// Queue one own row (`dir own`, `queued`, `local_seq` drawn). A relay
     /// copy must go to its edge's destination on a live edge, from an
-    /// inbound origin on the edge's source newer than `cursor_seq`; the
-    /// edge's `relayed_seq` advances past the origin in the same
-    /// transaction (§8).
+    /// inbound origin on the edge's source newer than `cursor_seq` and not
+    /// yet relayed on the edge (newer than `relayed_seq`); the edge's
+    /// `relayed_seq` advances past the origin in the same transaction (§8).
     pub fn foreign_queue_send(&mut self, send: &ForeignSend<'_>) -> Result<i64> {
         self.foreign_queue_sends(std::slice::from_ref(send))?
             .into_iter()
@@ -934,7 +999,9 @@ impl Store {
     }
 
     /// Queue up to [`MAX_FOREIGN_BATCH`] own rows in one transaction (every
-    /// part of a split copy together, so a crash never leaves half a copy).
+    /// part of a split copy together, so a crash never leaves half a copy;
+    /// the parts after the first are the only rows whose origin may already
+    /// be at `relayed_seq`, and each `part_k` at most once).
     pub fn foreign_queue_sends(&mut self, sends: &[ForeignSend<'_>]) -> Result<Vec<i64>> {
         if sends.is_empty() {
             return Err(StoreError::Invalid("nothing to queue"));
@@ -946,7 +1013,11 @@ impl Store {
             check_send(s)?;
         }
         self.with_tx(Durability::Full, |tx| {
-            sends.iter().map(|s| queue_one(tx, s)).collect()
+            let mut copies = Vec::new();
+            sends
+                .iter()
+                .map(|s| queue_one(tx, s, &mut copies))
+                .collect()
         })
     }
 
@@ -985,6 +1056,7 @@ impl Store {
             )?;
             let group = tx.last_insert_rowid();
             let mut ids = Vec::with_capacity(parts.len());
+            let mut copies = Vec::new();
             for p in parts {
                 ids.push(queue_one(
                     tx,
@@ -997,6 +1069,7 @@ impl Store {
                         origin_msg: None,
                         edge_id: None,
                     },
+                    &mut copies,
                 )?);
             }
             Ok((group, ids))
@@ -1037,9 +1110,11 @@ impl Store {
         )
     }
 
-    /// §4 monotone state update of an own row. A lower rank is ignored
+    /// §4 monotone state update of an own row. A move
+    /// [`ForeignState::may_become`] refuses is ignored
     /// ([`StateChange::Unchanged`]): `delivered` never regresses, `failed`
-    /// is left only by `delivered`. At the same state only a differing
+    /// is left only by `delivered`, a `relayed` row never becomes `failed`
+    /// (it was transmitted). At the same state only a differing
     /// evidence / reason is written. An inbound row has no send state
     /// ([`StoreError::Invalid`]).
     pub fn foreign_set_state(
@@ -1066,7 +1141,7 @@ impl Store {
                 ));
             }
             let cur = ForeignState::from_col(&cur)?;
-            if state.rank() < cur.rank()
+            if !cur.may_become(state)
                 || (state == cur
                     && evidence == cur_ev.as_deref()
                     && reason == cur_reason.as_deref())
@@ -1148,10 +1223,11 @@ impl Store {
 
     /// §4 `Accepted { native_id }`: the carrier took the row — record its
     /// native id (own-echo suppression, §8 guard 2) and clear the handoff
-    /// marker, in one transaction.
+    /// marker, in one transaction. FULL: the recorded native id is own-echo
+    /// evidence that must survive a crash.
     pub fn foreign_accepted(&mut self, id: i64, native_msg_id: &str) -> Result<()> {
         nonempty_field(native_msg_id, "native message id")?;
-        self.with_tx(Durability::Normal, |tx| {
+        self.with_tx(Durability::Full, |tx| {
             let n = tx.execute(
                 "UPDATE foreign_messages
                  SET native_msg_id = ?2, meta = json_remove(meta, '$.handoff')
@@ -1161,6 +1237,41 @@ impl Store {
             if n == 0 {
                 return Err(StoreError::NotFound);
             }
+            Ok(())
+        })
+    }
+
+    /// §9 cancel: delete an own `queued` row with no pending handoff
+    /// (nothing of it was handed to a carrier). One row per call, so a
+    /// split target's unsent parts are cancelled one by one and its sent
+    /// parts stay ("cancel drops unsent parts only"). An unknown id is
+    /// [`StoreError::NotFound`]; an inbound row, a row past `queued` or one
+    /// with `meta.handoff = "pending"` (may have been sent) is
+    /// [`StoreError::Invalid`]. FULL: a cancelled row must not come back
+    /// after a crash and be sent.
+    pub fn foreign_cancel(&mut self, id: i64) -> Result<()> {
+        self.with_tx(Durability::Full, |tx| {
+            let row: Option<(String, String, bool)> = tx
+                .query_row(
+                    "SELECT dir, state,
+                            coalesce(json_extract(meta, '$.handoff') = 'pending', 0)
+                     FROM foreign_messages WHERE id = ?1",
+                    [id],
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+                )
+                .optional()?;
+            let (dir, state, pending) = row.ok_or(StoreError::NotFound)?;
+            if ForeignDir::from_col(&dir)? != ForeignDir::Own {
+                return Err(StoreError::Invalid(
+                    "an inbound foreign row is not cancelled",
+                ));
+            }
+            if ForeignState::from_col(&state)? != ForeignState::Queued || pending {
+                return Err(StoreError::Invalid(
+                    "only a queued row with nothing handed is cancelled",
+                ));
+            }
+            tx.execute("DELETE FROM foreign_messages WHERE id = ?1", [id])?;
             Ok(())
         })
     }
@@ -1303,7 +1414,9 @@ impl Store {
 
     /// Enable (with a new recorded consent; `cursor_seq` moves to the
     /// current `local_seq`, so what arrived while off is history) or
-    /// disable an edge. Returns whether it changed.
+    /// disable an edge. Disabling **drops** the edge's never-handed copies
+    /// (`queued`, no pending handoff; module doc): a disabled edge has no
+    /// backlog. Returns whether it changed.
     pub fn edge_set_enabled(
         &mut self,
         id: i64,
@@ -1331,6 +1444,7 @@ impl Store {
                 }
                 None => {
                     tx.execute("UPDATE relay_edges SET enabled = 0 WHERE id = ?1", [id])?;
+                    drop_backlog(tx, id)?;
                 }
             }
             Ok(true)
@@ -1412,12 +1526,7 @@ impl Store {
             if n == 0 {
                 return Ok(false);
             }
-            tx.execute(
-                "DELETE FROM foreign_messages
-                 WHERE edge_id = ?1 AND dir = 'own' AND state = 'queued'
-                   AND json_extract(meta, '$.handoff') IS NOT 'pending'",
-                [id],
-            )?;
+            drop_backlog(tx, id)?;
             Ok(true)
         })
     }
