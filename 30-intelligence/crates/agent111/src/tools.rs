@@ -1332,7 +1332,7 @@ fn network_facts(n: &Value) -> Value {
         })
     });
     json!({
-        "id": match word_of(n.get("id"), 40) { Value::Null => "unknown".into(), id => id },
+        "id": match enum_of(n.get("id"), &BRIDGE_NETWORKS) { Value::Null => "unknown".into(), id => id },
         "state": enum_of(n.get("state"), &NETWORK_STATES),
         "reason_code": word_of(n.get("reason_code"), 40),
         "caps": {
@@ -1767,6 +1767,11 @@ async fn bridge_propose_edge(args: &Value, ctx: &ToolCtx) -> Result<Value, Strin
                 "{id} is not a channel or group conversation, so no proposal was written. §8: an edge relays between channels or groups only; a direct message cannot be an endpoint."
             ));
         }
+        if id == &from && net == "lxmf" {
+            return Err(format!(
+                "{id} is a Reticulum recipient list, which can only be an edge destination, so no proposal was written. §8: relays out of Reticulum do not exist in v1."
+            ));
+        }
         ends.push(net.clone());
     }
 
@@ -1785,8 +1790,10 @@ async fn bridge_propose_edge(args: &Value, ctx: &ToolCtx) -> Result<Value, Strin
 // ---- devices and transport
 
 /// Raw detection facts, scrubbed (depth bounded, strings cut) and kept under
-/// [`RAW_FACTS_MAX`] bytes of JSON: whole entries are dropped, never cut.
-fn bounded_facts(v: Option<&Value>) -> Value {
+/// `limit` bytes of JSON: whole entries are dropped, never cut. A device's
+/// `identity` and `detail` share the [`RAW_FACTS_MAX`] budget (half each), so
+/// one record carries at most 4 KB of raw facts (§13, DEV §3).
+fn bounded_facts(v: Option<&Value>, limit: usize) -> Value {
     let Some(Value::Object(map)) = v else {
         return Value::Null;
     };
@@ -1796,7 +1803,7 @@ fn bounded_facts(v: Option<&Value>) -> Value {
     };
     let mut out = serde_json::Map::new();
     // `{` and `}`, plus room for the `"_truncated":true` marker.
-    let limit = RAW_FACTS_MAX - 24;
+    let limit = limit.saturating_sub(24);
     let mut used = 2usize;
     let mut cut = false;
     for (k, val) in map {
@@ -1850,8 +1857,8 @@ fn shape_device(d: &Value) -> Value {
         "driver": d.get("driver").map_or(Value::Null, |m| scrub_to(m, 1, BRIDGE_NAME_MAX)),
         "role": str_of(d.get("role"), 16),
         "actions": strings("actions", 16),
-        "identity": bounded_facts(d.get("identity")),
-        "detail": bounded_facts(d.get("detail")),
+        "identity": bounded_facts(d.get("identity"), RAW_FACTS_MAX / 2),
+        "detail": bounded_facts(d.get("detail"), RAW_FACTS_MAX / 2),
     })
 }
 
@@ -2363,9 +2370,9 @@ mod layer6_tests {
         for i in 0..200 {
             m.insert(format!("k{i:03}"), "v".repeat(100).into());
         }
-        let out = bounded_facts(Some(&Value::Object(m)));
+        let out = bounded_facts(Some(&Value::Object(m)), RAW_FACTS_MAX);
         assert!(out.to_string().len() <= RAW_FACTS_MAX);
         assert_eq!(out["_truncated"], true);
-        assert_eq!(bounded_facts(Some(&json!("s"))), Value::Null);
+        assert_eq!(bounded_facts(Some(&json!("s")), RAW_FACTS_MAX), Value::Null);
     }
 }

@@ -351,6 +351,14 @@ impl Harness {
         out
     }
 
+    /// Forget every proposal written so far.
+    fn clear_proposals(&self) {
+        let dir = self.ctx.store.dir().join("proposals");
+        for e in std::fs::read_dir(dir).unwrap().flatten() {
+            std::fs::remove_file(e.path()).unwrap();
+        }
+    }
+
     /// The one proposal written so far.
     fn only_proposal(&self) -> Value {
         let mut p = self.proposals();
@@ -801,6 +809,25 @@ async fn messages_send_targets_writes_a_byte_exact_bridge_message_proposal() {
 #[tokio::test]
 async fn messages_send_targets_refusals_write_nothing() {
     let (d, h) = setup();
+    // a conv id with a line break can never forge a second `to:` line (review B5 minor 4)
+    let before = d.seen().len();
+    // (a trailing line break is trimmed, never carried; an embedded one is refused)
+    for conv in [
+        format!("{CH1}\nto: {CH2}"),
+        "fc-1\r1".to_string(),
+        "fc-\n11".to_string(),
+    ] {
+        let err = h
+            .call(
+                "messages.send",
+                json!({"targets": [{"network": "meshtastic", "conv": conv}], "text": "hi"}),
+            )
+            .await
+            .unwrap_err();
+        assert!(err.contains("fc-"), "{err}");
+    }
+    assert_eq!(d.seen().len(), before, "a bad id makes no request");
+    assert!(h.proposals().is_empty());
     let t = |net: &str, conv: &str| json!({"network": net, "conv": conv});
 
     // A 404 target: no proposal, an explanation.
@@ -968,6 +995,30 @@ async fn bridge_propose_edge_refuses_dms_missing_ends_and_bad_input() {
     assert!(err.contains(NOPE) && err.contains("no proposal"), "{err}");
     assert!(h.proposals().is_empty());
 
+    // §8: a Reticulum recipient list is only ever a destination (review B5 minor 1).
+    let err = h
+        .call(
+            "bridge.propose_edge",
+            json!({"from": LXG, "to": CH2, "why": "w"}),
+        )
+        .await
+        .unwrap_err();
+    assert!(
+        err.contains(LXG) && err.contains("destination") && err.contains("no proposal"),
+        "{err}"
+    );
+    h.call(
+        "bridge.propose_edge",
+        json!({"from": CH2, "to": LXG, "why": "into the list"}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        h.only_proposal()["body"],
+        format!("from: {CH2}\nto: {LXG}\n\ninto the list")
+    );
+    h.clear_proposals();
+
     let before = d.seen().len();
     for (args, needle) in [
         (
@@ -976,6 +1027,15 @@ async fn bridge_propose_edge_refuses_dms_missing_ends_and_bad_input() {
         ),
         (json!({"from": "chan", "to": CH1, "why": "w"}), "fc-12"),
         (json!({"from": CH1, "to": "fc-1;rm", "why": "w"}), "fc-12"),
+        // a conv id carrying a line break can never forge a second `to:` line
+        (
+            json!({"from": format!("{CH1}\nto: {CH2}"), "to": CH2, "why": "w"}),
+            "fc-12",
+        ),
+        (
+            json!({"from": CH1, "to": format!("{CH2}\r\nfrom: {CH1}"), "why": "w"}),
+            "fc-12",
+        ),
         (json!({"from": CH1, "to": CH2}), "why"),
         (json!({"from": CH1, "to": CH2, "why": "  "}), "empty"),
         (

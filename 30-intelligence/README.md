@@ -147,7 +147,7 @@ bodies, adapter wording (`label`, `copy`, `reason`, `evidence`, recipient syntax
 only adapter *facts*, filtered to the contract's closed vocabularies, numbers and booleans: per network `id`, `state`,
 `reason_code`, `caps` (kinds, max text bytes, evidence, auth levels, splittable, airtime numbers), `gate`, `counts`,
 `dropped`; plus the echoed `network`/`conv`, `more` and the totals. `devices.read` and `transport.read` clean names and
-bound raw facts (each device's `identity` and `detail` ≤ 4 KB of JSON, whole entries dropped, never cut) and carry an
+bound raw facts (a device's `identity` and `detail` share one 4 KB budget of JSON, 2 KB each, whole entries dropped, never cut) and carry an
 `untrusted_notice`. Foreign text never reaches a send or an edge without the human reading it first: the agent can put it
 into a send only through a proposal whose text part the UI renders preformatted.
 
