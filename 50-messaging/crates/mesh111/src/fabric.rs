@@ -35,10 +35,11 @@
 //! link events (a connection's announce, a disconnect), contact events (a key
 //! arrives, a request is accepted), ACK evidence (§5 loss inference), and the
 //! explicit [`Fabric::retry`] (the UI's per-message retry) and
-//! [`Fabric::retry_all`] — what the daemon calls on `fabric` events that show
-//! more connectivity than it saw before (the home hub answering, more
-//! attributed peers), never on every event: `retry_all`'s own fetch emits a
-//! `Fabric` event. Keepalive is the adapter's transport detail.
+//! [`Fabric::retry_all`] (an operator's retry-all). The daemon never calls
+//! `retry_all` on its own: it presumes every outstanding fragment lost, so an
+//! automatic call on a link event re-sent a 16-fragment transfer in flight
+//! (the lock's three-node wire count read 31 frames); members re-fetch on
+//! link-up by themselves. Keepalive is the adapter's transport detail.
 //!
 //! ### Verify before state (§18 rule 1)
 //!
@@ -803,9 +804,8 @@ impl Fabric {
 
     /// A fabric event: retry a pending mint, fetch from the home hub,
     /// presume every outstanding fragment lost, clear custody rejects and
-    /// in-flight `CUSTODY_PUT`s, and pump every peer. It emits a `Fabric`
-    /// event itself (the fetch), so a caller driven by `Fabric` events must
-    /// not call it on every one (module doc, "No timers").
+    /// in-flight `CUSTODY_PUT`s, and pump every peer. An operator action:
+    /// never called automatically (module doc, "No timers").
     pub async fn retry_all(&self) -> Result<()> {
         self.call(|c| c.retry_all()).await
     }

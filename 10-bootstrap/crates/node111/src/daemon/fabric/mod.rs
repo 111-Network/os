@@ -45,17 +45,6 @@
 //!    per key (a message keeps its first change, a contact its last), and
 //!    publishes `message` / `contact` / `fabric` frames; `Settings` events
 //!    are persisted to `fabric/settings` (0600) and reconcile the listener.
-//!    A `Fabric` event whose status shows **more connectivity** than the
-//!    pump saw last ([`Connectivity::gained`]: the home hub newly answering,
-//!    or more attributed peers — fresh evidence from a far end) calls
-//!    `Fabric::retry_all` once (§9: members fetch on link-up and on `fabric`
-//!    events; it also re-sends what a live socket left in flight). A bare
-//!    link-up is not a trigger: the fabric fetches and pumps on it itself.
-//!    Never on `Message` / `Contact` events, and never on its own echo:
-//!    `retry_all` opens no connection and attributes nothing, so the
-//!    `Fabric` event its fetch emits reads the same connectivity and calls
-//!    nothing; another call needs a fresh packet from a far end on a new
-//!    connection (bounded by real link events).
 //! 7. **Housekeeping**: every few seconds the `fabric` service facts
 //!    ([`FabricHandle::provider`] → the registry rule) are refreshed from
 //!    `Fabric::status`; every minute a §10.4 capacity pass runs with the
@@ -751,14 +740,8 @@ impl FabricHandle {
 
     /// `GET /fabric` (`FabricStatus`; the down shape when not running).
     pub async fn status_json(&self) -> Result<Value, FabricError> {
-        Ok(self.status_snapshot().await?.0)
-    }
-
-    /// [`Self::status_json`] plus what it shows about connectivity (`None`
-    /// while the fabric is not running).
-    async fn status_snapshot(&self) -> Result<(Value, Option<Connectivity>), FabricError> {
         let Some(f) = self.fabric() else {
-            return Ok((json::status_down(&self.persisted().fabric), None));
+            return Ok(json::status_down(&self.persisted().fabric));
         };
         let mut st = f.status().await?;
         // the store reports it after a refused epoch mint; the identity
@@ -766,7 +749,7 @@ impl FabricHandle {
         st.store.restore_pending |= self.restore_pending();
         self.set_facts(&st);
         let q = self.quotas().await;
-        Ok((json::status(&st, &q), Some(Connectivity::of(&st))))
+        Ok(json::status(&st, &q))
     }
 
     fn set_facts(&self, st: &FabricStatus) {
@@ -931,24 +914,17 @@ impl FabricHandle {
         }))
     }
 
-    /// Publish a `fabric` frame; returns the connectivity it showed.
-    async fn publish_fabric(&self, api: &ApiState) -> Option<Connectivity> {
-        match self.status_snapshot().await {
-            Ok((v, seen)) => {
+    async fn publish_fabric(&self, api: &ApiState) {
+        match self.status_json().await {
+            Ok(v) => {
                 api.events.publish("fabric", &v);
-                seen
             }
-            Err(e) => {
-                eprintln!("111 fabric: status: {e}");
-                None
-            }
+            Err(e) => eprintln!("111 fabric: status: {e}"),
         }
     }
 
-    /// Publish one batch of fabric events (see the module doc, step 6); a
-    /// `fabric` frame that shows more connectivity than `seen` calls
-    /// `Fabric::retry_all` once. `seen` is the pump's own record.
-    async fn publish(&self, api: &ApiState, batch: Vec<FabricEvent>, seen: &mut Connectivity) {
+    /// Publish one batch of fabric events (see the module doc, step 6).
+    async fn publish(&self, api: &ApiState, batch: Vec<FabricEvent>) {
         let mut messages: BTreeMap<i64, MessageChange> = BTreeMap::new();
         let mut order: Vec<i64> = Vec::new();
         let mut contacts: Vec<(NodeId, ContactChange)> = Vec::new();
@@ -985,17 +961,7 @@ impl FabricHandle {
             }
         }
         if fabric {
-            if let Some(now) = self.publish_fabric(api).await {
-                let gained = now.gained(*seen);
-                *seen = now;
-                if gained {
-                    if let Some(f) = self.fabric() {
-                        if let Err(e) = f.retry_all().await {
-                            eprintln!("111 fabric: retry on a link event: {e}");
-                        }
-                    }
-                }
-            }
+            self.publish_fabric(api).await;
         }
     }
 
@@ -1051,39 +1017,12 @@ impl FabricHandle {
     }
 }
 
-/// What a `FabricStatus` shows this node can reach — the pump's trigger for
-/// `Fabric::retry_all` (module doc, step 6).
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-struct Connectivity {
-    /// The home hub answered on the current connection (attributed).
-    hub_reachable: bool,
-    /// Attributed peers over every link (the hub's connection included).
-    attributed: usize,
-}
-
-impl Connectivity {
-    fn of(st: &FabricStatus) -> Connectivity {
-        Connectivity {
-            hub_reachable: st.hub.enrolled && st.hub.reachable,
-            attributed: st.links.iter().map(|l| l.peers).sum(),
-        }
-    }
-
-    /// More than `before` along either axis: the hub answering where it was
-    /// not, or more attributed peers. Equal or less never counts —
-    /// `retry_all`'s own `Fabric` event reads the same.
-    fn gained(self, before: Connectivity) -> bool {
-        (self.hub_reachable && !before.hub_reachable) || self.attributed > before.attributed
-    }
-}
-
 /// Fabric events → SSE (module doc, step 6).
 async fn pump(
     me: Weak<FabricHandle>,
     api: Weak<ApiState>,
     mut rx: broadcast::Receiver<FabricEvent>,
 ) {
-    let mut seen = Connectivity::default();
     loop {
         let first = match rx.recv().await {
             Ok(e) => Some(e),
@@ -1108,7 +1047,7 @@ async fn pump(
         let (Some(me), Some(api)) = (me.upgrade(), api.upgrade()) else {
             return;
         };
-        me.publish(&api, batch, &mut seen).await;
+        me.publish(&api, batch).await;
     }
 }
 
@@ -1146,52 +1085,6 @@ mod tests {
         assert_eq!(roles(&s), ROLE_MAILBOX);
         s.hub_role = true;
         assert_eq!(roles(&s), ROLE_MAILBOX | ROLE_ALWAYS_ON_HUB);
-    }
-
-    /// L5 m1: `retry_all` runs only when a status shows more connectivity
-    /// than the pump saw last; its own echo (the same status) never calls
-    /// it again, and a drop then a reconnect calls it once more.
-    #[test]
-    fn retry_all_follows_new_connectivity_only() {
-        let none = Connectivity::default();
-        let answered = Connectivity {
-            hub_reachable: true,
-            attributed: 1,
-        };
-        assert!(!none.gained(none), "nothing at start, nothing new");
-        assert!(answered.gained(none), "the hub answered on a new link");
-        assert!(!answered.gained(answered), "retry_all's own echo");
-        assert!(!none.gained(answered), "a drop is no reason to retry");
-        let peer = Connectivity {
-            attributed: 2,
-            ..answered
-        };
-        assert!(peer.gained(answered), "a direct peer attributed");
-        assert!(!answered.gained(peer), "one peer left");
-        let swapped = Connectivity {
-            hub_reachable: true,
-            attributed: 1,
-        };
-        let only_peer = Connectivity {
-            hub_reachable: false,
-            attributed: 1,
-        };
-        assert!(swapped.gained(only_peer), "the hub answered as a peer left");
-        // a pump that sees each status once (a bare link-up shows no new
-        // attribution) calls retry_all exactly at the rises, however many
-        // echoes follow
-        let seq = [
-            none, none, answered, answered, answered, none, none, answered, peer, peer,
-        ];
-        let mut seen = Connectivity::default();
-        let mut calls = 0;
-        for now in seq {
-            if now.gained(seen) {
-                calls += 1;
-            }
-            seen = now;
-        }
-        assert_eq!(calls, 3);
     }
 
     #[test]
