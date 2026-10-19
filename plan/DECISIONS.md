@@ -267,6 +267,64 @@ ADR-lite. Every decision, its rejected alternatives, and why. Newest last; never
   bridge; the bridge function is super important"); users may end up living in our dashboard, so our Messages view must carry every
   network, while the adopted projects' own UIs remain available unmodified (adopt, don't reinvent).
 
+## D25 — Layer 6 (Transport & Bridge) design decisions
+
+- **Date:** 2026-10-19
+- **Decision (owner, over the options brief `plan/layers/60-transport/options.md`):**
+  - **(F1) Foreign messages live in the mesh111 store:** additive schema V3 (foreign conversations, foreign messages, relay edges, send
+    groups) in the same SQLCipher store with typed `Fabric::foreign_*` calls and a prune class in the §10.4 order. Amends the locked Layer 5
+    §10.3 additively.
+  - **(F2) Meshtastic text in-binary through the official `meshtastic` Rust crate** (GPL-3.0), as one more client on the existing meshmud
+    downlink, with 111's own allowlist on top (text to a channel or a node; never admin, config or a heartbeat with nonce 1). Accepted: the
+    shipped `111d` binary is effectively GPL-3.0-only (our files stay "or later"; a legal read on the protobufs' missing version notice).
+    Nearby folds into that client and the Python presence reader retires after parity.
+  - **(F3) LXMF carrier — owner's rule, lead's pick.** Owner (verbatim): "try to keep it as clean as possible, separate and on demand
+    running, meaning if it's not running, it doesn't make our system heavier! you decide this one, performance is super important + I want
+    users to have 100% freedom." Lead's pick within that rule: headless MeshChatX 4.10.7 (slim closure) as an **optional, on-demand
+    supervised child** behind a swappable carrier trait — nothing of it runs, loads or listens unless the user enables the Reticulum
+    bridge; on hosts whose `python3` is older than 3.11 it runs from a bundled interpreter that is likewise installed only when enabled;
+    the same child is the hosted Reticulum panel. The RNS-importing sidecar (option C) stays the contingency for MeshChatX's 2027-01-01
+    sunset or for verified-sender labels. Nothing LXMF enters the `111d` binary.
+  - **(F4) Phone apps — same rule, lead's pick.** Owner (verbatim): "keep it as thin as possible and separate so we don't make the repo
+    heavier, decide yourself. again, the goal is users get hooked to our UI but we offer opening the native of other apps as well in our
+    dashboard separate." Lead's pick: one app-peer adapter shape; Delta Chat first (`deltachat-rpc-server` plus the Madmail chatmail relay
+    on the hub, both optional on-demand children; a Termux phone can be a Delta Chat node); SimpleX second, optional, on glibc hubs only;
+    Briar documented online-only (Tor); each app's native UI offered separately (hosted panel where a web UI exists, otherwise a link-out
+    with honest copy); driving a phone's UI stays a user-attended runbook outside v1.
+  - **(F5) Bridge-first on a minimal transport spine; first signed Layer 6 release = bridge + spine + phone relay + device core (R-B).**
+    Waves: 0 spine (`interfaces.toml`, rnsd posture v2, live attach, `transport.read`, store V3 + contract, A10 registry amendment) ·
+    1 bridge core + Meshtastic + Messages categories + agent tools · 2 LXMF + app peers + phone relay v1 · 3 device core (hotplug, consented
+    identify via adopted tools, RNode stanza proposals, the narrow apply→verify→undo cut) + Settings → Layer 6 · 4 netns verification + fable
+    review. The 111 KISS modem link, its CI image, the MeshCore data-type PR and **(F6) sealed 111 carriage over foreign radios** form the
+    **second release** once the owner's bench exists.
+  - **(F7) Relay defaults:** edges are explicit, directed, non-transitive, between channel or group conversations only, enabled by a human on
+    a paired or loopback session, the agent proposes; a relayed copy is never relayed again; own-echo suppression; a visible `[name/TAG] `
+    marker (plus the structured field where the carrier allows it). Accepted defaults: no courtesy notice on the source channel; readable
+    relay into an amateur-licensed radio only after a human confirms, sealed frames never; a backlog is held to capacity, then shed oldest
+    with a visible counter. **Not accepted as a default:** honouring Meshtastic `ok_to_mqtt` as a relay filter — it becomes a per-edge
+    switch, off by default (user freedom).
+  - **(F8, not polled) Fan-out:** a targets picker, one send group, one message row per target with its own state and retry, a per-target
+    preview (bytes, parts, airtime fact, refusals); oversize refused by default, split an explicit per-send choice, never silent truncation.
+  - **Optional components — owner's framing (verbatim):** "the whole idea is to ship thin layer of own, handselect a few that run native,
+    not fully decided which yet, then we do a full review and integrate." Reading recorded for the spec: the base install is the thin 111
+    layer; adapters and their adopted programs are separate, on-demand components that weigh nothing while disabled; **which adopted
+    projects run "native" (shipped and integrated) is hand-selected by the owner after a full review** — the spec designs the component
+    seam (signed, manifest-pinned, enable-time install from the payload or a pre-seeded cache) and does not pre-decide a download path.
+  - Detail picks from the brief §3 (categories rail, delivery evidence, foreign DMs land in this node's Messages, Meshtastic defaults incl.
+    never writing node configuration in v1, A10 `TransportId` values for Meshtastic and Reticulum, rnsd posture v2 per D17 #5, identify via
+    adopted `rnodeconf --info`, README §6's ordered-network list as KB entry + adapter order with the runtime fall-through deferred to
+    Layer 7, MeshCore dev range `FF00–FFFF` until the bench, PSK keyed hash, MQTT-uplinked channels off by default for sends, LXMF visible
+    prefix + hash dedupe, the narrow P4 cut for device actions) are the lead's, to be attacked by the fable panel before the spec locks.
+- **Rejected:** a separate bridge store in node111 (second key and prune) · pseudo-NodeIds for foreign senders · an own prost client as the
+  first choice (adopt, don't reinvent) · a Python two-way Meshtastic sidecar · MeshMonitor as the send path · lxmd alone · Rust Reticulum
+  reimplementations (not upstream) · raising the LXMF floor instead of bundling (owner wants freedom; decided by the lead within the
+  on-demand rule) · SimpleX first (glibc-only, no Android peer) · Briar first (Tor-only) · "framework only" phone apps · transport-first
+  sequencing · sealed carriage in the first release · matterbridge or a Matrix/XMPP hub as the bridge core · a courtesy notice by default ·
+  `ok_to_mqtt` as a default relay filter.
+- **Why:** the bridge is the point of the layer and every bridge path is provable in network namespaces today, while the LoRa modem and the
+  device probes need boards the owner does not have yet; the owner's rules for adopted programs (separate, on demand, no weight when off,
+  users hooked on our UI with the native UIs one click away) decide every adapter's shape.
+
 ## Pending
 
 - Move deep architecture content out of `os/README.md` into per-layer specs (blocked on layer homes existing).

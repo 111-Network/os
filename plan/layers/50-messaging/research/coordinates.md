@@ -135,3 +135,9 @@ All 7 forks decided (D19, 2026-10-14). Spec draft: `os/50-messaging/README.md`. 
   wording, `layers` reports 5) ‖ UIP (stale comments, mock layers) ‖ HB (presence reader nonce-0 heartbeat every 5 min: the board's API
   session lapses after 15 idle minutes); B = MANP (gen-manifest refuses an incomplete payload listing). Run id `wf_0b7a0a07-28c`
   (launched 2026-10-19 03:30 CEST from `f025c98`).
+- **Owner decisions for the lock (2026-10-19, asked with the Layer 6 forks):** the panel-lint residual #2 is **accepted** and stated in
+  spec §13 "Guards" (the P1g agent's proposed sentence); the restore floor is **accepted as is** (a words-only restore keeps announcing from
+  the provisional floor; the hub-learned floor is a Layer 7 item; documented in D24). Manifest evolution path: the lead's reversible call
+  stands (unknown names parse and are ignored; a reader-version field when the first incompatible change comes). Identify button: Layer 6.
+- **Polish wave interrupted** (session ended mid-run, 2026-10-19 ~04:00): finished agents are read from the run journal; unfinished ones are
+  re-run as fresh Agent-tool subagents with a RESUMPTION NOTICE over their partial work (ultracode is off: no Workflow resume).

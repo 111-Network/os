@@ -38,3 +38,7 @@ Next after the run: lead writes `layers/60-transport/options.md` → owner decid
   tokens, 895 tool calls, 95 min. Reports `00`–`07-gap-1` committed. Critic verdict: sufficient after G1; G1 filled by running MeshChatX in two
   netns. Options brief written and finalized (`options.md`); INDEX row 6 → 🧭 deciding. Next: owner decisions → `DECISIONS.md` D25 (D24 is
   the Layer 5 lock) → spec `os/60-transport/README.md` → fable panel → `TASKS.md` → build after the Layer 5 lock.
+- **Owner decided (2026-10-19, D25):** F1 mesh111 tables · F2 official crate in-binary · F3/F4 delegated under the "separate, on demand,
+  zero weight when off, users free" rule (lead picks: MeshChatX slim on-demand child; Delta Chat + Madmail first) · F5 bridge-first, R-B ·
+  F6 second release · F7 three defaults accepted, `ok_to_mqtt` filter per-edge off · optional components: thin own layer, hand-selected natives
+  after a full review. Next: spec `os/60-transport/README.md` (sonnet draft, lead review) → fable panel → `TASKS.md`; build after the L5 lock.
