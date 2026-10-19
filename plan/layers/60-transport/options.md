@@ -1,6 +1,6 @@
 # Layer 6 — Transport & Bridge: options brief
 
-Status: ✍️ draft 2026-10-19 (critic + gap-fill pending; their findings go into §0.13+ and §5) · lead-written from the 6-scout sweep
+Status: ✍️ draft 2026-10-19, critic folded in (§0.13–16, §6); the one blocking gap (G1, the LXMF endpoint on the device floor) is being filled and decides F3 · lead-written from the 6-scout sweep
 (`layers/60-transport/research/`: seams scout opus, 5 lens scouts sonnet, each web-verified; critic opus). Reads with: `os/README.md` §6 ·
 D17 (device decisions) · D19 c (LoRa ownership) · D20 (Layer 5 hand-offs) · D22 (GPL-3.0-or-later) · **D23** (this kickoff) ·
 `cross-layer/devices.md` · `layers/60-transport/research/00-code-seams.md` (line-verified seam map).
@@ -62,6 +62,23 @@ the Layer 6 build starts after the Layer 5 lock.
     written for a 2.7.x board (an X25519-only key signs nothing). (lens 1 §3.18, lens 5 §3.15–17)
 12. **Android reality is unchanged.** Termux has no 2026 release; TCP-to-hub stays the only reliable phone path; no adoptable helper exists
     for MulticastLock, USB-to-TCP or hotspot. (lens 5 §3.21–22)
+13. **The critic's own checks (06):** meshmud originates nothing but one `want_config` at uplink connect, so the 15-minute lapse (fact 4) is
+    real on the meshmud side too — **routed to the Layer 5 closure now** (the presence reader gains a nonce-0 heartbeat; polish wave HB).
+    The official `meshtastic` Rust crate meets lens 1's constraints (nonce-0 heartbeat every 5 min, a config id we choose, any stream), so
+    "own client" is not forced by them. MeshChatX requires **Python ≥ 3.11** while our venvs are built from the distro `python3`
+    (3.10 on Ubuntu 22.04, 3.9 on Debian 11): the LXMF pick has a device-floor problem that the gap-fill scout is measuring (G1).
+    Meshtasticator (CC BY 4.0, test-only) runs N native firmware nodes on TCP 4403+ and forwards packets by simulated range, but needs a
+    native firmware build (no prebuilt binary); `meshtasticd -s` has the same prerequisite. **Madmail** (Rust single-binary chatmail
+    relay, AGPL-3.0, IP + self-signed mode) was missed by lens 3 and changes Delta Chat's LAN story; `deltachat-rpc-server` speaks stdio
+    JSON-RPC, which our supervisor cannot do today (`supervise.rs:333` sets `stdin = null`).
+14. **README §6's own words are unaddressed by the sweep:** "a short, ordered list of preferred networks, curated in the Knowledge Layer,
+    attempts to join them in sequence … falls back through the list". The brief scopes it in §3 (critic G5).
+15. **Provenance of the RNode probe:** lens 5's DETECT bytes and its pty stub were modelled on `RNodeInterface.py`, which is
+    Reticulum-licensed source read by LLM agents — the exact case upstream's "fakes" chapter warns about (lens 2 §3.17). The brief
+    drops that path (critic G6).
+16. **Frame budget arithmetic:** by the firmware check (255 − 16, minus 12 for PKI) and the encoding of `Data` (2-byte portnum varint plus
+    a bitfield), the sealed `PRIVATE_APP` budget is about 231/219 B, not the 233/221 B Layer 5 §8 pins; text about 232/220 B. Settled at
+    spec time with a prost encode (critic G7).
 
 ## 1. What Layer 6 is, in one paragraph
 
@@ -87,15 +104,22 @@ Everything below the core is adopted and run as-is.
 
 ### F2. The Meshtastic adapter
 
-- **A. In-binary Rust thin client (≈300 lines on prost) in `daemon/meshtastic/client.rs`, one more downlink on meshmud's `127.0.0.1:11230`:
-  handshake once per connection, keep-alive with nonce 0, one send queue spaced ≥ 2.1 s, allowlist at the lowest layer (`TEXT_MESSAGE_APP`
-  now, `PRIVATE_APP` later, `want_config_id` once, never heartbeat 1, no admin, no config).** +~150 KiB; the same client serves the Layer 5
-  `meshtastic-client` Link seam later; Nearby folds into it and the Python presence reader retires after parity, which removes the 15-minute
-  lapse (fact 4). Consequence to accept: the shipped `111d` is effectively GPL-3.0-only. *(pick)*
-  - A2. Adopt the `meshtastic` crate (GPL-3.0, 0.1.9, one author): +372/+332 KiB, brings serial/BLE deps we do not use. Fallback.
+- **A. In-binary Rust, adopting the official `meshtastic` crate (GPL-3.0, 0.1.9, 31k downloads, one listed author; +372/+332 KiB with
+  its default features, less once serial/BLE features are trimmed): one more downlink on meshmud's `127.0.0.1:11230`, handshake once per
+  connection with a nonce we choose, the crate's nonce-0 keep-alive, and our own allowlist on top (we call only `send_text` on a channel or
+  to a node, never admin, config or heartbeat 1), one send queue spaced ≥ 2.1 s.** "Adopt, don't reinvent" (critic G2); the same connection
+  serves the Layer 5 `meshtastic-client` Link seam later; Nearby folds into it and the Python presence reader retires after parity, which
+  removes the 15-minute lapse for good. Consequence to accept: the shipped `111d` is effectively GPL-3.0-only (a legal read on the
+  protobufs' missing version notice decides whether "or later" survives, critic G9). *(pick)*
+  - A1. Our own ≈300-line client on prost types from a pinned protobufs snapshot (+152/+132 KiB, measured): the fallback if the crate's
+    stream layer blocks the single queue, the pacing, or the sealed-frame Link; same licence consequence.
 - B. Extend the GPL Python presence sidecar into a two-way bridge over a local protocol: proven library, but Python on every Termux node's
   critical path, a respawn means a fresh config stream for every client, and sealed frames would cross a Rust↔Python line.
 - C. A feature in meshmud — rejected (unmodified-upstream rule; Go absent; its closure would flip to GPL).
+- D. MeshMonitor's REST `POST /messages` as the send path — rejected for the reasons D19 g already gave (Node 22, ~189 MB, admin requests
+  to the node, binds all interfaces); it stays a later optional service.
+- Test fixtures (honest, critic G3): unit and integration tests run against the stub meshmud with scripted `FromRadio` frames; multi-node
+  behaviour needs Meshtasticator or `meshtasticd -s`, both of which need a native firmware build in CI; RF behaviour needs boards.
 
 ### F3. The LXMF adapter and the Reticulum UI
 
@@ -108,18 +132,29 @@ Everything below the core is adopted and run as-is.
   Python on Termux) but a **D17 #12 rule change** with license consequences (a separate process under the Reticulum License, never combined
   with `111d`; a legal read). Recommendation: keep C ready and decide it when MeshChatX v5.0.0 lands without a successor.
 - D. Rust reimplementations (Leviculum, LXMF-rs) — rejected: not upstream, legal exposure (upstream disputes machine-generated copies).
+- **Open until the gap-fill lands (critic G1, blocking):** MeshChatX needs Python ≥ 3.11 and 21 dependencies (miniaudio has no aarch64
+  wheel), while our venvs are built from the distro `python3`. If the measured floor is "Debian 12 / Ubuntu 24.04 / Termux hubs only", A
+  stays the pick with that floor stated; if MeshChatX cannot attach, send and receive as read from its source, C moves up. Nothing LXMF
+  has been *run* yet; every claim above is source-read.
 
 ### F4. What "phone apps" promises in v1
 
-- **A. An app-peer adapter shape plus two reference adapters on a Linux hub: SimpleX (bot WebSocket API + a hub `smp-server` on the LAN) and
-  Delta Chat (`deltachat-rpc-server` JSON-RPC; a hub chatmail relay for LAN, public relays when online). Briar documented as online-only (Tor).
-  ADB/UI driving of a phone is a user-attended, KB-guided runbook, outside the v1 promise; phone actions, if any, are typed `111d` actions
-  behind human approval (the narrow P4 cut), never an agent shell.** *(pick)*
-- B. Briar first (the owner's example): JVM-heavy and online-only; a poor fit for an offline mesh.
-- C. Delta Chat only: smallest, best Termux story, weak LAN story.
+First the honest frame (critic G4): **P2 as worded — the agent installs and drives apps on the phone — is not feasible.** Termux cannot
+drive another app's UI or install silently; ADB to the same phone is an attended, fragile session. The strongest *offline* phone paths are
+already the first two networks: Sideband/Columba users reach us over the LXMF bridge, Meshtastic app users over their board. "Phone apps"
+therefore means **hub-side adapters for apps that have a headless peer**, and the phone runs the ordinary app.
+
+- **A. The app-peer adapter shape plus one reference adapter, Delta Chat: `deltachat-rpc-server` (MPL-2.0, Rust, arm64 Android build so a
+  Termux phone can itself be a node) with **Madmail** (Rust single-binary chatmail relay, AGPL-3.0, IP + self-signed mode) on the hub for
+  offline LANs and public relays when online. Needs one supervisor extension (a child with piped stdio, or a tiny socket wrapper) because
+  `supervise.rs` sets `stdin = null`. Briar documented as online-only (Tor). SimpleX as a second adapter only on glibc hubs (its binaries are
+  Haskell builds for Ubuntu), outside the musl floor. ADB/UI driving: a user-attended, KB-guided runbook, outside the v1 promise; phone
+  actions, if any, are typed `111d` actions behind human approval (the narrow P4 cut), never an agent shell.** *(pick)*
+- B. SimpleX first (documented bot WebSocket API, `smp-server --ip` on the hub): the best API of the lot, but glibc-only and no Android peer.
+- C. Briar first (the owner's example): JVM-heavy and online-only; a poor fit for an offline mesh.
 - D. Framework only, apps as KB experiments: the category would promise nothing.
-- Sub-decisions: the hub terminates an app's end-to-end encryption to bridge it (plaintext on the hub, per-contact opt-in, labelled) — needed
-  for any of A–C; a Debian-class hub floor for SimpleX/chatmail binaries (musl-only boards excluded from this category).
+- Sub-decision for any of A–C: the hub terminates an app's end-to-end encryption to bridge it (plaintext on the hub, per-contact opt-in,
+  labelled on both sides). Evidence level: doc-only; no phone or app was run.
 
 ### F5. Sequencing and the first signed Layer 6 release
 
@@ -180,9 +215,20 @@ Everything below the core is adopted and run as-is.
   kept; a second AutoInterface in the stock `reticulum` group and the propagation-node role are Settings opt-ins, off by default; children start
   after rnsd's socket exists and restart with it; interface changes use `rnstatus --attach/--reload`, never `pkill`. Lens 2 argues an
   endpoint needs no transport; D17 #5 stands because the phone-relay role needs the hub to route.
-- **Identify.** Own byte probes for family detection (RNode 13-byte DETECT, MeshCore `GetVersion`; Meshtastic via meshmud as built), rnodeconf
-  only for provisioning, pairing and flashing; identify stays consented once per device (D17 #8); the RNode step is a separate process in the
-  rns venv (rule 1 holds).
+- **Identify.** Adopted tools, not our own byte probes (critic G6): the RNode step is `rnodeconf --info` from the rns venv (a separate
+  process, rule 1 holds), with a fake `rnodeconf` script for the text-parser tests and no stub modelled on Reticulum source; the MeshCore
+  step is the documented MIT `GetVersion`/`GetIdentity` exchange; Meshtastic via meshmud as built. Identify stays consented once per device
+  (D17 #8). rnodeconf stays the only path for provisioning, pairing and flashing.
+- **README §6's ordered list (critic G5).** The "short, ordered list of preferred networks, curated in the Knowledge Layer" becomes a KB
+  concept entry plus the adapter order in `state/interfaces.toml` and Settings → Layer 6 (111 fabric first, then Reticulum, Meshtastic,
+  LXMF, app peers); at setup the agent proposes enabling them in that order. The runtime "join in sequence, heartbeat, fall back through
+  the list" is Layer 7's presence and gateway work and is deferred there explicitly.
+- **Node configuration.** In v1 the bridge never writes Meshtastic node configuration (name set in the panel); D17's typed
+  `meshtastic.set` allowlist stays reserved vocabulary for a later cut (resolves lens 1 vs devices.md §3).
+- **PSKs.** Conversations are keyed by a keyed hash of the channel name and PSK; the PSK itself is never persisted (resolves lens 1 vs 4).
+- **MQTT-uplinked channels.** Sends on a channel with MQTT uplink are off by default and warn when enabled (resolves lens 1 vs 5).
+- **LXMF relay marker.** A visible `[name/TAG] ` prefix in the body on LXMF too, because MeshChatX's API accepts no custom fields and
+  stock Sideband users must see the original sender; plus the per-node hash dedupe (resolves lens 2 vs 4).
 - **MeshCore data type**: dev range `FF00–FFFF` until the bench, then the PR (plan correction to D20's hand-off).
 - **Versions**: Reticulum pins resolve from PyPI at release time; the Meshtastic bridge is tested on 2.7.26 stable, 2.8.1 is a bench item;
   the presence reader's 2.7.11 pin becomes moot once the in-binary client reaches parity.
@@ -200,6 +246,8 @@ Everything below the core is adopted and run as-is.
   follow-up row (nonce-0 heartbeat in the reader) until the in-binary client replaces it.
 - KB: `projects/reticulum.md` and `projects/lxmf.md` versions are stale; `meshtastic-python.md` and `meshmud.md` still call in-binary
   protobufs a blocker; `briar-bramble.md` license string is `GPL-3.0-only` (the file says "or any later version").
+- Layer 5 §8 frame budget 233/221 B → about 231/219 B once a prost encode settles it (fact 16).
+- devices.md §3 "own probes" sequencing → adopted `rnodeconf --info` (fact 15).
 
 ## 5. Open questions for the owner (beyond the polled forks)
 
@@ -209,6 +257,32 @@ Everything below the core is adopted and run as-is.
 4. Decide the LXMF sidecar (F3 C) now, or when MeshChatX v5.0.0 lands without a successor?
 5. May the signed manifest ship a Columba APK (it embeds Reticulum-licensed Python) or only link to it (KB candidate, `-no-sentry` build)?
 
-## 6. Critic and gap-fill (filled in when the run returns)
+## 6. Critic and gap-fill
 
-Pending.
+**Verdict (06-critic.md):** strong on seams, Meshtastic firmware behaviour, bridge semantics and transport sequencing; sufficient today
+for the store, categories, fan-out, relay and loop-guard forks; **not** sufficient for the LXMF fork until G1 is filled.
+
+| # | Gap | Severity | Where the brief lands |
+|---|---|---|---|
+| G1 | LXMF endpoint never run; MeshChatX needs Python ≥ 3.11 vs the distro-`python3` venv floor | blocking | gap-fill scout running; decides F3 |
+| G2 | Own Meshtastic client picked over the adoptable crate; MeshMonitor not weighed | major | F2 pick flipped to the crate; MeshMonitor rejected with reasons |
+| G3 | No proven hardware-less Meshtastic harness | major | F2 test-fixture line: stub meshmud for unit/integration, Meshtasticator or `meshtasticd -s` after a native build in CI |
+| G4 | Phone apps vs the device floor and offline-first; Madmail missed; stdio blocked | major | F4 reframed (Delta Chat + Madmail first, SimpleX on glibc hubs, honest lead) |
+| G5 | README §6's ordered list unaddressed | major | §3 detail pick: KB list + interfaces order now; runtime fall-through in Layer 7 |
+| G6 | RNode probe bytes derived from Reticulum source | major | §3: `rnodeconf --info` adopted; the stub dropped |
+| G7 | Frame budget 233/221 vs ≈231/219 | minor | fact 16; settled by encode at spec time |
+| G8 | No adopt-heavy alternative (Matrix/XMPP hub as the bus) weighed | minor | considered: a hub homeserver plus N bridges does not put text in *our* Messages view (D23) and adds a server to every hub; kept as a Layer 7 internet-gateway option (F5 D) |
+| G9 | protobufs LICENSE carries no version notice | minor | legal read; F2 wording hedged |
+
+**Conflicts the critic listed, and how the brief resolves them:** (1) adapter channel → Meshtastic in-binary; LXMF: `111d` is a REST/WS
+client of the MeshChatX child; Delta Chat: a child with piped stdio (supervisor extension) — one pattern per adapter, no spool dir unless
+an adapter needs one; (2) LXMF marker → visible prefix plus hash dedupe (§3); (3) `enable_transport` → D17 #5 stands (§3 posture);
+(4) text ceiling → the firmware's real ceiling is the physics the preview shows, the 200 B app convention is a note; (5) adopt vs own →
+crate and rnodeconf (F2, §3); (6) MeshCore ID before the lock → owner (F5 note, §4); (7) node config → never written in v1 (§3);
+(8) PSK → keyed hash (§3); (9) MQTT channels → off by default plus warn (§3); (10) sequencing → owner (F5); (11) meshmud has a release
+(lens 1 right); (12) MeshCore loop-detect default → irrelevant in v1.
+
+**Evidence level per fork** (critic's honesty note): F1 store *source-read* (schema and seams line-verified) · F2 Meshtastic *source-read*
+(firmware and crate source; sizes *run*; nothing on a board) · F3 LXMF *source-read*, G1 *run* pending · F4 phone apps *doc-only* ·
+F5 sequencing and the transport spine *run* (netns rnsd, pty stub, `rnstatus --attach`) · F6 sealed carriage *source-read* · F7/F8 relay
+and fan-out *design* on prior art read from source and docs.
