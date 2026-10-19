@@ -1,6 +1,6 @@
 # Layer 6 — Transport & Bridge: options brief
 
-Status: ✍️ draft 2026-10-19, critic folded in (§0.13–16, §6); the one blocking gap (G1, the LXMF endpoint on the device floor) is being filled and decides F3 · lead-written from the 6-scout sweep
+Status: 🧭 deciding · 2026-10-19 · sweep complete (6 scouts, opus critic, 1 gap-fill scout; ~2.0M tokens, 895 tool calls, 47–62 sources per lens); the gap-fill ran the LXMF endpoint and settled F3's shape · lead-written from the 6-scout sweep
 (`layers/60-transport/research/`: seams scout opus, 5 lens scouts sonnet, each web-verified; critic opus). Reads with: `os/README.md` §6 ·
 D17 (device decisions) · D19 c (LoRa ownership) · D20 (Layer 5 hand-offs) · D22 (GPL-3.0-or-later) · **D23** (this kickoff) ·
 `cross-layer/devices.md` · `layers/60-transport/research/00-code-seams.md` (line-verified seam map).
@@ -76,6 +76,20 @@ the Layer 6 build starts after the Layer 5 lock.
 15. **Provenance of the RNode probe:** lens 5's DETECT bytes and its pty stub were modelled on `RNodeInterface.py`, which is
     Reticulum-licensed source read by LLM agents — the exact case upstream's "fakes" chapter warns about (lens 2 §3.17). The brief
     drops that path (critic G6).
+17. **MeshChatX actually runs as the LXMF carrier (gap 1, *run* in two netns).** It attaches to rnsd's shared instance as a client,
+    sends and receives both ways (event `lxmf.delivery`, the LXMF hash identical on both ends = a cross-node dedupe key), survives an rnsd
+    restart (one delivery, no loss, no duplicate), and sent **zero packets** off-box in 25 minutes. Traps the adapter must handle: start
+    order (rnsd must own the socket before any child, else the child becomes the instance and the node partitions silently); `--auth` is a
+    no-op until setup plus a config PATCH; default inbound stamp cost 8 (set 0); auto-resend must be off (delivered must be sticky in our
+    outbox); a peer must announce before it can be answered (111d schedules announces); field 16 `app_extensions` round-trips intact (the
+    relay marker rides there plus a visible prefix). No signature-valid flag: signature-invalid messages are dropped before the event,
+    source-unknown ones delivered unflagged.
+18. **The LXMF floor is Python ≥ 3.11 (real: `tomllib`, `StrEnum`, `datetime.UTC`).** Debian 12+, Ubuntu 24.04+, Pi OS bookworm+ and
+    Termux (3.14) meet it; Debian 11 and Ubuntu 22.04 (the lead box, 3.10) do not. Proven hybrid (*run*): rnsd stays on the distro
+    Python, MeshChatX runs from a bundled python-build-standalone 3.11 (~47 MB per arch; repo MPL-2.0, interpreter PSF; a new L1
+    dependency). A **slim closure** (35 wheels, 128 MiB on disk, 75 MB RSS, 0.4 s start; voice, WASM plugins, BLE and WebTransport lazily
+    absent) carried messaging and has wheels for manylinux and musllinux on x86_64 and aarch64; the full closure (44 wheels, 251 MiB) has
+    no aarch64 `miniaudio` wheel. Termux needs two or three CI-built wheels. (gap 1 §3–4)
 16. **Frame budget arithmetic:** by the firmware check (255 − 16, minus 12 for PKI) and the encoding of `Data` (2-byte portnum varint plus
     a bitfield), the sealed `PRIVATE_APP` budget is about 231/219 B, not the 233/221 B Layer 5 §8 pins; text about 232/220 B. Settled at
     spec time with a prost encode (critic G7).
@@ -123,19 +137,25 @@ Everything below the core is adopted and run as-is.
 
 ### F3. The LXMF adapter and the Reticulum UI
 
-- **A. MeshChatX as a headless supervised child beside rnsd, from a hash-locked venv pinned from PyPI; `111d` talks to its loopback REST +
-  WebSocket through a narrow carrier trait; the same child is the hosted Reticulum panel behind the child-panel proxy (WebSocket) that
-  Layer 5 reserved.** No rule change. Labels say "Reticulum, sender unverified" (the API has no verify flag). Its sunset (2027-01-01) falls
-  before the owner's hardware exists, so the carrier trait is the insurance. *(pick)*
-- B. lxmd only — insufficient (inbound-only, no sender names, no send path); keep as the opt-in propagation-node role.
-- C. Our own ~300-line sidecar importing RNS/LXMF in the rns venv: the sturdiest (public API, verify flag, custom fields, no sunset, pure
-  Python on Termux) but a **D17 #12 rule change** with license consequences (a separate process under the Reticulum License, never combined
-  with `111d`; a legal read). Recommendation: keep C ready and decide it when MeshChatX v5.0.0 lands without a successor.
-- D. Rust reimplementations (Leviculum, LXMF-rs) — rejected: not upstream, legal exposure (upstream disputes machine-generated copies).
-- **Open until the gap-fill lands (critic G1, blocking):** MeshChatX needs Python ≥ 3.11 and 21 dependencies (miniaudio has no aarch64
-  wheel), while our venvs are built from the distro `python3`. If the measured floor is "Debian 12 / Ubuntu 24.04 / Termux hubs only", A
-  stays the pick with that floor stated; if MeshChatX cannot attach, send and receive as read from its source, C moves up. Nothing LXMF
-  has been *run* yet; every claim above is source-read.
+- **A-slim. MeshChatX 4.10.7 as a headless supervised child beside rnsd, slim closure (35 wheels), hash-locked per arch and libc in CI;
+  on hosts whose `python3` is older than 3.11 it runs from a bundled python-build-standalone 3.11 while rnsd stays on the distro Python
+  (the proven hybrid); `111d` is its loopback REST + WebSocket client through a narrow carrier trait (start order, auth setup, stamp cost 0,
+  auto-resend off, scheduled announces, sticky `delivered`, dedupe by LXMF hash); the same child is the hosted Reticulum panel behind the
+  child-panel proxy Layer 5 reserved.** No rule change; every hard rule kept; the owner's "full UI plus text in Messages" in one adopted
+  program. Labels say "Reticulum, sender unverified". Its sunset (2027-01-01, v5.0.0 last, no successor announced) is why the carrier trait
+  exists. Hub only in v1 (phones are Sideband/Columba peers of the hub). *(pick)*
+  - Sub-decision: bundled CPython as a new Layer 1 dependency (~47 MB per arch, LICENSING §7 row) **or** raise the Layer 6 LXMF floor to
+    Debian 12+ / Ubuntu 24.04+ / Pi OS bookworm+ / Termux. Recommendation: bundle, because Ubuntu 22.04 hubs are common until 2027.
+- A-full. The upstream-supported 44-wheel closure: +120 MiB, an aarch64 `miniaudio` source build in CI, voice and plugins we do not use.
+- B. Original Reticulum MeshChat 2.4.0 (MIT): parses on 3.10, but no auth at all, no `app_extensions`, Electron-only releases (a Node
+  frontend build in CI). Fallback if the owner refuses both the bundle and the raised floor.
+- C. Our own ~300-line sidecar importing RNS/LXMF (Python ≥ 3.7, fits every distro and Termux with no extra interpreter; verify flag,
+  custom fields, state callbacks, no web UI to secure, no sunset) — a **D17 #12 rule change** with license consequences (a separate process
+  under the Reticulum License, never combined with `111d`; a legal read). Recommendation: keep C ready; decide it when v5.0.0 lands without
+  a successor, or now if the owner wants verified/unverified sender labels in v1.
+- D. lxmd only — insufficient (inbound-only, no send path); it stays the opt-in propagation-node role. E. Rust reimplementations
+  (Leviculum, LXMF-rs) — rejected: not upstream, legal exposure.
+- Evidence: A *run* (two netns, both directions, restart, egress log); B and C *source-read*.
 
 ### F4. What "phone apps" promises in v1
 
@@ -256,6 +276,12 @@ therefore means **hub-side adapters for apps that have a headless peer**, and th
 3. When the hub has internet, may phone-app adapters use public servers (chatmail relays, SimpleX presets) or only self-hosted ones?
 4. Decide the LXMF sidecar (F3 C) now, or when MeshChatX v5.0.0 lands without a successor?
 5. May the signed manifest ship a Columba APK (it embeds Reticulum-licensed Python) or only link to it (KB candidate, `-no-sentry` build)?
+6. Bundled CPython (python-build-standalone) as a Layer 1 dependency, or raise the LXMF floor to Debian 12+ / Ubuntu 24.04+ (F3)?
+7. LXMF bridge display name and announce policy (announces cost airtime on LoRa; stock apps learn our key only by announce).
+8. Must v1 show verified vs unverified LXMF senders (forces C), or is "unverified" enough?
+9. The "send to Reticulum" target with no LXMF channels: a chosen peer address (per-network recipient lists; recommended), a
+   distribution-group hub, or Reticulum Relay Chat rooms later?
+10. A DM to the board's own Meshtastic node lands in this node's Messages (recommended); hub-member routing waits for multi-device (v1.1).
 
 ## 6. Critic and gap-fill
 
@@ -264,7 +290,7 @@ for the store, categories, fan-out, relay and loop-guard forks; **not** sufficie
 
 | # | Gap | Severity | Where the brief lands |
 |---|---|---|---|
-| G1 | LXMF endpoint never run; MeshChatX needs Python ≥ 3.11 vs the distro-`python3` venv floor | blocking | gap-fill scout running; decides F3 |
+| G1 | LXMF endpoint never run; MeshChatX needs Python ≥ 3.11 vs the distro-`python3` venv floor | blocking | **filled** (`07-gap-1.md`): run in two netns, works; floor matrix; hybrid interpreter proven; slim closure sized; F3 rewritten |
 | G2 | Own Meshtastic client picked over the adoptable crate; MeshMonitor not weighed | major | F2 pick flipped to the crate; MeshMonitor rejected with reasons |
 | G3 | No proven hardware-less Meshtastic harness | major | F2 test-fixture line: stub meshmud for unit/integration, Meshtasticator or `meshtasticd -s` after a native build in CI |
 | G4 | Phone apps vs the device floor and offline-first; Madmail missed; stdio blocked | major | F4 reframed (Delta Chat + Madmail first, SimpleX on glibc hubs, honest lead) |
@@ -283,6 +309,6 @@ crate and rnodeconf (F2, §3); (6) MeshCore ID before the lock → owner (F5 not
 (lens 1 right); (12) MeshCore loop-detect default → irrelevant in v1.
 
 **Evidence level per fork** (critic's honesty note): F1 store *source-read* (schema and seams line-verified) · F2 Meshtastic *source-read*
-(firmware and crate source; sizes *run*; nothing on a board) · F3 LXMF *source-read*, G1 *run* pending · F4 phone apps *doc-only* ·
+(firmware and crate source; sizes *run*; nothing on a board) · F3 LXMF *run* (gap 1) · F4 phone apps *doc-only* ·
 F5 sequencing and the transport spine *run* (netns rnsd, pty stub, `rnstatus --attach`) · F6 sealed carriage *source-read* · F7/F8 relay
 and fan-out *design* on prior art read from source and docs.

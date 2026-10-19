@@ -34,3 +34,7 @@ Sessions die; this file is what the next session needs.
 
 Next after the run: lead writes `layers/60-transport/options.md` → owner decides → `DECISIONS.md` → spec `os/60-transport/README.md`
 → fable adversarial panel → `TASKS.md` → build (after the Layer 5 lock).
+- **Run 1 complete (2026-10-19 ~03:40 CEST):** 8 agents (seams opus · 5 lens scouts sonnet · critic opus · gap-1 sonnet), ~2.0M subagent
+  tokens, 895 tool calls, 95 min. Reports `00`–`07-gap-1` committed. Critic verdict: sufficient after G1; G1 filled by running MeshChatX in two
+  netns. Options brief written and finalized (`options.md`); INDEX row 6 → 🧭 deciding. Next: owner decisions → `DECISIONS.md` D25 (D24 is
+  the Layer 5 lock) → spec `os/60-transport/README.md` → fable panel → `TASKS.md` → build after the Layer 5 lock.

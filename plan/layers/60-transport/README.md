@@ -1,6 +1,6 @@
 # Layer 6 — Transport & Bridge: plan folder
 
-**Status** (copied from [`INDEX.md`](../../INDEX.md) row 6, which stays the source of truth): 🔬 researching — kickoff 2026-10-19 (D23): the bridge carries readable text both ways, foreign networks appear as their own categories in Messages while their own UIs stay hosted panels; v1 networks = Meshtastic + Reticulum/LXMF + phone apps reached through Termux; no LoRa hardware on the lead box yet (the owner sets up a full test setup later, so hardware gates stay external until then); the research sweep runs alongside the Layer 5 closure and the Layer 6 build starts after the Layer 5 lock.
+**Status** (copied from [`INDEX.md`](../../INDEX.md) row 6, which stays the source of truth): 🧭 deciding — options brief `layers/60-transport/options.md` (2026-10-19) from the 8-agent sweep (6 scouts, critic, gap-fill: MeshChatX run in netns): 8 polled forks with picks (foreign tables in the mesh111 store, Meshtastic via the official crate in-binary, LXMF via headless MeshChatX slim + bundled CPython on old distros, phone apps = Delta Chat + Madmail first, bridge-first sequencing, sealed carriage second release, explicit relay edges, per-target fan-out); owner decides → spec + fable panel; build after the Layer 5 lock. Kickoff D23; no hardware yet
 
 **Spec and build:** `os/60-transport/README.md` and `os/60-transport/TASKS.md` do not exist yet; they are written after the options brief is decided.
 
@@ -20,8 +20,8 @@
 | `research/04-bridge-design.md` | Lens 4: bridge semantics: categories in Messages, fan-out, relay between networks, loop guard, consent, prior art. |
 | `research/05-transports-devices.md` | Lens 5: the device-connection core scoped without hardware; MeshCore KISS modem status; interfaces.toml; sequencing. |
 | `research/06-critic.md` | Completeness critique of 00 to 05. |
-| `research/07-gap-N.md` | One per blocking gap (cap 2). |
-| `options.md` | Options brief for the owner (lead-written after the sweep). |
+| [`research/07-gap-1.md`](research/07-gap-1.md) | Gap 1: MeshChatX actually run as the LXMF carrier; Python floor matrix; hybrid interpreter; slim closure. |
+| [`options.md`](options.md) | Options brief for the owner: 18 settled facts, 8 polled forks with picks, detail picks, plan corrections, critic digest. |
 | [`runs/workflows/`](runs/workflows/) | Workflow scripts, one per run: `research.js` first. |
 | `runs/journals/` | Exported run journals (`<label>.<wf_id>.jsonl`) with a README once the first run is exported. |
 
