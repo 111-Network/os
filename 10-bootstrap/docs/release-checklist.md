@@ -80,8 +80,9 @@ current release, so an unlisted `bin/meshmud`, bundle file or reader script is n
 at boot and a torn one goes undetected. The node does not check that the listing is complete,
 so `gen-manifest.py` does it at release time (step 4): it reads every `payload-<triple>.tar.gz` in
 memory and refuses one whose `share/payload.manifest` does not list a regular file of the tarball
-(itself excepted) or lists a path that is not one, naming the first offending path. It does not
-compare hashes, so the `diff` and `sha256sum -c` lines below stay as the human cross-check.
+(itself excepted), lists a path that is not one, or lists a file with a sha256 other than the
+tarball member's (compared exactly, lowercase hex, as `verify_tree` compares it), naming the first
+offending path. The `diff` and `sha256sum -c` lines below stay as the human cross-check.
 Write the listing from the payload tree:
 
 ```sh
@@ -126,7 +127,8 @@ The Layer 5 sections are written when their files are in the artifacts dir, and 
 refuses a payload whose `bin/meshmud`, `panels/meshtastic-web/` tree or presence lock differs
 from the pins it is about to write (and a `meshmud` with no `111` binary and payload of its
 triple), and, pins or no pins, a readable payload whose `share/payload.manifest` leaves a file
-unlisted or lists one that is absent (the listing is written in step 2). Assert a full release before signing:
+unlisted, lists one that is absent or lists one with a wrong sha256 (the listing is written in
+step 2). Assert a full release before signing:
 
 ```sh
 grep -E '^\[(pkg\.meshmud\.target\.|bundle\.meshtastic-web|presence-lock)' dist/channel-111-stable.toml

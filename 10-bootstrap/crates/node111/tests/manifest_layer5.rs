@@ -1117,6 +1117,197 @@ fn generator_refuses_an_incomplete_payload_listing() {
     assert!(m.payload_for(X86).is_some());
 }
 
+/// What the node does with a payload at stage time (`stage_payload`: pin check, safe
+/// unpack, `verify_tree`), pinned to the payload's own bytes.
+fn node_stages(payload: &[u8]) -> anyhow::Result<()> {
+    use std::str::FromStr;
+    let artifact = node111::manifest::PinnedArtifact {
+        name: X86.into(),
+        url: "http://x".into(),
+        sha256: sha256_bytes(payload),
+        size: payload.len() as u64,
+    };
+    let staging = tempfile::tempdir().unwrap();
+    node111::daemon::updater::stage::stage_payload(
+        payload,
+        &artifact,
+        staging.path(),
+        &node111::calver::Calver::from_str("2026.10.12").unwrap(),
+    )
+    .map(|_| ())
+}
+
+/// The listing's hashes (Layer 5 integrated review m7): each listed sha256 must be the
+/// tarball member's, compared exactly as `verify_tree` compares it, so a payload that
+/// every node would refuse at stage time is refused at release time instead, naming
+/// the first offending path.
+#[test]
+fn generator_refuses_a_payload_listing_with_a_wrong_hash() {
+    let x86_payload = "payload-x86_64-unknown-linux-musl.tar.gz";
+    let wrong: &[u8] = b"not the packed bytes";
+    let wrong_sha = sha256_bytes(wrong);
+    let app_js = "panels/meshtastic-web/assets/app.js";
+    let app_js_bytes = BUNDLE
+        .iter()
+        .find(|(rel, _)| *rel == "assets/app.js")
+        .unwrap()
+        .1;
+    let llms = "share/kb/llms.txt";
+    let mismatch = |rel: &str, packed: &[u8]| {
+        format!(
+            "share/payload.manifest lists {rel} with sha256 {wrong_sha}, but the tarball's {rel} \
+             has sha256 {}",
+            sha256_bytes(packed)
+        )
+    };
+
+    // `unlisted` + `phantom` on the same path: packed with its own bytes, listed once
+    // with the hash of other bytes.
+    let cases: Vec<(&str, Vec<u8>, String)> = vec![
+        (
+            "bin/meshmud listed with another file's hash",
+            layer5_payload_listing(
+                &[layer5::MESHMUD_BIN],
+                &[(layer5::MESHMUD_BIN, wrong)],
+                true,
+                &[],
+            ),
+            mismatch(layer5::MESHMUD_BIN, MESHMUD_X86),
+        ),
+        (
+            "a bundle file listed with another file's hash",
+            layer5_payload_listing(&[app_js], &[(app_js, wrong)], true, &[]),
+            mismatch(app_js, app_js_bytes),
+        ),
+        (
+            "a base file (share/kb) listed with another file's hash",
+            layer5_payload_listing(&[llms], &[(llms, wrong)], true, &[]),
+            mismatch(llms, b"index\n"),
+        ),
+        (
+            "a path listed twice, right then wrong (every line must hold)",
+            layer5_payload_listing(&[], &[(llms, wrong)], true, &[]),
+            mismatch(llms, b"index\n"),
+        ),
+    ];
+    for (what, payload, needle) in cases {
+        let (dir, arts) = release_artifacts();
+        std::fs::write(arts.join(x86_payload), &payload).unwrap();
+        let out = dir.path().join("refused.toml");
+        let o = gen_manifest(&arts, &out);
+        let stderr = String::from_utf8_lossy(&o.stderr);
+        assert!(!o.status.success(), "{what}: gen-manifest must refuse");
+        assert!(
+            stderr.contains(&needle),
+            "{what}: wanted {needle:?} in: {stderr}"
+        );
+        assert!(
+            stderr.contains(x86_payload),
+            "{what}: the error names the payload: {stderr}"
+        );
+        assert!(!out.exists(), "{what}: no manifest may be written");
+        // the node agrees: its stage-time verify_tree refuses the same payload
+        let err = node_stages(&payload).unwrap_err().to_string();
+        assert!(
+            err.contains("payload tree hash mismatch"),
+            "{what}: the node refuses it too: {err}"
+        );
+    }
+
+    // The comparison is exact, as the node's: the right hash in uppercase is refused by both.
+    let mut files: Vec<(String, Vec<u8>)> = vec![
+        (
+            "bin/111".into(),
+            b"#!/bin/sh\necho fake 111 daemon\n".to_vec(),
+        ),
+        (llms.into(), b"index\n".to_vec()),
+        ("share/kb/reticulum.md".into(), b"entry\n".to_vec()),
+    ];
+    files.extend(layer5_files(Some(MESHMUD_X86), BUNDLE, true, &[]));
+    let mut listing = String::new();
+    for (rel, bytes) in &files {
+        let sha = sha256_bytes(bytes);
+        let sha = if rel == llms { sha.to_uppercase() } else { sha };
+        listing.push_str(&format!("{sha}  {rel}\n"));
+    }
+    let mut gz = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+    {
+        let mut b = tar::Builder::new(&mut gz);
+        for (rel, bytes) in files
+            .iter()
+            .map(|(r, b)| (r.as_str(), b.as_slice()))
+            .chain([("share/payload.manifest", listing.as_bytes())])
+        {
+            let mut h = tar::Header::new_gnu();
+            h.set_size(bytes.len() as u64);
+            h.set_mode(0o644);
+            h.set_entry_type(tar::EntryType::Regular);
+            h.set_cksum();
+            b.append_data(&mut h, rel, bytes).unwrap();
+        }
+        b.finish().unwrap();
+    }
+    let upper = gz.finish().unwrap();
+    let (dir, arts) = release_artifacts();
+    std::fs::write(arts.join(x86_payload), &upper).unwrap();
+    let o = gen_manifest(&arts, &dir.path().join("refused.toml"));
+    let stderr = String::from_utf8_lossy(&o.stderr);
+    assert!(!o.status.success(), "an uppercase hash must be refused");
+    assert!(
+        stderr.contains(&format!(
+            "lists {llms} with sha256 {}",
+            sha256_bytes(b"index\n").to_uppercase()
+        )),
+        "{stderr}"
+    );
+    assert!(node_stages(&upper)
+        .unwrap_err()
+        .to_string()
+        .contains("payload tree hash mismatch"));
+
+    // Listing order across absent and wrong-hash lines: the first offending line is named.
+    let (dir, arts) = release_artifacts();
+    for (phantom, first, not) in [
+        (
+            [(layer5::MESHMUD_BIN, wrong), ("aa/absent", wrong)],
+            "lists bin/meshmud with sha256",
+            "aa/absent",
+        ),
+        (
+            [("aa/absent", wrong), (layer5::MESHMUD_BIN, wrong)],
+            "lists aa/absent, which is not a regular file",
+            "lists bin/meshmud with",
+        ),
+    ] {
+        std::fs::write(
+            arts.join(x86_payload),
+            layer5_payload_listing(&[layer5::MESHMUD_BIN], &phantom, true, &[]),
+        )
+        .unwrap();
+        let o = gen_manifest(&arts, &dir.path().join("refused.toml"));
+        let stderr = String::from_utf8_lossy(&o.stderr);
+        assert!(!o.status.success());
+        assert!(
+            stderr.contains(first) && !stderr.contains(not),
+            "wanted only {first:?}: {stderr}"
+        );
+    }
+
+    // And an unlisted file is still reported before a wrong hash.
+    std::fs::write(
+        arts.join(x86_payload),
+        layer5_payload_listing(&[app_js, llms], &[(llms, wrong)], true, &[]),
+    )
+    .unwrap();
+    let o = gen_manifest(&arts, &dir.path().join("refused.toml"));
+    let stderr = String::from_utf8_lossy(&o.stderr);
+    assert!(!o.status.success());
+    assert!(
+        stderr.contains(&format!("does not list {app_js},")) && !stderr.contains("with sha256"),
+        "wanted the unlisted file first: {stderr}"
+    );
+}
+
 /// The accepting side of the listing guard: a listing in the forms the node reads
 /// (`./` and doubled-slash paths, blank lines, a CRLF listing, extra columns) still
 /// covers its files, and the Layer 5 round trip is unchanged.

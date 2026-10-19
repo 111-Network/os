@@ -36,7 +36,10 @@ With no terminal, or at end of input, both stop the install and nothing is assum
 |---|---|
 | `install.sh` | regenerated per release with fresh pins; shim sha256+minisig on the release page |
 | `111` | `x86_64-unknown-linux-musl`, `aarch64-unknown-linux-musl`; aarch64 built with `-z max-page-size=16384` (16KB-page Android kernels), CI asserts `p_align=0x4000` |
-| release payload tarball | `releases/<ver>/` = `bin/111` + `share/kb/` (KB snapshot, immutable release asset — never a codeload pin; GitHub regenerates codeload bytes, 2023 incident) |
+| release payload tarball | `releases/<ver>/` = `bin/111` + `share/kb/` (KB snapshot, immutable release asset — never a codeload pin; GitHub regenerates codeload bytes, 2023 incident) + the Layer 5 assets (D20): `bin/meshmud`, `panels/meshtastic-web/` (the web bundle), `share/meshtastic-presence/` (the reader script, its lock, `LICENSE`) + `share/payload.manifest` (`sha256  relpath` for every other file; `gen-manifest.py` refuses a payload it does not list completely and with the members' hashes) |
+| `meshmud-<tag>-linux-amd64`, `meshmud-<tag>-linux-arm64` | Layer 5: CI-built by `scripts/meshmud-build.sh` from the pinned upstream tarball, conveyed as GPL-3.0; `[pkg.meshmud.target.<triple>]`; the same bytes ride in that triple's payload as `bin/meshmud` |
+| `meshtastic-web-<tag>.tar` + `.tree` | Layer 5: the Meshtastic web client, from `scripts/meshtastic-web-build.sh` (pinned tag); `[bundle.meshtastic-web]`, `tree-sha256` = sha256 of the `.tree`; unpacked in every payload at `panels/meshtastic-web/` |
+| `meshtastic-presence-lock.txt` | Layer 5: the presence venv's hash-locked closure (`pip install --require-hashes`, like `rns-lock.txt`); `[presence-lock]`; also in every payload under `share/meshtastic-presence/` |
 | Termux APK bundle | termux-app v0.118.3 + Termux:Boot v0.8.1 + Termux:API v0.53.0, arm64-v8a, GitHub builds, single source |
 | Termux .deb closure | enumerated per-release (minimum: openssh, termux-services, cronie, python, python-cryptography; final list settled by spike V3), per-deb sha256, Termux repo snapshot pinned, monthly CI revalidation |
 | `rns-lock.txt` | pip requirements with hashes (`rns==1.5.6` + transitive closure), `--require-hashes`; lockfile sha256 in manifest |
@@ -203,7 +206,10 @@ recorded in `10-bootstrap/TASKS.md` at build (Layer 5 task B1).
   with a plain-language reason, is in `venvs/presence.status.json`, which the `meshtastic` service reads). `fabric/` is
   created at runtime, like `agent/`.
 - **Supervision.** `meshmud` and `meshtastic-presence` are supervised children of `111d` exactly like `rnsd` and `111-agent`
-  (`supervise.rs` `ChildSpec`, back-off, restart route); the fabric itself runs in-process.
+  (`supervise.rs` `ChildSpec`, back-off, restart route); the fabric itself runs in-process. Every supervised child is
+  forked by one long-lived thread with `PR_SET_PDEATHSIG = SIGTERM`, so a `111d` killed without its stop path (SIGKILL, OOM)
+  takes its children with it; a child's own children and a child that ignores SIGTERM still rely on the service
+  manager's cgroup kill.
 - **CLI verbs.** `111 fabric offer|enroll|status` join the subcommand set (Architecture).
 - **Dependencies** (sign-off recorded in `10-bootstrap/TASKS.md` at build, per its Dependency policy): `rusqlite` / `libsqlite3-sys`
   (`bundled-sqlcipher-vendored-openssl`), `blake3`, `bao-tree`, `ciborium`. `scripts/check.sh` builds SQLCipher for both musl targets.

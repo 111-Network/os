@@ -1268,8 +1268,9 @@ print(sum(1 for m in body.get("messages", []) if m.get("text") == sent))' "$W/bo
   wait "${DPID[A]}" 2>/dev/null || true
   DPID[A]=""
   local orphans
+  wait_for 5 '[ -z "$(procs_in A)" ]' || true
   orphans=$(procs_in A)
-  note "A: 111d killed -9; its children outlive it (no PR_SET_PDEATHSIG; a service manager's cgroup kill reaps them in production): ${orphans:-none} — the harness reaps them"
+  t "A: 111d killed -9; its children follow it within 5 s (PR_SET_PDEATHSIG): survivors ${orphans:-none}" '[ -z "$orphans" ]'
   for p in $orphans; do kill -9 "${p%%:*}" 2>/dev/null || true; done
   wait_for 5 '[ -z "$(procs_in A)" ]' || true
   local crashed="written while A was crashed"

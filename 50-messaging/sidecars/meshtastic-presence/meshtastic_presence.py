@@ -66,6 +66,8 @@ import math
 import os
 import random
 import signal
+import socket
+import struct
 import sys
 import tempfile
 import threading
@@ -103,6 +105,13 @@ ALLOWED_TORADIO = frozenset({"want_config_id", "heartbeat"})
 # heartbeat case): a transmit, so the guard below refuses every heartbeat whose nonce is not 0.
 #: Seconds between session keep-alive heartbeats, on the monotonic clock.
 KEEPALIVE_INTERVAL = 300.0
+
+#: Seconds a keep-alive may wait for meshmud to take its bytes (a write timeout on the
+#: socket, see :func:`set_write_timeout`). A meshmud that stopped reading would otherwise
+#: block the library's ``sendall``, and with it the reader loop, for good. A keep-alive
+#: that times out ends the session like a read failure: the link is reported lost and the
+#: reader reconnects with back-off.
+KEEPALIVE_WRITE_TIMEOUT = 5.0
 
 #: Format and bidi-override characters that are not Unicode category Cc but can still
 #: reorder or hide text when an RF-origin name is rendered.
@@ -424,10 +433,30 @@ def allowed_to_radio(message: Any) -> bool:
     return to_radio_kind(message) is not None
 
 
-def make_interface_class(connect_wait: float = 30.0) -> Any:
+def set_write_timeout(sock: Any, seconds: float) -> None:
+    """Bound every blocking write on ``sock`` to ``seconds`` (``SO_SNDTIMEO``); reads still block.
+
+    ``settimeout`` would bound the library reader thread's ``recv`` on the same socket too and
+    end a link that is merely quiet. A write that times out raises ``OSError`` (EAGAIN); so
+    does a socket that cannot take the option. The kernel's ``struct timeval`` is sized by
+    reading the current value back: two longs (32-bit time) or two 64-bit fields. Zero would
+    mean "no timeout", so the bound never drops below a millisecond.
+    """
+    seconds = max(0.001, float(seconds))
+    size = len(sock.getsockopt(socket.SOL_SOCKET, socket.SO_SNDTIMEO, 16))
+    layout = {16: "qq", 8: "ii"}.get(size)
+    if layout is None:
+        raise OSError(f"unexpected SO_SNDTIMEO size {size}; the keep-alive write cannot be bounded")
+    whole = int(seconds)
+    micros = min(999_999, int(round((seconds - whole) * 1_000_000)))
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_SNDTIMEO, struct.pack(layout, whole, micros))
+
+
+def make_interface_class(connect_wait: float = 30.0, write_timeout: float = KEEPALIVE_WRITE_TIMEOUT) -> Any:
     """Build the read-only TCP interface class (imports meshtastic-python lazily).
 
-    ``connect_wait`` is how long the constructor waits for the node database.
+    ``connect_wait`` is how long the constructor waits for the node database;
+    ``write_timeout`` bounds each keep-alive write (:data:`KEEPALIVE_WRITE_TIMEOUT`).
 
     A function, not a module-level class, so the unit tests and the lock tooling can
     import this file without the library installed.
@@ -447,7 +476,8 @@ def make_interface_class(connect_wait: float = 30.0) -> Any:
           still cannot send). The checks run under one re-entrant lock: the keep-alive goes
           out from the reader's thread, the first ``want_config`` from the constructor's.
         * ``session_keepalive``: the one added method; builds the empty ``Heartbeat``
-          ``ToRadio`` itself (nonce never assigned, so 0) and passes it through the guard.
+          ``ToRadio`` itself (nonce never assigned, so 0) and passes it through the guard,
+          with the socket's writes bounded by ``write_timeout``.
           :class:`PresenceReader` calls it from its loop every :data:`KEEPALIVE_INTERVAL`.
         * ``_sendDisconnect`` / ``_startHeartbeat``: no-ops. meshmud forwards downlink frames
           to the board verbatim; a ``disconnect`` would end the board's API session for
@@ -457,11 +487,16 @@ def make_interface_class(connect_wait: float = 30.0) -> Any:
           driven from the reader loop on the monotonic clock instead of a second thread.
         * ``connect``: skips the 32 resync bytes meant for sleeping serial devices.
         * ``_reconnect``: never re-dials (and so never re-sends ``want_config``); the link
-          is reported lost and :class:`PresenceReader` reconnects with back-off.
+          is reported lost and :class:`PresenceReader` reconnects with back-off. It also wakes
+          the library's reader thread out of a blocking ``recv`` before closing the socket
+          (``_socket_shutdown``, both directions): after a keep-alive write timed out the peer
+          is alive but silent, a plain close does not wake a ``recv`` on Linux, and ``close``
+          of this interface waits for that thread with no timeout.
         """
 
         _want_config_sent = False
         _connect_wait = float(connect_wait)
+        _write_timeout = float(write_timeout)
         dropped_to_radio = 0
         keepalives_sent = 0
         _impl_ok = False
@@ -498,13 +533,17 @@ def make_interface_class(connect_wait: float = 30.0) -> Any:
         def session_keepalive(self) -> bool:
             """Put one nonce-0 heartbeat on the wire; True when it went out.
 
-            False when there is no socket or the guard refused it. A socket error propagates
-            (the library has already reported the link lost); the caller treats it as a lost
-            link.
+            False when there is no socket or the guard refused it. The socket's writes are
+            bounded by ``write_timeout`` first (:func:`set_write_timeout`), so a meshmud that
+            stopped reading makes the library's ``sendall`` raise instead of blocking. A
+            socket error or that timeout propagates (the library has already reported the
+            link lost through ``_reconnect``); the caller treats it as a lost link.
             """
             with self._guard_lock:
-                if getattr(self, "socket", None) is None:
+                sock = getattr(self, "socket", None)
+                if sock is None:
                     return False
+                set_write_timeout(sock, self._write_timeout)
                 before = self.keepalives_sent
                 message = mesh_pb2.ToRadio()
                 message.heartbeat.SetInParent()  # an empty Heartbeat: nonce stays 0
@@ -526,17 +565,23 @@ def make_interface_class(connect_wait: float = 30.0) -> Any:
 
         def _reconnect(self) -> None:
             self._wantExit = True
-            try:
-                if self.socket is not None:
-                    self.socket.close()
-            except OSError:
-                pass
+            sock = self.socket
+            if sock is not None:
+                try:
+                    self._socket_shutdown()  # wakes the reader thread's recv (see above)
+                except OSError:
+                    pass
+                try:
+                    sock.close()
+                except OSError:
+                    pass
             self.socket = None
             self._disconnected()
 
     # The overrides rely on private library names; fail loudly at class build
     # (not at first send) if the pinned library ever renames one of them.
-    for _name in ("_sendToRadio", "_sendToRadioImpl", "_sendDisconnect", "_startHeartbeat", "_reconnect", "connect"):
+    for _name in ("_sendToRadio", "_sendToRadioImpl", "_sendDisconnect", "_startHeartbeat", "_reconnect", "connect",
+                  "_socket_shutdown"):
         if not hasattr(TCPInterface, _name):
             raise RuntimeError(f"meshtastic-python no longer defines TCPInterface.{_name}; the read-only guard cannot be trusted")
     if not hasattr(mesh_pb2.ToRadio(), "heartbeat"):
@@ -544,9 +589,10 @@ def make_interface_class(connect_wait: float = 30.0) -> Any:
     return ReadOnlyTCPInterface
 
 
-def default_connector(host: str, port: int, timeout: float) -> Any:
+def default_connector(host: str, port: int, timeout: float,
+                      write_timeout: float = KEEPALIVE_WRITE_TIMEOUT) -> Any:
     """Open the read-only interface; blocks until the node DB has been downloaded."""
-    cls = make_interface_class(connect_wait=max(1.0, timeout))
+    cls = make_interface_class(connect_wait=max(1.0, timeout), write_timeout=write_timeout)
     return cls(host, portNumber=port, connectNow=True, timeout=int(max(1, timeout)))
 
 
@@ -727,8 +773,9 @@ class PresenceReader:
 
         The clock is the monotonic one and starts when the session's loop first runs, just
         after the connector returned (the ``want_config`` that opened the session restarted
-        the board's idle timer then). A keep-alive that cannot be sent (socket error, no
-        helper, refused by the guard) ends the session: the link is reported lost and the
+        the board's idle timer then). A keep-alive that cannot be sent (socket error, a write
+        that meshmud did not take within :data:`KEEPALIVE_WRITE_TIMEOUT`, no helper, refused
+        by the guard) ends the session: the link is reported lost and the
         reader reconnects with back-off, whose fresh ``want_config`` revives a board session
         that has already lapsed.
         """
@@ -742,6 +789,9 @@ class PresenceReader:
         helper = _attr(iface, "session_keepalive")
         try:
             sent = bool(helper()) if callable(helper) else False
+        except (socket.timeout, BlockingIOError) as exc:
+            LOG.warning("session keep-alive write timed out (meshmud is not reading): %s", exc)
+            sent = False
         except Exception as exc:
             LOG.warning("session keep-alive failed: %s", exc)
             sent = False

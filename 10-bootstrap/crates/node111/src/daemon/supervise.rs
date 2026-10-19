@@ -3,6 +3,24 @@
 //!
 //! Timing decisions live in the pure `BackoffSchedule` (unit-tested without
 //! processes); the supervisor task only does I/O.
+//!
+//! **Parent death.** Every child is started with `PR_SET_PDEATHSIG = SIGTERM`
+//! (the `pre_exec` hook in [`set_parent_death_signal`]), so a `111d` that dies
+//! without running its stop path (SIGKILL, OOM kill, abort) takes its children
+//! with it instead of leaving them running unsupervised. The kernel sends that
+//! signal when the *thread* that forked the child exits, not when the process
+//! does. A tokio worker can retire while the daemon lives on: after
+//! `block_in_place` its core moves to another thread, and an idle blocking-pool
+//! thread exits. A child forked by such a thread would get a SIGTERM while
+//! `111d` runs, and the supervisor would count it as a crash. So no supervisor
+//! task forks: every child is forked by one dedicated thread
+//! ([`spawn_on_forker`]) that never exits, and the signal comes only when the
+//! process is gone. What it does not cover: a child's own children (the
+//! kernel clears the flag in every fork, so a child that forks must arrange
+//! its own), a child that catches or ignores SIGTERM (no SIGKILL follows
+//! without a live parent), and a set-user-ID or file-capability program (the
+//! kernel clears the flag at exec; none is supervised here). The service
+//! manager's cgroup kill stays the backstop for those.
 
 use std::collections::VecDeque;
 use std::path::PathBuf;
@@ -145,6 +163,103 @@ pub struct ChildControl {
 
 fn signal(pid: u32, sig: libc::c_int) {
     unsafe { libc::kill(pid as libc::pid_t, sig) };
+}
+
+/// The child side of the parent-death link (module doc, "Parent death"): the
+/// child asks for SIGTERM when its forking thread (the forker, which lives as
+/// long as `111d`) dies. Also refuses to exec when `111d` already died between
+/// the fork and the `prctl`, since then the signal would never come.
+fn set_parent_death_signal(cmd: &mut tokio::process::Command) {
+    let parent = std::process::id() as libc::pid_t;
+    // SAFETY: runs in the child between fork and exec, so it must be
+    // async-signal-safe: it makes two syscalls (prctl, getppid) and builds its
+    // error from a raw errno, without allocating or taking a lock.
+    unsafe {
+        cmd.pre_exec(move || {
+            let sig = libc::SIGTERM as libc::c_ulong;
+            if libc::prctl(
+                libc::PR_SET_PDEATHSIG,
+                sig,
+                0 as libc::c_ulong,
+                0 as libc::c_ulong,
+                0 as libc::c_ulong,
+            ) != 0
+            {
+                return Err(std::io::Error::last_os_error());
+            }
+            if libc::getppid() != parent {
+                return Err(std::io::Error::from_raw_os_error(libc::ESRCH));
+            }
+            Ok(())
+        });
+    }
+}
+
+/// One spawn handed to the forker thread: the command, the runtime its child
+/// registers with (for `wait`), and where the result goes.
+struct SpawnRequest {
+    cmd: tokio::process::Command,
+    rt: tokio::runtime::Handle,
+    reply: tokio::sync::oneshot::Sender<std::io::Result<tokio::process::Child>>,
+}
+
+/// The forker thread's queue; the thread is started on first use (and again
+/// only if it were ever gone).
+static FORKER: Mutex<Option<std::sync::mpsc::Sender<SpawnRequest>>> = Mutex::new(None);
+
+/// The forker thread: forks every supervised child and never returns while
+/// `111d` runs (the queue's sender lives in [`FORKER`]), so the children's
+/// parent-death signal fires only when the process dies.
+fn forker_loop(rx: std::sync::mpsc::Receiver<SpawnRequest>) {
+    for SpawnRequest { mut cmd, rt, reply } in rx {
+        let _in_runtime = rt.enter();
+        let spawned = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| cmd.spawn()))
+            .unwrap_or_else(|_| Err(std::io::Error::other("spawning the child panicked")));
+        if let Err(Ok(mut child)) = reply.send(spawned) {
+            // the supervisor went away meanwhile (its runtime shut down): leave
+            // no unsupervised child behind
+            let _ = child.start_kill();
+        }
+    }
+}
+
+/// Spawn `cmd` on the forker thread (module doc, "Parent death") and wait for
+/// the result. The child registers with the caller's runtime, exactly as a
+/// `cmd.spawn()` here would.
+async fn spawn_on_forker(cmd: tokio::process::Command) -> std::io::Result<tokio::process::Child> {
+    let (reply, result) = tokio::sync::oneshot::channel();
+    submit_to_forker(SpawnRequest {
+        cmd,
+        rt: tokio::runtime::Handle::current(),
+        reply,
+    })?;
+    result.await.unwrap_or_else(|_| {
+        Err(std::io::Error::other(
+            "the child-forking thread dropped the spawn",
+        ))
+    })
+}
+
+/// Queue `req` for the forker thread, starting the thread on first use.
+fn submit_to_forker(mut req: SpawnRequest) -> std::io::Result<()> {
+    let mut slot = FORKER.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(tx) = slot.as_ref() {
+        match tx.send(req) {
+            Ok(()) => return Ok(()),
+            Err(std::sync::mpsc::SendError(back)) => {
+                req = back;
+                *slot = None;
+            }
+        }
+    }
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::Builder::new()
+        .name("111d-forker".into())
+        .spawn(move || forker_loop(rx))?;
+    tx.send(req)
+        .map_err(|_| std::io::Error::other("the child-forking thread exited at start"))?;
+    *slot = Some(tx);
+    Ok(())
 }
 
 impl ChildControl {
@@ -294,7 +409,8 @@ impl ChildHandle {
 /// Spawn a supervised child: restart-in-place, backoff per policy, sustained
 /// crash-loop ⇒ Degraded (surfaced by the dashboard, not fatal to the daemon;
 /// the supervisor then waits for a [`ChildControl::restart`] or a stop).
-/// Must be called within a tokio runtime.
+/// Each run is forked by the forker thread with the parent-death signal set
+/// (module doc). Must be called within a tokio runtime.
 pub fn spawn_child(spec: ChildSpec) -> ChildHandle {
     let (state_tx, state_rx) = tokio::sync::watch::channel(ChildState::Backoff);
     let ctl = ChildControl {
@@ -363,7 +479,8 @@ pub fn spawn_child(spec: ChildSpec) -> ChildHandle {
                                 .stderr(std::process::Stdio::inherit());
                         }
                     }
-                    cmd.spawn()
+                    set_parent_death_signal(&mut cmd);
+                    spawn_on_forker(cmd).await
                 };
                 let mut child = match spawn_result {
                     Ok(c) => c,
@@ -580,6 +697,44 @@ mod tests {
 
     fn alive(pid: u32) -> bool {
         unsafe { libc::kill(pid as libc::pid_t, 0) == 0 }
+    }
+
+    /// Running, not a zombie: /proc/<pid>/stat's state field (after the
+    /// parenthesised comm) is neither `Z` nor `X`.
+    fn running(pid: u32) -> bool {
+        let Ok(stat) = std::fs::read_to_string(format!("/proc/{pid}/stat")) else {
+            return false;
+        };
+        let state = stat
+            .rsplit_once(')')
+            .and_then(|(_, rest)| rest.trim_start().chars().next());
+        !matches!(state, None | Some('Z') | Some('X'))
+    }
+
+    /// PR_SET_PDEATHSIG fires when the *thread* that forked the child exits.
+    /// A runtime on a thread that then ends stands in for a retired tokio
+    /// worker: the child must not die with it, because the forker thread, not
+    /// the caller's thread, forked it (module doc, "Parent death").
+    #[test]
+    fn a_child_outlives_the_thread_whose_runtime_started_it() {
+        let pid = std::thread::spawn(|| {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            rt.block_on(async {
+                let h = spawn_child(sh("exec sleep 30", &[]));
+                assert!(until(Duration::from_secs(2), || h.pid().is_some()).await);
+                h.pid().unwrap()
+            })
+        })
+        .join()
+        .unwrap();
+        std::thread::sleep(Duration::from_millis(500));
+        let survived = running(pid);
+        signal(pid, libc::SIGKILL);
+        unsafe { libc::waitpid(pid as libc::pid_t, std::ptr::null_mut(), 0) };
+        assert!(survived, "the child died with the thread that asked for it");
     }
 
     #[tokio::test]

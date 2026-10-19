@@ -11,7 +11,9 @@ import json
 import os
 import random
 import re
+import socket
 import stat
+import struct
 import sys
 import tempfile
 import threading
@@ -98,13 +100,45 @@ class FakeToRadio:
         return self.variant
 
 
+class FakeSocket:
+    """The socket surface the guarded interface touches: the SO_SNDTIMEO option (16-byte
+    timeval by default, ``timeval_size`` to change it), ``sendall`` (raises ``stall`` when
+    set, like a write that timed out), ``close``; ``shut`` records ``_socket_shutdown``."""
+
+    def __init__(self, stall=None, timeval_size=16):
+        self.options = {}
+        self.sent = []
+        self.stall = stall
+        self.timeval_size = timeval_size
+        self.closed = self.shut = False
+
+    def getsockopt(self, level, name, buflen=0):
+        assert (level, name) == (socket.SOL_SOCKET, socket.SO_SNDTIMEO)
+        return self.options.get((level, name), bytes(self.timeval_size))
+
+    def setsockopt(self, level, name, value):
+        if len(value) != self.timeval_size:
+            raise OSError(22, "Invalid argument")
+        self.options[(level, name)] = value
+
+    def sendall(self, data):
+        if self.stall is not None:
+            raise self.stall
+        self.sent.append(data)
+
+    def close(self):
+        self.closed = True
+
+
 class FakeTCPInterface:
     """Stands in for ``meshtastic.tcp_interface.TCPInterface``: the library's send-path shape
     (``_sendToRadio`` calls ``_sendToRadioImpl``) with a list as the wire."""
 
     def __init__(self):
         self.wire = []
-        self.socket = object()
+        self.socket = FakeSocket()
+        self._wantExit = False
+        self.lost_reported = 0
 
     def _sendToRadio(self, toRadio):  # noqa: N802
         self._sendToRadioImpl(toRadio)
@@ -121,8 +155,101 @@ class FakeTCPInterface:
     def _reconnect(self):
         pass
 
+    def _socket_shutdown(self):  # noqa: N802
+        if self.socket is not None:
+            self.socket.shut = True
+
+    def _disconnected(self):
+        self.lost_reported += 1
+
     def connect(self):
         pass
+
+
+class SocketWritingTCPInterface(FakeTCPInterface):
+    """The pinned library's write path (meshtastic 2.7.11 ``TCPInterface._writeBytes``): the
+    frame goes out with ``socket.sendall``; on ``OSError`` it calls ``_reconnect`` (unless the
+    interface is closing) and re-raises."""
+
+    def _sendToRadioImpl(self, toRadio):  # noqa: N802
+        self.wire.append(toRadio)
+        self._writeBytes(b"\x94\xc3\x00\x02\x3a\x00")  # a framed empty heartbeat
+
+    def _writeBytes(self, b):  # noqa: N802
+        if self.socket is not None:
+            try:
+                self.socket.sendall(b)
+            except OSError:
+                if not self._wantExit:
+                    self._reconnect()
+                raise
+
+    def close(self):
+        self.closed = True
+
+
+class LoopbackTCPInterface(SocketWritingTCPInterface):
+    """The pinned library's shape on a real socket: a reader thread blocked in ``recv``, and a
+    ``close`` that joins it with no timeout (``StreamInterface.close``) once the socket is
+    gone (``TCPInterface.close`` skips its half-close when ``socket`` is None)."""
+
+    def __init__(self, sock):
+        super().__init__()
+        self.socket = sock
+        self._rxThread = threading.Thread(target=self._reader, daemon=True)
+        self._rxThread.start()
+
+    def _reader(self):
+        try:
+            while not self._wantExit:
+                sock = self.socket
+                if sock is None or not sock.recv(1):
+                    break
+        except OSError:
+            pass
+        finally:
+            self._disconnected()
+
+    def _socket_shutdown(self):  # noqa: N802
+        if self.socket is not None:
+            self.socket.shutdown(socket.SHUT_RDWR)
+
+    def close(self):
+        self._wantExit = True
+        self._rxThread.join()
+
+
+def fill_send_path(sock, quiet=0.3, limit=10.0):
+    """Queue bytes on ``sock`` (non-blocking for these calls only) until the kernel has taken
+    none for ``quiet`` seconds: the peer is not reading, so the next blocking write would wait."""
+    started, quiet_since = time.monotonic(), None
+    while time.monotonic() - started < limit:
+        try:
+            sock.send(b"\0" * 65536, socket.MSG_DONTWAIT)
+            quiet_since = None
+        except BlockingIOError:
+            if quiet_since is None:
+                quiet_since = time.monotonic()
+            elif time.monotonic() - quiet_since >= quiet:
+                return
+            time.sleep(0.02)
+    raise AssertionError("the send path never filled")
+
+
+def run_in_thread(fn, timeout):
+    """(finished, result or exception) of ``fn()`` run on a daemon thread for up to ``timeout``."""
+    box = {}
+
+    def go():
+        try:
+            box["value"] = fn()
+        except BaseException as exc:  # noqa: B902 - reported to the test
+            box["value"] = exc
+
+    t = threading.Thread(target=go, daemon=True)
+    t.start()
+    t.join(timeout)
+    return not t.is_alive(), box.get("value")
 
 
 @contextlib.contextmanager
@@ -688,6 +815,43 @@ class ReaderTests(unittest.TestCase):
         self.assertTrue(all(m.heartbeat.nonce == 0 and m.heartbeat.ByteSize() == 0 for m in iface.wire[1:]))
         self.assertEqual((r.keepalives, iface.keepalives_sent, iface.dropped_to_radio), (2, 2, 0))
 
+    def test_a_keepalive_write_timeout_ends_the_session_and_reconnects_with_backoff(self):
+        # m5: meshmud stopped reading, so the first link's keep-alive write times out; the
+        # reader reports the link lost, closes it, backs off and reconnects
+        made = []
+
+        def connector(host, port, timeout):
+            with fake_library(base=SocketWritingTCPInterface):
+                iface = mp.make_interface_class()()
+            if not made:
+                iface.socket = FakeSocket(stall=socket.timeout("timed out"))
+            iface.nodesByNum, iface.myInfo = {5: node(5)}, SimpleNamespace(my_node_num=1)
+            iface.isConnected = threading.Event()
+            iface.isConnected.set()
+            made.append(iface)
+            return iface
+
+        ticks = iter(range(0, 10 ** 9, 400))  # every reading of the clock is 400 s later
+        sleeps = []
+        r = self.reader(connector, sleep=lambda s: sleeps.append(s), monotonic=lambda: next(ticks))
+        t = threading.Thread(target=r.run, daemon=True)
+        t.start()
+        try:
+            self.assertTrue(wait_for(lambda: len(made) >= 2 and made[1].keepalives_sent >= 1))
+        finally:
+            r.stop()
+            t.join(5)
+        self.assertFalse(t.is_alive())
+        first, second = made[0], made[1]
+        self.assertEqual(r.keepalive_failures, 1)
+        self.assertEqual(first.keepalives_sent, 0)
+        self.assertTrue(first.closed)
+        self.assertEqual(first.lost_reported, 1)
+        self.assertIsNone(first.socket)
+        self.assertEqual(sleeps[0], 1.0)  # the existing back-off policy, first step
+        self.assertGreaterEqual(r.keepalives, 1)
+        self.assertTrue(all(m.WhichOneof("payload_variant") == "heartbeat" for m in second.wire))
+
     def test_stop_during_backoff_returns_promptly(self):
         r = mp.PresenceReader("h", 1, self.out, connector=lambda h, p, t: (_ for _ in ()).throw(OSError("x")),
                               bus=self.bus, backoff=mp.Backoff(30, 2, 60, 0.0))
@@ -787,6 +951,93 @@ class GuardedInterfaceTests(unittest.TestCase):
             iface.session_keepalive()
         self.assertEqual(iface.keepalives_sent, 0)
         self.assertFalse(iface._impl_ok)
+
+    # --- the keep-alive write timeout (Layer 5 integrated review m5) ----------------------
+    def test_keepalive_bounds_the_socket_write_before_sending(self):
+        self.assertEqual(mp.KEEPALIVE_WRITE_TIMEOUT, 5.0)
+        self.assertTrue(self.iface.session_keepalive())
+        opt = self.iface.socket.options[(socket.SOL_SOCKET, socket.SO_SNDTIMEO)]
+        self.assertEqual(struct.unpack("qq", opt), (5, 0))
+        with fake_library():
+            iface = mp.make_interface_class(write_timeout=0.25)()
+        self.assertTrue(iface.session_keepalive())
+        opt = iface.socket.options[(socket.SOL_SOCKET, socket.SO_SNDTIMEO)]
+        self.assertEqual(struct.unpack("qq", opt), (0, 250000))
+
+    def test_the_write_bound_follows_the_kernel_timeval_and_never_turns_itself_off(self):
+        small = FakeSocket(timeval_size=8)  # 32-bit time: two 32-bit longs
+        mp.set_write_timeout(small, 5.0)
+        self.assertEqual(struct.unpack("ii", small.options[(socket.SOL_SOCKET, socket.SO_SNDTIMEO)]), (5, 0))
+        for zero in (0, 0.0, -3):  # a zero timeval means "block forever": clamped to 1 ms
+            sock = FakeSocket()
+            mp.set_write_timeout(sock, zero)
+            self.assertEqual(struct.unpack("qq", sock.options[(socket.SOL_SOCKET, socket.SO_SNDTIMEO)]), (0, 1000))
+        with self.assertRaises(OSError):
+            mp.set_write_timeout(FakeSocket(timeval_size=12), 5.0)  # a layout we do not know: refuse
+        # an unbounded write is never attempted: the keep-alive fails before the guard
+        self.iface.socket = FakeSocket(timeval_size=12)
+        with self.assertRaises(OSError):
+            self.iface.session_keepalive()
+        self.assertEqual((self.iface.wire, self.iface.keepalives_sent), ([], 0))
+
+    def test_the_write_bound_round_trips_through_a_real_socket_and_leaves_reads_alone(self):
+        sock = socket.socket()
+        try:
+            mp.set_write_timeout(sock, mp.KEEPALIVE_WRITE_TIMEOUT)
+            size = len(sock.getsockopt(socket.SOL_SOCKET, socket.SO_SNDTIMEO, 16))
+            layout = {16: "qq", 8: "ii"}[size]
+            self.assertEqual(struct.unpack(layout, sock.getsockopt(socket.SOL_SOCKET, socket.SO_SNDTIMEO, size)), (5, 0))
+            self.assertEqual(struct.unpack(layout, sock.getsockopt(socket.SOL_SOCKET, socket.SO_RCVTIMEO, size)), (0, 0))
+            self.assertIsNone(sock.gettimeout())  # still a blocking socket for the library's reader
+        finally:
+            sock.close()
+
+    def test_a_keepalive_write_that_times_out_reports_the_link_lost(self):
+        # socket.timeout is what a Python-level timeout raises, BlockingIOError (EAGAIN) what
+        # SO_SNDTIMEO makes sendall raise on a blocking socket
+        for stall in (socket.timeout("timed out"), BlockingIOError(11, "Resource temporarily unavailable")):
+            with fake_library(base=SocketWritingTCPInterface):
+                iface = mp.make_interface_class()()
+            sock = iface.socket = FakeSocket(stall=stall)
+            with self.assertRaises(type(stall)):
+                iface.session_keepalive()
+            self.assertEqual((iface.keepalives_sent, sock.sent), (0, []), repr(stall))
+            self.assertFalse(iface._impl_ok)
+            # the library's write path called _reconnect: the reader thread is woken (both
+            # directions shut), the socket closed and dropped, the link reported lost
+            self.assertTrue(sock.shut and sock.closed, repr(stall))
+            self.assertIsNone(iface.socket)
+            self.assertTrue(iface._wantExit)
+            self.assertEqual(iface.lost_reported, 1)
+            self.assertFalse(iface.session_keepalive())  # no socket left: nothing more is tried
+
+    def test_a_meshmud_that_stops_reading_times_the_keepalive_out_and_close_does_not_hang(self):
+        srv = socket.socket()
+        srv.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 4096)  # inherited: a small window fills fast
+        srv.bind(("127.0.0.1", 0))
+        srv.listen(1)
+        cli = socket.create_connection(srv.getsockname())
+        peer, _ = srv.accept()  # meshmud, stalled: never reads, never writes, never closes
+        try:
+            cli.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 4096)
+            fill_send_path(cli)
+            with fake_library(base=LoopbackTCPInterface):
+                iface = mp.make_interface_class(write_timeout=0.3)(cli)
+            started = time.monotonic()
+            done, result = run_in_thread(iface.session_keepalive, 5.0)
+            self.assertTrue(done, "the keep-alive write blocked")
+            self.assertIsInstance(result, OSError)
+            self.assertLess(time.monotonic() - started, 3.0)
+            self.assertIsNone(iface.socket)
+            done, _ = run_in_thread(iface.close, 3.0)
+            self.assertTrue(done, "close() waits for a reader thread still blocked in recv")
+            self.assertFalse(iface._rxThread.is_alive())
+            self.assertGreaterEqual(iface.lost_reported, 1)
+            self.assertEqual(iface.keepalives_sent, 0)
+        finally:
+            peer.close()
+            srv.close()
+            cli.close()
 
     def test_the_librarys_disconnect_and_heartbeat_timer_stay_switched_off(self):
         self.assertIsNone(self.iface._sendDisconnect())

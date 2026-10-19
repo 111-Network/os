@@ -106,7 +106,9 @@ pub fn build_payload_with(extra: &[(&str, &[u8])]) -> Vec<u8> {
 /// files (the generator's release-time listing guard, `manifest/gen-manifest.py`):
 /// the `unlisted` relpaths are packed but left out of the listing, each `phantom`
 /// (relpath, bytes) is listed with the hash of its bytes but not packed, and
-/// `listing: false` packs no `share/payload.manifest` at all.
+/// `listing: false` packs no `share/payload.manifest` at all. A path that is both
+/// `unlisted` and a `phantom` is packed with its own bytes and listed once with the
+/// phantom's hash (a wrong-hash entry).
 pub fn build_payload_listing(
     extra: &[(&str, &[u8])],
     unlisted: &[&str],

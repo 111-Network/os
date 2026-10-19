@@ -43,10 +43,13 @@ unlisted bin/meshmud, panels/ file or reader script would never be re-hashed at 
 listed file that is not in the tarball is refused by every node at unpack. Every readable
 payload-<triple>.tar.gz is therefore refused unless its share/payload.manifest (lines
 `sha256  relpath`, read exactly as verify_tree reads them: the first two whitespace-separated
-tokens, shorter lines skipped) lists every regular file in the tarball except itself, and lists no
-path that is not a regular file in it. The error names the first offending path: an unlisted file
-first (bytewise order), then a listed-but-absent one (listing order). The hashes are not compared
-here; the release checklist keeps `sha256sum -c share/payload.manifest` as the human cross-check.
+tokens, shorter lines skipped) lists every regular file in the tarball except itself, lists no
+path that is not a regular file in it, and gives each listed path the sha256 of that member (as
+verify_tree compares it: exactly, lowercase hex; a path listed twice must hold on every line).
+A wrong hash is refused like a missing entry: every node's stage-time verify_tree would refuse the
+payload. The error names the first offending path: an unlisted file first (bytewise order), then a
+listed one that is absent or whose hash differs (listing order). The release checklist keeps
+`sha256sum -c share/payload.manifest` as the human cross-check.
 """
 import argparse
 import glob
@@ -209,7 +212,8 @@ def check_pinned(entries, rel, path, what):
 
 def check_listing(entries, listing, what):
     """The payload's share/payload.manifest lists every regular file of the tarball (itself
-    excepted) and nothing that is not one: verify_tree's blind spot, closed at release time.
+    excepted), nothing that is not one, and each with the member's sha256: verify_tree's blind
+    spot (unlisted files) closed at release time, and its stage-time hash check run early.
 
     `listing` is the manifest's bytes (read_tar keep=). Parsed as verify_tree parses it, and the
     listed paths are normalised the way the filesystem resolves them ('.' and empty parts
@@ -226,10 +230,11 @@ def check_listing(entries, listing, what):
         parts = line.split()
         if len(parts) < 2:
             continue
-        listed.append(member_path(parts[1], f"{what}: {PAYLOAD_LISTING} entry", allow_dot_prefix=True))
+        listed.append((member_path(parts[1], f"{what}: {PAYLOAD_LISTING} entry", allow_dot_prefix=True),
+                       parts[0]))
     if not listed:
         fail(f"{what}: {PAYLOAD_LISTING} lists nothing (the node refuses a payload manifest that pins nothing)")
-    listed_set = set(listed)
+    listed_set = {rel for rel, _sha in listed}
     for rel in sorted(r for r, (kind, _sha, _size) in entries.items() if kind == "file"):
         if rel == PAYLOAD_LISTING or rel in listed_set:
             continue
@@ -238,11 +243,14 @@ def check_listing(entries, listing, what):
             hint = " (a name with whitespace cannot be listed: the node splits each line on whitespace)"
         fail(f"{what}: {PAYLOAD_LISTING} does not list {rel}, which the tarball carries: the node's "
              f"boot-time verify_tree hashes only listed files, so it would never be re-hashed{hint}")
-    for rel in listed:
+    for rel, sha in listed:
         got = entries.get(rel)
         if got is None or got[0] != "file":
             fail(f"{what}: {PAYLOAD_LISTING} lists {rel}, which is not a regular file in the tarball "
                  "(every node refuses such a payload at unpack)")
+        if sha != got[1]:
+            fail(f"{what}: {PAYLOAD_LISTING} lists {rel} with sha256 {sha}, but the tarball's {rel} "
+                 f"has sha256 {got[1]} (every node's verify_tree refuses such a payload at stage)")
 
 
 def check_payload(path, triple, meshmud, web_listing, lock, pins_any):

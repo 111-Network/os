@@ -8,8 +8,9 @@ needs nothing; run it inside the hash-locked presence venv:
 It proves, against the pinned library, that (a) the only ToRadio messages that ever reach
 the wire are one want_config_id per connection and the session keep-alive, a heartbeat with
 nonce 0 (no heartbeat with another nonce, no disconnect, nothing else, including at close),
-(b) the pubsub signatures we subscribe with are accepted, and (c) the node DB, position and
-telemetry events end up in the presence file.
+(b) the pubsub signatures we subscribe with are accepted, (c) the node DB, position and
+telemetry events end up in the presence file, and (d) a keep-alive into a meshmud that stopped
+reading times out instead of blocking, and the reader reconnects (Layer 5 review m5).
 """
 import json
 import os
@@ -65,6 +66,7 @@ class FakeMeshtasticNode(threading.Thread):
         self.received = []  # variants of every ToRadio, in order, across connections
         self.heartbeats = []  # the nonce of every heartbeat, in order
         self.connections = []
+        self.stalled = set()  # connections this node no longer reads from (a stuck meshmud)
         self.lock = threading.Lock()
         self.stop = False
 
@@ -85,6 +87,9 @@ class FakeMeshtasticNode(threading.Thread):
         buf = b""
         conn.settimeout(0.2)
         while not self.stop:
+            if conn in self.stalled:
+                time.sleep(0.05)
+                continue
             try:
                 chunk = conn.recv(4096)
             except socket.timeout:
@@ -193,7 +198,8 @@ class RealLibraryTests(unittest.TestCase):
     def test_library_surface_we_override_still_exists(self):
         from meshtastic.tcp_interface import TCPInterface
         for name in ("_sendToRadio", "_sendToRadioImpl", "_sendDisconnect", "_startHeartbeat", "_reconnect",
-                     "myConnect", "_startConfig", "_waitConnected", "_disconnected", "connect"):
+                     "myConnect", "_startConfig", "_waitConnected", "_disconnected", "connect", "_socket_shutdown",
+                     "_writeBytes"):
             self.assertTrue(hasattr(TCPInterface, name), name)
         self.assertTrue(hasattr(mesh_pb2.ToRadio(), "heartbeat"))
         self.assertTrue(hasattr(mesh_pb2.Heartbeat(), "nonce"))
@@ -265,6 +271,43 @@ class RealLibraryTests(unittest.TestCase):
             seen, nonces = list(self.node.received), list(self.node.heartbeats)
         self.assertEqual(seen, ["want_config_id"] + ["heartbeat"] * len(nonces))
         self.assertTrue(nonces and all(n == 0 for n in nonces), nonces)
+
+    def test_a_keepalive_into_a_meshmud_that_stopped_reading_times_out_and_the_reader_reconnects(self):
+        reader = mp.PresenceReader("127.0.0.1", self.node.port, self.tmp.name, min_interval=0.0, poll=0.2,
+                                   connect_timeout=10, backoff=mp.Backoff(0.2, 2.0, 1.0, 0.0),
+                                   keepalive_interval=1.0,
+                                   connector=lambda h, p, t: mp.default_connector(h, p, t, write_timeout=0.3))
+        t = threading.Thread(target=reader.run, daemon=True)
+        t.start()
+        try:
+            self.assertTrue(wait_for(lambda: self.doc() is not None), "no presence file")
+            iface = reader._iface
+            with self.node.lock:
+                self.node.stalled.update(self.node.connections)  # meshmud stops reading
+            sock = iface.socket
+            quiet_since, started = None, time.monotonic()
+            while time.monotonic() - started < 10:  # fill the path until the kernel takes nothing
+                try:
+                    sock.send(b"\0" * 65536, socket.MSG_DONTWAIT)
+                    quiet_since = None
+                except BlockingIOError:
+                    quiet_since = quiet_since or time.monotonic()
+                    if time.monotonic() - quiet_since >= 0.3:
+                        break
+                    time.sleep(0.02)
+                except OSError:
+                    break  # the keep-alive already timed out and closed it
+            self.assertTrue(wait_for(lambda: reader.keepalive_failures >= 1, 15), "the keep-alive never timed out")
+            self.assertTrue(wait_for(lambda: self.node.received.count("want_config_id") >= 2, 15),
+                            "no reconnect after the keep-alive timed out")
+            self.assertIsNot(reader._iface, iface)
+        finally:
+            reader.stop()
+            t.join(10)
+        self.assertFalse(t.is_alive(), "the reader hung (close waiting on a reader thread stuck in recv?)")
+        with self.node.lock:
+            self.assertTrue(all(n == 0 for n in self.node.heartbeats), self.node.heartbeats)
+            self.assertTrue(set(self.node.received) <= {"want_config_id", "heartbeat"}, self.node.received)
 
     def test_the_guard_refuses_heartbeat_nonce_one_and_every_other_toradio_on_the_real_interface(self):
         iface = mp.default_connector("127.0.0.1", self.node.port, 10)

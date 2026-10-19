@@ -94,9 +94,11 @@ lowest layer, not by convention: **no send path except the session keep-alive** 
   nonce 0 every 5 minutes (the Rust client and the web SDK do the same): the helper `session_keepalive` builds the
   empty `Heartbeat` itself (it never assigns a nonce; an AST test proves that) and passes it through the same guard.
   **Nonce 1 makes the board broadcast its NodeInfo on the mesh, a transmit**, so the guard refuses every heartbeat whose
-  nonce is not 0. A keep-alive that cannot be sent (socket error) counts as a lost link: the reader reconnects with
-  back-off, and the fresh `want_config` also revives a session that has already lapsed. `--once` (identify) is
-  short-lived and sends no heartbeat.
+  nonce is not 0. A keep-alive that cannot be sent counts as a lost link: a socket error, or a meshmud that takes none
+  of its bytes within 5 seconds (`KEEPALIVE_WRITE_TIMEOUT`, a write timeout set on the socket with `SO_SNDTIMEO` before
+  each keep-alive, so the loop never blocks on a meshmud that stopped reading; reads are not bounded). The reader then
+  wakes the library's reader thread, closes the link and reconnects with back-off, and the fresh `want_config` also
+  revives a session that has already lapsed. `--once` (identify) is short-lived and sends no heartbeat.
 * The library's `disconnect` message on close and its own heartbeat timer thread are removed: meshmud forwards
   downlink frames to the board verbatim, and a `disconnect` would end the board's API session for every other client.
 * It skips the 32 resync bytes meant for sleeping serial devices, and never re-dials by itself (a reconnect inside

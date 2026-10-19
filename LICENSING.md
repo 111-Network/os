@@ -196,7 +196,8 @@ derived in our code (sections 1 and 8). It stays a separate, unmodified, latest-
   dashboard (Settings, Essentials, "Licenses").
 - [ ] **Our own license (GPL-3.0-or-later):** ship `LICENSE.md` beside the third-party notices in every release. For every conveyed binary of our own code, publish the
   Corresponding Source of that exact release from the same place as the binaries (the tagged source at the release's commit; GPL-3.0 section 6(d)) and name the tag and
-  commit in the release notes. Keep the copyright notice and the "no warranty" statement intact in anything we ship (GPL-3.0 sections 4 and 5). The release checklist does not record this yet.
+  commit in the release notes. Keep the copyright notice and the "no warranty" statement intact in anything we ship (GPL-3.0 sections 4 and 5). The release checklist records the source offer as a
+  publish step (`10-bootstrap/docs/release-checklist.md` step 5, "Corresponding Source", D22: the tagged `git archive` beside every binary release, tag and commit in the release notes).
 - [ ] **OFL fonts:** keep copyright and license text beside the font files, never sell the fonts alone, keep them unmodified (OFL clause 3 restricts reserved font names on modified versions). Met today.
 - [ ] **Monocypher:** keep `LICENCE.md` with the vendored sources. If a C port ever ships in firmware, carry the BSD-2-Clause notice or elect CC0. Met today (test-only).
 - [ ] **GPL components stay separate programs (design rule; see section 7).** Termux APKs and debs, RNode firmware if ever pinned, and `meshtasticd` are never linked, merged or patched. For
