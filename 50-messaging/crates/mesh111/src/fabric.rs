@@ -34,8 +34,11 @@
 //! **No timers** (§1, §9): nothing here sleeps or schedules. Retries happen on
 //! link events (a connection's announce, a disconnect), contact events (a key
 //! arrives, a request is accepted), ACK evidence (§5 loss inference), and the
-//! explicit [`Fabric::retry`] / [`Fabric::retry_all`] (what the daemon calls on
-//! `fabric` events). Keepalive is the adapter's transport detail.
+//! explicit [`Fabric::retry`] (the UI's per-message retry) and
+//! [`Fabric::retry_all`] — what the daemon calls on `fabric` events that show
+//! more connectivity than it saw before (the home hub answering, more
+//! attributed peers), never on every event: `retry_all`'s own fetch emits a
+//! `Fabric` event. Keepalive is the adapter's transport detail.
 //!
 //! ### Verify before state (§18 rule 1)
 //!
@@ -120,6 +123,15 @@
 //!   none): a member that re-enrolls — a new device after a restore, or a
 //!   fresh offer — fetches what waits for it. The member keeps its cursor's
 //!   `max()` semantics.
+//! - A `MAILBOX_FETCH` is always answered (L5 m3, as built at the lock):
+//!   the items above the cursor, or — when the hub holds none for the
+//!   member — one item-less `MAILBOX_ITEM {custody_seq = cursor}`. Only an
+//!   enrolled member's fetch on a connection attributed to it is answered,
+//!   so the answer is the member's evidence that its hub serves it there:
+//!   [`HubView::reachable`] is true only while a connection is attributed
+//!   to the home hub (a fresh, verified hub packet arrived on it since it
+//!   came up), never from this node's own dialed socket. A member that
+//!   predates the marker drops it as a malformed item, harmlessly.
 //! - The member re-sends `MAILBOX_COMMIT {cursor}` beside every
 //!   `MAILBOX_FETCH` on hub link-up (the hub keeps `max(cursor)`, so it is
 //!   idempotent), and a commit owed while no hub connection exists stays
@@ -520,7 +532,16 @@ pub struct LinkView {
 pub struct HubView {
     /// This node has a home hub.
     pub enrolled: bool,
-    /// A connection to the home hub is up.
+    /// A connection to the home hub is up that this node may send on (it
+    /// dialed the hub's address and the hub's announce answered, or the
+    /// connection is attributed). Hello and announce authenticate nothing
+    /// (§8.1): this alone promises no delivery.
+    pub connected: bool,
+    /// The home hub answered on the current connection: a connection is
+    /// attributed to it (a `pair_mac`-verified packet from the hub that the
+    /// L2 window judged fresh arrived on it since it came up — `ENROLL_OK`,
+    /// a `MAILBOX_ITEM`, a `CUSTODY_ACK`, any sealed packet of the hub
+    /// node). Never self-judged from this node's own sendable connection.
     pub reachable: bool,
     /// The committed mailbox cursor.
     pub cursor: u64,
@@ -773,14 +794,18 @@ impl Fabric {
         self.call(move |c| c.cancel(id)).await?
     }
 
-    /// Re-queue an own `queued` or `sent` message now (§15 retry).
+    /// Re-queue an own `queued` or `sent` message now (§15 retry): its
+    /// outstanding fragments are presumed lost and its in-flight
+    /// `CUSTODY_PUT`s forgotten, so the next pump re-sends both.
     pub async fn retry(&self, id: i64) -> Result<MessageView> {
         self.call(move |c| c.retry(id)).await?
     }
 
     /// A fabric event: retry a pending mint, fetch from the home hub,
-    /// presume every outstanding fragment lost, clear custody rejects, and
-    /// pump every peer.
+    /// presume every outstanding fragment lost, clear custody rejects and
+    /// in-flight `CUSTODY_PUT`s, and pump every peer. It emits a `Fabric`
+    /// event itself (the fetch), so a caller driven by `Fabric` events must
+    /// not call it on every one (module doc, "No timers").
     pub async fn retry_all(&self) -> Result<()> {
         self.call(|c| c.retry_all()).await
     }
@@ -1690,6 +1715,17 @@ impl Core {
 
     fn home_hub(&self) -> Option<NodeId> {
         self.settings.home_hub.map(|h| h.node_id)
+    }
+
+    /// `hub.reachable` (§15): a connection is attributed to `hub` — the hub
+    /// itself answered on it since it came up (a `pair_mac`-verified packet
+    /// the L2 window judged fresh, §8.1). A connection entry lives from its
+    /// link-up to its disconnect, so an answer heard on an earlier
+    /// connection never counts.
+    fn hub_answered(&self, hub: &NodeId) -> bool {
+        self.conns
+            .values()
+            .any(|c| c.attributed.as_ref() == Some(hub))
     }
 
     fn profile(&self, ck: &ConnKey) -> (PathProfile, LinkKind) {
@@ -2805,6 +2841,24 @@ impl Core {
             c.push.fetch(cursor);
         }
         self.stream_items(ck, sender);
+        // §9 as built (L5 m3): a fetch is always answered. When nothing is
+        // held above the cursor, an item-less `MAILBOX_ITEM {custody_seq =
+        // cursor}` says so — the member's proof that its hub serves it on
+        // this connection (`hub.reachable`). Items held but not streamable
+        // on this path get no such claim.
+        let streamed = self
+            .conns
+            .get(ck)
+            .is_some_and(|c| !c.push.inflight.is_empty());
+        if !streamed {
+            match self.store.custody_fetch(sender.as_bytes(), cursor, 1) {
+                Ok(held) if held.is_empty() => {
+                    self.send_control(ck, sender, Kind::MailboxItem, encode_item(cursor, &[]));
+                }
+                Ok(_) => {}
+                Err(_) => self.counters.errors += 1,
+            }
+        }
     }
 
     fn on_commit(&mut self, sender: &NodeId, payload: &[u8]) {
@@ -2935,6 +2989,13 @@ impl Core {
     fn on_item(&mut self, sender: &NodeId, payload: &[u8]) {
         let Some(hub) = self.home_hub() else { return };
         if *sender != hub {
+            return;
+        }
+        // The hub's answer to a fetch when it holds nothing above the cursor
+        // (an item-less `MAILBOX_ITEM {custody_seq}`, `on_fetch`): its outer
+        // packet already attributed the connection; nothing to store, and
+        // the cursor stays where it is.
+        if decode_cursor(payload).is_ok() {
             return;
         }
         let Ok((seq, item)) = decode_item(payload) else {
@@ -3100,6 +3161,12 @@ impl Core {
                 let _ = self.store.outbox_set_outstanding(id, idx, false);
             }
         }
+        // A `CUSTODY_PUT` the hub ignored or lost holds its fragments in
+        // flight until a disconnect: the retry re-PUTs them now (the same
+        // stored bytes, so the hub dedups by `pkt_ref`; an ACK of the
+        // earlier PUT still matches the new entry).
+        self.custody_inflight.retain(|(i, _)| *i != id);
+        self.custody_pending.retain(|_, (i, _)| *i != id);
         self.try_mint();
         self.pump_set.insert(peer);
         self.message(id)
@@ -3397,8 +3464,12 @@ impl Core {
         let Some(h) = self.settings.home_hub.take() else {
             return;
         };
+        // A configured direct peer at the same address keeps its dial (the
+        // rule `dial_held` applies to enrollment attempts).
         if let (Some(addr), Some(d)) = (h.address, self.dialer()) {
-            d.release(addr);
+            if !self.peer_dials.contains(&addr) {
+                d.release(addr);
+            }
         }
         self.commit_owed = None;
         self.custody_inflight.clear();
@@ -3461,7 +3532,8 @@ impl Core {
             links,
             hub: HubView {
                 enrolled: hub.is_some(),
-                reachable: hub.is_some_and(|h| self.sendable_conn(&h.node_id).is_some()),
+                connected: hub.is_some_and(|h| self.sendable_conn(&h.node_id).is_some()),
+                reachable: hub.is_some_and(|h| self.hub_answered(&h.node_id)),
                 cursor: match hub {
                     Some(h) => self.store.cursor(h.node_id.as_bytes())?,
                     None => 0,

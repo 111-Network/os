@@ -9,17 +9,23 @@
 //! without `ENROLL_OK` (§7.3): a spent code leaves no dial and no hub card on
 //! the member, a refused re-enrollment keeps a member's dial, and an
 //! abandoned wait releases what it started but never a configured peer's dial
-//! or a contact that existed before.
+//! or a contact that existed before. Lock fixes (integrated review): a lost
+//! `CUSTODY_PUT` is re-PUT by the message's retry and a lost push re-fetched
+//! by `retry_all` (m1); leaving the hub keeps a configured peer's dial at
+//! the same address (m2); `hub.reachable` needs the hub's own answer on the
+//! current connection, never just a dialed socket and an announce (m3).
 
 mod common;
 
 use std::net::SocketAddr;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
 use common::*;
 use mesh111::contacts::{card_text, ROLE_ALWAYS_ON_HUB, ROLE_MAILBOX};
+use mesh111::envelope::OUTER_OVERHEAD;
 use mesh111::fabric::{
     ContactChange, Fabric, FabricError, FabricEvent, FabricSettings, HomeHub, MessageChange,
     SettingsPatch,
@@ -28,12 +34,12 @@ use mesh111::link::lossy::{DropFilter, LossyConfig};
 use mesh111::link::tcp_lan::{
     encode_frame, read_frame, read_hello, TcpLan, HELLO, T_ANNOUNCE, T_SEALED,
 };
-use mesh111::link::{Dialer, Link, LinkState};
+use mesh111::link::{Dialer, Frame, FrameType, Link, LinkKind, LinkState, PathProfile};
 use mesh111::mailbox::EnrollStatus;
 use mesh111::outbox::Reason;
 use mesh111::store::{Class, MsgState, Trust};
 use tokio::io::AsyncWriteExt;
-use tokio::net::TcpStream;
+use tokio::net::{TcpListener, TcpStream};
 
 struct Node {
     ident: Arc<Ident>,
@@ -754,4 +760,242 @@ async fn an_abandoned_wait_releases_what_it_started_only() {
         "the configured peer's dial stays"
     );
     drop(silent);
+}
+
+/// A `tcp-lan` test bearer with stream sizes (no fragmenting), optionally
+/// losing frames in its sending direction.
+fn tcp_like(filter: Option<DropFilter>) -> LossyConfig {
+    LossyConfig {
+        profile: PathProfile::tcp_lan(),
+        kind: LinkKind::TcpLan,
+        filter,
+        ..LossyConfig::default()
+    }
+}
+
+/// Drops the first sealed frame big enough to carry a sealed item inside
+/// (a `CUSTODY_PUT` or a `MAILBOX_ITEM`; a fetch or a commit is far
+/// smaller), then nothing.
+fn lose_first_item() -> DropFilter {
+    let seen = Arc::new(AtomicUsize::new(0));
+    Arc::new(move |f: &Frame| {
+        f.frame_type == FrameType::Sealed
+            && f.bytes.len() > 2 * OUTER_OVERHEAD + 32
+            && seen.fetch_add(1, Ordering::SeqCst) == 0
+    })
+}
+
+/// m1: a `CUSTODY_PUT` lost on a live connection keeps its fragment in
+/// flight (no ACK, no disconnect, no timer). The message's retry forgets
+/// that, and a second PUT goes out and is held.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_lost_custody_put_is_put_again_by_the_messages_retry() {
+    let d = Dirs::new();
+    let (h, haddr) = hub(&d).await;
+    let a = member(&d, "alice", &h, haddr).await;
+    let b = member(&d, "bob", &h, haddr).await;
+    exchange_cards(&a.f, &b.f).await;
+    b.t.release(haddr);
+    a.t.release(haddr);
+    until(10, || async { (hub_peers(&h).await == 0).then_some(()) }).await;
+    // Alice's only path to the hub now loses her first item-sized frame.
+    let (ea, _eh) = lossy_pair(
+        (&a.f, &a.ident),
+        (&h.f, &h.ident),
+        tcp_like(Some(lose_first_item())),
+        tcp_like(None),
+    )
+    .await;
+    let id =
+        a.f.send(b.ident.id(), "lost on the way", None)
+            .await
+            .unwrap();
+    until_state(&a.f, id, MsgState::Sent, 10).await;
+    until(10, || async { (ea.stats().dropped == 1).then_some(()) }).await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(
+        a.f.message(id).await.unwrap().state,
+        MsgState::Sent,
+        "nothing answers a lost PUT"
+    );
+    assert_eq!(h.f.status().await.unwrap().custody.0, 0);
+    let sent = ea.stats().sent;
+    a.f.retry(id).await.unwrap();
+    until_state(&a.f, id, MsgState::Relayed, 10).await;
+    assert!(ea.stats().sent > sent, "a second CUSTODY_PUT went out");
+    assert_eq!(ea.stats().dropped, 1);
+    assert_eq!(h.f.status().await.unwrap().custody.0, 1);
+}
+
+/// m1: a pushed `MAILBOX_ITEM` lost on a live connection is streamed again
+/// only when the member fetches again: `retry_all` (what the daemon calls on
+/// a `fabric` event with new connectivity) does, after link-up.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn retry_all_after_link_up_fetches_a_lost_push_again() {
+    let d = Dirs::new();
+    let (h, haddr) = hub(&d).await;
+    let a = member(&d, "alice", &h, haddr).await;
+    let b = member(&d, "bob", &h, haddr).await;
+    exchange_cards(&a.f, &b.f).await;
+    b.t.release(haddr);
+    until(10, || async { (hub_peers(&h).await == 1).then_some(()) }).await;
+    let id =
+        a.f.send(b.ident.id(), "held, then lost once", None)
+            .await
+            .unwrap();
+    until_state(&a.f, id, MsgState::Relayed, 10).await;
+    // Bob's way back to the hub loses the hub's first item to him.
+    let (_eb, eh) = lossy_pair(
+        (&b.f, &b.ident),
+        (&h.f, &h.ident),
+        tcp_like(None),
+        tcp_like(Some(lose_first_item())),
+    )
+    .await;
+    until(10, || async { (eh.stats().dropped == 1).then_some(()) }).await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(inbox(&b.f, a.ident.id()).await.is_empty());
+    assert_eq!(a.f.message(id).await.unwrap().state, MsgState::Relayed);
+    b.f.retry_all().await.unwrap();
+    until_state(&a.f, id, MsgState::Delivered, 10).await;
+    let got = inbox(&b.f, a.ident.id()).await;
+    assert_eq!(got.len(), 1);
+    assert_eq!(got[0].text.as_deref(), Some("held, then lost once"));
+}
+
+/// m2: leaving the hub (forgetting its contact) keeps the dial when a
+/// configured direct peer sits at the same address.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn leaving_the_hub_keeps_a_configured_peers_dial_at_its_address() {
+    let d = Dirs::new();
+    let (h, haddr) = hub(&d).await;
+    let a = member(&d, "alice", &h, haddr).await;
+    assert_eq!(a.t.connection_count(), 1);
+    a.f.dial_peer(haddr, h.ident.id()).await.unwrap();
+    a.f.forget_contact(h.ident.id()).await.unwrap();
+    assert_eq!(a.f.settings().await.unwrap().home_hub, None);
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    assert_eq!(
+        a.t.connection_count(),
+        1,
+        "the configured peer's dial stays"
+    );
+    assert!(matches!(a.t.state(), LinkState::Up { .. }));
+}
+
+/// A listener that answers the `tcp-lan` handshake with `announce` (public
+/// bytes anyone can replay) and then reads everything and answers nothing.
+async fn silent_hub(announce: Vec<u8>) -> (SocketAddr, tokio::task::JoinHandle<()>) {
+    let l = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = l.local_addr().unwrap();
+    let task = tokio::spawn(async move {
+        let mut socks = Vec::new();
+        while let Ok((mut s, _)) = l.accept().await {
+            let ann = announce.clone();
+            socks.push(tokio::spawn(async move {
+                if s.write_all(&HELLO).await.is_err()
+                    || s.write_all(&encode_frame(T_ANNOUNCE, &ann).unwrap())
+                        .await
+                        .is_err()
+                    || read_hello(&mut s).await.is_err()
+                {
+                    return;
+                }
+                while read_frame(&mut s).await.is_ok() {}
+            }));
+        }
+    });
+    (addr, task)
+}
+
+/// m3: a dialed connection whose announce names the hub is `connected`,
+/// but `reachable` stays false until the hub itself answers on it — an
+/// announce authenticates nothing (§8.1), and the fetch sent on link-up
+/// gets no answer from a hub that is not there.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_hub_that_never_answers_is_connected_but_not_reachable() {
+    let d = Dirs::new();
+    let (h, _haddr) = hub(&d).await;
+    let (fake, task) = silent_hub(h.ident.announce_bytes()).await;
+    let ai = Ident::new("alice", 0);
+    let settings = FabricSettings {
+        home_hub: Some(HomeHub {
+            node_id: h.ident.id(),
+            address: Some(fake),
+        }),
+        ..FabricSettings::default()
+    };
+    let a = start(&ai, &d.node("alice"), settings);
+    a.add_contact_card(&h.f.card().await.unwrap().text)
+        .await
+        .unwrap();
+    let at = tcp(&a, &ai, "tcp");
+    add_tcp(&a, &at, true).await;
+    until(10, || async {
+        let s = a.status().await.ok()?;
+        s.hub.connected.then_some(())
+    })
+    .await;
+    // The fetch went out on link-up (sealed to the hub) and nothing came back.
+    until(10, || async {
+        (!ai.sealed_to(&h.ident.enc()).is_empty()).then_some(())
+    })
+    .await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let st = a.status().await.unwrap();
+    assert!(st.hub.enrolled && st.hub.connected);
+    assert!(!st.hub.reachable, "self-judged from a dialed socket");
+    assert_eq!(st.links[0].peers, 0, "nothing attributed");
+    task.abort();
+}
+
+/// m3: every link-up fetch is answered, an empty mailbox too (an item-less
+/// `MAILBOX_ITEM`), so `reachable` comes back after a reconnect and after
+/// the hub's restart — from the hub's answer on the new connection, never
+/// from the one before.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_empty_mailbox_fetch_is_answered_so_reachable_returns_after_link_up() {
+    let d = Dirs::new();
+    let (h, haddr) = hub(&d).await;
+    let a = member(&d, "alice", &h, haddr).await;
+    // Enrolled: ENROLL_OK answered on this connection.
+    let st = a.f.status().await.unwrap();
+    assert!(st.hub.connected && st.hub.reachable);
+    let before = st.counters;
+    let cursor = st.hub.cursor;
+    let gone = || async {
+        let s = a.f.status().await.ok()?;
+        (!s.hub.connected && !s.hub.reachable).then_some(())
+    };
+
+    // The link drops, then comes back with nothing held for Alice.
+    a.t.release(haddr);
+    until(10, gone).await;
+    assert_eq!(h.f.status().await.unwrap().custody.0, 0);
+    a.t.maintain(haddr, Some(h.ident.id()));
+    until(10, || async {
+        a.f.status().await.ok()?.hub.reachable.then_some(())
+    })
+    .await;
+    let st = a.f.status().await.unwrap();
+    assert!(st.hub.connected);
+    assert_eq!(st.links[0].peers, 1, "the hub's connection is attributed");
+    assert_eq!(st.counters.items_received, before.items_received, "no item");
+    assert_eq!(st.counters.dropped, before.dropped, "a marker, not junk");
+    assert_eq!(st.hub.cursor, cursor, "the cursor stays");
+
+    // The hub dies and comes back on the same port: the old connection's
+    // answer does not carry over; the new one's does.
+    h.f.abort();
+    h.t.shutdown();
+    until(10, gone).await;
+    let h2 = start(&h.ident, &h.dir, hub_settings());
+    let t2 = tcp(&h2, &h.ident, "tcp");
+    add_tcp(&h2, &t2, true).await;
+    listen(&t2, haddr.port()).await;
+    until(10, || async {
+        a.f.status().await.ok()?.hub.reachable.then_some(())
+    })
+    .await;
+    assert_eq!(a.f.status().await.unwrap().hub.cursor, cursor);
 }

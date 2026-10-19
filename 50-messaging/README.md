@@ -398,6 +398,11 @@ whose hub is not yours stays `queued`, reason "their hub is not yours; it is del
   `MAILBOX_COMMIT {cursor}`: the member has stored everything up to it; the hub keeps `max(cursor)` and marks those
   items **evict-first** (not deleted: capacity decides). Cursors are the hub's local insertion sequence — no clock.
 - Members fetch on link-up and on `fabric` events; hubs push `MAILBOX_ITEM` proactively on attributed connections.
+  *As built at the lock (L5 m3):* a hub answers every `MAILBOX_FETCH` it serves (an enrolled member's, on a connection
+  attributed to it); when it streams nothing and holds nothing above the cursor, the answer is one item-less
+  `MAILBOX_ITEM {custody_seq = the fetched cursor}` meaning "nothing above your cursor", which the member stores
+  nothing for (no item processed, no drop counted, cursor unchanged) and which, like any fresh hub packet, attributes the
+  connection (§15 `reachable`).
 - **Hub-to-hub replication (A+)** is specified as: configured peer hubs exchange per-(dest) summary vectors (the §4
   prefix + ranges form) and replicate custody items; replicas are evict-first; a hub then also accepts custody for a
   peer hub's members. Not built in v1.
@@ -719,6 +724,12 @@ configured `peers` entry holds that address, and a hub card pinned only for it i
 existed before is kept). `FabricStatus` gains `counters` (optional: the fabric's bounded diagnostics for Advanced,
 absent while it is not running); `Status.layers` lists 5 while the fabric runs and is not restore-pending;
 `hub_not_yours` also explains `sent` after `REJECT_UNKNOWN_DEST` (§9).
+
+*As built (L5 lock, integrated review m3):* `FabricHub.reachable` — and with it the `fabric` row's LIVE `hub_reachable`
+— is true only while a connection is attributed to the home hub (§8.1: a `pair_mac`-verified packet from the hub that the
+window judged fresh arrived on it since it came up: `ENROLL_OK`, a `MAILBOX_ITEM` including §9's item-less answer to a
+fetch on an empty mailbox, a `CUSTODY_ACK`, …), never from the member's own dialed socket; a member connected to its hub
+but not yet answered reads NOT SET `hub_waiting_answer` "Connected to your home hub, waiting for its answer."
 
 ## 16. UI (Layer 4 tree; one component tree, density flags)
 

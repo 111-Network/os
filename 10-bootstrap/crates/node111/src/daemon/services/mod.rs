@@ -503,8 +503,13 @@ pub struct FabricFacts {
     pub restore_pending: bool,
     /// Capacity pruning cannot make room (§10.4 `store_full`).
     pub store_full: bool,
-    /// Home hub (§7.3): `None` = not enrolled with one; `Some(reachable)`.
+    /// Home hub (§7.3): `None` = not enrolled with one; `Some(reachable)` —
+    /// reachable only once the hub answered on the current connection (a
+    /// connection attributed to it, §8.1), never self-judged.
     pub hub_reachable: Option<bool>,
+    /// A connection to the home hub is up (dialed and announced) but the hub
+    /// has not answered on it yet: NOT SET "waiting for its answer".
+    pub hub_connected: bool,
     /// Hub role (§9): `None` = this node is not a hub; `Some(n)` = a hub with
     /// `n` enrolled members.
     pub members: Option<u32>,
@@ -1107,10 +1112,12 @@ fn codeagent(f: &Facts) -> Computed {
 }
 
 /// Layer 5 §15 `fabric` ("Messaging"): LIVE when the store is open and an
-/// enrolled hub is reachable, or this hub has a member, or a peer link is
-/// attributed; NOT SET when the store is open but nothing is reachable (a hub
-/// without members is "waiting for the first node to enroll"; a node with no
-/// hub is pointed at enrollment); ERROR on store failure or `store_full`,
+/// enrolled hub is reachable (it answered on the current connection), or this
+/// hub has a member, or a peer link is attributed; NOT SET when the store is
+/// open but nothing is reachable (a hub without members is "waiting for the
+/// first node to enroll"; a member connected to its hub that has not answered
+/// yet is "waiting for its answer"; a node with no hub is pointed at
+/// enrollment); ERROR on store failure or `store_full`,
 /// and — each named for what it is, with the way out — when no identity
 /// loaded (`no_identity`) or the identity holder is restore-pending
 /// (`restore_pending`: its counters file is missing, so nothing is sealed).
@@ -1195,6 +1202,13 @@ fn fabric(f: &Facts) -> Computed {
             "hub_waiting",
             "This node is a home hub, waiting for the first node to enroll.",
         )
+    } else if x.hub_reachable == Some(false) && x.hub_connected {
+        Computed::new(
+            id,
+            ServiceState::Unset,
+            "hub_waiting_answer",
+            "Connected to your home hub, waiting for its answer.",
+        )
     } else if x.hub_reachable == Some(false) {
         Computed::new(
             id,
@@ -1217,6 +1231,7 @@ fn fabric(f: &Facts) -> Computed {
         "hub": {
             "enrolled": x.hub_reachable.is_some(),
             "reachable": x.hub_reachable,
+            "connected": x.hub_reachable.is_some() && x.hub_connected,
         },
         "hub_role": x.members.is_some(),
         "members": x.members,
@@ -1626,9 +1641,46 @@ mod tests {
             ..base.clone()
         });
         assert_eq!(st(&f, id), (U, "hub_unreachable", true));
+        assert_eq!(row(&f, id).detail["hub"]["connected"], false);
+        // L5 m3: connected to the hub, no answer on that connection yet —
+        // NOT SET, never the LIVE copy that promises delivery
+        f = with(FabricFacts {
+            hub_reachable: Some(false),
+            hub_connected: true,
+            ..base.clone()
+        });
+        let c = row(&f, id);
+        assert_eq!((c.state, c.reason_code), (U, "hub_waiting_answer"));
+        assert_eq!(
+            c.reason,
+            "Connected to your home hub, waiting for its answer."
+        );
+        assert_eq!(c.detail["hub"]["reachable"], false);
+        assert_eq!(c.detail["hub"]["connected"], true);
+        // ... and an attributed direct peer still makes the row LIVE
+        f = with(FabricFacts {
+            hub_reachable: Some(false),
+            hub_connected: true,
+            attributed_links: 1,
+            ..base.clone()
+        });
+        assert_eq!(st(&f, id), (L, "peer_linked", true));
+        // a stray connected fact without a home hub reads not enrolled
+        f = with(FabricFacts {
+            hub_connected: true,
+            ..base.clone()
+        });
+        assert_eq!(st(&f, id), (U, "not_enrolled", true));
+        assert_eq!(row(&f, id).detail["hub"]["connected"], false);
         // LIVE: hub reachable · a member · an attributed link
         f = with(FabricFacts {
             hub_reachable: Some(true),
+            ..base.clone()
+        });
+        assert_eq!(st(&f, id), (L, "hub_reachable", true));
+        f = with(FabricFacts {
+            hub_reachable: Some(true),
+            hub_connected: true,
             ..base.clone()
         });
         assert_eq!(st(&f, id), (L, "hub_reachable", true));
