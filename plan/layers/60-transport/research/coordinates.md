@@ -69,4 +69,6 @@ Next after the run: lead writes `layers/60-transport/options.md` → owner decid
   GitHub access was granted mid-session (owner: the org has full access); the branch is pushed after every commit.
 - **Wave 0 closed + B1:** S1 bounce `a38fe19`, B1 `fc802a7`. **Run — Wave 1** (`wave-1.js`, B2 + B3): `wf_0ea8a249-2d9`. **Run — Wave 1b** (`wave-1b.js`,
   B4 + B5): `wf_b2b6ec75-68f`. **Reviews:** S1-bounce + B1 `wf_182b25dc-d01`. Lead fixes from the S3/S4 reviews (version test, rnstatus re-probe
-  back-off, `write_line` stdin poisoning) ride a lead commit after the Wave 1 launch.
+  back-off, `write_line` stdin poisoning) ride a lead commit after the Wave 1 launch (`19bc979`).
+- **Wave 1 landing:** B5 `cfa065d` (review `wf_6dd8e7a4-3f0`). **Run — B1 bounce** (`wave-1-bounce.js`: the B1 review major + the S1-bounce/B1
+  minors): `wf_f9c6bf9d-b98`. The B5 agent found the chat preamble and the Layer 3 tools line outside its ownership; the lead extended both.
