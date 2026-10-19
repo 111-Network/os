@@ -210,10 +210,16 @@
 //! - Nothing here touches 111 message numbering, the outbox or the L2
 //!   window: foreign rows only draw `local_seq` from the store-wide counter
 //!   (one order, §3).
-//! - Readings: a cancel deletes an own row still `queued` that was never
-//!   handed to a carrier (no pending handoff mark, no native id; the
-//!   store's `foreign_cancel`); the handoff mark is set only through
-//!   [`Fabric::foreign_handoff_begin`] / [`Fabric::foreign_accepted`];
+//! - Readings: a cancel deletes a user-composed own row still `queued`
+//!   that was never handed to a carrier (no pending handoff mark, no native
+//!   id; the store's `foreign_cancel`; a relay copy is not cancelled) and
+//!   emits a `Conversation` event for its conversation (the row is gone, so
+//!   no per-row event names it); the handoff mark is set, cleared and
+//!   withdrawn only through [`Fabric::foreign_handoff_begin`] /
+//!   [`Fabric::foreign_accepted`] / [`Fabric::foreign_handoff_abort`],
+//!   which emit no event (bookkeeping of the at-most-once rule; the
+//!   visible change is the state the carrier reports next); a conversation
+//!   upsert emits only when the store reports a new row or a new title;
 //!   edge changes emit no event (the `bridge` SSE snapshot is the bridge
 //!   core's), except a disable or a delete, which drop the destination's
 //!   never-handed copies (a `Conversation` event for it).
@@ -4063,12 +4069,15 @@ impl Fabric {
         self.call(move |c| c.foreign_queue_sends(sends)).await?
     }
 
-    /// Cancel an own row (§9): only while `queued` and never handed to a
-    /// carrier (no pending handoff, no recorded native id); the store
-    /// deletes it ([`Store::foreign_cancel`], FULL), so it can never be
-    /// sent. Anything else is [`FabricError::NotRetryable`]. Other parts of
-    /// the same send are not touched (cancel drops unsent parts only, one
-    /// call per part).
+    /// Cancel a user-composed own row (§9): only while `queued` and never
+    /// handed to a carrier (no pending handoff, no recorded native id); the
+    /// store deletes it ([`Store::foreign_cancel`], FULL), so it can never
+    /// be sent, and a `Conversation` event tells the client to refetch the
+    /// conversation (the row no longer exists). A row past that is
+    /// [`FabricError::NotRetryable`]; a relay copy is
+    /// [`FabricError::Invalid`] (copies leave by shed, disable or delete).
+    /// Other parts of the same send are not touched (cancel drops unsent
+    /// parts only, one call per part).
     pub async fn foreign_cancel(&self, id: i64) -> Result<()> {
         self.call(move |c| c.foreign_cancel(id)).await?
     }
@@ -4327,6 +4336,20 @@ impl Fabric {
         self.call(move |c| c.store.foreign_accepted(id, &native).map_err(fx))
             .await?
     }
+
+    /// §4 "Later retries": withdraw a row's pending handoff mark
+    /// ([`Store::foreign_handoff_abort`], FULL) when the carrier reported a
+    /// refusal **before air** and no `Accepted`, so the next tick offers
+    /// the row again ([`Fabric::foreign_queued`]). Never after an
+    /// `Accepted` or on a post-air outcome. Emits no event, like
+    /// [`Fabric::foreign_handoff_begin`] (the mark is bookkeeping; the row's
+    /// visible state did not change). A row that is not `queued` with a
+    /// pending mark is [`FabricError::Invalid`]; an unknown id
+    /// [`FabricError::NotFound`].
+    pub async fn foreign_handoff_abort(&self, id: i64) -> Result<()> {
+        self.call(move |c| c.store.foreign_handoff_abort(id).map_err(fx))
+            .await?
+    }
 }
 
 /// What the actor remembers about a foreign conversation.
@@ -4449,11 +4472,6 @@ impl Core {
     }
 
     fn foreign_set_meta(&mut self, id: i64, key: &str, value: Option<ForeignMeta>) -> Result<bool> {
-        if key == "handoff" {
-            return Err(FabricError::Invalid(
-                "the handoff mark is set only by foreign_handoff_begin / foreign_accepted",
-            ));
-        }
         let v = value.as_ref().map(|v| match v {
             ForeignMeta::Str(s) => MetaValue::Str(s),
             ForeignMeta::Int(i) => MetaValue::Int(*i),
@@ -4491,7 +4509,9 @@ impl Core {
             return Err(FabricError::NotRetryable);
         }
         self.store.foreign_cancel(id).map_err(fx)?;
-        self.foreign_event(row.conv, Some(id), ForeignChange::State);
+        // B1-bounce F3: the row is gone, so no per-row event may name it;
+        // the conversation changed (its queued count), the client refetches.
+        self.foreign_event(row.conv, None, ForeignChange::Conversation);
         Ok(())
     }
 
@@ -4613,15 +4633,13 @@ impl Core {
         native_id: &str,
         title: Option<&str>,
     ) -> Result<i64> {
-        let id = self
+        // B1-bounce F4: the store compares against the stored row (cached or
+        // not) and answers whether anything changed.
+        let (id, changed) = self
             .store
-            .foreign_conversation_upsert(network, account, kind, native_id, title)
+            .foreign_conversation_upsert_changed(network, account, kind, native_id, title)
             .map_err(fx)?;
-        let unchanged = self
-            .foreign_convs
-            .get(&id)
-            .is_some_and(|f| title.is_none() || f.title.as_deref() == title);
-        if !unchanged {
+        if changed {
             match self.store.foreign_conversation(id) {
                 Ok(Some(c)) => self.remember_conv(id, ConvFacts::of(&c)),
                 _ => {
@@ -5417,9 +5435,11 @@ mod foreign_tests {
         ));
         let mut rx = subscribe(&n.f).await;
         n.f.foreign_cancel(b).await.unwrap();
+        // B1-bounce F3: the row is gone, so the change is the
+        // conversation's (no event names a row that no longer exists)
         assert_eq!(
             events(&n.f, &mut rx).await,
-            vec![(d, Some(b), ForeignChange::State)]
+            vec![(d, None, ForeignChange::Conversation)]
         );
         // deleted: it can never be offered or sent
         assert!(matches!(
@@ -5477,6 +5497,95 @@ mod foreign_tests {
             n.f.foreign_handoff_begin(b).await,
             Err(FabricError::Invalid(_))
         ));
+    }
+
+    /// B1-bounce F8: a pre-air refusal without `Accepted` withdraws the
+    /// pending mark through the actor; the row is offered again and is
+    /// cancellable again. No event (as for `foreign_handoff_begin`).
+    #[tokio::test]
+    async fn a_pre_air_refusal_aborts_the_handoff_mark() {
+        let n = node();
+        let d = dm(&n.f, "dm:!0badc0de").await;
+        let part = ForeignGroupPart {
+            conv: d,
+            text: "hello".into(),
+            part_k: 1,
+            part_n: 1,
+        };
+        let (_, ids) =
+            n.f.foreign_group_create("hello", "[]", vec![part])
+                .await
+                .unwrap();
+        let a = ids[0];
+        let offered = |f: Fabric| async move {
+            f.foreign_queued("meshtastic", 10)
+                .await
+                .unwrap()
+                .iter()
+                .any(|m| m.id == a)
+        };
+        assert!(matches!(
+            n.f.foreign_handoff_abort(a).await,
+            Err(FabricError::Invalid(_))
+        ));
+        n.f.foreign_handoff_begin(a).await.unwrap();
+        assert!(!offered(n.f.clone()).await);
+        let mut rx = subscribe(&n.f).await;
+        n.f.foreign_handoff_abort(a).await.unwrap();
+        assert!(events(&n.f, &mut rx).await.is_empty(), "bookkeeping only");
+        assert!(!n.f.foreign_message(a).await.unwrap().handoff_pending);
+        assert!(offered(n.f.clone()).await, "offered again");
+        // twice is refused: no mark to withdraw
+        assert!(matches!(
+            n.f.foreign_handoff_abort(a).await,
+            Err(FabricError::Invalid(_))
+        ));
+        assert!(matches!(
+            n.f.foreign_handoff_abort(9_999).await,
+            Err(FabricError::NotFound)
+        ));
+        // the meta setter cannot write the reserved mark (F7)
+        assert!(matches!(
+            n.f.foreign_set_meta(a, "handoff", Some(ForeignMeta::Str("pending".into())))
+                .await,
+            Err(FabricError::Invalid(_))
+        ));
+        assert!(offered(n.f.clone()).await);
+        n.f.foreign_cancel(a).await.unwrap();
+    }
+
+    /// B1-bounce F4: an upsert of a conversation the actor does not have
+    /// cached compares against the stored row: two identical upserts after
+    /// a cache clear emit nothing; only the new row emitted.
+    #[tokio::test]
+    async fn an_uncached_identical_upsert_emits_nothing() {
+        let n = node();
+        let mut rx = subscribe(&n.f).await;
+        let c = channel(&n.f, "!board", "LongFast").await;
+        n.f.call(|core| core.foreign_convs.clear()).await.unwrap();
+        assert_eq!(channel(&n.f, "!board", "LongFast").await, c);
+        n.f.call(|core| core.foreign_convs.clear()).await.unwrap();
+        assert_eq!(channel(&n.f, "!board", "LongFast").await, c);
+        assert_eq!(
+            events(&n.f, &mut rx).await,
+            vec![(c, None, ForeignChange::Conversation)],
+            "one event: the new row"
+        );
+        // a real difference while uncached still emits
+        n.f.call(|core| core.foreign_convs.clear()).await.unwrap();
+        n.f.foreign_conversation_upsert(
+            "meshtastic",
+            "!board",
+            ForeignKind::Channel,
+            "ch:LongFast:00ff",
+            Some("Long Fast"),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            events(&n.f, &mut rx).await,
+            vec![(c, None, ForeignChange::Conversation)]
+        );
     }
 
     #[tokio::test]

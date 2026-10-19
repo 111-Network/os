@@ -2790,8 +2790,11 @@ fn a_second_copy_of_one_origin_on_one_edge_is_refused() {
         copy_send(e, o4, b, "[!a1/M] four", 1, 1),
     ])
     .unwrap();
-    // A cancelled copy is never queued again (the mark holds).
-    s.foreign_cancel(c1).unwrap();
+    // B1-bounce F10: a relay copy is not cancelled (copies leave by shed,
+    // disable or delete); the copy stays and its origin is never queued
+    // again (the mark holds).
+    assert!(matches!(s.foreign_cancel(c1), Err(StoreError::Invalid(_))));
+    assert!(s.foreign_message(c1).unwrap().is_some());
     assert!(matches!(
         s.foreign_queue_send(&copy_send(e, o1, b, "[!a1/M] one", 1, 1)),
         Err(StoreError::Invalid(_))
@@ -2932,4 +2935,172 @@ fn a_copy_with_a_pending_handoff_is_pruned_as_handed_never_shed() {
     assert_eq!(s.edge(e).unwrap().unwrap().shed, 1);
     assert!(s.foreign_message(pending).unwrap().is_none());
     assert!(s.foreign_message(backlog).unwrap().is_none());
+}
+
+/// B1-bounce F7: `handoff` is a reserved meta key — the at-most-once mark
+/// is representable only through its three calls.
+#[test]
+fn the_handoff_meta_key_is_reserved() {
+    let (_t, mut s) = ready();
+    let dm = fconv(&mut s, "meshtastic", ForeignKind::Dm, "dm:!a1");
+    let u = user_send(&mut s, dm, "hello");
+    for v in [Some(MetaValue::Str("pending")), None] {
+        assert!(matches!(
+            s.foreign_set_meta(u, "handoff", v),
+            Err(StoreError::Invalid(_))
+        ));
+    }
+    s.foreign_handoff_begin(u).unwrap();
+    assert!(matches!(
+        s.foreign_set_meta(u, "handoff", None),
+        Err(StoreError::Invalid(_))
+    ));
+    assert!(s.foreign_message(u).unwrap().unwrap().handoff_pending);
+}
+
+/// B1-bounce F8: a pre-air refusal (no `Accepted`) withdraws the pending
+/// mark; the row is offered, cancellable and droppable again. Anything
+/// else is refused.
+#[test]
+fn a_pending_handoff_is_aborted_only_on_a_queued_own_row() {
+    let (_t, mut s) = ready();
+    let dm = fconv(&mut s, "meshtastic", ForeignKind::Dm, "dm:!a1");
+    let a = fconv(&mut s, "meshtastic", ForeignKind::Channel, "ch:a:1");
+    let b = fconv(&mut s, "meshtastic", ForeignKind::Channel, "ch:b:1");
+    let e = mk_edge(&mut s, a, b);
+    let offered = |s: &Store, id: i64| {
+        s.foreign_queued("meshtastic", 50)
+            .unwrap()
+            .iter()
+            .any(|m| m.id == id)
+    };
+    let u = user_send(&mut s, dm, "hello");
+    // no mark yet
+    assert!(matches!(
+        s.foreign_handoff_abort(u),
+        Err(StoreError::Invalid(_))
+    ));
+    s.foreign_handoff_begin(u).unwrap();
+    assert!(!offered(&s, u));
+    s.foreign_handoff_abort(u).unwrap();
+    let row = s.foreign_message(u).unwrap().unwrap();
+    assert!(!row.handoff_pending);
+    assert_eq!(row.state, ForeignState::Queued);
+    assert!(offered(&s, u), "offered again");
+    // a second handoff after the abort is the one send of the act
+    s.foreign_handoff_begin(u).unwrap();
+    s.foreign_accepted(u, "0x1").unwrap();
+    s.foreign_set_state(u, ForeignState::Sent, None, None)
+        .unwrap();
+    assert!(matches!(
+        s.foreign_handoff_abort(u),
+        Err(StoreError::Invalid(_))
+    ));
+    // a row past queued with a (stale) mark is not aborted
+    let v = user_send(&mut s, dm, "two");
+    s.foreign_handoff_begin(v).unwrap();
+    s.foreign_set_state(v, ForeignState::Failed, None, Some("NO_CHANNEL"))
+        .unwrap();
+    assert!(matches!(
+        s.foreign_handoff_abort(v),
+        Err(StoreError::Invalid(_))
+    ));
+    // inbound and unknown rows
+    let inbound = ingest1(&mut s, fin(dm, "!a1", Some("9"), "hey", false));
+    assert!(matches!(
+        s.foreign_handoff_abort(inbound),
+        Err(StoreError::Invalid(_))
+    ));
+    assert!(matches!(
+        s.foreign_handoff_abort(9999),
+        Err(StoreError::NotFound)
+    ));
+    // after an abort the row is cancellable again
+    let w = user_send(&mut s, dm, "three");
+    s.foreign_handoff_begin(w).unwrap();
+    assert!(matches!(s.foreign_cancel(w), Err(StoreError::Invalid(_))));
+    s.foreign_handoff_abort(w).unwrap();
+    s.foreign_cancel(w).unwrap();
+    // a relay copy: after an abort it is never-handed backlog again, so a
+    // disable drops it
+    let o = ingest1(&mut s, fin(a, "!a1", Some("1"), "one", false));
+    let c = s
+        .foreign_queue_send(&copy_send(e, o, b, "[!a1/M] one", 1, 1))
+        .unwrap();
+    s.foreign_handoff_begin(c).unwrap();
+    s.foreign_handoff_abort(c).unwrap();
+    assert!(offered(&s, c));
+    assert!(s.edge_set_enabled(e, false, None).unwrap());
+    assert!(s.foreign_message(c).unwrap().is_none());
+}
+
+/// B1-bounce F9: the parts of one copy in one call are cross-checked
+/// (part 1 first, `part_k` = previous + 1, one `part_n`, complete by the
+/// end of the call), and origins go in ascending order: any violation
+/// fails the whole batch and writes nothing.
+#[test]
+fn one_batch_numbers_a_copys_parts_in_order_and_origins_ascending() {
+    let (_t, mut s) = ready();
+    let a = fconv(&mut s, "meshtastic", ForeignKind::Channel, "ch:a:1");
+    let b = fconv(&mut s, "meshtastic", ForeignKind::Channel, "ch:b:1");
+    let e = mk_edge(&mut s, a, b);
+    let o1 = ingest1(&mut s, fin(a, "!a1", Some("1"), "one", false));
+    let o2 = ingest1(&mut s, fin(a, "!a1", Some("2"), "two", false));
+    let before = (
+        s.local_seq().unwrap(),
+        s.edge(e).unwrap().unwrap().relayed_seq,
+    );
+    let bad: [&[ForeignSend<'_>]; 6] = [
+        // part_n differs between the parts of one copy
+        &[
+            copy_send(e, o1, b, "p", 1, 2),
+            copy_send(e, o1, b, "p", 2, 3),
+        ],
+        // a part skipped
+        &[
+            copy_send(e, o1, b, "p", 1, 3),
+            copy_send(e, o1, b, "p", 3, 3),
+        ],
+        // out of order
+        &[
+            copy_send(e, o1, b, "p", 2, 2),
+            copy_send(e, o1, b, "p", 1, 2),
+        ],
+        // a copy that does not start at part 1
+        &[copy_send(e, o1, b, "p", 2, 2)],
+        // incomplete: part 2 of 2 could never be queued later
+        &[copy_send(e, o1, b, "p", 1, 2)],
+        // origins descending: o1 is below the mark o2 just moved
+        &[
+            copy_send(e, o2, b, "[!a1/M] two", 1, 1),
+            copy_send(e, o1, b, "[!a1/M] one", 1, 1),
+        ],
+    ];
+    for batch in bad {
+        assert!(
+            matches!(s.foreign_queue_sends(batch), Err(StoreError::Invalid(_))),
+            "{batch:?}"
+        );
+        assert_eq!(
+            (
+                s.local_seq().unwrap(),
+                s.edge(e).unwrap().unwrap().relayed_seq
+            ),
+            before,
+            "nothing written"
+        );
+    }
+    // the same copies in order: interleaving two origins' parts is fine as
+    // long as each copy's own numbering holds and origins ascend
+    let ids = s
+        .foreign_queue_sends(&[
+            copy_send(e, o1, b, "(1/2) o", 1, 2),
+            copy_send(e, o1, b, "(2/2) ne", 2, 2),
+            copy_send(e, o2, b, "(1/3) t", 1, 3),
+            copy_send(e, o2, b, "(2/3) w", 2, 3),
+            copy_send(e, o2, b, "(3/3) o", 3, 3),
+        ])
+        .unwrap();
+    assert_eq!(ids.len(), 5);
+    assert_eq!(s.edge(e).unwrap().unwrap().relayed_seq, fseq(&s, o2));
 }

@@ -776,10 +776,15 @@ mod tests {
 /// (`40-interface/ui/test/contract.gen.ts`, generated from `openapi.yaml`):
 /// every emitted key is declared, every required key is emitted, and the
 /// values validate (a JSON-Schema subset: `$ref`, `type`, `enum`, `const`,
-/// `minimum`, `pattern`, `format: date-time`, `required`, `properties`,
-/// `items`, `oneOf`).
+/// `minimum`, `maximum`, `minLength`, `maxLength` (Unicode scalar values,
+/// as JSON Schema counts them), `minItems`, `maxItems`, `pattern`,
+/// `format: date-time`, `required`, `properties`, `items`, `oneOf`).
+/// Skipped keywords of the digest (B1-bounce F2): `additionalProperties`
+/// (stricter here: an object with `properties` may carry no other key),
+/// `format` other than `date-time`, and the annotations `default` and
+/// `description`.
 #[cfg(test)]
-mod foreign_tests {
+pub(super) mod foreign_tests {
     use super::*;
     use mesh111::store::{EdgeOversize, ForeignAuth, ForeignKind, ForeignState};
     use std::sync::OnceLock;
@@ -927,6 +932,37 @@ mod foreign_tests {
                 errs.push(format!("{path}: {n} below minimum {m}"));
             }
         }
+        if let (Some(n), Some(m)) = (v.as_f64(), schema.get("maximum").and_then(Value::as_f64)) {
+            if n > m {
+                errs.push(format!("{path}: {n} above maximum {m}"));
+            }
+        }
+        if let Some(s) = v.as_str() {
+            let len = s.chars().count() as u64;
+            if let Some(m) = schema.get("minLength").and_then(Value::as_u64) {
+                if len < m {
+                    errs.push(format!("{path}: length {len} below minLength {m}"));
+                }
+            }
+            if let Some(m) = schema.get("maxLength").and_then(Value::as_u64) {
+                if len > m {
+                    errs.push(format!("{path}: length {len} above maxLength {m}"));
+                }
+            }
+        }
+        if let Some(a) = v.as_array() {
+            let len = a.len() as u64;
+            if let Some(m) = schema.get("minItems").and_then(Value::as_u64) {
+                if len < m {
+                    errs.push(format!("{path}: {len} items below minItems {m}"));
+                }
+            }
+            if let Some(m) = schema.get("maxItems").and_then(Value::as_u64) {
+                if len > m {
+                    errs.push(format!("{path}: {len} items above maxItems {m}"));
+                }
+            }
+        }
         if let Some(s) = v.as_str() {
             if let Some(p) = schema.get("pattern").and_then(Value::as_str) {
                 if !re_match(p, s) {
@@ -969,7 +1005,9 @@ mod foreign_tests {
         }
     }
 
-    fn assert_schema(v: &Value, name: &str) {
+    /// Validate `v` against the contract schema `name` (also used by the
+    /// fabric wiring's frame tests).
+    pub(in crate::daemon::fabric) fn assert_schema(v: &Value, name: &str) {
         let mut errs = Vec::new();
         validate(
             v,
@@ -1366,6 +1404,71 @@ mod foreign_tests {
             &mut errs,
         );
         assert!(!errs.is_empty());
+        // B1-bounce F2: length and count bounds are checked too — a
+        // 300-byte `enabled_by` (contract maxLength 256) is drift.
+        let h = "0f".repeat(32);
+        let live = EdgeLive {
+            adapters_enabled: true,
+            pause_reason: None,
+        };
+        let mut e = edge(&edge_row(false, &h), &live);
+        let mut errs = Vec::new();
+        validate(
+            &e,
+            &json!({"$ref": "#/components/schemas/BridgeEdge"}),
+            "e",
+            &mut errs,
+        );
+        assert!(errs.is_empty(), "{errs:#?}");
+        e["enabled_by"] = json!("x".repeat(300));
+        let mut errs = Vec::new();
+        validate(
+            &e,
+            &json!({"$ref": "#/components/schemas/BridgeEdge"}),
+            "e",
+            &mut errs,
+        );
+        assert!(
+            errs.iter()
+                .any(|x| x.contains("enabled_by") && x.contains("maxLength")),
+            "{errs:#?}"
+        );
+        // the other bounds, on inline schemas
+        for (v, schema, want) in [
+            (
+                json!(""),
+                json!({"type": "string", "minLength": 1}),
+                "minLength",
+            ),
+            (
+                json!(7),
+                json!({"type": "integer", "maximum": 5}),
+                "maximum",
+            ),
+            (
+                json!([]),
+                json!({"type": "array", "minItems": 1}),
+                "minItems",
+            ),
+            (
+                json!([1, 2, 3]),
+                json!({"type": "array", "maxItems": 2}),
+                "maxItems",
+            ),
+        ] {
+            let mut errs = Vec::new();
+            validate(&v, &schema, "x", &mut errs);
+            assert!(errs.iter().any(|x| x.contains(want)), "{want}: {errs:#?}");
+        }
+        // maxLength counts characters, not bytes
+        let mut errs = Vec::new();
+        validate(
+            &json!("éé"),
+            &json!({"type": "string", "maxLength": 2}),
+            "x",
+            &mut errs,
+        );
+        assert!(errs.is_empty(), "{errs:#?}");
     }
 
     #[test]

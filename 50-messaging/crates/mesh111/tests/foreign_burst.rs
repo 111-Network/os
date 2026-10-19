@@ -7,6 +7,13 @@
 //! within the bound, and every foreign row is stored once, in contiguous
 //! `local_seq` order per batch. Foreign events stay coalesced per
 //! conversation per call for an unpinned channel.
+//!
+//! The overlap is proven, not assumed (B1-bounce F1): the burst task fires
+//! a oneshot once its first call returned, the two 111 sends are issued
+//! only then, and the burst's second call waits for the "sends issued"
+//! signal, so at least three of the four calls (768 rows) run while both
+//! 111 messages are in flight. The test asserts that the last ingest
+//! returned after the sends were issued.
 
 mod common;
 
@@ -71,20 +78,37 @@ async fn a_thousand_row_burst_does_not_starve_111_delivery() {
     let mut events = a.subscribe();
 
     // The burst: four awaited calls (256, 256, 256, 232), as an adapter
-    // tick would issue them.
+    // tick would issue them. F1 gates: `first_done` fires when the first
+    // call returned; the second call waits for `sends_issued`.
+    let (first_done_tx, first_done) = tokio::sync::oneshot::channel::<()>();
+    let (sends_issued_tx, sends_issued) = tokio::sync::oneshot::channel::<()>();
     let fa = a.clone();
     let burst = tokio::spawn(async move {
         let all: Vec<ForeignInsert> = (0..ROWS).map(|i| burst_row(conv, i)).collect();
         let started = Instant::now();
         let mut batches = Vec::new();
-        for chunk in all.chunks(MAX_FOREIGN_INGEST) {
+        let mut first_done_tx = Some(first_done_tx);
+        let mut sends_issued = Some(sends_issued);
+        for (i, chunk) in all.chunks(MAX_FOREIGN_INGEST).enumerate() {
+            if i == 1 {
+                if let Some(gate) = sends_issued.take() {
+                    gate.await.expect("the sends were issued");
+                }
+            }
             let ids = fa.foreign_ingest(chunk.to_vec()).await.expect("ingest");
             batches.push(ids);
+            if let Some(tx) = first_done_tx.take() {
+                let _ = tx.send(());
+            }
         }
-        (batches, started.elapsed())
+        // when the LAST ingest returned
+        let ended = Instant::now();
+        (batches, started.elapsed(), ended)
     });
 
-    // 111 traffic both ways while the burst runs.
+    // 111 traffic both ways while the burst runs: issued only once the
+    // burst's first call has returned.
+    first_done.await.expect("the burst started");
     let t0 = Instant::now();
     let ab = a
         .send(bi.id(), "alice → bob during the burst", None)
@@ -94,16 +118,26 @@ async fn a_thousand_row_burst_does_not_starve_111_delivery() {
         .send(ai.id(), "bob → alice during the burst", None)
         .await
         .unwrap();
+    let issued = Instant::now();
+    sends_issued_tx.send(()).expect("the burst waits");
     until_state(&a, ab, MsgState::Delivered, BOUND.as_secs()).await;
     let lat_ab = t0.elapsed();
     until_state(&b, ba, MsgState::Delivered, BOUND.as_secs()).await;
     let lat_ba = t0.elapsed();
-    let (batches, burst_time) = burst.await.unwrap();
+    let (batches, burst_time, burst_ended) = burst.await.unwrap();
+    let overlap = burst_ended.saturating_duration_since(issued);
     println!(
         "foreign burst: {ROWS} rows in {} calls took {burst_time:?}; \
          111 latency under it: alice→bob delivered after {lat_ab:?}, \
-         bob→alice after {lat_ba:?} (bound {BOUND:?})",
+         bob→alice after {lat_ba:?} (bound {BOUND:?}); the burst ran \
+         {overlap:?} past the sends being issued",
         batches.len()
+    );
+    // F1: the bound was measured during the burst — its last call returned
+    // after both 111 sends were issued.
+    assert!(
+        burst_ended > issued,
+        "the burst ended before the 111 sends were issued"
     );
     assert!(lat_ab < BOUND && lat_ba < BOUND);
     assert_eq!(batches.len(), ROWS.div_ceil(MAX_FOREIGN_INGEST));

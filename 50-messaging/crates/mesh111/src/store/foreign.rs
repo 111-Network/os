@@ -34,9 +34,18 @@
 //!   `delivered` overrides `failed`.
 //! - **At most once per user act (§4).** `meta.handoff = "pending"` is
 //!   written durably before a handoff ([`Store::foreign_handoff_begin`]) and
-//!   cleared by `Accepted` ([`Store::foreign_accepted`]); a pending row is
-//!   never offered again by [`Store::foreign_queued`], never cancelled
-//!   ([`Store::foreign_cancel`]) and never shed as backlog (prune 2b).
+//!   cleared by `Accepted` ([`Store::foreign_accepted`]), or withdrawn by
+//!   [`Store::foreign_handoff_abort`] when the carrier refused the row
+//!   before air without an `Accepted`; a pending row is never offered again
+//!   by [`Store::foreign_queued`], never cancelled ([`Store::foreign_cancel`])
+//!   and never shed as backlog (prune 2b). `handoff` is a reserved `meta`
+//!   key: [`Store::foreign_set_meta`] refuses it, so the mark is
+//!   representable only through those three calls.
+//! - **Cancel is the user's (§9).** [`Store::foreign_cancel`] deletes one
+//!   queued, never-handed **user-composed** row (`group_id` set). A relay
+//!   copy is not cancelled: copies leave only by a shed (prune 2b), an edge
+//!   disable or an edge delete, which the edge's counters and the
+//!   destination's `Conversation` change explain.
 //! - **Relay edges (§8).** Inputs are inbound rows of the source with
 //!   `local_seq > max(cursor_seq, relayed_seq)` that are not relayed copies
 //!   ([`Store::edge_inputs`]); queueing a copy advances `relayed_seq` past
@@ -47,7 +56,13 @@
 //!   `relayed_seq` is refused, except for the further parts of a split copy
 //!   queued in the same [`Store::foreign_queue_sends`] call; the partial
 //!   `UNIQUE (edge_id, origin_msg, part_k)` index makes a duplicate part
-//!   unrepresentable.
+//!   unrepresentable. Within one call the parts of one copy are checked
+//!   against each other: the first is part 1, each further part is the
+//!   previous `part_k + 1` with the same `part_n`, and the copy is complete
+//!   (its last part is `part_n`) by the end of the call. A call queues
+//!   origins in **ascending `local_seq` order**: a lower origin after a
+//!   higher one on the same edge is at or below the advanced mark, so a
+//!   descending batch fails as a whole (fail closed, nothing written).
 //! - **Disabling an edge drops its backlog.** [`Store::edge_set_enabled`]
 //!   `(false)` deletes the edge's copies still `queued` without a pending
 //!   handoff (never handed to a carrier), as [`Store::edge_delete`] does: a
@@ -669,7 +684,15 @@ fn check_meta(c: &Connection, meta: &str) -> Result<()> {
     }
 }
 
+/// The reserved `meta` key of the §4 at-most-once mark (module doc).
+const HANDOFF_KEY: &str = "handoff";
+
 fn meta_key(k: &str) -> Result<()> {
+    if k == HANDOFF_KEY {
+        return Err(StoreError::Invalid(
+            "meta.handoff is set only by foreign_handoff_begin / foreign_accepted / foreign_handoff_abort",
+        ));
+    }
     let ok = !k.is_empty()
         && k.len() <= MAX_META_KEY
         && k.bytes().all(|b| b.is_ascii_lowercase() || b == b'_');
@@ -745,11 +768,22 @@ fn check_send(s: &ForeignSend<'_>) -> Result<()> {
     }
 }
 
+/// A relay copy queued earlier in the current [`Store::foreign_queue_sends`]
+/// call: `(edge, origin)` with its `part_n` and the last `part_k` queued.
+struct CopyParts {
+    edge: i64,
+    origin: i64,
+    part_n: u32,
+    last_k: u32,
+}
+
 /// Queue one own row inside the caller's transaction (validated by
-/// [`check_send`] first). `copies` holds the `(edge, origin)` pairs queued
-/// earlier in this transaction: only they may queue a further part of a
-/// copy whose origin is already at or below `relayed_seq`.
-fn queue_one(c: &Connection, s: &ForeignSend<'_>, copies: &mut Vec<(i64, i64)>) -> Result<i64> {
+/// [`check_send`] first). `copies` holds the copies queued earlier in this
+/// transaction: only they may queue a further part of a copy whose origin
+/// is already at or below `relayed_seq`, and that part must continue the
+/// copy's numbering (same `part_n`, `part_k` = the previous + 1; module
+/// doc). A copy's first part in a call is part 1.
+fn queue_one(c: &Connection, s: &ForeignSend<'_>, copies: &mut Vec<CopyParts>) -> Result<i64> {
     let (account, _) = conv_facts(c, s.conv)?;
     if let Some(g) = s.group_id {
         let found: Option<i64> = c
@@ -785,15 +819,38 @@ fn queue_one(c: &Connection, s: &ForeignSend<'_>, copies: &mut Vec<(i64, i64)>) 
             return Err(StoreError::Invalid("history is never relayed"));
         }
         // §8 guard 6: one copy per origin per edge. At or below the mark
-        // only the further parts of the copy this transaction queued.
-        let further_part = copies.contains(&(edge, origin));
-        if oseq_u <= e.relayed_seq && !further_part {
-            return Err(StoreError::Invalid(
-                "this origin was already relayed (or shed) on this edge",
-            ));
-        }
-        if !further_part {
-            copies.push((edge, origin));
+        // only the further parts of the copy this transaction queued, in
+        // order (B1-bounce F9).
+        match copies
+            .iter_mut()
+            .find(|p| p.edge == edge && p.origin == origin)
+        {
+            Some(p) => {
+                if s.part_n != p.part_n || Some(s.part_k) != p.last_k.checked_add(1) {
+                    return Err(StoreError::Invalid(
+                        "the parts of one relay copy are numbered 1..n in order in one call",
+                    ));
+                }
+                p.last_k = s.part_k;
+            }
+            None => {
+                if oseq_u <= e.relayed_seq {
+                    return Err(StoreError::Invalid(
+                        "this origin was already relayed (or shed) on this edge",
+                    ));
+                }
+                if s.part_k != 1 {
+                    return Err(StoreError::Invalid(
+                        "a relay copy starts at part 1 in the call that queues it",
+                    ));
+                }
+                copies.push(CopyParts {
+                    edge,
+                    origin,
+                    part_n: s.part_n,
+                    last_k: 1,
+                });
+            }
         }
         // §8: the copy and the high-water mark commit together.
         c.execute(
@@ -854,12 +911,42 @@ impl Store {
         native_id: &str,
         title: Option<&str>,
     ) -> Result<i64> {
+        self.foreign_conversation_upsert_changed(network, account, kind, native_id, title)
+            .map(|(id, _)| id)
+    }
+
+    /// [`Store::foreign_conversation_upsert`], also telling whether
+    /// anything changed: `true` for a new row or a differing `title`,
+    /// `false` when the row exists and the requested `title` is `None` or
+    /// equal (nothing is written then). The fabric's §10 `Conversation`
+    /// event follows this answer, not its cache.
+    pub fn foreign_conversation_upsert_changed(
+        &mut self,
+        network: &str,
+        account: &str,
+        kind: ForeignKind,
+        native_id: &str,
+        title: Option<&str>,
+    ) -> Result<(i64, bool)> {
         network_id(network)?;
         field(account, "account too long")?;
         nonempty_field(native_id, "conversation native id")?;
         field_opt(title, "title too long")?;
         self.with_tx(Durability::Normal, |tx| {
-            Ok(tx.query_row(
+            let found: Option<(i64, Option<String>)> = tx
+                .query_row(
+                    "SELECT id, title FROM foreign_conversations
+                     WHERE network = ?1 AND account = ?2 AND kind = ?3 AND native_id = ?4",
+                    params![network, account, kind.as_str(), native_id],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+                .optional()?;
+            if let Some((id, stored)) = &found {
+                if title.is_none() || title == stored.as_deref() {
+                    return Ok((*id, false));
+                }
+            }
+            let id = tx.query_row(
                 "INSERT INTO foreign_conversations (network, account, kind, native_id, title)
                  VALUES (?1, ?2, ?3, ?4, ?5)
                  ON CONFLICT (network, account, kind, native_id)
@@ -867,7 +954,8 @@ impl Store {
                  RETURNING id",
                 params![network, account, kind.as_str(), native_id, title],
                 |r| r.get(0),
-            )?)
+            )?;
+            Ok((id, true))
         })
     }
 
@@ -1002,6 +1090,12 @@ impl Store {
     /// part of a split copy together, so a crash never leaves half a copy;
     /// the parts after the first are the only rows whose origin may already
     /// be at `relayed_seq`, and each `part_k` at most once).
+    ///
+    /// The parts of one copy go `1..=part_n` in order with one `part_n`, and
+    /// the copy is complete within the call; the copies of one edge go in
+    /// **ascending origin `local_seq` order** (a descending batch is
+    /// refused as a whole: [`StoreError::Invalid`], nothing written). See
+    /// the module doc, "One copy per origin per edge".
     pub fn foreign_queue_sends(&mut self, sends: &[ForeignSend<'_>]) -> Result<Vec<i64>> {
         if sends.is_empty() {
             return Err(StoreError::Invalid("nothing to queue"));
@@ -1014,10 +1108,18 @@ impl Store {
         }
         self.with_tx(Durability::Full, |tx| {
             let mut copies = Vec::new();
-            sends
+            let ids = sends
                 .iter()
                 .map(|s| queue_one(tx, s, &mut copies))
-                .collect()
+                .collect::<Result<Vec<i64>>>()?;
+            if copies.iter().any(|p| p.last_k != p.part_n) {
+                // the missing parts could never be queued later (the mark
+                // moved past the origin): fail closed
+                return Err(StoreError::Invalid(
+                    "a split relay copy is queued with all its parts in one call",
+                ));
+            }
+            Ok(ids)
         })
     }
 
@@ -1158,9 +1260,10 @@ impl Store {
     }
 
     /// Set (`Some`) or remove (`None`) one `meta` field (`[a-z_]`, ≤ 32
-    /// bytes). Returns whether the row exists. The handoff marker has its
-    /// own durable calls ([`Store::foreign_handoff_begin`],
-    /// [`Store::foreign_accepted`]).
+    /// bytes). Returns whether the row exists. The reserved key `handoff`
+    /// is [`StoreError::Invalid`] here: the marker has its own durable calls
+    /// ([`Store::foreign_handoff_begin`], [`Store::foreign_accepted`],
+    /// [`Store::foreign_handoff_abort`]).
     pub fn foreign_set_meta(
         &mut self,
         id: i64,
@@ -1241,15 +1344,18 @@ impl Store {
         })
     }
 
-    /// §9 cancel: delete an own `queued` row with no pending handoff
-    /// (nothing of it was handed to a carrier). One row per call, so a
-    /// split target's unsent parts are cancelled one by one and its sent
-    /// parts stay ("cancel drops unsent parts only"). An unknown id is
-    /// [`StoreError::NotFound`]; an inbound row, a row past `queued` or one
-    /// with `meta.handoff = "pending"` (may have been sent) is
-    /// [`StoreError::Invalid`]. FULL: a cancelled row must not come back
-    /// after a crash and be sent.
-    pub fn foreign_cancel(&mut self, id: i64) -> Result<()> {
+    /// §4 at most once, the pre-air refusal: withdraw the `handoff =
+    /// "pending"` mark of a `queued` own row, so [`Store::foreign_queued`]
+    /// offers it again (and it is cancellable and droppable again). The
+    /// caller uses it **only** when the carrier reported a refusal before
+    /// air (`Retry::Later`: duty cycle, rate limit, a full queue) and no
+    /// `Accepted` for the row — nothing was transmitted, so a later retry
+    /// is still the one send of the user act. After a crash the mark stays
+    /// (never re-sent automatically). An unknown id is
+    /// [`StoreError::NotFound`]; an inbound row, a row past `queued` or a
+    /// row without a pending mark is [`StoreError::Invalid`]. FULL, like
+    /// the mark itself.
+    pub fn foreign_handoff_abort(&mut self, id: i64) -> Result<()> {
         self.with_tx(Durability::Full, |tx| {
             let row: Option<(String, String, bool)> = tx
                 .query_row(
@@ -1261,9 +1367,52 @@ impl Store {
                 )
                 .optional()?;
             let (dir, state, pending) = row.ok_or(StoreError::NotFound)?;
+            if ForeignDir::from_col(&dir)? != ForeignDir::Own
+                || ForeignState::from_col(&state)? != ForeignState::Queued
+                || !pending
+            {
+                return Err(StoreError::Invalid(
+                    "only a queued own row with a pending handoff is aborted",
+                ));
+            }
+            tx.execute(
+                "UPDATE foreign_messages SET meta = json_remove(meta, '$.handoff') WHERE id = ?1",
+                [id],
+            )?;
+            Ok(())
+        })
+    }
+
+    /// §9 cancel: delete a user-composed own `queued` row (`group_id` set)
+    /// with no pending handoff (nothing of it was handed to a carrier). One
+    /// row per call, so a split target's unsent parts are cancelled one by
+    /// one and its sent parts stay ("cancel drops unsent parts only"). An
+    /// unknown id is [`StoreError::NotFound`]; an inbound row, a relay copy
+    /// (copies leave only by shed, disable or delete — module doc), a row
+    /// past `queued` or one with `meta.handoff = "pending"` (may have been
+    /// sent) is [`StoreError::Invalid`]. FULL: a cancelled row must not come
+    /// back after a crash and be sent.
+    pub fn foreign_cancel(&mut self, id: i64) -> Result<()> {
+        self.with_tx(Durability::Full, |tx| {
+            let row: Option<(String, String, bool, Option<i64>)> = tx
+                .query_row(
+                    "SELECT dir, state,
+                            coalesce(json_extract(meta, '$.handoff') = 'pending', 0),
+                            group_id
+                     FROM foreign_messages WHERE id = ?1",
+                    [id],
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+                )
+                .optional()?;
+            let (dir, state, pending, group) = row.ok_or(StoreError::NotFound)?;
             if ForeignDir::from_col(&dir)? != ForeignDir::Own {
                 return Err(StoreError::Invalid(
                     "an inbound foreign row is not cancelled",
+                ));
+            }
+            if group.is_none() {
+                return Err(StoreError::Invalid(
+                    "a relay copy is not cancelled (it leaves by shed, disable or delete)",
                 ));
             }
             if ForeignState::from_col(&state)? != ForeignState::Queued || pending {

@@ -608,6 +608,17 @@ pub async fn start(
 
 impl FabricHandle {
     /// The running fabric.
+    ///
+    /// Foreign **writes** (Layer 6 §3: ingest, send groups, relay copies)
+    /// go through this handle's wrappers ([`FabricHandle::foreign_ingest`],
+    /// [`FabricHandle::foreign_group_create`],
+    /// [`FabricHandle::foreign_queue_sends`]): they record each new row's
+    /// "received" / "queued" display time in `display-times.foreign` when
+    /// the row is written. A caller writing through the raw [`Fabric`]
+    /// leaves that to the first render: a channel row coalesced into a
+    /// per-conversation frame (no `id`) is then stamped when it is first
+    /// read, not when it arrived. Reads and state changes may use the raw
+    /// fabric.
     pub fn fabric(&self) -> Option<&Fabric> {
         self.live.as_ref().map(|l| &l.fabric)
     }
@@ -804,6 +815,15 @@ impl FabricHandle {
         let ids = fabric.foreign_queue_sends(sends).await?;
         self.record_foreign_times(ids.iter().copied());
         Ok(ids)
+    }
+
+    /// §4 at most once: withdraw a pending handoff mark
+    /// ([`Fabric::foreign_handoff_abort`]) after the carrier reported a
+    /// pre-air refusal and no `Accepted` (`Retry::Later`): the row is
+    /// offered again by the next tick.
+    pub async fn foreign_handoff_abort(&self, id: i64) -> Result<(), FabricError> {
+        let fabric = self.fabric().ok_or(FabricError::Stopped)?;
+        fabric.foreign_handoff_abort(id).await
     }
 
     /// The store's quota per refusable class (`None` = unset).
@@ -1009,25 +1029,38 @@ impl FabricHandle {
     /// step 6): one conversation read per distinct conversation gives the
     /// network and the highest `seq`; a conversation that is gone is
     /// skipped. A per-row `new` records the row's display time now.
+    ///
+    /// When that read fails for another reason (a store fault, a stopped
+    /// actor), the conversation's row frames cannot be built; instead ONE
+    /// `conversation` frame with `seq` 0 and the network
+    /// [`UNKNOWN_NETWORK`] is published for it, so the client refetches the
+    /// conversation rather than missing its rows (B1-bounce F5).
     async fn foreign_frames(&self, items: Vec<ForeignItem>) -> Vec<Value> {
         let Some(f) = self.fabric() else {
             return Vec::new();
         };
-        let mut convs: HashMap<i64, Option<(String, u64)>> = HashMap::new();
+        let mut convs: HashMap<i64, ConvFrame> = HashMap::new();
         let mut out = Vec::with_capacity(items.len());
         for (conv, id, change) in items {
             if let std::collections::hash_map::Entry::Vacant(v) = convs.entry(conv) {
                 let facts = match f.foreign_conversation(conv).await {
-                    Ok(c) => Some((c.network, c.last_seq)),
-                    Err(FabricError::NotFound) => None,
+                    Ok(c) => ConvFrame::Facts(c.network, c.last_seq),
+                    Err(FabricError::NotFound) => ConvFrame::Gone,
                     Err(e) => {
                         eprintln!("111 fabric: network_message event: {e}");
-                        None
+                        out.push(json::network_message(
+                            UNKNOWN_NETWORK,
+                            conv,
+                            None,
+                            ForeignChange::Conversation,
+                            0,
+                        ));
+                        ConvFrame::Gone
                     }
                 };
                 v.insert(facts);
             }
-            let Some(Some((network, seq))) = convs.get(&conv) else {
+            let Some(ConvFrame::Facts(network, seq)) = convs.get(&conv) else {
                 continue;
             };
             if let (ForeignChange::New, Some(id)) = (change, id) {
@@ -1139,6 +1172,20 @@ impl FabricHandle {
 
 /// A foreign event's key and first change: `(conv, id, change)`.
 type ForeignItem = (i64, Option<i64>, ForeignChange);
+
+/// The `network` of a refetch frame whose conversation could not be read
+/// (B1-bounce F5): the contract's open-vocabulary fallback (`NetworkId`: an
+/// unknown id renders as `unknown`); the frame carries no `id` and `seq` 0,
+/// and the client's refetch of the conversation names the real network.
+const UNKNOWN_NETWORK: &str = "unknown";
+
+/// What one batch learned about a conversation for its frames.
+enum ConvFrame {
+    /// Its network and highest `seq`.
+    Facts(String, u64),
+    /// Nothing more to publish: gone, or a refetch frame already pushed.
+    Gone,
+}
 
 /// Foreign events of one SSE batch, coalesced again per `(conv, id)` key
 /// (the first change wins, as for messages), in first-seen order.
@@ -1434,6 +1481,60 @@ mod tests {
         let v = h.foreign_message_json(&row);
         assert_eq!(v["id"], json::fm_id(ids[0]));
         assert_eq!(v["at"], times::rfc3339(at));
+        h.shutdown().await;
+    }
+
+    /// B1-bounce F5: a conversation read that fails for a reason other
+    /// than NotFound (here: the actor stopped) turns the batch's frames for
+    /// that conversation into ONE `conversation` refetch frame (seq 0);
+    /// nothing is silently dropped.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_failed_conversation_read_publishes_a_refetch_frame() {
+        use mesh111::store::ForeignKind;
+        let dir = tempfile::tempdir().unwrap();
+        let api = test_api(dir.path());
+        let identity = crate::identity::generate(&dir.path().join("identity")).unwrap();
+        let h = start(test_cfg(dir.path()), Some(identity), &api).await;
+        assert!(h.running(), "{:?}", h.down_reason());
+        let f = h.fabric().unwrap().clone();
+        let ch = f
+            .foreign_conversation_upsert(
+                "meshtastic",
+                "!0badc0de",
+                ForeignKind::Channel,
+                "ch:LongFast:9f3c",
+                Some("LongFast"),
+            )
+            .await
+            .unwrap();
+        // healthy: the frames are built from the conversation read
+        let ok = h.foreign_frames(vec![(ch, None, ForeignChange::New)]).await;
+        assert_eq!(ok.len(), 1);
+        assert_eq!(ok[0]["network"], "meshtastic");
+        // the actor stops: every read now fails with Stopped
+        f.shutdown().await.unwrap();
+        assert!(matches!(
+            f.foreign_conversation(ch).await,
+            Err(FabricError::Stopped)
+        ));
+        let got = h
+            .foreign_frames(vec![
+                (ch, Some(7), ForeignChange::New),
+                (ch, Some(8), ForeignChange::State),
+                (ch, None, ForeignChange::New),
+                (ch + 1, None, ForeignChange::Conversation),
+            ])
+            .await;
+        assert_eq!(
+            got,
+            vec![
+                json!({"network": UNKNOWN_NETWORK, "conv": json::fc_id(ch), "change": "conversation", "seq": 0}),
+                json!({"network": UNKNOWN_NETWORK, "conv": json::fc_id(ch + 1), "change": "conversation", "seq": 0}),
+            ]
+        );
+        for v in &got {
+            json::foreign_tests::assert_schema(v, "SseNetworkMessage");
+        }
         h.shutdown().await;
     }
 }
