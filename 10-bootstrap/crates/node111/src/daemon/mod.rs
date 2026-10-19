@@ -3,6 +3,7 @@
 //! dashboard, updater, KB server, conditional rnsd child.
 
 pub mod bridge;
+pub mod components;
 pub mod dashboard;
 pub mod devices;
 pub mod fabric;

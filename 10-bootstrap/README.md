@@ -222,6 +222,25 @@ recorded in `10-bootstrap/TASKS.md` at build (Layer 5 task B1).
 - **Updater intake (seam).** The updater gains an intake path for a staged payload at `fabric/blobs/<hash>`, verified by the same
   minisign manifest — Layer 1's manifest stays the trust root; the wire transfer that fills it arrives in v1.1.
 
+## Layer 6: optional components (D26 #1 #5, 2026-10-19)
+
+Additive (`os/60-transport/README.md` §2.1, §15): third-party programs a Layer 6 adapter needs (the LXMF helper's `rns`/`lxmf`
+closure, `deltachat-rpc-server`, Madmail, SimpleX) are **optional components**, declared in `assets/components/<id>.toml`
+(embedded in the `111` binary, `deny_unknown_fields`; a pip component's hash-locked lock rides beside it in the same folder, so
+the installer reads both from its own binary before any payload is staged) and never shipped as bytes in a release. Step 5 of
+`111 install` prints **one notice line** per third-party program (name, licence, where to read it), the rns closure's included,
+and records it in the receipt (`notices`: program, licence, URL, SHA-256 of the text) before that program's download; then it
+pre-downloads each component's payload into `cache/packages/<id>/` (root-owned; pip closures with a throwaway venv's own pip,
+`cache/packages/.components-pip`, removed after; binaries through the fetcher, size and SHA-256 checked); a failed download is a
+receipt degrade branch, never fatal, and a USB drop into the same directory is the offline alternative. Nothing is installed,
+loaded or running until a human enables the component (paired or loopback session) and acknowledges that exact notice, which
+`state/bridge.json` (0600) records with its hash; without it enable answers `409 consent_required` and nothing happens. Enable is
+offline: verify the cache against the pin (fail closed), install a pip closure into `venvs/<id>` (a link to one complete build in
+`venvs/<id>.d/`, the presence-venv pattern) or a binary into `components/<id>/`, start it as a supervised child with piped stdio,
+ordered after rnsd where it needs it. Disable stops it and releases its ports; "remove files" deletes `components/<id>/`,
+`venvs/<id>{,.d}` and `bridge/<adapter>/`, and only a separate call deletes `cache/packages/<id>/`. A disabled component has no
+process, listener, timer or open file (`60-transport/verify/zero-weight.sh`, G7).
+
 ## Seams for later layers
 
 Layer 2: identity seam contract delivered — `os/20-identity/README.md` v2 (§Identity above) · Layer 3: offer hook (`state/offer.json` + dashboard element + `/api/status` field) + hub-offload endpoint · Layer 4: delivered — dashboard surface/port/auth + `/api/v1` (see `os/40-interface/README.md`) · Layer 5/6: rnsd child → real transport management (`/var/lib/111/rns`, config schema-version, netlink trigger, `transport_state` enum), radio table · Layer 7: gateway re-evaluation, KB git-sync, manifest gossip · Layer 9: supervision-tree handles, `/health` contract, exit(0)-restart, watchdog heartbeat, per-OEM phone watchdog channel. *[Layer 5 (D20): delivered as the amendments above — ports, `fabric/` state, `111 fabric` verbs, dependencies, manifest entries, token, updater intake.]*

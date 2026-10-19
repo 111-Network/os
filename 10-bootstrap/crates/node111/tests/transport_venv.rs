@@ -37,7 +37,7 @@ fn fake_venv(layout: &DaemonLayout, lock: &Path) {
     let venv = venv::venv_dir(layout);
     std::fs::create_dir_all(venv.join("bin")).unwrap();
     let rnsd = venv.join("bin/rnsd");
-    std::fs::write(&rnsd, "#!/bin/sh\nsleep 300\n").unwrap();
+    std::fs::write(&rnsd, "#!/bin/sh\nexec sleep 300\n").unwrap();
     use std::os::unix::fs::PermissionsExt;
     std::fs::set_permissions(&rnsd, std::fs::Permissions::from_mode(0o755)).unwrap();
     let sha = node111::util::hash::sha256_file(lock).unwrap();
