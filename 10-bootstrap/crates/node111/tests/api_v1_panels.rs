@@ -16,6 +16,11 @@
 //! shim body deadline + the main listener's header-read timeout (m5), and the
 //! trusted-loopback binding is a random pair-generation nonce (m6).
 //!
+//! P1g (Wave 3, V2 gap #1): without `Sec-Fetch-Site` (Chrome sends none to
+//! `http://<LAN IP>`) an API request whose `Origin` (else `Referer`) names
+//! another authority is refused for every method, `GET`/`HEAD` included; a
+//! request with neither header is the documented residual and passes.
+//!
 //! Harness: a temp node root with the shipped `meshtastic.toml` (optionally
 //! edited), a temp bundle under `<root>/current/panels/meshtastic-web`, a stub
 //! shim registered as `meshtastic-http`, the dashboard app on an ephemeral
@@ -1501,6 +1506,151 @@ async fn api_paths_are_same_origin_only() {
     );
     assert_eq!(r.status, 200);
     assert_eq!(fx.stub.seen.lock().unwrap().len(), 2);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn api_paths_without_fetch_metadata_check_origin_or_referer() {
+    // V2 gap #1: Chrome sends no Sec-Fetch-* to http://<LAN IP>, so on a LAN
+    // origin the Fetch Metadata rule never fires; every other origin on the
+    // node's host is same-site, SameSite=Strict attaches the cookie, and a GET
+    // of /api/v1/fromradio would dequeue a frame the viewer never sees
+    let fx = fixture(Opts {
+        lan: true,
+        own: vec!["192.168.1.5".parse().unwrap()],
+        ..Opts::default()
+    })
+    .await;
+    let c = cookie_header(&fx.open());
+    let (p, d) = (fx.port, fx.dash);
+    let lan = format!("192.168.1.5:{p}");
+    let at = |m: &str, path: &str, hs: &[(&str, &str)]| {
+        let mut h = vec![("Cookie", c.as_str())];
+        h.extend_from_slice(hs);
+        let r = send(p, m, path, &lan, &h, None);
+        r.no_cors();
+        r
+    };
+    let same_site = [
+        // the right host on another port: the dashboard (:port and :80),
+        // a second panel, any other local service
+        ("Referer", format!("http://192.168.1.5:{d}/")),
+        ("Referer", "http://192.168.1.5/".to_string()),
+        ("Referer", "http://192.168.1.5:8080/x?y=1".to_string()),
+        ("Origin", format!("http://192.168.1.5:{d}")),
+        ("Origin", "http://192.168.1.5:8080".to_string()),
+        // another host / another site (its cookie is withheld anyway)
+        ("Referer", format!("http://192.168.1.9:{p}/")),
+        ("Referer", "http://evil.example/".to_string()),
+        ("Origin", "http://evil.example".to_string()),
+        // present but naming no http authority
+        ("Origin", "null".to_string()),
+        ("Origin", format!("https://192.168.1.5:{p}")),
+    ];
+    for path in ["/api/v1/fromradio", "/%61pi/v1/fromradio", "/api"] {
+        for (name, value) in &same_site {
+            let why = format!("{path} {name}: {value}");
+            let r = at("GET", path, &[(name, value.as_str())]);
+            r.problem(403, "bad_request");
+            assert_eq!(
+                r.json()["title"],
+                "panel API refused to other origins",
+                "{why}"
+            );
+            // HEAD is refused the same way (no body to read)
+            let r = at("HEAD", path, &[(name, value.as_str())]);
+            assert_eq!(r.status, 403, "HEAD {why}");
+        }
+    }
+    assert!(
+        fx.stub.seen.lock().unwrap().is_empty(),
+        "no same-site GET reached the shim"
+    );
+
+    // the panel's own origin passes: a same-authority Referer or Origin
+    for (name, value) in [
+        ("Referer", format!("http://192.168.1.5:{p}/")),
+        ("Referer", format!("http://192.168.1.5:{p}/messages/7?x=1")),
+        ("Origin", format!("http://192.168.1.5:{p}")),
+    ] {
+        let r = at("GET", "/api/v1/fromradio", &[(name, value.as_str())]);
+        assert_eq!(r.status, 200, "{name}: {value}: {}", r.body);
+    }
+    // RESIDUAL (V2 #2, owner: spec): neither Origin nor Referer nor
+    // Sec-Fetch-* is the panel's own GET on a LAN IP (Referrer-Policy:
+    // no-referrer) and is byte-identical to a same-site no-cors GET sent
+    // with referrerPolicy "no-referrer": nothing server-side separates them
+    let r = at("GET", "/api/v1/fromradio", &[]);
+    assert_eq!(r.status, 200, "{}", r.body);
+    assert_eq!(fx.stub.seen.lock().unwrap().len(), 4);
+
+    // non-API paths are untouched: the dashboard's frame / tab navigation
+    let r = at(
+        "GET",
+        "/",
+        &[("Referer", &format!("http://192.168.1.5:{d}/"))],
+    );
+    assert_eq!((r.status, r.body.as_str()), (200, INDEX));
+    // non-GET keeps the Origin rule (and its refusal); the panel's PUT passes
+    let put = |hs: &[(&str, &str)]| {
+        let mut h = vec![("Cookie", c.as_str())];
+        h.extend_from_slice(hs);
+        let r = send(p, "PUT", "/api/v1/toradio", &lan, &h, Some("\u{1}"));
+        r.no_cors();
+        r
+    };
+    let r = put(&[("Origin", &format!("http://192.168.1.5:{d}"))]);
+    r.problem(403, "bad_request");
+    assert_eq!(r.json()["title"], "cross-origin request refused");
+    put(&[]).problem(403, "bad_request");
+    let r = put(&[("Origin", &format!("http://192.168.1.5:{p}"))]);
+    assert_eq!(r.status, 200, "{}", r.body);
+    assert_eq!(fx.stub.seen.lock().unwrap().len(), 5);
+
+    // loopback: Chrome sends Fetch Metadata there and it decides, unchanged
+    let lo = fixture(Opts::default()).await;
+    let lc = cookie_header(&lo.open());
+    let dash_ref = format!("http://127.0.0.1:{}/", lo.dash);
+    for site in ["same-site", "none"] {
+        let r = lo.panel(
+            "GET",
+            "/api/v1/fromradio",
+            &[
+                ("Cookie", &lc),
+                ("Sec-Fetch-Site", site),
+                ("Referer", &dash_ref),
+            ],
+        );
+        r.problem(403, "bad_request");
+        assert_eq!(r.json()["title"], "panel API refused to other origins");
+    }
+    let r = lo.panel(
+        "GET",
+        "/api/v1/fromradio",
+        &[
+            ("Cookie", &lc),
+            ("Sec-Fetch-Site", "cross-site"),
+            ("Referer", "http://evil.example/"),
+        ],
+    );
+    r.problem(403, "bad_request");
+    assert_eq!(r.json()["title"], "cross-site request refused");
+    let r = lo.panel(
+        "GET",
+        "/api/v1/fromradio",
+        &[("Cookie", &lc), ("Sec-Fetch-Site", "same-origin")],
+    );
+    assert_eq!(r.status, 200);
+    // loopback without Fetch Metadata (curl, older browsers): the same
+    // fallback as the LAN origin
+    lo.panel(
+        "GET",
+        "/api/v1/fromradio",
+        &[("Cookie", &lc), ("Referer", &dash_ref)],
+    )
+    .problem(403, "bad_request");
+    let r = lo.panel("GET", "/api/v1/fromradio", &[("Cookie", &lc)]);
+    assert_eq!(r.status, 200);
+    assert_eq!(lo.stub.seen.lock().unwrap().len(), 2);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
