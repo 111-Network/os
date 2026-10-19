@@ -126,7 +126,10 @@ fn config_render_and_schema_seam() {
     assert!(text.contains("type = AutoInterface"));
     assert!(text.contains("group_id = 111.network"));
     assert!(!config::write_if_changed(&layout).unwrap());
-    assert_eq!(config::existing_schema_version(&layout), Some(config::SCHEMA_VERSION));
+    assert_eq!(
+        config::existing_schema_version(&layout),
+        Some(config::SCHEMA_VERSION)
+    );
     // a newer schema version (Layer 6) is read back correctly
     std::fs::write(config::config_path(&layout), "schema-version = 7\n").unwrap();
     assert_eq!(config::existing_schema_version(&layout), Some(7));
