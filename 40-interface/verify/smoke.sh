@@ -27,12 +27,18 @@
 #              SSE tapes go to ui/test/tapes/ (see SMOKE_TAPES).
 #
 # Every check prints `ok:` or `FAIL:` (`note:` lines are information only); the
-# script exits 1 on any FAIL. Every process dies with the pid namespace; the
+# script exits 1 on any FAIL. No check may pass on a missing answer: JSON assertions go
+# through jb/jf/jqs (they refuse an empty input — `jq -e` alone exits 0 on one), counts
+# and peer numbers read nothing from a failed request, and every "nothing left / nothing
+# changed" check carries a positive control (the thing was there before).
+# Every process dies with the pid namespace; the
 # scratch root is removed on success (kept on failure, or with SMOKE_KEEP=1).
 #
 # Env: SMOKE_KEEP=1        keep the scratch root
 #      SMOKE_TAPES=1       re-record the SSE tapes (default: record only missing ones,
 #                          so routine runs do not rewrite the UI's test fixtures)
+#      SMOKE_TAPES_DIR=DIR write tapes into DIR instead of ui/test/tapes (with SMOKE_TAPES=1:
+#                          a fresh recording to diff against the committed fixtures)
 #      SMOKE_SKIP_BUILD=1  dev loop only: reuse ui/dist and target/ as they are
 #      TMPDIR              where the scratch root goes (mktemp)
 #
@@ -63,7 +69,7 @@ OS=$(cd "$HERE/../.." && pwd)
 UI=$OS/40-interface/ui
 BOOT=$OS/10-bootstrap
 INTEL=$OS/30-intelligence
-TAPES=$UI/test/tapes
+TAPES=${SMOKE_TAPES_DIR:-$UI/test/tapes}
 export PATH="$HOME/.cargo/bin:$PATH:/usr/sbin:/sbin"
 
 LANIP=192.168.77.5
@@ -105,7 +111,23 @@ hdr() {
     k==n { sub(/^[^:]*:[ \t]*/, "", line); print line; exit }' "$W/hdr"
 }
 ct_is() { case "$(hdr content-type)" in "$1"*) return 0 ;; *) return 1 ;; esac }
-jb() { jq -e "$@" "$W/body" >/dev/null 2>&1; }
+# JSON checks. jq (1.6 here) exits 0 under -e when its input holds NO value at all (an empty
+# or whitespace-only body, an empty pipe, an empty "$(…)" capture), so a bare `jq -e` passes
+# exactly when the request failed. Every JSON assertion goes through one of these, which first
+# require a non-blank byte:  jb FILTER… (the last body, $W/body) · jf FILE FILTER… (a file) ·
+# jqs FILTER… (stdin: an SSE frame's data, a pipeline)
+has_json() { [ -s "$1" ] && grep -q '[^[:space:]]' "$1" 2>/dev/null; }
+jb() { has_json "$W/body" && jq -e "$@" "$W/body" >/dev/null 2>&1; }
+jf() {
+  local f=$1
+  shift
+  has_json "$f" && jq -e "$@" "$f" >/dev/null 2>&1
+}
+jqs() {
+  local in
+  in=$(cat)
+  [ -n "${in//[[:space:]]/}" ] && printf '%s' "$in" | jq -e "$@" >/dev/null 2>&1
+}
 jget() { jq -r "$@" "$W/body" 2>/dev/null || true; }
 snip() { head -c 300 "$W/body" 2>/dev/null | tr '\n\r' '  '; }
 # t DESC CONDITION — CONDITION is eval'd at check time (pass it single-quoted)
@@ -359,7 +381,7 @@ inner() {
   t "Last-Event-ID: $id1 → no reset frame, replay starts with id $rid > $id1 ($(events_in "$W/events-replay.sse"))" \
     '! grep -q "^event: reset" "$W/events-replay.sse" && [[ "$rid" =~ ^[0-9]+$ ]] && [ "$rid" -gt "${id1:-0}" ]'
   t "the replay carries the alias change as a status frame" \
-    'grep "^data: " "$W/events-replay.sse" | sed "s/^data: //" | jq -e "select(.node.alias? == \"smoke\")" >/dev/null 2>&1'
+    'grep "^data: " "$W/events-replay.sse" | sed "s/^data: //" | jqs "select(.node.alias? == \"smoke\")"'
   sse "$W/events-stale.sse" 2 "$B/api/v1/events" -H "Last-Event-ID: 5"
   t "Last-Event-ID from another daemon lifetime → reset {reason:restart}" \
     '[ "$(field "$(frame 1 "$W/events-stale.sse")" data)" = "{\"reason\":\"restart\"}" ]'
@@ -395,8 +417,8 @@ inner() {
   filecode=$(jq -r .code "$ROOT/state/dashboard-pair.json" 2>/dev/null || true)
   t "\`111 dashboard\` prints the bound URLs + LAN state + pair code ($code)" \
     'grep -q "^  http://" "$W/cli.out" && grep -q "LAN sharing: on" "$W/cli.out" && [ -n "$code" ]'
-  t "\`111 dashboard\` pair code = state/dashboard-pair.json" '[ "$code" = "$filecode" ]'
-  t "\`111 dashboard\` prints a QR pair link (LAN on)" 'grep -q "#/pair?code=$code" "$W/cli.out"'
+  t "\`111 dashboard\` pair code = state/dashboard-pair.json" '[ -n "$code" ] && [ "$code" = "$filecode" ]'
+  t "\`111 dashboard\` prints a QR pair link (LAN on)" '[ -n "$code" ] && grep -q "#/pair?code=$code" "$W/cli.out"'
   [ -n "$code" ] || code=$filecode
 
   req POST "$L/api/v1/auth/pair" "${lan[@]}" -c "$jar" -H 'Content-Type: application/json' -d "{\"code\":\"$code\"}"
@@ -437,12 +459,12 @@ inner() {
   t "the paired browser appears in /api/v1/devices as a companion ($comp)" '[ -n "$comp" ]'
   req GET "$L/api/v1/auth/session" "${lan[@]}" -b "$jar"
   t "LAN GET /auth/session names that companion as this browser (device_id $(jget .device_id))" \
-    '[ "$ST" = 200 ] && [ "$(jget .device_id)" = "${comp%% *}" ]'
+    '[ -n "$comp" ] && [ "$ST" = 200 ] && [ "$(jget .device_id)" = "${comp%% *}" ]'
 
   req POST "$L/api/v1/auth/logout" "${lan[@]}" -b "$jar" -c "$jar" -H 'Content-Type: application/json' -d '{}'
   t "LAN POST /auth/logout → 204" '[ "$ST" = 204 ]'
   req GET "$L/api/v1/status" "${lan[@]}" -H "Cookie: s111=${token:-none}"
-  t "the old cookie is revoked server-side → 401" 'problem_is 401 unauthenticated'
+  t "the old cookie is revoked server-side → 401" '[ -n "$token" ] && problem_is 401 unauthenticated'
 
   # ---------------------------------------------------------------- chat relay
   phase "5e. chat relay (stub model through the real 111-agent)"
@@ -455,13 +477,13 @@ inner() {
   t "POST /api/v1/chat (stream) → text/event-stream with event: token … event: done ($(events_in "$W/chat.sse"))" \
     'grep -qi "^content-type: text/event-stream" "$W/chat.sse.hdr" && grep -q "^event: token" "$W/chat.sse" && grep -q "^event: done" "$W/chat.sse"'
   t "done = {conversation_id:conv-smoke-1, reply = concatenated tokens (\"$toks\"), tool_trace:[]}" \
-    'printf "%s" "$done1" | jq -e --arg r "$toks" ".conversation_id == \"conv-smoke-1\" and .reply == \$r and .tool_trace == []" >/dev/null'
+    'printf "%s" "$done1" | jqs --arg r "$toks" ".conversation_id == \"conv-smoke-1\" and .reply == \$r and .tool_trace == []"'
   tape "$W/chat.sse" chat.sse
 
   curl -sN --max-time 60 -o "$W/chat-tool.sse" -H "$cj" \
     -d '{"conversation_id":"conv-smoke-2","message":"what is meshtastic?"}' "$B/api/v1/chat" || true
   t "tool turn → event: tool {name:kb.read} then done with tool_trace ($(events_in "$W/chat-tool.sse"))" \
-    'awk "BEGIN{RS=\"\"} /event: tool/" "$W/chat-tool.sse" | grep -q "\"name\":\"kb.read\"" && sed -n "/^event: done/,/^$/p" "$W/chat-tool.sse" | sed -n "s/^data: //p" | jq -e ".tool_trace | any(.name == \"kb.read\")" >/dev/null'
+    'awk "BEGIN{RS=\"\"} /event: tool/" "$W/chat-tool.sse" | grep -q "\"name\":\"kb.read\"" && sed -n "/^event: done/,/^$/p" "$W/chat-tool.sse" | sed -n "s/^data: //p" | jqs ".tool_trace | any(.name == \"kb.read\")"'
   tape "$W/chat-tool.sse" chat-tool.sse
 
   req POST "$B/api/v1/chat" -H "$cj" -d '{"conversation_id":"conv-smoke-1","message":"hello again","stream":false}' --max-time 60
@@ -499,7 +521,7 @@ inner() {
   t "GET /api/v1/proposals/prop-smoke → 200 Proposal" '[ "$ST" = 200 ] && jb ".id == \"prop-smoke\" and .title == \"Smoke proposal\""'
   req POST "$B/api/v1/proposals/prop-smoke/decision" -H "$cj" -d '{"decision":"accepted"}'
   t "POST /proposals/prop-smoke/decision {accepted} → 200 decided" '[ "$ST" = 200 ] && jb ".decision.decision == \"accepted\""'
-  t "decision recorded in agent/decisions/prop-smoke.json" 'jq -e ".decision == \"accepted\"" "$ROOT/agent/decisions/prop-smoke.json" >/dev/null 2>&1'
+  t "decision recorded in agent/decisions/prop-smoke.json" 'jf "$ROOT/agent/decisions/prop-smoke.json" ".decision == \"accepted\""'
   req POST "$B/api/v1/proposals/prop-smoke/decision" -H "$cj" -d '{"decision":"dismissed"}'
   t "deciding again → 409 already_decided" 'problem_is 409 already_decided'
   req GET "$B/api/v1/proposals?status=decided"
@@ -535,7 +557,7 @@ inner() {
     'awk "BEGIN{RS=\"\"} /event: proposal/" "$W/events-activity.sse" | grep -q "\"id\":\"${prop:-none}\""'
   tape "$W/events-activity.sse" events-activity.sse
   if [ -n "$TAPED" ]; then
-    note "tapes recorded into ui/test/tapes:$TAPED"
+    note "tapes recorded into ${TAPES#"$OS"/}:$TAPED"
   else
     note "tapes in ui/test/tapes already present — kept (SMOKE_TAPES=1 re-records)"
   fi
@@ -561,10 +583,10 @@ inner() {
   done
   t "model comes back LIVE with a new pid ($mpid0 → $mpid1, state $mstate1)" \
     '[[ "$mpid1" =~ ^[0-9]+$ ]] && [ "$mpid1" != "$mpid0" ] && [ "$mstate1" = live ]'
-  t "the old llama-server process is gone" '! kill -0 "$mpid0" 2>/dev/null'
+  t "the old llama-server process is gone" '[[ "$mpid0" =~ ^[0-9]+$ ]] && ! kill -0 "$mpid0" 2>/dev/null'
   req GET "$B/api/v1/services/transport"
   t "transport (detection-only stub here) offers no restart ($(jget .reason_code), actions $(jget -c .actions))" \
-    'jb "(.actions | index(\"restart\")) == null"'
+    '[ "$ST" = 200 ] && jb "(.actions | type) == \"array\" and (.actions | index(\"restart\")) == null"'
   req POST "$B/api/v1/services/transport/restart" -H 'Content-Type: application/json' -d '{}'
   t "POST /api/v1/services/transport/restart → 409 not_supervised" 'problem_is 409 not_supervised'
   req POST "$B/api/v1/services/kb/restart" -H 'Content-Type: application/json' -d '{}'
@@ -578,6 +600,8 @@ inner() {
   phase "5h. update check + node restart"
   req POST "$B/api/v1/update/check" -H "$cj" -d '{}'
   t "POST /api/v1/update/check → 202 {started:true}" '[ "$ST" = 202 ] && jb ".started == true"'
+  local before
+  before=$(pgrep -l -x '111-agent|llama-server|python3' | tr '\n' ' ' || true)
   req POST "$B/api/v1/node/restart" -H "$cj" -d '{}'
   t "POST /api/v1/node/restart → 202 {restarting:true}" '[ "$ST" = 202 ] && jb ".restarting == true"'
   local gone=0 rc=255
@@ -599,7 +623,7 @@ inner() {
     [ -z "$left" ] && break
     sleep 0.2
   done
-  t "the daemon stopped its children on exit (left: ${left:-none})" '[ -z "$left" ]'
+  t "the daemon stopped its children on exit (before: ${before% }; left: ${left:-none})" '[ -n "$before" ] && [ -z "$left" ]'
   note "daemon log tail:"
   tail -8 "$ROOT/daemon.log" | sed 's/^/  daemon| /'
 }
@@ -673,19 +697,24 @@ wait_msg() {
 }
 mfield() { printf '%s' "${M:-null}" | jq -r "$1" 2>/dev/null || true; }
 # count_text NODE PEER TEXT → how many messages in NODE's thread with PEER carry TEXT
+# (404, no thread yet, counts 0; any other failed read prints nothing — never a number)
 count_text() {
   api "$1" GET "/api/v1/messages/threads/${NID[$2]}?limit=500"
-  jget --arg t "$3" '[(.messages // [])[] | select(.text == $t)] | length'
+  case $ST in 200) ;; 404) echo 0 && return 0 ;; *) return 0 ;; esac
+  jget --arg t "$3" 'if (.messages | type) == "array" then ([.messages[] | select(.text == $t)] | length) else empty end'
 }
-# thread_len NODE PEER → messages in NODE's thread with PEER
+# thread_len NODE PEER → messages in NODE's thread with PEER (same rule as count_text)
 thread_len() {
   api "$1" GET "/api/v1/messages/threads/${NID[$2]}?limit=500"
-  jget '(.messages // []) | length'
+  case $ST in 200) ;; 404) echo 0 && return 0 ;; *) return 0 ;; esac
+  jget 'if (.messages | type) == "array" then (.messages | length) else empty end'
 }
-# peers_of NODE → attributed tcp-lan peers (GET /fabric links[].peers)
+# peers_of NODE → attributed tcp-lan peers (GET /fabric links[].peers); nothing unless the
+# read answered 200 with a links array (a failed read must not count as "0 peers")
 peers_of() {
   api "$1" GET /api/v1/fabric
-  jget '[.links[]? | select(.id == "tcp-lan") | .peers] | add // 0'
+  [ "$ST" = 200 ] || return 0
+  jget 'if (.links | type) == "array" then ([.links[] | select(.id == "tcp-lan") | .peers] | add // 0) else empty end'
 }
 # hello_at IP PORT → 0 when a tcp-lan listener answers with "111F" 0x01
 hello_at() {
@@ -922,15 +951,15 @@ inner3() {
   card_h=$(jget .card.text)
   t "H: POST /fabric/hub/offer → 200 HubOffer (code $code_b, address $addr_b, card, bundle), Cache-Control: no-store" \
     '[ "$ST" = 200 ] && [ "$addr_b" = 10.111.0.10:11183 ] && [ -n "$card_h" ] && jb ".bundle.text | startswith(\"111HUB:\")" && [ "$(hdr cache-control)" = no-store ]'
-  t "one code per member: the second offer's code differs from the first" '[ -n "$code_b" ] && [ "$code_b" != "$code_a" ]'
+  t "one code per member: the second offer's code differs from the first" '[ -n "$code_a" ] && [ -n "$code_b" ] && [ "$code_b" != "$code_a" ]'
   jsend B POST /api/v1/fabric/hub/enroll "$(jq -nc --arg a "$addr_b" --arg c "$code_b" --arg k "$card_h" '{address: $a, code: $c, card: $k}')"
   t "B: POST /fabric/hub/enroll {address, code, card} → 200 FabricHub enrolled + reachable, node_id = H" \
     '[ "$ST" = 200 ] && jb ".enrolled == true and .reachable == true" && [ "$(jget .node_id)" = "${NID[H]}" ]'
   jsend C POST /api/v1/fabric/hub/enroll "$(jq -nc --arg c "$code_b" --arg k "$card_h" '{address: "10.111.0.10:11183", code: $c, card: $k}')"
   t "a spent code enrols nobody: C with B's used code → 502 upstream_error (the hub refused), C stays a non-member" \
-    'problem_is 502 upstream_error'
+    '[ -n "$code_b" ] && problem_is 502 upstream_error'
   api C GET /api/v1/fabric
-  t "C: no home hub after the refusal (hub.enrolled false)" 'jb ".hub.enrolled == false"'
+  t "C: no home hub after the refusal (hub.enrolled false)" '[ "$ST" = 200 ] && jb ".hub.enrolled == false"'
   api H GET /api/v1/fabric
   t "H: hub.members = 2 (A and B), offer spent (offer_active false), custody empty" \
     'jb ".hub.members == 2 and .hub.offer_active == false and .custody.count == 0"'
@@ -948,7 +977,7 @@ inner3() {
     '[ "$(jget .state)" = live ] && [ "$(jget .reason_code)" = peer_linked ]'
   local hpe
   hpe=$(peers_of H)
-  if [ "$hpe" -gt 2 ]; then
+  if [[ "$hpe" =~ ^[0-9]+$ ]] && [ "$hpe" -gt 2 ]; then
     note "gap: C's refused enrollment left its dial to H maintained (H counts $hpe attributed peers: A, B and C) — fabric.rs enroll() calls Dialer::maintain and on_enroll_ok never releases it on a refusal; the hub's card also stays pinned on C"
   fi
 
@@ -1027,7 +1056,8 @@ print(sum(1 for m in body.get("messages", []) if m.get("text") == sent))' "$W/bo
   t "A: the small message goes queued → sent → delivered on the direct link (state $(mfield .state), reason $(mfield .reason_code))" '[ "$(mfield .state)" = delivered ]'
   sleep 0.6
   sse_off "$sp_dir"
-  t "B's thread shows it exactly once (dir in, received_seq set)" '[ "$(count_text B A "$small")" = 1 ]'
+  t "B's thread shows it exactly once (dir in, received_seq set)" \
+    '[ "$(count_text B A "$small")" = 1 ] && jb --arg t "$small" "[.messages[] | select(.text == \$t and .dir == \"in\" and (.received_seq | type) == \"number\")] | length == 1"'
   local df
   df=$(mframes "$W/A-direct.sse" "$sm" | tr '\n' ',')
   t "A's SSE: message frames for it [${df%,}] — first new, last delivered" \
@@ -1049,13 +1079,13 @@ print(sum(1 for m in body.get("messages", []) if m.get("text") == sent))' "$W/bo
     wait "$rp" || true
   fi
   t "replayed from the bridge: hello + A's announce + $(jq -r '.sent.sealed // 0' "$W/replay-b.json" 2>/dev/null) sealed frames + a card request (capture $(basename "${capA:-none}"))" \
-    '[ -s "$W/replay-b.json" ] && jq -e ".sent.announce == 1 and .sent.sealed > 0" "$W/replay-b.json" >/dev/null'
+    'jf "$W/replay-b.json" ".sent.announce == 1 and .sent.sealed > 0"'
   t "B answered the fresh socket with hello + its own announce only: no sealed frame, no card answer ($(jq -c .received_types "$W/replay-b.json" 2>/dev/null))" \
-    'jq -e ".received_hello and (.received_types.sealed // 0) == 0 and (.received_types.announce // 0) == 1" "$W/replay-b.json" >/dev/null 2>&1'
+    'jf "$W/replay-b.json" ".received_hello and (.received_types.sealed // 0) == 0 and (.received_types.announce // 0) == 1"'
   t "B never attributed the replay socket (tcp-lan attributed peers $peers0 → ${peers1:-?} while it was open)" '[ -n "${peers1:-}" ] && [ "$peers1" = "$peers0" ]'
   len1=$(thread_len B A)
   t "no duplicate delivery: B's thread with A unchanged ($len0 → $len1), \"$small\" still once" \
-    '[ "$len1" = "$len0" ] && [ "$(count_text B A "$small")" = 1 ]'
+    '[[ "$len0" =~ ^[0-9]+$ ]] && [ "$len1" = "$len0" ] && [ "$(count_text B A "$small")" = 1 ]'
   note "gap: B's replay counters cannot be asserted — mesh111 FabricStatus.counters (stale, dropped, …) exist but GET /fabric (fabric/json.rs status()) and the contract's FabricStatus omit them"
 
   # ---------------------------------------------------------------- 10. (4) non-member
@@ -1066,7 +1096,7 @@ print(sum(1 for m in body.get("messages", []) if m.get("text") == sent))' "$W/bo
   t "B: state sent, reason_code hub_not_yours, reason \"$(mfield .reason)\"" \
     '[ "$(mfield .state)" = sent ] && [ "$(mfield .reason_code)" = hub_not_yours ] && [ -n "$(mfield ".reason // empty")" ]'
   api H GET /api/v1/fabric
-  t "H took no custody for it (custody.count $(jget .custody.count))" 'jb ".custody.count == 0"'
+  t "H took no custody for it (custody.count $(jget .custody.count))" '[ "$ST" = 200 ] && jb ".custody.count == 0"'
   api C GET "/api/v1/messages/threads/${NID[B]}"
   t "C never saw it (no thread with B: 404)" '[ "$ST" = 404 ]'
 
@@ -1104,26 +1134,26 @@ print(sum(1 for m in body.get("messages", []) if m.get("text") == sent))' "$W/bo
   local tr
   chat A conv-l5-read "@tool messages.read {\"peer\": \"${NID[B]}\", \"limit\": 1}"
   t "messages.read through /v1/chat: event tool + done.tool_trace = [{messages.read, ok:true}]" \
-    'grep -q "^event: tool" "$W/chat-conv-l5-read.sse" && printf "%s" "$DONE" | jq -e ".tool_trace == [{\"name\": \"messages.read\", \"ok\": true}]" >/dev/null 2>&1'
+    'grep -q "^event: tool" "$W/chat-conv-l5-read.sse" && printf "%s" "$DONE" | jqs ".tool_trace == [{\"name\": \"messages.read\", \"ok\": true}]"'
   tr=$(toolres A messages.read)
   t "messages.read result carries A's thread with B (\"$small\")" '[[ "$tr" == *"$small"* ]]'
   tape "$W/chat-conv-l5-read.sse" chat-l5-tool.sse "${NROOT[A]}"
   chat A conv-l5-contacts "@tool contacts.read {}"
   tr=$(toolres A contacts.read)
   t "contacts.read answered (ok:true) and lists B and C" \
-    'printf "%s" "$DONE" | jq -e ".tool_trace == [{\"name\": \"contacts.read\", \"ok\": true}]" >/dev/null 2>&1 && [[ "$tr" == *"${NID[B]}"* && "$tr" == *"${NID[C]}"* ]]'
+    'printf "%s" "$DONE" | jqs ".tool_trace == [{\"name\": \"contacts.read\", \"ok\": true}]" && [[ "$tr" == *"${NID[B]}"* && "$tr" == *"${NID[C]}"* ]]'
   chat A conv-l5-fabric "@tool fabric.read {}"
   tr=$(toolres A fabric.read)
   t "fabric.read answered (ok:true) with the home hub (H's node_id)" \
-    'printf "%s" "$DONE" | jq -e ".tool_trace == [{\"name\": \"fabric.read\", \"ok\": true}]" >/dev/null 2>&1 && [[ "$tr" == *"${NID[H]}"* ]]'
+    'printf "%s" "$DONE" | jqs ".tool_trace == [{\"name\": \"fabric.read\", \"ok\": true}]" && [[ "$tr" == *"${NID[H]}"* ]]'
   chat A conv-l5-nearby "@tool nearby.read {}"
   tr=$(toolres A nearby.read)
   t "nearby.read answered (ok:true) inside the labelled untrusted block (A has no board: no sources)" \
-    'printf "%s" "$DONE" | jq -e ".tool_trace == [{\"name\": \"nearby.read\", \"ok\": true}]" >/dev/null 2>&1 && [[ "$tr" == *"UNTRUSTED: heard over the air from strangers"* ]]'
+    'printf "%s" "$DONE" | jqs ".tool_trace == [{\"name\": \"nearby.read\", \"ok\": true}]" && [[ "$tr" == *"UNTRUSTED: heard over the air from strangers"* ]]'
   local ptext="proposed by the agent on A"
   chat A conv-l5-send "@tool messages.send {\"to\": \"${NID[B]}\", \"text\": \"$ptext\"}"
   t "messages.send answered (ok:true): it writes a proposal, it never sends" \
-    'printf "%s" "$DONE" | jq -e ".tool_trace == [{\"name\": \"messages.send\", \"ok\": true}]" >/dev/null 2>&1 && [ "$(count_text B A "$ptext")" = 0 ]'
+    'printf "%s" "$DONE" | jqs ".tool_trace == [{\"name\": \"messages.send\", \"ok\": true}]" && [ "$(count_text B A "$ptext")" = 0 ]'
   local pid="" pbody
   pbody="to: ${NID[B]}"$'\n\n'"$ptext"
   wait_for 15 find_prop || true
@@ -1238,9 +1268,9 @@ print(sum(1 for m in body.get("messages", []) if m.get("text") == sent))' "$W/bo
     wait "$rh" || true
   fi
   t "replayed A's recorded hub session (announce + $(jq -r '.sent.sealed // 0' "$W/replay-h.json" 2>/dev/null) sealed: ENROLL, FETCH, COMMIT…) to H on a fresh socket" \
-    '[ -s "$W/replay-h.json" ] && jq -e ".sent.announce == 1 and .sent.sealed > 0" "$W/replay-h.json" >/dev/null'
+    'jf "$W/replay-h.json" ".sent.announce == 1 and .sent.sealed > 0"'
   t "H pushed nothing to it although it holds A's custody: no sealed frame back ($(jq -c .received_types "$W/replay-h.json" 2>/dev/null))" \
-    'jq -e ".received_hello and (.received_types.sealed // 0) == 0" "$W/replay-h.json" >/dev/null 2>&1'
+    'jf "$W/replay-h.json" ".received_hello and (.received_types.sealed // 0) == 0"'
   api H GET /api/v1/fabric
   c1=$(jget .custody.count)
   t "H never attributed it (peers $hp0 → ${hp1:-?}) and still holds the custody ($c0 → $c1)" '[ "${hp1:-x}" = "$hp0" ] && [ "$c1" = "$c0" ] && [ "${c1:-0}" -ge 1 ]'
@@ -1276,7 +1306,7 @@ print(sum(1 for m in body.get("messages", []) if m.get("text") == sent))' "$W/bo
   chat H conv-l5-nearby "@tool nearby.read {}"
   tr=$(toolres H nearby.read)
   t "names reach the agent only inside the labelled untrusted block (nearby.read on H: label + \"Hilltop relay\")" \
-    'printf "%s" "$DONE" | jq -e ".tool_trace == [{\"name\": \"nearby.read\", \"ok\": true}]" >/dev/null 2>&1 && [[ "$tr" == *"UNTRUSTED: heard over the air from strangers"* && "$tr" == *"Hilltop relay"* ]]'
+    'printf "%s" "$DONE" | jqs ".tool_trace == [{\"name\": \"nearby.read\", \"ok\": true}]" && [[ "$tr" == *"UNTRUSTED: heard over the air from strangers"* && "$tr" == *"Hilltop relay"* ]]'
   jsend H POST /api/v1/panels/meshtastic/session '{}'
   local turl
   turl=$(jget .url)
@@ -1293,7 +1323,7 @@ print(sum(1 for m in body.get("messages", []) if m.get("text") == sent))' "$W/bo
   sse_off "$SSEP_RUN_H"
   SSEP_RUN_H=""
   t "H's SSE carried fabric, contact, nearby and panels frames" \
-    '[ -n "$(sse_data "$W/H-run.sse" fabric | head -1)" ] && [ -n "$(sse_data "$W/H-run.sse" nearby | head -1)" ] && [ -n "$(sse_data "$W/H-run.sse" panels | head -1)" ]'
+    '[ -n "$(sse_data "$W/H-run.sse" fabric | head -1)" ] && [ -n "$(sse_data "$W/H-run.sse" contact | head -1)" ] && [ -n "$(sse_data "$W/H-run.sse" nearby | head -1)" ] && [ -n "$(sse_data "$W/H-run.sse" panels | head -1)" ]'
   tape "$W/H-run.sse" events-l5-hub.sse "${NROOT[H]}"
 
   # ---------------------------------------------------------------- 16. (10) clean restart
@@ -1308,31 +1338,34 @@ print(sum(1 for m in body.get("messages", []) if m.get("text") == sent))' "$W/bo
   EP0[C]=$(last_own_epoch C A)
   EP0[H]=$(last_own_epoch H A)
   note "epochs before the clean restart: A=${EP0[A]} B=${EP0[B]} C=${EP0[C]} H=${EP0[H]}"
-  local left
+  local left before dp
   for n in "${N3_NODES[@]}"; do
+    # positive control: the daemon is seen in its netns before the stop (procs_in can't go vacuous)
+    dp=${DPID[$n]:-}
+    before=$(procs_in "$n")
     stop_node "$n"
     wait_for 10 '[ -z "$(procs_in "$n")" ]' || true
     left=$(procs_in "$n")
-    t "$n: SIGTERM → 111 daemon exits 0 (exit ${RC:-none}), children joined (left in its netns: ${left:-none})" \
-      '[ "$RC" = 0 ] && [ -z "$left" ]'
+    t "$n: SIGTERM → 111 daemon exits 0 (exit ${RC:-none}), children joined ($(wc -w <<<"$before") processes in its netns before, left: ${left:-none})" \
+      '[ -n "$dp" ] && [[ " $before " == *" $dp:"* ]] && [ "$RC" = 0 ] && [ -z "$left" ]'
     t "$n: the fabric closed cleanly (no \"clean close failed/timed out\" in daemon.log)" \
-      '! grep -q "clean close \(failed\|timed out\)\|identity counters not closed cleanly" "${NROOT[$n]}/daemon.log"'
+      '[ -s "${NROOT[$n]}/daemon.log" ] && ! grep -q "clean close \(failed\|timed out\)\|identity counters not closed cleanly" "${NROOT[$n]}/daemon.log"'
   done
   for n in "${N3_NODES[@]}"; do start_node "$n"; done
   send A B "after a clean restart (A)"
-  t "A: reopened store keeps its epoch (${EP0[A]} → $(epoch_of A B "$MID"))" '[ -n "$MID" ] && [ "$(epoch_of A B "$MID")" = "${EP0[A]}" ]'
+  t "A: reopened store keeps its epoch (${EP0[A]} → $(epoch_of A B "$MID"))" '[ -n "$MID" ] && [ -n "${EP0[A]}" ] && [ "$(epoch_of A B "$MID")" = "${EP0[A]}" ]'
   send B A "after a clean restart (B)"
-  t "B: reopened store keeps its epoch (${EP0[B]} → $(epoch_of B A "$MID"))" '[ -n "$MID" ] && [ "$(epoch_of B A "$MID")" = "${EP0[B]}" ]'
+  t "B: reopened store keeps its epoch (${EP0[B]} → $(epoch_of B A "$MID"))" '[ -n "$MID" ] && [ -n "${EP0[B]}" ] && [ "$(epoch_of B A "$MID")" = "${EP0[B]}" ]'
   send C A "after a clean restart (C)"
-  t "C: reopened store keeps its epoch (${EP0[C]} → $(epoch_of C A "$MID"))" '[ -n "$MID" ] && [ "$(epoch_of C A "$MID")" = "${EP0[C]}" ]'
+  t "C: reopened store keeps its epoch (${EP0[C]} → $(epoch_of C A "$MID"))" '[ -n "$MID" ] && [ -n "${EP0[C]}" ] && [ "$(epoch_of C A "$MID")" = "${EP0[C]}" ]'
   send H A "after a clean restart (H)"
-  t "H: reopened store keeps its epoch (${EP0[H]} → $(epoch_of H A "$MID"))" '[ -n "$MID" ] && [ "$(epoch_of H A "$MID")" = "${EP0[H]}" ]'
+  t "H: reopened store keeps its epoch (${EP0[H]} → $(epoch_of H A "$MID"))" '[ -n "$MID" ] && [ -n "${EP0[H]}" ] && [ "$(epoch_of H A "$MID")" = "${EP0[H]}" ]'
   local hm2=$MID
   wait_msg H A "$hm2" '.state == "delivered"' 30 || true
   t "after the restart the fabric still delivers (H → A $(mfield .state); custody count at H back to $(api H GET /api/v1/fabric; jget .custody.count))" \
     '[ "$(mfield .state)" = delivered ]'
   if [ -n "$TAPED" ]; then
-    note "tapes recorded into ui/test/tapes:$TAPED"
+    note "tapes recorded into ${TAPES#"$OS"/}:$TAPED"
   else
     note "tapes in ui/test/tapes already present — kept (SMOKE_TAPES=1 re-records)"
   fi

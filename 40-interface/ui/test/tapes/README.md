@@ -26,3 +26,10 @@ validates each frame against the contract (`openapi.yaml` `x-sse-events`).
 Routine runs record only missing tapes; `SMOKE_TAPES=1` re-records (single-node mode: the Layer 4
 tapes; `--three-node`: the Layer 5 ones). After a re-record run `pnpm test` (or
 `pnpm exec vitest run test/tapes.test.ts`) — a daemon change the UI would drop fails there.
+
+Drift check without touching these files: `SMOKE_TAPES=1 SMOKE_TAPES_DIR=<scratch dir> bash
+40-interface/verify/smoke.sh [--three-node]` records a fresh set elsewhere; compare the JSON key
+paths per event name with the committed set, and re-record only the tapes whose shape moved
+(a stream also differs by timing — which frames land in the capture window — which is not drift).
+Some `services` frames carry host facts the daemon probes (for example the `codeagent` row's
+`opencode` path from `$HOME`/`PATH`); they are recorded as sent.
