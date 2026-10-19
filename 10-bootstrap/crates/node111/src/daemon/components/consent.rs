@@ -9,6 +9,15 @@
 //! other top-level key as it found it. `components.<id>` =
 //! `{acknowledged: {notice_hash, notice_text_version}, enabled}`.
 //!
+//! **Bridge-core sections (Layer 6 B2, additive).** `adapters` (compiled-in
+//! adapters on/off), `ham` (per-account licensed-mode confirmations with the
+//! text hash), `channels` (per-channel send switches, with the uplink text
+//! hash when the channel was uplinked), `recipient_lists` and `announce` are
+//! typed fields of [`BridgeFile`], parsed with `deny_unknown_fields` and kept
+//! by every write of this module; a malformed section makes the whole file
+//! invalid (moved aside, fail closed: no confirmation survives).
+//! [`update_file`] is the bridge core's read-modify-write.
+//!
 //! **Failures (fail closed).** An absent file is an empty one. A file that is
 //! not a small regular file, not a JSON object, has another `schema`, or whose
 //! `components` object is malformed is **moved aside**
@@ -66,11 +75,66 @@ pub struct ComponentRecord {
     pub enabled: bool,
 }
 
-/// The `components` part of `state/bridge.json` plus the keys this module
-/// does not own (kept verbatim on write).
+/// `ham[]` (bridge core, Layer 6 §5 "HAM and MQTT: live consent"): a human
+/// confirmed readable sends and relays through a licensed account, recorded
+/// with the SHA-256 of the exact text confirmed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HamRecord {
+    pub network: String,
+    pub account: String,
+    pub text_hash: String,
+    pub by: String,
+}
+
+/// `channels[]` (bridge core, Layer 6 §5): the per-channel send switch, keyed
+/// by the conversation's native coordinates (a re-keyed channel is a new
+/// conversation and starts off). `text_hash` is the uplink warning confirmed
+/// when the switch was turned on for an uplinked channel.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ChannelRecord {
+    pub network: String,
+    pub account: String,
+    pub native_id: String,
+    pub send: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub text_hash: Option<String>,
+    pub by: String,
+}
+
+/// `recipient_lists[]` (bridge core, Layer 6 §6, the contract's
+/// `RecipientList`): a local destination-only list, one DM per member.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RecipientListRecord {
+    pub id: String,
+    pub network: String,
+    pub name: String,
+    pub members: Vec<String>,
+}
+
+/// `announce` (bridge core, Layer 6 §6 (3)): the LXMF display name (`None` =
+/// the default `111-<4 hex>`) and the announce interval (0 = events only).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AnnounceRecord {
+    #[serde(default)]
+    pub name: Option<String>,
+    pub interval_min: u32,
+}
+
+/// The `components` part of `state/bridge.json`, the bridge-core sections,
+/// plus the keys neither owns (kept verbatim on write).
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct BridgeFile {
     pub components: BTreeMap<String, ComponentRecord>,
+    /// Compiled-in adapters on/off (network id → enabled).
+    pub adapters: BTreeMap<String, bool>,
+    pub ham: Vec<HamRecord>,
+    pub channels: Vec<ChannelRecord>,
+    pub recipient_lists: Vec<RecipientListRecord>,
+    pub announce: Option<AnnounceRecord>,
     others: serde_json::Map<String, serde_json::Value>,
 }
 
@@ -142,8 +206,27 @@ fn decode(bytes: &[u8]) -> Result<BridgeFile, String> {
         return Err("components: a key is not a component id".into());
     }
     map.remove("schema");
+    fn section<T: serde::de::DeserializeOwned + Default>(
+        map: &mut serde_json::Map<String, serde_json::Value>,
+        key: &str,
+    ) -> Result<T, String> {
+        match map.remove(key) {
+            None => Ok(T::default()),
+            Some(v) => serde_json::from_value(v).map_err(|e| format!("{key}: {e}")),
+        }
+    }
+    let adapters = section(&mut map, "adapters")?;
+    let ham = section(&mut map, "ham")?;
+    let channels = section(&mut map, "channels")?;
+    let recipient_lists = section(&mut map, "recipient_lists")?;
+    let announce = section(&mut map, "announce")?;
     Ok(BridgeFile {
         components,
+        adapters,
+        ham,
+        channels,
+        recipient_lists,
+        announce,
         others: map,
     })
 }
@@ -203,16 +286,40 @@ fn read_capped(p: &Path) -> std::io::Result<Vec<u8>> {
 }
 
 fn save(root: &Path, f: &BridgeFile) -> anyhow::Result<()> {
-    let mut map = f.others.clone();
-    map.insert("schema".into(), serde_json::Value::from(SCHEMA));
-    map.insert("components".into(), serde_json::to_value(&f.components)?);
-    let mut text = serde_json::to_string_pretty(&serde_json::Value::Object(map))?;
-    text.push('\n');
+    let text = render(f)?;
     let p = path(root);
     if let Some(dir) = p.parent() {
         std::fs::create_dir_all(dir)?;
     }
     crate::util::fs::atomic_write(&p, text.as_bytes(), 0o600)
+}
+
+/// The file's text (pretty JSON, trailing newline).
+fn render(f: &BridgeFile) -> anyhow::Result<String> {
+    let mut map = f.others.clone();
+    map.insert("schema".into(), serde_json::Value::from(SCHEMA));
+    map.insert("components".into(), serde_json::to_value(&f.components)?);
+    if !f.adapters.is_empty() {
+        map.insert("adapters".into(), serde_json::to_value(&f.adapters)?);
+    }
+    if !f.ham.is_empty() {
+        map.insert("ham".into(), serde_json::to_value(&f.ham)?);
+    }
+    if !f.channels.is_empty() {
+        map.insert("channels".into(), serde_json::to_value(&f.channels)?);
+    }
+    if !f.recipient_lists.is_empty() {
+        map.insert(
+            "recipient_lists".into(),
+            serde_json::to_value(&f.recipient_lists)?,
+        );
+    }
+    if let Some(a) = &f.announce {
+        map.insert("announce".into(), serde_json::to_value(a)?);
+    }
+    let mut text = serde_json::to_string_pretty(&serde_json::Value::Object(map))?;
+    text.push('\n');
+    Ok(text)
 }
 
 /// Read-modify-write `components.<id>` under the process-wide lock.
@@ -226,6 +333,23 @@ pub fn update(
     let rec = file.components.entry(id.to_string()).or_default();
     f(rec);
     let out = rec.clone();
+    save(root, &file)?;
+    Ok(out)
+}
+
+/// Read-modify-write the whole file under the process-wide lock (the bridge
+/// core's sections; Layer 6 B2). `f` returning an error writes nothing.
+pub fn update_file<T>(
+    root: &Path,
+    f: impl FnOnce(&mut BridgeFile) -> anyhow::Result<T>,
+) -> anyhow::Result<T> {
+    let _guard = WRITE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let mut file = load(root);
+    let out = f(&mut file)?;
+    // never write what `load` would refuse (and move aside) next time
+    if render(&file)?.len() as u64 > MAX_FILE {
+        anyhow::bail!("state/bridge.json would be larger than 64 KiB");
+    }
     save(root, &file)?;
     Ok(out)
 }
@@ -439,6 +563,54 @@ mod tests {
                 .file_type()
                 .is_symlink()
         );
+    }
+
+    #[test]
+    fn bridge_core_sections_round_trip_and_survive_a_components_write() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        update_file(root, |f| {
+            f.adapters.insert("meshtastic".into(), true);
+            f.ham.push(HamRecord {
+                network: "meshtastic".into(),
+                account: "!0badc0de".into(),
+                text_hash: "ab".repeat(32),
+                by: "loopback".into(),
+            });
+            f.channels.push(ChannelRecord {
+                network: "meshtastic".into(),
+                account: "!0badc0de".into(),
+                native_id: "ch:LongFast:9f3c".into(),
+                send: true,
+                text_hash: None,
+                by: "loopback".into(),
+            });
+            f.recipient_lists.push(RecipientListRecord {
+                id: "friends".into(),
+                network: "lxmf".into(),
+                name: "Friends".into(),
+                members: vec!["0".repeat(32)],
+            });
+            f.announce = Some(AnnounceRecord {
+                name: None,
+                interval_min: 60,
+            });
+            Ok(())
+        })
+        .unwrap();
+        let c = component();
+        require(root, &c, Some(&c.notice_hash())).unwrap();
+        let f = load(root);
+        assert!(f.acknowledged(&c));
+        assert_eq!(f.adapters.get("meshtastic"), Some(&true));
+        assert_eq!(f.ham.len(), 1);
+        assert_eq!(f.channels[0].native_id, "ch:LongFast:9f3c");
+        assert_eq!(f.recipient_lists[0].members.len(), 1);
+        assert_eq!(f.announce.as_ref().unwrap().interval_min, 60);
+        // a malformed section is fail closed: the file is moved aside
+        std::fs::write(path(root), r#"{"schema":1,"ham":[{"account":"x"}]}"#).unwrap();
+        assert!(load(root).ham.is_empty());
+        assert!(root.join("state/bridge.json.invalid-1").exists());
     }
 
     #[test]

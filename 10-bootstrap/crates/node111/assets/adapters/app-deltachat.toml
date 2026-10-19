@@ -1,0 +1,17 @@
+# Adapter manifest (Layer 6 §4 `caps().copy`, §7 app peers; Delta Chat is the reference). Parsed with
+# deny_unknown_fields by the bridge core. The adapter itself is built only after the netns spike passed (S5).
+id = "app:deltachat"                    # network id (§3)
+label = "Delta Chat"
+chip = "DC"
+tag = "DC"                              # relay marker TAG (§8; draft proposal)
+kinds = ["dm", "group"]                 # only groups can be relay endpoints (§7 (4))
+evidence = ["queued", "sent", "relayed", "delivered"]
+
+[auth]
+none = "the app's end-to-end encryption ends on this hub; 111 vouches for nothing about the sender's name"
+
+[copy]
+banner = "This hub decrypts everything its Delta Chat bridge account receives, including messages from contacts you do not bridge. The plaintext exists on this hub: the hub terminates Delta Chat's end-to-end encryption. Bridging is off for every contact until you turn it on for that one."
+send_warning = "111 sends from this hub's own Delta Chat bridge account, flagged as a bot. What you relay onto another network is readable there."
+dm_hint = "Open Delta Chat on your phone or desktop: that is the native app; Messages shows the same conversations as text"
+service = "deltachat-rpc-server (the chatmail core, MPL-2.0) and the Madmail relay (AGPL-3.0) are separate programs you install after reading their licences; 111 is not their distributor. Public chatmail relays are off by default."

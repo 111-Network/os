@@ -69,6 +69,10 @@ mesh111 = { path = "../../../50-messaging/crates/mesh111" }
 # §10.2 Mode S `store_secret` (keyed BLAKE2b-256 behind the identity handle):
 # already in the graph via id111 and mesh111 at the same exact pin (+0 crates).
 blake2 = "=0.11.0"
+# Layer 6 B2 (bridge core, 60-transport/README.md §3 "One ingest function": NFC):
+# already in the graph via id111 (bip39) at the same pin, 0.1.25 (+0 crates);
+# sign-off row in os/10-bootstrap/TASKS.md "Layer 6 additions".
+unicode-normalization = "0.1.25"
 
 [features]
 default = ["mdns"]

@@ -3,24 +3,50 @@
 //! fan-out, delivery state and the foreign tables (mesh111 store, schema V3); **adapters**
 //! move native text and report facts, nothing more (§4).
 //!
-//! T0 scaffold (`60-transport/TASKS.md`): the §4 adapter contract and the type names the
-//! build tasks share. Wave 1 B2 fills `core`, `ingest`, `edges`, `fanout`, `state` and the
-//! scripted [`StubAdapter`] (the G1 fixture); B3 adds the Meshtastic client, C3 the LXMF
-//! adapter, C5 the app peers. The bridge core is always present and inert with no adapter
-//! enabled (§2): nothing here runs, polls or listens until an adapter is enabled by a human
-//! (`AGENTS.md`: the Raspberry Pi is the floor).
+//! This file is the §4 adapter contract and the type names the build tasks share (T0); the
+//! core lives beside it (B2):
+//!
+//! - [`core`] — [`Bridge`]: the adapter registry (one recv task per enabled adapter), the
+//!   adapter manifests (`assets/adapters/<id>.toml`), the monotonic tick, the networks view
+//!   and the typed API surface the routes call, with [`BridgeError`] mapped onto problems.
+//! - [`ingest`] — the §3 one ingest function (Cc + Cf strip, NFC, caps), the dedupe flag and
+//!   §8 guard 2 (own-echo suppression).
+//! - [`marker`] — the §8 relay marker `[<n>/<TAG>] `: build and parse.
+//! - [`edges`] — §8 relay edges: guards 1–6, live consent with pause, `honour_ok_to_mqtt`,
+//!   oversize refuse / split, `relayed_seq`.
+//! - [`fanout`] — §9 compose fan-out: per-target plans (bytes, cap, parts, airtime estimate,
+//!   refusals), atomic validation, send groups.
+//! - [`state`] — the §4 delivery state machine: crash-safe handoff, monotone states, `Later`
+//!   retries on the tick with capped back-off, user rows first.
+//! - [`settings`] — the bridge-core sections of `state/bridge.json` (HAM confirmations,
+//!   per-channel send switches, recipient lists, announce), the text + hash records.
+//! - [`stub`] — the scripted [`StubAdapter`] (the G1 fixture).
+//!
+//! B3 adds the Meshtastic client, C3 the LXMF adapter, C5 the app peers. The bridge core is
+//! always present and inert with no adapter enabled (§2): nothing here runs, polls or listens
+//! until an adapter is enabled by a human (`AGENTS.md`: the Raspberry Pi is the floor) — with
+//! none enabled there is no task and [`Bridge::tick_once`] returns before touching anything.
 //!
 //! Hard rules carried in (§1): foreign text is untrusted everywhere · a 111 message enters a
 //! foreign network only by the user's explicit act · no wall clock in any ordering decision
 //! (`local_seq` and the monotonic tick only) · an adapter's `send` never blocks the core.
 
 pub mod attest;
+pub mod core;
+pub mod edges;
+pub mod fanout;
+pub mod ingest;
+pub mod marker;
+pub mod settings;
+pub mod state;
+pub mod stub;
+
+pub use self::core::{AdapterManifest, Bridge, BridgeConfig, BridgeError, NearbySink};
+pub use self::stub::{StubAdapter, StubOutcome};
 
 use futures_util::future::BoxFuture;
 use serde::{Deserialize, Serialize};
-use std::collections::VecDeque;
-use std::sync::Mutex;
-use tokio::sync::{mpsc, Notify};
+use tokio::sync::mpsc;
 
 /// Network ids (§3, defined once): `111` is the fabric; the rest are foreign.
 pub const NETWORK_111: &str = "111";
@@ -309,178 +335,76 @@ pub trait Adapter: Send + Sync {
     fn recv(&self) -> BoxFuture<'_, Inbound>;
     /// Returns a handle at once; events follow.
     fn send(&self, conv: &ConvRef, text: &str, o: SendOpts) -> BoxFuture<'_, SendHandle>;
-}
-
-/// What the stub answers for a send (scripted per test, §4 "StubAdapter").
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum StubOutcome {
-    /// `Accepted {native_id}` then the listed evidence states in order.
-    Accept {
-        native_id: String,
-        evidence: Vec<(ForeignMessageState, String)>,
-    },
-    Fail {
-        reason: Reason,
-        retry: Retry,
-    },
-}
-
-/// In-process adapter with scripted accept, evidence, failures, airtime and inbound feed:
-/// the G1 fixture (modelled on `mesh111::link::lossy`). T0 ships the minimal form; B2
-/// extends it (airtime, queue-full pauses, link flaps).
-pub struct StubAdapter {
-    id: &'static str,
-    caps: Mutex<Caps>,
-    inbound: Mutex<VecDeque<Inbound>>,
-    wake: Notify,
-    outcomes: Mutex<VecDeque<StubOutcome>>,
-    sent: Mutex<Vec<(ConvRef, String)>>,
-    next_native_id: Mutex<u64>,
-}
-
-impl StubAdapter {
-    pub fn new(id: &'static str, caps: Caps) -> Self {
-        Self {
-            id,
-            caps: Mutex::new(caps),
-            inbound: Mutex::new(VecDeque::new()),
-            wake: Notify::new(),
-            outcomes: Mutex::new(VecDeque::new()),
-            sent: Mutex::new(Vec::new()),
-            next_native_id: Mutex::new(1),
-        }
-    }
-
-    /// Default caps for a stub network: channel + DM, 232/220 B, every evidence state.
-    pub fn default_caps(label: &str, tag: &str) -> Caps {
-        Caps {
-            kinds: vec![ConvKind::Channel, ConvKind::Dm],
-            max_text_bytes: PerKind {
-                channel: Some(232),
-                dm: Some(220),
-                group: None,
-            },
-            evidence: vec![
-                ForeignMessageState::Queued,
-                ForeignMessageState::Sent,
-                ForeignMessageState::Relayed,
-                ForeignMessageState::Delivered,
-            ],
-            airtime: None,
-            auth_levels: vec![Auth::None, Auth::ChannelKey],
-            copy: Honest {
-                label: label.to_string(),
-                chip: tag.to_string(),
-                tag: tag.to_string(),
-                banner: format!("{label}: a stub network (tests only)"),
-                send_warning: String::new(),
-            },
-            recipient_syntax: None,
-            splittable: true,
-            state: AdapterState::Live,
-        }
-    }
-
-    /// Feed one inbound item (text, upsert, nearby, link state); wakes a pending `recv`.
-    pub fn feed(&self, item: Inbound) {
-        self.inbound.lock().expect("stub inbound").push_back(item);
-        self.wake.notify_one();
-    }
-
-    /// Script the outcome of the next `send`s, in order. With no script, a send is
-    /// accepted and reaches `sent` ("accepted by the radio").
-    pub fn script(&self, outcome: StubOutcome) {
-        self.outcomes
-            .lock()
-            .expect("stub outcomes")
-            .push_back(outcome);
-    }
-
-    pub fn set_state(&self, state: AdapterState) {
-        self.caps.lock().expect("stub caps").state = state;
-    }
-
-    /// Every `(conv, text)` handed to `send`, in order.
-    pub fn sent(&self) -> Vec<(ConvRef, String)> {
-        self.sent.lock().expect("stub sent").clone()
+    /// Live facts the core reads per send and per relay copy (§5 "HAM and MQTT: live
+    /// consent", §8 "Consent facts are read live, per copy"): this node's accounts, licensed
+    /// mode, channel uplink and key facts, the region. A provided method (additive to the T0
+    /// contract): an adapter that reports none reads as "no accounts, nothing licensed,
+    /// nothing uplinked" — the Meshtastic client (B3) and the LXMF adapter (C3) override it.
+    fn facts(&self) -> AdapterFacts {
+        AdapterFacts::default()
     }
 }
 
-impl Adapter for StubAdapter {
-    fn id(&self) -> &'static str {
-        self.id
+/// One account of this node on a network (§3 `account`): a board's node id, our LXMF
+/// destination, an app-peer bridge account. Inbound from any of them is our own echo (§8
+/// guard 2).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AccountFacts {
+    /// The native id (`!0badc0de`, a destination hash); the `account` of its conversations.
+    pub id: String,
+    /// What the UI shows (a board's long name and id); untrusted.
+    pub label: Option<String>,
+    /// The board reports an amateur-licensed user (`User.is_licensed`, read live, §5).
+    pub licensed: bool,
+}
+
+/// Live facts of one channel (§5): the board publishes it to MQTT (`uplink_enabled`), and
+/// whether it uses the default (public) key (§8 add-on).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChannelFacts {
+    pub account: String,
+    /// The conversation's native id (`ch:<name>:<kh>`).
+    pub native_id: String,
+    pub uplink: bool,
+    pub default_key: bool,
+}
+
+/// What [`Adapter::facts`] reports (read live; never cached across a decision).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AdapterFacts {
+    pub accounts: Vec<AccountFacts>,
+    pub channels: Vec<ChannelFacts>,
+    /// The radio region is set (`None`: not applicable). Unset ⇒ nothing is handed to the
+    /// adapter (a board transmits nothing before it, §5); rows queue with `region_unset`.
+    pub region_set: Option<bool>,
+    /// The carrier's message ids are globally unique (LXMF hash, app-peer ids): a repeat of
+    /// the §3 key alone is a duplicate. `false` (Meshtastic's 32-bit packet ids): key and
+    /// body within the last 32 rows.
+    pub ids_globally_unique: bool,
+    /// Parts of a split send can arrive out of order (Meshtastic; the preview says so, §9).
+    pub parts_may_reorder: bool,
+    /// `max_text_bytes` on a licensed account where it differs from [`Caps::max_text_bytes`]
+    /// (Meshtastic DMs: 232 B instead of 220 B, the firmware skips PKI, §4).
+    pub licensed_caps: Option<PerKind>,
+}
+
+impl AdapterFacts {
+    /// The account `id`, if it is one of this node's on this network.
+    pub fn account(&self, id: &str) -> Option<&AccountFacts> {
+        self.accounts.iter().find(|a| a.id == id)
     }
 
-    fn caps(&self) -> Caps {
-        self.caps.lock().expect("stub caps").clone()
-    }
-
-    fn recv(&self) -> BoxFuture<'_, Inbound> {
-        Box::pin(async move {
-            loop {
-                if let Some(item) = self.inbound.lock().expect("stub inbound").pop_front() {
-                    return item;
-                }
-                self.wake.notified().await;
-            }
-        })
-    }
-
-    fn send(&self, conv: &ConvRef, text: &str, _o: SendOpts) -> BoxFuture<'_, SendHandle> {
-        self.sent
-            .lock()
-            .expect("stub sent")
-            .push((conv.clone(), text.to_string()));
-        let outcome = self
-            .outcomes
-            .lock()
-            .expect("stub outcomes")
-            .pop_front()
-            .unwrap_or_else(|| {
-                let mut n = self.next_native_id.lock().expect("stub ids");
-                let native_id = format!("stub-{}", *n);
-                *n += 1;
-                StubOutcome::Accept {
-                    native_id,
-                    evidence: vec![(
-                        ForeignMessageState::Sent,
-                        "accepted by the radio".to_string(),
-                    )],
-                }
-            });
-        Box::pin(async move {
-            let (tx, rx) = mpsc::channel(8);
-            match outcome {
-                StubOutcome::Accept {
-                    native_id,
-                    evidence,
-                } => {
-                    let _ = tx.send(SendEvent::Accepted { native_id }).await;
-                    for (state, evidence) in evidence {
-                        let _ = tx.send(SendEvent::Evidence { state, evidence }).await;
-                    }
-                }
-                StubOutcome::Fail { reason, retry } => {
-                    let _ = tx.send(SendEvent::Failed { reason, retry }).await;
-                }
-            }
-            SendHandle { events: rx }
-        })
+    /// The live facts of a channel conversation.
+    pub fn channel(&self, account: &str, native_id: &str) -> Option<&ChannelFacts> {
+        self.channels
+            .iter()
+            .find(|c| c.account == account && c.native_id == native_id)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn conv() -> ConvRef {
-        ConvRef {
-            network: "stub-a".into(),
-            account: "board-1".into(),
-            kind: ConvKind::Channel,
-            native_id: "ch:LongFast:abcd".into(),
-        }
-    }
 
     #[test]
     fn states_are_monotone_with_delivered_on_top() {
@@ -502,48 +426,23 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn stub_send_returns_at_once_and_streams_events() {
-        let stub = StubAdapter::new("stub-a", StubAdapter::default_caps("Stub A", "A"));
-        let mut h = stub.send(&conv(), "hello", SendOpts::default()).await;
-        assert_eq!(
-            h.events.recv().await,
-            Some(SendEvent::Accepted {
-                native_id: "stub-1".into()
-            })
-        );
-        assert!(matches!(
-            h.events.recv().await,
-            Some(SendEvent::Evidence {
-                state: ForeignMessageState::Sent,
-                ..
-            })
-        ));
-        stub.script(StubOutcome::Fail {
-            reason: Reason::RegionUnset,
-            retry: Retry::Later,
+    #[test]
+    fn facts_default_to_nothing_and_look_up_by_native_coordinates() {
+        let mut f = AdapterFacts::default();
+        assert!(f.account("!0badc0de").is_none());
+        f.accounts.push(AccountFacts {
+            id: "!0badc0de".into(),
+            label: None,
+            licensed: true,
         });
-        let mut h = stub.send(&conv(), "again", SendOpts::default()).await;
-        assert_eq!(
-            h.events.recv().await,
-            Some(SendEvent::Failed {
-                reason: Reason::RegionUnset,
-                retry: Retry::Later
-            })
-        );
-        assert_eq!(stub.sent().len(), 2);
-    }
-
-    #[tokio::test]
-    async fn stub_recv_waits_for_feed() {
-        let stub = std::sync::Arc::new(StubAdapter::new(
-            "stub-b",
-            StubAdapter::default_caps("Stub B", "B"),
-        ));
-        let s2 = stub.clone();
-        let waiter = tokio::spawn(async move { s2.recv().await });
-        tokio::task::yield_now().await;
-        stub.feed(Inbound::Link(LinkState::Up));
-        assert_eq!(waiter.await.unwrap(), Inbound::Link(LinkState::Up));
+        f.channels.push(ChannelFacts {
+            account: "!0badc0de".into(),
+            native_id: "ch:LongFast:9f3c".into(),
+            uplink: true,
+            default_key: true,
+        });
+        assert!(f.account("!0badc0de").unwrap().licensed);
+        assert!(f.channel("!0badc0de", "ch:LongFast:9f3c").unwrap().uplink);
+        assert!(f.channel("!other", "ch:LongFast:9f3c").is_none());
     }
 }

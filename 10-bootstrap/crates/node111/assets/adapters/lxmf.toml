@@ -1,0 +1,29 @@
+# Adapter manifest (Layer 6 §4 `caps().copy`, §6): the honest copy the UI shows for LXMF over Reticulum, so the UI
+# holds no per-network code. Loaded by the bridge core (`daemon/bridge/core.rs`); parsed with deny_unknown_fields.
+id = "lxmf"                             # network id (§3)
+label = "Reticulum (LXMF)"
+chip = "LX"                             # the Messages chip
+tag = "LX"                              # relay marker TAG: one to three ASCII letters (§8)
+# LXMF has no channels (§6): DMs, and a local recipient list as a destination-only group (one DM per member).
+kinds = ["dm", "group"]
+evidence = ["queued", "sent", "relayed", "delivered"]
+airtime_rule = "depends on the path: Reticulum picks the interface, LoRa or not; no estimate is shown"
+
+[auth]                                  # `auth` labels this adapter can report (§3) and their copy
+none = "nothing vouches for the sender's name; the library did not validate a signature (the reason is shown)"
+signed = "the LXMF library validated the sender's signature for this address; the name is still self-declared"
+
+[copy]
+banner = "Messages here are LXMF texts carried by Reticulum through this node's own helper. They are not 111-sealed and are labelled with their LXMF sender address. While the helper is off, this node receives no LXMF."
+send_warning = "111 sends on LXMF only what you send or choose to bridge, as a message from this node's bridge identity (its own LXMF address). The recipient can read it; delivery depends on the path, and LXMF confirms it only when the recipient's node does."
+dm_hint = "Send an LXMF message from this node (readable, not 111-sealed)"
+service = "Reticulum and LXMF are the work of the Reticulum project (reticulum.network); 111 uses them as released and is not affiliated. This node announces its LXMF address and display name to every Reticulum peer it reaches."
+
+[limits]                                # §4: bytes per text, by kind (opportunistic LXMF; larger over a link)
+dm = 287
+group = 287
+
+[recipient]                             # an LXMF destination hash, entered, pasted or picked from a heard announce
+label = "LXMF address (32 hex)"
+pattern = "^[0-9a-f]{32}$"
+example = "0123456789abcdef0123456789abcdef"
