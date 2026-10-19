@@ -45,6 +45,14 @@
 //!    per key (a message keeps its first change, a contact its last), and
 //!    publishes `message` / `contact` / `fabric` frames; `Settings` events
 //!    are persisted to `fabric/settings` (0600) and reconcile the listener.
+//!    Layer 6 `Foreign` events (`60-transport/README.md` §10) become
+//!    `network_message` frames `{network, conv, id?, change, seq}`,
+//!    coalesced again per `(conv, id)` key (first change wins): one
+//!    conversation read per distinct conversation in the batch gives the
+//!    network and the highest `seq`; a coalesced channel event carries no
+//!    `id`. Foreign display times ("received" / "queued") live in the second
+//!    instance, `fabric/display-times.foreign`, opened beside the first
+//!    ([`FabricHandle::foreign_ingest`] records them for the bridge core).
 //! 7. **Housekeeping**: every few seconds the `fabric` service facts
 //!    ([`FabricHandle::provider`] → the registry rule) are refreshed from
 //!    `Fabric::status`; every minute a §10.4 capacity pass runs with the
@@ -80,17 +88,19 @@ use axum::http::StatusCode;
 use id111::keyset::NodeId;
 use mesh111::contacts::{ROLE_ALWAYS_ON_HUB, ROLE_MAILBOX};
 use mesh111::fabric::{
-    ContactChange, Fabric, FabricError, FabricEvent, FabricSettings, FabricStatus, MessageChange,
-    MessageView,
+    ContactChange, Fabric, FabricError, FabricEvent, FabricSettings, FabricStatus, ForeignChange,
+    ForeignGroupPart, ForeignQueue, MessageChange, MessageView,
 };
 use mesh111::keys::ModeS;
 use mesh111::link::tcp_lan::{TcpLan, TcpLanConfig, DEFAULT_PORT};
 use mesh111::link::{Dialer, LinkId};
 use mesh111::sealer::Sealer;
-use mesh111::store::{Class, DiskSpace, OpenParams, Store, StoreError, Trust};
+use mesh111::store::{
+    Class, DiskSpace, ForeignInsert, ForeignMessageRow, OpenParams, Store, StoreError, Trust,
+};
 use sealer::{AnnounceOutcome, IdentitySealer};
 use serde_json::{json, Value};
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, RwLock, Weak};
@@ -186,6 +196,8 @@ pub struct FabricHandle {
     persisted: Mutex<settings::Persisted>,
     facts: RwLock<FabricFacts>,
     times: Mutex<times::DisplayTimes>,
+    /// The second instance (Layer 6 §3): `foreign_messages` row ids.
+    foreign_times: Mutex<times::DisplayTimes>,
     contacts: Mutex<HashMap<[u8; 32], Value>>,
     listener: tokio::sync::Mutex<Option<SocketAddr>>,
     /// Serializes announce re-mints on settings changes.
@@ -547,10 +559,13 @@ pub async fn start(
     if let Some(why) = &down {
         eprintln!("111 fabric: not running: {why}");
     }
-    let times = if live.is_some() {
-        times::DisplayTimes::load(&cfg.fabric_dir)
+    let (times, foreign_times) = if live.is_some() {
+        (
+            times::DisplayTimes::load(&cfg.fabric_dir),
+            times::DisplayTimes::open(&cfg.fabric_dir, times::TimesFile::Foreign),
+        )
     } else {
-        times::DisplayTimes::memory()
+        (times::DisplayTimes::memory(), times::DisplayTimes::memory())
     };
     let handle = Arc::new(FabricHandle {
         facts: RwLock::new(FabricFacts {
@@ -564,6 +579,7 @@ pub async fn start(
         down,
         persisted: Mutex::new(persisted.clone()),
         times: Mutex::new(times),
+        foreign_times: Mutex::new(foreign_times),
         contacts: Mutex::new(HashMap::new()),
         listener: tokio::sync::Mutex::new(None),
         remint: tokio::sync::Mutex::new(()),
@@ -722,6 +738,72 @@ impl FabricHandle {
             t.record(id, now);
         }
         Ok(id)
+    }
+
+    /// The display time of foreign row `id` (Layer 6 §3: the second
+    /// instance; recorded now when unseen).
+    pub fn foreign_at_of(&self, id: i64) -> i64 {
+        self.foreign_times
+            .lock()
+            .map(|mut t| t.get_or_record(id, times::now()))
+            .unwrap_or_else(|_| times::now())
+    }
+
+    /// Record "now" as the display time of foreign rows first seen now
+    /// (received, or queued); an id with a time keeps it.
+    pub fn record_foreign_times(&self, ids: impl IntoIterator<Item = i64>) {
+        let now = times::now();
+        if let Ok(mut t) = self.foreign_times.lock() {
+            for id in ids {
+                t.record(id, now);
+            }
+        }
+    }
+
+    /// `ForeignMessage` JSON for a row (its display time from the foreign
+    /// instance).
+    pub fn foreign_message_json(&self, m: &ForeignMessageRow) -> Value {
+        json::foreign_message(m, self.foreign_at_of(m.id))
+    }
+
+    /// The bridge core's ingest (Layer 6 §3): one bounded batch through the
+    /// fabric ([`Fabric::foreign_ingest`]: ≤ 256 rows, one transaction,
+    /// awaited), with each new row's "received" display time recorded now.
+    pub async fn foreign_ingest(
+        &self,
+        batch: Vec<ForeignInsert>,
+    ) -> Result<Vec<Option<i64>>, FabricError> {
+        let fabric = self.fabric().ok_or(FabricError::Stopped)?;
+        let ids = fabric.foreign_ingest(batch).await?;
+        self.record_foreign_times(ids.iter().flatten().copied());
+        Ok(ids)
+    }
+
+    /// A send group with its foreign parts (§9, [`Fabric::foreign_group_create`];
+    /// `targets` from [`json::send_group_targets`]), each row's "queued"
+    /// display time recorded now.
+    pub async fn foreign_group_create(
+        &self,
+        text: &str,
+        targets: &str,
+        parts: Vec<ForeignGroupPart>,
+    ) -> Result<(i64, Vec<i64>), FabricError> {
+        let fabric = self.fabric().ok_or(FabricError::Stopped)?;
+        let (group, ids) = fabric.foreign_group_create(text, targets, parts).await?;
+        self.record_foreign_times(ids.iter().copied());
+        Ok((group, ids))
+    }
+
+    /// Queue own rows (relay copies; [`Fabric::foreign_queue_sends`]), each
+    /// row's "queued" display time recorded now.
+    pub async fn foreign_queue_sends(
+        &self,
+        sends: Vec<ForeignQueue>,
+    ) -> Result<Vec<i64>, FabricError> {
+        let fabric = self.fabric().ok_or(FabricError::Stopped)?;
+        let ids = fabric.foreign_queue_sends(sends).await?;
+        self.record_foreign_times(ids.iter().copied());
+        Ok(ids)
     }
 
     /// The store's quota per refusable class (`None` = unset).
@@ -923,15 +1005,50 @@ impl FabricHandle {
         }
     }
 
+    /// `network_message` frames for coalesced foreign events (module doc,
+    /// step 6): one conversation read per distinct conversation gives the
+    /// network and the highest `seq`; a conversation that is gone is
+    /// skipped. A per-row `new` records the row's display time now.
+    async fn foreign_frames(&self, items: Vec<ForeignItem>) -> Vec<Value> {
+        let Some(f) = self.fabric() else {
+            return Vec::new();
+        };
+        let mut convs: HashMap<i64, Option<(String, u64)>> = HashMap::new();
+        let mut out = Vec::with_capacity(items.len());
+        for (conv, id, change) in items {
+            if let std::collections::hash_map::Entry::Vacant(v) = convs.entry(conv) {
+                let facts = match f.foreign_conversation(conv).await {
+                    Ok(c) => Some((c.network, c.last_seq)),
+                    Err(FabricError::NotFound) => None,
+                    Err(e) => {
+                        eprintln!("111 fabric: network_message event: {e}");
+                        None
+                    }
+                };
+                v.insert(facts);
+            }
+            let Some(Some((network, seq))) = convs.get(&conv) else {
+                continue;
+            };
+            if let (ForeignChange::New, Some(id)) = (change, id) {
+                self.record_foreign_times([id]);
+            }
+            out.push(json::network_message(network, conv, id, change, *seq));
+        }
+        out
+    }
+
     /// Publish one batch of fabric events (see the module doc, step 6).
     async fn publish(&self, api: &ApiState, batch: Vec<FabricEvent>) {
         let mut messages: BTreeMap<i64, MessageChange> = BTreeMap::new();
         let mut order: Vec<i64> = Vec::new();
         let mut contacts: Vec<(NodeId, ContactChange)> = Vec::new();
+        let mut foreign = ForeignBatch::default();
         let mut fabric = false;
         let mut new_settings = None;
         for ev in batch {
             match ev {
+                FabricEvent::Foreign { conv, id, change } => foreign.push(conv, id, change),
                 FabricEvent::Message { id, change, .. } => {
                     if let std::collections::btree_map::Entry::Vacant(e) = messages.entry(id) {
                         e.insert(change);
@@ -959,6 +1076,9 @@ impl FabricHandle {
             if let Some(v) = self.message_frame(id, messages[&id]).await {
                 api.events.publish("message", &v);
             }
+        }
+        for v in self.foreign_frames(foreign.items).await {
+            api.events.publish("network_message", &v);
         }
         if fabric {
             self.publish_fabric(api).await;
@@ -1013,6 +1133,25 @@ impl FabricHandle {
         // A no-op while restore-pending: no counters file is written then.
         if let Err(e) = l.sealer.shutdown_counters() {
             eprintln!("111 fabric: identity counters not closed cleanly: {e}");
+        }
+    }
+}
+
+/// A foreign event's key and first change: `(conv, id, change)`.
+type ForeignItem = (i64, Option<i64>, ForeignChange);
+
+/// Foreign events of one SSE batch, coalesced again per `(conv, id)` key
+/// (the first change wins, as for messages), in first-seen order.
+#[derive(Debug, Default)]
+struct ForeignBatch {
+    seen: HashSet<(i64, Option<i64>)>,
+    items: Vec<ForeignItem>,
+}
+
+impl ForeignBatch {
+    fn push(&mut self, conv: i64, id: Option<i64>, change: ForeignChange) {
+        if self.seen.insert((conv, id)) {
+            self.items.push((conv, id, change));
         }
     }
 }
@@ -1092,5 +1231,209 @@ mod tests {
         let d = disk_space(&std::env::temp_dir()).unwrap();
         assert!(d.total > 0 && d.free <= d.total);
         assert!(disk_space(Path::new("/definitely/not/here")).is_none());
+    }
+
+    #[test]
+    fn foreign_batches_coalesce_per_key_and_keep_the_first_change() {
+        use ForeignChange::{Conversation, New, State};
+        let mut b = ForeignBatch::default();
+        b.push(1, None, New);
+        b.push(2, Some(9), New);
+        b.push(1, None, Conversation);
+        b.push(2, Some(9), State);
+        b.push(2, Some(10), State);
+        b.push(2, None, Conversation);
+        assert_eq!(
+            b.items,
+            vec![
+                (1, None, New),
+                (2, Some(9), New),
+                (2, Some(10), State),
+                (2, None, Conversation)
+            ]
+        );
+    }
+
+    fn test_api(dir: &Path) -> Arc<ApiState> {
+        use crate::daemon::dashboard::api_v1::ApiConfig;
+        use crate::daemon::dashboard::DashboardState;
+        std::fs::create_dir_all(dir.join("state")).unwrap();
+        let layout = DaemonLayout {
+            root: dir.to_path_buf(),
+            etc: dir.join("etc"),
+        };
+        let mut cfg = ApiConfig::new(layout, false);
+        cfg.persist_auth = false;
+        ApiState::new(Arc::new(RwLock::new(DashboardState::new("t"))), cfg)
+    }
+
+    fn test_cfg(dir: &Path) -> FabricConfig {
+        FabricConfig {
+            fabric_dir: dir.join(FABRIC_DIR),
+            identity_dir: dir.join("identity"),
+            listen: SocketAddr::from((Ipv4Addr::LOCALHOST, 0)),
+            tcp: TcpTuning::default(),
+            hub_default: false,
+            enroll_timeout: Duration::from_secs(5),
+            housekeeping: Duration::from_secs(3600),
+            shutdown_grace: Duration::from_secs(5),
+            offer_host: None,
+        }
+    }
+
+    /// The `network_message` frames published since `head`.
+    fn frames(api: &ApiState, head: u64) -> Vec<Value> {
+        api.events
+            .subscribe(Some(head))
+            .replay
+            .iter()
+            .filter(|f| f.event == "network_message")
+            .map(|f| serde_json::from_str(&f.data).unwrap())
+            .collect()
+    }
+
+    async fn until_frames(api: &ApiState, head: u64, n: usize) -> Vec<Value> {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            let got = frames(api, head);
+            if got.len() >= n {
+                return got;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "{} of {n} frames: {got:?}",
+                got.len()
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    }
+
+    fn inbound(conv: i64, i: u32) -> ForeignInsert {
+        ForeignInsert {
+            conv,
+            sender_native: "!a1b2c3d4".into(),
+            sender_name: Some("W1AW".into()),
+            auth: mesh111::store::ForeignAuth::ChannelKey,
+            native_msg_id: Some(format!("{:08x}", 0x5000_0000 + i)),
+            body: format!("text {i}"),
+            claim_ts: None,
+            meta: None,
+            id_globally_unique: false,
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn foreign_events_become_coalesced_network_message_frames() {
+        use mesh111::store::ForeignKind;
+        let dir = tempfile::tempdir().unwrap();
+        let api = test_api(dir.path());
+        let identity = crate::identity::generate(&dir.path().join("identity")).unwrap();
+        let h = start(test_cfg(dir.path()), Some(identity), &api).await;
+        assert!(h.running(), "{:?}", h.down_reason());
+        let f = h.fabric().unwrap().clone();
+        let head = api.events.subscribe(None).head;
+
+        let ch = f
+            .foreign_conversation_upsert(
+                "meshtastic",
+                "!0badc0de",
+                ForeignKind::Channel,
+                "ch:LongFast:9f3c",
+                Some("LongFast"),
+            )
+            .await
+            .unwrap();
+        let dm = f
+            .foreign_conversation_upsert(
+                "meshtastic",
+                "!0badc0de",
+                ForeignKind::Dm,
+                "dm:!a1b2c3d4",
+                None,
+            )
+            .await
+            .unwrap();
+        let first = until_frames(&api, head, 2).await;
+        assert_eq!(
+            first,
+            vec![
+                json!({"network": "meshtastic", "conv": json::fc_id(ch), "change": "conversation", "seq": 0}),
+                json!({"network": "meshtastic", "conv": json::fc_id(dm), "change": "conversation", "seq": 0}),
+            ]
+        );
+        let head = api.events.subscribe(None).head;
+
+        // 50 channel rows and 3 DM rows in one bounded call
+        let mut batch: Vec<ForeignInsert> = (0..50).map(|i| inbound(ch, i)).collect();
+        batch.extend((0..3).map(|i| inbound(dm, 100 + i)));
+        let ids: Vec<i64> = h
+            .foreign_ingest(batch)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(Option::unwrap)
+            .collect();
+        assert_eq!(ids.len(), 53);
+        let got = until_frames(&api, head, 4).await;
+        let ch_seq = f.foreign_conversation(ch).await.unwrap().last_seq;
+        let dm_seq = f.foreign_conversation(dm).await.unwrap().last_seq;
+        let mut want = vec![json!({
+            "network": "meshtastic", "conv": json::fc_id(ch), "change": "new", "seq": ch_seq,
+        })];
+        for id in &ids[50..] {
+            want.push(json!({
+                "network": "meshtastic", "conv": json::fc_id(dm), "id": json::fm_id(*id),
+                "change": "new", "seq": dm_seq,
+            }));
+        }
+        let mut got_sorted = got.clone();
+        got_sorted.sort_by_key(|v| v.to_string());
+        want.sort_by_key(|v| v.to_string());
+        assert_eq!(
+            got_sorted, want,
+            "one frame for the channel, one per DM row"
+        );
+
+        // a state change of an own row: one per-row frame
+        let head = api.events.subscribe(None).head;
+        let part = ForeignGroupPart {
+            conv: dm,
+            text: "reply".into(),
+            part_k: 1,
+            part_n: 1,
+        };
+        let (_, own) = h
+            .foreign_group_create("reply", "[]", vec![part])
+            .await
+            .unwrap();
+        f.foreign_set_state(
+            own[0],
+            mesh111::store::ForeignState::Sent,
+            Some("accepted by the radio"),
+            None,
+        )
+        .await
+        .unwrap();
+        let got = until_frames(&api, head, 1).await;
+        assert!(
+            got.iter().all(|v| v["id"] == json::fm_id(own[0])),
+            "{got:?}"
+        );
+        assert_eq!(
+            got[0]["change"], "new",
+            "the first change since the previous frame"
+        );
+
+        // display times: the foreign instance, beside the 111 one
+        let at = h.foreign_at_of(ids[0]);
+        assert!(at > 1_700_000_000);
+        let file = dir.path().join(FABRIC_DIR).join(times::FOREIGN_TIMES_FILE);
+        let len = std::fs::metadata(&file).unwrap().len();
+        assert_eq!(len, 16 * 54, "53 received + 1 queued, each recorded once");
+        let row = f.foreign_message(ids[0]).await.unwrap();
+        let v = h.foreign_message_json(&row);
+        assert_eq!(v["id"], json::fm_id(ids[0]));
+        assert_eq!(v["at"], times::rfc3339(at));
+        h.shutdown().await;
     }
 }

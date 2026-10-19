@@ -184,6 +184,39 @@
 //!   a hub card it never had before.
 //! - All handles dropped does not stop the actor: call
 //!   [`Fabric::shutdown`] (clean close) or [`Fabric::abort`].
+//!
+//! ### Foreign calls (Layer 6 `60-transport/README.md` §3, §8, §9, §10)
+//!
+//! The bridge core and the daemon's routes reach the foreign tables (store
+//! schema v3, [`crate::store::foreign`]) only through the typed
+//! `Fabric::foreign_*` calls, never through [`Fabric::with_store`] (which
+//! emits no event). Each call runs in the actor between frame pumps as
+//! **one** synchronous SQLCipher transaction, like `send` and `threads`:
+//!
+//! - [`Fabric::foreign_ingest`] takes at most [`MAX_FOREIGN_INGEST`] rows
+//!   (256; refused above, before the actor is asked). The bridge core
+//!   awaits each call, so an adapter tick waits for its batch to commit —
+//!   that wait is the back-pressure on the actor's input channel, and a
+//!   1,000-row burst is four jobs interleaved with 111 frames, never one
+//!   long stall (`tests/foreign_burst.rs` measures the 111 latency).
+//! - Every write emits [`FabricEvent::Foreign`] beside `Message`, `Contact`,
+//!   `Fabric` and `Settings`, **coalesced per tick** (§10): one event per
+//!   own row, DM row or pinned-channel row (`id` set), and one per
+//!   **conversation** for inbound traffic of an unpinned channel (`id`
+//!   `None`; the daemon carries the conversation's highest `seq` in the
+//!   frame), so 50 channel rows in one batch are one event. As for every
+//!   API job, the events of a call are emitted before the next call's
+//!   reply (`Core::handle`), so "per tick" is at most "per call".
+//! - Nothing here touches 111 message numbering, the outbox or the L2
+//!   window: foreign rows only draw `local_seq` from the store-wide counter
+//!   (one order, §3).
+//! - Readings: a cancel deletes an own row still `queued` that was never
+//!   handed to a carrier (no pending handoff mark, no native id; the
+//!   store's `foreign_cancel`); the handoff mark is set only through
+//!   [`Fabric::foreign_handoff_begin`] / [`Fabric::foreign_accepted`];
+//!   edge changes emit no event (the `bridge` SSE snapshot is the bridge
+//!   core's), except a disable or a delete, which drop the destination's
+//!   never-handed copies (a `Conversation` event for it).
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::net::SocketAddr;
@@ -218,8 +251,11 @@ use crate::mailbox::{
 use crate::outbox::{build_ack_block, highest_seen, MessageBody, Reason};
 use crate::sealer::{Freshness, Sealer, SealerError};
 use crate::store::{
-    Class, ContactRow, CustodyPut, Dir, EpochDecision, EpochState, FragOffer, MessageRow, MsgState,
-    NewMessage, RequestPut, Seq, Store, StoreError, Trust,
+    Class, ContactRow, CustodyPut, Dir, EdgeConsent, EdgeCounter, EdgeNew, EdgeOversize, EdgeRow,
+    EpochDecision, EpochState, ForeignConversationRow, ForeignDir, ForeignInsert, ForeignKind,
+    ForeignMessageRow, ForeignSend, ForeignState, FragOffer, GroupPart, MessageRow, MetaValue,
+    MsgState, NewMessage, RequestPut, SendGroupRow, Seq, StateChange, Store, StoreError, Trust,
+    MAX_FOREIGN_BATCH,
 };
 
 /// Bytes a stream link's fragment plan keeps free for the INTRO card
@@ -357,8 +393,21 @@ pub enum ContactChange {
     Request,
 }
 
-/// Events the daemon subscribes to (SSE `message`, `contact`, `fabric`),
-/// coalesced per message / contact per tick.
+/// What changed about a foreign row or conversation (Layer 6 §10 SSE
+/// `network_message.change`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ForeignChange {
+    /// Rows new to the client: inbound, a queued own row, a relay copy.
+    New,
+    /// One row's state, evidence, reason or `meta` changed.
+    State,
+    /// The conversation itself changed: new to this run, a new title, a
+    /// pin, its read mark, or queued copies dropped with an edge.
+    Conversation,
+}
+
+/// Events the daemon subscribes to (SSE `message`, `contact`, `fabric`,
+/// `network_message`), coalesced per message / contact per tick.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FabricEvent {
     /// A new message, a state change, or a request (first change this tick).
@@ -381,6 +430,19 @@ pub enum FabricEvent {
     Fabric,
     /// The settings changed; persist them.
     Settings(FabricSettings),
+    /// A foreign row or conversation changed (Layer 6 §3, §10), coalesced
+    /// per row per tick for own rows, DMs, groups and pinned channels, and
+    /// per **conversation** per tick (`id: None`) for inbound traffic of an
+    /// unpinned channel (module doc, "Foreign calls").
+    Foreign {
+        /// `foreign_conversations.id`.
+        conv: i64,
+        /// `foreign_messages.id`; `None` on a coalesced channel event and on
+        /// a conversation change.
+        id: Option<i64>,
+        /// First change since the previous frame.
+        change: ForeignChange,
+    },
 }
 
 /// One message as the API shows it.
@@ -706,6 +768,7 @@ impl Fabric {
             counters: Counters::default(),
             events: events.clone(),
             pending_events: BTreeMap::new(),
+            foreign_convs: HashMap::new(),
             outq: Vec::new(),
             _control: input.clone(),
             frames,
@@ -1218,6 +1281,11 @@ enum EventKey {
     Contact([u8; 32]),
     Fabric,
     Settings,
+    /// One foreign row (Layer 6 §10).
+    ForeignMsg(i64),
+    /// One foreign conversation: its coalesced channel traffic and its own
+    /// changes share the key (the first change wins, as for messages).
+    ForeignConv(i64),
 }
 
 struct Core {
@@ -1249,6 +1317,9 @@ struct Core {
     counters: Counters,
     events: broadcast::Sender<FabricEvent>,
     pending_events: BTreeMap<EventKey, FabricEvent>,
+    /// Kind, pin and title of the foreign conversations seen this run (the
+    /// §10 coalescing decision; a bounded cache refilled from the store).
+    foreign_convs: HashMap<i64, ConvFacts>,
     outq: Vec<Out>,
     /// Keeps the control channel open while the actor runs (dropping every
     /// handle does not stop it, module doc).
@@ -3760,6 +3831,869 @@ impl Core {
 }
 
 // ---------------------------------------------------------------------------
+// Layer 6 foreign calls (`60-transport/README.md` §3, §8, §9, §10)
+// ---------------------------------------------------------------------------
+
+/// Rows per [`Fabric::foreign_ingest`] call (§3: one bounded batch per
+/// adapter tick; the store's own cap, checked before the actor is asked).
+pub const MAX_FOREIGN_INGEST: usize = MAX_FOREIGN_BATCH;
+/// The largest page a foreign read returns at once
+/// ([`Fabric::foreign_thread`], [`Fabric::foreign_queued`],
+/// [`Fabric::foreign_edge_inputs`]); larger limits are clamped.
+pub const MAX_FOREIGN_PAGE: usize = 10_000;
+/// Conversations whose kind, pin and title the actor remembers (a cache for
+/// the §10 coalescing decision: cleared when full, refilled from the store).
+const FOREIGN_CONV_CACHE: usize = 4096;
+
+/// [`Fabric::foreign_set_state`]'s outcome: `Changed`, or `Unchanged` when
+/// the state would move back (§4 monotone) or nothing differs.
+pub type ForeignStateOutcome = StateChange;
+
+/// One own foreign row to queue ([`Fabric::foreign_queue_send`]; the owned
+/// form of [`ForeignSend`]). Exactly one of `group_id` (user-composed; a
+/// direct reply is a one-target send group, [`Fabric::foreign_group_create`])
+/// or `edge_id` + `origin_msg` (a §8 relay copy).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ForeignQueue {
+    /// Destination conversation.
+    pub conv: i64,
+    /// The text of this part (≤ 64 KiB; the marker already applied).
+    pub text: String,
+    /// The send group of a user-composed row.
+    pub group_id: Option<i64>,
+    /// Part `k` of `n` (1-based; `1/1` for a whole text).
+    pub part_k: u32,
+    /// Parts of the split send.
+    pub part_n: u32,
+    /// The inbound row a relay copy copies.
+    pub origin_msg: Option<i64>,
+    /// The edge a relay copy belongs to.
+    pub edge_id: Option<i64>,
+}
+
+impl ForeignQueue {
+    /// A §8 relay copy (part `k` of `n`) of `origin` on `edge` into `conv`.
+    pub fn relay_copy(conv: i64, text: String, edge: i64, origin: i64, k: u32, n: u32) -> Self {
+        ForeignQueue {
+            conv,
+            text,
+            group_id: None,
+            part_k: k,
+            part_n: n,
+            origin_msg: Some(origin),
+            edge_id: Some(edge),
+        }
+    }
+
+    fn borrow(&self) -> ForeignSend<'_> {
+        ForeignSend {
+            conv: self.conv,
+            text: &self.text,
+            group_id: self.group_id,
+            part_k: self.part_k,
+            part_n: self.part_n,
+            origin_msg: self.origin_msg,
+            edge_id: self.edge_id,
+        }
+    }
+}
+
+/// One foreign part of a send group ([`Fabric::foreign_group_create`]; the
+/// owned form of [`GroupPart`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ForeignGroupPart {
+    /// Target conversation.
+    pub conv: i64,
+    /// This part's text.
+    pub text: String,
+    /// Part `k` of `n` (1-based).
+    pub part_k: u32,
+    /// Parts of this target's send.
+    pub part_n: u32,
+}
+
+/// The recorded human consent of an edge (§8; the owned form of
+/// [`EdgeConsent`]): the warning text's hash and who accepted it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ForeignConsent {
+    /// Lowercase hex SHA-256 of the exact warning text confirmed.
+    pub consent_hash: String,
+    /// The session that confirmed (`loopback`, a paired session's label).
+    pub enabled_by: String,
+}
+
+impl ForeignConsent {
+    fn borrow(&self) -> EdgeConsent<'_> {
+        EdgeConsent {
+            consent_hash: &self.consent_hash,
+            enabled_by: &self.enabled_by,
+        }
+    }
+}
+
+/// A new relay edge ([`Fabric::foreign_edge_create`]; the owned form of
+/// [`EdgeNew`]): created enabled with `cursor_seq` = the current
+/// `local_seq`, so nothing already stored is relayed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ForeignEdgeNew {
+    /// Source conversation (`channel` or `group`).
+    pub src_conv: i64,
+    /// Destination conversation (`channel` or `group`).
+    pub dst_conv: i64,
+    /// Drop Meshtastic-origin rows without the ok-to-MQTT bit (off by default).
+    pub honour_ok_to_mqtt: bool,
+    /// Too-long copies: `refuse` (default) or `split`.
+    pub oversize: EdgeOversize,
+    /// The confirmed warning.
+    pub consent: ForeignConsent,
+}
+
+/// A partial change of an edge ([`Fabric::foreign_edge_patch`],
+/// `BridgeEdgePatch`).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ForeignEdgePatch {
+    /// Pause, or resume (resuming records `consent`).
+    pub paused: Option<bool>,
+    /// The new confirmation a resume records.
+    pub consent: Option<ForeignConsent>,
+    /// Must equal the stored value: the store keeps it as created.
+    pub honour_ok_to_mqtt: Option<bool>,
+    /// Must equal the stored value: the store keeps it as created.
+    pub oversize: Option<EdgeOversize>,
+}
+
+/// One `meta` value ([`Fabric::foreign_set_meta`]; the owned form of
+/// [`MetaValue`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ForeignMeta {
+    /// A string (≤ 256 bytes).
+    Str(String),
+    /// An integer.
+    Int(i64),
+    /// A boolean.
+    Bool(bool),
+}
+
+/// One page of a foreign conversation ([`Fabric::foreign_thread`], §10
+/// `ForeignThread`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ForeignThreadPage {
+    /// The conversation with its counts.
+    pub conversation: ForeignConversationRow,
+    /// Rows ascending by `local_seq`.
+    pub messages: Vec<ForeignMessageRow>,
+    /// Rows exist beyond the window: older ones without `since_seq`, newer
+    /// ones with it.
+    pub more: bool,
+}
+
+/// A send group with its foreign rows ([`Fabric::foreign_group`], §9).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ForeignGroupView {
+    /// The group as stored.
+    pub group: SendGroupRow,
+    /// Every part of every foreign target, by `local_seq`.
+    pub rows: Vec<ForeignMessageRow>,
+}
+
+impl Fabric {
+    /// §3 ingest: insert up to [`MAX_FOREIGN_INGEST`] inbound rows (after
+    /// the bridge core's one ingest function) in **one** transaction.
+    /// Returns, per input, the new row id or `None` for a §3 duplicate. A
+    /// larger batch is refused here, before the actor is asked; any invalid
+    /// row writes nothing. Await each call before the next (back-pressure,
+    /// module doc).
+    pub async fn foreign_ingest(&self, batch: Vec<ForeignInsert>) -> Result<Vec<Option<i64>>> {
+        if batch.len() > MAX_FOREIGN_INGEST {
+            return Err(FabricError::Invalid("foreign ingest over 256 rows"));
+        }
+        if batch.is_empty() {
+            return Ok(Vec::new());
+        }
+        self.call(move |c| c.foreign_ingest(batch)).await?
+    }
+
+    /// §4 monotone state update of an own row (a lower state is ignored:
+    /// [`StateChange::Unchanged`]). `evidence` is the adapter's string the
+    /// UI prints; `reason` a §4 reason code.
+    pub async fn foreign_set_state(
+        &self,
+        id: i64,
+        state: ForeignState,
+        evidence: Option<&str>,
+        reason: Option<&str>,
+    ) -> Result<ForeignStateOutcome> {
+        let evidence = evidence.map(str::to_owned);
+        let reason = reason.map(str::to_owned);
+        self.call(move |c| c.foreign_set_state(id, state, evidence, reason))
+            .await?
+    }
+
+    /// Set (`Some`) or remove (`None`) one `meta` field of a row (`[a-z_]`,
+    /// ≤ 32 bytes; never `handoff`, which has its own calls). Returns
+    /// whether the row exists.
+    pub async fn foreign_set_meta(
+        &self,
+        id: i64,
+        key: &str,
+        value: Option<ForeignMeta>,
+    ) -> Result<bool> {
+        let key = key.to_owned();
+        self.call(move |c| c.foreign_set_meta(id, &key, value))
+            .await?
+    }
+
+    /// Queue one own row (a relay copy, or a part of an existing send
+    /// group). A relay copy advances its edge's `relayed_seq` in the same
+    /// transaction (§8).
+    pub async fn foreign_queue_send(&self, send: ForeignQueue) -> Result<i64> {
+        self.foreign_queue_sends(vec![send])
+            .await?
+            .into_iter()
+            .next()
+            .ok_or(FabricError::Invalid("nothing was queued"))
+    }
+
+    /// Queue up to 256 own rows in one transaction (every part of a split
+    /// relay copy together, so a crash never leaves half a copy).
+    pub async fn foreign_queue_sends(&self, sends: Vec<ForeignQueue>) -> Result<Vec<i64>> {
+        if sends.len() > MAX_FOREIGN_BATCH {
+            return Err(FabricError::Invalid("foreign batch over 256 rows"));
+        }
+        self.call(move |c| c.foreign_queue_sends(sends)).await?
+    }
+
+    /// Cancel an own row (§9): only while `queued` and never handed to a
+    /// carrier (no pending handoff, no recorded native id); the store
+    /// deletes it ([`Store::foreign_cancel`], FULL), so it can never be
+    /// sent. Anything else is [`FabricError::NotRetryable`]. Other parts of
+    /// the same send are not touched (cancel drops unsent parts only, one
+    /// call per part).
+    pub async fn foreign_cancel(&self, id: i64) -> Result<()> {
+        self.call(move |c| c.foreign_cancel(id)).await?
+    }
+
+    /// §9: create a send group (`text`, its `targets` JSON) and queue its
+    /// foreign parts in one transaction (atomic: a bad part queues nothing;
+    /// `parts` may be empty for 111-only targets). Returns the group id and
+    /// the row ids in `parts` order.
+    pub async fn foreign_group_create(
+        &self,
+        text: &str,
+        targets: &str,
+        parts: Vec<ForeignGroupPart>,
+    ) -> Result<(i64, Vec<i64>)> {
+        if parts.len() > MAX_FOREIGN_BATCH {
+            return Err(FabricError::Invalid("foreign batch over 256 rows"));
+        }
+        let (text, targets) = (text.to_owned(), targets.to_owned());
+        self.call(move |c| c.foreign_group_create(&text, &targets, &parts))
+            .await?
+    }
+
+    /// One send group with its rows.
+    pub async fn foreign_group(&self, id: i64) -> Result<ForeignGroupView> {
+        self.call(move |c| c.foreign_group(id)).await?
+    }
+
+    /// Create an enabled relay edge with its recorded consent (§8; DM
+    /// endpoints, `src = dst` and a duplicate pair are refused).
+    pub async fn foreign_edge_create(&self, edge: ForeignEdgeNew) -> Result<EdgeRow> {
+        self.call(move |c| c.foreign_edge_create(&edge)).await?
+    }
+
+    /// Every edge, by id.
+    pub async fn foreign_edge_list(&self) -> Result<Vec<EdgeRow>> {
+        self.call(|c| c.store.edge_list().map_err(fx)).await?
+    }
+
+    /// One edge.
+    pub async fn foreign_edge_get(&self, id: i64) -> Result<EdgeRow> {
+        self.call(move |c| c.store.edge(id).map_err(fx)?.ok_or(FabricError::NotFound))
+            .await?
+    }
+
+    /// Enable (recording `consent`; `cursor_seq` moves to now: what arrived
+    /// while off is history) or disable an edge (the store drops its copies
+    /// never handed to a carrier: a `Conversation` event for the
+    /// destination). Returns whether it changed.
+    pub async fn foreign_edge_set_enabled(
+        &self,
+        id: i64,
+        enabled: bool,
+        consent: Option<ForeignConsent>,
+    ) -> Result<bool> {
+        self.call(move |c| c.foreign_edge_set_enabled(id, enabled, consent.as_ref()))
+            .await?
+    }
+
+    /// Pause, or resume with the new confirmation (§8 `consent_paused`).
+    /// Returns whether it changed.
+    pub async fn foreign_edge_set_paused(
+        &self,
+        id: i64,
+        paused: bool,
+        consent: Option<ForeignConsent>,
+    ) -> Result<bool> {
+        self.call(move |c| {
+            let consent = consent.as_ref().map(ForeignConsent::borrow);
+            c.store
+                .edge_set_paused(id, paused, consent.as_ref())
+                .map_err(fx)
+        })
+        .await?
+    }
+
+    /// `PATCH /bridge/edges/{id}`: pause or resume. `honour_ok_to_mqtt` and
+    /// `oversize` are kept as created by this store version: a patch that
+    /// would change either is refused before anything is written.
+    pub async fn foreign_edge_patch(&self, id: i64, patch: ForeignEdgePatch) -> Result<EdgeRow> {
+        self.call(move |c| c.foreign_edge_patch(id, &patch)).await?
+    }
+
+    /// Advance an edge's `relayed_seq` to at least `seq` (a shed, §8;
+    /// never backwards). Returns the stored value.
+    pub async fn foreign_edge_advance_relayed(&self, id: i64, seq: u64) -> Result<u64> {
+        self.call(move |c| c.store.edge_advance_relayed_seq(id, seq).map_err(fx))
+            .await?
+    }
+
+    /// Add `n` to one of an edge's §8 counters (`relayed`, `shed`,
+    /// `refused`).
+    pub async fn foreign_edge_count(&self, id: i64, counter: EdgeCounter, n: u64) -> Result<()> {
+        self.call(move |c| c.store.edge_count(id, counter, n).map_err(fx))
+            .await?
+    }
+
+    /// Delete an edge with its loop-guard keys and its copies never handed
+    /// to a carrier. Returns whether it existed.
+    pub async fn foreign_edge_delete(&self, id: i64) -> Result<bool> {
+        self.call(move |c| c.foreign_edge_delete(id)).await?
+    }
+
+    /// §8 "what it relays": inbound rows of the edge's source above
+    /// `max(cursor_seq, relayed_seq)` that are not relayed copies, oldest
+    /// first, at most `limit` (clamped to [`MAX_FOREIGN_PAGE`]).
+    pub async fn foreign_edge_inputs(
+        &self,
+        edge: i64,
+        limit: usize,
+    ) -> Result<Vec<ForeignMessageRow>> {
+        let limit = limit.min(MAX_FOREIGN_PAGE);
+        self.call(move |c| c.store.edge_inputs(edge, limit).map_err(fx))
+            .await?
+    }
+
+    /// Record a loop-guard key on `edge` (§3 `foreign_seen`, bounded per
+    /// edge, oldest evicted).
+    pub async fn foreign_seen_insert(
+        &self,
+        edge: i64,
+        conv: i64,
+        sender_native: &str,
+        native_msg_id: &str,
+        local_seq: u64,
+    ) -> Result<()> {
+        let (sender, native) = (sender_native.to_owned(), native_msg_id.to_owned());
+        self.call(move |c| {
+            c.store
+                .foreign_seen_insert(edge, conv, &sender, &native, local_seq)
+                .map_err(fx)
+        })
+        .await?
+    }
+
+    /// Whether a loop-guard key is held on `edge` (any edge when `None`).
+    pub async fn foreign_seen_contains(
+        &self,
+        edge: Option<i64>,
+        conv: i64,
+        sender_native: &str,
+        native_msg_id: &str,
+    ) -> Result<bool> {
+        let (sender, native) = (sender_native.to_owned(), native_msg_id.to_owned());
+        self.call(move |c| {
+            c.store
+                .foreign_seen_contains(edge, conv, &sender, &native)
+                .map_err(fx)
+        })
+        .await?
+    }
+
+    /// Insert or find a conversation by `(network, account, kind,
+    /// native_id)` (§3 conversation identity); a `title` replaces the
+    /// stored one. A conversation new to this run, or a new title, emits a
+    /// `Conversation` event.
+    pub async fn foreign_conversation_upsert(
+        &self,
+        network: &str,
+        account: &str,
+        kind: ForeignKind,
+        native_id: &str,
+        title: Option<&str>,
+    ) -> Result<i64> {
+        let (network, account, native) =
+            (network.to_owned(), account.to_owned(), native_id.to_owned());
+        let title = title.map(str::to_owned);
+        self.call(move |c| {
+            c.foreign_conversation_upsert(&network, &account, kind, &native, title.as_deref())
+        })
+        .await?
+    }
+
+    /// Pin or unpin a conversation (pinned rows are never pruned, and a
+    /// pinned channel's rows are no longer coalesced).
+    pub async fn foreign_conversation_pin(&self, id: i64, pinned: bool) -> Result<()> {
+        self.call(move |c| c.foreign_conversation_pin(id, pinned))
+            .await?
+    }
+
+    /// Clear a conversation's unread counter (an event only when it was
+    /// not zero).
+    pub async fn foreign_conversation_mark_read(&self, id: i64) -> Result<()> {
+        self.call(move |c| c.foreign_conversation_mark_read(id))
+            .await?
+    }
+
+    /// The conversations of `network` (every network when `None`), most
+    /// recent first.
+    pub async fn foreign_conversations(
+        &self,
+        network: Option<&str>,
+    ) -> Result<Vec<ForeignConversationRow>> {
+        let network = network.map(str::to_owned);
+        self.call(move |c| {
+            c.store
+                .foreign_conversations(network.as_deref())
+                .map_err(fx)
+        })
+        .await?
+    }
+
+    /// One conversation with its counts.
+    pub async fn foreign_conversation(&self, id: i64) -> Result<ForeignConversationRow> {
+        self.call(move |c| c.foreign_conversation(id)).await?
+    }
+
+    /// One page of a conversation (§10 `?limit&since_seq`): without
+    /// `since_seq` the newest `limit` rows, with it the first `limit` rows
+    /// above it; ascending by `local_seq` either way.
+    pub async fn foreign_thread(
+        &self,
+        conv: i64,
+        since_seq: Option<u64>,
+        limit: usize,
+    ) -> Result<ForeignThreadPage> {
+        self.call(move |c| c.foreign_thread(conv, since_seq, limit))
+            .await?
+    }
+
+    /// The adapter tick's queue for `network` (§4 order): own `queued` rows
+    /// without a pending handoff, user-composed rows first, then
+    /// `local_seq`; copies of a disabled or paused edge are held back.
+    pub async fn foreign_queued(
+        &self,
+        network: &str,
+        limit: usize,
+    ) -> Result<Vec<ForeignMessageRow>> {
+        let network = network.to_owned();
+        let limit = limit.min(MAX_FOREIGN_PAGE);
+        self.call(move |c| c.store.foreign_queued(&network, limit).map_err(fx))
+            .await?
+    }
+
+    /// One foreign row.
+    pub async fn foreign_message(&self, id: i64) -> Result<ForeignMessageRow> {
+        self.call(move |c| {
+            c.store
+                .foreign_message(id)
+                .map_err(fx)?
+                .ok_or(FabricError::NotFound)
+        })
+        .await?
+    }
+
+    /// §4 at most once: mark a `queued` own row `handoff = pending`
+    /// durably (FULL) before it is handed to a carrier.
+    pub async fn foreign_handoff_begin(&self, id: i64) -> Result<()> {
+        self.call(move |c| c.store.foreign_handoff_begin(id).map_err(fx))
+            .await?
+    }
+
+    /// §4 `Accepted { native_id }`: record the carrier's native id (own-echo
+    /// suppression, §8 guard 2) and clear the handoff mark.
+    pub async fn foreign_accepted(&self, id: i64, native_msg_id: &str) -> Result<()> {
+        let native = native_msg_id.to_owned();
+        self.call(move |c| c.store.foreign_accepted(id, &native).map_err(fx))
+            .await?
+    }
+}
+
+/// What the actor remembers about a foreign conversation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ConvFacts {
+    kind: ForeignKind,
+    pinned: bool,
+    title: Option<String>,
+}
+
+impl ConvFacts {
+    fn of(c: &ForeignConversationRow) -> ConvFacts {
+        ConvFacts {
+            kind: c.kind,
+            pinned: c.pinned,
+            title: c.title.clone(),
+        }
+    }
+}
+
+/// Store failures of the typed foreign calls: a missing row is the API's
+/// `NotFound`, a refused input its `Invalid` (a `400`, not a store fault).
+fn fx(e: StoreError) -> FabricError {
+    match e {
+        StoreError::NotFound => FabricError::NotFound,
+        StoreError::Invalid(why) => FabricError::Invalid(why),
+        e => FabricError::Store(e),
+    }
+}
+
+impl Core {
+    // -- foreign events (§10 coalescing) -------------------------------------
+
+    fn foreign_event(&mut self, conv: i64, id: Option<i64>, change: ForeignChange) {
+        let key = match id {
+            Some(id) => EventKey::ForeignMsg(id),
+            None => EventKey::ForeignConv(conv),
+        };
+        self.pending_events
+            .entry(key)
+            .or_insert(FabricEvent::Foreign { conv, id, change });
+    }
+
+    fn remember_conv(&mut self, id: i64, facts: ConvFacts) {
+        if self.foreign_convs.len() >= FOREIGN_CONV_CACHE && !self.foreign_convs.contains_key(&id) {
+            self.foreign_convs.clear();
+        }
+        self.foreign_convs.insert(id, facts);
+    }
+
+    /// Inbound rows of this conversation coalesce per conversation: an
+    /// unpinned channel. Unknown facts (a store failure) coalesce too — the
+    /// bounded choice; the client refetches the conversation either way.
+    fn coalesces(&mut self, conv: i64) -> bool {
+        if let Some(f) = self.foreign_convs.get(&conv) {
+            return f.kind == ForeignKind::Channel && !f.pinned;
+        }
+        match self.store.foreign_conversation(conv) {
+            Ok(Some(c)) => {
+                let f = ConvFacts::of(&c);
+                let per_conv = f.kind == ForeignKind::Channel && !f.pinned;
+                self.remember_conv(conv, f);
+                per_conv
+            }
+            Ok(None) => true,
+            Err(_) => {
+                self.counters.errors += 1;
+                true
+            }
+        }
+    }
+
+    /// The §10 rule for one row: per message for own rows, DMs, groups and
+    /// pinned channels; per conversation for inbound unpinned-channel rows.
+    fn foreign_row_event(&mut self, conv: i64, id: i64, dir: ForeignDir, change: ForeignChange) {
+        if dir == ForeignDir::In && self.coalesces(conv) {
+            self.foreign_event(conv, None, change);
+        } else {
+            self.foreign_event(conv, Some(id), change);
+        }
+    }
+
+    /// [`Core::foreign_row_event`] for a row known by id only.
+    fn foreign_id_event(&mut self, id: i64, change: ForeignChange) {
+        match self.store.foreign_message(id) {
+            Ok(Some(r)) => self.foreign_row_event(r.conv, id, r.dir, change),
+            Ok(None) => {}
+            Err(_) => self.counters.errors += 1,
+        }
+    }
+
+    // -- writes ---------------------------------------------------------------
+
+    fn foreign_ingest(&mut self, batch: Vec<ForeignInsert>) -> Result<Vec<Option<i64>>> {
+        let convs: Vec<i64> = batch.iter().map(|r| r.conv).collect();
+        let ids = self.store.foreign_insert_batch(batch).map_err(fx)?;
+        for (conv, id) in convs.into_iter().zip(&ids) {
+            if let Some(id) = *id {
+                self.foreign_row_event(conv, id, ForeignDir::In, ForeignChange::New);
+            }
+        }
+        Ok(ids)
+    }
+
+    fn foreign_set_state(
+        &mut self,
+        id: i64,
+        state: ForeignState,
+        evidence: Option<String>,
+        reason: Option<String>,
+    ) -> Result<StateChange> {
+        let ch = self
+            .store
+            .foreign_set_state(id, state, evidence.as_deref(), reason.as_deref())
+            .map_err(fx)?;
+        if ch == StateChange::Changed {
+            self.foreign_id_event(id, ForeignChange::State);
+        }
+        Ok(ch)
+    }
+
+    fn foreign_set_meta(&mut self, id: i64, key: &str, value: Option<ForeignMeta>) -> Result<bool> {
+        if key == "handoff" {
+            return Err(FabricError::Invalid(
+                "the handoff mark is set only by foreign_handoff_begin / foreign_accepted",
+            ));
+        }
+        let v = value.as_ref().map(|v| match v {
+            ForeignMeta::Str(s) => MetaValue::Str(s),
+            ForeignMeta::Int(i) => MetaValue::Int(*i),
+            ForeignMeta::Bool(b) => MetaValue::Bool(*b),
+        });
+        let found = self.store.foreign_set_meta(id, key, v).map_err(fx)?;
+        if found {
+            self.foreign_id_event(id, ForeignChange::State);
+        }
+        Ok(found)
+    }
+
+    fn foreign_queue_sends(&mut self, sends: Vec<ForeignQueue>) -> Result<Vec<i64>> {
+        let rows: Vec<ForeignSend<'_>> = sends.iter().map(ForeignQueue::borrow).collect();
+        let ids = self.store.foreign_queue_sends(&rows).map_err(fx)?;
+        for (s, id) in sends.iter().zip(&ids) {
+            self.foreign_event(s.conv, Some(*id), ForeignChange::New);
+        }
+        Ok(ids)
+    }
+
+    fn foreign_cancel(&mut self, id: i64) -> Result<()> {
+        let row = self
+            .store
+            .foreign_message(id)
+            .map_err(fx)?
+            .ok_or(FabricError::NotFound)?;
+        // The store refuses a pending handoff; a recorded native id (the
+        // carrier accepted it) is refused here too: fail closed.
+        let untouched = row.dir == ForeignDir::Own
+            && row.state == ForeignState::Queued
+            && !row.handoff_pending
+            && row.native_msg_id.is_none();
+        if !untouched {
+            return Err(FabricError::NotRetryable);
+        }
+        self.store.foreign_cancel(id).map_err(fx)?;
+        self.foreign_event(row.conv, Some(id), ForeignChange::State);
+        Ok(())
+    }
+
+    fn foreign_group_create(
+        &mut self,
+        text: &str,
+        targets: &str,
+        parts: &[ForeignGroupPart],
+    ) -> Result<(i64, Vec<i64>)> {
+        let gp: Vec<GroupPart<'_>> = parts
+            .iter()
+            .map(|p| GroupPart {
+                conv: p.conv,
+                text: &p.text,
+                part_k: p.part_k,
+                part_n: p.part_n,
+            })
+            .collect();
+        let (group, ids) = self
+            .store
+            .send_group_create(text, targets, &gp)
+            .map_err(fx)?;
+        for (p, id) in parts.iter().zip(&ids) {
+            self.foreign_event(p.conv, Some(*id), ForeignChange::New);
+        }
+        Ok((group, ids))
+    }
+
+    fn foreign_group(&self, id: i64) -> Result<ForeignGroupView> {
+        let group = self
+            .store
+            .send_group(id)
+            .map_err(fx)?
+            .ok_or(FabricError::NotFound)?;
+        let rows = self.store.send_group_rows(id).map_err(fx)?;
+        Ok(ForeignGroupView { group, rows })
+    }
+
+    fn foreign_edge_create(&mut self, e: &ForeignEdgeNew) -> Result<EdgeRow> {
+        let id = self
+            .store
+            .edge_create(&EdgeNew {
+                src_conv: e.src_conv,
+                dst_conv: e.dst_conv,
+                honour_ok_to_mqtt: e.honour_ok_to_mqtt,
+                oversize: e.oversize,
+                consent: e.consent.borrow(),
+            })
+            .map_err(fx)?;
+        self.store
+            .edge(id)
+            .map_err(fx)?
+            .ok_or(FabricError::Store(StoreError::Corrupt("edge just created")))
+    }
+
+    fn foreign_edge_patch(&mut self, id: i64, p: &ForeignEdgePatch) -> Result<EdgeRow> {
+        let e = self
+            .store
+            .edge(id)
+            .map_err(fx)?
+            .ok_or(FabricError::NotFound)?;
+        if p.honour_ok_to_mqtt
+            .is_some_and(|v| v != e.honour_ok_to_mqtt)
+            || p.oversize.is_some_and(|v| v != e.oversize)
+        {
+            return Err(FabricError::Invalid(
+                "an edge keeps honour_ok_to_mqtt and oversize as created; \
+                 delete it and create a new one to change them",
+            ));
+        }
+        if let Some(paused) = p.paused {
+            let consent = p.consent.as_ref().map(ForeignConsent::borrow);
+            self.store
+                .edge_set_paused(id, paused, consent.as_ref())
+                .map_err(fx)?;
+        }
+        self.store
+            .edge(id)
+            .map_err(fx)?
+            .ok_or(FabricError::NotFound)
+    }
+
+    fn foreign_edge_set_enabled(
+        &mut self,
+        id: i64,
+        enabled: bool,
+        consent: Option<&ForeignConsent>,
+    ) -> Result<bool> {
+        let dst = self.store.edge(id).map_err(fx)?.map(|e| e.dst_conv);
+        let consent = consent.map(ForeignConsent::borrow);
+        let changed = self
+            .store
+            .edge_set_enabled(id, enabled, consent.as_ref())
+            .map_err(fx)?;
+        if let (true, false, Some(dst)) = (changed, enabled, dst) {
+            // a disabled edge has no backlog: its never-handed copies left
+            self.foreign_event(dst, None, ForeignChange::Conversation);
+        }
+        Ok(changed)
+    }
+
+    fn foreign_edge_delete(&mut self, id: i64) -> Result<bool> {
+        let Some(e) = self.store.edge(id).map_err(fx)? else {
+            return Ok(false);
+        };
+        let gone = self.store.edge_delete(id).map_err(fx)?;
+        if gone {
+            // queued copies of the edge left the destination
+            self.foreign_event(e.dst_conv, None, ForeignChange::Conversation);
+        }
+        Ok(gone)
+    }
+
+    fn foreign_conversation_upsert(
+        &mut self,
+        network: &str,
+        account: &str,
+        kind: ForeignKind,
+        native_id: &str,
+        title: Option<&str>,
+    ) -> Result<i64> {
+        let id = self
+            .store
+            .foreign_conversation_upsert(network, account, kind, native_id, title)
+            .map_err(fx)?;
+        let unchanged = self
+            .foreign_convs
+            .get(&id)
+            .is_some_and(|f| title.is_none() || f.title.as_deref() == title);
+        if !unchanged {
+            match self.store.foreign_conversation(id) {
+                Ok(Some(c)) => self.remember_conv(id, ConvFacts::of(&c)),
+                _ => {
+                    self.foreign_convs.remove(&id);
+                }
+            }
+            self.foreign_event(id, None, ForeignChange::Conversation);
+        }
+        Ok(id)
+    }
+
+    fn foreign_conversation_pin(&mut self, id: i64, pinned: bool) -> Result<()> {
+        self.store
+            .foreign_conversation_set_pinned(id, pinned)
+            .map_err(fx)?;
+        if let Some(f) = self.foreign_convs.get_mut(&id) {
+            f.pinned = pinned;
+        }
+        self.foreign_event(id, None, ForeignChange::Conversation);
+        Ok(())
+    }
+
+    fn foreign_conversation_mark_read(&mut self, id: i64) -> Result<()> {
+        let c = self.foreign_conversation(id)?;
+        if c.unread == 0 {
+            return Ok(());
+        }
+        self.store.foreign_conversation_mark_read(id).map_err(fx)?;
+        self.foreign_event(id, None, ForeignChange::Conversation);
+        Ok(())
+    }
+
+    // -- reads ----------------------------------------------------------------
+
+    fn foreign_conversation(&self, id: i64) -> Result<ForeignConversationRow> {
+        self.store
+            .foreign_conversation(id)
+            .map_err(fx)?
+            .ok_or(FabricError::NotFound)
+    }
+
+    fn foreign_thread(
+        &self,
+        conv: i64,
+        since_seq: Option<u64>,
+        limit: usize,
+    ) -> Result<ForeignThreadPage> {
+        let conversation = self.foreign_conversation(conv)?;
+        let limit = limit.clamp(1, MAX_FOREIGN_PAGE);
+        let mut messages = match since_seq {
+            Some(s) => self.store.foreign_messages(conv, s, limit + 1),
+            None => self.store.foreign_thread_page(conv, limit + 1),
+        }
+        .map_err(fx)?;
+        let more = messages.len() > limit;
+        if more {
+            match since_seq {
+                Some(_) => messages.truncate(limit),
+                None => {
+                    messages.remove(0);
+                }
+            }
+        }
+        Ok(ForeignThreadPage {
+            conversation,
+            messages,
+            more,
+        })
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
@@ -4108,5 +5042,797 @@ mod tests {
             ..Conn::default()
         };
         assert!(d.sendable_to(&x));
+    }
+}
+
+/// Layer 6 foreign calls through the actor (§3 typed writes, §10 SSE
+/// coalescing): every call, the 256-row cap, and the coalescing rule.
+#[cfg(test)]
+mod foreign_tests {
+    use super::*;
+    use crate::keys::StoreKey;
+    use crate::store::{ForeignAuth, OpenParams};
+    use crate::test_double::TestSealer;
+
+    struct Node {
+        f: Fabric,
+        _dir: tempfile::TempDir,
+    }
+
+    /// Store opens are serialized within the test process: concurrent first
+    /// SQLCipher opens failed rarely under load (the integration harness
+    /// and the daemon serialize them the same way).
+    static OPEN: Mutex<()> = Mutex::new(());
+
+    fn node() -> Node {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let sealer = Arc::new(TestSealer::from_label("bridge"));
+        let _one = OPEN.lock().unwrap_or_else(|e| e.into_inner());
+        let (store, decision) = Store::open(
+            dir.path(),
+            &StoreKey::from_bytes([0x6f; 32]),
+            &OpenParams {
+                announce_last: sealer.announce_last(),
+                restore_floor_set: false,
+            },
+        )
+        .expect("store");
+        let f = Fabric::start(sealer, store, decision, FabricSettings::default()).expect("fabric");
+        Node { f, _dir: dir }
+    }
+
+    fn row(conv: i64, native: Option<&str>, body: &str) -> ForeignInsert {
+        ForeignInsert {
+            conv,
+            sender_native: "!a1b2c3d4".into(),
+            sender_name: Some("W1AW".into()),
+            auth: ForeignAuth::ChannelKey,
+            native_msg_id: native.map(str::to_owned),
+            body: body.into(),
+            claim_ts: None,
+            meta: None,
+            id_globally_unique: false,
+        }
+    }
+
+    fn rows(conv: i64, tag: &str, n: usize) -> Vec<ForeignInsert> {
+        (0..n)
+            .map(|i| row(conv, Some(&format!("{tag}{i}")), &format!("{tag} {i}")))
+            .collect()
+    }
+
+    fn consent(h: char) -> ForeignConsent {
+        ForeignConsent {
+            consent_hash: h.to_string().repeat(64),
+            enabled_by: "loopback".into(),
+        }
+    }
+
+    type Ev = (i64, Option<i64>, ForeignChange);
+
+    /// Subscribe after a barrier call, so events of earlier calls (emitted
+    /// at the end of their tick) are not seen.
+    async fn subscribe(f: &Fabric) -> broadcast::Receiver<FabricEvent> {
+        f.foreign_conversations(None).await.expect("barrier");
+        f.subscribe()
+    }
+
+    /// The `Foreign` events emitted so far: a barrier call first (its job
+    /// runs only after every earlier tick emitted its events).
+    async fn events(f: &Fabric, rx: &mut broadcast::Receiver<FabricEvent>) -> Vec<Ev> {
+        f.foreign_conversations(None).await.expect("barrier");
+        let mut out = Vec::new();
+        while let Ok(e) = rx.try_recv() {
+            if let FabricEvent::Foreign { conv, id, change } = e {
+                out.push((conv, id, change));
+            }
+        }
+        out
+    }
+
+    async fn channel(f: &Fabric, account: &str, name: &str) -> i64 {
+        f.foreign_conversation_upsert(
+            "meshtastic",
+            account,
+            ForeignKind::Channel,
+            &format!("ch:{name}:00ff"),
+            Some(name),
+        )
+        .await
+        .expect("channel")
+    }
+
+    async fn dm(f: &Fabric, native: &str) -> i64 {
+        f.foreign_conversation_upsert("meshtastic", "!board", ForeignKind::Dm, native, None)
+            .await
+            .expect("dm")
+    }
+
+    #[tokio::test]
+    async fn ingest_is_one_bounded_batch_per_call() {
+        let n = node();
+        let c = channel(&n.f, "!board", "LongFast").await;
+        let over = rows(c, "o", MAX_FOREIGN_INGEST + 1);
+        assert!(matches!(
+            n.f.foreign_ingest(over).await,
+            Err(FabricError::Invalid(_))
+        ));
+        assert_eq!(n.f.foreign_conversation(c).await.unwrap().messages, 0);
+        assert!(n.f.foreign_ingest(Vec::new()).await.unwrap().is_empty());
+        let ids = n.f.foreign_ingest(rows(c, "k", 256)).await.unwrap();
+        assert_eq!(ids.len(), 256);
+        assert!(ids.iter().all(Option::is_some));
+        // one transaction: the batch drew contiguous local_seq
+        let page = n.f.foreign_thread(c, None, 300).await.unwrap();
+        let seqs: Vec<u64> = page.messages.iter().map(|m| m.local_seq).collect();
+        assert!(seqs.windows(2).all(|w| w[1] == w[0] + 1), "{seqs:?}");
+        // a repeated (key, body) inside the window is a duplicate
+        let tail: Vec<ForeignInsert> = rows(c, "k", 256).into_iter().skip(253).collect();
+        let again = n.f.foreign_ingest(tail).await.unwrap();
+        assert_eq!(again, vec![None, None, None]);
+        // the same packet id with another body is a new row only beyond
+        // the window: here k0's id is 256 rows back, so it is inserted
+        let old = n.f.foreign_ingest(rows(c, "k", 1)).await.unwrap();
+        assert!(old[0].is_some());
+        // an unknown conversation writes nothing and names nothing
+        assert!(matches!(
+            n.f.foreign_ingest(vec![row(9_999, None, "x")]).await,
+            Err(FabricError::NotFound)
+        ));
+        let mut big = rows(c, "q", 2);
+        big[1].body = "x".repeat(crate::store::MAX_FOREIGN_BODY + 1);
+        assert!(matches!(
+            n.f.foreign_ingest(big).await,
+            Err(FabricError::Invalid(_))
+        ));
+        assert_eq!(n.f.foreign_conversation(c).await.unwrap().messages, 257);
+    }
+
+    #[tokio::test]
+    async fn unpinned_channel_traffic_coalesces_per_conversation_dms_per_message() {
+        let n = node();
+        let mut rx = subscribe(&n.f).await;
+        let c = channel(&n.f, "!board", "LongFast").await;
+        assert_eq!(
+            events(&n.f, &mut rx).await,
+            vec![(c, None, ForeignChange::Conversation)]
+        );
+        // 50 channel rows in one call: ONE event, for the conversation
+        let ids = n.f.foreign_ingest(rows(c, "a", 50)).await.unwrap();
+        assert_eq!(ids.iter().flatten().count(), 50);
+        assert_eq!(
+            events(&n.f, &mut rx).await,
+            vec![(c, None, ForeignChange::New)]
+        );
+        // a DM: one event per row
+        let d = dm(&n.f, "dm:!0badc0de").await;
+        assert_eq!(
+            events(&n.f, &mut rx).await,
+            vec![(d, None, ForeignChange::Conversation)]
+        );
+        let ids = n.f.foreign_ingest(rows(d, "d", 5)).await.unwrap();
+        let got = events(&n.f, &mut rx).await;
+        let want: Vec<Ev> = ids
+            .iter()
+            .map(|id| (d, Some(id.unwrap()), ForeignChange::New))
+            .collect();
+        assert_eq!(got, want);
+        // one mixed batch: the channel once, the DM rows each
+        let mut mixed = rows(c, "m", 10);
+        mixed.extend(rows(d, "e", 3));
+        n.f.foreign_ingest(mixed).await.unwrap();
+        let got = events(&n.f, &mut rx).await;
+        assert_eq!(got.iter().filter(|e| e.0 == c).count(), 1);
+        assert_eq!(got.iter().filter(|e| e.0 == d && e.1.is_some()).count(), 3);
+        // a pinned channel's rows are shown (and signalled) one by one
+        n.f.foreign_conversation_pin(c, true).await.unwrap();
+        assert_eq!(
+            events(&n.f, &mut rx).await,
+            vec![(c, None, ForeignChange::Conversation)]
+        );
+        n.f.foreign_ingest(rows(c, "p", 4)).await.unwrap();
+        let got = events(&n.f, &mut rx).await;
+        assert_eq!(got.len(), 4);
+        assert!(got.iter().all(|e| e.0 == c && e.1.is_some()));
+        n.f.foreign_conversation_pin(c, false).await.unwrap();
+        events(&n.f, &mut rx).await;
+        n.f.foreign_ingest(rows(c, "u", 7)).await.unwrap();
+        assert_eq!(events(&n.f, &mut rx).await.len(), 1);
+        // the same upsert again: no event; a new title: one
+        assert_eq!(channel(&n.f, "!board", "LongFast").await, c);
+        n.f.foreign_conversation_upsert(
+            "meshtastic",
+            "!board",
+            ForeignKind::Channel,
+            "ch:LongFast:00ff",
+            None,
+        )
+        .await
+        .unwrap();
+        assert!(events(&n.f, &mut rx).await.is_empty());
+        n.f.foreign_conversation_upsert(
+            "meshtastic",
+            "!board",
+            ForeignKind::Channel,
+            "ch:LongFast:00ff",
+            Some("Long Fast"),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            events(&n.f, &mut rx).await,
+            vec![(c, None, ForeignChange::Conversation)]
+        );
+        assert_eq!(
+            n.f.foreign_conversation(c).await.unwrap().title.as_deref(),
+            Some("Long Fast")
+        );
+        // the rail: every network, then one
+        assert_eq!(n.f.foreign_conversations(None).await.unwrap().len(), 2);
+        assert_eq!(
+            n.f.foreign_conversations(Some("meshtastic"))
+                .await
+                .unwrap()
+                .len(),
+            2
+        );
+        assert!(n
+            .f
+            .foreign_conversations(Some("lxmf"))
+            .await
+            .unwrap()
+            .is_empty());
+        // a refused network id is a 400, never a store fault
+        assert!(matches!(
+            n.f.foreign_conversation_upsert("111", "a", ForeignKind::Dm, "x", None)
+                .await,
+            Err(FabricError::Invalid(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn own_rows_states_and_meta_are_per_message() {
+        let n = node();
+        let d = dm(&n.f, "dm:!0badc0de").await;
+        let mut rx = subscribe(&n.f).await;
+        let part = ForeignGroupPart {
+            conv: d,
+            text: "hello".into(),
+            part_k: 1,
+            part_n: 1,
+        };
+        let (g, ids) =
+            n.f.foreign_group_create("hello", "[]", vec![part])
+                .await
+                .unwrap();
+        let id = ids[0];
+        assert_eq!(
+            events(&n.f, &mut rx).await,
+            vec![(d, Some(id), ForeignChange::New)]
+        );
+        let view = n.f.foreign_group(g).await.unwrap();
+        assert_eq!(view.group.text, "hello");
+        assert_eq!(view.rows.len(), 1);
+        assert_eq!(view.rows[0].group_id, Some(g));
+        assert!(matches!(
+            n.f.foreign_group(g + 100).await,
+            Err(FabricError::NotFound)
+        ));
+        // the adapter tick's queue
+        let q = n.f.foreign_queued("meshtastic", 10).await.unwrap();
+        assert_eq!(q.iter().map(|m| m.id).collect::<Vec<_>>(), vec![id]);
+        // §4 monotone states
+        let sent =
+            n.f.foreign_set_state(id, ForeignState::Sent, Some("accepted by the radio"), None)
+                .await
+                .unwrap();
+        assert_eq!(sent, StateChange::Changed);
+        assert_eq!(
+            events(&n.f, &mut rx).await,
+            vec![(d, Some(id), ForeignChange::State)]
+        );
+        let back =
+            n.f.foreign_set_state(id, ForeignState::Queued, None, None)
+                .await
+                .unwrap();
+        assert_eq!(back, StateChange::Unchanged);
+        assert!(events(&n.f, &mut rx).await.is_empty());
+        let m = n.f.foreign_message(id).await.unwrap();
+        assert_eq!(m.state, ForeignState::Sent);
+        assert_eq!(m.evidence.as_deref(), Some("accepted by the radio"));
+        // meta: one field, never the handoff mark
+        assert!(matches!(
+            n.f.foreign_set_meta(id, "handoff", Some(ForeignMeta::Str("pending".into())))
+                .await,
+            Err(FabricError::Invalid(_))
+        ));
+        assert!(n
+            .f
+            .foreign_set_meta(id, "hops", Some(ForeignMeta::Int(3)))
+            .await
+            .unwrap());
+        assert!(!n
+            .f
+            .foreign_set_meta(9_999, "hops", Some(ForeignMeta::Int(3)))
+            .await
+            .unwrap());
+        assert_eq!(
+            events(&n.f, &mut rx).await,
+            vec![(d, Some(id), ForeignChange::State)]
+        );
+        assert!(n
+            .f
+            .foreign_message(id)
+            .await
+            .unwrap()
+            .meta
+            .contains("\"hops\":3"));
+        // a group of more than 256 parts never reaches the actor
+        let many: Vec<ForeignGroupPart> = (0..257)
+            .map(|_| ForeignGroupPart {
+                conv: d,
+                text: "x".into(),
+                part_k: 1,
+                part_n: 1,
+            })
+            .collect();
+        assert!(matches!(
+            n.f.foreign_group_create("x", "[]", many).await,
+            Err(FabricError::Invalid(_))
+        ));
+        assert!(matches!(
+            n.f.foreign_message(9_999).await,
+            Err(FabricError::NotFound)
+        ));
+        // an inbound row has no send state
+        let inbound = n.f.foreign_ingest(rows(d, "i", 1)).await.unwrap()[0].unwrap();
+        assert!(matches!(
+            n.f.foreign_set_state(inbound, ForeignState::Sent, None, None)
+                .await,
+            Err(FabricError::Invalid(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn cancel_only_while_queued_and_never_handed_off() {
+        let n = node();
+        let d = dm(&n.f, "dm:!0badc0de").await;
+        let parts = (1..=3)
+            .map(|k| ForeignGroupPart {
+                conv: d,
+                text: format!("({k}/3) part"),
+                part_k: k,
+                part_n: 3,
+            })
+            .collect();
+        let (_, ids) =
+            n.f.foreign_group_create("part part part", "[]", parts)
+                .await
+                .unwrap();
+        let (a, b, c) = (ids[0], ids[1], ids[2]);
+        n.f.foreign_handoff_begin(a).await.unwrap();
+        assert!(matches!(
+            n.f.foreign_cancel(a).await,
+            Err(FabricError::NotRetryable)
+        ));
+        let mut rx = subscribe(&n.f).await;
+        n.f.foreign_cancel(b).await.unwrap();
+        assert_eq!(
+            events(&n.f, &mut rx).await,
+            vec![(d, Some(b), ForeignChange::State)]
+        );
+        // deleted: it can never be offered or sent
+        assert!(matches!(
+            n.f.foreign_message(b).await,
+            Err(FabricError::NotFound)
+        ));
+        assert!(!n
+            .f
+            .foreign_queued("meshtastic", 10)
+            .await
+            .unwrap()
+            .iter()
+            .any(|m| m.id == b));
+        assert!(matches!(
+            n.f.foreign_cancel(b).await,
+            Err(FabricError::NotFound)
+        ));
+        // a sent row is past cancelling
+        n.f.foreign_set_state(c, ForeignState::Sent, None, None)
+            .await
+            .unwrap();
+        assert!(matches!(
+            n.f.foreign_cancel(c).await,
+            Err(FabricError::NotRetryable)
+        ));
+        // accepted by a carrier (native id recorded): no longer cancellable
+        n.f.foreign_accepted(a, "0x2a").await.unwrap();
+        assert!(!n.f.foreign_message(a).await.unwrap().handoff_pending);
+        assert!(matches!(
+            n.f.foreign_cancel(a).await,
+            Err(FabricError::NotRetryable)
+        ));
+        // the other parts keep their own state
+        assert_eq!(
+            n.f.foreign_message(c).await.unwrap().state,
+            ForeignState::Sent
+        );
+        assert!(n
+            .f
+            .foreign_message(a)
+            .await
+            .unwrap()
+            .native_msg_id
+            .is_some());
+        let inbound = n.f.foreign_ingest(rows(d, "i", 1)).await.unwrap()[0].unwrap();
+        assert!(matches!(
+            n.f.foreign_cancel(inbound).await,
+            Err(FabricError::NotRetryable)
+        ));
+        assert!(matches!(
+            n.f.foreign_cancel(9_999).await,
+            Err(FabricError::NotFound)
+        ));
+        assert!(matches!(
+            n.f.foreign_handoff_begin(b).await,
+            Err(FabricError::Invalid(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn edges_through_the_actor() {
+        let n = node();
+        let src = channel(&n.f, "!board", "LongFast").await;
+        let dst = channel(&n.f, "!board2", "Ops").await;
+        let d = dm(&n.f, "dm:!0badc0de").await;
+        n.f.foreign_ingest(rows(src, "h", 2)).await.unwrap(); // history
+        let new = |s, t| ForeignEdgeNew {
+            src_conv: s,
+            dst_conv: t,
+            honour_ok_to_mqtt: false,
+            oversize: EdgeOversize::Refuse,
+            consent: consent('a'),
+        };
+        let e = n.f.foreign_edge_create(new(src, dst)).await.unwrap();
+        assert!(e.enabled && !e.paused && e.cursor_seq > 0);
+        assert_eq!(
+            (e.src_kind, e.dst_kind),
+            (ForeignKind::Channel, ForeignKind::Channel)
+        );
+        for bad in [new(d, dst), new(src, d), new(src, src), new(src, dst)] {
+            assert!(matches!(
+                n.f.foreign_edge_create(bad).await,
+                Err(FabricError::Invalid(_))
+            ));
+        }
+        assert!(matches!(
+            n.f.foreign_edge_create(new(src, 9_999)).await,
+            Err(FabricError::NotFound)
+        ));
+        assert!(n.f.foreign_edge_inputs(e.id, 10).await.unwrap().is_empty());
+        n.f.foreign_ingest(rows(src, "n", 3)).await.unwrap();
+        let inputs = n.f.foreign_edge_inputs(e.id, 10).await.unwrap();
+        assert_eq!(inputs.len(), 3, "history before cursor_seq is never input");
+        let origin = &inputs[0];
+        let copy =
+            n.f.foreign_queue_send(ForeignQueue::relay_copy(
+                dst,
+                format!("[W1AW/M] {}", origin.body),
+                e.id,
+                origin.id,
+                1,
+                1,
+            ))
+            .await
+            .unwrap();
+        let e2 = n.f.foreign_edge_get(e.id).await.unwrap();
+        assert_eq!(e2.relayed_seq, origin.local_seq, "advanced with the copy");
+        assert_eq!(n.f.foreign_edge_inputs(e.id, 10).await.unwrap().len(), 2);
+        let c = n.f.foreign_message(copy).await.unwrap();
+        assert_eq!((c.edge_id, c.origin_msg), (Some(e.id), Some(origin.id)));
+        // a copy to the wrong conversation, or one that is user-composed and a copy
+        let mut wrong = ForeignQueue::relay_copy(src, "x".into(), e.id, inputs[1].id, 1, 1);
+        assert!(matches!(
+            n.f.foreign_queue_send(wrong.clone()).await,
+            Err(FabricError::Invalid(_))
+        ));
+        wrong.conv = dst;
+        wrong.group_id = Some(1);
+        assert!(matches!(
+            n.f.foreign_queue_send(wrong).await,
+            Err(FabricError::Invalid(_))
+        ));
+        let q = |f: Fabric| async move { f.foreign_queued("meshtastic", 10).await.unwrap() };
+        assert_eq!(q(n.f.clone()).await.len(), 1);
+        // patch: pause and resume; options stay as created
+        let refused = ForeignEdgePatch {
+            oversize: Some(EdgeOversize::Split),
+            paused: Some(true),
+            ..ForeignEdgePatch::default()
+        };
+        assert!(matches!(
+            n.f.foreign_edge_patch(e.id, refused).await,
+            Err(FabricError::Invalid(_))
+        ));
+        assert!(
+            !n.f.foreign_edge_get(e.id).await.unwrap().paused,
+            "nothing written"
+        );
+        let same = ForeignEdgePatch {
+            oversize: Some(EdgeOversize::Refuse),
+            honour_ok_to_mqtt: Some(false),
+            paused: Some(true),
+            ..ForeignEdgePatch::default()
+        };
+        assert!(n.f.foreign_edge_patch(e.id, same).await.unwrap().paused);
+        assert!(
+            q(n.f.clone()).await.is_empty(),
+            "a paused edge's copies wait"
+        );
+        let resume = ForeignEdgePatch {
+            paused: Some(false),
+            ..ForeignEdgePatch::default()
+        };
+        assert!(matches!(
+            n.f.foreign_edge_patch(e.id, resume.clone()).await,
+            Err(FabricError::Invalid(_))
+        ));
+        let resume = ForeignEdgePatch {
+            consent: Some(consent('b')),
+            ..resume
+        };
+        let r = n.f.foreign_edge_patch(e.id, resume).await.unwrap();
+        assert!(!r.paused);
+        assert_eq!(r.consent_hash, "b".repeat(64));
+        assert!(n.f.foreign_edge_set_paused(e.id, true, None).await.unwrap());
+        assert!(!n.f.foreign_edge_set_paused(e.id, true, None).await.unwrap());
+        assert!(n
+            .f
+            .foreign_edge_set_paused(e.id, false, Some(consent('c')))
+            .await
+            .unwrap());
+        // disable drops the never-handed backlog (the destination is told);
+        // re-enable moves the cursor (what arrived while off is history)
+        assert_eq!(q(n.f.clone()).await.len(), 1);
+        let mut rx = subscribe(&n.f).await;
+        assert!(n
+            .f
+            .foreign_edge_set_enabled(e.id, false, None)
+            .await
+            .unwrap());
+        assert_eq!(
+            events(&n.f, &mut rx).await,
+            vec![(dst, None, ForeignChange::Conversation)]
+        );
+        let gone = n.f.foreign_message(copy).await;
+        assert!(matches!(gone, Err(FabricError::NotFound)), "{gone:?}");
+        assert!(!n
+            .f
+            .foreign_edge_set_enabled(e.id, false, None)
+            .await
+            .unwrap());
+        assert!(
+            events(&n.f, &mut rx).await.is_empty(),
+            "no change, no event"
+        );
+        n.f.foreign_ingest(rows(src, "off", 2)).await.unwrap();
+        assert!(matches!(
+            n.f.foreign_edge_set_enabled(e.id, true, None).await,
+            Err(FabricError::Invalid(_))
+        ));
+        assert!(n
+            .f
+            .foreign_edge_set_enabled(e.id, true, Some(consent('d')))
+            .await
+            .unwrap());
+        assert!(n.f.foreign_edge_inputs(e.id, 10).await.unwrap().is_empty());
+        // counters, the high-water mark, the loop guard
+        n.f.foreign_edge_count(e.id, EdgeCounter::Relayed, 2)
+            .await
+            .unwrap();
+        n.f.foreign_edge_count(e.id, EdgeCounter::Refused, 1)
+            .await
+            .unwrap();
+        let cur = n.f.foreign_edge_get(e.id).await.unwrap().cursor_seq;
+        let hw =
+            n.f.foreign_edge_advance_relayed(e.id, cur + 1)
+                .await
+                .unwrap();
+        assert_eq!(hw, cur + 1);
+        assert_eq!(
+            n.f.foreign_edge_advance_relayed(e.id, 1).await.unwrap(),
+            cur + 1,
+            "never backwards"
+        );
+        let e3 = n.f.foreign_edge_get(e.id).await.unwrap();
+        assert_eq!((e3.relayed, e3.refused, e3.shed), (2, 1, 0));
+        n.f.foreign_seen_insert(e.id, src, "!a1b2c3d4", "n0", 7)
+            .await
+            .unwrap();
+        assert!(n
+            .f
+            .foreign_seen_contains(Some(e.id), src, "!a1b2c3d4", "n0")
+            .await
+            .unwrap());
+        assert!(n
+            .f
+            .foreign_seen_contains(None, src, "!a1b2c3d4", "n0")
+            .await
+            .unwrap());
+        assert!(!n
+            .f
+            .foreign_seen_contains(None, src, "!a1b2c3d4", "n1")
+            .await
+            .unwrap());
+        assert!(matches!(
+            n.f.foreign_seen_insert(9_999, src, "!a", "n", 1).await,
+            Err(FabricError::NotFound)
+        ));
+        assert_eq!(n.f.foreign_edge_list().await.unwrap().len(), 1);
+        // delete: the destination is told (its queued copies are gone)
+        // (the first new row sits at the shed mark cur + 1: never input)
+        let z = n.f.foreign_ingest(rows(src, "z", 2)).await.unwrap();
+        assert_eq!(n.f.foreign_edge_inputs(e.id, 10).await.unwrap().len(), 1);
+        let o2 = z[1].unwrap();
+        let copy2 =
+            n.f.foreign_queue_send(ForeignQueue::relay_copy(
+                dst,
+                "[W1AW/M] z".into(),
+                e.id,
+                o2,
+                1,
+                1,
+            ))
+            .await
+            .unwrap();
+        assert!(
+            matches!(
+                n.f.foreign_queue_send(ForeignQueue::relay_copy(
+                    dst,
+                    "again".into(),
+                    e.id,
+                    o2,
+                    1,
+                    1
+                ))
+                .await,
+                Err(FabricError::Invalid(_))
+            ),
+            "one copy per origin per edge"
+        );
+        assert!(n.f.foreign_edge_delete(e.id).await.unwrap());
+        let got = events(&n.f, &mut rx).await;
+        let at_dst: Vec<Ev> = got.iter().copied().filter(|e| e.0 == dst).collect();
+        assert_eq!(
+            at_dst,
+            vec![
+                (dst, Some(copy2), ForeignChange::New),
+                (dst, None, ForeignChange::Conversation)
+            ]
+        );
+        // the source's two ingests since the subscription: one event each
+        assert_eq!(got.iter().filter(|e| e.0 == src).count(), 2, "{got:?}");
+        let gone = n.f.foreign_message(copy2).await;
+        assert!(matches!(gone, Err(FabricError::NotFound)), "{gone:?}");
+        assert!(!n.f.foreign_edge_delete(e.id).await.unwrap());
+        assert!(n.f.foreign_edge_list().await.unwrap().is_empty());
+        assert!(matches!(
+            n.f.foreign_edge_get(e.id).await,
+            Err(FabricError::NotFound)
+        ));
+    }
+
+    #[tokio::test]
+    async fn queue_order_puts_user_rows_ahead_of_relay_copies() {
+        let n = node();
+        let src = channel(&n.f, "!board", "LongFast").await;
+        let dst = channel(&n.f, "!board2", "Ops").await;
+        let e =
+            n.f.foreign_edge_create(ForeignEdgeNew {
+                src_conv: src,
+                dst_conv: dst,
+                honour_ok_to_mqtt: false,
+                oversize: EdgeOversize::Split,
+                consent: consent('a'),
+            })
+            .await
+            .unwrap();
+        let o = n.f.foreign_ingest(rows(src, "r", 1)).await.unwrap()[0].unwrap();
+        let split = vec![
+            ForeignQueue::relay_copy(dst, "[W1AW/M] (1/2) a".into(), e.id, o, 1, 2),
+            ForeignQueue::relay_copy(dst, "[W1AW/M] (2/2) b".into(), e.id, o, 2, 2),
+        ];
+        let copies = n.f.foreign_queue_sends(split).await.unwrap();
+        assert_eq!(copies.len(), 2);
+        let part = ForeignGroupPart {
+            conv: dst,
+            text: "mine".into(),
+            part_k: 1,
+            part_n: 1,
+        };
+        let (_, mine) =
+            n.f.foreign_group_create("mine", "[]", vec![part])
+                .await
+                .unwrap();
+        let order: Vec<i64> =
+            n.f.foreign_queued("meshtastic", 10)
+                .await
+                .unwrap()
+                .iter()
+                .map(|m| m.id)
+                .collect();
+        assert_eq!(order, vec![mine[0], copies[0], copies[1]]);
+        assert_eq!(n.f.foreign_queued("meshtastic", 1).await.unwrap().len(), 1);
+        assert!(matches!(
+            n.f.foreign_queue_sends(Vec::new()).await,
+            Err(FabricError::Invalid(_))
+        ));
+        let many = (0..257)
+            .map(|_| ForeignQueue::relay_copy(dst, "x".into(), e.id, o, 1, 1))
+            .collect();
+        assert!(matches!(
+            n.f.foreign_queue_sends(many).await,
+            Err(FabricError::Invalid(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn thread_pages_read_marks_and_more() {
+        let n = node();
+        let d = dm(&n.f, "dm:!0badc0de").await;
+        let bodies = |p: &ForeignThreadPage| -> Vec<String> {
+            p.messages.iter().map(|m| m.body.clone()).collect()
+        };
+        n.f.foreign_ingest(rows(d, "t", 5)).await.unwrap();
+        let newest = n.f.foreign_thread(d, None, 2).await.unwrap();
+        assert_eq!(bodies(&newest), vec!["t 3", "t 4"]);
+        assert!(newest.more, "older rows exist");
+        assert_eq!(newest.conversation.unread, 5);
+        let all = n.f.foreign_thread(d, None, 10).await.unwrap();
+        assert_eq!(all.messages.len(), 5);
+        assert!(!all.more);
+        let s1 = all.messages[1].local_seq;
+        let after = n.f.foreign_thread(d, Some(s1), 2).await.unwrap();
+        assert_eq!(bodies(&after), vec!["t 2", "t 3"]);
+        assert!(after.more, "newer rows exist");
+        let s3 = all.messages[3].local_seq;
+        let tail = n.f.foreign_thread(d, Some(s3), 5).await.unwrap();
+        assert_eq!(bodies(&tail), vec!["t 4"]);
+        assert!(!tail.more);
+        // limit 0 reads one row, a huge limit is clamped
+        assert_eq!(
+            n.f.foreign_thread(d, None, 0).await.unwrap().messages.len(),
+            1
+        );
+        assert_eq!(
+            n.f.foreign_thread(d, None, usize::MAX)
+                .await
+                .unwrap()
+                .messages
+                .len(),
+            5
+        );
+        assert!(matches!(
+            n.f.foreign_thread(9_999, None, 5).await,
+            Err(FabricError::NotFound)
+        ));
+        // the read mark: one event, then none while nothing is unread
+        let mut rx = subscribe(&n.f).await;
+        n.f.foreign_conversation_mark_read(d).await.unwrap();
+        assert_eq!(
+            events(&n.f, &mut rx).await,
+            vec![(d, None, ForeignChange::Conversation)]
+        );
+        assert_eq!(n.f.foreign_conversation(d).await.unwrap().unread, 0);
+        n.f.foreign_conversation_mark_read(d).await.unwrap();
+        assert!(events(&n.f, &mut rx).await.is_empty());
+        assert!(matches!(
+            n.f.foreign_conversation_mark_read(9_999).await,
+            Err(FabricError::NotFound)
+        ));
+        assert!(matches!(
+            n.f.foreign_conversation_pin(9_999, true).await,
+            Err(FabricError::NotFound)
+        ));
     }
 }
