@@ -6,7 +6,7 @@
 
 **Opener brief:** [`cross-layer/devices.md`](../../cross-layer/devices.md) (device-connection core, D17 decisions, §9 Layer 5 hand-offs). Parked ideas picked up here: P1 Meshtastic bridge, P2 phone apps ([`cross-layer/parked.md`](../../cross-layer/parked.md)).
 
-**Decisions:** D17 (device decisions), D19 c (LoRa ownership: 111 modem = MeshCore KISS, `owner = 111d | rnsd`), D20 (Layer 5 hand-offs), D22 (GPL-3.0-or-later: changes the linking boundary), **D23** (this kickoff) in [`DECISIONS.md`](../../DECISIONS.md). Build protocol: [`EXECUTION.md`](../../EXECUTION.md).
+**Decisions:** D17 (device decisions), D19 c (LoRa ownership: 111 modem = MeshCore KISS, `owner = 111d | rnsd`), D20 (Layer 5 hand-offs), D22 (GPL-3.0-or-later: changes the linking boundary), **D23** (this kickoff), **D25** (design decisions from the options brief: store, crate, on-demand carriers, bridge-first R-B, relay defaults) in [`DECISIONS.md`](../../DECISIONS.md). Build protocol: [`EXECUTION.md`](../../EXECUTION.md).
 
 ## Files
 
@@ -23,6 +23,6 @@
 | [`research/07-gap-1.md`](research/07-gap-1.md) | Gap 1: MeshChatX actually run as the LXMF carrier; Python floor matrix; hybrid interpreter; slim closure. |
 | [`options.md`](options.md) | Options brief for the owner: 18 settled facts, 8 polled forks with picks, detail picks, plan corrections, critic digest. |
 | [`runs/workflows/`](runs/workflows/) | Workflow scripts, one per run: `research.js` first. |
-| `runs/journals/` | Exported run journals (`<label>.<wf_id>.jsonl`) with a README once the first run is exported. |
+| [`runs/journals/`](runs/journals/) | Exported run journals (`<label>.<wf_id>.jsonl`): `research.wf_7407f773-81c.jsonl` (6 scouts, critic, gap 1); see its README. |
 
 Workflow scripts are launched by their path under `runs/workflows/`; they hard-code `ROOT = /home/kia/projects/111network/os`.
