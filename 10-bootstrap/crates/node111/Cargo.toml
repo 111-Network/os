@@ -73,6 +73,14 @@ blake2 = "=0.11.0"
 # already in the graph via id111 (bip39) at the same pin, 0.1.25 (+0 crates);
 # sign-off row in os/10-bootstrap/TASKS.md "Layer 6 additions".
 unicode-normalization = "0.1.25"
+# Layer 6 B3 (D25 F2 / D27 pre-approved; sign-off row in os/10-bootstrap/TASKS.md
+# "Layer 6 additions"): the official Meshtastic crate, used for its generated
+# protobuf types only (`meshtastic::protobufs` + the re-exported `prost::Message`).
+# No features: its `tokio` feature (the stream API) drags tokio-serial, serialport
+# (MPL-2.0) and tokio "full", so the client on meshmud's downlink is our own
+# (`daemon/meshtastic/client.rs`, spec §5 fallback). GPL-3.0: the shipped `111d` is
+# effectively GPL-3.0-only once this links (LICENSING.md §7).
+meshtastic = { version = "=0.1.9", default-features = false }
 
 [features]
 default = ["mdns"]

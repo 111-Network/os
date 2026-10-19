@@ -2,9 +2,25 @@
 //!
 //! A Meshtastic board is **identified** (consented, [`identify`]), gets a
 //! service row whose page hosts Meshtastic's own web client (through the
-//! [`shim`]), and its nodes-heard feed **Nearby** ([`presence`]). 111 itself
-//! never transmits on the Meshtastic mesh and never changes node
-//! configuration.
+//! [`shim`]), and its nodes-heard feed **Nearby** ([`presence`], and the
+//! client's own node DB once it is connected).
+//!
+//! **What 111 transmits (restated by D23 / D25 and Layer 6 §5; this replaces
+//! Layer 5 §14's "111 never transmits on Meshtastic").** 111 transmits on
+//! Meshtastic only what you send or choose to bridge, as a normal text from
+//! your board's own node: the Layer 6 bridge client ([`client`]) is the one
+//! sender, and its send allowlist at the stream layer ([`allowlist`]) lets out
+//! only plain text packets, its one `want_config_id` per connection and the
+//! nonce-0 keep-alive. 111 still **never writes node configuration** (no admin,
+//! config, xmodem or MQTT-proxy message ever leaves; D17's `meshtastic.set`
+//! stays reserved). The service-page copy is [`SERVICE_COPY`].
+//!
+//! **GPL protobuf code is in this binary now (D22, D25 F2).** The client links
+//! the `meshtastic` crate (GPL-3.0) for its generated prost types, so the
+//! shipped `111d` is effectively GPL-3.0-only (`LICENSING.md` §7; our files
+//! stay "or later"). Layer 5 §14's "no Meshtastic protobuf code enters our
+//! Rust binary" no longer holds; the shim and the presence ingest still decode
+//! nothing.
 //!
 //! Two supervised children, exactly like rnsd and `111-agent`:
 //! - **meshmud** ([`meshmud`]) holds the board's one API-client slot: uplink =
@@ -43,11 +59,47 @@
 //! literal) while no ESTABLISHED socket to it exists in `/proc/net/tcp{,6}`.
 //! Board-reported channel utilization is not known to the daemon (the reader
 //! excludes the local board from its file), so it stays `null`.
+//!
+//! **The bridge client** ([`client::MeshtasticAdapter`], Layer 6 §5) is
+//! attached by the daemon's bridge wiring ([`Meshtastic::attach_client`]: it
+//! holds the conversation key) and runs only while the service runs: every
+//! tick starts it once meshmud is up, its downlink listens and its uplink is
+//! present, and stops it otherwise (the binding dropped, meshmud down, daemon
+//! shutdown), so with the service off it has no task, socket or timer. The
+//! reading of "while LIVE" (§2, §5): LIVE's node-DB clause is the client's own
+//! output once the presence reader retires, so the start gate is LIVE's other
+//! clauses. While the client is connected and configured, Nearby comes from
+//! its node DB (the same `NearbySource` the reader's file yields, the parity
+//! gate in `tests/meshtastic_client.rs`); [`Meshtastic::set_client_nearby`]
+//! turns that off. The reader's retirement is Layer 6 V4's call.
 
+pub mod allowlist;
+pub mod client;
 pub mod identify;
 pub mod meshmud;
 pub mod presence;
 pub mod shim;
+
+/// The service-page copy (Layer 6 §5 "Service-page copy", replacing L5 §14's
+/// "111 never transmits"); the same string as `copy.service` in
+/// `assets/adapters/meshtastic.toml`. [`service_copy`] names the board.
+pub const SERVICE_COPY: &str = "111 transmits on Meshtastic only what you send or choose to bridge, as a normal text from your board's own node. Anyone on that channel can read it: Meshtastic protects channel messages with the channel's key, and the default channel's key is public. If your board uploads to an MQTT server, messages on channels with uplink enabled are published there. Messages from Meshtastic that appear in 111 are not 111-sealed and are labelled with their Meshtastic sender. Meshtastic is a registered mark, used nominatively.";
+
+/// [`SERVICE_COPY`] with the board's own node named: "… from your board's own
+/// node <long name> (!<id>). …" (untrusted name, text only).
+pub fn service_copy(long_name: Option<&str>, id: Option<&str>) -> String {
+    let who = match (long_name.filter(|n| !n.is_empty()), id) {
+        (Some(n), Some(i)) => format!(" {n} ({i})"),
+        (None, Some(i)) => format!(" {i}"),
+        (Some(n), None) => format!(" {n}"),
+        (None, None) => String::new(),
+    };
+    SERVICE_COPY.replacen(
+        "your board's own node.",
+        &format!("your board's own node{who}."),
+        1,
+    )
+}
 
 use crate::daemon::dashboard::ApiState;
 use crate::daemon::devices::registry::MeshtasticView;
@@ -59,6 +111,7 @@ use crate::daemon::services::probe::{Provider, Sources};
 use crate::daemon::services::{MeshmudFacts, PanelInfo, ServiceId, Supervised};
 use crate::daemon::supervise::{self, BackoffPolicy, ChildHandle, ChildState};
 use crate::daemon::DaemonLayout;
+use client::MeshtasticAdapter;
 use meshmud::Uplink;
 use presence::{NearbySource, Presence, Refresh};
 use shim::{MeshtasticShim, ShimConfig};
@@ -206,6 +259,12 @@ pub struct Meshtastic {
     status: Mutex<Status>,
     ctx: Mutex<Option<Ctx>>,
     stopping: AtomicBool,
+    /// The bridge client (Layer 6 §5), once the daemon attached it.
+    client: Mutex<Option<Arc<MeshtasticAdapter>>>,
+    /// Nearby comes from the connected client rather than the reader's file.
+    client_nearby: AtomicBool,
+    /// The client's node-DB version last published as SSE `nearby`.
+    client_nearby_published: AtomicU64,
 }
 
 fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
@@ -315,7 +374,78 @@ impl Meshtastic {
             status: Mutex::new(Status::default()),
             ctx: Mutex::new(None),
             stopping: AtomicBool::new(false),
+            client: Mutex::new(None),
+            client_nearby: AtomicBool::new(true),
+            client_nearby_published: AtomicU64::new(0),
         })
+    }
+
+    // ------------------------------------------------------------ the bridge client
+
+    /// Attach the bridge client (Layer 6 §5; the daemon's bridge wiring builds
+    /// it with the conversation key). It starts on the next tick the service
+    /// runs. A client attached before stays attached (one board, one client).
+    pub fn attach_client(&self, c: Arc<MeshtasticAdapter>) {
+        let mut slot = lock(&self.client);
+        if slot.is_none() {
+            *slot = Some(c);
+        }
+    }
+
+    /// The attached bridge client.
+    pub fn client(&self) -> Option<Arc<MeshtasticAdapter>> {
+        lock(&self.client).clone()
+    }
+
+    /// Nearby from the connected client (`true`, the default) or the reader's
+    /// file only (`false`).
+    pub fn set_client_nearby(&self, on: bool) {
+        self.client_nearby.store(on, Ordering::SeqCst);
+    }
+
+    /// The client feeds Nearby now: attached, chosen, connected and through a
+    /// config stream.
+    fn client_feed(&self) -> Option<Arc<MeshtasticAdapter>> {
+        if !self.client_nearby.load(Ordering::SeqCst) {
+            return None;
+        }
+        self.client().filter(|c| c.nearby_ready())
+    }
+
+    /// The service runs for the client: meshmud up, its downlink listening,
+    /// its uplink present (LIVE's clauses but the node DB, which the client
+    /// itself provides).
+    fn client_wanted(&self) -> bool {
+        if self.stopping.load(Ordering::SeqCst) || !self.meshmud_running() {
+            return false;
+        }
+        let st = lock(&self.status);
+        st.downlink_listening && st.uplink_down_since.is_none()
+    }
+
+    /// Start or stop the client to match the service (every tick).
+    async fn reconcile_client(&self) {
+        let Some(c) = self.client() else { return };
+        let want = self.client_wanted();
+        if want && !c.running() {
+            let device = lock(&self.service).as_ref().map(|s| s.device_id.clone());
+            if let Some(id) = device {
+                let label = lock(&self.status)
+                    .board
+                    .clone()
+                    .unwrap_or_else(|| "the bound board".into());
+                c.set_source(&id, &label);
+            }
+            c.start();
+        } else if !want && c.running() {
+            c.stop().await;
+        }
+    }
+
+    async fn stop_client(&self) {
+        if let Some(c) = self.client() {
+            c.stop().await;
+        }
     }
 
     pub fn config(&self) -> &MeshtasticConfig {
@@ -402,6 +532,11 @@ impl Meshtastic {
                 None => (ChildDisplay::Absent, false, None, false),
             }
         };
+        let feed = self.client_feed();
+        let (node_db_present, nodes_heard) = match &feed {
+            Some(c) => (true, c.mesh_facts().nodes),
+            None => (self.presence.present(), self.presence.count()),
+        };
         let st = lock(&self.status);
         MeshmudFacts {
             running,
@@ -409,10 +544,10 @@ impl Meshtastic {
             bound,
             installed: st.meshmud_installed,
             downlink_listening: st.downlink_listening,
-            node_db_present: self.presence.present(),
+            node_db_present,
             board: st.board.clone(),
             firmware_version: st.firmware_version.clone(),
-            nodes_heard: self.presence.count(),
+            nodes_heard,
             uplink_lost_secs: st.uplink_down_since.map(|t| t.elapsed().as_secs()),
             channel_utilization: None,
             usb_uplink: st.usb_uplink,
@@ -453,11 +588,16 @@ impl Meshtastic {
         }
     }
 
-    /// `GET /api/v1/nearby` sources: the bound board's node DB, once the
-    /// reader produced one.
+    /// `GET /api/v1/nearby` sources: the bound board's node DB, from the
+    /// connected bridge client (Layer 6 §5) or, failing that, once the reader
+    /// produced one.
     pub fn nearby_sources(&self) -> Vec<NearbySource> {
         let device = lock(&self.service).as_ref().map(|s| s.device_id.clone());
-        let (Some(id), Some(nodes)) = (device, self.presence.nodes()) else {
+        let nodes = match self.client_feed() {
+            Some(c) => Some(c.nearby_nodes()),
+            None => self.presence.nodes(),
+        };
+        let (Some(id), Some(nodes)) = (device, nodes) else {
             return Vec::new();
         };
         let label = lock(&self.status)
@@ -530,6 +670,7 @@ impl Meshtastic {
             self.reconcile().await;
         }
         self.refresh().await;
+        self.reconcile_client().await;
     }
 
     /// Re-insert `Arc<Supervised>` = base + meshmud, then the reader.
@@ -775,6 +916,7 @@ impl Meshtastic {
     /// Stop both children (joined), release meshmud's claims, drop shim
     /// sessions.
     async fn stop_service(&self) {
+        self.stop_client().await;
         let svc = lock(&self.service).take();
         let Some(svc) = svc else { return };
         let grace = self.cfg.stop_grace;
@@ -891,7 +1033,12 @@ impl Meshtastic {
             st.meshmud_installed = installed;
             st.reader_unavailable = reader_unavailable;
         }
-        if changed == Refresh::Changed {
+        // the client's node DB changed since the last publish
+        let client_changed = self.client_feed().is_some_and(|c| {
+            let v = c.nearby_version();
+            self.client_nearby_published.swap(v, Ordering::SeqCst) != v
+        });
+        if changed == Refresh::Changed || client_changed {
             self.publish_nearby(&api);
         }
     }
@@ -903,6 +1050,7 @@ impl Meshtastic {
     /// the reader's `--once` timeout.
     pub async fn stop_and_wait(&self, grace: Duration) {
         self.stopping.store(true, Ordering::SeqCst);
+        self.stop_client().await;
         let _t = self.transition.lock().await;
         let svc = lock(&self.service).take();
         if let Some(svc) = svc {
@@ -939,6 +1087,17 @@ impl Meshtastic {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn service_copy_names_the_board() {
+        assert!(SERVICE_COPY
+            .starts_with("111 transmits on Meshtastic only what you send or choose to bridge"));
+        assert!(!SERVICE_COPY.contains("never transmits"));
+        let named = service_copy(Some("Hilltop"), Some("!0a0a0a0a"));
+        assert!(named.contains("from your board's own node Hilltop (!0a0a0a0a). Anyone"));
+        assert_eq!(service_copy(None, None), SERVICE_COPY);
+        assert!(service_copy(Some(""), Some("!0a0a0a0a")).contains("own node !0a0a0a0a."));
+    }
 
     #[test]
     fn proc_addresses_decode() {
