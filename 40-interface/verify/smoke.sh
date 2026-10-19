@@ -696,6 +696,15 @@ wait_msg() {
   done
 }
 mfield() { printf '%s' "${M:-null}" | jq -r "$1" 2>/dev/null || true; }
+# fab_diag NODE… → one note per node with its fabric view (hub, links, custody, counters);
+# for a failed wait, so the log says what each node saw instead of only "not delivered"
+fab_diag() {
+  local n
+  for n in "$@"; do
+    api "$n" GET /api/v1/fabric
+    note "diag $n fabric: $(jget -c '{hub: {enrolled: .hub.enrolled, reachable: .hub.reachable, cursor: .hub.cursor, members: .hub.members}, links: [.links[]? | {id, state, peers}], custody: .custody, counters: .counters}')"
+  done
+}
 # count_text NODE PEER TEXT → how many messages in NODE's thread with PEER carry TEXT
 # (404, no thread yet, counts 0; any other failed read prints nothing — never a number)
 count_text() {
@@ -972,14 +981,21 @@ inner3() {
   t "H: fabric service LIVE (a hub with members) — $(jget .reason_code)" '[ "$(jget .state)" = live ]'
   wait_for 20 'api A GET /api/v1/services/fabric; [ "$(jget .state)" = live ]' || true
   t "A: fabric service LIVE (enrolled hub reachable) — $(jget .reason_code)" '[ "$(jget .state)" = live ]'
-  wait_for 20 'api C GET /api/v1/services/fabric; [ "$(jget .state)" = live ]' || true
-  t "C: fabric service LIVE through its configured direct peer, no hub ($(jget .reason_code): $(jget .reason))" \
-    '[ "$(jget .state)" = live ] && [ "$(jget .reason_code)" = peer_linked ]'
+  # C's dial to A is up, but hello and announce authenticate nothing (§8.1): a
+  # connection is attributed only by a fresh sealed packet, and C has sent A
+  # nothing yet — so the row is honest: NOT SET. It goes LIVE (peer_linked) in
+  # (7) below, after C's first message to A. A LIVE here would mean C's refused
+  # enrollment left an attributed link to H (the leak the polish wave closed).
+  sleep 1
+  api C GET /api/v1/services/fabric
+  t "C: fabric service NOT SET before any sealed traffic to its configured peer — the link to A is up but unattributed, no hub ($(jget .reason_code))" \
+    '[ "$(jget .state)" = unset ] && [ "$(jget .reason_code)" = not_enrolled ]'
+  t "C: tcp-lan counts no attributed peer yet ($(peers_of C))" '[ "$(peers_of C)" = 0 ]'
   local hpe
-  hpe=$(peers_of H)
-  if [[ "$hpe" =~ ^[0-9]+$ ]] && [ "$hpe" -gt 2 ]; then
-    note "gap: C's refused enrollment left its dial to H maintained (H counts $hpe attributed peers: A, B and C) — fabric.rs enroll() calls Dialer::maintain and on_enroll_ok never releases it on a refusal; the hub's card also stays pinned on C"
-  fi
+  wait_for 10 'hpe=$(peers_of H); [ "$hpe" = 2 ]' || true
+  t "H: tcp-lan attributed peers = 2 (A and B): C's refused enrollment released its dial to H ($hpe)" '[ "$hpe" = 2 ]'
+  api C GET "/api/v1/contacts/${NID[H]}"
+  t "C: the hub card pinned only for the refused attempt is forgotten (GET /contacts/H → 404)" '[ "$ST" = 404 ]'
 
   # ---------------------------------------------------------------- 7. (1) cards
   phase "7. (1) cards: node1… card request via the hub, pasted cards both ways (§7.2)"
@@ -1122,6 +1138,9 @@ print(sum(1 for m in body.get("messages", []) if m.get("text") == sent))' "$W/bo
   t "A: PATCH /contacts/C {accept:true} → 200 request:false" '[ "$ST" = 200 ] && jb ".request == false"'
   wait_msg C A "$cm" '.state == "delivered"' 30 || true
   t "C's copy reaches delivered (A ACKs exactly what it shows)" '[ "$(mfield .state)" = delivered ]'
+  wait_for 10 'api C GET /api/v1/services/fabric; [ "$(jget .state)" = live ]' || true
+  t "C: fabric service LIVE through its configured direct peer once A's sealed ACK attributed the link, no hub ($(jget .reason_code): $(jget .reason))" \
+    '[ "$(jget .state)" = live ] && [ "$(jget .reason_code)" = peer_linked ] && [ "$(peers_of C)" = 1 ]'
   t "A's thread with C shows the held message exactly once" '[ "$(count_text A C "$rq")" = 1 ]'
   sleep 0.6
   sse_off "$sp_req"
@@ -1231,7 +1250,10 @@ print(sum(1 for m in body.get("messages", []) if m.get("text") == sent))' "$W/bo
     'jb ".store.open == true and .custody.count >= 1 and .hub.members == 2"'
   nx A ip link set eth0 up
   ok "A: eth0 up again"
-  wait_msg B A "$fm" '.state == "delivered"' 120 || true
+  if ! wait_msg B A "$fm" '.state == "delivered"' 120; then
+    note "diag B msg $fm: $(printf '%s' "${M:-null}" | jq -c '{state, reason_code, msg_id}' 2>/dev/null)"
+    fab_diag A B H
+  fi
   t "A fetched it from the restarted hub by cursor → delivered (state $(mfield .state))" '[ "$(mfield .state)" = delivered ]'
   t "A's thread shows it exactly once (custody that survived a hub crash is not redelivered)" '[ "$(count_text A B "$full")" = 1 ]'
 
