@@ -29,6 +29,11 @@
 //!    `502 upstream_error`. The probe polls the module's `stopping` flag in
 //!    its 50 ms loops, so daemon shutdown never waits for the reader's
 //!    `--once` timeout (the reader is killed when its future is dropped).
+//!    meshmud's liveness is checked again after the reader answers and before
+//!    anything is bound or persisted, because the supervisor reaps and records
+//!    an exit asynchronously and a quick answer can beat it: an exited child
+//!    (supervisor state, or `/proc/<pid>/stat` gone or a zombie) turns any
+//!    answer into this `502`.
 //! 8. A forget that lands while the probe runs wins: the registry refuses
 //!    the result before writing anything ([`DeviceRegistry::record_identify`]),
 //!    the service the identify child was becoming is torn down at once
@@ -37,6 +42,7 @@
 
 use super::{meshmud, Meshtastic, MESHMUD_TASK};
 use crate::daemon::dashboard::api_v1::Problem;
+use crate::daemon::dashboard::bind::pid_alive;
 use crate::daemon::dashboard::ApiState;
 use crate::daemon::devices::registry::TargetError;
 use crate::daemon::devices::store::{board_name, MeshtasticBinding};
@@ -44,7 +50,7 @@ use crate::daemon::devices::{
     clean, DeviceFirmware, DeviceRecord, DeviceRegistry, FirmwareFamily, FirmwareSource, MAX_FACT,
 };
 use crate::daemon::ports::PortBusy;
-use crate::daemon::supervise::{self, ChildHandle, ChildState};
+use crate::daemon::supervise::{self, ChildControl, ChildHandle, ChildState};
 use axum::http::StatusCode;
 use serde::Deserialize;
 use std::fmt;
@@ -371,9 +377,15 @@ impl Meshtastic {
                 tokio::time::sleep(POLL).await;
             }
         };
-        tokio::select! {
+        let answer = tokio::select! {
             r = self.run_once() => r,
             e = watch => Err(e),
+        };
+        // 3. an answer counts only from a meshmud still running: the
+        // supervisor sees an exit late, so the exit wins (module doc, 7.)
+        match answer {
+            Ok(_) if !child_running(child) => Err(died()),
+            other => other,
         }
     }
 
@@ -429,6 +441,28 @@ impl Meshtastic {
     }
 }
 
+/// The identify child is still up: the supervisor reports it running and its
+/// pid is neither gone nor a zombie. The supervisor reaps and records an exit
+/// asynchronously, so its state alone can still say `Running` for a child
+/// that has already exited.
+fn child_running(child: &ChildControl) -> bool {
+    child.state() == ChildState::Running && child.pid().is_some_and(pid_running)
+}
+
+/// `pid` exists and is not a zombie: the state field of `/proc/<pid>/stat`
+/// (after the parenthesised comm) is neither `Z` nor `X`. Without a readable
+/// `/proc/<pid>/stat` (reaped, or no procfs), the kernel answers signal 0.
+fn pid_running(pid: u32) -> bool {
+    match std::fs::read_to_string(format!("/proc/{pid}/stat")) {
+        Ok(stat) => !matches!(
+            stat.rsplit_once(')')
+                .and_then(|(_, rest)| rest.trim_start().chars().next()),
+            None | Some('Z' | 'X' | 'x')
+        ),
+        Err(_) => pid_alive(pid),
+    }
+}
+
 /// Display-safe board name from `my_node_info` (exposed for tests).
 pub fn display_board(info: &MyNodeInfo) -> Option<String> {
     board_name(&info.hw_model).or_else(|| board_name(&info.long_name))
@@ -469,6 +503,47 @@ mod tests {
         }
         let huge = vec![b' '; MAX_ONCE_BYTES + 1];
         assert!(parse_once(&huge).is_err());
+    }
+
+    /// The race the post-answer check closes: the identify child has exited
+    /// but its supervisor has not observed that yet. On a current-thread
+    /// runtime that does not yield, the supervisor task cannot reap, so the
+    /// child stays a zombie while its state still says `Running`.
+    #[tokio::test(flavor = "current_thread")]
+    async fn an_exit_the_supervisor_has_not_seen_is_not_running() {
+        let child = supervise::spawn_child(supervise::ChildSpec {
+            name: "identify-liveness".into(),
+            program: "sleep".into(),
+            args: vec!["30".into()],
+            env: Vec::new(),
+            backoff: meshmud::identify_backoff(),
+            stdout_log: None,
+        });
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while child.state() != ChildState::Running || child.pid().is_none() {
+            assert!(std::time::Instant::now() < deadline, "the child never ran");
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        let pid = child.pid().unwrap();
+        assert!(child_running(&child), "a live child counted as gone");
+        // kill it and wait for the zombie without yielding to the runtime
+        unsafe { libc::kill(pid as libc::pid_t, libc::SIGKILL) };
+        while pid_running(pid) {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "pid {pid} never exited"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        // the supervisor has not seen the exit, the check has
+        assert_eq!(child.state(), ChildState::Running);
+        assert_eq!(child.pid(), Some(pid));
+        assert!(!child_running(&child), "a zombie counted as running");
+        // once the supervisor runs it reaps the child; nothing is left behind
+        child.stop_and_wait(Duration::from_secs(2)).await;
+        assert_eq!(child.state(), ChildState::Stopped);
+        assert!(!child_running(&child));
+        assert!(!pid_running(pid));
     }
 
     #[test]

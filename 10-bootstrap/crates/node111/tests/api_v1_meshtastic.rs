@@ -1197,10 +1197,26 @@ async fn identify_refusals_open_nothing_twice() {
         .release(&h.stub.addr.to_string(), "meshtastic-client")
         .unwrap();
 
-    // meshmud dying during identify: 502, never respawned (identify profile)
+    // meshmud dying during identify: 502, never respawned (identify profile).
+    // The reader's answer is held until meshmud has exited, so the board
+    // answers after the exit whichever of the two the daemon notices first.
     std::fs::write(&h.crash, "").unwrap();
-    let r = http(port, "POST", path.clone(), Some(r#"{"consent":true}"#)).await;
-    r.problem(502, "upstream_error");
+    std::fs::write(&h.hold, "").unwrap();
+    let step = tokio::spawn(http(
+        port,
+        "POST",
+        path.clone(),
+        Some(r#"{"consent":true}"#),
+    ));
+    let pids = h.meshmud_launches(1).await;
+    wait_until(
+        "the identify meshmud exited",
+        Duration::from_secs(5),
+        || !alive(pids[0]),
+    )
+    .await;
+    std::fs::remove_file(&h.hold).unwrap();
+    step.await.unwrap().problem(502, "upstream_error");
     tokio::time::sleep(Duration::from_millis(2_600)).await; // > the service policy's first back-off
     assert_eq!(h.meshmud_pids().len(), 1, "{:?}", h.launched(""));
     assert!(h.held().is_empty(), "claims released: {:?}", h.held());
