@@ -62,6 +62,11 @@ Next after the run: lead writes `layers/60-transport/options.md` → owner decid
 - T0 scaffold: `ef04ac9`. AGENTS.md Raspberry Pi rule: `218fd81`.
 - **Run — Wave 0** (`runs/workflows/wave-0.js`, S1 S2 S4 S6 S3): `wf_10d063a6-41e`. **Run — Wave 0 spike** (`wave-0-spike.js`, S5): `wf_d7fe17dd-f69`.
   Resume: `Workflow({scriptPath: "<repo>/plan/layers/60-transport/runs/workflows/<name>.js", resumeFromRunId: "<id>"})`.
-- **Wave 0 landed so far:** S2 `12c1485` (contract), S5 `711f5b1` (spike PASS), S1 `85cf84f` (store V3). **Run — Wave 1a** (`wave-1a.js`, B1 alone,
-  started beside S4/S6/S3): `wf_55b4e5fc-8a9`. The push to `origin/claude/layer-6-implementation-006mte` is refused (403: no GitHub access for
-  the org in this session); every task is committed locally and the push is retried at each wave end.
+- **Wave 0 landed:** S2 `12c1485` (contract) + review minors `8bccbd5`, S5 `711f5b1` (spike PASS), S1 `85cf84f` (store V3), S6 `e5073d5`,
+  S3 `8a8f668`, S4 `5ae8030`. Wave 0 run complete (5 agents, ~1.27M subagent tokens, 49 min). **Run — Wave 1a** (`wave-1a.js`, B1 alone, started
+  beside S4/S6/S3): `wf_55b4e5fc-8a9` (done, 29 min). **Run — S1 bounce** (`wave-0-bounce.js`, the S1 review's major + minors): `wf_8bec0a2d-af3`.
+  **Reviews** (`wave-review.js`, fable judges, read-only): S1 + S2 `wf_4423192d-713`; S3 + S4 `wf_9f93907d-888`.
+  GitHub access was granted mid-session (owner: the org has full access); the branch is pushed after every commit.
+- **Wave 0 closed + B1:** S1 bounce `a38fe19`, B1 `fc802a7`. **Run — Wave 1** (`wave-1.js`, B2 + B3): `wf_0ea8a249-2d9`. **Run — Wave 1b** (`wave-1b.js`,
+  B4 + B5): `wf_b2b6ec75-68f`. **Reviews:** S1-bounce + B1 `wf_182b25dc-d01`. Lead fixes from the S3/S4 reviews (version test, rnstatus re-probe
+  back-off, `write_line` stdin poisoning) ride a lead commit after the Wave 1 launch.

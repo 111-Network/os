@@ -918,8 +918,7 @@ mod tests {
 
     #[test]
     fn unknown_version_fails_closed() {
-        // 0x02 / 0x03 are assigned since A10 (Layer 6 §14); 0x04.. stay closed.
-        for bad in [0x00u8, 0x04, 0x05, 0x80, 0xff] {
+        for bad in [0x00u8, 0x02, 0x03, 0x04, 0xff] {
             let mut wire = valid_wire();
             wire[0] = bad;
             assert_eq!(

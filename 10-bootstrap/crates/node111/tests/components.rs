@@ -143,6 +143,7 @@ impl Node {
         let mut cfg = ComponentsConfig::new(&self.root);
         cfg.runner = RunnerConfig {
             retry: Duration::from_millis(50),
+            retry_max: Duration::from_millis(200),
             settle: Duration::ZERO,
             grace: Duration::from_secs(2),
         };

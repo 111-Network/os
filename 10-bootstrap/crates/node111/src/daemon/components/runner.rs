@@ -52,8 +52,14 @@ pub struct Gate {
 /// Timing of a runner.
 #[derive(Debug, Clone)]
 pub struct RunnerConfig {
-    /// Re-probe interval while waiting for the dependency to serve.
+    /// First re-probe interval while waiting for the dependency to serve;
+    /// each further probe that still says no doubles it up to
+    /// [`RunnerConfig::retry_max`] (a probe starts a Python interpreter, so a
+    /// lasting misconfiguration must not poll a Pi at a fixed rate); a
+    /// dependency state change or a spawn resets it.
     pub retry: Duration,
+    /// Cap of the doubled re-probe interval.
+    pub retry_max: Duration,
     /// Wait after a spawn before the post-spawn probe (the child attaches).
     pub settle: Duration,
     /// SIGTERM → SIGKILL grace when the runner stops the child.
@@ -64,6 +70,7 @@ impl Default for RunnerConfig {
     fn default() -> Self {
         RunnerConfig {
             retry: Duration::from_secs(5),
+            retry_max: Duration::from_secs(60),
             settle: Duration::from_secs(1),
             grace: crate::daemon::CHILD_STOP_GRACE,
         }
@@ -216,19 +223,25 @@ async fn probe(serving: &ServingProbe) -> bool {
         .unwrap_or(false)
 }
 
-/// Wait for a change of `dep`'s state, at most `retry`.
-async fn dep_change_or(dep: Option<&ChildControl>, retry: Duration) {
+/// Wait for a change of `dep`'s state, at most `retry`; `true` when the
+/// state changed (the caller resets its re-probe back-off), `false` at the
+/// timeout.
+async fn dep_change_or(dep: Option<&ChildControl>, retry: Duration) -> bool {
     match dep {
         Some(d) => {
             let mut w = d.state_watch();
-            let _ = tokio::time::timeout(retry, async {
+            tokio::time::timeout(retry, async {
                 if w.changed().await.is_err() {
                     std::future::pending::<()>().await;
                 }
             })
-            .await;
+            .await
+            .is_ok()
         }
-        None => tokio::time::sleep(retry).await,
+        None => {
+            tokio::time::sleep(retry).await;
+            false
+        }
     }
 }
 
@@ -265,6 +278,7 @@ impl Task {
 
     async fn run(mut self) {
         let mut partitioned = false;
+        let mut retry = self.cfg.retry;
         let mut next = Next::Again;
         loop {
             match next {
@@ -309,13 +323,21 @@ impl Task {
                     if !partitioned {
                         self.set(RunnerStatus::Waiting { reason });
                     }
+                    let wait = retry;
+                    retry = (retry * 2).min(self.cfg.retry_max);
                     next = tokio::select! {
                         cmd = self.cmd_rx.recv() => Self::on_cmd(cmd),
-                        _ = dep_change_or(dep.as_ref(), self.cfg.retry) => Next::Again,
+                        changed = dep_change_or(dep.as_ref(), wait) => {
+                            if changed {
+                                retry = self.cfg.retry;
+                            }
+                            Next::Again
+                        }
                     };
                     continue;
                 }
             }
+            retry = self.cfg.retry;
 
             // ---- spawn
             let handle = spawn_child(self.spec.clone().with_stdio(ChildStdio::Piped));
@@ -467,6 +489,7 @@ mod tests {
     fn fast() -> RunnerConfig {
         RunnerConfig {
             retry: Duration::from_millis(30),
+            retry_max: Duration::from_millis(120),
             settle: Duration::ZERO,
             grace: Duration::from_secs(2),
         }

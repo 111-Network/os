@@ -281,7 +281,10 @@ impl PipedIo {
     /// (`InvalidInput`) when `line` holds a CR or LF (one line, never two) or
     /// is longer than [`PIPED_LINE_MAX`]; `BrokenPipe` once the child is
     /// gone. Callers bound the wait with a timeout (a child that does not read
-    /// fills the pipe).
+    /// fills the pipe). A write that fails or is cancelled part-way (the
+    /// timeout fired) **closes the child's stdin**: a half line can never be
+    /// completed by the next call into one garbled protocol line; the child
+    /// sees EOF, the adapter sees `BrokenPipe` and restarts it.
     pub async fn write_line(&self, line: &str) -> std::io::Result<()> {
         if line.len() > PIPED_LINE_MAX || line.bytes().any(|b| b == b'\n' || b == b'\r') {
             return Err(std::io::Error::new(
@@ -290,7 +293,9 @@ impl PipedIo {
             ));
         }
         let mut guard = self.stdin.lock().await;
-        let Some(stdin) = guard.as_mut() else {
+        // taken out for the write: a cancelled or failed write drops it
+        // (closing the pipe); only a whole line puts it back
+        let Some(mut stdin) = guard.take() else {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::BrokenPipe,
                 "the child is gone",
@@ -299,7 +304,9 @@ impl PipedIo {
         let mut bytes = Vec::with_capacity(line.len() + 1);
         bytes.extend_from_slice(line.as_bytes());
         bytes.push(b'\n');
-        write_all(stdin, &bytes).await
+        write_all(&mut stdin, &bytes).await?;
+        *guard = Some(stdin);
+        Ok(())
     }
 }
 
@@ -1329,6 +1336,22 @@ mod tests {
         );
         assert_eq!(st.dropped_overflow, 2);
         assert_eq!(st.first.as_deref(), Some("0"));
+    }
+
+    #[tokio::test]
+    async fn a_cancelled_partial_write_closes_the_stdin() {
+        // a child that never reads its stdin: the pipe fills at 64 KiB
+        let h = spawn_child(sh("exec sleep 30", &[]).with_stdio(ChildStdio::Piped));
+        assert!(until(Duration::from_secs(2), || h.pid().is_some()).await);
+        let io = h.stdio().borrow().clone().expect("piped stdio published");
+        let line = "x".repeat(PIPED_LINE_MAX);
+        let cancelled = tokio::time::timeout(Duration::from_millis(300), io.write_line(&line))
+            .await
+            .is_err();
+        assert!(cancelled, "a full pipe blocks the write until the timeout");
+        let err = io.write_line("next").await.unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::BrokenPipe);
+        h.stop_and_wait(Duration::from_secs(5)).await;
     }
 
     #[tokio::test]
