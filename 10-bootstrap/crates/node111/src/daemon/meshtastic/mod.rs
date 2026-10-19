@@ -181,6 +181,9 @@ struct Status {
     bound_ports: Vec<String>,
     /// `current/bin/meshmud` is a file (last refresh).
     meshmud_installed: bool,
+    /// Why the presence reader cannot run (last refresh;
+    /// `MeshmudFacts::reader_unavailable`).
+    reader_unavailable: Option<String>,
 }
 
 struct Ctx {
@@ -415,6 +418,7 @@ impl Meshtastic {
             usb_uplink: st.usb_uplink,
             port_held_by,
             log: st.log.clone(),
+            reader_unavailable: st.reader_unavailable.clone(),
         }
     }
 
@@ -829,12 +833,26 @@ impl Meshtastic {
                 .is_file()
                 .then(|| cfg.log.to_string_lossy().into_owned());
             let installed = cfg.meshmud_installed();
-            let identify = installed && cfg.reader_installed();
-            (listening, present, log, identify, installed)
+            let reader = cfg.reader_installed();
+            let identify = installed && reader;
+            // why the reader cannot run, as its venv build recorded it
+            // (`venvs/presence.status.json`, `transport::venv::presence`)
+            let reader_unavailable = (!reader).then(|| {
+                crate::daemon::transport::venv::presence::unavailable_reason(&cfg.root)
+                    .unwrap_or_else(|| "The presence reader is not installed on this node.".into())
+            });
+            (
+                listening,
+                present,
+                log,
+                identify,
+                installed,
+                reader_unavailable,
+            )
         })
         .await
-        .unwrap_or((false, None, None, false, false));
-        let (listening, present, log, identify, installed) = observed;
+        .unwrap_or((false, None, None, false, false, None));
+        let (listening, present, log, identify, installed, reader_unavailable) = observed;
         // the node DB counts only while a board is bound (the file of an
         // unbound board is never read)
         let has_service = lock(&self.service).is_some();
@@ -871,6 +889,7 @@ impl Meshtastic {
             st.identify_tcp = identify;
             st.bound_ports = bound_ports;
             st.meshmud_installed = installed;
+            st.reader_unavailable = reader_unavailable;
         }
         if changed == Refresh::Changed {
             self.publish_nearby(&api);

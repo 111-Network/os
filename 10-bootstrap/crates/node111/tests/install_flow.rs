@@ -6,7 +6,9 @@
 //! venv (os/50-messaging/README.md §14) with a fake python3/pip
 //! (`fake_python`): a fresh install builds it from the pinned lock before step 7
 //! hands `venvs/` to node111, a re-run leaves it alone, and a failed build
-//! never fails the install.
+//! never fails the install (a receipt degrade branch). And the rns closure on
+//! a fresh Debian whose `python3` has no pip module: a throwaway venv's own
+//! pip downloads it (`packages::pip_closure`).
 
 mod common;
 mod fake_python;
@@ -171,6 +173,7 @@ fn script(
     let state = layout.state_dir().to_string_lossy().into_owned();
     let cache = format!("{root}/cache/packages");
     let lock = format!("{cache}/python/rns-lock.txt");
+    let tool = format!("{root}/{}", node111::install::packages::RNS_PIP_VENV);
     let mut s: Vec<(String, Output)> = vec![
         ("apt-get update".into(), out(0, "")),
         ("apt-get install -y python3 python3-venv iw ca-certificates".into(), out(0, "")),
@@ -178,9 +181,9 @@ fn script(
             format!("apt-get install -y --download-only --reinstall -o Dir::Cache::archives={cache} python3 python3-venv iw ca-certificates"),
             out(0, ""),
         ),
-        ("python3 -m pip --version".into(), out(0, "pip 24.0\n")),
+        (format!("python3 -m venv {tool}"), out(0, "")),
         (
-            format!("python3 -m pip download --require-hashes -r {lock} -d {cache}/python"),
+            format!("{tool}/bin/pip download --require-hashes -r {lock} -d {cache}/python"),
             out(0, ""),
         ),
     ];
@@ -618,11 +621,15 @@ fn presence_pin(bytes: &[u8]) -> String {
     )
 }
 
-/// The install script without its `python3` steps (the fake python runs them).
+/// The install script without its `python3` and venv `bin/pip` steps (the
+/// fake python runs them: `fake_python::Routed`).
 fn without_python(script: Vec<(String, Output)>) -> Vec<(String, Output)> {
     script
         .into_iter()
-        .filter(|(cmd, _)| !cmd.starts_with("python3 "))
+        .filter(|(cmd, _)| {
+            let program = cmd.split(' ').next().unwrap_or_default();
+            program != "python3" && !Path::new(program).ends_with("bin/pip")
+        })
         .collect()
 }
 
@@ -643,6 +650,11 @@ fn install_builds_the_presence_venv_from_the_pinned_lock() {
     let receipt = run_with(&ctx, &fetcher)
         .unwrap_or_else(|e| panic!("install failed: {e:#}\ncalls: {:?}", runner.order()));
     assert_eq!(receipt.version, RELEASE);
+    assert!(
+        receipt.degrade_branches.is_empty(),
+        "{:?}",
+        receipt.degrade_branches
+    );
     mock.assert_exhausted();
 
     let root = &flow.layout.root;
@@ -677,7 +689,9 @@ fn install_builds_the_presence_venv_from_the_pinned_lock() {
     });
     assert!(venv < download && download < install, "{calls:?}");
     // built while the installer still holds the tree; step 7 then chowns it
-    let built = runner.position("python3 -m venv").unwrap();
+    let built = runner
+        .position(&format!("python3 -m venv {}/", builds.display()))
+        .unwrap();
     let chown = runner
         .position(&format!(
             "chown -R node111:node111 {}/venvs",
@@ -716,11 +730,22 @@ fn install_builds_the_presence_venv_from_the_pinned_lock() {
         .unwrap_or_else(|e| panic!("re-run failed: {e:#}\ncalls: {:?}", runner2.order()));
     mock2.assert_exhausted();
     let rerun = py.calls()[before..].to_vec();
+    let (builds_s, cache_s) = (
+        builds.to_string_lossy().into_owned(),
+        cache.to_string_lossy().into_owned(),
+    );
     assert!(
         !rerun
             .iter()
-            .any(|c| c.contains("-m venv") || c.contains("/bin/pip")),
+            .any(|c| c.contains(&builds_s) || c.contains(&cache_s)),
         "the re-run touched the presence venv: {rerun:?}"
+    );
+    // (step 5 re-downloads only the rns closure, with its own tool venv)
+    assert!(
+        rerun
+            .iter()
+            .all(|c| c.contains(node111::install::packages::RNS_PIP_VENV)),
+        "{rerun:?}"
     );
     assert_eq!(
         std::fs::read_link(presence::venv_dir(root)).unwrap(),
@@ -803,4 +828,128 @@ fn install_survives_a_presence_venv_failure() {
         Outcome::NotShipped
     );
     silent.assert_exhausted();
+}
+
+/// A presence venv that cannot be built is a receipt degrade branch (step 6),
+/// with the reason its build recorded — and still never fails the install.
+#[test]
+fn a_failed_presence_venv_is_a_receipt_degrade_branch() {
+    let payload = common::build_payload_with(&[(layer5::PRESENCE_LOCK, PRESENCE_LOCK)]);
+    let flow = setup_with(None, payload, &presence_pin(PRESENCE_LOCK));
+    let env = base_env("debian");
+    let py = fake_python::FakePython::new();
+    py.fail_install(true);
+    let mock = MockRunner::new(without_python(script(&flow.layout, false, true)));
+    let runner = fake_python::Routed::new(&mock, &py);
+    let ctx = ctx_for(&flow, &runner, &env, false);
+    let fetcher = node111::util::http::Fetcher::new(Duration::from_secs(10), 64 << 20).unwrap();
+    let receipt = run_with(&ctx, &fetcher)
+        .unwrap_or_else(|e| panic!("install failed: {e:#}\ncalls: {:?}", runner.order()));
+    mock.assert_exhausted();
+    let root = &flow.layout.root;
+    assert!(std::fs::symlink_metadata(presence::venv_dir(root)).is_err());
+    let reason = presence::unavailable_reason(root).unwrap();
+    let branches: Vec<_> = receipt
+        .degrade_branches
+        .iter()
+        .filter(|b| b.starts_with("presence venv unavailable: "))
+        .collect();
+    assert_eq!(branches.len(), 1, "{:?}", receipt.degrade_branches);
+    assert!(branches[0].ends_with(&reason), "{branches:?} vs {reason}");
+    assert!(
+        branches[0].contains("DO NOT MATCH THE HASHES"),
+        "{branches:?}"
+    );
+    // … and it is what the receipt on disk says
+    let written = Receipt::read(&root.join("receipt.json")).unwrap().unwrap();
+    assert_eq!(written.degrade_branches, receipt.degrade_branches);
+}
+
+/// A fresh Debian/Ubuntu: `python3` + `python3-venv`, but no pip module
+/// ("No module named pip" — `python3-pip` is not in the package set). The rns
+/// closure is still prefetched into `cache/packages/python/` (the daemon's
+/// offline rns venv build needs it, or the node has no transport): a
+/// throwaway venv's own pip downloads it, the host's `python3 -m pip` is
+/// never asked, and the tool venv is gone before `cache/` is hashed.
+#[test]
+fn rns_closure_is_prefetched_without_a_host_pip() {
+    let flow = setup(None);
+    let env = base_env("debian");
+    let py = fake_python::FakePython::new();
+    py.no_host_pip(true);
+    let mock = MockRunner::new(without_python(script(&flow.layout, false, true)));
+    let runner = fake_python::Routed::new(&mock, &py);
+    let ctx = ctx_for(&flow, &runner, &env, false);
+    let fetcher = node111::util::http::Fetcher::new(Duration::from_secs(10), 64 << 20).unwrap();
+    let receipt = run_with(&ctx, &fetcher)
+        .unwrap_or_else(|e| panic!("install failed: {e:#}\ncalls: {:?}", runner.order()));
+    mock.assert_exhausted();
+    assert!(
+        receipt.degrade_branches.is_empty(),
+        "no transport stub on a fresh Debian: {:?}",
+        receipt.degrade_branches
+    );
+    // the package set stays pip-free (python3-pip recommends build tools)
+    assert_eq!(
+        node111::install::packages::packages_for(node111::install::packages::Family::Debian),
+        ["python3", "python3-venv", "iw", "ca-certificates"]
+    );
+
+    let root = &flow.layout.root;
+    let tool = root.join(node111::install::packages::RNS_PIP_VENV);
+    let cache = root.join("cache/packages/python");
+    let calls = py.calls();
+    assert!(
+        !calls.iter().any(|c| c.starts_with("python3 -m pip")),
+        "the host pip was asked: {calls:?}"
+    );
+    let venv = calls
+        .iter()
+        .position(|c| *c == format!("python3 -m venv {}", tool.display()))
+        .unwrap_or_else(|| panic!("no tool venv: {calls:?}"));
+    let download = calls
+        .iter()
+        .position(|c| {
+            *c == format!(
+                "{}/bin/pip download --require-hashes -r {}/rns-lock.txt -d {}",
+                tool.display(),
+                cache.display(),
+                cache.display()
+            )
+        })
+        .unwrap_or_else(|| panic!("no rns closure download: {calls:?}"));
+    assert!(venv < download, "{calls:?}");
+    assert!(
+        std::fs::symlink_metadata(&tool).is_err(),
+        "the tool venv is removed"
+    );
+    assert!(
+        receipt.cache_hashes.keys().all(|k| !k.contains(".rns-pip")),
+        "{:?}",
+        receipt.cache_hashes.keys()
+    );
+    assert!(receipt
+        .cache_hashes
+        .contains_key("packages/python/rns-lock.txt"));
+
+    // no python3 venv at all: the transport stub degrade, never an install error
+    let flow = setup(None);
+    let py = fake_python::FakePython::new();
+    py.fail_venv(true);
+    let mock = MockRunner::new(without_python(script(&flow.layout, false, true)));
+    let runner = fake_python::Routed::new(&mock, &py);
+    let ctx = ctx_for(&flow, &runner, &env, false);
+    let receipt = run_with(&ctx, &fetcher)
+        .unwrap_or_else(|e| panic!("install failed: {e:#}\ncalls: {:?}", runner.order()));
+    mock.assert_exhausted();
+    assert_eq!(
+        receipt.degrade_branches,
+        ["python3/venv absent after package step: rns closure not prefetched; transport stub"]
+    );
+    assert!(std::fs::symlink_metadata(
+        flow.layout
+            .root
+            .join(node111::install::packages::RNS_PIP_VENV)
+    )
+    .is_err());
 }

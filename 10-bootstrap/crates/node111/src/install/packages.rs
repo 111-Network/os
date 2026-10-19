@@ -1,8 +1,9 @@
 //! Step 5 — packages (spec §Install flow Linux, online guaranteed): INSTALL the
 //! transport prerequisites per distro family AND download the resolved closure
 //! into `cache/packages/` (root-owned, offline reinstall assets) + the rns pip
-//! closure into `cache/packages/python/`. Every cached artifact is hash-recorded
-//! in the receipt. The Meshtastic presence reader's closure (Layer 5 §14) is not
+//! closure into `cache/packages/python/` with a throwaway venv's own pip
+//! ([`pip_closure`]: the host needs no `python3 -m pip`). Every cached artifact
+//! is hash-recorded in the receipt. The Meshtastic presence reader's closure (Layer 5 §14) is not
 //! fetched here: its lock rides in the release payload, so the stage step
 //! downloads it into `cache/packages/presence/` with the build venv's own pip
 //! (`stage::presence_venv`).
@@ -31,7 +32,10 @@ impl Family {
 }
 
 /// The pinned package set (spec step 5). python3+venv makes Bundle B real on
-/// fresh images; iw feeds AP-mode probing; ca-certificates for TLS.
+/// fresh images; iw feeds AP-mode probing; ca-certificates for TLS. No pip
+/// package: every pip that runs is a venv's own ([`pip_closure`]) — Debian's
+/// `python3-pip` would also pull `build-essential` and `python3-dev` in
+/// (Recommends), and Fedora/Arch ship pip apart from python as well.
 pub fn packages_for(family: Family) -> &'static [&'static str] {
     match family {
         Family::Debian => &["python3", "python3-venv", "iw", "ca-certificates"],
@@ -127,45 +131,72 @@ pub fn run(ctx: &InstallContext, family: Family, receipt: &mut Receipt) -> anyho
     Ok(())
 }
 
+/// The throwaway venv whose pip downloads the rns closure ([`pip_closure`]),
+/// inside the root-owned `cache/packages/` (on the node's own filesystem: a
+/// `noexec` `/tmp` cannot break it); removed again before step 9 hashes
+/// `cache/`.
+pub const RNS_PIP_VENV: &str = "cache/packages/.rns-pip";
+
 /// Download the rns pip closure into `cache/packages/python/` using the
-/// hash-locked lockfile (spec §Transport). Degrades when python3/pip absent.
+/// hash-locked lockfile (spec §Transport) with the pip of a throwaway venv
+/// ([`RNS_PIP_VENV`]), never the host's `python3 -m pip`: a fresh
+/// Debian/Ubuntu has `python3-venv` but no pip module ("No module named
+/// pip"), and without this closure the daemon's offline rns venv build
+/// (`daemon::transport::venv::build`, `--no-index`) fails — a node with no
+/// transport. The pip that downloads is then the one every venv bootstraps
+/// (`ensurepip`), the same that installs the closure offline later.
+/// Degrades when python3 or its `venv` module is absent (no venv, no
+/// transport); a download that runs and fails is an install error.
 pub fn pip_closure(
     ctx: &InstallContext,
     lockfile: &Path,
     receipt: &mut Receipt,
 ) -> anyhow::Result<()> {
-    let py = ctx.runner.run("python3", &["-m", "pip", "--version"])?;
-    if !py.ok() {
+    let tool = ctx.layout.root.join(RNS_PIP_VENV);
+    remove_tool_venv(&tool)?; // a run killed mid-download left it behind
+    let tool_s = tool.to_string_lossy().into_owned();
+    let venv = ctx.runner.run("python3", &["-m", "venv", &tool_s]);
+    if !venv.as_ref().is_ok_and(|o| o.ok()) {
+        let _ = remove_tool_venv(&tool);
         receipt.degrade_branches.push(
-            "python3/pip absent after package step: rns closure not prefetched; transport stub"
+            "python3/venv absent after package step: rns closure not prefetched; transport stub"
                 .into(),
         );
         return Ok(());
     }
     let dest = ctx.layout.root.join("cache/packages/python");
-    std::fs::create_dir_all(&dest)?;
-    let dest_s = dest.to_string_lossy().into_owned();
-    let lock_s = lockfile.to_string_lossy().into_owned();
-    let out = ctx.runner.run(
-        "python3",
-        &[
-            "-m",
-            "pip",
-            "download",
-            "--require-hashes",
-            "-r",
-            &lock_s,
-            "-d",
-            &dest_s,
-        ],
-    )?;
-    anyhow::ensure!(
-        out.ok(),
-        "pip closure download failed (rns lockfile {}): {}",
-        lock_s,
-        out.stderr.trim()
-    );
-    Ok(())
+    let downloaded = (|| -> anyhow::Result<()> {
+        std::fs::create_dir_all(&dest)?;
+        let dest_s = dest.to_string_lossy().into_owned();
+        let lock_s = lockfile.to_string_lossy().into_owned();
+        let pip = format!("{tool_s}/bin/pip");
+        let out = ctx.runner.run(
+            &pip,
+            &["download", "--require-hashes", "-r", &lock_s, "-d", &dest_s],
+        )?;
+        anyhow::ensure!(
+            out.ok(),
+            "pip closure download failed (rns lockfile {}): {}",
+            lock_s,
+            out.stderr.trim()
+        );
+        Ok(())
+    })();
+    if let Err(e) = remove_tool_venv(&tool) {
+        eprintln!("111 install: {e:#}");
+    }
+    downloaded
+}
+
+/// Remove [`RNS_PIP_VENV`] (a link is removed itself, never followed).
+fn remove_tool_venv(tool: &Path) -> anyhow::Result<()> {
+    let removed = match std::fs::symlink_metadata(tool) {
+        Ok(meta) if meta.file_type().is_dir() => std::fs::remove_dir_all(tool),
+        Ok(_) => std::fs::remove_file(tool),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => Err(e),
+    };
+    removed.map_err(|e| anyhow::anyhow!("cannot remove {}: {e}", tool.display()))
 }
 
 /// Hash-record every cached artifact into the receipt (relpath → sha256).

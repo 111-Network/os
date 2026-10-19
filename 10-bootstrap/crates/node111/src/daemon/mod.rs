@@ -312,6 +312,9 @@ async fn daemon_main() -> anyhow::Result<()> {
     // daemon-wide port-owner table it claims board ports in.
     let port_table = Arc::new(ports::PortTable::new());
     dashboard.api.insert_ext(Arc::clone(&port_table));
+    // §14: the presence reader's venv for the lock `current/` carries, before
+    // the module exists (its reader start checks `reader_installed()`)
+    ensure_presence_venv(&layout, Arc::new(crate::util::run::SystemRunner)).await;
     let meshtastic = meshtastic::Meshtastic::new(
         meshtastic::MeshtasticConfig::production(
             &layout,
@@ -398,6 +401,36 @@ async fn daemon_main() -> anyhow::Result<()> {
     );
     eprintln!("111 daemon: shutting down");
     Ok(())
+}
+
+/// Daemon start, before the Meshtastic module is built (os/50-messaging/
+/// README.md §14, §19 L1; every promotion restarts the daemon): ensure
+/// `venvs/presence` was built from the lock the release in `current/` carries
+/// — rebuilt offline from `cache/packages/presence/` when an update changed
+/// the lock, nothing at all when it did not, nothing when the release ships no
+/// reader (`transport::venv::presence::ensure_current`). Runs on a blocking
+/// thread and completes before the reader can start, so the reader starts on
+/// the venv this release needs. Never fatal: an unavailable venv is logged
+/// here and recorded in `venvs/presence.status.json`, whose reason the
+/// `meshtastic` service row shows.
+pub async fn ensure_presence_venv(
+    layout: &DaemonLayout,
+    runner: Arc<dyn crate::util::run::Runner>,
+) -> transport::venv::presence::Outcome {
+    use transport::venv::presence::{self, Outcome, PresenceVenvError};
+    let at = layout.clone();
+    let outcome = tokio::task::spawn_blocking(move || presence::ensure_current(&at, &*runner))
+        .await
+        .unwrap_or_else(|e| Outcome::Unavailable {
+            error: PresenceVenvError::Io(format!("the build task failed: {e}")),
+            previous_kept: presence::python(&layout.root).is_file(),
+        });
+    match &outcome {
+        Outcome::Built => eprintln!("111 daemon: presence venv rebuilt for this release's lock"),
+        Outcome::Unavailable { error, .. } => eprintln!("111 daemon: presence venv: {error}"),
+        Outcome::NotShipped | Outcome::Unchanged => {}
+    }
+    outcome
 }
 
 /// `111 daemon` entry (called by systemd/runit).

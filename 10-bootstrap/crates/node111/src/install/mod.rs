@@ -115,8 +115,13 @@ pub fn run_with(
     let lockfile = stage::fetch_rns_lock(ctx, fetcher, &pre.manifest)?;
     packages::pip_closure(ctx, &lockfile, &mut receipt)?;
 
-    // 6. stage (payload → releases/, flip current, initial floor, symlink)
-    stage::run(ctx, fetcher, &pre.manifest)?;
+    // 6. stage (payload → releases/, flip current, initial floor, symlink,
+    //    presence venv — never fatal; a venv it could not build is a degrade
+    //    branch)
+    let release_dir = stage::run(ctx, fetcher, &pre.manifest)?;
+    if let Some(branch) = presence_degrade(ctx, &pre.manifest, &release_dir) {
+        receipt.degrade_branches.push(branch);
+    }
 
     // 7. supervise (user, units, udev, ownership, enable --now)
     supervise::run(ctx, pre.degraded)?;
@@ -136,4 +141,26 @@ pub fn run_with(
     }
 
     Ok(receipt)
+}
+
+/// Step 6's presence venv (os/50-messaging/README.md §14, §19 L1) as a receipt
+/// degrade branch: the release pins a presence lock, yet the venv in place was
+/// not built from it — exactly when `stage::presence_venv` returned
+/// `Outcome::Unavailable` (`Built`/`Unchanged` leave a venv whose marker is the
+/// lock's sha256, `NotShipped` pins no lock). A content probe of that marker,
+/// never the log; the reason is the one `venvs/presence.status.json` records.
+fn presence_degrade(
+    ctx: &InstallContext,
+    manifest: &crate::manifest::ChannelManifest,
+    release_dir: &std::path::Path,
+) -> Option<String> {
+    use crate::daemon::transport::venv::presence;
+    manifest.presence_lock()?;
+    let root = &ctx.layout.root;
+    if presence::integrity_ok(root, &presence::lockfile(release_dir)) {
+        return None;
+    }
+    let reason = presence::unavailable_reason(root)
+        .unwrap_or_else(|| "no venv was built from the release's presence lock".into());
+    Some(format!("presence venv unavailable: {reason}"))
 }

@@ -6,13 +6,15 @@
 //! file the fake `python3 -m venv` wrote, run by its path.
 //!
 //! - `python3 --version` · `python3 -m venv DIR` (writes `DIR/bin/python` and
-//!   `DIR/bin/pip`) · `python3 -m pip ...` (the fake pip).
+//!   `DIR/bin/pip`) · `python3 -m pip ...` (the fake pip; with
+//!   [`FakePython::no_host_pip`], "No module named pip" like a fresh Debian).
 //! - `pip --version` · `pip download ...` · `pip install ... -r LOCK ...`
 //!   (copies LOCK to `<venv>/installed-lock.txt`, so a test sees which lock a
 //!   venv was built from).
 //! - Switches: [`FakePython::set_missing`] (no `python3` at all: spawning it
 //!   fails), [`FakePython::fail_install`] (pip reports a hash mismatch),
-//!   [`FakePython::fail_download`], [`FakePython::fail_venv`].
+//!   [`FakePython::fail_download`], [`FakePython::fail_venv`],
+//!   [`FakePython::no_host_pip`].
 //! - Every call is appended to `calls.log` ([`FakePython::calls`]):
 //!   `python3 <args>` or `<pip path> <args>`.
 
@@ -50,7 +52,12 @@ case "$1" in
         chmod 755 "$3/bin/python"
         cp "$T/pip" "$3/bin/pip" && chmod 755 "$3/bin/pip"
         exit 0 ;;
-      pip) shift 2; exec "$T/pip" "$@" ;;
+      pip)
+        if [ -e "$T/no-host-pip" ]; then
+          echo "/usr/bin/python3: No module named pip" >&2
+          exit 1
+        fi
+        shift 2; exec "$T/pip" "$@" ;;
     esac ;;
 esac
 echo "fake python3: unexpected arguments: $*" >&2
@@ -124,6 +131,13 @@ exit 2
     /// `python3 -m venv` fails (no `ensurepip`).
     pub fn fail_venv(&self, on: bool) {
         self.flag("venv-fail", on);
+    }
+
+    /// The host interpreter has no pip module (`python3 -m pip` fails as on a
+    /// fresh Debian/Ubuntu with `python3-venv` but not `python3-pip`); a
+    /// venv's own `bin/pip` still works.
+    pub fn no_host_pip(&self, on: bool) {
+        self.flag("no-host-pip", on);
     }
 
     /// Every call so far, in order.

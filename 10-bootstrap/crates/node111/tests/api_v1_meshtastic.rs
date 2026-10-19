@@ -26,8 +26,12 @@
 //! drop-oldest buffer + drop count, per-session connections, revocation, idle,
 //! session cap, upstream down); presence ingest hardening; `GET /nearby` + SSE
 //! `nearby`; `meshtastic` service LIVE / NOT SET / ERROR through the
-//! registry's rules (and the `radio` row agreeing); phones never drive USB
-//! boards (`can_run_here = false`) while a Wi-Fi board runs.
+//! registry's rules (and the `radio` row agreeing); a presence venv that could
+//! not be built (`venvs/presence.status.json`, made by a fake python3/pip:
+//! `fake_python`) is the row's ERROR reason; phones never drive USB boards
+//! (`can_run_here = false`) while a Wi-Fi board runs.
+
+mod fake_python;
 
 use node111::daemon::dashboard::{
     routes, serve_listener, ApiConfig, ApiState, DashboardState, SharedState,
@@ -45,6 +49,7 @@ use node111::daemon::services::{
     self, Computed, Facts, PanelHealth, PanelInfo, PanelState, ServiceId, ServiceState, Supervised,
 };
 use node111::daemon::supervise::BackoffPolicy;
+use node111::daemon::transport::venv::presence as venv_presence;
 use node111::daemon::DaemonLayout;
 use serde_json::{json, Value};
 use std::io::{Read, Write};
@@ -1564,6 +1569,128 @@ async fn service_states_follow_the_facts() {
     h.m.tick_once().await;
     assert!(h.m.facts().installed);
     assert_eq!(h.meshmud_pids().len(), 1, "started once, not every tick");
+    h.stop().await;
+}
+
+/// The presence reader's venv could not be built (§14: its build records why
+/// in `venvs/presence.status.json`): meshmud runs and its downlink listens,
+/// but no node DB can come, so the row is ERROR `presence_unavailable` with
+/// the recorded reason — never an endless `node_db_pending`. With the status
+/// reading ready and the reader installed the row is what it always was.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_unbuilt_presence_venv_is_the_meshtastic_rows_reason() {
+    const ID: &str = "abcd1234abcd1234";
+    let seed = || {
+        Some(seed_binding(
+            ID,
+            json!({"kind": "serial", "path": heltec_uplink()}),
+            true,
+        ))
+    };
+    let Some(h) = harness(Opts {
+        seed: seed(),
+        ..Opts::default()
+    }) else {
+        return;
+    };
+    let root = h.dir.path();
+    // no interpreter in the venv, and a rebuild that failed (hash mismatch)
+    std::fs::remove_file(&h.m.config().reader_python).unwrap();
+    let lock = root.join("presence-lock.txt");
+    std::fs::write(&lock, b"meshtastic==2.7.11 --hash=sha256:abcd\n").unwrap();
+    let py = fake_python::FakePython::new();
+    py.fail_install(true);
+    let built = venv_presence::ensure(
+        root,
+        &py,
+        &lock,
+        &venv_presence::cache_dir(root),
+        venv_presence::Mode::Offline,
+    );
+    assert!(
+        matches!(
+            built,
+            venv_presence::Outcome::Unavailable {
+                previous_kept: false,
+                ..
+            }
+        ),
+        "{built:?}"
+    );
+    let why = venv_presence::unavailable_reason(root).unwrap();
+    assert!(why.starts_with("The presence reader is off"), "{why}");
+
+    h.start().await;
+    wait_until("meshmud", Duration::from_secs(5), || h.m.facts().running).await;
+    assert_eq!(h.meshmud_launches(1).await.len(), 1);
+    h.m.tick_once().await;
+    let f = h.m.facts();
+    assert!(f.downlink_listening && !f.node_db_present, "{f:?}");
+    assert_eq!(f.reader_unavailable.as_deref(), Some(why.as_str()));
+    assert!(
+        h.reader_pids("service").is_empty(),
+        "no reader without its venv"
+    );
+    let row = h.meshtastic_row(false);
+    assert_eq!(
+        (row.state, row.reason_code),
+        (ServiceState::Error, "presence_unavailable"),
+        "{row:?}"
+    );
+    assert_eq!(row.reason, why);
+    assert_eq!(row.detail["reader_unavailable"], why.as_str());
+    // nothing recorded, the reader simply not there: a plain reason
+    std::fs::remove_file(venv_presence::status_path(root)).unwrap();
+    h.m.tick_once().await;
+    let row = h.meshtastic_row(false);
+    assert_eq!(
+        (row.state, row.reason_code, row.reason.as_str()),
+        (
+            ServiceState::Error,
+            "presence_unavailable",
+            "The presence reader is not installed on this node."
+        )
+    );
+    h.stop().await;
+
+    // the status reads ready and the reader is installed: unchanged
+    let Some(h) = harness(Opts {
+        seed: seed(),
+        ..Opts::default()
+    }) else {
+        return;
+    };
+    let ready = venv_presence::Status {
+        schema: 1,
+        ok: true,
+        code: "presence_venv_ready".into(),
+        reason: None,
+        lock_sha256: "ab".repeat(32),
+        previous_kept: false,
+    };
+    std::fs::write(
+        venv_presence::status_path(h.dir.path()),
+        serde_json::to_vec(&ready).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(venv_presence::status(h.dir.path()), Some(ready));
+    h.start().await;
+    wait_until("meshmud", Duration::from_secs(5), || h.m.facts().running).await;
+    h.m.tick_once().await;
+    assert_eq!(h.m.facts().reader_unavailable, None);
+    assert_ne!(h.meshtastic_row(false).reason_code, "presence_unavailable");
+    wait_until("node DB", Duration::from_secs(10), || {
+        h.presence_file().is_file()
+    })
+    .await;
+    h.m.tick_once().await;
+    let row = h.meshtastic_row(false);
+    assert_eq!(
+        (row.state, row.reason_code),
+        (ServiceState::Live, "meshtastic_live"),
+        "{row:?}"
+    );
+    assert_eq!(row.detail["reader_unavailable"], Value::Null);
     h.stop().await;
 }
 

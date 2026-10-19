@@ -547,6 +547,11 @@ pub struct MeshmudFacts {
     pub port_held_by: Option<String>,
     /// meshmud's log file, when it exists.
     pub log: Option<String>,
+    /// Why the presence reader cannot run here (its venv or script is
+    /// missing): the reason `venvs/presence.status.json` records for a venv
+    /// that could not be built (`transport::venv::presence`), else a plain
+    /// "not installed". `None` = the reader is installed.
+    pub reader_unavailable: Option<String>,
 }
 
 impl MeshmudFacts {
@@ -1225,8 +1230,11 @@ fn fabric(f: &Facts) -> Computed {
 /// board is bound (identified-but-unbound boards point at the agent); ERROR
 /// when meshmud crash-loops, its uplink is lost for more than
 /// [`UPLINK_LOST_GRACE`], another owner holds the bound port (`port_busy`),
-/// or a board is bound but meshmud's binary is not installed
-/// (`binary_absent`: an install or upgrade problem, not a set-up step). A USB
+/// a board is bound but meshmud's binary is not installed
+/// (`binary_absent`: an install or upgrade problem, not a set-up step), or
+/// meshmud is connected but the presence reader cannot run, so no node DB
+/// will come (`presence_unavailable`, with the reason its venv build
+/// recorded — never an endless "waiting for the list of nodes"). A USB
 /// board cannot be driven from a phone.
 fn meshtastic(f: &Facts) -> Computed {
     let id = ServiceId::Meshtastic;
@@ -1327,6 +1335,14 @@ fn meshtastic(f: &Facts) -> Computed {
                 "downlink_pending",
                 "meshmud is starting.",
             ),
+            ChildDisplay::Running if !m.node_db_present && m.reader_unavailable.is_some() => {
+                Computed::new(
+                    id,
+                    ServiceState::Error,
+                    "presence_unavailable",
+                    m.reader_unavailable.clone().unwrap_or_default(),
+                )
+            }
             ChildDisplay::Running if !m.node_db_present => Computed::new(
                 id,
                 ServiceState::Starting,
@@ -1356,6 +1372,7 @@ fn meshtastic(f: &Facts) -> Computed {
         "port_held_by": m.port_held_by,
         "bound": m.bound,
         "meshmud_installed": m.installed,
+        "reader_unavailable": m.reader_unavailable,
         "log": m.log,
     });
     out
@@ -1792,6 +1809,63 @@ mod tests {
         assert_eq!(
             st(&with(busy(ChildDisplay::Running)), id),
             (L, "meshtastic_live", true)
+        );
+    }
+
+    /// The presence reader cannot run (its venv could not be built, or it is
+    /// not installed): with meshmud connected and no node DB the row is ERROR
+    /// with that reason, not an endless `node_db_pending`; the earlier rules
+    /// keep their place and the installed reader changes nothing.
+    #[test]
+    fn meshtastic_names_an_unavailable_presence_reader() {
+        let id = ServiceId::Meshtastic;
+        let with = |m: MeshmudFacts| Facts {
+            meshmud: Some(m),
+            ..Facts::default()
+        };
+        let why = "The presence reader is off: its environment could not be built (python3 is \
+                   not installed on this machine).";
+        let off = |m: MeshmudFacts| MeshmudFacts {
+            node_db_present: false,
+            reader_unavailable: Some(why.into()),
+            ..m
+        };
+        let c = row(&with(off(mm(ChildDisplay::Running))), id);
+        assert_eq!((c.state, c.reason_code), (E, "presence_unavailable"));
+        assert_eq!(c.reason, why);
+        assert_eq!(c.detail["reader_unavailable"], why);
+        assert_eq!(c.actions, [Action::Restart, Action::Log]);
+        // the reader installed: unchanged — waiting for the node DB, then LIVE
+        let mut m = mm(ChildDisplay::Running);
+        m.node_db_present = false;
+        let c = row(&with(m), id);
+        assert_eq!((c.state, c.reason_code), (S, "node_db_pending"));
+        assert_eq!(c.detail["reader_unavailable"], Value::Null);
+        assert_eq!(
+            st(&with(mm(ChildDisplay::Running)), id),
+            (L, "meshtastic_live", true)
+        );
+        // a node DB already in (a reader on an earlier venv): LIVE
+        let stale = MeshmudFacts {
+            node_db_present: true,
+            ..off(mm(ChildDisplay::Running))
+        };
+        assert_eq!(st(&with(stale), id), (L, "meshtastic_live", true));
+        // meshmud not up yet, or its uplink lost: those rules come first
+        let mut m = off(mm(ChildDisplay::Running));
+        m.downlink_listening = false;
+        assert_eq!(st(&with(m), id), (S, "downlink_pending", true));
+        let mut m = off(mm(ChildDisplay::Running));
+        m.uplink_lost_secs = Some(61);
+        assert_eq!(st(&with(m), id), (E, "uplink_lost", true));
+        // no meshmud child: the reader is not the problem yet
+        assert_eq!(
+            st(&with(off(mm(ChildDisplay::Absent))), id),
+            (U, "meshtastic_unbound", true)
+        );
+        assert_eq!(
+            st(&with(off(mm(ChildDisplay::Backoff))), id),
+            (E, "child_backoff", true)
         );
     }
 
