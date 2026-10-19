@@ -126,7 +126,7 @@ ending `queued → sent → sent / transmitted, not confirmed` after 63 s. That 
 ## Weight (spec §2.1 rule 5; measured 2026-10-19, x86_64, CPython 3.13)
 
 Resolved: `rns 1.5.7` · `lxmf 1.2.1` · `cryptography 50.0.2` · `cffi 2.1.1` · `pycparser 3.11` · `pyserial 3.5` (resolved on
-CPython 3.11, so the lock's floor is **CPython 3.10**: `cffi 2.1.1` and `pycparser 3.11` need it, although `rns` and `lxmf`
+CPython 3.11, so the lock's floor is **CPython 3.11**: `cffi 2.1.1` and `pycparser 3.11` need 3.10, and `cryptography 50` needs `typing-extensions` below 3.11, which this lock (resolved on 3.11) does not carry — on 3.10 `pip --require-hashes` would refuse it; although `rns` and `lxmf`
 need only 3.7).
 Cached payload: 5.83 MB of wheels (this platform; 167 hashes cover every published file). Installed: 24.9 MB (site-packages
 without pip; `cryptography` is 15.5 MB of it). Idle helper: 43.7 MB RSS, 10 threads, **no TCP/UDP/unix listener**. Zero while
