@@ -141,3 +141,11 @@ All 7 forks decided (D19, 2026-10-14). Spec draft: `os/50-messaging/README.md`. 
   stands (unknown names parse and are ignored; a reader-version field when the first incompatible change comes). Identify button: Layer 6.
 - **Polish wave interrupted** (session ended mid-run, 2026-10-19 ~04:00): finished agents are read from the run journal; unfinished ones are
   re-run as fresh Agent-tool subagents with a RESUMPTION NOTICE over their partial work (ultracode is off: no Workflow resume).
+- **Polish wave landed (2026-10-19 evening, one commit per task):** HB `553076d` · UIP `6278590` · VENVW `1a8488e` · F2P `ba9cf89` · MANP `796a92d`;
+  §13 residual sentence `04a7dd5`; journals exported `5a88122`. Lead gates on that tree: `10-bootstrap/scripts/check.sh` ALL GREEN
+  (node111 492 · mesh111 163 host + 163 in the musl-x86_64 G2 run · UI 1192 · notices current), smoke 118, panel-lint 144, identity
+  185 + 44 + 7 + harness OK, intelligence green, knowledge 0 errors, presence sidecar 90. Three-node smoke was RED once for a wrong
+  expectation (C LIVE at step 6 had been satisfied by the leaked hub dial F2P closed; §8.1: attribution needs a sealed packet) — harness
+  corrected `b0f8c52`, 156 checks GREEN; one flake seen in three runs (hub-crash delivery wait, `fab_diag` notes added). **V4** fable judge
+  launched as an Agent-tool subagent (prompt = `runs/workflows/wave-4-review.js`, adapted for today's tree) → `review/integrated.md`;
+  then D24, board summary, INDEX row 5 ✅, tag `checkpoint-layer-5`.
