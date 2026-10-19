@@ -81,3 +81,7 @@ Next after the run: lead writes `layers/60-transport/options.md` → owner decid
 - **C3py landed** `c04984b` (review `wf_95e16a19-802`): rns pin moved to 1.5.7 (lxmf 1.2.1 requires it), python floor 3.10; the assets copy of
   the lock is deliberately left to C3rs with the `install_flow` MockRunner update (5 tests go red while the lock sits in assets without it).
 - **B4 review:** amend (2 majors). **Run — B4 bounce** (`wave-1b-bounce.js`): `wf_6a37fe4b-365`.
+- **Wave 1 build complete:** B2 `69cbfee` (review `wf_fd716a8a-a09`), B3 `5c1c73d` (review `wf_def38731-39a`); Wave 1 run `wf_0ea8a249-2d9` done
+  (2 agents, ~1.13M subagent tokens, 52 min). C3py review amend → lead fixes `a0dcf56` (assets-copy tests skip until C3rs; floor 3.11).
+- **Wave 2 fully launched:** `wave-2.js` C1 `wf_19cfc9b9-7ac`; `wave-2b.js` C3rs + C5 `wf_80a1e93d-2e8`; C4 `wf_4f4eadf8-b07` and C2 (`wf_3fd1e4f0-857`)
+  still running. Disk: the node111 target reached 21 GB (4.2 GB free); test binaries and incremental dirs older than 35 min were deleted (13 GB free).
