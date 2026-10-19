@@ -50,3 +50,15 @@ Next after the run: lead writes `layers/60-transport/options.md` → owner decid
 - **Panel → lock (2026-10-19, evening):** reviews `506cf65` (all amend-then-lock) → triage + six owner questions → **D26** `415aa93` → v0.2 `27487bb` →
   re-check `30af706` (amend-then-lock, 13 items) → v0.3 → **locked v1.0, D27**; board `os/60-transport/TASKS.md`. Build starts at `checkpoint-layer-5`.
 
+
+## Build (2026-10-19, cloud session; branch `claude/layer-6-implementation-006mte`)
+
+- Box: a cloud container, **4 CPUs, 15 GB RAM, a fixed disk allowance (~40 GB; a copy of the node111 target dir filled it once)**; no musl
+  cross toolchains (G2 static-link stages SKIP; not a lock run); unprivileged netns work; `iproute2` installed by apt during the session;
+  crates.io, PyPI and GitHub reachable through the proxy; no `rnsd` on the host. Shared warm `CARGO_TARGET_DIR`s under the session
+  scratchpad, one per workspace (cargo's lock serializes agents); `CARGO_BUILD_JOBS=2`; at most two Workflow slots per run (the harness caps
+  concurrency at CPUs − 2), so Rust and non-Rust tasks are interleaved in each wave's task list.
+- Scripts hard-code `ROOT = /home/user/os` and the scratchpad path of this session (the Layer 5 scripts hard-code the owner's box).
+- T0 scaffold: `ef04ac9`. AGENTS.md Raspberry Pi rule: `218fd81`.
+- **Run — Wave 0** (`runs/workflows/wave-0.js`, S1 S2 S4 S6 S3): `wf_10d063a6-41e`. **Run — Wave 0 spike** (`wave-0-spike.js`, S5): `wf_d7fe17dd-f69`.
+  Resume: `Workflow({scriptPath: "<repo>/plan/layers/60-transport/runs/workflows/<name>.js", resumeFromRunId: "<id>"})`.
