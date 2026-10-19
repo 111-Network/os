@@ -47,4 +47,6 @@ Next after the run: lead writes `layers/60-transport/options.md` → owner decid
   `enable_transport = yes` on Cat 3/4 (§11, D17 #5 vs R02), the compiled-in crate vs "zero weight" (§2.1), the MeshChatX auth window (§6 rule 2),
   the one-sided Meshtastic A10 (§14), frame budgets by arithmetic (§4/§16 G2). **Panel:** three fable judges as Agent-tool subagents (read-only; no
   builds — the Layer 5 V4 judge holds the box): lenses bridge · carriers · integration → `review/{bridge,carriers,integration}.md` → lead triage.
+- **Panel → lock (2026-10-19, evening):** reviews `506cf65` (all amend-then-lock) → triage + six owner questions → **D26** `415aa93` → v0.2 `27487bb` →
+  re-check `30af706` (amend-then-lock, 13 items) → v0.3 → **locked v1.0, D27**; board `os/60-transport/TASKS.md`. Build starts at `checkpoint-layer-5`.
 

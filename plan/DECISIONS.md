@@ -418,6 +418,30 @@ ADR-lite. Every decision, its rejected alternatives, and why. Newest last; never
 - **Why:** the owner wants a thin layer of our own wired to the built layers, users responsible for the third-party software they choose to install,
   and the author kept safe; the panel's blockers were all seams, not design, and these answers close every one.
 
+## D27 — Layer 6 spec locked (v1.0); build starts
+
+- **Date:** 2026-10-19
+- **Decision:** the Layer 6 (Transport & Bridge) spec `os/60-transport/README.md` is **locked at v1.0** = draft v0.3 as reviewed: v0.1 (sonnet, from
+  D25 + the options brief + research 00–07) → three fable judges (bridge semantics · carriers and licensing · integration and verification; all
+  amend-then-lock, three blockers, 25 majors, ~40 minors; `plan/layers/60-transport/review/{bridge,carriers,integration}.md`) → lead triage with six
+  owner questions (`triage.md`) → **D26** → v0.2 → one fable re-check (amend-then-lock: one major, the LXMF post-air failure mapping, plus textual
+  items; `recheck.md`) → v0.3 (13 items applied, every citation re-pinned) → lock. No second re-check: the lead verified the v0.3 diff against the
+  list.
+  - **What R-B commits to** (bridge-first, D25 F5): bridge core + foreign tables V3 in the mesh111 store · Meshtastic text through the official crate
+    behind a stream-level send allowlist · LXMF through our own `lxmf-sidecar` (user-installed `rns`/`lxmf`, credited; licence pending the owner's
+    upstream contact) · explicit directed non-transitive relay edges with the marker alphabet, live consent and `relayed_seq` · per-target fan-out with
+    preview · the transport spine (`interfaces.toml`, renderer v2, `rnstatus` attach/reload, phone relay over TCP with the pair-code QR) · the device
+    core (hotplug, `PortTable`, consented identify via adopted tools, the four-action applier) · seven agent tools, every write a proposal · A10 bytes
+    and the verifier plug · optional components with an install-time cache, runtime-only zero weight and the user-installs licence notice · Delta Chat
+    only on a passed netns spike. Second release: sealed carriage over foreign radios, the KISS modem link, attestation gossip and its labels, MeshChatX
+    as a panel, SimpleX by hand-selection.
+  - **Build:** `os/60-transport/TASKS.md` (T0 scaffold; Wave 0 S1–S6; Wave 1 B1–B5; Wave 2 C1–C5; Wave 3 V1–V5) per `EXECUTION.md`; opus for Rust,
+    sonnet for UI/docs/Python, fable for the integrated review; the box rules and Linux hygiene of `AGENTS.md`.
+- **Open (owner):** the upstream answer on the helper's licence (the helper ships behind the enable gate with the notice until then); which components
+  ship as natives is decided after the build review.
+- **Why:** every panel finding was a seam, not a design; D26 closed the forks; the spec is now shorter than its first draft and wired to the built
+  layers by line-verified citations.
+
 ## Pending
 
 - Move deep architecture content out of `os/README.md` into per-layer specs (blocked on layer homes existing).

@@ -6,8 +6,9 @@ Messages, sends one text into several networks as per-target messages, and relay
 **device core** (hotplug, port ownership, consented identify, RNode stanza proposals, a narrow apply→verify→undo cut) carry the radios. Every adopted
 program is a separate, on-demand component that weighs nothing at runtime while it is off.
 
-Status: ✍️ draft v0.2 for the fable re-check (D25, D26). Nothing here is built. Build tasks will live in `TASKS.md` per `os/plan/EXECUTION.md` (not
-written yet). Anything beyond the options brief and research lens 4 §4.8 is marked **(draft proposal)**. The changelog from v0.1 is at the end.
+Status: ✅ **v1.0, locked (D27, 2026-10-19)** — v0.3 as reviewed (three-judge fable panel on v0.1, one re-check on v0.2; D25, D26). Nothing here is built yet. Build tasks will live in `TASKS.md` per
+`os/plan/EXECUTION.md` (not written yet). Anything beyond the options brief and research lens 4 §4.8 is marked **(draft proposal)**. The changelog
+from v0.1 is at the end.
 
 ## 0. Reading guide
 
@@ -18,7 +19,8 @@ R05 transports and devices, R06 critic, R07 gap-1 run, all under `os/plan/layers
 
 **Citations.** `M/` = `50-messaging/crates/mesh111/src` · `N/` = `10-bootstrap/crates/node111/src/daemon` · `A/` = `30-intelligence/crates/agent111` ·
 `UI/` = `40-interface/ui/src` · `API` = `40-interface/api/openapi.yaml` · `ID/` = `20-identity/crates/id111/src` · `L5` = `50-messaging/README.md`.
-Every `file:line` was re-read in the working tree on 2026-10-19. **Evidence:** *(run)* executed here · *(src)* source read · *(doc)* docs only ·
+Every `file:line` was re-read in the working tree on 2026-10-19 (v0.3 re-pinned `supervise.rs`, the mesh111 `fabric.rs` lines, the `openapi.yaml`
+NearbySource enum and the presence reader after later commits). **Evidence:** *(run)* executed here · *(src)* source read · *(doc)* docs only ·
 *(design)* not yet run.
 
 **In one paragraph.** A bridge core in `111d` owns consent, loop guard, fan-out and the foreign tables (mesh111 store, schema V3). Meshtastic goes
@@ -78,12 +80,11 @@ and are never reported as passed. **Non-goals:** MeshCore as a bridge target · 
 | Transport spine · device core | `interfaces.toml`, renderer v2, applier, `transport.read` · hotplug, ports, identify | custom glue; `rnsd`, `rnstatus`, `rnodeconf` adopted | always (identify only on consent) |
 
 **Ports (loopback unless stated), extending L5 §2:** dashboard 11180 · model 11181 · agent 11182 · fabric 11183 · panels 11190–11229 · meshmud 11230 ·
-**new, reserved 11231–11239 (draft proposal):** 11232 SimpleX CLI WebSocket; the rest for Madmail and `smp-server`. The LXMF helper needs no port.
-Madmail serves the standard chatmail ports (SMTP 25, 465, 587, IMAP 143, 993, HTTPS 443; *doc*, pinned at the spike), which need
-`CAP_NET_BIND_SERVICE` (§18) and cannot be had on Termux; `smp-server` uses its documented default 5223 (*doc*; LAN form `--ip`). rnsd's Backbone
-listener is 4242 on the LAN address, only while LAN sharing is on. Radio ports are claimed in the `PortTable` (`N/ports.rs:106`); a loopback listener
-is claimed there too (precedent: the meshmud downlink, `N/meshtastic/mod.rs:676`) **and** pre-bound with a listen check before the child starts,
-because only a bind detects a foreign holder. A held port answers `409 port_busy`.
+**new (draft proposal):** 11232 SimpleX CLI WebSocket only. The LXMF helper needs no port. Madmail serves the standard chatmail ports (SMTP 25, 465,
+587, IMAP 143, 993, HTTPS 443; *doc*, pinned at the spike), which need `CAP_NET_BIND_SERVICE` (§18) and cannot be had on Termux; `smp-server` uses its
+documented default 5223 (*doc*; LAN form `--ip`). rnsd's Backbone listener is 4242 on the LAN address, only while LAN sharing is on. Radio ports are
+claimed in the `PortTable` (`N/ports.rs:106`); a loopback listener is claimed there too (precedent: the meshmud downlink, `N/meshtastic/mod.rs:676`)
+**and** pre-bound with a listen check before the child starts, because only a bind detects a foreign holder. A held port answers `409 port_busy`.
 
 **State (`/var/lib/111`), additions (draft proposal):** `state/interfaces.toml` (0600, §11) · `state/bridge.json` (0600: recipient lists, per-channel
 send switches, HAM confirmations with the text hash, announce name and interval, licence acknowledgements; invalid ⇒ moved aside like
@@ -93,7 +94,7 @@ the tree has no vault, this is the minimal one) · `bridge/lxmf/` (0700: the hel
 enable) · `cache/packages/<id>/` (install-time payloads) · `fabric/display-times.foreign` (§3). The foreign tables are in `fabric/store.db`.
 
 **Process shape.** The bridge core and the Meshtastic client are in-process tasks. `rnsd` and `meshmud` are the existing supervised children. New
-children, all `supervise.rs` `ChildSpec`s (`N/supervise.rs:37`) started only on enable: `lxmf-sidecar` and `deltachat-rpc-server` (piped stdio, §7),
+children, all `supervise.rs` `ChildSpec`s (`N/supervise.rs:55`) started only on enable: `lxmf-sidecar` and `deltachat-rpc-server` (piped stdio, §7),
 `madmail`, `simplex-chat` + `smp-server`. **Child ordering is bridge-core orchestration, not a supervisor feature** (`supervise.rs` has one
 independent back-off loop per child and no dependency gate); the rules are in §6 "Start order".
 
@@ -111,16 +112,19 @@ SimpleX.
    (+372 / +332 KiB, no runtime cost unless service `meshtastic` is LIVE).
 3. **Install-time cache.** `111 install`, when online, pre-downloads each declared payload into `cache/packages/<id>/` (pip closures with the build
    venv's own pip, binaries from the pinned URL), the rns and presence pattern (`10-bootstrap/crates/node111/src/install/packages.rs`, `pip_closure`),
-   after printing one notice line per component (name, licence, where to read it; a Layer 1 UX item, the line the rns venv gets too). A USB drop into
-   the same directory is the offline alternative. Enable installs from the cache offline. **There is no runtime fetch.**
+   after printing one notice line per component (name, licence, where to read it; a Layer 1 UX item, the line the rns venv gets too), and records that
+   notice (program, licence, URL) in the install receipt beside the artifact hashes, so the acknowledgement exists before any download. A USB drop
+   into the same directory is the offline alternative. Enable installs from the cache offline. **There is no runtime fetch.** A changed pin on a 111
+   update reaches the root-owned cache as the updater's normal manifest refresh, the precedent `LICENSING.md` §9.3 sets for the rns pin; no new
+   mechanism.
 4. **Enabled only by a human** (paired or loopback session; the agent can only suggest). Enable runs: **licence notice** (program, licence, where to
    read it, cached size; the user acknowledges and `state/bridge.json` records it: the user installs, 111 is not the distributor) → check `[requires]`
    → verify cached files against the pin, fail closed → install (`--require-hashes` venv build, or unpack into `components/<id>/`) → start → health.
    Without the recorded acknowledgement nothing is installed or started (`409 consent_required`).
 5. **Disable** stops the child and releases its ports and claims; "remove files" deletes the installed tree, `bridge/<adapter>/` state (the Delta Chat
    account store included) and, separately, the cached payload. Nothing is deleted without that click. Weights shown before enable: cached and
-   installed size from `[weight]`; the rns closure is existing, the helper's pure wheels plus `cryptography` are *not measured* (R02 §3.1), and Delta
-   Chat, Madmail and SimpleX sizes are recorded at pin time.
+   installed size from `[weight]`; the rns closure is existing, the helper's pure wheels plus `cryptography` are *not measured*, and Delta Chat,
+   Madmail and SimpleX sizes are recorded at pin time.
 
 ## 3. The foreign message model (normative)
 
@@ -146,7 +150,7 @@ it cannot collide with 111 row ids (`N/fabric/times.rs:1-13`).
 
 **Typed writes, batched.** `Fabric::foreign_ingest`, `foreign_set_state`, `foreign_queue_send`, `foreign_group_*`, `foreign_edge_*` and reads (draft
 proposal names) run in the actor and emit `FabricEvent::Foreign { conv, id, change }` beside `Message`, `Contact`, `Fabric`, `Settings`
-(`M/fabric.rs:350`); `with_store` (`:909`) is a trap: it shares `local_seq` and emits no event (R00 §3.2). The fabric is one loop (`run`, `:1021`) and
+(`M/fabric.rs:363`); `with_store` (`:934`) is a trap: it shares `local_seq` and emits no event (R00 §3.2). The fabric is one loop (`run`, `:1021`) and
 every call is a synchronous SQLCipher transaction between frame pumps, so `foreign_ingest` takes a bounded batch (256 rows) as one transaction per
 adapter tick, the bridge core awaits each call (back-pressure on the actor's input channel), and `Foreign` events coalesce per conversation
 (integration M3). G1 carries a 1,000-row burst with a bound on 111 delivery latency.
@@ -184,7 +188,7 @@ while undelivered, pinned foreign rows, the bounded `foreign_seen` keys. Capacit
 ## 4. Adapter contract (normative)
 
 An adapter moves native text and reports facts. It never decides consent, relaying, loop guard, size policy or persistence, never touches the store,
-and its `send` never blocks the bridge core (the fabric awaits `Link::send` inside its actor, `M/fabric.rs:1311`; waiting for airtime there would
+and its `send` never blocks the bridge core (the fabric awaits `Link::send` inside its actor, `M/fabric.rs:1336`; waiting for airtime there would
 stall everything, R00 §3 finding 7).
 
 ```rust
@@ -251,7 +255,7 @@ client on prost (+152 / +132 KiB, run).
   idempotently and the client never re-sends `want_config_id` inside a session (it can wedge firmware). The nonce-0 heartbeat keeps the 15-minute API
   session alive (R01 §3.9; the presence reader's keep-alive is built, `meshtastic_presence.py:35`). If meshmud's uplink drops, all downlinks close and
   the client reconnects with capped back-off.
-- **Send allowlist at the lowest layer** (precedent: the reader's `ALLOWED_TORADIO`, `meshtastic_presence.py:91`). The crate gets a wrapped stream
+- **Send allowlist at the lowest layer** (precedent: the reader's `ALLOWED_TORADIO`, `meshtastic_presence.py:93`). The crate gets a wrapped stream
   that parses every outgoing `ToRadio` and drops, counts and logs (no content) anything outside: `packet` with `portnum = TEXT_MESSAGE_APP` to a
   channel (`to = 0xFFFFFFFF`) or a node · `want_config_id` once · `heartbeat` nonce 0. Never admin, config, `xmodemPacket`, `mqttClientProxyMessage`,
   `disconnect`, heartbeat nonce 1 (the board would broadcast its NodeInfo), any other portnum. The second release adds `PRIVATE_APP`. A unit test
@@ -305,31 +309,38 @@ bundled** (D26 #5). The carrier is `lxmf-sidecar` (`60-transport/sidecars/lxmf-s
 (`50-messaging/sidecars/meshtastic-presence/`): one Python file of a few hundred lines, `requirements.in`, a lock from `gen_lock.py`, `run-tests.sh`
 and offline `tests/`, a README and a LICENSE. It runs in its own venv `venvs/lxmf`, built by the L1 pattern (`pip install --require-hashes` from the
 lock the release carries, closure cached under `cache/packages/lxmf/`, §2.1) on the distro `python3` (`rns` and `lxmf` need only Python ≥ 3.7, R02
-§2). It is the one program of ours that imports Reticulum, a separate process never combined with `111d` (D17 #12 amended, §15, §18). **Credit:** its
-header, README, `THIRD-PARTY-NOTICES.md` and the Settings copy say "Reticulum and LXMF are the work of the Reticulum project (reticulum.network); 111
-uses them as released and is not affiliated". Its licence is **pending the owner's contact with upstream** (§15). Evidence: the Reticulum side is
-*run* (R07 checks 1, 1b, 7); the helper is *design* until G3 (R02 §4 C, *src*).
+§2). Its lock pins `rns` (and `lxmf`'s `rns` requirement) to the same version as `rns-lock.txt` at release time, because two `rns` copies share one
+instance protocol; `gen-notices.py --check` or the release checklist asserts that the two locks agree. It is the one program of ours that imports
+Reticulum, a separate process never combined with `111d` (D17 #12 amended, §15, §18). **Credit:** its header, README, `THIRD-PARTY-NOTICES.md` and the
+Settings copy say "Reticulum and LXMF are the work of the Reticulum project (reticulum.network); 111 uses them as released and is not affiliated". Its
+licence is **pending the owner's contact with upstream** (§15). Evidence: the Reticulum side is *run* (R07 checks 1, 1b, 7); the helper is *design*
+until G3 (R02 §4 C, *src*).
 
 **Process contract.** A `ChildSpec` with piped stdio (§7), spawned only while the Reticulum bridge is enabled: `python3 -I lxmf_sidecar.py
 --config-dir <bridge/lxmf/rns> --identity <bridge/lxmf/identity> --storage <bridge/lxmf/store> --name <display name>`, `HOME=<root>`. **JSON Lines,
-UTF-8, one object per line, at most 64 KiB; stdout is the protocol, stderr the log.** `111d` validates every line (size, schema, field caps) and
-counts a malformed one as noise (draft proposal for the messages):
+UTF-8, one object per line, at most 64 KiB; stdout is the protocol, stderr the log.** Piped stdio and not the presence sidecar's snapshot file because
+the helper is bidirectional (send, announce, name), listens on no port (§15.7), and the `Piped` extension is needed by `deltachat-rpc-server` anyway
+(§7). `111d` validates every line (size, schema, field caps) and counts a malformed one as noise (draft proposal for the messages):
 - `111d → helper`: `send {id, to, text, fields?}` · `announce {}` · `name {display}` · `quit {}`.
-- `helper → 111d`: `ready {dest, instance}` (`dest` = the LXMF delivery destination hash the library reports) · `msg {hash, src, name, text, claim_ts,
-  signed, why_unsigned, fields}` · `state {id, hash, state, reason}` · `heard {dest, name}` (an announce: feeds Nearby `reticulum` sources and
-  re-queues a `peer_unannounced` send) · `link {up | down | partitioned}`.
+- `helper → 111d`: `ready {dest, pubkey, instance}` (`dest` = the LXMF delivery destination hash the library reports, `pubkey` = the identity's 64 B
+  public key, so G3 can exercise the Wave 0 verifier's hash binding end to end, §14) · `msg {hash, src, name, text, claim_ts, signed, why_unsigned,
+  fields}` · `state {id, hash, state, reason}` · `heard {dest, name}` (an announce: feeds Nearby `reticulum` sources and re-queues a
+  `peer_unannounced` send) · `link {up | down | partitioned}`.
 
 **What the helper does.** (1) Attaches to the shared rnsd instance as an interface-less client: its config dir has `share_instance = yes`,
-`instance_name = 111` and rnsd's `rpc_key` (a different dir derives a different key, R02 §3.4), dir 0700, `config` 0600 (§11); if the installed RNS
-has a require-shared-instance mode it uses it so it can never become the instance (confirmed at build). (2) Owns the delivery identity
-`bridge/lxmf/identity` (0600) and one destination; `111d` does not read the file in R-B (§14). (3) Announces on enable, on every `link up`, on request
-and on a user-set interval (default 60 minutes, `0` = events only; Reticulum caps announces at 2 % airtime per interface); display name default
-`111-<4 hex of the address>`; **no stamp cost** advertised (no policy), the router pays others' (R02 §3.12). (4) Sends with the library's `LXMessage`
-(it picks opportunistic, direct or link) and **never auto-resends**: after the library's 5 attempts (R02 §3.10) the row is `failed` and `111d`
-re-queues it on that peer's next `heard` or by hand. (5) Receives through the delivery callback; the **message hash is the dedupe key** (R07 §2 check
-4); **`signed` is the library's `signature_validated`**, with `unverified_reason` otherwise (R02 §3.6, §4 C, *src*); attachments are not ingested. (6)
-Reports states monotonically: `OUTBOUND` queued, `SENDING`/`SENT` sent, `DELIVERED` delivered, a propagated `SENT` relayed,
-`REJECTED`/`CANCELLED`/`FAILED` failed. While it is down the node receives no LXMF (a propagation node would hold it; opt-in, off).
+`instance_name = 111` and rnsd's `rpc_key` (a different dir derives a different key, R02 §3.4), dir 0700, `config` 0600 (§11); *(unverified)* if the
+installed RNS has a require-shared-instance mode the helper uses it (confirmed at build); the start order and the post-spawn `rnstatus` check below
+are the mechanism. (2) Owns the delivery identity `bridge/lxmf/identity` (0600) and one destination; `111d` does not read the file in R-B (§14). (3)
+Announces on enable, on every `link up`, on request and on a user-set interval (default 60 minutes, `0` = events only; Reticulum caps announces at 2 %
+airtime per interface); display name default `111-<4 hex of the address>`; **no stamp cost** advertised (no policy), the router pays others' (R02
+§3.12). (4) Sends with the library's `LXMessage` (it picks opportunistic, direct or link) and **never auto-resends**. After the library's 5 attempts
+(R02 §3.10): a `FAILED` that came after `SENDING`/`SENT` was on air without proof, so the row keeps `sent` with "transmitted, not confirmed" and is
+`Retry::Later` on that peer's next `heard`; a `FAILED` while still `OUTBOUND` (no path, nothing sent) is `queued` with `peer_unannounced`; only
+`REJECTED` (stamp, blackhole) and the user's `CANCELLED` are `failed` (bridge M2). (5) Receives through the delivery callback; the **message hash is
+the dedupe key** (R07 §2 check 4); **`signed` is the library's `signature_validated`**, with `unverified_reason` otherwise (R02 §3.6, §4 C, *src*);
+attachments are not ingested. (6) Reports states monotonically: `OUTBOUND` queued, `SENDING`/`SENT` sent, `DELIVERED` delivered, a propagated `SENT`
+relayed, `REJECTED` and a user `CANCELLED` failed, a `FAILED` as in (4). While it is down the node receives no LXMF (a propagation node would hold it;
+opt-in, off).
 
 **Relay marker and fields.** The visible `[name/TAG] ` prefix (§8) leads the text, and a structured copy rides the LXMF fields **the library lets a
 sender set**: any field id (the `fields` dict is serialised as given), title and content (R02 §3.13, §4 C, *src*). The helper uses `FIELD_CUSTOM_TYPE
@@ -351,7 +362,8 @@ case) · interface changes use `rnstatus --attach|--detach|--reload`, never `pki
 
 **"Send to Reticulum".** With no channels a target is a **chosen peer address**: per-network recipient lists (Settings or the compose picker; 32-hex
 addresses entered, pasted or picked from heard announces in Nearby), one LXMF DM per recipient. A recipient list is a destination-only `group` (§8). A
-distribution-group hub and Reticulum Relay Chat rooms are deferred (§17).
+distribution-group hub and Reticulum Relay Chat rooms are deferred (§17). The native UIs for Reticulum users are Sideband and Columba on a phone;
+MeshChatX may return as a hosted panel (§17).
 
 ## 7. App-peer adapters (normative shape; Delta Chat is the reference)
 
@@ -381,9 +393,9 @@ core's bot flag (`Config::Bot`). Contacts join by Secure-Join: the hub shows the
 map as in §4 (*doc*). The relay is **Madmail** (Rust single-binary chatmail relay, AGPL-3.0, IP-only and self-signed mode, experimental), LAN-bound
 only while LAN sharing is on, addresses like `user@[192.168.1.5]`; its licence file is read before its pin (§15).
 
-**Supervisor extension (needed; shared with the LXMF helper).** A `ChildSpec` (`N/supervise.rs:37-46`) gains `stdio: Null | Piped`. Today every spawn
-sets `stdin = null` (`:333`) and sends stdout and stderr to a log or inherits them (`:334-367`). For `Piped` the supervisor **owns a reader task for
-stdout** (an undrained pipe blocks the child and the respawn loop), exposes the lines through a bounded channel on its `ChildControl` (`:137`) with a
+**Supervisor extension (needed; shared with the LXMF helper).** A `ChildSpec` (`N/supervise.rs:55-64`) gains `stdio: Null | Piped`. Today every spawn
+sets `stdin = null` (`:449`) and sends stdout and stderr to a log or inherits them (`:450-481`). For `Piped` the supervisor **owns a reader task for
+stdout** (an undrained pipe blocks the child and the respawn loop), exposes the lines through a bounded channel on its `ChildControl` (`:155`) with a
 stdin writer, and re-publishes both after every respawn; the adapter re-attaches, requests in flight fail with `adapter_down` and re-queue (§4);
 stderr still goes to the log. A tiny socket wrapper is the fallback. **(draft proposal)** for the names.
 
@@ -464,7 +476,7 @@ networks…") whose result is a **copy of the text** sent as a fresh send group,
 - **Send** (`POST /messages/fanout` → `{group_id, items: [{target, id, plan}]}`). Validation is atomic: a target refused for `oversize` in `refuse`
   mode or for a consent gate (`ham_unconfirmed`, `uplink_off`) answers `409` with the per-target report and queues nothing. Adapter *state* (region
   unset, board away, queue full, no path) is not a call error: rows queue with the reason, because delivery is non-negotiable. Each row has its own
-  state, retry and cancel (only while `queued` with nothing sent, as `Fabric::cancel`, `M/fabric.rs:772`); one target's failure never cancels another;
+  state, retry and cancel (only while `queued` with nothing sent, as `Fabric::cancel`, `M/fabric.rs:794`); one target's failure never cancels another;
   pacing is the adapter's.
 - **Agent.** `messages.send` gains optional `targets` and stays a proposal: `kind: bridge_message`, body = `to: <fc-id>` lines, a blank line, the text
   verbatim (draft proposal; R04 §4.8), rendered **preformatted, never as Markdown** (§10). Accepting runs the same validation and, if a consent gate
@@ -502,7 +514,7 @@ flood cannot fill the 256-entry ring; `bridge` (adapter and edge status). The UI
 with no default).
 
 **Enum growth and the pins each bump touches.** `Proposal.kind` + `bridge_message`, `bridge_edge`, `device` (`N/dashboard/api_v1/proposals.rs:65`
-`KINDS` 5 → 8, `API:556`) · `NearbySource.kind` + `reticulum` (`API:919`; sources are announces the helper hears) · new `ForeignMessageState`
+`KINDS` 5 → 8, `API:556`) · `NearbySource.kind` + `reticulum` (`API:920`; sources are announces the helper hears) · new `ForeignMessageState`
 (`API:687` `MessageState` stays closed at four) · `reason_code` per §4 · `Problem.code` + `consent_required`, `oversize`, `component_unavailable`,
 `unsupported_action` · agent tools 10 → 17 (`A/tests/daemon_tools.rs:306`, `A/tests/chat_loop.rs:308`) · regenerate with `pnpm gen:types`, run
 `gen-sse.mjs --check` (`40-interface/ui/package.json:14`). `ServiceId` does **not** grow: R-B hosts no panel, and the `transport` row already reads
@@ -572,7 +584,7 @@ uplink = "/dev/serial/by-id/usb-…"
   legality is a per-node human fact, DEV §0.6); the frequency plan comes from the KB region table, generated from the pinned `config.proto` (R05
   §3.16). rnsd has no validate flag, so validation is **start rnsd on a scratch `--config` dir and read `rnstatus`** (§19).
 - **Live attach, detach, reload.** `rnstatus --attach|--detach|--reload <name>` over rnsd's control RPC (RNS ≥ 1.5.5; *run* against 1.5.7, R05 §3.9).
-  Posture keys need a restart through `ChildControl::restart` (`N/supervise.rs:209`) with the child ordering of §2 and §6. The netlink path, which
+  Posture keys need a restart through `ChildControl::restart` (`N/supervise.rs:324`) with the child ordering of §2 and §6. The netlink path, which
   today regenerates the config and `pkill`s rnsd on every link change (`N/transport/mod.rs:165-186`), becomes: re-render, diff, `--reload` the
   AutoInterface, restart only for posture.
 - **`transport.read`.** Interface facts `{name, type, up, rx, tx, peers}` from `rnstatus` through the shared instance, replacing the "joined"
@@ -607,7 +619,8 @@ uplink = "/dev/serial/by-id/usb-…"
   (`identify.rs:200-202`). The port is released at the end or its claim transferred (`PortTable::transfer`). Over-matching `lora-table.toml` rows
   (`10c4:ea60`, `1a86:*`, `303a:*`) stay a `likely` hint and are refined here.
 - **Proposals.** `device.propose` (§13) files `kind: device` with actions from the closed vocabulary (DEV §3); the UI renders a device card with the
-  exact stanza and port. `kind: device` also carries the two one-shot actions below, so **no new proposal kind is needed for identify or restarts**.
+  exact stanza and port (a restart proposal renders a **service card**, not a device card). `kind: device` also carries the two one-shot actions
+  below, so **no new proposal kind is needed for identify or restarts**.
 - **The narrow apply→verify→undo cut (P4, D17 #7).** Four actions with a revert: `rns.interface.upsert`, `rns.interface.remove`, `rns.posture.set`,
   `radio.region.set`. Two one-shot actions with nothing to revert: `identify {device_id}` (the per-device consent, remembered on accept) and
   `service.restart {service_id}` (supervised children only, `409 not_supervised` otherwise, `API:47`). Everything else in the vocabulary
@@ -664,7 +677,8 @@ label, "already bridged by node X" and "Open the sealed thread" are the second r
 
 - **The plug.** `TransportVerifier` (`ID/attest.rs:298`) gets its first implementor in `node111`: for `0x03`, SHA-256 of the supplied 64 B public key
   against `transport_key`, then Ed25519; for `0x02`, an explicit rule that an all-zero `transport_sig` is accepted as one-sided and marked so. Vectors
-  are frozen in `id111`. A one-sided record never yields `attested-111`, even later: anyone can write a record naming a victim's board key.
+  are frozen in `id111`; G3 exercises the `0x03` hash binding with the helper's `ready.pubkey` (§6). A one-sided record never yields `attested-111`,
+  even later: anyone can write a record naming a victim's board key.
 - **No Reticulum arithmetic in our code (carriers M4).** The LXMF destination hash is reported by the helper (`ready.dest`, §6) and **carried and
   compared, never derived**: deriving it from the public key would reproduce Reticulum's addressing from documents, the pattern §12 rejects for the
   RNode probe. How the hash rides in the signed record is pinned with the gossip kind (§17). In R-B `111d` does not read the helper's identity file.
@@ -710,7 +724,7 @@ label, "already bridged by node X" and "Open the sealed thread" are the second r
 | Item | Status |
 |---|---|
 | shipped `111d` binary | effectively **GPL-3.0-only** once the `meshtastic` crate and prost types link in (D25 F2); our files stay "or later". The protobufs `LICENSE` has no version notice, so a legal read decides whether "or later" survives (GPLv3 §14; R06 G9). Rows: the crate and its 49-crate closure (MPL-2.0 `serialport` unless dropped), prost, bytes, prost-derive, the one protobuf snapshot (commit hash and checksum beside the notices) |
-| `lxmf-sidecar` and Reticulum | **pending the owner's contact with upstream.** A separate process in its own venv, never combined with `111d`, importing the user-installed `rns` and `lxmf`; Reticulum's authorship credited in its header, README, `THIRD-PARTY-NOTICES.md` and Settings. Its own licence, and how it sits with the Reticulum License (non-OSI; no-harm and no-AI-training clauses, `LICENSING.md` §8), follow that contact and a legal read (R02 §4 C). `LICENSING.md` §1, §7 and the evidence line at `:30` name the helper as the one program of ours that imports Reticulum (D17 #12 amended, D26 #4); "no crate depends on Reticulum" stays true |
+| `lxmf-sidecar` and Reticulum | **pending the owner's contact with upstream.** A separate process in its own venv, never combined with `111d`, importing the user-installed `rns` and `lxmf`; Reticulum's authorship credited in its header, README, `THIRD-PARTY-NOTICES.md` and Settings. Its own licence, and how it sits with the Reticulum License (non-OSI; no-harm and no-AI-training clauses, `LICENSING.md` §8), follow that contact and a legal read (R02 §4 C). `LICENSING.md` §1, §7, §8 and the evidence line at `:30` name the helper as the one program of ours that imports Reticulum (D17 #12 amended, D26 #4); "no crate depends on Reticulum" stays true |
 | every third-party program a component needs | downloaded hash-locked from its public source at install or enable time, **never in a 111 payload** (D26 #5). Before any download or enable 111 shows a notice (program, licence, where to read it) and records the user's acknowledgement: the user installs, 111 and its author are not the distributor. The Layer 1 rns venv gets the same one-line notice |
 | Madmail · SimpleX · Briar headless | AGPL-3.0 (Madmail: repo metadata only; **its licence file is read before its pin**, its AGPL §13 source offer named) · AGPL-3.0 · GPL-3.0-or-later per LICENSE.txt: separate processes; source offers name the pinned tags |
 | `deltachat-rpc-server` · test tools | MPL-2.0, separate process · `meshtasticd` (GPL-3.0) and Meshtasticator (CC BY 4.0) are test fixtures, never shipped; Sideband (CC BY-NC-SA) is never shipped; Columba is linked, not shipped |
@@ -806,18 +820,19 @@ the MeshCore data-type PR.
   `FabricEvent::Foreign` (§3) · §14's "111 never transmits", "read-only" and "no Meshtastic protobuf code enters our Rust binary" restated (§5, §15),
   with the doc comments in `N/meshtastic/mod.rs:5-7`, `shim.rs:9-10` and `M/link/mod.rs:233` updated (the Link seam waits for the second release) ·
   "Message them" is no longer withheld (L5 §14) · the presence reader retires after parity · `interfaces.toml` is the only reader of the Meshtastic
-  binding (§11) · INTRO over LoRa stays deferred (`M/fabric.rs:2439`).
+  binding (§11) · INTRO over LoRa stays deferred (`M/fabric.rs:2475`).
 - **Layer 2:** A10 bytes `0x02`, `0x03` and the `TransportVerifier` implementor with frozen vectors (§14) · one domain-tagged derivation on the
   identity handle for `111/bridge-conv/v1` (the A9 pattern); Cat-1 vectors untouched.
-- **Layer 1:** new children, dirs and ports (§2) · `ChildSpec.stdio` with a supervisor-owned reader (`N/supervise.rs:37,333`) · **child ordering is
+- **Layer 1:** new children, dirs and ports (§2) · `ChildSpec.stdio` with a supervisor-owned reader (`N/supervise.rs:55,449`) · **child ordering is
   bridge-core orchestration over `stop_and_wait`/`restart` and fresh spawns, with the post-spawn partition check; not a supervisor feature** (task
-  cut, G4) · `111 install` pre-downloads declared payloads into `cache/packages/<id>/` and prints the notice line, and the rns venv gets the same line
-  (D26 #1, #5) · `venvs/lxmf` and its lock in the signed manifest (hashes only, no Reticulum bytes) · renderer modes (§11) · `CAP_NET_BIND_SERVICE`
-  for Madmail if it needs standard ports, `AF_NETLINK` kept if the unit restricts address families · `gen-notices.py` and `LICENSING.md` rows (§15) ·
-  the `rns` pin resolves from PyPI at release time (`10-bootstrap/README.md:42` still says `rns==1.5.6`).
+  cut, G4) · `111 install` pre-downloads declared payloads into `cache/packages/<id>/` and prints the notice line, recorded in the install receipt
+  beside the artifact hashes, and the rns venv gets the same line (D26 #1, #5) · `venvs/lxmf` and its lock in the signed manifest (hashes only, no
+  Reticulum bytes) · renderer modes (§11) · `CAP_NET_BIND_SERVICE` for Madmail if it needs standard ports, `AF_NETLINK` kept if the unit restricts
+  address families · `gen-notices.py` and `LICENSING.md` rows (§15) · the `rns` pin resolves from PyPI at release time (`10-bootstrap/README.md:45`
+  still says `rns==1.5.6`) and the helper's lock agrees with it (asserted by `gen-notices.py --check` or the release checklist).
 - **Layer 4:** routes, SSE, enums and pins (§10) · the **global bearer write gate** in `require_session` (`N/dashboard/api_v1/auth.rs:974`), which
-  also closes `restart` and `identify` · preformatted proposal bodies · `pnpm gen:types`, `gen-sse.mjs --check` · `/settings/l6` · prompts. **Layer
-  3:** seven tools and the count pins (§13).
+  also closes `restart` and `identify` · preformatted proposal bodies · `pnpm gen:types`, `gen-sse.mjs --check` · `/settings/l6` · agent prompts gain
+  `bridge.setup` and `transport.fix` (`UI/lib/prompts.ts:124`). **Layer 3:** seven tools and the count pins (§13).
 - **D17 #12 and `LICENSING.md`:** amended by D26 #4 (§15). The rule that no test harness imports RNS or LXMF is superseded for the helper's tests and
   G3 only.
 - **Layer 0 (KB), new `candidate` entries:** `meshtastic-rust` · `madmail` · `deltachat-rpc-server` · `simplex-chat` · `rnode-firmware` (cache-seeding
@@ -836,7 +851,8 @@ the MeshCore data-type PR.
   heartbeat (R01 §3.9) is built (`meshtastic_presence.py:35`). L5 §8 budget 233 / 221 B → 231 / 219 B (`PRIVATE_APP`), text 232 / 220 B (shapes by
   prost encode in G2, firmware limits on hardware).
 - `DEV` §3 "own probes" → adopted `rnodeconf --info` (R06 G6); `DEV` §3 `service.restart` "control, rate-limited" → a proposal like every write (D26
-  #2).
+  #2). The `DEV` §3 closed action vocabulary grows by two one-shot actions, `identify {device_id}` and `service.restart {service_id}`, carried in
+  `kind: device` proposals (one applier loop, fewer pins); `identify` renders on a device card and `service.restart` on a service card.
 - D17 #12 → amended by D26 #4: Reticulum stays a separate service never incorporated into `111d`; the LXMF helper is the one named program of ours
   that imports it, as a separate process. OB F3 (MeshChatX closure, bundled CPython, carrier trait, catch-up rules) → withdrawn; R07 stays as evidence
   for the Reticulum side only.
@@ -859,3 +875,14 @@ the MeshCore data-type PR.
   M5, M9; D26 #2, #3).
 - **§15–§19:** stores, live consent, helper licensing rows, notices; G1–G7 reshaped, G6 reserved, gate homes; MeshChatX and labels to §17; Layer 0/1
   rows (carriers M5, minors 9, 14, 15; integration M5, M6; D26 #3–#5).
+
+## Changelog v0.2 → v0.3
+
+- **1** §6 (4), (6): a post-air LXMF `FAILED` keeps `sent`, `Retry::Later` on `heard`; `OUTBOUND` + `FAILED` is `queued`/`peer_unannounced`; only
+  `REJECTED` and `CANCELLED` are `failed`. **2** §6, §18 Layer 1: the helper's lock agrees with `rns-lock.txt`. **3** §2.1 rule 3, §18 Layer 1: the
+  notice is recorded in the install receipt. **4** §18 Layer 4: agent prompts restored.
+- **5** §12, §19: the two one-shot actions in `kind: device` recorded; restarts render a service card. **6** §2: port 11232 only. **7** citations
+  re-pinned (`supervise.rs`, mesh111 `fabric.rs`, `API:920`, presence reader, `10-bootstrap/README.md:45`) and the header note. **8** §6 (1):
+  require-shared-instance tagged *(unverified)*, the "not measured" cite dropped. **9** §15: `LICENSING.md` §8. **10** §6: why piped stdio. **11** §6,
+  §14: `ready.pubkey`. **12** §6: Sideband and Columba are the native UIs. **13** §2.1: updater manifest refresh (`LICENSING.md` §9.3).
+
