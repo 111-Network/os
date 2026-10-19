@@ -14,7 +14,10 @@
 //!   §6.5 window's verdict, never a rejection.
 //!
 //! (A3 — `next_announce_counter` as the `msg_seq` epoch source — is a
-//! documentation + unit-test amendment in `counters.rs`; it adds no wire.)
+//! documentation + unit-test amendment in `counters.rs`; it adds no wire.
+//! So is A12 — `observe_counter`'s verdict after an unclean reboot, from the
+//! Layer 5 integrated review: the `counters::tests::a12_*` unit tests, no
+//! wire, no vector.)
 //!
 //! The files live in a SUBDIRECTORY on purpose: the top-level vector set is
 //! the Cat-1 Monocypher harness contract (D20: untouched), and both its

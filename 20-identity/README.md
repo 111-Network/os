@@ -5,7 +5,8 @@ Every node's cryptographic self: how a node's identity is generated, stored, use
 Status of this document: **spec v2.1 — LOCKED** (v2.1 = v2 + one §3 amendment, 2026-10-14: A and R MUST be torsion-free — owner decision, closes the T9 F3 mixed-order residual; decisions: `os/plan/DECISIONS.md` D13 + D14 lock amendments incl. three user calls at lock; panel triage: `os/plan/layers/20-identity/review/triage.md` — 4 judges, 71 raw findings, all gating items resolved in v2; options brief: `os/plan/layers/20-identity/options.md`; research: 8-agent sweep `wf_73d7f290-f74`, 2026-10-12).
 
 **Layer 5 amendments (D20, 2026-10-14):** A1–A4 and A6–A11 are recorded additively in §13.1; the locked text is unchanged and
-carries a one-line pointer wherever a sentence is superseded (§6.2–§6.5, §8.4, §10, §13). A5 is asked later (§15).
+carries a one-line pointer wherever a sentence is superseded (§6.2–§6.5, §8.4, §10, §13). A5 is asked later (§15). A12
+(2026-10-19, from the Layer 5 integrated review) is recorded the same way, with a §6.5 pointer.
 
 The keywords **MUST / MUST NOT / SHOULD / MAY** are normative (RFC 2119).
 
@@ -140,6 +141,8 @@ Counter state (announce counter + per-peer traffic counters/windows) is **protoc
 > **Amended by Layer 5 (A11; §13.1):** for kinds that carry a `msg_seq` the 32-entry window is not enforced below high-water;
 > replay authority is Layer 5's receive state, every packet is still offered to the window, and its fresh/stale verdict gates
 > attribution.
+>
+> **Amended by Layer 5 (A12; §13.1):** after an unclean reboot `observe_counter` judges from the persisted high-water, not the jump.
 
 ### 6.6 Online link upgrades
 
@@ -376,6 +379,27 @@ verified packet is still offered to the window** (`CounterStore::observe_counter
 whatever the verdict. The window's fresh/stale verdict gates *attribution* of a connection, card answers and proactive pushes; a
 replayed packet verifies but is never fresh. Control kinds (`msg_seq = 0`) are idempotent. Only a `pair_mac`-verified packet keys
 replay state; a valid `sig` never does. TLV `0x21` is reserved for `signer_pubkey` (§6.7).
+
+**A12 — unclean-reboot verdict for `observe_counter` (§6.5, A11; Layer 5 integrated review M1, 2026-10-19).** The `counters` file
+holds each peer's receive high-water as of the last batch commit, up to N − 1 behind the live value. After an unclean reboot the
+§6.5 jump (J = N = 64) moves it to persisted + 64 and clears the bitmap, so the window takes only (persisted + 32, persisted + 64].
+A peer that was **not** restarted continues its live counter into the gap below that window, and every packet it sends there
+verifies yet is Stale: the hub never attributes that member's connection and ignores its `MAILBOX_FETCH`, `CUSTODY_PUT` and
+`ENROLL` for up to 32 packets — with no timers, many reconnects. Rule: when J > 32 opens such a gap, the unclean open records each
+persisted peer's window, as persisted, as its **unclean floor**. `observe_counter` judges a counter that falls behind the jumped
+window against it: at or below the persisted high-water ⇒ Stale; above it ⇒ offered to the floor window, a 32-entry §6.5 window
+on the un-jumped timeline that every counter accepted since the open also enters. Unseen there ⇒ **Fresh**, recorded there only,
+so a second observation is Stale; seen, or 32 or more behind the highest counter accepted since the open ⇒ Stale. A gap verdict
+changes no persisted state: the jumped window, the batch tick and the clean flag stay as they are. Counters the jumped window can
+record behave as before (A11). The floor lives in memory only. It survives batch commits, because a commit writes the jumped
+high-water, not the live one, so dropping it there would bring the stall back on a busy hub. It is dropped once the peer's
+counters reach the jumped high-water, after which the two windows agree. It does not survive a restart: a clean or unclean restart
+before the peer catches up reopens on the persisted jumped high-water, and the peer's counters are Stale until they re-enter the
+window, as before this amendment. A jump of at most 32 opens no gap and records no floor. `on_receive` (the §6.5 strict
+rejection, for kinds without `msg_seq`) and the send-side jump are unchanged. **Residual:** one of the last ≤ N pre-crash packets,
+replayed after the crash, can attribute a socket for pushes of sealed items it cannot read and for card answers — the same
+bounded residual §6.5 already hands to Layer 5 idempotency (A11). Test: `counters::tests::a12_unclean_open_keeps_a_live_peer_fresh`,
+with the `a12_*` set beside it (floor bound, clean open, batch commits, restart, small jump, `on_receive` bookkeeping).
 
 ## 14. Test vectors & conformance
 

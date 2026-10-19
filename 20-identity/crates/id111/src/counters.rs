@@ -12,10 +12,11 @@
 //! never applies to them — panel seams#1). After an unclean reboot BOTH sides
 //! apply a conservative forward jump with **J ≥ N** (send-side counter and
 //! receive-side high-water alike); the receive side accepts the resulting gap
-//! harmlessly — a jump only advances the window. The §6.5 residual is stated
-//! honestly: a receiver's stale-by-≤N persisted window can re-accept
-//! already-consumed frames after an unclean reboot; content-level idempotency
-//! is Layer 5's (§13).
+//! harmlessly — a jump only advances the window — for `on_receive`, while
+//! `observe_counter` judges the gap from the persisted high-water (A12
+//! below). The §6.5 residual is stated honestly: a receiver's stale-by-≤N
+//! persisted window can re-accept already-consumed frames after an unclean
+//! reboot; content-level idempotency is Layer 5's (§13).
 //!
 //! Unclean-vs-clean detection: the `counters` file carries a clean-shutdown
 //! flag byte. On disk the file is ALWAYS marked dirty/running except by
@@ -47,6 +48,30 @@
 //!   `msg_seq` kinds replay authority is Layer 5's own receive state; the
 //!   verdict only gates connection attribution, card answers and proactive
 //!   pushes (L5 §4, §8.1). `on_receive` keeps the §6.5 rejecting contract.
+//! - **A12 — the unclean-reboot verdict (L5 integrated review M1).** The
+//!   jump leaves a gap between a persisted peer's high-water as persisted
+//!   and the jumped window's trailing edge (J = N = 64 ⇒ the window takes
+//!   only `(persisted + 32, persisted + 64]`), and a live peer that was not
+//!   restarted sends its next counters into that gap: without A12 each one
+//!   is `Stale` and L5 attributes nothing from that peer for up to 32
+//!   packets. When J > [`WINDOW_SIZE`] opens such a gap,
+//!   [`CounterStore::open`] records each persisted peer's window as its
+//!   **unclean floor** (memory only). [`CounterStore::observe_counter`]
+//!   judges a counter that falls behind the jumped window against it: at or
+//!   below the persisted high-water ⇒ `Stale`; above it ⇒ offered to the
+//!   floor window — a §6.5 window on the un-jumped timeline that every
+//!   counter accepted since the open also enters — unseen ⇒ `Fresh`,
+//!   recorded there only (a second observation is `Stale`); seen, or 32 or
+//!   more behind the highest counter accepted since the open ⇒ `Stale`.
+//!   Nothing persisted changes on that path. The floor survives batch
+//!   commits (a commit writes the jumped high-water, not the live one), is
+//!   dropped once the peer's counters reach the jumped high-water (the two
+//!   windows then agree), and dies with the process: a restart before the
+//!   peer catches up stalls it as before A12. Residual: one of the last ≤ N
+//!   pre-crash packets, replayed after the crash, can attribute a socket for
+//!   pushes of sealed items it cannot read and for card answers — the
+//!   bounded residual §6.5 already hands to Layer 5 idempotency (A11).
+//!   `on_receive` and the send side keep the jump unchanged.
 //! - **A3 — the `msg_seq` epoch source.** [`CounterStore::next_announce_counter`]
 //!   is the §4 epoch source: each call returns a fresh, strictly greater
 //!   value that is already durable (fsync) when returned, and refuses with
@@ -153,10 +178,13 @@ impl std::error::Error for WindowReject {}
 pub enum Freshness {
     /// The window accepted the counter (above high-water, or an unseen slot
     /// inside the window); its state advanced exactly as
-    /// [`CounterStore::on_receive`] would have.
+    /// [`CounterStore::on_receive`] would have. Also (A12, after an unclean
+    /// open) a counter behind the jumped window but above the peer's
+    /// persisted high-water and unseen since the open: recorded in the
+    /// in-memory floor window only — nothing persisted changes.
     Fresh,
     /// The window would reject the counter (already seen, or 32 or more
-    /// behind high-water); nothing changed.
+    /// behind high-water) and no A12 floor admits it; nothing changed.
     Stale,
 }
 
@@ -326,6 +354,18 @@ impl PeerTraffic {
     }
 }
 
+/// L5 amendment A12 — one peer's unclean floor (see
+/// [`CounterStore::unclean_floor`]). In memory only; never persisted.
+#[derive(Debug, Clone, Copy)]
+struct UncleanFloor {
+    /// The receive high-water as persisted at the unclean open: a counter at
+    /// or below it is never judged fresh through the floor.
+    floor: u64,
+    /// The §6.5 window on the un-jumped timeline: seeded from the persisted
+    /// window, then fed every counter accepted since the open.
+    window: ReceiveWindow,
+}
+
 // ---------------------------------------------------------------------------
 // The counter store (§6.2 announce counter + §6.5 traffic counters)
 // ---------------------------------------------------------------------------
@@ -350,6 +390,13 @@ pub struct CounterStore {
     /// operation flips the file to DIRTY_RUNNING before proceeding, so a
     /// crash after any emission is always seen as unclean at the next open.
     clean_on_disk: bool,
+    /// L5 amendment A12 — per persisted peer, its receive window as persisted
+    /// at an unclean open (the high-water is the peer's *unclean floor*),
+    /// advanced by every counter accepted since. In memory only, never
+    /// persisted; dropped per peer once its counters reach the jumped
+    /// high-water. At most one entry per persisted peer (≤
+    /// [`MAX_COUNTER_PEERS`]); empty after a clean open.
+    unclean_floors: HashMap<NodeId, UncleanFloor>,
 }
 
 impl CounterStore {
@@ -370,6 +417,7 @@ impl CounterStore {
             dirty_packets: 0,
             batch_n: DEFAULT_BATCH_N,
             clean_on_disk: false,
+            unclean_floors: HashMap::new(),
         };
         // Initial commit: counter 0 durable. Persisted CLEAN — nothing has been
         // emitted yet, so the first open() must not read this as a crash
@@ -384,9 +432,11 @@ impl CounterStore {
     /// Unless the previous run marked a clean shutdown, this applies the §6.5
     /// unclean-reboot forward jump J = N (≥ N) to every per-peer send counter
     /// and receive high-water — the announce counter is NOT jumped (§6.2
-    /// sync-commits it before transmit, so it is never uncommitted). The file
-    /// is then re-marked dirty/running so a crash from here reads as unclean
-    /// at the next open.
+    /// sync-commits it before transmit, so it is never uncommitted). Where
+    /// the jump exceeds [`WINDOW_SIZE`] it also records each persisted
+    /// peer's L5 A12 unclean floor (in memory; see [`Self::observe_counter`]).
+    /// The file is then re-marked dirty/running so a crash from here reads as
+    /// unclean at the next open.
     pub fn open(dir: &Path) -> Result<Self, CounterError> {
         let path = dir.join(COUNTERS_FILE);
         if !path.exists() {
@@ -403,6 +453,7 @@ impl CounterStore {
             dirty_packets: 0,
             batch_n: parsed.batch_n,
             clean_on_disk: false,
+            unclean_floors: HashMap::new(),
         };
         if !parsed.clean {
             store.apply_unclean_jump();
@@ -431,6 +482,7 @@ impl CounterStore {
             dirty_packets: 0,
             batch_n: DEFAULT_BATCH_N,
             clean_on_disk: false,
+            unclean_floors: HashMap::new(),
         })
     }
 
@@ -516,11 +568,19 @@ impl CounterStore {
 
     /// §6.5 — offer a received packet counter: accepted (window advanced) or
     /// rejected as replay/too-old. Batch-committed with the send side.
+    ///
+    /// The unclean-reboot jump binds here unchanged: the gap below the jumped
+    /// window stays rejected (L5 amendment A12 changes only
+    /// [`Self::observe_counter`]'s verdict). An accepted counter also enters
+    /// the peer's A12 floor window while one is live — bookkeeping only, so
+    /// that a caller mixing both calls can never see a counter accepted here
+    /// judged fresh again there.
     pub fn on_receive(&mut self, peer: &NodeId, counter: u64) -> Result<(), CounterError> {
         self.mark_running()?;
         let base = self.traffic_base;
         let entry = self.peer_entry(*peer, base)?;
         entry.window.offer(counter).map_err(CounterError::Window)?;
+        self.note_unclean_floor(peer, counter);
         self.tick_and_maybe_commit()?;
         Ok(())
     }
@@ -533,7 +593,21 @@ impl CounterStore {
     /// batch-commit tick) and returns [`Freshness::Fresh`]. A counter the
     /// window would reject — already seen, or [`WINDOW_SIZE`] or more behind
     /// high-water — returns `Ok(`[`Freshness::Stale`]`)` and changes NOTHING
-    /// (not the window, not the batch tick, not the on-disk clean flag).
+    /// (not the window, not the batch tick, not the on-disk clean flag),
+    /// unless A12 below judges it fresh.
+    ///
+    /// **L5 amendment A12 — after an unclean open.** A counter that falls
+    /// behind the jumped window (never one the window holds as seen) is
+    /// judged against the peer's unclean floor ([`Self::unclean_floor`]): at
+    /// or below the persisted high-water ⇒ `Stale`; above it ⇒ offered to
+    /// the floor window. Unseen there ⇒ `Fresh`, recorded in that in-memory
+    /// window only — the persisted window, the batch tick and the clean flag
+    /// stay as they are, and a second observation of the same counter is
+    /// `Stale`. Seen there, or [`WINDOW_SIZE`] or more behind the highest
+    /// counter accepted since the open ⇒ `Stale`, nothing changed. So a live
+    /// peer that was not restarted is fresh again at once instead of after
+    /// up to 32 packets. Residual: one of the last ≤ N pre-crash packets,
+    /// replayed after the crash, is judged `Fresh` once (module docs, A12).
     ///
     /// Errors are the store's own, never a replay verdict:
     /// [`CounterError::TooManyPeers`] for a new peer past the guard, and
@@ -554,8 +628,14 @@ impl CounterStore {
         // counter (§6.5), so only known peers can be stale.
         if let Some(t) = self.peers.get(peer) {
             let mut probe = t.window;
-            if probe.offer(counter).is_err() {
-                return Ok(Freshness::Stale);
+            match probe.offer(counter) {
+                Ok(()) => {}
+                Err(WindowReject::Replayed) => return Ok(Freshness::Stale),
+                // A12: behind the window — after an unclean open this may be
+                // a live counter in the gap the receive jump opened.
+                Err(WindowReject::OutsideWindow) => {
+                    return Ok(self.unclean_floor_verdict(peer, counter));
+                }
             }
         }
         // Fresh: exactly the on_receive path.
@@ -567,8 +647,20 @@ impl CounterStore {
             // typed so no input can panic.
             return Ok(Freshness::Stale);
         }
+        self.note_unclean_floor(peer, counter);
         self.tick_and_maybe_commit()?;
         Ok(Freshness::Fresh)
+    }
+
+    /// L5 amendment A12 — the peer's unclean floor: its receive high-water as
+    /// persisted at an unclean open, for as long as that floor still decides
+    /// [`Self::observe_counter`] verdicts. `None` after a clean open, for a
+    /// peer absent from the persisted file (its window starts empty), when
+    /// the jump was at most [`WINDOW_SIZE`] (no gap opened), and once the
+    /// peer's counters have reached the jumped high-water. In memory only:
+    /// never persisted, so any restart drops it.
+    pub fn unclean_floor(&self, peer: &NodeId) -> Option<u64> {
+        self.unclean_floors.get(peer).map(|f| f.floor)
     }
 
     /// §6.5 — clean-shutdown commit: uncommitted state is flushed and the
@@ -658,12 +750,63 @@ impl CounterStore {
         Ok(())
     }
 
+    /// A12 — the verdict on a counter behind the peer's jumped window: fresh
+    /// only above its unclean floor and unseen in the floor window, where it
+    /// is then recorded. A stale verdict changes nothing (`offer` mutates
+    /// only on acceptance).
+    fn unclean_floor_verdict(&mut self, peer: &NodeId, counter: u64) -> Freshness {
+        let Some(f) = self.unclean_floors.get_mut(peer) else {
+            return Freshness::Stale;
+        };
+        if counter > f.floor && f.window.offer(counter).is_ok() {
+            Freshness::Fresh
+        } else {
+            Freshness::Stale
+        }
+    }
+
+    /// A12 — mirror a counter the §6.5 window just accepted into the peer's
+    /// floor window, and drop the floor once the peer's counters reach the
+    /// jumped high-water: from then on every counter behind the window is
+    /// behind the floor window too, so the floor can no longer change a
+    /// verdict. The window accepted `counter`, so it lies above the floor and
+    /// is unseen in the floor window; the offer cannot fail there.
+    fn note_unclean_floor(&mut self, peer: &NodeId, counter: u64) {
+        let Some(high) = self.peers.get(peer).map(|t| t.window.high) else {
+            return;
+        };
+        let Some(f) = self.unclean_floors.get_mut(peer) else {
+            return;
+        };
+        let _ = f.window.offer(counter);
+        if f.window.high >= high {
+            self.unclean_floors.remove(peer);
+        }
+    }
+
     /// §6.5 — the unclean-reboot conservative forward jump, J = N (≥ N), on
     /// send-side counters and receive-side high-waters alike. Never touches
     /// the announce counter (§6.2 sync-commit makes that unnecessary).
+    ///
+    /// L5 amendment A12: where the jump exceeds [`WINDOW_SIZE`] it opens a
+    /// gap between each persisted high-water and the jumped window's trailing
+    /// edge, so each persisted peer's window is first recorded, as persisted,
+    /// as its unclean floor (memory only; [`Self::observe_counter`]). A jump
+    /// of at most [`WINDOW_SIZE`] keeps every counter above the persisted
+    /// high-water inside the window, and records nothing.
     fn apply_unclean_jump(&mut self) {
         let jump = self.batch_n;
-        for entry in self.peers.values_mut() {
+        let opens_gap = jump > u64::from(WINDOW_SIZE);
+        for (id, entry) in self.peers.iter_mut() {
+            if opens_gap {
+                self.unclean_floors.insert(
+                    *id,
+                    UncleanFloor {
+                        floor: entry.window.high,
+                        window: entry.window,
+                    },
+                );
+            }
             entry.send_last = entry.send_last.saturating_add(jump);
             entry.window.jump_forward(jump);
         }
@@ -1449,6 +1592,244 @@ mod tests {
         assert!(
             next > c3 && next > n,
             "first post-crash send ({next}) must exceed every uncommitted counter (≤{c3}) and the jump N={n}"
+        );
+    }
+
+    // ------------------------------------------------------------------
+    // L5 amendment A12 — the unclean-reboot verdict for observe_counter
+    // (Layer 5 integrated review M1).
+    // ------------------------------------------------------------------
+
+    /// Persist a peer at receive high-water 10, observe 11..15 unpersisted,
+    /// then crash (drop without shutdown) — the review's demonstration.
+    fn a12_crashed_hub(tag: &str, m: &NodeId) -> TempDir {
+        let tmp = TempDir::new(tag);
+        let mut hub = CounterStore::create(tmp.path()).unwrap();
+        for c in 1..=10u64 {
+            assert_eq!(hub.observe_counter(m, c).unwrap(), Freshness::Fresh);
+        }
+        hub.commit().unwrap(); // persisted high-water = 10
+        for c in 11..=15u64 {
+            assert_eq!(hub.observe_counter(m, c).unwrap(), Freshness::Fresh);
+        }
+        drop(hub); // kill -9: no shutdown()
+        tmp
+    }
+
+    /// The A12 gate (README §13.1): the review's demo, now Fresh.
+    #[test]
+    fn a12_unclean_open_keeps_a_live_peer_fresh() {
+        let m = peer(0xb1);
+        let tmp = a12_crashed_hub("a12-demo", &m);
+        let mut hub = CounterStore::open(tmp.path()).unwrap();
+        let n = hub.batch_n();
+        let w = u64::from(WINDOW_SIZE);
+        assert_eq!(n, DEFAULT_BATCH_N);
+        // The §6.5 jump itself is unchanged: high 10 + J, bitmap cleared.
+        let jumped = hub.peer_traffic(&m).unwrap().receive_window();
+        assert_eq!((jumped.high(), jumped.bitmap()), (10 + n, 0));
+        assert_eq!(hub.unclean_floor(&m), Some(10));
+
+        // The member's live counter continues at 16: Fresh (Stale before A12).
+        assert_eq!(hub.observe_counter(&m, 16).unwrap(), Freshness::Fresh);
+        // Recorded in memory only: the persisted window did not move.
+        assert_eq!(hub.peer_traffic(&m).unwrap().receive_window(), jumped);
+        // A counter already observed since the open: Stale.
+        assert_eq!(hub.observe_counter(&m, 16).unwrap(), Freshness::Stale);
+        // At or below the persisted high-water: Stale.
+        assert_eq!(hub.observe_counter(&m, 10).unwrap(), Freshness::Stale);
+        assert_eq!(hub.observe_counter(&m, 1).unwrap(), Freshness::Stale);
+        // The stated residual: an unpersisted pre-crash counter (11..15),
+        // replayed after the crash, is judged Fresh once.
+        assert_eq!(hub.observe_counter(&m, 11).unwrap(), Freshness::Fresh);
+        assert_eq!(hub.observe_counter(&m, 11).unwrap(), Freshness::Stale);
+        // on_receive keeps §6.5's strict rejection of the gap, state untouched.
+        assert!(matches!(
+            hub.on_receive(&m, 17),
+            Err(CounterError::Window(WindowReject::OutsideWindow))
+        ));
+        assert_eq!(hub.peer_traffic(&m).unwrap().receive_window(), jumped);
+
+        // Every live counter through the jumped window's trailing edge is
+        // Fresh; the persisted window still has not moved.
+        for c in 17..=(10 + n - w) {
+            assert_eq!(hub.observe_counter(&m, c).unwrap(), Freshness::Fresh, "{c}");
+        }
+        assert_eq!(hub.peer_traffic(&m).unwrap().receive_window(), jumped);
+        // Inside the jumped window the §6.5 window records them as before.
+        for c in (10 + n - w + 1)..=(10 + n) {
+            assert_eq!(hub.observe_counter(&m, c).unwrap(), Freshness::Fresh, "{c}");
+        }
+        assert_eq!(
+            hub.peer_traffic(&m).unwrap().receive_window().high(),
+            10 + n
+        );
+        // Caught up with the jumped high-water: the floor is dropped.
+        assert_eq!(hub.unclean_floor(&m), None);
+        // Above persisted + J: Fresh, and the window advances.
+        assert_eq!(
+            hub.observe_counter(&m, 10 + n + 1).unwrap(),
+            Freshness::Fresh
+        );
+        assert_eq!(
+            hub.peer_traffic(&m).unwrap().receive_window().high(),
+            10 + n + 1
+        );
+        // Behind the window with no floor: Stale, as A11 always was.
+        assert_eq!(hub.observe_counter(&m, 20).unwrap(), Freshness::Stale);
+    }
+
+    #[test]
+    fn a12_first_counter_above_the_jump_advances_the_window_and_drops_the_floor() {
+        let m = peer(0xb2);
+        let tmp = a12_crashed_hub("a12-above", &m);
+        let mut hub = CounterStore::open(tmp.path()).unwrap();
+        let n = hub.batch_n();
+        let c = 10 + n + 5;
+        assert_eq!(hub.observe_counter(&m, c).unwrap(), Freshness::Fresh);
+        let win = hub.peer_traffic(&m).unwrap().receive_window();
+        assert_eq!((win.high(), win.bitmap()), (c, 1));
+        assert_eq!(hub.unclean_floor(&m), None, "both windows agree");
+        // The gap is now 32 or more behind the live counter: Stale.
+        assert_eq!(hub.observe_counter(&m, 16).unwrap(), Freshness::Stale);
+    }
+
+    #[test]
+    fn a12_counters_at_or_below_the_floor_stay_stale() {
+        // A hole below the persisted high-water, filled after the commit:
+        // the persisted window still shows it unseen, so only the floor
+        // bound keeps that pre-crash packet's replay Stale.
+        let tmp = TempDir::new("a12-floor");
+        let m = peer(0xb9);
+        {
+            let mut hub = CounterStore::create(tmp.path()).unwrap();
+            for c in (1..=10u64).filter(|&c| c != 5) {
+                assert_eq!(hub.observe_counter(&m, c).unwrap(), Freshness::Fresh);
+            }
+            hub.commit().unwrap(); // persisted: high 10, slot 5 unseen
+            assert_eq!(hub.observe_counter(&m, 5).unwrap(), Freshness::Fresh);
+            drop(hub); // crash: 5 consumed, never persisted
+        }
+        let mut hub = CounterStore::open(tmp.path()).unwrap();
+        assert_eq!(hub.unclean_floor(&m), Some(10));
+        assert_eq!(hub.observe_counter(&m, 5).unwrap(), Freshness::Stale);
+        assert_eq!(hub.observe_counter(&m, 10).unwrap(), Freshness::Stale);
+        assert_eq!(hub.observe_counter(&m, 11).unwrap(), Freshness::Fresh);
+        assert_eq!(hub.observe_counter(&m, 5).unwrap(), Freshness::Stale);
+    }
+
+    #[test]
+    fn a12_clean_shutdown_applies_no_floor() {
+        let tmp = TempDir::new("a12-clean");
+        let m = peer(0xb3);
+        {
+            let mut hub = CounterStore::create(tmp.path()).unwrap();
+            for c in 1..=15u64 {
+                assert_eq!(hub.observe_counter(&m, c).unwrap(), Freshness::Fresh);
+            }
+            hub.shutdown().unwrap();
+        }
+        let mut hub = CounterStore::open(tmp.path()).unwrap();
+        assert_eq!(hub.unclean_floor(&m), None);
+        assert_eq!(hub.peer_traffic(&m).unwrap().receive_window().high(), 15);
+        assert_eq!(hub.observe_counter(&m, 16).unwrap(), Freshness::Fresh);
+        // Behind the (unjumped) window: Stale, exactly as A11.
+        assert_eq!(hub.observe_counter(&m, 1).unwrap(), Freshness::Stale);
+    }
+
+    #[test]
+    fn a12_floor_survives_batch_commits_until_the_peer_catches_up() {
+        // A busy hub: other peers' traffic batch-commits long before the
+        // stalled member's counters re-enter the window. The commit writes
+        // the JUMPED high-water, so the floor must outlive it.
+        let m = peer(0xb4);
+        let other = peer(0xb5);
+        let tmp = a12_crashed_hub("a12-commit", &m);
+        let path = tmp.path().join(COUNTERS_FILE);
+        let mut hub = CounterStore::open(tmp.path()).unwrap();
+        let n = hub.batch_n();
+        for c in 1..=(2 * n) {
+            assert_eq!(hub.observe_counter(&other, c).unwrap(), Freshness::Fresh);
+        }
+        let on_disk = parse_file(&fs::read(&path).unwrap()).unwrap();
+        assert_eq!(
+            on_disk.peers[&other].window.high(),
+            2 * n,
+            "batch-committed"
+        );
+        assert_eq!(
+            on_disk.peers[&m].window.high(),
+            10 + n,
+            "the jumped high-water"
+        );
+        assert_eq!(hub.unclean_floor(&m), Some(10));
+        assert_eq!(hub.observe_counter(&m, 16).unwrap(), Freshness::Fresh);
+        // A gap verdict ticks no batch commit and rewrites nothing.
+        let before = fs::read(&path).unwrap();
+        for c in 17..=40u64 {
+            assert_eq!(hub.observe_counter(&m, c).unwrap(), Freshness::Fresh);
+        }
+        assert_eq!(fs::read(&path).unwrap(), before);
+    }
+
+    #[test]
+    fn a12_floor_is_memory_only_and_a_restart_before_catch_up_drops_it() {
+        // The stated limit: the floor is never persisted, so a restart
+        // (clean here) before the member catches up reopens on the jumped
+        // high-water with no floor and the gap is Stale again.
+        let m = peer(0xb6);
+        let tmp = a12_crashed_hub("a12-restart", &m);
+        let n = {
+            let mut hub = CounterStore::open(tmp.path()).unwrap();
+            assert_eq!(hub.observe_counter(&m, 16).unwrap(), Freshness::Fresh);
+            hub.shutdown().unwrap();
+            hub.batch_n()
+        };
+        let mut hub = CounterStore::open(tmp.path()).unwrap();
+        assert_eq!(hub.unclean_floor(&m), None);
+        assert_eq!(
+            hub.peer_traffic(&m).unwrap().receive_window().high(),
+            10 + n
+        );
+        assert_eq!(hub.observe_counter(&m, 17).unwrap(), Freshness::Stale);
+    }
+
+    #[test]
+    fn a12_jump_within_the_window_needs_no_floor() {
+        // J ≤ 32 keeps every counter above the persisted high-water inside
+        // the jumped window: no gap, no floor, verdicts are the window's.
+        let tmp = TempDir::new("a12-small");
+        let m = peer(0xb7);
+        {
+            let mut hub = CounterStore::create(tmp.path()).unwrap();
+            hub.set_batch_n(nz(u64::from(WINDOW_SIZE)));
+            for c in 1..=10u64 {
+                hub.observe_counter(&m, c).unwrap();
+            }
+            hub.commit().unwrap();
+        }
+        let mut hub = CounterStore::open(tmp.path()).unwrap();
+        assert_eq!(hub.unclean_floor(&m), None);
+        assert_eq!(hub.observe_counter(&m, 11).unwrap(), Freshness::Fresh);
+        assert_eq!(hub.observe_counter(&m, 10).unwrap(), Freshness::Stale);
+    }
+
+    #[test]
+    fn a12_on_receive_feeds_the_floor_so_no_counter_is_fresh_twice() {
+        // A caller mixing on_receive and observe_counter: a counter the
+        // window accepted through on_receive must never come back Fresh
+        // through the floor after the window has slid past it.
+        let m = peer(0xb8);
+        let tmp = a12_crashed_hub("a12-mixed", &m);
+        let mut hub = CounterStore::open(tmp.path()).unwrap();
+        let n = hub.batch_n();
+        hub.on_receive(&m, 10 + n - 4).unwrap(); // inside the jumped window
+        assert_eq!(hub.unclean_floor(&m), Some(10), "not caught up yet");
+        hub.on_receive(&m, 10 + n + 40).unwrap(); // past it: caught up
+        assert_eq!(hub.unclean_floor(&m), None);
+        assert_eq!(
+            hub.observe_counter(&m, 10 + n - 4).unwrap(),
+            Freshness::Stale
         );
     }
 }
