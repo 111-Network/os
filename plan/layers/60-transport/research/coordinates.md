@@ -62,3 +62,6 @@ Next after the run: lead writes `layers/60-transport/options.md` → owner decid
 - T0 scaffold: `ef04ac9`. AGENTS.md Raspberry Pi rule: `218fd81`.
 - **Run — Wave 0** (`runs/workflows/wave-0.js`, S1 S2 S4 S6 S3): `wf_10d063a6-41e`. **Run — Wave 0 spike** (`wave-0-spike.js`, S5): `wf_d7fe17dd-f69`.
   Resume: `Workflow({scriptPath: "<repo>/plan/layers/60-transport/runs/workflows/<name>.js", resumeFromRunId: "<id>"})`.
+- **Wave 0 landed so far:** S2 `12c1485` (contract), S5 `711f5b1` (spike PASS), S1 `85cf84f` (store V3). **Run — Wave 1a** (`wave-1a.js`, B1 alone,
+  started beside S4/S6/S3): `wf_55b4e5fc-8a9`. The push to `origin/claude/layer-6-implementation-006mte` is refused (403: no GitHub access for
+  the org in this session); every task is committed locally and the push is retried at each wave end.
