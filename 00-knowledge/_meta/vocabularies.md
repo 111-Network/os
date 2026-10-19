@@ -34,3 +34,6 @@ Filtering vocabulary for the `tags:` frontmatter field — filtering only, never
 - messaging — message transport, delivery states, and message stores
 - panel — third-party web UIs hosted inside the dashboard
 - dtn — delay-tolerant networking and store-and-forward custody
+- bridge — relaying text between 111 and a foreign network (Layer 6)
+- firmware — device firmware images and their flashing tools
+- test-fixture — tools used only to test, never shipped

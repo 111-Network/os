@@ -67,6 +67,14 @@ Legend: ⬜ todo · 🔧 in flight · 🔁 bounced · ✅ verified + committed
 
 Target-gated lockfile entries (resolved by Cargo, **never compiled** for the two musl targets; listed so the lock diff is fully signed off): `sqlite-wasm-rs` 0.5.5 (MIT; rusqlite, `wasm32-unknown-unknown` only) → `rsqlite-vfs` 0.1.1 (MIT), `hashbrown` 0.16.1, `js-sys` 0.3.106, `wasm-bindgen` 0.2.129 (+ `-macro`, `-macro-support`, `-shared`), `bumpalo` 3.20.3, `rustversion` 1.0.23 (all MIT OR Apache-2.0); `crunchy` 0.2.4 (MIT; `half`, `spirv` only).
 
+- **Layer 6 additions (D25 F2 / D27; `os/60-transport/TASKS.md` rows B3 + S6) — pre-approved by D25 F2 and D27 (spec v1.0 lock); the sign-off row below is filled by B3 against the real `Cargo.lock`:**
+  - `meshtastic 0.1.9` (GPL-3.0 — **copyleft, linked**; crates.io 0.1.9 of 2026-05-25, upstream `LICENSE` is the GPL-3.0 text, read 2026-10-19) — the official Meshtastic client crate for the Layer 6 bridge client (spec §5). Pulls prost types and `bytes` (the crates already in the graph are counted by B3); its normal closure was measured at 49 crates (31 `MIT OR Apache-2.0`, the crate itself, and `serialport` 4.10.1 `MPL-2.0`). Features to trim: `serial` and BLE (`serialport`, `btleplug`), if the build proves it. Effect: the shipped `111d` binary is effectively GPL-3.0-only (`LICENSING.md` section 7). The exact crate closure and the binary-size delta (research: +372 KiB x86_64, +332 KiB aarch64 musl) are recorded by B3 at build; fallback is our own ~300-line prost client.
+  - Sign-off row (B3 fills this in at its review):
+
+| Crate | Version | License (as declared) | Why (pulled by) | Audit note |
+|---|---|---|---|---|
+| `meshtastic` | 0.1.9 | GPL-3.0 | node111 → `daemon/meshtastic/` client (spec §5) | pre-approved D25 F2 / D27; **B3 to record:** resolved features, full closure with licences, size delta on both musl targets, the protobuf snapshot commit + checksum, whether the package ships `.proto` or generated Rust |
+
 **Module stubs** (created in T0, tasks fill them): `util/{fs,hash,http,run}` · `calver` · `manifest` · `minisign` · `floor` · `identity/{mod,bip32,nip49}` · `install/{mod,preflight,probe,categorize,packages,stage,supervise,verify,offer,receipt}` · `install/phone/{mod,adb,preflight,apk,runas,harden,start,verify,teardown}` · `daemon/{mod,supervise,watchdog,health,kb}` · `daemon/dashboard/{mod,routes}` · `daemon/transport/{mod,venv,config,netlink}` · `daemon/updater/{mod,fetch,stage}` · `update_helper` · `update_guard` · `probation` · `cli` · `config` · `uninstall`.
 
 **Cross-module APIs** (frozen at T0; signatures may gain `&self`-style plumbing but not change semantics):

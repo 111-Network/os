@@ -5,5 +5,6 @@
 ## Concepts
 
 - [LoRa Airtime Budget](lora-airtime-budget.md): Duty-cycle law and time-on-air numbers that cap LoRa traffic volume. | concept | lora,mesh,networking
+- [Preferred Networks](preferred-networks.md): Ordered list of preferred networks; v1 only shapes UI and proposals. | concept | bridge,mesh,networking
 - [Secure Contexts](secure-contexts.md): Browser rule deciding which APIs work on LAN HTTP versus loopback origins. | concept | networking,panel
 - [Delivery States](store-and-forward-states.md): Four delivery states and the evidence each one requires. | concept | dtn,messaging,offline

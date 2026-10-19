@@ -7,7 +7,7 @@ tags: [panel, messaging, mesh]
 platforms: [linux, android]
 upstream: https://github.com/Quad4-Software/MeshChatX
 license: 0BSD AND MIT
-last_verified: 2026-10-14
+last_verified: 2026-10-19
 sources:
   - https://github.com/Quad4-Software/MeshChatX
   - https://raw.githubusercontent.com/Quad4-Software/MeshChatX/master/LICENSE
@@ -23,7 +23,8 @@ Reticulum LXMF web client fork; unaudited and parked behind the generic proxy.
 
 MeshChatX is a fork of Reticulum MeshChat: a Python web client for LXMF messaging that embeds Reticulum
 in-process. It is the intended first consumer of the reserved generic panel reverse proxy (parked item P7).
-It is a bridge target with its own LXMF identity, not part of the 111 fabric.
+It is a bridge target with its own LXMF identity, not part of the 111 fabric. Since Layer 6 it is no longer the LXMF
+carrier (that is the helper `lxmf-sidecar`); it may return later as an optional hosted panel.
 The `LICENSE` file reads: 0BSD for the Quad4 modifications, MIT for the upstream MeshChat portions.
 
 ## Use when
@@ -39,7 +40,8 @@ The `LICENSE` file reads: 0BSD for the Quad4 modifications, MIT for the upstream
 
 ## Details
 
-Reported as of 2026-10-14: v4.10.7 (2026-10-11); listed in the Reticulum manual's software chapter.
+Reported as of 2026-10-19: v4.10.7 (2026-10-11); listed in the Reticulum manual's software chapter. Its README announces
+a sunset on 2027-01-01 with v5.0.0 as the last release, and its floors rise with `rns` (4.10.7 needs `rns>=1.5.7`).
 Delivery: PyPI wheel with the UI bundled, Docker, and a Termux guide.
 Proxy behavior: a WebSocket Origin check on `/ws` and `/ws/telephone/audio` that needs
 `MESHCHAT_TRUSTED_PROXIES` plus `X-Forwarded-Host`, `-Proto`, and `-Port` behind a proxy.
@@ -60,6 +62,7 @@ Each client carries its own LXMF identity; the second identity is a bridge, neve
 - Sideband — CC BY-NC-SA 4.0, rejected. Columba — MPL-2.0 native Android app, no external API seen.
 - NomadNet — GPL-3.0 text UI with no web UI; MeshChat already browses its pages.
 - 2026-10-14 — license read from the upstream `LICENSE`; the fork's provenance is for the review panel to judge.
+- 2026-10-19 — Layer 6 research: sunset notice read; the carrier role moved to the helper.
 
 ## Links
 

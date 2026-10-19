@@ -7,7 +7,7 @@ tags: [mesh, lora, identity]
 platforms: [esp32, nrf52]
 upstream: https://github.com/meshcore-dev/MeshCore
 license: MIT
-last_verified: 2026-10-14
+last_verified: 2026-10-19
 sources:
   - https://github.com/meshcore-dev/MeshCore
   - https://github.com/meshcore-dev/MeshCore/issues/1024
@@ -78,6 +78,8 @@ Layer 5 carriage facts (reports 01, 02, 06, gap-1; as of 2026-10-14):
 - Repeater as Cat-1 relay: the stock MIT repeater (repeater-v1.17.1, 2026-08-14) is relay-blind carriage, so
   a Cat-1 relay needs no firmware of ours. Companions repeat only in client-repeat mode, and by default only
   on 433.000, 869.495, or 918.000 MHz.
+- Data-type allocation: `number_allocations.md` wants a working demo before it grants an id, so 111 uses the free
+  developer range `FF00`–`FFFF` until the two-board bench, then opens the registration pull request.
 - `RAW_CUSTOM` (0x0F) is not flooded: it is forwarded only along a known direct path ("don't flood route these
   (yet)"), so 184 B applies to learned direct paths and flood carriage means group data.
 - Companion link: serial, BLE, or TCP (one per build); `send_raw_packet` and `RAW_DATA` exist; BLE default MTU 23,
@@ -96,6 +98,7 @@ Layer 5 carriage facts (reports 01, 02, 06, gap-1; as of 2026-10-14):
   study; license re-verified against the upstream repository.
 - 2026-10-14 — Layer 5 research pass added the carriage facts from `Mesh.cpp` and the KISS modem
   documentation; no two-board bench has run yet.
+- 2026-10-19 — Layer 6 research: allocation rule recorded (developer range until the bench).
 
 ## Links
 

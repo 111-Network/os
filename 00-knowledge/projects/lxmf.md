@@ -2,12 +2,12 @@
 title: LXMF
 category: project
 status: candidate
-summary: Reticulum message format and propagation daemon; custom license, bridge target only.
+summary: Reticulum message format and propagation daemon; custom license, helper-process only.
 tags: [messaging, mesh, dtn]
 platforms: [linux, android, macos, windows]
 upstream: https://github.com/markqvist/LXMF
 license: LicenseRef-Reticulum
-last_verified: 2026-10-14
+last_verified: 2026-10-19
 sources:
   - https://github.com/markqvist/LXMF
   - https://raw.githubusercontent.com/markqvist/LXMF/master/LXMF/LXMessage.py
@@ -18,13 +18,16 @@ relations:
   required_by: ["[[meshchatx]]"]
 ---
 
-Reticulum message format and propagation daemon; custom license, bridge target only.
+Reticulum message format and propagation daemon; custom license, helper-process only.
 
 ## What it is
 
 LXMF is the message format and delivery layer of the Reticulum ecosystem, with `lxmd` as its
 store-and-forward propagation daemon.
-For Layer 5 it is a bridge target: format facts are recorded here, and the code never enters our tree.
+It is a bridge target: format facts are recorded here, and the code never enters our tree or the 111d binary.
+Layer 6 carries it through `lxmf-sidecar`, a helper of ours that imports the user-installed packages in a separate
+process and venv. Credit: Reticulum and LXMF are the work of the Reticulum project (reticulum.network); 111 uses
+them as released and is not affiliated.
 License is the custom Reticulum License (recorded as `LicenseRef-Reticulum`), non-OSI.
 
 ## Use when
@@ -35,13 +38,15 @@ License is the custom Reticulum License (recorded as `LicenseRef-Reticulum`), no
 ## Do NOT use when
 
 - It would become the fabric: it brings its own addressing, a wall-clock timestamp, and a 112-byte overhead.
-- Any code would be imported (`import RNS` or `import LXMF`); Layer 5 forbids that.
+- Any code would be imported into 111d (`import RNS` or `import LXMF`); only the separate helper process may do that.
 - The Reticulum License is unacceptable for the use: it forbids systems able to purposefully harm humans
   and any use in AI or machine-learning training sets.
 
 ## Details
 
-Reported as of 2026-10-14: LXMF 1.2.0 (2026-09-30).
+Reported as of 2026-10-19: LXMF 1.2.1 (PyPI, 2026-10-13, verified); the GitHub mirror is at 1.2.0 (2026-09-30).
+1.2.1 is airtime-aware (slow-path cache, queued messages held for slow destinations, receipt timeouts scaled to the
+round trip), so a sender's "sent" has to follow the library's state callbacks, not its own timers.
 Format: overhead 112 bytes (the README says 111), made of 16 + 16 + 64-byte signature plus msgpack;
 timestamp is a sender float64 in seconds; the message id is SHA-256 of destination, source, and payload and
 is not transmitted. Messages are Ed25519 signed; link delivery is documented as forward-secret.
@@ -57,7 +62,8 @@ A propagated send ends in `SENT`; `DELIVERED` is set only for opportunistic and 
 
 Boundary: the LXMF address is a transport address only; our NodeId stays inside the sealed envelope.
 The LXMF README warns that independent "fakes" violate its license and that downstream users are liable,
-which reinforces the process boundary. Reach it through [[meshchatx]] or `lxmd`, never in-process.
+which reinforces the process boundary. Reach it through the helper or `lxmd`, never in-process; [[meshchatx]] is no
+longer the carrier.
 
 ## Evidence
 
@@ -68,6 +74,7 @@ which reinforces the process boundary. Reach it through [[meshchatx]] or `lxmd`,
   README says it was built with an LLM reading the reference); none is upstream, and upstream disputes them.
 - Sideband — CC BY-NC-SA 4.0, rejected. Columba — MPL-2.0 Android client with no external API seen.
 - 2026-10-14 — licensing and format facts read from upstream files in the Layer 5 research; no code run.
+- 2026-10-19 — PyPI confirms LXMF 1.2.1 under the Reticulum License; Layer 6 carriage decision recorded.
 
 ## Links
 
