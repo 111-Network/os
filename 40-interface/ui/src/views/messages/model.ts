@@ -248,6 +248,9 @@ export function messagingBanner(service: Pick<ServiceRecord, "state" | "reason" 
 export const SETUP_QUESTION = "Messaging on this node is not working yet. Check why, and walk me through setting it up: enrolling with a home hub, or connecting another 111 node.";
 /** A problem with messaging that is already set up (§16 `messaging.fix`: an unreachable home hub, a full store). */
 export const FIX_QUESTION = "Messaging on this node has a problem. Check what is wrong (an unreachable home hub, or a full message store) and tell me the steps to fix it.";
+/** A member that is connected to its home hub, which has not answered yet (§9: nothing is wrong that this node can see, so check, do not re-enroll). */
+export const WAITING_QUESTION =
+  "This node is connected to my home hub, but the hub has not answered yet. Check whether the hub is running and reachable from here, and tell me whether to wait or what to do. Do not enroll again.";
 /** A node that is a home hub with no members yet (§15: it is offered "Let a node use this hub", not asked to enroll). */
 export const OFFER_QUESTION = "This node is a home hub and no node has enrolled with it yet. Walk me through letting another node use this hub: the enrollment code and address to give them, and how they enroll.";
 
@@ -264,11 +267,13 @@ export interface BannerAgent {
  * context goal (`messaging.setup` / `messaging.fix`, `messagingGoal` in banner.tsx) over the `fabric` service's facts;
  * `question` is the plain-words ask that goes with it. The node reports an unreachable home hub and a hub with no
  * members as NOT SET, but neither is a set-up for an enrolling member: an unreachable hub is a fix (§16), and a hub with
- * no members is offered "Let a node use this hub" (§15).
+ * no members is offered "Let a node use this hub" (§15). A member connected to its hub that has not answered yet is
+ * enrolled already, so it is asked to check the hub (the quieter `messaging.fix` ask), never to set up again.
  */
 export function bannerAgent(banner: MessagingBanner, reasonCode: string | null | undefined): BannerAgent | null {
   if (!banner.fixable) return null;
   if (banner.kind === "error" || reasonCode === "hub_unreachable") return { label: "Ask the agent to fix it", goal: "fix", question: FIX_QUESTION, primary: false };
+  if (reasonCode === "hub_waiting_answer") return { label: "Ask the agent to check the hub", goal: "fix", question: WAITING_QUESTION, primary: false };
   if (reasonCode === "hub_waiting") return { label: "Let a node use this hub, with the agent", goal: "setup", question: OFFER_QUESTION, primary: true };
   return { label: "Set up messaging with the agent", goal: "setup", question: SETUP_QUESTION, primary: true };
 }

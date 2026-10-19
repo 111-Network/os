@@ -12,7 +12,7 @@ import { apiStore } from "../src/lib/api/store";
 import type { FabricStatus, HubOffer } from "../src/lib/api/types";
 import { ModeProvider, resetModeForTests } from "../src/lib/mode";
 import ServicesView from "../src/views/services";
-import { restoreFloor } from "../src/lib/api/fabric";
+import { hubSummary, restoreFloor } from "../src/lib/api/fabric";
 import { custodyText, hubLine, hubName, linkLabel, linkLine, profileSummary, STORE_FULL_TEXT, STORE_PRUNE_TEXT } from "../src/views/services/fabric-model";
 import { HubLine } from "../src/views/services/fabric";
 import { MAX_NAME_CHARS } from "../src/views/nearby/model";
@@ -331,6 +331,8 @@ describe("restore wait and the agent's goal", () => {
     expect(fabricAgent({ state: "live", reason_code: "hub_reachable" }, { ...f, store: { ...f.store, open: false } })).toMatchObject({ goal: "messaging.fix" });
     expect(fabricAgent({ state: "error", reason_code: "store_failed" }, f)).toMatchObject({ goal: "messaging.fix" });
     expect(fabricAgent({ state: "unset", reason_code: "hub_unreachable" }, f)).toMatchObject({ goal: "messaging.fix" });
+    // connected to the home hub, no answer yet: a quiet check, never a set-up for a node that is already enrolled
+    expect(fabricAgent({ state: "unset", reason_code: "hub_waiting_answer" }, f)).toEqual({ goal: "messaging.fix", label: "Ask the agent to check the hub", primary: false });
     expect(fabricAgent({ state: "unset", reason_code: "not_enrolled" }, f)).toMatchObject({ goal: "messaging.setup", label: "Set up messaging with the agent" });
     expect(fabricAgent({ state: "live", reason_code: "hub_reachable" }, f)).toBeNull();
     expect(fabricAgent(null, null)).toBeNull();
@@ -693,10 +695,38 @@ describe("the fabric service page", () => {
 });
 
 
+// ------------------------------------------------------------------------------- the home-hub phrase
+
+describe("the home-hub phrase tells reachable, connected and waiting, and down apart", () => {
+  const phrase = (over: Partial<FabricStatus["hub"]>) =>
+    hubSummary({ enrolled: true, connected: false, reachable: false, members: 0, offer_active: false, ...over });
+
+  it("an enrolled member: answered, connected without an answer, neither", () => {
+    expect(phrase({ connected: true, reachable: true })).toBe("Home hub reachable");
+    expect(phrase({ connected: true, reachable: false })).toBe("Home hub enrolled, connected, waiting for its answer");
+    expect(phrase({ connected: false, reachable: false })).toBe("Home hub enrolled, not reachable right now");
+  });
+
+  it("an answered hub reads reachable even if the connection flag lags", () => {
+    expect(phrase({ connected: false, reachable: true })).toBe("Home hub reachable");
+  });
+
+  it("a node that is not enrolled never reads as waiting on a hub", () => {
+    expect(phrase({ enrolled: false, connected: true, members: 2 })).toBe("Home hub for 2 members");
+    expect(phrase({ enrolled: false, connected: true, offer_active: true })).toBe("Waiting for a node to enroll");
+    expect(phrase({ enrolled: false })).toBe("No home hub");
+  });
+
+  it("the Services line keeps the hub's name after the waiting phrase", () => {
+    const hub: FabricStatus["hub"] = { enrolled: true, connected: true, reachable: false, cursor: 0, node_id: HUB, address: null, members: 0, offer_active: false };
+    expect(hubLine(hub, [])).toMatch(/^Home hub enrolled, connected, waiting for its answer: /);
+  });
+});
+
 // ------------------------------------------------------------------------------- peer-authored hub name
 
 describe("the home hub's name is peer text: cleaned, cut, and isolated from the words around it", () => {
-  const hub = (over: Partial<FabricStatus["hub"]> = {}): FabricStatus["hub"] => ({ enrolled: true, reachable: true, cursor: 1, node_id: HUB, address: null, members: 0, offer_active: false, ...over });
+  const hub = (over: Partial<FabricStatus["hub"]> = {}): FabricStatus["hub"] => ({ enrolled: true, connected: true, reachable: true, cursor: 1, node_id: HUB, address: null, members: 0, offer_active: false, ...over });
   const contact = (label: string, alias: string | null = null) => [{ node_id: HUB, bech32: "node1x", label, alias, trust: "enrolled" as const, request: false, pinned: false, has_key: true, roles: [], home_hub: null }];
 
   it("hubName flattens, strips direction overrides and cuts a long label", () => {

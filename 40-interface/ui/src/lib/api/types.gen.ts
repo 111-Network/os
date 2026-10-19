@@ -1231,11 +1231,13 @@ export interface components {
             detail: string | null;
             profile: components["schemas"]["FabricPathProfile"];
         };
-        /** @description Both ends of the hub relationship (§9): the member side (enrolled, reachable, cursor) and the hub side (members, offer_active). */
+        /** @description Both ends of the hub relationship (§9): the member side (enrolled, connected, reachable, cursor) and the hub side (members, offer_active). */
         FabricHub: {
             /** @description this node has a home hub */
             enrolled: boolean;
-            /** @description an attributed link to the home hub is up */
+            /** @description a connection to the home hub is up that this node may send on, but the hub has not answered on it yet; promises no delivery (false when not enrolled) */
+            connected: boolean;
+            /** @description an attributed link to the home hub is up: the hub answered on the current connection */
             reachable: boolean;
             /** @description mailbox cursor committed with the home hub (the hub's own insertion sequence; no clock) */
             cursor: number;

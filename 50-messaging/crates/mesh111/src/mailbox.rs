@@ -7,6 +7,7 @@
 //! CUSTODY_ACK    (hub → member)  §6.2 (custody.rs)
 //! MAILBOX_FETCH  (member → hub)  cursor(varint)
 //! MAILBOX_ITEM   (hub → member)  custody_seq(varint) ‖ sealed item bytes
+//!                                (no item bytes = "nothing above your cursor", see below)
 //! MAILBOX_COMMIT (member → hub)  cursor(varint)
 //! ENROLL         (member → hub)  code(8)            -- INTRO set; the card rides the §3 slot
 //! ENROLL_OK      (hub → member)  status(1) ‖ [card_len(1) ‖ card ‖ custody_seq_floor(varint)]
@@ -20,6 +21,15 @@
 //! floor follow), `1` mismatch, `2` refused (no open offer: none, spent by
 //! someone else, or dismissed), `3` locked out after 5 failures — the
 //! contract surfaces 3 as `429` and 1–2 as `502`.
+//!
+//! A `MAILBOX_ITEM` with no item bytes (just `custody_seq`, which is the
+//! fetched cursor) is not an item: it is the hub's answer to a
+//! `MAILBOX_FETCH` when it holds nothing above that cursor (§9 as built,
+//! L5 m3). The hub builds it with [`encode_item`] and an empty item; the
+//! member recognizes it as a bare cursor ([`decode_cursor`]) before it tries
+//! [`decode_item`], which rejects it as an item of the wrong size. It stores
+//! nothing and moves no cursor, but as a fresh packet from the hub it counts
+//! as the hub having answered (`reachable`, §15).
 //!
 //! Hub push window: per attributed connection the hub keeps the highest
 //! custody sequence it has streamed and the sequences not yet committed;
@@ -103,7 +113,9 @@ pub fn decode_cursor(payload: &[u8]) -> Result<u64, MailboxError> {
     Ok(c)
 }
 
-/// `MAILBOX_ITEM` payload.
+/// `MAILBOX_ITEM` payload. An empty `item` encodes the item-less form, the
+/// hub's "nothing above your cursor" answer (module doc); `custody_seq` is
+/// then the fetched cursor.
 pub fn encode_item(custody_seq: u64, item: &[u8]) -> Vec<u8> {
     let mut out = Vec::with_capacity(10 + item.len());
     put_varint(&mut out, custody_seq);
@@ -111,7 +123,10 @@ pub fn encode_item(custody_seq: u64, item: &[u8]) -> Vec<u8> {
     out
 }
 
-/// Parse a `MAILBOX_ITEM` payload.
+/// Parse a `MAILBOX_ITEM` payload that carries an item. The item-less form
+/// (one varint, no item bytes: the hub's "nothing above your cursor" answer)
+/// is not an item and fails here with [`MailboxError::ItemSize`] (size 0);
+/// a receiver that accepts that answer checks [`decode_cursor`] first.
 pub fn decode_item(payload: &[u8]) -> Result<(u64, &[u8]), MailboxError> {
     let mut r = Reader::new(payload);
     let seq = r.varint()?;

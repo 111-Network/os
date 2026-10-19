@@ -173,6 +173,11 @@ describe("Messages list", () => {
     const unreachable = setRow("hub_unreachable", "Your home hub cannot be reached right now; messages wait until it can.");
     expect(unreachable).toContain("Ask the agent to fix it");
     expect(unreachable).not.toContain("Set up messaging with the agent");
+    const answering = setRow("hub_waiting_answer", "Connected to your home hub, waiting for its answer.");
+    expect(answering).toContain("Connected to your home hub, waiting for its answer.");
+    expect(answering).toContain("Ask the agent to check the hub");
+    expect(answering).not.toContain("Set up messaging with the agent");
+    expect(answering).not.toContain("Let a node use this hub");
     const notEnrolled = setRow("not_enrolled", "No home hub and no other node reachable yet.");
     expect(notEnrolled).toContain("Set up messaging with the agent");
   });

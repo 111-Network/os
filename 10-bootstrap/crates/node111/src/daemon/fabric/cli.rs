@@ -397,15 +397,26 @@ pub fn run_with(
                 "Enrolled with hub {} at {} ({}).",
                 v["node_id"].as_str().unwrap_or("?"),
                 v["address"].as_str().unwrap_or("?"),
-                if yes(&v["reachable"]) {
-                    "reachable"
-                } else {
-                    "not reachable right now"
-                }
+                hub_state(&v)
             )?;
         }
     }
     Ok(())
+}
+
+/// The three honest states of the home hub (`FabricHub`): `reachable` (the
+/// hub answered on the current connection), `connected` without it (a
+/// connection this node may send on is up, the hub has not answered yet), and
+/// neither. A node never says "not reachable" while it is connected and
+/// merely waiting.
+fn hub_state(hub: &Value) -> &'static str {
+    if yes(&hub["reachable"]) {
+        "reachable"
+    } else if yes(&hub["connected"]) {
+        "connected, waiting for the hub's answer"
+    } else {
+        "not connected"
+    }
 }
 
 fn write_status(v: &Value, out: &mut dyn Write) -> std::io::Result<()> {
@@ -435,11 +446,7 @@ fn write_status(v: &Value, out: &mut dyn Write) -> std::io::Result<()> {
             "Home hub:  {} at {} — {}, cursor {}",
             hub["node_id"].as_str().unwrap_or("?"),
             hub["address"].as_str().unwrap_or("?"),
-            if yes(&hub["reachable"]) {
-                "reachable"
-            } else {
-                "not reachable"
-            },
+            hub_state(hub),
             hub["cursor"]
         )?;
     } else {
@@ -500,6 +507,75 @@ mod tests {
     }
 
     const BUNDLE: &str = "111HUB:CARDTEXT:ABCDEFGH:192.168.1.4:11183";
+
+    /// A `GET /api/v1/fabric` body with the given hub flags (enrolled).
+    fn status_with_hub(connected: bool, reachable: bool) -> Value {
+        serde_json::json!({
+            "store": { "open": true, "used": 10, "watermark": 100, "store_full": false },
+            "hub": {
+                "enrolled": true,
+                "connected": connected,
+                "reachable": reachable,
+                "cursor": 7,
+                "node_id": "ab".repeat(32),
+                "address": "10.0.0.1:11183",
+                "members": 0,
+                "offer_active": false
+            },
+            "settings": { "hub_role": false, "listen_lan": true, "custody_opt_in": false },
+            "custody": { "count": 0, "bytes": 0 },
+            "links": []
+        })
+    }
+
+    fn home_hub_line(v: &Value) -> String {
+        let mut out = Vec::new();
+        write_status(v, &mut out).unwrap();
+        String::from_utf8(out)
+            .unwrap()
+            .lines()
+            .find(|l| l.starts_with("Home hub:"))
+            .expect("a Home hub line")
+            .to_string()
+    }
+
+    /// L5 fix D: the status line tells the three hub states apart; a member
+    /// that is connected and waiting is not "not reachable".
+    #[test]
+    fn status_tells_reachable_waiting_and_not_connected_apart() {
+        let tail = |c, r| {
+            let l = home_hub_line(&status_with_hub(c, r));
+            l.split(" — ")
+                .nth(1)
+                .expect("the state follows the address")
+                .to_string()
+        };
+        assert_eq!(tail(true, true), "reachable, cursor 7");
+        assert_eq!(
+            tail(true, false),
+            "connected, waiting for the hub's answer, cursor 7"
+        );
+        assert_eq!(tail(false, false), "not connected, cursor 7");
+        // an older daemon that does not send `connected` reads as not connected
+        let mut old = status_with_hub(false, false);
+        old["hub"].as_object_mut().unwrap().remove("connected");
+        assert!(home_hub_line(&old).contains("not connected, cursor 7"));
+        // no home hub: the enrollment hint, whatever the flags say
+        let mut none = status_with_hub(false, false);
+        none["hub"]["enrolled"] = Value::Bool(false);
+        assert!(home_hub_line(&none).starts_with("Home hub:  none"));
+    }
+
+    #[test]
+    fn enroll_result_uses_the_same_three_states() {
+        for (c, r, want) in [
+            (true, true, "reachable"),
+            (true, false, "connected, waiting for the hub's answer"),
+            (false, false, "not connected"),
+        ] {
+            assert_eq!(hub_state(&status_with_hub(c, r)["hub"]), want);
+        }
+    }
 
     #[test]
     fn parse_matrix() {

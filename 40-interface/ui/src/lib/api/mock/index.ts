@@ -927,7 +927,7 @@ export function createMockAdapter(opts: MockOptions = {}): MockAdapter {
             throw problem(502, "upstream_error", "The hub did not accept that", "It could not be reached, or it refused the code.");
           }
           M.enrollFailures = 0;
-          M.fabric.hub = { ...M.fabric.hub, enrolled: true, reachable: true, cursor: 0, node_id: HUB, address: MOCK_HUB_ADDRESS };
+          M.fabric.hub = { ...M.fabric.hub, enrolled: true, connected: true, reachable: true, cursor: 0, node_id: HUB, address: MOCK_HUB_ADDRESS };
           M.fabric.links = M.fabric.links.map((l) => ({ ...l, state: "up", peers: Math.max(1, l.peers) }));
           if (!contactOf(HUB)) {
             const hub = makeContact(HUB, { alias: "Workshop hub", trust: "enrolled", roles: ["mailbox", "always_on_hub"], pinned: true });

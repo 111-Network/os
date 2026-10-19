@@ -217,7 +217,7 @@ export function buildFabric(): FabricStatus {
         profile: { mtu_bytes: 16384, framing: "stream", reliable: true, broadcast: false, cost_class: "bulk", airtime: null },
       },
     ],
-    hub: { enrolled: true, reachable: true, cursor: 41, node_id: HUB, address: MOCK_HUB_ADDRESS, members: 0, offer_active: false },
+    hub: { enrolled: true, connected: true, reachable: true, cursor: 41, node_id: HUB, address: MOCK_HUB_ADDRESS, members: 0, offer_active: false },
     custody: { count: 0, bytes: 0 },
     store,
     settings: { hub_role: false, listen_lan: true, custody_opt_in: false, quotas: Object.fromEntries(MOCK_QUOTA_CLASSES.map((c) => [c, null])) },
@@ -352,13 +352,16 @@ export interface ServicePatch {
 
 const plural = (n: number, one: string, many: string): string => (n === 1 ? `1 ${one}` : `${n} ${many}`);
 
-/** The `fabric` row for a fabric snapshot: LIVE when the store is open and a hub is reachable, this hub has members, or a peer is linked. */
+/**
+ * The `fabric` row for a fabric snapshot: LIVE when the store is open and a hub is reachable, this hub has members, or a peer is
+ * linked. An enrolled node that is connected to its hub but has no answer yet is NOT SET (`hub_waiting_answer`), as the daemon reports it.
+ */
 export function fabricRow(f: FabricStatus): ServicePatch {
   const attributed = f.links.reduce((n, l) => n + l.peers, 0);
   const detail = {
     started: true,
     store: { open: f.store.open, full: f.store.store_full },
-    hub: { enrolled: f.hub.enrolled, reachable: f.hub.enrolled ? f.hub.reachable : null },
+    hub: { enrolled: f.hub.enrolled, reachable: f.hub.enrolled ? f.hub.reachable : null, connected: f.hub.enrolled && f.hub.connected },
     hub_role: f.settings.hub_role,
     members: f.settings.hub_role ? f.hub.members : null,
     attributed_links: attributed,
@@ -370,6 +373,7 @@ export function fabricRow(f: FabricStatus): ServicePatch {
   if (f.hub.members > 0) return row("live", "hub_serving", `This node is a home hub for ${plural(f.hub.members, "member node", "member nodes")}.`);
   if (attributed > 0) return row("live", "peer_linked", `Connected directly to ${plural(attributed, "other 111 node", "other 111 nodes")}.`);
   if (f.settings.hub_role) return row("unset", "hub_waiting", "This node is a home hub, waiting for the first node to enroll.");
+  if (f.hub.enrolled && f.hub.connected && !f.hub.reachable) return row("unset", "hub_waiting_answer", "Connected to your home hub, waiting for its answer.");
   if (f.hub.enrolled) return row("unset", "hub_unreachable", "Your home hub cannot be reached right now; messages wait until it can.");
   return row("unset", "not_enrolled", "No home hub and no other node reachable yet. Set up with the agent to enroll with a hub.");
 }

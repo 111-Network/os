@@ -184,6 +184,7 @@ pub fn card(text: &str) -> Result<Value, String> {
 pub fn hub(h: &HubView) -> Value {
     json!({
         "enrolled": h.enrolled,
+        "connected": h.connected,
         "reachable": h.reachable,
         "cursor": h.cursor,
         "node_id": h.node_id.as_ref().map(hex),
@@ -307,6 +308,7 @@ pub fn status_down(s: &FabricSettings) -> Value {
         "links": [],
         "hub": {
             "enrolled": s.home_hub.is_some(),
+            "connected": false,
             "reachable": false,
             "cursor": 0,
             "node_id": s.home_hub.as_ref().map(|h| hex(&h.node_id)),

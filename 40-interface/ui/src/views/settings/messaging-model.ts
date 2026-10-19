@@ -319,12 +319,14 @@ export interface FabricAgent {
 
 /**
  * What "ask the agent" offers on this page: a fix when messaging has a problem (a full or closed store, an unreachable home
- * hub), a set-up when it is not set up, nothing special when it works (the generic question stays).
+ * hub), a check when this node is connected to its home hub and the hub has not answered yet, a set-up when it is not set
+ * up, nothing special when it works (the generic question stays).
  */
 export function fabricAgent(service: Pick<ServiceRecord, "state" | "reason_code"> | null | undefined, fabric: Pick<FabricStatus, "store"> | null): FabricAgent | null {
   if (fabric && (fabric.store.store_full || !fabric.store.open)) return { goal: "messaging.fix", label: "Ask the agent to fix it", primary: true };
   if (!service) return null;
   if (service.state === "error" || service.reason_code === "hub_unreachable") return { goal: "messaging.fix", label: "Ask the agent to fix it", primary: true };
+  if (service.reason_code === "hub_waiting_answer") return { goal: "messaging.fix", label: "Ask the agent to check the hub", primary: false };
   if (service.state === "unset") return { goal: "messaging.setup", label: "Set up messaging with the agent", primary: true };
   return null;
 }

@@ -778,11 +778,18 @@ export const schemas: Record<string, JsonSchema> = {
   },
   "FabricHub": {
     "type": "object",
-    "required": ["enrolled","reachable","cursor","node_id","address","members","offer_active"],
-    "description": "Both ends of the hub relationship (§9): the member side (enrolled, reachable, cursor) and the hub side (members, offer_active).",
+    "required": ["enrolled","connected","reachable","cursor","node_id","address","members","offer_active"],
+    "description": "Both ends of the hub relationship (§9): the member side (enrolled, connected, reachable, cursor) and the hub side (members, offer_active).",
     "properties": {
       "enrolled": {"type":"boolean","description":"this node has a home hub"},
-      "reachable": {"type":"boolean","description":"an attributed link to the home hub is up"},
+      "connected": {
+        "type": "boolean",
+        "description": "a connection to the home hub is up that this node may send on, but the hub has not answered on it yet; promises no delivery (false when not enrolled)"
+      },
+      "reachable": {
+        "type": "boolean",
+        "description": "an attributed link to the home hub is up: the hub answered on the current connection"
+      },
       "cursor": {
         "type": "integer",
         "minimum": 0,

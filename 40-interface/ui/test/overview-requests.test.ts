@@ -77,6 +77,7 @@ describe("the Messages banner asks with the Layer 5 goals", () => {
     expect(messagingGoal(bannerAgent(unset, "not_enrolled")!.goal)).toBe("messaging.setup");
     expect(messagingGoal(bannerAgent(unset, "hub_waiting")!.goal)).toBe("messaging.setup");
     expect(messagingGoal(bannerAgent(unset, "hub_unreachable")!.goal)).toBe("messaging.fix");
+    expect(messagingGoal(bannerAgent(unset, "hub_waiting_answer")!.goal)).toBe("messaging.fix");
     const full = messagingBanner({ state: "error", reason: "full", reason_code: "store_full" }, null)!;
     expect(messagingGoal(bannerAgent(full, "store_full")!.goal)).toBe("messaging.fix");
   });

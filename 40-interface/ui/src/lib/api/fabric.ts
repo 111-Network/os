@@ -38,9 +38,13 @@ export function formatBytes(n: number): string {
   return `${u === 0 || v >= 10 ? Math.round(v) : v.toFixed(1)} ${UNITS[u]}`;
 }
 
-/** Where this node stands with a home hub, in one phrase (member side first, then the hub role). */
-export function hubSummary(h: Pick<FabricHub, "enrolled" | "reachable" | "members" | "offer_active">): string {
-  if (h.enrolled) return h.reachable ? "Home hub reachable" : "Home hub enrolled, not reachable right now";
+/**
+ * Where this node stands with a home hub, in one phrase (member side first, then the hub role). An enrolled member is
+ * reachable when the hub answered, "connected, waiting for its answer" when a connection is up and the hub has not answered
+ * on it yet, and not reachable otherwise.
+ */
+export function hubSummary(h: Pick<FabricHub, "enrolled" | "connected" | "reachable" | "members" | "offer_active">): string {
+  if (h.enrolled) return h.reachable ? "Home hub reachable" : h.connected ? "Home hub enrolled, connected, waiting for its answer" : "Home hub enrolled, not reachable right now";
   if (h.members > 0) return h.members === 1 ? "Home hub for 1 member" : `Home hub for ${h.members} members`;
   if (h.offer_active) return "Waiting for a node to enroll";
   return "No home hub";

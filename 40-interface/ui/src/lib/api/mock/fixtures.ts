@@ -408,7 +408,7 @@ export function buildFixtures(now: number): Fixtures {
       detail: {
         started: true,
         store: { open: true, full: false },
-        hub: { enrolled: true, reachable: true },
+        hub: { enrolled: true, reachable: true, connected: true },
         hub_role: false,
         members: null,
         attributed_links: 1,

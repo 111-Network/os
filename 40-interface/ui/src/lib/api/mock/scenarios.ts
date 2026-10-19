@@ -417,7 +417,7 @@ export const messagingNew: ScenarioFn = (base) => {
   m.nextSeq = 1;
   m.nextRecv = 1;
   m.nextMsg = 1;
-  m.fabric.hub = { enrolled: false, reachable: false, cursor: 0, node_id: null, address: null, members: 0, offer_active: false };
+  m.fabric.hub = { enrolled: false, connected: false, reachable: false, cursor: 0, node_id: null, address: null, members: 0, offer_active: false };
   m.fabric.links = m.fabric.links.map((l) => ({ ...l, state: "down", peers: 0 }));
   m.fabric.store.used = 120_000;
   syncFabricRow(data);

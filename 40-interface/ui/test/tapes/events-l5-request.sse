@@ -12,7 +12,7 @@ data: {"change":"request","message":{"at":"2026-10-19T00:12:28Z","dir":"in","id"
 
 id: 1792368735930022
 event: fabric
-data: {"custody":{"bytes":0,"count":0},"hub":{"address":"10.111.0.10:11184","cursor":0,"enrolled":true,"members":0,"node_id":"dc7aa0108bed37d241b81696de4dff7128b5db3d801822e3a04fbcfb8da93907","offer_active":false,"reachable":true},"links":[{"detail":null,"id":"tcp-lan","kind":"tcp-lan","peers":3,"profile":{"airtime":null,"broadcast":false,"cost_class":"bulk","framing":"stream","mtu_bytes":65535,"reliable":true},"state":"up"}],"schema":1,"settings":{"custody_opt_in":false,"hub_role":false,"listen_lan":true,"quotas":{"custody":null,"kb":null,"object":null,"patch":null,"sync":null,"update":null}},"store":{"open":true,"restore_pending":false,"store_full":false,"used":1122304,"watermark":536870912}}
+data: {"custody":{"bytes":0,"count":0},"hub":{"address":"10.111.0.10:11184","connected":true,"cursor":0,"enrolled":true,"members":0,"node_id":"dc7aa0108bed37d241b81696de4dff7128b5db3d801822e3a04fbcfb8da93907","offer_active":false,"reachable":true},"links":[{"detail":null,"id":"tcp-lan","kind":"tcp-lan","peers":3,"profile":{"airtime":null,"broadcast":false,"cost_class":"bulk","framing":"stream","mtu_bytes":65535,"reliable":true},"state":"up"}],"schema":1,"settings":{"custody_opt_in":false,"hub_role":false,"listen_lan":true,"quotas":{"custody":null,"kb":null,"object":null,"patch":null,"sync":null,"update":null}},"store":{"open":true,"restore_pending":false,"store_full":false,"used":1122304,"watermark":536870912}}
 
 id: 1792368735930023
 event: contact

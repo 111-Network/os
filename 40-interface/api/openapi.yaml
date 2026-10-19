@@ -809,11 +809,12 @@ components:
         profile: { $ref: "#/components/schemas/FabricPathProfile" }
     FabricHub:
       type: object
-      required: [enrolled, reachable, cursor, node_id, address, members, offer_active]
-      description: "Both ends of the hub relationship (§9): the member side (enrolled, reachable, cursor) and the hub side (members, offer_active)."
+      required: [enrolled, connected, reachable, cursor, node_id, address, members, offer_active]
+      description: "Both ends of the hub relationship (§9): the member side (enrolled, connected, reachable, cursor) and the hub side (members, offer_active)."
       properties:
         enrolled: { type: boolean, description: "this node has a home hub" }
-        reachable: { type: boolean, description: "an attributed link to the home hub is up" }
+        connected: { type: boolean, description: "a connection to the home hub is up that this node may send on, but the hub has not answered on it yet; promises no delivery (false when not enrolled)" }
+        reachable: { type: boolean, description: "an attributed link to the home hub is up: the hub answered on the current connection" }
         cursor: { type: integer, minimum: 0, description: "mailbox cursor committed with the home hub (the hub's own insertion sequence; no clock)" }
         node_id: { type: [string, "null"], pattern: "^[0-9a-f]{64}$", description: "the home hub; null when not enrolled" }
         address: { type: [string, "null"], description: "host:port of the home hub's tcp-lan listener; null when not enrolled" }

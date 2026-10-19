@@ -20,7 +20,7 @@ import {
   upsertMessage,
   type ThreadPage,
 } from "../src/lib/api/messages";
-import { buildMessaging, cancelQueued, MOCK_REASONS, threadsOf, pageOf, ADA, BRAM, CLEO, DANA, DOV } from "../src/lib/api/mock/messaging";
+import { buildMessaging, cancelQueued, fabricRow, MOCK_REASONS, threadsOf, pageOf, ADA, BRAM, CLEO, DANA, DOV } from "../src/lib/api/mock/messaging";
 import type { Message, MessageState, Thread } from "../src/lib/api/types";
 import {
   announceIncoming,
@@ -60,6 +60,7 @@ import {
   timeLabel,
   unreadText,
   unresolved,
+  WAITING_QUESTION,
   whenText,
 } from "../src/views/messages/model";
 import { ApiError, synthProblem } from "../src/lib/api/problem";
@@ -573,6 +574,16 @@ describe("the messaging line above the list", () => {
       expect(a?.label).toMatch(/fix/i);
     });
 
+    it("a member connected to its hub that has not answered yet is asked to check the hub, never to set up or enroll again", () => {
+      const a = bannerAgent(unset, "hub_waiting_answer");
+      expect(a).toMatchObject({ goal: "fix", question: WAITING_QUESTION, primary: false });
+      expect(a?.label).toBe("Ask the agent to check the hub");
+      expect(a?.question).not.toBe(SETUP_QUESTION);
+      expect(a?.question).toMatch(/connected to my home hub/i);
+      expect(a?.question).toMatch(/has not answered yet/i);
+      expect(a?.question).toMatch(/do not enroll again/i);
+    });
+
     it("a hub with no members is offered 'let a node use this hub', not asked to enroll", () => {
       const a = bannerAgent(unset, "hub_waiting");
       expect(a?.question).toBe(OFFER_QUESTION);
@@ -674,5 +685,39 @@ describe("route parameter and errors", () => {
     expect(errorSentence(ApiError.network(new TypeError("x")), "fallback")).toMatch(/could not reach the node/i);
     expect(errorSentence(new Error("boom"), "fallback")).toBe("fallback");
     expect(errorSentence("nope", "fallback")).toBe("fallback");
+  });
+});
+
+describe("the mock's fabric row follows the daemon's rules for a member's hub", () => {
+  const base = () => buildMessaging(NOW).fabric;
+  const member = (over: { connected: boolean; reachable: boolean }) => {
+    const f = base();
+    return fabricRow({ ...f, links: [], hub: { ...f.hub, enrolled: true, members: 0, ...over }, settings: { ...f.settings, hub_role: false } });
+  };
+
+  it("an enrolled member whose hub answered is LIVE", () => {
+    expect(member({ connected: true, reachable: true })).toMatchObject({ state: "live", reason_code: "hub_reachable" });
+  });
+
+  it("connected to the hub with no answer yet is NOT SET: hub_waiting_answer, in the daemon's words", () => {
+    const row = member({ connected: true, reachable: false });
+    expect(row).toMatchObject({ state: "unset", reason_code: "hub_waiting_answer", reason: "Connected to your home hub, waiting for its answer." });
+    expect(row.detail).toMatchObject({ hub: { enrolled: true, reachable: false, connected: true } });
+  });
+
+  it("not connected at all stays hub_unreachable, and a node with no hub stays not_enrolled", () => {
+    const row = member({ connected: false, reachable: false });
+    expect(row).toMatchObject({ state: "unset", reason_code: "hub_unreachable" });
+    expect(row.detail).toMatchObject({ hub: { enrolled: true, reachable: false, connected: false } });
+    const f = base();
+    const none = fabricRow({ ...f, links: [], hub: { ...f.hub, enrolled: false, connected: false, reachable: false, members: 0 }, settings: { ...f.settings, hub_role: false } });
+    expect(none).toMatchObject({ reason_code: "not_enrolled" });
+    expect(none.detail).toMatchObject({ hub: { enrolled: false, reachable: null, connected: false } });
+  });
+
+  it("a direct peer still makes the row LIVE while the hub has not answered", () => {
+    const f = base();
+    const row = fabricRow({ ...f, links: f.links.map((l) => ({ ...l, peers: 1 })), hub: { ...f.hub, enrolled: true, members: 0, connected: true, reachable: false } });
+    expect(row).toMatchObject({ state: "live", reason_code: "peer_linked" });
   });
 });
