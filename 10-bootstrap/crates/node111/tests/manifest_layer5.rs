@@ -600,14 +600,15 @@ fn tree_text() -> String {
         .collect()
 }
 
-/// A release payload (bin/111, share/kb, share/payload.manifest) carrying the
-/// given Layer 5 assets; `bundle` lists the files placed under panels/meshtastic-web/.
-fn layer5_payload(
+/// The files of a release payload beyond the base ones (bin/111, share/kb), as
+/// (relpath, bytes): the given Layer 5 assets; `bundle` lists the files placed under
+/// panels/meshtastic-web/.
+fn layer5_files(
     meshmud: Option<&[u8]>,
     bundle: &[(&str, &[u8])],
     lock: bool,
     extra: &[(&str, &[u8])],
-) -> Vec<u8> {
+) -> Vec<(String, Vec<u8>)> {
     let mut files: Vec<(String, Vec<u8>)> = Vec::new();
     if let Some(bytes) = meshmud {
         files.push((layer5::MESHMUD_BIN.into(), bytes.to_vec()));
@@ -625,11 +626,41 @@ fn layer5_payload(
     for (rel, bytes) in extra {
         files.push((rel.to_string(), bytes.to_vec()));
     }
+    files
+}
+
+/// A release payload (bin/111, share/kb, share/payload.manifest) carrying the
+/// given Layer 5 assets; `bundle` lists the files placed under panels/meshtastic-web/.
+fn layer5_payload(
+    meshmud: Option<&[u8]>,
+    bundle: &[(&str, &[u8])],
+    lock: bool,
+    extra: &[(&str, &[u8])],
+) -> Vec<u8> {
+    let files = layer5_files(meshmud, bundle, lock, extra);
     let refs: Vec<(&str, &[u8])> = files
         .iter()
         .map(|(r, b)| (r.as_str(), b.as_slice()))
         .collect();
     common::build_payload_with(&refs)
+}
+
+/// The full x86_64 Layer 5 payload with a `share/payload.manifest` that disagrees
+/// with its files: `unlisted` paths are packed but not listed, `phantom` paths are
+/// listed but not packed, `listing: false` packs no manifest (see
+/// `common::build_payload_listing`).
+fn layer5_payload_listing(
+    unlisted: &[&str],
+    phantom: &[(&str, &[u8])],
+    listing: bool,
+    extra: &[(&str, &[u8])],
+) -> Vec<u8> {
+    let files = layer5_files(Some(MESHMUD_X86), BUNDLE, true, extra);
+    let refs: Vec<(&str, &[u8])> = files
+        .iter()
+        .map(|(r, b)| (r.as_str(), b.as_slice()))
+        .collect();
+    common::build_payload_listing(&refs, unlisted, phantom, listing)
 }
 
 /// A complete release artifacts dir, every Layer 5 pin consistent with both payloads.
@@ -903,4 +934,242 @@ fn generator_refuses_payloads_that_disagree_with_its_pins() {
     assert!(String::from_utf8_lossy(&o.stderr).contains("warning"));
     let m = ChannelManifest::parse(&std::fs::read_to_string(&out).unwrap()).unwrap();
     assert!(m.meshmud_for(X86).is_none() && m.bundles().is_empty());
+}
+
+/// Release-time guard for the payload listing (DOCS agent gap; B1 reviewer deviation
+/// 5): `update_guard.rs` re-verifies the current release at every start with
+/// `verify_tree`, which hashes only the files `share/payload.manifest` lists, so the
+/// generator refuses a payload whose listing misses a file the tarball carries (or
+/// names one it does not), naming the first offending path.
+#[test]
+fn generator_refuses_an_incomplete_payload_listing() {
+    let x86_payload = "payload-x86_64-unknown-linux-musl.tar.gz";
+    let app_js = "panels/meshtastic-web/assets/app.js";
+    let reader = "share/meshtastic-presence/meshtastic_presence.py";
+    // Every file of the full x86_64 payload: listing none of them leaves nothing pinned.
+    let every_file: Vec<String> = ["bin/111", "share/kb/llms.txt", "share/kb/reticulum.md"]
+        .into_iter()
+        .map(String::from)
+        .chain(
+            layer5_files(Some(MESHMUD_X86), BUNDLE, true, &[])
+                .into_iter()
+                .map(|(rel, _)| rel),
+        )
+        .collect();
+    let every_ref: Vec<&str> = every_file.iter().map(String::as_str).collect();
+    let no_app_js =
+        format!("share/payload.manifest does not list {app_js}, which the tarball carries");
+    let no_reader =
+        format!("share/payload.manifest does not list {reader}, which the tarball carries");
+
+    let cases: Vec<(&str, Vec<u8>, &str)> = vec![
+        (
+            "bin/meshmud packed but unlisted",
+            layer5_payload_listing(&[layer5::MESHMUD_BIN], &[], true, &[]),
+            "share/payload.manifest does not list bin/meshmud, which the tarball carries",
+        ),
+        (
+            "a panels/ file packed but unlisted",
+            layer5_payload_listing(&[app_js], &[], true, &[]),
+            &no_app_js,
+        ),
+        (
+            "the presence reader script packed but unlisted",
+            layer5_payload_listing(&[reader], &[], true, &[]),
+            &no_reader,
+        ),
+        (
+            "a base file (share/kb) packed but unlisted",
+            layer5_payload_listing(&["share/kb/llms.txt"], &[], true, &[]),
+            "share/payload.manifest does not list share/kb/llms.txt,",
+        ),
+        (
+            "a file whose name holds whitespace can never be listed",
+            layer5_payload_listing(&[], &[], true, &[("share/kb/two words.md", b"x")]),
+            "does not list share/kb/two words.md, which the tarball carries",
+        ),
+        (
+            "a listed file that is not in the tarball",
+            layer5_payload_listing(&[], &[("bin/ghost", b"never packed")], true, &[]),
+            "share/payload.manifest lists bin/ghost, which is not a regular file in the tarball",
+        ),
+        (
+            "a listed bundle file that is not in the tarball",
+            layer5_payload_listing(
+                &[],
+                &[("panels/meshtastic-web/assets/gone.js", b"gone")],
+                true,
+                &[],
+            ),
+            "lists panels/meshtastic-web/assets/gone.js, which is not a regular file",
+        ),
+        (
+            "a listing path that climbs out of the tree",
+            layer5_payload_listing(&[], &[("../escape", b"x")], true, &[]),
+            "climbs out with '..'",
+        ),
+        (
+            "a payload without share/payload.manifest",
+            layer5_payload_listing(&[], &[], false, &[]),
+            "carries no share/payload.manifest file",
+        ),
+        (
+            "a listing that pins nothing",
+            layer5_payload_listing(&every_ref, &[], true, &[]),
+            "share/payload.manifest lists nothing",
+        ),
+    ];
+    for (what, payload, needle) in cases {
+        let (dir, arts) = release_artifacts();
+        std::fs::write(arts.join(x86_payload), payload).unwrap();
+        let out = dir.path().join("refused.toml");
+        let o = gen_manifest(&arts, &out);
+        let stderr = String::from_utf8_lossy(&o.stderr);
+        assert!(!o.status.success(), "{what}: gen-manifest must refuse");
+        assert!(
+            stderr.contains(needle),
+            "{what}: wanted {needle:?} in: {stderr}"
+        );
+        assert!(
+            stderr.contains(x86_payload),
+            "{what}: the error names the payload: {stderr}"
+        );
+        assert!(!out.exists(), "{what}: no manifest may be written");
+    }
+
+    // The error names the FIRST offending path: unlisted files in bytewise order…
+    let (dir, arts) = release_artifacts();
+    std::fs::write(
+        arts.join(x86_payload),
+        layer5_payload_listing(&[app_js, layer5::MESHMUD_BIN, reader], &[], true, &[]),
+    )
+    .unwrap();
+    let o = gen_manifest(&arts, &dir.path().join("refused.toml"));
+    let stderr = String::from_utf8_lossy(&o.stderr);
+    assert!(!o.status.success());
+    assert!(
+        stderr.contains("does not list bin/meshmud,"),
+        "wanted bin/meshmud first: {stderr}"
+    );
+    assert!(
+        !stderr.contains("app.js") && !stderr.contains("meshtastic_presence.py"),
+        "only the first offender is named: {stderr}"
+    );
+    // …then, with nothing unlisted, the listed-but-absent ones in listing order.
+    std::fs::write(
+        arts.join(x86_payload),
+        layer5_payload_listing(&[], &[("zz/last", b"2"), ("aa/first", b"1")], true, &[]),
+    )
+    .unwrap();
+    let o = gen_manifest(&arts, &dir.path().join("refused.toml"));
+    let stderr = String::from_utf8_lossy(&o.stderr);
+    assert!(!o.status.success());
+    assert!(
+        stderr.contains("lists zz/last,") && !stderr.contains("aa/first"),
+        "wanted the first listed absentee (zz/last) only: {stderr}"
+    );
+    // An unlisted file is reported before a phantom one.
+    std::fs::write(
+        arts.join(x86_payload),
+        layer5_payload_listing(&[app_js], &[("bin/ghost", b"x")], true, &[]),
+    )
+    .unwrap();
+    let o = gen_manifest(&arts, &dir.path().join("refused.toml"));
+    let stderr = String::from_utf8_lossy(&o.stderr);
+    assert!(!o.status.success());
+    assert!(
+        stderr.contains(&format!("does not list {app_js},")) && !stderr.contains("bin/ghost"),
+        "wanted the unlisted file first: {stderr}"
+    );
+
+    // The guard holds with no Layer 5 pin written too: a plain readable payload with
+    // an unlisted file is refused, and a complete one passes without a warning.
+    let (dir, arts) = release_artifacts();
+    for name in [
+        "meshmud-v1.0.0-linux-amd64",
+        "meshmud-v1.0.0-linux-arm64",
+        "meshtastic-web-v2.7.2.tar",
+        "meshtastic-web-v2.7.2.tree",
+        "meshtastic-presence-lock.txt",
+        "payload-aarch64-unknown-linux-musl.tar.gz",
+    ] {
+        std::fs::remove_file(arts.join(name)).unwrap();
+    }
+    std::fs::write(
+        arts.join(x86_payload),
+        common::build_payload_listing(&[], &["share/kb/llms.txt"], &[], true),
+    )
+    .unwrap();
+    let out = dir.path().join("plain.toml");
+    let o = gen_manifest(&arts, &out);
+    assert!(!o.status.success(), "an unlisted file must be refused");
+    assert!(
+        String::from_utf8_lossy(&o.stderr).contains("does not list share/kb/llms.txt,"),
+        "{}",
+        String::from_utf8_lossy(&o.stderr)
+    );
+    assert!(!out.exists());
+    std::fs::write(arts.join(x86_payload), common::build_payload()).unwrap();
+    let o = gen_manifest(&arts, &out);
+    assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+    assert!(!String::from_utf8_lossy(&o.stderr).contains("warning"));
+    let m = ChannelManifest::parse(&std::fs::read_to_string(&out).unwrap()).unwrap();
+    assert!(m.payload_for(X86).is_some());
+}
+
+/// The accepting side of the listing guard: a listing in the forms the node reads
+/// (`./` and doubled-slash paths, blank lines, a CRLF listing, extra columns) still
+/// covers its files, and the Layer 5 round trip is unchanged.
+#[test]
+fn generator_accepts_listings_the_node_reads() {
+    // The node resolves `./bin/111` and `bin//111` to the same file, so they cover it.
+    let files = layer5_files(Some(MESHMUD_X86), BUNDLE, true, &[]);
+    let mut all: Vec<(String, Vec<u8>)> = vec![
+        (
+            "bin/111".into(),
+            b"#!/bin/sh\necho fake 111 daemon\n".to_vec(),
+        ),
+        ("share/kb/llms.txt".into(), b"index\n".to_vec()),
+        ("share/kb/reticulum.md".into(), b"entry\n".to_vec()),
+    ];
+    all.extend(files);
+    let mut listing = String::from("\r\n\n");
+    for (i, (rel, bytes)) in all.iter().enumerate() {
+        let sha = sha256_bytes(bytes);
+        let path = match i % 3 {
+            0 => format!("./{rel}"),
+            1 => rel.replacen('/', "//", 1),
+            _ => rel.clone(),
+        };
+        listing.push_str(&format!("{sha}  {path}  trailing columns are ignored\r\n"));
+    }
+    let mut gz = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+    {
+        let mut b = tar::Builder::new(&mut gz);
+        for (rel, bytes) in all
+            .iter()
+            .map(|(r, b)| (r.as_str(), b.as_slice()))
+            .chain([("share/payload.manifest", listing.as_bytes())])
+        {
+            let mut h = tar::Header::new_gnu();
+            h.set_size(bytes.len() as u64);
+            h.set_mode(0o644);
+            h.set_entry_type(tar::EntryType::Regular);
+            h.set_cksum();
+            b.append_data(&mut h, rel, bytes).unwrap();
+        }
+        b.finish().unwrap();
+    }
+    let payload = gz.finish().unwrap();
+
+    let (dir, arts) = release_artifacts();
+    std::fs::write(
+        arts.join("payload-x86_64-unknown-linux-musl.tar.gz"),
+        &payload,
+    )
+    .unwrap();
+    let out = dir.path().join("channel-111-stable.toml");
+    let o = gen_manifest(&arts, &out);
+    assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+    ChannelManifest::parse(&std::fs::read_to_string(&out).unwrap()).unwrap();
 }

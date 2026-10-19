@@ -77,8 +77,12 @@ payload, Layer 5 assets included. The rule, from `manifest.rs` and `daemon/updat
 the installer and the updater, so a bad Layer 5 asset is refused at install and update time
 either way. But `update-guard` (before every daemon start) runs `verify_tree` alone on the
 current release, so an unlisted `bin/meshmud`, bundle file or reader script is never re-hashed
-at boot and a torn one goes undetected. Neither `gen-manifest.py` nor the node checks that the
-listing is complete, so this step is on you. From the payload tree:
+at boot and a torn one goes undetected. The node does not check that the listing is complete,
+so `gen-manifest.py` does it at release time (step 4): it reads every `payload-<triple>.tar.gz` in
+memory and refuses one whose `share/payload.manifest` does not list a regular file of the tarball
+(itself excepted) or lists a path that is not one, naming the first offending path. It does not
+compare hashes, so the `diff` and `sha256sum -c` lines below stay as the human cross-check.
+Write the listing from the payload tree:
 
 ```sh
 find bin share panels -type f ! -path share/payload.manifest -print0 \
@@ -121,7 +125,8 @@ generated file (it runs gen-manifest.py + the T2 parser); so must
 The Layer 5 sections are written when their files are in the artifacts dir, and the generator
 refuses a payload whose `bin/meshmud`, `panels/meshtastic-web/` tree or presence lock differs
 from the pins it is about to write (and a `meshmud` with no `111` binary and payload of its
-triple). Assert a full release before signing:
+triple), and, pins or no pins, a readable payload whose `share/payload.manifest` leaves a file
+unlisted or lists one that is absent (the listing is written in step 2). Assert a full release before signing:
 
 ```sh
 grep -E '^\[(pkg\.meshmud\.target\.|bundle\.meshtastic-web|presence-lock)' dist/channel-111-stable.toml

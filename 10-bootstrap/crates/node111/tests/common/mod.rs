@@ -99,6 +99,20 @@ pub fn build_payload() -> Vec<u8> {
 /// `bin/`), each listed in `share/payload.manifest` like every payload file — the
 /// Layer 5 assets (`bin/meshmud`, `panels/<bundle>/…`, `share/meshtastic-presence/…`).
 pub fn build_payload_with(extra: &[(&str, &[u8])]) -> Vec<u8> {
+    build_payload_listing(extra, &[], &[], true)
+}
+
+/// [`build_payload_with`] with a `share/payload.manifest` that can disagree with the
+/// files (the generator's release-time listing guard, `manifest/gen-manifest.py`):
+/// the `unlisted` relpaths are packed but left out of the listing, each `phantom`
+/// (relpath, bytes) is listed with the hash of its bytes but not packed, and
+/// `listing: false` packs no `share/payload.manifest` at all.
+pub fn build_payload_listing(
+    extra: &[(&str, &[u8])],
+    unlisted: &[&str],
+    phantom: &[(&str, &[u8])],
+    listing: bool,
+) -> Vec<u8> {
     let mut files: Vec<(String, Vec<u8>, u32)> = vec![
         (
             "bin/111".into(),
@@ -118,17 +132,29 @@ pub fn build_payload_with(extra: &[(&str, &[u8])]) -> Vec<u8> {
     }
     let mut manifest = String::new();
     for (path, bytes, _) in &files {
+        if unlisted.contains(&path.as_str()) {
+            continue;
+        }
         manifest.push_str(&format!(
             "{}  {}\n",
             node111::util::hash::sha256_bytes(bytes),
             path
         ));
     }
-    files.push((
-        "share/payload.manifest".into(),
-        manifest.into_bytes(),
-        0o644,
-    ));
+    for (path, bytes) in phantom {
+        manifest.push_str(&format!(
+            "{}  {}\n",
+            node111::util::hash::sha256_bytes(bytes),
+            path
+        ));
+    }
+    if listing {
+        files.push((
+            "share/payload.manifest".into(),
+            manifest.into_bytes(),
+            0o644,
+        ));
+    }
 
     let mut gz = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
     {

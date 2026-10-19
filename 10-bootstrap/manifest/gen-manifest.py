@@ -35,6 +35,18 @@ same check first and refuses to write such a manifest:
     not pinned (nothing else under panels/).
 A payload that is not a readable .tar.gz is refused whenever any Layer 5 pin is written; with
 none written it is reported on stderr and passed through (a node refuses it at unpack anyway).
+
+Payload listing (release-time guard, whatever pins are written): update_guard.rs re-verifies the
+current release at every daemon start with verify_tree (daemon/updater/stage.rs), which hashes
+only the files share/payload.manifest LISTS and never looks for files it does not list. So an
+unlisted bin/meshmud, panels/ file or reader script would never be re-hashed at boot, and a
+listed file that is not in the tarball is refused by every node at unpack. Every readable
+payload-<triple>.tar.gz is therefore refused unless its share/payload.manifest (lines
+`sha256  relpath`, read exactly as verify_tree reads them: the first two whitespace-separated
+tokens, shorter lines skipped) lists every regular file in the tarball except itself, and lists no
+path that is not a regular file in it. The error names the first offending path: an unlisted file
+first (bytewise order), then a listed-but-absent one (listing order). The hashes are not compared
+here; the release checklist keeps `sha256sum -c share/payload.manifest` as the human cross-check.
 """
 import argparse
 import glob
@@ -79,8 +91,12 @@ PAYLOAD_MESHMUD = "bin/meshmud"
 PAYLOAD_PANELS = "panels"
 PAYLOAD_PRESENCE_LOCK = "share/meshtastic-presence/meshtastic-presence-lock.txt"
 WEB_BUNDLE = "meshtastic-web"
+# The payload's own file list (daemon/updater/stage.rs `verify_tree`; update_guard.rs).
+PAYLOAD_LISTING = "share/payload.manifest"
 # Bounds for reading a tar (a packaging error, not a release, beyond these).
 TAR_MAX_MEMBERS = 262144
+# One listing line is `sha256  relpath`; the bound covers TAR_MAX_MEMBERS long lines.
+LISTING_MAX_BYTES = 64 << 20
 
 
 def fail(msg):
@@ -110,11 +126,13 @@ def member_path(name, what, allow_dot_prefix):
     return "/".join(out)
 
 
-def read_tar(path, what, gz, allow_dot_prefix):
+def read_tar(path, what, gz, allow_dot_prefix, keep=None):
     """{relpath: ("file", sha256, size) | ("dir", None, None)} for every member, read in memory.
 
     Plain files and directories only (the node refuses links, hard links and devices); a path
-    listed twice is refused. Raises tarfile.TarError/OSError/EOFError when unreadable."""
+    listed twice is refused. `keep` is a dict whose keys are relpaths to retain: the bytes of
+    each such file found replace its None value (bounded by LISTING_MAX_BYTES). Raises
+    tarfile.TarError/OSError/EOFError when unreadable."""
     entries = {}
     with tarfile.open(path, "r:gz" if gz else "r:") as tar:
         for count, m in enumerate(tar, 1):
@@ -122,10 +140,18 @@ def read_tar(path, what, gz, allow_dot_prefix):
                 fail(f"{what}: more than {TAR_MAX_MEMBERS} members")
             rel = member_path(m.name, what, allow_dot_prefix)
             if m.type in (tarfile.REGTYPE, tarfile.AREGTYPE):
+                kept = keep is not None and rel in keep
+                if kept and m.size > LISTING_MAX_BYTES:
+                    fail(f"{what}: {rel} is larger than {LISTING_MAX_BYTES} bytes")
                 h = hashlib.sha256()
+                chunks = []
                 f = tar.extractfile(m)
                 for chunk in iter(lambda: f.read(1 << 20), b""):
                     h.update(chunk)
+                    if kept:
+                        chunks.append(chunk)
+                if kept:
+                    keep[rel] = b"".join(chunks)
                 entry = ("file", h.hexdigest(), m.size)
             elif m.type == tarfile.DIRTYPE:
                 entry = ("dir", None, None)
@@ -181,12 +207,51 @@ def check_pinned(entries, rel, path, what):
              f"{os.path.basename(path)} (sha256 {want[0]}, {want[1]} bytes)")
 
 
+def check_listing(entries, listing, what):
+    """The payload's share/payload.manifest lists every regular file of the tarball (itself
+    excepted) and nothing that is not one: verify_tree's blind spot, closed at release time.
+
+    `listing` is the manifest's bytes (read_tar keep=). Parsed as verify_tree parses it, and the
+    listed paths are normalised the way the filesystem resolves them ('.' and empty parts
+    dropped; absolute and '..' paths refused)."""
+    got = entries.get(PAYLOAD_LISTING)
+    if got is None or got[0] != "file" or listing is None:
+        fail(f"{what}: carries no {PAYLOAD_LISTING} file (the node refuses a payload without one)")
+    try:
+        text = listing.decode("utf-8")
+    except UnicodeDecodeError:
+        fail(f"{what}: {PAYLOAD_LISTING} is not UTF-8 (the node refuses it)")
+    listed = []
+    for line in text.split("\n"):
+        parts = line.split()
+        if len(parts) < 2:
+            continue
+        listed.append(member_path(parts[1], f"{what}: {PAYLOAD_LISTING} entry", allow_dot_prefix=True))
+    if not listed:
+        fail(f"{what}: {PAYLOAD_LISTING} lists nothing (the node refuses a payload manifest that pins nothing)")
+    listed_set = set(listed)
+    for rel in sorted(r for r, (kind, _sha, _size) in entries.items() if kind == "file"):
+        if rel == PAYLOAD_LISTING or rel in listed_set:
+            continue
+        hint = ""
+        if any(c.isspace() for c in rel):
+            hint = " (a name with whitespace cannot be listed: the node splits each line on whitespace)"
+        fail(f"{what}: {PAYLOAD_LISTING} does not list {rel}, which the tarball carries: the node's "
+             f"boot-time verify_tree hashes only listed files, so it would never be re-hashed{hint}")
+    for rel in listed:
+        got = entries.get(rel)
+        if got is None or got[0] != "file":
+            fail(f"{what}: {PAYLOAD_LISTING} lists {rel}, which is not a regular file in the tarball "
+                 "(every node refuses such a payload at unpack)")
+
+
 def check_payload(path, triple, meshmud, web_listing, lock, pins_any):
     """Cross-check one payload-<triple>.tar.gz against the Layer 5 pins about to be written
-    (the node's verify_layer5_tree, both ways)."""
+    (the node's verify_layer5_tree, both ways), then check its payload listing is complete."""
     what = os.path.basename(path)
+    kept = {PAYLOAD_LISTING: None}
     try:
-        entries = read_tar(path, what, gz=True, allow_dot_prefix=False)
+        entries = read_tar(path, what, gz=True, allow_dot_prefix=False, keep=kept)
     except (tarfile.TarError, OSError, EOFError) as e:
         if pins_any:
             fail(f"{what}: not a readable .tar.gz ({e}); the Layer 5 pins cannot be checked against it")
@@ -224,6 +289,8 @@ def check_payload(path, triple, meshmud, web_listing, lock, pins_any):
         check_pinned(entries, PAYLOAD_PRESENCE_LOCK, lock, what)
     elif present(entries, PAYLOAD_PRESENCE_LOCK):
         fail(f"{what}: carries {PAYLOAD_PRESENCE_LOCK} but no presence lock is pinned")
+
+    check_listing(entries, kept[PAYLOAD_LISTING], what)
 
 
 def sha256_of(path):
