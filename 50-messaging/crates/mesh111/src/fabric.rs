@@ -155,7 +155,20 @@
 //!   `settings.home_hub` is cleared (a `Settings` event) and its maintained
 //!   dial released.
 //! - [`Fabric::enroll`] resolves on `ENROLL_OK`; it has no timeout of its
-//!   own (no timers here) — the route that calls it bounds the wait.
+//!   own (no timers here) — the route that calls it bounds the wait, and
+//!   dropping the wait (that bound elapsed, or its client went away)
+//!   abandons the attempt.
+//! - An enrollment attempt that ends without `ENROLL_OK` (§7.3) — refused
+//!   (any `ENROLL_OK` status but OK, or an answer that does not verify or
+//!   pin), no link, superseded by a newer attempt, its hub forgotten, or
+//!   abandoned — leaves nothing behind on the member: the dial it started
+//!   is released unless the home hub or a configured peer
+//!   ([`Fabric::dial_peer`]) holds that address, and a hub card it pinned
+//!   is forgotten unless the contact existed before the attempt (or became
+//!   the home hub, or was used or edited since: an alias, a pin, a stronger
+//!   trust, a message to it). A refused member therefore neither redials
+//!   the hub (which would keep counting it as an attributed peer) nor keeps
+//!   a hub card it never had before.
 //! - All handles dropped does not stop the actor: call
 //!   [`Fabric::shutdown`] (clean close) or [`Fabric::abort`].
 
@@ -666,6 +679,7 @@ impl Fabric {
             heard: HashSet::new(),
             offer: None,
             enrolling: None,
+            peer_dials: HashSet::new(),
             read_marks: HashMap::new(),
             counters: Counters::default(),
             events: events.clone(),
@@ -835,14 +849,38 @@ impl Fabric {
 
     /// Member side (§7.3): enroll with the hub at `address` using its code;
     /// `card` (the hub's card text) is needed unless the hub is already a
-    /// contact. Resolves when `ENROLL_OK` arrives.
+    /// contact. Resolves when `ENROLL_OK` arrives: `Ok` once enrolled, else
+    /// the typed refusal (`FabricError::Enroll(status)`, `NoLink`, …). An
+    /// attempt that ends without `ENROLL_OK` — including this future being
+    /// dropped before the answer — leaves nothing behind (module doc).
     pub async fn enroll(&self, address: SocketAddr, code: &str, card: Option<&str>) -> Result<()> {
         let code = code.to_owned();
         let card = card.map(str::to_owned);
         let (tx, rx) = oneshot::channel();
-        self.call(move |c| c.enroll(address, &code, card.as_deref(), tx))
-            .await??;
-        rx.await.map_err(|_| FabricError::Stopped)?
+        // Armed before the attempt opens: dropping this future at any await
+        // point abandons it.
+        let mut wait = EnrollWait {
+            rx: Some(rx),
+            input: self.inner.input.clone(),
+        };
+        if let Err(e) = self
+            .call(move |c| c.enroll(address, &code, card.as_deref(), tx))
+            .await?
+        {
+            wait.rx = None; // refused before any attempt opened
+            return Err(e);
+        }
+        wait.answer().await
+    }
+
+    /// Keep a hand-configured direct peer dialed (the daemon's
+    /// `fabric/settings` `peers`, §8.1): the first registered dialer
+    /// maintains `address`, expecting `node_id` there. The fabric records
+    /// the address, so an enrollment that ends without `ENROLL_OK` never
+    /// releases a dial a configured peer holds (module doc). `NoLink` when
+    /// no dialer is registered.
+    pub async fn dial_peer(&self, address: SocketAddr, node_id: NodeId) -> Result<()> {
+        self.call(move |c| c.dial_peer(address, node_id)).await?
     }
 
     /// Hub side (§7.3): mint a one-time enrollment code (replacing any open
@@ -1068,11 +1106,79 @@ struct LinkSlot {
     dialer: Option<Arc<dyn Dialer>>,
 }
 
+/// The member's open enrollment attempt (§7.3; one at a time).
 struct Enrolling {
     hub: NodeId,
     code: Code,
     address: SocketAddr,
     reply: Option<oneshot::Sender<Result<()>>>,
+    /// This attempt started the dial to `address` (neither the home hub nor
+    /// a configured peer held it then): an end without `ENROLL_OK` releases
+    /// it.
+    dialed: bool,
+    /// This attempt pinned the hub's card for a contact that did not exist
+    /// before: an end without `ENROLL_OK` forgets it.
+    pinned: bool,
+}
+
+/// How an enrollment attempt ended without `ENROLL_OK` (module doc): every
+/// end undoes the same things ([`Core::end_enroll`]) and tells its caller
+/// why.
+enum EnrollEnd {
+    /// The hub refused (`ENROLL_OK` with a status other than OK), or its
+    /// answer did not verify or pin.
+    Refused(FabricError),
+    /// No registered link can dial the address.
+    NoLink,
+    /// A newer attempt replaced it.
+    Superseded,
+    /// The hub's contact was forgotten meanwhile.
+    HubForgotten,
+    /// Its caller stopped waiting (the route's bound elapsed, or its client
+    /// went away).
+    Abandoned,
+}
+
+impl EnrollEnd {
+    fn error(self) -> FabricError {
+        match self {
+            EnrollEnd::Refused(e) => e,
+            EnrollEnd::NoLink => FabricError::NoLink,
+            EnrollEnd::Superseded => FabricError::Invalid("superseded by a new enrollment"),
+            EnrollEnd::HubForgotten => FabricError::Invalid("the hub was forgotten"),
+            EnrollEnd::Abandoned => FabricError::Invalid("the enrollment was abandoned"),
+        }
+    }
+}
+
+/// The member's wait for `ENROLL_OK` ([`Fabric::enroll`]). Dropped before
+/// the answer, it closes the reply and abandons the attempt
+/// ([`Core::abandon_enroll`]), which then leaves nothing behind.
+struct EnrollWait {
+    rx: Option<oneshot::Receiver<Result<()>>>,
+    input: mpsc::UnboundedSender<Input>,
+}
+
+impl EnrollWait {
+    async fn answer(&mut self) -> Result<()> {
+        let Some(rx) = self.rx.as_mut() else {
+            return Err(FabricError::Stopped);
+        };
+        let answer = rx.await;
+        self.rx = None;
+        answer.map_err(|_| FabricError::Stopped)?
+    }
+}
+
+impl Drop for EnrollWait {
+    fn drop(&mut self) {
+        if let Some(rx) = self.rx.take() {
+            // Closed first: the actor ends only the attempt nobody awaits.
+            drop(rx);
+            let job: Job = Box::new(|c: &mut Core| c.abandon_enroll());
+            let _ = self.input.send(Input::Run(job));
+        }
+    }
 }
 
 enum Route {
@@ -1112,6 +1218,8 @@ struct Core {
     heard: HashSet<NodeId>,
     offer: Option<EnrollOffer>,
     enrolling: Option<Enrolling>,
+    /// Addresses kept dialed for configured peers ([`Fabric::dial_peer`]).
+    peer_dials: HashSet<SocketAddr>,
     read_marks: HashMap<NodeId, u64>,
     counters: Counters,
     events: broadcast::Sender<FabricEvent>,
@@ -2841,6 +2949,9 @@ impl Core {
         }
     }
 
+    /// §7.3 member side: the hub's answer to the open attempt. Anything but
+    /// a verified, pinned OK ends the attempt as refused ([`Self::end_enroll`]:
+    /// the dial it started released, a card it pinned forgotten).
     fn on_enroll_ok(&mut self, sender: &NodeId, payload: &[u8], ck: Option<&ConnKey>) {
         if !self.enrolling.as_ref().is_some_and(|e| e.hub == *sender) {
             return;
@@ -2851,41 +2962,39 @@ impl Core {
         let Some(mut en) = self.enrolling.take() else {
             return;
         };
-        let reply = en.reply.take();
-        let result = if ok.status == EnrollStatus::Ok {
-            match ok.card.as_deref().map(|c| (verify_card(c), c)) {
-                Some((Ok(ann), card)) if ann.node_id() == *sender => {
-                    match self.pin(&ann, card, Trust::Enrolled) {
-                        Ok(()) => {
-                            self.heard.insert(*sender);
-                            self.settings.home_hub = Some(HomeHub {
-                                node_id: *sender,
-                                address: Some(en.address),
-                            });
-                            if self
-                                .store
-                                .advance_cursor(sender.as_bytes(), ok.custody_seq_floor)
-                                .is_err()
-                            {
-                                self.counters.errors += 1;
-                            }
-                            self.settings_changed();
-                            self.contact_event(*sender, ContactChange::Updated);
-                            if let Some(ck) = ck {
-                                self.hub_link_up(ck);
-                            }
-                            Ok(())
-                        }
-                        Err(e) => Err(e),
-                    }
-                }
-                _ => Err(FabricError::Enroll(EnrollStatus::Refused)),
+        if ok.status != EnrollStatus::Ok {
+            let why = EnrollEnd::Refused(FabricError::Enroll(ok.status));
+            return self.end_enroll(en, why);
+        }
+        let (ann, card) = match ok.card.as_deref().map(|c| (verify_card(c), c)) {
+            Some((Ok(ann), card)) if ann.node_id() == *sender => (ann, card),
+            _ => {
+                let why = EnrollEnd::Refused(FabricError::Enroll(EnrollStatus::Refused));
+                return self.end_enroll(en, why);
             }
-        } else {
-            Err(FabricError::Enroll(ok.status))
         };
-        if let Some(r) = reply {
-            let _ = r.send(result);
+        if let Err(e) = self.pin(&ann, card, Trust::Enrolled) {
+            return self.end_enroll(en, EnrollEnd::Refused(e));
+        }
+        self.heard.insert(*sender);
+        self.settings.home_hub = Some(HomeHub {
+            node_id: *sender,
+            address: Some(en.address),
+        });
+        if self
+            .store
+            .advance_cursor(sender.as_bytes(), ok.custody_seq_floor)
+            .is_err()
+        {
+            self.counters.errors += 1;
+        }
+        self.settings_changed();
+        self.contact_event(*sender, ContactChange::Updated);
+        if let Some(ck) = ck {
+            self.hub_link_up(ck);
+        }
+        if let Some(r) = en.reply.take() {
+            let _ = r.send(Ok(()));
         }
     }
 
@@ -3272,9 +3381,8 @@ impl Core {
         }
         if self.enrolling.as_ref().is_some_and(|e| e.hub == id) {
             if let Some(mut e) = self.enrolling.take() {
-                if let Some(r) = e.reply.take() {
-                    let _ = r.send(Err(FabricError::Invalid("the hub was forgotten")));
-                }
+                e.pinned = false; // forgotten just now
+                self.end_enroll(e, EnrollEnd::HubForgotten);
             }
         }
         self.rebuild_keys();
@@ -3379,6 +3487,10 @@ impl Core {
         })
     }
 
+    /// §7.3 member side: open an attempt (replacing any open one). An `Err`
+    /// opens nothing and pins nothing; once open, the attempt answers
+    /// `reply` exactly once — on `ENROLL_OK`, or through
+    /// [`Self::end_enroll`].
     fn enroll(
         &mut self,
         address: SocketAddr,
@@ -3387,46 +3499,130 @@ impl Core {
         reply: oneshot::Sender<Result<()>>,
     ) -> Result<()> {
         let code = normalize_code(code)?;
-        let hub = match card {
+        let card = match card {
             Some(text) => {
                 let bytes = parse_card_text(text)?;
                 let ann = verify_card(&bytes)?;
                 if ann.node_id() == self.own {
                     return Err(CardError::OwnCard.into());
                 }
-                self.pin(&ann, &bytes, Trust::Oob)?;
-                self.contact_event(ann.node_id(), ContactChange::Added);
-                ann.node_id()
+                Some((ann, bytes))
             }
-            None => match self.settings.home_hub {
-                Some(h) => h.node_id,
-                None => return Err(FabricError::Invalid("the hub's card is needed")),
-            },
+            None => None,
         };
-        if let Some(mut old) = self.enrolling.take() {
-            if let Some(r) = old.reply.take() {
-                let _ = r.send(Err(FabricError::Invalid("superseded by a new enrollment")));
-            }
+        let hub = match (&card, self.settings.home_hub) {
+            (Some((ann, _)), _) => ann.node_id(),
+            (None, Some(h)) => h.node_id,
+            (None, None) => return Err(FabricError::Invalid("the hub's card is needed")),
+        };
+        // What the attempt this one replaces holds for the same hub or the
+        // same address passes on to it (and is not undone with it).
+        let (mut pinned, inherit_dial) = match &self.enrolling {
+            Some(o) => (o.hub == hub && o.pinned, o.address == address && o.dialed),
+            None => (false, false),
+        };
+        if let Some((ann, bytes)) = &card {
+            let known = self.contact_known(&hub);
+            self.pin(ann, bytes, Trust::Oob)?;
+            self.contact_event(hub, ContactChange::Added);
+            pinned |= !known;
         }
-        self.enrolling = Some(Enrolling {
+        if let Some(mut old) = self.enrolling.take() {
+            old.pinned &= old.hub != hub;
+            old.dialed &= old.address != address;
+            self.end_enroll(old, EnrollEnd::Superseded);
+        }
+        let mut en = Enrolling {
             hub,
             code,
             address,
             reply: Some(reply),
-        });
+            dialed: inherit_dial,
+            pinned,
+        };
         match self.sendable_conn(&hub) {
-            Some(ck) => self.send_enroll(&ck),
+            Some(ck) => {
+                self.enrolling = Some(en);
+                self.send_enroll(&ck);
+            }
             None => match self.dialer() {
-                Some(d) => d.maintain(address, Some(hub)),
-                None => {
-                    if let Some(mut e) = self.enrolling.take() {
-                        if let Some(r) = e.reply.take() {
-                            let _ = r.send(Err(FabricError::NoLink));
-                        }
-                    }
+                Some(d) => {
+                    en.dialed |= !self.dial_held(address);
+                    d.maintain(address, Some(hub));
+                    self.enrolling = Some(en);
                 }
+                None => self.end_enroll(en, EnrollEnd::NoLink),
             },
         }
+        Ok(())
+    }
+
+    /// §7.3 member side: an attempt that ends without `ENROLL_OK` leaves
+    /// nothing behind (module doc). The dial it started is released unless
+    /// the home hub or a configured peer holds that address now; the card it
+    /// pinned for a new contact is forgotten unless that contact became the
+    /// home hub or was used or edited since (an alias, a pin, a stronger
+    /// trust, an own message to it). Then its caller hears why.
+    fn end_enroll(&mut self, mut en: Enrolling, why: EnrollEnd) {
+        if en.dialed && !self.dial_held(en.address) {
+            if let Some(d) = self.dialer() {
+                d.release(en.address);
+            }
+        }
+        if en.pinned && Some(en.hub) != self.home_hub() {
+            let untouched = matches!(
+                self.store.contact(en.hub.as_bytes()),
+                Ok(Some(c)) if c.trust == Trust::Oob && c.alias.is_none() && !c.pinned
+            ) && !self.tx.values().any(|m| m.peer == en.hub);
+            if untouched && self.forget(en.hub).is_err() {
+                self.counters.errors += 1;
+            }
+        }
+        self.fabric_changed();
+        if let Some(r) = en.reply.take() {
+            let _ = r.send(Err(why.error()));
+        }
+    }
+
+    /// [`Fabric::enroll`]'s wait was dropped: end the open attempt if its
+    /// reply has no receiver any more (a newer attempt's caller still
+    /// waits, so that one is left alone).
+    fn abandon_enroll(&mut self) {
+        let abandoned = self
+            .enrolling
+            .as_ref()
+            .is_some_and(|e| e.reply.as_ref().is_none_or(|r| r.is_closed()));
+        if abandoned {
+            if let Some(en) = self.enrolling.take() {
+                self.end_enroll(en, EnrollEnd::Abandoned);
+            }
+        }
+    }
+
+    /// A dial at `address` that an enrollment attempt must not release: the
+    /// home hub's, or a configured peer's.
+    fn dial_held(&self, address: SocketAddr) -> bool {
+        self.peer_dials.contains(&address)
+            || self.settings.home_hub.and_then(|h| h.address) == Some(address)
+    }
+
+    /// Anything is known about `id` (a contact row, a `node1…` entry waiting
+    /// for its card, a message request); a store error counts as known, so
+    /// an attempt never forgets what it could not see.
+    fn contact_known(&self, id: &NodeId) -> bool {
+        !matches!(self.store.contact(id.as_bytes()), Ok(None))
+            || self.pending_keys.contains(id)
+            || self.request_pending(id)
+    }
+
+    /// [`Fabric::dial_peer`].
+    fn dial_peer(&mut self, address: SocketAddr, node_id: NodeId) -> Result<()> {
+        if node_id == self.own {
+            return Err(FabricError::Invalid("cannot dial this node itself"));
+        }
+        let d = self.dialer().ok_or(FabricError::NoLink)?;
+        self.peer_dials.insert(address);
+        d.maintain(address, Some(node_id));
         Ok(())
     }
 

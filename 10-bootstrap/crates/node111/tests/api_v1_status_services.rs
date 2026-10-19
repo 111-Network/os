@@ -4,7 +4,9 @@
 //! the services registry (§7 rows from injected facts, 2-tick debounce,
 //! `starting` grace, `since`, `services` frames), log tails, settings (merge,
 //! alias rules, loopback-only fields, offer dual write), KB traversal guards,
-//! restart / update-check, and the `status` heartbeat.
+//! restart / update-check, and the `status` heartbeat. Layer 5 (F2P):
+//! `layers` reports 5 only while the message fabric runs and is not
+//! restore-pending.
 //!
 //! Peers: real `ConnectInfo` over a loopback socket, or axum's
 //! `MockConnectInfo(addr)` to simulate a LAN peer (same harness as
@@ -459,6 +461,69 @@ async fn status_schema_pins_and_superset() {
     );
     n.api.dash.write().unwrap().kb = None;
     assert_eq!(get(port, "/api/v1/status").json()["layers"], json!([1, 4]));
+}
+
+/// The `layers` of `GET /api/v1/status` on `port`.
+fn layers_of(port: u16) -> Vec<u64> {
+    get(port, "/api/v1/status").json()["layers"]
+        .as_array()
+        .expect("layers")
+        .iter()
+        .map(|v| v.as_u64().expect("integer layer"))
+        .collect()
+}
+
+/// Start the fabric on `n` (the daemon's wiring, `fabric::start`) and hand
+/// it to the API like the daemon does.
+async fn with_fabric(
+    n: &Node,
+    identity: Option<node111::identity::Identity>,
+) -> Arc<node111::daemon::fabric::FabricHandle> {
+    use node111::daemon::fabric::{self, FabricConfig};
+    let mut cfg = FabricConfig::production(&n.api.layout, None);
+    cfg.listen = "127.0.0.1:0".parse().unwrap();
+    let h = fabric::start(cfg, identity, &n.api).await;
+    n.api.insert_ext(Arc::clone(&h));
+    h
+}
+
+/// F2P: Layer 5 is listed while the message fabric runs and is not
+/// restore-pending (`os/50-messaging/README.md` §4: nothing is sealed and no
+/// link runs then); no fabric, a fabric that is down, or a restore-pending
+/// one ⇒ no 5.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn layers_list_5_only_while_the_fabric_runs() {
+    // no fabric at all (a daemon without Layer 5 wiring)
+    let n = node();
+    let port = serve(&n.api, None).await;
+    assert!(!layers_of(port).contains(&5), "{:?}", layers_of(port));
+
+    // healthy: running, an epoch, links
+    let id = node111::identity::generate(&n.api.layout.identity_dir()).unwrap();
+    let h = with_fabric(&n, Some(id)).await;
+    assert!(h.running() && !h.restore_pending(), "{:?}", h.down_reason());
+    let l = layers_of(port);
+    assert!(l.contains(&5), "{l:?}");
+    assert_eq!(l.last(), Some(&5), "ascending: {l:?}");
+    h.shutdown().await;
+
+    // restore-pending: the L2 counters file is absent (§4)
+    let r = node();
+    let rport = serve(&r.api, None).await;
+    let dir = r.api.layout.identity_dir();
+    let id = node111::identity::generate(&dir).unwrap();
+    std::fs::remove_file(dir.join("counters")).unwrap();
+    let h = with_fabric(&r, Some(id)).await;
+    assert!(h.running() && h.restore_pending());
+    assert!(!layers_of(rport).contains(&5), "{:?}", layers_of(rport));
+    h.shutdown().await;
+
+    // down: no identity loaded, so the store never opened
+    let d = node();
+    let dport = serve(&d.api, None).await;
+    let h = with_fabric(&d, None).await;
+    assert!(!h.running());
+    assert!(!layers_of(dport).contains(&5), "{:?}", layers_of(dport));
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

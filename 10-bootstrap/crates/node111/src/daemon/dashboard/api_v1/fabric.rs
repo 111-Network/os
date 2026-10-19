@@ -22,9 +22,13 @@
 //!   literal and as a resolved name alike (`settings::dial_refusal`).
 //!   Enrollment success persists `home_hub` to `fabric/settings` before the
 //!   `200` (the `Settings` event writes it again).
-//!   A wait that times out leaves the enrollment pending inside the fabric
-//!   (its dial stays up): if the hub answers later the node still enrolls
-//!   and a `fabric` frame reports it.
+//!   An attempt that ends without `ENROLL_OK` leaves nothing behind (§7.3;
+//!   mesh111 `Fabric::enroll`): on a refusal (`502`/`429`) and on a wait
+//!   that times out (`502`, the wait is dropped and the fabric abandons the
+//!   attempt) the dial it started is released — unless the home hub or a
+//!   configured `peers` entry holds that address — and a hub card pinned
+//!   only for it is forgotten (a contact that existed before is kept). A
+//!   late `ENROLL_OK` is then ignored; enroll again with a fresh code.
 //! - `POST /fabric/hub/offer` → `HubOffer` (`Cache-Control: no-store`; the
 //!   code is shown once) — loopback-only (`403 loopback_only`); `409
 //!   bad_request` when this node holds no custody (turn on the hub role

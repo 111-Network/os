@@ -12,12 +12,15 @@
 //!   only; `at` is the daemon's display time ([`super::times`]).
 //! - Peer strings are never interpreted: texts and aliases go out verbatim
 //!   as JSON strings (the UI renders them as text).
+//! - `FabricStatus.counters` (diagnostics for Advanced) are mesh111's
+//!   bounded `Counters` since this fabric started (§18 rule 1: a failure
+//!   leaves no trace but a counter); the down shape carries none.
 
 use id111::encoding::NodeIdDisplay;
 use id111::keyset::NodeId;
 use mesh111::contacts::AppData;
 use mesh111::fabric::{
-    ContactView, FabricSettings, FabricStatus, HubView, LinkView, MessageView, OfferView,
+    ContactView, Counters, FabricSettings, FabricStatus, HubView, LinkView, MessageView, OfferView,
     ThreadView,
 };
 use mesh111::link::{CostClass, Framing, LinkState};
@@ -244,6 +247,39 @@ pub fn settings(s: &FabricSettings, quotas: &[(Class, Option<u64>)]) -> Value {
     })
 }
 
+/// `FabricCounters`: every counter mesh111 keeps (destructured, so a new
+/// counter does not compile until the contract names it).
+pub fn counters(c: &Counters) -> Value {
+    let Counters {
+        dropped,
+        stale,
+        refused_requests,
+        retransmits,
+        inferred_lost,
+        max_outstanding,
+        regressed,
+        piggybacked,
+        items_pushed,
+        items_received,
+        conflicts,
+        errors,
+    } = *c;
+    json!({
+        "dropped": dropped,
+        "stale": stale,
+        "refused_requests": refused_requests,
+        "retransmits": retransmits,
+        "inferred_lost": inferred_lost,
+        "max_outstanding": max_outstanding,
+        "regressed": regressed,
+        "piggybacked": piggybacked,
+        "items_pushed": items_pushed,
+        "items_received": items_received,
+        "conflicts": conflicts,
+        "errors": errors,
+    })
+}
+
 /// `FabricStatus` of a running fabric.
 pub fn status(st: &FabricStatus, quotas: &[(Class, Option<u64>)]) -> Value {
     json!({
@@ -259,6 +295,7 @@ pub fn status(st: &FabricStatus, quotas: &[(Class, Option<u64>)]) -> Value {
             "restore_pending": st.store.restore_pending,
         },
         "settings": settings(&st.settings, quotas),
+        "counters": counters(&st.counters),
     })
 }
 

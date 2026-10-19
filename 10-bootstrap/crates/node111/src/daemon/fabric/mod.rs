@@ -29,7 +29,9 @@
 //! 4. **Fabric** (`Fabric::start`: epoch mint, `complete_partials` and
 //!    orphan recovery are the library's own), then the **`tcp-lan`** adapter
 //!    registered with its dialer (the fabric keeps the home hub dialed;
-//!    configured direct `peers` from `fabric/settings` are dialed here). No
+//!    configured direct `peers` from `fabric/settings` are dialed here,
+//!    through `Fabric::dial_peer`, so the fabric knows those dials and an
+//!    enrollment that ends without `ENROLL_OK` never releases one). No
 //!    link is registered while the node has no announce or the identity
 //!    holder is restore-pending: no listener, no dial, no `peers` — so no
 //!    inbound packet ever reaches the L2 window (§4, L2 §8.4).
@@ -501,7 +503,9 @@ async fn boot_with(
         }
         for p in &persisted.peers {
             if p.node_id != node_id {
-                t.maintain(p.address, Some(p.node_id));
+                if let Err(e) = fabric.dial_peer(p.address, p.node_id).await {
+                    eprintln!("111 fabric: peer {} not dialed: {e}", p.address);
+                }
             }
         }
         Some(t)

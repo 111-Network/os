@@ -184,7 +184,7 @@ export const schemas: Record<string, JsonSchema> = {
       },
       "layers": {
         "type": "array",
-        "description": "layers this node runs right now (0 needs the KB payload verified, 2 needs identity ok, 3 needs the agent binary, 1 and 4 always)",
+        "description": "layers this node runs right now (0 needs the KB payload verified, 2 needs identity ok, 3 needs the agent binary, 5 needs the message fabric running and not restore_pending, 1 and 4 always)",
         "items": {"type":"integer","minimum":0,"maximum":9}
       }
     }
@@ -578,7 +578,7 @@ export const schemas: Record<string, JsonSchema> = {
       },
       "reason_code": {
         "type": ["string","null"],
-        "description": "stable snake_case, display-only for clients, set while the state needs an explanation. Emitted set (111d): waiting_for_key (queued, the peer's card has not arrived), hub_not_yours (queued, their hub is not yours; delivered when you meet directly), restore_pending (queued, the identity holder reports a restore floor so nothing is sealed), store_full (queued, the local store refuses new work), mailbox_full (sent, the hub answered REJECT_FULL), not_enrolled (sent, the hub answered REJECT_UNENROLLED: it no longer lists this node), cancelled (queued, the user cancelled it before it left; an empty placeholder goes instead so no number is abandoned, §4). null when nothing needs explaining."
+        "description": "stable snake_case, display-only for clients, set while the state needs an explanation. Emitted set (111d): waiting_for_key (queued, the peer's card has not arrived), hub_not_yours (queued while your hub is unreachable and their card names another hub; or sent after your hub answered REJECT_UNKNOWN_DEST — your hub does not know them, §9; either way delivered when you meet directly), restore_pending (queued, the identity holder reports a restore floor so nothing is sealed), store_full (queued, the local store refuses new work), mailbox_full (sent, the hub answered REJECT_FULL), not_enrolled (sent, the hub answered REJECT_UNENROLLED: it no longer lists this node), cancelled (queued, the user cancelled it before it left; an empty placeholder goes instead so no number is abandoned, §4). null when nothing needs explaining."
       },
       "reason": {"type":["string","null"],"description":"one plain sentence for `reason_code`"},
       "local_seq": {
@@ -856,6 +856,62 @@ export const schemas: Record<string, JsonSchema> = {
       "quotas": {"type":"object","additionalProperties":{"type":["integer","null"],"minimum":0}}
     }
   },
+  "FabricCounters": {
+    "type": "object",
+    "required": [
+      "dropped",
+      "stale",
+      "refused_requests",
+      "retransmits",
+      "inferred_lost",
+      "max_outstanding",
+      "regressed",
+      "piggybacked",
+      "items_pushed",
+      "items_received",
+      "conflicts",
+      "errors"
+    ],
+    "description": "Diagnostics for Advanced views (§18 rule 1: a failure leaves no trace but a counter). Counted since the fabric started; reset at every start. Never a health verdict on their own.",
+    "properties": {
+      "dropped": {"type":"integer","minimum":0,"description":"frames that failed to open or verify"},
+      "stale": {
+        "type": "integer",
+        "minimum": 0,
+        "description": "verified packets the replay window judged stale (never attributing a connection)"
+      },
+      "refused_requests": {
+        "type": "integer",
+        "minimum": 0,
+        "description": "first-contact INTROs refused by capacity (dropped without an ACK, §7.2)"
+      },
+      "retransmits": {"type":"integer","minimum":0,"description":"fragment retransmissions (each re-sealed)"},
+      "inferred_lost": {
+        "type": "integer",
+        "minimum": 0,
+        "description": "fragments presumed lost from ACK evidence (a later-sent fragment was acknowledged first, §5)"
+      },
+      "max_outstanding": {
+        "type": "integer",
+        "minimum": 0,
+        "description": "the most fragments ever outstanding to one peer (§5: at most 16)"
+      },
+      "regressed": {
+        "type": "integer",
+        "minimum": 0,
+        "description": "acknowledgement bits that went back after the receiver evicted a partial message"
+      },
+      "piggybacked": {"type":"integer","minimum":0,"description":"ACK blocks that rode a data packet (§6.1)"},
+      "items_pushed": {"type":"integer","minimum":0,"description":"hub role: mailbox items streamed to members"},
+      "items_received": {"type":"integer","minimum":0,"description":"member: mailbox items received from the home hub"},
+      "conflicts": {
+        "type": "integer",
+        "minimum": 0,
+        "description": "announces or cards whose keys conflict with a pinned contact (dropped, §7.1)"
+      },
+      "errors": {"type":"integer","minimum":0,"description":"store or identity-holder failures inside the fabric"}
+    }
+  },
   "FabricStatus": {
     "type": "object",
     "required": ["schema","links","hub","custody","store","settings"],
@@ -865,7 +921,11 @@ export const schemas: Record<string, JsonSchema> = {
       "hub": {"$ref":"#/components/schemas/FabricHub"},
       "custody": {"$ref":"#/components/schemas/FabricCustody"},
       "store": {"$ref":"#/components/schemas/FabricStore"},
-      "settings": {"$ref":"#/components/schemas/FabricSettings"}
+      "settings": {"$ref":"#/components/schemas/FabricSettings"},
+      "counters": {
+        "$ref": "#/components/schemas/FabricCounters",
+        "description": "diagnostics for Advanced; absent while the fabric is not running (store.open false) and from older daemons"
+      }
     }
   },
   "HubEnrollRequest": {

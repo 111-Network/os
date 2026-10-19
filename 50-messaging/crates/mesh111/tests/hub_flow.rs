@@ -5,7 +5,11 @@
 //! sender crash with items in custody followed by a direct new-epoch packet,
 //! re-enrollment on a new device fetching custody already held (§7.3 floor),
 //! a stale home-hub hint (a locator only), a direct write clearing a custody
-//! reject's reason, and forgetting the home hub.
+//! reject's reason, forgetting the home hub, and enrollment attempts that end
+//! without `ENROLL_OK` (§7.3): a spent code leaves no dial and no hub card on
+//! the member, a refused re-enrollment keeps a member's dial, and an
+//! abandoned wait releases what it started but never a configured peer's dial
+//! or a contact that existed before.
 
 mod common;
 
@@ -16,14 +20,18 @@ use std::time::Duration;
 
 use common::*;
 use mesh111::contacts::{card_text, ROLE_ALWAYS_ON_HUB, ROLE_MAILBOX};
-use mesh111::fabric::{Fabric, FabricEvent, FabricSettings, HomeHub, MessageChange, SettingsPatch};
+use mesh111::fabric::{
+    ContactChange, Fabric, FabricError, FabricEvent, FabricSettings, HomeHub, MessageChange,
+    SettingsPatch,
+};
 use mesh111::link::lossy::{DropFilter, LossyConfig};
 use mesh111::link::tcp_lan::{
     encode_frame, read_frame, read_hello, TcpLan, HELLO, T_ANNOUNCE, T_SEALED,
 };
-use mesh111::link::Dialer;
+use mesh111::link::{Dialer, Link, LinkState};
+use mesh111::mailbox::EnrollStatus;
 use mesh111::outbox::Reason;
-use mesh111::store::{Class, MsgState};
+use mesh111::store::{Class, MsgState, Trust};
 use tokio::io::AsyncWriteExt;
 use tokio::net::TcpStream;
 
@@ -570,4 +578,180 @@ async fn forgetting_the_home_hub_ends_the_membership_here() {
     until(10, || async { (a.t.connection_count() == 0).then_some(()) }).await;
     tokio::time::sleep(Duration::from_millis(400)).await;
     assert_eq!(a.t.connection_count(), 0);
+}
+
+/// A node with a `tcp-lan` dialer and nothing else: no listener, no hub.
+async fn bare(d: &Dirs, name: &str) -> Node {
+    let ident = Ident::new(name, 0);
+    let dir = d.node(name);
+    let f = start(&ident, &dir, FabricSettings::default());
+    let t = tcp(&f, &ident, "tcp");
+    add_tcp(&f, &t, true).await;
+    Node { ident, f, t, dir }
+}
+
+/// Attributed peers on the hub's `tcp-lan` link.
+async fn hub_peers(h: &Node) -> usize {
+    h.f.status().await.unwrap().links[0].peers
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_spent_code_leaves_no_dial_and_no_hub_card() {
+    let d = Dirs::new();
+    let (h, haddr) = hub(&d).await;
+    // Alice spends the code.
+    let offer = h.f.offer(Some(haddr)).await.unwrap();
+    let a = bare(&d, "alice").await;
+    tokio::time::timeout(
+        Duration::from_secs(10),
+        a.f.enroll(haddr, &offer.code, Some(offer.card.as_str())),
+    )
+    .await
+    .expect("enroll in time")
+    .expect("alice enrolled");
+    until(10, || async { (hub_peers(&h).await == 1).then_some(()) }).await;
+
+    // Carol presents the same code with the hub's card: the hub refuses.
+    let c = bare(&d, "carol").await;
+    let mut events = c.f.subscribe();
+    let r = tokio::time::timeout(
+        Duration::from_secs(10),
+        c.f.enroll(haddr, &offer.code, Some(offer.card.as_str())),
+    )
+    .await
+    .expect("answered in time");
+    assert!(
+        matches!(r, Err(FabricError::Enroll(EnrollStatus::Refused))),
+        "{r:?}"
+    );
+    // No new pin: the card pinned for the attempt is gone again.
+    assert!(matches!(
+        c.f.contact(h.ident.id()).await,
+        Err(FabricError::NotFound)
+    ));
+    assert!(c.f.contacts().await.unwrap().is_empty());
+    assert_eq!(c.f.settings().await.unwrap().home_hub, None);
+    let seen = drain_events(&mut events);
+    assert!(
+        seen.iter().any(|e| matches!(e, FabricEvent::Contact { node_id, change: ContactChange::Removed } if *node_id == h.ident.id())),
+        "{seen:?}"
+    );
+    // No maintained dial: the connection closes and stays closed, and the
+    // adapter has no dial target left.
+    until(10, || async { (c.t.connection_count() == 0).then_some(()) }).await;
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    assert_eq!(c.t.connection_count(), 0, "no redial");
+    assert_eq!(c.t.state(), LinkState::Down, "no dial target");
+    // The hub counts Alice alone again.
+    until(10, || async { (hub_peers(&h).await == 1).then_some(()) }).await;
+    assert_eq!(h.f.status().await.unwrap().hub.members, 1);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_refused_reenrollment_keeps_the_members_dial() {
+    let d = Dirs::new();
+    let (h, haddr) = hub(&d).await;
+    let a = member(&d, "alice", &h, haddr).await;
+    assert_eq!(a.t.connection_count(), 1);
+    // A code that no longer opens anything.
+    let offer = h.f.offer(Some(haddr)).await.unwrap();
+    assert!(h.f.dismiss_offer().await.unwrap());
+    for card in [None, Some(offer.card.as_str())] {
+        let r = tokio::time::timeout(
+            Duration::from_secs(10),
+            a.f.enroll(haddr, &offer.code, card),
+        )
+        .await
+        .expect("answered in time");
+        assert!(matches!(r, Err(FabricError::Enroll(_))), "{r:?}");
+    }
+    // The membership and its dial are untouched.
+    let s = a.f.settings().await.unwrap();
+    assert_eq!(s.home_hub.map(|x| x.node_id), Some(h.ident.id()));
+    assert_eq!(s.home_hub.and_then(|x| x.address), Some(haddr));
+    assert_eq!(
+        a.f.contact(h.ident.id()).await.unwrap().trust,
+        Trust::Enrolled
+    );
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    assert_eq!(a.t.connection_count(), 1, "the home hub's dial stays");
+    assert!(a.f.status().await.unwrap().hub.reachable);
+    assert_eq!(hub_peers(&h).await, 1);
+    // ... and still carries mail.
+    let b = member(&d, "bob", &h, haddr).await;
+    exchange_cards(&a.f, &b.f).await;
+    b.t.release(haddr);
+    let id =
+        a.f.send(b.ident.id(), "still a member", None)
+            .await
+            .unwrap();
+    until_state(&a.f, id, MsgState::Relayed, 10).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_abandoned_wait_releases_what_it_started_only() {
+    let d = Dirs::new();
+    let (h, _haddr) = hub(&d).await;
+    let offer = h.f.offer(None).await.unwrap();
+    // Accepts TCP (the kernel backlog) but never speaks: the attempt waits.
+    let silent = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let saddr = silent.local_addr().unwrap();
+    let c = bare(&d, "carol").await;
+
+    // An attempt whose caller goes away (a route's bound elapsing drops its
+    // future the same way): the dial it started and the card it pinned go.
+    let wait = {
+        let (f, code, card) = (c.f.clone(), offer.code.clone(), offer.card.clone());
+        tokio::spawn(async move { f.enroll(saddr, &code, Some(&card)).await })
+    };
+    until(10, || async {
+        matches!(c.t.state(), LinkState::Up { .. }).then_some(())
+    })
+    .await;
+    assert!(c.f.contact(h.ident.id()).await.is_ok(), "pinned meanwhile");
+    wait.abort();
+    until(10, || async {
+        (c.t.state() == LinkState::Down).then_some(())
+    })
+    .await;
+    until(10, || async {
+        matches!(c.f.contact(h.ident.id()).await, Err(FabricError::NotFound)).then_some(())
+    })
+    .await;
+
+    // The same with a timeout around the wait: a contact that existed
+    // before the attempt is kept.
+    c.f.add_contact_card(&offer.card).await.unwrap();
+    let r = tokio::time::timeout(
+        Duration::from_millis(300),
+        c.f.enroll(saddr, &offer.code, Some(offer.card.as_str())),
+    )
+    .await;
+    assert!(r.is_err(), "nothing answers there");
+    until(10, || async {
+        (c.t.state() == LinkState::Down).then_some(())
+    })
+    .await;
+    assert_eq!(
+        c.f.contact(h.ident.id()).await.unwrap().trust,
+        Trust::Oob,
+        "an existing contact is kept"
+    );
+
+    // A configured peer's dial at that address is never released.
+    c.f.dial_peer(saddr, h.ident.id()).await.unwrap();
+    let r = tokio::time::timeout(
+        Duration::from_millis(300),
+        c.f.enroll(saddr, &offer.code, Some(offer.card.as_str())),
+    )
+    .await;
+    assert!(r.is_err());
+    // The dropped wait queued its abandonment first: one round trip later
+    // the attempt has ended.
+    c.f.status().await.unwrap();
+    assert!(
+        matches!(c.t.state(), LinkState::Up { .. }),
+        "the configured peer's dial stays"
+    );
+    drop(silent);
 }

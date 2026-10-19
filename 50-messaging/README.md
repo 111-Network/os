@@ -617,7 +617,11 @@ not see or store it** — this sentence is on the service page.
   connects to the TCP downlink, sends `want_config` once, subscribes to NodeInfo / position / telemetry events, writes
   `fabric/presence/meshtastic.json` atomically: `{schema: 1, nodes: [{id, num, long_name, short_name, pubkey?, snr?,
   rssi?, hops_away?, last_heard_hint (node clock, display only), position?, channel_utilization?}]}` with names
-  truncated to 40 bytes and control characters stripped. It never sends text, admin or any user packet. `111d` opens
+  truncated to 40 bytes and control characters stripped. It never sends text, admin or any user packet. Its one
+  other `ToRadio` frame is a session keep-alive, a `heartbeat` with nonce 0 every 5 minutes (the board closes an API
+  session after 15 minutes without any `ToRadio` frame and `meshmud` forwards frames verbatim, so without it Nearby
+  freezes while no panel is open), which transmits nothing on the mesh; nonce 1 would make the board broadcast its
+  NodeInfo, so the guard refuses every other nonce. `111d` opens
   the file `O_NOFOLLOW`, requires a regular file ≤ 1 MiB, validates the schema (≤ 4096 nodes, typed fields; invalid ⇒
   keep the previous snapshot, bump a log counter), then publishes `GET /api/v1/nearby` + SSE `nearby`. Names are
   **untrusted RF-origin strings**: rendered as text only, handed to the agent inside a labelled untrusted block.
@@ -703,6 +707,13 @@ follows at the next start. `fabric/settings` that is invalid is moved aside (`se
 rebuilt from the `enrolled` contact (the one holding this node's mailbox cursor, else a sole custody holder); enrollment persists `home_hub` before it answers; dial targets that name no peer (unspecified,
 multicast, broadcast, loopback in production) are refused. `111 fabric enroll` never takes a bare code on argv (it is
 typed, hidden); the scanned `111HUB:` bundle may ride argv.
+
+*As built (F2P, Wave 3 polish):* an enrollment attempt that ends without `ENROLL_OK` (refused, unanswered within the
+route's wait, superseded) leaves nothing behind on the member: the dial it started is released unless the home hub or a
+configured `peers` entry holds that address, and a hub card pinned only for it is forgotten (§7.3; a contact that
+existed before is kept). `FabricStatus` gains `counters` (optional: the fabric's bounded diagnostics for Advanced,
+absent while it is not running); `Status.layers` lists 5 while the fabric runs and is not restore-pending;
+`hub_not_yours` also explains `sent` after `REJECT_UNKNOWN_DEST` (§9).
 
 ## 16. UI (Layer 4 tree; one component tree, density flags)
 

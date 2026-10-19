@@ -573,7 +573,7 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** @description Member side: enroll with a hub using its one-time code (`ENROLL`, §7.3). The hub's card is needed to seal the request — it rides in `card` when the hub is not already a contact (the hub's offer QR carries card, address and code together). A node has one home hub in v1: enrolling while enrolled answers 409 (`bad_request`). A hub that is unreachable or refuses answers 502 `upstream_error`; the hub's attempt lockout (5 failures) surfaces as 429 `rate_limited`. Success answers the new hub state. */
+        /** @description Member side: enroll with a hub using its one-time code (`ENROLL`, §7.3). The hub's card is needed to seal the request — it rides in `card` when the hub is not already a contact (the hub's offer QR carries card, address and code together). A node has one home hub in v1: enrolling while enrolled answers 409 (`bad_request`). A hub that is unreachable or refuses answers 502 `upstream_error`; the hub's attempt lockout (5 failures) surfaces as 429 `rate_limited`. An attempt that fails or times out leaves nothing behind: the dial it started is released and a hub card pinned only for it is forgotten (a contact that existed before is kept). Success answers the new hub state. */
         post: operations["enrollHub"];
         delete?: never;
         options?: never;
@@ -808,7 +808,7 @@ export interface components {
                 loopback: boolean;
                 paired: boolean;
             };
-            /** @description layers this node runs right now (0 needs the KB payload verified, 2 needs identity ok, 3 needs the agent binary, 1 and 4 always) */
+            /** @description layers this node runs right now (0 needs the KB payload verified, 2 needs identity ok, 3 needs the agent binary, 5 needs the message fabric running and not restore_pending, 1 and 4 always) */
             layers: number[];
         };
         /** @enum {string} */
@@ -1099,7 +1099,7 @@ export interface components {
             text: string;
             /** @description dir=in is always `delivered` (it arrived here; a held message request is not acknowledged to its sender until accepted) */
             state: components["schemas"]["MessageState"];
-            /** @description stable snake_case, display-only for clients, set while the state needs an explanation. Emitted set (111d): waiting_for_key (queued, the peer's card has not arrived), hub_not_yours (queued, their hub is not yours; delivered when you meet directly), restore_pending (queued, the identity holder reports a restore floor so nothing is sealed), store_full (queued, the local store refuses new work), mailbox_full (sent, the hub answered REJECT_FULL), not_enrolled (sent, the hub answered REJECT_UNENROLLED: it no longer lists this node), cancelled (queued, the user cancelled it before it left; an empty placeholder goes instead so no number is abandoned, §4). null when nothing needs explaining. */
+            /** @description stable snake_case, display-only for clients, set while the state needs an explanation. Emitted set (111d): waiting_for_key (queued, the peer's card has not arrived), hub_not_yours (queued while your hub is unreachable and their card names another hub; or sent after your hub answered REJECT_UNKNOWN_DEST — your hub does not know them, §9; either way delivered when you meet directly), restore_pending (queued, the identity holder reports a restore floor so nothing is sealed), store_full (queued, the local store refuses new work), mailbox_full (sent, the hub answered REJECT_FULL), not_enrolled (sent, the hub answered REJECT_UNENROLLED: it no longer lists this node), cancelled (queued, the user cancelled it before it left; an empty placeholder goes instead so no number is abandoned, §4). null when nothing needs explaining. */
             reason_code: string | null;
             /** @description one plain sentence for `reason_code` */
             reason: string | null;
@@ -1285,6 +1285,33 @@ export interface components {
                 [key: string]: number | null;
             };
         };
+        /** @description Diagnostics for Advanced views (§18 rule 1: a failure leaves no trace but a counter). Counted since the fabric started; reset at every start. Never a health verdict on their own. */
+        FabricCounters: {
+            /** @description frames that failed to open or verify */
+            dropped: number;
+            /** @description verified packets the replay window judged stale (never attributing a connection) */
+            stale: number;
+            /** @description first-contact INTROs refused by capacity (dropped without an ACK, §7.2) */
+            refused_requests: number;
+            /** @description fragment retransmissions (each re-sealed) */
+            retransmits: number;
+            /** @description fragments presumed lost from ACK evidence (a later-sent fragment was acknowledged first, §5) */
+            inferred_lost: number;
+            /** @description the most fragments ever outstanding to one peer (§5: at most 16) */
+            max_outstanding: number;
+            /** @description acknowledgement bits that went back after the receiver evicted a partial message */
+            regressed: number;
+            /** @description ACK blocks that rode a data packet (§6.1) */
+            piggybacked: number;
+            /** @description hub role: mailbox items streamed to members */
+            items_pushed: number;
+            /** @description member: mailbox items received from the home hub */
+            items_received: number;
+            /** @description announces or cards whose keys conflict with a pinned contact (dropped, §7.1) */
+            conflicts: number;
+            /** @description store or identity-holder failures inside the fabric */
+            errors: number;
+        };
         FabricStatus: {
             schema: number;
             links: components["schemas"]["FabricLink"][];
@@ -1292,6 +1319,8 @@ export interface components {
             custody: components["schemas"]["FabricCustody"];
             store: components["schemas"]["FabricStore"];
             settings: components["schemas"]["FabricSettings"];
+            /** @description diagnostics for Advanced; absent while the fabric is not running (store.open false) and from older daemons */
+            counters?: components["schemas"]["FabricCounters"];
         };
         HubEnrollRequest: {
             /** @description the hub's tcp-lan address, host:port */

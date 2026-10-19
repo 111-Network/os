@@ -32,6 +32,12 @@
 //! file; a bare enrollment code read through the CLI's terminal reader; the
 //! applied-proposal guard on disk (a pending record survives a restart); the
 //! announce re-minted on a settings change.
+//!
+//! Wave 3 polish (F2P, three-node smoke gaps): a refused enrollment (a spent
+//! code, `502`) leaves no dial and no hub card on the member (§7.3) — the
+//! hub's `tcp-lan` peer count drops back and the member shows no home hub;
+//! `GET /fabric` carries every mesh111 counter under `counters`; the
+//! contract's `hub_not_yours` names the `sent` case of §9.
 
 use axum::extract::connect_info::MockConnectInfo;
 use mesh111::link::lossy::{self, EndSpec, LossyConfig, LossyEnd};
@@ -770,6 +776,28 @@ async fn hub_offer_enroll_send_and_every_route() {
     let r = b.get("/api/v1/fabric");
     check_op("getFabric", &r);
     assert_eq!(r.json()["hub"]["enrolled"], false);
+    // counters (diagnostics for Advanced): every mesh111 counter, by name
+    let counters = st["counters"].as_object().expect("counters");
+    let mut keys: Vec<&str> = counters.keys().map(String::as_str).collect();
+    keys.sort_unstable();
+    assert_eq!(
+        keys,
+        [
+            "conflicts",
+            "dropped",
+            "errors",
+            "inferred_lost",
+            "items_pushed",
+            "items_received",
+            "max_outstanding",
+            "piggybacked",
+            "refused_requests",
+            "regressed",
+            "retransmits",
+            "stale",
+        ]
+    );
+    assert!(counters.values().all(Value::is_u64), "{st}");
 
     // own cards (public announce only)
     let card = a.card();
@@ -1719,6 +1747,75 @@ async fn peers_from_settings_dial_a_listen_lan_node() {
     b.fabric.shutdown().await;
 }
 
+/// F2P (three-node smoke gap): a member that presents a spent code is
+/// refused (`502 upstream_error`) and keeps nothing of the attempt (§7.3):
+/// its dial to the hub is released — the hub's `tcp-lan` peer count drops
+/// back to the members it had — it shows no home hub, and the hub card it
+/// pinned only for the attempt is forgotten.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_refused_enrollment_leaves_no_dial_and_no_hub_card() {
+    let hub = node(Opts {
+        hub: true,
+        ..Opts::default()
+    })
+    .await;
+    let a = node(Opts::default()).await;
+    let c = node(Opts::default()).await;
+    let tcp_peers = |n: &Node| -> Option<u64> {
+        let st = n.get("/api/v1/fabric").json();
+        st["links"]
+            .as_array()?
+            .iter()
+            .find(|l| l["kind"] == "tcp-lan")?["peers"]
+            .as_u64()
+    };
+    // A spends the code.
+    let (code, card, address) = offer_of(&hub);
+    let body = json!({ "address": address, "code": code, "card": card });
+    let r = a.post("/api/v1/fabric/hub/enroll", body.clone());
+    check_op("enrollHub", &r);
+    assert_eq!(r.status, 200, "{}", r.body);
+    until(10, "the hub counts A", || {
+        (tcp_peers(&hub)? == 1).then_some(())
+    })
+    .await;
+
+    // C presents it again: refused.
+    let r = c.post("/api/v1/fabric/hub/enroll", body);
+    check_op("enrollHub", &r);
+    r.problem(502, "upstream_error");
+    let st = c.get("/api/v1/fabric");
+    check_op("getFabric", &st);
+    let st = st.json();
+    assert_eq!(st["hub"]["enrolled"], false, "{st}");
+    assert!(st["hub"]["node_id"].is_null(), "{st}");
+    assert!(c.fabric.persisted().fabric.home_hub.is_none());
+    let r = c.get(&format!("/api/v1/contacts/{}", hub.id));
+    check_op("getContact", &r);
+    r.problem(404, "not_found");
+    let r = c.get("/api/v1/contacts");
+    check_op("listContacts", &r);
+    assert!(!r.body.contains(&hub.id), "no hub card kept: {}", r.body);
+
+    // The dial is released: C's connection closes and is not redialed, and
+    // the hub counts A alone again.
+    until(10, "C's connection to the hub closes", || {
+        (c.fabric.tcp()?.connection_count() == 0).then_some(())
+    })
+    .await;
+    until(10, "the hub's count drops back", || {
+        (tcp_peers(&hub)? == 1).then_some(())
+    })
+    .await;
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert_eq!(c.fabric.tcp().unwrap().connection_count(), 0, "no redial");
+    assert_eq!(tcp_peers(&hub), Some(1));
+    assert_eq!(hub.get("/api/v1/fabric").json()["hub"]["members"], 1);
+    for n in [&hub, &a, &c] {
+        n.fabric.shutdown().await;
+    }
+}
+
 /// F2 review m3: a corrupt `fabric/settings` is moved aside and the member's
 /// home hub comes back from its `enrolled` contact (with the address when
 /// it can be salvaged from the bad file).
@@ -1853,6 +1950,7 @@ fn contract_codes_pass_the_validator() {
         (Reason::NotEnrolled, MsgState::Sent),
         (Reason::Cancelled, MsgState::Queued),
         (Reason::RestorePending, MsgState::Queued),
+        (Reason::HubNotYours, MsgState::Sent),
     ] {
         let v = MessageView {
             id: 7,
@@ -1890,6 +1988,16 @@ fn contract_codes_pass_the_validator() {
     assert!(
         line.contains("not_enrolled (") && line.contains("cancelled ("),
         "{line}"
+    );
+    // §9: after REJECT_UNKNOWN_DEST the sender keeps `sent` with hub_not_yours
+    let hub_not_yours = line
+        .split("hub_not_yours (")
+        .nth(1)
+        .and_then(|rest| rest.split("), ").next())
+        .expect("hub_not_yours entry");
+    assert!(
+        hub_not_yours.contains("sent after") && hub_not_yours.contains("REJECT_UNKNOWN_DEST"),
+        "{hub_not_yours}"
     );
     let codes = &contract().schemas["Problem"]["properties"]["code"]["enum"];
     assert!(codes

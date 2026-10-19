@@ -27,7 +27,11 @@
 //! - `layers` — layers *working* right now (contract `Status.layers`): `0` iff
 //!   the KB payload verified at start and `current/share/kb` is still
 //!   readable, `1` always (this daemon), `2` iff the identity loaded ok, `3`
-//!   iff `current/bin/111-agent` exists, `4` always (this dashboard answers).
+//!   iff `current/bin/111-agent` exists, `4` always (this dashboard answers),
+//!   `5` iff the message fabric runs and is not restore-pending (the
+//!   `FabricHandle` ext: `running() && !restore_pending()` — while the
+//!   identity holder reports a restore floor nothing is sealed and no link
+//!   runs, `os/50-messaging/README.md` §4, §15).
 //!
 //! **Heartbeat** ([`spawn_heartbeat`]): every 2 s the snapshot is rebuilt and a
 //! `status` frame is published on the events bus when it changed (diffed as
@@ -39,6 +43,7 @@
 use super::{auth, settings, ApiRouter, ApiState};
 use crate::daemon::dashboard::bind::BindInfo;
 use crate::daemon::dashboard::{DashboardState, ErrorState, OfferState, TransportState};
+use crate::daemon::fabric::FabricHandle;
 use crate::daemon::health::{evaluate, HealthStatus, TransportHealth};
 use crate::daemon::intelligence::ChildDisplay;
 use crate::daemon::services::Registry;
@@ -238,11 +243,13 @@ pub fn display_forms(node_id: Option<&str>) -> (Option<String>, Option<String>) 
 
 /// Layers working right now (see module docs for the rule). `kb_verified` =
 /// the KB passed its integrity check at start; `identity_ok` = the identity
-/// loaded (the `/health` identity component).
+/// loaded (the `/health` identity component); `fabric_ok` = the message
+/// fabric runs and is not restore-pending ([`fabric_ok`]).
 pub fn layers(
     layout: &crate::daemon::DaemonLayout,
     kb_verified: bool,
     identity_ok: bool,
+    fabric_ok: bool,
 ) -> Vec<u8> {
     let mut l = Vec::new();
     if kb_verified && std::fs::read_dir(layout.current_release().join("share/kb")).is_ok() {
@@ -256,7 +263,18 @@ pub fn layers(
         l.push(3);
     }
     l.push(4);
+    if fabric_ok {
+        l.push(5);
+    }
     l
+}
+
+/// Layer 5 is working: the fabric runs (its store opened) and the identity
+/// holder reports no restore floor (§4: nothing is sealed, no link runs).
+/// No fabric handle (a daemon without Layer 5) ⇒ false.
+pub fn fabric_ok(api: &ApiState) -> bool {
+    api.ext::<Arc<FabricHandle>>()
+        .is_some_and(|f| f.running() && !f.restore_pending())
 }
 
 fn transport_label(t: TransportHealth) -> &'static str {
@@ -277,8 +295,14 @@ pub fn build(api: &ApiState, auth: AuthView) -> Status {
     let alias = settings::read_file(&state_dir).alias;
     let lan_enabled = settings::lan_configured(api);
     let bind = api.bind.read().unwrap().clone();
+    let fabric_ok = fabric_ok(api);
     let s = api.dash.read().unwrap();
-    let layers = layers(&api.layout, s.kb.is_some(), s.components.identity);
+    let layers = layers(
+        &api.layout,
+        s.kb.is_some(),
+        s.components.identity,
+        fabric_ok,
+    );
     let update = update_view(&state_dir, &s, updater.as_deref());
     let (label, bech32) = display_forms(s.node_id.as_deref());
     let agent_running = s.intelligence.agent == ChildDisplay::Running;
