@@ -274,7 +274,7 @@ ADR-lite. Every decision, its rejected alternatives, and why. Newest last; never
   running system (single-node smoke, three-node smoke, panel lint, the full bootstrap gate, then the as-built code read with an attacker's and a
   phone user's eyes; `plan/layers/50-messaging/review/integrated.md`): **fix-then-lock** — every gate green, one major (M1) demonstrated
   deterministically, eight minors. The fix wave ran as four agents on disjoint files (A: id111 · B: fabric · C: supervisor, sidecar, manifest, docs ·
-  D: reachability copy), each verified by the lead and committed separately (`fed2ee9`, `7071c07`, `989fe32`, `e8850c4`, lead reversal `82e7e57`);
+  D: reachability copy), each verified by the lead and committed separately (`fed2ee9`, `7071c07`, `989fe32`, `e8850c4`, lead reversal `82e7e57`, `27f640a`);
   then the lock gates: `10-bootstrap/scripts/check.sh` ALL GREEN (834 cargo tests, UI 1201, G2 on both targets), smoke 118, **three-node 159 / 157 /
   157 three times in a row with no leftover process**, panel-lint 144; identity 193 + 44 + 7 + the Monocypher harness, intelligence, knowledge and the
   presence sidecar green.
@@ -301,6 +301,8 @@ ADR-lite. Every decision, its rejected alternatives, and why. Newest last; never
     "link lost", never a hang.
   - **(g) `gen-manifest` compares each listed sha256 with the tarball member** (m7); a wrong hash is refused like a missing entry.
   - **(h) Docs (m8):** artifacts per release listed; `LICENSING.md` §8 names the checklist's source-offer step.
+  - **(j) Identify answers only for a live meshmud** (`27f640a`): the identify-born child's liveness is checked after the reader's handshake (supervisor
+    state plus `/proc`), so a handshake answered after the child exited is `502 upstream_error`, never a bind — the race a full-gate run exposed once.
   - **(i) Earlier at this lock:** panel-guard residual #2 **accepted by the owner** and stated in §13 (a header-less same-site GET on a plain-HTTP LAN
     origin is byte-identical to the panel's own); the restore floor **accepted as is** (a words-only restore keeps announcing from the provisional
     floor; the hub-learned floor is Layer 7's); the manifest evolution path is the lead's reversible call (unknown names parse and are ignored); the
