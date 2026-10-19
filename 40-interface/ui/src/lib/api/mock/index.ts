@@ -42,7 +42,7 @@ import type {
 import { SERVICE_IDS } from "../types";
 import { MockBus, realClock, type MockClock } from "./bus";
 import { finalSentence, pickReply, tokenize } from "./chat";
-import { buildFixtures, iso, logLine } from "./fixtures";
+import { buildFixtures, iso, layersRunning, logLine } from "./fixtures";
 import { HUB, MOCK_HUB_ADDRESS, MOCK_REASONS, buildNearby, buildPanels, cancelQueued, fabricRow, hex64, hubBundleText, makeContact, meshtasticLiveRow, pageOf, threadsOf } from "./messaging";
 import { cardFor } from "./qr";
 import { MOCK_PAIR_CODE, SCENARIO_NAMES, resolveScenario, scenarios, type MockData, type Scenario, type ScenarioName, type ScriptContext } from "./scenarios";
@@ -193,10 +193,19 @@ export function createMockAdapter(opts: MockOptions = {}): MockAdapter {
     if (!state.auth.loopback) throw problem(403, "loopback_only", "Available on the node itself", "Change this from the machine the node runs on.");
   };
 
-  /** Re-derive the `fabric` row from the snapshot and publish both frames (the registry does this each tick in the daemon). */
+  /**
+   * Re-derive the `fabric` row from the snapshot and publish both frames (the registry does this each tick in the daemon).
+   * `status.layers` follows from the row and the restore floor (5 only while Messaging runs); like the daemon, a changed
+   * snapshot is published as a `status` frame.
+   */
   function syncFabric(): void {
     ctx.patchService("fabric", fabricRow(M.fabric));
     publishFabric();
+    const layers = layersRunning(svc("fabric").state, M.restorePending);
+    if (layers.join() !== state.status.layers.join()) {
+      state.status.layers = layers;
+      publishStatus();
+    }
   }
 
   /** Why a message cannot leave right now, or null: the reason codes of §15, in the order the daemon checks them. */

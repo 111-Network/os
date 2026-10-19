@@ -14,6 +14,18 @@ export const KB_SHA = "5be1f09a7c2d84e3b6a1900fd27c4e58a3b9d1c06e7f24a85b3c9d0e1
 
 export const iso = (ms: number): string => new Date(ms).toISOString();
 
+/**
+ * `Status.layers` as 111d reports it (status.rs `layers()`): layers 0 to 4 as on the mock laptop, plus 5 (Messaging & data,
+ * os/50-messaging/README.md) while the fabric runs: its `fabric` service row is LIVE and no identity restore is pending
+ * (nothing is sealed or sent until it finishes). An unset or errored fabric (no hub yet, a full store) and a restore floor
+ * leave 5 out.
+ */
+export function layersRunning(fabricState: ServiceRecord["state"] | undefined, restorePending: boolean): number[] {
+  const layers = [0, 1, 2, 3, 4];
+  if (fabricState === "live" && !restorePending) layers.push(5);
+  return layers;
+}
+
 export interface Fixtures {
   /** Epoch ms the fixtures were built at; "since" / "created_at" fields are relative to it. */
   now: number;
@@ -421,6 +433,7 @@ export function buildFixtures(now: number): Fixtures {
     }),
   ];
 
+  const messaging = buildMessaging(now, NODE_ID);
   const status: Status = {
     schema: 1,
     node: {
@@ -456,7 +469,7 @@ export function buildFixtures(now: number): Fixtures {
     bind: { urls: ["http://111.localhost", "http://111.local", "http://192.168.1.42", "http://127.0.0.1:11180"], lan: true },
     lan_enabled: true,
     auth: { loopback: true, paired: false },
-    layers: [0, 1, 2, 3, 4],
+    layers: layersRunning(services.find((x) => x.id === "fabric")?.state, messaging.restorePending),
   };
 
   const proposals: Proposal[] = [
@@ -535,7 +548,7 @@ Nothing to fix right now. If it repeats, ask me to check the Wi-Fi power-saving 
     kbIndex: KB_INDEX,
     kbEntries: { ...KB_ENTRIES },
     logs,
-    messaging: buildMessaging(now, NODE_ID),
+    messaging,
   };
 }
 

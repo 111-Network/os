@@ -260,9 +260,11 @@ export interface BannerAgent {
 }
 
 /**
- * What the banner's agent button asks, chosen by the node's `reason_code` until U2's `messaging.*` goals land. The
- * node reports an unreachable home hub and a hub with no members as NOT SET, but neither is a set-up for an enrolling
- * member: an unreachable hub is a fix (§16), and a hub with no members is offered "Let a node use this hub" (§15).
+ * What the banner's agent button asks, chosen by the node's `reason_code`. The banner sends `goal` as its Layer 5
+ * context goal (`messaging.setup` / `messaging.fix`, `messagingGoal` in banner.tsx) over the `fabric` service's facts;
+ * `question` is the plain-words ask that goes with it. The node reports an unreachable home hub and a hub with no
+ * members as NOT SET, but neither is a set-up for an enrolling member: an unreachable hub is a fix (§16), and a hub with
+ * no members is offered "Let a node use this hub" (§15).
  */
 export function bannerAgent(banner: MessagingBanner, reasonCode: string | null | undefined): BannerAgent | null {
   if (!banner.fixable) return null;

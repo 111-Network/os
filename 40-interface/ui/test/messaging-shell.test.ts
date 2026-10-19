@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import { ROUTES } from "../src/app/routes";
 import { attentionHref, attentionSummary } from "../src/lib/attention";
 import { isActive, minModeFor, NAV, titleFor, visibleNav } from "../src/lib/nav";
+import { needsYou, requestsItem } from "../src/views/overview/model";
 
 describe("routes", () => {
   const paths = ROUTES.map((r) => r.path);
@@ -53,9 +54,22 @@ describe("the header badge text", () => {
 describe("where the header badge leads", () => {
   const none = { openProposals: 0, erroredServices: 0, erroredDevices: 0 };
 
-  it("opens Messages when message requests are all it counts (Overview's block does not list them)", () => {
+  it("opens Messages when message requests are all it counts (the same place Overview's request row leads)", () => {
     expect(attentionHref({ ...none, openRequests: 1 })).toBe("/messages");
     expect(attentionHref({ ...none, openRequests: 5 })).toBe("/messages");
+  });
+
+  it("Overview's Needs-you block lists the requests the badge counts, and its row leads where a requests-only badge does", () => {
+    for (const n of [1, 5]) {
+      const row = requestsItem(n);
+      expect(row?.label).toBe(attentionSummary({ ...none, openRequests: n }));
+      expect(row?.href).toBe(attentionHref({ ...none, openRequests: n }));
+      expect(needsYou(null, [], [], [], n).items.map((i) => i.key)).toEqual(["requests"]);
+    }
+    // Nothing counted: no row, and the badge goes to the block as before.
+    expect(requestsItem(0)).toBeNull();
+    expect(needsYou(null, [], [], [], 0).items).toEqual([]);
+    expect(attentionHref({ ...none, openRequests: 0 })).toBe("/overview#needs-you");
   });
 
   it("opens Overview's 'Needs you' whenever anything it lists is pending, requests or not", () => {

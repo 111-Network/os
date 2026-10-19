@@ -4,9 +4,10 @@ import type { Attention } from "./api/store";
 const plural = (n: number, one: string, many: string): string => `${n} ${n === 1 ? one : many}`;
 
 /**
- * Where the header badge leads. Overview's "Needs you" block lists proposals and service and device errors; message
- * requests live in Messages. When requests are the only thing the badge counts, it opens Messages, so the number never
- * leads to a page that does not show what it counted.
+ * Where the header badge leads. Overview's "Needs you" block lists everything the badge counts: proposals, service and
+ * device errors, and "N message requests" (`requestsItem`). When requests are the only thing counted, the badge skips the
+ * extra hop and opens Messages directly, which is where that Overview row leads and where a request is answered. Anything
+ * else pending opens "Needs you", which lists it all, requests included.
  */
 export function attentionHref(a: Pick<Attention, "openProposals" | "erroredServices" | "erroredDevices"> & Partial<Pick<Attention, "openRequests">>): string {
   const requestsOnly = (a.openRequests ?? 0) > 0 && a.openProposals + a.erroredServices + a.erroredDevices === 0;

@@ -1,7 +1,7 @@
 // Mock scenarios: each is a function from the base fixtures to the data the adapter serves plus a
 // script of timed events (relative to adapter creation). The adapter (index.ts) owns the live
 // state and implements ScriptContext; scenarios only describe what changes and when.
-import { RADIO_BOARD_FOUND, RADIO_NO_BOARD, VERSION, heltecDevice, iso, logLine, type Fixtures } from "./fixtures";
+import { RADIO_BOARD_FOUND, RADIO_NO_BOARD, VERSION, heltecDevice, iso, layersRunning, logLine, type Fixtures } from "./fixtures";
 import { ADA, DOV, ELI, FAY, fabricRow, makeContact, type MessagingData } from "./messaging";
 import type { AgentEvent, AgentStatus, Contact, DeviceRecord, FlashOffer, NodeId, Proposal, ServiceId, ServiceRecord, Settings, Status } from "../types";
 
@@ -395,9 +395,15 @@ export const blankBoard: ScenarioFn = (base) => {
   };
 };
 
-/** Re-derive the `fabric` service row from the messaging data (what 111d's registry does every tick). */
+/** Re-derive `status.layers` from the fabric row and the restore floor (what 111d's status snapshot does: 5 only while Messaging runs). */
+function syncLayers(d: MockData): void {
+  d.status.layers = layersRunning(svc(d, "fabric").state, d.messaging.restorePending);
+}
+
+/** Re-derive the `fabric` service row from the messaging data (what 111d's registry does every tick), and the layers that follow from it. */
 function syncFabricRow(d: MockData): void {
   Object.assign(svc(d, "fabric"), fabricRow(d.messaging.fabric));
+  syncLayers(d);
 }
 
 export const messagingNew: ScenarioFn = (base) => {
@@ -493,6 +499,7 @@ export const restorePending: ScenarioFn = (base) => {
   const data = dataFrom(base);
   const m = data.messaging;
   m.restorePending = true;
+  syncLayers(data); // the fabric row stays LIVE, but nothing is sealed while the floor is up: Messaging is not among the running layers
   const last = m.messages.filter((x) => x.dir === "own" && x.peer === ADA).slice(-1)[0];
   if (last) {
     last.state = "queued";

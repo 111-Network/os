@@ -127,6 +127,49 @@ describe("scenarios for messaging", () => {
   });
 });
 
+describe("status.layers: 5 (Messaging) only while the fabric runs", () => {
+  const BASE = [0, 1, 2, 3, 4];
+  /** Where the fabric is not LIVE at the start, or the identity restore is still pending: Messaging is not a running layer. */
+  const WITHOUT_5: readonly ScenarioName[] = ["messaging-new", "store-full", "restore-pending"];
+
+  it.each(SCENARIO_NAMES)("%s reports layer 5 exactly when the fabric service is LIVE and no restore is pending", async (scenario) => {
+    const { a } = await paired(scenario);
+    const live = (await a.service("fabric")).state === "live" && !a.mock.state.messaging.restorePending;
+    const layers = (await a.status()).layers;
+    expect(layers).toEqual(live ? [...BASE, 5] : BASE);
+    expect(layers.includes(5), scenario).toBe(!WITHOUT_5.includes(scenario));
+    expect(a.mock.scenario.data.status.layers, `${scenario} data`).toEqual(layers);
+  });
+
+  it("healthy and the other hub-reachable scenarios include 5; messaging-new (NOT SET), store-full (ERROR) and restore-pending do not", async () => {
+    for (const scenario of ["healthy", "requests", "meshtastic", "agent-down"] as const) expect((await make(scenario).a.status()).layers, scenario).toEqual([0, 1, 2, 3, 4, 5]);
+    for (const scenario of WITHOUT_5) expect((await make(scenario).a.status()).layers, scenario).toEqual(BASE);
+    expect(await make("messaging-new").a.service("fabric")).toMatchObject({ state: "unset" });
+    expect(await make("store-full").a.service("fabric")).toMatchObject({ state: "error" });
+  });
+
+  it("5 arrives as a status frame when the store is freed (12 s) and when the restore floor lifts (12 s)", async () => {
+    for (const scenario of ["store-full", "restore-pending"] as const) {
+      const { a, clock } = make(scenario);
+      const { frames } = listen(a);
+      expect((await a.status()).layers, `${scenario} at start`).toEqual(BASE);
+      await clock.advanceAsync(13_000, 500);
+      expect((await a.status()).layers, `${scenario} after 12 s`).toEqual([...BASE, 5]);
+      const sent = frames.filter((f) => f.event === "status" && (f.data as { layers: number[] }).layers.includes(5));
+      expect(sent.length, `${scenario} status frame`).toBeGreaterThan(0);
+    }
+  });
+
+  it("enrolling with a hub on a node that never messaged brings 5 in, with the status frame", async () => {
+    const { a } = make("messaging-new");
+    const { frames } = listen(a);
+    expect((await a.status()).layers).toEqual(BASE);
+    await a.fabric.enrollHub({ address: MOCK_HUB_ADDRESS, code: "k7m2-9x4p" });
+    expect((await a.status()).layers).toEqual([...BASE, 5]);
+    expect(frames.some((f) => f.event === "status" && (f.data as { layers: number[] }).layers.includes(5))).toBe(true);
+  });
+});
+
 describe("the request flow", () => {
   it("accepting makes the contact, clears the request flag and keeps the held messages in the thread", async () => {
     const { a } = make("requests");
