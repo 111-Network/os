@@ -129,3 +129,8 @@ All 7 forks decided (D19, 2026-10-14). Spec draft: `os/50-messaging/README.md`. 
 - **Wave 3 fix wave** `plan/layers/50-messaging/runs/workflows/wave-3-fix.js`: phase A = P1g guard Fetch-Metadata fallback (opus) ‖ DOCS
   (release-checklist rows, Overview copy; sonnet); phase B = VENV presence venv build (opus) ‖ V1v smoke verification + `jq -e` audit (opus xhigh).
   Run id `wf_8f3fabca-305` (launched 2026-10-19 02:45 CEST from `c84d834`). Then the lead: panel-lint.sh, every gate, D24 lock entry, INDEX, tag; then V4 fable review.
+- **Fix wave landed (2026-10-19):** DOCS `353ec88` · smoke `40cd9ee` · tapes `8a08b2c` · VENV part 1 `51d7ad9` · P1g `29b4b5b`
+  (lead panel-lint GREEN 144/0). **Polish wave** `plan/layers/50-messaging/runs/workflows/wave-3-polish.js`: A = VENVW (daemon-start
+  rebuild + service-row reason + fresh-Debian python3-pip gap) ‖ F2P (enrol-refusal dial leak, `FabricStatus.counters`, `hub_not_yours`
+  wording, `layers` reports 5) ‖ UIP (stale comments, mock layers) ‖ HB (presence reader nonce-0 heartbeat every 5 min: the board's API
+  session lapses after 15 idle minutes); B = MANP (gen-manifest refuses an incomplete payload listing). Run id recorded once launched.
