@@ -133,4 +133,5 @@ All 7 forks decided (D19, 2026-10-14). Spec draft: `os/50-messaging/README.md`. 
   (lead panel-lint GREEN 144/0). **Polish wave** `plan/layers/50-messaging/runs/workflows/wave-3-polish.js`: A = VENVW (daemon-start
   rebuild + service-row reason + fresh-Debian python3-pip gap) ‖ F2P (enrol-refusal dial leak, `FabricStatus.counters`, `hub_not_yours`
   wording, `layers` reports 5) ‖ UIP (stale comments, mock layers) ‖ HB (presence reader nonce-0 heartbeat every 5 min: the board's API
-  session lapses after 15 idle minutes); B = MANP (gen-manifest refuses an incomplete payload listing). Run id recorded once launched.
+  session lapses after 15 idle minutes); B = MANP (gen-manifest refuses an incomplete payload listing). Run id `wf_0b7a0a07-28c`
+  (launched 2026-10-19 03:30 CEST from `f025c98`).
