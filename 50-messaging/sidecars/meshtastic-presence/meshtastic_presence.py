@@ -29,12 +29,16 @@ pubsub bus, and writes ``<out>/meshtastic.json`` atomically::
 
 Hard rules (spec section 14, "Presence reader"):
 
-* **No send path.** 111 never transmits on the Meshtastic mesh and never changes node
-  configuration. The only ``ToRadio`` message this program lets out of the process is the
-  single ``want_config_id`` of a connection (:func:`allowed_to_radio`). Text, data,
-  admin, position, traceroute packets, the library's keepalive heartbeat and its
-  ``disconnect`` message (which meshmud would forward to the board and which would end the
-  board's API session for every other client) are all refused at the lowest layer
+* **No send path, except the session keep-alive.** 111 never transmits on the Meshtastic
+  mesh and never changes node configuration. Exactly two ``ToRadio`` messages may leave
+  this process (:func:`to_radio_kind`, :func:`allowed_to_radio`): the single
+  ``want_config_id`` of a connection, and a ``heartbeat`` with nonce 0 every
+  :data:`KEEPALIVE_INTERVAL` (5 minutes), which keeps the board's client-API session open
+  and makes the board do nothing on the mesh. Text, data, admin, position, traceroute
+  packets, a heartbeat with any other nonce (nonce 1 makes the board broadcast its
+  NodeInfo, a transmit), the library's own heartbeat timer and its ``disconnect`` message
+  (which meshmud would forward to the board and which would end the board's API session
+  for every other client) are all refused at the lowest layer
   (:class:`ReadOnlyTCPInterface`). ``tests/test_presence.py`` proves it by AST scan and by
   behaviour.
 * **Untrusted strings.** Everything from the radio is RF-origin: names are stripped of
@@ -82,8 +86,23 @@ MAX_NAME_BYTES = 40
 MAX_FILE_BYTES = 1_000_000
 BROADCAST_NUM = 0xFFFFFFFF
 
-#: ToRadio ``payload_variant`` names this program may emit. Exactly one.
-ALLOWED_TORADIO = frozenset({"want_config_id"})
+#: ToRadio ``payload_variant`` names this program may emit: ``want_config_id`` (once per
+#: connection) and ``heartbeat`` (only the empty, nonce-0 one; see :func:`to_radio_kind`).
+ALLOWED_TORADIO = frozenset({"want_config_id", "heartbeat"})
+
+# Why a keep-alive at all (Layer 6 research finding, Meshtastic firmware v2.7.26): the board
+# closes its client-API session after 15 minutes without ANY ToRadio frame, serial and TCP
+# alike (src/SerialConsole.cpp:27,119-121 and src/mesh/api/ServerAPI.cpp:6,34), and FromRadio
+# stops until a new want_config_id. meshmud forwards every downlink ToRadio verbatim to the
+# board and originates nothing but one want_config at uplink connect (internal/common/
+# uplink.go:95-106); the frames this reader sends count as ToRadio on the board, the link
+# between reader and meshmud does not. So with no web panel open the board went silent after
+# 15 minutes and Nearby froze. Sending one nonce-0 heartbeat every 5 minutes (the Rust client
+# and the web SDK do the same) restarts the board's timer three times per window. Nonce 1 is
+# the one value that makes the board broadcast its NodeInfo on the mesh (src/mesh/PhoneAPI.cpp,
+# heartbeat case): a transmit, so the guard below refuses every heartbeat whose nonce is not 0.
+#: Seconds between session keep-alive heartbeats, on the monotonic clock.
+KEEPALIVE_INTERVAL = 300.0
 
 #: Format and bidi-override characters that are not Unicode category Cc but can still
 #: reorder or hide text when an RF-origin name is rendered.
@@ -370,12 +389,39 @@ class Backoff:
 
 
 # --------------------------------------------------------------------------- the interface
-def allowed_to_radio(message: Any) -> bool:
-    """True only for a ``ToRadio`` whose payload variant is in :data:`ALLOWED_TORADIO`."""
+def _is_empty_heartbeat(heartbeat: Any) -> bool:
+    """True for a ``Heartbeat`` whose nonce is 0 and which carries nothing else.
+
+    Nonce 0 is the protobuf default and is not even put on the wire; it only restarts the
+    board's idle timer. Nonce 1 makes the board broadcast its NodeInfo on the mesh (a
+    transmit), so every other nonce is refused. ``ByteSize() == 0`` pins the wire form too:
+    a field this library version does not know about is not an empty keep-alive either.
+    """
+    value = getattr(heartbeat, "nonce", 0)
+    return type(value) is int and value == 0 and heartbeat.ByteSize() == 0
+
+
+def to_radio_kind(message: Any) -> Optional[str]:
+    """The payload variant of ``message`` when this program may send it, else None.
+
+    ``want_config_id`` passes (the interface lets it out once per connection); ``heartbeat``
+    passes only when it is empty, i.e. nonce 0; every other variant, and anything that is not
+    a ToRadio, is refused. Never raises.
+    """
     try:
-        return message.WhichOneof("payload_variant") in ALLOWED_TORADIO
+        variant = message.WhichOneof("payload_variant")
+        if variant not in ALLOWED_TORADIO:
+            return None
+        if variant == "heartbeat" and not _is_empty_heartbeat(message.heartbeat):
+            return None
+        return str(variant)
     except Exception:
-        return False
+        return None
+
+
+def allowed_to_radio(message: Any) -> bool:
+    """True only for a ``ToRadio`` that :func:`to_radio_kind` lets through."""
+    return to_radio_kind(message) is not None
 
 
 def make_interface_class(connect_wait: float = 30.0) -> Any:
@@ -386,19 +432,29 @@ def make_interface_class(connect_wait: float = 30.0) -> Any:
     A function, not a module-level class, so the unit tests and the lock tooling can
     import this file without the library installed.
     """
+    from meshtastic.protobuf import mesh_pb2  # type: ignore[import-not-found]
     from meshtastic.tcp_interface import TCPInterface  # type: ignore[import-not-found]
 
     class ReadOnlyTCPInterface(TCPInterface):  # type: ignore[misc]
-        """``TCPInterface`` that can only ever send one ``want_config`` per connection.
+        """``TCPInterface`` whose only ToRadio traffic is one ``want_config`` per connection
+        and the nonce-0 session keep-alive.
 
-        Overrides (all of them remove behaviour, none adds any):
+        Overrides (all of them remove behaviour, bar the one keep-alive helper):
 
         * ``_sendToRadio`` and ``_sendToRadioImpl``: refuse every ToRadio but the first
-          ``want_config_id`` (both the public entry and the implementation layer are
-          guarded, so a library path that bypasses ``_sendToRadio`` still cannot send).
+          ``want_config_id`` and a heartbeat with nonce 0 (both the public entry and the
+          implementation layer are guarded, so a library path that bypasses ``_sendToRadio``
+          still cannot send). The checks run under one re-entrant lock: the keep-alive goes
+          out from the reader's thread, the first ``want_config`` from the constructor's.
+        * ``session_keepalive``: the one added method; builds the empty ``Heartbeat``
+          ``ToRadio`` itself (nonce never assigned, so 0) and passes it through the guard.
+          :class:`PresenceReader` calls it from its loop every :data:`KEEPALIVE_INTERVAL`.
         * ``_sendDisconnect`` / ``_startHeartbeat``: no-ops. meshmud forwards downlink frames
           to the board verbatim; a ``disconnect`` would end the board's API session for
-          everybody, a heartbeat is pointless on a link the board does not own.
+          everybody. The library's own heartbeat timer thread is off: the keep-alive is not
+          pointless on this link (the board's 15-minute idle timer counts the frames it
+          receives through meshmud, see the note at :data:`KEEPALIVE_INTERVAL`) but it is
+          driven from the reader loop on the monotonic clock instead of a second thread.
         * ``connect``: skips the 32 resync bytes meant for sleeping serial devices.
         * ``_reconnect``: never re-dials (and so never re-sends ``want_config``); the link
           is reported lost and :class:`PresenceReader` reconnects with back-off.
@@ -407,29 +463,53 @@ def make_interface_class(connect_wait: float = 30.0) -> Any:
         _want_config_sent = False
         _connect_wait = float(connect_wait)
         dropped_to_radio = 0
+        keepalives_sent = 0
         _impl_ok = False
+        _guard_lock = threading.RLock()
 
         def _sendToRadio(self, toRadio: Any) -> None:  # noqa: N802 (library name)
-            if not allowed_to_radio(toRadio) or self._want_config_sent:
-                self.dropped_to_radio += 1
-                LOG.debug("refused a ToRadio message (read-only reader)")
-                return
-            self._want_config_sent = True
-            self._impl_ok = True
-            try:
-                super()._sendToRadio(toRadio)
-            finally:
-                self._impl_ok = False
+            with self._guard_lock:
+                kind = to_radio_kind(toRadio)
+                if kind is None or (kind == "want_config_id" and self._want_config_sent):
+                    self.dropped_to_radio += 1
+                    LOG.debug("refused a ToRadio message (read-only reader)")
+                    return
+                if kind == "want_config_id":
+                    self._want_config_sent = True
+                self._impl_ok = True
+                try:
+                    super()._sendToRadio(toRadio)
+                finally:
+                    self._impl_ok = False
+                if kind == "heartbeat":
+                    self.keepalives_sent += 1
 
         def _sendToRadioImpl(self, toRadio: Any) -> None:  # noqa: N802 (library name)
             # The implementation layer is reachable only through the guarded
             # entry above; anything else (a library internal, a future code path)
-            # is refused and counted.
-            if not self._impl_ok:
-                self.dropped_to_radio += 1
-                LOG.debug("refused a ToRadio message at the implementation layer (read-only reader)")
-                return
-            super()._sendToRadioImpl(toRadio)
+            # is refused and counted. Even then the message is checked again.
+            with self._guard_lock:
+                if not self._impl_ok or to_radio_kind(toRadio) is None:
+                    self.dropped_to_radio += 1
+                    LOG.debug("refused a ToRadio message at the implementation layer (read-only reader)")
+                    return
+                super()._sendToRadioImpl(toRadio)
+
+        def session_keepalive(self) -> bool:
+            """Put one nonce-0 heartbeat on the wire; True when it went out.
+
+            False when there is no socket or the guard refused it. A socket error propagates
+            (the library has already reported the link lost); the caller treats it as a lost
+            link.
+            """
+            with self._guard_lock:
+                if getattr(self, "socket", None) is None:
+                    return False
+                before = self.keepalives_sent
+                message = mesh_pb2.ToRadio()
+                message.heartbeat.SetInParent()  # an empty Heartbeat: nonce stays 0
+                self._sendToRadio(message)
+                return self.keepalives_sent > before
 
         def _sendDisconnect(self) -> None:  # noqa: N802
             return None
@@ -459,6 +539,8 @@ def make_interface_class(connect_wait: float = 30.0) -> Any:
     for _name in ("_sendToRadio", "_sendToRadioImpl", "_sendDisconnect", "_startHeartbeat", "_reconnect", "connect"):
         if not hasattr(TCPInterface, _name):
             raise RuntimeError(f"meshtastic-python no longer defines TCPInterface.{_name}; the read-only guard cannot be trusted")
+    if not hasattr(mesh_pb2.ToRadio(), "heartbeat"):
+        raise RuntimeError("meshtastic-python's ToRadio has no heartbeat field; the session keep-alive cannot be built")
     return ReadOnlyTCPInterface
 
 
@@ -510,11 +592,14 @@ class PresenceReader:
                  bus: Any = None, min_interval: float = 2.0, poll: float = 5.0,
                  connect_timeout: float = 60.0, backoff: Optional[Backoff] = None,
                  sleep: Optional[Callable[[float], None]] = None,
-                 monotonic: Callable[[], float] = time.monotonic) -> None:
+                 monotonic: Callable[[], float] = time.monotonic,
+                 keepalive_interval: float = KEEPALIVE_INTERVAL) -> None:
         self.host, self.port, self.out_dir = host, port, out_dir
         self._connector = connector or default_connector
         self._bus = bus
         self.min_interval, self.poll, self.connect_timeout = min_interval, poll, connect_timeout
+        #: never below 1 s: a misconfiguration must not turn the keep-alive into a flood
+        self.keepalive_interval = max(1.0, float(keepalive_interval))
         self._backoff = backoff or Backoff()
         self._stop = threading.Event()
         self._sleep = sleep or (lambda seconds: self._stop.wait(seconds))
@@ -525,9 +610,12 @@ class PresenceReader:
         self._connecting = False
         self._iface: Any = None
         self._last_write: Optional[float] = None
+        self._last_keepalive: Optional[float] = None
         self._last_bytes: Optional[bytes] = None
         self._subscribed: List[Tuple[Callable[..., None], str]] = []
         self.writes = 0
+        self.keepalives = 0
+        self.keepalive_failures = 0
         self.write_errors = 0
         self.dropped_nodes = 0
         self.connect_failures = 0
@@ -634,6 +722,38 @@ class PresenceReader:
                 return True
         return True
 
+    def _keep_session_alive(self, iface: Any) -> None:
+        """Send the session keep-alive when ``keepalive_interval`` has passed.
+
+        The clock is the monotonic one and starts when the session's loop first runs, just
+        after the connector returned (the ``want_config`` that opened the session restarted
+        the board's idle timer then). A keep-alive that cannot be sent (socket error, no
+        helper, refused by the guard) ends the session: the link is reported lost and the
+        reader reconnects with back-off, whose fresh ``want_config`` revives a board session
+        that has already lapsed.
+        """
+        now = self._monotonic()
+        if self._last_keepalive is None:
+            self._last_keepalive = now
+            return
+        if now - self._last_keepalive < self.keepalive_interval:
+            return
+        self._last_keepalive = now
+        helper = _attr(iface, "session_keepalive")
+        try:
+            sent = bool(helper()) if callable(helper) else False
+        except Exception as exc:
+            LOG.warning("session keep-alive failed: %s", exc)
+            sent = False
+        if sent:
+            self.keepalives += 1
+            LOG.debug("session keep-alive sent")
+            return
+        self.keepalive_failures += 1
+        LOG.warning("session keep-alive was not sent; treating the link as lost")
+        self._lost.set()
+        self._wake.set()
+
     def run_session(self, iface: Any, max_steps: Optional[int] = None) -> None:
         """Serve one connection until it is lost, the reader is stopped or ``max_steps``."""
         self._dirty.set()  # config is complete when the connector returns: publish now
@@ -642,6 +762,9 @@ class PresenceReader:
             if max_steps is not None and steps >= max_steps:
                 return
             steps += 1
+            self._keep_session_alive(iface)
+            if self._lost.is_set():
+                break
             if not self._dirty.is_set():
                 self._wake.wait(self.poll)
                 self._wake.clear()
@@ -665,6 +788,7 @@ class PresenceReader:
     def _connect(self) -> Optional[Any]:
         self._iface = None
         self._last_write = None
+        self._last_keepalive = None
         self._lost.clear()
         self._connecting = True
         try:

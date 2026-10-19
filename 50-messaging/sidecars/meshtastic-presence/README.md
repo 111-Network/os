@@ -41,6 +41,8 @@ Behaviour:
   node (`{"schema":1,"nodes":[]}`).
 * Rewrites the file only when its content changed, at most every `--min-interval` seconds.
 * A SIGTERM during a blocking connect aborts it immediately.
+* Keeps the board's API session alive: a `heartbeat` with nonce 0 every 5 minutes of session time (monotonic clock,
+  from the reader loop, no extra thread). See "No send path".
 
 ## Output: `meshtastic.json` (spec section 14, schema 1)
 
@@ -77,18 +79,35 @@ One JSON line on stdout, nothing written to disk:
 ## No send path
 
 111 never transmits on the Meshtastic mesh and never changes node configuration. This program enforces it at the
-lowest layer, not by convention:
+lowest layer, not by convention: **no send path except the session keep-alive** (a heartbeat with nonce 0 every
+5 minutes), which transmits nothing on the mesh.
 
-* It uses a subclass of the library's `TCPInterface` (`ReadOnlyTCPInterface`) whose `_sendToRadio` lets exactly
-  one `ToRadio` variant through, **once per connection**: `want_config_id`. Anything else (text, data, admin,
-  position, traceroute, any `MeshPacket`) is refused and counted, whoever asks, including the library itself.
-* The library's `disconnect` message on close and its 5-minute `heartbeat` are removed too: meshmud forwards
+* It uses a subclass of the library's `TCPInterface` (`ReadOnlyTCPInterface`) whose `_sendToRadio` lets exactly two
+  `ToRadio` variants through: `want_config_id`, **once per connection**, and a `heartbeat` that is empty (nonce 0).
+  Anything else (text, data, admin, position, traceroute, any `MeshPacket`, a heartbeat with any other nonce) is
+  refused and counted, whoever asks, including the library itself.
+* **Session keep-alive.** The board closes its client-API session after 15 minutes without *any* `ToRadio` frame,
+  serial and TCP alike, and stops sending `FromRadio` until a new `want_config_id` (Meshtastic firmware v2.7.26,
+  `src/SerialConsole.cpp:27,119-121` and `src/mesh/api/ServerAPI.cpp:6,34`). meshmud forwards every downlink frame to
+  the board verbatim and originates nothing but one `want_config` at uplink connect, so with no web panel open the
+  board would go silent after 15 minutes and Nearby would freeze. The reader loop therefore sends one `heartbeat` with
+  nonce 0 every 5 minutes (the Rust client and the web SDK do the same): the helper `session_keepalive` builds the
+  empty `Heartbeat` itself (it never assigns a nonce; an AST test proves that) and passes it through the same guard.
+  **Nonce 1 makes the board broadcast its NodeInfo on the mesh, a transmit**, so the guard refuses every heartbeat whose
+  nonce is not 0. A keep-alive that cannot be sent (socket error) counts as a lost link: the reader reconnects with
+  back-off, and the fresh `want_config` also revives a session that has already lapsed. `--once` (identify) is
+  short-lived and sends no heartbeat.
+* The library's `disconnect` message on close and its own heartbeat timer thread are removed: meshmud forwards
   downlink frames to the board verbatim, and a `disconnect` would end the board's API session for every other client.
 * It skips the 32 resync bytes meant for sleeping serial devices, and never re-dials by itself (a reconnect inside
   the library would re-send `want_config` outside our back-off).
-* `tests/test_presence.py` proves it by scanning the source for every send/write/config API name (none appears) and
-  by behaviour; `tests/test_real_library.py` proves against the pinned library, with a fake node on a loopback
-  socket, that only `want_config_id` ever reaches the wire, at start, during events, at close and across reconnects.
+* `tests/test_presence.py` proves it by scanning the source for every send/write/config API name (none appears; the
+  only names with `send` in them are the two guarded overrides and the disconnect no-op), by an AST check that no
+  nonce is ever assigned and that only `session_keepalive` builds a `ToRadio`, and by behaviour on a fake interface
+  (the heartbeat goes out after the interval and not before, with nonce 0; nonce 1, a second `want_config` and every
+  other `ToRadio` are refused); `tests/test_real_library.py` proves against the pinned library, with a fake node on a
+  loopback socket, that only `want_config_id` (once per connection) and nonce-0 heartbeats ever reach the wire, at
+  start, during events, at close and across reconnects.
 
 What the user does in the *panel* is a different path: it goes to their radio and is neither seen nor stored here.
 

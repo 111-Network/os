@@ -6,6 +6,7 @@ Run from the sidecar directory:  python3 -I -m pytest tests   (or: python3 -I -m
 """
 import ast
 import base64
+import contextlib
 import json
 import os
 import random
@@ -15,8 +16,10 @@ import sys
 import tempfile
 import threading
 import time
+import types
 import unittest
 from types import SimpleNamespace
+from unittest import mock
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
@@ -53,6 +56,89 @@ class FakeInterface:
     def __getattr__(self, name):  # only reached for attributes the fake does not define
         self.touched.append(name)
         raise AttributeError(name)
+
+
+class KeepaliveFake(FakeInterface):
+    """A FakeInterface that also has the one added helper (``session_keepalive``)."""
+
+    def __init__(self, nodes, result=True, **kw):
+        super().__init__(nodes, **kw)
+        self.keepalive_calls = 0
+        self.result = result
+
+    def session_keepalive(self):
+        self.keepalive_calls += 1
+        if isinstance(self.result, BaseException):
+            raise self.result
+        return self.result
+
+
+class FakeHeartbeat:
+    """mesh_pb2.Heartbeat as far as the guard looks: a nonce and a wire size."""
+
+    def __init__(self, parent, nonce=0):
+        self._parent, self.nonce = parent, nonce
+
+    def SetInParent(self):  # noqa: N802 (protobuf name)
+        self._parent.variant = "heartbeat"
+
+    def ByteSize(self):  # noqa: N802 (protobuf name)
+        return 0 if self.nonce == 0 else 2  # a nonzero varint costs a tag byte and a value byte
+
+
+class FakeToRadio:
+    """mesh_pb2.ToRadio as far as the guard looks: a oneof by name, a heartbeat child."""
+
+    def __init__(self, variant=None, nonce=0):
+        self.variant = variant
+        self.heartbeat = FakeHeartbeat(self, nonce)
+
+    def WhichOneof(self, group):  # noqa: N802 (protobuf name)
+        assert group == "payload_variant"
+        return self.variant
+
+
+class FakeTCPInterface:
+    """Stands in for ``meshtastic.tcp_interface.TCPInterface``: the library's send-path shape
+    (``_sendToRadio`` calls ``_sendToRadioImpl``) with a list as the wire."""
+
+    def __init__(self):
+        self.wire = []
+        self.socket = object()
+
+    def _sendToRadio(self, toRadio):  # noqa: N802
+        self._sendToRadioImpl(toRadio)
+
+    def _sendToRadioImpl(self, toRadio):  # noqa: N802
+        self.wire.append(toRadio)
+
+    def _sendDisconnect(self):  # noqa: N802
+        raise AssertionError("the guarded subclass must never reach the library's disconnect")
+
+    def _startHeartbeat(self):  # noqa: N802
+        raise AssertionError("the guarded subclass must never reach the library's heartbeat timer")
+
+    def _reconnect(self):
+        pass
+
+    def connect(self):
+        pass
+
+
+@contextlib.contextmanager
+def fake_library(base=FakeTCPInterface, to_radio=FakeToRadio):
+    """Install a fake ``meshtastic`` package so ``make_interface_class`` builds on ``base``."""
+    lib = types.ModuleType("meshtastic")
+    tcp = types.ModuleType("meshtastic.tcp_interface")
+    tcp.TCPInterface = base
+    pkg = types.ModuleType("meshtastic.protobuf")
+    pb = types.ModuleType("meshtastic.protobuf.mesh_pb2")
+    pb.ToRadio = to_radio
+    pkg.mesh_pb2 = pb
+    lib.tcp_interface, lib.protobuf = tcp, pkg
+    with mock.patch.dict(sys.modules, {"meshtastic": lib, "meshtastic.tcp_interface": tcp,
+                                       "meshtastic.protobuf": pkg, "meshtastic.protobuf.mesh_pb2": pb}):
+        yield
 
 
 class FakeBus:
@@ -536,6 +622,72 @@ class ReaderTests(unittest.TestCase):
             r.stop()
             t.join(5)
 
+    # --- the session keep-alive (spec section 14: nonce-0 heartbeat every 5 minutes) -------
+    def test_keepalive_goes_out_after_the_interval_and_not_before(self):
+        clock = [1000.0]
+        r = self.reader(monotonic=lambda: clock[0])
+        fake = KeepaliveFake({5: node(5)})
+        for now, calls in ((1000.0, 0), (1299.9, 0), (1300.0, 1), (1300.0, 1), (1599.0, 1), (1600.0, 2)):
+            clock[0] = now
+            r.run_session(fake, max_steps=1)
+            self.assertEqual(fake.keepalive_calls, calls, now)
+        self.assertEqual((r.keepalives, r.keepalive_failures), (2, 0))
+        self.assertFalse(r._lost.is_set())
+
+    def test_keepalive_interval_defaults_to_five_minutes_and_has_a_floor(self):
+        self.assertEqual(mp.KEEPALIVE_INTERVAL, 300.0)
+        self.assertEqual(self.reader().keepalive_interval, 300.0)
+        self.assertEqual(self.reader(keepalive_interval=0).keepalive_interval, 1.0)
+        self.assertEqual(self.reader(keepalive_interval=-5).keepalive_interval, 1.0)
+        self.assertEqual(self.reader(keepalive_interval=42).keepalive_interval, 42.0)
+
+    def test_keepalive_that_cannot_be_sent_ends_the_session(self):
+        for result in (OSError("broken pipe"), False, RuntimeError("boom")):
+            clock = [50.0]
+            r = self.reader(monotonic=lambda: clock[0])
+            fake = KeepaliveFake({5: node(5)}, result=result)
+            r.run_session(fake, max_steps=1)
+            clock[0] = 350.0
+            r.run_session(fake, max_steps=3)  # returns early: the link is reported lost
+            self.assertTrue(r._lost.is_set(), repr(result))
+            self.assertEqual((fake.keepalive_calls, r.keepalives, r.keepalive_failures), (1, 0, 1), repr(result))
+
+    def test_an_interface_without_the_helper_ends_the_session_when_a_keepalive_is_due(self):
+        clock = [50.0]
+        r = self.reader(monotonic=lambda: clock[0])
+        fake = FakeInterface({5: node(5)})
+        r.run_session(fake, max_steps=1)
+        self.assertEqual(fake.touched, [])  # not due yet: nothing but the read surface was touched
+        clock[0] = 350.0
+        r.run_session(fake, max_steps=1)
+        self.assertTrue(r._lost.is_set())
+        self.assertEqual(r.keepalive_failures, 1)
+
+    def test_keepalive_clock_restarts_with_each_connection(self):
+        r = self.reader(lambda h, p, t: KeepaliveFake({}))
+        r._last_keepalive = 123.0
+        self.assertIsNotNone(r._connect())
+        self.assertIsNone(r._last_keepalive)
+
+    def test_keepalive_end_to_end_through_the_guarded_interface(self):
+        # reader loop -> session_keepalive -> guard -> the (fake) wire: exactly want_config, then
+        # one heartbeat per interval, every one with nonce 0
+        clock = [10.0]
+        with fake_library():
+            iface = mp.make_interface_class()()
+        iface.nodesByNum, iface.myInfo = {5: node(5)}, SimpleNamespace(my_node_num=1)
+        iface.isConnected = threading.Event()
+        iface.isConnected.set()
+        iface._sendToRadio(FakeToRadio("want_config_id"))
+        r = self.reader(monotonic=lambda: clock[0])
+        for now in (10.0, 309.0, 310.0, 500.0, 609.0, 610.0):
+            clock[0] = now
+            r.run_session(iface, max_steps=1)
+        kinds = [m.WhichOneof("payload_variant") for m in iface.wire]
+        self.assertEqual(kinds, ["want_config_id", "heartbeat", "heartbeat"])
+        self.assertTrue(all(m.heartbeat.nonce == 0 and m.heartbeat.ByteSize() == 0 for m in iface.wire[1:]))
+        self.assertEqual((r.keepalives, iface.keepalives_sent, iface.dropped_to_radio), (2, 2, 0))
+
     def test_stop_during_backoff_returns_promptly(self):
         r = mp.PresenceReader("h", 1, self.out, connector=lambda h, p, t: (_ for _ in ()).throw(OSError("x")),
                               bus=self.bus, backoff=mp.Backoff(30, 2, 60, 0.0))
@@ -547,6 +699,106 @@ class ReaderTests(unittest.TestCase):
         t.join(5)
         self.assertFalse(t.is_alive())
         self.assertLess(time.monotonic() - started, 2.0)
+
+
+class GuardedInterfaceTests(unittest.TestCase):
+    """The generated ``ReadOnlyTCPInterface`` on a fake library (the real one is in
+    tests/test_real_library.py): one want_config, nonce-0 heartbeats, nothing else."""
+
+    def build(self, **fake_kw):
+        stack = contextlib.ExitStack()
+        stack.enter_context(fake_library(**fake_kw))
+        self.addCleanup(stack.close)
+        return mp.make_interface_class()
+
+    def setUp(self):
+        self.cls = self.build()
+        self.iface = self.cls()
+
+    def variants(self):
+        return [m.WhichOneof("payload_variant") for m in self.iface.wire]
+
+    def test_keepalive_puts_an_empty_nonce_zero_heartbeat_on_the_wire(self):
+        self.assertTrue(self.iface.session_keepalive())
+        self.assertEqual(self.variants(), ["heartbeat"])
+        self.assertEqual(self.iface.wire[0].heartbeat.nonce, 0)
+        self.assertEqual(self.iface.wire[0].heartbeat.ByteSize(), 0)
+        for _ in range(3):
+            self.assertTrue(self.iface.session_keepalive())
+        self.assertEqual(self.variants(), ["heartbeat"] * 4)
+        self.assertEqual((self.iface.keepalives_sent, self.iface.dropped_to_radio), (4, 0))
+
+    def test_one_want_config_per_connection_then_heartbeats(self):
+        self.iface._sendToRadio(FakeToRadio("want_config_id"))
+        self.iface._sendToRadio(FakeToRadio("want_config_id"))  # a second one is refused
+        self.assertTrue(self.iface.session_keepalive())
+        self.assertEqual(self.variants(), ["want_config_id", "heartbeat"])
+        self.assertEqual(self.iface.dropped_to_radio, 1)
+        self.assertEqual(self.iface.keepalives_sent, 1)
+
+    def test_a_heartbeat_with_any_other_nonce_is_refused(self):
+        # nonce 1 makes the board broadcast its NodeInfo on the mesh: a transmit
+        for nonce in (1, 2, 127, 128, 69420, 69421, 2 ** 32 - 1, -1, True, False, 0.0, "0", None):
+            before = self.iface.dropped_to_radio
+            self.iface._sendToRadio(FakeToRadio("heartbeat", nonce=nonce))
+            self.assertEqual(self.iface.dropped_to_radio, before + 1, repr(nonce))
+        self.assertEqual(self.iface.wire, [])
+        self.assertEqual(self.iface.keepalives_sent, 0)
+
+    def test_every_other_toradio_is_still_refused(self):
+        others = ["packet", "disconnect", "xmodemPacket", "mqttClientProxyMessage", None]
+        for variant in others:
+            self.iface._sendToRadio(FakeToRadio(variant))
+        self.iface._sendToRadio(object())
+        self.iface._sendToRadio(None)
+        self.assertEqual(self.iface.wire, [])
+        self.assertEqual(self.iface.dropped_to_radio, len(others) + 2)
+
+    def test_the_implementation_layer_refuses_calls_outside_the_guarded_entry(self):
+        self.iface._sendToRadioImpl(FakeToRadio("heartbeat"))  # allowed content, wrong door
+        self.iface._sendToRadioImpl(FakeToRadio("want_config_id"))
+        self.assertEqual(self.iface.wire, [])
+        self.assertEqual(self.iface.dropped_to_radio, 2)
+
+    def test_the_implementation_layer_rechecks_the_message_inside_the_guarded_entry(self):
+        class Sneaky(FakeTCPInterface):
+            def _sendToRadio(self, toRadio):  # noqa: N802
+                self._sendToRadioImpl(toRadio)
+                self._sendToRadioImpl(FakeToRadio("packet"))  # a library path adding its own frame
+                self._sendToRadioImpl(FakeToRadio("heartbeat", nonce=1))
+
+        iface = self.build(base=Sneaky)()
+        self.assertTrue(iface.session_keepalive())
+        self.assertEqual([m.WhichOneof("payload_variant") for m in iface.wire], ["heartbeat"])
+        self.assertEqual(iface.dropped_to_radio, 2)
+
+    def test_no_socket_means_no_keepalive(self):
+        self.iface.socket = None
+        self.assertFalse(self.iface.session_keepalive())
+        self.assertEqual((self.iface.wire, self.iface.keepalives_sent), ([], 0))
+
+    def test_a_socket_error_propagates_and_closes_the_guard_again(self):
+        class Broken(FakeTCPInterface):
+            def _sendToRadioImpl(self, toRadio):  # noqa: N802
+                raise OSError("broken pipe")
+
+        iface = self.build(base=Broken)()
+        with self.assertRaises(OSError):
+            iface.session_keepalive()
+        self.assertEqual(iface.keepalives_sent, 0)
+        self.assertFalse(iface._impl_ok)
+
+    def test_the_librarys_disconnect_and_heartbeat_timer_stay_switched_off(self):
+        self.assertIsNone(self.iface._sendDisconnect())
+        self.assertIsNone(self.iface._startHeartbeat())
+        self.assertEqual(self.iface.wire, [])
+
+    def test_class_build_fails_loudly_when_toradio_has_no_heartbeat_field(self):
+        class NoHeartbeat:
+            pass
+
+        with self.assertRaises(RuntimeError):
+            self.build(to_radio=NoHeartbeat)
 
 
 class CliTests(unittest.TestCase):
@@ -591,8 +843,37 @@ class NoSendPathTests(unittest.TestCase):
         names = {n.id for n in ast.walk(self.tree) if isinstance(n, ast.Name) and "send" in n.id.lower()}
         self.assertEqual(names, set())
 
-    def test_only_one_toradio_variant_is_allowed(self):
-        self.assertEqual(mp.ALLOWED_TORADIO, frozenset({"want_config_id"}))
+    def test_only_two_toradio_variants_are_allowed_and_the_keepalive_helper_is_the_only_new_name(self):
+        self.assertEqual(mp.ALLOWED_TORADIO, frozenset({"want_config_id", "heartbeat"}))
+        names = {n.name for n in ast.walk(self.tree) if isinstance(n, ast.FunctionDef)
+                 and re.search(r"heartbeat|keepalive|keep_session_alive", n.name, re.I)}
+        self.assertEqual(names, {"_is_empty_heartbeat", "_startHeartbeat", "session_keepalive", "_keep_session_alive"})
+
+    def test_nothing_in_the_source_ever_assigns_a_heartbeat_nonce(self):
+        # the keep-alive is the empty Heartbeat: nonce 1 (a NodeInfo broadcast) cannot be built here
+        for n in ast.walk(self.tree):
+            if isinstance(n, ast.Attribute) and n.attr == "nonce":
+                self.assertIsInstance(n.ctx, ast.Load)
+            if isinstance(n, ast.keyword):
+                self.assertNotEqual(n.arg, "nonce")
+            if isinstance(n, ast.Call) and isinstance(n.func, ast.Name):
+                self.assertNotIn(n.func.id, ("setattr", "exec", "eval"))
+            if isinstance(n, (ast.Assign, ast.AugAssign, ast.AnnAssign)):
+                targets = n.targets if isinstance(n, ast.Assign) else [n.target]
+                for t in targets:
+                    self.assertFalse(isinstance(t, ast.Name) and "nonce" in t.id.lower(), ast.dump(t))
+
+    def test_only_the_keepalive_helper_builds_a_toradio(self):
+        owner = {}
+        for fn in (n for n in ast.walk(self.tree) if isinstance(n, ast.FunctionDef)):
+            for n in ast.walk(fn):
+                owner[id(n)] = fn.name  # innermost function wins (ast.walk is breadth-first)
+        built = sorted(owner.get(id(n)) for n in ast.walk(self.tree)
+                       if isinstance(n, ast.Attribute) and n.attr == "ToRadio" and isinstance(n.ctx, ast.Load))
+        self.assertEqual(built, ["make_interface_class", "session_keepalive"])  # class-build field check, the build
+        touched = sorted(owner.get(id(n)) for n in ast.walk(self.tree)
+                         if isinstance(n, ast.Attribute) and n.attr == "heartbeat")
+        self.assertEqual(touched, ["session_keepalive", "to_radio_kind"])
 
     def test_allowed_to_radio_with_fake_messages(self):
         class Msg:
@@ -604,10 +885,27 @@ class NoSendPathTests(unittest.TestCase):
                 return self.variant
 
         self.assertTrue(mp.allowed_to_radio(Msg("want_config_id")))
+        # a heartbeat the fake cannot show to be empty (no .heartbeat at all) fails closed
         for variant in ("packet", "heartbeat", "disconnect", "mqttClientProxyMessage", "xmodemPacket", None):
             self.assertFalse(mp.allowed_to_radio(Msg(variant)), variant)
         self.assertFalse(mp.allowed_to_radio(object()))
         self.assertFalse(mp.allowed_to_radio(None))
+
+    def test_allowed_to_radio_lets_only_a_nonce_zero_heartbeat_through(self):
+        self.assertTrue(mp.allowed_to_radio(FakeToRadio("heartbeat", nonce=0)))
+        self.assertEqual(mp.to_radio_kind(FakeToRadio("heartbeat")), "heartbeat")
+        self.assertEqual(mp.to_radio_kind(FakeToRadio("want_config_id")), "want_config_id")
+        for nonce in (1, 2, 2 ** 32 - 1, -1, True, 0.0, "0", None):
+            self.assertFalse(mp.allowed_to_radio(FakeToRadio("heartbeat", nonce=nonce)), repr(nonce))
+            self.assertIsNone(mp.to_radio_kind(FakeToRadio("heartbeat", nonce=nonce)), repr(nonce))
+        # a heartbeat that is empty by nonce but not on the wire (a field this library knows and we do not)
+        hb = FakeToRadio("heartbeat")
+        hb.heartbeat.ByteSize = lambda: 4
+        self.assertFalse(mp.allowed_to_radio(hb))
+        # a heartbeat object that cannot even report its size fails closed
+        broken = FakeToRadio("heartbeat")
+        broken.heartbeat = SimpleNamespace(nonce=0)
+        self.assertFalse(mp.allowed_to_radio(broken))
 
     def test_module_imports_without_meshtastic_installed_or_loaded(self):
         # the library is imported lazily, only inside make_interface_class / PubsubBus

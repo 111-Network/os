@@ -5,10 +5,11 @@ needs nothing; run it inside the hash-locked presence venv:
 
     <venv>/bin/python -I -m unittest discover -s tests
 
-It proves, against the pinned library, that (a) the only ToRadio message that ever reaches
-the wire is one want_config_id per connection (no heartbeat, no disconnect, nothing else,
-including at close), (b) the pubsub signatures we subscribe with are accepted, and (c) the
-node DB, position and telemetry events end up in the presence file.
+It proves, against the pinned library, that (a) the only ToRadio messages that ever reach
+the wire are one want_config_id per connection and the session keep-alive, a heartbeat with
+nonce 0 (no heartbeat with another nonce, no disconnect, nothing else, including at close),
+(b) the pubsub signatures we subscribe with are accepted, and (c) the node DB, position and
+telemetry events end up in the presence file.
 """
 import json
 import os
@@ -62,6 +63,7 @@ class FakeMeshtasticNode(threading.Thread):
         self.srv.listen(4)
         self.port = self.srv.getsockname()[1]
         self.received = []  # variants of every ToRadio, in order, across connections
+        self.heartbeats = []  # the nonce of every heartbeat, in order
         self.connections = []
         self.lock = threading.Lock()
         self.stop = False
@@ -105,6 +107,8 @@ class FakeMeshtasticNode(threading.Thread):
                 variant = msg.WhichOneof("payload_variant")
                 with self.lock:
                     self.received.append(variant)
+                    if variant == "heartbeat":
+                        self.heartbeats.append(msg.heartbeat.nonce)
                 if variant == "want_config_id":
                     self.send_config(conn, msg.want_config_id)
 
@@ -179,15 +183,20 @@ class RealLibraryTests(unittest.TestCase):
         self.assertFalse(mp.allowed_to_radio(mesh_pb2.ToRadio(packet=mesh_pb2.MeshPacket())))
         self.assertFalse(mp.allowed_to_radio(mesh_pb2.ToRadio(disconnect=True)))
         hb = mesh_pb2.ToRadio()
-        hb.heartbeat.SetInParent()
-        self.assertFalse(mp.allowed_to_radio(hb))
+        hb.heartbeat.SetInParent()  # nonce 0: the session keep-alive
+        self.assertTrue(mp.allowed_to_radio(hb))
+        self.assertTrue(mp.allowed_to_radio(mesh_pb2.ToRadio(heartbeat=mesh_pb2.Heartbeat(nonce=0))))
+        for nonce in (1, 2, 69420, 2 ** 32 - 1):  # nonce 1 makes the board broadcast its NodeInfo
+            self.assertFalse(mp.allowed_to_radio(mesh_pb2.ToRadio(heartbeat=mesh_pb2.Heartbeat(nonce=nonce))), nonce)
         self.assertFalse(mp.allowed_to_radio(mesh_pb2.ToRadio()))
 
     def test_library_surface_we_override_still_exists(self):
         from meshtastic.tcp_interface import TCPInterface
-        for name in ("_sendToRadio", "_sendDisconnect", "_startHeartbeat", "_reconnect", "myConnect", "_startConfig",
-                     "_waitConnected", "_disconnected", "connect"):
+        for name in ("_sendToRadio", "_sendToRadioImpl", "_sendDisconnect", "_startHeartbeat", "_reconnect",
+                     "myConnect", "_startConfig", "_waitConnected", "_disconnected", "connect"):
             self.assertTrue(hasattr(TCPInterface, name), name)
+        self.assertTrue(hasattr(mesh_pb2.ToRadio(), "heartbeat"))
+        self.assertTrue(hasattr(mesh_pb2.Heartbeat(), "nonce"))
 
     def test_presence_file_events_and_exactly_one_want_config(self):
         reader = mp.PresenceReader("127.0.0.1", self.node.port, self.tmp.name, min_interval=0.0, poll=0.2,
@@ -231,7 +240,57 @@ class RealLibraryTests(unittest.TestCase):
         time.sleep(0.5)  # a late disconnect/heartbeat, if there were one, would arrive now
         with self.node.lock:
             seen = list(self.node.received)
-        self.assertEqual(seen, ["want_config_id", "want_config_id"], "only want_config may reach the wire")
+        self.assertEqual(seen, ["want_config_id", "want_config_id"],
+                         "only want_config may reach the wire (the keep-alive is not due within this test)")
+
+    def test_keepalive_heartbeat_reaches_the_wire_with_nonce_zero_and_nothing_else_does(self):
+        reader = mp.PresenceReader("127.0.0.1", self.node.port, self.tmp.name, min_interval=0.0, poll=0.2,
+                                   connect_timeout=10, backoff=mp.Backoff(0.2, 2.0, 1.0, 0.0),
+                                   keepalive_interval=2.0)
+        t = threading.Thread(target=reader.run, daemon=True)
+        t.start()
+        try:
+            self.assertTrue(wait_for(lambda: self.doc() is not None), "no presence file")
+            with self.node.lock:
+                self.assertEqual(self.node.received, ["want_config_id"], "no heartbeat before the interval")
+            self.assertTrue(wait_for(lambda: len(self.node.heartbeats) >= 2, 15), "no keep-alive heartbeats")
+            self.assertGreaterEqual(reader.keepalives, 2)
+            self.assertEqual(reader.keepalive_failures, 0)
+        finally:
+            reader.stop()
+            t.join(10)
+        self.assertFalse(t.is_alive())
+        time.sleep(0.5)  # a late disconnect, if there were one, would arrive now
+        with self.node.lock:
+            seen, nonces = list(self.node.received), list(self.node.heartbeats)
+        self.assertEqual(seen, ["want_config_id"] + ["heartbeat"] * len(nonces))
+        self.assertTrue(nonces and all(n == 0 for n in nonces), nonces)
+
+    def test_the_guard_refuses_heartbeat_nonce_one_and_every_other_toradio_on_the_real_interface(self):
+        iface = mp.default_connector("127.0.0.1", self.node.port, 10)
+        try:
+            self.assertTrue(iface.session_keepalive())
+            self.assertTrue(wait_for(lambda: self.node.heartbeats == [0]))
+            refused = [
+                mesh_pb2.ToRadio(heartbeat=mesh_pb2.Heartbeat(nonce=1)),
+                mesh_pb2.ToRadio(heartbeat=mesh_pb2.Heartbeat(nonce=2)),
+                mesh_pb2.ToRadio(disconnect=True),
+                mesh_pb2.ToRadio(want_config_id=99),  # a second want_config
+                mesh_pb2.ToRadio(packet=mesh_pb2.MeshPacket(to=0xFFFFFFFF)),
+            ]
+            for msg in refused:
+                iface._sendToRadio(msg)
+                iface._sendToRadioImpl(msg)  # and the implementation layer, called directly
+            self.assertEqual(iface.dropped_to_radio, 2 * len(refused))
+            self.assertTrue(iface.session_keepalive())  # the guard is still open for the real keep-alive
+            self.assertTrue(wait_for(lambda: self.node.heartbeats == [0, 0]))
+            time.sleep(0.5)
+        finally:
+            iface.close()
+        time.sleep(0.3)
+        with self.node.lock:
+            self.assertEqual(self.node.received, ["want_config_id", "heartbeat", "heartbeat"])
+            self.assertEqual(self.node.heartbeats, [0, 0])
 
     def test_once_prints_my_node_info_and_sends_only_want_config(self):
         code, line = mp.run_once("127.0.0.1", self.node.port, 10)
