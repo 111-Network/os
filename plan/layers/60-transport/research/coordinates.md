@@ -78,3 +78,5 @@ Next after the run: lead writes `layers/60-transport/options.md` → owner decid
 - **B4 landed** `39483b0` (+ fmt `b72067e`; review `wf_4e82a662-f37`). **Run — Wave 2c** (`wave-2c.js`, C4 device core alone, right after B4):
   `wf_4f4eadf8-b07`. `wave-2b.js` is now C3rs + C5 (after B2 and C3py). Ownership moves: the registry.rs binding reader/writer switch is C4's; the
   two `N/meshtastic/mod.rs` readers are C1's (B3 holds the file until it lands); C4 exposes `devices::applier::apply` and C1 calls it.
+- **C3py landed** `c04984b` (review `wf_95e16a19-802`): rns pin moved to 1.5.7 (lxmf 1.2.1 requires it), python floor 3.10; the assets copy of
+  the lock is deliberately left to C3rs with the `install_flow` MockRunner update (5 tests go red while the lock sits in assets without it).
