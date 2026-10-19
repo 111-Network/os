@@ -386,8 +386,24 @@ describe("adapter <-> openapi.yaml", () => {
   };
   const toRegex = (tpl: string) => new RegExp(`^${tpl.replace(/\{[^}]+\}/g, "[^/]+")}$`);
 
-  it("covers every operation except the event stream", () => {
-    expect(Object.keys(CALLS).sort()).toEqual(Object.keys(operations).filter((id) => id !== "events").sort());
+  // Layer 6 contract operations (S2, 60-transport/README.md §10) whose adapter methods land with the C2 UI task. C2 moves each
+  // id from this list into CALLS above, and empties the list; until then the contract is ahead of the adapter on purpose.
+  const LAYER6_PENDING = [
+    "listNetworks", "listForeignConversations", "openForeignConversation", "getForeignConversation", "sendForeignMessage",
+    "previewFanout", "sendFanout", "listBridgeEdges", "createBridgeEdge", "getBridgeEdge", "patchBridgeEdge", "deleteBridgeEdge",
+    "getBridgeSettings", "patchBridgeSettings", "listBridgeComponents", "enableBridgeComponent", "disableBridgeComponent",
+    "removeBridgeComponentFiles", "getTransport", "patchTransportPosture", "joinTransport",
+  ];
+
+  it("covers every operation except the event stream and the Layer 6 operations still pending an adapter method", () => {
+    expect(Object.keys(CALLS).sort()).toEqual(Object.keys(operations).filter((id) => id !== "events" && !LAYER6_PENDING.includes(id)).sort());
+  });
+
+  it("the pending list only names real operations that have no adapter call yet", () => {
+    for (const id of LAYER6_PENDING) {
+      expect(operations[id], `${id} is in the contract`).toBeDefined();
+      expect(CALLS[id], `${id} has a CALLS entry: remove it from LAYER6_PENDING`).toBeUndefined();
+    }
   });
 
   for (const [id, call] of Object.entries(CALLS)) {

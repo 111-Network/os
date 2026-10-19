@@ -8,7 +8,9 @@ info:
     chat/agent routes to `111-agent` (:11182). See README.md in this folder for conventions
     (auth, problem+json, SSE). The `x-sse-events` map at the bottom types the `/events` stream.
     Layer 5 (Messaging & Data, os/50-messaging/README.md §15) adds messages, contacts, fabric,
-    nearby, panels and device identify, all additively.
+    nearby, panels and device identify, all additively. Layer 6 (Transport & Bridge,
+    os/60-transport/README.md §10, D27) adds foreign networks and conversations, compose fan-out,
+    relay edges, optional components and the transport spine, all additively.
 servers:
   - url: http://127.0.0.1:11180
   - url: http://111.localhost
@@ -155,14 +157,14 @@ paths:
   /api/v1/proposals/{id}/decision:
     post:
       operationId: decideProposal
-      description: "Record the human's decision. A `kind: message` proposal is applied on acceptance (Layer 5 §17): its body must be `to: <64 hex>` + a blank line + the text, its node-id stamp must name this node and the recipient must be an accepted contact; then 111d queues the message itself and the decision is recorded (the agent never sends). A refused acceptance answers the problem below and leaves the proposal open; the agent's bearer never decides a message proposal (401)."
+      description: "Record the human's decision. A `kind: message` proposal is applied on acceptance (Layer 5 §17): its body must be `to: <64 hex>` + a blank line + the text, its node-id stamp must name this node and the recipient must be an accepted contact; then 111d queues the message itself and the decision is recorded (the agent never sends). A refused acceptance answers the problem below and leaves the proposal open; the agent's bearer never decides a message proposal (401). Layer 6: a `bridge_message` proposal runs the fan-out validation on acceptance, a `bridge_edge` proposal the edge-enable consent round-trip, a `device` proposal the apply, probe, revert loop (or the one-shot `identify` / `service.restart`). A consent gate answers 409 `consent_required` with `consent` {text, hash}; the client shows the text and repeats the decision with `accept_warning` = the hash. A refusal leaves the proposal open."
       parameters: [ { name: id, in: path, required: true, schema: { type: string } } ]
-      requestBody: { required: true, content: { application/json: { schema: { type: object, required: [decision], properties: { decision: { $ref: "#/components/schemas/Decision" } } } } } }
+      requestBody: { required: true, content: { application/json: { schema: { type: object, required: [decision], properties: { decision: { $ref: "#/components/schemas/Decision" }, accept_warning: { $ref: "#/components/schemas/Sha256Hex", description: "Layer 6: the hash of the consent text the user was shown (`bridge_edge`, or a `bridge_message` behind a consent gate); absent on the first call" } } } } } }
       responses:
         "200": { description: Recorded, content: { application/json: { schema: { $ref: "#/components/schemas/Proposal" } } } }
         "404": { $ref: "#/components/responses/Problem" }
         "502": { description: "upstream_error: the agent wrote a kind outside the enum, or (kind message) a body that does not follow the `to:` contract or a node-id stamp that does not name this node", $ref: "#/components/responses/Problem" }
-        "409": { description: "already_decided; for kind message also bad_request (the recipient is not a contact, or is a pending message request) and restore_pending (the identity holder reports a restore floor, so nothing is sealed yet) — the proposal stays open", $ref: "#/components/responses/Problem" }
+        "409": { description: "already_decided; for kind message also bad_request (the recipient is not a contact, or is a pending message request) and restore_pending (the identity holder reports a restore floor, so nothing is sealed yet); Layer 6 adds consent_required (`consent` carries text + hash), oversize and component_unavailable (bridge kinds), unsupported_action (a `device` action outside the four applied and two one-shot actions) and not_supervised (`service.restart` on a child 111d does not supervise) — the proposal stays open", $ref: "#/components/responses/Problem" }
   /api/v1/settings:
     get:
       operationId: getSettings
@@ -372,6 +374,196 @@ paths:
       responses:
         "200": { description: Ticket minted, content: { application/json: { schema: { $ref: "#/components/schemas/PanelSession" } } } }
         "404": { description: "not_found (unknown panel, or its service is not set up)", $ref: "#/components/responses/Problem" }
+  # ---- Layer 6: Transport & Bridge (60-transport/README.md §10; D27; additive) ----
+  # Every write below refuses the agent's bearer (401 unauthenticated): the global gate in `require_session`, no allowlist (§13).
+  /api/v1/networks:
+    get:
+      operationId: listNetworks
+      summary: "Foreign networks this node can bridge: state, honest copy, caps, counts, dropped-text counter, optional-component facts (§10)"
+      description: "One entry per declared adapter, in the user's preferred order (`GET /transport` `order`). A disabled optional component is listed as `state: disabled` with its cached and installed size, so the user sees what enabling costs before any byte is installed (§2.1). The 111 fabric is not a `Network`: its threads are `/messages/threads`."
+      responses:
+        "200": { description: "OK", content: { application/json: { schema: { type: object, required: [schema, networks], properties: { schema: { type: integer }, networks: { type: array, items: { $ref: "#/components/schemas/Network" } } } } } } }
+  /api/v1/networks/{net}/conversations:
+    get:
+      operationId: listForeignConversations
+      summary: "Conversations of one network (channels, DMs, groups), most recent activity first"
+      description: "Ordered by `last_seq` (the store's receipt sequence), never by a foreign clock. Titles are untrusted foreign text: render as text only."
+      parameters: [ { $ref: "#/components/parameters/networkId" } ]
+      responses:
+        "200": { description: "OK", content: { application/json: { schema: { type: object, required: [schema, network, conversations], properties: { schema: { type: integer }, network: { $ref: "#/components/schemas/NetworkId" }, conversations: { type: array, items: { $ref: "#/components/schemas/ForeignConversation" } } } } } } }
+        "404": { description: "not_found (no such network)", $ref: "#/components/responses/Problem" }
+    post:
+      operationId: openForeignConversation
+      summary: "Open a foreign DM (from Nearby or a message): `{kind: dm, native_id}`"
+      description: "Idempotent: an existing DM with that native id is returned unchanged. `native_id` is the network's own address (`!a1b2c3d4` for Meshtastic, 32 hex for an LXMF destination) and is validated against the adapter's `caps.recipient_syntax`. A foreign DM is never a 111 contact. Only `kind: dm` is accepted (channels come from the board; recipient lists are `PATCH /bridge/settings`). Loopback or a paired session; the agent's bearer is refused (401)."
+      parameters: [ { $ref: "#/components/parameters/networkId" } ]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: "#/components/schemas/ForeignDmOpen" } } } }
+      responses:
+        "200": { description: "The conversation (created now, or already known)", content: { application/json: { schema: { $ref: "#/components/schemas/ForeignConversation" } } } }
+        "400": { description: "bad_request: `native_id` does not match the network's recipient syntax", $ref: "#/components/responses/Problem" }
+        "404": { description: "not_found (no such network)", $ref: "#/components/responses/Problem" }
+        "409": { description: "component_unavailable: the network's optional component is not enabled", $ref: "#/components/responses/Problem" }
+  /api/v1/networks/{net}/conversations/{conv}:
+    get:
+      operationId: getForeignConversation
+      description: "One conversation, ascending by `seq` (receipt sequence). Without `since_seq` the newest `limit` messages are returned; with it, the first `limit` above that sequence. `more` is true when messages exist beyond the window. Reading never acknowledges anything to the foreign side. Split sends are one row per part (`part`)."
+      parameters:
+        - { $ref: "#/components/parameters/networkId" }
+        - { $ref: "#/components/parameters/foreignConvId" }
+        - { name: since_seq, in: query, schema: { type: integer, minimum: 0 } }
+        - { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 500, default: 100 } }
+      responses:
+        "200": { description: "OK", content: { application/json: { schema: { $ref: "#/components/schemas/ForeignThread" } } } }
+        "400": { $ref: "#/components/responses/Problem" }
+        "404": { $ref: "#/components/responses/Problem" }
+  /api/v1/networks/{net}/conversations/{conv}/messages:
+    post:
+      operationId: sendForeignMessage
+      summary: "Send a text into one foreign conversation (always a human act in the UI)"
+      description: "Queues one row (or one row per part with `size_mode: split`) and answers 202 `{id, plan}`; delivery is never promised: adapter state (region unset, board away, queue full, no path) queues the row with a `reason_code`. A text over the network's cap in `refuse` mode (the default) answers 409 `oversize` and queues nothing; a consent gate (`ham_unconfirmed`, `uplink_off`) answers 409 `consent_required` carrying the exact text and its hash (confirm via `PATCH /bridge/settings`, then send again). The text is a copy: no 111 message is exported. Loopback or a paired session; the agent's bearer is refused (401); the agent proposes (`kind: bridge_message`)."
+      parameters:
+        - { $ref: "#/components/parameters/networkId" }
+        - { $ref: "#/components/parameters/foreignConvId" }
+      requestBody: { required: true, content: { application/json: { schema: { $ref: "#/components/schemas/ForeignSendRequest" } } } }
+      responses:
+        "202": { description: "Queued", content: { application/json: { schema: { $ref: "#/components/schemas/ForeignSendAccepted" } } } }
+        "400": { $ref: "#/components/responses/Problem" }
+        "404": { $ref: "#/components/responses/Problem" }
+        "409": { description: "oversize (refuse mode), consent_required (ham_unconfirmed / uplink_off; `consent` carries text + hash), component_unavailable", $ref: "#/components/responses/Problem" }
+  /api/v1/messages/fanout/preview:
+    post:
+      operationId: previewFanout
+      summary: "Dry run of a compose fan-out: per-target bytes, cap, parts, airtime estimate, refusals (§9)"
+      description: "Writes nothing, transmits nothing and does not log the text. Every target gets a `plan`; a target that would be refused carries `plan.refusal`. Airtime is an estimate and labelled one. Loopback or a paired session; the agent's bearer is refused (401)."
+      requestBody: { required: true, content: { application/json: { schema: { $ref: "#/components/schemas/FanoutRequest" } } } }
+      responses:
+        "200": { description: "OK", content: { application/json: { schema: { $ref: "#/components/schemas/FanoutPreview" } } } }
+        "400": { $ref: "#/components/responses/Problem" }
+        "404": { description: "not_found (a target names no conversation or contact)", $ref: "#/components/responses/Problem" }
+  /api/v1/messages/fanout:
+    post:
+      operationId: sendFanout
+      summary: "Send one text to many targets as a fresh send group (§9)"
+      description: "Validation is atomic: if any target is refused for `oversize` in `refuse` mode or for a consent gate (`ham_unconfirmed`, `uplink_off`), the answer is 409 with the per-target report in `targets` and nothing is queued. Adapter state (region unset, board away, queue full, no path) is not a call error: rows queue with their reason. 111 targets are ordinary sealed messages (`msg-…` ids, Layer 5 states); foreign targets are `fm-…` rows. Each row has its own state, retry and cancel; one target's failure never cancels another. Loopback or a paired session; the agent's bearer is refused (401)."
+      requestBody: { required: true, content: { application/json: { schema: { $ref: "#/components/schemas/FanoutRequest" } } } }
+      responses:
+        "202": { description: "Queued", content: { application/json: { schema: { $ref: "#/components/schemas/FanoutResult" } } } }
+        "400": { $ref: "#/components/responses/Problem" }
+        "404": { $ref: "#/components/responses/Problem" }
+        "409": { description: "per-target refusal, nothing queued: code `oversize` or `consent_required`; `targets` lists every refused target with its own code, detail and (for a consent gate) `consent`", $ref: "#/components/responses/Problem" }
+  /api/v1/bridge/edges:
+    get:
+      operationId: listBridgeEdges
+      summary: "Relay edges (explicit, directed, non-transitive copies from one conversation to another, §8)"
+      responses:
+        "200": { description: "OK", content: { application/json: { schema: { type: object, required: [schema, edges], properties: { schema: { type: integer }, edges: { type: array, items: { $ref: "#/components/schemas/BridgeEdge" } } } } } } }
+    post:
+      operationId: createBridgeEdge
+      summary: "Enable a relay edge (only a human on a paired or loopback session)"
+      description: "Both endpoints are `channel` or `group` conversations and differ; a DM endpoint is 400 `bad_request`. Without `accept_warning` the answer is 409 `consent_required` carrying the exact warning text and its hash (`consent`); the client shows the text and repeats the request with `accept_warning` = that hash. History is never relayed: `cursor_seq` is set at enable. Accepting a `bridge_edge` proposal (`POST /proposals/{id}/decision`) runs the same round-trip. The agent's bearer is refused (401)."
+      requestBody: { required: true, content: { application/json: { schema: { $ref: "#/components/schemas/BridgeEdgeCreate" } } } }
+      responses:
+        "201": { description: "Edge enabled", content: { application/json: { schema: { $ref: "#/components/schemas/BridgeEdge" } } } }
+        "400": { $ref: "#/components/responses/Problem" }
+        "404": { description: "not_found (an endpoint names no conversation)", $ref: "#/components/responses/Problem" }
+        "409": { description: "consent_required (no or stale `accept_warning`), component_unavailable (an endpoint's adapter is not enabled), bad_request (the same pair is already an edge)", $ref: "#/components/responses/Problem" }
+  /api/v1/bridge/edges/{id}:
+    get:
+      operationId: getBridgeEdge
+      parameters: [ { $ref: "#/components/parameters/edgeId" } ]
+      responses:
+        "200": { description: "OK", content: { application/json: { schema: { $ref: "#/components/schemas/BridgeEdge" } } } }
+        "404": { $ref: "#/components/responses/Problem" }
+    patch:
+      operationId: patchBridgeEdge
+      description: "Partial merge: `paused` (pausing is always allowed; resuming a `consent_paused` edge answers 409 `consent_required` with the NEW text and hash until `accept_warning` echoes it), `honour_ok_to_mqtt`, `oversize`. The agent's bearer is refused (401)."
+      parameters: [ { $ref: "#/components/parameters/edgeId" } ]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: "#/components/schemas/BridgeEdgePatch" } } } }
+      responses:
+        "200": { description: "OK", content: { application/json: { schema: { $ref: "#/components/schemas/BridgeEdge" } } } }
+        "400": { $ref: "#/components/responses/Problem" }
+        "404": { $ref: "#/components/responses/Problem" }
+        "409": { description: "consent_required (resume without a current `accept_warning`)", $ref: "#/components/responses/Problem" }
+    delete:
+      operationId: deleteBridgeEdge
+      description: "Remove the edge. Copies already queued on the destination stay (they are ordinary own rows); no new copy is made. The agent's bearer is refused (401)."
+      parameters: [ { $ref: "#/components/parameters/edgeId" } ]
+      responses:
+        "204": { description: Removed }
+        "404": { $ref: "#/components/responses/Problem" }
+  /api/v1/bridge/settings:
+    get:
+      operationId: getBridgeSettings
+      summary: "Adapters on/off, preferred order, recipient lists, per-channel send switches, HAM confirmations (state/bridge.json)"
+      responses:
+        "200": { description: "OK", content: { application/json: { schema: { $ref: "#/components/schemas/BridgeSettings" } } } }
+    patch:
+      operationId: patchBridgeSettings
+      description: "Partial merge. A HAM confirmation or an uplinked channel's send switch is never a bare patch: without `accept_warning` the answer is 409 `consent_required` carrying the exact text and its hash, repeated with the hash to confirm; the confirmation is recorded with the text hash. Turning an adapter that is an optional component on goes through `POST /bridge/components/{id}/enable`, not here. The agent's bearer is refused (401)."
+      requestBody: { required: true, content: { application/json: { schema: { $ref: "#/components/schemas/BridgeSettingsPatch" } } } }
+      responses:
+        "200": { description: "OK", content: { application/json: { schema: { $ref: "#/components/schemas/BridgeSettings" } } } }
+        "400": { $ref: "#/components/responses/Problem" }
+        "404": { $ref: "#/components/responses/Problem" }
+        "409": { description: "consent_required (HAM confirmation or uplinked-channel send switch without a current `accept_warning`), component_unavailable", $ref: "#/components/responses/Problem" }
+  /api/v1/bridge/components:
+    get:
+      operationId: listBridgeComponents
+      summary: "Optional third-party components: declared, cached, installed, running (§2.1)"
+      responses:
+        "200": { description: "OK", content: { application/json: { schema: { type: object, required: [schema, components], properties: { schema: { type: integer }, components: { type: array, items: { $ref: "#/components/schemas/Component" } } } } } } }
+  /api/v1/bridge/components/{id}/enable:
+    post:
+      operationId: enableBridgeComponent
+      description: "Install from the install-time cache (offline; nothing downloads at runtime), start, health. Without `accept_notice_hash` the answer is 409 `consent_required` carrying the licence notice (program, licence, where to read it, cached size) and its hash; the client shows it and repeats the request with the hash, which `state/bridge.json` records (the user installs, 111 is not the distributor). A payload missing from the cache or failing its pin, or a failed `[requires]` check, answers 409 `component_unavailable` and installs nothing (fail closed). Loopback or a paired session; the agent's bearer is refused (401)."
+      parameters: [ { $ref: "#/components/parameters/componentId" } ]
+      requestBody: { required: false, content: { application/json: { schema: { $ref: "#/components/schemas/ComponentEnableRequest" } } } }
+      responses:
+        "200": { description: "The component after enabling", content: { application/json: { schema: { $ref: "#/components/schemas/Component" } } } }
+        "404": { $ref: "#/components/responses/Problem" }
+        "409": { description: "consent_required (no or stale `accept_notice_hash`), component_unavailable", $ref: "#/components/responses/Problem" }
+  /api/v1/bridge/components/{id}/disable:
+    post:
+      operationId: disableBridgeComponent
+      description: "Stop the child and release its ports and claims. Installed files and the cached payload stay (a re-enable is offline and instant); `remove-files` deletes them. Idempotent. The agent's bearer is refused (401)."
+      parameters: [ { $ref: "#/components/parameters/componentId" } ]
+      responses:
+        "200": { description: "The component after disabling", content: { application/json: { schema: { $ref: "#/components/schemas/Component" } } } }
+        "404": { $ref: "#/components/responses/Problem" }
+  /api/v1/bridge/components/{id}/remove-files:
+    post:
+      operationId: removeBridgeComponentFiles
+      description: "Delete the installed tree and the adapter's state (`bridge/<adapter>/`, a Delta Chat account store included); with `cache: true` also the cached payload. Nothing is deleted without this call. A running component answers 409 `bad_request` (disable it first). The agent's bearer is refused (401)."
+      parameters: [ { $ref: "#/components/parameters/componentId" } ]
+      requestBody: { required: false, content: { application/json: { schema: { $ref: "#/components/schemas/ComponentRemoveRequest" } } } }
+      responses:
+        "200": { description: "The component after removal", content: { application/json: { schema: { $ref: "#/components/schemas/Component" } } } }
+        "404": { $ref: "#/components/responses/Problem" }
+        "409": { description: "bad_request: the component is running", $ref: "#/components/responses/Problem" }
+  /api/v1/transport:
+    get:
+      operationId: getTransport
+      summary: "Transport facts: interfaces from the cached rnstatus, posture, region, callsign, preferred order (§11)"
+      description: "Interface facts come from a tick-driven cache of `rnstatus` through the shared instance, never the request path (`interfaces_state` says whether the cache is fresh). No credential appears here: the IFAC passphrase is only on `POST /transport/join`."
+      responses:
+        "200": { description: "OK", content: { application/json: { schema: { $ref: "#/components/schemas/TransportStatus" } } } }
+  /api/v1/transport/posture:
+    patch:
+      operationId: patchTransportPosture
+      description: "Partial merge of the rnsd posture, the radio region and callsign, and the preferred network order, applied through the narrow apply, probe, revert loop (§12): snapshot `interfaces.toml` and the rendered config, apply, probe within 30 s, keep or revert. A reverted change answers 200 with `reverted: true` and the reason; the previous posture is live. A posture change restarts rnsd with its children in order. An unknown region is 400 `bad_request`. Loopback or a paired session; the agent's bearer is refused (401); the agent proposes (`kind: device`)."
+      requestBody: { required: true, content: { application/json: { schema: { $ref: "#/components/schemas/TransportPosturePatch" } } } }
+      responses:
+        "200": { description: "The outcome and the transport facts after it", content: { application/json: { schema: { $ref: "#/components/schemas/TransportPostureResult" } } } }
+        "400": { $ref: "#/components/responses/Problem" }
+        "409": { description: "bad_request: another change is applying", $ref: "#/components/responses/Problem" }
+  /api/v1/transport/join:
+    post:
+      operationId: joinTransport
+      summary: "The phone-relay join descriptor (address, port, IFAC name and passphrase if set)"
+      description: "A POST because it returns a credential and the agent's bearer reads every GET: this route is `no-store`, refuses the bearer (401) like every non-GET, and is served only on a paired or loopback session. Used by a phone's `111d` after the QR pair-code ceremony to write its own `TCPClientInterface` entry; the passphrase never rides in the QR. 409 `bad_request` while LAN sharing is off (no Backbone listener to join). The IFAC passphrase is a shared network credential, not identity key material."
+      responses:
+        "200": { description: "The descriptor", content: { application/json: { schema: { $ref: "#/components/schemas/TransportJoin" } } } }
+        "409": { description: "bad_request: LAN sharing is off, or this node is not a relay", $ref: "#/components/responses/Problem" }
   /api/v1/events:
     get:
       operationId: events
@@ -386,6 +578,10 @@ components:
     contactId: { name: id, in: path, required: true, description: "the contact's `node_id`", schema: { $ref: "#/components/schemas/NodeId" } }
     messageId: { name: id, in: path, required: true, schema: { $ref: "#/components/schemas/MessageId" } }
     panelId: { name: id, in: path, required: true, schema: { $ref: "#/components/schemas/ServiceId" } }
+    networkId: { name: net, in: path, required: true, description: "a network id; the colon of `app:…` is percent-encoded", schema: { $ref: "#/components/schemas/NetworkId" } }
+    foreignConvId: { name: conv, in: path, required: true, schema: { $ref: "#/components/schemas/ForeignConversationId" } }
+    edgeId: { name: id, in: path, required: true, schema: { $ref: "#/components/schemas/BridgeEdgeId" } }
+    componentId: { name: id, in: path, required: true, schema: { $ref: "#/components/schemas/ComponentId" } }
   responses:
     Problem: { description: problem+json, content: { application/problem+json: { schema: { $ref: "#/components/schemas/Problem" } } } }
   schemas:
@@ -399,8 +595,10 @@ components:
         detail: { type: string }
         code:
           type: string
-          enum: [unauthenticated, loopback_only, lan_read_only, agent_unavailable, model_unavailable, bad_request, not_found, rate_limited, already_decided, not_supervised, settings_locked, offer_stale, needs_hub, upstream_error, internal, port_busy, panel_ticket_expired, restore_pending]
+          enum: [unauthenticated, loopback_only, lan_read_only, agent_unavailable, model_unavailable, bad_request, not_found, rate_limited, already_decided, not_supervised, settings_locked, offer_stale, needs_hub, upstream_error, internal, port_busy, panel_ticket_expired, restore_pending, consent_required, oversize, component_unavailable, unsupported_action]
         errors: { type: array, items: { type: object, required: [message], properties: { pointer: { type: string }, message: { type: string } } } }
+        consent: { $ref: "#/components/schemas/ConsentRequired", description: "Layer 6 extension member (RFC 9457): present on `consent_required`; the exact text and its hash to echo back" }
+        targets: { type: array, items: { $ref: "#/components/schemas/TargetRefusal" }, description: "Layer 6 extension member: the per-target report of a refused fan-out (409 `oversize` or `consent_required`); nothing was queued" }
     ServiceId: { type: string, enum: [agent, model, transport, radio, kb, gateway, codeagent, fabric, meshtastic] }
     ServiceState: { type: string, enum: [live, unset, error, starting] }
     ServiceRecord:
@@ -553,7 +751,7 @@ components:
         id: { type: string }
         node_id: { type: [string, "null"] }
         task_id: { type: [string, "null"] }
-        kind: { type: string, enum: [diagnose, propose, patch, chat, message], description: "Layer 5 adds `message` (§17 `messages.send`): the body is exactly `to: <64 lowercase hex>` + a blank line + the text verbatim; accepting it (POST /proposals/{id}/decision) makes 111d send it — only to an accepted contact and only when the proposal's `node_id` names this node — and the decision is recorded after the store committed the message" }
+        kind: { type: string, enum: [diagnose, propose, patch, chat, message, bridge_message, bridge_edge, device], description: "Layer 6 adds `bridge_message` (body: `to: <fc-id>` lines, a blank line, then the text verbatim; accepting runs the fan-out validation and, if a consent gate applies, the 409 `consent_required` round-trip), `bridge_edge` (body: a `from: <fc-id>` line and a `to: <fc-id>` line, then the agent's reason; accepting runs the edge-enable consent round-trip) and `device` (body: one JSON object `{\"why\": string, \"actions\": [Action]}` where an Action is `{\"action\": name, …args}` from the closed vocabulary `rns.interface.upsert {device_id, type, params}`, `rns.interface.remove {name}`, `rns.posture.set {share_instance, enable_transport}`, `radio.region.set {region}`, plus the one-shots `identify {device_id}` and `service.restart {service_id}`; 111d validates, applies, probes and reverts; the other vocabulary entries are refused `unsupported_action`; a body that is not that shape is 502 `upstream_error`). RENDERING RULE: the text part of a `bridge_message` or `bridge_edge` body quotes foreign, untrusted text and is rendered as a preformatted text block, never as Markdown (no links, no emphasis); `device` bodies render as a card from the parsed JSON. Layer 5 adds `message` (§17 `messages.send`): the body is exactly `to: <64 lowercase hex>` + a blank line + the text verbatim; accepting it (POST /proposals/{id}/decision) makes 111d send it — only to an accepted contact and only when the proposal's `node_id` names this node — and the decision is recorded after the store committed the message" }
         title: { type: string }
         body: { type: string, description: markdown }
         created_at: { type: string, format: date-time }
@@ -917,7 +1115,7 @@ components:
       description: "A presence source. v1: one per identified Meshtastic board, grouped as 'heard via Meshtastic on <board alias>'."
       properties:
         id: { type: string }
-        kind: { type: string, enum: [meshtastic] }
+        kind: { type: string, enum: [meshtastic, reticulum], description: "Layer 6 adds `reticulum`: announces the LXMF helper hears. For a `reticulum` source a node's `id` is the 32-hex destination hash, `num` is 0, `long_name` is the announced display name (untrusted) and `short_name` its first 8 hex; `device_id` is null. Unknown kinds render as `unknown`" }
         label: { type: string, description: "plain heading, e.g. heard via Meshtastic on Bench radio" }
         device_id: { type: [string, "null"], description: "the DeviceRecord this source reads through" }
         nodes: { type: array, items: { $ref: "#/components/schemas/NearbyNode" } }
@@ -971,6 +1169,515 @@ components:
         contact: { $ref: "#/components/schemas/Contact" }
     SseNearby: { type: object, required: [sources], properties: { sources: { type: array, items: { $ref: "#/components/schemas/NearbySource" } } } }
     SsePanels: { type: object, required: [panels], properties: { panels: { type: array, items: { $ref: "#/components/schemas/Panel" } } } }
+    # ---- Layer 6: Transport & Bridge (60-transport/README.md §3–§11; D27; additive) ----
+    NetworkId: { type: string, pattern: "^[a-z0-9][a-z0-9:_-]{0,39}$", description: "a network id (§3): `111` (the fabric; appears only in orderings), `meshtastic`, `lxmf`, `app:deltachat`, `app:simplex`. Open vocabulary: an unknown id renders as `unknown`. The colon in `app:…` is percent-encoded in a path." }
+    ForeignConversationId: { type: string, pattern: "^fc-[A-Za-z0-9_-]{1,125}$", description: "`fc-…`, minted by 111d. API bodies and proposals name a conversation by this id, never by native id or name." }
+    ForeignMessageId: { type: string, pattern: "^fm-[A-Za-z0-9_-]{1,125}$", description: "`fm-…`, minted by 111d, one per stored row (a split send is one row per part). Never a 111 `msg-…` id." }
+    BridgeEdgeId: { type: string, pattern: "^be-[A-Za-z0-9_-]{1,125}$" }
+    SendGroupId: { type: string, pattern: "^sg-[A-Za-z0-9_-]{1,125}$" }
+    ComponentId: { type: string, pattern: "^[a-z0-9][a-z0-9_-]{0,39}$", description: "an optional component's id from `assets/components/<id>.toml` (§2.1)" }
+    Sha256Hex: { type: string, pattern: "^[0-9a-f]{64}$", description: "lowercase hex SHA-256 of the exact UTF-8 bytes of the consent text it names" }
+    ForeignMessageState:
+      type: string
+      enum: [queued, sent, relayed, delivered, failed]
+      description: "Delivery evidence for a foreign row (§4), CLOSED. Monotone: `delivered` never regresses; `failed` is only for a refusal BEFORE air (see `reason_code`) and is terminal unless a later `delivered` arrives. A NAK after the board transmitted keeps `sent` or `relayed` with `evidence` 'transmitted, not confirmed'. Layer 5's `MessageState` stays at four and is not used for foreign rows."
+    ForeignAuth:
+      type: string
+      enum: [none, channel-key, pki, signed, attested-111]
+      description: "How far the sender is vouched for (§3), closed; the copy for each level comes from the adapter manifest (`Network.copy.auth`). none: nothing. channel-key: anyone with this channel key can use any name. pki: the board's PKI proved the sender key, not the name. signed: the carrier reports a validated signature (LXMF only in v1). attested-111: reserved for the second release."
+    ForeignConvKind: { type: string, enum: [channel, dm, group], description: "`group` is a destination-only local recipient list (LXMF has no channels) or an app-peer group" }
+    ForeignReasonCode:
+      type: string
+      enum: [region_unset, no_channel, too_large, not_authorized, pki_failed, got_nak, adapter_down, no_route, timeout, max_retransmit, no_response, duty_cycle, rate_limited, key_unknown, peer_unannounced, uplink_off, ham_unconfirmed, consent_paused, cancelled, oversize]
+      description: "The vocabulary of `ForeignMessage.reason_code` (§4, §5, §8), documented here once. Before air (state `failed`): region_unset, no_channel, too_large, not_authorized, pki_failed, got_nak, adapter_down. After air (state stays sent/relayed, 'transmitted, not confirmed'): no_route, timeout, max_retransmit, no_response. Retry later (state `queued`): duty_cycle, rate_limited, key_unknown, peer_unannounced, adapter_down. Consent gates: uplink_off, ham_unconfirmed, consent_paused. User acts: cancelled. oversize: refused for size in `refuse` mode. `reason_code` itself is a plain string on the wire so that growth is additive; clients render unknown values as `unknown`."
+    NetworkState: { type: string, enum: [live, not_set, error, disabled], description: "live: adapter up. not_set: needs a human fact first (no board bound, region unset). error: adapter failed or partitioned (see `reason`). disabled: optional component not enabled; its cached and installed size is in `component`." }
+    ComponentState: { type: string, enum: [declared, cached, installed, running, disabled], description: "§2.1. declared: in the release, no payload. cached: payload in cache/packages, nothing installed. installed: files installed, not running. running: supervised child up. disabled: was enabled, stopped by the user (installed files remain until remove-files)." }
+    ComponentLicense:
+      type: object
+      required: [spdx, read_at, notice]
+      properties:
+        spdx: { type: string, description: "SPDX expression of the third-party program, e.g. MPL-2.0" }
+        read_at: { type: string, description: "where to read the licence (URL or path in the cache)" }
+        notice: { type: string, description: "the one-line notice shown before enable (program, licence, where to read it, cached size); its hash is `Component.notice_hash`" }
+    Component:
+      type: object
+      required: [id, adapter, state, cached_bytes, installed_bytes, license, notice_hash, acknowledged]
+      description: "An optional third-party component (§2.1). While `disabled` or only `declared`/`cached` it has no process, listener, loaded code, timer or open file; the sizes are what enabling would add."
+      properties:
+        id: { $ref: "#/components/schemas/ComponentId" }
+        adapter: { $ref: "#/components/schemas/NetworkId", description: "the network this component carries" }
+        state: { $ref: "#/components/schemas/ComponentState" }
+        cached_bytes: { type: [integer, "null"], minimum: 0, description: "size of the cached payload; null when none is cached" }
+        installed_bytes: { type: [integer, "null"], minimum: 0, description: "size of the installed tree; null when not installed" }
+        rss_bytes: { type: [integer, "null"], minimum: 0, description: "declared resident size while running (from the manifest `[weight]`); null when unmeasured" }
+        license: { $ref: "#/components/schemas/ComponentLicense" }
+        notice_hash: { $ref: "#/components/schemas/Sha256Hex", description: "the hash `POST …/enable` must echo as `accept_notice_hash`" }
+        acknowledged: { type: boolean, description: "the user's acknowledgement of this notice (this hash) is recorded in state/bridge.json" }
+        reason_code: { type: [string, "null"], description: "stable snake_case, display-only; e.g. payload_missing, pin_mismatch, requires_unmet, child_degraded. null when nothing needs explaining" }
+        reason: { type: [string, "null"], description: "one plain sentence for `reason_code`" }
+    NetworkCopy:
+      type: object
+      required: [banner, send_warning, relay_tag, auth]
+      description: "The adapter's honest copy, from `assets/adapters/<id>.toml`, so the UI holds no per-network code (§4)."
+      properties:
+        banner: { type: string, description: "what this network is and is not, shown on the thread" }
+        send_warning: { type: string, description: "what sending means here (who can read it, what is published), shown before the first send" }
+        relay_tag: { type: string, pattern: "^[A-Za-z]{1,3}$", description: "the TAG in the relay marker `[name/TAG]` (M, LX, DC, SX)" }
+        auth: { type: object, additionalProperties: { type: string }, description: "`ForeignAuth` level to its label copy" }
+        dm_note: { type: [string, "null"], description: "DM-specific note, e.g. 'Send a Meshtastic DM from this node (readable, not 111-sealed)'" }
+    NetworkCaps:
+      type: object
+      required: [kinds, max_text_bytes, evidence, airtime, auth_levels, splittable, recipient_syntax]
+      description: "What the adapter can carry (§4); read by preview, the UI and the agent."
+      properties:
+        kinds: { type: array, items: { $ref: "#/components/schemas/ForeignConvKind" } }
+        max_text_bytes: { type: object, additionalProperties: { type: object, additionalProperties: { type: integer, minimum: 1 } }, description: "conversation kind to mode to bytes per packet; mode `default` is always present, other modes are adapter-defined (e.g. `licensed`)" }
+        evidence: { type: array, items: { $ref: "#/components/schemas/ForeignMessageState" }, description: "the states this adapter can report (Meshtastic channels never reach `delivered`)" }
+        airtime:
+          oneOf:
+            - { type: object, required: [duty_cycle_permille, bits_per_s, rule], properties: { duty_cycle_permille: { type: integer, minimum: 0 }, bits_per_s: { type: integer, minimum: 0 }, rule: { type: string, description: "the preview's estimate rule in words; always labelled an estimate" } } }
+            - { type: "null" }
+        auth_levels: { type: array, items: { $ref: "#/components/schemas/ForeignAuth" } }
+        splittable: { type: boolean, description: "the adapter supports `size_mode: split` (numbered parts)" }
+        recipient_syntax:
+          oneOf:
+            - { type: object, required: [label, pattern, example], properties: { label: { type: string }, pattern: { type: string, description: "ECMAScript-compatible regular expression for one native address" }, example: { type: string } } }
+            - { type: "null" }
+    NetworkGate:
+      type: object
+      required: [region_set, licensed, ham_confirmed, uplink_channels]
+      description: "Facts for the foreign compose gate (§10). null means not applicable to this network."
+      properties:
+        region_set: { type: [boolean, "null"], description: "the radio region is set (a board transmits nothing before it)" }
+        licensed: { type: [boolean, "null"], description: "an account of this node is an amateur-licensed board" }
+        ham_confirmed: { type: [boolean, "null"], description: "a human confirmed readable sends through the licensed account" }
+        uplink_channels: { type: integer, minimum: 0, description: "channels whose board publishes them to the internet (MQTT uplink)" }
+    NetworkCounts:
+      type: object
+      required: [conversations, unread, queued, edges]
+      properties:
+        conversations: { type: integer, minimum: 0 }
+        unread: { type: integer, minimum: 0, description: "foreign DM unread only counts here; it never raises the header badge (§10)" }
+        queued: { type: integer, minimum: 0, description: "own rows still `queued` (waiting for the radio, a path or a key)" }
+        edges: { type: integer, minimum: 0, description: "relay edges with an endpoint on this network" }
+    Network:
+      type: object
+      required: [id, label, chip, state, account, copy, caps, gate, counts, dropped, component]
+      description: "One bridgeable foreign network (§10). Every foreign string reachable from it (account, names) is untrusted: render as text only."
+      properties:
+        id: { $ref: "#/components/schemas/NetworkId" }
+        label: { type: string, description: "from the adapter manifest, e.g. Meshtastic" }
+        chip: { type: string, description: "the short network chip shown on every foreign message" }
+        state: { $ref: "#/components/schemas/NetworkState" }
+        reason_code: { type: [string, "null"], description: "stable snake_case, display-only: region_unset, no_board, adapter_down, partitioned, component_unavailable, … null while live" }
+        reason: { type: [string, "null"], description: "one plain sentence for `reason_code`" }
+        account: { type: [string, "null"], description: "which board or identity of ours speaks on this network (e.g. the board's long name and `!id`, or the LXMF destination hash); null when none" }
+        copy: { $ref: "#/components/schemas/NetworkCopy" }
+        caps: { $ref: "#/components/schemas/NetworkCaps" }
+        gate: { $ref: "#/components/schemas/NetworkGate" }
+        counts: { $ref: "#/components/schemas/NetworkCounts" }
+        dropped: { type: integer, minimum: 0, description: "texts the adapter dropped while 111 was busy (bounded inbound queue overflow); shown as 'N texts dropped while 111 was busy', never silent (§4)" }
+        component: { oneOf: [ { $ref: "#/components/schemas/Component" }, { type: "null" } ], description: "the optional component behind this network, or null for the compiled-in Meshtastic adapter" }
+    ForeignConversation:
+      type: object
+      required: [id, network, account, kind, native_id, title, last_seq, unread, pinned]
+      properties:
+        id: { $ref: "#/components/schemas/ForeignConversationId" }
+        network: { $ref: "#/components/schemas/NetworkId" }
+        account: { type: string, description: "which board or identity of ours this conversation belongs to" }
+        kind: { $ref: "#/components/schemas/ForeignConvKind" }
+        native_id: { type: string, description: "the network's own id (`!a1b2c3d4`, a destination hash, a channel `ch:<name>:<kh>`); untrusted, text only" }
+        title: { type: string, description: "foreign name; UNTRUSTED, control and format characters already stripped, text only" }
+        last_seq: { type: integer, minimum: 0, description: "highest `seq` stored for this conversation (0 when empty)" }
+        unread: { type: integer, minimum: 0 }
+        pinned: { type: boolean, description: "pinned conversations are never pruned and may raise the attention count" }
+        uplink: { type: [boolean, "null"], description: "channels: the board publishes this channel to the internet (MQTT uplink), read live; null when not applicable" }
+        send_enabled: { type: boolean, description: "the per-channel send switch (`PATCH /bridge/settings`); an uplinked channel is off by default" }
+    ForeignSender:
+      type: object
+      required: [native, name]
+      properties:
+        native: { type: string, description: "the sender's id on that network (`!a1b2c3d4`, a destination hash); untrusted" }
+        name: { type: string, description: "the sender's self-declared name; UNTRUSTED: `auth` says what, if anything, vouches for it" }
+    ForeignPart:
+      type: object
+      required: [k, n]
+      properties: { k: { type: integer, minimum: 1 }, n: { type: integer, minimum: 2 } }
+    ForeignRelayedFrom:
+      type: object
+      required: [msg, edge]
+      description: "Set on a relayed copy (an `own` row made by an edge)"
+      properties: { msg: { $ref: "#/components/schemas/ForeignMessageId", description: "the origin row" }, edge: { $ref: "#/components/schemas/BridgeEdgeId" } }
+    ForeignMessage:
+      type: object
+      required: [id, conv, dir, sender, auth, text, state, evidence, reason_code, reason, group_id, part, relayed_from, via_internet, seq, at, claim_ts, truncated]
+      description: "One stored foreign row (§3). Order is `seq` (receipt sequence from the store-wide counter); `at` and `claim_ts` are display only and order nothing. Peer-authored fields (`text`, `sender.name`) are untrusted: text-only rendering, and the agent sees them only inside a labelled untrusted block."
+      properties:
+        id: { $ref: "#/components/schemas/ForeignMessageId" }
+        conv: { $ref: "#/components/schemas/ForeignConversationId" }
+        dir: { type: string, enum: [in, own] }
+        sender: { $ref: "#/components/schemas/ForeignSender" }
+        auth: { $ref: "#/components/schemas/ForeignAuth" }
+        text: { type: string, description: "stored body after the one ingest function (Cc and Cf stripped, NFC, capped at 64 KiB). Foreign text: untrusted" }
+        state: { $ref: "#/components/schemas/ForeignMessageState", description: "dir=in is always `delivered` (it arrived here)" }
+        evidence: { type: [string, "null"], description: "the string the UI prints for the state, from the adapter (e.g. 'accepted by the radio', 'a neighbour rebroadcast it'); null for dir=in" }
+        reason_code: { type: [string, "null"], description: "stable snake_case, display-only for clients; the vocabulary is `ForeignReasonCode` (region_unset, no_channel, too_large, not_authorized, pki_failed, got_nak, adapter_down, no_route, timeout, max_retransmit, no_response, duty_cycle, rate_limited, key_unknown, peer_unannounced, uplink_off, ham_unconfirmed, consent_paused, cancelled, oversize). Unknown values render as `unknown`. null when nothing needs explaining" }
+        reason: { type: [string, "null"], description: "one plain sentence for `reason_code`" }
+        group_id: { oneOf: [ { $ref: "#/components/schemas/SendGroupId" }, { type: "null" } ], description: "the send group a user-composed row belongs to" }
+        part: { oneOf: [ { $ref: "#/components/schemas/ForeignPart" }, { type: "null" } ], description: "k of n for one part of a split send; the UI shows the lowest state among a send's parts" }
+        relayed_from: { oneOf: [ { $ref: "#/components/schemas/ForeignRelayedFrom" }, { type: "null" } ] }
+        via_internet: { type: boolean, description: "Meshtastic `via_mqtt`: the packet reached the board over an MQTT bridge. Shown as 'via internet'" }
+        seq: { type: integer, minimum: 0, description: "local ordering sequence (the store's `local_seq`); strictly increasing per node" }
+        at: { type: string, format: date-time, description: "local wall-clock time this node stored the row. Display only" }
+        claim_ts: { type: [string, "null"], format: date-time, description: "the foreign side's own timestamp, unverified: shown only behind a 'sender's claim' disclosure. null when absent" }
+        truncated: { type: [integer, "null"], minimum: 0, description: "when the stored body was cut at 64 KiB, the original size in bytes (the UI says 'message too long to show (N bytes)'); null otherwise" }
+    ForeignThread:
+      type: object
+      required: [schema, conversation, messages, more]
+      properties:
+        schema: { type: integer }
+        conversation: { $ref: "#/components/schemas/ForeignConversation" }
+        messages: { type: array, items: { $ref: "#/components/schemas/ForeignMessage" } }
+        more: { type: boolean }
+    ForeignDmOpen:
+      type: object
+      required: [kind, native_id]
+      properties:
+        kind: { type: string, const: dm }
+        native_id: { type: string, minLength: 1, maxLength: 128, description: "the recipient's native address on that network" }
+    SendMode: { type: string, enum: [refuse, split], description: "per target: refuse (default) answers oversize and sends nothing; split cuts at UTF-8 boundaries into numbered parts `(k/n) `. Truncation never happens silently." }
+    PlanWarning:
+      type: object
+      required: [code, text]
+      description: "A fact that does not refuse the send: the row queues or goes out with it."
+      properties:
+        code: { type: string, description: "stable snake_case: region_unset, duty_cycle, adapter_down, uplink_channel, parts_out_of_order, … " }
+        text: { type: string }
+    SendPlan:
+      type: object
+      required: [bytes, cap, parts, size_mode, airtime_estimate, refusal, warnings]
+      description: "What a send will do to one target (§9)."
+      properties:
+        bytes: { type: integer, minimum: 0, description: "UTF-8 bytes of the text, plus the relay or part overhead that would be added" }
+        cap: { type: [integer, "null"], minimum: 1, description: "the target's `max_text_bytes` for its kind and mode; null when the carrier states none" }
+        parts: { type: integer, minimum: 1, description: "1 unless `size_mode` is split and the text is over the cap" }
+        size_mode: { $ref: "#/components/schemas/SendMode" }
+        airtime_estimate:
+          oneOf:
+            - { type: object, required: [millis, label], properties: { millis: { type: [integer, "null"], minimum: 0 }, label: { type: string, description: "always labelled an estimate, e.g. 'about 2.1 s (estimate)' or 'depends on the path'" } } }
+            - { type: "null" }
+        refusal: { oneOf: [ { $ref: "#/components/schemas/PlanRefusal" }, { type: "null" } ], description: "non-null: this target would be refused and (in a fan-out) nothing is queued" }
+        warnings: { type: array, items: { $ref: "#/components/schemas/PlanWarning" } }
+    PlanRefusal:
+      type: object
+      required: [code, detail, consent]
+      properties:
+        code: { type: string, enum: [oversize, ham_unconfirmed, uplink_off] }
+        detail: { type: string, description: "plain sentence, e.g. '312 B > 232 B per packet'" }
+        consent: { oneOf: [ { $ref: "#/components/schemas/ConsentRequired" }, { type: "null" } ], description: "for a consent gate (ham_unconfirmed, uplink_off): the exact text and hash to confirm via PATCH /bridge/settings; null for oversize" }
+    ConsentRequired:
+      type: object
+      required: [action, subject, warning_text, hash, addons]
+      description: "The 409 consent round-trip (§2.1, §8): the daemon states the exact text, the client shows it and echoes `hash` back (`accept_warning` or `accept_notice_hash`). A text that changed since (a live fact moved) has a new hash, so a stale echo is refused again. Never a bare PATCH."
+      properties:
+        action: { type: string, enum: [edge_enable, edge_resume, component_enable, ham_confirm, uplink_send], description: "which confirmation this is" }
+        subject: { type: string, description: "what it is about: the edge id or `src>dst` pair, the component id, the account, or the channel's `fc-…` id" }
+        warning_text: { type: string, description: "the exact text the user is confirming; may quote untrusted channel names: text only" }
+        hash: { $ref: "#/components/schemas/Sha256Hex" }
+        addons: { type: array, items: { type: string }, description: "the live add-on facts included in the text (default-key source, uplinked destination, licensed account) so the UI can badge them" }
+    FanoutTarget:
+      description: "One target of a fan-out: a foreign conversation (or recipient list) of an enabled network, or a 111 contact."
+      oneOf:
+        - { $ref: "#/components/schemas/FanoutForeignTarget" }
+        - { $ref: "#/components/schemas/FanoutContactTarget" }
+    FanoutForeignTarget:
+      type: object
+      required: [network, conv]
+      properties:
+        network: { $ref: "#/components/schemas/NetworkId" }
+        conv: { $ref: "#/components/schemas/ForeignConversationId" }
+        size_mode: { $ref: "#/components/schemas/SendMode", description: "this target's mode; falls back to the request's `size_mode`, then `refuse`" }
+    FanoutContactTarget:
+      type: object
+      required: [node_id]
+      properties: { node_id: { $ref: "#/components/schemas/NodeId", description: "an accepted 111 contact: an ordinary sealed message with Layer 5 states" } }
+    FanoutRequest:
+      type: object
+      required: [text, targets]
+      properties:
+        text: { type: string, minLength: 1, description: "the text, copied into every target (nothing is exported from a 111 thread)" }
+        targets: { type: array, minItems: 1, maxItems: 64, items: { $ref: "#/components/schemas/FanoutTarget" } }
+        size_mode: { $ref: "#/components/schemas/SendMode", description: "default for targets that do not name one" }
+    FanoutPreviewItem:
+      type: object
+      required: [target, plan]
+      properties: { target: { $ref: "#/components/schemas/FanoutTarget" }, plan: { $ref: "#/components/schemas/SendPlan" } }
+    FanoutPreview:
+      type: object
+      required: [schema, text_bytes, ok, items]
+      properties:
+        schema: { type: integer }
+        text_bytes: { type: integer, minimum: 0 }
+        ok: { type: boolean, description: "no target carries a `refusal`: sending now would queue every row" }
+        items: { type: array, items: { $ref: "#/components/schemas/FanoutPreviewItem" } }
+    SendItem:
+      type: object
+      required: [target, id, plan]
+      properties:
+        target: { $ref: "#/components/schemas/FanoutTarget" }
+        id: { type: string, description: "the row: `fm-…` for a foreign target (the first part of a split), `msg-…` for a 111 contact" }
+        ids: { type: array, items: { type: string }, description: "every row of a split send, one per part, in part order; absent for a single row" }
+        plan: { $ref: "#/components/schemas/SendPlan" }
+    SendGroup:
+      type: object
+      required: [id, text, items]
+      description: "A fan-out as stored (§3, §9): per-target rows keep their own state, retry and cancel."
+      properties:
+        id: { $ref: "#/components/schemas/SendGroupId" }
+        text: { type: string }
+        items: { type: array, items: { $ref: "#/components/schemas/SendItem" } }
+    FanoutResult:
+      type: object
+      required: [schema, group_id, items]
+      properties:
+        schema: { type: integer }
+        group_id: { $ref: "#/components/schemas/SendGroupId" }
+        items: { type: array, items: { $ref: "#/components/schemas/SendItem" } }
+    ForeignSendRequest:
+      type: object
+      required: [text]
+      properties:
+        text: { type: string, minLength: 1 }
+        size_mode: { $ref: "#/components/schemas/SendMode" }
+    ForeignSendAccepted:
+      type: object
+      required: [schema, id, plan]
+      properties:
+        schema: { type: integer }
+        id: { $ref: "#/components/schemas/ForeignMessageId", description: "the row (the first part of a split send)" }
+        ids: { type: array, items: { $ref: "#/components/schemas/ForeignMessageId" }, description: "every row of a split send, in part order; absent for a single row" }
+        plan: { $ref: "#/components/schemas/SendPlan" }
+    BridgeEdgeCounters:
+      type: object
+      required: [relayed, shed, refused]
+      properties:
+        relayed: { type: integer, minimum: 0, description: "copies handed to the destination adapter" }
+        shed: { type: integer, minimum: 0, description: "backlog copies dropped oldest-first at capacity (shown as a visible counter; `relayed_seq` advances past them)" }
+        refused: { type: integer, minimum: 0, description: "copies not made: too long in `refuse` mode ('N too long to relay'), or no ok-to-MQTT bit while `honour_ok_to_mqtt`" }
+    BridgeEdge:
+      type: object
+      required: [id, src, dst, enabled, paused, cursor_seq, relayed_seq, honour_ok_to_mqtt, oversize, consent_hash, counters, pause_reason]
+      description: "An explicit, directed, non-transitive relay from `src` to `dst` (§8). Only a human enables one."
+      properties:
+        id: { $ref: "#/components/schemas/BridgeEdgeId" }
+        src: { $ref: "#/components/schemas/ForeignConversationId" }
+        dst: { $ref: "#/components/schemas/ForeignConversationId" }
+        enabled: { type: boolean, description: "read-only: false while either endpoint's adapter is not enabled (the edge is kept, nothing relays)" }
+        paused: { type: boolean }
+        cursor_seq: { type: integer, minimum: 0, description: "`seq` at enable: history is never relayed" }
+        relayed_seq: { type: integer, minimum: 0, description: "highest origin `seq` handed to a copy; advanced on a shed too" }
+        honour_ok_to_mqtt: { type: boolean, description: "off by default; when on, a Meshtastic-origin message without the ok-to-MQTT bit is not relayed off the mesh and counts as refused" }
+        oversize: { type: string, enum: [refuse, split], description: "a copy is never truncated: refuse (default) or split into numbered parts" }
+        consent_hash: { oneOf: [ { $ref: "#/components/schemas/Sha256Hex" }, { type: "null" } ], description: "hash of the warning text the human confirmed; null before the first confirmation" }
+        counters: { $ref: "#/components/schemas/BridgeEdgeCounters" }
+        pause_reason: { type: [string, "null"], description: "why it is paused: `user`, or `consent_paused` (a live consent fact changed after enable: uplink, licensed mode, channel key). null while not paused. Resuming a consent_paused edge needs the new text's hash" }
+    BridgeEdgeCreate:
+      type: object
+      required: [src, dst]
+      properties:
+        src: { $ref: "#/components/schemas/ForeignConversationId" }
+        dst: { $ref: "#/components/schemas/ForeignConversationId" }
+        honour_ok_to_mqtt: { type: boolean, default: false }
+        oversize: { type: string, enum: [refuse, split], default: refuse }
+        accept_warning: { $ref: "#/components/schemas/Sha256Hex", description: "the `ConsentRequired.hash` of the warning the user was shown; absent on the first call (409 consent_required answers with the text)" }
+    BridgeEdgePatch:
+      type: object
+      properties:
+        paused: { type: boolean }
+        honour_ok_to_mqtt: { type: boolean }
+        oversize: { type: string, enum: [refuse, split] }
+        accept_warning: { $ref: "#/components/schemas/Sha256Hex", description: "required to resume a consent_paused edge: the hash of the NEW warning text" }
+    RecipientList:
+      type: object
+      required: [id, network, name, members]
+      description: "A local, destination-only recipient list (§6): one DM per member from the bridge identity. A fan-out target and an edge destination, never a source."
+      properties:
+        id: { type: string, pattern: "^[A-Za-z0-9_-]{1,64}$" }
+        network: { $ref: "#/components/schemas/NetworkId" }
+        name: { type: string, maxLength: 64, description: "user-chosen label; text only" }
+        members: { type: array, maxItems: 256, items: { type: string }, description: "native addresses (e.g. 32-hex LXMF destinations), validated against `caps.recipient_syntax`" }
+    ChannelSwitch:
+      type: object
+      required: [conv, network, send, uplink]
+      properties:
+        conv: { $ref: "#/components/schemas/ForeignConversationId" }
+        network: { $ref: "#/components/schemas/NetworkId" }
+        send: { type: boolean, description: "the per-channel send switch; gates every send on the channel, relay copies included" }
+        uplink: { type: [boolean, "null"], description: "the board publishes this channel to the internet, read live" }
+    HamAccount:
+      type: object
+      required: [account, licensed, confirmed]
+      properties:
+        account: { type: string, description: "which board of ours" }
+        licensed: { type: boolean, description: "the board reports an amateur-licensed user, read live" }
+        confirmed: { type: boolean, description: "a human confirmed readable sends and relays through this account (recorded with the text hash)" }
+    BridgeAnnounce:
+      type: object
+      required: [name, interval_min]
+      properties:
+        name: { type: [string, "null"], maxLength: 64, description: "the LXMF display name announced; null = the default `111-<4 hex>`" }
+        interval_min: { type: integer, minimum: 0, description: "minutes between announces; 0 = on events only" }
+    BridgeSettings:
+      type: object
+      required: [schema, order, adapters, recipient_lists, channels, ham, announce]
+      description: "Mirror of state/bridge.json plus the preferred order from interfaces.toml (§2, §11). No key material and no passphrase."
+      properties:
+        schema: { type: integer }
+        order: { type: array, items: { $ref: "#/components/schemas/NetworkId" }, description: "the user's preferred networks, first = most preferred (drives the rail, Settings and the agent's setup proposals; runtime fall-back through the list is Layer 7)" }
+        adapters: { type: object, additionalProperties: { type: boolean }, description: "network id to enabled, for compiled-in adapters; optional components are `Component.state`" }
+        recipient_lists: { type: array, items: { $ref: "#/components/schemas/RecipientList" } }
+        channels: { type: array, items: { $ref: "#/components/schemas/ChannelSwitch" } }
+        ham: { type: array, items: { $ref: "#/components/schemas/HamAccount" } }
+        announce: { $ref: "#/components/schemas/BridgeAnnounce" }
+    BridgeChannelPatch:
+      type: object
+      required: [conv, send]
+      properties:
+        conv: { $ref: "#/components/schemas/ForeignConversationId" }
+        send: { type: boolean }
+        accept_warning: { $ref: "#/components/schemas/Sha256Hex", description: "turning send on for an uplinked channel needs the hash of its warning ('this channel is published to the internet by your board')" }
+    BridgeHamPatch:
+      type: object
+      required: [account, confirmed]
+      properties:
+        account: { type: string }
+        confirmed: { type: boolean }
+        accept_warning: { $ref: "#/components/schemas/Sha256Hex", description: "confirming needs the hash of the licensee warning; withdrawing a confirmation needs none" }
+    BridgeAnnouncePatch:
+      type: object
+      properties:
+        name: { type: [string, "null"], maxLength: 64 }
+        interval_min: { type: integer, minimum: 0 }
+    BridgeSettingsPatch:
+      type: object
+      description: "Partial merge. `recipient_lists` replaces the whole set. `channels` and `ham` list only the entries that change; if several lack a current hash the 409 describes the first."
+      properties:
+        order: { type: array, items: { $ref: "#/components/schemas/NetworkId" } }
+        adapters: { type: object, additionalProperties: { type: boolean } }
+        recipient_lists: { type: array, items: { $ref: "#/components/schemas/RecipientList" } }
+        channels: { type: array, items: { $ref: "#/components/schemas/BridgeChannelPatch" } }
+        ham: { type: array, items: { $ref: "#/components/schemas/BridgeHamPatch" } }
+        announce: { $ref: "#/components/schemas/BridgeAnnouncePatch" }
+    ComponentEnableRequest:
+      type: object
+      properties:
+        accept_notice_hash: { $ref: "#/components/schemas/Sha256Hex", description: "`Component.notice_hash` as shown to the user; absent on the first call (409 consent_required answers with the notice)" }
+    ComponentRemoveRequest:
+      type: object
+      properties:
+        cache: { type: boolean, default: false, description: "also delete the cached payload (separately confirmed; without it a later enable is offline)" }
+    TransportInterface:
+      type: object
+      required: [name, type, up, rx, tx, peers]
+      description: "One rnsd interface from the cached `rnstatus` (§11). Names and types are rnsd's strings: untrusted text."
+      properties:
+        name: { type: string }
+        type: { type: string, description: "e.g. AutoInterface, RNodeInterface, BackboneInterface, TCPClientInterface" }
+        up: { type: boolean }
+        rx: { type: integer, minimum: 0, description: "bytes received since the interface came up" }
+        tx: { type: integer, minimum: 0, description: "bytes sent since the interface came up" }
+        peers: { type: [integer, "null"], minimum: 0, description: "heard peers or connected clients; null when the interface type does not report them" }
+    TransportLan:
+      type: object
+      required: [backbone_listen, port, ifac]
+      properties:
+        backbone_listen: { type: boolean, description: "a BackboneInterface listener, rendered only while LAN sharing is on" }
+        port: { type: integer, minimum: 1, maximum: 65535, description: "default 4242" }
+        ifac: { type: boolean, description: "an IFAC passphrase is set (the passphrase itself is only on POST /transport/join)" }
+    TransportPosture:
+      type: object
+      required: [share_instance, instance_name, enable_transport, lan, stock_autointerface, propagation_node]
+      description: "The rnsd posture from interfaces.toml `[posture]` (§11)."
+      properties:
+        share_instance: { type: boolean }
+        instance_name: { type: string }
+        enable_transport: { type: boolean, description: "default true on Cat 3/4, false elsewhere" }
+        lan: { $ref: "#/components/schemas/TransportLan" }
+        stock_autointerface: { type: boolean, description: "second AutoInterface in the stock `reticulum` group: opt-in" }
+        propagation_node: { type: boolean, description: "LXMF propagation role: opt-in" }
+    TransportStatus:
+      type: object
+      required: [schema, interfaces, interfaces_state, posture, region, callsign, order]
+      properties:
+        schema: { type: integer }
+        interfaces: { type: array, items: { $ref: "#/components/schemas/TransportInterface" } }
+        interfaces_state: { type: string, enum: [ok, stale, unavailable], description: "the rnstatus cache: ok (fresh), stale (last good, tick missed), unavailable (rnsd absent or rnstatus failed; `interfaces` is empty)" }
+        posture: { $ref: "#/components/schemas/TransportPosture" }
+        region: { type: [string, "null"], description: "radio region id from the KB region table; null until a human sets it (a board transmits nothing before)" }
+        callsign: { type: [string, "null"], maxLength: 16, description: "optional, for licensed operators; display and confirmation copy only" }
+        order: { type: array, items: { $ref: "#/components/schemas/NetworkId" }, description: "the preferred networks, in the user's order" }
+    TransportPosturePatch:
+      type: object
+      description: "Partial merge. Each part goes through apply, probe, revert (§12)."
+      properties:
+        posture:
+          type: object
+          properties:
+            share_instance: { type: boolean }
+            instance_name: { type: string, minLength: 1, maxLength: 32 }
+            enable_transport: { type: boolean }
+            lan:
+              type: object
+              properties: { backbone_listen: { type: boolean }, port: { type: integer, minimum: 1024, maximum: 65535 }, ifac: { type: boolean } }
+            stock_autointerface: { type: boolean }
+            propagation_node: { type: boolean }
+        region: { type: string, minLength: 1, maxLength: 32, description: "a user-confirmed region id (the request is the confirmation); unknown id is 400" }
+        callsign: { type: [string, "null"], maxLength: 16 }
+        order: { type: array, items: { $ref: "#/components/schemas/NetworkId" } }
+    TransportPostureResult:
+      type: object
+      required: [schema, applied, reverted, reason, status]
+      properties:
+        schema: { type: integer }
+        applied: { type: boolean, description: "the change is live and probed good" }
+        reverted: { type: boolean, description: "the probe failed within 30 s and the snapshot was restored; the previous posture is live" }
+        reason: { type: [string, "null"], description: "one plain sentence when reverted" }
+        status: { $ref: "#/components/schemas/TransportStatus" }
+    TransportJoin:
+      type: object
+      required: [schema, address, port]
+      description: "The phone-relay join descriptor (§11). Carries a shared network credential: served by POST only, no-store, never logged. Not identity key material."
+      properties:
+        schema: { type: integer }
+        address: { type: string, description: "the hub's LAN address" }
+        port: { type: integer, minimum: 1, maximum: 65535 }
+        ifac_name: { type: string, description: "IFAC network name; absent when IFAC is off" }
+        ifac_passphrase: { type: string, description: "IFAC passphrase; absent when IFAC is off. Never in a QR" }
+    SseNetworkMessage:
+      type: object
+      required: [network, conv, change, seq]
+      description: "A foreign message, state change or conversation change. Coalesced per message per tick for DMs and own rows, and per CONVERSATION per tick (conversation plus highest `seq`, no `id`) for unpinned channel traffic, so a flood cannot fill the 256-entry ring. `change` is the first change since the previous frame. Refetch the conversation; the frame carries no text."
+      properties:
+        network: { $ref: "#/components/schemas/NetworkId" }
+        conv: { $ref: "#/components/schemas/ForeignConversationId" }
+        id: { $ref: "#/components/schemas/ForeignMessageId", description: "absent on a coalesced channel frame and on `conversation`" }
+        change: { type: string, enum: [new, state, conversation] }
+        seq: { type: integer, minimum: 0, description: "highest `seq` in the conversation after the change" }
+    SseBridge:
+      type: object
+      description: "Adapter and edge status as full snapshots (like `fabric`): a key is present only when that part changed."
+      properties:
+        networks: { type: array, items: { $ref: "#/components/schemas/Network" } }
+        edges: { type: array, items: { $ref: "#/components/schemas/BridgeEdge" } }
+    TargetRefusal:
+      type: object
+      required: [target, code, detail, consent]
+      description: "One refused target in a 409 fan-out report (`Problem.targets`): nothing was queued for any target."
+      properties:
+        target: { $ref: "#/components/schemas/FanoutTarget" }
+        code: { type: string, enum: [oversize, consent_required], description: "oversize: over the cap in refuse mode. consent_required: a gate (`ham_unconfirmed` or `uplink_off`, named in `consent.action`) needs a confirmation first" }
+        detail: { type: string }
+        consent: { oneOf: [ { $ref: "#/components/schemas/ConsentRequired" }, { type: "null" } ] }
 x-sse-events:
   events:
     status: "#/components/schemas/Status"
@@ -984,6 +1691,8 @@ x-sse-events:
     fabric: "#/components/schemas/FabricStatus"
     nearby: "#/components/schemas/SseNearby"
     panels: "#/components/schemas/SsePanels"
+    network_message: "#/components/schemas/SseNetworkMessage"
+    bridge: "#/components/schemas/SseBridge"
   chat:
     token: "#/components/schemas/SseChatToken"
     tool: "#/components/schemas/SseChatTool"
