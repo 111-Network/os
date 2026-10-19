@@ -204,7 +204,8 @@ copy, category/role, version, uptime, update state, last check, gateway) · **Ag
 
 > **Layer 5 delivers (U2):** the Needs-you block gains one row, "N message requests", linking to `/messages` (the count is
 > `Attention.openRequests`: requests ignored on this device are not counted, so the row and the header badge agree; it is a count and
-> never what a sender wrote).
+> never what a sender wrote). The Nearby card stays transport-level; its advanced-only note now points to `/nearby` (the Meshtastic
+> nodes a board has heard, §6.4) instead of announcing a table to come, and names radar and map views as Layer 7's.
 
 ### 6.3 Devices — `/devices` (core)
 Everything the user owns and has attached to or paired with this node — never other people's nodes

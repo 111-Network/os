@@ -130,7 +130,7 @@ export function needsYou(
 
 // ----------------------------------------------------------------------------- nearby / devices
 
-/** One sentence from `transport_state` (v1 knows nothing else about the neighbourhood). */
+/** One sentence from `transport_state`. The card stays transport-level; the nodes a Meshtastic board has heard are listed on the Nearby page. */
 export function nearbySentence(status: Status | null): string {
   switch (status?.transport_state) {
     case "joined":

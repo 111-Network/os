@@ -258,7 +258,9 @@ export default function OverviewView() {
           <h2 className="sr-only">Nearby</h2>
           <p className="font-mono text-sm leading-relaxed text-foreground">{nearbySentence(status)}</p>
           <Adv>
-            <p className={TEXT}>The nearby-nodes table arrives with the relay and presence layers. Today the node only knows whether it has heard anyone.</p>
+            <p className={TEXT}>
+              This card only says whether anyone has been heard. The Meshtastic nodes a board has heard are listed on the Nearby page; radar and map views arrive with Layer 7 (Relay &amp; presence).
+            </p>
           </Adv>
           <RouteLink to="/nearby" className="inline-flex min-h-11 items-center font-mono text-xs">
             See who is nearby
