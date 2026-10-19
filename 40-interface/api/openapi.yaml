@@ -562,7 +562,7 @@ paths:
       summary: "The phone-relay join descriptor (address, port, IFAC name and passphrase if set)"
       description: "A POST because it returns a credential and the agent's bearer reads every GET: this route is `no-store`, refuses the bearer (401) like every non-GET, and is served only on a paired or loopback session. Used by a phone's `111d` after the QR pair-code ceremony to write its own `TCPClientInterface` entry; the passphrase never rides in the QR. 409 `bad_request` while LAN sharing is off (no Backbone listener to join). The IFAC passphrase is a shared network credential, not identity key material."
       responses:
-        "200": { description: "The descriptor", content: { application/json: { schema: { $ref: "#/components/schemas/TransportJoin" } } } }
+        "200": { description: "The descriptor", headers: { Cache-Control: { schema: { type: string, enum: [no-store] }, description: "always `no-store`: the body carries a credential" } }, content: { application/json: { schema: { $ref: "#/components/schemas/TransportJoin" } } } }
         "409": { description: "bad_request: LAN sharing is off, or this node is not a relay", $ref: "#/components/responses/Problem" }
   /api/v1/events:
     get:
@@ -1280,7 +1280,7 @@ components:
         component: { oneOf: [ { $ref: "#/components/schemas/Component" }, { type: "null" } ], description: "the optional component behind this network, or null for the compiled-in Meshtastic adapter" }
     ForeignConversation:
       type: object
-      required: [id, network, account, kind, native_id, title, last_seq, unread, pinned]
+      required: [id, network, account, kind, native_id, title, last_seq, unread, pinned, send_enabled]
       properties:
         id: { $ref: "#/components/schemas/ForeignConversationId" }
         network: { $ref: "#/components/schemas/NetworkId" }
@@ -1292,7 +1292,7 @@ components:
         unread: { type: integer, minimum: 0 }
         pinned: { type: boolean, description: "pinned conversations are never pruned and may raise the attention count" }
         uplink: { type: [boolean, "null"], description: "channels: the board publishes this channel to the internet (MQTT uplink), read live; null when not applicable" }
-        send_enabled: { type: boolean, description: "the per-channel send switch (`PATCH /bridge/settings`); an uplinked channel is off by default" }
+        send_enabled: { type: [boolean, "null"], description: "the per-channel send switch (`PATCH /bridge/settings`); an uplinked channel is off by default; null when not applicable (a DM or a recipient list)" }
     ForeignSender:
       type: object
       required: [native, name]
@@ -1466,13 +1466,16 @@ components:
         refused: { type: integer, minimum: 0, description: "copies not made: too long in `refuse` mode ('N too long to relay'), or no ok-to-MQTT bit while `honour_ok_to_mqtt`" }
     BridgeEdge:
       type: object
-      required: [id, src, dst, enabled, paused, cursor_seq, relayed_seq, honour_ok_to_mqtt, oversize, consent_hash, counters, pause_reason]
+      required: [id, src, dst, src_kind, dst_kind, enabled, enabled_by, paused, cursor_seq, relayed_seq, honour_ok_to_mqtt, oversize, consent_hash, counters, pause_reason]
       description: "An explicit, directed, non-transitive relay from `src` to `dst` (§8). Only a human enables one."
       properties:
         id: { $ref: "#/components/schemas/BridgeEdgeId" }
         src: { $ref: "#/components/schemas/ForeignConversationId" }
         dst: { $ref: "#/components/schemas/ForeignConversationId" }
+        src_kind: { type: string, enum: [channel, group], description: "the source conversation's kind (denormalised, §3: a DM endpoint is unrepresentable)" }
+        dst_kind: { type: string, enum: [channel, group] }
         enabled: { type: boolean, description: "read-only: false while either endpoint's adapter is not enabled (the edge is kept, nothing relays)" }
+        enabled_by: { type: string, maxLength: 256, description: "which session enabled it (§3 `relay_edges.enabled_by`): `loopback`, or the paired session's label; never a secret" }
         paused: { type: boolean }
         cursor_seq: { type: integer, minimum: 0, description: "`seq` at enable: history is never relayed" }
         relayed_seq: { type: integer, minimum: 0, description: "highest origin `seq` handed to a copy; advanced on a shed too" }

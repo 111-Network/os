@@ -1928,8 +1928,8 @@ export interface components {
             pinned: boolean;
             /** @description channels: the board publishes this channel to the internet (MQTT uplink), read live; null when not applicable */
             uplink?: boolean | null;
-            /** @description the per-channel send switch (`PATCH /bridge/settings`); an uplinked channel is off by default */
-            send_enabled?: boolean;
+            /** @description the per-channel send switch (`PATCH /bridge/settings`); an uplinked channel is off by default; null when not applicable (a DM or a recipient list) */
+            send_enabled: boolean | null;
         };
         ForeignSender: {
             /** @description the sender's id on that network (`!a1b2c3d4`, a destination hash); untrusted */
@@ -2125,8 +2125,17 @@ export interface components {
             id: components["schemas"]["BridgeEdgeId"];
             src: components["schemas"]["ForeignConversationId"];
             dst: components["schemas"]["ForeignConversationId"];
+            /**
+             * @description the source conversation's kind (denormalised, §3: a DM endpoint is unrepresentable)
+             * @enum {string}
+             */
+            src_kind: "channel" | "group";
+            /** @enum {string} */
+            dst_kind: "channel" | "group";
             /** @description read-only: false while either endpoint's adapter is not enabled (the edge is kept, nothing relays) */
             enabled: boolean;
+            /** @description which session enabled it (§3 `relay_edges.enabled_by`): `loopback`, or the paired session's label; never a secret */
+            enabled_by: string;
             paused: boolean;
             /** @description `seq` at enable: history is never relayed */
             cursor_seq: number;
@@ -4088,6 +4097,8 @@ export interface operations {
             /** @description The descriptor */
             200: {
                 headers: {
+                    /** @description always `no-store`: the body carries a credential */
+                    "Cache-Control"?: "no-store";
                     [name: string]: unknown;
                 };
                 content: {

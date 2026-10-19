@@ -25,7 +25,7 @@ const FOREIGN_MSG = {
   at: "2026-10-19T09:00:00Z", claim_ts: null, truncated: null,
 };
 const EDGE = {
-  id: "be-1", src: "fc-3", dst: "fc-4", enabled: true, paused: false, cursor_seq: 10, relayed_seq: 12, honour_ok_to_mqtt: false, oversize: "refuse",
+  id: "be-1", src: "fc-3", dst: "fc-4", src_kind: "channel", dst_kind: "group", enabled: true, enabled_by: "loopback", paused: false, cursor_seq: 10, relayed_seq: 12, honour_ok_to_mqtt: false, oversize: "refuse",
   consent_hash: HASH, counters: { relayed: 3, shed: 0, refused: 1 }, pause_reason: null,
 };
 const COMPONENT = {
@@ -69,7 +69,7 @@ describe("Layer 6 fixtures validate against the contract", () => {
   it.each([
     ["Network", NETWORK],
     ["Component", COMPONENT],
-    ["ForeignConversation", { id: "fc-3", network: "meshtastic", account: "!a1b2c3d4", kind: "channel", native_id: "ch:LongFast:ab12", title: "LongFast", last_seq: 12, unread: 0, pinned: false }],
+    ["ForeignConversation", { id: "fc-3", network: "meshtastic", account: "!a1b2c3d4", kind: "channel", native_id: "ch:LongFast:ab12", title: "LongFast", last_seq: 12, unread: 0, pinned: false, send_enabled: true }],
     ["ForeignMessage", FOREIGN_MSG],
     ["ForeignMessage", { ...FOREIGN_MSG, dir: "own", state: "failed", reason_code: "region_unset", reason: "region is not set", group_id: "sg-2", part: { k: 1, n: 2 }, relayed_from: { msg: "fm-1", edge: "be-1" } }],
     ["BridgeEdge", EDGE],

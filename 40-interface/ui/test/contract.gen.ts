@@ -1403,7 +1403,7 @@ export const schemas: Record<string, JsonSchema> = {
   },
   "ForeignConversation": {
     "type": "object",
-    "required": ["id","network","account","kind","native_id","title","last_seq","unread","pinned"],
+    "required": ["id","network","account","kind","native_id","title","last_seq","unread","pinned","send_enabled"],
     "properties": {
       "id": {"$ref":"#/components/schemas/ForeignConversationId"},
       "network": {"$ref":"#/components/schemas/NetworkId"},
@@ -1428,8 +1428,8 @@ export const schemas: Record<string, JsonSchema> = {
         "description": "channels: the board publishes this channel to the internet (MQTT uplink), read live; null when not applicable"
       },
       "send_enabled": {
-        "type": "boolean",
-        "description": "the per-channel send switch (`PATCH /bridge/settings`); an uplinked channel is off by default"
+        "type": ["boolean","null"],
+        "description": "the per-channel send switch (`PATCH /bridge/settings`); an uplinked channel is off by default; null when not applicable (a DM or a recipient list)"
       }
     }
   },
@@ -1799,7 +1799,10 @@ export const schemas: Record<string, JsonSchema> = {
       "id",
       "src",
       "dst",
+      "src_kind",
+      "dst_kind",
       "enabled",
+      "enabled_by",
       "paused",
       "cursor_seq",
       "relayed_seq",
@@ -1814,9 +1817,20 @@ export const schemas: Record<string, JsonSchema> = {
       "id": {"$ref":"#/components/schemas/BridgeEdgeId"},
       "src": {"$ref":"#/components/schemas/ForeignConversationId"},
       "dst": {"$ref":"#/components/schemas/ForeignConversationId"},
+      "src_kind": {
+        "type": "string",
+        "enum": ["channel","group"],
+        "description": "the source conversation's kind (denormalised, §3: a DM endpoint is unrepresentable)"
+      },
+      "dst_kind": {"type":"string","enum":["channel","group"]},
       "enabled": {
         "type": "boolean",
         "description": "read-only: false while either endpoint's adapter is not enabled (the edge is kept, nothing relays)"
+      },
+      "enabled_by": {
+        "type": "string",
+        "maxLength": 256,
+        "description": "which session enabled it (§3 `relay_edges.enabled_by`): `loopback`, or the paired session's label; never a secret"
       },
       "paused": {"type":"boolean"},
       "cursor_seq": {"type":"integer","minimum":0,"description":"`seq` at enable: history is never relayed"},
