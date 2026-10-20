@@ -1,0 +1,15 @@
+
+ Shared Instance[rns/111]
+    Status    : Up
+    Serving   : 2 programs
+    Rate      : 1.00 Gbps
+    Traffic   : 1.21 KB↑
+                980 B↓
+
+ AutoInterface[Auto Interface]
+    Status    : Down
+    Mode      : Full
+    Rate      : 10.00 Mbps
+    Traffic   : 0 B↑
+                0 B↓
+

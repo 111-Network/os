@@ -46,7 +46,11 @@ export const schemas: Record<string, JsonSchema> = {
           "internal",
           "port_busy",
           "panel_ticket_expired",
-          "restore_pending"
+          "restore_pending",
+          "consent_required",
+          "oversize",
+          "component_unavailable",
+          "unsupported_action"
         ]
       },
       "errors": {
@@ -56,6 +60,15 @@ export const schemas: Record<string, JsonSchema> = {
           "required": ["message"],
           "properties": {"pointer":{"type":"string"},"message":{"type":"string"}}
         }
+      },
+      "consent": {
+        "$ref": "#/components/schemas/ConsentRequired",
+        "description": "Layer 6 extension member (RFC 9457): present on `consent_required`; the exact text and its hash to echo back"
+      },
+      "targets": {
+        "type": "array",
+        "items": {"$ref":"#/components/schemas/TargetRefusal"},
+        "description": "Layer 6 extension member: the per-target report of a refused fan-out (409 `oversize` or `consent_required`); nothing was queued"
       }
     }
   },
@@ -280,8 +293,8 @@ export const schemas: Record<string, JsonSchema> = {
       "task_id": {"type":["string","null"]},
       "kind": {
         "type": "string",
-        "enum": ["diagnose","propose","patch","chat","message"],
-        "description": "Layer 5 adds `message` (§17 `messages.send`): the body is exactly `to: <64 lowercase hex>` + a blank line + the text verbatim; accepting it (POST /proposals/{id}/decision) makes 111d send it — only to an accepted contact and only when the proposal's `node_id` names this node — and the decision is recorded after the store committed the message"
+        "enum": ["diagnose","propose","patch","chat","message","bridge_message","bridge_edge","device"],
+        "description": "Layer 6 adds `bridge_message` (body: `to: <fc-id>` lines, a blank line, then the text verbatim; accepting runs the fan-out validation and, if a consent gate applies, the 409 `consent_required` round-trip), `bridge_edge` (body: a `from: <fc-id>` line and a `to: <fc-id>` line, then the agent's reason; accepting runs the edge-enable consent round-trip) and `device` (body: one JSON object `{\"why\": string, \"actions\": [Action]}` where an Action is `{\"action\": name, …args}` from the closed vocabulary `rns.interface.upsert {device_id, type, params}`, `rns.interface.remove {name}`, `rns.posture.set {share_instance, enable_transport}`, `radio.region.set {region}`, plus the one-shots `identify {device_id}` and `service.restart {service_id}`; 111d validates, applies, probes and reverts; the other vocabulary entries are refused `unsupported_action`; a body that is not that shape is 502 `upstream_error`). RENDERING RULE: the text part of a `bridge_message` or `bridge_edge` body quotes foreign, untrusted text and is rendered as a preformatted text block, never as Markdown (no links, no emphasis); `device` bodies render as a card from the parsed JSON. Layer 5 adds `message` (§17 `messages.send`): the body is exactly `to: <64 lowercase hex>` + a blank line + the text verbatim; accepting it (POST /proposals/{id}/decision) makes 111d send it — only to an accepted contact and only when the proposal's `node_id` names this node — and the decision is recorded after the store committed the message"
       },
       "title": {"type":"string"},
       "body": {"type":"string","description":"markdown"},
@@ -849,13 +862,13 @@ export const schemas: Record<string, JsonSchema> = {
       "quotas": {
         "type": "object",
         "additionalProperties": {"type":["integer","null"],"minimum":0},
-        "description": "capacity shaping per refusable stored-data class, in bytes: kb, update, patch, sync, object, custody (messages and agent ops are never refused, §10.4, so they take no quota); null means no quota. Not a per-sender limit; those do not exist"
+        "description": "capacity shaping per refusable stored-data class, in bytes: kb, update, patch, sync, object, custody, foreign (Layer 6: foreign-network rows, §3; messages and agent ops are never refused, §10.4, so they take no quota); null means no quota. Not a per-sender limit; those do not exist"
       }
     }
   },
   "FabricSettingsPatch": {
     "type": "object",
-    "description": "Partial merge. In `quotas`, a class set to null drops its quota; only the refusable classes (kb, update, patch, sync, object, custody) take one — any other key is 400.",
+    "description": "Partial merge. In `quotas`, a class set to null drops its quota; only the refusable classes (kb, update, patch, sync, object, custody, foreign) take one — any other key is 400.",
     "properties": {
       "hub_role": {"type":"boolean"},
       "listen_lan": {"type":"boolean"},
@@ -995,7 +1008,11 @@ export const schemas: Record<string, JsonSchema> = {
     "description": "A presence source. v1: one per identified Meshtastic board, grouped as 'heard via Meshtastic on <board alias>'.",
     "properties": {
       "id": {"type":"string"},
-      "kind": {"type":"string","enum":["meshtastic"]},
+      "kind": {
+        "type": "string",
+        "enum": ["meshtastic","reticulum"],
+        "description": "Layer 6 adds `reticulum`: announces the LXMF helper hears. For a `reticulum` source a node's `id` is the 32-hex destination hash, `num` is 0, `long_name` is the announced display name (untrusted) and `short_name` its first 8 hex; `device_id` is null. Unknown kinds render as `unknown`"
+      },
       "label": {"type":"string","description":"plain heading, e.g. heard via Meshtastic on Bench radio"},
       "device_id": {"type":["string","null"],"description":"the DeviceRecord this source reads through"},
       "nodes": {"type":"array","items":{"$ref":"#/components/schemas/NearbyNode"}}
@@ -1102,6 +1119,1082 @@ export const schemas: Record<string, JsonSchema> = {
     "type": "object",
     "required": ["panels"],
     "properties": {"panels":{"type":"array","items":{"$ref":"#/components/schemas/Panel"}}}
+  },
+  "NetworkId": {
+    "type": "string",
+    "pattern": "^[a-z0-9][a-z0-9:_-]{0,39}$",
+    "description": "a network id (§3): `111` (the fabric; appears only in orderings), `meshtastic`, `lxmf`, `app:deltachat`, `app:simplex`. Open vocabulary: an unknown id renders as `unknown`. The colon in `app:…` is percent-encoded in a path."
+  },
+  "ForeignConversationId": {
+    "type": "string",
+    "pattern": "^fc-[A-Za-z0-9_-]{1,125}$",
+    "description": "`fc-…`, minted by 111d. API bodies and proposals name a conversation by this id, never by native id or name."
+  },
+  "ForeignMessageId": {
+    "type": "string",
+    "pattern": "^fm-[A-Za-z0-9_-]{1,125}$",
+    "description": "`fm-…`, minted by 111d, one per stored row (a split send is one row per part). Never a 111 `msg-…` id."
+  },
+  "BridgeEdgeId": {"type":"string","pattern":"^be-[A-Za-z0-9_-]{1,125}$"},
+  "SendGroupId": {"type":"string","pattern":"^sg-[A-Za-z0-9_-]{1,125}$"},
+  "ComponentId": {
+    "type": "string",
+    "pattern": "^[a-z0-9][a-z0-9_-]{0,39}$",
+    "description": "an optional component's id from `assets/components/<id>.toml` (§2.1)"
+  },
+  "Sha256Hex": {
+    "type": "string",
+    "pattern": "^[0-9a-f]{64}$",
+    "description": "lowercase hex SHA-256 of the exact UTF-8 bytes of the consent text it names"
+  },
+  "ForeignMessageState": {
+    "type": "string",
+    "enum": ["queued","sent","relayed","delivered","failed"],
+    "description": "Delivery evidence for a foreign row (§4), CLOSED. Monotone: `delivered` never regresses; `failed` is only for a refusal BEFORE air (see `reason_code`) and is terminal unless a later `delivered` arrives. A NAK after the board transmitted keeps `sent` or `relayed` with `evidence` 'transmitted, not confirmed'. Layer 5's `MessageState` stays at four and is not used for foreign rows."
+  },
+  "ForeignAuth": {
+    "type": "string",
+    "enum": ["none","channel-key","pki","signed","attested-111"],
+    "description": "How far the sender is vouched for (§3), closed; the copy for each level comes from the adapter manifest (`Network.copy.auth`). none: nothing. channel-key: anyone with this channel key can use any name. pki: the board's PKI proved the sender key, not the name. signed: the carrier reports a validated signature (LXMF only in v1). attested-111: reserved for the second release."
+  },
+  "ForeignConvKind": {
+    "type": "string",
+    "enum": ["channel","dm","group"],
+    "description": "`group` is a destination-only local recipient list (LXMF has no channels) or an app-peer group"
+  },
+  "ForeignReasonCode": {
+    "type": "string",
+    "enum": [
+      "region_unset",
+      "no_channel",
+      "too_large",
+      "not_authorized",
+      "pki_failed",
+      "got_nak",
+      "adapter_down",
+      "no_route",
+      "timeout",
+      "max_retransmit",
+      "no_response",
+      "duty_cycle",
+      "rate_limited",
+      "key_unknown",
+      "peer_unannounced",
+      "uplink_off",
+      "ham_unconfirmed",
+      "consent_paused",
+      "cancelled",
+      "oversize"
+    ],
+    "description": "The vocabulary of `ForeignMessage.reason_code` (§4, §5, §8), documented here once. 111d also emits handoff_pending on a row with `uncertain: true` (state `queued`: handed to the carrier, no answer came; it may have been sent and is never resent by itself) — a display-only code outside this enum, which stays at twenty. Before air (state `failed`): region_unset, no_channel, too_large, not_authorized, pki_failed, got_nak, adapter_down. After air (state stays sent/relayed, 'transmitted, not confirmed'): no_route, timeout, max_retransmit, no_response. Retry later (state `queued`): duty_cycle, rate_limited, key_unknown, peer_unannounced, adapter_down. Consent gates: uplink_off, ham_unconfirmed, consent_paused. User acts: cancelled. oversize: refused for size in `refuse` mode. `reason_code` itself is a plain string on the wire so that growth is additive; clients render unknown values as `unknown`."
+  },
+  "NetworkState": {
+    "type": "string",
+    "enum": ["live","not_set","error","disabled"],
+    "description": "live: adapter up. not_set: needs a human fact first (no board bound, region unset). error: adapter failed or partitioned (see `reason`). disabled: optional component not enabled; its cached and installed size is in `component`."
+  },
+  "ComponentState": {
+    "type": "string",
+    "enum": ["declared","cached","installed","running","disabled"],
+    "description": "§2.1. declared: in the release, no payload. cached: payload in cache/packages, nothing installed. installed: files installed, not running. running: supervised child up. disabled: was enabled, stopped by the user (installed files remain until remove-files)."
+  },
+  "ComponentLicense": {
+    "type": "object",
+    "required": ["spdx","read_at","notice"],
+    "properties": {
+      "spdx": {"type":"string","description":"SPDX expression of the third-party program, e.g. MPL-2.0"},
+      "read_at": {"type":"string","description":"where to read the licence (URL or path in the cache)"},
+      "notice": {
+        "type": "string",
+        "description": "the one-line notice shown before enable (program, licence, where to read it, cached size); its hash is `Component.notice_hash`"
+      }
+    }
+  },
+  "Component": {
+    "type": "object",
+    "required": ["id","adapter","state","cached_bytes","installed_bytes","license","notice_hash","acknowledged"],
+    "description": "An optional third-party component (§2.1). While `disabled` or only `declared`/`cached` it has no process, listener, loaded code, timer or open file; the sizes are what enabling would add.",
+    "properties": {
+      "id": {"$ref":"#/components/schemas/ComponentId"},
+      "adapter": {"$ref":"#/components/schemas/NetworkId","description":"the network this component carries"},
+      "state": {"$ref":"#/components/schemas/ComponentState"},
+      "cached_bytes": {
+        "type": ["integer","null"],
+        "minimum": 0,
+        "description": "size of the cached payload; null when none is cached"
+      },
+      "installed_bytes": {
+        "type": ["integer","null"],
+        "minimum": 0,
+        "description": "size of the installed tree; null when not installed"
+      },
+      "rss_bytes": {
+        "type": ["integer","null"],
+        "minimum": 0,
+        "description": "declared resident size while running (from the manifest `[weight]`); null when unmeasured"
+      },
+      "license": {"$ref":"#/components/schemas/ComponentLicense"},
+      "notice_hash": {
+        "$ref": "#/components/schemas/Sha256Hex",
+        "description": "the hash `POST …/enable` must echo as `accept_notice_hash`"
+      },
+      "acknowledged": {
+        "type": "boolean",
+        "description": "the user's acknowledgement of this notice (this hash) is recorded in state/bridge.json"
+      },
+      "reason_code": {
+        "type": ["string","null"],
+        "description": "stable snake_case, display-only; e.g. payload_missing, pin_mismatch, requires_unmet, child_degraded. null when nothing needs explaining"
+      },
+      "reason": {"type":["string","null"],"description":"one plain sentence for `reason_code`"}
+    }
+  },
+  "NetworkCopy": {
+    "type": "object",
+    "required": ["banner","send_warning","relay_tag","auth"],
+    "description": "The adapter's honest copy, from `assets/adapters/<id>.toml`, so the UI holds no per-network code (§4).",
+    "properties": {
+      "banner": {"type":"string","description":"what this network is and is not, shown on the thread"},
+      "send_warning": {
+        "type": "string",
+        "description": "what sending means here (who can read it, what is published), shown before the first send"
+      },
+      "relay_tag": {
+        "type": "string",
+        "pattern": "^[A-Za-z]{1,3}$",
+        "description": "the TAG in the relay marker `[name/TAG]` (M, LX, DC, SX)"
+      },
+      "auth": {
+        "type": "object",
+        "additionalProperties": {"type":"string"},
+        "description": "`ForeignAuth` level to its label copy"
+      },
+      "dm_note": {
+        "type": ["string","null"],
+        "description": "DM-specific note, e.g. 'Send a Meshtastic DM from this node (readable, not 111-sealed)'"
+      }
+    }
+  },
+  "NetworkCaps": {
+    "type": "object",
+    "required": ["kinds","max_text_bytes","evidence","airtime","auth_levels","splittable","recipient_syntax"],
+    "description": "What the adapter can carry (§4); read by preview, the UI and the agent.",
+    "properties": {
+      "kinds": {"type":"array","items":{"$ref":"#/components/schemas/ForeignConvKind"}},
+      "max_text_bytes": {
+        "type": "object",
+        "additionalProperties": {"type":"object","additionalProperties":{"type":"integer","minimum":1}},
+        "description": "conversation kind to mode to bytes per packet; mode `default` is always present, other modes are adapter-defined (e.g. `licensed`)"
+      },
+      "evidence": {
+        "type": "array",
+        "items": {"$ref":"#/components/schemas/ForeignMessageState"},
+        "description": "the states this adapter can report (Meshtastic channels never reach `delivered`)"
+      },
+      "airtime": {
+        "oneOf": [
+          {
+            "type": "object",
+            "required": ["duty_cycle_permille","bits_per_s","rule"],
+            "properties": {
+              "duty_cycle_permille": {"type":"integer","minimum":0},
+              "bits_per_s": {"type":"integer","minimum":0},
+              "rule": {
+                "type": "string",
+                "description": "the preview's estimate rule in words; always labelled an estimate"
+              }
+            }
+          },
+          {"type":"null"}
+        ]
+      },
+      "auth_levels": {"type":"array","items":{"$ref":"#/components/schemas/ForeignAuth"}},
+      "splittable": {"type":"boolean","description":"the adapter supports `size_mode: split` (numbered parts)"},
+      "recipient_syntax": {
+        "oneOf": [
+          {
+            "type": "object",
+            "required": ["label","pattern","example"],
+            "properties": {
+              "label": {"type":"string"},
+              "pattern": {
+                "type": "string",
+                "description": "ECMAScript-compatible regular expression for one native address"
+              },
+              "example": {"type":"string"}
+            }
+          },
+          {"type":"null"}
+        ]
+      }
+    }
+  },
+  "NetworkGate": {
+    "type": "object",
+    "required": ["region_set","licensed","ham_confirmed","uplink_channels"],
+    "description": "Facts for the foreign compose gate (§10). null means not applicable to this network.",
+    "properties": {
+      "region_set": {
+        "type": ["boolean","null"],
+        "description": "the radio region is set (a board transmits nothing before it)"
+      },
+      "licensed": {"type":["boolean","null"],"description":"an account of this node is an amateur-licensed board"},
+      "ham_confirmed": {
+        "type": ["boolean","null"],
+        "description": "a human confirmed readable sends through the licensed account"
+      },
+      "uplink_channels": {
+        "type": "integer",
+        "minimum": 0,
+        "description": "channels whose board publishes them to the internet (MQTT uplink)"
+      }
+    }
+  },
+  "NetworkCounts": {
+    "type": "object",
+    "required": ["conversations","unread","queued","edges"],
+    "properties": {
+      "conversations": {"type":"integer","minimum":0},
+      "unread": {
+        "type": "integer",
+        "minimum": 0,
+        "description": "foreign DM unread only counts here; it never raises the header badge (§10)"
+      },
+      "queued": {
+        "type": "integer",
+        "minimum": 0,
+        "description": "own rows still `queued` (waiting for the radio, a path or a key)"
+      },
+      "edges": {"type":"integer","minimum":0,"description":"relay edges with an endpoint on this network"}
+    }
+  },
+  "Network": {
+    "type": "object",
+    "required": ["id","label","chip","state","account","copy","caps","gate","counts","dropped","component"],
+    "description": "One bridgeable foreign network (§10). Every foreign string reachable from it (account, names) is untrusted: render as text only.",
+    "properties": {
+      "id": {"$ref":"#/components/schemas/NetworkId"},
+      "label": {"type":"string","description":"from the adapter manifest, e.g. Meshtastic"},
+      "chip": {"type":"string","description":"the short network chip shown on every foreign message"},
+      "state": {"$ref":"#/components/schemas/NetworkState"},
+      "reason_code": {
+        "type": ["string","null"],
+        "description": "stable snake_case, display-only: region_unset, no_board, adapter_down, partitioned, component_unavailable, … null while live"
+      },
+      "reason": {"type":["string","null"],"description":"one plain sentence for `reason_code`"},
+      "account": {
+        "type": ["string","null"],
+        "description": "which board or identity of ours speaks on this network (e.g. the board's long name and `!id`, or the LXMF destination hash); null when none"
+      },
+      "copy": {"$ref":"#/components/schemas/NetworkCopy"},
+      "caps": {"$ref":"#/components/schemas/NetworkCaps"},
+      "gate": {"$ref":"#/components/schemas/NetworkGate"},
+      "counts": {"$ref":"#/components/schemas/NetworkCounts"},
+      "dropped": {
+        "type": "integer",
+        "minimum": 0,
+        "description": "texts the adapter dropped while 111 was busy (bounded inbound queue overflow); shown as 'N texts dropped while 111 was busy', never silent (§4)"
+      },
+      "component": {
+        "oneOf": [{"$ref":"#/components/schemas/Component"},{"type":"null"}],
+        "description": "the optional component behind this network, or null for the compiled-in Meshtastic adapter"
+      }
+    }
+  },
+  "ForeignConversation": {
+    "type": "object",
+    "required": ["id","network","account","kind","native_id","title","last_seq","unread","pinned","send_enabled"],
+    "properties": {
+      "id": {"$ref":"#/components/schemas/ForeignConversationId"},
+      "network": {"$ref":"#/components/schemas/NetworkId"},
+      "account": {"type":"string","description":"which board or identity of ours this conversation belongs to"},
+      "kind": {"$ref":"#/components/schemas/ForeignConvKind"},
+      "native_id": {
+        "type": "string",
+        "description": "the network's own id (`!a1b2c3d4`, a destination hash, a channel `ch:<name>:<kh>`); untrusted, text only"
+      },
+      "title": {
+        "type": "string",
+        "description": "foreign name; UNTRUSTED, control and format characters already stripped, text only"
+      },
+      "last_seq": {"type":"integer","minimum":0,"description":"highest `seq` stored for this conversation (0 when empty)"},
+      "unread": {"type":"integer","minimum":0},
+      "pinned": {
+        "type": "boolean",
+        "description": "pinned conversations are never pruned and may raise the attention count"
+      },
+      "uplink": {
+        "type": ["boolean","null"],
+        "description": "channels: the board publishes this channel to the internet (MQTT uplink), read live; null when not applicable"
+      },
+      "send_enabled": {
+        "type": ["boolean","null"],
+        "description": "the per-channel send switch (`PATCH /bridge/settings`); an uplinked channel is off by default; null when not applicable (a DM or a recipient list)"
+      }
+    }
+  },
+  "ForeignSender": {
+    "type": "object",
+    "required": ["native","name"],
+    "properties": {
+      "native": {
+        "type": "string",
+        "description": "the sender's id on that network (`!a1b2c3d4`, a destination hash); untrusted"
+      },
+      "name": {
+        "type": "string",
+        "description": "the sender's self-declared name; UNTRUSTED: `auth` says what, if anything, vouches for it"
+      }
+    }
+  },
+  "ForeignPart": {
+    "type": "object",
+    "required": ["k","n"],
+    "properties": {"k":{"type":"integer","minimum":1},"n":{"type":"integer","minimum":2}}
+  },
+  "ForeignRelayedFrom": {
+    "type": "object",
+    "required": ["msg","edge"],
+    "description": "Set on a relayed copy (an `own` row made by an edge)",
+    "properties": {
+      "msg": {"$ref":"#/components/schemas/ForeignMessageId","description":"the origin row"},
+      "edge": {"$ref":"#/components/schemas/BridgeEdgeId"}
+    }
+  },
+  "ForeignMessage": {
+    "type": "object",
+    "required": [
+      "id",
+      "conv",
+      "dir",
+      "sender",
+      "auth",
+      "text",
+      "state",
+      "evidence",
+      "reason_code",
+      "reason",
+      "group_id",
+      "part",
+      "relayed_from",
+      "via_internet",
+      "seq",
+      "at",
+      "claim_ts",
+      "truncated"
+    ],
+    "description": "One stored foreign row (§3). Order is `seq` (receipt sequence from the store-wide counter); `at` and `claim_ts` are display only and order nothing. Peer-authored fields (`text`, `sender.name`) are untrusted: text-only rendering, and the agent sees them only inside a labelled untrusted block.",
+    "properties": {
+      "id": {"$ref":"#/components/schemas/ForeignMessageId"},
+      "conv": {"$ref":"#/components/schemas/ForeignConversationId"},
+      "dir": {"type":"string","enum":["in","own"]},
+      "sender": {"$ref":"#/components/schemas/ForeignSender"},
+      "auth": {"$ref":"#/components/schemas/ForeignAuth"},
+      "text": {
+        "type": "string",
+        "description": "stored body after the one ingest function (Cc and Cf stripped, NFC, capped at 64 KiB). Foreign text: untrusted"
+      },
+      "state": {
+        "$ref": "#/components/schemas/ForeignMessageState",
+        "description": "dir=in is always `delivered` (it arrived here)"
+      },
+      "evidence": {
+        "type": ["string","null"],
+        "description": "the string the UI prints for the state, from the adapter (e.g. 'accepted by the radio', 'a neighbour rebroadcast it'); null for dir=in"
+      },
+      "reason_code": {
+        "type": ["string","null"],
+        "description": "stable snake_case, display-only for clients; the vocabulary is `ForeignReasonCode` (region_unset, no_channel, too_large, not_authorized, pki_failed, got_nak, adapter_down, no_route, timeout, max_retransmit, no_response, duty_cycle, rate_limited, key_unknown, peer_unannounced, uplink_off, ham_unconfirmed, consent_paused, cancelled, oversize). Unknown values render as `unknown`. null when nothing needs explaining"
+      },
+      "reason": {"type":["string","null"],"description":"one plain sentence for `reason_code`"},
+      "group_id": {
+        "oneOf": [{"$ref":"#/components/schemas/SendGroupId"},{"type":"null"}],
+        "description": "the send group a user-composed row belongs to"
+      },
+      "part": {
+        "oneOf": [{"$ref":"#/components/schemas/ForeignPart"},{"type":"null"}],
+        "description": "k of n for one part of a split send; the UI shows the lowest state among a send's parts"
+      },
+      "relayed_from": {"oneOf":[{"$ref":"#/components/schemas/ForeignRelayedFrom"},{"type":"null"}]},
+      "via_internet": {
+        "type": "boolean",
+        "description": "Meshtastic `via_mqtt`: the packet reached the board over an MQTT bridge. Shown as 'via internet'"
+      },
+      "seq": {
+        "type": "integer",
+        "minimum": 0,
+        "description": "local ordering sequence (the store's `local_seq`); strictly increasing per node"
+      },
+      "at": {
+        "type": "string",
+        "format": "date-time",
+        "description": "local wall-clock time this node stored the row. Display only"
+      },
+      "claim_ts": {
+        "type": ["string","null"],
+        "format": "date-time",
+        "description": "the foreign side's own timestamp, unverified: shown only behind a 'sender's claim' disclosure. null when absent"
+      },
+      "truncated": {
+        "type": ["integer","null"],
+        "minimum": 0,
+        "description": "when the stored body was cut at 64 KiB, the original size in bytes (the UI says 'message too long to show (N bytes)'); null otherwise"
+      },
+      "uncertain": {
+        "type": "boolean",
+        "description": "Layer 6 C1 (additive): an own row handed to a carrier that never answered (its pending mark survived a restart or a disable, and it is not in flight now): it may have been sent, and it is never handed again by itself — 'may have been sent; resend?' (§4). Such a row without another reason reads `reason_code: handoff_pending`. Absent from older daemons (read as false)"
+      },
+      "not_relayed": {
+        "type": ["string","null"],
+        "description": "Layer 6 C1 (additive): why an inbound row was kept from every relay edge — `marker` (it already carries a relay marker `[name/TAG]`, §8 guard 3: a copy is never relayed again, and a human who types a marker gets no relay). null when not applicable; absent from older daemons"
+      }
+    }
+  },
+  "ForeignThread": {
+    "type": "object",
+    "required": ["schema","conversation","messages","more"],
+    "properties": {
+      "schema": {"type":"integer"},
+      "conversation": {"$ref":"#/components/schemas/ForeignConversation"},
+      "messages": {"type":"array","items":{"$ref":"#/components/schemas/ForeignMessage"}},
+      "more": {"type":"boolean"}
+    }
+  },
+  "ForeignDmOpen": {
+    "type": "object",
+    "required": ["kind","native_id"],
+    "properties": {
+      "kind": {"type":"string","const":"dm"},
+      "native_id": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 128,
+        "description": "the recipient's native address on that network"
+      }
+    }
+  },
+  "SendMode": {
+    "type": "string",
+    "enum": ["refuse","split"],
+    "description": "per target: refuse (default) answers oversize and sends nothing; split cuts at UTF-8 boundaries into numbered parts `(k/n) `. Truncation never happens silently."
+  },
+  "PlanWarning": {
+    "type": "object",
+    "required": ["code","text"],
+    "description": "A fact that does not refuse the send: the row queues or goes out with it.",
+    "properties": {
+      "code": {
+        "type": "string",
+        "description": "stable snake_case: region_unset, duty_cycle, adapter_down, uplink_channel, parts_out_of_order, … "
+      },
+      "text": {"type":"string"}
+    }
+  },
+  "SendPlan": {
+    "type": "object",
+    "required": ["bytes","cap","parts","size_mode","airtime_estimate","refusal","warnings"],
+    "description": "What a send will do to one target (§9).",
+    "properties": {
+      "bytes": {
+        "type": "integer",
+        "minimum": 0,
+        "description": "UTF-8 bytes of the text, plus the relay or part overhead that would be added"
+      },
+      "cap": {
+        "type": ["integer","null"],
+        "minimum": 1,
+        "description": "the target's `max_text_bytes` for its kind and mode; null when the carrier states none"
+      },
+      "parts": {
+        "type": "integer",
+        "minimum": 1,
+        "description": "1 unless `size_mode` is split and the text is over the cap"
+      },
+      "size_mode": {"$ref":"#/components/schemas/SendMode"},
+      "airtime_estimate": {
+        "oneOf": [
+          {
+            "type": "object",
+            "required": ["millis","label"],
+            "properties": {
+              "millis": {"type":["integer","null"],"minimum":0},
+              "label": {
+                "type": "string",
+                "description": "always labelled an estimate, e.g. 'about 2.1 s (estimate)' or 'depends on the path'"
+              }
+            }
+          },
+          {"type":"null"}
+        ]
+      },
+      "refusal": {
+        "oneOf": [{"$ref":"#/components/schemas/PlanRefusal"},{"type":"null"}],
+        "description": "non-null: this target would be refused and (in a fan-out) nothing is queued"
+      },
+      "warnings": {"type":"array","items":{"$ref":"#/components/schemas/PlanWarning"}}
+    }
+  },
+  "PlanRefusal": {
+    "type": "object",
+    "required": ["code","detail","consent"],
+    "properties": {
+      "code": {"type":"string","enum":["oversize","ham_unconfirmed","uplink_off"]},
+      "detail": {"type":"string","description":"plain sentence, e.g. '312 B > 232 B per packet'"},
+      "consent": {
+        "oneOf": [{"$ref":"#/components/schemas/ConsentRequired"},{"type":"null"}],
+        "description": "for a consent gate (ham_unconfirmed, uplink_off): the exact text and hash to confirm via PATCH /bridge/settings; null for oversize"
+      }
+    }
+  },
+  "ConsentRequired": {
+    "type": "object",
+    "required": ["action","subject","warning_text","hash","addons"],
+    "description": "The 409 consent round-trip (§2.1, §8): the daemon states the exact text, the client shows it and echoes `hash` back (`accept_warning` or `accept_notice_hash`). A text that changed since (a live fact moved) has a new hash, so a stale echo is refused again. Never a bare PATCH.",
+    "properties": {
+      "action": {
+        "type": "string",
+        "enum": ["edge_enable","edge_resume","component_enable","ham_confirm","uplink_send"],
+        "description": "which confirmation this is"
+      },
+      "subject": {
+        "type": "string",
+        "description": "what it is about: the edge id or `src>dst` pair, the component id, the account, or the channel's `fc-…` id"
+      },
+      "warning_text": {
+        "type": "string",
+        "description": "the exact text the user is confirming; may quote untrusted channel names: text only"
+      },
+      "hash": {"$ref":"#/components/schemas/Sha256Hex"},
+      "addons": {
+        "type": "array",
+        "items": {"type":"string"},
+        "description": "the live add-on facts included in the text (default-key source, uplinked destination, licensed account) so the UI can badge them"
+      }
+    }
+  },
+  "FanoutTarget": {
+    "description": "One target of a fan-out: a foreign conversation (or recipient list) of an enabled network, or a 111 contact.",
+    "oneOf": [{"$ref":"#/components/schemas/FanoutForeignTarget"},{"$ref":"#/components/schemas/FanoutContactTarget"}]
+  },
+  "FanoutForeignTarget": {
+    "type": "object",
+    "required": ["network","conv"],
+    "properties": {
+      "network": {"$ref":"#/components/schemas/NetworkId"},
+      "conv": {"$ref":"#/components/schemas/ForeignConversationId"},
+      "size_mode": {
+        "$ref": "#/components/schemas/SendMode",
+        "description": "this target's mode; falls back to the request's `size_mode`, then `refuse`"
+      }
+    }
+  },
+  "FanoutContactTarget": {
+    "type": "object",
+    "required": ["node_id"],
+    "properties": {
+      "node_id": {
+        "$ref": "#/components/schemas/NodeId",
+        "description": "an accepted 111 contact: an ordinary sealed message with Layer 5 states"
+      }
+    }
+  },
+  "FanoutRequest": {
+    "type": "object",
+    "required": ["text","targets"],
+    "properties": {
+      "text": {
+        "type": "string",
+        "minLength": 1,
+        "description": "the text, copied into every target (nothing is exported from a 111 thread)"
+      },
+      "targets": {"type":"array","minItems":1,"maxItems":64,"items":{"$ref":"#/components/schemas/FanoutTarget"}},
+      "size_mode": {"$ref":"#/components/schemas/SendMode","description":"default for targets that do not name one"}
+    }
+  },
+  "FanoutPreviewItem": {
+    "type": "object",
+    "required": ["target","plan"],
+    "properties": {"target":{"$ref":"#/components/schemas/FanoutTarget"},"plan":{"$ref":"#/components/schemas/SendPlan"}}
+  },
+  "FanoutPreview": {
+    "type": "object",
+    "required": ["schema","text_bytes","ok","items"],
+    "properties": {
+      "schema": {"type":"integer"},
+      "text_bytes": {"type":"integer","minimum":0},
+      "ok": {"type":"boolean","description":"no target carries a `refusal`: sending now would queue every row"},
+      "items": {"type":"array","items":{"$ref":"#/components/schemas/FanoutPreviewItem"}}
+    }
+  },
+  "SendItem": {
+    "type": "object",
+    "required": ["target","id","plan"],
+    "properties": {
+      "target": {"$ref":"#/components/schemas/FanoutTarget"},
+      "id": {
+        "type": "string",
+        "description": "the row: `fm-…` for a foreign target (the first part of a split), `msg-…` for a 111 contact"
+      },
+      "ids": {
+        "type": "array",
+        "items": {"type":"string"},
+        "description": "every row of a split send, one per part, in part order; absent for a single row"
+      },
+      "plan": {"$ref":"#/components/schemas/SendPlan"}
+    }
+  },
+  "SendGroup": {
+    "type": "object",
+    "required": ["id","text","items"],
+    "description": "A fan-out as stored (§3, §9): per-target rows keep their own state, retry and cancel.",
+    "properties": {
+      "id": {"$ref":"#/components/schemas/SendGroupId"},
+      "text": {"type":"string"},
+      "items": {"type":"array","items":{"$ref":"#/components/schemas/SendItem"}}
+    }
+  },
+  "FanoutResult": {
+    "type": "object",
+    "required": ["schema","group_id","items"],
+    "properties": {
+      "schema": {"type":"integer"},
+      "group_id": {"$ref":"#/components/schemas/SendGroupId"},
+      "items": {"type":"array","items":{"$ref":"#/components/schemas/SendItem"}}
+    }
+  },
+  "ForeignSendRequest": {
+    "type": "object",
+    "required": ["text"],
+    "properties": {"text":{"type":"string","minLength":1},"size_mode":{"$ref":"#/components/schemas/SendMode"}}
+  },
+  "ForeignSendAccepted": {
+    "type": "object",
+    "required": ["schema","id","plan"],
+    "properties": {
+      "schema": {"type":"integer"},
+      "id": {
+        "$ref": "#/components/schemas/ForeignMessageId",
+        "description": "the row (the first part of a split send)"
+      },
+      "ids": {
+        "type": "array",
+        "items": {"$ref":"#/components/schemas/ForeignMessageId"},
+        "description": "every row of a split send, in part order; absent for a single row"
+      },
+      "plan": {"$ref":"#/components/schemas/SendPlan"}
+    }
+  },
+  "BridgeEdgeCounters": {
+    "type": "object",
+    "required": ["relayed","shed","refused"],
+    "properties": {
+      "relayed": {"type":"integer","minimum":0,"description":"copies handed to the destination adapter"},
+      "shed": {
+        "type": "integer",
+        "minimum": 0,
+        "description": "backlog copies dropped oldest-first at capacity (shown as a visible counter; `relayed_seq` advances past them)"
+      },
+      "refused": {
+        "type": "integer",
+        "minimum": 0,
+        "description": "copies not made: too long in `refuse` mode ('N too long to relay'), or no ok-to-MQTT bit while `honour_ok_to_mqtt`"
+      }
+    }
+  },
+  "BridgeEdge": {
+    "type": "object",
+    "required": [
+      "id",
+      "src",
+      "dst",
+      "src_kind",
+      "dst_kind",
+      "enabled",
+      "enabled_by",
+      "paused",
+      "cursor_seq",
+      "relayed_seq",
+      "honour_ok_to_mqtt",
+      "oversize",
+      "consent_hash",
+      "counters",
+      "pause_reason"
+    ],
+    "description": "An explicit, directed, non-transitive relay from `src` to `dst` (§8). Only a human enables one.",
+    "properties": {
+      "id": {"$ref":"#/components/schemas/BridgeEdgeId"},
+      "src": {"$ref":"#/components/schemas/ForeignConversationId"},
+      "dst": {"$ref":"#/components/schemas/ForeignConversationId"},
+      "src_kind": {
+        "type": "string",
+        "enum": ["channel","group"],
+        "description": "the source conversation's kind (denormalised, §3: a DM endpoint is unrepresentable)"
+      },
+      "dst_kind": {"type":"string","enum":["channel","group"]},
+      "enabled": {
+        "type": "boolean",
+        "description": "read-only: false while either endpoint's adapter is not enabled (the edge is kept, nothing relays)"
+      },
+      "enabled_by": {
+        "type": "string",
+        "maxLength": 256,
+        "description": "which session enabled it (§3 `relay_edges.enabled_by`): `loopback`, or the paired session's label; never a secret"
+      },
+      "paused": {"type":"boolean"},
+      "cursor_seq": {"type":"integer","minimum":0,"description":"`seq` at enable: history is never relayed"},
+      "relayed_seq": {
+        "type": "integer",
+        "minimum": 0,
+        "description": "highest origin `seq` handed to a copy; advanced on a shed too"
+      },
+      "honour_ok_to_mqtt": {
+        "type": "boolean",
+        "description": "off by default; when on, a Meshtastic-origin message without the ok-to-MQTT bit is not relayed off the mesh and counts as refused"
+      },
+      "oversize": {
+        "type": "string",
+        "enum": ["refuse","split"],
+        "description": "a copy is never truncated: refuse (default) or split into numbered parts"
+      },
+      "consent_hash": {
+        "oneOf": [{"$ref":"#/components/schemas/Sha256Hex"},{"type":"null"}],
+        "description": "hash of the warning text the human confirmed; null before the first confirmation"
+      },
+      "counters": {"$ref":"#/components/schemas/BridgeEdgeCounters"},
+      "pause_reason": {
+        "type": ["string","null"],
+        "description": "why it is paused: `user`, or `consent_paused` (a live consent fact changed after enable: uplink, licensed mode, channel key). null while not paused. Resuming a consent_paused edge needs the new text's hash"
+      }
+    }
+  },
+  "BridgeEdgeCreate": {
+    "type": "object",
+    "required": ["src","dst"],
+    "properties": {
+      "src": {"$ref":"#/components/schemas/ForeignConversationId"},
+      "dst": {"$ref":"#/components/schemas/ForeignConversationId"},
+      "honour_ok_to_mqtt": {"type":"boolean","default":false},
+      "oversize": {"type":"string","enum":["refuse","split"],"default":"refuse"},
+      "accept_warning": {
+        "$ref": "#/components/schemas/Sha256Hex",
+        "description": "the `ConsentRequired.hash` of the warning the user was shown; absent on the first call (409 consent_required answers with the text)"
+      }
+    }
+  },
+  "BridgeEdgePatch": {
+    "type": "object",
+    "properties": {
+      "paused": {"type":"boolean"},
+      "honour_ok_to_mqtt": {"type":"boolean"},
+      "oversize": {"type":"string","enum":["refuse","split"]},
+      "accept_warning": {
+        "$ref": "#/components/schemas/Sha256Hex",
+        "description": "required to resume a consent_paused edge: the hash of the NEW warning text"
+      }
+    }
+  },
+  "RecipientList": {
+    "type": "object",
+    "required": ["id","network","name","members"],
+    "description": "A local, destination-only recipient list (§6): one DM per member from the bridge identity. A fan-out target and an edge destination, never a source.",
+    "properties": {
+      "id": {"type":"string","pattern":"^[A-Za-z0-9_-]{1,64}$"},
+      "network": {"$ref":"#/components/schemas/NetworkId"},
+      "name": {"type":"string","maxLength":64,"description":"user-chosen label; text only"},
+      "members": {
+        "type": "array",
+        "maxItems": 256,
+        "items": {"type":"string"},
+        "description": "native addresses (e.g. 32-hex LXMF destinations), validated against `caps.recipient_syntax`"
+      }
+    }
+  },
+  "ChannelSwitch": {
+    "type": "object",
+    "required": ["conv","network","send","uplink"],
+    "properties": {
+      "conv": {"$ref":"#/components/schemas/ForeignConversationId"},
+      "network": {"$ref":"#/components/schemas/NetworkId"},
+      "send": {
+        "type": "boolean",
+        "description": "the per-channel send switch; gates every send on the channel, relay copies included"
+      },
+      "uplink": {"type":["boolean","null"],"description":"the board publishes this channel to the internet, read live"}
+    }
+  },
+  "HamAccount": {
+    "type": "object",
+    "required": ["account","licensed","confirmed"],
+    "properties": {
+      "account": {"type":"string","description":"which board of ours"},
+      "licensed": {"type":"boolean","description":"the board reports an amateur-licensed user, read live"},
+      "confirmed": {
+        "type": "boolean",
+        "description": "a human confirmed readable sends and relays through this account (recorded with the text hash)"
+      }
+    }
+  },
+  "BridgeAnnounce": {
+    "type": "object",
+    "required": ["name","interval_min"],
+    "properties": {
+      "name": {
+        "type": ["string","null"],
+        "maxLength": 64,
+        "description": "the LXMF display name announced; null = the default `111-<4 hex>`"
+      },
+      "interval_min": {"type":"integer","minimum":0,"description":"minutes between announces; 0 = on events only"}
+    }
+  },
+  "BridgeSettings": {
+    "type": "object",
+    "required": ["schema","order","adapters","recipient_lists","channels","ham","announce"],
+    "description": "Mirror of state/bridge.json plus the preferred order from interfaces.toml (§2, §11). No key material and no passphrase.",
+    "properties": {
+      "schema": {"type":"integer"},
+      "order": {
+        "type": "array",
+        "items": {"$ref":"#/components/schemas/NetworkId"},
+        "description": "the user's preferred networks, first = most preferred (drives the rail, Settings and the agent's setup proposals; runtime fall-back through the list is Layer 7)"
+      },
+      "adapters": {
+        "type": "object",
+        "additionalProperties": {"type":"boolean"},
+        "description": "network id to enabled, for compiled-in adapters; optional components are `Component.state`"
+      },
+      "recipient_lists": {"type":"array","items":{"$ref":"#/components/schemas/RecipientList"}},
+      "channels": {"type":"array","items":{"$ref":"#/components/schemas/ChannelSwitch"}},
+      "ham": {"type":"array","items":{"$ref":"#/components/schemas/HamAccount"}},
+      "announce": {"$ref":"#/components/schemas/BridgeAnnounce"}
+    }
+  },
+  "BridgeChannelPatch": {
+    "type": "object",
+    "required": ["conv","send"],
+    "properties": {
+      "conv": {"$ref":"#/components/schemas/ForeignConversationId"},
+      "send": {"type":"boolean"},
+      "accept_warning": {
+        "$ref": "#/components/schemas/Sha256Hex",
+        "description": "turning send on for an uplinked channel needs the hash of its warning ('this channel is published to the internet by your board')"
+      }
+    }
+  },
+  "BridgeHamPatch": {
+    "type": "object",
+    "required": ["account","confirmed"],
+    "properties": {
+      "account": {"type":"string"},
+      "confirmed": {"type":"boolean"},
+      "accept_warning": {
+        "$ref": "#/components/schemas/Sha256Hex",
+        "description": "confirming needs the hash of the licensee warning; withdrawing a confirmation needs none"
+      }
+    }
+  },
+  "BridgeAnnouncePatch": {
+    "type": "object",
+    "properties": {"name":{"type":["string","null"],"maxLength":64},"interval_min":{"type":"integer","minimum":0}}
+  },
+  "BridgeSettingsPatch": {
+    "type": "object",
+    "description": "Partial merge. `recipient_lists` replaces the whole set. `channels` and `ham` list only the entries that change; if several lack a current hash the 409 describes the first.",
+    "properties": {
+      "order": {"type":"array","items":{"$ref":"#/components/schemas/NetworkId"}},
+      "adapters": {"type":"object","additionalProperties":{"type":"boolean"}},
+      "recipient_lists": {"type":"array","items":{"$ref":"#/components/schemas/RecipientList"}},
+      "channels": {"type":"array","items":{"$ref":"#/components/schemas/BridgeChannelPatch"}},
+      "ham": {"type":"array","items":{"$ref":"#/components/schemas/BridgeHamPatch"}},
+      "announce": {"$ref":"#/components/schemas/BridgeAnnouncePatch"}
+    }
+  },
+  "ComponentEnableRequest": {
+    "type": "object",
+    "properties": {
+      "accept_notice_hash": {
+        "$ref": "#/components/schemas/Sha256Hex",
+        "description": "`Component.notice_hash` as shown to the user; absent on the first call (409 consent_required answers with the notice)"
+      }
+    }
+  },
+  "ComponentRemoveRequest": {
+    "type": "object",
+    "properties": {
+      "cache": {
+        "type": "boolean",
+        "default": false,
+        "description": "also delete the cached payload (separately confirmed; without it a later enable is offline)"
+      }
+    }
+  },
+  "TransportInterface": {
+    "type": "object",
+    "required": ["name","type","up","rx","tx","peers"],
+    "description": "One rnsd interface from the cached `rnstatus` (§11). Names and types are rnsd's strings: untrusted text.",
+    "properties": {
+      "name": {"type":"string"},
+      "type": {
+        "type": "string",
+        "description": "e.g. AutoInterface, RNodeInterface, BackboneInterface, TCPClientInterface"
+      },
+      "up": {"type":"boolean"},
+      "rx": {"type":"integer","minimum":0,"description":"bytes received since the interface came up"},
+      "tx": {"type":"integer","minimum":0,"description":"bytes sent since the interface came up"},
+      "peers": {
+        "type": ["integer","null"],
+        "minimum": 0,
+        "description": "heard peers or connected clients; null when the interface type does not report them"
+      }
+    }
+  },
+  "TransportLan": {
+    "type": "object",
+    "required": ["backbone_listen","port","ifac"],
+    "properties": {
+      "backbone_listen": {"type":"boolean","description":"a BackboneInterface listener, rendered only while LAN sharing is on"},
+      "port": {"type":"integer","minimum":1,"maximum":65535,"description":"default 4242"},
+      "ifac": {
+        "type": "boolean",
+        "description": "an IFAC passphrase is set (the passphrase itself is only on POST /transport/join)"
+      }
+    }
+  },
+  "TransportPosture": {
+    "type": "object",
+    "required": ["share_instance","instance_name","enable_transport","lan","stock_autointerface","propagation_node"],
+    "description": "The rnsd posture from interfaces.toml `[posture]` (§11).",
+    "properties": {
+      "share_instance": {"type":"boolean"},
+      "instance_name": {"type":"string"},
+      "enable_transport": {"type":"boolean","description":"default true on Cat 3/4, false elsewhere"},
+      "lan": {"$ref":"#/components/schemas/TransportLan"},
+      "stock_autointerface": {"type":"boolean","description":"second AutoInterface in the stock `reticulum` group: opt-in"},
+      "propagation_node": {"type":"boolean","description":"LXMF propagation role: opt-in"}
+    }
+  },
+  "TransportStatus": {
+    "type": "object",
+    "required": ["schema","interfaces","interfaces_state","posture","region","callsign","order"],
+    "properties": {
+      "schema": {"type":"integer"},
+      "interfaces": {"type":"array","items":{"$ref":"#/components/schemas/TransportInterface"}},
+      "interfaces_state": {
+        "type": "string",
+        "enum": ["ok","stale","unavailable"],
+        "description": "the rnstatus cache: ok (fresh), stale (last good, tick missed), unavailable (rnsd absent or rnstatus failed; `interfaces` is empty)"
+      },
+      "posture": {"$ref":"#/components/schemas/TransportPosture"},
+      "region": {
+        "type": ["string","null"],
+        "description": "radio region id from the KB region table; null until a human sets it (a board transmits nothing before)"
+      },
+      "callsign": {
+        "type": ["string","null"],
+        "maxLength": 16,
+        "description": "optional, for licensed operators; display and confirmation copy only"
+      },
+      "order": {
+        "type": "array",
+        "items": {"$ref":"#/components/schemas/NetworkId"},
+        "description": "the preferred networks, in the user's order"
+      }
+    }
+  },
+  "TransportPosturePatch": {
+    "type": "object",
+    "description": "Partial merge. Each part goes through apply, probe, revert (§12).",
+    "properties": {
+      "posture": {
+        "type": "object",
+        "properties": {
+          "share_instance": {"type":"boolean"},
+          "instance_name": {"type":"string","minLength":1,"maxLength":32},
+          "enable_transport": {"type":"boolean"},
+          "lan": {
+            "type": "object",
+            "properties": {
+              "backbone_listen": {"type":"boolean"},
+              "port": {"type":"integer","minimum":1024,"maximum":65535},
+              "ifac": {"type":"boolean"}
+            }
+          },
+          "stock_autointerface": {"type":"boolean"},
+          "propagation_node": {"type":"boolean"}
+        }
+      },
+      "region": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 32,
+        "description": "a user-confirmed region id (the request is the confirmation); unknown id is 400"
+      },
+      "callsign": {"type":["string","null"],"maxLength":16},
+      "order": {"type":"array","items":{"$ref":"#/components/schemas/NetworkId"}}
+    }
+  },
+  "TransportPostureResult": {
+    "type": "object",
+    "required": ["schema","applied","reverted","reason","status"],
+    "properties": {
+      "schema": {"type":"integer"},
+      "applied": {"type":"boolean","description":"the change is live and probed good"},
+      "reverted": {
+        "type": "boolean",
+        "description": "the probe failed within 30 s and the snapshot was restored; the previous posture is live"
+      },
+      "reason": {"type":["string","null"],"description":"one plain sentence when reverted"},
+      "status": {"$ref":"#/components/schemas/TransportStatus"}
+    }
+  },
+  "TransportJoin": {
+    "type": "object",
+    "required": ["schema","address","port"],
+    "description": "The phone-relay join descriptor (§11). Carries a shared network credential: served by POST only, no-store, never logged. Not identity key material.",
+    "properties": {
+      "schema": {"type":"integer"},
+      "address": {"type":"string","description":"the hub's LAN address"},
+      "port": {"type":"integer","minimum":1,"maximum":65535},
+      "ifac_name": {"type":"string","description":"IFAC network name; absent when IFAC is off"},
+      "ifac_passphrase": {"type":"string","description":"IFAC passphrase; absent when IFAC is off. Never in a QR"}
+    }
+  },
+  "SseNetworkMessage": {
+    "type": "object",
+    "required": ["network","conv","change","seq"],
+    "description": "A foreign message, state change or conversation change. Coalesced per message per tick for DMs and own rows, and per CONVERSATION per tick (conversation plus highest `seq`, no `id`) for unpinned channel traffic, so a flood cannot fill the 256-entry ring. `change` is the first change since the previous frame. Refetch the conversation; the frame carries no text.",
+    "properties": {
+      "network": {"$ref":"#/components/schemas/NetworkId"},
+      "conv": {"$ref":"#/components/schemas/ForeignConversationId"},
+      "id": {
+        "$ref": "#/components/schemas/ForeignMessageId",
+        "description": "absent on a coalesced channel frame and on `conversation`"
+      },
+      "change": {"type":"string","enum":["new","state","conversation"]},
+      "seq": {"type":"integer","minimum":0,"description":"highest `seq` in the conversation after the change"}
+    }
+  },
+  "SseBridge": {
+    "type": "object",
+    "description": "Adapter and edge status as full snapshots (like `fabric`): a key is present only when that part changed.",
+    "properties": {
+      "networks": {"type":"array","items":{"$ref":"#/components/schemas/Network"}},
+      "edges": {"type":"array","items":{"$ref":"#/components/schemas/BridgeEdge"}}
+    }
+  },
+  "TargetRefusal": {
+    "type": "object",
+    "required": ["target","code","detail","consent"],
+    "description": "One refused target in a 409 fan-out report (`Problem.targets`): nothing was queued for any target.",
+    "properties": {
+      "target": {"$ref":"#/components/schemas/FanoutTarget"},
+      "code": {
+        "type": "string",
+        "enum": ["oversize","consent_required"],
+        "description": "oversize: over the cap in refuse mode. consent_required: a gate (`ham_unconfirmed` or `uplink_off`, named in `consent.action`) needs a confirmation first"
+      },
+      "detail": {"type":"string"},
+      "consent": {"oneOf":[{"$ref":"#/components/schemas/ConsentRequired"},{"type":"null"}]}
+    }
   }
 };
 
@@ -1408,7 +2501,13 @@ export const operations: Record<string, ContractOperation> = {
     "requestSchema": {
       "type": "object",
       "required": ["decision"],
-      "properties": {"decision":{"$ref":"#/components/schemas/Decision"}}
+      "properties": {
+        "decision": {"$ref":"#/components/schemas/Decision"},
+        "accept_warning": {
+          "$ref": "#/components/schemas/Sha256Hex",
+          "description": "Layer 6: the hash of the consent text the user was shown (`bridge_edge`, or a `bridge_message` behind a consent gate); absent on the first call"
+        }
+      }
     },
     "query": [],
     "pathParams": ["id"],
@@ -1861,6 +2960,324 @@ export const operations: Record<string, ContractOperation> = {
     "pathParams": ["id"],
     "errors": [404]
   },
+  "listNetworks": {
+    "method": "GET",
+    "path": "/api/v1/networks",
+    "success": 200,
+    "contentType": "application/json",
+    "schema": {
+      "type": "object",
+      "required": ["schema","networks"],
+      "properties": {
+        "schema": {"type":"integer"},
+        "networks": {"type":"array","items":{"$ref":"#/components/schemas/Network"}}
+      }
+    },
+    "schemasByType": {
+      "application/json": {
+        "type": "object",
+        "required": ["schema","networks"],
+        "properties": {
+          "schema": {"type":"integer"},
+          "networks": {"type":"array","items":{"$ref":"#/components/schemas/Network"}}
+        }
+      }
+    },
+    "requestSchema": null,
+    "query": [],
+    "pathParams": [],
+    "errors": []
+  },
+  "listForeignConversations": {
+    "method": "GET",
+    "path": "/api/v1/networks/{net}/conversations",
+    "success": 200,
+    "contentType": "application/json",
+    "schema": {
+      "type": "object",
+      "required": ["schema","network","conversations"],
+      "properties": {
+        "schema": {"type":"integer"},
+        "network": {"$ref":"#/components/schemas/NetworkId"},
+        "conversations": {"type":"array","items":{"$ref":"#/components/schemas/ForeignConversation"}}
+      }
+    },
+    "schemasByType": {
+      "application/json": {
+        "type": "object",
+        "required": ["schema","network","conversations"],
+        "properties": {
+          "schema": {"type":"integer"},
+          "network": {"$ref":"#/components/schemas/NetworkId"},
+          "conversations": {"type":"array","items":{"$ref":"#/components/schemas/ForeignConversation"}}
+        }
+      }
+    },
+    "requestSchema": null,
+    "query": [],
+    "pathParams": ["net"],
+    "errors": [404]
+  },
+  "openForeignConversation": {
+    "method": "POST",
+    "path": "/api/v1/networks/{net}/conversations",
+    "success": 200,
+    "contentType": "application/json",
+    "schema": {"$ref":"#/components/schemas/ForeignConversation"},
+    "schemasByType": {"application/json":{"$ref":"#/components/schemas/ForeignConversation"}},
+    "requestSchema": {"$ref":"#/components/schemas/ForeignDmOpen"},
+    "query": [],
+    "pathParams": ["net"],
+    "errors": [400,404,409]
+  },
+  "getForeignConversation": {
+    "method": "GET",
+    "path": "/api/v1/networks/{net}/conversations/{conv}",
+    "success": 200,
+    "contentType": "application/json",
+    "schema": {"$ref":"#/components/schemas/ForeignThread"},
+    "schemasByType": {"application/json":{"$ref":"#/components/schemas/ForeignThread"}},
+    "requestSchema": null,
+    "query": [{"name":"since_seq","required":false},{"name":"limit","required":false}],
+    "pathParams": ["net","conv"],
+    "errors": [400,404]
+  },
+  "sendForeignMessage": {
+    "method": "POST",
+    "path": "/api/v1/networks/{net}/conversations/{conv}/messages",
+    "success": 202,
+    "contentType": "application/json",
+    "schema": {"$ref":"#/components/schemas/ForeignSendAccepted"},
+    "schemasByType": {"application/json":{"$ref":"#/components/schemas/ForeignSendAccepted"}},
+    "requestSchema": {"$ref":"#/components/schemas/ForeignSendRequest"},
+    "query": [],
+    "pathParams": ["net","conv"],
+    "errors": [400,404,409]
+  },
+  "previewFanout": {
+    "method": "POST",
+    "path": "/api/v1/messages/fanout/preview",
+    "success": 200,
+    "contentType": "application/json",
+    "schema": {"$ref":"#/components/schemas/FanoutPreview"},
+    "schemasByType": {"application/json":{"$ref":"#/components/schemas/FanoutPreview"}},
+    "requestSchema": {"$ref":"#/components/schemas/FanoutRequest"},
+    "query": [],
+    "pathParams": [],
+    "errors": [400,404]
+  },
+  "sendFanout": {
+    "method": "POST",
+    "path": "/api/v1/messages/fanout",
+    "success": 202,
+    "contentType": "application/json",
+    "schema": {"$ref":"#/components/schemas/FanoutResult"},
+    "schemasByType": {"application/json":{"$ref":"#/components/schemas/FanoutResult"}},
+    "requestSchema": {"$ref":"#/components/schemas/FanoutRequest"},
+    "query": [],
+    "pathParams": [],
+    "errors": [400,404,409]
+  },
+  "listBridgeEdges": {
+    "method": "GET",
+    "path": "/api/v1/bridge/edges",
+    "success": 200,
+    "contentType": "application/json",
+    "schema": {
+      "type": "object",
+      "required": ["schema","edges"],
+      "properties": {
+        "schema": {"type":"integer"},
+        "edges": {"type":"array","items":{"$ref":"#/components/schemas/BridgeEdge"}}
+      }
+    },
+    "schemasByType": {
+      "application/json": {
+        "type": "object",
+        "required": ["schema","edges"],
+        "properties": {
+          "schema": {"type":"integer"},
+          "edges": {"type":"array","items":{"$ref":"#/components/schemas/BridgeEdge"}}
+        }
+      }
+    },
+    "requestSchema": null,
+    "query": [],
+    "pathParams": [],
+    "errors": []
+  },
+  "createBridgeEdge": {
+    "method": "POST",
+    "path": "/api/v1/bridge/edges",
+    "success": 201,
+    "contentType": "application/json",
+    "schema": {"$ref":"#/components/schemas/BridgeEdge"},
+    "schemasByType": {"application/json":{"$ref":"#/components/schemas/BridgeEdge"}},
+    "requestSchema": {"$ref":"#/components/schemas/BridgeEdgeCreate"},
+    "query": [],
+    "pathParams": [],
+    "errors": [400,404,409]
+  },
+  "getBridgeEdge": {
+    "method": "GET",
+    "path": "/api/v1/bridge/edges/{id}",
+    "success": 200,
+    "contentType": "application/json",
+    "schema": {"$ref":"#/components/schemas/BridgeEdge"},
+    "schemasByType": {"application/json":{"$ref":"#/components/schemas/BridgeEdge"}},
+    "requestSchema": null,
+    "query": [],
+    "pathParams": ["id"],
+    "errors": [404]
+  },
+  "patchBridgeEdge": {
+    "method": "PATCH",
+    "path": "/api/v1/bridge/edges/{id}",
+    "success": 200,
+    "contentType": "application/json",
+    "schema": {"$ref":"#/components/schemas/BridgeEdge"},
+    "schemasByType": {"application/json":{"$ref":"#/components/schemas/BridgeEdge"}},
+    "requestSchema": {"$ref":"#/components/schemas/BridgeEdgePatch"},
+    "query": [],
+    "pathParams": ["id"],
+    "errors": [400,404,409]
+  },
+  "deleteBridgeEdge": {
+    "method": "DELETE",
+    "path": "/api/v1/bridge/edges/{id}",
+    "success": 204,
+    "contentType": null,
+    "schema": null,
+    "schemasByType": {},
+    "requestSchema": null,
+    "query": [],
+    "pathParams": ["id"],
+    "errors": [404]
+  },
+  "getBridgeSettings": {
+    "method": "GET",
+    "path": "/api/v1/bridge/settings",
+    "success": 200,
+    "contentType": "application/json",
+    "schema": {"$ref":"#/components/schemas/BridgeSettings"},
+    "schemasByType": {"application/json":{"$ref":"#/components/schemas/BridgeSettings"}},
+    "requestSchema": null,
+    "query": [],
+    "pathParams": [],
+    "errors": []
+  },
+  "patchBridgeSettings": {
+    "method": "PATCH",
+    "path": "/api/v1/bridge/settings",
+    "success": 200,
+    "contentType": "application/json",
+    "schema": {"$ref":"#/components/schemas/BridgeSettings"},
+    "schemasByType": {"application/json":{"$ref":"#/components/schemas/BridgeSettings"}},
+    "requestSchema": {"$ref":"#/components/schemas/BridgeSettingsPatch"},
+    "query": [],
+    "pathParams": [],
+    "errors": [400,404,409]
+  },
+  "listBridgeComponents": {
+    "method": "GET",
+    "path": "/api/v1/bridge/components",
+    "success": 200,
+    "contentType": "application/json",
+    "schema": {
+      "type": "object",
+      "required": ["schema","components"],
+      "properties": {
+        "schema": {"type":"integer"},
+        "components": {"type":"array","items":{"$ref":"#/components/schemas/Component"}}
+      }
+    },
+    "schemasByType": {
+      "application/json": {
+        "type": "object",
+        "required": ["schema","components"],
+        "properties": {
+          "schema": {"type":"integer"},
+          "components": {"type":"array","items":{"$ref":"#/components/schemas/Component"}}
+        }
+      }
+    },
+    "requestSchema": null,
+    "query": [],
+    "pathParams": [],
+    "errors": []
+  },
+  "enableBridgeComponent": {
+    "method": "POST",
+    "path": "/api/v1/bridge/components/{id}/enable",
+    "success": 200,
+    "contentType": "application/json",
+    "schema": {"$ref":"#/components/schemas/Component"},
+    "schemasByType": {"application/json":{"$ref":"#/components/schemas/Component"}},
+    "requestSchema": {"$ref":"#/components/schemas/ComponentEnableRequest"},
+    "query": [],
+    "pathParams": ["id"],
+    "errors": [404,409]
+  },
+  "disableBridgeComponent": {
+    "method": "POST",
+    "path": "/api/v1/bridge/components/{id}/disable",
+    "success": 200,
+    "contentType": "application/json",
+    "schema": {"$ref":"#/components/schemas/Component"},
+    "schemasByType": {"application/json":{"$ref":"#/components/schemas/Component"}},
+    "requestSchema": null,
+    "query": [],
+    "pathParams": ["id"],
+    "errors": [404]
+  },
+  "removeBridgeComponentFiles": {
+    "method": "POST",
+    "path": "/api/v1/bridge/components/{id}/remove-files",
+    "success": 200,
+    "contentType": "application/json",
+    "schema": {"$ref":"#/components/schemas/Component"},
+    "schemasByType": {"application/json":{"$ref":"#/components/schemas/Component"}},
+    "requestSchema": {"$ref":"#/components/schemas/ComponentRemoveRequest"},
+    "query": [],
+    "pathParams": ["id"],
+    "errors": [404,409]
+  },
+  "getTransport": {
+    "method": "GET",
+    "path": "/api/v1/transport",
+    "success": 200,
+    "contentType": "application/json",
+    "schema": {"$ref":"#/components/schemas/TransportStatus"},
+    "schemasByType": {"application/json":{"$ref":"#/components/schemas/TransportStatus"}},
+    "requestSchema": null,
+    "query": [],
+    "pathParams": [],
+    "errors": []
+  },
+  "patchTransportPosture": {
+    "method": "PATCH",
+    "path": "/api/v1/transport/posture",
+    "success": 200,
+    "contentType": "application/json",
+    "schema": {"$ref":"#/components/schemas/TransportPostureResult"},
+    "schemasByType": {"application/json":{"$ref":"#/components/schemas/TransportPostureResult"}},
+    "requestSchema": {"$ref":"#/components/schemas/TransportPosturePatch"},
+    "query": [],
+    "pathParams": [],
+    "errors": [400,409]
+  },
+  "joinTransport": {
+    "method": "POST",
+    "path": "/api/v1/transport/join",
+    "success": 200,
+    "contentType": "application/json",
+    "schema": {"$ref":"#/components/schemas/TransportJoin"},
+    "schemasByType": {"application/json":{"$ref":"#/components/schemas/TransportJoin"}},
+    "requestSchema": null,
+    "query": [],
+    "pathParams": [],
+    "errors": [409]
+  },
   "events": {
     "method": "GET",
     "path": "/api/v1/events",
@@ -1888,7 +3305,9 @@ export const sse: { events: Record<string, string>; chat: Record<string, string>
     "contact": "SseContact",
     "fabric": "FabricStatus",
     "nearby": "SseNearby",
-    "panels": "SsePanels"
+    "panels": "SsePanels",
+    "network_message": "SseNetworkMessage",
+    "bridge": "SseBridge"
   },
   "chat": {"token":"SseChatToken","tool":"SseChatTool","done":"SseChatDone","error":"SseChatError"}
 };

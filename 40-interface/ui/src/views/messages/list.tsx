@@ -15,6 +15,7 @@ import type { Thread } from "../../lib/api/types";
 import { cx, FOCUS_RING } from "../../lib/cx";
 import { Adv } from "../../lib/mode";
 import { MessagingBanner } from "./banner";
+import { NetworkRail } from "./net/rail";
 import { StateGlyph } from "./glyph";
 import { announceIncoming, lastLine, requestItemOf, shortId, type SeenThreads, threadGlyphState, threadName, unreadText, unresolved, whenText } from "./model";
 import { RequestsSection } from "./requests";
@@ -102,6 +103,8 @@ export default function ThreadList() {
       <MessagingBanner />
 
       <RequestsSection items={requests} headingId="requests-h" openAfterAccept />
+
+      <NetworkRail />
 
       <section aria-labelledby="conversations-h" className="flex flex-col gap-2">
         <h2 id="conversations-h" className="font-mono text-[10px] uppercase tracking-widest text-muted-foreground">

@@ -1,0 +1,19 @@
+[2026-10-19 12:00:00] Opening serial port /dev/serial/by-id/usb-Silicon_Labs_CP2102_USB_to_UART_Bridge_Controller_0001-if00-port0...
+[2026-10-19 12:00:03] Device connected
+[2026-10-19 12:00:03] Current firmware version: 1.86
+[2026-10-19 12:00:03] Reading EEPROM...
+[2026-10-19 12:00:04] EEPROM checksum correct
+[2026-10-19 12:00:04] Device signature validated
+[2026-10-19 12:00:04] 
+[2026-10-19 12:00:04] Device info:
+[2026-10-19 12:00:04] 	Product            : Heltec LoRa32 v3 850 - 950 MHz (c1:c8:3a)
+[2026-10-19 12:00:04] 	Device signature   : Genuine board, vendor is unsigned.io
+[2026-10-19 12:00:04] 	Firmware version   : 1.86
+[2026-10-19 12:00:04] 	Hardware revision  : 1
+[2026-10-19 12:00:04] 	Serial number      : 00:00:00:2a
+[2026-10-19 12:00:04] 	Modem chip         : SX1262
+[2026-10-19 12:00:04] 	Frequency range    : 850.0 MHz - 950.0 MHz
+[2026-10-19 12:00:04] 	Max TX power       : 22 dBm
+[2026-10-19 12:00:04] 	Manufactured       : 2026-05-01 10:00:00
+[2026-10-19 12:00:04] 	Device mode        : Normal (host-controlled)
+

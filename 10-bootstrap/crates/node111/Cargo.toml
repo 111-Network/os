@@ -69,6 +69,18 @@ mesh111 = { path = "../../../50-messaging/crates/mesh111" }
 # §10.2 Mode S `store_secret` (keyed BLAKE2b-256 behind the identity handle):
 # already in the graph via id111 and mesh111 at the same exact pin (+0 crates).
 blake2 = "=0.11.0"
+# Layer 6 B2 (bridge core, 60-transport/README.md §3 "One ingest function": NFC):
+# already in the graph via id111 (bip39) at the same pin, 0.1.25 (+0 crates);
+# sign-off row in os/10-bootstrap/TASKS.md "Layer 6 additions".
+unicode-normalization = "0.1.25"
+# Layer 6 B3 (D25 F2 / D27 pre-approved; sign-off row in os/10-bootstrap/TASKS.md
+# "Layer 6 additions"): the official Meshtastic crate, used for its generated
+# protobuf types only (`meshtastic::protobufs` + the re-exported `prost::Message`).
+# No features: its `tokio` feature (the stream API) drags tokio-serial, serialport
+# (MPL-2.0) and tokio "full", so the client on meshmud's downlink is our own
+# (`daemon/meshtastic/client.rs`, spec §5 fallback). GPL-3.0: the shipped `111d` is
+# effectively GPL-3.0-only once this links (LICENSING.md §7).
+meshtastic = { version = "=0.1.9", default-features = false }
 
 [features]
 default = ["mdns"]

@@ -50,3 +50,51 @@ Next after the run: lead writes `layers/60-transport/options.md` → owner decid
 - **Panel → lock (2026-10-19, evening):** reviews `506cf65` (all amend-then-lock) → triage + six owner questions → **D26** `415aa93` → v0.2 `27487bb` →
   re-check `30af706` (amend-then-lock, 13 items) → v0.3 → **locked v1.0, D27**; board `os/60-transport/TASKS.md`. Build starts at `checkpoint-layer-5`.
 
+
+## Build (2026-10-19, cloud session; branch `claude/layer-6-implementation-006mte`)
+
+- Box: a cloud container, **4 CPUs, 15 GB RAM, a fixed disk allowance (~40 GB; a copy of the node111 target dir filled it once)**; no musl
+  cross toolchains (G2 static-link stages SKIP; not a lock run); unprivileged netns work; `iproute2` installed by apt during the session;
+  crates.io, PyPI and GitHub reachable through the proxy; no `rnsd` on the host. Shared warm `CARGO_TARGET_DIR`s under the session
+  scratchpad, one per workspace (cargo's lock serializes agents); `CARGO_BUILD_JOBS=2`; at most two Workflow slots per run (the harness caps
+  concurrency at CPUs − 2), so Rust and non-Rust tasks are interleaved in each wave's task list.
+- Scripts hard-code `ROOT = /home/user/os` and the scratchpad path of this session (the Layer 5 scripts hard-code the owner's box).
+- T0 scaffold: `ef04ac9`. AGENTS.md Raspberry Pi rule: `218fd81`.
+- **Run — Wave 0** (`runs/workflows/wave-0.js`, S1 S2 S4 S6 S3): `wf_10d063a6-41e`. **Run — Wave 0 spike** (`wave-0-spike.js`, S5): `wf_d7fe17dd-f69`.
+  Resume: `Workflow({scriptPath: "<repo>/plan/layers/60-transport/runs/workflows/<name>.js", resumeFromRunId: "<id>"})`.
+- **Wave 0 landed:** S2 `12c1485` (contract) + review minors `8bccbd5`, S5 `711f5b1` (spike PASS), S1 `85cf84f` (store V3), S6 `e5073d5`,
+  S3 `8a8f668`, S4 `5ae8030`. Wave 0 run complete (5 agents, ~1.27M subagent tokens, 49 min). **Run — Wave 1a** (`wave-1a.js`, B1 alone, started
+  beside S4/S6/S3): `wf_55b4e5fc-8a9` (done, 29 min). **Run — S1 bounce** (`wave-0-bounce.js`, the S1 review's major + minors): `wf_8bec0a2d-af3`.
+  **Reviews** (`wave-review.js`, fable judges, read-only): S1 + S2 `wf_4423192d-713`; S3 + S4 `wf_9f93907d-888`.
+  GitHub access was granted mid-session (owner: the org has full access); the branch is pushed after every commit.
+- **Wave 0 closed + B1:** S1 bounce `a38fe19`, B1 `fc802a7`. **Run — Wave 1** (`wave-1.js`, B2 + B3): `wf_0ea8a249-2d9`. **Run — Wave 1b** (`wave-1b.js`,
+  B4 + B5): `wf_b2b6ec75-68f`. **Reviews:** S1-bounce + B1 `wf_182b25dc-d01`. Lead fixes from the S3/S4 reviews (version test, rnstatus re-probe
+  back-off, `write_line` stdin poisoning) ride a lead commit after the Wave 1 launch (`19bc979`).
+- **Wave 1 landing:** B5 `cfa065d` (review `wf_6dd8e7a4-3f0`). **Run — B1 bounce** (`wave-1-bounce.js`: the B1 review major + the S1-bounce/B1
+  minors): `wf_f9c6bf9d-b98` (landed `da0c8a0`; node111 fabric verified on a HEAD overlay while B2/B4 held the tree). B5 review minors `edfd8bf`.
+- **Wave 2 started early for the non-Rust tasks** (they depend on the landed contract and the spec only): `wave-2a.js` (C2 UI + C3py helper)
+  `wf_3fd1e4f0-857`, launched beside B2/B3/B4. `wave-2.js` is now C1 alone (after B2/B4 land); `wave-2b.js` C4 + C3rs + C5 after that.
+  Lesson: a backtick inside a brief closes the template literal — `node --check` accepts the result (tagged templates), the Workflow parser does not.
+- **B4 landed** `39483b0` (+ fmt `b72067e`; review `wf_4e82a662-f37`). **Run — Wave 2c** (`wave-2c.js`, C4 device core alone, right after B4):
+  `wf_4f4eadf8-b07`. `wave-2b.js` is now C3rs + C5 (after B2 and C3py). Ownership moves: the registry.rs binding reader/writer switch is C4's; the
+  two `N/meshtastic/mod.rs` readers are C1's (B3 holds the file until it lands); C4 exposes `devices::applier::apply` and C1 calls it.
+- **C3py landed** `c04984b` (review `wf_95e16a19-802`): rns pin moved to 1.5.7 (lxmf 1.2.1 requires it), python floor 3.10; the assets copy of
+  the lock is deliberately left to C3rs with the `install_flow` MockRunner update (5 tests go red while the lock sits in assets without it).
+- **B4 review:** amend (2 majors). **Run — B4 bounce** (`wave-1b-bounce.js`): `wf_6a37fe4b-365`.
+- **Wave 1 build complete:** B2 `69cbfee` (review `wf_fd716a8a-a09`), B3 `5c1c73d` (review `wf_def38731-39a`); Wave 1 run `wf_0ea8a249-2d9` done
+  (2 agents, ~1.13M subagent tokens, 52 min). C3py review amend → lead fixes `a0dcf56` (assets-copy tests skip until C3rs; floor 3.11).
+- **Wave 2 fully launched:** `wave-2.js` C1 `wf_19cfc9b9-7ac`; `wave-2b.js` C3rs + C5 `wf_80a1e93d-2e8`; C4 `wf_4f4eadf8-b07` and C2 (`wf_3fd1e4f0-857`)
+  still running. Disk: the node111 target reached 21 GB (4.2 GB free); test binaries and incremental dirs older than 35 min were deleted (13 GB free).
+- **B4 bounce landed** `323458b` (verified in a scratch worktree on HEAD + the bounce's eight files, since C4's live `devices/registry.rs` edits
+  broke the shared tree: clippy clean, lib transport 30, spine 21, venv 6, devices 15, G4 GREEN; the worktree was removed after). **C2 landed**
+  `e94985f` (`pnpm check` 1400 tests, budgets PASS; review `wf_b2f6351f-8d9`). **B2 + B3 reviews:** both amend (B2: pre-air Later keeps the
+  pending mark + the DM post-air NAK is never retried; B3: the HAM fact fails open) → **Run — Wave 1c bounce** (`wave-1c-bounce.js`, B2-bounce +
+  B3-bounce in parallel on disjoint files, findings embedded as double-quoted JSON strings so backticks cannot close a template literal):
+  `wf_866f9a2c-d40`. C2's deviations are C1 contract items (reason_code `handoff_pending`, fm- ids on retry/cancel, accept_warning on the
+  decision, no join QR, no mark-read) — recorded in the C2 row for the C1 landing / bounce.
+- **Pause (owner, token budget, 2026-10-20 ~00:20):** the Wave 1c bounce `wf_866f9a2c-d40` and the C2 review `wf_b2f6351f-8d9` were stopped and their
+  partial edits reverted; the three build workflows ran to completion. **Landed:** C4 `54117d3` (+ board `3a4d321`; run `wf_4f4eadf8-b07`), C3rs `ea178c2`
+  (run `wf_80a1e93d-2e8`, whose C5 half returned partial — its diff is `runs/wip/C5-deltachat-madmail.patch`, blocked by the install harness, see the
+  C5 row), C1 `21258f5` (run `wf_19cfc9b9-7ac`). Each was verified by the lead (C4 and C3rs in scratch worktrees on HEAD + the task's files, C1 on the
+  quiet tree). Disk: the worktree builds filled the allowance (linker Bus error); `target/node111/debug/incremental` and stale test binaries were
+  deleted (12 GB free). Canonical state for the next session: `plan/HANDOFF-2026-10-20.md`.

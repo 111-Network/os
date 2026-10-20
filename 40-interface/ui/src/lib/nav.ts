@@ -141,6 +141,7 @@ export function titleFor(path: string, services?: readonly ServiceRecord[] | nul
     "/nearby": "Nearby",
     "/messages": "Messages",
     "/messages/contacts": "Contacts",
+    "/messages/send": "Send to networks",
     "/logs": "Logs",
     "/settings": "Settings",
     "/settings/licenses": "Licenses",
@@ -151,6 +152,7 @@ export function titleFor(path: string, services?: readonly ServiceRecord[] | nul
   const hit = exact[path];
   if (hit) return hit;
   if (path.startsWith("/kb/")) return "Knowledge base";
+  if (path.startsWith("/messages/net/")) return path.split("/").length > 4 ? "Foreign conversation" : "Network";
   const [, head, rest] = /^\/([^/]+)\/([^/]+)$/.exec(path) ?? [];
   switch (head) {
     case "devices":

@@ -27,6 +27,14 @@
 //!   no token was minted is `401` — a presented credential is never ignored.
 //!   Loopback trust is not reopened by this (D16 a stands under Termux): the
 //!   token is what lets the agent in where loopback is untrusted.
+//! - **The global write gate** (Layer 6 `60-transport/README.md` §13 "One
+//!   global rule", D26 #2): the agent's bearer **reads** — it is refused
+//!   (`401`) on **every** method but `GET`, with no allowlist
+//!   ([`bearer_write_refused`], checked first in [`require_session`] and on
+//!   the open `/auth/*` writes by [`bearer_write_gate`]). Identify, restarts,
+//!   proposal decisions, bridge edges, sends and the join descriptor are all
+//!   writes; the agent files proposals and the human decides. A presented
+//!   bearer is never ignored on a write, even beside a valid session cookie.
 //!
 //! Both files are re-read when they change on disk (inode/mtime/len stamp), so
 //! `111 dashboard rotate` takes effect on a running daemon without a restart.
@@ -916,6 +924,36 @@ fn bearer_refused() -> Problem {
     .detail("Bearer tokens are accepted only from the node itself, and only the daemon's own.")
 }
 
+/// The global write gate (§13, D26 #2; module doc): a request that presents
+/// any bearer credential on a method other than `GET` is refused, whatever
+/// the token, the peer or the route. `HEAD` and `OPTIONS` count as writes
+/// here (fail closed: the agent only ever needs `GET`).
+pub fn bearer_write_refused(method: &Method, headers: &HeaderMap) -> bool {
+    *method != Method::GET && !bearer_tokens(headers).is_empty()
+}
+
+/// The `401` of the write gate.
+fn bearer_write_problem() -> Problem {
+    Problem::new(
+        StatusCode::UNAUTHORIZED,
+        "unauthenticated",
+        "a dashboard session is required for this change",
+    )
+    .detail(
+        "The agent's token reads only; every change is made by a person on this node or a paired \
+         browser. The agent files a proposal instead.",
+    )
+}
+
+/// The write gate as a middleware for the routes outside [`require_session`]
+/// (the open `/auth/*` writes): the same rule, nothing else.
+pub async fn bearer_write_gate(req: Request, next: Next) -> Response {
+    if bearer_write_refused(req.method(), req.headers()) {
+        return bearer_write_problem().into_response();
+    }
+    next.run(req).await
+}
+
 // ---------------------------------------------------------------- middleware
 
 /// Every `s111` cookie value, in header order (all `Cookie` headers are
@@ -967,15 +1005,35 @@ pub fn companion_device_id(token: &str) -> String {
     )
 }
 
+/// What a write records as its author (`relay_edges.enabled_by`, the HAM and
+/// uplink confirmations, Layer 6 §3, §8): `loopback` for a trusted loopback
+/// peer without a session, `paired:<companion device id>` for a paired
+/// session (the id the device registry shows; derived from the stored hash,
+/// never the token), `unknown` otherwise. Never a secret.
+pub fn session_label(api: &ApiState, headers: &HeaderMap, ext: &Extensions) -> String {
+    if let Some((token, _)) = api.auth.session_in(headers) {
+        return format!("paired:{}", companion_device_id(&token));
+    }
+    if trusted_loopback(api, ext) {
+        return "loopback".into();
+    }
+    "unknown".into()
+}
+
 /// Gate for every `/api/v1/*` route except `/api/v1/auth/*` (and the Layer 1
-/// `/api/status` + `/v1`). Order: a presented bearer decides first
-/// ([`bearer_verdict`]: loopback peer + the daemon token, else `401`); then a
-/// trusted loopback peer passes; then a valid `s111` session cookie.
+/// `/api/status` + `/v1`). Order: the global write gate first (any bearer on
+/// a non-`GET` is `401`, [`bearer_write_refused`]); then a presented bearer
+/// decides ([`bearer_verdict`]: loopback peer + the daemon token, else
+/// `401`); then a trusted loopback peer passes; then a valid `s111` session
+/// cookie.
 pub async fn require_session(
     State(api): State<Arc<ApiState>>,
     req: Request,
     next: Next,
 ) -> Response {
+    if bearer_write_refused(req.method(), req.headers()) {
+        return bearer_write_problem().into_response();
+    }
     let token = api.ext::<DaemonToken>();
     match bearer_verdict(
         req.headers(),
@@ -1180,6 +1238,7 @@ pub fn router() -> ApiRouter {
         .route("/api/v1/auth/session", get(session))
         .route("/api/v1/auth/pair", post(pair))
         .route("/api/v1/auth/logout", post(logout))
+        .route_layer(axum::middleware::from_fn(bearer_write_gate))
 }
 
 #[cfg(test)]
@@ -1461,6 +1520,44 @@ mod tests {
             bearer_tokens(&auth_headers(&["Basic x", "Bearer one", "Bearer two"])),
             ["one", "two"]
         );
+    }
+
+    #[test]
+    fn the_write_gate_refuses_a_bearer_on_every_method_but_get() {
+        let methods = [
+            Method::GET,
+            Method::HEAD,
+            Method::POST,
+            Method::PUT,
+            Method::PATCH,
+            Method::DELETE,
+            Method::OPTIONS,
+            Method::from_bytes(b"PROPFIND").unwrap(),
+        ];
+        let token = DaemonToken::mint().unwrap();
+        let good = format!("Bearer {}", token.as_str());
+        for m in &methods {
+            // no bearer: the gate does not decide (cookies / loopback do)
+            assert!(!bearer_write_refused(m, &HeaderMap::new()), "{m}");
+            // other schemes are not bearer credentials
+            assert!(
+                !bearer_write_refused(m, &auth_headers(&["Basic YTpi"])),
+                "{m}"
+            );
+            for h in [good.as_str(), "Bearer nope", "bearer ", "Bearer"] {
+                let hs = auth_headers(&[h]);
+                assert_eq!(bearer_write_refused(m, &hs), *m != Method::GET, "{m} {h}");
+                // the right token from loopback reads, and still never writes
+                if h == good {
+                    assert_eq!(
+                        bearer_verdict(&hs, true, Some(&token)),
+                        BearerVerdict::Accepted
+                    );
+                }
+            }
+            let two = auth_headers(&[&good, &good]);
+            assert_eq!(bearer_write_refused(m, &two), *m != Method::GET, "{m}");
+        }
     }
 
     #[test]

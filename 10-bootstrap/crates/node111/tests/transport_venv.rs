@@ -37,7 +37,7 @@ fn fake_venv(layout: &DaemonLayout, lock: &Path) {
     let venv = venv::venv_dir(layout);
     std::fs::create_dir_all(venv.join("bin")).unwrap();
     let rnsd = venv.join("bin/rnsd");
-    std::fs::write(&rnsd, "#!/bin/sh\nsleep 300\n").unwrap();
+    std::fs::write(&rnsd, "#!/bin/sh\nexec sleep 300\n").unwrap();
     use std::os::unix::fs::PermissionsExt;
     std::fs::set_permissions(&rnsd, std::fs::Permissions::from_mode(0o755)).unwrap();
     let sha = node111::util::hash::sha256_file(lock).unwrap();
@@ -122,11 +122,14 @@ fn config_render_and_schema_seam() {
     // first write creates; second is a no-op
     assert!(config::write_if_changed(&layout).unwrap());
     let text = std::fs::read_to_string(config::config_path(&layout)).unwrap();
-    assert!(text.contains("schema-version = 1"), "{text}");
+    assert!(text.contains("schema-version = 2"), "{text}");
     assert!(text.contains("type = AutoInterface"));
     assert!(text.contains("group_id = 111.network"));
     assert!(!config::write_if_changed(&layout).unwrap());
-    assert_eq!(config::existing_schema_version(&layout), Some(1));
+    assert_eq!(
+        config::existing_schema_version(&layout),
+        Some(config::SCHEMA_VERSION)
+    );
     // a newer schema version (Layer 6) is read back correctly
     std::fs::write(config::config_path(&layout), "schema-version = 7\n").unwrap();
     assert_eq!(config::existing_schema_version(&layout), Some(7));

@@ -1,9 +1,30 @@
 // Thin useSyncExternalStore wrappers over the app store. Selectors return slices of an immutable
 // state object, so references are stable between unrelated changes.
 import { useEffect, useSyncExternalStore } from "react";
-import { apiStore, type Attention, type ConnectionSnapshot, type StoreMeta, type StoreState, type ThreadSlot } from "./store";
+import { apiStore, type Attention, type ConnectionSnapshot, type ForeignSlot, type StoreMeta, type StoreState, type ThreadSlot } from "./store";
 import type { IgnoredRequests } from "./requests";
-import type { AgentEvent, Card, Contact, DeviceRecord, FabricStatus, HostedPanel, NearbySource, NodeId, Proposal, ServiceId, ServiceRecord, Status, Thread } from "./types";
+import type {
+  AgentEvent,
+  BridgeComponent,
+  BridgeEdge,
+  BridgeSettings,
+  Card,
+  Contact,
+  DeviceRecord,
+  FabricStatus,
+  ForeignConversation,
+  HostedPanel,
+  NearbySource,
+  Network,
+  NetworkId,
+  NodeId,
+  Proposal,
+  ServiceId,
+  ServiceRecord,
+  Status,
+  Thread,
+  TransportStatus,
+} from "./types";
 
 function useSlice<T>(select: (s: StoreState) => T): T {
   const snapshot = () => select(apiStore.getState());
@@ -91,3 +112,74 @@ export const useNearby = (): NearbySource[] | null => useSlice((s) => s.nearby);
 
 /** Declared hosted panels and their listener slots; null until loaded. */
 export const usePanels = (): HostedPanel[] | null => useSlice((s) => s.panels);
+
+// --- Layer 6: foreign networks, relay edges, components, transport ----------------------------------------------
+
+/** The foreign networks in the preferred order (the rail and the pickers); null until loaded, and for a node older than Layer 6. */
+export const useNetworks = (): Network[] | null => useSlice((s) => s.networks);
+
+/** One network by id; null while loading or when unknown. */
+export const useNetwork = (id: NetworkId): Network | null => useSlice((s) => s.networks?.find((n) => n.id === id) ?? null);
+
+/**
+ * One network's conversations, most recent first. The first render for a network starts the load; `undefined` until it
+ * arrives (so a view can tell "not loaded" from "none").
+ */
+export function useNetworkConversations(net: NetworkId): ForeignConversation[] | undefined {
+  const list = useSlice((s) => s.conversations[net]);
+  useEffect(() => {
+    void apiStore.refreshConversations(net);
+  }, [net]);
+  return list;
+}
+
+/** The conversations of several networks at once (the fan-out picker); a network not loaded yet is missing from the record. */
+export function useConversationsOf(nets: readonly NetworkId[]): Record<NetworkId, ForeignConversation[]> {
+  const all = useSlice((s) => s.conversations);
+  const key = nets.join("\u0000");
+  useEffect(() => {
+    for (const n of key === "" ? [] : key.split("\u0000")) void apiStore.refreshConversations(n);
+  }, [key]);
+  return all;
+}
+
+const NO_FOREIGN: ForeignSlot = { state: "loading", network: "", page: null, error: null };
+
+/** One foreign conversation by its `fc-…` id. The first render starts its load (the newest 100 rows); the slot follows `network_message` frames. */
+export function useForeignThread(net: NetworkId, conv: string, limit?: number): ForeignSlot {
+  const slot = useSlice((s) => s.foreignPages[conv] ?? NO_FOREIGN);
+  useEffect(() => {
+    void apiStore.loadForeign(net, conv, limit);
+  }, [net, conv, limit]);
+  return slot;
+}
+
+/** Relay edges; null until loaded. */
+export const useEdges = (): BridgeEdge[] | null => useSlice((s) => s.edges);
+
+/** state/bridge.json as the node mirrors it. The first use asks for it. */
+export function useBridgeSettings(): BridgeSettings | null {
+  const v = useSlice((s) => s.bridgeSettings);
+  useEffect(() => {
+    void apiStore.refreshBridgeSettings();
+  }, []);
+  return v;
+}
+
+/** Optional components. The first use asks for them. */
+export function useComponents(): BridgeComponent[] | null {
+  const v = useSlice((s) => s.components);
+  useEffect(() => {
+    void apiStore.refreshComponents();
+  }, []);
+  return v;
+}
+
+/** Interfaces, posture, region and callsign. The first use asks for them. */
+export function useTransport(): TransportStatus | null {
+  const v = useSlice((s) => s.transport);
+  useEffect(() => {
+    void apiStore.refreshTransport();
+  }, []);
+  return v;
+}

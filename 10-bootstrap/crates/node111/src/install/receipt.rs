@@ -35,6 +35,24 @@ pub struct Receipt {
     /// Degradations taken (no python3, container relay, unknown distro, …).
     pub degrade_branches: Vec<String>,
     pub phone: Option<PhoneReceipt>,
+    /// Third-party notices printed before any download (Layer 6 §2.1 rule 3,
+    /// §15; D26 #5: the user installs, 111 is not the distributor): one per
+    /// program, recorded beside the artifact hashes. `default`: receipts
+    /// written before Layer 6 carry none and must still parse.
+    #[serde(default)]
+    pub notices: Vec<InstallNotice>,
+}
+
+/// One notice line shown by `111 install` (program, licence, where to read
+/// it) and the SHA-256 of its exact text.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InstallNotice {
+    pub program: String,
+    pub license: String,
+    pub url: String,
+    /// Lowercase hex SHA-256 of the notice text (the same hash `enable`
+    /// asks the user to acknowledge for a component).
+    pub hash: String,
 }
 
 impl Receipt {
@@ -51,6 +69,7 @@ impl Receipt {
             cache_hashes: BTreeMap::new(),
             degrade_branches: Vec::new(),
             phone: None,
+            notices: Vec::new(),
         }
     }
 
@@ -109,5 +128,21 @@ mod tests {
         let r = Receipt::read(&p).unwrap().unwrap();
         assert_eq!(r.node_id, "");
         assert_eq!(r.version, "2026.10.12");
+        assert!(r.notices.is_empty(), "a pre-Layer-6 receipt has no notices");
+    }
+
+    #[test]
+    fn notices_round_trip() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("receipt.json");
+        let mut r = Receipt::new("2026.10.19");
+        r.notices.push(InstallNotice {
+            program: "Reticulum (rns)".into(),
+            license: "LicenseRef-Reticulum".into(),
+            url: "https://example.org/LICENSE".into(),
+            hash: "a".repeat(64),
+        });
+        r.write(&p).unwrap();
+        assert_eq!(Receipt::read(&p).unwrap().unwrap().notices, r.notices);
     }
 }

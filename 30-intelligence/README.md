@@ -108,3 +108,70 @@ schema-validated (D10); `111-agent` still never gets a host shell.
 - **Writes** only via the proposal path: this layer's "only write path" rule is preserved, and `messages.send` never sends on its own.
 - **Untrusted text.** Names heard over Meshtastic are RF-origin strings, handed to the model inside a labelled untrusted block.
 - **Offload** is unchanged in v1: it stays on the LAN binding + pairing auth and is not v1 fabric traffic.
+
+## Appendix — Layer 6 tools (D27, 2026-10-19)
+
+Additive (`os/60-transport/README.md` §13, §15.6, §8, §12; built by Layer 6 task B5). The tool set stays fixed,
+shell-free and schema-validated (D10) and grows from ten to **seventeen**: seven new tools, and `messages.send` gains
+`targets`. Schemas follow the §13 order after the Layer 5 five: `bridge.read` · `bridge.propose_edge` · `devices.read` ·
+`transport.read` · `device.identify` · `device.propose` · `service.restart`.
+
+**The agent writes nothing.** Every daemon call the tools make is a GET with the per-spawn bearer (one call, no retry, no
+redirect, size-capped before parsing); every write is a **proposal** the human accepts in the UI. The agent's bearer is
+refused on every non-GET (the global write gate, D26 #2 — transport §13), so even a bug here could not reach a send,
+an edge, a restart or a probe. A test fails if any request other than a GET ever leaves the agent for the daemon URL.
+
+| Tool | Kind | Daemon reads (GET) | Result |
+|---|---|---|---|
+| `bridge.read {network?, conv?, since_seq?, limit 1..50}` | read | `/networks` always; `/networks/{net}/conversations` with `network`; `/networks/{net}/conversations/{conv}?limit&since_seq` with `conv`; `/bridge/edges` | networks, conversations, messages, edges (see the untrusted-block rule) |
+| `messages.send {to, text}` | write intent | `/contacts/{to}` | proposal `message` (Layer 5, unchanged) |
+| `messages.send {targets: [{network, conv}] 1..16, text}` | write intent | `/networks/{net}/conversations/{conv}?limit=1` per target | proposal `bridge_message` |
+| `bridge.propose_edge {from, to, why}` | write intent | `/networks`, then `/networks/{net}/conversations` of each enabled network until both ends are found | proposal `bridge_edge` |
+| `devices.read {id?}` | read | `/devices` or `/devices/{id}` | records with raw facts ≤ 4 KB each |
+| `transport.read {}` | read | `/transport` | the cached `rnstatus` interface facts, posture, region, order |
+| `device.identify {id}` | consent | `/devices/{id}` | the remembered probe result, or proposal `device` |
+| `device.propose {id?, actions 1..8, why}` | write intent | `/devices/{id}` for each device named | proposal `device` |
+| `service.restart {service_id, why}` | write intent | none | proposal `device` |
+
+**Ids.** `network` is from the closed set `meshtastic`, `lxmf`, `app:deltachat`, `app:simplex` (`111` is not one: its
+threads are the `messages.*` tools; the colon is percent-encoded in a path). A conversation is `^fc-[0-9]{1,19}$`, a
+device id `^[A-Za-z0-9_-]{4,64}$`, a service id `^[a-z0-9-]{1,32}$`. Bad ids are refused before any request.
+
+**Untrusted-block rule (bridge.read).** Everything another person or network wrote reaches the model **only inside one
+block**: `{"untrusted": {"label": "UNTRUSTED: received from other networks", "origin", "warning", "networks",
+"conversations", "conversation", "messages", "edges"}}`. Names, ids, native ids, titles, accounts, sender names, message
+bodies, adapter wording (`label`, `copy`, `reason`, `evidence`, recipient syntax) and edge records are all in it, scrubbed like
+`messages.read` — control and bidi characters dropped, bodies via `clean_text` at 4096 characters, names and ids via
+`clean_line` at 64 (adapter sentences at 512), nesting bounded — and **not** with `nearby.read`'s 256. Every body is
+`untrusted_text`, own rows included (an own row can be a relayed copy of someone else's words). Outside the block sit
+only adapter *facts*, filtered to the contract's closed vocabularies, numbers and booleans: per network `id`, `state`,
+`reason_code`, `caps` (kinds, max text bytes, evidence, auth levels, splittable, airtime numbers), `gate`, `counts`,
+`dropped`; plus the echoed `network`/`conv`, `more` and the totals. `devices.read` and `transport.read` clean names and
+bound raw facts (a device's `identity` and `detail` share one 4 KB budget of JSON, 2 KB each, whole entries dropped, never cut) and carry an
+`untrusted_notice`. Foreign text never reaches a send or an edge without the human reading it first: the agent can put it
+into a send only through a proposal whose text part the UI renders preformatted.
+
+**Proposal bodies — verbatim shapes (111d's C1 parses exactly these on accept; `40-interface/api/openapi.yaml`
+`Proposal.kind`).** Every proposal is stamped with this node's id and journaled as `proposal.written` with its kind.
+
+| `kind` | Body, byte for byte |
+|---|---|
+| `bridge_message` | one line `to: <fc-id>` per target, in the order given · a blank line · the text **verbatim** (`check_send_text`: non-blank, ≤ 4096 bytes, no control characters but newline and tab, refused never truncated). Each target is checked with `GET /networks/{net}/conversations/{conv}`; a 404 writes nothing and says why. |
+| `bridge_edge` | `from: <fc-id>` · `to: <fc-id>` · a blank line · `why` (≤ 512 characters, cleaned). Both conversations must exist and be `channel` or `group` kinds and differ; a DM endpoint is refused with the §8 reason and no proposal is written. |
+| `device` | **one compact JSON object** `{"why": <why>, "actions": [<Action>, …]}`; an Action is `{"action": name, …args}`. |
+
+`device` actions are the **closed** vocabulary (devices brief §3, transport §12): `rns.interface.upsert {device_id, type,
+params}` (params: a flat object of strings, numbers and booleans) · `rns.interface.remove {name}` · `rns.posture.set
+{share_instance?, enable_transport?}` (at least one) · `radio.region.set {region}` · `identify {device_id}` ·
+`service.restart {service_id}`. The rest of the vocabulary (`meshtastic.set`, `ble.pair`, `ble.forget`, `firmware.flash`)
+and anything unknown is refused here as `unsupported_action` — the agent never files what 111d would refuse. Each action's
+keys are written in a fixed order (`action` first, then the fields in the order above) and nested objects with sorted keys,
+so a body is byte-stable. `device.identify` writes the single action `{"action":"identify","device_id":"<id>"}` with
+`why` = `identify this radio once (a consented probe)`: accepting it **is** the per-device consent (opening a serial port
+can reset a board); a device whose record already carries `firmware.source == "probe"` returns the remembered result and
+writes nothing. `service.restart` writes the single action `service.restart` and makes **no** daemon call at all: a restart
+route is never requested, and 111d answers `not_supervised` on accept for an unsupervised child.
+
+Count pins: `tests/daemon_tools.rs` (schema count 17, new names in order) and `tests/chat_loop.rs` (17 tools offered).
+New tests: `tests/layer6_tools.rs` (a stub 111d serving the new GET routes). No dependency, resident process or timer is
+added: the tools are plain functions that run only inside a chat turn.

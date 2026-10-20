@@ -31,6 +31,11 @@ This repo (`os/`) is the operating layer of the 111network mesh OS: an offline-f
   `80-storage`, `90-evolution` reserved). `plan/layers/` uses the same names. Specs in `<NN-slug>/README.md`, boards in
   `<NN-slug>/TASKS.md`.
 - Commit in this repo after every verified task. NEVER add Claude co-author or attribution lines.
+- **Raspberry Pi is the floor (owner rule, 2026-10-19):** the OS without the local models was confirmed to run on a Raspberry Pi, and the
+  required configuration stays that way: super light and super efficient. The base install is the thin 111 layer only; everything third-party is
+  a separate, on-demand component that weighs nothing (no process, listener, loaded code, timer or open file) while it is off. No task may add a
+  resident process, a periodic poll, a runtime dependency or a build-time weight to the required configuration without the owner's say; measure
+  (RSS, binary size, listeners) and record it in the layer's `TASKS.md` when it changes.
 - Ask the owner on interpretive forks; do not assume. Never reinvent the wheel: adopt existing projects, host their
   panels, do not recreate them.
 - **Linux hygiene while building and testing:** nothing of ours stays running that the next step does not need. Dev servers

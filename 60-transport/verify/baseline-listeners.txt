@@ -1,0 +1,33 @@
+# 60-transport/verify/baseline-listeners.txt — the Layer 5 baseline G7 compares against (spec §16 G7, §2.1 rule 2).
+#
+# With every optional component disabled, the processes under 111d and the TCP ports they listen on must be exactly
+# what Layer 5 runs: nothing of Layer 6 adds a process or a listener until a human enables a component. Read by
+# verify/zero-weight.sh. Two kinds of line, fields separated by whitespace, `#` starts a comment:
+#
+#   listen <port or lo-hi> <when> <holder>    a TCP listener allowed (and, for `always`, required) under 111d
+#   proc   <name> <cmdline match>             a descendant process of 111d allowed in the baseline
+#
+# <when> is evaluated from facts the script reads, never from the API:
+#   always          111d itself always listens here
+#   child:<name>    allowed while that `proc` descendant runs (it is the child's own listener)
+#   fabric_listen   <root>/fabric/settings has hub_role or listen_lan true (Layer 5 LAN sharing of the fabric)
+#   panel           a hosted panel's listener while its service is set up; Layer 5's one panel is the Meshtastic
+#                   web client, set up exactly when a board is bound, so: allowed while `meshmud` runs
+#
+# Not listed, so a FAIL when seen: any component (lxmf-sidecar, deltachat-rpc-server, madmail, simplex-chat,
+# smp-server), anything run from <root>/components/ or <root>/venvs/<component>, the SimpleX socket 11232, Madmail's
+# mail ports, and rnsd's Backbone listener 4242 (Layer 6 posture, only while LAN sharing; added here when B4 lands).
+# rnsd's AutoInterface and mDNS sockets are UDP: the script records them, it does not assert them.
+
+listen 11180        always          111d (dashboard; loopback, or every address while LAN sharing is on)
+listen 11181        child:llama-server   llama-server (the local model, loopback)
+listen 11182        child:111-agent      111-agent (the agent, loopback)
+listen 11183        fabric_listen   111d (the fabric LAN listener: hub role or listen_lan)
+listen 11190-11229  panel           111d (a hosted panel's listener)
+listen 11230        child:meshmud   meshmud (the downlink; only while a board is bound)
+
+proc rnsd                 bin/rnsd
+proc 111-agent            111-agent
+proc llama-server         llama-server
+proc meshmud              meshmud
+proc meshtastic-presence  meshtastic_presence.py

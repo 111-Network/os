@@ -1,0 +1,47 @@
+# 111 node rnsd config (Reticulum INI format), rendered by 111d from
+# state/interfaces.toml (os/60-transport/README.md §11, renderer v2). Do not
+# edit: 111d rewrites it. Mode 0600: it carries the shared-instance rpc_key.
+# The schema-version line is the takeover seam: a binary that knows only an
+# older version leaves this file alone.
+schema-version = 2
+
+[reticulum]
+  share_instance = Yes
+  instance_name = 111
+  rpc_key = 1111111111111111111111111111111111111111111111111111111111111111
+  enable_transport = Yes
+
+[interfaces]
+  [[Auto Interface]]
+    type = AutoInterface
+    enabled = yes
+    group_id = 111.network
+  [[Roof RNode]]
+    type = RNodeInterface
+    enabled = yes
+    port = /dev/serial/by-id/usb-Silicon_Labs_CP2102-if00-port0
+    frequency = 869525000
+    bandwidth = 125000
+    txpower = 14
+    spreadingfactor = 8
+    codingrate = 5
+    airtime_limit_long = 10
+  [[Field RNode]]
+    type = RNodeInterface
+    enabled = yes
+    port = tcp://10.0.0.5:4403
+    frequency = 914875000
+    bandwidth = 125000
+    txpower = 22
+    spreadingfactor = 8
+    codingrate = 5
+    id_interval = 600
+    id_callsign = W1AW
+    airtime_limit_short = 33.5
+  [[111 hub 10.0.0.1]]
+    type = TCPClientInterface
+    enabled = yes
+    target_host = 10.0.0.1
+    target_port = 4242
+    network_name = 111-lan
+    passphrase = fedcba9876543210fedcba9876543210

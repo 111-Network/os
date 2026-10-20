@@ -1,0 +1,3 @@
+[2026-10-19 12:03:00] Opening serial port /dev/ttyUSB0...
+[2026-10-19 12:03:03] Serial port opened, but RNode did not respond. Is a valid firmware installed?
+Got invalid response while detecting device

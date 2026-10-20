@@ -1,0 +1,49 @@
+# Optional component declaration (Layer 6 §2.1; the format is node111's `daemon/components/manifest.rs`). Parsed with
+# deny_unknown_fields like assets/panels/<id>.toml: an unknown key or an invalid file ⇒ not registered. The release
+# carries no third-party bytes: `111 install` prints the notice below, records it in the install receipt, then
+# downloads the hash-locked closure into cache/packages/lxmf/; nothing is installed or started until a human enables
+# the component and acknowledges the notice (409 consent_required otherwise), and then only from that cache.
+id = "lxmf"
+adapter = "lxmf"                        # the network id this component carries (§3)
+title = "Reticulum / LXMF helper"
+kb_entry = "projects/lxmf"
+
+[payload]
+kind = "pip"                            # pip | binary
+# The hash-locked closure (rns 1.5.7 + lxmf 1.2.1 + cryptography, cffi, pycparser, pyserial; hashes only, no
+# third-party bytes) rides beside this file as assets/components/lxmf.lock.txt, embedded in the signed binary: a
+# byte-identical copy of 60-transport/sidecars/lxmf-sidecar/lxmf-sidecar-lock.txt written by the helper's gen_lock.py
+# (tests assert the two are identical). `111 install` downloads it into cache/packages/lxmf/ with a throwaway venv's
+# pip (`pip download --require-hashes`); enable installs venvs/lxmf from that cache only, offline. Its rns pin must
+# equal the release's rns-lock.txt (§6: two rns copies share one instance protocol; a release-checklist assertion).
+lock = "lxmf.lock.txt"
+venv = "lxmf"                           # venvs/lxmf, a link to venvs/lxmf.d/<build> (the L1 presence pattern)
+
+[requires]
+python = "3.11"                         # the hash-locked closure was resolved on 3.11 and carries no typing-extensions for older (rns and lxmf alone need 3.7, §6)
+service = "transport"                   # rnsd must serve the shared instance before the helper starts (§6 "Start order")
+
+[run]
+# venvs/lxmf/bin/python -I <current>/share/lxmf-sidecar/lxmf_sidecar.py <args>, piped stdio (JSON Lines, §6), HOME=<root>,
+# stderr to bridge/lxmf/lxmf.log. {bridge} is <root>/bridge/lxmf: the client config dir bridge/lxmf/rns (0700, its
+# config 0600, rendered by the transport spine with rnsd's rpc_key), the identity bridge/lxmf/identity (0600, owned by
+# the helper; 111d never reads it) and the router's storage bridge/lxmf/store (0700). The LXMF adapter appends
+# `--announce-interval <minutes>` and, when one is set, `--name <display name>` (daemon/bridge/lxmf.rs `run_args`,
+# from the bridge settings' announce section).
+program = "share/lxmf-sidecar/lxmf_sidecar.py"
+args = ["--config-dir", "{bridge}/rns", "--identity", "{bridge}/identity", "--storage", "{bridge}/store"]
+ports = []                              # the helper listens on no port (§15.7)
+health = "ready"                        # the first stdout line is {"type":"ready", dest, pubkey, instance} within the timeout
+health_timeout_secs = 30
+
+[weight]
+# Measured with the closure of this lock (x86_64, CPython 3.13; 60-transport/sidecars/lxmf-sidecar/README.md "Weight"):
+# the wheels pip downloads for this platform, the venv's site-packages without pip, the idle helper's resident set.
+cached_bytes = 5830776                  # 5.83 MB: 6 wheels, cryptography 4.75 MB of it
+installed_bytes = 24927142              # 24.9 MB
+rss_bytes = 43700000                    # 43.7 MB idle (10 threads, no listener), as the helper README records it
+
+[license]
+spdx = "LicenseRef-Reticulum"           # rns and lxmf: the Reticulum License (non-OSI; LICENSING.md §8)
+read_at = "https://github.com/markqvist/Reticulum/blob/master/LICENSE"
+notice = "Reticulum (rns) and LXMF (lxmf) are the work of the Reticulum project (reticulum.network) and are licensed under the Reticulum License; read it at https://github.com/markqvist/Reticulum/blob/master/LICENSE and https://github.com/markqvist/LXMF/blob/master/LICENSE before you enable this. They and their dependencies (cryptography, cffi, pycparser, pyserial, each under its own licence) are downloaded hash-locked from PyPI, unmodified, and run in this node's LXMF helper, a separate program. You install them: 111 is not affiliated with the Reticulum project and is not their distributor."

@@ -7,15 +7,16 @@ tags: [mesh, networking, offline]
 platforms: [linux, android, macos, windows]
 upstream: https://github.com/markqvist/Reticulum
 license: LicenseRef-Reticulum
-last_verified: 2026-10-14
+last_verified: 2026-10-19
 sources:
   - https://reticulum.network
   - https://github.com/markqvist/Reticulum
   - https://raw.githubusercontent.com/markqvist/Reticulum/master/docs/source/interfaces.rst
   - https://github.com/liamcottle/reticulum-meshchat
 relations:
-  alternative_to: ["[[meshtastic]]"]
-  required_by: ["[[lxmf]]", "[[meshchatx]]"]
+  alternative_to: ["[[meshtastic]]", "[[leviculum]]"]
+  relates_to: ["[[rnode-firmware]]"]
+  required_by: ["[[lxmf]]", "[[meshchatx]]", "[[ble-reticulum]]"]
 ---
 
 Sovereign end-to-end encrypted networking stack; custom license needs legal review
@@ -49,8 +50,9 @@ independent of the transport underneath.
 
 ## Details
 
-- Component versions reported as of 2026-10: RNS 1.3.5, LXMF 1.0.1,
-  NomadNet 1.4.4.
+- Component versions reported as of 2026-10-19 (PyPI, verified): RNS 1.5.7 (2026-10-05), LXMF 1.2.1 (2026-10-13),
+  NomadNet 1.4.4. The GitHub repository is a lagging mirror (tag 1.5.5), so the latest upstream release resolves
+  from PyPI.
 - The reference implementation is a Python 3 userland stack; it runs on
   anything with Python 3, including the Android build.
 - Host-radio split: RNode is a dumb LoRa KISS modem, while the host owns
@@ -61,8 +63,12 @@ independent of the transport underneath.
   of this entry.
 - The live world map at rmap.world shows a growing node population.
 
-No-import carriage (Layer 5; reports 01, 02, gap-1; as of 2026-10-14). 111 never imports RNS or LXMF; it
-reaches Reticulum only through an adopted program's external interface:
+No-import carriage (Layer 5; reports 01, 02, gap-1; as of 2026-10-14). 111d never imports RNS or LXMF; it
+reaches Reticulum only through an adopted program's external interface. Layer 6 amends this (D26 #4): `lxmf-sidecar`,
+a small helper of ours, is the one program that imports `rns` and `lxmf`, as a separate process in its own venv
+built from the user-installed packages, never combined with 111d. Credit: Reticulum and LXMF are the work of the
+Reticulum project (reticulum.network); 111 uses them as released and is not affiliated. The helper's own licence
+waits on the owner's contact with upstream. The interfaces below remain the Layer 5 record:
 
 - MeshChat HTTP and WebSocket API: `POST /api/v1/lxmf-messages/send` (content, image, audio, or file
   attachments only, no arbitrary field), `GET /api/v1/lxmf-messages/conversation/{hash}`,
@@ -90,6 +96,8 @@ reaches Reticulum only through an adopted program's external interface:
   versions and activity figures reported as of 2026-10.
 - 2026-10-14: Layer 5 research pass added the no-import carriage facts from interface documentation
   and the MeshChat source; nothing was run.
+- 2026-10-19: Layer 6 research: versions read from PyPI; the helper boundary and credit line recorded; rnsd 1.5.7
+  was run in network namespaces by the research pass (shared instance, Backbone, RNode stub).
 
 ## Links
 

@@ -17,7 +17,9 @@ export type EventsFrame =
   | { event: "contact"; data: Schemas["SseContact"] }
   | { event: "fabric"; data: Schemas["FabricStatus"] }
   | { event: "nearby"; data: Schemas["SseNearby"] }
-  | { event: "panels"; data: Schemas["SsePanels"] };
+  | { event: "panels"; data: Schemas["SsePanels"] }
+  | { event: "network_message"; data: Schemas["SseNetworkMessage"] }
+  | { event: "bridge"; data: Schemas["SseBridge"] };
 
 /** Frames on the `POST /api/v1/chat` response stream. */
 export type ChatFrame =
@@ -29,7 +31,7 @@ export type ChatFrame =
 export type EventsEventName = EventsFrame["event"];
 export type ChatEventName = ChatFrame["event"];
 
-export const EVENTS_EVENT_NAMES = ["status", "services", "devices", "proposal", "agent", "reset", "message", "contact", "fabric", "nearby", "panels"] as const;
+export const EVENTS_EVENT_NAMES = ["status", "services", "devices", "proposal", "agent", "reset", "message", "contact", "fabric", "nearby", "panels", "network_message", "bridge"] as const;
 export const CHAT_EVENT_NAMES = ["token", "tool", "done", "error"] as const;
 
 // Convenience aliases for the schemas the app uses.
@@ -100,6 +102,60 @@ export type MessageChangeEvent = Schemas["SseMessage"];
 export type ContactChangeEvent = Schemas["SseContact"];
 export type NearbyEvent = Schemas["SseNearby"];
 export type PanelsEvent = Schemas["SsePanels"];
+export type NetworkId = Schemas["NetworkId"];
+export type Network = Schemas["Network"];
+export type NetworkState = Schemas["NetworkState"];
+export type NetworkCopy = Schemas["NetworkCopy"];
+export type NetworkCaps = Schemas["NetworkCaps"];
+export type NetworkGate = Schemas["NetworkGate"];
+export type NetworkCounts = Schemas["NetworkCounts"];
+export type BridgeComponent = Schemas["Component"];
+export type ComponentState = Schemas["ComponentState"];
+export type ComponentLicense = Schemas["ComponentLicense"];
+export type ComponentEnableRequest = Schemas["ComponentEnableRequest"];
+export type ComponentRemoveRequest = Schemas["ComponentRemoveRequest"];
+export type ForeignConversationId = Schemas["ForeignConversationId"];
+export type ForeignConversation = Schemas["ForeignConversation"];
+export type ForeignConvKind = Schemas["ForeignConvKind"];
+export type ForeignMessageId = Schemas["ForeignMessageId"];
+export type ForeignMessage = Schemas["ForeignMessage"];
+export type ForeignMessageState = Schemas["ForeignMessageState"];
+export type ForeignAuth = Schemas["ForeignAuth"];
+export type ForeignReasonCode = Schemas["ForeignReasonCode"];
+export type ForeignSender = Schemas["ForeignSender"];
+export type ForeignThread = Schemas["ForeignThread"];
+export type ForeignDmOpen = Schemas["ForeignDmOpen"];
+export type ForeignSendRequest = Schemas["ForeignSendRequest"];
+export type ForeignSendAccepted = Schemas["ForeignSendAccepted"];
+export type SendMode = Schemas["SendMode"];
+export type SendPlan = Schemas["SendPlan"];
+export type PlanWarning = Schemas["PlanWarning"];
+export type PlanRefusal = Schemas["PlanRefusal"];
+export type ConsentRequired = Schemas["ConsentRequired"];
+export type Sha256Hex = Schemas["Sha256Hex"];
+export type TargetRefusal = Schemas["TargetRefusal"];
+export type FanoutTarget = Schemas["FanoutTarget"];
+export type FanoutRequest = Schemas["FanoutRequest"];
+export type FanoutPreview = Schemas["FanoutPreview"];
+export type FanoutResult = Schemas["FanoutResult"];
+export type SendItem = Schemas["SendItem"];
+export type SendGroupId = Schemas["SendGroupId"];
+export type SendGroup = Schemas["SendGroup"];
+export type BridgeEdgeId = Schemas["BridgeEdgeId"];
+export type BridgeEdge = Schemas["BridgeEdge"];
+export type BridgeEdgeCreate = Schemas["BridgeEdgeCreate"];
+export type BridgeEdgePatch = Schemas["BridgeEdgePatch"];
+export type RecipientList = Schemas["RecipientList"];
+export type BridgeSettings = Schemas["BridgeSettings"];
+export type BridgeSettingsPatch = Schemas["BridgeSettingsPatch"];
+export type TransportInterface = Schemas["TransportInterface"];
+export type TransportPosture = Schemas["TransportPosture"];
+export type TransportPosturePatch = Schemas["TransportPosturePatch"];
+export type TransportPostureResult = Schemas["TransportPostureResult"];
+export type TransportStatus = Schemas["TransportStatus"];
+export type TransportJoin = Schemas["TransportJoin"];
+export type NetworkMessageEvent = Schemas["SseNetworkMessage"];
+export type BridgeEvent = Schemas["SseBridge"];
 export type ProblemCode = Schemas["Problem"]["code"];
 
 // Enum tuples (runtime copies of the contract enums).
@@ -110,14 +166,23 @@ export const DEVICE_KINDS = ["radio", "bluetooth", "companion", "node", "analog"
 export const DEVICE_STATES = ["connected", "disconnected", "needs_setup", "error"] as const;
 export const DEVICE_TRANSPORTS = ["usb-serial", "spi", "bluetooth", "wifi", "lan", "tcp", "audio", "unknown"] as const;
 export const DECISIONS = ["accepted", "dismissed"] as const;
-export const PROBLEM_CODES = ["unauthenticated", "loopback_only", "lan_read_only", "agent_unavailable", "model_unavailable", "bad_request", "not_found", "rate_limited", "already_decided", "not_supervised", "settings_locked", "offer_stale", "needs_hub", "upstream_error", "internal", "port_busy", "panel_ticket_expired", "restore_pending"] as const;
+export const PROBLEM_CODES = ["unauthenticated", "loopback_only", "lan_read_only", "agent_unavailable", "model_unavailable", "bad_request", "not_found", "rate_limited", "already_decided", "not_supervised", "settings_locked", "offer_stale", "needs_hub", "upstream_error", "internal", "port_busy", "panel_ticket_expired", "restore_pending", "consent_required", "oversize", "component_unavailable", "unsupported_action"] as const;
 export const DEVICE_ACTIONS = ["rename", "forget", "agent", "identify", "pair", "authorize", "flash"] as const;
 export const MESSAGE_STATES = ["queued", "sent", "relayed", "delivered"] as const;
 export const MESSAGE_DIRS = ["own", "in"] as const;
 export const CONTACT_TRUSTS = ["oob", "tofu", "enrolled"] as const;
 export const LINK_KINDS = ["tcp-lan", "kiss-modem", "meshtastic-client", "rns-bridge", "ble"] as const;
 export const LINK_STATES = ["down", "up", "degraded"] as const;
-export const NEARBY_KINDS = ["meshtastic"] as const;
+export const NEARBY_KINDS = ["meshtastic", "reticulum"] as const;
 export const PANEL_HEALTHS = ["up", "down", "unknown"] as const;
 export const MESSAGE_CHANGES = ["new", "state", "request"] as const;
 export const CONTACT_CHANGES = ["added", "updated", "removed", "request"] as const;
+export const FOREIGN_MESSAGE_STATES = ["queued", "sent", "relayed", "delivered", "failed"] as const;
+export const FOREIGN_AUTHS = ["none", "channel-key", "pki", "signed", "attested-111"] as const;
+export const FOREIGN_CONV_KINDS = ["channel", "dm", "group"] as const;
+export const FOREIGN_REASON_CODES = ["region_unset", "no_channel", "too_large", "not_authorized", "pki_failed", "got_nak", "adapter_down", "no_route", "timeout", "max_retransmit", "no_response", "duty_cycle", "rate_limited", "key_unknown", "peer_unannounced", "uplink_off", "ham_unconfirmed", "consent_paused", "cancelled", "oversize"] as const;
+export const NETWORK_STATES = ["live", "not_set", "error", "disabled"] as const;
+export const COMPONENT_STATES = ["declared", "cached", "installed", "running", "disabled"] as const;
+export const SEND_MODES = ["refuse", "split"] as const;
+export const PROPOSAL_KINDS = ["diagnose", "propose", "patch", "chat", "message", "bridge_message", "bridge_edge", "device"] as const;
+export const NETWORK_MESSAGE_CHANGES = ["new", "state", "conversation"] as const;

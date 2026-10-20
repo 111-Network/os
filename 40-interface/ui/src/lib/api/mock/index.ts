@@ -42,6 +42,7 @@ import type {
 import { SERVICE_IDS } from "../types";
 import { MockBus, realClock, type MockClock } from "./bus";
 import { finalSentence, pickReply, tokenize } from "./chat";
+import { createBridgeMock } from "./bridge";
 import { buildFixtures, iso, layersRunning, logLine } from "./fixtures";
 import { HUB, MOCK_HUB_ADDRESS, MOCK_REASONS, buildNearby, buildPanels, cancelQueued, fabricRow, hex64, hubBundleText, makeContact, meshtasticLiveRow, pageOf, threadsOf } from "./messaging";
 import { cardFor } from "./qr";
@@ -322,6 +323,39 @@ export function createMockAdapter(opts: MockOptions = {}): MockAdapter {
     return c;
   };
 
+  /** Queue a sealed message to an accepted contact (the Layer 5 path of `POST /messages`, also used by a fan-out's 111 targets). */
+  function queueText(toId: string, text: string): string {
+    const to = contactOf(toId);
+    if (!to || to.request) throw problem(404, "not_found", "Not a contact", "Add them as a contact first.");
+    const code = blockOf(to.node_id);
+    const m: Message = {
+      id: `msg-01j9zd${(M.nextMsg++).toString().padStart(4, "0")}`,
+      peer: to.node_id,
+      dir: "own",
+      text,
+      state: "queued",
+      reason_code: code,
+      reason: code ? (MOCK_REASONS[code] ?? null) : null,
+      local_seq: M.nextSeq++,
+      received_seq: null,
+      sent_at_claim: null,
+      at: iso(clock.now()),
+      msg_id: { stream: 0, epoch: 9120, n: M.messages.filter((x) => x.peer === to.node_id && x.dir === "own").length + 1 },
+    };
+    M.messages.push(m);
+    publishMessage(m, "new");
+    dispatch(m);
+    return m.id;
+  }
+
+  // --- Layer 6: foreign networks, relay edges, components, transport (mock/bridge.ts) ---------------------------------
+  const B = createBridgeMock(state.bridge, {
+    now: () => clock.now(),
+    later,
+    publish: (f) => bus.publish(f),
+    sendTo111: queueText,
+  });
+
   const ctx: ScriptContext = {
     now: () => clock.now(),
     patchStatus(fn) {
@@ -366,6 +400,9 @@ export function createMockAdapter(opts: MockOptions = {}): MockAdapter {
       fn(M);
       syncFabric();
       reevaluate();
+    },
+    bridgeReceive(convId, sender, text, o) {
+      B.receive(convId, sender, text, o);
     },
   };
 
@@ -551,6 +588,19 @@ export function createMockAdapter(opts: MockOptions = {}): MockAdapter {
     }
   }
 
+  /** The four applied and two one-shot actions of a `device` proposal (§12); anything else is refused and the proposal stays open. */
+  function checkDeviceProposal(body: string): void {
+    const known = ["rns.interface.upsert", "rns.interface.remove", "rns.posture.set", "radio.region.set", "identify", "service.restart"];
+    let parsed: { actions?: { action?: unknown }[] } | null = null;
+    try {
+      parsed = JSON.parse(body) as { actions?: { action?: unknown }[] };
+    } catch {
+      parsed = null;
+    }
+    if (!parsed || !Array.isArray(parsed.actions)) throw problem(502, "upstream_error", "The proposal body is not in the expected shape");
+    for (const a of parsed.actions) if (typeof a?.action !== "string" || !known.includes(a.action)) throw problem(409, "unsupported_action", "That action is not applied here", String(a?.action));
+  }
+
   const adapter: Adapter = {
     kind: "mock",
 
@@ -694,7 +744,7 @@ export function createMockAdapter(opts: MockOptions = {}): MockAdapter {
         if (!p) throw problem(404, "not_found", "No such proposal", id);
         return p;
       }),
-    decide: (id: string, decision: Decision) =>
+    decide: (id: string, decision: Decision, acceptWarning?: string) =>
       rest((): Proposal => {
         if (decision !== "accepted" && decision !== "dismissed") {
           throw problem(400, "bad_request", "Invalid decision", undefined, [{ pointer: "/decision", message: "must be accepted or dismissed" }]);
@@ -702,6 +752,11 @@ export function createMockAdapter(opts: MockOptions = {}): MockAdapter {
         const p = state.proposals.find((x) => x.id === id);
         if (!p) throw problem(404, "not_found", "No such proposal", id);
         if (p.decision) throw problem(409, "already_decided", "This proposal was already decided", `It was ${p.decision.decision}.`);
+        // Layer 6: accepting a bridge proposal runs the same validation and consent round-trip as the direct route; a refusal leaves it open.
+        if (decision === "accepted") {
+          if (p.kind === "bridge_edge" || p.kind === "bridge_message") B.decideProposal(p, acceptWarning);
+          else if (p.kind === "device") checkDeviceProposal(p.body);
+        }
         p.decision = { decision, at: iso(clock.now()) };
         return p;
       }),
@@ -781,30 +836,14 @@ export function createMockAdapter(opts: MockOptions = {}): MockAdapter {
           if (typeof req?.text !== "string" || req.text.trim() === "") errors.push({ pointer: "/text", message: "must not be empty" });
           else if (req.text.length > MAX_TEXT) errors.push({ pointer: "/text", message: `must be at most ${MAX_TEXT} characters` });
           if (errors.length) throw problem(400, "bad_request", "Invalid message", "A text that the framing cannot carry is refused, never cut short.", errors);
-          const to = contactOf(req.to);
-          if (!to || to.request) throw problem(404, "not_found", "Not a contact", "Add them as a contact first.");
-          const code = blockOf(to.node_id);
-          const m: Message = {
-            id: `msg-01j9zd${(M.nextMsg++).toString().padStart(4, "0")}`,
-            peer: to.node_id,
-            dir: "own",
-            text: req.text,
-            state: "queued",
-            reason_code: code,
-            reason: code ? (MOCK_REASONS[code] ?? null) : null,
-            local_seq: M.nextSeq++,
-            received_seq: null,
-            sent_at_claim: null,
-            at: iso(clock.now()),
-            msg_id: { stream: 0, epoch: 9120, n: M.messages.filter((x) => x.peer === to.node_id && x.dir === "own").length + 1 },
-          };
-          M.messages.push(m);
-          publishMessage(m, "new");
-          dispatch(m);
-          return { schema: 1, id: m.id };
+          return { schema: 1, id: queueText(req.to, req.text) };
         }),
       retry: (id: string) =>
         rest((): Message => {
+          if (B.isForeignId(id)) {
+            B.retry(id);
+            return null as unknown as Message; // the node answers with a foreign row; the page re-reads the conversation
+          }
           const m = messageById(id);
           if (m.dir !== "own" || (m.state !== "queued" && m.state !== "sent")) {
             throw problem(409, "bad_request", "Not retryable", "Only an own message that is queued or sent can be retried.");
@@ -816,6 +855,7 @@ export function createMockAdapter(opts: MockOptions = {}): MockAdapter {
       // reason_code cancelled; 409 once it has left, when it is not ours, or when it was cancelled already; 404 when unknown.
       cancel: (id: string) =>
         rest((): void => {
+          if (B.isForeignId(id)) return B.cancel(id);
           const m = messageById(id);
           if (cancelQueued(m) !== "cancelled") {
             throw problem(409, "bad_request", "Not cancellable", "Only an own message that is still queued can be cancelled.");
@@ -991,6 +1031,36 @@ export function createMockAdapter(opts: MockOptions = {}): MockAdapter {
     },
 
     nearby: () => rest((): NearbySource[] => M.nearby),
+
+    networks: {
+      list: () => rest(() => B.networks.list()),
+      conversations: (net) => rest(() => B.networks.conversations(net)),
+      openDm: (net, nativeId) => rest(() => B.networks.openDm(net, nativeId)),
+      conversation: (net, conv, q) => rest(() => B.networks.conversation(net, conv, q)),
+      send: (net, conv, body) => rest(() => B.networks.send(net, conv, body)),
+      fanoutPreview: (body) => rest(() => B.networks.fanoutPreview(body)),
+      fanout: (body) => rest(() => B.networks.fanout(body)),
+    },
+
+    bridge: {
+      edges: () => rest(() => B.bridge.edges()),
+      createEdge: (body) => rest(() => B.bridge.createEdge(body)),
+      edge: (id) => rest(() => B.bridge.edge(id)),
+      patchEdge: (id, patch) => rest(() => B.bridge.patchEdge(id, patch)),
+      deleteEdge: (id) => rest(() => B.bridge.deleteEdge(id)),
+      settings: () => rest(() => B.bridge.settings()),
+      patchSettings: (patch) => rest(() => B.bridge.patchSettings(patch)),
+      components: () => rest(() => B.bridge.components()),
+      enableComponent: (id, hash) => rest(() => B.bridge.enableComponent(id, hash)),
+      disableComponent: (id) => rest(() => B.bridge.disableComponent(id)),
+      removeComponentFiles: (id, cache) => rest(() => B.bridge.removeComponentFiles(id, cache)),
+    },
+
+    transport: {
+      status: () => rest(() => B.transport.status()),
+      patchPosture: (patch) => rest(() => B.transport.patchPosture(patch)),
+      join: () => rest(() => B.transport.join()),
+    },
 
     panels: {
       list: () => rest((): HostedPanel[] => M.panels),

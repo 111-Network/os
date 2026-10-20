@@ -6,8 +6,8 @@ summary: Offline-first messaging protocol family with strong introduction patter
 tags: [mesh, identity, offline]
 platforms: [android]
 upstream: https://code.briarproject.org/briar/briar
-license: GPL-3.0-only
-last_verified: 2026-10-12
+license: GPL-3.0-or-later
+last_verified: 2026-10-19
 sources:
   - https://briarproject.org
   - https://code.briarproject.org/briar/briar
@@ -54,8 +54,9 @@ key-compromise-injection finding as the reason static-static ECDH alone
 is banned. Assurance history: a Cure53 audit in 2017 covered a
 development version in partial scope with a recommended follow-up, and an
 ETH Zürich thesis in 2023 analyzed Bramble in Briar 1.4.20; close to the
-rubric bar but not a release-version full audit. GPL-3.0, Android-only
-client.
+rubric bar but not a release-version full audit. GPL-3.0-or-later (the upstream `LICENSE.txt` notice grants version 3
+or any later version), Android-only client. `briar-headless` (REST on loopback, a Kotlin jar) registers only the Tor
+plugin on Linux, so a hub can reach Briar only online; it is documented, not built.
 
 ## Evidence
 
@@ -67,6 +68,7 @@ client.
   shape for offline nodes.
 - 2026-10-12 — desk research sweep; entered at candidate as a case
   study, audits noted as partial.
+- 2026-10-19 — licence notice read upstream; Layer 6 research found no offline headless path.
 
 ## Links
 

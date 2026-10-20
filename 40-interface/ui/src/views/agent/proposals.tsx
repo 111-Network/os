@@ -11,7 +11,8 @@ import { Button } from "../../components/button";
 import { Disclosure } from "../../components/disclosure";
 import { apiStore, getAdapter, isApiError } from "../../lib/api";
 import type { Decision, Proposal } from "../../lib/api/sse.gen";
-import { ProposalBody } from "./proposal-body";
+import { useConsentFlow } from "../messages/net/consent";
+import { ProposalBody, isBridgeKind } from "./proposal-body";
 
 function createdText(iso: string, now: number): string {
   const t = Date.parse(iso);
@@ -28,13 +29,22 @@ interface CardProps {
 function ProposalCard({ proposal, now, onWhy, onDecided }: CardProps) {
   const [busy, setBusy] = useState<Decision | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const { dialog, attempt } = useConsentFlow();
 
   const decide = async (decision: Decision) => {
     setBusy(decision);
     setError(null);
     try {
       const adapter = await getAdapter();
-      await adapter.decide(proposal.id, decision);
+      if (decision === "accepted" && isBridgeKind(proposal.kind)) {
+        // Accepting a bridge proposal runs the same validation as the direct route. A consent gate answers 409 with the exact text:
+        // the person reads it here, and the decision is repeated with its hash. A refusal leaves the proposal open.
+        const out = await attempt((hash) => adapter.decide(proposal.id, decision, hash));
+        if (!out.ok) {
+          if (!out.cancelled) throw out.error;
+          return;
+        }
+      } else await adapter.decide(proposal.id, decision);
       announce(decision === "accepted" ? "proposal marked accepted" : "proposal dismissed");
       onDecided();
     } catch (err) {
@@ -64,7 +74,7 @@ function ProposalCard({ proposal, now, onWhy, onDecided }: CardProps) {
         }
         className="mt-1"
       >
-        <ProposalBody body={proposal.body} />
+        <ProposalBody body={proposal.body} kind={proposal.kind} />
       </Disclosure>
       <div className="mt-1 flex flex-wrap gap-2">
         <Button size="sm" variant="primary" arrow={false} loading={busy === "accepted"} aria-disabled={busy !== null || undefined} onClick={() => void decide("accepted")}>
@@ -77,6 +87,7 @@ function ProposalCard({ proposal, now, onWhy, onDecided }: CardProps) {
           Why?
         </Button>
       </div>
+      {dialog ? <div className="mt-2">{dialog}</div> : null}
       {error ? (
         <p role="alert" className="mt-2 text-xs text-destructive">
           {error}

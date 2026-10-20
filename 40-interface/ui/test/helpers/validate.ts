@@ -1,6 +1,7 @@
 // A small JSON-Schema-subset validator over the digest generated from api/openapi.yaml.
 // Supports what the contract uses: $ref, type (incl. type arrays with "null"), enum, const,
-// required, properties, items, minimum/maximum, minLength/maxLength, pattern, format date-time.
+// required, properties, items, minimum/maximum, minLength/maxLength, pattern, format date-time, and oneOf (valid when ANY branch is
+// valid: the contract uses it for "a schema or null" and for the fan-out target union, never for exclusive alternatives).
 import { schemas, type JsonSchema } from "../contract.gen";
 
 const DATE_TIME = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?(Z|[+-]\d{2}:\d{2})$/;
@@ -36,6 +37,12 @@ export function resolveRef(ref: string): JsonSchema {
 export function validate(value: unknown, schema: JsonSchema, path = "$"): string[] {
   if (typeof schema.$ref === "string") return validate(value, resolveRef(schema.$ref), path);
   const errors: string[] = [];
+  if (Array.isArray(schema.oneOf)) {
+    const failures = (schema.oneOf as JsonSchema[]).map((branch) => validate(value, branch, path));
+    if (!failures.some((f) => f.length === 0)) {
+      return [`${path}: matches none of ${failures.length} oneOf branches (${failures.map((f) => f[0] ?? "").join(" | ")})`];
+    }
+  }
   if (schema.type !== undefined) {
     const types = Array.isArray(schema.type) ? (schema.type as string[]) : [schema.type as string];
     if (!types.some((t) => typeOk(value, t))) {

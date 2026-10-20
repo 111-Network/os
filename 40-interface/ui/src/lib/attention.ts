@@ -1,5 +1,6 @@
 // Plain-words summary of what needs the user, for the header badge tooltip.
 import type { Attention } from "./api/store";
+import type { ForeignConversation } from "./api/types";
 
 const plural = (n: number, one: string, many: string): string => `${n} ${n === 1 ? one : many}`;
 
@@ -23,3 +24,17 @@ export function attentionSummary(a: Pick<Attention, "openProposals" | "erroredSe
   if ((a.openRequests ?? 0) > 0) parts.push(plural(a.openRequests!, "message request", "message requests"));
   return parts.length > 0 ? parts.join(", ") : "Nothing needs you";
 }
+
+// --- Foreign networks (os/60-transport/README.md §10) ------------------------------------------------------------------------------
+//
+// The header badge counts proposals, errors and message requests: things that need a decision. It does not count unread messages,
+// and a stranger's text on another network never raises it. A foreign DM to the board raises the unread count of its network only,
+// and channel traffic raises nothing unless the channel is pinned. These two functions are the whole rule; `computeAttention`
+// (lib/api/store.ts) takes no foreign input at all, which a test pins.
+
+/** Does this conversation's unread count towards the unread number the Messages rail shows? A DM does, a channel only when pinned, a recipient list never. */
+export const countsAsUnread = (c: Pick<ForeignConversation, "kind" | "pinned">): boolean => c.kind === "dm" || (c.kind === "channel" && c.pinned);
+
+/** The unread number for a network's rail entry. Never the header badge. */
+export const foreignUnread = (convs: readonly Pick<ForeignConversation, "kind" | "pinned" | "unread">[] | null | undefined): number =>
+  (convs ?? []).reduce((n, c) => (countsAsUnread(c) ? n + c.unread : n), 0);

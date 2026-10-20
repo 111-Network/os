@@ -15,6 +15,8 @@ const Overview = lazy(() => import("../views/overview"));
 const Devices = lazy(() => import("../views/devices"));
 const Nearby = lazy(() => import("../views/nearby"));
 const Messages = lazy(() => import("../views/messages"));
+// Foreign networks and fan-out (Layer 6): their own lazy chunk, under D21's 64 KB cap.
+const MessagesNet = lazy(() => import("../views/messages/net"));
 const Contacts = lazy(() => import("../views/contacts"));
 const Services = lazy(() => import("../views/services"));
 const Settings = lazy(() => import("../views/settings"));
@@ -38,6 +40,9 @@ export const ROUTES: RouteDef[] = [
   { path: "/nearby", View: Nearby },
   { path: "/messages", View: Messages },
   { path: "/messages/contacts", View: Contacts }, // before /messages/:peer, which would call it "no such conversation"
+  { path: "/messages/send", View: MessagesNet }, // Layer 6 fan-out: before /messages/:peer for the same reason
+  { path: "/messages/net/:network", View: MessagesNet }, // Layer 6 foreign networks: before /messages/:peer (a network id is not a node id)
+  { path: "/messages/net/:network/:conv", View: MessagesNet },
   { path: "/messages/:peer", View: Messages },
   { path: "/services/:id", View: Services },
   { path: "/logs", View: Logs },

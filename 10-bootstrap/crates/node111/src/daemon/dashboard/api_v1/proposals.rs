@@ -37,6 +37,40 @@
 //! bearer (`401`: deciding is the human's act, §17), so a proposal is never
 //! sent twice and never sent after being dismissed.
 //!
+//! **Layer 6 kinds** (`os/60-transport/README.md` §8, §9, §12, §13; bodies
+//! parsed by [`crate::daemon::fabric::proposal`]). `KINDS` grows to eight.
+//! Accepting one is applied like `message`, under the same lock, with the
+//! same record discipline (`applied: {pending: true}` first, the result
+//! after, a refusal before anything ran removes the pending record and the
+//! proposal stays open), and only after the proposal's node-id stamp names
+//! this node:
+//! - `bridge_message`: the targets (`fc-` ids, or 111 contacts by node id)
+//!   and the verbatim text run the **same validation as `POST
+//!   /messages/fanout`** (a preview first, nothing written). A consent gate
+//!   (`ham_unconfirmed`, `uplink_off` on an uplinked channel) answers `409
+//!   consent_required` with `consent` {text, hash} and the per-target report;
+//!   the UI shows the text and repeats the decision with `accept_warning` =
+//!   the hash, which records that confirmation (by this session) and the
+//!   validation runs again (one gate per round). An oversize target, or a
+//!   channel the user switched off, is `409` with the report. Then the send
+//!   group is queued through the bridge core: `applied: {group_id, items}`.
+//! - `bridge_edge`: the edge-enable round-trip of `POST /bridge/edges` (the
+//!   warning as it reads now; `accept_warning` must echo its hash); `applied:
+//!   {edge_id}`.
+//! - `device`: the device core's applier (`devices::applier`, C4) takes the
+//!   whole proposal — `ApplierRequest::from_body` (the closed vocabulary; a
+//!   body that is not the one JSON object is `502 upstream_error`, an action
+//!   outside it `409 unsupported_action`) and `devices::applier::apply`
+//!   (every action dry-run first; the pending record, then per action
+//!   snapshot → apply → probe → keep or revert; the one-shots `identify` —
+//!   the acceptance is the consent — and `service.restart`, `409
+//!   not_supervised` for a child 111d does not supervise). The applier writes
+//!   the decision record itself; this file does not also decide it. Without
+//!   an applier in ext (the device core not wired) a device proposal is `409
+//!   unsupported_action` and stays open.
+//!
+//! The agent's bearer never decides (the global write gate, `401`).
+//!
 //! Events: a recorded decision publishes `event: proposal` with the
 //! `SseProposal` shape plus the new `decision` (`{id,title,kind,created_at,
 //! decision:{decision,at}}`) so other open tabs refetch. The relay's events
@@ -44,6 +78,7 @@
 //! ([`summary`]).
 
 use super::{ApiRouter, ApiState, Problem};
+use crate::daemon::components::consent::{ConsentRequired, ProblemWith};
 use crate::daemon::DaemonLayout;
 use axum::body::Bytes;
 use axum::extract::rejection::PathRejection;
@@ -61,10 +96,25 @@ use time::OffsetDateTime;
 
 /// List cap (newest first).
 pub const MAX_LIST: usize = 200;
-/// `Proposal.kind` (contract enum).
-pub const KINDS: [&str; 5] = ["diagnose", "propose", "patch", "chat", "message"];
+/// `Proposal.kind` (contract enum; Layer 6 adds three, §10).
+pub const KINDS: [&str; 8] = [
+    "diagnose",
+    "propose",
+    "patch",
+    "chat",
+    "message",
+    "bridge_message",
+    "bridge_edge",
+    "device",
+];
 /// `Proposal.kind` of a message the agent proposes (§17).
 pub const MESSAGE_KIND: &str = "message";
+/// Layer 6 §9: a text into foreign conversations (and 111 contacts).
+pub const BRIDGE_MESSAGE_KIND: &str = "bridge_message";
+/// Layer 6 §8: a relay edge.
+pub const BRIDGE_EDGE_KIND: &str = "bridge_edge";
+/// Layer 6 §12: device actions (incl. the `identify` / `service.restart` one-shots).
+pub const DEVICE_KIND: &str = "device";
 /// Largest proposal/decision file read (bodies are model-written markdown).
 const MAX_FILE: u64 = 1 << 20;
 
@@ -488,7 +538,8 @@ async fn get_handler(
     }
 }
 
-/// One async lock for every decision on a message proposal (module doc).
+/// One async lock for every decision on an applied proposal (`message` and the Layer 6
+/// kinds; module doc).
 static MESSAGE_DECIDE: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 /// `applied` while a message acceptance is in flight (module doc).
@@ -573,12 +624,17 @@ async fn decide_message(
 #[derive(Deserialize)]
 struct DecisionReq {
     decision: Value,
+    /// Layer 6: the hash of the consent text the user was shown (absent on the first
+    /// call).
+    #[serde(default)]
+    accept_warning: Option<Value>,
 }
 
 async fn decision_handler(
     State(api): State<Arc<ApiState>>,
     id: Result<Path<String>, PathRejection>,
     headers: axum::http::HeaderMap,
+    ext: axum::http::Extensions,
     body: Bytes,
 ) -> Response {
     let Ok(Path(id)) = id else {
@@ -587,29 +643,45 @@ async fn decision_handler(
     if !valid_id(&id) {
         return not_found().into_response();
     }
-    let decision = match serde_json::from_slice::<DecisionReq>(&body) {
+    let (decision, accept) = match serde_json::from_slice::<DecisionReq>(&body) {
         Ok(DecisionReq {
             decision: Value::String(d),
-        }) if is_decision(&d) => d,
+            accept_warning,
+        }) if is_decision(&d) => match accept_warning {
+            None | Some(Value::Null) => (d, None),
+            Some(Value::String(h)) if super::bridge::check_hash(Some(&h)).is_ok() => (d, Some(h)),
+            Some(_) => {
+                return bad_request(
+                    "accept_warning must be the 64-hex SHA-256 the consent carried.",
+                )
+                .into_response()
+            }
+        },
         _ => {
             return bad_request("Body must be {\"decision\": \"accepted\" | \"dismissed\"}.")
                 .into_response()
         }
     };
     let layout = api.layout.clone();
-    // A message proposal is applied on acceptance (module doc).
+    // An applied proposal is applied on acceptance (module doc). The agent's bearer
+    // never reaches this handler on a POST (the global write gate, §13).
     let peek = {
         let (layout, id) = (layout.clone(), id.clone());
         tokio::task::spawn_blocking(move || get_checked(&layout, &id)).await
     };
     if let Ok(Ok(Some(p))) = peek {
         if p.kind == MESSAGE_KIND {
-            // §17/§18 rule 9: the human accepts; the agent's bearer passes
-            // `require_session` but never decides a message proposal.
-            if let Err(problem) = super::messages::refuse_bearer(&headers) {
-                return problem.into_response();
-            }
             return match decide_message(&api, p, decision).await {
+                Ok(p) => {
+                    api.events.publish("proposal", &p.event());
+                    Json(p).into_response()
+                }
+                Err(problem) => problem.into_response(),
+            };
+        }
+        if [BRIDGE_MESSAGE_KIND, BRIDGE_EDGE_KIND, DEVICE_KIND].contains(&p.kind.as_str()) {
+            let by = super::auth::session_label(&api, &headers, &ext);
+            return match decide_layer6(&api, p, decision, accept, by).await {
                 Ok(p) => {
                     api.events.publish("proposal", &p.event());
                     Json(p).into_response()
@@ -626,6 +698,346 @@ async fn decision_handler(
         Ok(Err(problem)) => problem.into_response(),
         Err(e) => internal(e).into_response(),
     }
+}
+
+// ---------------------------------------------------------------- Layer 6 kinds
+
+/// `409 unsupported_action` (the proposal stays open).
+fn unsupported(action: &str, why: &str) -> ProblemWith {
+    ProblemWith::new(
+        Problem::new(
+            StatusCode::CONFLICT,
+            "unsupported_action",
+            "This node does not apply that action.",
+        )
+        .detail(format!("{action:?}: {why}")),
+    )
+}
+
+fn upstream(r: &crate::daemon::fabric::proposal::Refusal) -> ProblemWith {
+    ProblemWith::new(r.problem())
+}
+
+/// The stamp rule of the applied kinds (a proposal written for another node — a copied
+/// agent dir — is never applied here).
+fn check_own_stamp(api: &ApiState, p: &Proposal) -> Result<(), ProblemWith> {
+    let own = api
+        .dash
+        .read()
+        .unwrap_or_else(|e| e.into_inner())
+        .node_id
+        .clone();
+    match (own, p.node_id.as_deref()) {
+        (Some(own), Some(stamp)) if own == stamp => Ok(()),
+        _ => Err(upstream(&crate::daemon::fabric::proposal::Refusal::Stamp)),
+    }
+}
+
+/// Write the pending record (from here a retry is `already_decided`).
+async fn record_pending(layout: &DaemonLayout, id: &str) -> Result<Proposal, ProblemWith> {
+    let (layout, id) = (layout.clone(), id.to_string());
+    let p = tokio::task::spawn_blocking(move || {
+        decide_applied(&layout, &id, "accepted", Some(applied_pending()))
+    })
+    .await
+    .map_err(|e| ProblemWith::new(internal(e)))?
+    .map_err(ProblemWith::new)?;
+    Ok(p)
+}
+
+/// A refusal before anything ran: the proposal reopens.
+fn reopen(layout: &DaemonLayout, id: &str, why: &str) {
+    let path = decisions_dir(layout).join(format!("{id}.json"));
+    if let Err(e) = std::fs::remove_file(&path) {
+        eprintln!(
+            "111 proposals: {id} was refused ({why}) but its pending record {} stays: {e}",
+            path.display()
+        );
+    }
+}
+
+/// Replace the pending record with the outcome.
+async fn finalise(layout: &DaemonLayout, accepted: &Proposal, applied: Value) {
+    let Some(rec) = accepted.decision.clone() else {
+        return;
+    };
+    let (l2, id2) = (layout.clone(), accepted.id.clone());
+    let done = tokio::task::spawn_blocking(move || write_decision(&l2, &id2, &rec, Some(&applied)))
+        .await
+        .map_err(anyhow::Error::from)
+        .and_then(|r| r);
+    if let Err(e) = done {
+        eprintln!(
+            "111 proposals: {} was applied; its decision record still reads pending: {e:#}",
+            accepted.id
+        );
+    }
+}
+
+/// A decision on a Layer 6 kind (module doc).
+async fn decide_layer6(
+    api: &ApiState,
+    p: Proposal,
+    decision: String,
+    accept: Option<String>,
+    by: String,
+) -> Result<Proposal, ProblemWith> {
+    let _one = MESSAGE_DECIDE.lock().await;
+    let layout = api.layout.clone();
+    let id = p.id.clone();
+    let current = {
+        let (layout, id) = (layout.clone(), id.clone());
+        tokio::task::spawn_blocking(move || get_checked(&layout, &id))
+            .await
+            .map_err(|e| ProblemWith::new(internal(e)))?
+            .map_err(ProblemWith::new)?
+    };
+    let Some(p) = current else {
+        return Err(ProblemWith::new(not_found()));
+    };
+    if p.decision.is_some() || decision != "accepted" {
+        let d = decision.clone();
+        return tokio::task::spawn_blocking(move || decide(&layout, &id, &d))
+            .await
+            .map_err(|e| ProblemWith::new(internal(e)))?
+            .map_err(ProblemWith::new);
+    }
+    check_own_stamp(api, &p)?;
+    match p.kind.as_str() {
+        BRIDGE_MESSAGE_KIND => accept_bridge_message(api, &p, accept, &by).await,
+        BRIDGE_EDGE_KIND => accept_bridge_edge(api, &p, accept, &by).await,
+        _ => accept_device(api, &p).await,
+    }
+}
+
+/// The 409 of a preview whose targets are refused (`targets` report; `consent` = the
+/// first gate that can be confirmed).
+fn refused_preview(preview: &Value) -> Option<ProblemWith> {
+    let mut targets = Vec::new();
+    let mut first_consent: Option<Value> = None;
+    let mut all_oversize = true;
+    for item in preview["items"].as_array().into_iter().flatten() {
+        let r = &item["plan"]["refusal"];
+        if r.is_null() {
+            continue;
+        }
+        let code = if r["code"] == "oversize" {
+            "oversize"
+        } else {
+            all_oversize = false;
+            "consent_required"
+        };
+        if first_consent.is_none() && !r["consent"].is_null() {
+            first_consent = Some(r["consent"].clone());
+        }
+        targets.push(json!({
+            "target": item["target"],
+            "code": code,
+            "detail": r["detail"],
+            "consent": r["consent"],
+        }));
+    }
+    if targets.is_empty() {
+        return None;
+    }
+    let (code, title, detail) = match (&first_consent, all_oversize) {
+        (Some(_), _) => (
+            "consent_required",
+            "Read and confirm the warning first.",
+            "Show the text, then repeat the decision with accept_warning = its hash; nothing was queued.",
+        ),
+        (None, true) => (
+            "oversize",
+            "The text is longer than a target carries.",
+            "See targets; nothing was queued. Dismiss the proposal or ask for a shorter text.",
+        ),
+        (None, false) => (
+            "consent_required",
+            "Sending is switched off for a target.",
+            "See targets: turn sending on in Settings, then accept again; nothing was queued.",
+        ),
+    };
+    let mut pw = ProblemWith::new(Problem::new(StatusCode::CONFLICT, code, title).detail(detail))
+        .with("targets", Value::Array(targets));
+    if let Some(c) = first_consent {
+        pw = pw.with("consent", c);
+    }
+    Some(pw)
+}
+
+/// Record the confirmation `c` (a gate of a `bridge_message`) as this session's.
+async fn confirm_gate(
+    bridge: &crate::daemon::bridge::Bridge,
+    c: &Value,
+    by: &str,
+) -> Result<(), ProblemWith> {
+    let hash = c["hash"].as_str().unwrap_or_default();
+    let subject = c["subject"].as_str().unwrap_or_default();
+    let done = match c["action"].as_str() {
+        Some("ham_confirm") => bridge.confirm_ham(subject, true, Some(hash), by).await,
+        Some("uplink_send") => {
+            let Some(conv) = crate::daemon::fabric::json::parse_fc_id(subject) else {
+                return Err(ProblemWith::new(not_found()));
+            };
+            bridge.set_uplink_send(conv, true, Some(hash), by).await
+        }
+        _ => return Err(ProblemWith::new(internal("an unknown consent gate"))),
+    };
+    done.map_err(|e| e.problem())
+}
+
+async fn accept_bridge_message(
+    api: &ApiState,
+    p: &Proposal,
+    accept: Option<String>,
+    by: &str,
+) -> Result<Proposal, ProblemWith> {
+    use crate::daemon::bridge::fanout::{
+        ContactTarget, FanoutRequest, FanoutTarget, ForeignTarget,
+    };
+    use crate::daemon::fabric::proposal::{parse_bridge_message, BridgeTarget};
+    let (targets, text) = parse_bridge_message(&p.body).map_err(|r| upstream(&r))?;
+    let bridge = super::bridge::bridge_of(api).map_err(ProblemWith::new)?;
+    let handle = super::messages::handle(api).map_err(ProblemWith::new)?;
+    let fab = handle
+        .fabric()
+        .cloned()
+        .ok_or_else(|| ProblemWith::new(crate::daemon::fabric::not_running()))?;
+    let mut list = Vec::with_capacity(targets.len());
+    for t in targets {
+        list.push(match t {
+            BridgeTarget::Conv(id) => {
+                let c = fab.foreign_conversation(id).await.map_err(|e| match e {
+                    mesh111::fabric::FabricError::NotFound => ProblemWith::new(
+                        Problem::new(StatusCode::NOT_FOUND, "not_found", "No such conversation.")
+                            .detail(format!(
+                                "{} names no conversation of this node.",
+                                crate::daemon::fabric::json::fc_id(id)
+                            )),
+                    ),
+                    other => ProblemWith::new(crate::daemon::fabric::problem(&other)),
+                })?;
+                FanoutTarget::Foreign(ForeignTarget {
+                    network: c.network,
+                    conv: crate::daemon::fabric::json::fc_id(id),
+                    size_mode: None,
+                })
+            }
+            BridgeTarget::Contact(n) => FanoutTarget::Contact(ContactTarget {
+                node_id: crate::daemon::fabric::json::hex(&n),
+            }),
+        });
+    }
+    let req = FanoutRequest {
+        text: text.to_string(),
+        targets: list,
+        size_mode: None,
+    };
+    // the fan-out validation, nothing written; one confirmable gate per round
+    let mut accept = accept;
+    loop {
+        let preview = bridge.fanout_preview(&req).await.map_err(|e| e.problem())?;
+        let Some(refused) = refused_preview(&preview) else {
+            break;
+        };
+        let gate = accept.take().and_then(|h| {
+            preview["items"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .map(|i| &i["plan"]["refusal"]["consent"])
+                .find(|c| c["hash"].as_str() == Some(h.as_str()))
+                .cloned()
+        });
+        match gate {
+            Some(c) => confirm_gate(&bridge, &c, by).await?,
+            None => return Err(refused),
+        }
+    }
+    let accepted = record_pending(&api.layout, &p.id).await?;
+    let sent = match bridge.fanout(&req).await {
+        Ok(v) => v,
+        Err(e) => {
+            reopen(&api.layout, &p.id, "the send was refused");
+            return Err(e.problem());
+        }
+    };
+    let items: Vec<Value> = sent["items"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .map(|i| json!({ "target": i["target"], "id": i["id"] }))
+        .collect();
+    finalise(
+        &api.layout,
+        &accepted,
+        json!({ "group_id": sent["group_id"], "items": items }),
+    )
+    .await;
+    Ok(accepted)
+}
+
+async fn accept_bridge_edge(
+    api: &ApiState,
+    p: &Proposal,
+    accept: Option<String>,
+    by: &str,
+) -> Result<Proposal, ProblemWith> {
+    use crate::daemon::bridge::edges::EdgeOpts;
+    use crate::daemon::bridge::BridgeError;
+    let (src, dst, _why) =
+        crate::daemon::fabric::proposal::parse_bridge_edge(&p.body).map_err(|r| upstream(&r))?;
+    let bridge = super::bridge::bridge_of(api).map_err(ProblemWith::new)?;
+    // the warning as it reads now (nothing is created without its hash)
+    let consent: ConsentRequired = match bridge
+        .create_edge(src, dst, EdgeOpts::default(), None, by)
+        .await
+    {
+        Err(BridgeError::Consent(c)) => c,
+        Err(e) => return Err(e.problem()),
+        Ok(v) => {
+            // cannot happen (no hash matches `None`); record it as applied
+            let accepted = record_pending(&api.layout, &p.id).await?;
+            finalise(&api.layout, &accepted, json!({ "edge_id": v["id"] })).await;
+            return Ok(accepted);
+        }
+    };
+    if accept.as_deref() != Some(consent.hash.as_str()) {
+        return Err(BridgeError::Consent(consent).problem());
+    }
+    let accepted = record_pending(&api.layout, &p.id).await?;
+    match bridge
+        .create_edge(src, dst, EdgeOpts::default(), Some(&consent.hash), by)
+        .await
+    {
+        Ok(v) => {
+            finalise(&api.layout, &accepted, json!({ "edge_id": v["id"] })).await;
+            Ok(accepted)
+        }
+        Err(e) => {
+            reopen(&api.layout, &p.id, "the edge was refused");
+            Err(e.problem())
+        }
+    }
+}
+
+/// A `device` proposal: the device core's applier decides and records it (module doc).
+async fn accept_device(api: &ApiState, p: &Proposal) -> Result<Proposal, ProblemWith> {
+    use crate::daemon::devices::applier::{self, Applier, ApplierRequest};
+    let Some(ap) = api.ext::<Arc<Applier>>() else {
+        return Err(unsupported(
+            "device",
+            "the device core's apply, probe and revert loop is not wired on this node",
+        ));
+    };
+    let req = ApplierRequest::from_body(&p.id, &p.body).map_err(|e| e.problem())?;
+    applier::apply(&ap, req).await.map_err(|e| e.problem())?;
+    let (layout, id) = (api.layout.clone(), p.id.clone());
+    tokio::task::spawn_blocking(move || get_checked(&layout, &id))
+        .await
+        .map_err(|e| ProblemWith::new(internal(e)))?
+        .map_err(ProblemWith::new)?
+        .ok_or_else(|| ProblemWith::new(not_found()))
 }
 
 pub fn router() -> ApiRouter {

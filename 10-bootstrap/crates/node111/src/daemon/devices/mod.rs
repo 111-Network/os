@@ -11,6 +11,11 @@
 //! - [`registry`] — the 5 s tick: detection + dashboard sessions (companions) →
 //!   [`DeviceRecord`]s, 2-tick debounce, `devices` frames on the events bus,
 //!   alias/forget mutations for `/api/v1/devices*`.
+//! - Layer 6 device core (`os/60-transport/README.md` §12): [`hotplug`]
+//!   (kernel uevents kick the tick; the poll stays the fallback),
+//!   [`identify`] (the consented RNode → Meshtastic → MeshCore sequence) and
+//!   [`applier`] (the four applied `device` proposal actions with
+//!   snapshot → apply → probe → keep or revert, and the two one-shots).
 //!
 //! ## Stable ids
 //! `id = hex(sha256(kind + ":" + stable_key))[..16]` where `stable_key` is, in
@@ -29,7 +34,10 @@
 //! again — allowed from that very browser, which is then logged out). Companions live exactly as long as their session: a session that is
 //! revoked (logout, `111 dashboard rotate`, expiry) drops the companion.
 
+pub mod applier;
 pub mod detect;
+pub mod hotplug;
+pub mod identify;
 pub mod registry;
 pub mod rns;
 pub mod store;
@@ -316,7 +324,12 @@ pub fn companion_name(user_agent: Option<&str>) -> String {
 }
 
 /// Create the registry for `api` (production paths from its layout), insert it
-/// into `api.ext`, and spawn the 5 s tick. Called once from `daemon/mod.rs`.
+/// into `api.ext`, build the identify sequence (Layer 6 §12,
+/// [`identify::install`]: `Arc<identify::Identify>` in `api.ext`, its
+/// availability the registry's offer), and spawn the tick loop
+/// ([`run_ticks`]) with the uevent hotplug source ([`hotplug::NetlinkUevent`];
+/// without one the 5 s poll alone serves). Called once from `daemon/mod.rs`,
+/// after the port-owner table and the Meshtastic module are in `api.ext`.
 ///
 /// `rnsd_running` reports whether the rnsd child is up (the Reticulum stack's
 /// liveness for devices bound by an `RNodeInterface` stanza).
@@ -324,18 +337,102 @@ pub fn start(
     api: std::sync::Arc<crate::daemon::dashboard::ApiState>,
     rnsd_running: impl Fn() -> bool + Send + Sync + 'static,
 ) -> std::sync::Arc<DeviceRegistry> {
+    use std::sync::Arc;
     let reg = install(&api, RegistryConfig::production(&api.layout));
     reg.set_rnsd_running(rnsd_running);
-    let task_reg = std::sync::Arc::clone(&reg);
-    tokio::spawn(async move {
-        let mut tick = tokio::time::interval(registry::TICK);
-        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-        loop {
-            tick.tick().await;
-            task_reg.tick(&api).await;
+    let phone_like = api
+        .ext::<Arc<crate::daemon::meshtastic::Meshtastic>>()
+        .map(|m| m.config().phone_like)
+        .unwrap_or(cfg!(target_os = "android"));
+    identify::install(
+        &api,
+        &reg,
+        identify::IdentifyConfig::production(&api.layout.root, phone_like),
+    );
+    let kick = Arc::new(tokio::sync::Notify::new());
+    match hotplug::NetlinkUevent::new() {
+        Ok(source) => {
+            tokio::spawn(hotplug::forward(source, Arc::clone(&kick)));
         }
-    });
+        Err(e) => eprintln!(
+            "111 daemon: devices: no uevent hotplug ({e:#}); the {} s poll serves",
+            registry::TICK.as_secs()
+        ),
+    }
+    tokio::spawn(run_ticks(
+        Arc::clone(&reg),
+        api,
+        kick,
+        TickTiming::default(),
+    ));
     reg
+}
+
+/// The tick loop's timing (§12 "Hotplug").
+#[derive(Debug, Clone, Copy)]
+pub struct TickTiming {
+    /// The authoritative poll ([`registry::TICK`]).
+    pub every: std::time::Duration,
+    /// Quiet time a uevent burst gets before the kicked tick (one plug is
+    /// several events: usb add, interface binds, tty add).
+    pub settle: std::time::Duration,
+    /// Delay of the confirming tick after a kicked tick left a change
+    /// pending (the 2-tick debounce, `registry::DEBOUNCE_TICKS`, counts
+    /// ticks, not seconds: it is unchanged, only reached sooner).
+    pub confirm: std::time::Duration,
+}
+
+impl Default for TickTiming {
+    fn default() -> Self {
+        TickTiming {
+            every: registry::TICK,
+            settle: std::time::Duration::from_millis(250),
+            confirm: std::time::Duration::from_secs(1),
+        }
+    }
+}
+
+/// Most settle rounds one burst may take (a flapping device cannot hold the
+/// tick off for longer than this many `settle` periods).
+const MAX_SETTLE_ROUNDS: u32 = 20;
+
+/// The registry's tick loop: every `t.every`, and at once (after `t.settle`)
+/// when `kick` fires; a kicked tick that left a changed snapshot pending is
+/// confirmed `t.confirm` later, and the poll restarts from there. Runs
+/// forever (the daemon's lifetime); tests drive it with
+/// [`hotplug::FixtureSource`] and a long `every`.
+pub async fn run_ticks(
+    reg: std::sync::Arc<DeviceRegistry>,
+    api: std::sync::Arc<crate::daemon::dashboard::ApiState>,
+    kick: std::sync::Arc<tokio::sync::Notify>,
+    t: TickTiming,
+) {
+    let mut tick = tokio::time::interval(t.every);
+    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    loop {
+        let kicked = tokio::select! {
+            _ = tick.tick() => false,
+            _ = kick.notified() => true,
+        };
+        if kicked {
+            for _ in 0..MAX_SETTLE_ROUNDS {
+                if tokio::time::timeout(t.settle, kick.notified())
+                    .await
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        }
+        reg.tick(&api).await;
+        if kicked {
+            if reg.has_pending() {
+                tokio::time::sleep(t.confirm).await;
+                reg.tick(&api).await;
+            }
+            tick.reset();
+        }
+    }
 }
 
 /// Create a registry with `cfg` and insert it into `api.ext` (no task: tests

@@ -1,50 +1,66 @@
-//! The consented identify step (Layer 5 §14 "Identify", D17 #8;
-//! `POST /api/v1/devices/{id}/identify`).
+//! The Meshtastic identify step (Layer 5 §14 "Identify", D17 #8; Layer 6
+//! `os/60-transport/README.md` §12: step 2 of the full sequence, "meshmud
+//! with the identify profile, as built").
 //!
-//! 1. The device must offer `identify` (a LoRa board with a port nothing else
-//!    drives; the registry decides — `DeviceRegistry::identify_target`).
-//! 2. The board port **and** meshmud's downlink are claimed in the port-owner
-//!    table for `identify:<id>`; a port someone else holds answers
-//!    `409 port_busy` and nothing is opened (a second board while one is bound
-//!    collides on the downlink, which the bound meshmud holds).
-//! 3. meshmud is started on the port with the **identify profile**: the same
+//! **Orchestration moved to `devices::identify`** (Layer 6 §12): the
+//! sequence (RNode, Meshtastic, MeshCore), the consent, the 30 s rate limit,
+//! the board-port claim and the rule that `family: unknown` is persisted only
+//! when every step answered `NoMatch`. What stays here is this step's child
+//! mechanics, [`Meshtastic::identify_step`]:
+//!
+//! 1. The board port **and** meshmud's downlink are claimed in the
+//!    port-owner table for the probe's task (`identify:<id>`; the
+//!    orchestrator already holds the board port under that task, so that
+//!    claim is idempotent); a port someone else holds answers
+//!    `409 port_busy` and nothing is opened (a second board while one is
+//!    bound collides on the downlink, which the bound meshmud holds).
+//! 2. meshmud is started on the port with the **identify profile**: the same
 //!    rendered config the service uses (so it never has to be restarted), the
 //!    port owned by `identify:<id>`, no presence reader yet, and a restart
 //!    policy whose first exit is final (`meshmud::identify_backoff`) — any
 //!    exit during the step ends it and never reopens the port.
-//! 4. Once the downlink LISTENs, the reader runs once (`--once`) through the
+//! 3. Once the downlink LISTENs, the reader runs once (`--once`) through the
 //!    downlink and prints `my_node_info` (one JSON line, ≤ 64 KiB, validated).
-//! 5. A Meshtastic answer: `firmware {family: meshtastic, version, source:
-//!    probe}` and the binding are persisted in `devices.json`, the claims are
+//! 4. A Meshtastic answer ([`StepResult::Bound`]): `firmware {family:
+//!    meshtastic, version, source: probe}` and the binding are persisted
+//!    (`DeviceRegistry::record_identify`: `interfaces.toml` through the spine
+//!    once one is attached, else `devices.json`), the claims are
 //!    **transferred** to `meshmud` (`PortTable::transfer` — the port is never
 //!    free in between), the presence reader starts, and **the identify child
 //!    becomes the service child in place** (the same process: one open, one
 //!    possible DTR/RTS reset, at this consented step only).
-//! 6. Exit code 3 (the board answered nothing Meshtastic): meshmud is stopped,
-//!    the claims released, and the honest result is persisted — `firmware
-//!    {family: unknown, source: probe}`, no binding (`200`).
-//! 7. Anything else (meshmud did not start or exited, no downlink, the reader
+//! 5. Exit code 3 (the board answered nothing Meshtastic,
+//!    [`StepResult::NotMeshtastic`]): meshmud is stopped, the downlink claim
+//!    released (the board port too when this step claimed it), and nothing is
+//!    persisted — that is the orchestrator's call.
+//! 6. Anything else (meshmud did not start or exited, no downlink, the reader
 //!    failed or timed out, malformed output, the daemon shutting down):
-//!    meshmud stopped, claims released, nothing persisted,
-//!    `502 upstream_error`. The probe polls the module's `stopping` flag in
-//!    its 50 ms loops, so daemon shutdown never waits for the reader's
-//!    `--once` timeout (the reader is killed when its future is dropped).
-//!    meshmud's liveness is checked again after the reader answers and before
-//!    anything is bound or persisted, because the supervisor reaps and records
-//!    an exit asynchronously and a quick answer can beat it: an exited child
-//!    (supervisor state, or `/proc/<pid>/stat` gone or a zombie) turns any
-//!    answer into this `502`.
-//! 8. A forget that lands while the probe runs wins: the registry refuses
+//!    meshmud stopped, claims released as in 5, nothing persisted,
+//!    [`IdentifyError::Upstream`]. The probe polls the module's `stopping`
+//!    flag in its 50 ms loops, so daemon shutdown never waits for the
+//!    reader's `--once` timeout (the reader is killed when its future is
+//!    dropped). meshmud's liveness is checked again after the reader answers
+//!    and before anything is bound or persisted, because the supervisor reaps
+//!    and records an exit asynchronously and a quick answer can beat it: an
+//!    exited child (supervisor state, or `/proc/<pid>/stat` gone or a zombie)
+//!    turns any answer into this `502`.
+//! 7. A forget that lands while the probe runs wins: the registry refuses
 //!    the result before writing anything ([`DeviceRegistry::record_identify`]),
 //!    the service the identify child was becoming is torn down at once
 //!    (children stopped, claims released, node DB removed) and the answer is
 //!    `404 not_found`.
+//!
+//! [`Meshtastic::identify`] is the **Layer 5 single-step entry** the
+//! `POST /devices/{id}/identify` route still calls until the route moves to
+//! `devices::identify::Identify::run` (task C1): it takes the target and the
+//! board port itself and keeps Layer 5's rule of persisting `family:
+//! unknown` after exit code 3 alone. The full sequence never does.
 
 use super::{meshmud, Meshtastic, MESHMUD_TASK};
 use crate::daemon::dashboard::api_v1::Problem;
 use crate::daemon::dashboard::bind::pid_alive;
 use crate::daemon::dashboard::ApiState;
-use crate::daemon::devices::registry::TargetError;
+use crate::daemon::devices::registry::{RecordError, TargetError};
 use crate::daemon::devices::store::{board_name, MeshtasticBinding};
 use crate::daemon::devices::{
     clean, DeviceFirmware, DeviceRecord, DeviceRegistry, FirmwareFamily, FirmwareSource, MAX_FACT,
@@ -180,18 +196,48 @@ enum Outcome {
     NotMeshtastic,
 }
 
+/// What the Meshtastic step found (module doc, 4. and 5.).
+#[derive(Debug, Clone, PartialEq)]
+pub enum StepResult {
+    /// A Meshtastic board: bound and persisted; meshmud now serves it.
+    Bound(Box<DeviceRecord>),
+    /// The board answered nothing Meshtastic (reader exit 3): nothing
+    /// persisted, meshmud stopped.
+    NotMeshtastic,
+}
+
+/// The claims one step made (what an abort gives back).
+struct Claims {
+    task: String,
+    uplink: meshmud::Uplink,
+    /// The board port was claimed by this step (not held before).
+    board: bool,
+}
+
 impl Meshtastic {
     fn identify_ctx(&self) -> Result<(Arc<ApiState>, Arc<DeviceRegistry>), IdentifyError> {
         self.ctx().ok_or(IdentifyError::Unavailable)
     }
 
-    /// Run the identify step for `device_id` (see module docs).
+    /// The daemon is shutting the module down.
+    pub fn is_stopping(&self) -> bool {
+        self.stopping.load(Ordering::SeqCst)
+    }
+
+    /// The Meshtastic step can run here for a serial (`true`) or TCP uplink:
+    /// meshmud and the reader installed, and a USB board only on Linux off
+    /// phones (Layer 5 §14).
+    pub fn identify_available(&self, serial: bool) -> bool {
+        self.cfg.meshmud_installed()
+            && self.cfg.reader_installed()
+            && !(serial && (self.cfg.phone_like || !cfg!(target_os = "linux")))
+    }
+
+    /// The Layer 5 single-step identify for `device_id` (module doc, last
+    /// paragraph): target, the Meshtastic step, and on exit code 3 the Layer 5
+    /// rule (`family: unknown` persisted).
     pub async fn identify(&self, device_id: &str) -> Result<DeviceRecord, IdentifyError> {
         let (api, reg) = self.identify_ctx()?;
-        let _t = self.transition.lock().await;
-        if self.stopping.load(Ordering::SeqCst) {
-            return Err(shutting_down());
-        }
         let target = reg.identify_target(device_id).map_err(|e| match e {
             TargetError::NotFound => IdentifyError::NotFound,
             TargetError::NotOffered(why) => IdentifyError::NotOffered(why),
@@ -203,18 +249,47 @@ impl Meshtastic {
                 },
             }),
         })?;
-        if !(self.cfg.meshmud_installed() && self.cfg.reader_installed()) {
+        let task = format!("identify:{device_id}");
+        match self.identify_step(device_id, &target.uplink, &task).await? {
+            StepResult::Bound(rec) => Ok(*rec),
+            StepResult::NotMeshtastic => {
+                let firmware = DeviceFirmware {
+                    family: FirmwareFamily::Unknown,
+                    version: None,
+                    source: FirmwareSource::Probe,
+                };
+                reg.record_identify(&api, device_id, firmware, None)
+                    .await
+                    .map_err(|_| IdentifyError::NotFound)
+            }
+        }
+    }
+
+    /// The Meshtastic step on `uplink` for `device_id` under `task` (module
+    /// doc, 1.–7.). The caller may already hold the board port under `task`
+    /// (the orchestrator does); it is then left to the caller unless the
+    /// step hands it to meshmud.
+    pub async fn identify_step(
+        &self,
+        device_id: &str,
+        uplink: &meshmud::Uplink,
+        task: &str,
+    ) -> Result<StepResult, IdentifyError> {
+        let (api, reg) = self.identify_ctx()?;
+        let _t = self.transition.lock().await;
+        if self.stopping.load(Ordering::SeqCst) {
+            return Err(shutting_down());
+        }
+        if !self.identify_available(uplink.is_usb()) {
             return Err(IdentifyError::Unavailable);
         }
-        let task = format!("identify:{device_id}");
         let tick = self.next_tick();
-        self.claim_for(&task, &target.uplink, tick)
-            .map_err(IdentifyError::Busy)?;
+        let claims = self.claim_step(task, uplink, tick)?;
 
-        let child = match self.start_identify_child(&target.uplink) {
+        let child = match self.start_identify_child(uplink) {
             Ok(c) => c,
             Err(e) => {
-                self.release_for(&task, &target.uplink);
+                self.release_step(&claims);
                 return Err(e);
             }
         };
@@ -222,12 +297,12 @@ impl Meshtastic {
         match outcome {
             Ok(Outcome::Meshtastic(info)) => {
                 let Some(binding) = MeshtasticBinding::new(
-                    target.uplink.clone(),
+                    uplink.clone(),
                     info.num as u32,
                     Some(&info.hw_model),
                     Some(&info.long_name),
                 ) else {
-                    self.abort(&task, &target.uplink, &child).await;
+                    self.abort(&claims, &child).await;
                     return Err(IdentifyError::Upstream("invalid my_node_info".into()));
                 };
                 let firmware = DeviceFirmware {
@@ -240,18 +315,18 @@ impl Meshtastic {
                 let tick = self.next_tick();
                 let moved = self
                     .ports
-                    .transfer(&target.uplink.port_name(), &task, MESHMUD_TASK, tick)
+                    .transfer(&uplink.port_name(), task, MESHMUD_TASK, tick)
                     .and_then(|()| {
                         self.ports.transfer(
                             &self.cfg.downlink.to_string(),
-                            &task,
+                            task,
                             MESHMUD_TASK,
                             tick,
                         )
                     });
                 if let Err(e) = moved {
-                    self.abort(&task, &target.uplink, &child).await;
-                    let _ = self.ports.release(&target.uplink.port_name(), MESHMUD_TASK);
+                    self.abort(&claims, &child).await;
+                    let _ = self.ports.release(&uplink.port_name(), MESHMUD_TASK);
                     return Err(IdentifyError::Upstream(format!(
                         "port hand-over failed: {e}"
                     )));
@@ -259,7 +334,7 @@ impl Meshtastic {
                 let reader = self.spawn_reader();
                 *super::lock(&self.service) = Some(super::Service {
                     device_id: device_id.to_string(),
-                    uplink: target.uplink.clone(),
+                    uplink: uplink.clone(),
                     meshmud: Some(child),
                     reader,
                     port_held_by: None,
@@ -270,18 +345,34 @@ impl Meshtastic {
                     let mut st = super::lock(&self.status);
                     st.board = reg.label(device_id).or_else(|| binding.hw_model.clone());
                     st.firmware_version = firmware.version.clone();
-                    st.usb_uplink = target.uplink.is_usb();
-                    st.bound_ports = vec![target.uplink.display()];
+                    st.usb_uplink = uplink.is_usb();
+                    st.bound_ports = vec![uplink.display()];
                 }
                 self.install_supervised();
-                let Ok(rec) = reg.record_identify(&api, device_id, firmware, Some(binding)) else {
-                    // forgotten while the probe ran: nothing was persisted, so
-                    // nothing may keep running or holding the port either
-                    eprintln!(
-                        "111 meshtastic: {device_id} was forgotten during identify; meshmud stopped"
-                    );
-                    self.drop_service(&api).await;
-                    return Err(IdentifyError::NotFound);
+                let rec = match reg
+                    .record_identify(&api, device_id, firmware, Some(binding))
+                    .await
+                {
+                    Ok(rec) => rec,
+                    Err(e) => {
+                        // forgotten while the probe ran, or the binding could
+                        // not be saved: nothing is bound, so nothing may keep
+                        // running or holding the port either
+                        eprintln!(
+                            "111 meshtastic: {device_id} identified but not bound ({}); meshmud stopped",
+                            match &e {
+                                RecordError::NotFound => "forgotten during identify".to_string(),
+                                RecordError::Binding(why) => why.clone(),
+                            }
+                        );
+                        self.drop_service(&api).await;
+                        return Err(match e {
+                            RecordError::NotFound => IdentifyError::NotFound,
+                            RecordError::Binding(why) => IdentifyError::Upstream(format!(
+                                "the binding could not be saved: {why}"
+                            )),
+                        });
+                    }
                 };
                 eprintln!(
                     "111 meshtastic: {device_id} identified as Meshtastic ({}); meshmud now serves it",
@@ -290,29 +381,56 @@ impl Meshtastic {
                         .and_then(|f| f.version.as_deref())
                         .unwrap_or("version unknown")
                 );
-                Ok(rec)
+                Ok(StepResult::Bound(Box::new(rec)))
             }
             Ok(Outcome::NotMeshtastic) => {
-                self.abort(&task, &target.uplink, &child).await;
-                let firmware = DeviceFirmware {
-                    family: FirmwareFamily::Unknown,
-                    version: None,
-                    source: FirmwareSource::Probe,
-                };
-                reg.record_identify(&api, device_id, firmware, None)
-                    .map_err(|_| IdentifyError::NotFound)
+                self.abort(&claims, &child).await;
+                Ok(StepResult::NotMeshtastic)
             }
             Err(e) => {
-                self.abort(&task, &target.uplink, &child).await;
+                self.abort(&claims, &child).await;
                 Err(e)
             }
         }
     }
 
-    /// Stop the identify child and release the identify claims.
-    async fn abort(&self, task: &str, uplink: &meshmud::Uplink, child: &ChildHandle) {
+    /// Claim the board port (unless `task` holds it already) and the
+    /// downlink; on a refusal nothing this step claimed stays claimed.
+    fn claim_step(
+        &self,
+        task: &str,
+        uplink: &meshmud::Uplink,
+        tick: u64,
+    ) -> Result<Claims, IdentifyError> {
+        let port = uplink.port_name();
+        let held_before = self.ports.is_held(&port).is_some_and(|o| o.task == task);
+        self.ports
+            .claim(&port, task, tick)
+            .map_err(IdentifyError::Busy)?;
+        let claims = Claims {
+            task: task.to_string(),
+            uplink: uplink.clone(),
+            board: !held_before,
+        };
+        if let Err(b) = self.ports.claim(&self.cfg.downlink.to_string(), task, tick) {
+            self.release_step(&claims);
+            return Err(IdentifyError::Busy(b));
+        }
+        Ok(claims)
+    }
+
+    /// Give back what [`Self::claim_step`] claimed.
+    fn release_step(&self, c: &Claims) {
+        let _ = self.ports.release(&self.cfg.downlink.to_string(), &c.task);
+        if c.board {
+            let _ = self.ports.release(&c.uplink.port_name(), &c.task);
+        }
+    }
+
+    /// Stop the identify child and give back the step's claims.
+    async fn abort(&self, claims: &Claims, child: &ChildHandle) {
         child.stop_and_wait(self.cfg.stop_grace).await;
-        self.release_for(task, uplink);
+        self.release_step(claims);
     }
 
     /// Render the config and spawn meshmud with the identify profile (its

@@ -376,10 +376,8 @@ pub fn catalogue(id: ServiceId) -> Catalogue {
                 "A Meshtastic board identified and bound to this node: plugged in by USB (Linux), \
                  or a Wi-Fi board reached by its address.",
             ),
-            description: "Meshtastic's own web client for the Meshtastic board bound to this \
-                node, and the list of Meshtastic nodes it hears. What you do in that client goes \
-                to your radio and out over Meshtastic; 111 does not see or store it, and 111 \
-                itself never transmits on Meshtastic.",
+            // Layer 6 §5: the honest copy replaces L5 §14's "111 never transmits"
+            description: crate::daemon::meshtastic::SERVICE_COPY,
             kb_entry: Some("projects/meshtastic-web.md"),
         },
     }

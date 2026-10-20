@@ -11,20 +11,50 @@
 //! at most [`CAP`] entries are kept (newest ids); the file is compacted when
 //! it grows past twice that, and a file larger than [`MAX_FILE`] is ignored.
 //! Never used for ordering, freshness or anything cryptographic.
+//!
+//! **A second instance (Layer 6 §3):** foreign rows (`foreign_messages`) have
+//! their own row-id space, so their "received" display time lives in
+//! `fabric/display-times.foreign` ([`FOREIGN_TIMES_FILE`]): the same record
+//! format, API and bounds, opened with [`DisplayTimes::open`] and
+//! [`TimesFile::Foreign`], so a foreign id can never collide with a 111
+//! message id. The file is chosen by a closed enum, never by a caller's
+//! string.
 
 use std::collections::HashMap;
 use std::io::Write;
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 
-/// File name inside the fabric directory.
+/// File name inside the fabric directory (111 `messages` row ids).
 pub const TIMES_FILE: &str = "display-times";
+/// The second instance's file (Layer 6 §3: `foreign_messages` row ids).
+pub const FOREIGN_TIMES_FILE: &str = "display-times.foreign";
 /// Entries kept.
 pub const CAP: usize = 100_000;
 /// One record.
 const REC: usize = 16;
 /// Largest file read (compaction keeps it far below).
 pub const MAX_FILE: u64 = (4 * CAP * REC) as u64;
+
+/// Which display-times instance (module doc): the file is one of two fixed
+/// names, never caller input.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TimesFile {
+    /// [`TIMES_FILE`]: 111 `messages` row ids.
+    Ours,
+    /// [`FOREIGN_TIMES_FILE`]: `foreign_messages` row ids (Layer 6 §3).
+    Foreign,
+}
+
+impl TimesFile {
+    /// The file name inside the fabric directory.
+    pub fn name(self) -> &'static str {
+        match self {
+            TimesFile::Ours => TIMES_FILE,
+            TimesFile::Foreign => FOREIGN_TIMES_FILE,
+        }
+    }
+}
 
 /// Wall-clock now, Unix seconds (display only).
 pub fn now() -> i64 {
@@ -63,7 +93,13 @@ impl DisplayTimes {
     /// Load `fabric_dir/display-times` (a missing, oversize or symlinked
     /// file starts empty).
     pub fn load(fabric_dir: &Path) -> DisplayTimes {
-        let path = fabric_dir.join(TIMES_FILE);
+        DisplayTimes::open(fabric_dir, TimesFile::Ours)
+    }
+
+    /// Load `fabric_dir/<file>` — [`TIMES_FILE`] or [`FOREIGN_TIMES_FILE`]
+    /// (a missing, oversize or symlinked file starts empty).
+    pub fn open(fabric_dir: &Path, file: TimesFile) -> DisplayTimes {
+        let path = fabric_dir.join(file.name());
         let mut t = DisplayTimes {
             path: Some(path.clone()),
             map: HashMap::new(),
@@ -177,6 +213,33 @@ mod tests {
         assert_eq!(b.get_or_record(8, 0), 1_700_000_100);
         assert_eq!(rfc3339(0), "1970-01-01T00:00:00Z");
         assert_eq!(rfc3339(1_700_000_000), "2023-11-14T22:13:20Z");
+    }
+
+    #[test]
+    fn the_foreign_instance_is_a_separate_file_with_the_same_format() {
+        let t = tempfile::tempdir().unwrap();
+        let mut ours = DisplayTimes::load(t.path());
+        let mut foreign = DisplayTimes::open(t.path(), TimesFile::Foreign);
+        // The same row id in both spaces never collides.
+        assert_eq!(ours.get_or_record(7, 1_700_000_000), 1_700_000_000);
+        assert_eq!(foreign.get_or_record(7, 1_800_000_000), 1_800_000_000);
+        foreign.record(9, 1_800_000_009);
+        let mut ours = DisplayTimes::open(t.path(), TimesFile::Ours);
+        let mut foreign = DisplayTimes::open(t.path(), TimesFile::Foreign);
+        assert_eq!((ours.len(), foreign.len()), (1, 2));
+        assert_eq!(ours.get_or_record(7, 0), 1_700_000_000);
+        assert_eq!(foreign.get_or_record(7, 0), 1_800_000_000);
+        // Same record format: 16-byte little-endian `id ‖ secs` records.
+        let bytes = std::fs::read(t.path().join(FOREIGN_TIMES_FILE)).unwrap();
+        assert_eq!(bytes.len(), 2 * REC);
+        assert_eq!(&bytes[..8], &7i64.to_le_bytes());
+        assert_eq!(&bytes[8..16], &1_800_000_000i64.to_le_bytes());
+        // A symlinked file is ignored (starts empty), as for the 111 file.
+        let other = t.path().join("elsewhere");
+        std::fs::write(&other, &bytes).unwrap();
+        let d = tempfile::tempdir().unwrap();
+        std::os::unix::fs::symlink(&other, d.path().join(FOREIGN_TIMES_FILE)).unwrap();
+        assert!(DisplayTimes::open(d.path(), TimesFile::Foreign).is_empty());
     }
 
     #[test]

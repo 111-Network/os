@@ -286,6 +286,17 @@ const DAEMON_TOOLS: [&str; 5] = [
     "nearby.read",
 ];
 
+/// The seven tools Layer 6 appends, in the §13 order.
+const LAYER6_TOOLS: [&str; 7] = [
+    "bridge.read",
+    "bridge.propose_edge",
+    "devices.read",
+    "transport.read",
+    "device.identify",
+    "device.propose",
+    "service.restart",
+];
+
 /// Valid arguments for each daemon tool (messages.send to an accepted contact).
 fn valid_args(name: &str) -> Value {
     match name {
@@ -298,13 +309,15 @@ fn valid_args(name: &str) -> Value {
 // ---------------------------------------------------------------- schemas
 
 #[test]
-fn schema_set_grows_by_exactly_the_five_daemon_tools() {
+fn schema_set_is_the_seventeen_tools_in_order() {
     let names: Vec<String> = tools::schemas()
         .iter()
         .map(|s| s["function"]["name"].as_str().unwrap().to_string())
         .collect();
-    assert_eq!(names.len(), 10);
-    assert_eq!(&names[5..], DAEMON_TOOLS);
+    // Layer 3's five, Layer 5's five, Layer 6's seven (transport §13).
+    assert_eq!(names.len(), 17);
+    assert_eq!(&names[5..10], DAEMON_TOOLS);
+    assert_eq!(&names[10..], LAYER6_TOOLS);
     for s in tools::schemas() {
         assert_eq!(s["type"], "function");
         assert_eq!(s["function"]["parameters"]["type"], "object", "{s}");
@@ -321,7 +334,12 @@ fn schema_set_grows_by_exactly_the_five_daemon_tools() {
     );
     assert_eq!(
         by_name("messages.send")["function"]["parameters"]["required"],
-        json!(["to", "text"])
+        json!(["text"]),
+        "to or targets: either one, so only the text is required"
+    );
+    assert_eq!(
+        by_name("messages.send")["function"]["parameters"]["properties"]["targets"]["maxItems"],
+        16
     );
     let nearby = by_name("nearby.read")["function"]["description"]
         .as_str()

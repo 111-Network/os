@@ -21,9 +21,29 @@
 //! without a live parent), and a set-user-ID or file-capability program (the
 //! kernel clears the flag at exec; none is supervised here). The service
 //! manager's cgroup kill stays the backstop for those.
+//!
+//! **Piped stdio (Layer 6 §7 "Supervisor extension", §2 "Process shape").**
+//! By default a child's stdin is null and its stdout and stderr go to its log
+//! or are inherited ([`ChildStdio::Null`]). A child spawned with
+//! [`ChildStdio::Piped`] (`spec.with_stdio(ChildStdio::Piped)`) speaks a line
+//! protocol on its stdin and stdout (the LXMF helper's JSON Lines, §6;
+//! `deltachat-rpc-server`'s JSON-RPC, §7): for every spawn the supervisor owns
+//! one stdout reader task (an undrained pipe would block the child and with it
+//! the respawn loop) that splits the stream into UTF-8 lines of at most
+//! [`PIPED_LINE_MAX`] bytes (a longer or invalid line is dropped and counted)
+//! into a bounded queue of [`PIPED_QUEUE_CAP`] lines (full ⇒ the oldest line is
+//! dropped and counted), and a stdin writer. Both are published as a
+//! [`PipedIo`] through a watch channel on the [`ChildControl`]
+//! ([`ChildControl::stdio`]), re-published with a new, process-wide unique
+//! generation after **every** spawn (respawns included) so an adapter
+//! re-attaches; `None` while no child runs. When the child exits, its stdin is
+//! closed and the reader drains what the pipe still holds (at most
+//! [`READER_DRAIN`]), then ends and closes the queue: no task outlives its
+//! child. stderr still goes to `stdout_log`, else it is inherited.
 
 use std::collections::VecDeque;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -59,8 +79,337 @@ pub struct ChildSpec {
     pub env: Vec<(String, String)>,
     pub backoff: BackoffPolicy,
     /// When set, stdout+stderr append to this file (children whose logs are
-    /// signal, e.g. rnsd peer discovery). Inherit otherwise.
+    /// signal, e.g. rnsd peer discovery). Inherit otherwise. With
+    /// [`ChildStdio::Piped`] only stderr goes here (stdout is the protocol).
     pub stdout_log: Option<PathBuf>,
+}
+
+/// How a child's stdin and stdout are wired (Layer 6 §7 "Supervisor
+/// extension"; module doc, "Piped stdio").
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum ChildStdio {
+    /// stdin null, stdout+stderr to `stdout_log` or inherited (every Layer 1–5
+    /// child).
+    #[default]
+    Null,
+    /// stdin and stdout are pipes owned by the supervisor and published as a
+    /// [`PipedIo`] on [`ChildControl::stdio`] after every spawn.
+    Piped,
+}
+
+/// What [`spawn_child`] starts: a [`ChildSpec`] plus its stdio wiring. Every
+/// `ChildSpec` converts into one with [`ChildStdio::Null`], so existing
+/// `spawn_child(spec)` calls are unchanged; a piped child is
+/// `spawn_child(spec.with_stdio(ChildStdio::Piped))`.
+#[derive(Debug, Clone)]
+pub struct SpawnSpec {
+    pub spec: ChildSpec,
+    pub stdio: ChildStdio,
+}
+
+impl From<ChildSpec> for SpawnSpec {
+    fn from(spec: ChildSpec) -> Self {
+        SpawnSpec {
+            spec,
+            stdio: ChildStdio::Null,
+        }
+    }
+}
+
+impl ChildSpec {
+    /// This spec with the given stdio wiring (§7).
+    pub fn with_stdio(self, stdio: ChildStdio) -> SpawnSpec {
+        SpawnSpec { spec: self, stdio }
+    }
+}
+
+/// Longest stdout line a piped child may send, in bytes without the newline
+/// (§6: "one object per line, at most 64 KiB"). Longer ⇒ dropped and counted.
+pub const PIPED_LINE_MAX: usize = 64 * 1024;
+/// Lines a piped child's queue holds; full ⇒ the oldest is dropped and counted.
+pub const PIPED_QUEUE_CAP: usize = 1024;
+/// After a piped child exited, how long its reader may still drain the pipe
+/// (a grandchild holding the write end open) before it is aborted.
+pub const READER_DRAIN: Duration = Duration::from_secs(1);
+/// Read chunk of the stdout reader.
+const READ_CHUNK: usize = 8 * 1024;
+
+/// Process-wide generation counter of [`PipedIo`]: unique and increasing
+/// across every child, so an adapter can tell any two attachments apart.
+static GENERATION: AtomicU64 = AtomicU64::new(0);
+
+#[derive(Debug, Default)]
+struct QueueState {
+    lines: VecDeque<String>,
+    /// The first line of this spawn, kept (a copy) for a health check that
+    /// must not consume it.
+    first: Option<String>,
+    closed: bool,
+    dropped_overflow: u64,
+    dropped_invalid: u64,
+}
+
+/// The bounded, drop-oldest line queue of one piped spawn (filled by the
+/// supervisor's reader task, drained by the adapter).
+#[derive(Debug)]
+pub struct LineQueue {
+    state: Mutex<QueueState>,
+    notify: tokio::sync::Notify,
+    cap: usize,
+}
+
+impl LineQueue {
+    fn new(cap: usize) -> Self {
+        LineQueue {
+            state: Mutex::new(QueueState::default()),
+            notify: tokio::sync::Notify::new(),
+            cap: cap.max(1),
+        }
+    }
+
+    fn lock(&self) -> std::sync::MutexGuard<'_, QueueState> {
+        // every critical section is a few field updates: poison is benign
+        self.state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    fn push(&self, line: String) {
+        {
+            let mut st = self.lock();
+            if st.first.is_none() {
+                st.first = Some(line.clone());
+            }
+            if st.lines.len() >= self.cap {
+                st.lines.pop_front();
+                st.dropped_overflow += 1;
+            }
+            st.lines.push_back(line);
+        }
+        self.notify.notify_waiters();
+    }
+
+    fn count_invalid(&self) {
+        self.lock().dropped_invalid += 1;
+    }
+
+    fn close(&self) {
+        self.lock().closed = true;
+        self.notify.notify_waiters();
+    }
+
+    /// Wait until `f` yields a value or the queue is closed (`f` sees the
+    /// state under the lock; no wake-up is lost between the check and the
+    /// wait).
+    async fn wait_for<T>(&self, mut f: impl FnMut(&mut QueueState) -> Option<T>) -> Option<T> {
+        loop {
+            let notified = self.notify.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            {
+                let mut st = self.lock();
+                if let Some(v) = f(&mut st) {
+                    return Some(v);
+                }
+                if st.closed {
+                    return None;
+                }
+            }
+            notified.await;
+        }
+    }
+}
+
+/// One spawn's piped stdio (§7): the line queue its stdout fills and its
+/// stdin writer. Cloning shares both. Published on [`ChildControl::stdio`].
+#[derive(Clone)]
+pub struct PipedIo {
+    generation: u64,
+    lines: Arc<LineQueue>,
+    stdin: Arc<tokio::sync::Mutex<Option<tokio::process::ChildStdin>>>,
+}
+
+impl std::fmt::Debug for PipedIo {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PipedIo")
+            .field("generation", &self.generation)
+            .finish_non_exhaustive()
+    }
+}
+
+impl PipedIo {
+    /// Unique per spawn, increasing across all children (module doc).
+    pub fn generation(&self) -> u64 {
+        self.generation
+    }
+
+    /// The next line (oldest first); `None` once the child exited and every
+    /// queued line was taken.
+    pub async fn recv_line(&self) -> Option<String> {
+        self.lines.wait_for(|st| st.lines.pop_front()).await
+    }
+
+    /// The next line if one is queued now.
+    pub fn try_recv_line(&self) -> Option<String> {
+        self.lines.lock().lines.pop_front()
+    }
+
+    /// The first line this spawn sent, without consuming it (a health check
+    /// such as the LXMF helper's `ready`, §6); `None` when the child exited
+    /// without one.
+    pub async fn first_line(&self) -> Option<String> {
+        self.lines.wait_for(|st| st.first.clone()).await
+    }
+
+    /// Lines dropped because the queue was full (the oldest go first).
+    pub fn dropped_overflow(&self) -> u64 {
+        self.lines.lock().dropped_overflow
+    }
+
+    /// Lines dropped because they were longer than [`PIPED_LINE_MAX`] or not
+    /// UTF-8 (noise, §6).
+    pub fn dropped_invalid(&self) -> u64 {
+        self.lines.lock().dropped_invalid
+    }
+
+    /// The reader ended: the child exited (queued lines may remain).
+    pub fn is_closed(&self) -> bool {
+        self.lines.lock().closed
+    }
+
+    /// Write one protocol line (a newline is appended) and flush. Refused
+    /// (`InvalidInput`) when `line` holds a CR or LF (one line, never two) or
+    /// is longer than [`PIPED_LINE_MAX`]; `BrokenPipe` once the child is
+    /// gone. Callers bound the wait with a timeout (a child that does not read
+    /// fills the pipe). A write that fails or is cancelled part-way (the
+    /// timeout fired) **closes the child's stdin**: a half line can never be
+    /// completed by the next call into one garbled protocol line; the child
+    /// sees EOF, the adapter sees `BrokenPipe` and restarts it.
+    pub async fn write_line(&self, line: &str) -> std::io::Result<()> {
+        if line.len() > PIPED_LINE_MAX || line.bytes().any(|b| b == b'\n' || b == b'\r') {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "a protocol line holds no CR/LF and is at most 64 KiB",
+            ));
+        }
+        let mut guard = self.stdin.lock().await;
+        // taken out for the write: a cancelled or failed write drops it
+        // (closing the pipe); only a whole line puts it back
+        let Some(mut stdin) = guard.take() else {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::BrokenPipe,
+                "the child is gone",
+            ));
+        };
+        let mut bytes = Vec::with_capacity(line.len() + 1);
+        bytes.extend_from_slice(line.as_bytes());
+        bytes.push(b'\n');
+        write_all(&mut stdin, &bytes).await?;
+        *guard = Some(stdin);
+        Ok(())
+    }
+}
+
+/// `write_all` + `flush` over `AsyncWrite` (no `io-util` needed).
+async fn write_all(w: &mut tokio::process::ChildStdin, mut buf: &[u8]) -> std::io::Result<()> {
+    use std::pin::Pin;
+    use tokio::io::AsyncWrite;
+    while !buf.is_empty() {
+        let n = std::future::poll_fn(|cx| Pin::new(&mut *w).poll_write(cx, buf)).await?;
+        if n == 0 {
+            return Err(std::io::ErrorKind::WriteZero.into());
+        }
+        buf = &buf[n..];
+    }
+    std::future::poll_fn(|cx| Pin::new(&mut *w).poll_flush(cx)).await
+}
+
+/// Line splitter of the stdout reader: bounded, never allocates past
+/// [`PIPED_LINE_MAX`] + one chunk.
+#[derive(Default)]
+struct LineSplitter {
+    line: Vec<u8>,
+    overlong: bool,
+}
+
+impl LineSplitter {
+    fn feed(&mut self, mut chunk: &[u8], q: &LineQueue) {
+        while !chunk.is_empty() {
+            match chunk.iter().position(|b| *b == b'\n') {
+                Some(i) => {
+                    self.extend(&chunk[..i]);
+                    self.finish(q);
+                    chunk = &chunk[i + 1..];
+                }
+                None => {
+                    self.extend(chunk);
+                    chunk = &[];
+                }
+            }
+        }
+    }
+
+    fn extend(&mut self, part: &[u8]) {
+        if self.overlong {
+            return;
+        }
+        if self.line.len() + part.len() > PIPED_LINE_MAX + 1 {
+            // + 1: a trailing CR does not count against the cap
+            self.overlong = true;
+            self.line = Vec::new();
+        } else {
+            self.line.extend_from_slice(part);
+        }
+    }
+
+    fn finish(&mut self, q: &LineQueue) {
+        let overlong = std::mem::take(&mut self.overlong);
+        let mut line = std::mem::take(&mut self.line);
+        if line.last() == Some(&b'\r') {
+            line.pop();
+        }
+        if overlong || line.len() > PIPED_LINE_MAX {
+            q.count_invalid();
+            return;
+        }
+        match String::from_utf8(line) {
+            Ok(s) => q.push(s),
+            Err(_) => q.count_invalid(),
+        }
+    }
+
+    /// End of stream: a last line without a newline still counts.
+    fn eof(&mut self, q: &LineQueue) {
+        if self.overlong || !self.line.is_empty() {
+            self.finish(q);
+        }
+    }
+}
+
+/// The per-spawn stdout reader: lines into `q` until EOF or a read error,
+/// then the queue closes.
+async fn read_lines(mut out: tokio::process::ChildStdout, q: Arc<LineQueue>) {
+    use std::pin::Pin;
+    use tokio::io::{AsyncRead, ReadBuf};
+    let mut buf = vec![0u8; READ_CHUNK];
+    let mut split = LineSplitter::default();
+    loop {
+        let n = std::future::poll_fn(|cx| {
+            let mut rb = ReadBuf::new(&mut buf);
+            match Pin::new(&mut out).poll_read(cx, &mut rb) {
+                std::task::Poll::Ready(Ok(())) => std::task::Poll::Ready(Ok(rb.filled().len())),
+                std::task::Poll::Ready(Err(e)) => std::task::Poll::Ready(Err(e)),
+                std::task::Poll::Pending => std::task::Poll::Pending,
+            }
+        })
+        .await;
+        match n {
+            Ok(0) | Err(_) => break,
+            Ok(n) => split.feed(&buf[..n], &q),
+        }
+    }
+    split.eof(&q);
+    q.close();
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -159,6 +508,8 @@ pub struct ChildControl {
     shared: Arc<Mutex<Shared>>,
     /// Wakes the supervisor out of a back-off sleep or the degraded wait.
     kick: Arc<tokio::sync::Notify>,
+    /// The current spawn's piped stdio (always `None` for [`ChildStdio::Null`]).
+    stdio_rx: tokio::sync::watch::Receiver<Option<PipedIo>>,
 }
 
 fn signal(pid: u32, sig: libc::c_int) {
@@ -269,6 +620,19 @@ impl ChildControl {
 
     pub fn state(&self) -> ChildState {
         *self.state_rx.borrow()
+    }
+
+    /// A watch of [`Self::state`] (child ordering, Layer 6 §6 "Start order",
+    /// waits on a dependency's state without polling).
+    pub fn state_watch(&self) -> tokio::sync::watch::Receiver<ChildState> {
+        self.state_rx.clone()
+    }
+
+    /// The piped stdio of the current spawn (§7): `Some` while a
+    /// [`ChildStdio::Piped`] child runs, re-published with a new generation
+    /// after every spawn; `None` between runs and for a null-stdio child.
+    pub fn stdio(&self) -> tokio::sync::watch::Receiver<Option<PipedIo>> {
+        self.stdio_rx.clone()
     }
 
     /// Current child PID when running (None while backing off/stopped).
@@ -384,6 +748,76 @@ impl ChildControl {
     }
 }
 
+/// Open a child's log for appending (`None`, logged: the caller inherits).
+fn open_log(path: &std::path::Path) -> Option<std::fs::File> {
+    match std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+    {
+        Ok(f) => Some(f),
+        Err(e) => {
+            eprintln!(
+                "111 supervise: open {} failed: {e} — inheriting",
+                path.display()
+            );
+            None
+        }
+    }
+}
+
+/// One piped spawn's reader task and stdin, between spawn and exit.
+struct Attached {
+    reader: tokio::task::JoinHandle<()>,
+    lines: Arc<LineQueue>,
+    stdin: Arc<tokio::sync::Mutex<Option<tokio::process::ChildStdin>>>,
+}
+
+/// Take the spawn's pipes, start its reader and publish its [`PipedIo`]
+/// with a fresh generation.
+fn attach_piped(
+    child: &mut tokio::process::Child,
+    stdio_tx: &tokio::sync::watch::Sender<Option<PipedIo>>,
+) -> Option<Attached> {
+    let (Some(out), Some(input)) = (child.stdout.take(), child.stdin.take()) else {
+        eprintln!("111 supervise: a piped child came without its pipes");
+        return None;
+    };
+    let lines = Arc::new(LineQueue::new(PIPED_QUEUE_CAP));
+    let reader = tokio::spawn(read_lines(out, Arc::clone(&lines)));
+    let stdin = Arc::new(tokio::sync::Mutex::new(Some(input)));
+    let generation = GENERATION.fetch_add(1, Ordering::Relaxed) + 1;
+    stdio_tx.send_replace(Some(PipedIo {
+        generation,
+        lines: Arc::clone(&lines),
+        stdin: Arc::clone(&stdin),
+    }));
+    Some(Attached {
+        reader,
+        lines,
+        stdin,
+    })
+}
+
+impl Attached {
+    /// The child exited: close its stdin, let the reader drain what the pipe
+    /// holds (at most [`READER_DRAIN`]; aborted after, e.g. when a grandchild
+    /// keeps the write end open), close the queue, publish `None`.
+    async fn detach(self, stdio_tx: &tokio::sync::watch::Sender<Option<PipedIo>>) {
+        drop(self.stdin.lock().await.take());
+        let mut reader = self.reader;
+        if tokio::time::timeout(READER_DRAIN, &mut reader)
+            .await
+            .is_err()
+        {
+            reader.abort();
+            let _ = reader.await;
+        }
+        self.lines.close();
+        stdio_tx.send_replace(None);
+    }
+}
+
 /// Owner of one supervised child: the [`ChildControl`] (via `Deref`) plus the
 /// supervisor task.
 pub struct ChildHandle {
@@ -410,15 +844,21 @@ impl ChildHandle {
 /// crash-loop ⇒ Degraded (surfaced by the dashboard, not fatal to the daemon;
 /// the supervisor then waits for a [`ChildControl::restart`] or a stop).
 /// Each run is forked by the forker thread with the parent-death signal set
-/// (module doc). Must be called within a tokio runtime.
-pub fn spawn_child(spec: ChildSpec) -> ChildHandle {
+/// (module doc). A [`ChildStdio::Piped`] spec gets a stdout reader and a
+/// stdin writer per run, published on [`ChildControl::stdio`] (module doc,
+/// "Piped stdio"). Must be called within a tokio runtime.
+pub fn spawn_child(spec: impl Into<SpawnSpec>) -> ChildHandle {
+    let SpawnSpec { spec, stdio } = spec.into();
+    let piped = stdio == ChildStdio::Piped;
     let (state_tx, state_rx) = tokio::sync::watch::channel(ChildState::Backoff);
+    let (stdio_tx, stdio_rx) = tokio::sync::watch::channel(None::<PipedIo>);
     let ctl = ChildControl {
         name: spec.name.clone(),
         state_rx,
         stop: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         shared: Arc::new(Mutex::new(Shared::default())),
         kick: Arc::new(tokio::sync::Notify::new()),
+        stdio_rx,
     };
 
     let task = {
@@ -445,15 +885,21 @@ pub fn spawn_child(spec: ChildSpec) -> ChildHandle {
                 let spawn_result = {
                     let mut cmd = tokio::process::Command::new(&spec.program);
                     cmd.args(&spec.args)
-                        .envs(spec.env.iter().map(|(k, v)| (k, v)))
-                        .stdin(std::process::Stdio::null());
-                    match &spec.stdout_log {
-                        Some(path) => match std::fs::OpenOptions::new()
-                            .create(true)
-                            .append(true)
-                            .open(path)
-                        {
-                            Ok(f) => {
+                        .envs(spec.env.iter().map(|(k, v)| (k, v)));
+                    if piped {
+                        // stdout is the protocol; stderr alone goes to the log
+                        cmd.stdin(std::process::Stdio::piped())
+                            .stdout(std::process::Stdio::piped());
+                        cmd.stderr(match &spec.stdout_log {
+                            Some(path) => open_log(path)
+                                .map(std::process::Stdio::from)
+                                .unwrap_or_else(std::process::Stdio::inherit),
+                            None => std::process::Stdio::inherit(),
+                        });
+                    } else {
+                        cmd.stdin(std::process::Stdio::null());
+                        match spec.stdout_log.as_deref().and_then(open_log) {
+                            Some(f) => {
                                 let err_f = f.try_clone();
                                 match err_f {
                                     Ok(e2) => {
@@ -465,18 +911,10 @@ pub fn spawn_child(spec: ChildSpec) -> ChildHandle {
                                     }
                                 }
                             }
-                            Err(e) => {
-                                eprintln!(
-                                    "111 supervise: open {} failed: {e} — inheriting",
-                                    path.display()
-                                );
+                            None => {
                                 cmd.stdout(std::process::Stdio::inherit())
                                     .stderr(std::process::Stdio::inherit());
                             }
-                        },
-                        None => {
-                            cmd.stdout(std::process::Stdio::inherit())
-                                .stderr(std::process::Stdio::inherit());
                         }
                     }
                     set_parent_death_signal(&mut cmd);
@@ -516,6 +954,13 @@ pub fn spawn_child(spec: ChildSpec) -> ChildHandle {
                         schedule.reset();
                     }
                 }
+                // piped: one reader per spawn, published before `Running` so
+                // whoever sees the child running finds its stdio
+                let attached = if piped {
+                    attach_piped(&mut child, &stdio_tx)
+                } else {
+                    None
+                };
                 let _ = state_tx.send(ChildState::Running);
                 if stopping() {
                     // stop raced the spawn (it saw no pid to signal)
@@ -525,6 +970,9 @@ pub fn spawn_child(spec: ChildSpec) -> ChildHandle {
                 }
 
                 let _ = child.wait().await;
+                if let Some(attached) = attached {
+                    attached.detach(&stdio_tx).await;
+                }
                 let restarting = {
                     let mut sh = ctl.shared.lock().unwrap();
                     sh.pid = None;
@@ -830,6 +1278,88 @@ mod tests {
             "fresh start out of degraded"
         );
         assert!(h.pid().is_some());
+        h.stop_and_wait(Duration::from_secs(5)).await;
+    }
+
+    fn split_all(chunks: &[&[u8]]) -> (Vec<String>, u64) {
+        let q = LineQueue::new(PIPED_QUEUE_CAP);
+        let mut s = LineSplitter::default();
+        for c in chunks {
+            s.feed(c, &q);
+        }
+        s.eof(&q);
+        let st = q.lock();
+        (st.lines.iter().cloned().collect(), st.dropped_invalid)
+    }
+
+    #[test]
+    fn lines_split_across_chunks_and_strip_one_cr() {
+        let (lines, bad) = split_all(&[b"a", b"b\nc\r", b"\n\n", b"tail"]);
+        assert_eq!(lines, ["ab", "c", "", "tail"]);
+        assert_eq!(bad, 0);
+    }
+
+    #[test]
+    fn overlong_and_non_utf8_lines_are_counted_not_kept() {
+        let at_cap = vec![b'x'; PIPED_LINE_MAX];
+        let over = vec![b'y'; PIPED_LINE_MAX + 1];
+        let mut big = over.clone();
+        big.extend_from_slice(b"\n");
+        let (lines, bad) = split_all(&[
+            &at_cap,
+            b"\n",
+            &big[..10],
+            &big[10..],
+            b"\xff\xfe\n",
+            b"ok\n",
+            &over,
+        ]);
+        assert_eq!(lines.len(), 2);
+        assert_eq!(lines[0].len(), PIPED_LINE_MAX, "exactly the cap passes");
+        assert_eq!(lines[1], "ok");
+        assert_eq!(
+            bad, 3,
+            "the overlong line, the invalid one, the overlong tail at EOF"
+        );
+    }
+
+    #[test]
+    fn a_full_queue_drops_the_oldest_and_keeps_the_first_line() {
+        let q = LineQueue::new(3);
+        for i in 0..5 {
+            q.push(i.to_string());
+        }
+        let st = q.lock();
+        assert_eq!(
+            st.lines.iter().cloned().collect::<Vec<_>>(),
+            ["2", "3", "4"]
+        );
+        assert_eq!(st.dropped_overflow, 2);
+        assert_eq!(st.first.as_deref(), Some("0"));
+    }
+
+    #[tokio::test]
+    async fn a_cancelled_partial_write_closes_the_stdin() {
+        // a child that never reads its stdin: the pipe fills at 64 KiB
+        let h = spawn_child(sh("exec sleep 30", &[]).with_stdio(ChildStdio::Piped));
+        assert!(until(Duration::from_secs(2), || h.pid().is_some()).await);
+        let io = h.stdio().borrow().clone().expect("piped stdio published");
+        let line = "x".repeat(PIPED_LINE_MAX);
+        let cancelled = tokio::time::timeout(Duration::from_millis(300), io.write_line(&line))
+            .await
+            .is_err();
+        assert!(cancelled, "a full pipe blocks the write until the timeout");
+        let err = io.write_line("next").await.unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::BrokenPipe);
+        h.stop_and_wait(Duration::from_secs(5)).await;
+    }
+
+    #[tokio::test]
+    async fn a_null_child_never_publishes_stdio() {
+        let h = spawn_child(sh("exec sleep 30", &[]));
+        assert!(until(Duration::from_secs(2), || h.pid().is_some()).await);
+        assert!(h.stdio().borrow().is_none());
+        assert_eq!(*h.state_watch().borrow(), ChildState::Running);
         h.stop_and_wait(Duration::from_secs(5)).await;
     }
 

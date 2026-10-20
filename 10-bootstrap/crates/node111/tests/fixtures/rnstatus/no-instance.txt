@@ -1,0 +1,1 @@
+No shared RNS instance available to get status from

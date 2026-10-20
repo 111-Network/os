@@ -28,7 +28,8 @@ the `x-sse-events` map) into `ui/src/lib/api/types.gen.ts` — never hand-edited
   state change or a new request, **coalesced per message per tick** so a 16-fragment transfer cannot
   flood the ring), `contact`, `fabric` (a full `FabricStatus` snapshot), `nearby` and `panels` (full
   snapshots). After `reset` the Layer 5 views also refetch `/fabric`, `/messages/threads`, `/contacts`,
-  `/nearby` and `/panels`.
+  `/nearby` and `/panels`. Layer 6 adds `network_message` and `bridge` (below); after `reset` its views also refetch
+  `/networks`, `/bridge/edges` and `/transport`.
 - **Layer 5 additions (Messaging & Data; `os/50-messaging/README.md` §15, D20) — additive under `/api/v1`:**
   - *Routes:* `GET /messages/threads`, `GET /messages/threads/{peer}`, `POST /messages`, `POST /messages/{id}/retry`,
     `GET|POST /contacts`, `GET|PATCH|DELETE /contacts/{id}`, `GET /contacts/me/card`, `GET /fabric`,
@@ -58,6 +59,87 @@ the `x-sse-events` map) into `ui/src/lib/api/types.gen.ts` — never hand-edited
     `DeviceRecord.actions` has `identify` (now live for Meshtastic-capable boards); `reason_code` sets grow as above;
     `Problem.code` + `port_busy`, `panel_ticket_expired`.
   - *No key material:* `Card` and `HubOffer` carry the public announce and a one-time enrollment code only.
+- **Layer 6 additions (Transport & Bridge; `os/60-transport/README.md` §10, D27) — additive under `/api/v1`:**
+  - *Routes:* `GET /networks`; `GET|POST /networks/{net}/conversations` (POST opens a foreign DM, `{kind: dm, native_id}`);
+    `GET /networks/{net}/conversations/{conv}` (`?limit&since_seq`); `POST /networks/{net}/conversations/{conv}/messages`
+    (`{text, size_mode?}` → 202 `{id, plan}`); `POST /messages/fanout/preview`, `POST /messages/fanout` (→ `{group_id, items}`);
+    `GET|POST /bridge/edges`, `GET|PATCH|DELETE /bridge/edges/{id}`; `GET|PATCH /bridge/settings`; `GET /bridge/components`,
+    `POST /bridge/components/{id}/enable|disable|remove-files`; `GET /transport`, `PATCH /transport/posture`,
+    `POST /transport/join`. `{net}` is a network id (`meshtastic`, `lxmf`, `app:deltachat`, `app:simplex`; the colon is
+    percent-encoded), `{conv}` an `fc-…` id. Lists use the `{schema, <plural>}` envelope; single resources are bare.
+  - *Ids and order:* `fc-…` conversations, `fm-…` foreign messages (one per stored row; a split send is one row per part),
+    `be-…` edges, `sg-…` send groups, all minted by `111d`; bodies and proposals name a conversation by `fc-` id, never by
+    native id or name. `msg-…` stays 111-only. Foreign rows are ordered by `ForeignMessage.seq` (the store-wide receipt
+    sequence); `at` and `claim_ts` are display only. A foreign conversation is never a 111 thread and a foreign address
+    never a contact. Foreign strings (`title`, `sender.name`, `text`, `Network.account`, interface names) are untrusted:
+    text-only rendering.
+  - *States:* `ForeignMessage.state` is the closed enum `queued|sent|relayed|delivered|failed` (§4); Layer 5's
+    `MessageState` stays at four and is not used for foreign rows. Monotone; `failed` only for a refusal before air and
+    terminal unless a later `delivered` arrives; `dir: in` rows are `delivered`. `reason_code` (vocabulary
+    `ForeignReasonCode`) grows by: `region_unset, no_channel, too_large, not_authorized, pki_failed, got_nak, adapter_down,
+    no_route, timeout, max_retransmit, no_response, duty_cycle, rate_limited, key_unknown, peer_unannounced, uplink_off,
+    ham_unconfirmed, consent_paused, cancelled, oversize`; the field stays a plain string so growth is additive, and unknown
+    values render as `unknown`. `Network.state` is `live|not_set|error|disabled`; `Component.state` is
+    `declared|cached|installed|running|disabled`.
+  - *Writes and the 401 rule:* the agent's bearer is refused with `401 unauthenticated` on **every non-GET** (one global gate
+    in `require_session`, no allowlist; this includes `POST /services/{id}/restart` and `POST /devices/{id}/identify`, which
+    never called the per-route refusal). The bearer reads every GET, so a route that returns a credential is a POST
+    (`/transport/join`, which also answers `no-store`). The agent acts only through proposals (`kind: bridge_message`,
+    `bridge_edge`, `device`); a human decides them on a paired or loopback session.
+  - *Consent round-trip (`409 consent_required`):* edge enable and resume, component enable, HAM confirmation and the
+    uplinked-channel send switch are never a bare write. The first call (without the hash) answers `409` with code
+    `consent_required` and the extension member `consent` = `{action, subject, warning_text, hash, addons}`; the client shows
+    `warning_text` verbatim and repeats the call with the hash (`accept_warning`; `accept_notice_hash` on component enable;
+    `accept_warning` on `POST /proposals/{id}/decision`). The hash is the lowercase hex SHA-256 of the exact UTF-8 bytes of
+    `warning_text`. The text is read live: a fact that changed (uplink, licensed mode, channel key) produces a new text and
+    hash, so a stale echo is refused again, and a `consent_paused` edge resumes only with the new hash.
+  - *Fan-out:* validation is atomic. A target refused for `oversize` (refuse mode) or a consent gate answers `409` (code
+    `oversize`, or `consent_required` when a gate is involved) with the extension member `targets` =
+    `[{target, code, detail, consent}]` for every refused target, and nothing is queued. Adapter state (region unset, board
+    away, queue full, no path) is never a call error: the row queues with its `reason_code`. `size_mode` is `refuse`
+    (default) or `split`, per target. `SendPlan` is the per-target preview (`bytes`, `cap`, `parts`, `airtime_estimate`,
+    `refusal`, `warnings`); airtime is always an estimate.
+  - *SSE:* `network_message` `{network, conv, id?, change: new|state|conversation, seq}` carries no text (refetch the
+    conversation). It is coalesced per message per tick for DMs and own rows and **per conversation per tick** (the
+    conversation plus its highest `seq`, no `id`) for unpinned channel traffic, so a flood cannot fill the 256-entry ring.
+    `bridge` `{networks?, edges?}` carries full snapshots of whichever part changed. A foreign DM raises the unread count
+    only, never the header badge.
+  - *Problem codes:* `consent_required` (409), `oversize` (409), `component_unavailable` (409: the optional component is not
+    enabled, its payload is missing from the cache or fails its pin, or `[requires]` is unmet; nothing is installed),
+    `unsupported_action` (a `device` proposal action outside the four applied and two one-shot actions). `not_supervised`
+    already exists (Layer 4/5) and is what `service.restart` on an unsupervised child answers.
+  - *Enum growth (all additive; unknown values render as `unknown`):* `Proposal.kind` + `bridge_message`, `bridge_edge`,
+    `device`; `NearbySource.kind` + `reticulum`; `Problem.code` as above; new schemas `ForeignMessageState`, `ForeignAuth`
+    (`none|channel-key|pki|signed|attested-111`), `ForeignConvKind`, `NetworkState`, `ComponentState`. `ServiceId` does not
+    grow; `DeviceRecord` is unchanged.
+  - *Proposal bodies:* `bridge_message` = `to: <fc-id>` lines, a blank line, the text verbatim; `bridge_edge` = a `from: <fc-id>`
+    line and a `to: <fc-id>` line, then the reason. **The text part of a `bridge_message` or `bridge_edge` body is foreign
+    text and is rendered as a preformatted text block, never as Markdown** (the agent view otherwise renders proposal bodies
+    as Markdown with external links). `device` = one JSON object `{"why": string, "actions": [Action]}`; an Action is
+    `{"action": name, …args}` from `rns.interface.upsert {device_id, type, params}`, `rns.interface.remove {name}`,
+    `rns.posture.set {share_instance, enable_transport}`, `radio.region.set {region}`, plus the one-shots
+    `identify {device_id}` and `service.restart {service_id}`; the rest of the vocabulary (`meshtastic.set`, `ble.pair`,
+    `ble.forget`, `firmware.flash`) is refused `unsupported_action`.
+  - *Optional components (§2.1):* `GET /networks` and `GET /bridge/components` list a disabled component with its cached and
+    installed size and licence notice; enabling needs the recorded acknowledgement and installs from the install-time cache
+    (nothing downloads at runtime). A disabled component has no process, listener or timer.
+  - *Pin list (each enum or tool-count bump touches these; the change is not done until all are green):*
+    1. `Proposal.kind` 5 → 8: `KINDS` in `10-bootstrap/crates/node111/src/daemon/dashboard/api_v1/proposals.rs:65` (`[&str; 5]` → 8; the daemon's validation
+       of what the agent wrote; an unlisted kind is `502 upstream_error`), the UI's proposal-kind handling
+       (`ui/src/views/agent`, preformatted rendering for the two bridge kinds), and the agent's proposal writer.
+    2. Agent tool count 10 → 17: `30-intelligence/crates/agent111/tests/daemon_tools.rs` and `tests/chat_loop.rs` (`names.len()`
+       at `:306` and the request's `tools` length at `:308`, plus the `DAEMON_TOOLS` list), plus `src/tools.rs` schemas and dispatch.
+    3. `pnpm gen:types` (regenerates `types.gen.ts`, `sse.gen.ts` and `test/contract.gen.ts` in one step), then
+       `node scripts/gen-sse.mjs --check` (fails when any generated file is stale). New enum tuples and aliases are listed in
+       `scripts/gen-sse.mjs` (`ALIASES`, `ENUMS`).
+    4. The UI store's SSE `switch (frame.event)` in `ui/src/lib/api/store.ts` (no `default`: an unknown event is ignored, so the
+       two new events are handled there when Layer 6's UI lands; `EventsFrame` already includes them).
+    5. The contract tests: `test/gen.test.ts` (event names and enum mirrors), `test/http.test.ts` (every operation has an
+       adapter call; the `LAYER6_PENDING` list is emptied as the adapter methods land), `test/layer6-contract.test.ts`
+       (closed enums, enum growth, fixtures), and the mock adapters, whose frames validate against `x-sse-events`.
+    6. `10-bootstrap/crates/node111/src/daemon/dashboard/api_v1/` gains the routes and the global bearer gate; its `NearbySource` kinds
+       and `Problem` codes mirror the enums above; `ForeignMessageState` is a new Rust enum separate from Layer 5's
+       `MessageState`.
 - **Not gated:** `/`, static assets, `/health` (body is booleans) and `/api/v1/auth/*`. Everything
   else — including the Layer 1 seam `/api/status` and the `/v1` legacy page — needs loopback or a
   session.
@@ -68,4 +150,4 @@ the `x-sse-events` map) into `ui/src/lib/api/types.gen.ts` — never hand-edited
 - **Identity:** no key material on any route, ever (Layer 2 rule). `node.label`/`bech32` are
   display forms computed from the public id.
 - **Timestamps:** RFC 3339 UTC. **IDs:** `conv-…` minted by the client (`[A-Za-z0-9_-]{1,128}`);
-  `prop-…`/`task-…` minted by `111-agent`; `msg-…` minted by `111d` (Layer 5).
+  `prop-…`/`task-…` minted by `111-agent`; `msg-…` minted by `111d` (Layer 5); `fc-…`/`fm-…`/`be-…`/`sg-…` minted by `111d` (Layer 6).

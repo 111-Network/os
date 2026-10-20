@@ -7,7 +7,16 @@
 //! answers those two paths on the guarded panel origin and **reframes** the
 //! bodies onto meshmud's TCP downlink, which carries the same protobuf bytes
 //! behind the 4-byte stream header `0x94 0xC3 <len hi> <len lo>`. No protobuf
-//! is ever decoded here (and no GPL code enters this binary).
+//! is ever decoded here. (Layer 6 §5/§18 restates L5's "no GPL code enters this
+//! binary": the bridge client links the `meshtastic` crate's generated types,
+//! D22 / D25 F2; this shim still decodes nothing.)
+//!
+//! - **`ToRadio.disconnect` is dropped** (Layer 6 §5, R01 §3.19): a body whose
+//!   first tag byte is `0x20` (field 4, varint) answers `200` and goes nowhere —
+//!   no downlink is opened, nothing is decoded — and is counted
+//!   ([`MeshtasticShim::disconnects_dropped`]). A raw disconnect would close the
+//!   board's API session for every client on meshmud; the web client's own
+//!   `disconnect()` never sends one.
 //!
 //! - **Per panel session one TCP connection** to the downlink, opened on the
 //!   session's first `toradio`/`fromradio` call, closed when the panel listener
@@ -53,6 +62,14 @@ pub const START2: u8 = 0xC3;
 pub const MAX_FRAME: usize = 512;
 /// The protobuf media type the node HTTP API uses.
 pub const PROTOBUF: &str = "application/x-protobuf";
+/// First tag byte of `ToRadio.disconnect` (field 4, wire type 0).
+pub const TAG_DISCONNECT: u8 = 0x20;
+
+/// `PUT /toradio` bodies discarded without decoding: one tag byte, `0x20`
+/// (Layer 6 §5 "The shim drops `ToRadio.disconnect`").
+pub fn is_disconnect(body: &[u8]) -> bool {
+    body.first() == Some(&TAG_DISCONNECT)
+}
 
 /// Frame one payload: `0x94 0xC3 len_hi len_lo ‖ payload`.
 pub fn frame(payload: &[u8]) -> Result<Vec<u8>, ShimError> {
@@ -259,6 +276,7 @@ struct Inner {
     cfg: ShimConfig,
     sessions: Mutex<Sessions>,
     dropped: AtomicU64,
+    disconnects: AtomicU64,
 }
 
 impl Inner {
@@ -323,6 +341,7 @@ impl MeshtasticShim {
                 cfg,
                 sessions: Mutex::new(Sessions::default()),
                 dropped: AtomicU64::new(0),
+                disconnects: AtomicU64::new(0),
             }),
         }
     }
@@ -339,6 +358,11 @@ impl MeshtasticShim {
     /// (`PanelState.dropped`).
     pub fn dropped(&self) -> u64 {
         self.inner.dropped.load(Ordering::Relaxed)
+    }
+
+    /// `ToRadio.disconnect` bodies discarded since start (Layer 6 §5).
+    pub fn disconnects_dropped(&self) -> u64 {
+        self.inner.disconnects.load(Ordering::Relaxed)
     }
 
     /// Sessions holding a downlink connection now.
@@ -429,6 +453,11 @@ impl MeshtasticShim {
     }
 
     async fn toradio(&self, key: &str, body: &[u8]) -> Result<ShimResponse, ShimError> {
+        if is_disconnect(body) {
+            // discarded with 200 before any downlink is touched (Layer 6 §5)
+            self.inner.disconnects.fetch_add(1, Ordering::Relaxed);
+            return Ok(ShimResponse::empty(StatusCode::OK));
+        }
         let framed = frame(body)?;
         let s = self.session(key).await?;
         s.touch();
@@ -619,6 +648,7 @@ mod tests {
             cfg: ShimConfig::production("127.0.0.1:11230".parse().unwrap()),
             sessions: Mutex::new(Sessions::default()),
             dropped: AtomicU64::new(0),
+            disconnects: AtomicU64::new(0),
         };
         inner.map().opening = 2;
         // dropped unreleased (connect failed, request cancelled)
@@ -638,6 +668,27 @@ mod tests {
             assert_eq!(map.opening, 0);
         }
         assert_eq!(inner.map().opening, 0);
+    }
+
+    #[test]
+    fn only_the_disconnect_tag_byte_is_dropped() {
+        assert!(is_disconnect(&[0x20, 0x01]));
+        assert!(is_disconnect(&[0x20]));
+        // packet (0x0a), want_config_id (0x18), heartbeat (0x3a): forwarded
+        assert!(!is_disconnect(&[0x0a, 0x00]));
+        assert!(!is_disconnect(&[0x18, 0x05]));
+        assert!(!is_disconnect(&[0x3a, 0x00]));
+        assert!(!is_disconnect(&[]));
+    }
+
+    #[tokio::test]
+    async fn a_disconnect_opens_no_downlink() {
+        // the downlink address answers nothing: a dropped disconnect never connects
+        let shim = MeshtasticShim::new(ShimConfig::production("127.0.0.1:9".parse().unwrap()));
+        let r = shim.toradio("s1", &[0x20, 0x01]).await.unwrap();
+        assert_eq!(r.status, StatusCode::OK);
+        assert_eq!(shim.disconnects_dropped(), 1);
+        assert_eq!(shim.sessions(), 0);
     }
 
     #[test]

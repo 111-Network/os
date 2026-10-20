@@ -32,7 +32,7 @@ this list is in `LICENSING.md`.
 Inputs at generation time (SHA-256):
 
 ```
-dd22efdd5cd346caf22d784fcce48d3840dc157439e3ee1c040695116c2c1702  10-bootstrap/Cargo.lock
+b896ea7a174b39896299bf844bb2369ce38bf3ade7c294b74f79b0d9f661eb6e  10-bootstrap/Cargo.lock
 9f779bdf23242c905a0106412a0cc6aa7b1b90ad985547d18674f6639e0b1d47  30-intelligence/Cargo.lock
 08c2709c1e59a5a9274d4ac88ff32ccfaa019b3e0042ea50c7f609e35d4fb225  40-interface/ui/pnpm-lock.yaml
 cf48326b784772c17f4528dc6739cf2678503e094f1b3aff09e4cbf91530eaaa  10-bootstrap/scripts/meshmud-build.sh#pins
@@ -52,7 +52,7 @@ The output is sorted and contains no timestamps, so identical inputs give identi
 
 | Group | Components |
 |---|---|
-| Rust crates | 223 |
+| Rust crates | 232 |
 | JavaScript packages | 7 |
 | Go modules (meshmud closure, CI-built binary) | 14 + meshmud + the Go standard library |
 | Python packages (presence venv) | 16 |
@@ -63,7 +63,7 @@ The output is sorted and contains no timestamps, so identical inputs give identi
 
 ## Rust crates
 
-223 crates, grouped by the license expression in their `Cargo.toml`. The last field says which binary links the crate:
+232 crates, grouped by the license expression in their `Cargo.toml`. The last field says which binary links the crate:
 `111`, `111-agent` or `both`.
 
 
@@ -75,11 +75,13 @@ The output is sorted and contains no timestamps, so identical inputs give identi
 
 - `adler2` 2.0.1 — https://github.com/oyvindln/adler2 — Copyright (C) Jonas Schievink — 111
 
-### Apache-2.0 (4)
+### Apache-2.0 (6)
 
 - `ciborium` 0.2.2 — https://github.com/enarx/ciborium — authors: Nathaniel McCallum — 111
 - `ciborium-io` 0.2.2 — https://github.com/enarx/ciborium — authors: Nathaniel McCallum — 111
 - `ciborium-ll` 0.2.2 — https://github.com/enarx/ciborium — authors: Nathaniel McCallum — 111
+- `prost` 0.14.4 — https://github.com/tokio-rs/prost — authors: Dan Burkert, Lucio Franco, Casper Meijn ... — 111
+- `prost-derive` 0.14.4 — https://github.com/tokio-rs/prost — authors: Dan Burkert, Lucio Franco, Casper Meijn ... — 111
 - `sync_wrapper` 1.0.2 — https://github.com/Actyx/sync_wrapper — authors: Actyx AG — both
 
 ### Apache-2.0 AND ISC (1)
@@ -118,7 +120,7 @@ The output is sorted and contains no timestamps, so identical inputs give identi
 
 - `rustls` 0.23.45 — https://github.com/rustls/rustls — Copyright (c) 2016, Joseph Birr-Pixton; Copyright (c) 2016 Joseph Birr-Pixton — 111
 
-### Apache-2.0 OR MIT (139)
+### Apache-2.0 OR MIT (145)
 
 - `aead` 0.6.1 — https://github.com/RustCrypto/traits — Copyright (c) 2019-2026 The RustCrypto Project Developers; Copyright (c) 2019 MobileCoin, LLC — 111
 - `anyhow` 1.0.104 — https://github.com/dtolnay/anyhow — authors: David Tolnay — both
@@ -174,6 +176,7 @@ The output is sorted and contains no timestamps, so identical inputs give identi
 - `genawaiter-macro` 0.99.1 — https://github.com/whatisaphone/genawaiter — authors: Devin R — 111
 - `genawaiter-proc-macro` 0.99.1 — https://github.com/whatisaphone/genawaiter — authors: Devin R — 111
 - `getrandom` 0.2.17 — https://github.com/rust-random/getrandom — Copyright (c) 2018-2024 The rust-random Project Developers; Copyright (c) 2014 The Rust Project Developers — 111
+- `getrandom` 0.3.4 — https://github.com/rust-random/getrandom — Copyright (c) 2018-2025 The rust-random Project Developers; Copyright (c) 2014 The Rust Project Developers — 111
 - `getrandom` 0.4.3 — https://github.com/rust-random/getrandom — Copyright (c) 2018-2026 The rust-random Project Developers; Copyright (c) 2014 The Rust Project Developers — 111
 - `half` 2.7.1 — https://github.com/VoidStarKat/half-rs — authors: Kathryn Long — 111
 - `hashbrown` 0.17.1 — https://github.com/rust-lang/hashbrown — Copyright (c) 2016 Amanieu d'Antras — 111
@@ -187,6 +190,7 @@ The output is sorted and contains no timestamps, so identical inputs give identi
 - `inout` 0.2.2 — https://github.com/RustCrypto/utils — Copyright (c) 2022-2025 The RustCrypto Project Developers; Copyright (c) 2022 Artyom Pavlov — 111
 - `inplace-vec-builder` 0.1.1 — https://github.com/rklaehn/inplace-vec-builder — authors: Rüdiger Klaehn — 111
 - `iroh-io` 0.6.2 — https://github.com/n0-computer/iroh — Copyright (c) 2023 — 111
+- `itertools` 0.14.0 — https://github.com/rust-itertools/itertools — Copyright (c) 2015 — 111
 - `itoa` 1.0.18 — https://github.com/dtolnay/itoa — authors: David Tolnay — both
 - `libc` 0.2.190 — https://github.com/rust-lang/libc — Copyright (c) The Rust Project Developers — both
 - `lock_api` 0.4.14 — https://github.com/Amanieu/parking_lot — Copyright (c) 2016 The Rust Project Developers — 111
@@ -205,13 +209,17 @@ The output is sorted and contains no timestamps, so identical inputs give identi
 - `pin-project-lite` 0.2.17 — https://github.com/taiki-e/pin-project-lite — no copyright line in package; see repository — both
 - `poly1305` 0.9.1 — https://github.com/RustCrypto/universal-hashes — Copyright (c) 2015-2026 The RustCrypto Project Developers — 111
 - `powerfmt` 0.2.1 — https://github.com/jhpratt/powerfmt — Copyright 2023 Jacob Pratt et al; Copyright (c) 2023 Jacob Pratt et al — both
+- `ppv-lite86` 0.2.21 — https://github.com/cryptocorrosion/cryptocorrosion — Copyright 2019 The CryptoCorrosion Contributors; Copyright (c) 2019 The CryptoCorrosion Contributors — 111
 - `proc-macro-error` 0.4.12 — https://gitlab.com/CreepySkeleton/proc-macro-error — Copyright 2019 CreepySkeleton; Copyright (c) 2019 CreepySkeleton — 111
 - `proc-macro-error-attr` 0.4.12 — https://gitlab.com/CreepySkeleton/proc-macro-error — Copyright 2019-2020 CreepySkeleton; Copyright (c) 2019-2020 CreepySkeleton — 111
 - `proc-macro-hack` 0.5.20+deprecated — https://github.com/dtolnay/proc-macro-hack — Copyright (c) 2018 David Tolnay — 111
 - `proc-macro2` 1.0.107 — https://github.com/dtolnay/proc-macro2 — authors: David Tolnay, Alex Crichton — both
 - `qrcode` 0.14.1 — https://github.com/kennytm/qrcode-rust — Copyright (c) 2016 kennytm — 111
 - `quote` 1.0.47 — https://github.com/dtolnay/quote — authors: David Tolnay — both
+- `rand` 0.9.5 — https://github.com/rust-random/rand — Copyrights in the Rand project are retained by their contributors. No; Copyright 2018 Developers of the Rand project; Copyright (c) 2014 The Rust Project Developers — 111
+- `rand_chacha` 0.9.0 — https://github.com/rust-random/rand — Copyrights in the Rand project are retained by their contributors. No; Copyright 2018 Developers of the Rand project; Copyright (c) 2014 The Rust Project Developers — 111
 - `rand_core` 0.6.4 — https://github.com/rust-random/rand — Copyrights in the Rand project are retained by their contributors. No; Copyright 2018 Developers of the Rand project; Copyright (c) 2014 The Rust Project Developers — 111
+- `rand_core` 0.9.5 — https://github.com/rust-random/rand — Copyrights in the Rand project are retained by their contributors. No; Copyright 2018 Developers of the Rand project; Copyright (c) 2014 The Rust Project Developers — 111
 - `range-collections` 0.4.6 — https://github.com/rklaehn/range-collections — Copyright (c) 2019 Rüdiger Klaehn — 111
 - `rayon` 1.12.0 — https://github.com/rayon-rs/rayon — Copyright (c) 2010 The Rust Project Developers — 111
 - `rayon-core` 1.13.0 — https://github.com/rayon-rs/rayon — Copyright (c) 2010 The Rust Project Developers — 111
@@ -285,6 +293,10 @@ The output is sorted and contains no timestamps, so identical inputs give identi
 ### CDLA-Permissive-2.0 (1)
 
 - `webpki-roots` 1.0.9 — https://github.com/rustls/webpki-roots — no copyright line in package; see repository — 111
+
+### GPL-3.0 (1)
+
+- `meshtastic` 0.1.9 — https://github.com/meshtastic/rust — Copyright (C) 2007 Free Software Foundation, Inc. <https://fsf.org/> — 111
 
 ### ISC (2)
 

@@ -108,12 +108,29 @@ pub fn run_with(
         }
     };
 
-    // 5. packages + caches (receipt accumulates hashes + degrade branches)
+    // 5. packages + caches (receipt accumulates hashes, notices + degrade branches)
     let mut receipt = Receipt::new(&pre.manifest.release().to_string());
     let family = packages::Family::of(&pre.distro);
     packages::run(ctx, family, &mut receipt)?;
     let lockfile = stage::fetch_rns_lock(ctx, fetcher, &pre.manifest)?;
+    // Layer 6 §2.1 rule 3, D26 #5: one notice line per third-party program,
+    // printed and recorded in the receipt before its download
+    packages::announce(
+        &packages::rns_notice(),
+        &mut receipt,
+        &mut std::io::stderr(),
+    );
     packages::pip_closure(ctx, &lockfile, &mut receipt)?;
+    // optional components declared in this binary (assets/components/):
+    // notices, then their payloads into cache/packages/<id>/ (never fatal;
+    // nothing is installed until a human enables one)
+    packages::cache_components(
+        ctx,
+        &crate::daemon::components::manifest::load_embedded(),
+        fetcher,
+        &mut receipt,
+        &mut std::io::stderr(),
+    );
 
     // 6. stage (payload → releases/, flip current, initial floor, symlink,
     //    presence venv — never fatal; a venv it could not build is a degrade

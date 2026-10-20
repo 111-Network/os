@@ -7,7 +7,7 @@ tags: [lora, mesh, messaging]
 platforms: [linux, macos, windows]
 upstream: https://github.com/meshtastic/python
 license: GPL-3.0-only
-last_verified: 2026-10-14
+last_verified: 2026-10-19
 sources:
   - https://github.com/meshtastic/python
   - https://python.meshtastic.org/mesh_interface.html
@@ -33,7 +33,8 @@ that feeds the Nearby list, run in its own source directory and hash-locked virt
 
 ## Do NOT use when
 
-- Its generated classes or protobufs would be imported into the Rust binary.
+- A client inside the Rust daemon is wanted: after D22 in-binary protobufs are no longer a blocker, and the
+  in-process client is [[meshtastic-rust]].
 - The reader must send anything: the presence reader has no send path by design.
 - A guaranteed maintainer is required: the README says it lacks a consistent one.
 
@@ -57,9 +58,12 @@ GPL boundary: separate process, own source directory, source offer naming the pi
 
 - [[meshmonitor]] REST API — richer fields and MeshCore coverage, but a 189 MB Node image that sends
   extra requests to the node by default.
-- A Rust adapter on prost-generated protobufs — would make our binary GPL-derived.
+- A Rust adapter on prost-generated protobufs — after D22 no longer a blocker; the binary then ships as GPL-3.0-only,
+  and the reader retires after a parity gate ([[meshtastic-rust]]).
 - No presence at all — rejected: the Nearby list is a stated goal.
 - 2026-10-14 — license read from upstream `pyproject.toml`; no field run of the reader yet.
+- 2026-10-19 — Layer 6 retires the reader after the parity gate; the pin stays at 2.7.11 until a 2.8-capable release
+  exists.
 
 ## Links
 

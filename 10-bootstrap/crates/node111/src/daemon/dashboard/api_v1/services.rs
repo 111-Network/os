@@ -22,7 +22,10 @@
 //!   several children restarts them one after another in registration order
 //!   (Layer 5 §14: meshmud, then the presence reader). Anything else →
 //!   `409 not_supervised`. Same gate as every write (loopback or session,
-//!   CSRF).
+//!   CSRF); since Layer 6 the global write gate refuses the agent's bearer
+//!   here too (`auth::require_session`, §13: the agent proposes
+//!   `service.restart`, a `kind: device` proposal, and the human's accept
+//!   runs [`restart_service`]).
 
 use super::{ApiRouter, ApiState, Problem};
 use crate::daemon::intelligence;
@@ -50,7 +53,7 @@ pub fn router() -> ApiRouter {
         .route("/api/v1/services/{id}/restart", post(restart))
 }
 
-fn not_supervised(id: ServiceId) -> Response {
+fn not_supervised(id: ServiceId) -> Problem {
     let detail = match id {
         ServiceId::Agent | ServiceId::Model => {
             "It is not installed on this node, so there is nothing to restart.".to_string()
@@ -73,24 +76,42 @@ fn not_supervised(id: ServiceId) -> Response {
         "This service is not run by the node itself.",
     )
     .detail(detail)
-    .into_response()
 }
 
 async fn restart(State(api): State<Arc<ApiState>>, Path(id): Path<String>) -> Response {
     let Some(sid) = ServiceId::parse(&id) else {
         return unknown(&id);
     };
+    match restart_service(&api, sid) {
+        Ok(v) => (StatusCode::ACCEPTED, Json(v)).into_response(),
+        Err(p) => p.into_response(),
+    }
+}
+
+/// The children 111d supervises for `sid` now, or `409 not_supervised` (the primary
+/// child decides: stopped for good, at shutdown, is not supervised). Starts nothing.
+pub fn supervised_children(
+    api: &ApiState,
+    sid: ServiceId,
+) -> Result<Vec<crate::daemon::supervise::ChildControl>, Problem> {
     let children = api
         .ext::<Arc<Supervised>>()
         .map(|s| s.children(sid).to_vec())
         .unwrap_or_default();
-    // the primary child decides: stopped for good (shutdown) ⇒ not supervised
     if children
         .first()
         .is_none_or(|c| c.state() == ChildState::Stopped)
     {
-        return not_supervised(sid);
+        return Err(not_supervised(sid));
     }
+    Ok(children)
+}
+
+/// Restart the children 111d supervises for `sid` in the background (module
+/// doc) and answer `{schema, id, restarting}`, or `409 not_supervised`. The
+/// route and an accepted `service.restart` proposal (Layer 6 §12) share it.
+pub fn restart_service(api: &ApiState, sid: ServiceId) -> Result<serde_json::Value, Problem> {
+    let children = supervised_children(api, sid)?;
     let names: Vec<_> = children.iter().map(|c| c.name().to_string()).collect();
     eprintln!(
         "111 daemon: restart of {} ({}) requested from the dashboard",
@@ -104,11 +125,7 @@ async fn restart(State(api): State<Arc<ApiState>>, Path(id): Path<String>) -> Re
             }
         }
     });
-    (
-        StatusCode::ACCEPTED,
-        Json(serde_json::json!({"schema": 1, "id": sid.as_str(), "restarting": true})),
-    )
-        .into_response()
+    Ok(serde_json::json!({"schema": 1, "id": sid.as_str(), "restarting": true}))
 }
 
 fn registry_down() -> Response {

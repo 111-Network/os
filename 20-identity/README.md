@@ -371,6 +371,20 @@ identity per foreign network, bound to the node by the §10 bidirectional attest
 fit the 32 B `transport_key` field, so it is bound by hash. The `transport_id` values and the hash are assigned when a bridge
 lands (Layer 6/7; there is no bridge this cycle). Link keys for online links (§6.6) are random, bound by attestation, **never
 seed-derived** (F2 stays rejected) and never the identity key (§6.1). No Reticulum code is imported (D17 #12).
+*A10 assigned by Layer 6 (D26 #3, 2026-10-19; `os/60-transport/README.md` §14, task S3).* Additive: the §10 wire, both signed
+inputs and the frozen top-level vectors are unchanged.
+
+| `transport_id` | `transport_key` | `transport_sig` | Binding |
+|---|---|---|---|
+| `0x02` meshtastic | the board's X25519 public key (32 B; the node number comes from NodeInfo, never carried) | **64 zero bytes** on 2.7.x boards (they cannot sign); a 2.8 XEdDSA signature over the same input may fill it later — no verifier for it exists in v1, so a non-zero value is rejected | `node_sig` only: **one-sided**, never `attested-111` (anyone can name a victim's board key) |
+| `0x03` reticulum | `SHA-256(pubkey64)`, `pubkey64` = X25519(32) ‖ Ed25519(32) as the helper reports it (carried, never derived) | Ed25519 by the identity's signing key (`pubkey64[32..64]`) over `"111/attest-transport/v1" ‖ node_pubkey`, strict predicate (§3) | both signatures |
+
+`id111` carries the bytes (`TransportId::Meshtastic` / `::Reticulum`), the pure helper `attest::reticulum_transport_key` and
+`MESHTASTIC_UNSIGNED`; it grows no verifier for them. The `TransportVerifier` implementor is `node111`'s `BridgeVerifier`
+(`10-bootstrap/crates/node111/src/daemon/bridge/attest.rs`). Vectors: `test-vectors/layer6/attest-transport-ids.json`
+(`tests/layer6_attest.rs`). The frozen `attestation.json` negative "unknown transport_id 0x02" keeps its bytes and its
+`err:tid:2` token for the Cat-1 harness (a core without A10 refuses the id); `id111` now rejects that record at the node leg
+instead (`conformance.rs` maps the token; still a rejection). `0x00` and `0x04`–`0xff` stay unassigned and fail closed.
 
 **A11 — replay authority for `msg_seq` kinds (§6.5).** Under store-and-forward a custody item can arrive hundreds of counters behind
 a direct-path packet, so for kinds carrying `msg_seq` the 32-entry window is **not enforced below high-water**; replay protection is

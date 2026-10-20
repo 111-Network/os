@@ -1,0 +1,24 @@
+
+ Shared Instance[rns/111]
+    Status    : Up
+    Serving   : 0 programs
+    Rate      : 1.00 Gbps
+    Traffic   : ↑0 B  0 bps
+                ↓0 B  0 bps
+
+ AutoInterface[Auto Interface]
+    Status    : Up
+    Mode      : Full
+    Rate      : 10.00 Mbps
+    Peers     : 0 reachable
+    Traffic   : ↑144 B  0 bps
+                ↓0 B    0 bps
+
+ TCPInterface[111 hub 10.0.0.1/10.0.0.1:4242]
+    Network   : 111-lan
+    Status    : Up
+    Mode      : Full
+    Rate      : 10.00 Mbps
+    Traffic   : ↑2.05 KB  0 bps
+                ↓4.11 KB  12 bps
+

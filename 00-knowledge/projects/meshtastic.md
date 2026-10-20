@@ -7,7 +7,7 @@ tags: [mesh, lora]
 platforms: [esp32, nrf52, rp2040, linux]
 upstream: https://github.com/meshtastic/firmware
 license: GPL-3.0-only
-last_verified: 2026-10-14
+last_verified: 2026-10-19
 sources:
   - https://meshtastic.org/docs
   - https://github.com/meshtastic/firmware
@@ -17,7 +17,7 @@ sources:
 relations:
   runs_on: ["[[heltec-wifi-lora-32-v3]]"]
   alternative_to: ["[[reticulum]]"]
-  required_by: ["[[install-meshtastic-on-heltec-wifi-lora-32-v3]]", "[[meshmud]]", "[[meshtastic-web]]", "[[meshtastic-python]]"]
+  required_by: ["[[install-meshtastic-on-heltec-wifi-lora-32-v3]]", "[[meshmud]]", "[[meshtastic-web]]", "[[meshtastic-python]]", "[[meshtastic-rust]]", "[[meshtasticator]]"]
 ---
 
 LoRa mesh firmware using managed flooding; flooding scales poorly on busy channels.
@@ -90,6 +90,9 @@ Layer 5 carriage facts (research reports 01, 02, 06; as of 2026-10-14):
 - Desk research sweep of 2026-10-12; no first-party smoke test yet.
 - 2026-10-14 — Layer 5 research pass added the carriage facts above from the client API, encryption, and
   `config.proto` documents; no hardware test.
+- 2026-10-19 — Layer 6 research: stable firmware is 2.7.26 (2026-06-24); 2.8.1 (2026-10-01) is a pre-release with
+  new node numbering, XEdDSA signing, and a new region table, so it stays a bench item.
+  The in-process client is [[meshtastic-rust]].
 
 ## Links
 

@@ -7,7 +7,7 @@ tags: [lora, mesh, panel]
 platforms: [linux]
 upstream: https://github.com/Rikonardo/meshmud
 license: MIT
-last_verified: 2026-10-14
+last_verified: 2026-10-19
 sources:
   - https://github.com/Rikonardo/meshmud
   - https://pkg.go.dev/github.com/Rikonardo/meshmud
@@ -22,7 +22,8 @@ Meshtastic API multiplexer; single maintainer, v1.0.0, hardware behavior unverif
 
 meshmud is a Go program (about 2.5k lines) that holds the single client slot of a Meshtastic node
 and fans it out: one serial or TCP uplink, many TCP downlinks, plus an HTTP downlink.
-Layer 5 adopts it so the web panel and the presence reader can both talk to one board.
+Layer 5 adopts it so the web panel and the presence reader can both talk to one board; Layer 6 adds the
+in-process client ([[meshtastic-rust]]) as one more downlink on the same port.
 License: own code MIT (upstream `LICENSE`). Binary licensing: see Details; verify at build.
 
 ## Use when
@@ -49,7 +50,8 @@ and a one-client HTTP downlink on 8000 serving `/api/v1/toradio` and `/api/v1/fr
 License note: meshmud's own code is MIT and its Go closure is 14 permissive modules. Read on 2026-10-14:
 `go.mod` lists no Meshtastic or protobuf module and `internal/common/protobuf` is a hand-written wire parser,
 so the CI-built binary is conveyed under MIT with its notices; the build's verdict step (module list plus a
-`*.pb.go` / import scan) flips it to GPL-3.0 only if a Meshtastic protobuf module ever enters the closure.
+`*.pb.go` / import scan) flips it to GPL-3.0 only if a Meshtastic protobuf module ever enters the closure (the
+shipped 111d binary is GPL-3.0-only anyway, D25 F2).
 Build is CI-only from an upstream tag and tarball sha256, never copied into the `os/` tree.
 
 Unverified: second-client config replay, a static musl or Android build, and DTR/RTS handling when the
@@ -66,6 +68,7 @@ Termux can run only the TCP-to-board uplink; USB serial there is not possible.
 - meshtastic-websocket-proxy — rejected: the web client has no WebSocket transport; license unverified.
 - A socat serial bridge (BSD-3-Clause shell script image) — no fan-out.
 - 2026-10-14 — license read from upstream; `go.mod` and source tree inspected; hardware behavior not tested.
+- 2026-10-19 — D22 removed the in-binary protobuf blocker; the Python reader retires after the parity gate.
 
 ## Links
 

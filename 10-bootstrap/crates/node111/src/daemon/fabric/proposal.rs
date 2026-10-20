@@ -20,6 +20,22 @@
 //! and the record leaves a visibly half-applied proposal, never a second
 //! send after a restart; a refused send removes the pending record (the
 //! proposal stays open).
+//!
+//! **Layer 6 kinds** (`os/60-transport/README.md` §9, §8, §12, §13; the body
+//! contracts B5 writes byte for byte, `30-intelligence/README.md` "Appendix —
+//! Layer 6 tools"). Each parser is strict and total over untrusted text: a
+//! body that does not follow its contract is a [`Refusal::Body`] (`502
+//! upstream_error`, the proposal stays open, the user may dismiss it):
+//!
+//! - `bridge_message` ([`parse_bridge_message`]): one `to: <fc-id>` line per
+//!   target (a 111 contact as `to: <64 lowercase hex>`), 1..=16, no target
+//!   twice, then a blank line, then the text **verbatim** (never trimmed),
+//!   non-empty. Conversations are named by `fc-` id, never by native id.
+//! - `bridge_edge` ([`parse_bridge_edge`]): `from: <fc-id>` and `to: <fc-id>`,
+//!   then (optionally) a blank line and the agent's reason, which is shown,
+//!   never used.
+//! - `device` bodies are the device core's (`devices::applier::ApplierRequest::
+//!   from_body`, C4): one parser for the closed vocabulary, beside its applier.
 
 use super::FabricHandle;
 use crate::daemon::dashboard::api_v1::Problem;
@@ -137,11 +153,139 @@ pub async fn send(handle: &FabricHandle, to: NodeId, text: &str) -> Result<i64, 
     })
 }
 
+// ---------------------------------------------------------------- Layer 6 bodies
+
+/// Targets a `bridge_message` names at most (B5's `targets` bound).
+pub const MAX_BRIDGE_TARGETS: usize = 16;
+/// One target of a `bridge_message` (`to:` line).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BridgeTarget {
+    /// A foreign conversation (`fc-<n>`, the row id).
+    Conv(i64),
+    /// A 111 contact (an ordinary sealed message).
+    Contact(NodeId),
+}
+
+/// Parse a `bridge_message` body: the targets in order and the verbatim text.
+pub fn parse_bridge_message(body: &str) -> Result<(Vec<BridgeTarget>, &str), Refusal> {
+    let mut targets: Vec<BridgeTarget> = Vec::new();
+    let mut rest = body;
+    loop {
+        let (line, after) = rest.split_once('\n').ok_or(Refusal::Body(
+            "the target lines are not followed by a blank line and the text",
+        ))?;
+        if line.is_empty() {
+            if targets.is_empty() {
+                return Err(Refusal::Body("the body names no target"));
+            }
+            rest = after;
+            break;
+        }
+        let v = line
+            .strip_prefix(TO_PREFIX)
+            .ok_or(Refusal::Body("a target line does not read \"to: <fc-id>\""))?;
+        let t = if let Some(id) = super::json::parse_fc_id(v) {
+            BridgeTarget::Conv(id)
+        } else if let Some(n) = super::json::parse_node_id(v) {
+            BridgeTarget::Contact(n)
+        } else {
+            return Err(Refusal::Body(
+                "a target is neither a conversation (fc-…) nor a 111 contact (64 hex)",
+            ));
+        };
+        if targets.contains(&t) {
+            return Err(Refusal::Body("a target is named twice"));
+        }
+        targets.push(t);
+        if targets.len() > MAX_BRIDGE_TARGETS {
+            return Err(Refusal::Body("more than 16 targets"));
+        }
+        rest = after;
+    }
+    if rest.is_empty() {
+        return Err(Refusal::Body("the message text is empty"));
+    }
+    Ok((targets, rest))
+}
+
+/// Parse a `bridge_edge` body: `(from, to, why)` (row ids; `why` may be empty).
+pub fn parse_bridge_edge(body: &str) -> Result<(i64, i64, &str), Refusal> {
+    let bad = Refusal::Body("the body does not read \"from: <fc-id>\" then \"to: <fc-id>\"");
+    let rest = body.strip_prefix("from: ").ok_or(bad.clone())?;
+    let (from, rest) = rest.split_once('\n').ok_or(bad.clone())?;
+    let rest = rest.strip_prefix(TO_PREFIX).ok_or(bad.clone())?;
+    let (to, why) = match rest.split_once('\n') {
+        None => (rest, ""),
+        Some((to, after)) => (
+            to,
+            after.strip_prefix('\n').ok_or(Refusal::Body(
+                "the edge lines are not followed by a blank line before the reason",
+            ))?,
+        ),
+    };
+    let from = super::json::parse_fc_id(from).ok_or(bad.clone())?;
+    let to = super::json::parse_fc_id(to).ok_or(bad)?;
+    Ok((from, to, why))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     const HEX: &str = "0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f";
+
+    #[test]
+    fn bridge_message_body_contract() {
+        let (t, text) = parse_bridge_message("to: fc-3\nto: fc-12\n\nhello\n  there ").unwrap();
+        assert_eq!(t, [BridgeTarget::Conv(3), BridgeTarget::Conv(12)]);
+        assert_eq!(text, "hello\n  there ", "verbatim, never trimmed");
+        let body = format!("to: {HEX}\nto: fc-1\n\n\n");
+        let (t, text) = parse_bridge_message(&body).unwrap();
+        assert_eq!(t[0], BridgeTarget::Contact(NodeId::from([0x0f; 32])));
+        assert_eq!(text, "\n");
+        let many: String = (1..=17).map(|i| format!("to: fc-{i}\n")).collect();
+        for bad in [
+            String::new(),
+            "\n\nx".into(),
+            "to: fc-1\n\n".into(),
+            "to: fc-1\nx".into(),
+            "to: fc-1\r\n\r\nx".into(),
+            "to:fc-1\n\nx".into(),
+            "To: fc-1\n\nx".into(),
+            "to: !a1b2c3d4\n\nx".into(),
+            "to: ch:LongFast\n\nx".into(),
+            "to: fc-0\n\nx".into(),
+            "to: fc-1\nto: fc-1\n\nx".into(),
+            format!("{many}\nx"),
+        ] {
+            assert!(parse_bridge_message(&bad).is_err(), "{bad:?}");
+        }
+        let sixteen = &many[..many.len() - "to: fc-17\n".len()];
+        assert!(parse_bridge_message(&format!("{sixteen}\nx")).is_ok());
+    }
+
+    #[test]
+    fn bridge_edge_body_contract() {
+        assert_eq!(
+            parse_bridge_edge("from: fc-1\nto: fc-2\n\nbecause").unwrap(),
+            (1, 2, "because")
+        );
+        assert_eq!(
+            parse_bridge_edge("from: fc-1\nto: fc-2").unwrap(),
+            (1, 2, "")
+        );
+        for bad in [
+            "",
+            "from: fc-1",
+            "from: fc-1\nto: fc-2\nwhy",
+            "to: fc-2\nfrom: fc-1",
+            "from: !a1\nto: fc-2",
+            "from: fc-1\nto: dm:!a1\n\nx",
+            " from: fc-1\nto: fc-2",
+        ] {
+            assert!(parse_bridge_edge(bad).is_err(), "{bad:?}");
+        }
+    }
 
     #[test]
     fn a1_body_contract() {

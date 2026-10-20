@@ -1,0 +1,6 @@
+[2026-10-19 12:02:00] Opening serial port /dev/ttyACM0...
+[2026-10-19 12:02:03] Device connected
+[2026-10-19 12:02:03] Current firmware version: 1.74
+[2026-10-19 12:02:03] Reading EEPROM...
+[2026-10-19 12:02:04] Invalid EEPROM data, could not parse device EEPROM.
+[2026-10-19 12:02:04] EEPROM is invalid, no further information available

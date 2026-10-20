@@ -1,0 +1,17 @@
+# Adapter manifest (Layer 6 §4 `caps().copy`, §7 app peers; SimpleX second, glibc hubs only). Parsed with
+# deny_unknown_fields by the bridge core. Whether it ships is the owner's hand-selection.
+id = "app:simplex"                      # network id (§3)
+label = "SimpleX"
+chip = "SX"
+tag = "SX"                              # relay marker TAG (§8; draft proposal)
+kinds = ["dm", "group"]                 # only groups can be relay endpoints (§7 (4))
+evidence = ["queued", "sent", "relayed", "delivered"]
+
+[auth]
+none = "the app's end-to-end encryption ends on this hub; 111 vouches for nothing about the sender's name"
+
+[copy]
+banner = "This hub decrypts everything its SimpleX bridge account receives, including messages from contacts you do not bridge. The plaintext exists on this hub: the hub terminates SimpleX's end-to-end encryption. Bridging is off for every contact until you turn it on for that one."
+send_warning = "111 sends from this hub's own SimpleX bridge account, a bot profile. What you relay onto another network is readable there."
+dm_hint = "Open SimpleX on your phone or desktop: that is the native app; Messages shows the same conversations as text"
+service = "The SimpleX CLI and smp-server (AGPL-3.0) are separate programs you install after reading their licences; 111 is not their distributor. SimpleX preset servers are off by default; it does not run on Termux."
