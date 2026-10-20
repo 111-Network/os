@@ -18,7 +18,12 @@
 //! closures with a throwaway venv's own pip (the [`pip_closure`] shape),
 //! binaries through the fetcher with size and SHA-256 checked. A failed
 //! download is a degrade branch, never fatal. Nothing is installed or started
-//! here: that waits for a human to enable the component.
+//! here: that waits for a human to enable the component. The release's one pip
+//! closure is the LXMF helper's (Layer 6 §6): declaration `lxmf.toml`, lock
+//! `lxmf.lock.txt` beside it (byte-identical to the helper's
+//! `lxmf-sidecar-lock.txt`), written as `<tool venv>/lxmf-lock.txt` and
+//! downloaded into `cache/packages/lxmf/`, where enable builds `venvs/lxmf`
+//! from it offline.
 
 use super::context::InstallContext;
 use super::receipt::{InstallNotice, Receipt};
@@ -470,5 +475,29 @@ mod notice_tests {
             .find(|c| c.id == "lxmf")
             .unwrap();
         assert_eq!(Notice::of(&c).record().hash, c.notice_hash());
+    }
+
+    #[test]
+    fn the_lxmf_closure_is_cached_under_its_id_with_its_notice_line() {
+        let c = crate::daemon::components::manifest::load_embedded()
+            .into_iter()
+            .find(|c| c.id == "lxmf")
+            .unwrap();
+        // the intake names the tool-venv lock and the cache dir after the id
+        assert!(matches!(
+            &c.payload,
+            Payload::Pip { lock, lock_bytes: Some(b), venv }
+                if lock == "lxmf.lock.txt" && venv == "lxmf" && !b.is_empty()
+        ));
+        let line = Notice::of(&c).line();
+        assert_eq!(line.lines().count(), 1);
+        for must in [
+            "Reticulum / LXMF helper",
+            "LicenseRef-Reticulum",
+            "https://github.com/markqvist/Reticulum/blob/master/LICENSE",
+            "not their distributor",
+        ] {
+            assert!(line.contains(must), "{must}: {line}");
+        }
     }
 }

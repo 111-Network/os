@@ -36,6 +36,7 @@ pub mod core;
 pub mod edges;
 pub mod fanout;
 pub mod ingest;
+pub mod lxmf;
 pub mod marker;
 pub mod settings;
 pub mod state;

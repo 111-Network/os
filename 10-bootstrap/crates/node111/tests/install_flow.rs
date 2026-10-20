@@ -174,6 +174,7 @@ fn script(
     let cache = format!("{root}/cache/packages");
     let lock = format!("{cache}/python/rns-lock.txt");
     let tool = format!("{root}/{}", node111::install::packages::RNS_PIP_VENV);
+    let ctool = format!("{root}/{}", node111::install::packages::COMPONENTS_PIP_VENV);
     let mut s: Vec<(String, Output)> = vec![
         ("apt-get update".into(), out(0, "")),
         ("apt-get install -y python3 python3-venv iw ca-certificates".into(), out(0, "")),
@@ -184,6 +185,13 @@ fn script(
         (format!("python3 -m venv {tool}"), out(0, "")),
         (
             format!("{tool}/bin/pip download --require-hashes -r {lock} -d {cache}/python"),
+            out(0, ""),
+        ),
+        // Layer 6 §2.1 rule 3: the optional components' closures (the lxmf lock is
+        // embedded beside assets/components/lxmf.toml) through a throwaway venv's pip
+        (format!("python3 -m venv {ctool}"), out(0, "")),
+        (
+            format!("{ctool}/bin/pip download --require-hashes -r {ctool}/lxmf-lock.txt -d {cache}/lxmf"),
             out(0, ""),
         ),
     ];
@@ -740,11 +748,13 @@ fn install_builds_the_presence_venv_from_the_pinned_lock() {
             .any(|c| c.contains(&builds_s) || c.contains(&cache_s)),
         "the re-run touched the presence venv: {rerun:?}"
     );
-    // (step 5 re-downloads only the rns closure, with its own tool venv)
+    // (step 5 re-downloads only the rns closure and the components' closures (lxmf),
+    // each with its own tool venv)
     assert!(
-        rerun
-            .iter()
-            .all(|c| c.contains(node111::install::packages::RNS_PIP_VENV)),
+        rerun.iter().all(|c| {
+            c.contains(node111::install::packages::RNS_PIP_VENV)
+                || c.contains(node111::install::packages::COMPONENTS_PIP_VENV)
+        }),
         "{rerun:?}"
     );
     assert_eq!(
@@ -944,7 +954,10 @@ fn rns_closure_is_prefetched_without_a_host_pip() {
     mock.assert_exhausted();
     assert_eq!(
         receipt.degrade_branches,
-        ["python3/venv absent after package step: rns closure not prefetched; transport stub"]
+        [
+            "python3/venv absent after package step: rns closure not prefetched; transport stub",
+            "component lxmf: python3/venv absent, closure not cached"
+        ]
     );
     assert!(std::fs::symlink_metadata(
         flow.layout
