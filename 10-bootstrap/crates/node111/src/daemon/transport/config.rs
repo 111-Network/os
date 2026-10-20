@@ -221,24 +221,27 @@ impl Secrets {
 
     /// Load `secrets/` under `root`, minting what is absent: the rpc key
     /// always, the IFAC passphrase when `want_ifac`. `secrets/` is 0700, every
-    /// file 0600. An unreadable or malformed rpc key or hub passphrase is
-    /// replaced by a fresh one (logged: every consumer is rendered by this
-    /// module from the same value, so a re-mint only means one rnsd
-    /// restart); a malformed client passphrase is left out (its stanza is not
-    /// rendered). `clients` names the TCPClient entries with `ifac` on.
+    /// file 0600. An rpc key or hub passphrase is minted only when its file
+    /// is **absent** or was read whole and holds an invalid value (logged:
+    /// every consumer is rendered by this module from the same value, so a
+    /// re-mint only means one rnsd restart). Any other read error — an
+    /// unreadable file, a symlink, a non-regular or oversized file — is
+    /// returned and nothing rotates (B4 review F3: a silent rotation
+    /// restarts rnsd and strands the helper's client config, or every joined
+    /// phone, on the old value); the spine reports it as
+    /// `ApplyError::Write`. The hub passphrase is not read when `want_ifac`
+    /// is off. A malformed or unreadable client passphrase is left out (its
+    /// stanza is not rendered). `clients` names the TCPClient entries with
+    /// `ifac` on.
     pub fn load_or_mint(root: &Path, want_ifac: bool, clients: &[&str]) -> anyhow::Result<Secrets> {
         let dir = secrets_dir(root);
         interfaces::ensure_dir(&dir, true)?;
         let key_path = dir.join(RPC_KEY_FILE);
-        let rpc_key = match read_secret(&key_path)
-            .ok()
-            .flatten()
-            .as_deref()
-            .and_then(unhex32)
-        {
+        let existing = read_secret(&key_path)?;
+        let rpc_key = match existing.as_deref().and_then(unhex32) {
             Some(k) => k,
             None => {
-                if key_path.exists() {
+                if existing.is_some() {
                     eprintln!(
                         "111 transport: {} is not a 32-byte hex key; minting a new one",
                         key_path.display()
@@ -251,7 +254,12 @@ impl Secrets {
             }
         };
         let ifac_path = dir.join(IFAC_FILE);
-        let ifac_passphrase = match read_secret(&ifac_path).ok().flatten() {
+        let hub = if want_ifac {
+            read_secret(&ifac_path)?
+        } else {
+            read_secret(&ifac_path).ok().flatten()
+        };
+        let ifac_passphrase = match hub {
             Some(p) if valid_passphrase(&p) => Some(p),
             other if want_ifac => {
                 if other.is_some() {
@@ -302,6 +310,23 @@ pub fn write_client_ifac(root: &Path, name: &str, passphrase: &str) -> anyhow::R
     write_secret(&client_ifac_path(root, name), passphrase)
 }
 
+/// A phone-relay client's stored IFAC passphrase (`Ok(None)`: absent; an
+/// invalid value is `None` too). `join::apply_join` keeps it to put back
+/// when a re-join fails.
+pub fn read_client_ifac(root: &Path, name: &str) -> anyhow::Result<Option<String>> {
+    Ok(read_secret(&client_ifac_path(root, name))?.filter(|p| valid_passphrase(p)))
+}
+
+/// Remove a phone-relay client's IFAC passphrase (absent is fine).
+pub fn remove_client_ifac(root: &Path, name: &str) -> anyhow::Result<()> {
+    match std::fs::remove_file(client_ifac_path(root, name)) {
+        Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
+            Err(anyhow::anyhow!("remove client IFAC passphrase: {e}"))
+        }
+        _ => Ok(()),
+    }
+}
+
 // ---------------------------------------------------------------- render
 
 /// A stanza that was not rendered, and why (one plain sentence).
@@ -312,10 +337,23 @@ pub struct LeftOut {
 }
 
 /// The rendered config and what it left out.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct Rendered {
     pub text: String,
     pub left_out: Vec<LeftOut>,
+}
+
+/// Redacted: `text` carries the rpc_key and IFAC passphrases.
+impl std::fmt::Debug for Rendered {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Rendered")
+            .field(
+                "text",
+                &format_args!("<{} bytes redacted>", self.text.len()),
+            )
+            .field("left_out", &self.left_out)
+            .finish()
+    }
 }
 
 fn yes_no(b: bool) -> &'static str {
@@ -644,11 +682,19 @@ pub fn lan_sharing(layout: &DaemonLayout) -> bool {
 }
 
 /// Render from what is on disk and write it when changed: the file under
-/// `state/` (read-only; absent or unreadable ⇒ the defaults), the secrets
-/// (minted when absent), LAN sharing and the category. The daemon's spine
-/// renders from its in-memory file instead (`posture.rs`).
+/// `state/` (read-only; absent ⇒ the defaults), the secrets (minted when
+/// absent), LAN sharing and the category. Fail-closed (B4 review F5): an
+/// unreadable, invalid or newer `interfaces.toml` is an error and
+/// `rns/config` is left as it is — never overwritten with the defaults,
+/// which would drop the user's stanzas. The daemon's spine renders from its
+/// in-memory file instead (`posture.rs`).
 pub fn write_if_changed(layout: &DaemonLayout) -> anyhow::Result<bool> {
-    let ifs = interfaces::read(&interfaces::path(&layout.state_dir())).unwrap_or_default();
+    let path = interfaces::path(&layout.state_dir());
+    let ifs = match interfaces::read(&path) {
+        Ok(f) => f,
+        Err(interfaces::LoadError::Absent) => InterfacesFile::default(),
+        Err(e) => anyhow::bail!("{} is {e}; rns/config left as it is", path.display()),
+    };
     let secrets = Secrets::for_file(&layout.root, &ifs)?;
     let text = render(&ifs, &secrets, lan_sharing(layout), category_of(layout));
     write_rendered(layout, &text)
@@ -728,5 +774,97 @@ mod tests {
         std::fs::write(secrets_dir(dir.path()).join(RPC_KEY_FILE), "zz").unwrap();
         let d = Secrets::load_or_mint(dir.path(), false, &[]).unwrap();
         assert_ne!(d.rpc_key_hex(), a.rpc_key_hex());
+    }
+
+    /// B4 review F3: a read error is not "malformed": nothing rotates, the
+    /// error reaches the caller. A symlink (`O_NOFOLLOW`) fails the read
+    /// even as root; the 0o000 case runs only unprivileged.
+    #[test]
+    fn f3_unreadable_secrets_never_rotate() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let a = Secrets::load_or_mint(dir.path(), true, &[]).unwrap();
+        let key = secrets_dir(dir.path()).join(RPC_KEY_FILE);
+        let ifac = secrets_dir(dir.path()).join(IFAC_FILE);
+        let held = dir.path().join("held-key");
+        std::fs::rename(&key, &held).unwrap();
+        std::os::unix::fs::symlink(&held, &key).unwrap();
+        let e = Secrets::load_or_mint(dir.path(), false, &[]);
+        assert!(e.is_err(), "a symlinked key is an error, not a re-mint");
+        assert!(
+            std::fs::symlink_metadata(&key)
+                .unwrap()
+                .file_type()
+                .is_symlink(),
+            "the key was not replaced"
+        );
+        std::fs::remove_file(&key).unwrap();
+        std::fs::rename(&held, &key).unwrap();
+        // the hub passphrase likewise (it is in every joined phone)
+        let pass = a.ifac_passphrase().unwrap().to_string();
+        std::fs::rename(&ifac, &held).unwrap();
+        std::os::unix::fs::symlink(&held, &ifac).unwrap();
+        assert!(Secrets::load_or_mint(dir.path(), true, &[]).is_err());
+        // not wanted: not read, no error, nothing minted over it
+        let b = Secrets::load_or_mint(dir.path(), false, &[]).unwrap();
+        assert_eq!(b.rpc_key_hex(), a.rpc_key_hex());
+        assert!(b.ifac_passphrase().is_none());
+        assert!(std::fs::symlink_metadata(&ifac)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        std::fs::remove_file(&ifac).unwrap();
+        std::fs::rename(&held, &ifac).unwrap();
+        // an unreadable (0o000) key: only meaningful without CAP_DAC_OVERRIDE
+        if unsafe { libc::geteuid() } == 0 {
+            eprintln!("f3: running as root, the 0o000 case is skipped (root reads it)");
+        } else {
+            std::fs::set_permissions(&key, std::fs::Permissions::from_mode(0o000)).unwrap();
+            assert!(Secrets::load_or_mint(dir.path(), false, &[]).is_err());
+            std::fs::set_permissions(&key, std::fs::Permissions::from_mode(0o600)).unwrap();
+        }
+        let c = Secrets::load_or_mint(dir.path(), true, &[]).unwrap();
+        assert_eq!(c.rpc_key_hex(), a.rpc_key_hex(), "never rotated");
+        assert_eq!(c.ifac_passphrase(), Some(pass.as_str()), "never rotated");
+    }
+
+    /// B4 review F5: an invalid or unreadable interfaces.toml never renders
+    /// the defaults over the user's rns/config.
+    #[test]
+    fn f5_write_if_changed_fails_closed() {
+        let dir = tempfile::tempdir().unwrap();
+        let l = layout(dir.path());
+        assert!(write_if_changed(&l).unwrap(), "absent: the defaults");
+        let toml = interfaces::path(&l.state_dir());
+        std::fs::create_dir_all(l.state_dir()).unwrap();
+        std::fs::write(&toml, "schema = 1\n[[interfaces]]\nname = 7\n").unwrap();
+        assert!(write_if_changed(&l).is_err(), "invalid: an error");
+        std::fs::write(&toml, "schema = 9\n").unwrap();
+        assert!(write_if_changed(&l).is_err(), "newer: an error");
+        std::fs::remove_file(&toml).unwrap();
+        std::fs::create_dir(&toml).unwrap();
+        assert!(write_if_changed(&l).is_err(), "not a file: an error");
+        std::fs::write(config_path(&l), "# the user's stanzas\n").unwrap();
+        assert!(write_if_changed(&l).is_err());
+        assert_eq!(
+            std::fs::read_to_string(config_path(&l)).unwrap(),
+            "# the user's stanzas\n",
+            "rns/config untouched"
+        );
+    }
+
+    /// `Rendered`'s Debug never shows the rpc_key (or any passphrase).
+    #[test]
+    fn rendered_debug_is_redacted() {
+        let s = Secrets::new([0xab; 32]).with_ifac("0123456789abcdef0123456789abcdef");
+        let mut ifs = InterfacesFile::default();
+        ifs.posture.lan.backbone.ifac = true;
+        let r = render_with(&ifs, &s, true, None, &[]);
+        assert!(r.text.contains(&s.rpc_key_hex()));
+        assert!(r.text.contains("0123456789abcdef0123456789abcdef"));
+        let dbg = format!("{r:?} {r:#?}");
+        assert!(!dbg.contains(&s.rpc_key_hex()), "{dbg}");
+        assert!(!dbg.contains("0123456789abcdef0123456789abcdef"), "{dbg}");
+        assert!(dbg.contains("redacted"));
     }
 }

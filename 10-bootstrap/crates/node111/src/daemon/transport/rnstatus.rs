@@ -16,10 +16,18 @@
 //! - **Cache.** rnstatus is a Python process, so it runs **on a tick into a
 //!   [`FactsCache`]** ([`tick`]); the route and the agent tool read the
 //!   cache, never the request path. The tick runs it only while rnsd runs
-//!   and someone read the facts within [`TickConfig::demand_window`] (or no
-//!   reading exists yet), backs off on failure, and is woken early when a
-//!   reader finds the cache stale: an idle node starts no Python process on
-//!   a timer (the Pi floor). No wall clock: `Instant` only.
+//!   **with a shared instance** ([`Rnstatus::shares_instance`]: with
+//!   `share_instance = No` there is no control RPC to ask) and someone read
+//!   the facts within [`TickConfig::demand_window`] — demand only, never
+//!   "no reading yet" (B4 review F2: that clause spawned Python every
+//!   backoff period for the daemon's lifetime with nobody reading) — backs
+//!   off on failure, and is woken early when a reader finds the cache stale:
+//!   an idle node starts no Python process on a timer (the Pi floor; the
+//!   `rnsd.log` heuristic carries the display state meanwhile). No wall
+//!   clock: `Instant` only.
+//! - **Parsing is fail-closed** on any input (B4 review F1): rnstatus's
+//!   output is untrusted text, so every slice is taken at a char boundary
+//!   and an unparsed value is `None`, never a panic.
 //! - **Runner.** Through [`Runner`] (tests inject a fake); production uses
 //!   [`TimedRunner`], which kills an rnstatus that runs past
 //!   [`RNSTATUS_TIMEOUT`] and caps its output at [`MAX_OUTPUT`] before any
@@ -30,6 +38,7 @@ use crate::util::run::{Output, Runner};
 use serde::Serialize;
 use std::io::Read;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -89,6 +98,9 @@ pub struct Rnstatus {
     runner: Arc<dyn Runner>,
     program: String,
     config_dir: String,
+    /// The rendered config's `share_instance` (set by the spine on every
+    /// render, §11); the facts tick reads nothing while it is false.
+    shared: AtomicBool,
 }
 
 impl Rnstatus {
@@ -98,7 +110,19 @@ impl Rnstatus {
             runner,
             program: program(root).to_string_lossy().into_owned(),
             config_dir: root.join("rns").to_string_lossy().into_owned(),
+            shared: AtomicBool::new(true),
         }
+    }
+
+    /// Record the rendered config's `share_instance` (the spine calls this
+    /// at start and after every write). Default true.
+    pub fn set_shares_instance(&self, on: bool) {
+        self.shared.store(on, Ordering::SeqCst);
+    }
+
+    /// Whether rnsd runs a shared instance (a control RPC rnstatus can ask).
+    pub fn shares_instance(&self) -> bool {
+        self.shared.load(Ordering::SeqCst)
     }
 
     /// The production runner: [`TimedRunner`] with `HOME=<root>`.
@@ -221,23 +245,29 @@ pub fn parse_size(s: &str) -> Option<u64> {
 }
 
 /// The size next to an arrow in a traffic segment: `↑1.21 KB  0 bps` (RNS
-/// 1.x) or `1.21 KB↑` (older releases).
+/// 1.x) or `1.21 KB↑` (older releases). Fail-closed on any input (B4
+/// review F1): every index is a char boundary (the byte after a matched
+/// char, never `+ 1`), so the other arrow or any non-ASCII byte rnsd prints
+/// before a size cannot panic; when the new form does not parse (`1.21 KB↑
+/// 980 B↓`: both arrows on one line) the old form is tried.
 fn size_at(segment: &str, arrow: char) -> Option<u64> {
     let at = segment.find(arrow)?;
-    let after = &segment[at + arrow.len_utf8()..];
-    if after.trim_start().starts_with(|c: char| c.is_ascii_digit()) {
+    let after = segment[at + arrow.len_utf8()..].trim_start();
+    if after.starts_with(|c: char| c.is_ascii_digit()) {
         // new form: the size follows, up to two spaces (then the rate)
-        let after = after.trim_start();
         let end = after.find("  ").unwrap_or(after.len());
-        return parse_size(&after[..end]);
+        if let Some(v) = parse_size(&after[..end]) {
+            return Some(v);
+        }
     }
     // old form: the size precedes the arrow
     let before = segment[..at].trim_end();
     let start = before
-        .rfind(|c: char| !(c.is_ascii_alphanumeric() || c == '.' || c == ' '))
-        .map(|i| i + 1)
-        .unwrap_or(0);
-    parse_size(before[start..].trim())
+        .char_indices()
+        .rev()
+        .find(|&(_, c)| !(c.is_ascii_alphanumeric() || c == '.' || c == ' '))
+        .map_or(0, |(i, c)| i + c.len_utf8());
+    parse_size(before.get(start..)?.trim())
 }
 
 fn header(line: &str) -> Option<(String, String)> {
@@ -464,8 +494,8 @@ pub struct TickConfig {
     /// Tick period (also the cadence of the log fallback of the display
     /// state, which v1 read every 30 s).
     pub period: Duration,
-    /// rnstatus runs only when the facts were read this recently (or none
-    /// exist yet).
+    /// rnstatus runs only when the facts were read this recently (demand
+    /// only, B4 review F2).
     pub demand_window: Duration,
     /// Cap of the doubled delay after failures.
     pub backoff_max: Duration,
@@ -576,20 +606,23 @@ impl FactsCache {
         }
     }
 
-    /// rnsd is not running: nothing to read.
+    /// rnsd is not running (or shares no instance): nothing to read. Stamps
+    /// the attempt, so a reader does not wake the tick on every request
+    /// while rnsd is down (B4 review F7: each wake reads `rnsd.log`).
     pub fn record_down(&self) {
         let mut i = self.lock();
         i.down = true;
         i.facts.clear();
         i.last_ok = None;
+        i.last_attempt = Some(Instant::now());
     }
 
-    /// The tick should run rnstatus now.
+    /// The tick should run rnstatus now: a reader asked within the demand
+    /// window. Demand only (B4 review F2): "no reading yet" is not demand.
     fn wanted(&self) -> bool {
         let i = self.lock();
-        i.last_ok.is_none()
-            || i.last_demand
-                .is_some_and(|t| t.elapsed() <= self.cfg.demand_window)
+        i.last_demand
+            .is_some_and(|t| t.elapsed() <= self.cfg.demand_window)
     }
 
     /// From a fresh reading: any interface but the shared instance is up
@@ -621,9 +654,10 @@ impl FactsCache {
 }
 
 /// The tick (module doc): every period (or when nudged), `each_tick` first
-/// (the display-state fallback), then, while `running()` and wanted, one
-/// rnstatus reading into `cache` on a blocking thread. Ends when the task is
-/// aborted (the handle's stop).
+/// (the display-state fallback), then, while `running()`, `rn` shares an
+/// instance and a reader asked within the demand window, one rnstatus
+/// reading into `cache` on a blocking thread. Ends when the task is aborted
+/// (the handle's stop).
 pub async fn tick<F>(
     cache: Arc<FactsCache>,
     rn: Arc<Rnstatus>,
@@ -642,7 +676,9 @@ pub async fn tick<F>(
             _ = cache.nudge.notified() => {}
         }
         each_tick(&cache);
-        if !running() {
+        if !running() || !rn.shares_instance() {
+            // no rnsd, or no shared instance to ask (no control RPC): skip
+            // the reading outright (B4 review F2)
             cache.record_down();
             delay = cfg.period;
             continue;
@@ -685,6 +721,116 @@ mod tests {
         assert_eq!(size_at("  2.20 KB↓", '↓'), Some(2200));
     }
 
+    /// B4 review F1: the old-form branch sliced at `rfind + 1`, inside a
+    /// multi-byte char (the other arrow, any non-ASCII byte), and panicked.
+    #[test]
+    fn f1_size_at_multibyte_before_a_size() {
+        // both arrows on one line (old form)
+        assert_eq!(size_at("1.21 KB↑ 980 B↓", '↑'), Some(1210));
+        assert_eq!(size_at("1.21 KB↑ 980 B↓", '↓'), Some(980));
+        // both arrows on one line (new form)
+        assert_eq!(size_at("↑1.21 KB  0 bps  ↓980 B  12 bps", '↑'), Some(1210));
+        assert_eq!(size_at("↑1.21 KB  0 bps  ↓980 B  12 bps", '↓'), Some(980));
+        // a non-ASCII prefix
+        assert_eq!(size_at("é2.47 KB↑", '↑'), Some(2470));
+        assert_eq!(size_at("Traffic €🦀5 B↓", '↓'), Some(5));
+        assert_eq!(size_at("↓↓", '↓'), None);
+        assert_eq!(size_at("é↑", '↑'), None);
+        assert_eq!(size_at("↑é", '↑'), None);
+    }
+
+    /// xorshift64: deterministic noise without a dependency.
+    struct Noise(u64);
+
+    impl Noise {
+        fn next(&mut self) -> u64 {
+            self.0 ^= self.0 << 13;
+            self.0 ^= self.0 >> 7;
+            self.0 ^= self.0 << 17;
+            self.0
+        }
+
+        fn below(&mut self, n: usize) -> usize {
+            (self.next() % n as u64) as usize
+        }
+    }
+
+    fn parse_all(text: &str) {
+        let _ = parse_text(text);
+        let _ = parse_json(text);
+        let _ = detail(text);
+        for line in text.lines() {
+            let _ = header(line);
+            let _ = parse_size(line);
+            let _ = leading_int(line);
+            for arrow in ['↑', '↓'] {
+                let _ = size_at(line, arrow);
+            }
+        }
+    }
+
+    /// B4 review F1: the parser is fail-closed on any input — random bytes
+    /// and arrow / non-ASCII / layout mixes never panic.
+    #[test]
+    fn f1_parser_never_panics_on_noise() {
+        const PIECES: &[&str] = &[
+            "↑",
+            "↓",
+            "é",
+            "€",
+            "🦀",
+            "\u{202e}",
+            "\u{0}",
+            "\t",
+            " ",
+            "  ",
+            ".",
+            "..",
+            "0",
+            "1",
+            "9",
+            "1.21",
+            "980",
+            " B",
+            " KB",
+            "MB",
+            " bps",
+            "B",
+            ":",
+            "[",
+            "]",
+            "/",
+            "\n",
+            " Shared Instance[rns/111]\n",
+            " RNodeInterface[Roof",
+            "    Status    : Up\n",
+            "    Traffic   : ",
+            "                ",
+            "    Peers     : ",
+            "    Clients   : ",
+            "{\"interfaces\": [",
+            "{\"name\": \"x\"}",
+            "]}",
+        ];
+        let mut n = Noise(0x9E37_79B9_7F4A_7C15);
+        for _ in 0..400 {
+            let len = n.below(240);
+            let bytes: Vec<u8> = (0..len)
+                .map(|_| match n.below(4) {
+                    // bias towards the arrows' and other UTF-8 lead/tail bytes
+                    0 => [0xE2, 0x86, 0x91, 0x93, 0xC3, 0xA9, 0xF0, 0x9F][n.below(8)],
+                    _ => (n.next() & 0xFF) as u8,
+                })
+                .collect();
+            parse_all(&String::from_utf8_lossy(&bytes));
+        }
+        for _ in 0..400 {
+            let parts = n.below(60);
+            let text: String = (0..parts).map(|_| PIECES[n.below(PIECES.len())]).collect();
+            parse_all(&text);
+        }
+    }
+
     #[test]
     fn headers() {
         assert_eq!(
@@ -711,7 +857,7 @@ mod tests {
             ..TickConfig::default()
         });
         assert_eq!(c.peek().state, CacheState::Unavailable);
-        assert!(c.wanted(), "nothing read yet");
+        assert!(!c.wanted(), "F2: nothing read yet is not demand");
         c.record(Ok(vec![InterfaceFacts {
             name: "Auto Interface".into(),
             kind: "AutoInterface".into(),
@@ -737,5 +883,47 @@ mod tests {
         c.record_down();
         assert_eq!(c.peek().state, CacheState::Unavailable);
         assert_eq!(c.joined(), None);
+    }
+
+    /// B4 review F2: demand is a reader within the window (10 min by
+    /// default); without one the tick starts no rnstatus, whatever the
+    /// cache holds.
+    #[test]
+    fn f2_wanted_is_demand_only() {
+        let c = FactsCache::new(TickConfig::default());
+        assert!(!c.wanted(), "no reading and no reader: not wanted");
+        c.record(Err(RnstatusError::NoInstance));
+        assert!(!c.wanted(), "a failed reading is not demand either");
+        let _ = c.snapshot();
+        assert!(c.wanted(), "a reader just asked");
+        // the reader was 9 min ago: still wanted; 10 min 1 s ago: not
+        let ago = |d: Duration| Instant::now().checked_sub(d);
+        if let Some(t) = ago(Duration::from_secs(9 * 60)) {
+            c.lock().last_demand = Some(t);
+            assert!(c.wanted());
+        }
+        if let Some(t) = ago(Duration::from_secs(601)) {
+            c.lock().last_demand = Some(t);
+            assert!(!c.wanted(), "10 min without a read: stops");
+        }
+    }
+
+    /// B4 review F7: while rnsd is down, a reader wakes the tick at most once
+    /// a period (record_down stamps the attempt), not on every request.
+    #[tokio::test]
+    async fn f7_snapshot_does_not_nudge_on_every_call_while_down() {
+        let c = FactsCache::new(TickConfig::default());
+        // a fresh cache: the first reader wakes the tick
+        let _ = c.snapshot();
+        let woke = tokio::time::timeout(Duration::from_millis(50), c.nudge.notified()).await;
+        assert!(woke.is_ok(), "the first reader wakes the tick");
+        // the tick found rnsd down
+        c.record_down();
+        for _ in 0..5 {
+            let s = c.snapshot();
+            assert_eq!(s.state, CacheState::Unavailable);
+        }
+        let woke = tokio::time::timeout(Duration::from_millis(50), c.nudge.notified()).await;
+        assert!(woke.is_err(), "no wake within the period after record_down");
     }
 }

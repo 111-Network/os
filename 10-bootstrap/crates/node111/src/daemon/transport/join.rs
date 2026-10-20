@@ -218,17 +218,49 @@ impl Spine {
 
 /// The phone side (module doc): store the passphrase, write the entry
 /// (replacing an earlier join of the same hub), render and attach it.
-/// Returns the entry's name and what the apply did.
+/// Returns the entry's name and what the apply did. The passphrase is
+/// stored before the update (the render reads it from `secrets/`); when the
+/// update is refused or fails, the earlier passphrase of this hub is put
+/// back, or the new one removed, so no orphaned client secret is left (B4
+/// review F6). A join without IFAC removes a stale passphrase of the same
+/// hub once the update succeeded.
 pub async fn apply_join(spine: &Spine, d: &JoinDescriptor) -> Result<(String, Applied), JoinError> {
     let entry = client_entry(d)?;
     let name = entry.name.clone();
-    if let Some(pass) = &d.ifac_passphrase {
-        config::write_client_ifac(&spine.layout().root, &name, pass)
-            .map_err(|e| JoinError::Secret(format!("{e:#}")))?;
+    let root = spine.layout().root.clone();
+    let secret = |e: anyhow::Error| JoinError::Secret(format!("{e:#}"));
+    // `Some(prior)`: a passphrase was stored and `prior` is what to restore
+    let prior = match &d.ifac_passphrase {
+        Some(pass) => {
+            let prior = config::read_client_ifac(&root, &name).map_err(secret)?;
+            config::write_client_ifac(&root, &name, pass).map_err(secret)?;
+            Some(prior)
+        }
+        None => None,
+    };
+    match spine.update(move |f| f.upsert(entry)).await {
+        Ok(applied) => {
+            if prior.is_none() {
+                if let Err(e) = config::remove_client_ifac(&root, &name) {
+                    eprintln!("111 transport: join of {name:?}: {e:#}");
+                }
+            }
+            Ok((name, applied))
+        }
+        Err(e) => {
+            if let Some(prior) = prior {
+                let undo = match prior {
+                    Some(p) => config::write_client_ifac(&root, &name, &p),
+                    None => config::remove_client_ifac(&root, &name),
+                };
+                if let Err(u) = undo {
+                    eprintln!(
+                        "111 transport: join of {name:?} failed and its IFAC passphrase was not \
+                         put back: {u:#}"
+                    );
+                }
+            }
+            Err(JoinError::Apply(e))
+        }
     }
-    let applied = spine
-        .update(move |f| f.upsert(entry))
-        .await
-        .map_err(JoinError::Apply)?;
-    Ok((name, applied))
 }

@@ -693,6 +693,16 @@ fn rnstatus_parser_goldens() {
             facts("Auto Interface", "AutoInterface", false, 0, 0, None),
         ]
     );
+    // B4 review F1: both arrows on one line, a non-ASCII byte before a
+    // size, an unparsable value: read what parses, never panic
+    assert_eq!(
+        rnstatus::parse_text(&read("arrows.txt")),
+        [
+            facts("rns/111", "Shared Instance", true, 980, 1_210, Some(1)),
+            facts("Roof RNode", "RNodeInterface", true, 5, 2_470, Some(3)),
+            facts("111 hub 10.0.0.1", "TCPInterface", true, 2_000, 1_000, None),
+        ]
+    );
     assert!(rnstatus::parse_text(&read("no-instance.txt")).is_empty());
     // -j: unverified shape, parsed but not used by the daemon
     assert_eq!(
@@ -830,7 +840,8 @@ async fn facts_tick_fills_the_cache_only_on_demand() {
         Arc::new(move || r2.load(Ordering::SeqCst)),
         move |_c: &FactsCache| *t2.lock().unwrap() += 1,
     ));
-    // the first reading fills the cache without any reader
+    // a reader asks: the first reading fills the cache (demand only, F2)
+    let _ = cache.snapshot();
     let wait = |want: CacheState| {
         let cache = Arc::clone(&cache);
         async move {
@@ -1224,4 +1235,241 @@ async fn port_table_claims_on_attach_and_release_on_detach() {
     // and the binding was mirrored into devices.json (write-only copy)
     let d = Store::load(&layout_at(dir.path()).state_dir().join(store::FILE));
     assert_eq!(d.meshtastic_binding().unwrap().0, "bbbb0000bbbb0000");
+}
+
+// ---------------------------------------------------------------- B4 review
+
+fn reads(l: &Arc<Mutex<Vec<String>>>) -> usize {
+    l.lock()
+        .unwrap()
+        .iter()
+        .filter(|x| *x == "rnstatus read")
+        .count()
+}
+
+/// B4 review F2: with `share_instance = false` no rnstatus runs, reader or
+/// not; with it on, rnstatus runs only while a reader asked within the
+/// demand window and stops once the window passes without a read.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn f2_tick_runs_rnstatus_on_demand_and_never_without_a_shared_instance() {
+    let dir = tempfile::tempdir().unwrap();
+    let st = layout_at(dir.path()).state_dir();
+    let mut f = InterfacesFile::default();
+    f.posture.share_instance = false;
+    interfaces::save(&st, &f).unwrap();
+    let log = Arc::new(Mutex::new(Vec::new()));
+    let rec = Rec::new(&log);
+    *rec.read_out.lock().unwrap() = out(
+        0,
+        &std::fs::read_to_string(fixture("rnstatus/hub.txt")).unwrap(),
+    );
+    let spine = spine_at(dir.path(), &rec, false, &[]);
+    let rn = spine.rnstatus();
+    assert!(
+        !rn.shares_instance(),
+        "the spine passed the file's posture on"
+    );
+    let cache = FactsCache::new(TickConfig {
+        period: Duration::from_millis(20),
+        demand_window: Duration::from_millis(250),
+        backoff_max: Duration::from_millis(40),
+    });
+    let ticks = Arc::new(Mutex::new(0u32));
+    let t2 = Arc::clone(&ticks);
+    let task = tokio::spawn(rnstatus::tick(
+        Arc::clone(&cache),
+        Arc::clone(&rn),
+        Arc::new(|| true),
+        move |_c: &FactsCache| *t2.lock().unwrap() += 1,
+    ));
+    // no shared instance, no reader: many ticks, zero runs
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(*ticks.lock().unwrap() > 5, "the tick ticks");
+    assert_eq!(reads(&log), 0, "no shared instance, no reader: no rnstatus");
+    // no shared instance, a reader: still zero runs
+    for _ in 0..15 {
+        assert_eq!(cache.snapshot().state, CacheState::Unavailable);
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert_eq!(reads(&log), 0, "no shared instance: no control RPC to ask");
+    // the reader goes away for longer than the window, then share_instance
+    // turns on (a posture change: a restart): zero runs without demand
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    spine
+        .update(|f| f.posture.share_instance = true)
+        .await
+        .unwrap();
+    assert!(rn.shares_instance());
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    assert_eq!(reads(&log), 0, "no reader within the window: no rnstatus");
+    // a reader within the window: runs happen
+    for _ in 0..10 {
+        let _ = cache.snapshot();
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(reads(&log) > 0, "a reader: rnstatus runs");
+    assert_eq!(cache.peek().state, CacheState::Ok);
+    // the window passes without a read: the runs stop
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    let n = reads(&log);
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(reads(&log), n, "no read within the window: no more runs");
+    // share_instance off again: the tick records nothing to read
+    spine
+        .update(|f| f.posture.share_instance = false)
+        .await
+        .unwrap();
+    for _ in 0..10 {
+        let _ = cache.snapshot();
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert_eq!(reads(&log), n, "off again: no runs even with a reader");
+    assert_eq!(cache.peek().state, CacheState::Unavailable);
+    task.abort();
+}
+
+/// B4 review F3: an unreadable `secrets/rns-rpc-key` is `ApplyError::Write`
+/// and nothing rotates (a symlink fails the `O_NOFOLLOW` read even as root).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn f3_unreadable_rpc_key_fails_the_apply_without_rotating() {
+    let dir = tempfile::tempdir().unwrap();
+    let log = Arc::new(Mutex::new(Vec::new()));
+    let spine = spine_at(dir.path(), &Rec::new(&log), false, &[]);
+    take(&log);
+    let cfg = config::config_path(&layout_at(dir.path()));
+    let before = std::fs::read_to_string(&cfg).unwrap();
+    let key = config::secrets_dir(dir.path()).join(config::RPC_KEY_FILE);
+    let held = dir.path().join("held");
+    std::fs::rename(&key, &held).unwrap();
+    std::os::unix::fs::symlink(&held, &key).unwrap();
+    let e = spine.apply().await;
+    assert!(
+        matches!(
+            e,
+            Err(node111::daemon::transport::posture::ApplyError::Write(_))
+        ),
+        "{e:?}"
+    );
+    assert!(std::fs::symlink_metadata(&key)
+        .unwrap()
+        .file_type()
+        .is_symlink());
+    assert_eq!(
+        std::fs::read_to_string(&cfg).unwrap(),
+        before,
+        "no re-render"
+    );
+    assert!(take(&log).is_empty(), "no restart, no rnstatus");
+}
+
+/// B4 review F6: a refused or failed join update leaves no orphaned client
+/// secret, and a failed re-join puts the earlier passphrase back.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn f6_failed_join_leaves_no_orphaned_secret() {
+    let d = join::JoinDescriptor {
+        schema: join::JOIN_SCHEMA,
+        address: "10.0.0.1".into(),
+        port: 4242,
+        ifac_name: Some("111-lan".into()),
+        ifac_passphrase: Some("0123456789abcdef0123456789abcdef".into()),
+    };
+    let name = "111 hub 10.0.0.1";
+    // refused: a newer interfaces.toml makes the spine read-only
+    let dir = tempfile::tempdir().unwrap();
+    let st = layout_at(dir.path()).state_dir();
+    std::fs::create_dir_all(&st).unwrap();
+    std::fs::write(interfaces::path(&st), "schema = 9\n").unwrap();
+    let log = Arc::new(Mutex::new(Vec::new()));
+    let spine = spine_at(dir.path(), &Rec::new(&log), false, &[]);
+    assert!(spine.read_only());
+    let e = join::apply_join(&spine, &d).await;
+    assert!(matches!(e, Err(JoinError::Apply(_))), "{e:?}");
+    assert!(
+        !config::client_ifac_path(dir.path(), name).exists(),
+        "no orphaned client secret"
+    );
+    // failed after the save: rns/config cannot be written; a re-join puts
+    // the first passphrase back
+    let dir = tempfile::tempdir().unwrap();
+    let spine = spine_at(dir.path(), &Rec::new(&log), false, &[]);
+    join::apply_join(&spine, &d).await.unwrap();
+    let secret = config::client_ifac_path(dir.path(), name);
+    let first = std::fs::read_to_string(&secret).unwrap();
+    let cfg = config::config_path(&layout_at(dir.path()));
+    std::fs::remove_file(&cfg).unwrap();
+    std::fs::create_dir_all(cfg.join("blocker")).unwrap();
+    let mut again = d.clone();
+    again.port = 4243;
+    again.ifac_passphrase = Some("fedcba9876543210fedcba9876543210".into());
+    let e = join::apply_join(&spine, &again).await;
+    assert!(matches!(e, Err(JoinError::Apply(_))), "{e:?}");
+    assert_eq!(std::fs::read_to_string(&secret).unwrap(), first);
+    // a first join that fails removes what it stored
+    let dir = tempfile::tempdir().unwrap();
+    let spine = spine_at(dir.path(), &Rec::new(&log), false, &[]);
+    let cfg = config::config_path(&layout_at(dir.path()));
+    std::fs::remove_file(&cfg).unwrap();
+    std::fs::create_dir_all(cfg.join("blocker")).unwrap();
+    assert!(join::apply_join(&spine, &d).await.is_err());
+    assert!(!config::client_ifac_path(dir.path(), name).exists());
+}
+
+/// B4 review F8: ports claimed for a render whose write fails are released
+/// again; a claim held from an earlier good apply stays.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn f8_failed_write_releases_the_new_claims() {
+    let dir = tempfile::tempdir().unwrap();
+    let log = Arc::new(Mutex::new(Vec::new()));
+    let spine = spine_at(dir.path(), &Rec::new(&log), false, &[]);
+    let table = Arc::new(PortTable::new());
+    spine
+        .adopt_ports(Arc::clone(&table), Arc::new(|| 7))
+        .await
+        .unwrap();
+    spine
+        .update(|f| {
+            f.radio.region = Some("EU_868".into());
+            f.interfaces
+                .push(rnode("RNode 1", "/dev/ttyACM0", None, 869_525_000));
+        })
+        .await
+        .unwrap();
+    assert_eq!(table.is_held("/dev/ttyACM0").unwrap().task, "rnsd");
+    // rns/config cannot be written (a non-empty directory in its place:
+    // fails even as root, unlike a read-only dir)
+    let cfg = config::config_path(&layout_at(dir.path()));
+    std::fs::remove_file(&cfg).unwrap();
+    std::fs::create_dir_all(cfg.join("blocker")).unwrap();
+    let e = spine
+        .update(|f| {
+            f.interfaces
+                .push(rnode("RNode 2", "/dev/ttyACM1", None, 869_525_000));
+        })
+        .await;
+    assert!(
+        matches!(
+            e,
+            Err(node111::daemon::transport::posture::ApplyError::Write(_))
+        ),
+        "{e:?}"
+    );
+    assert!(
+        table.is_held("/dev/ttyACM1").is_none(),
+        "the new claim is released on the error path"
+    );
+    assert_eq!(
+        table.is_held("/dev/ttyACM0").unwrap().task,
+        "rnsd",
+        "the claim of the running stanza stays"
+    );
+    // a fresh table (adopt_ports → apply) and the daemon-start render
+    // (write_config) likewise
+    let t2 = Arc::new(PortTable::new());
+    assert!(spine
+        .adopt_ports(Arc::clone(&t2), Arc::new(|| 8))
+        .await
+        .is_err());
+    assert!(t2.held().is_empty(), "nothing claimed is kept");
+    assert!(spine.write_config().is_err());
+    assert!(t2.held().is_empty(), "nothing claimed is kept");
 }

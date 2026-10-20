@@ -1,0 +1,15 @@
+ Shared Instance[rns/111]
+    Status    : Up
+    Serving   : 1 program
+    Traffic   : 1.21 KB↑ 980 B↓
+
+ RNodeInterface[Roof RNode]
+    Status    : Up
+    Peers     : 3 reachable
+    Traffic   : é2.47 KB↑
+                ↓ünknown
+                €5 B↓
+
+ TCPInterface[111 hub 10.0.0.1/10.0.0.1:4242]
+    Status    : Up
+    Traffic   : ↑1.00 KB  0 bps  ↓2.00 KB  0 bps

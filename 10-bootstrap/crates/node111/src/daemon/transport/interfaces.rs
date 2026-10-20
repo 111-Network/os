@@ -1456,12 +1456,30 @@ fn typed(spec: &ParamSpec, raw: &str) -> Option<toml::Value> {
 /// Keys of an RNode stanza that are rendered by 111d, not parameters.
 const STANZA_FIXED_KEYS: [&str; 5] = ["type", "enabled", "interface_enabled", "port", "name"];
 
+/// Keys of an RNode stanza that protect or shape it — IFAC (Reticulum
+/// reads `network_name`/`networkname`, `passphrase`/`pass_phrase`,
+/// `ifac_size`) and the interface mode (`interface_mode`/`mode`). None is
+/// on the allowlist, so a migrated copy would lose them and later render
+/// onto an unprotected network with another mode: such a stanza is skipped
+/// instead (B4 review F4).
+const STANZA_GUARDED_KEYS: [&str; 7] = [
+    "network_name",
+    "networkname",
+    "passphrase",
+    "pass_phrase",
+    "ifac_size",
+    "interface_mode",
+    "mode",
+];
+
 /// Build the first file (integration M7): the Meshtastic binding becomes an
 /// `owner = "111d"` entry; every enabled `RNodeInterface` stanza of
 /// `rns_config` an `owner = "rnsd"` entry (name sanitized and made unique,
 /// port validated, parameters kept only when allowlisted and in range; no
 /// region is inferred: a migrated RNode stays unrendered until a human sets
-/// one). `RNodeMultiInterface` and other types are not migrated (logged).
+/// one). `RNodeMultiInterface` and other types are not migrated (logged);
+/// nor is an RNode stanza carrying IFAC or interface-mode keys
+/// ([`STANZA_GUARDED_KEYS`]; a weakened copy is never written, B4 review F4).
 pub fn migrate(binding: Option<(String, MeshtasticBinding)>, rns_config: Option<&str>) -> Migrated {
     let mut file = InterfacesFile::default();
     let mut notes = Vec::new();
@@ -1487,6 +1505,20 @@ pub fn migrate(binding: Option<(String, MeshtasticBinding)>, rns_config: Option<
                     shown(&s.name)
                 ));
             }
+            continue;
+        }
+        if let Some((k, _)) = s
+            .pairs
+            .iter()
+            .find(|(k, _)| STANZA_GUARDED_KEYS.contains(&k.as_str()))
+        {
+            // the key is named, never its value (a passphrase)
+            notes.push(format!(
+                "migration: RNode stanza {:?} skipped: it sets {:?} (IFAC or interface mode), which \
+                 a migrated copy cannot keep; add it again in Settings → Layer 6",
+                shown(&s.name),
+                shown(k)
+            ));
             continue;
         }
         let Some(port) = s.get("port").filter(|p| valid_port(p)) else {
@@ -1837,5 +1869,42 @@ params = { node_num = 168430090 }
         assert!(joined.contains("txpower"), "{joined}");
         assert!(joined.contains("renamed \"RNode 1\""), "{joined}");
         m.file.validate().unwrap();
+    }
+
+    /// B4 review F4: an RNode stanza with IFAC or a mode is skipped with a
+    /// note, never migrated as a weakened (unprotected, other-mode) copy.
+    #[test]
+    fn f4_migration_skips_ifac_and_mode_stanzas() {
+        let base = "[interfaces]\n  [[Plain]]\n    type = RNodeInterface\n    enabled = yes\n    \
+                    port = /dev/ttyACM0\n    frequency = 867200000\n";
+        for (key, value) in [
+            ("network_name", "secretnet"),
+            ("networkname", "secretnet"),
+            ("passphrase", "hunter2hunter2hunter2"),
+            ("pass_phrase", "hunter2hunter2hunter2"),
+            ("ifac_size", "16"),
+            ("interface_mode", "access_point"),
+            ("mode", "gateway"),
+        ] {
+            let cfg = format!(
+                "{base}  [[Guarded]]\n    type = RNodeInterface\n    enabled = yes\n    \
+                 port = /dev/ttyACM1\n    frequency = 867200000\n    {key} = {value}\n"
+            );
+            let m = migrate(None, Some(&cfg));
+            let names: Vec<_> = m.file.interfaces.iter().map(|i| i.name.as_str()).collect();
+            assert_eq!(
+                names,
+                ["Plain"],
+                "{key}: the guarded stanza is not migrated"
+            );
+            let joined = m.notes.join("\n");
+            assert!(joined.contains("\"Guarded\" skipped"), "{key}: {joined}");
+            assert!(
+                joined.contains("add it again in Settings → Layer 6"),
+                "{joined}"
+            );
+            assert!(joined.contains(key), "{joined}");
+            assert!(!joined.contains(value), "{key}: the value is never logged");
+        }
     }
 }

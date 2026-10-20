@@ -19,7 +19,12 @@
 //!   `transport` is stopped first (`Components::stop_before`), rnsd restarts,
 //!   then each is resumed (`Components::start_after`), whose runner gates on
 //!   rnsd serving again and runs the post-spawn partition check.
-//! - Ports rnsd no longer drives are released after the detach.
+//! - Ports rnsd no longer drives are released after the detach; ports
+//!   claimed for a render whose write then fails are released again (B4
+//!   review F8), so a failed apply holds nothing new.
+//! - Every render tells [`Rnstatus`] the file's `share_instance`, so the
+//!   facts tick asks nothing of an rnsd without a shared instance (B4 review
+//!   F2).
 //! - The netlink path ([`Spine::on_link_change`]) is the same apply plus a
 //!   `--reload` of the AutoInterface(s), so new links are picked up without a
 //!   restart.
@@ -102,6 +107,10 @@ pub type BindingMirror =
 
 /// The daemon tick stamped on port claims (never wall clock).
 pub type Tick = Arc<dyn Fn() -> u64 + Send + Sync>;
+
+/// A render, the port keys rnsd holds for it (`None`: no table adopted),
+/// and the keys claimed afresh by it.
+type RenderClaimed = (Rendered, Option<BTreeSet<String>>, BTreeSet<String>);
 
 // ---------------------------------------------------------------- diff
 
@@ -294,6 +303,7 @@ impl Spine {
         let mirror: BindingMirror = Arc::new(move |want| {
             crate::daemon::devices::store::mirror_meshtastic_binding(&devices_json, want)
         });
+        rnstatus.set_shares_instance(startup.file.posture.share_instance);
         Arc::new(Spine {
             layout,
             file: RwLock::new(startup.file),
@@ -375,18 +385,22 @@ impl Spine {
     }
 
     /// Render `f`, claiming the RNode ports for rnsd first when a
-    /// `PortTable` is adopted; returns the render and the port keys rnsd
-    /// now holds.
-    fn render_claimed(
-        &self,
-        f: &InterfacesFile,
-    ) -> Result<(Rendered, Option<BTreeSet<String>>), ApplyError> {
+    /// `PortTable` is adopted; returns the render, the port keys rnsd now
+    /// holds, and those this call claimed afresh (released again by
+    /// [`Spine::release_new`] when the write fails, B4 review F8).
+    fn render_claimed(&self, f: &InterfacesFile) -> Result<RenderClaimed, ApplyError> {
         let secrets = self.secrets(f)?;
         let lan = self.lan_sharing();
         let first = config::render_with(f, &secrets, lan, self.category, &[]);
         let Some((table, tick)) = read(&self.ports) else {
-            return Ok((first, None));
+            return Ok((first, None, BTreeSet::new()));
         };
+        let before: BTreeSet<String> = table
+            .held()
+            .into_iter()
+            .filter(|(_, o)| o.task == TASK_RNSD)
+            .map(|(k, _)| k)
+            .collect();
         let left: BTreeSet<String> = first
             .left_out
             .iter()
@@ -417,7 +431,38 @@ impl Spine {
         } else {
             config::render_with(f, &secrets, lan, self.category, &exclude)
         };
-        Ok((rendered, Some(wanted)))
+        let fresh = wanted.difference(&before).cloned().collect();
+        Ok((rendered, Some(wanted), fresh))
+    }
+
+    /// Release the keys a failed apply claimed afresh (B4 review F8).
+    fn release_new(&self, fresh: &BTreeSet<String>) {
+        let Some((table, _)) = read(&self.ports) else {
+            return;
+        };
+        for key in fresh {
+            let _ = table.release(key, TASK_RNSD);
+        }
+    }
+
+    /// Write the render; on failure release what this render claimed, and
+    /// on success record the file's `share_instance` for the facts tick.
+    fn write_rendered(
+        &self,
+        f: &InterfacesFile,
+        rendered: &Rendered,
+        fresh: &BTreeSet<String>,
+    ) -> Result<bool, ApplyError> {
+        match config::write_rendered(&self.layout, &rendered.text) {
+            Ok(w) => {
+                self.rnstatus.set_shares_instance(f.posture.share_instance);
+                Ok(w)
+            }
+            Err(e) => {
+                self.release_new(fresh);
+                Err(ApplyError::Write(format!("{e:#}")))
+            }
+        }
     }
 
     fn release_unwanted(&self, wanted: Option<&BTreeSet<String>>) {
@@ -448,9 +493,8 @@ impl Spine {
             return Err(ApplyError::NewerConfig);
         }
         let f = self.file();
-        let (rendered, wanted) = self.render_claimed(&f)?;
-        config::write_rendered(&self.layout, &rendered.text)
-            .map_err(|e| ApplyError::Write(format!("{e:#}")))?;
+        let (rendered, wanted, fresh) = self.render_claimed(&f)?;
+        self.write_rendered(&f, &rendered, &fresh)?;
         write(&self.left_out, rendered.left_out.clone());
         Self::log_left_out(&rendered.left_out);
         self.release_unwanted(wanted.as_ref());
@@ -516,9 +560,8 @@ impl Spine {
         }
         let f = self.file();
         let old = config::current_text(&self.layout).unwrap_or_default();
-        let (rendered, wanted) = self.render_claimed(&f)?;
-        let written = config::write_rendered(&self.layout, &rendered.text)
-            .map_err(|e| ApplyError::Write(format!("{e:#}")))?;
+        let (rendered, wanted, fresh) = self.render_claimed(&f)?;
+        let written = self.write_rendered(&f, &rendered, &fresh)?;
         write(&self.left_out, rendered.left_out.clone());
         if written {
             Self::log_left_out(&rendered.left_out);
