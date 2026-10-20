@@ -334,7 +334,15 @@ describe("adapter <-> openapi.yaml", () => {
     "/api/v1/contacts": { schema: 1, contacts: [] },
     "/api/v1/nearby": { schema: 1, sources: [] },
     "/api/v1/panels": { schema: 1, panels: [] },
+    // Layer 6 lists and the one window the adapter unwraps. The colon of `app:deltachat` is percent-encoded in a path.
+    "/api/v1/networks": { schema: 1, networks: [] },
+    "/api/v1/networks/app%3Adeltachat/conversations": { schema: 1, network: "app:deltachat", conversations: [] },
+    "/api/v1/networks/meshtastic/conversations/fc-3": { schema: 1, conversation: { id: "fc-3" }, messages: [], more: false },
+    "/api/v1/bridge/edges": { schema: 1, edges: [] },
+    "/api/v1/bridge/components": { schema: 1, components: [] },
   };
+  const HASH = "a".repeat(64);
+  const FANOUT = { text: "hello", targets: [{ network: "meshtastic", conv: "fc-3", size_mode: "split" as const }, { node_id: PEER }] };
   const CALLS: Record<string, (a: Adapter) => Promise<unknown>> = {
     getStatus: (a) => a.status(),
     listServices: (a) => a.services(),
@@ -383,27 +391,33 @@ describe("adapter <-> openapi.yaml", () => {
     listNearby: (a) => a.nearby(),
     listPanels: (a) => a.panels.list(),
     openPanelSession: (a) => a.panels.openSession("meshtastic"),
+    // Layer 6 (os/60-transport/README.md section 10)
+    listNetworks: (a) => a.networks.list(),
+    listForeignConversations: (a) => a.networks.conversations("app:deltachat"),
+    openForeignConversation: (a) => a.networks.openDm("meshtastic", "!a1b2c3d4"),
+    getForeignConversation: (a) => a.networks.conversation("meshtastic", "fc-3", { sinceSeq: 4, limit: 50 }),
+    sendForeignMessage: (a) => a.networks.send("meshtastic", "fc-3", { text: "hello", size_mode: "split" }),
+    previewFanout: (a) => a.networks.fanoutPreview(FANOUT),
+    sendFanout: (a) => a.networks.fanout(FANOUT),
+    listBridgeEdges: (a) => a.bridge.edges(),
+    createBridgeEdge: (a) => a.bridge.createEdge({ src: "fc-3", dst: "fc-4", honour_ok_to_mqtt: false, oversize: "split", accept_warning: HASH }),
+    getBridgeEdge: (a) => a.bridge.edge("be-1"),
+    patchBridgeEdge: (a) => a.bridge.patchEdge("be-1", { paused: false, oversize: "refuse", accept_warning: HASH }),
+    deleteBridgeEdge: (a) => a.bridge.deleteEdge("be-1"),
+    getBridgeSettings: (a) => a.bridge.settings(),
+    patchBridgeSettings: (a) => a.bridge.patchSettings({ order: ["111", "meshtastic"], ham: [{ account: "Bench radio", confirmed: true, accept_warning: HASH }] }),
+    listBridgeComponents: (a) => a.bridge.components(),
+    enableBridgeComponent: (a) => a.bridge.enableComponent("lxmf", HASH),
+    disableBridgeComponent: (a) => a.bridge.disableComponent("lxmf"),
+    removeBridgeComponentFiles: (a) => a.bridge.removeComponentFiles("lxmf", true),
+    getTransport: (a) => a.transport.status(),
+    patchTransportPosture: (a) => a.transport.patchPosture({ region: "EU_868", posture: { lan: { backbone_listen: true } } }),
+    joinTransport: (a) => a.transport.join(),
   };
   const toRegex = (tpl: string) => new RegExp(`^${tpl.replace(/\{[^}]+\}/g, "[^/]+")}$`);
 
-  // Layer 6 contract operations (S2, 60-transport/README.md §10) whose adapter methods land with the C2 UI task. C2 moves each
-  // id from this list into CALLS above, and empties the list; until then the contract is ahead of the adapter on purpose.
-  const LAYER6_PENDING = [
-    "listNetworks", "listForeignConversations", "openForeignConversation", "getForeignConversation", "sendForeignMessage",
-    "previewFanout", "sendFanout", "listBridgeEdges", "createBridgeEdge", "getBridgeEdge", "patchBridgeEdge", "deleteBridgeEdge",
-    "getBridgeSettings", "patchBridgeSettings", "listBridgeComponents", "enableBridgeComponent", "disableBridgeComponent",
-    "removeBridgeComponentFiles", "getTransport", "patchTransportPosture", "joinTransport",
-  ];
-
-  it("covers every operation except the event stream and the Layer 6 operations still pending an adapter method", () => {
-    expect(Object.keys(CALLS).sort()).toEqual(Object.keys(operations).filter((id) => id !== "events" && !LAYER6_PENDING.includes(id)).sort());
-  });
-
-  it("the pending list only names real operations that have no adapter call yet", () => {
-    for (const id of LAYER6_PENDING) {
-      expect(operations[id], `${id} is in the contract`).toBeDefined();
-      expect(CALLS[id], `${id} has a CALLS entry: remove it from LAYER6_PENDING`).toBeUndefined();
-    }
+  it("covers every operation except the event stream (the Layer 6 operations included)", () => {
+    expect(Object.keys(CALLS).sort()).toEqual(Object.keys(operations).filter((id) => id !== "events").sort());
   });
 
   for (const [id, call] of Object.entries(CALLS)) {

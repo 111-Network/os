@@ -3,11 +3,35 @@
 // events stream: components read through hooks and never fetch snapshots themselves.
 import type { Adapter, ConnectionInfo, ConnectionState, EventsFrameWithId } from "./adapter";
 import { openRequests, removeContact, upsertContact } from "./contacts";
+import { applyForeignTail, FOREIGN_PAGE_LIMIT, mergeForeignPage, sameConversations, topSeq, trimForeign, type ForeignPage } from "./networks";
 import { applyMessageToPage, mergeThreadPage, THREAD_PAGE_LIMIT, trimPage, type ThreadPage } from "./messages";
 import { sameSources } from "./nearby";
 import { isApiError, type ApiError } from "./problem";
 import { browserStorage, ignoreRequest, isIgnored, loadIgnored, NO_IGNORED, pruneIgnored, requestSeq, restoreRequest, saveIgnored, type IgnoredRequests, type KeyValueStorage } from "./requests";
-import type { AgentEvent, Card, Contact, ContactChangeEvent, DeviceRecord, FabricStatus, HostedPanel, MessageChangeEvent, NearbySource, NodeId, Proposal, ServiceRecord, Status, Thread } from "./types";
+import type {
+  AgentEvent,
+  BridgeComponent,
+  BridgeEdge,
+  BridgeSettings,
+  Card,
+  Contact,
+  ContactChangeEvent,
+  DeviceRecord,
+  FabricStatus,
+  ForeignConversation,
+  HostedPanel,
+  MessageChangeEvent,
+  NearbySource,
+  Network,
+  NetworkId,
+  NetworkMessageEvent,
+  NodeId,
+  Proposal,
+  ServiceRecord,
+  Status,
+  Thread,
+  TransportStatus,
+} from "./types";
 
 export const ACTIVITY_RING = 200;
 
@@ -46,6 +70,15 @@ export interface ThreadSlot {
   error: ApiError | null;
 }
 
+/** One foreign conversation as the store holds it, keyed by its `fc-…` id: loading, ready (`page`), or why it could not be loaded. */
+export interface ForeignSlot {
+  state: "loading" | "ready" | "missing" | "error";
+  /** The network the conversation belongs to (the route to read it needs it). */
+  network: NetworkId;
+  page: ForeignPage | null;
+  error: ApiError | null;
+}
+
 export interface StoreState {
   status: Status | null;
   services: ServiceRecord[] | null;
@@ -72,6 +105,20 @@ export interface StoreState {
   nearby: NearbySource[] | null;
   /** Layer 5: declared hosted panels and their listener slots; null until loaded. */
   panels: HostedPanel[] | null;
+  /** Layer 6: the foreign networks in the preferred order; null until loaded (an older node answers 404 and it stays null). */
+  networks: Network[] | null;
+  /** Layer 6: conversations per network, loaded when a view asks. */
+  conversations: Record<NetworkId, ForeignConversation[]>;
+  /** Layer 6: conversations opened this page load, by `fc-…` id, with their message window. */
+  foreignPages: Record<string, ForeignSlot>;
+  /** Layer 6: relay edges; null until loaded. */
+  edges: BridgeEdge[] | null;
+  /** Layer 6: state/bridge.json as the node mirrors it, loaded when Settings or the compose asks. */
+  bridgeSettings: BridgeSettings | null;
+  /** Layer 6: optional components (declared, cached, installed, running), loaded when Settings asks. */
+  components: BridgeComponent[] | null;
+  /** Layer 6: interfaces, posture, region, callsign; loaded when Settings asks. */
+  transport: TransportStatus | null;
   connection: ConnectionSnapshot;
   /** Agent events, newest first, at most ACTIVITY_RING, deduped on (seq, ts). */
   activity: AgentEvent[];
@@ -165,6 +212,19 @@ function coalesced(fn: () => Promise<void>): () => Promise<void> {
   };
 }
 
+/** `coalesced`, one lane per key: concurrent calls for the same key become one trailing pass; other keys do not wait. */
+function coalescedBy<K extends string>(fn: (key: K) => Promise<void>): (key: K) => Promise<void> {
+  const lanes = new Map<K, () => Promise<void>>();
+  return (key) => {
+    let lane = lanes.get(key);
+    if (!lane) {
+      lane = coalesced(() => fn(key));
+      lanes.set(key, lane);
+    }
+    return lane();
+  };
+}
+
 function newestFirst(list: readonly Proposal[]): Proposal[] {
   return [...list].sort((a, b) => (a.created_at < b.created_at ? 1 : a.created_at > b.created_at ? -1 : 0));
 }
@@ -185,6 +245,13 @@ function initialState(): StoreState {
     fabric: null,
     nearby: null,
     panels: null,
+    networks: null,
+    conversations: {},
+    foreignPages: {},
+    edges: null,
+    bridgeSettings: null,
+    components: null,
+    transport: null,
     connection: INITIAL_CONNECTION,
     activity: [],
     baselineVersion: null,
@@ -208,6 +275,9 @@ export class ApiStore {
   private readonly pageLimits = new Map<NodeId, number>();
   /** The newest `loadThread` call per conversation; an older response that arrives later is dropped. */
   private readonly threadGen = new Map<NodeId, number>();
+  /** `limit` per foreign conversation, and the newest load per conversation (same rule as the 111 threads). */
+  private readonly foreignLimits = new Map<string, number>();
+  private readonly foreignGen = new Map<string, number>();
   /** Never repeats (not even across `reset`), so a response from before a reset cannot pass for a current one. */
   private loadCounter = 0;
   /** Where the per-device fold of ignored requests is kept; null when the browser gives none. */
@@ -322,6 +392,8 @@ export class ApiStore {
   reset(): void {
     this.pageLimits.clear();
     this.threadGen.clear();
+    this.foreignLimits.clear();
+    this.foreignGen.clear();
     this.commit({ ...initialState(), ignored: loadIgnored(this.storage) });
   }
 
@@ -395,6 +467,15 @@ export class ApiStore {
       case "panels":
         if (frame.data && Array.isArray(frame.data.panels)) patch.panels = reuse(this.state.panels, frame.data.panels, byId);
         break;
+      case "network_message":
+        // Carries no text: refetch what it names. The open conversation takes the tail, the lists follow.
+        if (isNetworkFrame(frame.data)) this.networkFrame(frame.data);
+        break;
+      case "bridge":
+        // Full snapshots of whichever part changed.
+        if (frame.data && Array.isArray(frame.data.networks)) patch.networks = reuse(this.state.networks, frame.data.networks, byId);
+        if (frame.data && Array.isArray(frame.data.edges)) patch.edges = reuse(this.state.edges, frame.data.edges, byId);
+        break;
       case "reset":
         // The first reset after attach is the daemon saying "start from a snapshot". That snapshot is
         // already on its way; only a reset after the initial load is a reason to load again.
@@ -463,7 +544,7 @@ export class ApiStore {
         return Promise.reject(e);
       }
     };
-    const [st, sv, dv, pr, th, ct, fb, nb, pn] = await Promise.allSettled([
+    const [st, sv, dv, pr, th, ct, fb, nb, pn, nw, eg] = await Promise.allSettled([
       a.status(),
       a.services(),
       a.devices(),
@@ -473,6 +554,8 @@ export class ApiStore {
       optional((x) => x.fabric.status()),
       optional((x) => x.nearby()),
       optional((x) => x.panels.list()),
+      optional((x) => x.networks.list()),
+      optional((x) => x.bridge.edges()),
     ]);
     if (this.adapter !== a) return; // detached or swapped while loading
     const patch: Partial<StoreState> = {};
@@ -488,14 +571,19 @@ export class ApiStore {
     if (fb.status === "fulfilled") patch.fabric = sameJson(this.state.fabric, fb.value) ? this.state.fabric : fb.value;
     if (nb.status === "fulfilled") patch.nearby = sameSources(this.state.nearby, nb.value);
     if (pn.status === "fulfilled") patch.panels = reuse(this.state.panels, pn.value, byId);
+    if (nw.status === "fulfilled") patch.networks = reuse(this.state.networks, nw.value, byId);
+    if (eg.status === "fulfilled") patch.edges = reuse(this.state.edges, eg.value, byId);
     const errors = [st, sv, dv, pr].flatMap((r) => (r.status === "rejected" ? [r.reason] : []));
     // A Layer 5 read can only add the pairing signal: its other failures keep the previous slice and stay quiet.
-    for (const r of [th, ct, fb, nb, pn]) if (r.status === "rejected" && isApiError(r.reason) && r.reason.unauthenticated) errors.push(r.reason);
+    for (const r of [th, ct, fb, nb, pn, nw, eg]) if (r.status === "rejected" && isApiError(r.reason) && r.reason.unauthenticated) errors.push(r.reason);
     patch.meta = { ready: true, ...(this.fail(errors) as { needsPair: boolean; error: ApiError | null }) };
     this.commit(patch);
     this.syncStream();
     // Conversations that are open follow a reload, with the window they had.
     for (const peer of Object.keys(this.state.threadPages)) void this.loadThread(peer, this.pageLimits.get(peer));
+    // The same for the foreign conversations that are open, and the network lists a view asked for.
+    for (const [conv, slot] of Object.entries(this.state.foreignPages)) void this.loadForeign(slot.network, conv, this.foreignLimits.get(conv));
+    for (const net of Object.keys(this.state.conversations)) void this.refreshConversations(net);
   });
 
   refreshStatus = coalesced(async () => {
@@ -634,6 +722,170 @@ export class ApiStore {
     }
   }
 
+
+  // --- Layer 6 snapshots (networks, conversations, edges, settings, components, transport) -------------------------
+
+  refreshNetworks = coalesced(async () => {
+    const a = this.adapter;
+    if (!a) return;
+    try {
+      const networks = await a.networks.list();
+      if (this.adapter === a) this.commit({ networks: reuse(this.state.networks, networks, byId) });
+    } catch {
+      /* keep the previous list */
+    }
+  });
+
+  refreshEdges = coalesced(async () => {
+    const a = this.adapter;
+    if (!a) return;
+    try {
+      const edges = await a.bridge.edges();
+      if (this.adapter === a) this.commit({ edges: reuse(this.state.edges, edges, byId) });
+    } catch {
+      /* keep the previous list */
+    }
+  });
+
+  refreshBridgeSettings = coalesced(async () => {
+    const a = this.adapter;
+    if (!a) return;
+    try {
+      const settings = await a.bridge.settings();
+      if (this.adapter === a) this.commit({ bridgeSettings: sameJson(this.state.bridgeSettings, settings) ? this.state.bridgeSettings : settings });
+    } catch {
+      /* keep the previous snapshot */
+    }
+  });
+
+  refreshComponents = coalesced(async () => {
+    const a = this.adapter;
+    if (!a) return;
+    try {
+      const components = await a.bridge.components();
+      if (this.adapter === a) this.commit({ components: reuse(this.state.components, components, byId) });
+    } catch {
+      /* keep the previous list */
+    }
+  });
+
+  refreshTransport = coalesced(async () => {
+    const a = this.adapter;
+    if (!a) return;
+    try {
+      const transport = await a.transport.status();
+      if (this.adapter === a) this.commit({ transport: sameJson(this.state.transport, transport) ? this.state.transport : transport });
+    } catch {
+      /* keep the previous snapshot */
+    }
+  });
+
+  /** Store a snapshot a write just returned (the page shows the node's answer at once; the next frame or reload confirms it). */
+  adoptBridgeSettings(settings: BridgeSettings): void {
+    this.commit({ bridgeSettings: settings });
+  }
+  adoptTransport(transport: TransportStatus): void {
+    this.commit({ transport });
+  }
+
+  /** One network's conversations (channels, DMs, groups), most recent first. Calls for the same network coalesce. */
+  refreshConversations = coalescedBy<NetworkId>(async (net) => {
+    const a = this.adapter;
+    if (!a) return;
+    try {
+      const list = await a.networks.conversations(net);
+      if (this.adapter === a) this.commit({ conversations: { ...this.state.conversations, [net]: sameConversations(this.state.conversations[net], list) } });
+    } catch {
+      /* keep the previous list */
+    }
+  });
+
+  /**
+   * Load one foreign conversation (the newest `limit` rows, default 100), keyed by its `fc-…` id. Overlapping calls for the same
+   * conversation are fine: only the newest call's answer is taken, laid over what a frame already added (`mergeForeignPage`).
+   */
+  async loadForeign(net: NetworkId, conv: string, limit: number = FOREIGN_PAGE_LIMIT): Promise<void> {
+    const a = this.adapter;
+    if (!a) return;
+    this.foreignLimits.set(conv, limit);
+    const gen = ++this.loadCounter;
+    this.foreignGen.set(conv, gen);
+    const have = this.state.foreignPages[conv];
+    if (!have) this.commit({ foreignPages: { ...this.state.foreignPages, [conv]: { state: "loading", network: net, page: null, error: null } } });
+    try {
+      const fetched = await a.networks.conversation(net, conv, { limit });
+      if (this.adapter !== a || this.foreignGen.get(conv) !== gen) return;
+      const prev = this.state.foreignPages[conv];
+      const page = trimForeign(mergeForeignPage(prev?.page, { conversation: fetched.conversation, messages: fetched.messages, more: fetched.more }), this.foreignLimits.get(conv) ?? limit);
+      const slot: ForeignSlot = prev?.page && sameJson(prev.page, page) ? { ...prev, state: "ready", error: null } : { state: "ready", network: net, page, error: null };
+      this.commit({ foreignPages: { ...this.state.foreignPages, [conv]: slot } });
+    } catch (e) {
+      if (this.adapter !== a || this.foreignGen.get(conv) !== gen) return;
+      const error = isApiError(e) ? e : null;
+      const prev = this.state.foreignPages[conv];
+      const next: ForeignSlot = error?.status === 404 ? { state: "missing", network: net, page: null, error } : { state: prev?.page ? "ready" : "error", network: net, page: prev?.page ?? null, error };
+      this.commit({ foreignPages: { ...this.state.foreignPages, [conv]: next } });
+    }
+  }
+
+  /** Take a row the page just changed itself (a cancel deletes it) out of the held window before the node's frame arrives. */
+  dropForeignRows(conv: string, ids: readonly string[]): void {
+    const slot = this.state.foreignPages[conv];
+    if (!slot?.page || ids.length === 0) return;
+    const gone = new Set(ids);
+    const messages = slot.page.messages.filter((m) => !gone.has(m.id));
+    if (messages.length === slot.page.messages.length) return;
+    this.commit({ foreignPages: { ...this.state.foreignPages, [conv]: { ...slot, page: { ...slot.page, messages } } } });
+  }
+
+  /**
+   * A `network_message` frame: it carries no text, so the open conversation refetches. A frame naming a row we hold re-reads from that row
+   * (a state change sits below the newest `seq`); one that does not re-reads above our newest `seq` (coalesced channel traffic). A
+   * `conversation` change (a row cancelled, a conversation added) reloads the whole window. The lists follow: the network's
+   * conversations when a view loaded them, and the network list for the counts when a conversation appeared or went.
+   */
+  private networkFrame(ev: NetworkMessageEvent): void {
+    const slot = this.state.foreignPages[ev.conv];
+    if (slot?.page) {
+      if (ev.change === "conversation") void this.loadForeign(ev.network, ev.conv, this.foreignLimits.get(ev.conv));
+      else void this.refreshForeignTail(ev);
+    }
+    if (this.state.conversations[ev.network] !== undefined || ev.change === "conversation") void this.refreshConversations(ev.network);
+    if (ev.change === "conversation") void this.refreshNetworks();
+  }
+
+  private readonly tailLane = coalescedBy<string>(async (conv) => {
+    const a = this.adapter;
+    const slot = this.state.foreignPages[conv];
+    const ev = this.tailEvents.get(conv);
+    this.tailEvents.delete(conv);
+    if (!a || !slot?.page || !ev) return;
+    const held = slot.page.messages;
+    const row = ev.id ? held.find((m) => m.id === ev.id) : undefined;
+    const since = row ? Math.max(0, row.seq - 1) : topSeq(held);
+    try {
+      const tail = await a.networks.conversation(slot.network, conv, { sinceSeq: since, limit: FOREIGN_PAGE_LIMIT });
+      if (this.adapter !== a) return;
+      const cur = this.state.foreignPages[conv];
+      if (!cur?.page) return;
+      // More than a tail's worth arrived: the window itself is stale.
+      if (tail.more) return void this.loadForeign(slot.network, conv, this.foreignLimits.get(conv));
+      const merged = trimForeign(applyForeignTail(cur.page, { conversation: tail.conversation, messages: tail.messages, more: tail.more }), this.foreignLimits.get(conv) ?? FOREIGN_PAGE_LIMIT);
+      if (sameJson(cur.page, merged)) return;
+      this.commit({ foreignPages: { ...this.state.foreignPages, [conv]: { ...cur, state: "ready", page: merged, error: null } } });
+    } catch {
+      /* the next frame or a reload brings it */
+    }
+  });
+  /** The newest frame per conversation waiting for its tail pass (older ones are covered by it). */
+  private readonly tailEvents = new Map<string, NetworkMessageEvent>();
+  private refreshForeignTail(ev: NetworkMessageEvent): Promise<void> {
+    const waiting = this.tailEvents.get(ev.conv);
+    // A frame that names a row we hold must not be replaced by a later nameless one: the state change sits below the newest `seq`.
+    if (!waiting || ev.id) this.tailEvents.set(ev.conv, ev);
+    return this.tailLane(ev.conv);
+  }
+
   /** Load this node's own card once (public material; it only changes when the identity does). */
   loadOwnCard = coalesced(async () => {
     const a = this.adapter;
@@ -650,6 +902,11 @@ export class ApiStore {
 function isMessageFrame(d: unknown): d is MessageChangeEvent {
   const x = d as Partial<MessageChangeEvent> | null;
   return !!x && typeof x === "object" && typeof x.peer === "string" && !!x.message && typeof x.message === "object" && typeof x.message.id === "string";
+}
+
+function isNetworkFrame(d: unknown): d is NetworkMessageEvent {
+  const x = d as Partial<NetworkMessageEvent> | null;
+  return !!x && typeof x === "object" && typeof x.network === "string" && typeof x.conv === "string" && typeof x.change === "string";
 }
 
 function isContactFrame(d: unknown): d is ContactChangeEvent {

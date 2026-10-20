@@ -1,9 +1,10 @@
 // Mock scenarios: each is a function from the base fixtures to the data the adapter serves plus a
 // script of timed events (relative to adapter creation). The adapter (index.ts) owns the live
 // state and implements ScriptContext; scenarios only describe what changes and when.
+import { buildBridgeRich, type BridgeData } from "./bridge";
 import { RADIO_BOARD_FOUND, RADIO_NO_BOARD, VERSION, heltecDevice, iso, layersRunning, logLine, type Fixtures } from "./fixtures";
-import { ADA, DOV, ELI, FAY, fabricRow, makeContact, type MessagingData } from "./messaging";
-import type { AgentEvent, AgentStatus, Contact, DeviceRecord, FlashOffer, NodeId, Proposal, ServiceId, ServiceRecord, Settings, Status } from "../types";
+import { ADA, DOV, ELI, FAY, buildNearby, fabricRow, makeContact, type MessagingData } from "./messaging";
+import type { AgentEvent, AgentStatus, Contact, DeviceRecord, FlashOffer, NearbySource, NodeId, Proposal, ServiceId, ServiceRecord, Settings, Status } from "../types";
 
 export const SCENARIO_NAMES = [
   "healthy",
@@ -21,6 +22,7 @@ export const SCENARIO_NAMES = [
   "store-full",
   "restore-pending",
   "meshtastic",
+  "bridge",
 ] as const;
 export type ScenarioName = (typeof SCENARIO_NAMES)[number];
 
@@ -61,6 +63,8 @@ export interface MockData {
   auth: MockAuth;
   /** Layer 5: contacts, conversations, fabric, nearby, panels. */
   messaging: MessagingData;
+  /** Layer 6: foreign networks, conversations, edges, bridge settings, components, transport. */
+  bridge: BridgeData;
 }
 
 /** What a script step may do. Every mutation publishes the matching frame on the bus. */
@@ -89,6 +93,8 @@ export interface ScriptContext {
    * every queued message and publish the `fabric` and `services` frames.
    */
   patchMessaging(fn: (m: MessagingData) => void): void;
+  /** A foreign text arrives in conversation `conv` (`fc-…`) from the air: a `network_message` frame. */
+  bridgeReceive(conv: string, sender: { native: string; name: string }, text: string, o?: { via_internet?: boolean }): void;
 }
 
 export interface TimedEvent {
@@ -122,6 +128,7 @@ function dataFrom(base: Fixtures): MockData {
     logs: c.logs,
     auth: { loopback: true, loopbackTrusted: true, requirePair: false, paired: false, created: null, deviceId: c.devices.find((d) => d.kind === "companion")?.id ?? null },
     messaging: c.messaging,
+    bridge: c.bridge,
   };
 }
 
@@ -528,6 +535,80 @@ export const meshtastic: ScenarioFn = (base) => {
   };
 };
 
+/** A reticulum presence source (announces the helper hears): a node's `id` is the 32-hex destination hash, `num` is 0. */
+function reticulumSource(now: number): NearbySource {
+  return {
+    id: "reticulum-lxmf",
+    kind: "reticulum",
+    label: "heard via Reticulum announces",
+    device_id: null,
+    nodes: [
+      { id: "0123456789abcdef0123456789abcdef", num: 0, long_name: "Sam (Sideband)", short_name: "01234567", last_heard_hint: iso(now - 9 * 60_000) },
+      { id: "fedcba9876543210fedcba9876543210", num: 0, long_name: "<b>Columba</b> phone", short_name: "fedcba98", last_heard_hint: iso(now - 40 * 60_000) },
+    ],
+  };
+}
+
+export const bridge: ScenarioFn = (base) => {
+  const data = dataFrom(base);
+  data.bridge = buildBridgeRich(base.now);
+  data.messaging.nearby = [...buildNearby(base.now), reticulumSource(base.now)];
+  const created_at = iso(base.now - 2 * 60_000);
+  const node_id = base.status.node.node_id;
+  data.proposals.unshift(
+    {
+      schema: 1,
+      id: "prop-01j9zl0a1bmq",
+      node_id,
+      task_id: null,
+      kind: "bridge_edge",
+      title: "Relay Ridge crew into Friends",
+      body: "from: fc-2\nto: fc-4\n\nThe camp updates on Ridge crew are worth passing on to your Reticulum friends. <b>Check it first.</b> [a link](https://evil.example)",
+      created_at,
+      decision: null,
+    },
+    {
+      schema: 1,
+      id: "prop-01j9zl0b2cnr",
+      node_id,
+      task_id: null,
+      kind: "bridge_message",
+      title: "Tell the ridge crew the camp is ready",
+      body: "to: fc-2\nto: fc-4\n\nCamp is ready at the second lake. **Not bold.** <script>alert(1)</script> https://example.com",
+      created_at,
+      decision: null,
+    },
+    {
+      schema: 1,
+      id: "prop-01j9zl0c3dps",
+      node_id,
+      task_id: null,
+      kind: "device",
+      title: "Set the region and look at the radio",
+      body: JSON.stringify({
+        why: "The board transmits nothing until a region is set, and I cannot tell which firmware it runs.",
+        actions: [
+          { action: "radio.region.set", region: "EU_868" },
+          { action: "identify", device_id: "usb-7c1e0b94a2d3" },
+          { action: "service.restart", service_id: "transport" },
+        ],
+      }),
+      created_at,
+      decision: null,
+    },
+  );
+  return {
+    name: "bridge",
+    summary:
+      "Layer 6: Meshtastic live (EU_868, a licensed board not yet confirmed, LongFast on the default key, Ridge crew uplinked with sending off, one DM), Reticulum live with a recipient list, Delta Chat cached and off. A relay edge and a consent-paused one. Three proposals (bridge_edge, bridge_message, device). 6 s in a hostile-named text arrives in LongFast; 9 s in Mara's DM arrives.",
+    data,
+    script: [
+      { atMs: 6_000, label: "a hostile-named text arrives in LongFast", run: (ctx) => ctx.bridgeReceive("fc-1", { native: "!5be00417", name: '<a href="https://evil.example">win</a>\u202egnp.exe' }, "<script>alert(1)</script> hello", { via_internet: true }) },
+      { atMs: 9_000, label: "Mara's DM arrives", run: (ctx) => ctx.bridgeReceive("fc-3", { native: "!0f3e9a12", name: "Mara" }, "I can see your repeater from here.") },
+    ],
+  };
+};
+
 export const scenarios: Record<ScenarioName, ScenarioFn> = {
   healthy,
   "first-run": firstRun,
@@ -544,6 +625,7 @@ export const scenarios: Record<ScenarioName, ScenarioFn> = {
   "store-full": storeFull,
   "restore-pending": restorePending,
   meshtastic,
+  bridge,
 };
 
 export function resolveScenario(name: string | null | undefined): ScenarioName {

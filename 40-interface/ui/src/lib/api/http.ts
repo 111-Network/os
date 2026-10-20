@@ -6,6 +6,7 @@ import type {
   DevicePatch,
   EventsHandlers,
   FlashReply,
+  ForeignThreadQuery,
   FlashRequest,
   MessageAccepted,
   ProposalFilter,
@@ -24,6 +25,12 @@ import {
   CHAT_EVENT_NAMES,
   type AgentStatus,
   type AuthSession,
+  type BridgeComponent,
+  type BridgeEdge,
+  type BridgeEdgeCreate,
+  type BridgeEdgePatch,
+  type BridgeSettings,
+  type BridgeSettingsPatch,
   type Card,
   type ChatFrame,
   type ChatHistory,
@@ -37,6 +44,13 @@ import {
   type FabricSettings,
   type FabricSettingsPatch,
   type FabricStatus,
+  type FanoutPreview,
+  type FanoutRequest,
+  type FanoutResult,
+  type ForeignConversation,
+  type ForeignSendAccepted,
+  type ForeignSendRequest,
+  type ForeignThread,
   type HostedPanel,
   type HubEnrollRequest,
   type HubOffer,
@@ -44,6 +58,7 @@ import {
   type LogTail,
   type Message,
   type NearbySource,
+  type Network,
   type PanelSession,
   type Proposal,
   type SendMessageRequest,
@@ -54,6 +69,10 @@ import {
   type Status,
   type TaskRequest,
   type Thread,
+  type TransportJoin,
+  type TransportPosturePatch,
+  type TransportPostureResult,
+  type TransportStatus,
 } from "./types";
 
 export interface HttpDeps {
@@ -247,7 +266,8 @@ export function createHttpAdapter(deps: HttpDeps = {}): Adapter {
       return body.proposals;
     },
     proposal: (id: string) => call<Proposal>("GET", `/proposals/${enc(id)}`),
-    decide: (id: string, decision: Decision) => call<Proposal>("POST", `/proposals/${enc(id)}/decision`, { body: { decision } }),
+    decide: (id: string, decision: Decision, acceptWarning?: string) =>
+      call<Proposal>("POST", `/proposals/${enc(id)}/decision`, { body: acceptWarning === undefined ? { decision } : { decision, accept_warning: acceptWarning } }),
 
     settings: () => call<Settings>("GET", "/settings"),
     patchSettings: (patch: SettingsPatch) => call<Settings>("PATCH", "/settings", { body: patch }),
@@ -288,6 +308,42 @@ export function createHttpAdapter(deps: HttpDeps = {}): Adapter {
     },
 
     nearby: () => list<NearbySource>("/nearby", "sources", "sources"),
+
+    networks: {
+      list: () => list<Network>("/networks", "networks", "networks"),
+      conversations: (net: string) => list<ForeignConversation>(`/networks/${enc(net)}/conversations`, "conversations", "conversations"),
+      openDm: (net: string, nativeId: string) => call<ForeignConversation>("POST", `/networks/${enc(net)}/conversations`, { body: { kind: "dm", native_id: nativeId } }),
+      conversation: async (net: string, conv: string, q: ForeignThreadQuery = {}) => {
+        const body = await call<Partial<ForeignThread>>("GET", `/networks/${enc(net)}/conversations/${enc(conv)}`, { query: { since_seq: q.sinceSeq, limit: q.limit } });
+        if (!Array.isArray(body?.messages) || !body.conversation) throw new ApiError(synthProblem(200, "Bad response", "Missing messages list."), { code: "upstream_error" });
+        return { schema: body.schema ?? 1, conversation: body.conversation, messages: body.messages, more: body.more === true } satisfies ForeignThread;
+      },
+      send: (net: string, conv: string, body: ForeignSendRequest) => call<ForeignSendAccepted>("POST", `/networks/${enc(net)}/conversations/${enc(conv)}/messages`, { body }),
+      fanoutPreview: (body: FanoutRequest) => call<FanoutPreview>("POST", "/messages/fanout/preview", { body }),
+      fanout: (body: FanoutRequest) => call<FanoutResult>("POST", "/messages/fanout", { body }),
+    },
+
+    bridge: {
+      edges: () => list<BridgeEdge>("/bridge/edges", "edges", "edges"),
+      createEdge: (body: BridgeEdgeCreate) => call<BridgeEdge>("POST", "/bridge/edges", { body }),
+      edge: (id: string) => call<BridgeEdge>("GET", `/bridge/edges/${enc(id)}`),
+      patchEdge: (id: string, patch: BridgeEdgePatch) => call<BridgeEdge>("PATCH", `/bridge/edges/${enc(id)}`, { body: patch }),
+      deleteEdge: (id: string) => call<void>("DELETE", `/bridge/edges/${enc(id)}`, { as: "none" }),
+      settings: () => call<BridgeSettings>("GET", "/bridge/settings"),
+      patchSettings: (patch: BridgeSettingsPatch) => call<BridgeSettings>("PATCH", "/bridge/settings", { body: patch }),
+      components: () => list<BridgeComponent>("/bridge/components", "components", "components"),
+      enableComponent: (id: string, acceptNoticeHash?: string) =>
+        call<BridgeComponent>("POST", `/bridge/components/${enc(id)}/enable`, { body: acceptNoticeHash === undefined ? {} : { accept_notice_hash: acceptNoticeHash } }),
+      disableComponent: (id: string) => call<BridgeComponent>("POST", `/bridge/components/${enc(id)}/disable`),
+      removeComponentFiles: (id: string, cache?: boolean) =>
+        call<BridgeComponent>("POST", `/bridge/components/${enc(id)}/remove-files`, { body: cache === undefined ? {} : { cache } }),
+    },
+
+    transport: {
+      status: () => call<TransportStatus>("GET", "/transport"),
+      patchPosture: (patch: TransportPosturePatch) => call<TransportPostureResult>("PATCH", "/transport/posture", { body: patch }),
+      join: () => call<TransportJoin>("POST", "/transport/join"),
+    },
 
     panels: {
       list: async () => {

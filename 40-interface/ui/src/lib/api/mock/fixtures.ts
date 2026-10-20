@@ -2,6 +2,7 @@
 // data, shaped exactly like api/openapi.yaml. Scenarios (scenarios.ts) clone and bend these.
 // Nothing here is imported by production code: the mock is reached only via a DEV-guarded dynamic import.
 import type { AgentStatus, DeviceRecord, Proposal, ServiceId, ServiceRecord, Settings, Status } from "../types";
+import { buildBridgeQuiet, type BridgeData } from "./bridge";
 import { buildMessaging, type MessagingData } from "./messaging";
 
 export const NODE_ID = "9f2c41d7a0b35e68c1d4f7092ab36e5d8c70f1e24b9a6d3057c8e1f2a4b6d9c3";
@@ -42,6 +43,8 @@ export interface Fixtures {
   logs: Record<ServiceId, string[]>;
   /** Layer 5: contacts, messages, fabric, nearby, panels (mock/messaging.ts). */
   messaging: MessagingData;
+  /** Layer 6: foreign networks, relay edges, bridge settings, components, transport (mock/bridge.ts). Quiet by default; the `bridge` scenario fills it. */
+  bridge: BridgeData;
 }
 
 const MIN = 60_000;
@@ -549,6 +552,7 @@ Nothing to fix right now. If it repeats, ask me to check the Wi-Fi power-saving 
     kbEntries: { ...KB_ENTRIES },
     logs,
     messaging,
+    bridge: buildBridgeQuiet(),
   };
 }
 

@@ -10,9 +10,11 @@ import type { DeviceRecord, HostedPanel, ServiceId, ServiceRecord, Status } from
  * The four generic goals, plus the four Layer 5 context goals (os/50-messaging/README.md section 16): `messaging.setup`
  * (enroll with a hub, or let a node use this one), `messaging.fix` (a full store, a hub that cannot be reached),
  * `meshtastic.setup` (identify the board, bind it) and `panel.explain` (what a hosted panel is and does). They are goal
- * sentences only: the context block stays the one builder's, and no text a peer or a radio sent is ever in it.
+ * sentences only: the context block stays the one builder's, and no text a peer or a radio sent is ever in it. Layer 6 adds
+ * `bridge.setup` (join a foreign network or relay one conversation into another) and `transport.fix` (the Reticulum transport or a
+ * radio region is not working); like the others they only ask, and every switch they lead to is the person's to turn.
  */
-export type PromptGoal = "setup" | "fix" | "connect" | "check" | "messaging.setup" | "messaging.fix" | "meshtastic.setup" | "panel.explain";
+export type PromptGoal = "setup" | "fix" | "connect" | "check" | "messaging.setup" | "messaging.fix" | "meshtastic.setup" | "panel.explain" | "bridge.setup" | "transport.fix";
 
 /**
  * What `buildPrompt` accepts. `context` emits the context block only, no goal sentence: for a prompt that
@@ -112,6 +114,10 @@ export function goalSentence(goal: PromptGoal, subject: PromptSubject): string {
       return "Fix messaging on this node. Find out why it is not working (a home hub that cannot be reached, or a message store that is full), and tell me the steps to fix it. Do not delete anything that has not been delivered.";
     case "meshtastic.setup":
       return "Set up the Meshtastic board on this node: identify it, bind it to meshmud, and check that the nodes it hears show up under Nearby and that the Meshtastic panel opens. Opening a board's serial port can reset it, so ask me before any step that does.";
+    case "bridge.setup":
+      return "Help me set up a foreign network on this node, or a relay between two conversations. Find out which networks are available (Meshtastic, Reticulum, Delta Chat), what each needs first (a radio region, a board, an optional component and its licence notice), and walk me through the steps. Relaying copies everyone's messages from one conversation to another, so tell me what that exposes. You can only propose: I turn on every network, relay and confirmation myself.";
+    case "transport.fix":
+      return "Fix the transport on this node. Find out why Reticulum or the radio is not passing traffic (a missing region, an interface that is down, a posture that does not match what I want), and tell me the steps. Propose any change as a proposal; I decide it.";
     case "panel.explain":
       return `Explain the ${name} panel on this node: what it is, what I can do in it, what it can send out over my radio or the network, which outside websites my browser may contact when it is open, and what I need to do to use it.`;
   }

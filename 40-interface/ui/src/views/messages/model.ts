@@ -6,7 +6,7 @@ import { cleanPeerText, conversationThreads, isCancelled, requestThreads } from 
 import { own } from "../../lib/api/own";
 import { isApiError } from "../../lib/api/problem";
 import { isIgnored, requestSeq, type IgnoredRequests } from "../../lib/api/requests";
-import type { Contact, FabricStatus, Message, MessageState, NodeId, ServiceRecord, Thread } from "../../lib/api/types";
+import type { Contact, FabricStatus, ForeignConversation, Message, MessageState, Network, NodeId, ServiceRecord, Thread } from "../../lib/api/types";
 import type { PromptGoal } from "../../lib/prompts";
 
 // --- Delivery evidence (§9) -----------------------------------------------------------------------------------------
@@ -219,6 +219,44 @@ export function composeGate(contact: Pick<Contact, "request" | "has_key"> | null
   if (!contact) return { ok: false, why: "You can write to your contacts. Add this person from Contacts first." };
   if (contact.request || pageRequest) return { ok: false, why: "This is a message request. Accept it to reply; nothing is sent back to them until you do." };
   return { ok: true, hint: contact.has_key ? null : REASON_COPY.waiting_for_key! };
+}
+
+// --- The foreign compose gate (os/60-transport/README.md §10) ------------------------------------------------------------------
+
+/** One fact shown above the foreign composer: it does not block a send (the node queues what it cannot send yet) but the person reads it first. */
+export interface GateNote {
+  code: string;
+  text: string;
+  tone: "warn" | "info";
+  /** A route that fixes it, when there is one. */
+  href?: string;
+}
+
+export type ForeignComposeGate = { ok: true; notes: GateNote[] } | { ok: false; why: string };
+
+export const UPLINK_WARNING = "This channel is published to the internet by your board.";
+export const UPLINK_DM_WARNING = "A direct message can go out as an opaque blob when any channel of this board uploads to the internet.";
+export const HAM_WARNING = "Your board is amateur-licensed. Readable texts sent through it need your confirmation once; sealed 111 messages never go this way.";
+
+/**
+ * Can this foreign conversation take a text, and what should the person read first? It replaces `composeGate` for foreign threads:
+ * a foreign address is never a contact, so there is no contact to check. Only an unknown network or one that is switched off blocks.
+ * Everything else is a fact to read (network up, region set, uplink, licence, airtime), because delivery is never promised and the
+ * node queues what it cannot send yet.
+ */
+export function foreignComposeGate(network: Network | null | undefined, conv: Pick<ForeignConversation, "kind" | "uplink" | "send_enabled"> | null | undefined): ForeignComposeGate {
+  if (!network || !conv) return { ok: false, why: "Loading this conversation." };
+  if (network.state === "disabled") return { ok: false, why: `${network.label} is turned off. Turn it on in Settings, Transport, then write here.` };
+  const notes: GateNote[] = [];
+  if (network.state === "error") notes.push({ code: "network_down", tone: "warn", text: `${network.label} is not reachable right now. Your text waits on this node until it is.` });
+  if (network.gate.region_set === false) notes.push({ code: "region_unset", tone: "warn", text: "The radio region is not set, so the board transmits nothing yet. Your text waits.", href: "/settings/l6" });
+  if (network.gate.licensed === true && network.gate.ham_confirmed !== true) notes.push({ code: "ham_unconfirmed", tone: "warn", text: HAM_WARNING });
+  if (conv.kind === "channel" && conv.uplink === true) notes.push({ code: "uplink_channel", tone: "warn", text: UPLINK_WARNING });
+  else if (conv.kind === "dm" && network.gate.uplink_channels > 0) notes.push({ code: "uplink_dm", tone: "warn", text: UPLINK_DM_WARNING });
+  if (conv.kind === "channel" && conv.send_enabled === false) notes.push({ code: "send_off", tone: "warn", text: "Sending on this channel is off. The first send asks you to confirm it." });
+  notes.push({ code: "send_warning", tone: "info", text: network.copy.send_warning });
+  if (network.caps.airtime) notes.push({ code: "airtime", tone: "info", text: `Airtime: ${network.caps.airtime.rule}. It is an estimate.` });
+  return { ok: true, notes };
 }
 
 // --- The messaging service line --------------------------------------------------------------------------------------

@@ -7,6 +7,12 @@
 import type {
   AgentStatus,
   AuthSession,
+  BridgeComponent,
+  BridgeEdge,
+  BridgeEdgeCreate,
+  BridgeEdgePatch,
+  BridgeSettings,
+  BridgeSettingsPatch,
   Card,
   ChatFrame,
   ChatHistory,
@@ -21,6 +27,13 @@ import type {
   FabricSettings,
   FabricSettingsPatch,
   FabricStatus,
+  FanoutPreview,
+  FanoutRequest,
+  FanoutResult,
+  ForeignConversation,
+  ForeignSendAccepted,
+  ForeignSendRequest,
+  ForeignThread,
   HostedPanel,
   HubEnrollRequest,
   HubOffer,
@@ -29,6 +42,8 @@ import type {
   Message,
   MessageId,
   NearbySource,
+  Network,
+  NetworkId,
   NodeId,
   PanelSession,
   Proposal,
@@ -40,6 +55,10 @@ import type {
   Status,
   TaskRequest,
   Thread,
+  TransportJoin,
+  TransportPosturePatch,
+  TransportPostureResult,
+  TransportStatus,
 } from "./types";
 import type { ThreadPage } from "./messages";
 
@@ -124,6 +143,12 @@ export interface MessageAccepted {
   id: MessageId;
 }
 
+/** Query of `GET /networks/{net}/conversations/{conv}`: `limit` defaults to 100 (max 500); `sinceSeq` pages forward from a receipt sequence. */
+export interface ForeignThreadQuery {
+  sinceSeq?: number;
+  limit?: number;
+}
+
 export interface SendOptions {
   /** Abort the in-flight request. Breaking out of the `for await` loop aborts it too. */
   signal?: AbortSignal;
@@ -180,7 +205,11 @@ export interface Adapter {
   /** Unwraps `{schema, proposals}`. Default filter is the server default, `open`. */
   proposals(status?: ProposalFilter): Promise<Proposal[]>;
   proposal(id: string): Promise<Proposal>;
-  decide(id: string, decision: Decision): Promise<Proposal>;
+  /**
+   * Record the human's decision. Layer 6: a bridge proposal behind a consent gate answers 409 `consent_required` with the exact text
+   * and its hash (`ApiError.problem.consent`); the decision is repeated with `acceptWarning` = that hash (`accept_warning`).
+   */
+  decide(id: string, decision: Decision, acceptWarning?: string): Promise<Proposal>;
 
   settings(): Promise<Settings>;
   patchSettings(patch: SettingsPatch): Promise<Settings>;
@@ -237,8 +266,63 @@ export interface Adapter {
     patchSettings(patch: FabricSettingsPatch): Promise<FabricSettings>;
   };
 
-  /** Unwraps `{schema, sources}`: presence per source (v1: Meshtastic nodes heard). Names are untrusted RF-origin strings. */
+  /** Unwraps `{schema, sources}`: presence per source (Meshtastic nodes heard; Reticulum announces heard). Names are untrusted RF-origin strings. */
   nearby(): Promise<NearbySource[]>;
+
+  /**
+   * Foreign networks (os/60-transport/README.md §10). Every write refuses the agent's bearer; a human on a loopback or paired session
+   * makes them. A foreign conversation is never a 111 thread: ids are `fc-…` and `fm-…`, and every foreign string is untrusted text.
+   */
+  networks: {
+    /** Unwraps `{schema, networks}`, in the preferred order. */
+    list(): Promise<Network[]>;
+    /** Unwraps `{schema, network, conversations}`, most recent receipt first. 404 for an unknown network. */
+    conversations(net: NetworkId): Promise<ForeignConversation[]>;
+    /** Open (or find) a foreign DM by the network's own address. 400 when it does not match the recipient syntax; 409 `component_unavailable`. */
+    openDm(net: NetworkId, nativeId: string): Promise<ForeignConversation>;
+    /** One conversation: the newest `limit` rows, or with `sinceSeq` the first `limit` above it. */
+    conversation(net: NetworkId, conv: string, q?: ForeignThreadQuery): Promise<ForeignThread>;
+    /**
+     * Queue a text into one conversation. 202 `{id, plan}`; 409 `oversize` (refuse mode) or 409 `consent_required` (HAM, uplink) with the text and hash.
+     * The row's retry and cancel are `messages.retry` / `messages.cancel` with its `fm-…` id.
+     */
+    send(net: NetworkId, conv: string, body: ForeignSendRequest): Promise<ForeignSendAccepted>;
+    /** Dry run of a fan-out: nothing is queued or sent, and the text is not logged. */
+    fanoutPreview(body: FanoutRequest): Promise<FanoutPreview>;
+    /** Send to many targets as one send group. Atomic: 409 with the per-target report (`ApiError.problem.targets`) queues nothing. */
+    fanout(body: FanoutRequest): Promise<FanoutResult>;
+  };
+
+  /** Relay edges, bridge settings and optional components (os/60-transport/README.md §2.1, §8, §10). */
+  bridge: {
+    /** Unwraps `{schema, edges}`. */
+    edges(): Promise<BridgeEdge[]>;
+    /** Enable a relay. 409 `consent_required` carries the exact warning and its hash until `acceptWarning` echoes it. */
+    createEdge(body: BridgeEdgeCreate): Promise<BridgeEdge>;
+    edge(id: string): Promise<BridgeEdge>;
+    /** Pause, resume (a `consent_paused` edge needs the NEW text's hash), `honour_ok_to_mqtt`, `oversize`. */
+    patchEdge(id: string, patch: BridgeEdgePatch): Promise<BridgeEdge>;
+    deleteEdge(id: string): Promise<void>;
+    settings(): Promise<BridgeSettings>;
+    /** Partial merge. A HAM confirmation or an uplinked channel's send switch answers 409 `consent_required` until it carries the hash. */
+    patchSettings(patch: BridgeSettingsPatch): Promise<BridgeSettings>;
+    /** Unwraps `{schema, components}`. */
+    components(): Promise<BridgeComponent[]>;
+    /** Install from the install-time cache and start. 409 `consent_required` carries the licence notice and its hash; 409 `component_unavailable` installs nothing. */
+    enableComponent(id: string, acceptNoticeHash?: string): Promise<BridgeComponent>;
+    disableComponent(id: string): Promise<BridgeComponent>;
+    /** Delete the installed tree and the adapter's state; `cache: true` also the cached download. 409 while it runs. */
+    removeComponentFiles(id: string, cache?: boolean): Promise<BridgeComponent>;
+  };
+
+  /** Transport facts, the rnsd posture, region and callsign (os/60-transport/README.md §11). */
+  transport: {
+    status(): Promise<TransportStatus>;
+    /** Partial merge through the apply, probe, revert loop. A reverted change is a 200 with `reverted: true`. */
+    patchPosture(patch: TransportPosturePatch): Promise<TransportPostureResult>;
+    /** The phone-relay join descriptor. A POST because it carries a credential; the answer is `no-store` and is never kept by this page. */
+    join(): Promise<TransportJoin>;
+  };
 
   /** Hosted panels (§13). */
   panels: {

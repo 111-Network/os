@@ -14,6 +14,7 @@ import type { NearbyNode, NearbySource } from "../../lib/api/types";
 import { Adv } from "../../lib/mode";
 import { NEARBY_QUESTION, questionPrompt } from "../../lib/prompts";
 import { AgentButton, useAgentReachable } from "../devices/agent-button";
+import { DmAction } from "./dm-action";
 import { RouteLink } from "../services/shared";
 import {
   displayName,
@@ -37,7 +38,7 @@ const TEXT = "font-mono text-xs leading-relaxed text-muted-foreground";
 /** Text a radio supplied: its own direction, isolated from the page around it, wrapped wherever it must be. */
 const RF_TEXT = "min-w-0 break-words [unicode-bidi:isolate]";
 
-function NodeItem({ node, now }: { node: NearbyNode; now: number }) {
+function NodeItem({ node, now, sourceKind }: { node: NearbyNode; now: number; sourceKind: string }) {
   const short = shortName(node);
   const facts = [hopsText(node), signalText(node), utilizationText(node)].filter((x): x is string => x !== null);
   const position = positionText(node);
@@ -57,6 +58,7 @@ function NodeItem({ node, now }: { node: NearbyNode; now: number }) {
       </div>
       {facts.length > 0 ? <p className={TEXT}>{facts.join(" · ")}</p> : null}
       {position ? <p className={TEXT}>position, as it reports it: {position}</p> : null}
+      <DmAction node={node} sourceKind={sourceKind} />
       <Adv>
         <p dir="auto" className={`${RF_TEXT} font-mono text-[11px] leading-snug text-muted-foreground`}>
           id {plain(node.id, 24)} · number {Number.isFinite(node.num) ? node.num : "unknown"}
@@ -72,7 +74,7 @@ function SourceList({ source, now }: { source: NearbySource; now: number }) {
   const heading = sourceHeading(source, devices);
   const nodes = sortedNodes(source.nodes);
   return (
-    <Panel title="meshtastic" suffix="nodes heard" flush>
+    <Panel title={source.kind === "reticulum" ? "reticulum" : "meshtastic"} suffix="nodes heard" flush>
       <div className="border-b border-border px-4 py-3">
         <h2 dir="auto" className={`${RF_TEXT} font-mono text-sm text-foreground`}>
           {heading}
@@ -80,11 +82,11 @@ function SourceList({ source, now }: { source: NearbySource; now: number }) {
         <p className={`mt-1 ${TEXT}`}>{nodes.length === 1 ? "1 node" : `${nodes.length} nodes`}</p>
       </div>
       {nodes.length === 0 ? (
-        <p className={`px-4 py-3 ${TEXT}`}>This board has not heard another node yet.</p>
+        <p className={`px-4 py-3 ${TEXT}`}>{source.kind === "reticulum" ? "No Reticulum announce heard yet." : "This board has not heard another node yet."}</p>
       ) : (
         <ul className="divide-y divide-border">
           {nodes.map((n) => (
-            <NodeItem key={`${source.id}/${n.id}`} node={n} now={now} />
+            <NodeItem key={`${source.id}/${n.id}`} node={n} now={now} sourceKind={source.kind} />
           ))}
         </ul>
       )}
@@ -130,7 +132,7 @@ export default function NearbyView() {
           <h2 id="nearby-lists" className="font-mono text-[10px] uppercase tracking-widest text-muted-foreground">
             heard by this node
           </h2>
-          <p className="font-mono text-sm leading-relaxed text-foreground">{heardSummary(nearby)}</p>
+          <p className="font-mono text-sm leading-relaxed text-foreground">{heardSummary(nearby.filter((s) => s.kind !== "reticulum")) }{nearby.some((s) => s.kind === "reticulum") ? ` ${nearby.filter((s) => s.kind === "reticulum").reduce((n, s) => n + s.nodes.length, 0)} Reticulum announces heard.` : ""}</p>
           {state.text ? (
             <p role="status" className="max-w-prose border border-dashed border-border p-3 font-mono text-xs leading-relaxed text-foreground" data-testid="nearby-stale">
               {state.text}
@@ -141,7 +143,7 @@ export default function NearbyView() {
           ))}
           <p className={`max-w-prose ${TEXT}`}>
             Names, positions and times are what each node says about itself over the air. They are shown as plain text and are never links. A time comes from the node&apos;s own clock, so it is a hint, not proof that
-            it is in range now. A Meshtastic node is not a contact: it is a different network with its own identities, and you cannot message it from here.
+            it is in range now. A Meshtastic node is not a contact: it is a different network with its own identities. Where it is offered, a DM opens as a Meshtastic conversation in Messages (readable, not 111-sealed).
           </p>
         </section>
       ) : (
