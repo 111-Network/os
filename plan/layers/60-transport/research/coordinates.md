@@ -92,3 +92,9 @@ Next after the run: lead writes `layers/60-transport/options.md` → owner decid
   B3-bounce in parallel on disjoint files, findings embedded as double-quoted JSON strings so backticks cannot close a template literal):
   `wf_866f9a2c-d40`. C2's deviations are C1 contract items (reason_code `handoff_pending`, fm- ids on retry/cancel, accept_warning on the
   decision, no join QR, no mark-read) — recorded in the C2 row for the C1 landing / bounce.
+- **Pause (owner, token budget, 2026-10-20 ~00:20):** the Wave 1c bounce `wf_866f9a2c-d40` and the C2 review `wf_b2f6351f-8d9` were stopped and their
+  partial edits reverted; the three build workflows ran to completion. **Landed:** C4 `54117d3` (+ board `3a4d321`; run `wf_4f4eadf8-b07`), C3rs `ea178c2`
+  (run `wf_80a1e93d-2e8`, whose C5 half returned partial — its diff is `runs/wip/C5-deltachat-madmail.patch`, blocked by the install harness, see the
+  C5 row), C1 `21258f5` (run `wf_19cfc9b9-7ac`). Each was verified by the lead (C4 and C3rs in scratch worktrees on HEAD + the task's files, C1 on the
+  quiet tree). Disk: the worktree builds filled the allowance (linker Bus error); `target/node111/debug/incremental` and stale test binaries were
+  deleted (12 GB free). Canonical state for the next session: `plan/HANDOFF-2026-10-20.md`.
