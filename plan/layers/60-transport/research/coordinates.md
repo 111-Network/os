@@ -85,3 +85,10 @@ Next after the run: lead writes `layers/60-transport/options.md` → owner decid
   (2 agents, ~1.13M subagent tokens, 52 min). C3py review amend → lead fixes `a0dcf56` (assets-copy tests skip until C3rs; floor 3.11).
 - **Wave 2 fully launched:** `wave-2.js` C1 `wf_19cfc9b9-7ac`; `wave-2b.js` C3rs + C5 `wf_80a1e93d-2e8`; C4 `wf_4f4eadf8-b07` and C2 (`wf_3fd1e4f0-857`)
   still running. Disk: the node111 target reached 21 GB (4.2 GB free); test binaries and incremental dirs older than 35 min were deleted (13 GB free).
+- **B4 bounce landed** `323458b` (verified in a scratch worktree on HEAD + the bounce's eight files, since C4's live `devices/registry.rs` edits
+  broke the shared tree: clippy clean, lib transport 30, spine 21, venv 6, devices 15, G4 GREEN; the worktree was removed after). **C2 landed**
+  `e94985f` (`pnpm check` 1400 tests, budgets PASS; review `wf_b2f6351f-8d9`). **B2 + B3 reviews:** both amend (B2: pre-air Later keeps the
+  pending mark + the DM post-air NAK is never retried; B3: the HAM fact fails open) → **Run — Wave 1c bounce** (`wave-1c-bounce.js`, B2-bounce +
+  B3-bounce in parallel on disjoint files, findings embedded as double-quoted JSON strings so backticks cannot close a template literal):
+  `wf_866f9a2c-d40`. C2's deviations are C1 contract items (reason_code `handoff_pending`, fm- ids on retry/cancel, accept_warning on the
+  decision, no join QR, no mark-read) — recorded in the C2 row for the C1 landing / bounce.
