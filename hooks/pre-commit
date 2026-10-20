@@ -1,5 +1,22 @@
 #!/bin/sh
-# Pre-commit: validate the knowledge base (schema, relations, staleness)
-# and fail if any generated llms.txt index is stale. Zero errors required.
+# Pre-commit, two checks:
+#  1. Never commit on a stale main. Fetch origin (15 s budget) and refuse when origin/main has moved
+#     past HEAD: rebase first (`git pull --rebase`), re-run the gates, then commit. Offline, the fetch
+#     fails and the commit goes through with a warning. Other branches are not checked.
+#  2. Validate the knowledge base (schema, relations, staleness) and fail if any generated llms.txt
+#     index is stale. Zero errors required.
+# Activate once per clone: git config core.hooksPath hooks
 cd "$(git rev-parse --show-toplevel)" || exit 1
-python3 00-knowledge/_meta/build.py --check
+branch=$(git symbolic-ref --quiet --short HEAD 2>/dev/null || echo "")
+if [ "$branch" = main ] && git remote get-url origin >/dev/null 2>&1; then
+  if timeout 15 git fetch -q origin main 2>/dev/null; then
+    behind=$(git rev-list --count HEAD..origin/main 2>/dev/null || echo 0)
+    if [ "$behind" -gt 0 ]; then
+      echo "pre-commit: main is $behind commit(s) behind origin/main — run 'git pull --rebase' and re-run the gates first (AGENTS.md: never work on a stale base)" >&2
+      exit 1
+    fi
+  else
+    echo "pre-commit: could not fetch origin (offline?) — staleness not checked" >&2
+  fi
+fi
+python3 0-knowledge/_meta/build.py --check

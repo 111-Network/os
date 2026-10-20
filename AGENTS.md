@@ -31,6 +31,11 @@ This repo (`os/`) is the operating layer of the 111network mesh OS: an offline-f
   `9-evolution` reserved). `plan/layers/` uses the same names. Specs in `<N-slug>/README.md`, boards in
   `<N-slug>/TASKS.md`.
 - Commit in this repo after every verified task. NEVER add Claude co-author or attribution lines.
+- **Start of every session, before reading the plan or touching a file:** `git fetch origin && git pull --ff-only` in `os/`
+  and in `../website/`, and work only on that base. If local commits exist and `origin/main` has moved, `git pull --rebase`,
+  re-run the gates, then continue. `hooks/pre-commit` refuses a commit on a `main` that is behind `origin/main` (it fetches
+  first; offline it warns and lets the commit through); activate it once per clone with `git config core.hooksPath hooks`.
+  Push when the work is verified and committed.
 - **Raspberry Pi is the floor (owner rule, 2026-10-19):** the OS without the local models was confirmed to run on a Raspberry Pi, and the
   required configuration stays that way: super light and super efficient. The base install is the thin 111 layer only; everything third-party is
   a separate, on-demand component that weighs nothing (no process, listener, loaded code, timer or open file) while it is off. No task may add a
