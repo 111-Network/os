@@ -25,8 +25,8 @@ os/plan/
     devices.md           device-connection core brief (Layer 6 opener; read by Layers 4, 5, 6)
     parked.md            ideas parked by the owner for later layers
   layers/
-    NN-<slug>/         one folder per layer that has plan material
-      README.md          one-screen index: status line, links to every file, spec + TASKS.md in os/NN-<slug>/
+    N-<slug>/         one folder per layer that has plan material
+      README.md          one-screen index: status line, links to every file, spec + TASKS.md in os/N-<slug>/
       options.md         options brief (research condensed into 2-4 options with a recommendation)
       research/          research reports, plus coordinates.md (run ids, resume info, build-wave log)
       review/            triage.md (lead's disposition of the adversarial panel) + per-judge and per-wave reports
@@ -36,30 +36,30 @@ os/plan/
 ```
 
 Layer folders exist only where there is plan material. A folder holds only the parts that layer produced
-(Layer 0 has no research folder, for example). The spec and the task board are not here: they live in `os/NN-<slug>/README.md`
-and `os/NN-<slug>/TASKS.md`, where the layer's code is.
+(Layer 0 has no research folder, for example). The spec and the task board are not here: they live in `os/N-<slug>/README.md`
+and `os/N-<slug>/TASKS.md`, where the layer's code is.
 
 ### Layers and their folders
 
 | Layer | Folder | Notes |
 |---|---|---|
-| 0 Knowledge | `layers/00-knowledge/` | options, triage |
-| 1 Bootstrap | `layers/10-bootstrap/` | options, triage |
-| 2 Identity | `layers/20-identity/` | options, research coordinates, triage |
-| 3 Local Intelligence | none | no plan material: no research sweep or panel was run; see D10 and `os/30-intelligence/` |
-| 4 Interface & Dashboard | `layers/40-interface/` | options, triage |
-| 5 Messaging & Data | `layers/50-messaging/` | full set: research, options, review, runs |
-| 6 Transport & Bridge | `layers/60-transport/` | research, coordinates, runs (kickoff 2026-10-19, D23); opener brief [`cross-layer/devices.md`](cross-layer/devices.md) |
-| 7 Relay & Presence | none yet | reserved name `70-relay`; pending |
-| 8 Storage & Shared State | none yet | reserved name `80-storage`; pending |
-| 9 Self-Healing & Evolution | none yet | reserved name `90-evolution`; pending |
+| 0 Knowledge | `layers/0-knowledge/` | options, triage |
+| 1 Bootstrap | `layers/1-bootstrap/` | options, triage |
+| 2 Identity | `layers/2-identity/` | options, research coordinates, triage |
+| 3 Local Intelligence | none | no plan material: no research sweep or panel was run; see D10 and `os/3-intelligence/` |
+| 4 Interface & Dashboard | `layers/4-interface/` | options, triage |
+| 5 Messaging & Data | `layers/5-messaging/` | full set: research, options, review, runs |
+| 6 Transport & Bridge | `layers/6-transport/` | research, coordinates, runs (kickoff 2026-10-19, D23); opener brief [`cross-layer/devices.md`](cross-layer/devices.md) |
+| 7 Relay & Presence | none yet | reserved name `7-relay`; pending |
+| 8 Storage & Shared State | none yet | reserved name `8-storage`; pending |
+| 9 Self-Healing & Evolution | none yet | reserved name `9-evolution`; pending |
 
 ## Naming conventions
 
-- **Layer folder:** `layers/NN-<slug>/`, where `NN` is the layer number from `INDEX.md` times 10 and the name is identical to the layer's own folder under `os/`. Current names: `00-knowledge`, `10-bootstrap`, `20-identity`, `40-interface`, `50-messaging`, `60-transport` (Layer 3, `30-intelligence`, has no plan material, so no plan folder). Reserved for layers not started yet: `70-relay`, `80-storage`, `90-evolution`. `plan/` and `hooks/` are not layers and stay unnumbered.
-- **Fixed names inside a layer folder:** `NN-<slug>/README.md`, `NN-<slug>/options.md`, `NN-<slug>/research/coordinates.md`, `NN-<slug>/review/triage.md`. A layer that lacks one of these simply has not produced it.
+- **Layer folder:** `layers/N-<slug>/`, where `N` is the layer number from `INDEX.md` and the name is identical to the layer's own folder under `os/`. Current names: `0-knowledge`, `1-bootstrap`, `2-identity`, `4-interface`, `5-messaging`, `6-transport` (Layer 3, `3-intelligence`, has no plan material, so no plan folder). Reserved for layers not started yet: `7-relay`, `8-storage`, `9-evolution`. `plan/` and `hooks/` are not layers and stay unnumbered.
+- **Fixed names inside a layer folder:** `N-<slug>/README.md`, `N-<slug>/options.md`, `N-<slug>/research/coordinates.md`, `N-<slug>/review/triage.md`. A layer that lacks one of these simply has not produced it.
 - **Research reports:** `research/NN-<topic>.md`, numbered in run order. Gap-fill reports reuse one number and add a suffix (07-gap-1, 07-gap-2, ...).
-- **Review reports:** `review/<lens>.md` for each judge of the spec panel (crypto, panels, integration), `NN-<slug>/review/recheck.md` for the re-check, `NN-<slug>/review/wave-N.md` for the triage of build wave N.
+- **Review reports:** `review/<lens>.md` for each judge of the spec panel (crypto, panels, integration), `N-<slug>/review/recheck.md` for the re-check, `N-<slug>/review/wave-N.md` for the triage of build wave N.
 - **Workflow scripts:** `runs/workflows/<name>.js`: `research.js`, `spec-review.js`, `wave-N.js`, `wave-N-review.js`, `wave-N-bounce.js`.
 - **Journals:** `runs/journals/<label>.<wf_id>.jsonl`, one JSON line per finished agent.
 - **Handoffs:** `HANDOFF-YYYY-MM-DD.md`.
@@ -67,41 +67,41 @@ and `os/NN-<slug>/TASKS.md`, where the layer's code is.
 ### How paths are written inside plan documents
 
 - Markdown links are relative to the file that contains them.
-- Backticked plan paths are written from the plan root (`layers/50-messaging/options.md`) or from the repo (`os/plan/layers/50-messaging/options.md`, `plan/layers/...`). Documents outside `plan/` always use the `os/plan/...` or `plan/...` form.
+- Backticked plan paths are written from the plan root (`layers/5-messaging/options.md`) or from the repo (`os/plan/layers/5-messaging/options.md`, `plan/layers/...`). Documents outside `plan/` always use the `os/plan/...` or `plan/...` form.
 - A bare file name such as `DECISIONS.md` or `INDEX.md` means the top-level file of that name.
 
 ## Where does X go?
 
 | You are producing | Put it in |
 |---|---|
-| A research scout report | `layers/NN-<slug>/research/NN-<topic>.md` |
-| Run ids, resume info, quota-wall notes, build-wave log | `layers/NN-<slug>/research/coordinates.md` (append; sessions die, this file survives) |
-| The options brief for the owner | `layers/NN-<slug>/options.md` |
-| An adversarial panel report or re-check | `layers/NN-<slug>/review/` |
-| The lead's triage of a panel or a build wave | `layers/NN-<slug>/review/triage.md` or `review/wave-N.md` |
-| A Workflow script you will launch or resume | `layers/NN-<slug>/runs/workflows/<name>.js` (must stay under the repo: `scriptPath` has to be readable after a restart) |
-| An exported workflow journal | `layers/NN-<slug>/runs/journals/` and a row in its README |
+| A research scout report | `layers/N-<slug>/research/NN-<topic>.md` |
+| Run ids, resume info, quota-wall notes, build-wave log | `layers/N-<slug>/research/coordinates.md` (append; sessions die, this file survives) |
+| The options brief for the owner | `layers/N-<slug>/options.md` |
+| An adversarial panel report or re-check | `layers/N-<slug>/review/` |
+| The lead's triage of a panel or a build wave | `layers/N-<slug>/review/triage.md` or `review/wave-N.md` |
+| A Workflow script you will launch or resume | `layers/N-<slug>/runs/workflows/<name>.js` (must stay under the repo: `scriptPath` has to be readable after a restart) |
+| An exported workflow journal | `layers/N-<slug>/runs/journals/` and a row in its README |
 | An owner decision | `DECISIONS.md` (new D-number, rejected alternatives included) |
 | Layer status change | the layer's row in `INDEX.md`, then the status line in the layer README |
 | A brief or note that spans layers | `cross-layer/` |
 | A session handoff | `HANDOFF-YYYY-MM-DD.md` at the plan root |
-| The layer spec, task board, code | `os/NN-<slug>/` (never here) |
+| The layer spec, task board, code | `os/N-<slug>/` (never here) |
 
 ### Starting a new layer folder
 
-1. `git mv` or create `layers/NN-<slug>/` with only the parts you have. It takes the same name as the layer's folder under `os/`.
-2. Write its `README.md` (status line copied from the `INDEX.md` row, links to every file, links to `os/NN-<slug>/README.md` and `TASKS.md`).
+1. `git mv` or create `layers/N-<slug>/` with only the parts you have. It takes the same name as the layer's folder under `os/`.
+2. Write its `README.md` (status line copied from the `INDEX.md` row, links to every file, links to `os/N-<slug>/README.md` and `TASKS.md`).
 3. Put the folder link in the Plan column of the layer's `INDEX.md` row.
 
 ### Handoffs
 
 A handoff is the one document a fresh session needs to continue exactly where work stopped. It lives at the plan root as
 `HANDOFF-YYYY-MM-DD.md` while it is current. The 2026-10-15 handoff is [`HANDOFF-2026-10-15.md`](HANDOFF-2026-10-15.md).
-Its paths were rewritten to the numbered layer folders on 2026-10-18; the state it describes is unchanged.
+Its paths were rewritten to the numbered layer folders on 2026-10-18 and again on 2026-10-20; the state it describes is unchanged.
 
 > The paths in the section below are as they were on 2026-10-15. The layer folders at the repo root and under `layers/`
-> were renumbered on 2026-10-18 (see the next section), so read `bootstrap/` as `10-bootstrap/`, a plan folder named
-> `05-messaging` as `50-messaging`, and so on. The handoff it mentions was rewritten to the new names the same day.
+> were renumbered on 2026-10-18 and again on 2026-10-20 (see the next two sections), so read `bootstrap/` as `1-bootstrap/`,
+> a plan folder named `05-messaging` as `5-messaging`, and so on. The handoff it mentions was rewritten to the new names both times.
 
 ## Moves on 2026-10-15
 
@@ -164,6 +164,9 @@ temp copy in `layers/02-identity/research/coordinates.md`).
 Two edits inside the moved Workflow scripts beyond prompt path strings: the `OUT` constants of `research.js` and
 `spec-review.js` now point at the new report folders. Editing a script changes the cache keys of its recorded run, so a
 `resumeFromRunId` replay of a run launched from the old text re-runs the changed calls live.
+
+> The names in the section below are as they were on 2026-10-18. The same folders were renumbered to one digit on
+> 2026-10-20 (see the next section): read `10-bootstrap/` as `1-bootstrap/`, `layers/50-messaging/` as `layers/5-messaging/`, and so on.
 
 ## Moves on 2026-10-18
 
@@ -236,3 +239,47 @@ G2 ×2, presence sidecar (69 tests), UI (1147 tests + budget), intelligence chec
 
 Editing a workflow script changes the cache keys of its recorded run, so a `resumeFromRunId` replay of a run launched from
 the old text re-runs the changed calls live. This now applies to all ten scripts in `plan/layers/50-messaging/runs/workflows/`.
+
+## Moves on 2026-10-20
+
+Why: one digit is enough. There will be no sub-layers such as `11-`, so the layer number itself names the folder:
+`N-<slug>` at the repo root and under `layers/`, the same name in both places.
+
+Only directories were renamed, with `git mv` (`git log --follow` works on every file). Paths are relative to `os/`.
+
+| Old path | New path |
+|---|---|
+| `00-knowledge/` | `0-knowledge/` |
+| `10-bootstrap/` | `1-bootstrap/` |
+| `20-identity/` | `2-identity/` |
+| `30-intelligence/` | `3-intelligence/` |
+| `40-interface/` | `4-interface/` |
+| `50-messaging/` | `5-messaging/` |
+| `60-transport/` | `6-transport/` |
+| `plan/layers/00-knowledge/` | `plan/layers/0-knowledge/` |
+| `plan/layers/10-bootstrap/` | `plan/layers/1-bootstrap/` |
+| `plan/layers/20-identity/` | `plan/layers/2-identity/` |
+| `plan/layers/40-interface/` | `plan/layers/4-interface/` |
+| `plan/layers/50-messaging/` | `plan/layers/5-messaging/` |
+| `plan/layers/60-transport/` | `plan/layers/6-transport/` |
+
+Reserved for the layers not started: `7-relay`, `8-storage`, `9-evolution` (created at kickoff). The research-report
+series inside a plan folder (`research/00-code-seams.md`, `07-gap-1.md`) is a different numbering and stays two-digit.
+
+References were rewritten the way the 2026-10-18 section describes, by one script whose dry run was read line by line.
+The ten old names are unique words, so one word-bounded replace covered code, scripts, configs, docs, plan files and the
+workflow scripts; the convention sentences (`NN-<slug>`, "layer number × 10") became `N-<slug>`, "the layer number".
+Regenerated from their generators instead of edited: `THIRD-PARTY-NOTICES.md` (lockfile-path table, hashes of the two
+hand-maintained license lists) and the seven `0-knowledge/**/llms.txt` (marker). Left as they were: the exported journals
+(`*.jsonl`), the frozen test vectors, and the two move sections above (history). The sibling website repo got its own commit.
+
+Gates on the renamed tree: `1-bootstrap/scripts/check.sh` green in every stage but clippy, which stops on two lints in the
+Layer 6 code as merged (`bridge/lxmf.rs:289` `chunks_exact_to_as_chunks`, `api_v1/networks.rs:107` `result_large_err`, clippy
+1.99; the rename changed one doc-comment line in each file, so they are the owner's to settle, not this move's); every other
+stage ran and passed (fmt, musl checks, 1195 Rust tests, shellcheck, the hermetic gate tests, notices, the mesh111 workspace,
+G2 on both targets, the presence sidecar, the UI with its budget). `3-intelligence/scripts/check.sh`, id111 tests, KB check
+0 errors, `hooks/pre-commit`, single-node smoke (118 checks) green; nothing left running afterwards.
+
+Editing a workflow script changes the cache keys of its recorded run, so a `resumeFromRunId` replay of a run launched
+from the old text re-runs the changed calls live. This applies again to every script under `layers/5-messaging/runs/workflows/`
+and `layers/6-transport/runs/workflows/`.

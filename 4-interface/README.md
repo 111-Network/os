@@ -1,9 +1,9 @@
 # Layer 4 — Interface & Dashboard
 
-Spec v2 (2026-10-13) · Decisions: D11, D15 (`os/plan/DECISIONS.md`) · Supersedes the v1 draft after the adversarial panel (`os/plan/layers/40-interface/review/triage.md`) and the owner's IA redirect.
+Spec v2 (2026-10-13) · Decisions: D11, D15 (`os/plan/DECISIONS.md`) · Supersedes the v1 draft after the adversarial panel (`os/plan/layers/4-interface/review/triage.md`) and the owner's IA redirect.
 
 **Layer 5 amendments (D20, 2026-10-14):** additive blocks marked "Layer 5 delivers" (§5, §6.4, §6.5, §6.7) and "Layer 5
-amendments" (§6.6, §7.2, §10.2, §11.1) record what Layer 5 (`os/50-messaging/README.md`, locked v1.2) adds to this layer. The
+amendments" (§6.6, §7.2, §10.2, §11.1) record what Layer 5 (`os/5-messaging/README.md`, locked v1.2) adds to this layer. The
 locked text is unchanged; a one-line pointer sits next to each sentence that is superseded.
 
 The dashboard is the node's face: a local, offline-first web app served by `111d` itself, opened in any
@@ -24,7 +24,7 @@ ship as honest structural stubs on the same seams.
 
 ```
 browser ──http──> 111d  :80 (best-effort) + :11180          (axum, Rust, Layer 1 binary)
-                   ├─ /                 embedded UI (40-interface/ui/dist via rust-embed)
+                   ├─ /                 embedded UI (4-interface/ui/dist via rust-embed)
                    ├─ /api/v1/*         this layer's contract (api/openapi.yaml)
                    ├─ /api/status, /health   Layer 1 seam, unchanged (additive)
                    └─ relay ──> 111-agent :11182  (/v1/chat, /v1/chat/history, /v1/agent/*)
@@ -45,8 +45,8 @@ browser ──http──> 111d  :80 (best-effort) + :11180          (axum, Rust,
 
 ## 2. Stack
 
-Standalone pnpm + Vite + React + TypeScript app at `40-interface/ui/`; `pnpm build` → `dist/`, embedded
-into `111d` by a dedicated `RustEmbed` struct over `40-interface/ui/dist` (release: compile-time;
+Standalone pnpm + Vite + React + TypeScript app at `4-interface/ui/`; `pnpm build` → `dist/`, embedded
+into `111d` by a dedicated `RustEmbed` struct over `4-interface/ui/dist` (release: compile-time;
 debug: disk). Dev: `pnpm dev` with `server.proxy` of `/api` → `127.0.0.1:11180`, or the in-browser
 mock adapter with no daemon at all.
 
@@ -151,7 +151,7 @@ no typewriter on live data) · `sparkline` · `diff-view` · `json-block` · `co
 `/kb/*` (entry viewer, linked from service pages).
 
 **Layer 5 delivers (D20, 2026-10-14):** the real MESSAGES and NEARBY views behind the entries §5 reserves as structural stubs
-(§6.4, §6.5; `os/50-messaging/README.md` §16 is normative). Routes added: `/messages/contacts` (Contacts) and `/settings/l5`
+(§6.4, §6.5; `os/5-messaging/README.md` §16 is normative). Routes added: `/messages/contacts` (Contacts) and `/settings/l5`
 (Settings → Messaging & Data, the Layer 5 page of the `/settings/l0` … `/settings/l9` family, §6.7). The `meshtastic` and `fabric`
 service rows join the sidebar's services list (§7.2).
 
@@ -245,7 +245,7 @@ none/degraded) as one sentence + a reserved canvas with the ASCII radar placehol
 map views arrive with Layer 7"), and "Ask the agent who is nearby". No fake peers.
 
 > **Layer 5 delivers (D20, 2026-10-14):** the real list, grouped by source ("heard via Meshtastic on {board alias}"), from
-> `GET /api/v1/nearby` + SSE `nearby` (`os/50-messaging/README.md` §14): name, short name, SNR/RSSI, hops, position, channel
+> `GET /api/v1/nearby` + SSE `nearby` (`os/5-messaging/README.md` §14): name, short name, SNR/RSSI, hops, position, channel
 > utilization, and `last_heard` shown as a hint. Names are untrusted RF-origin strings, rendered as text only. No fake peers; a
 > Meshtastic node is never a contact, and "Message them" is not offered until a bridge exists. Radar and map stay Layer 7.
 >
@@ -269,7 +269,7 @@ map views arrive with Layer 7"), and "Ask the agent who is nearby". No fake peer
 messaging" prompt. Reserved as the third core item because the vision names human messaging the
 flagship service; no fake inbox.
 
-> **Layer 5 delivers (D20, 2026-10-14):** Messages becomes real (`os/50-messaging/README.md` §16, normative). Thread list (alias or
+> **Layer 5 delivers (D20, 2026-10-14):** Messages becomes real (`os/5-messaging/README.md` §16, normative). Thread list (alias or
 > label, last line, state glyphs, unread) · a **requests** section (INTROs: accept / ignore) · composer ("attachments arrive
 > next") · per-message state in the exact copy of messaging §9, with the reason when `queued` or rejected · "received" time, the
 > unverified sender claim behind a disclosure · advanced appends raw `msg_id`, path, custody receipts. **Contacts**
@@ -302,7 +302,7 @@ Header: dot + `LIVE|NOT SET|ERROR|STARTING`, plain name, `since`, one-line reaso
 
 #### Panel tab and hosted panels (Layer 5 amendments, D20, 2026-10-14)
 
-Normative text: `os/50-messaging/README.md` §13. This is the Layer 4 summary.
+Normative text: `os/5-messaging/README.md` §13. This is the Layer 4 summary.
 - **D15 amendment (D19 d, D20 d).** The iframe ban narrows to "no iframe of any URL that is not a registry-declared panel";
   `ServiceRecord.embed_url` is superseded for hosted projects by the additive `panel` object (§7.2) and is kept only for link-out;
   one `ServiceId` per hosted project; the dashboard CSP keeps `frame-ancestors 'none'` and adds an exact `frame-src` list, per
@@ -387,7 +387,7 @@ L2 · Intelligence L3 · Interface L4 · Messaging L5 · Transport L6 · Relay &
 · Repairs L9. Each: one-paragraph description, the status fields that layer owns today (from
 `/status`), "configurable here (coming)", "Ask the agent". Structure only this cycle.
 
-> **Layer 5 delivers (D20, 2026-10-14):** `/settings/l5` "Messaging & Data" gets real rows (`os/50-messaging/README.md` §16): home hub
+> **Layer 5 delivers (D20, 2026-10-14):** `/settings/l5` "Messaging & Data" gets real rows (`os/5-messaging/README.md` §16): home hub
 > (the enrolled hub's card; enroll by QR or code) · "Let a node use this hub" (offer code, hub-role toggle, LAN listener) · custody
 > opt-in · store usage and quotas · export (a CLI instruction until the `age` export lands). Loopback-only rows are disabled over
 > LAN like Essentials; `POST /fabric/hub/offer` is loopback-only like `offer`.
@@ -479,7 +479,7 @@ unreadable). `driver` says what drives it ("Driven by: Mesh transport (RNode) / 
 ### 7.2 Layer 5 amendments (D20, 2026-10-14) — services
 
 `ServiceId` grows by `fabric` ("Messaging") and `meshtastic`; the fixed-size registry arrays grow to 9
-(`os/50-messaging/README.md` §15, §14). Rules:
+(`os/5-messaging/README.md` §15, §14). Rules:
 
 | id | name | live when | unset when | error when |
 |---|---|---|---|---|
@@ -587,7 +587,7 @@ deduped on `seq`) · `reset`. Chat tokens are **not** on this stream (they ride 
 
 ### 10.2 Layer 5 amendments (D20, 2026-10-14) — contract growth
 
-Additive; binding form `api/openapi.yaml`, semantics in `os/50-messaging/README.md` §15.
+Additive; binding form `api/openapi.yaml`, semantics in `os/5-messaging/README.md` §15.
 - **Routes** (under `/api/v1`): `GET /messages/threads` · `GET /messages/threads/{peer}` · `POST /messages` (202 `{id}`; stays `queued` until a path
   exists) · `POST /messages/{id}/retry` · `GET|PATCH|DELETE /contacts[/{id}]` · `POST /contacts` · `GET /contacts/me/card` ·
   `GET /fabric` · `POST /fabric/hub/enroll` · `POST /fabric/hub/offer` (loopback-only like `offer`) · `PATCH /fabric/settings` ·
@@ -637,13 +637,13 @@ Additive; binding form `api/openapi.yaml`, semantics in `os/50-messaging/README.
 
 ### 11.1 Layer 5 amendments (D20, 2026-10-14) — bearer token and `localhost`
 
-- **Bearer token** (`os/50-messaging/README.md` §17). `require_session` also accepts `Authorization: Bearer <token>` **from a loopback
+- **Bearer token** (`os/5-messaging/README.md` §17). `require_session` also accepts `Authorization: Bearer <token>` **from a loopback
   peer only**; presented by a non-loopback peer it earns nothing and the session rules above apply. The token is the per-spawn
   `AGENT111_DAEMON_TOKEN` that `111d` mints into `111-agent`'s environment, beside the existing `AGENT111_*`; the agent uses it to
   reach `/api/v1` on loopback. **Loopback trust is never reopened:** under Termux (D16 a — every app shares loopback) loopback peers
   still need a session; the token is a secret in the child's environment, not a loopback skip. Agent writes still go only through
   proposals.
-- **`localhost` → `127.0.0.1`** (`os/50-messaging/README.md` §13). The main dashboard listener answers `Host: localhost` with a **308**
+- **`localhost` → `127.0.0.1`** (`os/5-messaging/README.md` §13). The main dashboard listener answers `Host: localhost` with a **308**
   to the same path on `127.0.0.1` (`[::1]` is matched bracketed), so panels never see `localhost`: the same host with a different
   port is same-site, so the frame, the ticket swap and same-origin fetches pass. The allowlist above is unchanged for the main
   listener; a panel listener matches its Host exactly against the dashboard's accepted host list **minus `localhost`**.
@@ -665,7 +665,7 @@ phone pairs once because loopback is not trusted there), and the final print car
 code, the LAN-sharing line and the backup hint.
 `111 dashboard` reprints everything later.
 
-## 13. `111d` changes this layer owns (Rust, `os/10-bootstrap/crates/node111`)
+## 13. `111d` changes this layer owns (Rust, `os/1-bootstrap/crates/node111`)
 
 Amendments to the locked Layer 1 spec recorded in D15: the dashboard surface gains POST/PATCH routes
 and one SSE route under `/api/v1` (the GET-only clause now applies to `/api/status` and `/health`
@@ -676,7 +676,7 @@ is on; `state/settings.json`; the device registry (§7.1, `state/devices.json`);
 `chown root:node111`; `update.last_check` / `clock_fault` are read from their state files (they
 were never populated). Dependency policy: prefer enabling features of already-present crates
 (hyper-util client for the relay); the one new crate is `mdns-sd` (+ `qrcode` for the CLI QR,
-both pure Rust, small) — recorded in `10-bootstrap/TASKS.md` per its policy.
+both pure Rust, small) — recorded in `1-bootstrap/TASKS.md` per its policy.
 
 ## 14. Checks & gates
 
@@ -684,7 +684,7 @@ UI: `pnpm typecheck` · `pnpm test` (vitest, node env: mode resolution as pure f
 filtering, prompt builder, SSE parser against tapes, http adapter against fake fetch) · `pnpm
 build` · `pnpm budget`. Rust: `scripts/check.sh` (fmt, clippy `-D warnings`, tests) stays green;
 new tests for auth, host guard, relay translation, services debounce, events ring/replay, embed
-serving. Integration: `40-interface/verify/smoke.sh` — builds the UI, builds `111d` (debug), runs it
+serving. Integration: `4-interface/verify/smoke.sh` — builds the UI, builds `111d` (debug), runs it
 in a loopback netns with the stub model (`intelligence` test stub) + real `111-agent`, and asserts:
 `/` serves the UI with the right content-type, `/api/v1/status` schema, pairing 401→200 flow from a
 non-loopback address, chat relay streams `token`/`done`, `/events` replays on `Last-Event-ID`,

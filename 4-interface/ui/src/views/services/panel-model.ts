@@ -1,4 +1,4 @@
-// The Panel tab's pure logic (os/50-messaging/README.md section 13, interface README 6.6): when a hosted panel is framed
+// The Panel tab's pure logic (os/5-messaging/README.md section 13, interface README 6.6): when a hosted panel is framed
 // and when it is not (and what the page says instead), the iframe's sandbox and permission attributes, the ticket URL the
 // frame may open, and the chrome's copy. No React and no clock, so the state matrix is unit-tested in the node environment.
 //

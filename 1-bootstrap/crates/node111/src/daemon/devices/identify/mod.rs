@@ -1,4 +1,4 @@
-//! The full identify sequence (`os/60-transport/README.md` §12 "Identify,
+//! The full identify sequence (`os/6-transport/README.md` §12 "Identify,
 //! once per device, consented (D17 #8), through adopted tools"; DEV §3.2;
 //! §16 G5). Orchestration moved here from `meshtastic::identify`, which
 //! keeps only the Meshtastic step's child mechanics.

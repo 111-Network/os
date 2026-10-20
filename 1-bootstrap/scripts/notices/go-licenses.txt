@@ -1,4 +1,4 @@
-# go-licenses.txt: hand-maintained license list for the meshmud Go closure (spec 50-messaging/README.md
+# go-licenses.txt: hand-maintained license list for the meshmud Go closure (spec 5-messaging/README.md
 # section 2, section 14 "GPL boundary"; read by gen-notices.py, gated by gen-notices.py --check and by
 # meshmud-build.sh, which fails a CI build whose `go version -m` lists a module that is not in this file).
 #

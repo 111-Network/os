@@ -44,14 +44,14 @@ gate "V13 16KB p_align (cross-build assert)" sh -c 'readelf -lW /tmp/dist-test/1
 gate "Termux assets dry-run" sh termux/tests/dryrun.sh
 gate "full cargo suite (all modules)" cargo test --quiet
 
-say "== Layer 5 local verification (os/50-messaging/README.md §19 L1, §20) =="
+say "== Layer 5 local verification (os/5-messaging/README.md §19 L1, §20) =="
 # mesh111 workspace: fmt, clippy, tests (two nodes + hub in-process, loss injection), musl check ×2
 # with SQLCipher + vendored OpenSSL compiled for both targets.
-gate "L5 messaging check (mesh111: fmt/clippy/test/musl ×2)" sh ../50-messaging/scripts/check.sh
+gate "L5 messaging check (mesh111: fmt/clippy/test/musl ×2)" sh ../5-messaging/scripts/check.sh
 gate "L5 manifest entries (meshmud / web bundle / presence lock)" cargo test --test manifest_layer5 -- --quiet
 gate "L5 build-script gates (meshmud / meshtastic-web pins)" sh scripts/notices/tests/build-scripts-gate.sh
 if command -v python3 >/dev/null 2>&1; then
-  gate "L5 presence sidecar (no send path, hardened output)" sh ../50-messaging/sidecars/meshtastic-presence/run-tests.sh
+  gate "L5 presence sidecar (no send path, hardened output)" sh ../5-messaging/sidecars/meshtastic-presence/run-tests.sh
 else
   say "SKIPPED L5 presence sidecar (python3 not found)"
 fi
@@ -66,11 +66,11 @@ fi
 # Layer 4 end-to-end, last gate: UI build, `111 daemon` + `111-agent` + stub model
 # in a user/net/pid namespace, /api/v1 + LAN pairing + relay + events assertions.
 if ! command -v pnpm >/dev/null 2>&1; then
-  say "SKIPPED L4 interface smoke (pnpm not found — the UI cannot be built) — run ../40-interface/verify/smoke.sh where pnpm exists"
+  say "SKIPPED L4 interface smoke (pnpm not found — the UI cannot be built) — run ../4-interface/verify/smoke.sh where pnpm exists"
 elif ! unshare -rn true 2>/dev/null; then
-  say "SKIPPED L4 interface smoke (unprivileged unshare unavailable) — run ../40-interface/verify/smoke.sh where it is"
+  say "SKIPPED L4 interface smoke (unprivileged unshare unavailable) — run ../4-interface/verify/smoke.sh where it is"
 else
-  gate "L4 interface smoke (../40-interface/verify/smoke.sh)" bash ../40-interface/verify/smoke.sh
+  gate "L4 interface smoke (../4-interface/verify/smoke.sh)" bash ../4-interface/verify/smoke.sh
 fi
 
 echo

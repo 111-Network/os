@@ -1,4 +1,4 @@
-// Foreign networks in Messages (os/60-transport/README.md §3, §4, §9, §10): the words for a foreign row's evidence and reason, the
+// Foreign networks in Messages (os/6-transport/README.md §3, §4, §9, §10): the words for a foreign row's evidence and reason, the
 // auth label, the banner, the dropped-text counter and the fan-out preview. Pure: no React, no clock of its own.
 //
 // Every string that came from the air (a title, a sender name, a native id, a body) is untrusted. It is cleaned again here

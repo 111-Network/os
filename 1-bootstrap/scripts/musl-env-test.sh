@@ -1,7 +1,7 @@
 #!/bin/sh
 # musl-env-test — self-test of scripts/musl-env.sh, the environment and assertions the G2 stages of
 # scripts/check.sh and the release asserts of scripts/cross-build.sh rely on (Wave 2 review B1 m1-m3).
-# Hermetic: synthetic files only, no cargo, no network. Run from os/10-bootstrap (scripts/check.sh does).
+# Hermetic: synthetic files only, no cargo, no network. Run from os/1-bootstrap (scripts/check.sh does).
 set -eu
 cd "$(dirname "$0")/.."
 
@@ -27,8 +27,8 @@ for kv in CC_x86_64_unknown_linux_musl=x86_64-linux-musl-gcc AR_x86_64_unknown_l
   CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER=x86_64-linux-musl-gcc \
   CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER=aarch64-linux-musl-gcc; do
   grep -qx "$kv" "$T/env" || fail "musl-env.sh does not export $kv"
-  # ../50-messaging/scripts/check.sh must export the very same values (no rebuild ping-pong).
-  grep -qx "export $kv" ../50-messaging/scripts/check.sh || fail "../50-messaging/scripts/check.sh does not export $kv"
+  # ../5-messaging/scripts/check.sh must export the very same values (no rebuild ping-pong).
+  grep -qx "export $kv" ../5-messaging/scripts/check.sh || fail "../5-messaging/scripts/check.sh does not export $kv"
 done
 
 # shellcheck source=scripts/musl-env.sh

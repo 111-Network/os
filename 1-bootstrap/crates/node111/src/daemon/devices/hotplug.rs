@@ -1,4 +1,4 @@
-//! Hotplug (`os/60-transport/README.md` §12 "Hotplug", §18 Layer 1
+//! Hotplug (`os/6-transport/README.md` §12 "Hotplug", §18 Layer 1
 //! "`AF_NETLINK` kept if the unit restricts address families"; DEV §3.1:
 //! "udev/netlink uevents (fallback: 5 s poll)").
 //!

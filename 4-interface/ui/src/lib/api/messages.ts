@@ -1,4 +1,4 @@
-// Messages slice (os/50-messaging/README.md §4, §9, §15, §16): pure helpers over Thread / Message. The store
+// Messages slice (os/5-messaging/README.md §4, §9, §15, §16): pure helpers over Thread / Message. The store
 // keeps the lists, the mock produces them, the Messages view renders them; none of that logic lives here.
 //
 // Order is `local_seq`, the node's receipt sequence. `at` and `sent_at_claim` are display only and never

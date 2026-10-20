@@ -1,4 +1,4 @@
-// A network's conversations split into channels, DMs and recipient lists (os/60-transport/README.md §10 "each split into channels and
+// A network's conversations split into channels, DMs and recipient lists (os/6-transport/README.md §10 "each split into channels and
 // DMs"). Titles are the air's own words: text only. A DM's unread count shows; a channel's only when it is pinned (the attention rule).
 import { hrefTo } from "../../../app/location";
 import { Badge } from "../../../components/badge";

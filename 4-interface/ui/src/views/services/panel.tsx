@@ -1,4 +1,4 @@
-// The Panel tab of a LIVE service page (os/50-messaging/README.md section 13): an adopted project's own web UI in an iframe on
+// The Panel tab of a LIVE service page (os/5-messaging/README.md section 13): an adopted project's own web UI in an iframe on
 // its own origin. Our chrome is the title, a health dot, reload (a new one-time ticket), "Open full client" (a new tab with
 // its own ticket) and "Ask the agent about this panel". Only a registry-declared panel is ever framed; the ticket URL goes
 // into the frame's `src` and is never shown. Where the panel cannot be framed (not running, a secure page needed, a panel

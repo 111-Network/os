@@ -1,11 +1,11 @@
 /*
  * harness.c -- Layer 2 (identity) host-side Monocypher C cross-vector harness (T9).
  *
- * Spec: os/20-identity/README.md v2.1 (v2 LOCKED + 2026-10-14 section 3 amendment), section 14 ("Rust <-> Monocypher-C
+ * Spec: os/2-identity/README.md v2.1 (v2 LOCKED + 2026-10-14 section 3 amendment), section 14 ("Rust <-> Monocypher-C
  * agreement vectors REQUIRED before any Cat-1 port") and section 11 / D14 (this
  * run doubles as Monocypher's rubric smoke-test log).
  *
- * What it does: re-executes the frozen test vectors in os/20-identity/test-vectors/
+ * What it does: re-executes the frozen test vectors in os/2-identity/test-vectors/
  * (produced by the Rust id111 crate) against the vendored Monocypher 4.0.3
  * C library and demands byte-exact agreement:
  *

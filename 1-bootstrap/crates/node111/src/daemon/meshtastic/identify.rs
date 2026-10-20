@@ -1,5 +1,5 @@
 //! The Meshtastic identify step (Layer 5 §14 "Identify", D17 #8; Layer 6
-//! `os/60-transport/README.md` §12: step 2 of the full sequence, "meshmud
+//! `os/6-transport/README.md` §12: step 2 of the full sequence, "meshmud
 //! with the identify profile, as built").
 //!
 //! **Orchestration moved to `devices::identify`** (Layer 6 §12): the

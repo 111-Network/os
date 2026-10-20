@@ -1,9 +1,9 @@
 # Layer 6, lens 0: as-built code seams (map, 2026-10-19)
 
 Read-only pass over the tree at `6ae61a0` (no web). Every line number was read this run; re-check before editing.
-Prefixes: `M/` = `50-messaging/crates/mesh111/src` · `N/` = `10-bootstrap/crates/node111/src/daemon` · `A/` =
-`30-intelligence/crates/agent111` · `UI/` = `40-interface/ui/src` · `API` = `40-interface/api/openapi.yaml` · `ID/` =
-`20-identity/crates/id111/src` · `SC/` = `50-messaging/sidecars/meshtastic-presence` · `L5` = `50-messaging/README.md`.
+Prefixes: `M/` = `5-messaging/crates/mesh111/src` · `N/` = `1-bootstrap/crates/node111/src/daemon` · `A/` =
+`3-intelligence/crates/agent111` · `UI/` = `4-interface/ui/src` · `API` = `4-interface/api/openapi.yaml` · `ID/` =
+`2-identity/crates/id111/src` · `SC/` = `5-messaging/sidecars/meshtastic-presence` · `L5` = `5-messaging/README.md`.
 
 ## 1. Summary
 
@@ -11,7 +11,7 @@ Prefixes: `M/` = `50-messaging/crates/mesh111/src` · `N/` = `10-bootstrap/crate
 - **Foreign messages have no home.** `messages.peer`/`sender` are `CHECK(length = 32)` NodeIds (`M/store/schema.rs:71-72`). The contract's `Message.peer`, `Thread.peer` and `SseMessage.peer` are 64-hex NodeIds (`API:695-731, 938-944`). The UI route `/messages/:peer` accepts only a NodeId (`UI/views/messages/model.ts:194`). Per-network categories need a new table, new routes, a new SSE event and a new UI route. None of them is an overload of the existing ones.
 - The daemon wires **one** link (`N/fabric/mod.rs:170-174`, `:481-505`) and **one** Meshtastic binding (`N/devices/store.rs:13-15`). meshmud's downlink is multi-client by design, and the L5 spec already names a later `meshtastic-client` on it (`L5:603-606`). The panel shim reframes protobuf without decoding it (`N/meshtastic/shim.rs:1-10`).
 - The only daemon↔sidecar pattern built is a one-way, read-only **snapshot file** (`N/meshtastic/presence.rs:1-25`, a 2 s poll). A test enforces that the sidecar has no send path (`SC/tests/test_presence.py:582`). Children get `stdin` = null (`N/supervise.rs:333`). A two-way bridge needs a new channel. The nearest precedent is the agent's per-spawn env token plus loopback API (`N/intelligence.rs:44`, `:233`).
-- rnsd runs with `share_instance = no` (`10-bootstrap/crates/node111/assets/rns/config.tmpl:9`), so no LXMF program can attach to it. The renderer is a constant template with a `schema-version` takeover check (`N/transport/config.rs:9-57`). It restarts rnsd with `pkill -f`, outside the supervisor (`N/transport/mod.rs:178`). rnsd's RNode ports are **not** in the port-owner table.
+- rnsd runs with `share_instance = no` (`1-bootstrap/crates/node111/assets/rns/config.tmpl:9`), so no LXMF program can attach to it. The renderer is a constant template with a `schema-version` takeover check (`N/transport/config.rs:9-57`). It restarts rnsd with `pkill -f`, outside the supervisor (`N/transport/mod.rs:178`). rnsd's RNode ports are **not** in the port-owner table.
 - Fixed-size registries every addition must bump: `ServiceId` (9, `N/services/mod.rs:80-108`), panel `id` = `ServiceId` (`N/panels/manifest.rs:10`), proposal `KINDS` (5, `N/dashboard/api_v1/proposals.rs:65`), agent tools (10, pinned by tests), L2 `TransportId` (only nostr `0x01`, `ID/attest.rs:150-170`), store `Class` (9, `M/store/rows.rs:32-56`).
 
 ## 2. Candidates
@@ -46,7 +46,7 @@ None. This lens reads code only.
 | `N/fabric/times.rs:1-13` | display times keyed by `i64` row id in `fabric/display-times` | per-store keys | a namespaced key, or a second file |
 | `N/dashboard/api_v1/messages.rs:54-58, 265-301` | `/messages/threads`, `/threads/{peer}`, `POST /messages {to: NodeId}` (`404` unless a contact) | literal route strings | new resources, e.g. `/api/v1/networks` (categories) and `/networks/{net}/conversations[/{conv}]`, plus a send route in that network's native addressing |
 | `N/dashboard/api_v1/nearby.rs:21-31`; `API:895-904` | Nearby = Meshtastic sources only, `kind: [meshtastic]` | `NearbySource.kind` enum | `reticulum`/`lxmf` sources (additive enum value) |
-| `API:695-731, 938-944, 955-967` | `Message`, `Thread`, `SseMessage` all NodeId-keyed; `x-sse-events` map | additive event names | a new SSE event (e.g. `network_message`) and `Network`/`ForeignConversation`/`ForeignMessage` schemas; regenerate with `pnpm gen:types` (`40-interface/ui/package.json:14`) |
+| `API:695-731, 938-944, 955-967` | `Message`, `Thread`, `SseMessage` all NodeId-keyed; `x-sse-events` map | additive event names | a new SSE event (e.g. `network_message`) and `Network`/`ForeignConversation`/`ForeignMessage` schemas; regenerate with `pnpm gen:types` (`4-interface/ui/package.json:14`) |
 | `N/dashboard/api_v1/events.rs:119` | `EventBus::publish(name, &Value)` accepts any name | — | none; the contract is the authority |
 | `UI/app/routes.tsx:39-41`; `UI/views/messages/index.tsx:11-31`; `model.ts:194` | `/messages`, `/messages/contacts` (placed before `:peer`), `/messages/:peer` = NodeId | route order | `/messages/net/:network[/:conv]` placed before `:peer` |
 | `UI/views/messages/list.tsx:1-60`; `UI/lib/api/messages.ts:148-151` | list = requests + conversations, `byPeer` | list sections | per-network sections or tabs (D23: "keep it categorized") |
@@ -131,14 +131,14 @@ None. This lens reads code only.
 
 | Crate or suite | Count | Breakdown |
 |---|---|---|
-| `mesh111` (`50-messaging`) | **161** | lib 136 · contacts 1 · flood 1 · hub_flow 9 · links 1 · lossy 7 · recovery 1 · requests 3 · doctests 2 |
-| `node111` (`10-bootstrap`) | **472** | lib 274 · main 0 · 22 integration binaries 198 (api_v1_devices 15, api_v1_meshtastic 11, api_v1_messages 11, api_v1_panels 18, api_v1_relay 9, api_v1_status_services 20, …) · doctests 0 |
-| `agent111` (`30-intelligence`) | **115** | lib 14 · main 0 · chat_loop 17 · config_guard 22 · daemon_tools 15 · events_status 15 · kb_ritual 17 · model_client 8 · task_engine 7 |
-| `id111` (`20-identity`) | **236** | lib 185 · conformance 44 · layer5_amendments 7 |
+| `mesh111` (`5-messaging`) | **161** | lib 136 · contacts 1 · flood 1 · hub_flow 9 · links 1 · lossy 7 · recovery 1 · requests 3 · doctests 2 |
+| `node111` (`1-bootstrap`) | **472** | lib 274 · main 0 · 22 integration binaries 198 (api_v1_devices 15, api_v1_meshtastic 11, api_v1_messages 11, api_v1_panels 18, api_v1_relay 9, api_v1_status_services 20, …) · doctests 0 |
+| `agent111` (`3-intelligence`) | **115** | lib 14 · main 0 · chat_loop 17 · config_guard 22 · daemon_tools 15 · events_status 15 · kb_ritual 17 · model_client 8 · task_engine 7 |
+| `id111` (`2-identity`) | **236** | lib 185 · conformance 44 · layer5_amendments 7 |
 | UI (vitest) | **1153** in 35 files | all passed, 2.9 s |
 | presence sidecar | **69** | 9 skipped (real-library tests without the venv) |
 
-Check commands: `10-bootstrap/scripts/check.sh` (fmt · clippy · musl ×2 · test · shellcheck · musl-env self-test · notices · build-scripts gate · systemd-analyze · messaging · G2 static link · presence sidecar · ui; `REQUIRE_G2=1` for lock runs) · `50-messaging/scripts/check.sh` (fmt, clippy, test, musl ×2) · `30-intelligence/scripts/check.sh` (fmt, clippy, test, musl x86_64) · `40-interface/ui`: `pnpm check` (typecheck, test, build, budget) · `SC/run-tests.sh`.
+Check commands: `1-bootstrap/scripts/check.sh` (fmt · clippy · musl ×2 · test · shellcheck · musl-env self-test · notices · build-scripts gate · systemd-analyze · messaging · G2 static link · presence sidecar · ui; `REQUIRE_G2=1` for lock runs) · `5-messaging/scripts/check.sh` (fmt, clippy, test, musl ×2) · `3-intelligence/scripts/check.sh` (fmt, clippy, test, musl x86_64) · `4-interface/ui`: `pnpm check` (typecheck, test, build, budget) · `SC/run-tests.sh`.
 
 ## 4. Recommendation
 
@@ -167,5 +167,5 @@ The forks this lens exposes (the owner decides; my pick last):
 `N/mod.rs`, `assets/{rns/config.tmpl,lora-table.toml,panels/meshtastic.toml}`; `API` (schemas, x-sse-events);
 `UI/views/messages/*`, `UI/lib/api/{messages,store,nearby}.ts`, `UI/views/{nearby,devices,settings}/*` (names and models),
 `UI/lib/{layers,prompts}.ts`, `UI/app/routes.tsx`; `A/src/tools.rs`, `A/tests/{daemon_tools,chat_loop}.rs`; `ID/attest.rs`,
-`20-identity/README.md §10`; `SC/{meshtastic_presence.py,README.md,requirements.in,tests/test_presence.py}`;
+`2-identity/README.md §10`; `SC/{meshtastic_presence.py,README.md,requirements.in,tests/test_presence.py}`;
 `L5` §3, §8, §10.3, §14, §21; `plan/cross-layer/devices.md` §3, §8–§9; `plan/DECISIONS.md` D23; the four check scripts.

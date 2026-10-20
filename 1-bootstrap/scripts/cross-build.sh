@@ -4,7 +4,7 @@
 # aarch64 links with -z max-page-size=16384 (16KB-page Android kernels) and the
 # script asserts p_align=0x4000 (spec CI assert).
 #
-# SQLCipher (Layer 5, os/50-messaging/README.md §10.1, §19 L1): once node111 depends on `mesh111`, the
+# SQLCipher (Layer 5, os/5-messaging/README.md §10.1, §19 L1): once node111 depends on `mesh111`, the
 # release links SQLCipher 4.x + a vendored OpenSSL 3 (rusqlite `bundled-sqlcipher-vendored-openssl`,
 # built from crate sources by cc-rs / openssl-src: no system libcrypto, nothing downloaded). The env
 # comes from scripts/musl-env.sh (shared with scripts/check.sh): CC/AR/linkers pinned per target, so
@@ -14,12 +14,12 @@
 # ELFs (no INTERP, no NEEDED) that carry strings only SQLCipher's and OpenSSL's C code has
 # (`cipher_plaintext_header_size`, `OpenSSL <ver> ` with <ver> from Cargo.lock's openssl-src);
 # without the dependency they say so. The size of each binary is printed (Layer 5 binary-growth
-# record: 10-bootstrap/TASKS.md, B1).
+# record: 1-bootstrap/TASKS.md, B1).
 #
 # CARGO_TARGET_DIR is honoured (parallel builders keep private target dirs).
 #
 # usage: scripts/cross-build.sh [--allow-no-ui] CALVER [OUTDIR]
-# The release embeds 40-interface/ui/dist. With pnpm the UI is always rebuilt;
+# The release embeds 4-interface/ui/dist. With pnpm the UI is always rebuilt;
 # without pnpm the build FAILS unless dist/ exists and is newer than every UI
 # build input (src/, public/, index.html, package.json, pnpm-lock.yaml,
 # vite.config.ts). --allow-no-ui skips that gate
@@ -52,30 +52,30 @@ TARGET_DIR=${CARGO_TARGET_DIR:-target}
 OUT=${2:-dist/releases/$VER}
 mkdir -p "$OUT"
 
-# Layer 4 UI: release builds embed 40-interface/ui/dist at COMPILE time (rust-embed),
+# Layer 4 UI: release builds embed 4-interface/ui/dist at COMPILE time (rust-embed),
 # so build it before cargo. A release must never ship a stale or missing UI.
-UI_DIR=../40-interface/ui
+UI_DIR=../4-interface/ui
 ui_stale() { # prints the first UI source newer than dist/index.html
   find "$UI_DIR/src" "$UI_DIR/public" "$UI_DIR/index.html" "$UI_DIR/package.json" \
     "$UI_DIR/pnpm-lock.yaml" "$UI_DIR/vite.config.ts" -newer "$UI_DIR/dist/index.html" -print 2>/dev/null | head -n 1
 }
 if command -v pnpm >/dev/null 2>&1; then
-  echo "== build dashboard UI (pnpm → 40-interface/ui/dist, embedded below) =="
+  echo "== build dashboard UI (pnpm → 4-interface/ui/dist, embedded below) =="
   if [ ! -f "$UI_DIR/node_modules/.modules.yaml" ]; then
     pnpm --dir "$UI_DIR" install --frozen-lockfile
   fi
   pnpm --dir "$UI_DIR" build
   [ -f "$UI_DIR/dist/index.html" ] || { echo "FAIL: UI build produced no dist/index.html" >&2; exit 1; }
 elif [ "$ALLOW_NO_UI" = 1 ]; then
-  echo "!! pnpm not found, --allow-no-ui given — embedding 40-interface/ui/dist as-is (or none: / serves the 'dashboard UI not built' notice). NOT a release build."
+  echo "!! pnpm not found, --allow-no-ui given — embedding 4-interface/ui/dist as-is (or none: / serves the 'dashboard UI not built' notice). NOT a release build."
 elif [ ! -f "$UI_DIR/dist/index.html" ]; then
-  echo "FAIL: pnpm not found and 40-interface/ui/dist is empty — this release would ship without the dashboard UI. Install pnpm, or pass --allow-no-ui for a test build." >&2
+  echo "FAIL: pnpm not found and 4-interface/ui/dist is empty — this release would ship without the dashboard UI. Install pnpm, or pass --allow-no-ui for a test build." >&2
   exit 1
 elif [ -n "$(ui_stale)" ]; then
-  echo "FAIL: pnpm not found and 40-interface/ui/dist is stale ($(ui_stale) is newer) — install pnpm to rebuild it, or pass --allow-no-ui for a test build." >&2
+  echo "FAIL: pnpm not found and 4-interface/ui/dist is stale ($(ui_stale) is newer) — install pnpm to rebuild it, or pass --allow-no-ui for a test build." >&2
   exit 1
 else
-  echo "!! pnpm not found — 40-interface/ui/dist is newer than every UI source; embedding it as-is"
+  echo "!! pnpm not found — 4-interface/ui/dist is newer than every UI source; embedding it as-is"
 fi
 
 echo "== build x86_64-unknown-linux-musl (release) =="
@@ -111,7 +111,7 @@ else
   echo "note: node111 does not depend on mesh111 yet (Layer 5 task F2) — SQLCipher assert not applicable"
 fi
 
-echo "== sizes (bytes; Layer 5 growth is recorded in 10-bootstrap/TASKS.md, B1) =="
+echo "== sizes (bytes; Layer 5 growth is recorded in 1-bootstrap/TASKS.md, B1) =="
 for t in x86_64 aarch64; do
   printf '%s %s\n' "$t" "$(wc -c <"$OUT/111-$t-unknown-linux-musl" | tr -d ' ')"
 done

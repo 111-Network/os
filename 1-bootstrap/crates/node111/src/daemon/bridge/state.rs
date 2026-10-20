@@ -1,4 +1,4 @@
-//! The delivery state machine (Layer 6 `60-transport/README.md` §4 "Monotone states", "At
+//! The delivery state machine (Layer 6 `6-transport/README.md` §4 "Monotone states", "At
 //! most once per user act", "Queue order"; §5 "Reasons"; §6 (4)): own rows from the queue
 //! to the adapter and the adapter's events back onto the rows.
 //!

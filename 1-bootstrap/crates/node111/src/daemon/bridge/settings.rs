@@ -1,4 +1,4 @@
-//! The bridge core's part of `state/bridge.json` (Layer 6 `60-transport/README.md` §2
+//! The bridge core's part of `state/bridge.json` (Layer 6 `6-transport/README.md` §2
 //! "State", §5 "HAM and MQTT: live consent", §6 "Send to Reticulum", §10 `/bridge/settings`,
 //! §15.3): HAM confirmations, per-channel send switches, recipient lists, the LXMF announce
 //! name and interval, compiled-in adapters on/off. The file and its fail-closed rules are

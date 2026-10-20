@@ -217,7 +217,7 @@ export interface Adapter {
   restart(): Promise<RestartReply>;
   updateCheck(): Promise<UpdateCheckReply>;
 
-  /** Messages (Layer 5 §15, os/50-messaging/README.md §9). Order is `local_seq`; delivery evidence is `Message.state`. */
+  /** Messages (Layer 5 §15, os/5-messaging/README.md §9). Order is `local_seq`; delivery evidence is `Message.state`. */
   messages: {
     /** Unwraps `{schema, threads}`: most recent activity first, including message-request threads. */
     threads(): Promise<Thread[]>;
@@ -270,7 +270,7 @@ export interface Adapter {
   nearby(): Promise<NearbySource[]>;
 
   /**
-   * Foreign networks (os/60-transport/README.md §10). Every write refuses the agent's bearer; a human on a loopback or paired session
+   * Foreign networks (os/6-transport/README.md §10). Every write refuses the agent's bearer; a human on a loopback or paired session
    * makes them. A foreign conversation is never a 111 thread: ids are `fc-…` and `fm-…`, and every foreign string is untrusted text.
    */
   networks: {
@@ -293,7 +293,7 @@ export interface Adapter {
     fanout(body: FanoutRequest): Promise<FanoutResult>;
   };
 
-  /** Relay edges, bridge settings and optional components (os/60-transport/README.md §2.1, §8, §10). */
+  /** Relay edges, bridge settings and optional components (os/6-transport/README.md §2.1, §8, §10). */
   bridge: {
     /** Unwraps `{schema, edges}`. */
     edges(): Promise<BridgeEdge[]>;
@@ -315,7 +315,7 @@ export interface Adapter {
     removeComponentFiles(id: string, cache?: boolean): Promise<BridgeComponent>;
   };
 
-  /** Transport facts, the rnsd posture, region and callsign (os/60-transport/README.md §11). */
+  /** Transport facts, the rnsd posture, region and callsign (os/6-transport/README.md §11). */
   transport: {
     status(): Promise<TransportStatus>;
     /** Partial merge through the apply, probe, revert loop. A reverted change is a 200 with `reverted: true`. */

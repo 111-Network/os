@@ -1,4 +1,4 @@
-//! Relay edges (Layer 6 `60-transport/README.md` §8; §15.3): explicit, directed,
+//! Relay edges (Layer 6 `6-transport/README.md` §8; §15.3): explicit, directed,
 //! non-transitive copies from one `channel`/`group` conversation to another, enabled only
 //! by a human who confirmed the exact warning text.
 //!

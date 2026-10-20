@@ -1,4 +1,4 @@
-//! Layer 5 manifest entries (D20; `os/50-messaging/README.md` §2, §13, §14, §19 L1): the
+//! Layer 5 manifest entries (D20; `os/5-messaging/README.md` §2, §13, §14, §19 L1): the
 //! per-target `meshmud` binaries, the Meshtastic web bundle and the presence venv
 //! lock — parse rules (open package/bundle names), the payload-tree cross-check
 //! (`verify_layer5_tree`, no link anywhere on the way), the bundle hash's

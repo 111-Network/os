@@ -1,7 +1,7 @@
 # Layer 5 — adversarial review triage
 
-Panel: 3 fable judges (`wf_c4054cfb-f80`, 2026-10-14, ~565k tokens) on `os/50-messaging/README.md` v1 draft. Reviews:
-`layers/50-messaging/review/{crypto,panels,integration}.md`. Verdicts: crypto **not-ready** (2 blocking / 10 major / 11 minor) ·
+Panel: 3 fable judges (`wf_c4054cfb-f80`, 2026-10-14, ~565k tokens) on `os/5-messaging/README.md` v1 draft. Reviews:
+`layers/5-messaging/review/{crypto,panels,integration}.md`. Verdicts: crypto **not-ready** (2 blocking / 10 major / 11 minor) ·
 panels **fix-then-lock** (1 / 8 / 8) · integration **fix-then-lock** (1 / 7 / 9). All three: the architecture (D19)
 stands; every blocker is a text-level fix. Disposition below; the rewrite is spec **v1.1** (same file).
 
@@ -59,7 +59,7 @@ Legend: ✅ accepted as proposed · ✅* accepted with a lead modification · �
 1. Attachments in messages → v1.1 (J5 a). 2. Generic reverse proxy + WebSocket/SSE → reserved; v1 = static panels +
 built-in Meshtastic shim (P2 i, J6). 3. INTRO over LoRa → Layer 6 (M7). 4. Identify = Meshtastic step only (J4).
 
-## Re-check (fable, `layers/50-messaging/review/recheck.md`)
+## Re-check (fable, `layers/5-messaging/review/recheck.md`)
 
 Verdict **fix-then-lock**: 53 fixes landed, 4 partial, 0 missing. New findings, all accepted into **v1.2**:
 N1 (blocking) frozen old-epoch receive state, newest 4 epochs, ACK ranges absolute `[epoch, start, len]` (≤ 8) ·

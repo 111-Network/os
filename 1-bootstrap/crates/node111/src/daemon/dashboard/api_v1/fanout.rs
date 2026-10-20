@@ -1,5 +1,5 @@
 //! `POST /api/v1/messages/fanout/preview` · `POST /api/v1/messages/fanout` (Layer 6
-//! `os/60-transport/README.md` §9; contract `previewFanout`, `sendFanout`).
+//! `os/6-transport/README.md` §9; contract `previewFanout`, `sendFanout`).
 //!
 //! - **Preview** → `FanoutPreview`: a `SendPlan` per target (bytes with the part
 //!   overhead, the cap for its kind and mode, parts, the airtime estimate — always

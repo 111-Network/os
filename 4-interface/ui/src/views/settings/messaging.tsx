@@ -1,4 +1,4 @@
-// Settings -> Messaging & data, /settings/l5 (os/50-messaging/README.md section 16, interface README 6.7): the home hub (enroll by
+// Settings -> Messaging & data, /settings/l5 (os/5-messaging/README.md section 16, interface README 6.7): the home hub (enroll by
 // QR, pasted text or typed address and code), "Let a node use this hub" (hub role, LAN listener, a one-time code with its QR
 // and a way to dismiss it), custody opt-in, the store (gauge, prune rules, quotas), the restore wait, and export.
 //

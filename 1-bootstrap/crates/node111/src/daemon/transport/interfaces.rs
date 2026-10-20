@@ -1,5 +1,5 @@
 //! `state/interfaces.toml`: the transport spine's config home and the
-//! **single source of truth for interface ownership** (`os/60-transport/
+//! **single source of truth for interface ownership** (`os/6-transport/
 //! README.md` §11; D17 #6, D19 c). `111d` renders rnsd's config from it
 //! (`config.rs`, renderer v2), the agent proposes typed actions, the human
 //! decides.
@@ -81,7 +81,7 @@ pub const TASK_MESHMUD: &str = "meshmud";
 /// Attempts at a free `interfaces.toml.invalid-<n>` name.
 const MOVE_ASIDE_TRIES: u32 = 1000;
 /// Comment head of a saved file.
-const HEADER: &str = "# 111 transport spine (os/60-transport/README.md §11): interface ownership and the rnsd\n\
+const HEADER: &str = "# 111 transport spine (os/6-transport/README.md §11): interface ownership and the rnsd\n\
 # posture. Written by 111d (0600); change it in Settings → Layer 6 or through an accepted proposal.\n";
 
 // ---------------------------------------------------------------- regions

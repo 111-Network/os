@@ -1,6 +1,6 @@
 # Layer 5 adversarial review — lens: crypto / envelope / protocol
 
-Judge: fable (crypto), 2026-10-14. Spec: `os/50-messaging/README.md` v1 draft, §3–§12, §18, §19. Evidence: `20-identity/README.md` §6/§8.4/§12/§13, `id111/src/{seal,counters,store}.rs`, research 04 and 07. "Verified" = a real check; "reasoned" = argued from quoted text.
+Judge: fable (crypto), 2026-10-14. Spec: `os/5-messaging/README.md` v1 draft, §3–§12, §18, §19. Evidence: `2-identity/README.md` §6/§8.4/§12/§13, `id111/src/{seal,counters,store}.rs`, research 04 and 07. "Verified" = a real check; "reasoned" = argued from quoted text.
 
 ## 1. Verdict: **not-ready**
 

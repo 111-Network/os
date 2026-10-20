@@ -22,8 +22,8 @@ library only (no `mesh111` code): `python3 -I crosscheck.py`.
 | `store-kdf.json` | §10.2 Mode S `store_key = BLAKE2b-256(key = store_secret, "111/store/v1" ‖ NodeId)` and the SQLCipher raw-key literal (task C3; asserted by `keys::tests::store_kdf_vectors`, which also requires the two inline doc answers verbatim) |
 
 Format: plain JSON, hex bytes, u64 values as decimal strings. Test identities: `a` = canonical-12 and `b` = canonical-24
-mnemonics (the same as `20-identity/test-vectors`). `epk` values are fixed stand-ins for the sealer's ephemeral key. The AEAD
-around the inner bytes is id111's (`20-identity/test-vectors/layer5/sealed-payload.json`). Rejection `expect` tokens are the
+mnemonics (the same as `2-identity/test-vectors`). `epk` values are fixed stand-ins for the sealer's ephemeral key. The AEAD
+around the inner bytes is id111's (`2-identity/test-vectors/layer5/sealed-payload.json`). Rejection `expect` tokens are the
 Rust `Debug` form of the module's error enum.
 
 Regeneration (only to re-freeze under a signed-off amendment): `cargo test -p mesh111 write_vectors -- --ignored`, then

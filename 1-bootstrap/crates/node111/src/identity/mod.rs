@@ -1,5 +1,5 @@
 //! Identity binding (L1 spec v2.2, D14(d)) — a THIN seam over `id111`, Layer 2's
-//! identity core (`os/20-identity/README.md` v2, §13). Everything cryptographic —
+//! identity core (`os/2-identity/README.md` v2, §13). Everything cryptographic —
 //! BIP-39, SLIP-0010, the dual Ed25519+X25519 keyset, §7 encodings, the §13
 //! atomic file-set writer, §8.4 restore rules, the D9 migration — lives in
 //! `id111`; this module only:
@@ -676,7 +676,7 @@ mod tests {
 
     #[test]
     fn corrupt_trio_quarantines_and_never_rekeys() {
-        // (Name kept: os/10-bootstrap/verify/README.md's F4 row cites this test.)
+        // (Name kept: os/1-bootstrap/verify/README.md's F4 row cites this test.)
         let (t, dir) = id_dir();
         let id = restore(&dir, V1_WORDS, None, true).unwrap();
         // corrupt the keyset cache so it no longer matches the mnemonic

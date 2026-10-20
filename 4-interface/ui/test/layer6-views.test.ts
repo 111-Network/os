@@ -1,4 +1,4 @@
-// Layer 6 views (os/60-transport/README.md section 10), rendered to static markup from the mock's `bridge` scenario through the real store:
+// Layer 6 views (os/6-transport/README.md section 10), rendered to static markup from the mock's `bridge` scenario through the real store:
 // the Messages rail, the foreign thread (name as text, evidence matrix, parts), the foreign compose gate, the fan-out preview and its
 // refusals, the consent panel and its round-trip, edges, Settings -> Transport, Nearby's DM action, and proposal bodies.
 import { createElement as h, type ReactElement } from "react";

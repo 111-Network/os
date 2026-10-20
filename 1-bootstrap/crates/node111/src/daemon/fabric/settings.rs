@@ -1,5 +1,5 @@
 //! `fabric/settings` (0600, JSON `{schema: 1, …}`): what the daemon persists
-//! for the fabric between runs (`os/50-messaging/README.md` §9, §15
+//! for the fabric between runs (`os/5-messaging/README.md` §9, §15
 //! `PATCH /fabric/settings`; the fabric emits `FabricEvent::Settings` whenever
 //! they change — enrollment sets `home_hub`, forgetting the hub clears it —
 //! and the daemon writes them here).

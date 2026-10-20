@@ -1,4 +1,4 @@
-// Bridge slice (os/60-transport/README.md §2.1, §6, §8, §9): the consent round-trip, relay edges, recipient lists and optional
+// Bridge slice (os/6-transport/README.md §2.1, §6, §8, §9): the consent round-trip, relay edges, recipient lists and optional
 // components. Pure helpers: the store keeps the lists, the views draw them.
 //
 // A consent is a 409 `consent_required` that carries the exact text and its SHA-256: the client shows the text verbatim and repeats

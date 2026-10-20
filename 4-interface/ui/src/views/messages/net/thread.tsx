@@ -1,4 +1,4 @@
-// One foreign conversation (os/60-transport/README.md §3, §4, §9, §10): rows in the order they arrived here, each with the network
+// One foreign conversation (os/6-transport/README.md §3, §4, §9, §10): rows in the order they arrived here, each with the network
 // chip, the native id, the sender's name as TEXT (never markup, never a link), what `auth` says about it, its delivery evidence in
 // the adapter's own words, and the time it was received here. The sender's own clock sits behind a disclosure. A split send is one
 // item whose state is the lowest among its parts, and cancel drops the unsent parts only.

@@ -2,7 +2,7 @@
 
 Every node's cryptographic self: how a node's identity is generated, stored, used, backed up, and recovered. The identity is a dual Ed25519+X25519 keyset derived from one seed; the 32-byte Ed25519 public key **is** the node (NodeId). It signs the node's announces and control artifacts, authenticates the node to peers, keys the per-packet encryption of node traffic, and anchors both the agentic-delegation hook and the transport-attestation bridge. Offline-first, registry-free, wallet-style backup — identical in kind across all six device categories, from an ESP32-S3 relay to a compute hub.
 
-Status of this document: **spec v2.1 — LOCKED** (v2.1 = v2 + one §3 amendment, 2026-10-14: A and R MUST be torsion-free — owner decision, closes the T9 F3 mixed-order residual; decisions: `os/plan/DECISIONS.md` D13 + D14 lock amendments incl. three user calls at lock; panel triage: `os/plan/layers/20-identity/review/triage.md` — 4 judges, 71 raw findings, all gating items resolved in v2; options brief: `os/plan/layers/20-identity/options.md`; research: 8-agent sweep `wf_73d7f290-f74`, 2026-10-12).
+Status of this document: **spec v2.1 — LOCKED** (v2.1 = v2 + one §3 amendment, 2026-10-14: A and R MUST be torsion-free — owner decision, closes the T9 F3 mixed-order residual; decisions: `os/plan/DECISIONS.md` D13 + D14 lock amendments incl. three user calls at lock; panel triage: `os/plan/layers/2-identity/review/triage.md` — 4 judges, 71 raw findings, all gating items resolved in v2; options brief: `os/plan/layers/2-identity/options.md`; research: 8-agent sweep `wf_73d7f290-f74`, 2026-10-12).
 
 **Layer 5 amendments (D20, 2026-10-14):** A1–A4 and A6–A11 are recorded additively in §13.1; the locked text is unchanged and
 carries a one-line pointer wherever a sentence is superseded (§6.2–§6.5, §8.4, §10, §13). A5 is asked later (§15). A12
@@ -282,7 +282,7 @@ Normative rules, each traced to a field incident:
 |---|---|---|
 | ESP32-S3 | flash encryption + Secure Boot v2 + NVS encryption | Published voltage-fault-injection AES-key recovery; the S3 die has no glitch detector. eFuse steps irreversible. |
 | nRF52840 | APPROTECT + ACL, Rev 3+ required (boot-time FICR check, §5) | Pre-Rev3 bypass via CVE-2020-27211 (open $5-class ESP32 tool); even Rev 3+ is raise-the-bar, not SE-grade. |
-| Cat 2 | OS keystore / 0600-0700 dir | Layer 1's accepted threat model applies (debuggable-build adb exposure until lockdown — `os/10-bootstrap/README.md` §Security & trust model). |
+| Cat 2 | OS keystore / 0600-0700 dir | Layer 1's accepted threat model applies (debuggable-build adb exposure until lockdown — `os/1-bootstrap/README.md` §Security & trust model). |
 | Cat 3 | Cat 2 rule (Linux-class) | Same as Cat 2. |
 | Cat 4 | TPM2-sealed at-rest encryption / SE050B+ resident custody | TPM2 path seals storage (key in RAM while running), not resident ECC custody; SE050 path is the strongest at-rest option (CC EAL 6+ / FIPS 140-2 L3); ~261ms I2C signing keeps SEs out of packet hot paths. |
 
@@ -297,14 +297,14 @@ Plus two written residuals outside the table: **recipient-side harvest-now-decry
   - **`111id` module scope (normative — the v1 build deliverable, D13 H1 + panel embedded#7):** keygen · sign/verify (strict predicate, §3) · X25519 ECDH (all-zero abort) · sealed-packet construction (§6.4) · announce encode/verify · pinning store + counter state · backup/restore/migrate · attestation encode/verify · encodings (hex/bech32/label) · commission support. The host-side **Monocypher C vector/smoke harness** is an explicit deliverable alongside (it feeds §14's agreement gate and §11's smoke-test evidence).
 - **Layer 3 (Local Intelligence) consumes:** the E1 hook (§9) and the recorded signer-daemon + default-deny policy-engine pattern; in v1 the agent holds zero key material and requests signatures from the identity holder (`111id` core in the `111d` world). The signer IPC (socket path, request schema, policy-engine ownership) is Layer 3's to spec.
 - **Layer 4 (Interface) displays:** the §7 operator label (10 base32 chars, `xxxx-xxxx-xx`) + editable local alias, and the identity-backup action surface (CLI instruction only under the HTTP-never rule) plus the identity error states incl. identity-collision. Label and alias are display-only — never auth. Delivered 2026-10-13: the dashboard shows `node.label`, `node.bech32`, the editable local alias (`state/settings.json`), and the backup instruction card (CLI only). A non-secret 'backed up' marker remains a Layer 2 amendment (dashboard shows 'unknown — run the CLI' until then).
-- **Layer 5 (Messaging & Data) owns the full envelope.** Contracted identity hooks (§6.7): `signer_pubkey`, the delegation trailer (v1: absent; non-empty ⇒ reject), ratchet-field space (size pinned by L5 at envelope lock). Also handed to L5: authorship/non-repudiation (inner signatures if wanted), content message-ID idempotency (the §6.5 delay-and-replay + rollback residuals), and group/broadcast key distribution (never static-static on node keys). Announces are L2 artifacts, not L5 envelopes. Every future L5 signed artifact carries its own domain tag (§6.1). *[Layer 5 is locked at `os/50-messaging/README.md` v1.2 (D20); its identity-side asks are recorded in §13.1.]*
+- **Layer 5 (Messaging & Data) owns the full envelope.** Contracted identity hooks (§6.7): `signer_pubkey`, the delegation trailer (v1: absent; non-empty ⇒ reject), ratchet-field space (size pinned by L5 at envelope lock). Also handed to L5: authorship/non-repudiation (inner signatures if wanted), content message-ID idempotency (the §6.5 delay-and-replay + rollback residuals), and group/broadcast key distribution (never static-static on node keys). Announces are L2 artifacts, not L5 envelopes. Every future L5 signed artifact carries its own domain tag (§6.1). *[Layer 5 is locked at `os/5-messaging/README.md` v1.2 (D20); its identity-side asks are recorded in §13.1.]*
 - **Layers 6/7 (Transport / Relay & Presence) — open questions handed over, not decided here:** Cat-1 relay announce-verification policy (verify-before-relay vs relay-blind; Ed25519 verify is Cat-1-feasible) · announce-as-routing vs announce-as-identity-only (the biggest cross-layer question the wire shape forces) · announce rate-limit policy (Reticulum caps ~2% interface bandwidth — announce flooding is the registry-free tax) · attestation gossip and gateway publication (§10) · the **mesh-epoch source** that §9/§10 expiries count in (v1 fail-mode pinned in §6.7: undefined ⇒ not evaluated, non-empty trailers rejected). `appdata` is 0–32B and versioned — the stated escape if L6/7's routing data outgrows it; transport-mutable data (hop counts) rides outside L2's signed blob. Safe to defer: v1 emits no announces at all (Layer 1's transport child has independent identity), so these gate L6/7's start, not v1's deployment. *[Superseded in part by Layer 5 A6, §13.1: v1 emits announces on demand — in a card, on link-up, inside an INTRO — and none unsolicited or periodic.]*
 - **Layer 0 (Knowledge):** receives the §16 entries at build.
-- **Cross-layer connection check:** the 20-item checklist this spec must be re-verified against when sibling layers land lives in `os/plan/layers/20-identity/review/triage.md`.
+- **Cross-layer connection check:** the 20-item checklist this spec must be re-verified against when sibling layers land lives in `os/plan/layers/2-identity/review/triage.md`.
 
 ### 13.1 Layer 5 amendments (D20, 2026-10-14)
 
-Requested by Layer 5 (`os/50-messaging/README.md` §19, locked v1.2) and landed as `id111` code (task I1) plus this text (task C5).
+Requested by Layer 5 (`os/5-messaging/README.md` §19, locked v1.2) and landed as `id111` code (task I1) plus this text (task C5).
 Additive: the locked text above is unchanged and the Cat-1 harness vectors are untouched. A5 is asked later (§15).
 
 **A1 — AD scope (§6.4 step 4).** The AD is the sealed packet's own cleartext header, byte-exact:
@@ -371,7 +371,7 @@ identity per foreign network, bound to the node by the §10 bidirectional attest
 fit the 32 B `transport_key` field, so it is bound by hash. The `transport_id` values and the hash are assigned when a bridge
 lands (Layer 6/7; there is no bridge this cycle). Link keys for online links (§6.6) are random, bound by attestation, **never
 seed-derived** (F2 stays rejected) and never the identity key (§6.1). No Reticulum code is imported (D17 #12).
-*A10 assigned by Layer 6 (D26 #3, 2026-10-19; `os/60-transport/README.md` §14, task S3).* Additive: the §10 wire, both signed
+*A10 assigned by Layer 6 (D26 #3, 2026-10-19; `os/6-transport/README.md` §14, task S3).* Additive: the §10 wire, both signed
 inputs and the frozen top-level vectors are unchanged.
 
 | `transport_id` | `transport_key` | `transport_sig` | Binding |
@@ -381,7 +381,7 @@ inputs and the frozen top-level vectors are unchanged.
 
 `id111` carries the bytes (`TransportId::Meshtastic` / `::Reticulum`), the pure helper `attest::reticulum_transport_key` and
 `MESHTASTIC_UNSIGNED`; it grows no verifier for them. The `TransportVerifier` implementor is `node111`'s `BridgeVerifier`
-(`10-bootstrap/crates/node111/src/daemon/bridge/attest.rs`). Vectors: `test-vectors/layer6/attest-transport-ids.json`
+(`1-bootstrap/crates/node111/src/daemon/bridge/attest.rs`). Vectors: `test-vectors/layer6/attest-transport-ids.json`
 (`tests/layer6_attest.rs`). The frozen `attestation.json` negative "unknown transport_id 0x02" keeps its bytes and its
 `err:tid:2` token for the Cat-1 harness (a core without A10 refuses the id); `id111` now rejects that record at the node leg
 instead (`conformance.rs` maps the token; still a rejection). `0x00` and `0x04`–`0xff` stay unassigned and fail closed.
@@ -417,7 +417,7 @@ with the `a12_*` set beside it (floor bound, clean open, batch commits, restart,
 
 ## 14. Test vectors & conformance
 
-All vectors live in `os/20-identity/test-vectors/` at build. Conformance gates:
+All vectors live in `os/2-identity/test-vectors/` at build. Conformance gates:
 
 - **RFC 8032 (Ed25519) + RFC 7748 (X25519)** reference vectors MUST pass on every adopted implementation.
 - **Rust (dalek) ↔ Monocypher-C agreement vectors** — keygen-from-seed, sign/verify, ECDH, sealed-packet round-trip — REQUIRED before any Cat-1 port (D13 H1; the port is pre-determined, not premature). The harness run is recorded as the rubric's smoke-test log (§11, D14).
@@ -463,8 +463,8 @@ All enter `candidate` per D13 H1 (desk-research cap); Monocypher fast-tracks to 
 | `iroh-nodeid` | case study | `candidate` (raw-pubkey NodeId proven at 200M+ endpoints) |
 | `briar-bramble` | case study | `candidate` (cited normatively in §6.5/§12; partial audits 2017/2023 noted) |
 
-**Layer 5 amendments (D20, 2026-10-14):** the table above is unchanged. Layer 5 writes its own entries at build (`os/50-messaging/README.md`
+**Layer 5 amendments (D20, 2026-10-14):** the table above is unchanged. Layer 5 writes its own entries at build (`os/5-messaging/README.md`
 §22) and updates the seed entries this list already cross-links — `meshtastic`, `reticulum` — plus `meshcore` (KISS modem,
 `GRP_DATA` flood, repeater as Cat-1).
 
-Build tasks: `os/20-identity/TASKS.md` (created at build start per `os/plan/EXECUTION.md`).
+Build tasks: `os/2-identity/TASKS.md` (created at build start per `os/plan/EXECUTION.md`).

@@ -1,7 +1,7 @@
 # Why this directory has no licence file yet
 
 The helper's licence is an **open item of D27**: it is pending the owner's contact with the Reticulum project and a legal
-read (spec `os/60-transport/README.md` §15 "Licensing boundary"; `LICENSING.md` §8). Until then:
+read (spec `os/6-transport/README.md` §15 "Licensing boundary"; `LICENSING.md` §8). Until then:
 
 - no `LICENSE` file is shipped here and the source file carries no SPDX identifier, so no licence is granted or implied by
   the repository for this directory; the other layers' licences (`LICENSE.md`) do not extend to it by omission;

@@ -72,7 +72,7 @@ needs" with no window definition: an edge enabled long ago protects every foreig
 history at hard capacity. Fix: the guard needs keys, not bodies; define a bounded `foreign_seen` key set (or "bodies prunable,
 ids kept") and the window as N rows per edge.
 
-**M5. G2's stub cannot be the existing one.** `40-interface/verify/stub-meshmud.py` speaks JSON in place of protobuf ("111d
+**M5. G2's stub cannot be the existing one.** `4-interface/verify/stub-meshmud.py` speaks JSON in place of protobuf ("111d
 never decodes them"); the §5 client decodes `FromRadio` with prost. Fix: G2 is a `cargo test` in node111 with a test-only Rust
 stub on the same prost types; the client treats undecodable frames as counted noise so the L5 harness keeps passing with the
 client on; the Nearby parity gate feeds one committed `FromRadio` fixture to both readers (today no recording exists and "one
@@ -80,7 +80,7 @@ release cycle" is not a check).
 
 **M6. The gates have no homes.** G7 names the four `check.sh` scripts and `pnpm check`; G1, G3, G4, G5 and G6 are new netns runs
 with no script name, flag or location (L5 put G1 in `smoke.sh --three-node` and G3 in `panel-lint.sh`). Fix: name each
-(`60-transport/verify/{bridge,lxmf,spine,devices}.sh`, `panel-lint.sh --panel reticulum`) and a `REQUIRE_*` for lock runs. G7's
+(`6-transport/verify/{bridge,lxmf,spine,devices}.sh`, `panel-lint.sh --panel reticulum`) and a `REQUIRE_*` for lock runs. G7's
 "idle RSS within noise" is not a criterion; record RSS, assert processes and listeners only.
 
 **M7. Migration leaves two sources of truth.** §11 "mirrored back into `devices.json` while a Layer 5 rollback is supported":
@@ -128,14 +128,14 @@ lazy chunk today is 46.6 KB (jsQR), views 8–14 KB, so a network view fits D21.
 (`daemon_tools.rs:306`, `chat_loop.rs:308`). A10 layout and the opaque `transport_sig` seam match `attest.rs:150-170,298`.
 `ChildControl::restart` exists (D16 c); `rnstatus --attach|--detach|--reload` was run (R05 §3.9); migration sources are real
 (`store.rs:141`, `rns.rs`); the v1 refusal path is at `transport/mod.rs:149-153,170-171` and `pkill` at `:178`. G3 maps one-to-one
-onto R07 checks 1–8. The licensing rows name the sign-off policy in `10-bootstrap/TASKS.md`. Every other cited line was re-read
+onto R07 checks 1–8. The licensing rows name the sign-off policy in `1-bootstrap/TASKS.md`. Every other cited line was re-read
 and is current.
 
 ## Proposed task cut
 
 | # | Task | Files | Model | Check |
 |---|---|---|---|---|
-| T1 | Store V3, `Class::Foreign`, prune 2a/2b, bounded `foreign_seen` | `M/store/{schema,rows,prune}.rs`, `M/store/foreign.rs` | opus | `50-messaging/scripts/check.sh`; migrate, refuse, prune-order tests |
+| T1 | Store V3, `Class::Foreign`, prune 2a/2b, bounded `foreign_seen` | `M/store/{schema,rows,prune}.rs`, `M/store/foreign.rs` | opus | `5-messaging/scripts/check.sh`; migrate, refuse, prune-order tests |
 | T2 | Typed `Fabric::foreign_*` with batched ingest, `FabricEvent::Foreign`, daemon publish arm | `M/fabric.rs`, `N/fabric/mod.rs` | opus | mesh111 tests; burst latency test. After T1 (same crate) |
 | T3 | Bridge core, `StubAdapter`, edges, fan-out, consent hash | `N/bridge/*` (new) | opus | unit tests: loop guard, cursor, size modes, handoff |
 | T4 | Contract: routes, schemas, `ForeignMessageState`, SSE, enum bumps, regen | `API`, `ui/src/lib/api/*.gen.ts` | sonnet | `gen-sse.mjs --check`, `pnpm typecheck`. Before T5, T6 |
@@ -146,9 +146,9 @@ and is current.
 | T9 | Supervisor: `stdio`, `after`, component registry, cache intake | `N/supervise.rs`, `N/components/*`, `assets/components/*`, `install/packages.rs` | opus | unit tests; `verify/zero-weight.sh` (G7). Needs Q1 |
 | T10 | Device core: hotplug, identify move + RNode/MeshCore steps, applier | `N/devices/{hotplug.rs,identify/,applier.rs}`, `N/meshtastic/identify.rs` | opus | G5 fixtures (uevent, fake rnodeconf, pty stub). After T7 |
 | T11 | LXMF carrier, MeshChatX child, child-panel proxy, `reticulum` panel | `N/bridge/lxmf/*`, `N/panels/{proxy.rs,manifest.rs,listener.rs}`, `assets/panels/*.toml` | opus | `verify/lxmf.sh` (G3), `panel-lint.sh` extension (G6). After T8, T9 |
-| T12 | Seven agent tools, pins, untrusted block | `A/src/tools.rs`, `A/tests/*` | sonnet | `30-intelligence/scripts/check.sh` |
-| T13 | A10 bytes + `TransportVerifier` plug (scope per Q3) | `ID/attest.rs`, `20-identity/README.md`, node111 verifier | opus | id111 vectors. Needs Q3 |
-| T14 | Spike: `deltachat-rpc-server` + Madmail in netns (M8); then docs, LICENSING, KB rows | sidecar scratch; `LICENSING.md`, `00-knowledge/*`, `50-messaging/README.md` §14 | sonnet | spike report; link check |
+| T12 | Seven agent tools, pins, untrusted block | `A/src/tools.rs`, `A/tests/*` | sonnet | `3-intelligence/scripts/check.sh` |
+| T13 | A10 bytes + `TransportVerifier` plug (scope per Q3) | `ID/attest.rs`, `2-identity/README.md`, node111 verifier | opus | id111 vectors. Needs Q3 |
+| T14 | Spike: `deltachat-rpc-server` + Madmail in netns (M8); then docs, LICENSING, KB rows | sidecar scratch; `LICENSING.md`, `0-knowledge/*`, `5-messaging/README.md` §14 | sonnet | spike report; link check |
 
 Not disjoint: T5/T10 (`devices.rs`), T7/T10 (`meshtastic/mod.rs`), T8/T9 (child ordering) — serialize as marked. Owner-gated: T5
 (Q2), T9 (Q1), T13 (Q3).

@@ -307,7 +307,7 @@ const ALIASES = [
   ["ResetEvent", "SseReset"],
   ["ServicesEvent", "SseServices"],
   ["DevicesEvent", "SseDevices"],
-  // Layer 5 (Messaging & Data, os/50-messaging/README.md §15). `Panel` is exported as HostedPanel:
+  // Layer 5 (Messaging & Data, os/5-messaging/README.md §15). `Panel` is exported as HostedPanel:
   // components/panel.tsx already owns the name `Panel` in the app.
   ["NodeId", "NodeId"],
   ["MessageId", "MessageId"],
@@ -345,7 +345,7 @@ const ALIASES = [
   ["ContactChangeEvent", "SseContact"],
   ["NearbyEvent", "SseNearby"],
   ["PanelsEvent", "SsePanels"],
-  // Layer 6 (Transport & Bridge, os/60-transport/README.md §10). `Component` is exported as BridgeComponent:
+  // Layer 6 (Transport & Bridge, os/6-transport/README.md §10). `Component` is exported as BridgeComponent:
   // the name collides with React's vocabulary.
   ["NetworkId", "NetworkId"],
   ["Network", "Network"],

@@ -1,4 +1,4 @@
-// Contacts slice (os/50-messaging/README.md §7, §15, §16; os/20-identity/README.md §7): pure helpers for what a user types,
+// Contacts slice (os/5-messaging/README.md §7, §15, §16; os/2-identity/README.md §7): pure helpers for what a user types,
 // pastes or scans into "add a contact", plus the card QR matrix and the list operations the store applies.
 //
 // Nothing here is authoritative: the daemon validates a card against its own announce rules and a NodeId against

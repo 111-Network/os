@@ -14,9 +14,9 @@ Three. Nothing else.
 
 | Component | What | Source | Runs on |
 |---|---|---|---|
-| `llama-server` | pinned llama.cpp build serving the node's model; OpenAI-compatible HTTP on `127.0.0.1:11181` | adopted: `00-knowledge/projects/llama-cpp.md` | nodes with a local model (2B, 4A, 4B) |
+| `llama-server` | pinned llama.cpp build serving the node's model; OpenAI-compatible HTTP on `127.0.0.1:11181` | adopted: `0-knowledge/projects/llama-cpp.md` | nodes with a local model (2B, 4A, 4B) |
 | `111-agent` | thin Rust agent loop: chat backend, KB grounding, task API, offload client — `127.0.0.1:11182` | custom, this repo | every node running Layer 3 (2A ◐, 2B, 3 ◐, 4A, 4B) |
-| `opencode` | adopted coding-agent harness, headless JSONL, invoked **by** `111-agent` for patch-class tasks | adopted: `00-knowledge/projects/opencode.md` | hub tiers (4A, 4B; opt-in on 2B) |
+| `opencode` | adopted coding-agent harness, headless JSONL, invoked **by** `111-agent` for patch-class tasks | adopted: `0-knowledge/projects/opencode.md` | hub tiers (4A, 4B; opt-in on 2B) |
 
 Both daemons are supervised children of `111d` — exactly the `rnsd` pattern from the bootstrap spec: `111d` spawns them, restarts them in place, and health-gates them; systemd/runit stay thin wrappers. Layer 3 adds no new supervisor.
 
@@ -24,7 +24,7 @@ Both daemons are supervised children of `111d` — exactly the `rnsd` pattern fr
 
 ## Model profiles
 
-The standard tier — the bootstrap's post-install offer — is **Qwen3 4B, Q4_K_M GGUF** (`00-knowledge/models/qwen3-4b.md`): one default everywhere a local model runs. Model blobs live in `/var/lib/111/models/` behind a `current` symlink (same pattern as `kb/<sha>/`), are sha256-pinned in the signed channel manifest, and arrive via Layer 1's prefetch / self-update path. There are no runtime downloads from model registries, ever.
+The standard tier — the bootstrap's post-install offer — is **Qwen3 4B, Q4_K_M GGUF** (`0-knowledge/models/qwen3-4b.md`): one default everywhere a local model runs. Model blobs live in `/var/lib/111/models/` behind a `current` symlink (same pattern as `kb/<sha>/`), are sha256-pinned in the signed channel manifest, and arrive via Layer 1's prefetch / self-update path. There are no runtime downloads from model registries, ever.
 
 | Category | Local model | Agent mode |
 |---|---|---|
@@ -69,7 +69,7 @@ Hub-ladder tuning beyond the default table · opencode as default on 2B · agent
 
 ## Appendix — as built (v1)
 
-Crate `os/30-intelligence/crates/agent111`, binary `111-agent`, 93 tests, gate `scripts/check.sh` (fmt + clippy + tests + musl check). Full contracts: `TASKS.md` → Pinned contracts.
+Crate `os/3-intelligence/crates/agent111`, binary `111-agent`, 93 tests, gate `scripts/check.sh` (fmt + clippy + tests + musl check). Full contracts: `TASKS.md` → Pinned contracts.
 
 **Process shape.** `111d` (Layer 1) spawns `111-agent` and `llama-server` as supervised children when their binaries exist in `current/bin/` (`llama-server` additionally needs a `.gguf` under `/var/lib/111/models/current/`); otherwise each is honestly `absent`. `/api/status.intelligence = {agent, model_server, agent_url}`. Verified end-to-end with the real binaries on a staged node root: agent spawned, KB grounded (the release's integrity-checked `share/kb/`), honest 503 on chat without a model, task failures journaled, clean SIGTERM shutdown of the child.
 
@@ -87,7 +87,7 @@ Crate `os/30-intelligence/crates/agent111`, binary `111-agent`, 93 tests, gate `
 
 ## Layer 5 amendments (D20, 2026-10-14)
 
-Additive (`os/50-messaging/README.md` §17, §19; built by Layer 5 task A1). The tool set stays fixed, shell-free and
+Additive (`os/5-messaging/README.md` §17, §19; built by Layer 5 task A1). The tool set stays fixed, shell-free and
 schema-validated (D10); `111-agent` still never gets a host shell.
 
 **Tools added** (the Layer 3 set grows by five):
@@ -102,7 +102,7 @@ schema-validated (D10); `111-agent` still never gets a host shell.
 
 - **Daemon access.** The tools run inside `111-agent` and reach `111d`'s loopback `/api/v1` with a bearer token
   (`Authorization: Bearer <AGENT111_DAEMON_TOKEN>`) — a per-spawn token `111d` mints into the child's environment beside the
-  existing `AGENT111_*`; `111d` accepts it from a loopback peer only (`os/40-interface/README.md` §11.1). Config gains
+  existing `AGENT111_*`; `111d` accepts it from a loopback peer only (`os/4-interface/README.md` §11.1). Config gains
   `daemon_api_url` (the loopback `/api/v1` base) and reads the token from the environment, with the existing precedence (flags >
   `AGENT111_*` env > `/etc/111/agent.env` > defaults); the exact flag and key spellings are fixed at build in task A1.
 - **Writes** only via the proposal path: this layer's "only write path" rule is preserved, and `messages.send` never sends on its own.
@@ -111,7 +111,7 @@ schema-validated (D10); `111-agent` still never gets a host shell.
 
 ## Appendix — Layer 6 tools (D27, 2026-10-19)
 
-Additive (`os/60-transport/README.md` §13, §15.6, §8, §12; built by Layer 6 task B5). The tool set stays fixed,
+Additive (`os/6-transport/README.md` §13, §15.6, §8, §12; built by Layer 6 task B5). The tool set stays fixed,
 shell-free and schema-validated (D10) and grows from ten to **seventeen**: seven new tools, and `messages.send` gains
 `targets`. Schemas follow the §13 order after the Layer 5 five: `bridge.read` · `bridge.propose_edge` · `devices.read` ·
 `transport.read` · `device.identify` · `device.propose` · `service.restart`.
@@ -151,7 +151,7 @@ bound raw facts (a device's `identity` and `detail` share one 4 KB budget of JSO
 `untrusted_notice`. Foreign text never reaches a send or an edge without the human reading it first: the agent can put it
 into a send only through a proposal whose text part the UI renders preformatted.
 
-**Proposal bodies — verbatim shapes (111d's C1 parses exactly these on accept; `40-interface/api/openapi.yaml`
+**Proposal bodies — verbatim shapes (111d's C1 parses exactly these on accept; `4-interface/api/openapi.yaml`
 `Proposal.kind`).** Every proposal is stamped with this node's id and journaled as `proposal.written` with its kind.
 
 | `kind` | Body, byte for byte |

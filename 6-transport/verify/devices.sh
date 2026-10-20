@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# 60-transport/verify/devices.sh — Layer 6 gate G5 (spec §16): the device core.
+# 6-transport/verify/devices.sh — Layer 6 gate G5 (spec §16): the device core.
 #
-#   bash 60-transport/verify/devices.sh                 runs what it can, SKIPs the rest
-#   REQUIRE_G5=1 bash 60-transport/verify/devices.sh    lock run: a missing prerequisite or a TODO step is a FAIL
+#   bash 6-transport/verify/devices.sh                 runs what it can, SKIPs the rest
+#   REQUIRE_G5=1 bash 6-transport/verify/devices.sh    lock run: a missing prerequisite or a TODO step is a FAIL
 #
 # First cut (C4):
 #   1. the device core's tests (cargo test --test devices_core): uevent fixtures kick the tick and the 2-tick
@@ -26,7 +26,7 @@
 # children and stubs; the scratch dir is removed on exit.
 set -u
 cd "$(dirname "$0")/../.." || exit 1
-. 60-transport/verify/lib.sh
+. 6-transport/verify/lib.sh
 REPO=$(pwd)
 
 command -v cargo >/dev/null 2>&1 || skip_or_fail G5 "cargo is not installed"
@@ -37,7 +37,7 @@ trap cleanup EXIT
 LOG="$SCRATCH/cargo.log"
 
 # ---- 1. the device core's acceptance tests
-if (cd "$REPO/10-bootstrap" && cargo test -q -p node111 --test devices_core) >"$LOG" 2>&1; then
+if (cd "$REPO/1-bootstrap" && cargo test -q -p node111 --test devices_core) >"$LOG" 2>&1; then
   ok "cargo test --test devices_core: $(grep -E '^test result:' "$LOG" | tail -1)"
 else
   tail -n 40 "$LOG" >&2
@@ -45,7 +45,7 @@ else
 fi
 
 # ---- 2. the module tests
-if (cd "$REPO/10-bootstrap" && cargo test -q -p node111 --lib devices) >"$LOG" 2>&1; then
+if (cd "$REPO/1-bootstrap" && cargo test -q -p node111 --lib devices) >"$LOG" 2>&1; then
   ok "cargo test --lib devices: $(grep -E '^test result:' "$LOG" | tail -1)"
 else
   tail -n 40 "$LOG" >&2
@@ -53,7 +53,7 @@ else
 fi
 
 # ---- 3. the uevent fixtures, independently (header ACTION@DEVPATH, then KEY=VALUE, NUL-separated)
-FIX="$REPO/10-bootstrap/crates/node111/tests/fixtures/uevent"
+FIX="$REPO/1-bootstrap/crates/node111/tests/fixtures/uevent"
 want_uevent() { # FILE ACTION SUBSYSTEM
   f="$FIX/$1"
   if [ ! -f "$f" ]; then fail "uevent fixture $1 is missing"; return; fi
@@ -76,7 +76,7 @@ want_uevent tty-remove.uevent remove tty
 want_uevent usb-remove.uevent remove usb
 want_uevent net-add.uevent add net
 want_uevent usb-change.uevent change usb
-if (cd "$REPO/10-bootstrap" && cargo test -q -p node111 --test devices_core uevent) >"$LOG" 2>&1; then
+if (cd "$REPO/1-bootstrap" && cargo test -q -p node111 --test devices_core uevent) >"$LOG" 2>&1; then
   ok "the uevent cases: $(grep -E '^test result:' "$LOG" | tail -1)"
 else
   tail -n 40 "$LOG" >&2
@@ -84,7 +84,7 @@ else
 fi
 
 # ---- 4. AF_NETLINK kept where the unit restricts address families
-for unit in "$REPO"/10-bootstrap/systemd/*.service; do
+for unit in "$REPO"/1-bootstrap/systemd/*.service; do
   line=$(grep -E '^RestrictAddressFamilies=' "$unit" || true)
   if [ -z "$line" ]; then
     ok "$(basename "$unit"): no RestrictAddressFamilies (AF_NETLINK allowed)"

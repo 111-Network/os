@@ -1,4 +1,4 @@
-// Layer 5 mock data (os/50-messaging/README.md): contacts, conversations in every delivery state and reason, requests,
+// Layer 5 mock data (os/5-messaging/README.md): contacts, conversations in every delivery state and reason, requests,
 // the fabric snapshot, Meshtastic presence and the hosted panel, all shaped like api/openapi.yaml. The adapter
 // (index.ts) holds the live copy; scenarios bend it. Nothing here is imported by production code.
 import { encodeNodeBech32 } from "../contacts";

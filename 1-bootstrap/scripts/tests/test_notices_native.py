@@ -8,7 +8,7 @@ THIRD-PARTY-NOTICES.md carries the SQLCipher text of the libsqlite3-sys crate it
 Hermetic: synthetic crate trees in a temp dir. The committed-file check reads the crate from the
 local cargo registry (scripts/check.sh runs it after cargo has fetched it) and fails when it is absent.
 
-  python3 -I -B -m unittest discover -s 10-bootstrap/scripts/tests -p 'test_*.py'   (from os/)
+  python3 -I -B -m unittest discover -s 1-bootstrap/scripts/tests -p 'test_*.py'   (from os/)
 """
 import contextlib
 import glob
@@ -20,7 +20,7 @@ import tempfile
 import unittest
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-SCRIPTS = os.path.dirname(HERE)                       # os/10-bootstrap/scripts
+SCRIPTS = os.path.dirname(HERE)                       # os/1-bootstrap/scripts
 OS_DIR = os.path.dirname(os.path.dirname(SCRIPTS))    # os/
 
 ZETETIC = """Copyright (c) 2008-2020 Zetetic LLC
@@ -144,21 +144,21 @@ class CommittedNotices(unittest.TestCase):
     def test_committed_file(self):
         with open(os.path.join(OS_DIR, "THIRD-PARTY-NOTICES.md"), encoding="utf-8") as f:
             notices = f.read()
-        with open(os.path.join(OS_DIR, "10-bootstrap", "Cargo.lock"), encoding="utf-8") as f:
+        with open(os.path.join(OS_DIR, "1-bootstrap", "Cargo.lock"), encoding="utf-8") as f:
             lock = f.read()
         m = re.search(r'name = "libsqlite3-sys"\nversion = "([^"]+)"', lock)
-        self.assertIsNotNone(m, "10-bootstrap/Cargo.lock has no libsqlite3-sys")
+        self.assertIsNotNone(m, "1-bootstrap/Cargo.lock has no libsqlite3-sys")
         home = os.environ.get("CARGO_HOME") or os.path.join(os.path.expanduser("~"), ".cargo")
         crates = glob.glob(os.path.join(home, "registry", "src", "*", f"libsqlite3-sys-{m.group(1)}"))
         if not crates:
-            self.fail(f"libsqlite3-sys {m.group(1)} is not unpacked in {home}: run `cargo fetch` in os/10-bootstrap "
+            self.fail(f"libsqlite3-sys {m.group(1)} is not unpacked in {home}: run `cargo fetch` in os/1-bootstrap "
                       "(this check fails rather than skips, so it never goes silently unrun)")
         with open(os.path.join(crates[0], "sqlcipher", "LICENSE"), encoding="utf-8") as f:
             lic = f.read().strip("\n")
         self.assertIn("Copyright (c) 2008-2020 Zetetic LLC", lic)
         self.assertIn("```text\n" + lic + "\n```", notices, "SQLCipher's LICENSE is not reproduced verbatim")
         o = re.search(r'name = "openssl-src"\nversion = "[^"+]*\+([^"]+)"', lock)
-        self.assertIsNotNone(o, "10-bootstrap/Cargo.lock has no openssl-src")
+        self.assertIsNotNone(o, "1-bootstrap/Cargo.lock has no openssl-src")
         ver = o.group(1)
         self.assertRegex(
             notices,

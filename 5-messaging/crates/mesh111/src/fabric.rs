@@ -185,7 +185,7 @@
 //! - All handles dropped does not stop the actor: call
 //!   [`Fabric::shutdown`] (clean close) or [`Fabric::abort`].
 //!
-//! ### Foreign calls (Layer 6 `60-transport/README.md` §3, §8, §9, §10)
+//! ### Foreign calls (Layer 6 `6-transport/README.md` §3, §8, §9, §10)
 //!
 //! The bridge core and the daemon's routes reach the foreign tables (store
 //! schema v3, [`crate::store::foreign`]) only through the typed
@@ -3837,7 +3837,7 @@ impl Core {
 }
 
 // ---------------------------------------------------------------------------
-// Layer 6 foreign calls (`60-transport/README.md` §3, §8, §9, §10)
+// Layer 6 foreign calls (`6-transport/README.md` §3, §8, §9, §10)
 // ---------------------------------------------------------------------------
 
 /// Rows per [`Fabric::foreign_ingest`] call (§3: one bounded batch per

@@ -1,9 +1,9 @@
 # Layer 5 — as-built extension seams (map, 2026-10-14)
 
 Where Layer 5 plugs into the built code. Produced by a read-only explore pass at kickoff (commit 0adb8e2); line
-numbers were verified then — re-check before editing. Prefixes: `N/` = `10-bootstrap/crates/node111/src`,
-`UI/` = `40-interface/ui`, `A/` = `30-intelligence/crates/agent111/src`, `ID/` = `20-identity/crates/id111/src`,
-`API/` = `40-interface/api`. `~` = approximate.
+numbers were verified then — re-check before editing. Prefixes: `N/` = `1-bootstrap/crates/node111/src`,
+`UI/` = `4-interface/ui`, `A/` = `3-intelligence/crates/agent111/src`, `ID/` = `2-identity/crates/id111/src`,
+`API/` = `4-interface/api`. `~` = approximate.
 
 ## 1. Supervised child pattern (how a new daemon child is added)
 
@@ -22,7 +22,7 @@ numbers were verified then — re-check before editing. Prefixes: `N/` = `10-boo
 - Rule fns: `agent :547` · `model :575` · `transport :618` · `radio :688` · `kb :767` · `gateway :801` · `codeagent :834`. Facts: `probe.rs` `spawn :486` (2 s tick; slow facts every 10 s), `slow_facts :380`, `file_facts :448`, `SpawnTracker :464`.
 - Adding an id touches: the fixed `7` in `ALL`/`compute`/`Registry::tick` + ordering test (`~:1020`) · `api_v1/services.rs` `unknown()` id list (`~:107-111`) · `API/openapi.yaml:232` `ServiceId` enum · generated `UI/src/lib/api/sse.gen.ts:66` + `UI/test/contract.gen.ts` · `UI/src/lib/verdict.ts:35` `NOUN` map (falls back to `plain_name`) · `UI/src/lib/api/mock/fixtures.ts:358, :464`.
 - Sidebar services list is dynamic (`UI/src/lib/nav.ts` `visibleNav`, `serviceHref`): a new id appears without nav edits; names/descriptions come from the Rust `catalogue()`. `UI/src/views/services/model.ts` `NO_SETUP_SERVICES` is gateway-only.
-- `embed_url` today: no Rust sets it (`Computed.embed_url` always `None`, `services/mod.rs:452`; copied in `record()` `:991`). UI: `views/services/model.ts:171-177` `classifyHref` (absolute http(s) only) → `embedUrl`; `views/services/index.tsx:221-228` `Links` renders only an external "Open full client" link. No iframe anywhere. CSP `N/daemon/dashboard/routes.rs:70`: `default-src 'self'`, `frame-ancestors 'none'`, no `frame-src`. Tests `UI/test/services.test.ts:35`; design note `40-interface/README.md:235`.
+- `embed_url` today: no Rust sets it (`Computed.embed_url` always `None`, `services/mod.rs:452`; copied in `record()` `:991`). UI: `views/services/model.ts:171-177` `classifyHref` (absolute http(s) only) → `embedUrl`; `views/services/index.tsx:221-228` `Links` renders only an external "Open full client" link. No iframe anywhere. CSP `N/daemon/dashboard/routes.rs:70`: `default-src 'self'`, `frame-ancestors 'none'`, no `frame-src`. Tests `UI/test/services.test.ts:35`; design note `4-interface/README.md:235`.
 
 ## 3. API routes, SSE bus, type generation
 
@@ -48,8 +48,8 @@ numbers were verified then — re-check before editing. Prefixes: `N/` = `10-boo
 - Layout `N/daemon/mod.rs:25` `DaemonLayout{root,etc}` · `state_dir()` `:33` (`root/state`) · `identity_dir()` `:36` · `current_release()` `:39` · `N/util/paths.rs:7` `root()` = `$NODE111_ROOT` or `/var/lib/111`.
 - Atomic writers `N/util/fs.rs:13` `atomic_write(path, data, mode)` · `:20` `atomic_write_owned(path, data, mode, Option<(uid,gid)>)` (fchown-before-rename, fchmod exact mode) · wrapper `api_v1/auth.rs:338` `write_json_owned`; `:361` `rotate_files` picks `owner` via `node_user_ids` when euid 0 · `N/config.rs:73` `chown_node111`, `:180` `chown_root_node111`.
 - State files: `settings.json` (`settings.rs:270`, 0644) · `devices.json` (`devices/store.rs:158`, 0600) · `dashboard-pair.json`, `dashboard-sessions.json` (`auth.rs:50-51`) · `offer.json`, `facts.json`, `health-confirmed.json`, `revert-request.json` (`daemon/mod.rs:121/133`) · `floor.json`, `update.json` (root-owned).
-- Dirs: `N/install/supervise.rs ~:116-127` `node_dirs` (state, state/staging, identity, rns, venvs) + `chown_tree :165`; agent dir at runtime (`intelligence.rs:256`). `10-bootstrap/systemd/111node.service:33-36`: `ProtectSystem=strict`, `StateDirectory=111` ⇒ `/var/lib/111` is the only writable tree.
-- **No database crate** in `node111` or `agent111` (no rusqlite/sled/redb). node111's dependency set is frozen; additions need reviewer sign-off recorded in `10-bootstrap/TASKS.md`. agent111 deps: anyhow, axum, serde, serde_json, time, tokio, tokio-stream, ureq.
+- Dirs: `N/install/supervise.rs ~:116-127` `node_dirs` (state, state/staging, identity, rns, venvs) + `chown_tree :165`; agent dir at runtime (`intelligence.rs:256`). `1-bootstrap/systemd/111node.service:33-36`: `ProtectSystem=strict`, `StateDirectory=111` ⇒ `/var/lib/111` is the only writable tree.
+- **No database crate** in `node111` or `agent111` (no rusqlite/sled/redb). node111's dependency set is frozen; additions need reviewer sign-off recorded in `1-bootstrap/TASKS.md`. agent111 deps: anyhow, axum, serde, serde_json, time, tokio, tokio-stream, ureq.
 - Agent store `A/store.rs`: `:55` `init` (0700; `conversations/`, `proposals/`, `tasks/`) · `:99` conversations = append-only JSONL · `:138/:145` proposals/tasks = pretty JSON `schema:1` via plain `std::fs::write` (not atomic) · `:78` `events.jsonl` · `:164` `new_id` = nanos + counter.
 
 ## 7. id111 crypto surface (what Layer 5 can call)

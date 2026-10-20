@@ -7,9 +7,9 @@ info:
     evolution; breaking changes bump the path prefix. Served same-origin by `111d`; `111d` relays
     chat/agent routes to `111-agent` (:11182). See README.md in this folder for conventions
     (auth, problem+json, SSE). The `x-sse-events` map at the bottom types the `/events` stream.
-    Layer 5 (Messaging & Data, os/50-messaging/README.md §15) adds messages, contacts, fabric,
+    Layer 5 (Messaging & Data, os/5-messaging/README.md §15) adds messages, contacts, fabric,
     nearby, panels and device identify, all additively. Layer 6 (Transport & Bridge,
-    os/60-transport/README.md §10, D27) adds foreign networks and conversations, compose fan-out,
+    os/6-transport/README.md §10, D27) adds foreign networks and conversations, compose fan-out,
     relay edges, optional components and the transport spine, all additively.
 servers:
   - url: http://127.0.0.1:11180
@@ -222,7 +222,7 @@ paths:
       operationId: authLogout
       responses:
         "204": { description: Session revoked }
-  # ---- Layer 5: Messaging & Data (50-messaging/README.md §15; additive) ----
+  # ---- Layer 5: Messaging & Data (5-messaging/README.md §15; additive) ----
   /api/v1/messages/threads:
     get:
       operationId: listThreads
@@ -374,7 +374,7 @@ paths:
       responses:
         "200": { description: Ticket minted, content: { application/json: { schema: { $ref: "#/components/schemas/PanelSession" } } } }
         "404": { description: "not_found (unknown panel, or its service is not set up)", $ref: "#/components/responses/Problem" }
-  # ---- Layer 6: Transport & Bridge (60-transport/README.md §10; D27; additive) ----
+  # ---- Layer 6: Transport & Bridge (6-transport/README.md §10; D27; additive) ----
   # Every write below refuses the agent's bearer (401 unauthenticated): the global gate in `require_session`, no allowlist (§13).
   /api/v1/networks:
     get:
@@ -879,7 +879,7 @@ components:
         detail: { type: object, additionalProperties: true, description: "raw detection facts the panel renders; bounded" }
     SseDevices: { type: object, required: [devices], properties: { devices: { type: array, items: { $ref: "#/components/schemas/DeviceRecord" } } } }
     SseServices: { type: object, required: [services], properties: { services: { type: array, items: { $ref: "#/components/schemas/ServiceRecord" } } } }
-    # ---- Layer 5: Messaging & Data (50-messaging/README.md §3–§15; additive) ----
+    # ---- Layer 5: Messaging & Data (5-messaging/README.md §3–§15; additive) ----
     NodeId: { type: string, pattern: "^[0-9a-f]{64}$", description: "a public NodeId, 64 lowercase hex; `label` and `bech32` are its display forms" }
     MessageId: { type: string, pattern: "^[A-Za-z0-9_-]{1,128}$", description: "`msg-…`, minted by 111d for the local row. Not the wire msg_id (§4), which only Advanced views show (`Message.msg_id`)" }
     MessageState:
@@ -1169,7 +1169,7 @@ components:
         contact: { $ref: "#/components/schemas/Contact" }
     SseNearby: { type: object, required: [sources], properties: { sources: { type: array, items: { $ref: "#/components/schemas/NearbySource" } } } }
     SsePanels: { type: object, required: [panels], properties: { panels: { type: array, items: { $ref: "#/components/schemas/Panel" } } } }
-    # ---- Layer 6: Transport & Bridge (60-transport/README.md §3–§11; D27; additive) ----
+    # ---- Layer 6: Transport & Bridge (6-transport/README.md §3–§11; D27; additive) ----
     NetworkId: { type: string, pattern: "^[a-z0-9][a-z0-9:_-]{0,39}$", description: "a network id (§3): `111` (the fabric; appears only in orderings), `meshtastic`, `lxmf`, `app:deltachat`, `app:simplex`. Open vocabulary: an unknown id renders as `unknown`. The colon in `app:…` is percent-encoded in a path." }
     ForeignConversationId: { type: string, pattern: "^fc-[A-Za-z0-9_-]{1,125}$", description: "`fc-…`, minted by 111d. API bodies and proposals name a conversation by this id, never by native id or name." }
     ForeignMessageId: { type: string, pattern: "^fm-[A-Za-z0-9_-]{1,125}$", description: "`fm-…`, minted by 111d, one per stored row (a split send is one row per part). Never a 111 `msg-…` id." }

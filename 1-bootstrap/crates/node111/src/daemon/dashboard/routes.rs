@@ -1,12 +1,12 @@
 //! Routes + handlers.
 //!
-//! Layer 1 contracts (pinned in os/10-bootstrap/TASKS.md), unchanged:
+//! Layer 1 contracts (pinned in os/1-bootstrap/TASKS.md), unchanged:
 //! - `GET /health`  → 200 iff all components green, always the component JSON
 //! - `GET /api/status` → the Layer 4/9 seam schema (additive-only)
 //! - both GET-only (405 otherwise); no identity material on any endpoint, ever
 //!
-//! Layer 4 (D15 amendments, `os/40-interface/README.md` §1/§11/§13):
-//! - `/` serves the embedded UI (`40-interface/ui/dist`), any other dist path is
+//! Layer 4 (D15 amendments, `os/4-interface/README.md` §1/§11/§13):
+//! - `/` serves the embedded UI (`4-interface/ui/dist`), any other dist path is
 //!   served by extension with `cache-control` (hashed `/assets/*` immutable, the
 //!   rest `no-cache` + ETag). An empty/missing dist (fresh checkout, UI not
 //!   built) serves a short notice instead of `/`.
@@ -52,12 +52,12 @@ use std::sync::Arc;
 #[folder = "assets/"]
 struct DashboardAssets;
 
-/// The Layer 4 UI build (`pnpm build` in `os/40-interface/ui`). Path is relative to
+/// The Layer 4 UI build (`pnpm build` in `os/4-interface/ui`). Path is relative to
 /// this crate's manifest dir. `allow_missing`: a fresh checkout without a UI
 /// build still compiles (and serves the notice). Release builds embed at compile
 /// time; debug builds read the folder from disk at request time.
 #[derive(rust_embed::RustEmbed)]
-#[folder = "../../../40-interface/ui/dist"]
+#[folder = "../../../4-interface/ui/dist"]
 #[allow_missing = true]
 struct UiDist;
 
@@ -67,7 +67,7 @@ const NOT_BUILT: &str = r#"<!doctype html>
 <body style="margin:0;background:#000;color:#fff;font:14px/1.6 ui-monospace,Menlo,Consolas,monospace">
 <main style="max-width:40em;padding:24px 16px">
 <h1 style="font-size:16px;margin:0 0 12px">111 node</h1>
-<p>dashboard UI not built — run <code>pnpm build</code> in <code>40-interface/ui</code>, then rebuild <code>111</code>.</p>
+<p>dashboard UI not built — run <code>pnpm build</code> in <code>4-interface/ui</code>, then rebuild <code>111</code>.</p>
 <p>The minimal node page works: <a href="/v1" style="color:#fff">/v1</a></p>
 </main></body></html>
 "#;

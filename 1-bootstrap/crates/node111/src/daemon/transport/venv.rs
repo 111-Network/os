@@ -7,7 +7,7 @@
 //!   `cache/packages/python/` (offline path; index allowed only at install
 //!   time).
 //! - **presence venv** (`venvs/presence`, [`presence`]): the
-//!   `meshtastic-presence` reader's own venv (`os/50-messaging/README.md` §2,
+//!   `meshtastic-presence` reader's own venv (`os/5-messaging/README.md` §2,
 //!   §14, §19 L1), built from the lock the release payload carries and the
 //!   manifest pins (`manifest::layer5::PRESENCE_LOCK`); fail closed — a failed
 //!   build never removes the venv in place.

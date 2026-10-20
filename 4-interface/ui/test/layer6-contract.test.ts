@@ -1,4 +1,4 @@
-// Layer 6 contract pins (60-transport/README.md §10, task S2): the closed enums, the enum growth on existing schemas, the SSE map,
+// Layer 6 contract pins (6-transport/README.md §10, task S2): the closed enums, the enum growth on existing schemas, the SSE map,
 // and fixtures for the new schemas validated against api/openapi.yaml. Fixtures are hand-written here, not daemon output.
 import { describe, expect, it } from "vitest";
 import {

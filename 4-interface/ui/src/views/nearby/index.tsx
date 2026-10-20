@@ -1,4 +1,4 @@
-// Nearby (os/50-messaging/README.md section 14 and 16, interface README 6.4): the nodes a Meshtastic board has heard, grouped by
+// Nearby (os/5-messaging/README.md section 14 and 16, interface README 6.4): the nodes a Meshtastic board has heard, grouped by
 // source ("heard via Meshtastic on <board>"). Everything a node reports is an untrusted RF-origin string: it is drawn as text
 // only (cleaned and cut), never as a link, and it never goes into a prompt. A Meshtastic node is not a contact. The radar and
 // map views stay Layer 7's.

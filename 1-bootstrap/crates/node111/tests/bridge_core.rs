@@ -1,4 +1,4 @@
-//! Layer 6 B2 acceptance (`os/60-transport/README.md` §3, §4, §8, §9; `60-transport/TASKS.md`
+//! Layer 6 B2 acceptance (`os/6-transport/README.md` §3, §4, §8, §9; `6-transport/TASKS.md`
 //! row B2): the bridge core on a real fabric (a fresh `id111` identity, SQLCipher store V3)
 //! with scripted `StubAdapter`s — two bridges cross-wired over stub "air" for the two-node
 //! relay cases.
@@ -89,7 +89,7 @@ fn schemas() -> &'static Map<String, Value> {
     static S: OnceLock<Map<String, Value>> = OnceLock::new();
     S.get_or_init(|| {
         let path = format!(
-            "{}/../../../40-interface/ui/test/contract.gen.ts",
+            "{}/../../../4-interface/ui/test/contract.gen.ts",
             env!("CARGO_MANIFEST_DIR")
         );
         let text = std::fs::read_to_string(path).expect("contract.gen.ts");

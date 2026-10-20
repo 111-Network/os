@@ -53,7 +53,7 @@ from an upstream file is marked (unverified). Code lives in `/tmp` scratch only;
    `bc7291552be7a58f361522990465165c`, Changelog 1.5.5) — a verification option for the updater.
 3. **MeshChatX sunsets 2027-01-01** (https://github.com/Quad4-Software/MeshChatX README "Project status"). v5.0.0 will be the last release. RNS releases weekly and
    its floors rise (MeshChatX 4.10.7 requires `rns>=1.5.7`, `lxmf>=1.2.0`), so a frozen MeshChatX will eventually meet an RNS it was not tested with.
-4. **Reticulum's default is `share_instance = Yes`; our template sets `no`** (`10-bootstrap/crates/node111/assets/rns/config.tmpl:9`). Any LXMF program
+4. **Reticulum's default is `share_instance = Yes`; our template sets `no`** (`1-bootstrap/crates/node111/assets/rns/config.tmpl:9`). Any LXMF program
    started with default config tries to *become* the shared instance, and falls back to client only when the bind fails
    (`RNS/Reticulum.py` ~lines 405-460). Consequences: (a) rnsd must be `yes` and up before any child starts, and children must be restarted when rnsd restarts;
    (b) a client with a different config dir derives a different `rpc_key` (hash of its own transport identity, line 362), so RPC (stats, RSSI) fails
@@ -96,12 +96,12 @@ from an upstream file is marked (unverified). Code lives in `/tmp` scratch only;
     stamps for 21 days (`TICKET_EXPIRY`). Enforcement is off by default in the library. Our own node should announce no stamp cost (no policy limits); we must pay other peers' costs.
 13. **Fields useful to a bridge**: `FIELD_CUSTOM_TYPE/DATA/META` (0xFB-0xFD) are reserved "for bridging/tunneling external protocols"; `FIELD_THREAD` 0x08, `FIELD_REPLY_TO` 0x30, `FIELD_RENDERER` 0x0F
     (plain/micron/markdown/bbcode). Via MeshChatX only attachments and `app_extensions` are writable, so carrying a sealed 111 envelope over LXMF (the L5 `rns-bridge` seam, 287 B budget,
-    `50-messaging/README.md:364`) would ride as a small file attachment, which is awkward but possible; Option C could use the custom fields directly.
+    `5-messaging/README.md:364`) would ride as a small file attachment, which is awkward but possible; Option C could use the custom fields directly.
 14. **Discovery**: LXMF peers appear in others' apps only by announce (≈200 B with ratchet, estimate) or when someone imports our address + public key. Announce cap is 2 % of each interface's bandwidth by default
     (`Reticulum.ANNOUNCE_CAP = 2`). Our AutoInterface uses `group_id = 111.network` (`config.tmpl:15`); stock apps default to group `reticulum` (`AutoInterface.DEFAULT_GROUP_ID`), ports 29716/42671,
     so stock LAN users will not hear us unless we join their group or they connect over TCP. Two AutoInterface blocks in one rnsd share default ports (sockets set `SO_REUSEADDR/REUSEPORT`); behaviour unverified.
 15. **Identity and A10**: an RNS identity file is 64 raw bytes (32 X25519 private ‖ 32 Ed25519 seed; `Identity.get_private_key`/`load_private_key`); the public key is 64 B. L2 §10's 32 B `transport_key`
-    field therefore binds by SHA-256 of the 64 B public key (`20-identity/README.md:366`), and `transport_sig` is a plain Ed25519 signature 111d can make from the seed. Cleanest flow: the *child* creates
+    field therefore binds by SHA-256 of the 64 B public key (`2-identity/README.md:366`), and `transport_sig` is a plain Ed25519 signature 111d can make from the seed. Cleanest flow: the *child* creates
     its identity (`meshchatx --generate-identity-file`, or lxmd on first run), 111d reads the file and signs the attestation. 111d never writes or parses anything Reticulum-specific except that 64-byte file.
     One delivery identity per `LXMRouter`, so one LXMF address per bridge identity (matches "one bridge identity per foreign network"); MeshChatX supports several identities if per-user addresses are ever wanted.
 16. **No channels**: confirmed. Closest patterns are (a) a distribution-group endpoint that fans out (LXMF-Tools `lxmf_distribution_group_*`, MIT, beta), (b) Reticulum Relay Chat, a separate IRC-like protocol over
@@ -168,4 +168,4 @@ text to a chosen peer in native LXMF (opportunistic when content ≤ 287 B, othe
 - https://raw.githubusercontent.com/markqvist/NomadNet/master/LICENSE · https://raw.githubusercontent.com/markqvist/Sideband/master/LICENSE · https://raw.githubusercontent.com/torlando-tech/columba/main/LICENSE.md · https://github.com/torlando-tech/columba
 - https://codeberg.org/Lew_Palm/Leviculum · https://crates.io/api/v1/crates/lxmf-wire · https://github.com/FreeTAKTeam/LXMF-rs · https://crates.io/api/v1/crates/reticulum
 - https://github.com/kc1awv/rrcd · https://raw.githubusercontent.com/kc1awv/rrcd/main/LICENSE · https://github.com/RFnexus/Reticulated · https://zff.dev/jahway603/send-lxmf
-- Repo: `LICENSING.md:24-31,59,184-185` · `plan/cross-layer/devices.md` §7 item 12 · `10-bootstrap/crates/node111/assets/rns/config.tmpl:8-15` · `…/src/daemon/transport/{mod.rs:102-113,148-186,config.rs:11-22}` · `20-identity/README.md:223-236,366` · `50-messaging/README.md:364` · `50-messaging/crates/mesh111/src/link/mod.rs:255` · `00-knowledge/{projects/{lxmf,meshchatx,reticulum}.md,concepts/store-and-forward-states.md}`
+- Repo: `LICENSING.md:24-31,59,184-185` · `plan/cross-layer/devices.md` §7 item 12 · `1-bootstrap/crates/node111/assets/rns/config.tmpl:8-15` · `…/src/daemon/transport/{mod.rs:102-113,148-186,config.rs:11-22}` · `2-identity/README.md:223-236,366` · `5-messaging/README.md:364` · `5-messaging/crates/mesh111/src/link/mod.rs:255` · `0-knowledge/{projects/{lxmf,meshchatx,reticulum}.md,concepts/store-and-forward-states.md}`

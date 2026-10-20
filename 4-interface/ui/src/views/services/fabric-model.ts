@@ -1,4 +1,4 @@
-// The `fabric` ("Messaging") service page and the Layer 5 settings page share these words (os/50-messaging/README.md sections
+// The `fabric` ("Messaging") service page and the Layer 5 settings page share these words (os/5-messaging/README.md sections
 // 8-10, 15, 16): what each link is, what a path can carry, who the home hub is, what the node holds for others, and what the
 // store does when it fills. Pure; the views draw it. Everything a peer or a radio could have written goes through
 // `cleanPeerText` before it is shown.

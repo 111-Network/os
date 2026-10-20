@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# lxmf-sidecar: the Layer 6 LXMF helper of the 111network OS (spec 60-transport/README.md section 6).
+# lxmf-sidecar: the Layer 6 LXMF helper of the 111network OS (spec 6-transport/README.md section 6).
 # Copyright (C) 2026 the 111network authors.
 #
 # Licence: PENDING the owner's contact with upstream (see LICENSE-NOTE.md). No licence is granted by

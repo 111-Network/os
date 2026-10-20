@@ -1,4 +1,4 @@
-//! Identify step 1: RNode (`os/60-transport/README.md` §12; DEV §3.2;
+//! Identify step 1: RNode (`os/6-transport/README.md` §12; DEV §3.2;
 //! KB `projects/rnode-firmware.md`: "Layer 6 adopts `rnodeconf --info` as
 //! the identify probe").
 //!

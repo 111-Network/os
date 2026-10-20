@@ -1,4 +1,4 @@
-// Contacts view model (os/50-messaging/README.md sections 7 and 16): what a row says about a contact, and the sentence for
+// Contacts view model (os/5-messaging/README.md sections 7 and 16): what a row says about a contact, and the sentence for
 // each way "add a contact" can end. Pure: no React.
 import { classifyAddInput, contactName, roleLabels, trustLabel, type AddInput } from "../../lib/api/contacts";
 import type { Contact } from "../../lib/api/types";

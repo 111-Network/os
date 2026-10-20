@@ -179,7 +179,7 @@ fn handle_update_request(
     let extract_result = (|| -> anyhow::Result<()> {
         safe_unpack(&tarball, &tmp)?;
         crate::daemon::updater::stage::verify_tree(&tmp)?;
-        // Layer 5 (os/50-messaging/README.md §19 L1): bin/meshmud, panels/<bundle>/ and
+        // Layer 5 (os/5-messaging/README.md §19 L1): bin/meshmud, panels/<bundle>/ and
         // the presence lock must equal the signed manifest's pins, and nothing unpinned
         // rides along. This is the authoritative check — on the tree WE extracted.
         manifest.verify_layer5_tree(&tmp, crate::daemon::updater::fetch::TARGET_TRIPLE)?;

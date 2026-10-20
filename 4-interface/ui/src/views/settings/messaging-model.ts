@@ -1,4 +1,4 @@
-// Settings -> Messaging & data (os/50-messaging/README.md sections 7.3, 9, 10, 15, 16): what is typed, scanned and shown on the
+// Settings -> Messaging & data (os/5-messaging/README.md sections 7.3, 9, 10, 15, 16): what is typed, scanned and shown on the
 // Layer 5 page. Pure, so the flows are tested in the node environment. Nothing here sends anything: the page calls the node's
 // own routes and shows what the node answers (never an optimistic value).
 import { formatPairCode } from "../../app/pair-code";

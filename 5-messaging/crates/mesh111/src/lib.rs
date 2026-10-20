@@ -1,4 +1,4 @@
-//! `mesh111` — the Layer 5 fabric (spec: `os/50-messaging/README.md` v1.1).
+//! `mesh111` — the Layer 5 fabric (spec: `os/5-messaging/README.md` v1.1).
 //!
 //! Store-and-forward of Layer 2 sealed packets across whatever links exist:
 //! envelope codec, message identity, fragmentation, authenticated receipts,
@@ -7,7 +7,7 @@
 //! goes through the [`sealer::Sealer`] handle the daemon implements over
 //! `id111` (spec §1, §18.3).
 //!
-//! Module ownership follows `os/50-messaging/TASKS.md` (T0 scaffold; Wave 0 C2/C3;
+//! Module ownership follows `os/5-messaging/TASKS.md` (T0 scaffold; Wave 0 C2/C3;
 //! Wave 1 F1). Modules are stubs until their task lands.
 
 #![forbid(unsafe_code)]

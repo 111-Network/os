@@ -1,4 +1,4 @@
-# The LXMF helper's Reticulum client config (os/60-transport/README.md §6, §11), rendered
+# The LXMF helper's Reticulum client config (os/6-transport/README.md §6, §11), rendered
 # by 111d. A shared-instance client with no interfaces: it attaches to 111d's rnsd and
 # carries no traffic of its own. 0600: it carries the rpc_key.
 schema-version = 2

@@ -12,7 +12,7 @@ kb_entry = "projects/lxmf"
 kind = "pip"                            # pip | binary
 # The hash-locked closure (rns 1.5.7 + lxmf 1.2.1 + cryptography, cffi, pycparser, pyserial; hashes only, no
 # third-party bytes) rides beside this file as assets/components/lxmf.lock.txt, embedded in the signed binary: a
-# byte-identical copy of 60-transport/sidecars/lxmf-sidecar/lxmf-sidecar-lock.txt written by the helper's gen_lock.py
+# byte-identical copy of 6-transport/sidecars/lxmf-sidecar/lxmf-sidecar-lock.txt written by the helper's gen_lock.py
 # (tests assert the two are identical). `111 install` downloads it into cache/packages/lxmf/ with a throwaway venv's
 # pip (`pip download --require-hashes`); enable installs venvs/lxmf from that cache only, offline. Its rns pin must
 # equal the release's rns-lock.txt (§6: two rns copies share one instance protocol; a release-checklist assertion).
@@ -37,7 +37,7 @@ health = "ready"                        # the first stdout line is {"type":"read
 health_timeout_secs = 30
 
 [weight]
-# Measured with the closure of this lock (x86_64, CPython 3.13; 60-transport/sidecars/lxmf-sidecar/README.md "Weight"):
+# Measured with the closure of this lock (x86_64, CPython 3.13; 6-transport/sidecars/lxmf-sidecar/README.md "Weight"):
 # the wheels pip downloads for this platform, the venv's site-packages without pip, the idle helper's resident set.
 cached_bytes = 5830776                  # 5.83 MB: 6 wheels, cryptography 4.75 MB of it
 installed_bytes = 24927142              # 24.9 MB

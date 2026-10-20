@@ -1,4 +1,4 @@
-// Messages view model (os/50-messaging/README.md §9, §16): the words and glyphs for delivery evidence, the reason a
+// Messages view model (os/5-messaging/README.md §9, §16): the words and glyphs for delivery evidence, the reason a
 // message waits, the "received" time with the sender's claim kept apart, and the one-line summaries of a thread.
 // Pure: no React, no clock of its own (every function that needs "now" takes it).
 import { parseNodeId } from "../../lib/api/contacts";
@@ -221,7 +221,7 @@ export function composeGate(contact: Pick<Contact, "request" | "has_key"> | null
   return { ok: true, hint: contact.has_key ? null : REASON_COPY.waiting_for_key! };
 }
 
-// --- The foreign compose gate (os/60-transport/README.md §10) ------------------------------------------------------------------
+// --- The foreign compose gate (os/6-transport/README.md §10) ------------------------------------------------------------------
 
 /** One fact shown above the foreign composer: it does not block a send (the node queues what it cannot send yet) but the person reads it first. */
 export interface GateNote {

@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
-# 60-transport/verify/zero-weight.sh — Layer 6 gate G7, zero weight (spec §16 G7, §2.1 rule 2; D26 #1).
+# 6-transport/verify/zero-weight.sh — Layer 6 gate G7, zero weight (spec §16 G7, §2.1 rule 2; D26 #1).
 #
 # With every optional component disabled: nothing is installed (no <root>/components/, no venvs/<component>), the
 # processes under 111d and the TCP ports they listen on equal the Layer 5 baseline (verify/baseline-listeners.txt),
 # and the idle RSS of 111d and the cached payload sizes are RECORDED (note:), not asserted.
 #
-#   NODE111_ROOT=/var/lib/111 bash 60-transport/verify/zero-weight.sh            the daemon is found by its cmdline
-#   NODE111_ROOT=… NODE111_PID=<111d pid> bash 60-transport/verify/zero-weight.sh
+#   NODE111_ROOT=/var/lib/111 bash 6-transport/verify/zero-weight.sh            the daemon is found by its cmdline
+#   NODE111_ROOT=… NODE111_PID=<111d pid> bash 6-transport/verify/zero-weight.sh
 #   REQUIRE_G7=1 …                                                                lock run: no daemon is a FAIL
 #
 # Reads /proc only (no ss, no ip): the listener set comes from /proc/<pid>/net/tcp{,6} (the daemon's own network
@@ -16,10 +16,10 @@
 set -u
 export LC_ALL=C
 cd "$(dirname "$0")/../.." || exit 1
-. 60-transport/verify/lib.sh
+. 6-transport/verify/lib.sh
 
-BASELINE=60-transport/verify/baseline-listeners.txt
-DECLS=10-bootstrap/crates/node111/assets/components
+BASELINE=6-transport/verify/baseline-listeners.txt
+DECLS=1-bootstrap/crates/node111/assets/components
 ROOT=${NODE111_ROOT:-}
 
 [ -n "$ROOT" ] || skip_or_fail G7 "NODE111_ROOT is not set (the daemon root to inspect)"

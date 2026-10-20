@@ -1,4 +1,4 @@
-//! The spine's apply path (`os/60-transport/README.md` §11 "Live attach,
+//! The spine's apply path (`os/6-transport/README.md` §11 "Live attach,
 //! detach, reload", §12 "Port ownership" and the `rns.posture.set` row, §6
 //! "Start order"; §18 Layer 1: child ordering is orchestration over
 //! `restart` and fresh spawns, not a supervisor feature).

@@ -1,4 +1,4 @@
-//! `GET /api/v1/status` — the `Status` schema (`os/40-interface/api/openapi.yaml`):
+//! `GET /api/v1/status` — the `Status` schema (`os/4-interface/api/openapi.yaml`):
 //! a strict superset of `/api/status` (every key it has, same values) plus
 //! `node.label/bech32/alias`, `update`, `intelligence.agent_state/model_id`,
 //! `bind`, `lan_enabled`, `auth` and `layers`. Owned by Layer 4 task R2.
@@ -31,7 +31,7 @@
 //!   `5` iff the message fabric runs and is not restore-pending (the
 //!   `FabricHandle` ext: `running() && !restore_pending()` — while the
 //!   identity holder reports a restore floor nothing is sealed and no link
-//!   runs, `os/50-messaging/README.md` §4, §15).
+//!   runs, `os/5-messaging/README.md` §4, §15).
 //!
 //! **Heartbeat** ([`spawn_heartbeat`]): every 2 s the snapshot is rebuilt and a
 //! `status` frame is published on the events bus when it changed (diffed as

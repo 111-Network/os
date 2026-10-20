@@ -1,10 +1,10 @@
 //! T10 acceptance: updater fetch/verify/stage against a fixture HTTP server —
 //! happy path, stale manifest, bad minisig, replayed keychain generation,
 //! tampered payload, clock-skew marker, and the Layer 5 cross-check
-//! (`verify_layer5_tree` after staging, os/50-messaging/README.md §19 L1). Asserts
+//! (`verify_layer5_tree` after staging, os/5-messaging/README.md §19 L1). Asserts
 //! the daemon never writes outside state/staging (no releases/, no `current`).
 //!
-//! Then the presence venv across promotions (os/50-messaging/README.md §14;
+//! Then the presence venv across promotions (os/5-messaging/README.md §14;
 //! `daemon::transport::venv::presence::ensure_current`, what the daemon runs at
 //! the start that follows a promotion), with a fake python3/pip
 //! (`fake_python`): an unchanged lock runs nothing, a changed lock rebuilds

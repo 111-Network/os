@@ -1,4 +1,4 @@
-// Layer 6 data layer (os/60-transport/README.md section 10): the mock's three adapters validated against the contract digest, the
+// Layer 6 data layer (os/6-transport/README.md section 10): the mock's three adapters validated against the contract digest, the
 // consent round-trip, relay edges, optional components, HAM and uplink gates, fan-out, transport, and the store's slices and frames
 // (`network_message` per conversation, `bridge`). Fixtures are the mock's; the contract digest is the judge.
 import { createHash } from "node:crypto";

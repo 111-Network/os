@@ -1,6 +1,6 @@
 # shellcheck shell=sh
 # fakes — stand-ins shared by the hermetic gates in scripts/tests/ (sourced, never run). They let a
-# gate drive scripts/cross-build.sh, scripts/check.sh and ../50-messaging/scripts/check.sh on a
+# gate drive scripts/cross-build.sh, scripts/check.sh and ../5-messaging/scripts/check.sh on a
 # synthetic tree: no cargo, no cross compiler, no network (Wave 2 review B1 m1-m3).
 
 # sysbin DIR TOOL... — DIR holds links to the named host tools and nothing else, so a gate's PATH

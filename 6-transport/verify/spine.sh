@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# 60-transport/verify/spine.sh — Layer 6 gate G4 (spec §16): the transport spine.
+# 6-transport/verify/spine.sh — Layer 6 gate G4 (spec §16): the transport spine.
 #
-#   bash 60-transport/verify/spine.sh                 runs what it can, SKIPs the rest
-#   REQUIRE_G4=1 bash 60-transport/verify/spine.sh    lock run: a missing prerequisite or a TODO step is a FAIL
+#   bash 6-transport/verify/spine.sh                 runs what it can, SKIPs the rest
+#   REQUIRE_G4=1 bash 6-transport/verify/spine.sh    lock run: a missing prerequisite or a TODO step is a FAIL
 #
 # First cut (B4):
 #   1. the spine's tests: golden renders per posture and stanza set (byte-exact, tests/fixtures/rns/*.golden),
@@ -20,7 +20,7 @@
 # Nothing of ours stays running: cargo's test binary exits, the scratch root is removed on exit.
 set -u
 cd "$(dirname "$0")/../.." || exit 1
-. 60-transport/verify/lib.sh
+. 6-transport/verify/lib.sh
 REPO=$(pwd)
 
 command -v cargo >/dev/null 2>&1 || skip_or_fail G4 "cargo is not installed"
@@ -31,7 +31,7 @@ trap cleanup EXIT
 
 # ---- 1. the spine's tests (golden renders, seams, apply path)
 LOG="$SCRATCH/cargo.log"
-if (cd "$REPO/10-bootstrap" && cargo test -q -p node111 --test transport_spine) >"$LOG" 2>&1; then
+if (cd "$REPO/1-bootstrap" && cargo test -q -p node111 --test transport_spine) >"$LOG" 2>&1; then
   ok "cargo test --test transport_spine: $(grep -E '^test result:' "$LOG" | tail -1)"
 else
   tail -n 40 "$LOG" >&2
@@ -41,7 +41,7 @@ fi
 # ---- 2. modes on a rendered scratch root (independent stat check)
 ROOT="$SCRATCH/root"
 mkdir -p "$ROOT"
-if (cd "$REPO/10-bootstrap" && SPINE_KEEP_ROOT="$ROOT" cargo test -q -p node111 --test transport_spine \
+if (cd "$REPO/1-bootstrap" && SPINE_KEEP_ROOT="$ROOT" cargo test -q -p node111 --test transport_spine \
       modes_on_a_scratch_root) >"$LOG" 2>&1; then
   want_mode() { # PATH MODE
     if [ ! -e "$ROOT/$1" ]; then fail "$1 is missing"; return; fi

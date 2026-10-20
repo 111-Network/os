@@ -2,8 +2,8 @@
 
 Judge: fable (one agent on the running system: the three netns harness runs, the hosted-panel lint, the full
 bootstrap gate, then the as-built paths read with an attacker's and a phone user's eyes). Tree: `b0f8c52` (polish wave
-+ harness fix). Law: `50-messaging/README.md` v1.2 + as-built amendments, D18–D21, D23/D25 for what Layer 6 takes
-over. Build record: `50-messaging/TASKS.md`, the triages under `review/`, the run journals under `runs/journals/`.
++ harness fix). Law: `5-messaging/README.md` v1.2 + as-built amendments, D18–D21, D23/D25 for what Layer 6 takes
+over. Build record: `5-messaging/TASKS.md`, the triages under `review/`, the run journals under `runs/journals/`.
 
 ## 1. Verdict: **fix-then-lock**
 
@@ -23,10 +23,10 @@ that fix and the two minors tied to it (m1, m3) land and the three-node smoke ru
 
 | # | Command | Result | Duration |
 |---|---|---|---|
-| 1 | `bash 40-interface/verify/smoke.sh` | `SMOKE GREEN — 118 checks ok, 0 FAIL` | 118.5 s (incl. UI + cargo build into a fresh target dir) |
-| 2 | `bash 40-interface/verify/smoke.sh --three-node` (SMOKE_KEEP=1) | `SMOKE GREEN — 158 checks ok, 0 FAIL` | 38.2 s in the namespaces |
-| 3 | `bash 40-interface/verify/panel-lint.sh` | `PANEL-LINT GREEN — 144 checks ok, 0 FAIL` (strict default) | 46.6 s |
-| 4 | `10-bootstrap/scripts/check.sh` | `ALL GREEN` (818 cargo tests across the suites, UI 1192, G2 run on musl-x86_64 + link on aarch64, notices current, gate self-tests, budget eager 103.0 / lazy 188.1 KB) | 695 s |
+| 1 | `bash 4-interface/verify/smoke.sh` | `SMOKE GREEN — 118 checks ok, 0 FAIL` | 118.5 s (incl. UI + cargo build into a fresh target dir) |
+| 2 | `bash 4-interface/verify/smoke.sh --three-node` (SMOKE_KEEP=1) | `SMOKE GREEN — 158 checks ok, 0 FAIL` | 38.2 s in the namespaces |
+| 3 | `bash 4-interface/verify/panel-lint.sh` | `PANEL-LINT GREEN — 144 checks ok, 0 FAIL` (strict default) | 46.6 s |
+| 4 | `1-bootstrap/scripts/check.sh` | `ALL GREEN` (818 cargo tests across the suites, UI 1192, G2 run on musl-x86_64 + link on aarch64, notices current, gate self-tests, budget eager 103.0 / lazy 188.1 KB) | 695 s |
 
 Material notes (read as evidence, not proof):
 
@@ -56,9 +56,9 @@ are green on this tree; the lock condition fails only on M1 below, which no gate
 
 ### M1 — After an unclean restart a node attributes nothing from a persisted peer for up to 32 packets; the hub mailbox is silently dead for that member
 
-**Where.** `20-identity/crates/id111/src/counters.rs:664–679` (`apply_unclean_jump`: every persisted peer's receive
+**Where.** `2-identity/crates/id111/src/counters.rs:664–679` (`apply_unclean_jump`: every persisted peer's receive
 high-water `+= J`, `J = batch_n = 64`, bitmap cleared since `J ≥ 32`) and `:547–581` (`observe_counter`: Stale for any
-counter ≤ `high − 32` or already seen). `50-messaging/crates/mesh111/src/fabric.rs:2447–2451` attributes a connection
+counter ≤ `high − 32` or already seen). `5-messaging/crates/mesh111/src/fabric.rs:2447–2451` attributes a connection
 only on `Freshness::Fresh`; `:2478–2497` answer `CUSTODY_PUT`, `MAILBOX_FETCH` and `ENROLL` only on an attributed
 connection; `:2753` pushes only to attributed connections that fetched. The member's counters toward the hub are
 batch-committed too, but the member was not restarted, so they continue from the live value.
@@ -98,7 +98,7 @@ same residual, one crate further from the window. Either way, re-run the three-n
 ## 4. Minors
 
 - **m1 `Fabric::retry_all` is never called.** The mesh111 module doc (`fabric.rs:38–43`) and `tests/lossy.rs:47` say the
-  daemon calls it on fabric events; `grep retry_all 10-bootstrap/crates/node111/src` finds no caller. So a member
+  daemon calls it on fabric events; `grep retry_all 1-bootstrap/crates/node111/src` finds no caller. So a member
   re-FETCHes only at link-up or enrolment, and `custody_inflight` on a live socket is cleared only by a disconnect;
   `Fabric::retry` (`fabric.rs:3085`) clears outstanding fragments but not the message's inflight custody entries, so
   the UI's retry does nothing for a CUSTODY_PUT the hub ignored (M1) or lost. Fix: call `retry_all` from the daemon's
@@ -119,10 +119,10 @@ same residual, one crate further from the window. Either way, re-run the three-n
   any TCP connector on the LAN harvests the NodeId and keys of every hub / LAN-sharing node. Spec-conformant (§8.1,
   §18.4 cleartext announces) — record it as a stated residual, or read the peer's hello first (no cost, still
   symmetric between 111 peers).
-- **m7 gen-manifest listing check compares names, not hashes** (`10-bootstrap/manifest/gen-manifest.py:211–239`;
+- **m7 gen-manifest listing check compares names, not hashes** (`1-bootstrap/manifest/gen-manifest.py:211–239`;
   MANP gap). `verify_tree` at stage time refuses a wrong hash, `sha256sum -c` is the human step. Fix: compare each
   listed sha256 with the tarball member (`read_tar` already computes them).
-- **m8 Stale docs.** `10-bootstrap/README.md` "Artifacts per release" still lists only `bin/111` + `share/kb/`;
+- **m8 Stale docs.** `1-bootstrap/README.md` "Artifacts per release" still lists only `bin/111` + `share/kb/`;
   `LICENSING.md` §8 still says the release checklist does not record the source offer (DOCS deviations). Two one-line
   edits.
 

@@ -1,6 +1,6 @@
 # Layer 5 — re-check of spec v1.1 (crypto + panels lenses)
 
-Judge: fable (re-check) · 2026-10-14 · `os/50-messaging/README.md` v1.1 (`21cd4cb`) vs the triage and the three reviews.
+Judge: fable (re-check) · 2026-10-14 · `os/5-messaging/README.md` v1.1 (`21cd4cb`) vs the triage and the three reviews.
 Real checks: `git show 97fd9bb` (v1 text); `counters.rs` (`next_announce_counter` fsyncs on mint, errors
 `RestoreFloorRequired` while a floor is pending; `open()` jumps traffic counters only); `store.rs:272` (stale check
 after signature verification); `routes.rs:197` (`host_allowed` accepts `localhost`); varint arithmetic; a line-grammar

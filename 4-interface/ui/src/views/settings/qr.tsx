@@ -1,4 +1,4 @@
-// A QR code drawn from the module matrix the node sends (os/50-messaging/README.md section 7.2): dark modules on a light plate in
+// A QR code drawn from the module matrix the node sends (os/5-messaging/README.md section 7.2): dark modules on a light plate in
 // the page's own tokens (the dashboard is dark, so the plate is `foreground`). Used for the hub's enrollment bundle.
 import { useEffect, useMemo, useRef } from "react";
 import { drawQr, QR_QUIET_ZONE, qrModules, qrScale } from "../../lib/api/contacts";

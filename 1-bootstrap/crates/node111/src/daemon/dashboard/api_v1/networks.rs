@@ -1,4 +1,4 @@
-//! `/api/v1/networks*` (Layer 6 `os/60-transport/README.md` §3, §9, §10; contract
+//! `/api/v1/networks*` (Layer 6 `os/6-transport/README.md` §3, §9, §10; contract
 //! `listNetworks`, `listForeignConversations`, `openForeignConversation`,
 //! `getForeignConversation`, `sendForeignMessage`).
 //!

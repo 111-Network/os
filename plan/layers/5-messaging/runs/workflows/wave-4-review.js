@@ -5,22 +5,22 @@ export const meta = {
 }
 
 const ROOT = '/home/kia/projects/111network/os'
-const OUT = `${ROOT}/plan/layers/50-messaging/review/integrated.md`
+const OUT = `${ROOT}/plan/layers/5-messaging/review/integrated.md`
 
 const PROMPT = `
 You are the INTEGRATED REVIEWER (V4) for Layer 5 (Messaging & Data) of the 111network OS. Today is 2026-10-19. Repo root:
 ${ROOT} (git; you NEVER commit). You judge whether Layer 5 may be LOCKED: "no critical or major finding open; every gate green".
 
-THE LAW: ${ROOT}/50-messaging/README.md (spec v1.2 + as-built amendments; §20 lists the lock gates G1–G4; §21 the deferred items) and
-${ROOT}/plan/DECISIONS.md D18–D21 (and D23 for what Layer 6 now takes over). The build record: ${ROOT}/50-messaging/TASKS.md (every row,
-its readings and bounces), the review triages ${ROOT}/plan/layers/50-messaging/review/{triage,recheck,wave-1,wave-2}.md, and the
-coordinates log ${ROOT}/plan/layers/50-messaging/research/coordinates.md (what landed when, what is an external gate).
+THE LAW: ${ROOT}/5-messaging/README.md (spec v1.2 + as-built amendments; §20 lists the lock gates G1–G4; §21 the deferred items) and
+${ROOT}/plan/DECISIONS.md D18–D21 (and D23 for what Layer 6 now takes over). The build record: ${ROOT}/5-messaging/TASKS.md (every row,
+its readings and bounces), the review triages ${ROOT}/plan/layers/5-messaging/review/{triage,recheck,wave-1,wave-2}.md, and the
+coordinates log ${ROOT}/plan/layers/5-messaging/research/coordinates.md (what landed when, what is an external gate).
 
 WHAT RUNS HERE (no hardware; everything in user namespaces): export PATH="$HOME/.cargo/bin:$PATH"; CARGO_BUILD_JOBS=6; one cargo at a time.
-1. bash ${ROOT}/40-interface/verify/smoke.sh                 (single node, Layer 4 + 5, ~118 checks)
-2. bash ${ROOT}/40-interface/verify/smoke.sh --three-node    (hub + members: cards, direct, hub custody, non-member, replay, restore, requests, agent tools, Meshtastic stub, clean restart; ~154 checks; keep the scratch root with SMOKE_KEEP=1 to inspect logs and stores)
-3. bash ${ROOT}/40-interface/verify/panel-lint.sh            (headless Chrome over CDP against the hosted Meshtastic panel; ~144 checks; prints RESIDUAL notes)
-4. ${ROOT}/10-bootstrap/scripts/check.sh                     (the full gate; ALL GREEN is the lock condition; ~15 min; run it last)
+1. bash ${ROOT}/4-interface/verify/smoke.sh                 (single node, Layer 4 + 5, ~118 checks)
+2. bash ${ROOT}/4-interface/verify/smoke.sh --three-node    (hub + members: cards, direct, hub custody, non-member, replay, restore, requests, agent tools, Meshtastic stub, clean restart; ~154 checks; keep the scratch root with SMOKE_KEEP=1 to inspect logs and stores)
+3. bash ${ROOT}/4-interface/verify/panel-lint.sh            (headless Chrome over CDP against the hosted Meshtastic panel; ~144 checks; prints RESIDUAL notes)
+4. ${ROOT}/1-bootstrap/scripts/check.sh                     (the full gate; ALL GREEN is the lock condition; ~15 min; run it last)
 Never run smoke.sh and panel-lint.sh at the same time (both build ui/dist).
 
 YOUR METHOD: run 1–3 first and read every ok:/FAIL:/note: line as evidence, not as proof: a harness can pass vacuously or assert the wrong

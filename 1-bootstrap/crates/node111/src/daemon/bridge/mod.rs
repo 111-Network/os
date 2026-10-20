@@ -1,4 +1,4 @@
-//! Bridge core (Layer 6 `os/60-transport/README.md` §2, §3, §4, §8, §9): the part of `111d`
+//! Bridge core (Layer 6 `os/6-transport/README.md` §2, §3, §4, §8, §9): the part of `111d`
 //! that joins the node to the networks it does not own. It owns consent, the loop guard,
 //! fan-out, delivery state and the foreign tables (mesh111 store, schema V3); **adapters**
 //! move native text and report facts, nothing more (§4).

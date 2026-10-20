@@ -2,7 +2,7 @@
 // base uses (headings as bold lines here, so a proposal never adds to the page outline). The parser never produces HTML, so every
 // character reaches the page as an escaped text node; links pass its allowlist.
 //
-// Layer 6 (os/60-transport/README.md §10, §12): a `bridge_message` or `bridge_edge` body quotes a stranger's text, so its text part is a
+// Layer 6 (os/6-transport/README.md §10, §12): a `bridge_message` or `bridge_edge` body quotes a stranger's text, so its text part is a
 // PREFORMATTED block: no Markdown, no links, no emphasis. A `device` body is one JSON object `{why, actions}` and renders as a card per
 // action from the parsed JSON, with the exact words for each action of the closed vocabulary.
 import { useMemo } from "react";

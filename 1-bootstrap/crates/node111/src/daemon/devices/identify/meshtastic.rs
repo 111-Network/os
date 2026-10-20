@@ -1,4 +1,4 @@
-//! Identify step 2: Meshtastic (`os/60-transport/README.md` §12: "meshmud
+//! Identify step 2: Meshtastic (`os/6-transport/README.md` §12: "meshmud
 //! with the identify profile, as built"; Layer 5 §14).
 //!
 //! The step's child mechanics stay in `meshtastic::identify`

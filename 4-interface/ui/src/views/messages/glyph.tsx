@@ -1,4 +1,4 @@
-// The delivery-evidence glyph (os/50-messaging/README.md section 9): three pips after the outbox, filled as far as the
+// The delivery-evidence glyph (os/5-messaging/README.md section 9): three pips after the outbox, filled as far as the
 // evidence got. Shape and the word carry the state, never color; the title and the detail disclosure hold the exact copy.
 import { cx } from "../../lib/cx";
 import { glyphFor, stateCopy } from "./model";

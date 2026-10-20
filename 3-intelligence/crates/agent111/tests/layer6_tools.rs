@@ -1,4 +1,4 @@
-//! Layer 6 agent tools (`os/60-transport/README.md` §13, D27) against a stub
+//! Layer 6 agent tools (`os/6-transport/README.md` §13, D27) against a stub
 //! `111d` serving the contract's new GET routes: `bridge.read`,
 //! `messages.send {targets}`, `bridge.propose_edge`, `devices.read`,
 //! `transport.read`, `device.identify`, `device.propose`, `service.restart`.

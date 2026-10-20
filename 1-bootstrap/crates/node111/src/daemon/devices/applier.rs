@@ -1,10 +1,10 @@
-//! The narrow apply → verify → undo cut (`os/60-transport/README.md` §12
+//! The narrow apply → verify → undo cut (`os/6-transport/README.md` §12
 //! "Proposals" and its table; D17 #7, P4; DEV §3 "Apply loop: snapshot →
 //! apply → probe within 30 s → keep or revert, result written to the
 //! proposal. Unknown action = refused, never best-effort").
 //!
 //! A `kind: device` proposal carries one JSON object `{"why", "actions":
-//! [{"action": name, …args}]}` (`40-interface/api/openapi.yaml`
+//! [{"action": name, …args}]}` (`4-interface/api/openapi.yaml`
 //! `Proposal.kind`). [`ApplierRequest::from_body`] parses it against the
 //! closed vocabulary:
 //!

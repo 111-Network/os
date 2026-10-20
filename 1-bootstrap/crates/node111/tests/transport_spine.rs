@@ -1,4 +1,4 @@
-//! Layer 6 B4 acceptance: the transport spine (`os/60-transport/README.md`
+//! Layer 6 B4 acceptance: the transport spine (`os/6-transport/README.md`
 //! §11; §16 G4 first cut). `state/interfaces.toml` (load, save, 0600,
 //! `deny_unknown_fields`, moved aside, newer left alone), validation,
 //! migration from `devices.json` + `rns/config` with the divergence line,
@@ -12,7 +12,7 @@
 //!
 //! No test starts Python or imports Reticulum: rnstatus is a fake `Runner`.
 //! `SPINE_KEEP_ROOT=<dir>` makes `modes_on_a_scratch_root` render into that
-//! dir and leave it for `60-transport/verify/spine.sh`'s independent check.
+//! dir and leave it for `6-transport/verify/spine.sh`'s independent check.
 
 use node111::daemon::devices::store::{self, MeshtasticBinding, Store};
 use node111::daemon::meshtastic::meshmud::Uplink;

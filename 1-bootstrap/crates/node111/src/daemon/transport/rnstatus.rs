@@ -1,4 +1,4 @@
-//! `rnstatus`, adopted from `venvs/rns` (`os/60-transport/README.md` §11
+//! `rnstatus`, adopted from `venvs/rns` (`os/6-transport/README.md` §11
 //! "Live attach, detach, reload" and "`transport.read`"; R05 §3.9).
 //!
 //! - **Control.** [`Rnstatus::attach`] / [`Rnstatus::detach`] /

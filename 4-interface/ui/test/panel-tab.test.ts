@@ -1,4 +1,4 @@
-// The Panel tab (os/50-messaging/README.md section 13): the iframe's attributes, the ticket URL the frame may open, the
+// The Panel tab (os/5-messaging/README.md section 13): the iframe's attributes, the ticket URL the frame may open, the
 // secure-context gate, the loopback-only copy, a reload that mints a fresh ticket, "Open full client", and the service page
 // that carries it (rendered from the mock's `meshtastic` scenario through the real store).
 import { createElement as h, type ReactElement } from "react";

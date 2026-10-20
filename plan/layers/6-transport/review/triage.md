@@ -39,7 +39,7 @@ Legend: ✅ accept as proposed · ✅* accept with the lead's variation · ❓ o
 | integration M2 | `failed` missing from a closed enum; no pin list; `unsupported_action` missing from `Problem.code` | ✅ new closed enum `ForeignMessageState`; `unsupported_action` added; the pin list per bump (proposals `KINDS`, `ServiceId::COUNT` arrays, status tests, agent count pins, `pnpm gen:types`, `gen-sse.mjs --check`) |
 | integration M3 | foreign ingest inside the single actor loop is unbatched | ✅ `foreign_ingest` takes a bounded batch (one transaction per adapter tick), the bridge core awaits each call, inbound `Foreign` events coalesce per conversation; G1 adds a 1,000-row burst with a 111 latency bound |
 | integration M5 | G2's stub cannot be the JSON stub-meshmud | ✅ G2 is a node111 `cargo test` with a test-only prost stub; undecodable frames are counted noise; the Nearby parity gate feeds one committed `FromRadio` fixture to both readers |
-| integration M6 | gates G1, G3–G6 have no script homes; G7 "RSS within noise" is not a criterion | ✅ `60-transport/verify/{bridge,lxmf,spine,devices}.sh`, `panel-lint.sh --panel meshchatx`, `REQUIRE_*` for lock runs; G7 records RSS, asserts processes and listeners |
+| integration M6 | gates G1, G3–G6 have no script homes; G7 "RSS within noise" is not a criterion | ✅ `6-transport/verify/{bridge,lxmf,spine,devices}.sh`, `panel-lint.sh --panel meshchatx`, `REQUIRE_*` for lock runs; G7 records RSS, asserts processes and listeners |
 | integration M7 | `interfaces.toml` and `devices.json` as two sources of truth | ✅ `interfaces.toml` wins; the mirror is write-only; on divergence at start the TOML wins and the difference is logged |
 
 ## Minors
@@ -80,5 +80,5 @@ fails (as recommended).
 ## Next
 
 Owner answers → D26 (Layer 6 design amendments) → draft v0.2 by the spec agent (every ✅ above + the answers) → one fable re-check on the diff →
-lock entry → `os/60-transport/TASKS.md` from the integration judge's task cut (T1–T14, serialization as marked; T5/T9/T13 owner-gated) → build after
+lock entry → `os/6-transport/TASKS.md` from the integration judge's task cut (T1–T14, serialization as marked; T5/T9/T13 owner-gated) → build after
 the Layer 5 lock.

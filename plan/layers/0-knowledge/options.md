@@ -5,7 +5,7 @@ Full raw findings: workflow `wf_cd0bfb29-a38` journal. This file condenses them 
 
 ## Already decided by `os/README.md` — not relitigated
 
-Markdown only · one topic per file · YAML frontmatter with tags/category/status (candidate→testing→proven) · wikilinks · llms.txt-style index · many small files · graphable later · source of truth at `os/00-knowledge/` · published to website later via CI.
+Markdown only · one topic per file · YAML frontmatter with tags/category/status (candidate→testing→proven) · wikilinks · llms.txt-style index · many small files · graphable later · source of truth at `os/0-knowledge/` · published to website later via CI.
 
 ## What research converged on (all 7 agents independently)
 
@@ -17,11 +17,11 @@ The 2026 ecosystem has consolidated: **llms.txt v2** (Aug 2026 revision, hierarc
 
 **Recommend: llms.txt v2 hierarchical indexes + AGENTS.md pair, all CI-generated from frontmatter.**
 
-- Root `os/00-knowledge/llms.txt` + one per category folder (v2's "most specific path wins" blesses this). Fixed line grammar: `- [Name](path.md): ≤12-word summary | status | keywords`.
+- Root `os/0-knowledge/llms.txt` + one per category folder (v2's "most specific path wins" blesses this). Fixed line grammar: `- [Name](path.md): ≤12-word summary | status | keywords`.
 - Main H2 sections list **proven only**; candidate/testing live in the v2 `Optional` section.
 - **No llms-full.txt** (v2 dropped it; Next.js's is ~676k tokens — poison for 1B–8B local models).
 - Token budgets driven by small-model evidence (Lost-in-the-Middle): root index ≤200 lines (~1.5k tok), category index ≤2k tok, entry 300–1500 tok.
-- `AGENTS.md` at repo root + `os/00-knowledge/AGENTS.md` teach the retrieval ritual: *read llms.txt → pick section → grep keywords → open one file*. No CLAUDE.md inside 00-knowledge/ (it would suppress Claude's AGENTS.md reading).
+- `AGENTS.md` at repo root + `os/0-knowledge/AGENTS.md` teach the retrieval ritual: *read llms.txt → pick section → grep keywords → open one file*. No CLAUDE.md inside 0-knowledge/ (it would suppress Claude's AGENTS.md reading).
 
 | Option | Verdict |
 |---|---|
@@ -74,7 +74,7 @@ Filenames: vault-wide-unique kebab-case; recipes deterministic (`install-<projec
 
 ## Decision E — Publish toolchain (decide now, build later)
 
-**Recommend: Quartz 5.** Only candidate rendering the decided format natively (wikilinks, frontmatter, backlinks, graph — zero conversion). Vault stays pure at `os/00-knowledge/`; Quartz lives in sibling `site/` and builds with `quartz build -d ../os/00-knowledge`. Emits `contentIndex.json` (machine-readable, agent-consumable) + sitemap; llms.txt via ~50-line post-build script. Official GH Actions workflow (Node 24); monochrome terminal aesthetic fully achievable per `website/docs/DESIGN.md`; no tracking; static HTML servable by any mesh node over local HTTP.
+**Recommend: Quartz 5.** Only candidate rendering the decided format natively (wikilinks, frontmatter, backlinks, graph — zero conversion). Vault stays pure at `os/0-knowledge/`; Quartz lives in sibling `site/` and builds with `quartz build -d ../os/0-knowledge`. Emits `contentIndex.json` (machine-readable, agent-consumable) + sitemap; llms.txt via ~50-line post-build script. Official GH Actions workflow (Node 24); monochrome terminal aesthetic fully achievable per `website/docs/DESIGN.md`; no tracking; static HTML servable by any mesh node over local HTTP.
 
 | Option | Verdict |
 |---|---|
@@ -96,4 +96,4 @@ The landscape sweeps produced a concrete seed inventory (~35 entries): mesh stac
 
 ## Deferred (recorded, not forgotten)
 
-`os/00-knowledge/skills/` (real SKILL.md packaging of agent procedures like *evaluate-candidate*, *promote-status*) · hub-side MCP wrapper over the same markdown · Foam-style link-reference definitions for GitHub-web browsing · per-category llms-full bundles if cloud agents ask · monthly headless LLM audit of KB freshness · Yjs only if dashboard needs live multi-user text · Willow/p2panda/Iroh/Loro quarterly re-review · markdown content negotiation (Cloudflare) at publish time.
+`os/0-knowledge/skills/` (real SKILL.md packaging of agent procedures like *evaluate-candidate*, *promote-status*) · hub-side MCP wrapper over the same markdown · Foam-style link-reference definitions for GitHub-web browsing · per-category llms-full bundles if cloud agents ask · monthly headless LLM audit of KB freshness · Yjs only if dashboard needs live multi-user text · Willow/p2panda/Iroh/Loro quarterly re-review · markdown content negotiation (Cloudflare) at publish time.

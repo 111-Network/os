@@ -1,6 +1,6 @@
 //! Layer 2 §14 conformance suite — the frozen test vectors as LIVE gates.
 //!
-//! Every file in `os/20-identity/test-vectors/` (frozen 2026-10-13, task T8) is
+//! Every file in `os/2-identity/test-vectors/` (frozen 2026-10-13, task T8) is
 //! loaded here and re-asserted against the PUBLIC `id111` API, so a vector
 //! can never rot into dead data and an implementation drift can never slip
 //! past a frozen answer. Only the public API is used: this suite sees the
@@ -1331,7 +1331,7 @@ fn announce_negatives_each_rejected_before_any_state_change() {
     }
 }
 
-/// L5 amendment A6 (`os/50-messaging/README.md` §7, §19) over the FROZEN L2
+/// L5 amendment A6 (`os/5-messaging/README.md` §7, §19) over the FROZEN L2
 /// file. `announce.json` is the Cat-1 harness contract and stays
 /// byte-identical (D20); it names a stale announce `err:stale:<last>:<got>`.
 /// Since A6, `id111` reports that outcome as `ok:unchanged:<last>` — but ONLY
@@ -2180,7 +2180,7 @@ fn attestation_kat_round_trip() {
     assert!(parsed.verify_transport_leg(&RejectAll).is_err());
 }
 
-/// Layer 6 amendment A10 (§13.1; `os/60-transport/README.md` §14, D26 #3,
+/// Layer 6 amendment A10 (§13.1; `os/6-transport/README.md` §14, D26 #3,
 /// 2026-10-19) over the FROZEN L2 file. `attestation.json` is the Cat-1
 /// harness contract and stays byte-identical (D20); it names a `0x02` record
 /// `err:tid:2` (unassigned then — and still so for a Cat-1 core that has not

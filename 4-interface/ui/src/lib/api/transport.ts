@@ -1,4 +1,4 @@
-// Transport slice (os/60-transport/README.md §11, §15.8): the rnsd posture, region and callsign, as text. Pure.
+// Transport slice (os/6-transport/README.md §11, §15.8): the rnsd posture, region and callsign, as text. Pure.
 import type { TransportPosture, TransportPostureResult, TransportStatus } from "./types";
 
 /** The region is a human fact (D17 #10): "not set" until a person picks one, and a board transmits nothing before. */

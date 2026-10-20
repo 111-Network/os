@@ -1,4 +1,4 @@
-//! `/api/v1/contacts*` (`os/50-messaging/README.md` §7, §15; contract
+//! `/api/v1/contacts*` (`os/5-messaging/README.md` §7, §15; contract
 //! `listContacts`, `addContact`, `getOwnCard`, `getContact`, `patchContact`,
 //! `forgetContact`).
 //!

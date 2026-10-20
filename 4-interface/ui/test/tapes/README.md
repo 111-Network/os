@@ -1,6 +1,6 @@
 # SSE tapes
 
-Byte-for-byte recordings of what a real `111 daemon` sent, made by `40-interface/verify/smoke.sh`.
+Byte-for-byte recordings of what a real `111 daemon` sent, made by `4-interface/verify/smoke.sh`.
 Never hand-written, never edited: the only rewrite is the scratch root path → `/var/lib/111`.
 `test/tapes.test.ts` replays every `*.sse` here through the real parser and frame mappers and
 validates each frame against the contract (`openapi.yaml` `x-sse-events`).
@@ -28,7 +28,7 @@ tapes; `--three-node`: the Layer 5 ones). After a re-record run `pnpm test` (or
 `pnpm exec vitest run test/tapes.test.ts`) — a daemon change the UI would drop fails there.
 
 Drift check without touching these files: `SMOKE_TAPES=1 SMOKE_TAPES_DIR=<scratch dir> bash
-40-interface/verify/smoke.sh [--three-node]` records a fresh set elsewhere; compare the JSON key
+4-interface/verify/smoke.sh [--three-node]` records a fresh set elsewhere; compare the JSON key
 paths per event name with the committed set, and re-record only the tapes whose shape moved
 (a stream also differs by timing — which frames land in the capture window — which is not drift).
 Some `services` frames carry host facts the daemon probes (for example the `codeagent` row's

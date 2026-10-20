@@ -1,9 +1,9 @@
 # Layer 6 — Transport & Bridge: options brief
 
 Status: 🧭 deciding · 2026-10-19 · sweep complete (6 scouts, opus critic, 1 gap-fill scout; ~2.0M tokens, 895 tool calls, 47–62 sources per lens); the gap-fill ran the LXMF endpoint and settled F3's shape · lead-written from the 6-scout sweep
-(`layers/60-transport/research/`: seams scout opus, 5 lens scouts sonnet, each web-verified; critic opus). Reads with: `os/README.md` §6 ·
+(`layers/6-transport/research/`: seams scout opus, 5 lens scouts sonnet, each web-verified; critic opus). Reads with: `os/README.md` §6 ·
 D17 (device decisions) · D19 c (LoRa ownership) · D20 (Layer 5 hand-offs) · D22 (GPL-3.0-or-later) · **D23** (this kickoff) ·
-`cross-layer/devices.md` · `layers/60-transport/research/00-code-seams.md` (line-verified seam map).
+`cross-layer/devices.md` · `layers/6-transport/research/00-code-seams.md` (line-verified seam map).
 
 Owner scope (D23): the bridge carries **readable text both ways**; foreign networks appear as **their own categories in Messages** while their
 own UIs stay hosted panels; v1 networks **Meshtastic + Reticulum/LXMF + phone apps via Termux**; **no hardware yet** (full test setup later);

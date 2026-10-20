@@ -97,7 +97,7 @@ pub trait KeyProvider: Send + Sync {
 /// A 32-byte key is always within BLAKE2b's 64-byte key limit, so the keyed
 /// constructor does not fail in practice; it is still a typed
 /// [`KeyError::Kdf`], never a panic. Known answers:
-/// `50-messaging/test-vectors/store-kdf.json`.
+/// `5-messaging/test-vectors/store-kdf.json`.
 pub fn derive_store_key(
     keyset_secret: &[u8; 32],
     node_id: &[u8; 32],

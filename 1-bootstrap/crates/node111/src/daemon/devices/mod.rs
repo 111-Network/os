@@ -1,4 +1,4 @@
-//! Device registry (Layer 4 R4, spec `os/40-interface/README.md` §6.3, §7.1):
+//! Device registry (Layer 4 R4, spec `os/4-interface/README.md` §6.3, §7.1):
 //! hardware the user attached to THIS node and devices they paired with its
 //! control panel — never other people's nodes (those are Nearby, Layer 7).
 //!
@@ -11,7 +11,7 @@
 //! - [`registry`] — the 5 s tick: detection + dashboard sessions (companions) →
 //!   [`DeviceRecord`]s, 2-tick debounce, `devices` frames on the events bus,
 //!   alias/forget mutations for `/api/v1/devices*`.
-//! - Layer 6 device core (`os/60-transport/README.md` §12): [`hotplug`]
+//! - Layer 6 device core (`os/6-transport/README.md` §12): [`hotplug`]
 //!   (kernel uevents kick the tick; the poll stays the fallback),
 //!   [`identify`] (the consented RNode → Meshtastic → MeshCore sequence) and
 //!   [`applier`] (the four applied `device` proposal actions with

@@ -1,4 +1,4 @@
-// Settings, Transport: /settings/l6 (os/60-transport/README.md §10 "UI", §11). Adapters and their order, the radio region and callsign (a
+// Settings, Transport: /settings/l6 (os/6-transport/README.md §10 "UI", §11). Adapters and their order, the radio region and callsign (a
 // human fact; "not set" until then), the rnsd posture and the phone-relay join, relays at a glance, recipient lists, optional components
 // with their sizes and licence notice, and the confirmations the node asks for (licensed boards, uplinked channels). Every change is a call
 // the node answers, and the page shows the answer.

@@ -210,4 +210,4 @@ https://github.com/chatmail/core (tag v2.63.0: `deltachat-rpc-server/README.md`,
 `deltachat-rpc-client/src/deltachat_rpc_client/{rpc,account,chat,const}.py`, `src/config.rs`, `src/mimefactory.rs`) ;
 https://github.com/themadorg/madmail (release and tag v2.30.5: `README.md`, `LICENCE`, `chatmail.toml.example`, `docs/local-dev.md`,
 `docs/project/user-guide/11-deployment-ip-domain-certs.md`, `crates/chatmail-config/src/{lib,client_mail}.rs`, `.github/workflows/ci.yml`,
-`.github/releaserc.ci.json`). Repo: `60-transport/README.md` §2, §4, §7, §15.10; `plan/layers/60-transport/research/03-phone-apps.md` §3.9.
+`.github/releaserc.ci.json`). Repo: `6-transport/README.md` §2, §4, §7, §15.10; `plan/layers/6-transport/research/03-phone-apps.md` §3.9.

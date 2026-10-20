@@ -1,7 +1,7 @@
 # Layer 2 (Identity) — Options Brief
 
 Status: 🧭 awaiting user decisions
-Source: 8-agent research sweep, 2026-10-12 (k3-256k fleet, workflow `wf_73d7f290-f74`, resumed after quota reset; ~927k subagent tokens, 365 tool calls across identity-systems · embedded-crypto · backup-recovery · wire-auth ×2 · agentic-identity · nostr-axis · mesh-case-studies · encodings-standards). Cross-checked against Layer 1 state (D8/D9, `layers/10-bootstrap/options.md`). Raw findings: workflow journal; discrepancies resolved in §Cross-check.
+Source: 8-agent research sweep, 2026-10-12 (k3-256k fleet, workflow `wf_73d7f290-f74`, resumed after quota reset; ~927k subagent tokens, 365 tool calls across identity-systems · embedded-crypto · backup-recovery · wire-auth ×2 · agentic-identity · nostr-axis · mesh-case-studies · encodings-standards). Cross-checked against Layer 1 state (D8/D9, `layers/1-bootstrap/options.md`). Raw findings: workflow journal; discrepancies resolved in §Cross-check.
 
 ## Already decided — not relitigated
 
@@ -111,7 +111,7 @@ Research found a **universal audit gap**: no mesh identity system is release-aud
 
 ## Decision H — v1 build scope
 
-**Recommend H1: spec + KB entries + Rust core + cross-implementation test vectors.** Deliverables: `os/20-identity/README.md` (spec, adversarial-reviewed) · KB entries for adopted components + case studies (all enter `candidate`; Monocypher can reach `testing` fast — audit exists) · `111id` Rust core (ed25519-dalek): keygen / sign / verify / ECDH / announce encode+verify / backup encode+restore / attestation format — consumed by Layer 1's `111d` (same Rust static world) and driving `111 identity backup/restore` · cross-implementation test-vector suite (RFC 8032 vectors + Rust↔Monocypher-C agreement vectors) so the later Cat-1 port verifies identically · the C/Monocypher Cat-1 core itself **deferred** until a layer owns ESP32 firmware, but pinned in the spec so the port is determined.
+**Recommend H1: spec + KB entries + Rust core + cross-implementation test vectors.** Deliverables: `os/2-identity/README.md` (spec, adversarial-reviewed) · KB entries for adopted components + case studies (all enter `candidate`; Monocypher can reach `testing` fast — audit exists) · `111id` Rust core (ed25519-dalek): keygen / sign / verify / ECDH / announce encode+verify / backup encode+restore / attestation format — consumed by Layer 1's `111d` (same Rust static world) and driving `111 identity backup/restore` · cross-implementation test-vector suite (RFC 8032 vectors + Rust↔Monocypher-C agreement vectors) so the later Cat-1 port verifies identically · the C/Monocypher Cat-1 core itself **deferred** until a layer owns ESP32 firmware, but pinned in the spec so the port is determined.
 
 | Option | Verdict |
 |---|---|

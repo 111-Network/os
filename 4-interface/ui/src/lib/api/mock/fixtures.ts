@@ -17,7 +17,7 @@ export const iso = (ms: number): string => new Date(ms).toISOString();
 
 /**
  * `Status.layers` as 111d reports it (status.rs `layers()`): layers 0 to 4 as on the mock laptop, plus 5 (Messaging & data,
- * os/50-messaging/README.md) while the fabric runs: its `fabric` service row is LIVE and no identity restore is pending
+ * os/5-messaging/README.md) while the fabric runs: its `fabric` service row is LIVE and no identity restore is pending
  * (nothing is sealed or sent until it finishes). An unset or errored fabric (no hub yet, a full store) and a restore floor
  * leave 5 out.
  */

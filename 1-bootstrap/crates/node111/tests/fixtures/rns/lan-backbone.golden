@@ -1,5 +1,5 @@
 # 111 node rnsd config (Reticulum INI format), rendered by 111d from
-# state/interfaces.toml (os/60-transport/README.md §11, renderer v2). Do not
+# state/interfaces.toml (os/6-transport/README.md §11, renderer v2). Do not
 # edit: 111d rewrites it. Mode 0600: it carries the shared-instance rpc_key.
 # The schema-version line is the takeover seam: a binary that knows only an
 # older version leaves this file alone.

@@ -9,7 +9,7 @@ const ROOT = '/home/user/os'
 const CTX = `
 You are a READ-ONLY review judge for the 111network OS, Layer 6 (Transport & Bridge). Today is 2026-10-19. Repo root: ${ROOT}.
 You never edit files, never run git write commands, never run cargo builds or tests that take more than a minute (the lead ran the
-checks; you read). The law: the locked spec ${ROOT}/60-transport/README.md (v1.0, D27), the task row in ${ROOT}/60-transport/TASKS.md,
+checks; you read). The law: the locked spec ${ROOT}/6-transport/README.md (v1.0, D27), the task row in ${ROOT}/6-transport/TASKS.md,
 ${ROOT}/plan/DECISIONS.md D25–D27, and AGENTS.md (the Raspberry Pi is the floor: no resident weight added to the base configuration).
 
 METHOD: read the task row and the spec sections named for it; then \`git show <commit> --stat\` and the full diff (\`git show <commit>\`);

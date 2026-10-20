@@ -1,4 +1,4 @@
-//! Accepting a `kind: message` proposal (`os/50-messaging/README.md` §17,
+//! Accepting a `kind: message` proposal (`os/5-messaging/README.md` §17,
 //! §18 rule 9: the agent never sends — it proposes, the human accepts in the
 //! dashboard, and `111d` sends). The proposal file is untrusted agent output;
 //! acceptance checks, in order:
@@ -21,8 +21,8 @@
 //! send after a restart; a refused send removes the pending record (the
 //! proposal stays open).
 //!
-//! **Layer 6 kinds** (`os/60-transport/README.md` §9, §8, §12, §13; the body
-//! contracts B5 writes byte for byte, `30-intelligence/README.md` "Appendix —
+//! **Layer 6 kinds** (`os/6-transport/README.md` §9, §8, §12, §13; the body
+//! contracts B5 writes byte for byte, `3-intelligence/README.md` "Appendix —
 //! Layer 6 tools"). Each parser is strict and total over untrusted text: a
 //! body that does not follow its contract is a [`Refusal::Body`] (`502
 //! upstream_error`, the proposal stays open, the user may dismiss it):

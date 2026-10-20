@@ -1,5 +1,5 @@
 """A scripted stand-in for the LXMF helper (Layer 6 spec section 6; the protocol of
-60-transport/sidecars/lxmf-sidecar/README.md): JSON Lines over piped stdio, for the
+6-transport/sidecars/lxmf-sidecar/README.md): JSON Lines over piped stdio, for the
 node111 adapter tests (tests/bridge_lxmf.rs). No Reticulum, no network, no sockets.
 
     python3 -I fake_lxmf_sidecar.py <scenario.json> <record-file> [ignored helper args...]

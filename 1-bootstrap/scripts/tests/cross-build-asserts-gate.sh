@@ -21,8 +21,8 @@ FAILS=0
 pass() { printf '%s\n' "asserts-gate: ok: $*"; }
 fail() { printf '%s\n' "asserts-gate: FAIL: $*" >&2; FAILS=$((FAILS + 1)); }
 
-mkdir -p "$T/10-bootstrap/scripts" "$T/home" "$T/fake"
-cp "$SCRIPTS/cross-build.sh" "$SCRIPTS/musl-env.sh" "$T/10-bootstrap/scripts/"
+mkdir -p "$T/1-bootstrap/scripts" "$T/home" "$T/fake"
+cp "$SCRIPTS/cross-build.sh" "$SCRIPTS/musl-env.sh" "$T/1-bootstrap/scripts/"
 SH=$(command -v sh)
 sysbin "$T/sysbin" dirname mkdir cp grep sed awk wc tr head env || exit 1
 fake_toolchains "$T/home" x86_64 aarch64
@@ -48,16 +48,16 @@ release() {
   fake_bin "$T/fake/$X" X86-64 "$1"
   fake_bin "$T/fake/$A" AArch64 "$2"
   if [ "${3:-mesh111}" = mesh111 ]; then
-    fake_lock "$T/10-bootstrap/Cargo.lock" mesh111
+    fake_lock "$T/1-bootstrap/Cargo.lock" mesh111
   else
-    fake_lock "$T/10-bootstrap/Cargo.lock"
+    fake_lock "$T/1-bootstrap/Cargo.lock"
   fi
   env -i HOME="$T/home" PATH="$T/stubs:$T/sysbin" CARGO_TARGET_DIR="$T/target" FAKE="$T/fake" \
     LIBSQLITE3_SYS_USE_PKG_CONFIG=1 LIBSQLITE3_FLAGS=-USQLITE_HAS_CODEC SQLCIPHER_LIB_DIR=/usr/lib \
     OPENSSL_NO_VENDOR=1 OPENSSL_DIR=/usr OPENSSL_LIB_DIR=/usr/lib OPENSSL_STATIC=0 \
     X86_64_UNKNOWN_LINUX_MUSL_OPENSSL_NO_VENDOR=1 AARCH64_UNKNOWN_LINUX_MUSL_OPENSSL_DIR=/usr \
     CC_aarch64_unknown_linux_musl=cc AR_x86_64_unknown_linux_musl=ar \
-    "$SH" "$T/10-bootstrap/scripts/cross-build.sh" --allow-no-ui 2026.10.14 "$T/out" 2>&1
+    "$SH" "$T/1-bootstrap/scripts/cross-build.sh" --allow-no-ui 2026.10.14 "$T/out" 2>&1
 }
 
 # expect_ok NAME OUTPUT RC NEEDLE...
@@ -141,9 +141,9 @@ expect_ok "no mesh111 in Cargo.lock: the SQLCipher assert says it does not apply
 
 # mesh111 locked but no openssl-src (+<OpenSSL version>) to name the expected OpenSSL.
 rm -rf "$T/target" "$T/out"
-printf '[[package]]\nname = "mesh111"\nversion = "0.1.0"\n' >"$T/10-bootstrap/Cargo.lock"
+printf '[[package]]\nname = "mesh111"\nversion = "0.1.0"\n' >"$T/1-bootstrap/Cargo.lock"
 OUT=$(env -i HOME="$T/home" PATH="$T/stubs:$T/sysbin" CARGO_TARGET_DIR="$T/target" FAKE="$T/fake" \
-  "$SH" "$T/10-bootstrap/scripts/cross-build.sh" --allow-no-ui 2026.10.14 "$T/out" 2>&1)
+  "$SH" "$T/1-bootstrap/scripts/cross-build.sh" --allow-no-ui 2026.10.14 "$T/out" 2>&1)
 expect_refused "mesh111 without openssl-src in Cargo.lock refused" "$OUT" $? "Cargo.lock has mesh111 but no openssl-src"
 
 if [ "$FAILS" -eq 0 ]; then

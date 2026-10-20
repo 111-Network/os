@@ -13,8 +13,8 @@ OS_DIR = os.path.abspath(os.path.join(ROOT, "..", "..", ".."))
 
 LOCK = os.path.join(ROOT, "lxmf-sidecar-lock.txt")
 REQ_IN = os.path.join(ROOT, "requirements.in")
-COMPONENT = os.path.join(OS_DIR, "10-bootstrap", "crates", "node111", "assets", "components", "lxmf.lock.txt")
-MANIFEST = os.path.join(OS_DIR, "10-bootstrap", "crates", "node111", "assets", "components", "lxmf.toml")
+COMPONENT = os.path.join(OS_DIR, "1-bootstrap", "crates", "node111", "assets", "components", "lxmf.lock.txt")
+MANIFEST = os.path.join(OS_DIR, "1-bootstrap", "crates", "node111", "assets", "components", "lxmf.toml")
 
 _spec = importlib.util.spec_from_file_location("gen_lock", os.path.join(ROOT, "gen_lock.py"))
 gen_lock = importlib.util.module_from_spec(_spec)

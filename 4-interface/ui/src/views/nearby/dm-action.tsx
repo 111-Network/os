@@ -1,4 +1,4 @@
-// "Send a Meshtastic DM from this node (readable, not 111-sealed)" (os/60-transport/README.md §5, §10): opens a foreign DM with a node Nearby
+// "Send a Meshtastic DM from this node (readable, not 111-sealed)" (os/6-transport/README.md §5, §10): opens a foreign DM with a node Nearby
 // heard. The label is the network's own (`Network.copy.dm_note`, from its manifest). A heard node is never a contact: this opens a
 // conversation in Messages under that network, where the text is labelled for what it is, and nothing is sent until the person writes.
 import { useState } from "react";

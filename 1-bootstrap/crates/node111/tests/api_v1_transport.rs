@@ -1,4 +1,4 @@
-//! Layer 6 C1 acceptance for the transport routes (`os/60-transport/README.md` §11, §12,
+//! Layer 6 C1 acceptance for the transport routes (`os/6-transport/README.md` §11, §12,
 //! §13; contract `getTransport`, `patchTransportPosture`, `joinTransport`) on a real
 //! `Spine` over a temp root, with `rnstatus` a fake `Runner` and rnsd a fake child (no
 //! Python, no Reticulum):
@@ -56,7 +56,7 @@ fn contract() -> &'static Contract {
     static C: OnceLock<Contract> = OnceLock::new();
     C.get_or_init(|| {
         let path = format!(
-            "{}/../../../40-interface/ui/test/contract.gen.ts",
+            "{}/../../../4-interface/ui/test/contract.gen.ts",
             env!("CARGO_MANIFEST_DIR")
         );
         let text = std::fs::read_to_string(path).expect("contract.gen.ts");
@@ -158,7 +158,7 @@ fn type_ok(v: &Value, t: &str) -> bool {
     }
 }
 
-/// A port of `40-interface/ui/test/helpers/validate.ts` (same subset, `oneOf` = any).
+/// A port of `4-interface/ui/test/helpers/validate.ts` (same subset, `oneOf` = any).
 fn validate(v: &Value, schema: &Value, path: &str, errs: &mut Vec<String>) {
     if let Some(r) = schema.get("$ref").and_then(Value::as_str) {
         let name = r.strip_prefix("#/components/schemas/").expect("local ref");

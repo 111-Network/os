@@ -1,4 +1,4 @@
-// The consent round-trip in the UI (os/60-transport/README.md §2.1, §8; interface README 7.x): a 409 `consent_required` carries the
+// The consent round-trip in the UI (os/6-transport/README.md §2.1, §8; interface README 7.x): a 409 `consent_required` carries the
 // exact text and its SHA-256. This panel shows that text verbatim (as text only: it may quote an untrusted channel name), badges the
 // live add-ons, and its Confirm button repeats the call with the hash. A text that changes between the two calls has a new hash and
 // is shown again, never confirmed on the old reading. Inline, not a modal (DESIGN.md): focus moves to it, Escape cancels.

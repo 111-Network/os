@@ -1,5 +1,5 @@
 //! Conditional transport (Bundle B; Layer 6 transport spine,
-//! `os/60-transport/README.md` §11): hash-locked rnsd child of the daemon when
+//! `os/6-transport/README.md` §11): hash-locked rnsd child of the daemon when
 //! python3+venv exist; detection-only stub otherwise. rns identity is
 //! independent of node identity in v1.
 //!

@@ -1,4 +1,4 @@
-// Adapters on and off, and the preferred order (os/60-transport/README.md §2.1, §10, §11). Meshtastic is part of 111; the others are
+// Adapters on and off, and the preferred order (os/6-transport/README.md §2.1, §10, §11). Meshtastic is part of 111; the others are
 // optional components, and turning one on shows its licence notice first (a 409 round-trip) and installs from the install-time cache.
 import { useState } from "react";
 import { announce } from "../../../app/LiveRegion";

@@ -6,7 +6,7 @@
 //! payload) → establish the initial floor. Prune to 2 only after probation —
 //! a fresh install has no probation, so nothing is pruned here. Then, when the
 //! release ships the Meshtastic presence reader, its venv (`venvs/presence`,
-//! os/50-messaging/README.md §14) is built from the pinned lock in that tree
+//! os/5-messaging/README.md §14) is built from the pinned lock in that tree
 //! ([`presence_venv`]; never fails the install).
 
 use super::context::InstallContext;
@@ -82,7 +82,7 @@ pub fn run(
     let result = (|| -> anyhow::Result<()> {
         crate::daemon::updater::stage::safe_unpack(&tarball, &tmp)?;
         crate::daemon::updater::stage::verify_tree(&tmp)?;
-        // Layer 5 assets equal the signed manifest's pins (os/50-messaging/README.md §19 L1).
+        // Layer 5 assets equal the signed manifest's pins (os/5-messaging/README.md §19 L1).
         manifest.verify_layer5_tree(&tmp, crate::daemon::updater::fetch::TARGET_TRIPLE)?;
         Ok(())
     })();
@@ -129,7 +129,7 @@ pub fn run(
     Ok(release_dir)
 }
 
-/// The presence reader's venv for the staged release (os/50-messaging/README.md
+/// The presence reader's venv for the staged release (os/5-messaging/README.md
 /// §14, §19 L1): when the manifest pins `[presence-lock]`, the lock in
 /// `release_dir` (already checked against that pin by `verify_layer5_tree`)
 /// drives `daemon::transport::venv::presence::ensure` in install mode — the

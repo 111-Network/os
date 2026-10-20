@@ -1,6 +1,6 @@
 #!/usr/bin/env node
-// Panel offline lint + G3 driver (os/50-messaging/README.md section 13 "Offline lint", section 20 G3).
-// Run by 40-interface/verify/panel-lint.sh inside the namespaces, after the daemon is up. No npm deps (Node >= 22).
+// Panel offline lint + G3 driver (os/5-messaging/README.md section 13 "Offline lint", section 20 G3).
+// Run by 4-interface/verify/panel-lint.sh inside the namespaces, after the daemon is up. No npm deps (Node >= 22).
 //
 //   node panel-lint.mjs --root <scratch node root> --out <dir> [--lan-host 192.168.77.5] [--cross-host 192.168.77.9]
 //                       [--attacker-port 11300] [--dwell 10] [--chrome <path>] [--no-canary]
@@ -368,7 +368,7 @@ async function scenario(b, opts) {
 // ------------------------------------------------------------------------------------------------ main
 
 async function main() {
-  const manifestPath = args.manifest || join(HERE, "../../../10-bootstrap/crates/node111/assets/panels/meshtastic.toml");
+  const manifestPath = args.manifest || join(HERE, "../../../1-bootstrap/crates/node111/assets/panels/meshtastic.toml");
   const manifest = readManifest(manifestPath);
   const panelId = manifest.id || "meshtastic";
   const slots = (() => {

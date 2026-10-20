@@ -1,4 +1,4 @@
-// Relay edges (os/60-transport/README.md §8): explicit, directed, non-transitive copies from one channel or group to another. Only a
+// Relay edges (os/6-transport/README.md §8): explicit, directed, non-transitive copies from one channel or group to another. Only a
 // human starts one, and starting (or resuming a consent-paused one) goes through the consent round-trip: the node states the exact
 // warning with its live add-ons, and this page echoes its hash. History is never relayed. Counters are the node's own.
 import { useState, type FormEvent } from "react";

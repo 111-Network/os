@@ -43,7 +43,7 @@
 //! authenticates the channel, never authorship (§12 rule 13: MAC auth is not
 //! authorship; non-repudiation, if ever wanted, is a Layer-5 inner signature).
 //!
-//! **Caller-owned inner layout — Layer 5 amendment A2** (`os/50-messaging/
+//! **Caller-owned inner layout — Layer 5 amendment A2** (`os/5-messaging/
 //! README.md` §3, §19): [`seal_payload`] / [`open_payload`] run the SAME
 //! construction (same ephemeral discipline, KDFs, derived nonce, AD = the
 //! exact header slice, `crypto_mode` `0x01` gate before decryption, the

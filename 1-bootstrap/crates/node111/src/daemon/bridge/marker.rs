@@ -1,4 +1,4 @@
-//! The relay marker (Layer 6 `60-transport/README.md` §8 "The marker (normative; bridge
+//! The relay marker (Layer 6 `6-transport/README.md` §8 "The marker (normative; bridge
 //! B1)"): every relayed copy, and every part of a split copy, starts with `[<n>/<TAG>] `.
 //!
 //! - **Build** ([`marker`]): `<n>` is the origin sender's name after the §3 ingest function,

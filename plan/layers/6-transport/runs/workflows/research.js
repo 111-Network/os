@@ -9,7 +9,7 @@ export const meta = {
 }
 
 const ROOT = '/home/kia/projects/111network/os'
-const OUT = ROOT + '/plan/layers/60-transport/research'
+const OUT = ROOT + '/plan/layers/6-transport/research'
 
 const CTX = `
 You are a research scout for the 111network OS build (repo root: ${ROOT}). Today is 2026-10-19.
@@ -24,33 +24,33 @@ underneath, "7. Relay & Presence" is the neighbour above, and "Category 3: Trans
 layer brings to life.
 
 WHAT IS ALREADY BUILT (Layers 0–5; do not re-research them, wire to them; cite file:line when you point at code):
-- L0 Knowledge base ${ROOT}/00-knowledge/ (entries with YAML frontmatter; rubric candidate→testing→proven in its README).
+- L0 Knowledge base ${ROOT}/0-knowledge/ (entries with YAML frontmatter; rubric candidate→testing→proven in its README).
   Existing entries you may cite and must not contradict without a fresher source: projects/{meshtastic,meshtastic-python,
   meshtastic-web,meshtastic-pki,meshmud,meshmonitor,meshcore,meshchatx,lxmf,reticulum,briar-bramble,briar-mailbox,
   delta-chat-securejoin,home-assistant-ingress}, protocols/{reticulum-protocol,nostr,bundle-protocol-v7},
   concepts/{lora-airtime-budget,secure-contexts,store-and-forward-states}, devices/heltec-wifi-lora-32-v3.
-- L1 Bootstrap: Rust daemon "111d" (crate node111 at ${ROOT}/10-bootstrap/crates/node111) supervises children; runs
+- L1 Bootstrap: Rust daemon "111d" (crate node111 at ${ROOT}/1-bootstrap/crates/node111) supervises children; runs
   Reticulum's "rnsd" as a child from a hash-locked Python venv with the config it renders from
-  ${ROOT}/10-bootstrap/crates/node111/assets/rns/config.tmpl (AutoInterface, share_instance = no, enable_transport = no);
+  ${ROOT}/1-bootstrap/crates/node111/assets/rns/config.tmpl (AutoInterface, share_instance = no, enable_transport = no);
   "transport_state" = no transport | isolated | joined | degraded; Android phones join via Termux (no root, no USB serial,
   no BLE, no multicast receive). Devices registry at src/daemon/devices/ (DeviceRecord, devices.json, lora-table.toml).
-- L2 Identity (${ROOT}/20-identity/README.md): Ed25519 + X25519 from one seed; NodeId = raw 32-byte Ed25519 pubkey;
+- L2 Identity (${ROOT}/2-identity/README.md): Ed25519 + X25519 from one seed; NodeId = raw 32-byte Ed25519 pubkey;
   sealed packets (XChaCha20-Poly1305, per-packet ephemeral X25519); §10 attestation format for transport identities
   (A10: one bridge identity per foreign network, bound by bidirectional cross-signed attestation; link keys never
   seed-derived).
-- L3 Intelligence: "111-agent" (crate agent111, ${ROOT}/30-intelligence/crates/agent111) with fixed shell-free tools incl.
+- L3 Intelligence: "111-agent" (crate agent111, ${ROOT}/3-intelligence/crates/agent111) with fixed shell-free tools incl.
   messages.read / messages.send (proposal-gated) / contacts.read / fabric.read / nearby.read; a per-spawn bearer token.
-- L4 Dashboard (${ROOT}/40-interface/README.md; contract ${ROOT}/40-interface/api/openapi.yaml): React UI embedded in 111d,
+- L4 Dashboard (${ROOT}/4-interface/README.md; contract ${ROOT}/4-interface/api/openapi.yaml): React UI embedded in 111d,
   /api/v1 REST + one SSE stream, services registry, device registry, Messages / Contacts / Nearby / Settings views,
   hosted panels (one origin per panel by port 11190–11229, ticket cookie, Meshtastic web client as the first panel).
-- L5 Messaging & Data (${ROOT}/50-messaging/README.md, spec v1.2 locked, built; closure in flight): the fabric "mesh111"
-  (${ROOT}/50-messaging/crates/mesh111) wired into 111d as daemon/fabric/: envelope codec, msg ids, fragmentation (F = 160 B),
+- L5 Messaging & Data (${ROOT}/5-messaging/README.md, spec v1.2 locked, built; closure in flight): the fabric "mesh111"
+  (${ROOT}/5-messaging/crates/mesh111) wired into 111d as daemon/fabric/: envelope codec, msg ids, fragmentation (F = 160 B),
   authenticated ACKs + custody receipts, contacts/cards/node1… addresses, home-hub mailbox, SQLCipher store, the Link trait
   (§8) with ONE link built (tcp-lan, port 11183) and the seams kiss-modem / meshtastic-client / rns-bridge / ble pinned
   with their frame budgets (233/221 B Meshtastic PRIVATE_APP; 287 B LXMF; 160 B MeshCore GRP_DATA). Meshtastic service (§14):
   consented identify, the "meshmud" multiplexer (Go, MIT, vendored, CI-built; uplink = board serial/TCP; TCP downlink
   127.0.0.1:11230 only, NO HTTP downlink), a GPL Python presence reader in its own hash-locked venv
-  (${ROOT}/50-messaging/sidecars/meshtastic-presence/) that writes a presence file 111d reads into Nearby, the built-in
+  (${ROOT}/5-messaging/sidecars/meshtastic-presence/) that writes a presence file 111d reads into Nearby, the built-in
   HTTP shim that serves the hosted Meshtastic web client. Layer 5 promised "no message bridge" and "111 never transmits
   on the Meshtastic mesh" — Layer 6 supersedes both (see the owner decisions below).
 - Layer 6 opener brief with 12 owner decisions (D17): ${ROOT}/plan/cross-layer/devices.md — read §0 findings, §2 device
@@ -118,25 +118,25 @@ const LENSES = [
     key: 'seams', model: 'opus', effort: 'high',
     prompt: `LENS 0 — AS-BUILT CODE SEAMS (no web; read code; every claim line-verified with file:line).
 Map exactly where Layer 6 plugs into the built tree, so the options brief and the build briefs can cite real seams.
-Read, in this order, only what you need of: ${ROOT}/50-messaging/crates/mesh111/src/link/mod.rs (the Link trait as built vs
+Read, in this order, only what you need of: ${ROOT}/5-messaging/crates/mesh111/src/link/mod.rs (the Link trait as built vs
 spec §8: LinkKind, PathProfile, PeerAddr, Frame; how a link is registered), src/fabric.rs (public API node111 calls: send,
 events, link registration, path/profile selection, outbox behaviour per link), src/contacts.rs + src/store/** (contact
 and thread/message schema: can a message row carry a foreign origin today? what is keyed by NodeId?), src/envelope.rs
 (kinds; the L6 shim byte), src/link/tcp_lan.rs (the one driver: the pattern a second driver copies);
-${ROOT}/10-bootstrap/crates/node111/src/daemon/fabric/{mod.rs,json.rs,settings.rs} (how TcpLan is constructed, settings,
+${ROOT}/1-bootstrap/crates/node111/src/daemon/fabric/{mod.rs,json.rs,settings.rs} (how TcpLan is constructed, settings,
 events → SSE, the Message/Thread JSON), src/daemon/dashboard/api_v1/{messages.rs,contacts.rs,nearby.rs,fabric.rs,
 devices.rs,proposals.rs}, src/daemon/meshtastic/{mod.rs,meshmud.rs,shim.rs,presence.rs,identify.rs} (the TCP-downlink
 client pattern; the presence-file ingest pattern; the identify flow + port-owner table in src/daemon/ports.rs),
 src/daemon/devices/{registry.rs,rns.rs,detect.rs,store.rs}, src/daemon/transport/** (rnsd child + config rendering:
 schema-version seam), src/daemon/services/{mod.rs,probe.rs} (ServiceId list, Facts, rules), src/daemon/supervise.rs
-(child pattern), assets/rns/config.tmpl, assets/lora-table.toml; ${ROOT}/40-interface/api/openapi.yaml (Thread, Message,
-Contact, NearbySource, DeviceRecord, ServiceId, Proposal.kind, x-sse-events); ${ROOT}/40-interface/ui/src/views/messages/**
+(child pattern), assets/rns/config.tmpl, assets/lora-table.toml; ${ROOT}/4-interface/api/openapi.yaml (Thread, Message,
+Contact, NearbySource, DeviceRecord, ServiceId, Proposal.kind, x-sse-events); ${ROOT}/4-interface/ui/src/views/messages/**
 (how threads are keyed and listed; where a per-network category would live), src/lib/api/{messages.ts,store.ts,
 nearby.ts}, src/views/{nearby,devices,settings}/** (file names + the models only), src/lib/{layers.ts,prompts.ts};
-${ROOT}/30-intelligence/crates/agent111/src/tools.rs (messages.send proposal path; how a tool is added);
-${ROOT}/50-messaging/sidecars/meshtastic-presence/meshtastic_presence.py + README (the sidecar pattern: venv lock, file
-output, hardening) — and the test/check commands per crate (10-bootstrap/scripts/check.sh stages, 50-messaging/scripts/
-check.sh, 30-intelligence/scripts/check.sh, 40-interface/ui package.json scripts).
+${ROOT}/3-intelligence/crates/agent111/src/tools.rs (messages.send proposal path; how a tool is added);
+${ROOT}/5-messaging/sidecars/meshtastic-presence/meshtastic_presence.py + README (the sidecar pattern: venv lock, file
+output, hardening) — and the test/check commands per crate (1-bootstrap/scripts/check.sh stages, 5-messaging/scripts/
+check.sh, 3-intelligence/scripts/check.sh, 4-interface/ui package.json scripts).
 Deliver ${OUT}/00-code-seams.md with: per subsystem a table (file:line · what exists · the seam · what Layer 6 must add or
 change) for six needs: (a) foreign-network messages + per-network categories in store, API, SSE and UI; (b) a second Link
 driver; (c) a daemon ↔ sidecar bridge protocol (what the presence reader does today, what a two-way sidecar needs);
@@ -223,8 +223,8 @@ backend exists), meshtastic-matrix-relay and other Meshtastic ↔ Matrix/Discord
 Matrix bridges, any Meshtastic ↔ Reticulum message bridge (not RNS_Over_Meshtastic, which is a transport), mautrix bridges
 (pattern only), and the IRC/XMPP gateway lessons. Then pin, with 2–4 options each and a pick: (1) the foreign message
 model (origin network, channel/conversation id, sender id + untrusted display name, received-time hint, state) and where it
-lives (the SQLCipher store with an origin column vs per-network tables vs memory-only) — read ${ROOT}/50-messaging/README.md
-§10.3 (schema) and §15 (routes) and ${ROOT}/40-interface/api/openapi.yaml Thread/Message first; (2) the Messages view
+lives (the SQLCipher store with an origin column vs per-network tables vs memory-only) — read ${ROOT}/5-messaging/README.md
+§10.3 (schema) and §15 (routes) and ${ROOT}/4-interface/api/openapi.yaml Thread/Message first; (2) the Messages view
 categories (per network, per channel/DM threads, badges, "unverified" labels; a Meshtastic node or LXMF address is never a
 111 contact — how to show "message them" honestly); (3) compose fan-out: one text → several targets with per-target
 state, and the size problem (Meshtastic ≈ 200 B per packet, LXMF larger): split / refuse / truncate per target, shown

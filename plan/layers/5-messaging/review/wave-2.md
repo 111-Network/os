@@ -1,6 +1,6 @@
 # Layer 5 — Wave 2 review triage (2026-10-14/15)
 
-Review run `wf_938461a1-1cb` (script `layers/50-messaging/runs/workflows/wave-2-review.js`): F2 by fable (xhigh), B1 and U2 by opus.
+Review run `wf_938461a1-1cb` (script `layers/5-messaging/runs/workflows/wave-2-review.js`): F2 by fable (xhigh), B1 and U2 by opus.
 Full findings: the run's `journal.jsonl`. Commits reviewed: B1 `09dc397` (+ notices `43c98bd`) · U2 `282bff8` · F2 `7554926`.
 Every finding is accepted unless marked; bounces run as fresh agents (one per task, disjoint files); the lead re-runs
 each check, reads the diff and commits per bounce. Wave 3 (V1 smoke, V2 panel lint) runs in parallel; its gaps join the

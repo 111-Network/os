@@ -1,4 +1,4 @@
-# 60-transport/verify/baseline-listeners.txt — the Layer 5 baseline G7 compares against (spec §16 G7, §2.1 rule 2).
+# 6-transport/verify/baseline-listeners.txt — the Layer 5 baseline G7 compares against (spec §16 G7, §2.1 rule 2).
 #
 # With every optional component disabled, the processes under 111d and the TCP ports they listen on must be exactly
 # what Layer 5 runs: nothing of Layer 6 adds a process or a listener until a human enables a component. Read by

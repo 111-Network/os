@@ -1,5 +1,5 @@
 # 111 node daemon — systemd unit.
-# Spec: os/10-bootstrap/README.md §Supervision (Linux). systemd/runit are thin
+# Spec: os/1-bootstrap/README.md §Supervision (Linux). systemd/runit are thin
 # Restart=always wrappers; the daemon's supervision tree is the supervisor of
 # record.
 #

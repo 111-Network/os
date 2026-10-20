@@ -1,6 +1,6 @@
 # Layer 6 draft v0.1 — judge 1: bridge semantics, relay safety, foreign-text threat model
 
-Reviewed 2026-10-19 against `60-transport/README.md` at `23283ba`; law: D23, D25 (F1, F7, F8), D17, D19, D20, D22; L5 v1.2 §4, §6, §7, §10.4, §15, §17, §18; L2 §10 / A10; D10. Read-only; no builds or harness runs.
+Reviewed 2026-10-19 against `6-transport/README.md` at `23283ba`; law: D23, D25 (F1, F7, F8), D17, D19, D20, D22; L5 v1.2 §4, §6, §7, §10.4, §15, §17, §18; L2 §10 / A10; D10. Read-only; no builds or harness runs.
 
 ## Verdict
 

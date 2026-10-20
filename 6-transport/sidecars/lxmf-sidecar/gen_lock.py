@@ -5,7 +5,7 @@
 This is how the lock is made, the same way ``rns-lock.txt`` is (a plain pip requirements
 file, every line ``name==version`` plus every published file hash, installed with
 ``pip install --require-hashes -r <lock>``; nothing is vendored). The same bytes are written to
-the component copy ``10-bootstrap/crates/node111/assets/components/lxmf.lock.txt`` (embedded in
+the component copy ``1-bootstrap/crates/node111/assets/components/lxmf.lock.txt`` (embedded in
 the signed binary beside ``lxmf.toml``; ``111 install`` downloads exactly those hashes into
 ``cache/packages/lxmf/`` and the venv is built from that cache):
 
@@ -44,7 +44,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 DEFAULT_IN = os.path.join(HERE, "requirements.in")
 DEFAULT_OUT = os.path.join(HERE, "lxmf-sidecar-lock.txt")
 DEFAULT_COMPONENT = os.path.normpath(os.path.join(
-    HERE, "..", "..", "..", "10-bootstrap", "crates", "node111", "assets", "components", "lxmf.lock.txt"))
+    HERE, "..", "..", "..", "1-bootstrap", "crates", "node111", "assets", "components", "lxmf.lock.txt"))
 PYPI = "https://pypi.org/pypi/%s/%s/json"
 
 NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*")

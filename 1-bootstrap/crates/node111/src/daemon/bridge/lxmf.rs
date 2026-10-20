@@ -1,4 +1,4 @@
-//! The LXMF adapter (Layer 6 `60-transport/README.md` §6 "LXMF adapter: our own helper";
+//! The LXMF adapter (Layer 6 `6-transport/README.md` §6 "LXMF adapter: our own helper";
 //! D26 #4): the Rust side of the `lxmf-sidecar` helper, attached to the component runner's
 //! child (`assets/components/lxmf.toml`, §2.1) through its piped stdio, JSON Lines both
 //! ways (§6 "Process contract"; the helper's README "Protocol"). `111d` imports nothing of

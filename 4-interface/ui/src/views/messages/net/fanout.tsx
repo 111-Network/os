@@ -1,4 +1,4 @@
-// "Send to networks…" (os/60-transport/README.md §9): one text, copied to any conversation of any enabled network, a Reticulum
+// "Send to networks…" (os/6-transport/README.md §9): one text, copied to any conversation of any enabled network, a Reticulum
 // recipient list, or a 111 contact. A fan-out is a fresh send group, never a 111 message exported. The preview (no queue write, no
 // transmit, no log of the text) shows per target the bytes against the cap, the parts if split, the airtime estimate (labelled one),
 // the region and licence facts, and any refusal ("312 B > 232 B per packet"). Size mode is per target and per send. Sending is

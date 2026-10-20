@@ -1,6 +1,6 @@
 # lxmf-sidecar
 
-The Layer 6 LXMF helper (spec `os/60-transport/README.md` §6, D26 #4): the one program of ours that imports Reticulum. It
+The Layer 6 LXMF helper (spec `os/6-transport/README.md` §6, D26 #4): the one program of ours that imports Reticulum. It
 attaches to the node's shared `rnsd` instance as an interface-less client, owns one LXMF delivery identity, and speaks JSON
 Lines over piped stdio to `111d` (stdout is the protocol, stderr the log). It never listens on a port.
 
@@ -17,7 +17,7 @@ component.
 | `lxmf_sidecar.py` | the program: one file, Python ≥ 3.7 syntax, standard library plus the user-installed `rns` and `lxmf` (imported lazily inside `main`) |
 | `requirements.in` | the two exact top-level pins: `rns==1.5.7`, `lxmf==1.2.1` |
 | `lxmf-sidecar-lock.txt` | the hash-locked closure (6 packages, 167 hashes: every file PyPI publishes for each pin); `pip install --require-hashes -r` |
-| `gen_lock.py` | produces / verifies the lock and writes the same bytes to `10-bootstrap/crates/node111/assets/components/lxmf.lock.txt` (embedded in the signed binary beside `lxmf.toml`) |
+| `gen_lock.py` | produces / verifies the lock and writes the same bytes to `1-bootstrap/crates/node111/assets/components/lxmf.lock.txt` (embedded in the signed binary beside `lxmf.toml`) |
 | `run-tests.sh`, `tests/` | offline tests (119) with a fake `RNS`/`LXMF` surface; no network, no hardware |
 | `LICENSE-NOTE.md` | why there is no licence file yet |
 

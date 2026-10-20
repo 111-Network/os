@@ -1,4 +1,4 @@
-// Foreign networks slice (os/60-transport/README.md §3, §4, §9, §10): pure helpers over Network / ForeignConversation /
+// Foreign networks slice (os/6-transport/README.md §3, §4, §9, §10): pure helpers over Network / ForeignConversation /
 // ForeignMessage. The store keeps the lists, the mock produces them, the net views render them; none of that logic lives here.
 //
 // Order is `seq`, the node's receipt sequence. `at` and `claim_ts` are display only and order nothing. Every foreign string

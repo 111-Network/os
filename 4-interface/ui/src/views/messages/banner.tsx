@@ -1,5 +1,5 @@
 // The one line above the Messages list when the `fabric` ("Messaging") service is not LIVE, or the store is full
-// (os/50-messaging/README.md section 15, interface README 7.2). The sentence is the node's own; the agent button is the fix.
+// (os/5-messaging/README.md section 15, interface README 7.2). The sentence is the node's own; the agent button is the fix.
 // What the button asks follows the node's `reason_code` (model.bannerAgent), not just its state: an unreachable home hub
 // is a fix, and a hub with no members is offered "let a node use this hub", whatever state the row reports. The prepared
 // message is the Layer 5 context goal (`messaging.setup` / `messaging.fix`, lib/prompts.ts) over the `fabric` service's facts.

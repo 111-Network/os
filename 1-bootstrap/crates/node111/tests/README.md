@@ -3,7 +3,7 @@
 ## Layer 5 fabric (F2) — how the pieces compose for the live run (V1, Wave 3)
 
 `tests/api_v1_messages.rs` runs several nodes in one process (real identities, real SQLCipher stores,
-real `tcp-lan` on loopback with `refuse_loopback` off). The netns run (V1, `40-interface/verify/smoke.sh`)
+real `tcp-lan` on loopback with `refuse_loopback` off). The netns run (V1, `4-interface/verify/smoke.sh`)
 uses the real `111 daemon` per root instead; nothing here needs a test hook there:
 
 - **Roots.** One `NODE111_ROOT` per node. The daemon keeps the identity loaded at start and opens

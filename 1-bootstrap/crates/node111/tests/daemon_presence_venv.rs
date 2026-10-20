@@ -1,4 +1,4 @@
-//! Layer 5 §14 at daemon start (os/50-messaging/README.md §14, §19 L1):
+//! Layer 5 §14 at daemon start (os/5-messaging/README.md §14, §19 L1):
 //! `daemon::ensure_presence_venv` — what `111 daemon` runs before it builds
 //! the Meshtastic module — rebuilds `venvs/presence` offline when the release
 //! in `current/` carries a lock the venv in place was not built from (an

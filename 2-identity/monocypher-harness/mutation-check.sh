@@ -3,7 +3,7 @@
 # copy of harness.c and require a non-zero exit for each. Uses python3 -I (stdlib) only to
 # do exact-once string replacement. Not part of the gate; evidence for the smoke log.
 #
-#   bash os/20-identity/monocypher-harness/mutation-check.sh
+#   bash os/2-identity/monocypher-harness/mutation-check.sh
 #
 # "Equivalent" mutants are expected to SURVIVE and are listed with the reason.
 set -uo pipefail

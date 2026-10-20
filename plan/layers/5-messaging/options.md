@@ -1,8 +1,8 @@
 # Layer 5 — Messaging & Data: options brief
 
-Status: 🧭 deciding · 2026-10-14 · lead-written from the 8-agent sweep (`layers/50-messaging/research/`: 5 lenses, opus critic,
+Status: 🧭 deciding · 2026-10-14 · lead-written from the 8-agent sweep (`layers/5-messaging/research/`: 5 lenses, opus critic,
 3 gap scouts; ~1.9M tokens, ~700 tool calls, 62–75 sources per lens). Reads with: `os/README.md` §5 · D13 (identity
-wire contract) · D17 (device decisions) · D18 (this cycle's scope) · `cross-layer/devices.md` · `layers/50-messaging/research/00-code-seams.md`.
+wire contract) · D17 (device decisions) · D18 (this cycle's scope) · `cross-layer/devices.md` · `layers/5-messaging/research/00-code-seams.md`.
 
 Owner scope for this cycle (D18): **Layer 5, designed with Layer 6 in mind** · the unified dashboard **hosts** adopted
 projects' own panels ("we do ALL the heavy lifting") · Meshtastic = identified + service row with its panel + read-only
@@ -47,7 +47,7 @@ presence, no bridge.
 
 ## 1. What Layer 5 is, in one paragraph
 
-A **fabric** (`mesh111`, a Rust library crate under `os/50-messaging/crates/`, wired into `111d` as a module so the
+A **fabric** (`mesh111`, a Rust library crate under `os/5-messaging/crates/`, wired into `111d` as a module so the
 identity keyset never leaves the daemon) that stores, forwards and delivers **envelopes** sealed with the Layer 2
 construction, over **links** that Layer 6 plugs in (`tcp-lan` built now; `kiss-modem`, `meshtastic-client`,
 `rns-bridge`, `ble` as seams); an **encrypted store** with capacity-only pruning; **contacts** (cards, QR, `node1…`,
@@ -283,7 +283,7 @@ OpenSSL Apache-2.0 notices (gen-notices covers) · Meshtastic is a registered ma
 
 ## 8. Cost plan for the rest of the cycle
 
-Spec `os/50-messaging/README.md` drafted by the lead from this brief (no drafter fleet) → **adversarial panel: 3 fable
+Spec `os/5-messaging/README.md` drafted by the lead from this brief (no drafter fleet) → **adversarial panel: 3 fable
 judges** (crypto/envelope + L2 amendments · panel-proxy security: tickets, cookies, CSRF, CSP · integration/seams + scope
 honesty), run with real netns checks where cheap → fixes → lock → `TASKS.md` → build waves: **opus** for Rust
 (`mesh111` crate, store, mailbox, proxy, Meshtastic integration), **sonnet** for UI (Messages view, Panel tab, contacts),

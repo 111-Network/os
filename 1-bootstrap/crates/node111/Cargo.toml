@@ -8,7 +8,7 @@ license = "GPL-3.0-or-later" # project license: os/LICENSE.md; third-party bound
 name = "111"
 path = "src/main.rs"
 
-# Dependency policy (os/10-bootstrap/TASKS.md): this set is frozen; additions need
+# Dependency policy (os/1-bootstrap/TASKS.md): this set is frozen; additions need
 # reviewer sign-off recorded in the task row.
 [dependencies]
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "process", "time", "net", "sync", "fs"] }
@@ -19,11 +19,11 @@ serde_json = "1"
 toml = "0.8"
 sha2 = "0.10"
 # T10 (L1 v2.2, D14d): Layer 2's identity core replaces the provisional secp256k1
-# seam. Path dep (dep-policy sign-off recorded in os/20-identity/TASKS.md row T10).
+# seam. Path dep (dep-policy sign-off recorded in os/2-identity/TASKS.md row T10).
 # k256 / bip39 2.x / bech32 0.11 / scrypt / chacha20poly1305 0.10 are dropped:
 # every call site was in the deleted identity/{bip32,nip49}.rs (mnemonic
 # ownership moved to id111's bip39 3.0.0 — converge, don't dual-pin).
-id111 = { path = "../../../20-identity/crates/id111" }
+id111 = { path = "../../../2-identity/crates/id111" }
 minisign-verify = "0.2"
 ureq = { version = "3", default-features = false, features = ["rustls"] }
 webpki-roots = "1"
@@ -44,7 +44,7 @@ zeroize = "1"
 # flate2 with miniz_oxide (no zlib C), tar for the archive format.
 tar = "0.4"
 flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
-# Layer 4 R1 (D15, sign-off in os/10-bootstrap/TASKS.md dependency policy):
+# Layer 4 R1 (D15, sign-off in os/1-bootstrap/TASKS.md dependency policy):
 # mDNS `111.local` announce while LAN-bound (optional: `mdns` feature, default on,
 # so a target that fails to link can build without it).
 mdns-sd = { version = "0.21", default-features = false, optional = true }
@@ -57,23 +57,23 @@ futures-util = { version = "0.3", default-features = false, features = ["std"] }
 # src/util/http_async.rs). hyper / hyper-util / http-body-util are already in
 # the graph via axum; this enables hyper's `client` + `http1` features (one
 # connection per request, no pool). hyper's `client` feature pulls `want` +
-# `try-lock` (tiny, hyper-ecosystem) — sign-off in os/10-bootstrap/TASKS.md.
+# `try-lock` (tiny, hyper-ecosystem) — sign-off in os/1-bootstrap/TASKS.md.
 hyper = { version = "1", default-features = false, features = ["client", "http1"] }
 hyper-util = { version = "0.1", default-features = false, features = ["tokio"] }
 http-body-util = "0.1"
-# Layer 5 F2 (D19/D20 pre-approved, os/50-messaging/TASKS.md row F2): the fabric
+# Layer 5 F2 (D19/D20 pre-approved, os/5-messaging/TASKS.md row F2): the fabric
 # library — wires its SQLCipher store (rusqlite bundled-sqlcipher-vendored-
 # openssl), bao-tree, blake3, ciborium, blake2 and chacha20poly1305 into the
 # graph. `daemon/fabric/` is its only caller.
-mesh111 = { path = "../../../50-messaging/crates/mesh111" }
+mesh111 = { path = "../../../5-messaging/crates/mesh111" }
 # §10.2 Mode S `store_secret` (keyed BLAKE2b-256 behind the identity handle):
 # already in the graph via id111 and mesh111 at the same exact pin (+0 crates).
 blake2 = "=0.11.0"
-# Layer 6 B2 (bridge core, 60-transport/README.md §3 "One ingest function": NFC):
+# Layer 6 B2 (bridge core, 6-transport/README.md §3 "One ingest function": NFC):
 # already in the graph via id111 (bip39) at the same pin, 0.1.25 (+0 crates);
-# sign-off row in os/10-bootstrap/TASKS.md "Layer 6 additions".
+# sign-off row in os/1-bootstrap/TASKS.md "Layer 6 additions".
 unicode-normalization = "0.1.25"
-# Layer 6 B3 (D25 F2 / D27 pre-approved; sign-off row in os/10-bootstrap/TASKS.md
+# Layer 6 B3 (D25 F2 / D27 pre-approved; sign-off row in os/1-bootstrap/TASKS.md
 # "Layer 6 additions"): the official Meshtastic crate, used for its generated
 # protobuf types only (`meshtastic::protobufs` + the re-exported `prost::Message`).
 # No features: its `tokio` feature (the stream API) drags tokio-serial, serialport

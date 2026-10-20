@@ -1,4 +1,4 @@
-//! The Meshtastic client (Layer 6 `60-transport/README.md` §5; §4 "Delivery states per
+//! The Meshtastic client (Layer 6 `6-transport/README.md` §5; §4 "Delivery states per
 //! network"; §3 "Conversation identity"): the Meshtastic [`Adapter`] of the bridge core.
 //!
 //! **One more downlink client.** [`MeshtasticAdapter`] connects to meshmud's TCP downlink

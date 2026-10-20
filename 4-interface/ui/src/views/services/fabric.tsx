@@ -1,4 +1,4 @@
-// The `fabric` ("Messaging") service page body (os/50-messaging/README.md section 16): links, the home hub, what the node holds
+// The `fabric` ("Messaging") service page body (os/5-messaging/README.md section 16): links, the home hub, what the node holds
 // for others, the store gauge, and how delivery is reported. LIVE / NOT SET / ERROR itself is the registry's (the header);
 // the set-up and fix buttons are the page's generic hand-off, which asks for `messaging.setup` / `messaging.fix`.
 import { hrefTo } from "../../app/location";

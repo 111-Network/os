@@ -3,10 +3,10 @@
 Host-side proof that **vendored Monocypher 4.0.3 (C)** agrees byte-for-byte with the **Rust `id111`** crate on the frozen Layer 2 test vectors — spec §14 *"Rust (dalek) ↔ Monocypher-C agreement vectors REQUIRED before any Cat-1 port"*. Its run is also the first-party smoke-test log for the `monocypher` KB entry (§11 / D14): `../test-vectors/monocypher-smoke.md`.
 
 ```bash
-bash os/20-identity/monocypher-harness/run.sh             # gate: exit 0 iff every file PASS
-bash os/20-identity/monocypher-harness/run.sh --sanitize  # same under ASan + UBSan
-bash os/20-identity/monocypher-harness/run.sh --log out.txt
-bash os/20-identity/monocypher-harness/mutation-check.sh  # proves the harness can fail (not part of the gate)
+bash os/2-identity/monocypher-harness/run.sh             # gate: exit 0 iff every file PASS
+bash os/2-identity/monocypher-harness/run.sh --sanitize  # same under ASan + UBSan
+bash os/2-identity/monocypher-harness/run.sh --log out.txt
+bash os/2-identity/monocypher-harness/mutation-check.sh  # proves the harness can fail (not part of the gate)
 ```
 
 Needs: a C99 compiler (`CC` overrides `cc`), bash, GNU `sha256sum`. No network, no Python at run time. `python3 -I` (stdlib only) is used only by `mutation-check.sh` and, offline, by `supplement/gen_supplement.py`.

@@ -1,6 +1,6 @@
 # Layer 6 draft v0.2 — fable re-check (2026-10-19)
 
-Judge: fable (re-check). Draft at `27487bb` (`60-transport/README.md`, 861 lines) against the triage, D26, the three reviews and the diff from `23283ba`. Read-only; nothing run, nothing left running.
+Judge: fable (re-check). Draft at `27487bb` (`6-transport/README.md`, 861 lines) against the triage, D26, the three reviews and the diff from `23283ba`. Read-only; nothing run, nothing left running.
 
 ## Verdict
 

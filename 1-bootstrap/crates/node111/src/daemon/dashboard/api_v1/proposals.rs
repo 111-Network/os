@@ -37,7 +37,7 @@
 //! bearer (`401`: deciding is the human's act, §17), so a proposal is never
 //! sent twice and never sent after being dismissed.
 //!
-//! **Layer 6 kinds** (`os/60-transport/README.md` §8, §9, §12, §13; bodies
+//! **Layer 6 kinds** (`os/6-transport/README.md` §8, §9, §12, §13; bodies
 //! parsed by [`crate::daemon::fabric::proposal`]). `KINDS` grows to eight.
 //! Accepting one is applied like `message`, under the same lock, with the
 //! same record discipline (`applied: {pending: true}` first, the result

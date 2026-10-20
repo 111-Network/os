@@ -1,6 +1,6 @@
 #!/bin/sh
 # meshtastic-web-build: produce the Meshtastic web client bundle that the dashboard hosts as a panel
-# (spec 50-messaging/README.md section 13, section 14; assets/panels/meshtastic.toml `bundle`).
+# (spec 5-messaging/README.md section 13, section 14; assets/panels/meshtastic.toml `bundle`).
 #
 # The bundle is GPL-3.0-only and is served UNMODIFIED from its own directory, never embedded in the
 # `111` binary (GPL boundary). This script only ever fetches the PINNED upstream tag; nothing here

@@ -1,12 +1,12 @@
-diff --git a/10-bootstrap/crates/node111/assets/adapters/app-deltachat.toml b/10-bootstrap/crates/node111/assets/adapters/app-deltachat.toml
+diff --git a/1-bootstrap/crates/node111/assets/adapters/app-deltachat.toml b/1-bootstrap/crates/node111/assets/adapters/app-deltachat.toml
 index 9a054b7..b41d151 100644
---- a/10-bootstrap/crates/node111/assets/adapters/app-deltachat.toml
-+++ b/10-bootstrap/crates/node111/assets/adapters/app-deltachat.toml
+--- a/1-bootstrap/crates/node111/assets/adapters/app-deltachat.toml
++++ b/1-bootstrap/crates/node111/assets/adapters/app-deltachat.toml
 @@ -1,17 +1,24 @@
  # Adapter manifest (Layer 6 §4 `caps().copy`, §7 app peers; Delta Chat is the reference). Parsed with
 -# deny_unknown_fields by the bridge core. The adapter itself is built only after the netns spike passed (S5).
 +# deny_unknown_fields by the bridge core. Refined by C5 with the netns spike's facts
-+# (plan/layers/60-transport/research/08-spike-deltachat.md §6, §7): the adapter is `daemon/bridge/deltachat.rs`.
++# (plan/layers/6-transport/research/08-spike-deltachat.md §6, §7): the adapter is `daemon/bridge/deltachat.rs`.
  id = "app:deltachat"                    # network id (§3)
  label = "Delta Chat"
  chip = "DC"
@@ -33,15 +33,15 @@ index 9a054b7..b41d151 100644
 +[limits]                                # bytes per text: one JSON-RPC line holds it with room to spare (deltachat.rs MAX_TEXT_BYTES)
 +dm = 16384
 +group = 16384
-diff --git a/10-bootstrap/crates/node111/assets/components/deltachat.toml b/10-bootstrap/crates/node111/assets/components/deltachat.toml
+diff --git a/1-bootstrap/crates/node111/assets/components/deltachat.toml b/1-bootstrap/crates/node111/assets/components/deltachat.toml
 new file mode 100644
 index 0000000..a0ee5a3
 --- /dev/null
-+++ b/10-bootstrap/crates/node111/assets/components/deltachat.toml
++++ b/1-bootstrap/crates/node111/assets/components/deltachat.toml
 @@ -0,0 +1,52 @@
 +# Optional component declaration (Layer 6 §2.1, §7; C5): deltachat-rpc-server, the chatmail core's JSON-RPC server, which
 +# runs this hub's Delta Chat bridge account over piped stdio (no port). Parsed with deny_unknown_fields by node111's
-+# `daemon/components/manifest.rs`. Pins: the netns spike S5 (plan/layers/60-transport/research/08-spike-deltachat.md §0;
++# `daemon/components/manifest.rs`. Pins: the netns spike S5 (plan/layers/6-transport/research/08-spike-deltachat.md §0;
 +# release v2.63.0 = tag commit de6f46971002c64b293d6095e66d8a1b7a11fd43; static binaries, so no glibc floor). No armv7
 +# asset exists upstream. The Android arm64-v8a build is the Termux target (a runbook gate, not a v1 claim, §7); it needs
 +# the Madmail relay, which does not run on Termux, so on a phone the enable refuses at [requires].
@@ -91,15 +91,15 @@ index 0000000..a0ee5a3
 +spdx = "MPL-2.0"
 +read_at = "https://github.com/chatmail/core/blob/v2.63.0/LICENSE"
 +notice = "deltachat-rpc-server 2.63.0 is the chatmail core by the Delta Chat contributors, licensed under the Mozilla Public License 2.0; read it at https://github.com/chatmail/core/blob/v2.63.0/LICENSE before you enable it. It is downloaded unmodified from its GitHub release; you install it, and 111 is not its distributor. It runs this hub's own Delta Chat bridge account, flagged as a bot, on this hub's Madmail relay. This hub decrypts everything this account receives, including messages from contacts you do not bridge. The plaintext exists on this hub. Bridging is off for every contact until you turn it on for that one. The account store keeps every message for 7 days (bridged texts are copied into Messages first); remove files deletes it."
-diff --git a/10-bootstrap/crates/node111/assets/components/madmail.toml b/10-bootstrap/crates/node111/assets/components/madmail.toml
+diff --git a/1-bootstrap/crates/node111/assets/components/madmail.toml b/1-bootstrap/crates/node111/assets/components/madmail.toml
 new file mode 100644
 index 0000000..ec0af79
 --- /dev/null
-+++ b/10-bootstrap/crates/node111/assets/components/madmail.toml
++++ b/1-bootstrap/crates/node111/assets/components/madmail.toml
 @@ -0,0 +1,52 @@
 +# Optional component declaration (Layer 6 §2.1, §7; C5): the Madmail relay (a Rust single-binary chatmail relay) that the
 +# Delta Chat bridge account uses, IP-only with a self-signed certificate. Parsed with deny_unknown_fields by node111's
-+# `daemon/components/manifest.rs`. Pins: the netns spike S5 (plan/layers/60-transport/research/08-spike-deltachat.md §0;
++# `daemon/components/manifest.rs`. Pins: the netns spike S5 (plan/layers/6-transport/research/08-spike-deltachat.md §0;
 +# release v2.30.5 = tag commit 22db4602768364955670b0f08dd97f03db6e22cc; neither project publishes checksums, so this
 +# signed manifest is the first independent record). Madmail tags are not releases: the pin moves only by a reviewed
 +# release, never by Madmail's own `upgrade`. No armv7 asset exists upstream: a 32-bit Pi has no build ("there is no build
@@ -149,11 +149,11 @@ index 0000000..ec0af79
 +spdx = "AGPL-3.0-or-later"
 +read_at = "https://github.com/themadorg/madmail/blob/v2.30.5/LICENCE"
 +notice = "Madmail 2.30.5 is a chatmail relay by themadorg, licensed under the GNU AGPL version 3 or later; read it at https://github.com/themadorg/madmail/blob/v2.30.5/LICENCE before you enable it. It is downloaded unmodified from its GitHub release; you install it, and 111 is not its distributor. Its Corresponding Source (AGPL section 13) is the tagged release at https://github.com/themadorg/madmail/tree/v2.30.5. 111 writes its configuration itself: loopback only, or this hub's LAN address while LAN sharing is on, ports 11240 to 11243, a self-signed certificate, push, federation, Shadowsocks, TURN, plain HTTP and metrics off. The relay's addresses carry this hub's IP, so changing LAN sharing changes the bridge account's address. Madmail is young software: its README says use it at your own risk. It needs glibc 2.38 or newer."
-diff --git a/10-bootstrap/crates/node111/assets/components/simplex.toml b/10-bootstrap/crates/node111/assets/components/simplex.toml
+diff --git a/1-bootstrap/crates/node111/assets/components/simplex.toml b/1-bootstrap/crates/node111/assets/components/simplex.toml
 new file mode 100644
 index 0000000..10e2fbf
 --- /dev/null
-+++ b/10-bootstrap/crates/node111/assets/components/simplex.toml
++++ b/1-bootstrap/crates/node111/assets/components/simplex.toml
 @@ -0,0 +1,33 @@
 +# Optional component declaration (Layer 6 §2.1, §7 "SimpleX (second; glibc hubs only)"; C5). D27: SimpleX ships only by the
 +# owner's hand-selection, and this release does not select it. So `kind = "none"`: nothing is pinned, cached or
@@ -188,15 +188,15 @@ index 0000000..10e2fbf
 +spdx = "AGPL-3.0-only"
 +read_at = "https://github.com/simplex-chat/simplex-chat/blob/stable/LICENSE"
 +notice = "SimpleX (the SimpleX Chat CLI and smp-server, licensed under the GNU AGPL version 3; read it at https://github.com/simplex-chat/simplex-chat/blob/stable/LICENSE) is not part of this release: it ships only when the owner selects it. When it does, it runs on glibc Linux hubs only, never on Termux, and you install it: 111 is not its distributor."
-diff --git a/10-bootstrap/crates/node111/src/daemon/bridge/deltachat.rs b/10-bootstrap/crates/node111/src/daemon/bridge/deltachat.rs
+diff --git a/1-bootstrap/crates/node111/src/daemon/bridge/deltachat.rs b/1-bootstrap/crates/node111/src/daemon/bridge/deltachat.rs
 new file mode 100644
 index 0000000..444a9d8
 --- /dev/null
-+++ b/10-bootstrap/crates/node111/src/daemon/bridge/deltachat.rs
++++ b/1-bootstrap/crates/node111/src/daemon/bridge/deltachat.rs
 @@ -0,0 +1,2493 @@
-+//! The Delta Chat adapter and its Madmail relay (Layer 6 `60-transport/README.md` §7 whole,
++//! The Delta Chat adapter and its Madmail relay (Layer 6 `6-transport/README.md` §7 whole,
 +//! §2.1, §4 "Delivery states per network", §15.2, §15.4; D26 #6). Built after the netns
-+//! spike passed: `plan/layers/60-transport/research/08-spike-deltachat.md` (S5) is the
++//! spike passed: `plan/layers/6-transport/research/08-spike-deltachat.md` (S5) is the
 +//! as-run evidence, and its §6 (states), §7 (the stdio protocol) and §8 (residuals) are the
 +//! facts this file follows.
 +//!
@@ -2687,10 +2687,10 @@ index 0000000..444a9d8
 +        assert!(CARD_TITLE.starts_with("Open Delta Chat"));
 +    }
 +}
-diff --git a/10-bootstrap/crates/node111/src/daemon/bridge/mod.rs b/10-bootstrap/crates/node111/src/daemon/bridge/mod.rs
+diff --git a/1-bootstrap/crates/node111/src/daemon/bridge/mod.rs b/1-bootstrap/crates/node111/src/daemon/bridge/mod.rs
 index f23b960..80abd6b 100644
---- a/10-bootstrap/crates/node111/src/daemon/bridge/mod.rs
-+++ b/10-bootstrap/crates/node111/src/daemon/bridge/mod.rs
+--- a/1-bootstrap/crates/node111/src/daemon/bridge/mod.rs
++++ b/1-bootstrap/crates/node111/src/daemon/bridge/mod.rs
 @@ -33,11 +33,14 @@
  
  pub mod attest;
@@ -2706,10 +2706,10 @@ index f23b960..80abd6b 100644
  pub mod state;
  pub mod stub;
  
-diff --git a/10-bootstrap/crates/node111/src/daemon/bridge/settings.rs b/10-bootstrap/crates/node111/src/daemon/bridge/settings.rs
+diff --git a/1-bootstrap/crates/node111/src/daemon/bridge/settings.rs b/1-bootstrap/crates/node111/src/daemon/bridge/settings.rs
 index 642fde2..ea9255b 100644
---- a/10-bootstrap/crates/node111/src/daemon/bridge/settings.rs
-+++ b/10-bootstrap/crates/node111/src/daemon/bridge/settings.rs
+--- a/1-bootstrap/crates/node111/src/daemon/bridge/settings.rs
++++ b/1-bootstrap/crates/node111/src/daemon/bridge/settings.rs
 @@ -22,11 +22,17 @@
  //!   members are validated against the network's recipient syntax (none ⇒ refused).
  //! - **A patch is all or nothing**: every entry is validated (and every consent gate
@@ -2935,13 +2935,13 @@ index 642fde2..ea9255b 100644
 +        );
 +    }
  }
-diff --git a/10-bootstrap/crates/node111/src/daemon/bridge/simplex.rs b/10-bootstrap/crates/node111/src/daemon/bridge/simplex.rs
+diff --git a/1-bootstrap/crates/node111/src/daemon/bridge/simplex.rs b/1-bootstrap/crates/node111/src/daemon/bridge/simplex.rs
 new file mode 100644
 index 0000000..109a209
 --- /dev/null
-+++ b/10-bootstrap/crates/node111/src/daemon/bridge/simplex.rs
++++ b/1-bootstrap/crates/node111/src/daemon/bridge/simplex.rs
 @@ -0,0 +1,110 @@
-+//! SimpleX (Layer 6 `60-transport/README.md` §7 "SimpleX (second; glibc hubs only)"; D27:
++//! SimpleX (Layer 6 `6-transport/README.md` §7 "SimpleX (second; glibc hubs only)"; D27:
 +//! SimpleX ships only by the owner's hand-selection). **This release does not enable it.**
 +//!
 +//! What exists: the component declaration `assets/components/simplex.toml` (AGPL-3.0-only;
@@ -3051,10 +3051,10 @@ index 0000000..109a209
 +        assert_eq!(h.events.recv().await, None);
 +    }
 +}
-diff --git a/10-bootstrap/crates/node111/src/daemon/components/consent.rs b/10-bootstrap/crates/node111/src/daemon/components/consent.rs
+diff --git a/1-bootstrap/crates/node111/src/daemon/components/consent.rs b/1-bootstrap/crates/node111/src/daemon/components/consent.rs
 index d26f930..dbc6938 100644
---- a/10-bootstrap/crates/node111/src/daemon/components/consent.rs
-+++ b/10-bootstrap/crates/node111/src/daemon/components/consent.rs
+--- a/1-bootstrap/crates/node111/src/daemon/components/consent.rs
++++ b/1-bootstrap/crates/node111/src/daemon/components/consent.rs
 @@ -15,7 +15,10 @@
  //! hash when the channel was uplinked), `recipient_lists` and `announce` are
  //! typed fields of [`BridgeFile`], parsed with `deny_unknown_fields` and kept
@@ -3123,10 +3123,10 @@ index d26f930..dbc6938 100644
      let mut text = serde_json::to_string_pretty(&serde_json::Value::Object(map))?;
      text.push('\n');
      Ok(text)
-diff --git a/10-bootstrap/crates/node111/src/daemon/components/manifest.rs b/10-bootstrap/crates/node111/src/daemon/components/manifest.rs
+diff --git a/1-bootstrap/crates/node111/src/daemon/components/manifest.rs b/1-bootstrap/crates/node111/src/daemon/components/manifest.rs
 index cc55ba0..4239f20 100644
---- a/10-bootstrap/crates/node111/src/daemon/components/manifest.rs
-+++ b/10-bootstrap/crates/node111/src/daemon/components/manifest.rs
+--- a/1-bootstrap/crates/node111/src/daemon/components/manifest.rs
++++ b/1-bootstrap/crates/node111/src/daemon/components/manifest.rs
 @@ -20,13 +20,32 @@
  //!   payload (enable answers `component_unavailable`), like a release without
  //!   the presence reader. `kind = "binary"`: `url` (https), `sha256` (64
@@ -3719,10 +3719,10 @@ index cc55ba0..4239f20 100644
 +        );
 +    }
  }
-diff --git a/10-bootstrap/crates/node111/src/daemon/components/mod.rs b/10-bootstrap/crates/node111/src/daemon/components/mod.rs
+diff --git a/1-bootstrap/crates/node111/src/daemon/components/mod.rs b/1-bootstrap/crates/node111/src/daemon/components/mod.rs
 index 4e1aa85..9f13f90 100644
---- a/10-bootstrap/crates/node111/src/daemon/components/mod.rs
-+++ b/10-bootstrap/crates/node111/src/daemon/components/mod.rs
+--- a/1-bootstrap/crates/node111/src/daemon/components/mod.rs
++++ b/1-bootstrap/crates/node111/src/daemon/components/mod.rs
 @@ -23,6 +23,15 @@
  //! Zero weight (§2.1 rule 2): a component that is not enabled has no runner,
  //! so no process, task, timer, probe or open file; [`Components`] itself only
@@ -3953,10 +3953,10 @@ index 4e1aa85..9f13f90 100644
      #[test]
      fn enable_errors_map_to_their_problems() {
          let c = manifest::load_embedded()
-diff --git a/10-bootstrap/crates/node111/src/daemon/components/registry.rs b/10-bootstrap/crates/node111/src/daemon/components/registry.rs
+diff --git a/1-bootstrap/crates/node111/src/daemon/components/registry.rs b/1-bootstrap/crates/node111/src/daemon/components/registry.rs
 index c7c3e90..378cd7d 100644
---- a/10-bootstrap/crates/node111/src/daemon/components/registry.rs
-+++ b/10-bootstrap/crates/node111/src/daemon/components/registry.rs
+--- a/1-bootstrap/crates/node111/src/daemon/components/registry.rs
++++ b/1-bootstrap/crates/node111/src/daemon/components/registry.rs
 @@ -157,7 +157,7 @@ pub fn facts(root: &Path, c: &Component) -> DiskFacts {
                  });
              (present, present.then_some(bytes.unwrap_or(0)))
@@ -3990,10 +3990,10 @@ index c7c3e90..378cd7d 100644
      }
  }
  
-diff --git a/10-bootstrap/crates/node111/src/install/packages.rs b/10-bootstrap/crates/node111/src/install/packages.rs
+diff --git a/1-bootstrap/crates/node111/src/install/packages.rs b/1-bootstrap/crates/node111/src/install/packages.rs
 index ec98921..ae7ee84 100644
---- a/10-bootstrap/crates/node111/src/install/packages.rs
-+++ b/10-bootstrap/crates/node111/src/install/packages.rs
+--- a/1-bootstrap/crates/node111/src/install/packages.rs
++++ b/1-bootstrap/crates/node111/src/install/packages.rs
 @@ -18,7 +18,17 @@
  //! closures with a throwaway venv's own pip (the [`pip_closure`] shape),
  //! binaries through the fetcher with size and SHA-256 checked. A failed
@@ -4127,14 +4127,14 @@ index ec98921..ae7ee84 100644
 +        }
 +    }
  }
-diff --git a/10-bootstrap/crates/node111/tests/bridge_deltachat.rs b/10-bootstrap/crates/node111/tests/bridge_deltachat.rs
+diff --git a/1-bootstrap/crates/node111/tests/bridge_deltachat.rs b/1-bootstrap/crates/node111/tests/bridge_deltachat.rs
 new file mode 100644
 index 0000000..722cf6d
 --- /dev/null
-+++ b/10-bootstrap/crates/node111/tests/bridge_deltachat.rs
++++ b/1-bootstrap/crates/node111/tests/bridge_deltachat.rs
 @@ -0,0 +1,1475 @@
-+//! Layer 6 C5 acceptance (`60-transport/README.md` §7, §2.1, §4, §15.2; the netns spike
-+//! `plan/layers/60-transport/research/08-spike-deltachat.md` §6–§7): the Delta Chat adapter
++//! Layer 6 C5 acceptance (`6-transport/README.md` §7, §2.1, §4, §15.2; the netns spike
++//! `plan/layers/6-transport/research/08-spike-deltachat.md` §6–§7): the Delta Chat adapter
 +//! against `tests/fake_deltachat_rpc.py`, a scripted JSON-RPC-over-stdio fake of
 +//! `deltachat-rpc-server` run as a real supervised child with piped stdio.
 +//!
@@ -5608,16 +5608,16 @@ index 0000000..722cf6d
 +    }
 +    comps.shutdown().await;
 +}
-diff --git a/10-bootstrap/crates/node111/tests/fake_deltachat_rpc.py b/10-bootstrap/crates/node111/tests/fake_deltachat_rpc.py
+diff --git a/1-bootstrap/crates/node111/tests/fake_deltachat_rpc.py b/1-bootstrap/crates/node111/tests/fake_deltachat_rpc.py
 new file mode 100644
 index 0000000..c584ed8
 --- /dev/null
-+++ b/10-bootstrap/crates/node111/tests/fake_deltachat_rpc.py
++++ b/1-bootstrap/crates/node111/tests/fake_deltachat_rpc.py
 @@ -0,0 +1,460 @@
 +"""A scripted fake of `deltachat-rpc-server` (the chatmail core, pinned v2.63.0) for
 +node111's `tests/bridge_deltachat.rs` (Layer 6 C5). Stdlib only; run with `python3 -I`.
 +
-+It speaks what the netns spike recorded (plan/layers/60-transport/research/08-spike-
++It speaks what the netns spike recorded (plan/layers/6-transport/research/08-spike-
 +deltachat.md §7): JSON-RPC 2.0, one object per line both ways, positional params, logs
 +never on stdout. `get_next_event_batch` long-polls: polls queue in issue order and are
 +answered only when events exist, at most 101 events each (the core's cap), so their

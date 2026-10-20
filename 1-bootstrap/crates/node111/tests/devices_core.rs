@@ -1,4 +1,4 @@
-//! Layer 6 C4 acceptance: the device core (`os/60-transport/README.md` §12,
+//! Layer 6 C4 acceptance: the device core (`os/6-transport/README.md` §12,
 //! §16 G5) without hardware.
 //!
 //! - **Hotplug.** Captured-shape kernel uevents (`tests/fixtures/uevent/*`,

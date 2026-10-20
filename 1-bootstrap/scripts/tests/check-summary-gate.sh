@@ -7,7 +7,7 @@
 #   - G2 asserts what it prints: every linked test binary is a static ELF for its target (x86_64
 #     too, no INTERP/NEEDED), and the mesh111 lib-test binary carries SQLCipher's codec and
 #     Cargo.lock's OpenSSL on both targets.
-#   - ../50-messaging/scripts/check.sh runs its musl checks with both cross toolchains or neither,
+#   - ../5-messaging/scripts/check.sh runs its musl checks with both cross toolchains or neither,
 #     with the same pinned CC/AR as scripts/musl-env.sh.
 #
 # Hermetic: check.sh + scripts/musl-env.sh on a scratch tree whose other stages are stubs, a stub
@@ -31,9 +31,9 @@ A=aarch64-unknown-linux-musl
 
 # ---- the scratch tree: the real check.sh and musl-env.sh, every other stage a stub that passes.
 R="$T/os"
-B="$R/10-bootstrap"
-mkdir -p "$B/scripts/notices/tests" "$B/systemd" "$R/40-interface/ui/node_modules" \
-  "$R/50-messaging/scripts" "$R/50-messaging/sidecars/meshtastic-presence" "$T/home" "$T/fake"
+B="$R/1-bootstrap"
+mkdir -p "$B/scripts/notices/tests" "$B/systemd" "$R/4-interface/ui/node_modules" \
+  "$R/5-messaging/scripts" "$R/5-messaging/sidecars/meshtastic-presence" "$T/home" "$T/fake"
 cp "$SCRIPTS/check.sh" "$SCRIPTS/musl-env.sh" "$B/scripts/"
 printf 'echo musl-env-test stub\n' >"$B/scripts/musl-env-test.sh"
 printf 'print("gen-notices stub")\n' >"$B/scripts/gen-notices.py"
@@ -48,11 +48,11 @@ done
 : >"$B/systemd/111node.service"
 : >"$B/systemd/111node-update.service"
 : >"$B/systemd/111node-update.path"
-: >"$R/40-interface/ui/node_modules/.modules.yaml"
-printf 'echo messaging-check stub\n' >"$R/50-messaging/scripts/check.sh"
-fake_lock "$R/50-messaging/Cargo.lock"
-printf 'echo presence stub\n' >"$R/50-messaging/sidecars/meshtastic-presence/run-tests.sh"
-printf 'print("gen_lock stub")\n' >"$R/50-messaging/sidecars/meshtastic-presence/gen_lock.py"
+: >"$R/4-interface/ui/node_modules/.modules.yaml"
+printf 'echo messaging-check stub\n' >"$R/5-messaging/scripts/check.sh"
+fake_lock "$R/5-messaging/Cargo.lock"
+printf 'echo presence stub\n' >"$R/5-messaging/sidecars/meshtastic-presence/run-tests.sh"
+printf 'print("gen_lock stub")\n' >"$R/5-messaging/sidecars/meshtastic-presence/gen_lock.py"
 
 sysbin "$T/sysbin" sh dirname mktemp rm cp grep sed head find xargs ls cat env mkdir python3 || exit 1
 fake_readelf "$T/stubs"
@@ -182,10 +182,10 @@ bins "" "plain test binary" "$CODEC" "plain test binary"
 expect_red "no mesh111 lib-test binary among the x86_64 ones → red" \
   "the mesh111 lib-test binary is not among the $X test binaries"
 
-# ---- ../50-messaging/scripts/check.sh: musl checks with both toolchains or neither.
-M="$T/msg/50-messaging"
+# ---- ../5-messaging/scripts/check.sh: musl checks with both toolchains or neither.
+M="$T/msg/5-messaging"
 mkdir -p "$M/scripts"
-cp "$OS/50-messaging/scripts/check.sh" "$M/scripts/"
+cp "$OS/5-messaging/scripts/check.sh" "$M/scripts/"
 # shellcheck disable=SC2016
 stub cargo "$T/msg/stubs" 'echo "cargo $*" >>"$FAKE/msg-cargo.log"
 case " $* " in

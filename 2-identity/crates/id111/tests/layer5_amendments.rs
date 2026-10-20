@@ -1,7 +1,7 @@
 //! Layer 5 amendments to Layer 2 (task L5-I1) — the `test-vectors/layer5/`
 //! vectors as LIVE gates over the PUBLIC `id111` API.
 //!
-//! `os/50-messaging/README.md` §19 asks Layer 2 for four code amendments; this
+//! `os/5-messaging/README.md` §19 asks Layer 2 for four code amendments; this
 //! suite freezes the three with observable wire/state behaviour:
 //!
 //! * **A2** (`sealed-payload.json`) — `seal::seal_payload` / `seal::open_payload`:

@@ -1,6 +1,6 @@
 #!/bin/sh
 # cross-build UI gate: a release build must fail without a fresh
-# 40-interface/ui/dist unless --allow-no-ui is given, and without both musl
+# 4-interface/ui/dist unless --allow-no-ui is given, and without both musl
 # cross toolchains it must fail before anything is built. Hermetic: copies
 # cross-build.sh and the scripts/musl-env.sh it sources into a scratch tree
 # with a fake UI, stub cross toolchains, a stub `cargo` that stops the build
@@ -19,9 +19,9 @@ FAILS=0
 pass() { printf '%s\n' "ui-gate: ok: $*"; }
 fail() { printf '%s\n' "ui-gate: FAIL: $*" >&2; FAILS=$((FAILS + 1)); }
 
-mkdir -p "$T/10-bootstrap/scripts" "$T/home" "$T/home-bare"
-cp "$SCRIPTS/cross-build.sh" "$SCRIPTS/musl-env.sh" "$T/10-bootstrap/scripts/"
-UI="$T/40-interface/ui"
+mkdir -p "$T/1-bootstrap/scripts" "$T/home" "$T/home-bare"
+cp "$SCRIPTS/cross-build.sh" "$SCRIPTS/musl-env.sh" "$T/1-bootstrap/scripts/"
+UI="$T/4-interface/ui"
 SH=$(command -v sh)
 sysbin "$T/sysbin" dirname mkdir find head || exit 1
 fake_toolchains "$T/home" x86_64 aarch64
@@ -47,7 +47,7 @@ build() { # extra PATH dir ("" = none); then cross-build args
 	_extra=$1
 	shift
 	env -i HOME="${XB_HOME:-$T/home}" PATH="${_extra:+$_extra:}$T/stubs:$T/sysbin" \
-		"$SH" "$T/10-bootstrap/scripts/cross-build.sh" "$@" 2026.10.14 "$T/out" 2>&1
+		"$SH" "$T/1-bootstrap/scripts/cross-build.sh" "$@" 2026.10.14 "$T/out" 2>&1
 }
 
 reset_ui

@@ -1,4 +1,4 @@
-//! The identity holder's handle (`os/50-messaging/README.md` §1, §3, §4, §10.2,
+//! The identity holder's handle (`os/5-messaging/README.md` §1, §3, §4, §10.2,
 //! §18.3): `mesh111`'s [`Sealer`] implemented over the live `id111` keyset
 //! that `111d` keeps for its lifetime (L2 §13 signer pattern — the keyset
 //! never enters `mesh111`, and no key material reaches any HTTP route).

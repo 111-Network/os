@@ -27,7 +27,7 @@
 //!   no token was minted is `401` — a presented credential is never ignored.
 //!   Loopback trust is not reopened by this (D16 a stands under Termux): the
 //!   token is what lets the agent in where loopback is untrusted.
-//! - **The global write gate** (Layer 6 `60-transport/README.md` §13 "One
+//! - **The global write gate** (Layer 6 `6-transport/README.md` §13 "One
 //!   global rule", D26 #2): the agent's bearer **reads** — it is refused
 //!   (`401`) on **every** method but `GET`, with no allowlist
 //!   ([`bearer_write_refused`], checked first in [`require_session`] and on

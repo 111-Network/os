@@ -1,4 +1,4 @@
-// Ignored message requests (os/50-messaging/README.md section 7.2): a fold the page keeps for itself, keyed
+// Ignored message requests (os/5-messaging/README.md section 7.2): a fold the page keeps for itself, keyed
 // (peer, newest received_seq), cleared by newer activity. The request itself stays pending on the node.
 import { describe, expect, it } from "vitest";
 import { own } from "../src/lib/api/own";

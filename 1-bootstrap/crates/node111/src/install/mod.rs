@@ -160,7 +160,7 @@ pub fn run_with(
     Ok(receipt)
 }
 
-/// Step 6's presence venv (os/50-messaging/README.md §14, §19 L1) as a receipt
+/// Step 6's presence venv (os/5-messaging/README.md §14, §19 L1) as a receipt
 /// degrade branch: the release pins a presence lock, yet the venv in place was
 /// not built from it — exactly when `stage::presence_venv` returned
 /// `Outcome::Unavailable` (`Built`/`Unchanged` leave a venv whose marker is the

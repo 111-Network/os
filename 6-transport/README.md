@@ -12,13 +12,13 @@ from v0.1 is at the end.
 
 ## 0. Reading guide
 
-Reads with: `os/README.md` §6 · `os/50-messaging/README.md` §8, §10, §13–§15, §18–§21 (the locked v1.2 fabric this layer amends additively) ·
-`os/20-identity/README.md` §10, §13.1 A10 · `os/plan/cross-layer/devices.md` (DEV) §3, §7, §9 · `os/plan/DECISIONS.md` D17, D19 c, D20, D22, D23, D25
+Reads with: `os/README.md` §6 · `os/5-messaging/README.md` §8, §10, §13–§15, §18–§21 (the locked v1.2 fabric this layer amends additively) ·
+`os/2-identity/README.md` §10, §13.1 A10 · `os/plan/cross-layer/devices.md` (DEV) §3, §7, §9 · `os/plan/DECISIONS.md` D17, D19 c, D20, D22, D23, D25
 and **D26** (the law for this draft) · the options brief (OB) and research R00 seam map, R01 Meshtastic, R02 LXMF, R03 phone apps, R04 bridge design,
-R05 transports and devices, R06 critic, R07 gap-1 run, all under `os/plan/layers/60-transport/` · its `review/` folder.
+R05 transports and devices, R06 critic, R07 gap-1 run, all under `os/plan/layers/6-transport/` · its `review/` folder.
 
-**Citations.** `M/` = `50-messaging/crates/mesh111/src` · `N/` = `10-bootstrap/crates/node111/src/daemon` · `A/` = `30-intelligence/crates/agent111` ·
-`UI/` = `40-interface/ui/src` · `API` = `40-interface/api/openapi.yaml` · `ID/` = `20-identity/crates/id111/src` · `L5` = `50-messaging/README.md`.
+**Citations.** `M/` = `5-messaging/crates/mesh111/src` · `N/` = `1-bootstrap/crates/node111/src/daemon` · `A/` = `3-intelligence/crates/agent111` ·
+`UI/` = `4-interface/ui/src` · `API` = `4-interface/api/openapi.yaml` · `ID/` = `2-identity/crates/id111/src` · `L5` = `5-messaging/README.md`.
 Every `file:line` was re-read in the working tree on 2026-10-19 (v0.3 re-pinned `supervise.rs`, the mesh111 `fabric.rs` lines, the `openapi.yaml`
 NearbySource enum and the presence reader after later commits). **Evidence:** *(run)* executed here · *(src)* source read · *(doc)* docs only ·
 *(design)* not yet run.
@@ -75,7 +75,7 @@ and are never reported as passed. **Non-goals:** MeshCore as a bridge target · 
 |---|---|---|---|
 | Bridge core `N/bridge/` | adapter registry, ingest, fan-out, relay edges, delivery state, component runner, API, SSE | custom glue (Layer 1 crate) | always; inert with no adapter enabled |
 | Meshtastic adapter | in-binary client on meshmud's downlink `127.0.0.1:11230` (`N/meshtastic/meshmud.rs:30`) | adopted: `meshtastic` crate 0.1.9 (GPL-3.0) over prost; fallback: our ~300-line prost client (OB F2 A1) | while service `meshtastic` is LIVE |
-| LXMF adapter | `lxmf-sidecar`, JSON Lines over piped stdio (§6) | ours: `60-transport/sidecars/lxmf-sidecar/`; imports user-installed `rns`, `lxmf` from PyPI | only when the Reticulum bridge is enabled |
+| LXMF adapter | `lxmf-sidecar`, JSON Lines over piped stdio (§6) | ours: `6-transport/sidecars/lxmf-sidecar/`; imports user-installed `rns`, `lxmf` from PyPI | only when the Reticulum bridge is enabled |
 | App-peer adapters | Delta Chat `deltachat-rpc-server` (MPL-2.0) + Madmail (AGPL-3.0); SimpleX (AGPL-3.0) | adopted, separate processes, downloaded at install | per adapter, on enable |
 | Transport spine · device core | `interfaces.toml`, renderer v2, applier, `transport.read` · hotplug, ports, identify | custom glue; `rnsd`, `rnstatus`, `rnodeconf` adopted | always (identify only on consent) |
 
@@ -111,7 +111,7 @@ SimpleX.
    installed"). `GET /networks` lists it as `disabled` with those facts. G7 asserts it (§16). The one compiled-in exception is the Meshtastic adapter
    (+372 / +332 KiB, no runtime cost unless service `meshtastic` is LIVE).
 3. **Install-time cache.** `111 install`, when online, pre-downloads each declared payload into `cache/packages/<id>/` (pip closures with the build
-   venv's own pip, binaries from the pinned URL), the rns and presence pattern (`10-bootstrap/crates/node111/src/install/packages.rs`, `pip_closure`),
+   venv's own pip, binaries from the pinned URL), the rns and presence pattern (`1-bootstrap/crates/node111/src/install/packages.rs`, `pip_closure`),
    after printing one notice line per component (name, licence, where to read it; a Layer 1 UX item, the line the rns venv gets too), and records that
    notice (program, licence, URL) in the install receipt beside the artifact hashes, so the acknowledgement exists before any download. A USB drop
    into the same directory is the offline alternative. Enable installs from the cache offline. **There is no runtime fetch.** A changed pin on a 111
@@ -305,8 +305,8 @@ client on prost (+152 / +132 KiB, run).
 ## 6. LXMF adapter: our own helper (normative; D26 #4)
 
 **Adopt, don't reinvent:** Reticulum and LXMF are used as released: `rns` and `lxmf` from PyPI, unmodified, **downloaded at install time, never
-bundled** (D26 #5). The carrier is `lxmf-sidecar` (`60-transport/sidecars/lxmf-sidecar/`), modelled on the presence sidecar
-(`50-messaging/sidecars/meshtastic-presence/`): one Python file of a few hundred lines, `requirements.in`, a lock from `gen_lock.py`, `run-tests.sh`
+bundled** (D26 #5). The carrier is `lxmf-sidecar` (`6-transport/sidecars/lxmf-sidecar/`), modelled on the presence sidecar
+(`5-messaging/sidecars/meshtastic-presence/`): one Python file of a few hundred lines, `requirements.in`, a lock from `gen_lock.py`, `run-tests.sh`
 and offline `tests/`, a README and a LICENSE. It runs in its own venv `venvs/lxmf`, built by the L1 pattern (`pip install --require-hashes` from the
 lock the release carries, closure cached under `cache/packages/lxmf/`, §2.1) on the distro `python3` (`rns` and `lxmf` need only Python ≥ 3.7, R02
 §2). Its lock pins `rns` (and `lxmf`'s `rns` requirement) to the same version as `rns-lock.txt` at release time, because two `rns` copies share one
@@ -482,7 +482,7 @@ networks…") whose result is a **copy of the text** sent as a fresh send group,
   verbatim (draft proposal; R04 §4.8), rendered **preformatted, never as Markdown** (§10). Accepting runs the same validation and, if a consent gate
   applies, the same 409 round-trip; a refusal leaves the proposal open with the problem.
 
-## 10. Messages view, contract and SSE (additive; binding form is `40-interface/api/openapi.yaml`)
+## 10. Messages view, contract and SSE (additive; binding form is `4-interface/api/openapi.yaml`)
 
 **Rail.** "111" first, then one entry per enabled network in the user's preferred order (§11), each split into channels and DMs; a thread view per
 conversation; each foreign message shows the network chip, the native id (`!a1b2c3d4` or the hash), the untrusted name as text and the `auth` label
@@ -517,7 +517,7 @@ with no default).
 `KINDS` 5 → 8, `API:556`) · `NearbySource.kind` + `reticulum` (`API:920`; sources are announces the helper hears) · new `ForeignMessageState`
 (`API:687` `MessageState` stays closed at four) · `reason_code` per §4 · `Problem.code` + `consent_required`, `oversize`, `component_unavailable`,
 `unsupported_action` · agent tools 10 → 17 (`A/tests/daemon_tools.rs:306`, `A/tests/chat_loop.rs:308`) · regenerate with `pnpm gen:types`, run
-`gen-sse.mjs --check` (`40-interface/ui/package.json:14`). `ServiceId` does **not** grow: R-B hosts no panel, and the `transport` row already reads
+`gen-sse.mjs --check` (`4-interface/ui/package.json:14`). `ServiceId` does **not** grow: R-B hosts no panel, and the `transport` row already reads
 "Reticulum". Unknown values render as `unknown` (U1b rule).
 
 **Proposal bodies are text, not Markdown.** The agent view parses proposal bodies as Markdown with external links
@@ -665,7 +665,7 @@ uplink = "/dev/serial/by-id/usb-…"
 
 ## 14. Identity and attestation (Layer 2 amendment A10; D26 #3)
 
-A10 (`20-identity/README.md` §13.1) reserved `transport_id` entries for bridge identities and hash binding for 64 B Reticulum keys, to be assigned
+A10 (`2-identity/README.md` §13.1) reserved `transport_id` entries for bridge identities and hash binding for 64 B Reticulum keys, to be assigned
 "when a bridge lands". The 202 B attestation (`ID/attest.rs:150-170`, §10) has `transport_id` 1 B, `transport_key` 32 B, `transport_sig` 64 B, today
 only `0x01` nostr. **Wave 0 lands the bytes and the verifier plug; the gossip kind that would carry attestations between nodes, the `attested-111`
 label, "already bridged by node X" and "Open the sealed thread" are the second release (§17).** Requested **(draft proposal)**:
@@ -719,7 +719,7 @@ label, "already bridged by node X" and "Open the sealed thread" are the second r
     Chat and SimpleX default to the self-hosted hub server. Each component is egress-logged in its gate (an AF_PACKET logger plus `strace -f -e
     trace=connect`, R07 §5), and the gate fails on any packet or `connect()` off the declared path.
 
-**Licensing boundary (to land in `LICENSING.md` §2/§3/§5/§7 and `10-bootstrap/TASKS.md` sign-off rows):**
+**Licensing boundary (to land in `LICENSING.md` §2/§3/§5/§7 and `1-bootstrap/TASKS.md` sign-off rows):**
 
 | Item | Status |
 |---|---|
@@ -732,9 +732,9 @@ label, "already bridged by node X" and "Open the sealed thread" are the second r
 
 ## 16. Verification (lock gates; netns, no hardware)
 
-**Gate homes (integration M6).** New `60-transport/verify/{bridge,lxmf,spine,devices}.sh` (G1, G3, G4, G5), each skipped without its prerequisites
-(unprivileged netns, `venvs/rns`) unless its `REQUIRE_*` is set for a lock run, as `REQUIRE_G2` does; `10-bootstrap/scripts/check.sh` gains a
-`60-transport` stage.
+**Gate homes (integration M6).** New `6-transport/verify/{bridge,lxmf,spine,devices}.sh` (G1, G3, G4, G5), each skipped without its prerequisites
+(unprivileged netns, `venvs/rns`) unless its `REQUIRE_*` is set for a lock run, as `REQUIRE_G2` does; `1-bootstrap/scripts/check.sh` gains a
+`6-transport` stage.
 
 **G1, bridge (`verify/bridge.sh` plus `cargo test`).** One `111d` (two on a veth for the cross-node loop cases) with three `StubAdapter`s of differing
 caps. Asserts: foreign rows never reach `/messages/threads` · **`401` for the agent bearer on every Layer 6 write, on `POST /devices/{id}/identify`
@@ -747,7 +747,7 @@ enabling a component without the recorded acknowledgement answers `409` · a `pe
 user rows go ahead of relay copies · the **1,000-row burst** keeps 111 delivery latency under its bound · airtime refusals · prune order, the
 `foreign` quota and bounded `foreign_seen` · a V3 store is refused by a V2 schema (a mesh111 unit test with `user_version = 3`) and V2 opens at V3.
 
-**G2, the Meshtastic client (a `node111` `cargo test` with a test-only prost stub).** The L5 harness stub (`40-interface/verify/stub-meshmud.py`)
+**G2, the Meshtastic client (a `node111` `cargo test` with a test-only prost stub).** The L5 harness stub (`4-interface/verify/stub-meshmud.py`)
 speaks JSON, not protobuf, so it cannot serve; the client counts undecodable frames as noise, which keeps that harness passing with the client on.
 Asserts: one `want_config_id` per connection, never 1, 69420, 69421 · replays ingested without duplicates · text before `config_complete_id` buffered
 and mapped · nonce-0 heartbeat on the test tick · the allowlist drops and counts everything else · **a dropped second `want_config_id` does not wedge
@@ -783,8 +783,8 @@ and the two one-shot actions.
 **G6, reserved.** R-B hosts no panel for an adopted program, so `panel-lint.sh` has nothing to lint. When one returns (§17) it gains `--panel <id>`
 and this gate (lint the server-side upstream session; tag *design* until built).
 
-**G7, the full gate and the zero-weight gate.** `10-bootstrap/scripts/check.sh` with `REQUIRE_G2=1`, `50-messaging/scripts/check.sh` (V3),
-`30-intelligence/scripts/check.sh` (17 tools), `pnpm check` (lazy chunk ≤ 64 KB), the presence-sidecar tests until it retires. **Zero weight is
+**G7, the full gate and the zero-weight gate.** `1-bootstrap/scripts/check.sh` with `REQUIRE_G2=1`, `5-messaging/scripts/check.sh` (V3),
+`3-intelligence/scripts/check.sh` (17 tools), `pnpm check` (lazy chunk ≤ 64 KB), the presence-sidecar tests until it retires. **Zero weight is
 runtime weight:** with every component disabled, processes and listening ports equal the Layer 5 baseline and **nothing is installed** (no
 `components/`, no `venvs/lxmf`); cached payload size, idle RSS and the binary-size delta (both musl targets) are recorded, not asserted. **G8:** the
 fable re-check on the diff, then the lock entry.
@@ -828,7 +828,7 @@ the MeshCore data-type PR.
   cut, G4) · `111 install` pre-downloads declared payloads into `cache/packages/<id>/` and prints the notice line, recorded in the install receipt
   beside the artifact hashes, and the rns venv gets the same line (D26 #1, #5) · `venvs/lxmf` and its lock in the signed manifest (hashes only, no
   Reticulum bytes) · renderer modes (§11) · `CAP_NET_BIND_SERVICE` for Madmail if it needs standard ports, `AF_NETLINK` kept if the unit restricts
-  address families · `gen-notices.py` and `LICENSING.md` rows (§15) · the `rns` pin resolves from PyPI at release time (`10-bootstrap/README.md:45`
+  address families · `gen-notices.py` and `LICENSING.md` rows (§15) · the `rns` pin resolves from PyPI at release time (`1-bootstrap/README.md:45`
   still says `rns==1.5.6`) and the helper's lock agrees with it (asserted by `gen-notices.py --check` or the release checklist).
 - **Layer 4:** routes, SSE, enums and pins (§10) · the **global bearer write gate** in `require_session` (`N/dashboard/api_v1/auth.rs:974`), which
   also closes `restart` and `identify` · preformatted proposal bodies · `pnpm gen:types`, `gen-sse.mjs --check` · `/settings/l6` · agent prompts gain
@@ -882,7 +882,7 @@ the MeshCore data-type PR.
   `REJECTED` and `CANCELLED` are `failed`. **2** §6, §18 Layer 1: the helper's lock agrees with `rns-lock.txt`. **3** §2.1 rule 3, §18 Layer 1: the
   notice is recorded in the install receipt. **4** §18 Layer 4: agent prompts restored.
 - **5** §12, §19: the two one-shot actions in `kind: device` recorded; restarts render a service card. **6** §2: port 11232 only. **7** citations
-  re-pinned (`supervise.rs`, mesh111 `fabric.rs`, `API:920`, presence reader, `10-bootstrap/README.md:45`) and the header note. **8** §6 (1):
+  re-pinned (`supervise.rs`, mesh111 `fabric.rs`, `API:920`, presence reader, `1-bootstrap/README.md:45`) and the header note. **8** §6 (1):
   require-shared-instance tagged *(unverified)*, the "not measured" cite dropped. **9** §15: `LICENSING.md` §8. **10** §6: why piped stdio. **11** §6,
   §14: `ready.pubkey`. **12** §6: Sideband and Columba are the native UIs. **13** §2.1: updater manifest refresh (`LICENSING.md` §9.3).
 

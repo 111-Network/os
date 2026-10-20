@@ -1,4 +1,4 @@
-// The banner above a network's conversations (os/60-transport/README.md §4, §10): the adapter's honest copy (what this network is and
+// The banner above a network's conversations (os/6-transport/README.md §4, §10): the adapter's honest copy (what this network is and
 // is not), the dropped-text counter ("N texts dropped while 111 was busy"), and, when the network needs something, the one line that
 // says what. The copy comes from the API's `Network.copy` (the adapter manifest), so this file holds no per-network words.
 import { hrefTo } from "../../../app/location";

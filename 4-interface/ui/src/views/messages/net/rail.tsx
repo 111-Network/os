@@ -1,4 +1,4 @@
-// The Messages rail (os/60-transport/README.md §10): "111" first, then one entry per enabled network in the user's preferred order,
+// The Messages rail (os/6-transport/README.md §10): "111" first, then one entry per enabled network in the user's preferred order,
 // each split into channels and DMs. The "111" entry is the list this rail sits on. A foreign DM raises the unread number here and
 // never the header badge. Disabled networks are not listed (they cost nothing and show in Settings).
 import { hrefTo } from "../../../app/location";

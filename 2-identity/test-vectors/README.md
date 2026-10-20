@@ -27,7 +27,7 @@ Frozen **2026-10-13** (task T8); amended **2026-10-14** under spec v2.1 (owner d
 
 ## Layer 5 amendment vectors — `layer5/` (frozen 2026-10-14, task L5-I1)
 
-The Layer 5 spec (`../../50-messaging/README.md` v1.2, D20) asks Layer 2 for amendments A2, A3, A6 and A11 (§19 there). They land as `id111` code and these vectors, in a **subdirectory on purpose**: the top-level set above is the Cat-1 Monocypher harness contract and stays byte-identical (D20 — "the Cat-1 harness vectors are untouched"); `monocypher-harness/run.sh` and `conformance.rs` inventory the top level only. `../crates/id111/tests/layer5_amendments.rs` loads **every** `layer5/*.json` (its own inventory, frozen date `2026-10-14`) and re-asserts it against the public API; `crosscheck.py` (`check_layer5_*`) re-derives it with no `id111` code.
+The Layer 5 spec (`../../5-messaging/README.md` v1.2, D20) asks Layer 2 for amendments A2, A3, A6 and A11 (§19 there). They land as `id111` code and these vectors, in a **subdirectory on purpose**: the top-level set above is the Cat-1 Monocypher harness contract and stays byte-identical (D20 — "the Cat-1 harness vectors are untouched"); `monocypher-harness/run.sh` and `conformance.rs` inventory the top level only. `../crates/id111/tests/layer5_amendments.rs` loads **every** `layer5/*.json` (its own inventory, frozen date `2026-10-14`) and re-asserts it against the public API; `crosscheck.py` (`check_layer5_*`) re-derives it with no `id111` code.
 
 | File | Amendment | What it freezes |
 |---|---|---|
@@ -50,7 +50,7 @@ A3 (`next_announce_counter` as the L5 `msg_seq` epoch source) adds no wire; it i
 ## Running
 
 ```bash
-cd os/20-identity
+cd os/2-identity
 export PATH="$HOME/.cargo/bin:$PATH"
 cargo test                                  # unit tests + tests/conformance.rs
 cargo clippy --tests -- -D warnings

@@ -1,8 +1,8 @@
 # Layer 6 — Transport & Bridge: plan folder
 
-**Status** (copied from [`INDEX.md`](../../INDEX.md) row 6, which stays the source of truth): 🔨 building — spec **v1.0 locked (D27, 2026-10-19)** after a 3-judge fable panel on v0.1 + a re-check on v0.2 (D26 amendments: own LXMF helper, install-time component cache with licence notices, every restart a proposal, A10 bytes now); board `os/60-transport/TASKS.md` (T0 → Waves 0–3); build starts at the Layer 5 tag; no hardware yet (bench items in the board's external gates)
+**Status** (copied from [`INDEX.md`](../../INDEX.md) row 6, which stays the source of truth): 🔨 building — spec **v1.0 locked (D27, 2026-10-19)** after a 3-judge fable panel on v0.1 + a re-check on v0.2 (D26 amendments: own LXMF helper, install-time component cache with licence notices, every restart a proposal, A10 bytes now); board `os/6-transport/TASKS.md` (T0 → Waves 0–3); build starts at the Layer 5 tag; no hardware yet (bench items in the board's external gates)
 
-**Spec and build:** [`os/60-transport/README.md`](../../../60-transport/README.md) (v1.0, locked D27) · [`os/60-transport/TASKS.md`](../../../60-transport/TASKS.md)
+**Spec and build:** [`os/6-transport/README.md`](../../../6-transport/README.md) (v1.0, locked D27) · [`os/6-transport/TASKS.md`](../../../6-transport/TASKS.md)
 
 **Opener brief:** [`cross-layer/devices.md`](../../cross-layer/devices.md) (device-connection core, D17 decisions, §9 Layer 5 hand-offs). Parked ideas picked up here: P1 Meshtastic bridge, P2 phone apps ([`cross-layer/parked.md`](../../cross-layer/parked.md)).
 

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# 60-transport/verify/lib.sh — shared helpers for the Layer 6 gate scripts (spec §16).
+# 6-transport/verify/lib.sh — shared helpers for the Layer 6 gate scripts (spec §16).
 #
-# Convention (from 10-bootstrap/scripts/check.sh REQUIRE_G2 and 40-interface/verify/smoke.sh):
+# Convention (from 1-bootstrap/scripts/check.sh REQUIRE_G2 and 4-interface/verify/smoke.sh):
 # every check prints `ok:` or `FAIL:` (`note:` is information only); a script exits 1 on any
 # FAIL. A gate whose prerequisites are absent (unprivileged netns, venvs/rns, a built binary)
 # prints `SKIPPED` and exits 0 — unless its REQUIRE_<GATE> variable is set (lock runs), in which

@@ -1,4 +1,4 @@
-//! Layer 6 B3 acceptance (os/60-transport/README.md §5, §16 G2): the Meshtastic bridge
+//! Layer 6 B3 acceptance (os/6-transport/README.md §5, §16 G2): the Meshtastic bridge
 //! client against a **fake meshmud** — a TCP server in this test (std threads) that speaks
 //! the `0x94 0xC3 <len hi> <len lo>` framing with prost-encoded `FromRadio` frames built from
 //! the `meshtastic` crate's own types, deframes what the client writes strictly (any byte

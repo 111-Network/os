@@ -23,7 +23,7 @@ Source: 3-scout fast sweep (stack / design extraction / dual-mode UX), per user 
 | D. Vanilla JS / WebComponents, hand-rolled CSS | 2/5 | Rejected: rebuilds Tailwind + a mini-framework by hand — bespoke surface the philosophy forbids |
 
 **Option A shape:**
-- Standalone pnpm + Vite + React app at `os/40-interface/ui/`, static `dist/` later embedded into 111d via `rust-embed` (`debug-embed` for dev).
+- Standalone pnpm + Vite + React app at `os/4-interface/ui/`, static `dist/` later embedded into 111d via `rust-embed` (`debug-embed` for dev).
 - Tailwind CSS 4 via `@tailwindcss/vite`; DESIGN.md tokens in `@theme`; `globals.css` ported from `website/src/app/globals.css`.
 - **No shadcn** (DESIGN.md bans its rounded primitives; ours are raw elements), **no framer-motion** (CSS keyframes + IntersectionObserver hook instead), **no state library** (React context + hooks), wouter or hash routing only.
 - Fonts self-hosted woff2 with hand-written `@font-face` (all SIL OFL): Geist Mono (variable), Geist Pixel Line (extract from `geist` package — it peer-depends on Next and can't be imported), Silkscreen 400/700.
@@ -59,13 +59,13 @@ Source: 3-scout fast sweep (stack / design extraction / dual-mode UX), per user 
 - Endpoints under `/api/v1/`: `POST /chat`, `GET /chat/history`, `GET /status/node`, `GET /status/mesh`, `GET /notifications`, `POST /settings`, `GET /events` (SSE; named events `agent.token`, `agent.message`, `notify`, `status.node`, `status.mesh`; monotonic ids + `Last-Event-ID` resume from a ring buffer).
 - One SSE channel avoids the browser 6-connections-per-origin limit — one pipe for old phones.
 - Versioning: path prefix, additive-only evolution; UI+daemon ship in one binary → short compatibility windows.
-- Typing (interim): `os/40-interface/api/openapi.yaml` is the source of truth **until 111d lands**; UI generates TS types via `openapi-typescript` at build. When 111d lands: Rust DTOs + `utoipa` take over as source, CI drift-checks emitted doc vs the yaml (fallback: ts-rs/specta).
+- Typing (interim): `os/4-interface/api/openapi.yaml` is the source of truth **until 111d lands**; UI generates TS types via `openapi-typescript` at build. When 111d lands: Rust DTOs + `utoipa` take over as source, CI drift-checks emitted doc vs the yaml (fallback: ts-rs/specta).
 - Errors: RFC-9457-style `problem+json` with machine-readable `code`. Auth: localhost/LAN bind, optional bearer token later; CORS stays closed (same-origin in prod).
 - **Mock seam (this cycle):** every panel talks to one typed data-adapter interface; a mock adapter serves fixtures + simulated SSE in-browser (zero server needed for dev/demo); the real adapter is a drop-in when 111d exists.
 
 ## D5 — Layer home and this cycle's build scope
 
-- Home: `os/40-interface/` (per D1 layer-slug convention): `README.md` (spec), `TASKS.md`, `api/openapi.yaml`, `ui/` (Vite app), `fonts/` (vendored woff2, license notes).
+- Home: `os/4-interface/` (per D1 layer-slug convention): `README.md` (spec), `TASKS.md`, `api/openapi.yaml`, `ui/` (Vite app), `fonts/` (vendored woff2, license notes).
 - Scope = **bases only**: scaffold, tokens, fonts, primitives, shell + mode system, 5 simple views + advanced panels with mock data, data-adapter seam, action-registry seam. No 111d embedding (Layer 1 dependency), no real API server, no e2e.
 
 ## Open decisions for user

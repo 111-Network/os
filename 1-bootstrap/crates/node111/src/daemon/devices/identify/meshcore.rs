@@ -1,4 +1,4 @@
-//! Identify step 3: MeshCore (`os/60-transport/README.md` §12; R05 §3.1).
+//! Identify step 3: MeshCore (`os/6-transport/README.md` §12; R05 §3.1).
 //!
 //! The documented MIT exchange of MeshCore's KISS modem firmware
 //! (`docs/kiss_modem_protocol.md`, MeshCore, MIT; read 2026-10-19), and

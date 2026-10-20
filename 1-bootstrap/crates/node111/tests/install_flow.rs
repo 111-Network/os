@@ -2,8 +2,8 @@
 //! HTTP server + scripted MockRunner + temp fs roots — happy path + idempotent
 //! re-run, downgrade refusal, degraded container path, clock-skew refusal, and
 //! the stage step's Layer 5 cross-check (fresh extraction and the "already
-//! staged" content probe; os/50-messaging/README.md §19 L1). Then the presence
-//! venv (os/50-messaging/README.md §14) with a fake python3/pip
+//! staged" content probe; os/5-messaging/README.md §19 L1). Then the presence
+//! venv (os/5-messaging/README.md §14) with a fake python3/pip
 //! (`fake_python`): a fresh install builds it from the pinned lock before step 7
 //! hands `venvs/` to node111, a re-run leaves it alone, and a failed build
 //! never fails the install (a receipt degrade branch). And the rns closure on

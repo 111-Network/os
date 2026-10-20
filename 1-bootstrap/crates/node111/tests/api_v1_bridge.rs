@@ -1,10 +1,10 @@
-//! Layer 6 C1 acceptance (`os/60-transport/README.md` §8, §9, §10, §12, §13; D26 #2;
-//! `60-transport/TASKS.md` row C1): the bridge routes, the proposal kinds and the daemon
+//! Layer 6 C1 acceptance (`os/6-transport/README.md` §8, §9, §10, §12, §13; D26 #2;
+//! `6-transport/TASKS.md` row C1): the bridge routes, the proposal kinds and the daemon
 //! wiring, driven through the real dashboard app on loopback sockets over a real fabric (a
 //! fresh `id111` identity, SQLCipher store V3) with scripted `StubAdapter`s.
 //!
 //! - every route's 2xx body and every problem against the contract digest
-//!   (`40-interface/ui/test/contract.gen.ts`) with the UI's JSON-Schema-subset validator
+//!   (`4-interface/ui/test/contract.gen.ts`) with the UI's JSON-Schema-subset validator
 //!   (`oneOf` = any branch);
 //! - networks (a disabled optional component listed with its cached size), conversations,
 //!   thread paging, a foreign DM opened, a person's read clearing `unread`;
@@ -73,7 +73,7 @@ fn contract() -> &'static Contract {
     static C: OnceLock<Contract> = OnceLock::new();
     C.get_or_init(|| {
         let path = format!(
-            "{}/../../../40-interface/ui/test/contract.gen.ts",
+            "{}/../../../4-interface/ui/test/contract.gen.ts",
             env!("CARGO_MANIFEST_DIR")
         );
         let text = std::fs::read_to_string(path).expect("contract.gen.ts");
@@ -175,7 +175,7 @@ fn type_ok(v: &Value, t: &str) -> bool {
     }
 }
 
-/// A port of `40-interface/ui/test/helpers/validate.ts` (same subset, `oneOf` = any).
+/// A port of `4-interface/ui/test/helpers/validate.ts` (same subset, `oneOf` = any).
 fn validate(v: &Value, schema: &Value, path: &str, errs: &mut Vec<String>) {
     if let Some(r) = schema.get("$ref").and_then(Value::as_str) {
         let name = r.strip_prefix("#/components/schemas/").expect("local ref");

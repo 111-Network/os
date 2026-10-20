@@ -1,4 +1,4 @@
-// The lazy chunk behind /messages/net/:network[/:conv] and /messages/send (os/60-transport/README.md §10, D21 cap 64 KB gzip). The router
+// The lazy chunk behind /messages/net/:network[/:conv] and /messages/send (os/6-transport/README.md §10, D21 cap 64 KB gzip). The router
 // places these before /messages/:peer; this view branches on the params.
 import { useParams } from "wouter";
 import { paramText } from "../../../lib/api/networks";

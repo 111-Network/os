@@ -166,7 +166,7 @@ pub fn check_once(cfg: &UpdaterConfig, layout: &DaemonLayout) -> anyhow::Result<
         &layout.state_dir().join("staging"),
         &manifest.release(),
     )?;
-    // Layer 5 cross-check (os/50-messaging/README.md §19 L1): the staged tree's
+    // Layer 5 cross-check (os/5-messaging/README.md §19 L1): the staged tree's
     // bin/meshmud, panel bundles and presence lock against the manifest's pins.
     // Advisory here — the root helper repeats it on the tree it extracts itself
     // (D12) — but a release whose payload disagrees with its own manifest is

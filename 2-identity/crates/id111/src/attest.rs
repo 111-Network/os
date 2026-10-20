@@ -148,7 +148,7 @@ impl fmt::Display for MeshEpoch {
 /// Append-only: assigned ids are never reused or weakened.
 ///
 /// A10 (§13.1) assigned `0x02` and `0x03` for **bridge identities** (Layer 6,
-/// `os/60-transport/README.md` §14; D26 #3, 2026-10-19). This crate carries
+/// `os/6-transport/README.md` §14; D26 #3, 2026-10-19). This crate carries
 /// the bytes and the binding rules below; it grows no verifier for them —
 /// the [`TransportVerifier`] plug lives in `node111` (the trait is the seam).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -1412,7 +1412,7 @@ mod tests {
         let att = NodeLeg::issue(&ks, TID, tkey, expiry).complete(tsig);
         let wire = att.to_bytes();
 
-        println!("Attestation KAT (frozen by T8 into os/20-identity/test-vectors/):");
+        println!("Attestation KAT (frozen by T8 into os/2-identity/test-vectors/):");
         println!("  node mnemonic   = abandon×11 about (BIP-39, empty passphrase)");
         println!("  node_pubkey     = {}", to_hex(ks.node_id().as_bytes()));
         println!("  transport_id    = 0x01 (nostr-secp256k1)");

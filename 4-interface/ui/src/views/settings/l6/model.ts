@@ -1,4 +1,4 @@
-// Settings, Transport (os/60-transport/README.md §2.1, §6, §8, §10, §11, §15): the words and the small pure rules of the page. No React.
+// Settings, Transport (os/6-transport/README.md §2.1, §6, §8, §10, §11, §15): the words and the small pure rules of the page. No React.
 import type { NetworkId, RecipientList } from "../../../lib/api/types";
 
 export const ADAPTERS_HELP =

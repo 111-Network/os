@@ -35,7 +35,7 @@ If a solid project exists, we use it. A custom piece exists only where nothing p
 
 Layers are modular: not every device can run — or needs — every layer. Each device takes, operates, and improves only the layers its hardware and its user's choices allow. The layer-to-category mapping is defined below.
 
-In the repository, each layer is a folder named `NN-<slug>`, `NN` being the layer number times ten (`00-knowledge`, `10-bootstrap`, `20-identity`, `30-intelligence`, `40-interface`, `50-messaging`), so the tree reads top to bottom in this order and leaves room between layers.
+In the repository, each layer is a folder named `N-<slug>`, `N` being the layer number (`0-knowledge`, `1-bootstrap`, `2-identity`, `3-intelligence`, `4-interface`, `5-messaging`, `6-transport`), so the tree reads top to bottom in this order.
 
 ### 0. Knowledge Layer
 
@@ -48,7 +48,7 @@ The foundation every other layer reads from. A curated, AI-readable knowledge ba
 
 Format follows AI-readability best practice: Markdown only, one topic per file, short lines, YAML frontmatter with tags/category/status (`proven`, `testing`, `candidate`), wikilinks between entries, a lightweight agent-readable index, and many small files rather than few large ones — structured so the knowledge can be graphed later.
 
-The source of truth lives at the operating-system level in `os/00-knowledge/`. The website has its own clear job; the knowledge base is published to it later via CI.
+The source of truth lives at the operating-system level in `os/0-knowledge/`. The website has its own clear job; the knowledge base is published to it later via CI.
 
 This layer drives adoption decisions ("if a solid project exists, we use it"), grounds the local agent's reasoning, and provides the per-device install recipes the Bootstrap Layer consumes.
 

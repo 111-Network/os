@@ -1,6 +1,6 @@
-# python-licenses.txt: hand-maintained license list for the meshtastic-presence venv (spec 50-messaging/README.md
+# python-licenses.txt: hand-maintained license list for the meshtastic-presence venv (spec 5-messaging/README.md
 # section 14). Read by gen-notices.py, which fails (also under --check) when a package in
-# 50-messaging/sidecars/meshtastic-presence/meshtastic-presence-lock.txt has no row here at the locked version,
+# 5-messaging/sidecars/meshtastic-presence/meshtastic-presence-lock.txt has no row here at the locked version,
 # or a row here has no package in the lock.
 #
 # One row per line:  name | version | SPDX | copyright | repository

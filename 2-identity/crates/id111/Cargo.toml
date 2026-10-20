@@ -4,10 +4,10 @@ version = "0.0.0" # calver stamped at release time, mirroring node111
 edition.workspace = true
 license = "GPL-3.0-or-later" # project license: os/LICENSE.md; third-party boundaries: os/LICENSING.md
 
-# Dependency policy (os/20-identity/TASKS.md): this set is frozen; additions need
+# Dependency policy (os/2-identity/TASKS.md): this set is frozen; additions need
 # reviewer sign-off recorded in the task row.
 #
-# The set is spec §3 (os/20-identity/README.md) only, exact-pinned per §3 ("exact
+# The set is spec §3 (os/2-identity/README.md) only, exact-pinned per §3 ("exact
 # pins at build"). Normative floors: ed25519-dalek MUST be >=2.0
 # (RUSTSEC-2022-0093; spec table names v2) and curve25519-dalek MUST be >=4.1.3
 # (RUSTSEC-2024-0344). Pin rationale recorded in task row T1.
@@ -46,7 +46,7 @@ bech32 = "=0.12.0"
 # Secret hygiene for keyset/mnemonic material.
 zeroize = { version = "=1.9.1", features = ["derive"] }
 # §4 — the named entropy source on Cat 2+ (getrandom()). 0.2 line matches
-# rand_core 0.6 (x25519-dalek) and the os/10-bootstrap lock; a 0.3/0.4 bump is a
+# rand_core 0.6 (x25519-dalek) and the os/1-bootstrap lock; a 0.3/0.4 bump is a
 # reviewer-sign-off change, not a scaffold choice.
 getrandom = "=0.2.17"
 

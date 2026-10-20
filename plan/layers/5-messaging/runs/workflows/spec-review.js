@@ -5,7 +5,7 @@ export const meta = {
 }
 
 const ROOT = '/home/kia/projects/111network/os'
-const OUT = ROOT + '/plan/layers/50-messaging/review'
+const OUT = ROOT + '/plan/layers/5-messaging/review'
 
 const CTX = `
 You are an ADVERSARIAL JUDGE on the Layer 5 (Messaging & Data) spec of the 111network OS. Today is 2026-10-14.
@@ -14,13 +14,13 @@ insecure, inconsistent with the locked sibling layers, or reinvents something an
 Default to skepticism; a finding you cannot ground in a quoted line of the spec or a sibling document is not a finding.
 
 READ FIRST (in this order; use sed -n / grep, do not slurp unrelated trees):
-1. ${ROOT}/50-messaging/README.md — the spec under review (whole file, ~450 lines).
+1. ${ROOT}/5-messaging/README.md — the spec under review (whole file, ~450 lines).
 2. ${ROOT}/plan/DECISIONS.md — D13 (identity wire contract), D17 (device decisions), D18 and D19 (this cycle's owner
    decisions: the spec MUST implement them, a judge does not relitigate owner decisions but may show they are
    mis-implemented or have unstated consequences).
-3. ${ROOT}/plan/layers/50-messaging/options.md — the options brief the spec came from (§0 facts, §3 detail picks, §4 amendments).
-4. ${ROOT}/plan/layers/50-messaging/research/00-code-seams.md — where the spec plugs into built code (line-verified map).
-5. Lens-specific reading listed in your brief below. Research reports in ${ROOT}/plan/layers/50-messaging/research/ (01–07) hold the
+3. ${ROOT}/plan/layers/5-messaging/options.md — the options brief the spec came from (§0 facts, §3 detail picks, §4 amendments).
+4. ${ROOT}/plan/layers/5-messaging/research/00-code-seams.md — where the spec plugs into built code (line-verified map).
+5. Lens-specific reading listed in your brief below. Research reports in ${ROOT}/plan/layers/5-messaging/research/ (01–07) hold the
    evidence with URLs; cite them when a spec claim contradicts them.
 
 HARD RULES the spec must respect (from the owner, not negotiable): adopt, don't reinvent · Reticulum is a connected
@@ -31,7 +31,7 @@ links into our Rust binary (separate processes/bundles are fine) · Linux musl-s
 
 METHOD: you may run cheap real checks (python arithmetic on byte budgets, parse the TOML manifest snippet with
 python3 -c "import tomllib" (Python 3.11+) or tomli if present, grep the Rust code named in 00-code-seams.md, read
-${ROOT}/20-identity/crates/id111/src/{seal.rs,counters.rs,announce.rs,store.rs} headers). Do NOT build, do NOT modify any
+${ROOT}/2-identity/crates/id111/src/{seal.rs,counters.rs,announce.rs,store.rs} headers). Do NOT build, do NOT modify any
 repo file except your own review file. Cost discipline: ≤ 25 tool calls on reading; spend your effort thinking.
 
 OUTPUT: write your review to the path given in your brief (markdown, ≤ 2500 words): 1. Verdict (lock-ready |
@@ -49,7 +49,7 @@ const JUDGES = [
     key: 'crypto',
     file: 'crypto.md',
     brief: `LENS: CRYPTO / ENVELOPE / PROTOCOL (spec §3–§12, §18, §19 "Layer 2 amendments").
-Extra reading: ${ROOT}/20-identity/README.md §6 (all), §8.4, §9, §10, §12, §13, §15; ${ROOT}/plan/layers/50-messaging/research/04-envelope.md
+Extra reading: ${ROOT}/2-identity/README.md §6 (all), §8.4, §9, §10, §12, §13, §15; ${ROOT}/plan/layers/5-messaging/research/04-envelope.md
 and 07-gap-2.md; id111 seal.rs (header, inner pin, MIN_PACKET_LEN), counters.rs (window, batch commit, restore jump).
 Attack list (not exhaustive): (1) pair_mac: is the KDF/MAC construction sound (keyed BLAKE2b, key derivation inputs,
 what it covers, ordering of verification vs window update), sender_ref 4 B collisions and the "try each candidate" rule
@@ -78,9 +78,9 @@ Write to ${OUT}/crypto.md`,
     key: 'panels',
     file: 'panels.md',
     brief: `LENS: HOSTED-PANEL PROXY SECURITY + MESHTASTIC INTEGRATION (spec §13, §14, §15 panel/identify routes, §18 items 7–8).
-Extra reading: ${ROOT}/40-interface/README.md §11 (auth as built: pair code, s111 cookie, loopback trust, CSRF rules, host
-guard), §6.6, §7; ${ROOT}/plan/layers/50-messaging/research/03-hosted-panels.md (mechanics + sources) and 07-gap-3-meshmonitor.md;
-${ROOT}/10-bootstrap/crates/node111/src/daemon/dashboard/routes.rs (CSP/headers middleware, ~line 70) and
+Extra reading: ${ROOT}/4-interface/README.md §11 (auth as built: pair code, s111 cookie, loopback trust, CSRF rules, host
+guard), §6.6, §7; ${ROOT}/plan/layers/5-messaging/research/03-hosted-panels.md (mechanics + sources) and 07-gap-3-meshmonitor.md;
+${ROOT}/1-bootstrap/crates/node111/src/daemon/dashboard/routes.rs (CSP/headers middleware, ~line 70) and
 api_v1/auth.rs (cookie/session/CSRF code) — read enough to judge the interplay; D16(a) loopback policy in DECISIONS.md.
 Attack list: (1) Ticket flow: single-use 128-bit ticket in a URL (referrer leak, history, logs), 30 s window, who may
 mint (dashboard session vs trusted loopback), ticket → cookie swap on the panel origin, cookie attributes
@@ -114,9 +114,9 @@ Write to ${OUT}/panels.md`,
     file: 'integration.md',
     brief: `LENS: INTEGRATION, SCOPE HONESTY, BUILDABILITY, ADOPT-DON'T-REINVENT (whole spec; emphasis §1–§2, §8–§11,
 §14–§17, §19–§22).
-Extra reading: ${ROOT}/README.md §5 and "What We Build vs. What We Adopt"; ${ROOT}/40-interface/README.md §5–§7, §10;
-${ROOT}/40-interface/api/openapi.yaml (ServiceId, ServiceRecord, DeviceRecord, x-sse-events); ${ROOT}/30-intelligence/README.md
-(tools, contracts); ${ROOT}/10-bootstrap/README.md (state layout, transport, update path) and 10-bootstrap/TASKS.md
+Extra reading: ${ROOT}/README.md §5 and "What We Build vs. What We Adopt"; ${ROOT}/4-interface/README.md §5–§7, §10;
+${ROOT}/4-interface/api/openapi.yaml (ServiceId, ServiceRecord, DeviceRecord, x-sse-events); ${ROOT}/3-intelligence/README.md
+(tools, contracts); ${ROOT}/1-bootstrap/README.md (state layout, transport, update path) and 1-bootstrap/TASKS.md
 "Dependency policy"; ${ROOT}/plan/cross-layer/devices.md §2–§3, §7; ${ROOT}/plan/cross-layer/parked.md; research 01, 02, 05, 07-gap-1, 07-gap-2.
 Attack list: (1) Does the spec implement D18 and D19 exactly (every decision, including the amendments D19 c made to
 cross-layer/devices.md and D19 d made to D15), with no silent additions or omissions? (2) Honesty of the four delivery states and of

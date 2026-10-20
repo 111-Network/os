@@ -1,4 +1,4 @@
-//! The one ingest function (Layer 6 `60-transport/README.md` §3 "One ingest function",
+//! The one ingest function (Layer 6 `6-transport/README.md` §3 "One ingest function",
 //! "Dedupe"; §8 guard 2; §15.1, §15.9): every foreign string — sender names, bodies,
 //! conversation titles and native ids, the marker name — passes [`clean`] before it is
 //! stored, shown or relayed.

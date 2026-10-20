@@ -1,4 +1,4 @@
-//! Compose fan-out (Layer 6 `60-transport/README.md` §9): one text into several targets as
+//! Compose fan-out (Layer 6 `6-transport/README.md` §9): one text into several targets as
 //! one fresh send group, never a 111 message exported.
 //!
 //! - **Targets** ([`FanoutTarget`]): a foreign conversation of an enabled network, a

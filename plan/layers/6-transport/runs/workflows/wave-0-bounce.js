@@ -9,10 +9,10 @@ const SP = '/tmp/claude-0/-home-user-os/e7852691-6eb6-50f1-9e84-b01d744ea3a9/scr
 
 const BRIEF = `
 You are a FIX subagent for the 111network OS, Layer 6. Today is 2026-10-19. Repo root: ${ROOT} (git; NEVER commit/add/stash/checkout/reset —
-the lead commits). The law: ${ROOT}/60-transport/README.md §3, §4, §8, §9 and the S1 row of ${ROOT}/60-transport/TASKS.md. Read the S1 commit
-first: git show 85cf84f --stat, then M/store/foreign.rs (M/ = ${ROOT}/50-messaging/crates/mesh111/src), schema.rs V3, prune.rs, tests.rs.
+the lead commits). The law: ${ROOT}/6-transport/README.md §3, §4, §8, §9 and the S1 row of ${ROOT}/6-transport/TASKS.md. Read the S1 commit
+first: git show 85cf84f --stat, then M/store/foreign.rs (M/ = ${ROOT}/5-messaging/crates/mesh111/src), schema.rs V3, prune.rs, tests.rs.
 
-OWNED (strict): M/store/{foreign.rs, schema.rs, prune.rs, tests.rs, mod.rs}, ${ROOT}/10-bootstrap/crates/node111/src/daemon/fabric/times.rs.
+OWNED (strict): M/store/{foreign.rs, schema.rs, prune.rs, tests.rs, mod.rs}, ${ROOT}/1-bootstrap/crates/node111/src/daemon/fabric/times.rs.
 Another agent (B1) is editing M/fabric.rs and N/fabric/{mod,json}.rs RIGHT NOW: never touch those; keep every existing pub signature in
 foreign.rs working (B1 codes against it); additions are fine. The V3 migration has not shipped, so editing the V3 SQL in place is allowed.
 
@@ -39,7 +39,7 @@ DROPS them (a disabled edge has no backlog; re-enable moves cursor_seq anyway) a
 BOX: export CARGO_TARGET_DIR=${SP}/target/mesh111 CARGO_BUILD_JOBS=2 (shared with B1 — cargo's lock serializes; a transient failure caused
 by B1's half-edited fabric.rs: wait 90 s and retry twice; B1 does not touch your files). For times.rs: CARGO_TARGET_DIR=${SP}/target/node111.
 No new dependencies. Never put a model name in a file. Nothing of yours stays running.
-CHECK: sh ${ROOT}/50-messaging/scripts/check.sh (musl SKIPS: say so) and cd ${ROOT}/10-bootstrap && cargo test -p node111 --lib fabric::times
+CHECK: sh ${ROOT}/5-messaging/scripts/check.sh (musl SKIPS: say so) and cd ${ROOT}/1-bootstrap && cargo test -p node111 --lib fabric::times
 && cargo clippy -p node111 --lib -- -D warnings. Paste the tails.
 RETURN (structured): task "S1-bounce", status, files, check, deviations, notes (one line per finding: what changed, the test name).
 `

@@ -11,8 +11,8 @@ const BRIEF = `
 You are a RESEARCH-SPIKE subagent for the 111network OS, Layer 6 (Transport & Bridge). Today is 2026-10-19. Repo root: ${ROOT}
 (a git repo; you NEVER run git commit/add/stash/checkout). You will not be messaged mid-task.
 
-TASK S5 — the Delta Chat spike (spec ${ROOT}/60-transport/README.md §7 "Spike first", §2 ports, §15.10 egress; D26 #6; your row in
-${ROOT}/60-transport/TASKS.md). Read §7 and §2 first, then ${ROOT}/plan/layers/60-transport/research/03-phone-apps.md §3.9–§3.11 (the
+TASK S5 — the Delta Chat spike (spec ${ROOT}/6-transport/README.md §7 "Spike first", §2 ports, §15.10 egress; D26 #6; your row in
+${ROOT}/6-transport/TASKS.md). Read §7 and §2 first, then ${ROOT}/plan/layers/6-transport/research/03-phone-apps.md §3.9–§3.11 (the
 research facts: deltachat-rpc-server speaks JSON-RPC 2.0 over stdio, Config::Bot, Secure-Join; Madmail is the Rust single-binary chatmail
 relay with an IP-only self-signed mode). The spike is evidence, not a build: nothing you make ships.
 
@@ -34,7 +34,7 @@ mode within ~60 minutes of trying, STOP and report that as the failure with the 
 (D26 #6: Delta Chat then leaves the first release). Scratch under ${SP}/S5/ only; delete it at the end. Linux hygiene: nothing of yours
 stays running when you return (ps check; kill what you started), the netns dies with its shell.
 
-DELIVERABLE (the only file you write in the repo): ${ROOT}/plan/layers/60-transport/research/08-spike-deltachat.md — the spike report in the
+DELIVERABLE (the only file you write in the repo): ${ROOT}/plan/layers/6-transport/research/08-spike-deltachat.md — the spike report in the
 style of the other research reports there (read 07-gap-1.md for the shape): header with date and the exact pins (URLs, tags, sha256 of every
 binary), what ran and how (commands), the results table (each step: ran / pass / fail with evidence), the exact ports and the capability
 verdict, the message-state mapping observed (what the core reports for queued/sent/delivered/read), the egress log result (zero off-link

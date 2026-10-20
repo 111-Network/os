@@ -1,4 +1,4 @@
-// What the `meshtastic` service page adds to the generic control panel (os/50-messaging/README.md sections 14 and 16): the nodes
+// What the `meshtastic` service page adds to the generic control panel (os/5-messaging/README.md sections 14 and 16): the nodes
 // heard (the list itself is Nearby), and the honest copy: what the panel transmits, whose keys protect it, which outside hosts a
 // browser may contact, and the phone residual. The nodes' names are never repeated here; only how many were heard.
 import { hrefTo } from "../../app/location";

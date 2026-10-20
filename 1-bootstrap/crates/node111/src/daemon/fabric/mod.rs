@@ -1,4 +1,4 @@
-//! Layer 5 fabric wiring (`os/50-messaging/README.md` §2, §4, §9, §10.2, §15,
+//! Layer 5 fabric wiring (`os/5-messaging/README.md` §2, §4, §9, §10.2, §15,
 //! §17; task F2): `mesh111` running inside `111d`.
 //!
 //! ## What [`start`] does, in order
@@ -45,7 +45,7 @@
 //!    per key (a message keeps its first change, a contact its last), and
 //!    publishes `message` / `contact` / `fabric` frames; `Settings` events
 //!    are persisted to `fabric/settings` (0600) and reconcile the listener.
-//!    Layer 6 `Foreign` events (`60-transport/README.md` §10) become
+//!    Layer 6 `Foreign` events (`6-transport/README.md` §10) become
 //!    `network_message` frames `{network, conv, id?, change, seq}`,
 //!    coalesced again per `(conv, id)` key (first change wins): one
 //!    conversation read per distinct conversation in the batch gives the

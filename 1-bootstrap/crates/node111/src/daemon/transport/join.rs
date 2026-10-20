@@ -1,4 +1,4 @@
-//! Phone relay v1 (`os/60-transport/README.md` §11 "Phone relay v1"; D17 #4:
+//! Phone relay v1 (`os/6-transport/README.md` §11 "Phone relay v1"; D17 #4:
 //! TCP to the hub first): the hub's **join descriptor** and the phone's side
 //! that turns one into an rnsd `TCPClientInterface` entry.
 //!

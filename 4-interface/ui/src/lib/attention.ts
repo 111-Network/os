@@ -25,7 +25,7 @@ export function attentionSummary(a: Pick<Attention, "openProposals" | "erroredSe
   return parts.length > 0 ? parts.join(", ") : "Nothing needs you";
 }
 
-// --- Foreign networks (os/60-transport/README.md §10) ------------------------------------------------------------------------------
+// --- Foreign networks (os/6-transport/README.md §10) ------------------------------------------------------------------------------
 //
 // The header badge counts proposals, errors and message requests: things that need a decision. It does not count unread messages,
 // and a stranger's text on another network never raises it. A foreign DM to the board raises the unread count of its network only,

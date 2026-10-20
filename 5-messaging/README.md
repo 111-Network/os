@@ -7,18 +7,18 @@ by policy. Plus the dashboard's power to **host** an adopted project's own panel
 Meshtastic.
 
 Status of this document: **spec v1.2 — locked (D20, 2026-10-14)** after the three-judge adversarial panel and the
-re-check (decisions D18, D19, D20 in `os/plan/DECISIONS.md`; options brief `os/plan/layers/50-messaging/options.md`; research
-`os/plan/layers/50-messaging/research/`; triage `os/plan/layers/50-messaging/review/triage.md`, re-check `os/plan/layers/50-messaging/review/recheck.md`). Nothing here is built yet. Build tasks will live in `TASKS.md` per `os/plan/EXECUTION.md`.
+re-check (decisions D18, D19, D20 in `os/plan/DECISIONS.md`; options brief `os/plan/layers/5-messaging/options.md`; research
+`os/plan/layers/5-messaging/research/`; triage `os/plan/layers/5-messaging/review/triage.md`, re-check `os/plan/layers/5-messaging/review/recheck.md`). Nothing here is built yet. Build tasks will live in `TASKS.md` per `os/plan/EXECUTION.md`.
 
-Reads with: `os/README.md` §5 (vision) · `os/20-identity/README.md` §6, §8.4, §9, §10, §12, §13 (the sealed packet,
-announces, restore, delegation, attestation, hand-offs) · `os/40-interface/README.md` §5–§7, §10–§11 (dashboard, services,
-contract, auth) · `os/30-intelligence/README.md` (tools, task API) · `os/plan/cross-layer/devices.md` (Layer 6 brief, amended by D19 c)
-· `os/plan/layers/50-messaging/research/00-code-seams.md` (where this plugs in).
+Reads with: `os/README.md` §5 (vision) · `os/2-identity/README.md` §6, §8.4, §9, §10, §12, §13 (the sealed packet,
+announces, restore, delegation, attestation, hand-offs) · `os/4-interface/README.md` §5–§7, §10–§11 (dashboard, services,
+contract, auth) · `os/3-intelligence/README.md` (tools, task API) · `os/plan/cross-layer/devices.md` (Layer 6 brief, amended by D19 c)
+· `os/plan/layers/5-messaging/research/00-code-seams.md` (where this plugs in).
 
 ## 1. Scope & non-goals
 
 **In v1 (this cycle):**
-- The **fabric**: `mesh111`, a Rust library crate (`os/50-messaging/crates/mesh111`), wired into `111d` as the module
+- The **fabric**: `mesh111`, a Rust library crate (`os/5-messaging/crates/mesh111`), wired into `111d` as the module
   `daemon/fabric/` — envelope codec, message identity, fragmentation, authenticated receipts, contacts, the home-hub
   mailbox, the `Link` trait, the encrypted store, the local API. The identity keyset never leaves the daemon (L2 §13:
   signer pattern); `mesh111` receives a sealer/signer handle that also caches per-contact pair keys (§3), never key bytes.
@@ -53,11 +53,11 @@ never links into our Rust binary.
 | `mesh111` crate | fabric library (§3–§12), `KeyProvider` seam, store schema, `Link` trait | custom (this layer) | every node running Layer 5 (Cat 2–5) |
 | `111d` `daemon/fabric/` | wires `mesh111` to identity, links, store dir, API, SSE, services registry | custom glue (Layer 1 crate, D15-style sanction) | same |
 | `111d` `daemon/panels/` | panel listeners: static serving, ticket auth, header policy, the Meshtastic HTTP shim; the generic reverse proxy is reserved (§13) | custom glue (`hyper`/`axum` already in the graph) | nodes with the dashboard |
-| SQLCipher via `rusqlite` | encrypted store engine (§10) | adopted: `00-knowledge/projects/rusqlite.md`, `sqlcipher.md` | same |
-| `blake3` + `bao-tree` | content addressing + verified streaming of bulk objects (§11) | adopted: `00-knowledge/projects/blake3-bao.md` | same |
-| `meshmud` | Meshtastic multiplexer: one serial/TCP uplink, many TCP downlinks | adopted: `00-knowledge/projects/meshmud.md` — own code MIT; the CI build records a license verdict and the binary is conveyed as GPL-3.0 only if its module list shows Meshtastic's GPL-3.0 Go protobufs linked (the v1.0.0 source as read on 2026-10-14 has none — a hand-written varint framing — so the expected verdict is MIT-only); pinned by upstream tag + tarball sha256 + commit, CI-built, only `go.mod`/`go.sum` data snapshots in `os/` | nodes with a Meshtastic board (§14) |
-| `meshtastic-presence` | tiny read-only presence reader on `meshtastic-python` | sidecar, GPL-3.0, own dir `os/50-messaging/sidecars/meshtastic-presence/`, own hash-locked venv | same |
-| Meshtastic web client | the hosted panel (static bundle) | adopted: `00-knowledge/projects/meshtastic-web.md` (GPL-3.0-only; served unmodified from disk, never `rust-embed`) | same |
+| SQLCipher via `rusqlite` | encrypted store engine (§10) | adopted: `0-knowledge/projects/rusqlite.md`, `sqlcipher.md` | same |
+| `blake3` + `bao-tree` | content addressing + verified streaming of bulk objects (§11) | adopted: `0-knowledge/projects/blake3-bao.md` | same |
+| `meshmud` | Meshtastic multiplexer: one serial/TCP uplink, many TCP downlinks | adopted: `0-knowledge/projects/meshmud.md` — own code MIT; the CI build records a license verdict and the binary is conveyed as GPL-3.0 only if its module list shows Meshtastic's GPL-3.0 Go protobufs linked (the v1.0.0 source as read on 2026-10-14 has none — a hand-written varint framing — so the expected verdict is MIT-only); pinned by upstream tag + tarball sha256 + commit, CI-built, only `go.mod`/`go.sum` data snapshots in `os/` | nodes with a Meshtastic board (§14) |
+| `meshtastic-presence` | tiny read-only presence reader on `meshtastic-python` | sidecar, GPL-3.0, own dir `os/5-messaging/sidecars/meshtastic-presence/`, own hash-locked venv | same |
+| Meshtastic web client | the hosted panel (static bundle) | adopted: `0-knowledge/projects/meshtastic-web.md` (GPL-3.0-only; served unmodified from disk, never `rust-embed`) | same |
 | `jsQR` | QR decoding in the dashboard (contact cards) | adopted (Apache-2.0), Layer 4 dependency sign-off | dashboard |
 
 **Ports (loopback unless stated):** dashboard 11180 · model 11181 · agent 11182 · **fabric `tcp-lan` 11183** (LAN-bound
@@ -663,7 +663,7 @@ not see or store it** — this sentence is on the service page.
   separate processes; no Meshtastic protobuf code enters our Rust binary. Source offers in `THIRD-PARTY-NOTICES.md`
   name the pinned tags (meshmud + its Go closure, meshtastic-python + its pip closure, the web bundle).
 
-## 15. API contract (additive, `/api/v1`; binding form: `40-interface/api/openapi.yaml`)
+## 15. API contract (additive, `/api/v1`; binding form: `4-interface/api/openapi.yaml`)
 
 | Route | Verb | Purpose |
 |---|---|---|
@@ -810,7 +810,7 @@ Termux). Tools run inside `111-agent`; writes only via the proposal path (L3 "on
   high-water for them, but every packet is still offered to it and its fresh/stale verdict gates attribution and pushes; TLV `0x21` reserved for `signer_pubkey`. **Asked later (v1.1):** A5 crypto-mode `0x02`
   (static-static folded into the KDF, the 16 B saver) and the carve-out that hash-verified chunk frames of public or
   already-encrypted objects may travel unsealed on broadcast bearers.
-- **Layer 1 (bootstrap):** new deps with sign-off recorded in `10-bootstrap/TASKS.md` — `rusqlite`/`libsqlite3-sys`
+- **Layer 1 (bootstrap):** new deps with sign-off recorded in `1-bootstrap/TASKS.md` — `rusqlite`/`libsqlite3-sys`
   (`bundled-sqlcipher-vendored-openssl`), `blake3`, `bao-tree`, `ciborium`; new state dirs (`fabric/`, `fabric/blobs`,
   `fabric/presence`, the presence venv); ports §2; `111 fabric offer|enroll|status` CLI verbs; manifest entries for
   meshmud binaries (built in CI from the pinned tarball), the Meshtastic web bundle (CI-built from the pinned tag when
@@ -833,7 +833,7 @@ Termux). Tools run inside `111-agent`; writes only via the proposal path (L3 "on
 
 ## 20. Verification (lock gates; netns, no hardware)
 
-G1 **three-node harness** (a named task: `40-interface/verify/smoke.sh` extended to three `NODE111_ROOT`s in three netns on
+G1 **three-node harness** (a named task: `4-interface/verify/smoke.sh` extended to three `NODE111_ROOT`s in three netns on
 a veth bridge, real `111d` binaries): two members + one hub — card exchange, `node1…` card request, INTRO request accept,
 `queued → sent → relayed → delivered`, a message to a non-member answered `REJECT_UNKNOWN_DEST` and shown honestly, hub
 killed mid-transfer and resumed by cursor, duplicates re-ACKed not redelivered, Tier-1 fragments over a test-only

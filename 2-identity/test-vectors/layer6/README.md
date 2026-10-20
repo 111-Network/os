@@ -1,12 +1,12 @@
 # Layer 6 amendment vectors — `layer6/` (frozen 2026-10-19, task S3)
 
-Layer 6 (`../../../60-transport/README.md` §14, D26 #3) assigns the A10 `transport_id` values reserved in
+Layer 6 (`../../../6-transport/README.md` §14, D26 #3) assigns the A10 `transport_id` values reserved in
 `../../README.md` §13.1. They land as `id111` registry values (`src/attest.rs`) and these vectors, in a **subdirectory on
 purpose**: the top-level set is the Cat-1 Monocypher harness contract and stays byte-identical (D20);
 `monocypher-harness/run.sh` and `conformance.rs` inventory the top level only.
 `../../crates/id111/tests/layer6_attest.rs` loads every `layer6/*.json` (its own inventory, frozen date `2026-10-19`) and
 re-asserts the registry bytes, parsing, the node leg and a byte-exact re-issue; `node111`'s `BridgeVerifier`
-(`10-bootstrap/crates/node111/src/daemon/bridge/attest.rs`) replays the same file through the transport-leg plug.
+(`1-bootstrap/crates/node111/src/daemon/bridge/attest.rs`) replays the same file through the transport-leg plug.
 
 | File | Amendment | What it freezes |
 |---|---|---|

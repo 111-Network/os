@@ -1,4 +1,4 @@
-// Recipient lists per network (os/60-transport/README.md §6): local, destination-only groups of native addresses, entered, pasted or
+// Recipient lists per network (os/6-transport/README.md §6): local, destination-only groups of native addresses, entered, pasted or
 // picked from the announces Nearby heard. Saving replaces the whole set (`PATCH /bridge/settings recipient_lists`). Names are the
 // person's own; the addresses are checked against the network's `recipient_syntax` before they are added.
 import { useEffect, useState } from "react";

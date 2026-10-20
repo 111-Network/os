@@ -1,4 +1,4 @@
-//! End-to-end tests for the KB retrieval ritual (os/00-knowledge/AGENTS.md):
+//! End-to-end tests for the KB retrieval ritual (os/0-knowledge/AGENTS.md):
 //! open the snapshot, grep by keyword or filename, then read one entry at a
 //! time — with `_meta/` invisible and no path ever escaping the KB dir.
 

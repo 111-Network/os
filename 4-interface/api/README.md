@@ -30,7 +30,7 @@ the `x-sse-events` map) into `ui/src/lib/api/types.gen.ts` — never hand-edited
   snapshots). After `reset` the Layer 5 views also refetch `/fabric`, `/messages/threads`, `/contacts`,
   `/nearby` and `/panels`. Layer 6 adds `network_message` and `bridge` (below); after `reset` its views also refetch
   `/networks`, `/bridge/edges` and `/transport`.
-- **Layer 5 additions (Messaging & Data; `os/50-messaging/README.md` §15, D20) — additive under `/api/v1`:**
+- **Layer 5 additions (Messaging & Data; `os/5-messaging/README.md` §15, D20) — additive under `/api/v1`:**
   - *Routes:* `GET /messages/threads`, `GET /messages/threads/{peer}`, `POST /messages`, `POST /messages/{id}/retry`,
     `GET|POST /contacts`, `GET|PATCH|DELETE /contacts/{id}`, `GET /contacts/me/card`, `GET /fabric`,
     `POST /fabric/hub/enroll`, `POST /fabric/hub/offer`, `PATCH /fabric/settings`, `GET /nearby`, `GET /panels`,
@@ -59,7 +59,7 @@ the `x-sse-events` map) into `ui/src/lib/api/types.gen.ts` — never hand-edited
     `DeviceRecord.actions` has `identify` (now live for Meshtastic-capable boards); `reason_code` sets grow as above;
     `Problem.code` + `port_busy`, `panel_ticket_expired`.
   - *No key material:* `Card` and `HubOffer` carry the public announce and a one-time enrollment code only.
-- **Layer 6 additions (Transport & Bridge; `os/60-transport/README.md` §10, D27) — additive under `/api/v1`:**
+- **Layer 6 additions (Transport & Bridge; `os/6-transport/README.md` §10, D27) — additive under `/api/v1`:**
   - *Routes:* `GET /networks`; `GET|POST /networks/{net}/conversations` (POST opens a foreign DM, `{kind: dm, native_id}`);
     `GET /networks/{net}/conversations/{conv}` (`?limit&since_seq`); `POST /networks/{net}/conversations/{conv}/messages`
     (`{text, size_mode?}` → 202 `{id, plan}`); `POST /messages/fanout/preview`, `POST /messages/fanout` (→ `{group_id, items}`);
@@ -124,10 +124,10 @@ the `x-sse-events` map) into `ui/src/lib/api/types.gen.ts` — never hand-edited
     installed size and licence notice; enabling needs the recorded acknowledgement and installs from the install-time cache
     (nothing downloads at runtime). A disabled component has no process, listener or timer.
   - *Pin list (each enum or tool-count bump touches these; the change is not done until all are green):*
-    1. `Proposal.kind` 5 → 8: `KINDS` in `10-bootstrap/crates/node111/src/daemon/dashboard/api_v1/proposals.rs:65` (`[&str; 5]` → 8; the daemon's validation
+    1. `Proposal.kind` 5 → 8: `KINDS` in `1-bootstrap/crates/node111/src/daemon/dashboard/api_v1/proposals.rs:65` (`[&str; 5]` → 8; the daemon's validation
        of what the agent wrote; an unlisted kind is `502 upstream_error`), the UI's proposal-kind handling
        (`ui/src/views/agent`, preformatted rendering for the two bridge kinds), and the agent's proposal writer.
-    2. Agent tool count 10 → 17: `30-intelligence/crates/agent111/tests/daemon_tools.rs` and `tests/chat_loop.rs` (`names.len()`
+    2. Agent tool count 10 → 17: `3-intelligence/crates/agent111/tests/daemon_tools.rs` and `tests/chat_loop.rs` (`names.len()`
        at `:306` and the request's `tools` length at `:308`, plus the `DAEMON_TOOLS` list), plus `src/tools.rs` schemas and dispatch.
     3. `pnpm gen:types` (regenerates `types.gen.ts`, `sse.gen.ts` and `test/contract.gen.ts` in one step), then
        `node scripts/gen-sse.mjs --check` (fails when any generated file is stale). New enum tuples and aliases are listed in
@@ -137,7 +137,7 @@ the `x-sse-events` map) into `ui/src/lib/api/types.gen.ts` — never hand-edited
     5. The contract tests: `test/gen.test.ts` (event names and enum mirrors), `test/http.test.ts` (every operation has an
        adapter call; the `LAYER6_PENDING` list is emptied as the adapter methods land), `test/layer6-contract.test.ts`
        (closed enums, enum growth, fixtures), and the mock adapters, whose frames validate against `x-sse-events`.
-    6. `10-bootstrap/crates/node111/src/daemon/dashboard/api_v1/` gains the routes and the global bearer gate; its `NearbySource` kinds
+    6. `1-bootstrap/crates/node111/src/daemon/dashboard/api_v1/` gains the routes and the global bearer gate; its `NearbySource` kinds
        and `Problem` codes mirror the enums above; `ForeignMessageState` is a new Rust enum separate from Layer 5's
        `MessageState`.
 - **Not gated:** `/`, static assets, `/health` (body is booleans) and `/api/v1/auth/*`. Everything

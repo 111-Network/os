@@ -1,4 +1,4 @@
-//! The bridge core (Layer 6 `60-transport/README.md` §2, §3, §4, §10): the adapter
+//! The bridge core (Layer 6 `6-transport/README.md` §2, §3, §4, §10): the adapter
 //! registry, the adapter manifests, the recv tasks, the monotonic tick and the typed API
 //! surface the routes (C1) call.
 //!

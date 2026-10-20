@@ -1,4 +1,4 @@
-// Nearby (os/50-messaging/README.md section 14, 16): the nodes a Meshtastic board has heard, per source. Pure: the words for the
+// Nearby (os/5-messaging/README.md section 14, 16): the nodes a Meshtastic board has heard, per source. Pure: the words for the
 // empty states, a node's name and figures as text, and the order. Every string a node reports is an untrusted RF-origin value:
 // it is cleaned (`cleanPeerText`), cut, and drawn as text only; nothing here ever builds a link or a prompt from it.
 import { cleanPeerText } from "../../lib/api/messages";

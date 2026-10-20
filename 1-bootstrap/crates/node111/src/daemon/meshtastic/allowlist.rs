@@ -1,4 +1,4 @@
-//! The Meshtastic **send allowlist at the lowest layer** (Layer 6 `60-transport/README.md`
+//! The Meshtastic **send allowlist at the lowest layer** (Layer 6 `6-transport/README.md`
 //! §5 "Send allowlist at the lowest layer"; precedent: the presence reader's
 //! `ALLOWED_TORADIO`, `meshtastic_presence.py:93`).
 //!

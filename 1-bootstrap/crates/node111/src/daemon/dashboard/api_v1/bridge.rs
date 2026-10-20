@@ -1,4 +1,4 @@
-//! `/api/v1/bridge/*` (Layer 6 `os/60-transport/README.md` §8, §2.1, §10; contract
+//! `/api/v1/bridge/*` (Layer 6 `os/6-transport/README.md` §8, §2.1, §10; contract
 //! `listBridgeEdges`, `createBridgeEdge`, `getBridgeEdge`, `patchBridgeEdge`,
 //! `deleteBridgeEdge`, `getBridgeSettings`, `patchBridgeSettings`, `listBridgeComponents`,
 //! `enableBridgeComponent`, `disableBridgeComponent`, `removeBridgeComponentFiles`).

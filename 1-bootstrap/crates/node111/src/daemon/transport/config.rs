@@ -1,4 +1,4 @@
-//! rnsd config, **renderer v2** (`os/60-transport/README.md` §11 "Renderer
+//! rnsd config, **renderer v2** (`os/6-transport/README.md` §11 "Renderer
 //! v2", §6 "rnsd posture v2"; carriers M1): `<root>/rns/config` rendered
 //! from the parsed `state/interfaces.toml` ([`render`]), never by hand.
 //!
@@ -596,7 +596,7 @@ pub fn render_with(
 /// client of 111d's rnsd with no interfaces of its own.
 pub fn render_client_config(secrets: &Secrets, instance_name: &str) -> String {
     format!(
-        "# The LXMF helper's Reticulum client config (os/60-transport/README.md §6, §11), rendered\n\
+        "# The LXMF helper's Reticulum client config (os/6-transport/README.md §6, §11), rendered\n\
          # by 111d. A shared-instance client with no interfaces: it attaches to 111d's rnsd and\n\
          # carries no traffic of its own. 0600: it carries the rpc_key.\n\
          schema-version = {SCHEMA_VERSION}\n\n\

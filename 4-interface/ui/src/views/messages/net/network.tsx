@@ -1,4 +1,4 @@
-// One network (os/60-transport/README.md §10): its banner, its conversations split into channels and DMs, a way to open a DM by the
+// One network (os/6-transport/README.md §10): its banner, its conversations split into channels and DMs, a way to open a DM by the
 // network's own address (or from what Nearby heard), and the relays that touch it.
 import { useState, type FormEvent } from "react";
 import { navigate } from "wouter/use-hash-location";

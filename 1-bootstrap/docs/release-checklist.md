@@ -30,7 +30,7 @@ scripts/cross-build.sh 2026.10.12 dist/releases/2026.10.12
 Produces `dist/releases/2026.10.12/111-{x86_64,aarch64}-unknown-linux-musl`
 (static-asserted; aarch64 p_align=0x4000 asserted; SQLCipher + OpenSSL strings asserted).
 
-Layer 5 release files (D20; `50-messaging/README.md` §19 L1), each built by CI from a pinned
+Layer 5 release files (D20; `5-messaging/README.md` §19 L1), each built by CI from a pinned
 upstream and never copied into `os/`:
 
 ```sh
@@ -42,7 +42,7 @@ Read `meshmud-<tag>.verdict` before going on: it says which license the binaries
 under (GPL-3.0 when they link Meshtastic's Go protobufs). It, the `.SOURCE` files, `.buildinfo`,
 `LICENSE.meshmud` and `LICENSE.meshtastic-web` go on the release page beside the binaries
 (`LICENSING.md` section 8). The presence reader needs no build: its lock is
-`50-messaging/sidecars/meshtastic-presence/meshtastic-presence-lock.txt` (re-check with
+`5-messaging/sidecars/meshtastic-presence/meshtastic-presence-lock.txt` (re-check with
 `gen_lock.py --verify`; `scripts/check.sh` runs it).
 
 ## 2. Assemble artifacts
@@ -55,7 +55,7 @@ Into `dist/releases/2026.10.12/` place: the two `111` binaries, the two
 |---|---|---|---|
 | `meshmud-<tag>-linux-amd64`, `meshmud-<tag>-linux-arm64` | `scripts/meshmud-build.sh` (CI, pinned upstream tarball) | `bin/meshmud` (0755): amd64 in the x86_64 payload, arm64 in the aarch64 one | `[pkg.meshmud.target.<triple>]` |
 | `meshtastic-web-<tag>.tar` + `meshtastic-web-<tag>.tree` | `scripts/meshtastic-web-build.sh` | the `.tar` unpacked at `panels/meshtastic-web/` | `[bundle.meshtastic-web]` (`tree-sha256` = sha256 of the `.tree`) |
-| `meshtastic-presence-lock.txt` | `50-messaging/sidecars/meshtastic-presence/` (`gen_lock.py`) | `share/meshtastic-presence/` with `meshtastic_presence.py`, the lock and `LICENSE` | `[presence-lock]` |
+| `meshtastic-presence-lock.txt` | `5-messaging/sidecars/meshtastic-presence/` (`gen_lock.py`) | `share/meshtastic-presence/` with `meshtastic_presence.py`, the lock and `LICENSE` | `[presence-lock]` |
 
 The Layer 5 files are optional to the generator, so a missing one is a silently thinner release
 (the node then reports meshmud or the panel honestly absent). A full release has all four

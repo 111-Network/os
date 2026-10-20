@@ -1,5 +1,5 @@
-//! Layer 4 R2 acceptance (`os/40-interface/README.md` §7, §10;
-//! `os/40-interface/api/openapi.yaml`): `/api/v1/status` schema pins + superset of
+//! Layer 4 R2 acceptance (`os/4-interface/README.md` §7, §10;
+//! `os/4-interface/api/openapi.yaml`): `/api/v1/status` schema pins + superset of
 //! `/api/status`, the `update` block from state files and the live updater,
 //! the services registry (§7 rows from injected facts, 2-tick debounce,
 //! `starting` grace, `since`, `services` frames), log tails, settings (merge,
@@ -488,7 +488,7 @@ async fn with_fabric(
 }
 
 /// F2P: Layer 5 is listed while the message fabric runs and is not
-/// restore-pending (`os/50-messaging/README.md` §4: nothing is sealed and no
+/// restore-pending (`os/5-messaging/README.md` §4: nothing is sealed and no
 /// link runs then); no fabric, a fabric that is down, or a restore-pending
 /// one ⇒ no 5.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

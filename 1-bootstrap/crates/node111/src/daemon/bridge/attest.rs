@@ -1,5 +1,5 @@
-//! The bridge-identity attestation plug (Layer 6 `os/60-transport/README.md` §14; Layer 2
-//! amendment A10, `os/20-identity/README.md` §13.1; D26 #3): the first implementor of
+//! The bridge-identity attestation plug (Layer 6 `os/6-transport/README.md` §14; Layer 2
+//! amendment A10, `os/2-identity/README.md` §13.1; D26 #3): the first implementor of
 //! `id111`'s [`TransportVerifier`] seam.
 //!
 //! `id111` owns the 202 B §10 record, both signed inputs and the registry bytes
@@ -219,9 +219,9 @@ mod tests {
     use serde_json::Value;
 
     const LAYER6: &str =
-        include_str!("../../../../../../20-identity/test-vectors/layer6/attest-transport-ids.json");
+        include_str!("../../../../../../2-identity/test-vectors/layer6/attest-transport-ids.json");
     const L2_ATTEST: &str =
-        include_str!("../../../../../../20-identity/test-vectors/attestation.json");
+        include_str!("../../../../../../2-identity/test-vectors/attestation.json");
 
     fn unhex(s: &str) -> Vec<u8> {
         assert!(s.len().is_multiple_of(2));

@@ -1,5 +1,5 @@
 //! The fixed tool set — no shell, no plugins, ever. Schemas are contract
-//! (frozen at T0; grown by exactly five in Layer 5, `os/50-messaging/README.md`
+//! (frozen at T0; grown by exactly five in Layer 5, `os/5-messaging/README.md`
 //! §17); `dispatch` runs one call against the node's own state.
 //! Every tool is a plain function over `ToolCtx`: nothing here spawns a
 //! subprocess.
@@ -17,7 +17,7 @@
 //! `untrusted_text`, and everything `nearby.read` returns sits inside an
 //! `untrusted_block` that says it came over the air from strangers (§14).
 //!
-//! Layer 6 (`os/60-transport/README.md` §13, D27) grows the set to seventeen:
+//! Layer 6 (`os/6-transport/README.md` §13, D27) grows the set to seventeen:
 //! `bridge.read`, `bridge.propose_edge`, `devices.read`, `transport.read`,
 //! `device.identify`, `device.propose` and `service.restart`, and extends
 //! `messages.send` with `targets`. The agent writes nothing: the daemon calls

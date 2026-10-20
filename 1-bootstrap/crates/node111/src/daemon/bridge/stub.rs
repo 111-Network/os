@@ -1,4 +1,4 @@
-//! The scripted [`StubAdapter`] (Layer 6 `60-transport/README.md` §4 "`StubAdapter`"): an
+//! The scripted [`StubAdapter`] (Layer 6 `6-transport/README.md` §4 "`StubAdapter`"): an
 //! in-process [`Adapter`] with scripted accept, evidence, failures, queue-full answers,
 //! airtime, an inbound feed and link flaps — the G1 fixture (§16), modelled on
 //! `mesh111::link::lossy` (a test bearer with scripted behaviour, no sockets).

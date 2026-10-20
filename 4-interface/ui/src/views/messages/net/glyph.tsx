@@ -1,4 +1,4 @@
-// The delivery-evidence glyph for a foreign row (os/60-transport/README.md §4): three pips after the outbox, filled as far as the
+// The delivery-evidence glyph for a foreign row (os/6-transport/README.md §4): three pips after the outbox, filled as far as the
 // evidence got, and a crossed box for a refusal before air. Shape and the word carry the state, never color.
 import { cx } from "../../../lib/cx";
 import { foreignStateCopy } from "./model";

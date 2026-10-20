@@ -1,6 +1,6 @@
 # Vendored Monocypher — provenance and hash pins
 
-Spec: `os/20-identity/README.md` §3 (Cat 1 primitive source), §11/D14 (vendored-primitive rubric exception: CC0/permissive + **vendored hash-pinned** + forkability recorded).
+Spec: `os/2-identity/README.md` §3 (Cat 1 primitive source), §11/D14 (vendored-primitive rubric exception: CC0/permissive + **vendored hash-pinned** + forkability recorded).
 
 | Field | Value |
 |---|---|
@@ -41,13 +41,13 @@ The GitHub tag `4.0.3` (`https://github.com/LoupVaillant/Monocypher/archive/refs
 * **4.0.3 (2026/06/15): "Fixed timing leak vulnerability in EdDSA/Ed25519 signatures."** Versions before 4.0.3 are affected; any Cat-1 port must start from ≥ 4.0.3 (this pin).
 * **4.0.0: `crypto_x25519()` now returns `void`.** Monocypher 4.x does **not** reject all-zero X25519 output natively. Spec §3 and the KB `monocypher` entry say it does (true for 3.x) — see "Findings" in `test-vectors/monocypher-smoke.md`; the harness's `ecdh()` wrapper supplies the ingress blacklist and the all-zero abort.
 * `crypto_eddsa_check_equation` is *cofactored* and *accepts non-canonical A/R* (source comment: "*Allow* non-cannonical encoding for A and R"; final step multiplies by 8). The §3 strict predicate is therefore a wrapper concern (`strict_verify()` in `harness.c`).
-* The Cure53 audit (2020-06) covered v3.1.1, not 4.x (`os/20-identity/README.md` §3, §11).
+* The Cure53 audit (2020-06) covered v3.1.1, not 4.x (`os/2-identity/README.md` §3, §11).
 
 ## Re-verifying / updating
 
 ```bash
 # re-verify the pin (no network)
-cd os/20-identity/monocypher-harness && sha256sum --check --strict SHA256SUMS
+cd os/2-identity/monocypher-harness && sha256sum --check --strict SHA256SUMS
 
 # re-verify provenance (network)
 curl -fLO https://monocypher.org/download/monocypher-4.0.3.tar.gz

@@ -1,4 +1,4 @@
-//! `/api/v1/transport*` (Layer 6 `os/60-transport/README.md` §11, §12; contract
+//! `/api/v1/transport*` (Layer 6 `os/6-transport/README.md` §11, §12; contract
 //! `getTransport`, `patchTransportPosture`, `joinTransport`).
 //!
 //! - `GET /transport` → `TransportStatus`: the interface facts from the tick-driven

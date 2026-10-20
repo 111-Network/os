@@ -1,4 +1,4 @@
-// HAM confirmation per account and the per-channel uplink send switch (os/60-transport/README.md §5, §15.5). Neither is a bare switch:
+// HAM confirmation per account and the per-channel uplink send switch (os/6-transport/README.md §5, §15.5). Neither is a bare switch:
 // turning one on answers with the exact text and its hash, the person reads it, and confirming records that hash. Turning one off needs
 // no confirmation.
 import { useState } from "react";

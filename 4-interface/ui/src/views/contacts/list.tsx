@@ -1,4 +1,4 @@
-// The contact list (os/50-messaging/README.md section 16): who you can write to, with pin, rename and forget. A forget is
+// The contact list (os/5-messaging/README.md section 16): who you can write to, with pin, rename and forget. A forget is
 // two steps. Names are local: the alias you set, else the operator label made from the id.
 import { useState, type FormEvent } from "react";
 import { redirectIfUnauthenticated } from "../../app/AuthGate";

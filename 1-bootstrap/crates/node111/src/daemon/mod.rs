@@ -2,7 +2,7 @@
 //! Restart=always wrappers, never the supervisor of record), watchdog heartbeat,
 //! dashboard, updater, KB server, conditional rnsd child.
 //!
-//! Layer 6 (`os/60-transport/README.md` §2, §4, §5, §11; task C1) is wired by
+//! Layer 6 (`os/6-transport/README.md` §2, §4, §5, §11; task C1) is wired by
 //! [`start_layer6`]: the bridge core with the compiled-in Meshtastic adapter
 //! registered (enabled in the core only while its client runs, i.e. while
 //! service `meshtastic` is LIVE — B3's rule), the optional components and
@@ -625,7 +625,7 @@ async fn daemon_main() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Daemon start, before the Meshtastic module is built (os/50-messaging/
+/// Daemon start, before the Meshtastic module is built (os/5-messaging/
 /// README.md §14, §19 L1; every promotion restarts the daemon): ensure
 /// `venvs/presence` was built from the lock the release in `current/` carries
 /// — rebuilt offline from `cache/packages/presence/` when an update changed

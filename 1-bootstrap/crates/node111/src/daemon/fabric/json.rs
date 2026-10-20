@@ -1,4 +1,4 @@
-//! The contract shapes (`40-interface/api/openapi.yaml` Layer 5 schemas) built
+//! The contract shapes (`4-interface/api/openapi.yaml` Layer 5 schemas) built
 //! from `mesh111`'s typed views: `Message`, `Thread`, `Contact`, `Card`
 //! (+ `QrMatrix`), `FabricStatus`, `FabricHub`, `FabricSettings`,
 //! `HubOffer`. One place, so routes and SSE frames agree byte for byte.
@@ -16,7 +16,7 @@
 //!   bounded `Counters` since this fabric started (§18 rule 1: a failure
 //!   leaves no trace but a counter); the down shape carries none.
 //!
-//! **Layer 6 foreign shapes** (`60-transport/README.md` §3 "Ids", §10; the
+//! **Layer 6 foreign shapes** (`6-transport/README.md` §3 "Ids", §10; the
 //! contract's `ForeignConversation`, `ForeignMessage`, `SendGroup`,
 //! `BridgeEdge`, `SseNetworkMessage`):
 //!
@@ -779,7 +779,7 @@ mod tests {
 }
 
 /// Layer 6 foreign shapes against the contract digest
-/// (`40-interface/ui/test/contract.gen.ts`, generated from `openapi.yaml`):
+/// (`4-interface/ui/test/contract.gen.ts`, generated from `openapi.yaml`):
 /// every emitted key is declared, every required key is emitted, and the
 /// values validate (a JSON-Schema subset: `$ref`, `type`, `enum`, `const`,
 /// `minimum`, `maximum`, `minLength`, `maxLength` (Unicode scalar values,
@@ -799,7 +799,7 @@ pub(super) mod foreign_tests {
         static S: OnceLock<Map<String, Value>> = OnceLock::new();
         S.get_or_init(|| {
             let path = format!(
-                "{}/../../../40-interface/ui/test/contract.gen.ts",
+                "{}/../../../4-interface/ui/test/contract.gen.ts",
                 env!("CARGO_MANIFEST_DIR")
             );
             let text = std::fs::read_to_string(path).expect("contract.gen.ts");

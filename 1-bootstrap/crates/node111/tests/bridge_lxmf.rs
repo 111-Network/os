@@ -1,7 +1,7 @@
-//! Layer 6 C3 (Rust half) acceptance (`os/60-transport/README.md` §6, §4, §14, §15.9;
-//! `60-transport/TASKS.md` row C3): the LXMF adapter `daemon/bridge/lxmf.rs` against a
+//! Layer 6 C3 (Rust half) acceptance (`os/6-transport/README.md` §6, §4, §14, §15.9;
+//! `6-transport/TASKS.md` row C3): the LXMF adapter `daemon/bridge/lxmf.rs` against a
 //! scripted helper (`tests/fake_lxmf_sidecar.py`, the JSON Lines protocol of
-//! `60-transport/sidecars/lxmf-sidecar/README.md`) spawned by the real supervisor with
+//! `6-transport/sidecars/lxmf-sidecar/README.md`) spawned by the real supervisor with
 //! piped stdio, so every generation, respawn and stdin write is the production path.
 //!
 //! - `ready` feeds the account and a fresh verifier (the frozen `0x03` vector verifies with
@@ -50,7 +50,7 @@ const D3: &str = "00112233445566778899aabbccddeeff";
 const D4: &str = "ffeeddccbbaa99887766554433221100";
 const SRC: &str = "5555aaaa5555aaaa5555aaaa5555aaaa";
 const VECTORS: &str =
-    include_str!("../../../../20-identity/test-vectors/layer6/attest-transport-ids.json");
+    include_str!("../../../../2-identity/test-vectors/layer6/attest-transport-ids.json");
 
 fn h(c: char) -> String {
     std::iter::repeat_n(c, 64).collect()
@@ -797,7 +797,7 @@ fn no_foreign_text_reaches_a_log_line() {
 fn sidecar_lock() -> Vec<u8> {
     std::fs::read(
         Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../../60-transport/sidecars/lxmf-sidecar/lxmf-sidecar-lock.txt"),
+            .join("../../../6-transport/sidecars/lxmf-sidecar/lxmf-sidecar-lock.txt"),
     )
     .unwrap()
 }

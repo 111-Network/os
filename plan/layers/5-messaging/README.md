@@ -2,7 +2,7 @@
 
 **Status** (copied from [`INDEX.md`](../../INDEX.md) row 5, which stays the source of truth): ✅ built — spec v1.2 locked (D20) + as-built lock **D24** (2026-10-19): `mesh111` store/envelope/fabric/`tcp-lan` (163 tests + musl G2 run), the fabric inside `111d` behind additive `/api/v1` + SSE, hosted panels with guards and offline lint, Meshtastic service (meshmud, shim, GPL presence reader in a hash-locked venv), agent tools with the loopback bearer, Messages/Contacts/Nearby/Panel/Settings UI (1201 vitest); V4 = one fable judge on the running system → fix-then-lock → fixed (Layer 2 A12 unclean-reboot verdict, honest hub reachability + §9 empty-fetch answer, children die with 111d, keep-alive timeout, manifest hashes); gates: `check.sh` ALL GREEN (834 cargo), smoke 118, three-node ×3 green, panel-lint 144; tag `checkpoint-layer-5`. Open: external hardware/CI gates (D24)
 
-**Spec and build:** [`os/50-messaging/README.md`](../../../50-messaging/README.md) · [`os/50-messaging/TASKS.md`](../../../50-messaging/TASKS.md)
+**Spec and build:** [`os/5-messaging/README.md`](../../../5-messaging/README.md) · [`os/5-messaging/TASKS.md`](../../../5-messaging/TASKS.md)
 
 **Decisions:** D18, D19, D20, D21, **D24** (the lock) (and D17 for the device decisions it builds on) in [`DECISIONS.md`](../../DECISIONS.md). Build protocol: [`EXECUTION.md`](../../EXECUTION.md).
 

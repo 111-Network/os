@@ -391,7 +391,7 @@ describe("adapter <-> openapi.yaml", () => {
     listNearby: (a) => a.nearby(),
     listPanels: (a) => a.panels.list(),
     openPanelSession: (a) => a.panels.openSession("meshtastic"),
-    // Layer 6 (os/60-transport/README.md section 10)
+    // Layer 6 (os/6-transport/README.md section 10)
     listNetworks: (a) => a.networks.list(),
     listForeignConversations: (a) => a.networks.conversations("app:deltachat"),
     openForeignConversation: (a) => a.networks.openDm("meshtastic", "!a1b2c3d4"),

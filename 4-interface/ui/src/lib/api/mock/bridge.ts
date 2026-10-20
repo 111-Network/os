@@ -1,4 +1,4 @@
-// Layer 6 mock (os/60-transport/README.md §2.1, §4, §8, §9, §10, §11): three adapters, conversations with foreign messages in every
+// Layer 6 mock (os/6-transport/README.md §2.1, §4, §8, §9, §10, §11): three adapters, conversations with foreign messages in every
 // state, a relay edge, consent 409 round-trips, optional components with sizes and the licence notice, and the transport facts. The
 // routes are synchronous and throw ApiError; the adapter (index.ts) wraps them in its latency, pairing gate and structuredClone.
 // Nothing here is imported by production code.

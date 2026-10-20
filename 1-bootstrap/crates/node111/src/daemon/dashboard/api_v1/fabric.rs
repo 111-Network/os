@@ -1,4 +1,4 @@
-//! `/api/v1/fabric*` (`os/50-messaging/README.md` §7.3, §9, §15; contract
+//! `/api/v1/fabric*` (`os/5-messaging/README.md` §7.3, §9, §15; contract
 //! `getFabric`, `enrollHub`, `offerHub`, `dismissHubOffer`,
 //! `patchFabricSettings`).
 //!

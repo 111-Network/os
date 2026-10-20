@@ -1,4 +1,4 @@
-// Optional components on Settings, Transport (os/60-transport/README.md §2.1): what each weighs before anything is installed, the licence
+// Optional components on Settings, Transport (os/6-transport/README.md §2.1): what each weighs before anything is installed, the licence
 // notice and its acknowledgement (a 409 round-trip whose hash is recorded), enable and disable, and "remove files" with "also delete the
 // cached download" as a separate choice. A component that is off has no process, listener, timer or open file.
 import { useState } from "react";
