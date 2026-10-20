@@ -1635,6 +1635,31 @@ impl Store {
         })
     }
 
+    /// Set an edge's two options (Layer 6 §8; C1, `PATCH /bridge/edges/{id}`):
+    /// `honour_ok_to_mqtt` (the per-edge relay filter, off by default) and
+    /// `oversize` (`refuse` or `split`; a copy is never truncated). Neither
+    /// is part of the consent text, so neither needs a new confirmation; the
+    /// cursor, `relayed_seq`, the pause and the consent stay as they are.
+    /// Returns whether anything changed (`NotFound` for an unknown edge).
+    pub fn edge_set_options(
+        &mut self,
+        id: i64,
+        honour_ok_to_mqtt: bool,
+        oversize: EdgeOversize,
+    ) -> Result<bool> {
+        self.with_tx(Durability::Full, |tx| {
+            let e = edge_in(tx, id)?.ok_or(StoreError::NotFound)?;
+            if e.honour_ok_to_mqtt == honour_ok_to_mqtt && e.oversize == oversize {
+                return Ok(false);
+            }
+            tx.execute(
+                "UPDATE relay_edges SET honour_ok_to_mqtt = ?2, oversize = ?3 WHERE id = ?1",
+                params![id, honour_ok_to_mqtt, oversize.as_str()],
+            )?;
+            Ok(true)
+        })
+    }
+
     /// Advance `relayed_seq` to at least `seq` (never backwards; FULL: the
     /// mark is what keeps history unrelayable). Returns the stored value.
     pub fn edge_advance_relayed_seq(&mut self, id: i64, seq: u64) -> Result<u64> {

@@ -350,8 +350,10 @@ impl Bridge {
 
     /// `PATCH /bridge/edges/{id}`: pause (always allowed) or resume (a `consent_paused`
     /// edge needs the hash of the **new** text; a user pause resumes on the recorded
-    /// text). `honour_ok_to_mqtt` and `oversize` are kept as created by this store version:
-    /// a patch that would change either is refused before anything is written.
+    /// text), and the two options `honour_ok_to_mqtt` and `oversize` (neither is part of
+    /// the consent text, so neither needs a confirmation; C1: `Store::edge_set_options`).
+    /// A resume that needs a confirmation is checked before any option is written, so a
+    /// `409 consent_required` changes nothing.
     pub async fn patch_edge(&self, id: i64, p: &EdgePatch, by: &str) -> Result<Value, BridgeError> {
         let f = self.fab()?;
         let e = match f.foreign_edge_get(id).await {
@@ -363,20 +365,10 @@ impl Bridge {
             EdgeOversize::Refuse => SizeMode::Refuse,
             EdgeOversize::Split => SizeMode::Split,
         };
-        if p.honour_ok_to_mqtt
-            .is_some_and(|v| v != e.honour_ok_to_mqtt)
-            || p.oversize.is_some_and(|v| v != stored_mode)
-        {
-            return Err(BridgeError::BadRequest(
-                "honour_ok_to_mqtt and oversize are fixed when the edge is created: delete it and create it again".into(),
-            ));
-        }
         let src = self.conv_row(e.src_conv).await?;
         let dst = self.conv_row(e.dst_conv).await?;
-        match p.paused {
-            Some(true) => {
-                f.foreign_edge_set_paused(id, true, None).await?;
-            }
+        // the resume's confirmation first: a refused resume writes nothing
+        let resume = match p.paused {
             Some(false) if e.paused => {
                 let w = self.live_warning(&src, &dst).ok_or_else(|| {
                     BridgeError::Unavailable("an endpoint's network is not enabled".into())
@@ -393,6 +385,29 @@ impl Bridge {
                         w.consent("edge_resume", fjson::be_id(id)),
                     ));
                 }
+                Some(w)
+            }
+            _ => None,
+        };
+        let honour = p.honour_ok_to_mqtt.unwrap_or(e.honour_ok_to_mqtt);
+        let mode = p.oversize.unwrap_or(stored_mode);
+        if honour != e.honour_ok_to_mqtt || mode != stored_mode {
+            let oversize = match mode {
+                SizeMode::Refuse => EdgeOversize::Refuse,
+                SizeMode::Split => EdgeOversize::Split,
+            };
+            f.foreign_edge_set_options(id, honour, oversize).await?;
+        }
+        match p.paused {
+            Some(true) => {
+                f.foreign_edge_set_paused(id, true, None).await?;
+            }
+            Some(false) if e.paused => {
+                let Some(w) = resume else {
+                    return Err(BridgeError::Unavailable(
+                        "an endpoint's network is not enabled".into(),
+                    ));
+                };
                 f.foreign_edge_set_paused(
                     id,
                     false,

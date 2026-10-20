@@ -1146,15 +1146,19 @@ async fn consent_round_trip_live_pause_and_the_gates_on_relay_copies() {
     assert_eq!(v["pause_reason"], "user");
     let v = p.n.bridge.patch_edge(e, &resume, "loopback").await.unwrap();
     assert_eq!(v["paused"], false);
-    // honour_ok_to_mqtt / oversize are fixed at creation by this store version
+    // honour_ok_to_mqtt / oversize change without a confirmation (not in the text; C1's
+    // `Store::edge_set_options`), and the consent stays as recorded
     let change = EdgePatch {
         oversize: Some(SizeMode::Split),
+        honour_ok_to_mqtt: Some(true),
         ..EdgePatch::default()
     };
-    assert!(matches!(
-        p.n.bridge.patch_edge(e, &change, "loopback").await,
-        Err(BridgeError::BadRequest(_))
-    ));
+    let v = p.n.bridge.patch_edge(e, &change, "loopback").await.unwrap();
+    assert_eq!(
+        (v["oversize"].as_str(), v["honour_ok_to_mqtt"].as_bool()),
+        (Some("split"), Some(true))
+    );
+    assert_eq!(v["paused"], false);
     // the settings mirror the confirmations
     let s = p.n.bridge.settings().await.unwrap();
     assert_schema(&s, "BridgeSettings");

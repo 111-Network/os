@@ -913,6 +913,12 @@ impl Bridge {
         }
     }
 
+    /// Publish the `bridge` frame with the networks snapshot now (C1: the routes call it
+    /// after an optional component changed state, which the core does not see itself).
+    pub async fn publish_snapshot(&self) {
+        self.publish_networks().await;
+    }
+
     /// Publish the `bridge` frame with the networks snapshot.
     pub(super) async fn publish_networks(&self) {
         if let Ok(v) = self.networks().await {

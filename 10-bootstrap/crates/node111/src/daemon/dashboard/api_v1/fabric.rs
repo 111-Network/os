@@ -413,7 +413,7 @@ fn parse_settings(body: &[u8]) -> Result<SettingsPatch, Problem> {
                 for (name, v) in q {
                     let class = json::quota_class(&name).ok_or_else(|| {
                         bad_request(format!(
-                            "{name:?} is not a quota class (kb, update, patch, sync, object, custody)."
+                            "{name:?} is not a quota class (kb, update, patch, sync, object, custody, foreign)."
                         ))
                     })?;
                     let quota = match v {

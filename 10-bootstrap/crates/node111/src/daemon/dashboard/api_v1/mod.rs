@@ -10,7 +10,16 @@
 //! - **gated** submodules (everything except `auth`) sit behind
 //!   [`auth::require_session`]: loopback peers pass (unless the loopback-trust
 //!   policy is off — Termux), others need a valid `s111` session cookie, else
-//!   `401 unauthenticated`.
+//!   `401 unauthenticated`. Its first check is the global write gate (Layer 6
+//!   §13, D26 #2): the agent's bearer is refused on every non-`GET`, no
+//!   allowlist; the open `auth` writes carry the same gate
+//!   ([`auth::bearer_write_gate`]).
+//! - Layer 6 state in [`ApiState::ext`] (inserted by `daemon/mod.rs`):
+//!   `Arc<crate::daemon::bridge::Bridge>` (networks, fan-out, edges,
+//!   settings), `crate::daemon::components::Components` (optional
+//!   components), `Arc<transport::TransportApi>` (the spine and the rnstatus
+//!   facts cache) and `Arc<bridge::ComponentAdapters>` (the component →
+//!   adapter seam).
 //! - `auth` routes (`/api/v1/auth/*`) are open (that is how a LAN visitor pairs).
 //! - [`auth::csrf_guard`] wraps BOTH groups: every POST/PATCH/PUT/DELETE must be
 //!   `Content-Type: application/json` (else 415) and, when `Origin` is present,
@@ -39,19 +48,23 @@
 
 pub mod actions;
 pub mod auth;
+pub mod bridge;
 pub mod contacts;
 pub mod devices;
 pub mod events;
 pub mod fabric;
+pub mod fanout;
 pub mod kb;
 pub mod messages;
 pub mod nearby;
+pub mod networks;
 pub mod panels;
 pub mod proposals;
 pub mod relay;
 pub mod services;
 pub mod settings;
 pub mod status;
+pub mod transport;
 
 use super::bind::BindInfo;
 use super::SharedState;
@@ -242,6 +255,11 @@ pub fn router(state: Arc<ApiState>) -> axum::Router {
         .merge(messages::router())
         .merge(contacts::router())
         .merge(fabric::router())
+        // Layer 6 (§10): networks, fan-out, bridge, transport
+        .merge(networks::router())
+        .merge(fanout::router())
+        .merge(bridge::router())
+        .merge(transport::router())
         .route_layer(middleware::from_fn_with_state(
             Arc::clone(&state),
             auth::require_session,

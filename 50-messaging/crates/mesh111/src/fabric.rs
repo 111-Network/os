@@ -4160,6 +4160,24 @@ impl Fabric {
         self.call(move |c| c.foreign_edge_patch(id, &patch)).await?
     }
 
+    /// Set an edge's `honour_ok_to_mqtt` and `oversize` (Layer 6 §8, C1:
+    /// `PATCH /bridge/edges/{id}`; neither is part of the consent text).
+    /// Edge-only changes emit no event (the bridge core publishes its
+    /// `bridge` snapshot). Returns whether anything changed.
+    pub async fn foreign_edge_set_options(
+        &self,
+        id: i64,
+        honour_ok_to_mqtt: bool,
+        oversize: EdgeOversize,
+    ) -> Result<bool> {
+        self.call(move |c| {
+            c.store
+                .edge_set_options(id, honour_ok_to_mqtt, oversize)
+                .map_err(fx)
+        })
+        .await?
+    }
+
     /// Advance an edge's `relayed_seq` to at least `seq` (a shed, §8;
     /// never backwards). Returns the stored value.
     pub async fn foreign_edge_advance_relayed(&self, id: i64, seq: u64) -> Result<u64> {
@@ -5827,6 +5845,57 @@ mod foreign_tests {
         assert!(n.f.foreign_edge_list().await.unwrap().is_empty());
         assert!(matches!(
             n.f.foreign_edge_get(e.id).await,
+            Err(FabricError::NotFound)
+        ));
+    }
+
+    #[tokio::test]
+    async fn edge_options_are_set_without_touching_the_consent_or_the_marks() {
+        let n = node();
+        let src = channel(&n.f, "!board", "LongFast").await;
+        let dst = channel(&n.f, "!board2", "Ops").await;
+        let e =
+            n.f.foreign_edge_create(ForeignEdgeNew {
+                src_conv: src,
+                dst_conv: dst,
+                honour_ok_to_mqtt: false,
+                oversize: EdgeOversize::Refuse,
+                consent: consent('a'),
+            })
+            .await
+            .unwrap();
+        let mut rx = subscribe(&n.f).await;
+        assert!(n
+            .f
+            .foreign_edge_set_options(e.id, true, EdgeOversize::Split)
+            .await
+            .unwrap());
+        let after = n.f.foreign_edge_get(e.id).await.unwrap();
+        assert!(after.honour_ok_to_mqtt);
+        assert_eq!(after.oversize, EdgeOversize::Split);
+        assert_eq!(
+            (
+                &after.consent_hash,
+                after.cursor_seq,
+                after.relayed_seq,
+                after.paused
+            ),
+            (&e.consent_hash, e.cursor_seq, e.relayed_seq, e.paused),
+            "only the two options change"
+        );
+        assert!(
+            !n.f.foreign_edge_set_options(e.id, true, EdgeOversize::Split)
+                .await
+                .unwrap(),
+            "the same values change nothing"
+        );
+        assert!(
+            events(&n.f, &mut rx).await.is_empty(),
+            "edge-only: no event"
+        );
+        assert!(matches!(
+            n.f.foreign_edge_set_options(9_999, false, EdgeOversize::Refuse)
+                .await,
             Err(FabricError::NotFound)
         ));
     }

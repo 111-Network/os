@@ -1,6 +1,16 @@
 //! `111 daemon` — the node kernel: tokio supervision tree (systemd/runit are thin
 //! Restart=always wrappers, never the supervisor of record), watchdog heartbeat,
 //! dashboard, updater, KB server, conditional rnsd child.
+//!
+//! Layer 6 (`os/60-transport/README.md` §2, §4, §5, §11; task C1) is wired by
+//! [`start_layer6`]: the bridge core with the compiled-in Meshtastic adapter
+//! registered (enabled in the core only while its client runs, i.e. while
+//! service `meshtastic` is LIVE — B3's rule), the optional components and
+//! their runner, the transport spine's routes, all in `ApiState` ext. Nothing
+//! of it spawns a task, timer or listener: the bridge has no recv task until
+//! an adapter is enabled, and the daemon's existing 2 s tick drives
+//! [`Layer6::tick_once`] (`Bridge::tick_once` returns at once with nothing
+//! enabled; AGENTS.md: the Raspberry Pi is the floor).
 
 pub mod bridge;
 pub mod components;
@@ -21,9 +31,10 @@ pub mod watchdog;
 
 use crate::install::categorize::{categorize, Classification, Refusal};
 use crate::install::probe::{self, Env, Facts};
-use dashboard::{DashboardState, ErrorState, OfferState, SharedState};
+use dashboard::{ApiState, DashboardState, ErrorState, OfferState, SharedState};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, RwLock};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, OnceLock, RwLock};
 use std::time::Duration;
 
 /// Runtime layout resolved once at daemon start.
@@ -153,6 +164,145 @@ fn rfc3339_now() -> String {
         .unwrap_or_else(|_| "unknown".into())
 }
 
+// ---------------------------------------------------------------- Layer 6 wiring
+
+/// §3 domain tag of the 32-byte key the bridge derives conversation ids under (the
+/// Meshtastic channel ids: a keyed BLAKE2b over the name and a keyed PSK digest).
+pub const BRIDGE_CONV_TAG: &[u8] = b"111/bridge-conv/v1";
+
+/// The bridge's conversation-id key from the identity's private keyset bytes (`sign seed
+/// ‖ X25519 scalar`), derived the way the Mode S store secret is
+/// (`fabric::sealer::store_secret_from`): keyed BLAKE2b-256 with the X25519 half as the
+/// key over [`BRIDGE_CONV_TAG`]. Nothing new is persisted; the identity is the only
+/// secret. `None` only if the MAC refuses its key (it never does for 32 bytes).
+pub fn bridge_conv_key(private_keyset: &[u8; 64]) -> Option<zeroize::Zeroizing<[u8; 32]>> {
+    use blake2::digest::consts::U32;
+    use blake2::digest::{FixedOutput, KeyInit, Update};
+    use zeroize::Zeroize;
+    let mut mac =
+        <blake2::Blake2bMac<U32> as KeyInit>::new_from_slice(&private_keyset[32..64]).ok()?;
+    Update::update(&mut mac, BRIDGE_CONV_TAG);
+    let mut out = mac.finalize_fixed();
+    let mut key = zeroize::Zeroizing::new([0u8; 32]);
+    key.copy_from_slice(&out);
+    out.zeroize();
+    Some(key)
+}
+
+/// What [`start_layer6`] wires.
+pub struct Layer6Parts {
+    pub api: Arc<ApiState>,
+    pub fabric: Arc<fabric::FabricHandle>,
+    pub ports: Arc<ports::PortTable>,
+    /// The daemon tick stamped on port claims (never wall clock).
+    pub tick: Arc<dyn Fn() -> u64 + Send + Sync>,
+    /// The transport spine and its `rnstatus` facts cache (`None`: tests without one).
+    pub transport: Option<(
+        Arc<transport::posture::Spine>,
+        Arc<transport::rnstatus::FactsCache>,
+    )>,
+    /// The Meshtastic bridge client (`None` without an identity: no conversation key).
+    pub mesh_client: Option<Arc<meshtastic::client::MeshtasticAdapter>>,
+    /// `python3` and a venv's pip for the components (blocking).
+    pub cmd: Arc<dyn crate::util::run::Runner>,
+}
+
+/// The Layer 6 parts of a running daemon (module doc).
+pub struct Layer6 {
+    pub bridge: Arc<bridge::Bridge>,
+    pub components: components::Components,
+    pub mesh_client: Option<Arc<meshtastic::client::MeshtasticAdapter>>,
+}
+
+/// Build the bridge core, the optional components and the transport routes' state, and
+/// insert them into `api` ext (`Arc<Bridge>`, `Components`, `Arc<TransportApi>`,
+/// `Arc<ComponentAdapters>`). Spawns nothing (module doc); the supervised children the
+/// components depend on are read from `api`'s `Supervised` ext when they are asked for.
+pub fn start_layer6(p: Layer6Parts) -> Layer6 {
+    use dashboard::api_v1::{bridge::ComponentAdapters, transport::TransportApi};
+    let root = p.api.layout.root.clone();
+    let deps = {
+        let api = Arc::downgrade(&p.api);
+        let child_of = move |sid: services::ServiceId| {
+            api.upgrade()?
+                .ext::<Arc<services::Supervised>>()?
+                .get(sid)
+                .cloned()
+        };
+        components::ServiceDeps {
+            root: root.clone(),
+            child_of: Arc::new(child_of),
+        }
+    };
+    let components = components::Components::new(
+        components::ComponentsConfig::new(&root),
+        components::manifest::load_embedded(),
+        components::Wiring {
+            cmd: p.cmd,
+            ports: Arc::clone(&p.ports),
+            deps: Arc::new(deps),
+            tick: p.tick,
+        },
+    );
+    let bridge = bridge::Bridge::new(bridge::BridgeConfig::new(&root), p.fabric, &p.api);
+    bridge.set_components(Arc::new(components.clone()));
+    if let Some((spine, facts)) = p.transport {
+        // an rnsd restart stops and resumes the components that depend on it (§6)
+        spine.set_restart_hooks(Arc::new(components.clone()));
+        p.api.insert_ext(Arc::new(TransportApi { spine, facts }));
+    }
+    p.api.insert_ext(Arc::clone(&bridge));
+    p.api.insert_ext(components.clone());
+    p.api.insert_ext(Arc::new(ComponentAdapters::default()));
+    Layer6 {
+        bridge,
+        components,
+        mesh_client: p.mesh_client,
+    }
+}
+
+impl Layer6 {
+    /// One pass, from the daemon's existing tick (no timer of its own): the Meshtastic
+    /// adapter is enabled in the bridge core while its client runs (service `meshtastic`
+    /// LIVE) and the user has not switched it off, disabled otherwise; then
+    /// `Bridge::tick_once`, which returns at once while nothing is enabled.
+    pub async fn tick_once(&self) {
+        if let Some(c) = &self.mesh_client {
+            let net = bridge::NETWORK_MESHTASTIC;
+            let want = c.running() && self.bridge.adapter_switch(net) != Some(false);
+            let have = self.bridge.adapter(net).is_some();
+            if want && !have {
+                let adapter: Arc<dyn bridge::Adapter> = Arc::clone(c) as Arc<dyn bridge::Adapter>;
+                if let Err(e) = self.bridge.enable(adapter).await {
+                    eprintln!("111 bridge: meshtastic: {e}");
+                }
+            } else if !want && have {
+                self.bridge.disable(net).await;
+            }
+        }
+        self.bridge.tick_once().await;
+    }
+
+    /// Daemon start, after the supervised children exist: resume the components whose
+    /// switch is on, and attach the adapters registered for them.
+    pub async fn resume(&self, api: &ApiState) {
+        self.components.resume_enabled().await;
+        for c in self.components.declared().to_vec() {
+            if self.components.stdio(&c.id).await.is_some() {
+                dashboard::api_v1::bridge::attach_adapter(api, &self.components, &c.id).await;
+            }
+        }
+    }
+
+    /// Daemon stop: the adapters, then the components' children.
+    pub async fn shutdown(&self) {
+        for net in self.bridge.enabled() {
+            self.bridge.disable(&net).await;
+        }
+        self.components.shutdown().await;
+    }
+}
+
 async fn daemon_main() -> anyhow::Result<()> {
     let layout = DaemonLayout {
         root: crate::util::paths::root(),
@@ -191,6 +341,11 @@ async fn daemon_main() -> anyhow::Result<()> {
             None
         }
     };
+
+    // Layer 6 §3: the bridge's conversation-id key (nothing new persisted)
+    let conv_key = identity
+        .as_ref()
+        .and_then(|id| bridge_conv_key(&id.keyset().to_bytes()));
 
     // KB snapshot (integrity-verify at start)
     match kb::verify_current(&layout.root) {
@@ -254,17 +409,31 @@ async fn daemon_main() -> anyhow::Result<()> {
             node_id.as_deref(),
         ))
     };
+    // the daemon tick (2 s): the intelligence mirror, and — once Layer 6 is wired
+    // below — the bridge core's pass (no timer of its own, §4)
+    let daemon_tick = Arc::new(AtomicU64::new(0));
+    let layer6_slot: Arc<OnceLock<Arc<Layer6>>> = Arc::new(OnceLock::new());
     {
         let state = Arc::clone(&state);
         let intelligence = Arc::clone(&intelligence);
+        let daemon_tick = Arc::clone(&daemon_tick);
+        let layer6_slot = Arc::clone(&layer6_slot);
         let mut tick = tokio::time::interval(Duration::from_secs(2));
         tokio::spawn(async move {
             loop {
                 tick.tick().await;
+                daemon_tick.fetch_add(1, Ordering::SeqCst);
                 state.write().unwrap().intelligence = intelligence.state();
+                if let Some(l6) = layer6_slot.get() {
+                    l6.tick_once().await;
+                }
             }
         });
     }
+    let tick_fn: Arc<dyn Fn() -> u64 + Send + Sync> = {
+        let t = Arc::clone(&daemon_tick);
+        Arc::new(move || t.load(Ordering::SeqCst))
+    };
 
     // probation monitor (health-confirmed / revert-request signals)
     tokio::spawn(probation_monitor(layout.clone(), Arc::clone(&state)));
@@ -314,6 +483,14 @@ async fn daemon_main() -> anyhow::Result<()> {
     // daemon-wide port-owner table it claims board ports in.
     let port_table = Arc::new(ports::PortTable::new());
     dashboard.api.insert_ext(Arc::clone(&port_table));
+    // Layer 6 §12: the spine claims 111d's and rnsd's radio ports in the one table
+    if let Err(e) = transport
+        .spine()
+        .adopt_ports(Arc::clone(&port_table), Arc::clone(&tick_fn))
+        .await
+    {
+        eprintln!("111 transport: {e}");
+    }
     // §14: the presence reader's venv for the lock `current/` carries, before
     // the module exists (its reader start checks `reader_installed()`)
     ensure_presence_venv(&layout, Arc::new(crate::util::run::SystemRunner)).await;
@@ -347,6 +524,26 @@ async fn daemon_main() -> anyhow::Result<()> {
         .await
     };
     dashboard.api.insert_ext(Arc::clone(&fabric));
+    // Layer 6: the bridge core (inert until an adapter is enabled), the Meshtastic client
+    // registered (started by the module while service `meshtastic` is LIVE), the optional
+    // components, the transport routes
+    let mesh_client = conv_key.map(|k| {
+        let c = meshtastic::client::MeshtasticAdapter::new(
+            meshtastic::client::ClientConfig::production(meshtastic::meshmud::DOWNLINK),
+            *k,
+        );
+        meshtastic.attach_client(Arc::clone(&c));
+        c
+    });
+    let layer6 = Arc::new(start_layer6(Layer6Parts {
+        api: Arc::clone(&dashboard.api),
+        fabric: Arc::clone(&fabric),
+        ports: Arc::clone(&port_table),
+        tick: Arc::clone(&tick_fn),
+        transport: Some((transport.spine(), transport.facts_cache())),
+        mesh_client,
+        cmd: Arc::new(crate::util::run::SystemRunner),
+    }));
     let mut sources =
         services::probe::Sources::new(Arc::clone(&intelligence), Arc::clone(&transport));
     sources.panels = Some(panels::provider(&panel_host));
@@ -372,10 +569,31 @@ async fn daemon_main() -> anyhow::Result<()> {
         let transport = Arc::clone(&transport);
         move || transport.child_state() == Some(supervise::ChildState::Running)
     });
-    // meshmud + the presence reader from the devices.json binding (Layer 5 §14)
+    // Layer 6 §11: `interfaces.toml` is the only home of the Meshtastic binding — the
+    // registry reads and writes it through the spine, and the spine's write-only
+    // `devices.json` mirror goes through the registry's in-memory store (C4)
+    devices.attach_spine(transport.spine());
+    // Layer 6 §12: the device core's apply → probe → keep-or-revert loop for accepted
+    // `kind: device` proposals (the registry is in ext now)
+    match devices::applier::Applier::production(
+        &dashboard.api,
+        transport.spine(),
+        transport
+            .control()
+            .map(|c| Arc::new(c) as Arc<dyn transport::posture::RnsdChild>),
+        Some(Arc::new(layer6.components.clone()) as Arc<dyn devices::applier::HelperCheck>),
+    ) {
+        Some(applier) => dashboard.api.insert_ext(applier),
+        None => eprintln!("111 daemon: devices: no applier (the registry is not running)"),
+    }
+    // meshmud + the presence reader from the binding (Layer 5 §14; Layer 6 §11)
     meshtastic
         .start(Arc::clone(&dashboard.api), devices, supervised)
         .await;
+    // Layer 6: the components whose switch is on, now that their dependencies exist;
+    // then the bridge pass joins the daemon tick
+    layer6.resume(&dashboard.api).await;
+    let _ = layer6_slot.set(Arc::clone(&layer6));
     // agent activity (Layer 4 R3): 111-agent /v1/agent/events → `agent` + `proposal` frames
     let _agent_events = dashboard::api_v1::relay::start_events(&dashboard.api);
 
@@ -392,6 +610,8 @@ async fn daemon_main() -> anyhow::Result<()> {
         },
     }
     dashboard.stop();
+    // Layer 6: adapters off, component children joined (before rnsd stops below)
+    layer6.shutdown().await;
     // Layer 5: close the fabric cleanly (store clean record + L2 counters)
     fabric.shutdown().await;
     // join every child (SIGTERM, grace, SIGKILL) before exiting: an orphaned
@@ -447,6 +667,23 @@ pub fn run() -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_bridge_conv_key_is_keyed_by_the_x25519_half_and_its_own_tag() {
+        let mut ks = [0u8; 64];
+        for (i, b) in ks.iter_mut().enumerate() {
+            *b = i as u8;
+        }
+        let k = bridge_conv_key(&ks).unwrap();
+        assert_eq!(*k, *bridge_conv_key(&ks).unwrap(), "deterministic");
+        let store = fabric::sealer::store_secret_from(&ks).unwrap();
+        assert_ne!(*k, *store, "a different tag, a different key");
+        let mut other = ks;
+        other[0] ^= 0xff; // the signing half does not key it
+        assert_eq!(*bridge_conv_key(&other).unwrap(), *k);
+        other[40] ^= 0xff;
+        assert_ne!(*bridge_conv_key(&other).unwrap(), *k);
+    }
 
     #[test]
     fn env_file_parsing() {

@@ -862,13 +862,13 @@ export const schemas: Record<string, JsonSchema> = {
       "quotas": {
         "type": "object",
         "additionalProperties": {"type":["integer","null"],"minimum":0},
-        "description": "capacity shaping per refusable stored-data class, in bytes: kb, update, patch, sync, object, custody (messages and agent ops are never refused, §10.4, so they take no quota); null means no quota. Not a per-sender limit; those do not exist"
+        "description": "capacity shaping per refusable stored-data class, in bytes: kb, update, patch, sync, object, custody, foreign (Layer 6: foreign-network rows, §3; messages and agent ops are never refused, §10.4, so they take no quota); null means no quota. Not a per-sender limit; those do not exist"
       }
     }
   },
   "FabricSettingsPatch": {
     "type": "object",
-    "description": "Partial merge. In `quotas`, a class set to null drops its quota; only the refusable classes (kb, update, patch, sync, object, custody) take one — any other key is 400.",
+    "description": "Partial merge. In `quotas`, a class set to null drops its quota; only the refusable classes (kb, update, patch, sync, object, custody, foreign) take one — any other key is 400.",
     "properties": {
       "hub_role": {"type":"boolean"},
       "listen_lan": {"type":"boolean"},
@@ -1186,7 +1186,7 @@ export const schemas: Record<string, JsonSchema> = {
       "cancelled",
       "oversize"
     ],
-    "description": "The vocabulary of `ForeignMessage.reason_code` (§4, §5, §8), documented here once. Before air (state `failed`): region_unset, no_channel, too_large, not_authorized, pki_failed, got_nak, adapter_down. After air (state stays sent/relayed, 'transmitted, not confirmed'): no_route, timeout, max_retransmit, no_response. Retry later (state `queued`): duty_cycle, rate_limited, key_unknown, peer_unannounced, adapter_down. Consent gates: uplink_off, ham_unconfirmed, consent_paused. User acts: cancelled. oversize: refused for size in `refuse` mode. `reason_code` itself is a plain string on the wire so that growth is additive; clients render unknown values as `unknown`."
+    "description": "The vocabulary of `ForeignMessage.reason_code` (§4, §5, §8), documented here once. 111d also emits handoff_pending on a row with `uncertain: true` (state `queued`: handed to the carrier, no answer came; it may have been sent and is never resent by itself) — a display-only code outside this enum, which stays at twenty. Before air (state `failed`): region_unset, no_channel, too_large, not_authorized, pki_failed, got_nak, adapter_down. After air (state stays sent/relayed, 'transmitted, not confirmed'): no_route, timeout, max_retransmit, no_response. Retry later (state `queued`): duty_cycle, rate_limited, key_unknown, peer_unannounced, adapter_down. Consent gates: uplink_off, ham_unconfirmed, consent_paused. User acts: cancelled. oversize: refused for size in `refuse` mode. `reason_code` itself is a plain string on the wire so that growth is additive; clients render unknown values as `unknown`."
   },
   "NetworkState": {
     "type": "string",
@@ -1539,6 +1539,14 @@ export const schemas: Record<string, JsonSchema> = {
         "type": ["integer","null"],
         "minimum": 0,
         "description": "when the stored body was cut at 64 KiB, the original size in bytes (the UI says 'message too long to show (N bytes)'); null otherwise"
+      },
+      "uncertain": {
+        "type": "boolean",
+        "description": "Layer 6 C1 (additive): an own row handed to a carrier that never answered (its pending mark survived a restart or a disable, and it is not in flight now): it may have been sent, and it is never handed again by itself — 'may have been sent; resend?' (§4). Such a row without another reason reads `reason_code: handoff_pending`. Absent from older daemons (read as false)"
+      },
+      "not_relayed": {
+        "type": ["string","null"],
+        "description": "Layer 6 C1 (additive): why an inbound row was kept from every relay edge — `marker` (it already carries a relay marker `[name/TAG]`, §8 guard 3: a copy is never relayed again, and a human who types a marker gets no relay). null when not applicable; absent from older daemons"
       }
     }
   },

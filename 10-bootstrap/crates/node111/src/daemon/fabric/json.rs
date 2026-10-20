@@ -50,8 +50,8 @@ use mesh111::fabric::{
 };
 use mesh111::link::{CostClass, Framing, LinkState};
 use mesh111::store::{
-    Class, Dir, EdgeRow, ForeignConversationRow, ForeignDir, ForeignMessageRow, MsgState,
-    SendGroupRow, Trust,
+    Class, Dir, EdgeRow, ForeignConversationRow, ForeignDir, ForeignMessageRow, ForeignState,
+    MsgState, SendGroupRow, Trust,
 };
 use serde_json::{json, Map, Value};
 
@@ -510,6 +510,12 @@ pub fn foreign_message(m: &ForeignMessageRow, at: i64) -> Value {
         "at": rfc3339(at),
         "claim_ts": m.claim_ts.and_then(claim_rfc3339),
         "truncated": truncated,
+        // Layer 6 C1 (additive, optional in the contract): an own row handed to a
+        // carrier whose answer never came (the persisted pending mark; the route clears
+        // it for a row in flight now) — "may have been sent; resend?" (§4) — and the
+        // reason an inbound row was kept from relaying (`marker`, §8 guard 3)
+        "uncertain": !inbound && m.state == ForeignState::Queued && m.handoff_pending,
+        "not_relayed": meta.get("not_relayed").and_then(Value::as_str),
     })
 }
 

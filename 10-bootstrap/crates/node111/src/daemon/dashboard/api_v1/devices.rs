@@ -23,6 +23,17 @@
 //! write (loopback or a paired session, CSRF/JSON rules). The step runs in
 //! its own task, so a client that disconnects mid-probe never leaves a child
 //! running or a port claimed.
+//!
+//! Layer 6 §12, §13 (D26 #2): the agent's bearer is refused here by the
+//! global write gate (`auth::require_session`) — the consent flag in the body
+//! is the human's, never the agent's. With the device core installed
+//! (`devices::identify::Identify` in ext, `devices::start`), the route runs
+//! its consented RNode → Meshtastic → MeshCore sequence
+//! (`Identify::run(.., Consent::Given)`, the consent remembered per device);
+//! without it (the Layer 5 harnesses) the Meshtastic step alone. The agent
+//! files a `kind: device` proposal with the one-shot `identify {device_id}`;
+//! accepting it **is** the consent and the device core's applier runs the
+//! same sequence.
 
 use super::{ApiRouter, ApiState, Problem};
 use crate::daemon::devices::{self, DeviceRegistry, MAX_ALIAS};
@@ -158,21 +169,38 @@ async fn identify(
     if let Err(p) = check_id(&id).and_then(|()| parse_consent(&body)) {
         return p.into_response();
     }
-    if let Err(p) = registry(&api) {
-        return p.into_response();
+    match identify_device(&api, &id).await {
+        Ok(rec) => Json(rec).into_response(),
+        Err(p) => p.into_response(),
+    }
+}
+
+/// The consented identify of device `id` (the caller holds the consent: the
+/// route's `{"consent": true}`). Answers the updated `DeviceRecord` as JSON.
+/// The steps run to completion in their own task: a client that goes away
+/// mid-probe must not cancel them half-way (child running, port claimed).
+pub async fn identify_device(api: &Arc<ApiState>, id: &str) -> Result<Value, Problem> {
+    use crate::daemon::devices::identify::{Consent, Identify};
+    check_id(id)?;
+    registry(api)?;
+    if let Some(ident) = api.ext::<Arc<Identify>>() {
+        let (api2, id2) = (Arc::clone(api), id.to_string());
+        let run = tokio::spawn(async move { ident.run(&api2, &id2, Consent::Given).await });
+        return match run.await {
+            Ok(Ok(report)) => Ok(serde_json::to_value(report.record).unwrap_or(Value::Null)),
+            Ok(Err(e)) => Err(e.problem()),
+            Err(_) => Err(IdentifyError::Upstream("the identify step failed".into()).problem()),
+        };
     }
     let Some(m) = api.ext::<Arc<Meshtastic>>() else {
-        return IdentifyError::Unavailable.problem().into_response();
+        return Err(IdentifyError::Unavailable.problem());
     };
-    // the step runs to completion in its own task: a client that goes away
-    // mid-probe must not cancel it half-way (child running, port claimed)
+    let id = id.to_string();
     let step = tokio::spawn(async move { m.identify(&id).await });
     match step.await {
-        Ok(Ok(rec)) => Json(rec).into_response(),
-        Ok(Err(e)) => e.problem().into_response(),
-        Err(_) => IdentifyError::Upstream("the identify step failed".into())
-            .problem()
-            .into_response(),
+        Ok(Ok(rec)) => Ok(serde_json::to_value(rec).unwrap_or(Value::Null)),
+        Ok(Err(e)) => Err(e.problem()),
+        Err(_) => Err(IdentifyError::Upstream("the identify step failed".into()).problem()),
     }
 }
 

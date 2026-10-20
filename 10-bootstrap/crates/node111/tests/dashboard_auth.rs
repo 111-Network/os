@@ -1345,3 +1345,141 @@ async fn daemon_bearer_on_a_trusted_loopback_node() {
         200
     );
 }
+
+// ---------------------------------------------------------------- the global write gate
+
+/// Every contract operation (`40-interface/ui/test/contract.gen.ts`): `(operationId,
+/// method, path)`.
+fn contract_ops() -> Vec<(String, String, String)> {
+    let path = format!(
+        "{}/../../../40-interface/ui/test/contract.gen.ts",
+        env!("CARGO_MANIFEST_DIR")
+    );
+    let text = std::fs::read_to_string(path).expect("contract.gen.ts");
+    let marker = "export const operations: Record<string, ContractOperation> = ";
+    let start = text.find(marker).expect("operations") + marker.len();
+    let mut it =
+        serde_json::Deserializer::from_str(&text[start..]).into_iter::<serde_json::Value>();
+    let Some(Ok(serde_json::Value::Object(ops))) = it.next() else {
+        panic!("contract digest operations");
+    };
+    ops.into_iter()
+        .map(|(id, o)| {
+            (
+                id,
+                o["method"].as_str().unwrap().to_string(),
+                o["path"].as_str().unwrap().to_string(),
+            )
+        })
+        .collect()
+}
+
+/// A contract path with plausible values for its parameters (route matching is by shape).
+fn concrete(path: &str) -> String {
+    path.replace("{peer}", &"ab".repeat(32))
+        .replace("{net}", "meshtastic")
+        .replace("{conv}", "fc-1")
+        .replace("{id}", "abcd1234")
+}
+
+/// Contract operations 111d serves no route for (contract-only: `404` for everyone, so a
+/// bearer reaches nothing there either).
+const UNROUTED: &[&str] = &["flashDevice"];
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_agent_bearer_is_refused_on_every_write_of_the_contract() {
+    // Layer 6 §13 "One global rule" (D26 #2): no allowlist — identify, restarts,
+    // proposal decisions, every Layer 5 and Layer 6 write, the open auth writes
+    let n = node();
+    let token = auth::DaemonToken::mint().unwrap();
+    n.api.insert_ext(token.clone());
+    let lo = serve(&n.api, None).await;
+    let lan = serve(&n.api, Some("192.168.1.50:40000")).await;
+    let good = bearer(&token);
+    let code = pair_code(&n.api);
+    let paired = post_json(
+        lan,
+        "/api/v1/auth/pair",
+        &format!(r#"{{"code":"{code}"}}"#),
+        &[],
+    );
+    assert_eq!(paired.status, 200, "{}", paired.body);
+    let cookie = format!("s111={}", cookie_of(&paired));
+    let ops = contract_ops();
+    let writes: Vec<_> = ops.iter().filter(|(_, m, _)| m != "GET").collect();
+    assert!(
+        writes.len() >= 37,
+        "{} writes in the contract",
+        writes.len()
+    );
+    for must in [
+        "identifyDevice",
+        "restartService",
+        "decideProposal",
+        "sendFanout",
+        "createBridgeEdge",
+        "enableBridgeComponent",
+        "joinTransport",
+        "patchTransportPosture",
+    ] {
+        assert!(writes.iter().any(|(id, _, _)| id == must), "{must}");
+    }
+    for (id, method, path) in &writes {
+        let path = concrete(path);
+        let with = |port: u16, extra: &[(&str, &str)]| {
+            let mut h = vec![("Content-Type", "application/json")];
+            h.extend_from_slice(extra);
+            request(port, method, &path, Some("127.0.0.1"), &h, Some("{}"))
+        };
+        if UNROUTED.contains(&id.as_str()) {
+            assert_eq!(with(lo, &[("Authorization", &good)]).status, 404, "{id}");
+            continue;
+        }
+        // the daemon's own token from loopback: refused on every write
+        let r = with(lo, &[("Authorization", &good)]);
+        r.problem(401, "unauthenticated");
+        assert!(
+            !r.body.contains(token.as_str()),
+            "{id}: the token is never echoed"
+        );
+        // ... even beside a valid session cookie
+        with(lan, &[("Authorization", &good), ("Cookie", &cookie)]).problem(401, "unauthenticated");
+        // a person passes the gate: trusted loopback, and a paired session
+        let r = with(lo, &[]);
+        assert_ne!(r.status, 401, "{id} {method} {path} (loopback): {}", r.body);
+        if id != "authLogout" {
+            let r = with(lan, &[("Cookie", &cookie)]);
+            assert_ne!(r.status, 401, "{id} {method} {path} (paired): {}", r.body);
+        }
+    }
+    // the bearer still reads every GET (here: the routes that need no subsystem)
+    for path in ["/api/v1/status", "/api/v1/settings", "/api/v1/proposals"] {
+        let r = get_with(lo, path, &[("Authorization", &good)]);
+        assert_eq!(r.status, 200, "{path}: {}", r.body);
+    }
+    // HEAD with a bearer is not a read to the gate (fail closed: only GET reads); a
+    // method the route does not serve is refused either way, never served
+    let r = request(
+        lo,
+        "HEAD",
+        "/api/v1/status",
+        Some("127.0.0.1"),
+        &[("Authorization", &good)],
+        None,
+    );
+    assert_eq!(r.status, 401, "HEAD");
+    for method in ["OPTIONS", "PUT"] {
+        let r = request(
+            lo,
+            method,
+            "/api/v1/status",
+            Some("127.0.0.1"),
+            &[
+                ("Authorization", &good),
+                ("Content-Type", "application/json"),
+            ],
+            None,
+        );
+        assert!(matches!(r.status, 401 | 405), "{method}: {}", r.status);
+    }
+}

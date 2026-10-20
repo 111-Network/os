@@ -2864,6 +2864,36 @@ fn cancel_drops_unsent_parts_only_one_by_one() {
 }
 
 #[test]
+fn edge_options_change_alone_and_report_whether_they_changed() {
+    let (_t, mut s) = ready();
+    let a = fconv(&mut s, "meshtastic", ForeignKind::Channel, "ch:a:1");
+    let b = fconv(&mut s, "meshtastic", ForeignKind::Channel, "ch:b:1");
+    let e = mk_edge(&mut s, a, b);
+    let o1 = ingest1(&mut s, fin(a, "!a1", Some("1"), "one", false));
+    s.foreign_queue_send(&copy_send(e, o1, b, "[!a1/M] one", 1, 1))
+        .unwrap();
+    let before = s.edge(e).unwrap().unwrap();
+    assert!(!s.edge_set_options(e, false, EdgeOversize::Refuse).unwrap());
+    assert!(s.edge_set_options(e, true, EdgeOversize::Split).unwrap());
+    let after = s.edge(e).unwrap().unwrap();
+    assert!(after.honour_ok_to_mqtt);
+    assert_eq!(after.oversize, EdgeOversize::Split);
+    assert_eq!(after.relayed_seq, before.relayed_seq, "the mark stays");
+    assert_eq!(after.cursor_seq, before.cursor_seq, "history stays history");
+    assert_eq!(after.consent_hash, before.consent_hash);
+    assert_eq!(
+        (after.enabled, after.paused),
+        (before.enabled, before.paused)
+    );
+    assert!(s.edge_set_options(e, false, EdgeOversize::Split).unwrap());
+    assert!(!s.edge(e).unwrap().unwrap().honour_ok_to_mqtt);
+    assert!(matches!(
+        s.edge_set_options(e + 100, true, EdgeOversize::Refuse),
+        Err(StoreError::NotFound)
+    ));
+}
+
+#[test]
 fn disabling_an_edge_drops_its_never_handed_copies() {
     let (_t, mut s) = ready();
     let a = fconv(&mut s, "meshtastic", ForeignKind::Channel, "ch:a:1");
