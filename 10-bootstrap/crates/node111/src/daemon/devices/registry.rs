@@ -11,30 +11,47 @@
 //! port is never opened (it can reset ESP32 boards). A USB VID:PID names the
 //! serial chip, not the board or its firmware, so a LoRa-table hit is
 //! `match.confidence: likely` ("Likely: Heltec WiFi LoRa 32 V3") with
-//! `firmware.family: unknown`; anything else is `unknown`.
+//! `firmware.family: unknown`; anything else is `unknown`. A consented probe
+//! that found a family (Layer 6 §12) makes the match `exact` (`rule: probe
+//! <family>`); a probe that found nothing confirms nothing.
 //!
 //! What drives a device (`driver`):
-//! - an enabled `RNodeInterface` stanza in `<root>/rns/config` whose `port` is
-//!   this device's tty while the rnsd child runs → `{stack: reticulum,
-//!   interface: <stanza>, live: true}`;
+//! - an `owner = "rnsd"`, `type = "RNodeInterface"` entry of
+//!   `state/interfaces.toml` (Layer 6 §11, §12 "Port ownership": the file and
+//!   the `PortTable` claims are the authority, no longer the rendered config)
+//!   whose `port` is this device's tty while the rnsd child runs and the
+//!   spine rendered it → `{stack: reticulum, interface: <name>, live: true}`
+//!   (a stanza the spine left out — no region, port held — is configured but
+//!   not in use: `detail.rns_left_out` names why). Only while
+//!   `interfaces.toml` does not exist yet (before the Layer 6 migration ran)
+//!   are the enabled `RNodeInterface` stanzas of `<root>/rns/config` read
+//!   instead ([`super::rns`], kept for that migration window only);
 //! - an SPI-class radio (CH341 USB-to-SPI `1a86:5512`) while meshtasticd answers
 //!   `127.0.0.1:4403` → `{stack: meshtastic, interface: meshtasticd, live: true}`
 //!   (meshtasticd never drives a USB serial board);
 //! - a companion → `{stack: dashboard, interface: session, live: true}`;
 //! - otherwise `null`.
 //!
-//! Layer 5 §14 (Meshtastic): a LoRa radio with a serial port (or an SPI bridge
-//! meshtasticd drives) offers the consented **`identify`** action while the
-//! Meshtastic module says this node can run it ([`MeshtasticView`]: meshmud
-//! and the presence reader installed; USB serial only off phones), nothing
-//! else drives or holds its port, and no Reticulum stanza names it. The
-//! identify result is persisted in `devices.json` ([`DeviceRegistry::record_identify`]):
+//! Layer 5 §14 (Meshtastic), Layer 6 §12: a LoRa radio with a serial port (or
+//! an SPI bridge meshtasticd drives) offers the consented **`identify`**
+//! action while **any identify step can run here** — the Meshtastic module's
+//! ([`MeshtasticView`]: meshmud and the presence reader installed; USB serial
+//! only off phones) or the device core's ([`IdentifyView`]: `rnodeconf` in
+//! `venvs/rns`, the MeshCore serial probe; set by `devices::identify`) —
+//! nothing else drives or holds its port, and no rnsd entry owns it. The
+//! identify result is persisted in `devices.json` ([`DeviceRegistry::record_identify`],
+//! [`DeviceRegistry::record_firmware`]; the Meshtastic binding itself goes to
+//! `interfaces.toml` through the spine once one is attached, Layer 6 §11, and
+//! `devices.json` keeps a write-only mirror):
 //! `firmware` from the probe overrides the sysfs `unknown`, and the device that
 //! holds the Meshtastic binding gets `service_id: meshtastic`, capability
 //! `meshtastic-firmware` and `driver {stack: meshtastic, interface: meshmud,
 //! live: <meshmud running>}` (so `stack_bound` / `stack_down` like any
 //! stack). A device whose port another owner holds in the port-owner table
-//! reads `port_busy`, with that owner's task in `detail.port_held_by`. The
+//! reads `port_busy`, with that owner's task in `detail.port_held_by`; so
+//! does one whose tty a port guard outside 111 holds open (ModemManager,
+//! brltty: DEV §8, found through `/proc/<pid>/fd`; 111 never stops them) —
+//! the scan runs only for serial ports nothing of ours holds. The
 //! uplink a device would be identified on names its device node under `/dev`
 //! (`/dev/serial/by-id/<name>` when that passes the §14 path pattern, else
 //! `/dev/<tty>`), or `tcp://127.0.0.1:4403` for an SPI bridge.
@@ -57,17 +74,22 @@ use super::rns::{self, RnodeBinding};
 use super::store::{Entry, MeshtasticBinding, Store, Summary};
 use super::{
     board_base, cap_detail, clean, companion_name, device_id, kb_slug, Confidence, DeviceDriver,
-    DeviceFirmware, DeviceKind, DeviceMatch, DeviceRecord, DeviceState, FirmwareFamily, Stack,
-    Transport, MAX_ALIAS, MAX_FACT, MAX_PATH_FACT, MAX_USER_AGENT,
+    DeviceFirmware, DeviceKind, DeviceMatch, DeviceRecord, DeviceState, FirmwareFamily,
+    FirmwareSource, Stack, Transport, MAX_ALIAS, MAX_FACT, MAX_PATH_FACT, MAX_USER_AGENT,
 };
 use crate::daemon::dashboard::api_v1::auth::SessionRec;
 use crate::daemon::dashboard::ApiState;
 use crate::daemon::meshtastic::meshmud::Uplink;
+use crate::daemon::ports::{port_key, PortTable};
+use crate::daemon::transport::config::LeftOut;
+use crate::daemon::transport::interfaces::{self, IfKind, IfOwner, InterfacesFile, LoadError};
+use crate::daemon::transport::posture::Spine;
 use crate::install::probe::{lora_table, RadioRule};
 use serde_json::{json, Map, Value};
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
+use std::io::Read;
 use std::net::SocketAddr;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
 use time::OffsetDateTime;
@@ -109,6 +131,38 @@ pub struct MeshtasticView {
     pub held: Vec<(String, String)>,
 }
 
+/// What the device core's identify steps can do on this node (§12: the
+/// offer appears whenever **any** step can run, not only when meshmud and the
+/// reader are installed). Set by `devices::identify` (production); the
+/// default (nothing) leaves the offer to the Meshtastic module alone.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct IdentifyView {
+    /// Some step can probe a USB serial board here.
+    pub serial: bool,
+    /// Some step can probe a TCP uplink here (meshtasticd).
+    pub tcp: bool,
+}
+
+/// The port guards 111 reports and never stops (DEV §8).
+pub const PORT_GUARDS: [&str; 2] = ["ModemManager", "brltty"];
+
+/// A process outside 111 that holds a tty open (DEV §8).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Holder {
+    /// Its `comm` (one of [`RegistryConfig::port_guards`]).
+    pub name: String,
+    pub pid: u32,
+}
+
+/// Where the RNode ownership of a tick came from (§12 "Port ownership").
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OwnerSource {
+    /// `state/interfaces.toml` (the spine's copy when one is attached).
+    Interfaces,
+    /// `rns/config` stanzas: only while `interfaces.toml` does not exist yet.
+    LegacyConfig,
+}
+
 /// Why `identify` cannot run on a device.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TargetError {
@@ -140,8 +194,19 @@ pub struct RegistryConfig {
     pub kb_dir: PathBuf,
     /// `<root>/state/devices.json`.
     pub store_path: PathBuf,
-    /// `<root>/rns/config` (RNodeInterface bindings).
+    /// `<root>/rns/config` (RNodeInterface stanzas: read only while
+    /// `interfaces.toml` does not exist yet).
     pub rns_config: PathBuf,
+    /// `<root>/state/interfaces.toml` (Layer 6 §11: the ownership authority;
+    /// an attached spine's in-memory copy is read instead).
+    pub interfaces_toml: PathBuf,
+    /// `<root>/state/identify-consent.json`: the devices whose identify the
+    /// user consented to (§12, D17 #8: remembered on accept).
+    pub consent_path: PathBuf,
+    /// procfs root for the port-guard scan (`/proc`).
+    pub proc_root: PathBuf,
+    /// Process names reported as port holders (DEV §8, [`PORT_GUARDS`]).
+    pub port_guards: Vec<String>,
     /// meshtasticd probe target (SPI-class radios only).
     pub probe_addr: SocketAddr,
     pub probe_timeout: Duration,
@@ -156,12 +221,26 @@ impl RegistryConfig {
             kb_dir: layout.current_release().join("share/kb"),
             store_path: layout.state_dir().join(super::store::FILE),
             rns_config: crate::daemon::transport::config::config_path(layout),
+            interfaces_toml: interfaces::path(&layout.state_dir()),
+            consent_path: layout.state_dir().join(CONSENT_FILE),
+            proc_root: PathBuf::from("/proc"),
+            port_guards: PORT_GUARDS.iter().map(|s| s.to_string()).collect(),
             probe_addr: MESHTASTICD_PROBE.parse().expect("static addr"),
             probe_timeout: Duration::from_secs(1),
             companion_idle: Duration::from_secs(600),
         }
     }
 }
+
+/// The consent file under `state/` (see [`RegistryConfig::consent_path`]).
+pub const CONSENT_FILE: &str = "identify-consent.json";
+/// Most remembered consents kept (one per device; oldest ids dropped first
+/// would need a clock, so the cap simply refuses more).
+const MAX_CONSENTS: usize = 256;
+/// procfs entries looked at per guard scan (bounded work per tick).
+const MAX_PROC_ENTRIES: usize = 8192;
+/// File descriptors looked at per guard process.
+const MAX_GUARD_FDS: usize = 4096;
 
 /// Error for the mutation API (`404` at the route).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -221,9 +300,16 @@ pub async fn probe(addr: SocketAddr, timeout: Duration) -> Probe {
 #[derive(Debug, Clone)]
 pub struct TickFacts {
     pub scan: Scan,
+    /// The RNode ports rnsd owns (§12 "Port ownership").
     pub rnode: Vec<RnodeBinding>,
+    pub rnode_source: OwnerSource,
+    /// Stanzas the spine did not render, with reasons (`Spine::left_out`;
+    /// empty without an attached spine).
+    pub left_out: Vec<LeftOut>,
     pub rnsd_running: bool,
     pub probe: Probe,
+    /// tty name → the port guard holding it open (DEV §8).
+    pub guards: HashMap<String, Holder>,
 }
 
 /// One device seen this tick (before alias/store merge).
@@ -240,6 +326,8 @@ struct Detected {
     hint: Option<Hint>,
     /// Layer 5 §14: the uplink an identify would open.
     identify_port: Option<Uplink>,
+    /// The kernel tty (serial ports only).
+    tty: Option<String>,
 }
 
 /// `(stack, interface)` a device is configured for.
@@ -261,6 +349,7 @@ struct Draft {
     identity: Map<String, Value>,
     detail: Map<String, Value>,
     identify_port: Option<Uplink>,
+    tty: Option<String>,
 }
 
 struct Inner {
@@ -273,17 +362,175 @@ struct Inner {
     sessions: HashMap<String, String>,
     /// present device id → the uplink an identify would open (last tick).
     identify_ports: HashMap<String, Uplink>,
+    /// present device id → who owns its port besides a live driver (last
+    /// tick): `rnsd` for an rnsd entry, a `PortTable` holder, a port guard.
+    port_owners: HashMap<String, String>,
+    /// present device id → the port guard holding its tty (last tick).
+    guards: HashMap<String, Holder>,
+    /// The devices whose identify the user consented to (§12).
+    consent: BTreeSet<String>,
+    /// The last `interfaces.toml` read error logged (once per kind).
+    owner_error: Option<String>,
 }
 
 type RunningFn = Arc<dyn Fn() -> bool + Send + Sync>;
 type ViewFn = Arc<dyn Fn() -> MeshtasticView + Send + Sync>;
+type IdentifyViewFn = Arc<dyn Fn() -> IdentifyView + Send + Sync>;
 
 pub struct DeviceRegistry {
     cfg: RegistryConfig,
     rules: Vec<RadioRule>,
     rnsd_running: RwLock<Option<RunningFn>>,
     meshtastic: RwLock<Option<ViewFn>>,
+    identify_view: RwLock<Option<IdentifyViewFn>>,
+    /// The transport spine (Layer 6 §11): once attached, the Meshtastic
+    /// binding is read from and written to `interfaces.toml` through it.
+    spine: RwLock<Option<Arc<Spine>>>,
     inner: Mutex<Inner>,
+}
+
+/// Why an identify result was not recorded.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RecordError {
+    /// The device is gone or was forgotten (nothing written).
+    NotFound,
+    /// The binding could not be saved to `interfaces.toml` (nothing bound).
+    Binding(String),
+}
+
+/// Read the consent file (missing or corrupt ⇒ none; ids re-validated).
+fn load_consent(path: &Path) -> BTreeSet<String> {
+    let Ok(f) = std::fs::File::open(path) else {
+        return BTreeSet::new();
+    };
+    let mut buf = Vec::new();
+    if f.take(64 * 1024).read_to_end(&mut buf).is_err() {
+        return BTreeSet::new();
+    }
+    let ids: Vec<String> = serde_json::from_slice::<Value>(&buf)
+        .ok()
+        .and_then(|v| v.get("devices").cloned())
+        .and_then(|v| serde_json::from_value(v).ok())
+        .unwrap_or_default();
+    ids.into_iter()
+        .filter(|id| super::valid_id(id))
+        .take(MAX_CONSENTS)
+        .collect()
+}
+
+fn save_consent(path: &Path, ids: &BTreeSet<String>) {
+    let body = json!({"schema": 1, "devices": ids});
+    if let Err(e) = crate::util::fs::atomic_write(path, format!("{body}\n").as_bytes(), 0o600) {
+        eprintln!(
+            "111 daemon: devices: cannot persist {}: {e:#}",
+            path.display()
+        );
+    }
+}
+
+/// The tty a `/dev/…` port names, following symlinks inside `roots.dev`
+/// (`tcp://…` and anything outside `/dev` resolve to nothing).
+fn resolve_tty(port: &str, roots: &Roots) -> Option<String> {
+    let rel = port
+        .strip_prefix(&*roots.dev.to_string_lossy())
+        .or_else(|| port.strip_prefix("/dev"))?
+        .trim_start_matches('/');
+    if rel.is_empty() || rel.split('/').any(|c| c == "..") {
+        return None;
+    }
+    let target = std::fs::canonicalize(roots.dev.join(rel)).ok()?;
+    Some(target.file_name()?.to_string_lossy().into_owned())
+}
+
+/// The RNode ports rnsd owns according to `file` (§12): every `owner =
+/// "rnsd"` RNode entry with a port.
+pub fn rnsd_bindings(file: &InterfacesFile, roots: &Roots) -> Vec<RnodeBinding> {
+    file.interfaces
+        .iter()
+        .filter(|i| i.owner == IfOwner::Rnsd && i.kind == IfKind::RNode)
+        .filter_map(|i| {
+            let port = i.port.as_deref()?;
+            Some(RnodeBinding {
+                tty: resolve_tty(port, roots),
+                name: clean(&i.name, MAX_FACT).unwrap_or_else(|| "RNode".into()),
+                port: clean(port, MAX_PATH_FACT).unwrap_or_default(),
+            })
+        })
+        .collect()
+}
+
+/// The ownership of one tick: the spine's file, else `interfaces.toml` on
+/// disk, else (absent only) the legacy `rns/config` stanzas. A file that
+/// cannot be read yields no bindings (the `PortTable` claims still hold)
+/// and its error.
+fn read_ownership(
+    spine_file: Option<InterfacesFile>,
+    toml: &Path,
+    rns_config: &Path,
+    roots: &Roots,
+) -> (Vec<RnodeBinding>, OwnerSource, Option<String>) {
+    if let Some(f) = spine_file {
+        return (rnsd_bindings(&f, roots), OwnerSource::Interfaces, None);
+    }
+    match interfaces::read(toml) {
+        Ok(f) => (rnsd_bindings(&f, roots), OwnerSource::Interfaces, None),
+        Err(LoadError::Absent) => (
+            rns::bindings(rns_config, roots),
+            OwnerSource::LegacyConfig,
+            None,
+        ),
+        Err(e) => (Vec::new(), OwnerSource::Interfaces, Some(e.to_string())),
+    }
+}
+
+/// Which of `ttys` (name, canonical path) a port guard holds open (DEV §8):
+/// every `/proc/<pid>` whose `comm` is one of `guards` has its `fd/*` links
+/// compared with the paths. Bounded ([`MAX_PROC_ENTRIES`],
+/// [`MAX_GUARD_FDS`]); a process whose fd table this user cannot read is
+/// skipped (only a confirmed holder is reported). Never signals anything.
+pub fn guard_holders(
+    proc_root: &Path,
+    guards: &[String],
+    ttys: &[(String, PathBuf)],
+) -> HashMap<String, Holder> {
+    let mut out = HashMap::new();
+    if guards.is_empty() || ttys.is_empty() {
+        return out;
+    }
+    let Ok(rd) = std::fs::read_dir(proc_root) else {
+        return out;
+    };
+    for e in rd.filter_map(Result::ok).take(MAX_PROC_ENTRIES) {
+        let name = e.file_name();
+        let Some(pid) = name.to_str().and_then(|n| n.parse::<u32>().ok()) else {
+            continue;
+        };
+        let dir = e.path();
+        let comm = std::fs::File::open(dir.join("comm")).ok().and_then(|f| {
+            let mut b = Vec::new();
+            f.take(64).read_to_end(&mut b).ok()?;
+            Some(String::from_utf8_lossy(&b).trim().to_string())
+        });
+        let Some(comm) = comm.filter(|c| guards.iter().any(|g| g == c)) else {
+            continue;
+        };
+        let Ok(fds) = std::fs::read_dir(dir.join("fd")) else {
+            continue;
+        };
+        for fd in fds.filter_map(Result::ok).take(MAX_GUARD_FDS) {
+            let Ok(target) = std::fs::read_link(fd.path()) else {
+                continue;
+            };
+            let target = std::fs::canonicalize(&target).unwrap_or(target);
+            if let Some((tty, _)) = ttys.iter().find(|(_, p)| *p == target) {
+                out.entry(tty.clone()).or_insert(Holder {
+                    name: comm.clone(),
+                    pid,
+                });
+            }
+        }
+    }
+    out
 }
 
 fn rfc3339(t: OffsetDateTime) -> String {
@@ -378,18 +625,31 @@ fn push_unique(v: &mut Vec<String>, s: &str) {
     }
 }
 
-/// Layer 5 §14: merge the persisted identify result and the Meshtastic
-/// binding into a hardware record, and decide whether `identify` is offered.
-/// Pure (the port-table lookup normalizes names through
+/// What [`apply_meshtastic`] reads besides the record (one tick's view).
+struct OfferFacts<'a> {
+    view: &'a MeshtasticView,
+    identify: IdentifyView,
+    /// The `PortTable` (normalized key, holder task) plus the view's list.
+    held: &'a [(String, String)],
+    /// The port guard holding this device's tty (DEV §8).
+    guard: Option<&'a Holder>,
+    /// An rnsd entry owns this device's port (§12).
+    rns_owned: bool,
+}
+
+/// Layer 5 §14, Layer 6 §12: merge the persisted identify result and the
+/// Meshtastic binding into a hardware record, and decide whether `identify`
+/// is offered (any step can run here, nothing else drives or holds the
+/// port). Pure (the port-table lookup normalizes names through
 /// `daemon::ports::port_key`).
 fn apply_meshtastic(
     r: &mut DeviceRecord,
     summary: Option<&mut Summary>,
     entry: Option<&Entry>,
-    view: &MeshtasticView,
+    facts: &OfferFacts<'_>,
     identify_port: Option<&Uplink>,
-    rns_hint: bool,
 ) {
+    let view = facts.view;
     if matches!(r.kind, DeviceKind::Companion | DeviceKind::Bluetooth) {
         return;
     }
@@ -397,6 +657,14 @@ fn apply_meshtastic(
     let binding: Option<&MeshtasticBinding> = entry.and_then(|e| e.meshtastic.as_ref());
     if let Some(fw) = &firmware {
         r.firmware = Some(fw.clone());
+        // a table hit is `likely` until a consented probe confirms a family
+        // (Layer 6 §12, contract `DeviceMatch`); `unknown` confirms nothing
+        if fw.source == FirmwareSource::Probe && fw.family != FirmwareFamily::Unknown {
+            r.matched = DeviceMatch {
+                confidence: Confidence::Exact,
+                rule: format!("probe {}", family_name(fw.family)),
+            };
+        }
     }
     let meshtastic_fw = firmware
         .as_ref()
@@ -426,19 +694,22 @@ fn apply_meshtastic(
         }
     } else if r.kind == DeviceKind::Radio && r.state.present() {
         if let Some(up) = identify_port {
-            let key = crate::daemon::ports::port_key(&up.port_name());
+            let key = port_key(&up.port_name());
             let self_task = format!("identify:{}", r.id);
-            let holder = view
+            let holder = facts
                 .held
                 .iter()
                 .find(|(k, _)| *k == key)
-                .map(|(_, t)| t.clone());
+                .map(|(_, t)| t.clone())
+                .or_else(|| facts.guard.map(|g| g.name.clone()));
             let driver_ok = match up {
                 // a USB board: nothing may drive it yet
-                Uplink::Serial { .. } => r.driver.is_none() && view.identify_usb,
+                Uplink::Serial { .. } => {
+                    r.driver.is_none() && (view.identify_usb || facts.identify.serial)
+                }
                 // an SPI bridge: identify goes through the meshtasticd that drives it
                 Uplink::Tcp { .. } => {
-                    view.identify_tcp
+                    (view.identify_tcp || facts.identify.tcp)
                         && r.driver.as_ref().is_some_and(|d| {
                             d.stack == Stack::Meshtastic
                                 && d.live
@@ -450,7 +721,14 @@ fn apply_meshtastic(
                 Some(task) if task != self_task => {
                     if r.state == DeviceState::NeedsSetup {
                         r.reason_code = "port_busy".into();
-                        r.reason = format!("Its port is in use by {task}.");
+                        r.reason = match facts.guard.filter(|g| g.name == task) {
+                            Some(g) => format!(
+                                "Its port is open in {task} (pid {}); 111 never stops it. \
+                                 Stop or configure {task} to leave this board alone.",
+                                g.pid
+                            ),
+                            None => format!("Its port is in use by {task}."),
+                        };
                         // the structured fact `identify_target` reads (the
                         // reason is display copy and may change)
                         r.detail.insert("port_held_by".into(), task.into());
@@ -458,7 +736,7 @@ fn apply_meshtastic(
                     }
                 }
                 Some(_) => {} // being identified right now
-                None if driver_ok && !rns_hint && r.reason_code != "no_port_access" => {
+                None if driver_ok && !facts.rns_owned && r.reason_code != "no_port_access" => {
                     actions.push(IDENTIFY_ACTION.to_string());
                 }
                 None => {}
@@ -470,6 +748,19 @@ fn apply_meshtastic(
         s.firmware = r.firmware.clone();
         s.capabilities = r.capabilities.clone();
         s.service_id = r.service_id.clone();
+        s.matched = Some(r.matched.clone());
+    }
+}
+
+/// The contract string of a firmware family.
+fn family_name(f: FirmwareFamily) -> &'static str {
+    match f {
+        FirmwareFamily::Rnode => "rnode",
+        FirmwareFamily::Meshtastic => "meshtastic",
+        FirmwareFamily::Meshcore => "meshcore",
+        FirmwareFamily::Kiss => "kiss",
+        FirmwareFamily::None => "none",
+        FirmwareFamily::Unknown => "unknown",
     }
 }
 
@@ -554,10 +845,13 @@ fn fingerprint(records: &[DeviceRecord]) -> String {
 impl DeviceRegistry {
     pub fn new(cfg: RegistryConfig) -> Self {
         let store = Store::load(&cfg.store_path);
+        let consent = load_consent(&cfg.consent_path);
         DeviceRegistry {
             rules: lora_table(),
             rnsd_running: RwLock::new(None),
             meshtastic: RwLock::new(None),
+            identify_view: RwLock::new(None),
+            spine: RwLock::new(None),
             inner: Mutex::new(Inner {
                 store,
                 published: None,
@@ -566,9 +860,89 @@ impl DeviceRegistry {
                 absent_ticks: HashMap::new(),
                 sessions: HashMap::new(),
                 identify_ports: HashMap::new(),
+                port_owners: HashMap::new(),
+                guards: HashMap::new(),
+                consent,
+                owner_error: None,
             }),
             cfg,
         }
+    }
+
+    /// The device core's identify availability (§12; `devices::identify`
+    /// installs it in production). Default: nothing (the Meshtastic module's
+    /// view alone decides the offer, as in Layer 5).
+    pub fn set_identify_view(&self, f: impl Fn() -> IdentifyView + Send + Sync + 'static) {
+        *self.identify_view.write().unwrap() = Some(Arc::new(f));
+    }
+
+    fn identify_view(&self) -> IdentifyView {
+        let f = self.identify_view.read().unwrap().clone();
+        f.map(|f| f()).unwrap_or_default()
+    }
+
+    /// Attach the transport spine (Layer 6 §11, §18 "`interfaces.toml` is
+    /// the only reader of the Meshtastic binding"): from now on
+    /// [`Self::meshtastic_binding`] reads the spine's file and
+    /// [`Self::record_identify`] / [`Self::forget`] write the binding
+    /// through `Spine::set_meshtastic_binding`; the spine's write-only
+    /// mirror is pointed at this registry's in-memory `devices.json` store
+    /// (so the two never race on the file), and the store is brought in line
+    /// with the file at once (the TOML wins). The daemon calls this once
+    /// after both exist: `devices.attach_spine(transport.spine())`.
+    pub fn attach_spine(self: &Arc<Self>, spine: Arc<Spine>) {
+        let me = Arc::downgrade(self);
+        spine.set_binding_mirror(Arc::new(move |want| {
+            me.upgrade().and_then(|r| r.mirror_binding(want))
+        }));
+        let now = spine.meshtastic_binding();
+        if let Some(line) = self.mirror_binding(now.as_ref().map(|(id, b)| (id.as_str(), b))) {
+            eprintln!("111 daemon: devices: {line}");
+        }
+        *self.spine.write().unwrap() = Some(spine);
+    }
+
+    fn spine(&self) -> Option<Arc<Spine>> {
+        self.spine.read().unwrap().clone()
+    }
+
+    /// The write-only `devices.json` mirror of the binding the spine saved
+    /// (`Store::mirror_meshtastic_binding` on the in-memory store); returns
+    /// the divergence line.
+    pub fn mirror_binding(&self, want: Option<(&str, &MeshtasticBinding)>) -> Option<String> {
+        self.inner
+            .lock()
+            .unwrap()
+            .store
+            .mirror_meshtastic_binding(want)
+    }
+
+    /// A changed snapshot is waiting for its confirming tick (the hotplug
+    /// loop runs that tick early, `devices::run_ticks`).
+    pub fn has_pending(&self) -> bool {
+        self.inner.lock().unwrap().pending.is_some()
+    }
+
+    /// The user consented to identifying `id` (§12, D17 #8: the route body or
+    /// the accepted `identify` proposal; remembered across restarts).
+    pub fn has_consent(&self, id: &str) -> bool {
+        self.inner.lock().unwrap().consent.contains(id)
+    }
+
+    /// Remember the consent for `id` (persisted, 0600). False when the cap
+    /// of remembered consents is reached (the probe still runs: the consent
+    /// was just given).
+    pub fn remember_consent(&self, id: &str) -> bool {
+        let mut inner = self.inner.lock().unwrap();
+        if inner.consent.contains(id) {
+            return true;
+        }
+        if inner.consent.len() >= MAX_CONSENTS || !super::valid_id(id) {
+            return false;
+        }
+        inner.consent.insert(id.to_string());
+        save_consent(&self.cfg.consent_path, &inner.consent);
+        true
     }
 
     pub fn config(&self) -> &RegistryConfig {
@@ -666,28 +1040,39 @@ impl DeviceRegistry {
             session_hash: None,
             hint: d.hint,
             identify_port: d.identify_port,
+            tty: d.tty,
         }
     }
 
-    /// The RNode stanza for `tty`: a live driver while rnsd runs, else only a
-    /// hint (configured, not live).
+    /// The rnsd entry for `tty` (§12 "Port ownership"): a live driver while
+    /// rnsd runs and the spine rendered it, else only a hint (configured,
+    /// not live) and, when the spine left it out, why.
     fn rnode_driver(
         facts: &TickFacts,
         tty: &str,
         detail: &mut Map<String, Value>,
-    ) -> (Option<DeviceDriver>, Option<Hint>) {
+    ) -> (Option<DeviceDriver>, Option<Hint>, Option<String>) {
         let Some(b) = facts.rnode.iter().find(|b| b.tty.as_deref() == Some(tty)) else {
-            return (None, None);
+            return (None, None, None);
         };
         put(detail, "rns_interface", Some(b.name.clone()));
         put(detail, "rns_port", Some(b.port.clone()));
         detail.insert("rnsd_running".into(), facts.rnsd_running.into());
-        let driver = facts.rnsd_running.then(|| DeviceDriver {
+        if facts.rnode_source == OwnerSource::LegacyConfig {
+            detail.insert("rns_source".into(), "rns-config".into());
+        }
+        let left = facts
+            .left_out
+            .iter()
+            .find(|l| l.name.eq_ignore_ascii_case(&b.name))
+            .and_then(|l| clean(&l.reason, 160));
+        put(detail, "rns_left_out", left.clone());
+        let driver = (facts.rnsd_running && left.is_none()).then(|| DeviceDriver {
             stack: Stack::Reticulum,
             interface: Some(b.name.clone()),
             live: true,
         });
-        (driver, Some((Stack::Reticulum, Some(b.name.clone()))))
+        (driver, Some((Stack::Reticulum, Some(b.name.clone()))), left)
     }
 
     fn serial_record(&self, port: &SerialPort, facts: &TickFacts, now: &str) -> Detected {
@@ -730,7 +1115,7 @@ impl DeviceRegistry {
         if let Some(u) = u {
             usb_detail(&mut detail, u);
         }
-        let (driver, hint) = Self::rnode_driver(facts, &port.tty, &mut detail);
+        let (driver, hint, left_out) = Self::rnode_driver(facts, &port.tty, &mut detail);
         let ids = u.map(|u| format!("{}:{}", u.vendor_id, u.product_id));
 
         let (kind, name, matched, firmware, unbound) = match rule {
@@ -772,8 +1157,14 @@ impl DeviceRegistry {
             ),
         };
         let configured;
-        let unbound = match (&driver, &hint) {
-            (None, Some((_, Some(i)))) => {
+        let unbound = match (&driver, &hint, &left_out) {
+            (None, Some((_, Some(i))), Some(why)) => {
+                configured = format!(
+                    "Its Reticulum interface \u{201c}{i}\u{201d} is configured, but not in use: {why}."
+                );
+                (unbound.0, configured.as_str())
+            }
+            (None, Some((_, Some(i))), None) => {
                 configured = format!(
                     "Its Reticulum interface \u{201c}{i}\u{201d} is configured, but rnsd is not running."
                 );
@@ -802,6 +1193,7 @@ impl DeviceRegistry {
                 identity,
                 detail,
                 identify_port: serial_uplink(&port.tty, port.by_id.as_deref()),
+                tty: Some(port.tty.clone()),
             },
             now,
         )
@@ -899,6 +1291,7 @@ impl DeviceRegistry {
                 identity,
                 detail,
                 identify_port,
+                tty: None,
             },
             now,
         )
@@ -951,6 +1344,7 @@ impl DeviceRegistry {
                 identity,
                 detail,
                 identify_port: None,
+                tty: None,
             },
             now,
         )
@@ -1045,6 +1439,7 @@ impl DeviceRegistry {
             session_hash: Some(s.hash.clone()),
             hint: None,
             identify_port: None,
+            tty: None,
         }
     }
 
@@ -1123,11 +1518,62 @@ impl DeviceRegistry {
     pub async fn tick(&self, api: &ApiState) -> bool {
         let roots = self.cfg.roots.clone();
         let rns_config = self.cfg.rns_config.clone();
-        let (scan, rnode) = tokio::task::spawn_blocking(move || {
-            (detect::scan(&roots), rns::bindings(&rns_config, &roots))
+        let toml = self.cfg.interfaces_toml.clone();
+        let proc_root = self.cfg.proc_root.clone();
+        let guards = self.cfg.port_guards.clone();
+        let spine = self.spine();
+        let spine_file = spine.as_ref().map(|s| s.file());
+        let left_out = spine.as_ref().map(|s| s.left_out()).unwrap_or_default();
+        let held: Vec<String> = api
+            .ext::<Arc<PortTable>>()
+            .map(|t| t.held().into_iter().map(|(k, _)| k).collect())
+            .unwrap_or_default();
+        let gathered = tokio::task::spawn_blocking(move || {
+            let scan = detect::scan(&roots);
+            let (rnode, source, err) = read_ownership(spine_file, &toml, &rns_config, &roots);
+            // the guard scan only for serial ports nothing of ours holds
+            let ttys: Vec<(String, PathBuf)> = scan
+                .serial
+                .iter()
+                .filter(|p| {
+                    !rnode
+                        .iter()
+                        .any(|b| b.tty.as_deref() == Some(p.tty.as_str()))
+                })
+                .filter(|p| {
+                    serial_uplink(&p.tty, p.by_id.as_deref())
+                        .is_none_or(|u| !held.contains(&port_key(&u.port_name())))
+                })
+                .filter_map(|p| {
+                    let path = std::fs::canonicalize(roots.dev.join(&p.tty)).ok()?;
+                    Some((p.tty.clone(), path))
+                })
+                .collect();
+            let found = guard_holders(&proc_root, &guards, &ttys);
+            (scan, rnode, source, err, found)
         })
-        .await
-        .unwrap_or_default();
+        .await;
+        let (scan, rnode, rnode_source, err, found) = match gathered {
+            Ok(g) => g,
+            Err(_) => (
+                Scan::default(),
+                Vec::new(),
+                OwnerSource::Interfaces,
+                None,
+                HashMap::new(),
+            ),
+        };
+        if let Some(e) = err {
+            let mut inner = self.inner.lock().unwrap();
+            if inner.owner_error.as_deref() != Some(e.as_str()) {
+                eprintln!(
+                    "111 daemon: devices: {} is not readable ({e}); RNode ownership comes \
+                     from the port claims alone",
+                    self.cfg.interfaces_toml.display()
+                );
+                inner.owner_error = Some(e);
+            }
+        }
         let spi_present = scan.usb_other.iter().any(|u| spi_bridge(u).is_some());
         let probe_result = if spi_present {
             probe(self.cfg.probe_addr, self.cfg.probe_timeout).await
@@ -1137,11 +1583,29 @@ impl DeviceRegistry {
         let facts = TickFacts {
             scan,
             rnode,
+            rnode_source,
+            left_out,
             rnsd_running: self.rnsd_running(),
             probe: probe_result,
+            guards: found,
         };
         let sessions = api.auth.sessions();
         self.apply(api, &facts, &sessions, OffsetDateTime::now_utc())
+    }
+
+    /// The `PortTable` holders (normalized key, task) merged with the
+    /// Meshtastic view's copy.
+    fn held(api: &ApiState, view: &MeshtasticView) -> Vec<(String, String)> {
+        let mut held: Vec<(String, String)> = api
+            .ext::<Arc<PortTable>>()
+            .map(|t| t.held().into_iter().map(|(k, o)| (k, o.task)).collect())
+            .unwrap_or_default();
+        for h in &view.held {
+            if !held.iter().any(|(k, _)| *k == h.0) {
+                held.push(h.clone());
+            }
+        }
+        held
     }
 
     /// The synchronous half of [`Self::tick`] (unit-testable).
@@ -1190,19 +1654,45 @@ impl DeviceRegistry {
         }
         drop(prev_drivers);
 
-        // Layer 5 §14: identify results, the Meshtastic binding, `identify`
+        // Layer 5 §14, Layer 6 §12: identify results, the Meshtastic
+        // binding, the owners of each port, `identify`
         let view = self.meshtastic_view();
+        let identify = self.identify_view();
+        let held = Self::held(api, &view);
         inner.identify_ports.clear();
+        inner.port_owners.clear();
+        inner.guards.clear();
         for d in &mut detected {
-            let rns_hint = matches!(d.hint, Some((Stack::Reticulum, _)));
+            let rns_owned = matches!(d.hint, Some((Stack::Reticulum, _)));
+            let guard = d.tty.as_ref().and_then(|t| facts.guards.get(t));
             apply_meshtastic(
                 &mut d.record,
                 Some(&mut d.summary),
                 inner.store.devices.get(&d.id),
-                &view,
+                &OfferFacts {
+                    view: &view,
+                    identify,
+                    held: &held,
+                    guard,
+                    rns_owned,
+                },
                 d.identify_port.as_ref(),
-                rns_hint,
             );
+            let claimed = d.identify_port.as_ref().and_then(|up| {
+                let key = port_key(&up.port_name());
+                held.iter().find(|(k, _)| *k == key).map(|(_, t)| t.clone())
+            });
+            let owner = if rns_owned {
+                Some(interfaces::TASK_RNSD.to_string())
+            } else {
+                claimed.or_else(|| guard.map(|g| g.name.clone()))
+            };
+            if let Some(o) = owner {
+                inner.port_owners.insert(d.id.clone(), o);
+            }
+            if let Some(g) = guard {
+                inner.guards.insert(d.id.clone(), g.clone());
+            }
             if let Some(up) = &d.identify_port {
                 inner.identify_ports.insert(d.id.clone(), up.clone());
             }
@@ -1397,6 +1887,7 @@ impl DeviceRegistry {
     /// alias; a companion's session is revoked — including the session making
     /// the request (that browser's next call gets `401`). Persists + publishes.
     pub fn forget(&self, api: &ApiState, id: &str) -> Result<(), NotFound> {
+        let mut unbind = false;
         let mut guard = self.inner.lock().unwrap();
         let inner = &mut *guard;
         let published = inner.published.as_mut().ok_or(NotFound)?;
@@ -1415,13 +1906,45 @@ impl DeviceRegistry {
             e.alias = None;
             // forgetting a bound board unbinds it (the Meshtastic module stops
             // meshmud on its next tick)
-            e.meshtastic = None;
+            unbind = e.meshtastic.take().is_some();
+        }
+        // a forgotten device's consent goes with it (a new identify asks again)
+        if inner.consent.remove(id) {
+            save_consent(&self.cfg.consent_path, &inner.consent);
         }
         inner.absent_ticks.remove(id);
         inner.store.mark_dirty();
         inner.store.flush(true);
         inner.published_fp = fingerprint(published);
         Self::emit(api, inner);
+        drop(guard);
+        // Layer 6 §11: the binding lives in interfaces.toml once a spine is
+        // attached. The reader already ignores a forgotten device's binding,
+        // so the unbind takes effect now; the file follows in the background
+        // (the route is synchronous).
+        if let Some(spine) = self.spine().filter(|_| unbind) {
+            let unbind_id = id.to_string();
+            match tokio::runtime::Handle::try_current() {
+                Ok(rt) => {
+                    rt.spawn(async move {
+                        let bound = spine
+                            .meshtastic_binding()
+                            .is_some_and(|(b, _)| b == unbind_id);
+                        if bound {
+                            if let Err(e) = spine.set_meshtastic_binding(None).await {
+                                eprintln!(
+                                    "111 daemon: devices: cannot unbind {unbind_id} in \
+                                     interfaces.toml: {e}"
+                                );
+                            }
+                        }
+                    });
+                }
+                Err(_) => eprintln!(
+                    "111 daemon: devices: {unbind_id} unbound in devices.json only (no runtime)"
+                ),
+            }
+        }
         Ok(())
     }
 
@@ -1457,13 +1980,15 @@ impl DeviceRegistry {
         };
         if let Some(d) = &rec.driver {
             match (d.stack, d.interface.as_deref()) {
-                (Stack::Reticulum, _) => return Err(busy("rnsd")),
+                (Stack::Reticulum, _) => return Err(busy(interfaces::TASK_RNSD)),
                 (Stack::Meshtastic, Some(MESHMUD_INTERFACE)) => return Err(busy("meshmud")),
                 _ => {}
             }
         }
-        if rec.detail.contains_key("rns_interface") {
-            return Err(busy("rnsd"));
+        // §12: the owner comes from interfaces.toml (an rnsd entry) and the
+        // PortTable claims, never from the rendered config
+        if let Some(owner) = inner.port_owners.get(id) {
+            return Err(busy(owner));
         }
         if rec.reason_code == "port_busy" {
             let owner = rec
@@ -1487,17 +2012,99 @@ impl DeviceRegistry {
     /// at once and returns it.
     ///
     /// The device must still be published and not forgotten: a forget that
-    /// landed while the probe ran wins, and [`NotFound`] is returned **before
-    /// anything is written** (a binding on a forgotten, hidden entry could
-    /// never be unbound through the API). Checked and written under one lock.
-    pub fn record_identify(
+    /// landed while the probe ran wins, and [`RecordError::NotFound`] is
+    /// returned **before anything is written** (a binding on a forgotten,
+    /// hidden entry could never be unbound through the API). Checked and
+    /// written under one lock.
+    ///
+    /// Layer 6 §11 (the Layer 5 writer switch): with a spine attached the
+    /// binding is written to `interfaces.toml` through
+    /// `Spine::set_meshtastic_binding` (whose mirror updates this store), not
+    /// to `devices.json`; a binding the spine refuses is
+    /// [`RecordError::Binding`] and nothing is bound. A forget that lands
+    /// while the spine saves wins too: the binding is removed again and
+    /// [`RecordError::NotFound`] answered.
+    pub async fn record_identify(
         &self,
         api: &ApiState,
         id: &str,
         firmware: DeviceFirmware,
         binding: Option<MeshtasticBinding>,
+    ) -> Result<DeviceRecord, RecordError> {
+        let (spine, b) = match (self.spine(), binding) {
+            (None, binding) => {
+                return self
+                    .record_locked(api, id, firmware, Some(binding))
+                    .map_err(|_| RecordError::NotFound)
+            }
+            // nothing to bind: the spine's binding is left as it is
+            (Some(_), None) => {
+                return self
+                    .record_locked(api, id, firmware, None)
+                    .map_err(|_| RecordError::NotFound)
+            }
+            (Some(spine), Some(b)) => (spine, b),
+        };
+        // checked first, so nothing is saved for a gone device
+        if !self.live(id) {
+            return Err(RecordError::NotFound);
+        }
+        if let Err(e) = spine
+            .set_meshtastic_binding(Some((id.to_string(), b)))
+            .await
+        {
+            return Err(RecordError::Binding(e.to_string()));
+        }
+        match self.record_locked(api, id, firmware, None) {
+            Ok(rec) => Ok(rec),
+            Err(NotFound) => {
+                // forgotten while the spine saved: unbind again
+                if spine
+                    .meshtastic_binding()
+                    .is_some_and(|(bound, _)| bound == id)
+                {
+                    let _ = spine.set_meshtastic_binding(None).await;
+                }
+                Err(RecordError::NotFound)
+            }
+        }
+    }
+
+    /// Persist an identify result that binds nothing (Layer 6 §12: an RNode
+    /// or MeshCore match, or `family: unknown` after every step answered
+    /// `NoMatch`): `firmware` only, the Meshtastic binding untouched.
+    /// Same liveness rule as [`Self::record_identify`].
+    pub fn record_firmware(
+        &self,
+        api: &ApiState,
+        id: &str,
+        firmware: DeviceFirmware,
+    ) -> Result<DeviceRecord, NotFound> {
+        self.record_locked(api, id, firmware, None)
+    }
+
+    /// Published and not forgotten.
+    fn live(&self, id: &str) -> bool {
+        let inner = self.inner.lock().unwrap();
+        inner.store.devices.get(id).is_some_and(|e| !e.forgotten)
+            && inner
+                .published
+                .as_ref()
+                .is_some_and(|p| p.iter().any(|r| r.id == id))
+    }
+
+    /// Write `firmware` and, with `binding = Some(..)`, set (or clear) the
+    /// `devices.json` binding; `None` leaves the binding as it is.
+    fn record_locked(
+        &self,
+        api: &ApiState,
+        id: &str,
+        firmware: DeviceFirmware,
+        binding: Option<Option<MeshtasticBinding>>,
     ) -> Result<DeviceRecord, NotFound> {
         let view = self.meshtastic_view();
+        let identify = self.identify_view();
+        let held = Self::held(api, &view);
         let mut guard = self.inner.lock().unwrap();
         let inner = &mut *guard;
         let live = inner.store.devices.get(id).is_some_and(|e| !e.forgotten)
@@ -1508,7 +2115,7 @@ impl DeviceRegistry {
         if !live {
             return Err(NotFound);
         }
-        if binding.is_some() {
+        if let Some(Some(_)) = &binding {
             for (other, e) in inner.store.devices.iter_mut() {
                 if other != id {
                     e.meshtastic = None;
@@ -1517,15 +2124,30 @@ impl DeviceRegistry {
         }
         let entry = inner.store.devices.get_mut(id).ok_or(NotFound)?;
         entry.firmware = Some(firmware);
-        entry.meshtastic = binding;
+        if let Some(b) = binding {
+            entry.meshtastic = b;
+        }
         let entry = entry.clone();
         inner.store.mark_dirty();
         inner.store.flush(true);
         let port = inner.identify_ports.get(id).cloned();
+        let guard_holder = inner.guards.get(id).cloned();
         let published = inner.published.as_mut().ok_or(NotFound)?;
         let rec = published.iter_mut().find(|r| r.id == id).ok_or(NotFound)?;
-        let rns_hint = rec.detail.contains_key("rns_interface");
-        apply_meshtastic(rec, None, Some(&entry), &view, port.as_ref(), rns_hint);
+        let rns_owned = rec.detail.contains_key("rns_interface");
+        apply_meshtastic(
+            rec,
+            None,
+            Some(&entry),
+            &OfferFacts {
+                view: &view,
+                identify,
+                held: &held,
+                guard: guard_holder.as_ref(),
+                rns_owned,
+            },
+            port.as_ref(),
+        );
         let out = rec.clone();
         sort_records(published);
         inner.published_fp = fingerprint(published);
@@ -1533,9 +2155,63 @@ impl DeviceRegistry {
         Ok(out)
     }
 
-    /// The device holding the Meshtastic binding (from `devices.json`).
+    /// The device holding the Meshtastic binding. Layer 6 §11 (the Layer 5
+    /// reader switch): with a spine attached, `interfaces.toml` (the spine's
+    /// file) is the only source — a binding on a device forgotten since is
+    /// never returned; without one (before the daemon attached it, Layer 5
+    /// tests), `devices.json`.
     pub fn meshtastic_binding(&self) -> Option<(String, MeshtasticBinding)> {
+        if let Some(spine) = self.spine() {
+            let (id, b) = spine.meshtastic_binding()?;
+            let forgotten = self
+                .inner
+                .lock()
+                .unwrap()
+                .store
+                .devices
+                .get(&id)
+                .is_some_and(|e| e.forgotten);
+            return (!forgotten).then_some((id, b));
+        }
         self.inner.lock().unwrap().store.meshtastic_binding()
+    }
+
+    /// The serial port an `rns.interface.upsert` for `id` names (§12, the
+    /// applier): the device must be a present LoRa radio on USB serial with a
+    /// port, not driven by meshmud and not held by anything but rnsd (an
+    /// existing rnsd entry for it is updated in place). The by-id node is
+    /// preferred (stable across re-plugs).
+    pub fn serial_port_for(&self, id: &str) -> Result<String, TargetError> {
+        let inner = self.inner.lock().unwrap();
+        let rec = inner
+            .published
+            .as_ref()
+            .and_then(|p| p.iter().find(|r| r.id == id))
+            .ok_or(TargetError::NotFound)?;
+        if rec.kind != DeviceKind::Radio || rec.transport != Transport::UsbSerial {
+            return Err(TargetError::NotOffered("only a LoRa board on USB serial"));
+        }
+        if !rec.state.present() {
+            return Err(TargetError::NotOffered("the board is not plugged in"));
+        }
+        let Some(Uplink::Serial { path }) = inner.identify_ports.get(id).cloned() else {
+            return Err(TargetError::NotOffered("the board has no port"));
+        };
+        if let Some(d) = &rec.driver {
+            if d.stack == Stack::Meshtastic {
+                return Err(TargetError::Busy {
+                    port: path,
+                    owner: "meshmud".into(),
+                });
+            }
+        }
+        match inner.port_owners.get(id) {
+            Some(owner) if owner != interfaces::TASK_RNSD => Err(TargetError::Busy {
+                port: path,
+                owner: owner.clone(),
+            }),
+            _ => Ok(path),
+        }
     }
 
     /// A device identified as Meshtastic but not bound (Layer 5 §14 "NOT SET
@@ -1657,6 +2333,122 @@ mod tests {
         d.live = false;
         let (s, code, _) = driven_state(Some(&d), unbound);
         assert_eq!((s, code), (DeviceState::Error, "stack_down"));
+    }
+
+    fn fake_dev() -> (tempfile::TempDir, Roots) {
+        let dir = tempfile::tempdir().unwrap();
+        let dev = dir.path().join("dev");
+        std::fs::create_dir_all(dev.join("serial/by-id")).unwrap();
+        std::fs::write(dev.join("ttyACM0"), "").unwrap();
+        std::os::unix::fs::symlink("../../ttyACM0", dev.join("serial/by-id/usb-X-if00")).unwrap();
+        let roots = Roots {
+            dev,
+            sys: dir.path().join("sys"),
+        };
+        (dir, roots)
+    }
+
+    #[test]
+    fn ownership_reads_interfaces_toml_and_the_legacy_config_only_without_it() {
+        let (dir, roots) = fake_dev();
+        let toml = dir.path().join("state/interfaces.toml");
+        let rns = dir.path().join("rns/config");
+        std::fs::create_dir_all(rns.parent().unwrap()).unwrap();
+        std::fs::write(
+            &rns,
+            "[interfaces]\n  [[Old]]\n    type = RNodeInterface\n    enabled = yes\n    \
+             port = /dev/ttyACM0\n",
+        )
+        .unwrap();
+        // no TOML yet: the legacy stanzas (the migration window)
+        let (b, src, err) = read_ownership(None, &toml, &rns, &roots);
+        assert_eq!(src, OwnerSource::LegacyConfig);
+        assert_eq!(b[0].name, "Old");
+        assert_eq!(b[0].tty.as_deref(), Some("ttyACM0"));
+        assert!(err.is_none());
+        // the TOML exists: it alone counts
+        let mut f = InterfacesFile::default();
+        interfaces::save(toml.parent().unwrap(), &f).unwrap();
+        let (b, src, _) = read_ownership(None, &toml, &rns, &roots);
+        assert_eq!(src, OwnerSource::Interfaces);
+        assert!(b.is_empty(), "{b:?}");
+        f.radio.region = Some("EU_868".into());
+        f.interfaces.push(interfaces::Interface {
+            name: "Roof".into(),
+            owner: IfOwner::Rnsd,
+            kind: IfKind::RNode,
+            device: None,
+            port: Some("/dev/serial/by-id/usb-X-if00".into()),
+            region: None,
+            uplink: None,
+            params: toml::Table::new(),
+        });
+        let (b, _, _) = read_ownership(Some(f), &toml, &rns, &roots);
+        assert_eq!(
+            (b[0].name.as_str(), b[0].tty.as_deref()),
+            ("Roof", Some("ttyACM0"))
+        );
+        // an unreadable TOML: no bindings, the error named (claims still hold)
+        std::fs::write(&toml, "schema = \"x\"").unwrap();
+        let (b, src, err) = read_ownership(None, &toml, &rns, &roots);
+        assert!(b.is_empty());
+        assert_eq!(src, OwnerSource::Interfaces);
+        assert!(err.is_some());
+        // ports resolve inside the dev root only
+        assert_eq!(resolve_tty("tcp://10.0.0.5:4242", &roots), None);
+        assert_eq!(resolve_tty("/dev/../etc/passwd", &roots), None);
+    }
+
+    #[test]
+    fn guards_are_found_through_their_fd_links_only() {
+        let (dir, roots) = fake_dev();
+        let tty = std::fs::canonicalize(roots.dev.join("ttyACM0")).unwrap();
+        let proc_root = dir.path().join("proc");
+        let mk = |pid: &str, comm: &str, target: Option<&Path>| {
+            let d = proc_root.join(pid);
+            std::fs::create_dir_all(d.join("fd")).unwrap();
+            std::fs::write(d.join("comm"), format!("{comm}\n")).unwrap();
+            if let Some(t) = target {
+                std::os::unix::fs::symlink(t, d.join("fd/7")).unwrap();
+            }
+        };
+        mk("41", "ModemManager", Some(&tty));
+        mk("42", "bash", Some(&tty)); // not a guard
+        mk("43", "brltty", Some(Path::new("/dev/null")));
+        mk("self", "ModemManager", Some(&tty)); // not a pid
+        let guards: Vec<String> = PORT_GUARDS.iter().map(|s| s.to_string()).collect();
+        let found = guard_holders(&proc_root, &guards, &[("ttyACM0".into(), tty.clone())]);
+        assert_eq!(
+            found.get("ttyACM0"),
+            Some(&Holder {
+                name: "ModemManager".into(),
+                pid: 41
+            })
+        );
+        assert_eq!(found.len(), 1);
+        // nothing to look for: nothing is read
+        assert!(guard_holders(&proc_root, &guards, &[]).is_empty());
+        assert!(guard_holders(&proc_root, &[], &[("ttyACM0".into(), tty)]).is_empty());
+    }
+
+    #[test]
+    fn consents_round_trip_and_are_revalidated() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join(CONSENT_FILE);
+        assert!(load_consent(&p).is_empty());
+        let ids: BTreeSet<String> = ["abcd1234abcd1234".to_string()].into();
+        save_consent(&p, &ids);
+        assert_eq!(load_consent(&p), ids);
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(p.metadata().unwrap().permissions().mode() & 0o777, 0o600);
+        std::fs::write(
+            &p,
+            r#"{"schema":1,"devices":["../../etc","abcd1234abcd1234"]}"#,
+        )
+        .unwrap();
+        assert_eq!(load_consent(&p), ids, "invalid ids dropped");
+        std::fs::write(&p, b"{corrupt").unwrap();
+        assert!(load_consent(&p).is_empty());
     }
 
     #[test]
