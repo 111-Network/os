@@ -1,0 +1,10 @@
+# Only the workflow actions are watched. Cargo, npm and Python pins are deliberate (LICENSING.md
+# tracks them; a bump is a reviewed task with a notices regeneration), and security alerts for
+# them are a repository setting, not a config file (plan/cross-layer/ci-cd.md).
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: monthly
+    open-pull-requests-limit: 2

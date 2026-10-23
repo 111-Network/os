@@ -1,0 +1,138 @@
+# CI for the 111network OS. Parity with the local gates is the rule: every job runs the same
+# script a lead runs before a commit (plan/cross-layer/ci-cd.md, D28), so a green run here means
+# what "green" means on the board. Nothing here signs, publishes or deploys (CD is planned, not
+# enabled: see the plan doc). Musl / G2 stages SKIP on these runners, as they do on a box without
+# the cross toolchains; a lock run stays a lead's run with REQUIRE_G2=1.
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+  CARGO_NET_RETRY: "5"
+  RUST_BACKTRACE: short
+
+jobs:
+  bootstrap-gate:
+    # 1-bootstrap/scripts/check.sh: fmt · clippy · node111 tests · shellcheck · hermetic gate
+    # assertions · notices · build-script gates · systemd-analyze · the mesh111 workspace
+    # (5-messaging/scripts/check.sh) · the presence sidecar · the UI (pnpm check).
+    name: Layer 1 aggregate gate (node111, mesh111, sidecar, UI)
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            1-bootstrap
+            5-messaging
+      - uses: pnpm/action-setup@v4
+        with:
+          package_json_file: 4-interface/ui/package.json
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: 4-interface/ui/pnpm-lock.yaml
+      - name: UI dependencies (frozen lockfile)
+        run: pnpm --dir 4-interface/ui install --frozen-lockfile
+      - name: 1-bootstrap/scripts/check.sh
+        run: sh 1-bootstrap/scripts/check.sh
+
+  identity:
+    name: Layer 2 id111 (fmt, clippy, tests)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    defaults:
+      run:
+        working-directory: 2-identity
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: 2-identity
+      - run: cargo fmt --all -- --check
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+      - run: cargo test --workspace
+
+  intelligence:
+    name: Layer 3 agent111 (scripts/check.sh)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+          targets: x86_64-unknown-linux-musl
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: 3-intelligence
+      - name: musl linker for the cargo check --target stage
+        run: sudo apt-get update -q && sudo apt-get install -y -q --no-install-recommends musl-tools
+      - run: sh 3-intelligence/scripts/check.sh
+
+  knowledge-contract-hygiene:
+    # The knowledge base (the pre-commit hook's check), the LXMF sidecar's offline tests, the
+    # API contract's generated TypeScript (must be committed current), and two repo-hygiene
+    # rules from AGENTS.md: no two-digit layer paths, no attribution lines in commits.
+    name: Knowledge base, sidecar, contract drift, repo hygiene
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Knowledge base check (0-knowledge/_meta/build.py --check)
+        run: python3 0-knowledge/_meta/build.py --check
+      - name: LXMF sidecar offline tests
+        run: sh 6-transport/sidecars/lxmf-sidecar/run-tests.sh
+      - uses: pnpm/action-setup@v4
+        with:
+          package_json_file: 4-interface/ui/package.json
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: 4-interface/ui/pnpm-lock.yaml
+      - name: Contract drift (openapi.yaml → generated TypeScript is committed current)
+        run: |
+          pnpm --dir 4-interface/ui install --frozen-lockfile
+          pnpm --dir 4-interface/ui gen:types
+          git diff --exit-code -- 4-interface/ui/src/lib/api
+      - name: Layer folders are one-digit (AGENTS.md; journals and the move records excepted)
+        run: |
+          if git grep -nE '\b[0-9]0-(knowledge|bootstrap|identity|intelligence|interface|messaging|transport)/' -- . ':!plan/README.md' ':!plan/HANDOFF-2026-10-15.md' ':!*.jsonl'; then
+            echo "::error::two-digit layer paths found (see above); the folders are N-<slug>"; exit 1
+          fi
+      - name: No attribution lines in commit messages (AGENTS.md)
+        if: github.event_name == 'pull_request'
+        env:
+          BASE: ${{ github.event.pull_request.base.sha }}
+          HEAD: ${{ github.event.pull_request.head.sha }}
+        run: |
+          if git log --format=%B "$BASE".."$HEAD" | grep -inE '^(co-authored-by:.*(claude|anthropic)|claude-session:|generated with \[?claude)'; then
+            echo "::error::attribution lines in a commit message; AGENTS.md forbids them"; exit 1
+          fi

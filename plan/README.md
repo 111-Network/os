@@ -21,7 +21,7 @@ os/plan/
   DECISIONS.md         decision log
   EXECUTION.md         build protocol
   HANDOFF-<date>.md    session handoff (newest = current; see "Handoffs")
-  cross-layer/         material that spans layers
+  cross-layer/         material that spans layers (devices.md, parked.md, ci-cd.md — CI/CD + GitHub hygiene, D28)
     devices.md           device-connection core brief (Layer 6 opener; read by Layers 4, 5, 6)
     parked.md            ideas parked by the owner for later layers
   layers/

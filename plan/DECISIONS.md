@@ -444,6 +444,24 @@ ADR-lite. Every decision, its rejected alternatives, and why. Newest last; never
 - **Why:** every panel finding was a seam, not a design; D26 closed the forks; the spec is now shorter than its first draft and wired to the built
   layers by line-verified citations.
 
+## D28 — CI/CD and GitHub hygiene (2026-10-23)
+
+**Decision:** GitHub Actions runs the repo's own gate scripts, unchanged, on every PR and every push to `main` (`.github/workflows/ci.yml`,
+four jobs: the Layer 1 aggregate gate `1-bootstrap/scripts/check.sh`, the Layer 2 fmt/clippy/test trio, `3-intelligence/scripts/check.sh`, and a
+knowledge-base + sidecar + contract-drift + repo-hygiene job that also enforces two `AGENTS.md` rules: one-digit layer folders and no
+attribution lines in commits). Parity with the local gates is the rule: no re-listing of steps that can drift from the scripts. Musl/G2,
+the netns harnesses, G7 and hardware gates stay lead/bench items. GitHub hygiene files: PR template, Dependabot for workflow actions only
+(monthly), `.gitattributes` (LF, byte-exact fixtures untouched), `.editorconfig`. Repository settings the owner sets (branch protection with
+the four required checks, PR-only `main`, up-to-date-before-merge, squash merges, read-only workflow permissions, Dependabot alerts,
+secret scanning) and the CD plan (a `release.yml` on `v*` tags building unsigned musl artifacts; signing stays with the owner's key;
+two decisions open) are in `plan/cross-layer/ci-cd.md`. The Layer 6 as-built lock, previously pencilled as D28 in the 2026-10-20 handoff,
+becomes D29.
+
+**Rejected:** a per-crate matrix of hand-written steps (drifts from `check.sh`; the aggregate gate is the thing a lead runs); Dependabot
+update PRs for cargo/npm/pip (the pins are deliberate and tracked in `LICENSING.md`; a bump is a reviewed task with a notices
+regeneration; alerts are a repository setting); SHA-pinned actions now (major tags read better and Dependabot keeps them fresh; the owner
+may pin later); a CD workflow now (needs the musl toolchains on the runner, a reproducibility check and a signing-key decision first).
+
 ## Pending
 
 - Move deep architecture content out of `os/README.md` into per-layer specs (blocked on layer homes existing).
