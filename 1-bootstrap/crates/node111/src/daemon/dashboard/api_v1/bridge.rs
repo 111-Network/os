@@ -202,6 +202,12 @@ impl ComponentAdapters {
         self.get(component).is_some()
     }
 
+    /// Whether `component` has a [`PrepareHook`] registered (W3: Madmail has a hook and no
+    /// factory of its own).
+    pub fn prepares(&self, component: &str) -> bool {
+        self.prepare_of(component).is_some()
+    }
+
     fn get(&self, component: &str) -> Option<AdapterFactory> {
         self.map
             .read()

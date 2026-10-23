@@ -1882,6 +1882,25 @@ fn a_fresh_layer6_spawns_nothing_and_enables_nothing() {
             !dir.path().join("bridge/lxmf").exists(),
             "no file of the helper while it is disabled"
         );
+        // W3: the Delta Chat network's hooks and factory are registered, and still nothing
+        // of either component runs or exists on disk
+        assert!(
+            adapters.registered("deltachat"),
+            "the core's adapter factory"
+        );
+        assert!(adapters.prepares("deltachat"), "the core's prepare hook");
+        assert!(adapters.prepares("madmail"), "the relay's prepare hook");
+        assert!(
+            !adapters.registered("madmail"),
+            "the relay carries no adapter"
+        );
+        for id in ["deltachat", "madmail"] {
+            assert!(l6.components.stdio(id).await.is_none(), "no {id} child");
+        }
+        assert!(
+            !dir.path().join("bridge/deltachat").exists(),
+            "no file of Delta Chat or Madmail while they are disabled"
+        );
         l6.shutdown().await;
     });
 }
@@ -2221,4 +2240,320 @@ fn lxmf_spine(n: &Node) -> Arc<node111::daemon::transport::posture::Spine> {
     );
     spine.write_config().unwrap();
     spine
+}
+
+// ---------------------------------------------------------------- W3: the resume loop
+
+/// W3: `Layer6::resume` runs the one loop (`Components::resume_enabled_with`) through
+/// `enable_component`: a component whose prepare hook fails stays off (its switch as it
+/// was, nothing started or written), and resumes — hook, child, adapter — once the hook
+/// can pass.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn resume_runs_the_prepare_hook_and_a_failing_hook_leaves_the_component_off() {
+    use node111::daemon::components::consent;
+    use node111::daemon::dashboard::api_v1::bridge::ComponentAdapters;
+    use node111::daemon::dashboard::api_v1::transport::TransportApi;
+    use node111::daemon::transport::config;
+    use node111::daemon::transport::rnstatus::{FactsCache, TickConfig};
+    let n = node_with(vec![lxmf_component()]).await;
+    let root = n.layout.root.clone();
+    let cache = root.join("cache/packages/lxmf");
+    std::fs::create_dir_all(&cache).unwrap();
+    std::fs::write(cache.join("lxmf-fake"), lxmf_bin()).unwrap();
+    let adapters = Arc::new(ComponentAdapters::default());
+    node111::daemon::register_lxmf(&adapters, &n.api, &n.bridge);
+    n.api.insert_ext(Arc::clone(&adapters));
+    // the switch is on and the notice acknowledged (an earlier lifetime enabled it)
+    consent::require(
+        &root,
+        &lxmf_component(),
+        Some(&lxmf_component().notice_hash()),
+    )
+    .unwrap();
+    consent::update(&root, "lxmf", |r| r.enabled = true).unwrap();
+    let l6 = node111::daemon::Layer6 {
+        bridge: Arc::clone(&n.bridge),
+        components: n.components.clone(),
+        mesh_client: None,
+    };
+
+    // no transport spine: the hook refuses, so nothing starts and nothing is written
+    l6.resume(&n.api).await;
+    assert!(n.components.stdio("lxmf").await.is_none(), "no child");
+    assert!(!config::client_config_path(&root).exists());
+    assert!(!root.join("components/lxmf").exists(), "nothing installed");
+    assert!(n.bridge.enabled().is_empty());
+    assert!(
+        consent::load(&root).record("lxmf").enabled,
+        "the switch stays as it was"
+    );
+
+    // with the spine the same resume passes the hook, starts the child, attaches
+    n.api.insert_ext(Arc::new(TransportApi {
+        spine: lxmf_spine(&n),
+        facts: FactsCache::new(TickConfig::default()),
+    }));
+    l6.resume(&n.api).await;
+    assert!(
+        n.components.stdio("lxmf").await.is_some(),
+        "the helper runs"
+    );
+    assert!(config::client_config_path(&root).is_file());
+    assert_eq!(n.bridge.enabled(), vec!["lxmf".to_string()]);
+    l6.shutdown().await;
+    assert!(n.bridge.enabled().is_empty());
+    assert!(n.components.stdio("lxmf").await.is_none());
+}
+
+// ---------------------------------------------------------------- W3: Delta Chat + Madmail
+
+/// The fake relay (as `tests/bridge_deltachat.rs`'s): records its arguments beside its
+/// config, answers the one-shot CLI and `create-user`; for `run` it listens on the IMAP
+/// address of the configuration 111 wrote — unless `NOLISTEN` sits beside the config,
+/// then it only keeps its stdio open.
+const W3_MADMAIL: &str = r#"#!/bin/sh
+echo "$5 $6 $7" >> "$(dirname "$2")/madmail-calls.log"
+case "$5" in
+  run)
+    if [ -e "$(dirname "$2")/NOLISTEN" ]; then
+      while IFS= read -r line; do :; done
+      exit 0
+    fi
+    exec python3 -I -c '
+import socket, sys, tomllib
+cfg = tomllib.load(open(sys.argv[1], "rb"))
+host, port = cfg["imap_tls_listen"].rsplit(":", 1)
+s = socket.socket()
+s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+s.bind((host, int(port)))
+s.listen(8)
+while True:
+    c, _ = s.accept()
+    c.close()
+' "$2" ;;
+  --json) printf '{"dclogin":"dclogin:hub@[127.0.0.1]/?p=pw&v=1&ih=127.0.0.1&ip=11242&is=ssl&sh=127.0.0.1&sp=11241&ss=ssl&ic=3","email":"hub@[127.0.0.1]","password":"pw","username":"hub"}\n' ;;
+  *) exit 0 ;;
+esac
+"#;
+
+fn w3_python3() -> PathBuf {
+    std::env::var_os("PATH")
+        .and_then(|p| {
+            std::env::split_paths(&p)
+                .map(|d| d.join("python3"))
+                .find(|c| c.is_file())
+        })
+        .unwrap_or_else(|| PathBuf::from("/usr/bin/python3"))
+}
+
+/// The core: `tests/fake_deltachat_rpc.py` behind a shell stub.
+fn w3_core() -> String {
+    format!(
+        "#!/bin/sh\nexec \"{}\" -I \"{}\" --log \"$FAKE_DC_LOG\"\n",
+        w3_python3().display(),
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fake_deltachat_rpc.py")
+            .display()
+    )
+}
+
+fn w3_decl(id: &str, file: &str, payload: &[u8], run: &str, requires: &str) -> Component {
+    let toml = format!(
+        r#"id = "{id}"
+adapter = "app:deltachat"
+title = "{title}"
+[payload]
+kind = "binary"
+url = "https://example.invalid/dl/{file}"
+sha256 = "{sha}"
+size = {size}
+[requires]
+{requires}
+[run]
+program = "{file}"
+{run}
+health = "none"
+[license]
+spdx = "MPL-2.0"
+read_at = "https://example.invalid/LICENSE"
+notice = "Test notice for {id}. You install it."
+"#,
+        title = if id == "madmail" {
+            "Madmail"
+        } else {
+            "Delta Chat core"
+        },
+        sha = sha256_bytes(payload),
+        size = payload.len(),
+    );
+    let mut all = manifest::load(&[(format!("{id}.toml"), toml.into_bytes())]);
+    assert_eq!(all.len(), 1, "the test declaration of {id} registers");
+    all.pop().unwrap()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_deltachat_seam_renders_the_relay_requires_its_listener_and_attaches_the_core() {
+    use node111::daemon::bridge::deltachat::{DcConfig, RelayPaths, RelayPorts};
+    use node111::daemon::dashboard::api_v1::bridge::ComponentAdapters;
+    let ports = {
+        let l: Vec<std::net::TcpListener> = (0..4)
+            .map(|_| std::net::TcpListener::bind("127.0.0.1:0").unwrap())
+            .collect();
+        let p: Vec<u16> = l.iter().map(|l| l.local_addr().unwrap().port()).collect();
+        RelayPorts {
+            smtp: p[0],
+            submission: p[1],
+            imap: p[2],
+            https: p[3],
+        }
+    };
+    let core = w3_core();
+    let relay = w3_decl(
+        "madmail",
+        "madmail-test",
+        W3_MADMAIL.as_bytes(),
+        &format!(
+            "args = [\"--config\", \"{{bridge}}/madmail.toml\", \"--state-dir\", \"{{bridge}}/madmail\", \"run\"]\nports = {:?}",
+            ports.all()
+        ),
+        "",
+    );
+    let rpc = w3_decl(
+        "deltachat",
+        "deltachat-test",
+        core.as_bytes(),
+        "env = { DC_ACCOUNTS_PATH = \"{bridge}/accounts\", FAKE_DC_LOG = \"{bridge}/fake-log.jsonl\" }",
+        "component = \"madmail\"",
+    );
+    let (relay_hash, rpc_hash) = (relay.notice_hash(), rpc.notice_hash());
+    let n = node_with(vec![relay, rpc]).await;
+    let root = n.layout.root.clone();
+    for (id, file, bytes) in [
+        ("madmail", "madmail-test", W3_MADMAIL.as_bytes()),
+        ("deltachat", "deltachat-test", core.as_bytes()),
+    ] {
+        let d = root.join("cache/packages").join(id);
+        std::fs::create_dir_all(&d).unwrap();
+        std::fs::write(d.join(file), bytes).unwrap();
+    }
+    let adapters = Arc::new(ComponentAdapters::default());
+    node111::daemon::register_deltachat_with(
+        &adapters,
+        &n.api,
+        &n.bridge,
+        node111::daemon::DeltaChatWiring {
+            cli: Arc::new(node111::util::run::SystemRunner),
+            ports,
+            cfg: DcConfig {
+                call_timeout: Duration::from_secs(5),
+                configure_timeout: Duration::from_secs(5),
+                settle_timeout: Duration::from_secs(2),
+                ..DcConfig::default()
+            },
+            listen_timeout: Duration::from_secs(3),
+        },
+    );
+    n.api.insert_ext(Arc::clone(&adapters));
+    assert_eq!(
+        node111::daemon::deltachat_relay_bind(&n.api),
+        node111::daemon::bridge::deltachat::RelayBind::Loopback,
+        "LAN sharing is off: loopback"
+    );
+    let paths = RelayPaths::of(&root);
+    let calls = || std::fs::read_to_string(paths.dir.join("madmail-calls.log")).unwrap_or_default();
+    let (relay_on, core_on) = (
+        "/api/v1/bridge/components/madmail/enable",
+        "/api/v1/bridge/components/deltachat/enable",
+    );
+
+    // without the relay's acknowledgement: 409, and its hook wrote nothing
+    n.post(relay_on, json!({})).problem(409, "consent_required");
+    assert!(
+        !paths.dir.exists(),
+        "nothing written before the notice passes"
+    );
+    // the core before the relay: requires_unmet, nothing started
+    let pb = n
+        .post(core_on, json!({ "accept_notice_hash": rpc_hash }))
+        .problem(409, "component_unavailable");
+    assert_eq!(pb["reason_code"], "requires_unmet", "{pb}");
+    assert!(n.components.stdio("deltachat").await.is_none());
+
+    // the relay: its first configuration is loopback-only, written before its child starts
+    let r = n.post(relay_on, json!({ "accept_notice_hash": relay_hash }));
+    check_op("enableBridgeComponent", &r);
+    assert_eq!(r.json()["state"], "running", "{}", r.body);
+    let conf = std::fs::read_to_string(&paths.config).unwrap();
+    assert!(conf.contains("loopback only"), "{conf}");
+    assert!(conf.contains(&format!("imap_tls_listen = \"127.0.0.1:{}\"", ports.imap)));
+    assert!(
+        n.bridge.enabled().is_empty(),
+        "the relay alone carries no network"
+    );
+
+    // a relay whose IMAP listener never opens: the core's hook refuses, the core never starts
+    std::fs::write(paths.dir.join("NOLISTEN"), "").unwrap();
+    n.post(relay_on, json!({})); // idempotent: already running, its config kept
+    let r = n.post(core_on, json!({ "accept_notice_hash": rpc_hash }));
+    let pb = r.problem(409, "component_unavailable");
+    assert_eq!(pb["reason_code"], "health_failed", "{pb}");
+    assert!(
+        pb["detail"].as_str().unwrap().contains("IMAP listener"),
+        "{pb}"
+    );
+    assert!(n.components.stdio("deltachat").await.is_none(), "no core");
+    assert!(!paths.accounts.join("fake-state.json").exists());
+    assert!(n.bridge.enabled().is_empty());
+
+    // the listener opens: settled (push off, federation rejected, registration closed on
+    // loopback), re-rendered, restarted, then the core starts and its adapter attaches
+    std::fs::remove_file(paths.dir.join("NOLISTEN")).unwrap();
+    let r = n.post(core_on, json!({ "accept_notice_hash": rpc_hash }));
+    check_op("enableBridgeComponent", &r);
+    assert_eq!(r.json()["state"], "running", "{}", r.body);
+    let log = calls();
+    for want in ["push off", "federation policy reject", "registration close"] {
+        assert!(log.lines().any(|l| l.trim() == want), "{want}: {log}");
+    }
+    assert_eq!(n.bridge.enabled(), vec!["app:deltachat".to_string()]);
+    let deadline = Instant::now() + Duration::from_secs(20);
+    loop {
+        let r = n.get("/api/v1/networks");
+        check_op("listNetworks", &r);
+        if network(&r.json(), "app:deltachat")["state"] == "live" {
+            break;
+        }
+        assert!(Instant::now() < deadline, "never live: {}", r.body);
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let log = calls();
+    assert!(
+        log.lines().any(|l| l.trim() == "--json create-user"),
+        "the bridge account was created on the relay: {log}"
+    );
+    assert!(
+        paths.accounts.join("fake-state.json").is_file(),
+        "DC_ACCOUNTS_PATH"
+    );
+    // enabling the core again changes nothing (no relay restart under a live core)
+    let runs = |t: &str| t.lines().filter(|l| l.trim() == "run").count();
+    let before = runs(&calls());
+    let r = n.post(core_on, json!({}));
+    assert_eq!(r.status, 200, "{}", r.body);
+    assert_eq!(runs(&calls()), before, "the relay was not restarted");
+
+    // disable: the network leaves the core first, then nothing of either runs
+    let r = n.post("/api/v1/bridge/components/deltachat/disable", json!({}));
+    check_op("disableBridgeComponent", &r);
+    assert!(n.bridge.enabled().is_empty());
+    let v = n.get("/api/v1/networks").json();
+    assert_ne!(network(&v, "app:deltachat")["state"], "live", "{v}");
+    let r = n.post("/api/v1/bridge/components/madmail/disable", json!({}));
+    check_op("disableBridgeComponent", &r);
+    for id in ["deltachat", "madmail"] {
+        let st = n.components.status(id).await.unwrap();
+        assert_ne!(st.state, ComponentState::Running, "{id}");
+        assert!(n.components.stdio(id).await.is_none(), "{id}: no child");
+    }
+    n.components.shutdown().await;
 }

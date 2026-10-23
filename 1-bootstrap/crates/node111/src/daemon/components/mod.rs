@@ -887,18 +887,35 @@ impl Components {
     /// recorded acknowledgement must still match its notice). Failures are
     /// logged and leave it off.
     pub async fn resume_enabled(&self) {
+        self.resume_enabled_with(|id| async move { self.enable(&id, None).await })
+            .await;
+    }
+
+    /// [`Self::resume_enabled`] with the per-component enable supplied (W3: the daemon's
+    /// `Layer6::resume` passes `api_v1::bridge::enable_component`, so a prepare hook runs
+    /// before the child starts, and the ordering lives here only): `enable(id)` is called
+    /// for every component whose switch is on, a dependency (`[requires] component`)
+    /// before its dependants, declaration order otherwise; an error is logged and leaves
+    /// that component off, and the loop goes on. Answers every declared id in that order
+    /// (the caller attaches adapters in it).
+    pub async fn resume_enabled_with<F, Fut>(&self, mut enable: F) -> Vec<String>
+    where
+        F: FnMut(String) -> Fut,
+        Fut: std::future::Future<Output = Result<Enabled, EnableError>>,
+    {
         let file = consent::load(self.root());
-        // a dependency (`[requires] component`) before its dependants
-        let mut order = self.inner.list.clone();
+        // a dependency (`[requires] component`) before its dependants (a stable sort)
+        let mut order: Vec<&Component> = self.inner.list.iter().collect();
         order.sort_by_key(|c| c.requires.component.is_some());
-        for c in order {
+        for c in &order {
             if !file.record(&c.id).enabled {
                 continue;
             }
-            if let Err(e) = self.enable(&c.id, None).await {
+            if let Err(e) = enable(c.id.clone()).await {
                 eprintln!("111 components: {} not resumed: {e}", c.id);
             }
         }
+        order.into_iter().map(|c| c.id.clone()).collect()
     }
 
     /// Daemon stop: every runner shut down.
@@ -1103,5 +1120,79 @@ mod tests {
         assert_eq!(b["detail"], "x.whl is not pinned by the lock");
         assert_eq!(EnableError::Unknown.problem(None).body()["status"], 404);
         assert_eq!(RemoveError::Running.problem().status, 409);
+    }
+
+    /// W3: one resume loop, the enable supplied — dependency first (whatever the
+    /// declaration order), a component whose switch is off skipped, a failure logged and
+    /// the loop going on; every declared id answered in that order.
+    #[tokio::test]
+    async fn resume_enabled_with_orders_dependencies_first_and_survives_a_failure() {
+        let dir = tempfile::tempdir().unwrap();
+        let decl = |id: &str, requires: &str| {
+            let toml = format!(
+                "id = \"{id}\"\nadapter = \"app:deltachat\"\ntitle = \"T {id}\"\n\
+                 [payload]\nkind = \"binary\"\nurl = \"https://example.invalid/dl/{id}\"\n\
+                 sha256 = \"{sha}\"\nsize = 1\n[requires]\n{requires}\n[run]\n\
+                 program = \"{id}\"\nports = []\nhealth = \"none\"\n[license]\n\
+                 spdx = \"MPL-2.0\"\nread_at = \"https://example.invalid/L\"\n\
+                 notice = \"Test notice for {id}. You install it.\"\n",
+                sha = "0".repeat(64)
+            );
+            (format!("{id}.toml"), toml.into_bytes())
+        };
+        // the dependant sorts first in the loader's order
+        let list = manifest::load(&[
+            decl("core", "component = \"relay\""),
+            decl("relay", ""),
+            decl("off", ""),
+        ]);
+        assert_eq!(list.len(), 3, "the test declarations register");
+        struct NoDeps;
+        impl Dependencies for NoDeps {
+            fn child(&self, _: ServiceId) -> Option<ChildControl> {
+                None
+            }
+            fn serving(&self, _: ServiceId) -> bool {
+                false
+            }
+        }
+        let comps = Components::new(
+            ComponentsConfig::new(dir.path()),
+            list,
+            Wiring {
+                cmd: Arc::new(crate::testkit::MockRunner::new(Vec::<(
+                    String,
+                    crate::util::run::Output,
+                )>::new())),
+                ports: Arc::new(PortTable::new()),
+                deps: Arc::new(NoDeps),
+                tick: Arc::new(|| 0),
+            },
+        );
+        for id in ["core", "relay"] {
+            consent::update(dir.path(), id, |r| r.enabled = true).unwrap();
+        }
+        let calls = std::sync::Mutex::new(Vec::new());
+        let order = comps
+            .resume_enabled_with(|id| {
+                calls.lock().unwrap().push(id.clone());
+                async move { Err(EnableError::StartFailed(format!("{id} refused"))) }
+            })
+            .await;
+        assert_eq!(
+            *calls.lock().unwrap(),
+            ["relay", "core"],
+            "the dependency first, the switched-off one skipped, a failure does not stop it"
+        );
+        assert_eq!(
+            order,
+            ["off", "relay", "core"],
+            "the loader's order, dependants last"
+        );
+        // the default enable is the same loop: nothing cached, so both stay off
+        comps.resume_enabled().await;
+        for id in ["relay", "core", "off"] {
+            assert!(comps.stdio(id).await.is_none(), "{id} runs nothing");
+        }
     }
 }

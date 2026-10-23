@@ -241,6 +241,12 @@ ordered after rnsd where it needs it. Disable stops it and releases its ports; "
 `venvs/<id>{,.d}` and `bridge/<adapter>/`, and only a separate call deletes `cache/packages/<id>/`. A disabled component has no
 process, listener, timer or open file (`6-transport/verify/zero-weight.sh`, G7).
 
+- **CLI verb.** `sudo 111 install --components ID[,ID…]` (e.g. `deltachat,madmail`, the components declared
+  `[install] prefetch = false`, which `111 install` does not pre-download) prints and records each named component's licence notice, downloads its
+  pinned payload (size + SHA-256) into `cache/packages/<id>/` and rewrites the receipt; it runs only on an installed node, as
+  root, never with `--phone`, refuses an undeclared id or a component with no build for this machine before any download, and
+  installs, enables or starts nothing.
+
 ## Seams for later layers
 
 Layer 2: identity seam contract delivered — `os/2-identity/README.md` v2 (§Identity above) · Layer 3: offer hook (`state/offer.json` + dashboard element + `/api/status` field) + hub-offload endpoint · Layer 4: delivered — dashboard surface/port/auth + `/api/v1` (see `os/4-interface/README.md`) · Layer 5/6: rnsd child → real transport management (`/var/lib/111/rns`, config schema-version, netlink trigger, `transport_state` enum), radio table · Layer 7: gateway re-evaluation, KB git-sync, manifest gossip · Layer 9: supervision-tree handles, `/health` contract, exit(0)-restart, watchdog heartbeat, per-OEM phone watchdog channel. *[Layer 5 (D20): delivered as the amendments above — ports, `fabric/` state, `111 fabric` verbs, dependencies, manifest entries, token, updater intake.]*
