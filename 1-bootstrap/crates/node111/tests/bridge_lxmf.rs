@@ -49,6 +49,8 @@ const D2: &str = "fedcba9876543210fedcba9876543210";
 const D3: &str = "00112233445566778899aabbccddeeff";
 const D4: &str = "ffeeddccbbaa99887766554433221100";
 const SRC: &str = "5555aaaa5555aaaa5555aaaa5555aaaa";
+/// A relay field's `mid`: 32 lowercase hex, the shape this adapter writes (§6, §8).
+const MID: &str = "00ff00ff00ff00ff00ff00ff00ff00ff";
 const VECTORS: &str =
     include_str!("../../../../2-identity/test-vectors/layer6/attest-transport-ids.json");
 
@@ -299,8 +301,8 @@ async fn msg_lines_become_inbound_texts_with_their_labels() {
         "fields": {
             "5": {"attachment": {"bytes": 1200}},
             "251": "111.relay",
-            "252": {"v": 1, "net": "meshtastic", "id": "W1AW7", "mid": "00ff"},
-            "relay": {"v": 1, "net": "meshtastic", "id": "W1AW7", "mid": "00ff"}
+            "252": {"v": 1, "net": "meshtastic", "id": "W1AW7", "mid": MID},
+            "relay": {"v": 1, "net": "meshtastic", "id": "W1AW7", "mid": MID}
         }
     }});
     let unsigned = json!({"emit": {
@@ -330,7 +332,7 @@ async fn msg_lines_become_inbound_texts_with_their_labels() {
             body: "[W1AW7/M] hello".into(),
             claim_ts: Some(1_700_000_000),
             meta: json!({
-                "relay": {"v": 1, "net": "meshtastic", "id": "W1AW7", "mid": "00ff"},
+                "relay": {"v": 1, "net": "meshtastic", "id": "W1AW7", "mid": MID},
                 "attachments": {"count": 1, "bytes": 1200}
             }),
         })
@@ -350,6 +352,53 @@ async fn msg_lines_become_inbound_texts_with_their_labels() {
         })
     );
     assert_eq!(a.noise(), 0);
+    hp.stop().await;
+}
+
+/// F2 + F3 (review of C3rs): a relay field whose `id` is not a §8 marker name is refused
+/// alone; a field nested deeper than `FIELDS_DEPTH` (3) is dropped alone. Either way the
+/// message — valid text, hash and signature — arrives, flagged `fields_truncated`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn f2_f3_a_bad_relay_field_or_a_too_deep_field_drops_the_field_not_the_message() {
+    let deep = json!({"emit": {
+        "type": "msg", "hash": h('3'), "src": SRC, "name": null, "text": "deep",
+        "claim_ts": null, "signed": true, "why_unsigned": null,
+        "fields": {"9": [[[1]]]}
+    }});
+    let bad_relay = json!({"emit": {
+        "type": "msg", "hash": h('4'), "src": SRC, "name": null, "text": "[ELEVENBYTES/M] x",
+        "claim_ts": null, "signed": true, "why_unsigned": null,
+        "fields": {"relay": {"v": 1, "net": "meshtastic", "id": "ELEVENBYTES", "mid": MID}}
+    }});
+    let bad_mid = json!({"emit": {
+        "type": "msg", "hash": h('5'), "src": SRC, "name": null, "text": "y",
+        "claim_ts": null, "signed": true, "why_unsigned": null,
+        "fields": {"relay": {"v": 1, "net": "meshtastic", "id": "W1AW7", "mid": "00ff"}}
+    }});
+    let hp = spawn(json!([[ready(D1, &pk_hex()), deep, bad_relay, bad_mid]]));
+    hp.live().await;
+    let a = &hp.adapter;
+    let text = |hash: char, body: &str, meta: Value| {
+        Inbound::Text(InboundText {
+            conv: dm(D1, SRC),
+            sender_native: SRC.into(),
+            sender_name: String::new(),
+            auth: Auth::Signed,
+            native_msg_id: h(hash),
+            body: body.into(),
+            claim_ts: None,
+            meta,
+        })
+    };
+    assert_eq!(
+        next(a).await,
+        text('3', "deep", json!({"fields_truncated": true}))
+    );
+    assert_eq!(next(a).await, text('4', "[ELEVENBYTES/M] x", json!({})));
+    assert_eq!(next(a).await, text('5', "y", json!({})));
+    assert_eq!(a.fields_dropped(), 1);
+    assert_eq!(a.relay_refused(), 2);
+    assert_eq!(a.noise(), 0, "a dropped field is not a malformed line");
     hp.stop().await;
 }
 
@@ -381,11 +430,12 @@ async fn heard_feeds_nearby_is_rate_limited_and_resends_an_unconfirmed_send() {
     // the name is untrusted text: control and format characters stripped
     assert_eq!(next(a).await, Inbound::Nearby(nearby_source(D1, D2, "Bob")));
     let mut s1 = send(a, D3, "one").await;
-    assert_eq!(ev(&mut s1).await, accepted(&h('a')));
+    // the hash rides the `queued` line; `Accepted` waits for air (F1)
     assert_eq!(
         ev(&mut s1).await,
         evidence(ForeignMessageState::Queued, EV_NO_PATH)
     );
+    assert_eq!(ev(&mut s1).await, accepted(&h('a')));
     assert_eq!(
         ev(&mut s1).await,
         evidence(ForeignMessageState::Sent, EV_SENT)
@@ -473,7 +523,7 @@ async fn state_lines_map_onto_send_events_monotonically() {
         None,
         "the late lower states never surface"
     );
-    assert_eq!(ev(&mut s2).await, accepted(&h('2')));
+    // refused before air: its hash is never an `Accepted` (F1)
     assert_eq!(
         ev(&mut s2).await,
         Some(SendEvent::Failed {
@@ -509,17 +559,11 @@ async fn state_lines_map_onto_send_events_monotonically() {
 // ---------------------------------------------------------------- noise
 
 fn malformed() -> Vec<Value> {
-    let nested = json!({"emit": {
-        "type": "msg", "hash": h('3'), "src": SRC, "name": "x", "text": "deep",
-        "claim_ts": null, "signed": false, "why_unsigned": "unverified",
-        "fields": {"9": [[[1]]]}
-    }});
     vec![
         json!({"raw": "not json"}),
         json!({"long": 70 * 1024}),
         json!({"emit": {"type": "hello"}}),
         json!({"emit": {"type": "heard", "dest": format!("{D2}0"), "name": "x"}}),
-        nested,
         json!({"raw": "[1,2]"}),
         json!({"emit": {"type": "state", "id": "m1", "state": "queued", "reason": "why not"}}),
         json!({"emit": {"type": "msg", "hash": h('4'), "src": SRC}}),
@@ -539,8 +583,8 @@ async fn malformed_lines_are_noise_and_never_surface() {
         Inbound::Nearby(nearby_source(D1, D2, "fine"))
     );
     assert!(a.recv().now_or_never().is_none(), "nothing else surfaced");
-    // seven of ours plus the supervisor's oversize drop
-    assert_eq!(a.noise(), 8);
+    // six of ours plus the supervisor's oversize drop
+    assert_eq!(a.noise(), 7);
     assert_eq!(
         a.caps().state,
         AdapterState::Live,
@@ -571,7 +615,6 @@ async fn a_respawn_reattaches_and_fails_sends_in_flight() {
     let g1 = a.ready().unwrap().generation;
     assert_eq!(next(a).await, Inbound::Link(LinkState::Up));
     let mut s1 = send(a, D3, "in flight").await;
-    assert_eq!(ev(&mut s1).await, accepted(&h('1')));
     assert_eq!(
         ev(&mut s1).await,
         evidence(ForeignMessageState::Queued, EV_NO_PATH)
@@ -582,8 +625,9 @@ async fn a_respawn_reattaches_and_fails_sends_in_flight() {
             reason: Reason::AdapterDown,
             retry: Retry::Later
         }),
-        "the core re-queues it"
+        "never on air, never accepted: the core re-queues it (F1)"
     );
+
     assert_eq!(next(a).await, Inbound::Link(LinkState::Down));
     assert_eq!(next(a).await, Inbound::Link(LinkState::Up));
     let r = a.ready().unwrap();
@@ -595,6 +639,77 @@ async fn a_respawn_reattaches_and_fails_sends_in_flight() {
         .try_into()
         .unwrap();
     assert!(a.verifier().reticulum_key_for(&tkey).is_none());
+    assert_eq!(a.in_flight(), 0);
+    hp.stop().await;
+}
+
+/// F1 (review of C3rs): the helper reports the hash as soon as the library packed the
+/// message, while it may still be `queued` (OUTBOUND, nothing on air). `Accepted` waits
+/// for `sent`, so a helper killed while a send is queued fails it pre-air (`Later`, no
+/// native id: the core keeps the row `queued` and re-hands it); a send already `sent` was
+/// accepted, so the same failure reads post-air. The queued hash still guards own echoes.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn f1_accepted_only_on_air_a_killed_helper_fails_a_queued_send_pre_air() {
+    let echo = json!({"emit": {
+        "type": "msg", "hash": h('1'), "src": SRC, "name": "Ann", "text": "ours",
+        "claim_ts": null, "signed": true, "why_unsigned": null, "fields": {}
+    }});
+    let runs = json!([
+        [
+            ready(D1, &pk_hex()),
+            link("up"),
+            {"expect": "send", "as": "s1"},
+            {"expect": "send", "as": "s2"},
+            {"state": {"ref": "s1", "hash": h('1'), "state": "queued"}},
+            {"state": {"ref": "s2", "hash": h('2'), "state": "queued"}},
+            {"state": {"ref": "s2", "hash": h('2'), "state": "sent"}},
+            echo,
+            {"sleep_ms": 100},
+            {"kill": true}
+        ],
+        [ready(D1, &pk_hex()), link("up")]
+    ]);
+    let hp = spawn(runs);
+    hp.live().await;
+    let a = &hp.adapter;
+    assert_eq!(next(a).await, Inbound::Link(LinkState::Up));
+    let mut s1 = send(a, D2, "queued when killed").await;
+    let mut s2 = send(a, D3, "sent when killed").await;
+    assert_eq!(
+        ev(&mut s1).await,
+        evidence(ForeignMessageState::Queued, EV_NO_PATH)
+    );
+    assert_eq!(
+        ev(&mut s1).await,
+        Some(SendEvent::Failed {
+            reason: Reason::AdapterDown,
+            retry: Retry::Later
+        }),
+        "never accepted: a pre-air Later"
+    );
+    assert_eq!(ev(&mut s1).await, None);
+    assert_eq!(
+        ev(&mut s2).await,
+        evidence(ForeignMessageState::Queued, EV_NO_PATH)
+    );
+    assert_eq!(ev(&mut s2).await, accepted(&h('2')), "accepted once on air");
+    assert_eq!(
+        ev(&mut s2).await,
+        evidence(ForeignMessageState::Sent, EV_SENT)
+    );
+    assert_eq!(
+        ev(&mut s2).await,
+        Some(SendEvent::Failed {
+            reason: Reason::AdapterDown,
+            retry: Retry::Later
+        })
+    );
+    assert_eq!(ev(&mut s2).await, None);
+    // the queued send's hash was kept: its echo never surfaces as an inbound text
+    assert_eq!(next(a).await, Inbound::Link(LinkState::Down));
+    assert_eq!(next(a).await, Inbound::Link(LinkState::Up));
+    assert!(a.recv().now_or_never().is_none(), "no echo surfaced");
+    assert_eq!(a.echoes(), 1);
     assert_eq!(a.in_flight(), 0);
     hp.stop().await;
 }
@@ -884,8 +999,14 @@ fn the_component_declaration_registers_through_the_loader() {
 
 // ---------------------------------------------------------------- through the bridge core
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn registered_through_bridge_enable_its_texts_echoes_nearby_and_sends_flow() {
+/// A real fabric and a `Bridge` on it (the production path of the bridge core).
+struct Core {
+    _dir: tempfile::TempDir,
+    handle: Arc<fabric::FabricHandle>,
+    bridge: Arc<Bridge>,
+}
+
+async fn core() -> Core {
     let dir = tempfile::tempdir().unwrap();
     std::fs::create_dir_all(dir.path().join("state")).unwrap();
     let layout = DaemonLayout {
@@ -904,6 +1025,148 @@ async fn registered_through_bridge_enable_its_texts_echoes_nearby_and_sends_flow
     let handle = fabric::start(c, Some(identity), &api).await;
     assert!(handle.running(), "{:?}", handle.down_reason());
     let bridge = Bridge::new(BridgeConfig::new(&layout.root), Arc::clone(&handle), &api);
+    Core {
+        _dir: dir,
+        handle,
+        bridge,
+    }
+}
+
+/// One observation of a row: `(state, evidence, reason)` and the send lines written so far.
+type Seen = ((ForeignMessageState, Option<String>, Option<String>), usize);
+
+/// F1 (review of C3rs), end to end through the bridge core: a send still `queued` when
+/// the helper is killed stays `queued` (never `sent` "transmitted, not confirmed", no
+/// native id) and the core re-hands it to the next helper run; once that run reports
+/// `sent` and is killed too, the row stays `sent` "transmitted, not confirmed" and is
+/// never re-sent automatically (§6 (4), §4).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn f1_a_send_queued_when_the_helper_is_killed_stays_queued_and_is_handed_again() {
+    let Core {
+        _dir,
+        handle,
+        bridge,
+    } = core().await;
+    let runs = json!([
+        [
+            ready(D1, &pk_hex()),
+            link("up"),
+            {"expect": "send", "as": "s1"},
+            {"state": {"ref": "s1", "hash": h('7'), "state": "queued"}},
+            {"sleep_ms": 400},
+            {"kill": true}
+        ],
+        [
+            {"sleep_ms": 400},
+            ready(D1, &pk_hex()),
+            link("up"),
+            {"expect": "send", "as": "s2"},
+            {"state": {"ref": "s2", "hash": h('8'), "state": "queued"}},
+            {"state": {"ref": "s2", "hash": h('8'), "state": "sent"}},
+            {"sleep_ms": 400},
+            {"kill": true}
+        ],
+        [ready(D1, &pk_hex()), link("up")]
+    ]);
+    let hp = spawn(runs);
+    hp.live().await;
+    bridge
+        .enable(Arc::clone(&hp.adapter) as Arc<dyn Adapter>)
+        .await
+        .unwrap();
+    let fab = handle.fabric().unwrap().clone();
+    let open = bridge.open_dm("lxmf", D2).await.unwrap();
+    let conv = node111::daemon::fabric::json::parse_fc_id(open["id"].as_str().unwrap()).unwrap();
+    let sent = bridge
+        .send_text("lxmf", conv, "hi Bob", None)
+        .await
+        .unwrap();
+    let id = node111::daemon::fabric::json::parse_fm_id(sent["id"].as_str().unwrap()).unwrap();
+    // tick until `done` holds; every observed state must pass `ok`
+    let drive = |done: &'static str| {
+        let (bridge, hp_lines) = (Arc::clone(&bridge), hp.record());
+        async move {
+            let deadline = Instant::now() + LIMIT;
+            let mut seen = Vec::new();
+            loop {
+                bridge.tick_once().await;
+                let st = bridge.row_state(id).await.unwrap();
+                let lines = std::fs::read_to_string(&hp_lines)
+                    .unwrap_or_default()
+                    .lines()
+                    .count();
+                seen.push((st.clone(), lines));
+                let hit = match done {
+                    "no path" => lines == 1 && st.1.as_deref() == Some(EV_NO_PATH),
+                    "down" => lines == 1 && st.2.as_deref() == Some("adapter_down"),
+                    "handed again" => lines == 2,
+                    "sent" => st.0 == ForeignMessageState::Sent,
+                    "unconfirmed" => st.1.as_deref() == Some(EV_UNCONFIRMED),
+                    _ => unreachable!(),
+                };
+                if hit {
+                    return (st, seen);
+                }
+                assert!(Instant::now() < deadline, "never {done}: {seen:?}");
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        }
+    };
+    let queued = |seen: &[Seen]| {
+        seen.iter().all(|((s, e, _), _)| {
+            *s == ForeignMessageState::Queued && e.as_deref() != Some(EV_UNCONFIRMED)
+        })
+    };
+    // run 1: handed, the helper reports `queued` with the packed message's hash
+    let (_, seen) = drive("no path").await;
+    assert!(queued(&seen), "{seen:?}");
+    // the helper is killed: the row stays `queued` (adapter_down), never `sent`
+    let (st, seen) = drive("down").await;
+    assert!(queued(&seen), "{seen:?}");
+    assert_eq!(st.0, ForeignMessageState::Queued);
+    let row = fab.foreign_message(id).await.unwrap();
+    assert_eq!(row.state, ForeignState::Queued);
+    assert_eq!(row.native_msg_id, None, "nothing was accepted");
+    assert!(bridge.is_tracked(id), "the core retries it");
+    // run 2: the core hands the same row again (a new send id, the same text)
+    let (_, seen) = drive("handed again").await;
+    assert!(queued(&seen), "queued until handed again: {seen:?}");
+    let lines = hp.lines();
+    assert!(lines[0].contains(r#""id":"m1""#) && lines[1].contains(r#""id":"m2""#));
+    assert!(lines.iter().all(|l| l.contains(r#""text":"hi Bob""#)));
+    // run 2 reports `sent`: accepted, the hash recorded on the row
+    let (st, _) = drive("sent").await;
+    assert_eq!(st.1.as_deref(), Some(EV_SENT));
+    let (st, _) = drive("unconfirmed").await;
+    assert_eq!(st.0, ForeignMessageState::Sent, "on air: stays sent");
+    let row = fab.foreign_message(id).await.unwrap();
+    assert_eq!(row.state, ForeignState::Sent);
+    assert_eq!(row.native_msg_id.as_deref(), Some(h('8').as_str()));
+    // run 3: live again, and the aired row is never handed again automatically
+    hp.live().await;
+    for _ in 0..30 {
+        bridge.tick_once().await;
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert_eq!(hp.lines().len(), 2, "never re-sent: {:?}", hp.lines());
+    let (s, e, _) = bridge.row_state(id).await.unwrap();
+    assert_eq!(
+        (s, e.as_deref()),
+        (ForeignMessageState::Sent, Some(EV_UNCONFIRMED))
+    );
+    hp.adapter.quit().await;
+    assert!(bridge.disable("lxmf").await);
+    hp.stop().await;
+    handle.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn registered_through_bridge_enable_its_texts_echoes_nearby_and_sends_flow() {
+    let Core {
+        _dir,
+        handle,
+        bridge,
+    } = core().await;
     let nearby: Arc<Mutex<Vec<(String, Value)>>> = Arc::default();
     let sink = Arc::clone(&nearby);
     bridge.set_nearby_sink(Arc::new(move |net: &str, v: Value| {

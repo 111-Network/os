@@ -17,10 +17,12 @@ byte-assert what 111d wrote. Steps:
     {"heard_of": "s1", "name": ..}   write a heard line for s1's destination
     {"sleep_ms": N}
     {"exit": code}                   exit now with that code
+    {"kill": true}                   SIGKILL itself now (a helper killed mid-send)
 After the last step the fake reads stdin until "quit" or end of input and exits 0.
 """
 import json
 import os
+import signal
 import sys
 import time
 
@@ -97,6 +99,10 @@ def main():
         elif "exit" in step:
             out.flush()
             os._exit(int(step["exit"]))
+        elif "kill" in step:
+            out.flush()
+            os.kill(os.getpid(), signal.SIGKILL)
+
     while True:
         obj = read_line()
         if obj is None or obj.get("type") == "quit":
