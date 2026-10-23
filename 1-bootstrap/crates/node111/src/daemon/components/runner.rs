@@ -8,7 +8,8 @@
 //! - it **spawns only while** the dependency's supervised child is `Running`
 //!   **and** the injectable `serving` probe answers true (production:
 //!   [`rnstatus_serving`], `rnstatus` from `venvs/rns` showing the shared
-//!   instance), else it waits (`Waiting {dependency_down | not_serving}`) on the
+//!   instance, started only once the supervised rnsd holds the instance's
+//!   socket — fix wave FA1), else it waits (`Waiting {dependency_down | not_serving}`) on the
 //!   dependency's state watch, re-probing every `retry`;
 //! - after **every** spawn, the supervisor's back-off respawns included (each
 //!   publishes a new [`PipedIo`] generation), it re-runs the probe; on failure
@@ -31,6 +32,7 @@
 use crate::daemon::supervise::{
     spawn_child, ChildControl, ChildHandle, ChildSpec, ChildState, ChildStdio, PipedIo,
 };
+use crate::daemon::transport::rnstatus::owner;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
@@ -417,7 +419,19 @@ pub const RNSTATUS_TIMEOUT: Duration = Duration::from_secs(10);
 /// run it); the transport spine may replace it with its cached `rnstatus`
 /// reading. Blocking; a probe that hangs is killed after
 /// [`RNSTATUS_TIMEOUT`] and answers false.
+///
+/// **Fix wave FA1 (§11, §16 G4):** rnstatus is started only once the rnsd
+/// the transport supervises for `root` holds the shared-instance socket
+/// ([`owner::supervised_ready`]: `/proc`, no Python). An rnstatus started
+/// while rnsd is down or still starting binds `@rns/<instance>` itself for
+/// a moment, and an rnsd respawned then attaches as its client and never
+/// serves. Until the socket is rnsd's this answers false (`not_serving`;
+/// the gate re-probes on the dependency's state change or its back-off)
+/// without starting anything; an unregistered root is never serving.
 pub fn rnstatus_serving(root: &Path) -> bool {
+    if owner::supervised_ready(root).is_err() {
+        return false;
+    }
     let bin = root.join("venvs/rns/bin/rnstatus");
     let config = root.join("rns");
     let child = std::process::Command::new(&bin)
@@ -670,20 +684,105 @@ mod tests {
         assert!(!rnstatus_serving(d.path()));
     }
 
+    /// A root whose rns/config names a unique instance, and a fake
+    /// rnstatus that logs each run into `calls` (FA1).
+    fn fa1_root(tag: &str) -> (tempfile::TempDir, String, PathBuf) {
+        let d = tempfile::tempdir().unwrap();
+        let n = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|t| t.subsec_nanos())
+            .unwrap_or(0);
+        let inst = format!("fa1-runner-{tag}-{}-{n}", std::process::id());
+        std::fs::create_dir_all(d.path().join("rns")).unwrap();
+        std::fs::write(
+            d.path().join("rns/config"),
+            format!("[reticulum]\n  share_instance = Yes\n  instance_name = {inst}\n"),
+        )
+        .unwrap();
+        let calls = d.path().join("calls.log");
+        (d, inst, calls)
+    }
+
+    fn fake_rnstatus(root: &Path, calls: &Path, body: &str) {
+        use std::os::unix::fs::PermissionsExt;
+        let bin = root.join("venvs/rns/bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let p = bin.join("rnstatus");
+        std::fs::write(
+            &p,
+            format!("#!/bin/sh\necho run >>'{}'\n{body}", calls.display()),
+        )
+        .unwrap();
+        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    fn runs(calls: &Path) -> usize {
+        std::fs::read_to_string(calls)
+            .map(|s| s.lines().count())
+            .unwrap_or(0)
+    }
+
     #[test]
     fn rnstatus_reports_a_shared_instance() {
-        use std::os::unix::fs::PermissionsExt;
-        let d = tempfile::tempdir().unwrap();
-        let bin = d.path().join("venvs/rns/bin");
-        std::fs::create_dir_all(&bin).unwrap();
-        let write = |body: &str| {
-            let p = bin.join("rnstatus");
-            std::fs::write(&p, body).unwrap();
-            std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
-        };
-        write("#!/bin/sh\necho ' Shared Instance[rnsd]'\necho '    Status    : Up'\n");
+        use std::os::linux::net::SocketAddrExt;
+        let (d, inst, calls) = fa1_root("serving");
+        // this process plays the supervised rnsd holding the instance
+        let me = std::process::id();
+        let token = owner::register(d.path(), Arc::new(move || Some(me)));
+        let addr =
+            std::os::unix::net::SocketAddr::from_abstract_name(format!("rns/{inst}")).unwrap();
+        let _l = std::os::unix::net::UnixListener::bind_addr(&addr).unwrap();
+        fake_rnstatus(
+            d.path(),
+            &calls,
+            "echo ' Shared Instance[rnsd]'\necho '    Status    : Up'\n",
+        );
         assert!(rnstatus_serving(d.path()));
-        write("#!/bin/sh\necho 'No shared RNS instance available to get status from'\nexit 1\n");
+        fake_rnstatus(
+            d.path(),
+            &calls,
+            "echo 'No shared RNS instance available to get status from'\nexit 1\n",
+        );
         assert!(!rnstatus_serving(d.path()));
+        assert_eq!(runs(&calls), 2);
+        owner::unregister(d.path(), token);
+    }
+
+    /// FA1: no rnstatus is started while the supervised rnsd does not hold
+    /// the instance (nothing listens, someone else listens, no rnsd, or no
+    /// rnsd registered for the root) — the old probe started one each time.
+    #[test]
+    fn fa1_no_rnstatus_until_the_supervised_rnsd_owns_the_instance() {
+        use std::os::linux::net::SocketAddrExt;
+        let (d, inst, calls) = fa1_root("gate");
+        fake_rnstatus(
+            d.path(),
+            &calls,
+            "echo ' Shared Instance[rnsd]'\necho '    Status    : Up'\n",
+        );
+        // no rnsd registered for this root
+        assert!(!rnstatus_serving(d.path()));
+        // registered, not running
+        let pid = Arc::new(std::sync::Mutex::new(None::<u32>));
+        let p2 = Arc::clone(&pid);
+        let token = owner::register(d.path(), Arc::new(move || *p2.lock().unwrap()));
+        assert!(!rnstatus_serving(d.path()));
+        // running (pid 1 stands in), nothing listens
+        *pid.lock().unwrap() = Some(1);
+        assert!(!rnstatus_serving(d.path()));
+        // the socket listens, but another process (this one) holds it
+        let addr =
+            std::os::unix::net::SocketAddr::from_abstract_name(format!("rns/{inst}")).unwrap();
+        let l = std::os::unix::net::UnixListener::bind_addr(&addr).unwrap();
+        assert!(!rnstatus_serving(d.path()));
+        assert_eq!(runs(&calls), 0, "no rnstatus started before rnsd owns it");
+        // the supervised pid holds it: now rnstatus runs
+        *pid.lock().unwrap() = Some(std::process::id());
+        assert!(rnstatus_serving(d.path()));
+        assert_eq!(runs(&calls), 1);
+        drop(l);
+        assert!(!rnstatus_serving(d.path()));
+        assert_eq!(runs(&calls), 1);
+        owner::unregister(d.path(), token);
     }
 }

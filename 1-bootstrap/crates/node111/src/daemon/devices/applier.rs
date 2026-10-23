@@ -682,6 +682,13 @@ impl SpineProbe {
 }
 
 impl ApplyProbe for SpineProbe {
+    /// One reading through the spine's [`Rnstatus`](crate::daemon::transport::rnstatus::Rnstatus),
+    /// which (fix wave FA1, §11) starts no rnstatus until the supervised
+    /// rnsd holds the shared-instance socket and answers `NotOwned`
+    /// instead: the probe loop (`Applier::probe_until`) keeps polling every
+    /// [`PROBE_INTERVAL`] for the ownership to appear and reverts only when
+    /// the window ends — no rnstatus of ours can become the instance while
+    /// a restarted rnsd starts.
     fn interfaces(&self) -> BoxFut<'_, Result<Vec<InterfaceFacts>, String>> {
         Box::pin(async move {
             let rn = self.spine.rnstatus();
