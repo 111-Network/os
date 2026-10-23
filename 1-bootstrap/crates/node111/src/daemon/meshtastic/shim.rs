@@ -52,6 +52,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::net::TcpStream;
 use tokio::time::Instant;
+use zeroize::Zeroize;
 
 /// The manifest's shim name (`assets/panels/meshtastic.toml`).
 pub const NAME: &str = "meshtastic-http";
@@ -88,9 +89,30 @@ pub fn frame(payload: &[u8]) -> Result<Vec<u8>, ShimError> {
 
 /// Incremental deframer for the downlink byte stream (bounded: it never
 /// holds more than one header + [`MAX_FRAME`] bytes of a partial frame).
-#[derive(Debug, Default)]
+///
+/// Frames carry secrets (a `Channel` frame holds its PSK, Layer 6 §5), so the
+/// buffer is wiped as it goes (B3 review F5): consumed bytes are zeroed where
+/// they sat, a buffer outgrown is zeroized before it is freed, and the whole
+/// buffer is zeroized on drop. `Debug` shows only the pending length.
+#[derive(Default)]
 pub struct Deframer {
-    buf: Vec<u8>,
+    /// Fully initialised storage; `data[..len]` is pending, the rest is zero.
+    data: Vec<u8>,
+    len: usize,
+}
+
+impl std::fmt::Debug for Deframer {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Deframer")
+            .field("pending", &self.len)
+            .finish()
+    }
+}
+
+impl Drop for Deframer {
+    fn drop(&mut self) {
+        self.data.zeroize();
+    }
 }
 
 impl Deframer {
@@ -98,45 +120,73 @@ impl Deframer {
         Self::default()
     }
 
+    /// Append `bytes`, growing into a fresh zeroed buffer (the old one wiped).
+    fn append(&mut self, bytes: &[u8]) {
+        let need = self.len.saturating_add(bytes.len());
+        if need > self.data.len() {
+            let mut grown = vec![0u8; need.max(self.data.len().saturating_mul(2)).max(64)];
+            grown[..self.len].copy_from_slice(&self.data[..self.len]);
+            let mut old = std::mem::replace(&mut self.data, grown);
+            old.zeroize();
+        }
+        self.data[self.len..need].copy_from_slice(bytes);
+        self.len = need;
+    }
+
+    /// Drop the first `n` pending bytes; the vacated tail is zeroed.
+    fn consume(&mut self, n: usize) {
+        let n = n.min(self.len);
+        self.data.copy_within(n..self.len, 0);
+        self.data[self.len - n..self.len].zeroize();
+        self.len -= n;
+    }
+
     /// Feed bytes; returns every complete payload, in order.
     pub fn push(&mut self, bytes: &[u8]) -> Vec<Vec<u8>> {
-        self.buf.extend_from_slice(bytes);
+        self.append(bytes);
         let mut out = Vec::new();
         loop {
+            let buf = &self.data[..self.len];
             // drop everything before the next START1 START2 (debug text, noise)
-            match self.buf.windows(2).position(|w| w == [START1, START2]) {
+            match buf.windows(2).position(|w| w == [START1, START2]) {
                 Some(0) => {}
                 Some(i) => {
-                    self.buf.drain(..i);
+                    self.consume(i);
                 }
                 None => {
                     // keep a trailing START1: its START2 may be next
-                    let keep = usize::from(self.buf.last() == Some(&START1));
-                    let cut = self.buf.len() - keep;
-                    self.buf.drain(..cut);
+                    let keep = usize::from(buf.last() == Some(&START1));
+                    let cut = self.len - keep;
+                    self.consume(cut);
                     return out;
                 }
             }
-            if self.buf.len() < 4 {
+            if self.len < 4 {
                 return out;
             }
-            let len = usize::from(u16::from_be_bytes([self.buf[2], self.buf[3]]));
+            let len = usize::from(u16::from_be_bytes([self.data[2], self.data[3]]));
             if len > MAX_FRAME {
                 // corrupt header: skip this START1 and resync
-                self.buf.drain(..1);
+                self.consume(1);
                 continue;
             }
-            if self.buf.len() < 4 + len {
+            if self.len < 4 + len {
                 return out;
             }
-            out.push(self.buf[4..4 + len].to_vec());
-            self.buf.drain(..4 + len);
+            out.push(self.data[4..4 + len].to_vec());
+            self.consume(4 + len);
         }
     }
 
     /// Bytes held for a partial frame.
     pub fn pending(&self) -> usize {
-        self.buf.len()
+        self.len
+    }
+
+    /// The whole storage, pending bytes and the wiped rest (tests: F5).
+    #[cfg(test)]
+    fn storage(&self) -> &[u8] {
+        &self.data
     }
 }
 
@@ -622,6 +672,34 @@ mod tests {
         assert!(d.pending() <= 1);
         // a zero-length frame is a frame
         assert_eq!(d.push(&[0x94, 0xc3, 0, 0]), vec![Vec::<u8>::new()]);
+    }
+
+    #[test]
+    fn the_deframer_wipes_what_it_consumed_f5() {
+        // B3 review F5: a frame's bytes (a Channel frame carries its PSK) must not stay
+        // in the buffer's storage once deframed, nor in a buffer outgrown
+        let secret = [0x5au8; 40];
+        let mut d = Deframer::new();
+        let mut stream = b"DEBUG | noise before\r\n".to_vec();
+        stream.extend_from_slice(&frame(&secret).unwrap());
+        // split reads: the partial frame is held, then completed (the buffer grows)
+        let (a, b) = stream.split_at(30);
+        assert!(d.push(a).is_empty());
+        assert_eq!(d.push(b), vec![secret.to_vec()]);
+        assert_eq!(d.pending(), 0);
+        assert!(
+            d.storage().iter().all(|b| *b == 0),
+            "consumed bytes are zeroed in place"
+        );
+        // a partial frame pending: only its own bytes are held
+        let f = frame(&secret).unwrap();
+        assert!(d.push(&f[..10]).is_empty());
+        assert_eq!(d.pending(), 10);
+        assert!(d.storage()[10..].iter().all(|b| *b == 0));
+        assert!(
+            !format!("{d:?}").contains("90"),
+            "Debug shows no bytes: {d:?}"
+        );
     }
 
     #[test]
