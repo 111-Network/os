@@ -126,6 +126,14 @@ pub fn body(s: &str) -> (String, Option<u64>) {
     }
 }
 
+/// A non-empty body made only of what [`clean`] strips (Cc and Cf; V5-4): it would be
+/// stored as an empty bubble, so the core drops it as noise (counted, never stored). An
+/// empty body stays a row (an adapter may report attachments with no text). Looks at what
+/// [`body`] looks at (the first `4 × 64 KiB`).
+pub fn cleans_to_nothing(raw: &str) -> bool {
+    !raw.is_empty() && cut(raw, MAX_RAW_BYTES).chars().all(is_stripped)
+}
+
 /// The `why_unsigned` values (§6 (5): the library's `unverified_reason`, or `unverified`).
 pub const WHY_UNSIGNED: &[&str] = &["source_unknown", "signature_invalid", "unverified"];
 /// The registered network ids a relay field may name (§3, §8).
@@ -235,9 +243,13 @@ pub fn auth(a: super::Auth) -> ForeignAuth {
 }
 
 /// One inbound text as the store row it becomes (§3), or `None` when it is noise (no
-/// usable sender, an over-long native id). `conv` is the conversation's row id; the
-/// adapter's auth label passes through (§3 "Authentication label").
+/// usable sender, an over-long native id, a body that cleans to nothing —
+/// [`cleans_to_nothing`]). `conv` is the conversation's row id; the adapter's auth label
+/// passes through (§3 "Authentication label").
 pub fn prepare(t: &InboundText, conv: i64, ids_globally_unique: bool) -> Option<ForeignInsert> {
+    if cleans_to_nothing(&t.body) {
+        return None;
+    }
     let (sender_native, native_msg_id) = ids(t)?;
     Some(prepare_ids(
         t,
@@ -521,6 +533,29 @@ mod tests {
         let mut t = text("x", "");
         t.native_msg_id.clear();
         assert_eq!(prepare(&t, 3, true).unwrap().native_msg_id, None);
+    }
+
+    #[test]
+    fn v5_4_a_body_of_only_cc_and_cf_is_noise_an_empty_one_is_not() {
+        for raw in [
+            "\u{202E}\u{200B}\u{FEFF}",
+            "\u{7}\r\u{0}",
+            "\u{AD}",
+            "\u{E0041}\u{2066}",
+        ] {
+            assert!(cleans_to_nothing(raw), "{raw:?}");
+            assert!(
+                prepare(&text(raw, "Ann"), 3, false).is_none(),
+                "{raw:?}: noise"
+            );
+        }
+        // an empty body stays a row (attachments with no text); any kept char keeps it
+        assert!(!cleans_to_nothing(""));
+        assert!(prepare(&text("", "Ann"), 3, false).is_some());
+        for raw in ["\u{202E}a", "\n", "\t", " "] {
+            assert!(!cleans_to_nothing(raw), "{raw:?}");
+            assert!(prepare(&text(raw, "Ann"), 3, false).is_some(), "{raw:?}");
+        }
     }
 
     fn lxmf(meta: Value) -> InboundText {

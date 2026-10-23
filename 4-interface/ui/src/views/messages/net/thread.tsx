@@ -29,6 +29,7 @@ import {
   isForeignRetryable,
   isHandoffPending,
   summarizeParts,
+  supersededBy,
   topSeq,
   type ThreadItem,
 } from "../../../lib/api/networks";
@@ -164,6 +165,8 @@ export function ForeignRow({ item, network, now, actions }: { item: ThreadItem; 
   const text = rows.map((r) => cleanPeerText(r.text)).join("\n");
   const truncated = rows.find((r) => r.truncated !== null && r.truncated !== undefined);
   const label = cleanPeerText(first.text).slice(0, 40);
+  // V5: a row already sent again reads "resent as …" and offers no retry (its new row is the one to act on)
+  const resentAs = own ? rows.map(supersededBy).find((x): x is string => x !== null) ?? null : null;
   return (
     <li className={cx("flex flex-col gap-1", own ? "items-end" : "items-start")} data-testid={first.id}>
       {!own ? <SenderLine m={first} network={network} /> : null}
@@ -186,9 +189,14 @@ export function ForeignRow({ item, network, now, actions }: { item: ThreadItem; 
           {reason}
         </p>
       ) : null}
-      {own && rows.some(isHandoffPending) ? (
+      {own && rows.some((r) => isHandoffPending(r) && supersededBy(r) === null) ? (
         <p className="max-w-[85%] text-end font-mono text-xs font-bold text-foreground" data-testid="handoff-question">
           {HANDOFF_QUESTION}
+        </p>
+      ) : null}
+      {resentAs ? (
+        <p className={cx("max-w-[85%] text-end", TEXT)} data-testid="resent-as">
+          resent as {resentAs}
         </p>
       ) : null}
       <Disclosure

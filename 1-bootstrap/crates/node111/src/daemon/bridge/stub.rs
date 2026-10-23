@@ -367,7 +367,9 @@ impl Adapter for StubAdapter {
 ///   command. Operations (`op`): `feed` (`items`: [`Inbound`] values), `burst` (`n` texts
 ///   in one conversation, one wake-up), `script` (send outcomes, in order; `replace` drops
 ///   what is still scripted), `facts`
-///   (replace the live facts), `state` (the adapter state), `queue_full`, `emit_held`,
+///   (replace the live facts), `state` (the adapter state, and the matching
+///   `Inbound::Link` — `Live` up, anything else down — so the core publishes the rail's
+///   `bridge` frame on its next tick as for a product adapter), `queue_full`, `emit_held`,
 ///   `pin` (a conversation's pinned flag, which no R-B route sets).
 /// - **Sends** are appended to `<control>/<id>.sent.jsonl` (one line per `send`, the
 ///   conversation, the text and the scripted outcome), so the script counts what reached
@@ -382,8 +384,8 @@ impl Adapter for StubAdapter {
 pub mod scenario {
     use super::{
         lock, Adapter, AdapterFacts, AdapterState, Caps, ConvKind, ConvRef, ForeignMessageState,
-        Inbound, InboundText, PerKind, Reason, Retry, SendEvent, SendHandle, SendOpts, StubAdapter,
-        StubOutcome,
+        Inbound, InboundText, LinkState, PerKind, Reason, Retry, SendEvent, SendHandle, SendOpts,
+        StubAdapter, StubOutcome,
     };
     use crate::daemon::bridge::{AirtimeProfile, Auth, Bridge, Syntax};
     use futures_util::future::BoxFuture;
@@ -965,7 +967,17 @@ pub mod scenario {
                     Ok(json!({}))
                 }
                 Command::State { stub, state } => {
-                    self.stub(&stub)?.inner.set_state(state);
+                    // V5-5: the state change also reaches the core as a link item, as a
+                    // product adapter reports it (Live = up, anything else = down), so
+                    // the rail's `bridge` frame follows on the next tick
+                    let s = self.stub(&stub)?;
+                    let link = if state == AdapterState::Live {
+                        LinkState::Up
+                    } else {
+                        LinkState::Down
+                    };
+                    s.inner.set_state(state);
+                    s.inner.feed(Inbound::Link(link));
                     Ok(json!({}))
                 }
                 Command::QueueFull { stub, on } => {
@@ -1015,6 +1027,25 @@ pub mod scenario {
             )
             .unwrap();
             assert!(matches!(f, Command::Feed { ref items, .. } if items.len() == 2));
+            // V5-5: the state op as G1 sends it
+            let st: Command = serde_json::from_str(
+                r#"{"op":"state","stub":"stub-app","state":{"state":"error","detail":"adapter_down"}}"#,
+            )
+            .unwrap();
+            assert!(
+                matches!(st, Command::State { state: AdapterState::Error(ref d), .. } if d == "adapter_down")
+            );
+            let st: Command = serde_json::from_str(
+                r#"{"op":"state","stub":"stub-app","state":{"state":"live"}}"#,
+            )
+            .unwrap();
+            assert!(matches!(
+                st,
+                Command::State {
+                    state: AdapterState::Live,
+                    ..
+                }
+            ));
             let s: ScenarioFile = serde_json::from_str(
                 r#"{"control":"/c","node":"a","stubs":[{"id":"stub-mesh","label":"M","tag":"SM","max_text_bytes":{"channel":232,"dm":220,"group":null}}]}"#,
             )

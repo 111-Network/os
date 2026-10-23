@@ -516,6 +516,9 @@ pub fn foreign_message(m: &ForeignMessageRow, at: i64) -> Value {
         // reason an inbound row was kept from relaying (`marker`, §8 guard 3)
         "uncertain": !inbound && m.state == ForeignState::Queued && m.handoff_pending,
         "not_relayed": meta.get("not_relayed").and_then(Value::as_str),
+        // V5-3 (additive): the row this one was sent again as (`meta.resent_as`); a
+        // superseded row is never retried again
+        "superseded_by": meta.get("resent_as").and_then(Value::as_i64).map(fm_id),
     })
 }
 

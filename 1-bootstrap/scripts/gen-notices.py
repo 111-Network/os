@@ -127,12 +127,14 @@ def go_snapshot_paths(tag):
 
 
 def component_pins():
-    """The optional components' declarations (`assets/components/*.toml`, sorted): each
-    file's hash covers its per-target pins, so a changed pin makes --check stale."""
+    """The optional components' declarations (`assets/components/*.toml`) and their pip
+    locks (`assets/components/*.lock.txt`, the LXMF helper's closure, §15), sorted: each
+    file's hash covers its per-target pins or its locked hashes, so a changed pin or lock
+    line makes --check stale."""
     if not os.path.isdir(COMPONENTS_DIR):
         return []
     return [os.path.join(COMPONENTS_DIR, n) for n in sorted(os.listdir(COMPONENTS_DIR))
-            if n.endswith(".toml") and os.path.isfile(os.path.join(COMPONENTS_DIR, n))]
+            if n.endswith((".toml", ".lock.txt")) and os.path.isfile(os.path.join(COMPONENTS_DIR, n))]
 
 
 def input_records():
@@ -642,8 +644,9 @@ def render():
     w("- **Python (Layer 5):** the packages locked for the `meshtastic-presence` venv (`5-messaging/sidecars/meshtastic-presence/meshtastic-presence-lock.txt`),")
     w("  with the hand-maintained `1-bootstrap/scripts/notices/python-licenses.txt`. Every locked package needs a row at its locked version.")
     w("- **Web client bundle (Layer 5):** the Meshtastic web client, tag and commit from `1-bootstrap/scripts/meshtastic-web-build.sh`.")
-    w("- **Optional components (Layer 6):** `1-bootstrap/crates/node111/assets/components/*.toml` are recorded below, so a changed per-target payload pin")
-    w("  makes `--check` stale. Their programs are separate and downloaded by the user (`LICENSING.md`); they are not covered by this file.")
+    w("- **Optional components (Layer 6):** `1-bootstrap/crates/node111/assets/components/*.toml` and their pip locks (`*.lock.txt`) are recorded below,")
+    w("  so a changed per-target payload pin or lock line makes `--check` stale. Their programs are separate and downloaded by the user (`LICENSING.md`);")
+    w("  they are not covered by this file.")
     w("- **Fonts, vendored code, embedded data:** see their sections.")
     w("- **Copyright lines** are taken from each component's license files (Rust: the unpacked crate in the cargo registry; JS: the installed package). Where")
     w("  a component's license files have no copyright line, its `authors` metadata is shown instead.")

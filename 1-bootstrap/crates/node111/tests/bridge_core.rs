@@ -586,6 +586,21 @@ async fn ingest_strips_cc_and_cf_nfc_normalises_and_caps_names() {
     let v = p.n.handle.foreign_message_json(&rows[1]);
     assert_eq!(v["truncated"], 90_000);
     assert_schema(&v, "ForeignMessage");
+    // V5-4: a body of only Cc/Cf characters is noise (counted), never an empty bubble
+    let noise = p.n.bridge.noise();
+    p.a.feed(text(
+        &p.ca,
+        "!a1b2c3d4",
+        "W1AW",
+        "3",
+        "\u{202E}\u{200B}\u{FEFF}\u{7}",
+    ));
+    p.a.feed(text(&p.ca, "!a1b2c3d4", "W1AW", "4", "after"));
+    let rows = p.n.wait_inbound(p.src, 3).await;
+    assert_eq!(rows.len(), 3, "the blank one was not stored");
+    assert_eq!(rows[2].body, "after");
+    assert!(rows.iter().all(|r| !r.body.is_empty()));
+    assert_eq!(p.n.bridge.noise(), noise + 1, "counted");
     p.n.handle.shutdown().await;
 }
 
@@ -1828,6 +1843,13 @@ async fn a_pending_row_after_a_crash_is_never_resent_and_resend_mints_a_new_row(
         "{}",
         old.meta
     );
+    // V5-3: a superseded row is never resent again (its text would go twice more)
+    assert!(
+        matches!(b2.resend(id).await, Err(BridgeError::BadRequest(_))),
+        "a row already resent is refused"
+    );
+    b2.tick_once().await;
+    assert_eq!(a2.sent_count(), 1, "nothing more went out");
     assert!(
         b2.resend(new).await.is_err(),
         "a delivered-path row is not resent"
@@ -2539,5 +2561,89 @@ async fn f7_recv_side_changes_publish_one_snapshot_on_the_tick() {
     assert_eq!(count(head), 1, "one snapshot on the tick");
     n.ticks(2).await;
     assert_eq!(count(head), 1, "and none while nothing changed");
+    n.handle.shutdown().await;
+}
+
+/// FB1 item 6: the `bridge` snapshot follows a network's conversation counts through the
+/// tick's debounce (no timer): an inbound DM (a new conversation, one unread) publishes one
+/// frame on the next tick whatever the batch size; a tick with nothing changed publishes
+/// none; a read mark (the fabric's `network_message` for the conversation) publishes the
+/// new `unread`; a text into an existing channel (no count changed) publishes nothing.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn item6_conversation_count_changes_publish_one_snapshot_on_the_tick() {
+    let n = node().await;
+    // as the daemon wires it: the fabric's publisher finds the bridge in ext
+    n.api.insert_ext(Arc::clone(&n.bridge));
+    let a = stub("stub-a", "Stub A", "A", "na");
+    n.bridge.enable(a.clone()).await.unwrap();
+    let ch = cref("stub-a", "na", ConvKind::Channel, "ch:alpha");
+    a.feed(text(&ch, "s", "S", "c0", "hello channel"));
+    let ch_id = n.conv(&ch).await;
+    n.wait_inbound(ch_id, 1).await;
+    n.ticks(2).await;
+    let frames = |from: u64| -> Vec<Value> {
+        n.api
+            .events
+            .subscribe(Some(from))
+            .replay
+            .iter()
+            .filter(|f| f.event == "bridge")
+            .map(|f| serde_json::from_str(&f.data).unwrap())
+            .collect()
+    };
+    let counts = |v: &Value| -> Value {
+        v["networks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|x| x["id"] == "stub-a")
+            .map(|x| x["counts"].clone())
+            .unwrap()
+    };
+    // a quiet tick: nothing
+    let head = n.api.events.head();
+    n.ticks(2).await;
+    assert!(
+        frames(head).is_empty(),
+        "nothing changed, nothing published"
+    );
+
+    // a DM from a new peer, three texts: one frame on the tick, unread 3
+    let dm = cref("stub-a", "na", ConvKind::Dm, "peer-1");
+    let head = n.api.events.head();
+    a.feed_many((0..3).map(|i| text(&dm, "peer-1", "P", &format!("d{i}"), "hi")));
+    let dm_id = n.conv(&dm).await;
+    n.wait_inbound(dm_id, 3).await;
+    assert!(frames(head).is_empty(), "nothing from the recv path itself");
+    n.ticks(1).await;
+    let got = frames(head);
+    assert_eq!(got.len(), 1, "{got:?}");
+    assert_schema(&got[0], "SseBridge");
+    assert_eq!(counts(&got[0])["unread"], 3, "{}", got[0]);
+    n.ticks(2).await;
+    assert_eq!(frames(head).len(), 1, "and none while nothing changed");
+
+    // the person reads it: the fabric's conversation event, then the tick publishes unread 0
+    let head = n.api.events.head();
+    n.fab().foreign_conversation_mark_read(dm_id).await.unwrap();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        n.ticks(1).await;
+        if let Some(f) = frames(head).last() {
+            assert_eq!(counts(f)["unread"], 0, "{f}");
+            break;
+        }
+        assert!(Instant::now() < deadline, "no snapshot after the read mark");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert_eq!(frames(head).len(), 1);
+
+    // a text into the existing channel: rows changed, counts did not — no frame
+    let head = n.api.events.head();
+    a.feed(text(&ch, "s", "S", "c1", "again"));
+    n.wait_inbound(ch_id, 2).await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    n.ticks(2).await;
+    assert!(frames(head).is_empty(), "{:?}", frames(head));
     n.handle.shutdown().await;
 }

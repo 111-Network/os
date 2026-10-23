@@ -1333,6 +1333,7 @@ components:
         truncated: { type: [integer, "null"], minimum: 0, description: "when the stored body was cut at 64 KiB, the original size in bytes (the UI says 'message too long to show (N bytes)'); null otherwise" }
         uncertain: { type: boolean, description: "Layer 6 C1 (additive): an own row handed to a carrier that never answered (its pending mark survived a restart or a disable, and it is not in flight now): it may have been sent, and it is never handed again by itself — 'may have been sent; resend?' (§4). Such a row without another reason reads `reason_code: handoff_pending`. Absent from older daemons (read as false)" }
         not_relayed: { type: [string, "null"], description: "Layer 6 C1 (additive): why an inbound row was kept from every relay edge — `marker` (it already carries a relay marker `[name/TAG]`, §8 guard 3: a copy is never relayed again, and a human who types a marker gets no relay). null when not applicable; absent from older daemons" }
+        superseded_by: { oneOf: [ { $ref: "#/components/schemas/ForeignMessageId" }, { type: "null" } ], description: "Layer 6 V5 (additive): the id of the row this own row was sent again as (`POST /messages/{id}/retry`). A superseded row is never retried again (`409 bad_request`: retry the new row); the UI reads it 'resent as …'. null otherwise; absent from older daemons (read as null)" }
     ForeignThread:
       type: object
       required: [schema, conversation, messages, more]

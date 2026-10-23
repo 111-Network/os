@@ -841,9 +841,13 @@ impl Bridge {
 
     /// Resend a user-composed row that is uncertain or `failed` (§4): a new one-target send
     /// group with the same text and part numbering (so a new packet id); the old row keeps
-    /// its state and records `meta.resent_as`. A relay copy is never resent (the edge's mark
-    /// has passed its origin). Returns `ForeignSendAccepted`.
+    /// its state and records `meta.resent_as` (`ForeignMessage.superseded_by`). A relay copy
+    /// is never resent (the edge's mark has passed its origin), nor a row already resent
+    /// (V5-3: `BadRequest`, the route's `409`; its new row is the one to retry). One resend
+    /// runs at a time. Returns `ForeignSendAccepted`.
     pub async fn resend(&self, id: i64) -> Result<Value, BridgeError> {
+        // V5-3: the check below and the `resent_as` write are one step
+        let _one = self.resend_one.lock().await;
         let f = self.fab()?;
         let row = match f.foreign_message(id).await {
             Ok(r) => r,
@@ -854,6 +858,17 @@ impl Bridge {
             return Err(BridgeError::BadRequest(
                 "only a message you composed is resent; a relay copy is not".into(),
             ));
+        }
+        // V5-3: a row already sent again is superseded by its new row — retry that one
+        // (two retries of one row would send its text twice more)
+        if let Some(new) = serde_json::from_str::<Value>(&row.meta)
+            .ok()
+            .and_then(|m| m.get("resent_as").and_then(Value::as_i64))
+        {
+            return Err(BridgeError::BadRequest(format!(
+                "this message was already sent again as {}; retry that one",
+                fjson::fm_id(new)
+            )));
         }
         let uncertain =
             row.state == ForeignState::Queued && row.handoff_pending && !self.is_tracked(id);

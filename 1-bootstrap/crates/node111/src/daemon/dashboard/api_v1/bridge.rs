@@ -23,7 +23,11 @@
 //!   contract's success; the child may still wait for its dependency, `reason_code`
 //!   says so). A component whose network has an adapter factory registered
 //!   ([`ComponentAdapters`], the C3/C5 seam) gets its adapter enabled in the bridge core
-//!   after enable and disabled before disable (its Nearby source cleared with it); a
+//!   after enable — an adapter that cannot attach (its factory or its health check
+//!   failed: the Delta Chat core's first handshake, an LXMF helper that does not start)
+//!   disables the component again and answers `409 component_unavailable` /
+//!   `health_failed` (FB1; a component it depends on stays) — and disabled before
+//!   disable (its Nearby source cleared with it); a
 //!   component with a [`PrepareHook`] (the LXMF helper's client config and run arguments,
 //!   W1) has it run once the licence notice passes and before its child starts — a
 //!   failing hook answers the enable's problem and nothing starts ([`enable_component`]). `disable` is idempotent; `remove-files
@@ -53,6 +57,7 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
+use std::time::Duration;
 
 pub fn router() -> ApiRouter {
     axum::Router::new()
@@ -163,6 +168,18 @@ pub(crate) async fn components_list(c: Components) -> Vec<Status> {
 pub type AdapterFactory =
     Arc<dyn Fn(Components) -> BoxFuture<'static, Result<Arc<dyn Adapter>, String>> + Send + Sync>;
 
+/// An [`AdapterFactory`] told how long it may wait for the adapter's health (FB1: the
+/// Delta Chat core's first handshake, §2.1 rule 4 "start → health"). `None`: the whole
+/// health check (the component route — a failure refuses the enable); `Some(bound)`: at
+/// most `bound`, and a check still pending then is no failure (`Layer6::resume` — the
+/// adapter attaches and reads its own state, `adapter_down`, until it is Live).
+/// [`ComponentAdapters::register`] wraps a plain factory into one that ignores the bound.
+pub type BoundedFactory = Arc<
+    dyn Fn(Components, Option<Duration>) -> BoxFuture<'static, Result<Arc<dyn Adapter>, String>>
+        + Send
+        + Sync,
+>;
+
 /// Runs before a component's child is started, once its licence notice is acknowledged
 /// (W1, the C3rs seam: the LXMF helper's Reticulum client config written with rnsd's
 /// `rpc_key`, §6 (1), §11): prepares what the child needs on disk and answers the
@@ -182,7 +199,7 @@ pub type UnprepareHook = Arc<dyn Fn() -> BoxFuture<'static, ()> + Send + Sync>;
 /// With nothing registered, enabling a component starts its child only.
 #[derive(Default)]
 pub struct ComponentAdapters {
-    map: RwLock<HashMap<String, AdapterFactory>>,
+    map: RwLock<HashMap<String, BoundedFactory>>,
     prepare: RwLock<HashMap<String, PrepareHook>>,
     unprepare: RwLock<HashMap<String, UnprepareHook>>,
 }
@@ -190,6 +207,12 @@ pub struct ComponentAdapters {
 impl ComponentAdapters {
     /// Register the factory of `component` (a second registration replaces the first).
     pub fn register(&self, component: &str, f: AdapterFactory) {
+        self.register_bounded(component, Arc::new(move |c, _bound| f(c)));
+    }
+
+    /// Register a factory that takes the health bound ([`BoundedFactory`]; a second
+    /// registration of either kind replaces the first).
+    pub fn register_bounded(&self, component: &str, f: BoundedFactory) {
         self.map
             .write()
             .unwrap_or_else(|e| e.into_inner())
@@ -225,7 +248,7 @@ impl ComponentAdapters {
         self.prepare_of(component).is_some()
     }
 
-    fn get(&self, component: &str) -> Option<AdapterFactory> {
+    fn get(&self, component: &str) -> Option<BoundedFactory> {
         self.map
             .read()
             .unwrap_or_else(|e| e.into_inner())
@@ -293,30 +316,74 @@ pub async fn enable_component(
 }
 
 /// After an enable: build and enable the component's adapter in the bridge core, when a
-/// factory is registered and its network is not enabled yet. Failures are logged; the
-/// component keeps running (its network reads `error` until the adapter attaches).
-pub async fn attach_adapter(api: &ApiState, components: &Components, component: &str) {
+/// factory is registered and its network is not enabled yet; the factory runs its whole
+/// health check ([`BoundedFactory`], `None`). `Err` when the factory or `Bridge::enable`
+/// failed (nothing attached; the component's child still runs — the route then disables
+/// it and answers `409 component_unavailable` / `health_failed`, FB1); `Ok` when attached
+/// or nothing was to attach.
+pub async fn attach_adapter(
+    api: &ApiState,
+    components: &Components,
+    component: &str,
+) -> Result<(), String> {
+    attach_adapter_within(api, components, component, None).await
+}
+
+/// [`attach_adapter`] with the factory's health wait bounded by `bound` (`Layer6::resume`,
+/// FB1: a dead core must not hold the daemon's start for its whole handshake timeout).
+pub async fn attach_adapter_within(
+    api: &ApiState,
+    components: &Components,
+    component: &str,
+    bound: Option<Duration>,
+) -> Result<(), String> {
     let (Some(reg), Some(bridge)) = (
         api.ext::<Arc<ComponentAdapters>>(),
         api.ext::<Arc<Bridge>>(),
     ) else {
-        return;
+        return Ok(());
     };
-    let Some(f) = reg.get(component) else { return };
+    let Some(f) = reg.get(component) else {
+        return Ok(());
+    };
     let Some(network) = components.get(component).map(|c| c.adapter.clone()) else {
-        return;
+        return Ok(());
     };
     if bridge.enabled().contains(&network) {
-        return;
+        return Ok(());
     }
-    match f(components.clone()).await {
-        Ok(adapter) => {
-            if let Err(e) = bridge.enable(adapter).await {
-                eprintln!("111 bridge: {component}: the adapter was not enabled: {e}");
-            }
-        }
-        Err(e) => eprintln!("111 bridge: {component}: the adapter was not built: {e}"),
+    let adapter = f(components.clone(), bound)
+        .await
+        .map_err(|e| format!("the adapter was not built: {e}"))?;
+    bridge
+        .enable(adapter)
+        .await
+        .map_err(|e| format!("the adapter was not enabled: {e}"))
+}
+
+/// The route's answer when the adapter of a component that just started could not attach
+/// (FB1): the component is disabled again (its adapter detached first, the prepare hook's
+/// files undone like a refused enable) — a component it depends on (Delta Chat's relay)
+/// stays — and the enable answers `409 component_unavailable` with `reason_code:
+/// health_failed`.
+async fn refuse_unattached(
+    api: &ApiState,
+    components: &Components,
+    component: &str,
+    why: String,
+) -> EnableError {
+    eprintln!("111 bridge: {component}: {why}; the component was stopped again");
+    detach_adapter(api, components, component).await;
+    components.disable(component).await;
+    let undo = api
+        .ext::<Arc<ComponentAdapters>>()
+        .and_then(|r| r.unprepare_of(component));
+    if let Some(undo) = undo {
+        undo().await;
     }
+    EnableError::StartFailed(format!(
+        "it started, but its adapter did not attach ({why}); it was stopped again"
+    ))
 }
 
 /// Before a disable: disable the component's network in the bridge core (whoever enabled
@@ -624,16 +691,40 @@ async fn enable(
     if c.get(&id).is_none() {
         return not_found("component").into_response();
     }
-    match enable_component(&api, &c, &id, req.accept_notice_hash.as_deref()).await {
+    // the enable, the adapter's health wait and an undo run to their end in a task of
+    // their own (as the posture PATCH, V5-1): a client that goes away never leaves a
+    // started child without its adapter or its undo
+    let ack = req.accept_notice_hash;
+    let (api2, c2, id2) = (Arc::clone(&api), c.clone(), id.clone());
+    let task = tokio::spawn(async move {
+        let done = enable_component(&api2, &c2, &id2, ack.as_deref()).await?;
+        if let Err(why) = attach_adapter(&api2, &c2, &id2).await {
+            return Err(refuse_unattached(&api2, &c2, &id2, why).await);
+        }
+        Ok(done)
+    });
+    let res = match task.await {
+        Ok(r) => r,
+        Err(e) => Err(EnableError::StartFailed(format!(
+            "the enable task failed: {e}"
+        ))),
+    };
+    match res {
         Ok(done) => {
-            attach_adapter(&api, &c, &id).await;
             let status = c.status(&id).await.unwrap_or(done.status);
             if let Some(b) = api.ext::<Arc<Bridge>>() {
                 b.publish_snapshot().await;
             }
             Json(component_json(&status)).into_response()
         }
-        Err(e) => e.problem(c.get(&id)).into_response(),
+        Err(e) => {
+            if matches!(e, EnableError::StartFailed(_)) {
+                if let Some(b) = api.ext::<Arc<Bridge>>() {
+                    b.publish_snapshot().await;
+                }
+            }
+            e.problem(c.get(&id)).into_response()
+        }
     }
 }
 

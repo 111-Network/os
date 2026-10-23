@@ -2306,6 +2306,36 @@ async fn foreign_rows_retry_and_cancel_by_fm_id_and_msg_ids_keep_the_layer5_path
     assert_eq!(fresh.state, ForeignState::Queued);
     assert_eq!(fresh.body, "maybe sent");
     assert!(listed(n, "stub-a", p.src, new).is_some());
+    // V5-3: the old row is superseded — the thread says by which row, and a second retry
+    // of it is refused (409) and queues nothing (it would send the text twice more)
+    let row = listed(n, "stub-a", p.src, u).unwrap();
+    assert_eq!(row["superseded_by"], fjson::fm_id(new), "{row}");
+    assert!(
+        listed(n, "stub-a", p.src, new).unwrap()["superseded_by"].is_null(),
+        "the new row is nobody's copy"
+    );
+    let rows_before = n
+        .fab()
+        .foreign_thread(p.src, None, 10_000)
+        .await
+        .unwrap()
+        .messages
+        .len();
+    let pb = retry(&fjson::fm_id(u)).problem(409, "bad_request");
+    assert!(
+        pb["detail"].as_str().unwrap().contains(&fjson::fm_id(new)),
+        "{pb}"
+    );
+    assert_eq!(
+        n.fab()
+            .foreign_thread(p.src, None, 10_000)
+            .await
+            .unwrap()
+            .messages
+            .len(),
+        rows_before,
+        "nothing queued"
+    );
     // an inbound row is neither
     p.a.feed(text(&p.ca, "!a1", "Alice", "in-1", "hello"));
     let rows = n.wait_rows(p.src, 4).await;
@@ -2858,5 +2888,235 @@ async fn the_deltachat_seam_renders_the_relay_requires_its_listener_and_attaches
         assert_ne!(st.state, ComponentState::Running, "{id}");
         assert!(n.components.stdio(id).await.is_none(), "{id}: no child");
     }
+    n.components.shutdown().await;
+}
+
+// ---------------------------------------------------------------- fix wave B (items 1, 2)
+
+/// The Delta Chat rig of the W3 test (fake relay + `fake_deltachat_rpc.py`) with the core's
+/// `FAKE_DC_MUTE` set to `mute` and the adapter's call timeout `call`; both payloads cached.
+struct DcRig {
+    n: Node,
+    relay_hash: String,
+    rpc_hash: String,
+    paths: node111::daemon::bridge::deltachat::RelayPaths,
+    adapters: Arc<node111::daemon::dashboard::api_v1::bridge::ComponentAdapters>,
+}
+
+async fn dc_rig(mute: &str, call: Duration) -> DcRig {
+    use node111::daemon::bridge::deltachat::{DcConfig, RelayPaths, RelayPorts};
+    use node111::daemon::dashboard::api_v1::bridge::ComponentAdapters;
+    let ports = {
+        let l: Vec<std::net::TcpListener> = (0..4)
+            .map(|_| std::net::TcpListener::bind("127.0.0.1:0").unwrap())
+            .collect();
+        let p: Vec<u16> = l.iter().map(|l| l.local_addr().unwrap().port()).collect();
+        RelayPorts {
+            smtp: p[0],
+            submission: p[1],
+            imap: p[2],
+            https: p[3],
+        }
+    };
+    let core = w3_core();
+    let relay = w3_decl(
+        "madmail",
+        "madmail-test",
+        W3_MADMAIL.as_bytes(),
+        &format!(
+            "args = [\"--config\", \"{{bridge}}/madmail.toml\", \"--state-dir\", \"{{bridge}}/madmail\", \"run\"]\nports = {:?}",
+            ports.all()
+        ),
+        "",
+    );
+    let rpc = w3_decl(
+        "deltachat",
+        "deltachat-test",
+        core.as_bytes(),
+        &format!(
+            "env = {{ DC_ACCOUNTS_PATH = \"{{bridge}}/accounts\", FAKE_DC_LOG = \"{{bridge}}/fake-log.jsonl\", FAKE_DC_MUTE = \"{mute}\" }}"
+        ),
+        "component = \"madmail\"",
+    );
+    let (relay_hash, rpc_hash) = (relay.notice_hash(), rpc.notice_hash());
+    let n = node_with(vec![relay, rpc]).await;
+    let root = n.layout.root.clone();
+    for (id, file, bytes) in [
+        ("madmail", "madmail-test", W3_MADMAIL.as_bytes()),
+        ("deltachat", "deltachat-test", core.as_bytes()),
+    ] {
+        let d = root.join("cache/packages").join(id);
+        std::fs::create_dir_all(&d).unwrap();
+        std::fs::write(d.join(file), bytes).unwrap();
+    }
+    let adapters = Arc::new(ComponentAdapters::default());
+    node111::daemon::register_deltachat_with(
+        &adapters,
+        &n.api,
+        &n.bridge,
+        node111::daemon::DeltaChatWiring {
+            cli: Arc::new(node111::util::run::SystemRunner),
+            ports,
+            cfg: DcConfig {
+                call_timeout: call,
+                configure_timeout: Duration::from_secs(5),
+                settle_timeout: Duration::from_secs(2),
+                ..DcConfig::default()
+            },
+            listen_timeout: Duration::from_secs(3),
+        },
+    );
+    n.api.insert_ext(Arc::clone(&adapters));
+    let paths = RelayPaths::of(&root);
+    DcRig {
+        n,
+        relay_hash,
+        rpc_hash,
+        paths,
+        adapters,
+    }
+}
+
+/// Item 1: the component route's Delta Chat factory waits for the core's first handshake
+/// (§2.1 rule 4): a core that never answers `get_system_info` answers `409
+/// component_unavailable` / `health_failed`, the core is disabled (no child, switch off,
+/// nothing attached) and the relay stays on.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn item1_a_muted_deltachat_core_answers_409_health_failed_and_keeps_the_relay() {
+    use node111::daemon::components::consent;
+    let rig = dc_rig("get_system_info", Duration::from_secs(2)).await;
+    let n = &rig.n;
+    let r = n.post(
+        "/api/v1/bridge/components/madmail/enable",
+        json!({ "accept_notice_hash": rig.relay_hash }),
+    );
+    check_op("enableBridgeComponent", &r);
+    let t0 = Instant::now();
+    let pb = n
+        .post(
+            "/api/v1/bridge/components/deltachat/enable",
+            json!({ "accept_notice_hash": rig.rpc_hash }),
+        )
+        .problem(409, "component_unavailable");
+    assert!(t0.elapsed() < Duration::from_secs(30), "bounded");
+    assert_eq!(pb["reason_code"], "health_failed", "{pb}");
+    assert!(
+        pb["detail"].as_str().unwrap().contains("handshake failed"),
+        "{pb}"
+    );
+    let log = std::fs::read_to_string(rig.paths.dir.join("fake-log.jsonl")).unwrap_or_default();
+    assert!(
+        log.contains("\"get_system_info\""),
+        "the core was asked: {log}"
+    );
+    assert!(
+        n.components.stdio("deltachat").await.is_none(),
+        "the core is stopped"
+    );
+    assert_eq!(
+        n.components.status("deltachat").await.unwrap().state,
+        ComponentState::Disabled
+    );
+    assert!(
+        !consent::load(&n.layout.root).record("deltachat").enabled,
+        "switch off"
+    );
+    assert!(n.bridge.enabled().is_empty(), "nothing attached");
+    assert_eq!(
+        n.components.status("madmail").await.unwrap().state,
+        ComponentState::Running,
+        "the relay stays"
+    );
+    n.post("/api/v1/bridge/components/madmail/disable", json!({}));
+    n.components.shutdown().await;
+}
+
+/// Item 1: `Layer6::resume` bounds the factory's handshake wait by
+/// `RESUME_ATTACH_BOUND`: with a core that never answers (and a call timeout far beyond
+/// the bound) the resume returns within the bound plus the relay's own start, and the
+/// adapter is in the core reading its own state (not live).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn item1_a_resume_with_a_dead_core_returns_within_the_bound() {
+    use node111::daemon::components::consent;
+    let rig = dc_rig("get_system_info", Duration::from_secs(120)).await;
+    let n = &rig.n;
+    let root = n.layout.root.clone();
+    for (c, h) in [("madmail", &rig.relay_hash), ("deltachat", &rig.rpc_hash)] {
+        let decl = n.components.get(c).unwrap().clone();
+        consent::require(&root, &decl, Some(h)).unwrap();
+        consent::update(&root, c, |r| r.enabled = true).unwrap();
+    }
+    let l6 = node111::daemon::Layer6::new(Arc::clone(&n.bridge), n.components.clone(), None);
+    let t0 = Instant::now();
+    l6.resume(&n.api).await;
+    let took = t0.elapsed();
+    assert!(
+        took < node111::daemon::RESUME_ATTACH_BOUND + Duration::from_secs(15),
+        "resume took {took:?}"
+    );
+    assert!(
+        n.components.stdio("deltachat").await.is_some(),
+        "the core runs"
+    );
+    assert_eq!(
+        n.bridge.enabled(),
+        vec!["app:deltachat".to_string()],
+        "attached"
+    );
+    let v = n.get("/api/v1/networks").json();
+    assert_ne!(network(&v, "app:deltachat")["state"], "live", "{v}");
+    assert!(rig.adapters.registered("deltachat"));
+    l6.shutdown().await;
+    assert!(n.components.stdio("deltachat").await.is_none());
+}
+
+/// Item 2: an adapter factory that fails after the component started (here the LXMF
+/// helper's, replaced by one that refuses) answers `409 component_unavailable` /
+/// `health_failed`: the helper is stopped, its switch off, its client config (the
+/// prepare hook's 0600 copy of rnsd's key) removed, nothing attached.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn item2_a_failing_lxmf_factory_answers_409_and_stops_the_helper() {
+    use node111::daemon::components::consent;
+    use node111::daemon::dashboard::api_v1::bridge::{AdapterFactory, ComponentAdapters};
+    use node111::daemon::dashboard::api_v1::transport::TransportApi;
+    use node111::daemon::transport::config;
+    use node111::daemon::transport::rnstatus::{FactsCache, TickConfig};
+    let n = node_with(vec![lxmf_component()]).await;
+    let root = n.layout.root.clone();
+    let cache = root.join("cache/packages/lxmf");
+    std::fs::create_dir_all(&cache).unwrap();
+    std::fs::write(cache.join("lxmf-fake"), lxmf_bin()).unwrap();
+    let adapters = Arc::new(ComponentAdapters::default());
+    node111::daemon::register_lxmf(&adapters, &n.api, &n.bridge);
+    let refusing: AdapterFactory =
+        Arc::new(|_| Box::pin(async { Err("scripted: the helper never answered".to_string()) }));
+    adapters.register("lxmf", refusing);
+    n.api.insert_ext(Arc::clone(&adapters));
+    n.api.insert_ext(Arc::new(TransportApi {
+        spine: lxmf_spine(&n),
+        facts: FactsCache::new(TickConfig::default()),
+    }));
+    let pb = n
+        .post(
+            "/api/v1/bridge/components/lxmf/enable",
+            json!({ "accept_notice_hash": lxmf_component().notice_hash() }),
+        )
+        .problem(409, "component_unavailable");
+    assert_eq!(pb["reason_code"], "health_failed", "{pb}");
+    assert!(pb["detail"].as_str().unwrap().contains("scripted"), "{pb}");
+    assert!(
+        n.components.stdio("lxmf").await.is_none(),
+        "the helper is stopped"
+    );
+    assert_ne!(
+        n.components.status("lxmf").await.unwrap().state,
+        ComponentState::Running
+    );
+    assert!(!consent::load(&root).record("lxmf").enabled, "switch off");
+    assert!(
+        !config::client_config_path(&root).exists(),
+        "the hook's file is gone"
+    );
+    assert!(n.bridge.enabled().is_empty());
     n.components.shutdown().await;
 }

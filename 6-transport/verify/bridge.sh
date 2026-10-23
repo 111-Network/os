@@ -996,6 +996,24 @@ PY
   t "nothing was installed, prepared or started: no components/lxmf, no venvs/lxmf, no bridge/lxmf, no python child" \
     '[ ! -e "${NROOT[A]}/components/lxmf" ] && [ ! -e "${NROOT[A]}/venvs/lxmf" ] && [ ! -e "${NROOT[A]}/bridge/lxmf" ] && ! pgrep -f lxmf_sidecar >/dev/null'
 
+  # V5-5: a stub's state flip reaches the rail: the hook's `state` op also queues the matching
+  # Inbound::Link, so the core publishes a `bridge` frame on its next tick. Its own short stream
+  # (the whole-run capture above ended with A's restart in phase 8).
+  local ssf="$W/A-state.sse" ssp
+  nx A curl -sN --max-time 60 -o "$ssf" "$DAPI/api/v1/events" 2>/dev/null &
+  ssp=$!
+  sleep 1
+  # the states stub-app reads in the bridge frames of that stream, in order, joined
+  appseq() { sse_data "$ssf" bridge | jq -r --arg n "$NETA" '.networks[] | select(.id == $n) | .state' 2>/dev/null | tr '\n' ' '; }
+  ctl A "$(jq -nc --arg s "$NETA" '{op: "state", stub: $s, state: {state: "error", detail: "adapter_down"}}')"
+  wait_for 15 '[[ "$(appseq)" == *error* ]]' || true
+  t "a stub's state flip to error is followed by a bridge frame naming $NETA error (the state op queues the link item)" '[[ "$(appseq)" == *error* ]]'
+  ctl A "$(jq -nc --arg s "$NETA" '{op: "state", stub: $s, state: {state: "live"}}')"
+  wait_for 15 '[[ "$(appseq)" == *error*live* ]]' || true
+  t "and the flip back to live by a later bridge frame naming $NETA live ($(appseq))" '[[ "$(appseq)" == *error*live* ]]'
+  kill "$ssp" 2>/dev/null
+  wait "$ssp" 2>/dev/null
+
   # ---------------------------------------------------------------- tapes
   phase "13. SSE: network_message and bridge frames (tapes)"
   sleep 1

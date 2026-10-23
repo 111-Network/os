@@ -533,7 +533,20 @@ pub struct Bridge {
     /// The recv path saw a link-state change or a dropped-text count (F7): the next tick
     /// publishes the `bridge` snapshot once, however many batches set it (no timer).
     snapshot_due: AtomicBool,
+    /// A foreign row or conversation changed (FB1 item 6: an ingest batch here, any
+    /// `network_message` the fabric published, [`Bridge::note_counts_changed`]): the next
+    /// tick reads the networks once and publishes the `bridge` snapshot only when a
+    /// network's `counts` (conversations, unread, queued) differ from the last published
+    /// ones — the UI need not re-read `GET /networks` per `network_message` frame.
+    counts_due: AtomicBool,
+    /// The counts of the last published snapshot.
+    published_counts: Mutex<Option<Vec<NetCounts>>>,
+    /// One `resend` at a time (V5-3: the `resent_as` check and its write are one step).
+    pub(super) resend_one: tokio::sync::Mutex<()>,
 }
+
+/// One network's `(id, conversations, unread, queued)` in a published snapshot (FB1 item 6).
+type NetCounts = (String, u64, u64, u64);
 
 impl std::fmt::Debug for Bridge {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -625,6 +638,9 @@ impl Bridge {
             noise: AtomicU64::new(0),
             consent_paused: Mutex::new(HashSet::new()),
             snapshot_due: AtomicBool::new(false),
+            counts_due: AtomicBool::new(false),
+            published_counts: Mutex::new(None),
+            resend_one: tokio::sync::Mutex::new(()),
         })
     }
 
@@ -796,9 +812,20 @@ impl Bridge {
         state::drain_events(self).await;
         super::edges::relay_pass(self).await;
         state::deliver_pass(self).await;
-        if self.snapshot_due.swap(false, Ordering::SeqCst) {
-            self.publish_networks().await;
+        let forced = self.snapshot_due.swap(false, Ordering::SeqCst);
+        let counts = self.counts_due.swap(false, Ordering::SeqCst);
+        if forced || counts {
+            self.publish_networks_when(forced).await;
         }
+    }
+
+    /// A foreign row or conversation may have changed its network's counts (the fabric's
+    /// `network_message` publisher calls it; FB1 item 6): the next [`Self::tick_once`]
+    /// publishes the `bridge` snapshot when the counts differ. A flag only — no timer, no
+    /// task; nothing is read until that tick (which returns at once while no adapter is
+    /// enabled, so the flag then waits for one).
+    pub fn note_counts_changed(&self) {
+        self.counts_due.store(true, Ordering::SeqCst);
     }
 
     // -- helpers shared by the other modules --------------------------------
@@ -935,9 +962,37 @@ impl Bridge {
     /// Publish the `bridge` frame with the networks snapshot, in the order `GET /networks`
     /// lists them (the spine's `[order]` when the daemon has one; release order otherwise).
     pub(super) async fn publish_networks(&self) {
+        self.publish_networks_when(true).await;
+    }
+
+    /// [`Self::publish_networks`]; unless `force`, only when some network's counts differ
+    /// from the last published snapshot's (FB1 item 6).
+    async fn publish_networks_when(&self, force: bool) {
         let Ok(mut v) = self.networks().await else {
             return;
         };
+        let sig: Vec<NetCounts> = v["networks"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .map(|n| {
+                let c = &n["counts"];
+                let num = |k: &str| c[k].as_u64().unwrap_or(0);
+                (
+                    n["id"].as_str().unwrap_or_default().to_string(),
+                    num("conversations"),
+                    num("unread"),
+                    num("queued"),
+                )
+            })
+            .collect();
+        {
+            let mut last = lock(&self.published_counts);
+            if !force && last.as_ref() == Some(&sig) {
+                return;
+            }
+            *last = Some(sig);
+        }
         let Some(api) = self.api.upgrade() else {
             return;
         };
@@ -1036,6 +1091,11 @@ impl Bridge {
                     self.noise.fetch_add(1, Ordering::SeqCst);
                     continue;
                 }
+                // V5-4: a body of only Cc/Cf characters would be an empty bubble: noise
+                if ingest::cleans_to_nothing(&t.body) {
+                    self.noise.fetch_add(1, Ordering::SeqCst);
+                    continue;
+                }
                 // the ids cleaned once: guard 2 and the stored row see the same values (F9)
                 let Some((sender, msg)) = ingest::ids(t) else {
                     self.noise.fetch_add(1, Ordering::SeqCst);
@@ -1066,8 +1126,9 @@ impl Bridge {
             }
             if !batch.is_empty() {
                 self.ingest_batches.fetch_add(1, Ordering::SeqCst);
-                if let Err(e) = self.handle.foreign_ingest(batch).await {
-                    eprintln!("111 bridge: {network}: ingest failed: {e}");
+                match self.handle.foreign_ingest(batch).await {
+                    Ok(_) => self.note_counts_changed(),
+                    Err(e) => eprintln!("111 bridge: {network}: ingest failed: {e}"),
                 }
             }
         }

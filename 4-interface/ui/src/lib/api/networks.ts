@@ -53,12 +53,20 @@ export const isForeignCancellable = (m: Pick<ForeignMessage, "dir" | "state" | "
   m.dir === "own" && m.state === "queued" && m.reason_code !== FOREIGN_CANCELLED && !isHandoffPending(m);
 
 /**
+ * The row this own row was already sent again as (`superseded_by`, additive in Layer 6 V5), or null. An older daemon omits the field:
+ * read as null. Only an `fm-…` id counts; anything else from the wire is ignored.
+ */
+export const supersededBy = (m: Pick<ForeignMessage, "superseded_by">): string | null =>
+  typeof m.superseded_by === "string" && /^fm-[A-Za-z0-9_-]{1,125}$/.test(m.superseded_by) ? m.superseded_by : null;
+
+/**
  * The person may ask again for a row refused before air (`failed`; `Retry::Never` is the user's to retry) or handed over without an
  * answer (uncertain). That is exactly what the node accepts (any other row answers 409): a `queued` row is still going by itself,
- * and a `sent` row has the carrier's word that it left.
+ * a `sent` row has the carrier's word that it left, and a row already sent again (`superseded_by`) is done: its new row is the one
+ * to retry (V5: two retries of one row sent its text twice more).
  */
-export const isForeignRetryable = (m: Pick<ForeignMessage, "dir" | "state" | "reason_code" | "uncertain">): boolean =>
-  m.dir === "own" && m.reason_code !== FOREIGN_CANCELLED && (m.state === "failed" || isHandoffPending(m));
+export const isForeignRetryable = (m: Pick<ForeignMessage, "dir" | "state" | "reason_code" | "uncertain" | "superseded_by">): boolean =>
+  m.dir === "own" && m.reason_code !== FOREIGN_CANCELLED && supersededBy(m) === null && (m.state === "failed" || isHandoffPending(m));
 
 /**
  * Would taking `next` for the held row `mine` be a step back from proof? Only `delivered` is protected: it is final, so an older

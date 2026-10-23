@@ -31,10 +31,10 @@ def copy_tree(dst):
         shutil.copy(os.path.join(OS_DIR, rel), os.path.join(dst, rel))
     shutil.copytree(os.path.join(SCRIPTS, "notices"), os.path.join(dst, "1-bootstrap/scripts/notices"),
                     ignore=shutil.ignore_patterns("tests", "__pycache__"))
-    # Layer 6: the optional components' declarations (their per-target pins)
+    # Layer 6: the optional components' declarations (their per-target pins) and locks
     os.makedirs(os.path.join(dst, COMPONENTS), exist_ok=True)
     for n in os.listdir(os.path.join(OS_DIR, COMPONENTS)):
-        if n.endswith(".toml"):
+        if n.endswith((".toml", ".lock.txt")):
             shutil.copy(os.path.join(OS_DIR, COMPONENTS, n), os.path.join(dst, COMPONENTS, n))
 
 
@@ -215,7 +215,16 @@ class ComponentPinTests(Base):
         self.assertIn("madmail.toml", names)
         for n in names:
             self.assertIn(f"{COMPONENTS}/{n}", labels)
-        self.assertNotIn(f"{COMPONENTS}/lxmf.lock.txt", labels, "only the *.toml declarations")
+        # §15 (FB1 item 3): the LXMF helper's pip lock is an input too
+        self.assertIn(f"{COMPONENTS}/lxmf.lock.txt", labels)
+
+    def test_fb1_a_one_byte_change_to_the_lxmf_lock_makes_check_stale(self):
+        out = self.notices()
+        self.check(out)
+        rel = f"{COMPONENTS}/lxmf.lock.txt"
+        self.edit(rel, lambda t: re.sub(r'(--hash=sha256:[0-9a-f]{63})([0-9a-f])',
+                                        lambda m: m.group(1) + ("0" if m.group(2) != "0" else "1"), t, count=1))
+        self.dies(lambda: self.check(out), f"{rel}: changed")
 
     def test_f6_a_one_byte_change_to_a_pin_makes_check_stale(self):
         out = self.notices()

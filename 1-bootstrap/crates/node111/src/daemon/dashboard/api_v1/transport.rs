@@ -20,10 +20,14 @@
 //!   exists for them) follow through `Spine::update` (validate → save 0600 → re-render →
 //!   diff → `rnstatus --attach|--detach|--reload` or an rnsd restart with its dependants
 //!   in order); a failed step there is `applied: false, reverted: false` with the
-//!   `reason`. The PATCH is no proposal: the applier's decision record for it (a
-//!   one-off `transport-posture-<random>` id) is removed once it answers. Without an
-//!   applier in ext (a node without the device registry, tests) the whole merge goes
-//!   through `Spine::update` as before and `reverted` is `false`.
+//!   `reason`. The PATCH is no proposal: it goes through
+//!   [`Applier::apply_unrecorded`] (the same one-at-a-time lock, no decision record;
+//!   FB1). Without an applier in ext (a node without the device registry, tests) the
+//!   whole merge goes through `Spine::update` as before and `reverted` is `false`.
+//!   **A client that goes away does not cancel the change (V5-1):** everything past
+//!   the validation runs in a task of its own that the handler awaits, so the apply,
+//!   the probe (≤ 30 s) and the revert — or the `Spine::update` steps — run to the end
+//!   whether or not the answer is still wanted.
 //! - `POST /transport/join` → `TransportJoin` with `Cache-Control: no-store`: the
 //!   phone-relay descriptor (address, port, and the IFAC name and passphrase when IFAC is
 //!   on). A POST because it carries a credential and the agent's bearer reads every GET:
@@ -35,7 +39,7 @@
 
 use super::auth;
 use super::{ApiRouter, ApiState, Problem};
-use crate::daemon::devices::applier::{self, Action, Applier, ApplierRequest, ApplyReport};
+use crate::daemon::devices::applier::{Action, Applier, ApplyReport};
 use crate::daemon::transport::join::{JoinError, Session};
 use crate::daemon::transport::posture::{Applied, ApplyError, Spine};
 use crate::daemon::transport::rnstatus::{FactsCache, FactsSnapshot};
@@ -332,46 +336,73 @@ fn report_json(report: &ApplyReport, t: &TransportApi) -> Value {
     })
 }
 
-/// A one-off applier request id for a PATCH (never a proposal's: proposals are the
-/// agent's `prop-…`; 8 random bytes, no clock).
-fn patch_request_id() -> Option<String> {
-    let mut b = [0u8; 8];
-    getrandom::getrandom(&mut b).ok()?;
-    let hex: String = b.iter().map(|x| format!("{x:02x}")).collect();
-    Some(format!("transport-posture-{hex}"))
+/// V5-2: a PATCH that moves the Backbone listener (its port or its switch) onto a port
+/// another task holds in the daemon's `PortTable` on this host (a component's listener,
+/// meshmud's downlink: a key `host:port` whose host is loopback, unspecified or one of
+/// this node's addresses) is `400`, nothing written. The file's own check
+/// (`interfaces::own_port`) already refused 111's fixed listeners.
+fn backbone_port_held(
+    api: &ApiState,
+    spine: &Spine,
+    p: &TransportPatch,
+    sim: &crate::daemon::transport::interfaces::InterfacesFile,
+) -> Option<Problem> {
+    let touched = p
+        .posture
+        .as_ref()
+        .and_then(|p| p.lan.as_ref())
+        .is_some_and(|l| l.port.is_some() || l.backbone_listen == Some(true));
+    let b = &sim.posture.lan.backbone;
+    if !touched || !b.listen {
+        return None;
+    }
+    let table = spine.port_table()?;
+    let local = |host: &str| {
+        let h = host.trim_matches(['[', ']']);
+        h.eq_ignore_ascii_case("localhost")
+            || h.parse::<IpAddr>()
+                .is_ok_and(|ip| ip.is_loopback() || ip.is_unspecified() || api.is_own_addr(&ip))
+    };
+    let (key, owner) = table.held().into_iter().find(|(k, _)| {
+        k.rsplit_once(':')
+            .is_some_and(|(h, port)| port.parse::<u16>() == Ok(b.port) && local(h))
+    })?;
+    Some(super::bridge::bad_request(format!(
+        "backbone port {} is in use on this node by {} ({key}); choose another port.",
+        b.port, owner.task
+    )))
 }
 
-/// The applier's parts of a PATCH through its loop (module doc). `Ok(None)`: kept;
-/// `Ok(Some(body))`: not kept (the answer); `Err`: refused before anything was written.
-async fn through_applier(
-    api: &ApiState,
-    applier: &Applier,
-    actions: Vec<Action>,
-    t: &TransportApi,
-) -> Result<Option<Value>, Response> {
-    let internal = |why: &str| {
-        Problem::new(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "internal",
-            "The change could not be applied.",
-        )
-        .detail(why.to_string())
-        .into_response()
-    };
-    let id = patch_request_id().ok_or_else(|| internal("no randomness for the request id"))?;
-    let req = ApplierRequest::new(&id, actions).map_err(|r| r.problem().into_response())?;
-    let res = applier::apply(applier, req).await;
-    if !matches!(res, Err(applier::ApplyError::AlreadyDecided)) {
-        // the PATCH is no proposal: its decision record goes (absent is fine)
-        let rec = super::proposals::decisions_dir(&api.layout).join(format!("{id}.json"));
-        if let Err(e) = std::fs::remove_file(&rec) {
-            if e.kind() != std::io::ErrorKind::NotFound {
-                eprintln!("111 transport: {} stays: {e}", rec.display());
+/// Everything a PATCH does past its validation (module doc): the applier's parts
+/// through [`Applier::apply_unrecorded`] when an applier is in ext (only a kept change
+/// lets the rest follow), then the rest through `Spine::update`. Owns what it needs: it
+/// runs in a task of its own (V5-1).
+async fn apply_patch(
+    t: Arc<TransportApi>,
+    applier: Option<Arc<Applier>>,
+    p: TransportPatch,
+) -> Response {
+    let actions = p.applier_actions();
+    let rest = match applier {
+        Some(ap) if !actions.is_empty() => {
+            match ap.apply_unrecorded(actions).await {
+                Ok(report) if report.applied => {}
+                Ok(report) => return Json(report_json(&report, &t)).into_response(),
+                Err(e) => return e.problem().into_response(),
             }
+            let rest = p.without_applier_parts();
+            if rest.is_empty() {
+                let none = Applied::default();
+                return Json(result_json(&none, &t)).into_response();
+            }
+            rest
         }
+        _ => p,
+    };
+    match t.spine.update(move |f| rest.merge(f)).await {
+        Ok(applied) => Json(result_json(&applied, &t)).into_response(),
+        Err(e) => apply_problem(&e).into_response(),
     }
-    let report = res.map_err(|e| e.problem().into_response())?;
-    Ok((!report.applied).then(|| report_json(&report, t)))
 }
 
 async fn patch_posture(State(api): State<Arc<ApiState>>, bytes: Bytes) -> Response {
@@ -396,26 +427,20 @@ async fn patch_posture(State(api): State<Arc<ApiState>>, bytes: Bytes) -> Respon
     if let Err(i) = sim.validate() {
         return apply_problem(&ApplyError::Invalid(i)).into_response();
     }
-    let actions = p.applier_actions();
-    let rest = match api.ext::<Arc<Applier>>() {
-        Some(ap) if !actions.is_empty() => {
-            match through_applier(&api, &ap, actions, &t).await {
-                Ok(None) => {}
-                Ok(Some(not_kept)) => return Json(not_kept).into_response(),
-                Err(resp) => return resp,
-            }
-            let rest = p.without_applier_parts();
-            if rest.is_empty() {
-                let none = Applied::default();
-                return Json(result_json(&none, &t)).into_response();
-            }
-            rest
-        }
-        _ => p,
-    };
-    match t.spine.update(move |f| rest.merge(f)).await {
-        Ok(applied) => Json(result_json(&applied, &t)).into_response(),
-        Err(e) => apply_problem(&e).into_response(),
+    if let Some(pb) = backbone_port_held(&api, &t.spine, &p, &sim) {
+        return pb.into_response();
+    }
+    // V5-1: the change runs to its end in its own task; this future only waits for it
+    let task = tokio::spawn(apply_patch(t, api.ext::<Arc<Applier>>(), p));
+    match task.await {
+        Ok(resp) => resp,
+        Err(e) => Problem::new(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "internal",
+            "The change could not be applied.",
+        )
+        .detail(format!("the apply task failed: {e}"))
+        .into_response(),
     }
 }
 

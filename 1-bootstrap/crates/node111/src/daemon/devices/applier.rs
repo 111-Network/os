@@ -64,7 +64,6 @@ use crate::daemon::dashboard::api_v1::Problem;
 use crate::daemon::dashboard::ApiState;
 use crate::daemon::ports::{port_key, Owner, PortBusy};
 use crate::daemon::services::ServiceId;
-use crate::daemon::supervise::ChildState;
 use crate::daemon::transport::config;
 use crate::daemon::transport::interfaces::{
     self, IfKind, IfOwner, Interface, InterfacesFile, Invalid,
@@ -791,40 +790,11 @@ impl OneShots for DaemonOneShots {
                         .detail(shown(service_id)),
                 )));
             };
-            // supervised children only; the primary child decides (stopped
-            // for good, at shutdown, is not supervised)
-            let children = api
-                .ext::<Arc<crate::daemon::services::Supervised>>()
-                .map(|s| s.children(sid).to_vec())
-                .unwrap_or_default();
-            if children
-                .first()
-                .is_none_or(|c| c.state() == ChildState::Stopped)
-            {
-                return Err(OneShotError::Refused(ProblemWith::new(
-                    Problem::new(
-                        StatusCode::CONFLICT,
-                        "not_supervised",
-                        "This service is not run by the node itself.",
-                    )
-                    .detail(format!(
-                        "{} has no child 111d supervises here.",
-                        sid.as_str()
-                    )),
-                )));
-            }
-            eprintln!(
-                "111 applier: restart of {} requested by an accepted proposal",
-                sid.as_str()
-            );
-            tokio::spawn(async move {
-                for child in children {
-                    if child.state() != ChildState::Stopped {
-                        child.restart(crate::daemon::CHILD_STOP_GRACE).await;
-                    }
-                }
-            });
-            Ok(json!({"schema": 1, "id": sid.as_str(), "restarting": true}))
+            // the route's own path (C4 review minor): supervised children only, the
+            // primary child decides (stopped for good, at shutdown, is not
+            // supervised), the restart runs in the background and is logged there
+            crate::daemon::dashboard::api_v1::services::restart_service(&api, sid)
+                .map_err(|p| OneShotError::Refused(ProblemWith::new(p)))
         })
     }
 }
@@ -930,6 +900,34 @@ pub async fn apply(applier: &Applier, req: ApplierRequest) -> Result<ApplyReport
     applier.apply(req).await
 }
 
+/// [`Applier::apply`] in a task of its own that the caller awaits (V5-1, §12 "snapshot →
+/// apply → probe within 30 s → keep or revert"): the loop owns everything it needs, so a
+/// caller that goes away mid-apply (an HTTP client that disconnects, which drops the
+/// handler's future) never cancels it between the apply and the revert — the probe and
+/// the revert run to the end and the decision record is finished either way. The probe
+/// window bounds the task. A task that panicked answers [`ApplyError::Record`].
+pub async fn apply_detached(
+    applier: Arc<Applier>,
+    req: ApplierRequest,
+) -> Result<ApplyReport, ApplyError> {
+    joined(tokio::spawn(async move { applier.apply(req).await }).await)
+}
+
+/// [`Applier::apply_unrecorded`] in a task of its own that the caller awaits (V5-1, as
+/// [`apply_detached`]).
+pub async fn apply_unrecorded_detached(
+    applier: Arc<Applier>,
+    actions: Vec<Action>,
+) -> Result<ApplyReport, ApplyError> {
+    joined(tokio::spawn(async move { applier.apply_unrecorded(actions).await }).await)
+}
+
+fn joined(
+    r: Result<Result<ApplyReport, ApplyError>, tokio::task::JoinError>,
+) -> Result<ApplyReport, ApplyError> {
+    r.unwrap_or_else(|e| Err(ApplyError::Record(format!("the apply task failed: {e}"))))
+}
+
 impl Applier {
     pub fn new(
         spine: Arc<Spine>,
@@ -972,18 +970,41 @@ impl Applier {
 
     /// Apply a device proposal (module doc).
     pub async fn apply(&self, req: ApplierRequest) -> Result<ApplyReport, ApplyError> {
+        self.run(Some(&req.proposal_id), &req.actions).await
+    }
+
+    /// Apply `actions` that are no proposal (the human's `PATCH /transport/posture`, §10,
+    /// §12; FB1 item 5): the same plan, one-at-a-time lock, snapshot → apply → probe →
+    /// keep-or-revert loop and report as [`Self::apply`], but no decision record is
+    /// written (there is no proposal to decide, so nothing to read `already_decided`
+    /// later). 1..=[`MAX_ACTIONS`] actions, else refused `400` before anything runs.
+    pub async fn apply_unrecorded(&self, actions: Vec<Action>) -> Result<ApplyReport, ApplyError> {
+        if actions.is_empty() || actions.len() > MAX_ACTIONS {
+            return Err(ApplyError::Refused(Refusal::Bad(format!(
+                "a change holds 1 to {MAX_ACTIONS} actions"
+            ))));
+        }
+        self.run(None, &actions).await
+    }
+
+    /// The loop of [`Self::apply`] (`Some(id)`: the decision record of proposal `id` is
+    /// written pending first and finished last) and [`Self::apply_unrecorded`] (`None`).
+    async fn run(&self, id: Option<&str>, actions: &[Action]) -> Result<ApplyReport, ApplyError> {
         let _one = self.one.lock().await;
-        let plan = self.plan(&req.actions).map_err(ApplyError::Refused)?;
-        let names: Vec<&str> = req.actions.iter().map(Action::name).collect();
-        let pending = json!({"pending": true, "actions": names});
-        match self.record.begin(&req.proposal_id, &pending) {
-            Ok(()) => {}
-            Err(None) => return Err(ApplyError::AlreadyDecided),
-            Err(Some(e)) => return Err(ApplyError::Record(e)),
+        let plan = self.plan(actions).map_err(ApplyError::Refused)?;
+        let label = id.unwrap_or("an unrecorded change");
+        if let Some(id) = id {
+            let names: Vec<&str> = actions.iter().map(Action::name).collect();
+            let pending = json!({"pending": true, "actions": names});
+            match self.record.begin(id, &pending) {
+                Ok(()) => {}
+                Err(None) => return Err(ApplyError::AlreadyDecided),
+                Err(Some(e)) => return Err(ApplyError::Record(e)),
+            }
         }
         let mut results: Vec<ActionResult> = Vec::new();
         let mut stopped = false;
-        for (action, step) in req.actions.iter().zip(plan) {
+        for (action, step) in actions.iter().zip(plan) {
             if stopped {
                 results.push(ActionResult {
                     action: action.name().into(),
@@ -1001,7 +1022,9 @@ impl Applier {
                     if results.is_empty() {
                         // the first action refused before any effect: the
                         // proposal reopens, nothing was applied
-                        self.record.reopen(&req.proposal_id);
+                        if let Some(id) = id {
+                            self.record.reopen(id);
+                        }
                         return Err(ApplyError::OneShot(problem));
                     }
                     ActionResult {
@@ -1029,7 +1052,7 @@ impl Applier {
                 stopped = true;
                 eprintln!(
                     "111 applier: {}: {} not kept: {}",
-                    req.proposal_id,
+                    label,
                     action.summary(),
                     r.reason.as_deref().unwrap_or("?")
                 );
@@ -1042,14 +1065,15 @@ impl Applier {
             reason: results.iter().find_map(|r| r.reason.clone()),
             actions: results,
         };
-        let applied = serde_json::to_value(&report).unwrap_or(Value::Null);
-        if let Err(e) = self.record.finish(&req.proposal_id, &applied) {
-            // applied once and recorded as accepted: the record keeps saying
-            // pending, and a retry is still already_decided
-            eprintln!(
-                "111 applier: {}: applied, but the decision record still reads pending: {e}",
-                req.proposal_id
-            );
+        if let Some(id) = id {
+            let applied = serde_json::to_value(&report).unwrap_or(Value::Null);
+            if let Err(e) = self.record.finish(id, &applied) {
+                // applied once and recorded as accepted: the record keeps saying
+                // pending, and a retry is still already_decided
+                eprintln!(
+                    "111 applier: {id}: applied, but the decision record still reads pending: {e}"
+                );
+            }
         }
         Ok(report)
     }

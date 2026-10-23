@@ -239,6 +239,14 @@ pub struct Layer6 {
     pass: tokio::sync::Mutex<()>,
 }
 
+/// How long [`Layer6::resume`] lets an adapter's health check run before attaching it
+/// anyway (FB1). A resumed Delta Chat account is already configured, so its first
+/// handshake is a few loopback JSON-RPC calls (`get_system_info`, the account's state):
+/// well under a second on a Pi; 2 s caps what one resumed network adds to the daemon's
+/// start (the route's enable waits the whole `Setup::handshake_timeout`, 240 s, which
+/// covers a first configuration against the relay).
+pub const RESUME_ATTACH_BOUND: Duration = Duration::from_secs(2);
+
 /// Build the bridge core, the optional components and the transport routes' state, and
 /// insert them into `api` ext (`Arc<Bridge>`, `Components`, `Arc<TransportApi>`,
 /// `Arc<ComponentAdapters>`). Spawns nothing (module doc); the supervised children the
@@ -344,6 +352,12 @@ impl Layer6 {
     /// match), with each enable going through `api_v1::bridge::enable_component` (the
     /// route's path) so a component's prepare hook runs before its child starts; a
     /// failure is logged and leaves that component off (its switch stays as it was).
+    /// The adapters attach with their health wait bounded by [`RESUME_ATTACH_BOUND`]
+    /// (FB1): a health check still pending then is no failure — the adapter is in the
+    /// core and reads its own state (`adapter_down`) until Live — so a dead core never
+    /// holds the daemon's start for its whole handshake timeout; a factory that fails
+    /// outright is logged and its child keeps running (the route's later enable
+    /// attaches it with the whole check, or refuses it).
     /// Once [`Layer6::shutdown`] has begun it does nothing (F2).
     pub async fn resume(&self, api: &ApiState) {
         if self.stopping() {
@@ -360,7 +374,12 @@ impl Layer6 {
                 return;
             }
             if comps.stdio(&id).await.is_some() {
-                dashboard::api_v1::bridge::attach_adapter(api, comps, &id).await;
+                let bound = Some(RESUME_ATTACH_BOUND);
+                if let Err(e) =
+                    dashboard::api_v1::bridge::attach_adapter_within(api, comps, &id, bound).await
+                {
+                    eprintln!("111 bridge: {id}: not attached at resume: {e}");
+                }
             }
         }
     }
@@ -612,8 +631,14 @@ pub fn register_deltachat(
 ///   not start. A core already attached in the bridge changes nothing.
 /// - `deltachat`'s factory attaches `DeltaChatAdapter` to the running core's stdio
 ///   (`deltachat::resume`, on the bind the hook rendered), with the per-contact switch read
-///   live from the bridge settings (`opt_in_from`); `attach_adapter` enables it in the
-///   core and the route's disable of either component detaches it first.
+///   live from the bridge settings (`opt_in_from`), then waits for the core's first
+///   handshake (`DeltaChatAdapter::handshake_outcome`, §2.1 rule 4; FB1): from the route
+///   the whole `Setup::handshake_timeout`, and a timeout, `adapter_down`,
+///   `relay_unreachable` or `relay_moved` fails the factory — the route then disables the
+///   core (the relay stays) and answers `409 component_unavailable` / `health_failed`;
+///   from `Layer6::resume` at most [`RESUME_ATTACH_BOUND`], after which the adapter
+///   attaches whatever the outcome and reads its own state. `attach_adapter` enables it
+///   in the core and the route's disable of either component detaches it first.
 ///
 /// The bind is [`deltachat_relay_bind`]. Captures the API state and the bridge weakly;
 /// spawns nothing, writes nothing (with both components off: no task, child, listener or
@@ -626,9 +651,16 @@ pub fn register_deltachat_with(
 ) {
     use bridge::deltachat::{self as dc, RelayBind, RelayPaths};
     use components::EnableError;
-    use dashboard::api_v1::bridge::{AdapterFactory, PrepareHook};
+    use dashboard::api_v1::bridge::{BoundedFactory, PrepareHook};
     fn stopping() -> EnableError {
         EnableError::StartFailed("the daemon is stopping".into())
+    }
+    /// An adapter state code as shown in a log line or a problem (stable words only).
+    fn dc_code(code: &str) -> String {
+        code.chars()
+            .filter(|c| c.is_ascii_alphanumeric() || *c == '_')
+            .take(32)
+            .collect()
     }
     // the bind the core's hook last rendered the relay for (the factory's relay host)
     let bound: Arc<std::sync::Mutex<Option<RelayBind>>> = Arc::default();
@@ -701,26 +733,55 @@ pub fn register_deltachat_with(
     adapters.register_prepare(dc::RPC_COMPONENT, core);
 
     let (api_w, bridge_w) = (Arc::downgrade(api), Arc::downgrade(bridge));
-    let factory: AdapterFactory = Arc::new(move |comps: components::Components| {
-        let (api, bridge, w, bound) = (
-            api_w.upgrade(),
-            bridge_w.upgrade(),
-            wiring.clone(),
-            Arc::clone(&bound),
-        );
-        Box::pin(async move {
-            let api = api.ok_or("the daemon is stopping")?;
-            let bridge = bridge.ok_or("the bridge is stopping")?;
-            let last = *bound.lock().unwrap_or_else(|e| e.into_inner());
-            let bind = last.unwrap_or_else(|| deltachat_relay_bind(&api));
-            let setup = w.setup(&api.layout.root, bind, dc::opt_in_from(&bridge));
-            let adapter = dc::resume(&comps, &setup)
-                .await
-                .ok_or("the Delta Chat core is not running")?;
-            Ok(adapter as Arc<dyn bridge::Adapter>)
-        })
-    });
-    adapters.register(dc::RPC_COMPONENT, factory);
+    let factory: BoundedFactory = Arc::new(
+        move |comps: components::Components, wait: Option<Duration>| {
+            let (api, bridge, w, bound) = (
+                api_w.upgrade(),
+                bridge_w.upgrade(),
+                wiring.clone(),
+                Arc::clone(&bound),
+            );
+            Box::pin(async move {
+                let api = api.ok_or("the daemon is stopping")?;
+                let bridge = bridge.ok_or("the bridge is stopping")?;
+                let last = *bound.lock().unwrap_or_else(|e| e.into_inner());
+                let bind = last.unwrap_or_else(|| deltachat_relay_bind(&api));
+                let setup = w.setup(&api.layout.root, bind, dc::opt_in_from(&bridge));
+                let adapter = dc::resume(&comps, &setup)
+                    .await
+                    .ok_or("the Delta Chat core is not running")?;
+                // §2.1 rule 4 (start → health): the core's first handshake (FB1)
+                let limit =
+                    wait.map_or(setup.handshake_timeout, |b| b.min(setup.handshake_timeout));
+                match adapter.handshake_outcome(limit).await {
+                    Ok(()) => {}
+                    Err(code) if wait.is_some() => eprintln!(
+                        "111 bridge: deltachat: attached before its first handshake was                          Live ({}); it reads its state until then",
+                        dc_code(&code)
+                    ),
+                    Err(code) => {
+                        // the adapter goes (its tasks end with it); the route disables
+                        // the core and keeps the relay
+                        drop(adapter);
+                        return Err(match code.as_str() {
+                            "timeout" => format!(
+                                "the Delta Chat core did not complete its handshake within {} s",
+                                setup.handshake_timeout.as_secs()
+                            ),
+                            "relay_moved" => "the Delta Chat bridge account lives on another                                               relay address (LAN sharing changed); remove its                                               files and enable it again"
+                                .to_string(),
+                            other => format!(
+                                "the Delta Chat core's handshake failed ({})",
+                                dc_code(other)
+                            ),
+                        });
+                    }
+                }
+                Ok(adapter as Arc<dyn bridge::Adapter>)
+            })
+        },
+    );
+    adapters.register_bounded(dc::RPC_COMPONENT, factory);
 }
 
 async fn daemon_main() -> anyhow::Result<()> {

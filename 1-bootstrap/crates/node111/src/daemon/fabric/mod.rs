@@ -1110,7 +1110,15 @@ impl FabricHandle {
                 api.events.publish("message", &v);
             }
         }
-        for v in self.foreign_frames(foreign.items).await {
+        let frames = self.foreign_frames(foreign.items).await;
+        if !frames.is_empty() {
+            // Layer 6 (FB1 item 6): the bridge's next tick re-publishes its snapshot when
+            // a network's counts changed with these rows
+            if let Some(b) = api.ext::<Arc<crate::daemon::bridge::Bridge>>() {
+                b.note_counts_changed();
+            }
+        }
+        for v in frames {
             api.events.publish("network_message", &v);
         }
         if fabric {

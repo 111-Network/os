@@ -338,6 +338,12 @@ impl Spine {
         self.category
     }
 
+    /// The daemon's `PortTable` once [`Self::adopt_ports`] ran (V5-2: the PATCH route
+    /// refuses a Backbone port another task holds).
+    pub fn port_table(&self) -> Option<Arc<PortTable>> {
+        read(&self.ports).map(|(t, _)| t)
+    }
+
     pub fn layout(&self) -> &DaemonLayout {
         &self.layout
     }
