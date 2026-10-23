@@ -114,7 +114,7 @@ The output is sorted and contains no timestamps, so identical inputs give identi
 
 ### Apache-2.0 OR GPL-2.0-only (1)
 
-- `self_cell` 1.3.0 — https://github.com/Voultapher/self_cell — Copyright (C) 1989, 1991 Free Software Foundation, Inc., — 111
+- `self_cell` 1.3.0 — https://github.com/Voultapher/self_cell — authors: Lukas Bergdoll — 111
 
 ### Apache-2.0 OR ISC OR MIT (1)
 
@@ -296,7 +296,7 @@ The output is sorted and contains no timestamps, so identical inputs give identi
 
 ### GPL-3.0 (1)
 
-- `meshtastic` 0.1.9 — https://github.com/meshtastic/rust — Copyright (C) 2007 Free Software Foundation, Inc. <https://fsf.org/> — 111
+- `meshtastic` 0.1.9 — https://github.com/meshtastic/rust — authors: Adam McQuilkin — 111
 
 ### ISC (2)
 

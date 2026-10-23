@@ -335,7 +335,7 @@ def run(cmd, cwd):
 
 
 LICFILE = re.compile(r"^(LICEN[CS]E|COPYING|UNLICENSE|COPYRIGHT|NOTICE)", re.I)
-BAD = ("yyyy", "[name", "<year>", "notice", "statement", "owner", "holder", "{")
+BAD = ("yyyy", "[name", "<year>", "notice", "statement", "owner", "holder", "{", "free software foundation")
 
 
 def copyright_lines(path, skip=()):
