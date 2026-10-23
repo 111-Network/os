@@ -839,19 +839,49 @@ export class ApiStore {
   }
 
   /**
+   * A view holds this conversation open (the foreign thread is mounted): a `new` frame on it is followed by a read of the newest
+   * window WITHOUT `since_seq`, which is the read the node counts as a person reading (a `since_seq` tail never clears `unread`).
+   * Returns the release for the effect's cleanup. Counted, so two views of one conversation do not release each other.
+   */
+  openForeign(conv: string): () => void {
+    this.openConvs.set(conv, (this.openConvs.get(conv) ?? 0) + 1);
+    return () => {
+      const n = (this.openConvs.get(conv) ?? 0) - 1;
+      if (n > 0) this.openConvs.set(conv, n);
+      else this.openConvs.delete(conv);
+    };
+  }
+  private readonly openConvs = new Map<string, number>();
+  /** Is somebody looking at this conversation right now (a view is mounted and the page is not hidden)? */
+  private isReading(conv: string): boolean {
+    if (!this.openConvs.has(conv)) return false;
+    try {
+      return typeof document === "undefined" || document.visibilityState !== "hidden";
+    } catch {
+      return true;
+    }
+  }
+
+  /**
    * A `network_message` frame: it carries no text, so the open conversation refetches. A frame naming a row we hold re-reads from that row
    * (a state change sits below the newest `seq`); one that does not re-reads above our newest `seq` (coalesced channel traffic). A
-   * `conversation` change (a row cancelled, a conversation added) reloads the whole window. The lists follow: the network's
-   * conversations when a view loaded them, and the network list for the counts when a conversation appeared or went.
+   * `conversation` change (a row cancelled, a conversation added) reloads the whole window. A `new` text on a conversation a view is
+   * reading re-reads the newest window instead (see `openForeign`), then the list, so the rail and the badge show the node's own
+   * `unread` (0). The lists follow only where a view holds them: a network's conversations when something loaded them, and the
+   * network list for the counts when a conversation appeared or went and no list is held to say it (the `bridge` frame is published on
+   * status changes, not on every count change, so the counts cannot be taken from it).
    */
   private networkFrame(ev: NetworkMessageEvent): void {
     const slot = this.state.foreignPages[ev.conv];
+    const held = this.state.conversations[ev.network] !== undefined;
+    const reading = ev.change === "new" && !!slot?.page && this.isReading(ev.conv);
     if (slot?.page) {
       if (ev.change === "conversation") void this.loadForeign(ev.network, ev.conv, this.foreignLimits.get(ev.conv));
       else void this.refreshForeignTail(ev);
     }
-    if (this.state.conversations[ev.network] !== undefined || ev.change === "conversation") void this.refreshConversations(ev.network);
-    if (ev.change === "conversation") void this.refreshNetworks();
+    // A read in progress refreshes the list itself once the node has counted it read; a list read now would show the old count.
+    if (held && !reading) void this.refreshConversations(ev.network);
+    if (ev.change === "conversation" && !held) void this.refreshNetworks();
   }
 
   private readonly tailLane = coalescedBy<string>(async (conv) => {
@@ -860,6 +890,12 @@ export class ApiStore {
     const ev = this.tailEvents.get(conv);
     this.tailEvents.delete(conv);
     if (!a || !slot?.page || !ev) return;
+    // A new text on a conversation somebody is reading: the node counts a read without `since_seq` as the person reading it.
+    if (ev.change === "new" && this.isReading(conv)) {
+      await this.loadForeign(slot.network, conv, this.foreignLimits.get(conv));
+      if (this.adapter === a && this.state.conversations[slot.network] !== undefined) await this.refreshConversations(slot.network);
+      return;
+    }
     const held = slot.page.messages;
     const row = ev.id ? held.find((m) => m.id === ev.id) : undefined;
     const since = row ? Math.max(0, row.seq - 1) : topSeq(held);
@@ -882,7 +918,8 @@ export class ApiStore {
   private refreshForeignTail(ev: NetworkMessageEvent): Promise<void> {
     const waiting = this.tailEvents.get(ev.conv);
     // A frame that names a row we hold must not be replaced by a later nameless one: the state change sits below the newest `seq`.
-    if (!waiting || ev.id) this.tailEvents.set(ev.conv, ev);
+    // A `new` text that is waiting stays `new` when a state frame replaces it: the read that marks the conversation read is still owed.
+    if (!waiting || ev.id) this.tailEvents.set(ev.conv, waiting?.change === "new" && ev.change !== "new" ? { ...ev, change: "new" } : ev);
     return this.tailLane(ev.conv);
   }
 
