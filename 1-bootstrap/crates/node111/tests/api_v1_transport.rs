@@ -428,10 +428,11 @@ fn http(
 
 // ---------------------------------------------------------------- fakes
 
-/// rnstatus: every call logged; reads answer nothing.
+/// rnstatus: every call logged; reads answer `read_out` (empty unless a test sets it).
 #[derive(Clone, Default)]
 struct Rec {
     log: Arc<Mutex<Vec<String>>>,
+    read_out: Arc<Mutex<String>>,
 }
 
 impl Runner for Rec {
@@ -442,9 +443,14 @@ impl Runner for Rec {
             line.push_str(a);
         }
         self.log.lock().unwrap().push(line);
+        let stdout = if args.len() == 2 {
+            self.read_out.lock().unwrap().clone()
+        } else {
+            String::new()
+        };
         Ok(Output {
             status: 0,
-            stdout: String::new(),
+            stdout,
             stderr: String::new(),
         })
     }
@@ -457,6 +463,8 @@ impl Runner for Rec {
 struct FakeRnsd {
     log: Arc<Mutex<Vec<String>>>,
     running: AtomicBool,
+    /// The control refuses the restart (`ChildControl::restart` answering false).
+    refuse: Arc<AtomicBool>,
 }
 
 impl RnsdChild for FakeRnsd {
@@ -465,8 +473,16 @@ impl RnsdChild for FakeRnsd {
     }
 
     fn restart(&self, _grace: Duration) -> BoxFut<'_, bool> {
-        self.log.lock().unwrap().push("restart rnsd".into());
-        Box::pin(async { true })
+        let ok = !self.refuse.load(Ordering::SeqCst);
+        self.log.lock().unwrap().push(
+            if ok {
+                "restart rnsd"
+            } else {
+                "restart rnsd refused"
+            }
+            .into(),
+        );
+        Box::pin(async move { ok })
     }
 }
 
@@ -478,6 +494,8 @@ struct Node {
     spine: Arc<Spine>,
     facts: Arc<FactsCache>,
     log: Arc<Mutex<Vec<String>>>,
+    rnsd: Arc<FakeRnsd>,
+    read_out: Arc<Mutex<String>>,
     token: DaemonToken,
     port: u16,
     lan: u16,
@@ -514,6 +532,7 @@ async fn node(lan_sharing: bool) -> Node {
     let startup = interfaces::startup(&st, &st.join(store::FILE), &config::config_path(&layout));
     let rec = Rec::default();
     let log = Arc::clone(&rec.log);
+    let read_out = Arc::clone(&rec.read_out);
     let rn = Arc::new(Rnstatus::new(Arc::new(rec), &layout.root));
     let spine = Spine::new(
         layout.clone(),
@@ -522,10 +541,12 @@ async fn node(lan_sharing: bool) -> Node {
         lan_sharing,
         Some(Category::Hub4A),
     );
-    spine.set_rnsd(Arc::new(FakeRnsd {
+    let rnsd = Arc::new(FakeRnsd {
         log: Arc::clone(&log),
         running: AtomicBool::new(true),
-    }));
+        refuse: Arc::new(AtomicBool::new(false)),
+    });
+    spine.set_rnsd(Arc::clone(&rnsd) as Arc<dyn RnsdChild>);
     spine.write_config().unwrap();
     let facts = FactsCache::new(TickConfig::default());
     let dash: SharedState = Arc::new(RwLock::new(DashboardState::new("2026.10.19")));
@@ -548,6 +569,8 @@ async fn node(lan_sharing: bool) -> Node {
         spine,
         facts,
         log,
+        rnsd,
+        read_out,
         token,
         port,
         lan,
@@ -579,6 +602,87 @@ impl Node {
     }
     fn take_log(&self) -> Vec<String> {
         std::mem::take(&mut *self.log.lock().unwrap())
+    }
+
+    /// The device core's applier in ext, as the daemon wires it (`Applier::production`'s
+    /// parts, with no device registry): the spine, a probe over the spine and this rnsd,
+    /// the decision records under `agent/decisions`, a short probe window.
+    fn install_applier(&self) {
+        use node111::daemon::devices::applier::{Applier, ApplierConfig, DecisionFile, SpineProbe};
+        let probe = SpineProbe::new(
+            Arc::clone(&self.spine),
+            Some(Arc::clone(&self.rnsd) as Arc<dyn RnsdChild>),
+            None,
+        );
+        let applier = Applier::new(
+            Arc::clone(&self.spine),
+            Arc::new(probe),
+            Arc::new(NoDevices),
+            Arc::new(NoShots),
+            Arc::new(DecisionFile::new(self.decisions())),
+            ApplierConfig {
+                probe_window: Duration::from_secs(2),
+                probe_interval: Duration::from_millis(20),
+            },
+        );
+        self.api.insert_ext(applier);
+    }
+
+    fn decisions(&self) -> std::path::PathBuf {
+        self.spine.layout().root.join("agent/decisions")
+    }
+
+    /// `interfaces.toml` and `rns/config` as they are on disk.
+    fn files(&self) -> (Vec<u8>, Vec<u8>) {
+        let l = self.spine.layout();
+        (
+            std::fs::read(interfaces::path(&l.state_dir())).unwrap(),
+            std::fs::read(config::config_path(l)).unwrap(),
+        )
+    }
+}
+
+/// No device registry (the PATCH carries no interface action).
+struct NoDevices;
+
+impl node111::daemon::devices::applier::DeviceLookup for NoDevices {
+    fn serial_port(
+        &self,
+        _: &str,
+    ) -> Result<String, node111::daemon::devices::registry::TargetError> {
+        Err(node111::daemon::devices::registry::TargetError::NotFound)
+    }
+}
+
+/// No one-shots (the PATCH carries none).
+struct NoShots;
+
+impl node111::daemon::devices::applier::OneShots for NoShots {
+    fn identify<'a>(
+        &'a self,
+        _: &'a str,
+    ) -> node111::daemon::devices::applier::BoxFut<
+        'a,
+        Result<Value, node111::daemon::devices::applier::OneShotError>,
+    > {
+        Box::pin(async {
+            Err(node111::daemon::devices::applier::OneShotError::Failed(
+                "not used".into(),
+            ))
+        })
+    }
+    fn restart<'a>(
+        &'a self,
+        _: &'a str,
+    ) -> node111::daemon::devices::applier::BoxFut<
+        'a,
+        Result<Value, node111::daemon::devices::applier::OneShotError>,
+    > {
+        Box::pin(async {
+            Err(node111::daemon::devices::applier::OneShotError::Failed(
+                "not used".into(),
+            ))
+        })
     }
 }
 
@@ -808,4 +912,97 @@ async fn the_bridge_settings_order_is_the_spines() {
     assert_eq!(ids[..2], ["app:simplex", "lxmf"], "{ids:?}");
     assert_eq!(ids[2..], ["meshtastic", "app:deltachat"], "{ids:?}");
     fabric.shutdown().await;
+}
+
+/// C1-bounce F3: with the device core's applier in ext, the posture and region parts of
+/// the PATCH go through its snapshot → apply → probe → keep-or-revert loop (§10 "posture
+/// through the applier (§12)"): a refused rnsd restart answers `applied: false,
+/// reverted: true` with `interfaces.toml` back byte-exact (and the direct parts of the
+/// same PATCH not applied); a restart that comes back with the shared instance up answers
+/// `applied: true, reverted: false`; the PATCH leaves no decision record behind.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn f3_posture_patches_go_through_the_applier_and_a_failed_restart_reverts() {
+    let n = node(false).await;
+    n.install_applier();
+    let before = n.files();
+    let path = "/api/v1/transport/posture";
+
+    // rnsd's control refuses the restart: not kept, the snapshot restored byte-exact
+    n.rnsd.refuse.store(true, Ordering::SeqCst);
+    let r = n.patch(
+        path,
+        json!({"posture": {"enable_transport": false}, "callsign": "W1AW"}),
+    );
+    check_op("patchTransportPosture", &r);
+    let v = r.json();
+    assert_eq!(
+        (v["applied"].as_bool(), v["reverted"].as_bool()),
+        (Some(false), Some(true)),
+        "{v}"
+    );
+    assert!(
+        v["reason"].as_str().unwrap().contains("restart rnsd"),
+        "{v}"
+    );
+    assert_eq!(
+        n.files().0,
+        before.0,
+        "interfaces.toml is the pre-PATCH bytes"
+    );
+    assert_eq!(n.files().1, before.1, "rns/config re-rendered as it was");
+    assert_eq!(v["status"]["posture"]["enable_transport"], true);
+    assert!(v["status"]["callsign"].is_null(), "the rest did not follow");
+    assert!(n.take_log().iter().any(|l| l == "restart rnsd refused"));
+
+    // an unknown region is still 400 before anything runs
+    n.patch(
+        path,
+        json!({"region": "MARS_1", "posture": {"enable_transport": false}}),
+    )
+    .problem(400, "bad_request");
+    assert_eq!(n.files().0, before.0);
+    assert!(n.take_log().is_empty(), "nothing ran");
+
+    // rnsd restarts and the shared instance is up: kept
+    n.rnsd.refuse.store(false, Ordering::SeqCst);
+    *n.read_out.lock().unwrap() =
+        " Shared Instance[rns/111]\n    Status    : Up\n    Serving   : 1 program\n\n".into();
+    let r = n.patch(path, json!({"posture": {"enable_transport": false}}));
+    check_op("patchTransportPosture", &r);
+    let v = r.json();
+    assert_eq!(
+        (v["applied"].as_bool(), v["reverted"].as_bool()),
+        (Some(true), Some(false)),
+        "{v}"
+    );
+    assert!(v["reason"].is_null(), "{v}");
+    assert_eq!(v["status"]["posture"]["enable_transport"], false);
+    assert_eq!(n.spine.file().posture.enable_transport, Some(false));
+    assert!(n.take_log().contains(&"restart rnsd".to_string()));
+
+    // the region through radio.region.set, the callsign and order after it
+    let r = n.patch(
+        path,
+        json!({"region": "EU_868", "callsign": "W1AW", "order": ["111", "lxmf"]}),
+    );
+    check_op("patchTransportPosture", &r);
+    let v = r.json();
+    assert_eq!(
+        (v["applied"].as_bool(), v["reverted"].as_bool()),
+        (Some(true), Some(false)),
+        "{v}"
+    );
+    assert_eq!(v["status"]["region"], "EU_868");
+    assert_eq!(v["status"]["callsign"], "W1AW");
+    assert_eq!(n.spine.file().order.networks[..2], ["111", "lxmf"]);
+
+    // the PATCH is no proposal: no decision record stays
+    let left: Vec<String> = std::fs::read_dir(n.decisions())
+        .map(|rd| {
+            rd.flatten()
+                .map(|e| e.file_name().to_string_lossy().into_owned())
+                .collect()
+        })
+        .unwrap_or_default();
+    assert!(left.is_empty(), "{left:?}");
 }

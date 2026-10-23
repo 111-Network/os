@@ -50,7 +50,7 @@ use crate::install::categorize::{categorize, Classification, Refusal};
 use crate::install::probe::{self, Env, Facts};
 use dashboard::{ApiState, DashboardState, ErrorState, OfferState, SharedState};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock, RwLock};
 use std::time::Duration;
 
@@ -229,6 +229,14 @@ pub struct Layer6 {
     pub bridge: Arc<bridge::Bridge>,
     pub components: components::Components,
     pub mesh_client: Option<Arc<meshtastic::client::MeshtasticAdapter>>,
+    /// Set first by [`Layer6::shutdown`] (C1-bounce F2): the daemon tick is detached and
+    /// keeps running until the process exits, and the Meshtastic client still reads
+    /// `running()` until `meshtastic.stop_and_wait`, which comes after the fabric is
+    /// closed — a pass in that window must not re-enable the adapter.
+    stopping: AtomicBool,
+    /// Held by a whole [`Layer6::tick_once`] pass and by [`Layer6::shutdown`], so a pass
+    /// already past the `stopping` check finishes before the adapters are disabled.
+    pass: tokio::sync::Mutex<()>,
 }
 
 /// Build the bridge core, the optional components and the transport routes' state, and
@@ -275,19 +283,44 @@ pub fn start_layer6(p: Layer6Parts) -> Layer6 {
     register_lxmf(&adapters, &p.api, &bridge);
     register_deltachat(&adapters, &p.api, &bridge);
     p.api.insert_ext(adapters);
-    Layer6 {
-        bridge,
-        components,
-        mesh_client: p.mesh_client,
-    }
+    Layer6::new(bridge, components, p.mesh_client)
 }
 
 impl Layer6 {
+    /// The parts [`start_layer6`] built (tests assemble one from their own bridge and
+    /// components); not stopping.
+    pub fn new(
+        bridge: Arc<bridge::Bridge>,
+        components: components::Components,
+        mesh_client: Option<Arc<meshtastic::client::MeshtasticAdapter>>,
+    ) -> Self {
+        Layer6 {
+            bridge,
+            components,
+            mesh_client,
+            stopping: AtomicBool::new(false),
+            pass: tokio::sync::Mutex::new(()),
+        }
+    }
+
+    /// [`Layer6::shutdown`] has begun: no tick pass or resume acts any more.
+    pub fn stopping(&self) -> bool {
+        self.stopping.load(Ordering::SeqCst)
+    }
+
     /// One pass, from the daemon's existing tick (no timer of its own): the Meshtastic
     /// adapter is enabled in the bridge core while its client runs (service `meshtastic`
     /// LIVE) and the user has not switched it off, disabled otherwise; then
-    /// `Bridge::tick_once`, which returns at once while nothing is enabled.
+    /// `Bridge::tick_once`, which returns at once while nothing is enabled. Once
+    /// [`Layer6::shutdown`] has begun it does nothing (F2).
     pub async fn tick_once(&self) {
+        if self.stopping() {
+            return;
+        }
+        let _pass = self.pass.lock().await;
+        if self.stopping() {
+            return;
+        }
         if let Some(c) = &self.mesh_client {
             let net = bridge::NETWORK_MESHTASTIC;
             let want = c.running() && self.bridge.adapter_switch(net) != Some(false);
@@ -311,7 +344,11 @@ impl Layer6 {
     /// match), with each enable going through `api_v1::bridge::enable_component` (the
     /// route's path) so a component's prepare hook runs before its child starts; a
     /// failure is logged and leaves that component off (its switch stays as it was).
+    /// Once [`Layer6::shutdown`] has begun it does nothing (F2).
     pub async fn resume(&self, api: &ApiState) {
+        if self.stopping() {
+            return;
+        }
         let comps = &self.components;
         let order = comps
             .resume_enabled_with(|id| async move {
@@ -319,14 +356,21 @@ impl Layer6 {
             })
             .await;
         for id in order {
+            if self.stopping() {
+                return;
+            }
             if comps.stdio(&id).await.is_some() {
                 dashboard::api_v1::bridge::attach_adapter(api, comps, &id).await;
             }
         }
     }
 
-    /// Daemon stop: the adapters, then the components' children.
+    /// Daemon stop: `stopping` first (no later tick pass or resume re-enables anything,
+    /// F2; a pass in flight is waited for), then the adapters, then the components'
+    /// children.
     pub async fn shutdown(&self) {
+        self.stopping.store(true, Ordering::SeqCst);
+        let _pass = self.pass.lock().await;
         for net in self.bridge.enabled() {
             self.bridge.disable(&net).await;
         }
@@ -349,7 +393,8 @@ pub fn wire_bridge_nearby(api: &Arc<ApiState>, bridge: &bridge::Bridge) {
 /// once the licence notice passes and before the helper starts, writes its Reticulum client
 /// config ([`lxmf_client_config`]) and answers `bridge::lxmf::run_args` of the bridge's
 /// announce settings (fail closed: no spine, no shared instance or no `rpc_key` refuses
-/// the enable and nothing starts); and the adapter factory that attaches `LxmfAdapter` to
+/// the enable and nothing starts); its undo ([`remove_lxmf_client_config`]) for an enable
+/// refused after the hook passed (C1-bounce F4); and the adapter factory that attaches `LxmfAdapter` to
 /// the running component's stdio (`attach_adapter` then enables it in the core; the route
 /// disables it before the child stops). Captures the API state and the bridge weakly;
 /// spawns nothing.
@@ -387,6 +432,18 @@ pub fn register_lxmf(
         })
     });
     adapters.register_prepare(lxmf::COMPONENT_ID, prepare);
+    // F4: a refused enable after a passing hook takes the client config back
+    let api_w = Arc::downgrade(api);
+    let unprepare: dashboard::api_v1::bridge::UnprepareHook = Arc::new(move || {
+        let api = api_w.upgrade();
+        Box::pin(async move {
+            if let Some(api) = api {
+                let root = api.layout.root.clone();
+                let _ = tokio::task::spawn_blocking(move || remove_lxmf_client_config(&root)).await;
+            }
+        })
+    });
+    adapters.register_unprepare(lxmf::COMPONENT_ID, unprepare);
     let bridge_w = Arc::downgrade(bridge);
     let factory: dashboard::api_v1::bridge::AdapterFactory =
         Arc::new(move |components: components::Components| {
@@ -408,10 +465,13 @@ pub fn register_lxmf(
 /// The LXMF helper's client config (§6 (1), §11): `share_instance = Yes`, the spine's
 /// `instance_name` and rnsd's `rpc_key` under `<root>/bridge/lxmf/rns/config` (0700 / 0600,
 /// `transport::config::write_client_config`; unchanged bytes are not rewritten). The key
-/// is the one the spine rendered rnsd's config with: it must exist already — this never
-/// mints one (a fresh key would not be rnsd's). Fails closed with the enable's problem:
-/// `requires_unmet` when rnsd does not share its instance or has no key yet,
-/// `install_failed` when the key cannot be read or the file written. Blocking.
+/// is the one the spine rendered rnsd's config with, read through the non-minting
+/// `Secrets::load_existing` (C1-bounce F1): nothing under rnsd's `secrets/` is minted,
+/// rewritten or re-moded here — not a malformed key, not the hub IFAC passphrase (a
+/// rotated key would not be rnsd's, and a component's enable never changes the spine's
+/// secrets). Fails closed with the enable's problem: `requires_unmet` when rnsd does not
+/// share its instance or has no key yet, `install_failed` when the key is unreadable,
+/// not a regular file or malformed, or the file cannot be written. Blocking.
 pub fn lxmf_client_config(
     spine: &transport::posture::Spine,
     root: &Path,
@@ -426,23 +486,46 @@ pub fn lxmf_client_config(
                 .into(),
         ));
     }
-    let rnsd_root = &spine.layout().root;
-    let key = config::secrets_dir(rnsd_root).join(config::RPC_KEY_FILE);
-    if !std::fs::symlink_metadata(&key).is_ok_and(|m| m.is_file()) {
-        return Err(EnableError::RequiresUnmet(
-            "rnsd has no rpc_key yet (its config was never rendered); start the transport \
-             service first"
-                .into(),
-        ));
-    }
-    let secrets = config::Secrets::for_file(rnsd_root, &f).map_err(|e| {
-        EnableError::InstallFailed(format!("rnsd's rpc_key could not be read: {e:#}"))
-    })?;
+    let secrets = config::Secrets::load_existing(&spine.layout().root)
+        .map_err(|e| {
+            EnableError::InstallFailed(format!("rnsd's rpc_key could not be read: {e:#}"))
+        })?
+        .ok_or_else(|| {
+            EnableError::RequiresUnmet(
+                "rnsd has no rpc_key yet (its config was never rendered); start the \
+                 transport service first"
+                    .into(),
+            )
+        })?;
     config::write_client_config(root, &secrets, &f.posture.instance_name).map_err(|e| {
         EnableError::InstallFailed(format!(
             "the helper's client config could not be written: {e:#}"
         ))
     })
+}
+
+/// Undo [`lxmf_client_config`] after a failed enable (C1-bounce F4): the hook runs before
+/// `Components::enable_with`'s `[requires]`, cache and pin checks, so an enable refused
+/// there would otherwise leave a 0600 copy of rnsd's `rpc_key` on disk for a component
+/// that is not installed. Removes `bridge/lxmf/rns/config`, then `bridge/lxmf/rns` and
+/// `bridge/lxmf` when they are left empty (anything else there stays). Blocking; errors
+/// are logged (best effort: the next enable rewrites the file).
+pub fn remove_lxmf_client_config(root: &Path) {
+    use transport::config;
+    let path = config::client_config_path(root);
+    match std::fs::remove_file(&path) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => eprintln!(
+            "111 bridge: lxmf: the helper's client config {} stays: {e}",
+            path.display()
+        ),
+    }
+    let dir = config::client_dir(root);
+    for d in [Some(dir.as_path()), dir.parent()].into_iter().flatten() {
+        // only an empty directory goes (ENOTEMPTY / ENOENT are fine)
+        let _ = std::fs::remove_dir(d);
+    }
 }
 
 /// How [`register_deltachat_with`] runs the Madmail relay's one-shot CLI and how long it

@@ -1828,15 +1828,20 @@ fn a_fresh_layer6_spawns_nothing_and_enables_nothing() {
             ),
             *key,
         );
-        tokio::time::sleep(Duration::from_millis(200)).await;
+        // F5: the production wiring, spine included (its routes' state, its restart hooks)
+        let spine = layer6_spine(&layout);
+        let facts = node111::daemon::transport::rnstatus::FactsCache::new(
+            node111::daemon::transport::rnstatus::TickConfig::default(),
+        );
+        // F5: the fabric quiesced — the same count on two reads 100 ms apart
         let metrics = tokio::runtime::Handle::current().metrics();
-        let before = metrics.num_alive_tasks();
+        let before = quiesced(&metrics).await;
         let l6 = node111::daemon::start_layer6(node111::daemon::Layer6Parts {
             api: Arc::clone(&api),
             fabric,
             ports: Arc::new(PortTable::new()),
             tick: Arc::new(|| 0),
-            transport: None,
+            transport: Some((Arc::clone(&spine), facts)),
             mesh_client: Some(Arc::clone(&client)),
             cmd: Arc::new(node111::testkit::MockRunner::new(Vec::<(
                 String,
@@ -1857,13 +1862,12 @@ fn a_fresh_layer6_spawns_nothing_and_enables_nothing() {
             !client.running(),
             "the client starts only while meshtastic is LIVE"
         );
-        let after = metrics.num_alive_tasks();
-        assert!(
-            after <= before,
-            "Layer 6 spawned {} task(s)",
-            after - before
-        );
+        let after = quiesced(&metrics).await;
+        assert_eq!(after, before, "Layer 6 left task(s) alive");
         assert!(api.ext::<Arc<Bridge>>().is_some());
+        assert!(api
+            .ext::<Arc<node111::daemon::dashboard::api_v1::transport::TransportApi>>()
+            .is_some());
         assert!(api.ext::<Components>().is_some());
         // W1: the LXMF seam and the Nearby sink are registered, and still nothing runs
         let adapters = api
@@ -1903,6 +1907,309 @@ fn a_fresh_layer6_spawns_nothing_and_enables_nothing() {
         );
         l6.shutdown().await;
     });
+}
+
+/// The alive tokio tasks once the count holds still across two reads 100 ms apart (F5:
+/// the fabric's own start-up tasks settled; at most 5 s).
+async fn quiesced(metrics: &tokio::runtime::RuntimeMetrics) -> usize {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let mut last = metrics.num_alive_tasks();
+    loop {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let now = metrics.num_alive_tasks();
+        if now == last {
+            return now;
+        }
+        assert!(Instant::now() < deadline, "the task count never settled");
+        last = now;
+    }
+}
+
+/// A transport spine on `layout` with rnsd's config rendered (no rnsd child: nothing runs).
+fn layer6_spine(layout: &DaemonLayout) -> Arc<node111::daemon::transport::posture::Spine> {
+    use node111::daemon::devices;
+    use node111::daemon::transport::{config, interfaces, posture::Spine, rnstatus::Rnstatus};
+    let st = layout.state_dir();
+    let startup = interfaces::startup(
+        &st,
+        &st.join(devices::store::FILE),
+        &config::config_path(layout),
+    );
+    let spine = Spine::new(
+        layout.clone(),
+        startup,
+        Arc::new(Rnstatus::new(Arc::new(NullRnstatus), &layout.root)),
+        false,
+        None,
+    );
+    spine.write_config().unwrap();
+    spine
+}
+
+/// C1-bounce F2: the daemon tick is detached and the Meshtastic client reads `running()`
+/// until `meshtastic.stop_and_wait`, after `layer6.shutdown()` and `fabric.shutdown()`; a
+/// tick in that window must not re-enable the adapter (a recv task ingesting into a closed
+/// fabric).
+#[test]
+fn f2_a_tick_after_shutdown_never_re_enables_the_meshtastic_adapter() {
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .unwrap();
+    rt.block_on(async {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("state")).unwrap();
+        let layout = DaemonLayout {
+            root: dir.path().to_path_buf(),
+            etc: dir.path().join("etc"),
+        };
+        let identity = node111::identity::generate(&layout.identity_dir()).unwrap();
+        let key = node111::daemon::bridge_conv_key(&identity.keyset().to_bytes()).unwrap();
+        let dash: SharedState = Arc::new(RwLock::new(DashboardState::new("2026.10.19")));
+        let mut acfg = ApiConfig::new(layout.clone(), false);
+        acfg.persist_auth = false;
+        let api = ApiState::new(dash, acfg);
+        let mut c = FabricConfig::production(&layout, None);
+        c.listen = "127.0.0.1:0".parse().unwrap();
+        c.housekeeping = Duration::from_secs(3600);
+        let fabric = fabric::start(c, Some(identity), &api).await;
+        assert!(fabric.running());
+        // a client whose connection task runs (it retries a closed downlink): running()
+        let closed = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let downlink = closed.local_addr().unwrap();
+        drop(closed);
+        let client = node111::daemon::meshtastic::client::MeshtasticAdapter::new(
+            node111::daemon::meshtastic::client::ClientConfig::production(downlink),
+            *key,
+        );
+        client.start();
+        assert!(client.running());
+        let l6 = node111::daemon::start_layer6(node111::daemon::Layer6Parts {
+            api: Arc::clone(&api),
+            fabric: Arc::clone(&fabric),
+            ports: Arc::new(PortTable::new()),
+            tick: Arc::new(|| 0),
+            transport: None,
+            mesh_client: Some(Arc::clone(&client)),
+            cmd: Arc::new(node111::testkit::MockRunner::new(Vec::<(
+                String,
+                node111::util::run::Output,
+            )>::new())),
+        });
+        // while the daemon runs, the tick enables the adapter (B3's rule)
+        l6.tick_once().await;
+        assert_eq!(l6.bridge.enabled(), vec!["meshtastic".to_string()]);
+        assert_eq!(l6.bridge.recv_tasks(), 1);
+        // the daemon's stop order: layer6, then the fabric; the client still runs
+        l6.shutdown().await;
+        assert!(l6.stopping());
+        assert!(l6.bridge.enabled().is_empty());
+        fabric.shutdown().await;
+        assert!(client.running(), "the window: meshtastic stops last");
+        for _ in 0..3 {
+            l6.tick_once().await;
+        }
+        assert!(
+            l6.bridge.enabled().is_empty(),
+            "a tick after shutdown re-enabled {:?}",
+            l6.bridge.enabled()
+        );
+        assert_eq!(l6.bridge.recv_tasks(), 0, "no recv task after shutdown");
+        // and a late resume does nothing either
+        l6.resume(&api).await;
+        assert!(l6.bridge.enabled().is_empty());
+        client.stop().await;
+    });
+}
+
+/// Every file under `dir` (relative path → its SHA-256), symlinks recorded by target.
+fn tree_hashes(dir: &std::path::Path) -> std::collections::BTreeMap<String, String> {
+    let mut out = std::collections::BTreeMap::new();
+    let Ok(rd) = std::fs::read_dir(dir) else {
+        return out;
+    };
+    for e in rd.flatten() {
+        let p = e.path();
+        let name = e.file_name().to_string_lossy().into_owned();
+        let meta = std::fs::symlink_metadata(&p).unwrap();
+        let v = if meta.file_type().is_symlink() {
+            format!("-> {}", std::fs::read_link(&p).unwrap().display())
+        } else if meta.is_dir() {
+            for (k, h) in tree_hashes(&p) {
+                out.insert(format!("{name}/{k}"), h);
+            }
+            continue;
+        } else {
+            sha256_bytes(&std::fs::read(&p).unwrap())
+        };
+        out.insert(name, v);
+    }
+    out
+}
+
+/// C1-bounce F1: the LXMF prepare hook reads rnsd's `rpc_key` without minting — no key is
+/// `requires_unmet`, a malformed key `install_failed`, and with the hub IFAC on and its
+/// passphrase absent the enable passes without minting one; `secrets/` is byte-unchanged
+/// in every case.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn f1_the_lxmf_client_config_never_mints_or_rewrites_rnsd_secrets() {
+    use node111::daemon::dashboard::api_v1::bridge::ComponentAdapters;
+    use node111::daemon::dashboard::api_v1::transport::TransportApi;
+    use node111::daemon::transport::config;
+    use node111::daemon::transport::rnstatus::{FactsCache, TickConfig};
+    let n = node_with(vec![lxmf_component()]).await;
+    let root = n.layout.root.clone();
+    let cache = root.join("cache/packages/lxmf");
+    std::fs::create_dir_all(&cache).unwrap();
+    std::fs::write(cache.join("lxmf-fake"), lxmf_bin()).unwrap();
+    let adapters = Arc::new(ComponentAdapters::default());
+    node111::daemon::register_lxmf(&adapters, &n.api, &n.bridge);
+    n.api.insert_ext(Arc::clone(&adapters));
+    let spine = lxmf_spine(&n);
+    n.api.insert_ext(Arc::new(TransportApi {
+        spine: Arc::clone(&spine),
+        facts: FactsCache::new(TickConfig::default()),
+    }));
+    let enable = "/api/v1/bridge/components/lxmf/enable";
+    let hash = lxmf_component().notice_hash();
+    let secrets = config::secrets_dir(&root);
+    let key = secrets.join("rns-rpc-key");
+    let client = config::client_config_path(&root);
+    let good = std::fs::read(&key).unwrap();
+
+    // no key (rnsd's config never rendered): requires_unmet, nothing minted
+    std::fs::remove_file(&key).unwrap();
+    let before = tree_hashes(&secrets);
+    let pb = n
+        .post(enable, json!({ "accept_notice_hash": hash }))
+        .problem(409, "component_unavailable");
+    assert_eq!(pb["reason_code"], "requires_unmet", "{pb}");
+    assert_eq!(tree_hashes(&secrets), before, "secrets/ unchanged");
+    assert!(!key.exists(), "no key minted");
+    assert!(!client.exists());
+    assert!(n.components.stdio("lxmf").await.is_none());
+
+    // a malformed key: install_failed, the bytes stay as they are
+    std::fs::write(
+        &key,
+        "not-a-key
+",
+    )
+    .unwrap();
+    let before = tree_hashes(&secrets);
+    let pb = n
+        .post(enable, json!({ "accept_notice_hash": hash }))
+        .problem(409, "component_unavailable");
+    assert_eq!(pb["reason_code"], "install_failed", "{pb}");
+    assert_eq!(tree_hashes(&secrets), before, "secrets/ unchanged");
+    assert_eq!(
+        std::fs::read(&key).unwrap(),
+        b"not-a-key
+"
+    );
+    assert!(!client.exists());
+    assert!(n.components.stdio("lxmf").await.is_none());
+
+    // the good key back, the hub IFAC on with its passphrase absent: the enable passes
+    // and mints no passphrase (load_or_mint would have)
+    std::fs::write(&key, &good).unwrap();
+    spine
+        .update(|f| f.posture.lan.backbone.ifac = true)
+        .await
+        .unwrap();
+    let _ = std::fs::remove_file(secrets.join("rns-ifac"));
+    let before = tree_hashes(&secrets);
+    let r = n.post(enable, json!({ "accept_notice_hash": hash }));
+    check_op("enableBridgeComponent", &r);
+    assert_eq!(r.json()["state"], "running", "{}", r.body);
+    assert_eq!(tree_hashes(&secrets), before, "secrets/ unchanged");
+    assert!(
+        !secrets.join("rns-ifac").exists(),
+        "no IFAC passphrase minted"
+    );
+    let text = std::fs::read_to_string(&client).unwrap();
+    let k = String::from_utf8(good).unwrap();
+    assert!(text.contains(&format!("rpc_key = {}", k.trim())), "{text}");
+    n.post("/api/v1/bridge/components/lxmf/disable", json!({}));
+    assert!(n.components.stdio("lxmf").await.is_none());
+}
+
+/// C1-bounce F4: the prepare hook passes, then `enable_with` refuses (the payload is not
+/// cached): the client config (a 0600 copy of rnsd's `rpc_key`) and its empty dirs are
+/// removed; nothing is installed or started.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn f4_a_refused_enable_after_a_passing_hook_leaves_no_client_config() {
+    use node111::daemon::dashboard::api_v1::bridge::ComponentAdapters;
+    use node111::daemon::dashboard::api_v1::transport::TransportApi;
+    use node111::daemon::transport::config;
+    use node111::daemon::transport::rnstatus::{FactsCache, TickConfig};
+    let n = node_with(vec![lxmf_component()]).await;
+    let root = n.layout.root.clone();
+    let adapters = Arc::new(ComponentAdapters::default());
+    node111::daemon::register_lxmf(&adapters, &n.api, &n.bridge);
+    n.api.insert_ext(Arc::clone(&adapters));
+    n.api.insert_ext(Arc::new(TransportApi {
+        spine: lxmf_spine(&n),
+        facts: FactsCache::new(TickConfig::default()),
+    }));
+    // the hook can pass (spine, shared instance, rnsd's key) but no payload is cached
+    let hash = lxmf_component().notice_hash();
+    let pb = n
+        .post(
+            "/api/v1/bridge/components/lxmf/enable",
+            json!({ "accept_notice_hash": hash }),
+        )
+        .problem(409, "component_unavailable");
+    assert_ne!(pb["reason_code"], "requires_unmet", "the hook passed: {pb}");
+    assert!(
+        !config::client_config_path(&root).exists(),
+        "no copy of rnsd's rpc_key left behind"
+    );
+    assert!(!root.join("bridge/lxmf").exists(), "{pb}");
+    assert!(!root.join("components/lxmf").exists(), "nothing installed");
+    assert!(n.components.stdio("lxmf").await.is_none(), "no child");
+    assert!(n.bridge.enabled().is_empty());
+}
+
+/// C1-bounce F6: the node-id stamp is checked on every Layer 6 kind — a `bridge_edge`
+/// stamped for another node, and one proposal of each kind with `node_id: null`, are each
+/// `502 upstream_error` with no decision file and nothing applied.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn f6_a_foreign_or_missing_stamp_is_refused_on_every_layer6_kind() {
+    let p = pair().await;
+    let n = &p.n;
+    let edge = format!(
+        "from: {}\nto: {}\n\nthe two channels talk about the same thing",
+        fjson::fc_id(p.src),
+        fjson::fc_id(p.dst)
+    );
+    let message = format!("to: {}\n\nhello\n", fjson::fc_id(p.src));
+    let device = r#"{"why":"x","actions":[{"action":"radio.region.set","region":"EU_868"}]}"#;
+    let other = "ab".repeat(32);
+    let cases: [(&str, &str, &str, Option<&str>); 4] = [
+        (
+            "prop-st1",
+            "bridge_edge",
+            edge.as_str(),
+            Some(other.as_str()),
+        ),
+        ("prop-st2", "bridge_edge", edge.as_str(), None),
+        ("prop-st3", "bridge_message", message.as_str(), None),
+        ("prop-st4", "device", device, None),
+    ];
+    let rows = n.rows(p.src).await.len();
+    for (id, kind, body, stamp) in cases {
+        n.propose(id, kind, body, stamp);
+        let pb = n.decide(id, None).problem(502, "upstream_error");
+        assert!(n.decision_file(id).is_none(), "{id}: {pb}");
+        assert!(
+            n.get(&format!("/api/v1/proposals/{id}")).json()["decision"].is_null(),
+            "{id} stays open"
+        );
+    }
+    assert_eq!(n.get("/api/v1/bridge/edges").json()["edges"], json!([]));
+    assert_eq!(n.rows(p.src).await.len(), rows, "nothing queued");
 }
 
 // ---------------------------------------------------------------- W1: foreign retry / cancel
@@ -2271,11 +2578,7 @@ async fn resume_runs_the_prepare_hook_and_a_failing_hook_leaves_the_component_of
     )
     .unwrap();
     consent::update(&root, "lxmf", |r| r.enabled = true).unwrap();
-    let l6 = node111::daemon::Layer6 {
-        bridge: Arc::clone(&n.bridge),
-        components: n.components.clone(),
-        mesh_client: None,
-    };
+    let l6 = node111::daemon::Layer6::new(Arc::clone(&n.bridge), n.components.clone(), None);
 
     // no transport spine: the hook refuses, so nothing starts and nothing is written
     l6.resume(&n.api).await;

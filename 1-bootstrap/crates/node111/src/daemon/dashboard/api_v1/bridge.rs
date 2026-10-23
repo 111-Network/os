@@ -171,12 +171,20 @@ pub type AdapterFactory =
 pub type PrepareHook =
     Arc<dyn Fn() -> BoxFuture<'static, Result<Vec<String>, EnableError>> + Send + Sync>;
 
+/// Undoes what a component's [`PrepareHook`] wrote when the enable it prepared is refused
+/// afterwards (C1-bounce F4: the hook runs before `Components::enable_with`'s
+/// `[requires]`, cache and pin checks; the LXMF helper's client config — a 0600 copy of
+/// rnsd's `rpc_key` — must not stay on disk for a component that did not start). Best
+/// effort; runs only while the component has no running child.
+pub type UnprepareHook = Arc<dyn Fn() -> BoxFuture<'static, ()> + Send + Sync>;
+
 /// The registration seam between optional components and the bridge core (module doc).
 /// With nothing registered, enabling a component starts its child only.
 #[derive(Default)]
 pub struct ComponentAdapters {
     map: RwLock<HashMap<String, AdapterFactory>>,
     prepare: RwLock<HashMap<String, PrepareHook>>,
+    unprepare: RwLock<HashMap<String, UnprepareHook>>,
 }
 
 impl ComponentAdapters {
@@ -192,6 +200,15 @@ impl ComponentAdapters {
     /// second registration replaces the first).
     pub fn register_prepare(&self, component: &str, f: PrepareHook) {
         self.prepare
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(component.to_string(), f);
+    }
+
+    /// Register the undo of `component`'s [`PrepareHook`] ([`UnprepareHook`]; a second
+    /// registration replaces the first).
+    pub fn register_unprepare(&self, component: &str, f: UnprepareHook) {
+        self.unprepare
             .write()
             .unwrap_or_else(|e| e.into_inner())
             .insert(component.to_string(), f);
@@ -223,6 +240,14 @@ impl ComponentAdapters {
             .get(component)
             .cloned()
     }
+
+    fn unprepare_of(&self, component: &str) -> Option<UnprepareHook> {
+        self.unprepare
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(component)
+            .cloned()
+    }
 }
 
 /// Enable `component` (the route's and `Layer6::resume`'s one path): when a
@@ -231,17 +256,20 @@ impl ComponentAdapters {
 /// arguments go to `Components::enable_with`; a failing hook refuses the enable (nothing
 /// installed past what was there, nothing started). Without a valid acknowledgement the
 /// hook does not run and the enable answers `consent_required` as usual (nothing is
-/// written for a component the user has not accepted, §2.1 rule 2).
+/// written for a component the user has not accepted, §2.1 rule 2). When the hook ran
+/// and `enable_with` then refuses (its `[requires]`, cache or pin checks) while the
+/// component has no running child, its [`UnprepareHook`] removes what the hook wrote
+/// (C1-bounce F4).
 pub async fn enable_component(
     api: &ApiState,
     components: &Components,
     component: &str,
     ack: Option<&str>,
 ) -> Result<Enabled, EnableError> {
-    let hook = api
-        .ext::<Arc<ComponentAdapters>>()
-        .and_then(|r| r.prepare_of(component));
+    let reg = api.ext::<Arc<ComponentAdapters>>();
+    let hook = reg.as_ref().and_then(|r| r.prepare_of(component));
     let mut args = Vec::new();
+    let mut prepared = false;
     if let Some(hook) = hook {
         let accepted = components
             .status(component)
@@ -252,9 +280,16 @@ pub async fn enable_component(
             });
         if accepted {
             args = hook().await?;
+            prepared = true;
         }
     }
-    components.enable_with(component, ack, args).await
+    let res = components.enable_with(component, ack, args).await;
+    if res.is_err() && prepared && components.stdio(component).await.is_none() {
+        if let Some(undo) = reg.as_ref().and_then(|r| r.unprepare_of(component)) {
+            undo().await;
+        }
+    }
+    res
 }
 
 /// After an enable: build and enable the component's adapter in the bridge core, when a

@@ -7,13 +7,23 @@
 //!   `state/interfaces.toml`. No credential appears here.
 //! - `PATCH /transport/posture` → `TransportPostureResult`: a partial merge of the
 //!   posture, the radio region (the request is the human's confirmation, §12
-//!   `radio.region.set`) and callsign, and the preferred order, applied through the
-//!   spine (`Spine::update`: validate → save 0600 → re-render → diff → `rnstatus
-//!   --attach|--detach|--reload` or an rnsd restart with its dependants in order). **v1:
-//!   this human write goes to B4's posture apply directly**; the probe-and-revert loop of
-//!   §12 is the device core's applier (C4), so `reverted` is always `false` here and a
-//!   failed step is reported in `reason` with `applied: false`. An unknown region or a bad
-//!   value is `400`.
+//!   `radio.region.set`) and callsign, and the preferred order. The whole merge is
+//!   validated against a copy of the file first (an unknown region or a bad value is
+//!   `400`, nothing written). Then, **posture through the applier (§10, §12;
+//!   C1-bounce F3)**: when the device core's `Arc<Applier>` is in ext, the parts its
+//!   closed vocabulary carries — `share_instance` / `enable_transport` as
+//!   `rns.posture.set`, the region as `radio.region.set`, in that order — go through its
+//!   snapshot → apply → probe → keep-or-revert loop, so a failed rnsd restart or probe
+//!   restores the previous `interfaces.toml` byte-exact and answers `applied: false,
+//!   reverted: true`. Only when they were kept does the rest (`instance_name`, `lan`,
+//!   `stock_autointerface`, `propagation_node`, callsign, order — no applier action
+//!   exists for them) follow through `Spine::update` (validate → save 0600 → re-render →
+//!   diff → `rnstatus --attach|--detach|--reload` or an rnsd restart with its dependants
+//!   in order); a failed step there is `applied: false, reverted: false` with the
+//!   `reason`. The PATCH is no proposal: the applier's decision record for it (a
+//!   one-off `transport-posture-<random>` id) is removed once it answers. Without an
+//!   applier in ext (a node without the device registry, tests) the whole merge goes
+//!   through `Spine::update` as before and `reverted` is `false`.
 //! - `POST /transport/join` → `TransportJoin` with `Cache-Control: no-store`: the
 //!   phone-relay descriptor (address, port, and the IFAC name and passphrase when IFAC is
 //!   on). A POST because it carries a credential and the agent's bearer reads every GET:
@@ -25,6 +35,7 @@
 
 use super::auth;
 use super::{ApiRouter, ApiState, Problem};
+use crate::daemon::devices::applier::{self, Action, Applier, ApplierRequest, ApplyReport};
 use crate::daemon::transport::join::{JoinError, Session};
 use crate::daemon::transport::posture::{Applied, ApplyError, Spine};
 use crate::daemon::transport::rnstatus::{FactsCache, FactsSnapshot};
@@ -121,7 +132,7 @@ pub fn apply_problem(e: &ApplyError) -> Problem {
 }
 
 /// `TransportPosturePatch.posture.lan`.
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct LanPatch {
     #[serde(default)]
@@ -133,7 +144,7 @@ struct LanPatch {
 }
 
 /// `TransportPosturePatch.posture`.
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct PosturePatch {
     #[serde(default)]
@@ -150,6 +161,20 @@ struct PosturePatch {
     propagation_node: Option<bool>,
 }
 
+impl PosturePatch {
+    fn is_empty(&self) -> bool {
+        self.share_instance.is_none()
+            && self.instance_name.is_none()
+            && self.enable_transport.is_none()
+            && self
+                .lan
+                .as_ref()
+                .is_none_or(|l| l.backbone_listen.is_none() && l.port.is_none() && l.ifac.is_none())
+            && self.stock_autointerface.is_none()
+            && self.propagation_node.is_none()
+    }
+}
+
 fn present<'de, D: serde::Deserializer<'de>, T: Deserialize<'de>>(
     d: D,
 ) -> Result<Option<T>, D::Error> {
@@ -157,7 +182,7 @@ fn present<'de, D: serde::Deserializer<'de>, T: Deserialize<'de>>(
 }
 
 /// `TransportPosturePatch`.
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TransportPatch {
     #[serde(default)]
@@ -208,6 +233,37 @@ impl TransportPatch {
             }
         }
         Ok(())
+    }
+
+    /// The parts the device core's applier carries (§12 vocabulary, module doc):
+    /// `rns.posture.set` first, then `radio.region.set`.
+    fn applier_actions(&self) -> Vec<Action> {
+        let mut out = Vec::new();
+        if let Some(p) = &self.posture {
+            if p.share_instance.is_some() || p.enable_transport.is_some() {
+                out.push(Action::PostureSet {
+                    share_instance: p.share_instance,
+                    enable_transport: p.enable_transport,
+                });
+            }
+        }
+        if let Some(r) = &self.region {
+            out.push(Action::RegionSet { region: r.clone() });
+        }
+        out
+    }
+
+    /// This patch without the applier's parts (what follows through `Spine::update`).
+    fn without_applier_parts(mut self) -> Self {
+        if let Some(p) = &mut self.posture {
+            p.share_instance = None;
+            p.enable_transport = None;
+        }
+        self.region = None;
+        if self.posture.as_ref().is_some_and(PosturePatch::is_empty) {
+            self.posture = None;
+        }
+        self
     }
 
     /// Apply the merge to the file (validation follows in `Spine::update`).
@@ -265,6 +321,59 @@ fn result_json(applied: &Applied, t: &TransportApi) -> Value {
     })
 }
 
+/// `TransportPostureResult` for the applier's parts not kept (module doc).
+fn report_json(report: &ApplyReport, t: &TransportApi) -> Value {
+    json!({
+        "schema": 1,
+        "applied": false,
+        "reverted": report.reverted,
+        "reason": report.reason.clone().or_else(|| Some("the change was not applied".into())),
+        "status": status_json(&t.spine, &t.facts.snapshot()),
+    })
+}
+
+/// A one-off applier request id for a PATCH (never a proposal's: proposals are the
+/// agent's `prop-…`; 8 random bytes, no clock).
+fn patch_request_id() -> Option<String> {
+    let mut b = [0u8; 8];
+    getrandom::getrandom(&mut b).ok()?;
+    let hex: String = b.iter().map(|x| format!("{x:02x}")).collect();
+    Some(format!("transport-posture-{hex}"))
+}
+
+/// The applier's parts of a PATCH through its loop (module doc). `Ok(None)`: kept;
+/// `Ok(Some(body))`: not kept (the answer); `Err`: refused before anything was written.
+async fn through_applier(
+    api: &ApiState,
+    applier: &Applier,
+    actions: Vec<Action>,
+    t: &TransportApi,
+) -> Result<Option<Value>, Response> {
+    let internal = |why: &str| {
+        Problem::new(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "internal",
+            "The change could not be applied.",
+        )
+        .detail(why.to_string())
+        .into_response()
+    };
+    let id = patch_request_id().ok_or_else(|| internal("no randomness for the request id"))?;
+    let req = ApplierRequest::new(&id, actions).map_err(|r| r.problem().into_response())?;
+    let res = applier::apply(applier, req).await;
+    if !matches!(res, Err(applier::ApplyError::AlreadyDecided)) {
+        // the PATCH is no proposal: its decision record goes (absent is fine)
+        let rec = super::proposals::decisions_dir(&api.layout).join(format!("{id}.json"));
+        if let Err(e) = std::fs::remove_file(&rec) {
+            if e.kind() != std::io::ErrorKind::NotFound {
+                eprintln!("111 transport: {} stays: {e}", rec.display());
+            }
+        }
+    }
+    let report = res.map_err(|e| e.problem().into_response())?;
+    Ok((!report.applied).then(|| report_json(&report, t)))
+}
+
 async fn patch_posture(State(api): State<Arc<ApiState>>, bytes: Bytes) -> Response {
     let t = match transport_of(&api) {
         Ok(t) => t,
@@ -281,7 +390,30 @@ async fn patch_posture(State(api): State<Arc<ApiState>>, bytes: Bytes) -> Respon
         let none = Applied::default();
         return Json(result_json(&none, &t)).into_response();
     }
-    match t.spine.update(move |f| p.merge(f)).await {
+    // the whole merge validated first: nothing is applied when any part is refused
+    let mut sim = t.spine.file();
+    p.clone().merge(&mut sim);
+    if let Err(i) = sim.validate() {
+        return apply_problem(&ApplyError::Invalid(i)).into_response();
+    }
+    let actions = p.applier_actions();
+    let rest = match api.ext::<Arc<Applier>>() {
+        Some(ap) if !actions.is_empty() => {
+            match through_applier(&api, &ap, actions, &t).await {
+                Ok(None) => {}
+                Ok(Some(not_kept)) => return Json(not_kept).into_response(),
+                Err(resp) => return resp,
+            }
+            let rest = p.without_applier_parts();
+            if rest.is_empty() {
+                let none = Applied::default();
+                return Json(result_json(&none, &t)).into_response();
+            }
+            rest
+        }
+        _ => p,
+    };
+    match t.spine.update(move |f| rest.merge(f)).await {
         Ok(applied) => Json(result_json(&applied, &t)).into_response(),
         Err(e) => apply_problem(&e).into_response(),
     }
