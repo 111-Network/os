@@ -17,7 +17,8 @@
 //! - [`fanout`] — §9 compose fan-out: per-target plans (bytes, cap, parts, airtime estimate,
 //!   refusals), atomic validation, send groups.
 //! - [`state`] — the §4 delivery state machine: crash-safe handoff, monotone states, `Later`
-//!   retries on the tick with capped back-off, user rows first.
+//!   retries on the tick with capped back-off (the pending mark withdrawn while nothing was
+//!   sent), a post-air NAK's `Later` re-sent when its peer is heard again, user rows first.
 //! - [`settings`] — the bridge-core sections of `state/bridge.json` (HAM confirmations,
 //!   per-channel send switches, recipient lists, announce), the text + hash records.
 //! - [`stub`] — the scripted [`StubAdapter`] (the G1 fixture).
@@ -185,18 +186,32 @@ pub enum Reason {
 pub enum SendEvent {
     /// The carrier took it; `native_id` is the Meshtastic packet id or the LXMF hash
     /// (recorded for own-echo suppression, §8 guard 2). Clears `meta.handoff = pending`.
-    Accepted {
-        native_id: String,
-    },
+    Accepted { native_id: String },
     /// A state with the evidence string the UI prints (§4 table).
     Evidence {
         state: ForeignMessageState,
         evidence: String,
     },
-    Failed {
-        reason: Reason,
-        retry: Retry,
-    },
+    /// The carrier did not (or not provably) deliver it. What the core does (§4, §5;
+    /// [`state`]):
+    ///
+    /// - **Before air** (no `Accepted` on the send, and `reason` not a post-air NAK):
+    ///   `Retry::Never` makes the row `failed`; `Retry::Later` keeps it `queued` with the
+    ///   reason, withdraws its pending handoff mark and hands it again on the tick with
+    ///   capped back-off, earlier on an adapter event (link up, a Nearby item, a conversation
+    ///   upsert). Nothing was transmitted, so the retry is still the one send of the act.
+    /// - **After air** (after `Accepted`, or a post-air NAK reason `no_route`, `timeout`,
+    ///   `max_retransmit`, `no_response`): the row keeps `sent`/`relayed` with "transmitted,
+    ///   not confirmed". With a post-air NAK reason and `Retry::Later` (a Meshtastic DM's
+    ///   NAK) the core re-hands the **same text** once when the adapter next yields
+    ///   [`Inbound::Conversation`] for exactly that send's [`ConvRef`] (the peer was heard
+    ///   again: the Meshtastic client upserts `dm:!<node>` on that node's NodeInfo); the
+    ///   adapter does not re-send by itself and mints a new native id, which the re-send's
+    ///   `Accepted` records on the row. No tick back-off applies. Any other failure after
+    ///   `Accepted`, or `Retry::Never`, is kept and never re-sent automatically.
+    /// - A row whose pending mark survived a restart is never re-sent automatically
+    ///   ("may have been sent; resend?"), whatever the adapter reports later.
+    Failed { reason: Reason, retry: Retry },
 }
 
 /// Returned by `send` at once; events follow on the channel (§4: `send` never blocks).

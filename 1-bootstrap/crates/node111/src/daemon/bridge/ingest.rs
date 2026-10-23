@@ -238,14 +238,39 @@ pub fn auth(a: super::Auth) -> ForeignAuth {
 /// usable sender, an over-long native id). `conv` is the conversation's row id; the
 /// adapter's auth label passes through (§3 "Authentication label").
 pub fn prepare(t: &InboundText, conv: i64, ids_globally_unique: bool) -> Option<ForeignInsert> {
+    let (sender_native, native_msg_id) = ids(t)?;
+    Some(prepare_ids(
+        t,
+        conv,
+        ids_globally_unique,
+        sender_native,
+        native_msg_id,
+    ))
+}
+
+/// The cleaned `(sender_native, native_msg_id)` of an inbound text ([`native`] on both,
+/// once), or `None` when it is noise (no usable sender, an over-long id). The core cleans
+/// once and uses these values for §8 guard 2 and for the stored row alike (F9).
+pub fn ids(t: &InboundText) -> Option<(String, Option<String>)> {
     let sender_native = native(&t.sender_native)?;
     let native_msg_id = if t.native_msg_id.is_empty() {
         None
     } else {
         Some(native(&t.native_msg_id)?)
     };
+    Some((sender_native, native_msg_id))
+}
+
+/// [`prepare`] with the ids already cleaned by [`ids`].
+pub fn prepare_ids(
+    t: &InboundText,
+    conv: i64,
+    ids_globally_unique: bool,
+    sender_native: String,
+    native_msg_id: Option<String>,
+) -> ForeignInsert {
     let (body, truncated) = body(&t.body);
-    Some(ForeignInsert {
+    ForeignInsert {
         conv,
         sender_native,
         sender_name: name(&t.sender_name),
@@ -255,7 +280,7 @@ pub fn prepare(t: &InboundText, conv: i64, ids_globally_unique: bool) -> Option<
         claim_ts: t.claim_ts,
         meta: meta(&t.meta, truncated),
         id_globally_unique: ids_globally_unique,
-    })
+    }
 }
 
 /// §8 guard 2: the native ids of our own accepted sends, bounded per network (oldest
@@ -294,9 +319,29 @@ impl OwnEcho {
 
 /// Is `t` our own echo (§8 guard 2): from an account of this node on its network, or
 /// carrying a native id of one of our own sends?
+/// The ids are compared cleaned, as the store would hold them (F9).
 pub fn is_own_echo(t: &InboundText, accounts: &[super::AccountFacts], echo: &OwnEcho) -> bool {
-    accounts.iter().any(|a| a.id == t.sender_native)
-        || (!t.native_msg_id.is_empty() && echo.is_ours(&t.conv.network, &t.native_msg_id))
+    match ids(t) {
+        Some((sender, msg)) => {
+            is_own_echo_ids(&t.conv.network, &sender, msg.as_deref(), accounts, echo)
+        }
+        None => accounts.iter().any(|a| a.id == t.sender_native),
+    }
+}
+
+/// §8 guard 2 on ids already cleaned by [`ids`]: `sender` is an account of this node on
+/// `network` (compared raw and cleaned), or `msg` is one of our recorded own ids.
+pub fn is_own_echo_ids(
+    network: &str,
+    sender: &str,
+    msg: Option<&str>,
+    accounts: &[super::AccountFacts],
+    echo: &OwnEcho,
+) -> bool {
+    accounts
+        .iter()
+        .any(|a| a.id == sender || native(&a.id).as_deref() == Some(sender))
+        || msg.is_some_and(|m| echo.is_ours(network, m))
 }
 
 /// Does `s` match an anchored recipient-syntax pattern (`caps.recipient_syntax`, the
@@ -584,6 +629,37 @@ mod tests {
         }
         assert_eq!(echo.len("meshtastic"), ECHO_IDS, "bounded");
         assert!(!echo.is_ours("meshtastic", "5000000a"), "oldest forgotten");
+    }
+
+    /// F9: guard 2 compares the cleaned ids the store would hold, not the raw ones.
+    #[test]
+    fn f9_own_echo_compares_cleaned_ids() {
+        let accounts = vec![crate::daemon::bridge::AccountFacts {
+            id: "!0badc0de".into(),
+            label: None,
+            licensed: false,
+        }];
+        let mut echo = OwnEcho::default();
+        let mut t = text("hello", "me");
+        t.sender_native = "!0bad\u{200B}c0de".into(); // a zero-width space in our own id
+        assert!(is_own_echo(&t, &accounts, &echo), "our account, cleaned");
+        t.sender_native = "!a1b2c3d4".into();
+        echo.record("meshtastic", "5000000a");
+        t.native_msg_id = "5000\u{2066}000a".into();
+        assert!(is_own_echo(&t, &accounts, &echo), "our native id, cleaned");
+        let (sender, msg) = ids(&t).unwrap();
+        assert_eq!(
+            (sender.as_str(), msg.as_deref()),
+            ("!a1b2c3d4", Some("5000000a"))
+        );
+        let row = prepare(&t, 7, false).unwrap();
+        assert_eq!(
+            row.native_msg_id.as_deref(),
+            Some("5000000a"),
+            "the same value stored"
+        );
+        t.sender_native = "\u{200B}".into();
+        assert!(ids(&t).is_none(), "nothing left: noise");
     }
 
     #[test]

@@ -21,21 +21,39 @@
 //!   sets its state and string; `Failed` before air with `Retry::Never` is `failed` with the
 //!   reason; a NAK after air (`no_route`, `timeout`, `max_retransmit`, `no_response`, or
 //!   any failure after `Accepted`) keeps `sent`/`relayed` with "transmitted, not
-//!   confirmed" and is never re-sent automatically; `delivered` never regresses.
-//! - **`Retry::Later` before acceptance** (queue full, duty cycle, rate limited, key
-//!   unknown, peer unannounced) keeps the row `queued` with the reason and retries it on
-//!   the tick with capped back-off — attempt `a` waits `min(2^(a-1), backoff_cap_ticks)`
-//!   ticks — and at once on an adapter event (link up, a heard announce, a conversation
-//!   upsert). The pending mark stays durable while it waits (the store has no handoff
-//!   abort): a crash during the wait leaves "may have been sent", never a resend.
+//!   confirmed"; `delivered` never regresses.
+//! - **`Retry::Later` before air** (queue full, duty cycle, rate limited, key unknown, peer
+//!   unannounced; no `Accepted` on the row): nothing was transmitted, so the core
+//!   **withdraws the pending mark** (`Fabric::foreign_handoff_abort`, FULL), forgets the
+//!   handle and the text and keeps only `(row id → attempts, due tick)`. The row is plain
+//!   `queued` with the reason again: cancellable (§9 "while `queued` with nothing sent"),
+//!   sheddable by the store's prune (2b), never "may have been sent", and after a restart
+//!   or a disable it is handed again on the next tick (the crash rule covers only a mark
+//!   that is still pending). [`deliver_pass`] re-hands it from `foreign_queued` once due —
+//!   attempt `a` waits `min(2^(a-1), backoff_cap_ticks)` ticks — and at once on an adapter
+//!   event (link up, a heard announce, a conversation upsert). A row that left the queue
+//!   meanwhile (cancelled, shed, its edge paused or deleted) is not waited for.
+//! - **`Retry::Later` after air** (a post-air NAK reason with `Later`; §4 "Reasons": a DM's
+//!   post-air NAK is `Later`; §5 "`Later` on the next NodeInfo from that node"): the row
+//!   keeps its state and "transmitted, not confirmed"; the leg waits — no tick back-off, no
+//!   timer — for the adapter's [`super::Inbound::Conversation`] upsert of exactly the leg's
+//!   conversation (the Meshtastic client emits `dm:!<node>` on that node's next NodeInfo),
+//!   then the same text is handed once more (the adapter mints a new packet id) and that
+//!   send's `Accepted` records the new native id. Each upsert re-sends at most once. A
+//!   failure after `Accepted` with any other reason, or with `Retry::Never`, is kept and
+//!   never re-sent. This is not the crash rule: a row still `pending` across a restart is
+//!   never re-sent automatically. At most [`MAX_PEER_WAIT`] rows wait so (the oldest
+//!   stops waiting and keeps its state).
 //! - **Recipient lists** (§6): a row in a list's conversation is handed as one DM per
 //!   member (legs); each leg retries on its own, an accepted leg is never sent again, and
-//!   the row shows the lowest state among its legs.
+//!   the row shows the lowest state among its legs. The pending mark is withdrawn only when
+//!   every leg was refused before air; while one leg was accepted the waiting legs retry
+//!   from memory (the row has a native id, so it is not handed again from the queue).
 
 use super::core::{conv_ref, is_list_conv, Bridge, BridgeError};
 use super::{
-    AdapterState, ConvKind, ConvRef, ForeignMessageState as S, Reason, Retry, SendEvent, SendOpts,
-    SizeMode,
+    ingest, AdapterState, ConvKind, ConvRef, ForeignMessageState as S, Reason, Retry, SendEvent,
+    SendOpts, SizeMode,
 };
 use crate::daemon::fabric::json::{self as fjson, GroupTarget};
 use mesh111::fabric::{FabricError, ForeignGroupPart, ForeignMeta};
@@ -43,11 +61,14 @@ use mesh111::store::{
     EdgeCounter, ForeignConversationRow, ForeignDir, ForeignMessageRow, ForeignState,
 };
 use serde_json::{json, Value};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use tokio::sync::mpsc::{self, error::TryRecvError};
 
 /// The evidence a post-air NAK leaves (§4, §5).
 pub const TRANSMITTED_NOT_CONFIRMED: &str = "transmitted, not confirmed";
+/// Rows whose leg waits for its peer's next conversation upsert (§5), at most; past it the
+/// oldest (`local_seq`) stops waiting and keeps its state and evidence.
+pub const MAX_PEER_WAIT: usize = 1024;
 /// Extra queued rows looked at per pass beyond the budget (rows accepted but still
 /// `queued` are skipped, never re-sent).
 const QUEUE_SLACK: usize = 256;
@@ -113,6 +134,15 @@ struct Leg {
     reason: Option<String>,
     /// Refused before air with `Retry::Never`.
     failed: bool,
+    /// On air, and the adapter asked for a later try (a post-air NAK with `Retry::Later`,
+    /// §5): `Some(false)` waits for the next upsert of `to`, `Some(true)` once it came (the
+    /// next pass re-sends). The handle stays open meanwhile (a real ack may still come).
+    peer: Option<bool>,
+    /// Re-sent after air: the next `Accepted` records its new native id.
+    rerecord: bool,
+    /// Re-sent after air at least once: what the first send reached stays (a refusal of
+    /// a re-send never makes the row `failed` or `queued` again).
+    resent: bool,
 }
 
 impl Leg {
@@ -126,6 +156,9 @@ impl Leg {
             evidence: None,
             reason: None,
             failed: false,
+            peer: None,
+            rerecord: false,
+            resent: false,
         }
     }
 
@@ -134,7 +167,7 @@ impl Leg {
         if self.failed && self.state.rank() < S::Relayed.rank() {
             return (S::Failed, None, self.reason.clone());
         }
-        if matches!(self.io, LegIo::Waiting { .. }) {
+        if matches!(self.io, LegIo::Waiting { .. }) && !self.resent {
             return (S::Queued, None, self.reason.clone());
         }
         (self.state, self.evidence.clone(), self.reason.clone())
@@ -150,6 +183,8 @@ impl Leg {
                 }
                 if delivered {
                     self.failed = false;
+                    // confirmed: nothing to try again
+                    self.peer = None;
                 }
                 self.state = state;
                 self.evidence = Some(evidence);
@@ -161,12 +196,20 @@ impl Leg {
                     || self.native.is_some()
                     || self.state.rank() >= S::Relayed.rank()
                 {
-                    // on air without proof: keep the state, never re-sent automatically
+                    // on air without proof: keep the state
                     if self.state.rank() < S::Sent.rank() {
                         self.state = S::Sent;
                     }
-                    self.evidence = Some(TRANSMITTED_NOT_CONFIRMED.to_string());
-                    self.reason = Some(code);
+                    if self.state != S::Delivered {
+                        self.evidence = Some(TRANSMITTED_NOT_CONFIRMED.to_string());
+                        self.reason = Some(code);
+                        // §4 Reasons, §5: a post-air NAK with `Later` waits for that
+                        // conversation's next upsert; any other failure after air is kept
+                        // and never re-sent
+                        if retry == Retry::Later && post_air(reason) {
+                            self.peer = Some(false);
+                        }
+                    }
                 } else if retry == Retry::Later {
                     let wait = 1u64
                         .checked_shl(self.attempts.saturating_sub(1))
@@ -177,6 +220,9 @@ impl Leg {
                         due: tick.saturating_add(wait),
                     };
                     self.reason = Some(code);
+                } else if self.resent {
+                    // a re-send refused for good: the first send stays what it was
+                    self.reason = Some(code);
                 } else {
                     self.failed = true;
                     self.reason = Some(code);
@@ -184,13 +230,17 @@ impl Leg {
             }
         }
     }
+
+    /// Due for a send now: its pre-air back-off ran out, or its peer was heard again.
+    fn due(&self, tick: u64) -> bool {
+        matches!(self.io, LegIo::Waiting { due, .. } if due <= tick) || self.peer == Some(true)
+    }
 }
 
 /// A row this run handed to an adapter.
 struct Track {
     network: String,
     conv: i64,
-    account: String,
     edge: Option<i64>,
     part_k: u32,
     local_seq: u64,
@@ -212,26 +262,63 @@ impl Track {
     }
 
     fn done(&self) -> bool {
-        self.legs.iter().all(|l| matches!(l.io, LegIo::Closed))
-    }
-
-    fn waiting_due(&self, tick: u64) -> bool {
         self.legs
             .iter()
-            .any(|l| matches!(l.io, LegIo::Waiting { due, .. } if due <= tick))
+            .all(|l| matches!(l.io, LegIo::Closed) && l.peer.is_none())
     }
+
+    fn retry_due(&self, tick: u64) -> bool {
+        self.legs.iter().any(|l| l.due(tick))
+    }
+
+    fn peer_waiting(&self) -> bool {
+        self.legs.iter().any(|l| l.peer.is_some())
+    }
+
+    /// Nothing of the row went on air and every leg waits for a pre-air retry: the pending
+    /// mark can be withdrawn (F1).
+    fn withdrawable(&self) -> Option<(u32, u64)> {
+        if self.recorded || self.legs.is_empty() {
+            return None;
+        }
+        let mut attempts = 0u32;
+        let mut due = u64::MAX;
+        for l in &self.legs {
+            match l.io {
+                LegIo::Waiting {
+                    attempts: a,
+                    due: d,
+                } if l.native.is_none() => {
+                    attempts = attempts.max(a);
+                    due = due.min(d);
+                }
+                _ => return None,
+            }
+        }
+        Some((attempts, due))
+    }
+}
+
+/// A row refused before air and withdrawn from the store (`queued`, no pending mark): the
+/// next handoff waits for tick `due` (or an adapter event).
+struct LaterWait {
+    network: String,
+    attempts: u32,
+    due: u64,
 }
 
 /// What the state machine holds in memory (rows handed this run; nothing durable).
 #[derive(Default)]
 pub(super) struct Delivery {
     tracks: HashMap<i64, Track>,
+    /// `Retry::Later` before air (module doc): row id → its wait. No handle, no text.
+    later: HashMap<i64, LaterWait>,
 }
 
 impl Delivery {
-    /// Rows tracked (in flight or waiting for a retry).
+    /// Rows tracked (in flight, waiting for a retry, or waiting for their peer).
     pub(super) fn len(&self) -> usize {
-        self.tracks.len()
+        self.tracks.len() + self.later.len()
     }
 }
 
@@ -241,8 +328,8 @@ enum Polled {
 }
 
 /// Forget the in-flight handles of `network` (its adapter was disabled): their rows keep
-/// the pending mark ("may have been sent"); legs waiting for a retry stay for the next
-/// enable.
+/// the pending mark ("may have been sent"); legs waiting for a retry or for their peer, and
+/// withdrawn rows' waits, stay for the next enable.
 pub(super) fn forget_in_flight(b: &Bridge, network: &str) {
     let mut d = lock(&b.delivery);
     d.tracks.retain(|_, t| {
@@ -258,11 +345,65 @@ pub(super) fn forget_in_flight(b: &Bridge, network: &str) {
     });
 }
 
+/// Forget row `id` entirely (it was cancelled: nothing of it is sent or waited for).
+pub(super) fn forget_row(b: &Bridge, id: i64) {
+    let mut d = lock(&b.delivery);
+    d.tracks.remove(&id);
+    d.later.remove(&id);
+}
+
+/// The adapter upserted conversation `conv` (cleaned coordinates): a leg waiting for that
+/// peer after a post-air NAK is re-sent on the next pass (§5). Returns the legs woken.
+pub(super) fn wake_peer(b: &Bridge, conv: &ConvRef) -> usize {
+    let mut d = lock(&b.delivery);
+    let mut n = 0;
+    for t in d.tracks.values_mut().filter(|t| t.network == conv.network) {
+        for l in &mut t.legs {
+            if l.peer == Some(false) && l.to == *conv {
+                l.peer = Some(true);
+                n += 1;
+            }
+        }
+    }
+    n
+}
+
 /// Drain every open handle's events (non-blocking) and write the rows' states.
 pub(super) async fn drain_events(b: &Bridge) {
     let ids: Vec<i64> = lock(&b.delivery).tracks.keys().copied().collect();
     for id in ids {
         drain_row(b, id).await;
+    }
+    cap_peer_wait(b);
+}
+
+/// Keep at most [`MAX_PEER_WAIT`] rows waiting for their peer (oldest stop waiting).
+fn cap_peer_wait(b: &Bridge) {
+    let mut d = lock(&b.delivery);
+    let n = d.tracks.values().filter(|t| t.peer_waiting()).count();
+    if n <= MAX_PEER_WAIT {
+        return;
+    }
+    let mut waiting: Vec<(u64, i64)> = d
+        .tracks
+        .iter()
+        .filter(|(_, t)| t.peer_waiting())
+        .map(|(id, t)| (t.local_seq, *id))
+        .collect();
+    waiting.sort_unstable();
+    for (_, id) in waiting.into_iter().take(n - MAX_PEER_WAIT) {
+        let done = match d.tracks.get_mut(&id) {
+            Some(t) => {
+                for l in &mut t.legs {
+                    l.peer = None;
+                }
+                t.done()
+            }
+            None => false,
+        };
+        if done {
+            d.tracks.remove(&id);
+        }
     }
 }
 
@@ -270,8 +411,9 @@ pub(super) async fn drain_events(b: &Bridge) {
 async fn drain_row(b: &Bridge, id: i64) {
     let tick = b.tick();
     let cap = b.cfg.backoff_cap_ticks;
-    let mut accepts = Vec::new();
-    let (write, facts) = {
+    // (native id, the row's first acceptance)
+    let mut accepts: Vec<(String, bool)> = Vec::new();
+    let (write, edge, part_k, withdraw) = {
         let mut d = lock(&b.delivery);
         let Some(t) = d.tracks.get_mut(&id) else {
             return;
@@ -295,62 +437,85 @@ async fn drain_row(b: &Bridge, id: i64) {
             return;
         }
         for (i, p) in polled {
-            let leg = &mut t.legs[i];
             match p {
                 Polled::Closed => {
+                    let leg = &mut t.legs[i];
                     if matches!(leg.io, LegIo::Open(_)) {
                         leg.io = LegIo::Closed;
                     }
                 }
                 Polled::Ev(ev) => {
                     if let SendEvent::Accepted { native_id } = &ev {
-                        lock(&b.echo).record(&t.network, native_id);
+                        // §8 guard 2 compares cleaned inbound ids
+                        let clean = ingest::native(native_id).unwrap_or_else(|| native_id.clone());
+                        lock(&b.echo).record(&t.network, &clean);
+                        let leg = &mut t.legs[i];
                         if !t.recorded {
                             t.recorded = true;
-                            accepts.push(native_id.clone());
+                            accepts.push((native_id.clone(), true));
+                        } else if leg.rerecord {
+                            // a re-send after air: the new packet id is the row's now
+                            accepts.push((native_id.clone(), false));
                         }
+                        leg.rerecord = false;
                     }
-                    leg.apply(ev, tick, cap);
+                    t.legs[i].apply(ev, tick, cap);
                 }
             }
         }
         let agg = t.aggregate();
         let write = (t.applied.as_ref() != Some(&agg)).then(|| agg.clone());
         t.applied = Some(agg);
-        (
-            write,
-            (
-                t.network.clone(),
-                t.edge,
-                t.part_k,
-                t.conv,
-                t.account.clone(),
-                t.local_seq,
-            ),
-        )
+        let withdraw = t
+            .withdrawable()
+            .map(|(attempts, due)| (t.network.clone(), attempts, due));
+        (write, t.edge, t.part_k, withdraw)
     };
     let Ok(f) = b.fab() else { return };
-    let (_, edge, part_k, conv, account, local_seq) = facts;
-    for native in accepts {
+    for (native, first) in accepts {
         if let Err(e) = f.foreign_accepted(id, &native).await {
             eprintln!(
                 "111 bridge: {}: accepted not recorded: {e}",
                 fjson::fm_id(id)
             );
         }
-        if let Some(edge) = edge {
-            if part_k == 1 {
-                let _ = f.foreign_edge_count(edge, EdgeCounter::Relayed, 1).await;
-            }
-            let _ = f
-                .foreign_seen_insert(edge, conv, &account, &native, local_seq)
-                .await;
+        if let (true, Some(edge), 1) = (first, edge, part_k) {
+            let _ = f.foreign_edge_count(edge, EdgeCounter::Relayed, 1).await;
         }
     }
     if let Some((s, ev, reason)) = write {
         let _ = f
             .foreign_set_state(id, store_state(s), ev.as_deref(), reason.as_deref())
             .await;
+    }
+    if let Some((network, attempts, due)) = withdraw {
+        // F1: refused before air, nothing transmitted — the row is plain `queued` again
+        match f.foreign_handoff_abort(id).await {
+            Ok(()) => {
+                let mut d = lock(&b.delivery);
+                d.tracks.remove(&id);
+                d.later.insert(
+                    id,
+                    LaterWait {
+                        network,
+                        attempts,
+                        due,
+                    },
+                );
+                return;
+            }
+            Err(FabricError::NotFound) => {
+                lock(&b.delivery).tracks.remove(&id);
+                return;
+            }
+            Err(e) => {
+                // kept: the legs retry from memory with the mark still durable
+                eprintln!(
+                    "111 bridge: {}: handoff not withdrawn: {e}",
+                    fjson::fm_id(id)
+                );
+            }
+        }
     }
     let mut d = lock(&b.delivery);
     if d.tracks.get(&id).is_some_and(Track::done) {
@@ -360,7 +525,8 @@ async fn drain_row(b: &Bridge, id: i64) {
 
 /// A candidate for this pass.
 enum Cand {
-    Fresh(Box<ForeignMessageRow>),
+    /// A queued row and the attempts it already made (a withdrawn `Later` row's).
+    Fresh(Box<ForeignMessageRow>, u32),
     /// `(row, conversation)` with a leg due for its retry.
     Retry(i64, i64),
 }
@@ -405,17 +571,21 @@ pub(super) async fn deliver_pass(b: &Bridge) {
                     }
                 }
             }
+            for w in d.later.values_mut().filter(|w| w.network == net) {
+                w.due = w.due.min(tick);
+            }
         }
         let hold = hold_reason(b, &net);
         let mut budget = b.cfg.sends_per_tick;
         let (tracked, mut due): (usize, Vec<(bool, u64, i64, i64)>) = {
             let d = lock(&b.delivery);
-            let mine: Vec<&Track> = d.tracks.values().filter(|t| t.network == net).collect();
+            let tracked = d.tracks.values().filter(|t| t.network == net).count()
+                + d.later.values().filter(|w| w.network == net).count();
             (
-                mine.len(),
+                tracked,
                 d.tracks
                     .iter()
-                    .filter(|(_, t)| t.network == net && t.waiting_due(tick))
+                    .filter(|(_, t)| t.network == net && t.retry_due(tick))
                     .map(|(id, t)| (!t.user, t.local_seq, *id, t.conv))
                     .collect(),
             )
@@ -430,7 +600,14 @@ pub(super) async fn deliver_pass(b: &Bridge) {
         };
         let mut cands: Vec<((bool, u64), Cand)> = Vec::with_capacity(fresh.len() + due.len());
         {
-            let d = lock(&b.delivery);
+            let mut d = lock(&b.delivery);
+            if fresh.len() < limit && d.later.values().any(|w| w.network == net) {
+                // the whole queue was read: a withdrawn row no longer in it (cancelled,
+                // shed, its edge paused or deleted) is not waited for
+                let queued: HashSet<i64> = fresh.iter().map(|r| r.id).collect();
+                d.later
+                    .retain(|id, w| w.network != net || queued.contains(id));
+            }
             for r in fresh {
                 if d.tracks.contains_key(&r.id)
                     || r.native_msg_id.is_some()
@@ -439,9 +616,14 @@ pub(super) async fn deliver_pass(b: &Bridge) {
                 {
                     continue;
                 }
+                let prior = match d.later.get(&r.id) {
+                    Some(w) if w.due > tick => continue,
+                    Some(w) => w.attempts,
+                    None => 0,
+                };
                 cands.push((
                     (r.group_id.is_none(), r.local_seq),
-                    Cand::Fresh(Box::new(r)),
+                    Cand::Fresh(Box::new(r), prior),
                 ));
             }
         }
@@ -470,7 +652,7 @@ pub(super) async fn deliver_pass(b: &Bridge) {
                     budget = budget.saturating_sub(retry_row(b, &att.adapter, id, tick).await);
                     drain_row(b, id).await;
                 }
-                Cand::Fresh(row) => {
+                Cand::Fresh(row, prior) => {
                     let Some(conv) = conv_cached(b, &mut convs, row.conv).await else {
                         continue;
                     };
@@ -484,7 +666,7 @@ pub(super) async fn deliver_pass(b: &Bridge) {
                         }
                         continue;
                     }
-                    let n = hand_off(b, &att.adapter, &row, &conv, &facts).await;
+                    let n = hand_off(b, &att.adapter, &row, &conv, &facts, prior).await;
                     budget = budget.saturating_sub(n.max(1));
                     drain_row(b, row.id).await;
                 }
@@ -493,13 +675,15 @@ pub(super) async fn deliver_pass(b: &Bridge) {
     }
 }
 
-/// Hand a fresh row to `adapter` (module doc). Returns the sends made.
+/// Hand a queued row to `adapter` (module doc); `prior` is the attempts a withdrawn
+/// `Later` row already made (0 for a fresh one). Returns the sends made.
 async fn hand_off(
     b: &Bridge,
     adapter: &std::sync::Arc<dyn super::Adapter>,
     row: &ForeignMessageRow,
     conv: &ForeignConversationRow,
     facts: &super::AdapterFacts,
+    prior: u32,
 ) -> usize {
     let Ok(f) = b.fab() else { return 0 };
     let targets: Vec<ConvRef> = if is_list_conv(conv) {
@@ -527,6 +711,7 @@ async fn hand_off(
                 let _ = f
                     .foreign_set_state(row.id, ForeignState::Failed, None, Some("no_channel"))
                     .await;
+                lock(&b.delivery).later.remove(&row.id);
                 return 0;
             }
         }
@@ -544,15 +729,18 @@ async fn hand_off(
     let mut legs = Vec::with_capacity(targets.len());
     for to in targets {
         let h = adapter.send(&to, &row.body, opts()).await;
-        legs.push(Leg::new(to, h.events));
+        let mut leg = Leg::new(to, h.events);
+        leg.attempts = prior.saturating_add(1);
+        legs.push(leg);
     }
     let n = legs.len();
-    lock(&b.delivery).tracks.insert(
+    let mut d = lock(&b.delivery);
+    d.later.remove(&row.id);
+    d.tracks.insert(
         row.id,
         Track {
             network: conv.network.clone(),
             conv: conv.id,
-            account: conv.account.clone(),
             edge: row.edge_id,
             part_k: row.part_k,
             local_seq: row.local_seq,
@@ -566,29 +754,39 @@ async fn hand_off(
     n
 }
 
-/// Send the due legs of a waiting row again. Returns the sends made.
+/// Send the due legs of a tracked row again: a pre-air wait that ran out, or a leg whose
+/// peer was heard again after a post-air NAK (the same text; the adapter mints a new
+/// packet id). Returns the sends made.
 async fn retry_row(
     b: &Bridge,
     adapter: &std::sync::Arc<dyn super::Adapter>,
     id: i64,
     tick: u64,
 ) -> usize {
-    let due: Vec<(usize, ConvRef, String, u32)> = {
+    let due: Vec<(usize, ConvRef, String, u32, bool)> = {
         let d = lock(&b.delivery);
         let Some(t) = d.tracks.get(&id) else { return 0 };
         t.legs
             .iter()
             .enumerate()
-            .filter_map(|(i, l)| match l.io {
-                LegIo::Waiting { attempts, due } if due <= tick => {
-                    Some((i, l.to.clone(), t.text.clone(), attempts))
-                }
-                _ => None,
+            .filter(|(_, l)| l.due(tick))
+            .map(|(i, l)| {
+                let attempts = match l.io {
+                    LegIo::Waiting { attempts, .. } => attempts,
+                    _ => l.attempts,
+                };
+                (
+                    i,
+                    l.to.clone(),
+                    t.text.clone(),
+                    attempts,
+                    l.peer == Some(true),
+                )
             })
             .collect()
     };
     let mut sent = 0;
-    for (i, to, text, attempts) in due {
+    for (i, to, text, attempts, after_air) in due {
         let h = adapter
             .send(
                 &to,
@@ -603,7 +801,15 @@ async fn retry_row(
         let mut d = lock(&b.delivery);
         if let Some(leg) = d.tracks.get_mut(&id).and_then(|t| t.legs.get_mut(i)) {
             leg.io = LegIo::Open(h.events);
-            leg.attempts = attempts + 1;
+            leg.attempts = attempts.saturating_add(1);
+            if after_air {
+                // the old packet id stays recorded as an own echo; the new one replaces
+                // it on the row once accepted
+                leg.peer = None;
+                leg.native = None;
+                leg.resent = true;
+            }
+            leg.rerecord = leg.resent;
         }
     }
     sent
@@ -615,9 +821,11 @@ impl Bridge {
         lock(&self.delivery).len()
     }
 
-    /// Whether this run is delivering row `id`.
+    /// Whether this run is delivering row `id` (handed and unanswered, waiting for a
+    /// retry — withdrawn rows included — or waiting for its peer).
     pub fn is_tracked(&self, id: i64) -> bool {
-        lock(&self.delivery).tracks.contains_key(&id)
+        let d = lock(&self.delivery);
+        d.tracks.contains_key(&id) || d.later.contains_key(&id)
     }
 
     /// "May have been sent; resend?" (§4): an own row handed to a carrier that never
@@ -796,6 +1004,87 @@ mod tests {
             "a failure after acceptance was on air: kept, never re-sent"
         );
         assert!(!matches!(l.io, LegIo::Waiting { .. }));
+        assert_eq!(
+            l.peer, None,
+            "only a post-air NAK with Later waits for its peer"
+        );
+    }
+
+    /// F2: a DM's post-air NAK (`Later`, §4 Reasons, §5) keeps `sent` with "transmitted,
+    /// not confirmed" and waits for the peer — not for the tick; `Never` stays as built.
+    #[test]
+    fn f2_a_post_air_nak_with_later_waits_for_its_peer_not_the_tick() {
+        let mut l = leg();
+        l.apply(
+            SendEvent::Accepted {
+                native_id: "0a0b0c0d".into(),
+            },
+            1,
+            64,
+        );
+        l.apply(ev(S::Sent, "accepted by the radio"), 1, 64);
+        l.apply(
+            SendEvent::Failed {
+                reason: Reason::MaxRetransmit,
+                retry: Retry::Later,
+            },
+            1,
+            64,
+        );
+        assert_eq!(
+            l.effective(),
+            (
+                S::Sent,
+                Some(TRANSMITTED_NOT_CONFIRMED.into()),
+                Some("max_retransmit".into())
+            )
+        );
+        assert_eq!(l.peer, Some(false));
+        assert!(!l.due(u64::MAX), "no tick back-off");
+        // a real ack that still comes ends the wait
+        l.apply(ev(S::Delivered, "the recipient confirmed"), 2, 64);
+        assert_eq!(l.peer, None);
+        let mut never = leg();
+        never.apply(
+            SendEvent::Accepted {
+                native_id: "1".into(),
+            },
+            1,
+            64,
+        );
+        never.apply(
+            SendEvent::Failed {
+                reason: Reason::Timeout,
+                retry: Retry::Never,
+            },
+            1,
+            64,
+        );
+        assert_eq!(never.peer, None, "Retry::Never post-air stays as built");
+        // a re-send refused before air keeps what the first send reached
+        let mut re = leg();
+        re.state = S::Sent;
+        re.resent = true;
+        re.apply(
+            SendEvent::Failed {
+                reason: Reason::RateLimited,
+                retry: Retry::Later,
+            },
+            5,
+            64,
+        );
+        assert!(matches!(re.io, LegIo::Waiting { .. }));
+        assert_eq!(re.effective().0, S::Sent, "never back to queued");
+        re.io = LegIo::Closed;
+        re.apply(
+            SendEvent::Failed {
+                reason: Reason::GotNak,
+                retry: Retry::Never,
+            },
+            6,
+            64,
+        );
+        assert_eq!(re.effective().0, S::Sent, "never failed after air");
     }
 
     #[test]
@@ -824,7 +1113,6 @@ mod tests {
         let mut t = Track {
             network: "lxmf".into(),
             conv: 1,
-            account: "local".into(),
             edge: None,
             part_k: 1,
             local_seq: 1,

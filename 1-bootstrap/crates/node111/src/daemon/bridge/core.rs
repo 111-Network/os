@@ -12,8 +12,11 @@
 //!   bounded batch of at most [`BridgeConfig::recv_batch`] (≤ 256) items, and hands the
 //!   batch to the §3 ingest: texts go through the one ingest function and §8 guard 2, then
 //!   **one** `FabricHandle::foreign_ingest` call, awaited (the back-pressure on the actor);
-//!   conversation upserts, Nearby items (to the daemon's [`NearbySink`]), link state and
-//!   the adapter's dropped-text counter are applied in the same pass.
+//!   conversation upserts (which also wake a leg waiting for that peer after a post-air
+//!   NAK, §5), Nearby items (to the daemon's [`NearbySink`]), link state and the adapter's
+//!   dropped-text counter are applied in the same pass. A link-state change or a dropped
+//!   count only marks the `bridge` SSE snapshot due; the next tick publishes it once (the
+//!   full snapshot reads the components and the fabric, too heavy per recv batch).
 //! - **Tick.** No timer of its own: the daemon's existing tick calls
 //!   [`Bridge::tick_once`] (the `Meshtastic::tick_once` shape). One pass drains send
 //!   events, runs the relay edges (§8, [`super::edges`]) and the delivery queue (§4,
@@ -35,6 +38,8 @@ use super::{
 };
 use crate::daemon::components::consent::{ConsentRequired, ProblemWith};
 use crate::daemon::components::Components;
+use crate::daemon::dashboard::api_v1::networks::in_order;
+use crate::daemon::dashboard::api_v1::transport::TransportApi;
 use crate::daemon::dashboard::api_v1::{ApiState, Problem};
 use crate::daemon::fabric::{self as fab, json as fjson, FabricHandle};
 use axum::http::StatusCode;
@@ -525,6 +530,9 @@ pub struct Bridge {
     noise: AtomicU64,
     /// Edges this run paused because a consent fact changed (§8).
     pub(super) consent_paused: Mutex<HashSet<i64>>,
+    /// The recv path saw a link-state change or a dropped-text count (F7): the next tick
+    /// publishes the `bridge` snapshot once, however many batches set it (no timer).
+    snapshot_due: AtomicBool,
 }
 
 impl std::fmt::Debug for Bridge {
@@ -616,6 +624,7 @@ impl Bridge {
             ingest_batches: AtomicU64::new(0),
             noise: AtomicU64::new(0),
             consent_paused: Mutex::new(HashSet::new()),
+            snapshot_due: AtomicBool::new(false),
         })
     }
 
@@ -787,6 +796,9 @@ impl Bridge {
         state::drain_events(self).await;
         super::edges::relay_pass(self).await;
         state::deliver_pass(self).await;
+        if self.snapshot_due.swap(false, Ordering::SeqCst) {
+            self.publish_networks().await;
+        }
     }
 
     // -- helpers shared by the other modules --------------------------------
@@ -884,7 +896,8 @@ impl Bridge {
         if let Some(id) = lock(&att.convs).get(conv) {
             return Some(*id);
         }
-        let account = ingest::native(&conv.account).unwrap_or_default();
+        // an empty or over-cap account is noise here as in the upsert branch (F6)
+        let account = ingest::native(&conv.account)?;
         let native_id = ingest::native(&conv.native_id)?;
         let id = self
             .fab()
@@ -919,11 +932,23 @@ impl Bridge {
         self.publish_networks().await;
     }
 
-    /// Publish the `bridge` frame with the networks snapshot.
+    /// Publish the `bridge` frame with the networks snapshot, in the order `GET /networks`
+    /// lists them (the spine's `[order]` when the daemon has one; release order otherwise).
     pub(super) async fn publish_networks(&self) {
-        if let Ok(v) = self.networks().await {
-            self.publish("bridge", &json!({ "networks": v["networks"] }));
+        let Ok(mut v) = self.networks().await else {
+            return;
+        };
+        let Some(api) = self.api.upgrade() else {
+            return;
+        };
+        if let Some(t) = api.ext::<Arc<TransportApi>>() {
+            let order = t.spine.file().order.networks;
+            if let Some(list) = v["networks"].as_array_mut() {
+                in_order(list, &order);
+            }
         }
+        api.events
+            .publish("bridge", &json!({ "networks": v["networks"] }));
     }
 
     // -- the recv side -------------------------------------------------------
@@ -952,6 +977,17 @@ impl Bridge {
                         continue;
                     };
                     let title = ingest::name(&title);
+                    // §5: that peer was heard again — a leg waiting after its post-air NAK
+                    // is re-sent on the next pass (F2)
+                    state::wake_peer(
+                        self,
+                        &ConvRef {
+                            network: network.to_string(),
+                            account: account.clone(),
+                            kind: conv.kind,
+                            native_id: native_id.clone(),
+                        },
+                    );
                     if let Ok(f) = self.fab() {
                         if let Ok(id) = f
                             .foreign_conversation_upsert(
@@ -1000,7 +1036,18 @@ impl Bridge {
                     self.noise.fetch_add(1, Ordering::SeqCst);
                     continue;
                 }
-                let ours = ingest::is_own_echo(t, &facts.accounts, &lock(&self.echo));
+                // the ids cleaned once: guard 2 and the stored row see the same values (F9)
+                let Some((sender, msg)) = ingest::ids(t) else {
+                    self.noise.fetch_add(1, Ordering::SeqCst);
+                    continue;
+                };
+                let ours = ingest::is_own_echo_ids(
+                    network,
+                    &sender,
+                    msg.as_deref(),
+                    &facts.accounts,
+                    &lock(&self.echo),
+                );
                 if ours {
                     att.echoes.fetch_add(1, Ordering::SeqCst);
                     continue;
@@ -1009,12 +1056,13 @@ impl Bridge {
                     self.noise.fetch_add(1, Ordering::SeqCst);
                     continue;
                 };
-                match ingest::prepare(t, conv, facts.ids_globally_unique) {
-                    Some(row) => batch.push(row),
-                    None => {
-                        self.noise.fetch_add(1, Ordering::SeqCst);
-                    }
-                }
+                batch.push(ingest::prepare_ids(
+                    t,
+                    conv,
+                    facts.ids_globally_unique,
+                    sender,
+                    msg,
+                ));
             }
             if !batch.is_empty() {
                 self.ingest_batches.fetch_add(1, Ordering::SeqCst);
@@ -1024,7 +1072,8 @@ impl Bridge {
             }
         }
         if changed {
-            self.publish_networks().await;
+            // debounced to the tick (F7): an overflow burst carries a Dropped item per batch
+            self.snapshot_due.store(true, Ordering::SeqCst);
         }
     }
 
