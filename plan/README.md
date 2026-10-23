@@ -49,7 +49,7 @@ and `os/N-<slug>/TASKS.md`, where the layer's code is.
 | 3 Local Intelligence | none | no plan material: no research sweep or panel was run; see D10 and `os/3-intelligence/` |
 | 4 Interface & Dashboard | `layers/4-interface/` | options, triage |
 | 5 Messaging & Data | `layers/5-messaging/` | full set: research, options, review, runs |
-| 6 Transport & Bridge | `layers/6-transport/` | research, coordinates, runs (kickoff 2026-10-19, D23); opener brief [`cross-layer/devices.md`](cross-layer/devices.md) |
+| 6 Transport & Bridge | `layers/6-transport/` | research (R00–R08 + coordinates), options, review (the 3-judge panel, the recheck, V5 `review/v5-integrated.md`), runs (workflows `runs/workflows/*.js`, journals); opener brief [`cross-layer/devices.md`](cross-layer/devices.md); built and locked 2026-10-23 (D29) |
 | 7 Relay & Presence | none yet | reserved name `7-relay`; pending |
 | 8 Storage & Shared State | none yet | reserved name `8-storage`; pending |
 | 9 Self-Healing & Evolution | none yet | reserved name `9-evolution`; pending |
