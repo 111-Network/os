@@ -29,6 +29,7 @@ import {
   isForeignRetryable,
   isHandoffPending,
   summarizeParts,
+  supersededBy,
   topSeq,
   type ThreadItem,
 } from "../../../lib/api/networks";
@@ -164,6 +165,8 @@ export function ForeignRow({ item, network, now, actions }: { item: ThreadItem; 
   const text = rows.map((r) => cleanPeerText(r.text)).join("\n");
   const truncated = rows.find((r) => r.truncated !== null && r.truncated !== undefined);
   const label = cleanPeerText(first.text).slice(0, 40);
+  // V5: a row already sent again reads "resent as …" and offers no retry (its new row is the one to act on)
+  const resentAs = own ? rows.map(supersededBy).find((x): x is string => x !== null) ?? null : null;
   return (
     <li className={cx("flex flex-col gap-1", own ? "items-end" : "items-start")} data-testid={first.id}>
       {!own ? <SenderLine m={first} network={network} /> : null}
@@ -186,9 +189,14 @@ export function ForeignRow({ item, network, now, actions }: { item: ThreadItem; 
           {reason}
         </p>
       ) : null}
-      {own && rows.some(isHandoffPending) ? (
+      {own && rows.some((r) => isHandoffPending(r) && supersededBy(r) === null) ? (
         <p className="max-w-[85%] text-end font-mono text-xs font-bold text-foreground" data-testid="handoff-question">
           {HANDOFF_QUESTION}
+        </p>
+      ) : null}
+      {resentAs ? (
+        <p className={cx("max-w-[85%] text-end", TEXT)} data-testid="resent-as">
+          resent as {resentAs}
         </p>
       ) : null}
       <Disclosure
@@ -252,7 +260,7 @@ function Composer({ network, convId, conv, onSent }: { network: Network; convId:
       } else if (!out.cancelled) {
         const err = out.error;
         if (redirectIfUnauthenticated(err)) return;
-        if (isApiError(err) && err.code === "oversize") setOversize(err.problem.detail ?? "Too long for one packet.");
+        if (isApiError(err) && err.code === "oversize") setOversize(cleanPeerText(err.problem.detail ?? "Too long for one packet."));
         else setError(errorSentence(err, "The text could not be queued. Try again."));
       }
     } finally {
@@ -296,7 +304,7 @@ function Composer({ network, convId, conv, onSent }: { network: Network; convId:
       </p>
       {oversize ? (
         <div role="alert" className="flex flex-col gap-2 border border-border p-3 font-mono text-xs" data-testid="oversize">
-          <p className="text-foreground">Not sent: {oversize}. Nothing was queued.</p>
+          <p dir="auto" className="text-foreground [unicode-bidi:isolate]">Not sent: {oversize}. Nothing was queued.</p>
           <div className="flex flex-wrap gap-2">
             {network.caps.splittable ? (
               <Button size="sm" onClick={() => void submit(undefined, "split")}>
@@ -327,7 +335,7 @@ export function useRowActions(netId: string, convId: string, limit: number = FOR
         const adapter = await getAdapter();
         for (const id of ids) {
           if (kind === "retry") await adapter.messages.retry(id);
-          else await adapter.messages.cancel?.(id);
+          else await adapter.messages.cancel(id);
         }
         if (kind === "cancel") {
           apiStore.dropForeignRows(convId, ids);
@@ -367,6 +375,9 @@ export default function ForeignThreadView({ network: netId, conv: convId }: { ne
     const el = listRef.current;
     if (el && pinned.current) el.scrollTop = el.scrollHeight;
   }, [page?.messages.length]);
+
+  // The store reads, and so marks read, a conversation a view holds open when a new text lands (a tail read never clears `unread`).
+  useEffect(() => apiStore.openForeign(convId), [convId]);
 
   // Reading is what clears the unread count on the node; the lists follow.
   const top = page ? topSeq(page.messages) : 0;
@@ -483,7 +494,7 @@ export default function ForeignThreadView({ network: netId, conv: convId }: { ne
           )}
         </div>
         {actionError ? (
-          <p role="alert" className="border-t border-border px-4 py-2 text-xs text-destructive" data-testid="action-error">
+          <p role="alert" dir="auto" className="border-t border-border px-4 py-2 text-xs text-destructive [unicode-bidi:isolate]" data-testid="action-error">
             {actionError}
           </p>
         ) : null}

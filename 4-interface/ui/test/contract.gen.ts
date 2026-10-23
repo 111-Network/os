@@ -1547,6 +1547,10 @@ export const schemas: Record<string, JsonSchema> = {
       "not_relayed": {
         "type": ["string","null"],
         "description": "Layer 6 C1 (additive): why an inbound row was kept from every relay edge — `marker` (it already carries a relay marker `[name/TAG]`, §8 guard 3: a copy is never relayed again, and a human who types a marker gets no relay). null when not applicable; absent from older daemons"
+      },
+      "superseded_by": {
+        "oneOf": [{"$ref":"#/components/schemas/ForeignMessageId"},{"type":"null"}],
+        "description": "Layer 6 V5 (additive): the id of the row this own row was sent again as (`POST /messages/{id}/retry`). A superseded row is never retried again (`409 bad_request`: retry the new row); the UI reads it 'resent as …'. null otherwise; absent from older daemons (read as null)"
       }
     }
   },

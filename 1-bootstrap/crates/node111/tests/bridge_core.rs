@@ -586,6 +586,21 @@ async fn ingest_strips_cc_and_cf_nfc_normalises_and_caps_names() {
     let v = p.n.handle.foreign_message_json(&rows[1]);
     assert_eq!(v["truncated"], 90_000);
     assert_schema(&v, "ForeignMessage");
+    // V5-4: a body of only Cc/Cf characters is noise (counted), never an empty bubble
+    let noise = p.n.bridge.noise();
+    p.a.feed(text(
+        &p.ca,
+        "!a1b2c3d4",
+        "W1AW",
+        "3",
+        "\u{202E}\u{200B}\u{FEFF}\u{7}",
+    ));
+    p.a.feed(text(&p.ca, "!a1b2c3d4", "W1AW", "4", "after"));
+    let rows = p.n.wait_inbound(p.src, 3).await;
+    assert_eq!(rows.len(), 3, "the blank one was not stored");
+    assert_eq!(rows[2].body, "after");
+    assert!(rows.iter().all(|r| !r.body.is_empty()));
+    assert_eq!(p.n.bridge.noise(), noise + 1, "counted");
     p.n.handle.shutdown().await;
 }
 
@@ -1828,6 +1843,13 @@ async fn a_pending_row_after_a_crash_is_never_resent_and_resend_mints_a_new_row(
         "{}",
         old.meta
     );
+    // V5-3: a superseded row is never resent again (its text would go twice more)
+    assert!(
+        matches!(b2.resend(id).await, Err(BridgeError::BadRequest(_))),
+        "a row already resent is refused"
+    );
+    b2.tick_once().await;
+    assert_eq!(a2.sent_count(), 1, "nothing more went out");
     assert!(
         b2.resend(new).await.is_err(),
         "a delivered-path row is not resent"
@@ -2193,4 +2215,435 @@ async fn every_view_matches_the_contract() {
         assert_schema(&bad.problem().body(), "Problem");
     }
     p.n.handle.shutdown().await;
+}
+
+// ---------------------------------------------------------------- B2 bounce (review findings)
+
+/// The row as the store holds it.
+async fn stored(n: &Node, id: i64) -> ForeignMessageRow {
+    n.fab().foreign_message(id).await.unwrap()
+}
+
+/// F1: a `Later` refusal before air (here `rate_limited`) withdraws the pending mark: the
+/// row is plain `queued` in the store (cancellable, not "may have been sent"), it is
+/// re-handed from the queue once due, and a new bridge on the same store (a restart, or a
+/// disable and enable) retries it on its first tick instead of leaving it uncertain.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn f1_a_rate_limited_row_is_withdrawn_retried_once_due_and_survives_a_restart() {
+    let n = node_with(|c| c.backoff_cap_ticks = 8).await;
+    let a = stub("stub-a", "Stub A", "A", "na");
+    n.bridge.enable(a.clone()).await.unwrap();
+    let ca = cref("stub-a", "na", ConvKind::Channel, "ch:alpha");
+    let conv = n.conv(&ca).await;
+    a.set_queue_full(true);
+    let v = n
+        .bridge
+        .send_text("stub-a", conv, "later", None)
+        .await
+        .unwrap();
+    let id = fjson::parse_fm_id(v["id"].as_str().unwrap()).unwrap();
+    n.ticks(1).await;
+    assert_eq!(a.sent_count(), 1);
+    let row = stored(&n, id).await;
+    assert_eq!(
+        (row.state, row.reason_code.as_deref()),
+        (ForeignState::Queued, Some("rate_limited"))
+    );
+    assert!(
+        !row.handoff_pending,
+        "nothing was sent: the pending mark is withdrawn"
+    );
+    assert!(
+        !n.bridge.uncertain(id).await.unwrap(),
+        "not 'may have been sent'"
+    );
+    assert!(n.bridge.is_tracked(id), "its wait is tracked");
+    // re-handed from the queue once due: attempt 2 at tick 2, attempt 3 at tick 4
+    let mut counts = Vec::new();
+    for _ in 0..4 {
+        n.ticks(1).await;
+        counts.push(a.sent_count());
+    }
+    assert_eq!(counts, vec![2, 2, 3, 3], "1, 2 ticks apart, from the queue");
+    assert!(!stored(&n, id).await.handoff_pending);
+    // a restart: the in-memory wait is gone, the store is truthful
+    n.bridge.disable("stub-a").await;
+    let b2 = Bridge::new(
+        BridgeConfig::new(&n.layout.root),
+        Arc::clone(&n.handle),
+        &n.api,
+    );
+    let a2 = stub("stub-a", "Stub A", "A", "na");
+    b2.enable(a2.clone()).await.unwrap();
+    assert!(!b2.uncertain(id).await.unwrap(), "retryable, not uncertain");
+    b2.tick_once().await;
+    assert_eq!(a2.sent(), vec![(ca.clone(), "later".to_string())]);
+    assert_eq!(
+        b2.row_state(id).await.unwrap().0,
+        ForeignMessageState::Sent,
+        "retried on the first tick after the restart"
+    );
+    // a row still refused before air stays cancellable (§9 'queued with nothing sent')
+    a2.set_queue_full(true);
+    let v = b2.send_text("stub-a", conv, "drop me", None).await.unwrap();
+    let gone = fjson::parse_fm_id(v["id"].as_str().unwrap()).unwrap();
+    b2.tick_once().await;
+    assert_eq!(a2.sent_count(), 2);
+    b2.cancel(gone).await.unwrap();
+    n.handle.shutdown().await;
+}
+
+/// F-extra-2: cancelling a row the core tracks for a `Later` retry drops the track; the
+/// ticks after it neither fail nor hand the deleted row again.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn f_extra_2_cancel_of_a_later_row_drops_its_track_and_never_re_hands() {
+    let n = node_with(|c| c.backoff_cap_ticks = 2).await;
+    let a = stub("stub-a", "Stub A", "A", "na");
+    n.bridge.enable(a.clone()).await.unwrap();
+    let conv = n
+        .conv(&cref("stub-a", "na", ConvKind::Channel, "ch:alpha"))
+        .await;
+    a.set_queue_full(true);
+    let v = n
+        .bridge
+        .send_text("stub-a", conv, "cancel me", None)
+        .await
+        .unwrap();
+    let id = fjson::parse_fm_id(v["id"].as_str().unwrap()).unwrap();
+    n.ticks(1).await;
+    assert_eq!(a.sent_count(), 1);
+    assert!(n.bridge.is_tracked(id));
+    n.bridge.cancel(id).await.unwrap();
+    assert!(!n.bridge.is_tracked(id), "the wait is dropped with the row");
+    a.set_queue_full(false);
+    // an adapter event would wake every waiting row of the network at once
+    a.feed(Inbound::Nearby(json!({"id": "ab", "kind": "reticulum"})));
+    n.ticks(6).await;
+    assert_eq!(a.sent_count(), 1, "the cancelled row is never handed again");
+    assert_eq!(n.bridge.tracked(), 0);
+    assert!(n.fab().foreign_message(id).await.is_err(), "deleted");
+    n.handle.shutdown().await;
+}
+
+/// F2: a DM's post-air NAK (`Failed { max_retransmit, Later }` after `Accepted`, the
+/// Meshtastic client's contract) keeps `sent` "transmitted, not confirmed", is not re-sent
+/// on ticks, and is re-sent once — the same text — when the adapter upserts exactly that
+/// DM's conversation (that node's NodeInfo); the re-send's `Accepted` records the new
+/// native id. An upsert of another conversation re-sends nothing.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn f2_a_dm_post_air_nak_is_resent_once_on_that_peers_upsert() {
+    let n = node().await;
+    let a = stub("stub-a", "Stub A", "A", "na");
+    n.bridge.enable(a.clone()).await.unwrap();
+    let dm = cref("stub-a", "na", ConvKind::Dm, "dm:!a1b2c3d4");
+    let conv = n.conv(&dm).await;
+    a.script(StubOutcome::AcceptThenFail {
+        native_id: "0000000a".into(),
+        evidence: vec![(ForeignMessageState::Sent, "accepted by the radio".into())],
+        reason: Reason::MaxRetransmit,
+        retry: Retry::Later,
+    });
+    let v = n
+        .bridge
+        .send_text("stub-a", conv, "hello", None)
+        .await
+        .unwrap();
+    let id = fjson::parse_fm_id(v["id"].as_str().unwrap()).unwrap();
+    n.ticks(1).await;
+    assert_eq!(a.sent_count(), 1);
+    assert_eq!(
+        n.bridge.row_state(id).await.unwrap(),
+        (
+            ForeignMessageState::Sent,
+            Some("transmitted, not confirmed".into()),
+            Some("max_retransmit".into())
+        )
+    );
+    assert_eq!(
+        stored(&n, id).await.native_msg_id.as_deref(),
+        Some("0000000a")
+    );
+    n.ticks(8).await;
+    assert_eq!(a.sent_count(), 1, "no tick back-off burning airtime");
+    assert!(n.bridge.is_tracked(id), "waiting for its peer");
+    // another node's NodeInfo: nothing
+    let other = cref("stub-a", "na", ConvKind::Dm, "dm:!0e0e0e0e");
+    a.feed(Inbound::Conversation {
+        conv: other.clone(),
+        title: "Bob".into(),
+    });
+    let wait_title = |r: ConvRef, t: &'static str| {
+        let f = n.fab();
+        async move {
+            let deadline = Instant::now() + Duration::from_secs(10);
+            loop {
+                let convs = f.foreign_conversations(Some("stub-a")).await.unwrap();
+                if convs
+                    .iter()
+                    .any(|c| c.native_id == r.native_id && c.title.as_deref() == Some(t))
+                {
+                    return;
+                }
+                assert!(Instant::now() < deadline, "the upsert is seen");
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        }
+    };
+    wait_title(other, "Bob").await;
+    n.ticks(2).await;
+    assert_eq!(a.sent_count(), 1, "only that node's upsert re-sends");
+    // that node is heard again
+    a.script(StubOutcome::Accept {
+        native_id: "0000000b".into(),
+        evidence: vec![(ForeignMessageState::Sent, "accepted by the radio".into())],
+    });
+    a.feed(Inbound::Conversation {
+        conv: dm.clone(),
+        title: "Alice".into(),
+    });
+    wait_title(dm.clone(), "Alice").await;
+    n.ticks(1).await;
+    assert_eq!(
+        a.sent(),
+        vec![
+            (dm.clone(), "hello".to_string()),
+            (dm.clone(), "hello".to_string())
+        ],
+        "one re-send, the same text"
+    );
+    assert_eq!(
+        stored(&n, id).await.native_msg_id.as_deref(),
+        Some("0000000b"),
+        "the re-send's native id is recorded"
+    );
+    assert_eq!(
+        n.bridge.row_state(id).await.unwrap(),
+        (
+            ForeignMessageState::Sent,
+            Some("accepted by the radio".into()),
+            None
+        )
+    );
+    n.ticks(4).await;
+    assert_eq!(a.sent_count(), 2, "once per upsert");
+    assert!(!n.bridge.is_tracked(id));
+    n.handle.shutdown().await;
+}
+
+/// F5: with `honour_ok_to_mqtt` on, a Meshtastic origin whose adapter reported no
+/// `ok_to_mqtt` is refused (fail closed); an explicit `true` relays.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn f5_a_meshtastic_origin_without_ok_to_mqtt_is_not_relayed_when_honoured() {
+    let n = node().await;
+    let m = stub("meshtastic", "Meshtastic", "M", "!0badc0de");
+    let b = stub("stub-b", "Stub B", "B", "nb");
+    n.bridge.enable(m.clone()).await.unwrap();
+    n.bridge.enable(b.clone()).await.unwrap();
+    let cm = cref(
+        "meshtastic",
+        "!0badc0de",
+        ConvKind::Channel,
+        "ch:LongFast:9f3c",
+    );
+    let src = n.conv(&cm).await;
+    let dst = n
+        .conv(&cref("stub-b", "nb", ConvKind::Channel, "ch:beta"))
+        .await;
+    let e = n
+        .edge(
+            src,
+            dst,
+            EdgeOpts {
+                honour_ok_to_mqtt: true,
+                oversize: SizeMode::Refuse,
+            },
+        )
+        .await;
+    m.feed_many([
+        text(&cm, "!a1b2c3d4", "S", "00000001", "no bit reported"),
+        with_meta(
+            text(&cm, "!a1b2c3d4", "S", "00000002", "may leave"),
+            json!({"ok_to_mqtt": true}),
+        ),
+    ]);
+    n.wait_inbound(src, 2).await;
+    n.ticks(3).await;
+    assert_eq!(texts(&b), vec!["[S/M] may leave"]);
+    assert_eq!(n.edge_row(e).await.refused, 1);
+    n.handle.shutdown().await;
+}
+
+/// F-extra: the `bridge` SSE snapshot lists the networks in the spine's `[order]`, as
+/// `GET /networks` does.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn f_extra_the_bridge_snapshot_follows_the_spine_order() {
+    use node111::daemon::dashboard::api_v1::transport::TransportApi;
+    use node111::daemon::transport::interfaces::{InterfacesFile, Order, Startup};
+    use node111::daemon::transport::posture::Spine;
+    use node111::daemon::transport::rnstatus::{FactsCache, Rnstatus, TickConfig, TimedRunner};
+    let n = node().await;
+    let order: Vec<String> = ["app:simplex", "lxmf", "meshtastic", "app:deltachat"]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+    let startup = Startup {
+        file: InterfacesFile {
+            order: Order {
+                networks: order.clone(),
+            },
+            ..InterfacesFile::default()
+        },
+        read_only: true,
+        notes: Vec::new(),
+    };
+    let root = n.layout.root.clone();
+    let rn = Arc::new(Rnstatus::new(Arc::new(TimedRunner::new(&root)), &root));
+    let spine = Spine::new(n.layout.clone(), startup, rn, false, None);
+    n.api.insert_ext(Arc::new(TransportApi {
+        spine,
+        facts: FactsCache::new(TickConfig::default()),
+    }));
+    let head = n.api.events.head();
+    n.bridge.publish_snapshot().await;
+    let frames: Vec<Value> = n
+        .api
+        .events
+        .subscribe(Some(head))
+        .replay
+        .iter()
+        .filter(|f| f.event == "bridge")
+        .map(|f| serde_json::from_str(&f.data).unwrap())
+        .collect();
+    let last = frames.last().expect("a bridge frame");
+    assert_schema(last, "SseBridge");
+    let ids: Vec<String> = last["networks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|x| x["id"].as_str().unwrap().to_string())
+        .collect();
+    assert_eq!(ids, order, "the same order as GET /networks");
+    n.handle.shutdown().await;
+}
+
+/// F7: link changes and dropped counts on the recv path only mark the snapshot due; the
+/// next tick publishes it once, however many batches changed it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn f7_recv_side_changes_publish_one_snapshot_on_the_tick() {
+    let n = node().await;
+    let a = stub("stub-a", "Stub A", "A", "na");
+    n.bridge.enable(a.clone()).await.unwrap();
+    let count = |from: u64| {
+        n.api
+            .events
+            .subscribe(Some(from))
+            .replay
+            .iter()
+            .filter(|f| f.event == "bridge")
+            .count()
+    };
+    let head = n.api.events.head();
+    for _ in 0..5 {
+        a.flap();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while n.bridge.link("stub-a") != Some(LinkState::Up) {
+            assert!(Instant::now() < deadline);
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        a.feed(Inbound::Link(LinkState::Down));
+        while n.bridge.link("stub-a") != Some(LinkState::Down) {
+            assert!(Instant::now() < deadline);
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    }
+    assert_eq!(count(head), 0, "nothing published from the recv path");
+    n.ticks(1).await;
+    assert_eq!(count(head), 1, "one snapshot on the tick");
+    n.ticks(2).await;
+    assert_eq!(count(head), 1, "and none while nothing changed");
+    n.handle.shutdown().await;
+}
+
+/// FB1 item 6: the `bridge` snapshot follows a network's conversation counts through the
+/// tick's debounce (no timer): an inbound DM (a new conversation, one unread) publishes one
+/// frame on the next tick whatever the batch size; a tick with nothing changed publishes
+/// none; a read mark (the fabric's `network_message` for the conversation) publishes the
+/// new `unread`; a text into an existing channel (no count changed) publishes nothing.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn item6_conversation_count_changes_publish_one_snapshot_on_the_tick() {
+    let n = node().await;
+    // as the daemon wires it: the fabric's publisher finds the bridge in ext
+    n.api.insert_ext(Arc::clone(&n.bridge));
+    let a = stub("stub-a", "Stub A", "A", "na");
+    n.bridge.enable(a.clone()).await.unwrap();
+    let ch = cref("stub-a", "na", ConvKind::Channel, "ch:alpha");
+    a.feed(text(&ch, "s", "S", "c0", "hello channel"));
+    let ch_id = n.conv(&ch).await;
+    n.wait_inbound(ch_id, 1).await;
+    n.ticks(2).await;
+    let frames = |from: u64| -> Vec<Value> {
+        n.api
+            .events
+            .subscribe(Some(from))
+            .replay
+            .iter()
+            .filter(|f| f.event == "bridge")
+            .map(|f| serde_json::from_str(&f.data).unwrap())
+            .collect()
+    };
+    let counts = |v: &Value| -> Value {
+        v["networks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|x| x["id"] == "stub-a")
+            .map(|x| x["counts"].clone())
+            .unwrap()
+    };
+    // a quiet tick: nothing
+    let head = n.api.events.head();
+    n.ticks(2).await;
+    assert!(
+        frames(head).is_empty(),
+        "nothing changed, nothing published"
+    );
+
+    // a DM from a new peer, three texts: one frame on the tick, unread 3
+    let dm = cref("stub-a", "na", ConvKind::Dm, "peer-1");
+    let head = n.api.events.head();
+    a.feed_many((0..3).map(|i| text(&dm, "peer-1", "P", &format!("d{i}"), "hi")));
+    let dm_id = n.conv(&dm).await;
+    n.wait_inbound(dm_id, 3).await;
+    assert!(frames(head).is_empty(), "nothing from the recv path itself");
+    n.ticks(1).await;
+    let got = frames(head);
+    assert_eq!(got.len(), 1, "{got:?}");
+    assert_schema(&got[0], "SseBridge");
+    assert_eq!(counts(&got[0])["unread"], 3, "{}", got[0]);
+    n.ticks(2).await;
+    assert_eq!(frames(head).len(), 1, "and none while nothing changed");
+
+    // the person reads it: the fabric's conversation event, then the tick publishes unread 0
+    let head = n.api.events.head();
+    n.fab().foreign_conversation_mark_read(dm_id).await.unwrap();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        n.ticks(1).await;
+        if let Some(f) = frames(head).last() {
+            assert_eq!(counts(f)["unread"], 0, "{f}");
+            break;
+        }
+        assert!(Instant::now() < deadline, "no snapshot after the read mark");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert_eq!(frames(head).len(), 1);
+
+    // a text into the existing channel: rows changed, counts did not — no frame
+    let head = n.api.events.head();
+    a.feed(text(&ch, "s", "S", "c1", "again"));
+    n.wait_inbound(ch_id, 2).await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    n.ticks(2).await;
+    assert!(frames(head).is_empty(), "{:?}", frames(head));
+    n.handle.shutdown().await;
 }

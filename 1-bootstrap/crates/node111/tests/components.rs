@@ -758,3 +758,166 @@ fn install_prints_and_records_every_notice_before_any_download() {
     assert!(receipt2.degrade_branches.is_empty());
     assert_eq!(receipt2.notices.len(), 1);
 }
+
+/// `[install] prefetch = false` (the Raspberry Pi floor): the plain install
+/// downloads nothing for it and prints one line naming
+/// `111 install --components`; that command later fetches exactly the named
+/// payloads (notice first, pinned size + SHA-256), records them in the
+/// receipt, and refuses before any download on a node without a receipt, an
+/// undeclared id or a component with nothing to download.
+#[test]
+fn prefetch_false_waits_for_install_components() {
+    use node111::install::context::InstallContext;
+    use node111::install::receipt::Receipt;
+    use node111::install::{fetch_components_with, packages};
+
+    let n = Node::new();
+    let big = component(vec![(
+        "big.toml".into(),
+        binary_toml("big", BIN, &[], "[install]\nprefetch = false").into_bytes(),
+    )]);
+    assert!(!big.prefetch);
+    let none = component(vec![(
+        "nope.toml".into(),
+        r#"id = "nope"
+adapter = "app:nope"
+title = "Nope"
+[payload]
+kind = "none"
+note = "Nope is not in this release"
+[run]
+program = "nope"
+health = "none"
+[license]
+spdx = "MIT"
+read_at = "https://example.invalid/LICENSE"
+notice = "Nope. You install it."
+"#
+        .as_bytes()
+        .to_vec(),
+    )]);
+    let all = vec![big.clone(), none.clone()];
+    let log = Log::default();
+    let fetcher = FakeFetcher {
+        log: log.clone(),
+        files: vec![("https://example.invalid/dl/big-bin".into(), BIN.to_vec())],
+    };
+    let runner = MockRunner::new(Vec::<(String, Output)>::new());
+    let env = MapEnv::new();
+    let ctx = InstallContext {
+        layout: node111::daemon::DaemonLayout {
+            root: n.root.clone(),
+            etc: n.root.join("etc"),
+        },
+        fs_root: n.root.clone(),
+        runner: &runner,
+        env: &env,
+        allow_degraded: false,
+        min_installer_version: "2026.10.01".parse().unwrap(),
+        manifest_base: String::new(),
+        manifest_fallback: None,
+        health_base: String::new(),
+        probe_204: Vec::new(),
+        check_root: false,
+    };
+    let ids = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+
+    // the plain install: no fetch, no notice, one line with the command
+    let mut receipt = Receipt::new("2026.10.23");
+    packages::cache_components(&ctx, &all, &fetcher, &mut receipt, &mut log.clone());
+    let events = log.0.lock().unwrap().clone();
+    assert!(
+        !events.iter().any(|e| e.starts_with("fetch ")),
+        "{events:?}"
+    );
+    assert_eq!(events.len(), 1, "{events:?}");
+    assert!(
+        events[0].contains("not pre-downloaded")
+            && events[0].contains("Demo big")
+            && events[0].contains("`sudo 111 install --components big`"),
+        "{events:?}"
+    );
+    assert!(receipt.notices.is_empty() && receipt.degrade_branches.is_empty());
+    assert!(!n.exists("cache/packages/big"));
+
+    // --components refuses before any download: no receipt yet, unknown id,
+    // nothing to download
+    let mut out = log.clone();
+    let err = fetch_components_with(&ctx, &fetcher, &all, &ids(&["big"]), &mut out).unwrap_err();
+    assert!(
+        format!("{err:#}").contains("run `111 install` first"),
+        "{err:#}"
+    );
+    receipt.write(&n.root.join("receipt.json")).unwrap();
+    let err =
+        fetch_components_with(&ctx, &fetcher, &all, &ids(&["big", "ghost"]), &mut out).unwrap_err();
+    assert!(
+        format!("{err:#}").contains("no component \"ghost\""),
+        "{err:#}"
+    );
+    let err = fetch_components_with(&ctx, &fetcher, &all, &ids(&["nope"]), &mut out).unwrap_err();
+    assert!(
+        format!("{err:#}").contains("Nope is not in this release"),
+        "{err:#}"
+    );
+    assert!(!log
+        .0
+        .lock()
+        .unwrap()
+        .iter()
+        .any(|e| e.starts_with("fetch ")));
+
+    // then it fetches exactly the named payload, notice first
+    let r = fetch_components_with(&ctx, &fetcher, &all, &ids(&["big"]), &mut out).unwrap();
+    let events = log.0.lock().unwrap().clone();
+    let notice = events
+        .iter()
+        .position(|e| e.starts_with("print 111 install: notice: Demo big"))
+        .expect("the notice is printed");
+    let fetch = events
+        .iter()
+        .position(|e| e == "fetch https://example.invalid/dl/big-bin")
+        .expect("the pinned URL is fetched");
+    assert!(notice < fetch, "{events:?}");
+    assert_eq!(
+        std::fs::read(n.root.join("cache/packages/big/big-bin")).unwrap(),
+        BIN
+    );
+    assert_eq!(
+        r.cache_hashes
+            .get("packages/big/big-bin")
+            .map(String::as_str),
+        Some(sha256_bytes(BIN).as_str())
+    );
+    let written = Receipt::read(&n.root.join("receipt.json"))
+        .unwrap()
+        .unwrap();
+    assert!(written.notices.iter().any(|x| x.hash == big.notice_hash()));
+    assert!(written.degrade_branches.is_empty());
+    // nothing installed, nothing running
+    assert!(!n.exists("components") && !n.exists("venvs"));
+
+    // a payload failing its pin is an error and never lands
+    let n2 = Node::new();
+    let ctx2 = InstallContext {
+        layout: node111::daemon::DaemonLayout {
+            root: n2.root.clone(),
+            etc: n2.root.join("etc"),
+        },
+        fs_root: n2.root.clone(),
+        ..ctx
+    };
+    Receipt::new("2026.10.23")
+        .write(&n2.root.join("receipt.json"))
+        .unwrap();
+    let mut tampered = BIN.to_vec();
+    tampered[0] ^= 1;
+    let bad = FakeFetcher {
+        log: Log::default(),
+        files: vec![("https://example.invalid/dl/big-bin".into(), tampered)],
+    };
+    let err =
+        fetch_components_with(&ctx2, &bad, &all, &ids(&["big"]), &mut Log::default()).unwrap_err();
+    assert!(format!("{err:#}").contains("sha256"), "{err:#}");
+    assert!(!n2.exists("cache/packages/big/big-bin"));
+}

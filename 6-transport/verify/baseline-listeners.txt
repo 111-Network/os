@@ -9,6 +9,7 @@
 #
 # <when> is evaluated from facts the script reads, never from the API:
 #   always          111d itself always listens here
+#   optional        111d listens here when it can (best effort): allowed, never required
 #   child:<name>    allowed while that `proc` descendant runs (it is the child's own listener)
 #   fabric_listen   <root>/fabric/settings has hub_role or listen_lan true (Layer 5 LAN sharing of the fabric)
 #   panel           a hosted panel's listener while its service is set up; Layer 5's one panel is the Meshtastic
@@ -20,6 +21,7 @@
 # rnsd's AutoInterface and mDNS sockets are UDP: the script records them, it does not assert them.
 
 listen 11180        always          111d (dashboard; loopback, or every address while LAN sharing is on)
+listen 80           optional        111d (the dashboard's best-effort :80 beside 11180 — Layer 4 bind.rs: needs CAP_NET_BIND_SERVICE or root, logged and skipped otherwise)
 listen 11181        child:llama-server   llama-server (the local model, loopback)
 listen 11182        child:111-agent      111-agent (the agent, loopback)
 listen 11183        fabric_listen   111d (the fabric LAN listener: hub role or listen_lan)

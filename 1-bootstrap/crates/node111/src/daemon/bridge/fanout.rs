@@ -658,6 +658,15 @@ impl Bridge {
     }
 
     /// `POST /messages/fanout` (module doc). Returns `FanoutResult`.
+    ///
+    /// Atomic for the foreign targets only: every target is resolved, planned and gated
+    /// first (a refusal queues nothing, `409`), and 111 contacts are checked to be contacts
+    /// before anything is sent. The 111 messages are then sent through `FabricHandle::send`
+    /// **before** `foreign_group_create`, because the group's `targets` record each one's
+    /// message id and the store has no call to add it afterwards; so a failure of the group
+    /// create (store full, stopped) or of a second contact's send leaves the 111 messages
+    /// already sent in their threads without a send group. Their own Layer 5 states and
+    /// retry are unaffected (F4, recorded).
     pub async fn fanout(&self, req: &FanoutRequest) -> Result<Value, BridgeError> {
         let resolved = self.resolve_all(req).await?;
         if let Some(e) = Self::refusals(&resolved) {
@@ -896,9 +905,23 @@ impl Bridge {
         Ok(out)
     }
 
-    /// Cancel one own row (§9): only while `queued` and never handed to a carrier.
+    /// Cancel one own row (§9): only while `queued` with nothing sent — never handed to
+    /// a carrier, or handed and refused before air (`Retry::Later`, its pending mark
+    /// withdrawn). A row with an accepted part (a recipient list's member got it) is not
+    /// cancelled. The core stops tracking the row, so a `Later` wait never touches the
+    /// deleted row.
     pub async fn cancel(&self, id: i64) -> Result<(), BridgeError> {
-        Ok(self.fab()?.foreign_cancel(id).await?)
+        let f = self.fab()?;
+        if let Ok(r) = f.foreign_message(id).await {
+            if r.native_msg_id.is_some() {
+                return Err(BridgeError::BadRequest(
+                    "part of this message was already sent".into(),
+                ));
+            }
+        }
+        f.foreign_cancel(id).await?;
+        super::state::forget_row(self, id);
+        Ok(())
     }
 
     /// Cancel every unsent row of send group `group` (a split send's unsent parts; the
@@ -911,6 +934,7 @@ impl Bridge {
             let unsent =
                 r.state == ForeignState::Queued && !r.handoff_pending && r.native_msg_id.is_none();
             if unsent && f.foreign_cancel(r.id).await.is_ok() {
+                super::state::forget_row(self, r.id);
                 out.push(r.id);
             }
         }

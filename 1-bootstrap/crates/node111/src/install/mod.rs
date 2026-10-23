@@ -56,6 +56,24 @@ pub fn run(args: crate::cli::InstallArgs) -> anyhow::Result<()> {
     };
     let fetcher =
         crate::util::http::Fetcher::new(std::time::Duration::from_secs(60), 512 * 1024 * 1024)?;
+    if let Some(ids) = &args.components {
+        anyhow::ensure!(
+            unsafe { libc::geteuid() } == 0,
+            "111 install --components needs root (the cache is root-owned) — re-run it with sudo"
+        );
+        fetch_components_with(
+            &ctx,
+            &fetcher,
+            &crate::daemon::components::manifest::load_embedded(),
+            ids,
+            &mut std::io::stderr(),
+        )?;
+        eprintln!(
+            "111 install: cached {}; enable it from the dashboard (nothing is installed or started until you do)",
+            ids.join(", ")
+        );
+        return Ok(());
+    }
     let receipt = run_with(&ctx, &fetcher)?;
     verify::print_success(
         &ctx.layout,
@@ -67,10 +85,28 @@ pub fn run(args: crate::cli::InstallArgs) -> anyhow::Result<()> {
 }
 
 /// The state machine (spec §Install flow Linux, steps 1–9). Testable: every
-/// system touch goes through ctx (Runner/Env/paths) and fetcher.
+/// system touch goes through ctx (Runner/Env/paths) and fetcher. The optional
+/// components are this binary's embedded declarations
+/// ([`run_with_components`]).
 pub fn run_with(
     ctx: &InstallContext,
     fetcher: &crate::util::http::Fetcher,
+) -> anyhow::Result<Receipt> {
+    run_with_components(
+        ctx,
+        fetcher,
+        &crate::daemon::components::manifest::load_embedded(),
+    )
+}
+
+/// [`run_with`] with the optional-component declarations step 5 caches
+/// (Layer 6 §2.1 rule 3) passed in, so a test harness decides which payloads
+/// its fetcher is asked for. A declaration with `[install] prefetch = false`
+/// is never downloaded here (one line names the command that fetches it).
+pub fn run_with_components(
+    ctx: &InstallContext,
+    fetcher: &crate::util::http::Fetcher,
+    components: &[crate::daemon::components::manifest::Component],
 ) -> anyhow::Result<Receipt> {
     // 0. base tree + existing receipt (untrusted hint) + version gate
     for d in [
@@ -126,7 +162,7 @@ pub fn run_with(
     // nothing is installed until a human enables one)
     packages::cache_components(
         ctx,
-        &crate::daemon::components::manifest::load_embedded(),
+        components,
         fetcher,
         &mut receipt,
         &mut std::io::stderr(),
@@ -157,6 +193,67 @@ pub fn run_with(
         offer::print_offer();
     }
 
+    Ok(receipt)
+}
+
+/// `111 install --components <ids>` (Layer 6 §2.1 rule 3; the payloads
+/// `[install] prefetch = false` leaves out of the base install): on an
+/// installed node, print each named component's licence notice and record it,
+/// then download its pinned payload into `cache/packages/<id>/` (size and
+/// SHA-256 against the declaration in this signed binary), and rewrite the
+/// receipt with the new notices and cache hashes. Nothing is installed or
+/// started. Refuses before any download: a node without a receipt (run
+/// `111 install` first), an id that is not declared, or one with nothing to
+/// download on this machine. A failed download (or a file failing its pin)
+/// is an error after the receipt is written (the notices printed stay
+/// recorded); nothing of it lands in the cache.
+pub fn fetch_components_with(
+    ctx: &InstallContext,
+    fetcher: &dyn packages::PayloadFetcher,
+    components: &[crate::daemon::components::manifest::Component],
+    ids: &[String],
+    out: &mut dyn std::io::Write,
+) -> anyhow::Result<Receipt> {
+    let receipt_path = ctx.layout.root.join("receipt.json");
+    let mut receipt = Receipt::read(&receipt_path)?.ok_or_else(|| {
+        anyhow::anyhow!("111 is not installed on this machine — run `111 install` first")
+    })?;
+    anyhow::ensure!(!ids.is_empty(), "--components names at least one component");
+    let mut chosen = Vec::new();
+    for id in ids {
+        let c = components.iter().find(|c| &c.id == id).ok_or_else(|| {
+            let known: Vec<&str> = components.iter().map(|c| c.id.as_str()).collect();
+            anyhow::anyhow!(
+                "no component {id:?} is declared in this release (declared: {})",
+                known.join(", ")
+            )
+        })?;
+        if let crate::daemon::components::manifest::Payload::Unavailable { reason } = &c.payload {
+            anyhow::bail!("nothing to download for {id}: {reason}");
+        }
+        anyhow::ensure!(
+            c.has_payload(),
+            "nothing to download for {id}: this release carries no lock for it"
+        );
+        if !chosen
+            .iter()
+            .any(|x: &crate::daemon::components::manifest::Component| x.id == c.id)
+        {
+            chosen.push(c.clone());
+        }
+    }
+    std::fs::create_dir_all(ctx.layout.root.join("cache/packages"))?;
+    let before = receipt.degrade_branches.len();
+    packages::fetch_components(ctx, &chosen, fetcher, &mut receipt, out);
+    // a failed fetch is this command's error, not an install degrade branch
+    let failed: Vec<String> = receipt.degrade_branches.split_off(before);
+    packages::record_cache_hashes(&ctx.layout.root.join("cache"), &mut receipt)?;
+    receipt.write(&receipt_path)?;
+    anyhow::ensure!(
+        failed.is_empty(),
+        "not every payload was fetched: {}",
+        failed.join("; ")
+    );
     Ok(receipt)
 }
 

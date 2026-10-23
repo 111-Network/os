@@ -16,7 +16,10 @@
 //! 231 / 219 against 239 / 227 · the shim drops `ToRadio.disconnect` · Nearby parity per
 //! field on the committed `FromRadio` fixture (`tests/fixtures/meshtastic/`) · undecodable
 //! (JSON stub) frames are noise · capped reconnect back-off · the source scan for
-//! `ToRadio` constructors.
+//! `ToRadio` constructors. B3 review: an unheard own NodeInfo is never Live (F1) · another
+//! client's partial replay does not configure the session (F2) · Nearby pushes coalesce on
+//! the monotonic clock (F3) · Wi-Fi PSK / MQTT password sentinels in nothing emitted (F5) ·
+//! "waiting" once per job, no terminal event dropped (F7).
 
 use meshtastic::protobufs as pb;
 use meshtastic::Message;
@@ -44,6 +47,9 @@ const SENTINEL: [u8; 16] = [
 ];
 /// A private key the board hands every client in its security config (never kept).
 const SECRET_PRIVATE_KEY: [u8; 32] = [0xe7; 32];
+/// The board's Wi-Fi PSK and MQTT password (config every client is handed; never kept, F5).
+const SECRET_WIFI: &str = "wifi-sentinel-Qz7xK2pW";
+const SECRET_MQTT: &str = "mqtt-sentinel-Lm4vR8tN";
 const BCAST: u32 = 0xffff_ffff;
 const T: Duration = Duration::from_secs(5);
 
@@ -135,6 +141,32 @@ fn security() -> Vec<u8> {
     }))
 }
 
+fn network() -> Vec<u8> {
+    fr(F::Config(pb::Config {
+        payload_variant: Some(pb::config::PayloadVariant::Network(
+            pb::config::NetworkConfig {
+                wifi_enabled: true,
+                wifi_ssid: "bench".into(),
+                wifi_psk: SECRET_WIFI.into(),
+                ..Default::default()
+            },
+        )),
+    }))
+}
+
+fn mqtt() -> Vec<u8> {
+    fr(F::ModuleConfig(pb::ModuleConfig {
+        payload_variant: Some(pb::module_config::PayloadVariant::Mqtt(
+            pb::module_config::MqttConfig {
+                enabled: true,
+                username: "bench".into(),
+                password: SECRET_MQTT.into(),
+                ..Default::default()
+            },
+        )),
+    }))
+}
+
 fn complete(id: u32) -> Vec<u8> {
     fr(F::ConfigCompleteId(id))
 }
@@ -211,6 +243,8 @@ struct Board {
     before_complete: Vec<Vec<u8>>,
     /// Answer no `want_config_id` at all (a board that never completes).
     silent: bool,
+    /// Leave the board's own NodeInfo out of the stream (B3 review F1).
+    omit_own: bool,
 }
 
 impl Default for Board {
@@ -236,6 +270,7 @@ impl Default for Board {
             ],
             before_complete: Vec::new(),
             silent: false,
+            omit_own: false,
         }
     }
 }
@@ -243,22 +278,37 @@ impl Default for Board {
 fn config_stream(b: &Board, complete_id: u32) -> Vec<u8> {
     let mut out = b"DEBUG | 12:00:00 boot noise\r\n".to_vec();
     out.extend(my_info(b.my));
-    out.extend(simple_node(
-        b.my,
-        "Bench board",
-        Some([0xaa; 32]),
-        b.licensed,
-    ));
+    if !b.omit_own {
+        out.extend(own_node(b));
+    }
     for (i, name, psk, uplink, role) in &b.channels {
         out.extend(channel(*i, name, psk, *uplink, *role));
     }
     out.extend(lora(b.region, 0));
     out.extend(security());
+    out.extend(network());
+    out.extend(mqtt());
     for n in &b.nodes {
         out.extend_from_slice(n);
     }
     for f in &b.before_complete {
         out.extend_from_slice(f);
+    }
+    out.extend(complete(complete_id));
+    out
+}
+
+fn own_node(b: &Board) -> Vec<u8> {
+    simple_node(b.my, "Bench board", Some([0xaa; 32]), b.licensed)
+}
+
+/// Another client's nodes-only replay (69421 on 2.7): my info, the node DB, the completion;
+/// no channels and no LoRa config.
+fn nodes_only_stream(b: &Board, complete_id: u32) -> Vec<u8> {
+    let mut out = my_info(b.my);
+    out.extend(own_node(b));
+    for n in &b.nodes {
+        out.extend_from_slice(n);
     }
     out.extend(complete(complete_id));
     out
@@ -829,7 +879,7 @@ async fn texts_are_spaced_at_least_2_1_s_on_the_monotonic_clock() {
 }
 
 #[tokio::test]
-async fn queue_status_free_zero_pauses_the_queue() {
+async fn queue_status_free_zero_pauses_the_queue_and_the_boards_status_resumes_it() {
     let h = harness(Board::default()).await;
     h.fake.push(&queue_status(0, 0, 0));
     wait_until("paused", || h.a.mesh_facts().paused).await;
@@ -844,7 +894,8 @@ async fn queue_status_free_zero_pauses_the_queue() {
         h.fake.texts().is_empty(),
         "nothing goes out while the board's queue is full"
     );
-    // the probe: a nonce-0 heartbeat asks the board for a fresh status
+    // keep-alive while paused (a nonce-0 heartbeat, backed off); the board's own status
+    // change resumes the queue (B3 review F6: no answer to the heartbeat is assumed)
     h.clock.advance(Duration::from_secs(2));
     wait_until("probe heartbeat", || !h.fake.heartbeats().is_empty()).await;
     h.fake.push(&queue_status(0, 4, 0));
@@ -1144,6 +1195,214 @@ async fn a_licensed_board_allows_232_byte_dms_and_facts_follow_live_changes() {
     h.stop().await;
 }
 
+// ------------------------------------------------------------------ B3 review
+
+/// F1 (MAJOR): the HAM consent fact failed open: with the board's own NodeInfo unheard,
+/// `licensed` was unknown, the account read as unlicensed and `caps` said Live, so a
+/// readable send went through on what may be a licensed board.
+#[tokio::test]
+async fn f1_an_unheard_own_nodeinfo_never_reports_live_nor_lets_a_readable_send_through() {
+    let board = Board {
+        omit_own: true,
+        licensed: true,
+        ..Default::default()
+    };
+    let h = harness(board.clone()).await;
+    let items = drain(&h.a).await;
+    assert!(
+        !items.contains(&Inbound::Link(LinkState::Up)),
+        "no link up without the consent facts: {items:?}"
+    );
+    for round in 0..2 {
+        let f = h.a.mesh_facts();
+        assert!(f.configured, "our own stream completed");
+        assert_eq!(f.licensed, None);
+        assert_eq!(h.a.caps().state, AdapterState::NotSet, "round {round}");
+        assert!(
+            f.not_live.as_deref().unwrap_or("").contains("own node"),
+            "{:?}",
+            f.not_live
+        );
+        // unknown is not "unlicensed": the restrictive reading
+        assert!(h.a.facts().accounts[0].licensed);
+        for conv in [h.channel_conv(0), h.channel_conv(1), h.dm(0x0b0b_0b0b)] {
+            let mut hd = h.a.send(&conv, "readable", SendOpts::default()).await;
+            assert_eq!(
+                all_events(&mut hd).await,
+                vec![failed(Reason::AdapterDown, Retry::Later)]
+            );
+        }
+        h.clock.advance(Duration::from_secs(10));
+        settle().await;
+        assert!(h.fake.texts().is_empty(), "nothing went on air");
+        // another client's replay without the own node changes nothing
+        h.fake.push(&config_stream(&board, 69_420));
+        settle().await;
+    }
+    // the own NodeInfo arrives (licensed): live, the link comes up, the fact is exact
+    h.fake.push(&own_node(&board));
+    wait_until("live", || h.a.caps().state == AdapterState::Live).await;
+    assert!(drain(&h.a).await.contains(&Inbound::Link(LinkState::Up)));
+    assert_eq!(h.a.mesh_facts().licensed, Some(true));
+    assert_eq!(h.a.mesh_facts().not_live, None);
+    assert!(h.a.facts().accounts[0].licensed);
+    h.send_written(&h.channel_conv(0), "now").await;
+    h.stop().await;
+}
+
+/// F2: another client's partial replay (its nodes-only 69421 pre-empting ours on the first
+/// connect) closed with any `config_complete_id` and marked the session configured with no
+/// channel table and no LoRa config.
+#[tokio::test]
+async fn f2_another_clients_partial_replay_does_not_configure_the_session() {
+    let board = Board {
+        silent: true,
+        ..Default::default()
+    };
+    let fake = Fake::start(board.clone());
+    let clock = ManualClock::new();
+    let a = MeshtasticAdapter::with_clock(cfg(fake.addr), KEY, clock.clone());
+    a.start();
+    wait_until("asked once", || fake.want_configs().len() == 1).await;
+    fake.push(&nodes_only_stream(&board, 69_421));
+    wait_until("partial seen", || {
+        a.mesh_facts().counters.partial_completions == 1
+    })
+    .await;
+    let f = a.mesh_facts();
+    assert!(!f.configured, "a partial table configures nothing");
+    assert!(f.channels.is_empty() && f.region.is_none());
+    assert_eq!(a.caps().state, AdapterState::NotSet);
+    assert!(
+        f.not_live
+            .as_deref()
+            .unwrap_or("")
+            .contains("config stream"),
+        "{:?}",
+        f.not_live
+    );
+    let conv = ConvRef {
+        network: "meshtastic".into(),
+        account: format!("!{MY:08x}"),
+        kind: ConvKind::Dm,
+        native_id: "dm:!0b0b0b0b".into(),
+    };
+    let mut hd = a.send(&conv, "too early", SendOpts::default()).await;
+    assert_eq!(
+        all_events(&mut hd).await,
+        vec![failed(Reason::AdapterDown, Retry::Later)]
+    );
+    assert!(!drain(&a).await.contains(&Inbound::Link(LinkState::Up)));
+    // a later full replay (the web client's 69420) completes the session
+    fake.push(&config_stream(&board, 69_420));
+    wait_until("configured", || a.mesh_facts().configured).await;
+    assert_eq!(a.caps().state, AdapterState::Live);
+    assert_eq!(a.mesh_facts().channels.len(), 2);
+    assert!(drain(&a).await.contains(&Inbound::Link(LinkState::Up)));
+    assert_eq!(fake.want_configs().len(), 1, "never asked again");
+    a.stop().await;
+}
+
+/// F3: every packet from any node rebuilt and pushed the whole Nearby source to the core.
+#[tokio::test]
+async fn f3_a_burst_of_packets_yields_one_nearby_push_per_window() {
+    let h = harness(Board::default()).await;
+    let first = drain(&h.a).await;
+    let nearby = |items: &[Inbound]| {
+        items
+            .iter()
+            .filter(|i| matches!(i, Inbound::Nearby(_)))
+            .count()
+    };
+    assert_eq!(nearby(&first), 1, "the configured node DB goes out at once");
+    let v0 = h.a.nearby_version();
+    // a burst inside the window, each packet read on its own (the core drains between)
+    let mut pushed = 0;
+    for i in 0..8u32 {
+        let from = 0x0d00_0000 + i;
+        let p = data_packet(
+            from,
+            BCAST,
+            pb::PortNum::PositionApp,
+            pb::Position {
+                latitude_i: Some(520_000_000 + i as i32),
+                longitude_i: Some(130_000_000),
+                ..Default::default()
+            }
+            .encode_to_vec(),
+        );
+        h.fake.push(&mesh(p));
+        wait_until("node heard", || h.a.nearby_version() > v0 + u64::from(i)).await;
+        pushed += nearby(&drain(&h.a).await);
+    }
+    assert_eq!(pushed, 0, "coalesced inside the window");
+    assert!(
+        h.a.nearby_version() >= v0 + 8,
+        "the module's tick still sees every change"
+    );
+    // the window passes: the next read after a packet carries the whole burst once
+    h.clock.advance(Duration::from_secs(5));
+    h.fake.push(&nodeinfo_packet(
+        0x0b0b_0b0b,
+        user(0x0b0b_0b0b, "Peer B", "PB", Some([0xb0; 32]), false),
+    ));
+    let items = drain(&h.a).await;
+    assert_eq!(nearby(&items), 1, "{items:?}");
+    let Some(Inbound::Nearby(v)) = items.iter().find(|i| matches!(i, Inbound::Nearby(_))) else {
+        unreachable!()
+    };
+    let nodes = v["nodes"].as_array().map_or(0, Vec::len);
+    assert_eq!(nodes, 2 + 8, "the burst's nodes are in the one push");
+    assert_eq!(h.a.mesh_facts().counters.nearby_pushes, 2);
+    h.stop().await;
+}
+
+/// F7: "waiting for the radio" was re-emitted on every pause, so a job that sat through
+/// many `free = 0` cycles filled its 16-slot channel and its `Accepted` was dropped.
+#[tokio::test]
+async fn f7_waiting_is_noted_once_per_job_and_a_terminal_event_is_never_dropped() {
+    let h = harness(Board::default()).await;
+    // a first text holds the pacing window (the manual clock stands still)
+    let (_first, _h1) = h.send_written(&h.channel_conv(0), "first").await;
+    h.fake.push(&queue_status(0, 0, 0));
+    wait_until("paused", || h.a.mesh_facts().paused).await;
+    let mut hd =
+        h.a.send(&h.channel_conv(1), "second", SendOpts::default())
+            .await;
+    // twenty pause / resume cycles while it waits; nobody reads the handle meanwhile
+    for _ in 0..20 {
+        h.fake.push(&queue_status(0, 4, 0));
+        h.fake.push(&queue_status(0, 0, 0));
+    }
+    let n = h.a.mesh_facts().counters.queue_statuses;
+    wait_until("cycles read", || {
+        h.a.mesh_facts().counters.queue_statuses >= n + 40
+    })
+    .await;
+    assert_eq!(h.fake.texts().len(), 1, "still held");
+    h.fake.push(&queue_status(0, 4, 0));
+    wait_until("resumed", || !h.a.mesh_facts().paused).await;
+    h.clock.advance(Duration::from_millis(2100));
+    wait_until("second written", || h.fake.texts().len() == 2).await;
+    let p = h.fake.texts()[1].clone();
+    h.fake.push(&queue_status(0, 4, p.id));
+    settle().await;
+    h.clock.advance(Duration::from_secs(1));
+    settle().await;
+    h.fake.push(&routing(MY, p.id, pb::routing::Error::None));
+    let evs = all_events(&mut hd).await;
+    assert_eq!(
+        evs,
+        vec![
+            ev(S::Queued, "waiting for the radio"),
+            accepted(&p),
+            ev(S::Sent, "accepted by the radio"),
+            ev(S::Relayed, "a neighbour rebroadcast it"),
+        ]
+    );
+    h.stop().await;
+}
+
 // ------------------------------------------------------------------ receive
 
 #[tokio::test]
@@ -1361,6 +1620,14 @@ fn assert_clean(what: &str, text: &str) {
             "{what} carries the {name} (base64): {text}"
         );
     }
+    for (name, secret) in [("Wi-Fi PSK", SECRET_WIFI), ("MQTT password", SECRET_MQTT)] {
+        assert!(!text.contains(secret), "{what} carries the {name}: {text}");
+        let b64 = node111::daemon::dashboard::routes::base64(secret.as_bytes());
+        assert!(
+            !text.contains(&b64[..16]),
+            "{what} carries the {name} (base64): {text}"
+        );
+    }
 }
 
 fn assert_clean_bytes(what: &str, bytes: &[u8]) {
@@ -1372,6 +1639,12 @@ fn assert_clean_bytes(what: &str, bytes: &[u8]) {
         !bytes.windows(8).any(|w| w == &SECRET_PRIVATE_KEY[..8]),
         "{what} carries the private key"
     );
+    for s in [SECRET_WIFI, SECRET_MQTT] {
+        assert!(
+            !bytes.windows(s.len()).any(|w| w == s.as_bytes()),
+            "{what} carries a Wi-Fi / MQTT secret"
+        );
+    }
 }
 
 #[tokio::test]

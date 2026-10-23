@@ -28,6 +28,21 @@
 //! - **Parsing is fail-closed** on any input (B4 review F1): rnstatus's
 //!   output is untrusted text, so every slice is taken at a char boundary
 //!   and an unparsed value is `None`, never a panic.
+//! - **Ownership gate (fix wave FA1, §11 "rnsd supervision", §16 G4).**
+//!   Every rnstatus run builds an `RNS.Reticulum` that binds the
+//!   shared-instance socket `@rns/<instance_name>` *first* and detaches it
+//!   only afterwards (RNS 1.5.7 `Reticulum.py` `__start_local_interface`,
+//!   `require_shared_instance`); run while rnsd is down or still starting,
+//!   it briefly *is* the instance, and an rnsd respawned in that window
+//!   attaches as its client and never serves again. So once
+//!   [`Rnstatus::set_owner_gate`] names the supervised rnsd's pid (the
+//!   daemon does at transport start), **no rnstatus is started unless
+//!   `@rns/<instance>` is listening and held by that pid** ([`owner`]:
+//!   `/proc/net/unix` and `/proc/<pid>/fd`, no Python); otherwise the call
+//!   answers [`RnstatusError::NotOwned`] without spawning anything. This
+//!   covers the facts tick, the applier's probe and the spine's
+//!   attach/detach/reload; the components runner's serving probe asks
+//!   [`owner::supervised_ready`] for the same fact.
 //! - **Runner.** Through [`Runner`] (tests inject a fake); production uses
 //!   [`TimedRunner`], which kills an rnstatus that runs past
 //!   [`RNSTATUS_TIMEOUT`] and caps its output at [`MAX_OUTPUT`] before any
@@ -76,6 +91,9 @@ pub enum RnstatusError {
     NotFound(String),
     /// A non-zero exit with this (cleaned, capped) detail.
     Exit { status: i32, detail: String },
+    /// Not run (FA1): the shared instance is not (yet) held by the
+    /// supervised rnsd, so an rnstatus started now could take it over.
+    NotOwned(String),
 }
 
 impl std::fmt::Display for RnstatusError {
@@ -87,20 +105,30 @@ impl std::fmt::Display for RnstatusError {
             RnstatusError::Exit { status, detail } => {
                 write!(f, "rnstatus exited {status}: {detail}")
             }
+            RnstatusError::NotOwned(why) => write!(f, "rnstatus not run: {why}"),
         }
     }
 }
 
 impl std::error::Error for RnstatusError {}
 
+/// Where the supervised rnsd's pid is read (`None` while it is not
+/// running). Blocking-safe and cheap: called before every rnstatus run.
+pub type PidSource = Arc<dyn Fn() -> Option<u32> + Send + Sync>;
+
 /// rnstatus against one rnsd config dir.
 pub struct Rnstatus {
     runner: Arc<dyn Runner>,
     program: String,
     config_dir: String,
+    root: PathBuf,
     /// The rendered config's `share_instance` (set by the spine on every
     /// render, §11); the facts tick reads nothing while it is false.
     shared: AtomicBool,
+    /// FA1: the supervised rnsd's pid; when set, nothing runs unless that
+    /// pid holds the shared instance (module doc). `None`: ungated (test
+    /// runners only; the daemon always sets it).
+    gate: std::sync::RwLock<Option<PidSource>>,
 }
 
 impl Rnstatus {
@@ -110,7 +138,31 @@ impl Rnstatus {
             runner,
             program: program(root).to_string_lossy().into_owned(),
             config_dir: root.join("rns").to_string_lossy().into_owned(),
+            root: root.to_path_buf(),
             shared: AtomicBool::new(true),
+            gate: std::sync::RwLock::new(None),
+        }
+    }
+
+    /// FA1: from now on run nothing unless the pid `rnsd` answers holds the
+    /// shared-instance socket (module doc). The daemon sets it at transport
+    /// start, before rnsd is spawned (the source answers `None` until then).
+    pub fn set_owner_gate(&self, rnsd: PidSource) {
+        *self.gate.write().unwrap_or_else(|p| p.into_inner()) = Some(rnsd);
+    }
+
+    /// The daemon root this runs against.
+    pub fn root(&self) -> &Path {
+        &self.root
+    }
+
+    /// The owner gate (FA1): `Ok` when ungated or when the supervised rnsd
+    /// holds `@rns/<instance>`; never starts a process.
+    pub fn gate(&self) -> Result<(), RnstatusError> {
+        let src = self.gate.read().unwrap_or_else(|p| p.into_inner()).clone();
+        match src {
+            None => Ok(()),
+            Some(pid) => owner::ready(&self.root, pid()).map_err(RnstatusError::NotOwned),
         }
     }
 
@@ -136,6 +188,7 @@ impl Rnstatus {
     }
 
     fn control(&self, flag: &str, name: &str) -> Result<(), RnstatusError> {
+        self.gate()?;
         let out = self
             .runner
             .run(&self.program, &["--config", &self.config_dir, flag, name])
@@ -173,6 +226,7 @@ impl Rnstatus {
 
     /// One reading of the interface facts (blocking).
     pub fn read(&self) -> Result<Vec<InterfaceFacts>, RnstatusError> {
+        self.gate()?;
         let out = self
             .runner
             .run(&self.program, &["--config", &self.config_dir])
@@ -385,6 +439,390 @@ pub fn parse_json(text: &str) -> Option<Vec<InterfaceFacts>> {
         });
     }
     Some(out)
+}
+
+// ---------------------------------------------------------------- owner
+
+/// Who holds the shared-instance socket (fix wave FA1; §11 "rnsd
+/// supervision", §16 G4 "a double crash that must not partition").
+///
+/// RNS on Linux serves the shared instance on the abstract `AF_UNIX`
+/// socket `\0rns/<instance_name>` (RNS 1.5.7 `LocalInterface.py`: the
+/// renderer writes `instance_name` into `[reticulum]`, and never
+/// `shared_instance_type = tcp`), shown in `/proc/net/unix` as
+/// `@rns/<instance_name>`. [`ready`] answers whether that socket is
+/// *listening* and its inode is open in `/proc/<pid>/fd` of the supervised
+/// rnsd: one read of `/proc/net/unix` and one directory walk of that pid's
+/// fds, no Python, no allocation per line. [`shared_instance_owner`] also
+/// names any other holder (a walk of every pid: the diagnostic path only).
+///
+/// `/proc/net/unix` is the reader's network namespace, which is rnsd's
+/// (111d and its children share it). Untrusted input everywhere: the file
+/// and the config are size-capped before parsing, and a line that does not
+/// parse is skipped, never a panic.
+///
+/// The registry ([`register`], [`supervised_ready`]) lets a caller that
+/// knows only the daemon root (the components runner's serving probe) ask
+/// the same question of the rnsd the transport supervises for that root;
+/// an unregistered root is never ready (fail closed).
+pub mod owner {
+    use super::PidSource;
+    use std::io::Read;
+    use std::os::unix::ffi::OsStrExt;
+    use std::path::{Path, PathBuf};
+    use std::sync::Mutex;
+
+    /// The kernel's table of unix sockets (the reader's netns).
+    pub const PROC_NET_UNIX: &str = "/proc/net/unix";
+    /// Most of `/proc/net/unix` read (bytes); a larger table is cut there.
+    pub const MAX_NET_UNIX: u64 = 8 * 1024 * 1024;
+    /// Most of `rns/config` read (bytes).
+    pub const MAX_CONFIG: u64 = 256 * 1024;
+    /// Most fds looked at per process.
+    pub const MAX_FDS: usize = 65_536;
+    /// `__SO_ACCEPTCON` in the Flags column: a listening socket.
+    const SO_ACCEPTCON: u32 = 0x0001_0000;
+    /// Longest instance name taken from the config.
+    const MAX_INSTANCE: usize = 128;
+
+    fn read_capped(path: &Path, cap: u64) -> Option<String> {
+        let f = std::fs::File::open(path).ok()?;
+        let mut buf = Vec::new();
+        f.take(cap).read_to_end(&mut buf).ok()?;
+        Some(String::from_utf8_lossy(&buf).into_owned())
+    }
+
+    /// The `[reticulum]` section of an rnsd config (ConfigObj) → the
+    /// instance's socket name `@rns/<instance_name>` (`instance_name`
+    /// absent: RNS's `default`). `None` when the config shares no instance
+    /// (`share_instance` off) or shares it over TCP: there is no abstract
+    /// socket to check, so nothing is ever ready (fail closed).
+    pub fn socket_name_in(config: &str) -> Option<String> {
+        let mut section = false;
+        let mut name: Option<&str> = None;
+        let mut shared = true;
+        for raw in config.lines() {
+            let line = raw.split('#').next().unwrap_or("").trim();
+            if line.starts_with('[') {
+                section = line.trim_matches(|c| c == '[' || c == ']').trim() == "reticulum"
+                    && !line.starts_with("[[");
+                continue;
+            }
+            if !section {
+                continue;
+            }
+            let Some((k, v)) = line.split_once('=') else {
+                continue;
+            };
+            let v = v.trim().trim_matches(|c| c == '"' || c == '\'');
+            match k.trim() {
+                "instance_name" => name = Some(v),
+                "share_instance" => {
+                    shared = matches!(v.to_ascii_lowercase().as_str(), "yes" | "true" | "on" | "1")
+                }
+                "shared_instance_type" if v.eq_ignore_ascii_case("tcp") => return None,
+                _ => {}
+            }
+        }
+        if !shared {
+            return None;
+        }
+        let name = name.unwrap_or("default");
+        let ok = !name.is_empty()
+            && name.len() <= MAX_INSTANCE
+            && name.bytes().all(|b| b.is_ascii_graphic());
+        ok.then(|| format!("@rns/{name}"))
+    }
+
+    /// `<root>/rns/config` → the shared instance's socket name.
+    pub fn socket_name(root: &Path) -> Option<String> {
+        socket_name_in(&read_capped(&root.join("rns/config"), MAX_CONFIG)?)
+    }
+
+    /// The inode of the **listening** unix socket bound to `name` in the
+    /// text of `/proc/net/unix` (`Num RefCount Protocol Flags Type St Inode
+    /// Path`). Accepted connections carry the same path but not the
+    /// listening flag; they are not the instance.
+    pub fn listener_inode(net_unix: &str, name: &str) -> Option<u64> {
+        for line in net_unix.lines() {
+            let mut it = line.split_whitespace();
+            let (Some(flags), Some(_ty), Some(st), Some(inode), Some(path)) =
+                (it.nth(3), it.next(), it.next(), it.next(), it.next())
+            else {
+                continue;
+            };
+            if path != name || it.next().is_some() || st != "01" {
+                continue;
+            }
+            let Ok(flags) = u32::from_str_radix(flags, 16) else {
+                continue;
+            };
+            if flags & SO_ACCEPTCON == 0 {
+                continue;
+            }
+            if let Ok(inode) = inode.parse::<u64>() {
+                if inode != 0 {
+                    return Some(inode);
+                }
+            }
+        }
+        None
+    }
+
+    /// Whether an fd directory (`/proc/<pid>/fd`) holds `socket:[inode]`.
+    pub fn fd_dir_holds(dir: &Path, inode: u64) -> bool {
+        let want = format!("socket:[{inode}]");
+        let Ok(rd) = std::fs::read_dir(dir) else {
+            return false;
+        };
+        rd.take(MAX_FDS).flatten().any(|e| {
+            std::fs::read_link(e.path()).is_ok_and(|t| t.as_os_str().as_bytes() == want.as_bytes())
+        })
+    }
+
+    fn fd_dir(pid: u32) -> PathBuf {
+        PathBuf::from(format!("/proc/{pid}/fd"))
+    }
+
+    /// The listening inode of `root`'s shared instance now, with its name.
+    fn current(root: &Path) -> Result<(String, u64), String> {
+        let name = socket_name(root)
+            .ok_or_else(|| "rns/config shares no instance over a local socket".to_string())?;
+        let table = read_capped(Path::new(PROC_NET_UNIX), MAX_NET_UNIX)
+            .ok_or_else(|| format!("{PROC_NET_UNIX} is not readable"))?;
+        match listener_inode(&table, &name) {
+            Some(inode) => Ok((name, inode)),
+            None => Err(format!("nothing listens on {name} yet")),
+        }
+    }
+
+    /// `Ok` when `root`'s shared instance listens and `rnsd` (the
+    /// supervised pid; `None`: not running) holds it; otherwise why not.
+    pub fn ready(root: &Path, rnsd: Option<u32>) -> Result<(), String> {
+        let pid = rnsd.ok_or_else(|| "rnsd is not running".to_string())?;
+        let (name, inode) = current(root)?;
+        if fd_dir_holds(&fd_dir(pid), inode) {
+            Ok(())
+        } else {
+            Err(format!(
+                "{name} is not held by the supervised rnsd (pid {pid})"
+            ))
+        }
+    }
+
+    /// Whether `pid` holds `root`'s listening shared-instance socket.
+    pub fn owned_by(root: &Path, pid: u32) -> bool {
+        ready(root, Some(pid)).is_ok()
+    }
+
+    /// Who holds `root`'s listening shared-instance socket: `supervised`
+    /// first (cheap), then any process (a walk of `/proc`: diagnostics
+    /// only). `None`: nothing listens, or the holder is not visible.
+    pub fn shared_instance_owner(root: &Path, supervised: Option<u32>) -> Option<u32> {
+        let (_, inode) = current(root).ok()?;
+        if let Some(pid) = supervised {
+            if fd_dir_holds(&fd_dir(pid), inode) {
+                return Some(pid);
+            }
+        }
+        holder_of(inode)
+    }
+
+    /// Any process holding the socket `inode` (diagnostics).
+    pub fn holder_of(inode: u64) -> Option<u32> {
+        std::fs::read_dir("/proc").ok()?.flatten().find_map(|e| {
+            let pid: u32 = e.file_name().to_str()?.parse().ok()?;
+            fd_dir_holds(&fd_dir(pid), inode).then_some(pid)
+        })
+    }
+
+    /// A process's command name (diagnostics; cleaned, capped).
+    pub fn comm(pid: u32) -> String {
+        let c = read_capped(Path::new(&format!("/proc/{pid}/comm")), 64).unwrap_or_default();
+        crate::daemon::devices::clean(c.trim(), 32).unwrap_or_default()
+    }
+
+    // ---- registry: root → the supervised rnsd's pid
+
+    type Entry = (PathBuf, u64, PidSource);
+    static REGISTRY: Mutex<Vec<Entry>> = Mutex::new(Vec::new());
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
+    fn registry() -> std::sync::MutexGuard<'static, Vec<Entry>> {
+        REGISTRY.lock().unwrap_or_else(|p| p.into_inner())
+    }
+
+    /// Record where the supervised rnsd's pid for `root` is read (the
+    /// transport does at start); replaces an earlier one. Returns the
+    /// token [`unregister`] takes.
+    pub fn register(root: &Path, rnsd: PidSource) -> u64 {
+        let token = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let mut r = registry();
+        r.retain(|(p, _, _)| p != root);
+        r.push((root.to_path_buf(), token, rnsd));
+        token
+    }
+
+    /// Drop `root`'s entry if it is still the one `token` registered.
+    pub fn unregister(root: &Path, token: u64) {
+        registry().retain(|(p, t, _)| !(p == root && *t == token));
+    }
+
+    /// The supervised rnsd's pid for `root` (`None`: none registered, or
+    /// it is not running).
+    pub fn supervised_pid(root: &Path) -> Option<u32> {
+        let src = registry()
+            .iter()
+            .find(|(p, _, _)| p == root)
+            .map(|(_, _, s)| s.clone())?;
+        src()
+    }
+
+    /// [`ready`] for the rnsd registered for `root`; an unregistered root
+    /// is never ready.
+    pub fn supervised_ready(root: &Path) -> Result<(), String> {
+        ready(root, supervised_pid(root))
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use std::sync::Arc;
+
+        const TABLE: &str = "\
+Num       RefCount Protocol Flags    Type St Inode Path
+0000000000000000: 00000002 00000000 00010000 0001 01 41001 @rns/111/rpc
+0000000000000000: 00000003 00000000 00000000 0001 03 41003 @rns/111
+0000000000000000: 00000002 00000000 00010000 0001 01 41002 @rns/111
+0000000000000000: 00000002 00000000 00010000 0001 01 41004 @rns/1111
+0000000000000000: 00000002 00000000 00010000 0001 01  9999 /run/systemd/notify
+0000000000000000: 00000003 00000000 00000000 0001 03 41005
+garbage line
+0000000000000000: 00000002 00000000 zzzzzzzz 0001 01 41006 @rns/odd
+0000000000000000: 00000002 00000000 00010000 0001 01 41007 @rns/sp ace
+";
+
+        #[test]
+        fn the_listener_is_found_by_name_and_flag() {
+            // the listening one, not the accepted connection (03) with the same path,
+            // not the rpc socket, not a longer name
+            assert_eq!(listener_inode(TABLE, "@rns/111"), Some(41002));
+            assert_eq!(listener_inode(TABLE, "@rns/111/rpc"), Some(41001));
+            assert_eq!(listener_inode(TABLE, "@rns/1111"), Some(41004));
+            assert_eq!(listener_inode(TABLE, "@rns/11"), None);
+            assert_eq!(listener_inode(TABLE, "@rns/odd"), None, "bad flags skipped");
+            assert_eq!(
+                listener_inode(TABLE, "@rns/sp"),
+                None,
+                "a name with a space never matches"
+            );
+            assert_eq!(listener_inode("", "@rns/111"), None);
+            // only connected sockets: nothing listens
+            let only_conn = "0000000000000000: 00000003 00000000 00000000 0001 03 41003 @rns/111\n";
+            assert_eq!(listener_inode(only_conn, "@rns/111"), None);
+        }
+
+        #[test]
+        fn the_config_names_the_socket() {
+            let c = "schema-version = 2\n\n[reticulum]\n  share_instance = Yes\n  instance_name = 111\n  rpc_key = aa\n\n[interfaces]\n  [[Auto Interface]]\n    instance_name = nope\n";
+            assert_eq!(socket_name_in(c).as_deref(), Some("@rns/111"));
+            assert_eq!(
+                socket_name_in("[reticulum]\n  share_instance = Yes\n").as_deref(),
+                Some("@rns/default")
+            );
+            assert_eq!(
+                socket_name_in("[reticulum]\n  share_instance = No\n  instance_name = 111\n"),
+                None
+            );
+            assert_eq!(
+                socket_name_in(
+                    "[reticulum]\n  instance_name = 111\n  shared_instance_type = tcp\n"
+                ),
+                None
+            );
+            assert_eq!(
+                socket_name_in("[reticulum]\n  instance_name = a\u{1}b\n"),
+                None
+            );
+            // a key outside [reticulum] does not count
+            assert_eq!(
+                socket_name_in("[logging]\n  instance_name = x\n[reticulum]\n").as_deref(),
+                Some("@rns/default")
+            );
+        }
+
+        #[test]
+        fn a_fake_fd_dir_holds_the_inode() {
+            let d = tempfile::tempdir().unwrap();
+            let fd = d.path().join("fd");
+            std::fs::create_dir(&fd).unwrap();
+            std::os::unix::fs::symlink("/dev/null", fd.join("0")).unwrap();
+            std::os::unix::fs::symlink("socket:[41001]", fd.join("3")).unwrap();
+            std::os::unix::fs::symlink("pipe:[41002]", fd.join("4")).unwrap();
+            assert!(fd_dir_holds(&fd, 41001));
+            assert!(
+                !fd_dir_holds(&fd, 41002),
+                "a pipe of that number is not the socket"
+            );
+            assert!(!fd_dir_holds(&fd, 4100), "no prefix match");
+            assert!(!fd_dir_holds(&d.path().join("absent"), 41001));
+        }
+
+        fn unique(tag: &str) -> String {
+            use std::time::{SystemTime, UNIX_EPOCH};
+            let n = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map(|d| d.subsec_nanos())
+                .unwrap_or(0);
+            format!("fa1-{tag}-{}-{n}", std::process::id())
+        }
+
+        fn root_for(instance: &str) -> tempfile::TempDir {
+            let d = tempfile::tempdir().unwrap();
+            std::fs::create_dir_all(d.path().join("rns")).unwrap();
+            std::fs::write(
+                d.path().join("rns/config"),
+                format!("[reticulum]\n  share_instance = Yes\n  instance_name = {instance}\n"),
+            )
+            .unwrap();
+            d
+        }
+
+        /// The live path: this process binds the abstract socket, so it is
+        /// the owner; an unregistered root and another pid are not.
+        #[test]
+        fn a_live_listener_is_owned_by_its_process() {
+            use std::os::linux::net::SocketAddrExt;
+            let inst = unique("live");
+            let d = root_for(&inst);
+            let me = std::process::id();
+            assert!(ready(d.path(), Some(me)).is_err(), "nothing listens yet");
+            let addr =
+                std::os::unix::net::SocketAddr::from_abstract_name(format!("rns/{inst}")).unwrap();
+            let l = std::os::unix::net::UnixListener::bind_addr(&addr).unwrap();
+            assert_eq!(ready(d.path(), Some(me)), Ok(()));
+            assert!(ready(d.path(), None).is_err(), "no rnsd pid: not ready");
+            assert!(!owned_by(d.path(), 1), "pid 1 does not hold it");
+            assert_eq!(shared_instance_owner(d.path(), Some(1)), Some(me));
+            // the registry: unregistered → never ready; registered → ready
+            assert!(supervised_ready(d.path()).is_err());
+            let t = register(d.path(), Arc::new(move || Some(me)));
+            assert_eq!(supervised_ready(d.path()), Ok(()));
+            let t2 = register(d.path(), Arc::new(|| None));
+            unregister(d.path(), t); // a stale token removes nothing
+            assert!(
+                supervised_ready(d.path()).is_err(),
+                "the newer entry answers"
+            );
+            unregister(d.path(), t2);
+            assert_eq!(supervised_pid(d.path()), None);
+            drop(l);
+            assert!(
+                ready(d.path(), Some(me)).is_err(),
+                "closed: nothing listens"
+            );
+        }
+    }
 }
 
 // ---------------------------------------------------------------- runner

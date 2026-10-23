@@ -23,7 +23,12 @@
 //! `lxmf.lock.txt` beside it (byte-identical to the helper's
 //! `lxmf-sidecar-lock.txt`), written as `<tool venv>/lxmf-lock.txt` and
 //! downloaded into `cache/packages/lxmf/`, where enable builds `venvs/lxmf`
-//! from it offline.
+//! from it offline. A per-target binary
+//! (Layer 6 C5: `deltachat-rpc-server`, Madmail) caches this machine's
+//! target only (`manifest::host_triple`); a declaration with nothing to
+//! install here (`Payload::Unavailable`: no build for this machine, or not in
+//! this release, e.g. SimpleX) is skipped quietly, notice included: nothing is
+//! downloaded for it.
 
 use super::context::InstallContext;
 use super::receipt::{InstallNotice, Receipt};
@@ -332,6 +337,14 @@ pub const COMPONENTS_PIP_VENV: &str = "cache/packages/.components-pip";
 /// the release does not carry (no lock yet) is skipped quietly; a failed
 /// download, a missing python3 or a payload failing its pin is a degrade
 /// branch. Never fails the install.
+///
+/// A declaration with `[install] prefetch = false` (the Delta Chat core and
+/// Madmail: the Raspberry Pi floor, AGENTS.md) is not downloaded and gets no
+/// licence notice here: one line names the components and
+/// [`manifest::fetch_command`], which runs [`fetch_components`] later. One
+/// already in the cache is kept as it is.
+///
+/// [`manifest::fetch_command`]: crate::daemon::components::manifest::fetch_command
 pub fn cache_components(
     ctx: &InstallContext,
     components: &[Component],
@@ -339,7 +352,73 @@ pub fn cache_components(
     receipt: &mut Receipt,
     out: &mut dyn std::io::Write,
 ) {
+    let (now, later): (Vec<&Component>, Vec<&Component>) = components
+        .iter()
+        .filter(|c| !matches!(c.payload, Payload::Unavailable { .. }))
+        .partition(|c| c.prefetch);
+    let deferred: Vec<&Component> = later
+        .into_iter()
+        .filter(|c| {
+            c.has_payload()
+                && crate::daemon::components::registry::verify_cache(&ctx.layout.root, c).is_err()
+        })
+        .collect();
+    if !deferred.is_empty() {
+        let _ = writeln!(out, "{}", deferred_line(&deferred));
+    }
+    let now: Vec<Component> = now.into_iter().cloned().collect();
+    cache_now(ctx, &now, fetcher, receipt, out);
+}
+
+/// The one line [`cache_components`] prints for the payloads it leaves to
+/// [`manifest::fetch_command`] (names, sizes, the command).
+///
+/// [`manifest::fetch_command`]: crate::daemon::components::manifest::fetch_command
+pub fn deferred_line(deferred: &[&Component]) -> String {
+    let bytes: u64 = deferred
+        .iter()
+        .map(|c| match &c.payload {
+            Payload::Binary { size, .. } => *size,
+            _ => c.weight.cached_bytes,
+        })
+        .sum();
+    let names: Vec<&str> = deferred.iter().map(|c| c.title.as_str()).collect();
+    let ids: Vec<&str> = deferred.iter().map(|c| c.id.as_str()).collect();
+    format!(
+        "111 install: not pre-downloaded (optional, {:.1} MB): {}; to use them, fetch them later with `{}`",
+        bytes as f64 / 1_000_000.0,
+        names.join(", "),
+        crate::daemon::components::manifest::fetch_command(&ids)
+    )
+}
+
+/// `111 install --components <ids>` (§2.1 rule 3, `[install] prefetch =
+/// false`): the same intake as [`cache_components`] for exactly these
+/// components, whatever their `prefetch`: notice first (printed and
+/// recorded), then the payload, size and SHA-256 checked against the pin in
+/// this signed binary's declaration. A failed download is a degrade branch
+/// the caller reports.
+pub fn fetch_components(
+    ctx: &InstallContext,
+    components: &[Component],
+    fetcher: &dyn PayloadFetcher,
+    receipt: &mut Receipt,
+    out: &mut dyn std::io::Write,
+) {
+    cache_now(ctx, components, fetcher, receipt, out);
+}
+
+fn cache_now(
+    ctx: &InstallContext,
+    components: &[Component],
+    fetcher: &dyn PayloadFetcher,
+    receipt: &mut Receipt,
+    out: &mut dyn std::io::Write,
+) {
     for c in components {
+        if matches!(c.payload, Payload::Unavailable { .. }) {
+            continue;
+        }
         announce(&Notice::of(c), receipt, out);
     }
     let pip: Vec<(&Component, &[u8])> = components
@@ -450,6 +529,204 @@ fn cache_binary(
 mod notice_tests {
     use super::*;
 
+    /// A fake [`PayloadFetcher`]: serves fixed bytes per URL and logs every
+    /// request (nothing reaches the network).
+    struct FakeFetcher {
+        files: Vec<(String, Vec<u8>)>,
+        log: std::cell::RefCell<Vec<String>>,
+    }
+
+    impl PayloadFetcher for FakeFetcher {
+        fn fetch(&self, url: &str) -> anyhow::Result<Vec<u8>> {
+            self.log.borrow_mut().push(url.to_string());
+            self.files
+                .iter()
+                .find(|(u, _)| u == url)
+                .map(|(_, b)| b.clone())
+                .ok_or_else(|| anyhow::anyhow!("404 {url}"))
+        }
+    }
+
+    /// A per-target binary declaration: this machine's target pins `bin`,
+    /// another target pins other bytes; `extra` appends tables.
+    fn per_target(id: &str, bin: &[u8], host: bool, extra: &str) -> Component {
+        let here = crate::daemon::components::manifest::host_triple();
+        let other = if here == "riscv64-linux" {
+            "s390x-linux"
+        } else {
+            "riscv64-linux"
+        };
+        let host_table = if host {
+            format!(
+                "[payload.targets.{here}]\nurl = \"https://example.invalid/dl/{id}-{here}\"\nsha256 = \"{}\"\nsize = {}\n",
+                crate::util::hash::sha256_bytes(bin),
+                bin.len()
+            )
+        } else {
+            String::new()
+        };
+        let toml = format!(
+            r#"id = "{id}"
+adapter = "app:{id}"
+title = "Title {id}"
+[payload]
+kind = "binary"
+{host_table}[payload.targets.{other}]
+url = "https://example.invalid/dl/{id}-{other}"
+sha256 = "{}"
+size = 3
+[run]
+program = "{{payload}}"
+health = "none"
+[license]
+spdx = "MPL-2.0"
+read_at = "https://example.invalid/LICENSE"
+notice = "Notice of {id}. You install it."
+{extra}"#,
+            "b".repeat(64)
+        );
+        crate::daemon::components::manifest::parse(&format!("{id}.toml"), toml.as_bytes(), |_| None)
+            .unwrap()
+    }
+
+    #[test]
+    fn binary_payloads_are_pinned_per_target_and_prefetch_false_waits_for_the_command() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().to_path_buf();
+        let runner =
+            crate::testkit::MockRunner::new(Vec::<(String, crate::util::run::Output)>::new());
+        let env = crate::testkit::MapEnv::new();
+        let ctx = InstallContext {
+            layout: crate::daemon::DaemonLayout {
+                root: root.clone(),
+                etc: root.join("etc"),
+            },
+            fs_root: root.clone(),
+            runner: &runner,
+            env: &env,
+            allow_degraded: false,
+            min_installer_version: "2026.10.01".parse().unwrap(),
+            manifest_base: String::new(),
+            manifest_fallback: None,
+            health_base: String::new(),
+            probe_204: Vec::new(),
+            check_root: false,
+        };
+        let here = crate::daemon::components::manifest::host_triple();
+        let good_bin = b"\x7fELF good payload".to_vec();
+        let bad_bin = b"\x7fELF tampered bytes".to_vec();
+        // `good`: this machine's pin, served intact → cached
+        let good = per_target("good", &good_bin, true, "");
+        // `evil`: served bytes of the pinned size that fail the sha256 → degrade
+        let evil = per_target("evil", &good_bin, true, "");
+        // `away`: no build for this machine → Payload::Unavailable, skipped quietly
+        let away = per_target("away", b"x", false, "");
+        assert!(matches!(away.payload, Payload::Unavailable { .. }));
+        // `big`: prefetch = false → not downloaded, one line names the command
+        let big = per_target("big", &good_bin, true, "[install]\nprefetch = false\n");
+        assert!(!big.prefetch);
+        let mut evil_served = bad_bin.clone();
+        evil_served.resize(good_bin.len(), 0);
+        let fetcher = FakeFetcher {
+            files: vec![
+                (
+                    format!("https://example.invalid/dl/good-{here}"),
+                    good_bin.clone(),
+                ),
+                (
+                    format!("https://example.invalid/dl/evil-{here}"),
+                    evil_served,
+                ),
+                (
+                    format!("https://example.invalid/dl/big-{here}"),
+                    good_bin.clone(),
+                ),
+            ],
+            log: Default::default(),
+        };
+        let mut receipt = Receipt::new("2026.10.23");
+        let mut out = Vec::new();
+        let all = vec![good.clone(), evil.clone(), away.clone(), big.clone()];
+        cache_components(&ctx, &all, &fetcher, &mut receipt, &mut out);
+        let text = String::from_utf8(out).unwrap();
+
+        // only this machine's URLs were requested, and never the deferred one
+        let asked = fetcher.log.borrow().clone();
+        assert_eq!(
+            asked,
+            vec![
+                format!("https://example.invalid/dl/good-{here}"),
+                format!("https://example.invalid/dl/evil-{here}"),
+            ]
+        );
+        assert_eq!(
+            std::fs::read(root.join(format!("cache/packages/good/good-{here}"))).unwrap(),
+            good_bin
+        );
+        assert!(!root
+            .join("cache/packages/evil")
+            .join(format!("evil-{here}"))
+            .exists());
+        assert!(!root.join("cache/packages/away").exists());
+        assert!(!root.join("cache/packages/big").exists());
+        assert_eq!(
+            receipt.degrade_branches.len(),
+            1,
+            "{:?}",
+            receipt.degrade_branches
+        );
+        assert!(
+            receipt.degrade_branches[0].contains("evil")
+                && receipt.degrade_branches[0].contains("sha256")
+        );
+        // notices: good + evil only (away has nothing to download, big waits)
+        let hashes: Vec<&str> = receipt.notices.iter().map(|n| n.hash.as_str()).collect();
+        assert_eq!(hashes, vec![good.notice_hash(), evil.notice_hash()]);
+        assert!(!text.contains("Title away"));
+        let deferred: Vec<&str> = text
+            .lines()
+            .filter(|l| l.contains("not pre-downloaded"))
+            .collect();
+        assert_eq!(deferred.len(), 1, "{text}");
+        assert!(
+            deferred[0].contains("Title big")
+                && deferred[0].contains("`sudo 111 install --components big`"),
+            "{text}"
+        );
+
+        // `111 install --components big` later: notice, then the pinned download
+        let mut out2 = Vec::new();
+        fetch_components(
+            &ctx,
+            std::slice::from_ref(&big),
+            &fetcher,
+            &mut receipt,
+            &mut out2,
+        );
+        let text2 = String::from_utf8(out2).unwrap();
+        assert!(text2.contains("111 install: notice: Title big"), "{text2}");
+        assert_eq!(
+            std::fs::read(root.join(format!("cache/packages/big/big-{here}"))).unwrap(),
+            good_bin
+        );
+        assert!(receipt.notices.iter().any(|n| n.hash == big.notice_hash()));
+        assert_eq!(receipt.degrade_branches.len(), 1);
+        crate::daemon::components::registry::verify_cache(&root, &big).unwrap();
+
+        // a re-run of the plain install: big is cached, so no line and no fetch
+        let before = fetcher.log.borrow().len();
+        let mut out3 = Vec::new();
+        cache_components(
+            &ctx,
+            std::slice::from_ref(&big),
+            &fetcher,
+            &mut Receipt::new("2026.10.23"),
+            &mut out3,
+        );
+        assert!(String::from_utf8(out3).unwrap().is_empty());
+        assert_eq!(fetcher.log.borrow().len(), before);
+    }
+
     #[test]
     fn a_notice_is_one_line_and_recorded_once() {
         let mut r = Receipt::new("2026.10.19");
@@ -466,6 +743,74 @@ mod notice_tests {
             r.notices[0].hash,
             crate::util::hash::sha256_bytes(n.text.as_bytes())
         );
+    }
+
+    #[test]
+    fn the_delta_chat_pins_are_the_spikes_per_target_binaries() {
+        use crate::daemon::components::manifest::{embedded, parse_for};
+        let files = embedded();
+        let file = |name: &str| {
+            files
+                .iter()
+                .find(|(n, _)| n == name)
+                .map(|(_, b)| b.clone())
+                .unwrap_or_else(|| panic!("{name} embedded"))
+        };
+        let pin = |name: &str, target: &str| {
+            let c = parse_for(name, &file(name), |_| None, target).unwrap();
+            match c.payload {
+                Payload::Binary { url, sha256, size } => Some((url, sha256, size, c.run.program)),
+                Payload::Unavailable { .. } => None,
+                Payload::Pip { .. } => panic!("{name}: a binary"),
+            }
+        };
+        let base = "https://github.com/chatmail/core/releases/download/v2.63.0/";
+        assert_eq!(
+            pin("deltachat.toml", "x86_64-linux"),
+            Some((
+                format!("{base}deltachat-rpc-server-x86_64-linux"),
+                "57cab3291ecc55736f97964b3a2979e5e23a70abcc270f1ed515e995f540d517".into(),
+                26_811_824,
+                "deltachat-rpc-server-x86_64-linux".into()
+            ))
+        );
+        assert_eq!(
+            pin("deltachat.toml", "aarch64-linux").map(|p| (p.1, p.2)),
+            Some((
+                "040b0c3699361c9aa9776caf259d73b70c5892937f6f85836e26143ba1cdbd13".into(),
+                21_009_952
+            ))
+        );
+        assert_eq!(
+            pin("deltachat.toml", "aarch64-android").map(|p| (p.1, p.2)),
+            Some((
+                "3e2d0c9306fccee78ccbd5b74c73430ed35dd1b31b31931abba97e8bbf9d658c".into(),
+                21_897_944
+            ))
+        );
+        let mm = "https://github.com/themadorg/madmail/releases/download/v2.30.5/";
+        assert_eq!(
+            pin("madmail.toml", "x86_64-linux"),
+            Some((
+                format!("{mm}madmail-linux-amd64"),
+                "ad89fb23de9580cd736c7caa8136422415cb8779954c16e366d94f9325b989d1".into(),
+                77_331_312,
+                "madmail-linux-amd64".into()
+            ))
+        );
+        assert_eq!(
+            pin("madmail.toml", "aarch64-linux").map(|p| (p.1, p.2)),
+            Some((
+                "27e6e74d9a268f33bb23a12aa57e5bcb1e164f3d670e6fe3d2b2bb7e541f20b5".into(),
+                73_479_752
+            ))
+        );
+        // no armv7 asset from either project (spike §0), and no Madmail for Android
+        assert_eq!(pin("madmail.toml", "arm-linux"), None);
+        assert_eq!(pin("deltachat.toml", "arm-linux"), None);
+        assert_eq!(pin("madmail.toml", "aarch64-android"), None);
+        // SimpleX declares nothing to download
+        assert_eq!(pin("simplex.toml", "x86_64-linux"), None);
     }
 
     #[test]

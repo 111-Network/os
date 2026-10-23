@@ -444,6 +444,32 @@ ADR-lite. Every decision, its rejected alternatives, and why. Newest last; never
 - **Why:** every panel finding was a seam, not a design; D26 closed the forks; the spec is now shorter than its first draft and wired to the built
   layers by line-verified citations.
 
+## D28 — CI/CD and GitHub hygiene (2026-10-23)
+
+**Decision:** GitHub Actions runs the repo's own gate scripts, unchanged, on every PR and every push to `main` (`.github/workflows/ci.yml`,
+four jobs: the Layer 1 aggregate gate `1-bootstrap/scripts/check.sh`, the Layer 2 fmt/clippy/test trio, `3-intelligence/scripts/check.sh`, and a
+knowledge-base + sidecar + contract-drift + repo-hygiene job that also enforces two `AGENTS.md` rules: one-digit layer folders and no
+attribution lines in commits). Parity with the local gates is the rule: no re-listing of steps that can drift from the scripts. Musl/G2,
+the netns harnesses, G7 and hardware gates stay lead/bench items. GitHub hygiene files: PR template, Dependabot for workflow actions only
+(monthly), `.gitattributes` (LF, byte-exact fixtures untouched), `.editorconfig`. Repository settings the owner sets (branch protection with
+the four required checks, PR-only `main`, up-to-date-before-merge, squash merges, read-only workflow permissions, Dependabot alerts,
+secret scanning) and the CD plan (a `release.yml` on `v*` tags building unsigned musl artifacts; signing stays with the owner's key;
+two decisions open) are in `plan/cross-layer/ci-cd.md`. The Layer 6 as-built lock, previously pencilled as D28 in the 2026-10-20 handoff,
+becomes D29.
+
+**Rejected:** a per-crate matrix of hand-written steps (drifts from `check.sh`; the aggregate gate is the thing a lead runs); Dependabot
+update PRs for cargo/npm/pip (the pins are deliberate and tracked in `LICENSING.md`; a bump is a reviewed task with a notices
+regeneration; alerts are a repository setting); SHA-pinned actions now (major tags read better and Dependabot keeps them fresh; the owner
+may pin later); a CD workflow now (needs the musl toolchains on the runner, a reproducibility check and a signing-key decision first).
+
+## D29 — Layer 6 (Transport & Bridge) as-built lock (2026-10-23)
+
+**Decision:** Layer 6 is built and locked as built, on branch `claude/layer-6-implementation-006mte` (48 `Layer 6 …` commits since `checkpoint-layer-5`; the board `6-transport/TASKS.md` carries every row's as-built facts, review verdicts, bounces and the Summary). Spec v1.0 (D27) stands with these recorded amendments: (1) §2.1 rule 3 — the installer no longer pre-downloads the Delta Chat core and Madmail payloads (`[install] prefetch = false`, 104 MB); `sudo 111 install --components ID[,ID…]` fetches a pinned payload later on an installed node, and an enable without a cached payload fails closed (409) — the Raspberry Pi floor rule (AGENTS.md) decided the default; the owner confirms or flips it. (2) §6 — a parked LXMF send stays a `queued` row with the evidence 'waiting for their announce' and no reason code; message `fields` are kept to depth 3 with a too-deep field dropped alone. (3) §10 — PATCH /transport/posture applies its posture and region parts through the device applier (a failed rnsd restart reverts byte-exact, `reverted` is real) and the rest directly; `POST /messages/{id}/retry|cancel` take `fm-` ids with the smallest additive bodies. (4) §12 — multi-action device proposals apply in order and stop at the first action not kept. Two defects found by the gates and fixed before the lock: a respawned rnsd could attach as a client of a vanishing shared-instance socket bound briefly by 111d's own rnstatus runs (every rnstatus spawn now requires the supervised rnsd to own the socket, and a client rnsd is restarted); a restarted LXMF helper forgot its peers (it now requests paths for parked sends, and the adapter announces on request). Gates at the lock (the lead run, re-run after fix wave B): G1 132 (130 before), G3 147, G4 129 (128), G5 99 (98), G7 GREEN; the Layer 1 aggregate stages, Layers 2–3, the Layer 4 smoke (118 / 159) and panel lint (144) green; G2 (musl) skipped on the build box. The Pi floor holds and is measured (the Summary). V5: fix-then-lock (`wf_feb6a10f-f14`), fixed in fix wave B `023188c` and re-verified.
+
+**Open at the lock (not blockers):** the owner questions and the follow-ups listed in the board's Summary; the hardware and bench gates (D23 #4); CI's musl check stands in for G2 until a lock run on the owner's machine.
+
+**Rejected:** pre-downloading every declared payload on every install (spec §2.1 as written; ~104 MB on a Pi SD card for components most nodes never enable); re-queuing a parked LXMF send through a Failed so it could carry a reason code (the helper keeps the send parked and resumes it itself — the text would go twice); a daemon route for 'announce on request' (the adapter's announce on park and on each helper run covers §6 (3) with no contract change); keeping the Layer 5 three-node capture order (it missed frames the daemon now publishes sooner); running the lock's `check.sh` as root on the build box (its 8 root-only test failures are not a tree fault — CI and the owner's machine run it whole).
+
 ## Pending
 
 - Move deep architecture content out of `os/README.md` into per-layer specs (blocked on layer homes existing).

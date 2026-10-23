@@ -14,7 +14,9 @@
 //!   [`BridgeVerifier`] (§14: `ready.pubkey` feeds the `0x03` hash binding; carried, never
 //!   derived). When a generation ends — the child exited, a respawn replaced it, the helper
 //!   reported `partitioned` — every send in flight fails `adapter_down` with
-//!   [`Retry::Later`] and the bridge core re-queues it (§4).
+//!   [`Retry::Later`]: a send never on air stays `queued` and the bridge core re-hands it
+//!   (§6 (4): a FAILED while OUTBOUND is `queued`); one already on air keeps `sent`
+//!   "transmitted, not confirmed" and is never re-sent automatically (§4).
 //! - **The trust boundary (§15.9).** Every line is validated before anything is read from
 //!   it ([`parse_line`]): at most 64 KiB, one JSON object, a closed `type` set, a closed key
 //!   set per type, every field type-checked and capped (destination hashes 32 lowercase hex,
@@ -27,8 +29,13 @@
 //!   (`auth` `signed` exactly when the library validated the signature, else `none` with
 //!   `why_unsigned` in `meta`; the hash is the dedupe key, ids are globally unique), plus a
 //!   conversation upsert when the sender's announced name is new; the received relay custom
-//!   field is surfaced in `meta.relay` only when its `net`/`id`/`mid` pass the §8 marker
-//!   alphabet; attachments are counted in `meta.attachments`, never ingested. `heard` ⇒
+//!   field is surfaced in `meta.relay` only in the exact shape this adapter writes (`net`
+//!   registered, `id` a §8 marker name of 1..=10 bytes, `mid` 32 lowercase hex; otherwise
+//!   the field alone is dropped and counted, [`LxmfAdapter::relay_refused`]); a field
+//!   nested deeper than [`FIELDS_DEPTH`] is dropped alone with `meta.fields_truncated`
+//!   ([`LxmfAdapter::fields_dropped`]); attachments are counted in `meta.attachments`,
+//!   never ingested. `heard` ⇒
+
 //!   [`Inbound::Nearby`] (a `reticulum` `NearbySource`), which also wakes the core's `Later`
 //!   rows (§4 "earlier on an adapter event"); heards are coalesced and rate-limited per
 //!   destination ([`LxmfConfig::heard_interval`], monotonic clock) because the helper
@@ -45,7 +52,22 @@
 //!   `send` line is written again on that peer's next surfaced `heard` (§6 (4): `Later` on
 //!   the next heard; the helper starts a new library attempt, its emitted states stay
 //!   monotone); `failed` only for `rejected` (stamp, blackhole) and `cancelled`.
-//!   `Accepted` carries the LXMF message hash once the library packed the message.
+//!   `Accepted` carries the LXMF message hash, and is sent **only once the send is on air**
+//!   (`sent`/`relayed`/`delivered`): the helper reports the hash as soon as the library
+//!   packed the message, possibly still `queued` (OUTBOUND, nothing transmitted), and the
+//!   core reads any failure after `Accepted` as post-air (§4 forbids that evidence for a
+//!   text never transmitted). A `queued` line's hash is kept adapter-side from its first
+//!   line and an inbound `msg` carrying one of our hashes is dropped as our own echo
+//!   (§8 guard 2; [`LxmfAdapter::echoes`]).
+//!
+//! - **Announce on request (§6 (3)).** The adapter writes the helper's `announce {}` line
+//!   (i) once right after the `ready` of every new generation (the component's start or a
+//!   restart: the peers relearn our address) and (ii) when a send parks as
+//!   `queued`/`peer_unannounced` (so the peer can learn our address and reply; the helper
+//!   also asks its rnsd for the peer's path). Both are bounded by one announce per
+//!   [`LxmfConfig::announce_interval`] (60 s) per helper run, read on the monotonic clock
+//!   where the adapter already handles the lines — no timer, no task. The helper's own
+//!   start, link-up and interval announces are unchanged.
 //!
 //! Weight: the adapter exists only while the `lxmf` component is enabled (§2.1 rule 2). Its
 //! one task waits on the stdio watch, the helper's lines and its own command queue; it owns
@@ -63,7 +85,8 @@ use crate::daemon::supervise::{PipedIo, PIPED_LINE_MAX};
 use futures_util::future::BoxFuture;
 use serde_json::{json, Map, Value};
 use sha2::{Digest, Sha256};
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
+
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -102,6 +125,8 @@ const EVENTS: usize = 64;
 const CMD_CAP: usize = 256;
 /// Nearby node names (Layer 5 §14 `NearbyNode`: names truncated to 40 bytes).
 const NEARBY_NAME_MAX: usize = 40;
+/// The helper's `announce {}` command (§6 "Process contract").
+const ANNOUNCE_LINE: &str = "{\"type\":\"announce\"}";
 
 /// The evidence strings of the §4 table (LXMF rows).
 pub const EV_NO_PATH: &str = "no path yet";
@@ -216,7 +241,10 @@ pub struct MsgLine {
     /// Attachments (`FIELD_FILE_ATTACHMENTS`, `FIELD_IMAGE`, `FIELD_AUDIO`): count, bytes.
     pub attachments: (u64, u64),
     pub truncated: bool,
+    /// The helper cut a field, or this adapter dropped one nested too deep.
     pub fields_truncated: bool,
+    /// Fields this adapter dropped for nesting deeper than [`FIELDS_DEPTH`].
+    pub fields_dropped: u64,
 }
 
 /// `state {id, hash?, state, reason?}` (§6), validated.
@@ -346,30 +374,57 @@ fn known_network(s: &str) -> bool {
     .contains(&s)
 }
 
+/// Why one received field value was not accepted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FieldErr {
+    /// A container deeper than [`FIELDS_DEPTH`]: foreign content (the helper renders five
+    /// levels), so only that field is dropped and the message kept (`fields_truncated`).
+    Deep,
+    /// Over the helper's own caps (entries, string bytes): the line breaks the protocol.
+    Noise,
+}
+
 /// A field value inside `fields` at level `depth` (a container there must be ≤
-/// [`FIELDS_DEPTH`]); strings and keys capped, containers bounded.
-fn field_value(v: &Value, depth: usize) -> Result<(), Noise> {
+/// [`FIELDS_DEPTH`]); strings and keys capped, containers bounded. Every container is
+/// checked for its size before its children, so a protocol breach anywhere in the value
+/// is reported as noise even when it also nests too deep.
+fn field_value(v: &Value, depth: usize) -> Result<(), FieldErr> {
+    let deep = |r: Result<(), FieldErr>, d: &mut bool| match r {
+        Err(FieldErr::Deep) => {
+            *d = true;
+            Ok(())
+        }
+        other => other,
+    };
+    let mut too_deep = depth > FIELDS_DEPTH && matches!(v, Value::Array(_) | Value::Object(_));
     match v {
-        Value::Null | Value::Bool(_) | Value::Number(_) => Ok(()),
-        Value::String(s) if s.len() <= FIELD_STR_MAX => Ok(()),
-        Value::String(_) => Err(Noise::Fields),
+        Value::Null | Value::Bool(_) | Value::Number(_) => {}
+        Value::String(s) if s.len() <= FIELD_STR_MAX => {}
+        Value::String(_) => return Err(FieldErr::Noise),
         Value::Array(a) => {
-            if depth > FIELDS_DEPTH || a.len() > FIELDS_ENTRIES {
-                return Err(Noise::Fields);
+            if a.len() > FIELDS_ENTRIES {
+                return Err(FieldErr::Noise);
             }
-            a.iter().try_for_each(|x| field_value(x, depth + 1))
+            for x in a {
+                deep(field_value(x, depth + 1), &mut too_deep)?;
+            }
         }
         Value::Object(o) => {
-            if depth > FIELDS_DEPTH || o.len() > FIELDS_ENTRIES {
-                return Err(Noise::Fields);
+            if o.len() > FIELDS_ENTRIES {
+                return Err(FieldErr::Noise);
             }
-            o.iter().try_for_each(|(k, x)| {
+            for (k, x) in o {
                 if k.len() > FIELD_STR_MAX {
-                    return Err(Noise::Fields);
+                    return Err(FieldErr::Noise);
                 }
-                field_value(x, depth + 1)
-            })
+                deep(field_value(x, depth + 1), &mut too_deep)?;
+            }
         }
+    }
+    if too_deep {
+        Err(FieldErr::Deep)
+    } else {
+        Ok(())
     }
 }
 
@@ -395,8 +450,11 @@ fn attachment_bytes(k: &str, v: &Value) -> Option<u64> {
     inner.get("bytes")?.as_u64()
 }
 
-/// The relay entry's shape (protocol: a wrong shape is noise) and the §8 alphabet (foreign
-/// content: a refusal drops the entry, not the message).
+/// The relay entry's shape (protocol: a wrong shape is noise) and its content (foreign: a
+/// refusal drops the entry, not the message, and is counted in
+/// [`LxmfAdapter::relay_refused`]). The accepted content is exactly what this adapter
+/// writes ([`relay_for`]): `v` 1, `net` a registered network, `id` a §8 marker name (1..=10
+/// bytes of the marker alphabet: no `]`, `/`, Cc or Cf), `mid` 32 lowercase hex (16 bytes).
 fn relay_entry(v: &Value) -> Result<Option<RelayField>, Noise> {
     let Some(o) = v.as_object() else {
         return Err(Noise::Field("relay"));
@@ -418,17 +476,26 @@ fn relay_entry(v: &Value) -> Result<Option<RelayField>, Noise> {
     let (net, id, mid) = (s("net", 64)?, s("id", 256)?, s("mid", 256)?);
     let ok = ver == 1
         && known_network(&net)
-        && id.len() <= NAME_MAX
-        && mid.len() <= NAME_MAX
+        && id.len() <= marker::NAME_MAX
         && marker_alphabet(&id)
-        && marker_alphabet(&mid);
+        && is_hex(&mid, 32);
     Ok(ok.then_some(RelayField { v: 1, net, id, mid }))
 }
 
-/// The relay entry (`Some(None)` = present but refused) and the attachment count and bytes.
-type FieldFacts = (Option<Option<RelayField>>, (u64, u64));
+/// What the received `fields` object yields.
+#[derive(Debug, Default)]
+struct FieldFacts {
+    /// The relay entry (`Some(None)` = present but refused).
+    relay: Option<Option<RelayField>>,
+    /// Attachment count and bytes.
+    attachments: (u64, u64),
+    /// Fields dropped for nesting deeper than [`FIELDS_DEPTH`] (the message is kept).
+    deep: u64,
+}
 
-/// The received `fields` object: bounded, nested at most [`FIELDS_DEPTH`].
+/// The received `fields` object: bounded, nested at most [`FIELDS_DEPTH`]. A field nested
+/// deeper is dropped alone (counted in [`FieldFacts::deep`]); a breach of the helper's own
+/// caps is noise.
 fn fields(v: &Value) -> Result<FieldFacts, Noise> {
     let Some(o) = v.as_object() else {
         return Err(Noise::Field("fields"));
@@ -436,23 +503,31 @@ fn fields(v: &Value) -> Result<FieldFacts, Noise> {
     if o.len() > FIELDS_ENTRIES {
         return Err(Noise::Fields);
     }
-    let mut relay = None;
+    let mut out = FieldFacts::default();
     let (mut n, mut bytes) = (0u64, 0u64);
     for (k, x) in o {
         if k == "relay" {
-            relay = Some(relay_entry(x)?);
+            out.relay = Some(relay_entry(x)?);
             continue;
         }
         if !field_key(k) {
             return Err(Noise::Field("fields"));
         }
-        field_value(x, 2)?;
+        match field_value(x, 2) {
+            Ok(()) => {}
+            Err(FieldErr::Deep) => {
+                out.deep += 1;
+                continue;
+            }
+            Err(FieldErr::Noise) => return Err(Noise::Fields),
+        }
         if let Some(b) = attachment_bytes(k, x) {
             n += 1;
             bytes = bytes.saturating_add(b);
         }
     }
-    Ok((relay, (n, bytes)))
+    out.attachments = (n, bytes);
+    Ok(out)
 }
 
 /// `claim_ts`: the sender's unverified clock (display only, §3). A JSON number; seconds
@@ -565,7 +640,7 @@ pub fn parse_line(line: &str) -> Result<Line, Noise> {
             if signed && why_unsigned.is_some() {
                 return Err(Noise::Field("why_unsigned"));
             }
-            let (relay, attachments) = fields(o.get("fields").unwrap_or(&Value::Null))?;
+            let facts = fields(o.get("fields").unwrap_or(&Value::Null))?;
             Ok(Line::Msg(Box::new(MsgLine {
                 hash,
                 src,
@@ -578,11 +653,12 @@ pub fn parse_line(line: &str) -> Result<Line, Noise> {
                 } else {
                     why_unsigned.or(Some("unverified"))
                 },
-                relay_refused: matches!(relay, Some(None)),
-                relay: relay.flatten(),
-                attachments,
+                relay_refused: matches!(facts.relay, Some(None)),
+                relay: facts.relay.flatten(),
+                attachments: facts.attachments,
                 truncated: flag(&o, "truncated")?,
-                fields_truncated: flag(&o, "fields_truncated")?,
+                fields_truncated: flag(&o, "fields_truncated")? || facts.deep > 0,
+                fields_dropped: facts.deep,
             })))
         }
         "state" => {
@@ -666,6 +742,15 @@ pub fn admit(
 }
 
 /// What one admitted `state` line means for the core (§4, §6 (4), (6)).
+///
+/// A parked send (`queued`/`peer_unannounced`) is reported as evidence only ("waiting for
+/// their announce"), so its row's `reason_code` stays null for now although the contract's
+/// `ForeignReasonCode` lists `peer_unannounced` as a queued reason: the core's
+/// [`SendEvent::Evidence`] carries no reason (and clears one), and the only queued reason it
+/// takes is a pre-air `Failed { .., Retry::Later }`, on which it withdraws the handoff and
+/// hands the row again — while the helper still holds the send parked and resumes it on the
+/// peer's announce, so the text would go twice (§4 "at most once per user act"). Fail-closed:
+/// the evidence alone until the core takes a reason with a queued state (a core follow-up).
 fn events_for(s: &StateLine) -> SendEvent {
     match (s.state, s.reason) {
         (S::Queued, Some(HelperReason::PeerUnannounced)) => SendEvent::Evidence {
@@ -781,6 +866,9 @@ pub struct LxmfConfig {
     pub heard_interval: Duration,
     /// A write to the helper's stdin waits at most this long (then stdin closes, §7).
     pub write_timeout: Duration,
+    /// Announce on request (§6 (3)): at most one `announce {}` per this interval per helper
+    /// run (monotonic; the one after `ready` counts).
+    pub announce_interval: Duration,
     pub on_ready: Option<ReadyHook>,
 }
 
@@ -813,6 +901,7 @@ impl LxmfConfig {
                 .collect(),
             heard_interval: Duration::from_secs(30),
             write_timeout: Duration::from_secs(5),
+            announce_interval: Duration::from_secs(60),
             on_ready: None,
         }
     }
@@ -841,9 +930,66 @@ struct Entry {
     line: String,
     generation: u64,
     last: Option<(S, Option<HelperReason>)>,
+    /// The LXMF message hash the helper last reported (also while still `queued`).
     hash: Option<String>,
+    /// The hash last handed to the core as `Accepted` — only once the send was on air.
+    accepted: Option<String>,
     /// A post-air FAILED: written again on the peer's next surfaced `heard` (§6 (4)).
     unconfirmed: bool,
+}
+
+/// Was a send in state `s` on air (§4 table, LXMF rows: `SENDING`/`SENT` and above)?
+fn on_air(s: S) -> bool {
+    matches!(s, S::Sent | S::Relayed | S::Delivered)
+}
+
+impl Entry {
+    /// The event that ends this send when its helper run ends (exited, replaced,
+    /// partitioned, quit) or its line could not be written: `adapter_down`, `Later`. A send
+    /// never on air stays a pre-air `Later` (the core keeps the row `queued` and re-hands
+    /// it, §6 (4): a FAILED while OUTBOUND is `queued`); one on air was `Accepted`, so the
+    /// core keeps `sent` "transmitted, not confirmed". Fail-closed for a send on air whose
+    /// hash never came (the helper always reports one once packed): a post-air reason, so
+    /// the core never re-sends what may have been transmitted (§4 "at most once").
+    fn down_event(&self) -> SendEvent {
+        let aired = self.last.is_some_and(|(p, _)| on_air(p));
+        SendEvent::Failed {
+            reason: if aired && self.accepted.is_none() {
+                Reason::NoResponse
+            } else {
+                Reason::AdapterDown
+            },
+            retry: Retry::Later,
+        }
+    }
+}
+
+/// The LXMF hashes of our own sends this adapter saw, `queued` ones included (§8 guard 2):
+/// the core records a native id only on `Accepted` (on air), so an inbound `msg` carrying a
+/// hash of ours that was never accepted is dropped here. Bounded (oldest forgotten).
+#[derive(Default)]
+struct OwnHashes {
+    order: VecDeque<String>,
+    set: HashSet<String>,
+}
+
+impl OwnHashes {
+    fn record(&mut self, h: &str) {
+        if self.set.contains(h) {
+            return;
+        }
+        if self.order.len() >= MAX_SENDS {
+            if let Some(old) = self.order.pop_front() {
+                self.set.remove(&old);
+            }
+        }
+        self.order.push_back(h.to_string());
+        self.set.insert(h.to_string());
+    }
+
+    fn contains(&self, h: &str) -> bool {
+        self.set.contains(h)
+    }
 }
 
 #[derive(Default)]
@@ -872,6 +1018,9 @@ struct St {
     titles: HashMap<String, String>,
     heard_at: HashMap<String, Instant>,
     heard_order: VecDeque<String>,
+    own: OwnHashes,
+    /// The last announce this adapter asked of the live run (§6 (3); reset per run).
+    announced_at: Option<Instant>,
     /// Supervisor drops (oversize / non-UTF-8) of ended generations.
     io_noise: u64,
 }
@@ -881,6 +1030,7 @@ struct Inner {
     tags: Vec<(String, String)>,
     heard_interval: Duration,
     write_timeout: Duration,
+    announce_interval: Duration,
     on_ready: Option<ReadyHook>,
     cmds: mpsc::Sender<Cmd>,
     st: Mutex<St>,
@@ -890,6 +1040,8 @@ struct Inner {
     refused: AtomicU64,
     coalesced: AtomicU64,
     relay_refused: AtomicU64,
+    fields_dropped: AtomicU64,
+    echoes: AtomicU64,
     next_id: AtomicU64,
     /// The current generation's io (for the supervisor's noise counter).
     io: Mutex<Option<PipedIo>>,
@@ -937,6 +1089,7 @@ impl LxmfAdapter {
             tags: cfg.tags,
             heard_interval: cfg.heard_interval,
             write_timeout: cfg.write_timeout,
+            announce_interval: cfg.announce_interval,
             on_ready: cfg.on_ready,
             cmds: tx,
             st: Mutex::new(St {
@@ -951,6 +1104,8 @@ impl LxmfAdapter {
                 titles: HashMap::new(),
                 heard_at: HashMap::new(),
                 heard_order: VecDeque::new(),
+                own: OwnHashes::default(),
+                announced_at: None,
                 io_noise: 0,
             }),
             queue: Mutex::new(Queue::default()),
@@ -959,6 +1114,8 @@ impl LxmfAdapter {
             refused: AtomicU64::new(0),
             coalesced: AtomicU64::new(0),
             relay_refused: AtomicU64::new(0),
+            fields_dropped: AtomicU64::new(0),
+            echoes: AtomicU64::new(0),
             next_id: AtomicU64::new(1),
             io: Mutex::new(None),
         });
@@ -1001,6 +1158,18 @@ impl LxmfAdapter {
     /// Received relay fields refused by the §8 alphabet (the message was kept).
     pub fn relay_refused(&self) -> u64 {
         self.inner.relay_refused.load(Ordering::SeqCst)
+    }
+
+    /// Received fields dropped for nesting deeper than [`FIELDS_DEPTH`] (the message was
+    /// kept with `fields_truncated`).
+    pub fn fields_dropped(&self) -> u64 {
+        self.inner.fields_dropped.load(Ordering::SeqCst)
+    }
+
+    /// Inbound `msg`s dropped because their hash is one of our own sends' that the core
+    /// never saw accepted (§8 guard 2; the core counts the rest in `Bridge::echoes`).
+    pub fn echoes(&self) -> u64 {
+        self.inner.echoes.load(Ordering::SeqCst)
     }
 
     /// Sends tracked now.
@@ -1081,10 +1250,7 @@ impl Inner {
             st.sends.drain().map(|(_, e)| e).collect()
         };
         for e in sends {
-            let _ = e.tx.try_send(SendEvent::Failed {
-                reason: Reason::AdapterDown,
-                retry: Retry::Later,
-            });
+            let _ = e.tx.try_send(e.down_event());
         }
     }
 
@@ -1117,7 +1283,30 @@ impl Inner {
         )
     }
 
-    /// Fail one tracked send with `adapter_down` (`Later`).
+    /// Announce on request (§6 (3); module doc): `true` when no announce was asked of this
+    /// run within [`LxmfConfig::announce_interval`] (monotonic), and the slot is taken.
+    fn announce_due(&self, now: Instant) -> bool {
+        let mut st = lock(&self.st);
+        if st
+            .announced_at
+            .is_some_and(|t| now.saturating_duration_since(t) < self.announce_interval)
+        {
+            return false;
+        }
+        st.announced_at = Some(now);
+        true
+    }
+
+    /// Write `announce {}` to the live run when [`Inner::announce_due`] allows it.
+    async fn announce_on_request(&self, io: &PipedIo, why: &'static str) {
+        if self.announce_due(Instant::now()) && !self.write(io, ANNOUNCE_LINE).await {
+            log(format_args!(
+                "an announce ({why}) could not be written to the helper"
+            ));
+        }
+    }
+
+    /// Fail one tracked send with `adapter_down` (`Later`; [`Entry::down_event`]).
     fn fail_one(&self, id: &str) {
         let e = {
             let mut st = lock(&self.st);
@@ -1125,10 +1314,7 @@ impl Inner {
             st.sends.remove(id)
         };
         if let Some(e) = e {
-            let _ = e.tx.try_send(SendEvent::Failed {
-                reason: Reason::AdapterDown,
-                retry: Retry::Later,
-            });
+            let _ = e.tx.try_send(e.down_event());
         }
     }
 
@@ -1160,18 +1346,36 @@ impl Inner {
                 }
             }
             Line::Msg(m) => self.msg(*m),
-            Line::State(s) => self.state(s),
+            Line::State(s) => {
+                if self.state(s) {
+                    // §6 (3): a send parked for the peer's announce; let the peer learn us
+                    self.announce_on_request(io, "a parked send").await;
+                }
+            }
             Line::Heard { dest, name } => self.heard(io, generation, dest, name).await,
         }
         Phase::Live
     }
 
     fn msg(&self, m: MsgLine) {
-        let Some(account) = lock(&self.st).ready.as_ref().map(|r| r.dest.clone()) else {
-            return;
+        let (account, ours) = {
+            let st = lock(&self.st);
+            let Some(account) = st.ready.as_ref().map(|r| r.dest.clone()) else {
+                return;
+            };
+            (account, st.own.contains(&m.hash))
         };
+        if ours {
+            // §8 guard 2: one of our own sends (its hash seen before the core accepted it)
+            self.echoes.fetch_add(1, Ordering::SeqCst);
+            return;
+        }
         if m.relay_refused {
             self.relay_refused.fetch_add(1, Ordering::SeqCst);
+        }
+        if m.fields_dropped > 0 {
+            self.fields_dropped
+                .fetch_add(m.fields_dropped, Ordering::SeqCst);
         }
         let conv = ConvRef {
             network: NETWORK_LXMF.into(),
@@ -1235,22 +1439,42 @@ impl Inner {
         }));
     }
 
-    fn state(&self, s: StateLine) {
+    /// One `state` line (§6 (4), (6); §4). The hash is kept from the first line that
+    /// carries it (the helper reports it once the library packed the message, while the
+    /// send may still be `queued`: OUTBOUND, nothing on air) and recorded for own-echo
+    /// suppression at once; `Accepted` goes to the core only once the send is on air
+    /// (`sent`/`relayed`/`delivered`), because the core reads any later failure of an
+    /// accepted send as post-air and never re-sends it. A new hash after that (the
+    /// helper's new library attempt of the same id) is accepted again once on air.
+    /// Returns `true` when the admitted line parks the send (`queued`/`peer_unannounced`).
+    fn state(&self, s: StateLine) -> bool {
         let mut st = lock(&self.st);
-        let Some(e) = st.sends.get_mut(&s.id) else {
-            return; // not ours (an evicted or older run's id): nothing to report
+        let St { sends, own, .. } = &mut *st;
+        let Some(e) = sends.get_mut(&s.id) else {
+            return false; // not ours (an evicted or older run's id): nothing to report
         };
         if let Some(h) = &s.hash {
+            own.record(h);
             if e.hash.as_deref() != Some(h) {
                 e.hash = Some(h.clone());
+            }
+        }
+        let admitted = admit(e.last, s.state, s.reason);
+        // on air now: an admitted on-air state, or a repeated one of a send already on air
+        // (a new attempt's `sent` after "transmitted, not confirmed")
+        let aired = on_air(s.state) && (admitted || e.last.is_some_and(|(p, _)| on_air(p)));
+        if aired && e.hash.is_some() && e.accepted != e.hash {
+            e.accepted = e.hash.clone();
+            if let Some(h) = &e.hash {
                 let _ = e.tx.try_send(SendEvent::Accepted {
                     native_id: h.clone(),
                 });
             }
         }
-        if !admit(e.last, s.state, s.reason) {
-            return;
+        if !admitted {
+            return false;
         }
+        let parked = s.state == S::Queued && s.reason == Some(HelperReason::PeerUnannounced);
         e.last = Some((s.state, s.reason));
         e.unconfirmed = s.reason == Some(HelperReason::Unconfirmed);
         let ev = events_for(&s);
@@ -1264,6 +1488,7 @@ impl Inner {
             st.sends.remove(&s.id);
             st.order.retain(|x| x != &s.id);
         }
+        parked
     }
 
     async fn heard(&self, io: &PipedIo, generation: u64, dest: String, name: Option<String>) {
@@ -1483,6 +1708,8 @@ async fn event(inner: &Inner, cur: &mut Option<Gen>, ev: Ev) {
                     st.live = Some(generation);
                     st.link = None;
                     st.state = AdapterState::Live;
+                    // the announce bound is per helper run
+                    st.announced_at = None;
                 }
                 g.phase = Phase::Live;
                 g.skip = Some(first);
@@ -1490,6 +1717,8 @@ async fn event(inner: &Inner, cur: &mut Option<Gen>, ev: Ev) {
                 if let Some(hook) = &inner.on_ready {
                     hook(&facts);
                 }
+                // §6 (3): a new run (start or restart) announces so the peers relearn us
+                inner.announce_on_request(&g.io, "a new run").await;
             }
             _ => {
                 let n = inner.refused.fetch_add(1, Ordering::SeqCst) + 1;
@@ -1674,6 +1903,7 @@ impl Adapter for LxmfAdapter {
                                 generation,
                                 last: None,
                                 hash: None,
+                                accepted: None,
                                 unconfirmed: false,
                             },
                         );
@@ -1795,7 +2025,7 @@ mod tests {
 
     #[test]
     fn msg_fields_relay_attachments_and_caps() {
-        let f = r#"{"5":{"attachment":{"bytes":1200}},"9":[{"1":"x"}],"251":"111.relay","252":{"v":1},"relay":{"v":1,"net":"meshtastic","id":"W1AW7","mid":"00ff"}}"#;
+        let f = r#"{"5":{"attachment":{"bytes":1200}},"9":[{"1":"x"}],"251":"111.relay","252":{"v":1},"relay":{"v":1,"net":"meshtastic","id":"W1AW7","mid":"00ff00ff00ff00ff00ff00ff00ff00ff"}}"#;
         let Line::Msg(m) = parse_line(&msg(f, "")).unwrap() else {
             panic!()
         };
@@ -1806,9 +2036,10 @@ mod tests {
                 v: 1,
                 net: "meshtastic".into(),
                 id: "W1AW7".into(),
-                mid: "00ff".into()
+                mid: "00ff00ff00ff00ff00ff00ff00ff00ff".into()
             })
         );
+        assert!(!m.fields_truncated && m.fields_dropped == 0);
         assert_eq!(m.claim_ts, Some(1_700_000_000));
         assert!(m.signed && m.why_unsigned.is_none());
         // the §8 alphabet refuses the entry, the message stays
@@ -1826,14 +2057,19 @@ mod tests {
         for f in [
             r#"{"relay":{"v":1,"net":"lxmf","id":"a"}}"#,
             r#"{"relay":"x"}"#,
-            r#"{"9":[[[1]]]}"#,
             r#"{"x":1}"#,
             r#"[]"#,
         ] {
             assert!(parse_line(&msg(f, "")).is_err(), "{f}");
         }
         // depth 3 is the bound: fields, a container, a container
-        assert!(parse_line(&msg(r#"{"9":[[1]]}"#, "")).is_ok());
+        let Line::Msg(m) = parse_line(&msg(r#"{"9":[[1]]}"#, "")).unwrap() else {
+            panic!()
+        };
+        assert!(!m.fields_truncated && m.fields_dropped == 0);
+        // a protocol breach inside a too-deep field is still noise
+        let breach = format!(r#"{{"9":[[["{}"]]]}}"#, "y".repeat(FIELD_STR_MAX + 1));
+        assert_eq!(parse_line(&msg(&breach, "")), Err(Noise::Fields));
         let long = format!(r#"{{"9":"{}"}}"#, "y".repeat(FIELD_STR_MAX + 1));
         assert_eq!(parse_line(&msg(&long, "")), Err(Noise::Fields));
         assert!(parse_line(&msg("{}", r#","truncated":true"#)).is_ok());
@@ -1862,6 +2098,128 @@ mod tests {
         // a 33-hex source and a 32-hex message hash are noise
         assert!(parse_line(&msg("{}", "").replace(SRC, &format!("{SRC}0"))).is_err());
         assert!(parse_line(&msg("{}", "").replace(&h64('a'), &h64('a')[..32])).is_err());
+    }
+
+    /// F2 (review of C3rs): a received relay field has exactly the shape this adapter
+    /// writes — `id` a §8 marker name (1..=10 bytes of the alphabet), `mid` 32 lowercase
+    /// hex — or it is refused alone and the message kept.
+    #[test]
+    fn f2_received_relay_field_id_is_a_marker_name_and_mid_is_32_hex() {
+        let mid = "0123456789abcdef0123456789abcdef";
+        let relay = |id: &str, mid: &str| {
+            let f = format!(
+                r#"{{"relay":{{"v":1,"net":"meshtastic","id":{},"mid":{}}}}}"#,
+                jstr(id),
+                jstr(mid)
+            );
+            match parse_line(&msg(&f, "")) {
+                Ok(Line::Msg(m)) => m,
+                other => panic!("{f}: {other:?}"),
+            }
+        };
+        let ok = relay("0123456789", mid);
+        assert_eq!(ok.relay.as_ref().map(|r| r.id.as_str()), Some("0123456789"));
+        assert!(!ok.relay_refused);
+        // ten bytes at a UTF-8 boundary: five two-byte characters
+        assert!(!relay("ééééé", mid).relay_refused);
+        // the adapter's own field round-trips
+        let tags = vec![("M".to_string(), "meshtastic".to_string())];
+        let mine = relay_for("[W1AW7/M] hello", &tags).unwrap();
+        assert_eq!(relay(&mine.id, &mine.mid).relay, Some(mine));
+        for (id, m) in [
+            ("01234567890", mid),                          // 11 bytes
+            ("éééééé", mid),                               // 12 bytes
+            ("a]b", mid),                                  // outside the alphabet
+            ("a\u{200b}b", mid),                           // Cf
+            ("W1AW7", "00ff"),                             // short
+            ("W1AW7", &format!("{mid}0")),                 // 33 hex
+            ("W1AW7", &mid.to_uppercase()),                // not lowercase
+            ("W1AW7", "0123456789abcdef0123456789abcdeg"), // not hex
+            ("W1AW7", &"x".repeat(64)),                    // the old 64-byte cap
+        ] {
+            let m = relay(id, m);
+            assert!(m.relay.is_none() && m.relay_refused, "{id:?} {m:?}");
+            assert_eq!(m.text, "hi", "the message is kept");
+        }
+    }
+
+    /// F3 (review of C3rs, the owner question answered fail-safe): `FIELDS_DEPTH` stays 3;
+    /// a field nested deeper is dropped alone, the message kept with `fields_truncated`.
+    #[test]
+    fn f3_a_field_nested_too_deep_is_dropped_alone_and_the_message_kept() {
+        let f = r#"{"9":[[[1]]],"10":"kept","5":{"attachment":{"bytes":7}}}"#;
+        let Line::Msg(m) = parse_line(&msg(f, "")).unwrap() else {
+            panic!()
+        };
+        assert!(m.fields_truncated);
+        assert_eq!(m.fields_dropped, 1);
+        assert_eq!(
+            (m.text.as_str(), m.hash.as_str()),
+            ("hi", h64('a').as_str())
+        );
+        assert!(m.signed);
+        assert_eq!(m.attachments, (1, 7), "the other fields still count");
+        // a too-deep attachment-shaped field is dropped, not counted
+        let f = r#"{"5":{"attachment":{"bytes":{"n":[1]}}}}"#;
+        let Line::Msg(m) = parse_line(&msg(f, "")).unwrap() else {
+            panic!()
+        };
+        assert_eq!((m.attachments, m.fields_dropped), ((0, 0), 1));
+        // two offending fields, and the helper's own flag is kept
+        let f = r#"{"9":{"a":{"b":{"c":1}}},"11":[[[[]]]]}"#;
+        let Line::Msg(m) = parse_line(&msg(f, r#","fields_truncated":true"#)).unwrap() else {
+            panic!()
+        };
+        assert!(m.fields_truncated);
+        assert_eq!(m.fields_dropped, 2);
+    }
+
+    /// F1 (review of C3rs): an on-air state, never a `queued` one, makes the send accepted.
+    #[test]
+    fn f1_on_air_states_and_the_down_event() {
+        assert!(!on_air(S::Queued) && !on_air(S::Failed));
+        assert!(on_air(S::Sent) && on_air(S::Relayed) && on_air(S::Delivered));
+        let (tx, _rx) = mpsc::channel(1);
+        let mut e = Entry {
+            tx,
+            to: SRC.into(),
+            line: String::new(),
+            generation: 1,
+            last: Some((S::Queued, None)),
+            hash: Some(h64('c')),
+            accepted: None,
+            unconfirmed: false,
+        };
+        let later = |reason| SendEvent::Failed {
+            reason,
+            retry: Retry::Later,
+        };
+        assert_eq!(
+            e.down_event(),
+            later(Reason::AdapterDown),
+            "pre-air: queued"
+        );
+        e.last = Some((S::Sent, None));
+        e.accepted = e.hash.clone();
+        assert_eq!(
+            e.down_event(),
+            later(Reason::AdapterDown),
+            "accepted: post-air"
+        );
+        e.accepted = None;
+        assert_eq!(
+            e.down_event(),
+            later(Reason::NoResponse),
+            "on air without a hash: fail closed, never re-sent"
+        );
+        assert!(super::super::state::post_air(Reason::NoResponse));
+        let mut own = OwnHashes::default();
+        for i in 0..=MAX_SENDS {
+            own.record(&format!("{i:064}"));
+        }
+        assert!(!own.contains(&format!("{:064}", 0)), "oldest forgotten");
+        assert!(own.contains(&format!("{MAX_SENDS:064}")));
+        assert_eq!(own.order.len(), MAX_SENDS);
     }
 
     #[test]

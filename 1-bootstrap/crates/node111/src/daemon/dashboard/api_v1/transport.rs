@@ -7,13 +7,27 @@
 //!   `state/interfaces.toml`. No credential appears here.
 //! - `PATCH /transport/posture` → `TransportPostureResult`: a partial merge of the
 //!   posture, the radio region (the request is the human's confirmation, §12
-//!   `radio.region.set`) and callsign, and the preferred order, applied through the
-//!   spine (`Spine::update`: validate → save 0600 → re-render → diff → `rnstatus
-//!   --attach|--detach|--reload` or an rnsd restart with its dependants in order). **v1:
-//!   this human write goes to B4's posture apply directly**; the probe-and-revert loop of
-//!   §12 is the device core's applier (C4), so `reverted` is always `false` here and a
-//!   failed step is reported in `reason` with `applied: false`. An unknown region or a bad
-//!   value is `400`.
+//!   `radio.region.set`) and callsign, and the preferred order. The whole merge is
+//!   validated against a copy of the file first (an unknown region or a bad value is
+//!   `400`, nothing written). Then, **posture through the applier (§10, §12;
+//!   C1-bounce F3)**: when the device core's `Arc<Applier>` is in ext, the parts its
+//!   closed vocabulary carries — `share_instance` / `enable_transport` as
+//!   `rns.posture.set`, the region as `radio.region.set`, in that order — go through its
+//!   snapshot → apply → probe → keep-or-revert loop, so a failed rnsd restart or probe
+//!   restores the previous `interfaces.toml` byte-exact and answers `applied: false,
+//!   reverted: true`. Only when they were kept does the rest (`instance_name`, `lan`,
+//!   `stock_autointerface`, `propagation_node`, callsign, order — no applier action
+//!   exists for them) follow through `Spine::update` (validate → save 0600 → re-render →
+//!   diff → `rnstatus --attach|--detach|--reload` or an rnsd restart with its dependants
+//!   in order); a failed step there is `applied: false, reverted: false` with the
+//!   `reason`. The PATCH is no proposal: it goes through
+//!   [`Applier::apply_unrecorded`] (the same one-at-a-time lock, no decision record;
+//!   FB1). Without an applier in ext (a node without the device registry, tests) the
+//!   whole merge goes through `Spine::update` as before and `reverted` is `false`.
+//!   **A client that goes away does not cancel the change (V5-1):** everything past
+//!   the validation runs in a task of its own that the handler awaits, so the apply,
+//!   the probe (≤ 30 s) and the revert — or the `Spine::update` steps — run to the end
+//!   whether or not the answer is still wanted.
 //! - `POST /transport/join` → `TransportJoin` with `Cache-Control: no-store`: the
 //!   phone-relay descriptor (address, port, and the IFAC name and passphrase when IFAC is
 //!   on). A POST because it carries a credential and the agent's bearer reads every GET:
@@ -25,6 +39,7 @@
 
 use super::auth;
 use super::{ApiRouter, ApiState, Problem};
+use crate::daemon::devices::applier::{Action, Applier, ApplyReport};
 use crate::daemon::transport::join::{JoinError, Session};
 use crate::daemon::transport::posture::{Applied, ApplyError, Spine};
 use crate::daemon::transport::rnstatus::{FactsCache, FactsSnapshot};
@@ -121,7 +136,7 @@ pub fn apply_problem(e: &ApplyError) -> Problem {
 }
 
 /// `TransportPosturePatch.posture.lan`.
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct LanPatch {
     #[serde(default)]
@@ -133,7 +148,7 @@ struct LanPatch {
 }
 
 /// `TransportPosturePatch.posture`.
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct PosturePatch {
     #[serde(default)]
@@ -150,6 +165,20 @@ struct PosturePatch {
     propagation_node: Option<bool>,
 }
 
+impl PosturePatch {
+    fn is_empty(&self) -> bool {
+        self.share_instance.is_none()
+            && self.instance_name.is_none()
+            && self.enable_transport.is_none()
+            && self
+                .lan
+                .as_ref()
+                .is_none_or(|l| l.backbone_listen.is_none() && l.port.is_none() && l.ifac.is_none())
+            && self.stock_autointerface.is_none()
+            && self.propagation_node.is_none()
+    }
+}
+
 fn present<'de, D: serde::Deserializer<'de>, T: Deserialize<'de>>(
     d: D,
 ) -> Result<Option<T>, D::Error> {
@@ -157,7 +186,7 @@ fn present<'de, D: serde::Deserializer<'de>, T: Deserialize<'de>>(
 }
 
 /// `TransportPosturePatch`.
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TransportPatch {
     #[serde(default)]
@@ -208,6 +237,37 @@ impl TransportPatch {
             }
         }
         Ok(())
+    }
+
+    /// The parts the device core's applier carries (§12 vocabulary, module doc):
+    /// `rns.posture.set` first, then `radio.region.set`.
+    fn applier_actions(&self) -> Vec<Action> {
+        let mut out = Vec::new();
+        if let Some(p) = &self.posture {
+            if p.share_instance.is_some() || p.enable_transport.is_some() {
+                out.push(Action::PostureSet {
+                    share_instance: p.share_instance,
+                    enable_transport: p.enable_transport,
+                });
+            }
+        }
+        if let Some(r) = &self.region {
+            out.push(Action::RegionSet { region: r.clone() });
+        }
+        out
+    }
+
+    /// This patch without the applier's parts (what follows through `Spine::update`).
+    fn without_applier_parts(mut self) -> Self {
+        if let Some(p) = &mut self.posture {
+            p.share_instance = None;
+            p.enable_transport = None;
+        }
+        self.region = None;
+        if self.posture.as_ref().is_some_and(PosturePatch::is_empty) {
+            self.posture = None;
+        }
+        self
     }
 
     /// Apply the merge to the file (validation follows in `Spine::update`).
@@ -265,6 +325,86 @@ fn result_json(applied: &Applied, t: &TransportApi) -> Value {
     })
 }
 
+/// `TransportPostureResult` for the applier's parts not kept (module doc).
+fn report_json(report: &ApplyReport, t: &TransportApi) -> Value {
+    json!({
+        "schema": 1,
+        "applied": false,
+        "reverted": report.reverted,
+        "reason": report.reason.clone().or_else(|| Some("the change was not applied".into())),
+        "status": status_json(&t.spine, &t.facts.snapshot()),
+    })
+}
+
+/// V5-2: a PATCH that moves the Backbone listener (its port or its switch) onto a port
+/// another task holds in the daemon's `PortTable` on this host (a component's listener,
+/// meshmud's downlink: a key `host:port` whose host is loopback, unspecified or one of
+/// this node's addresses) is `400`, nothing written. The file's own check
+/// (`interfaces::own_port`) already refused 111's fixed listeners.
+fn backbone_port_held(
+    api: &ApiState,
+    spine: &Spine,
+    p: &TransportPatch,
+    sim: &crate::daemon::transport::interfaces::InterfacesFile,
+) -> Option<Problem> {
+    let touched = p
+        .posture
+        .as_ref()
+        .and_then(|p| p.lan.as_ref())
+        .is_some_and(|l| l.port.is_some() || l.backbone_listen == Some(true));
+    let b = &sim.posture.lan.backbone;
+    if !touched || !b.listen {
+        return None;
+    }
+    let table = spine.port_table()?;
+    let local = |host: &str| {
+        let h = host.trim_matches(['[', ']']);
+        h.eq_ignore_ascii_case("localhost")
+            || h.parse::<IpAddr>()
+                .is_ok_and(|ip| ip.is_loopback() || ip.is_unspecified() || api.is_own_addr(&ip))
+    };
+    let (key, owner) = table.held().into_iter().find(|(k, _)| {
+        k.rsplit_once(':')
+            .is_some_and(|(h, port)| port.parse::<u16>() == Ok(b.port) && local(h))
+    })?;
+    Some(super::bridge::bad_request(format!(
+        "backbone port {} is in use on this node by {} ({key}); choose another port.",
+        b.port, owner.task
+    )))
+}
+
+/// Everything a PATCH does past its validation (module doc): the applier's parts
+/// through [`Applier::apply_unrecorded`] when an applier is in ext (only a kept change
+/// lets the rest follow), then the rest through `Spine::update`. Owns what it needs: it
+/// runs in a task of its own (V5-1).
+async fn apply_patch(
+    t: Arc<TransportApi>,
+    applier: Option<Arc<Applier>>,
+    p: TransportPatch,
+) -> Response {
+    let actions = p.applier_actions();
+    let rest = match applier {
+        Some(ap) if !actions.is_empty() => {
+            match ap.apply_unrecorded(actions).await {
+                Ok(report) if report.applied => {}
+                Ok(report) => return Json(report_json(&report, &t)).into_response(),
+                Err(e) => return e.problem().into_response(),
+            }
+            let rest = p.without_applier_parts();
+            if rest.is_empty() {
+                let none = Applied::default();
+                return Json(result_json(&none, &t)).into_response();
+            }
+            rest
+        }
+        _ => p,
+    };
+    match t.spine.update(move |f| rest.merge(f)).await {
+        Ok(applied) => Json(result_json(&applied, &t)).into_response(),
+        Err(e) => apply_problem(&e).into_response(),
+    }
+}
+
 async fn patch_posture(State(api): State<Arc<ApiState>>, bytes: Bytes) -> Response {
     let t = match transport_of(&api) {
         Ok(t) => t,
@@ -281,9 +421,26 @@ async fn patch_posture(State(api): State<Arc<ApiState>>, bytes: Bytes) -> Respon
         let none = Applied::default();
         return Json(result_json(&none, &t)).into_response();
     }
-    match t.spine.update(move |f| p.merge(f)).await {
-        Ok(applied) => Json(result_json(&applied, &t)).into_response(),
-        Err(e) => apply_problem(&e).into_response(),
+    // the whole merge validated first: nothing is applied when any part is refused
+    let mut sim = t.spine.file();
+    p.clone().merge(&mut sim);
+    if let Err(i) = sim.validate() {
+        return apply_problem(&ApplyError::Invalid(i)).into_response();
+    }
+    if let Some(pb) = backbone_port_held(&api, &t.spine, &p, &sim) {
+        return pb.into_response();
+    }
+    // V5-1: the change runs to its end in its own task; this future only waits for it
+    let task = tokio::spawn(apply_patch(t, api.ext::<Arc<Applier>>(), p));
+    match task.await {
+        Ok(resp) => resp,
+        Err(e) => Problem::new(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "internal",
+            "The change could not be applied.",
+        )
+        .detail(format!("the apply task failed: {e}"))
+        .into_response(),
     }
 }
 

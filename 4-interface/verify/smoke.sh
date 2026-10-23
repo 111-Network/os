@@ -198,8 +198,13 @@ inner() {
   local sigign
   sigign=$(awk '/^SigIgn:/ {print $2}' /proc/self/status)
   t "namespace shell has default SIGINT/SIGTERM (SigIgn=$sigign)" '(( (16#$sigign & 0x4002) == 0 ))'
+  mk_dummy0() { # a dummy0 link: `type dummy`, else a veth pair with its peer up (kernels without the dummy
+    # module, e.g. some cloud images: a local address on either carries loopback-delivered traffic the same way)
+    ip link add dummy0 type dummy 2>/dev/null && return 0
+    ip link add dummy0 type veth peer name dummy0p && ip link set dummy0p up
+  }
   ip link set lo up
-  if ip link add dummy0 type dummy && ip addr add "$LANIP/24" dev dummy0 && ip link set dummy0 up; then
+  if mk_dummy0 && ip addr add "$LANIP/24" dev dummy0 && ip link set dummy0 up; then
     ok "netns: lo up, dummy0 $LANIP/24 (no route off-box)"
   else
     fail "netns: cannot create dummy0 — LAN checks will fail"
@@ -911,7 +916,15 @@ inner3() {
       fail "$n: netns/veth setup failed"
     fi
   done
-  t "A reaches B over the bridge (ping 10.111.0.12 from A's netns)" 'nx A ping -c1 -W3 10.111.0.12 >/dev/null 2>&1'
+  # ICMP is unavailable inside some user namespaces (cloud kernels, even to loopback): the fallback is a short-lived
+  # TCP listener in B's netns and a connect from A's (no daemon is up yet at this step)
+  reach_b() {
+    nx A ping -c1 -W3 10.111.0.12 >/dev/null 2>&1 && return 0
+    nx B timeout 6 python3 -I -c 'import socket; s=socket.socket(); s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1); s.bind(("10.111.0.12", 11199)); s.listen(1); s.accept()' >/dev/null 2>&1 &
+    sleep 0.5
+    nx A timeout 3 python3 -I -c 'import socket; socket.create_connection(("10.111.0.12", 11199), 2).close()' >/dev/null 2>&1
+  }
+  t "A reaches B over the bridge (ping 10.111.0.12 from A's netns, or a TCP connect where ICMP is unavailable in the namespace)" reach_b
 
   # ---------------------------------------------------------------- 5. helpers + daemons
   phase "5. recording relays, fake board, four daemons"
@@ -923,8 +936,11 @@ inner3() {
   wait_for 5 'grep -q "tcp-lan-relay:" "$SMOKE_WORK/r1.log" && grep -q "tcp-lan-relay:" "$SMOKE_WORK/r2.log"' || true
   t "relays up: R1 10.111.0.12:11184 → B:11183, R2 10.111.0.10:11184 → H:11183 (frames recorded raw)" \
     'kill -0 "$R1PID" 2>/dev/null && kill -0 "$R2PID" 2>/dev/null'
-  for n in B H C A; do start_node "$n"; done
+  # H first, with its stream opened at once: its first presence refresh and panel health flip happen within seconds
+  # of /health (sooner since Layer 6's hotplug kick), and a capture opened after three more daemons started missed them
+  start_node H
   sse_on H "$W/H-run.sse"
+  for n in B C A; do start_node "$n"; done
   SSEP_RUN_H=$SSEP
   for n in "${N3_NODES[@]}"; do agent_up "$n"; done
   for n in "${N3_NODES[@]}"; do

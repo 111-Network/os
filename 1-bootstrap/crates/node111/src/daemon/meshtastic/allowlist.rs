@@ -148,7 +148,9 @@ fn text_packet_ok(p: &pb::MeshPacket) -> bool {
         channel: p.channel,
         id: p.id,
         hop_limit: p.hop_limit,
-        want_ack: p.want_ack,
+        // §5 fixes `want_ack = true` for channel text and DMs (the local reliable record);
+        // a text without it is not ours (B3 review F4)
+        want_ack: true,
         payload_variant: Some(pb::mesh_packet::PayloadVariant::Decoded(pb::Data {
             portnum: pb::PortNum::TextMessageApp as i32,
             payload: d.payload.clone(),
@@ -635,6 +637,8 @@ mod tests {
             |p| p.rx_time = 1,
             |p| p.next_hop = 1,
             |p| p.relay_node = 1,
+            // F4: §5 pins want_ack = true; a text without it never passes
+            |p| p.want_ack = false,
             |p| p.payload_variant = Some(pb::mesh_packet::PayloadVariant::Encrypted(vec![1, 2])),
             |p| p.payload_variant = None,
         ] {

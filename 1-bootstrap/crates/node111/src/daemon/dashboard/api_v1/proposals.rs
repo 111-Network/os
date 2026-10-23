@@ -65,7 +65,10 @@
 //!   snapshot → apply → probe → keep or revert; the one-shots `identify` —
 //!   the acceptance is the consent — and `service.restart`, `409
 //!   not_supervised` for a child 111d does not supervise). The applier writes
-//!   the decision record itself; this file does not also decide it. Without
+//!   the decision record itself; this file does not also decide it. The loop
+//!   runs in a task of its own that the handler awaits
+//!   (`devices::applier::apply_detached`, V5-1): a client that goes away
+//!   mid-apply never leaves a change unreverted or a record pending. Without
 //!   an applier in ext (the device core not wired) a device proposal is `409
 //!   unsupported_action` and stays open.
 //!
@@ -1031,7 +1034,11 @@ async fn accept_device(api: &ApiState, p: &Proposal) -> Result<Proposal, Problem
         ));
     };
     let req = ApplierRequest::from_body(&p.id, &p.body).map_err(|e| e.problem())?;
-    applier::apply(&ap, req).await.map_err(|e| e.problem())?;
+    // V5-1: the loop runs to its end in a task of its own (a tab that navigates away
+    // drops this future, never the probe, the revert or the decision record)
+    applier::apply_detached(ap, req)
+        .await
+        .map_err(|e| e.problem())?;
     let (layout, id) = (api.layout.clone(), p.id.clone());
     tokio::task::spawn_blocking(move || get_checked(&layout, &id))
         .await

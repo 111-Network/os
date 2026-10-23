@@ -19,9 +19,20 @@
 //! ingested until a `config_complete_id`. Another client's `want_config_id` replays the
 //! config stream to every downlink (meshmud forwards verbatim, R01 §3.10) and can pre-empt
 //! ours, so **any** `config_complete_id` ends a config stream, replays are ingested
-//! idempotently and `want_config_id` is never re-sent inside a session. Text before the
-//! first completion is buffered (bounded, [`PREBUFFER`]) and mapped once the channel table
-//! is in. A nonce-0 heartbeat every 5 minutes on the injectable monotonic clock keeps the
+//! idempotently and `want_config_id` is never re-sent inside a session. A completion
+//! configures the session only when it is ours or the table it closes is whole (the board's
+//! own NodeInfo with its `User`, a LoRa config and a primary channel): another client's
+//! partial replay (69420 / 69421) leaves the session unconfigured until a later full one.
+//! Text before the first completion is buffered (bounded, [`PREBUFFER`]) and mapped once
+//! the channel table is in.
+//!
+//! **Live only with the consent facts in hand** (§5 "HAM and MQTT: live consent", §15.5):
+//! `caps().state` is `Live` only once the session is configured, the board's own `User`
+//! (with `is_licensed`) has been heard and a nonzero region is known; until then it is
+//! `NotSet` ([`MeshFacts::not_live`] says why), every send is handed back `adapter_down`
+//! / `Later`, and [`Adapter::facts`] reports the account as licensed (the restrictive
+//! reading: an unknown board is not treated as unlicensed). `Inbound::Link(Up)` follows the
+//! same rule, so the core's `Later` rows wake when the facts arrive. A nonce-0 heartbeat every 5 minutes on the injectable monotonic clock keeps the
 //! board's 15-minute API session alive (R01 §3.9). `rebooted` or a closed downlink ends the
 //! session; the client reconnects with capped back-off.
 //!
@@ -39,7 +50,7 @@
 //! - `Failed { reason, Later }`: the job goes back to the core, which retries on its tick
 //!   (and earlier on an adapter event): `adapter_down` (no configured session), `rate_limited`,
 //!   `duty_cycle`, `key_unknown` (PKI key of the destination unknown). The adapter events
-//!   are `Inbound::Link(Up)` once a session is configured and an `Inbound::Conversation`
+//!   are `Inbound::Link(Up)` once a session is live (above) and an `Inbound::Conversation`
 //!   upsert of `dm:!<node>` when that node's NodeInfo with a key is heard (key learned) or,
 //!   after a DM's post-air NAK, when that node's next NodeInfo is heard.
 //! - `Accepted { native_id }` once **the radio** took it (`native_id` = the packet id, 8
@@ -48,7 +59,8 @@
 //!   queues a res-0 status before that NAK), or any ack or post-air NAK for it. Every
 //!   refusal above comes before it, so the core's "a failure after `Accepted` was on air"
 //!   rule holds.
-//! - `Evidence`: `queued` "waiting for the radio" while the queue is paused (the job stays);
+//! - `Evidence`: `queued` "waiting for the radio" once per job when the queue is paused (the
+//!   job stays; a job that sits through many pauses says it once);
 //!   `sent` "accepted by the radio" (right after `Accepted`); `relayed` "a neighbour
 //!   rebroadcast it" (a routing ack from our own node: the
 //!   implicit ack; "relayed, not confirmed" for a DM); `delivered` "the recipient confirmed"
@@ -57,7 +69,10 @@
 //!   `Failed { reason, Later }` (the state stays where it was: states are monotone).
 //! - The handle closes after a terminal event, a DM's `delivered`, a channel text's
 //!   `relayed` or post-air NAK, or [`IN_FLIGHT_TTL`]. A handle that closes with neither
-//!   `Accepted` nor `Failed` means a write broke mid-frame: "may have been sent".
+//!   `Accepted` nor `Failed` means a write broke mid-frame: "may have been sent". A
+//!   handle holds [`JOB_EVENTS`] events, the last [`TERMINAL_RESERVE`] kept for `Accepted`,
+//!   `Failed` and `delivered`: a progress event that would take a reserved slot is dropped,
+//!   a terminal one never is (a job emits at most one of each).
 //!
 //! **Receive** (§5): portnum 1 becomes an [`InboundText`]; `emoji != 0` with `reply_id` is a
 //! tapback, counted and not a message; channel text is `channel-key` (`none` on a channel
@@ -80,6 +95,10 @@
 //! reader's rules (meshtastic-python's node dict updates and `normalize_node`), names cut to
 //! 24 B; [`MeshtasticAdapter::nearby_nodes`] runs the reader-format rows through the
 //! daemon's own ingest (`presence::parse`), so both feeds publish the same `NearbySource`.
+//! The core's Nearby sink gets at most one `Inbound::Nearby` per
+//! [`ClientConfig::nearby_every`] on the monotonic clock, evaluated when the adapter is read
+//! after a packet (no timer, no task); [`MeshtasticAdapter::nearby_version`] still moves on
+//! every node DB change for the module's own tick.
 
 use super::allowlist::{self, AllowStats, AllowlistWriter, LogRing, BROADCAST};
 use super::presence::{self, NearbyNode, NearbySource};
@@ -131,6 +150,13 @@ pub const IN_FLIGHT: usize = 256;
 pub const IN_FLIGHT_TTL: Duration = Duration::from_secs(10 * 60);
 /// Most nodes kept (the reader's and the daemon's cap).
 pub const MAX_NODES: usize = presence::MAX_NODES;
+/// Least spacing of the `Inbound::Nearby` pushes to the core (B3 review F3: a full rebuild
+/// per packet is hundreds of KB of JSON on a busy mesh).
+pub const NEARBY_EVERY: Duration = Duration::from_secs(5);
+/// Events one send handle holds (§4 `SendHandle`).
+pub const JOB_EVENTS: usize = 16;
+/// Slots of [`JOB_EVENTS`] only `Accepted`, `Failed` and `delivered` may take (B3 review F7).
+pub const TERMINAL_RESERVE: usize = 3;
 /// Recent packet ids never reused (the firmware's own window is 20).
 const USED_IDS: usize = 4096;
 /// Conversation upserts remembered (to emit each once).
@@ -279,13 +305,16 @@ pub struct ClientConfig {
     /// Reconnect back-off: first wait, doubled up to `reconnect_max`.
     pub reconnect_initial: Duration,
     pub reconnect_max: Duration,
-    /// Probe cadence while `QueueStatus.free = 0` (a nonce-0 heartbeat asks for a status).
+    /// Keep-alive cadence while `QueueStatus.free = 0` (a nonce-0 heartbeat, doubled up to
+    /// `pause_probe_max`); the board's own status change resumes the queue.
     pub pause_probe: Duration,
     pub pause_probe_max: Duration,
     pub connect_timeout: Duration,
     pub write_timeout: Duration,
     pub inbound_capacity: usize,
     pub prebuffer_capacity: usize,
+    /// Least spacing of `Inbound::Nearby` on the monotonic clock ([`NEARBY_EVERY`]).
+    pub nearby_every: Duration,
 }
 
 impl ClientConfig {
@@ -303,6 +332,7 @@ impl ClientConfig {
             write_timeout: Duration::from_secs(5),
             inbound_capacity: INBOUND,
             prebuffer_capacity: PREBUFFER,
+            nearby_every: NEARBY_EVERY,
         }
     }
 }
@@ -651,6 +681,11 @@ pub struct ClientCounters {
     pub queue_statuses: u64,
     /// Reconnect back-off waits started.
     pub backoffs: u64,
+    /// `config_complete_id`s that closed an incomplete table (another client's partial
+    /// replay) and so did not configure the session.
+    pub partial_completions: u64,
+    /// `Inbound::Nearby` pushes to the core.
+    pub nearby_pushes: u64,
 }
 
 /// Live facts of the board (§5 "HAM and MQTT: live consent").
@@ -677,6 +712,8 @@ pub struct MeshFacts {
     pub in_flight: u32,
     /// `QueueStatus.free = 0` paused the send queue.
     pub paused: bool,
+    /// Why `caps().state` is not `Live` (`None` when it is).
+    pub not_live: Option<String>,
     pub counters: ClientCounters,
 }
 
@@ -688,13 +725,27 @@ struct Job {
     dm: bool,
     text: Vec<u8>,
     tx: mpsc::Sender<SendEvent>,
-    /// "waiting for the radio" already reported for the current pause.
+    /// "waiting for the radio" already reported for this job (once per job, B3 review F7).
     wait_noted: bool,
 }
 
 impl Job {
+    /// Never blocks. `Accepted`, `Failed` and `delivered` (each at most once per job) may
+    /// use the [`TERMINAL_RESERVE`]; a progress event that would eat into it is dropped, so
+    /// a terminal event is never lost to a slow reader (B3 review F7).
     fn emit(&self, e: SendEvent) {
-        // never blocks; the core drains handles promptly and a job emits few events
+        let terminal = matches!(
+            &e,
+            SendEvent::Accepted { .. }
+                | SendEvent::Failed { .. }
+                | SendEvent::Evidence {
+                    state: ForeignMessageState::Delivered,
+                    ..
+                }
+        );
+        if !terminal && self.tx.capacity() <= TERMINAL_RESERVE {
+            return;
+        }
         let _ = self.tx.try_send(e);
     }
 }
@@ -795,6 +846,8 @@ struct State {
     region: Option<i32>,
     preset: Option<i32>,
     use_preset: bool,
+    /// A `Config.lora` of this board was ingested.
+    lora_seen: bool,
     hop_limit: u32,
     channels: BTreeMap<u32, Chan>,
     nodes: HashMap<u32, Node>,
@@ -804,6 +857,8 @@ struct State {
     emitted_convs: HashMap<String, String>,
     nearby_dirty: bool,
     nearby_version: u64,
+    /// No `Inbound::Nearby` before this monotonic time (F3 coalescing).
+    nearby_next_at: Duration,
     source: Option<(String, String)>,
     queue: VecDeque<Job>,
     in_flight: HashMap<u32, Flight>,
@@ -868,6 +923,43 @@ fn manifest_str(path: &[&str]) -> String {
 impl State {
     fn my_account(&self) -> Option<String> {
         self.my_num.map(node_id)
+    }
+
+    /// The board's own NodeInfo with its `User` (and so `is_licensed`) has been heard.
+    fn own_known(&self) -> bool {
+        self.my_num
+            .and_then(|n| self.nodes.get(&n))
+            .is_some_and(|n| n.user_known)
+    }
+
+    /// The table a completion closes is whole: own node, LoRa config, a primary channel
+    /// (B3 review F2: another client's partial replay can pre-empt ours).
+    fn table_complete(&self) -> bool {
+        self.own_known() && self.lora_seen && self.primary().is_some()
+    }
+
+    /// Sends may go out: a configured session with the consent facts in hand (§5).
+    fn ready(&self) -> bool {
+        self.connected && self.configured && self.own_known() && self.region.is_some()
+    }
+
+    /// Why `caps().state` is not `Live` (`None` when it is).
+    fn not_live(&self) -> Option<&'static str> {
+        Some(if !self.running {
+            "the client is not running"
+        } else if !self.connected {
+            "not connected to the board's downlink"
+        } else if !self.configured {
+            "waiting for the board's full config stream"
+        } else if !self.own_known() {
+            "waiting for the board's own node info (licensed or not)"
+        } else if self.region.is_none() {
+            "waiting for the board's LoRa config"
+        } else if self.region == Some(0) {
+            "the board's region is unset: it transmits nothing"
+        } else {
+            return None;
+        })
     }
 
     fn primary(&self) -> Option<&Chan> {
@@ -1202,6 +1294,7 @@ impl MeshtasticAdapter {
             queued: st.queue.len() as u32,
             in_flight: st.in_flight.len() as u32,
             paused: st.pause.is_some(),
+            not_live: st.not_live().map(str::to_string),
             counters,
         }
     }
@@ -1265,9 +1358,10 @@ impl MeshtasticAdapter {
 
     fn caps_now(&self) -> Caps {
         let st = self.inner.lock();
-        // live once configured with a region; an error only after a session dropped;
-        // otherwise a human fact is missing (no board running, region unset)
-        let state = if st.running && st.configured && st.region != Some(0) {
+        // live once configured with the consent facts and a set region (B3 review F1: an
+        // unheard own NodeInfo is not "unlicensed"); an error only after a session dropped;
+        // otherwise a fact is missing (`MeshFacts::not_live` says which)
+        let state = if st.running && st.not_live().is_none() {
             AdapterState::Live
         } else if st.running && !st.configured && st.ever_configured {
             AdapterState::Error("the board's downlink dropped; reconnecting".into())
@@ -1317,7 +1411,8 @@ impl MeshtasticAdapter {
         tx: &mpsc::Sender<SendEvent>,
     ) -> Result<(), (Reason, Retry)> {
         let mut st = self.inner.lock();
-        if !st.running || !st.connected || !st.configured {
+        // not before the consent facts are in (F1): the core retries on `Link(Up)`
+        if !st.running || !st.ready() {
             return Err((Reason::AdapterDown, Retry::Later));
         }
         if conv.network != NETWORK_MESHTASTIC || Some(conv.account.clone()) != st.my_account() {
@@ -1442,8 +1537,13 @@ impl Adapter for MeshtasticAdapter {
                     if let Some(item) = st.inbound.pop_front() {
                         return item;
                     }
-                    if st.nearby_dirty && st.ever_configured {
+                    let now = self.inner.clock.now();
+                    if st.nearby_dirty && st.ever_configured && now >= st.nearby_next_at {
+                        // coalesced on the monotonic clock (F3); a change inside the window
+                        // goes out with the next read after it
                         st.nearby_dirty = false;
+                        st.nearby_next_at = now + self.inner.cfg.nearby_every;
+                        st.counters.nearby_pushes += 1;
                         drop(st);
                         let src = self.nearby_source();
                         if let Ok(v) = serde_json::to_value(&src) {
@@ -1459,7 +1559,7 @@ impl Adapter for MeshtasticAdapter {
 
     fn send(&self, conv: &ConvRef, text: &str, _o: SendOpts) -> BoxFuture<'_, SendHandle> {
         // `want_ack` is always true on Meshtastic (§5), whatever the options say
-        let (tx, rx) = mpsc::channel(16);
+        let (tx, rx) = mpsc::channel(JOB_EVENTS);
         match self.enqueue(conv, text, &tx) {
             Ok(()) => self.inner.work_wake.notify_one(),
             Err((reason, retry)) => {
@@ -1483,7 +1583,9 @@ impl Adapter for MeshtasticAdapter {
                         Some(n) if !n.is_empty() => format!("{n} ({id})"),
                         _ => id.clone(),
                     }),
-                    licensed: f.licensed.unwrap_or(false),
+                    // unknown is not "unlicensed" (F1): the restrictive reading until the
+                    // board's own User is heard (the adapter is not Live meanwhile)
+                    licensed: f.licensed.unwrap_or(true),
                 })
                 .collect(),
             channels: f
@@ -1576,9 +1678,28 @@ impl Inner {
             }
             f.zeroize();
         }
+        self.sync_link(&mut st);
         drop(st);
         self.recv_wake.notify_one();
         self.work_wake.notify_one();
+    }
+
+    /// `Inbound::Link` follows readiness (the session is configured and the consent facts
+    /// are in, F1): `Up` wakes the core's `Later` rows once sends can go.
+    fn sync_link(&self, st: &mut State) {
+        let ready = st.ready();
+        if ready != st.link_up {
+            st.link_up = ready;
+            let cap = self.cfg.inbound_capacity;
+            st.push_inbound(
+                cap,
+                Inbound::Link(if ready {
+                    LinkState::Up
+                } else {
+                    LinkState::Down
+                }),
+            );
+        }
     }
 
     fn handle_from_radio(&self, st: &mut State, msg: pb::FromRadio, now: Duration) {
@@ -1601,6 +1722,11 @@ impl Inner {
                     st.nack_wait.clear();
                     st.give_back_queue();
                     st.in_flight.clear();
+                    // nor its radio config: the new board's stream must complete afresh
+                    st.region = None;
+                    st.preset = None;
+                    st.lora_seen = false;
+                    st.configured = false;
                     st.nearby_dirty = true;
                     st.nearby_version += 1;
                 }
@@ -1615,6 +1741,7 @@ impl Inner {
             }
             Some(V::Config(mut c)) => match &mut c.payload_variant {
                 Some(pb::config::PayloadVariant::Lora(l)) => {
+                    st.lora_seen = true;
                     st.region = Some(l.region);
                     st.preset = Some(l.modem_preset);
                     st.use_preset = l.use_preset;
@@ -1627,8 +1754,20 @@ impl Inner {
                 Some(pb::config::PayloadVariant::Security(s)) => {
                     s.private_key.zeroize();
                 }
+                // never read; wiped before the message drops (B3 review F5)
+                Some(pb::config::PayloadVariant::Network(n)) => {
+                    n.wifi_psk.zeroize();
+                }
+                Some(pb::config::PayloadVariant::Bluetooth(b)) => {
+                    b.fixed_pin.zeroize();
+                }
                 _ => {}
             },
+            Some(V::ModuleConfig(mut m)) => {
+                if let Some(pb::module_config::PayloadVariant::Mqtt(q)) = &mut m.payload_variant {
+                    q.password.zeroize();
+                }
+            }
             Some(V::ConfigCompleteId(id)) => self.config_complete(st, id),
             Some(V::Packet(p)) => self.packet(st, p),
             Some(V::QueueStatus(qs)) => self.queue_status(st, &qs, now),
@@ -1703,6 +1842,16 @@ impl Inner {
         let cap = self.cfg.inbound_capacity;
         let ours = st.config_id == Some(id);
         let first = !st.configured;
+        if first && !ours && !st.table_complete() {
+            // another client's partial replay pre-empted ours (F2): not configured on it;
+            // a later full stream completes the session (we never ask again)
+            st.counters.partial_completions += 1;
+            self.log.line(format!(
+                "another client's config stream ended with the table incomplete ({}); waiting for a full one",
+                st.not_live().unwrap_or("incomplete")
+            ));
+            return;
+        }
         st.configured = true;
         st.ever_configured = true;
         st.upsert_channels(cap, &self.key);
@@ -1712,12 +1861,9 @@ impl Inner {
         }
         st.nearby_dirty = true;
         st.nearby_version += 1;
+        st.nearby_next_at = Duration::ZERO;
         if first {
             st.counters.configured += 1;
-            if !st.link_up {
-                st.link_up = true;
-                st.push_inbound(cap, Inbound::Link(LinkState::Up));
-            }
             self.log.line(format!(
                 "config stream complete ({}; {} channel(s), {} node(s))",
                 if ours { "ours" } else { "another client's" },
@@ -1948,10 +2094,10 @@ impl Inner {
                         }
                     }
                 }
-            } else if st.pause.take().is_some() {
-                for job in st.queue.iter_mut() {
-                    job.wait_noted = false;
-                }
+            } else {
+                // the board's own status change resumes the queue; a job reports
+                // "waiting for the radio" once, however many pauses it sits through (F7)
+                st.pause = None;
             }
         }
         let id = qs.mesh_packet_id;
@@ -1986,7 +2132,8 @@ impl Inner {
         }
         if let Some(p) = st.pause.as_mut() {
             if now >= p.probe_at {
-                // a nonce-0 heartbeat makes the board answer with a QueueStatus
+                // keep-alive while paused (nonce 0, backed off); the board's own status
+                // change resumes the queue (B3 review F6: no answer is claimed)
                 out.push(Work::Frame(to_radio_heartbeat()));
                 p.step = (p.step * 2).min(self.cfg.pause_probe_max);
                 p.probe_at = now + p.step;
@@ -2008,7 +2155,7 @@ impl Inner {
         // ends at the TTL
         let ttl = IN_FLIGHT_TTL;
         st.in_flight.retain(|_, fl| now < fl.written_at + ttl);
-        if st.configured && st.pause.is_none() && now >= st.next_send_at && !st.queue.is_empty() {
+        if st.ready() && st.pause.is_none() && now >= st.next_send_at && !st.queue.is_empty() {
             if let Some(id) = st.new_packet_id() {
                 if let Some(job) = st.queue.pop_front() {
                     let hop = st.hop_limit;
@@ -2066,7 +2213,7 @@ impl Inner {
         if let Some(p) = &st.pause {
             t = t.min(p.probe_at);
         }
-        if st.configured && st.pause.is_none() && !st.queue.is_empty() {
+        if st.ready() && st.pause.is_none() && !st.queue.is_empty() {
             t = t.min(st.next_send_at);
         }
         for fl in st.in_flight.values() {

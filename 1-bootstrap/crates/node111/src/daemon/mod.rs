@@ -11,6 +11,23 @@
 //! an adapter is enabled, and the daemon's existing 2 s tick drives
 //! [`Layer6::tick_once`] (`Bridge::tick_once` returns at once with nothing
 //! enabled; AGENTS.md: the Raspberry Pi is the floor).
+//!
+//! W1 (the open wiring of C1): the LXMF helper's seam is registered
+//! ([`register_lxmf`]: before its child starts, the helper's Reticulum client
+//! config is written with rnsd's `rpc_key` and its run arguments computed;
+//! once it runs, `LxmfAdapter` attaches to its piped stdio and is enabled in
+//! the core), and the core's Nearby sink feeds `GET /nearby` (the
+//! `reticulum` sources, `dashboard::api_v1::nearby::BridgeNearby`).
+//! Registration spawns nothing either: with the component disabled no task,
+//! child, listener or file of the helper exists.
+//!
+//! W3 (§7, §14): the Delta Chat network's two components are registered the
+//! same way ([`register_deltachat`]: Madmail's prepare hook writes the relay's
+//! loopback-only first config; the core's settles and renders the relay for
+//! its bind and requires its IMAP listener; the factory attaches
+//! `DeltaChatAdapter` to the running core), and [`Layer6::resume`] runs
+//! `Components::resume_enabled_with`'s one dependency-ordered loop. Nothing of
+//! either component exists while both are off.
 
 pub mod bridge;
 pub mod components;
@@ -33,7 +50,7 @@ use crate::install::categorize::{categorize, Classification, Refusal};
 use crate::install::probe::{self, Env, Facts};
 use dashboard::{ApiState, DashboardState, ErrorState, OfferState, SharedState};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock, RwLock};
 use std::time::Duration;
 
@@ -212,7 +229,23 @@ pub struct Layer6 {
     pub bridge: Arc<bridge::Bridge>,
     pub components: components::Components,
     pub mesh_client: Option<Arc<meshtastic::client::MeshtasticAdapter>>,
+    /// Set first by [`Layer6::shutdown`] (C1-bounce F2): the daemon tick is detached and
+    /// keeps running until the process exits, and the Meshtastic client still reads
+    /// `running()` until `meshtastic.stop_and_wait`, which comes after the fabric is
+    /// closed — a pass in that window must not re-enable the adapter.
+    stopping: AtomicBool,
+    /// Held by a whole [`Layer6::tick_once`] pass and by [`Layer6::shutdown`], so a pass
+    /// already past the `stopping` check finishes before the adapters are disabled.
+    pass: tokio::sync::Mutex<()>,
 }
+
+/// How long [`Layer6::resume`] lets an adapter's health check run before attaching it
+/// anyway (FB1). A resumed Delta Chat account is already configured, so its first
+/// handshake is a few loopback JSON-RPC calls (`get_system_info`, the account's state):
+/// well under a second on a Pi; 2 s caps what one resumed network adds to the daemon's
+/// start (the route's enable waits the whole `Setup::handshake_timeout`, 240 s, which
+/// covers a first configuration against the relay).
+pub const RESUME_ATTACH_BOUND: Duration = Duration::from_secs(2);
 
 /// Build the bridge core, the optional components and the transport routes' state, and
 /// insert them into `api` ext (`Arc<Bridge>`, `Components`, `Arc<TransportApi>`,
@@ -251,22 +284,51 @@ pub fn start_layer6(p: Layer6Parts) -> Layer6 {
         spine.set_restart_hooks(Arc::new(components.clone()));
         p.api.insert_ext(Arc::new(TransportApi { spine, facts }));
     }
+    wire_bridge_nearby(&p.api, &bridge);
     p.api.insert_ext(Arc::clone(&bridge));
     p.api.insert_ext(components.clone());
-    p.api.insert_ext(Arc::new(ComponentAdapters::default()));
-    Layer6 {
-        bridge,
-        components,
-        mesh_client: p.mesh_client,
-    }
+    let adapters = Arc::new(ComponentAdapters::default());
+    register_lxmf(&adapters, &p.api, &bridge);
+    register_deltachat(&adapters, &p.api, &bridge);
+    p.api.insert_ext(adapters);
+    Layer6::new(bridge, components, p.mesh_client)
 }
 
 impl Layer6 {
+    /// The parts [`start_layer6`] built (tests assemble one from their own bridge and
+    /// components); not stopping.
+    pub fn new(
+        bridge: Arc<bridge::Bridge>,
+        components: components::Components,
+        mesh_client: Option<Arc<meshtastic::client::MeshtasticAdapter>>,
+    ) -> Self {
+        Layer6 {
+            bridge,
+            components,
+            mesh_client,
+            stopping: AtomicBool::new(false),
+            pass: tokio::sync::Mutex::new(()),
+        }
+    }
+
+    /// [`Layer6::shutdown`] has begun: no tick pass or resume acts any more.
+    pub fn stopping(&self) -> bool {
+        self.stopping.load(Ordering::SeqCst)
+    }
+
     /// One pass, from the daemon's existing tick (no timer of its own): the Meshtastic
     /// adapter is enabled in the bridge core while its client runs (service `meshtastic`
     /// LIVE) and the user has not switched it off, disabled otherwise; then
-    /// `Bridge::tick_once`, which returns at once while nothing is enabled.
+    /// `Bridge::tick_once`, which returns at once while nothing is enabled. Once
+    /// [`Layer6::shutdown`] has begun it does nothing (F2).
     pub async fn tick_once(&self) {
+        if self.stopping() {
+            return;
+        }
+        let _pass = self.pass.lock().await;
+        if self.stopping() {
+            return;
+        }
         if let Some(c) = &self.mesh_client {
             let net = bridge::NETWORK_MESHTASTIC;
             let want = c.running() && self.bridge.adapter_switch(net) != Some(false);
@@ -284,23 +346,442 @@ impl Layer6 {
     }
 
     /// Daemon start, after the supervised children exist: resume the components whose
-    /// switch is on, and attach the adapters registered for them.
+    /// switch is on, and attach the adapters registered for them. The loop is
+    /// `Components::resume_enabled_with`'s (W3: one place for the order — a dependency
+    /// before its dependants — and the rule that the recorded acknowledgement must still
+    /// match), with each enable going through `api_v1::bridge::enable_component` (the
+    /// route's path) so a component's prepare hook runs before its child starts; a
+    /// failure is logged and leaves that component off (its switch stays as it was).
+    /// The adapters attach with their health wait bounded by [`RESUME_ATTACH_BOUND`]
+    /// (FB1): a health check still pending then is no failure — the adapter is in the
+    /// core and reads its own state (`adapter_down`) until Live — so a dead core never
+    /// holds the daemon's start for its whole handshake timeout; a factory that fails
+    /// outright is logged and its child keeps running (the route's later enable
+    /// attaches it with the whole check, or refuses it).
+    /// Once [`Layer6::shutdown`] has begun it does nothing (F2).
     pub async fn resume(&self, api: &ApiState) {
-        self.components.resume_enabled().await;
-        for c in self.components.declared().to_vec() {
-            if self.components.stdio(&c.id).await.is_some() {
-                dashboard::api_v1::bridge::attach_adapter(api, &self.components, &c.id).await;
+        if self.stopping() {
+            return;
+        }
+        let comps = &self.components;
+        let order = comps
+            .resume_enabled_with(|id| async move {
+                dashboard::api_v1::bridge::enable_component(api, comps, &id, None).await
+            })
+            .await;
+        for id in order {
+            if self.stopping() {
+                return;
+            }
+            if comps.stdio(&id).await.is_some() {
+                let bound = Some(RESUME_ATTACH_BOUND);
+                if let Err(e) =
+                    dashboard::api_v1::bridge::attach_adapter_within(api, comps, &id, bound).await
+                {
+                    eprintln!("111 bridge: {id}: not attached at resume: {e}");
+                }
             }
         }
     }
 
-    /// Daemon stop: the adapters, then the components' children.
+    /// Daemon stop: `stopping` first (no later tick pass or resume re-enables anything,
+    /// F2; a pass in flight is waited for), then the adapters, then the components'
+    /// children.
     pub async fn shutdown(&self) {
+        self.stopping.store(true, Ordering::SeqCst);
+        let _pass = self.pass.lock().await;
         for net in self.bridge.enabled() {
             self.bridge.disable(&net).await;
         }
         self.components.shutdown().await;
     }
+}
+
+/// The bridge core's Nearby sink (W1): the adapters' Nearby items (LXMF heards, the
+/// `reticulum` sources) are merged into a `BridgeNearby` in `api` ext, which `GET
+/// /nearby` lists after the Meshtastic module's sources; a change publishes the SSE
+/// `nearby` frame. No timer, no task.
+pub fn wire_bridge_nearby(api: &Arc<ApiState>, bridge: &bridge::Bridge) {
+    use dashboard::api_v1::nearby;
+    let heard = Arc::new(nearby::BridgeNearby::default());
+    bridge.set_nearby_sink(nearby::sink(api, Arc::clone(&heard)));
+    api.insert_ext(heard);
+}
+
+/// Register the LXMF helper's seam (§6, C3rs; W1) in `adapters`: a prepare hook that,
+/// once the licence notice passes and before the helper starts, writes its Reticulum client
+/// config ([`lxmf_client_config`]) and answers `bridge::lxmf::run_args` of the bridge's
+/// announce settings (fail closed: no spine, no shared instance or no `rpc_key` refuses
+/// the enable and nothing starts); its undo ([`remove_lxmf_client_config`]) for an enable
+/// refused after the hook passed (C1-bounce F4); and the adapter factory that attaches `LxmfAdapter` to
+/// the running component's stdio (`attach_adapter` then enables it in the core; the route
+/// disables it before the child stops). Captures the API state and the bridge weakly;
+/// spawns nothing.
+pub fn register_lxmf(
+    adapters: &dashboard::api_v1::bridge::ComponentAdapters,
+    api: &Arc<ApiState>,
+    bridge: &Arc<bridge::Bridge>,
+) {
+    use bridge::lxmf::{self, LxmfAdapter, LxmfConfig};
+    use components::EnableError;
+    let (api_w, bridge_w) = (Arc::downgrade(api), Arc::downgrade(bridge));
+    let prepare: dashboard::api_v1::bridge::PrepareHook = Arc::new(move || {
+        let (api, bridge) = (api_w.upgrade(), bridge_w.upgrade());
+        Box::pin(async move {
+            let stopping = || EnableError::StartFailed("the daemon is stopping".into());
+            let api = api.ok_or_else(stopping)?;
+            let bridge = bridge.ok_or_else(stopping)?;
+            let spine = api
+                .ext::<Arc<dashboard::api_v1::transport::TransportApi>>()
+                .map(|t| Arc::clone(&t.spine))
+                .ok_or_else(|| {
+                    EnableError::RequiresUnmet(
+                        "this node runs no transport spine, so rnsd's shared instance is not \
+                         available to attach to"
+                            .into(),
+                    )
+                })?;
+            let root = api.layout.root.clone();
+            tokio::task::spawn_blocking(move || lxmf_client_config(&spine, &root))
+                .await
+                .map_err(|e| {
+                    EnableError::InstallFailed(format!("the config task failed: {e}"))
+                })??;
+            Ok(lxmf::run_args(&bridge.announce()))
+        })
+    });
+    adapters.register_prepare(lxmf::COMPONENT_ID, prepare);
+    // F4: a refused enable after a passing hook takes the client config back
+    let api_w = Arc::downgrade(api);
+    let unprepare: dashboard::api_v1::bridge::UnprepareHook = Arc::new(move || {
+        let api = api_w.upgrade();
+        Box::pin(async move {
+            if let Some(api) = api {
+                let root = api.layout.root.clone();
+                let _ = tokio::task::spawn_blocking(move || remove_lxmf_client_config(&root)).await;
+            }
+        })
+    });
+    adapters.register_unprepare(lxmf::COMPONENT_ID, unprepare);
+    let bridge_w = Arc::downgrade(bridge);
+    let factory: dashboard::api_v1::bridge::AdapterFactory =
+        Arc::new(move |components: components::Components| {
+            let bridge = bridge_w.upgrade();
+            Box::pin(async move {
+                let bridge = bridge.ok_or("the bridge is stopping")?;
+                let stdio = components
+                    .stdio(lxmf::COMPONENT_ID)
+                    .await
+                    .ok_or("the lxmf component is not running")?;
+                let adapter =
+                    LxmfAdapter::start(stdio, LxmfConfig::from_manifests(bridge.manifests()));
+                Ok(adapter as Arc<dyn bridge::Adapter>)
+            })
+        });
+    adapters.register(lxmf::COMPONENT_ID, factory);
+}
+
+/// The LXMF helper's client config (§6 (1), §11): `share_instance = Yes`, the spine's
+/// `instance_name` and rnsd's `rpc_key` under `<root>/bridge/lxmf/rns/config` (0700 / 0600,
+/// `transport::config::write_client_config`; unchanged bytes are not rewritten). The key
+/// is the one the spine rendered rnsd's config with, read through the non-minting
+/// `Secrets::load_existing` (C1-bounce F1): nothing under rnsd's `secrets/` is minted,
+/// rewritten or re-moded here — not a malformed key, not the hub IFAC passphrase (a
+/// rotated key would not be rnsd's, and a component's enable never changes the spine's
+/// secrets). Fails closed with the enable's problem: `requires_unmet` when rnsd does not
+/// share its instance or has no key yet, `install_failed` when the key is unreadable,
+/// not a regular file or malformed, or the file cannot be written. Blocking.
+pub fn lxmf_client_config(
+    spine: &transport::posture::Spine,
+    root: &Path,
+) -> Result<bool, components::EnableError> {
+    use components::EnableError;
+    use transport::config;
+    let f = spine.file();
+    if !f.posture.share_instance {
+        return Err(EnableError::RequiresUnmet(
+            "rnsd does not share its instance (share_instance is off), so the helper has \
+             nothing to attach to"
+                .into(),
+        ));
+    }
+    let secrets = config::Secrets::load_existing(&spine.layout().root)
+        .map_err(|e| {
+            EnableError::InstallFailed(format!("rnsd's rpc_key could not be read: {e:#}"))
+        })?
+        .ok_or_else(|| {
+            EnableError::RequiresUnmet(
+                "rnsd has no rpc_key yet (its config was never rendered); start the \
+                 transport service first"
+                    .into(),
+            )
+        })?;
+    config::write_client_config(root, &secrets, &f.posture.instance_name).map_err(|e| {
+        EnableError::InstallFailed(format!(
+            "the helper's client config could not be written: {e:#}"
+        ))
+    })
+}
+
+/// Undo [`lxmf_client_config`] after a failed enable (C1-bounce F4): the hook runs before
+/// `Components::enable_with`'s `[requires]`, cache and pin checks, so an enable refused
+/// there would otherwise leave a 0600 copy of rnsd's `rpc_key` on disk for a component
+/// that is not installed. Removes `bridge/lxmf/rns/config`, then `bridge/lxmf/rns` and
+/// `bridge/lxmf` when they are left empty (anything else there stays). Blocking; errors
+/// are logged (best effort: the next enable rewrites the file).
+pub fn remove_lxmf_client_config(root: &Path) {
+    use transport::config;
+    let path = config::client_config_path(root);
+    match std::fs::remove_file(&path) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => eprintln!(
+            "111 bridge: lxmf: the helper's client config {} stays: {e}",
+            path.display()
+        ),
+    }
+    let dir = config::client_dir(root);
+    for d in [Some(dir.as_path()), dir.parent()].into_iter().flatten() {
+        // only an empty directory goes (ENOTEMPTY / ENOENT are fine)
+        let _ = std::fs::remove_dir(d);
+    }
+}
+
+/// How [`register_deltachat_with`] runs the Madmail relay's one-shot CLI and how long it
+/// waits (§7; `bridge::deltachat::Setup`'s knobs). [`DeltaChatWiring::production`] is
+/// `Setup::new`'s defaults (the 11240–11243 block the components claim, a 20 s IMAP
+/// wait, `SystemRunner`); tests move the ports and shorten the waits.
+#[derive(Clone)]
+pub struct DeltaChatWiring {
+    /// Runs `madmail --config … --state-dir … <switch>` (blocking).
+    pub cli: Arc<dyn crate::util::run::Runner>,
+    pub ports: bridge::deltachat::RelayPorts,
+    pub cfg: bridge::deltachat::DcConfig,
+    pub listen_timeout: Duration,
+}
+
+impl DeltaChatWiring {
+    /// The daemon's wiring (`Setup::new`'s defaults; nothing runs until an enable).
+    pub fn production() -> Self {
+        let cli: Arc<dyn crate::util::run::Runner> = Arc::new(crate::util::run::SystemRunner);
+        let s = bridge::deltachat::Setup::new(
+            Path::new("/"),
+            bridge::deltachat::RelayBind::Loopback,
+            Arc::clone(&cli),
+            Arc::new(|_: &str, _: &str| false),
+        );
+        DeltaChatWiring {
+            cli,
+            ports: s.ports,
+            cfg: s.cfg,
+            listen_timeout: s.listen_timeout,
+        }
+    }
+
+    fn setup(
+        &self,
+        root: &Path,
+        bind: bridge::deltachat::RelayBind,
+        optin: bridge::deltachat::OptIn,
+    ) -> bridge::deltachat::Setup {
+        let mut s = bridge::deltachat::Setup::new(root, bind, Arc::clone(&self.cli), optin);
+        s.ports = self.ports;
+        s.cfg = self.cfg.clone();
+        s.listen_timeout = self.listen_timeout;
+        s
+    }
+}
+
+/// Where the Madmail relay listens (§7: "LAN-bound only while LAN sharing is on"): this
+/// hub's first LAN IPv4 (`dashboard::bind::lan_ipv4s`, the order the dashboard prints)
+/// while LAN sharing is effective this lifetime (`ApiState::lan_enabled`, the contract's
+/// single source of truth, `settings.lan_enabled`), loopback otherwise — and loopback
+/// when LAN sharing is on but no LAN address exists (fail closed).
+pub fn deltachat_relay_bind(api: &ApiState) -> bridge::deltachat::RelayBind {
+    use bridge::deltachat::RelayBind;
+    if !api.lan_enabled {
+        return RelayBind::Loopback;
+    }
+    dashboard::bind::lan_ipv4s()
+        .first()
+        .map_or(RelayBind::Loopback, |ip| RelayBind::Lan(*ip))
+}
+
+/// [`register_deltachat_with`] the daemon's wiring.
+pub fn register_deltachat(
+    adapters: &dashboard::api_v1::bridge::ComponentAdapters,
+    api: &Arc<ApiState>,
+    bridge: &Arc<bridge::Bridge>,
+) {
+    register_deltachat_with(adapters, api, bridge, DeltaChatWiring::production());
+}
+
+/// Register the Delta Chat network's two components (§7, §2.1; C5, W3) in `adapters`, each
+/// enabled through the component route (`enable_component`, its own licence round trip):
+///
+/// - `madmail`'s prepare hook writes the relay's **first configuration, loopback-only**
+///   whatever the LAN setting (`RelayPaths::prepare` + `write_madmail_config`, 0700 / 0600)
+///   before its child starts; a relay already running keeps the configuration it runs with
+///   (the idempotent enable rewrites nothing).
+/// - `deltachat`'s prepare hook needs the relay running (else `requires_unmet`, the
+///   components' own copy), then settles and renders it for its bind (`deltachat::relan`:
+///   stopped, `push off`, federation rejected, registration open only on the LAN,
+///   re-rendered, started) and requires its IMAP listener (`relay_listening`, the bounded
+///   wait of `listen_timeout`) — else `start_failed` (`health_failed`) and the core does
+///   not start. A core already attached in the bridge changes nothing.
+/// - `deltachat`'s factory attaches `DeltaChatAdapter` to the running core's stdio
+///   (`deltachat::resume`, on the bind the hook rendered), with the per-contact switch read
+///   live from the bridge settings (`opt_in_from`), then waits for the core's first
+///   handshake (`DeltaChatAdapter::handshake_outcome`, §2.1 rule 4; FB1): from the route
+///   the whole `Setup::handshake_timeout`, and a timeout, `adapter_down`,
+///   `relay_unreachable` or `relay_moved` fails the factory — the route then disables the
+///   core (the relay stays) and answers `409 component_unavailable` / `health_failed`;
+///   from `Layer6::resume` at most [`RESUME_ATTACH_BOUND`], after which the adapter
+///   attaches whatever the outcome and reads its own state. `attach_adapter` enables it
+///   in the core and the route's disable of either component detaches it first.
+///
+/// The bind is [`deltachat_relay_bind`]. Captures the API state and the bridge weakly;
+/// spawns nothing, writes nothing (with both components off: no task, child, listener or
+/// file of either).
+pub fn register_deltachat_with(
+    adapters: &dashboard::api_v1::bridge::ComponentAdapters,
+    api: &Arc<ApiState>,
+    bridge: &Arc<bridge::Bridge>,
+    wiring: DeltaChatWiring,
+) {
+    use bridge::deltachat::{self as dc, RelayBind, RelayPaths};
+    use components::EnableError;
+    use dashboard::api_v1::bridge::{BoundedFactory, PrepareHook};
+    fn stopping() -> EnableError {
+        EnableError::StartFailed("the daemon is stopping".into())
+    }
+    /// An adapter state code as shown in a log line or a problem (stable words only).
+    fn dc_code(code: &str) -> String {
+        code.chars()
+            .filter(|c| c.is_ascii_alphanumeric() || *c == '_')
+            .take(32)
+            .collect()
+    }
+    // the bind the core's hook last rendered the relay for (the factory's relay host)
+    let bound: Arc<std::sync::Mutex<Option<RelayBind>>> = Arc::default();
+
+    let (api_w, w) = (Arc::downgrade(api), wiring.clone());
+    let relay: PrepareHook = Arc::new(move || {
+        let (api, ports) = (api_w.upgrade(), w.ports);
+        Box::pin(async move {
+            let api = api.ok_or_else(stopping)?;
+            let comps = api.ext::<components::Components>().ok_or_else(stopping)?;
+            if comps.stdio(dc::RELAY_COMPONENT).await.is_some() {
+                return Ok(Vec::new());
+            }
+            let paths = RelayPaths::of(&api.layout.root);
+            tokio::task::spawn_blocking(move || {
+                dc::write_madmail_config(&paths, RelayBind::Loopback, ports)
+            })
+            .await
+            .map_err(|e| EnableError::InstallFailed(format!("the config task failed: {e}")))?
+            .map_err(|e| {
+                EnableError::InstallFailed(format!(
+                    "the relay's configuration could not be written: {e:#}"
+                ))
+            })?;
+            Ok(Vec::new())
+        })
+    });
+    adapters.register_prepare(dc::RELAY_COMPONENT, relay);
+
+    let (api_w, bridge_w, w, b) = (
+        Arc::downgrade(api),
+        Arc::downgrade(bridge),
+        wiring.clone(),
+        Arc::clone(&bound),
+    );
+    let core: PrepareHook = Arc::new(move || {
+        let (api, bridge, w, bound) = (api_w.upgrade(), bridge_w.upgrade(), w.clone(), b.clone());
+        Box::pin(async move {
+            let api = api.ok_or_else(stopping)?;
+            let bridge = bridge.ok_or_else(stopping)?;
+            let comps = api.ext::<components::Components>().ok_or_else(stopping)?;
+            if comps.stdio(dc::RPC_COMPONENT).await.is_some()
+                && bridge.enabled().iter().any(|n| n == dc::NETWORK)
+            {
+                return Ok(Vec::new());
+            }
+            if comps.stdio(dc::RELAY_COMPONENT).await.is_none() {
+                let title = comps
+                    .get(dc::RELAY_COMPONENT)
+                    .map_or("Madmail", |c| c.title.as_str());
+                return Err(EnableError::RequiresUnmet(format!(
+                    "it needs {title} enabled first"
+                )));
+            }
+            let bind = deltachat_relay_bind(&api);
+            let setup = w.setup(&api.layout.root, bind, dc::opt_in_from(&bridge));
+            dc::relan(&comps, &setup, bind).await?;
+            if !dc::relay_listening(bind, setup.ports, setup.listen_timeout).await {
+                return Err(EnableError::StartFailed(format!(
+                    "Madmail runs, but its IMAP listener {}:{} did not open; the Delta Chat \
+                     core was not started",
+                    bind.host(),
+                    setup.ports.imap
+                )));
+            }
+            *bound.lock().unwrap_or_else(|e| e.into_inner()) = Some(bind);
+            Ok(Vec::new())
+        })
+    });
+    adapters.register_prepare(dc::RPC_COMPONENT, core);
+
+    let (api_w, bridge_w) = (Arc::downgrade(api), Arc::downgrade(bridge));
+    let factory: BoundedFactory = Arc::new(
+        move |comps: components::Components, wait: Option<Duration>| {
+            let (api, bridge, w, bound) = (
+                api_w.upgrade(),
+                bridge_w.upgrade(),
+                wiring.clone(),
+                Arc::clone(&bound),
+            );
+            Box::pin(async move {
+                let api = api.ok_or("the daemon is stopping")?;
+                let bridge = bridge.ok_or("the bridge is stopping")?;
+                let last = *bound.lock().unwrap_or_else(|e| e.into_inner());
+                let bind = last.unwrap_or_else(|| deltachat_relay_bind(&api));
+                let setup = w.setup(&api.layout.root, bind, dc::opt_in_from(&bridge));
+                let adapter = dc::resume(&comps, &setup)
+                    .await
+                    .ok_or("the Delta Chat core is not running")?;
+                // §2.1 rule 4 (start → health): the core's first handshake (FB1)
+                let limit =
+                    wait.map_or(setup.handshake_timeout, |b| b.min(setup.handshake_timeout));
+                match adapter.handshake_outcome(limit).await {
+                    Ok(()) => {}
+                    Err(code) if wait.is_some() => eprintln!(
+                        "111 bridge: deltachat: attached before its first handshake was                          Live ({}); it reads its state until then",
+                        dc_code(&code)
+                    ),
+                    Err(code) => {
+                        // the adapter goes (its tasks end with it); the route disables
+                        // the core and keeps the relay
+                        drop(adapter);
+                        return Err(match code.as_str() {
+                            "timeout" => format!(
+                                "the Delta Chat core did not complete its handshake within {} s",
+                                setup.handshake_timeout.as_secs()
+                            ),
+                            "relay_moved" => "the Delta Chat bridge account lives on another                                               relay address (LAN sharing changed); remove its                                               files and enable it again"
+                                .to_string(),
+                            other => format!(
+                                "the Delta Chat core's handshake failed ({})",
+                                dc_code(other)
+                            ),
+                        });
+                    }
+                }
+                Ok(adapter as Arc<dyn bridge::Adapter>)
+            })
+        },
+    );
+    adapters.register_bounded(dc::RPC_COMPONENT, factory);
 }
 
 async fn daemon_main() -> anyhow::Result<()> {
@@ -593,6 +1074,10 @@ async fn daemon_main() -> anyhow::Result<()> {
     // Layer 6: the components whose switch is on, now that their dependencies exist;
     // then the bridge pass joins the daemon tick
     layer6.resume(&dashboard.api).await;
+    // G1 (Layer 6 §16): debug builds only — the StubAdapters `$NODE111_BRIDGE_STUBS`
+    // declares; returns at once when the variable is unset (bridge::stub::scenario)
+    #[cfg(debug_assertions)]
+    bridge::stub::scenario::start(Arc::clone(&layer6.bridge));
     let _ = layer6_slot.set(Arc::clone(&layer6));
     // agent activity (Layer 4 R3): 111-agent /v1/agent/events → `agent` + `proposal` frames
     let _agent_events = dashboard::api_v1::relay::start_events(&dashboard.api);

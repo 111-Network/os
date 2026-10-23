@@ -72,6 +72,10 @@ export interface MockControls {
   readonly bus: MockBus;
   /** Drop the event stream for `ms`, then reconnect with Last-Event-ID replay (or reset). */
   dropConnection(ms: number): void;
+  /** The node refuses a still-queued foreign own row before air (`failed` with `reason`), as a scenario script's `bridgeRefuse` does. */
+  bridgeRefuse(id: string, reason: string): void;
+  /** A foreign text arrives from the air, as a scenario script's `bridgeReceive` does (a `network_message` frame; the conversation's `unread` rises). */
+  bridgeReceive(conv: string, sender: { native: string; name: string }, text: string, o?: { via_internet?: boolean }): void;
   dispose(): void;
 }
 
@@ -403,6 +407,9 @@ export function createMockAdapter(opts: MockOptions = {}): MockAdapter {
     },
     bridgeReceive(convId, sender, text, o) {
       B.receive(convId, sender, text, o);
+    },
+    bridgeRefuse(id, reason) {
+      B.refuse(id, reason);
     },
   };
 
@@ -1145,6 +1152,8 @@ export function createMockAdapter(opts: MockOptions = {}): MockAdapter {
     state,
     bus,
     dropConnection: (ms) => bus.disconnect(ms),
+    bridgeRefuse: (id, reason) => B.refuse(id, reason),
+    bridgeReceive: (conv, sender, text, o) => B.receive(conv, sender, text, o),
     dispose() {
       disposed = true;
       bus.stop();

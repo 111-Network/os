@@ -40,27 +40,49 @@ export function lowestState(states: readonly string[]): string {
 export const FOREIGN_CANCELLED = "cancelled";
 /**
  * A row whose hand-off to the carrier started and neither an acceptance nor a refusal came back (§4 at most once): after a crash it
- * is never re-sent on its own and reads "may have been sent; resend?". The contract has no field for the store's `meta.handoff`, so
- * the daemon is asked to publish it as this `reason_code`; a daemon that does not simply never shows the question.
+ * is never re-sent on its own and reads "may have been sent; resend?". The contract carries it as `uncertain: true` (and, when no other
+ * reason is set, as this `reason_code`); either one is enough, so an older daemon that only sets the code still shows the question.
  */
 export const HANDOFF_PENDING = "handoff_pending";
 
-export const isHandoffPending = (m: Pick<ForeignMessage, "dir" | "reason_code">): boolean => m.dir === "own" && m.reason_code === HANDOFF_PENDING;
+export const isHandoffPending = (m: Pick<ForeignMessage, "dir" | "reason_code" | "uncertain">): boolean =>
+  m.dir === "own" && (m.uncertain === true || m.reason_code === HANDOFF_PENDING);
 
-/** Cancel drops a row that is still `queued` with nothing sent (`Fabric::cancel`); a cancelled row is done. */
-export const isForeignCancellable = (m: Pick<ForeignMessage, "dir" | "state" | "reason_code">): boolean =>
-  m.dir === "own" && m.state === "queued" && m.reason_code !== FOREIGN_CANCELLED && m.reason_code !== HANDOFF_PENDING;
+/** Cancel drops a row that is still `queued` with nothing sent (`Fabric::cancel`); a cancelled row is done, and a handed-over one may have left. */
+export const isForeignCancellable = (m: Pick<ForeignMessage, "dir" | "state" | "reason_code" | "uncertain">): boolean =>
+  m.dir === "own" && m.state === "queued" && m.reason_code !== FOREIGN_CANCELLED && !isHandoffPending(m);
 
-/** The person may ask again for a row still waiting, handed over without proof, or refused before air (`Retry::Never` is the user's to retry). */
-export const isForeignRetryable = (m: Pick<ForeignMessage, "dir" | "state" | "reason_code">): boolean =>
-  m.dir === "own" && (m.state === "queued" || m.state === "sent" || m.state === "failed") && m.reason_code !== FOREIGN_CANCELLED;
+/**
+ * The row this own row was already sent again as (`superseded_by`, additive in Layer 6 V5), or null. An older daemon omits the field:
+ * read as null. Only an `fm-…` id counts; anything else from the wire is ignored.
+ */
+export const supersededBy = (m: Pick<ForeignMessage, "superseded_by">): string | null =>
+  typeof m.superseded_by === "string" && /^fm-[A-Za-z0-9_-]{1,125}$/.test(m.superseded_by) ? m.superseded_by : null;
 
-/** Keep a list ordered by `seq` after inserting or replacing `m` (matched by `id`); a stale snapshot never steps a row down the ladder. */
+/**
+ * The person may ask again for a row refused before air (`failed`; `Retry::Never` is the user's to retry) or handed over without an
+ * answer (uncertain). That is exactly what the node accepts (any other row answers 409): a `queued` row is still going by itself,
+ * a `sent` row has the carrier's word that it left, and a row already sent again (`superseded_by`) is done: its new row is the one
+ * to retry (V5: two retries of one row sent its text twice more).
+ */
+export const isForeignRetryable = (m: Pick<ForeignMessage, "dir" | "state" | "reason_code" | "uncertain" | "superseded_by">): boolean =>
+  m.dir === "own" && m.reason_code !== FOREIGN_CANCELLED && supersededBy(m) === null && (m.state === "failed" || isHandoffPending(m));
+
+/**
+ * Would taking `next` for the held row `mine` be a step back from proof? Only `delivered` is protected: it is final, so an older
+ * snapshot that still says `sent` must not undo it. Every other change is the node's own account and is taken as it comes:
+ * `queued` -> `failed` (refused before air) ranks "down" on the evidence ladder but is exactly what the person must see, and a
+ * row's re-queue after a retry is the node's say, not the page's to hide (§4: the node enforces the ladder).
+ */
+export const regressesDelivered = (mine: Pick<ForeignMessage, "state">, next: Pick<ForeignMessage, "state">): boolean =>
+  mine.state === "delivered" && next.state !== "delivered" && foreignRank(next.state) >= 0;
+
+/** Keep a list ordered by `seq` after inserting or replacing `m` (matched by `id`); a stale snapshot never undoes `delivered`. */
 export function upsertForeign(messages: readonly ForeignMessage[], m: ForeignMessage): ForeignMessage[] {
   const at = messages.findIndex((x) => x.id === m.id);
   if (at >= 0) {
     const mine = messages[at]!;
-    if (foreignRank(mine.state) > foreignRank(m.state) && foreignRank(m.state) >= 0) return messages as ForeignMessage[];
+    if (regressesDelivered(mine, m)) return messages as ForeignMessage[];
     if (JSON.stringify(mine) === JSON.stringify(m)) return messages as ForeignMessage[];
     const next = messages.slice();
     next[at] = m;
@@ -84,7 +106,7 @@ export const topSeq = (messages: readonly ForeignMessage[]): number => messages.
 
 /**
  * Lay a fetched window over the one the store holds, never going back in time: rows the response does not know and that are newer
- * than its newest are kept, and a row never steps down the evidence ladder. Everything else is the response's: it is the node's
+ * than its newest are kept, and a `delivered` row is never undone by an older snapshot. Everything else is the response's: it is the node's
  * own account of the window (a cancelled row is gone from it).
  */
 export function mergeForeignPage(current: ForeignPage | null | undefined, fetched: ForeignPage): ForeignPage {
@@ -95,7 +117,7 @@ export function mergeForeignPage(current: ForeignPage | null | undefined, fetche
   let changed = false;
   const messages = fetched.messages.map((m) => {
     const mine = have.get(m.id);
-    if (mine && foreignRank(mine.state) > foreignRank(m.state) && foreignRank(m.state) >= 0) {
+    if (mine && regressesDelivered(mine, m)) {
       changed = true;
       return mine;
     }

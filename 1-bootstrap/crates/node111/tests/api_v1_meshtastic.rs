@@ -1225,7 +1225,9 @@ async fn identify_refusals_open_nothing_twice() {
     std::fs::remove_file(&h.crash).unwrap();
     h.stop().await;
 
-    // a board that answers but is not Meshtastic: honest `unknown`, unbound
+    // a board that answers but is not Meshtastic: one NoMatch is not `unknown` (§12, FB1
+    // item 4 — `unknown` only after all three families answered NoMatch, which this
+    // single-step entry never probes): 502, nothing persisted, unbound
     let Some(h) = harness(Opts {
         mode: Mode::NotMeshtastic,
         ..Opts::default()
@@ -1242,19 +1244,15 @@ async fn identify_refusals_open_nothing_twice() {
         Some(r#"{"consent":true}"#),
     )
     .await;
-    assert_eq!(r.status, 200, "{}", r.body);
-    let rec = r.json();
-    assert_eq!(rec["firmware"]["family"], "unknown");
-    assert_eq!(rec["firmware"]["source"], "probe");
-    assert_ne!(rec["service_id"], "meshtastic", "{rec}");
-    assert!(rec["driver"].is_null(), "{rec}");
+    r.problem(502, "upstream_error");
+    assert!(r.body.contains("nothing was recorded"), "{}", r.body);
     let pids = h.meshmud_launches(1).await;
     assert_eq!(pids.len(), 1);
     assert!(!alive(pids[0]), "the identify meshmud was stopped");
     assert!(h.held().is_empty());
     assert!(h.m.service_pids().is_none());
     let e = &h.store()["devices"][&board.id];
-    assert_eq!(e["firmware"]["family"], "unknown");
+    assert!(e.get("firmware").is_none(), "nothing persisted: {e}");
     assert!(e.get("meshtastic").is_none());
     assert_eq!(h.meshtastic_row(false).reason_code, "no_meshtastic");
     h.stop().await;

@@ -18,7 +18,7 @@ component.
 | `requirements.in` | the two exact top-level pins: `rns==1.5.7`, `lxmf==1.2.1` |
 | `lxmf-sidecar-lock.txt` | the hash-locked closure (6 packages, 167 hashes: every file PyPI publishes for each pin); `pip install --require-hashes -r` |
 | `gen_lock.py` | produces / verifies the lock and writes the same bytes to `1-bootstrap/crates/node111/assets/components/lxmf.lock.txt` (embedded in the signed binary beside `lxmf.toml`) |
-| `run-tests.sh`, `tests/` | offline tests (119) with a fake `RNS`/`LXMF` surface; no network, no hardware |
+| `run-tests.sh`, `tests/` | offline tests (128) with a fake `RNS`/`LXMF` surface; no network, no hardware |
 | `LICENSE-NOTE.md` | why there is no licence file yet |
 
 ## Run
@@ -62,7 +62,7 @@ stderr line names the venv `<root>/venvs/lxmf`).
 
 | library | emitted |
 |---|---|
-| unknown destination (`Identity.recall` finds nothing) | `queued` / `peer_unannounced`, the send is parked (≤ 256) and tried when a matching `heard` arrives |
+| unknown destination (`Identity.recall` finds nothing) | `queued` / `peer_unannounced`, the send is parked (≤ 256), its path is requested (below) and it is tried when a matching `heard` arrives |
 | `OUTBOUND` (or `GENERATING`) | `queued` |
 | `SENDING`, `SENT` | `sent` |
 | propagated `SENT` (not used in v1: propagation is off) | `relayed` |
@@ -76,6 +76,17 @@ Monotone: `queued < sent < relayed < delivered`; `delivered` and `failed` are fi
 `queued`/`sent` row is emitted again only to add a new reason. A delivery proof from an older attempt of the same `id` still
 counts. The helper never resends by itself: one hand-over to the router per `send`. `SENDING`/`SENT` are not signalled by a
 callback in LXMF, so the helper samples in-flight messages once a second, and only while one is in flight.
+
+**Path requests for parked sends (spec §6 (4)).** A shared-instance RNS client keeps no known destinations across a restart,
+so a restarted helper would otherwise wait for the peer's next announce (up to its interval, 60 minutes by default). When a
+send parks as `peer_unannounced`, the helper calls `RNS.Transport.request_path(dest)` once for that destination (a second
+send parked on it adds nothing), then again on its own timer with back-off (30 s, 60 s, … up to 480 s, never more often than
+every 30 s), only while a send to it stays parked; the period ends on the `heard` that resumes it, and a new run starts with
+none, so every destination it parks again is requested again. Its rnsd answers a local client's request from its path table
+(even with transport off) or forwards it to the network; the answer is the peer's announce as a path response, which the
+announce handler accepts (`receive_path_responses`), reports as `heard` and uses to resume the parked sends. Like the router,
+`request_path` is called outside the state lock. A send the library already holds (a `FAILED` while `OUTBOUND`) is left to
+the library's own pathing.
 
 ### Relay marker
 
@@ -112,7 +123,7 @@ start so nothing a library prints can corrupt the protocol.
 
 `sh run-tests.sh` (pytest when the interpreter has it, else unittest; `-I` isolated mode). They cover framing and the 64 KiB
 limit, every command and malformed-line case, the state mapping (all library states × every prior state), the monotone
-rule, parking and resume, the marker placement and round trip, attachment stripping and caps, announce timing on a fake
+rule, parking and resume, the path requests of parked sends (once per destination, the back-off, the path response, outside the lock), the marker placement and round trip, attachment stripping and caps, announce timing on a fake
 monotonic clock, exit codes 3 and 4, a subprocess run of the real `__main__` path (library output never reaches the protocol,
 SIGTERM is a clean exit), no foreign text or key material on stderr, and AST scans: no socket, no `bind`/`listen`, no wall
 clock, no `print`. `tests/test_lock.py` checks the lock and the embedded copy. The fake surface lives in `tests/_support.py`.

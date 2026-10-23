@@ -25,6 +25,30 @@ pub struct InstallArgs {
     /// Shim-forwarded floor (the binary also refuses below the compiled-in
     /// MIN_INSTALLER_VERSION).
     pub min_installer_version: Option<crate::calver::Calver>,
+    /// `--components ID[,ID…]` (Layer 6 §2.1 rule 3): only download these
+    /// optional components' pinned payloads into the install-time cache on an
+    /// installed node (the ones `[install] prefetch = false` leaves out).
+    pub components: Option<Vec<String>>,
+}
+
+/// `--components` value: comma-separated component ids (the contract's
+/// `ComponentId` pattern), at most 16, duplicates dropped.
+fn parse_component_ids(v: &str) -> anyhow::Result<Vec<String>> {
+    let mut ids: Vec<String> = Vec::new();
+    for id in v.split(',').map(str::trim).filter(|s| !s.is_empty()) {
+        anyhow::ensure!(
+            crate::daemon::components::manifest::is_component_id(id),
+            "--components: {id:?} is not a component id"
+        );
+        if !ids.iter().any(|x| x == id) {
+            ids.push(id.to_string());
+        }
+    }
+    anyhow::ensure!(
+        !ids.is_empty() && ids.len() <= 16,
+        "--components needs 1 to 16 comma-separated component ids"
+    );
+    Ok(ids)
 }
 
 #[derive(Debug)]
@@ -77,6 +101,11 @@ fn parse_install_flags(args: &[String]) -> anyhow::Result<InstallArgs> {
             i += 1;
             continue;
         }
+        if let Some(v) = arg.strip_prefix("--components=") {
+            ia.components = Some(parse_component_ids(v)?);
+            i += 1;
+            continue;
+        }
         match arg {
             "--phone" => ia.phone = true,
             "--keep-adb" => ia.keep_adb = true,
@@ -91,6 +120,13 @@ fn parse_install_flags(args: &[String]) -> anyhow::Result<InstallArgs> {
                         .clone(),
                 );
             }
+            "--components" => {
+                i += 1;
+                let v = args
+                    .get(i)
+                    .ok_or_else(|| anyhow::anyhow!("--components needs a value"))?;
+                ia.components = Some(parse_component_ids(v)?);
+            }
             "--min-installer-version" => {
                 i += 1;
                 let v = args
@@ -102,6 +138,10 @@ fn parse_install_flags(args: &[String]) -> anyhow::Result<InstallArgs> {
         }
         i += 1;
     }
+    anyhow::ensure!(
+        !(ia.phone && ia.components.is_some()),
+        "--components is a host-install flag (not with --phone)"
+    );
     Ok(ia)
 }
 
@@ -158,6 +198,7 @@ const USAGE: &str = "111 — the 111 Network node
 USAGE:
   111 install [--allow-degraded] [--min-installer-version=CALVER]
   111 install --phone [--serial SERIAL] [--keep-adb] [--reboot-test] [--yes]
+  111 install --components ID[,ID…]   (download optional components' payloads into the cache, e.g. deltachat,madmail)
   111 daemon
   111 identity backup|restore      (run as the node user: sudo -u node111 111 identity backup)
   111 identity commission [--loopback-test]   (Cat-1 relay ceremony; your own computer, needs a terminal)
@@ -649,6 +690,31 @@ fn identity_generate(burn: bool) -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn install_components_flag_takes_component_ids() {
+        let ids =
+            |argv: &[&str]| match parse(&argv.iter().map(|s| s.to_string()).collect::<Vec<_>>()) {
+                Ok(Cmd::Install(ia)) => Ok(ia.components),
+                Ok(other) => panic!("{other:?}"),
+                Err(e) => Err(e.to_string()),
+            };
+        let want = Some(vec!["deltachat".to_string(), "madmail".to_string()]);
+        assert_eq!(
+            ids(&["install", "--components", "deltachat,madmail"]),
+            Ok(want.clone())
+        );
+        assert_eq!(
+            ids(&["install", "--components=deltachat,madmail,deltachat"]),
+            Ok(want)
+        );
+        assert_eq!(ids(&["install"]), Ok(None));
+        assert!(ids(&["install", "--components"]).is_err());
+        assert!(ids(&["install", "--components", ","]).is_err());
+        assert!(ids(&["install", "--components", "../etc"]).is_err());
+        assert!(ids(&["install", "--components", "Delta"]).is_err());
+        assert!(ids(&["install", "--phone", "--components", "deltachat"]).is_err());
+    }
 
     #[test]
     fn parse_matrix() {
