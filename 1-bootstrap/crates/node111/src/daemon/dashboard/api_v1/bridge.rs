@@ -23,7 +23,10 @@
 //!   contract's success; the child may still wait for its dependency, `reason_code`
 //!   says so). A component whose network has an adapter factory registered
 //!   ([`ComponentAdapters`], the C3/C5 seam) gets its adapter enabled in the bridge core
-//!   after enable and disabled before disable. `disable` is idempotent; `remove-files
+//!   after enable and disabled before disable (its Nearby source cleared with it); a
+//!   component with a [`PrepareHook`] (the LXMF helper's client config and run arguments,
+//!   W1) has it run once the licence notice passes and before its child starts — a
+//!   failing hook answers the enable's problem and nothing starts ([`enable_component`]). `disable` is idempotent; `remove-files
 //!   {cache?}` deletes the installed tree and `bridge/<adapter>/` (and with `cache: true`
 //!   the cached payload — root-owned, so the daemon user's `EACCES` is a clear `500`).
 //!
@@ -35,7 +38,7 @@ use super::{ApiRouter, ApiState, Problem};
 use crate::daemon::bridge::edges::{EdgeOpts, EdgePatch};
 use crate::daemon::bridge::settings::SettingsPatch;
 use crate::daemon::bridge::{Adapter, Bridge, BridgeError, SizeMode};
-use crate::daemon::components::{Components, Status};
+use crate::daemon::components::{Components, EnableError, Enabled, Status};
 use crate::daemon::fabric::json as fjson;
 use axum::body::Bytes;
 use axum::extract::rejection::PathRejection;
@@ -160,11 +163,20 @@ pub(crate) async fn components_list(c: Components) -> Vec<Status> {
 pub type AdapterFactory =
     Arc<dyn Fn(Components) -> BoxFuture<'static, Result<Arc<dyn Adapter>, String>> + Send + Sync>;
 
+/// Runs before a component's child is started, once its licence notice is acknowledged
+/// (W1, the C3rs seam: the LXMF helper's Reticulum client config written with rnsd's
+/// `rpc_key`, §6 (1), §11): prepares what the child needs on disk and answers the
+/// arguments the adapter appends to `[run] args` (`lxmf::run_args`). An error refuses the
+/// enable with the contract's problem and nothing starts (fail closed).
+pub type PrepareHook =
+    Arc<dyn Fn() -> BoxFuture<'static, Result<Vec<String>, EnableError>> + Send + Sync>;
+
 /// The registration seam between optional components and the bridge core (module doc).
 /// With nothing registered, enabling a component starts its child only.
 #[derive(Default)]
 pub struct ComponentAdapters {
     map: RwLock<HashMap<String, AdapterFactory>>,
+    prepare: RwLock<HashMap<String, PrepareHook>>,
 }
 
 impl ComponentAdapters {
@@ -176,6 +188,20 @@ impl ComponentAdapters {
             .insert(component.to_string(), f);
     }
 
+    /// Register the hook that runs before `component`'s child starts ([`PrepareHook`]; a
+    /// second registration replaces the first).
+    pub fn register_prepare(&self, component: &str, f: PrepareHook) {
+        self.prepare
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(component.to_string(), f);
+    }
+
+    /// Whether `component` has an adapter factory registered.
+    pub fn registered(&self, component: &str) -> bool {
+        self.get(component).is_some()
+    }
+
     fn get(&self, component: &str) -> Option<AdapterFactory> {
         self.map
             .read()
@@ -183,6 +209,46 @@ impl ComponentAdapters {
             .get(component)
             .cloned()
     }
+
+    fn prepare_of(&self, component: &str) -> Option<PrepareHook> {
+        self.prepare
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(component)
+            .cloned()
+    }
+}
+
+/// Enable `component` (the route's and `Layer6::resume`'s one path): when a
+/// [`PrepareHook`] is registered and the licence notice passes (`ack` is the notice's
+/// hash, or none and the acknowledgement is recorded), the hook runs first and its
+/// arguments go to `Components::enable_with`; a failing hook refuses the enable (nothing
+/// installed past what was there, nothing started). Without a valid acknowledgement the
+/// hook does not run and the enable answers `consent_required` as usual (nothing is
+/// written for a component the user has not accepted, §2.1 rule 2).
+pub async fn enable_component(
+    api: &ApiState,
+    components: &Components,
+    component: &str,
+    ack: Option<&str>,
+) -> Result<Enabled, EnableError> {
+    let hook = api
+        .ext::<Arc<ComponentAdapters>>()
+        .and_then(|r| r.prepare_of(component));
+    let mut args = Vec::new();
+    if let Some(hook) = hook {
+        let accepted = components
+            .status(component)
+            .await
+            .is_some_and(|st| match ack {
+                Some(h) => h == st.notice_hash,
+                None => st.acknowledged,
+            });
+        if accepted {
+            args = hook().await?;
+        }
+    }
+    components.enable_with(component, ack, args).await
 }
 
 /// After an enable: build and enable the component's adapter in the bridge core, when a
@@ -214,12 +280,18 @@ pub async fn attach_adapter(api: &ApiState, components: &Components, component: 
 
 /// Before a disable: disable the component's network in the bridge core (whoever enabled
 /// its adapter: nothing reads a child that is about to stop).
-async fn detach_adapter(api: &ApiState, components: &Components, component: &str) {
+pub async fn detach_adapter(api: &ApiState, components: &Components, component: &str) {
     let Some(bridge) = api.ext::<Arc<Bridge>>() else {
         return;
     };
     if let Some(network) = components.get(component).map(|c| c.adapter.clone()) {
         bridge.disable(&network).await;
+        // its Nearby source goes with it (W1: a stopped helper hears nothing)
+        if let Some(nearby) = api.ext::<Arc<super::nearby::BridgeNearby>>() {
+            if nearby.clear(&network) {
+                super::nearby::publish(api);
+            }
+        }
     }
 }
 
@@ -511,7 +583,7 @@ async fn enable(
     if c.get(&id).is_none() {
         return not_found("component").into_response();
     }
-    match c.enable(&id, req.accept_notice_hash.as_deref()).await {
+    match enable_component(&api, &c, &id, req.accept_notice_hash.as_deref()).await {
         Ok(done) => {
             attach_adapter(&api, &c, &id).await;
             let status = c.status(&id).await.unwrap_or(done.status);

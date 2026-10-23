@@ -18,8 +18,11 @@
 //!   `Arc<crate::daemon::bridge::Bridge>` (networks, fan-out, edges,
 //!   settings), `crate::daemon::components::Components` (optional
 //!   components), `Arc<transport::TransportApi>` (the spine and the rnstatus
-//!   facts cache) and `Arc<bridge::ComponentAdapters>` (the component →
-//!   adapter seam).
+//!   facts cache), `Arc<bridge::ComponentAdapters>` (the component →
+//!   adapter seam: adapter factories and the prepare hooks that run before a
+//!   component's child starts, the LXMF helper's registered by
+//!   `daemon::register_lxmf`) and `Arc<nearby::BridgeNearby>` (the adapters'
+//!   Nearby sources, the `reticulum` ones, merged into `GET /nearby`).
 //! - `auth` routes (`/api/v1/auth/*`) are open (that is how a LAN visitor pairs).
 //! - [`auth::csrf_guard`] wraps BOTH groups: every POST/PATCH/PUT/DELETE must be
 //!   `Content-Type: application/json` (else 415) and, when `Origin` is present,

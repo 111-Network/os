@@ -25,7 +25,15 @@
 //! - the agent's bearer reads (`GET /networks`) and is refused (`401`) on every Layer 6
 //!   write;
 //! - SSE `network_message` and `bridge` frames observed on `/events`;
-//! - a fresh Layer 6 wiring spawns nothing: no recv task, no runtime task, nothing enabled.
+//! - a fresh Layer 6 wiring spawns nothing: no recv task, no runtime task, nothing enabled
+//!   (the LXMF seam and the Nearby sink registered all the same);
+//! - W1: `POST /messages/fm-…/retry|cancel` (`Bridge::resend` / `Bridge::cancel`; a `msg-…`
+//!   id keeps the Layer 5 path), and the LXMF seam end to end against a scripted helper —
+//!   the client config written with rnsd's `rpc_key` only once the notice passes and a
+//!   spine exists (fail closed otherwise), the run arguments, the adapter attached and
+//!   live in `GET /networks`, its `heard` merged into `GET /nearby` as a `reticulum`
+//!   source with the SSE `nearby` frame, and disable removing the network, the source and
+//!   the child.
 
 use axum::extract::connect_info::MockConnectInfo;
 use node111::daemon::bridge::{
@@ -568,6 +576,11 @@ async fn serve(api: &Arc<ApiState>, peer: Option<&str>) -> u16 {
 }
 
 async fn node() -> Node {
+    node_with(vec![demo_component()]).await
+}
+
+/// A node whose optional components are `declared`.
+async fn node_with(declared: Vec<Component>) -> Node {
     let dir = tempfile::tempdir().unwrap();
     std::fs::create_dir_all(dir.path().join("state")).unwrap();
     std::fs::create_dir_all(dir.path().join("current")).unwrap();
@@ -598,7 +611,7 @@ async fn node() -> Node {
     };
     let components = Components::new(
         ccfg,
-        vec![demo_component()],
+        declared,
         Wiring {
             cmd: Arc::new(node111::testkit::MockRunner::new(Vec::<(
                 String,
@@ -1852,6 +1865,360 @@ fn a_fresh_layer6_spawns_nothing_and_enables_nothing() {
         );
         assert!(api.ext::<Arc<Bridge>>().is_some());
         assert!(api.ext::<Components>().is_some());
+        // W1: the LXMF seam and the Nearby sink are registered, and still nothing runs
+        let adapters = api
+            .ext::<Arc<node111::daemon::dashboard::api_v1::bridge::ComponentAdapters>>()
+            .unwrap();
+        assert!(adapters.registered("lxmf"));
+        let heard = api
+            .ext::<Arc<node111::daemon::dashboard::api_v1::nearby::BridgeNearby>>()
+            .unwrap();
+        assert!(heard.sources().is_empty());
+        assert!(
+            l6.components.stdio("lxmf").await.is_none(),
+            "no helper child"
+        );
+        assert!(
+            !dir.path().join("bridge/lxmf").exists(),
+            "no file of the helper while it is disabled"
+        );
         l6.shutdown().await;
     });
+}
+
+// ---------------------------------------------------------------- W1: foreign retry / cancel
+
+/// The `ForeignMessage` JSON of row `id` in `conv`'s thread (`None`: not listed).
+fn listed(n: &Node, net: &str, conv: i64, id: i64) -> Option<Value> {
+    let t = n
+        .get(&format!(
+            "/api/v1/networks/{net}/conversations/{}",
+            fjson::fc_id(conv)
+        ))
+        .json();
+    t["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|m| m["id"] == fjson::fm_id(id))
+        .cloned()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn foreign_rows_retry_and_cancel_by_fm_id_and_msg_ids_keep_the_layer5_path() {
+    use mesh111::store::ForeignState;
+    let p = pair().await;
+    let n = &p.n;
+    let path = format!(
+        "/api/v1/networks/stub-a/conversations/{}/messages",
+        fjson::fc_id(p.src)
+    );
+    let send = |text: &str| {
+        let r = n.post(&path, json!({ "text": text }));
+        check_op("sendForeignMessage", &r);
+        fjson::parse_fm_id(r.json()["id"].as_str().unwrap()).unwrap()
+    };
+    let retry = |id: &str| n.post(&format!("/api/v1/messages/{id}/retry"), json!({}));
+    let cancel = |id: &str| n.post(&format!("/api/v1/messages/{id}/cancel"), json!({}));
+
+    // queued, nothing handed: cancel deletes the row (202), GET shows it gone
+    let q = send("cancel me");
+    assert!(listed(n, "stub-a", p.src, q).is_some());
+    let r = cancel(&fjson::fm_id(q));
+    assert_eq!(r.status, 202, "{}", r.body);
+    assert_eq!(r.json()["id"], fjson::fm_id(q));
+    assert!(n.fab().foreign_message(q).await.is_err(), "deleted");
+    assert!(
+        listed(n, "stub-a", p.src, q).is_none(),
+        "gone from the thread"
+    );
+    cancel(&fjson::fm_id(q)).problem(404, "not_found");
+
+    // a sent row: not cancellable (409, Layer 5 copy) and not waiting for a decision
+    let s = send("on air");
+    n.fab().foreign_handoff_begin(s).await.unwrap();
+    n.fab().foreign_accepted(s, "native-1").await.unwrap();
+    n.fab()
+        .foreign_set_state(s, ForeignState::Sent, Some("accepted by the radio"), None)
+        .await
+        .unwrap();
+    let pb = cancel(&fjson::fm_id(s)).problem(409, "bad_request");
+    assert!(pb["title"].as_str().unwrap().contains("cancelled"), "{pb}");
+    assert_eq!(
+        n.fab().foreign_message(s).await.unwrap().state,
+        ForeignState::Sent,
+        "kept"
+    );
+    retry(&fjson::fm_id(s)).problem(409, "bad_request");
+
+    // an uncertain row (handed, never answered, not in flight): may have been sent, so it
+    // is not cancelled; retry sends it again as a new row and the old one records it
+    let u = send("maybe sent");
+    n.fab().foreign_handoff_begin(u).await.unwrap();
+    assert!(n.bridge.uncertain(u).await.unwrap());
+    let row = listed(n, "stub-a", p.src, u).unwrap();
+    assert_eq!(row["uncertain"], true, "{row}");
+    assert_eq!(row["reason_code"], "handoff_pending", "{row}");
+    cancel(&fjson::fm_id(u)).problem(409, "bad_request");
+    let r = retry(&fjson::fm_id(u));
+    assert_eq!(r.status, 200, "{}", r.body);
+    assert_schema("ForeignSendAccepted", &r.json());
+    let new = fjson::parse_fm_id(r.json()["id"].as_str().unwrap()).unwrap();
+    assert_ne!(new, u, "a new row");
+    let old = n.fab().foreign_message(u).await.unwrap();
+    assert!(
+        old.meta.contains(&format!("\"resent_as\":{new}")),
+        "{}",
+        old.meta
+    );
+    assert_eq!(
+        old.state,
+        ForeignState::Queued,
+        "the old row keeps its state"
+    );
+    let fresh = n.fab().foreign_message(new).await.unwrap();
+    assert_eq!(fresh.state, ForeignState::Queued);
+    assert_eq!(fresh.body, "maybe sent");
+    assert!(listed(n, "stub-a", p.src, new).is_some());
+    // an inbound row is neither
+    p.a.feed(text(&p.ca, "!a1", "Alice", "in-1", "hello"));
+    let rows = n.wait_rows(p.src, 4).await;
+    let inbound = rows
+        .iter()
+        .find(|r| r.dir == mesh111::store::ForeignDir::In)
+        .unwrap()
+        .id;
+    cancel(&fjson::fm_id(inbound)).problem(409, "bad_request");
+    retry(&fjson::fm_id(inbound)).problem(409, "bad_request");
+
+    // unknown and malformed fm- ids
+    for id in ["fm-999999", "fm-0", "fm-x", "fm-"] {
+        retry(id).problem(404, "not_found");
+        cancel(id).problem(404, "not_found");
+    }
+    // a Layer 5 id takes the Layer 5 path: msg-<n> never names foreign row n
+    let k = send("a foreign row");
+    cancel(&format!("msg-{k}")).problem(404, "not_found");
+    retry(&format!("msg-{k}")).problem(404, "not_found");
+    assert!(n.fab().foreign_message(k).await.is_ok(), "untouched");
+    // the agent's bearer is refused by the global gate before any handler
+    for op in ["retry", "cancel"] {
+        http(
+            n.port,
+            "POST",
+            &format!("/api/v1/messages/{}/{op}", fjson::fm_id(k)),
+            &[("Authorization", &n.bearer())],
+            Some(&json!({})),
+        )
+        .problem(401, "unauthenticated");
+    }
+    assert!(n.fab().foreign_message(k).await.is_ok());
+}
+
+// ---------------------------------------------------------------- W1: the LXMF seam
+
+/// Our delivery destination and a peer the scripted helper hears.
+const LX_DEST: &str = "0123456789abcdef0123456789abcdef";
+const LX_PEER: &str = "fedcba9876543210fedcba9876543210";
+
+/// A scripted LXMF helper (a binary payload): records its arguments under `$HOME`, says
+/// `ready`, reports one `heard`, then reads stdin until it is stopped (its stdout stays
+/// open: a closed stdout ends the run for the adapter).
+fn lxmf_bin() -> Vec<u8> {
+    format!(
+        "#!/bin/sh\nprintf '%s\\n' \"$*\" > \"$HOME/lxmf-args\"\n\
+         printf '%s\\n' '{{\"type\":\"ready\",\"dest\":\"{LX_DEST}\",\"pubkey\":\"{pk}\",\"instance\":\"111\"}}'\n\
+         printf '%s\\n' '{{\"type\":\"heard\",\"dest\":\"{LX_PEER}\",\"name\":\"Bob\"}}'\n\
+         while IFS= read -r line; do :; done\n",
+        pk = "ab".repeat(64)
+    )
+    .into_bytes()
+}
+
+/// The `lxmf` component as a binary payload running [`lxmf_bin`] (the real declaration is
+/// a pip closure on Python 3.11 after rnsd; the seam under test does not depend on it).
+fn lxmf_component() -> Component {
+    let bin = lxmf_bin();
+    let toml = format!(
+        r#"id = "lxmf"
+adapter = "lxmf"
+title = "Reticulum / LXMF helper"
+[payload]
+kind = "binary"
+url = "https://example.invalid/dl/lxmf-fake"
+sha256 = "{sha}"
+size = {size}
+[run]
+program = "lxmf-fake"
+args = ["--config-dir", "{{bridge}}/rns"]
+ports = []
+health = "ready"
+health_timeout_secs = 10
+[license]
+spdx = "LicenseRef-Reticulum"
+read_at = "https://example.invalid/LICENSE"
+notice = "This installs a scripted LXMF helper for a test; read its licence at https://example.invalid/LICENSE. You install it."
+"#,
+        sha = sha256_bytes(&bin),
+        size = bin.len(),
+    );
+    let mut all = manifest::load(&[("lxmf.toml".to_string(), toml.into_bytes())]);
+    assert_eq!(all.len(), 1, "the test declaration registers");
+    all.pop().unwrap()
+}
+
+fn network<'a>(v: &'a Value, id: &str) -> &'a Value {
+    v["networks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|x| x["id"] == id)
+        .unwrap_or_else(|| panic!("no network {id}: {v}"))
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_lxmf_seam_writes_the_client_config_attaches_the_adapter_and_feeds_nearby() {
+    use node111::daemon::dashboard::api_v1::bridge::ComponentAdapters;
+    use node111::daemon::dashboard::api_v1::transport::TransportApi;
+    use node111::daemon::transport::config;
+    use node111::daemon::transport::rnstatus::{FactsCache, TickConfig};
+    use std::os::unix::fs::PermissionsExt;
+    let n = node_with(vec![lxmf_component()]).await;
+    let root = n.layout.root.clone();
+    let cache = root.join("cache/packages/lxmf");
+    std::fs::create_dir_all(&cache).unwrap();
+    std::fs::write(cache.join("lxmf-fake"), lxmf_bin()).unwrap();
+    let adapters = Arc::new(ComponentAdapters::default());
+    node111::daemon::register_lxmf(&adapters, &n.api, &n.bridge);
+    n.api.insert_ext(Arc::clone(&adapters));
+    node111::daemon::wire_bridge_nearby(&n.api, &n.bridge);
+    assert!(adapters.registered("lxmf"));
+    let enable = "/api/v1/bridge/components/lxmf/enable";
+    let hash = lxmf_component().notice_hash();
+    let client = config::client_config_path(&root);
+
+    // without the acknowledgement: 409 consent_required, and the hook wrote nothing
+    n.post(enable, json!({})).problem(409, "consent_required");
+    assert!(!root.join("bridge/lxmf").exists());
+    // without a transport spine: fail closed — the contract's problem, nothing started
+    let pb = n
+        .post(enable, json!({ "accept_notice_hash": hash }))
+        .problem(409, "component_unavailable");
+    assert_eq!(pb["reason_code"], "requires_unmet", "{pb}");
+    assert!(!client.exists());
+    assert!(!root.join("components/lxmf").exists(), "nothing installed");
+    assert!(n.components.stdio("lxmf").await.is_none(), "no child");
+    assert!(n.bridge.enabled().is_empty());
+
+    // the spine, with rnsd's config (and its rpc_key) rendered
+    let spine = lxmf_spine(&n);
+    n.api.insert_ext(Arc::new(TransportApi {
+        spine,
+        facts: FactsCache::new(TickConfig::default()),
+    }));
+    let head = n.api.events.head();
+    let r = n.post(enable, json!({ "accept_notice_hash": hash }));
+    check_op("enableBridgeComponent", &r);
+    assert_eq!(r.json()["state"], "running", "{}", r.body);
+    // the client config: 0600 in a 0700 dir, rnsd's key and instance, no interfaces
+    let text = std::fs::read_to_string(&client).unwrap();
+    let key = std::fs::read_to_string(root.join("secrets/rns-rpc-key")).unwrap();
+    assert!(
+        text.contains(&format!("rpc_key = {}", key.trim())),
+        "{text}"
+    );
+    assert!(text.contains("share_instance = Yes") && text.contains("instance_name = 111"));
+    let mode = |p: &std::path::Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+    assert_eq!(mode(&client), 0o600);
+    assert_eq!(mode(&config::client_dir(&root)), 0o700);
+    // the run arguments the adapter appends (§6 (3))
+    let args = std::fs::read_to_string(root.join("lxmf-args")).unwrap();
+    assert!(args.contains("--config-dir"), "{args}");
+    assert!(args.contains("--announce-interval 60"), "{args}");
+    // the adapter is enabled in the core and goes live on the helper's ready line
+    assert_eq!(n.bridge.enabled(), vec!["lxmf".to_string()]);
+    let deadline = Instant::now() + Duration::from_secs(20);
+    loop {
+        let r = n.get("/api/v1/networks");
+        check_op("listNetworks", &r);
+        if network(&r.json(), "lxmf")["state"] == "live" {
+            break;
+        }
+        assert!(Instant::now() < deadline, "never live: {}", r.body);
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    // its heard reaches GET /nearby as a `reticulum` source (the core's pass delivers it)
+    let deadline = Instant::now() + Duration::from_secs(20);
+    let src = loop {
+        n.bridge.tick_once().await;
+        let r = n.get("/api/v1/nearby");
+        check_op("listNearby", &r);
+        let v = r.json();
+        if let Some(s) = v["sources"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|s| s["kind"] == "reticulum")
+        {
+            break s.clone();
+        }
+        assert!(Instant::now() < deadline, "never heard: {v}");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    };
+    assert_schema("NearbySource", &src);
+    assert_eq!(src["id"], format!("reticulum:{LX_DEST}"));
+    assert_eq!(src["label"], "heard via Reticulum");
+    assert_eq!(src["device_id"], Value::Null);
+    assert_eq!(src["nodes"].as_array().unwrap().len(), 1);
+    let node = &src["nodes"][0];
+    assert_eq!(node["id"], LX_PEER);
+    assert_eq!(node["num"], 0);
+    assert_eq!(node["long_name"], "Bob");
+    assert_eq!(node["short_name"], &LX_PEER[..8]);
+    // and the SSE `nearby` frame carries the merged list
+    let raw = sse_after(n.port, head, |s| s.contains("event: nearby"));
+    let frame = frames(&raw)
+        .into_iter()
+        .find(|(e, _)| e == "nearby")
+        .unwrap_or_else(|| panic!("no nearby frame: {raw}"));
+    let v: Value = serde_json::from_str(&frame.1).unwrap();
+    assert_schema("SseNearby", &v);
+    assert!(frame.1.contains(LX_PEER), "{}", frame.1);
+
+    // disable: the adapter goes (before the child), its source with it, the child stops
+    let r = n.post("/api/v1/bridge/components/lxmf/disable", json!({}));
+    check_op("disableBridgeComponent", &r);
+    assert_ne!(r.json()["state"], "running");
+    assert!(n.bridge.enabled().is_empty());
+    let v = n.get("/api/v1/networks").json();
+    assert_eq!(network(&v, "lxmf")["state"], "disabled", "{v}");
+    let v = n.get("/api/v1/nearby").json();
+    assert!(v["sources"].as_array().unwrap().is_empty(), "{v}");
+    let st = n.components.status("lxmf").await.unwrap();
+    assert_ne!(st.state, ComponentState::Running);
+    assert!(
+        n.components.stdio("lxmf").await.is_none(),
+        "no child, no stdio"
+    );
+}
+
+/// A transport spine over `n`'s root with rnsd's config rendered (its `rpc_key` minted).
+fn lxmf_spine(n: &Node) -> Arc<node111::daemon::transport::posture::Spine> {
+    use node111::daemon::devices;
+    use node111::daemon::transport::{config, interfaces, posture::Spine, rnstatus::Rnstatus};
+    let st = n.layout.state_dir();
+    let startup = interfaces::startup(
+        &st,
+        &st.join(devices::store::FILE),
+        &config::config_path(&n.layout),
+    );
+    let spine = Spine::new(
+        n.layout.clone(),
+        startup,
+        Arc::new(Rnstatus::new(Arc::new(NullRnstatus), &n.layout.root)),
+        false,
+        None,
+    );
+    spine.write_config().unwrap();
+    spine
 }

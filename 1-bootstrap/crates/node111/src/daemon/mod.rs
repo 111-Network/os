@@ -11,6 +11,15 @@
 //! an adapter is enabled, and the daemon's existing 2 s tick drives
 //! [`Layer6::tick_once`] (`Bridge::tick_once` returns at once with nothing
 //! enabled; AGENTS.md: the Raspberry Pi is the floor).
+//!
+//! W1 (the open wiring of C1): the LXMF helper's seam is registered
+//! ([`register_lxmf`]: before its child starts, the helper's Reticulum client
+//! config is written with rnsd's `rpc_key` and its run arguments computed;
+//! once it runs, `LxmfAdapter` attaches to its piped stdio and is enabled in
+//! the core), and the core's Nearby sink feeds `GET /nearby` (the
+//! `reticulum` sources, `dashboard::api_v1::nearby::BridgeNearby`).
+//! Registration spawns nothing either: with the component disabled no task,
+//! child, listener or file of the helper exists.
 
 pub mod bridge;
 pub mod components;
@@ -251,9 +260,13 @@ pub fn start_layer6(p: Layer6Parts) -> Layer6 {
         spine.set_restart_hooks(Arc::new(components.clone()));
         p.api.insert_ext(Arc::new(TransportApi { spine, facts }));
     }
+    wire_bridge_nearby(&p.api, &bridge);
     p.api.insert_ext(Arc::clone(&bridge));
     p.api.insert_ext(components.clone());
-    p.api.insert_ext(Arc::new(ComponentAdapters::default()));
+    let adapters = Arc::new(ComponentAdapters::default());
+    register_lxmf(&adapters, &p.api, &bridge);
+    // C5: register("deltachat", ..) goes here
+    p.api.insert_ext(adapters);
     Layer6 {
         bridge,
         components,
@@ -284,10 +297,27 @@ impl Layer6 {
     }
 
     /// Daemon start, after the supervised children exist: resume the components whose
-    /// switch is on, and attach the adapters registered for them.
+    /// switch is on, and attach the adapters registered for them. The resume goes through
+    /// `api_v1::bridge::enable_component` (the route's path) so a component's prepare hook
+    /// runs before its child starts — the loop is `Components::resume_enabled`'s (a
+    /// dependency before its dependants, the recorded acknowledgement must still match);
+    /// a failure is logged and leaves that component off (its switch stays as it was).
     pub async fn resume(&self, api: &ApiState) {
-        self.components.resume_enabled().await;
-        for c in self.components.declared().to_vec() {
+        let file = components::consent::load(&api.layout.root);
+        let mut order = self.components.declared().to_vec();
+        order.sort_by_key(|c| c.requires.component.is_some());
+        for c in &order {
+            if !file.record(&c.id).enabled {
+                continue;
+            }
+            if let Err(e) =
+                dashboard::api_v1::bridge::enable_component(api, &self.components, &c.id, None)
+                    .await
+            {
+                eprintln!("111 components: {} not resumed: {e}", c.id);
+            }
+        }
+        for c in order {
             if self.components.stdio(&c.id).await.is_some() {
                 dashboard::api_v1::bridge::attach_adapter(api, &self.components, &c.id).await;
             }
@@ -301,6 +331,117 @@ impl Layer6 {
         }
         self.components.shutdown().await;
     }
+}
+
+/// The bridge core's Nearby sink (W1): the adapters' Nearby items (LXMF heards, the
+/// `reticulum` sources) are merged into a `BridgeNearby` in `api` ext, which `GET
+/// /nearby` lists after the Meshtastic module's sources; a change publishes the SSE
+/// `nearby` frame. No timer, no task.
+pub fn wire_bridge_nearby(api: &Arc<ApiState>, bridge: &bridge::Bridge) {
+    use dashboard::api_v1::nearby;
+    let heard = Arc::new(nearby::BridgeNearby::default());
+    bridge.set_nearby_sink(nearby::sink(api, Arc::clone(&heard)));
+    api.insert_ext(heard);
+}
+
+/// Register the LXMF helper's seam (§6, C3rs; W1) in `adapters`: a prepare hook that,
+/// once the licence notice passes and before the helper starts, writes its Reticulum client
+/// config ([`lxmf_client_config`]) and answers `bridge::lxmf::run_args` of the bridge's
+/// announce settings (fail closed: no spine, no shared instance or no `rpc_key` refuses
+/// the enable and nothing starts); and the adapter factory that attaches `LxmfAdapter` to
+/// the running component's stdio (`attach_adapter` then enables it in the core; the route
+/// disables it before the child stops). Captures the API state and the bridge weakly;
+/// spawns nothing.
+pub fn register_lxmf(
+    adapters: &dashboard::api_v1::bridge::ComponentAdapters,
+    api: &Arc<ApiState>,
+    bridge: &Arc<bridge::Bridge>,
+) {
+    use bridge::lxmf::{self, LxmfAdapter, LxmfConfig};
+    use components::EnableError;
+    let (api_w, bridge_w) = (Arc::downgrade(api), Arc::downgrade(bridge));
+    let prepare: dashboard::api_v1::bridge::PrepareHook = Arc::new(move || {
+        let (api, bridge) = (api_w.upgrade(), bridge_w.upgrade());
+        Box::pin(async move {
+            let stopping = || EnableError::StartFailed("the daemon is stopping".into());
+            let api = api.ok_or_else(stopping)?;
+            let bridge = bridge.ok_or_else(stopping)?;
+            let spine = api
+                .ext::<Arc<dashboard::api_v1::transport::TransportApi>>()
+                .map(|t| Arc::clone(&t.spine))
+                .ok_or_else(|| {
+                    EnableError::RequiresUnmet(
+                        "this node runs no transport spine, so rnsd's shared instance is not \
+                         available to attach to"
+                            .into(),
+                    )
+                })?;
+            let root = api.layout.root.clone();
+            tokio::task::spawn_blocking(move || lxmf_client_config(&spine, &root))
+                .await
+                .map_err(|e| {
+                    EnableError::InstallFailed(format!("the config task failed: {e}"))
+                })??;
+            Ok(lxmf::run_args(&bridge.announce()))
+        })
+    });
+    adapters.register_prepare(lxmf::COMPONENT_ID, prepare);
+    let bridge_w = Arc::downgrade(bridge);
+    let factory: dashboard::api_v1::bridge::AdapterFactory =
+        Arc::new(move |components: components::Components| {
+            let bridge = bridge_w.upgrade();
+            Box::pin(async move {
+                let bridge = bridge.ok_or("the bridge is stopping")?;
+                let stdio = components
+                    .stdio(lxmf::COMPONENT_ID)
+                    .await
+                    .ok_or("the lxmf component is not running")?;
+                let adapter =
+                    LxmfAdapter::start(stdio, LxmfConfig::from_manifests(bridge.manifests()));
+                Ok(adapter as Arc<dyn bridge::Adapter>)
+            })
+        });
+    adapters.register(lxmf::COMPONENT_ID, factory);
+}
+
+/// The LXMF helper's client config (§6 (1), §11): `share_instance = Yes`, the spine's
+/// `instance_name` and rnsd's `rpc_key` under `<root>/bridge/lxmf/rns/config` (0700 / 0600,
+/// `transport::config::write_client_config`; unchanged bytes are not rewritten). The key
+/// is the one the spine rendered rnsd's config with: it must exist already — this never
+/// mints one (a fresh key would not be rnsd's). Fails closed with the enable's problem:
+/// `requires_unmet` when rnsd does not share its instance or has no key yet,
+/// `install_failed` when the key cannot be read or the file written. Blocking.
+pub fn lxmf_client_config(
+    spine: &transport::posture::Spine,
+    root: &Path,
+) -> Result<bool, components::EnableError> {
+    use components::EnableError;
+    use transport::config;
+    let f = spine.file();
+    if !f.posture.share_instance {
+        return Err(EnableError::RequiresUnmet(
+            "rnsd does not share its instance (share_instance is off), so the helper has \
+             nothing to attach to"
+                .into(),
+        ));
+    }
+    let rnsd_root = &spine.layout().root;
+    let key = config::secrets_dir(rnsd_root).join(config::RPC_KEY_FILE);
+    if !std::fs::symlink_metadata(&key).is_ok_and(|m| m.is_file()) {
+        return Err(EnableError::RequiresUnmet(
+            "rnsd has no rpc_key yet (its config was never rendered); start the transport \
+             service first"
+                .into(),
+        ));
+    }
+    let secrets = config::Secrets::for_file(rnsd_root, &f).map_err(|e| {
+        EnableError::InstallFailed(format!("rnsd's rpc_key could not be read: {e:#}"))
+    })?;
+    config::write_client_config(root, &secrets, &f.posture.instance_name).map_err(|e| {
+        EnableError::InstallFailed(format!(
+            "the helper's client config could not be written: {e:#}"
+        ))
+    })
 }
 
 async fn daemon_main() -> anyhow::Result<()> {

@@ -14,9 +14,10 @@
 //!   to show (N bytes)"). Native ids and accounts are cleaned but never cut: one over the
 //!   store's field cap is refused (counted as noise), because a cut id could merge two
 //!   senders.
-//! - **`meta`** is rebuilt from a closed set of keys (`snr`, `rssi`, `hops`, `via_mqtt`,
-//!   `ok_to_mqtt`), each type-checked; anything else the adapter sent is dropped (the core
-//!   interprets no foreign field).
+//! - **`meta`** is rebuilt from a closed set of keys, each type-checked and capped: the
+//!   Meshtastic ones (`snr`, `rssi`, `hops`, `via_mqtt`, `ok_to_mqtt`, §5) and the LXMF ones
+//!   (`why_unsigned`, `relay`, `attachments`, `helper_truncated`, `fields_truncated`, §6);
+//!   anything else the adapter sent is dropped (the core interprets no foreign field).
 //! - **Dedupe** is the store's (§3 key `(conv, sender_native, native_msg_id)`): the
 //!   adapter's [`super::AdapterFacts::ids_globally_unique`] picks key-alone (LXMF hash,
 //!   app ids) or key + body within the last 32 inbound rows (Meshtastic's 32-bit ids).
@@ -125,7 +126,61 @@ pub fn body(s: &str) -> (String, Option<u64>) {
     }
 }
 
-/// The closed `meta` keys an adapter may report (§3), type-checked; plus `truncated`.
+/// The `why_unsigned` values (§6 (5): the library's `unverified_reason`, or `unverified`).
+pub const WHY_UNSIGNED: &[&str] = &["source_unknown", "signature_invalid", "unverified"];
+/// The registered network ids a relay field may name (§3, §8).
+const RELAY_NETS: &[&str] = &[
+    super::NETWORK_MESHTASTIC,
+    super::NETWORK_LXMF,
+    super::NETWORK_DELTACHAT,
+    super::NETWORK_SIMPLEX,
+];
+/// A relay field's `id` / `mid` at most (the LXMF adapter's cap: a §3 name).
+pub const MAX_RELAY_PART: usize = MAX_NAME_BYTES;
+
+/// A relay field's text part: non-empty, at most `max` bytes, already clean (§3) and in
+/// the §8 marker alphabet (no `]`, no `/`); anything else is dropped, never repaired.
+fn relay_part(v: Option<&Value>, max: usize) -> Option<&str> {
+    let s = v?.as_str()?;
+    let ok = !s.is_empty()
+        && s.len() <= max
+        && !s.chars().any(|c| c == ']' || c == '/' || is_stripped(c))
+        && clean(s) == s;
+    ok.then_some(s)
+}
+
+/// `meta.relay` (§6 "Relay marker and fields", the received custom field the LXMF adapter
+/// surfaces): exactly `{v: 1, net, id, mid}` with `net` a registered network.
+fn relay_meta(v: &Value) -> Option<Value> {
+    let o = v.as_object()?;
+    if o.len() != 4 || o.get("v").and_then(Value::as_u64) != Some(1) {
+        return None;
+    }
+    let net = o.get("net").and_then(Value::as_str)?;
+    if !RELAY_NETS.contains(&net) {
+        return None;
+    }
+    let id = relay_part(o.get("id"), MAX_RELAY_PART)?;
+    let mid = relay_part(o.get("mid"), MAX_RELAY_PART)?;
+    Some(serde_json::json!({ "v": 1, "net": net, "id": id, "mid": mid }))
+}
+
+/// `meta.attachments` (§6 (5): counted, never ingested): exactly `{count, bytes}`, two
+/// non-negative integers, `count` ≥ 1.
+fn attachments_meta(v: &Value) -> Option<Value> {
+    let o = v.as_object()?;
+    let count = o.get("count").and_then(Value::as_u64).filter(|n| *n > 0)?;
+    let bytes = o.get("bytes").and_then(Value::as_u64)?;
+    (o.len() == 2).then(|| serde_json::json!({ "count": count, "bytes": bytes }))
+}
+
+/// The closed `meta` keys an adapter may report (§3), each type-checked; anything else is
+/// dropped, and a key whose value does not fit is dropped alone. Meshtastic (§5): `snr`,
+/// `rssi` (numbers), `hops` (a non-negative integer), `via_mqtt`, `ok_to_mqtt` (booleans).
+/// LXMF (§6 (5), the adapter's `msg` mapping): `why_unsigned` (one of [`WHY_UNSIGNED`]),
+/// `relay` ([`relay_meta`]), `attachments` ([`attachments_meta`]), `helper_truncated` and
+/// `fields_truncated` (`true` only: the helper cut the text or dropped fields). Plus
+/// `truncated`, which only this function sets (the original size of a body cut here).
 fn meta(adapter: &Value, truncated: Option<u64>) -> Option<String> {
     let mut out = Map::new();
     if let Value::Object(m) = adapter {
@@ -140,6 +195,24 @@ fn meta(adapter: &Value, truncated: Option<u64>) -> Option<String> {
         for key in ["via_mqtt", "ok_to_mqtt"] {
             if let Some(v) = m.get(key).filter(|v| v.is_boolean()) {
                 out.insert(key.into(), v.clone());
+            }
+        }
+        if let Some(why) = m
+            .get("why_unsigned")
+            .and_then(Value::as_str)
+            .filter(|w| WHY_UNSIGNED.contains(w))
+        {
+            out.insert("why_unsigned".into(), Value::from(why));
+        }
+        if let Some(r) = m.get("relay").and_then(relay_meta) {
+            out.insert("relay".into(), r);
+        }
+        if let Some(a) = m.get("attachments").and_then(attachments_meta) {
+            out.insert("attachments".into(), a);
+        }
+        for key in ["helper_truncated", "fields_truncated"] {
+            if m.get(key) == Some(&Value::Bool(true)) {
+                out.insert(key.into(), Value::Bool(true));
             }
         }
     }
@@ -403,6 +476,84 @@ mod tests {
         let mut t = text("x", "");
         t.native_msg_id.clear();
         assert_eq!(prepare(&t, 3, true).unwrap().native_msg_id, None);
+    }
+
+    fn lxmf(meta: Value) -> InboundText {
+        let mut t = text("hi", "Ann");
+        t.conv.network = "lxmf".into();
+        t.auth = Auth::None;
+        t.meta = meta;
+        t
+    }
+
+    fn meta_of(t: &InboundText) -> Value {
+        prepare(t, 9, true)
+            .unwrap()
+            .meta
+            .map_or(Value::Null, |m| serde_json::from_str(&m).unwrap())
+    }
+
+    #[test]
+    fn every_lxmf_meta_key_round_trips_with_its_type() {
+        let all = serde_json::json!({
+            "why_unsigned": "source_unknown",
+            "relay": {"v": 1, "net": "meshtastic", "id": "W1AW7", "mid": "00ff"},
+            "attachments": {"count": 2, "bytes": 1200},
+            "helper_truncated": true,
+            "fields_truncated": true,
+        });
+        assert_eq!(meta_of(&lxmf(all.clone())), all);
+        for why in WHY_UNSIGNED {
+            assert_eq!(
+                meta_of(&lxmf(serde_json::json!({ "why_unsigned": why }))),
+                serde_json::json!({ "why_unsigned": why })
+            );
+        }
+        // Meshtastic and LXMF keys live in one closed set
+        let mixed = serde_json::json!({"snr": 1.5, "why_unsigned": "unverified"});
+        assert_eq!(meta_of(&lxmf(mixed.clone())), mixed);
+    }
+
+    #[test]
+    fn a_wrong_type_or_shape_drops_that_key_alone() {
+        for bad in [
+            serde_json::json!({"why_unsigned": "because"}),
+            serde_json::json!({"why_unsigned": 1}),
+            serde_json::json!({"relay": "x"}),
+            serde_json::json!({"relay": {"v": 2, "net": "meshtastic", "id": "a", "mid": "b"}}),
+            serde_json::json!({"relay": {"v": 1, "net": "elsewhere", "id": "a", "mid": "b"}}),
+            serde_json::json!({"relay": {"v": 1, "net": "lxmf", "id": "a/b", "mid": "b"}}),
+            serde_json::json!({"relay": {"v": 1, "net": "lxmf", "id": "a]", "mid": "b"}}),
+            serde_json::json!({"relay": {"v": 1, "net": "lxmf", "id": "a\u{202e}", "mid": "b"}}),
+            serde_json::json!({"relay": {"v": 1, "net": "lxmf", "id": "", "mid": "b"}}),
+            serde_json::json!({"relay": {"v": 1, "net": "lxmf", "id": "a".repeat(65), "mid": "b"}}),
+            serde_json::json!({"relay": {"v": 1, "net": "lxmf", "id": "a"}}),
+            serde_json::json!({"relay": {"v": 1, "net": "lxmf", "id": "a", "mid": "b", "x": 1}}),
+            serde_json::json!({"attachments": 3}),
+            serde_json::json!({"attachments": {"count": 0, "bytes": 0}}),
+            serde_json::json!({"attachments": {"count": -1, "bytes": 5}}),
+            serde_json::json!({"attachments": {"count": 1, "bytes": "5"}}),
+            serde_json::json!({"attachments": {"count": 1, "bytes": 5, "names": ["a"]}}),
+            serde_json::json!({"helper_truncated": "yes"}),
+            serde_json::json!({"helper_truncated": false}),
+            serde_json::json!({"fields_truncated": 1}),
+        ] {
+            assert_eq!(meta_of(&lxmf(bad.clone())), Value::Null, "{bad}");
+        }
+        // the good keys beside a bad one survive
+        let m = meta_of(&lxmf(serde_json::json!({
+            "why_unsigned": "unverified", "relay": {"v": 1, "net": "x", "id": "a", "mid": "b"}
+        })));
+        assert_eq!(m, serde_json::json!({"why_unsigned": "unverified"}));
+    }
+
+    #[test]
+    fn unknown_keys_are_dropped_and_truncated_is_ours_only() {
+        let m = meta_of(&lxmf(serde_json::json!({
+            "fields": {"5": 1}, "hash": "ab", "handoff": "pending", "resent_as": 3,
+            "truncated": 99, "title": "<b>x</b>", "helper_truncated": true,
+        })));
+        assert_eq!(m, serde_json::json!({"helper_truncated": true}));
     }
 
     #[test]

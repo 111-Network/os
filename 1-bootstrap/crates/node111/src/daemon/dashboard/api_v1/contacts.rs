@@ -21,12 +21,12 @@
 //! The agent's bearer may read (§17 `contacts.read`); every write is `401`
 //! for it.
 
-use super::messages::{bad_request, handle, refuse_bearer};
+use super::messages::{bad_request, handle};
 use super::{ApiRouter, ApiState, Problem};
 use crate::daemon::fabric::{self, json};
 use axum::body::Bytes;
 use axum::extract::{Path, State};
-use axum::http::{HeaderMap, StatusCode};
+use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::Json;
@@ -77,10 +77,7 @@ async fn list(State(api): State<Arc<ApiState>>) -> Response {
     }
 }
 
-async fn add(State(api): State<Arc<ApiState>>, headers: HeaderMap, body: Bytes) -> Response {
-    if let Err(p) = refuse_bearer(&headers) {
-        return p.into_response();
-    }
+async fn add(State(api): State<Arc<ApiState>>, body: Bytes) -> Response {
     let shape = "Body must be exactly one of {\"card\": <card text>} or {\"node_id\": <NodeId>}.";
     let obj = match serde_json::from_slice::<Value>(&body) {
         Ok(Value::Object(o)) if o.len() == 1 => o,
@@ -180,15 +177,7 @@ fn parse_patch(body: &[u8]) -> Result<ContactPatch, Problem> {
     Ok(p)
 }
 
-async fn patch(
-    State(api): State<Arc<ApiState>>,
-    Path(id): Path<String>,
-    headers: HeaderMap,
-    body: Bytes,
-) -> Response {
-    if let Err(p) = refuse_bearer(&headers) {
-        return p.into_response();
-    }
+async fn patch(State(api): State<Arc<ApiState>>, Path(id): Path<String>, body: Bytes) -> Response {
     let Some(id) = json::parse_node_id(&id) else {
         return not_found().into_response();
     };
@@ -210,14 +199,7 @@ async fn patch(
     }
 }
 
-async fn forget(
-    State(api): State<Arc<ApiState>>,
-    Path(id): Path<String>,
-    headers: HeaderMap,
-) -> Response {
-    if let Err(p) = refuse_bearer(&headers) {
-        return p.into_response();
-    }
+async fn forget(State(api): State<Arc<ApiState>>, Path(id): Path<String>) -> Response {
     let Some(id) = json::parse_node_id(&id) else {
         return not_found().into_response();
     };
