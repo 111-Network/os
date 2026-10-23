@@ -23,6 +23,20 @@
 //! Zero weight (§2.1 rule 2): a component that is not enabled has no runner,
 //! so no process, task, timer, probe or open file; [`Components`] itself only
 //! holds the parsed declarations.
+//!
+//! **C5 additions (additive):** `[requires] glibc` is checked with
+//! [`probe_libc`] (through the wiring's command runner, so tests fake it) and
+//! refuses with honest copy on an older glibc, on Termux and on musl;
+//! `[requires] component` needs that component enabled first (and
+//! [`Components::resume_enabled`] resumes dependencies before dependants); an
+//! [`Payload::Unavailable`] payload (no build for this machine, or not in this
+//! release) refuses with its copy after `[requires]`; `[run] env` is set on the
+//! child with the placeholders expanded.
+//!
+//! **No runtime fetch (§2.1 rule 3; `[install] prefetch = false`):** a payload
+//! missing from the cache answers `409 component_unavailable` (reason
+//! `payload_missing`) whose detail names
+//! [`manifest::fetch_command`]; enable never downloads.
 
 pub mod consent;
 pub mod manifest;
@@ -519,7 +533,10 @@ impl Components {
             return Err(EnableError::StartFailed("invalid adapter arguments".into()));
         }
         // 2. [requires]
-        self.check_requires(c).await?;
+        self.check_requires(c, runners).await?;
+        if let Payload::Unavailable { reason } = &c.payload {
+            return Err(EnableError::RequiresUnmet(reason.clone()));
+        }
         // 3. the cache against the pin, 4. install from it (blocking work)
         let cmd = Arc::clone(&self.inner.wiring.cmd);
         let comp = c.clone();
@@ -527,7 +544,13 @@ impl Components {
         tokio::task::spawn_blocking(move || -> Result<(), EnableError> {
             if !registry::installed_from_pin(&root_b, &comp) {
                 registry::verify_cache(&root_b, &comp).map_err(|e| match e {
-                    VerifyError::NotCached(d) => EnableError::NotCached(d),
+                    // nothing downloads at runtime (§2.1 rule 3): name the
+                    // command that fills the cache (`[install] prefetch`)
+                    VerifyError::NotCached(d) => EnableError::NotCached(format!(
+                        "{d}; the payload is not cached: fetch it with `{}` (or put the pinned file in cache/packages/{}/), then enable again",
+                        manifest::fetch_command(&[comp.id.as_str()]),
+                        comp.id
+                    )),
                     VerifyError::Mismatch(d) => EnableError::HashMismatch(d),
                 })?;
             }
@@ -586,7 +609,28 @@ impl Components {
         }
     }
 
-    async fn check_requires(&self, c: &Component) -> Result<(), EnableError> {
+    async fn check_requires(
+        &self,
+        c: &Component,
+        runners: &HashMap<String, ComponentRunner>,
+    ) -> Result<(), EnableError> {
+        if let Some(need) = c.requires.glibc {
+            let cmd = Arc::clone(&self.inner.wiring.cmd);
+            let have = tokio::task::spawn_blocking(move || probe_libc(cmd.as_ref()))
+                .await
+                .unwrap_or(LibC::Other);
+            if let Some(copy) = glibc_refusal(c, need, &have) {
+                return Err(EnableError::RequiresUnmet(copy));
+            }
+        }
+        if let Some(dep) = &c.requires.component {
+            if !runners.contains_key(dep) {
+                let title = self.get(dep).map_or(dep.as_str(), |d| d.title.as_str());
+                return Err(EnableError::RequiresUnmet(format!(
+                    "it needs {title} enabled first"
+                )));
+            }
+        }
         if let Some((major, minor)) = c.requires.python {
             let cmd = Arc::clone(&self.inner.wiring.cmd);
             let out = tokio::task::spawn_blocking(move || cmd.run("python3", &["--version"]))
@@ -696,7 +740,10 @@ impl Components {
                 .replace("{release}", &self.inner.cfg.release.to_string_lossy())
         };
         let mut args: Vec<String> = Vec::new();
-        let program = match c.payload {
+        let program = match &c.payload {
+            Payload::Unavailable { reason } => {
+                return Err(EnableError::RequiresUnmet(reason.clone()));
+            }
             Payload::Pip { .. } => {
                 args.push("-I".into());
                 args.push(
@@ -713,11 +760,13 @@ impl Components {
         };
         args.extend(c.run.args.iter().map(|a| expand(a)));
         args.extend(extra.iter().cloned());
+        let mut env = vec![("HOME".into(), root.to_string_lossy().into_owned())];
+        env.extend(c.run.env.iter().map(|(k, v)| (k.clone(), expand(v))));
         Ok(ChildSpec {
             name: c.id.clone(),
             program,
             args,
-            env: vec![("HOME".into(), root.to_string_lossy().into_owned())],
+            env,
             backoff: BackoffPolicy::default(),
             stdout_log: Some(p.bridge.join(format!("{}.log", c.id))),
         })
@@ -839,7 +888,10 @@ impl Components {
     /// logged and leave it off.
     pub async fn resume_enabled(&self) {
         let file = consent::load(self.root());
-        for c in self.inner.list.clone() {
+        // a dependency (`[requires] component`) before its dependants
+        let mut order = self.inner.list.clone();
+        order.sort_by_key(|c| c.requires.component.is_some());
+        for c in order {
             if !file.record(&c.id).enabled {
                 continue;
             }
@@ -855,6 +907,85 @@ impl Components {
         for (_, r) in runners.drain() {
             r.shutdown().await;
         }
+    }
+}
+
+/// The host's C library as far as `[requires] glibc` cares (C5).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LibC {
+    /// glibc (major, minor).
+    Glibc(u32, u32),
+    /// Termux on Android (bionic; no glibc).
+    Termux,
+    /// Another C library (musl) or nothing the probes recognise.
+    Other,
+}
+
+/// Probe the host's C library (blocking): this binary built for Android ⇒
+/// Termux; else `getconf GNU_LIBC_VERSION` ("glibc 2.39"), else the first
+/// line of `ldd --version` ("ldd (Ubuntu GLIBC 2.39-0ubuntu8) 2.39"), else
+/// `uname -o` ("Android" ⇒ Termux). Nothing recognised ⇒ [`LibC::Other`]
+/// (fail closed: a glibc requirement refuses).
+pub fn probe_libc(cmd: &dyn Runner) -> LibC {
+    if cfg!(target_os = "android") {
+        return LibC::Termux;
+    }
+    let out = |program: &str, args: &[&str]| {
+        cmd.run(program, args)
+            .ok()
+            .filter(|o| o.ok())
+            .map(|o| format!("{}\n{}", o.stdout, o.stderr))
+    };
+    if let Some(v) = out("getconf", &["GNU_LIBC_VERSION"]).and_then(|t| {
+        let rest = t.trim().strip_prefix("glibc ")?;
+        parse_glibc(rest)
+    }) {
+        return LibC::Glibc(v.0, v.1);
+    }
+    if let Some(v) = out("ldd", &["--version"]).and_then(|t| {
+        let first = t.lines().find(|l| !l.trim().is_empty())?.to_string();
+        let lower = first.to_ascii_lowercase();
+        if !(lower.contains("glibc") || lower.contains("gnu libc")) {
+            return None;
+        }
+        parse_glibc(first.split_whitespace().last()?)
+    }) {
+        return LibC::Glibc(v.0, v.1);
+    }
+    if out("uname", &["-o"]).is_some_and(|t| t.contains("Android")) {
+        return LibC::Termux;
+    }
+    LibC::Other
+}
+
+/// `2.39` or `2.39-0ubuntu8` ⇒ (2, 39).
+fn parse_glibc(s: &str) -> Option<(u32, u32)> {
+    let mut it = s.trim().split(|c: char| !c.is_ascii_digit());
+    let major: u32 = it.next()?.parse().ok()?;
+    let minor: u32 = it.next()?.parse().ok()?;
+    (major == 2).then_some((major, minor))
+}
+
+/// The refusal copy of a glibc requirement on `have`, or `None` when met.
+pub fn glibc_refusal(c: &Component, need: (u32, u32), have: &LibC) -> Option<String> {
+    let distros = c
+        .requires
+        .glibc_distros
+        .as_deref()
+        .map(|d| format!(" ({d})"))
+        .unwrap_or_default();
+    let (title, ma, mi) = (&c.title, need.0, need.1);
+    match *have {
+        LibC::Glibc(a, b) if (a, b) >= need => None,
+        LibC::Glibc(a, b) => Some(format!(
+            "this release of {title} needs glibc {ma}.{mi} or newer{distros}; this node has glibc {a}.{b}"
+        )),
+        LibC::Termux => Some(format!(
+            "{title} does not run on Termux: this release needs glibc {ma}.{mi} or newer, which Android does not have; enable it on a Linux hub{distros}"
+        )),
+        LibC::Other => Some(format!(
+            "this release of {title} needs glibc {ma}.{mi} or newer{distros}; this node has another C library (musl, or none the probe recognises)"
+        )),
     }
 }
 
@@ -906,6 +1037,46 @@ mod tests {
         assert!(!is_ready_line(r#"{"type":"msg"}"#));
         assert!(!is_ready_line("ready"));
         assert!(!is_ready_line(r#"["ready"]"#));
+    }
+
+    #[test]
+    fn the_libc_probe_reads_getconf_then_ldd_then_uname() {
+        use crate::testkit::MockRunner;
+        use crate::util::run::Output;
+        let ok = |s: &str| Output {
+            status: 0,
+            stdout: s.into(),
+            stderr: String::new(),
+        };
+        let fail = || Output {
+            status: 1,
+            stdout: String::new(),
+            stderr: "nope".into(),
+        };
+        let r = MockRunner::new(vec![("getconf GNU_LIBC_VERSION", ok("glibc 2.39\n"))]);
+        assert_eq!(probe_libc(&r), LibC::Glibc(2, 39));
+        let r = MockRunner::new(vec![
+            ("getconf GNU_LIBC_VERSION", fail()),
+            (
+                "ldd --version",
+                ok("ldd (Debian GLIBC 2.36-9+deb12u7) 2.36\nCopyright\n"),
+            ),
+        ]);
+        assert_eq!(probe_libc(&r), LibC::Glibc(2, 36));
+        let r = MockRunner::new(vec![
+            ("getconf GNU_LIBC_VERSION", fail()),
+            ("ldd --version", fail()),
+            ("uname -o", ok("Android\n")),
+        ]);
+        assert_eq!(probe_libc(&r), LibC::Termux);
+        let r = MockRunner::new(vec![
+            ("getconf GNU_LIBC_VERSION", fail()),
+            ("ldd --version", ok("musl libc (x86_64)\nVersion 1.2.4\n")),
+            ("uname -o", ok("GNU/Linux\n")),
+        ]);
+        assert_eq!(probe_libc(&r), LibC::Other);
+        assert_eq!(parse_glibc("2.41"), Some((2, 41)));
+        assert_eq!(parse_glibc("1.2"), None);
     }
 
     #[test]

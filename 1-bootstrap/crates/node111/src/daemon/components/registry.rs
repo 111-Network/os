@@ -157,7 +157,7 @@ pub fn facts(root: &Path, c: &Component) -> DiskFacts {
                 });
             (present, present.then_some(bytes.unwrap_or(0)))
         }
-        Payload::Binary { .. } => {
+        Payload::Binary { .. } | Payload::Unavailable { .. } => {
             let present = std::fs::symlink_metadata(&p.install).is_ok();
             (
                 present,
@@ -252,6 +252,7 @@ pub fn verify_cache(root: &Path, c: &Component) -> Result<(), VerifyError> {
             }
             Ok(())
         }
+        Payload::Unavailable { reason } => Err(VerifyError::NotCached(reason.clone())),
     }
 }
 
@@ -331,6 +332,7 @@ pub fn installed_from_pin(root: &Path, c: &Component) -> bool {
         Payload::Binary { sha256, .. } => {
             p.install.join(&c.run.program).is_file() && marker_is(&p.install, sha256)
         }
+        Payload::Unavailable { .. } => false,
     }
 }
 
@@ -358,6 +360,7 @@ pub fn install(root: &Path, c: &Component, cmd: &dyn Runner) -> Result<Installed
         Payload::Binary { url, sha256, .. } => {
             install_binary(root, c, url, sha256).map(|()| Installed::Built)
         }
+        Payload::Unavailable { reason } => Err(InstallError(reason.clone())),
     }
 }
 

@@ -15,7 +15,10 @@
 //! hash when the channel was uplinked), `recipient_lists` and `announce` are
 //! typed fields of [`BridgeFile`], parsed with `deny_unknown_fields` and kept
 //! by every write of this module; a malformed section makes the whole file
-//! invalid (moved aside, fail closed: no confirmation survives).
+//! invalid (moved aside, fail closed: no confirmation survives). `contacts`
+//! (Layer 6 C5, additive): the per-contact bridging switch of app peers (§7
+//! (2)), one record per contact turned on, with the hash of the text the
+//! human confirmed.
 //! [`update_file`] is the bridge core's read-modify-write.
 //!
 //! **Failures (fail closed).** An absent file is an empty one. A file that is
@@ -124,6 +127,20 @@ pub struct AnnounceRecord {
     pub interval_min: u32,
 }
 
+/// `contacts[]` (bridge core, Layer 6 §7 (2), C5): bridging is on for this
+/// app-peer contact (its native id: the address) of this account; absent ⇒
+/// off. `text_hash` is the SHA-256 of the per-contact warning the human
+/// confirmed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ContactRecord {
+    pub network: String,
+    pub account: String,
+    pub contact: String,
+    pub text_hash: String,
+    pub by: String,
+}
+
 /// The `components` part of `state/bridge.json`, the bridge-core sections,
 /// plus the keys neither owns (kept verbatim on write).
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -135,6 +152,8 @@ pub struct BridgeFile {
     pub channels: Vec<ChannelRecord>,
     pub recipient_lists: Vec<RecipientListRecord>,
     pub announce: Option<AnnounceRecord>,
+    /// App-peer contacts with bridging on (§7 (2)).
+    pub contacts: Vec<ContactRecord>,
     others: serde_json::Map<String, serde_json::Value>,
 }
 
@@ -220,6 +239,7 @@ fn decode(bytes: &[u8]) -> Result<BridgeFile, String> {
     let channels = section(&mut map, "channels")?;
     let recipient_lists = section(&mut map, "recipient_lists")?;
     let announce = section(&mut map, "announce")?;
+    let contacts = section(&mut map, "contacts")?;
     Ok(BridgeFile {
         components,
         adapters,
@@ -227,6 +247,7 @@ fn decode(bytes: &[u8]) -> Result<BridgeFile, String> {
         channels,
         recipient_lists,
         announce,
+        contacts,
         others: map,
     })
 }
@@ -316,6 +337,9 @@ fn render(f: &BridgeFile) -> anyhow::Result<String> {
     }
     if let Some(a) = &f.announce {
         map.insert("announce".into(), serde_json::to_value(a)?);
+    }
+    if !f.contacts.is_empty() {
+        map.insert("contacts".into(), serde_json::to_value(&f.contacts)?);
     }
     let mut text = serde_json::to_string_pretty(&serde_json::Value::Object(map))?;
     text.push('\n');

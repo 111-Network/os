@@ -20,20 +20,48 @@
 //!   payload (enable answers `component_unavailable`), like a release without
 //!   the presence reader. `kind = "binary"`: `url` (https), `sha256` (64
 //!   lowercase hex) and `size` pin one file, cached under
-//!   `cache/packages/<id>/<file name of the URL>`.
+//!   `cache/packages/<id>/<file name of the URL>`. **Per-target binaries
+//!   (Layer 6 C5, additive):** instead of one pin, `[payload.targets.<arch>-<os>]`
+//!   tables (`x86_64-linux`, `aarch64-linux`, `aarch64-android`; the Rust
+//!   `std::env::consts` spelling) each pin a `url`/`sha256`/`size`; every
+//!   table is validated, and the one for this binary's own target
+//!   ([`host_triple`]) becomes [`Payload::Binary`]. No table for this target ⇒
+//!   [`Payload::Unavailable`] ("there is no build of … for this machine"):
+//!   declared, nothing cached, enable refused with that copy. `kind = "none"`
+//!   (optional `note`) declares a component the release does not ship
+//!   (`Payload::Unavailable` with the note as its copy).
 //! - `[run] program`: for `pip`, a path relative to the release tree
 //!   (`share/<dir>/<script>.py`, run as `venvs/<id>/bin/python -I <current>/<program>`);
 //!   for `binary`, a path relative to `components/<id>/`. `args` may use the
 //!   placeholders `{root}`, `{bridge}` (`bridge/<adapter dir>/`), `{install}`
 //!   (`components/<id>/`) and `{release}` (`current/`), each as a whole
-//!   argument or inside one; any other `{…}` is invalid.
+//!   argument or inside one; any other `{…}` is invalid. `program =
+//!   "{payload}"` names the installed file of a per-target binary (its URL's
+//!   file name differs per target). `env` (C5, additive) is a table of at most
+//!   8 variables set on the child (`[A-Z][A-Z0-9_]*`; never `HOME`, `PATH` or
+//!   `LD_*`), values with the same placeholders.
+//! - `[requires]` (C5, additive): `glibc = "2.38"` (the host's C library must
+//!   be glibc of at least that version: probed with `getconf
+//!   GNU_LIBC_VERSION`, else `ldd --version`; Termux and musl hosts refuse with
+//!   their own copy), `glibc_distros` (the copy's hint, e.g. "Debian 13 /
+//!   Ubuntu 24.04"), `component = "<id>"` (another component that must be
+//!   enabled first).
 //! - `[run] health`: `ready` (the first stdout line must be a JSON object with
 //!   `"type": "ready"`, within `health_timeout_secs`, default 20) or `none`.
 //! - `[license] notice` is the exact text the user acknowledges; its hash
 //!   ([`Component::notice_hash`]) is what `POST …/enable` must echo.
+//! - `[install] prefetch` (C5, additive; default `true`): whether `111 install`
+//!   pre-downloads the payload into `cache/packages/<id>/` (§2.1 rule 3).
+//!   `false` keeps a large payload off the base install (the Raspberry Pi
+//!   floor, AGENTS.md: the Delta Chat core and Madmail are ~104 MB): the
+//!   installer prints one line naming [`fetch_command`] instead, and the
+//!   payload is fetched only when a human runs that command. Enable never
+//!   downloads (§2.1 rule 3, "no runtime fetch"): without the cached file it
+//!   fails closed with `component_unavailable` naming the same command.
 
 use crate::daemon::services::ServiceId;
 use serde::Deserialize;
+use std::collections::BTreeMap;
 use std::fmt;
 use std::sync::Arc;
 use std::time::Duration;
@@ -114,6 +142,16 @@ struct Raw {
     #[serde(default)]
     weight: RawWeight,
     license: RawLicense,
+    #[serde(default)]
+    install: RawInstall,
+}
+
+/// `[install]` (C5, additive; module doc).
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawInstall {
+    #[serde(default)]
+    prefetch: Option<bool>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -130,6 +168,20 @@ struct RawPayload {
     sha256: Option<String>,
     #[serde(default)]
     size: Option<u64>,
+    /// Per-target pins (`[payload.targets.<arch>-<os>]`, C5).
+    #[serde(default)]
+    targets: Option<BTreeMap<String, RawTarget>>,
+    /// The copy of a `kind = "none"` declaration.
+    #[serde(default)]
+    note: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawTarget {
+    url: String,
+    sha256: String,
+    size: u64,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -139,6 +191,12 @@ struct RawRequires {
     python: Option<String>,
     #[serde(default)]
     service: Option<String>,
+    #[serde(default)]
+    glibc: Option<String>,
+    #[serde(default)]
+    glibc_distros: Option<String>,
+    #[serde(default)]
+    component: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -149,6 +207,8 @@ struct RawRun {
     args: Vec<String>,
     #[serde(default)]
     ports: Vec<i64>,
+    #[serde(default)]
+    env: BTreeMap<String, String>,
     health: String,
     #[serde(default)]
     health_timeout_secs: Option<u64>,
@@ -188,6 +248,9 @@ pub struct Component {
     pub run: Run,
     pub weight: Weight,
     pub license: License,
+    /// `[install] prefetch` (default `true`): `111 install` pre-downloads the
+    /// payload; `false` leaves it to [`fetch_command`] (module doc).
+    pub prefetch: bool,
 }
 
 /// The payload pin (§2.1 rule 1).
@@ -201,12 +264,17 @@ pub enum Payload {
         lock_bytes: Option<Arc<[u8]>>,
         venv: String,
     },
-    /// One pinned file (a binary or a `.tar.gz` of one).
+    /// One pinned file (a binary or a `.tar.gz` of one); for a per-target
+    /// declaration, this machine's target.
     Binary {
         url: String,
         sha256: String,
         size: u64,
     },
+    /// Declared, but nothing to install on this machine: no build for its
+    /// target, or `kind = "none"` (not shipped in this release). Nothing is
+    /// cached; enable answers `component_unavailable` with `reason`.
+    Unavailable { reason: String },
 }
 
 /// `[requires]`.
@@ -217,6 +285,14 @@ pub struct Requires {
     /// A supervised service that must serve before the child starts (§6
     /// "Start order"; `transport` = rnsd's shared instance).
     pub service: Option<ServiceId>,
+    /// Lowest glibc (major, minor) the payload links against (C5: the
+    /// Madmail release needs 2.38).
+    pub glibc: Option<(u32, u32)>,
+    /// The copy's hint for [`Requires::glibc`] ("Debian 13 / Ubuntu 24.04").
+    pub glibc_distros: Option<String>,
+    /// Another component that must be enabled first (C5: the Delta Chat core
+    /// needs the Madmail relay).
+    pub component: Option<String>,
 }
 
 /// How the child is health-checked after it starts (§2.1 rule 4).
@@ -236,6 +312,8 @@ pub struct Run {
     /// Loopback ports the child listens on (claimed in the `PortTable` and
     /// pre-bound before it starts, §2).
     pub ports: Vec<u16>,
+    /// Extra environment (placeholders unexpanded; `HOME` is always set).
+    pub env: Vec<(String, String)>,
     pub health: Health,
 }
 
@@ -260,6 +338,16 @@ impl Component {
     /// `Sha256Hex`: what the user acknowledges and `enable` must echo).
     pub fn notice_hash(&self) -> String {
         crate::util::hash::sha256_bytes(self.license.notice.as_bytes())
+    }
+
+    /// Whether this machine has anything to download for it (a pip lock the
+    /// release carries, or a binary pin for this target).
+    pub fn has_payload(&self) -> bool {
+        match &self.payload {
+            Payload::Pip { lock_bytes, .. } => lock_bytes.is_some(),
+            Payload::Binary { .. } => true,
+            Payload::Unavailable { .. } => false,
+        }
     }
 
     /// The `bridge/<dir>/` name of this component's adapter: the part after
@@ -471,12 +559,109 @@ pub fn url_file_name(url: &str) -> Option<String> {
     ok.then(|| name.to_string())
 }
 
+/// The command that downloads the named components' payloads into the
+/// install-time cache later (`[install] prefetch = false`, §2.1 rule 3): run
+/// as root, online; nothing else fetches a component payload.
+pub fn fetch_command(ids: &[&str]) -> String {
+    format!("sudo 111 install --components {}", ids.join(","))
+}
+
+/// The `[run] program` token naming a per-target binary's installed file.
+pub const PAYLOAD_PROGRAM: &str = "{payload}";
+
+/// This binary's own target in the `[payload.targets.<arch>-<os>]` spelling
+/// (`x86_64-linux`, `aarch64-linux`, `aarch64-android`, `arm-linux` for a
+/// 32-bit ARM build): the payload a per-target declaration installs here.
+pub fn host_triple() -> String {
+    format!("{}-{}", std::env::consts::ARCH, std::env::consts::OS)
+}
+
+/// `<arch>-<os>`: lowercase ASCII, digits and `_` in the arch, one `-`.
+fn is_target_triple(s: &str) -> bool {
+    let Some((arch, os)) = s.split_once('-') else {
+        return false;
+    };
+    s.len() <= 32
+        && !arch.is_empty()
+        && !os.is_empty()
+        && arch
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_')
+        && os.bytes().all(|b| b.is_ascii_lowercase())
+}
+
+/// One validated binary pin `(url, sha256, size)`.
+fn binary_pin(
+    url: Option<&str>,
+    sha256: Option<String>,
+    size: Option<u64>,
+) -> Result<(String, String, u64), ManifestError> {
+    let url = https_url(
+        "payload.url",
+        url.ok_or_else(|| invalid("payload.url", "a binary payload pins its url"))?,
+    )?;
+    if url_file_name(&url).is_none() {
+        return Err(invalid("payload.url", "ends in a plain file name"));
+    }
+    let sha256 = sha256
+        .filter(|h| {
+            h.len() == 64
+                && h.bytes()
+                    .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+        })
+        .ok_or_else(|| invalid("payload.sha256", "64 lowercase hex"))?;
+    let size = size
+        .filter(|s| (1..=MAX_BINARY_BYTES).contains(s))
+        .ok_or_else(|| invalid("payload.size", "1 byte to 512 MiB"))?;
+    Ok((url, sha256, size))
+}
+
+/// `2.MINOR` (glibc's major is 2).
+fn glibc_version(s: &str) -> Result<(u32, u32), ManifestError> {
+    let bad = || invalid("requires.glibc", "2.MINOR, e.g. 2.38");
+    let (ma, mi) = s.trim().split_once('.').ok_or_else(bad)?;
+    let num = |p: &str| {
+        (!p.is_empty() && p.len() <= 3 && p.bytes().all(|b| b.is_ascii_digit()))
+            .then(|| p.parse::<u32>().ok())
+            .flatten()
+    };
+    match (num(ma), num(mi)) {
+        (Some(2), Some(b)) => Ok((2, b)),
+        _ => Err(bad()),
+    }
+}
+
+/// An environment name a declaration may set (never one the runner owns or
+/// one that changes how the dynamic linker loads code).
+fn env_key_ok(k: &str) -> bool {
+    let b = k.as_bytes();
+    !b.is_empty()
+        && b.len() <= 64
+        && b[0].is_ascii_uppercase()
+        && b.iter()
+            .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || *c == b'_')
+        && !matches!(k, "HOME" | "PATH" | "IFS" | "SHELL")
+        && !k.starts_with("LD_")
+}
+
 /// Parse + validate one declaration. `file` is its file name (`<id>.toml`);
-/// `lock_of` finds a lock beside it by file name.
+/// `lock_of` finds a lock beside it by file name. A per-target payload picks
+/// this binary's own target ([`host_triple`]).
 pub fn parse<'a>(
     file: &str,
     bytes: &[u8],
     lock_of: impl Fn(&str) -> Option<&'a [u8]>,
+) -> Result<Component, ManifestError> {
+    parse_for(file, bytes, lock_of, &host_triple())
+}
+
+/// [`parse`] as a machine of `target` would (tests; the installer of another
+/// architecture).
+pub fn parse_for<'a>(
+    file: &str,
+    bytes: &[u8],
+    lock_of: impl Fn(&str) -> Option<&'a [u8]>,
+    target: &str,
 ) -> Result<Component, ManifestError> {
     if bytes.len() > MAX_MANIFEST_BYTES {
         return Err(ManifestError::TooLarge(bytes.len()));
@@ -504,10 +689,19 @@ pub fn parse<'a>(
     let kb_entry = raw.kb_entry.as_deref().map(kb_path).transpose()?;
 
     let p = raw.payload;
+    let mut per_target = false;
     let payload = match p.kind.as_str() {
         "pip" => {
-            if p.url.is_some() || p.sha256.is_some() || p.size.is_some() {
-                return Err(invalid("payload", "a pip payload has no url/sha256/size"));
+            if p.url.is_some()
+                || p.sha256.is_some()
+                || p.size.is_some()
+                || p.targets.is_some()
+                || p.note.is_some()
+            {
+                return Err(invalid(
+                    "payload",
+                    "a pip payload has no url/sha256/size/targets/note",
+                ));
             }
             let lock = p
                 .lock
@@ -547,36 +741,70 @@ pub fn parse<'a>(
             }
         }
         "binary" => {
-            if p.lock.is_some() || p.venv.is_some() {
-                return Err(invalid("payload", "a binary payload has no lock/venv"));
+            if p.lock.is_some() || p.venv.is_some() || p.note.is_some() {
+                return Err(invalid("payload", "a binary payload has no lock/venv/note"));
             }
-            let url = https_url(
-                "payload.url",
-                p.url
-                    .as_deref()
-                    .ok_or_else(|| invalid("payload.url", "a binary payload pins its url"))?,
-            )?;
-            if url_file_name(&url).is_none() {
-                return Err(invalid("payload.url", "ends in a plain file name"));
+            match p.targets {
+                None => {
+                    let (url, sha256, size) = binary_pin(p.url.as_deref(), p.sha256, p.size)?;
+                    Payload::Binary { url, sha256, size }
+                }
+                Some(targets) => {
+                    if p.url.is_some() || p.sha256.is_some() || p.size.is_some() {
+                        return Err(invalid("payload", "one pin or per-target pins, not both"));
+                    }
+                    if targets.is_empty() || targets.len() > 16 {
+                        return Err(invalid("payload.targets", "1 to 16 targets"));
+                    }
+                    per_target = true;
+                    let mut chosen = None;
+                    for (triple, t) in targets {
+                        if !is_target_triple(&triple) {
+                            return Err(invalid(
+                                "payload.targets",
+                                format!("{triple:?} is not an <arch>-<os> target"),
+                            ));
+                        }
+                        // every target is validated, not only this machine's
+                        let pin = binary_pin(Some(&t.url), Some(t.sha256), Some(t.size))?;
+                        if triple == target {
+                            chosen = Some(pin);
+                        }
+                    }
+                    match chosen {
+                        Some((url, sha256, size)) => Payload::Binary { url, sha256, size },
+                        None => Payload::Unavailable {
+                            reason: format!(
+                                "there is no build of {title} for this machine ({target})"
+                            ),
+                        },
+                    }
+                }
             }
-            let sha256 = p
-                .sha256
-                .filter(|h| {
-                    h.len() == 64
-                        && h.bytes()
-                            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
-                })
-                .ok_or_else(|| invalid("payload.sha256", "64 lowercase hex"))?;
-            let size = p
-                .size
-                .filter(|s| (1..=MAX_BINARY_BYTES).contains(s))
-                .ok_or_else(|| invalid("payload.size", "1 byte to 512 MiB"))?;
-            Payload::Binary { url, sha256, size }
+        }
+        "none" => {
+            if p.lock.is_some()
+                || p.venv.is_some()
+                || p.url.is_some()
+                || p.sha256.is_some()
+                || p.size.is_some()
+                || p.targets.is_some()
+            {
+                return Err(invalid(
+                    "payload",
+                    "a declaration without a payload pins nothing",
+                ));
+            }
+            let reason = match p.note.as_deref() {
+                Some(n) => plain_text("payload.note", n, 200)?,
+                None => format!("{title} is not part of this release"),
+            };
+            Payload::Unavailable { reason }
         }
         other => return Err(invalid("payload.kind", format!("unknown kind {other:?}"))),
     };
 
-    let requires = Requires {
+    let mut requires = Requires {
         python: raw
             .requires
             .python
@@ -590,13 +818,49 @@ pub fn parse<'a>(
                     .ok_or_else(|| invalid("requires.service", "not a service id"))?,
             ),
         },
+        glibc: raw
+            .requires
+            .glibc
+            .as_deref()
+            .map(glibc_version)
+            .transpose()?,
+        glibc_distros: None,
+        component: match raw.requires.component {
+            None => None,
+            Some(c) if is_component_id(&c) && c != raw.id => Some(c),
+            Some(_) => return Err(invalid("requires.component", "another component's id")),
+        },
     };
+    if let Some(d) = raw.requires.glibc_distros.as_deref() {
+        if requires.glibc.is_none() {
+            return Err(invalid(
+                "requires.glibc_distros",
+                "only with requires.glibc",
+            ));
+        }
+        requires.glibc_distros = Some(plain_text("requires.glibc_distros", d, 64)?);
+    }
     if matches!(payload, Payload::Pip { .. }) && requires.python.is_none() {
         return Err(invalid("requires.python", "a pip payload names its python"));
     }
 
     let r = raw.run;
-    let program = rel_path("run.program", &r.program)?;
+    let program = if r.program == PAYLOAD_PROGRAM {
+        match &payload {
+            Payload::Binary { url, .. } if per_target => url_file_name(url).unwrap_or_default(),
+            // never run: enable refuses an unavailable payload first
+            Payload::Unavailable { .. } => raw.id.clone(),
+            _ => {
+                return Err(invalid(
+                    "run.program",
+                    "{payload} names the file of a per-target binary",
+                ))
+            }
+        }
+    } else {
+        r.program.clone()
+    };
+    let program = rel_path("run.program", &program)?;
     if matches!(payload, Payload::Pip { .. }) && !program.ends_with(".py") {
         return Err(invalid("run.program", "a pip component runs a .py script"));
     }
@@ -608,6 +872,19 @@ pub fn parse<'a>(
         .iter()
         .map(|a| run_arg(a))
         .collect::<Result<Vec<_>, _>>()?;
+    if r.env.len() > 8 {
+        return Err(invalid("run.env", "more than 8 variables"));
+    }
+    let mut env: Vec<(String, String)> = Vec::with_capacity(r.env.len());
+    for (k, v) in &r.env {
+        if !env_key_ok(k) {
+            return Err(invalid(
+                "run.env",
+                format!("{k:?} is not a name a declaration may set"),
+            ));
+        }
+        env.push((k.clone(), run_arg(v)?));
+    }
     if r.ports.len() > 8 {
         return Err(invalid("run.ports", "more than 8 ports"));
     }
@@ -667,6 +944,7 @@ pub fn parse<'a>(
             program,
             args,
             ports,
+            env,
             health,
         },
         weight: Weight {
@@ -675,6 +953,7 @@ pub fn parse<'a>(
             rss_bytes: w.rss_bytes,
         },
         license,
+        prefetch: raw.install.prefetch.unwrap_or(true),
     })
 }
 
@@ -760,6 +1039,34 @@ notice = "This installs demo. You install it."
             "the helper listens on no port (§15.7)"
         );
         assert_eq!(lxmf.notice_hash().len(), 64);
+    }
+
+    #[test]
+    fn install_prefetch_defaults_to_true_and_the_delta_chat_pair_opts_out() {
+        // default: absent [install] ⇒ pre-downloaded by `111 install`
+        assert!(parse_str("demo.toml", &pip_toml("")).unwrap().prefetch);
+        let off = parse_str("demo.toml", &pip_toml("[install]\nprefetch = false\n")).unwrap();
+        assert!(!off.prefetch);
+        // an unknown [install] key is refused like every other table
+        assert!(matches!(
+            parse_str("demo.toml", &pip_toml("[install]\neager = true\n")),
+            Err(ManifestError::Parse(_))
+        ));
+        assert!(matches!(
+            parse_str("demo.toml", &pip_toml("[install]\nprefetch = \"no\"\n")),
+            Err(ManifestError::Parse(_))
+        ));
+        // the Raspberry Pi floor: the ~104 MB Delta Chat + Madmail payloads
+        // are never pre-downloaded; the LXMF closure (small) still is
+        let loaded = load(&embedded());
+        let by = |id: &str| loaded.iter().find(|c| c.id == id).unwrap();
+        assert!(by("lxmf").prefetch);
+        assert!(!by("deltachat").prefetch);
+        assert!(!by("madmail").prefetch);
+        assert_eq!(
+            fetch_command(&["deltachat", "madmail"]),
+            "sudo 111 install --components deltachat,madmail"
+        );
     }
 
     #[test]
@@ -906,5 +1213,163 @@ notice = "This installs deltachat-rpc-server (MPL-2.0)."
         );
         assert_eq!(url_file_name("https://h/x/"), None);
         assert_eq!(url_file_name("https://h/x/.hidden"), None);
+    }
+
+    fn per_target_toml(extra_run: &str, requires: &str) -> String {
+        format!(
+            r#"id = "relay"
+adapter = "app:deltachat"
+title = "Relay"
+[payload]
+kind = "binary"
+[payload.targets.x86_64-linux]
+url = "https://example.org/dl/relay-linux-amd64"
+sha256 = "{a}"
+size = 10
+[payload.targets.aarch64-linux]
+url = "https://example.org/dl/relay-linux-arm64"
+sha256 = "{b}"
+size = 20
+[requires]
+{requires}
+[run]
+program = "{{payload}}"
+args = ["--config", "{{bridge}}/relay.toml"]
+{extra_run}
+health = "none"
+[license]
+spdx = "AGPL-3.0-or-later"
+read_at = "https://example.org/LICENCE"
+notice = "This installs the relay. You install it."
+"#,
+            a = "a".repeat(64),
+            b = "b".repeat(64),
+        )
+    }
+
+    #[test]
+    fn a_per_target_binary_picks_this_machines_pin_and_names_its_file() {
+        let t = per_target_toml("", "");
+        let c = parse_for("relay.toml", t.as_bytes(), |_| None, "x86_64-linux").unwrap();
+        assert_eq!(
+            c.payload,
+            Payload::Binary {
+                url: "https://example.org/dl/relay-linux-amd64".into(),
+                sha256: "a".repeat(64),
+                size: 10
+            }
+        );
+        assert_eq!(
+            c.run.program, "relay-linux-amd64",
+            "{{payload}} is the file"
+        );
+        let c = parse_for("relay.toml", t.as_bytes(), |_| None, "aarch64-linux").unwrap();
+        assert_eq!(c.run.program, "relay-linux-arm64");
+        assert!(matches!(c.payload, Payload::Binary { size: 20, .. }));
+        // no build for a 32-bit ARM machine: declared, with the honest copy
+        let c = parse_for("relay.toml", t.as_bytes(), |_| None, "arm-linux").unwrap();
+        assert_eq!(
+            c.payload,
+            Payload::Unavailable {
+                reason: "there is no build of Relay for this machine (arm-linux)".into()
+            }
+        );
+        // the host's own parse is one of these
+        assert!(parse("relay.toml", t.as_bytes(), |_| None).is_ok());
+        assert!(host_triple().contains('-'));
+        // every target is validated, not only this machine's
+        let bad = t.replace(&"b".repeat(64), "nothex");
+        assert!(parse_for("relay.toml", bad.as_bytes(), |_| None, "x86_64-linux").is_err());
+        let bad = t.replace("[payload.targets.aarch64-linux]", "[payload.targets.Arm64]");
+        assert!(parse_for("relay.toml", bad.as_bytes(), |_| None, "x86_64-linux").is_err());
+        // one pin or per-target pins, not both
+        let both = t.replace("kind = \"binary\"", "kind = \"binary\"\nsize = 3");
+        assert!(parse_for("relay.toml", both.as_bytes(), |_| None, "x86_64-linux").is_err());
+        // {payload} only names a per-target binary
+        let single = t
+            .replace("[payload.targets.x86_64-linux]\n", "")
+            .replace(
+                &format!(
+                    "[payload.targets.aarch64-linux]\nurl = \"https://example.org/dl/relay-linux-arm64\"\nsha256 = \"{}\"\nsize = 20\n",
+                    "b".repeat(64)
+                ),
+                "",
+            );
+        assert!(parse_for("relay.toml", single.as_bytes(), |_| None, "x86_64-linux").is_err());
+    }
+
+    #[test]
+    fn requires_glibc_component_and_env_are_validated() {
+        let t = per_target_toml(
+            "env = { DC_ACCOUNTS_PATH = \"{bridge}/accounts\" }",
+            "glibc = \"2.38\"\nglibc_distros = \"Debian 13 / Ubuntu 24.04\"\ncomponent = \"other\"",
+        );
+        let c = parse_for("relay.toml", t.as_bytes(), |_| None, "x86_64-linux").unwrap();
+        assert_eq!(c.requires.glibc, Some((2, 38)));
+        assert_eq!(
+            c.requires.glibc_distros.as_deref(),
+            Some("Debian 13 / Ubuntu 24.04")
+        );
+        assert_eq!(c.requires.component.as_deref(), Some("other"));
+        assert_eq!(
+            c.run.env,
+            vec![(
+                "DC_ACCOUNTS_PATH".to_string(),
+                "{bridge}/accounts".to_string()
+            )]
+        );
+        for bad in [
+            ("glibc = \"2.38\"", "glibc = \"3.1\""),
+            ("glibc = \"2.38\"", "glibc = \"2\""),
+            ("glibc = \"2.38\"\n", ""),
+            ("component = \"other\"", "component = \"relay\""),
+            ("component = \"other\"", "component = \"Not An Id\""),
+            ("DC_ACCOUNTS_PATH", "LD_PRELOAD"),
+            ("DC_ACCOUNTS_PATH", "HOME"),
+            ("DC_ACCOUNTS_PATH", "dc_lower"),
+            ("{bridge}/accounts", "{home}/accounts"),
+        ] {
+            let b = t.replace(bad.0, bad.1);
+            assert!(
+                parse_for("relay.toml", b.as_bytes(), |_| None, "x86_64-linux").is_err(),
+                "{bad:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_declaration_without_a_payload_carries_its_copy() {
+        let t = r#"id = "sx"
+adapter = "app:simplex"
+title = "SimpleX"
+[payload]
+kind = "none"
+note = "SimpleX is not enabled in this release"
+[run]
+program = "simplex-chat"
+ports = [11232]
+health = "none"
+[license]
+spdx = "AGPL-3.0-only"
+read_at = "https://example.org/LICENSE"
+notice = "SimpleX is not part of this release."
+"#;
+        let c = parse("sx.toml", t.as_bytes(), |_| None).unwrap();
+        assert_eq!(
+            c.payload,
+            Payload::Unavailable {
+                reason: "SimpleX is not enabled in this release".into()
+            }
+        );
+        let pinned = t.replace("kind = \"none\"", "kind = \"none\"\nsize = 1");
+        assert!(parse("sx.toml", pinned.as_bytes(), |_| None).is_err());
+        let default = t.replace("note = \"SimpleX is not enabled in this release\"\n", "");
+        let c = parse("sx.toml", default.as_bytes(), |_| None).unwrap();
+        assert_eq!(
+            c.payload,
+            Payload::Unavailable {
+                reason: "SimpleX is not part of this release".into()
+            }
+        );
     }
 }

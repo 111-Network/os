@@ -22,11 +22,17 @@
 //!   members are validated against the network's recipient syntax (none ⇒ refused).
 //! - **A patch is all or nothing**: every entry is validated (and every consent gate
 //!   checked) before anything is written.
+//! - **Per-contact bridging for app peers** (§7 (2), §15.3; C5, additive): off for every
+//!   contact until a human turns it on for that one with the hash of [`contact_text`]
+//!   ([`Bridge::set_contact_bridging`]); the app-peer adapter reads the switch live per
+//!   received message ([`Bridge::contact_bridged`]) and copies only those contacts' texts
+//!   into Messages. The agent can neither propose nor confirm it (§15.3).
 
 use super::core::{compiled_in, is_list_conv, Bridge, BridgeError, LIST_ACCOUNT, LIST_PREFIX};
 use super::{ingest, AdapterFacts, ConvKind};
 use crate::daemon::components::consent::{
-    self, AnnounceRecord, ChannelRecord, ConsentRequired, HamRecord, RecipientListRecord,
+    self, AnnounceRecord, ChannelRecord, ConsentRequired, ContactRecord, HamRecord,
+    RecipientListRecord,
 };
 use crate::daemon::fabric::json::{self as fjson, ConvLive};
 use mesh111::store::{ForeignConversationRow, ForeignKind};
@@ -69,6 +75,18 @@ pub fn uplink_text(label: &str, native_id: &str, uplink_copy: &str) -> String {
     )
 }
 
+/// The per-contact bridging warning of an app peer (§7 (2), verbatim after the subject:
+/// the network label and the contact's native id, stable for the contact's life).
+pub fn contact_text(label: &str, contact: &str) -> String {
+    format!(
+        "{label} contact {contact}: This hub decrypts this contact's messages to bridge them. \
+         What you relay onto another network is readable there."
+    )
+}
+
+/// App-peer contacts with bridging on, per network (more is refused).
+pub const MAX_BRIDGED_CONTACTS: usize = 256;
+
 /// The bridge-core sections as loaded (module doc).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Sections {
@@ -77,6 +95,8 @@ pub struct Sections {
     pub channels: Vec<ChannelRecord>,
     pub lists: Vec<RecipientListRecord>,
     pub announce: Option<AnnounceRecord>,
+    /// App-peer contacts with bridging on (C5).
+    pub contacts: Vec<ContactRecord>,
 }
 
 impl Sections {
@@ -89,7 +109,17 @@ impl Sections {
             channels: f.channels,
             lists: f.recipient_lists,
             announce: f.announce,
+            contacts: f.contacts,
         }
+    }
+
+    /// Bridging is on for `contact` of `account` on `network`: a record whose hash is
+    /// the hash of `text` as it reads now (a changed text asks again).
+    pub fn contact_bridged(&self, network: &str, account: &str, contact: &str, text: &str) -> bool {
+        let h = sha256_hex(text);
+        self.contacts.iter().any(|r| {
+            r.network == network && r.account == account && r.contact == contact && r.text_hash == h
+        })
     }
 
     /// A human confirmed `text` for `account` (its hash is the recorded one).
@@ -362,6 +392,7 @@ impl Bridge {
             file.channels = written.channels;
             file.recipient_lists = written.lists;
             file.announce = written.announce;
+            file.contacts = written.contacts;
             Ok(())
         })
         .map_err(|e| BridgeError::Io(format!("{e:#}")))?;
@@ -645,6 +676,99 @@ impl Bridge {
         Ok(())
     }
 
+    /// Is bridging on for app-peer `contact` (its native id) of `account` on `network`
+    /// (§7 (2))? Read live; off unless a human turned it on with the current text.
+    pub fn contact_bridged(&self, network: &str, account: &str, contact: &str) -> bool {
+        let text = contact_text(&self.label_of(network), contact);
+        super::core::lock_sections(self).contact_bridged(network, account, contact, &text)
+    }
+
+    /// The contacts with bridging on for `network`.
+    pub fn bridged_contacts(&self, network: &str) -> Vec<ContactRecord> {
+        super::core::lock_sections(self)
+            .contacts
+            .iter()
+            .filter(|r| r.network == network)
+            .cloned()
+            .collect()
+    }
+
+    /// Turn bridging on (with the hash of [`contact_text`]; else `409 consent_required`
+    /// with the exact text) or off for app-peer `contact` of `account` (§7 (2)). Only an
+    /// app-peer network (`app:…`) has the switch; the address is a native id (no
+    /// whitespace, control or format characters, at most 254 bytes).
+    pub async fn set_contact_bridging(
+        &self,
+        network: &str,
+        account: &str,
+        contact: &str,
+        on: bool,
+        accept_hash: Option<&str>,
+        by: &str,
+    ) -> Result<(), BridgeError> {
+        if !self.known(network) {
+            return Err(BridgeError::NotFound("network"));
+        }
+        if !network.starts_with("app:") {
+            return Err(BridgeError::BadRequest(format!(
+                "{} has no per-contact bridging",
+                self.label_of(network)
+            )));
+        }
+        let native_ok = |s: &str| {
+            !s.is_empty()
+                && s.len() <= 254
+                && ingest::clean(s) == s
+                && !s.chars().any(char::is_whitespace)
+        };
+        if !native_ok(contact) || !native_ok(account) {
+            return Err(BridgeError::BadRequest(
+                "that is not a contact address".into(),
+            ));
+        }
+        if !on {
+            return self.write_sections(|s| {
+                s.contacts.retain(|r| {
+                    !(r.network == network && r.account == account && r.contact == contact)
+                })
+            });
+        }
+        let text = contact_text(&self.label_of(network), contact);
+        let hash = sha256_hex(&text);
+        if accept_hash != Some(hash.as_str()) {
+            return Err(BridgeError::Consent(ConsentRequired {
+                action: "contact_bridge",
+                subject: contact.to_string(),
+                warning_text: text,
+                hash,
+                addons: Vec::new(),
+            }));
+        }
+        let count = super::core::lock_sections(self)
+            .contacts
+            .iter()
+            .filter(|r| r.network == network && !(r.account == account && r.contact == contact))
+            .count();
+        if count >= MAX_BRIDGED_CONTACTS {
+            return Err(BridgeError::BadRequest(format!(
+                "at most {MAX_BRIDGED_CONTACTS} bridged contacts per network"
+            )));
+        }
+        let rec = ContactRecord {
+            network: network.to_string(),
+            account: account.to_string(),
+            contact: contact.to_string(),
+            text_hash: hash,
+            by: by.to_string(),
+        };
+        self.write_sections(|s| {
+            s.contacts.retain(|r| {
+                !(r.network == rec.network && r.account == rec.account && r.contact == rec.contact)
+            });
+            s.contacts.push(rec);
+        })
+    }
+
     /// The LXMF announce name and interval (§6 (3)).
     pub fn announce(&self) -> AnnounceRecord {
         super::core::lock_sections(self).announce()
@@ -886,5 +1010,50 @@ mod tests {
         assert_eq!(p.ham.len(), 1);
         assert!(serde_json::from_value::<SettingsPatch>(json!({"surprise": 1})).is_err());
         assert!(list_id_ok("friends-1_x") && !list_id_ok("") && !list_id_ok("a b"));
+    }
+
+    #[test]
+    fn a_contact_is_bridged_only_with_the_current_text_hash() {
+        let mut s = Sections::default();
+        let t = contact_text("Delta Chat", "alice@[192.168.1.5]");
+        assert!(t.ends_with(
+            "This hub decrypts this contact's messages to bridge them. What you relay onto \
+             another network is readable there."
+        ));
+        assert!(!s.contact_bridged(
+            "app:deltachat",
+            "hub@[192.168.1.5]",
+            "alice@[192.168.1.5]",
+            &t
+        ));
+        s.contacts.push(ContactRecord {
+            network: "app:deltachat".into(),
+            account: "hub@[192.168.1.5]".into(),
+            contact: "alice@[192.168.1.5]".into(),
+            text_hash: sha256_hex(&t),
+            by: "loopback".into(),
+        });
+        assert!(s.contact_bridged(
+            "app:deltachat",
+            "hub@[192.168.1.5]",
+            "alice@[192.168.1.5]",
+            &t
+        ));
+        assert!(!s.contact_bridged(
+            "app:deltachat",
+            "hub@[192.168.1.5]",
+            "bob@[192.168.1.5]",
+            &t
+        ));
+        let changed = format!("{t} (new copy)");
+        assert!(
+            !s.contact_bridged(
+                "app:deltachat",
+                "hub@[192.168.1.5]",
+                "alice@[192.168.1.5]",
+                &changed
+            ),
+            "a changed text asks again"
+        );
     }
 }

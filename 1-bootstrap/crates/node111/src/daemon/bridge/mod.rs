@@ -33,12 +33,14 @@
 
 pub mod attest;
 pub mod core;
+pub mod deltachat;
 pub mod edges;
 pub mod fanout;
 pub mod ingest;
 pub mod lxmf;
 pub mod marker;
 pub mod settings;
+pub mod simplex;
 pub mod state;
 pub mod stub;
 

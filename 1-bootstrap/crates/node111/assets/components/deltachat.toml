@@ -1,0 +1,56 @@
+# Optional component declaration (Layer 6 §2.1, §7; C5): deltachat-rpc-server, the chatmail core's JSON-RPC server, which
+# runs this hub's Delta Chat bridge account over piped stdio (no port). Parsed with deny_unknown_fields by node111's
+# `daemon/components/manifest.rs`. Pins: the netns spike S5 (plan/layers/6-transport/research/08-spike-deltachat.md §0;
+# release v2.63.0 = tag commit de6f46971002c64b293d6095e66d8a1b7a11fd43; static binaries, so no glibc floor). No armv7
+# asset exists upstream. The Android arm64-v8a build is the Termux target (a runbook gate, not a v1 claim, §7); it needs
+# the Madmail relay, which does not run on Termux, so on a phone the enable refuses at [requires].
+#
+# The account-level warning of §7 (2) is part of the notice below, verbatim, so the enable's 409 consent round trip
+# records it. Health is the adapter's own JSON-RPC handshake (`get_system_info`) on every generation
+# (`daemon/bridge/deltachat.rs`), so `health = "none"` here.
+id = "deltachat"
+adapter = "app:deltachat"               # the account store is bridge/deltachat/accounts (0700; removed by "remove files")
+title = "Delta Chat core"
+kb_entry = "projects/deltachat-rpc-server"
+
+[payload]
+kind = "binary"
+
+[payload.targets.x86_64-linux]
+url = "https://github.com/chatmail/core/releases/download/v2.63.0/deltachat-rpc-server-x86_64-linux"
+sha256 = "57cab3291ecc55736f97964b3a2979e5e23a70abcc270f1ed515e995f540d517"
+size = 26811824                         # static-pie, stripped; run in the spike (`--version` → 2.63.0)
+
+[payload.targets.aarch64-linux]
+url = "https://github.com/chatmail/core/releases/download/v2.63.0/deltachat-rpc-server-aarch64-linux"
+sha256 = "040b0c3699361c9aa9776caf259d73b70c5892937f6f85836e26143ba1cdbd13"
+size = 21009952                         # static, stripped; downloaded and hashed, not run
+
+[payload.targets.aarch64-android]
+url = "https://github.com/chatmail/core/releases/download/v2.63.0/deltachat-rpc-server-arm64-v8a-android"
+sha256 = "3e2d0c9306fccee78ccbd5b74c73430ed35dd1b31b31931abba97e8bbf9d658c"
+size = 21897944                         # bionic linker64; downloaded and hashed, not run
+
+[requires]
+component = "madmail"                   # the relay the bridge account lives on
+
+[run]
+program = "{payload}"
+args = []
+env = { DC_ACCOUNTS_PATH = "{bridge}/accounts" }
+ports = []                              # JSON-RPC over stdio only
+health = "none"
+
+[weight]
+cached_bytes = 26811824                 # x86_64 (aarch64: 21009952, Android: 21897944)
+installed_bytes = 26811824
+rss_bytes = 31000000                    # 28.5–30.9 MB with one account, measured in the spike
+
+[install]
+prefetch = false                        # 26.8 MB on x86_64: not pre-downloaded by `111 install` (the Raspberry Pi floor);
+                                        # `sudo 111 install --components deltachat,madmail` fetches it, enable never does
+
+[license]
+spdx = "MPL-2.0"
+read_at = "https://github.com/chatmail/core/blob/v2.63.0/LICENSE"
+notice = "deltachat-rpc-server 2.63.0 is the chatmail core by the Delta Chat contributors, licensed under the Mozilla Public License 2.0; read it at https://github.com/chatmail/core/blob/v2.63.0/LICENSE before you enable it. It is downloaded unmodified from its GitHub release; you install it, and 111 is not its distributor. It runs this hub's own Delta Chat bridge account, flagged as a bot, on this hub's Madmail relay. This hub decrypts everything this account receives, including messages from contacts you do not bridge. The plaintext exists on this hub. Bridging is off for every contact until you turn it on for that one. The account store keeps every message for 7 days (bridged texts are copied into Messages first); remove files deletes it."
