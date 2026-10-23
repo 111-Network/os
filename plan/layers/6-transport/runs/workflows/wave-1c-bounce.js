@@ -24,12 +24,13 @@ const RESULT = {
 }
 
 const NOW = "\nUPDATE 2026-10-23 (read before the task text): C1 (21258f5), C3rs (ea178c2) and C4 (54117d3) have landed since this brief was written; N/mod.rs constructs the Bridge and the MeshtasticAdapter and calls attach_client. The 'NOT yours' lists still hold. Agents on the same tree right now: W1 (N/mod.rs, N/dashboard/api_v1/*, N/bridge/ingest.rs, tests/api_v1_*.rs), W2 (N/bridge/{deltachat,simplex,settings,mod}.rs, N/components/**, src/install/**, their tests). The shared target dir is warm; cargo's lock serializes builds \u2014 a wait on the lock is normal.\n"
+const B2_EXTRA2 = "(F-extra-2, from W1, minor-to-major, fanout.rs Bridge::cancel ~:900 + state.rs tracking) Bridge::cancel deletes a queued, never-handed row even while the core still tracks it for a Later retry (after F1 the Delivery map keeps (row id \u2192 attempts, due tick)); the core may then try to update a missing row. Drop the track on cancel (or check is_tracked) and test: cancel a rate-limited (Later) row, run ticks, no error and no re-hand.\n(Context: W1 landed the fm- retry/cancel routes in messages.rs calling Bridge::resend / Bridge::cancel; the OLD row records meta.resent_as = <new id> as you built it \u2014 keep that contract, the route's test pins it.)\n"
 const B2_EXTRA = "\n(F-extra, from the C1 row, minor, core.rs publish_networks) the `bridge` SSE snapshot lists networks in release order while GET /networks sorts by the settings' [order]; make the snapshot use the same order (one sort at publish time, no new state).\n"
 const only = (args && Array.isArray(args.only)) ? args.only : ['B2', 'B3']
 phase('Bounce')
 log('Layer 6 Wave 1 bounce: B2 + B3 review majors + minors (parallel, disjoint files)')
 const jobs = []
-if (only.includes('B2')) jobs.push(() => agent(CTX + NOW + '\n\n' + B2 + B2_EXTRA, { label: 'L6:B2-bounce', phase: 'Bounce', schema: RESULT, model: 'opus', effort: 'high' }))
+if (only.includes('B2')) jobs.push(() => agent(CTX + NOW + '\n\n' + B2 + B2_EXTRA + B2_EXTRA2, { label: 'L6:B2-bounce', phase: 'Bounce', schema: RESULT, model: 'opus', effort: 'high' }))
 if (only.includes('B3')) jobs.push(() => agent(CTX + NOW + '\n\n' + B3, { label: 'L6:B3-bounce', phase: 'Bounce', schema: RESULT, model: 'opus', effort: 'high' }))
 const results = await parallel(jobs)
 log('returned: ' + results.map(r => (r ? r.task + '=' + r.status : 'null')).join(', '))
