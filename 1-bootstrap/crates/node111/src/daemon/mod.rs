@@ -1013,6 +1013,10 @@ async fn daemon_main() -> anyhow::Result<()> {
     // Layer 6: the components whose switch is on, now that their dependencies exist;
     // then the bridge pass joins the daemon tick
     layer6.resume(&dashboard.api).await;
+    // G1 (Layer 6 §16): debug builds only — the StubAdapters `$NODE111_BRIDGE_STUBS`
+    // declares; returns at once when the variable is unset (bridge::stub::scenario)
+    #[cfg(debug_assertions)]
+    bridge::stub::scenario::start(Arc::clone(&layer6.bridge));
     let _ = layer6_slot.set(Arc::clone(&layer6));
     // agent activity (Layer 4 R3): 111-agent /v1/agent/events → `agent` + `proposal` frames
     let _agent_events = dashboard::api_v1::relay::start_events(&dashboard.api);
