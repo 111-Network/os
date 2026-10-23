@@ -1,6 +1,6 @@
 # Layer 6 — Transport & Bridge: options brief
 
-Status: 🧭 deciding · 2026-10-19 · sweep complete (6 scouts, opus critic, 1 gap-fill scout; ~2.0M tokens, 895 tool calls, 47–62 sources per lens); the gap-fill ran the LXMF endpoint and settled F3's shape · lead-written from the 6-scout sweep
+Status: ✅ decided (D25, D26; spec locked D27, built and locked D29; was 🧭 deciding on 2026-10-19) · 2026-10-19 · sweep complete (6 scouts, opus critic, 1 gap-fill scout; ~2.0M tokens, 895 tool calls, 47–62 sources per lens); the gap-fill ran the LXMF endpoint and settled F3's shape · lead-written from the 6-scout sweep
 (`layers/6-transport/research/`: seams scout opus, 5 lens scouts sonnet, each web-verified; critic opus). Reads with: `os/README.md` §6 ·
 D17 (device decisions) · D19 c (LoRa ownership) · D20 (Layer 5 hand-offs) · D22 (GPL-3.0-or-later) · **D23** (this kickoff) ·
 `cross-layer/devices.md` · `layers/6-transport/research/00-code-seams.md` (line-verified seam map).
