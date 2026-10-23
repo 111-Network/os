@@ -14,8 +14,13 @@ harmless ones (MsgsChanged, ContactsChanged, ChatModified).
 The test drives the scripted world with **control lines** written into the same stdin
 (objects without a `jsonrpc` key; the adapter never writes one): `join`, `group`,
 `incoming`, `deliver`/`read`/`fail` (`msg` or the last send), `hidden_delivered`,
-`auto`, `garbage`, `info`, `overflow`, `delay`, `exit`. Every request and its answer
-are appended to `--log` as JSON lines. The world persists in
+`auto`, `garbage`, `info`, `overflow`, `delay`, `exit`. `join` and `incoming` take
+`"new_key": true` for a **new contact id with the same address** (core 2.x key-contacts:
+a re-installed app or another key sending with that From; C5 review F1), and `incoming`
+takes `"latest_key": true` (the newest id with that address) and `"padlock": false` for a message the core shows without the padlock. Methods named
+in `$FAKE_DC_MUTE` (comma-separated) are logged and never answered (a core that does not
+finish its handshake; F3). Every request and its answer are appended to `--log` as JSON
+lines. The world persists in
 `$DC_ACCOUNTS_PATH/fake-state.json`, so a respawn finds the configured account.
 """
 
@@ -53,6 +58,7 @@ class World:
         self.delays = {}
         self.auto_deliver = False
         self.last_sent = None
+        self.mute = {m for m in os.environ.get("FAKE_DC_MUTE", "").split(",") if m}
         self.state = {"accounts": {}, "next": 10}
         if os.path.exists(path):
             with open(path, encoding="utf-8") as f:
@@ -121,10 +127,22 @@ class World:
 
     # -- the scripted world
     def contact_by_addr(self, acc, addr):
+        """The first contact id with this address (the original key)."""
         for cid, c in acc["contacts"].items():
             if c["address"] == addr:
                 return int(cid)
         return None
+
+    def contact_for(self, acc, c, addr):
+        """`new_key`: another contact id with the same address; `latest_key`: the newest
+        contact id with it; else the first one."""
+        if c.get("new_key"):
+            return self.new_contact(acc, addr, c.get("name", ""))
+        if c.get("latest_key"):
+            ids = [int(k) for k, v in acc["contacts"].items() if v["address"] == addr]
+            if ids:
+                return max(ids)
+        return self.contact_by_addr(acc, addr) or self.new_contact(acc, addr, c.get("name", ""))
 
     def new_contact(self, acc, addr, name):
         cid = self.next_id()
@@ -168,8 +186,8 @@ class World:
         what = c.get("control")
         a, acc = self.only()
         if what == "join":
-            addr, name = c["addr"], c.get("name", "")
-            cid = self.contact_by_addr(acc, addr) or self.new_contact(acc, addr, name)
+            addr = c["addr"]
+            cid = self.contact_for(acc, c, addr)
             chat = self.single_chat(acc, cid)
             self.save()
             self.event(a, "ContactsChanged", contactId=cid)
@@ -187,9 +205,7 @@ class World:
             self.event(a, "ChatModified", chatId=chat)
         elif what == "incoming":
             addr = c["from"]
-            cid = self.contact_by_addr(acc, addr) or self.new_contact(
-                acc, addr, c.get("name", "")
-            )
+            cid = self.contact_for(acc, c, addr)
             if c.get("group"):
                 chat = self.group_chat(acc, c["group"])
             else:
@@ -203,6 +219,7 @@ class World:
                 "isInfo": bool(c.get("info", False)),
                 "fileBytes": int(c.get("file_bytes", 0)),
                 "timestamp": 1760000000,
+                "padlock": bool(c.get("padlock", True)),
             }
             self.save()
             self.event(a, "MsgsChanged", chatId=chat, msgId=mid)
@@ -353,7 +370,7 @@ class World:
             "state": m["state"],
             "isInfo": m["isInfo"],
             "isBot": m["fromId"] == 1,
-            "showPadlock": True,
+            "showPadlock": m.get("padlock", True),
             "viewType": "Text",
             "fileBytes": m["fileBytes"],
             "timestamp": m["timestamp"],
@@ -417,6 +434,8 @@ class World:
         if method == "get_next_event_batch":
             self.polls.append(rid)
             self.pump()
+            return
+        if method in self.mute:
             return
         result, error = self.call(method, params if isinstance(params, list) else [])
         reply = {"jsonrpc": "2.0", "id": rid}

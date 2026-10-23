@@ -65,6 +65,10 @@ PRESENCE_DIR = os.path.join(OS_DIR, "5-messaging", "sidecars", "meshtastic-prese
 PRESENCE_LOCK = os.path.join(PRESENCE_DIR, "meshtastic-presence-lock.txt")
 PRESENCE_LICENSE = os.path.join(PRESENCE_DIR, "LICENSE")
 
+# Layer 6 inputs (6-transport/README.md §15): the optional components' declarations, whose
+# per-target payload pins (url, sha256, size) are what `111 install` downloads
+COMPONENTS_DIR = os.path.join(OS_DIR, "1-bootstrap", "crates", "node111", "assets", "components")
+
 
 def die(msg):
     sys.stderr.write("gen-notices: " + msg + "\n")
@@ -122,6 +126,15 @@ def go_snapshot_paths(tag):
     return (os.path.join(NOTICES_DIR, f"meshmud-{tag}.go.mod"), os.path.join(NOTICES_DIR, f"meshmud-{tag}.go.sum"))
 
 
+def component_pins():
+    """The optional components' declarations (`assets/components/*.toml`, sorted): each
+    file's hash covers its per-target pins, so a changed pin makes --check stale."""
+    if not os.path.isdir(COMPONENTS_DIR):
+        return []
+    return [os.path.join(COMPONENTS_DIR, n) for n in sorted(os.listdir(COMPONENTS_DIR))
+            if n.endswith(".toml") and os.path.isfile(os.path.join(COMPONENTS_DIR, n))]
+
+
 def input_records():
     """[(sha256, label)] for every input recorded in the notices file and compared by --check."""
     recs = []
@@ -132,7 +145,7 @@ def input_records():
     recs.append((pins_digest(mp), "1-bootstrap/scripts/meshmud-build.sh#pins"))
     recs.append((pins_digest(wp), "1-bootstrap/scripts/meshtastic-web-build.sh#pins"))
     gomod, gosum = go_snapshot_paths(mp["MESHMUD_TAG"])
-    extra = (gomod, gosum, GO_LICENSES, PY_LICENSES, PRESENCE_LOCK, PRESENCE_LICENSE)
+    extra = (gomod, gosum, GO_LICENSES, PY_LICENSES, PRESENCE_LOCK, PRESENCE_LICENSE) + tuple(component_pins())
     for path in extra:
         recs.append((sha256(path) if os.path.isfile(path) else None, os.path.relpath(path, OS_DIR)))
     return recs
@@ -300,7 +313,12 @@ def check(out_path):
     collect_go()
     collect_python()
     stale = []
-    for h, rel in input_records():
+    current = input_records()
+    labels = {rel for _h, rel in current}
+    for rel in sorted(recorded):
+        if rel not in labels:
+            stale.append(f"  {rel}: recorded but no longer an input")
+    for h, rel in current:
         if rel not in recorded:
             stale.append(f"  {rel}: not recorded in THIRD-PARTY-NOTICES.md")
         elif h is None:
@@ -624,6 +642,8 @@ def render():
     w("- **Python (Layer 5):** the packages locked for the `meshtastic-presence` venv (`5-messaging/sidecars/meshtastic-presence/meshtastic-presence-lock.txt`),")
     w("  with the hand-maintained `1-bootstrap/scripts/notices/python-licenses.txt`. Every locked package needs a row at its locked version.")
     w("- **Web client bundle (Layer 5):** the Meshtastic web client, tag and commit from `1-bootstrap/scripts/meshtastic-web-build.sh`.")
+    w("- **Optional components (Layer 6):** `1-bootstrap/crates/node111/assets/components/*.toml` are recorded below, so a changed per-target payload pin")
+    w("  makes `--check` stale. Their programs are separate and downloaded by the user (`LICENSING.md`); they are not covered by this file.")
     w("- **Fonts, vendored code, embedded data:** see their sections.")
     w("- **Copyright lines** are taken from each component's license files (Rust: the unpacked crate in the cargo registry; JS: the installed package). Where")
     w("  a component's license files have no copyright line, its `authors` metadata is shown instead.")

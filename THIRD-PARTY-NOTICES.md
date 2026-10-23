@@ -21,6 +21,8 @@ this list is in `LICENSING.md`.
 - **Python (Layer 5):** the packages locked for the `meshtastic-presence` venv (`5-messaging/sidecars/meshtastic-presence/meshtastic-presence-lock.txt`),
   with the hand-maintained `1-bootstrap/scripts/notices/python-licenses.txt`. Every locked package needs a row at its locked version.
 - **Web client bundle (Layer 5):** the Meshtastic web client, tag and commit from `1-bootstrap/scripts/meshtastic-web-build.sh`.
+- **Optional components (Layer 6):** `1-bootstrap/crates/node111/assets/components/*.toml` are recorded below, so a changed per-target payload pin
+  makes `--check` stale. Their programs are separate and downloaded by the user (`LICENSING.md`); they are not covered by this file.
 - **Fonts, vendored code, embedded data:** see their sections.
 - **Copyright lines** are taken from each component's license files (Rust: the unpacked crate in the cargo registry; JS: the installed package). Where
   a component's license files have no copyright line, its `authors` metadata is shown instead.
@@ -43,6 +45,10 @@ b077e56d26a629af7093ffeb32862f9d31381c672030a7d66e1dcdea1fcdc4a1  1-bootstrap/sc
 66486fd5c7055d2abdf0f6f896c101d4f723fa50a88d059b0373392810dca8ad  1-bootstrap/scripts/notices/python-licenses.txt
 6606833e36e9b3e9fd13b1a98ee210fd482008cfa3ed85c12f8f589a070d2ca3  5-messaging/sidecars/meshtastic-presence/meshtastic-presence-lock.txt
 3972dc9744f6499f0f9b2dbf76696f2ae7ad8af9b23dde66d6af86c9dfb36986  5-messaging/sidecars/meshtastic-presence/LICENSE
+d94c702b8fe1510baa927f092408367d50b043c423a413238c50a1733c9eb73a  1-bootstrap/crates/node111/assets/components/deltachat.toml
+4abba173f6c1eb0d4f9e9675daf2537cf04021dbc84a93a22da9538fc88fa998  1-bootstrap/crates/node111/assets/components/lxmf.toml
+5fae6ffe7d0118a4b54aaaec940fc3dcc649d34bb4b7a2f49c6072eff2a823fa  1-bootstrap/crates/node111/assets/components/madmail.toml
+2d933a1ff2033bcb2e9c9370ea7da5c23c6230cc00288acccffa6343768a0c73  1-bootstrap/crates/node111/assets/components/simplex.toml
 ```
 
 Regenerate with `python3 -I os/1-bootstrap/scripts/gen-notices.py` whenever an input above changes (a `#pins` entry is a hash of the pin lines of that build script). `--check` (run by `os/1-bootstrap/scripts/check.sh`) fails when the hashes above no longer match or a Go or Python license list no longer covers its lock.

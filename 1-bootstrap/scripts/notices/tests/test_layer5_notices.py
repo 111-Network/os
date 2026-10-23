@@ -19,6 +19,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 SCRIPTS = os.path.dirname(os.path.dirname(HERE))          # os/1-bootstrap/scripts
 OS_DIR = os.path.dirname(os.path.dirname(SCRIPTS))        # os/
 PRESENCE = os.path.join("5-messaging", "sidecars", "meshtastic-presence")
+COMPONENTS = "1-bootstrap/crates/node111/assets/components"
 
 
 def copy_tree(dst):
@@ -30,6 +31,11 @@ def copy_tree(dst):
         shutil.copy(os.path.join(OS_DIR, rel), os.path.join(dst, rel))
     shutil.copytree(os.path.join(SCRIPTS, "notices"), os.path.join(dst, "1-bootstrap/scripts/notices"),
                     ignore=shutil.ignore_patterns("tests", "__pycache__"))
+    # Layer 6: the optional components' declarations (their per-target pins)
+    os.makedirs(os.path.join(dst, COMPONENTS), exist_ok=True)
+    for n in os.listdir(os.path.join(OS_DIR, COMPONENTS)):
+        if n.endswith(".toml"):
+            shutil.copy(os.path.join(OS_DIR, COMPONENTS, n), os.path.join(dst, COMPONENTS, n))
 
 
 def load(dst):
@@ -179,6 +185,54 @@ class PinTests(Base):
                        "1-bootstrap/scripts/notices/go-licenses.txt", "1-bootstrap/scripts/notices/python-licenses.txt",
                        PRESENCE + "/meshtastic-presence-lock.txt", PRESENCE + "/LICENSE"):
             self.assertIn(needed, labels)
+
+
+class ComponentPinTests(Base):
+    """6-transport/README.md §15: `--check` hashes every component pin (C5 review F6)."""
+
+    def setUp(self):
+        super().setUp()
+        # the lockfiles are inputs too: copied so the whole block can be current
+        for rel in self.gn.LOCKFILES:
+            os.makedirs(os.path.dirname(self.path(rel)), exist_ok=True)
+            shutil.copy(os.path.join(OS_DIR, rel), self.path(rel))
+
+    def notices(self):
+        """A notices file holding only the inputs block, as the generator writes it."""
+        recs = "\n".join(f"{h}  {rel}" for h, rel in self.gn.input_records())
+        with open(self.path("THIRD-PARTY-NOTICES.md"), "w", encoding="utf-8") as f:
+            f.write(f"Inputs at generation time (SHA-256):\n\n```\n{recs}\n```\n")
+        return self.path("THIRD-PARTY-NOTICES.md")
+
+    def check(self, out):
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.gn.check(out)
+
+    def test_every_component_declaration_is_a_recorded_input(self):
+        labels = [rel for _h, rel in self.gn.input_records()]
+        names = sorted(n for n in os.listdir(self.path(COMPONENTS)) if n.endswith(".toml"))
+        self.assertIn("deltachat.toml", names)
+        self.assertIn("madmail.toml", names)
+        for n in names:
+            self.assertIn(f"{COMPONENTS}/{n}", labels)
+        self.assertNotIn(f"{COMPONENTS}/lxmf.lock.txt", labels, "only the *.toml declarations")
+
+    def test_f6_a_one_byte_change_to_a_pin_makes_check_stale(self):
+        out = self.notices()
+        self.check(out)
+        rel = f"{COMPONENTS}/madmail.toml"
+        self.edit(rel, lambda t: re.sub(r'(sha256 = "[0-9a-f]{63})([0-9a-f])"',
+                                        lambda m: m.group(1) + ("0" if m.group(2) != "0" else "1") + '"', t, count=1))
+        self.dies(lambda: self.check(out), f"{rel}: changed")
+
+    def test_a_removed_or_added_declaration_makes_check_stale(self):
+        out = self.notices()
+        os.remove(self.path(f"{COMPONENTS}/simplex.toml"))
+        self.dies(lambda: self.check(out), f"{COMPONENTS}/simplex.toml: recorded but no longer an input")
+        out = self.notices()
+        with open(self.path(f"{COMPONENTS}/extra.toml"), "w", encoding="utf-8") as f:
+            f.write('id = "extra"\n')
+        self.dies(lambda: self.check(out), f"{COMPONENTS}/extra.toml: not recorded")
 
 
 if __name__ == "__main__":

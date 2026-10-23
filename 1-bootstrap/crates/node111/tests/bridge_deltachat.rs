@@ -494,6 +494,135 @@ async fn a_joined_contact_is_not_bridged_until_its_switch_flips() {
     r.fake.stop().await;
 }
 
+/// The next text, skipping conversation announcements and link state.
+async fn next_text(a: &DeltaChatAdapter) -> node111::daemon::bridge::InboundText {
+    loop {
+        if let Inbound::Text(t) = next_item(a).await {
+            return t;
+        }
+    }
+}
+
+/// The contact id `joined.json` holds for `addr`.
+fn joined_id(dir: &Path, addr: &str) -> Option<u64> {
+    let v: Value = serde_json::from_slice(&std::fs::read(dir.join("joined.json")).ok()?).ok()?;
+    v["contacts"]
+        .as_array()?
+        .iter()
+        .find(|c| c["address"] == addr)
+        .and_then(|c| c["contact_id"].as_u64())
+}
+
+/// F1 (C5 review, MAJOR): the receive gate keys the key-contact that completed
+/// Secure-Join (its core contact id), not the address. After Alice joined and was switched
+/// on, a second contact id with Alice's address (core 2.x: a re-installed app, or any
+/// sender the relay admits with that From) writes, in a DM and in a group: nothing
+/// crosses and each is counted; a message from Alice's own key without the padlock is not
+/// copied either; Alice's own id still crosses. A new Secure-Join from the new id replaces
+/// the record through the join path (the switch unchanged): then that id crosses and the
+/// old one does not, and a DM goes to the new key's chat.
+#[tokio::test]
+async fn f1_a_second_contact_id_with_a_joined_address_never_crosses_and_is_counted() {
+    let r = rig().await;
+    joined_and_on(&r, ALICE, "Alice").await;
+    let first = joined_id(r.fake.dir.path(), ALICE).expect("Alice's joined id");
+    let _ = drain(&r.adapter);
+    assert_eq!(r.adapter.unbridged(), 0);
+    r.fake
+        .control(json!({"control": "incoming", "from": ALICE, "new_key": true, "name": "Alice", "text": "impostor"}))
+        .await;
+    until("the other key's DM counted", || r.adapter.unbridged() == 1).await;
+    r.fake
+        .control(json!({"control": "incoming", "from": ALICE, "latest_key": true, "group": "Team", "text": "impostor in a group"}))
+        .await;
+    until("the other key's group text counted", || {
+        r.adapter.unbridged() == 2
+    })
+    .await;
+    r.fake
+        .control(
+            json!({"control": "incoming", "from": ALICE, "padlock": false, "text": "no padlock"}),
+        )
+        .await;
+    until("the padlock-less text counted", || {
+        r.adapter.unbridged() == 3
+    })
+    .await;
+    assert!(
+        drain(&r.adapter)
+            .iter()
+            .all(|i| matches!(i, Inbound::Link(_))),
+        "nothing of the other key crossed"
+    );
+    // Alice's own key still crosses
+    r.fake
+        .control(json!({"control": "incoming", "from": ALICE, "text": "the real Alice"}))
+        .await;
+    let t = next_text(&r.adapter).await;
+    assert_eq!(
+        (t.body.as_str(), t.sender_native.as_str()),
+        ("the real Alice", ALICE)
+    );
+    assert_eq!(r.adapter.unbridged(), 3);
+    // a DM to Alice goes to her joined key's chat
+    let send = |text: &'static str| {
+        let a = Arc::clone(&r.adapter);
+        async move {
+            let mut h = a.send(&dm(ALICE), text, SendOpts::default()).await;
+            while let Some(e) = next_event(&mut h.events).await {
+                if matches!(e, SendEvent::Evidence { .. } | SendEvent::Failed { .. }) {
+                    return e;
+                }
+            }
+            panic!("no send event")
+        }
+    };
+    let sent_chats = || {
+        r.fake
+            .requests()
+            .into_iter()
+            .filter(|(m, _)| m == "misc_send_text_message")
+            .map(|(_, p)| p[1].as_u64().unwrap())
+            .collect::<Vec<_>>()
+    };
+    assert!(matches!(
+        send("to the first key").await,
+        SendEvent::Evidence { .. }
+    ));
+    // the new key completes Secure-Join: the record moves to its id, the switch stays on
+    r.fake
+        .control(json!({"control": "join", "addr": ALICE, "latest_key": true}))
+        .await;
+    until("the joined record moved to the new id", || {
+        joined_id(r.fake.dir.path(), ALICE).is_some_and(|id| id != first)
+    })
+    .await;
+    assert_eq!(r.adapter.contacts().len(), 1);
+    assert!(
+        r.adapter.contacts()[0].bridged,
+        "the human's switch is unchanged"
+    );
+    r.fake
+        .control(
+            json!({"control": "incoming", "from": ALICE, "latest_key": true, "text": "re-joined"}),
+        )
+        .await;
+    let t = next_text(&r.adapter).await;
+    assert_eq!(t.body, "re-joined");
+    r.fake
+        .control(json!({"control": "incoming", "from": ALICE, "text": "the old key"}))
+        .await;
+    until("the old key counted", || r.adapter.unbridged() == 4).await;
+    assert!(matches!(
+        send("to the new key").await,
+        SendEvent::Evidence { .. }
+    ));
+    let chats = sent_chats();
+    assert_eq!(chats.len(), 2, "{chats:?}");
+    assert_ne!(chats[0], chats[1], "the DM moved to the new key's chat");
+    r.fake.stop().await;
+}
+
 struct Node {
     bridge: Arc<Bridge>,
     handle: Arc<node111::daemon::fabric::FabricHandle>,
@@ -1337,12 +1466,15 @@ notice = "Test notice for {id}. You install it."
     )
 }
 
-#[tokio::test]
-async fn the_whole_enable_renders_settles_checks_health_and_attaches() {
-    let dir = tempfile::tempdir().unwrap();
-    let root = dir.path().join("var/lib/111");
+/// The two test declarations (the fake relay, the fake core with `core_env` added to its
+/// `[run] env`) with their payloads cached under `root`, the components over them and a
+/// loopback [`Setup`] with short waits.
+fn enable_rig(
+    root: &Path,
+    ports: RelayPorts,
+    core_env: &str,
+) -> (Vec<Component>, Components, Setup) {
     std::fs::create_dir_all(root.join("state")).unwrap();
-    let ports = free_ports();
     let core = format!(
         "#!/bin/sh\nexec \"{}\" -I \"{}\" --log \"$FAKE_DC_LOG\"\n",
         python3().display(),
@@ -1362,7 +1494,9 @@ async fn the_whole_enable_renders_settles_checks_health_and_attaches() {
         "deltachat",
         "deltachat-test",
         core.as_bytes(),
-        "env = { DC_ACCOUNTS_PATH = \"{bridge}/accounts\", FAKE_DC_LOG = \"{bridge}/fake-log.jsonl\" }",
+        &format!(
+            "env = {{ DC_ACCOUNTS_PATH = \"{{bridge}}/accounts\", FAKE_DC_LOG = \"{{bridge}}/fake-log.jsonl\"{core_env} }}"
+        ),
         "component = \"madmail\"",
     );
     let list = manifest::load(&[
@@ -1378,10 +1512,9 @@ async fn the_whole_enable_renders_settles_checks_health_and_attaches() {
         std::fs::create_dir_all(&d).unwrap();
         std::fs::write(d.join(file), bytes).unwrap();
     }
-    let hash = |id: &str| list.iter().find(|c| c.id == id).unwrap().notice_hash();
-    let comps = components(&root, list.clone(), Arc::new(SystemRunner));
+    let comps = components(root, list.clone(), Arc::new(SystemRunner));
     let mut s = Setup::new(
-        &root,
+        root,
         RelayBind::Loopback,
         Arc::new(SystemRunner),
         Arc::new(|_: &str, _: &str| false),
@@ -1390,6 +1523,21 @@ async fn the_whole_enable_renders_settles_checks_health_and_attaches() {
     s.cfg.call_timeout = Duration::from_secs(5);
     s.cfg.settle_timeout = Duration::from_secs(2);
     s.listen_timeout = Duration::from_secs(10);
+    s.handshake_timeout = Duration::from_secs(15);
+    (list, comps, s)
+}
+
+fn notice_hash(list: &[Component], id: &str) -> String {
+    list.iter().find(|c| c.id == id).unwrap().notice_hash()
+}
+
+#[tokio::test]
+async fn the_whole_enable_renders_settles_checks_health_and_attaches() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("var/lib/111");
+    let ports = free_ports();
+    let (list, comps, s) = enable_rig(&root, ports, "");
+    let hash = |id: &str| notice_hash(&list, id);
 
     // without the relay's acknowledgement: 409 with its notice, nothing installed
     let e = deltachat::enable(&comps, &s, None, None).await.unwrap_err();
@@ -1488,5 +1636,145 @@ async fn the_whole_enable_renders_settles_checks_health_and_attaches() {
             ComponentState::Disabled
         );
     }
+    comps.shutdown().await;
+}
+
+/// F2 (C5 review): a LAN port held by another program is found **before** the LAN
+/// configuration is rendered and the relay restarted: the call answers the error, the
+/// relay runs again on the loopback configuration (registration closed), healthy, with no
+/// crash loop; once the port is free the same call moves it to the LAN address.
+#[tokio::test]
+async fn f2_a_held_lan_port_keeps_the_relay_on_loopback_and_answers_the_error() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("var/lib/111");
+    let ports = free_ports();
+    let (list, comps, s) = enable_rig(&root, ports, "");
+    // the relay alone (the core's acknowledgement missing: its 409, the relay stays)
+    let e = deltachat::enable(&comps, &s, Some(&notice_hash(&list, "madmail")), None)
+        .await
+        .unwrap_err();
+    assert!(matches!(e, EnableError::ConsentRequired { .. }), "{e:?}");
+    let paths = RelayPaths::of(&root);
+    let calls = || std::fs::read_to_string(paths.dir.join("madmail-calls.log")).unwrap_or_default();
+    let lan_ip = std::net::Ipv4Addr::new(127, 0, 0, 2);
+    let held = std::net::TcpListener::bind((lan_ip, ports.https)).unwrap();
+    let before = calls().lines().count();
+    let e = deltachat::relan(&comps, &s, RelayBind::Lan(lan_ip))
+        .await
+        .unwrap_err();
+    let EnableError::StartFailed(msg) = &e else {
+        panic!("{e:?}")
+    };
+    assert!(msg.contains(&format!("127.0.0.2:{}", ports.https)), "{msg}");
+    let conf = std::fs::read_to_string(&paths.config).unwrap();
+    assert!(
+        conf.contains(&format!("imap_tls_listen = \"127.0.0.1:{}\"", ports.imap)),
+        "the LAN configuration was never written: {conf}"
+    );
+    assert!(!conf.contains("127.0.0.2"), "{conf}");
+    let new: Vec<String> = calls()
+        .lines()
+        .skip(before)
+        .map(|l| l.trim().to_string())
+        .collect();
+    assert!(!new.iter().any(|l| l == "registration open"), "{new:?}");
+    assert_eq!(
+        new.iter()
+            .filter(|l| l.as_str() != "run")
+            .collect::<Vec<_>>(),
+        ["push off", "federation policy reject", "registration close"],
+        "settled loopback-only: {new:?}"
+    );
+    assert!(
+        deltachat::relay_listening(RelayBind::Loopback, ports, Duration::from_secs(10)).await,
+        "the relay listens on loopback again"
+    );
+    let new: Vec<String> = calls()
+        .lines()
+        .skip(before)
+        .map(|l| l.trim().to_string())
+        .collect();
+    assert_eq!(
+        new.last().map(String::as_str),
+        Some("run"),
+        "started again: {new:?}"
+    );
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let runs = calls().lines().filter(|l| l.trim() == "run").count();
+    assert_eq!(
+        comps.status("madmail").await.unwrap().state,
+        ComponentState::Running
+    );
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert_eq!(
+        calls().lines().filter(|l| l.trim() == "run").count(),
+        runs,
+        "no crash loop"
+    );
+    // the port is free again: the relay moves to the LAN address
+    drop(held);
+    deltachat::relan(&comps, &s, RelayBind::Lan(lan_ip))
+        .await
+        .unwrap();
+    let conf = std::fs::read_to_string(&paths.config).unwrap();
+    assert!(
+        conf.contains(&format!("imap_tls_listen = \"127.0.0.2:{}\"", ports.imap)),
+        "{conf}"
+    );
+    assert!(calls().contains("registration open"));
+    comps.disable("madmail").await;
+    comps.shutdown().await;
+}
+
+/// F3 (C5 review): the core's health is its handshake (§2.1 rule 4: start → health). A
+/// core that never answers `get_system_info` is disabled again within the bounded wait
+/// and the enable answers `start_failed` (the 409 `health_failed`); the relay stays.
+#[tokio::test]
+async fn f3_a_core_that_never_answers_its_handshake_is_disabled_and_the_enable_fails() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("var/lib/111");
+    let ports = free_ports();
+    let (list, comps, mut s) = enable_rig(&root, ports, ", FAKE_DC_MUTE = \"get_system_info\"");
+    s.handshake_timeout = Duration::from_secs(1);
+    let t0 = Instant::now();
+    let e = deltachat::enable(
+        &comps,
+        &s,
+        Some(&notice_hash(&list, "madmail")),
+        Some(&notice_hash(&list, "deltachat")),
+    )
+    .await
+    .unwrap_err();
+    assert!(t0.elapsed() < LIMIT, "bounded");
+    assert_eq!(e.reason_code(), "health_failed", "{e:?}");
+    let body = e.problem(None).body();
+    assert_eq!(body["code"], "component_unavailable", "{body}");
+    assert!(
+        body["detail"]
+            .as_str()
+            .unwrap()
+            .contains("did not complete its handshake within 1 s"),
+        "{body}"
+    );
+    let log = std::fs::read_to_string(RelayPaths::of(&root).dir.join("fake-log.jsonl"))
+        .unwrap_or_default();
+    assert!(
+        log.contains("\"get_system_info\""),
+        "the core was asked: {log}"
+    );
+    assert!(
+        comps.stdio("deltachat").await.is_none(),
+        "the core is stopped"
+    );
+    assert_eq!(
+        comps.status("deltachat").await.unwrap().state,
+        ComponentState::Disabled
+    );
+    assert_eq!(
+        comps.status("madmail").await.unwrap().state,
+        ComponentState::Running,
+        "the relay stays (its own health passed)"
+    );
+    comps.disable("madmail").await;
     comps.shutdown().await;
 }

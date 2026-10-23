@@ -211,3 +211,36 @@ https://github.com/chatmail/core (tag v2.63.0: `deltachat-rpc-server/README.md`,
 https://github.com/themadorg/madmail (release and tag v2.30.5: `README.md`, `LICENCE`, `chatmail.toml.example`, `docs/local-dev.md`,
 `docs/project/user-guide/11-deployment-ip-domain-certs.md`, `crates/chatmail-config/src/{lib,client_mail}.rs`, `.github/workflows/ci.yml`,
 `.github/releaserc.ci.json`). Repo: `6-transport/README.md` §2, §4, §7, §15.10; `plan/layers/6-transport/research/03-phone-apps.md` §3.9.
+
+## Addendum 2026-10-23 — review citations
+
+The C5 review (fable, 2026-10-23) verified these upstream facts by reading source at the pinned tags; they are recorded here from the
+review's text (nothing was fetched or run for this addendum). They cover what C5 builds on beyond what this spike ran.
+
+**Core v2.63.0 (`deltachat-rpc-server`, `deltachat-jsonrpc`).**
+
+- The 18 JSON-RPC methods C5 calls exist: `get_system_info`, `get_all_account_ids`,
+  `add_account`, `set_config`, `get_config`, `is_configured`, `add_transport_from_qr`, `start_io`, `wait_for_all_work_done`,
+  `get_chat_securejoin_qr_code`, `get_next_event_batch`, `get_message`, `get_contact`, `get_basic_chat_info`, `get_chat_id_by_contact_id`,
+  `create_chat_by_contact_id`, `misc_send_text_message`, `markseen_msgs`.
+- All 53 `KNOWN_KINDS` exist in `api/types/events.rs` (the review's count; the list in `N/bridge/deltachat.rs` as of this
+  addendum has 52 entries, every one of them covered), with camelCase fields (the ones C5 reads: `msgId`,
+  `chatId`, `contactId`, `progress`, `n`).
+- `chatType` serialises as `"Single"` / `"Group"`.
+- `MessageObject` carries `fromId`, `chatId`, `state` (u32), `isInfo`, `fileBytes`, `timestamp` and `sender`; `ContactObject` carries
+  `address`, `displayName` and `authName`.
+- (C5-bounce, not part of the review's verified list) the receive gate also refuses `showPadlock == false` when the message object carries
+  it (`MessageObject.show_padlock`); without the field the contact-id gate alone decides.
+
+**Madmail v2.30.5.**
+
+- The TOML keys C5 renders (`hostname`, `primary_domain`, `state_dir`, `runtime_dir`, `tls_mode`, `debug`, `auth_auto_create`,
+  `smtp_listen`, `submission_tls_listen`, `imap_tls_listen`, `http_tls_listen`, `turn_enable`) exist in `AppConfig`.
+- `--config *.toml` is parsed as TOML.
+- `effective_primary_domain` wraps an IP as `[x.x.x.x]`, so account addresses read `user@[192.168.1.5]`.
+- `tls_boot.rs` self-generates the certificate for `tls_mode = "self_signed"`.
+- `--json` is a global flag, and `create-user`, `push off`, `federation policy reject` and `registration open|close` are real subcommands.
+
+**What this spike did not run.** The spike ran the maddy-style `.conf` that `madmail install` writes (§2), not the TOML form C5 renders,
+and it never ran `federation` or `registration`. C5's integration test drives a shell fake of the relay that accepts any verb, so those
+two subcommands and the TOML form are verified by source reading only; G7 runs the real binaries once.

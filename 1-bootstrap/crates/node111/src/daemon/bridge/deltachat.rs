@@ -39,6 +39,14 @@
 //! (`SecurejoinInviterProgress` 1000: the contact's own act, remembered in
 //! `bridge/deltachat/joined.json`); bridging for that contact stays **off** until a human
 //! turns it on (`Bridge::set_contact_bridging`, read live through [`OptIn`] per message).
+//! The join is keyed by the core's **contact id** of the key-contact that completed
+//! Secure-Join, not by its address: in core 2.x another key with the same `From` address
+//! (a re-installed app, any sender the relay admits with that address) is another contact
+//! id that never joined, and its texts are never copied (a new Secure-Join from that id
+//! replaces the record through the join path; the human's switch is unchanged). A message
+//! the core shows without the padlock (`showPadlock == false`) is never copied either.
+//! At [`MAX_JOINED`] further joins are refused and counted ([`DeltaChatAdapter::joins_refused`]),
+//! never by evicting a joined contact.
 //! Only a joined **and** switched-on contact's texts become foreign rows (kinds `dm` and
 //! `group`, only groups can be relay endpoints); everything else is received and decrypted
 //! by the core but never copied into Messages, shown or relayed ([`DeltaChatAdapter::unbridged`]
@@ -147,8 +155,9 @@ const MAX_BATCH: usize = 256;
 const INBOUND_CAP: usize = 1024;
 /// Sends tracked for evidence; full ⇒ the oldest is forgotten (its row keeps its state).
 const MAX_TRACKED: usize = 4096;
-/// Joined contacts remembered.
-const MAX_JOINED: usize = 1024;
+/// Joined contacts remembered; at the cap further joins are refused (counted), a joined
+/// contact is never evicted.
+pub const MAX_JOINED: usize = 1024;
 /// Conversation → chat id entries cached.
 const MAX_CHATS: usize = 4096;
 /// Event polls kept outstanding (module doc) and the most ever in flight.
@@ -463,6 +472,10 @@ struct Msg {
     file_bytes: u64,
     timestamp: Option<i64>,
     sender: Option<(String, String)>,
+    /// `showPadlock` (`deltachat-jsonrpc` `MessageObject.show_padlock`): `Some(false)` is a
+    /// message the core does not show as end-to-end encrypted; absent on a core without
+    /// the field (then the contact-id gate alone decides).
+    padlock: Option<bool>,
 }
 
 fn parse_message(v: &Value) -> Option<Msg> {
@@ -475,6 +488,11 @@ fn parse_message(v: &Value) -> Option<Msg> {
         file_bytes: o.get("fileBytes").and_then(Value::as_u64).unwrap_or(0),
         timestamp: o.get("timestamp").and_then(Value::as_i64),
         sender: o.get("sender").and_then(parse_contact),
+        // present but not a bool: the object is malformed (noise, fail closed)
+        padlock: match o.get("showPadlock") {
+            None => None,
+            Some(v) => Some(v.as_bool()?),
+        },
     })
 }
 
@@ -723,6 +741,12 @@ struct Inner {
     noise: AtomicU64,
     unbridged: AtomicU64,
     warnings: AtomicU64,
+    /// Secure-Join completions refused at [`MAX_JOINED`] (logged once).
+    joins_refused: AtomicU64,
+    joins_full_logged: AtomicBool,
+    /// The first handshake's outcome since attach: `Ok` once live, `Err(code)` when it
+    /// failed or the generation ended first ([`DeltaChatAdapter::handshake_outcome`]).
+    outcome: watch::Sender<Option<Result<(), String>>>,
     on_change: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
     /// The driver and the current generation's tasks (aborted on shutdown).
     tasks: Mutex<Vec<JoinHandle<()>>>,
@@ -800,17 +824,49 @@ impl Inner {
             .cloned()
     }
 
-    /// Bridged = joined by Secure-Join **and** switched on by a human (module doc).
+    /// Bridged = joined by Secure-Join **and** switched on by a human (module doc). The
+    /// send side: a DM then goes to the joined record's `contact_id` ([`resolve_chat`]).
     fn bridged(&self, account: &str, addr: &str) -> bool {
         self.joined(addr).is_some() && (self.optin)(account, addr)
     }
 
-    fn remember_joined(&self, c: JoinedContact) {
+    /// The receive side (§7 (2)): the sender is the very key-contact that completed
+    /// Secure-Join for `addr` (its core contact id), **and** the human's switch is on. A
+    /// different contact id with the same address never joined (module doc "Consent").
+    fn bridged_from(&self, account: &str, addr: &str, contact: u32) -> bool {
+        self.joined(addr).is_some_and(|c| c.contact_id == contact) && (self.optin)(account, addr)
+    }
+
+    /// Remember a Secure-Join completion (the join path is the only way a record for an
+    /// address changes: a new join from another contact id replaces it, and the DM chat
+    /// cached for the address goes with it). At [`MAX_JOINED`] a join of a new address is
+    /// refused and counted, logged once; no joined contact is evicted. `false` = refused.
+    fn remember_joined(&self, c: JoinedContact) -> bool {
         let snapshot = {
             let mut list = lock(&self.joined);
-            list.retain(|o| o.address != c.address);
-            if list.len() >= MAX_JOINED {
-                list.remove(0);
+            let old = list.iter().position(|o| o.address == c.address);
+            match old {
+                Some(i) => {
+                    let prev = list.remove(i);
+                    if prev.contact_id != c.contact_id {
+                        let native = format!("dm:{}", c.address);
+                        let mut chats = lock(&self.chats);
+                        chats.ids.remove(&native);
+                        chats.announced.remove(&native);
+                    }
+                }
+                None if list.len() >= MAX_JOINED => {
+                    drop(list);
+                    self.joins_refused.fetch_add(1, Ordering::SeqCst);
+                    if !self.joins_full_logged.swap(true, Ordering::SeqCst) {
+                        eprintln!(
+                            "111 bridge: {NETWORK}: {MAX_JOINED} contacts have joined; further \
+                             Secure-Join completions are refused (counted)"
+                        );
+                    }
+                    return false;
+                }
+                None => {}
             }
             list.push(c);
             list.clone()
@@ -828,6 +884,18 @@ impl Inner {
             }
         }
         self.changed();
+        true
+    }
+
+    /// Publish the first handshake's outcome (later ones change nothing).
+    fn settle_outcome(&self, r: Result<(), String>) {
+        self.outcome.send_if_modified(|o| {
+            if o.is_some() {
+                return false;
+            }
+            *o = Some(r);
+            true
+        });
     }
 
     fn track(&self, msg: u32, tx: mpsc::Sender<SendEvent>) {
@@ -1029,6 +1097,9 @@ impl DeltaChatAdapter {
             noise: AtomicU64::new(0),
             unbridged: AtomicU64::new(0),
             warnings: AtomicU64::new(0),
+            joins_refused: AtomicU64::new(0),
+            joins_full_logged: AtomicBool::new(false),
+            outcome: watch::channel(None).0,
             on_change: Mutex::new(None),
             tasks: Mutex::new(Vec::new()),
             gen_tasks: Mutex::new(Vec::new()),
@@ -1109,6 +1180,26 @@ impl DeltaChatAdapter {
     /// Texts received from contacts that are not bridged (never copied, shown or relayed).
     pub fn unbridged(&self) -> u64 {
         self.inner.unbridged.load(Ordering::SeqCst)
+    }
+
+    /// Secure-Join completions refused because [`MAX_JOINED`] contacts have joined.
+    pub fn joins_refused(&self) -> u64 {
+        self.inner.joins_refused.load(Ordering::SeqCst)
+    }
+
+    /// The first handshake's outcome since [`attach`](Self::attach) (§2.1 rule 4: start →
+    /// health; the core's health is its handshake, `get_system_info` first): `Ok` once it
+    /// reached `Live`; `Err(code)` when it failed (`adapter_down`, `relay_unreachable`,
+    /// `relay_moved`), the generation ended first, or nothing came within `timeout`
+    /// (`timeout`). A bounded wait, never a resident probe.
+    pub async fn handshake_outcome(&self, timeout: Duration) -> Result<(), String> {
+        let mut rx = self.inner.outcome.subscribe();
+        let got = match tokio::time::timeout(timeout, rx.wait_for(Option::is_some)).await {
+            Ok(Ok(v)) => v.clone().unwrap_or_else(|| Err("adapter_down".into())),
+            Ok(Err(_)) => Err("adapter_down".into()),
+            Err(_) => Err("timeout".into()),
+        };
+        got
     }
 
     /// `Warning` and `Error` events the core reported (the IMAP `UIDNEXT` warning is one,
@@ -1256,7 +1347,18 @@ async fn run_generation(inner: &Arc<Inner>, io: PipedIo) {
     }
     let reader = tokio::spawn(read_loop(Arc::clone(inner), Arc::clone(&rpc)));
     let poller = tokio::spawn(poll_loop(Arc::clone(inner), Arc::clone(&rpc), prx));
-    let session = tokio::spawn(handshake(Arc::clone(inner), Arc::clone(&rpc)));
+    let session = {
+        let (inner, rpc) = (Arc::clone(inner), Arc::clone(&rpc));
+        tokio::spawn(async move {
+            handshake(Arc::clone(&inner), rpc).await;
+            let r = match lock(&inner.live).state.clone() {
+                AdapterState::Live => Ok(()),
+                AdapterState::Error(code) => Err(code),
+                other => Err(format!("{other:?}")),
+            };
+            inner.settle_outcome(r);
+        })
+    };
     {
         let mut g = lock(&inner.gen_tasks);
         g.retain(|t| !t.is_finished());
@@ -1280,6 +1382,8 @@ async fn run_generation(inner: &Arc<Inner>, io: PipedIo) {
     if was_live {
         inner.push(Inbound::Link(LinkState::Down));
     }
+    // the child went away before its first handshake finished
+    inner.settle_outcome(Err("adapter_down".into()));
     inner.changed();
 }
 
@@ -1434,7 +1538,9 @@ async fn on_incoming(inner: &Arc<Inner>, rpc: &Arc<Rpc>, acct: u32, msg_id: u32)
         inner.unbridged.fetch_add(1, Ordering::SeqCst);
         return;
     };
-    if addr == account || !inner.bridged(&account, &addr) {
+    // §7 (2): the joined key-contact itself (its contact id, not only its address), the
+    // human's switch, and nothing the core shows without the padlock
+    if addr == account || m.padlock == Some(false) || !inner.bridged_from(&account, &addr, m.from) {
         inner.unbridged.fetch_add(1, Ordering::SeqCst);
         return;
     }
@@ -2057,6 +2163,10 @@ pub struct Setup {
     pub optin: OptIn,
     /// How long the relay may take to open its IMAP listener.
     pub listen_timeout: Duration,
+    /// How long [`enable`] waits for the core's first handshake to reach `Live` (§2.1 rule
+    /// 4: start → health). Bounds `get_system_info` through the first configuration
+    /// against the relay (`DcConfig::configure_timeout`) and the settle wait.
+    pub handshake_timeout: Duration,
 }
 
 impl Setup {
@@ -2070,6 +2180,7 @@ impl Setup {
             cli,
             optin,
             listen_timeout: Duration::from_secs(20),
+            handshake_timeout: Duration::from_secs(240),
         }
     }
 
@@ -2089,15 +2200,14 @@ impl Setup {
     }
 }
 
-/// Stop the relay, set its switches, render `bind`, start it again (the relay's CLI writes
-/// its database while nothing else does).
-async fn restart_relay(
+/// Set the relay's switches (`push off`, federation rejected, registration per `bind`) and
+/// render `bind` (the relay is stopped).
+async fn settle_and_render(
     components: &Components,
     s: &Setup,
     bind: RelayBind,
 ) -> Result<(), EnableError> {
     let paths = RelayPaths::of(&s.root);
-    components.stop_before(RELAY_COMPONENT).await;
     let cli = s.relay_cli(components);
     let lan = bind.is_lan();
     let settled = tokio::task::spawn_blocking(move || cli.settle(lan))
@@ -2105,15 +2215,39 @@ async fn restart_relay(
         .map_err(|e| e.to_string())
         .and_then(|r| r);
     let rendered = write_madmail_config(&paths, bind, s.ports).map_err(|e| format!("{e:#}"));
-    let free = lan_ports_free(bind, s.ports);
-    components.start_after(RELAY_COMPONENT).await;
-    match (settled, rendered, free) {
-        (Ok(()), Ok(()), Ok(())) => Ok(()),
-        (Err(e), _, _) | (_, Err(e), _) => Err(EnableError::StartFailed(format!(
+    match (settled, rendered) {
+        (Ok(()), Ok(())) => Ok(()),
+        (Err(e), _) | (_, Err(e)) => Err(EnableError::StartFailed(format!(
             "the Madmail relay could not be configured: {e}"
         ))),
-        (_, _, Err(e)) => Err(e),
     }
+}
+
+/// Stop the relay, set its switches, render `bind`, start it again (the relay's CLI writes
+/// its database while nothing else does).
+///
+/// The LAN block is pre-bound **before** anything is rendered (§2: only a bind detects a
+/// foreign holder; after the stop, so the relay's own listeners are released): when a
+/// port is held, the LAN configuration is never written; the relay is settled and
+/// rendered loopback-only (registration closed; fail closed, and a block the component's
+/// claim holds for it, so no crash loop on a port it cannot bind), started again, and the
+/// error is returned.
+async fn restart_relay(
+    components: &Components,
+    s: &Setup,
+    bind: RelayBind,
+) -> Result<(), EnableError> {
+    components.stop_before(RELAY_COMPONENT).await;
+    if let Err(e) = lan_ports_free(bind, s.ports) {
+        if let Err(f) = settle_and_render(components, s, RelayBind::Loopback).await {
+            eprintln!("111 bridge: {NETWORK}: the loopback fallback: {f}");
+        }
+        components.start_after(RELAY_COMPONENT).await;
+        return Err(e);
+    }
+    let r = settle_and_render(components, s, bind).await;
+    components.start_after(RELAY_COMPONENT).await;
+    r
 }
 
 /// Enable the Delta Chat network (§7, §2.1 rule 4), each component through its own licence
@@ -2128,7 +2262,11 @@ async fn restart_relay(
 /// 3. health: the IMAP listener (else the relay is disabled again);
 /// 4. `Components::enable("deltachat")` (needs `madmail` enabled; `DC_ACCOUNTS_PATH` =
 ///    `bridge/deltachat/accounts`);
-/// 5. [`DeltaChatAdapter::attach`] on its stdio. The daemon registers it:
+/// 5. [`DeltaChatAdapter::attach`] on its stdio, then health: the core's first handshake
+///    must reach `Live` within `Setup::handshake_timeout`
+///    ([`DeltaChatAdapter::handshake_outcome`]); else the core is disabled again and the
+///    call answers `StartFailed` (the 409 `health_failed`), as the relay's health does in
+///    step 3. The daemon registers it:
 ///    `bridge.enable(adapter.clone() as Arc<dyn Adapter>).await` (C1's seam).
 ///
 /// Idempotent: an enabled relay is not restarted. When the core's acknowledgement is
@@ -2168,12 +2306,32 @@ pub async fn enable(
         .stdio(RPC_COMPONENT)
         .await
         .ok_or_else(|| EnableError::StartFailed("the Delta Chat core is not running".into()))?;
-    Ok(DeltaChatAdapter::attach(
+    let adapter = DeltaChatAdapter::attach(
         s.adapter_cfg(),
         stdio,
         Arc::new(s.relay_cli(components)),
         Arc::clone(&s.optin),
-    ))
+    );
+    match adapter.handshake_outcome(s.handshake_timeout).await {
+        Ok(()) => Ok(adapter),
+        Err(code) => {
+            drop(adapter);
+            components.disable(RPC_COMPONENT).await;
+            let why = match code.as_str() {
+                "timeout" => format!(
+                    "it did not complete its handshake within {} s",
+                    s.handshake_timeout.as_secs()
+                ),
+                "relay_moved" => "its bridge account lives on another relay address (LAN \
+                                  sharing changed); remove its files and enable it again"
+                    .to_string(),
+                other => format!("its handshake failed ({})", plain(other, 64)),
+            };
+            Err(EnableError::StartFailed(format!(
+                "the Delta Chat core started, but {why}; it was stopped again"
+            )))
+        }
+    }
 }
 
 /// The adapter of a network the daemon resumed (`Components::resume_enabled` started both
@@ -2202,11 +2360,21 @@ pub async fn disable(components: &Components, bridge: &super::Bridge) {
 /// with registration open or closed. The relay's addresses carry its IP, so a bridge
 /// account made on another address reads `relay_moved`
 /// ([`DeltaChatAdapter::set_relay_host`]); contacts join again after "remove files".
+///
+/// A LAN port held by another program is refused before anything is rendered: the relay
+/// is rendered loopback-only instead and the error returned ([`restart_relay`]).
 pub async fn relan(components: &Components, s: &Setup, bind: RelayBind) -> Result<(), EnableError> {
     let paths = RelayPaths::of(&s.root);
     if components.stdio(RELAY_COMPONENT).await.is_none() {
-        return write_madmail_config(&paths, bind, s.ports)
-            .map_err(|e| EnableError::InstallFailed(format!("{e:#}")));
+        let free = lan_ports_free(bind, s.ports);
+        let target = if free.is_ok() {
+            bind
+        } else {
+            RelayBind::Loopback
+        };
+        write_madmail_config(&paths, target, s.ports)
+            .map_err(|e| EnableError::InstallFailed(format!("{e:#}")))?;
+        return free;
     }
     restart_relay(components, s, bind).await
 }
@@ -2359,6 +2527,7 @@ mod tests {
             file_bytes,
             timestamp: None,
             sender: None,
+            padlock: None,
         };
         assert_eq!(body_of(&m("hi", 0)).as_deref(), Some("hi"));
         assert_eq!(
@@ -2483,11 +2652,167 @@ turn_enable = false
         assert_eq!(RelayPorts::default().all(), [11240, 11241, 11242, 11243]);
     }
 
+    /// F4 (C5 review): the card's `QrMatrix` is the contract's shape, concretely.
     #[test]
-    fn the_card_carries_the_qr_text_and_a_module_matrix() {
+    fn f4_the_card_carries_the_qr_text_and_a_concrete_qr_matrix() {
         let m = fjson::qr("https://i.delta.chat/#EDDC&v=3&i=a&s=b&a=u%40%5B127.0.0.1%5D").unwrap();
-        assert!(m.get("size").is_some() || m.is_object(), "{m}");
+        let o = m.as_object().expect("a QrMatrix object");
+        let mut keys: Vec<&str> = o.keys().map(String::as_str).collect();
+        keys.sort_unstable();
+        assert_eq!(keys, ["rows", "size"], "{m}");
+        let size = o["size"].as_u64().expect("size is an integer");
+        assert!(
+            size >= 21,
+            "a QR symbol is at least version 1 (21 modules): {size}"
+        );
+        let size = usize::try_from(size).unwrap();
+        let rows = o["rows"].as_array().expect("rows is an array");
+        assert_eq!(rows.len(), size, "one row per module row");
+        for r in rows {
+            let r = r.as_str().expect("each row is a string");
+            assert_eq!(r.len(), size, "each row is `size` modules");
+            assert!(r.bytes().all(|b| b == b'0' || b == b'1'), "{r}");
+        }
+        // the finder pattern's top-left corner is dark, its separator light
+        assert!(rows[0].as_str().unwrap().starts_with("1111111"));
+        assert_eq!(&rows[0].as_str().unwrap()[7..8], "0");
         assert!(ACCOUNT_WARNING.starts_with("This hub decrypts everything this account receives"));
         assert!(CARD_TITLE.starts_with("Open Delta Chat"));
+    }
+
+    struct NoRelay;
+
+    impl RelayAccounts for NoRelay {
+        fn create_user(&self) -> Result<String, String> {
+            Err("no relay in this test".into())
+        }
+    }
+
+    /// An adapter with no core attached (the watch never publishes a generation).
+    fn bare(optin: OptIn) -> (Arc<DeltaChatAdapter>, watch::Sender<Option<PipedIo>>) {
+        let (tx, rx) = watch::channel(None);
+        let cfg = DcConfig {
+            joined_file: None,
+            ..DcConfig::default()
+        };
+        (
+            DeltaChatAdapter::attach(cfg, rx, Arc::new(NoRelay), optin),
+            tx,
+        )
+    }
+
+    fn contact(i: usize, id: u32) -> JoinedContact {
+        JoinedContact {
+            address: format!("c{i}@[127.0.0.1]"),
+            name: format!("C{i}"),
+            contact_id: id,
+        }
+    }
+
+    /// F5 (C5 review): at MAX_JOINED a further join is refused and counted; no joined
+    /// (possibly bridged) contact is evicted; a re-join of a joined address still lands.
+    #[tokio::test]
+    async fn f5_at_max_joined_further_joins_are_refused_and_no_contact_is_evicted() {
+        let (a, _tx) = bare(Arc::new(|_: &str, _: &str| true));
+        for i in 0..MAX_JOINED {
+            assert!(a.inner.remember_joined(contact(i, 10 + i as u32)));
+        }
+        assert_eq!(a.contacts().len(), MAX_JOINED);
+        assert_eq!(a.joins_refused(), 0);
+        // one more address: refused, counted, the first contact still joined
+        assert!(!a.inner.remember_joined(contact(MAX_JOINED, 9000)));
+        assert!(!a.inner.remember_joined(contact(MAX_JOINED + 1, 9001)));
+        assert_eq!(a.joins_refused(), 2);
+        assert_eq!(a.contacts().len(), MAX_JOINED);
+        assert!(a.inner.joined("c0@[127.0.0.1]").is_some(), "never evicted");
+        assert!(a.inner.joined(&contact(MAX_JOINED, 0).address).is_none());
+        // a new Secure-Join from another id of a joined address replaces its record
+        assert!(a.inner.remember_joined(contact(0, 5000)));
+        assert_eq!(a.inner.joined("c0@[127.0.0.1]").unwrap().contact_id, 5000);
+        assert_eq!(a.contacts().len(), MAX_JOINED);
+        assert_eq!(a.joins_refused(), 2);
+    }
+
+    /// F1 (C5 review), unit level: the receive gate keys the joined contact id; a re-join
+    /// from a new id moves the gate and drops the DM chat cached for the address.
+    #[tokio::test]
+    async fn f1_the_receive_gate_keys_the_joined_contact_id_not_the_address() {
+        let (a, _tx) = bare(Arc::new(|_: &str, c: &str| c == "alice@[127.0.0.1]"));
+        let alice = "alice@[127.0.0.1]";
+        let hub = "hub@[127.0.0.1]";
+        assert!(!a.inner.bridged_from(hub, alice, 10), "not joined");
+        a.inner.remember_joined(JoinedContact {
+            address: alice.into(),
+            name: "Alice".into(),
+            contact_id: 10,
+        });
+        assert!(a.inner.bridged_from(hub, alice, 10));
+        assert!(
+            !a.inner.bridged_from(hub, alice, 11),
+            "same address, other key"
+        );
+        a.inner.remember_chat(&format!("dm:{alice}"), 40);
+        a.inner.remember_joined(JoinedContact {
+            address: alice.into(),
+            name: "Alice".into(),
+            contact_id: 11,
+        });
+        assert!(a.inner.bridged_from(hub, alice, 11));
+        assert!(
+            !a.inner.bridged_from(hub, alice, 10),
+            "the old key no longer"
+        );
+        assert_eq!(
+            a.inner.chat_of(&format!("dm:{alice}")),
+            None,
+            "cache dropped"
+        );
+        // the padlock field: absent, true, false, and a malformed value
+        let base = json!({"fromId": 11, "chatId": 40, "text": "x", "isInfo": false});
+        assert_eq!(parse_message(&base).unwrap().padlock, None);
+        let mut v = base.clone();
+        v["showPadlock"] = json!(false);
+        assert_eq!(parse_message(&v).unwrap().padlock, Some(false));
+        v["showPadlock"] = json!(true);
+        assert_eq!(parse_message(&v).unwrap().padlock, Some(true));
+        v["showPadlock"] = json!("yes");
+        assert_eq!(parse_message(&v), None, "malformed: noise");
+    }
+
+    /// F3 (C5 review): with no core the first handshake outcome is a bounded timeout.
+    #[tokio::test]
+    async fn f3_the_first_handshake_outcome_is_bounded() {
+        let (a, _tx) = bare(Arc::new(|_: &str, _: &str| false));
+        assert_eq!(
+            a.handshake_outcome(Duration::from_millis(50)).await,
+            Err("timeout".into())
+        );
+        a.inner.settle_outcome(Err("adapter_down".into()));
+        a.inner.settle_outcome(Ok(()));
+        assert_eq!(
+            a.handshake_outcome(Duration::from_millis(50)).await,
+            Err("adapter_down".into()),
+            "the first outcome stays"
+        );
+    }
+
+    /// F2 (C5 review): a LAN port held by another program is detected by a bind.
+    #[test]
+    fn f2_a_held_lan_port_is_refused_by_the_pre_bind() {
+        let held = std::net::TcpListener::bind("127.0.0.2:0").unwrap();
+        let port = held.local_addr().unwrap().port();
+        let ports = RelayPorts {
+            smtp: port,
+            ..RelayPorts::default()
+        };
+        let e = lan_ports_free(RelayBind::Lan(Ipv4Addr::new(127, 0, 0, 2)), ports).unwrap_err();
+        assert!(
+            matches!(&e, EnableError::StartFailed(m) if m.contains(&format!("127.0.0.2:{port}"))),
+            "{e:?}"
+        );
+        assert!(
+            lan_ports_free(RelayBind::Loopback, ports).is_ok(),
+            "loopback is claimed"
+        );
     }
 }
