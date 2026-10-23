@@ -38,26 +38,31 @@
 # helper (a copy of 6-transport/sidecars/lxmf-sidecar/lxmf_sidecar.py) under egress-log.py's wrapper: 111d's
 # component runner, piped stdio, post-spawn check, respawns and stop path are all the real ones.
 #
-# One stand-in, said here because it is not a product path: 111d has no route that makes the helper announce on
-# request (§6 (3) "on request"; the adapter's `LxmfAdapter::announce` has no caller), and the helper announces by
-# itself only at its start, on a `link up` and every `interval_min` (default 60 minutes). Where the gate needs B to
-# announce (announce before reply; after A's helper restarted, since a shared-instance RNS client keeps no known
-# destinations across a restart), egress-log.py's wrapper writes the helper's own `{"type":"announce"}` command
-# to its stdin (`--inject`, tapped as `+ `). Everything else crosses 111d.
+# No stand-in for a product path: every protocol line a helper reads is written by 111d (the wrapper runs without
+# `--inject`, and the gate asserts that no `+ ` line exists in either tap). The two cases the V2 run had to drive by
+# hand are product paths now (fix wave FA2): announce on request (§6 (3); 111d writes `announce {}` after every
+# `ready` and when a send parks as `peer_unannounced`, at most once per 60 s per helper run) and the path request of
+# a parked send (§6 (4); the helper calls `RNS.Transport.request_path`, its rnsd answers from its path table or asks
+# the network, and the peer's announce comes back as a path response). Announce before reply (A → B while A has never
+# heard B) and the restart case (A's restarted helper has forgotten every peer) are both recovered that way. To keep
+# the parked state observable for the row checks, B's rnsd is frozen (SIGSTOP) for a few seconds while A's send
+# parks; the release after SIGCONT is the product's.
 #
 # Assertions (every one is an ok:/FAIL: line; the script exits 1 on any FAIL; "nothing" checks carry positive
 # controls): the Pi rule (no rnstatus without a reader, one after GET /transport) · the helper never becomes the
 # instance (started before rnsd it exits 3 and no socket of it listens; under 111d `ss -xlp` shows only rnsd on
 # @rns/111, rnstatus shows the shared instance, the first line is `ready`) · a start while rnsd does not serve is
 # detected as `partitioned` by the runner's post-spawn check and recovered once rnsd serves (adapter_down →
-# live in GET /networks) · announce before reply (peer_unannounced, then delivered on heard) · signed: false with
+# live in GET /networks) · announce before reply (peer_unannounced, 111d's announce on the park, the helper's path
+# request answered by the peer's announce as a path response, then delivered on heard) · signed: false with
 # why_unsigned source_unknown before the source announced, true after · both directions · the same text twice is
 # two rows · hash dedupe (an exact replay of a real msg line, plus a new hash twice, through the fake helper) ·
 # the custom-field round trip (a Meshtastic channel → LXMF recipient-list edge: the far helper reports
 # FIELD_CUSTOM_TYPE 111.relay, 111d handed it over and the far 111d stores the copy marker first, never an edge
 # input: an LXMF DM is no edge endpoint) · history before the edge is never relayed · monotone states and a late failed after delivered ignored · delivery in seconds with no
 # stamp cost · an rnsd crash on A: one delivery, no regression, the helper re-attached · zero off-link packets on
-# both veths and no connect() but the shared instance from any helper · enable (acknowledged) → disable →
+# both veths and no connect() but the shared instance from any helper · a restarted helper recovers its peer
+# through the path request (no announce of the peer) · 111d's announce after every ready · enable (acknowledged) → disable →
 # remove files leaves nothing installed while the cache survives, until remove-cache.
 #
 # Nothing of ours stays running: every process dies with the pid namespace or is stopped explicitly first; the
@@ -216,12 +221,16 @@ tap_last_run() { # NODE → the helper lines of the newest run
   awk '/^# start /{n++; buf=""} n && /^< /{sub(/^< /, ""); buf=buf $0 "\n"} END{printf "%s", buf}' "$(tapf "$1")" 2>/dev/null
 }
 heard_in_last_run() { tap_last_run "$1" | jq -e --arg d "$2" 'select(.type == "heard" and .dest == $d)' >/dev/null 2>&1; }
-# the helper's own `announce {}` written to its stdin through the wrapper (111d has no route that sends it)
-INJECTS=0
-inject_announce() {
-  INJECTS=$((INJECTS + 1))
-  printf '{"type":"announce"}\n' >"${ROOT[$1]}/g3/inject/.a$INJECTS"
-  mv "${ROOT[$1]}/g3/inject/.a$INJECTS" "${ROOT[$1]}/g3/inject/a$INJECTS.line"
+tap_to_last_run() { # NODE → the lines 111d wrote to the newest run
+  awk '/^# start /{n++; buf=""} n && /^> /{sub(/^> /, ""); buf=buf $0 "\n"} END{printf "%s", buf}' "$(tapf "$1")" 2>/dev/null
+}
+# the `announce {}` lines 111d wrote to NODE's newest helper run (§6 (3) announce on request)
+announces_to() { tap_to_last_run "$1" | grep -cx '{"type":"announce"}' || true; }
+injected() { grep -c '^+ ' "$(tapf "$1")" 2>/dev/null || true; } # NODE → lines not written by 111d
+# pos_in_last_run NODE JQ-BOOL → the 1-based position of the first helper line of NODE's newest run for which JQ-BOOL
+# holds (0 when none); for ordering checks
+pos_in_last_run() {
+  tap_last_run "$1" | jq -Rnr "[inputs | fromjson?] | [to_entries[] | select(.value | $2) | .key + 1] | first // 0" 2>/dev/null || echo 0
 }
 tap_to_has() { tap_to "$1" | jq -e "$2" >/dev/null 2>&1; }
 # conv_of NODE NET KIND NATIVE_SUBSTRING → $CONV (fc- id or "")
@@ -520,8 +529,13 @@ sys.exit(1)" "$B_IP"'
   kill -CONT "$frozen" 2>/dev/null
   d0=$(now)
   wait_for 150 'lxmf_live A' || true
+  A_READY=$(now) # an upper bound for the ready of A's current helper run (the announce bound, step 5)
   t "A: recovered once rnsd serves again: lxmf live, component running, no reason ($(since "$d0")s after SIGCONT)" 'lxmf_live A'
   t "A: the recovered helper's first line was ready" '[ "$(tap_last_run_first A | jq -r .type 2>/dev/null)" = ready ]'
+  tw 10 "A: announce on request (§6 (3)): the first line 111d wrote to the new run is announce {}, once" \
+    '[ "$(tap_to_last_run A | head -1)" = "{\"type\":\"announce\"}" ] && [ "$(announces_to A)" = 1 ]'
+  t "B: 111d wrote announce {} once to B's run too, first ($(announces_to B))" \
+    '[ "$(tap_to_last_run B | head -1)" = "{\"type\":\"announce\"}" ] && [ "$(announces_to B)" = 1 ]'
   A_DEST=$(tap_last_run_first A | jq -r '.dest // empty' 2>/dev/null)
   t "A: the account is the helper's address ($A_DEST)" '[[ "$A_DEST" =~ ^[0-9a-f]{32}$ ]] && net_of A lxmf && [[ "$(jget .account)" == *"$A_DEST"* ]]'
   ssx=$(nx A ss -xlp 2>/dev/null)
@@ -529,7 +543,7 @@ sys.exit(1)" "$B_IP"'
     'printf "%s\n" "$ssx" | grep "rns/111" | grep -q "pid=$(rnsd_pid A)," && ! printf "%s\n" "$ssx" | grep "rns/111" | grep -qv "pid=$(rnsd_pid A),"'
 
   # ---------------------------------------------------------------- 5. announce before reply, signed, both ways
-  phase "5. announce before reply, signed false then true, both directions"
+  phase "5. announce before reply (111d's announce on the park, the helper's path request), signed false then true, both directions"
   tw 90 "B heard A's announce (GET /nearby on B lists $A_DEST under reticulum)" 'nearby_has B "$A_DEST"'
   api A GET /api/v1/nearby
   t "A has not heard B (B announced once, at its start, before A ran): no $B_DEST in A's Nearby" '[ "$ST" = 200 ] && ! nearby_has A "$B_DEST"'
@@ -537,23 +551,9 @@ sys.exit(1)" "$B_IP"'
   open_dm A "$B_DEST"
   convAB=$CONV
   t "A: the DM to B's address opens by native id ($convAB, native $(jget .native_id))" '[[ "$convAB" == fc-* ]]'
-  local txt_parked="g3 a-to-b before b announced" mid_parked
-  send_text A "$convAB" "$txt_parked"
-  mid_parked=$MID
-  t "A: a send to an unannounced peer answers 202 ($mid_parked)" '[ -n "$mid_parked" ]'
-  tw 20 "A: the helper parked it (state queued, reason peer_unannounced)" \
-    'tap_has A "select(.type == \"state\" and .state == \"queued\" and .reason == \"peer_unannounced\")"'
-  parked_row() {
-    thread A lxmf "$convAB"
-    jq --arg id "$mid_parked" '.messages[] | select(.id == $id)' "$W/thread-A.json" >"$W/row.json" 2>/dev/null
-    jf "$W/row.json" '.state == "queued" and (.reason_code == "peer_unannounced" or .evidence == "waiting for their announce")'
-  }
-  wait_for 15 parked_row || true
-  t "A: the row says it waits queued for the announce (reason_code $(jq -r .reason_code "$W/row.json"), evidence '$(jq -r .evidence "$W/row.json")')" parked_row
-  jf "$W/row.json" '.reason_code == "peer_unannounced"' ||
-    note "A: the parked row carries reason_code $(jq -r .reason_code "$W/row.json") (the adapter maps the helper's peer_unannounced to evidence only; the contract lists peer_unannounced as a queued reason_code)"
   open_dm B "$A_DEST"
   convBA=$CONV
+  # B → A first, while A has never heard B: delivered, but the signature cannot be checked
   local txt_unsigned="g3 b-to-a before b announced" mid_unsigned
   d0=$(now)
   send_text B "$convBA" "$txt_unsigned"
@@ -568,12 +568,57 @@ sys.exit(1)" "$B_IP"'
   msgline A "$txt_unsigned"
   t "A: the helper reported signed false, why_unsigned source_unknown ($(jq -c '{signed, why_unsigned}' "$W/msgline.json" 2>/dev/null))" \
     'jf "$W/msgline.json" ".signed == false and .why_unsigned == \"source_unknown\""'
-  t "A: the parked send still waits (nothing but B's announce may release it)" 'state_is A lxmf "$convAB" "$mid_parked" queued'
-  # B announces now: the helper's own `announce {}` (§6 (3) "on request"; 111d has no route for it, see the header)
-  inject_announce B
-  tw 30 "A's helper heard B's announce" 'heard_in_last_run A "$B_DEST"'
+  t "A: an inbound message taught A's helper nothing of B (no heard of $B_DEST in its run)" '! heard_in_last_run A "$B_DEST"'
+  # A → B: the send parks; 111d announces A (the park comes > 60 s after this run's ready, outside the bound) and the
+  # helper asks its rnsd for B's path. B's rnsd is frozen for a few seconds so the parked state can be read.
+  local wait_s
+  wait_s=$(awk -v a="$A_READY" -v b="$(now)" 'BEGIN{w = 62 - (b - a); printf "%d", (w > 0 ? w + 1 : 0)}')
+  if [ "$wait_s" -gt 0 ]; then
+    note "waiting ${wait_s}s: A's park must come more than 60 s after its run's ready (one announce per 60 s per run, §6 (3))"
+    sleep "$wait_s"
+  fi
+  local ann_A0 ann_B0 brnsd txt_parked="g3 a-to-b before b announced" mid_parked
+  ann_A0=$(announces_to A)
+  ann_B0=$(announces_to B)
+  brnsd=$(rnsd_pid B)
+  kill -STOP "$brnsd" 2>/dev/null
+  t "B: rnsd ($brnsd) frozen while A's send parks (the far side holds still; nothing answers A's path request yet)" \
+    '[ -n "$brnsd" ] && grep -q "^State:.*T" "/proc/$brnsd/status" 2>/dev/null'
+  send_text A "$convAB" "$txt_parked"
+  mid_parked=$MID
+  thread A lxmf "$convAB" # the first sample of the row's states
+  t "A: a send to an unannounced peer answers 202 ($mid_parked)" '[ -n "$mid_parked" ]'
+  tw 20 "A: the helper parked it (state queued, reason peer_unannounced)" \
+    'tap_has A "select(.type == \"state\" and .state == \"queued\" and .reason == \"peer_unannounced\")"'
+  tw 10 "A: announce on request (§6 (3)): 111d wrote announce {} to its helper when the send parked ($ann_A0 → $(announces_to A))" \
+    '[ "$(announces_to A)" = $((ann_A0 + 1)) ]'
+  parked_row() {
+    thread A lxmf "$convAB"
+    jq --arg id "$mid_parked" '.messages[] | select(.id == $id)' "$W/thread-A.json" >"$W/row.json" 2>/dev/null
+    jf "$W/row.json" '.state == "queued" and (.reason_code == "peer_unannounced" or .evidence == "waiting for their announce")'
+  }
+  wait_for 15 parked_row || true
+  t "A: the row says it waits queued for the announce (reason_code $(jq -r .reason_code "$W/row.json"), evidence '$(jq -r .evidence "$W/row.json")')" parked_row
+  jf "$W/row.json" '.reason_code == "peer_unannounced"' ||
+    note "A: the parked row carries reason_code $(jq -r .reason_code "$W/row.json"): the core's SendEvent::Evidence takes no reason and the only queued reason it takes (a pre-air Failed, Later) would re-hand a send the helper holds parked; recorded as the core's follow-up (FA2 (c))"
+  sleep 2
+  t "A: the parked send still waits while nothing answers (state $(field_of A lxmf "$convAB" "$mid_parked" state))" 'state_is A lxmf "$convAB" "$mid_parked" queued'
+  t "A: the parked send's helper never heard B yet" '! heard_in_last_run A "$B_DEST"'
+  kill -CONT "$brnsd" 2>/dev/null
+  d0=$(now)
+  # B's rnsd now reads A's path request (forwarded by A's rnsd) and B's side answers with B's announce as a path response
+  tw 30 "A's helper heard B: its path request was answered (a path response; B's helper did not announce)" 'heard_in_last_run A "$B_DEST"'
   tw 30 "A: GET /nearby lists $B_DEST under reticulum" 'nearby_has A "$B_DEST"'
-  tw 90 "announce before reply: A's parked send went on heard and was delivered" 'state_is A lxmf "$convAB" "$mid_parked" delivered'
+  tw 90 "announce before reply: A's parked send went on the heard and was delivered ($(since "$d0")s after SIGCONT)" 'state_is A lxmf "$convAB" "$mid_parked" delivered'
+  local sid_parked p_park p_heard p_done
+  sid_parked=$(tap_to A | jq -r --arg t "$txt_parked" 'select(.type == "send" and .text == $t) | .id' 2>/dev/null | tail -1)
+  p_park=$(pos_in_last_run A ".type == \"state\" and .id == \"$sid_parked\" and .reason == \"peer_unannounced\"")
+  p_heard=$(pos_in_last_run A ".type == \"heard\" and .dest == \"$B_DEST\"")
+  p_done=$(pos_in_last_run A ".type == \"state\" and .id == \"$sid_parked\" and .state == \"delivered\"")
+  t "A: the helper's lines for send $sid_parked are parked ($p_park) → heard B ($p_heard) → delivered ($p_done), in that order" \
+    '[ "$p_park" -gt 0 ] && [ "$p_heard" -gt "$p_park" ] && [ "$p_done" -gt "$p_heard" ]'
+  t "B: 111d wrote no announce to B's helper meanwhile ($ann_B0 → $(announces_to B)) and nothing was injected (A $(injected A), B $(injected B))" \
+    '[ "$(announces_to B)" = "$ann_B0" ] && [ "$(injected A)" = 0 ] && [ "$(injected B)" = 0 ]'
   tw 20 "B: A's parked text arrived once" 'conv_of B lxmf dm "$A_DEST" && [[ "$CONV" == fc-* ]] && rows_are B lxmf "$CONV" "$txt_parked" 1'
   convB_A=$CONV
   row_by_text B lxmf "$convB_A" "$txt_parked"
@@ -587,7 +632,7 @@ sys.exit(1)" "$B_IP"'
   tw 20 "A: stored once" 'rows_are A lxmf "$convA_B" "$txt_signed" 1'
   row_by_text A lxmf "$convA_B" "$txt_signed"
   msgline A "$txt_signed"
-  t "A: signed true once the source announced (auth $(jq -r .auth "$W/row.json" 2>/dev/null); $(jq -c '{signed, why_unsigned}' "$W/msgline.json" 2>/dev/null))" \
+  t "A: signed true once the source's announce (the path response) reached A (auth $(jq -r .auth "$W/row.json" 2>/dev/null); $(jq -c '{signed, why_unsigned}' "$W/msgline.json" 2>/dev/null))" \
     '[ "$(jq -r .auth "$W/row.json" 2>/dev/null)" = signed ] && jf "$W/msgline.json" ".signed == true and .why_unsigned == null"'
   # delivery in seconds (the stamp facts are read from rnsd's stored announces at the end)
   local txt_fast="g3 timing probe" mid_fast secs
@@ -669,18 +714,24 @@ sys.exit(1)" "$B_IP"'
   jsend A POST /api/v1/bridge/edges "$(jq -nc --arg s "$chan" --arg d "$list" --arg h "$ehash" '{src: $s, dst: $d, accept_warning: $h}')"
   edge=$(jget '.id // empty')
   t "A: the edge is created with the hash (201, $edge, enabled_by $(jget .enabled_by))" '[ "$ST" = 201 ] && [[ "$edge" == be-* ]]'
-  # A's helper restarted in step 6 and a shared-instance client keeps no peers across a restart: B announces again
-  if heard_in_last_run A "$B_DEST"; then
-    note "A's current helper run has heard B already"
-  else
-    note "A's restarted helper has not heard B since its start (a shared-instance client stores no known destinations); B announces"
-    inject_announce B
-    tw 30 "A's restarted helper heard B's new announce" 'heard_in_last_run A "$B_DEST"'
-  fi
+  # A's helper restarted in step 6 and a shared-instance client keeps no known destinations across a restart: the
+  # relay copy to B parks, the helper requests B's path, A's rnsd (or the network) answers, the copy goes (§6 (4))
+  local ann_B7 relay_text="[Relayer/M] g3 relay probe"
+  ann_B7=$(announces_to B)
+  t "A: the restarted helper run starts with no known peers: it has not heard B" '! heard_in_last_run A "$B_DEST"'
+  t "A: 111d announced the restarted run once, first (§6 (3): the peers relearn A)" \
+    '[ "$(tap_to_last_run A | head -1)" = "{\"type\":\"announce\"}" ]'
   printf 'g3 relay probe\n' >"${ROOT[A]}/g3/board/text-2"
   tw 30 "A: the relay probe arrives on the channel" 'rows_are A meshtastic "$chan" "g3 relay probe" 1'
-  local relay_text="[Relayer/M] g3 relay probe"
   tw 90 "B: the relayed copy arrives as '$relay_text'" 'rows_are B lxmf "$convB_A" "$relay_text" 1'
+  local sid_relay
+  sid_relay=$(tap_to A | jq -r --arg t "$relay_text" 'select(.type == "send" and .text == $t) | .id' 2>/dev/null | tail -1)
+  p_park=$(pos_in_last_run A ".type == \"state\" and .id == \"$sid_relay\" and .reason == \"peer_unannounced\"")
+  p_heard=$(pos_in_last_run A ".type == \"heard\" and .dest == \"$B_DEST\"")
+  t "restart case: A's restarted helper parked the copy ($sid_relay at $p_park) and recovered B through its path request (heard at $p_heard), not by waiting for B's announce" \
+    '[ "$p_park" -gt 0 ] && [ "$p_heard" -gt "$p_park" ]'
+  t "restart case: B did not announce (111d wrote $ann_B7 → $(announces_to B) announces to B's run) and nothing was injected (A $(injected A), B $(injected B))" \
+    '[ "$(announces_to B)" = "$ann_B7" ] && [ "$(injected A)" = 0 ] && [ "$(injected B)" = 0 ]'
   t "A: 111d handed the copy to its helper with fields.relay {v 1, net meshtastic}" \
     'tap_to_has A "select(.type == \"send\" and .text == \"$relay_text\" and .fields.relay.v == 1 and .fields.relay.net == \"meshtastic\")"'
   msgline B "$relay_text"
@@ -907,7 +958,7 @@ cp "$HELPER_SRC" "$WORK/helper/lxmf_sidecar.py"
 make_root() { # NODE
   local n=$1 root=$WORK/$1 rel
   rel=$root/releases/$VER
-  mkdir -p "$rel/bin" "$rel/share/lxmf-sidecar" "$root/etc" "$root/state" "$root/g3/board" "$root/g3/inject" \
+  mkdir -p "$rel/bin" "$rel/share/lxmf-sidecar" "$root/etc" "$root/state" "$root/g3/board" \
     "$root/cache/packages/python" "$root/cache/packages/lxmf" "$root/venvs/rns/bin"
   ln -s "releases/$VER" "$root/current"
   # the release's helper path: the real helper (or, on request, the scripted fake) under the egress wrapper
@@ -926,8 +977,7 @@ else:
     mode, prog = "real", [sys.executable, "-I", "$WORK/helper/lxmf_sidecar.py"]
 os.execv(sys.executable, [sys.executable, "-I", "$EGRESS", "wrap",
                           "--strace-log", os.path.join(G3, "strace-%s-%d.log" % (mode, os.getpid())),
-                          "--tap", os.path.join(G3, "tap.log"), "--inject", os.path.join(G3, "inject"),
-                          "--"] + prog + sys.argv[1:])
+                          "--tap", os.path.join(G3, "tap.log"), "--"] + prog + sys.argv[1:])
 EOF
   printf 'real\n' >"$root/g3/helper-mode"
   # rnsd's venv: the gate venv's rnsd, and a counting rnstatus (the Pi-rule check reads the count)

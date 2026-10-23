@@ -60,6 +60,15 @@
 //!   line and an inbound `msg` carrying one of our hashes is dropped as our own echo
 //!   (§8 guard 2; [`LxmfAdapter::echoes`]).
 //!
+//! - **Announce on request (§6 (3)).** The adapter writes the helper's `announce {}` line
+//!   (i) once right after the `ready` of every new generation (the component's start or a
+//!   restart: the peers relearn our address) and (ii) when a send parks as
+//!   `queued`/`peer_unannounced` (so the peer can learn our address and reply; the helper
+//!   also asks its rnsd for the peer's path). Both are bounded by one announce per
+//!   [`LxmfConfig::announce_interval`] (60 s) per helper run, read on the monotonic clock
+//!   where the adapter already handles the lines — no timer, no task. The helper's own
+//!   start, link-up and interval announces are unchanged.
+//!
 //! Weight: the adapter exists only while the `lxmf` component is enabled (§2.1 rule 2). Its
 //! one task waits on the stdio watch, the helper's lines and its own command queue; it owns
 //! no timer and polls nothing (a write is bounded by a timeout only while it runs).
@@ -116,6 +125,8 @@ const EVENTS: usize = 64;
 const CMD_CAP: usize = 256;
 /// Nearby node names (Layer 5 §14 `NearbyNode`: names truncated to 40 bytes).
 const NEARBY_NAME_MAX: usize = 40;
+/// The helper's `announce {}` command (§6 "Process contract").
+const ANNOUNCE_LINE: &str = "{\"type\":\"announce\"}";
 
 /// The evidence strings of the §4 table (LXMF rows).
 pub const EV_NO_PATH: &str = "no path yet";
@@ -731,6 +742,15 @@ pub fn admit(
 }
 
 /// What one admitted `state` line means for the core (§4, §6 (4), (6)).
+///
+/// A parked send (`queued`/`peer_unannounced`) is reported as evidence only ("waiting for
+/// their announce"), so its row's `reason_code` stays null for now although the contract's
+/// `ForeignReasonCode` lists `peer_unannounced` as a queued reason: the core's
+/// [`SendEvent::Evidence`] carries no reason (and clears one), and the only queued reason it
+/// takes is a pre-air `Failed { .., Retry::Later }`, on which it withdraws the handoff and
+/// hands the row again — while the helper still holds the send parked and resumes it on the
+/// peer's announce, so the text would go twice (§4 "at most once per user act"). Fail-closed:
+/// the evidence alone until the core takes a reason with a queued state (a core follow-up).
 fn events_for(s: &StateLine) -> SendEvent {
     match (s.state, s.reason) {
         (S::Queued, Some(HelperReason::PeerUnannounced)) => SendEvent::Evidence {
@@ -846,6 +866,9 @@ pub struct LxmfConfig {
     pub heard_interval: Duration,
     /// A write to the helper's stdin waits at most this long (then stdin closes, §7).
     pub write_timeout: Duration,
+    /// Announce on request (§6 (3)): at most one `announce {}` per this interval per helper
+    /// run (monotonic; the one after `ready` counts).
+    pub announce_interval: Duration,
     pub on_ready: Option<ReadyHook>,
 }
 
@@ -878,6 +901,7 @@ impl LxmfConfig {
                 .collect(),
             heard_interval: Duration::from_secs(30),
             write_timeout: Duration::from_secs(5),
+            announce_interval: Duration::from_secs(60),
             on_ready: None,
         }
     }
@@ -995,6 +1019,8 @@ struct St {
     heard_at: HashMap<String, Instant>,
     heard_order: VecDeque<String>,
     own: OwnHashes,
+    /// The last announce this adapter asked of the live run (§6 (3); reset per run).
+    announced_at: Option<Instant>,
     /// Supervisor drops (oversize / non-UTF-8) of ended generations.
     io_noise: u64,
 }
@@ -1004,6 +1030,7 @@ struct Inner {
     tags: Vec<(String, String)>,
     heard_interval: Duration,
     write_timeout: Duration,
+    announce_interval: Duration,
     on_ready: Option<ReadyHook>,
     cmds: mpsc::Sender<Cmd>,
     st: Mutex<St>,
@@ -1062,6 +1089,7 @@ impl LxmfAdapter {
             tags: cfg.tags,
             heard_interval: cfg.heard_interval,
             write_timeout: cfg.write_timeout,
+            announce_interval: cfg.announce_interval,
             on_ready: cfg.on_ready,
             cmds: tx,
             st: Mutex::new(St {
@@ -1077,6 +1105,7 @@ impl LxmfAdapter {
                 heard_at: HashMap::new(),
                 heard_order: VecDeque::new(),
                 own: OwnHashes::default(),
+                announced_at: None,
                 io_noise: 0,
             }),
             queue: Mutex::new(Queue::default()),
@@ -1254,6 +1283,29 @@ impl Inner {
         )
     }
 
+    /// Announce on request (§6 (3); module doc): `true` when no announce was asked of this
+    /// run within [`LxmfConfig::announce_interval`] (monotonic), and the slot is taken.
+    fn announce_due(&self, now: Instant) -> bool {
+        let mut st = lock(&self.st);
+        if st
+            .announced_at
+            .is_some_and(|t| now.saturating_duration_since(t) < self.announce_interval)
+        {
+            return false;
+        }
+        st.announced_at = Some(now);
+        true
+    }
+
+    /// Write `announce {}` to the live run when [`Inner::announce_due`] allows it.
+    async fn announce_on_request(&self, io: &PipedIo, why: &'static str) {
+        if self.announce_due(Instant::now()) && !self.write(io, ANNOUNCE_LINE).await {
+            log(format_args!(
+                "an announce ({why}) could not be written to the helper"
+            ));
+        }
+    }
+
     /// Fail one tracked send with `adapter_down` (`Later`; [`Entry::down_event`]).
     fn fail_one(&self, id: &str) {
         let e = {
@@ -1294,7 +1346,12 @@ impl Inner {
                 }
             }
             Line::Msg(m) => self.msg(*m),
-            Line::State(s) => self.state(s),
+            Line::State(s) => {
+                if self.state(s) {
+                    // §6 (3): a send parked for the peer's announce; let the peer learn us
+                    self.announce_on_request(io, "a parked send").await;
+                }
+            }
             Line::Heard { dest, name } => self.heard(io, generation, dest, name).await,
         }
         Phase::Live
@@ -1389,11 +1446,12 @@ impl Inner {
     /// (`sent`/`relayed`/`delivered`), because the core reads any later failure of an
     /// accepted send as post-air and never re-sends it. A new hash after that (the
     /// helper's new library attempt of the same id) is accepted again once on air.
-    fn state(&self, s: StateLine) {
+    /// Returns `true` when the admitted line parks the send (`queued`/`peer_unannounced`).
+    fn state(&self, s: StateLine) -> bool {
         let mut st = lock(&self.st);
         let St { sends, own, .. } = &mut *st;
         let Some(e) = sends.get_mut(&s.id) else {
-            return; // not ours (an evicted or older run's id): nothing to report
+            return false; // not ours (an evicted or older run's id): nothing to report
         };
         if let Some(h) = &s.hash {
             own.record(h);
@@ -1414,8 +1472,9 @@ impl Inner {
             }
         }
         if !admitted {
-            return;
+            return false;
         }
+        let parked = s.state == S::Queued && s.reason == Some(HelperReason::PeerUnannounced);
         e.last = Some((s.state, s.reason));
         e.unconfirmed = s.reason == Some(HelperReason::Unconfirmed);
         let ev = events_for(&s);
@@ -1429,6 +1488,7 @@ impl Inner {
             st.sends.remove(&s.id);
             st.order.retain(|x| x != &s.id);
         }
+        parked
     }
 
     async fn heard(&self, io: &PipedIo, generation: u64, dest: String, name: Option<String>) {
@@ -1648,6 +1708,8 @@ async fn event(inner: &Inner, cur: &mut Option<Gen>, ev: Ev) {
                     st.live = Some(generation);
                     st.link = None;
                     st.state = AdapterState::Live;
+                    // the announce bound is per helper run
+                    st.announced_at = None;
                 }
                 g.phase = Phase::Live;
                 g.skip = Some(first);
@@ -1655,6 +1717,8 @@ async fn event(inner: &Inner, cur: &mut Option<Gen>, ev: Ev) {
                 if let Some(hook) = &inner.on_ready {
                     hook(&facts);
                 }
+                // §6 (3): a new run (start or restart) announces so the peers relearn us
+                inner.announce_on_request(&g.io, "a new run").await;
             }
             _ => {
                 let n = inner.refused.fetch_add(1, Ordering::SeqCst) + 1;

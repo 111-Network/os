@@ -7,7 +7,8 @@ the parts of the surface the helper uses, with the semantics read from rns 1.5.7
   ``is_connected_to_shared_instance`` flag; with ``require_shared_instance`` a would-be instance raises
   ``SystemError``.
 * ``RNS.Identity`` (recall of a destination hash, ``get_public_key`` 64 B, 64 B identity files),
-  ``RNS.Destination`` (OUT destinations), ``RNS.Transport`` (announce handlers, interfaces).
+  ``RNS.Destination`` (OUT destinations), ``RNS.Transport`` (announce handlers, interfaces,
+  ``request_path``: recorded, and answered from ``Fakes.path_table`` like a shared rnsd would).
 * ``LXMF.LXMRouter`` (delivery identity, callbacks, ``handle_outbound``, ``announce``),
   ``LXMF.LXMessage`` (state constants, hash, fields, callbacks) and the field-id constants.
 """
@@ -176,10 +177,19 @@ class FakeTransport:
     def __init__(self):
         self.handlers = []
         self.interfaces = []
+        self.path_requests = []  # every RNS.Transport.request_path(destination_hash) call, in order
+        self.on_request = None   # what the shared instance does with one (set by Fakes)
 
     def register_announce_handler(self, handler):
         if hasattr(handler, "aspect_filter") and callable(handler.received_announce):
             self.handlers.append(handler)
+
+    def request_path(self, destination_hash, on_interface=None, tag=None, recursive=False):
+        """RNS.Transport.request_path (rns 1.5.7 signature). A shared-instance client's request goes to
+        its rnsd, which answers from its path table with the cached announce (a path response)."""
+        self.path_requests.append(bytes(destination_hash))
+        if self.on_request is not None:
+            self.on_request(bytes(destination_hash))
 
 
 class Fakes:
@@ -192,6 +202,8 @@ class Fakes:
         self.transport.interfaces.append(LocalClientInterface(True))
         self.known = {}      # destination hash -> FakeIdentity
         self.app_data = {}   # destination hash -> bytes
+        self.path_table = {}  # destination hash -> (FakeIdentity, name): what the shared rnsd knows
+        self.transport.on_request = self._answer_path_request
         self.reticulum_calls = []
         self.exit_handler_ran = False
         fakes = self
@@ -261,6 +273,13 @@ class Fakes:
         for h in list(self.transport.handlers):
             h.received_announce(d, ident, data)
         return d
+
+    def _answer_path_request(self, d):
+        """rnsd answers a local client's path request from its table (even with transport off): the
+        cached announce reaches the client's announce handlers as a path response."""
+        if d in self.path_table:
+            ident, name = self.path_table[d]
+            self.announce(ident, name)
 
     def install(self):
         self._saved = {k: sys.modules.get(k) for k in ("RNS", "LXMF")}

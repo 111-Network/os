@@ -33,7 +33,7 @@ Exit codes: 0 clean (``quit``, stdin closed, SIGTERM/SIGINT), 1 start-up failure
 (the helper would have become the shared instance), 4 the ``rns``/``lxmf`` libraries are missing.
 
 No wall clock orders or authenticates anything here: timers (announce interval, state sampling, link
-check) use the monotonic clock; ``claim_ts`` is the sender's unverified claim, passed through for display.
+check, the path re-request of a parked destination) use the monotonic clock; ``claim_ts`` is the sender's unverified claim, passed through for display.
 """
 from __future__ import annotations
 
@@ -69,6 +69,8 @@ MAX_NAMES = 2048                # announced display names remembered
 MSGS_PER_SEND = 4               # library messages kept per send id (a retry after a post-air FAILED)
 STATE_TICK_SECS = 1.0           # sampling of in-flight sends (only while one is in flight)
 LINK_POLL_SECS = 5.0            # instance link check
+PATH_REQUEST_SECS = 30.0        # a parked destination's path is asked again at most this often ...
+PATH_REQUEST_MAX_SECS = 480.0   # ... doubling up to this (only while a send to it is parked)
 DEFAULT_ANNOUNCE_MINUTES = 60
 RELAY_TYPE = "111.relay"
 INSTANCE_DEFAULT = "111"
@@ -613,6 +615,10 @@ class Helper:
         self.next_announce: Optional[float] = None
         self.next_link_poll = 0.0
         self.next_state_tick = 0.0
+        # Path requests for parked destinations (spec section 6 (4)): dest -> [next due, interval]; an
+        # entry lives exactly as long as a send to that destination is parked (one parked period).
+        self.path_reqs: Dict[bytes, List[float]] = {}
+        self.path_due: List[bytes] = []  # requests to make once the lock is released
 
     # ---- attach / start -------------------------------------------------------------------------
     def attach(self) -> None:
@@ -703,6 +709,7 @@ class Helper:
                         ready.append((e, m))
             for e, m in ready:
                 self._handoff(e, m)  # outside the lock: the router may wait on its own lock
+            self._request_paths()
         except Exception as exc:
             self.log.warn("announce handling failed (%s)" % type(exc).__name__)
 
@@ -775,6 +782,7 @@ class Helper:
                 m = self._prepare(e)
         if m is not None:
             self._handoff(e, m)
+        self._request_paths()
 
     def _make_room(self) -> bool:
         if len(self.sends) < MAX_SENDS:
@@ -788,7 +796,8 @@ class Helper:
     # ---- sending --------------------------------------------------------------------------------
     def _prepare(self, e: SendEntry) -> Optional[Any]:
         """Caller holds the lock. Build the library message for ``e`` and register it, or park the send
-        until the peer announces (None). Never calls the router."""
+        until the peer announces (None) and queue a path request for it (made by the caller after the
+        lock is released, ``_request_paths``). Never calls the router or the transport."""
         RNS, LXMF = self.RNS, self.LXMF
         ident = RNS.Identity.recall(e.dest)
         if ident is None:
@@ -797,9 +806,12 @@ class Helper:
                 e.concluded = True
                 return None
             e.parked = True
+            self._want_path(e.dest)
             self._advance(e, S_QUEUED, R_UNANNOUNCED)
             return None
-        e.parked = False
+        if e.parked:
+            e.parked = False
+            self._parked_period_ends(e.dest)
         try:
             d = RNS.Destination(ident, RNS.Destination.OUT, RNS.Destination.SINGLE, "lxmf", "delivery")
             if bytes(d.hash) != e.dest:
@@ -817,6 +829,41 @@ class Helper:
         e.msgs.append(m)
         del e.msgs[:-MSGS_PER_SEND]
         return m
+
+    # ---- path requests (spec section 6 (4): a parked send asks the network for its peer) ----------
+    def _want_path(self, d: bytes) -> None:
+        """Caller holds the lock. The first park of ``d`` in a parked period queues one path request now
+        and schedules the re-request; a further send parked on ``d`` adds nothing."""
+        if d in self.path_reqs:
+            return
+        self.path_reqs[d] = [self.clock() + PATH_REQUEST_SECS, PATH_REQUEST_SECS]
+        self.path_due.append(d)
+
+    def _parked_period_ends(self, d: bytes) -> None:
+        """Caller holds the lock. No send to ``d`` is parked any more: forget its path request."""
+        if not any(x.parked and x.dest == d for x in self.sends.values()):
+            self.path_reqs.pop(d, None)
+
+    def _request_paths(self) -> None:
+        """Make the queued path requests. The caller must NOT hold the lock: ``request_path`` sends a
+        packet through the transport, whose locks a library thread may hold while it calls our announce
+        handler (the same rule as the router, ``_handoff``). A shared-instance client's request is
+        answered by its rnsd from the path table (even with transport off) or forwarded to the network;
+        the answer arrives as an announce (a path response) and resumes the parked sends (``heard``)."""
+        with self.lock:
+            due, self.path_due = self.path_due, []
+        if not due:
+            return
+        req = getattr(getattr(self.RNS, "Transport", None), "request_path", None)
+        if not callable(req):
+            self.log.warn("this RNS has no Transport.request_path; parked sends wait for an announce")
+            return
+        for d in due:
+            try:
+                req(d)
+                self.log.info("path requested for %s" % d.hex())
+            except Exception as exc:
+                self.log.warn("path request failed (%s)" % type(exc).__name__)
 
     def _handoff(self, e: SendEntry, m: Any) -> None:
         """Hand one prepared message to the router. The caller must NOT hold the lock: ``handle_outbound``
@@ -926,8 +973,9 @@ class Helper:
         return any((not e.concluded) and (not e.parked) and e.msgs for e in self.sends.values())
 
     def next_wakeup(self) -> float:
-        """Seconds until the next timer. The state sample is scheduled only while a send is in flight; the
-        link check and the announce interval are the helper's only other timers."""
+        """Seconds until the next timer. The state sample is scheduled only while a send is in flight and
+        a path re-request only while a send is parked; the link check and the announce interval are the
+        helper's only other timers."""
         now = self.clock()
         due = [self.next_link_poll]
         if self.next_announce is not None:
@@ -935,6 +983,8 @@ class Helper:
         with self.lock:
             if self._pending():
                 due.append(self.next_state_tick)
+            if self.path_reqs:
+                due.append(min(v[0] for v in self.path_reqs.values()))
         return max(0.0, min(due) - now)
 
     def tick(self) -> None:
@@ -956,6 +1006,19 @@ class Helper:
                 for e in list(self.sends.values()):
                     if not e.concluded and not e.parked and e.msgs:
                         self._observe(e, e.msgs[-1])
+        with self.lock:
+            if self.path_reqs:
+                parked = set(x.dest for x in self.sends.values() if x.parked)
+                for d in list(self.path_reqs):
+                    if d not in parked:
+                        del self.path_reqs[d]  # the parked period ended without a resume (evicted)
+                        continue
+                    when, interval = self.path_reqs[d]
+                    if now >= when:  # re-request with back-off: 30 s, 60 s, ... up to 480 s
+                        interval = min(interval * 2.0, PATH_REQUEST_MAX_SECS)
+                        self.path_reqs[d] = [now + interval, interval]
+                        self.path_due.append(d)
+        self._request_paths()  # outside the lock
 
     # ---- main loop ------------------------------------------------------------------------------
     def run(self, inbox: "queue.Queue[Tuple[str, Any]]") -> None:

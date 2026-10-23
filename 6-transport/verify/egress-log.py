@@ -21,8 +21,9 @@
 #          111d spawns, so its pid is the component's; SIGTERM/SIGINT are forwarded to the traced program itself
 #          (strace would only detach), and strace runs with --kill-on-exit so nothing outlives the wrapper. Exits
 #          with the program's exit code. With --inject DIR, a file DIR/<name>.line holding one protocol line is
-#          written to the program's stdin between 111d's lines (tapped as `+ `) and renamed <name>.line.done: the
-#          gate's stand-in for a command 111d has no route for (G3: the helper's own `announce {}`).
+#          written to the program's stdin between 111d's lines (tapped as `+ `) and renamed <name>.line.done: a
+#          stand-in for a command 111d has no route for. G3 no longer uses it (since fix wave FA2 111d announces on
+#          request itself, and lxmf.sh asserts that no `+ ` line exists); it stays for scripted-helper experiments.
 #
 #     python3 -I egress-log.py wrap --strace-log s.log --tap tap.log [--inject DIR] -- PROGRAM ARGS...
 #

@@ -14,7 +14,10 @@
 //! - no foreign text reaches a log line (a child run of this binary, stderr captured);
 //! - the component declaration registers through S4's loader with its byte-identical lock;
 //! - the adapter registers through `Bridge::enable` and its texts, echoes, Nearby items and
-//!   sends flow through the bridge core onto a real fabric.
+//!   sends flow through the bridge core onto a real fabric;
+//! - FA2 (V2's gaps): announce on request (§6 (3)) — one `announce {}` after the `ready` of
+//!   every run and one when a send parks as `peer_unannounced`, bounded per run — and the
+//!   parked row through the core: queued, "waiting for their announce", handed once.
 //!
 //! Hermetic: every helper child is stopped on the way out (and dies with the test process
 //! through the parent-death signal otherwise); scratch lives in temp dirs.
@@ -95,18 +98,34 @@ struct Helper {
     adapter: Arc<LxmfAdapter>,
 }
 
+/// The helper's `announce {}` command, as the adapter writes it (§6 (3)).
+const ANNOUNCE: &str = r#"{"type":"announce"}"#;
+
 impl Helper {
     fn record(&self) -> PathBuf {
         self.dir.path().join("record")
     }
 
-    /// Every line the helper read from its stdin, in order.
-    fn lines(&self) -> Vec<String> {
+    /// Every line the helper read from its stdin, in order, announces included.
+    fn all_lines(&self) -> Vec<String> {
         std::fs::read_to_string(self.record())
             .unwrap_or_default()
             .lines()
             .map(str::to_string)
             .collect()
+    }
+
+    /// Every line the helper read from its stdin but the adapter's `announce {}` (written
+    /// once after each `ready`, §6 (3); the announce tests count those).
+    fn lines(&self) -> Vec<String> {
+        self.all_lines()
+            .into_iter()
+            .filter(|l| l != ANNOUNCE)
+            .collect()
+    }
+
+    fn announces(&self) -> usize {
+        self.all_lines().iter().filter(|l| *l == ANNOUNCE).count()
     }
 
     async fn wait_lines(&self, n: usize) -> Vec<String> {
@@ -480,6 +499,134 @@ async fn heard_feeds_nearby_is_rate_limited_and_resends_an_unconfirmed_send() {
         3,
         "no re-send of a parked send"
     );
+    assert_eq!(
+        hp.announces(),
+        1,
+        "the one after ready; the park came inside the 60 s window"
+    );
+    hp.stop().await;
+}
+
+// ---------------------------------------------------------------- announce on request (FA2)
+
+/// FA2 (a), §6 (3) "on request": the adapter writes `announce {}` once right after the
+/// `ready` of every run, and once when a send parks as `peer_unannounced` — at most one per
+/// `announce_interval` per helper run (monotonic, evaluated where the lines are handled; no
+/// timer). A park outside the window announces, a second park inside it does not, a new
+/// run announces again at once (the bound is per run).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn fa2_announce_after_ready_and_on_a_parked_send_bounded_per_run() {
+    let window = Duration::from_millis(1500);
+    let runs = json!([
+        [
+            ready(D1, &pk_hex()),
+            {"expect": "send", "as": "s1"},
+            {"state": {"ref": "s1", "state": "queued", "reason": "peer_unannounced"}},
+            {"expect": "send", "as": "s2"},
+            {"state": {"ref": "s2", "state": "queued", "reason": "peer_unannounced"}},
+            {"expect": "send", "as": "s3"},
+            {"state": {"ref": "s3", "hash": h('3'), "state": "queued"}},
+            {"state": {"ref": "s3", "hash": h('3'), "state": "sent"}},
+            {"sleep_ms": 200},
+            {"exit": 0}
+        ],
+        [ready(D1, &pk_hex())]
+    ]);
+    let hp = spawn_with(runs, true, |c| c.announce_interval = window);
+    hp.live().await;
+    let a = &hp.adapter;
+    let g1 = a.ready().unwrap().generation;
+    // (i) right after ready, before anything else is written
+    assert!(until(LIMIT, || hp.announces() == 1).await);
+    assert_eq!(hp.all_lines(), vec![ANNOUNCE.to_string()]);
+    // outside the window: the park announces once
+    tokio::time::sleep(window + Duration::from_millis(300)).await;
+    let mut s1 = send(a, D2, "one").await;
+    assert_eq!(
+        ev(&mut s1).await,
+        evidence(ForeignMessageState::Queued, EV_UNANNOUNCED)
+    );
+    assert!(
+        until(LIMIT, || hp.announces() == 2).await,
+        "{:?}",
+        hp.all_lines()
+    );
+    // inside the window: a second park announces nothing; a send that is not parked neither
+    let mut s2 = send(a, D3, "two").await;
+    assert_eq!(
+        ev(&mut s2).await,
+        evidence(ForeignMessageState::Queued, EV_UNANNOUNCED)
+    );
+    let mut s3 = send(a, D4, "three").await;
+    assert_eq!(
+        ev(&mut s3).await,
+        evidence(ForeignMessageState::Queued, EV_NO_PATH)
+    );
+    assert_eq!(ev(&mut s3).await, accepted(&h('3')));
+    // the run ends (exit 0) and the supervisor respawns it: a new run announces at once,
+    // inside the old run's window
+    let a2 = Arc::clone(a);
+    assert!(
+        until(LIMIT, move || a2.ready().is_some_and(|r| r.generation > g1)).await,
+        "no second run"
+    );
+    assert!(
+        until(LIMIT, || hp.announces() == 3).await,
+        "{:?}",
+        hp.all_lines()
+    );
+    let all = hp.all_lines();
+    let kinds: Vec<&str> = all
+        .iter()
+        .map(|l| {
+            if l == ANNOUNCE {
+                "announce"
+            } else if l.contains(r#""type":"send""#) {
+                "send"
+            } else {
+                "other"
+            }
+        })
+        .collect();
+    assert_eq!(
+        kinds,
+        vec!["announce", "send", "announce", "send", "send", "announce"],
+        "{all:?}"
+    );
+    // nothing more while the second run idles
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(hp.announces(), 3);
+    hp.stop().await;
+}
+
+/// FA2 (a): with the default bound (60 s) a park right after `ready` adds no announce (the
+/// one after ready counts), and a run whose first line is not `ready` gets none.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn fa2_the_default_window_counts_the_ready_announce() {
+    assert_eq!(
+        LxmfConfig::default().announce_interval,
+        Duration::from_secs(60)
+    );
+    let runs = json!([[
+        ready(D1, &pk_hex()),
+        {"expect": "send", "as": "s1"},
+        {"state": {"ref": "s1", "state": "queued", "reason": "peer_unannounced"}},
+        {"expect": "send", "as": "s2"},
+        {"state": {"ref": "s2", "state": "queued", "reason": "peer_unannounced"}}
+    ]]);
+    let hp = spawn(runs);
+    hp.live().await;
+    let a = &hp.adapter;
+    for (to, text) in [(D2, "one"), (D3, "two")] {
+        let mut rx = send(a, to, text).await;
+        assert_eq!(
+            ev(&mut rx).await,
+            evidence(ForeignMessageState::Queued, EV_UNANNOUNCED)
+        );
+    }
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert_eq!(hp.announces(), 1, "{:?}", hp.all_lines());
+    assert_eq!(hp.all_lines()[0], ANNOUNCE);
     hp.stop().await;
 }
 
@@ -729,7 +876,13 @@ async fn a_run_whose_first_line_is_not_ready_is_refused_and_asked_to_quit() {
         Inbound::Link(LinkState::Up),
         "nothing of the refused run surfaced"
     );
-    assert_eq!(hp.lines(), vec![r#"{"type":"quit"}"#.to_string()]);
+    // the refused run got only the quit; the ready run that followed got its announce
+    // (§6 (3): one per run that passed the ready check)
+    assert!(until(LIMIT, || hp.all_lines().len() >= 2).await);
+    assert_eq!(
+        hp.all_lines(),
+        vec![r#"{"type":"quit"}"#.to_string(), ANNOUNCE.to_string()]
+    );
     hp.stop().await;
 }
 
@@ -1094,6 +1247,7 @@ async fn f1_a_send_queued_when_the_helper_is_killed_stays_queued_and_is_handed_a
                 let lines = std::fs::read_to_string(&hp_lines)
                     .unwrap_or_default()
                     .lines()
+                    .filter(|l| *l != ANNOUNCE)
                     .count();
                 seen.push((st.clone(), lines));
                 let hit = match done {
@@ -1130,7 +1284,12 @@ async fn f1_a_send_queued_when_the_helper_is_killed_stays_queued_and_is_handed_a
     assert!(bridge.is_tracked(id), "the core retries it");
     // run 2: the core hands the same row again (a new send id, the same text)
     let (_, seen) = drive("handed again").await;
-    assert!(queued(&seen), "queued until handed again: {seen:?}");
+    // (the observation that sees the second line may already carry run 2's `sent`: the
+    // tick between two reads can apply it; every earlier one must be queued)
+    assert!(
+        queued(&seen[..seen.len() - 1]),
+        "queued until handed again: {seen:?}"
+    );
     let lines = hp.lines();
     assert!(lines[0].contains(r#""id":"m1""#) && lines[1].contains(r#""id":"m2""#));
     assert!(lines.iter().all(|l| l.contains(r#""text":"hi Bob""#)));
@@ -1154,6 +1313,85 @@ async fn f1_a_send_queued_when_the_helper_is_killed_stays_queued_and_is_handed_a
         (s, e.as_deref()),
         (ForeignMessageState::Sent, Some(EV_UNCONFIRMED))
     );
+    hp.adapter.quit().await;
+    assert!(bridge.disable("lxmf").await);
+    hp.stop().await;
+    handle.shutdown().await;
+}
+
+/// FA2 (c), end to end through the bridge core: a send the helper parks as
+/// `queued`/`peer_unannounced` is a `queued` row with the evidence "waiting for their
+/// announce", handed exactly once — the core never re-hands it while the helper holds it
+/// (no duplicate on the heard) — and it goes on the peer's heard. The row's `reason_code`:
+/// the core's `SendEvent::Evidence` carries no reason, so it is null until the core takes a
+/// reason with a queued state (recorded as the core's follow-up); `peer_unannounced` is the
+/// only other value allowed here.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn fa2_a_parked_send_is_a_queued_row_waiting_for_the_announce_handed_once() {
+    let Core {
+        _dir,
+        handle,
+        bridge,
+    } = core().await;
+    let runs = json!([[
+        ready(D1, &pk_hex()),
+        link("up"),
+        {"expect": "send", "as": "s1"},
+        {"state": {"ref": "s1", "state": "queued", "reason": "peer_unannounced"}},
+        {"sleep_ms": 1500},
+        {"heard_of": "s1", "name": "Bob"},
+        {"state": {"ref": "s1", "hash": h('5'), "state": "queued"}},
+        {"state": {"ref": "s1", "hash": h('5'), "state": "sent"}},
+        {"state": {"ref": "s1", "hash": h('5'), "state": "delivered"}}
+    ]]);
+    let hp = spawn(runs);
+    hp.live().await;
+    bridge
+        .enable(Arc::clone(&hp.adapter) as Arc<dyn Adapter>)
+        .await
+        .unwrap();
+    let fab = handle.fabric().unwrap().clone();
+    let open = bridge.open_dm("lxmf", D2).await.unwrap();
+    let conv = node111::daemon::fabric::json::parse_fc_id(open["id"].as_str().unwrap()).unwrap();
+    let sent = bridge
+        .send_text("lxmf", conv, "hi Bob", None)
+        .await
+        .unwrap();
+    let id = node111::daemon::fabric::json::parse_fm_id(sent["id"].as_str().unwrap()).unwrap();
+    let deadline = Instant::now() + LIMIT;
+    let mut parked_seen = 0;
+    loop {
+        bridge.tick_once().await;
+        let (state, evidence, reason) = bridge.row_state(id).await.unwrap();
+        if evidence.as_deref() == Some(EV_UNANNOUNCED) {
+            assert_eq!(state, ForeignMessageState::Queued);
+            assert!(
+                reason.is_none() || reason.as_deref() == Some("peer_unannounced"),
+                "{reason:?}"
+            );
+            let row = fab.foreign_message(id).await.unwrap();
+            assert_eq!(row.state, ForeignState::Queued);
+            assert_eq!(row.native_msg_id, None);
+            parked_seen += 1;
+        }
+        if state == ForeignMessageState::Delivered {
+            assert_eq!(evidence.as_deref(), Some(EV_DELIVERED));
+            break;
+        }
+        assert!(Instant::now() < deadline, "never delivered: {state:?}");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(
+        parked_seen >= 10,
+        "the parked row was seen {parked_seen} times"
+    );
+    let row = fab.foreign_message(id).await.unwrap();
+    assert_eq!(row.state, ForeignState::Delivered);
+    assert_eq!(row.native_msg_id.as_deref(), Some(h('5').as_str()));
+    let lines = hp.lines();
+    assert_eq!(lines.len(), 1, "handed once, never re-handed: {lines:?}");
+    assert!(lines[0].contains(r#""text":"hi Bob""#));
+    assert_eq!(hp.announces(), 1, "the park came inside the ready's window");
     hp.adapter.quit().await;
     assert!(bridge.disable("lxmf").await);
     hp.stop().await;
