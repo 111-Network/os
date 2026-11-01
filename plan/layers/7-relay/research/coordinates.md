@@ -40,5 +40,5 @@ The brief is complete; it waits on the owner's decisions F1–F11 and the §5 qu
 journal is not exported (unlike Layer 6's `runs/journals/`): this box refuses to copy from the session-local transcript store; it lives
 at `~/.claude/projects/…/subagents/workflows/wf_60f165f1-80f/journal.jsonl` on the lead machine and the run resumes by its id.
 
-`options.md` is written (above). Next: the owner decides → `DECISIONS.md` → spec `os/7-relay/README.md` → fable adversarial panel
-→ `TASKS.md` → build.
+`options.md` is written (above); **the owner decided on 2026-11-01 (D30: every pick and default)**. Next: spec `os/7-relay/README.md` v0.1
+(run 2, `runs/workflows/spec.js`: an opus drafter, then three fable judges) → lead triage → fix and one fable re-check → lock → `TASKS.md` → build.

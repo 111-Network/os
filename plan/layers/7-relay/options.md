@@ -1,13 +1,13 @@
 # Layer 7 — Relay & Presence: options brief
 
-Status: 🧭 deciding · 2026-11-01 · sweep complete (opus seams scout, 5 sonnet lens scouts, opus critic, 2 sonnet gap-fill scouts; run
+Status: ✅ decided (D30, 2026-11-01: every pick and default taken by the owner) · sweep complete (opus seams scout, 5 sonnet lens scouts, opus critic, 2 sonnet gap-fill scouts; run
 `wf_60f165f1-80f`; the critic's digest, the gap-fill digest and the unverified-claims list are §6) · lead-written from the nine reports in `research/` (`00-code-seams.md` line-verified on
 `3bf545b`; `01`–`05` web-verified where this box's network policy allowed: package indexes and raw GitHub files only, most documentation
 sites denied — every claim the scouts could not fetch is marked in the reports and collected by the critic). Reads with: `os/README.md` §7
 and "Category 5" · the hand-offs listed in [`README.md`](README.md) · D17 #5/#12, D19 c, D20, D22, D23–D29 · `AGENTS.md` (the Pi floor).
 
 Owner scope: Layer 6 is locked (D29); Layer 7 is the next layer in `INDEX.md`; `INDEX.md` "Process (per layer)" starts it with research → this brief
-→ the owner's decision → spec → fable panel → build (`EXECUTION.md` applies once the spec is decided). **Nothing of Layer 7 is built; nothing is built before the owner answers §2.**
+→ the owner's decision → spec → fable panel → build (`EXECUTION.md` applies once the spec is decided). **Decided 2026-11-01 (D30); the spec `7-relay/README.md` follows, then the fable panel, the lock and the build.**
 
 ## 0. What the research settled (facts that bound every option)
 

@@ -1,9 +1,9 @@
 # Layer 7 — Relay & Presence: plan folder
 
-**Status** (summarised from [`INDEX.md`](../../INDEX.md) row 7, which stays the source of truth): 🧭 deciding — kickoff 2026-11-01
+**Status** (summarised from [`INDEX.md`](../../INDEX.md) row 7, which stays the source of truth): ✍️ speccing — kickoff 2026-11-01
 (cloud session, branch `claude/layer-6-implementation-006mte`): the research sweep ran (`runs/workflows/research.js`: opus seams scout,
 five sonnet lens scouts, opus completeness critic, two sonnet gap-fill scouts; `research/00`–`07`) and the lead wrote
-[`options.md`](options.md), complete with the gap-fills folded in; **the owner decides before any Layer 7 code is written**
+[`options.md`](options.md), complete with the gap-fills folded in; **the owner decided on 2026-11-01 (D30: every pick and default of the brief); next the spec `os/7-relay/README.md`, the fable panel, the lock, `TASKS.md`, the build**
 (`INDEX.md` "Process (per layer)": research → options brief → decision → adversarial pass → build; `EXECUTION.md` applies once the spec is
 decided).
 
