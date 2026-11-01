@@ -343,6 +343,7 @@ export class ApiStore {
   attach(adapter: Adapter): Promise<void> {
     this.detach();
     this.adapter = adapter;
+    this.watchVisibility();
     this.subscribeStream();
     // Recorded before the stream can deliver anything: the daemon's mandatory first `reset` frame must
     // not trigger a second load of what this one is already fetching.
@@ -355,6 +356,8 @@ export class ApiStore {
   }
 
   detach(): void {
+    this.unwatchVisibility?.();
+    this.unwatchVisibility = null;
     this.unsubscribe?.();
     this.unsubscribe = null;
     this.adapter = null;
@@ -852,6 +855,38 @@ export class ApiStore {
     };
   }
   private readonly openConvs = new Map<string, number>();
+  private unwatchVisibility: (() => void) | null = null;
+  /**
+   * A tab that was hidden when a text landed was not marked read (`isReading`): the tail read leaves `unread` alone. One listener,
+   * registered by `attach` and removed by `detach` (not one per view), reads the newest window of every open conversation that still
+   * shows unread the moment the page becomes visible, so the node counts it read, then refreshes that network's list. No timer.
+   */
+  private watchVisibility(): void {
+    if (typeof document === "undefined" || typeof document.addEventListener !== "function") return;
+    const doc = document;
+    const onVisible = () => {
+      try {
+        if (doc.visibilityState !== "visible") return;
+      } catch {
+        return;
+      }
+      void this.markOpenRead();
+    };
+    doc.addEventListener("visibilitychange", onVisible);
+    this.unwatchVisibility = () => doc.removeEventListener("visibilitychange", onVisible);
+  }
+  private async markOpenRead(): Promise<void> {
+    const a = this.adapter;
+    if (!a) return;
+    for (const conv of this.openConvs.keys()) {
+      const slot = this.state.foreignPages[conv];
+      if (!slot?.page) continue;
+      const listed = this.state.conversations[slot.network]?.find((c) => c.id === conv);
+      if (Math.max(listed?.unread ?? 0, slot.page.conversation.unread) <= 0) continue;
+      await this.loadForeign(slot.network, conv, this.foreignLimits.get(conv));
+      if (this.adapter === a && this.state.conversations[slot.network] !== undefined) await this.refreshConversations(slot.network);
+    }
+  }
   /** Is somebody looking at this conversation right now (a view is mounted and the page is not hidden)? */
   private isReading(conv: string): boolean {
     if (!this.openConvs.has(conv)) return false;
@@ -868,8 +903,8 @@ export class ApiStore {
    * `conversation` change (a row cancelled, a conversation added) reloads the whole window. A `new` text on a conversation a view is
    * reading re-reads the newest window instead (see `openForeign`), then the list, so the rail and the badge show the node's own
    * `unread` (0). The lists follow only where a view holds them: a network's conversations when something loaded them, and the
-   * network list for the counts when a conversation appeared or went and no list is held to say it (the `bridge` frame is published on
-   * status changes, not on every count change, so the counts cannot be taken from it).
+   * network list is not read here: the node publishes the `bridge` snapshot when a network's counts change (no timer), and that frame
+   * carries the counts (see the `bridge` case of `applyFrame`).
    */
   private networkFrame(ev: NetworkMessageEvent): void {
     const slot = this.state.foreignPages[ev.conv];
@@ -881,7 +916,6 @@ export class ApiStore {
     }
     // A read in progress refreshes the list itself once the node has counted it read; a list read now would show the old count.
     if (held && !reading) void this.refreshConversations(ev.network);
-    if (ev.change === "conversation" && !held) void this.refreshNetworks();
   }
 
   private readonly tailLane = coalescedBy<string>(async (conv) => {

@@ -182,6 +182,57 @@ describe("F2: an open DM does not count up", () => {
   });
 });
 
+describe("F2b: a tab that was hidden marks the open conversation read when it becomes visible", () => {
+  function stubDocument() {
+    const listeners = new Set<() => void>();
+    const doc = {
+      visibilityState: "hidden",
+      addEventListener: (_t: string, fn: () => void) => void listeners.add(fn),
+      removeEventListener: (_t: string, fn: () => void) => void listeners.delete(fn),
+    };
+    vi.stubGlobal("document", doc);
+    return { doc, listeners, show: () => { doc.visibilityState = "visible"; for (const fn of [...listeners]) fn(); } };
+  }
+  afterEach(() => vi.unstubAllGlobals());
+
+  it("F2b: a text that landed while hidden counts unread; the visibilitychange re-reads the window once and the list shows 0; detach removes the listener", async () => {
+    const d = stubDocument();
+    const { a } = await loaded();
+    expect(d.listeners.size).toBe(1);
+    const release = apiStore.openForeign("fc-3");
+    await apiStore.loadForeign("meshtastic", "fc-3");
+    await apiStore.refreshConversations("meshtastic");
+    a.mock.bridgeReceive("fc-3", { native: "!0f3e9a12", name: "Mara" }, "ping while hidden");
+    await flush(60);
+    expect(dm().unread).toBeGreaterThan(0); // hidden: a tail read, not a read of the window
+    const spy = vi.spyOn(a.networks, "conversation");
+    d.show();
+    await flush(60);
+    expect(spy.mock.calls.filter((c) => c[1] === "fc-3" && c[2]?.sinceSeq === undefined)).toHaveLength(1);
+    expect(dm().unread).toBe(0);
+    spy.mockClear();
+    d.show(); // nothing unread any more: no read
+    await flush(30);
+    expect(spy).not.toHaveBeenCalled();
+    release();
+    apiStore.detach();
+    expect(d.listeners.size).toBe(0);
+  });
+
+  it("F2b: a conversation nobody holds open is left alone when the page becomes visible", async () => {
+    const d = stubDocument();
+    const { a } = await loaded();
+    await apiStore.loadForeign("meshtastic", "fc-3");
+    await apiStore.refreshConversations("meshtastic");
+    a.mock.bridgeReceive("fc-3", { native: "!0f3e9a12", name: "Mara" }, "ping, no view");
+    await flush(60);
+    const spy = vi.spyOn(a.networks, "conversation");
+    d.show();
+    await flush(30);
+    expect(spy).not.toHaveBeenCalled();
+  });
+});
+
 describe("F3: foreign strings are cleaned and direction-isolated", () => {
   const BIDI = "‮⁦";
   const consent: ConsentRequired = { action: "edge_enable", subject: "fc-1>fc-4", warning_text: `Copies ${BIDI}gnp.exe into Friends.`, hash: "e".repeat(64), addons: [] };
@@ -282,7 +333,7 @@ describe("F6: retry is offered where the node accepts it", () => {
 });
 
 describe("F7: frames refresh what a view holds", () => {
-  it("F7: a conversation frame reads the network's list only where one is held, and /networks only where none is", async () => {
+  it("F7: a conversation frame reads the network's list only where one is held, and never /networks (the bridge frame carries the counts)", async () => {
     const { a } = await loaded();
     expect(apiStore.getState().conversations.meshtastic).toBeUndefined();
     const lists = vi.spyOn(a.networks, "conversations");
@@ -291,7 +342,7 @@ describe("F7: frames refresh what a view holds", () => {
     apiStore.applyFrame({ event: "network_message", data: { network: "meshtastic", conv: "fc-9", change: "conversation", seq: 0 } });
     await flush(30);
     expect(lists).not.toHaveBeenCalled(); // nobody holds a list
-    expect(nets).toHaveBeenCalledTimes(1); // so the counts come from /networks
+    expect(nets).not.toHaveBeenCalled(); // the counts come from the node's bridge snapshot, not a read per frame
 
     await apiStore.refreshConversations("meshtastic");
     lists.mockClear();
@@ -300,6 +351,9 @@ describe("F7: frames refresh what a view holds", () => {
     await flush(30);
     expect(lists).toHaveBeenCalledTimes(1);
     expect(nets).not.toHaveBeenCalled(); // the list says what the rail needs
+    const before = apiStore.getState().networks!;
+    apiStore.applyFrame({ event: "bridge", data: { networks: before.map((n) => (n.id === "meshtastic" ? { ...n, counts: { ...n.counts, conversations: n.counts.conversations + 1 } } : n)) } });
+    expect(apiStore.getState().networks!.find((n) => n.id === "meshtastic")!.counts.conversations).toBe(before.find((n) => n.id === "meshtastic")!.counts.conversations + 1);
 
     lists.mockClear();
     apiStore.applyFrame({ event: "network_message", data: { network: "lxmf", conv: "fc-4", change: "state", id: "fm-16", seq: 1 } });
