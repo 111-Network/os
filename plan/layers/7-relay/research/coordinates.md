@@ -42,3 +42,15 @@ at `~/.claude/projects/…/subagents/workflows/wf_60f165f1-80f/journal.jsonl` on
 
 `options.md` is written (above); **the owner decided on 2026-11-01 (D30: every pick and default)**. Next: spec `os/7-relay/README.md` v0.1
 (run 2, `runs/workflows/spec.js`: an opus drafter, then three fable judges) → lead triage → fix and one fable re-check → lock → `TASKS.md` → build.
+
+## Run 2 — spec draft and fable panel (2026-11-01)
+
+- Script: `runs/workflows/spec.js` (Draft: one opus author, xhigh, writes `os/7-relay/README.md` v0.1 from D30, the brief, the reports
+  and the as-built code, modelled on `6-transport/README.md`; Panel: three fable judges, read-only, one report each in `review/`:
+  `custody.md` (C), `carriers.md` (S), `integration.md` (I)). `args.panelOnly` reruns the panel on the file as it stands.
+- Run id: `wf_27c6c677-781` (launched 2026-11-01 ~23:40 UTC from the tree `2c144e9`). Resume:
+  `Workflow({scriptPath: "<repo>/plan/layers/7-relay/runs/workflows/spec.js", resumeFromRunId: "wf_27c6c677-781"})`.
+- Next: the lead writes `review/triage.md` → run 3 `runs/workflows/spec-fix.js` (an opus editor applies the triage → v0.2; one fable
+  re-check writes `review/recheck.md`; `args.triage`, `args.from`, `args.to`, `args.recheckOnly`) → D31 (amendments) and D32 (lock)
+  → `os/7-relay/TASKS.md` → build.
+
