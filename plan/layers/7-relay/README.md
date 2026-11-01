@@ -2,8 +2,9 @@
 
 **Status** (copied from [`INDEX.md`](../../INDEX.md) row 7, which stays the source of truth): 🧭 deciding — kickoff 2026-11-01
 (cloud session, branch `claude/layer-6-implementation-006mte`): the research sweep ran (`runs/workflows/research.js`: opus seams scout,
-five sonnet lens scouts, opus completeness critic; `research/00`–`06`) and the lead wrote [`options.md`](options.md); **the owner
-decides before any Layer 7 code is written** (`EXECUTION.md`: research → options brief → decision → adversarial pass → build).
+five sonnet lens scouts, opus completeness critic, two sonnet gap-fill scouts; `research/00`–`07`) and the lead wrote
+[`options.md`](options.md), complete with the gap-fills folded in; **the owner decides before any Layer 7 code is written**
+(`EXECUTION.md`: research → options brief → decision → adversarial pass → build).
 
 **What the layer is:** `os/README.md` §7 (heartbeats, gateways, the adopted asynchronous store-and-forward transport, dynamic
 delivery paths) and "Category 5: Global Gateways" (an overlay role: 5A intermittent, 5B permanent). Layer 7 runs on every
@@ -38,7 +39,8 @@ number after D29).
 | `research/04-kb-updates.md` | Lens 4: signed releases and the KB from a hub with no internet; git bundles; manifest gossip vs hub-as-origin; trust model. |
 | `research/05-ui-consent-floor.md` | Lens 5: Nearby radar/map (offline maps), presence UI, consent and privacy, the Pi-floor weight table of every candidate program. |
 | `research/06-critic.md` | Completeness critique of 00 to 05, with the unverified-claims list (this box's network policy denies most doc sites). |
-| `research/07-gap-N.md` | Gap-fill reports (cap 2), if the critic found blocking gaps. |
+| `research/07-gap-1.md` | Gap-fill G1: the adopted-carrier sweep re-scored with the KB gates (ntfy, Yggdrasil/yggstack, WireGuard, Headscale/Tailscale) and the internet link's security costed (TLS-RPK via rustls, `snow`, a tunnel). |
+| `research/07-gap-2.md` | Gap-fill G2: the one cross-hub custody shape (single-copy push hand-over, the `fwd` column, the home-hub hint TLV), its bytes and resident cost, the twelve additive Layer 5 amendments. |
 | `options.md` | The options brief for the owner (written by the lead after the sweep). |
 | [`runs/workflows/`](runs/workflows/) | Workflow scripts, one per run (`research.js` first); run ids in `research/coordinates.md`. |
 

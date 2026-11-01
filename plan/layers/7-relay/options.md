@@ -46,9 +46,10 @@ owner's decision → spec → fable panel → build. **Nothing of Layer 7 is bui
    recipient's `ACK` → `delivered`); Nostr `OK`, SMTP accept and LXMF propagated sends all end at `sent` (02 §1, findings 1–2).
 8. **Cross-hub custody does not exist**: a hub accepts custody only for its own members and answers `REJECT_UNKNOWN_DEST` otherwise;
    hub-to-hub replication A+ is specified as "§4 summary vectors" that **a hub cannot compute** (it sees `dest_hint`, size, counters,
-   `pkt_ref` and its own `custody_seq`, never sender, stream or `msg_id`). The forward direction needs only a cursor per hub pair (the
-   built `MAILBOX_FETCH`/`COMMIT` shape; Syncthing's `{index id, max sequence}` is the same idea); multi-copy replication needs
-   `pkt_ref` set reconciliation (00 finding 13; 03 findings 7–8).
+   `pkt_ref` and its own `custody_seq`, never sender, stream or `msg_id`). The forward direction is a push of custody rows between hubs and needs
+   no cursor at all (07-gap-2 §2: a `fwd` column on the custody table; `Dir::Transit` is a `messages` row needing peer, stream,
+   epoch and `n`, which a hub never sees); multi-copy replication needs `pkt_ref` set reconciliation (00 finding 13; 03 findings
+   7–8).
 9. **A quantitative trap in built code:** `CUSTODY_WRAP` is **120 B** (`frag.rs:64`, pinned by a test), not the "about 90 B" of L5 §9. A
    custody-wrapped `CUSTODY_PUT` cannot be planned on the 160 B flood floor (`MtuTooSmall`) and leaves 24 B of text on a 233 B Meshtastic
    frame. Custody over LoRa needs an unwrapped "hint custody" form first; custody over `tcp-lan` and Reticulum links is fine (03 finding 6).
@@ -99,6 +100,16 @@ owner's decision → spec → fable panel → build. **Nothing of Layer 7 is bui
     transport node, rust-nostr, babeld and a BLE scanner have **no measured RSS** anywhere in the repo.
 22. **Offload discovery takes a private IP literal only** (`agent111` `model_base`, no DNS); the Layer 3 README's "rides the fabric" is not
     what is built (LAN HTTP + pairing) (00 finding 17).
+23. **No adopted carrier can pass the KB's `testing` gate from desk research** (`0-knowledge/README.md:93`), so the adopt-vs-build rule's
+    operative branch (`:97`) is "prototype the best candidate and write the smoke log"; three problems the sweep had mixed are distinct:
+    a *mailbox* that holds bytes (ntfy, chatmail, Nostr, LXMF, our hub), *reach* for two always-on ends with no public address (Yggdrasil,
+    WireGuard, Headscale) and *link crypto*; reach tools are not store-and-forward. ntfy is the lightest mailbox (the existing
+    ureq + rustls client; 4,096 B bodies; a 12 h in-memory default cache; the topic name is the only default access control); yggstack is
+    rootless reach at the price of a resident Go process on both ends and no semver tag (07-gap-1 §1–§3).
+24. **TLS 1.3 raw public keys through the rustls already in the lock is feasible with no new crypto crate** (the verifier and resolver
+    hooks and `verify_tls13_signature_with_raw_key` read in the local 0.23.45 source; a tokio adapter or `tokio-rustls` 0.26.6 is the
+    only addition); the link key must be random, attested and never the identity key (`2-identity/README.md:372`), so it is a fresh
+    Ed25519 key per node pinned from the hub card, and attesting it is an L2 registry change (07-gap-1 §3 items 9–12, §3b).
 
 ## 1. What Layer 7 is, in one paragraph
 
@@ -141,38 +152,96 @@ periodic timer the owner has not approved, and nothing that leaves the node unse
 
 ### F3. The global store-and-forward carrier(s) for v1
 
-- **A + B. A 111 rendezvous hub (a hub with a public address; peer hubs and 5A/5B gateways dial out; the same envelope, receipts and custody;
-  `tcp-lan` wrapped in Noise IK or TLS-RPK per L2 §6.6) and, for people with no public address, a chatmail/Madmail mailbox through the
-  Layer 6 Delta Chat component (sealed batches ride as attachments; verified limits, fact 20).** No new third-party software for A; B is
-  already shipped and measured (~64 MB RSS while on, zero off). A alone earns `relayed`/`delivered`; B ends at `sent` and the relay sees
-  addresses, sizes and timing (consent copy says so). *(pick: 02 §4.2; 00 §4 "gateway as hub")*
+- **A + P. A 111 hub reachable over the internet (a hub with a public address, or a home hub exposed through a reach layer; peer hubs
+  and 5A/5B gateways dial out; the same envelope, receipts and custody; `tcp-lan` wrapped in TLS 1.3 raw public keys, below) as the
+  evidence-grade path, and ntfy as the first adopted mailbox, prototyped behind the hub's carrier hand-off (F4 A) for islands with no
+  public address on either side.** A is built code plus glue (`tcp-lan` and the hub mailbox exist; what is new is the forward row of
+  F4 and the reach); ntfy is reached by the ureq + rustls client `111d` already has: no new process, crate or listener, zero weight
+  while off, works through NAT. The gap-fill scout applied the KB's own gate (`0-knowledge/README.md:93-97`): **no carrier can pass
+  `testing` from desk research**, so the rule's operative branch is "prototype the best candidate and write the smoke log", never
+  "build"; by release evidence ntfy (v2.36.0 on 2026-10-31, monthly tags; Apache-2.0 / GPL-2.0 dual, both files read) is the healthiest
+  and lightest adopted mailbox, with bus factor and issue response unread for every candidate (api.github.com is closed from this box).
+  Its shape and limits (07-gap-1 §3): base64 sealed batches in a 4,096 B body (a 16-fragment message at the 160 B floor, ≈ 1.07 KB, fits
+  one post; TCP-sized frames need chunking or the attachment path); `GET /<topic>/json?poll=1&since=<id>` to drain; a 12 h **in-memory**
+  default cache lost on restart (`cache-file` and `cache-duration` for durability on a self-hosted server); public-instance limits
+  (burst 60 then one per 5 s, 30 connections per visitor; ntfy.sh 250 messages a day anonymous), so one batch per message flush; **the
+  topic name is the only default access control** (anyone who knows it reads and writes it), so the topic derives from a pairing
+  secret, never from the NodeId, or a self-hosted `auth-file` ACL; the operator sees IP, topic, size, timing and the cleartext header
+  (`dest_hint`, counters). Ceiling `sent` (an HTTP accept is no `CUSTODY_ACK`); `delivered` is the recipient's own sealed `ACK` and
+  rides any carrier with a return path (a reverse topic), so it works on ntfy too; carrier loss costs a resend, never a message (the
+  sender keeps its copy until `delivered`, L5 §9). *(pick: 07-gap-1 §4.1 P + Q; 02 §4.2; 00 §4 "gateway as hub")*
+- B. The chatmail/Madmail mailbox through the Layer 6 Delta Chat component (sealed batches as attachments; verified limits, fact 20):
+  already shipped and measured (~64 MB RSS while on, zero off), ceiling `sent`, the metadata is mail addresses and the relay sees sizes
+  and timing (the consent copy says so). **Stays available as the carrier that works today**; heavier than ntfy (an rpc-server per
+  account). *(07-gap-1 §4.1 R)*
+- **The reach layer for A, in the owner's order:** a public address first (nothing new); **yggstack** second, opt-in (Yggdrasil in user
+  space: SOCKS5 and `-remote-tcp` port forwarding, no TUN, no root; a hub behind CGNAT exposes 11183 on its Yggdrasil IPv6, which
+  `dial_peer`'s configured `SocketAddr` takes; LGPL-3.0 with a linking exception, verified) — but a resident Go process on **both** ends,
+  RSS unmeasured, **no semver tag** in the Go proxy (the release gate fails on what could be read), one Termux anecdote, public peers are
+  stranger-run nodes (an egress consent item) and upstream calls Yggdrasil "early-stage"; an **adopted tunnel** third, documented and
+  never required (WireGuard needs an interface, root on Termux; Headscale needs a public control host; a stock Tailscale client logs to
+  its vendor, a KB telemetry auto-fail, unless `TS_NO_LOGS_NO_SUPPORT`). Reach tools are pipes, not mailboxes: two intermittent 5A
+  islands never meet through them, which is why the mailbox (ntfy, B) exists at all (07-gap-1 §1, §3 items 7–8).
 - C. Nostr relays (L2's reserved `0x01`): the largest free infrastructure, but public acceptance of opaque regular-kind events, PoW and paid
-  policy are unverified from this box, the overhead is 1.5–3.8×, and the client needs secp256k1 and websockets — a **separate CI-built
-  carrier binary**, never in `111d` (a build-time weight the Pi-floor rule reserves to the owner). v1.1 after a bench reads real relays.
+  policy are unverified from this box, the overhead is 1.5–3.8×, `nostr-rs-relay`'s last crates.io release is 2023-08 (the release gate
+  fails there), and the client needs secp256k1 and websockets — a **separate CI-built carrier binary**, never in `111d` (a build-time
+  weight the Pi-floor rule reserves to the owner). v1.1 after a bench reads real relays.
 - D. LXMF propagation (one more helper verb, fact 10): zero new component where network 2 is on; 30-day expiry, 256 KB, sender stamps,
-  `sent` only. v1.1, and it opens the rule question of F4 C.
+  `sent` only; bus factor 1 upstream (`reticulum.md:49`). v1.1, and it opens the rule question of F4 C.
 - iroh (hole punching, self-run relay with allowlist; +13 MB; default discovery is n0's infrastructure) solves NAT, not storage: v1.1 as an
   optional component, on the owner's say. Tor/arti hosting is documented as unfinished; dtn7 loses on IP too (no custody, old deps,
   no aarch64 asset); Meshtastic MQTT is a bridge category, not a 111 carrier.
-- If the owner prefers the L2-anticipated path, swap B for C; the cost is the unverified relay policy.
-- **The internet link's security (conflict 5):** TLS 1.3 with raw public keys (RFC 7250) through `rustls` 0.23.45, which is already in
-  the lock and supports RPK on both sides (the critic read `only_raw_public_keys` / `requires_raw_public_keys` in the local registry
-  source; `tokio-rustls` is not in the lock), the Cat 2/4 TCP path L2 §6.6 allows *(pick)* — over Noise IK via `snow` (a new, unaudited
-  dependency lens 2 named). An **adopted tunnel** (WireGuard, Headscale) under `tcp-lan` needs neither and no 111 code at all: an
-  owner-run alternative, documented, never required.
-- **Candidates the sweep missed** (the critic's G1; assessed by the gap-fill scout in `research/07-gap-1.md` and folded in below once it
-  lands): **ntfy** (an HTTP mailbox `111d`'s existing HTTPS client can reach with no new process; Apache-2.0 / GPL-2.0 dual; defaults a
-  12 h message cache, 15 MB attachments kept 3 h), **Yggdrasil / yggstack** (hub reach with no public address, rootless, LGPL-3.0 with
-  a linking exception; untested on Termux), and the adopted tunnel above. The KB's own rule (`0-knowledge/README.md:97`: build only when
-  nothing passes the testing gates) applies to F3 A, which is our code; the gap report says whether an adopted mailbox passes.
+- If the owner prefers the L2-anticipated path, swap ntfy for C; the cost is the unverified relay policy and the second binary.
+- **The internet link's security (conflict 5), costed by the gap-fill (07-gap-1 §3b):** **(a) TLS 1.3 with raw public keys (RFC 7250)
+  through `rustls` 0.23.45** *(pick)* — already in the lock with `ring`, RPK on both sides confirmed in the local registry source
+  (`only_raw_public_keys`, `requires_raw_public_keys`, `verify_tls13_signature_with_raw_key`, Ed25519 via `any_eddsa_type`), so no new
+  crypto crate and no new `LICENSING.md` row; the cost is verifier/resolver glue pinning one SPKI (~100 lines) plus a tokio adapter
+  (~150 lines over `read_tls`/`write_tls`, or `tokio-rustls` 0.26.6, MIT OR Apache-2.0: one lockfile entry and one row, the owner's
+  call). **(c) an adopted tunnel** under `tcp-lan` (above): zero 111 code, documented as the owner-run alternative. **(b) Noise IK via
+  `snow`** 0.10.0 (Apache-2.0 OR MIT; unaudited, L2 §11; buffer-based, no async glue) only if a short spike shows the rustls glue costs
+  more than the audit gap. (d) nothing, as locked: `dest_hint`, counters and sizes stay visible on path. What every option hides from
+  the path: frame types, `dest_hint`, counters, static keys; what the far hub still sees: `dest`, size, `prio_flags`, `dest_hint`,
+  counters (`5-messaging/README.md:409`). **The link key follows L2 (`2-identity/README.md:372`): random, attested, never seed-derived,
+  never the identity key** — a fresh Ed25519 key per node pinned from the hub card (TOFU from the card in v1); attesting it needs a new
+  `transport_id` in the L2 registry (the upgrade, an owner question).
 
 ### F4. Cross-hub delivery inside the fabric (what "delivery paths form dynamically" is in v1)
 
-- **A. The minimal own forwarder: a star of paired hubs, one hub-to-hub hop, transit only at hubs, cursor-based, on IP links.** An
-  owner-made mutual hub pairing (the §7.3 code flow); `on_custody_put` accepts custody for a `dest` whose 8 B home-hub hint names a paired
-  hub and stores `Dir::Transit`; a forwarder pumps Transit rows to the paired hub as `CUSTODY_PUT` and evicts on its `ACCEPTED`/`DUPLICATE`;
-  a cursor per hub pair on reconnect; a hub never forwards what came from a paired hub (no cycles by construction). Exactly one amendment
-  to the locked crate (A2) and no new process, timer or routing protocol; the stock repeater floods the RF part. *(pick: 03 §4.2)*
+- **A. Single-copy push hand-over of custody between paired hubs, and from a hub to its own carrier: a star of owner-paired hubs, transit
+  only at hubs, no cursor, on IP links.** The gap-fill scout reconciled the three conflicting shapes into this one (07-gap-2 §2, fork F1).
+  Pairing is two §7.3 enrolments in both directions; each hub records the other in a new `FabricSettings.paired_hubs {node_id, leaf,
+  gateway}` and dials it through the daemon's hand-configured `peers`; a paired hub is never a home hub (`home_hub` stays single). A
+  forward row is an ordinary `custody` row whose `dest` is a non-member, plus a `fwd` column (1 from a member, 2 from a `leaf` hub, 3 from
+  the carrier) — **not `Dir::Transit`**, which is a `messages` row needing peer, stream, epoch and `n`, none of which a hub can see in a
+  sealed item. The widened gate: an enrolled member's `CUSTODY_PUT` for a non-member `dest` is held for forwarding and answered
+  `ACCEPTED` when a target exists (a paired hub, else this hub's carrier), else `REJECT_UNKNOWN_DEST` as today; **the receiving hub needs
+  no change** (a paired hub is an enrolled member that puts for the receiver's members, which today's gate accepts). A hub never forwards
+  what came from a paired hub, except a `leaf` hub's rows onward to this hub's carrier (the 5A/5B gateway); `pkt_ref` stays UNIQUE and is
+  kept after hand-over, so a bounced item is `DUPLICATE` and done; loop freedom is structural (the `fwd` table), no TTL. Rows are
+  protected while `committed = 0` (other people's undelivered items), `committed = 1` on the target's `ACCEPTED`/`DUPLICATE` and then
+  evicted by the existing prune step 1; a quota-only `Class::Transit` keeps strangers' items from starving member custody; over quota
+  with only protected rows, new forward puts get `REJECT_FULL`. The forwarder is event-driven (row inserted, link up, contact event; no
+  timer). **Home-hub discovery:** the sender already holds the dest's 8 B home-hub hint (`contacts.home_hub`, from the signed appdata)
+  and adds it as ext TLV `0x02` inside the hub-sealed `CUSTODY_PUT` (11 B, optional; old hubs skip an unknown TLV, `5-messaging/README.md:110`);
+  without it the custodian probes paired hubs in a fixed order, stops at the first `ACCEPTED`/`DUPLICATE` (a yes is proof: the answerer's
+  gate checked enrolment) and caches dest → hub in memory (≤ 256 entries, ~16 KB). Signed member lists and enrol mirrors are rejected
+  (they leak the roster, go stale with no clock, and do nothing for a carrier that addresses by a tag of `dest`). **Evidence:** the first
+  hub's `ACCEPTED` earns `relayed` with a new reason `forwarding` (honest: a mailbox node durably holds it in a protected row; the L5
+  §6.2 "for a known member" clause is widened); later hops earn no state; `delivered` is only the recipient's `ACK`, an ordinary item on
+  the reverse path. **Cost** (07-gap-2 §4): ≈ 1.2 KB on `tcp-lan` per 100 B text forwarded (6.3× the item) plus ≈ 0.95 KB for the return
+  `ACK`; per hub one column, a ~16 KB cache, one held connection per paired hub (the 25 s keepalive: +2.4 % wakeups per pair, ≈ 0.4 MB
+  a day); **nothing on a non-hub node** (every new path sits behind `holds_custody()`; `paired_hubs` is empty; nothing dialled or
+  stored). The carrier is reached through a **hand-off API** (`forward_take(target, n)`, `forward_done(seq, Taken | Rejected | Retry)`,
+  `carrier_inbound(dest, item)`, a "forward pending / target up" event) over a loopback JSON-lines pipe, the LXMF helper's pattern,
+  spawned on event (5A) or one held child (5B), zero while off: **the carrier is not a `Link` in v1**, so `remove_link`, a new
+  `LinkKind`, the openapi enum and `Route::Via` stay untouched. Exactly the twelve additive or default-off amendments of F5; with no
+  pairing and no carrier the hub is byte-identical to today. *(pick: 07-gap-2 §2, §5 F1; 03 §4.2 for the star)*
+- A′. The rendezvous form (lens 2; 07-gap-2 fork F2): peer hubs and gateways are members of a rendezvous hub that holds `dest ‖ item`
+  under the member hub as `dest` and is drained by `FETCH`/`COMMIT` with cursors. It lets a **non-hub phone carry others' items**
+  (member-gateways) and resume by cursor, at the cost of a new `MAILBOX_XITEM` kind, a `custody.dest` that is not the real dest and
+  `on_item` changes. Only if the owner says a phone that is merely a member must carry traffic; A does not preclude it.
+- A″. A+ pull by per-origin cursors over `MAILBOX_FETCH`/`COMMIT` (the seams scout; 07-gap-2 fork F3): needs member-list exchange, a
+  cursor table and replica flags, and the §4 vectors are unbuildable by a hub — the largest and least private shape. Rejected.
 - B. Reticulum as the router via the LXMF helper (`rns-bridge`): true multi-hop across IP-less islands with an adopted router, at the cost
   of A1, A3, A5, A6, A7, doubled LoRa airtime for small frames, a resident Python helper plus an rnsd transport role on every cross-hub
   path, a forked relay fleet, and `SENT`-only evidence. v1.1 optional long-haul carrier, after F4 C.
@@ -180,24 +249,32 @@ periodic timer the owner has not approved, and nothing that leaves the node unse
   a new use), must that be a separate importing program of ours, or neither (carrier only through the `rncp` spool)? The brief takes the
   conservative reading (lens 3's, the critic's conflict 4): a new verb that carries 111 frames is a rule question for the owner, never
   the default, even inside the existing helper.
-- **The cross-hub shape itself was in conflict** (the critic's G2: the seams scout's pull replication by per-origin cursors over
-  `MAILBOX_FETCH`/`COMMIT` with a gateway hub that accepts any unknown `dest`; lens 2's rendezvous hub with a new member class for
-  gateways; lens 3's push of `Dir::Transit` rows by `CUSTODY_PUT` only for dests whose home-hub hint names a paired hub) and nobody said
-  how a hub learns which hub a non-member `dest` belongs to (`CUSTODY_PUT` carries the 32 B dest, not the hub hint). The gap-fill scout
-  (`research/07-gap-2.md`) reconciles them; A above is lens 3's shape and is amended from that report when it lands.
 - D. Multi-copy epidemic replication between hubs (A+ as specified, with `pkt_ref` set reconciliation in Negentropy's shape and the relay
   flood ring): v1.1+, only if three or more hubs need redundancy.
 - E. IP-level mesh routing (babeld, Yggdrasil): not Layer 7 at all — `tcp-lan` reaches any IP address; a Wi-Fi mesh on Linux hubs is at
-  most a Layer 6 spine recipe (root, no Termux).
-- v1.1 (recorded now): the radio form of A — hint custody without the 120 B wrap (fact 9), with A1, A3, A5, A6, A7 (the Layer 6
-  "second release" set, D25 F6).
+  most a Layer 6 spine recipe (root, no Termux). (yggstack as a hub's *reach* is F3, not routing.)
+- v1.1 (recorded now): the radio form of A — hint custody without the 120 B wrap (fact 9; 131 B with the hint; it exceeds the 160 B
+  floor), with A1, A3, A5, A6, A7 (the Layer 6 "second release" set, D25 F6); chains beyond the `fwd` table (a plaintext hop count, an
+  envelope change); a signed forward receipt (the dest hub's `custody-sig`); member-gateways (A′); sweep-before-ack (restore today's
+  honest `hub_not_yours` when every reachable paired hub refuses); an own-send carrier route for a non-hub node (`Route::Carrier`,
+  per-route planning, the `carrier` `LinkKind`).
 
 ### F5. Amending locked Layer 5 (permission, not design)
 
-- **A. Layer 7 may amend `mesh111` additively, each amendment named and owner-visible: A2 now (paired-hub forward; `Dir::Transit` finally
-  written; the custody gate admits a gateway-role hub and paired hubs); the A+ wording of L5 §9/§21 corrected (cursor per hub pair, not
-  §4 vectors); the `CUSTODY_WRAP` figure corrected to 120 B; `remove_link` and a non-blocking `Link::send` contract when the first
-  intermittent carrier lands; the rest (A1, A3, A4, A5, the route variant) with the radio form in v1.1.** *(pick)*
+- **A. Layer 7 may amend `mesh111` additively, each amendment named and owner-visible — exactly the twelve of `research/07-gap-2.md` §3,
+  all additive or default-off, byte-identical with no pairing and no carrier: (1) the custody gate widened to hold a non-member `dest`
+  for forwarding when a target exists (the L5 §9 spec text); (2) the scope sentence ("needs a paired hub or a gateway carrier; otherwise
+  the message stays queued, `hub_not_yours`"); (3) the A+ sentences of L5 §9/§21 and line 30 replaced by single-copy push (the §4 vectors
+  are not computable by a hub); (4) "≈ 90 B" → 120 B (`CUSTODY_WRAP`, `frag.rs:64`; 131 B with the hint); (5) V4 migration `custody.fwd
+  INTEGER NOT NULL DEFAULT 0 CHECK (fwd IN (0,1,2,3))` (§10.3); (6) a quota-only `Class::Transit` (§10.4); (7) ext TLV `0x02 dest_hub(8)`,
+  `CUSTODY_PUT` only, in the registry; (8) the `relayed` evidence clause of §6.2 widened "or for forwarding", reason `forwarding`;
+  (9) the reason enum in `outbox.rs` and `openapi.yaml` (then `pnpm gen:types`); (10) `FabricSettings.paired_hubs`, a pairing outcome of
+  `on_enroll_ok` that does not set `home_hub`, the member count excluding paired hubs; (11) the forwarder arms and the three hand-off
+  entry points; (12) the §7.3 sentence "pairing is two enrolments; a paired hub is not a home hub; one home hub in v1 stands". Envelope
+  bytes, L2 identity and the 16 B `pkt_ref` are untouched; the wire-visible additions are one optional TLV and one reason string; an old
+  hub skips the TLV and rejects as today. `Dir::Transit` and the "delivered transit copies" prune query stay unused; `remove_link` and
+  a non-blocking `Link::send` move to v1.1 with the `carrier` `LinkKind` (F4). The rest (A1, A3, A4, A5, the route variant) with the
+  radio form in v1.1.** *(pick)*
 - B. Layer 7 stays outside `mesh111` entirely: then cross-hub delivery is a sidecar re-implementing custody beside the store — a second
   copy of the same logic, rejected on "never reinvent".
 - The same question for Layer 1 (F6 B) and Layer 2 (F8: the epoch unit).
@@ -275,12 +352,14 @@ periodic timer the owner has not approved, and nothing that leaves the node unse
 ### F10. Sequencing and the first Layer 7 release
 
 - **A. v1 = F1 A (presence, the `111` Nearby kind, the per-transport switch) · F2 A (event-driven gateway test, the probe gone) · F7 A (the
-  registry; gateway advertisement to members) · F3 A + B (the rendezvous hub over a Noise-wrapped `tcp-lan`, the chatmail mailbox) ·
-  F4 A + F5 A (hub pairing, A2, cursor replication) · F6 A (hub as update origin, `--from`, the Layer 1 trust amendments first) · F8 A
-  (the beacon format and the epoch unit, nothing evaluated) · F9 R1 · consent and metered-link settings (05 §3.5: a user setting in
-  v1, the licensed-radio fact consulted on every new path). v1.1 = the radio form of F4 (hint custody, A1/A3/A5/A6/A7), Nostr and LXMF
-  carriers, iroh, Tier 2 transfer, the map bucket, the first epoch consumer, multi-copy replication, MeshCore adverts as a Nearby feed
-  (bench).** *(pick)*
+  registry; gateway advertisement to members) · F3 A + P (the hub over `tcp-lan` in TLS-RPK, the ntfy carrier prototype as the first
+  v1 task so the KB gets its smoke log; B chatmail stays available) · F4 A + F5 A (hub pairing, the `fwd` push hand-over, the hint TLV,
+  the twelve amendments) · F6 A (hub as update origin, `--from`, the Layer 1 trust amendments first) · F8 A (the beacon format and the
+  epoch unit, nothing evaluated) · F9 R1 · consent and metered-link settings (05 §3.5: a user setting in v1, the licensed-radio fact
+  consulted on every new path). v1.1 = the radio form of F4 (hint custody, A1/A3/A5/A6/A7), chains, a signed forward receipt,
+  member-gateways, sweep-before-ack, an own-send carrier route and the `carrier` `LinkKind`, Nostr and LXMF carriers, yggstack as an
+  opt-in reach component, iroh, Tier 2 transfer, the map bucket, the first epoch consumer, multi-copy replication, MeshCore adverts
+  as a Nearby feed (bench).** *(pick)*
 - B. Carriers first (F3) with presence later — leaves "who is near" a stub for another cycle. C. Presence only, no gateway — leaves README
   §7's second half unbuilt. D. Everything at once — the radio form needs hardware the owner does not have yet (D23 #4).
 - Every radio path stays stub-verified in netns; the bench list (hardware or live net) is in §5.
@@ -314,15 +393,19 @@ periodic timer the owner has not approved, and nothing that leaves the node unse
   (publisher, hash, size, short text) and the object comes over a `Bulk` link (Tier 2, v1.1); broadcasts rank below user messages and wait
   for airtime; shaping into LoRa is physics the adapter advertises (02 §4.5).
 - **A carrier forwards sealed packets as opaque bytes, never re-fragments**; batching several packets of one message in one carrier payload
-  is glue; a `carrier` `LinkKind` (stream, reliable, bulk, no airtime) is an additive contract change; `PeerAddr::Opaque` names a mailbox
-  peer; `Link::send` returns at once (02 findings 3, 16).
+  is glue (02 findings 3, 16). **In v1 the carrier is not a `Link`:** the hub hands forward rows to its carrier child through the hand-off
+  API of F4 A (`forward_take`, `forward_done`, `carrier_inbound`, a "forward pending / target up" event over a loopback JSON-lines pipe,
+  the LXMF helper's pattern), so `remove_link`, a new `LinkKind`, the openapi enum and `Route::Via` stay untouched (07-gap-2 answer 10);
+  the `carrier` `LinkKind` (stream, reliable, bulk, no airtime; `PeerAddr::Opaque`; `Link::send` returning at once) is the v1.1 form if a
+  non-hub node must carry its own sends.
 - **The L2 §13 hand-offs**: announces are identity plus locator, never routing (the 8 B home-hub id is enough to pick a paired hub; a role
   TLV may follow); Cat-1 relays are relay-blind (the stock repeater cannot verify, 111 writes no relay firmware, verify-before-relay hands an
   attacker a CPU lever; defences sit at the endpoints); no announce rate limit of ours (emission is on demand; receivers are bounded by
   capacity; Reticulum's 2 % cap stays rnsd's default) (03 §4.5).
-- **Loop and duplicate suppression, layer by layer**: the repeater's seen-table and hop cap; the hub's `pkt_ref` dedup (`DUPLICATE` ends a
-  forward); one inter-hub hop, never forward what came from a paired hub; the receiver's prefix and range state. No hop counter on
-  `tcp-lan`; the shim `hop_limit` stays unbuilt until a 111 transit node floods on a broadcast bearer (03 §4.4).
+- **Loop and duplicate suppression, layer by layer**: the repeater's seen-table and hop cap; the hub's `pkt_ref` dedup, kept after
+  hand-over (`DUPLICATE` ends a forward); the `fwd` table (never forward what came from a paired hub, except a `leaf` hub's rows onward
+  to this hub's carrier); the receiver's prefix and range state. No hop counter on `tcp-lan`; the shim `hop_limit` stays unbuilt until a
+  111 transit node floods on a broadcast bearer (03 §4.4; 07-gap-2 answer 6).
 - **Runtime "join in sequence, fall back" is not a state machine**: every enabled network is a zero-weight-when-off component, so parallel
   costs nothing and stopping one loses a path; `[order]` is path preference (which network to try first per peer, the rail, agent
   proposals); sequence only exclusive resources (one serial port, a band where sealed frames are forbidden, a phone on battery), as a
@@ -354,7 +437,8 @@ periodic timer the owner has not approved, and nothing that leaves the node unse
 - **Deferred from Layer 6 and not researched here (G9):** v1.1 hub-member routing of foreign DMs, and gateway carriage of foreign-network
   text (a gateway carries sealed 111 envelopes only in v1).
 - **Bench items** (hardware or live net, not blockers): rnsd RSS as a transport node on a Pi; real public Nostr relay acceptance and limits;
-  public chatmail relay behaviour for 30 MiB machine mails; rustls RFC 7250 support; arm64 Madmail; Termux netlink bind and background
+  public chatmail relay behaviour for 30 MiB machine mails; a rustls RPK handshake against OpenSSL 3.2+; ntfy `since=<id>` after the id is evicted and ntfy.sh's
+  real retention; yggstack RSS and Termux survival; arm64 Madmail; Termux netlink bind and background
   survival; MeshCore adverts as a Nearby feed; the licensed-band legal read per region.
 
 ## 4. Plan corrections this brief records
@@ -400,6 +484,24 @@ periodic timer the owner has not approved, and nothing that leaves the node unse
 13. Map: an exempt bucket plus a Range tile route now, or the Meshtastic panel's map until Layer 8? Radar angle rule acceptable? (F9)
 14. Should the required configuration's `gateway` service row survive as the gateway badge's home, or does a Layer 7 "gateway" page
     replace it? (F2, F9)
+15. May the carrier prototype use the public ntfy.sh for tests (a third party sees IP, topic and timing), or an owner-run server from
+    day one? Is a 12 h default retention acceptable when documented, or must 111 ship a recommended self-host config (`cache-file`,
+    `cache-duration`)? (F3)
+16. Is `sent` accepted as the ceiling of the first adopted carrier, with `relayed` crossing islands only through paired hubs (F4 A)? And
+    which gate failures are tolerable for a prototype — ntfy's bus factor and issue response are unread (api.github.com is closed from
+    this box), yggstack has no semver tag? (F3)
+17. `tokio-rustls` as a new lockfile entry (build-time weight, one `LICENSING.md` row) or the ~150-line adapter? May a gateway use
+    public Yggdrasil peers (stranger-run nodes, egress to them), or only peers the user names? Is the attested link key's new
+    `transport_id` (an L2 registry change) in Layer 7's scope, or is pin-from-card enough for v1? (F3)
+18. May Layer 7 amend locked Layer 5 with exactly the twelve items of `07-gap-2.md` §3 (F5 A), nothing else? Is `relayed` (reason
+    `forwarding`) at the first hub acceptable, or must the state stay `sent` until the dest's hub accepts (a new `CUSTODY_ACK` status and a
+    second ACK that is hearsay unless signed)? (F4, F5)
+19. The home-hub hint TLV in v1, or probe-only (which drops one amendment and leaks each unknown dest to every paired hub on first send)?
+    A number for the Transit quota default? (F4)
+20. Must a non-hub phone carry others' items in v1 (then the rendezvous form A′), or is 5A/5B "a hub with internet" (A)? An own-send
+    carrier route for a non-hub node (`Route::Carrier`): v1 or v1.1? Sweep-before-ack: v1 or v1.1? (F4)
+21. Hub pairing over the public internet before TLS-RPK lands: require a tunnel, or warn (the path sees `dest_hint`, counters and
+    sizes)? (F3, F4)
 
 ## 6. Critic and gap-fill
 
@@ -414,7 +516,17 @@ hub's counter (F8, restated). Minors G5–G9 are folded into §3. Seven cross-re
 only when the dashboard is LAN-bound; ntfy's dual licence and defaults; yggstack's licence; Termux at SDK 28 (Android 17's local-network
 permission does not bind it); the UI lazy headroom 36.1 KB.
 
-**Gap-fill:** _(two sonnet scouts on G1 and G2; `research/07-gap-1.md`, `research/07-gap-2.md` — folded into F3 and F4 when they land.)_
+**Gap-fill (two sonnet scouts, G1 and G2):** `research/07-gap-1.md` re-scored lens 2's carriers with the KB gates and added ntfy,
+Yggdrasil/yggstack, WireGuard and Headscale/Tailscale, costed TLS-RPK against `snow` and a tunnel from the local rustls source, and
+found that no candidate can pass `testing` from desk research (the rule says prototype the best, not build) — folded into F3, facts 23
+and 24, §3's bench list and §5 items 15–17 and 21 (bus factor, issue response and commit counts are unread for every candidate;
+wireguard-go's licence, yggstack's tags and every RSS figure are unverified). `research/07-gap-2.md` reconciled the three cross-hub
+shapes into single-copy push hand-over with a `fwd` column (no `Dir::Transit`, no A+ pull, no cursor), answered how a hub learns a
+non-member dest's hub (the sender's 8 B hint as ext TLV `0x02`, else a probe of paired hubs), sized the bytes and the resident cost,
+and listed the twelve additive amendments — folded into F4 A, F5 A, fact 8 and §5 items 18–21. One tension between the two is resolved
+here: 07-gap-1 wants the carrier "behind a `carrier` link-kind seam", 07-gap-2 shows the hand-off API needs no `Link` change at all;
+v1 takes the hand-off (the carrier is never a `Link`), and the `carrier` `LinkKind` is the v1.1 form for an own-send route on a
+non-hub node.
 
 **Unverified claims (the lead verifies on the owner's machine; the critic's §6 is the list):** denied hosts or search snippets only
 (Roughtime RFC 10049, CT gossip RFC 9162, RFC 6762/6763 TXT limits, RFC 6693 constants, Briar BSP, Arti onion-service status, MeshCore

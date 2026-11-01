@@ -30,7 +30,13 @@ Sessions die; this file is what the next session needs.
 | 4 kb-updates | `04-kb-updates.md` | signed releases and the KB from a hub with no internet; manifest gossip vs hub-as-origin; trust model |
 | 5 ui-floor | `05-ui-consent-floor.md` | Nearby radar/map offline, presence UI, consent; the Pi-floor weight table of every candidate |
 | critic | `06-critic.md` | completeness verdict, gaps, conflicts, owner forks, the unverified-claims list |
-| gap-fill | `07-gap-N.md` | one per blocking gap (cap 2) |
+| gap-fill | `07-gap-1.md`, `07-gap-2.md` | one per blocking gap (cap 2): G1 the adopted-carrier sweep and the internet link's security; G2 the one cross-hub custody shape |
+
+**Run 1 complete** (2026-11-01, ~21:55–22:44 UTC): 9 agents (the opus seams scout, five sonnet lens scouts, the opus critic, two
+sonnet gap-fill scouts), about 1.88 M subagent tokens, 519 tool calls, 49 min wall clock. The critic's verdict: "close to ready", two
+blocking gaps (G1 the carrier sweep had skipped the KB gate and three candidates; G2 three cross-hub shapes in conflict), both filled
+(`07-gap-1.md`, `07-gap-2.md`) and folded by the lead into `options.md` (F3, F4, F5, F10, facts 8 and 23–24, §3, §5 items 15–21, §6).
+The brief is complete; it waits on the owner's decisions F1–F11 and the §5 questions. Nothing of the run is left running.
 
 Next after the run: lead writes `layers/7-relay/options.md` → owner decides → `DECISIONS.md` → spec `os/7-relay/README.md`
 → fable adversarial panel → `TASKS.md` → build.

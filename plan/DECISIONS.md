@@ -475,3 +475,4 @@ may pin later); a CD workflow now (needs the musl toolchains on the runner, a re
 - Move deep architecture content out of `os/README.md` into per-layer specs (blocked on layer homes existing).
 - **Layer 0 hook activation** — owner chose to leave it off (D17); `build.py --check` stays manual per task.
 - **Release source offer** — the release checklist must publish the tagged Corresponding Source beside every binary release (D22; `LICENSING.md` section 8).
+- **Layer 7 (Relay & Presence) options brief awaits the owner** (2026-11-01) — `plan/layers/7-relay/options.md`: polled forks F1–F11 with the lead's picks, 21 owner questions, 10 plan corrections against locked text (D19 b / L5 §9 "A+ follows without redesign", L5 §9 custody wrap 90 → 120 B, L3 README:48 "model, load", L1 "KB git-sync", README §6 "join in sequence", `receipt.gateway`). The decisions land as the next entry; no Layer 7 code before then.
