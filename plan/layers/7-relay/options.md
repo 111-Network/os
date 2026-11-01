@@ -129,6 +129,8 @@ periodic timer the owner has not approved, and nothing that leaves the node unse
 - **A. Make "internet" mean "the owner's chosen carrier endpoint is reachable", evaluated on a netlink address/route change and on a carrier
   attempt, never by contacting `install.111.network`; drop the 60 s HEAD; `mdns-sd`'s 5 s IP check follows the same events.** Changes a
   Layer 4/6 probe cadence (the `gateway` service row keeps its shape; `wan_ok` becomes "carrier reachable at last check, N min ago").
+  On Termux the netlink bind is unverified (fact 19), so the event trigger keeps a coarse polling fallback there (the critic's
+  conflict 3: the seams scout kept the 111 target, lens 2 moved it to the carrier, lens 5 asked for the fallback; A takes all three).
   *(pick: 00 §4, 01 §5 q2, 02 finding 14, 05 §3.1)*
 - B. Keep the 60 s probe as it is (it is already in the measured floor) — but it is a first-party phone-home 1,440 times a day and a
   several-MB-a-day cost on a phone plan; "no telemetry" is the owner's rule to read.
@@ -153,6 +155,16 @@ periodic timer the owner has not approved, and nothing that leaves the node unse
   optional component, on the owner's say. Tor/arti hosting is documented as unfinished; dtn7 loses on IP too (no custody, old deps,
   no aarch64 asset); Meshtastic MQTT is a bridge category, not a 111 carrier.
 - If the owner prefers the L2-anticipated path, swap B for C; the cost is the unverified relay policy.
+- **The internet link's security (conflict 5):** TLS 1.3 with raw public keys (RFC 7250) through `rustls` 0.23.45, which is already in
+  the lock and supports RPK on both sides (the critic read `only_raw_public_keys` / `requires_raw_public_keys` in the local registry
+  source; `tokio-rustls` is not in the lock), the Cat 2/4 TCP path L2 §6.6 allows *(pick)* — over Noise IK via `snow` (a new, unaudited
+  dependency lens 2 named). An **adopted tunnel** (WireGuard, Headscale) under `tcp-lan` needs neither and no 111 code at all: an
+  owner-run alternative, documented, never required.
+- **Candidates the sweep missed** (the critic's G1; assessed by the gap-fill scout in `research/07-gap-1.md` and folded in below once it
+  lands): **ntfy** (an HTTP mailbox `111d`'s existing HTTPS client can reach with no new process; Apache-2.0 / GPL-2.0 dual; defaults a
+  12 h message cache, 15 MB attachments kept 3 h), **Yggdrasil / yggstack** (hub reach with no public address, rootless, LGPL-3.0 with
+  a linking exception; untested on Termux), and the adopted tunnel above. The KB's own rule (`0-knowledge/README.md:97`: build only when
+  nothing passes the testing gates) applies to F3 A, which is our code; the gap report says whether an adopted mailbox passes.
 
 ### F4. Cross-hub delivery inside the fabric (what "delivery paths form dynamically" is in v1)
 
@@ -165,7 +177,14 @@ periodic timer the owner has not approved, and nothing that leaves the node unse
   of A1, A3, A5, A6, A7, doubled LoRa airtime for small frames, a resident Python helper plus an rnsd transport role on every cross-hub
   path, a forked relay fleet, and `SENT`-only evidence. v1.1 optional long-haul carrier, after F4 C.
 - C. The rule question B opens: may the LXMF helper gain a "carry a sealed 111 packet" verb (the same program that already imports RNS,
-  a new use), must that be a separate importing program of ours, or neither (carrier only through the `rncp` spool)?
+  a new use), must that be a separate importing program of ours, or neither (carrier only through the `rncp` spool)? The brief takes the
+  conservative reading (lens 3's, the critic's conflict 4): a new verb that carries 111 frames is a rule question for the owner, never
+  the default, even inside the existing helper.
+- **The cross-hub shape itself was in conflict** (the critic's G2: the seams scout's pull replication by per-origin cursors over
+  `MAILBOX_FETCH`/`COMMIT` with a gateway hub that accepts any unknown `dest`; lens 2's rendezvous hub with a new member class for
+  gateways; lens 3's push of `Dir::Transit` rows by `CUSTODY_PUT` only for dests whose home-hub hint names a paired hub) and nobody said
+  how a hub learns which hub a non-member `dest` belongs to (`CUSTODY_PUT` carries the 32 B dest, not the hub hint). The gap-fill scout
+  (`research/07-gap-2.md`) reconciles them; A above is lens 3's shape and is amended from that report when it lands.
 - D. Multi-copy epidemic replication between hubs (A+ as specified, with `pkt_ref` set reconciliation in Negentropy's shape and the relay
   flood ring): v1.1+, only if three or more hubs need redundancy.
 - E. IP-level mesh routing (babeld, Yggdrasil): not Layer 7 at all — `tcp-lan` reaches any IP address; a Wi-Fi mesh on Linux hubs is at
@@ -214,21 +233,28 @@ periodic timer the owner has not approved, and nothing that leaves the node unse
   dynamic facts (model, load, queue, "internet right now") by a sealed query after an attributed connect, never in a TXT or a signed
   blob.** Never advertised: alias, load, battery, location, loaded models, anything naming a person. *(pick: 01 §4.3)*
 - B. A broadcast registry frame on every transport — against A6 and the Pi floor; rejected.
-- **Gateway advertisement scope:** *(pick)* members and contacts only, sealed (the hub offer, INTRO, cards) — a public announce role bit
-  tells every listener who has internet and battery; the owner may still choose the public bit.
+- **Gateway advertisement scope (the critic's conflict 1):** lens 1 put a static signed "willing to gateway" bit in the announce
+  `appdata`, lens 5 said never a public bit, lens 2 said both and picked members-only. An announce reaches anyone on link-up, in a card or
+  in an INTRO, so a role bit is public. *(pick)* members and contacts only, sealed (the hub offer, INTRO, cards); the signed static bit
+  stays available as the owner's choice, with its cost named: every listener learns who has internet and battery.
 - Phones: a Termux node cannot browse or answer mDNS; it is discovered through its hub and finds its hub from the enrol bundle. The
   open case is a hub whose DHCP address changed while the phone was away: a QR rescan, a `/24` unicast sweep on `:11183` (a policy
   choice), or wait for an Android app or BLE.
 
 ### F8. The mesh-epoch source (L2 §13)
 
-- **A. A hub-signed epoch beacon (E-A) as the source, the release manifest's `epoch_floor` (E-C) as its floor.** Each hub keeps a persisted
-  counter advanced on its own policy and signs `"111/epoch/v1" ‖ issuer ‖ epoch`; a node adopts the maximum from its pinned home hub;
+- **A. A hub-signed epoch beacon (E-A) as the source, the release manifest's `epoch_floor` (E-C) as its floor.** What advances a hub's
+  counter must be said (the critic's G4): **its own persisted powered-on monotonic time divided by the unit, floored by the manifest** —
+  that is E-C evaluated at the hub and *distributed* to its clockless members; never a gateway's NTP clock (a wall clock by the back
+  door). So E-A is "hub-distributed E-C"; the beacon advances on events (each handshake reads the counter), with no timer. Each hub
+  signs `"111/epoch/v1" ‖ issuer ‖ epoch`; a node adopts the maximum from its pinned home hub;
   the beacon rides `ENROLL_OK`, the mailbox handshake and cards, never a broadcast. A frozen hub extends certs for its own members only;
   a compromised hub can jump its members, who already trust it for custody; the manifest floor stops a hub from freezing time once the
   user updates. A Cat-1 relay is asked for nothing. **v1 keeps "not evaluated"** until the first real consumer (cert delegation, L9, or an
-  attestation that needs an expiry) is scheduled; the **epoch unit (day or week) is the one decision to take now**, because attestations
-  and certs already encode `expiry` as a bare `u64`. *(pick: 01 §4.4)*
+  attestation that needs an expiry) is scheduled — the candidate first consumer is **freeze protection for updates** (F6: an "age by
+  mesh-epoch" on the newest manifest seen); the **epoch unit (day or week) is the one decision to take now**, because attestations
+  and certs already encode `expiry` as a bare `u64`. Not to be confused with L5 §4's `epoch` (one announce counter per store open), which
+  is a different thing. *(pick: 01 §4.4, amended per the critic)*
 - B. Highest-seen, signed, step-bounded gossip (E-B, the "advance when you see a greater one" design): extra LoRa bytes, per-island drift,
   and its natural failure (one forged large value) is exactly the DoS L2 warns about. Ranked last.
 - C. Release-anchored ratchet plus local dwell only (E-C alone): revocation at release cadence; a fresh verifier gives an old revoked cert a
@@ -258,6 +284,18 @@ periodic timer the owner has not approved, and nothing that leaves the node unse
 - B. Carriers first (F3) with presence later — leaves "who is near" a stub for another cycle. C. Presence only, no gateway — leaves README
   §7's second half unbuilt. D. Everything at once — the radio form needs hardware the owner does not have yet (D23 #4).
 - Every radio path stays stub-verified in netns; the bench list (hardware or live net) is in §5.
+
+### F11. Public signed frames: `BROADCAST` 0x30, attestation gossip and labels, "global broadcasts" (the critic's G3)
+
+- **A. Pin the formats in the Layer 7 spec, build the consumers in v1.1.** The spec fixes the `BROADCAST` 0x30 frame (publisher, signature,
+  a pointer on the 160 B floor, the object by Tier 2), the attestation gossip rule (the 202 B L2 §10 record rides cards, INTRO and the hub
+  handshake — never a LoRa announce `appdata`, where 10 B remain — and the label the UI shows for an attested transport identity), and
+  the source of "global broadcasts" (publishers the user follows; a 5B gateway streams only those). Nostr as a **readable-text Adapter**
+  for followed publishers (the Layer 6 Adapter shape, which fits readable text; the seams scout's point) is the natural first producer and
+  sits in v1.1 beside F3 C. *(pick)*
+- B. Build attestation gossip in v1 on the existing handshakes (cheap on `tcp-lan`, nothing on LoRa) and leave 0x30 for v1.1.
+- C. Defer all three without pinning the formats — rejected: L6 §18 hands attestation gossip and labels to this layer explicitly, and
+  an unpinned 0x30 would be designed twice.
 
 ## 3. Detail picks (spec-reviewed by the panel, not polled)
 
@@ -299,6 +337,22 @@ periodic timer the owner has not approved, and nothing that leaves the node unse
   port), fetched by sha256; transient RSS during an update equals the tarball size (not resident; recorded when it changes) (04 §4, q1).
 - **The Reticulum fleet stays one**: 111 frames flood on MeshCore, Reticulum traffic on RNode; microReticulum_Firmware is a reference only
   unless F4 B ever ships (03 §2).
+- **Resident costs the critic asked for (G5):** `_111._tcp` is free only while `mdns-sd` already runs (the dashboard LAN-bound); on a
+  hub whose dashboard is not shared it would start the daemon's thread, a UDP 5353 listener and the 5 s IP check (~12 wakeups/min) — so
+  the registry record follows the dashboard's LAN switch, never starts the daemon by itself; a paired-hub connection's keepalive is the
+  `tcp-lan` 25 s frame (~70 B each, ~240 kB a day); the epoch beacon adds no timer (F8); the WAN probe's bytes per day are unmeasured
+  (a TLS handshake per HEAD; several MB a day is an estimate).
+- **Sizes and regions (G6):** the airtime tables use a 138 B announce; the real v1 announce is 141 or 149 B plus the 1 B shim, so the
+  figures read 3–9 % low; the duty-cycle shares are for the EU 1 % sub-band only — US, AU and other regional dwell and duty rules are
+  not stated and are a legal read (rule 7), never a limit of ours.
+- **The agent's role in Intent-Based Routing (G7):** read-only tools (`presence.read`, `gateway.read`, or an extended `nearby.read`; both
+  pins bumped); it proposes (enable a gateway, pair a hub, set an interval), never acts; a registry hit becomes an offload target only as
+  the private IP literal `agent111` requires, taken from the sealed query, never from a TXT.
+- **"Layer 7 runs natively on Cat 1" means the stock repeater's own floods and adverts (G8)**: nothing of ours runs there; the Cat-1 C core
+  stays deferred (L2 §15, D13 H1). The MeshCore **room server** (an adoptable LoRa store-and-forward for group text) was not assessed:
+  a bench item for v1.1, beside MeshCore adverts as a Nearby feed.
+- **Deferred from Layer 6 and not researched here (G9):** v1.1 hub-member routing of foreign DMs, and gateway carriage of foreign-network
+  text (a gateway carries sealed 111 envelopes only in v1).
 - **Bench items** (hardware or live net, not blockers): rnsd RSS as a transport node on a Pi; real public Nostr relay acceptance and limits;
   public chatmail relay behaviour for 30 MiB machine mails; rustls RFC 7250 support; arm64 Madmail; Termux netlink bind and background
   survival; MeshCore adverts as a Nearby feed; the licensed-band legal read per region.
@@ -321,6 +375,11 @@ periodic timer the owner has not approved, and nothing that leaves the node unse
 8. D21 (the UI budget) needs an amendment if a map ever ships: an exempt bucket, the fonts precedent.
 9. `plan/cross-layer/parked.md` P5 (an own Rust Reticulum if our transport ever depends on Reticulum code) is closed by upstream's own
    statement and by F4 A: no Rust Reticulum in `111d`, ever.
+10. Against locked text, every scout agrees (the critic's table; each needs the owner's acknowledgement): D19 b / L5 §9 "A+ follows
+    without redesign" (it cannot be built as worded) · L3 README:48 "broadcasts hub role, model, load" (model and load are never in a
+    broadcast; the registry answers them by a sealed query) · L1 "KB git-sync is Layer 7" (git is rejected for the node; the KB ships as
+    a signed snapshot) · README §6 "join in sequence" (no join state machine; `[order]` is preference) · MeshCore's hop cap is 63 (a
+    6-bit `path_length`), not 64.
 
 ## 5. Open questions for the owner (beyond the polled forks)
 
@@ -344,5 +403,29 @@ periodic timer the owner has not approved, and nothing that leaves the node unse
 
 ## 6. Critic and gap-fill
 
-_(filled from `research/06-critic.md` and `07-gap-N.md` when the sweep's critique phase returns; the unverified-claims list the critic
-collects is the lead's verification list for the owner's machine.)_
+**Critic (opus, `research/06-critic.md`): "almost ready for an options brief"** — presence, the heartbeat numbers, the timer baseline,
+relay inside the fabric, updates and the KB, and the UI floor are covered with file:line evidence and verified licences; the heartbeat
+tension is quantified and left to the owner. Two blocking gaps: **G1** the global carrier sweep did not apply the KB's adopt-vs-build gate
+and missed ntfy, Yggdrasil/yggstack and an adopted tunnel, and picked `snow` without seeing that `rustls` already does RFC 7250
+(settled by the critic, F3); **G2** three reports proposed three cross-hub custody shapes and none said how a hub learns a non-member
+`dest`'s hub (F4). Majors: **G3** public signed frames had no options (F11); **G4** the epoch option E-A did not say what advances a
+hub's counter (F8, restated). Minors G5–G9 are folded into §3. Seven cross-report conflicts are resolved in F2, F3, F4, F7 and §4 item
+10. The critic's own checks settled: `rustls` 0.23.45 RPK on both sides; `mdns-sd` 0.21.5's 5 s IP check and that our daemon starts it
+only when the dashboard is LAN-bound; ntfy's dual licence and defaults; yggstack's licence; Termux at SDK 28 (Android 17's local-network
+permission does not bind it); the UI lazy headroom 36.1 KB.
+
+**Gap-fill:** _(two sonnet scouts on G1 and G2; `research/07-gap-1.md`, `research/07-gap-2.md` — folded into F3 and F4 when they land.)_
+
+**Unverified claims (the lead verifies on the owner's machine; the critic's §6 is the list):** denied hosts or search snippets only
+(Roughtime RFC 10049, CT gossip RFC 9162, RFC 6762/6763 TXT limits, RFC 6693 constants, Briar BSP, Arti onion-service status, MeshCore
+PR 650 cadences, NsdManager MulticastLock, Termux issue 536, Android NetworkCapabilities and Data Saver, the AOSP route-netlink
+restriction, 47 CFR 97.113(a)(4) and other regions' amateur rules, F-Droid Nearby, apt `Valid-Until`, the MeshChatX map, PMTiles /
+Organic Maps / Kiwix sizes, Tuwunel RAM) · live services (public Nostr relay limits, chatmail operators' terms for machine traffic,
+ntfy.sh anonymous limits, the public LXMF propagation set, whether `I2PInterface` needs an external router) · licences not read from the
+upstream file (chatmail relay, Madmail limits, dtn7-rs, Leviculum, batman-adv, bluer, blake3 / bao-tree / gix registry records, the TUF
+spec, libkiwix, libzim, snow) · measurements (musl and RSS deltas for `nostr-sdk`, iroh, snow, `tokio-rustls`; rnsd RSS as a transport
+node on a Pi; rust-nostr and babeld RSS; the real payload tarball size; WAN-probe bytes per day; the mdns-sd thread's RSS; per-crate
+test counts after Layer 6; the Meshtastic monitor tick with no board; PoW at 2 MH/s; the Reticulum 275 B and ~300 B arithmetic;
+airtime and phone energy on real hardware) · device-gated (netlink groups under SDK 28, held sockets under Doze and the phantom-process
+killer, yggstack and an LXMF host on Termux) · bench or legal (stock MeshCore floods of our `FF00–FFFF` `GRP_DATA`, the KISS modem, real
+LoRa rate shaping, Ed25519 verify time on Cat 1 hardware, duty-cycle and dwell rules per region).
