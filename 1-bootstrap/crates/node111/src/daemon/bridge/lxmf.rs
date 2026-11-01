@@ -314,7 +314,7 @@ fn unhex64(s: &str) -> Option<[u8; 64]> {
         _ => b - b'a' + 10,
     };
     let mut out = [0u8; 64];
-    for (i, pair) in s.as_bytes().chunks_exact(2).enumerate() {
+    for (i, pair) in s.as_bytes().as_chunks::<2>().0.iter().enumerate() {
         out[i] = (digit(pair[0]) << 4) | digit(pair[1]);
     }
     Some(out)
