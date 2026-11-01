@@ -18,7 +18,7 @@ Sessions die; this file is what the next session needs.
 ## Run 1 — research sweep (2026-11-01)
 
 - Script: `plan/layers/7-relay/runs/workflows/research.js` (launched by `scriptPath`; keep it byte-identical to resume).
-- Workflow run id: _(filled in when launched)_.
+- Workflow run id: `wf_60f165f1-80f` (launched 2026-11-01 ~21:55 UTC from the tree `bdea810`; harness transcript dir `~/.claude/projects/-home-user-os/e7852691-6eb6-50f1-9e84-b01d744ea3a9/subagents/workflows/wf_60f165f1-80f/`). Resume: `Workflow({scriptPath: "<repo>/plan/layers/7-relay/runs/workflows/research.js", resumeFromRunId: "wf_60f165f1-80f"})`.
 - Models: seams scout opus (high) · lens scouts sonnet (high) · critic opus (xhigh) · gap-fill sonnet (high).
 
 | Lens | Report | Question |
