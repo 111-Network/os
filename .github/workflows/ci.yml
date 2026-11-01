@@ -52,6 +52,8 @@ jobs:
           cache-dependency-path: 4-interface/ui/pnpm-lock.yaml
       - name: UI dependencies (frozen lockfile)
         run: pnpm --dir 4-interface/ui install --frozen-lockfile
+      - name: minisign (the node111 update tests sign their fixtures with the CLI)
+        run: sudo apt-get update -q && sudo apt-get install -y -q --no-install-recommends minisign
       - name: 1-bootstrap/scripts/check.sh
         run: sh 1-bootstrap/scripts/check.sh
 
@@ -124,9 +126,10 @@ jobs:
           pnpm --dir 4-interface/ui install --frozen-lockfile
           pnpm --dir 4-interface/ui gen:types
           git diff --exit-code -- 4-interface/ui/src/lib/api
-      - name: Layer folders are one-digit (AGENTS.md; journals and the move records excepted)
+      - name: Layer folders are one-digit (AGENTS.md; journals, the move records and the Layer 5 tag's tree excepted)
+        # 6-transport/verify/bridge.sh reads the mesh111 tree at the checkpoint-layer-5 tag, whose folders carry the old names.
         run: |
-          if git grep -nE '\b[0-9]0-(knowledge|bootstrap|identity|intelligence|interface|messaging|transport)/' -- . ':!plan/README.md' ':!plan/HANDOFF-2026-10-15.md' ':!*.jsonl'; then
+          if git grep -nE '\b[0-9]0-(knowledge|bootstrap|identity|intelligence|interface|messaging|transport)/' -- . ':!plan/README.md' ':!plan/HANDOFF-2026-10-15.md' ':!*.jsonl' ':!6-transport/verify/bridge.sh'; then
             echo "::error::two-digit layer paths found (see above); the folders are N-<slug>"; exit 1
           fi
       - name: No attribution lines in commit messages (AGENTS.md)
