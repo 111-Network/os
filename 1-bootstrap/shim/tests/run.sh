@@ -11,7 +11,7 @@ PORT=$((20000 + ($$ % 20000)))
 FAILS=0
 SRV_PID=""
 
-# shellcheck disable=SC2317  # invoked via trap, not direct flow
+# shellcheck disable=SC2317,SC2329  # invoked via trap, not direct flow
 cleanup() {
 	[ -n "$SRV_PID" ] && kill "$SRV_PID" 2>/dev/null
 	rm -rf "$T"
