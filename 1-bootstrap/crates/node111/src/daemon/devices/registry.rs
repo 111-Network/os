@@ -51,7 +51,10 @@
 //! reads `port_busy`, with that owner's task in `detail.port_held_by`; so
 //! does one whose tty a port guard outside 111 holds open (ModemManager,
 //! brltty: DEV §8, found through `/proc/<pid>/fd`; 111 never stops them) —
-//! the scan runs only for serial ports nothing of ours holds. The
+//! the scan runs only for serial ports nothing of ours holds. The owners
+//! are read on every tick and again, from the `PortTable`, the moment an
+//! identify result is recorded (its claim is released or handed over by
+//! then), so the next request never meets the finished identify's claim. The
 //! uplink a device would be identified on names its device node under `/dev`
 //! (`/dev/serial/by-id/<name>` when that passes the §14 path pattern, else
 //! `/dev/<tty>`), or `tcp://127.0.0.1:4403` for an SPI bridge.
@@ -635,6 +638,25 @@ struct OfferFacts<'a> {
     guard: Option<&'a Holder>,
     /// An rnsd entry owns this device's port (§12).
     rns_owned: bool,
+}
+
+/// Who owns a device's port besides a live driver (§12): `rnsd` for an rnsd
+/// entry, else its `PortTable` holder (`held`), else the port guard holding
+/// its tty.
+fn port_owner(
+    rns_owned: bool,
+    port: Option<&Uplink>,
+    held: &[(String, String)],
+    guard: Option<&Holder>,
+) -> Option<String> {
+    if rns_owned {
+        return Some(interfaces::TASK_RNSD.to_string());
+    }
+    port.and_then(|up| {
+        let key = port_key(&up.port_name());
+        held.iter().find(|(k, _)| *k == key).map(|(_, t)| t.clone())
+    })
+    .or_else(|| guard.map(|g| g.name.clone()))
 }
 
 /// Layer 5 §14, Layer 6 §12: merge the persisted identify result and the
@@ -1678,16 +1700,7 @@ impl DeviceRegistry {
                 },
                 d.identify_port.as_ref(),
             );
-            let claimed = d.identify_port.as_ref().and_then(|up| {
-                let key = port_key(&up.port_name());
-                held.iter().find(|(k, _)| *k == key).map(|(_, t)| t.clone())
-            });
-            let owner = if rns_owned {
-                Some(interfaces::TASK_RNSD.to_string())
-            } else {
-                claimed.or_else(|| guard.map(|g| g.name.clone()))
-            };
-            if let Some(o) = owner {
+            if let Some(o) = port_owner(rns_owned, d.identify_port.as_ref(), &held, guard) {
                 inner.port_owners.insert(d.id.clone(), o);
             }
             if let Some(g) = guard {
@@ -2132,6 +2145,22 @@ impl DeviceRegistry {
         inner.store.flush(true);
         let port = inner.identify_ports.get(id).cloned();
         let guard_holder = inner.guards.get(id).cloned();
+        // the identify that just ended released (or handed over) its claim:
+        // the owner view follows the PortTable now, not at the next tick (an
+        // upsert right after would otherwise meet the identify's own claim
+        // and answer `409 port_busy`); an rnsd entry stays the owner
+        let rnsd = inner
+            .port_owners
+            .get(id)
+            .is_some_and(|o| o == interfaces::TASK_RNSD);
+        match port_owner(rnsd, port.as_ref(), &held, guard_holder.as_ref()) {
+            Some(o) => {
+                inner.port_owners.insert(id.to_string(), o);
+            }
+            None => {
+                inner.port_owners.remove(id);
+            }
+        }
         let published = inner.published.as_mut().ok_or(NotFound)?;
         let rec = published.iter_mut().find(|r| r.id == id).ok_or(NotFound)?;
         let rns_owned = rec.detail.contains_key("rns_interface");
@@ -2429,6 +2458,83 @@ mod tests {
         // nothing to look for: nothing is read
         assert!(guard_holders(&proc_root, &guards, &[]).is_empty());
         assert!(guard_holders(&proc_root, &[], &[("ttyACM0".into(), tty)]).is_empty());
+    }
+
+    #[test]
+    fn a_recorded_identify_refreshes_the_port_owner_from_the_port_table() {
+        use crate::daemon::dashboard::{ApiConfig, DashboardState};
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("state")).unwrap();
+        let layout = crate::daemon::DaemonLayout {
+            root: dir.path().to_path_buf(),
+            etc: dir.path().join("etc"),
+        };
+        let dash = Arc::new(RwLock::new(DashboardState::new("2026.11.01")));
+        let api = ApiState::new(dash, ApiConfig::new(layout.clone(), false));
+        let ports = Arc::new(PortTable::new());
+        api.insert_ext(Arc::clone(&ports));
+        let reg = DeviceRegistry::new(RegistryConfig::production(&layout));
+        let id = "abcd1234abcd1234";
+        let path = "/dev/serial/by-id/usb-X-if00";
+        let task = format!("identify:{id}");
+        // the last tick ran while the identify held the port
+        ports.claim(path, &task, 1).unwrap();
+        {
+            let mut inner = reg.inner.lock().unwrap();
+            let mut r = rec(id, DeviceKind::Radio, DeviceState::NeedsSetup, "Board");
+            r.transport = Transport::UsbSerial;
+            inner.published = Some(vec![r]);
+            inner
+                .store
+                .devices
+                .insert(id.into(), Entry::new("a".into(), "b".into()));
+            inner
+                .identify_ports
+                .insert(id.into(), Uplink::Serial { path: path.into() });
+            inner.port_owners.insert(id.into(), task.clone());
+        }
+        let fw = |family| DeviceFirmware {
+            family,
+            version: None,
+            source: FirmwareSource::Probe,
+        };
+        // released, not recorded yet: the cached view still names the identify
+        ports.release(path, &task).unwrap();
+        assert!(matches!(
+            reg.serial_port_for(id),
+            Err(TargetError::Busy { owner, .. }) if owner == task
+        ));
+        // recorded: the next upsert sees the free port, no tick needed
+        reg.record_firmware(&api, id, fw(FirmwareFamily::Rnode))
+            .unwrap();
+        assert_eq!(reg.serial_port_for(id).unwrap(), path);
+        // the holder changed (handed over, not released): the new holder answers
+        ports.claim(path, &task, 2).unwrap();
+        ports.transfer(path, &task, "meshmud", 3).unwrap();
+        reg.record_firmware(&api, id, fw(FirmwareFamily::Meshtastic))
+            .unwrap();
+        assert!(matches!(
+            reg.serial_port_for(id),
+            Err(TargetError::Busy { owner, .. }) if owner == "meshmud"
+        ));
+        // an rnsd entry stays the owner (it is not a PortTable claim)
+        ports.release(path, "meshmud").unwrap();
+        reg.inner
+            .lock()
+            .unwrap()
+            .port_owners
+            .insert(id.into(), interfaces::TASK_RNSD.into());
+        reg.record_firmware(&api, id, fw(FirmwareFamily::Rnode))
+            .unwrap();
+        assert_eq!(
+            reg.inner
+                .lock()
+                .unwrap()
+                .port_owners
+                .get(id)
+                .map(String::as_str),
+            Some(interfaces::TASK_RNSD)
+        );
     }
 
     #[test]

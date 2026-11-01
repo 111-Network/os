@@ -180,9 +180,18 @@ fn problem_code(status: StatusCode) -> &'static str {
 /// `/api/*` errors that are not JSON (axum's plain-text extractor rejections,
 /// 413 body limit, 405, …) become problem+json with the same status; the
 /// framework's message becomes `detail`. Other headers (e.g. `Allow`) stay.
+///
+/// axum does not collapse slashes, so `//api/v1/…` (and a bare `/api`)
+/// matches no API route: it lands on the GET-only static catch-all (a bare
+/// `405` to a POST). Such a path is answered here as the unknown API route it
+/// is — `404 not_found`, any method, before any handler runs.
 async fn api_problems(req: Request, next: Next) -> Response {
-    if !req.uri().path().starts_with("/api/") {
+    let path = req.uri().path();
+    if !is_api_path(path.trim_start_matches('/')) {
         return next.run(req).await;
+    }
+    if !path.starts_with("/api/") {
+        return api_not_found().await.into_response();
     }
     let resp = next.run(req).await;
     let status = resp.status();
@@ -223,6 +232,11 @@ async fn api_problems(req: Request, next: Next) -> Response {
 /// this, the GET-only static catch-all would answer `405` to a POST).
 async fn api_not_found() -> Problem {
     Problem::new(StatusCode::NOT_FOUND, "not_found", "no such API route")
+}
+
+/// `rest` (a path without its leading `/`) names the API namespace.
+fn is_api_path(rest: &str) -> bool {
+    rest == "api" || rest.starts_with("api/")
 }
 
 // ---------------------------------------------------------------- host guard
@@ -430,7 +444,7 @@ async fn ui_path(
     Path(path): Path<String>,
     headers: HeaderMap,
 ) -> Response {
-    if path == "api" || path.starts_with("api/") {
+    if is_api_path(&path) {
         return Problem::new(StatusCode::NOT_FOUND, "not_found", "no such API route")
             .into_response();
     }
