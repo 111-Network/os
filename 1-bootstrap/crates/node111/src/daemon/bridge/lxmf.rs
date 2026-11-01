@@ -51,7 +51,12 @@
 //!   `delivered`; a post-air `FAILED` keeps `sent` "transmitted, not confirmed" and the same
 //!   `send` line is written again on that peer's next surfaced `heard` (§6 (4): `Later` on
 //!   the next heard; the helper starts a new library attempt, its emitted states stay
-//!   monotone); `failed` only for `rejected` (stamp, blackhole) and `cancelled`.
+//!   monotone). A `FAILED` while still `OUTBOUND` (the helper's `queued`/`peer_unannounced`
+//!   line that carries a hash: the library held the message and concluded it, nothing on
+//!   air, a park before any library message has none) keeps `queued` and is resumed the
+//!   same way, its `send` line written again on that peer's next surfaced `heard` (one
+//!   attempt per heard; nothing else would resume it, the helper never resends by itself);
+//!   `failed` only for `rejected` (stamp, blackhole) and `cancelled`.
 //!   `Accepted` carries the LXMF message hash, and is sent **only once the send is on air**
 //!   (`sent`/`relayed`/`delivered`): the helper reports the hash as soon as the library
 //!   packed the message, possibly still `queued` (OUTBOUND, nothing transmitted), and the
@@ -936,6 +941,9 @@ struct Entry {
     accepted: Option<String>,
     /// A post-air FAILED: written again on the peer's next surfaced `heard` (§6 (4)).
     unconfirmed: bool,
+    /// A FAILED while still OUTBOUND (the helper concluded the library's attempt, nothing
+    /// on air; the row stays `queued`): written again on the peer's next surfaced `heard`.
+    stalled: bool,
 }
 
 /// Was a send in state `s` on air (§4 table, LXMF rows: `SENDING`/`SENT` and above)?
@@ -1477,6 +1485,9 @@ impl Inner {
         let parked = s.state == S::Queued && s.reason == Some(HelperReason::PeerUnannounced);
         e.last = Some((s.state, s.reason));
         e.unconfirmed = s.reason == Some(HelperReason::Unconfirmed);
+        // a park line with a hash is a FAILED while OUTBOUND: the helper no longer holds it
+        // (its own park, before any library message, carries none and resumes by itself)
+        e.stalled = parked && s.hash.is_some();
         let ev = events_for(&s);
         let _ = e.tx.try_send(ev.clone());
         let done = match ev {
@@ -1492,34 +1503,56 @@ impl Inner {
     }
 
     async fn heard(&self, io: &PipedIo, generation: u64, dest: String, name: Option<String>) {
+        // §6 (4): a post-air FAILED is `Later` on that peer's next heard, and so is a FAILED
+        // while OUTBOUND (module doc)
+        for (id, line) in self.surface_heard(generation, &dest, name) {
+            if !self.write(io, &line).await {
+                self.fail_one(&id);
+            }
+        }
+    }
+
+    /// The bookkeeping of one `heard` of `generation`: coalesced per destination, else
+    /// surfaced as Nearby; returns the sends to write again (`(id, send line)`), one
+    /// attempt per surfaced heard.
+    fn surface_heard(
+        &self,
+        generation: u64,
+        dest: &str,
+        name: Option<String>,
+    ) -> Vec<(String, String)> {
         let now = Instant::now();
         let (account, resend) = {
             let mut st = lock(&self.st);
             let Some(account) = st.ready.as_ref().map(|r| r.dest.clone()) else {
-                return;
+                return Vec::new();
             };
             if dest == account {
-                return;
+                return Vec::new();
             }
-            if let Some(t) = st.heard_at.get(&dest) {
+            if let Some(t) = st.heard_at.get(dest) {
                 if now.duration_since(*t) < self.heard_interval {
                     self.coalesced.fetch_add(1, Ordering::SeqCst);
-                    return;
+                    return Vec::new();
                 }
             } else {
-                st.heard_order.push_back(dest.clone());
+                st.heard_order.push_back(dest.to_string());
                 while st.heard_order.len() > HEARD_MEMORY {
                     if let Some(old) = st.heard_order.pop_front() {
                         st.heard_at.remove(&old);
                     }
                 }
             }
-            st.heard_at.insert(dest.clone(), now);
+            st.heard_at.insert(dest.to_string(), now);
             let mut resend = Vec::new();
             for (id, e) in st.sends.iter_mut() {
                 // kept set: a later heard writes it again (the helper ignores a send whose
-                // attempt is still in flight and starts a new one once it concluded)
-                if e.to == dest && e.unconfirmed && e.generation == generation && !e.tx.is_closed()
+                // attempt is still in flight and starts a new one once it concluded); an
+                // admitted line of the new attempt clears it
+                if e.to == dest
+                    && (e.unconfirmed || e.stalled)
+                    && e.generation == generation
+                    && !e.tx.is_closed()
                 {
                     resend.push((id.clone(), e.line.clone()));
                 }
@@ -1530,13 +1563,8 @@ impl Inner {
             .as_deref()
             .map(|n| ingest::cut(&ingest::clean(n), NEARBY_NAME_MAX).to_string())
             .unwrap_or_default();
-        self.push_heard(&dest, nearby_source(&account, &dest, &long));
-        // §6 (4): a post-air FAILED is `Later` on that peer's next heard
-        for (id, line) in resend {
-            if !self.write(io, &line).await {
-                self.fail_one(&id);
-            }
-        }
+        self.push_heard(dest, nearby_source(&account, dest, &long));
+        resend
     }
 }
 
@@ -1905,6 +1933,7 @@ impl Adapter for LxmfAdapter {
                                 hash: None,
                                 accepted: None,
                                 unconfirmed: false,
+                                stalled: false,
                             },
                         );
                         st.order.push_back(id.clone());
@@ -2189,6 +2218,7 @@ mod tests {
             hash: Some(h64('c')),
             accepted: None,
             unconfirmed: false,
+            stalled: false,
         };
         let later = |reason| SendEvent::Failed {
             reason,
@@ -2220,6 +2250,100 @@ mod tests {
         assert!(!own.contains(&format!("{:064}", 0)), "oldest forgotten");
         assert!(own.contains(&format!("{MAX_SENDS:064}")));
         assert_eq!(own.order.len(), MAX_SENDS);
+    }
+
+    /// FC1 (board Summary follow-up): a FAILED while still OUTBOUND keeps the row `queued`
+    /// and is resumed on that peer's next surfaced heard (the same `send` line, once per
+    /// heard), never `Accepted` before air; the helper's own park (no hash) is left to it.
+    #[tokio::test]
+    async fn fc1_a_failed_while_outbound_is_written_again_on_the_next_heard() {
+        let (_stdio_tx, stdio) = watch::channel(None);
+        let a = LxmfAdapter::start(stdio, LxmfConfig::default());
+        let inner = &a.inner;
+        let entry = |tx, line: &str| Entry {
+            tx,
+            to: SRC.into(),
+            line: line.into(),
+            generation: 1,
+            last: None,
+            hash: None,
+            accepted: None,
+            unconfirmed: false,
+            stalled: false,
+        };
+        let (l1, l2) = (
+            send_line("m1", SRC, "hi", None),
+            send_line("m2", SRC, "yo", None),
+        );
+        let ((tx1, mut rx1), (tx2, _rx2)) = (mpsc::channel(EVENTS), mpsc::channel(EVENTS));
+        {
+            let mut st = lock(&inner.st);
+            st.live = Some(1);
+            st.ready = Some(ReadyFacts {
+                generation: 1,
+                dest: DEST.into(),
+                pubkey: [7; 64],
+                instance: "default".into(),
+            });
+            st.sends.insert("m1".into(), entry(tx1, &l1));
+            st.sends.insert("m2".into(), entry(tx2, &l2));
+            st.order.extend(["m1".to_string(), "m2".to_string()]);
+        }
+        let line = |id: &str, hash: Option<String>, state, reason| StateLine {
+            id: id.into(),
+            hash,
+            state,
+            reason,
+        };
+        let unannounced = Some(HelperReason::PeerUnannounced);
+        // m1: the library took it (OUTBOUND), then FAILED before air; m2: the helper's park
+        assert!(!inner.state(line("m1", Some(h64('c')), S::Queued, None)));
+        assert!(inner.state(line("m1", Some(h64('c')), S::Queued, unannounced)));
+        assert!(inner.state(line("m2", None, S::Queued, unannounced)));
+        assert!(
+            lock(&inner.st).own.contains(&h64('c')),
+            "own echo still recorded"
+        );
+        let resend = inner.surface_heard(1, SRC, None);
+        assert_eq!(
+            resend,
+            vec![("m1".to_string(), l1.clone())],
+            "m1 only, same line"
+        );
+        assert!(
+            inner.surface_heard(1, SRC, None).is_empty(),
+            "coalesced: one per heard"
+        );
+        lock(&inner.st).heard_at.clear(); // the interval passed
+        assert_eq!(
+            inner.surface_heard(1, SRC, None),
+            vec![("m1".to_string(), l1.clone())],
+            "the resumed attempt failed again: kept, written on the next heard"
+        );
+        // the new attempt goes on air: accepted with its hash, no longer resumed
+        assert!(!inner.state(line("m1", Some(h64('d')), S::Sent, None)));
+        lock(&inner.st).heard_at.clear();
+        assert!(inner.surface_heard(1, SRC, None).is_empty());
+        let mut seen = Vec::new();
+        while let Ok(ev) = rx1.try_recv() {
+            seen.push(ev);
+        }
+        let ev = |state, evidence: &str| SendEvent::Evidence {
+            state,
+            evidence: evidence.into(),
+        };
+        assert_eq!(
+            seen,
+            vec![
+                ev(S::Queued, EV_NO_PATH),
+                ev(S::Queued, EV_UNANNOUNCED),
+                SendEvent::Accepted {
+                    native_id: h64('d')
+                },
+                ev(S::Sent, EV_SENT),
+            ],
+            "queued until on air; Accepted once, only on air"
+        );
     }
 
     #[test]
