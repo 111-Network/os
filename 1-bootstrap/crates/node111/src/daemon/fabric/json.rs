@@ -516,6 +516,13 @@ pub fn foreign_message(m: &ForeignMessageRow, at: i64) -> Value {
         // reason an inbound row was kept from relaying (`marker`, §8 guard 3)
         "uncertain": !inbound && m.state == ForeignState::Queued && m.handoff_pending,
         "not_relayed": meta.get("not_relayed").and_then(Value::as_str),
+        // FC5 (additive): the relay field a received message carried (`meta.relay`, the
+        // LXMF custom field `111.relay` `{v, net, id, mid}`, §6), admitted by the one
+        // ingest function only in exactly that shape. It is the sender's claim, not a fact
+        // of this node, so it is not `relayed_from` (an own copy one of our edges made, by
+        // local ids); on an inbound DM, which no edge reads, it is the only sign the text
+        // is another node's relay copy
+        "relay": meta.get("relay").filter(|r| r.is_object()),
         // V5-3 (additive): the row this one was sent again as (`meta.resent_as`); a
         // superseded row is never retried again
         "superseded_by": meta.get("resent_as").and_then(Value::as_i64).map(fm_id),
@@ -1377,6 +1384,52 @@ pub(super) mod foreign_tests {
         let conv = network_message("app:deltachat", 6, None, ForeignChange::Conversation, 0);
         assert_schema(&conv, "SseNetworkMessage");
         assert_eq!(conv["change"], "conversation");
+    }
+
+    #[test]
+    fn an_inbound_dm_row_shows_its_relay_field_and_a_null_not_relayed() {
+        use crate::daemon::bridge::{ingest, Auth, ConvKind, ConvRef, InboundText};
+        // an LXMF DM another 111 node relayed: the row as the one ingest function stores it
+        let relay = json!({"v": 1, "net": "meshtastic", "id": "W1AW7", "mid": "00ff"});
+        let t = InboundText {
+            conv: ConvRef {
+                network: "lxmf".into(),
+                account: "a1b2c3d4e5f60718293a4b5c6d7e8f90".into(),
+                kind: ConvKind::Dm,
+                native_id: "0f1e2d3c4b5a69788796a5b4c3d2e1f0".into(),
+            },
+            sender_native: "0f1e2d3c4b5a69788796a5b4c3d2e1f0".into(),
+            sender_name: "Relayer".into(),
+            auth: Auth::Signed,
+            native_msg_id: "77aa".into(),
+            body: "[W1AW7/M] hi from the mesh".into(),
+            claim_ts: None,
+            meta: json!({ "relay": relay, "evil": 1 }),
+        };
+        let ins = ingest::prepare(&t, 5, true).unwrap();
+        let mut row = fm(21);
+        row.conv = ins.conv;
+        row.auth = ins.auth;
+        row.body = ins.body;
+        row.meta = ins.meta.unwrap();
+        let v = foreign_message(&row, 0);
+        assert_schema(&v, "ForeignMessage");
+        assert_eq!(v["relay"], relay, "meta.relay reaches the contract");
+        assert!(
+            v["relayed_from"].is_null(),
+            "a peer's claim is not a local copy"
+        );
+        assert!(
+            v.get("not_relayed").is_some_and(Value::is_null),
+            "present and null: no edge reads a DM"
+        );
+        // a row that carried none, or a stored value of another shape, reads null
+        assert!(foreign_message(&fm(22), 0)["relay"].is_null());
+        let mut odd = fm(23);
+        odd.meta = r#"{"relay":"x"}"#.into();
+        let v = foreign_message(&odd, 0);
+        assert_schema(&v, "ForeignMessage");
+        assert!(v["relay"].is_null());
     }
 
     #[test]

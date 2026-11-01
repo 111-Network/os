@@ -1548,6 +1548,32 @@ export const schemas: Record<string, JsonSchema> = {
         "type": ["string","null"],
         "description": "Layer 6 C1 (additive): why an inbound row was kept from every relay edge — `marker` (it already carries a relay marker `[name/TAG]`, §8 guard 3: a copy is never relayed again, and a human who types a marker gets no relay). null when not applicable; absent from older daemons"
       },
+      "relay": {
+        "description": "Layer 6 FC5 (additive): the structured relay field a received row carried — LXMF `FIELD_CUSTOM_TYPE = \"111.relay\"`, `{v, net, id, mid}` (§6 \"Relay marker and fields\"): another 111 node's edge says it copied this text from `net`, where `id` named the sender and `mid` the message. The ingest function admits exactly that shape (`v` 1, `net` a registered network, `id` and `mid` clean, 1–64 bytes, without `]` or `/`) and drops anything else. A peer's claim, untrusted and naming nothing on this node: unlike `relayed_from` (an own copy one of this node's edges made, by local ids). On an inbound DM, which no edge reads (`not_relayed` stays null there), it is the only sign the text is a relayed copy. null when the row carried none; absent from older daemons (read as null)",
+        "oneOf": [
+          {
+            "type": "object",
+            "required": ["v","net","id","mid"],
+            "properties": {
+              "v": {"type":"integer","enum":[1],"description":"the field's version"},
+              "net": {"$ref":"#/components/schemas/NetworkId","description":"the network the copy came from"},
+              "id": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 64,
+                "description": "the origin sender's name or id on `net`; untrusted"
+              },
+              "mid": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 64,
+                "description": "the origin message's id on `net`; untrusted"
+              }
+            }
+          },
+          {"type":"null"}
+        ]
+      },
       "superseded_by": {
         "oneOf": [{"$ref":"#/components/schemas/ForeignMessageId"},{"type":"null"}],
         "description": "Layer 6 V5 (additive): the id of the row this own row was sent again as (`POST /messages/{id}/retry`). A superseded row is never retried again (`409 bad_request`: retry the new row); the UI reads it 'resent as …'. null otherwise; absent from older daemons (read as null)"
