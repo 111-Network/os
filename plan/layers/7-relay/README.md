@@ -1,10 +1,11 @@
 # Layer 7 — Relay & Presence: plan folder
 
-**Status** (copied from [`INDEX.md`](../../INDEX.md) row 7, which stays the source of truth): 🧭 deciding — kickoff 2026-11-01
+**Status** (summarised from [`INDEX.md`](../../INDEX.md) row 7, which stays the source of truth): 🧭 deciding — kickoff 2026-11-01
 (cloud session, branch `claude/layer-6-implementation-006mte`): the research sweep ran (`runs/workflows/research.js`: opus seams scout,
 five sonnet lens scouts, opus completeness critic, two sonnet gap-fill scouts; `research/00`–`07`) and the lead wrote
 [`options.md`](options.md), complete with the gap-fills folded in; **the owner decides before any Layer 7 code is written**
-(`EXECUTION.md`: research → options brief → decision → adversarial pass → build).
+(`INDEX.md` "Process (per layer)": research → options brief → decision → adversarial pass → build; `EXECUTION.md` applies once the spec is
+decided).
 
 **What the layer is:** `os/README.md` §7 (heartbeats, gateways, the adopted asynchronous store-and-forward transport, dynamic
 delivery paths) and "Category 5: Global Gateways" (an overlay role: 5A intermittent, 5B permanent). Layer 7 runs on every

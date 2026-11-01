@@ -6,7 +6,7 @@ Sessions die; this file is what the next session needs.
 ## Kickoff (2026-11-01, cloud session)
 
 - Owner's words (2026-11-01): "continue what's left to build … send cheaper sub agents and check their work". Layer 6 is locked
-  (D29); Layers 7–9 are pending; `EXECUTION.md` starts a layer with research → options brief → the owner's decision. So the kickoff
+  (D29); Layers 7–9 are pending; `INDEX.md` "Process (per layer)" starts a layer with research → options brief → the owner's decision. So the kickoff
   is the research sweep and the brief; **no Layer 7 code before the owner decides.**
 - Tree at kickoff: `01b4a72` (the CI fix on PR #2) on `claude/layer-6-implementation-006mte`, which is `origin/main` (`322a66d`)
   plus the Layer 6 build; PR #2 is open and unmerged on GitHub at kickoff (the branch is the one most ahead).
@@ -18,7 +18,7 @@ Sessions die; this file is what the next session needs.
 ## Run 1 — research sweep (2026-11-01)
 
 - Script: `plan/layers/7-relay/runs/workflows/research.js` (launched by `scriptPath`; keep it byte-identical to resume).
-- Workflow run id: `wf_60f165f1-80f` (launched 2026-11-01 ~21:55 UTC from the tree `bdea810`; harness transcript dir `~/.claude/projects/-home-user-os/e7852691-6eb6-50f1-9e84-b01d744ea3a9/subagents/workflows/wf_60f165f1-80f/`). Resume: `Workflow({scriptPath: "<repo>/plan/layers/7-relay/runs/workflows/research.js", resumeFromRunId: "wf_60f165f1-80f"})`.
+- Workflow run id: `wf_60f165f1-80f` (launched 2026-11-01 ~21:55 UTC from the tree `bdea810`; the scouts read `3bf545b`, the commit after launch; harness transcript dir `~/.claude/projects/-home-user-os/e7852691-6eb6-50f1-9e84-b01d744ea3a9/subagents/workflows/wf_60f165f1-80f/`). Resume: `Workflow({scriptPath: "<repo>/plan/layers/7-relay/runs/workflows/research.js", resumeFromRunId: "wf_60f165f1-80f"})`.
 - Models: seams scout opus (high) · lens scouts sonnet (high) · critic opus (xhigh) · gap-fill sonnet (high).
 
 | Lens | Report | Question |
@@ -36,7 +36,9 @@ Sessions die; this file is what the next session needs.
 sonnet gap-fill scouts), about 1.88 M subagent tokens, 519 tool calls, 49 min wall clock. The critic's verdict: "close to ready", two
 blocking gaps (G1 the carrier sweep had skipped the KB gate and three candidates; G2 three cross-hub shapes in conflict), both filled
 (`07-gap-1.md`, `07-gap-2.md`) and folded by the lead into `options.md` (F3, F4, F5, F10, facts 8 and 23–24, §3, §5 items 15–21, §6).
-The brief is complete; it waits on the owner's decisions F1–F11 and the §5 questions. Nothing of the run is left running.
+The brief is complete; it waits on the owner's decisions F1–F11 and the §5 questions. Nothing of the run is left running. The run's
+journal is not exported (unlike Layer 6's `runs/journals/`): this box refuses to copy from the session-local transcript store; it lives
+at `~/.claude/projects/…/subagents/workflows/wf_60f165f1-80f/journal.jsonl` on the lead machine and the run resumes by its id.
 
-Next after the run: lead writes `layers/7-relay/options.md` → owner decides → `DECISIONS.md` → spec `os/7-relay/README.md`
-→ fable adversarial panel → `TASKS.md` → build.
+`options.md` is written (above). Next: the owner decides → `DECISIONS.md` → spec `os/7-relay/README.md` → fable adversarial panel
+→ `TASKS.md` → build.

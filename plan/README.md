@@ -20,7 +20,7 @@ os/plan/
   INDEX.md             status board
   DECISIONS.md         decision log
   EXECUTION.md         build protocol
-  HANDOFF-<date>.md    session handoff (newest = current; see "Handoffs")
+  HANDOFF-<date>.md    session handoff (the newest open one is current; none open now; see "Handoffs")
   cross-layer/         material that spans layers (devices.md, parked.md, ci-cd.md — CI/CD + GitHub hygiene, D28)
     devices.md           device-connection core brief (Layer 6 opener; read by Layers 4, 5, 6)
     parked.md            ideas parked by the owner for later layers
@@ -265,7 +265,8 @@ Only directories were renamed, with `git mv` (`git log --follow` works on every 
 | `plan/layers/50-messaging/` | `plan/layers/5-messaging/` |
 | `plan/layers/60-transport/` | `plan/layers/6-transport/` |
 
-Reserved for the layers not started: `7-relay`, `8-storage`, `9-evolution` (created at kickoff). The research-report
+Reserved for the layers not started: `8-storage`, `9-evolution` (created at kickoff; `7-relay` got its plan folder at the 2026-11-01
+kickoff and has no spec folder yet). The research-report
 series inside a plan folder (`research/00-code-seams.md`, `07-gap-1.md`) is a different numbering and stays two-digit.
 
 References were rewritten the way the 2026-10-18 section describes, by one script whose dry run was read line by line.

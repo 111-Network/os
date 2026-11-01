@@ -1,13 +1,13 @@
 # Layer 7 — Relay & Presence: options brief
 
-Status: 🧭 deciding · 2026-11-01 · sweep complete (opus seams scout, 5 sonnet lens scouts, opus critic; run `wf_60f165f1-80f`; the critic's
-digest and the unverified-claims list are §6) · lead-written from the six reports in `research/` (`00-code-seams.md` line-verified on
+Status: 🧭 deciding · 2026-11-01 · sweep complete (opus seams scout, 5 sonnet lens scouts, opus critic, 2 sonnet gap-fill scouts; run
+`wf_60f165f1-80f`; the critic's digest, the gap-fill digest and the unverified-claims list are §6) · lead-written from the nine reports in `research/` (`00-code-seams.md` line-verified on
 `3bf545b`; `01`–`05` web-verified where this box's network policy allowed: package indexes and raw GitHub files only, most documentation
 sites denied — every claim the scouts could not fetch is marked in the reports and collected by the critic). Reads with: `os/README.md` §7
 and "Category 5" · the hand-offs listed in [`README.md`](README.md) · D17 #5/#12, D19 c, D20, D22, D23–D29 · `AGENTS.md` (the Pi floor).
 
-Owner scope: Layer 6 is locked (D29); Layer 7 is the next layer in `INDEX.md`; `EXECUTION.md` starts it with research → this brief → the
-owner's decision → spec → fable panel → build. **Nothing of Layer 7 is built; nothing is built before the owner answers §2.**
+Owner scope: Layer 6 is locked (D29); Layer 7 is the next layer in `INDEX.md`; `INDEX.md` "Process (per layer)" starts it with research → this brief
+→ the owner's decision → spec → fable panel → build (`EXECUTION.md` applies once the spec is decided). **Nothing of Layer 7 is built; nothing is built before the owner answers §2.**
 
 ## 0. What the research settled (facts that bound every option)
 
@@ -152,7 +152,7 @@ periodic timer the owner has not approved, and nothing that leaves the node unse
 
 ### F3. The global store-and-forward carrier(s) for v1
 
-- **A + P. A 111 hub reachable over the internet (a hub with a public address, or a home hub exposed through a reach layer; peer hubs
+- **A + P (P: the ntfy prototype, 07-gap-1's lettering). A 111 hub reachable over the internet (a hub with a public address, or a home hub exposed through a reach layer; peer hubs
   and 5A/5B gateways dial out; the same envelope, receipts and custody; `tcp-lan` wrapped in TLS 1.3 raw public keys, below) as the
   evidence-grade path, and ntfy as the first adopted mailbox, prototyped behind the hub's carrier hand-off (F4 A) for islands with no
   public address on either side.** A is built code plus glue (`tcp-lan` and the hub mailbox exist; what is new is the forward row of
@@ -167,9 +167,10 @@ periodic timer the owner has not approved, and nothing that leaves the node unse
   (burst 60 then one per 5 s, 30 connections per visitor; ntfy.sh 250 messages a day anonymous), so one batch per message flush; **the
   topic name is the only default access control** (anyone who knows it reads and writes it), so the topic derives from a pairing
   secret, never from the NodeId, or a self-hosted `auth-file` ACL; the operator sees IP, topic, size, timing and the cleartext header
-  (`dest_hint`, counters). Ceiling `sent` (an HTTP accept is no `CUSTODY_ACK`); `delivered` is the recipient's own sealed `ACK` and
-  rides any carrier with a return path (a reverse topic), so it works on ntfy too; carrier loss costs a resend, never a message (the
-  sender keeps its copy until `delivered`, L5 §9). *(pick: 07-gap-1 §4.1 P + Q; 02 §4.2; 00 §4 "gateway as hub")*
+  (`dest_hint`, counters). The carrier leg earns no state (an HTTP accept is no `CUSTODY_ACK`): a sender whose own node is the gateway sees `sent`,
+  a member whose hub holds the item for its carrier sees `relayed` (reason `forwarding`, F4 A); `delivered` is the recipient's own
+  sealed `ACK` and rides any carrier with a return path (a reverse topic), so it works on ntfy too; carrier loss costs a resend, never
+  a message (the sender keeps its copy until `delivered`, L5 §9). *(pick: 07-gap-1 §4.1 P + Q; 02 §4.2; 00 §4 "gateway as hub")*
 - B. The chatmail/Madmail mailbox through the Layer 6 Delta Chat component (sealed batches as attachments; verified limits, fact 20):
   already shipped and measured (~64 MB RSS while on, zero off), ceiling `sent`, the metadata is mail addresses and the relay sees sizes
   and timing (the consent copy says so). **Stays available as the carrier that works today**; heavier than ntfy (an rpc-server per
@@ -273,11 +274,11 @@ periodic timer the owner has not approved, and nothing that leaves the node unse
   entry points; (12) the §7.3 sentence "pairing is two enrolments; a paired hub is not a home hub; one home hub in v1 stands". Envelope
   bytes, L2 identity and the 16 B `pkt_ref` are untouched; the wire-visible additions are one optional TLV and one reason string; an old
   hub skips the TLV and rejects as today. `Dir::Transit` and the "delivered transit copies" prune query stay unused; `remove_link` and
-  a non-blocking `Link::send` move to v1.1 with the `carrier` `LinkKind` (F4). The rest (A1, A3, A4, A5, the route variant) with the
+  a non-blocking `Link::send` move to v1.1 with the `carrier` `LinkKind` (F4). The rest (A1, A3, A5, A6, A7, the route variant) with the
   radio form in v1.1.** *(pick)*
 - B. Layer 7 stays outside `mesh111` entirely: then cross-hub delivery is a sidecar re-implementing custody beside the store — a second
   copy of the same logic, rejected on "never reinvent".
-- The same question for Layer 1 (F6 B) and Layer 2 (F8: the epoch unit).
+- The same question for Layer 1 (F6, the Layer 1 amendments bullet) and Layer 2 (F8: the epoch unit).
 
 ### F6. Updates and the KB where there is no internet
 
@@ -290,12 +291,12 @@ periodic timer the owner has not approved, and nothing that leaves the node unse
   over the fabric — the right shape for non-IP bearers and Layer 8 datasets; v1.1, same staging directory. D. Sneakernet only — a subset of
   A; keep `--from` as the guaranteed floor, never the only path. LoRa carries the manifest ("release X exists, bring a stick or reach a
   hub"), never a payload (fact 14).
-- **The KB:** B1 in the release payload (status quo; a KB change is a calver respin, a few MB on a LAN hub) *(pick for v1)* vs B2 a KB
-  overlay with its own signed pin (the `[kb]` pin already parses; needs a root-helper request type and a floor dimension) — pick B2 only if
+- **The KB:** K1 in the release payload (status quo; a KB change is a calver respin, a few MB on a LAN hub) *(pick for v1)* vs K2 a KB
+  overlay with its own signed pin (the `[kb]` pin already parses; needs a root-helper request type and a floor dimension) — pick K2 only if
   the owner wants a KB cadence apart from the binary's. Git bundles and gateways fetching the 111 repo: rejected for the node (fact 14).
-- **"Manifest gossip":** C1 pull on link-up (when the fabric link to the home hub comes up, or `--from` runs, check that origin once; no
-  gossip, no timer) *(pick)*; C2 a 5-byte release tag in the announce `appdata` (fits the 10 B; unsigned, can only cause a poll) later;
-  C3 a signed `UPDATE` notice frame — no gain over C1.
+- **"Manifest gossip":** M1 pull on link-up (when the fabric link to the home hub comes up, or `--from` runs, check that origin once; no
+  gossip, no timer) *(pick)*; M2 a 5-byte release tag in the announce `appdata` (fits the 10 B; unsigned, can only cause a poll) later;
+  M3 a signed `UPDATE` notice frame — no gain over M1.
 - **Layer 1 amendments first (owner's permission): the `channel` check, the keychain walk (previous key signs the next pubkey, walked
   from the compiled key), `min-upgrade-from` in the helper, and a freeze stance for v1** (accept that a stale hub holds a node until it
   reaches any other origin; add expiry once the epoch exists). A new verb that writes into `state/staging/` and drops
@@ -355,11 +356,11 @@ periodic timer the owner has not approved, and nothing that leaves the node unse
   registry; gateway advertisement to members) · F3 A + P (the hub over `tcp-lan` in TLS-RPK, the ntfy carrier prototype as the first
   v1 task so the KB gets its smoke log; B chatmail stays available) · F4 A + F5 A (hub pairing, the `fwd` push hand-over, the hint TLV,
   the twelve amendments) · F6 A (hub as update origin, `--from`, the Layer 1 trust amendments first) · F8 A (the beacon format and the
-  epoch unit, nothing evaluated) · F9 R1 · consent and metered-link settings (05 §3.5: a user setting in v1, the licensed-radio fact
-  consulted on every new path). v1.1 = the radio form of F4 (hint custody, A1/A3/A5/A6/A7), chains, a signed forward receipt,
+  epoch unit, nothing evaluated) · F9 R1 · F11 A (the `BROADCAST` 0x30, attestation-gossip and label formats pinned in the spec) · consent and
+  metered-link settings (05 §3.5: a user setting in v1, the licensed-radio fact consulted on every new path). v1.1 = the radio form of F4 (hint custody, A1/A3/A5/A6/A7), chains, a signed forward receipt,
   member-gateways, sweep-before-ack, an own-send carrier route and the `carrier` `LinkKind`, Nostr and LXMF carriers, yggstack as an
-  opt-in reach component, iroh, Tier 2 transfer, the map bucket, the first epoch consumer, multi-copy replication, MeshCore adverts
-  as a Nearby feed (bench).** *(pick)*
+  opt-in reach component, iroh, Tier 2 transfer, the map bucket, the first epoch consumer, multi-copy replication, the 0x30 and attestation consumers with the
+  Nostr text Adapter (F11), MeshCore adverts as a Nearby feed (bench).** *(pick)*
 - B. Carriers first (F3) with presence later — leaves "who is near" a stub for another cycle. C. Presence only, no gateway — leaves README
   §7's second half unbuilt. D. Everything at once — the radio form needs hardware the owner does not have yet (D23 #4).
 - Every radio path stays stub-verified in netns; the bench list (hardware or live net) is in §5.
@@ -388,7 +389,8 @@ periodic timer the owner has not approved, and nothing that leaves the node unse
   NodeId under a new L2 domain tag) hides the NodeId from relays that do not know it (02 §4.4, §4.6).
 - **5A intermittent gateways flush on a connectivity event and on fabric events** (start the carrier child, push the outbox, fetch the
   mailbox, stop; zero weight while off); **5B permanent gateways hold one connection** (a paired hub or one IMAP IDLE session; ~200 kB a day
-  of keepalive); phones are 5A by default (Doze) (02 §4.3).
+  of keepalive); a phone that runs a hub is 5A by default (Doze); a phone that is only a member carries nothing in v1
+  (F4 A) (02 §4.3).
 - **"Global broadcasts" are signed public frames (`0x30`) from publishers the user follows**; on a 160 B floor a broadcast is a pointer
   (publisher, hash, size, short text) and the object comes over a `Bulk` link (Tier 2, v1.1); broadcasts rank below user messages and wait
   for airtime; shaping into LoRa is physics the adapter advertises (02 §4.5).
@@ -478,7 +480,7 @@ periodic timer the owner has not approved, and nothing that leaves the node unse
 8. A hard "no gateway or relay path onto a board marked licensed", or per-link human consent? Needs the regional legal read. (F3, 05 §3.5)
 9. The epoch unit, day or week; freeze the beacon format with the layer or at the first consumer? (F8)
 10. Phones that lose their hub's address: QR rescan, a `/24` sweep on `:11183`, or wait for an Android app? (F7)
-11. KB cadence apart from the binary's (F6 B2) or not; may the Layer 1 trust amendments land before hub distribution is built? (F6)
+11. KB cadence apart from the binary's (F6 K2) or not; may the Layer 1 trust amendments land before hub distribution is built? (F6)
 12. Who signs Layer 8 datasets served from the same hub object store: the release key, the hub owner's key, or the publisher's checksum?
     (F6; note only, Layer 8's question)
 13. Map: an exempt bucket plus a Range tile route now, or the Meshtastic panel's map until Layer 8? Radar angle rule acceptable? (F9)
@@ -487,9 +489,8 @@ periodic timer the owner has not approved, and nothing that leaves the node unse
 15. May the carrier prototype use the public ntfy.sh for tests (a third party sees IP, topic and timing), or an owner-run server from
     day one? Is a 12 h default retention acceptable when documented, or must 111 ship a recommended self-host config (`cache-file`,
     `cache-duration`)? (F3)
-16. Is `sent` accepted as the ceiling of the first adopted carrier, with `relayed` crossing islands only through paired hubs (F4 A)? And
-    which gate failures are tolerable for a prototype — ntfy's bus factor and issue response are unread (api.github.com is closed from
-    this box), yggstack has no semver tag? (F3)
+16. Which gate failures are tolerable for a carrier prototype — ntfy's bus factor and issue response are unread (api.github.com is
+    closed from this box), yggstack has no semver tag? (The evidence a carrier leg earns is item 18.) (F3)
 17. `tokio-rustls` as a new lockfile entry (build-time weight, one `LICENSING.md` row) or the ~150-line adapter? May a gateway use
     public Yggdrasil peers (stranger-run nodes, egress to them), or only peers the user names? Is the attested link key's new
     `transport_id` (an L2 registry change) in Layer 7's scope, or is pin-from-card enough for v1? (F3)
@@ -505,13 +506,13 @@ periodic timer the owner has not approved, and nothing that leaves the node unse
 
 ## 6. Critic and gap-fill
 
-**Critic (opus, `research/06-critic.md`): "almost ready for an options brief"** — presence, the heartbeat numbers, the timer baseline,
+**Critic (opus, `research/06-critic.md`): "close to ready for an options brief"** — presence, the heartbeat numbers, the timer baseline,
 relay inside the fabric, updates and the KB, and the UI floor are covered with file:line evidence and verified licences; the heartbeat
 tension is quantified and left to the owner. Two blocking gaps: **G1** the global carrier sweep did not apply the KB's adopt-vs-build gate
 and missed ntfy, Yggdrasil/yggstack and an adopted tunnel, and picked `snow` without seeing that `rustls` already does RFC 7250
 (settled by the critic, F3); **G2** three reports proposed three cross-hub custody shapes and none said how a hub learns a non-member
 `dest`'s hub (F4). Majors: **G3** public signed frames had no options (F11); **G4** the epoch option E-A did not say what advances a
-hub's counter (F8, restated). Minors G5–G9 are folded into §3. Seven cross-report conflicts are resolved in F2, F3, F4, F7 and §4 item
+hub's counter (F8, restated). Minors G5–G9 are folded into §3. Six cross-report conflicts are resolved in F2, F3, F4, F7 and §4 item
 10. The critic's own checks settled: `rustls` 0.23.45 RPK on both sides; `mdns-sd` 0.21.5's 5 s IP check and that our daemon starts it
 only when the dashboard is LAN-bound; ntfy's dual licence and defaults; yggstack's licence; Termux at SDK 28 (Android 17's local-network
 permission does not bind it); the UI lazy headroom 36.1 KB.
@@ -526,7 +527,7 @@ non-member dest's hub (the sender's 8 B hint as ext TLV `0x02`, else a probe of 
 and listed the twelve additive amendments — folded into F4 A, F5 A, fact 8 and §5 items 18–21. One tension between the two is resolved
 here: 07-gap-1 wants the carrier "behind a `carrier` link-kind seam", 07-gap-2 shows the hand-off API needs no `Link` change at all;
 v1 takes the hand-off (the carrier is never a `Link`), and the `carrier` `LinkKind` is the v1.1 form for an own-send route on a
-non-hub node.
+non-hub node. 07-gap-2's "a VPN until Layer 6's online Noise IK" reads as "until F3's TLS-RPK" (§5 item 21).
 
 **Unverified claims (the lead verifies on the owner's machine; the critic's §6 is the list):** denied hosts or search snippets only
 (Roughtime RFC 10049, CT gossip RFC 9162, RFC 6762/6763 TXT limits, RFC 6693 constants, Briar BSP, Arti onion-service status, MeshCore

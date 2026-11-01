@@ -23,7 +23,7 @@
 | [`research/07-gap-1.md`](research/07-gap-1.md) | Gap 1: MeshChatX actually run as the LXMF carrier; Python floor matrix; hybrid interpreter; slim closure. |
 | [`options.md`](options.md) | Options brief for the owner: 18 settled facts, 8 polled forks with picks, detail picks, plan corrections, critic digest. |
 | [`research/08-spike-deltachat.md`](research/08-spike-deltachat.md) | S5 spike: Delta Chat core + Madmail in one netns (PASS), the traps, the review-citation addendum. |
-| [`runs/workflows/`](runs/workflows/) | Workflow scripts, one per run (`research.js`, `wave-0*.js` … `wave-3d-fix.js`, `wave-review.js`, `plan-check.js`); the run ids are in `research/coordinates.md`. |
+| [`runs/workflows/`](runs/workflows/) | Workflow scripts, one per run (`research.js`, `wave-0*.js` … `wave-3e-fix.js`, `wave-review.js`, `plan-check.js`); the run ids are in `research/coordinates.md`. |
 | [`review/`](review/) | Fable panel on v0.1: `bridge.md` · `carriers.md` · `integration.md` · the lead's `triage.md` (dispositions + owner answers) · `recheck.md` (fable re-check of v0.2) · `v5-integrated.md` (the V5 integrated review of the built layer, fix-then-lock). |
 | [`runs/journals/`](runs/journals/) | Exported run journals (`<label>.<wf_id>.jsonl`): `research.wf_7407f773-81c.jsonl` (6 scouts, critic, gap 1); see its README (the build-phase runs were not exported: their ids and results are in `research/coordinates.md`). |
 

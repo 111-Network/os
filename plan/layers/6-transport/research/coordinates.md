@@ -30,7 +30,7 @@ Sessions die; this file is what the next session needs.
 | 4 bridge design | `04-bridge-design.md` | categories in Messages, fan-out, inter-network relay, loop guard, consent, prior art, contract |
 | 5 transports | `05-transports-devices.md` | device core scoped without hardware; MeshCore KISS modem status; interfaces.toml; sequencing |
 | critic | `06-critic.md` | completeness verdict, gaps, conflicts |
-| gap-fill | `07-gap-N.md` | one per blocking gap (cap 2) |
+| gap-fill | `07-gap-1.md` | one per blocking gap (cap 2); one was needed |
 
 Next after the run: lead writes `layers/6-transport/options.md` → owner decides → `DECISIONS.md` → spec `os/6-transport/README.md`
 → fable adversarial panel → `TASKS.md` → build (after the Layer 5 lock).
@@ -109,3 +109,8 @@ Next after the run: lead writes `layers/6-transport/options.md` → owner decide
   the board rows (an "as built, fix wave C" note) and the Summary's follow-up list.
 - Beside it, the same day: the first CI run of PR #2 was red on two jobs (PyYAML missing on the hygiene runner; two clippy 1.99 lints) —
   fixed in `01b4a72`.
+- **Landed (2026-11-01):** FC1 `d116a50` · FC2 `adcbe87` · FC3 `6331902` · FC4 `ef5a2fe` · FC5 `f5f2e35`; the lead gates (fmt, clippy, the full node111 suite with exactly the 8 root-only
+  failures, `pnpm check`, the LXMF helper 128, G1 132, G3 147); the board `8da8c88`; the release-build Pi-floor measurements `43fddaf`
+  (`111` 19.4 MB, `111-agent` 4.4 MB, idle RSS 19.7 / 5.3 MB, G7 green on the release binaries); the CI runner fixes `6435863`
+  (minisign, the one-digit grep), `108f6ad` (shellcheck SC2329) and `55ebdd3` (the `intelligence_children` test-port race, `serve_on`).
+  **End of the Layer 6 log**; Layer 7 continues in `layers/7-relay/research/coordinates.md`.
