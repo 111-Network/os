@@ -51,7 +51,7 @@ and `os/N-<slug>/TASKS.md`, where the layer's code is.
 | 4 Interface & Dashboard | `layers/4-interface/` | options, triage |
 | 5 Messaging & Data | `layers/5-messaging/` | full set: research, options, review, runs |
 | 6 Transport & Bridge | `layers/6-transport/` | research (R00–R08 + coordinates), options, review (the 3-judge panel, the recheck, V5 `review/v5-integrated.md`), runs (workflows `runs/workflows/*.js`, journals); opener brief [`cross-layer/devices.md`](cross-layer/devices.md); built and locked 2026-10-23 (D29) |
-| 7 Relay & Presence | `layers/7-relay/` | research (kickoff 2026-11-01: `research/00`–`06`, `runs/workflows/research.js`, `research/coordinates.md`), options brief (`options.md`, 🧭 deciding); the owner decides before the build |
+| 7 Relay & Presence | `layers/7-relay/` | research (kickoff 2026-11-01: `research/00`–`07`, `runs/workflows/research.js`, `research/coordinates.md`), options brief (`options.md`, complete, 🧭 deciding); the owner decides before the build |
 | 8 Storage & Shared State | none yet | reserved name `8-storage`; pending |
 | 9 Self-Healing & Evolution | none yet | reserved name `9-evolution`; pending |
 
