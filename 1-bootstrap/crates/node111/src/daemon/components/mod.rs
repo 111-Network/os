@@ -37,6 +37,13 @@
 //! missing from the cache answers `409 component_unavailable` (reason
 //! `payload_missing`) whose detail names
 //! [`manifest::fetch_command`]; enable never downloads.
+//!
+//! **Preflight (FC2, as built):** [`Components::preflight`] runs the checks of
+//! enable's steps 1–3 that change nothing (the notice, without recording it;
+//! `[requires]`; the payload; the cache against the pin) with the same
+//! [`EnableError`] and copy, so an adapter that writes files before enable
+//! (Delta Chat's relay configuration) asks first and a refused enable leaves
+//! nothing on disk.
 
 pub mod consent;
 pub mod manifest;
@@ -495,6 +502,66 @@ impl Components {
         })
     }
 
+    /// The checks [`Self::enable`] runs before it changes anything, in its order and with
+    /// its errors and copy (module doc, "Preflight"): the licence notice (checked, never
+    /// recorded), then — unless `id` is enabled already (idempotent) — `[requires]`, the
+    /// payload and the cache against the pin. Writes, installs and starts nothing; a
+    /// refusal is kept for the status' reason as enable's is. `ack` as for enable.
+    pub async fn preflight(&self, id: &str, ack: Option<&str>) -> Result<(), EnableError> {
+        self.preflight_after(id, ack, None).await
+    }
+
+    /// [`Self::preflight`] for a component the caller enables right after `first`: a
+    /// `[requires] component = first` counts as met (Delta Chat asks for its core before
+    /// the relay it needs is enabled).
+    pub async fn preflight_after(
+        &self,
+        id: &str,
+        ack: Option<&str>,
+        first: Option<&str>,
+    ) -> Result<(), EnableError> {
+        let c = self.get(id).cloned().ok_or(EnableError::Unknown)?;
+        let runners = self.inner.runners.lock().await;
+        let result = self.preflight_locked(&c, ack, first, &runners).await;
+        if let Err(e) = &result {
+            self.remember(&c.id, e);
+        }
+        result
+    }
+
+    async fn preflight_locked(
+        &self,
+        c: &Component,
+        ack: Option<&str>,
+        first: Option<&str>,
+        runners: &HashMap<String, ComponentRunner>,
+    ) -> Result<(), EnableError> {
+        // 1. the notice, as `consent::require` decides it, without recording the ack
+        let accepted = match ack {
+            Some(h) => h == c.notice_hash(),
+            None => consent::load(self.root()).acknowledged(c),
+        };
+        if !accepted {
+            let req = ConsentRequired::for_component(c);
+            return Err(EnableError::ConsentRequired {
+                text: req.warning_text,
+                hash: req.hash,
+            });
+        }
+        if runners.contains_key(&c.id) {
+            return Ok(());
+        }
+        // 2. [requires], 3. the cache against the pin (no install)
+        self.check_requires(c, runners, first).await?;
+        if let Payload::Unavailable { reason } = &c.payload {
+            return Err(EnableError::RequiresUnmet(reason.clone()));
+        }
+        let (root, comp) = (self.root().to_path_buf(), c.clone());
+        tokio::task::spawn_blocking(move || verify_pin(&root, &comp))
+            .await
+            .map_err(|e| EnableError::InstallFailed(format!("the verify task failed: {e}")))?
+    }
+
     async fn enable_locked(
         &self,
         c: &Component,
@@ -533,7 +600,7 @@ impl Components {
             return Err(EnableError::StartFailed("invalid adapter arguments".into()));
         }
         // 2. [requires]
-        self.check_requires(c, runners).await?;
+        self.check_requires(c, runners, None).await?;
         if let Payload::Unavailable { reason } = &c.payload {
             return Err(EnableError::RequiresUnmet(reason.clone()));
         }
@@ -542,18 +609,7 @@ impl Components {
         let comp = c.clone();
         let root_b = root.clone();
         tokio::task::spawn_blocking(move || -> Result<(), EnableError> {
-            if !registry::installed_from_pin(&root_b, &comp) {
-                registry::verify_cache(&root_b, &comp).map_err(|e| match e {
-                    // nothing downloads at runtime (§2.1 rule 3): name the
-                    // command that fills the cache (`[install] prefetch`)
-                    VerifyError::NotCached(d) => EnableError::NotCached(format!(
-                        "{d}; the payload is not cached: fetch it with `{}` (or put the pinned file in cache/packages/{}/), then enable again",
-                        manifest::fetch_command(&[comp.id.as_str()]),
-                        comp.id
-                    )),
-                    VerifyError::Mismatch(d) => EnableError::HashMismatch(d),
-                })?;
-            }
+            verify_pin(&root_b, &comp)?;
             registry::install(&root_b, &comp, cmd.as_ref())
                 .map(|_| ())
                 .map_err(|e| EnableError::InstallFailed(e.0))
@@ -609,10 +665,13 @@ impl Components {
         }
     }
 
+    /// `[requires]` (enable's step 2); `first` is a component counted as enabled
+    /// ([`Self::preflight_after`]).
     async fn check_requires(
         &self,
         c: &Component,
         runners: &HashMap<String, ComponentRunner>,
+        first: Option<&str>,
     ) -> Result<(), EnableError> {
         if let Some(need) = c.requires.glibc {
             let cmd = Arc::clone(&self.inner.wiring.cmd);
@@ -624,7 +683,7 @@ impl Components {
             }
         }
         if let Some(dep) = &c.requires.component {
-            if !runners.contains_key(dep) {
+            if !runners.contains_key(dep) && first != Some(dep.as_str()) {
                 let title = self.get(dep).map_or(dep.as_str(), |d| d.title.as_str());
                 return Err(EnableError::RequiresUnmet(format!(
                     "it needs {title} enabled first"
@@ -1015,6 +1074,23 @@ fn parse_python_version(text: &str) -> Option<(u32, u32)> {
     Some((major, minor))
 }
 
+/// Enable's step 3: an install not from the pin needs a cache that verifies against it.
+/// Nothing downloads at runtime (§2.1 rule 3): a missing payload names the command that
+/// fills the cache (`[install] prefetch`). Blocking; reads only.
+fn verify_pin(root: &Path, c: &Component) -> Result<(), EnableError> {
+    if registry::installed_from_pin(root, c) {
+        return Ok(());
+    }
+    registry::verify_cache(root, c).map_err(|e| match e {
+        VerifyError::NotCached(d) => EnableError::NotCached(format!(
+            "{d}; the payload is not cached: fetch it with `{}` (or put the pinned file in cache/packages/{}/), then enable again",
+            manifest::fetch_command(&[c.id.as_str()]),
+            c.id
+        )),
+        VerifyError::Mismatch(d) => EnableError::HashMismatch(d),
+    })
+}
+
 /// A health line: a JSON object whose `type` is `ready` (§6 `ready {dest,
 /// pubkey, instance}`).
 fn is_ready_line(line: &str) -> bool {
@@ -1120,6 +1196,98 @@ mod tests {
         assert_eq!(b["detail"], "x.whl is not pinned by the lock");
         assert_eq!(EnableError::Unknown.problem(None).body()["status"], 404);
         assert_eq!(RemoveError::Running.problem().status, 409);
+    }
+
+    /// FC2: preflight answers enable's refusals in enable's order and writes nothing — no
+    /// recorded acknowledgement, no `bridge.json`, no directory — and counts `first` as
+    /// enabled for `[requires] component`.
+    #[tokio::test]
+    async fn preflight_refuses_like_enable_and_creates_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("root");
+        std::fs::create_dir(&root).unwrap();
+        let decl = |id: &str, requires: &str| {
+            let toml = format!(
+                "id = \"{id}\"\nadapter = \"app:deltachat\"\ntitle = \"T {id}\"\n\
+                 [payload]\nkind = \"binary\"\nurl = \"https://example.invalid/dl/{id}\"\n\
+                 sha256 = \"{sha}\"\nsize = 1\n[requires]\n{requires}\n[run]\n\
+                 program = \"{id}\"\nports = []\nhealth = \"none\"\n[license]\n\
+                 spdx = \"MPL-2.0\"\nread_at = \"https://example.invalid/L\"\n\
+                 notice = \"Test notice for {id}. You install it.\"\n",
+                sha = "0".repeat(64)
+            );
+            (format!("{id}.toml"), toml.into_bytes())
+        };
+        let list = manifest::load(&[decl("relay", ""), decl("core", "component = \"relay\"")]);
+        assert_eq!(list.len(), 2, "the test declarations register");
+        struct NoDeps;
+        impl Dependencies for NoDeps {
+            fn child(&self, _: ServiceId) -> Option<ChildControl> {
+                None
+            }
+            fn serving(&self, _: ServiceId) -> bool {
+                false
+            }
+        }
+        let hash = |id: &str| list.iter().find(|c| c.id == id).unwrap().notice_hash();
+        let comps = Components::new(
+            ComponentsConfig::new(&root),
+            list.clone(),
+            Wiring {
+                cmd: Arc::new(crate::testkit::MockRunner::new(Vec::<(
+                    String,
+                    crate::util::run::Output,
+                )>::new())),
+                ports: Arc::new(PortTable::new()),
+                deps: Arc::new(NoDeps),
+                tick: Arc::new(|| 0),
+            },
+        );
+        let nothing = || {
+            assert_eq!(
+                std::fs::read_dir(&root).unwrap().count(),
+                0,
+                "nothing created under the root"
+            );
+        };
+        // the notice first: none, or a wrong one, answers its 409
+        for ack in [None, Some("wrong")] {
+            let e = comps.preflight("relay", ack).await.unwrap_err();
+            assert_eq!(e.reason_code(), "consent_required", "{e:?}");
+        }
+        nothing();
+        // the right one passes, unrecorded; nothing cached: enable's payload_missing copy
+        let e = comps
+            .preflight("relay", Some(&hash("relay")))
+            .await
+            .unwrap_err();
+        assert_eq!(e.reason_code(), "payload_missing", "{e:?}");
+        assert!(e.to_string().contains("then enable again"), "{e}");
+        nothing();
+        assert!(!consent::load(&root).acknowledged(&list[0]), "not recorded");
+        // the dependant: its dependency off answers requires_unmet; counted as first, the
+        // cache answers
+        let e = comps
+            .preflight("core", Some(&hash("core")))
+            .await
+            .unwrap_err();
+        assert_eq!(e.reason_code(), "requires_unmet", "{e:?}");
+        let e = comps
+            .preflight_after("core", Some(&hash("core")), Some("relay"))
+            .await
+            .unwrap_err();
+        assert_eq!(e.reason_code(), "payload_missing", "{e:?}");
+        nothing();
+        // enable answers the same refusal (it records the acknowledgement, as before)
+        let e = comps
+            .enable("relay", Some(&hash("relay")))
+            .await
+            .unwrap_err();
+        assert_eq!(e.reason_code(), "payload_missing", "{e:?}");
+        assert!(matches!(
+            comps.preflight("x", None).await,
+            Err(EnableError::Unknown)
+        ));
     }
 
     /// W3: one resume loop, the enable supplied — dependency first (whatever the

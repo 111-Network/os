@@ -282,7 +282,9 @@ impl ComponentAdapters {
 /// written for a component the user has not accepted, §2.1 rule 2). When the hook ran
 /// and `enable_with` then refuses (its `[requires]`, cache or pin checks) while the
 /// component has no running child, its [`UnprepareHook`] removes what the hook wrote
-/// (C1-bounce F4).
+/// (C1-bounce F4). Before the hook runs, [`Components::preflight`] asks those same
+/// checks first (FC2): a component whose `[requires]` or payload would refuse writes
+/// nothing (Madmail has no unprepare hook; the LXMF one becomes a fallback).
 pub async fn enable_component(
     api: &ApiState,
     components: &Components,
@@ -302,6 +304,7 @@ pub async fn enable_component(
                 None => st.acknowledged,
             });
         if accepted {
+            components.preflight(component, ack).await?;
             args = hook().await?;
             prepared = true;
         }

@@ -2254,6 +2254,9 @@ async fn restart_relay(
 /// round trip (`relay_ack`, `core_ack`: the hashes the user echoes; a missing one answers
 /// `409 consent_required` with that notice and nothing past it runs):
 ///
+/// 0. `Components::preflight` of the relay, then of the core (its relay counted as enabled;
+///    its missing acknowledgement waits for step 4): a notice, `[requires]` or cache refusal
+///    answers before anything is written (FC2: a refused enable leaves no `bridge/deltachat/`);
 /// 1. `bridge/deltachat/` and its directories (0700); the relay's first configuration is
 ///    loopback-only whatever the LAN setting (its runtime switches are not set yet);
 /// 2. `Components::enable("madmail")` (glibc ≥ 2.38, the cache against the pin, the port
@@ -2277,6 +2280,15 @@ pub async fn enable(
     relay_ack: Option<&str>,
     core_ack: Option<&str>,
 ) -> Result<Arc<DeltaChatAdapter>, EnableError> {
+    components.preflight(RELAY_COMPONENT, relay_ack).await?;
+    match components
+        .preflight_after(RPC_COMPONENT, core_ack, Some(RELAY_COMPONENT))
+        .await
+    {
+        // the core's own licence round trip comes after the relay's enable (step 4)
+        Ok(()) | Err(EnableError::ConsentRequired { .. }) => {}
+        Err(e) => return Err(e),
+    }
     let paths = RelayPaths::of(&s.root);
     paths.prepare().map_err(|e| {
         EnableError::InstallFailed(format!("cannot create {}: {e}", paths.dir.display()))
@@ -2706,6 +2718,95 @@ turn_enable = false
             address: format!("c{i}@[127.0.0.1]"),
             name: format!("C{i}"),
             contact_id: id,
+        }
+    }
+
+    /// FC2: the components' checks run before the relay's directories and configuration are
+    /// written; a refused enable (the relay's notice, its missing payload) leaves no
+    /// `bridge/deltachat/`, and the core's missing acknowledgement does not answer first.
+    #[tokio::test]
+    async fn fc2_a_refused_enable_writes_nothing() {
+        use crate::daemon::components::{manifest, ComponentsConfig, Dependencies, Wiring};
+        use crate::daemon::ports::PortTable;
+        use crate::daemon::services::ServiceId;
+        use crate::daemon::supervise::ChildControl;
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("root");
+        std::fs::create_dir(&root).unwrap();
+        let decl = |id: &str, requires: &str| {
+            let toml = format!(
+                "id = \"{id}\"\nadapter = \"app:deltachat\"\ntitle = \"T {id}\"\n\
+                 [payload]\nkind = \"binary\"\nurl = \"https://example.invalid/dl/{id}\"\n\
+                 sha256 = \"{sha}\"\nsize = 1\n[requires]\n{requires}\n[run]\n\
+                 program = \"{id}\"\nports = []\nhealth = \"none\"\n[license]\n\
+                 spdx = \"MPL-2.0\"\nread_at = \"https://example.invalid/L\"\n\
+                 notice = \"Test notice for {id}. You install it.\"\n",
+                sha = "0".repeat(64)
+            );
+            (format!("{id}.toml"), toml.into_bytes())
+        };
+        let list = manifest::load(&[
+            decl(RELAY_COMPONENT, ""),
+            decl(RPC_COMPONENT, &format!("component = \"{RELAY_COMPONENT}\"")),
+        ]);
+        assert_eq!(list.len(), 2, "the test declarations register");
+        let hash = |id: &str| list.iter().find(|c| c.id == id).unwrap().notice_hash();
+        struct NoDeps;
+        impl Dependencies for NoDeps {
+            fn child(&self, _: ServiceId) -> Option<ChildControl> {
+                None
+            }
+            fn serving(&self, _: ServiceId) -> bool {
+                false
+            }
+        }
+        let runner: Arc<dyn Runner> = Arc::new(crate::testkit::MockRunner::new(Vec::<(
+            String,
+            crate::util::run::Output,
+        )>::new()));
+        let comps = Components::new(
+            ComponentsConfig::new(&root),
+            list.clone(),
+            Wiring {
+                cmd: Arc::clone(&runner),
+                ports: Arc::new(PortTable::new()),
+                deps: Arc::new(NoDeps),
+                tick: Arc::new(|| 0),
+            },
+        );
+        let s = Setup::new(
+            &root,
+            RelayBind::Loopback,
+            runner,
+            Arc::new(|_: &str, _: &str| false),
+        );
+        let paths = RelayPaths::of(&root);
+        // the relay's notice missing: its 409, nothing written
+        let e = enable(&comps, &s, None, None).await.unwrap_err();
+        assert!(
+            matches!(&e, EnableError::ConsentRequired { hash: h, .. } if *h == hash(RELAY_COMPONENT)),
+            "{e:?}"
+        );
+        assert!(
+            !paths.dir.exists(),
+            "nothing written before the notice passes"
+        );
+        // accepted, nothing cached: payload_missing (not the core's 409), nothing written
+        for core_ack in [None, Some(hash(RPC_COMPONENT))] {
+            let e = enable(
+                &comps,
+                &s,
+                Some(&hash(RELAY_COMPONENT)),
+                core_ack.as_deref(),
+            )
+            .await
+            .unwrap_err();
+            assert_eq!(e.reason_code(), "payload_missing", "{e:?}");
+            assert!(
+                !paths.dir.exists(),
+                "a refused enable leaves no bridge/deltachat/"
+            );
+            assert!(!root.join("components").exists(), "nothing installed");
         }
     }
 
