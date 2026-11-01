@@ -1,10 +1,9 @@
 # Layer 7 — Relay & Presence: plan folder
 
-**Status** (copied from [`INDEX.md`](../../INDEX.md) row 7, which stays the source of truth): 🔬 researching — kickoff 2026-11-01
-(cloud session, branch `claude/layer-6-implementation-006mte`): the research sweep (`runs/workflows/research.js`: opus seams scout,
-five sonnet lens scouts, opus completeness critic, up to two gap-fill scouts) writes `research/00`–`07`; the lead then writes
-`options.md`; **the owner decides before any Layer 7 code is written** (`EXECUTION.md`: research → options brief → decision →
-adversarial pass → build).
+**Status** (copied from [`INDEX.md`](../../INDEX.md) row 7, which stays the source of truth): 🧭 deciding — kickoff 2026-11-01
+(cloud session, branch `claude/layer-6-implementation-006mte`): the research sweep ran (`runs/workflows/research.js`: opus seams scout,
+five sonnet lens scouts, opus completeness critic; `research/00`–`06`) and the lead wrote [`options.md`](options.md); **the owner
+decides before any Layer 7 code is written** (`EXECUTION.md`: research → options brief → decision → adversarial pass → build).
 
 **What the layer is:** `os/README.md` §7 (heartbeats, gateways, the adopted asynchronous store-and-forward transport, dynamic
 delivery paths) and "Category 5: Global Gateways" (an overlay role: 5A intermittent, 5B permanent). Layer 7 runs on every
