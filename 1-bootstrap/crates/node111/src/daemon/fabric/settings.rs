@@ -758,6 +758,28 @@ pub fn holds_address(p: &Persisted, address: SocketAddr) -> bool {
         || p.fabric.home_hub.and_then(|h| h.address) == Some(address)
 }
 
+/// Fold an unpairing the pump has not applied yet into `p` (Layer 7 §4.6;
+/// M5c S2): the records `current` (the fabric's current `paired_hubs`)
+/// no longer holds leave `p.fabric.paired_hubs`, and the daemon's halves
+/// beside them leave `p.pairs`. Records `current` adds are not taken here
+/// (they arrive with their `Settings` event, the daemon's half written
+/// then). Returns whether anything was dropped.
+pub fn fold_dropped_records(p: &mut Persisted, current: &[PairedHub]) -> bool {
+    let gone: Vec<NodeId> = p
+        .fabric
+        .paired_hubs
+        .iter()
+        .map(|h| h.node_id)
+        .filter(|n| !current.iter().any(|c| c.node_id == *n))
+        .collect();
+    if gone.is_empty() {
+        return false;
+    }
+    p.fabric.paired_hubs.retain(|h| !gone.contains(&h.node_id));
+    p.pairs.retain(|l| !gone.contains(&l.node_id));
+    true
+}
+
 /// Why `link`'s address cannot be recorded beside `p`, if it cannot: the
 /// home hub, a configured peer or another paired hub already uses it. A
 /// second dial to an address the adapter already keeps is a no-op that
@@ -1570,6 +1592,43 @@ mod tests {
         assert_eq!(pair_address_refusal(&homed, &PairLink::new(other)), None);
         let free: SocketAddr = "10.0.0.9:11183".parse().unwrap();
         assert_eq!(pair_address_refusal(&homed, &at(other, free)), None);
+    }
+
+    /// M5c S2: an unpairing the pump has not applied yet is folded in: the
+    /// dropped record and its half leave, the others stay, an added record
+    /// is not taken.
+    #[test]
+    fn a_pending_unpairing_is_folded_into_the_records() {
+        let (b, c) = (NodeId::from(FAR), NodeId::from([0x44; 32]));
+        let mut p = Persisted {
+            fabric: FabricSettings {
+                hub_role: true,
+                paired_hubs: vec![
+                    paired(FAR, PairRole::Peer, PairVia::Tcp),
+                    paired([0x44; 32], PairRole::Peer, PairVia::Tcp),
+                ],
+                ..FabricSettings::default()
+            },
+            pairs: vec![PairLink::new(b), PairLink::new(c)],
+            ..Persisted::default()
+        };
+        let current = vec![paired([0x44; 32], PairRole::Peer, PairVia::Tcp)];
+        assert!(!fold_dropped_records(
+            &mut p.clone(),
+            &p.fabric.paired_hubs.clone()
+        ));
+        assert!(fold_dropped_records(&mut p, &current));
+        assert_eq!(p.fabric.paired_hubs, current);
+        assert_eq!(p.pairs, vec![PairLink::new(c)]);
+        let added = vec![
+            paired([0x44; 32], PairRole::Peer, PairVia::Tcp),
+            paired([0x55; 32], PairRole::Peer, PairVia::Tcp),
+        ];
+        assert!(!fold_dropped_records(&mut p, &added));
+        assert_eq!(
+            p.fabric.paired_hubs, current,
+            "an added record waits for its event"
+        );
     }
 
     #[test]

@@ -102,7 +102,10 @@
 //!   keeps a new home-hub address only after a handshake there named the
 //!   hub (the dial's expected NodeId; refused where a connection is up
 //!   already). The override is voided by any sign the membership ended
-//!   (the hub forgotten or enrolled at again, a lag; `Rehomed`).
+//!   (the hub forgotten or enrolled at again; `Rehomed`). A pump lag alone
+//!   never voids it: the current settings and the hub's contact row are
+//!   re-read, and only a changed membership ends it (M5c). No void path
+//!   releases the address the home hub is shown at.
 //! - **The carrier topic's X25519** (§6.2) stays behind the identity handle
 //!   ([`IdentitySealer::carrier_topic_x25519`]), on no API.
 //!
@@ -276,17 +279,28 @@ pub struct FabricHandle {
 /// any sign that the membership it
 /// was taken for may have ended: a `Settings` event in a batch that shows
 /// the hub neither at `from` nor at `to` (the pump applies only a batch's
-/// last one), a `Contact` event `Added` or `Removed` for the hub (it was
+/// last one), or a `Contact` event `Added` or `Removed` for the hub (it was
 /// forgotten, or enrolled at again: an enrollment with a card always emits
-/// `Added`), or a pump lag (events were lost). A forget-and-re-enrol at
-/// `from` therefore never has `to` written over it (M5b F5). A spurious
-/// void is the recoverable side: the fabric's own copy is shown and D8 can
-/// replace the address again.
+/// `Added`). A forget-and-re-enrol at `from` therefore never has `to`
+/// written over it (M5b F5).
+///
+/// A **pump lag** (events were lost) does not void it on its own (M5c S1:
+/// the void would release `to`, the one verified connection to the hub,
+/// and nothing would dial the hub again). After a lag the hub's contact
+/// row is read: the override is voided when the row is gone or its
+/// `marker` (the row's `first_seen_seq`, a store sequence taken before the
+/// override was recorded: a forget deletes the row, a re-enrolment after
+/// it inserts a new one) differs; the re-read settings then void it as a
+/// `Settings` event would (the hub at neither address). No void path
+/// releases the address the home hub is shown at ([`FabricHandle::releasable`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct Rehomed {
     hub: NodeId,
     from: Option<SocketAddr>,
     to: SocketAddr,
+    /// The hub's contact row (`first_seen_seq`) when the override was
+    /// taken; `None` (no row) never confirms the membership after a lag.
+    marker: Option<u64>,
     void: bool,
 }
 
@@ -1044,20 +1058,32 @@ impl FabricHandle {
     /// re-read (one actor call, only then) and applied instead: a record,
     /// and the daemon's half beside it, is dropped only when the fabric no
     /// longer holds it (an unpairing); a half whose record has not arrived
-    /// yet stays (module doc, "Layer 7 seams"). When that re-read fails
+    /// yet stays (module doc, "Layer 7 seams"). The same re-read runs when
+    /// `s` holds a record this handle lacks (M5c S2: a view older than an
+    /// unpairing [`FabricHandle::set_pair_link`] already folded in must not
+    /// bring the record back, or the unpairing's own event would then drop
+    /// the fresh half); a new pairing's `ENROLL_OK` costs that one call.
+    /// When that re-read fails
     /// (the fabric stopped) nothing is persisted. The pairing table and the
     /// file bytes are produced under the `persisted` lock and the file is
     /// written under `persist`, so both follow the changes in one order.
+    /// A home-hub address the §7.7 override leaves is released under
+    /// `persist`, and only when [`FabricHandle::releasable`].
     async fn on_settings(&self, s: FabricSettings) -> FabricSettings {
         let one = self.persist.lock().await;
         let mut s = s;
-        let lacks_a_record = self.persisted.lock().is_ok_and(|p| {
+        let records_differ = self.persisted.lock().is_ok_and(|p| {
+            let has =
+                |v: &[mesh111::fabric::PairedHub], n: &NodeId| v.iter().any(|x| x.node_id == *n);
             p.fabric
                 .paired_hubs
                 .iter()
-                .any(|h| !s.paired_hubs.iter().any(|x| x.node_id == h.node_id))
+                .any(|h| !has(&s.paired_hubs, &h.node_id))
+                || s.paired_hubs
+                    .iter()
+                    .any(|h| !has(&p.fabric.paired_hubs, &h.node_id))
         });
-        if lacks_a_record {
+        if records_differ {
             let Some(f) = self.fabric() else { return s };
             match f.settings().await {
                 Ok(current) => s = current,
@@ -1088,14 +1114,12 @@ impl FabricHandle {
             Err(_) => return s,
         };
         self.write_settings(&bytes);
-        drop(one);
         if let (Some(a), Some(tcp)) = (stale, self.tcp()) {
-            if !settings::holds_address(&snapshot, a)
-                && !snapshot.pairs.iter().any(|l| l.address == Some(a))
-            {
+            if self.releasable(&snapshot, a) {
                 Dialer::release(tcp, a);
             }
         }
+        drop(one);
         self.reconcile_listener(&s).await;
         self.refresh_announce(&s).await;
         self.reconcile_pair_dials().await;
@@ -1167,14 +1191,71 @@ impl FabricHandle {
         ended
     }
 
-    /// Void this run's §7.7 override unconditionally (a pump lag: the
-    /// events that could have ended it were lost).
-    fn void_rehome(&self) {
-        if let Ok(mut r) = self.rehomed.lock() {
-            if let Some(x) = r.as_mut() {
-                x.void = true;
+    /// After a pump lag (the events that could have ended this run's §7.7
+    /// override were lost): read the hub's contact row and void the
+    /// override only when the row is gone or its marker differs from the
+    /// one taken with the override ([`Rehomed`], M5c S1). The settings
+    /// half of the check (the hub at neither address) is the re-read that
+    /// follows ([`FabricHandle::apply_rehome`]). One store read, only while
+    /// an override is live. A read that fails shows no membership change
+    /// and keeps the override (its address is the hub's, verified by a
+    /// handshake; a void would drop the one dial to it); an override taken
+    /// without a marker is never confirmed (void).
+    async fn recheck_rehome_after_lag(&self) {
+        let Some(x) = self
+            .rehomed
+            .lock()
+            .ok()
+            .and_then(|r| *r)
+            .filter(|x| !x.void)
+        else {
+            return;
+        };
+        match self.hub_marker(x.hub).await {
+            Ok(now) if x.marker.is_some() && now == x.marker => return,
+            Ok(_) => {}
+            Err(e) => {
+                eprintln!("111 fabric: home-hub contact not read after the lag ({e}); kept");
+                if x.marker.is_some() {
+                    return;
+                }
             }
         }
+        if let Ok(mut r) = self.rehomed.lock() {
+            // the same override still (a replacement may have run meanwhile)
+            if let Some(y) = r.as_mut().filter(|y| y.hub == x.hub && y.to == x.to) {
+                y.void = true;
+            }
+        }
+    }
+
+    /// The membership marker of `hub` ([`Rehomed`]): its contact row's
+    /// `first_seen_seq` (a store sequence, no clock); `Ok(None)` when there
+    /// is no row, `Err` when it cannot be read.
+    async fn hub_marker(&self, hub: NodeId) -> Result<Option<u64>, String> {
+        let f = self.fabric().ok_or("the fabric is not running")?;
+        f.with_store(move |s| {
+            s.contact(hub.as_bytes())
+                .map(|c| c.map(|c| c.first_seen_seq))
+        })
+        .await
+        .map_err(|e| e.to_string())?
+        .map_err(|e| e.to_string())
+    }
+
+    /// May a dial at `address` that the §7.7 override (or its trial) used
+    /// be released beside `snapshot` (the persisted settings as just
+    /// applied)? Not while the home hub is shown at it, a configured peer
+    /// or a paired hub uses it, or a live override names it (M5c S1).
+    fn releasable(&self, snapshot: &settings::Persisted, address: SocketAddr) -> bool {
+        !settings::holds_address(snapshot, address)
+            && !snapshot.pairs.iter().any(|l| l.address == Some(address))
+            && !self
+                .rehomed
+                .lock()
+                .ok()
+                .and_then(|r| *r)
+                .is_some_and(|x| !x.void && x.to == address)
     }
 
     /// Replace the live pairing table; called under the `persisted` lock
@@ -1238,6 +1319,16 @@ impl FabricHandle {
     /// hub, a configured peer or another paired hub already uses
     /// ([`settings::pair_address_refusal`]), and beyond [`MAX_PAIRED_HUBS`]
     /// halves. The §4.6 step 5 dials follow.
+    ///
+    /// When the persisted settings hold a record for `link.node_id`, the
+    /// fabric's **current** settings are re-read first (one actor call,
+    /// only then; under `persist`) and the records it no longer holds are
+    /// dropped from the persisted ones with their halves
+    /// ([`settings::fold_dropped_records`]): an unpairing whose `Settings`
+    /// event the pump has not applied yet is applied here, so a fresh half
+    /// for a re-pairing counts as not yet recorded (kept in memory, written
+    /// with its record later) and the unpairing's late event drops nothing
+    /// (M5c S2).
     pub async fn set_pair_link(&self, link: settings::PairLink) -> Result<(), FabricError> {
         let l = self.live.as_ref().ok_or(FabricError::Stopped)?;
         if let Some(why) =
@@ -1246,11 +1337,26 @@ impl FabricHandle {
             return Err(FabricError::Invalid(why));
         }
         let one = self.persist.lock().await;
+        let held = self
+            .persisted
+            .lock()
+            .map_err(|_| FabricError::Stopped)?
+            .fabric
+            .paired_hubs
+            .iter()
+            .any(|h| h.node_id == link.node_id);
+        let current = match held {
+            true => Some(l.fabric.settings().await?.paired_hubs),
+            false => None,
+        };
         let bytes = {
             let mut p = self.persisted.lock().map_err(|_| FabricError::Stopped)?;
             if !p.fabric.hub_role {
                 return Err(FabricError::Invalid("pairing needs the hub role"));
             }
+            let folded = current
+                .as_deref()
+                .is_some_and(|c| settings::fold_dropped_records(&mut p, c));
             if let Some(why) = settings::pair_address_refusal(&p, &link) {
                 return Err(FabricError::Invalid(why));
             }
@@ -1267,7 +1373,7 @@ impl FabricHandle {
                 .paired_hubs
                 .iter()
                 .any(|h| h.node_id == link.node_id);
-            recorded.then(|| settings::encoded(&p))
+            (recorded || folded).then(|| settings::encoded(&p))
         };
         if let Some(b) = bytes {
             self.write_settings(&b);
@@ -1317,7 +1423,18 @@ impl FabricHandle {
     /// uses, and for an address a connection is already up at (M5b F4: the
     /// trial dial would be a no-op there and that connection's handshake
     /// named whichever node its own dial expected); `NoLink` while no
-    /// `tcp-lan` runs. One bounded wait on the
+    /// `tcp-lan` runs. The trial dial is released only as the daemon's own
+    /// (M5c S3, [`FabricHandle::release_trial`]): not when, after the wait,
+    /// the shown home hub, a peer, a pair or a pair dial uses the address,
+    /// or the fabric's own home-hub copy moved to it meanwhile.
+    /// A dial target the fabric alone holds there (a pairing dial in
+    /// back-off with no daemon half) is invisible to the daemon: the
+    /// adapter keeps the first dial's expected NodeId and offers no
+    /// "is this a target" query, so that residual is D8's (a mesh111
+    /// `Dialer::is_target` seam). The membership marker ([`Rehomed`]) is
+    /// read before the fabric's settings, so a forget-and-re-enrol between
+    /// the two reads leaves an old marker (the override voids on a lag)
+    /// rather than a new one over old settings. One bounded wait on the
     /// fabric's events, no poll. The fabric keeps its own copy of the old
     /// address until the next start (it has no setter); the daemon persists
     /// and shows the new one over it.
@@ -1332,6 +1449,10 @@ impl FabricHandle {
             return Err(FabricError::Invalid(why));
         }
         let _one = self.rehome.lock().await;
+        let marked = match l.fabric.settings().await?.home_hub {
+            Some(h) => (h.node_id, self.hub_marker(h.node_id).await.ok().flatten()),
+            None => return Err(FabricError::Invalid("this node has no home hub")),
+        };
         let fabric_hub = l
             .fabric
             .settings()
@@ -1362,11 +1483,11 @@ impl FabricHandle {
         let mut events = l.fabric.subscribe();
         Dialer::maintain(tcp, address, Some(fabric_hub.node_id));
         if !connected_at(tcp, &mut events, address, wait).await {
-            Dialer::release(tcp, address);
+            self.release_trial(address, fabric_hub.address).await;
             return Ok(false);
         }
         if let Err(e) = l.fabric.dial_peer(address, fabric_hub.node_id).await {
-            Dialer::release(tcp, address);
+            self.release_trial(address, fabric_hub.address).await;
             return Err(e);
         }
         let one = self.persist.lock().await;
@@ -1375,6 +1496,7 @@ impl FabricHandle {
                 hub: fabric_hub.node_id,
                 from: fabric_hub.address,
                 to: address,
+                marker: marked.1.filter(|_| marked.0 == fabric_hub.node_id),
                 void: false,
             });
         }
@@ -1393,15 +1515,42 @@ impl FabricHandle {
             Err(_) => return Ok(true),
         };
         self.write_settings(&bytes);
-        drop(one);
         if let Some(old) = shown.address {
-            if !settings::holds_address(&snapshot, old)
-                && !snapshot.pairs.iter().any(|x| x.address == Some(old))
-            {
+            if self.releasable(&snapshot, old) {
                 Dialer::release(tcp, old);
             }
         }
+        drop(one);
         Ok(true)
+    }
+
+    /// Release the §7.7 trial dial at `address` (M5c S3) unless, now, the
+    /// shown home hub, a configured peer, a paired hub or a pair dial uses
+    /// it, or the fabric's own home-hub copy moved to it during the trial
+    /// (`before`: that copy's address when the trial started; a
+    /// re-enrolment there): then the trial's `maintain` was a no-op on
+    /// that holder's target, or the holder came meanwhile, and a release
+    /// would take its dial. One settings read, only on a failed trial.
+    async fn release_trial(&self, address: SocketAddr, before: Option<SocketAddr>) {
+        let Some(tcp) = self.tcp() else { return };
+        let fabric_copy = match self.fabric() {
+            Some(f) => match f.settings().await {
+                Ok(s) => s.home_hub.and_then(|h| h.address),
+                // the fabric stopped: its dials went with it
+                Err(_) => None,
+            },
+            None => None,
+        };
+        if (fabric_copy == Some(address) && before != Some(address))
+            || self.pair_dials.lock().await.values().any(|a| *a == address)
+        {
+            return;
+        }
+        let one = self.persist.lock().await;
+        if self.releasable(&self.persisted(), address) {
+            Dialer::release(tcp, address);
+        }
+        drop(one);
     }
 
     /// Re-mint the own announce for `s` (§7.3 A8: roles, home-hub hint —
@@ -1570,12 +1719,14 @@ impl FabricHandle {
     /// the fabric's current settings re-read and applied instead
     /// ([`FabricHandle::sync_settings`]: a lost `Settings` event may have
     /// been an unpairing, whose half and dial must go), the §7.7 override
-    /// is voided, and one synthetic `Fabric` event is added: to the SSE
-    /// clients and to the tap's consumers it means "re-read everything"
-    /// (M5b F3).
+    /// is kept unless the hub's contact row shows the membership changed
+    /// (M5c S1, [`Rehomed`]; the re-read settings void it when they show
+    /// the hub at neither address), and one synthetic `Fabric` event is
+    /// added: to the SSE clients and to the tap's consumers it means
+    /// "re-read everything" (M5b F3).
     async fn pump_batch(&self, api: &ApiState, mut batch: Vec<FabricEvent>, lagged: bool) {
         if lagged {
-            self.void_rehome();
+            self.recheck_rehome_after_lag().await;
             batch.retain(|e| !matches!(e, FabricEvent::Settings(_)));
             if let Err(e) = self.sync_settings().await {
                 eprintln!("111 fabric: settings not re-read after the lag: {e}");
@@ -2467,6 +2618,151 @@ mod tests {
             .then_some(())
         })
         .await;
+        h.shutdown().await;
+    }
+
+    /// M5c S1: a pump lag alone keeps the §7.7 override and its dial (the
+    /// hub's contact row shows the same membership); a lag that hid a
+    /// forget-and-re-enrol (a new contact row) voids it, and the fabric's
+    /// own address is shown again.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_pump_lag_keeps_the_rehomed_address_unless_the_membership_changed() {
+        use mesh111::link::Link;
+        let (hd, md) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+        let (ha, ma) = (test_api(hd.path()), test_api(md.path()));
+        let hid = crate::identity::generate(&hd.path().join("identity")).unwrap();
+        let hub = start(lo_cfg(hd.path(), true), Some(hid), &ha).await;
+        let mid = crate::identity::generate(&md.path().join("identity")).unwrap();
+        let m = start(lo_cfg(md.path(), false), Some(mid), &ma).await;
+        assert!(hub.running() && m.running());
+        let at = hub.listen_addr().await.unwrap();
+        let offer = hub.fabric().unwrap().offer(Some(at)).await.unwrap();
+        m.fabric()
+            .unwrap()
+            .enroll(at, &offer.code, Some(&offer.card))
+            .await
+            .unwrap();
+        m.sync_settings().await.unwrap();
+        let hub_id = hub.sealer().unwrap().node_id();
+        let relay = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let moved = relay.local_addr().unwrap();
+        let forward = tokio::spawn(async move {
+            while let Ok((mut inbound, _)) = relay.accept().await {
+                tokio::spawn(async move {
+                    if let Ok(mut out) = tokio::net::TcpStream::connect(at).await {
+                        let _ = tokio::io::copy_bidirectional(&mut inbound, &mut out).await;
+                    }
+                });
+            }
+        });
+        let r = m
+            .replace_home_hub_address(moved, Duration::from_secs(5))
+            .await;
+        assert!(matches!(r, Ok(true)), "{r:?}");
+        let marker = m.rehomed.lock().unwrap().unwrap().marker;
+        assert!(marker.is_some(), "the membership marker is taken");
+        // a lagged batch (events lost) with the membership unchanged
+        m.pump_batch(&ma, Vec::new(), true).await;
+        assert!(m.rehomed.lock().unwrap().is_some_and(|x| !x.void));
+        assert_eq!(m.persisted().fabric.home_hub.unwrap().address, Some(moved));
+        assert!(
+            Link::peers(m.tcp().unwrap()).contains(&PeerAddr::Tcp(moved)),
+            "the verified connection to the hub is kept"
+        );
+        let st = m.status_json().await.unwrap();
+        assert_eq!(st["hub"]["address"], moved.to_string());
+        let file = std::fs::read_to_string(settings::path(&m.cfg.fabric_dir)).unwrap();
+        assert!(file.contains(&moved.to_string()), "{file}");
+        // the hub forgotten and enrolled at again at `at`, all of it lost
+        // in a lag (no event reaches the pump): a new contact row
+        let hb = *hub_id.as_bytes();
+        m.fabric()
+            .unwrap()
+            .with_store(move |s| {
+                let row = s.contact(&hb).unwrap().unwrap();
+                assert!(s.contact_forget(&hb).unwrap());
+                s.contact_upsert(&row).unwrap();
+            })
+            .await
+            .unwrap();
+        assert_ne!(m.hub_marker(hub_id).await.unwrap(), marker);
+        m.pump_batch(&ma, Vec::new(), true).await;
+        assert!(m.rehomed.lock().unwrap().is_none());
+        assert_eq!(m.persisted().fabric.home_hub.unwrap().address, Some(at));
+        let st = m.status_json().await.unwrap();
+        assert_eq!(st["hub"]["address"], at.to_string());
+        let file = std::fs::read_to_string(settings::path(&m.cfg.fabric_dir)).unwrap();
+        assert!(file.contains(&format!("\"{at}\"")), "{file}");
+        until("the override's dial released", || {
+            (!Link::peers(m.tcp().unwrap()).contains(&PeerAddr::Tcp(moved))).then_some(())
+        })
+        .await;
+        forward.abort();
+        for h in [m, hub] {
+            h.shutdown().await;
+        }
+    }
+
+    /// M5c S2: an unpairing the pump has not applied yet, then a fresh half
+    /// for a re-pairing of the same hub: the half survives the unpairing's
+    /// late `Settings` event (and an older view that still holds the
+    /// record), kept in memory until its record arrives.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_re_pairing_half_survives_the_unpairings_late_event() {
+        use mesh111::fabric::{PairRole, PairVia, PairedHub};
+        let dir = tempfile::tempdir().unwrap();
+        let api = test_api(dir.path());
+        let identity = crate::identity::generate(&dir.path().join("identity")).unwrap();
+        let far = NodeId::from([0xb0; 32]);
+        let fabric_dir = dir.path().join(FABRIC_DIR);
+        std::fs::create_dir_all(&fabric_dir).unwrap();
+        let file = settings::Persisted {
+            fabric: FabricSettings {
+                hub_role: true,
+                paired_hubs: vec![PairedHub {
+                    node_id: far,
+                    role: PairRole::Peer,
+                    via: PairVia::Tcp,
+                    ours: true,
+                    theirs: true,
+                }],
+                ..FabricSettings::default()
+            },
+            ..settings::Persisted::default()
+        };
+        settings::save(&fabric_dir, &file).unwrap();
+        let h = start(lo_cfg(dir.path(), true), Some(identity), &api).await;
+        assert!(h.running(), "{:?}", h.down_reason());
+        let at = |a: &str| settings::PairLink {
+            address: Some(a.parse().unwrap()),
+            ..settings::PairLink::new(far)
+        };
+        h.set_pair_link(at("127.0.0.1:9")).await.unwrap();
+        let older = h.fabric().unwrap().settings().await.unwrap();
+        // the pump is held back: no event of the fabric is applied
+        if let Ok(mut t) = h.tasks.lock() {
+            for j in t.drain(..) {
+                j.abort();
+            }
+        }
+        assert!(h.fabric().unwrap().unpair(far).await.unwrap());
+        assert_eq!(h.persisted().fabric.paired_hubs.len(), 1, "not applied yet");
+        h.set_pair_link(at("127.0.0.1:30")).await.unwrap();
+        assert!(
+            h.persisted().fabric.paired_hubs.is_empty(),
+            "the unpairing folded in"
+        );
+        let on_disk = || std::fs::read_to_string(settings::path(&fabric_dir)).unwrap();
+        assert!(!on_disk().contains("paired_hubs"), "{}", on_disk());
+        let late = h.fabric().unwrap().settings().await.unwrap();
+        assert!(late.paired_hubs.is_empty());
+        h.on_settings(older).await;
+        h.on_settings(late).await;
+        let table = h.pair_table().read().unwrap().clone();
+        assert_eq!(table, vec![at("127.0.0.1:30")], "the fresh half survives");
+        assert_eq!(h.persisted().pairs, table);
+        assert!(h.persisted().fabric.paired_hubs.is_empty());
+        assert!(!on_disk().contains("paired_hubs"), "{}", on_disk());
         h.shutdown().await;
     }
 
