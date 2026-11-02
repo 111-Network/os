@@ -52,10 +52,21 @@ WAVE 0 LANDED (read the files, not this summary, before you rely on a name):
 - node111 manifest (L1): \`ChannelManifest::parse_verified\` (same signature) walks the keychain from the compiled key (T2), verifies under the highest
   generation reached, refuses any channel but \`STABLE_CHANNEL\` (T1), cuts the keychain to the generations walked and exposes \`trusted_generation()\`;
   caps \`MANIFEST_MAX_BYTES\`, \`SIGNATURE_MAX_BYTES\`, \`KEYCHAIN_MAX\`; fixtures \`tests/fixtures/l7-L1/\`.
+- node111 updater (L2): \`fetch::Origin::{HomeHub {base}, Internet {base}, Dir {path}, Url {base}}\`, \`Origin::home_hub(host) -> Option<Origin>\` (IP literal or
+  plain DNS name → \`http://<host>:11180/origin/v1/\`), \`Origin::{kind(), label(), is_internet()}\`; \`UpdaterConfig.check_internet\` (default true; static
+  until D10/L4 wire it), \`UpdaterConfig::{internet_origins(), visible_order(home_hub: Option<Origin>)}\`; \`fetch::check_origins(cfg, layout, &[Origin],
+  LockWait::{Wait, NoWait}) -> FetchOutcome\` (\`Held\` on a NoWait take of a held lock, \`NoOrigin\` on an empty list, \`AlreadyStaged\` when the run it
+  waited for staged the same release); \`check_once\` = the internet bases under Wait; \`stage::StagingLock::{acquire(state_dir, wait) -> LockTake,
+  waited()}\` (\`state/staging.lock\`, flock, O_CLOEXEC | O_NOFOLLOW, 0600); the blob rule (a non-internet origin fetches \`blob/<sha256>\`, never
+  \`payload.url\`); T3 (\`min-upgrade-from\` above the installed release ⇒ Refused before any payload); the per-origin record
+  \`state/update-origins.json\` (\`fetch::origin_records(state_dir) -> Vec<OriginRecord {kind, origin, answer, release, newest_seen, detail, at}>\`;
+  internet bases keep \`last-update-check.json\`); \`UpdaterStatus::settle()\`; \`util::http::{check_url(url, Option<HttpException>) -> Result<Scheme,
+  UrlRefused>, HttpException::{HomeHubOrigin, UserTypedFrom}, Fetcher::allowing_http(e), Fetcher::get_capped(url, max), is_not_found(&err)}\` (T6:
+  https:// always; http:// to a loopback IP literal, or to any host under a typed exception; no redirect on http://, https-only redirects on https://).
 WAVE0_FACTS_PENDING: M4 (fabric: the widened gate, PairedHub in FabricSettings, FabricEvent::Forward, the hand-off API, set_carrier_max_frame),
 M5 (node111 fabric/settings paired_hubs, the tap in FabricHandle::publish, TcpLanConfig.wrap from relay::tls::wrap(), the home-hub address call, the
-X25519 behind the identity handle), D1 (N/relay/settings.rs: load/save/typed accessors/view), L2 (updater: staging lock, origins list, check_internet,
-the http:// exception), L3 (helper guard) — the lead replaces this line with their as-built names before the launch.
+X25519 behind the identity handle), D1 (N/relay/settings.rs: load/save/typed accessors/view), L3 (helper guard) — the lead replaces this line with
+their as-built names before the launch.
 `
 
 const CTX = `
