@@ -491,10 +491,60 @@ may pin later); a CD workflow now (needs the musl toolchains on the runner, a re
 - **Why:** the owner took the lead's picks and defaults as presented; each is the lightest shape that keeps the Pi floor (nothing resident, no timer, no poll on a non-hub node; hub-only costs measured), adopts before it builds (ntfy through the existing client, rustls already in the lock, the KB's own prototype rule), keeps Layer 5's evidence honest (`relayed` only where a node durably holds the item) and never contacts 111's own servers for a liveness fact.
 - **Next:** spec `7-relay/README.md` v0.1 (opus draft) → three fable judges → lead triage → amendments and one fable re-check (the next entry) → lock → `7-relay/TASKS.md` → build per `EXECUTION.md`, the ntfy carrier prototype first.
 
+## D31 — Layer 7 spec amendments after the fable panel: refused forward rows and a per-origin Transit share, the honest no-hint ack, a staging lock, read-only code seams beside the twelve
+
+- **Date:** 2026-11-02
+- **Context:** draft v0.1 (`30ffc1d`) went to three fable judges (custody · carriers · integration), all **amend-then-lock**: four blockers,
+  seventeen majors, forty minors, beside the drafter's eleven recorded deviations and three questions. The lead's triage
+  (`plan/layers/7-relay/review/triage.md`) accepts every finding (six with the lead's variation) and lists six forks for the owner. The owner's
+  standing instruction for this layer is "go with defaults you picked for layer 7" (D30); each fork below is therefore applied in v0.2 as the lead
+  recommends and is listed under Pending until the owner confirms or flips it (a flip lands as v0.3 before the lock, or as a lock amendment).
+- **Decision (lead, under the owner's standing instruction; owner to confirm):**
+  - **(1) One code seam for TLS raw public keys (Q1, drafter D1).** Wrapping hub-to-hub `tcp-lan` in TLS 1.3 needs the `serve` stream parameter
+    of mesh111's tcp-lan adapter generalised to any async stream: no wire byte changes, no new spec text in Layer 5. Recorded in the spec's §4.4
+    and §19 as a *code seam*, not a thirteenth Layer 5 spec amendment. Flip: internet pairing is tunnel-only in v1 and TLS-RPK moves to v1.1.
+  - **(2) Byte-identical code seams beside the twelve (Q2, panel I1/I9/C9).** The twelve items of D30 (F5) are the Layer 5 *spec* amendments;
+    read-only or byte-identical code seams a Layer 7 feature needs (a `Fabric::attributed_on(peer)` accessor so Nearby can say "on the LAN"
+    versus "through the hub"; the `PairedHub {node_id, role, via}` record inside amendment 10; the role-bit names living in node111's sealer
+    beside `appdata`) are listed in §19 and in the lock entry, each marked read-only or byte-identical. Flip: one `111` fact per contact with
+    the transport unknown, and no accessor.
+  - **(3) A hub's own messages cross islands only through its own home hub in v1 (Q3, panel C4).** An always-on hub with no home hub sees
+    `queued` for off-island contacts; the own-send route into the hub's own forward table is v1.1 beside the own-send carrier route (D30 Q20).
+    Flip: a thirteenth Layer 5 change in v1.
+  - **(4) The sealed registry query is pinned now, built in v1.1 (Q4, drafter D6).** Two control kinds reserved; until then a member learns a
+    hub's gateway willingness only from the enrol offer and from the `forwarding` reason (panel I5). Flip: build it in v1.
+  - **(5) Two hubs meet once over `tcp-lan` to pair (Q5, drafter D10, panel S22).** The same LAN, a tunnel or one public address; afterwards
+    they may talk only through a carrier; the second `ENROLL` rides the connection the first hub opened. Flip: pairing over a carrier, which
+    needs a new payload form.
+  - **(6) Refused forward rows end, and the Transit pool has a per-origin share (Q6, panel C1).** A forward row every reachable target refused
+    is marked `refused` (committed, evictable, counted in the fabric status; the member keeps `relayed` and the spec says what that means);
+    each origin (member or paired hub) may hold at most `quota.transit / 8` of Transit (16 MiB of the 128 MiB default) before its puts get
+    `REJECT_FULL`; protected Transit rows count toward the high watermark. Within F4; the lead sees no flip worth writing.
+  - **(7) Everything the triage marks ✅ or ✅\*** goes into draft v0.2: the honest no-hint ack (hold and `ACCEPTED` when any target exists,
+    `REJECT_UNKNOWN_DEST` when none; "held and will be offered", never "found"); a `state/staging.lock` for the updater loop and `111 update
+    --from` (exit 75 when held); complementary pair roles enforced at pairing (`409 pair_role_mismatch`); re-posts only on a newer far-hub frame,
+    Flush now or a since-miss, counted; acks consumed on take and never retried; the prune-class rules by `fwd` named at their lines; the
+    `mdns-sd` re-arm procedure and its bind-failure fallback; the origin base on the dashboard port and the `blob/<sha256>` fetch for hub and
+    `--from` origins; the carrier's own `ureq::Agent`, 5A in `spawn_blocking`, 5B on one named thread with a threads row in the weight table;
+    every Layer 7 consent in the pinned `ConsentRequired` shape with four appended actions; `needs_hub` and four appended error codes with the
+    six-item pin list; the heartbeat switch visible and inert in v1 (every transport `409 no_such_transport`, `rns` pointed at the bridge
+    settings); members-only gateway advertisement in v1; a human-only `POST /nearby/hops` for the `rnpath` read; and the forty minors.
+  - **Numbers kept as the lead's defaults (the owner may change any):** Termux fallback poll 15 min · ntfy `cache-duration` 168 h · epoch origin
+    day 2026-01-01 · no-timer gate pass line 1.10 × the first recorded baseline · DNS-SD browse window 5 s · Transit 128 MiB, per-origin 16 MiB.
+- **Rejected:** a thirteenth Layer 5 spec amendment for any of the above · a hub's own-send forward route in v1 · pairing over a carrier · a
+  global Transit pool with no per-origin share · a forward row that lives forever · an ack retried through a carrier · per-transport evidence
+  invented where the fabric's events carry no route.
+- **Why:** the panel's blockers were seams and honesty gaps, not design; every fix above is the fail-closed, lighter reading that keeps D30's
+  scope (nothing resident on a non-hub node, hub-only costs measured, Layer 5 amended additively by the twelve) and keeps the evidence the UI
+  shows true to what the code can know.
+- **Next:** v0.2 (one spec editor) → one fable re-check (`review/recheck.md`) → the lock entry (D32) → `7-relay/TASKS.md` → build, the ntfy
+  carrier prototype first.
+
 ## Pending
 
 - Move deep architecture content out of `os/README.md` into per-layer specs (Layers 0–6 have their homes; the README's Layer 7–9 content waits for theirs).
 - **Layer 0 hook activation** — owner chose to leave it off (D17); `build.py --check` stays manual per task.
 - **Release source offer** — the release checklist must publish the tagged Corresponding Source beside every binary release (D22; `LICENSING.md` section 8).
 - **Layer 6 owner questions** (D29 "Open at the lock" and the board Summary's owner-question list), among them the `[install] prefetch` default for the 104 MB Delta Chat + Madmail payloads, the LXMF helper's licence contact with upstream, the additive `superseded_by` field and the synchronous paired-LAN posture PATCH.
-- **Layer 7 (Relay & Presence) spec in draft** (D30, 2026-11-01: the owner took every pick and default of `plan/layers/7-relay/options.md`) — next `7-relay/README.md` v0.1 → fable panel → amendments → lock → `7-relay/TASKS.md`; no Layer 7 build task before the lock.
+- **Layer 7 (Relay & Presence) spec in amendment** (D30 picks, D31 amendments after the panel) — v0.2 → one fable re-check → lock (D32) → `7-relay/TASKS.md`; no Layer 7 build task before the lock.
+- **Layer 7 owner questions (D31, applied as the lead recommends until answered):** (1) the tcp-lan stream seam for TLS-RPK as a code seam, or tunnel-only pairing in v1; (2) byte-identical code seams listed beside the twelve, or no `attributed_on` accessor; (3) a hub's own messages cross islands only via its home hub in v1; (4) the sealed registry query in v1.1; (5) hubs meet once over tcp-lan to pair; (6) refused forward rows end and Transit has a per-origin share.
