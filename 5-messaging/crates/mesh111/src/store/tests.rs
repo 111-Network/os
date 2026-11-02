@@ -3445,6 +3445,71 @@ fn custody_splits_by_fwd_between_custody_and_transit() {
     assert_eq!(s.custody_stats().unwrap().0, 6);
 }
 
+/// Layer 7 §5.9 (M4c): the forwarder's page query reads the rows'
+/// heads, the same rows in the same order as `forward_pending`, with the
+/// item's length and never its bytes.
+#[test]
+fn forward_heads_page_like_forward_pending_without_the_bytes() {
+    let (_t, mut s) = ready();
+    let member = accepted(s.custody_put(&PEER, &[1; 1000]).unwrap());
+    let f1 = accepted(
+        s.custody_put_fwd(&STRANGER, &[2; 2000], Fwd::FromMember(PEER))
+            .unwrap(),
+    );
+    let f2 = accepted(
+        s.custody_put_fwd(&PEER2, &[3; 3000], Fwd::FromLeaf(LEAF))
+            .unwrap(),
+    );
+    let f3 = accepted(
+        s.custody_put_fwd(&STRANGER, &[4; 500], Fwd::FromCarrier(CARRIER))
+            .unwrap(),
+    );
+    assert!(s.forward_commit(f2).unwrap());
+    let heads = s.forward_pending_lens(0, 10).unwrap();
+    assert_eq!(
+        heads,
+        vec![
+            ForwardHead {
+                custody_seq: f1,
+                dest: STRANGER,
+                pkt_ref: crate::custody::pkt_ref(&[2; 2000]),
+                len: 2000,
+                fwd: Fwd::FromMember(PEER),
+            },
+            ForwardHead {
+                custody_seq: f3,
+                dest: STRANGER,
+                pkt_ref: crate::custody::pkt_ref(&[4; 500]),
+                len: 500,
+                fwd: Fwd::FromCarrier(CARRIER),
+            },
+        ],
+        "protected forward rows only: no member row, no committed one"
+    );
+    let full = s.forward_pending(0, 10).unwrap();
+    assert_eq!(
+        full.iter()
+            .map(|i| (
+                i.custody_seq,
+                i.dest,
+                i.pkt_ref,
+                i.bytes.len() as u64,
+                i.fwd
+            ))
+            .collect::<Vec<_>>(),
+        heads
+            .iter()
+            .map(|h| (h.custody_seq, h.dest, h.pkt_ref, h.len, h.fwd))
+            .collect::<Vec<_>>(),
+        "the same rows as forward_pending"
+    );
+    // `after` is exclusive and `limit` pages.
+    assert_eq!(s.forward_pending_lens(f1, 1).unwrap()[0].custody_seq, f3);
+    assert_eq!(s.forward_pending_lens(0, 1).unwrap().len(), 1);
+    assert!(s.forward_pending_lens(f3, 10).unwrap().is_empty());
+    assert!(s.forward_pending_lens(member, 0).unwrap().is_empty());
+}
+
 #[test]
 fn the_transit_quota_defaults_to_a_quarter_and_the_share_to_an_eighth() {
     let (_t, mut s) = ready();

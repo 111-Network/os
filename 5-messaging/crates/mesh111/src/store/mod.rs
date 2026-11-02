@@ -59,8 +59,9 @@ pub use foreign::{
 };
 pub use prune::{DiskSpace, PruneReport, PruneStep, PrunedItem, PrunedRef, Watermarks};
 pub use rows::{
-    Class, ContactRow, CustodyItem, CustodyPut, Dir, ForwardItem, Fwd, MessageRow, MsgState,
-    NewMessage, OutboxFrag, RequestPut, RequestRefusal, ThreadCounts, Trust, FWD_FROM_LEN,
+    Class, ContactRow, CustodyItem, CustodyPut, Dir, ForwardHead, ForwardItem, Fwd, MessageRow,
+    MsgState, NewMessage, OutboxFrag, RequestPut, RequestRefusal, ThreadCounts, Trust,
+    FWD_FROM_LEN,
 };
 pub use rx::{FragOffer, Offer, Partial, PartialRef, RxEpoch};
 pub use tx::Seq;

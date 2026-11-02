@@ -543,6 +543,21 @@ pub struct ForwardItem {
     pub committed: bool,
 }
 
+/// The head of a protected forward row (Layer 7 §5.9): what the
+/// forwarder's resident window keeps of a row it pages in, without the
+/// item's bytes (`len` is `length(bytes)`, read by SQLite; the blob itself
+/// is read only when the row is put, [`Store::forward_item`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ForwardHead {
+    pub custody_seq: u64,
+    pub dest: [u8; 32],
+    pub pkt_ref: [u8; 16],
+    /// The item's sealed bytes.
+    pub len: u64,
+    /// Never [`Fwd::Member`].
+    pub fwd: Fwd,
+}
+
 /// The store's answer to filing a message request (§7.2 (3)).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RequestPut {
@@ -1339,6 +1354,51 @@ impl Store {
         let mut out = Vec::new();
         for r in rows {
             out.push(forward_item(r?)?);
+        }
+        Ok(out)
+    }
+
+    /// [`Store::forward_pending`]'s rows as heads: the same rows in the
+    /// same order, with the item's length instead of its bytes (Layer 7
+    /// §5.9: the forwarder pages its window from here, so a page of large
+    /// Transit items never reads the blobs).
+    pub fn forward_pending_lens(&self, after: u64, limit: usize) -> Result<Vec<ForwardHead>> {
+        let mut st = self.conn.prepare(
+            "SELECT custody_seq, dest, pkt_ref, length(bytes), fwd, fwd_from FROM custody
+             WHERE fwd != 0 AND committed = 0 AND custody_seq > ?1
+             ORDER BY custody_seq LIMIT ?2",
+        )?;
+        let rows = st.query_map(
+            params![
+                to_i64(after, "custody_seq")?,
+                i64::try_from(limit).unwrap_or(i64::MAX)
+            ],
+            |r| {
+                Ok((
+                    r.get::<_, i64>(0)?,
+                    r.get::<_, Vec<u8>>(1)?,
+                    r.get::<_, Vec<u8>>(2)?,
+                    r.get::<_, i64>(3)?,
+                    r.get::<_, i64>(4)?,
+                    r.get::<_, Option<Vec<u8>>>(5)?,
+                ))
+            },
+        )?;
+        let mut out = Vec::new();
+        for r in rows {
+            let (seq, dest, pkt_ref, len, fwd, from) = r?;
+            let fwd = Fwd::from_parts(fwd, from)?;
+            if !fwd.is_forward() {
+                return Err(StoreError::Corrupt("custody.fwd"));
+            }
+            out.push(ForwardHead {
+                custody_seq: to_u64(seq, "custody_seq")?,
+                dest: id32(dest, "custody.dest")?,
+                pkt_ref: <[u8; 16]>::try_from(pkt_ref.as_slice())
+                    .map_err(|_| StoreError::Corrupt("custody.pkt_ref"))?,
+                len: to_u64(len, "custody.bytes")?,
+                fwd,
+            });
         }
         Ok(out)
     }

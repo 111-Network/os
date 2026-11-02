@@ -11,11 +11,14 @@
 //! (`tests/hub_flow.rs` stays unchanged and green). The M4b fixes: wholeness
 //! recorded (a former member pairs, a member code records no pair), no
 //! pairing dial kept once whole, the hub role switch, re-post rule (1)'s
-//! once-bound, a replayed or misdirected pair ack, the resident window and
-//! the forwarder's linear work.
+//! bound, a replayed or misdirected pair ack, the resident window and
+//! the forwarder's linear work. The M4c fixes: the window shared fairly (a
+//! down pair's backlog never holds back an up pair's rows), `Forward` on a
+//! far frame with a post outstanding, rule (1) once per far-hub round.
 
 mod common;
 
+use std::collections::HashSet;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -1548,8 +1551,62 @@ async fn with_the_hub_role_off_pairs_wait_and_nothing_is_forwarded() {
 /// M4b: §5.9 re-post rule (1) is applied at the take after the drain was
 /// handed in (the drain's own acks commit first, nothing is re-armed in
 /// between) and re-arms a post at most once in its life.
+/// The `FabricEvent::Forward`s for `target` among `events`.
+fn forwards(events: &[FabricEvent], target: &Node) -> Vec<u32> {
+    let id = target.id();
+    events
+        .iter()
+        .filter_map(|e| match e {
+            FabricEvent::Forward { target, pending } if *target == id => Some(*pending),
+            _ => None,
+        })
+        .collect()
+}
+
+/// The `Forward`s for `target` that `f` emits once its ticks settled: an
+/// API reply can precede the end of the tick that emits (the events of a
+/// tick go out after its batch), so this waits for the first one (up to
+/// 5 s) and then collects what follows over a few more ticks.
+async fn forwards_settled(
+    f: &Fabric,
+    rx: &mut tokio::sync::broadcast::Receiver<FabricEvent>,
+    target: &Node,
+) -> Vec<u32> {
+    let mut got = Vec::new();
+    for _ in 0..250 {
+        f.status().await.unwrap();
+        got.extend(forwards(&drain_events(rx), target));
+        if !got.is_empty() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    for _ in 0..5 {
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        f.status().await.unwrap();
+        got.extend(forwards(&drain_events(rx), target));
+    }
+    got
+}
+
+/// Take what G owes G′ and report every put `Taken`.
+async fn take_posted(g: &Node, g2: &Node) -> Vec<mesh111::fabric::CarrierFrame> {
+    let out = g.f.forward_take(g2.id(), 8).await.unwrap();
+    for p in &out {
+        if let Some(seq) = p.custody_seq {
+            g.f.forward_done(seq, ForwardDone::Taken).await.unwrap();
+        }
+    }
+    out
+}
+
+/// §5.9 re-post rule (1) (M4b, M4c): a verified far frame after a post
+/// marks it; the re-arm waits for the take after the drain (a drain's own
+/// acks commit first); one re-post per row per far-hub round, never two
+/// within one round, and a new round (a far frame after the re-post with
+/// no ack for it) allows one more.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn rule_1_re_arms_a_post_once_after_the_drain() {
+async fn rule_1_re_arms_a_post_once_per_far_hub_round() {
     let d = Dirs::new();
     let g = hub(&d, "hub-g").await;
     let g2 = hub(&d, "hub-g2").await;
@@ -1565,13 +1622,8 @@ async fn rule_1_re_arms_a_post_once_after_the_drain() {
     for i in 1..=4u8 {
         assert_eq!(raw.put(&y.id(), &item(i, 300), hint).await, Accepted);
     }
-    let posts = g.f.forward_take(g2.id(), 8).await.unwrap();
+    let posts = take_posted(&g, &g2).await;
     assert_eq!(posts.len(), 4);
-    for p in &posts {
-        g.f.forward_done(p.custody_seq.unwrap(), ForwardDone::Taken)
-            .await
-            .unwrap();
-    }
     // G′ takes the first three; their acks come back in one drain.
     for p in &posts[..3] {
         g2.f.carrier_inbound(g.id(), p.bytes.clone()).await.unwrap();
@@ -1582,47 +1634,104 @@ async fn rule_1_re_arms_a_post_once_after_the_drain() {
     for a in &acks {
         g.f.carrier_inbound(g2.id(), a.bytes.clone()).await.unwrap();
     }
-    // Two calls: the drain's ticks have flushed and emitted by then.
-    g.f.status().await.unwrap();
-    g.f.status().await.unwrap();
-    assert!(
-        !drain_events(&mut gev)
-            .iter()
-            .any(|e| matches!(e, FabricEvent::Forward { .. })),
+    assert_eq!(
+        forwards_settled(&g.f, &mut gev, &g2).await.len(),
+        1,
+        "the far frame tells the carrier once that a post is owed again"
+    );
+    assert_eq!(
+        pair_view(&g.f, &g2).await.reposts,
+        0,
         "nothing re-armed while the drain is handed in"
     );
     for i in 1..=3u8 {
         assert!(row(&g.f, &item(i, 300)).await.unwrap().committed);
     }
-    // The next take: the fourth post, unacknowledged, re-armed once.
-    let re = g.f.forward_take(g2.id(), 8).await.unwrap();
+    // Round 1: the take re-arms the fourth post, unacknowledged, once.
+    let re = take_posted(&g, &g2).await;
     assert_eq!(re.len(), 1);
     assert_eq!(re[0].custody_seq, posts[3].custody_seq);
-    g.f.forward_done(re[0].custody_seq.unwrap(), ForwardDone::Taken)
-        .await
-        .unwrap();
     assert_eq!(pair_view(&g.f, &g2).await.reposts, 1);
-    // Another far frame (the ack of a fifth put): rule (1) is spent for
-    // the fourth, so the take after it returns nothing.
-    assert_eq!(raw.put(&y.id(), &item(5, 300), hint).await, Accepted);
-    let fifth = g.f.forward_take(g2.id(), 8).await.unwrap();
-    assert_eq!(fifth.len(), 1);
-    g.f.forward_done(fifth[0].custody_seq.unwrap(), ForwardDone::Taken)
+    // Never twice within the round: flushes while G′ is silent, and a
+    // replayed (stale) far frame, post nothing again.
+    assert!(take_posted(&g, &g2).await.is_empty(), "never twice");
+    g.f.carrier_inbound(g2.id(), acks[0].bytes.clone())
         .await
         .unwrap();
+    assert!(
+        take_posted(&g, &g2).await.is_empty(),
+        "a stale frame is no round"
+    );
+    assert_eq!(pair_view(&g.f, &g2).await.reposts, 1);
+    // Round 2: G′ flushes again after the re-post (the ack of a fifth
+    // put, none for the fourth): the fourth may be re-posted once more.
+    assert_eq!(raw.put(&y.id(), &item(5, 300), hint).await, Accepted);
+    let fifth = take_posted(&g, &g2).await;
+    assert_eq!(fifth.len(), 1, "only the new put: the fourth waits");
     g2.f.carrier_inbound(g.id(), fifth[0].bytes.clone())
         .await
         .unwrap();
     for a in g2.f.forward_take(g.id(), 8).await.unwrap() {
         g.f.carrier_inbound(g2.id(), a.bytes).await.unwrap();
     }
+    assert!(row(&g.f, &item(5, 300)).await.unwrap().committed);
+    let re2 = take_posted(&g, &g2).await;
+    assert_eq!(re2.len(), 1, "one re-post in the second round");
+    assert_eq!(re2[0].custody_seq, posts[3].custody_seq);
+    assert_eq!(pair_view(&g.f, &g2).await.reposts, 2);
     assert!(
-        g.f.forward_take(g2.id(), 8).await.unwrap().is_empty(),
-        "never twice"
+        take_posted(&g, &g2).await.is_empty(),
+        "never twice in it either"
     );
-    assert_eq!(pair_view(&g.f, &g2).await.reposts, 1);
+    assert_eq!(pair_view(&g.f, &g2).await.reposts, 2);
     // "Flush now" (rule (2)) still re-arms it.
     assert_eq!(g.f.forward_repost(g2.id()).await.unwrap(), 1);
+}
+
+/// M4c (§5.9 rule (1)): a drain carrying only acks for other rows emits a
+/// `Forward` for the pair when a post is still unacknowledged after it,
+/// so the re-post does not wait for an unrelated trigger.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_far_frame_with_a_post_outstanding_emits_forward() {
+    let d = Dirs::new();
+    let g = hub(&d, "hub-g").await;
+    let g2 = hub(&d, "hub-g2").await;
+    pair(&g, &g2, PairRole::Peer, PairVia::Carrier).await;
+    for h in [&g, &g2] {
+        h.f.set_carrier_max_frame(Some(3_068)).await.unwrap();
+    }
+    let m = member(&d, "mary", &g, false).await;
+    let y = member(&d, "yuri", &g2, false).await;
+    y.t.release(g2.addr);
+    let mut raw = Raw::open(g.addr, &m.ident, &g).await;
+    let hint = Some([0xEE; DEST_HUB_LEN]);
+    for i in 1..=3u8 {
+        assert_eq!(raw.put(&y.id(), &item(i, 300), hint).await, Accepted);
+    }
+    let posts = take_posted(&g, &g2).await;
+    assert_eq!(posts.len(), 3);
+    for p in &posts[..2] {
+        g2.f.carrier_inbound(g.id(), p.bytes.clone()).await.unwrap();
+    }
+    let acks = g2.f.forward_take(g.id(), 8).await.unwrap();
+    assert_eq!(acks.len(), 2, "acks for R1 and R2 only");
+    let mut gev = g.f.subscribe();
+    for a in &acks {
+        g.f.carrier_inbound(g2.id(), a.bytes.clone()).await.unwrap();
+    }
+    let ev = forwards_settled(&g.f, &mut gev, &g2).await;
+    assert_eq!(ev.len(), 1, "one Forward for the pair: {ev:?}");
+    assert!(ev[0] >= 1);
+    let re = take_posted(&g, &g2).await;
+    assert_eq!(re.len(), 1);
+    assert_eq!(re[0].custody_seq, posts[2].custody_seq, "R3 re-armed");
+    // Nothing owed after it: a silent far hub gets no further event.
+    let mut gev = g.f.subscribe();
+    assert!(take_posted(&g, &g2).await.is_empty());
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    g.f.status().await.unwrap();
+    g.f.status().await.unwrap();
+    assert!(forwards(&drain_events(&mut gev), &g2).is_empty());
 }
 
 /// M4b: a pair's `CUSTODY_ACK` is read only fresh, on a connection
@@ -1743,4 +1852,107 @@ async fn target_computations_stay_linear_in_a_1000_row_drain() {
         spent <= 3 * u64::from(N),
         "{spent} target computations for {N} rows"
     );
+}
+
+/// The `numbered` index of every distinct item `from` put to `to` for
+/// `dest`, in the order of their first put.
+fn first_puts(from: &Node, to: &Node, dest: &NodeId) -> Vec<u32> {
+    let mut seen = HashSet::new();
+    puts(from, to)
+        .into_iter()
+        .filter(|(d, _, _)| d == dest)
+        .filter_map(|(_, it, _)| {
+            let i = u32::from_le_bytes(it.get(1..5)?.try_into().ok()?);
+            seen.insert(i).then_some(i)
+        })
+        .collect()
+}
+
+/// M4c (§5.5): the resident window is shared fairly. With B away, 5,000
+/// rows whose turn is B fill the window and the store; rows for a dest
+/// behind C (up) are still delivered while B is down, each in place of
+/// one of B's newest resident rows (evicted to the store, never refused);
+/// when B comes back every row for B is delivered too, each target's in
+/// custody order, none lost or duplicated.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_down_pairs_backlog_never_holds_back_an_up_pairs_rows() {
+    let d = Dirs::new();
+    let a = hub(&d, "hub-a").await;
+    let b = hub(&d, "hub-b").await;
+    let c = hub(&d, "hub-c").await;
+    pair(&a, &b, PairRole::Peer, PairVia::Tcp).await;
+    pair(&a, &c, PairRole::Peer, PairVia::Tcp).await;
+    let m = member(&d, "mary", &a, false).await;
+    let dd = member(&d, "dave", &b, false).await;
+    let cc = member(&d, "carl", &c, false).await;
+    dd.t.release(b.addr);
+    cc.t.release(c.addr);
+    // One row for Carl while both are up: B (first in the probe order)
+    // refuses it and C takes it, so the hit cache names C for Carl (the
+    // stored rows are judged without their hint).
+    let warm = numbered(1_000_000);
+    let mut raw = Raw::open(a.addr, &m.ident, &a).await;
+    assert_eq!(raw.put(&cc.id(), &warm, None).await, Accepted);
+    until(10, || async {
+        row(&a.f, &warm).await?.committed.then_some(())
+    })
+    .await;
+    b.t.release(a.addr);
+    until(10, || async {
+        (!pair_view(&a.f, &b).await.reachable).then_some(())
+    })
+    .await;
+    const N: u32 = 5_000;
+    const K: u32 = 200;
+    let for_b: Vec<Vec<u8>> = (0..N).map(numbered).collect();
+    assert_eq!(raw.blast(&dd.id(), &for_b).await, N as usize);
+    assert_eq!(protected(&a.f).await, u64::from(N));
+    assert_eq!(
+        pair_view(&a.f, &b).await.pending as usize,
+        FORWARD_RESIDENT,
+        "B's rows fill the window; the rest is in the store"
+    );
+    let for_c: Vec<Vec<u8>> = (N..N + K).map(numbered).collect();
+    let raw = Raw::open(a.addr, &m.ident, &a).await;
+    assert_eq!(raw.blast(&cc.id(), &for_c).await, K as usize);
+    // Carl's rows reach C while B is still away.
+    until(60, || async {
+        (protected(&a.f).await == u64::from(N)).then_some(())
+    })
+    .await;
+    assert!(!pair_view(&a.f, &b).await.reachable, "B is still away");
+    assert_eq!(
+        c.f.status().await.unwrap().custody.0,
+        u64::from(K) + 1,
+        "C holds each of Carl's rows once"
+    );
+    // B's evicted rows page back in as C's commits free room (page-in
+    // skips nothing), so B's resident count is bounded by the window only.
+    let at_b = pair_view(&a.f, &b).await.pending as usize;
+    assert!(
+        at_b <= FORWARD_RESIDENT,
+        "B's rows stay within the window: {at_b}"
+    );
+    assert_eq!(
+        first_puts(&a, &c, &cc.id()),
+        [1_000_000].into_iter().chain(N..N + K).collect::<Vec<_>>(),
+        "C got Carl's rows in custody order, once each"
+    );
+    // B comes back: everything for B, in custody order, once each.
+    b.t.maintain(a.addr, Some(a.id()));
+    until(300, || async { (protected(&a.f).await == 0).then_some(()) }).await;
+    assert_eq!(
+        b.f.status().await.unwrap().custody.0,
+        u64::from(N),
+        "B holds each of Dave's rows once"
+    );
+    assert_eq!(
+        first_puts(&a, &b, &dd.id()),
+        (0..N).collect::<Vec<_>>(),
+        "B got Dave's rows in custody order"
+    );
+    let st = a.f.status().await.unwrap();
+    assert_eq!(st.counters.forward_refused, 0, "evicted, never refused");
+    assert_eq!(pair_view(&a.f, &b).await.pending, 0);
+    assert_eq!(pair_view(&a.f, &c).await.pending, 0);
 }

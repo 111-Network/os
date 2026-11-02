@@ -291,14 +291,32 @@
 //!   forward rows live in memory (about 250 B each with the indexes: ≈ 1 MB
 //!   at most, hubs only). The first window is read at start; rows beyond it
 //!   wait in the store, "not yet offered", and are paged in custody order
-//!   (`Store::forward_pending`, one read per `FORWARD_LOAD_PAGE` rows) as
-//!   resident rows leave. A row held while the window is full (or while
-//!   rows wait before it) goes to the store only, so it is offered after
-//!   the rows ahead of it, without its hint, as after a restart. The view's
-//!   `pending` counts resident rows; `Store::forward_stats` has the totals.
-//!   A target that is down keeps its rows resident, so a window full of
-//!   rows for down targets holds back the rows behind it until they move
-//!   (a reading recorded for the lead). A non-hub node holds the empty
+//!   from the paging floor (`Store::forward_pending_lens`: row heads with
+//!   the item's length, never the blobs; one read per `FORWARD_LOAD_PAGE`
+//!   rows) as resident rows leave; a page brings every row in, whatever its
+//!   turn. A row held while the window is full (or while rows wait before
+//!   it) goes to the store, so it is offered after the rows ahead of it,
+//!   without its hint, as after a restart. **The window is shared fairly**
+//!   (§5.5: a target that is down never holds back another's rows): a
+//!   target is *up* when it can take a row now (a `tcp` pair with a
+//!   sendable connection, a `carrier` pair while the carrier bound is set).
+//!   While the window is full and rows wait in the store, the **swap
+//!   probe** reads one page of row heads per pass, in custody order; each
+//!   stored row whose turn (the table, the hit cache, the probe order; no
+//!   hint) is up enters in place of the **newest** idle resident row whose
+//!   turn is down or that has no target (evicted: it is in the store
+//!   already, leaves memory without a refusal, and the paging floor moves
+//!   below it), and the others stay in the store. Newest first, so every
+//!   target's resident rows stay older than its stored ones and it is
+//!   offered its rows in custody order when it comes up. The probe reads
+//!   nothing while no target is up or nothing can be evicted, and once it
+//!   reached the end of the store with nothing to move it stops until a
+//!   target comes up (it then starts again from the floor); meanwhile a
+//!   new row whose turn is up enters at once, with its hint, in place of an
+//!   evicted one. So an all-down hub, or a store of rows for down targets
+//!   only, does not churn, and each pass does at most one read and one page
+//!   of evictions. The view's `pending` counts resident rows;
+//!   `Store::forward_stats` has the totals. A non-hub node holds the empty
 //!   structure only.
 //! - **The hub role off** (a `custody_opt_in` node keeps member custody):
 //!   the records stay in `paired_hubs` and forward nothing, the resident
@@ -327,10 +345,15 @@
 //!   trigger releases at most one window of them, oldest first, so a pair
 //!   with room again drains them ACK-clocked. The carrier's posted marks
 //!   and the re-post rules live here ([`Fabric::forward_done`],
-//!   [`Fabric::forward_repost`]): §5.9 rule (1) is applied at the
-//!   [`Fabric::forward_take`] after a verified far frame (after the whole
+//!   [`Fabric::forward_repost`]): §5.9 rule (1) counts **far-hub rounds**
+//!   per post: a verified frame from the far hub that arrives after a post
+//!   (its `Taken`) and carries no ack for it marks that post once (a
+//!   `FabricEvent::Forward` tells the carrier it is owed); the next
+//!   [`Fabric::forward_take`] re-arms the marked posts (after the whole
 //!   drain was handed in, so a drain's own acks commit before anything is
-//!   re-armed) and re-arms each post at most once in the row's life.
+//!   re-armed). A re-post needs a far frame after it to be re-armed again:
+//!   one re-post per row per far-hub round, never two within one (C6, §15
+//!   G10 item 3); flushes while the far hub is silent post nothing again.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::net::SocketAddr;
@@ -367,9 +390,9 @@ use crate::sealer::{Freshness, Sealer, SealerError};
 use crate::store::{
     Class, ContactRow, CustodyPut, Dir, EdgeConsent, EdgeCounter, EdgeNew, EdgeOversize, EdgeRow,
     EpochDecision, EpochState, ForeignConversationRow, ForeignDir, ForeignInsert, ForeignKind,
-    ForeignMessageRow, ForeignSend, ForeignState, ForwardItem, FragOffer, Fwd, GroupPart,
-    MessageRow, MetaValue, MsgState, NewMessage, RequestPut, SendGroupRow, Seq, StateChange, Store,
-    StoreError, Trust, MAX_FOREIGN_BATCH,
+    ForeignMessageRow, ForeignSend, ForeignState, ForwardHead, ForwardItem, FragOffer, Fwd,
+    GroupPart, MessageRow, MetaValue, MsgState, NewMessage, RequestPut, SendGroupRow, Seq,
+    StateChange, Store, StoreError, Trust, MAX_FOREIGN_BATCH,
 };
 
 /// Bytes a stream link's fragment plan keeps free for the INTRO card
@@ -402,7 +425,8 @@ pub const CARRIER_ACK_QUEUE: usize = 1024;
 pub const FORWARD_PUT_WRAP: usize = CUSTODY_WRAP + DEST_HUB_ALONE_LEN;
 /// Forward rows read from the store per page (Layer 7 §5.9: the rows
 /// resume after a restart, and rows beyond the resident window come in as
-/// it drains): one `forward_pending` read per 256 rows.
+/// it drains): one `forward_pending_lens` read of row heads per 256 rows
+/// (the swap probe reads at most one such page per pass).
 const FORWARD_LOAD_PAGE: usize = 256;
 /// Protected forward rows the forwarder holds in memory at most (the
 /// resident window, module doc): about 250 B each, ≈ 1 MB at most, hubs
@@ -1939,10 +1963,12 @@ enum Slot {
     InFlight,
     Full,
     Taken,
-    /// Posted, §5.9 rule (1) not used yet.
+    /// Posted, no verified far frame since the post.
     Posted,
-    /// Posted, rule (1) used (never again for this row).
-    Spent,
+    /// Posted, and a verified frame from the far hub came after the post
+    /// with no ack for it (a far-hub round): §5.9 rule (1) re-arms it at
+    /// the next [`Fabric::forward_take`].
+    Heard,
     /// Re-armed: owed to the carrier again.
     Armed,
 }
@@ -1973,9 +1999,12 @@ struct FwdRow {
     /// Its turn's pair was unpaired or broken: with no target left it is
     /// refused rather than kept waiting.
     orphaned: bool,
-    /// §5.9 re-post rule (1) re-armed it once: never again (a per-row bit,
-    /// never reset by a re-take; C6's bound).
-    rule1: bool,
+    /// §5.9 re-post rule (1): a verified frame from its turn came after
+    /// its (re-)post. Set once per far-hub round (only a row in the posted
+    /// set takes it, at the first far frame after its post), cleared by the
+    /// re-arm and by every new post: one re-post per row per far-hub round,
+    /// never two within one (C6, §15 G10 item 3).
+    heard: bool,
 }
 
 impl FwdRow {
@@ -1986,7 +2015,7 @@ impl FwdRow {
             Turn::Full => Slot::Full,
             Turn::Taken => Slot::Taken,
             Turn::Posted { repost: true } => Slot::Armed,
-            Turn::Posted { repost: false } if self.rule1 => Slot::Spent,
+            Turn::Posted { repost: false } if self.heard => Slot::Heard,
             Turn::Posted { repost: false } => Slot::Posted,
         }
     }
@@ -2002,7 +2031,7 @@ struct TargetQ {
     full: BTreeSet<u64>,
     taken: BTreeSet<u64>,
     posted: BTreeSet<u64>,
-    spent: BTreeSet<u64>,
+    heard: BTreeSet<u64>,
     armed: BTreeSet<u64>,
 }
 
@@ -2014,7 +2043,7 @@ impl TargetQ {
             Slot::Full => &mut self.full,
             Slot::Taken => &mut self.taken,
             Slot::Posted => &mut self.posted,
-            Slot::Spent => &mut self.spent,
+            Slot::Heard => &mut self.heard,
             Slot::Armed => &mut self.armed,
         }
     }
@@ -2025,7 +2054,7 @@ impl TargetQ {
             + self.full.len()
             + self.taken.len()
             + self.posted.len()
-            + self.spent.len()
+            + self.heard.len()
             + self.armed.len()
     }
 
@@ -2037,7 +2066,7 @@ impl TargetQ {
             &self.full,
             &self.taken,
             &self.posted,
-            &self.spent,
+            &self.heard,
             &self.armed,
         ] {
             v.extend(s.iter().copied());
@@ -2111,6 +2140,9 @@ struct Forwarder {
     rows: BTreeMap<u64, FwdRow>,
     /// The resident rows by turn and state (the per-target queues).
     targets: HashMap<NodeId, TargetQ>,
+    /// Resident idle rows with no turn (no target exists for them now:
+    /// they wait, and are evictable like a down target's).
+    unturned: BTreeSet<u64>,
     /// Resident rows by dest (a cache hit re-targets that dest's rows).
     by_dest: HashMap<[u8; 32], BTreeSet<u64>>,
     /// Resident rows each target refused (a `tcp` pair's refusals end with
@@ -2121,11 +2153,25 @@ struct Forwarder {
     /// The pair set or the carrier bound changed: every idle row is
     /// recomputed by the next pass.
     all_dirty: bool,
-    /// Protected rows above `loaded` wait in the store, not yet offered
-    /// (the window was full when they came): paged in custody order.
+    /// Protected rows above `loaded` may wait in the store, not resident
+    /// (the window was full when they came, or they were evicted): paged
+    /// in custody order.
     more: bool,
-    /// The highest `custody_seq` the window has held.
+    /// The paging floor: every protected row at or below it is resident
+    /// (an eviction moves it back below the evicted row; a page moves it
+    /// up past what it read).
     loaded: u64,
+    /// The swap probe (module doc "The resident window"): rows of the
+    /// store above `loaded` and at or below `probe` were read while the
+    /// window was full and found unable to move.
+    probe: u64,
+    /// The probe read to the end of the store and found nothing it could
+    /// swap in: no store read for it until a target comes up (or a new row
+    /// that can move is held).
+    probe_done: bool,
+    /// The targets that were up when the probe last looked: one coming up
+    /// restarts the probe from `loaded`.
+    up: HashSet<NodeId>,
     /// The pending map `pkt_ref → (custody_seq, target)` of puts out.
     pending: HashMap<[u8; 16], (u64, NodeId)>,
     /// The hit cache `dest → pair`.
@@ -2136,9 +2182,6 @@ struct Forwarder {
     broken: HashSet<NodeId>,
     /// `carrier` pairs heard through the carrier this session.
     heard: HashSet<NodeId>,
-    /// `carrier` pairs a verified frame came from since their last
-    /// [`Fabric::forward_take`] (§5.9 re-post rule (1), applied there).
-    far_frame: HashSet<NodeId>,
     /// Re-posts per `carrier` pair this session.
     reposts: HashMap<NodeId, u32>,
     /// Dials a pairing attempt started, kept while the pair is not whole
@@ -2159,7 +2202,11 @@ struct Forwarder {
 impl Forwarder {
     /// Take row `seq` out of its turn's queue.
     fn unplace(&mut self, seq: u64) {
-        let Some((Some(t), slot)) = self.rows.get(&seq).map(|r| (r.turn, r.slot())) else {
+        let Some((turn, slot)) = self.rows.get(&seq).map(|r| (r.turn, r.slot())) else {
+            return;
+        };
+        let Some(t) = turn else {
+            self.unturned.remove(&seq);
             return;
         };
         if let Some(q) = self.targets.get_mut(&t) {
@@ -2170,11 +2217,18 @@ impl Forwarder {
         }
     }
 
-    /// Put row `seq` into its turn's queue (a row with no turn sits in
-    /// none).
+    /// Put row `seq` into its turn's queue (a row with no turn is idle and
+    /// sits in `unturned` once its targets were computed; a fresh row sits
+    /// in none until then).
     fn place(&mut self, seq: u64) {
-        if let Some((Some(t), slot)) = self.rows.get(&seq).map(|r| (r.turn, r.slot())) {
-            self.targets.entry(t).or_default().set(slot).insert(seq);
+        match self.rows.get(&seq).map(|r| (r.turn, r.slot(), r.fresh)) {
+            Some((Some(t), slot, _)) => {
+                self.targets.entry(t).or_default().set(slot).insert(seq);
+            }
+            Some((None, _, false)) => {
+                self.unturned.insert(seq);
+            }
+            _ => {}
         }
     }
 
@@ -2207,6 +2261,39 @@ impl Forwarder {
         self.place(seq);
         self.dirty.insert(seq);
         self.run = true;
+    }
+
+    /// The resident row the window gives up first when a row that can move
+    /// must enter (module doc "The resident window"): the newest idle (or
+    /// `REJECT_FULL`) row whose turn is a target not in `up`, or that has no
+    /// target now, with its targets settled (not dirty). Newest first, so each target's
+    /// resident rows stay older than its rows in the store: it is offered
+    /// its rows in custody order when it comes up. O(targets).
+    fn evictable(&self, up: &HashSet<NodeId>) -> Option<u64> {
+        let settled = |s: &&u64| !self.dirty.contains(s);
+        let mut best = self.unturned.iter().rev().find(settled).copied();
+        for (t, q) in &self.targets {
+            if up.contains(t) {
+                continue;
+            }
+            // Idle, or kept after a `REJECT_FULL` (retried on the pair's
+            // next link-up either way, C16).
+            for set in [&q.idle, &q.full] {
+                if let Some(s) = set.iter().rev().find(settled) {
+                    best = best.max(Some(*s));
+                }
+            }
+        }
+        best
+    }
+
+    /// Evict the idle row `seq` from the window: it is in the store already
+    /// and leaves memory without a refusal; paging resumes below it.
+    fn evict(&mut self, seq: u64) {
+        if self.untrack(seq).is_some() {
+            self.loaded = self.loaded.min(seq.saturating_sub(1));
+            self.more = true;
+        }
     }
 
     /// Forget a row (committed, refused, or gone from the store): every
@@ -2269,6 +2356,7 @@ impl Forwarder {
                 r.state = Turn::Idle;
                 r.orphaned = true;
                 self.dirty.insert(seq);
+                self.unturned.insert(seq);
             }
         }
         self.run = true;
@@ -2294,13 +2382,14 @@ impl Forwarder {
         self.run = true;
     }
 
-    /// Frames [`Fabric::forward_take`] would return to `target` now.
+    /// Frames [`Fabric::forward_take`] would return to `target` now (the
+    /// posts §5.9 rule (1) re-arms at that take included).
     fn owed(&self, target: &NodeId) -> u32 {
         let acks = self.acks.get(target).map_or(0, VecDeque::len);
         let rows = self
             .targets
             .get(target)
-            .map_or(0, |q| q.idle.len() + q.armed.len());
+            .map_or(0, |q| q.idle.len() + q.armed.len() + q.heard.len());
         u32::try_from(acks + rows).unwrap_or(u32::MAX)
     }
 
@@ -5491,7 +5580,6 @@ impl Core {
         }
         self.fwd.broken.remove(node);
         self.fwd.heard.remove(node);
-        self.fwd.far_frame.remove(node);
         self.fwd.reposts.remove(node);
         self.fwd.acks.remove(node);
         self.fwd.notify.remove(node);
@@ -5562,6 +5650,8 @@ impl Core {
         if self.settings.hub_role {
             self.fwd.more = true;
             self.fwd.loaded = 0;
+            self.fwd.probe = 0;
+            self.fwd.probe_done = false;
             self.fwd.all_dirty = true;
             self.fwd.run = true;
             let whole: Vec<NodeId> = self
@@ -5662,17 +5752,40 @@ impl Core {
     /// A forward row was held: the forwarder offers it at the end of the
     /// tick, after the answer (§5.5, C2). While the resident window is full
     /// (or rows wait in the store before it) the row waits in the store and
-    /// is paged in in custody order, without its hint (module doc).
+    /// is paged in, or swapped in by the probe, in custody order without its
+    /// hint (module doc "The resident window"). Once the probe found every
+    /// stored row unable to move, a row that can move now enters at once
+    /// with its hint, in place of an evicted one: no stored row is owed to
+    /// its turn before it.
     fn track_forward(&mut self, seq: u64, it: FwdRow) {
         if !self.settings.hub_role {
             return;
         }
-        if self.fwd.more || self.fwd.rows.len() >= FORWARD_RESIDENT {
-            self.fwd.more = true;
+        if !self.fwd.more && self.fwd.rows.len() < FORWARD_RESIDENT {
+            self.fwd.loaded = self.fwd.loaded.max(seq);
+            self.fwd.insert(seq, it);
             return;
         }
-        self.fwd.loaded = self.fwd.loaded.max(seq);
-        self.fwd.insert(seq, it);
+        self.fwd.more = true;
+        if self.fwd.probe_done {
+            let pairs = self.eligible_pairs();
+            let up = self.up_targets(&pairs);
+            if self.fwd.probe_done {
+                let turn = self.first_target(&pairs, &it.dest, it.fwd, it.hint, it.size);
+                if turn.is_some_and(|t| up.contains(&t)) {
+                    if self.fwd.rows.len() >= FORWARD_RESIDENT {
+                        match self.fwd.evictable(&up) {
+                            Some(v) => self.fwd.evict(v),
+                            None => return,
+                        }
+                    }
+                    self.fwd.insert(seq, it);
+                }
+                return;
+            }
+        }
+        // The probe reads it in custody order (one page per trigger).
+        self.fwd.run = true;
     }
 
     /// A resident row as the gate or the store gives it.
@@ -5694,14 +5807,72 @@ impl Core {
             refused: Vec::new(),
             fresh: true,
             orphaned: false,
-            rule1: false,
+            heard: false,
         }
     }
 
-    /// Page protected forward rows in from the store, in custody order,
-    /// while the window has room for a page (one `forward_pending` read per
-    /// [`FORWARD_LOAD_PAGE`] rows that leave it; §15 G9 item 6 at start).
-    /// Returns how many came in.
+    /// A resident row from a stored row's head (no hint: memory only).
+    fn head_row(h: &ForwardHead) -> FwdRow {
+        let size = usize::try_from(h.len).unwrap_or(usize::MAX);
+        Self::fwd_row(h.dest, h.pkt_ref, size, h.fwd.code(), None)
+    }
+
+    /// The turn a row with no refusal would get now (§5.1 table, hint,
+    /// cache, probe order): what the probe and a held row under a full
+    /// window are judged by. One target computation.
+    fn first_target(
+        &mut self,
+        pairs: &[PairedHub],
+        dest: &[u8; 32],
+        fwd: u8,
+        hint: Option<[u8; DEST_HUB_LEN]>,
+        size: usize,
+    ) -> Option<NodeId> {
+        let cached = self.fwd.cache.get(dest);
+        self.fwd.computed += 1;
+        forward_targets(
+            pairs,
+            fwd,
+            hint,
+            size,
+            self.fwd.carrier_max,
+            TargetMode::Held,
+            cached,
+        )
+        .list
+        .first()
+        .copied()
+    }
+
+    /// The targets that can take a row now (module doc "The resident
+    /// window"): a `tcp` pair with a sendable connection, a `carrier` pair
+    /// while the carrier bound is set. A target that was not up when the
+    /// probe last looked restarts the probe from the paging floor (its rows
+    /// in the store are read again). O(pairs × connections), only while the
+    /// window is full.
+    fn up_targets(&mut self, pairs: &[PairedHub]) -> HashSet<NodeId> {
+        let up: HashSet<NodeId> = pairs
+            .iter()
+            .filter(|p| match p.via {
+                PairVia::Tcp => self.sendable_conn(&p.node_id).is_some(),
+                PairVia::Carrier => self.fwd.carrier_max.is_some(),
+            })
+            .map(|p| p.node_id)
+            .collect();
+        if up.iter().any(|t| !self.fwd.up.contains(t)) {
+            self.fwd.probe = self.fwd.loaded;
+            self.fwd.probe_done = false;
+        }
+        self.fwd.up.clone_from(&up);
+        up
+    }
+
+    /// Page protected forward rows in from the store, in custody order from
+    /// the paging floor, while the window has room for a page (one
+    /// `forward_pending_lens` read of row heads per [`FORWARD_LOAD_PAGE`]
+    /// rows that leave it; §15 G9 item 6 at start). A row already resident
+    /// (swapped in above the floor) is skipped; every other row comes in,
+    /// whatever its turn. Returns how many heads were read.
     fn page_in(&mut self) -> Result<usize> {
         if !self.fwd.more || !self.settings.hub_role {
             return Ok(0);
@@ -5712,17 +5883,75 @@ impl Core {
             return Ok(0);
         }
         let want = room.min(FORWARD_LOAD_PAGE);
-        let page = self.store.forward_pending(self.fwd.loaded, want)?;
+        let page = self.store.forward_pending_lens(self.fwd.loaded, want)?;
         if page.len() < want {
             self.fwd.more = false;
         }
         let n = page.len();
-        for it in page {
-            self.fwd.loaded = self.fwd.loaded.max(it.custody_seq);
-            let row = Self::fwd_row(it.dest, it.pkt_ref, it.bytes.len(), it.fwd.code(), None);
-            self.fwd.insert(it.custody_seq, row);
+        for h in page {
+            self.fwd.loaded = self.fwd.loaded.max(h.custody_seq);
+            if !self.fwd.rows.contains_key(&h.custody_seq) {
+                self.fwd.insert(h.custody_seq, Self::head_row(&h));
+            }
         }
         Ok(n)
+    }
+
+    /// The window is full and rows wait in the store (module doc "The
+    /// resident window"): one page of row heads from the probe; each stored
+    /// row whose turn is up enters, in place of the newest idle row whose
+    /// turn is down (evicted to the store), and the others stay in the
+    /// store. Bounded: one read of at most [`FORWARD_LOAD_PAGE`] heads and
+    /// as many evictions per pass; nothing is read while no target is up,
+    /// nothing can be evicted, or the probe found nothing to move since a
+    /// target last came up (an all-down hub, or a store of rows for down
+    /// targets only, does not churn). Returns how many rows came in.
+    fn swap_in(&mut self, pairs: &[PairedHub]) -> Result<usize> {
+        let resident = self.fwd.rows.len();
+        let room = FORWARD_RESIDENT.saturating_sub(resident);
+        if !self.fwd.more || !self.settings.hub_role || room >= FORWARD_LOAD_PAGE {
+            return Ok(0);
+        }
+        let up = self.up_targets(pairs);
+        if up.is_empty() || self.fwd.probe_done {
+            return Ok(0);
+        }
+        if room == 0 && self.fwd.evictable(&up).is_none() {
+            return Ok(0);
+        }
+        let from = self.fwd.probe.max(self.fwd.loaded);
+        let heads = self.store.forward_pending_lens(from, FORWARD_LOAD_PAGE)?;
+        let mut pos = from;
+        let mut moved = 0;
+        let mut blocked = false;
+        for h in &heads {
+            if !self.fwd.rows.contains_key(&h.custody_seq) {
+                let size = usize::try_from(h.len).unwrap_or(usize::MAX);
+                let turn = self.first_target(pairs, &h.dest, h.fwd.code(), None, size);
+                if turn.is_some_and(|t| up.contains(&t)) {
+                    if self.fwd.rows.len() >= FORWARD_RESIDENT {
+                        let Some(v) = self.fwd.evictable(&up) else {
+                            blocked = true;
+                            break;
+                        };
+                        self.fwd.evict(v);
+                    }
+                    self.fwd.insert(h.custody_seq, Self::head_row(h));
+                    moved += 1;
+                }
+            }
+            pos = h.custody_seq;
+        }
+        self.fwd.probe = pos;
+        if !blocked {
+            if heads.len() < FORWARD_LOAD_PAGE {
+                self.fwd.probe_done = true;
+            } else {
+                // The next pass reads on (at most four a tick).
+                self.fwd.run = true;
+            }
+        }
+        Ok(moved)
     }
 
     /// At start (§15 G9 item 6): the first window of protected forward rows,
@@ -5730,6 +5959,8 @@ impl Core {
     fn load_forward_rows(&mut self) -> Result<()> {
         self.fwd.more = true;
         self.fwd.loaded = 0;
+        self.fwd.probe = 0;
+        self.fwd.probe_done = false;
         while self.page_in()? > 0 {}
         Ok(())
     }
@@ -5749,9 +5980,11 @@ impl Core {
 
     /// One pass, bounded by what changed: page rows in while the
     /// window has room, recompute the targets of the rows whose inputs
-    /// changed only, release the `REJECT_FULL` rows a trigger retried, and
-    /// put what is due to the `tcp` pairs that are up and have window room;
-    /// carrier turns wait for `forward_take`.
+    /// changed only, swap rows that can move in for rows that cannot while
+    /// the window is full, release the `REJECT_FULL` rows a trigger
+    /// retried, and put what is due to the `tcp` pairs that are up and have
+    /// window room; carrier turns wait for `forward_take`. At most one
+    /// store read of row heads per pass.
     fn forward_pass(&mut self) {
         if !self.settings.hub_role {
             self.fwd.retry_full.clear();
@@ -5759,9 +5992,10 @@ impl Core {
             self.fwd.all_dirty = false;
             return;
         }
-        if self.page_in().is_err() {
+        let paged = self.page_in().unwrap_or_else(|_| {
             self.counters.errors += 1;
-        }
+            1
+        });
         if self.fwd.rows.is_empty() {
             self.fwd.retry_full.clear();
             self.fwd.all_dirty = false;
@@ -5782,6 +6016,18 @@ impl Core {
         let mut refuse = Vec::new();
         for seq in std::mem::take(&mut self.fwd.dirty) {
             self.retarget(seq, &pairs, &mut retry, &mut refuse);
+        }
+        // After the retargets, so every resident row's turn is settled.
+        if paged == 0 {
+            match self.swap_in(&pairs) {
+                Ok(0) => {}
+                Ok(_) => {
+                    for seq in std::mem::take(&mut self.fwd.dirty) {
+                        self.retarget(seq, &pairs, &mut retry, &mut refuse);
+                    }
+                }
+                Err(_) => self.counters.errors += 1,
+            }
         }
         for seq in refuse {
             self.refuse_row(seq);
@@ -5827,6 +6073,9 @@ impl Core {
             t.list.is_empty() && r.refused.is_empty() && !r.orphaned,
         );
         let old = r.turn;
+        if let Some(r) = self.fwd.rows.get_mut(&seq) {
+            r.fresh = false;
+        }
         match next {
             Some(n) => {
                 if fresh {
@@ -5847,9 +6096,6 @@ impl Core {
             // Every target refused (§5.8), or none left after an unpair or
             // a break.
             None => refuse.push(seq),
-        }
-        if let Some(r) = self.fwd.rows.get_mut(&seq) {
-            r.fresh = false;
         }
     }
 
@@ -6101,22 +6347,20 @@ impl Core {
     /// [`Fabric::forward_take`].
     fn forward_take(&mut self, target: NodeId, max: usize) -> Result<Vec<CarrierFrame>> {
         self.carrier_pair(&target)?;
-        // §5.9 re-post rule (1) (C6), after the whole drain was handed in:
-        // a far frame verified since the last take re-arms each post still
-        // unacknowledged, once per row in its life.
-        if self.fwd.far_frame.remove(&target) {
-            let posted: Vec<u64> = self
-                .fwd
-                .targets
-                .get(&target)
-                .map(|q| q.posted.iter().copied().collect())
-                .unwrap_or_default();
-            for seq in posted {
-                self.fwd.mutate(seq, |r| {
-                    r.rule1 = true;
-                    r.state = Turn::Posted { repost: true };
-                });
-            }
+        // §5.9 re-post rule (1) (C6), after the whole drain was handed in
+        // (its acks committed first): each post a verified far frame came
+        // after, still unacknowledged, is re-armed once for that round.
+        let heard: Vec<u64> = self
+            .fwd
+            .targets
+            .get(&target)
+            .map(|q| q.heard.iter().copied().collect())
+            .unwrap_or_default();
+        for seq in heard {
+            self.fwd.mutate(seq, |r| {
+                r.heard = false;
+                r.state = Turn::Posted { repost: true };
+            });
         }
         self.fwd.run = true;
         self.run_forwarder();
@@ -6196,7 +6440,11 @@ impl Core {
         }
         let turn = r.turn;
         match done {
-            ForwardDone::Taken => self.fwd.set_state(seq, Turn::Posted { repost: false }),
+            // A new post: a far frame after it starts its round.
+            ForwardDone::Taken => self.fwd.mutate(seq, |r| {
+                r.heard = false;
+                r.state = Turn::Posted { repost: false };
+            }),
             // Stays for the next flush; no event (a carrier that is down
             // is not asked again in a loop).
             ForwardDone::Retry => {
@@ -6219,7 +6467,7 @@ impl Core {
             Some(q) => q
                 .posted
                 .iter()
-                .chain(q.spent.iter())
+                .chain(q.heard.iter())
                 .chain(q.taken.iter())
                 .copied()
                 .collect(),
@@ -6227,7 +6475,10 @@ impl Core {
         };
         let n = u32::try_from(seqs.len()).unwrap_or(u32::MAX);
         for seq in seqs {
-            self.fwd.set_state(seq, Turn::Posted { repost: true });
+            self.fwd.mutate(seq, |r| {
+                r.heard = false;
+                r.state = Turn::Posted { repost: true };
+            });
         }
         if n > 0 {
             self.fwd.notify.insert(target);
@@ -6281,9 +6532,24 @@ impl Core {
             // ENROLL never rides a carrier (S22); nothing else is carried.
             _ => self.counters.dropped += 1,
         }
-        // §5.9 re-post rule (1): noted only; the re-arm waits for the next
-        // `forward_take`, after every frame of this drain was handed in.
-        self.fwd.far_frame.insert(from);
+        // §5.9 re-post rule (1): a verified far frame after a post starts
+        // that post's round (an ack this frame carried committed its row
+        // above). Each post still unacknowledged is marked once (a post
+        // already marked, or re-posted since, waits for the next round);
+        // the re-arm waits for the next `forward_take`, after every frame
+        // of this drain was handed in, and the carrier is told it is owed.
+        let posted: Vec<u64> = self
+            .fwd
+            .targets
+            .get(&from)
+            .map(|q| q.posted.iter().copied().collect())
+            .unwrap_or_default();
+        if !posted.is_empty() {
+            for seq in posted {
+                self.fwd.mutate(seq, |r| r.heard = true);
+            }
+            self.fwd.notify.insert(from);
+        }
         self.fwd.run = true;
         self.fabric_changed();
         Ok(())
@@ -7826,6 +8092,46 @@ mod tests {
     fn a_resident_row_is_small() {
         assert!(std::mem::size_of::<FwdRow>() <= 160);
         assert_eq!(FORWARD_RESIDENT % FORWARD_LOAD_PAGE, 0);
+    }
+
+    /// M4c (module doc "The resident window"): the window gives up the
+    /// newest settled idle row whose turn is down or that has no target,
+    /// never an up target's, a dirty row or a put out; an eviction moves
+    /// the paging floor below the row and leaves rows in the store.
+    #[test]
+    fn eviction_takes_the_newest_idle_row_whose_turn_is_down() {
+        let mut f = Forwarder::default();
+        let (b, c) = (NodeId::from([1u8; 32]), NodeId::from([2u8; 32]));
+        for seq in 1..=6u64 {
+            let n = u8::try_from(seq).unwrap();
+            f.insert(seq, Core::fwd_row([n; 32], [n; 16], 100, 1, None));
+        }
+        f.dirty.clear();
+        assert!(f.unturned.is_empty(), "a fresh row sits in no queue");
+        for (seq, t) in [(1, b), (2, b), (3, c), (4, b), (5, c)] {
+            f.mutate(seq, |r| {
+                r.fresh = false;
+                r.turn = Some(t);
+            });
+        }
+        f.mutate(6, |r| r.fresh = false);
+        assert!(f.unturned.contains(&6), "no target: it waits");
+        f.set_state(4, Turn::InFlight);
+        f.loaded = 6;
+        let up: HashSet<NodeId> = [c].into_iter().collect();
+        assert_eq!(f.evictable(&up), Some(6), "the newest: no target");
+        f.evict(6);
+        assert_eq!((f.loaded, f.more, f.rows.len()), (5, true, 5));
+        assert_eq!(f.evictable(&up), Some(2), "B's newest idle row");
+        f.dirty.insert(2);
+        assert_eq!(f.evictable(&up), Some(1), "a dirty row is not settled");
+        f.dirty.clear();
+        f.evict(2);
+        assert_eq!(f.loaded, 1);
+        let all: HashSet<NodeId> = [b, c].into_iter().collect();
+        assert_eq!(f.evictable(&all), None, "every target up");
+        f.set_state(1, Turn::Full);
+        assert_eq!(f.evictable(&up), Some(1), "kept after REJECT_FULL");
     }
 }
 
