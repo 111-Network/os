@@ -61,5 +61,19 @@ at `~/.claude/projects/…/subagents/workflows/wf_60f165f1-80f/journal.jsonl` on
   `args.triage`, `args.from`, `args.to`, `args.recheckOnly`).
 - Run id: `wf_b307f6ca-f43` (launched 2026-11-02 from the tree `e0ebd71`). Resume:
   `Workflow({scriptPath: "<repo>/plan/layers/7-relay/runs/workflows/spec-fix.js", resumeFromRunId: "wf_b307f6ca-f43"})`.
-- Next: the re-check's verdict → lock (D32; a second fix pass only on a blocker or major) → `os/7-relay/TASKS.md` → build.
+- Result (2026-11-02): v0.2 (`00d17b1`; all 61 findings, the eleven deviations and the numbers applied, sixteen editor deviations within the
+  triage); the re-check's verdict **lock** with three minors (R1–R3) folded into the lock edit by the lead → **v1.0 locked, D32** (`4689dbf`).
+- The tag `checkpoint-layer-6` (annotated, at `4689dbf`: the last tree before Layer 7 code; G9's old hub) exists locally; this session's git
+  proxy disconnects on every tag push (the branch pushes fine), so the owner pushes it from their machine (`git push origin checkpoint-layer-6`
+  after fetching the branch and tagging `4689dbf`); until then G9 takes the commit hash.
+
+## Run 4 — build board (2026-11-02)
+
+- Script: `runs/workflows/board.js` (Draft: one opus planner writes `os/7-relay/TASKS.md` from the locked spec per `EXECUTION.md`, modelled on
+  the Layer 6 board; Check: one fable judge builds the section-to-task coverage matrix, checks file ownership per wave, the checks, D32's order,
+  the floor rows and the form → `review/board-check.md`; Fix: one planner pass and a re-check when the judge says fix-first).
+- Run id: `wf_125acb61-573` (launched 2026-11-02 from the tree `78b0d08`). Resume:
+  `Workflow({scriptPath: "<repo>/plan/layers/7-relay/runs/workflows/board.js", resumeFromRunId: "wf_125acb61-573"})`.
+- Next: the lead reads the board and the judge's report, fixes what is left, commits the board → the build waves per the board (one workflow per
+  wave under `runs/workflows/`, the lead runs every check, reads every diff, commits per verified task).
 
