@@ -36,7 +36,7 @@ Legend: ⬜ todo · 🔨 in flight · ✅ verified+committed · ❌ bounced
 `N/dashboard/api_v1/{relay7,pair,registry,origins}.rs` routers answering 404 until their row lands, mounted in `api_v1/mod.rs` · the KB candidate
 `0-knowledge/projects/ntfy.md` (desk research only: Apache-2.0 and GPL-2.0 dual licence, v2.36.0 of 2026-10-31, monthly tags, bus factor and issue response
 unread, D30 Q15–Q16; `build.py --check` green) · the `LICENSING.md` fix that needs no code (§19 item 5: the `:56` Reticulum line; the `bao-tree` 0.17.0 and
-`minisign-verify` 0.3.0 notes) · this board. Commit "Layer 7 scaffold".
+`minisign-verify` 0.3.0 notes) · this board. Commit "Layer 7 scaffold". **✅ landed `005a510` (2026-11-02): fmt, clippy, the test build, `build.py --check`, shellcheck, the stubs' SKIPPED and REQUIRE paths, the notices check green; `relay::tap` is wired by M5; `carrier/mod.rs` mirrors the hand-off shapes until M4.**
 
 ## Wave 0 (parallel, disjoint; P1 first; M1, M2, M3, M6 land before M4 and M5 right after it; L1 before L2 and L3)
 

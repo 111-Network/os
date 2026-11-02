@@ -84,5 +84,17 @@ at `~/.claude/projects/…/subagents/workflows/wf_60f165f1-80f/journal.jsonl` on
   the LICENSING fix; the lead runs fmt, clippy, `build.py --check`, shellcheck, reads the diff and commits "Layer 7 scaffold").
 - Run id: `wf_0cc2beb9-430` (launched 2026-11-02 from the tree `561cb5e`). Resume:
   `Workflow({scriptPath: "<repo>/plan/layers/7-relay/runs/workflows/t0.js", resumeFromRunId: "wf_0cc2beb9-430"})`.
-- Next: Wave 0 per the board (P1 first; one workflow `runs/workflows/wave-0.js`), the lead runs every check, reads every diff, commits per verified task.
+- Result (2026-11-02): done in one pass; the lead re-ran fmt, clippy, the test build, `build.py --check`, shellcheck, a stub's SKIPPED and
+  REQUIRE paths and the notices check, read the diff and committed "Layer 7 scaffold" (`005a510`). Agent notes kept for the rows: `relay::tap` is
+  wired by M5 in `FabricHandle::publish`; `carrier/mod.rs` carries a local `HandOff` trait and mirrors of `CarrierFrame`, `ForwardDone`,
+  `ForwardPending` until M4 lands (D11 adapts them); `Pair {own, peer, topic_key}`; ntfy's licence read as `Apache-2.0 OR GPL-2.0-only` (no "or
+  later" wording seen); upstream's tag cadence is not monthly (none in September 2026, ten in October), recorded in the entry.
+
+## Run 6 — Wave 0 (2026-11-02)
+
+- Script: `runs/workflows/wave-0.js` (three stages for the landing order, two slots: A = P1 C1 M1 M2 M6 M3 L1; B = M4 L2 L3 D1 M7 P2; C = M5;
+  `args.only` = a subset of ids, `args.stopAfter` = "A" | "B"). The lead reviews each returned task against its row (the check re-run, the diff
+  read) and commits it; a failed task is bounced with the same script and `args.only`.
+- Run id: `wf_5c3ab45e-2a7` (launched 2026-11-02 from the tree `005a510`). Resume:
+  `Workflow({scriptPath: "<repo>/plan/layers/7-relay/runs/workflows/wave-0.js", resumeFromRunId: "wf_5c3ab45e-2a7"})`.
 
