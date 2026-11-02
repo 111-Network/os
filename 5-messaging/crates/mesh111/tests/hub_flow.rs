@@ -562,7 +562,13 @@ async fn a_direct_write_clears_a_custody_reject_reason() {
     })
     .await;
     assert_eq!(m.state, MsgState::Sent);
-    assert_eq!(inbox(&carol, a.ident.id()).await.len(), 1);
+    // The reason clears when the frame is handed to the link (`on_sent`); Carol's
+    // fabric receives it from the link's channel and writes it a moment later, so
+    // wait for her inbox rather than read it once (a loaded CI runner lost that race).
+    until(10, || async {
+        (inbox(&carol, a.ident.id()).await.len() == 1).then_some(())
+    })
+    .await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
