@@ -8,9 +8,11 @@
 // mock chunk) is removed and fixtures never ship.
 import type { Adapter } from "./adapter";
 import { createHttpAdapter } from "./http";
+import type { RelayAdapter } from "./relay";
 import { apiStore } from "./store";
 
 export type { Adapter } from "./adapter";
+export type { RelayAdapter } from "./relay";
 export { ApiError, isApiError, isProblem } from "./problem";
 export { apiStore } from "./store";
 
@@ -33,14 +35,34 @@ export function getAdapter(): Promise<Adapter> {
   return singleton;
 }
 
-/** Test seam: forget the memoized adapter. */
+let relaySingleton: Promise<RelayAdapter> | null = null;
+
+/**
+ * The Layer 7 adapter for this page load (memoized). A separate seam from `getAdapter` so the Layer 7 code stays out of the eager chunk:
+ * `./relay` is imported here, dynamically and only when a Layer 7 view (or the store, after a `relay` frame) asks, and the mock's
+ * relay is reached only through the mock adapter, inside the same `import.meta.env.DEV` guard as the mock itself.
+ */
+export function getRelay(): Promise<RelayAdapter> {
+  relaySingleton ??= (async () => {
+    const adapter = await getAdapter();
+    const mockRelay = (adapter as { mock?: { relay?: RelayAdapter } }).mock?.relay;
+    if (adapter.kind === "mock" && mockRelay) return mockRelay;
+    const { createHttpRelay } = await import("./relay");
+    return createHttpRelay();
+  })();
+  return relaySingleton;
+}
+
+/** Test seam: forget the memoized adapters. */
 export function resetAdapterForTests(): void {
   singleton = null;
+  relaySingleton = null;
 }
 
 /** Boot helper for main.tsx: pick the adapter, hand it to the store, return it. */
 export async function startApi(): Promise<Adapter> {
   const adapter = await getAdapter();
   apiStore.attach(adapter);
+  apiStore.attachRelay(getRelay); // after attach: `detach` forgets the loader, and the store calls it only once a Layer 7 slice is loaded
   return adapter;
 }

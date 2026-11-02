@@ -38,7 +38,7 @@
 //! sent twice and never sent after being dismissed.
 //!
 //! **Layer 6 kinds** (`os/6-transport/README.md` §8, §9, §12, §13; bodies
-//! parsed by [`crate::daemon::fabric::proposal`]). `KINDS` grows to eight.
+//! parsed by [`crate::daemon::fabric::proposal`]). `KINDS` grows to eight (Layer 7: nine, `relay`).
 //! Accepting one is applied like `message`, under the same lock, with the
 //! same record discipline (`applied: {pending: true}` first, the result
 //! after, a refusal before anything ran removes the pending record and the
@@ -99,8 +99,9 @@ use time::OffsetDateTime;
 
 /// List cap (newest first).
 pub const MAX_LIST: usize = 200;
-/// `Proposal.kind` (contract enum; Layer 6 adds three, §10).
-pub const KINDS: [&str; 8] = [
+/// `Proposal.kind` (contract enum; Layer 6 adds three, §10; Layer 7 adds `relay`, `7-relay/README.md`
+/// §13.2, the ninth).
+pub const KINDS: [&str; 9] = [
     "diagnose",
     "propose",
     "patch",
@@ -109,6 +110,7 @@ pub const KINDS: [&str; 8] = [
     "bridge_message",
     "bridge_edge",
     "device",
+    "relay",
 ];
 /// `Proposal.kind` of a message the agent proposes (§17).
 pub const MESSAGE_KIND: &str = "message";
@@ -1144,6 +1146,31 @@ mod tests {
                 .decision,
             "accepted"
         );
+    }
+
+    /// The enum on the `Proposal.kind` line of the contract, read from the checkout (skipped without it).
+    fn contract_kinds() -> Option<Vec<String>> {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../../4-interface/api/openapi.yaml");
+        let text = std::fs::read_to_string(path).ok()?;
+        let line = text.lines().find(|l| {
+            l.trim_start()
+                .starts_with("kind: { type: string, enum: [diagnose, propose, patch, chat,")
+        })?;
+        let list = line.split("enum: [").nth(1)?.split(']').next()?;
+        Some(list.split(',').map(|k| k.trim().to_string()).collect())
+    }
+
+    #[test]
+    fn kinds_mirror_the_contract_enum_with_relay_last() {
+        assert_eq!(KINDS.len(), 9);
+        assert_eq!(KINDS[8], "relay");
+        if let Some(contract) = contract_kinds() {
+            assert_eq!(
+                contract, KINDS,
+                "openapi.yaml Proposal.kind and KINDS differ"
+            );
+        }
     }
 
     #[test]

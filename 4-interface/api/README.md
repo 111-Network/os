@@ -29,7 +29,8 @@ the `x-sse-events` map) into `ui/src/lib/api/types.gen.ts` — never hand-edited
   flood the ring), `contact`, `fabric` (a full `FabricStatus` snapshot), `nearby` and `panels` (full
   snapshots). After `reset` the Layer 5 views also refetch `/fabric`, `/messages/threads`, `/contacts`,
   `/nearby` and `/panels`. Layer 6 adds `network_message` and `bridge` (below); after `reset` its views also refetch
-  `/networks`, `/bridge/edges` and `/transport`.
+  `/networks`, `/bridge/edges` and `/transport`. Layer 7 adds `relay` (a full `RelayStatus` on change) and `registry` (`{rows}`, a full
+  snapshot); after `reset` its views also refetch `/relay` and `/registry` (the store re-reads a slice only once something loaded it).
 - **Layer 5 additions (Messaging & Data; `os/5-messaging/README.md` §15, D20) — additive under `/api/v1`:**
   - *Routes:* `GET /messages/threads`, `GET /messages/threads/{peer}`, `POST /messages`, `POST /messages/{id}/retry`,
     `GET|POST /contacts`, `GET|PATCH|DELETE /contacts/{id}`, `GET /contacts/me/card`, `GET /fabric`,
@@ -140,7 +141,74 @@ the `x-sse-events` map) into `ui/src/lib/api/types.gen.ts` — never hand-edited
     6. `1-bootstrap/crates/node111/src/daemon/dashboard/api_v1/` gains the routes and the global bearer gate; its `NearbySource` kinds
        and `Problem` codes mirror the enums above; `ForeignMessageState` is a new Rust enum separate from Layer 5's
        `MessageState`.
-- **Not gated:** `/`, static assets, `/health` (body is booleans) and `/api/v1/auth/*`. Everything
+- **Layer 7 additions (Relay & Presence; `os/7-relay/README.md` §13, D30–D32) — additive under `/api/v1`:**
+  - *Routes:* `GET /relay` (`RelayStatus`), `PATCH /relay/settings` (a partial merge; the same keys, secrets as write-only strings),
+    `POST /relay/pair/offer` (`{role, via}` → `{bundle, code, link_spki}`; dismissed with `DELETE /fabric/hub/offer`), `POST /relay/pair`
+    (`{bundle, role, via, lan?, accept_warning?}` → 202 `PairedHub`), `DELETE /relay/paired/{node_id}` (204, idempotent),
+    `POST /relay/carrier/check`, `POST /relay/carrier/flush` (202 `{schema, started}`), `GET /registry` (`{schema, rows}`),
+    `POST /registry/browse` (202, a DNS-SD browse of at most 5 s), `POST /nearby/hops` (202; a program spawn, so a POST), `GET /update/origins`
+    (`{schema, origins}` in the order they are tried). Lists use the `{schema, <plural>}` envelope; single resources are bare.
+  - *Who may call:* `GET`s follow the usual rule and the agent's bearer reads them. The agent's bearer is refused (`401`) on every write
+    here (the global gate, no allowlist); the agent acts only through proposals (`kind: relay`). **Loopback-only** (403 `loopback_only`
+    otherwise): `POST /relay/pair/offer`, `POST /relay/pair`, `DELETE /relay/paired/{node_id}`, like their Layer 5 siblings; the CLI
+    `111 fabric pair` covers the phone case.
+  - *`/origin/v1/*` is not in `openapi.yaml`:* `GET /origin/v1/channel-111-stable.toml`, `…toml.minisig` and `blob/{sha256}` are the hub's
+    update-origin files (§9.1): read-only, unauthenticated, GET only (405 otherwise), 404 when not serving, mounted beside `/health`
+    (see "Not gated"). Their scope is not `/api/v1`.
+  - *No secret on any route:* the carrier token and topic secret are write-only. `RelayStatus.carrier.token` and `.topic_secret` are
+    `{set: boolean}`; the values are never echoed, logged or sent on SSE. Ages (`checked_ago_s`, `last_flush_ago_s`, `heard_ago_s`,
+    `ago_s`) are seconds from a monotonic clock; no Layer 7 shape carries a wall-clock timestamp. Every name, label, endpoint, url and
+    evidence string is untrusted: text-only rendering.
+  - *Consent round-trip (`409 consent_required`):* the Layer 6 round-trip, unchanged. The Layer 7 gates are `carrier_enable` (a carrier
+    turned on, its server changed, or a metered cap set or raised while it is on, with `metered` in `addons`; subject `<kind>:<server>`),
+    `gateway_bit` (the public gateway role bit), `origin_serve` (serving update files to the LAN) — all on `PATCH /relay/settings` — and
+    `pair_plain` (pairing over an unencrypted non-private link, `POST /relay/pair`, subject the far hub's NodeId). The first call (without
+    `accept_warning`) answers `409` with `consent` = `{action, subject, warning_text, hash, addons}`; the client shows `warning_text`
+    verbatim and repeats the call with `accept_warning` = the hash (on `POST /proposals/{id}/decision` too). A changed text has a new
+    hash, so a stale echo is refused again.
+  - *Pairing:* the scan side picks `role` and `via` from its own side and they must complement the bundle's (`peer`↔`peer`,
+    `leaf`↔`gateway`, same `via`), else `409 pair_role_mismatch` and nothing is recorded; a `carrier` pair is `peer` only, a `leaf` or
+    `gateway` pair `tcp` only. `lan` (default `false`) is the owner's mark that the link is a LAN or an adopted tunnel and runs plain.
+    `PairedHub.tls` is `rpk` | `plain` (accepted after `pair_plain`) | `none` (a `lan` or `carrier` pair), with `lan` beside it.
+  - *Heartbeat:* every write of `presence.heartbeat` answers `409 no_such_transport`, except `rns`, which answers `409 settings_locked`
+    naming `PATCH /api/v1/bridge/settings`; nothing is written. The proposal action `presence.interval` is refused `unsupported_action`
+    in v1.
+  - *Problem codes:* `no_such_transport`, `licensed_board`, `metered_cap` (409: no request is made past a metered link's daily cap),
+    `lan_off` (409: a registry browse or origin serving needs LAN sharing), `pair_role_mismatch` (409). "Needs a hub" stays `needs_hub`.
+    `component_unavailable` and `rate_limited` serve `POST /nearby/hops`; `settings_locked` already existed.
+  - *SSE:* `relay` = `SseRelay` (a full `RelayStatus`) and `registry` = `SseRegistry` (`{rows}`), both full snapshots on change; no
+    timer refreshes either.
+  - *Enum growth (all additive; unknown values render as `unknown`):* `Proposal.kind` + `relay` (body: one JSON object
+    `{"why": string, "actions": [Action]}` from `gateway.enable {carrier, mode}`, `hub.pair {}`, `presence.interval {transport, minutes}`,
+    `carrier.flush {}`; rendered as a card from the parsed JSON, never as Markdown); `NearbySource.kind` + `111` and `NearbyNode` +
+    `heard_ago_s`, `heard_seq`, `evidence` (`[{transport, text}]`, `transport` ∈ `tcp-lan`, `hub`, `carrier`), `roles`,
+    `position_precision_bits`; `ConsentRequired.action` + the four above; `Problem.code` + the five above; `Message.reason_code` +
+    `forwarding` (state `relayed`: "Your hub holds it and passes it to their hub.", `MessageState` stays at four); the `gateway` service
+    row's `reason_code` set is `gateway_none`, `carrier_ok`, `carrier_pending`, `gateway_off` (`wan_ok`, `wan_unknown`, `wan_offline`
+    retire) and its `detail` is `GatewayDetail`; `HubOffer` + `gateway {carrier, mode}` (the member learns its hub is a gateway once,
+    at enrolment). New schemas: `RelayStatus`, `RelaySettingsPatch`, `PairedHub`, `RegistryRow`, `UpdateOrigin` and their parts.
+  - *Pin list (each enum or tool-count bump touches these; the change is not done until all are green):*
+    1. `Proposal.kind` 8 → 9 (`relay`): `KINDS` in `1-bootstrap/crates/node111/src/daemon/dashboard/api_v1/proposals.rs` (`[&str; 9]`; an
+       unlisted kind is `502 upstream_error`), the UI's proposal-kind handling (`ui/src/views/agent/proposal-body.tsx`: a card from the
+       parsed JSON, as `device`), and the agent's proposal writer.
+    2. Agent tool count 17 → 20: `3-intelligence/crates/agent111/tests/daemon_tools.rs` and `tests/chat_loop.rs`, the `DAEMON_TOOLS` list,
+       and `src/tools.rs` schemas and dispatch (`presence.read`, `gateway.read`, `relay.propose`; `nearby.read` is extended).
+    3. `pnpm gen:types`, then `node scripts/gen-sse.mjs --check`; the new enum tuples (`CONSENT_ACTIONS`, `RELAY_GATEWAY_STATES`,
+       `PAIR_ROLES`, `PAIR_VIAS`, `PAIR_TLS`, `REGISTRY_ANSWERS`, `EVIDENCE_TRANSPORTS`; `NEARBY_KINDS`, `PROBLEM_CODES` and
+       `PROPOSAL_KINDS` grow) and aliases are listed in `scripts/gen-sse.mjs` (`ALIASES`, `ENUMS`).
+    4. `x-sse-events.events` gains `relay` and `registry`, and the UI store's `switch (frame.event)` in `ui/src/lib/api/store.ts` handles
+       both (`relay`, `registry` slices; a loaded slice is re-read after `reset`).
+    5. The contract tests: `test/gen.test.ts` (event names and enum mirrors), `test/http.test.ts` (every operation has an adapter call;
+       the Layer 7 operations are called through `createHttpRelay`), `test/layer7-contract.test.ts` (closed enums, enum growth,
+       fixtures, the mock, the store), and the mock relay (`ui/src/lib/api/mock/relay.ts`), whose frames validate against `x-sse-events`.
+       `test/layer6-contract.test.ts` pins the Layer 6 prefix of the grown lists.
+    6. `1-bootstrap/crates/node111/src/daemon/dashboard/api_v1/` mirrors: `KINDS`, the `NearbySource` kinds (`kind_for`: `111`), the
+       evidence transports (`EVIDENCE_TRANSPORTS` in `nearby.rs`), and beside the new routes the `Problem` codes and `ConsentRequired`
+       actions above.
+  - *The UI seam:* the Layer 7 adapter is `ui/src/lib/api/relay.ts` (`RelayAdapter`, `createHttpRelay`), reached through `getRelay()` in
+    `lib/api/index.ts` and imported dynamically, so none of it is in the eager chunk; the dev mock's relay is `adapter.mock.relay`.
+- **Not gated:** `/`, static assets, `/health` (body is booleans), `/origin/v1/*` (Layer 7, §9.1: the hub's verified update files, GET only,
+  404 unless the hub serves them; outside `openapi.yaml`) and `/api/v1/auth/*`. Everything
   else — including the Layer 1 seam `/api/status` and the `/v1` legacy page — needs loopback or a
   session.
 - **Chat stream (`POST /chat`, `stream:true`):** the response body is `text/event-stream` with
@@ -150,4 +218,4 @@ the `x-sse-events` map) into `ui/src/lib/api/types.gen.ts` — never hand-edited
 - **Identity:** no key material on any route, ever (Layer 2 rule). `node.label`/`bech32` are
   display forms computed from the public id.
 - **Timestamps:** RFC 3339 UTC. **IDs:** `conv-…` minted by the client (`[A-Za-z0-9_-]{1,128}`);
-  `prop-…`/`task-…` minted by `111-agent`; `msg-…` minted by `111d` (Layer 5); `fc-…`/`fm-…`/`be-…`/`sg-…` minted by `111d` (Layer 6).
+  `prop-…`/`task-…` minted by `111-agent`; `msg-…` minted by `111d` (Layer 5); `fc-…`/`fm-…`/`be-…`/`sg-…` minted by `111d` (Layer 6). Layer 7 mints no new id family: a paired hub is its `NodeId`.

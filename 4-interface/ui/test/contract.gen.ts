@@ -50,7 +50,12 @@ export const schemas: Record<string, JsonSchema> = {
           "consent_required",
           "oversize",
           "component_unavailable",
-          "unsupported_action"
+          "unsupported_action",
+          "no_such_transport",
+          "licensed_board",
+          "metered_cap",
+          "lan_off",
+          "pair_role_mismatch"
         ]
       },
       "errors": {
@@ -102,7 +107,7 @@ export const schemas: Record<string, JsonSchema> = {
       "since": {"type":"string","format":"date-time"},
       "reason_code": {
         "type": "string",
-        "description": "stable snake_case, display-only for clients. Emitted set (111d): healthy, health_pending, spawn_pending, child_degraded, child_stopped, child_backoff, health_error, health_503, health_unreachable, binary_absent, no_model, no_python, venv_unavailable, transport_degraded, joined, isolated, no_radio, radio_unbound, radio_bound_rnode, radio_bound_meshtastic, stack_waiting, stack_down, verify_failed, kb_absent, wan_ok, wan_unknown, wan_offline, not_hub, opencode_found, opencode_absent. Layer 5 adds: store_full (fabric), port_busy (meshtastic); fabric and meshtastic rows add their own snake_case codes, additively."
+        "description": "stable snake_case, display-only for clients. Emitted set (111d): healthy, health_pending, spawn_pending, child_degraded, child_stopped, child_backoff, health_error, health_503, health_unreachable, binary_absent, no_model, no_python, venv_unavailable, transport_degraded, joined, isolated, no_radio, radio_unbound, radio_bound_rnode, radio_bound_meshtastic, stack_waiting, stack_down, verify_failed, kb_absent, not_hub, opencode_found, opencode_absent. Layer 5 adds: store_full (fabric), port_busy (meshtastic); fabric and meshtastic rows add their own snake_case codes, additively. Layer 7 (§3.5) retires wan_ok, wan_unknown and wan_offline and emits, for the `gateway` row, gateway_none (state unset: no gateway configured), carrier_ok (live), carrier_pending (unset: the last check failed or items wait) and gateway_off (unset: off by choice)."
       },
       "reason": {"type":"string","description":"one plain sentence"},
       "can_run_here": {"type":"boolean"},
@@ -115,7 +120,11 @@ export const schemas: Record<string, JsonSchema> = {
         "description": "Layer 5 (§13): the hosted panel for this service's LIVE page, or null. Additive: absent on older daemons"
       },
       "actions": {"type":"array","items":{"type":"string","enum":["restart","log"]}},
-      "detail": {"type":"object","additionalProperties":true}
+      "detail": {
+        "type": "object",
+        "additionalProperties": true,
+        "description": "per-service facts. The `gateway` row's detail is `GatewayDetail` (Layer 7, §3.5)"
+      }
     }
   },
   "Status": {
@@ -293,8 +302,8 @@ export const schemas: Record<string, JsonSchema> = {
       "task_id": {"type":["string","null"]},
       "kind": {
         "type": "string",
-        "enum": ["diagnose","propose","patch","chat","message","bridge_message","bridge_edge","device"],
-        "description": "Layer 6 adds `bridge_message` (body: `to: <fc-id>` lines, a blank line, then the text verbatim; accepting runs the fan-out validation and, if a consent gate applies, the 409 `consent_required` round-trip), `bridge_edge` (body: a `from: <fc-id>` line and a `to: <fc-id>` line, then the agent's reason; accepting runs the edge-enable consent round-trip) and `device` (body: one JSON object `{\"why\": string, \"actions\": [Action]}` where an Action is `{\"action\": name, …args}` from the closed vocabulary `rns.interface.upsert {device_id, type, params}`, `rns.interface.remove {name}`, `rns.posture.set {share_instance, enable_transport}`, `radio.region.set {region}`, plus the one-shots `identify {device_id}` and `service.restart {service_id}`; 111d validates, applies, probes and reverts; the other vocabulary entries are refused `unsupported_action`; a body that is not that shape is 502 `upstream_error`). RENDERING RULE: the text part of a `bridge_message` or `bridge_edge` body quotes foreign, untrusted text and is rendered as a preformatted text block, never as Markdown (no links, no emphasis); `device` bodies render as a card from the parsed JSON. Layer 5 adds `message` (§17 `messages.send`): the body is exactly `to: <64 lowercase hex>` + a blank line + the text verbatim; accepting it (POST /proposals/{id}/decision) makes 111d send it — only to an accepted contact and only when the proposal's `node_id` names this node — and the decision is recorded after the store committed the message"
+        "enum": ["diagnose","propose","patch","chat","message","bridge_message","bridge_edge","device","relay"],
+        "description": "Layer 7 adds `relay` (§13.2; body: one JSON object `{\"why\": string, \"actions\": [Action]}` where an Action is `{\"action\": name, …args}` from the closed vocabulary `gateway.enable {carrier, mode}`, `hub.pair {}`, `presence.interval {transport, minutes}`, `carrier.flush {}`; accepting it runs the same validation, consent and refusal paths as the routes (a consent gate answers 409 `consent_required` and the human repeats the decision with `accept_warning`); `presence.interval` is refused `unsupported_action` in v1; a body that is not that shape is 502 `upstream_error`; it renders as a card from the parsed JSON, never as Markdown). Layer 6 adds `bridge_message` (body: `to: <fc-id>` lines, a blank line, then the text verbatim; accepting runs the fan-out validation and, if a consent gate applies, the 409 `consent_required` round-trip), `bridge_edge` (body: a `from: <fc-id>` line and a `to: <fc-id>` line, then the agent's reason; accepting runs the edge-enable consent round-trip) and `device` (body: one JSON object `{\"why\": string, \"actions\": [Action]}` where an Action is `{\"action\": name, …args}` from the closed vocabulary `rns.interface.upsert {device_id, type, params}`, `rns.interface.remove {name}`, `rns.posture.set {share_instance, enable_transport}`, `radio.region.set {region}`, plus the one-shots `identify {device_id}` and `service.restart {service_id}`; 111d validates, applies, probes and reverts; the other vocabulary entries are refused `unsupported_action`; a body that is not that shape is 502 `upstream_error`). RENDERING RULE: the text part of a `bridge_message` or `bridge_edge` body quotes foreign, untrusted text and is rendered as a preformatted text block, never as Markdown (no links, no emphasis); `device` bodies render as a card from the parsed JSON. Layer 5 adds `message` (§17 `messages.send`): the body is exactly `to: <64 lowercase hex>` + a blank line + the text verbatim; accepting it (POST /proposals/{id}/decision) makes 111d send it — only to an accepted contact and only when the proposal's `node_id` names this node — and the decision is recorded after the store committed the message"
       },
       "title": {"type":"string"},
       "body": {"type":"string","description":"markdown"},
@@ -563,7 +572,7 @@ export const schemas: Record<string, JsonSchema> = {
   "MessageState": {
     "type": "string",
     "enum": ["queued","sent","relayed","delivered"],
-    "description": "Delivery evidence (§9), own messages only. queued: no path, key missing, or the peer's hub is not yours (see `reason_code`). sent: a frame was written to a link, or a custody reject kept it here (see `reason_code`). relayed: an authenticated CUSTODY_ACK from a mailbox node for a known member — saved and held for them, not yet at them. delivered: the recipient's own ACK. Only that ACK releases the sender's copy."
+    "description": "Delivery evidence (§9), own messages only. queued: no path, key missing, or the peer's hub is not yours (see `reason_code`). sent: a frame was written to a link, or a custody reject kept it here (see `reason_code`). relayed: an authenticated CUSTODY_ACK from a mailbox node for a known member — saved and held for them, not yet at them. Layer 7 widens it: also a hub's CUSTODY_ACK for a recipient whose home-hub hint names ANOTHER hub, with `reason_code` `forwarding` — held, and passed on to that hub; never 'the recipient's hub was found'. delivered: the recipient's own ACK. Only that ACK releases the sender's copy."
   },
   "ContactTrust": {
     "type": "string",
@@ -591,7 +600,7 @@ export const schemas: Record<string, JsonSchema> = {
       },
       "reason_code": {
         "type": ["string","null"],
-        "description": "stable snake_case, display-only for clients, set while the state needs an explanation. Emitted set (111d): waiting_for_key (queued, the peer's card has not arrived), hub_not_yours (queued while your hub is unreachable and their card names another hub; or sent after your hub answered REJECT_UNKNOWN_DEST — your hub does not know them, §9; either way delivered when you meet directly), restore_pending (queued, the identity holder reports a restore floor so nothing is sealed), store_full (queued, the local store refuses new work), mailbox_full (sent, the hub answered REJECT_FULL), not_enrolled (sent, the hub answered REJECT_UNENROLLED: it no longer lists this node), cancelled (queued, the user cancelled it before it left; an empty placeholder goes instead so no number is abandoned, §4). null when nothing needs explaining."
+        "description": "stable snake_case, display-only for clients, set while the state needs an explanation. Emitted set (111d): waiting_for_key (queued, the peer's card has not arrived), hub_not_yours (queued while your hub is unreachable and their card names another hub; or sent after your hub answered REJECT_UNKNOWN_DEST — your hub does not know them, §9; either way delivered when you meet directly), restore_pending (queued, the identity holder reports a restore floor so nothing is sealed), store_full (queued, the local store refuses new work), mailbox_full (sent, the hub answered REJECT_FULL), not_enrolled (sent, the hub answered REJECT_UNENROLLED: it no longer lists this node), cancelled (queued, the user cancelled it before it left; an empty placeholder goes instead so no number is abandoned, §4), forwarding (Layer 7, relayed: 'Your hub holds it and passes it to their hub.'). null when nothing needs explaining."
       },
       "reason": {"type":["string","null"],"description":"one plain sentence for `reason_code`"},
       "local_seq": {
@@ -974,6 +983,10 @@ export const schemas: Record<string, JsonSchema> = {
       "bundle": {
         "$ref": "#/components/schemas/Card",
         "description": "what the member scans or pastes: the hub's card, address and code in one text and QR"
+      },
+      "gateway": {
+        "oneOf": [{"$ref":"#/components/schemas/GatewayOffer"},{"type":"null"}],
+        "description": "Layer 7 (§7.5): present while this hub is a gateway; the member learns it once, here. Absent or null otherwise"
       }
     }
   },
@@ -999,7 +1012,33 @@ export const schemas: Record<string, JsonSchema> = {
         "type": ["object","null"],
         "properties": {"lat":{"type":"number"},"lon":{"type":"number"},"alt_m":{"type":["number","null"]}}
       },
-      "channel_utilization": {"type":["number","null"]}
+      "channel_utilization": {"type":["number","null"]},
+      "heard_ago_s": {
+        "type": ["integer","null"],
+        "minimum": 0,
+        "description": "Layer 7 (§2.1): seconds since this node's own monotonic clock last proved the node was heard; display only, never a peer's clock. No timer refreshes it: the UI computes ages from this value and its own clock between frames. Absent on Meshtastic and Reticulum rows"
+      },
+      "heard_seq": {
+        "type": ["integer","null"],
+        "minimum": 0,
+        "description": "Layer 7: the store sequence (`local_seq`) of the event that proved it; monotone, survives restarts"
+      },
+      "evidence": {
+        "type": "array",
+        "items": {"$ref":"#/components/schemas/NearbyEvidence"},
+        "description": "Layer 7: one entry per transport the node was heard on (a contact heard on the LAN and through its hub has two). Untrusted text"
+      },
+      "roles": {
+        "type": "array",
+        "items": {"type":"string"},
+        "description": "Layer 7: the contact's signed role names (e.g. mailbox, gateway); text only"
+      },
+      "position_precision_bits": {
+        "type": ["integer","null"],
+        "minimum": 0,
+        "maximum": 32,
+        "description": "Layer 7 (§10.1 rule 4): the channel's position precision. v1 knows none (null): the radar draws the coarsest cell"
+      }
     }
   },
   "NearbySource": {
@@ -1010,8 +1049,8 @@ export const schemas: Record<string, JsonSchema> = {
       "id": {"type":"string"},
       "kind": {
         "type": "string",
-        "enum": ["meshtastic","reticulum"],
-        "description": "Layer 6 adds `reticulum`: announces the LXMF helper hears. For a `reticulum` source a node's `id` is the 32-hex destination hash, `num` is 0, `long_name` is the announced display name (untrusted) and `short_name` its first 8 hex; `device_id` is null. Unknown kinds render as `unknown`"
+        "enum": ["meshtastic","reticulum","111"],
+        "description": "Layer 7 adds `111` (§2.3): the contacts and paired hubs this node has a presence fact for this session, one source labelled '111 nodes heard by this node', `device_id` null; a node's `id` is the NodeId (64 hex), `num` is 0, `long_name` the local alias or the L2 label, `short_name` the label, `last_heard_hint` null, and `heard_ago_s`, `heard_seq`, `evidence`, `roles` are set. A 111 node is never merged into a Meshtastic or Reticulum row. Layer 6 adds `reticulum`: announces the LXMF helper hears. For a `reticulum` source a node's `id` is the 32-hex destination hash, `num` is 0, `long_name` is the announced display name (untrusted) and `short_name` its first 8 hex; `device_id` is null. Unknown kinds render as `unknown`"
       },
       "label": {"type":"string","description":"plain heading, e.g. heard via Meshtastic on Bench radio"},
       "device_id": {"type":["string","null"],"description":"the DeviceRecord this source reads through"},
@@ -1683,8 +1722,18 @@ export const schemas: Record<string, JsonSchema> = {
     "properties": {
       "action": {
         "type": "string",
-        "enum": ["edge_enable","edge_resume","component_enable","ham_confirm","uplink_send"],
-        "description": "which confirmation this is"
+        "enum": [
+          "edge_enable",
+          "edge_resume",
+          "component_enable",
+          "ham_confirm",
+          "uplink_send",
+          "carrier_enable",
+          "pair_plain",
+          "gateway_bit",
+          "origin_serve"
+        ],
+        "description": "which confirmation this is. Layer 7 appends `carrier_enable` (ntfy on, or its metered cap set or raised; subject `<kind>:<server>`), `pair_plain` (pairing over an unencrypted non-private link; subject the far hub's NodeId), `gateway_bit` (the public gateway role bit) and `origin_serve` (serving update files to the LAN)"
       },
       "subject": {
         "type": "string",
@@ -2225,6 +2274,413 @@ export const schemas: Record<string, JsonSchema> = {
       "detail": {"type":"string"},
       "consent": {"oneOf":[{"$ref":"#/components/schemas/ConsentRequired"},{"type":"null"}]}
     }
+  },
+  "RelayGatewayState": {
+    "type": "string",
+    "enum": ["gateway_none","carrier_ok","carrier_pending","gateway_off"],
+    "description": "The gateway badge's four states (§3.5, §3.8), never 'online': gateway_none (no gateway configured), carrier_ok (the carrier answered at the last check), carrier_pending (the last check failed or items wait), gateway_off (off by choice). Also the `reason_code` of the `gateway` service row. Unknown values render as `unknown`."
+  },
+  "RelayGateway": {
+    "type": "object",
+    "required": [
+      "enabled",
+      "state",
+      "carrier",
+      "endpoint",
+      "mode",
+      "checked_ago_s",
+      "last_flush_ago_s",
+      "pending",
+      "metered_cap_reached"
+    ],
+    "description": "The hub's own gateway badge (§3.8): never a member's view of its hub.",
+    "properties": {
+      "enabled": {"type":"boolean","description":"`gateway.enabled`; true only on a hub"},
+      "state": {"$ref":"#/components/schemas/RelayGatewayState"},
+      "carrier": {
+        "type": ["string","null"],
+        "description": "the carrier the claim rests on: `ntfy`, `paired-hub` or null. Open vocabulary (chatmail joins after §6.5): unknown values render as `unknown`"
+      },
+      "endpoint": {
+        "type": ["string","null"],
+        "description": "the carrier's host, or the paired hub's label. Untrusted: render as text"
+      },
+      "mode": {
+        "type": ["string","null"],
+        "enum": ["5A","5B",null],
+        "description": "5A: requests on a schedule the flush sets; 5B: a held stream (never on a Termux hub)"
+      },
+      "checked_ago_s": {
+        "type": ["integer","null"],
+        "minimum": 0,
+        "description": "seconds since the last carrier check; null before one ran. A monotonic clock, display only"
+      },
+      "last_flush_ago_s": {"type":["integer","null"],"minimum":0},
+      "pending": {"type":"integer","minimum":0,"description":"items waiting for the carrier"},
+      "metered_cap_reached": {
+        "type": "boolean",
+        "description": "the rolling 24 h cap of a metered link is reached: no flush runs (§12)"
+      },
+      "termux_poll_min": {
+        "type": "integer",
+        "minimum": 9,
+        "description": "`gateway.termux_poll_min` (default 15): read only on a Termux hub whose netlink bind failed (§3.4)"
+      }
+    }
+  },
+  "RelaySecret": {
+    "type": "object",
+    "required": ["set"],
+    "description": "A write-only secret: whether one is stored, never its value.",
+    "properties": {"set":{"type":"boolean"}}
+  },
+  "RelayCarrier": {
+    "type": "object",
+    "required": ["kind","server","mode","token","topic_secret","consent_hash"],
+    "description": "The carrier switch (§6.3). `kind: none` constructs nothing: no socket, task, thread or file write.",
+    "properties": {
+      "kind": {
+        "type": "string",
+        "enum": ["none","ntfy"],
+        "description": "`chatmail` joins after §6.5; unknown values render as `unknown`"
+      },
+      "server": {
+        "type": ["string","null"],
+        "description": "an https:// URL; http:// only for a private address, and then the token crosses that LAN in clear (§9.5 T6). Untrusted: render as text"
+      },
+      "mode": {"type":"string","enum":["5A","5B"]},
+      "token": {"$ref":"#/components/schemas/RelaySecret"},
+      "topic_secret": {"$ref":"#/components/schemas/RelaySecret"},
+      "consent_hash": {
+        "oneOf": [{"$ref":"#/components/schemas/Sha256Hex"},{"type":"null"}],
+        "description": "the hash of the `carrier_enable` text the human accepted; null until then"
+      }
+    }
+  },
+  "PairRole": {
+    "type": "string",
+    "enum": ["peer","leaf","gateway"],
+    "description": "The role the far hub has, from this hub's side (§4.6 row 2): `peer` (default), `leaf` (this hub is its gateway) or `gateway` (it is this hub's upstream). Roles are complementary across the two hubs: peer-peer, leaf-gateway."
+  },
+  "PairVia": {
+    "type": "string",
+    "enum": ["tcp","carrier"],
+    "description": "The link (§4.6 row 2): `tcp` (default) or `carrier` (a far gateway reached through this hub's carrier; `peer` only)."
+  },
+  "PairTls": {
+    "type": "string",
+    "enum": ["rpk","plain","none"],
+    "description": "How the link is protected (§12): rpk (TLS 1.3 raw public keys), plain (a non-private address the owner accepted unencrypted after the `pair_plain` warning), none (not applicable: a `lan` pair runs plain on a private link by the owner's mark, and a `carrier` pair talks only through its carrier)."
+  },
+  "PairedHub": {
+    "type": "object",
+    "required": ["node_id","label","role","via","tls","lan","reachable","pending","reposts"],
+    "description": "One paired hub (§4.6, §13.1). Forwards only when both sides hold the pair.",
+    "properties": {
+      "node_id": {"$ref":"#/components/schemas/NodeId"},
+      "label": {
+        "type": "string",
+        "description": "the L2 label of the far hub (`xxxx-xxxx-xx`), a display form of the NodeId"
+      },
+      "role": {"$ref":"#/components/schemas/PairRole"},
+      "via": {"$ref":"#/components/schemas/PairVia"},
+      "tls": {"$ref":"#/components/schemas/PairTls"},
+      "lan": {
+        "type": "boolean",
+        "description": "the owner marked this pair a LAN or an adopted tunnel, so it runs plain (§4.1 rule 1)"
+      },
+      "reachable": {"type":"boolean"},
+      "pending": {"type":"integer","minimum":0,"description":"forward rows waiting for this pair"},
+      "reposts": {"type":"integer","minimum":0,"description":"carrier re-posts of §5.9 (C6)"}
+    }
+  },
+  "RelayHeartbeat": {
+    "type": "object",
+    "required": ["transport","interval_min","owner"],
+    "description": "One transport's presence beat (§2.4): visible and inert in v1 (every write is refused). `0` is events only.",
+    "properties": {
+      "transport": {"type":"string","description":"e.g. tcp-lan, kiss-modem, meshtastic-client, rns"},
+      "interval_min": {"type":"integer","minimum":0},
+      "owner": {
+        "type": "string",
+        "description": "who owns the setting: `layer7`, or `layer6` for `rns` (the LXMF helper's announce interval, written through `PATCH /bridge/settings`)"
+      }
+    }
+  },
+  "RelayDiscovery": {
+    "type": "object",
+    "required": ["lan_record","public_gateway_bit","offload_bit"],
+    "properties": {
+      "lan_record": {
+        "type": "boolean",
+        "description": "the `_111._tcp` DNS-SD record (§7.1); needs LAN sharing and a LAN-bound listener"
+      },
+      "public_gateway_bit": {
+        "type": "boolean",
+        "description": "role bit 3 (§7.2): everyone who receives the card learns this node has internet; needs its `gateway_bit` consent"
+      },
+      "offload_bit": {"type":"boolean","description":"role bit 4: serves model inference to paired LAN members"}
+    }
+  },
+  "RelayOrigin": {
+    "type": "object",
+    "required": ["serve","targets","bytes"],
+    "properties": {
+      "serve": {
+        "type": "boolean",
+        "description": "role bit 5 and the three `/origin/v1/*` routes (§9.1); needs `hub_role`, LAN sharing and its `origin_serve` consent"
+      },
+      "targets": {
+        "type": "array",
+        "items": {"type":"string"},
+        "description": "target triples this hub holds and serves; default: its own"
+      },
+      "bytes": {"type":"integer","minimum":0,"description":"size of `state/origin/`"}
+    }
+  },
+  "MeteredLink": {
+    "type": "object",
+    "required": ["match","daily_cap_bytes"],
+    "description": "A link the user marks metered (§12). Carrier bytes count in a rolling 24 h window on a monotonic clock; past the cap no flush runs. The SSID is a hint the user marks: Termux cannot read Android's metered flag.",
+    "properties": {
+      "match": {
+        "type": "object",
+        "description": "Exactly one of `iface` or `ssid`.",
+        "properties": {"iface":{"type":"string"},"ssid":{"type":"string"}}
+      },
+      "daily_cap_bytes": {"type":"integer","minimum":1}
+    }
+  },
+  "RelayStatus": {
+    "type": "object",
+    "required": ["schema","gateway","carrier","paired_hubs","forward","presence","discovery","origin","updates","metered"],
+    "description": "The whole Layer 7 state (§13.1). No secret is in it, ever: the agent's bearer reads it.",
+    "properties": {
+      "schema": {"type":"integer"},
+      "gateway": {"$ref":"#/components/schemas/RelayGateway"},
+      "carrier": {"$ref":"#/components/schemas/RelayCarrier"},
+      "paired_hubs": {"type":"array","items":{"$ref":"#/components/schemas/PairedHub"}},
+      "forward": {
+        "type": "object",
+        "required": ["refused","too_large"],
+        "description": "The fabric's session counters `forward_refused` and `forward_too_large` (§5.8, §5.2)",
+        "properties": {"refused":{"type":"integer","minimum":0},"too_large":{"type":"integer","minimum":0}}
+      },
+      "presence": {
+        "type": "object",
+        "required": ["heartbeat"],
+        "properties": {"heartbeat":{"type":"array","items":{"$ref":"#/components/schemas/RelayHeartbeat"}}}
+      },
+      "discovery": {"$ref":"#/components/schemas/RelayDiscovery"},
+      "origin": {"$ref":"#/components/schemas/RelayOrigin"},
+      "updates": {
+        "type": "object",
+        "required": ["check_internet"],
+        "properties": {
+          "check_internet": {"type":"boolean","description":"false: the hourly loop contacts no internet base (§9.3)"}
+        }
+      },
+      "metered": {"type":"array","items":{"$ref":"#/components/schemas/MeteredLink"}}
+    }
+  },
+  "RelaySettingsPatch": {
+    "type": "object",
+    "description": "Partial merge of `RelayStatus`'s writable keys (§13.1). Secrets are write-only strings here (`carrier.token`, `carrier.topic_secret`; null clears). `accept_warning` is the hash of the consent text the human was shown for `carrier_enable`, `gateway_bit` or `origin_serve`; absent on the first call.",
+    "properties": {
+      "gateway": {
+        "type": "object",
+        "properties": {"enabled":{"type":"boolean"},"termux_poll_min":{"type":"integer","minimum":9}}
+      },
+      "carrier": {
+        "type": "object",
+        "properties": {
+          "kind": {"type":"string","enum":["none","ntfy"]},
+          "server": {"type":["string","null"],"maxLength":512},
+          "mode": {"type":"string","enum":["5A","5B"]},
+          "token": {"type":["string","null"],"maxLength":512,"description":"write-only"},
+          "topic_secret": {"type":["string","null"],"maxLength":64,"description":"write-only; 32 B base32"}
+        }
+      },
+      "presence": {
+        "type": "object",
+        "description": "Every write is refused in v1 (§2.4): 409 `no_such_transport`, or `settings_locked` for `rns`.",
+        "properties": {
+          "heartbeat": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": ["transport","interval_min"],
+              "properties": {"transport":{"type":"string"},"interval_min":{"type":"integer","minimum":0}}
+            }
+          }
+        }
+      },
+      "discovery": {
+        "type": "object",
+        "properties": {
+          "lan_record": {"type":"boolean"},
+          "public_gateway_bit": {"type":"boolean"},
+          "offload_bit": {"type":"boolean"}
+        }
+      },
+      "origin": {
+        "type": "object",
+        "properties": {"serve":{"type":"boolean"},"targets":{"type":"array","items":{"type":"string"}}}
+      },
+      "updates": {"type":"object","properties":{"check_internet":{"type":"boolean"}}},
+      "metered": {"type":"array","items":{"$ref":"#/components/schemas/MeteredLink"},"description":"replaces the list"},
+      "accept_warning": {"$ref":"#/components/schemas/Sha256Hex"}
+    }
+  },
+  "PairOfferRequest": {
+    "type": "object",
+    "required": ["role","via"],
+    "description": "The role this hub proposes for the other hub, and the link (§4.6 step 1).",
+    "properties": {"role":{"$ref":"#/components/schemas/PairRole"},"via":{"$ref":"#/components/schemas/PairVia"}}
+  },
+  "PairOffer": {
+    "type": "object",
+    "required": ["schema","bundle","code","link_spki"],
+    "properties": {
+      "schema": {"type":"integer"},
+      "bundle": {"$ref":"#/components/schemas/Card","description":"the `111PAIR:` bundle as text and QR"},
+      "code": {"type":"string","description":"the one-time enrolment code, shown once"},
+      "link_spki": {"type":"string","description":"the link key's SPKI, base32 (public)"}
+    }
+  },
+  "PairRequest": {
+    "type": "object",
+    "required": ["bundle","role","via"],
+    "properties": {
+      "bundle": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 1024,
+        "description": "the far hub's `111PAIR:` text, scanned or pasted"
+      },
+      "role": {"$ref":"#/components/schemas/PairRole"},
+      "via": {"$ref":"#/components/schemas/PairVia"},
+      "lan": {
+        "type": "boolean",
+        "default": false,
+        "description": "mark the link a LAN or an adopted tunnel: it runs plain (§4.1 rule 1)"
+      },
+      "accept_warning": {
+        "$ref": "#/components/schemas/Sha256Hex",
+        "description": "the hash of the `pair_plain` text the user was shown; absent on the first call"
+      }
+    }
+  },
+  "RelayAccepted": {
+    "type": "object",
+    "required": ["schema","started"],
+    "properties": {"schema":{"type":"integer"},"started":{"type":"boolean"}}
+  },
+  "RegistryAnswer": {
+    "type": "string",
+    "enum": ["hint","signed"],
+    "description": "Which layer answered (§7.6): hint = a DNS-SD record, 'hint (unverified)'; signed = a role bit, 'signed by this contact'. 'asked just now' (a query reply) joins in v1.1. Unknown values render as `unknown`."
+  },
+  "RegistryRow": {
+    "type": "object",
+    "required": ["id","label","node_id","address","roles","answered_by","heard_ago_s"],
+    "description": "One 111 node the registry knows (§7). Every string is untrusted (a forged TXT record is possible): render as text. A row binds nothing: only the handshake and a verified packet do.",
+    "properties": {
+      "id": {
+        "type": "string",
+        "description": "stable within this list: the NodeId when known, else the DNS-SD instance"
+      },
+      "label": {"type":"string","description":"the L2 label of the instance; never an alias"},
+      "node_id": {
+        "oneOf": [{"$ref":"#/components/schemas/NodeId"},{"type":"null"}],
+        "description": "the `k` TXT value of a hint, or the contact's NodeId; unverified for a hint"
+      },
+      "address": {
+        "type": ["string","null"],
+        "description": "host:port of the fabric listener from the record; null for a signed row"
+      },
+      "roles": {
+        "type": "array",
+        "items": {"type":"string"},
+        "description": "role names (mailbox, hub, gateway, offload, origin), from the TXT `r` or the contact's signed bits"
+      },
+      "answered_by": {"$ref":"#/components/schemas/RegistryAnswer"},
+      "heard_ago_s": {"type":["integer","null"],"minimum":0}
+    }
+  },
+  "UpdateOrigin": {
+    "type": "object",
+    "required": ["kind","url","last_answer","newest_seen"],
+    "description": "One update origin (§9.3). A hub or `--from` origin has its own record and never writes the dashboard's 'last successful check'.",
+    "properties": {
+      "kind": {
+        "type": "string",
+        "enum": ["hub","internet","directory","url"],
+        "description": "hub: the home hub's origin; internet: install.111.network or GitHub Releases; directory and url: typed for `111 update --from`. Unknown values render as `unknown`"
+      },
+      "url": {"type":"string","description":"the origin base. Untrusted: render as text"},
+      "last_answer": {
+        "oneOf": [
+          {
+            "type": "object",
+            "required": ["ok","ago_s"],
+            "properties": {
+              "ok": {"type":"boolean"},
+              "ago_s": {"type":"integer","minimum":0},
+              "detail": {"type":["string","null"]}
+            }
+          },
+          {"type":"null"}
+        ],
+        "description": "null before this origin was asked"
+      },
+      "newest_seen": {
+        "type": ["string","null"],
+        "description": "the newest release calver this origin served and this node verified (T4: 'newest release seen: <calver> from <origin>')"
+      }
+    }
+  },
+  "GatewayDetail": {
+    "type": "object",
+    "required": ["carrier","endpoint","mode","checked_ago_s","last_flush_ago_s","pending","error"],
+    "description": "`ServiceRecord.detail` of the `gateway` row (§3.5 item 3; replaces `{online, probe_url, checked_at, error, interval_sec}`). Ages come from a monotonic clock; there is no wall-clock `checked_at`.",
+    "properties": {
+      "carrier": {"type":["string","null"],"description":"`ntfy`, `paired-hub` or null; open vocabulary"},
+      "endpoint": {"type":["string","null"]},
+      "mode": {"type":["string","null"],"enum":["5A","5B",null]},
+      "checked_ago_s": {"type":["integer","null"],"minimum":0},
+      "last_flush_ago_s": {"type":["integer","null"],"minimum":0},
+      "pending": {"type":"integer","minimum":0},
+      "error": {"type":["string","null"]}
+    }
+  },
+  "GatewayOffer": {
+    "type": "object",
+    "required": ["carrier","mode"],
+    "description": "What the hub offer tells a member about its hub's gateway, once, at enrolment (§7.5). Nothing about it rides INTRO or cards.",
+    "properties": {"carrier":{"type":"string","enum":["ntfy"]},"mode":{"type":"string","enum":["5A","5B"]}}
+  },
+  "NearbyEvidenceTransport": {
+    "type": "string",
+    "enum": ["tcp-lan","hub","carrier"],
+    "description": "Closed (§2.3): tcp-lan (a connection attributed to the peer, the home hub's row and a `tcp` pair's row), hub (heard through the home hub), carrier (a `carrier` pair's row)."
+  },
+  "NearbyEvidence": {
+    "type": "object",
+    "required": ["transport","text"],
+    "properties": {
+      "transport": {"$ref":"#/components/schemas/NearbyEvidenceTransport"},
+      "text": {
+        "type": "string",
+        "description": "the §2.2 evidence string, e.g. 'a message from them arrived (verified)'"
+      }
+    }
+  },
+  "SseRelay": {"$ref":"#/components/schemas/RelayStatus"},
+  "SseRegistry": {
+    "type": "object",
+    "required": ["rows"],
+    "properties": {"rows":{"type":"array","items":{"$ref":"#/components/schemas/RegistryRow"}}}
   }
 };
 
@@ -2535,7 +2991,7 @@ export const operations: Record<string, ContractOperation> = {
         "decision": {"$ref":"#/components/schemas/Decision"},
         "accept_warning": {
           "$ref": "#/components/schemas/Sha256Hex",
-          "description": "Layer 6: the hash of the consent text the user was shown (`bridge_edge`, or a `bridge_message` behind a consent gate); absent on the first call"
+          "description": "Layer 6/7: the hash of the consent text the user was shown (`bridge_edge`, a `bridge_message` behind a consent gate, or a `relay` action behind `carrier_enable` / `gateway_bit` / `origin_serve`); absent on the first call"
         }
       }
     },
@@ -3308,6 +3764,170 @@ export const operations: Record<string, ContractOperation> = {
     "pathParams": [],
     "errors": [409]
   },
+  "getRelay": {
+    "method": "GET",
+    "path": "/api/v1/relay",
+    "success": 200,
+    "contentType": "application/json",
+    "schema": {"$ref":"#/components/schemas/RelayStatus"},
+    "schemasByType": {"application/json":{"$ref":"#/components/schemas/RelayStatus"}},
+    "requestSchema": null,
+    "query": [],
+    "pathParams": [],
+    "errors": []
+  },
+  "patchRelaySettings": {
+    "method": "PATCH",
+    "path": "/api/v1/relay/settings",
+    "success": 200,
+    "contentType": "application/json",
+    "schema": {"$ref":"#/components/schemas/RelayStatus"},
+    "schemasByType": {"application/json":{"$ref":"#/components/schemas/RelayStatus"}},
+    "requestSchema": {"$ref":"#/components/schemas/RelaySettingsPatch"},
+    "query": [],
+    "pathParams": [],
+    "errors": [400,409]
+  },
+  "offerRelayPair": {
+    "method": "POST",
+    "path": "/api/v1/relay/pair/offer",
+    "success": 200,
+    "contentType": "application/json",
+    "schema": {"$ref":"#/components/schemas/PairOffer"},
+    "schemasByType": {"application/json":{"$ref":"#/components/schemas/PairOffer"}},
+    "requestSchema": {"$ref":"#/components/schemas/PairOfferRequest"},
+    "query": [],
+    "pathParams": [],
+    "errors": [400,403,409]
+  },
+  "pairRelayHub": {
+    "method": "POST",
+    "path": "/api/v1/relay/pair",
+    "success": 202,
+    "contentType": "application/json",
+    "schema": {"$ref":"#/components/schemas/PairedHub"},
+    "schemasByType": {"application/json":{"$ref":"#/components/schemas/PairedHub"}},
+    "requestSchema": {"$ref":"#/components/schemas/PairRequest"},
+    "query": [],
+    "pathParams": [],
+    "errors": [400,403,409,502]
+  },
+  "unpairRelayHub": {
+    "method": "DELETE",
+    "path": "/api/v1/relay/paired/{node_id}",
+    "success": 204,
+    "contentType": null,
+    "schema": null,
+    "schemasByType": {},
+    "requestSchema": null,
+    "query": [],
+    "pathParams": ["node_id"],
+    "errors": [403]
+  },
+  "checkRelayCarrier": {
+    "method": "POST",
+    "path": "/api/v1/relay/carrier/check",
+    "success": 202,
+    "contentType": "application/json",
+    "schema": {"$ref":"#/components/schemas/RelayAccepted"},
+    "schemasByType": {"application/json":{"$ref":"#/components/schemas/RelayAccepted"}},
+    "requestSchema": null,
+    "query": [],
+    "pathParams": [],
+    "errors": [409]
+  },
+  "flushRelayCarrier": {
+    "method": "POST",
+    "path": "/api/v1/relay/carrier/flush",
+    "success": 202,
+    "contentType": "application/json",
+    "schema": {"$ref":"#/components/schemas/RelayAccepted"},
+    "schemasByType": {"application/json":{"$ref":"#/components/schemas/RelayAccepted"}},
+    "requestSchema": null,
+    "query": [],
+    "pathParams": [],
+    "errors": [409]
+  },
+  "listRegistry": {
+    "method": "GET",
+    "path": "/api/v1/registry",
+    "success": 200,
+    "contentType": "application/json",
+    "schema": {
+      "type": "object",
+      "required": ["schema","rows"],
+      "properties": {
+        "schema": {"type":"integer"},
+        "rows": {"type":"array","items":{"$ref":"#/components/schemas/RegistryRow"}}
+      }
+    },
+    "schemasByType": {
+      "application/json": {
+        "type": "object",
+        "required": ["schema","rows"],
+        "properties": {
+          "schema": {"type":"integer"},
+          "rows": {"type":"array","items":{"$ref":"#/components/schemas/RegistryRow"}}
+        }
+      }
+    },
+    "requestSchema": null,
+    "query": [],
+    "pathParams": [],
+    "errors": []
+  },
+  "browseRegistry": {
+    "method": "POST",
+    "path": "/api/v1/registry/browse",
+    "success": 202,
+    "contentType": "application/json",
+    "schema": {"$ref":"#/components/schemas/RelayAccepted"},
+    "schemasByType": {"application/json":{"$ref":"#/components/schemas/RelayAccepted"}},
+    "requestSchema": null,
+    "query": [],
+    "pathParams": [],
+    "errors": [409]
+  },
+  "runNearbyHops": {
+    "method": "POST",
+    "path": "/api/v1/nearby/hops",
+    "success": 202,
+    "contentType": "application/json",
+    "schema": {"$ref":"#/components/schemas/RelayAccepted"},
+    "schemasByType": {"application/json":{"$ref":"#/components/schemas/RelayAccepted"}},
+    "requestSchema": null,
+    "query": [],
+    "pathParams": [],
+    "errors": [409,429]
+  },
+  "listUpdateOrigins": {
+    "method": "GET",
+    "path": "/api/v1/update/origins",
+    "success": 200,
+    "contentType": "application/json",
+    "schema": {
+      "type": "object",
+      "required": ["schema","origins"],
+      "properties": {
+        "schema": {"type":"integer"},
+        "origins": {"type":"array","items":{"$ref":"#/components/schemas/UpdateOrigin"}}
+      }
+    },
+    "schemasByType": {
+      "application/json": {
+        "type": "object",
+        "required": ["schema","origins"],
+        "properties": {
+          "schema": {"type":"integer"},
+          "origins": {"type":"array","items":{"$ref":"#/components/schemas/UpdateOrigin"}}
+        }
+      }
+    },
+    "requestSchema": null,
+    "query": [],
+    "pathParams": [],
+    "errors": []
+  },
   "events": {
     "method": "GET",
     "path": "/api/v1/events",
@@ -3337,7 +3957,9 @@ export const sse: { events: Record<string, string>; chat: Record<string, string>
     "nearby": "SseNearby",
     "panels": "SsePanels",
     "network_message": "SseNetworkMessage",
-    "bridge": "SseBridge"
+    "bridge": "SseBridge",
+    "relay": "SseRelay",
+    "registry": "SseRegistry"
   },
   "chat": {"token":"SseChatToken","tool":"SseChatTool","done":"SseChatDone","error":"SseChatError"}
 };

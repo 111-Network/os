@@ -25,7 +25,7 @@
 //! fake peers.
 
 use super::{ApiRouter, ApiState};
-use crate::daemon::bridge::{NearbySink, NETWORK_LXMF};
+use crate::daemon::bridge::{NearbySink, NETWORK_111, NETWORK_LXMF};
 use crate::daemon::meshtastic::presence::{sanitize_name, NearbyNode, NearbySource};
 use crate::daemon::meshtastic::Meshtastic;
 use axum::extract::State;
@@ -50,9 +50,19 @@ pub const MAX_BRIDGE_SOURCES: usize = 8;
 /// The `reticulum` source's heading.
 pub const RETICULUM_LABEL: &str = "heard via Reticulum";
 
-/// The `NearbySource.kind` a bridge network may report (closed: anything else is dropped).
+/// `NearbyNode.evidence[].transport` (Layer 7 `7-relay/README.md` §2.3, contract `NearbyEvidenceTransport`): the closed set a `111` row's
+/// evidence may name. `tcp-lan` is a connection attributed to the peer (also the home hub's row and a `tcp` pair's row), `hub` a contact
+/// heard through the home hub, `carrier` a `carrier` pair's row. The `111` source itself is built by the presence module (row D2).
+pub const EVIDENCE_TRANSPORTS: [&str; 3] = ["tcp-lan", "hub", "carrier"];
+
+/// The `NearbySource.kind` of a network's source (closed: anything else is dropped). Layer 7 adds `111` (the presence module's own
+/// source, §2.3); only the bridge's `reticulum` source is ever pushed by an adapter ([`BridgeNearby::push`]).
 fn kind_for(network: &str) -> Option<&'static str> {
-    (network == NETWORK_LXMF).then_some("reticulum")
+    if network == NETWORK_111 {
+        Some("111")
+    } else {
+        (network == NETWORK_LXMF).then_some("reticulum")
+    }
 }
 
 fn is_hex32(s: &str) -> bool {
@@ -81,7 +91,7 @@ impl BridgeNearby {
     /// whether what `GET /nearby` shows changed (a new node, a new name); a document that
     /// does not validate changes nothing.
     pub fn push(&self, network: &str, doc: &Value) -> bool {
-        let Some(kind) = kind_for(network) else {
+        let Some(kind) = kind_for(network).filter(|k| *k == "reticulum") else {
             return false;
         };
         let Some(o) = doc.as_object() else {
@@ -247,6 +257,48 @@ mod tests {
 
     fn doc(dest: &str, name: &str) -> Value {
         crate::daemon::bridge::lxmf::nearby_source(ME, dest, name)
+    }
+
+    /// An `enum: [..]` list from the first contract line that starts with `prefix` (skipped without the checkout).
+    fn contract_enum(prefix: &str) -> Option<Vec<String>> {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../../4-interface/api/openapi.yaml");
+        let text = std::fs::read_to_string(path).ok()?;
+        let line = text.lines().find(|l| l.trim_start().starts_with(prefix))?;
+        let list = line.split("enum: [").nth(1)?.split(']').next()?;
+        Some(
+            list.split(',')
+                .map(|k| k.trim().trim_matches('"').to_string())
+                .collect(),
+        )
+    }
+
+    #[test]
+    fn the_111_kind_and_the_evidence_set_mirror_the_contract() {
+        assert_eq!(kind_for(NETWORK_111), Some("111"));
+        assert_eq!(kind_for(NETWORK_LXMF), Some("reticulum"));
+        assert_eq!(kind_for("meshtastic"), None);
+        assert_eq!(EVIDENCE_TRANSPORTS, ["tcp-lan", "hub", "carrier"]);
+        if let Some(c) = contract_enum("NearbyEvidenceTransport:") {
+            assert_eq!(
+                c, EVIDENCE_TRANSPORTS,
+                "openapi.yaml NearbyEvidenceTransport and EVIDENCE_TRANSPORTS differ"
+            );
+        }
+        if let Some(c) = contract_enum("kind: { type: string, enum: [meshtastic, reticulum") {
+            assert_eq!(c, ["meshtastic", "reticulum", "111"]);
+        }
+    }
+
+    #[test]
+    fn an_adapter_can_never_push_the_111_source() {
+        // The `111` source is the presence module's: a document naming network `111` is dropped like any unknown network.
+        let b = BridgeNearby::default();
+        let mut d = doc(D, "x");
+        d["kind"] = json!("111");
+        assert!(!b.push("111", &d));
+        assert!(!b.push("111", &doc(D, "x")));
+        assert!(b.sources().is_empty());
     }
 
     #[test]

@@ -401,6 +401,34 @@ const ALIASES = [
   ["TransportJoin", "TransportJoin"],
   ["NetworkMessageEvent", "SseNetworkMessage"],
   ["BridgeEvent", "SseBridge"],
+  // Layer 7 (Relay & Presence, os/7-relay/README.md §13)
+  ["RelayStatus", "RelayStatus"],
+  ["RelayGateway", "RelayGateway"],
+  ["RelayGatewayState", "RelayGatewayState"],
+  ["RelayCarrier", "RelayCarrier"],
+  ["RelaySecret", "RelaySecret"],
+  ["RelayHeartbeat", "RelayHeartbeat"],
+  ["RelayDiscovery", "RelayDiscovery"],
+  ["RelayOrigin", "RelayOrigin"],
+  ["RelaySettingsPatch", "RelaySettingsPatch"],
+  ["RelayAccepted", "RelayAccepted"],
+  ["MeteredLink", "MeteredLink"],
+  ["PairedHub", "PairedHub"],
+  ["PairRole", "PairRole"],
+  ["PairVia", "PairVia"],
+  ["PairTls", "PairTls"],
+  ["PairOfferRequest", "PairOfferRequest"],
+  ["PairOffer", "PairOffer"],
+  ["PairRequest", "PairRequest"],
+  ["RegistryRow", "RegistryRow"],
+  ["RegistryAnswer", "RegistryAnswer"],
+  ["UpdateOrigin", "UpdateOrigin"],
+  ["GatewayDetail", "GatewayDetail"],
+  ["GatewayOffer", "GatewayOffer"],
+  ["NearbyEvidence", "NearbyEvidence"],
+  ["NearbyEvidenceTransport", "NearbyEvidenceTransport"],
+  ["RelayEvent", "SseRelay"],
+  ["RegistryEvent", "SseRegistry"],
 ];
 
 // Runtime enum tuples. [exportedName, schemaName, path inside the schema to the enum array]
@@ -434,6 +462,14 @@ const ENUMS = [
   ["SEND_MODES", "SendMode", []],
   ["PROPOSAL_KINDS", "Proposal", ["properties", "kind"]],
   ["NETWORK_MESSAGE_CHANGES", "SseNetworkMessage", ["properties", "change"]],
+  // Layer 7
+  ["CONSENT_ACTIONS", "ConsentRequired", ["properties", "action"]],
+  ["RELAY_GATEWAY_STATES", "RelayGatewayState", []],
+  ["PAIR_ROLES", "PairRole", []],
+  ["PAIR_VIAS", "PairVia", []],
+  ["PAIR_TLS", "PairTls", []],
+  ["REGISTRY_ANSWERS", "RegistryAnswer", []],
+  ["EVIDENCE_TRANSPORTS", "NearbyEvidenceTransport", []],
 ];
 
 function schemaRefName(ref, schemas) {

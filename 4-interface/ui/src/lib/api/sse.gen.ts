@@ -19,7 +19,9 @@ export type EventsFrame =
   | { event: "nearby"; data: Schemas["SseNearby"] }
   | { event: "panels"; data: Schemas["SsePanels"] }
   | { event: "network_message"; data: Schemas["SseNetworkMessage"] }
-  | { event: "bridge"; data: Schemas["SseBridge"] };
+  | { event: "bridge"; data: Schemas["SseBridge"] }
+  | { event: "relay"; data: Schemas["SseRelay"] }
+  | { event: "registry"; data: Schemas["SseRegistry"] };
 
 /** Frames on the `POST /api/v1/chat` response stream. */
 export type ChatFrame =
@@ -31,7 +33,7 @@ export type ChatFrame =
 export type EventsEventName = EventsFrame["event"];
 export type ChatEventName = ChatFrame["event"];
 
-export const EVENTS_EVENT_NAMES = ["status", "services", "devices", "proposal", "agent", "reset", "message", "contact", "fabric", "nearby", "panels", "network_message", "bridge"] as const;
+export const EVENTS_EVENT_NAMES = ["status", "services", "devices", "proposal", "agent", "reset", "message", "contact", "fabric", "nearby", "panels", "network_message", "bridge", "relay", "registry"] as const;
 export const CHAT_EVENT_NAMES = ["token", "tool", "done", "error"] as const;
 
 // Convenience aliases for the schemas the app uses.
@@ -156,6 +158,33 @@ export type TransportStatus = Schemas["TransportStatus"];
 export type TransportJoin = Schemas["TransportJoin"];
 export type NetworkMessageEvent = Schemas["SseNetworkMessage"];
 export type BridgeEvent = Schemas["SseBridge"];
+export type RelayStatus = Schemas["RelayStatus"];
+export type RelayGateway = Schemas["RelayGateway"];
+export type RelayGatewayState = Schemas["RelayGatewayState"];
+export type RelayCarrier = Schemas["RelayCarrier"];
+export type RelaySecret = Schemas["RelaySecret"];
+export type RelayHeartbeat = Schemas["RelayHeartbeat"];
+export type RelayDiscovery = Schemas["RelayDiscovery"];
+export type RelayOrigin = Schemas["RelayOrigin"];
+export type RelaySettingsPatch = Schemas["RelaySettingsPatch"];
+export type RelayAccepted = Schemas["RelayAccepted"];
+export type MeteredLink = Schemas["MeteredLink"];
+export type PairedHub = Schemas["PairedHub"];
+export type PairRole = Schemas["PairRole"];
+export type PairVia = Schemas["PairVia"];
+export type PairTls = Schemas["PairTls"];
+export type PairOfferRequest = Schemas["PairOfferRequest"];
+export type PairOffer = Schemas["PairOffer"];
+export type PairRequest = Schemas["PairRequest"];
+export type RegistryRow = Schemas["RegistryRow"];
+export type RegistryAnswer = Schemas["RegistryAnswer"];
+export type UpdateOrigin = Schemas["UpdateOrigin"];
+export type GatewayDetail = Schemas["GatewayDetail"];
+export type GatewayOffer = Schemas["GatewayOffer"];
+export type NearbyEvidence = Schemas["NearbyEvidence"];
+export type NearbyEvidenceTransport = Schemas["NearbyEvidenceTransport"];
+export type RelayEvent = Schemas["SseRelay"];
+export type RegistryEvent = Schemas["SseRegistry"];
 export type ProblemCode = Schemas["Problem"]["code"];
 
 // Enum tuples (runtime copies of the contract enums).
@@ -166,14 +195,14 @@ export const DEVICE_KINDS = ["radio", "bluetooth", "companion", "node", "analog"
 export const DEVICE_STATES = ["connected", "disconnected", "needs_setup", "error"] as const;
 export const DEVICE_TRANSPORTS = ["usb-serial", "spi", "bluetooth", "wifi", "lan", "tcp", "audio", "unknown"] as const;
 export const DECISIONS = ["accepted", "dismissed"] as const;
-export const PROBLEM_CODES = ["unauthenticated", "loopback_only", "lan_read_only", "agent_unavailable", "model_unavailable", "bad_request", "not_found", "rate_limited", "already_decided", "not_supervised", "settings_locked", "offer_stale", "needs_hub", "upstream_error", "internal", "port_busy", "panel_ticket_expired", "restore_pending", "consent_required", "oversize", "component_unavailable", "unsupported_action"] as const;
+export const PROBLEM_CODES = ["unauthenticated", "loopback_only", "lan_read_only", "agent_unavailable", "model_unavailable", "bad_request", "not_found", "rate_limited", "already_decided", "not_supervised", "settings_locked", "offer_stale", "needs_hub", "upstream_error", "internal", "port_busy", "panel_ticket_expired", "restore_pending", "consent_required", "oversize", "component_unavailable", "unsupported_action", "no_such_transport", "licensed_board", "metered_cap", "lan_off", "pair_role_mismatch"] as const;
 export const DEVICE_ACTIONS = ["rename", "forget", "agent", "identify", "pair", "authorize", "flash"] as const;
 export const MESSAGE_STATES = ["queued", "sent", "relayed", "delivered"] as const;
 export const MESSAGE_DIRS = ["own", "in"] as const;
 export const CONTACT_TRUSTS = ["oob", "tofu", "enrolled"] as const;
 export const LINK_KINDS = ["tcp-lan", "kiss-modem", "meshtastic-client", "rns-bridge", "ble"] as const;
 export const LINK_STATES = ["down", "up", "degraded"] as const;
-export const NEARBY_KINDS = ["meshtastic", "reticulum"] as const;
+export const NEARBY_KINDS = ["meshtastic", "reticulum", "111"] as const;
 export const PANEL_HEALTHS = ["up", "down", "unknown"] as const;
 export const MESSAGE_CHANGES = ["new", "state", "request"] as const;
 export const CONTACT_CHANGES = ["added", "updated", "removed", "request"] as const;
@@ -184,5 +213,12 @@ export const FOREIGN_REASON_CODES = ["region_unset", "no_channel", "too_large", 
 export const NETWORK_STATES = ["live", "not_set", "error", "disabled"] as const;
 export const COMPONENT_STATES = ["declared", "cached", "installed", "running", "disabled"] as const;
 export const SEND_MODES = ["refuse", "split"] as const;
-export const PROPOSAL_KINDS = ["diagnose", "propose", "patch", "chat", "message", "bridge_message", "bridge_edge", "device"] as const;
+export const PROPOSAL_KINDS = ["diagnose", "propose", "patch", "chat", "message", "bridge_message", "bridge_edge", "device", "relay"] as const;
 export const NETWORK_MESSAGE_CHANGES = ["new", "state", "conversation"] as const;
+export const CONSENT_ACTIONS = ["edge_enable", "edge_resume", "component_enable", "ham_confirm", "uplink_send", "carrier_enable", "pair_plain", "gateway_bit", "origin_serve"] as const;
+export const RELAY_GATEWAY_STATES = ["gateway_none", "carrier_ok", "carrier_pending", "gateway_off"] as const;
+export const PAIR_ROLES = ["peer", "leaf", "gateway"] as const;
+export const PAIR_VIAS = ["tcp", "carrier"] as const;
+export const PAIR_TLS = ["rpk", "plain", "none"] as const;
+export const REGISTRY_ANSWERS = ["hint", "signed"] as const;
+export const EVIDENCE_TRANSPORTS = ["tcp-lan", "hub", "carrier"] as const;

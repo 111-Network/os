@@ -2,6 +2,7 @@
 // useSyncExternalStore. The store is the only consumer of the adapter's read side and of the
 // events stream: components read through hooks and never fetch snapshots themselves.
 import type { Adapter, ConnectionInfo, ConnectionState, EventsFrameWithId } from "./adapter";
+import type { RelayAdapter } from "./relay"; // type only: the module itself stays out of the eager chunk (see getRelay in ./index)
 import { openRequests, removeContact, upsertContact } from "./contacts";
 import { applyForeignTail, FOREIGN_PAGE_LIMIT, mergeForeignPage, sameConversations, topSeq, trimForeign, type ForeignPage } from "./networks";
 import { applyMessageToPage, mergeThreadPage, THREAD_PAGE_LIMIT, trimPage, type ThreadPage } from "./messages";
@@ -27,6 +28,8 @@ import type {
   NetworkMessageEvent,
   NodeId,
   Proposal,
+  RegistryRow,
+  RelayStatus,
   ServiceRecord,
   Status,
   Thread,
@@ -119,6 +122,10 @@ export interface StoreState {
   components: BridgeComponent[] | null;
   /** Layer 6: interfaces, posture, region, callsign; loaded when Settings asks. */
   transport: TransportStatus | null;
+  /** Layer 7: the relay status (gateway, paired hubs, switches); null until a `relay` frame or a Layer 7 view loads it. No secret is in it. */
+  relay: RelayStatus | null;
+  /** Layer 7: the service registry rows; null until a `registry` frame or a Layer 7 view loads it. Untrusted strings. */
+  registry: RegistryRow[] | null;
   connection: ConnectionSnapshot;
   /** Agent events, newest first, at most ACTIVITY_RING, deduped on (seq, ts). */
   activity: AgentEvent[];
@@ -252,6 +259,8 @@ function initialState(): StoreState {
     bridgeSettings: null,
     components: null,
     transport: null,
+    relay: null,
+    registry: null,
     connection: INITIAL_CONNECTION,
     activity: [],
     baselineVersion: null,
@@ -267,6 +276,8 @@ export class ApiStore {
   private state: StoreState = initialState();
   private listeners = new Set<() => void>();
   private adapter: Adapter | null = null;
+  /** Layer 7: how to reach the relay adapter. Called only to re-read a slice that is already loaded; never at start-up. */
+  private relayLoader: (() => Promise<RelayAdapter>) | null = null;
   private unsubscribe: (() => void) | null = null;
   /** The snapshot load started by the latest `attach`, while it is still running. */
   private initialLoad: Promise<void> | null = null;
@@ -361,7 +372,13 @@ export class ApiStore {
     this.unsubscribe?.();
     this.unsubscribe = null;
     this.adapter = null;
+    this.relayLoader = null;
     this.initialLoad = null;
+  }
+
+  /** Layer 7: hand the store the lazy loader of the relay adapter (call after `attach`). Nothing is fetched until a slice is loaded. */
+  attachRelay(load: (() => Promise<RelayAdapter>) | null): void {
+    this.relayLoader = load;
   }
 
   private subscribeStream(): void {
@@ -473,6 +490,14 @@ export class ApiStore {
       case "network_message":
         // Carries no text: refetch what it names. The open conversation takes the tail, the lists follow.
         if (isNetworkFrame(frame.data)) this.networkFrame(frame.data);
+        break;
+      case "relay":
+        // A full RelayStatus snapshot (like `fabric`).
+        if (isRelayStatus(frame.data)) patch.relay = sameJson(this.state.relay, frame.data) ? this.state.relay : frame.data;
+        break;
+      case "registry":
+        // The rows, as a full snapshot.
+        if (frame.data && Array.isArray(frame.data.rows)) patch.registry = reuse(this.state.registry, frame.data.rows, byId);
         break;
       case "bridge":
         // Full snapshots of whichever part changed.
@@ -587,6 +612,9 @@ export class ApiStore {
     // The same for the foreign conversations that are open, and the network lists a view asked for.
     for (const [conv, slot] of Object.entries(this.state.foreignPages)) void this.loadForeign(slot.network, conv, this.foreignLimits.get(conv));
     for (const net of Object.keys(this.state.conversations)) void this.refreshConversations(net);
+    // Layer 7 slices follow a reload only once something loaded them (a frame or a view): a node that never opens a Layer 7 view asks nothing.
+    if (this.state.relay !== null) void this.refreshRelay();
+    if (this.state.registry !== null) void this.refreshRegistry();
   });
 
   refreshStatus = coalesced(async () => {
@@ -725,6 +753,32 @@ export class ApiStore {
     }
   }
 
+
+  // --- Layer 7 snapshots (relay status, registry) -------------------------------------------------------------------------
+
+  refreshRelay = coalesced(async () => {
+    const a = this.adapter;
+    const load = this.relayLoader;
+    if (!a || !load) return;
+    try {
+      const relay = await (await load()).status();
+      if (this.adapter === a) this.commit({ relay: sameJson(this.state.relay, relay) ? this.state.relay : relay });
+    } catch {
+      /* keep the previous snapshot (an older node answers 404 and the slice stays as it was) */
+    }
+  });
+
+  refreshRegistry = coalesced(async () => {
+    const a = this.adapter;
+    const load = this.relayLoader;
+    if (!a || !load) return;
+    try {
+      const rows = await (await load()).registry();
+      if (this.adapter === a) this.commit({ registry: reuse(this.state.registry, rows, byId) });
+    } catch {
+      /* keep the previous snapshot */
+    }
+  });
 
   // --- Layer 6 snapshots (networks, conversations, edges, settings, components, transport) -------------------------
 
@@ -983,6 +1037,11 @@ function isNetworkFrame(d: unknown): d is NetworkMessageEvent {
 function isContactFrame(d: unknown): d is ContactChangeEvent {
   const x = d as Partial<ContactChangeEvent> | null;
   return !!x && typeof x === "object" && !!x.contact && typeof x.contact === "object" && typeof x.contact.node_id === "string";
+}
+
+function isRelayStatus(d: unknown): d is RelayStatus {
+  const x = d as Partial<RelayStatus> | null;
+  return !!x && typeof x === "object" && !!x.gateway && typeof x.gateway === "object" && Array.isArray(x.paired_hubs);
 }
 
 /** The app-wide store. Tests construct their own ApiStore. */

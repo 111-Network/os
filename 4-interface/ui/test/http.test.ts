@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { Adapter } from "../src/lib/api/adapter";
 import { createHttpAdapter, panelsSeenAtLoad, resetPanelsAtLoadForTests } from "../src/lib/api/http";
+import { createHttpRelay, relayConsentOf, type RelayAdapter } from "../src/lib/api/relay";
 import { ApiError } from "../src/lib/api/problem";
 import type { ChatFrame } from "../src/lib/api/types";
 import { operations } from "./contract.gen";
@@ -416,9 +417,49 @@ describe("adapter <-> openapi.yaml", () => {
   };
   const toRegex = (tpl: string) => new RegExp(`^${tpl.replace(/\{[^}]+\}/g, "[^/]+")}$`);
 
-  it("covers every operation except the event stream (the Layer 6 operations included)", () => {
-    expect(Object.keys(CALLS).sort()).toEqual(Object.keys(operations).filter((id) => id !== "events").sort());
+  // Layer 7 (os/7-relay/README.md section 13): its own adapter (src/lib/api/relay.ts), so its calls take a RelayAdapter.
+  const BUNDLE = `111PAIR:${"a".repeat(224)}:K7M29X4P:${"b".repeat(71)}:203.0.113.7:11183:peer:tcp`;
+  const RELAY_CALLS: Record<string, (a: RelayAdapter) => Promise<unknown>> = {
+    getRelay: (a) => a.status(),
+    patchRelaySettings: (a) => a.patchSettings({ gateway: { enabled: true }, carrier: { kind: "ntfy", server: "https://ntfy.example.org", mode: "5A", token: "tk_x" } }, HASH),
+    offerRelayPair: (a) => a.pairOffer({ role: "peer", via: "tcp" }),
+    pairRelayHub: (a) => a.pair({ bundle: BUNDLE, role: "peer", via: "tcp", lan: false, accept_warning: HASH }),
+    unpairRelayHub: (a) => a.unpair(PEER),
+    checkRelayCarrier: (a) => a.checkCarrier(),
+    flushRelayCarrier: (a) => a.flushCarrier(),
+    listRegistry: (a) => a.registry(),
+    browseRegistry: (a) => a.browseRegistry(),
+    runNearbyHops: (a) => a.nearbyHops(),
+    listUpdateOrigins: (a) => a.updateOrigins(),
+  };
+  const RELAY_JSON: Record<string, unknown> = {
+    "/api/v1/registry": { schema: 1, rows: [] },
+    "/api/v1/update/origins": { schema: 1, origins: [] },
+  };
+
+  it("covers every operation except the event stream (the Layer 6 and Layer 7 operations included)", () => {
+    expect([...Object.keys(CALLS), ...Object.keys(RELAY_CALLS)].sort()).toEqual(Object.keys(operations).filter((id) => id !== "events").sort());
   });
+
+  for (const [id, call] of Object.entries(RELAY_CALLS)) {
+    it(`${id} matches its contract operation`, async () => {
+      const op = operations[id]!;
+      const r = recorder((c) => {
+        if (op.success === 204) return new Response(null, { status: 204 });
+        return jsonResponse(RELAY_JSON[c.path] ?? { schema: 1 }, op.success);
+      });
+      await call(createHttpRelay({ fetch: r.fetch }));
+      expect(r.calls).toHaveLength(1);
+      const c = r.calls[0]!;
+      expect(c.method).toBe(op.method);
+      expect(c.path).toMatch(toRegex(op.path));
+      expect(c.init).toMatchObject({ credentials: "same-origin", cache: "no-store" });
+      if (c.method !== "GET") expect(c.headers["Content-Type"]).toBe("application/json");
+      for (const q of op.query) if (q.required) expect(c.query.has(q.name), `required query ${q.name}`).toBe(true);
+      if (op.requestSchema) expect(validate(c.body, op.requestSchema)).toEqual([]);
+      else expect(c.body).toBeUndefined();
+    });
+  }
 
   for (const [id, call] of Object.entries(CALLS)) {
     it(`${id} matches its contract operation`, async () => {
@@ -492,5 +533,65 @@ describe("the first panel list of a page load", () => {
     const { adapter } = adapterWith(() => problemResponse(503, "upstream_error", "Unavailable"));
     await adapter.panels.list().catch(() => undefined);
     expect(panelsSeenAtLoad()).toBeNull();
+  });
+});
+
+describe("the Layer 7 relay adapter (src/lib/api/relay.ts)", () => {
+  const HASH = "a".repeat(64);
+  const CONSENT = { action: "carrier_enable", subject: "ntfy:https://ntfy.example.org", warning_text: "To carry messages between this hub and abcd-efgh-ij ...", hash: HASH, addons: ["metered"] };
+
+  it("repeats a settings write with accept_warning, and does not add the key on the first call", async () => {
+    const r = recorder(() => jsonResponse({ schema: 1 }));
+    const relay = createHttpRelay({ fetch: r.fetch });
+    await relay.patchSettings({ discovery: { public_gateway_bit: true } });
+    await relay.patchSettings({ discovery: { public_gateway_bit: true } }, HASH);
+    expect(r.calls[0]!.body).toEqual({ discovery: { public_gateway_bit: true } });
+    expect(r.calls[1]!.body).toEqual({ discovery: { public_gateway_bit: true }, accept_warning: HASH });
+    expect(r.calls[1]!.method).toBe("PATCH");
+  });
+
+  it("a 409 consent_required carries the exact text and hash, including the four Layer 7 actions", async () => {
+    for (const action of ["carrier_enable", "pair_plain", "gateway_bit", "origin_serve"]) {
+      const r = recorder(() => jsonResponse({ type: "about:blank", title: "Confirm", status: 409, code: "consent_required", consent: { ...CONSENT, action } }, 409, { "content-type": "application/problem+json" }));
+      const err = await createHttpRelay({ fetch: r.fetch }).patchSettings({ carrier: { kind: "ntfy" } }).catch((e: unknown) => e);
+      expect(err).toBeInstanceOf(ApiError);
+      expect(relayConsentOf(err)).toEqual({ ...CONSENT, action });
+    }
+  });
+
+  it("a malformed or unknown consent is never offered (fail closed)", async () => {
+    for (const consent of [{ ...CONSENT, action: "free_money" }, { ...CONSENT, hash: "nope" }, { ...CONSENT, warning_text: "" }, null]) {
+      const r = recorder(() => jsonResponse({ type: "about:blank", title: "Confirm", status: 409, code: "consent_required", consent }, 409, { "content-type": "application/problem+json" }));
+      const err = await createHttpRelay({ fetch: r.fetch }).pair({ bundle: "111PAIR:x", role: "peer", via: "tcp" }).catch((e: unknown) => e);
+      expect(relayConsentOf(err)).toBeNull();
+    }
+    expect(relayConsentOf(new Error("x"))).toBeNull();
+  });
+
+  it("the Layer 7 problem codes come through as the node's own code", async () => {
+    for (const [status, code] of [[409, "no_such_transport"], [409, "licensed_board"], [409, "metered_cap"], [409, "lan_off"], [409, "pair_role_mismatch"], [409, "needs_hub"], [403, "loopback_only"]] as const) {
+      const r = recorder(() => problemResponse(status, code, "t", "d"));
+      const err = await createHttpRelay({ fetch: r.fetch }).pair({ bundle: "111PAIR:x", role: "leaf", via: "tcp" }).catch((e: unknown) => e);
+      expect((err as ApiError).code).toBe(code);
+      expect((err as ApiError).status).toBe(status);
+    }
+  });
+
+  it("encodes the node id into the unpair path and resolves on 204", async () => {
+    const r = recorder(() => new Response(null, { status: 204 }));
+    await expect(createHttpRelay({ fetch: r.fetch }).unpair("ab".repeat(32))).resolves.toBeUndefined();
+    expect(r.calls[0]).toMatchObject({ method: "DELETE", path: `/api/v1/relay/paired/${"ab".repeat(32)}` });
+  });
+
+  it("a list reply without its list is a bad response, never an empty one", async () => {
+    const r = recorder(() => jsonResponse({ schema: 1 }));
+    const relay = createHttpRelay({ fetch: r.fetch });
+    expect(((await relay.registry().catch((e: unknown) => e)) as ApiError).code).toBe("upstream_error");
+    expect(((await relay.updateOrigins().catch((e: unknown) => e)) as ApiError).code).toBe("upstream_error");
+  });
+
+  it("a network failure is the adapter's `network` error", async () => {
+    const relay = createHttpRelay({ fetch: (() => Promise.reject(new TypeError("Failed to fetch"))) as typeof fetch });
+    expect(((await relay.status().catch((e: unknown) => e)) as ApiError).code).toBe("network");
   });
 });

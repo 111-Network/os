@@ -18,7 +18,8 @@ const ADDON_WORD: Record<string, string> = {
   uplinked_channel: "published to the internet",
 };
 
-const ACTION_WORD: Record<ConsentRequired["action"], string> = {
+// Partial: Layer 7 appends four actions (carrier_enable, pair_plain, gateway_bit, origin_serve) whose words its own views supply; until then they read "Confirm".
+const ACTION_WORD: Partial<Record<ConsentRequired["action"], string>> = {
   edge_enable: "Start this relay",
   edge_resume: "Resume this relay",
   component_enable: "Install and turn this on",
@@ -27,7 +28,7 @@ const ACTION_WORD: Record<ConsentRequired["action"], string> = {
 };
 
 export const addonWord = (a: string): string => (Object.prototype.hasOwnProperty.call(ADDON_WORD, a) ? ADDON_WORD[a]! : a.replace(/[^\w .:/-]/g, "").slice(0, 60));
-export const actionWord = (a: ConsentRequired["action"]): string => (Object.prototype.hasOwnProperty.call(ACTION_WORD, a) ? ACTION_WORD[a] : "Confirm");
+export const actionWord = (a: ConsentRequired["action"]): string => (Object.prototype.hasOwnProperty.call(ACTION_WORD, a) ? ACTION_WORD[a] ?? "Confirm" : "Confirm");
 
 export interface ConsentPanelProps {
   consent: ConsentRequired;
