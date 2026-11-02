@@ -30,6 +30,7 @@
 //! either component exists while both are off.
 
 pub mod bridge;
+pub mod carrier;
 pub mod components;
 pub mod dashboard;
 pub mod devices;
@@ -38,8 +39,11 @@ pub mod health;
 pub mod intelligence;
 pub mod kb;
 pub mod meshtastic;
+pub mod origin;
 pub mod panels;
 pub mod ports;
+pub mod registry;
+pub mod relay;
 pub mod services;
 pub mod supervise;
 pub mod transport;
@@ -1074,6 +1078,9 @@ async fn daemon_main() -> anyhow::Result<()> {
     // Layer 6: the components whose switch is on, now that their dependencies exist;
     // then the bridge pass joins the daemon tick
     layer6.resume(&dashboard.api).await;
+    // Layer 7 (`os/7-relay/README.md` §6.3): relay & presence; returns at once while every
+    // switch is off (nothing read, spawned, bound or scheduled)
+    relay::start(&dashboard.api, &fabric);
     // G1 (Layer 6 §16): debug builds only — the StubAdapters `$NODE111_BRIDGE_STUBS`
     // declares; returns at once when the variable is unset (bridge::stub::scenario)
     #[cfg(debug_assertions)]

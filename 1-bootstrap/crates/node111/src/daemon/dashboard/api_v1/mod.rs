@@ -61,9 +61,13 @@ pub mod kb;
 pub mod messages;
 pub mod nearby;
 pub mod networks;
+pub mod origins;
+pub mod pair;
 pub mod panels;
 pub mod proposals;
+pub mod registry;
 pub mod relay;
+pub mod relay7;
 pub mod services;
 pub mod settings;
 pub mod status;
@@ -263,6 +267,11 @@ pub fn router(state: Arc<ApiState>) -> axum::Router {
         .merge(fanout::router())
         .merge(bridge::router())
         .merge(transport::router())
+        // Layer 7 (§13.1): relay status and settings, pairing, the registry, update origins
+        .merge(relay7::router())
+        .merge(pair::router())
+        .merge(registry::router())
+        .merge(origins::router())
         .route_layer(middleware::from_fn_with_state(
             Arc::clone(&state),
             auth::require_session,
