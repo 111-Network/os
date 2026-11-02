@@ -103,3 +103,13 @@ at `~/.claude/projects/…/subagents/workflows/wf_60f165f1-80f/journal.jsonl` on
   node111 compiles from disk, so the re-run waits for M4's return; the UI checks of C1 and the mesh111 checks re-ran green). In flight: M4, L3; then
   D1, M7, P2; stage C M5. Wave 1 script written (`runs/workflows/wave-1.js`, `ef69cd5`, facts block to finish from M4/M5/D1/L3 before the launch).
 
+- Result (2026-11-02, ~05:10 UTC): the workflow completed, 14/14 agents returned (no bounce needed; L1 partial resolved by the lead's one-line
+  edit). Every Wave 0 row is ✅ with the lead's re-run green and its as-built notes on the board: M1 `57af4bc`, M2 `ef84094`, M3 `7746eef`,
+  M6 `22de995`, M7 `ad3d270`, M4 `841d90a`, P1 `a553cf3`, C1 `d2a0792`, L1 `4253197`, L2 `4cf8f5d`, L3 `eb94950`, D1 `1616fc1`, P2 `0e36e87`,
+  M5 `ca4c514`. One CI fix after landing (`bc91cce`): the contract-walk auth test met the eight Layer 7 writes without routes (404 for 401) and
+  now allowlists them until D2/D10 route them. An independent adversarial review of M4's diff (read-only, after the landing) found three
+  confirmed defects the lead's read had missed (a member enrolment counted as a whole pair, O(rows) forwarder work per trigger, an unbounded
+  re-post rule) plus five smaller ones: the fix wave `runs/workflows/wave-0b.js` (row M4b: the fix with the lead's design, then one read-only
+  re-review; run id `wf_5307572b-24b`) runs before Wave 1; M5 got the same review (result pending at this note). Owner question recorded on
+  row M4 (the `forwarding` reason narrower than amendment 8). Lesson for the next waves: an independent read-only review of every Rust row
+  before its commit, not only the lead's read (the wave-1 script gets a review stage).
