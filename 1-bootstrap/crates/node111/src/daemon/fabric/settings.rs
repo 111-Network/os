@@ -25,7 +25,10 @@
 //!   ([`pair_dials`]). With no pair the key is not written at all, so the
 //!   file's bytes are exactly what a build before Layer 7 wrote. A daemon
 //!   half whose fabric record does not exist yet (a pin recorded before the
-//!   pairing's `ENROLL_OK`) is kept in memory only.
+//!   pairing's `ENROLL_OK`) is kept in memory only. A row written before
+//!   the two bools existed (an M5 build of this branch only; no such file
+//!   exists elsewhere) reads with both `false`: a half pair, which neither
+//!   forwards nor is dialled by the daemon until it is paired again.
 //!
 //! Per-class quotas live in the store (§10.4), not here.
 //!
@@ -39,16 +42,20 @@
 //! The home hub is the one fact a member cannot re-derive from its own
 //! switches, so a member whose file is absent or invalid gets it back from
 //! the store ([`rebuild_home_hub`], run by the fabric once the store is
-//! open): the single `enrolled` contact that holds this node's mailbox
-//! cursor, else the `enrolled` custody holder this node's own stored
-//! announce names as its home hub (the 8-byte `appdata` hint, §7.3 A8),
-//! preferring a `home_hub` salvaged from the invalid file when that names
-//! one. **A paired hub is never rebuilt as the home hub** (Layer 7 §19 C7):
-//! a pairing writes no mailbox cursor and is never named in the own
-//! announce (a paired hub is never a home hub, amendment 12), and the pairs
-//! salvaged from an invalid file are skipped outright. The hub's address
-//! comes back only from such a salvage; without it nothing dials the hub
-//! until a fresh offer (the contact keeps it `enrolled`).
+//! open). This node's own stored announce is authoritative whenever a
+//! verified one is stored (its 8-byte `appdata` hint, §7.3 A8, read through
+//! `IdentitySealer::stored_hub_hint`): one that names no hub rebuilds
+//! nothing; one that names a hub admits only the `enrolled` contact it
+//! names. Only without a stored announce does the single `enrolled`
+//! contact holding this node's mailbox cursor decide. A `home_hub` salvaged
+//! from the invalid file is preferred when it names an admitted contact.
+//! **A paired hub is never rebuilt as the home hub** (Layer 7 §19 C7): it is
+//! never named in the own announce (a paired hub is never a home hub,
+//! amendment 12; a former home hub keeps its cursor row for good, so the
+//! cursor alone is no evidence), and the pairs salvaged from an invalid
+//! file are skipped outright. The hub's address comes back only from such
+//! a salvage; without it nothing dials the hub until a fresh offer (the
+//! contact keeps it `enrolled`).
 //!
 //! Dial targets (`home_hub.address`, `peers[].address`,
 //! `paired_hubs[].address`) must name a peer: an unspecified, multicast or
@@ -56,6 +63,7 @@
 //! peers (§2) — makes the file invalid ([`dial_refusal`], shared with
 //! `POST /fabric/hub/enroll`).
 
+use super::sealer::StoredHubHint;
 use mesh111::contacts::{card_text, parse_card_text};
 use mesh111::fabric::{FabricSettings, HomeHub, PairRole, PairVia, PairedHub, MAX_PAIRED_HUBS};
 use serde::{Deserialize, Serialize};
@@ -651,32 +659,49 @@ pub struct Enrolled {
 }
 
 /// The home hub of a member whose settings file was absent or invalid
-/// (module doc). `pairs` are never picked (Layer 7 §19 C7). In order:
+/// (module doc). `pairs` are never picked (Layer 7 §19 C7). The node's own
+/// stored announce (`announced`, [`StoredHubHint`]) is authoritative
+/// whenever a verified one is stored: it is re-minted on every home-hub
+/// change (§7.3 A8) and a paired hub is never named there (amendment 12).
 ///
-/// 1. the salvaged `hint` when it names an `enrolled` contact;
-/// 2. else the single `enrolled` contact that holds this node's mailbox
-///    cursor (this node fetched from it — decisive; a pairing writes no
-///    cursor, amendment 10);
-/// 3. else, when nothing was fetched yet, the single `enrolled` custody
-///    holder whose NodeId begins with `announced`, the 8-byte home-hub hint
-///    of this node's own stored announce (§7.3 A8: re-minted on every
-///    home-hub change; a paired hub is never a home hub, so never named
-///    there).
+/// - [`StoredHubHint::NoHub`]: the node's last signed statement names no
+///   home hub, so **nothing is rebuilt** — not even from a mailbox cursor.
+///   A cursor row is never deleted (a former home hub keeps its cursor > 0
+///   for good, even after it is forgotten and paired with), so a cursor is
+///   no evidence once the announce says otherwise.
+/// - [`StoredHubHint::Hub`]: only an `enrolled` contact whose NodeId begins
+///   with the hint and that is a custody holder or holds this node's
+///   mailbox cursor can be picked: the salvaged `hint` when it names one,
+///   else the single one (the 8-byte prefix is a locator; two such
+///   contacts are ambiguous and nothing is guessed).
+/// - [`StoredHubHint::NoAnnounce`] (none stored, or another node's or junk
+///   bytes): the salvaged `hint` when it names an `enrolled` contact, else
+///   the single `enrolled` contact that holds this node's mailbox cursor
+///   (this node fetched from it; a pairing writes no cursor, amendment 10).
+///   This fallback cannot tell a former home hub that became a pair from
+///   the home hub when the file and the announce are both gone (no salvage
+///   names the pairs then).
 ///
-/// Anything else is ambiguous and nothing is guessed: without an own
-/// announce that names a hub (none stored, or none minted since the
-/// enrollment) a member that never fetched gets no home hub back. Both
-/// sides of an enrollment pin each other `enrolled`, so on a hub its
-/// `enrolled` contacts are members and, when paired, the paired hubs: the
-/// members hold no cursor of this node and are never named in its announce.
+/// Anything else is ambiguous and nothing is guessed. Both sides of an
+/// enrollment pin each other `enrolled`, so on a hub its `enrolled`
+/// contacts are members and, when paired, the paired hubs: the members
+/// hold no cursor of this node and are never named in its announce.
 pub fn rebuild_home_hub(
     enrolled: &[Enrolled],
     hint: Option<&HomeHub>,
-    announced: Option<[u8; 8]>,
+    announced: StoredHubHint,
     pairs: &[NodeId],
 ) -> Option<HomeHub> {
-    let candidates: Vec<&Enrolled> = enrolled
-        .iter()
+    let candidates: Vec<&Enrolled> = match announced {
+        StoredHubHint::NoHub => return None,
+        StoredHubHint::Hub(a) => enrolled
+            .iter()
+            .filter(|e| e.node_id.as_bytes()[..8] == a && (e.custody || e.cursor > 0))
+            .collect(),
+        StoredHubHint::NoAnnounce => enrolled.iter().collect(),
+    };
+    let candidates: Vec<&Enrolled> = candidates
+        .into_iter()
         .filter(|e| !pairs.contains(&e.node_id))
         .collect();
     if let Some(h) = hint {
@@ -684,36 +709,25 @@ pub fn rebuild_home_hub(
             return Some(*h);
         }
     }
-    let fetched: Vec<&Enrolled> = candidates
-        .iter()
-        .copied()
-        .filter(|e| e.cursor > 0)
-        .collect();
-    let named =
-        |e: &&Enrolled| e.custody && announced.is_some_and(|a| e.node_id.as_bytes()[..8] == a);
-    let pick = match fetched.as_slice() {
-        [one] => Some(*one),
-        [] => match candidates
-            .iter()
-            .copied()
-            .filter(named)
-            .collect::<Vec<_>>()
-            .as_slice()
-        {
-            [one] => Some(*one),
-            _ => None,
-        },
-        _ => None,
+    let pick: Vec<&Enrolled> = match announced {
+        StoredHubHint::Hub(_) => candidates,
+        _ => candidates.into_iter().filter(|e| e.cursor > 0).collect(),
     };
-    pick.map(|e| HomeHub {
-        node_id: e.node_id,
-        address: None,
-    })
+    match pick.as_slice() {
+        [one] => Some(HomeHub {
+            node_id: one.node_id,
+            address: None,
+        }),
+        _ => None,
+    }
 }
 
 /// Layer 7 §4.6 step 5, one connection per pair: the paired hubs this hub
 /// dials through `peers` (`Fabric::dial_peer`), as `(far hub, address)`.
-/// A `tcp` pair whose fabric record exists is dialled when this hub holds
+/// Only a **whole** pair (`PairedHub::whole`: both enrollments recorded) is
+/// dialled here: a half pair's second `ENROLL` rides the fabric's own
+/// pairing dial, which the fabric keeps while the pair is half and releases
+/// once it is whole. A whole `tcp` pair is dialled when this hub holds
 /// the far hub's address and either the far hub holds none for this hub
 /// (`far_holds_address` false, the default) or this NodeId sorts lower
 /// (bytewise, the 64-hex order). Nothing without the hub role (§5.11), for a
@@ -727,7 +741,7 @@ pub fn pair_dials(own: &NodeId, p: &Persisted) -> Vec<(NodeId, SocketAddr)> {
     p.fabric
         .paired_hubs
         .iter()
-        .filter(|h| h.via == PairVia::Tcp && h.node_id != *own)
+        .filter(|h| h.whole() && h.via == PairVia::Tcp && h.node_id != *own)
         .filter_map(|h| {
             let l = p.pair_link(&h.node_id)?;
             let address = l.address?;
@@ -742,6 +756,37 @@ pub fn pair_dials(own: &NodeId, p: &Persisted) -> Vec<(NodeId, SocketAddr)> {
 pub fn holds_address(p: &Persisted, address: SocketAddr) -> bool {
     p.peers.iter().any(|x| x.address == address)
         || p.fabric.home_hub.and_then(|h| h.address) == Some(address)
+}
+
+/// Why `link`'s address cannot be recorded beside `p`, if it cannot: the
+/// home hub, a configured peer or another paired hub already uses it. A
+/// second dial to an address the adapter already keeps is a no-op that
+/// keeps the first dial's expected NodeId (`Dialer::maintain`), so such a
+/// pair could never connect (§4.6 step 5).
+pub fn pair_address_refusal(p: &Persisted, link: &PairLink) -> Option<&'static str> {
+    let a = link.address?;
+    if holds_address(p, a) {
+        Some("that address is the home hub's or a configured peer's")
+    } else if p
+        .pairs
+        .iter()
+        .any(|x| x.node_id != link.node_id && x.address == Some(a))
+    {
+        Some("that address is another paired hub's")
+    } else {
+        None
+    }
+}
+
+/// The bytes [`save`] writes for `p` (built under the fabric handle's
+/// lock, written after it in order).
+pub(super) fn encoded(p: &Persisted) -> String {
+    encode(p)
+}
+
+/// Write `fabric/settings` atomically (0600) from bytes [`encoded`] built.
+pub(super) fn save_encoded(fabric_dir: &Path, text: &str) -> anyhow::Result<()> {
+    crate::util::fs::atomic_write(&path(fabric_dir), text.as_bytes(), 0o600)
 }
 
 /// Write `fabric/settings` atomically (0600).
@@ -882,12 +927,15 @@ mod tests {
             custody,
             cursor,
         };
-        let says = |n: &NodeId| Some(prefix8(n));
+        let says = |n: &NodeId| StoredHubHint::Hub(prefix8(n));
         // a member: one enrolled custody holder its own announce names
         let got = rebuild_home_hub(&[e(hub, true, 0)], None, says(&hub), &[]).unwrap();
         assert_eq!((got.node_id, got.address), (hub, None));
         // … and without that announce hint nothing is guessed (it might be a pair)
-        assert_eq!(rebuild_home_hub(&[e(hub, true, 0)], None, None, &[]), None);
+        assert_eq!(
+            rebuild_home_hub(&[e(hub, true, 0)], None, StoredHubHint::NoAnnounce, &[]),
+            None
+        );
         assert_eq!(
             rebuild_home_hub(&[e(hub, true, 0)], None, says(&other), &[]),
             None
@@ -899,21 +947,32 @@ mod tests {
         );
         // or one that holds this node's mailbox cursor
         assert_eq!(
-            rebuild_home_hub(&[e(hub, false, 7)], None, None, &[]).map(|h| h.node_id),
+            rebuild_home_hub(&[e(hub, false, 7)], None, StoredHubHint::NoAnnounce, &[])
+                .map(|h| h.node_id),
             Some(hub)
         );
         // a hub's enrolled contacts are members: nothing to rebuild
         assert_eq!(
-            rebuild_home_hub(&[e(member, false, 0)], None, None, &[]),
+            rebuild_home_hub(&[e(member, false, 0)], None, StoredHubHint::NoAnnounce, &[]),
             None
         );
         assert_eq!(
-            rebuild_home_hub(&[e(member, false, 0), e(other, false, 0)], None, None, &[]),
+            rebuild_home_hub(
+                &[e(member, false, 0), e(other, false, 0)],
+                None,
+                StoredHubHint::NoAnnounce,
+                &[]
+            ),
             None
         );
         // two custody holders: ambiguous unless the own announce names one
         assert_eq!(
-            rebuild_home_hub(&[e(hub, true, 0), e(other, true, 0)], None, None, &[]),
+            rebuild_home_hub(
+                &[e(hub, true, 0), e(other, true, 0)],
+                None,
+                StoredHubHint::NoAnnounce,
+                &[]
+            ),
             None
         );
         assert_eq!(
@@ -929,19 +988,34 @@ mod tests {
         // a hub whose members include one that opted into custody: that
         // member is no home hub (its own announce names none)
         assert_eq!(
-            rebuild_home_hub(&[e(member, true, 0), e(other, false, 0)], None, None, &[]),
+            rebuild_home_hub(
+                &[e(member, true, 0), e(other, false, 0)],
+                None,
+                StoredHubHint::NoAnnounce,
+                &[]
+            ),
             None
         );
         // the mailbox cursor is decisive: a custody-holding member of its
         // own (a laptop that opted in) still finds its hub
         assert_eq!(
-            rebuild_home_hub(&[e(hub, true, 3), e(member, true, 0)], None, None, &[])
-                .map(|h| h.node_id),
+            rebuild_home_hub(
+                &[e(hub, true, 3), e(member, true, 0)],
+                None,
+                StoredHubHint::NoAnnounce,
+                &[]
+            )
+            .map(|h| h.node_id),
             Some(hub)
         );
         // two cursors: ambiguous
         assert_eq!(
-            rebuild_home_hub(&[e(hub, true, 3), e(other, true, 1)], None, None, &[]),
+            rebuild_home_hub(
+                &[e(hub, true, 3), e(other, true, 1)],
+                None,
+                StoredHubHint::NoAnnounce,
+                &[]
+            ),
             None
         );
         // a salvaged hint wins when it names an enrolled contact
@@ -953,7 +1027,7 @@ mod tests {
             rebuild_home_hub(
                 &[e(hub, false, 0), e(other, true, 0)],
                 Some(&hint),
-                None,
+                StoredHubHint::NoAnnounce,
                 &[]
             ),
             Some(hint)
@@ -1037,10 +1111,69 @@ mod tests {
         };
         // deleted file: a hub whose only enrolled contact is its whole pair
         // (custody role, no cursor, never named in the own announce)
-        assert_eq!(rebuild_home_hub(&[e(pair, true, 0)], None, None, &[]), None);
         assert_eq!(
-            rebuild_home_hub(&[e(pair, true, 0), e(member, false, 0)], None, None, &[]),
+            rebuild_home_hub(&[e(pair, true, 0)], None, StoredHubHint::NoAnnounce, &[]),
             None
+        );
+        assert_eq!(
+            rebuild_home_hub(
+                &[e(pair, true, 0), e(member, false, 0)],
+                None,
+                StoredHubHint::NoAnnounce,
+                &[]
+            ),
+            None
+        );
+        // M5b F1: a former home hub that became a pair keeps its cursor
+        // row for good; with the file deleted (no salvage names the pair)
+        // the own announce, which names no hub, is authoritative: nothing
+        // is rebuilt, the cursor rule included
+        let none = StoredHubHint::NoHub;
+        assert_eq!(rebuild_home_hub(&[e(pair, true, 5)], None, none, &[]), None);
+        assert_eq!(
+            rebuild_home_hub(&[e(pair, true, 5), e(member, false, 0)], None, none, &[]),
+            None
+        );
+        let back = HomeHub {
+            node_id: pair,
+            address: None,
+        };
+        assert_eq!(
+            rebuild_home_hub(&[e(pair, true, 5)], Some(&back), none, &[]),
+            None,
+            "a salvaged home_hub against an announce that names none"
+        );
+        // an announce that names another hub: the pair's cursor does not
+        // win, the named hub does (even with two cursors)
+        let now = NodeId::from([0x5a; 32]);
+        let names_now = StoredHubHint::Hub(prefix8(&now));
+        assert_eq!(
+            rebuild_home_hub(&[e(pair, true, 5), e(now, true, 2)], None, names_now, &[])
+                .map(|h| h.node_id),
+            Some(now)
+        );
+        assert_eq!(
+            rebuild_home_hub(&[e(pair, true, 5)], None, names_now, &[]),
+            None,
+            "the named hub is not enrolled: nothing"
+        );
+        assert_eq!(
+            rebuild_home_hub(
+                &[e(pair, true, 5), e(now, true, 0)],
+                Some(&back),
+                names_now,
+                &[]
+            )
+            .map(|h| h.node_id),
+            Some(now),
+            "a salvaged hint the announce does not name is ignored"
+        );
+        // without any stored announce the cursor rule is the only evidence
+        // left (the documented fallback)
+        assert_eq!(
+            rebuild_home_hub(&[e(pair, true, 5)], None, StoredHubHint::NoAnnounce, &[])
+                .map(|h| h.node_id),
+            Some(pair)
         );
         // invalid file: the salvaged pairs are skipped by every rule, even a
         // (tampered) salvaged home_hub, a stale cursor or an announce hint
@@ -1050,15 +1183,25 @@ mod tests {
         };
         let pairs = [pair];
         assert_eq!(
-            rebuild_home_hub(&[e(pair, true, 0)], Some(&as_hub), None, &pairs),
+            rebuild_home_hub(
+                &[e(pair, true, 0)],
+                Some(&as_hub),
+                StoredHubHint::NoAnnounce,
+                &pairs
+            ),
             None
         );
         assert_eq!(
-            rebuild_home_hub(&[e(pair, true, 9)], None, None, &pairs),
+            rebuild_home_hub(&[e(pair, true, 9)], None, StoredHubHint::NoAnnounce, &pairs),
             None
         );
         assert_eq!(
-            rebuild_home_hub(&[e(pair, true, 0)], None, Some(prefix8(&pair)), &pairs),
+            rebuild_home_hub(
+                &[e(pair, true, 0)],
+                None,
+                StoredHubHint::Hub(prefix8(&pair)),
+                &pairs
+            ),
             None
         );
         // the salvage reads the pairs of a broken file (only the NodeIds)
@@ -1379,6 +1522,14 @@ mod tests {
         let mut off = side(high, Some(b_addr), false);
         off.fabric.hub_role = false;
         assert!(!dials(&low, &off));
+        // M5b F8: a half pair (one enrollment recorded, or a row written
+        // before the two bools existed) rides the fabric's pairing dial
+        for (ours, theirs) in [(true, false), (false, true), (false, false)] {
+            let mut half = side(high, Some(b_addr), false);
+            half.fabric.paired_hubs[0].ours = ours;
+            half.fabric.paired_hubs[0].theirs = theirs;
+            assert!(!dials(&low, &half), "{ours} {theirs}");
+        }
         assert!(!dials(&high, &side(high, Some(b_addr), false)));
         // the home hub's and the peers' addresses are held
         let mut held = side(high, Some(b_addr), false);
@@ -1397,6 +1548,28 @@ mod tests {
         };
         assert!(pair_link_refusal(&lo, &low, true).is_some());
         assert!(pair_link_refusal(&lo, &low, false).is_none());
+        // M5b F7a: an address the home hub, a peer or another pair uses
+        let at = |n: NodeId, a: SocketAddr| PairLink {
+            address: Some(a),
+            ..PairLink::new(n)
+        };
+        let other = NodeId::from([0x44; 32]);
+        assert!(pair_address_refusal(&held, &at(other, a_addr)).is_some());
+        let mut homed = side(high, Some(b_addr), false);
+        homed.fabric.home_hub = Some(HomeHub {
+            node_id: NodeId::from([5; 32]),
+            address: Some(a_addr),
+        });
+        assert!(pair_address_refusal(&homed, &at(other, a_addr)).is_some());
+        assert!(pair_address_refusal(&homed, &at(other, b_addr)).is_some());
+        assert_eq!(
+            pair_address_refusal(&homed, &at(high, b_addr)),
+            None,
+            "the pair's own address is its own"
+        );
+        assert_eq!(pair_address_refusal(&homed, &PairLink::new(other)), None);
+        let free: SocketAddr = "10.0.0.9:11183".parse().unwrap();
+        assert_eq!(pair_address_refusal(&homed, &at(other, free)), None);
     }
 
     #[test]

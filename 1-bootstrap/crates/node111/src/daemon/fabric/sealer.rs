@@ -169,6 +169,22 @@ pub fn appdata(roles: u16, home_hub: Option<&NodeId>) -> Vec<u8> {
     out
 }
 
+/// What this node's stored announce says about its home hub
+/// ([`IdentitySealer::stored_hub_hint`]; Layer 7 §19 C7). The input to
+/// `settings::rebuild_home_hub`: a verified own announce is authoritative
+/// whenever one is stored.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StoredHubHint {
+    /// No verified announce of this node is stored (none, unreadable,
+    /// oversize, another node's, or junk).
+    NoAnnounce,
+    /// A verified own announce is stored and names no home hub.
+    NoHub,
+    /// A verified own announce names the home hub whose NodeId begins with
+    /// these 8 bytes (§7.3 A8: a locator, never an authenticator).
+    Hub([u8; 8]),
+}
+
 /// What [`IdentitySealer::ensure_announce`] did.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AnnounceOutcome {
@@ -230,23 +246,31 @@ impl IdentitySealer {
         carrier_topic_x25519_from(self.keyset(), peer_enc_pubkey)
     }
 
-    /// The home-hub hint (`appdata` bytes 4..12, §7.3 A8) of this node's own
-    /// announce as stored in `fabric_dir/announce`, when that file holds a
-    /// verified announce of this node that carries one. Read before the
-    /// announce is re-minted at start, so it is the node's own last signed
-    /// statement of its home hub (`settings::rebuild_home_hub`, Layer 7 §19
-    /// C7: a paired hub is never named there). A local file read; nothing is
-    /// presented.
-    pub fn stored_hub_hint(&self, fabric_dir: &Path) -> Option<[u8; 8]> {
-        let b = read_small(
+    /// What this node's own announce, as stored in `fabric_dir/announce`,
+    /// says about its home hub (the `appdata` hint, bytes 4..12, §7.3 A8):
+    /// [`StoredHubHint::NoAnnounce`] unless the file holds a verified
+    /// announce of this node, else [`StoredHubHint::NoHub`] or
+    /// [`StoredHubHint::Hub`]. Read before the announce is re-minted at
+    /// start, so it is the node's own last signed statement of its home hub
+    /// (`settings::rebuild_home_hub`, Layer 7 §19 C7: a paired hub is never
+    /// named there). A local file read; nothing is presented.
+    pub fn stored_hub_hint(&self, fabric_dir: &Path) -> StoredHubHint {
+        let Some(b) = read_small(
             &fabric_dir.join(ANNOUNCE_FILE),
             id111::announce::MAX_LEN as u64,
-        )?;
+        ) else {
+            return StoredHubHint::NoAnnounce;
+        };
         if !self.own_valid(&b) {
-            return None;
+            return StoredHubHint::NoAnnounce;
         }
-        let a = Announce::parse(&b).ok()?;
-        mesh111::contacts::AppData::parse(a.appdata()).home_hub
+        let Ok(a) = Announce::parse(&b) else {
+            return StoredHubHint::NoAnnounce;
+        };
+        match mesh111::contacts::AppData::parse(a.appdata()).home_hub {
+            Some(h) => StoredHubHint::Hub(h),
+            None => StoredHubHint::NoHub,
+        }
     }
 
     /// Peers with a cached pair key (diagnostics, tests).
@@ -701,24 +725,32 @@ mod tests {
         let s = sealer(t.path());
         let fabric = t.path().join("fabric");
         std::fs::create_dir_all(&fabric).unwrap();
-        assert_eq!(s.stored_hub_hint(&fabric), None, "no announce stored");
+        assert_eq!(
+            s.stored_hub_hint(&fabric),
+            StoredHubHint::NoAnnounce,
+            "no announce stored"
+        );
         assert_eq!(
             s.ensure_announce(&fabric, &appdata(0, None)),
             AnnounceOutcome::Minted
         );
-        assert_eq!(s.stored_hub_hint(&fabric), None, "no home hub");
+        assert_eq!(
+            s.stored_hub_hint(&fabric),
+            StoredHubHint::NoHub,
+            "an announce that names no home hub"
+        );
         let hub = NodeId::from([0x5c; 32]);
         s.ensure_announce(&fabric, &appdata(0, Some(&hub)));
-        assert_eq!(s.stored_hub_hint(&fabric), Some([0x5c; 8]));
+        assert_eq!(s.stored_hub_hint(&fabric), StoredHubHint::Hub([0x5c; 8]));
         // another node's announce is never read as this node's statement
         let other = sealer(&t.path().join("o"));
         let ofab = t.path().join("ofab");
         std::fs::create_dir_all(&ofab).unwrap();
         other.ensure_announce(&ofab, &appdata(0, Some(&NodeId::from([0x77; 32]))));
         std::fs::copy(ofab.join(ANNOUNCE_FILE), fabric.join(ANNOUNCE_FILE)).unwrap();
-        assert_eq!(s.stored_hub_hint(&fabric), None);
+        assert_eq!(s.stored_hub_hint(&fabric), StoredHubHint::NoAnnounce);
         std::fs::write(fabric.join(ANNOUNCE_FILE), b"junk").unwrap();
-        assert_eq!(s.stored_hub_hint(&fabric), None);
+        assert_eq!(s.stored_hub_hint(&fabric), StoredHubHint::NoAnnounce);
     }
 
     #[test]
