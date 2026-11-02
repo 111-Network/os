@@ -8,7 +8,11 @@
 //! after a restart, the carrier hand-off (§5.9: posts, re-posts, acks
 //! consumed on take, the longest path leaf → gateway → carrier → gateway′ →
 //! leaf′ and back), and with no pairing Layer 5's answers and frames
-//! (`tests/hub_flow.rs` stays unchanged and green).
+//! (`tests/hub_flow.rs` stays unchanged and green). The M4b fixes: wholeness
+//! recorded (a former member pairs, a member code records no pair), no
+//! pairing dial kept once whole, the hub role switch, re-post rule (1)'s
+//! once-bound, a replayed or misdirected pair ack, the resident window and
+//! the forwarder's linear work.
 
 mod common;
 
@@ -20,17 +24,21 @@ use std::time::Duration;
 use common::*;
 use id111::keyset::NodeId;
 use mesh111::contacts::{ROLE_ALWAYS_ON_HUB, ROLE_MAILBOX};
+use mesh111::custody::CustodyReceipt;
 use mesh111::custody::{pkt_ref, CustodyAck, CustodyStatus};
 use mesh111::envelope::{
     open_envelope, seal_envelope, Inner, Kind, PeerKeys, Priority, DEST_HUB_LEN,
 };
-use mesh111::fabric::{Fabric, FabricEvent, FabricSettings, ForwardDone, PairView, SettingsPatch};
+use mesh111::fabric::{
+    Fabric, FabricError, FabricEvent, FabricSettings, ForwardDone, PairView, SettingsPatch,
+    FORWARD_RESIDENT,
+};
 use mesh111::ids::MsgSeq;
 use mesh111::link::tcp_lan::{
     encode_frame, read_frame, read_hello, TcpLan, HELLO, T_ANNOUNCE, T_SEALED,
 };
-use mesh111::link::Dialer;
-use mesh111::mailbox::{decode_put, encode_put};
+use mesh111::link::{Dialer, Link, PeerAddr};
+use mesh111::mailbox::{decode_put, encode_cursor, encode_put, EnrollStatus};
 use mesh111::outbox::Reason;
 use mesh111::store::{Class, ForwardItem, Fwd, MsgState};
 use mesh111::{PairRole, PairVia};
@@ -125,11 +133,20 @@ fn stranger(d: &Dirs, name: &str) -> Node {
     }
 }
 
-/// Pair `a` and `b` (§4.6 step 3): `b` scans `a`'s bundle and enrolls at
-/// `a` on its own dial; `a` then enrolls at `b` over that same connection
-/// (the second `ENROLL` rides it, S22). `role` is `b`'s role from `a`'s side.
-async fn pair(a: &Node, b: &Node, role: PairRole, via: PairVia) {
-    let oa = a.f.offer(Some(a.addr)).await.expect("offer a");
+/// Pair `a` and `b` (§4.6 steps 1–4) without the daemon: `a` shows a
+/// pairing code and `b` enrolls at `a` on its own dial (`b` records `ours`,
+/// `a` records `theirs`); `b` shows one and `a` enrolls at `b` over that
+/// same connection (the second `ENROLL` rides it, S22): whole on both
+/// sides. `role` is `b`'s role from `a`'s side. `hold`: `b` holds `a`'s
+/// address and `a` none for it, so the daemon's §4.6 step 5 rule has `b`
+/// dial (`dial_peer`, as the daemon does); without it the fabric keeps no
+/// pairing dial once the pair is whole (M4b).
+async fn pair_with(a: &Node, b: &Node, role: PairRole, via: PairVia, hold: bool) {
+    let oa =
+        a.f.offer_pair(Some(a.addr), role, via)
+            .await
+            .expect("offer a");
+    assert!(oa.bundle.is_none(), "the 111PAIR: bundle is the daemon's");
     let rec = tokio::time::timeout(
         T,
         b.f.pair(Some(a.addr), &oa.code, &oa.card, role.complement(), via),
@@ -138,21 +155,32 @@ async fn pair(a: &Node, b: &Node, role: PairRole, via: PairVia) {
     .expect("b in time")
     .expect("b paired");
     assert_eq!(
-        (rec.node_id, rec.role, rec.via),
-        (a.id(), role.complement(), via)
+        (rec.node_id, rec.role, rec.via, rec.ours, rec.theirs),
+        (a.id(), role.complement(), via, true, false),
+        "half: b's ENROLL_OK only"
     );
-    let ob = b.f.offer(None).await.expect("offer b");
-    tokio::time::timeout(T, a.f.pair(None, &ob.code, &ob.card, role, via))
+    assert!(!pair_view(&b.f, a).await.whole, "a half pair");
+    if hold {
+        b.f.dial_peer(a.addr, a.id())
+            .await
+            .expect("b holds the dial");
+    }
+    let ob =
+        b.f.offer_pair(None, role.complement(), via)
+            .await
+            .expect("offer b");
+    let rec = tokio::time::timeout(T, a.f.pair(None, &ob.code, &ob.card, role, via))
         .await
         .expect("a in time")
         .expect("a paired over b's connection");
+    assert!(rec.whole(), "b redeemed a's code, then a's ENROLL_OK");
     for (x, y) in [(a, b), (b, a)] {
         let y = y.id();
         until(10, || async {
             let s = x.f.status().await.ok()?;
             s.paired
                 .iter()
-                .any(|p| p.hub.node_id == y && p.whole)
+                .any(|p| p.hub.node_id == y && p.whole && p.hub.ours && p.hub.theirs)
                 .then_some(())
         })
         .await;
@@ -160,6 +188,24 @@ async fn pair(a: &Node, b: &Node, role: PairRole, via: PairVia) {
         let st = x.f.status().await.unwrap();
         assert!(st.settings.home_hub.is_none() && st.hub.cursor == 0);
     }
+    if hold {
+        for (x, y) in [(a, b), (b, a)] {
+            until(10, || async {
+                pair_view(&x.f, y).await.reachable.then_some(())
+            })
+            .await;
+        }
+    } else {
+        // Whole: the pairing dial went with the connection it held.
+        let far = PeerAddr::Tcp(a.addr);
+        until(10, || async { (!b.t.peers().contains(&far)).then_some(()) }).await;
+    }
+}
+
+/// [`pair_with`] as the daemon would run it: a `tcp` pair keeps the one
+/// connection `b` opened, a `carrier` pair none.
+async fn pair(a: &Node, b: &Node, role: PairRole, via: PairVia) {
+    pair_with(a, b, role, via, via == PairVia::Tcp).await;
 }
 
 async fn pair_view(f: &Fabric, of: &Node) -> PairView {
@@ -206,6 +252,23 @@ fn item(tag: u8, len: usize) -> Vec<u8> {
     v
 }
 
+/// The `i`-th of many distinct items.
+fn numbered(i: u32) -> Vec<u8> {
+    let mut v = vec![0x5a; 200];
+    v[0] = 0x31;
+    v[1..5].copy_from_slice(&i.to_le_bytes());
+    v
+}
+
+/// `(count, bytes)` of protected forward rows at `f` (the totals).
+async fn protected(f: &Fabric) -> u64 {
+    f.with_store(|s| s.forward_stats())
+        .await
+        .unwrap()
+        .unwrap()
+        .0
+}
+
 /// A raw `tcp-lan` peer speaking as `who` to the hub `hub` at `addr`
 /// (hello, its announce, then sealed frames by hand): the gate's answers.
 struct Raw {
@@ -229,6 +292,102 @@ impl Raw {
             who: who.clone(),
             hub: hub.keys(),
         }
+    }
+
+    /// Seal `payload` as `kind` from `who` to the hub and write it;
+    /// returns the packet (for a replay).
+    async fn send(&mut self, kind: Kind, payload: Vec<u8>) -> Vec<u8> {
+        let inner = Inner::new(&self.who.id(), kind, MsgSeq::CONTROL, payload);
+        let pkt = seal_envelope(&*self.who, &self.hub, Priority::Control, &inner).unwrap();
+        self.write(&pkt).await;
+        pkt
+    }
+
+    /// Write one sealed packet as it is.
+    async fn write(&mut self, pkt: &[u8]) {
+        self.s
+            .write_all(&encode_frame(T_SEALED, pkt).unwrap())
+            .await
+            .unwrap();
+    }
+
+    /// The next sealed packet of `kind` from the hub, within `wait`.
+    async fn next(&mut self, kind: Kind, wait: Duration) -> Option<Vec<u8>> {
+        let hub = self.hub;
+        let deadline = tokio::time::Instant::now() + wait;
+        loop {
+            let (ty, body) = tokio::time::timeout_at(deadline, read_frame(&mut self.s))
+                .await
+                .ok()?
+                .ok()?;
+            if ty != T_SEALED {
+                continue;
+            }
+            let Ok(o) = open_envelope(&*self.who, &body, &|_| vec![hub]) else {
+                continue;
+            };
+            if o.inner.kind == kind {
+                return Some(o.inner.payload);
+            }
+        }
+    }
+
+    /// A signed `CUSTODY_ACK` from `who` for `item` held for `dest`.
+    async fn ack(&mut self, dest: &NodeId, item: &[u8], status: CustodyStatus) -> Vec<u8> {
+        let receipt = CustodyReceipt {
+            status,
+            custody_seq: u64::from(status.is_held()),
+            pkt_ref: pkt_ref(item),
+        };
+        let ack = CustodyAck::build(&*self.who, receipt, dest, false).unwrap();
+        self.send(Kind::CustodyAck, ack.encode().unwrap()).await
+    }
+
+    /// Put every item for `dest` back to back while a second task reads
+    /// the receipts; returns how many came back `ACCEPTED`.
+    async fn blast(self, dest: &NodeId, items: &[Vec<u8>]) -> usize {
+        let Raw { s, who, hub } = self;
+        let (mut rd, mut wr) = s.into_split();
+        let want = items.len();
+        let reader_who = who.clone();
+        let reader = tokio::spawn(async move {
+            let mut seen = 0usize;
+            let mut accepted = 0usize;
+            while seen < want {
+                let Ok(Ok((ty, body))) =
+                    tokio::time::timeout(Duration::from_secs(60), read_frame(&mut rd)).await
+                else {
+                    break;
+                };
+                if ty != T_SEALED {
+                    continue;
+                }
+                let Ok(o) = open_envelope(&*reader_who, &body, &|_| vec![hub]) else {
+                    continue;
+                };
+                if o.inner.kind != Kind::CustodyAck {
+                    continue;
+                }
+                seen += 1;
+                if CustodyAck::decode(&o.inner.payload).unwrap().receipt.status == Accepted {
+                    accepted += 1;
+                }
+            }
+            accepted
+        });
+        for it in items {
+            let inner = Inner::new(
+                &who.id(),
+                Kind::CustodyPut,
+                MsgSeq::CONTROL,
+                encode_put(dest, it),
+            );
+            let pkt = seal_envelope(&*who, &hub, Priority::Interactive, &inner).unwrap();
+            wr.write_all(&encode_frame(T_SEALED, &pkt).unwrap())
+                .await
+                .unwrap();
+        }
+        reader.await.unwrap()
     }
 
     /// Put `item` for `dest` (with the hint TLV when given) and read the
@@ -695,7 +854,9 @@ async fn reject_unenrolled_breaks_the_pair_and_returns_the_row() {
     // B1 drops A (DELETE /relay/paired): A is no longer enrolled there.
     assert!(b1.f.unpair(a.id()).await.unwrap());
     assert!(b1.f.status().await.unwrap().paired.is_empty());
-    // B1's dial went with the pair; A dials B1, so its put reaches it.
+    // The daemon releases B1's dial with the pair (M5); A still lists B1
+    // and dials it, so its put reaches it.
+    b1.t.release(a.addr);
     a.t.maintain(b1.addr, Some(b1.id()));
     let id = m.f.send(dd.id(), "around B1", None).await.unwrap();
     until_state(&m.f, id, MsgState::Delivered, 20).await;
@@ -713,8 +874,12 @@ async fn a_half_pair_forwards_nothing() {
     let d = Dirs::new();
     let a = hub(&d, "hub-a").await;
     let h = hub(&d, "hub-h").await;
-    // H enrolls at A as a pairing; A never enrolls at H.
-    let oa = a.f.offer(Some(a.addr)).await.unwrap();
+    // H redeems A's pairing code; A never enrolls at H: each side holds one
+    // half (H `ours`, A `theirs`).
+    let oa =
+        a.f.offer_pair(Some(a.addr), PairRole::Peer, PairVia::Tcp)
+            .await
+            .unwrap();
     tokio::time::timeout(
         T,
         h.f.pair(
@@ -729,7 +894,12 @@ async fn a_half_pair_forwards_nothing() {
     .unwrap()
     .unwrap();
     let v = pair_view(&h.f, &a).await;
-    assert!(!v.whole, "half: A did not enroll here");
+    assert!(!v.whole && v.hub.ours && !v.hub.theirs, "half at H: {v:?}");
+    let v = pair_view(&a.f, &h).await;
+    assert!(!v.whole && !v.hub.ours && v.hub.theirs, "half at A: {v:?}");
+    let c = a.f.contact(h.id()).await.unwrap();
+    assert_eq!(c.trust, mesh111::store::Trust::Oob, "never a member");
+    assert_eq!(a.f.status().await.unwrap().hub.members, 0);
     let mh = member(&d, "mona", &h, false).await;
     let x = NodeId::from([0x77; 32]);
     let mut raw = Raw::open(h.addr, &mh.ident, &h).await;
@@ -742,10 +912,39 @@ async fn a_half_pair_forwards_nothing() {
     assert_eq!(
         from_a.put(&x, &item(2, 300), None).await,
         RejectUnenrolled,
-        "the half pair's own puts: not enrolled here"
+        "the half pair's own puts: not admitted here"
     );
-    assert!(puts(&h, &a).is_empty(), "H forwards nothing to A");
-    assert!(a.f.status().await.unwrap().paired.is_empty());
+    let ma = member(&d, "milo", &a, false).await;
+    let mut from_h = Raw::open(a.addr, &h.ident, &a).await;
+    assert_eq!(
+        from_h.put(&ma.id(), &item(3, 300), None).await,
+        RejectUnenrolled,
+        "nor there, even for a member dest"
+    );
+    // The only puts between them are the raw ones above.
+    assert_eq!(puts(&h, &a).len(), 1, "H forwards nothing to A");
+    assert_eq!(puts(&a, &h).len(), 1, "nor A to H");
+    // A member code records no pair: J enrolls at A with one through
+    // `pair`, and A takes it for a member, never a pair.
+    let j = hub(&d, "hub-j").await;
+    let om = a.f.offer(Some(a.addr)).await.unwrap();
+    tokio::time::timeout(
+        T,
+        j.f.pair(
+            Some(a.addr),
+            &om.code,
+            &om.card,
+            PairRole::Peer,
+            PairVia::Tcp,
+        ),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let st = a.f.status().await.unwrap();
+    assert_eq!(st.paired.len(), 1, "only H's half is recorded at A");
+    assert_eq!(st.hub.members, 2, "J is a member here (and Milo)");
+    assert!(!pair_view(&j.f, &a).await.whole);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -815,8 +1014,8 @@ async fn the_carrier_hand_off_posts_once_reposts_on_cue_and_consumes_acks() {
     let l = hub(&d, "hub-l").await;
     pair(&g, &l, PairRole::Leaf, PairVia::Tcp).await;
     pair(&g, &g2, PairRole::Peer, PairVia::Carrier).await;
-    // They met once over tcp-lan; afterwards only the carrier.
-    g2.t.release(g.addr);
+    // They met once over tcp-lan; afterwards only the carrier (the
+    // pairing dial went once the pair was whole, `pair_with`).
     for h in [&g, &g2] {
         h.f.set_carrier_max_frame(Some(3_068)).await.unwrap();
     }
@@ -913,6 +1112,12 @@ async fn the_carrier_hand_off_posts_once_reposts_on_cue_and_consumes_acks() {
         "a tcp pair has no carrier frames"
     );
     assert!(
+        g.f.carrier_inbound(l.id(), acks[1].bytes.clone())
+            .await
+            .is_err(),
+        "and hands none in"
+    );
+    assert!(
         pair_view(&g.f, &g2).await.reachable,
         "heard through the carrier"
     );
@@ -959,7 +1164,6 @@ async fn leaf_to_leaf_across_the_carrier_and_back() {
     pair(&g, &l, PairRole::Leaf, PairVia::Tcp).await;
     pair(&g2, &l2, PairRole::Leaf, PairVia::Tcp).await;
     pair(&g, &g2, PairRole::Peer, PairVia::Carrier).await;
-    g2.t.release(g.addr);
     for h in [&g, &g2] {
         h.f.set_carrier_max_frame(Some(3_068)).await.unwrap();
     }
@@ -1092,4 +1296,451 @@ async fn unpairing_returns_rows_and_the_far_hub_is_no_member_after() {
         "never a member here afterwards"
     );
     assert!(!a.f.unpair(b.id()).await.unwrap());
+}
+
+/// M4b: wholeness is recorded, never inferred from a contact's trust. A hub
+/// that is another hub's member stays its member until both pairing
+/// enrollments are recorded; its home hub cannot pair with it (amendment 12,
+/// both sides); a former member pairs both ways and is then a pair, not a
+/// member; a recorded pair presenting a member code is refused without
+/// spending it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_former_member_pairs_only_by_two_recorded_enrollments() {
+    let d = Dirs::new();
+    let a = hub(&d, "hub-a").await;
+    let b = hub(&d, "hub-b").await;
+    let m = member(&d, "mary", &a, false).await;
+    // B is A's member (its home hub is A).
+    let om = a.f.offer(Some(a.addr)).await.unwrap();
+    tokio::time::timeout(T, b.f.enroll(a.addr, &om.code, Some(om.card.as_str())))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(a.f.status().await.unwrap().hub.members, 2);
+    // B cannot pair with its home hub, and A's pairing code at B is refused
+    // there: nothing is recorded on either side.
+    let oa =
+        a.f.offer_pair(Some(a.addr), PairRole::Peer, PairVia::Tcp)
+            .await
+            .unwrap();
+    let r =
+        b.f.pair(
+            Some(a.addr),
+            &oa.code,
+            &oa.card,
+            PairRole::Peer,
+            PairVia::Tcp,
+        )
+        .await;
+    assert!(matches!(r, Err(FabricError::Invalid(_))), "{r:?}");
+    let ob =
+        b.f.offer_pair(None, PairRole::Peer, PairVia::Tcp)
+            .await
+            .unwrap();
+    let r = tokio::time::timeout(
+        T,
+        a.f.pair(None, &ob.code, &ob.card, PairRole::Peer, PairVia::Tcp),
+    )
+    .await
+    .unwrap();
+    assert!(
+        matches!(r, Err(FabricError::Enroll(EnrollStatus::Refused))),
+        "{r:?}"
+    );
+    for h in [&a, &b] {
+        assert!(h.f.status().await.unwrap().paired.is_empty());
+    }
+    // Still A's member: its fetch is served, its puts admitted.
+    let st = a.f.status().await.unwrap();
+    assert_eq!(st.hub.members, 2, "B is still a member at A");
+    let mut from_b = Raw::open(a.addr, &b.ident, &a).await;
+    assert_eq!(
+        from_b.put(&m.id(), &item(1, 300), None).await,
+        Accepted,
+        "a member's put"
+    );
+    // (closed, so A's ENROLL below rides B's own connection)
+    let raw_at = PeerAddr::Tcp(from_b.s.local_addr().unwrap());
+    drop(from_b);
+    until(10, || async {
+        (!a.t.peers().contains(&raw_at)).then_some(())
+    })
+    .await;
+    // B leaves A (L5 has no un-enrol at A: B stays `enrolled` there) and the
+    // two pair both ways: then B is a pair at A, not a member.
+    b.f.forget_contact(a.id()).await.unwrap();
+    // (its old connection gone first: an ENROLL that rode a closing one
+    // would be lost, and an attempt that dialed nothing never resends it)
+    let at_a = PeerAddr::Tcp(a.addr);
+    until(10, || async {
+        let s = b.f.status().await.ok()?;
+        (!b.t.peers().contains(&at_a) && s.links.iter().all(|l| l.peers == 0)).then_some(())
+    })
+    .await;
+    pair(&a, &b, PairRole::Peer, PairVia::Tcp).await;
+    let st = a.f.status().await.unwrap();
+    assert_eq!(st.hub.members, 1, "a hub both member and pair is a pair");
+    assert!(pair_view(&a.f, &b).await.whole);
+    let mut from_b = Raw::open(a.addr, &b.ident, &a).await;
+    assert_eq!(
+        from_b
+            .put(&NodeId::from([0x77; 32]), &item(2, 300), None)
+            .await,
+        RejectUnknownDest,
+        "a tcp peer pair: today's gate, never a forward origin"
+    );
+    assert_eq!(
+        from_b.put(&m.id(), &item(3, 300), None).await,
+        Accepted,
+        "for a member: a member row"
+    );
+    assert!(row(&a.f, &item(3, 300)).await.is_none());
+    // B drops its half; a member code from B (still recorded at A) is
+    // refused before it is checked, so the code still serves a member.
+    assert!(b.f.unpair(a.id()).await.unwrap());
+    let om = a.f.offer(Some(a.addr)).await.unwrap();
+    let r = tokio::time::timeout(T, b.f.enroll(a.addr, &om.code, Some(om.card.as_str())))
+        .await
+        .unwrap();
+    assert!(
+        matches!(r, Err(FabricError::Enroll(EnrollStatus::Refused))),
+        "{r:?}"
+    );
+    assert!(
+        pair_view(&a.f, &b).await.hub.whole(),
+        "A's record unchanged"
+    );
+    let c = stranger(&d, "carl");
+    add_tcp(&c.f, &c.t, true).await;
+    tokio::time::timeout(T, c.f.enroll(a.addr, &om.code, Some(om.card.as_str())))
+        .await
+        .unwrap()
+        .expect("the code was not spent by the refusal");
+    assert_eq!(a.f.status().await.unwrap().hub.members, 2);
+}
+
+/// M4b: without the daemon's dial, a whole `tcp` pair keeps no pairing dial
+/// either (the daemon's §4.6 step 5 rule holds its one connection); a half
+/// pair keeps the dial its attempt started (the far `ENROLL` rides it).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_whole_pair_keeps_no_pairing_dial() {
+    let d = Dirs::new();
+    let a = hub(&d, "hub-a").await;
+    let b = hub(&d, "hub-b").await;
+    pair_with(&a, &b, PairRole::Peer, PairVia::Tcp, false).await;
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    assert!(
+        !b.t.peers().contains(&PeerAddr::Tcp(a.addr)),
+        "not redialed"
+    );
+    // A half pair: H's dial stays up while A has not enrolled there.
+    let h = hub(&d, "hub-h").await;
+    let oa =
+        a.f.offer_pair(Some(a.addr), PairRole::Peer, PairVia::Carrier)
+            .await
+            .unwrap();
+    tokio::time::timeout(
+        T,
+        h.f.pair(
+            Some(a.addr),
+            &oa.code,
+            &oa.card,
+            PairRole::Peer,
+            PairVia::Carrier,
+        ),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    assert!(
+        h.t.peers().contains(&PeerAddr::Tcp(a.addr)),
+        "kept while half"
+    );
+    // Unpairing releases it.
+    assert!(h.f.unpair(a.id()).await.unwrap());
+    until(10, || async {
+        (!h.t.peers().contains(&PeerAddr::Tcp(a.addr))).then_some(())
+    })
+    .await;
+}
+
+/// M4b: with the hub role off (custody opt-in keeps member custody) the
+/// records stay, nothing is forwarded or answered, the held row waits in
+/// the store (never refused) and the view shows each pair not whole, not
+/// reachable, nothing pending; back on, the row is forwarded.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn with_the_hub_role_off_pairs_wait_and_nothing_is_forwarded() {
+    let d = Dirs::new();
+    let a = hub(&d, "hub-a").await;
+    let b = hub(&d, "hub-b").await;
+    pair(&a, &b, PairRole::Peer, PairVia::Tcp).await;
+    a.f.patch_settings(SettingsPatch {
+        custody_opt_in: Some(true),
+        ..SettingsPatch::default()
+    })
+    .await
+    .unwrap();
+    let m = member(&d, "mary", &a, false).await;
+    let dd = member(&d, "dave", &b, false).await;
+    exchange_cards(&m.f, &dd.f).await;
+    b.t.release(a.addr);
+    until(10, || async {
+        (!pair_view(&a.f, &b).await.reachable).then_some(())
+    })
+    .await;
+    let id =
+        m.f.send(dd.id(), "waits with the role", None)
+            .await
+            .unwrap();
+    until_state(&m.f, id, MsgState::Relayed, 10).await;
+    assert_eq!(pair_view(&a.f, &b).await.pending, 1);
+    a.f.patch_settings(SettingsPatch {
+        hub_role: Some(false),
+        ..SettingsPatch::default()
+    })
+    .await
+    .unwrap();
+    let v = pair_view(&a.f, &b).await;
+    assert!(
+        !v.whole && !v.reachable && v.pending == 0,
+        "the view with the role off: {v:?}"
+    );
+    assert!(v.hub.whole(), "the record is kept");
+    assert_eq!(protected(&a.f).await, 1, "the row waits in the store");
+    // No pair answers: B's fetch gets no item-less answer from A.
+    let mut from_b = Raw::open(a.addr, &b.ident, &a).await;
+    from_b.send(Kind::MailboxFetch, encode_cursor(0)).await;
+    assert!(
+        from_b
+            .next(Kind::MailboxItem, Duration::from_millis(500))
+            .await
+            .is_none(),
+        "no pair is answered"
+    );
+    let raw_at = PeerAddr::Tcp(from_b.s.local_addr().unwrap());
+    drop(from_b);
+    until(10, || async {
+        (!a.t.peers().contains(&raw_at)).then_some(())
+    })
+    .await;
+    // B is back on its own connection: still nothing is forwarded.
+    let before = puts(&a, &b).len();
+    b.t.maintain(a.addr, Some(a.id()));
+    let at_b = PeerAddr::Tcp(a.addr);
+    until(10, || async { b.t.peers().contains(&at_b).then_some(()) }).await;
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    assert_eq!(puts(&a, &b).len(), before, "nothing forwarded");
+    assert!(a.f.forward_take(b.id(), 8).await.is_err());
+    assert_eq!(a.f.status().await.unwrap().counters.forward_refused, 0);
+    // Back on: the row pages in from the store and goes (the switch is a
+    // forwarder run).
+    a.f.patch_settings(SettingsPatch {
+        hub_role: Some(true),
+        ..SettingsPatch::default()
+    })
+    .await
+    .unwrap();
+    until_state(&m.f, id, MsgState::Delivered, 20).await;
+    assert_eq!(protected(&a.f).await, 0);
+}
+
+/// M4b: §5.9 re-post rule (1) is applied at the take after the drain was
+/// handed in (the drain's own acks commit first, nothing is re-armed in
+/// between) and re-arms a post at most once in its life.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn rule_1_re_arms_a_post_once_after_the_drain() {
+    let d = Dirs::new();
+    let g = hub(&d, "hub-g").await;
+    let g2 = hub(&d, "hub-g2").await;
+    pair(&g, &g2, PairRole::Peer, PairVia::Carrier).await;
+    for h in [&g, &g2] {
+        h.f.set_carrier_max_frame(Some(3_068)).await.unwrap();
+    }
+    let m = member(&d, "mary", &g, false).await;
+    let y = member(&d, "yuri", &g2, false).await;
+    y.t.release(g2.addr);
+    let mut raw = Raw::open(g.addr, &m.ident, &g).await;
+    let hint = Some([0xEE; DEST_HUB_LEN]); // upstream: the carrier pair
+    for i in 1..=4u8 {
+        assert_eq!(raw.put(&y.id(), &item(i, 300), hint).await, Accepted);
+    }
+    let posts = g.f.forward_take(g2.id(), 8).await.unwrap();
+    assert_eq!(posts.len(), 4);
+    for p in &posts {
+        g.f.forward_done(p.custody_seq.unwrap(), ForwardDone::Taken)
+            .await
+            .unwrap();
+    }
+    // G′ takes the first three; their acks come back in one drain.
+    for p in &posts[..3] {
+        g2.f.carrier_inbound(g.id(), p.bytes.clone()).await.unwrap();
+    }
+    let acks = g2.f.forward_take(g.id(), 8).await.unwrap();
+    assert_eq!(acks.len(), 3);
+    let mut gev = g.f.subscribe();
+    for a in &acks {
+        g.f.carrier_inbound(g2.id(), a.bytes.clone()).await.unwrap();
+    }
+    // Two calls: the drain's ticks have flushed and emitted by then.
+    g.f.status().await.unwrap();
+    g.f.status().await.unwrap();
+    assert!(
+        !drain_events(&mut gev)
+            .iter()
+            .any(|e| matches!(e, FabricEvent::Forward { .. })),
+        "nothing re-armed while the drain is handed in"
+    );
+    for i in 1..=3u8 {
+        assert!(row(&g.f, &item(i, 300)).await.unwrap().committed);
+    }
+    // The next take: the fourth post, unacknowledged, re-armed once.
+    let re = g.f.forward_take(g2.id(), 8).await.unwrap();
+    assert_eq!(re.len(), 1);
+    assert_eq!(re[0].custody_seq, posts[3].custody_seq);
+    g.f.forward_done(re[0].custody_seq.unwrap(), ForwardDone::Taken)
+        .await
+        .unwrap();
+    assert_eq!(pair_view(&g.f, &g2).await.reposts, 1);
+    // Another far frame (the ack of a fifth put): rule (1) is spent for
+    // the fourth, so the take after it returns nothing.
+    assert_eq!(raw.put(&y.id(), &item(5, 300), hint).await, Accepted);
+    let fifth = g.f.forward_take(g2.id(), 8).await.unwrap();
+    assert_eq!(fifth.len(), 1);
+    g.f.forward_done(fifth[0].custody_seq.unwrap(), ForwardDone::Taken)
+        .await
+        .unwrap();
+    g2.f.carrier_inbound(g.id(), fifth[0].bytes.clone())
+        .await
+        .unwrap();
+    for a in g2.f.forward_take(g.id(), 8).await.unwrap() {
+        g.f.carrier_inbound(g2.id(), a.bytes).await.unwrap();
+    }
+    assert!(
+        g.f.forward_take(g2.id(), 8).await.unwrap().is_empty(),
+        "never twice"
+    );
+    assert_eq!(pair_view(&g.f, &g2).await.reposts, 1);
+    // "Flush now" (rule (2)) still re-arms it.
+    assert_eq!(g.f.forward_repost(g2.id()).await.unwrap(), 1);
+}
+
+/// M4b: a pair's `CUSTODY_ACK` is read only fresh, on a connection
+/// attributed to the pair the put went to: a replayed `REJECT_FULL` and an
+/// `ACCEPTED` from another pair change nothing; the real answer commits.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_replayed_or_misdirected_pair_ack_changes_nothing() {
+    let d = Dirs::new();
+    let a = hub(&d, "hub-a").await;
+    let b = hub(&d, "hub-b").await;
+    let c = hub(&d, "hub-c").await;
+    pair(&a, &b, PairRole::Peer, PairVia::Tcp).await;
+    pair(&a, &c, PairRole::Peer, PairVia::Tcp).await;
+    let m = member(&d, "mary", &a, false).await;
+    // B and C go away; raw connections speak for them.
+    for h in [&b, &c] {
+        h.f.abort();
+        h.t.shutdown();
+    }
+    for h in [&b, &c] {
+        until(10, || async {
+            (!pair_view(&a.f, h).await.reachable).then_some(())
+        })
+        .await;
+    }
+    let x = NodeId::from([0x77; 32]);
+    let r = item(9, 300);
+    let mut raw = Raw::open(a.addr, &m.ident, &a).await;
+    assert_eq!(raw.put(&x, &r, None).await, Accepted, "held for B first");
+    let mut rb = Raw::open(a.addr, &b.ident, &a).await;
+    rb.send(Kind::MailboxFetch, encode_cursor(0)).await;
+    let put = rb.next(Kind::CustodyPut, T).await.expect("A puts R to B");
+    assert_eq!(decode_put(&put).unwrap().1, &r[..]);
+    let full = rb.ack(&x, &r, CustodyStatus::RejectFull).await;
+    // A retry trigger: B's next fetch re-offers R.
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    rb.send(Kind::MailboxFetch, encode_cursor(0)).await;
+    rb.next(Kind::CustodyPut, T).await.expect("R again");
+    let stale = a.f.status().await.unwrap().counters.stale;
+    rb.write(&full).await; // the replay
+    let mut rc = Raw::open(a.addr, &c.ident, &a).await;
+    rc.send(Kind::MailboxFetch, encode_cursor(0)).await;
+    rc.ack(&x, &r, Accepted).await; // C was never sent R
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(!row(&a.f, &r).await.unwrap().committed, "neither counted");
+    assert_eq!(a.f.status().await.unwrap().counters.stale, stale + 1);
+    rb.ack(&x, &r, Accepted).await;
+    until(10, || async {
+        row(&a.f, &r).await?.committed.then_some(())
+    })
+    .await;
+    assert_eq!(a.f.status().await.unwrap().counters.forward_refused, 0);
+}
+
+/// M4b: a backlog beyond the resident window drains completely: at most
+/// [`FORWARD_RESIDENT`] rows live in memory (the view counts them), the
+/// rest wait in the store and page in as the window drains.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_6000_row_backlog_drains_through_the_resident_window() {
+    let d = Dirs::new();
+    let a = hub(&d, "hub-a").await;
+    let b = hub(&d, "hub-b").await;
+    pair(&a, &b, PairRole::Peer, PairVia::Tcp).await;
+    let m = member(&d, "mary", &a, false).await;
+    let dd = member(&d, "dave", &b, false).await;
+    dd.t.release(b.addr);
+    b.t.release(a.addr);
+    until(10, || async {
+        (!pair_view(&a.f, &b).await.reachable).then_some(())
+    })
+    .await;
+    const N: u32 = 6_000;
+    let items: Vec<Vec<u8>> = (0..N).map(numbered).collect();
+    let raw = Raw::open(a.addr, &m.ident, &a).await;
+    assert_eq!(raw.blast(&dd.id(), &items).await, N as usize);
+    assert_eq!(protected(&a.f).await, u64::from(N));
+    assert_eq!(
+        pair_view(&a.f, &b).await.pending as usize,
+        FORWARD_RESIDENT,
+        "the resident window; the rest is in the store"
+    );
+    b.t.maintain(a.addr, Some(a.id()));
+    until(300, || async { (protected(&a.f).await == 0).then_some(()) }).await;
+    let held = b.f.status().await.unwrap().custody.0;
+    assert!(held >= u64::from(N), "B holds them all: {held}");
+    let st = a.f.status().await.unwrap();
+    assert_eq!(st.counters.forward_refused, 0);
+    assert_eq!(pair_view(&a.f, &b).await.pending, 0);
+}
+
+/// M4b: the forwarder recomputes a row's targets only when its inputs
+/// changed: a 1,000-row backlog drained to a pair that comes back costs at
+/// most 3 computations per row (the gate's and the forwarder's), never one
+/// per row per trigger.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn target_computations_stay_linear_in_a_1000_row_drain() {
+    let d = Dirs::new();
+    let a = hub(&d, "hub-a").await;
+    let b = hub(&d, "hub-b").await;
+    pair(&a, &b, PairRole::Peer, PairVia::Tcp).await;
+    let m = member(&d, "mary", &a, false).await;
+    let dd = member(&d, "dave", &b, false).await;
+    dd.t.release(b.addr);
+    b.t.release(a.addr);
+    until(10, || async {
+        (!pair_view(&a.f, &b).await.reachable).then_some(())
+    })
+    .await;
+    const N: u32 = 1_000;
+    let before = a.f.forward_target_computations().await.unwrap();
+    let items: Vec<Vec<u8>> = (0..N).map(numbered).collect();
+    let raw = Raw::open(a.addr, &m.ident, &a).await;
+    assert_eq!(raw.blast(&dd.id(), &items).await, N as usize);
+    b.t.maintain(a.addr, Some(a.id()));
+    until(120, || async { (protected(&a.f).await == 0).then_some(()) }).await;
+    let spent = a.f.forward_target_computations().await.unwrap() - before;
+    assert!(
+        spent <= 3 * u64::from(N),
+        "{spent} target computations for {N} rows"
+    );
 }

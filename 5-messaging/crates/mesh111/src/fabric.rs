@@ -226,23 +226,45 @@
 //!
 //! ### Pairing and cross-hub forwarding (Layer 7 §4.6, §5)
 //!
-//! Layer 7's amendments 1, 7 (sender side), 8, 10 and 11
-//! (`7-relay/README.md` §5.3). Every path starts behind
-//! [`FabricSettings::holds_custody`] (Layer 7 §5.11); with no paired hub a
-//! hub's gate answers, frames and rows are Layer 5's.
+//! Layer 7's amendments 1, 7 (sender side), 8, 10, 11 and 12
+//! (`7-relay/README.md` §5.3). Every pairing and forwarding path starts
+//! behind the hub role ([`FabricSettings::hub_role`], Layer 7 §5.11); with
+//! no paired hub a hub's gate answers, frames and rows are Layer 5's.
 //!
-//! - **Pairing** ([`Fabric::pair`], hub role only): a §7.3 enrollment whose
-//!   outcome is one [`PairedHub`] record in [`FabricSettings::paired_hubs`]
-//!   (persisted by the daemon through [`FabricEvent::Settings`]); it sets no
-//!   home hub and writes no cursor, and pins the far hub's card at `oob`, so
-//!   the contact reads `enrolled` only once the far hub enrolled here too. A
-//!   pair is **whole** when both enrollments are done (this hub's record,
-//!   and the far hub `enrolled` here); only a whole pair is a forward target
-//!   or origin, so a half pair forwards nothing. The second `ENROLL` rides
-//!   the connection the first hub opened (an attributed connection is
-//!   sendable whatever its direction, S22); `ENROLL` never rides a carrier.
-//!   A paired hub is never a member: not counted, never a `dest` member row,
-//!   never fetched for, never answered a card.
+//! - **Pairing** (hub role only; §4.6 steps 1–4) is two enrollments, one in
+//!   each direction, and **wholeness is recorded, never inferred from a
+//!   contact's trust**. [`Fabric::offer_pair`] mints a pairing code (one
+//!   open offer at a time, member or pairing); the far hub's `ENROLL` that
+//!   redeems it records its [`PairedHub`] with `theirs` set and pins its
+//!   card at `oob`, never `enrolled`. This hub's [`Fabric::pair`] with the
+//!   far hub's pairing code records `ours` on its `ENROLL_OK`; it sets no
+//!   home hub and writes no cursor. A pair is **whole** when both bools are
+//!   set ([`PairedHub::whole`], persisted by the daemon through
+//!   [`FabricEvent::Settings`], which is also how it learns a pair became
+//!   whole); only a whole pair that did not answer `REJECT_UNENROLLED` this
+//!   session is a forward target or an admitted sender, so a half pair's
+//!   puts meet `REJECT_UNENROLLED` and it is offered nothing. A member
+//!   offer's code ([`Fabric::offer`]) never records a pair; a recorded pair
+//!   presenting one, this node's home hub presenting a pairing code
+//!   (amendment 12), and a pairing code presented for a hub recorded with
+//!   another role or link are refused before the code is checked (the offer
+//!   is neither spent nor locked). The second `ENROLL` rides the connection
+//!   the first hub opened (an attributed connection is sendable whatever its
+//!   direction, S22); `ENROLL` never rides a carrier. A paired hub is never
+//!   a member: not counted, never a `dest` member row, never fetched for,
+//!   its commits ignored, never answered a card; a hub that is both an
+//!   enrolled member and a recorded pair is a pair. [`Fabric::unpair`] drops
+//!   the record (both bools) and everything held for the pair and leaves the
+//!   far hub's contact as it is.
+//! - **Pairing dials** (§4.6 steps 3, 5): the dial a pairing attempt
+//!   started is kept only while the pair is half, so the far hub's `ENROLL`
+//!   can ride it; once whole, the fabric keeps no dial for any link (the
+//!   daemon's rule holds a `tcp` pair's one connection; a `carrier` pair is
+//!   never dialed again). The side whose `ENROLL_OK` makes the pair whole
+//!   releases its own dial and sends one `MAILBOX_FETCH {0}` on the
+//!   connection; a whole pair's fetch (or its connection dropping) releases
+//!   the other side's. The side whose answer makes the pair whole releases
+//!   nothing at once: that `ENROLL_OK` rides the connection.
 //! - **The gate** (`Core::custody_gate`, Layer 7 §5.2): the member branch
 //!   is today's (a member `dest` ⇒ a `fwd = 0` row from any origin); a
 //!   non-member `dest` meets `forward_ok`, a synchronous arm of this actor:
@@ -256,30 +278,59 @@
 //!   the table in `paired_hubs` order (hint first, then the hit cache, then
 //!   the probe order); its **turn** is the first target that has not
 //!   refused it, and a target that is down keeps its turn until it is up.
-//!   One put per row at a time, at most [`FORWARD_WINDOW`] in flight per
-//!   `tcp` pair (ACK-clocked flow control). In memory per row: its dest,
-//!   the received hint, its turn and refusals (about 130 B per protected
-//!   forward row with the map's share, hubs only, bounded by the Transit
-//!   quota); after a restart the rows resume from the store without their
-//!   hints. A non-hub node holds the empty structure only.
+//!   The work per trigger is bounded by what changed: the rows sit in
+//!   per-target queues by state (custody order), a row's targets are
+//!   recomputed only when its inputs changed (a new or paged-in row, a
+//!   refusal, an orphaning, the pair set or the carrier bound, a changed
+//!   cache entry for its dest), and the put stage visits only the `tcp`
+//!   pairs that are up and have window room; a row is forgotten in one
+//!   lookup (its `pkt_ref` keys the pending map). One put per row at a
+//!   time, at most [`FORWARD_WINDOW`] in flight per `tcp` pair (ACK-clocked
+//!   flow control).
+//! - **The resident window:** at most [`FORWARD_RESIDENT`] protected
+//!   forward rows live in memory (about 250 B each with the indexes: ≈ 1 MB
+//!   at most, hubs only). The first window is read at start; rows beyond it
+//!   wait in the store, "not yet offered", and are paged in custody order
+//!   (`Store::forward_pending`, one read per `FORWARD_LOAD_PAGE` rows) as
+//!   resident rows leave. A row held while the window is full (or while
+//!   rows wait before it) goes to the store only, so it is offered after
+//!   the rows ahead of it, without its hint, as after a restart. The view's
+//!   `pending` counts resident rows; `Store::forward_stats` has the totals.
+//!   A target that is down keeps its rows resident, so a window full of
+//!   rows for down targets holds back the rows behind it until they move
+//!   (a reading recorded for the lead). A non-hub node holds the empty
+//!   structure only.
+//! - **The hub role off** (a `custody_opt_in` node keeps member custody):
+//!   the records stay in `paired_hubs` and forward nothing, the resident
+//!   rows leave memory and wait in the store (never refused), no pair is
+//!   answered or admitted, the pairing dials are released, and the view
+//!   shows each pair not whole, not reachable, nothing pending. On again,
+//!   the rows page in from the store.
 //! - **Readings recorded for the lead:** a refusal is a fact of its
 //!   connection (§5.5): a `tcp` pair's refusals are forgotten when its
 //!   connection drops, so the row is offered to it again on its next
 //!   link-up; with every target refused at once the row is marked refused.
 //!   Carrier bound unset ([`Fabric::set_carrier_max_frame`] with `None`):
 //!   no carrier pair is a target at the gate, and a row already held for a
-//!   carrier pair waits for the bound instead of being refused. A pair's
-//!   link-up (an outbound `tcp` connection that announced it) sends one
-//!   `MAILBOX_FETCH {0}`, which the far hub answers with one item-less
+//!   carrier pair waits for the bound instead of being refused. A whole
+//!   `tcp` pair's link-up (an outbound connection that announced it) sends
+//!   one `MAILBOX_FETCH {0}`, which the far hub answers with one item-less
 //!   `MAILBOX_ITEM`, never items: both sides of the one connection
 //!   attribute, so either may forward on it (§8.1: an inbound connection
-//!   gets nothing until a fresh sealed packet attributes it). `REJECT_FULL`
-//!   rows are retried on the pair's next link-up or attribution and on any
-//!   other `CUSTODY_ACK` from it or a row inserted for it, never on the
-//!   `REJECT_FULL` itself (that would ping-pong). The carrier's posted
-//!   marks and the re-post rule live here ([`Fabric::forward_done`],
-//!   [`Fabric::forward_repost`]): a far frame verified after a post re-arms
-//!   it once (§5.9 rule (1)).
+//!   gets nothing until a fresh sealed packet attributes it). A pair's
+//!   `CUSTODY_ACK` is read only from the pair the put went to: over `tcp`
+//!   only when fresh on a connection attributed to it (a replay changes
+//!   nothing), through the carrier only from a whole `carrier` pair.
+//!   `REJECT_FULL` rows are retried on the pair's next link-up or
+//!   attribution and on any other `CUSTODY_ACK` from it or a row inserted
+//!   for it, never on the `REJECT_FULL` itself (that would ping-pong); each
+//!   trigger releases at most one window of them, oldest first, so a pair
+//!   with room again drains them ACK-clocked. The carrier's posted marks
+//!   and the re-post rules live here ([`Fabric::forward_done`],
+//!   [`Fabric::forward_repost`]): §5.9 rule (1) is applied at the
+//!   [`Fabric::forward_take`] after a verified far frame (after the whole
+//!   drain was handed in, so a drain's own acks commit before anything is
+//!   re-armed) and re-arms each post at most once in the row's life.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::net::SocketAddr;
@@ -349,9 +400,15 @@ pub const CARRIER_ACK_QUEUE: usize = 1024;
 /// Bytes a forward put adds around its item (Layer 7 §5.2, §6.1 item 3):
 /// [`CUSTODY_WRAP`] and the 11 B hint TLV ([`DEST_HUB_ALONE_LEN`]), 131 B.
 pub const FORWARD_PUT_WRAP: usize = CUSTODY_WRAP + DEST_HUB_ALONE_LEN;
-/// Forward rows read from the store per page at start (Layer 7 §5.9: the
-/// rows resume after a restart).
+/// Forward rows read from the store per page (Layer 7 §5.9: the rows
+/// resume after a restart, and rows beyond the resident window come in as
+/// it drains): one `forward_pending` read per 256 rows.
 const FORWARD_LOAD_PAGE: usize = 256;
+/// Protected forward rows the forwarder holds in memory at most (the
+/// resident window, module doc): about 250 B each, ≈ 1 MB at most, hubs
+/// only. Rows beyond it wait in the store, not yet offered, and are paged
+/// in custody order as the window drains.
+pub const FORWARD_RESIDENT: usize = 4_096;
 
 /// Whether an item of `item_len` sealed bytes fits a carrier whose largest
 /// frame is `max_frame` (Layer 7 §5.2, §6.1 item 3): item +
@@ -435,9 +492,11 @@ pub struct FabricSettings {
     pub custody_opt_in: bool,
     /// The home hub, once enrolled.
     pub home_hub: Option<HomeHub>,
-    /// Hubs this hub enrolled at by pairing (Layer 7 §4.6 step 4, amendment
-    /// 10): the one record the gate reads. Empty without the hub role; a
-    /// paired hub is never the home hub (module doc).
+    /// Hubs paired with this one (Layer 7 §4.6 steps 3–4, amendment 10):
+    /// the one record the gate reads, each with the two enrollments it
+    /// holds ([`PairedHub::whole`]). Only a hub-role node records pairs;
+    /// with the hub role off they stay here and forward nothing. A paired
+    /// hub is never the home hub (module doc).
     pub paired_hubs: Vec<PairedHub>,
 }
 
@@ -515,10 +574,13 @@ impl PairVia {
     }
 }
 
-/// One paired hub (Layer 7 §4.6 step 4, amendment 10; §19 code seam 3:
-/// `{node_id, role, via}`, the record the gate reads). The daemon keeps the
-/// address, link key, `lan` and the warning hash beside it in
-/// `fabric/settings`; none of them is the fabric's.
+/// One paired hub (Layer 7 §4.6 steps 3–4, amendment 10; §19 code seam 3:
+/// `{node_id, role, via}`, the record the gate reads, plus the two
+/// enrollments it holds, `ours` and `theirs`: wholeness is recorded, never
+/// inferred from a contact's trust; an additive deviation from amendment
+/// 10's shape, D33). The daemon persists all five in its `paired_hubs` row
+/// and keeps the address, link key, `lan` and the warning hash beside them
+/// in `fabric/settings`; none of those is the fabric's.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct PairedHub {
     /// The far hub.
@@ -527,6 +589,12 @@ pub struct PairedHub {
     pub role: PairRole,
     /// Its link.
     pub via: PairVia,
+    /// This hub's pairing `ENROLL` got `ENROLL_OK` at the far hub
+    /// ([`Fabric::pair`]).
+    pub ours: bool,
+    /// The far hub redeemed this hub's pairing offer
+    /// ([`Fabric::offer_pair`]).
+    pub theirs: bool,
 }
 
 impl PairedHub {
@@ -535,6 +603,13 @@ impl PairedHub {
     /// need a connection).
     pub fn valid(&self) -> bool {
         self.via == PairVia::Tcp || self.role == PairRole::Peer
+    }
+
+    /// Both enrollments are recorded (§4.6 step 4: "a pair forwards only
+    /// when both sides hold it"): only a whole pair is a forward target or
+    /// origin.
+    pub fn whole(&self) -> bool {
+        self.ours && self.theirs
     }
 }
 
@@ -573,17 +648,21 @@ pub enum ForwardDone {
 pub struct PairView {
     /// The record.
     pub hub: PairedHub,
-    /// Both enrollments are done (module doc): a forward target and origin.
+    /// [`PairedHub::whole`] with the hub role on: a forward target and
+    /// origin (`false` with the hub role off, whatever the record holds).
     pub whole: bool,
     /// It answered `REJECT_UNENROLLED` this session ("the other hub no
     /// longer lists this hub", §5.9): no forward target until paired again.
     pub broken: bool,
     /// `tcp`: a connection is attributed to it (it answered on it since it
     /// came up); `carrier`: a verified frame from it arrived through the
-    /// carrier this session.
+    /// carrier this session. `false` with the hub role off.
     pub reachable: bool,
-    /// Forward rows whose turn is this pair, plus the `CUSTODY_ACK`s owed to
-    /// it through the carrier.
+    /// Resident forward rows whose turn is this pair, plus the
+    /// `CUSTODY_ACK`s owed to it through the carrier. Rows beyond the
+    /// resident window ([`FORWARD_RESIDENT`]) are in the store, not yet
+    /// offered, and counted by no pair; `Store::forward_stats` has the
+    /// totals.
     pub pending: u32,
     /// Carrier re-posts this session (§5.9 C6).
     pub reposts: u32,
@@ -668,9 +747,11 @@ pub enum FabricEvent {
     /// Forward pending / target up (Layer 7 §5.9): frames are owed to the
     /// `carrier` pair `target` ([`Fabric::forward_take`] would return
     /// `pending` of them now). Coalesced per target per tick (the actor's
-    /// input batch); emitted when a row's turn or an ack reaches the pair, a
-    /// posted row is re-armed, or the carrier bound is set, never on a
-    /// timer and never for a row that merely waits after a `Retry`.
+    /// input batch); emitted when a row's turn or an ack reaches the pair,
+    /// its `REJECT_FULL` rows are retried, [`Fabric::forward_repost`]
+    /// re-arms a post, or the carrier bound is set; never on a timer, never
+    /// for a row that merely waits after a `Retry`, and never for re-post
+    /// rule (1), which the next [`Fabric::forward_take`] applies itself.
     Forward {
         /// The `carrier` pair.
         target: NodeId,
@@ -1020,6 +1101,7 @@ impl Fabric {
             commit_owed: None,
             heard: HashSet::new(),
             offer: None,
+            offer_pair: None,
             enrolling: None,
             peer_dials: HashSet::new(),
             read_marks: HashMap::new(),
@@ -1286,20 +1368,22 @@ impl Fabric {
 }
 
 /// Layer 7 (§4.6, §5.9): pairing, the carrier bound and the hand-off API.
-/// Every call is a synchronous arm of the actor (it never awaits a pair) and
-/// refuses on a node that holds no custody.
+/// Every call is a synchronous arm of the actor (it never awaits a pair);
+/// pairing and the hand-off are refused without the hub role (§5.11).
 impl Fabric {
     /// Hub side, Layer 7 §4.6 steps 3–4: enroll at the hub whose card is
-    /// `card` with its one-time `code`, recording a pairing (`role` and
-    /// `via` from this hub's side) instead of a home hub. The `ENROLL` rides
-    /// a connection already attributed to that hub when one exists (the
+    /// `card` with its one-time pairing `code` (minted there by
+    /// [`Fabric::offer_pair`]), recording a pairing (`role` and `via` from
+    /// this hub's side) instead of a home hub. The `ENROLL` rides a
+    /// connection already attributed to that hub when one exists (the
     /// second hub of a pairing answers on the first hub's connection, S22),
     /// else a dial to `address`. Resolves on `ENROLL_OK` like
     /// [`Fabric::enroll`] (same refusals; dropping the wait abandons the
-    /// attempt). Refused without the hub role, for this node or its home
-    /// hub, for a `role`/`via` pair §4.6 forbids, and beyond
-    /// [`MAX_PAIRED_HUBS`]. The pair forwards once the far hub has enrolled
-    /// here too (module doc).
+    /// attempt) with the record, whose `ours` is now set; the pair is whole
+    /// (it forwards) once `theirs` is set too, when the far hub redeems this
+    /// hub's pairing offer. Refused without the hub role, for this node or
+    /// its home hub, for a `role`/`via` pair §4.6 forbids, for a hub
+    /// recorded with another role or link, and beyond [`MAX_PAIRED_HUBS`].
     pub async fn pair(
         &self,
         address: Option<SocketAddr>,
@@ -1315,26 +1399,49 @@ impl Fabric {
             rx: Some(rx),
             input: self.inner.input.clone(),
         };
-        let hub = match self
+        let node = match self
             .call(move |c| c.pair(address, &code, &card, role, via, tx))
             .await?
         {
-            Ok(h) => h,
+            Ok(n) => n,
             Err(e) => {
                 wait.rx = None; // refused before any attempt opened
                 return Err(e);
             }
         };
         wait.answer().await?;
-        Ok(hub)
+        self.call(move |c| c.find_pair(&node))
+            .await?
+            .ok_or(FabricError::NotFound)
     }
 
-    /// Layer 7 §13.1 `DELETE /relay/paired/{node_id}`: drop the pairing.
-    /// Its forward rows return to the other targets (refused when none is
-    /// left), and the far hub's contact goes back to `oob`, so it is never
-    /// taken for a member here afterwards: its puts meet
-    /// `REJECT_UNENROLLED`, the far hub's sign that this hub no longer lists
-    /// it. `false` when no such pair is recorded.
+    /// Hub side, Layer 7 §4.6 step 1: mint a one-time **pairing** code
+    /// (replacing any open offer, member or pairing: one at a time). `role`
+    /// and `via` are the far hub's, from this hub's side. The far hub's
+    /// `ENROLL` that redeems it records (or completes) its [`PairedHub`]
+    /// with `theirs` set and pins its card at `oob`, never `enrolled`: a
+    /// paired hub is never a member. A member offer's code
+    /// ([`Fabric::offer`]) never records a pair, and a recorded pair that
+    /// presents one is refused; this node's home hub redeeming a pairing
+    /// code is refused (amendment 12). `bundle` is `None`: the `111PAIR:`
+    /// bundle (link key, role, via) is the daemon's (D6). Refused without
+    /// the hub role and for a `role`/`via` pair §4.6 forbids.
+    pub async fn offer_pair(
+        &self,
+        address: Option<SocketAddr>,
+        role: PairRole,
+        via: PairVia,
+    ) -> Result<OfferView> {
+        self.call(move |c| c.offer_pair(address, role, via)).await?
+    }
+
+    /// Layer 7 §13.1 `DELETE /relay/paired/{node_id}`: drop the pairing
+    /// record (both enrollments) and everything held for the pair; its
+    /// forward rows return to the other targets (refused when none is
+    /// left). The far hub's contact is left as it is: a pairing pinned it
+    /// at `oob`, so its puts meet `REJECT_UNENROLLED` here afterwards, the
+    /// far hub's sign that this hub no longer lists it. `false` when no such
+    /// pair is recorded.
     pub async fn unpair(&self, node_id: NodeId) -> Result<bool> {
         self.call(move |c| c.unpair(node_id)).await?
     }
@@ -1348,11 +1455,16 @@ impl Fabric {
     }
 
     /// Sealed frames owed to `target`, a whole `carrier` pair (Layer 7
-    /// §5.9), in custody order, at most `max`: first the `CUSTODY_ACK`s owed
-    /// to it (`custody_seq = None`, consumed by this call and never returned
-    /// again, C7), then forward puts whose turn it is (`Some`), each to be
-    /// answered with [`Fabric::forward_done`]. A put already posted is
-    /// returned again only once re-armed (§5.9 C6). A forwarder trigger.
+    /// §5.9), at most `max`: first the `CUSTODY_ACK`s owed to it
+    /// (`custody_seq = None`, consumed by this call and never returned
+    /// again, C7), then forward puts whose turn it is (`Some`), in custody
+    /// order, each to be answered with [`Fabric::forward_done`]. A put
+    /// already posted is returned again only once re-armed (§5.9 C6): by
+    /// [`Fabric::forward_repost`], or by re-post rule (1), applied here
+    /// when a verified frame from `target` came in through
+    /// [`Fabric::carrier_inbound`] since the last take (at most once per
+    /// row). A forwarder trigger. `Invalid` for anything but a whole
+    /// `carrier` pair, or with the hub role off.
     pub async fn forward_take(&self, target: NodeId, max: usize) -> Result<Vec<CarrierFrame>> {
         self.call(move |c| c.forward_take(target, max)).await?
     }
@@ -1370,7 +1482,7 @@ impl Fabric {
     /// mailbox item is (INTRO allowed). Only `CUSTODY_PUT` (the `fwd = 3`
     /// branch of the gate) and `CUSTODY_ACK` are read; anything else, and
     /// any frame not from `from`, is dropped and counted. `Invalid` for a
-    /// sender that is not a paired hub, or on a node that holds no custody.
+    /// sender that is not a whole `carrier` pair, or with the hub role off.
     pub async fn carrier_inbound(&self, from: NodeId, frame: Vec<u8>) -> Result<()> {
         if !(MIN_PACKET_LEN..=MAX_PACKET_LEN).contains(&frame.len()) {
             return Err(FabricError::Invalid("carrier frame size"));
@@ -1385,6 +1497,15 @@ impl Fabric {
     /// re-post. Returns how many were re-armed.
     pub async fn forward_repost(&self, target: NodeId) -> Result<u32> {
         self.call(move |c| c.forward_repost(target)).await?
+    }
+
+    /// A test hook, not an API: the §5.1 target computations this session
+    /// (the gate's and the forwarder's). The forwarder recomputes a row's
+    /// targets only when its inputs changed, so a drain of N rows costs
+    /// O(N) of them (`tests/forward.rs` asserts ≤ 3 N).
+    #[doc(hidden)]
+    pub async fn forward_target_computations(&self) -> Result<u64> {
+        self.call(|c| c.fwd.computed).await
     }
 }
 
@@ -1798,7 +1919,7 @@ fn forward_targets(
 /// Where a forward row is with its current target (Layer 7 §5.9).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Turn {
-    /// Nothing out: the next run offers it to its turn when that is up.
+    /// Nothing out: offered to its turn when that is up (and has room).
     Idle,
     /// A put written to a `tcp` pair, awaiting its `CUSTODY_ACK`.
     InFlight,
@@ -1811,12 +1932,31 @@ enum Turn {
     Posted { repost: bool },
 }
 
-/// One protected forward row the forwarder holds in memory.
+/// The set of its turn's [`TargetQ`] a resident row sits in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Slot {
+    Idle,
+    InFlight,
+    Full,
+    Taken,
+    /// Posted, §5.9 rule (1) not used yet.
+    Posted,
+    /// Posted, rule (1) used (never again for this row).
+    Spent,
+    /// Re-armed: owed to the carrier again.
+    Armed,
+}
+
+/// One protected forward row the forwarder holds in memory (one of the at
+/// most [`FORWARD_RESIDENT`] of the resident window, module doc).
 #[derive(Debug, Clone)]
 struct FwdRow {
     dest: [u8; 32],
+    /// The stored `pkt_ref`: the pending map's key, so forgetting a row is
+    /// one lookup.
+    pkt_ref: [u8; 16],
     /// The `dest_hub` TLV it arrived with, repeated on every forward put
-    /// (§5.4; lost at a restart).
+    /// (§5.4; lost at a restart and for a row paged in from the store).
     hint: Option<[u8; DEST_HUB_LEN]>,
     /// The §5.1 table row (1–3).
     fwd: u8,
@@ -1833,29 +1973,176 @@ struct FwdRow {
     /// Its turn's pair was unpaired or broken: with no target left it is
     /// refused rather than kept waiting.
     orphaned: bool,
+    /// §5.9 re-post rule (1) re-armed it once: never again (a per-row bit,
+    /// never reset by a re-take; C6's bound).
+    rule1: bool,
+}
+
+impl FwdRow {
+    fn slot(&self) -> Slot {
+        match self.state {
+            Turn::Idle => Slot::Idle,
+            Turn::InFlight => Slot::InFlight,
+            Turn::Full => Slot::Full,
+            Turn::Taken => Slot::Taken,
+            Turn::Posted { repost: true } => Slot::Armed,
+            Turn::Posted { repost: false } if self.rule1 => Slot::Spent,
+            Turn::Posted { repost: false } => Slot::Posted,
+        }
+    }
+}
+
+/// The resident rows whose turn is one target, by where they stand, each
+/// set in custody order: the per-target queues the forwarder works from
+/// (no pass over every row; counts are set sizes).
+#[derive(Debug, Default)]
+struct TargetQ {
+    idle: BTreeSet<u64>,
+    inflight: BTreeSet<u64>,
+    full: BTreeSet<u64>,
+    taken: BTreeSet<u64>,
+    posted: BTreeSet<u64>,
+    spent: BTreeSet<u64>,
+    armed: BTreeSet<u64>,
+}
+
+impl TargetQ {
+    fn set(&mut self, s: Slot) -> &mut BTreeSet<u64> {
+        match s {
+            Slot::Idle => &mut self.idle,
+            Slot::InFlight => &mut self.inflight,
+            Slot::Full => &mut self.full,
+            Slot::Taken => &mut self.taken,
+            Slot::Posted => &mut self.posted,
+            Slot::Spent => &mut self.spent,
+            Slot::Armed => &mut self.armed,
+        }
+    }
+
+    fn len(&self) -> usize {
+        self.idle.len()
+            + self.inflight.len()
+            + self.full.len()
+            + self.taken.len()
+            + self.posted.len()
+            + self.spent.len()
+            + self.armed.len()
+    }
+
+    fn all(&self) -> Vec<u64> {
+        let mut v: Vec<u64> = Vec::with_capacity(self.len());
+        for s in [
+            &self.idle,
+            &self.inflight,
+            &self.full,
+            &self.taken,
+            &self.posted,
+            &self.spent,
+            &self.armed,
+        ] {
+            v.extend(s.iter().copied());
+        }
+        v
+    }
+}
+
+/// The hit cache `dest → pair` (Layer 7 §5.5): at most [`FORWARD_CACHE`]
+/// entries, oldest evicted, in memory only. A map for the lookup and an
+/// insertion log for the eviction order (stale log entries are skipped and
+/// compacted), so a lookup and an insert are O(1) amortized.
+#[derive(Debug, Default)]
+struct HitCache {
+    map: HashMap<[u8; 32], (NodeId, u64)>,
+    order: VecDeque<([u8; 32], u64)>,
+    stamp: u64,
+}
+
+impl HitCache {
+    fn get(&self, dest: &[u8; 32]) -> Option<NodeId> {
+        self.map.get(dest).map(|(p, _)| *p)
+    }
+
+    #[cfg(test)]
+    fn len(&self) -> usize {
+        self.map.len()
+    }
+
+    /// Record a hit; `true` when the dest's entry changed (new, or another
+    /// pair).
+    fn put(&mut self, dest: [u8; 32], pair: NodeId) -> bool {
+        self.stamp += 1;
+        let changed = self.map.get(&dest).is_none_or(|(p, _)| *p != pair);
+        self.map.insert(dest, (pair, self.stamp));
+        self.order.push_back((dest, self.stamp));
+        while self.map.len() > FORWARD_CACHE {
+            let Some((d, s)) = self.order.pop_front() else {
+                break;
+            };
+            if self.map.get(&d).is_some_and(|(_, st)| *st == s) {
+                self.map.remove(&d);
+            }
+        }
+        if self.order.len() > 2 * FORWARD_CACHE {
+            let map = &self.map;
+            self.order
+                .retain(|(d, s)| map.get(d).is_some_and(|(_, st)| st == s));
+        }
+        changed
+    }
+
+    /// Drop every entry naming `pair`.
+    fn forget_pair(&mut self, pair: &NodeId) {
+        self.map.retain(|_, (p, _)| p != pair);
+        let map = &self.map;
+        self.order
+            .retain(|(d, s)| map.get(d).is_some_and(|(_, st)| st == s));
+    }
 }
 
 /// The forwarder's in-memory state (Layer 7 §5.5, §5.9): lost at a
-/// restart; the store keeps the rows (module doc).
+/// restart; the store keeps the rows (module doc). Every structure is
+/// bounded by the resident window ([`FORWARD_RESIDENT`] rows) or by
+/// [`MAX_PAIRED_HUBS`].
 #[derive(Debug, Default)]
 struct Forwarder {
     /// The carrier bound ([`Fabric::set_carrier_max_frame`]).
     carrier_max: Option<usize>,
-    /// Protected forward rows by `custody_seq` (custody order).
+    /// The resident window: protected forward rows by `custody_seq`.
     rows: BTreeMap<u64, FwdRow>,
+    /// The resident rows by turn and state (the per-target queues).
+    targets: HashMap<NodeId, TargetQ>,
+    /// Resident rows by dest (a cache hit re-targets that dest's rows).
+    by_dest: HashMap<[u8; 32], BTreeSet<u64>>,
+    /// Resident rows each target refused (a `tcp` pair's refusals end with
+    /// its connection).
+    refused_by: HashMap<NodeId, BTreeSet<u64>>,
+    /// Rows whose targets the next pass recomputes (their inputs changed).
+    dirty: BTreeSet<u64>,
+    /// The pair set or the carrier bound changed: every idle row is
+    /// recomputed by the next pass.
+    all_dirty: bool,
+    /// Protected rows above `loaded` wait in the store, not yet offered
+    /// (the window was full when they came): paged in custody order.
+    more: bool,
+    /// The highest `custody_seq` the window has held.
+    loaded: u64,
     /// The pending map `pkt_ref → (custody_seq, target)` of puts out.
     pending: HashMap<[u8; 16], (u64, NodeId)>,
-    /// The hit cache `dest → pair`, oldest first ([`FORWARD_CACHE`]).
-    cache: VecDeque<([u8; 32], NodeId)>,
+    /// The hit cache `dest → pair`.
+    cache: HitCache,
     /// Sealed `CUSTODY_ACK`s owed to each `carrier` pair.
     acks: HashMap<NodeId, VecDeque<Vec<u8>>>,
     /// Pairs that answered `REJECT_UNENROLLED` this session.
     broken: HashSet<NodeId>,
     /// `carrier` pairs heard through the carrier this session.
     heard: HashSet<NodeId>,
+    /// `carrier` pairs a verified frame came from since their last
+    /// [`Fabric::forward_take`] (§5.9 re-post rule (1), applied there).
+    far_frame: HashSet<NodeId>,
     /// Re-posts per `carrier` pair this session.
     reposts: HashMap<NodeId, u32>,
-    /// Dials a pairing attempt started and its `ENROLL_OK` kept.
+    /// Dials a pairing attempt started, kept while the pair is not whole
+    /// (the far hub's `ENROLL` rides them, §4.6 step 3).
     dials: HashMap<NodeId, SocketAddr>,
     /// A run is owed at the end of the tick.
     run: bool,
@@ -1863,51 +2150,178 @@ struct Forwarder {
     retry_full: HashSet<NodeId>,
     /// `carrier` pairs whose owed frames changed this tick.
     notify: BTreeSet<NodeId>,
+    /// §5.1 target computations this session (a diagnostic: the forwarder
+    /// recomputes only rows whose inputs changed;
+    /// [`Fabric::forward_target_computations`]).
+    computed: u64,
 }
 
 impl Forwarder {
-    fn cache_get(&self, dest: &[u8; 32]) -> Option<NodeId> {
-        self.cache.iter().find(|(d, _)| d == dest).map(|(_, p)| *p)
-    }
-
-    fn cache_put(&mut self, dest: [u8; 32], pair: NodeId) {
-        self.cache.retain(|(d, _)| *d != dest);
-        self.cache.push_back((dest, pair));
-        while self.cache.len() > FORWARD_CACHE {
-            self.cache.pop_front();
+    /// Take row `seq` out of its turn's queue.
+    fn unplace(&mut self, seq: u64) {
+        let Some((Some(t), slot)) = self.rows.get(&seq).map(|r| (r.turn, r.slot())) else {
+            return;
+        };
+        if let Some(q) = self.targets.get_mut(&t) {
+            q.set(slot).remove(&seq);
+            if q.len() == 0 {
+                self.targets.remove(&t);
+            }
         }
     }
 
-    /// Forget a row (committed, refused, or gone from the store).
+    /// Put row `seq` into its turn's queue (a row with no turn sits in
+    /// none).
+    fn place(&mut self, seq: u64) {
+        if let Some((Some(t), slot)) = self.rows.get(&seq).map(|r| (r.turn, r.slot())) {
+            self.targets.entry(t).or_default().set(slot).insert(seq);
+        }
+    }
+
+    /// Change row `seq`; its queue entry follows.
+    fn mutate(&mut self, seq: u64, f: impl FnOnce(&mut FwdRow)) {
+        self.unplace(seq);
+        if let Some(r) = self.rows.get_mut(&seq) {
+            f(r);
+        }
+        self.place(seq);
+    }
+
+    fn set_state(&mut self, seq: u64, state: Turn) {
+        self.mutate(seq, |r| r.state = state);
+    }
+
+    /// The put of row `seq` is no longer out: its pending entry goes.
+    fn unpend(&mut self, seq: u64) {
+        if let Some(r) = self.rows.get(&seq) {
+            if self.pending.get(&r.pkt_ref).is_some_and(|(s, _)| *s == seq) {
+                self.pending.remove(&r.pkt_ref);
+            }
+        }
+    }
+
+    /// A new resident row (its targets are computed by the next pass).
+    fn insert(&mut self, seq: u64, row: FwdRow) {
+        self.by_dest.entry(row.dest).or_default().insert(seq);
+        self.rows.insert(seq, row);
+        self.place(seq);
+        self.dirty.insert(seq);
+        self.run = true;
+    }
+
+    /// Forget a row (committed, refused, or gone from the store): every
+    /// index entry goes with it, each one lookup.
     fn untrack(&mut self, seq: u64) -> Option<FwdRow> {
-        self.pending.retain(|_, (s, _)| *s != seq);
-        self.rows.remove(&seq)
+        self.unpend(seq);
+        self.unplace(seq);
+        let r = self.rows.remove(&seq)?;
+        if let Some(s) = self.by_dest.get_mut(&r.dest) {
+            s.remove(&seq);
+            if s.is_empty() {
+                self.by_dest.remove(&r.dest);
+            }
+        }
+        for t in &r.refused {
+            if let Some(s) = self.refused_by.get_mut(t) {
+                s.remove(&seq);
+                if s.is_empty() {
+                    self.refused_by.remove(t);
+                }
+            }
+        }
+        self.dirty.remove(&seq);
+        Some(r)
+    }
+
+    /// `target` refused row `seq` (§5.5, §5.8): noted, the row loses its
+    /// turn and the next pass gives it the next one.
+    fn refused(&mut self, seq: u64, target: NodeId) {
+        if !self.rows.contains_key(&seq) {
+            return;
+        }
+        self.unpend(seq);
+        self.mutate(seq, |r| {
+            if !r.refused.contains(&target) {
+                r.refused.push(target);
+            }
+            r.turn = None;
+            r.state = Turn::Idle;
+        });
+        self.refused_by.entry(target).or_default().insert(seq);
+        self.dirty.insert(seq);
+        self.run = true;
+    }
+
+    /// Rows whose turn was `node` lose it (every state) and return to the
+    /// other targets at the next pass (refused there when none is left).
+    fn orphan(&mut self, node: &NodeId) {
+        let seqs = self
+            .targets
+            .remove(node)
+            .map(|q| q.all())
+            .unwrap_or_default();
+        for seq in seqs {
+            if let Some(r) = self.rows.get_mut(&seq) {
+                if self.pending.get(&r.pkt_ref).is_some_and(|(s, _)| *s == seq) {
+                    self.pending.remove(&r.pkt_ref);
+                }
+                r.turn = None;
+                r.state = Turn::Idle;
+                r.orphaned = true;
+                self.dirty.insert(seq);
+            }
+        }
+        self.run = true;
+    }
+
+    /// A hit for `dest` at `pair` (§5.5): when the entry changed, the idle
+    /// rows of that dest that `pair` has not refused and whose turn is
+    /// another target are recomputed (the cache goes first).
+    fn cache_put(&mut self, dest: [u8; 32], pair: NodeId) {
+        if !self.cache.put(dest, pair) {
+            return;
+        }
+        let Some(seqs) = self.by_dest.get(&dest) else {
+            return;
+        };
+        for seq in seqs {
+            if let Some(r) = self.rows.get(seq) {
+                if r.state == Turn::Idle && r.turn != Some(pair) && !r.refused.contains(&pair) {
+                    self.dirty.insert(*seq);
+                }
+            }
+        }
+        self.run = true;
     }
 
     /// Frames [`Fabric::forward_take`] would return to `target` now.
     fn owed(&self, target: &NodeId) -> u32 {
         let acks = self.acks.get(target).map_or(0, VecDeque::len);
         let rows = self
-            .rows
-            .values()
-            .filter(|r| {
-                r.turn.as_ref() == Some(target)
-                    && matches!(r.state, Turn::Idle | Turn::Posted { repost: true })
-            })
-            .count();
+            .targets
+            .get(target)
+            .map_or(0, |q| q.idle.len() + q.armed.len());
         u32::try_from(acks + rows).unwrap_or(u32::MAX)
     }
 
-    /// Rows whose turn is `target` (any state), plus acks owed to it.
+    /// Resident rows whose turn is `target` (any state), plus acks owed to
+    /// it.
     fn pending_for(&self, target: &NodeId) -> u32 {
         let acks = self.acks.get(target).map_or(0, VecDeque::len);
-        let rows = self
-            .rows
-            .values()
-            .filter(|r| r.turn.as_ref() == Some(target))
-            .count();
+        let rows = self.targets.get(target).map_or(0, TargetQ::len);
         u32::try_from(acks + rows).unwrap_or(u32::MAX)
     }
+}
+
+/// What one forward put to a `tcp` pair came to.
+enum PutOutcome {
+    /// Written to the out queue (in flight).
+    Sent,
+    /// The row left the target's idle queue (gone, or refused there).
+    Skipped,
+    /// Nothing can go to this target now (no keys, no sealing, a store or
+    /// sealer error): the rest waits for the next run.
+    Blocked,
 }
 
 struct Core {
@@ -1932,6 +2346,9 @@ struct Core {
     commit_owed: Option<u64>,
     heard: HashSet<NodeId>,
     offer: Option<EnrollOffer>,
+    /// The open offer is a pairing offer (Layer 7 §4.6 step 1): the far
+    /// hub's role and link from this hub's side.
+    offer_pair: Option<(PairRole, PairVia)>,
     enrolling: Option<Enrolling>,
     /// Addresses kept dialed for configured peers ([`Fabric::dial_peer`]).
     peer_dials: HashSet<SocketAddr>,
@@ -2141,8 +2558,9 @@ impl Core {
             .filter(|p| self.keys.get(p).is_none())
             .collect();
         self.pending_keys.extend(missing);
-        // Layer 7 §5.9 (§15 G9 item 6): protected forward rows resume.
-        if self.settings.holds_custody() {
+        // Layer 7 §5.9 (§15 G9 item 6): protected forward rows resume (the
+        // first window of them; the rest page in as it drains).
+        if self.settings.hub_role {
             self.load_forward_rows()?;
         }
         self.pump_all();
@@ -2333,7 +2751,10 @@ impl Core {
         if Some(node) == self.home_hub() {
             self.hub_link_up(ck);
         }
-        if self.pair_of(&node).is_some_and(|p| p.via == PairVia::Tcp) {
+        if self
+            .whole_pair(&node)
+            .is_some_and(|p| p.via == PairVia::Tcp)
+        {
             self.pair_link_up(ck, node);
         }
         self.pump_set.insert(node);
@@ -2896,9 +3317,23 @@ impl Core {
                 let item = match stored.get(&(id, idx)) {
                     Some(b) => b.clone(),
                     None => {
-                        let Some(b) =
-                            self.seal_data(keys, id, idx, room.saturating_sub(wrap), tcp, false)
-                        else {
+                        let first =
+                            self.seal_data(keys, id, idx, room.saturating_sub(wrap), tcp, false);
+                        // Layer 7 §5.4: a fragment planned before the dest's
+                        // hint was known (`plan_mtu` reserved no TLV) goes
+                        // without it, a locator only, rather than not at all.
+                        let first = match first {
+                            None if hint.is_some() => self.seal_data(
+                                keys,
+                                id,
+                                idx,
+                                room.saturating_sub(CUSTODY_WRAP),
+                                tcp,
+                                false,
+                            ),
+                            b => b,
+                        };
+                        let Some(b) = first else {
                             continue;
                         };
                         if self
@@ -2976,10 +3411,14 @@ impl Core {
             (Tag::None | Tag::Push(_) | Tag::Commit(_) | Tag::Forward(_), Ok(())) => {}
             (Tag::Forward(seq), Err(e)) => {
                 // Not written: the row waits for its turn's next connection.
-                if let Some(r) = self.fwd.rows.get_mut(&seq) {
-                    if r.state == Turn::InFlight {
-                        r.state = Turn::Idle;
-                    }
+                if self
+                    .fwd
+                    .rows
+                    .get(&seq)
+                    .is_some_and(|r| r.state == Turn::InFlight)
+                {
+                    self.fwd.unpend(seq);
+                    self.fwd.set_state(seq, Turn::Idle);
                 }
                 self.on_send_error(ck, &e);
             }
@@ -3230,8 +3669,8 @@ impl Core {
             c.attributed = Some(sender);
             self.pump_set.insert(sender);
             self.fabric_changed();
-            // Layer 7 §5.9: a paired hub's attribution runs the forwarder.
-            if self.pair_of(&sender).is_some() {
+            // Layer 7 §5.9: a whole pair's attribution runs the forwarder.
+            if self.whole_pair(&sender).is_some() {
                 self.fwd.retry_full.insert(sender);
                 self.fwd.run = true;
             }
@@ -3312,7 +3751,10 @@ impl Core {
                     self.on_custody_put(ck, &sender, &opened.inner.payload, hint);
                 }
             }
-            Kind::CustodyAck => self.on_custody_ack(&sender, &opened.inner.payload),
+            Kind::CustodyAck => {
+                let live = fresh == Freshness::Fresh && attributed;
+                self.on_custody_ack(&sender, &opened.inner.payload, live);
+            }
             Kind::MailboxFetch => {
                 if let Some(ck) = ck.as_ref().filter(|_| attributed) {
                     self.on_fetch(ck, &sender, &opened.inner.payload);
@@ -3570,7 +4012,10 @@ impl Core {
         let item = item.to_vec();
         let mut member = false;
         let mut forward = false;
-        let (status, custody_seq) = if !self.settings.holds_custody() || !self.is_enrolled(sender) {
+        // Layer 7 §5.2: a member, or a live (whole, unbroken) pair; a half
+        // pair's put meets REJECT_UNENROLLED.
+        let admitted = self.is_member(sender) || self.live_pair(sender).is_some();
+        let (status, custody_seq) = if !self.settings.holds_custody() || !admitted {
             (CustodyStatus::RejectUnenrolled, 0)
         } else {
             let fwd = match self.custody_gate(sender, arrival, &dest, hint, item.len()) {
@@ -3588,7 +4033,14 @@ impl Core {
                 Some(fwd) => match self.store.custody_put_fwd(dest.as_bytes(), &item, fwd) {
                     Ok(CustodyPut::Accepted(s)) => {
                         if fwd.is_forward() {
-                            self.track_forward(s, &dest, item.len(), fwd.code(), hint);
+                            let row = Self::fwd_row(
+                                dest.to_bytes(),
+                                pkt_ref(&item),
+                                item.len(),
+                                fwd.code(),
+                                hint,
+                            );
+                            self.track_forward(s, row);
                             forward = true;
                         } else {
                             member = true;
@@ -3681,19 +4133,28 @@ impl Core {
     }
 
     fn on_fetch(&mut self, ck: &ConnKey, sender: &NodeId, payload: &[u8]) {
-        if !self.settings.holds_custody() || !self.is_enrolled(sender) {
+        if !self.settings.holds_custody() {
             return;
         }
         let Ok(cursor) = decode_cursor(payload) else {
             return;
         };
-        if self.pair_of(sender).is_some() {
-            // Layer 7 (module doc): a paired hub's link-up fetch. It
-            // attributed this connection; one item-less answer attributes
-            // the other side's, never an item (a pair is never a member).
-            self.send_control(ck, sender, Kind::MailboxItem, encode_item(cursor, &[]));
-            self.fwd.retry_full.insert(*sender);
-            self.fwd.run = true;
+        if let Some(p) = self.whole_pair(sender) {
+            // Layer 7 (module doc): a whole pair's link-up fetch, or the
+            // ping that ends a pairing. Any pairing dial to it goes (the
+            // daemon's §4.6 step 5 holds a `tcp` pair's one connection).
+            self.release_pair_dial(sender);
+            if p.via == PairVia::Tcp {
+                // It attributed this connection; one item-less answer
+                // attributes the other side's, never an item (a pair is
+                // never a member). A `carrier` pair gets nothing over `tcp`.
+                self.send_control(ck, sender, Kind::MailboxItem, encode_item(cursor, &[]));
+                self.fwd.retry_full.insert(*sender);
+                self.fwd.run = true;
+            }
+            return;
+        }
+        if !self.is_member(sender) {
             return;
         }
         if let Some(c) = self.conns.get_mut(ck) {
@@ -3754,7 +4215,23 @@ impl Core {
     /// {hub card, custody_seq_floor}`.
     fn on_enroll(&mut self, ck: &ConnKey, opened: &Opened) {
         let member = opened.sender;
-        let status = if !self.settings.holds_custody() {
+        let node = member.node_id;
+        // Layer 7 §4.6: a pairing offer's code records the far hub as a pair
+        // (`theirs`), never a member; a member offer's code never records a
+        // pair, and a recorded pair is refused one; this node's home hub is
+        // refused a pairing code (amendment 12). Checked before the code is
+        // presented: a refused presenter neither spends nor locks the offer.
+        let pairing = self.offer_pair;
+        let refused = !self.settings.holds_custody()
+            || match pairing {
+                Some((role, via)) => {
+                    !self.settings.hub_role
+                        || Some(node) == self.home_hub()
+                        || self.pair_fits(&node, role, via).is_err()
+                }
+                None => self.find_pair(&node).is_some(),
+            };
+        let status = if refused {
             EnrollStatus::Refused
         } else {
             match self.offer.as_mut() {
@@ -3768,17 +4245,19 @@ impl Core {
         let status = match (status, opened.inner.card.as_deref()) {
             (EnrollStatus::Ok, Some(card)) => match verify_card(card) {
                 Ok(ann) if ann.node_id() == member.node_id => {
-                    match self.pin(&ann, card, Trust::Enrolled) {
+                    let trust = if pairing.is_some() {
+                        Trust::Oob
+                    } else {
+                        Trust::Enrolled
+                    };
+                    match self.pin(&ann, card, trust) {
                         Ok(()) => {
                             // It sealed to our key: it holds our card.
                             self.heard.insert(member.node_id);
                             self.contact_event(member.node_id, ContactChange::Added);
                             self.fabric_changed();
-                            // Layer 7 §4.6: a paired hub enrolled here, so
-                            // the pair is whole on this side.
-                            if self.find_pair(&member.node_id).is_some() {
-                                self.fwd.retry_full.insert(member.node_id);
-                                self.fwd.run = true;
+                            if let Some((role, via)) = pairing {
+                                self.record_theirs(node, role, via);
                             }
                             EnrollStatus::Ok
                         }
@@ -3814,12 +4293,21 @@ impl Core {
 
     // -- member side (§9) --------------------------------------------------
 
-    fn on_custody_ack(&mut self, sender: &NodeId, payload: &[u8]) {
-        // Layer 7 §5.3 amendment 11: a paired hub's receipt for a forward
-        // put (today only the home hub's acks are read).
-        if self.pair_of(sender).is_some() {
-            if let Ok(ack) = CustodyAck::decode(payload) {
-                self.on_forward_ack(sender, &ack);
+    /// `live`: the packet was fresh and its connection is attributed to
+    /// `sender` (only then is a pair's receipt read).
+    fn on_custody_ack(&mut self, sender: &NodeId, payload: &[u8], live: bool) {
+        // Layer 7 §5.3 amendment 11: a whole `tcp` pair's receipt for a
+        // forward put (today only the home hub's acks are read). A replayed
+        // (stale) one, or one on a connection not attributed to it, changes
+        // nothing; a `carrier` pair's come through `carrier_inbound` only.
+        if self.find_pair(sender).is_some() {
+            let tcp = self
+                .whole_pair(sender)
+                .is_some_and(|p| p.via == PairVia::Tcp);
+            if live && tcp {
+                if let Ok(ack) = CustodyAck::decode(payload) {
+                    self.on_forward_ack(sender, &ack);
+                }
             }
             return;
         }
@@ -3911,8 +4399,20 @@ impl Core {
                 return self.end_enroll(en, why);
             }
         };
-        // Layer 7 §4.6 step 4: a pairing pins the far hub at `oob`; it reads
-        // `enrolled` once the far hub enrolled here (the pair is whole).
+        // Layer 7 §4.6 step 4: a pairing pins the far hub at `oob`, never
+        // `enrolled` (a paired hub is never a member); the record says
+        // whether it is whole. The hub role and the record's role and link
+        // are checked again (they may have changed while it was open).
+        if let Some(p) = en.pair {
+            let fits = if self.settings.hub_role {
+                self.pair_fits(&p.node_id, p.role, p.via)
+            } else {
+                Err(FabricError::Invalid("pairing needs the hub role"))
+            };
+            if let Err(e) = fits {
+                return self.end_enroll(en, EnrollEnd::Refused(e));
+            }
+        }
         let trust = if en.pair.is_some() {
             Trust::Oob
         } else {
@@ -3925,7 +4425,7 @@ impl Core {
         if let Some(p) = en.pair {
             // A pairing records the pair: no home hub, no cursor (am. 10).
             let dial = en.address.filter(|_| en.dialed);
-            self.record_pair(p, dial);
+            self.record_ours(p, dial, ck);
             self.contact_event(*sender, ContactChange::Updated);
             if let Some(r) = en.reply.take() {
                 let _ = r.send(Ok(()));
@@ -4464,12 +4964,13 @@ impl Core {
                 .iter()
                 .map(|p| PairView {
                     hub: *p,
-                    whole: self.is_enrolled(&p.node_id),
+                    whole: self.settings.hub_role && p.whole(),
                     broken: self.fwd.broken.contains(&p.node_id),
-                    reachable: match p.via {
-                        PairVia::Tcp => self.hub_answered(&p.node_id),
-                        PairVia::Carrier => self.fwd.heard.contains(&p.node_id),
-                    },
+                    reachable: self.settings.hub_role
+                        && match p.via {
+                            PairVia::Tcp => self.hub_answered(&p.node_id),
+                            PairVia::Carrier => self.fwd.heard.contains(&p.node_id),
+                        },
                     pending: self.fwd.pending_for(&p.node_id),
                     reposts: self.fwd.reposts.get(&p.node_id).copied().unwrap_or(0),
                 })
@@ -4649,6 +5150,7 @@ impl Core {
             address,
         };
         self.offer = Some(offer);
+        self.offer_pair = None;
         self.fabric_changed();
         Ok(view)
     }
@@ -4662,6 +5164,7 @@ impl Core {
             o.dismiss();
         }
         self.offer = None;
+        self.offer_pair = None;
         self.fabric_changed();
         open
     }
@@ -4674,7 +5177,11 @@ impl Core {
             self.store.set_request_quota(q)?;
         }
         if let Some(v) = patch.hub_role {
+            let was = self.settings.hub_role;
             self.settings.hub_role = v;
+            if was != v {
+                self.hub_role_changed();
+            }
         }
         if let Some(v) = patch.listen_lan {
             self.settings.listen_lan = v;
@@ -4707,8 +5214,9 @@ struct PutVerdict {
 /// Layer 7 §4.6: the pairing list the fabric trusts: one record per hub,
 /// never this node or its home hub (a paired hub is never a home hub), only
 /// the combinations §4.6 step 2 allows, at most [`MAX_PAIRED_HUBS`] (later
-/// entries dropped). Applied to the settings the daemon starts the fabric
-/// with; a list it never wrote is not rewritten back.
+/// entries dropped); each record keeps its `ours` and `theirs`. Applied to
+/// the settings the daemon starts the fabric with; a list it never wrote is
+/// not rewritten back.
 fn normalize_pairs(s: &mut FabricSettings, own: &NodeId) {
     let home = s.home_hub.map(|h| h.node_id);
     let mut seen = HashSet::new();
@@ -4722,7 +5230,7 @@ impl Core {
     // -- pairs (§4.6) ------------------------------------------------------
 
     /// The pairing record of `node`, whatever this node's role (record
-    /// keeping: forget, unpair, the member count).
+    /// keeping: forget, unpair, the member count, the card answer).
     fn find_pair(&self, node: &NodeId) -> Option<PairedHub> {
         self.settings
             .paired_hubs
@@ -4731,34 +5239,64 @@ impl Core {
             .copied()
     }
 
-    /// The pairing record of `node` while this node holds custody: every
-    /// forwarding path starts here (Layer 7 §5.11).
+    /// The pairing record of `node` while the hub role is on: every pairing
+    /// and forwarding path starts here (Layer 7 §5.11; with the hub role off
+    /// the records stay in the file and their rows wait in the store).
     fn pair_of(&self, node: &NodeId) -> Option<PairedHub> {
-        if !self.settings.holds_custody() {
+        if !self.settings.hub_role {
             return None;
         }
         self.find_pair(node)
     }
 
+    /// A whole pair (both enrollments recorded, §4.6 step 4: "a pair
+    /// forwards only when both sides hold it"), hub role on.
+    fn whole_pair(&self, node: &NodeId) -> Option<PairedHub> {
+        self.pair_of(node).filter(PairedHub::whole)
+    }
+
+    /// A whole pair that did not answer `REJECT_UNENROLLED` this session:
+    /// a forward target, and a sender the gate admits.
+    fn live_pair(&self, node: &NodeId) -> Option<PairedHub> {
+        self.whole_pair(node)
+            .filter(|p| !self.fwd.broken.contains(&p.node_id))
+    }
+
     /// A member: enrolled here and not a paired hub (§5.2: a paired hub is
-    /// never treated as a member). Without pairs, exactly `is_enrolled`.
+    /// never treated as a member; a hub that is both is a pair). Without
+    /// pairs, exactly `is_enrolled`.
     fn is_member(&self, node: &NodeId) -> bool {
         self.is_enrolled(node) && self.find_pair(node).is_none()
     }
 
-    /// The forward targets that exist now: whole pairs (the far hub enrolled
-    /// here too) that did not answer `REJECT_UNENROLLED`, in `paired_hubs`
+    /// The forward targets that exist now: the live pairs in `paired_hubs`
     /// order (the order the owner sees, §5.5).
     fn eligible_pairs(&self) -> Vec<PairedHub> {
-        if !self.settings.holds_custody() {
+        if !self.settings.hub_role {
             return Vec::new();
         }
         self.settings
             .paired_hubs
             .iter()
-            .filter(|p| !self.fwd.broken.contains(&p.node_id) && self.is_enrolled(&p.node_id))
+            .filter(|p| p.whole() && !self.fwd.broken.contains(&p.node_id))
             .copied()
             .collect()
+    }
+
+    /// The record `node` would get for `role`/`via`: refused when it is
+    /// recorded with another role or link (§4.6 step 2, C3: nothing is
+    /// changed), or when a new record would pass [`MAX_PAIRED_HUBS`].
+    fn pair_fits(&self, node: &NodeId, role: PairRole, via: PairVia) -> Result<()> {
+        match self.find_pair(node) {
+            Some(p) if p.role != role || p.via != via => Err(FabricError::Invalid(
+                "the pair is recorded with another role or link",
+            )),
+            Some(_) => Ok(()),
+            None if self.settings.paired_hubs.len() >= MAX_PAIRED_HUBS => {
+                Err(FabricError::Invalid("too many paired hubs"))
+            }
+            None => Ok(()),
+        }
     }
 
     /// [`Fabric::pair`]: an enrollment attempt that records a pairing.
@@ -4770,7 +5308,7 @@ impl Core {
         role: PairRole,
         via: PairVia,
         reply: oneshot::Sender<Result<()>>,
-    ) -> Result<PairedHub> {
+    ) -> Result<NodeId> {
         // §5.11: pairing is refused unless the hub role is on.
         if !self.settings.hub_role {
             return Err(FabricError::Invalid("pairing needs the hub role"));
@@ -4787,83 +5325,138 @@ impl Core {
             node_id: node,
             role,
             via,
+            ours: false,
+            theirs: false,
         };
         if !hub.valid() {
             return Err(FabricError::Invalid(
                 "a carrier pair is a peer; leaf and gateway pairs are tcp",
             ));
         }
-        if self.find_pair(&node).is_none() && self.settings.paired_hubs.len() >= MAX_PAIRED_HUBS {
-            return Err(FabricError::Invalid("too many paired hubs"));
-        }
+        self.pair_fits(&node, role, via)?;
         self.enroll(address, code, Some(card), Some(hub), reply)?;
-        Ok(hub)
+        Ok(node)
     }
 
-    /// `ENROLL_OK` of a pairing (§4.6 step 4): one record, replacing an
-    /// earlier one for the same hub; the dial the attempt started is kept
-    /// (until unpaired) so the second `ENROLL` can ride it.
-    fn record_pair(&mut self, p: PairedHub, dial: Option<SocketAddr>) {
-        match self
+    /// [`Fabric::offer_pair`]: a member offer's mint, marked a pairing.
+    fn offer_pair(
+        &mut self,
+        address: Option<SocketAddr>,
+        role: PairRole,
+        via: PairVia,
+    ) -> Result<OfferView> {
+        if !self.settings.hub_role {
+            return Err(FabricError::Invalid("pairing needs the hub role"));
+        }
+        let probe = PairedHub {
+            node_id: self.own,
+            role,
+            via,
+            ours: false,
+            theirs: false,
+        };
+        if !probe.valid() {
+            return Err(FabricError::Invalid(
+                "a carrier pair is a peer; leaf and gateway pairs are tcp",
+            ));
+        }
+        let mut view = self.offer(address)?;
+        // The `111PAIR:` bundle is the daemon's (D6); a `111HUB:` one would
+        // offer a pairing code to a member.
+        view.bundle = None;
+        self.offer_pair = Some((role, via));
+        Ok(view)
+    }
+
+    /// Hub side of a pairing (§4.6 step 3): the far hub redeemed this hub's
+    /// pairing offer. The record gets `theirs` (created with the offer's
+    /// role and link when new); the far hub's card was pinned at `oob`.
+    /// Its `ENROLL_OK` rides the connection, so no dial is released here.
+    fn record_theirs(&mut self, node: NodeId, role: PairRole, via: PairVia) {
+        let rec = match self
+            .settings
+            .paired_hubs
+            .iter_mut()
+            .find(|x| x.node_id == node)
+        {
+            Some(x) => {
+                x.theirs = true;
+                *x
+            }
+            None => {
+                let p = PairedHub {
+                    node_id: node,
+                    role,
+                    via,
+                    ours: false,
+                    theirs: true,
+                };
+                self.settings.paired_hubs.push(p);
+                p
+            }
+        };
+        self.pair_changed(rec);
+    }
+
+    /// This hub's `ENROLL_OK` of a pairing (§4.6 step 4; `p`'s role and
+    /// link were checked against the record, [`Self::pair_fits`]): the
+    /// record gets `ours`. While the pair is half the dial the attempt
+    /// started is kept, so the far hub's `ENROLL` can ride it; once whole,
+    /// no pairing dial is kept for any link (the daemon's §4.6 step 5 rule
+    /// holds a `tcp` pair's one connection; a `carrier` pair is never
+    /// dialed), and a `MAILBOX_FETCH {0}` on `ck` tells the far hub to
+    /// release its own (module doc).
+    fn record_ours(&mut self, p: PairedHub, dial: Option<SocketAddr>, ck: Option<&ConnKey>) {
+        let rec = match self
             .settings
             .paired_hubs
             .iter_mut()
             .find(|x| x.node_id == p.node_id)
         {
-            Some(x) => *x = p,
-            None => self.settings.paired_hubs.push(p),
-        }
-        self.fwd.broken.remove(&p.node_id);
+            Some(x) => {
+                x.ours = true;
+                *x
+            }
+            None => {
+                let r = PairedHub {
+                    ours: true,
+                    theirs: false,
+                    ..p
+                };
+                self.settings.paired_hubs.push(r);
+                r
+            }
+        };
         if let Some(a) = dial {
-            self.fwd.dials.insert(p.node_id, a);
+            self.fwd.dials.insert(rec.node_id, a);
         }
-        self.fwd.retry_full.insert(p.node_id);
+        if rec.whole() {
+            if let Some(ck) = ck {
+                self.send_control(ck, &rec.node_id, Kind::MailboxFetch, encode_cursor(0));
+            }
+            self.release_pair_dial(&rec.node_id);
+        }
+        self.pair_changed(rec);
+    }
+
+    /// A record was written: persisted through [`FabricEvent::Settings`]
+    /// (the two bools ride it: the daemon learns the pair is whole there),
+    /// and the forwarder re-reads the pair set.
+    fn pair_changed(&mut self, rec: PairedHub) {
+        self.fwd.broken.remove(&rec.node_id);
+        if rec.whole() {
+            self.fwd.retry_full.insert(rec.node_id);
+        }
+        self.fwd.all_dirty = true;
         self.fwd.run = true;
         self.settings_changed();
         self.fabric_changed();
     }
 
-    /// [`Fabric::unpair`].
-    fn unpair(&mut self, node: NodeId) -> Result<bool> {
-        if self.find_pair(&node).is_none() {
-            return Ok(false);
-        }
-        self.drop_pair(&node);
-        // Never a member afterwards: an `enrolled` contact returns at `oob`
-        // (trust only moves up, so the row is replaced), and its puts meet
-        // REJECT_UNENROLLED, which tells the far hub (§5.9).
-        if let Some(row) = self
-            .store
-            .contact(node.as_bytes())?
-            .filter(|r| r.trust == Trust::Enrolled)
-        {
-            let ann = verify_card(&row.announce)?;
-            let mut back = contact_row(&ann, &row.announce, Trust::Oob);
-            back.alias = row.alias.clone();
-            back.pinned = row.pinned;
-            self.store.contact_forget(node.as_bytes())?;
-            self.sealer.forget_pair_key(&row.enc_pubkey);
-            self.store.contact_upsert(&back)?;
-            self.rebuild_keys();
-            self.contact_event(node, ContactChange::Updated);
-        }
-        Ok(true)
-    }
-
-    /// The record goes; rows whose turn it was return to the other targets
-    /// (§13.1 `DELETE /relay/paired`), everything held for it is dropped.
-    fn drop_pair(&mut self, node: &NodeId) {
-        self.settings.paired_hubs.retain(|p| p.node_id != *node);
-        self.orphan_rows(node);
-        for r in self.fwd.rows.values_mut() {
-            r.refused.retain(|n| n != node);
-        }
-        self.fwd.broken.remove(node);
-        self.fwd.heard.remove(node);
-        self.fwd.reposts.remove(node);
-        self.fwd.acks.remove(node);
-        self.fwd.notify.remove(node);
-        self.fwd.cache.retain(|(_, p)| p != node);
+    /// The dial a pairing attempt started for `node` is no longer needed:
+    /// released unless the home hub, a configured peer or another pair's
+    /// attempt holds the address.
+    fn release_pair_dial(&mut self, node: &NodeId) {
         if let Some(a) = self.fwd.dials.remove(node) {
             if !self.dial_held(a) {
                 if let Some(d) = self.dialer() {
@@ -4871,22 +5464,43 @@ impl Core {
                 }
             }
         }
-        self.settings_changed();
-        self.fabric_changed();
     }
 
-    /// Rows whose turn was `node` lose it and return to the other targets
-    /// at the next run (refused there when none is left).
-    fn orphan_rows(&mut self, node: &NodeId) {
-        for r in self.fwd.rows.values_mut() {
-            if r.turn.as_ref() == Some(node) {
-                r.turn = None;
-                r.state = Turn::Idle;
-                r.orphaned = true;
+    /// [`Fabric::unpair`]: the record and everything held for the pair go;
+    /// the far hub's contact is left as it is (a pairing pinned it at `oob`,
+    /// never `enrolled`; a member before stays a member).
+    fn unpair(&mut self, node: NodeId) -> Result<bool> {
+        if self.find_pair(&node).is_none() {
+            return Ok(false);
+        }
+        self.drop_pair(&node);
+        Ok(true)
+    }
+
+    /// The record goes; rows whose turn it was return to the other targets
+    /// (§13.1 `DELETE /relay/paired`), everything held for it is dropped.
+    fn drop_pair(&mut self, node: &NodeId) {
+        self.settings.paired_hubs.retain(|p| p.node_id != *node);
+        self.fwd.orphan(node);
+        if let Some(seqs) = self.fwd.refused_by.remove(node) {
+            for seq in seqs {
+                if let Some(r) = self.fwd.rows.get_mut(&seq) {
+                    r.refused.retain(|n| n != node);
+                }
             }
         }
-        self.fwd.pending.retain(|_, (_, t)| t != node);
-        self.fwd.run = true;
+        self.fwd.broken.remove(node);
+        self.fwd.heard.remove(node);
+        self.fwd.far_frame.remove(node);
+        self.fwd.reposts.remove(node);
+        self.fwd.acks.remove(node);
+        self.fwd.notify.remove(node);
+        self.fwd.retry_full.remove(node);
+        self.fwd.cache.forget_pair(node);
+        self.fwd.all_dirty = true;
+        self.release_pair_dial(node);
+        self.settings_changed();
+        self.fabric_changed();
     }
 
     /// `REJECT_UNENROLLED` from a pair (§5.9): "the other hub no longer
@@ -4894,11 +5508,12 @@ impl Core {
     /// its rows return to the other targets.
     fn pair_broken(&mut self, node: NodeId) {
         self.fwd.broken.insert(node);
-        self.orphan_rows(&node);
+        self.fwd.orphan(&node);
+        self.fwd.all_dirty = true;
         self.fabric_changed();
     }
 
-    /// A `tcp` pair's outbound connection came up (module doc): one
+    /// A whole `tcp` pair's outbound connection came up (module doc): one
     /// `MAILBOX_FETCH {0}` so the far side attributes it, then a run.
     fn pair_link_up(&mut self, ck: &ConnKey, node: NodeId) {
         self.send_control(ck, &node, Kind::MailboxFetch, encode_cursor(0));
@@ -4907,27 +5522,86 @@ impl Core {
     }
 
     /// A pair's connection went: its puts in flight wait for the next one,
-    /// and a `tcp` pair's refusals end with their connection (§5.5).
+    /// and a `tcp` pair's refusals end with their connection (§5.5); a
+    /// whole pair's pairing dial is released (never redialed).
     fn pair_link_down(&mut self, node: &NodeId) {
         let tcp = self.find_pair(node).is_some_and(|p| p.via == PairVia::Tcp);
-        for r in self.fwd.rows.values_mut() {
-            if tcp {
-                r.refused.retain(|n| n != node);
-            }
-            if r.turn.as_ref() == Some(node) && r.state == Turn::InFlight {
-                r.state = Turn::Idle;
+        if tcp {
+            if let Some(seqs) = self.fwd.refused_by.remove(node) {
+                for seq in seqs {
+                    if let Some(r) = self.fwd.rows.get_mut(&seq) {
+                        r.refused.retain(|n| n != node);
+                        if r.state == Turn::Idle {
+                            self.fwd.dirty.insert(seq);
+                        }
+                    }
+                }
             }
         }
+        let out: Vec<u64> = self
+            .fwd
+            .targets
+            .get(node)
+            .map(|q| q.inflight.iter().copied().collect())
+            .unwrap_or_default();
+        for seq in out {
+            self.fwd.unpend(seq);
+            self.fwd.set_state(seq, Turn::Idle);
+        }
+        if self.whole_pair(node).is_some() {
+            self.release_pair_dial(node);
+        }
         self.fwd.run = true;
+    }
+
+    /// The hub role was switched (Layer 7 §5.11): off, every pairing
+    /// and forwarding path stops, the resident rows leave memory (they wait
+    /// in the store, never refused) and the pairing dials are released; on,
+    /// the rows page in again from the store.
+    fn hub_role_changed(&mut self) {
+        if self.settings.hub_role {
+            self.fwd.more = true;
+            self.fwd.loaded = 0;
+            self.fwd.all_dirty = true;
+            self.fwd.run = true;
+            let whole: Vec<NodeId> = self
+                .settings
+                .paired_hubs
+                .iter()
+                .filter(|p| p.whole())
+                .map(|p| p.node_id)
+                .collect();
+            self.fwd.retry_full.extend(whole);
+        } else {
+            let dials: Vec<SocketAddr> = self.fwd.dials.drain().map(|(_, a)| a).collect();
+            let old = std::mem::take(&mut self.fwd);
+            self.fwd = Forwarder {
+                carrier_max: old.carrier_max,
+                broken: old.broken,
+                heard: old.heard,
+                reposts: old.reposts,
+                computed: old.computed,
+                ..Forwarder::default()
+            };
+            for a in dials {
+                if !self.dial_held(a) {
+                    if let Some(d) = self.dialer() {
+                        d.release(a);
+                    }
+                }
+            }
+        }
+        self.fabric_changed();
     }
 
     // -- the gate (§5.2) ---------------------------------------------------
 
     /// Layer 7 §5.1 and §5.2: where a put for `dest` from `sender` (already
-    /// checked enrolled) goes. Synchronous: it reads the pairing record and
-    /// the carrier bound only, so it decides whether a target **exists**.
+    /// admitted: a member, or a live pair) goes. Synchronous: it reads the
+    /// pairing record and the carrier bound only, so it decides whether a
+    /// target **exists**.
     fn custody_gate(
-        &self,
+        &mut self,
         sender: &NodeId,
         arrival: Arrival,
         dest: &NodeId,
@@ -4944,10 +5618,10 @@ impl Core {
         if *dest == self.own || hint.is_some_and(|h| h[..] == self.own.as_bytes()[..DEST_HUB_LEN]) {
             return unknown;
         }
-        if self.settings.paired_hubs.is_empty() {
+        if !self.settings.hub_role || self.settings.paired_hubs.is_empty() {
             return unknown;
         }
-        let fwd = match (self.pair_of(sender), arrival) {
+        let fwd = match (self.live_pair(sender), arrival) {
             // From a member (never the home hub: a hub's own upstream).
             (None, Arrival::Tcp) if Some(*sender) != self.home_hub() => {
                 Fwd::FromMember(sender.to_bytes())
@@ -4964,9 +5638,11 @@ impl Core {
             // record: today's gate (§5.1 last row).
             _ => return unknown,
         };
-        let cached = self.fwd.cache_get(&dest.to_bytes());
+        let cached = self.fwd.cache.get(&dest.to_bytes());
+        let pairs = self.eligible_pairs();
+        self.fwd.computed += 1;
         let t = forward_targets(
-            &self.eligible_pairs(),
+            &pairs,
             fwd.code(),
             hint,
             size,
@@ -4984,47 +5660,77 @@ impl Core {
     }
 
     /// A forward row was held: the forwarder offers it at the end of the
-    /// tick, after the answer (§5.5, C2).
-    fn track_forward(
-        &mut self,
-        seq: u64,
-        dest: &NodeId,
+    /// tick, after the answer (§5.5, C2). While the resident window is full
+    /// (or rows wait in the store before it) the row waits in the store and
+    /// is paged in in custody order, without its hint (module doc).
+    fn track_forward(&mut self, seq: u64, it: FwdRow) {
+        if !self.settings.hub_role {
+            return;
+        }
+        if self.fwd.more || self.fwd.rows.len() >= FORWARD_RESIDENT {
+            self.fwd.more = true;
+            return;
+        }
+        self.fwd.loaded = self.fwd.loaded.max(seq);
+        self.fwd.insert(seq, it);
+    }
+
+    /// A resident row as the gate or the store gives it.
+    fn fwd_row(
+        dest: [u8; 32],
+        pkt_ref: [u8; 16],
         size: usize,
         fwd: u8,
         hint: Option<[u8; DEST_HUB_LEN]>,
-    ) {
-        self.fwd.rows.insert(
-            seq,
-            FwdRow {
-                dest: dest.to_bytes(),
-                hint,
-                fwd,
-                size,
-                turn: None,
-                state: Turn::Idle,
-                refused: Vec::new(),
-                fresh: true,
-                orphaned: false,
-            },
-        );
-        self.fwd.run = true;
+    ) -> FwdRow {
+        FwdRow {
+            dest,
+            pkt_ref,
+            hint,
+            fwd,
+            size,
+            turn: None,
+            state: Turn::Idle,
+            refused: Vec::new(),
+            fresh: true,
+            orphaned: false,
+            rule1: false,
+        }
     }
 
-    /// At start (§15 G9 item 6): every protected forward row, without the
-    /// hint it arrived with (in memory only).
-    fn load_forward_rows(&mut self) -> Result<()> {
-        let mut after = 0;
-        loop {
-            let page = self.store.forward_pending(after, FORWARD_LOAD_PAGE)?;
-            let Some(last) = page.last().map(|i| i.custody_seq) else {
-                break;
-            };
-            for it in page {
-                let dest = NodeId::from(it.dest);
-                self.track_forward(it.custody_seq, &dest, it.bytes.len(), it.fwd.code(), None);
-            }
-            after = last;
+    /// Page protected forward rows in from the store, in custody order,
+    /// while the window has room for a page (one `forward_pending` read per
+    /// [`FORWARD_LOAD_PAGE`] rows that leave it; §15 G9 item 6 at start).
+    /// Returns how many came in.
+    fn page_in(&mut self) -> Result<usize> {
+        if !self.fwd.more || !self.settings.hub_role {
+            return Ok(0);
         }
+        let resident = self.fwd.rows.len();
+        let room = FORWARD_RESIDENT.saturating_sub(resident);
+        if room == 0 || (room < FORWARD_LOAD_PAGE && resident > 0) {
+            return Ok(0);
+        }
+        let want = room.min(FORWARD_LOAD_PAGE);
+        let page = self.store.forward_pending(self.fwd.loaded, want)?;
+        if page.len() < want {
+            self.fwd.more = false;
+        }
+        let n = page.len();
+        for it in page {
+            self.fwd.loaded = self.fwd.loaded.max(it.custody_seq);
+            let row = Self::fwd_row(it.dest, it.pkt_ref, it.bytes.len(), it.fwd.code(), None);
+            self.fwd.insert(it.custody_seq, row);
+        }
+        Ok(n)
+    }
+
+    /// At start (§15 G9 item 6): the first window of protected forward rows,
+    /// without the hints they arrived with (in memory only).
+    fn load_forward_rows(&mut self) -> Result<()> {
+        self.fwd.more = true;
+        self.fwd.loaded = 0;
+        while self.page_in()? > 0 {}
         Ok(())
     }
 
@@ -5041,108 +5747,178 @@ impl Core {
         }
     }
 
-    /// One pass: give every idle row its turn (or the refused mark), retry
-    /// the `REJECT_FULL` rows a trigger released, and put what is due to the
-    /// `tcp` pairs that are up; carrier turns wait for `forward_take`.
+    /// One pass, bounded by what changed: page rows in while the
+    /// window has room, recompute the targets of the rows whose inputs
+    /// changed only, release the `REJECT_FULL` rows a trigger retried, and
+    /// put what is due to the `tcp` pairs that are up and have window room;
+    /// carrier turns wait for `forward_take`.
     fn forward_pass(&mut self) {
-        if !self.settings.holds_custody() || self.fwd.rows.is_empty() {
+        if !self.settings.hub_role {
             self.fwd.retry_full.clear();
+            self.fwd.dirty.clear();
+            self.fwd.all_dirty = false;
+            return;
+        }
+        if self.page_in().is_err() {
+            self.counters.errors += 1;
+        }
+        if self.fwd.rows.is_empty() {
+            self.fwd.retry_full.clear();
+            self.fwd.all_dirty = false;
             return;
         }
         let pairs = self.eligible_pairs();
-        let via: HashMap<NodeId, PairVia> = pairs.iter().map(|p| (p.node_id, p.via)).collect();
+        if std::mem::take(&mut self.fwd.all_dirty) {
+            let idle: Vec<u64> = self
+                .fwd
+                .rows
+                .iter()
+                .filter(|(_, r)| r.state == Turn::Idle)
+                .map(|(s, _)| *s)
+                .collect();
+            self.fwd.dirty.extend(idle);
+        }
         let mut retry = std::mem::take(&mut self.fwd.retry_full);
-        let max = self.fwd.carrier_max;
-        let seqs: Vec<u64> = self.fwd.rows.keys().copied().collect();
         let mut refuse = Vec::new();
-        let mut moved: Vec<NodeId> = Vec::new();
-        for seq in &seqs {
-            let cached = match self.fwd.rows.get(seq) {
-                Some(r) if r.state == Turn::Idle => self.fwd.cache_get(&r.dest),
-                _ => continue,
-            };
-            let Some(r) = self.fwd.rows.get_mut(seq) else {
-                continue;
-            };
-            let t = forward_targets(&pairs, r.fwd, r.hint, r.size, max, TargetMode::Held, cached);
-            match t.list.iter().find(|n| !r.refused.contains(n)) {
-                Some(&n) => {
-                    if r.fresh {
-                        retry.insert(n);
-                    }
-                    if r.turn != Some(n) {
-                        r.turn = Some(n);
-                        moved.push(n);
-                    }
-                }
-                // Every target refused (§5.8), or none left after an unpair
-                // or a break; a row that never had one waits.
-                None if !t.list.is_empty() || !r.refused.is_empty() || r.orphaned => {
-                    refuse.push(*seq);
-                }
-                None => r.turn = None,
-            }
-            r.fresh = false;
+        for seq in std::mem::take(&mut self.fwd.dirty) {
+            self.retarget(seq, &pairs, &mut retry, &mut refuse);
         }
         for seq in refuse {
             self.refuse_row(seq);
         }
-        for r in self.fwd.rows.values_mut() {
-            if r.state == Turn::Full && r.turn.is_some_and(|t| retry.contains(&t)) {
-                r.state = Turn::Idle;
-                moved.extend(r.turn);
-            }
+        for t in retry {
+            self.retry_full_rows(&t);
         }
-        for n in moved {
-            if via.get(&n) == Some(&PairVia::Carrier) {
-                self.fwd.notify.insert(n);
-            }
+        for p in pairs.iter().filter(|p| p.via == PairVia::Tcp) {
+            self.put_due(p.node_id);
         }
-        let mut inflight: HashMap<NodeId, usize> = HashMap::new();
-        for r in self.fwd.rows.values() {
-            if let (Turn::InFlight, Some(t)) = (r.state, r.turn) {
-                *inflight.entry(t).or_default() += 1;
-            }
+    }
+
+    /// Row `seq`'s §5.1 targets from the current inputs: its turn is the
+    /// first that has not refused it; with none, it is refused (every
+    /// target refused, or its turn's pair went) or waits (none ever).
+    fn retarget(
+        &mut self,
+        seq: u64,
+        pairs: &[PairedHub],
+        retry: &mut HashSet<NodeId>,
+        refuse: &mut Vec<u64>,
+    ) {
+        let Some(r) = self.fwd.rows.get(&seq) else {
+            return;
+        };
+        if r.state != Turn::Idle {
+            return;
         }
-        for seq in seqs {
-            let Some(t) = self
+        let cached = self.fwd.cache.get(&r.dest);
+        self.fwd.computed += 1;
+        let t = forward_targets(
+            pairs,
+            r.fwd,
+            r.hint,
+            r.size,
+            self.fwd.carrier_max,
+            TargetMode::Held,
+            cached,
+        );
+        let next = t.list.iter().find(|n| !r.refused.contains(n)).copied();
+        let (fresh, waits) = (
+            r.fresh,
+            t.list.is_empty() && r.refused.is_empty() && !r.orphaned,
+        );
+        let old = r.turn;
+        match next {
+            Some(n) => {
+                if fresh {
+                    retry.insert(n);
+                }
+                if old != Some(n) {
+                    self.fwd.mutate(seq, |r| r.turn = Some(n));
+                    if pairs
+                        .iter()
+                        .any(|p| p.node_id == n && p.via == PairVia::Carrier)
+                    {
+                        self.fwd.notify.insert(n);
+                    }
+                }
+            }
+            // A row that never had a target waits for one.
+            None if waits => self.fwd.mutate(seq, |r| r.turn = None),
+            // Every target refused (§5.8), or none left after an unpair or
+            // a break.
+            None => refuse.push(seq),
+        }
+        if let Some(r) = self.fwd.rows.get_mut(&seq) {
+            r.fresh = false;
+        }
+    }
+
+    /// A retry trigger for `t`'s `REJECT_FULL` rows (C16): at most one
+    /// window of them, oldest first, goes back to its queue. Each answer
+    /// from the pair that is not `REJECT_FULL` is the next trigger, so a
+    /// pair with room again drains them ACK-clocked, and a full one costs
+    /// one window per trigger (module doc).
+    fn retry_full_rows(&mut self, t: &NodeId) {
+        let full: Vec<u64> = match self.fwd.targets.get(t) {
+            Some(q) => q.full.iter().take(FORWARD_WINDOW).copied().collect(),
+            None => return,
+        };
+        if full.is_empty() {
+            return;
+        }
+        for seq in full {
+            self.fwd.set_state(seq, Turn::Idle);
+        }
+        if self.carrier_pair(t).is_ok() {
+            self.fwd.notify.insert(*t);
+        }
+    }
+
+    /// The put stage for the `tcp` pair `t`: only when it is up and has
+    /// window room, its idle rows in custody order until the window is full
+    /// (at most [`FORWARD_WINDOW`] in flight, ACK-clocked).
+    fn put_due(&mut self, t: NodeId) {
+        let (empty, inflight) = match self.fwd.targets.get(&t) {
+            Some(q) => (q.idle.is_empty(), q.inflight.len()),
+            None => return,
+        };
+        if empty || inflight >= FORWARD_WINDOW {
+            return;
+        }
+        // A pair that is down keeps its turn until its link-up (§5.5).
+        let Some(ck) = self.sendable_conn(&t) else {
+            return;
+        };
+        let mut room = FORWARD_WINDOW - inflight;
+        while room > 0 {
+            let Some(seq) = self
                 .fwd
-                .rows
-                .get(&seq)
-                .filter(|r| r.state == Turn::Idle)
-                .and_then(|r| r.turn)
+                .targets
+                .get(&t)
+                .and_then(|q| q.idle.first().copied())
             else {
-                continue;
+                return;
             };
-            if via.get(&t) != Some(&PairVia::Tcp) {
-                continue;
-            }
-            let n = inflight.entry(t).or_default();
-            if *n >= FORWARD_WINDOW {
-                continue;
-            }
-            // A pair that is down keeps its turn until its link-up (§5.5).
-            let Some(ck) = self.sendable_conn(&t) else {
-                continue;
-            };
-            if self.forward_put_tcp(seq, t, &ck) {
-                *n += 1;
+            match self.forward_put_tcp(seq, t, &ck) {
+                PutOutcome::Sent => room -= 1,
+                PutOutcome::Skipped => {}
+                PutOutcome::Blocked => return,
             }
         }
     }
 
     /// The stored row, unless it is gone or no longer protected (then it
-    /// leaves the forwarder).
-    fn forward_item_or_untrack(&mut self, seq: u64) -> Option<ForwardItem> {
+    /// leaves the forwarder). `Err`: the store failed (counted).
+    fn forward_item_or_untrack(&mut self, seq: u64) -> Result<Option<ForwardItem>, ()> {
         match self.store.forward_item(seq) {
-            Ok(Some(it)) if !it.committed => Some(it),
+            Ok(Some(it)) if !it.committed => Ok(Some(it)),
             Ok(_) => {
                 self.fwd.untrack(seq);
-                None
+                Ok(None)
             }
             Err(_) => {
                 self.counters.errors += 1;
-                None
+                Err(())
             }
         }
     }
@@ -5188,38 +5964,35 @@ impl Core {
 
     /// Put row `seq` to the `tcp` pair `target` on `ck`; records
     /// `pkt_ref → custody_seq` (the pending map).
-    fn forward_put_tcp(&mut self, seq: u64, target: NodeId, ck: &ConnKey) -> bool {
+    fn forward_put_tcp(&mut self, seq: u64, target: NodeId, ck: &ConnKey) -> PutOutcome {
         if !self.can_seal() {
-            return false;
+            return PutOutcome::Blocked;
         }
         let Some(keys) = self.keys.get(&target) else {
-            return false;
+            return PutOutcome::Blocked;
         };
-        let Some(item) = self.forward_item_or_untrack(seq) else {
-            return false;
+        let item = match self.forward_item_or_untrack(seq) {
+            Ok(Some(it)) => it,
+            Ok(None) => return PutOutcome::Skipped,
+            Err(()) => return PutOutcome::Blocked,
         };
         let hint = self.fwd.rows.get(&seq).and_then(|r| r.hint);
         let Some(sealed) = self.seal_forward_put(&keys, &item, hint) else {
-            return false;
+            return PutOutcome::Blocked;
         };
         if sealed.len() > self.room(ck) {
             // No path to this target carries it: its refusal (§5.8).
-            if let Some(r) = self.fwd.rows.get_mut(&seq) {
-                r.refused.push(target);
-            }
-            self.fwd.run = true;
-            return false;
+            self.fwd.refused(seq, target);
+            return PutOutcome::Skipped;
         }
         self.fwd.pending.insert(item.pkt_ref, (seq, target));
-        if let Some(r) = self.fwd.rows.get_mut(&seq) {
-            r.state = Turn::InFlight;
-        }
+        self.fwd.set_state(seq, Turn::InFlight);
         self.outq.push(Out {
             ck: ck.clone(),
             frame: Frame::sealed(sealed),
             tag: Tag::Forward(seq),
         });
-        true
+        PutOutcome::Sent
     }
 
     /// The refused mark (§5.8): `committed = 1`, step-1 evictable, counted.
@@ -5233,15 +6006,19 @@ impl Core {
         self.fabric_changed();
     }
 
-    /// A pair's `CUSTODY_ACK` for a forward put (§5.9): `ACCEPTED` or
-    /// `DUPLICATE` commits (and is a cache hit), `REJECT_UNKNOWN_DEST` moves
-    /// to the next target, `REJECT_FULL` keeps the row with that pair,
-    /// `REJECT_UNENROLLED` breaks the pair.
+    /// A pair's `CUSTODY_ACK` for a forward put (§5.9), from the pair the
+    /// put went to only (an ack from any other pair changes nothing):
+    /// `ACCEPTED` or `DUPLICATE` commits (and is a cache hit),
+    /// `REJECT_UNKNOWN_DEST` moves to the next target, `REJECT_FULL` keeps
+    /// the row with that pair, `REJECT_UNENROLLED` breaks the pair.
     fn on_forward_ack(&mut self, sender: &NodeId, ack: &CustodyAck) {
         let pref = ack.receipt.pkt_ref;
         let Some(&(seq, target)) = self.fwd.pending.get(&pref) else {
             return;
         };
+        if target != *sender {
+            return;
+        }
         let status = ack.receipt.status;
         if status != CustodyStatus::RejectFull {
             // A forwarder run for that pair (C16): its REJECT_FULL rows are
@@ -5260,22 +6037,11 @@ impl Core {
             self.fabric_changed();
             return;
         }
-        if target != *sender {
-            return;
-        }
         match status {
-            CustodyStatus::RejectUnknownDest => {
-                self.fwd.pending.remove(&pref);
-                if let Some(r) = self.fwd.rows.get_mut(&seq) {
-                    r.refused.push(target);
-                    r.state = Turn::Idle;
-                }
-            }
+            CustodyStatus::RejectUnknownDest => self.fwd.refused(seq, target),
             CustodyStatus::RejectFull => {
-                self.fwd.pending.remove(&pref);
-                if let Some(r) = self.fwd.rows.get_mut(&seq) {
-                    r.state = Turn::Full;
-                }
+                self.fwd.unpend(seq);
+                self.fwd.set_state(seq, Turn::Full);
             }
             CustodyStatus::RejectUnenrolled => self.pair_broken(*sender),
             CustodyStatus::Accepted | CustodyStatus::Duplicate => {}
@@ -5287,7 +6053,7 @@ impl Core {
     /// changed this tick (coalesced: the latest count wins).
     fn forward_events(&mut self) {
         for t in std::mem::take(&mut self.fwd.notify) {
-            if self.pair_of(&t).is_none_or(|p| p.via != PairVia::Carrier) {
+            if self.carrier_pair(&t).is_err() {
                 continue;
             }
             let pending = self.fwd.owed(&t);
@@ -5302,9 +6068,14 @@ impl Core {
 
     // -- the hand-off (§5.9) -----------------------------------------------
 
-    /// [`Fabric::set_carrier_max_frame`].
+    /// [`Fabric::set_carrier_max_frame`]: a changed bound recomputes the
+    /// idle rows' targets; every call tells the carrier pairs what they are
+    /// owed.
     fn set_carrier_max_frame(&mut self, max: Option<usize>) {
-        self.fwd.carrier_max = max;
+        if self.fwd.carrier_max != max {
+            self.fwd.carrier_max = max;
+            self.fwd.all_dirty = true;
+        }
         self.fwd.run = true;
         let carriers: Vec<NodeId> = self
             .settings
@@ -5316,20 +6087,37 @@ impl Core {
         self.fwd.notify.extend(carriers);
     }
 
-    /// `target` is a `carrier` pair of this hub.
+    /// `target` is a whole `carrier` pair of this hub, hub role on.
     fn carrier_pair(&self, target: &NodeId) -> Result<PairedHub> {
-        if !self.settings.holds_custody() {
+        if !self.settings.hub_role {
             return Err(FabricError::Invalid("this node is not a hub"));
         }
-        match self.find_pair(target) {
+        match self.whole_pair(target) {
             Some(p) if p.via == PairVia::Carrier => Ok(p),
-            _ => Err(FabricError::Invalid("not a carrier pair")),
+            _ => Err(FabricError::Invalid("not a whole carrier pair")),
         }
     }
 
     /// [`Fabric::forward_take`].
     fn forward_take(&mut self, target: NodeId, max: usize) -> Result<Vec<CarrierFrame>> {
         self.carrier_pair(&target)?;
+        // §5.9 re-post rule (1) (C6), after the whole drain was handed in:
+        // a far frame verified since the last take re-arms each post still
+        // unacknowledged, once per row in its life.
+        if self.fwd.far_frame.remove(&target) {
+            let posted: Vec<u64> = self
+                .fwd
+                .targets
+                .get(&target)
+                .map(|q| q.posted.iter().copied().collect())
+                .unwrap_or_default();
+            for seq in posted {
+                self.fwd.mutate(seq, |r| {
+                    r.rule1 = true;
+                    r.state = Turn::Posted { repost: true };
+                });
+            }
+        }
         self.fwd.run = true;
         self.run_forwarder();
         let mut out = Vec::new();
@@ -5351,42 +6139,41 @@ impl Core {
         let Some(keys) = self.keys.get(&target) else {
             return Ok(out);
         };
-        let due: Vec<u64> = self
-            .fwd
-            .rows
-            .iter()
-            .filter(|(_, r)| {
-                r.turn == Some(target)
-                    && matches!(r.state, Turn::Idle | Turn::Posted { repost: true })
-            })
-            .map(|(s, _)| *s)
-            .collect();
+        let room = max.saturating_sub(out.len());
+        let mut due: Vec<u64> = match self.fwd.targets.get(&target) {
+            Some(q) => q
+                .armed
+                .iter()
+                .take(room)
+                .chain(q.idle.iter().take(room))
+                .copied()
+                .collect(),
+            None => Vec::new(),
+        };
+        due.sort_unstable();
+        due.truncate(room);
         for seq in due {
-            if out.len() >= max {
-                break;
-            }
-            let Some(item) = self.forward_item_or_untrack(seq) else {
-                continue;
+            let item = match self.forward_item_or_untrack(seq) {
+                Ok(Some(it)) => it,
+                Ok(None) => continue,
+                Err(()) => break,
             };
             if !carrier_fits(self.fwd.carrier_max, item.bytes.len()) {
                 // The bound shrank under it: this target refuses it.
-                if let Some(r) = self.fwd.rows.get_mut(&seq) {
-                    r.refused.push(target);
-                }
-                self.fwd.run = true;
+                self.fwd.refused(seq, target);
                 continue;
             }
             let hint = self.fwd.rows.get(&seq).and_then(|r| r.hint);
             let Some(bytes) = self.seal_forward_put(&keys, &item, hint) else {
-                continue;
+                break;
             };
-            let Some(r) = self.fwd.rows.get_mut(&seq) else {
+            let Some(r) = self.fwd.rows.get(&seq) else {
                 continue;
             };
             if matches!(r.state, Turn::Posted { .. }) {
                 *self.fwd.reposts.entry(target).or_default() += 1;
             }
-            r.state = Turn::Taken;
+            self.fwd.set_state(seq, Turn::Taken);
             self.fwd.pending.insert(item.pkt_ref, (seq, target));
             out.push(CarrierFrame {
                 custody_seq: Some(seq),
@@ -5401,24 +6188,25 @@ impl Core {
 
     /// [`Fabric::forward_done`].
     fn forward_done(&mut self, seq: u64, done: ForwardDone) {
-        let Some(r) = self.fwd.rows.get_mut(&seq) else {
+        let Some(r) = self.fwd.rows.get(&seq) else {
             return;
         };
         if r.state != Turn::Taken {
             return;
         }
+        let turn = r.turn;
         match done {
-            ForwardDone::Taken => r.state = Turn::Posted { repost: false },
+            ForwardDone::Taken => self.fwd.set_state(seq, Turn::Posted { repost: false }),
             // Stays for the next flush; no event (a carrier that is down
             // is not asked again in a loop).
-            ForwardDone::Retry => r.state = Turn::Idle,
+            ForwardDone::Retry => {
+                self.fwd.unpend(seq);
+                self.fwd.set_state(seq, Turn::Idle);
+            }
             ForwardDone::Rejected { .. } => {
-                if let Some(t) = r.turn {
-                    r.refused.push(t);
+                if let Some(t) = turn {
+                    self.fwd.refused(seq, t);
                 }
-                r.state = Turn::Idle;
-                self.fwd.pending.retain(|_, (s, _)| *s != seq);
-                self.fwd.run = true;
                 self.fabric_changed();
             }
         }
@@ -5427,12 +6215,19 @@ impl Core {
     /// [`Fabric::forward_repost`].
     fn forward_repost(&mut self, target: NodeId) -> Result<u32> {
         self.carrier_pair(&target)?;
-        let mut n = 0u32;
-        for r in self.fwd.rows.values_mut() {
-            if r.turn == Some(target) && matches!(r.state, Turn::Posted { .. } | Turn::Taken) {
-                r.state = Turn::Posted { repost: true };
-                n = n.saturating_add(1);
-            }
+        let seqs: Vec<u64> = match self.fwd.targets.get(&target) {
+            Some(q) => q
+                .posted
+                .iter()
+                .chain(q.spent.iter())
+                .chain(q.taken.iter())
+                .copied()
+                .collect(),
+            None => Vec::new(),
+        };
+        let n = u32::try_from(seqs.len()).unwrap_or(u32::MAX);
+        for seq in seqs {
+            self.fwd.set_state(seq, Turn::Posted { repost: true });
         }
         if n > 0 {
             self.fwd.notify.insert(target);
@@ -5442,12 +6237,9 @@ impl Core {
 
     /// [`Fabric::carrier_inbound`] (the size was checked by the handle).
     fn carrier_inbound(&mut self, from: NodeId, frame: &[u8]) -> Result<()> {
-        if !self.settings.holds_custody() {
-            return Err(FabricError::Invalid("this node is not a hub"));
-        }
-        let Some(pair) = self.pair_of(&from) else {
-            return Err(FabricError::Invalid("not a paired hub"));
-        };
+        // A whole carrier pair only (a `tcp` pair's frames never come this
+        // way: §5.1, a frame against the record).
+        self.carrier_pair(&from)?;
         let opened = {
             let keys = &self.keys;
             match open_envelope(&*self.sealer, frame, &|p| keys.lookup(p)) {
@@ -5475,30 +6267,23 @@ impl Core {
             return Ok(());
         }
         self.heard.insert(sender);
-        if pair.via == PairVia::Carrier {
-            self.fwd.heard.insert(sender);
-        }
+        self.fwd.heard.insert(sender);
         match opened.inner.kind {
             Kind::CustodyPut => {
                 let hint = opened.inner.ext.dest_hub;
                 self.on_carrier_put(&from, &opened.inner.payload, hint);
             }
-            Kind::CustodyAck => self.on_custody_ack(&from, &opened.inner.payload),
+            Kind::CustodyAck => {
+                if let Ok(ack) = CustodyAck::decode(&opened.inner.payload) {
+                    self.on_forward_ack(&from, &ack);
+                }
+            }
             // ENROLL never rides a carrier (S22); nothing else is carried.
             _ => self.counters.dropped += 1,
         }
-        // §5.9 re-post rule (1): a far frame verified after a post re-arms
-        // every post still unacknowledged (once per post).
-        let mut armed = false;
-        for r in self.fwd.rows.values_mut() {
-            if r.turn == Some(from) && r.state == (Turn::Posted { repost: false }) {
-                r.state = Turn::Posted { repost: true };
-                armed = true;
-            }
-        }
-        if armed {
-            self.fwd.notify.insert(from);
-        }
+        // §5.9 re-post rule (1): noted only; the re-arm waits for the next
+        // `forward_take`, after every frame of this drain was handed in.
+        self.fwd.far_frame.insert(from);
         self.fwd.run = true;
         self.fabric_changed();
         Ok(())
@@ -6775,6 +7560,8 @@ mod tests {
             node_id: NodeId::from([b; 32]),
             role,
             via,
+            ours: true,
+            theirs: true,
         }
     }
 
@@ -6971,21 +7758,21 @@ mod tests {
         }
         assert_eq!(f.cache.len(), FORWARD_CACHE);
         let first = [0u8; 32];
-        assert_eq!(f.cache_get(&first), None, "the oldest went");
+        assert_eq!(f.cache.get(&first), None, "the oldest went");
         let mut last = [0u8; 32];
         last[..4].copy_from_slice(&299u32.to_le_bytes());
-        assert_eq!(f.cache_get(&last), Some(p));
+        assert_eq!(f.cache.get(&last), Some(p));
         f.cache_put(last, q);
         assert_eq!(
-            f.cache_get(&last),
+            f.cache.get(&last),
             Some(q),
             "one entry per dest, the newest"
         );
         assert_eq!(f.cache.len(), FORWARD_CACHE);
     }
 
-    /// Layer 7 §5.11: without the hub role pairing is refused, and a node
-    /// that holds no custody refuses the hand-off; nothing is recorded.
+    /// Layer 7 §5.11: without the hub role pairing (both directions) and
+    /// the hand-off are refused; nothing is recorded.
     #[tokio::test]
     async fn no_pairing_and_no_hand_off_without_the_hub_role() {
         let hub = test_node("hub", FabricSettings::default());
@@ -7004,9 +7791,41 @@ mod tests {
         assert!(hub.f.carrier_inbound(peer, Vec::new()).await.is_err());
         hub.f.forward_done(7, ForwardDone::Taken).await.unwrap();
         assert!(!hub.f.unpair(peer).await.unwrap());
+        let r = hub.f.offer_pair(None, PairRole::Peer, PairVia::Tcp).await;
+        assert!(matches!(r, Err(FabricError::Invalid(_))), "{r:?}");
         let st = hub.f.status().await.unwrap();
         assert!(st.settings.paired_hubs.is_empty() && st.paired.is_empty());
         assert_eq!(st.counters.forward_refused, 0);
+        // With the hub role: a pairing offer only for a pair §4.6 allows,
+        // and no `111HUB:` bundle for it (the `111PAIR:` one is the daemon's).
+        let real = test_node(
+            "real-hub",
+            FabricSettings {
+                hub_role: true,
+                ..FabricSettings::default()
+            },
+        );
+        let at: SocketAddr = "192.0.2.1:11183".parse().unwrap();
+        let r = real
+            .f
+            .offer_pair(Some(at), PairRole::Leaf, PairVia::Carrier)
+            .await;
+        assert!(matches!(r, Err(FabricError::Invalid(_))), "{r:?}");
+        let v = real
+            .f
+            .offer_pair(Some(at), PairRole::Leaf, PairVia::Tcp)
+            .await
+            .unwrap();
+        assert!(v.bundle.is_none() && v.address == Some(at));
+        assert!(real.f.offer(Some(at)).await.unwrap().bundle.is_some());
+    }
+
+    /// The resident window's per-row cost (module doc: about 250 B a row
+    /// with the indexes, ≈ 1 MB at [`FORWARD_RESIDENT`]).
+    #[test]
+    fn a_resident_row_is_small() {
+        assert!(std::mem::size_of::<FwdRow>() <= 160);
+        assert_eq!(FORWARD_RESIDENT % FORWARD_LOAD_PAGE, 0);
     }
 }
 

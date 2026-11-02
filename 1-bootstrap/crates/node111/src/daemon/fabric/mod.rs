@@ -1982,6 +1982,8 @@ mod tests {
                         node_id: node[1 - i],
                         role: PairRole::Peer,
                         via: PairVia::Tcp,
+                        ours: true,
+                        theirs: true,
                     }],
                     ..FabricSettings::default()
                 },

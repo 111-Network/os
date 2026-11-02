@@ -13,9 +13,12 @@
 //!   directly on a LAN without a hub).
 //! - `paired_hubs` — Layer 7 §4.6 (amendment 10, §19 C9; additive, the
 //!   schema stays 1): one row per paired hub, ≤ [`MAX_PAIRED_HUBS`]. The
-//!   fabric's record `{node_id, role, via}` (`FabricSettings.paired_hubs`,
-//!   the one record its gate reads, persisted through `FabricEvent::Settings`)
-//!   and, in the same row, the daemon's half ([`PairLink`]): the far hub's
+//!   fabric's record `{node_id, role, via, ours, theirs}`
+//!   (`FabricSettings.paired_hubs`, the one record its gate reads, persisted
+//!   through `FabricEvent::Settings`; `ours` and `theirs` are the two
+//!   enrollments the pair holds, always written, `false` when absent: a pair
+//!   is whole, and forwards, only with both) and, in the same row, the
+//!   daemon's half ([`PairLink`]): the far hub's
 //!   `address`, its pinned `link_spki` (§4.2), `lan` (§4.1 rule 1) and the
 //!   `pair_plain` `warning_hash` (§4.6 step 6); plus `far_holds_address`
 //!   (written only when `true`), the §4.6 step 5 fact the dial rule needs
@@ -211,7 +214,8 @@ struct PeerFile {
     address: String,
 }
 
-/// One `paired_hubs` row, in the §4.6 key order.
+/// One `paired_hubs` row, in the §4.6 key order (the fabric's two
+/// enrollment bools after `via`).
 #[derive(Serialize, Deserialize)]
 struct PairFile {
     node_id: String,
@@ -219,6 +223,10 @@ struct PairFile {
     address: Option<String>,
     role: String,
     via: String,
+    #[serde(default)]
+    ours: bool,
+    #[serde(default)]
+    theirs: bool,
     #[serde(default)]
     link_spki: Option<String>,
     #[serde(default)]
@@ -332,7 +340,13 @@ fn decode_pairs(
         let role = PairRole::from_code(&p.role)
             .ok_or("paired_hubs[].role is not peer, leaf or gateway")?;
         let via = PairVia::from_code(&p.via).ok_or("paired_hubs[].via is not tcp or carrier")?;
-        let hub = PairedHub { node_id, role, via };
+        let hub = PairedHub {
+            node_id,
+            role,
+            via,
+            ours: p.ours,
+            theirs: p.theirs,
+        };
         if !hub.valid() {
             return Err(
                 "paired_hubs[]: a carrier pair is a peer; leaf and gateway pairs are tcp".into(),
@@ -442,6 +456,8 @@ fn encode(p: &Persisted) -> String {
                     address: l.and_then(|l| l.address).map(|a| a.to_string()),
                     role: h.role.code().to_string(),
                     via: h.via.code().to_string(),
+                    ours: h.ours,
+                    theirs: h.theirs,
                     link_spki: l.and_then(|l| l.link_spki.as_ref()).map(LinkSpki::text),
                     lan: l.is_some_and(|l| l.lan),
                     warning_hash: l
@@ -999,6 +1015,8 @@ mod tests {
             node_id: NodeId::from(node),
             role,
             via,
+            ours: true,
+            theirs: true,
         }
     }
 
@@ -1108,8 +1126,9 @@ mod tests {
         assert_eq!(encode(&l.persisted), encode(&empty));
     }
 
-    /// §4.6: the row is the fabric's `{node_id, role, via}` with the
-    /// daemon's `address`, `link_spki`, `lan`, `warning_hash` beside it.
+    /// §4.6: the row is the fabric's `{node_id, role, via, ours, theirs}`
+    /// with the daemon's `address`, `link_spki`, `lan`, `warning_hash`
+    /// beside it.
     #[test]
     fn paired_hubs_round_trip_in_the_4_6_shape() {
         let far = NodeId::from(FAR);
@@ -1120,8 +1139,14 @@ mod tests {
                 hub_role: true,
                 paired_hubs: vec![
                     paired(FAR, PairRole::Peer, PairVia::Tcp),
-                    paired([0xee; 32], PairRole::Gateway, PairVia::Tcp),
-                    paired([0x0c; 32], PairRole::Peer, PairVia::Carrier),
+                    PairedHub {
+                        theirs: false,
+                        ..paired([0xee; 32], PairRole::Gateway, PairVia::Tcp)
+                    },
+                    PairedHub {
+                        ours: false,
+                        ..paired([0x0c; 32], PairRole::Peer, PairVia::Carrier)
+                    },
                 ],
                 ..FabricSettings::default()
             },
@@ -1156,7 +1181,8 @@ mod tests {
             rows[0],
             serde_json::json!({
                 "node_id": "cd".repeat(32), "address": "203.0.113.7:11183", "role": "peer",
-                "via": "tcp", "link_spki": spki(0x5a).text(), "lan": false, "warning_hash": null,
+                "via": "tcp", "ours": true, "theirs": true, "link_spki": spki(0x5a).text(),
+                "lan": false, "warning_hash": null,
             })
         );
         let keys = [
@@ -1164,6 +1190,8 @@ mod tests {
             "address",
             "role",
             "via",
+            "ours",
+            "theirs",
             "link_spki",
             "lan",
             "warning_hash",
@@ -1178,6 +1206,10 @@ mod tests {
             "§4.6 key order: {text}"
         );
         assert_eq!(rows[1]["role"], "gateway");
+        assert_eq!(rows[1]["ours"], true);
+        assert_eq!(rows[1]["theirs"], false, "a half pair: written false");
+        assert_eq!(rows[2]["ours"], false);
+        assert_eq!(rows[2]["theirs"], true);
         assert_eq!(rows[1]["lan"], true);
         assert_eq!(rows[1]["far_holds_address"], true);
         assert_eq!(rows[1]["warning_hash"], "9f".repeat(32));
@@ -1212,7 +1244,12 @@ mod tests {
             )
         };
         let ok = row(r#""role":"peer","via":"tcp""#);
-        assert!(decode(&ok, true).is_ok(), "{ok}");
+        let p = decode(&ok, true).unwrap();
+        let h = p.fabric.paired_hubs[0];
+        assert!(!h.ours && !h.theirs, "the two bools are false when absent");
+        let half = row(r#""role":"peer","via":"tcp","theirs":true"#);
+        let h = decode(&half, true).unwrap().fabric.paired_hubs[0];
+        assert!(!h.ours && h.theirs && !h.whole());
         let mut short = good.clone();
         short.pop();
         let mut not_ed25519 = [0u8; LINK_SPKI_LEN];
@@ -1238,6 +1275,8 @@ mod tests {
                 card_text(&not_ed25519)
             )),
             row(r#""role":"peer","via":"tcp","warning_hash":"ABC""#),
+            row(r#""role":"peer","via":"tcp","ours":"yes""#),
+            row(r#""role":"peer","via":"tcp","theirs":1"#),
             row(&format!(
                 r#""role":"peer","via":"tcp","warning_hash":"{}""#,
                 "AB".repeat(32)
@@ -1305,6 +1344,8 @@ mod tests {
                     node_id: far,
                     role: PairRole::Peer,
                     via: PairVia::Tcp,
+                    ours: true,
+                    theirs: true,
                 }],
                 ..FabricSettings::default()
             },
