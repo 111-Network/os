@@ -20,6 +20,7 @@ library only (no `mesh111` code): `python3 -I crosscheck.py`.
 | `custody.json` | §6.2 receipts for statuses 1–5, `pkt_ref`, `custody-sig` input and signature, rejections |
 | `enroll.json` | §7.3 keyed hash (`111/enroll/v1`), member binding, strict code-parser rejections |
 | `store-kdf.json` | §10.2 Mode S `store_key = BLAKE2b-256(key = store_secret, "111/store/v1" ‖ NodeId)` and the SQLCipher raw-key literal (task C3; asserted by `keys::tests::store_kdf_vectors`, which also requires the two inline doc answers verbatim) |
+| `layer7/dest-hub.json` | Layer 7 (`7-relay/README.md` §5.4; written 2026-11-02, task M2, not frozen with the five above): the hint TLV `0x02 dest_hub` on a `CUSTODY_PUT`; its own drift gate `envelope::tests::layer7`; the table is `layer7/README.md` |
 
 Format: plain JSON, hex bytes, u64 values as decimal strings. Test identities: `a` = canonical-12 and `b` = canonical-24
 mnemonics (the same as `2-identity/test-vectors`). `epk` values are fixed stand-ins for the sealer's ephemeral key. The AEAD
