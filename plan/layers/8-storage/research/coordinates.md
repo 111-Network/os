@@ -25,5 +25,17 @@ Sessions die; this file is what the next session needs.
   Resume: `Workflow({scriptPath: "<repo>/plan/layers/8-storage/runs/workflows/research.js", resumeFromRunId: "wf_68595f58-589"})`.
 - Models: seams scout opus (high) · lens scouts sonnet (high) · critic opus (xhigh) · gap-fill sonnet (high).
 
-Next after the run: the lead writes `layers/8-storage/options.md` → the owner decides → `DECISIONS.md` → spec `os/8-storage/README.md`
-→ fable adversarial panel → `TASKS.md` → build.
+- Result (2026-11-02): complete — 8 agents (the seams scout, five lens scouts, the critic, one gap-fill (G1, agent-state encryption: `07-gap-1.md`); the critic rated G2 (software updates beyond the 111 release) major and left G3/G4 (chunk sidecar; Pi prior art) to the lead); reports `00`–`07`
+  committed; the critic's verdict: enough for the brief once the remaining gaps are closed.
+
+## Run 2 — options brief (2026-11-02)
+
+- Script: `plan/layers/8-storage/runs/workflows/options.js` (shared with the other layer; `args.layer` = `8-storage`): two sonnet gap-fill
+  scouts on the gaps the critic left for the lead (`research/07-gap-2.md`, `07-gap-3.md`) → one opus drafter writes `options.md` in the
+  Layer 7 brief's shape → one fable judge verifies every fact, fork and pick against the reports and the locked rules (`review/options-check.md`)
+  → one fix pass by the drafter and a re-check when the judge says fix-first.
+- Run id: `wf_56b53fe7-c2f` (launched 2026-11-02 from the tree `dfd6828`, beside the other layer's run and the Layer 7 fix run). Resume:
+  `Workflow({scriptPath: "<repo>/plan/layers/8-storage/runs/workflows/options.js", args: {layer: "8-storage"}, resumeFromRunId: "wf_56b53fe7-c2f"})`.
+
+Next after the run: the lead reads the judge's report and the brief, fixes what the judge left, presents the decision sheet to the owner →
+the owner decides → `DECISIONS.md` → spec `os/8-storage/README.md` → fable adversarial panel → `TASKS.md` → build.
