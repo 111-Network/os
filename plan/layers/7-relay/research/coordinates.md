@@ -50,7 +50,16 @@ at `~/.claude/projects/…/subagents/workflows/wf_60f165f1-80f/journal.jsonl` on
   `custody.md` (C), `carriers.md` (S), `integration.md` (I)). `args.panelOnly` reruns the panel on the file as it stands.
 - Run id: `wf_27c6c677-781` (launched 2026-11-01 ~23:40 UTC from the tree `2c144e9`). Resume:
   `Workflow({scriptPath: "<repo>/plan/layers/7-relay/runs/workflows/spec.js", resumeFromRunId: "wf_27c6c677-781"})`.
-- Next: the lead writes `review/triage.md` → run 3 `runs/workflows/spec-fix.js` (an opus editor applies the triage → v0.2; one fable
-  re-check writes `review/recheck.md`; `args.triage`, `args.from`, `args.to`, `args.recheckOnly`) → D31 (amendments) and D32 (lock)
-  → `os/7-relay/TASKS.md` → build.
+- Result (2026-11-02): v0.1 drafted (1,100 lines, 262 verified citations, eleven recorded deviations, three questions); the panel's three
+  verdicts all amend-then-lock: 4 blockers (C1, C2, S1, I1), 17 majors, 40 minors. The lead's triage `review/triage.md` accepts every
+  finding (six with a variation) and lists six owner forks; D31 records the amendments and applies each fork as the lead recommends.
+
+## Run 3 — fix and re-check (2026-11-02)
+
+- Script: `runs/workflows/spec-fix.js` (Fix: one opus editor applies `review/triage.md` to `os/7-relay/README.md` → v0.2, appends the
+  changelog; Recheck: one fable judge verifies every disposition landed and nothing regressed, writes `review/recheck.md`;
+  `args.triage`, `args.from`, `args.to`, `args.recheckOnly`).
+- Run id: `wf_b307f6ca-f43` (launched 2026-11-02 from the tree `e0ebd71`). Resume:
+  `Workflow({scriptPath: "<repo>/plan/layers/7-relay/runs/workflows/spec-fix.js", resumeFromRunId: "wf_b307f6ca-f43"})`.
+- Next: the re-check's verdict → lock (D32; a second fix pass only on a blocker or major) → `os/7-relay/TASKS.md` → build.
 
