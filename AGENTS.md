@@ -4,7 +4,7 @@ This repo (`os/`) is the operating layer of the 111network mesh OS: an offline-f
 
 ## Read first
 
-- Layer folders are `N-<slug>` with `N` = the layer number (`0-knowledge`, `1-bootstrap`, `2-identity`, `3-intelligence`, `4-interface`, `5-messaging`, `6-transport`); `plan/layers/` uses the same names.
+- Layer folders are `N-<slug>` with `N` = the layer number (`0-knowledge`, `1-bootstrap`, `2-identity`, `3-intelligence`, `4-interface`, `5-messaging`, `6-transport`; `7-relay`, `8-storage`, `9-evolution` are in progress and have plan folders, their spec folders are created with their specs); `plan/layers/` uses the same names.
 - Knowledge-base navigation contract: `0-knowledge/AGENTS.md` — read it before querying `0-knowledge/`.
 - Layer 0 (Knowledge Layer) spec: `0-knowledge/README.md` — locked; defines entry format, relations, status gates, indexes.
 - Layer 1 (Bootstrap) spec: `1-bootstrap/README.md` — locked v2.2; the `111` binary, installer, daemon, updates.
@@ -13,6 +13,7 @@ This repo (`os/`) is the operating layer of the 111network mesh OS: an offline-f
 - Layer 3 (Local Intelligence) spec + as-built appendix: `3-intelligence/README.md`; build log/contracts: `3-intelligence/TASKS.md`.
 - Layer 4 (Interface & Dashboard) spec: `4-interface/README.md` — locked v2; HTTP contract `4-interface/api/openapi.yaml` (conventions `4-interface/api/README.md`); build board `4-interface/TASKS.md`. The UI is `4-interface/ui`; the Rust side lives in `1-bootstrap/crates/node111/src/daemon/dashboard/`.
 - Layer 5 (Messaging & Data) spec: `5-messaging/README.md` — locked v1.2 (D20); build board `5-messaging/TASKS.md`. Core crate: `5-messaging/crates/mesh111`. The daemon side (fabric, hosted panels, Meshtastic) lives in `1-bootstrap/crates/node111/src/daemon/{fabric,panels,meshtastic}/`; the presence sidecar is `5-messaging/sidecars/meshtastic-presence/`.
+- Layers 7–9 state: Layer 7 (Relay & Presence) decided (D30, 2026-11-01), spec `7-relay/README.md` in draft, plan `plan/layers/7-relay/` (`options.md`, `research/`, `review/`); Layers 8 (Storage & Shared State) and 9 (Self-Healing & Evolution) in research since 2026-11-02: `plan/layers/8-storage/`, `plan/layers/9-evolution/` (each: `README.md`, `research/coordinates.md`, `runs/workflows/research.js`). No code for a layer before its decision and its locked spec.
 - Licensing: our own license is `LICENSE.md` (GPL-3.0-or-later; contributions of any kind are appreciated). Third-party licensing and dependency boundaries (Reticulum is a separate service, never incorporated): `LICENSING.md` — update it when a dependency, vendored file, or pinned external program changes. Third-party notices and license texts: `THIRD-PARTY-NOTICES.md` — regenerate it when a lockfile changes.
 
 ## Working rules (merged from the former `CLAUDE.md`, 2026-10-19; `CLAUDE.md` now only includes this file)
@@ -27,8 +28,8 @@ This repo (`os/`) is the operating layer of the 111network mesh OS: an offline-f
   k3-256k research/parallel · kimi-for-coding bulk.)
 - `README.md` stays user-facing and general; deep specs live per layer in `<layer>/README.md`, tasks in
   `<layer>/TASKS.md`.
-- Layer folders are `N-<slug>` with `N` = the layer number: `0-knowledge` … `6-transport` (`7-relay`, `8-storage`,
-  `9-evolution` reserved). `plan/layers/` uses the same names. Specs in `<N-slug>/README.md`, boards in
+- Layer folders are `N-<slug>` with `N` = the layer number: `0-knowledge` … `9-evolution` (spec folders exist for 0–6 and, in draft,
+  7; `8-storage` and `9-evolution` are in research). `plan/layers/` uses the same names, all ten exist. Specs in `<N-slug>/README.md`, boards in
   `<N-slug>/TASKS.md`.
 - Commit in this repo after every verified task. NEVER add Claude co-author or attribution lines.
 - **Start of every session, before reading the plan or touching a file:** `git fetch origin && git pull --ff-only` in `os/`

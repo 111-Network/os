@@ -52,12 +52,12 @@ and `os/N-<slug>/TASKS.md`, where the layer's code is.
 | 5 Messaging & Data | `layers/5-messaging/` | full set: research, options, review, runs |
 | 6 Transport & Bridge | `layers/6-transport/` | research (R00–R08 + coordinates), options, review (the 3-judge panel, the recheck, V5 `review/v5-integrated.md`), runs (workflows `runs/workflows/*.js`, journals); opener brief [`cross-layer/devices.md`](cross-layer/devices.md); built and locked 2026-10-23 (D29) |
 | 7 Relay & Presence | `layers/7-relay/` | research (kickoff 2026-11-01: `research/00`–`07`, `runs/workflows/research.js`, `research/coordinates.md`), options brief (`options.md`, decided D30 2026-11-01); ✍️ speccing: spec → fable panel → lock → build |
-| 8 Storage & Shared State | none yet | reserved name `8-storage`; pending |
-| 9 Self-Healing & Evolution | none yet | reserved name `9-evolution`; pending |
+| 8 Storage & Shared State | `layers/8-storage/` | research (kickoff 2026-11-02: `research/`, `runs/workflows/research.js`, `research/coordinates.md`); 🔬 researching; the owner decides on the brief before any build |
+| 9 Self-Healing & Evolution | `layers/9-evolution/` | research (kickoff 2026-11-02, beside Layer 8: `research/`, `runs/workflows/research.js`, `research/coordinates.md`); 🔬 researching; the owner decides on the brief before any build |
 
 ## Naming conventions
 
-- **Layer folder:** `layers/N-<slug>/`, where `N` is the layer number from `INDEX.md` and the name is identical to the layer's own folder under `os/`. Current names: `0-knowledge`, `1-bootstrap`, `2-identity`, `4-interface`, `5-messaging`, `6-transport`, `7-relay` (Layer 3, `3-intelligence`, has no plan material, so no plan folder; `7-relay` has a plan folder from its 2026-11-01 kickoff and no spec folder yet). Reserved for layers not started yet: `8-storage`, `9-evolution`. `plan/` and `hooks/` are not layers and stay unnumbered.
+- **Layer folder:** `layers/N-<slug>/`, where `N` is the layer number from `INDEX.md` and the name is identical to the layer's own folder under `os/`. Current names: `0-knowledge`, `1-bootstrap`, `2-identity`, `4-interface`, `5-messaging`, `6-transport`, `7-relay` (Layer 3, `3-intelligence`, has no plan material, so no plan folder; `7-relay` has a plan folder from its 2026-11-01 kickoff and its spec in draft; `8-storage` and `9-evolution` have plan folders from their 2026-11-02 kickoff and no spec folder yet). No layer name is reserved any more. `plan/` and `hooks/` are not layers and stay unnumbered.
 - **Fixed names inside a layer folder:** `N-<slug>/README.md`, `N-<slug>/options.md`, `N-<slug>/research/coordinates.md`, `N-<slug>/review/triage.md`. A layer that lacks one of these simply has not produced it.
 - **Research reports:** `research/NN-<topic>.md`, numbered in run order. Gap-fill reports reuse one number and add a suffix (07-gap-1, 07-gap-2, ...).
 - **Review reports:** `review/<lens>.md` for each judge of the spec panel (crypto, panels, integration), `N-<slug>/review/recheck.md` for the re-check, `N-<slug>/review/wave-N.md` for the triage of build wave N.
@@ -265,8 +265,8 @@ Only directories were renamed, with `git mv` (`git log --follow` works on every 
 | `plan/layers/50-messaging/` | `plan/layers/5-messaging/` |
 | `plan/layers/60-transport/` | `plan/layers/6-transport/` |
 
-Reserved for the layers not started: `8-storage`, `9-evolution` (created at kickoff; `7-relay` got its plan folder at the 2026-11-01
-kickoff and has no spec folder yet). The research-report
+Every layer has its plan folder now (`7-relay` since 2026-11-01, `8-storage` and `9-evolution` since 2026-11-02; a spec folder is
+created with its spec). The research-report
 series inside a plan folder (`research/00-code-seams.md`, `07-gap-1.md`) is a different numbering and stays two-digit.
 
 References were rewritten the way the 2026-10-18 section describes, by one script whose dry run was read line by line.
