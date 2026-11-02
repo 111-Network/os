@@ -103,12 +103,15 @@ fn parse_verified_happy_path_and_floor_refusal() {
     high.highest_release = "2026.10.13".into();
     assert!(ChannelManifest::parse_verified(&fixture_bytes(), &sig(), &pubkey(), &high).is_err());
 
+    // Layer 7 §9.5 T2: the floor is checked against the generation the verified keychain walk
+    // reaches, never against the manifest's own maximum. The fixture's generation-1 link is a
+    // placeholder, so the walk reaches only generation 0: a floor at 0 holds, a floor at 1 refuses.
     let mut high_gen = Floor::initial();
-    high_gen.highest_keychain_generation = 1; // fixture's max gen is 1 -> equal is fine
+    high_gen.highest_keychain_generation = 0;
     assert!(
         ChannelManifest::parse_verified(&fixture_bytes(), &sig(), &pubkey(), &high_gen).is_ok()
     );
-    high_gen.highest_keychain_generation = 2;
+    high_gen.highest_keychain_generation = 1;
     assert!(
         ChannelManifest::parse_verified(&fixture_bytes(), &sig(), &pubkey(), &high_gen).is_err()
     );
