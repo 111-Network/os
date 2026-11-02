@@ -10,3 +10,15 @@
 
 /// The pinned raw-public-key stream wrap (§4.3, §4.4). T0: the name only.
 pub struct RpkWrap;
+
+/// The `tcp-lan` stream wrap (§4.1 rule 1, §4.4), read once by the fabric when it builds `tcp-lan`
+/// (`daemon/fabric/mod.rs`, row M5). `fabric_dir` is `<root>/fabric` (the link key lives in
+/// `<root>/secrets/`, §4.2); `pairs` is the daemon's live pairing table (§4.6: the pins, `lan`, the
+/// warning hash), updated whenever a pin is recorded or a pair goes. `None` keeps every connection
+/// plain and byte-identical: until D5, and always without a non-private pair. Stub: `None`.
+pub fn wrap(
+    _fabric_dir: &std::path::Path,
+    _pairs: &crate::daemon::fabric::settings::PairTable,
+) -> Option<std::sync::Arc<dyn mesh111::link::tcp_lan::StreamWrap>> {
+    None
+}

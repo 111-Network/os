@@ -45,6 +45,14 @@
 //!   `BLAKE2b-256(key = X25519 private key = keyset bytes 32..64, data =
 //!   "111/store-secret/v1")`, RFC 7693 keyed mode, computed here; the private
 //!   key bytes are copied only into zeroizing buffers.
+//! - **The carrier topic's X25519** (Layer 7 §6.2, §18 L2: one derivation
+//!   behind the identity handle, the A9 pattern) =
+//!   `X25519(own_enc_sk, peer_enc_pk)` with a paired hub, the key of
+//!   `topic_key` (`carrier::ntfy::topic_key`, whose KDF runs there):
+//!   [`IdentitySealer::carrier_topic_x25519`]. Computed on demand, never
+//!   cached, returned only in a zeroizing buffer, and on no API, log, frame
+//!   or file (`carrier.ntfy.topic_secret`, when the owner sets one, replaces
+//!   it as the key). A low-order peer key or an all-zero output is refused.
 //!
 //! The node's **own announce** (§7: "card requests are answered from stored
 //! announce bytes, never minted") is kept in `fabric/announce` (0600): read at
@@ -136,6 +144,20 @@ pub fn store_secret_from(private_keyset: &[u8; 64]) -> Result<Zeroizing<Key32>, 
     Ok(secret)
 }
 
+/// Layer 7 §6.2: the X25519 output that keys a pairing's carrier topic,
+/// `X25519(own_enc_sk, peer_enc_pk)` (RFC 7748; equal on both hubs), in a
+/// zeroizing buffer. A low-order `peer_enc_pubkey` or an all-zero
+/// (non-contributory) output is refused: the zero secret is never returned
+/// (`Keyset::ecdh`, L2 §3).
+pub fn carrier_topic_x25519_from(
+    keyset: &Keyset,
+    peer_enc_pubkey: &Key32,
+) -> Result<Zeroizing<Key32>, SealerError> {
+    keyset
+        .ecdh(peer_enc_pubkey)
+        .map_err(|e| SealerError::Open(OpenError::Ecdh(e)))
+}
+
 /// `appdata` v1 (§7.3, L2 amendment A8): `[ver=1][roles u16 LE][reserved]`
 /// plus the optional 8-byte truncated home-hub id (a locator only).
 pub fn appdata(roles: u16, home_hub: Option<&NodeId>) -> Vec<u8> {
@@ -195,6 +217,36 @@ impl IdentitySealer {
             .lock()
             .map(|c| c.is_restore_pending())
             .unwrap_or(true)
+    }
+
+    /// Layer 7 §6.2: the X25519 output with the paired hub whose encryption
+    /// key is `peer_enc_pubkey`, the carrier topic's key
+    /// ([`carrier_topic_x25519_from`]). On no API: the daemon's carrier
+    /// alone calls it, when it builds a `carrier` pair.
+    pub fn carrier_topic_x25519(
+        &self,
+        peer_enc_pubkey: &Key32,
+    ) -> Result<Zeroizing<Key32>, SealerError> {
+        carrier_topic_x25519_from(self.keyset(), peer_enc_pubkey)
+    }
+
+    /// The home-hub hint (`appdata` bytes 4..12, §7.3 A8) of this node's own
+    /// announce as stored in `fabric_dir/announce`, when that file holds a
+    /// verified announce of this node that carries one. Read before the
+    /// announce is re-minted at start, so it is the node's own last signed
+    /// statement of its home hub (`settings::rebuild_home_hub`, Layer 7 §19
+    /// C7: a paired hub is never named there). A local file read; nothing is
+    /// presented.
+    pub fn stored_hub_hint(&self, fabric_dir: &Path) -> Option<[u8; 8]> {
+        let b = read_small(
+            &fabric_dir.join(ANNOUNCE_FILE),
+            id111::announce::MAX_LEN as u64,
+        )?;
+        if !self.own_valid(&b) {
+            return None;
+        }
+        let a = Announce::parse(&b).ok()?;
+        mesh111::contacts::AppData::parse(a.appdata()).home_hub
     }
 
     /// Peers with a cached pair key (diagnostics, tests).
@@ -594,6 +646,79 @@ mod tests {
         // a foreign or corrupt file is never presented
         std::fs::write(fabric.join(ANNOUNCE_FILE), b"junk").unwrap();
         assert_eq!(s.ensure_announce(&fabric, &hub), AnnounceOutcome::Minted);
+    }
+
+    /// Layer 7 §6.2: the carrier topic's X25519, RFC 7748 §6.1 vectors (an
+    /// RFC 8032 seed for the signing half, which the X25519 never reads).
+    #[test]
+    fn carrier_topic_x25519_known_answers_and_refusals() {
+        let hex32 = |h: &str| id111::encoding::hex_decode(h).unwrap();
+        let seed = hex32("9d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f60");
+        let keyset = |scalar: &str| {
+            let mut b = [0u8; 64];
+            b[..32].copy_from_slice(&seed);
+            b[32..].copy_from_slice(&hex32(scalar));
+            Keyset::from_bytes(&b).unwrap()
+        };
+        let alice = keyset("77076d0a7318a57d3c16c17251b26645df4c2f87ebc0992ab177fba51db92c2a");
+        let bob = keyset("5dab087e624a8a4b79e17f8b83800ee66f3bb1292618b6fd1c2f8b27ff88e0eb");
+        let alice_pk = hex32("8520f0098930a754748b7ddcb43ef75a0dbf3a0d26381af4eba4a98eaa9b4e6a");
+        let bob_pk = hex32("de9edb7d7b7dc1b4d35b61c2ece435373f8343c85b78674dadfc7e146f882b4f");
+        assert_eq!(alice.x25519_public(), alice_pk);
+        assert_eq!(bob.x25519_public(), bob_pk);
+        let shared = "4a5d9d5ba4ce2de1728e3bf480350f25e07e21c947d19e3376f09b3c1e161742";
+        let ab = carrier_topic_x25519_from(&alice, &bob_pk).unwrap();
+        let ba = carrier_topic_x25519_from(&bob, &alice_pk).unwrap();
+        assert_eq!(id111::encoding::hex_encode(&ab), shared);
+        assert_eq!(*ab, *ba, "both hubs derive the same key");
+        // low-order points (RFC 7748 §6.1) and zero are refused
+        for bad in [[0u8; 32], {
+            let mut one = [0u8; 32];
+            one[0] = 1;
+            one
+        }] {
+            assert!(carrier_topic_x25519_from(&alice, &bad).is_err());
+        }
+        // the handle computes the same over its own keyset, both ways
+        let t = tempfile::tempdir().unwrap();
+        let a = sealer(&t.path().join("a"));
+        let b = sealer(&t.path().join("b"));
+        let x = a.carrier_topic_x25519(&b.enc_pubkey()).unwrap();
+        let y = b.carrier_topic_x25519(&a.enc_pubkey()).unwrap();
+        assert_eq!(*x, *y);
+        assert_eq!(
+            *x,
+            *carrier_topic_x25519_from(a.keyset(), &b.enc_pubkey()).unwrap()
+        );
+        assert_ne!(*x, a.store_secret().unwrap(), "another derivation");
+        assert_eq!(a.cached_pair_keys(), 0, "not cached");
+    }
+
+    /// Layer 7 §19 C7: the stored announce's home-hub hint.
+    #[test]
+    fn the_stored_announce_names_the_home_hub() {
+        let t = tempfile::tempdir().unwrap();
+        let s = sealer(t.path());
+        let fabric = t.path().join("fabric");
+        std::fs::create_dir_all(&fabric).unwrap();
+        assert_eq!(s.stored_hub_hint(&fabric), None, "no announce stored");
+        assert_eq!(
+            s.ensure_announce(&fabric, &appdata(0, None)),
+            AnnounceOutcome::Minted
+        );
+        assert_eq!(s.stored_hub_hint(&fabric), None, "no home hub");
+        let hub = NodeId::from([0x5c; 32]);
+        s.ensure_announce(&fabric, &appdata(0, Some(&hub)));
+        assert_eq!(s.stored_hub_hint(&fabric), Some([0x5c; 8]));
+        // another node's announce is never read as this node's statement
+        let other = sealer(&t.path().join("o"));
+        let ofab = t.path().join("ofab");
+        std::fs::create_dir_all(&ofab).unwrap();
+        other.ensure_announce(&ofab, &appdata(0, Some(&NodeId::from([0x77; 32]))));
+        std::fs::copy(ofab.join(ANNOUNCE_FILE), fabric.join(ANNOUNCE_FILE)).unwrap();
+        assert_eq!(s.stored_hub_hint(&fabric), None);
+        std::fs::write(fabric.join(ANNOUNCE_FILE), b"junk").unwrap();
+        assert_eq!(s.stored_hub_hint(&fabric), None);
     }
 
     #[test]
