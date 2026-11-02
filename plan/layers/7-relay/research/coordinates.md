@@ -97,4 +97,9 @@ at `~/.claude/projects/…/subagents/workflows/wf_60f165f1-80f/journal.jsonl` on
   read) and commits it; a failed task is bounced with the same script and `args.only`.
 - Run id: `wf_5c3ab45e-2a7` (launched 2026-11-02 from the tree `005a510`). Resume:
   `Workflow({scriptPath: "<repo>/plan/layers/7-relay/runs/workflows/wave-0.js", resumeFromRunId: "wf_5c3ab45e-2a7"})`.
+- Progress (2026-11-02, ~04:10 UTC): stage A returned 7/7 (six done, L1 partial on one unowned test line the lead applied:
+  `tests/manifest_parse.rs` floor assertion moved to the T2 reading). Landed with the lead's re-run green: M1 `57af4bc`, M2 `ef84094`, M3 `7746eef`,
+  M6 `22de995` (board rows ✅, `758675f`). Reviewed and waiting only for the node111 re-run: P1, C1, L1, L2 (stage B's M4 edits `M/fabric.rs`, which
+  node111 compiles from disk, so the re-run waits for M4's return; the UI checks of C1 and the mesh111 checks re-ran green). In flight: M4, L3; then
+  D1, M7, P2; stage C M5. Wave 1 script written (`runs/workflows/wave-1.js`, `ef69cd5`, facts block to finish from M4/M5/D1/L3 before the launch).
 
