@@ -100,8 +100,23 @@ WAVE 0 LANDED (read the files, not this summary, before you rely on a name):
   Readings built in: a tcp pair's outbound link-up sends one MAILBOX_FETCH {0}, answered with one item-less MAILBOX_ITEM (both sides attribute); a tcp
   pair's refusals end with its connection; REJECT_FULL rows retry on the pair's link-up/attribution, any other ack from it or a row inserted for it; the
   \`forwarding\` reason only when the hint names a hub this node knows (hub_flow's stale-hint test unchanged; OWNER QUESTION, board row M4).
-WAVE0_FACTS_PENDING: M5 (node111 fabric/settings paired_hubs, the tap in FabricHandle::publish, TcpLanConfig.wrap from relay::tls::wrap(), the home-hub
-address call, the X25519 behind the identity handle) — the lead replaces this line with their as-built names before the launch.
+- node111 fabric seams (M5, ca4c514): \`N/fabric/settings.rs\`: \`PairLink { node_id, address: Option<SocketAddr>, link_spki: Option<LinkSpki>, lan, warning_hash:
+  Option<[u8; 32]>, far_holds_address }\` (\`PairLink::new(id)\`), \`LinkSpki::{from_der, from_text, as_der, raw_key, text}\` (44 B Ed25519 SPKI DER, 71-char card
+  base32), \`PairTable = Arc<RwLock<Vec<PairLink>>>\`, \`Persisted.pairs\` + \`Persisted::pair_link(&id)\`, \`pair_link_refusal(&link, &own, refuse_loopback)\`,
+  \`pair_dials(own, &Persisted) -> Vec<(NodeId, SocketAddr)>\` (hub role only; tcp pairs; this side dials when \`!far_holds_address || own < far\`:
+  \`far_holds_address\` means "this hub's bundle showed the far hub an address", D6 sets it), \`holds_address(&Persisted, addr)\`, \`Recover.pairs\`; the file's
+  \`paired_hubs[]\` rows \`{node_id, address, role, via, link_spki, lan, warning_hash, far_holds_address}\` (the key omitted when empty; address/link_spki
+  optional; any other bad row makes the file invalid); \`rebuild_home_hub(enrolled, hint, announced, pairs)\`. \`N/fabric/mod.rs\`:
+  \`FabricHandle::{set_pair_link(PairLink) -> Result<(), FabricError>, forget_pair_link(&NodeId) -> bool, pair_table() -> PairTable,
+  replace_home_hub_address(addr, wait: Duration) -> Result<bool, FabricError>}\` (D6 calls set_pair_link BEFORE Fabric::pair so the pin is in place; the half
+  reaches the file with the fabric's record), \`reconcile_pair_dials\` (after every pair change; through \`Fabric::dial_peer\`), the tap \`relay::tap(&ev)\` for
+  Message/Contact/Fabric/Forward events (D2/D3/D11 consume it; a no-op while off), \`TcpLanConfig.wrap = relay::tls::wrap(&cfg.fabric_dir, &pairs)\` read ONCE
+  when tcp-lan is built (D5: return a pass-through wrap on every hub that reads the live PairTable, else a first non-private pairing gets TLS only after a
+  restart). \`N/fabric/sealer.rs\`: \`IdentitySealer::carrier_topic_x25519(&peer_enc_pk) -> Result<Zeroizing<Key32>, SealerError>\` (on no API; D11 feeds it
+  to carrier::ntfy::topic_key), \`stored_hub_hint(&fabric_dir)\`. \`N/relay/tls.rs\`: \`pub fn wrap(fabric_dir: &Path, pairs: &PairTable) -> Option<Arc<dyn
+  StreamWrap>>\` (the None stub D5 replaces, same signature).
+WAVE0_FACTS_PENDING: M4b (the fix wave on M4: PairedHub gains persisted \`ours\`/\`theirs\` (whole = both), \`Fabric::offer_pair(address, role, via)\` for
+pairing offers, FORWARD_RESIDENT, the pairing dial released once whole) — the lead replaces this line with M4b's as-built names before the launch.
 `
 
 const CTX = `

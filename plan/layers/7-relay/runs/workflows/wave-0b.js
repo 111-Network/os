@@ -89,9 +89,11 @@ F2 CONFIRMED (high, Pi floor): the forwarder is O(rows) per trigger, so a drain 
 F3 CONFIRMED (medium, Pi floor and §4.6 step 3): a carrier pairing keeps a resident tcp dial. record_pair keeps the attempt's dial whatever via is,
   and dial_held pins it: the dialer redials a carrier pair with back-off until unpair, while the spec says a carrier pair talks only through its
   carrier after enrolment. (The tests hide it: the hand-off test and leaf_to_leaf release the dial by hand; remove those by-hand releases.)
-  FIX: keep a pairing dial only while the pair is not whole (so the far hub's ENROLL can ride it); when a carrier pair becomes whole, release the
-  dial (and it is never re-dialed by the fabric); for a tcp pair the dial is kept as today. Say in notes that the daemon (M5/D6, §4.6 step 5) must
-  put only tcp pairs in its peers list.
+  FIX: keep a pairing dial only while the pair is not whole (so the far hub's ENROLL can ride it); once the pair is whole, release the fabric's
+  pairing dial for EVERY via (M5 landed the daemon's §4.6 step 5 rule, "one connection per pair": the daemon's reconcile_pair_dials in
+  N/fabric/mod.rs holds the dial for a tcp pair on the side whose NodeId sorts lower, and releases it through Dialer::release; a fabric dial kept
+  alongside makes both hubs dial, M5's open question 1); a carrier pair is never dialed by the fabric afterwards. Note for the lead which call the
+  daemon uses to learn the pair became whole (a Settings event carrying the two bools suffices).
 
 F4 CONFIRMED (medium): re-post rule (1) has no bound. carrier_inbound re-arms every Posted{repost:false} row on every verified far frame, frame by
   frame; after a re-take + forward_done(Taken) the row is Posted{repost:false} again, so the next far frame re-arms it again; within one drain
