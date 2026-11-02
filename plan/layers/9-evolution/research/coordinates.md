@@ -20,7 +20,9 @@ Sessions die; this file is what the next session needs.
 ## Run 1 — research sweep (2026-11-02)
 
 - Script: `plan/layers/9-evolution/runs/workflows/research.js` (launched by `scriptPath`; keep it byte-identical to resume).
-- Run id: _(filled at launch)_.
+- Run id: `wf_d17d28de-ce6` (launched 2026-11-02 ~00:35 UTC from the tree `a65ac6d`, beside the Layer 7 spec run `wf_27c6c677-781` and the
+  other sweep; harness transcript dir `~/.claude/projects/-home-user-os/e7852691-6eb6-50f1-9e84-b01d744ea3a9/subagents/workflows/wf_d17d28de-ce6/`).
+  Resume: `Workflow({scriptPath: "<repo>/plan/layers/9-evolution/runs/workflows/research.js", resumeFromRunId: "wf_d17d28de-ce6"})`.
 - Models: seams scout opus (high) · lens scouts sonnet (high) · critic opus (xhigh) · gap-fill sonnet (high).
 
 Next after the run: the lead writes `layers/9-evolution/options.md` → the owner decides → `DECISIONS.md` → spec `os/9-evolution/README.md`
