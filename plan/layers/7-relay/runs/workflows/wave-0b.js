@@ -237,6 +237,6 @@ trigger is now bounded independently of the number of rows held (show the loops)
 unbounded; (4) a pair is admitted to any forward path only when whole = ours && theirs, persisted; (5) the tests exercise the claims (a pairing
 with a former member, hub_role off, the once-bound of rule (1), the replayed ack, the window). Report only what you can show with a concrete
 path; CONFIRMED when traced end to end, PLAUSIBLE otherwise; list what you checked and found sound and what is not covered.`,
-  { label: 'L7:M4b-review', phase: 'Re-review', schema: REVIEW, model: 'opus', effort: 'high' })
+  { label: `L7:${F[0].id}-review`, phase: 'Re-review', schema: REVIEW, model: 'opus', effort: 'high' })
 log('re-review: ' + (R ? `${R.findings.length} findings` : 'none'))
 return { F, R }

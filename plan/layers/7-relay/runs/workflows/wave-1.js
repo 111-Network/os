@@ -149,8 +149,19 @@ WAVE 0 LANDED (read the files, not this summary, before you rely on a name):
   in this hub's bundle passes the far hub's dial_refusal and is reachable from its network); otherwise leave it false (this hub then dials whenever
   it holds the far address): a private LAN address shown to a hub on another network with far_holds_address = true makes the far hub dial forever
   while this hub waits. A settings row written before M4b (ours/theirs absent) reads as a half pair.
-WAVE0_FACTS_PENDING: M4c (the window fairness bounce: the eviction rule, the store head query) and M5c (the §7.7 void rule) — the lead replaces this
-line with their as-built names before the launch.
+- node111 §7.7 as built after M5c (db7ee22, bfbb33d): \`Rehomed { hub, from, to, marker: Option<u64>, void }\` (the marker is the hub contact row's
+  \`first_seen_seq\`); \`FabricHandle::replace_home_hub_address(address, wait) -> Result<bool, FabricError>\` (D8's call): \`Ok(true)\` once a
+  handshake at the address named the hub (or the fabric's own copy moved there meanwhile), \`Ok(false)\` when no handshake named it in time or the
+  membership changed during the wait, \`Err(Invalid)\` for no home hub, a refused address (dial_refusal), a peer's or a pair's address, or one with
+  a connection up already; the trial dial is released on every failure unless a pair dial or the fabric's own copy holds the address; the override
+  is voided by a Settings showing the hub at neither address, a Contact Added/Removed for the hub, or after a pump lag a gone contact row or a
+  changed marker; no void path releases the shown home-hub address. RESIDUAL FOR D8: a dial target only the fabric holds at the trial address is
+  invisible to the daemon (no mesh111 \`Dialer::is_target\` yet; a foreign connection there can pass the trial's connected check, which sees no
+  NodeId): do not call replace_home_hub_address while a pairing dial may be in flight at that address (read pair_table() and the pairing records
+  first) and record in notes where that is not enough. \`settings::fold_dropped_records(&mut Persisted, &[PairedHub]) -> bool\`; set_pair_link
+  folds a pending unpair into the records before storing a new half, so D6 may call Fabric::unpair and then set_pair_link at once.
+WAVE0_FACTS_PENDING: M4c (the window fairness bounce: the eviction rule, the store head query) — the lead replaces this line with its as-built
+names before the launch.
 `
 
 const CTX = `
