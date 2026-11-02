@@ -79,9 +79,25 @@ WAVE 0 LANDED (read the files, not this summary, before you rely on a name):
   refused too); a \`--from\` staged bundle passes the same chain as an internet one.
 - M4's minimal node111 compile fixes already in the tree: \`Counters.forward_refused\`/\`forward_too_large\` (mirrored by RelayStatus.forward, not
   FabricCounters), a \`FabricEvent::Forward { .. }\` arm in \`FabricHandle::publish\`, \`paired_hubs: Vec::new()\` in fabric/settings decode.
-WAVE0_FACTS_PENDING: M4 (fabric: the widened gate, PairedHub in FabricSettings, FabricEvent::Forward, the hand-off API, set_carrier_max_frame),
-M5 (node111 fabric/settings paired_hubs, the tap in FabricHandle::publish, TcpLanConfig.wrap from relay::tls::wrap(), the home-hub address call, the
-X25519 behind the identity handle) — the lead replaces this line with their as-built names before the launch.
+- mesh111 fabric (M4, 841d90a): \`FabricSettings.paired_hubs: Vec<PairedHub>\`; \`PairedHub { node_id, role: PairRole, via: PairVia }\` (\`valid()\`: a carrier
+  pair is \`Peer\` only); \`PairRole::{Peer, Leaf, Gateway}\` and \`PairVia::{Tcp, Carrier}\` with \`code()\` ("peer"/"leaf"/"gateway", "tcp"/"carrier"),
+  \`from_code(&str)\`, \`PairRole::complement()\` (peer↔peer, leaf↔gateway); re-exported at the crate root: \`mesh111::{CarrierFrame, ForwardDone, PairRole,
+  PairVia, PairedHub}\`. Handle API (every call refused on a node that holds no custody): \`Fabric::pair(address: Option<SocketAddr>, code, card, role, via)
+  -> Result<PairedHub>\` (hub role only; the ENROLL rides a connection already attributed to the far hub when one exists, else dials \`address\`; the far hub is
+  pinned \`oob\` and the pair is WHOLE only once the far hub enrolled here too; a paired hub is never the home hub, am. 12), \`unpair(node_id) -> Result<bool>\`
+  (the far hub's contact goes back to \`oob\`, its puts then meet REJECT_UNENROLLED), \`set_carrier_max_frame(Option<usize>)\` (in memory; \`None\` = no
+  carrier target for a new put), \`forward_take(target, max) -> Result<Vec<CarrierFrame { custody_seq: Option<u64>, bytes }>>\` (acks first, \`custody_seq
+  = None\`, consumed; then puts whose turn it is), \`forward_done(custody_seq, ForwardDone::{Taken, Rejected { why: &'static str }, Retry})\`,
+  \`carrier_inbound(from, frame: Vec<u8>)\` (size, then open, then the counter window; CUSTODY_PUT and CUSTODY_ACK only), \`forward_repost(target) -> Result<u32>\`.
+  \`FabricEvent::Forward { target: NodeId, pending: u32 }\` (coalesced per carrier pair per tick; emitted when a row's turn or an ack reaches the pair, a
+  post is re-armed, or the bound is set; never after a \`Retry\`). \`FabricStatus.paired: Vec<PairView { hub, whole, broken, reachable, pending, reposts }>\`
+  (the member count skips pairs); \`Counters.forward_refused\`, \`forward_too_large\`. Constants \`MAX_PAIRED_HUBS\` 32, \`FORWARD_CACHE\` 256,
+  \`FORWARD_WINDOW\` 32, \`CARRIER_ACK_QUEUE\` 1024, \`FORWARD_PUT_WRAP\` 131, \`pub fn carrier_fits(max_frame: Option<usize>, item_len)\`.
+  Readings built in: a tcp pair's outbound link-up sends one MAILBOX_FETCH {0}, answered with one item-less MAILBOX_ITEM (both sides attribute); a tcp
+  pair's refusals end with its connection; REJECT_FULL rows retry on the pair's link-up/attribution, any other ack from it or a row inserted for it; the
+  \`forwarding\` reason only when the hint names a hub this node knows (hub_flow's stale-hint test unchanged; OWNER QUESTION, board row M4).
+WAVE0_FACTS_PENDING: M5 (node111 fabric/settings paired_hubs, the tap in FabricHandle::publish, TcpLanConfig.wrap from relay::tls::wrap(), the home-hub
+address call, the X25519 behind the identity handle) — the lead replaces this line with their as-built names before the launch.
 `
 
 const CTX = `
