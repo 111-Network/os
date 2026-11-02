@@ -6,7 +6,9 @@
 //! Pruning then frees down to the low watermark (and back above the floor).
 //!
 //! **Normative order:**
-//! 1. transit custody that is `committed`, public chunks that are
+//! 1. transit custody that is `committed` — member rows a member committed
+//!    and (Layer 7 §5.8) forward rows the next custodian acknowledged or
+//!    every target refused (the refused mark) — public chunks that are
 //!    re-fetchable (and delivered transit copies) — weight = size × age, old
 //!    and large first; age = local-sequence distance;
 //! 2. superseded release/KB objects (below the Layer 1 floor), fully fetched
@@ -29,7 +31,9 @@
 //!    incoming custody or bulk item, which is refused instead) **and only
 //!    after an export offer** ([`Store::set_export_offered`]); otherwise
 //!    `export_offer_needed`;
-//! 4. **never** undelivered outbound, uncommitted custody, pending requests,
+//! 4. **never** undelivered outbound, uncommitted custody (forward rows
+//!    included, Layer 7 §5.3 amendment 6: a forward row marked refused is
+//!    committed, so it is a step-1 row), pending requests,
 //!    pinned items or contacts — nor (Layer 6 §3) a user-composed foreign
 //!    send (`group_id` set) while undelivered, the rows of a pinned foreign
 //!    conversation, or the bounded `foreign_seen` keys — instead
@@ -44,6 +48,19 @@
 //! `quota.foreign`, unset = unlimited): over it, its step-2a/2b items are
 //! evicted **first**, before any other quota or step, and it never refuses
 //! (it is never in `full_classes`).
+//!
+//! **Transit (Layer 7 §5.8).** `custody` rows split by `fwd`:
+//! [`Class::Custody`] counts the member rows (`fwd = 0`) only and
+//! [`Class::Transit`] the forward rows (`fwd != 0`), so strangers' items
+//! never count against members' custody quota. Transit always has a quota:
+//! `quota.transit` when set, else a quarter of the custody quota when one is
+//! set, else a quarter of the high watermark (128 MiB at the 512 MiB
+//! default). Inside it each origin (`fwd_from`) holds at most
+//! [`Store::transit_share`] (`quota.transit / 8`, 16 MiB of the default) of
+//! protected forward rows; over it, that origin's forward puts are refused
+//! while other origins are admitted ([`Store::custody_put_fwd`]). Protected
+//! forward rows are DB rows, so they count in live bytes toward the high
+//! watermark like every other row: at the cap, member custody is refused too.
 //!
 //! **Live bytes** are DB pages, so the v3 foreign tables count as soon as
 //! they hold rows; [`Store::class_bytes`] of `Foreign` is the rows' body and
@@ -224,27 +241,39 @@ fn key(r: &PrunedRef) -> (u8, i128, [u8; 32]) {
     }
 }
 
-/// Step 1 candidates.
+/// Bytes one `custody` row accounts for (SQL expression): the item plus,
+/// for a forward row, its 32 B `fwd_from` (NULL, so 0, for a member row:
+/// member rows count exactly what they counted before v4).
+const CUSTODY_ROW_BYTES: &str = "length(bytes) + coalesce(length(fwd_from), 0)";
+
+/// Step 1 candidates. A committed `custody` row is [`Class::Custody`] when
+/// `fwd = 0` and [`Class::Transit`] otherwise (Layer 7 §5.3 amendment 6).
 fn evictable(c: &Connection) -> Result<Vec<Candidate>> {
     let mut out = Vec::new();
     {
-        let mut st = c.prepare(
-            "SELECT custody_seq, length(bytes), local_seq FROM custody WHERE committed = 1",
-        )?;
+        let mut st = c.prepare(&format!(
+            "SELECT custody_seq, {CUSTODY_ROW_BYTES}, local_seq, fwd FROM custody
+             WHERE committed = 1"
+        ))?;
         let rows = st.query_map([], |r| {
             Ok((
                 r.get::<_, i64>(0)?,
                 r.get::<_, i64>(1)?,
                 r.get::<_, i64>(2)?,
+                r.get::<_, i64>(3)?,
             ))
         })?;
         for r in rows {
-            let (seq, len, local) = r?;
+            let (seq, len, local, fwd) = r?;
             out.push(Candidate {
                 item: PrunedRef::Custody(to_u64(seq, "custody_seq")?),
                 bytes: to_u64(len, "custody.len")? + ROW_OVERHEAD,
                 local_seq: to_u64(local, "custody.local_seq")?,
-                class: Class::Custody,
+                class: if fwd == 0 {
+                    Class::Custody
+                } else {
+                    Class::Transit
+                },
             });
         }
     }
@@ -480,11 +509,18 @@ pub(crate) fn live_bytes(c: &Connection) -> Result<u64> {
     Ok(db.saturating_add(to_u64(blobs, "blobs.disk_bytes")?))
 }
 
-/// Bytes a class accounts for.
+/// Bytes a class accounts for. `custody` splits by `fwd` (Layer 7 §5.3
+/// amendment 6): `Custody` is the member rows (`fwd = 0`), `Transit` the
+/// forward rows (`fwd != 0`, each with its `fwd_from`).
 pub(crate) fn class_bytes(c: &Connection, class: Class) -> Result<u64> {
-    let v: i64 = if class == Class::Custody {
+    let v: i64 = if class == Class::Custody || class == Class::Transit {
+        let rows = if class == Class::Custody {
+            "fwd = 0"
+        } else {
+            "fwd != 0"
+        };
         c.query_row(
-            "SELECT coalesce(sum(length(bytes) + ?1), 0) FROM custody",
+            &format!("SELECT coalesce(sum({CUSTODY_ROW_BYTES} + ?1), 0) FROM custody WHERE {rows}"),
             [ROW_OVERHEAD as i64],
             |r| r.get(0),
         )?
@@ -541,18 +577,41 @@ impl Store {
     }
 
     /// The quota of `class`, if any.
+    ///
+    /// [`Class::Transit`] always has one (Layer 7 §5.8): `quota.transit`
+    /// when set, else one quarter of the custody quota when one is set,
+    /// else one quarter of the configured high watermark — 128 MiB at the
+    /// 512 MiB default ([`DEFAULT_HIGH_WATERMARK`]).
     pub fn quota(&self, class: Class) -> Result<Option<u64>> {
-        get_u64(&self.conn, &quota_key(class))
+        let set = get_u64(&self.conn, &quota_key(class))?;
+        if class != Class::Transit || set.is_some() {
+            return Ok(set);
+        }
+        let base = match get_u64(&self.conn, &quota_key(Class::Custody))? {
+            Some(custody) => custody,
+            None => self.watermarks()?.high,
+        };
+        Ok(Some(base / 4))
     }
 
-    /// Set or clear the quota of a refusable class (custody or bulk;
-    /// messages are never refused, so quotas on them are invalid), or the
-    /// shaping quota of [`Class::Foreign`] (evict first, never refuse;
-    /// Layer 6 §3).
+    /// The per-origin share of Transit (Layer 7 §5.8, D31 (6)): one eighth
+    /// of the Transit quota ([`Store::quota`]), 16 MiB of the default;
+    /// derived, no setting of its own. Each origin of forward rows (a
+    /// member, a leaf hub or a carrier pair, by `fwd_from`) holds at most
+    /// this much of protected forward rows ([`Store::forward_origin_bytes`]).
+    pub fn transit_share(&self) -> Result<u64> {
+        Ok(self.quota(Class::Transit)?.unwrap_or(0) / 8)
+    }
+
+    /// Set or clear the quota of a refusable class (custody, transit or
+    /// bulk; messages are never refused, so quotas on them are invalid), or
+    /// the shaping quota of [`Class::Foreign`] (evict first, never refuse;
+    /// Layer 6 §3). Clearing `quota.transit` restores its derived default
+    /// (Layer 7 §5.8), never "no cap".
     pub fn set_quota(&mut self, class: Class, quota: Option<u64>) -> Result<()> {
         if !class.has_quota() {
             return Err(StoreError::Invalid(
-                "quotas apply to custody, bulk and the foreign shaping quota",
+                "quotas apply to custody, transit, bulk and the foreign shaping quota",
             ));
         }
         let k = quota_key(class);

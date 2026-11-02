@@ -4,6 +4,18 @@
 //! sealed packet).
 //!
 //! Size limits are checked before anything is written.
+//!
+//! **Forward rows (Layer 7 §5.1, §5.8; schema v4).** A `custody` row whose
+//! `dest` is not a member here is a forward row: `fwd` names the forward
+//! table's row (1 from a member, 2 from a leaf hub, 3 from the carrier) and
+//! `fwd_from` its origin ([`Fwd`]). Forward rows are [`Class::Transit`],
+//! member rows (`fwd = 0`) stay [`Class::Custody`], so strangers' items
+//! never count against members' custody quota. A forward row is protected
+//! while `committed = 0` and becomes step-1 evictable when the next
+//! custodian acknowledges it ([`Store::forward_commit`]) or every target has
+//! refused it ([`Store::forward_refuse`], the refused mark). `Dir::Transit`
+//! is not used for them (a `messages` row needs peer, stream, epoch and `n`,
+//! none of which a hub sees in a sealed item).
 
 use rusqlite::{params, Connection, OptionalExtension, Row};
 
@@ -54,11 +66,19 @@ pub enum Class {
     /// (prune steps 2a/2b), never refused. It has a shaping quota
     /// ([`Class::has_quota`]): over it, this class is evicted first.
     Foreign = 9,
+    /// Forward rows (Layer 7 §5.3 amendment 6, §5.8): `custody` rows with
+    /// `fwd != 0`, other people's sealed items a hub holds for another hub.
+    /// Quota-only (settings key `quota.transit`, always set: a default
+    /// derives from the custody quota or the high watermark,
+    /// [`Store::quota`](super::Store::quota)); refusable (over it, or over an
+    /// origin's share, forward puts get `REJECT_FULL`); never produced by
+    /// [`Class::from_kind`] and never the class of a message or a blob.
+    Transit = 10,
 }
 
 impl Class {
     /// Every class.
-    pub const ALL: [Class; 10] = [
+    pub const ALL: [Class; 11] = [
         Class::Control,
         Class::Human,
         Class::Agent,
@@ -69,10 +89,13 @@ impl Class {
         Class::Object,
         Class::Custody,
         Class::Foreign,
+        Class::Transit,
     ];
 
     /// The class of a §3.2 kind byte. Never [`Class::Foreign`]: foreign
-    /// rows have no 111 kind (Layer 6 §3).
+    /// rows have no 111 kind (Layer 6 §3). Never [`Class::Transit`]: a
+    /// forward row's class comes from its `fwd`, not from a kind (Layer 7
+    /// §5.3 amendment 6).
     pub fn from_kind(kind: u8) -> Class {
         match kind {
             0x01 => Class::Human,
@@ -87,12 +110,19 @@ impl Class {
     }
 
     /// Bulk and custody classes: the ones capacity may refuse and quotas
-    /// shape (§10.4: "refuses new custody and new bulk"). False for
+    /// shape (§10.4: "refuses new custody and new bulk"), forward rows
+    /// included ([`Class::Transit`], Layer 7 §5.8). False for
     /// [`Class::Foreign`] (Layer 6 §3: evicted, never refused).
     pub fn is_refusable(self) -> bool {
         matches!(
             self,
-            Class::Kb | Class::Update | Class::Patch | Class::Sync | Class::Object | Class::Custody
+            Class::Kb
+                | Class::Update
+                | Class::Patch
+                | Class::Sync
+                | Class::Object
+                | Class::Custody
+                | Class::Transit
         )
     }
 
@@ -117,6 +147,7 @@ impl Class {
             Class::Object => "object",
             Class::Custody => "custody",
             Class::Foreign => "foreign",
+            Class::Transit => "transit",
         }
     }
 
@@ -425,6 +456,93 @@ pub struct CustodyItem {
     pub committed: bool,
 }
 
+/// Bytes `fwd_from` adds to a forward row (a NodeId; Layer 7 §16 "+32 B per
+/// forward row").
+pub const FWD_FROM_LEN: usize = 32;
+
+/// `custody.fwd` with `custody.fwd_from` (Layer 7 §5.1 table, §5.3
+/// amendment 5): which row of the forward table holds a custody item and,
+/// for a forward row, the NodeId of the member or pair that put it (the
+/// §5.8 per-origin share is keyed by it). One value carries both columns,
+/// so a forward row without an origin, or a member row with one, cannot be
+/// written (the v4 `CHECK`s say the same in SQL).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Fwd {
+    /// `fwd = 0`: `dest` is a member here (today's row; `fwd_from` NULL).
+    Member,
+    /// `fwd = 1`: an enrolled member put a non-member `dest`; the member.
+    FromMember([u8; 32]),
+    /// `fwd = 2`: a `leaf` pair's put, for a `carrier` pair; the leaf hub.
+    FromLeaf([u8; 32]),
+    /// `fwd = 3`: a `carrier` pair's put for a member of a `leaf` pair; the
+    /// carrier pair.
+    FromCarrier([u8; 32]),
+}
+
+impl Fwd {
+    /// The `custody.fwd` value (0–3).
+    pub fn code(&self) -> u8 {
+        match self {
+            Fwd::Member => 0,
+            Fwd::FromMember(_) => 1,
+            Fwd::FromLeaf(_) => 2,
+            Fwd::FromCarrier(_) => 3,
+        }
+    }
+
+    /// The `custody.fwd_from` value: the origin of a forward row, `None`
+    /// for a member row.
+    pub fn origin(&self) -> Option<&[u8; 32]> {
+        match self {
+            Fwd::Member => None,
+            Fwd::FromMember(o) | Fwd::FromLeaf(o) | Fwd::FromCarrier(o) => Some(o),
+        }
+    }
+
+    /// Whether this is a forward row (`fwd != 0`).
+    pub fn is_forward(&self) -> bool {
+        !matches!(self, Fwd::Member)
+    }
+
+    /// The storage class (Layer 7 §5.3 amendment 6): [`Class::Custody`] for
+    /// `fwd = 0`, [`Class::Transit`] for every forward row.
+    pub fn class(&self) -> Class {
+        if self.is_forward() {
+            Class::Transit
+        } else {
+            Class::Custody
+        }
+    }
+
+    /// Both columns of one stored row; a pair the v4 `CHECK`s forbid is a
+    /// corrupt row (fail closed, never guessed).
+    pub(crate) fn from_parts(fwd: i64, from: Option<Vec<u8>>) -> Result<Fwd> {
+        let from = from.map(|f| id32(f, "custody.fwd_from")).transpose()?;
+        match (fwd, from) {
+            (0, None) => Ok(Fwd::Member),
+            (1, Some(o)) => Ok(Fwd::FromMember(o)),
+            (2, Some(o)) => Ok(Fwd::FromLeaf(o)),
+            (3, Some(o)) => Ok(Fwd::FromCarrier(o)),
+            _ => Err(StoreError::Corrupt("custody.fwd")),
+        }
+    }
+}
+
+/// A forward row (Layer 7 §5.1, §5.9): what the forwarder offers the next
+/// custodian. `pkt_ref` is the stored one (computed from `bytes` at put).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ForwardItem {
+    pub custody_seq: u64,
+    pub dest: [u8; 32],
+    pub pkt_ref: [u8; 16],
+    pub bytes: Vec<u8>,
+    /// Never [`Fwd::Member`].
+    pub fwd: Fwd,
+    /// Committed by the next custodian's ack, or marked refused (§5.8): then
+    /// step-1 evictable, and never offered again.
+    pub committed: bool,
+}
+
 /// The store's answer to filing a message request (§7.2 (3)).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RequestPut {
@@ -453,10 +571,22 @@ pub enum RequestRefusal {
 pub enum CustodyPut {
     /// Stored durably under `custody_seq`.
     Accepted(u64),
-    /// Same `pkt_ref` already held, under `custody_seq`.
+    /// Same `pkt_ref` already held, under `custody_seq` (a member row or a
+    /// forward row alike: a bounced item answers `DUPLICATE`, Layer 7 §5.7).
     Duplicate(u64),
-    /// Capacity refuses new custody (`REJECT_FULL`, §10.4).
+    /// Capacity refuses new custody (`REJECT_FULL`, §10.4); for a forward
+    /// row also the Transit quota or its origin's share (Layer 7 §5.8).
     RejectFull,
+}
+
+/// The columns of a forward-row SELECT, in the order [`raw_forward`] reads.
+const FORWARD_COLS: &str = "custody_seq, dest, pkt_ref, bytes, fwd, fwd_from, committed";
+
+/// Bytes one stored forward row accounts for in its origin's share: the
+/// item, its `fwd_from` and the per-row overhead (the same sum
+/// [`Store::class_bytes`] of [`Class::Transit`] counts).
+fn forward_row_bytes(item_len: usize) -> u64 {
+    (item_len + FWD_FROM_LEN) as u64 + super::prune::ROW_OVERHEAD
 }
 
 impl Store {
@@ -1007,7 +1137,33 @@ impl Store {
     /// gives the same value for the receipt). `Accepted` is committed with
     /// `synchronous = FULL` — the receipt promises the hub holds it.
     /// Capacity may answer `RejectFull` (§10.4).
+    ///
+    /// A member row: [`Store::custody_put_fwd`] with [`Fwd::Member`]
+    /// (`fwd = 0`, `fwd_from` NULL — the row a store without pairing has
+    /// always written).
     pub fn custody_put(&mut self, dest: &[u8; 32], bytes: &[u8]) -> Result<CustodyPut> {
+        self.custody_put_fwd(dest, bytes, Fwd::Member)
+    }
+
+    /// Hold a sealed item as the forward table's row `fwd` (Layer 7 §5.1,
+    /// §5.3 amendment 6; the fabric's gate decided which row, §5.2).
+    ///
+    /// Dedup by `pkt_ref` first, across member and forward rows (a bounced
+    /// item answers `Duplicate`, §5.7). Then admission under the row's class
+    /// ([`Fwd::class`]: `Custody` for a member row, `Transit` for a forward
+    /// row) by the §10.4 rule — its quota, the high watermark, `store_full`
+    /// — and, for a forward row, first under its origin's share
+    /// ([`Store::transit_share`], §5.8): an origin whose protected forward
+    /// rows would exceed it gets `RejectFull` while other origins are still
+    /// admitted. A member row is admitted exactly as before v4 (its bytes,
+    /// the custody quota, the watermark); a forward row counts its item,
+    /// its `fwd_from` and the per-row overhead.
+    pub fn custody_put_fwd(
+        &mut self,
+        dest: &[u8; 32],
+        bytes: &[u8],
+        fwd: Fwd,
+    ) -> Result<CustodyPut> {
         if bytes.len() > MAX_CUSTODY_ITEM {
             return Err(StoreError::Invalid("custody item too large"));
         }
@@ -1015,15 +1171,40 @@ impl Store {
         if let Some(seq) = self.custody_by_ref(pkt_ref)? {
             return Ok(CustodyPut::Duplicate(seq));
         }
-        if !self.admit(super::Class::Custody, bytes.len() as u64)? {
+        let incoming = match fwd.origin() {
+            None => bytes.len() as u64,
+            Some(origin) => {
+                let need = forward_row_bytes(bytes.len());
+                let held = self.forward_origin_bytes(origin)?;
+                if held.saturating_add(need) > self.transit_share()? {
+                    return Ok(CustodyPut::RejectFull);
+                }
+                need
+            }
+        };
+        if !self.admit(fwd.class(), incoming)? {
             return Ok(CustodyPut::RejectFull);
         }
         self.with_tx(Durability::Full, |tx| {
             let seq = to_i64(next_local_seq(tx)?, "local_seq")?;
-            tx.execute(
-                "INSERT INTO custody (dest, pkt_ref, bytes, local_seq) VALUES (?1, ?2, ?3, ?4)",
-                params![&dest[..], &pkt_ref[..], bytes, seq],
-            )?;
+            match fwd.origin() {
+                None => tx.execute(
+                    "INSERT INTO custody (dest, pkt_ref, bytes, local_seq) VALUES (?1, ?2, ?3, ?4)",
+                    params![&dest[..], &pkt_ref[..], bytes, seq],
+                )?,
+                Some(origin) => tx.execute(
+                    "INSERT INTO custody (dest, pkt_ref, bytes, local_seq, fwd, fwd_from)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                    params![
+                        &dest[..],
+                        &pkt_ref[..],
+                        bytes,
+                        seq,
+                        i64::from(fwd.code()),
+                        &origin[..]
+                    ],
+                )?,
+            };
             Ok(CustodyPut::Accepted(to_u64(
                 tx.last_insert_rowid(),
                 "custody_seq",
@@ -1134,6 +1315,113 @@ impl Store {
             |r| Ok((r.get(0)?, r.get(1)?)),
         )?;
         Ok((to_u64(n, "count")?, to_u64(b, "bytes")?))
+    }
+
+    // -- forward rows (hub role, Layer 7 §5) --------------------------------
+
+    /// Protected forward rows (`fwd != 0`, `committed = 0`) above
+    /// `custody_seq` `after` (exclusive), ascending, at most `limit`: what
+    /// the forwarder still owes a next custodian (Layer 7 §5.9; after a
+    /// restart it resumes from here, §15 G9 item 6).
+    pub fn forward_pending(&self, after: u64, limit: usize) -> Result<Vec<ForwardItem>> {
+        let mut st = self.conn.prepare(&format!(
+            "SELECT {FORWARD_COLS} FROM custody
+             WHERE fwd != 0 AND committed = 0 AND custody_seq > ?1
+             ORDER BY custody_seq LIMIT ?2"
+        ))?;
+        let rows = st.query_map(
+            params![
+                to_i64(after, "custody_seq")?,
+                i64::try_from(limit).unwrap_or(i64::MAX)
+            ],
+            raw_forward,
+        )?;
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(forward_item(r?)?);
+        }
+        Ok(out)
+    }
+
+    /// One forward row by `custody_seq` (committed or not); `None` for a
+    /// member row or a row no longer held.
+    pub fn forward_item(&self, custody_seq: u64) -> Result<Option<ForwardItem>> {
+        let raw = self
+            .conn
+            .query_row(
+                &format!("SELECT {FORWARD_COLS} FROM custody WHERE custody_seq = ?1 AND fwd != 0"),
+                [to_i64(custody_seq, "custody_seq")?],
+                raw_forward,
+            )
+            .optional()?;
+        raw.map(forward_item).transpose()
+    }
+
+    /// The forward row holding `pkt_ref`, if one is held (a next custodian's
+    /// `CUSTODY_ACK` names the item by it, Layer 7 §5.9).
+    pub fn forward_by_ref(&self, pkt_ref: &[u8; 16]) -> Result<Option<ForwardItem>> {
+        let raw = self
+            .conn
+            .query_row(
+                &format!("SELECT {FORWARD_COLS} FROM custody WHERE pkt_ref = ?1 AND fwd != 0"),
+                [&pkt_ref[..]],
+                raw_forward,
+            )
+            .optional()?;
+        raw.map(forward_item).transpose()
+    }
+
+    /// The next custodian answered `ACCEPTED` or `DUPLICATE` (Layer 7 §5.8):
+    /// mark the forward row `committed = 1`, so step 1 may evict it by size ×
+    /// age; `pkt_ref` stays until it does. Idempotent; `false` when nothing
+    /// changed (already committed, a member row, or not held). A member row
+    /// is never touched here: only its member's `MAILBOX_COMMIT` commits it.
+    pub fn forward_commit(&mut self, custody_seq: u64) -> Result<bool> {
+        let n = self.conn.execute(
+            "UPDATE custody SET committed = 1
+             WHERE custody_seq = ?1 AND fwd != 0 AND committed = 0",
+            [to_i64(custody_seq, "custody_seq")?],
+        )?;
+        Ok(n > 0)
+    }
+
+    /// The refused mark (Layer 7 §5.8, panel C1 (a)): every target the
+    /// forward table allows has refused the row, or it fits no target left.
+    /// It is the same column as a commit (`committed = 1`): the row leaves
+    /// step 4's "never" tier and step 1 may evict it like any committed row;
+    /// thereafter it is an ordinary committed row (the `forward_refused`
+    /// count is the fabric's, per session). Idempotent, as
+    /// [`Store::forward_commit`].
+    pub fn forward_refuse(&mut self, custody_seq: u64) -> Result<bool> {
+        self.forward_commit(custody_seq)
+    }
+
+    /// `(count, bytes)` of protected forward rows (`fwd != 0`,
+    /// `committed = 0`; bytes = the items).
+    pub fn forward_stats(&self) -> Result<(u64, u64)> {
+        let (n, b): (i64, i64) = self.conn.query_row(
+            "SELECT count(*), coalesce(sum(length(bytes)), 0) FROM custody
+             WHERE fwd != 0 AND committed = 0",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )?;
+        Ok((to_u64(n, "count")?, to_u64(b, "bytes")?))
+    }
+
+    /// Bytes of `origin`'s protected forward rows (`fwd_from = origin`,
+    /// `committed = 0`), counted as [`Store::class_bytes`] counts Transit:
+    /// what its share ([`Store::transit_share`]) is measured against (Layer
+    /// 7 §5.8). Committed rows (handed over or refused) are step-1 evictable
+    /// and evicted first by the Transit quota, so they pin nothing and do
+    /// not hold the share.
+    pub fn forward_origin_bytes(&self, origin: &[u8; 32]) -> Result<u64> {
+        let v: i64 = self.conn.query_row(
+            "SELECT coalesce(sum(length(bytes) + length(fwd_from) + ?2), 0) FROM custody
+             WHERE fwd != 0 AND committed = 0 AND fwd_from = ?1",
+            params![&origin[..], super::prune::ROW_OVERHEAD as i64],
+            |r| r.get(0),
+        )?;
+        to_u64(v, "forward bytes")
     }
 
     // -- cursors (member side, §9) -----------------------------------------
@@ -1251,5 +1539,36 @@ fn outbox_from_raw(v: OutboxRaw) -> Result<OutboxFrag> {
         outstanding,
         acked,
         local_seq: to_u64(local, "outbox.local_seq")?,
+    })
+}
+
+type ForwardRaw = (i64, Vec<u8>, Vec<u8>, Vec<u8>, i64, Option<Vec<u8>>, bool);
+
+fn raw_forward(r: &Row<'_>) -> rusqlite::Result<ForwardRaw> {
+    Ok((
+        r.get(0)?,
+        r.get(1)?,
+        r.get(2)?,
+        r.get(3)?,
+        r.get(4)?,
+        r.get(5)?,
+        r.get(6)?,
+    ))
+}
+
+fn forward_item(v: ForwardRaw) -> Result<ForwardItem> {
+    let (seq, dest, pkt_ref, bytes, fwd, from, committed) = v;
+    let fwd = Fwd::from_parts(fwd, from)?;
+    if !fwd.is_forward() {
+        return Err(StoreError::Corrupt("custody.fwd"));
+    }
+    Ok(ForwardItem {
+        custody_seq: to_u64(seq, "custody_seq")?,
+        dest: id32(dest, "custody.dest")?,
+        pkt_ref: <[u8; 16]>::try_from(pkt_ref.as_slice())
+            .map_err(|_| StoreError::Corrupt("custody.pkt_ref"))?,
+        bytes,
+        fwd,
+        committed,
     })
 }
