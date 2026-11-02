@@ -132,3 +132,10 @@ at `~/.claude/projects/…/subagents/workflows/wf_60f165f1-80f/journal.jsonl` on
   after a pending unpair is dropped by the unpair's late event) and S3 (the trial dial's timeout releases a foreign dial target; the mesh111
   `Dialer::is_target` seam is a D8 residual): the M5c bounce. The lead's rule since Wave 0 holds: every Rust row gets one independent read-only
   review before its commit, and a review finding is either fixed in a bounce or written on the row as `open:`.
+- Result (2026-11-02, ~09:00 UTC, the owner paused the build for the PR #2 merge): M5c landed `db7ee22` (its re-review's one low finding fixed by
+  the lead's follow-up `bfbb33d`: the hub and its membership marker re-read before a §7.7 override is recorded, with the test
+  `a_forget_during_the_trial_records_no_override`). M4c (`wf_93618910-625`) returned done; its re-review found two confirmed medium gaps in the
+  fairness probe (no self-wake, no reset on turn-changing events), three low points and a doc nit → the M4d brief (`wave-0b.js` `T.M4d`, row
+  M4d ⬜, not launched); the lead's re-run caught one racy assertion in the new fairness test (a down target's resident count after the up
+  target's rows committed: evicted rows page back in as room frees) and fixed it before landing M4c `19df20b`. Wave 1 not launched; the state is
+  in `plan/HANDOFF-2026-11-02.md`.

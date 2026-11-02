@@ -7,9 +7,9 @@ export const meta = {
   ],
 }
 
-const ROOT = '/home/user/os'
 const SP = '/tmp/claude-0/-home-user-os/e7852691-6eb6-50f1-9e84-b01d744ea3a9/scratchpad'
 const a = args || {}
+const ROOT = a.root || '/home/user/os'
 const ONLY = Array.isArray(a.only) ? a.only : null
 
 const CTX = `
@@ -184,6 +184,62 @@ Keep: every M4b test passing or rewritten to the same claim; hub_flow.rs unchang
 CHECK (all green, paste the tail): from ${ROOT}/5-messaging: CARGO_TARGET_DIR=${SP}/target/mesh111 sh scripts/check.sh (musl SKIP); then cargo test -p
 mesh111 --test forward --test hub_flow twice; from ${ROOT}/1-bootstrap: cargo check -p node111 (node111 compiles mesh111 from disk).
 NOTES: the exact names added (the store query, any constant), and the eviction rule as built.` },
+  M4d: { model: 'opus', effort: 'high', brief: `TASK M4d (row "| M4d |" in the Wave 0 table of ${ROOT}/7-relay/TASKS.md): the bounce on M4c (landed; read
+the module doc paragraph "The resident window" of M/fabric.rs and the end of "Readings recorded for the lead", then Forwarder::evictable/evict,
+Core::track_forward, first_target, up_targets, page_in, swap_in, forward_pass, run_forwarder and the actor loop). YOU WORK IN A GIT WORKTREE: ${ROOT} is a
+detached checkout of the repo made for you; edit and test there only; never git commit/add/stash/checkout; the lead applies your diff to the main
+tree. Files you own: ${ROOT}/5-messaging/crates/mesh111/src/fabric.rs and ${ROOT}/5-messaging/crates/mesh111/tests/forward.rs. Nothing else (no
+store change is needed; no node111 check: the lead runs it on the main tree). The findings of the read-only re-review of M4c (verify each against
+the file as it now is):
+
+F1 CONFIRMED (medium): the swap probe advances only on unrelated inputs. run_forwarder caps a tick at 4 passes; swap_in reads one page of 256
+  heads per pass, so a tick gets through at most 1,024 stored heads, then fwd.run stays true but nothing wakes the actor (no timer, no self-queued
+  input): the probe sits until some unrelated Input arrives, and a newly up target sends it back to 'loaded', so a flapping pair can keep it from
+  ever reaching the end of a deep store. Scenario: 4,096 rows for B (down) resident, 20,000 more for B in the store; one put for Carl (turn C, up)
+  is stored only; the tick's 4 passes read 1,024 B heads and stop; Carl's row waits for about 20 unrelated inputs. THE DESIGN (lead): when a tick
+  ends with the probe having more to read (swap_in saw a full page and set run), the actor queues ONE internal continue-input to itself through its
+  own input path (no timer, no task, no sleep; a self-wake is one message in its own mailbox): the per-tick work stays bounded (4 passes) and every
+  other input interleaves; if the mailbox is bounded and full, drop the self-wake (the next real input resumes the probe) and record that in notes.
+  Test: more than 4 pages (> 1,024) of down-target rows ahead of one up target's row, and NO call into the hub under test while waiting (every
+  status()/pair_view() on it is a tick that hides the defect): observe only through the far hub's custody count or the hub's event stream, then
+  assert the row arrived.
+
+F2 CONFIRMED (medium): probe_done means "no stored row has an up turn", which stays true only while stored rows' turns cannot change; they change
+  on an unpairing, a pair break (forward_targets drops the pair: near/upstream rows move to the next pair), a carrier bound change (rows that did not
+  fit now fit) and a cache hit; probe_done is reset only when a NEW target comes up (up_targets). After such a change swap_in returns at once while
+  track_forward's probe_done branch admits NEWER rows for the same up target by evicting: they are offered before that target's older stored rows,
+  which breaks per-target custody order and R1's fairness. Scenario: pairs [B, C, D]; the window holds D's rows (D down), unhinted rows whose turn is
+  B (down) are in the store, the probe read them all (probe_done); the owner unpairs B: those rows now have turn C (up) but the up set did not
+  change; swap_in returns 0, page_in has no room; every new unhinted put with turn C evicts a D row and goes to C first. FIX: wherever all_dirty is
+  set (drop_pair, pair_broken, pair_changed, set_carrier_max_frame) also set probe = loaded and probe_done = false; on a cache_put that inserts or
+  changes an entry, the same reset (a cache commit is rare per dest and the re-sweep is bounded per tick and self-paced by F1). Test: an unpairing
+  under a full window: the ex-B stored rows reach C before newer puts for C, in custody order.
+
+F3 PLAUSIBLE (low): only a DOWN target's rows are evictable; an up pair that answers REJECT_FULL keeps its Full rows (retried one window per
+  trigger, C16) and a window full of them blocks other up targets' stored rows (R1's starvation with 'full' for 'down'). FIX: a target whose
+  REJECT_FULL rows are waiting (a non-empty full set for it) counts as NOT up for admission (no stored row is swapped in for it until its next
+  trigger clears or accepts), and its Full rows are evictable like a down target's (they are in the store; on their return they are offered again).
+  Test: C full while D's stored rows wait: D's rows move.
+
+F4 PLAUSIBLE (low): eviction strips a resident row of its hint, its refusals and its orphaned flag during normal running; paged back in without the
+  hint, a fwd=1 row whose hint named no pair (upstream and carriers only, §5.1) now also takes the near tcp pairs; a carrier pair that Rejected it
+  is offered it again (one carrier post per cycle); an orphaned row waits instead of being refused. FIX: when choosing what to evict, prefer (among
+  the newest down-turn rows) a row with hint = None and no refusals; record the residual widening in notes next to the paged-hint follow-up (the
+  hint column stays a recorded follow-up, not yours).
+
+F5 PLAUSIBLE (low, record only): rule (1) rounds are counted per far frame after a post, not per drain (§5.9 "a drain that began after its post");
+  under 5A (drain, take, flush, drain) it comes out the same; under 5B's held stream the far hub's frames from one flush arrive one by one and each
+  one after a new Taken can re-arm the row once more. Do NOT change the counting: add one doc sentence in the module doc that the round is counted
+  per verified far frame and that the daemon's held-stream driver (D11) must call forward_take only at a drain boundary; the lead records it for D11.
+
+F6 CONFIRMED (low): tests/forward.rs: the old M4b doc comment of the rule-(1) test ("re-arms a post at most once in its life", three lines) now
+  sits above the \`forwards\` helper and states the bound M4c removed: delete those lines.
+
+Keep: every M4c test passing or rewritten to the same claim; hub_flow.rs unchanged; no timer, task, sleep or listener; the work per tick bounded;
+FORWARD_RESIDENT, FORWARD_LOAD_PAGE and FwdRow's size unchanged; no new pub API.
+CHECK (all green, paste the tail): from ${ROOT}/5-messaging: CARGO_TARGET_DIR=${SP}/target/mesh111 sh scripts/check.sh (musl SKIP); then cargo test -p
+mesh111 --test forward --test hub_flow twice. Scratch files under ${SP}/M4d/ only; delete them at the end.
+NOTES: the self-wake as built (where it is queued, what bounds it), the reset rule, the admission rule for a full target, the eviction preference.` },
 }
 
 const RESULT = {

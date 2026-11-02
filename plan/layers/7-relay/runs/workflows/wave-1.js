@@ -160,8 +160,12 @@ WAVE 0 LANDED (read the files, not this summary, before you rely on a name):
   NodeId): do not call replace_home_hub_address while a pairing dial may be in flight at that address (read pair_table() and the pairing records
   first) and record in notes where that is not enough. \`settings::fold_dropped_records(&mut Persisted, &[PairedHub]) -> bool\`; set_pair_link
   folds a pending unpair into the records before storing a new half, so D6 may call Fabric::unpair and then set_pair_link at once.
-WAVE0_FACTS_PENDING: M4c (the window fairness bounce: the eviction rule, the store head query) — the lead replaces this line with its as-built
-names before the launch.
+- mesh111 forwarder after M4c (19df20b): the resident window is shared fairly (a swap probe evicts a down target's newest idle rows for an up
+  target's stored rows; \`Store::forward_pending_lens\` reads row heads without their bytes); re-post rule (1) re-arms once per far-hub round
+  (\`Slot::Heard\`). The public API is unchanged (\`forward_take\`, \`forward_done\`, \`forward_repost\`, \`carrier_inbound\`, \`PairView\`): nothing
+  in Wave 1 depends on the forwarder's internals. M4d (a bounce: the probe's self-wake and its resets) is the next mesh111 task; if the lead runs
+  it beside Wave 1 (a worktree) and lands it on M/fabric.rs mid-wave, a node111 build that fails ONLY with errors inside mesh111 is that landing
+  in progress: wait 90 s and retry (up to five times) before reporting blocked-by: M4d.
 `
 
 const CTX = `

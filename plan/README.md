@@ -20,7 +20,7 @@ os/plan/
   INDEX.md             status board
   DECISIONS.md         decision log
   EXECUTION.md         build protocol
-  HANDOFF-<date>.md    session handoff (the newest open one is current; none open now; see "Handoffs")
+  HANDOFF-<date>.md    session handoff (the newest open one is current: HANDOFF-2026-11-02.md; see "Handoffs")
   cross-layer/         material that spans layers (devices.md, parked.md, ci-cd.md — CI/CD + GitHub hygiene, D28)
     devices.md           device-connection core brief (Layer 6 opener; read by Layers 4, 5, 6)
     parked.md            ideas parked by the owner for later layers
@@ -51,7 +51,7 @@ and `os/N-<slug>/TASKS.md`, where the layer's code is.
 | 4 Interface & Dashboard | `layers/4-interface/` | options, triage |
 | 5 Messaging & Data | `layers/5-messaging/` | full set: research, options, review, runs |
 | 6 Transport & Bridge | `layers/6-transport/` | research (R00–R08 + coordinates), options, review (the 3-judge panel, the recheck, V5 `review/v5-integrated.md`), runs (workflows `runs/workflows/*.js`, journals); opener brief [`cross-layer/devices.md`](cross-layer/devices.md); built and locked 2026-10-23 (D29) |
-| 7 Relay & Presence | `layers/7-relay/` | research (kickoff 2026-11-01: `research/00`–`07`, `runs/workflows/research.js`, `research/coordinates.md`), options brief (`options.md`, decided D30 2026-11-01), spec runs (`runs/workflows/spec.js`, `spec-fix.js`), review (`review/`: three panel reports, `triage.md`, `recheck.md`; D31, lock D32 2026-11-02); 🔨 building per `os/7-relay/TASKS.md` |
+| 7 Relay & Presence | `layers/7-relay/` | research (kickoff 2026-11-01: `research/00`–`07`, `runs/workflows/research.js`, `research/coordinates.md`), options brief (`options.md`, decided D30 2026-11-01), spec runs (`runs/workflows/spec.js`, `spec-fix.js`), review (`review/`: three panel reports, `triage.md`, `recheck.md`; D31, lock D32 2026-11-02); 🔨 building per `os/7-relay/TASKS.md` (Wave 0 and its fix waves landed 2026-11-02, `runs/workflows/wave-0*.js`; Wave 1 next; paused for the PR #2 merge: `HANDOFF-2026-11-02.md`) |
 | 8 Storage & Shared State | `layers/8-storage/` | research (kickoff 2026-11-02: `research/00`–`07-gap-3`, `runs/workflows/research.js`, `research/coordinates.md`), options brief (`options.md`, `runs/workflows/options.js`, `review/options-check.md`); 🧭 deciding: the owner decides → spec → fable panel → lock → build |
 | 9 Self-Healing & Evolution | `layers/9-evolution/` | research (kickoff 2026-11-02: `research/00`–`07-gap-3`, `runs/workflows/research.js`, `research/coordinates.md`), options brief (`options.md`, `runs/workflows/options.js`, `review/options-check.md`); 🧭 deciding: the owner decides → spec → fable panel → lock → build |
 
@@ -98,7 +98,7 @@ and `os/N-<slug>/TASKS.md`, where the layer's code is.
 
 A handoff is the one document a fresh session needs to continue exactly where work stopped. It lives at the plan root as
 `HANDOFF-YYYY-MM-DD.md` while it is current. Once its work is done it is marked closed at the top and stays as the record; the newest open one is current.
-The handoffs so far: [`HANDOFF-2026-10-15.md`](HANDOFF-2026-10-15.md) (Layer 5, historical) and [`HANDOFF-2026-10-20.md`](HANDOFF-2026-10-20.md) (Layer 6, closed 2026-10-23); none is open now.
+The handoffs so far: [`HANDOFF-2026-10-15.md`](HANDOFF-2026-10-15.md) (Layer 5, historical) and [`HANDOFF-2026-10-20.md`](HANDOFF-2026-10-20.md) (Layer 6, closed 2026-10-23) and [`HANDOFF-2026-11-02.md`](HANDOFF-2026-11-02.md) (Layer 7, **open**: the current state).
 The 2026-10-15 handoff's paths were rewritten to the numbered layer folders on 2026-10-18 and again on 2026-10-20; the state it describes is unchanged.
 
 > The paths in the section below are as they were on 2026-10-15. The layer folders at the repo root and under `layers/`
