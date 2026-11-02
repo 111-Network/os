@@ -635,6 +635,7 @@ async fn update_check_wakes_the_updater_loop() {
         fallback_base: None,
         current_version: "2026.10.13".parse().unwrap(),
         timeout: Duration::from_secs(2),
+        check_internet: true,
     };
     let hooks = updater::Hooks {
         wake: Arc::clone(&n.api.update_check),

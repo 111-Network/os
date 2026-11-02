@@ -2,11 +2,111 @@
 //! verify the extracted tree against `share/payload.manifest` → fsync → rename
 //! → drop `state/update-request.json`. The daemon's staging area is the ONLY
 //! place it may write; promotion to releases/ is the root helper's job (D12).
+//!
+//! The whole fetch–stage–request sequence runs under [`StagingLock`]
+//! (`state/staging.lock`, Layer 7 §9.2, S1), so the daemon's check and a
+//! `111 update --from` run never write `state/staging/<ver>/` or the request
+//! file at the same time.
 
 use crate::calver::Calver;
 use crate::manifest::PinnedArtifact;
 use flate2::read::GzDecoder;
+use std::fs::File;
+use std::os::fd::AsRawFd;
+use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Component, Path, PathBuf};
+
+/// The lock file's name under `state/` (Layer 7 §9.2, S1; §18).
+pub const STAGING_LOCK: &str = "staging.lock";
+
+/// How [`StagingLock::acquire`] treats a lock another run holds (§9.2).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LockWait {
+    /// Block until it is free: the daemon's loop, inside its `spawn_blocking`.
+    Wait,
+    /// Return [`LockTake::Held`] at once: `111 update --from` (exit 75, L4).
+    NoWait,
+}
+
+/// The result of [`StagingLock::acquire`].
+#[derive(Debug)]
+pub enum LockTake {
+    Taken(StagingLock),
+    /// Another run (the daemon's check, or a `--from` run) holds the lock.
+    Held,
+}
+
+/// `state/staging.lock`: an exclusive `flock(2)` on a file opened `O_CLOEXEC`
+/// (so no child the daemon spawns inherits it) and `O_NOFOLLOW` (a planted link
+/// is refused, never followed), held for the whole fetch–stage–request sequence
+/// (Layer 7 §9.2, S1). Dropping it closes the descriptor, which releases the
+/// lock; a crashed holder releases it the same way.
+#[derive(Debug)]
+pub struct StagingLock {
+    _file: File,
+    waited: bool,
+}
+
+impl StagingLock {
+    /// `state/staging.lock` under `state_dir`.
+    pub fn path(state_dir: &Path) -> PathBuf {
+        state_dir.join(STAGING_LOCK)
+    }
+
+    /// Take the lock (creating the file, mode 0600, when missing).
+    pub fn acquire(state_dir: &Path, wait: LockWait) -> std::io::Result<LockTake> {
+        std::fs::create_dir_all(state_dir)?;
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .mode(0o600)
+            .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW)
+            .open(Self::path(state_dir))?;
+        // A non-blocking try first, so a waiting take knows it waited (the run
+        // it waited for may have staged the same release: `already_requested`).
+        match flock(&file, libc::LOCK_EX | libc::LOCK_NB)? {
+            true => {
+                return Ok(LockTake::Taken(StagingLock {
+                    _file: file,
+                    waited: false,
+                }))
+            }
+            false if wait == LockWait::NoWait => return Ok(LockTake::Held),
+            false => {}
+        }
+        flock(&file, libc::LOCK_EX)?;
+        Ok(LockTake::Taken(StagingLock {
+            _file: file,
+            waited: true,
+        }))
+    }
+
+    /// Whether this take had to wait for another holder (§9.2: the daemon's
+    /// check skips re-staging what that holder just requested).
+    pub fn waited(&self) -> bool {
+        self.waited
+    }
+}
+
+/// `flock(2)` with EINTR retried: `Ok(false)` when a `LOCK_NB` take finds the lock
+/// held.
+fn flock(file: &File, op: libc::c_int) -> std::io::Result<bool> {
+    loop {
+        // SAFETY: `file` owns a valid open descriptor for this call's duration.
+        let rc = unsafe { libc::flock(file.as_raw_fd(), op) };
+        if rc == 0 {
+            return Ok(true);
+        }
+        let err = std::io::Error::last_os_error();
+        match err.raw_os_error() {
+            Some(libc::EINTR) => continue,
+            Some(libc::EWOULDBLOCK) if op & libc::LOCK_NB != 0 => return Ok(false),
+            _ => return Err(err),
+        }
+    }
+}
 
 /// Extract a gzipped tarball with strict path safety: no absolute paths, no
 /// `..`, no symlink/hardlink entries (payload is a plain file tree).
@@ -121,6 +221,33 @@ pub fn stage_payload(
     Ok(dest)
 }
 
+/// Whether `state/update-request.json` already asks for `version` with this
+/// manifest's sha256, and its staging bundle is in place: the run that held the
+/// staging lock while this one waited staged it (Layer 7 §9.2, S1: a concurrent
+/// run stages once). The file is the daemon's own; an unreadable or oversized
+/// one answers `false` (stage again).
+pub fn already_requested(state_dir: &Path, version: &Calver, manifest_sha256: &str) -> bool {
+    const REQUEST_MAX_BYTES: u64 = 64 * 1024;
+    let path = state_dir.join("update-request.json");
+    let Ok(meta) = std::fs::metadata(&path) else {
+        return false;
+    };
+    if !meta.is_file() || meta.len() > REQUEST_MAX_BYTES {
+        return false;
+    }
+    let Ok(bytes) = std::fs::read(&path) else {
+        return false;
+    };
+    let Ok(req) = serde_json::from_slice::<serde_json::Value>(&bytes) else {
+        return false;
+    };
+    let staged = state_dir.join("staging").join(version.to_string());
+    req["version"].as_str() == Some(version.to_string().as_str())
+        && req["manifest_sha256"].as_str() == Some(manifest_sha256)
+        && staged.join("payload.tar.gz").is_file()
+        && staged.join("channel-111-stable.toml.minisig").is_file()
+}
+
 /// Drop the daemon→helper signal (`state/update-request.json`, schema 1).
 /// The 111node-update.path unit watches this file.
 pub fn write_update_request(
@@ -147,5 +274,85 @@ pub fn write_update_request(
 
 #[cfg(test)]
 mod tests {
-    // Integration coverage in tests/updater_stage.rs.
+    // Fetch/stage coverage in tests/updater_stage.rs; the lock's own rules here.
+    use super::*;
+
+    #[test]
+    fn a_held_lock_is_held_until_dropped() {
+        let dir = tempfile::tempdir().unwrap();
+        let first = match StagingLock::acquire(dir.path(), LockWait::NoWait).unwrap() {
+            LockTake::Taken(l) => l,
+            LockTake::Held => panic!("a fresh lock is free"),
+        };
+        assert!(!first.waited());
+        assert!(StagingLock::path(dir.path()).is_file());
+        // flock is per open file description: a second open conflicts even in
+        // the same process (the daemon's loop against a --from run).
+        assert!(matches!(
+            StagingLock::acquire(dir.path(), LockWait::NoWait).unwrap(),
+            LockTake::Held
+        ));
+        drop(first);
+        // A child another test forks shares the descriptor until its exec closes
+        // it (O_CLOEXEC): the release can take that instant to show.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            match StagingLock::acquire(dir.path(), LockWait::NoWait).unwrap() {
+                LockTake::Taken(_) => break,
+                LockTake::Held if std::time::Instant::now() < deadline => {
+                    std::thread::sleep(std::time::Duration::from_millis(10))
+                }
+                LockTake::Held => panic!("the lock stayed held after its release"),
+            }
+        }
+    }
+
+    #[test]
+    fn a_waiting_take_blocks_until_release() {
+        let dir = tempfile::tempdir().unwrap();
+        let LockTake::Taken(held) = StagingLock::acquire(dir.path(), LockWait::Wait).unwrap()
+        else {
+            panic!("a fresh lock is free");
+        };
+        let (tx, rx) = std::sync::mpsc::channel();
+        let path = dir.path().to_path_buf();
+        let waiter = std::thread::spawn(move || {
+            let take = StagingLock::acquire(&path, LockWait::Wait).unwrap();
+            let LockTake::Taken(ref l) = take else {
+                panic!("a waiting take never answers Held");
+            };
+            assert!(l.waited());
+            tx.send(()).unwrap();
+            drop(take);
+        });
+        assert!(
+            rx.recv_timeout(std::time::Duration::from_millis(200))
+                .is_err(),
+            "the waiter must block while the lock is held"
+        );
+        drop(held);
+        rx.recv_timeout(std::time::Duration::from_secs(5))
+            .expect("the waiter takes the lock once it is released");
+        waiter.join().unwrap();
+    }
+
+    #[test]
+    fn the_lock_file_is_cloexec_and_never_a_link() {
+        let dir = tempfile::tempdir().unwrap();
+        let LockTake::Taken(l) = StagingLock::acquire(dir.path(), LockWait::NoWait).unwrap() else {
+            panic!("a fresh lock is free");
+        };
+        // SAFETY: F_GETFD on a descriptor `l` owns.
+        let flags = unsafe { libc::fcntl(l._file.as_raw_fd(), libc::F_GETFD) };
+        assert!(flags & libc::FD_CLOEXEC != 0, "O_CLOEXEC");
+        drop(l);
+
+        let other = tempfile::tempdir().unwrap();
+        let target = other.path().join("elsewhere");
+        std::fs::write(&target, b"").unwrap();
+        let planted = tempfile::tempdir().unwrap();
+        std::os::unix::fs::symlink(&target, StagingLock::path(planted.path())).unwrap();
+        let err = StagingLock::acquire(planted.path(), LockWait::NoWait).unwrap_err();
+        assert_eq!(err.raw_os_error(), Some(libc::ELOOP), "{err}");
+    }
 }

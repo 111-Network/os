@@ -10,13 +10,26 @@
 //! (`fake_python`): an unchanged lock runs nothing, a changed lock rebuilds
 //! offline, and a failed rebuild (hash mismatch, no python3) keeps the old venv
 //! and records why.
+//!
+//! Then Layer 7 §9.2–§9.5 (row L2): the staging lock (`state/staging.lock`: a
+//! held lock answers `Held` and stages nothing, a concurrent run stages once),
+//! the blob rule (a hub, directory or typed-URL origin fetches
+//! `blob/<sha256 of the pin>`, never `payload.url`, and writes no
+//! `last-update-check.json`), a 404 trying the next origin, T3 (`min-upgrade-from`
+//! above the running release is refused before any payload fetch), T6 (plain
+//! `http://` to a LAN host passes only under a typed exception) and
+//! `check_internet = false` (no internet base contacted, by the check or the
+//! loop).
 
 mod common;
 mod fake_python;
 
 use node111::calver::Calver;
 use node111::daemon::transport::venv::presence::{self, Outcome, PresenceVenvError};
-use node111::daemon::updater::fetch::{check_once, FetchOutcome, UpdaterConfig};
+use node111::daemon::updater::fetch::{
+    check_once, check_origins, origin_records, Answer, FetchOutcome, Origin, UpdaterConfig,
+};
+use node111::daemon::updater::stage::{LockTake, LockWait, StagingLock};
 use node111::daemon::DaemonLayout;
 use node111::floor::Floor;
 use node111::manifest::layer5;
@@ -128,6 +141,7 @@ fn cfg(port: u16, current: &str) -> UpdaterConfig {
         fallback_base: None,
         current_version: Calver::from_str(current).unwrap(),
         timeout: std::time::Duration::from_secs(5),
+        check_internet: true,
     }
 }
 
@@ -685,4 +699,629 @@ fn presence_venv_replaces_a_hand_made_dir() {
     assert_eq!(installed_lock(&layout), LOCK_1);
     assert_eq!(builds(&layout).len(), 1, "the hand-made dir is pruned");
     assert!(!builds(&layout)[0].starts_with("legacy-"));
+}
+
+// --- Layer 7 §9.2–§9.5: the staging lock, the origin list, the blob rule, T3, T6 ---
+
+use std::sync::{Arc, Mutex};
+
+/// A loopback file server that logs every request line's path (`/x`), and
+/// answers 404 for anything it does not have. Runs until the process exits.
+#[derive(Clone)]
+struct LogServer {
+    port: u16,
+    log: Arc<Mutex<Vec<String>>>,
+}
+
+impl LogServer {
+    fn serve(dir: Option<PathBuf>) -> LogServer {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let log = Arc::new(Mutex::new(Vec::new()));
+        let seen = Arc::clone(&log);
+        std::thread::spawn(move || {
+            for conn in listener.incoming() {
+                let Ok(mut conn) = conn else { break };
+                let dir = dir.clone();
+                let seen = Arc::clone(&seen);
+                std::thread::spawn(move || {
+                    let mut buf = [0u8; 4096];
+                    let Ok(n) = conn.read(&mut buf) else { return };
+                    let req = String::from_utf8_lossy(&buf[..n]).into_owned();
+                    let mut words = req.split_whitespace();
+                    let method = words.next().unwrap_or("").to_string();
+                    let path = words.next().unwrap_or("/").to_string();
+                    seen.lock().unwrap().push(format!("{method} {path}"));
+                    let file = dir
+                        .as_ref()
+                        .map(|d| d.join(path.trim_start_matches('/')))
+                        .and_then(|f| std::fs::read(f).ok());
+                    let (status, body) = match file {
+                        Some(b) => ("200 OK", b),
+                        None => ("404 Not Found", b"not found".to_vec()),
+                    };
+                    let head = format!(
+                        "HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                        body.len()
+                    );
+                    let _ = conn.write_all(head.as_bytes());
+                    if method != "HEAD" {
+                        let _ = conn.write_all(&body);
+                    }
+                });
+            }
+        });
+        LogServer { port, log }
+    }
+
+    fn base(&self) -> String {
+        format!("http://127.0.0.1:{}", self.port)
+    }
+
+    fn requests(&self) -> Vec<String> {
+        self.log.lock().unwrap().clone()
+    }
+
+    fn count(&self, needle: &str) -> usize {
+        self.requests()
+            .iter()
+            .filter(|r| r.contains(needle))
+            .count()
+    }
+
+    fn exact(&self, line: &str) -> usize {
+        self.requests().iter().filter(|r| *r == line).count()
+    }
+}
+
+/// An origin directory: the signed manifest pinning `payload` (its
+/// `payload.url` set to `payload_url`), `blob/<sha256>` holding the payload
+/// unless `blob` is false, and `patch` applied to the manifest text before it is
+/// signed.
+fn origin_dir(
+    release: &str,
+    payload: &[u8],
+    payload_url: &str,
+    blob: bool,
+    patch: &dyn Fn(String) -> String,
+) -> tempfile::TempDir {
+    let dir = tempfile::tempdir().unwrap();
+    make_served(dir.path(), release, payload, "");
+    std::fs::remove_file(dir.path().join("payload.tar.gz")).unwrap();
+    let manifest_path = dir.path().join("channel-111-stable.toml");
+    let manifest = std::fs::read_to_string(&manifest_path)
+        .unwrap()
+        .replace("PAYLOAD_URL", payload_url);
+    std::fs::write(&manifest_path, patch(manifest)).unwrap();
+    common::sign_file(&common::minisign_fixture_key(), &manifest_path);
+    if blob {
+        std::fs::create_dir_all(dir.path().join("blob")).unwrap();
+        std::fs::write(dir.path().join("blob").join(sha(payload)), payload).unwrap();
+    }
+    dir
+}
+
+fn no_patch(s: String) -> String {
+    s
+}
+
+/// An internet-only config whose bases are `base` (and no fallback).
+fn net_cfg(base: &str, current: &str) -> UpdaterConfig {
+    UpdaterConfig {
+        manifest_base: base.to_string(),
+        fallback_base: None,
+        current_version: Calver::from_str(current).unwrap(),
+        timeout: std::time::Duration::from_secs(5),
+        check_internet: true,
+    }
+}
+
+fn hub(server: &LogServer) -> Origin {
+    Origin::HomeHub {
+        base: format!("{}/origin/v1/", server.base()),
+    }
+}
+
+fn assert_bundle(layout: &DaemonLayout, version: &str) {
+    let staged = layout.state_dir().join("staging").join(version);
+    for f in [
+        "payload.tar.gz",
+        "channel-111-stable.toml",
+        "channel-111-stable.toml.minisig",
+        "tree/bin/111",
+    ] {
+        assert!(staged.join(f).exists(), "{f} staged");
+    }
+    let req: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(layout.state_dir().join("update-request.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(req["version"], version);
+    assert!(!layout.root.join("releases").exists());
+    assert!(!layout.root.join("current").exists());
+}
+
+/// S5: the home hub's payload comes from `blob/<sha256 of the pin>`;
+/// `payload.url` is never fetched, `last-update-check.json` never written, and
+/// the per-origin record holds the answer and the newest release seen.
+#[test]
+fn hub_origin_fetches_the_blob_never_the_payload_url() {
+    let decoy = LogServer::serve(None);
+    let payload = common::build_payload();
+    let dir = origin_dir(
+        "2026.10.12",
+        &payload,
+        &format!("{}/payload.tar.gz", decoy.base()),
+        true,
+        &no_patch,
+    );
+    // the hub serves the origin under /origin/v1/ (§9.1)
+    let served = tempfile::tempdir().unwrap();
+    std::fs::create_dir(served.path().join("origin")).unwrap();
+    std::os::unix::fs::symlink(dir.path(), served.path().join("origin/v1")).unwrap();
+    let hub_server = LogServer::serve(Some(served.path().to_path_buf()));
+
+    let node = tempfile::tempdir().unwrap();
+    let layout = layout_at(node.path());
+    let cfg = net_cfg("http://127.0.0.1:9", "2026.10.01");
+    let outcome = check_origins(&cfg, &layout, &[hub(&hub_server)], LockWait::Wait).unwrap();
+    assert!(
+        matches!(outcome, FetchOutcome::Staged { .. }),
+        "{outcome:?}"
+    );
+    assert_bundle(&layout, "2026.10.12");
+    assert!(decoy.requests().is_empty(), "payload.url is ignored");
+    assert_eq!(
+        hub_server.count(&format!("GET /origin/v1/blob/{}", sha(&payload))),
+        1
+    );
+    assert_eq!(hub_server.count("HEAD"), 0, "no Date probe of a hub");
+    assert!(
+        !layout.state_dir().join("last-update-check.json").exists(),
+        "record_success is an internet base's"
+    );
+    let recs = origin_records(&layout.state_dir());
+    assert_eq!(recs.len(), 1);
+    assert_eq!(recs[0].kind, "home_hub");
+    assert_eq!(recs[0].answer, Answer::Staged);
+    assert_eq!(recs[0].newest_seen.as_deref(), Some("2026.10.12"));
+
+    // a hub answering "up to date" writes no record_success either
+    let node = tempfile::tempdir().unwrap();
+    let layout = layout_at(node.path());
+    let cfg = net_cfg("http://127.0.0.1:9", "2026.10.12");
+    let outcome = check_origins(&cfg, &layout, &[hub(&hub_server)], LockWait::Wait).unwrap();
+    assert!(matches!(outcome, FetchOutcome::UpToDate), "{outcome:?}");
+    assert!(!layout.state_dir().join("last-update-check.json").exists());
+    assert_eq!(
+        origin_records(&layout.state_dir())[0].answer,
+        Answer::UpToDate
+    );
+}
+
+/// `--from <dir>` and `--from <url>` follow the same blob rule; the directory
+/// origin makes no request at all.
+#[test]
+fn from_dir_and_url_fetch_the_blob() {
+    let decoy = LogServer::serve(None);
+    let payload = common::build_payload();
+    let dir = origin_dir(
+        "2026.10.12",
+        &payload,
+        &format!("{}/payload.tar.gz", decoy.base()),
+        true,
+        &no_patch,
+    );
+    let cfg = net_cfg("http://127.0.0.1:9", "2026.10.01");
+
+    let node = tempfile::tempdir().unwrap();
+    let layout = layout_at(node.path());
+    let from_dir = Origin::Dir {
+        path: dir.path().to_path_buf(),
+    };
+    let outcome = check_origins(&cfg, &layout, &[from_dir], LockWait::NoWait).unwrap();
+    assert!(
+        matches!(outcome, FetchOutcome::Staged { .. }),
+        "{outcome:?}"
+    );
+    assert_bundle(&layout, "2026.10.12");
+    assert!(!layout.state_dir().join("last-update-check.json").exists());
+    assert_eq!(origin_records(&layout.state_dir())[0].kind, "dir");
+
+    let server = LogServer::serve(Some(dir.path().to_path_buf()));
+    let node = tempfile::tempdir().unwrap();
+    let layout = layout_at(node.path());
+    let from_url = Origin::Url {
+        base: format!("{}/", server.base()),
+    };
+    let outcome = check_origins(&cfg, &layout, &[from_url], LockWait::NoWait).unwrap();
+    assert!(
+        matches!(outcome, FetchOutcome::Staged { .. }),
+        "{outcome:?}"
+    );
+    assert_bundle(&layout, "2026.10.12");
+    assert_eq!(server.count(&format!("GET /blob/{}", sha(&payload))), 1);
+    assert!(decoy.requests().is_empty(), "payload.url is ignored");
+    assert!(!layout.state_dir().join("last-update-check.json").exists());
+
+    // a tampered blob is refused and the staging removed
+    let blob = dir.path().join("blob").join(sha(&payload));
+    let mut bytes = std::fs::read(&blob).unwrap();
+    let n = bytes.len();
+    bytes[n - 1] ^= 0xFF;
+    std::fs::write(&blob, &bytes).unwrap();
+    let node = tempfile::tempdir().unwrap();
+    let layout = layout_at(node.path());
+    let from_dir = Origin::Dir {
+        path: dir.path().to_path_buf(),
+    };
+    assert!(check_origins(&cfg, &layout, &[from_dir], LockWait::NoWait).is_err());
+    assert!(!layout.state_dir().join("update-request.json").exists());
+    assert!(!layout.state_dir().join("staging/2026.10.12").exists());
+}
+
+/// A missing blob 404s and the next origin is tried; a missing manifest too.
+#[test]
+fn a_404_tries_the_next_origin() {
+    let payload = common::build_payload();
+    let without_blob = origin_dir(
+        "2026.10.12",
+        &payload,
+        "https://example.invalid/p",
+        false,
+        &no_patch,
+    );
+    let with_blob = origin_dir(
+        "2026.10.12",
+        &payload,
+        "https://example.invalid/p",
+        true,
+        &no_patch,
+    );
+    let first = LogServer::serve(Some(without_blob.path().to_path_buf()));
+    let empty = LogServer::serve(None);
+    let origins = [
+        Origin::Url { base: empty.base() },
+        Origin::Url { base: first.base() },
+        Origin::Dir {
+            path: with_blob.path().to_path_buf(),
+        },
+    ];
+    let node = tempfile::tempdir().unwrap();
+    let layout = layout_at(node.path());
+    let cfg = net_cfg("http://127.0.0.1:9", "2026.10.01");
+    let outcome = check_origins(&cfg, &layout, &origins, LockWait::Wait).unwrap();
+    assert!(
+        matches!(outcome, FetchOutcome::Staged { .. }),
+        "{outcome:?}"
+    );
+    assert_bundle(&layout, "2026.10.12");
+    assert_eq!(empty.count("GET /channel-111-stable.toml"), 1);
+    assert_eq!(first.count(&format!("GET /blob/{}", sha(&payload))), 1);
+    let recs = origin_records(&layout.state_dir());
+    let answers: Vec<_> = recs.iter().map(|r| (r.kind.as_str(), r.answer)).collect();
+    assert_eq!(
+        answers,
+        vec![
+            ("url", Answer::NotFound),
+            ("url", Answer::NotFound),
+            ("dir", Answer::Staged)
+        ]
+    );
+    assert_eq!(recs[0].newest_seen, None, "no manifest seen there");
+    assert_eq!(recs[1].newest_seen.as_deref(), Some("2026.10.12"));
+
+    // every origin missing: degraded, nothing staged
+    let node = tempfile::tempdir().unwrap();
+    let layout = layout_at(node.path());
+    let outcome = check_origins(&cfg, &layout, &origins[..2], LockWait::Wait).unwrap();
+    assert!(
+        matches!(outcome, FetchOutcome::Degraded { .. }),
+        "{outcome:?}"
+    );
+    assert!(!layout.state_dir().join("update-request.json").exists());
+}
+
+/// S1: a held `state/staging.lock` answers `Held` to a non-blocking take, and
+/// nothing is fetched or staged; the waiting take (the daemon's loop) runs once
+/// the lock is free.
+#[test]
+fn a_held_lock_answers_held_and_stages_nothing() {
+    let payload = common::build_payload();
+    let dir = origin_dir(
+        "2026.10.12",
+        &payload,
+        "https://example.invalid/p",
+        true,
+        &no_patch,
+    );
+    let server = LogServer::serve(Some(dir.path().to_path_buf()));
+    let node = tempfile::tempdir().unwrap();
+    let layout = layout_at(node.path());
+    let cfg = net_cfg("http://127.0.0.1:9", "2026.10.01");
+    let from = [Origin::Url {
+        base: server.base(),
+    }];
+
+    let LockTake::Taken(daemon) =
+        StagingLock::acquire(&layout.state_dir(), LockWait::NoWait).unwrap()
+    else {
+        panic!("a fresh lock is free");
+    };
+    let outcome = check_origins(&cfg, &layout, &from, LockWait::NoWait).unwrap();
+    assert!(matches!(outcome, FetchOutcome::Held), "{outcome:?}");
+    assert!(server.requests().is_empty(), "nothing fetched while held");
+    assert!(!layout.state_dir().join("staging").exists());
+    assert!(!layout.state_dir().join("update-request.json").exists());
+    assert!(origin_records(&layout.state_dir()).is_empty());
+    drop(daemon);
+
+    // Released. A child another test forks in this process shares the lock's
+    // descriptor until its exec closes it (O_CLOEXEC), so a take right after the
+    // release may still read Held for that instant: retry briefly.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    let outcome = loop {
+        match check_origins(&cfg, &layout, &from, LockWait::NoWait).unwrap() {
+            FetchOutcome::Held if std::time::Instant::now() < deadline => {
+                std::thread::sleep(std::time::Duration::from_millis(10))
+            }
+            other => break other,
+        }
+    };
+    assert!(
+        matches!(outcome, FetchOutcome::Staged { .. }),
+        "{outcome:?}"
+    );
+}
+
+/// Waiters blocked on `state/staging.lock` (the `-> FLOCK` lines of
+/// `/proc/locks` for its inode); `None` when `/proc/locks` is unreadable.
+fn flock_waiters(lock: &Path) -> Option<usize> {
+    use std::os::unix::fs::MetadataExt;
+    let ino = std::fs::metadata(lock).ok()?.ino();
+    let locks = std::fs::read_to_string("/proc/locks").ok()?;
+    Some(
+        locks
+            .lines()
+            .filter(|l| l.contains("->") && l.contains("FLOCK"))
+            .filter(|l| {
+                l.split_whitespace()
+                    .any(|w| w.rsplit(':').next() == Some(&ino.to_string()) && w.contains(':'))
+            })
+            .count(),
+    )
+}
+
+/// S1, G12: two checks that wait on the lock at once stage once; the second
+/// sees the request the first wrote and fetches no payload.
+#[test]
+fn a_concurrent_run_stages_once() {
+    let payload = common::build_payload();
+    let served = tempfile::tempdir().unwrap();
+    let server_dir = served.path().to_path_buf();
+    let server = LogServer::serve(Some(server_dir.clone()));
+    let dir = origin_dir(
+        "2026.10.12",
+        &payload,
+        &format!("{}/payload.tar.gz", server.base()),
+        false,
+        &no_patch,
+    );
+    for f in ["channel-111-stable.toml", "channel-111-stable.toml.minisig"] {
+        std::fs::copy(dir.path().join(f), server_dir.join(f)).unwrap();
+    }
+    std::fs::write(server_dir.join("payload.tar.gz"), &payload).unwrap();
+
+    let node = tempfile::tempdir().unwrap();
+    let layout = layout_at(node.path());
+    let cfg = net_cfg(&server.base(), "2026.10.01");
+    let LockTake::Taken(gate) =
+        StagingLock::acquire(&layout.state_dir(), LockWait::NoWait).unwrap()
+    else {
+        panic!("a fresh lock is free");
+    };
+    let runs: Vec<_> = (0..2)
+        .map(|_| {
+            let (cfg, layout) = (cfg.clone(), layout.clone());
+            std::thread::spawn(move || check_once(&cfg, &layout).unwrap())
+        })
+        .collect();
+    // both runs block on the lock before it is released
+    let lock = StagingLock::path(&layout.state_dir());
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        match flock_waiters(&lock) {
+            Some(n) if n >= 2 => break,
+            Some(_) if std::time::Instant::now() < deadline => {
+                std::thread::sleep(std::time::Duration::from_millis(20))
+            }
+            Some(n) => panic!("only {n} waiter(s) blocked on the lock"),
+            None => {
+                eprintln!("/proc/locks unreadable: waiting 500 ms instead");
+                std::thread::sleep(std::time::Duration::from_millis(500));
+                break;
+            }
+        }
+    }
+    assert!(server.requests().is_empty(), "nothing fetched while held");
+    drop(gate);
+    let outcomes: Vec<_> = runs.into_iter().map(|r| r.join().unwrap()).collect();
+    let staged = outcomes
+        .iter()
+        .filter(|o| matches!(o, FetchOutcome::Staged { .. }))
+        .count();
+    let already = outcomes
+        .iter()
+        .filter(|o| matches!(o, FetchOutcome::AlreadyStaged { .. }))
+        .count();
+    assert_eq!((staged, already), (1, 1), "{outcomes:?}");
+    assert_eq!(server.count("GET /payload.tar.gz"), 1, "one payload fetch");
+    assert_eq!(server.exact("GET /channel-111-stable.toml"), 2);
+    assert_bundle(&layout, "2026.10.12");
+    // an internet base: record_success, no per-origin record
+    assert!(layout.state_dir().join("last-update-check.json").exists());
+    assert!(origin_records(&layout.state_dir()).is_empty());
+
+    // an uncontended run re-stages as before (the hourly retry of a request the
+    // helper left in place)
+    let outcome = check_once(&cfg, &layout).unwrap();
+    assert!(
+        matches!(outcome, FetchOutcome::Staged { .. }),
+        "{outcome:?}"
+    );
+}
+
+/// T3 (§9.5): the daemon's staging decision refuses a release whose
+/// `min-upgrade-from` is above the running one, before its payload is fetched;
+/// at the boundary it stages.
+#[test]
+fn t3_min_upgrade_from_above_the_installed_release_is_refused() {
+    let payload = common::build_payload();
+    let served = tempfile::tempdir().unwrap();
+    let server = LogServer::serve(Some(served.path().to_path_buf()));
+    let dir = origin_dir(
+        "2026.10.20",
+        &payload,
+        &format!("{}/payload.tar.gz", server.base()),
+        true,
+        &|m| {
+            m.replace(
+                "min-upgrade-from = \"2026.10.01\"",
+                "min-upgrade-from = \"2026.10.10\"",
+            )
+        },
+    );
+    for f in ["channel-111-stable.toml", "channel-111-stable.toml.minisig"] {
+        std::fs::copy(dir.path().join(f), served.path().join(f)).unwrap();
+    }
+    std::fs::write(served.path().join("payload.tar.gz"), &payload).unwrap();
+
+    for origin in [
+        Origin::Internet {
+            base: server.base(),
+        },
+        Origin::Dir {
+            path: dir.path().to_path_buf(),
+        },
+    ] {
+        let node = tempfile::tempdir().unwrap();
+        let layout = layout_at(node.path());
+        let cfg = net_cfg(&server.base(), "2026.10.05");
+        let outcome =
+            check_origins(&cfg, &layout, std::slice::from_ref(&origin), LockWait::Wait).unwrap();
+        match outcome {
+            FetchOutcome::Refused { reason } => {
+                assert!(reason.contains("min-upgrade-from"), "{reason}");
+                assert!(reason.contains("2026.10.10"), "{reason}");
+            }
+            other => panic!("expected Refused for {origin:?}, got {other:?}"),
+        }
+        assert!(!layout.state_dir().join("staging").exists());
+        assert!(!layout.state_dir().join("update-request.json").exists());
+        assert!(!layout.state_dir().join("last-update-check.json").exists());
+    }
+    assert_eq!(server.count("payload.tar.gz"), 0, "no payload fetched");
+
+    // installed == min-upgrade-from: stages
+    let node = tempfile::tempdir().unwrap();
+    let layout = layout_at(node.path());
+    let cfg = net_cfg(&server.base(), "2026.10.10");
+    let outcome = check_once(&cfg, &layout).unwrap();
+    assert!(
+        matches!(outcome, FetchOutcome::Staged { .. }),
+        "{outcome:?}"
+    );
+    assert_bundle(&layout, "2026.10.20");
+}
+
+/// T6 (§9.5): an internet base never passes plain http:// to a LAN host (no
+/// request made), and neither does its manifest's `payload.url`.
+#[test]
+fn t6_internet_bases_refuse_plain_http_to_a_lan_host() {
+    let node = tempfile::tempdir().unwrap();
+    let layout = layout_at(node.path());
+    let cfg = net_cfg("http://192.0.2.1:9/stable", "2026.10.01");
+    match check_once(&cfg, &layout).unwrap() {
+        FetchOutcome::Degraded { reason, .. } => {
+            assert!(reason.contains("refusing plain http://"), "{reason}")
+        }
+        other => panic!("expected Degraded, got {other:?}"),
+    }
+
+    let payload = common::build_payload();
+    let served = tempfile::tempdir().unwrap();
+    let dir = origin_dir(
+        "2026.10.12",
+        &payload,
+        "http://192.0.2.1:9/payload.tar.gz",
+        true,
+        &no_patch,
+    );
+    for f in ["channel-111-stable.toml", "channel-111-stable.toml.minisig"] {
+        std::fs::copy(dir.path().join(f), served.path().join(f)).unwrap();
+    }
+    let server = LogServer::serve(Some(served.path().to_path_buf()));
+    let cfg = net_cfg(&server.base(), "2026.10.01");
+    match check_once(&cfg, &layout).unwrap() {
+        FetchOutcome::Degraded { reason, .. } => {
+            assert!(reason.contains("refusing plain http://"), "{reason}")
+        }
+        other => panic!("expected Degraded, got {other:?}"),
+    }
+    assert!(!layout.state_dir().join("staging").exists());
+}
+
+/// `check_internet = false`: the check contacts no internet base, and neither
+/// does the hourly loop, even when the dashboard wakes it.
+#[test]
+fn check_internet_off_contacts_no_internet_base() {
+    let server = LogServer::serve(None);
+    let node = tempfile::tempdir().unwrap();
+    let layout = layout_at(node.path());
+    let mut cfg = net_cfg(&server.base(), "2026.10.01");
+    cfg.fallback_base = Some(format!("{}/fallback", server.base()));
+    cfg.check_internet = false;
+    assert!(cfg.internet_origins().is_empty());
+    assert_eq!(cfg.visible_order(None).len(), 2, "listed, not contacted");
+    let outcome = check_once(&cfg, &layout).unwrap();
+    assert!(matches!(outcome, FetchOutcome::NoOrigin), "{outcome:?}");
+
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let hooks = node111::daemon::updater::Hooks::default();
+    let status = Arc::clone(&hooks.status);
+    let wake = Arc::clone(&hooks.wake);
+    let state: node111::daemon::dashboard::SharedState = Arc::new(std::sync::RwLock::new(
+        node111::daemon::dashboard::DashboardState::new("2026.10.01"),
+    ));
+    rt.block_on(async {
+        let task = tokio::spawn(node111::daemon::updater::run_with_hooks(
+            layout.clone(),
+            state,
+            cfg.clone(),
+            hooks,
+        ));
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        // the dashboard's POST /api/v1/update/check: begin_check, then wake
+        assert!(!status.begin_check());
+        wake.notify_one();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while status.checking() && std::time::Instant::now() < deadline {
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        assert!(
+            !status.checking(),
+            "a woken loop with nothing to check settles"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        task.abort();
+    });
+    assert!(server.requests().is_empty(), "{:?}", server.requests());
+    assert_eq!(status.checks(), 0);
+    assert_eq!(status.last_result(), None);
+    assert!(!layout.state_dir().join("last-update-check.json").exists());
+    assert!(!StagingLock::path(&layout.state_dir()).exists());
 }

@@ -1,6 +1,12 @@
 //! Update client: fetch → verify (minisig + floor) → stage into `state/staging/` →
 //! drop `state/update-request.json`. The daemon CANNOT write `releases/` or flip
 //! `current` — the privileged root helper is the only flip actor (D12).
+//!
+//! Layer 7 §9.2–§9.3: every check runs under `state/staging.lock`
+//! ([`stage::StagingLock`]); the hourly loop waits for it inside its
+//! `spawn_blocking`, and checks the internet bases only while
+//! [`fetch::UpdaterConfig::check_internet`] is on (the loop and its hourly sleep
+//! stay as they are: no timer is added, D30 Q2).
 
 pub mod fetch;
 pub mod stage;
@@ -64,6 +70,13 @@ impl UpdaterStatus {
         self.checks.load(Ordering::SeqCst)
     }
 
+    /// A woken loop with no origin to check (`check_internet` off, Layer 7
+    /// §9.3): the dashboard's `begin_check` is cleared without an outcome, and
+    /// nothing was contacted.
+    pub fn settle(&self) {
+        self.checking.store(false, Ordering::SeqCst);
+    }
+
     /// Record a finished check (the loop calls it; public so tests can set
     /// an outcome without a network round).
     pub fn finish(&self, result: LastResult) {
@@ -98,9 +111,23 @@ pub async fn run_with_hooks(
 ) {
     let mut backoff = Duration::from_secs(60);
     loop {
+        // `check_internet` off (§9.3): the internet bases are not contacted; the
+        // loop sleeps as it always does, and a dashboard wake settles at once.
+        if !cfg.check_internet {
+            hooks.status.settle();
+            tokio::select! {
+                _ = tokio::time::sleep(DEFAULT_INTERVAL) => {}
+                _ = hooks.wake.notified() => {
+                    eprintln!("111 updater: check requested; internet checks are off");
+                }
+            }
+            continue;
+        }
         hooks.status.begin_check();
         // Extend the watchdog during the fetch window; restore right after.
         let _ = watchdog::extend(10 * 60 * 1_000_000);
+        // The check waits for `state/staging.lock` here, inside the blocking task
+        // (a `111 update --from` run may hold it, §9.2).
         let outcome = tokio::task::spawn_blocking({
             let layout = layout.clone();
             let cfg = cfg.clone();
@@ -110,7 +137,9 @@ pub async fn run_with_hooks(
         let _ = watchdog::restore(30 * 1_000_000);
         hooks.status.finish(match &outcome {
             Ok(Ok(fetch::FetchOutcome::UpToDate)) => LastResult::UpToDate,
-            Ok(Ok(fetch::FetchOutcome::Staged { .. })) => LastResult::Staged,
+            Ok(Ok(
+                fetch::FetchOutcome::Staged { .. } | fetch::FetchOutcome::AlreadyStaged { .. },
+            )) => LastResult::Staged,
             Ok(Ok(fetch::FetchOutcome::Refused { .. })) => LastResult::Refused,
             _ => LastResult::Degraded,
         });
@@ -121,7 +150,10 @@ pub async fn run_with_hooks(
                 backoff = Duration::from_secs(60);
                 DEFAULT_INTERVAL
             }
-            Ok(Ok(fetch::FetchOutcome::Staged { version })) => {
+            Ok(Ok(
+                fetch::FetchOutcome::Staged { version }
+                | fetch::FetchOutcome::AlreadyStaged { version },
+            )) => {
                 eprintln!("111 updater: staged {version}, root helper notified");
                 state.write().unwrap().update_pending = true;
                 backoff = Duration::from_secs(60);
@@ -141,6 +173,9 @@ pub async fn run_with_hooks(
                 backoff = jittered(backoff.saturating_mul(2).min(MAX_BACKOFF));
                 backoff
             }
+            // A waiting take never answers Held, and the list is not empty while
+            // `check_internet` is on; both read as "nothing done this round".
+            Ok(Ok(fetch::FetchOutcome::Held | fetch::FetchOutcome::NoOrigin)) => DEFAULT_INTERVAL,
             Ok(Err(e)) => {
                 eprintln!("111 updater: check failed: {e:#}");
                 backoff = jittered(backoff.saturating_mul(2).min(MAX_BACKOFF));
