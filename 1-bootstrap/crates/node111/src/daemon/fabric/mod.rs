@@ -1094,6 +1094,8 @@ impl FabricHandle {
                 }
                 FabricEvent::Fabric => fabric = true,
                 FabricEvent::Settings(s) => new_settings = Some(s),
+                // Layer 7 §5.9: the carrier's trigger; M5 hands it to `relay::`.
+                FabricEvent::Forward { .. } => {}
             }
         }
         if let Some(s) = new_settings {

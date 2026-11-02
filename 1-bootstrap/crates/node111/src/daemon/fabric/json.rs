@@ -338,6 +338,9 @@ pub fn counters(c: &Counters) -> Value {
         items_received,
         conflicts,
         errors,
+        // Layer 7 §13.1: mirrored by `RelayStatus.forward`, not `FabricCounters`.
+        forward_refused: _,
+        forward_too_large: _,
     } = *c;
     json!({
         "dropped": dropped,

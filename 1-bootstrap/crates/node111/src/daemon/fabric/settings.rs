@@ -166,6 +166,9 @@ fn decode(text: &str, refuse_loopback: bool) -> Result<Persisted, String> {
             listen_lan: f.listen_lan,
             custody_opt_in: f.custody_opt_in,
             home_hub,
+            // Layer 7 §4.6: the file's `paired_hubs` key arrives with the daemon
+            // seams (board row M5); none until then.
+            paired_hubs: Vec::new(),
         },
         peers,
     })
@@ -407,6 +410,7 @@ mod tests {
                     node_id: hub,
                     address: Some("192.168.1.9:11183".parse().unwrap()),
                 }),
+                paired_hubs: Vec::new(),
             },
             peers: vec![Peer {
                 node_id: NodeId::from([1u8; 32]),
