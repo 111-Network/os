@@ -26,7 +26,8 @@
 //!   destination's cap: `oversize = refuse` counts it (`refused`, "N too long to relay"),
 //!   `split` queues numbered parts with the marker first on every part. With
 //!   `honour_ok_to_mqtt` on, an origin whose `meta.ok_to_mqtt` is false is refused and
-//!   counted (fail closed: whatever the destination). A copy is queued with
+//!   counted (fail closed: whatever the destination), and so is a Meshtastic origin whose
+//!   adapter reported no `ok_to_mqtt` at all. A copy is queued with
 //!   `foreign_queue_sends` (all its parts in one call: the store advances `relayed_seq` in
 //!   that transaction and refuses a second copy of the origin), then the origin's key goes
 //!   into `foreign_seen`. Inputs not relayed advance `relayed_seq` past them; a shed (store
@@ -499,7 +500,7 @@ impl Bridge {
                 self.publish_edges().await;
                 return Ok(queued);
             }
-            if e.honour_ok_to_mqtt && ok_to_mqtt_absent(input) {
+            if e.honour_ok_to_mqtt && mqtt_denied(input, &src.network) {
                 refused += 1;
                 skip_to = Some(input.local_seq);
                 continue;
@@ -559,13 +560,18 @@ impl Bridge {
     }
 }
 
-/// `honour_ok_to_mqtt`: the origin says it may not leave the mesh (`meta.ok_to_mqtt` is
-/// `false`). Absent means the adapter reported nothing: relayed.
-fn ok_to_mqtt_absent(m: &ForeignMessageRow) -> bool {
-    serde_json::from_str::<Value>(&m.meta)
+/// `honour_ok_to_mqtt` (§8): may the origin not leave its mesh? `meta.ok_to_mqtt = false`
+/// is denied on any network. On a Meshtastic origin the key is the board's own bit, which
+/// the client always reports: a row without it (or with an unreadable `meta`) is denied
+/// too (fail closed, F5). Other networks have no such bit: a missing key relays.
+fn mqtt_denied(m: &ForeignMessageRow, src_network: &str) -> bool {
+    let bit = serde_json::from_str::<Value>(&m.meta)
         .ok()
-        .and_then(|v| v.get("ok_to_mqtt").and_then(Value::as_bool))
-        == Some(false)
+        .and_then(|v| v.get("ok_to_mqtt").and_then(Value::as_bool));
+    match bit {
+        Some(ok) => !ok,
+        None => src_network == super::NETWORK_MESHTASTIC,
+    }
 }
 
 /// One relay pass over every enabled, unpaused edge whose two networks are enabled.
@@ -630,7 +636,7 @@ mod tests {
     }
 
     #[test]
-    fn ok_to_mqtt_is_read_from_meta() {
+    fn f5_mqtt_denied_reads_meta_and_fails_closed_on_meshtastic() {
         let mut m = ForeignMessageRow {
             id: 1,
             conv: 1,
@@ -653,11 +659,20 @@ mod tests {
             meta: r#"{"ok_to_mqtt":false}"#.into(),
             handoff_pending: false,
         };
-        assert!(ok_to_mqtt_absent(&m));
+        for net in ["meshtastic", "lxmf"] {
+            assert!(mqtt_denied(&m, net), "an explicit false is denied on {net}");
+        }
         m.meta = r#"{"ok_to_mqtt":true}"#.into();
-        assert!(!ok_to_mqtt_absent(&m));
+        assert!(!mqtt_denied(&m, "meshtastic"));
+        // F5: a Meshtastic origin without the bit fails closed; other origins relay
         m.meta = "{}".into();
-        assert!(!ok_to_mqtt_absent(&m));
+        assert!(
+            mqtt_denied(&m, "meshtastic"),
+            "missing on Meshtastic: denied"
+        );
+        assert!(!mqtt_denied(&m, "lxmf"), "missing elsewhere: relayed");
+        m.meta = "not json".into();
+        assert!(mqtt_denied(&m, "meshtastic"));
         assert_eq!(copy_marker(Some("W1AW/7"), "M"), "[W1AW7/M] ");
     }
 }

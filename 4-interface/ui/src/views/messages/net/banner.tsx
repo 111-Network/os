@@ -5,6 +5,7 @@ import { hrefTo } from "../../../app/location";
 import { ButtonLink } from "../../../components/button";
 import { StatusDot, type DotState } from "../../../components/status-dot";
 import { useStatus } from "../../../lib/api/hooks";
+import { cleanPeerText } from "../../../lib/api/messages";
 import type { Network } from "../../../lib/api/types";
 import { buildPrompt } from "../../../lib/prompts";
 import { AgentButton, useAgentReachable } from "../../devices/agent-button";
@@ -32,7 +33,14 @@ export function NetworkBanner({ network }: { network: Network }) {
       <p className="max-w-prose font-mono text-sm leading-relaxed text-foreground" data-testid="network-copy">
         {network.copy.banner}
       </p>
-      {network.account ? <p className="break-all font-mono text-[11px] text-muted-foreground">speaks as {network.account}</p> : null}
+      {network.account ? (
+        <p className="break-all font-mono text-[11px] text-muted-foreground">
+          speaks as{" "}
+          <span dir="auto" className="[unicode-bidi:isolate]" data-testid="network-account">
+            {cleanPeerText(network.account)}
+          </span>
+        </p>
+      ) : null}
       {line ? (
         <p role="status" className="max-w-prose font-mono text-xs leading-relaxed text-foreground" data-testid="network-line">
           {line}

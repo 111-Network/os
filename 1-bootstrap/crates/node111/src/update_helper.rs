@@ -5,6 +5,21 @@
 //! a hint; node111→root trust never flows through daemon-writable content (D12).
 //! The extracted tree is checked against its own `share/payload.manifest` and then
 //! against the manifest's Layer 5 pins (`ChannelManifest::verify_layer5_tree`).
+//!
+//! **T3 (Layer 7 §9.5).** Before it reads the tarball the helper refuses a
+//! manifest whose `min-upgrade-from` is above the installed release (the
+//! basename of `current`), and an install whose release it cannot read, and
+//! flips nothing: the request stays, no release is promoted, no journal or
+//! floor is written ([`check_min_upgrade_from`]). The installer's own gate
+//! (`install/stage.rs` `version_gate`) is unchanged.
+//!
+//! **Origin-blind (Layer 7 §9.2, §9.5 T6; I14).** The request file names only a
+//! version and a staging bundle; a bundle `111 update --from` staged from a
+//! directory or a typed URL passes the very same chain as one the daemon fetched
+//! from an internet base (minisign under the keychain walk, channel, floor,
+//! T3, the tarball pin, the tree check, the Layer 5 pins). The helper reads no
+//! field naming an origin and has no path that trusts one. It stays a oneshot
+//! (111node-update.path → .service): no process, timer or listener is added.
 
 use crate::calver::Calver;
 use crate::daemon::updater::stage::safe_unpack;
@@ -113,7 +128,34 @@ fn consume(path: &Path) {
     let _ = std::fs::remove_file(path);
 }
 
-/// Handle one update-request: re-verify → promote → journal → floor → flip →
+/// §9.5 T3: refuse a manifest whose `min-upgrade-from` is above the installed
+/// release. An installed release the helper cannot read (no `current` link, or a
+/// basename that is not a calver) is refused too: fail closed, since the helper
+/// only ever runs on an installed node (the installer flips `current` first).
+/// Equal passes, as in the installer's gate.
+pub fn check_min_upgrade_from(
+    installed: Option<Calver>,
+    manifest: &ChannelManifest,
+) -> anyhow::Result<()> {
+    let installed = installed.ok_or_else(|| {
+        anyhow::anyhow!(
+            "installed release unknown (no readable `current` link): refusing to check \
+             min-upgrade-from {} — nothing flipped",
+            manifest.min_upgrade_from()
+        )
+    })?;
+    anyhow::ensure!(
+        installed >= manifest.min_upgrade_from(),
+        "installed release {installed} is below min-upgrade-from {} of release {}: \
+         refusing the update, nothing flipped — reinstall from a fresh shim",
+        manifest.min_upgrade_from(),
+        manifest.release()
+    );
+    Ok(())
+}
+
+/// Handle one update-request: re-verify (minisign, channel, floor) → T3 →
+/// tarball pin → extract and tree-check → promote → journal → floor → flip →
 /// restart. Errors leave the running version untouched.
 fn handle_update_request(
     layout: &DaemonLayout,
@@ -143,15 +185,17 @@ fn handle_update_request(
     );
 
     // 2. Idempotency: already running this (or newer).
-    if let Some(current) = current_version(layout) {
-        if let Ok(cur_cv) = Calver::from_str(&current) {
-            if manifest.release() <= cur_cv {
-                consume(&req_path);
-                report.actions.push(HelperAction::Nothing);
-                return Ok(());
-            }
+    let installed = current_version(layout).and_then(|c| Calver::from_str(&c).ok());
+    if let Some(cur_cv) = installed {
+        if manifest.release() <= cur_cv {
+            consume(&req_path);
+            report.actions.push(HelperAction::Nothing);
+            return Ok(());
         }
     }
+
+    // 2b. T3 (Layer 7 §9.5): never upgrade from below `min-upgrade-from`.
+    check_min_upgrade_from(installed, &manifest)?;
 
     // 3. Re-hash the raw tarball against the manifest pin, then extract OURSELVES.
     let payload_pin = manifest

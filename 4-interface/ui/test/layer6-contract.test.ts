@@ -53,8 +53,9 @@ describe("Layer 6 enums (the pins an enum bump touches)", () => {
     expect(FOREIGN_REASON_CODES).toHaveLength(20);
   });
   it("Proposal.kind, NearbySource.kind and Problem.code grew additively", () => {
-    expect([...PROPOSAL_KINDS]).toEqual(["diagnose", "propose", "patch", "chat", "message", "bridge_message", "bridge_edge", "device"]);
-    expect([...NEARBY_KINDS]).toEqual(["meshtastic", "reticulum"]);
+    // Layer 7 appends (`relay`, `111`): the Layer 6 prefix is what this pins; test/layer7-contract.test.ts pins the full lists.
+    expect([...PROPOSAL_KINDS].slice(0, 8)).toEqual(["diagnose", "propose", "patch", "chat", "message", "bridge_message", "bridge_edge", "device"]);
+    expect([...NEARBY_KINDS].slice(0, 2)).toEqual(["meshtastic", "reticulum"]);
     for (const c of ["consent_required", "oversize", "component_unavailable", "unsupported_action", "not_supervised"]) expect(PROBLEM_CODES as readonly string[]).toContain(c);
   });
   it("the SSE map has the two Layer 6 events and Layer 5's are untouched", () => {

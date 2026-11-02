@@ -28,5 +28,9 @@ pub mod outbox; // F1 — §6.1 ACK construction, §9 states/reasons, §3.3 MSG 
 pub mod sealer; // T0 — the identity-holder handle (trait only)
 pub mod store; // C3 — §10 SQLCipher store, tx/rx state, pruning // F1 — the runtime that ties the above together
 
+// Layer 7 §5.9 (amendment 11) and §4.6 (amendment 10): the hand-off shapes
+// and the pairing record, named `mesh111::…` by the daemon's carrier.
+pub use fabric::{CarrierFrame, ForwardDone, PairRole, PairVia, PairedHub};
+
 #[cfg(test)]
 mod test_double; // C2 — in-memory `Sealer` double + frozen-vector reader (tests only)

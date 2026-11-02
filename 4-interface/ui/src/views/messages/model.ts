@@ -322,7 +322,8 @@ export function bannerAgent(banner: MessagingBanner, reasonCode: string | null |
 export function errorSentence(err: unknown, fallback: string): string {
   if (!isApiError(err)) return fallback;
   if (err.code === "network") return "Could not reach the node. Check that it is running and try again.";
-  return err.problem.detail || err.problem.title || fallback;
+  // A node's sentence can quote a foreign title or name: it is peer text on its way to the screen.
+  return cleanPeerText(err.problem.detail || err.problem.title || fallback);
 }
 
 // --- Requests (INTROs, §7.2) -------------------------------------------------------------------------------------------

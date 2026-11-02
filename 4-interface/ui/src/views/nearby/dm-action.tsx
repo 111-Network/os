@@ -8,6 +8,7 @@ import { Button } from "../../components/button";
 import { apiStore, getAdapter, isApiError } from "../../lib/api";
 import { addressProblem } from "../../lib/api/bridge";
 import { useNetworks } from "../../lib/api/hooks";
+import { cleanPeerText } from "../../lib/api/messages";
 import { foreignPath } from "../../lib/api/networks";
 import type { NearbyNode } from "../../lib/api/types";
 
@@ -35,7 +36,8 @@ export function DmAction({ node, sourceKind }: { node: Pick<NearbyNode, "id" | "
       navigate(foreignPath(network.id, c.id));
     } catch (err) {
       if (redirectIfUnauthenticated(err)) return;
-      setError(isApiError(err) ? err.problem.detail || err.problem.title : "Could not open that conversation.");
+      // The node's sentence can quote the heard node's name: peer text, drawn as text with its direction isolated.
+      setError(isApiError(err) ? cleanPeerText(err.problem.detail || err.problem.title) : "Could not open that conversation.");
     } finally {
       setBusy(false);
     }
@@ -48,7 +50,7 @@ export function DmAction({ node, sourceKind }: { node: Pick<NearbyNode, "id" | "
         </Button>
       </div>
       {error ? (
-        <p role="alert" className="font-mono text-xs text-destructive">
+        <p role="alert" dir="auto" className="font-mono text-xs text-destructive [unicode-bidi:isolate]" data-testid="nearby-dm-error">
           {error}
         </p>
       ) : null}

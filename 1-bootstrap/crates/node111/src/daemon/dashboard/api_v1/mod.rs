@@ -18,8 +18,11 @@
 //!   `Arc<crate::daemon::bridge::Bridge>` (networks, fan-out, edges,
 //!   settings), `crate::daemon::components::Components` (optional
 //!   components), `Arc<transport::TransportApi>` (the spine and the rnstatus
-//!   facts cache) and `Arc<bridge::ComponentAdapters>` (the component →
-//!   adapter seam).
+//!   facts cache), `Arc<bridge::ComponentAdapters>` (the component →
+//!   adapter seam: adapter factories and the prepare hooks that run before a
+//!   component's child starts, the LXMF helper's registered by
+//!   `daemon::register_lxmf`) and `Arc<nearby::BridgeNearby>` (the adapters'
+//!   Nearby sources, the `reticulum` ones, merged into `GET /nearby`).
 //! - `auth` routes (`/api/v1/auth/*`) are open (that is how a LAN visitor pairs).
 //! - [`auth::csrf_guard`] wraps BOTH groups: every POST/PATCH/PUT/DELETE must be
 //!   `Content-Type: application/json` (else 415) and, when `Origin` is present,
@@ -58,9 +61,13 @@ pub mod kb;
 pub mod messages;
 pub mod nearby;
 pub mod networks;
+pub mod origins;
+pub mod pair;
 pub mod panels;
 pub mod proposals;
+pub mod registry;
 pub mod relay;
+pub mod relay7;
 pub mod services;
 pub mod settings;
 pub mod status;
@@ -260,6 +267,11 @@ pub fn router(state: Arc<ApiState>) -> axum::Router {
         .merge(fanout::router())
         .merge(bridge::router())
         .merge(transport::router())
+        // Layer 7 (§13.1): relay status and settings, pairing, the registry, update origins
+        .merge(relay7::router())
+        .merge(pair::router())
+        .merge(registry::router())
+        .merge(origins::router())
         .route_layer(middleware::from_fn_with_state(
             Arc::clone(&state),
             auth::require_session,

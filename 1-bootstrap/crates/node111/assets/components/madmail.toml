@@ -1,0 +1,56 @@
+# Optional component declaration (Layer 6 §2.1, §7; C5): the Madmail relay (a Rust single-binary chatmail relay) that the
+# Delta Chat bridge account uses, IP-only with a self-signed certificate. Parsed with deny_unknown_fields by node111's
+# `daemon/components/manifest.rs`. Pins: the netns spike S5 (plan/layers/6-transport/research/08-spike-deltachat.md §0;
+# release v2.30.5 = tag commit 22db4602768364955670b0f08dd97f03db6e22cc; neither project publishes checksums, so this
+# signed manifest is the first independent record). Madmail tags are not releases: the pin moves only by a reviewed
+# release, never by Madmail's own `upgrade`. No armv7 asset exists upstream: a 32-bit Pi has no build ("there is no build
+# of Madmail for this machine"). The release binary links glibc 2.38 symbols (spike §8.3): Debian 12 / Pi OS bookworm
+# (2.36) and Ubuntu 22.04 refuse with the [requires] copy; the core (deltachat.toml) is static and has no floor.
+#
+# 111 runs it without `madmail install` (which writes into /usr/share, spike row 2) and never runs `upgrade`: the adapter
+# (`daemon/bridge/deltachat.rs`) writes bridge/deltachat/madmail.toml itself before every enable (listeners on the block
+# below, loopback-bound, the LAN address only while LAN sharing is on; tls_mode self_signed; no plain IMAP, submission or
+# HTTP, no OpenMetrics, TURN off, no Shadowsocks or Iroh) and sets push off, federation reject and registration
+# open/close with the relay's CLI while it is stopped. Health is the IMAP listener (checked by the adapter, which knows
+# the rendered address), so `health = "none"` here.
+id = "madmail"
+adapter = "app:deltachat"               # the network it carries; state in bridge/deltachat/ (removed by "remove files")
+title = "Madmail"
+kb_entry = "projects/madmail"
+
+[payload]
+kind = "binary"
+
+[payload.targets.x86_64-linux]
+url = "https://github.com/themadorg/madmail/releases/download/v2.30.5/madmail-linux-amd64"
+sha256 = "ad89fb23de9580cd736c7caa8136422415cb8779954c16e366d94f9325b989d1"
+size = 77331312                         # dynamic glibc, not stripped; run in the spike (`version` → madmail-v2 2.30.5)
+
+[payload.targets.aarch64-linux]
+url = "https://github.com/themadorg/madmail/releases/download/v2.30.5/madmail-linux-arm64"
+sha256 = "27e6e74d9a268f33bb23a12aa57e5bcb1e164f3d670e6fe3d2b2bb7e541f20b5"
+size = 73479752                         # dynamic glibc; downloaded and hashed, not run
+
+[requires]
+glibc = "2.38"
+glibc_distros = "Debian 13 / Ubuntu 24.04"
+
+[run]
+program = "{payload}"                   # the installed file of this machine's target
+args = ["--config", "{bridge}/madmail.toml", "--state-dir", "{bridge}/madmail", "run"]
+ports = [11240, 11241, 11242, 11243]    # SMTP, submission (TLS), IMAP (TLS), HTTPS: ≥ 1024, no CAP_NET_BIND_SERVICE (spike §4)
+health = "none"
+
+[weight]
+cached_bytes = 77331312                 # x86_64 (aarch64: 73479752)
+installed_bytes = 77331312
+rss_bytes = 37000000                    # 34.6–35.6 MB measured in the spike
+
+[install]
+prefetch = false                        # 77.3 MB on x86_64: not pre-downloaded by `111 install` (the Raspberry Pi floor);
+                                        # `sudo 111 install --components deltachat,madmail` fetches it, enable never does
+
+[license]
+spdx = "AGPL-3.0-or-later"
+read_at = "https://github.com/themadorg/madmail/blob/v2.30.5/LICENCE"
+notice = "Madmail 2.30.5 is a chatmail relay by themadorg, licensed under the GNU AGPL version 3 or later; read it at https://github.com/themadorg/madmail/blob/v2.30.5/LICENCE before you enable it. It is downloaded unmodified from its GitHub release; you install it, and 111 is not its distributor. Its Corresponding Source (AGPL section 13) is the tagged release at https://github.com/themadorg/madmail/tree/v2.30.5. 111 writes its configuration itself: loopback only, or this hub's LAN address while LAN sharing is on, ports 11240 to 11243, a self-signed certificate, push, federation, Shadowsocks, TURN, plain HTTP and metrics off. The relay's addresses carry this hub's IP, so changing LAN sharing changes the bridge account's address. Madmail is young software: its README says use it at your own risk. It needs glibc 2.38 or newer."

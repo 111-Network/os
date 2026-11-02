@@ -42,12 +42,12 @@
 //! else here: enroll, offer, dismiss and settings are `401` for it.
 
 use super::auth::LoopbackOnly;
-use super::messages::{bad_request, handle, refuse_bearer};
+use super::messages::{bad_request, handle};
 use super::{ApiRouter, ApiState, Problem};
 use crate::daemon::fabric::{self, json, settings::dial_refusal, FabricHandle};
 use axum::body::Bytes;
 use axum::extract::State;
-use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
+use axum::http::{header, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, patch, post};
 use axum::Json;
@@ -214,10 +214,7 @@ fn parse_enroll(body: &[u8]) -> Result<EnrollReq, Problem> {
     })
 }
 
-async fn enroll(State(api): State<Arc<ApiState>>, headers: HeaderMap, body: Bytes) -> Response {
-    if let Err(p) = refuse_bearer(&headers) {
-        return p.into_response();
-    }
+async fn enroll(State(api): State<Arc<ApiState>>, body: Bytes) -> Response {
     let req = match parse_enroll(&body) {
         Ok(r) => r,
         Err(p) => return p.into_response(),
@@ -287,14 +284,7 @@ async fn enroll(State(api): State<Arc<ApiState>>, headers: HeaderMap, body: Byte
     }
 }
 
-async fn offer(
-    _lo: LoopbackOnly,
-    State(api): State<Arc<ApiState>>,
-    headers: HeaderMap,
-) -> Response {
-    if let Err(p) = refuse_bearer(&headers) {
-        return p.into_response();
-    }
+async fn offer(_lo: LoopbackOnly, State(api): State<Arc<ApiState>>) -> Response {
     let h = match handle(&api) {
         Ok(h) => h,
         Err(p) => return p.into_response(),
@@ -376,14 +366,7 @@ fn with_current_card(view: &mut mesh111::fabric::OfferView, announce: &[u8]) {
     view.card = card;
 }
 
-async fn dismiss(
-    _lo: LoopbackOnly,
-    State(api): State<Arc<ApiState>>,
-    headers: HeaderMap,
-) -> Response {
-    if let Err(p) = refuse_bearer(&headers) {
-        return p.into_response();
-    }
+async fn dismiss(_lo: LoopbackOnly, State(api): State<Arc<ApiState>>) -> Response {
     let h = match handle(&api) {
         Ok(h) => h,
         Err(p) => return p.into_response(),
@@ -438,15 +421,7 @@ fn parse_settings(body: &[u8]) -> Result<SettingsPatch, Problem> {
     Ok(p)
 }
 
-async fn settings(
-    _lo: LoopbackOnly,
-    State(api): State<Arc<ApiState>>,
-    headers: HeaderMap,
-    body: Bytes,
-) -> Response {
-    if let Err(p) = refuse_bearer(&headers) {
-        return p.into_response();
-    }
+async fn settings(_lo: LoopbackOnly, State(api): State<Arc<ApiState>>, body: Bytes) -> Response {
     let patch = match parse_settings(&body) {
         Ok(p) => p,
         Err(p) => return p.into_response(),

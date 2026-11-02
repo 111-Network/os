@@ -137,7 +137,7 @@ allowed() { # port -> 0 when a baseline line allows it now
     lo=${range%-*}; hi=${range#*-}
     [ "$port" -ge "$lo" ] && [ "$port" -le "$hi" ] || continue
     case "$when" in
-      always) return 0 ;;
+      always | optional) return 0 ;;
       child:*) running "${when#child:}" && return 0 ;;
       fabric_listen) fabric_listen && return 0 ;;
       panel) running meshmud && return 0 ;;

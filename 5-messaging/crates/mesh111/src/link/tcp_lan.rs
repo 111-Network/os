@@ -45,12 +45,25 @@
 //!   settings: hub role or LAN sharing) — [`TcpLan::listen`].
 //! - **Capacity**, not policy: at most `max_connections` connections (file
 //!   descriptors are finite); a full table refuses new ones.
+//! - **The stream seam** (Layer 7 §4.4; Layer 7 §19 code seam 1):
+//!   [`TcpLanConfig::wrap`] is `None` by default, and then every byte on the
+//!   wire is what this module always wrote. With a [`StreamWrap`] the host
+//!   wraps each accepted or dialed `TcpStream` before the hello (node111
+//!   runs paired-hub links inside TLS 1.3 with raw public keys there; this
+//!   crate gains no crypto dependency). The 111 wire inside the wrapped
+//!   stream is unchanged. An inbound wrap may name the pair whose pinned key
+//!   the peer presented (S7): a first announce naming another NodeId ends
+//!   the connection inside the handshake, before any byte beyond the hello
+//!   and the own announce, rather than waiting for `pair_mac` attribution.
+//!   The wrap's own handshake counts against `handshake_timeout` and the
+//!   connection table, like the hello.
 //!
 //! The stream leaks `dest_hint`, counters and sizes to an on-path observer
-//! (§18 rule 4): no transport encryption in v1; content, sender and kind are
-//! sealed.
+//! (§18 rule 4): no transport encryption in this crate (a host wrap may add
+//! it, Layer 7 §4.1); content, sender and kind are sealed.
 
 use std::collections::HashMap;
+use std::io;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
@@ -90,8 +103,46 @@ pub const MAX_BODY: usize = 65_535;
 /// Card request body: one NodeId.
 pub const CARD_REQUEST_LEN: usize = 32;
 
+/// A duplex byte stream a [`StreamWrap`] hands back (Layer 7 §4.4): any
+/// `AsyncRead + AsyncWrite + Send + Unpin` type, behind a box so the trait
+/// stays object-safe.
+pub trait LinkStream: AsyncRead + AsyncWrite + Send + Unpin {}
+
+impl<T: AsyncRead + AsyncWrite + Send + Unpin + ?Sized> LinkStream for T {}
+
+/// A boxed [`LinkStream`].
+pub type BoxedStream = Box<dyn LinkStream>;
+
+/// The `tcp-lan` stream seam (Layer 7 §4.4; §19 code seam 1): the host
+/// wraps each connection's `TcpStream` before the §8.1 hello is written.
+///
+/// Both calls run inside the adapter's handshake: they count against
+/// `handshake_timeout` and the connection table. An `Err` ends the
+/// connection before any 111 byte (a dial counts it as a failed attempt).
+/// A wrap may hand the stream back unwrapped (a member, a LAN pair: Layer 7
+/// §4.1 rules 1 and 3); the choice is the host's.
+pub trait StreamWrap: Send + Sync {
+    /// A dialed connection to `addr`, where the dialer expects `expected`
+    /// ([`Dialer::maintain`]; `None` when the dial names no NodeId).
+    fn outbound(
+        &self,
+        addr: SocketAddr,
+        expected: Option<NodeId>,
+        stream: TcpStream,
+    ) -> BoxFuture<'_, io::Result<BoxedStream>>;
+
+    /// An accepted connection from `remote`. The `NodeId` is the pair whose
+    /// pinned key the peer presented (S7), `None` for a plain peer; when
+    /// `Some`, a first announce naming another NodeId is refused.
+    fn inbound(
+        &self,
+        remote: SocketAddr,
+        stream: TcpStream,
+    ) -> BoxFuture<'_, io::Result<(BoxedStream, Option<NodeId>)>>;
+}
+
 /// Adapter settings. Every limit is capacity or transport, never policy.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct TcpLanConfig {
     /// This node's own announce (stored bytes, §7), sent first on every
     /// connection.
@@ -114,6 +165,27 @@ pub struct TcpLanConfig {
     /// Frames read from all connections and not yet taken by `recv`
     /// (capacity: a full queue stops the readers — module doc).
     pub inbound_queue: usize,
+    /// The stream seam (Layer 7 §4.4): `None` (the default) leaves every
+    /// connection a plain `TcpStream`, byte-identical with the adapter
+    /// before the seam.
+    pub wrap: Option<Arc<dyn StreamWrap>>,
+}
+
+impl std::fmt::Debug for TcpLanConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TcpLanConfig")
+            .field("own_announce_len", &self.own_announce.len())
+            .field("max_connections", &self.max_connections)
+            .field("keepalive", &self.keepalive)
+            .field("handshake_timeout", &self.handshake_timeout)
+            .field("refuse_loopback", &self.refuse_loopback)
+            .field("backoff_min", &self.backoff_min)
+            .field("backoff_max", &self.backoff_max)
+            .field("write_queue", &self.write_queue)
+            .field("inbound_queue", &self.inbound_queue)
+            .field("wrap", &self.wrap.is_some())
+            .finish()
+    }
 }
 
 impl TcpLanConfig {
@@ -129,6 +201,7 @@ impl TcpLanConfig {
             backoff_max: Duration::from_secs(60),
             write_queue: 1024,
             inbound_queue: 256,
+            wrap: None,
         }
     }
 }
@@ -159,8 +232,10 @@ pub enum WireError {
     /// The announce failed to parse or verify, or the gate refused it.
     #[error("announce refused")]
     AnnounceRefused,
-    /// A dial was answered by another node than the one expected there.
-    #[error("the peer is not the node this address was dialed for")]
+    /// A dial was answered by another node than the one expected there, or
+    /// a wrapped peer's first announce names another NodeId than the pair
+    /// its pinned key matched (Layer 7 §4.4, S7).
+    #[error("the peer is not the node this connection was opened for")]
     ClaimMismatch,
 }
 
@@ -276,13 +351,33 @@ impl Shared {
     }
 }
 
-/// Decrements the handshake counter on every exit path.
-struct HandshakeSlot<'a>(&'a AtomicUsize);
+/// One handshake in flight (the wrap's and the hello's): counted against
+/// `max_connections`, decremented on every exit path.
+struct HandshakeSlot(Arc<Shared>);
 
-impl Drop for HandshakeSlot<'_> {
-    fn drop(&mut self) {
-        self.0.fetch_sub(1, Ordering::SeqCst);
+impl HandshakeSlot {
+    fn take(shared: &Arc<Shared>) -> Self {
+        shared.handshaking.fetch_add(1, Ordering::SeqCst);
+        HandshakeSlot(shared.clone())
     }
+}
+
+impl Drop for HandshakeSlot {
+    fn drop(&mut self) {
+        self.0.handshaking.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
+/// How a connection was opened.
+#[derive(Debug, Clone, Copy)]
+enum Opened {
+    /// Accepted by the listener.
+    Accepted,
+    /// Dialed to `addr` for `expected` ([`Dialer::maintain`]).
+    Dialed {
+        addr: SocketAddr,
+        expected: Option<NodeId>,
+    },
 }
 
 /// The `tcp-lan` adapter (§8.1). Cheap to clone (shared state).
@@ -354,7 +449,7 @@ impl TcpLan {
                 }
                 let s = shared.clone();
                 tokio::spawn(async move {
-                    serve(s, stream, remote, false, None).await;
+                    open(s, stream, remote, Opened::Accepted).await;
                 });
             }
         });
@@ -418,18 +513,52 @@ impl TcpLan {
     }
 }
 
-/// One connection, start to end. Returns whether the handshake completed.
-async fn serve(
-    shared: Arc<Shared>,
-    stream: TcpStream,
-    remote: SocketAddr,
-    outbound: bool,
-    expected: Option<NodeId>,
-) -> bool {
-    shared.handshaking.fetch_add(1, Ordering::SeqCst);
-    let slot = HandshakeSlot(&shared.handshaking);
+/// One TCP connection, start to end: the host's [`StreamWrap`] if any
+/// (Layer 7 §4.4), then [`serve`]. Returns whether the handshake completed.
+async fn open(shared: Arc<Shared>, stream: TcpStream, remote: SocketAddr, how: Opened) -> bool {
+    let slot = HandshakeSlot::take(&shared);
+    // One deadline for the wrap's handshake and the hello (monotonic clock).
+    let deadline = tokio::time::Instant::now() + shared.cfg.handshake_timeout;
     let _ = stream.set_nodelay(true);
-    let (mut rd, mut wr) = stream.into_split();
+    let Some(wrap) = shared.cfg.wrap.clone() else {
+        // `wrap = None`: the plain stream, byte-identical.
+        return serve(shared, slot, stream, remote, how, None, deadline).await;
+    };
+    let wrapped = async {
+        match how {
+            Opened::Accepted => wrap.inbound(remote, stream).await,
+            Opened::Dialed { addr, expected } => wrap
+                .outbound(addr, expected, stream)
+                .await
+                .map(|s| (s, None)),
+        }
+    };
+    let (stream, matched) = match tokio::time::timeout_at(deadline, wrapped).await {
+        Ok(Ok(x)) => x,
+        _ => return false, // refused, failed or slow: no 111 byte was written
+    };
+    serve(shared, slot, stream, remote, how, matched, deadline).await
+}
+
+/// One connection's 111 wire over any duplex stream (§8.1; generic since
+/// Layer 7 §4.4). `matched` is the pair an inbound wrap named (S7).
+async fn serve<S>(
+    shared: Arc<Shared>,
+    slot: HandshakeSlot,
+    stream: S,
+    remote: SocketAddr,
+    how: Opened,
+    matched: Option<NodeId>,
+    deadline: tokio::time::Instant,
+) -> bool
+where
+    S: AsyncRead + AsyncWrite + Send + Unpin + 'static,
+{
+    let (outbound, expected) = match how {
+        Opened::Accepted => (false, None),
+        Opened::Dialed { expected, .. } => (true, expected),
+    };
+    let (mut rd, mut wr) = tokio::io::split(stream);
     let own = shared
         .own
         .read()
@@ -445,6 +574,12 @@ async fn serve(
             return Err(WireError::NotAnnounceFirst);
         }
         let ann = verify_announce(&body).ok_or(WireError::AnnounceRefused)?;
+        // S7: the wrapped peer is the pair its pinned key matched; another
+        // NodeId ends the connection here, before any other 111 byte and
+        // before the fabric's gate sees it.
+        if matched.is_some_and(|m| m != ann.node_id()) {
+            return Err(WireError::ClaimMismatch);
+        }
         if !gate.admit(&ann) {
             return Err(WireError::AnnounceRefused);
         }
@@ -454,7 +589,7 @@ async fn serve(
         }
         Ok::<Vec<u8>, WireError>(body)
     };
-    let first = match tokio::time::timeout(shared.cfg.handshake_timeout, handshake).await {
+    let first = match tokio::time::timeout_at(deadline, handshake).await {
         Ok(Ok(body)) => body,
         _ => return false,
     };
@@ -686,7 +821,8 @@ impl Dialer for TcpLan {
                         tokio::time::timeout(shared.cfg.handshake_timeout, connect).await
                     {
                         let remote = stream.peer_addr().unwrap_or(addr);
-                        if serve(shared.clone(), stream, remote, true, expected).await {
+                        let how = Opened::Dialed { addr, expected };
+                        if open(shared.clone(), stream, remote, how).await {
                             backoff = shared.cfg.backoff_min;
                         }
                     }
@@ -805,6 +941,241 @@ mod tests {
         assert_eq!(opening(at).await, first);
         t.set_announce(second.clone());
         assert_eq!(opening(at).await, second);
+        t.shutdown();
+    }
+
+    /// A test identity: its NodeId and stored announce bytes.
+    fn ident(label: u8) -> (NodeId, Vec<u8>) {
+        let mut b = [0u8; 64];
+        b[..32].copy_from_slice(&crate::envelope::blake2b_256(&[b"m6-sign", &[label]]));
+        b[32..].copy_from_slice(&crate::envelope::blake2b_256(&[b"m6-ecdh", &[label]]));
+        let k = id111::keyset::Keyset::from_bytes(&b).unwrap();
+        let ann = Announce::create(&k, 1, &[1, 0, 0, 0]).unwrap().encode();
+        (k.node_id(), ann)
+    }
+
+    /// A fake [`StreamWrap`] (Layer 7 §4.4): each connection is pumped
+    /// through a `tokio::io::duplex` pair, so the adapter speaks over a
+    /// stream that is not a `TcpStream`; every call is recorded.
+    #[derive(Default)]
+    struct DuplexWrap {
+        matched: Option<NodeId>,
+        refuse_outbound: bool,
+        calls: Mutex<Vec<(bool, SocketAddr, Option<NodeId>)>>,
+    }
+
+    fn pump(tcp: TcpStream) -> BoxedStream {
+        let (near, mut far) = tokio::io::duplex(1 << 17);
+        tokio::spawn(async move {
+            let mut tcp = tcp;
+            let _ = tokio::io::copy_bidirectional(&mut tcp, &mut far).await;
+        });
+        Box::new(near)
+    }
+
+    impl StreamWrap for DuplexWrap {
+        fn outbound(
+            &self,
+            addr: SocketAddr,
+            expected: Option<NodeId>,
+            stream: TcpStream,
+        ) -> BoxFuture<'_, io::Result<BoxedStream>> {
+            self.calls.lock().unwrap().push((true, addr, expected));
+            let refuse = self.refuse_outbound;
+            Box::pin(async move {
+                if refuse {
+                    return Err(io::Error::new(io::ErrorKind::PermissionDenied, "refused"));
+                }
+                Ok(pump(stream))
+            })
+        }
+
+        fn inbound(
+            &self,
+            remote: SocketAddr,
+            stream: TcpStream,
+        ) -> BoxFuture<'_, io::Result<(BoxedStream, Option<NodeId>)>> {
+            self.calls.lock().unwrap().push((false, remote, None));
+            let matched = self.matched;
+            Box::pin(async move { Ok((pump(stream), matched)) })
+        }
+    }
+
+    fn wrapped(
+        own: Vec<u8>,
+        wrap: Arc<DuplexWrap>,
+    ) -> (TcpLan, mpsc::UnboundedReceiver<LinkEvent>) {
+        let mut cfg = TcpLanConfig::new(own);
+        cfg.refuse_loopback = false; // the test peers are on loopback
+        cfg.wrap = Some(wrap);
+        let (events, rx) = mpsc::unbounded_channel();
+        let t = TcpLan::new(
+            LinkId::new("tcp-lan"),
+            cfg,
+            events,
+            Arc::new(super::super::AdmitAll),
+        );
+        (t, rx)
+    }
+
+    async fn next_event(rx: &mut mpsc::UnboundedReceiver<LinkEvent>) -> LinkEvent {
+        tokio::time::timeout(Duration::from_secs(5), rx.recv())
+            .await
+            .expect("an event")
+            .expect("the sink is open")
+    }
+
+    /// Everything the peer still sends until it closes.
+    async fn rest(s: &mut TcpStream) -> Vec<u8> {
+        let mut out = Vec::new();
+        let mut buf = [0u8; 512];
+        loop {
+            match tokio::time::timeout(Duration::from_secs(5), s.read(&mut buf)).await {
+                Ok(Ok(0)) | Ok(Err(_)) => return out,
+                Ok(Ok(n)) => out.extend_from_slice(&buf[..n]),
+                Err(_) => panic!("the connection stayed open"),
+            }
+        }
+    }
+
+    #[test]
+    fn the_default_is_no_wrap() {
+        let cfg = TcpLanConfig::new(Vec::new());
+        assert!(cfg.wrap.is_none());
+        assert!(format!("{cfg:?}").contains("wrap: false"));
+    }
+
+    /// Layer 7 §4.4: through a wrapped inbound stream the 111 wire is
+    /// unchanged in both directions, and a first announce from the matched
+    /// pair is served.
+    #[tokio::test]
+    async fn a_wrapped_inbound_stream_carries_the_wire_unchanged() {
+        let (_, own) = ident(1);
+        let (peer_id, peer_ann) = ident(2);
+        let wrap = Arc::new(DuplexWrap {
+            matched: Some(peer_id),
+            ..DuplexWrap::default()
+        });
+        let (t, mut events) = wrapped(own.clone(), wrap.clone());
+        let at = t.listen("127.0.0.1:0".parse().unwrap()).await.unwrap();
+
+        let mut c = TcpStream::connect(at).await.unwrap();
+        read_hello(&mut c).await.unwrap();
+        assert_eq!(read_frame(&mut c).await.unwrap(), (T_ANNOUNCE, own));
+        c.write_all(&HELLO).await.unwrap();
+        c.write_all(&encode_frame(T_ANNOUNCE, &peer_ann).unwrap())
+            .await
+            .unwrap();
+
+        let LinkEvent::Connected {
+            peer,
+            outbound,
+            expected,
+            ..
+        } = next_event(&mut events).await
+        else {
+            panic!("not a connection");
+        };
+        assert!(!outbound);
+        assert_eq!(expected, None);
+        assert_eq!(t.connection_count(), 1);
+        assert_eq!(t.recv().await, (peer.clone(), Frame::announce(peer_ann)));
+
+        let body: Vec<u8> = (0..300u16).map(|i| (i % 251) as u8).collect();
+        c.write_all(&encode_frame(T_SEALED, &body).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(t.recv().await, (peer.clone(), Frame::sealed(body)));
+
+        t.send(peer, Frame::sealed(vec![7; 40])).await.unwrap();
+        assert_eq!(read_frame(&mut c).await.unwrap(), (T_SEALED, vec![7; 40]));
+
+        let local = c.local_addr().unwrap();
+        assert_eq!(*wrap.calls.lock().unwrap(), vec![(false, local, None)]);
+        t.shutdown();
+    }
+
+    /// S7: a wrapped peer whose pinned key matched one pair and whose first
+    /// announce names another NodeId is refused: no byte follows the hello
+    /// and the own announce, and no connection is reported.
+    #[tokio::test]
+    async fn a_mismatched_first_announce_ends_the_connection() {
+        let (_, own) = ident(1);
+        let (pair_id, _) = ident(2);
+        let (_, other_ann) = ident(3);
+        let wrap = Arc::new(DuplexWrap {
+            matched: Some(pair_id),
+            ..DuplexWrap::default()
+        });
+        let (t, mut events) = wrapped(own.clone(), wrap);
+        let at = t.listen("127.0.0.1:0".parse().unwrap()).await.unwrap();
+
+        let mut c = TcpStream::connect(at).await.unwrap();
+        read_hello(&mut c).await.unwrap();
+        assert_eq!(read_frame(&mut c).await.unwrap(), (T_ANNOUNCE, own));
+        c.write_all(&HELLO).await.unwrap();
+        c.write_all(&encode_frame(T_ANNOUNCE, &other_ann).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(rest(&mut c).await, Vec::<u8>::new(), "no other 111 byte");
+        assert!(events.try_recv().is_err(), "never a connection");
+        assert_eq!(t.connection_count(), 0);
+        t.shutdown();
+    }
+
+    /// Layer 7 §4.4: a dial hands the wrap its address and expected NodeId,
+    /// and the wire inside is unchanged.
+    #[tokio::test]
+    async fn a_wrapped_dial_names_the_pair_and_carries_the_wire() {
+        let (_, own) = ident(1);
+        let (peer_id, peer_ann) = ident(2);
+        let wrap = Arc::new(DuplexWrap::default());
+        let (t, mut events) = wrapped(own.clone(), wrap.clone());
+        let l = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = l.local_addr().unwrap();
+        t.maintain(addr, Some(peer_id));
+
+        let (mut s, _) = l.accept().await.unwrap();
+        read_hello(&mut s).await.unwrap();
+        assert_eq!(read_frame(&mut s).await.unwrap(), (T_ANNOUNCE, own));
+        s.write_all(&HELLO).await.unwrap();
+        s.write_all(&encode_frame(T_ANNOUNCE, &peer_ann).unwrap())
+            .await
+            .unwrap();
+        let LinkEvent::Connected {
+            outbound, expected, ..
+        } = next_event(&mut events).await
+        else {
+            panic!("not a connection");
+        };
+        assert!(outbound);
+        assert_eq!(expected, Some(peer_id));
+        assert_eq!(
+            *wrap.calls.lock().unwrap(),
+            vec![(true, addr, Some(peer_id))]
+        );
+        t.release(addr);
+        t.shutdown();
+    }
+
+    /// A wrap that refuses a dial ends it before any 111 byte; the dial is a
+    /// failed attempt, never a connection.
+    #[tokio::test]
+    async fn a_refused_wrap_writes_no_111_byte() {
+        let (_, own) = ident(1);
+        let wrap = Arc::new(DuplexWrap {
+            refuse_outbound: true,
+            ..DuplexWrap::default()
+        });
+        let (t, mut events) = wrapped(own, wrap);
+        let l = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = l.local_addr().unwrap();
+        t.maintain(addr, None);
+        let (mut s, _) = l.accept().await.unwrap();
+        assert_eq!(rest(&mut s).await, Vec::<u8>::new());
+        assert!(events.try_recv().is_err());
+        assert_eq!(t.connection_count(), 0);
+        t.release(addr);
         t.shutdown();
     }
 

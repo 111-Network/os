@@ -20,10 +20,11 @@ os/plan/
   INDEX.md             status board
   DECISIONS.md         decision log
   EXECUTION.md         build protocol
-  HANDOFF-<date>.md    session handoff (newest = current; see "Handoffs")
-  cross-layer/         material that spans layers
+  HANDOFF-<date>.md    session handoff (the newest open one is current: HANDOFF-2026-11-02.md; see "Handoffs")
+  cross-layer/         material that spans layers (devices.md, parked.md, ci-cd.md — CI/CD + GitHub hygiene, D28)
     devices.md           device-connection core brief (Layer 6 opener; read by Layers 4, 5, 6)
     parked.md            ideas parked by the owner for later layers
+    ci-cd.md             CI/CD and GitHub hygiene (D28): what runs on GitHub, the owner's repository settings, the CD plan
   layers/
     N-<slug>/         one folder per layer that has plan material
       README.md          one-screen index: status line, links to every file, spec + TASKS.md in os/N-<slug>/
@@ -49,18 +50,18 @@ and `os/N-<slug>/TASKS.md`, where the layer's code is.
 | 3 Local Intelligence | none | no plan material: no research sweep or panel was run; see D10 and `os/3-intelligence/` |
 | 4 Interface & Dashboard | `layers/4-interface/` | options, triage |
 | 5 Messaging & Data | `layers/5-messaging/` | full set: research, options, review, runs |
-| 6 Transport & Bridge | `layers/6-transport/` | research, coordinates, runs (kickoff 2026-10-19, D23); opener brief [`cross-layer/devices.md`](cross-layer/devices.md) |
-| 7 Relay & Presence | none yet | reserved name `7-relay`; pending |
-| 8 Storage & Shared State | none yet | reserved name `8-storage`; pending |
-| 9 Self-Healing & Evolution | none yet | reserved name `9-evolution`; pending |
+| 6 Transport & Bridge | `layers/6-transport/` | research (R00–R08 + coordinates), options, review (the 3-judge panel, the recheck, V5 `review/v5-integrated.md`), runs (workflows `runs/workflows/*.js`, journals); opener brief [`cross-layer/devices.md`](cross-layer/devices.md); built and locked 2026-10-23 (D29) |
+| 7 Relay & Presence | `layers/7-relay/` | research (kickoff 2026-11-01: `research/00`–`07`, `runs/workflows/research.js`, `research/coordinates.md`), options brief (`options.md`, decided D30 2026-11-01), spec runs (`runs/workflows/spec.js`, `spec-fix.js`), review (`review/`: three panel reports, `triage.md`, `recheck.md`; D31, lock D32 2026-11-02); 🔨 building per `os/7-relay/TASKS.md` (Wave 0 and its fix waves landed 2026-11-02, `runs/workflows/wave-0*.js`; Wave 1 next; paused for the PR #2 merge: `HANDOFF-2026-11-02.md`) |
+| 8 Storage & Shared State | `layers/8-storage/` | research (kickoff 2026-11-02: `research/00`–`07-gap-3`, `runs/workflows/research.js`, `research/coordinates.md`), options brief (`options.md`, `runs/workflows/options.js`, `review/options-check.md`); 🧭 deciding: the owner decides → spec → fable panel → lock → build |
+| 9 Self-Healing & Evolution | `layers/9-evolution/` | research (kickoff 2026-11-02: `research/00`–`07-gap-3`, `runs/workflows/research.js`, `research/coordinates.md`), options brief (`options.md`, `runs/workflows/options.js`, `review/options-check.md`); 🧭 deciding: the owner decides → spec → fable panel → lock → build |
 
 ## Naming conventions
 
-- **Layer folder:** `layers/N-<slug>/`, where `N` is the layer number from `INDEX.md` and the name is identical to the layer's own folder under `os/`. Current names: `0-knowledge`, `1-bootstrap`, `2-identity`, `4-interface`, `5-messaging`, `6-transport` (Layer 3, `3-intelligence`, has no plan material, so no plan folder). Reserved for layers not started yet: `7-relay`, `8-storage`, `9-evolution`. `plan/` and `hooks/` are not layers and stay unnumbered.
+- **Layer folder:** `layers/N-<slug>/`, where `N` is the layer number from `INDEX.md` and the name is identical to the layer's own folder under `os/`. Current names: `0-knowledge`, `1-bootstrap`, `2-identity`, `4-interface`, `5-messaging`, `6-transport`, `7-relay` (Layer 3, `3-intelligence`, has no plan material, so no plan folder; `7-relay` has a plan folder from its 2026-11-01 kickoff and its spec in draft; `8-storage` and `9-evolution` have plan folders from their 2026-11-02 kickoff and no spec folder yet). No layer name is reserved any more. `plan/` and `hooks/` are not layers and stay unnumbered.
 - **Fixed names inside a layer folder:** `N-<slug>/README.md`, `N-<slug>/options.md`, `N-<slug>/research/coordinates.md`, `N-<slug>/review/triage.md`. A layer that lacks one of these simply has not produced it.
 - **Research reports:** `research/NN-<topic>.md`, numbered in run order. Gap-fill reports reuse one number and add a suffix (07-gap-1, 07-gap-2, ...).
 - **Review reports:** `review/<lens>.md` for each judge of the spec panel (crypto, panels, integration), `N-<slug>/review/recheck.md` for the re-check, `N-<slug>/review/wave-N.md` for the triage of build wave N.
-- **Workflow scripts:** `runs/workflows/<name>.js`: `research.js`, `spec-review.js`, `wave-N.js`, `wave-N-review.js`, `wave-N-bounce.js`.
+- **Workflow scripts:** `runs/workflows/<name>.js`: `research.js`, `spec-review.js`, `wave-N.js`, `wave-N-review.js`, `wave-N-bounce.js`, `wave-N-fix.js`, `plan-check.js` (a letter after the wave number, `wave-2d.js`, `wave-3c-fix.js`, marks a round inside the wave).
 - **Journals:** `runs/journals/<label>.<wf_id>.jsonl`, one JSON line per finished agent.
 - **Handoffs:** `HANDOFF-YYYY-MM-DD.md`.
 
@@ -96,8 +97,9 @@ and `os/N-<slug>/TASKS.md`, where the layer's code is.
 ### Handoffs
 
 A handoff is the one document a fresh session needs to continue exactly where work stopped. It lives at the plan root as
-`HANDOFF-YYYY-MM-DD.md` while it is current. The 2026-10-15 handoff is [`HANDOFF-2026-10-15.md`](HANDOFF-2026-10-15.md).
-Its paths were rewritten to the numbered layer folders on 2026-10-18 and again on 2026-10-20; the state it describes is unchanged.
+`HANDOFF-YYYY-MM-DD.md` while it is current. Once its work is done it is marked closed at the top and stays as the record; the newest open one is current.
+The handoffs so far: [`HANDOFF-2026-10-15.md`](HANDOFF-2026-10-15.md) (Layer 5, historical) and [`HANDOFF-2026-10-20.md`](HANDOFF-2026-10-20.md) (Layer 6, closed 2026-10-23) and [`HANDOFF-2026-11-02.md`](HANDOFF-2026-11-02.md) (Layer 7, **open**: the current state).
+The 2026-10-15 handoff's paths were rewritten to the numbered layer folders on 2026-10-18 and again on 2026-10-20; the state it describes is unchanged.
 
 > The paths in the section below are as they were on 2026-10-15. The layer folders at the repo root and under `layers/`
 > were renumbered on 2026-10-18 and again on 2026-10-20 (see the next two sections), so read `bootstrap/` as `1-bootstrap/`,
@@ -263,7 +265,8 @@ Only directories were renamed, with `git mv` (`git log --follow` works on every 
 | `plan/layers/50-messaging/` | `plan/layers/5-messaging/` |
 | `plan/layers/60-transport/` | `plan/layers/6-transport/` |
 
-Reserved for the layers not started: `7-relay`, `8-storage`, `9-evolution` (created at kickoff). The research-report
+Every layer has its plan folder now (`7-relay` since 2026-11-01, `8-storage` and `9-evolution` since 2026-11-02; a spec folder is
+created with its spec). The research-report
 series inside a plan folder (`research/00-code-seams.md`, `07-gap-1.md`) is a different numbering and stays two-digit.
 
 References were rewritten the way the 2026-10-18 section describes, by one script whose dry run was read line by line.

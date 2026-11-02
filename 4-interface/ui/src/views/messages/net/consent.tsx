@@ -6,6 +6,7 @@ import { useCallback, useEffect, useRef, useState, type ReactNode } from "react"
 import { Badge } from "../../../components/badge";
 import { Button } from "../../../components/button";
 import { consentOf } from "../../../lib/api/bridge";
+import { cleanPeerText } from "../../../lib/api/messages";
 import type { ConsentRequired } from "../../../lib/api/types";
 
 /** What each add-on the node names means in a badge. An unknown add-on shows as it came, cleaned, as text. */
@@ -17,7 +18,8 @@ const ADDON_WORD: Record<string, string> = {
   uplinked_channel: "published to the internet",
 };
 
-const ACTION_WORD: Record<ConsentRequired["action"], string> = {
+// Partial: Layer 7 appends four actions (carrier_enable, pair_plain, gateway_bit, origin_serve) whose words its own views supply; until then they read "Confirm".
+const ACTION_WORD: Partial<Record<ConsentRequired["action"], string>> = {
   edge_enable: "Start this relay",
   edge_resume: "Resume this relay",
   component_enable: "Install and turn this on",
@@ -26,7 +28,7 @@ const ACTION_WORD: Record<ConsentRequired["action"], string> = {
 };
 
 export const addonWord = (a: string): string => (Object.prototype.hasOwnProperty.call(ADDON_WORD, a) ? ADDON_WORD[a]! : a.replace(/[^\w .:/-]/g, "").slice(0, 60));
-export const actionWord = (a: ConsentRequired["action"]): string => (Object.prototype.hasOwnProperty.call(ACTION_WORD, a) ? ACTION_WORD[a] : "Confirm");
+export const actionWord = (a: ConsentRequired["action"]): string => (Object.prototype.hasOwnProperty.call(ACTION_WORD, a) ? ACTION_WORD[a] ?? "Confirm" : "Confirm");
 
 export interface ConsentPanelProps {
   consent: ConsentRequired;
@@ -67,8 +69,8 @@ export function ConsentPanel({ consent, changed = false, busy = false, onConfirm
           The text changed since you last read it, so it needs a new confirmation. Read it again.
         </p>
       ) : null}
-      <pre id="consent-text" className="whitespace-pre-wrap break-words border border-border bg-secondary/20 p-3 text-sm leading-relaxed text-foreground" data-testid="consent-text">
-        {consent.warning_text}
+      <pre id="consent-text" dir="auto" className="whitespace-pre-wrap break-words border border-border bg-secondary/20 p-3 text-sm leading-relaxed text-foreground [unicode-bidi:isolate]" data-testid="consent-text">
+        {cleanPeerText(consent.warning_text)}
       </pre>
       {consent.addons.length > 0 ? (
         <ul className="flex flex-wrap gap-2" aria-label="What makes this text stronger">

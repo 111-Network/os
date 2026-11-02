@@ -2,11 +2,11 @@
 //! Fake child binaries (sh scripts) on a temp root; every test finishes well
 //! under 10s. Absent pieces are honest `absent`, never errors.
 
-use node111::daemon::dashboard::{serve, DashboardState, SharedState};
+use node111::daemon::dashboard::{serve_on, DashboardState, SharedState};
 use node111::daemon::intelligence::{start, ChildDisplay, IntelligenceState, AGENT_URL};
 use node111::daemon::DaemonLayout;
 use std::io::{Read, Write};
-use std::net::{Ipv4Addr, SocketAddr, TcpStream};
+use std::net::{Ipv4Addr, TcpStream};
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
@@ -319,11 +319,14 @@ async fn stop_terminates_both_children() {
 // ---- /api/status ----
 
 fn http_get(port: u16, path: &str) -> (u16, String) {
-    let mut conn = TcpStream::connect(("127.0.0.1", port)).unwrap();
+    let mut conn = TcpStream::connect(("127.0.0.1", port))
+        .unwrap_or_else(|e| panic!("connect for GET {path}: {e}"));
     let req = format!("GET {path} HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n");
-    conn.write_all(req.as_bytes()).unwrap();
+    conn.write_all(req.as_bytes())
+        .unwrap_or_else(|e| panic!("write GET {path}: {e}"));
     let mut buf = String::new();
-    conn.read_to_string(&mut buf).unwrap();
+    conn.read_to_string(&mut buf)
+        .unwrap_or_else(|e| panic!("read the response to GET {path}: {e}"));
     let status: u16 = buf
         .split_whitespace()
         .nth(1)
@@ -333,21 +336,22 @@ fn http_get(port: u16, path: &str) -> (u16, String) {
     (status, body)
 }
 
+/// The listener is bound here, on port 0, and handed to the server: no
+/// probe-and-rebind window for another process to take the port, no
+/// throwaway connection, and a bind failure fails the test instead of being
+/// swallowed (CI once saw the first request reset by whatever answered the
+/// re-bound port).
 async fn serve_state(state: SharedState) -> u16 {
-    let probe = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
-    let port = probe.local_addr().unwrap().port();
-    drop(probe);
-    let bind = SocketAddr::from((Ipv4Addr::LOCALHOST, port));
+    let listener = tokio::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
+        .await
+        .unwrap();
+    let port = listener.local_addr().unwrap().port();
     tokio::spawn(async move {
-        let _ = serve(state, bind, false).await;
-    });
-    for _ in 0..100 {
-        if TcpStream::connect(("127.0.0.1", port)).is_ok() {
-            return port;
+        if let Err(e) = serve_on(state, listener, false).await {
+            eprintln!("dashboard server ended: {e:#}");
         }
-        tokio::time::sleep(Duration::from_millis(10)).await;
-    }
-    panic!("server never came up");
+    });
+    port
 }
 
 fn status_json(port: u16) -> serde_json::Value {

@@ -95,6 +95,8 @@ export interface ScriptContext {
   patchMessaging(fn: (m: MessagingData) => void): void;
   /** A foreign text arrives in conversation `conv` (`fc-…`) from the air: a `network_message` frame. */
   bridgeReceive(conv: string, sender: { native: string; name: string }, text: string, o?: { via_internet?: boolean }): void;
+  /** The node refuses a foreign own row that is still `queued` before air: `failed` with `reason` (a `network_message` state frame). */
+  bridgeRefuse(id: string, reason: string): void;
 }
 
 export interface TimedEvent {

@@ -56,6 +56,10 @@ pub enum Reason {
     /// this node). Not yet in the C1 contract's emitted set (renders
     /// `unknown`); F2 adds it with `cancelled` (Wave 2).
     NotEnrolled,
+    /// `relayed` (§5.3 am. 9, Layer 7 §5): the home hub's `ACCEPTED` came
+    /// from a hub that holds the message for forwarding, and the dest's
+    /// hint names another hub. Not a failure; the state stays `relayed`.
+    Forwarding,
     /// The user cancelled before it left: an empty tombstone goes instead
     /// (§4 never-abandoned `n`).
     Cancelled,
@@ -63,13 +67,14 @@ pub enum Reason {
 
 impl Reason {
     /// Every reason.
-    pub const ALL: [Reason; 7] = [
+    pub const ALL: [Reason; 8] = [
         Reason::WaitingForKey,
         Reason::HubNotYours,
         Reason::RestorePending,
         Reason::StoreFull,
         Reason::MailboxFull,
         Reason::NotEnrolled,
+        Reason::Forwarding,
         Reason::Cancelled,
     ];
 
@@ -82,6 +87,7 @@ impl Reason {
             Reason::StoreFull => "store_full",
             Reason::MailboxFull => "mailbox_full",
             Reason::NotEnrolled => "not_enrolled",
+            Reason::Forwarding => "forwarding",
             Reason::Cancelled => "cancelled",
         }
     }
@@ -102,6 +108,7 @@ impl Reason {
             Reason::StoreFull => "The local store is full.",
             Reason::MailboxFull => "Your hub's mailbox is full.",
             Reason::NotEnrolled => "Your hub no longer lists this node.",
+            Reason::Forwarding => "Your hub holds it and passes it to their hub.",
             Reason::Cancelled => "Cancelled before it left; an empty placeholder is sent.",
         }
     }
@@ -395,6 +402,18 @@ mod tests {
             assert!(!r.sentence().is_empty());
         }
         assert_eq!(Reason::from_code("nope"), None);
+    }
+
+    /// §5.3 am. 9: the `forwarding` code and its sentence are fixed.
+    #[test]
+    fn forwarding_reason_code_and_sentence() {
+        assert_eq!(Reason::Forwarding.code(), "forwarding");
+        assert_eq!(
+            Reason::Forwarding.sentence(),
+            "Your hub holds it and passes it to their hub."
+        );
+        assert_eq!(Reason::from_code("forwarding"), Some(Reason::Forwarding));
+        assert_eq!(Reason::ALL.len(), 8);
     }
 
     #[test]

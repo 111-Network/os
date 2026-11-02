@@ -51,10 +51,12 @@
 //!    `404 not_found`.
 //!
 //! [`Meshtastic::identify`] is the **Layer 5 single-step entry** the
-//! `POST /devices/{id}/identify` route still calls until the route moves to
-//! `devices::identify::Identify::run` (task C1): it takes the target and the
-//! board port itself and keeps Layer 5's rule of persisting `family:
-//! unknown` after exit code 3 alone. The full sequence never does.
+//! `POST /devices/{id}/identify` route falls back to when the full sequence
+//! (`devices::identify::Identify`) is not in `ApiState` ext: it takes the
+//! target and the board port itself. One `NoMatch` is not "unknown" (§12:
+//! `unknown` only after all three families answered `NoMatch`, C4 review
+//! minor), so exit code 3 here persists nothing and answers `502
+//! upstream_error` naming the step, as the full sequence's inconclusive run.
 
 use super::{meshmud, Meshtastic, MESHMUD_TASK};
 use crate::daemon::dashboard::api_v1::Problem;
@@ -234,10 +236,11 @@ impl Meshtastic {
     }
 
     /// The Layer 5 single-step identify for `device_id` (module doc, last
-    /// paragraph): target, the Meshtastic step, and on exit code 3 the Layer 5
-    /// rule (`family: unknown` persisted).
+    /// paragraph): target, then the Meshtastic step; exit code 3 persists
+    /// nothing and answers [`IdentifyError::Upstream`] (one `NoMatch` is not
+    /// `unknown`, §12).
     pub async fn identify(&self, device_id: &str) -> Result<DeviceRecord, IdentifyError> {
-        let (api, reg) = self.identify_ctx()?;
+        let (_, reg) = self.identify_ctx()?;
         let target = reg.identify_target(device_id).map_err(|e| match e {
             TargetError::NotFound => IdentifyError::NotFound,
             TargetError::NotOffered(why) => IdentifyError::NotOffered(why),
@@ -252,16 +255,11 @@ impl Meshtastic {
         let task = format!("identify:{device_id}");
         match self.identify_step(device_id, &target.uplink, &task).await? {
             StepResult::Bound(rec) => Ok(*rec),
-            StepResult::NotMeshtastic => {
-                let firmware = DeviceFirmware {
-                    family: FirmwareFamily::Unknown,
-                    version: None,
-                    source: FirmwareSource::Probe,
-                };
-                reg.record_identify(&api, device_id, firmware, None)
-                    .await
-                    .map_err(|_| IdentifyError::NotFound)
-            }
+            StepResult::NotMeshtastic => Err(IdentifyError::Upstream(
+                "not identified: meshtastic: no match (the board answered nothing \
+                 Meshtastic; the other families were not probed here); nothing was recorded"
+                    .into(),
+            )),
         }
     }
 

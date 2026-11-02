@@ -10,6 +10,8 @@ Status of this document: **spec v1.2 — locked (D20, 2026-10-14)** after the th
 re-check (decisions D18, D19, D20 in `os/plan/DECISIONS.md`; options brief `os/plan/layers/5-messaging/options.md`; research
 `os/plan/layers/5-messaging/research/`; triage `os/plan/layers/5-messaging/review/triage.md`, re-check `os/plan/layers/5-messaging/review/recheck.md`). Nothing here is built yet. Build tasks will live in `TASKS.md` per `os/plan/EXECUTION.md`.
 
+Amendment note: amended by Layer 7 (D30 F5): twelve additive items, the replacement texts of `os/7-relay/README.md` §5.3 (and §4.6 for item 12); every item is additive or default-off, and no other line of this spec changes. The lock above is unchanged.
+
 Reads with: `os/README.md` §5 (vision) · `os/2-identity/README.md` §6, §8.4, §9, §10, §12, §13 (the sealed packet,
 announces, restore, delegation, attestation, hand-offs) · `os/4-interface/README.md` §5–§7, §10–§11 (dashboard, services,
 contract, auth) · `os/3-intelligence/README.md` (tools, task API) · `os/plan/cross-layer/devices.md` (Layer 6 brief, amended by D19 c)
@@ -26,8 +28,7 @@ contract, auth) · `os/3-intelligence/README.md` (tools, task API) · `os/plan/c
   ↔ hub, hub ↔ hub). Every other link (`kiss-modem`, `meshtastic-client`, `rns-bridge`, `ble`) is a **seam** with its
   frame budget pinned here and its driver built by Layer 6.
 - **Delivery model v1** (D19 b): direct links + **home-hub mailbox** + contact cards. Store-and-forward in v1 works
-  **between members of the same hub, or over a direct link**; cross-hub custody arrives with hub-to-hub replication
-  (A+, §21). No multi-hop discovery, no periodic announces, nothing from Layer 7.
+  **between members of the same hub, or over a direct link**; cross-hub custody is Layer 7's single-copy push (Layer 7 §5). No multi-hop discovery, no periodic announces, nothing from Layer 7.
 - **Hosted panels** (D19 d): one origin per panel by port, served by `111d`. v1 ships **static** panels plus a built-in
   **Meshtastic HTTP shim**; the generic reverse proxy for `child`/`detected` panels is specified (§13) and reserved.
 - **Meshtastic service** (D18 #3, D19 g): consented identify (the Meshtastic step), `meshmud` multiplexer, read-only
@@ -108,7 +109,8 @@ authenticator (L2 B2).
                     1:1 stream; control kinds carry 0 ‖ 0
    [frag_idx, frag_count]  varint ×2            if HAS_FRAG (§5)
    [n_ext(1) ‖ ext TLVs]   type(1) len(1) value  if HAS_EXT (n_ext ≥ 1; unknown type ⇒ skip; duplicate type ⇒
-                                                 reject; 0x01 seen_peer_seq; 0x10 ratchet pubkey and 0x21 signer_pubkey
+                                                 reject; 0x01 seen_peer_seq; `0x02 dest_hub` (8 B, the dest's home-hub hint; `CUSTODY_PUT` only, any other kind ⇒ reject);
+                                                 0x10 ratchet pubkey and 0x21 signer_pubkey
                                                  are reserved ⇒ REJECT in v1; 0x20 delegation trailer ⇒ REJECT per L2 §6.7)
    [ack block]             §6.1                  if PIGGYBACK_ACK (length-prefixed, before payload)
    [card_len(1) ‖ card]    137–169 B             if INTRO: the sender's own announce (§7; v1: tcp-lan only; MSG and
@@ -274,8 +276,8 @@ business (Layer 6).
 Payload: `status(1: 1 ACCEPTED · 2 DUPLICATE · 3 REJECT_FULL · 4 REJECT_UNENROLLED · 5 REJECT_UNKNOWN_DEST) ‖
 custody_seq(varint) ‖ pkt_ref(16) = BLAKE2b-128("111/custody/v1" ‖ exact sealed bytes of the item)`. Hashing the exact
 bytes proves the custodian **received** them (holding is a promise the store's "never prune undelivered custody for
-members" rule keeps). `ACCEPTED` from a **mailbox-role** node for a **known member** is the only evidence for the UI
-state `relayed`. Transferable form on request: `Ed25519("111/custody-sig/v1" ‖ hub ‖ dest ‖ status ‖ custody_seq ‖
+members" rule keeps). `ACCEPTED` from a **mailbox-role** node for a **known member, or held for forwarding** (Layer 7 §5), is the only evidence for the UI
+state `relayed`; the member shows reason `forwarding` when the dest's hint names another hub. Transferable form on request: `Ed25519("111/custody-sig/v1" ‖ hub ‖ dest ‖ status ‖ custody_seq ‖
 pkt_ref)`, carried as the last 64 B of the `CUSTODY_ACK` payload. `custody_seq` is ≥ 1 for ACCEPTED/DUPLICATE and 0 for
 every REJECT.
 
@@ -327,7 +329,7 @@ random bytes minted with the offer), stores the contact as
 `enrolled`, answers `ENROLL_OK {hub card, custody_seq_floor}` — *as built (F1 bounce):* `custody_seq_floor` = (lowest custody_seq still held uncommitted for that member) − 1 when any is held, else the hub's `custody_high`, so a member that re-enrols (new device, fresh offer) fetches what the hub already holds for it; the member applies `max(cursor, floor)`. Code rules (mirroring the pair code, D15): single-use,
 invalidated when the hub owner dismisses the offer, attempt lockout after 5 failures — a defense, carved out of "no
 policy limits" like the pair code; `DELETE /fabric/hub/offer` dismisses an outstanding offer (loopback-only). Enrollment is the owner's **access list**, not a rate policy; a hub refuses
-`CUSTODY_PUT` from unenrolled nodes with `REJECT_UNENROLLED`. A node has one home hub in v1 (replicas = deferred A+).
+`CUSTODY_PUT` from unenrolled nodes with `REJECT_UNENROLLED`. A node has one home hub in v1. Pairing two hubs (Layer 7 §4.6) is two enrolments, one in each direction; a paired hub is never a home hub.
 
 `appdata` v1 (L2 amendment A8): `[ver=1][roles u16 LE][reserved]` — bit 0 mailbox (accepts custody) · bit 1 always-on
 hub · bit 2 LoRa-attached; optional 8 B truncated home-hub id (locator only — *as built:* it never pre-empts routing; when our hub is reachable the `CUSTODY_PUT` is sent and the hub's `CUSTODY_ACK` decides, so a stale hint cannot strand a message; the hint only supplies the `hub_not_yours` reason while the hub is unreachable). Layer 7 appends TLVs after v1.
@@ -384,13 +386,12 @@ kind are sealed.
 
 A hub = any node the owner enrolls others with (Cat 4 by default; an always-on laptop may opt in; phones opt in
 explicitly). It holds **custody**: sealed items it cannot read, for members that are away. **v1 scope sentence:** a
-hub accepts custody only for its own members (and only from members); store-and-forward therefore works between
-members of one hub or over a direct link — cross-hub delivery needs A+ (§21). The UI says so: a message to a contact
+hub holds custody for its members, from its members; with a paired hub or a carrier it also holds forward rows for non-member dests from its members, its leaf hubs and its carrier (Layer 7 §5); a message to a contact whose hub is not yours and not reachable through a pair stays `queued` (your hub unreachable) or `sent` (your hub answered `REJECT_UNKNOWN_DEST`), reason `hub_not_yours`. The UI says so: a message to a contact
 whose hub is not yours stays `queued`, reason "their hub is not yours; it is delivered when you meet directly".
 
-- `CUSTODY_PUT {dest NodeId(32) ‖ sealed item bytes}` sealed to the hub (the double seal costs ≈ 90 B — irrelevant on
+- `CUSTODY_PUT {dest NodeId(32) ‖ sealed item bytes}` sealed to the hub (the double seal costs 120 B, `CUSTODY_WRAP` (`crates/mesh111/src/frag.rs:64`), 131 B with the Layer 7 hint TLV — irrelevant on
   TCP; on LoRa the hub link is the mailbox's own `kiss-modem`, Layer 6). Hub: sender ∈ enrolled else
-  `REJECT_UNENROLLED`; **`dest` ∈ enrolled else `REJECT_UNKNOWN_DEST`** (sender keeps `sent`, reason "your hub does not
+  `REJECT_UNENROLLED`; **`dest` ∈ enrolled ⇒ a member row; else, with a forward target for this sender (a paired hub or this hub's carrier, Layer 7 §5.2) ⇒ a forward row and `ACCEPTED`; else `REJECT_UNKNOWN_DEST`** (sender keeps `sent`, reason "your hub does not
   know them"); dedup by `pkt_ref`; store `(dest, bytes, custody_seq)`; reply `CUSTODY_ACK` (§6.2). `REJECT_FULL` when
   the store refuses new custody (§10.4); the sender keeps the item `sent`, reason "mailbox full".
 - `MAILBOX_FETCH {cursor varint}` from a member on an **attributed** connection (§8.1): the hub streams
@@ -403,14 +404,12 @@ whose hub is not yours stays `queued`, reason "their hub is not yours; it is del
   `MAILBOX_ITEM {custody_seq = the fetched cursor}` meaning "nothing above your cursor", which the member stores
   nothing for (no item processed, no drop counted, cursor unchanged) and which, like any fresh hub packet, attributes the
   connection (§15 `reachable`).
-- **Hub-to-hub replication (A+)** is specified as: configured peer hubs exchange per-(dest) summary vectors (the §4
-  prefix + ranges form) and replicate custody items; replicas are evict-first; a hub then also accepts custody for a
-  peer hub's members. Not built in v1.
+- **Cross-hub custody (Layer 7 §5)** is single-copy push: the origin hub hands each held item to the dest's hub, or to its carrier, with `CUSTODY_PUT`, and the receiving hub applies its own gate. Multi-copy replication, if built, reconciles `pkt_ref` sets; the §4 vectors are not computable by a hub (`n` is sealed).
 - The hub never opens items; it sees `dest`, size, `prio_flags`, `dest_hint`, counters.
 
 **States (UI, normative evidence):** `queued` (outbox; no path, key missing, or their hub is not yours — reason shown)
 · `sent` (frame written to a link; LoRa: modem accepted TX; a repeater echo is detail here; also a custody reject with
-its reason) · `relayed` (authenticated `CUSTODY_ACK ACCEPTED` from a mailbox-role node for a known member — "a mailbox
+its reason) · `relayed` (authenticated `CUSTODY_ACK ACCEPTED` from a mailbox-role node for a known member, or held for forwarding to another hub (Layer 7 §5) — "a mailbox
 node saved it and will hold it for them") · `delivered` (recipient `ACK`). Retries happen on link and contact events,
 never on wall-clock timers; the sender's copy is kept until `delivered`.
 
@@ -444,7 +443,7 @@ are not encrypted), `auto_vacuum = INCREMENTAL` so pruning frees disk, `secure_d
 (the age hint), `state queued|sent|relayed|delivered`, `reason`, `received_local_seq`, `body` or blob refs, `pinned`) ·
 `tx_state` (`(peer, stream)` → next `n`, `epoch`) · `outbox` (sealed bytes awaiting a path, per fragment, outstanding count,
 SACK bitmap) · `rx_state` (`(peer, stream, epoch)` → prefix + ranges; newest 4 epochs kept) · `rx_floor` (`(peer, stream)` → highest evicted epoch) · `partials` (fragment bitmaps **and the fragment bytes**, one FULL transaction, so a SACKed fragment survives a crash; capacity-evicted oldest-first) · `custody` (hub: `dest`,
-`custody_seq`, `pkt_ref`, bytes, `committed`) · `cursors` (member: hub → cursor) · `blobs` (`hash`, `size`,
+`custody_seq`, `pkt_ref`, bytes, `committed`, `fwd` (0 member · 1 from a member · 2 from a leaf hub · 3 from the carrier; Layer 7 §5.1), `fwd_from`) · `cursors` (member: hub → cursor) · `blobs` (`hash`, `size`,
 `refcount`, `public`, `object_key?`) · `requests` (pending INTROs) · `settings`.
 Bodies of `MSG` live in the DB (small); attachments (v1.1) and every bulk object are files under `fabric/blobs/` named
 by BLAKE3 root — private objects are encrypted once with a **random per-object `object_key`** generated inside the store (never
@@ -458,7 +457,7 @@ Trigger: live bytes (DB pages minus freelist + blob dir) above the high watermar
 Order: (1) transit custody that is `committed` and public chunks that are re-fetchable — weight = size × age (old and
 large first; age = `local_seq` distance, never a clock) · (2) superseded release/KB objects below the Layer 1 monotonic
 floor, fully fetched deltas · (3) own conversation history oldest-first **only at hard capacity and only after an
-export offer** (§21: `age`-based export) · (4) **never** undelivered outbound, uncommitted custody for members, pending
+export offer** (§21: `age`-based export) · (4) **never** undelivered outbound, uncommitted custody, forward rows included; a forward row marked refused is committed, pending
 requests, pinned items or contacts — instead the store refuses new custody and new bulk, and surfaces `store_full` on
 the `fabric` service and to the agent. Per-class quotas exist as capacity shaping (configurable); per-sender limits and
 stamp costs are policy and do not exist.
@@ -685,7 +684,7 @@ not see or store it** — this sentence is on the service page.
 SSE (same `/events` stream, additive names): `message` (state change, new message, request — **coalesced per message
 per tick** so a 16-fragment transfer never floods the 256-entry ring), `contact`, `fabric` (link/hub/custody/store),
 `nearby`, `panels`. Enum growth: `ServiceId` + `fabric`, `meshtastic` · `DeviceRecord.actions` + `identify` ·
-`reason_code` + `store_full`, `mailbox_full`, `waiting_for_key`, `hub_not_yours`, `port_busy` · `Problem.code` +
+`reason_code` + `store_full`, `mailbox_full`, `waiting_for_key`, `hub_not_yours`, `port_busy`, `forwarding` ("Your hub holds it and passes it to their hub.") · `Problem.code` +
 `port_busy`, `panel_ticket_expired`, `upstream_error`. Unknown enum values render as `unknown` (U1b rule).
 
 **Services:** `fabric` ("Messaging"): LIVE when the store is open and (an enrolled hub is reachable, or this hub has at
@@ -858,8 +857,7 @@ meshmud (TCP-to-board uplink) + the presence venv · two-board MeshCore bench fo
 
 ## 21. Deferred (recorded, not forgotten)
 
-Attachments and the Tier-2 transfer on the wire (v1.1; §5, §11 pinned) · hub-to-hub replication (A+) and cross-hub
-custody · multi-hop discovery and announce-as-routing (L7) · INTRO over LoRa (card in fragment 0; fragments with an
+Attachments and the Tier-2 transfer on the wire (v1.1; §5, §11 pinned) · multi-copy hub replication (Layer 7 §17) · multi-hop discovery and announce-as-routing (L7) · INTRO over LoRa (card in fragment 0; fragments with an
 unresolvable `sender_ref` wait in a capacity-bounded pending-INTRO buffer until fragment 0 lands) · `kiss-modem`,
 `meshtastic-client`, `rns-bridge`, `ble`, online Noise IK / TLS-RPK links (L6) · message bridges (P1) · sender-key groups
 and MLS behind a hub DS · rolling recipient ratchets (RATCHET flag, TLV 0x10) · erasure coding (`coding` field; RaptorQ

@@ -61,6 +61,27 @@ pub const MAX_ORDER: usize = 16;
 pub const MAX_CALLSIGN: usize = 16;
 /// rnsd's Backbone listener port on the LAN (§2 "Ports", §11).
 pub const BACKBONE_PORT: u16 = 4242;
+
+/// What 111 itself listens on (V5-2): the Backbone listener may not take one of these.
+/// The dashboard (11180, and its best-effort :80 — already below 1024), the agent
+/// (11182), the fabric (11183), the hosted panels' range (11190–11229) and meshmud's
+/// downlink (11230). A port another task holds at runtime is the PATCH route's check
+/// (`PortTable`), not this file's.
+pub fn own_port(port: u16) -> Option<&'static str> {
+    if port == crate::daemon::dashboard::DEFAULT_PORT || port == 80 {
+        Some("the dashboard")
+    } else if port == crate::daemon::intelligence::AGENT_PORT {
+        Some("the agent")
+    } else if port == mesh111::link::tcp_lan::DEFAULT_PORT {
+        Some("the fabric")
+    } else if crate::daemon::panels::PANEL_PORTS.contains(&port) {
+        Some("the hosted panels")
+    } else if port == crate::daemon::services::MESHMUD_DOWNLINK_PORT {
+        Some("meshmud's downlink")
+    } else {
+        None
+    }
+}
 /// The shared-instance name (§6 "rnsd posture v2").
 pub const DEFAULT_INSTANCE: &str = "111";
 /// README §6's preferred networks, the default `[order]`.
@@ -562,7 +583,10 @@ impl fmt::Display for Invalid {
                 "instance name {:?} is not 1-32 of A-Z a-z 0-9 . _ -",
                 shown(n)
             ),
-            Invalid::BadBackbonePort(p) => write!(f, "backbone port {p} is not 1024-65535"),
+            Invalid::BadBackbonePort(p) => match own_port(*p).filter(|_| *p >= 1024) {
+                Some(what) => write!(f, "backbone port {p} is 111's own ({what})"),
+                None => write!(f, "backbone port {p} is not 1024-65535"),
+            },
             Invalid::BadCallsign => write!(f, "callsign is not 0-{MAX_CALLSIGN} of A-Z 0-9 / -"),
             Invalid::BadOrder(n) => write!(
                 f,
@@ -841,7 +865,7 @@ impl InterfacesFile {
             return Err(Invalid::BadInstanceName(self.posture.instance_name.clone()));
         }
         let bp = self.posture.lan.backbone.port;
-        if bp < 1024 {
+        if bp < 1024 || own_port(bp).is_some() {
             return Err(Invalid::BadBackbonePort(bp));
         }
         let mut seen = BTreeSet::new();
@@ -1834,6 +1858,25 @@ params = { node_num = 168430090 }
         let mut g = f.clone();
         g.posture.lan.backbone.port = 80;
         assert_eq!(g.validate(), Err(Invalid::BadBackbonePort(80)));
+        // V5-2: 111's own listeners are refused too, with what holds them
+        for (p, what) in [
+            (11180, "the dashboard"),
+            (11182, "the agent"),
+            (11183, "the fabric"),
+            (11190, "the hosted panels"),
+            (11229, "the hosted panels"),
+            (11230, "meshmud's downlink"),
+        ] {
+            let mut g = f.clone();
+            g.posture.lan.backbone.port = p;
+            assert_eq!(g.validate(), Err(Invalid::BadBackbonePort(p)), "{p}");
+            assert!(g.validate().unwrap_err().to_string().contains(what), "{p}");
+        }
+        for p in [1024, 4242, 11181, 11189, 11231, 65535] {
+            let mut g = f.clone();
+            g.posture.lan.backbone.port = p;
+            assert_eq!(g.validate(), Ok(()), "{p}");
+        }
         let mut g = f.clone();
         g.order.networks.push("111".into());
         assert!(matches!(g.validate(), Err(Invalid::BadOrder(_))));

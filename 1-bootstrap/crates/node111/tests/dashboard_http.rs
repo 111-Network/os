@@ -5,7 +5,7 @@
 //! notice); Host refusals are problem+json. Auth/CSRF/static/events matrix:
 //! tests/dashboard_auth.rs.
 
-use node111::daemon::dashboard::{serve, DashboardState, SharedState, TransportState};
+use node111::daemon::dashboard::{serve, serve_on, DashboardState, SharedState, TransportState};
 use node111::daemon::health::TransportHealth;
 use std::io::{Read, Write};
 use std::net::{Ipv4Addr, SocketAddr, TcpStream};
@@ -31,21 +31,18 @@ fn http_req(port: u16, method: &str, path: &str, host: &str) -> (u16, String) {
 }
 
 async fn start_server(state: SharedState) -> u16 {
-    // Bind an ephemeral port first to learn a free one, drop it, then serve.
-    let probe = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
-    let port = probe.local_addr().unwrap().port();
-    drop(probe);
-    let bind = SocketAddr::from((Ipv4Addr::LOCALHOST, port));
+    // Bound here on port 0 and handed to the server: no probe-and-rebind
+    // window, no throwaway connection, a bind failure fails the test.
+    let listener = tokio::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
+        .await
+        .unwrap();
+    let port = listener.local_addr().unwrap().port();
     tokio::spawn(async move {
-        let _ = serve(state, bind, false).await;
-    });
-    for _ in 0..100 {
-        if TcpStream::connect(("127.0.0.1", port)).is_ok() {
-            return port;
+        if let Err(e) = serve_on(state, listener, false).await {
+            eprintln!("dashboard server ended: {e:#}");
         }
-        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-    }
-    panic!("server never came up");
+    });
+    port
 }
 
 /// A §7 machine-string NodeId (lowercase hex of a 32B Ed25519 public key).

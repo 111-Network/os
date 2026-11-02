@@ -152,8 +152,13 @@ inner() {
   local sigign
   sigign=$(awk '/^SigIgn:/ {print $2}' /proc/self/status)
   t "namespace shell has default SIGINT/SIGTERM (SigIgn=$sigign)" '(( (16#$sigign & 0x4002) == 0 ))'
+  mk_dummy0() { # a dummy0 link: `type dummy`, else a veth pair with its peer up (kernels without the dummy
+    # module, e.g. some cloud images: a local address on either carries loopback-delivered traffic the same way)
+    ip link add dummy0 type dummy 2>/dev/null && return 0
+    ip link add dummy0 type veth peer name dummy0p && ip link set dummy0p up
+  }
   ip link set lo up
-  if ip link add dummy0 type dummy && ip addr add "$LANIP/24" dev dummy0 && ip addr add "$CROSSIP/24" dev dummy0 && ip link set dummy0 up; then
+  if mk_dummy0 && ip addr add "$LANIP/24" dev dummy0 && ip addr add "$CROSSIP/24" dev dummy0 && ip link set dummy0 up; then
     ok "netns: lo up, dummy0 $LANIP/24 + $CROSSIP/24 (a second address = a second site; no route off-box)"
   else
     fail "netns: cannot create dummy0 — the LAN scenario cannot run"

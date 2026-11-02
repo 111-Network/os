@@ -131,6 +131,18 @@ pub async fn serve(
     lan_opt_in: bool,
 ) -> anyhow::Result<()> {
     let listener = bind::bind_listener(bind, lan_opt_in).await?;
+    serve_on(state, listener, lan_opt_in).await
+}
+
+/// [`serve`] on a listener the caller already bound: a test binds port 0
+/// itself and hands the listener over, so there is no probe-and-rebind
+/// window in which another process can take the port, no throwaway
+/// connection, and a bind failure is the caller's to see.
+pub async fn serve_on(
+    state: SharedState,
+    listener: tokio::net::TcpListener,
+    lan_opt_in: bool,
+) -> anyhow::Result<()> {
     let layout = crate::daemon::DaemonLayout {
         root: std::env::temp_dir().join("111-dashboard-ephemeral"),
         etc: std::env::temp_dir().join("111-dashboard-ephemeral/etc"),

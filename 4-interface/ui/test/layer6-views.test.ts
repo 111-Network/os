@@ -250,13 +250,13 @@ describe("a foreign thread", () => {
     expect(item).toContain("Parts can arrive out of order.");
   });
 
-  it("a row that is only queued offers cancel; one that has been sent does not; a refused one offers try again", async () => {
+  it("a row that is only queued offers cancel; one that has been sent does not; a refused one offers try again (F6: retry only where the node accepts it)", async () => {
     await load();
     const out = await thread("meshtastic", "fc-1");
     expect(rowOf(out, "6")).toContain("cancel sending");
-    expect(rowOf(out, "6")).toContain("retry now");
+    expect(rowOf(out, "6")).not.toMatch(/retry now|try again|>resend</); // still going by itself: the node would answer 409
     expect(rowOf(out, "5")).not.toContain("cancel sending");
-    expect(rowOf(out, "5")).toContain("retry now");
+    expect(rowOf(out, "5")).not.toMatch(/retry now|try again|>resend</); // sent: the carrier has it, so 'retry now' is never offered
     expect(rowOf(out, "4")).not.toContain("retry now"); // relayed: past retrying
     expect(rowOf(out, "7")).toContain("try again");
     expect(rowOf(out, "7")).not.toContain("cancel sending");
@@ -749,7 +749,22 @@ describe("Settings, Transport", () => {
   it("relays are summarised with a link to where they are managed", async () => {
     const out = await settings();
     expect(out).toContain("2 relays, 1 paused, 1 copy shed, 3 too long to relay.");
-    expect(out).toContain('href="#/messages/net/meshtastic"');
+    expect(out).toContain('href="#/messages/net/lxmf"'); // F5: the first enabled network in the node's order (Reticulum comes first here), not a fixed one
+    expect(out).not.toContain('href="#/messages/net/meshtastic"');
+  });
+
+  it("F5: the relays link follows the networks that are on: the first enabled one in the node's order, /messages when none is", async () => {
+    const { a } = await load();
+    await a.bridge.patchSettings({ order: ["111", "meshtastic", "lxmf", "app:deltachat"] });
+    await Promise.all([apiStore.refreshNetworks(), apiStore.refreshBridgeSettings(), apiStore.refreshComponents(), apiStore.refreshTransport()]);
+    expect(html(h(TransportSettings))).toContain('href="#/messages/net/meshtastic"'); // the node's order puts Meshtastic first now
+    await a.bridge.disableComponent("lxmf");
+    await a.bridge.patchSettings({ adapters: { meshtastic: false } });
+    await Promise.all([apiStore.refreshNetworks(), apiStore.refreshBridgeSettings()]);
+    const out = html(h(TransportSettings));
+    expect(out).not.toMatch(/href="#\/messages\/net\/(meshtastic|lxmf)"/);
+    expect(out).toContain('data-testid="manage-relays"');
+    expect(out).toMatch(/href="#\/messages"[^>]*data-testid="manage-relays"|data-testid="manage-relays"[^>]*href="#\/messages"/);
   });
 
   it("the page hands off to the agent with the two Layer 6 goals", async () => {

@@ -5,6 +5,10 @@
 // Layer 6 (os/6-transport/README.md §10, §12): a `bridge_message` or `bridge_edge` body quotes a stranger's text, so its text part is a
 // PREFORMATTED block: no Markdown, no links, no emphasis. A `device` body is one JSON object `{why, actions}` and renders as a card per
 // action from the parsed JSON, with the exact words for each action of the closed vocabulary.
+//
+// Layer 7 (os/7-relay/README.md §13.2): a `relay` body is the same JSON shape `{why, actions}` over its own closed vocabulary
+// (`gateway.enable`, `hub.pair`, `presence.interval`, `carrier.flush`) and renders as a card per action the same way. It never goes
+// through the Markdown renderer, and every string in it (the model wrote it) is cleaned and drawn as text.
 import { useMemo } from "react";
 import { useServices } from "../../lib/api/hooks";
 import { cleanPeerText } from "../../lib/api/messages";
@@ -111,6 +115,53 @@ export function actionSentence(a: DeviceAction, serviceName?: string | null): { 
   }
 }
 
+// --- relay ----------------------------------------------------------------------------------------------------------------------
+
+/** Parse a `relay` body: one JSON object `{why, actions: [{action, …}]}`, the `device` shape. Anything else is null (shown raw, as text). */
+export const parseRelayBody = (body: string): DeviceBody | null => parseDeviceBody(body);
+
+/** What each action of the Layer 7 vocabulary does, in the exact words the card shows. Accepting runs the same checks as the routes. */
+export function relayActionSentence(a: DeviceAction): { title: string; detail: string | null } {
+  switch (a.action) {
+    case "gateway.enable":
+      return {
+        title: `turn on the gateway through ${text(a.carrier, 40) || "a carrier"}${a.mode === undefined ? "" : ` (mode ${text(a.mode, 8)})`}`,
+        detail: "The carrier's own consent text is shown first and you confirm it; nothing is sent until you do, and nothing is sent while the switch is off.",
+      };
+    case "hub.pair":
+      return { title: "open the pairing screen", detail: "Pairing itself stays with you: you show this hub's bundle and scan or paste the other hub's. Nothing is paired by accepting." };
+    case "presence.interval":
+      return { title: `set the ${text(a.transport, 40)} presence interval to ${text(a.minutes, 8)} min`, detail: "Not available in this version: accepting is refused and the proposal stays open." };
+    case "carrier.flush":
+      return { title: "send and fetch through the carrier once", detail: "Posts what waits and reads what came back, one time. It counts against a metered cap and is refused past it." };
+    default:
+      return { title: `unknown action: ${text(a.action, 60)}`, detail: "This node does not apply it; accepting is refused and the proposal stays open." };
+  }
+}
+
+function RelayCard({ body }: { body: DeviceBody }) {
+  return (
+    <div className="flex max-h-72 flex-col gap-2 overflow-auto border border-border bg-secondary/20 p-3" data-testid="relay-card">
+      <p className="text-sm text-foreground" data-testid="relay-why">
+        {cleanPeerText(body.why)}
+      </p>
+      {body.actions.length === 0 ? <p className="text-xs text-muted-foreground">It names no action.</p> : null}
+      <ul className="flex flex-col gap-2">
+        {body.actions.map((a, i) => {
+          const s = relayActionSentence(a);
+          return (
+            <li key={i} className="border border-border p-2" data-testid="relay-action">
+              <p className="font-mono text-[10px] uppercase tracking-widest text-muted-foreground">{text(a.action, 40)}</p>
+              <p className="text-sm text-foreground">{s.title}</p>
+              {s.detail ? <p className="text-xs leading-relaxed text-muted-foreground">{s.detail}</p> : null}
+            </li>
+          );
+        })}
+      </ul>
+    </div>
+  );
+}
+
 function DeviceCard({ body }: { body: DeviceBody }) {
   const services = useServices();
   return (
@@ -137,9 +188,19 @@ function DeviceCard({ body }: { body: DeviceBody }) {
 }
 
 export function ProposalBody({ body, kind }: { body: string; kind?: BodyKind }) {
-  const doc = useMemo(() => (kind === "bridge_message" || kind === "bridge_edge" || kind === "device" ? null : parseMarkdown(body)), [body, kind]);
+  const doc = useMemo(() => (kind === "bridge_message" || kind === "bridge_edge" || kind === "device" || kind === "relay" ? null : parseMarkdown(body)), [body, kind]);
   const device = useMemo(() => (kind === "device" ? parseDeviceBody(body) : null), [body, kind]);
+  const relay = useMemo(() => (kind === "relay" ? parseRelayBody(body) : null), [body, kind]);
   if (kind === "bridge_message" || kind === "bridge_edge") return <BridgeText body={body} kind={kind} />;
+  if (kind === "relay") {
+    if (relay) return <RelayCard body={relay} />;
+    return (
+      <div className="max-h-72 overflow-auto border border-border bg-secondary/20 p-3">
+        <p className="mb-2 text-xs text-muted-foreground">This body is not in the expected shape, so it is shown as plain text.</p>
+        <pre className="whitespace-pre-wrap break-words font-mono text-sm text-foreground">{cleanPeerText(body)}</pre>
+      </div>
+    );
+  }
   if (kind === "device") {
     if (device) return <DeviceCard body={device} />;
     return (

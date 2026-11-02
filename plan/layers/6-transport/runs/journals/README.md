@@ -10,3 +10,5 @@ agent's structured return. Exported from the lead machine's local transcript sto
 
 The reports those agents wrote are the files under [`../../research/`](../../research/); the journal keeps each agent's
 structured return (status, files, evidence level, deviations) beside them.
+
+Only the research sweep was exported. The build-phase runs (Waves 0–3, the bounces, the fix waves A and B, the reviews) left no journal here: their run ids and results are in [`../../research/coordinates.md`](../../research/coordinates.md) and the board rows, and their scripts are in [`../workflows/`](../workflows/). `runs/wip/` (the C5 patch) is gone: the patch landed.

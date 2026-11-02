@@ -2,6 +2,7 @@
 // useSyncExternalStore. The store is the only consumer of the adapter's read side and of the
 // events stream: components read through hooks and never fetch snapshots themselves.
 import type { Adapter, ConnectionInfo, ConnectionState, EventsFrameWithId } from "./adapter";
+import type { RelayAdapter } from "./relay"; // type only: the module itself stays out of the eager chunk (see getRelay in ./index)
 import { openRequests, removeContact, upsertContact } from "./contacts";
 import { applyForeignTail, FOREIGN_PAGE_LIMIT, mergeForeignPage, sameConversations, topSeq, trimForeign, type ForeignPage } from "./networks";
 import { applyMessageToPage, mergeThreadPage, THREAD_PAGE_LIMIT, trimPage, type ThreadPage } from "./messages";
@@ -27,6 +28,8 @@ import type {
   NetworkMessageEvent,
   NodeId,
   Proposal,
+  RegistryRow,
+  RelayStatus,
   ServiceRecord,
   Status,
   Thread,
@@ -119,6 +122,10 @@ export interface StoreState {
   components: BridgeComponent[] | null;
   /** Layer 6: interfaces, posture, region, callsign; loaded when Settings asks. */
   transport: TransportStatus | null;
+  /** Layer 7: the relay status (gateway, paired hubs, switches); null until a `relay` frame or a Layer 7 view loads it. No secret is in it. */
+  relay: RelayStatus | null;
+  /** Layer 7: the service registry rows; null until a `registry` frame or a Layer 7 view loads it. Untrusted strings. */
+  registry: RegistryRow[] | null;
   connection: ConnectionSnapshot;
   /** Agent events, newest first, at most ACTIVITY_RING, deduped on (seq, ts). */
   activity: AgentEvent[];
@@ -252,6 +259,8 @@ function initialState(): StoreState {
     bridgeSettings: null,
     components: null,
     transport: null,
+    relay: null,
+    registry: null,
     connection: INITIAL_CONNECTION,
     activity: [],
     baselineVersion: null,
@@ -267,6 +276,8 @@ export class ApiStore {
   private state: StoreState = initialState();
   private listeners = new Set<() => void>();
   private adapter: Adapter | null = null;
+  /** Layer 7: how to reach the relay adapter. Called only to re-read a slice that is already loaded; never at start-up. */
+  private relayLoader: (() => Promise<RelayAdapter>) | null = null;
   private unsubscribe: (() => void) | null = null;
   /** The snapshot load started by the latest `attach`, while it is still running. */
   private initialLoad: Promise<void> | null = null;
@@ -343,6 +354,7 @@ export class ApiStore {
   attach(adapter: Adapter): Promise<void> {
     this.detach();
     this.adapter = adapter;
+    this.watchVisibility();
     this.subscribeStream();
     // Recorded before the stream can deliver anything: the daemon's mandatory first `reset` frame must
     // not trigger a second load of what this one is already fetching.
@@ -355,10 +367,18 @@ export class ApiStore {
   }
 
   detach(): void {
+    this.unwatchVisibility?.();
+    this.unwatchVisibility = null;
     this.unsubscribe?.();
     this.unsubscribe = null;
     this.adapter = null;
+    this.relayLoader = null;
     this.initialLoad = null;
+  }
+
+  /** Layer 7: hand the store the lazy loader of the relay adapter (call after `attach`). Nothing is fetched until a slice is loaded. */
+  attachRelay(load: (() => Promise<RelayAdapter>) | null): void {
+    this.relayLoader = load;
   }
 
   private subscribeStream(): void {
@@ -470,6 +490,14 @@ export class ApiStore {
       case "network_message":
         // Carries no text: refetch what it names. The open conversation takes the tail, the lists follow.
         if (isNetworkFrame(frame.data)) this.networkFrame(frame.data);
+        break;
+      case "relay":
+        // A full RelayStatus snapshot (like `fabric`).
+        if (isRelayStatus(frame.data)) patch.relay = sameJson(this.state.relay, frame.data) ? this.state.relay : frame.data;
+        break;
+      case "registry":
+        // The rows, as a full snapshot.
+        if (frame.data && Array.isArray(frame.data.rows)) patch.registry = reuse(this.state.registry, frame.data.rows, byId);
         break;
       case "bridge":
         // Full snapshots of whichever part changed.
@@ -584,6 +612,9 @@ export class ApiStore {
     // The same for the foreign conversations that are open, and the network lists a view asked for.
     for (const [conv, slot] of Object.entries(this.state.foreignPages)) void this.loadForeign(slot.network, conv, this.foreignLimits.get(conv));
     for (const net of Object.keys(this.state.conversations)) void this.refreshConversations(net);
+    // Layer 7 slices follow a reload only once something loaded them (a frame or a view): a node that never opens a Layer 7 view asks nothing.
+    if (this.state.relay !== null) void this.refreshRelay();
+    if (this.state.registry !== null) void this.refreshRegistry();
   });
 
   refreshStatus = coalesced(async () => {
@@ -723,6 +754,32 @@ export class ApiStore {
   }
 
 
+  // --- Layer 7 snapshots (relay status, registry) -------------------------------------------------------------------------
+
+  refreshRelay = coalesced(async () => {
+    const a = this.adapter;
+    const load = this.relayLoader;
+    if (!a || !load) return;
+    try {
+      const relay = await (await load()).status();
+      if (this.adapter === a) this.commit({ relay: sameJson(this.state.relay, relay) ? this.state.relay : relay });
+    } catch {
+      /* keep the previous snapshot (an older node answers 404 and the slice stays as it was) */
+    }
+  });
+
+  refreshRegistry = coalesced(async () => {
+    const a = this.adapter;
+    const load = this.relayLoader;
+    if (!a || !load) return;
+    try {
+      const rows = await (await load()).registry();
+      if (this.adapter === a) this.commit({ registry: reuse(this.state.registry, rows, byId) });
+    } catch {
+      /* keep the previous snapshot */
+    }
+  });
+
   // --- Layer 6 snapshots (networks, conversations, edges, settings, components, transport) -------------------------
 
   refreshNetworks = coalesced(async () => {
@@ -839,19 +896,80 @@ export class ApiStore {
   }
 
   /**
+   * A view holds this conversation open (the foreign thread is mounted): a `new` frame on it is followed by a read of the newest
+   * window WITHOUT `since_seq`, which is the read the node counts as a person reading (a `since_seq` tail never clears `unread`).
+   * Returns the release for the effect's cleanup. Counted, so two views of one conversation do not release each other.
+   */
+  openForeign(conv: string): () => void {
+    this.openConvs.set(conv, (this.openConvs.get(conv) ?? 0) + 1);
+    return () => {
+      const n = (this.openConvs.get(conv) ?? 0) - 1;
+      if (n > 0) this.openConvs.set(conv, n);
+      else this.openConvs.delete(conv);
+    };
+  }
+  private readonly openConvs = new Map<string, number>();
+  private unwatchVisibility: (() => void) | null = null;
+  /**
+   * A tab that was hidden when a text landed was not marked read (`isReading`): the tail read leaves `unread` alone. One listener,
+   * registered by `attach` and removed by `detach` (not one per view), reads the newest window of every open conversation that still
+   * shows unread the moment the page becomes visible, so the node counts it read, then refreshes that network's list. No timer.
+   */
+  private watchVisibility(): void {
+    if (typeof document === "undefined" || typeof document.addEventListener !== "function") return;
+    const doc = document;
+    const onVisible = () => {
+      try {
+        if (doc.visibilityState !== "visible") return;
+      } catch {
+        return;
+      }
+      void this.markOpenRead();
+    };
+    doc.addEventListener("visibilitychange", onVisible);
+    this.unwatchVisibility = () => doc.removeEventListener("visibilitychange", onVisible);
+  }
+  private async markOpenRead(): Promise<void> {
+    const a = this.adapter;
+    if (!a) return;
+    for (const conv of this.openConvs.keys()) {
+      const slot = this.state.foreignPages[conv];
+      if (!slot?.page) continue;
+      const listed = this.state.conversations[slot.network]?.find((c) => c.id === conv);
+      if (Math.max(listed?.unread ?? 0, slot.page.conversation.unread) <= 0) continue;
+      await this.loadForeign(slot.network, conv, this.foreignLimits.get(conv));
+      if (this.adapter === a && this.state.conversations[slot.network] !== undefined) await this.refreshConversations(slot.network);
+    }
+  }
+  /** Is somebody looking at this conversation right now (a view is mounted and the page is not hidden)? */
+  private isReading(conv: string): boolean {
+    if (!this.openConvs.has(conv)) return false;
+    try {
+      return typeof document === "undefined" || document.visibilityState !== "hidden";
+    } catch {
+      return true;
+    }
+  }
+
+  /**
    * A `network_message` frame: it carries no text, so the open conversation refetches. A frame naming a row we hold re-reads from that row
    * (a state change sits below the newest `seq`); one that does not re-reads above our newest `seq` (coalesced channel traffic). A
-   * `conversation` change (a row cancelled, a conversation added) reloads the whole window. The lists follow: the network's
-   * conversations when a view loaded them, and the network list for the counts when a conversation appeared or went.
+   * `conversation` change (a row cancelled, a conversation added) reloads the whole window. A `new` text on a conversation a view is
+   * reading re-reads the newest window instead (see `openForeign`), then the list, so the rail and the badge show the node's own
+   * `unread` (0). The lists follow only where a view holds them: a network's conversations when something loaded them, and the
+   * network list is not read here: the node publishes the `bridge` snapshot when a network's counts change (no timer), and that frame
+   * carries the counts (see the `bridge` case of `applyFrame`).
    */
   private networkFrame(ev: NetworkMessageEvent): void {
     const slot = this.state.foreignPages[ev.conv];
+    const held = this.state.conversations[ev.network] !== undefined;
+    const reading = ev.change === "new" && !!slot?.page && this.isReading(ev.conv);
     if (slot?.page) {
       if (ev.change === "conversation") void this.loadForeign(ev.network, ev.conv, this.foreignLimits.get(ev.conv));
       else void this.refreshForeignTail(ev);
     }
-    if (this.state.conversations[ev.network] !== undefined || ev.change === "conversation") void this.refreshConversations(ev.network);
-    if (ev.change === "conversation") void this.refreshNetworks();
+    // A read in progress refreshes the list itself once the node has counted it read; a list read now would show the old count.
+    if (held && !reading) void this.refreshConversations(ev.network);
   }
 
   private readonly tailLane = coalescedBy<string>(async (conv) => {
@@ -860,6 +978,12 @@ export class ApiStore {
     const ev = this.tailEvents.get(conv);
     this.tailEvents.delete(conv);
     if (!a || !slot?.page || !ev) return;
+    // A new text on a conversation somebody is reading: the node counts a read without `since_seq` as the person reading it.
+    if (ev.change === "new" && this.isReading(conv)) {
+      await this.loadForeign(slot.network, conv, this.foreignLimits.get(conv));
+      if (this.adapter === a && this.state.conversations[slot.network] !== undefined) await this.refreshConversations(slot.network);
+      return;
+    }
     const held = slot.page.messages;
     const row = ev.id ? held.find((m) => m.id === ev.id) : undefined;
     const since = row ? Math.max(0, row.seq - 1) : topSeq(held);
@@ -882,7 +1006,8 @@ export class ApiStore {
   private refreshForeignTail(ev: NetworkMessageEvent): Promise<void> {
     const waiting = this.tailEvents.get(ev.conv);
     // A frame that names a row we hold must not be replaced by a later nameless one: the state change sits below the newest `seq`.
-    if (!waiting || ev.id) this.tailEvents.set(ev.conv, ev);
+    // A `new` text that is waiting stays `new` when a state frame replaces it: the read that marks the conversation read is still owed.
+    if (!waiting || ev.id) this.tailEvents.set(ev.conv, waiting?.change === "new" && ev.change !== "new" ? { ...ev, change: "new" } : ev);
     return this.tailLane(ev.conv);
   }
 
@@ -912,6 +1037,11 @@ function isNetworkFrame(d: unknown): d is NetworkMessageEvent {
 function isContactFrame(d: unknown): d is ContactChangeEvent {
   const x = d as Partial<ContactChangeEvent> | null;
   return !!x && typeof x === "object" && !!x.contact && typeof x.contact === "object" && typeof x.contact.node_id === "string";
+}
+
+function isRelayStatus(d: unknown): d is RelayStatus {
+  const x = d as Partial<RelayStatus> | null;
+  return !!x && typeof x === "object" && !!x.gateway && typeof x.gateway === "object" && Array.isArray(x.paired_hubs);
 }
 
 /** The app-wide store. Tests construct their own ApiStore. */

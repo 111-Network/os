@@ -22,6 +22,11 @@
 //!   conversations, messages, relay edges, loop-guard keys and send groups.
 //!   They draw `local_seq` from the same counter ([`next_local_seq`]): one
 //!   store-wide sequence, never a second one.
+//! - **Forward rows (Layer 7 §5, schema v4)** ([`rows::Fwd`]): `custody`
+//!   rows a hub holds for another hub, `fwd != 0` with their origin in
+//!   `fwd_from`, in their own class ([`Class::Transit`]) with a default
+//!   quota and a per-origin share ([`prune`], Layer 7 §5.8). With no pairing
+//!   nothing writes one: every row stays `fwd = 0`, `fwd_from` NULL.
 //!
 //! No wall clock anywhere: ages are the store's local insertion sequence.
 
@@ -54,8 +59,9 @@ pub use foreign::{
 };
 pub use prune::{DiskSpace, PruneReport, PruneStep, PrunedItem, PrunedRef, Watermarks};
 pub use rows::{
-    Class, ContactRow, CustodyItem, CustodyPut, Dir, MessageRow, MsgState, NewMessage, OutboxFrag,
-    RequestPut, RequestRefusal, ThreadCounts, Trust,
+    Class, ContactRow, CustodyItem, CustodyPut, Dir, ForwardHead, ForwardItem, Fwd, MessageRow,
+    MsgState, NewMessage, OutboxFrag, RequestPut, RequestRefusal, ThreadCounts, Trust,
+    FWD_FROM_LEN,
 };
 pub use rx::{FragOffer, Offer, Partial, PartialRef, RxEpoch};
 pub use tx::Seq;

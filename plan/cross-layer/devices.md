@@ -1,6 +1,6 @@
 # Device-connection core — plan brief (Layer 6 opener)
 
-Status: ✍️ brief with owner decisions (D17, 2026-10-14) · task P1 (`os/4-interface/TASKS.md`) · build at Layer 6 kickoff.
+Status: ✍️ brief with owner decisions (D17, 2026-10-14) · task P1 (`os/4-interface/TASKS.md`) · built in Layer 6 as the device core (B4 spine, C4 hotplug/identify/applier; G4/G5 green; locked D29, 2026-10-23) — kept as the opener record.
 Reads with: `os/README.md` (Cat 1–5, Layers 6–7) · D9/D12 (phone path, rnsd child, meshtasticd detection-only,
 phone multicast gap) · D10/D15 (agent tools, registry, prompts) · `4-interface/README.md` §6.3, §7.1, §8 ·
 `4-interface/api/openapi.yaml` (`DeviceRecord`).

@@ -17,7 +17,10 @@
 //!   sent; resend?": handed to a carrier that never answered, and not in flight in this
 //!   run; such a row without another reason reads `reason_code: handoff_pending`) and
 //!   `not_relayed` (`marker`: kept from relaying because it already carries a relay
-//!   marker, §8 guard 3). A person's read of the newest window (no `since_seq`, no
+//!   marker, §8 guard 3; null on a DM, which no edge reads); every row carries `relay`
+//!   (FC5: the LXMF `111.relay` field a received row carried, `{v, net, id, mid}`, the
+//!   sender's claim and never `relayed_from`; on an inbound DM the only sign it is a
+//!   relayed copy). A person's read of the newest window (no `since_seq`, no
 //!   bearer) clears the conversation's `unread` (local only; the agent's reads never do).
 //! - `POST /networks/{net}/conversations/{conv}/messages {text, size_mode?}` → `202
 //!   ForeignSendAccepted {id, ids?, plan}`: a one-target send group (§9). `409 oversize`
@@ -104,20 +107,23 @@ pub fn in_order(networks: &mut [Value], order: &[String]) {
 }
 
 /// The networks view (module doc), built off the runtime's workers.
-pub async fn networks_view(api: &ApiState, bridge: Arc<Bridge>) -> Result<Value, Response> {
+/// The error is boxed: a `Response` is wide and the `Ok` path is the common one.
+pub async fn networks_view(api: &ApiState, bridge: Arc<Bridge>) -> Result<Value, Box<Response>> {
     let h = tokio::runtime::Handle::current();
     let b = Arc::clone(&bridge);
     let v = tokio::task::spawn_blocking(move || h.block_on(b.networks()))
         .await
         .map_err(|_| {
-            super::Problem::new(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "internal",
-                "The networks view failed.",
+            Box::new(
+                super::Problem::new(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "internal",
+                    "The networks view failed.",
+                )
+                .into_response(),
             )
-            .into_response()
         })?
-        .map_err(|e| e.problem().into_response())?;
+        .map_err(|e| Box::new(e.problem().into_response()))?;
     let mut v = v;
     if let Some(t) = api.ext::<Arc<super::transport::TransportApi>>() {
         let order = t.spine.file().order.networks;
@@ -135,7 +141,7 @@ async fn list(State(api): State<Arc<ApiState>>) -> Response {
     };
     match networks_view(&api, b).await {
         Ok(v) => Json(v).into_response(),
-        Err(r) => r,
+        Err(r) => *r,
     }
 }
 

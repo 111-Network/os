@@ -36,6 +36,7 @@
 - [Meshtastic Web](meshtastic-web.md): Official Meshtastic web client under GPL-3.0-only; importing its SDK spreads the license. | candidate | lora,mesh,panel
 - [Meshtasticator](meshtasticator.md): Meshtastic network simulator; CC BY 4.0, test fixture only, never shipped. | candidate | lora,mesh,test-fixture
 - [Monocypher](monocypher.md): Audited compact C crypto for Cat 1; single maintainer, CC0 forkability recorded. | testing | hardware,identity,offline
+- [ntfy](ntfy.md): HTTP pub-sub notification server; the first Layer 7 hub-to-hub carrier candidate. | candidate | dtn,messaging,networking
 - [OpenCode](opencode.md): Open-source coding agent CLI with terminal TUI and 75+ model providers. | candidate | agent,llm
 - [Reticulum](reticulum.md): Sovereign end-to-end encrypted networking stack; custom license needs legal review | candidate | mesh,networking,offline
 - [RNode Firmware](rnode-firmware.md): GPL-3.0 LoRa modem firmware for Reticulum; flasher ships inside the rns wheel. | candidate | firmware,hardware,lora

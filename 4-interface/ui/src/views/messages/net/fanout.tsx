@@ -19,7 +19,9 @@ import { getAdapter, isApiError } from "../../../lib/api";
 import { confirmGate, refusalsOf } from "../../../lib/api/bridge";
 import { contactName } from "../../../lib/api/contacts";
 import { useContacts, useConversationsOf, useForeignThread, useNetworks } from "../../../lib/api/hooks";
+import { cleanPeerText } from "../../../lib/api/messages";
 import { enabledNetworks, groupParts } from "../../../lib/api/networks";
+import { cx } from "../../../lib/cx";
 import type { Contact, FanoutPreview, FanoutResult, FanoutTarget, ForeignConversation, Network, PlanRefusal, SendItem, SendMode } from "../../../lib/api/types";
 import { MAX_COMPOSE_CHARS, errorSentence } from "../model";
 import { useConsentFlow } from "./consent";
@@ -67,7 +69,7 @@ function SentForeign({ item, network }: { item: SendItem; network: Network | nul
         <ForeignRow item={it} network={network} now={now} actions={{ retry, cancel }} />
       </ul>
       {error ? (
-        <p role="alert" className="font-mono text-xs text-destructive">
+        <p role="alert" dir="auto" className="font-mono text-xs text-destructive [unicode-bidi:isolate]">
           {error}
         </p>
       ) : null}
@@ -85,14 +87,14 @@ export function PlanLines({ plan, onSplit, onConfirm, splittable }: { plan: Fano
       </p>
       {air ? <p className={TEXT}>airtime: {air}</p> : null}
       {plan.warnings.map((w) => (
-        <p key={w.code} className={TEXT} data-testid={`warn-${w.code}`}>
-          {w.text}
+        <p key={w.code} dir="auto" className={cx(TEXT, "[unicode-bidi:isolate]")} data-testid={`warn-${w.code}`}>
+          {cleanPeerText(w.text)}
         </p>
       ))}
       {plan.refusal ? (
         <div className="flex flex-col gap-2 border border-foreground p-2" role="alert" data-testid="refusal">
-          <p className="font-mono text-xs text-foreground">
-            Refused: {plan.refusal.detail}
+          <p dir="auto" className="font-mono text-xs text-foreground [unicode-bidi:isolate]" data-testid="refusal-detail">
+            Refused: {cleanPeerText(plan.refusal.detail)}
           </p>
           <div className="flex flex-wrap gap-2">
             {plan.refusal.code === "oversize" && splittable ? (
@@ -200,7 +202,7 @@ export default function FanoutView() {
       if (redirectIfUnauthenticated(err)) return;
       const refused = isApiError(err) ? refusalsOf(err) : [];
       if (refused.length > 0) {
-        setError(`Nothing was queued. ${refused.length === 1 ? "1 target was" : `${refused.length} targets were`} refused: ${refused.map((r) => r.detail).join("; ")}`);
+        setError(`Nothing was queued. ${refused.length === 1 ? "1 target was" : `${refused.length} targets were`} refused: ${refused.map((r) => cleanPeerText(r.detail)).join("; ")}`);
         setRev((n) => n + 1);
       } else setError(errorSentence(err, "The send could not be queued."));
     } finally {
@@ -314,7 +316,7 @@ export default function FanoutView() {
             {!ready && chosen.length > 0 && text.trim() !== "" && preview && !preview.ok ? <p className={TEXT}>Fix the refused targets first: nothing is sent unless every target can take it.</p> : null}
           </div>
           {error ? (
-            <p role="alert" className="max-w-prose font-mono text-xs text-destructive" data-testid="fanout-error">
+            <p role="alert" dir="auto" className="max-w-prose font-mono text-xs text-destructive [unicode-bidi:isolate]" data-testid="fanout-error">
               {error}
             </p>
           ) : null}

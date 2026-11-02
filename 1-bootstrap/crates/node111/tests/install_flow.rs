@@ -9,21 +9,43 @@
 //! never fails the install (a receipt degrade branch). And the rns closure on
 //! a fresh Debian whose `python3` has no pip module: a throwaway venv's own
 //! pip downloads it (`packages::pip_closure`).
+//!
+//! The optional components (Layer 6 §2.1 rule 3): every run hands step 5 the
+//! embedded declarations through `run_with_components` minus any binary that
+//! would be pre-downloaded (its pin names a real host, and the harness's
+//! fetcher is real), so no test reaches the network; the Delta Chat core and
+//! Madmail stay in (`[install] prefetch = false`: never downloaded, and the
+//! happy path proves it through the production `run_with`).
 
 mod common;
 mod fake_python;
 
 use node111::calver::Calver;
+use node111::daemon::components::manifest::{self, Component, Payload};
 use node111::daemon::transport::venv::presence::{self, Outcome, PresenceVenvError};
 use node111::daemon::DaemonLayout;
 use node111::install::context::InstallContext;
 use node111::install::receipt::Receipt;
-use node111::install::{run_with, supervise};
+use node111::install::{run_with, run_with_components, supervise};
 use node111::manifest::layer5;
 use node111::testkit::{MapEnv, MockRunner};
 use node111::util::run::{Output, Runner};
 use std::path::Path;
 use std::time::Duration;
+
+/// The embedded component declarations minus every binary payload step 5
+/// would download (module doc).
+fn harness_components() -> Vec<Component> {
+    let all = manifest::load_embedded();
+    let kept: Vec<Component> = all
+        .into_iter()
+        .filter(|c| !(c.prefetch && matches!(c.payload, Payload::Binary { .. })))
+        .collect();
+    for id in ["deltachat", "madmail", "lxmf"] {
+        assert!(kept.iter().any(|c| c.id == id), "{id} stays in the harness");
+    }
+    kept
+}
 
 fn out(status: i32, stdout: &str) -> Output {
     Output {
@@ -264,8 +286,36 @@ fn happy_path_end_to_end_and_idempotent_rerun() {
     let runner = MockRunner::new(script(&flow.layout, false, true));
     let ctx = ctx_for(&flow, &runner, &env, false);
     let fetcher = node111::util::http::Fetcher::new(Duration::from_secs(10), 64 << 20).unwrap();
+    // the production entry (the embedded declarations): safe offline only
+    // because no embedded binary is pre-downloaded
+    assert!(
+        manifest::load_embedded()
+            .iter()
+            .all(|c| !(c.prefetch && matches!(c.payload, Payload::Binary { .. }))),
+        "an embedded binary payload would be pre-downloaded"
+    );
     let receipt = run_with(&ctx, &fetcher)
         .unwrap_or_else(|e| panic!("install failed: {e:#}\ncalls: {:?}", runner.calls()));
+    // the Raspberry Pi floor: the ~104 MB Delta Chat + Madmail payloads are not
+    // pre-downloaded and get no notice until `111 install --components` runs
+    for id in ["deltachat", "madmail", "simplex"] {
+        let c = manifest::load_embedded()
+            .into_iter()
+            .find(|c| c.id == id)
+            .unwrap();
+        assert!(
+            !flow.layout.root.join("cache/packages").join(id).exists(),
+            "{id} not cached"
+        );
+        assert!(
+            !receipt.notices.iter().any(|n| n.hash == c.notice_hash()),
+            "{id}: no notice"
+        );
+        assert!(!receipt
+            .cache_hashes
+            .keys()
+            .any(|k| k.starts_with(&format!("packages/{id}/"))));
+    }
 
     assert_eq!(receipt.version, RELEASE);
     assert_eq!(receipt.category, "Node2A");
@@ -355,7 +405,7 @@ fn happy_path_end_to_end_and_idempotent_rerun() {
     // --- idempotent re-run (same release): all steps probe, nothing breaks ---
     let runner2 = MockRunner::new(script(&flow.layout, true, true));
     let ctx2 = ctx_for(&flow, &runner2, &env, false);
-    let receipt2 = run_with(&ctx2, &fetcher)
+    let receipt2 = run_with_components(&ctx2, &fetcher, &harness_components())
         .unwrap_or_else(|e| panic!("re-run failed: {e:#}\ncalls: {:?}", runner2.calls()));
     assert_eq!(receipt2.version, RELEASE);
     // identity NOT regenerated
@@ -384,7 +434,7 @@ fn downgrade_refused() {
     let runner = MockRunner::new(Vec::<(String, Output)>::new());
     let ctx = ctx_for(&flow, &runner, &env, false);
     let fetcher = node111::util::http::Fetcher::new(Duration::from_secs(10), 64 << 20).unwrap();
-    let err = run_with(&ctx, &fetcher).unwrap_err();
+    let err = run_with_components(&ctx, &fetcher, &harness_components()).unwrap_err();
     assert!(err.to_string().contains("downgrade"), "{err}");
 }
 
@@ -395,8 +445,8 @@ fn degraded_container_gets_dropin() {
     let runner = MockRunner::new(script(&flow.layout, false, true));
     let ctx = ctx_for(&flow, &runner, &env, true); // --allow-degraded
     let fetcher = node111::util::http::Fetcher::new(Duration::from_secs(10), 64 << 20).unwrap();
-    let receipt =
-        run_with(&ctx, &fetcher).unwrap_or_else(|e| panic!("degraded install failed: {e:#}"));
+    let receipt = run_with_components(&ctx, &fetcher, &harness_components())
+        .unwrap_or_else(|e| panic!("degraded install failed: {e:#}"));
     assert!(receipt.degrade_branches.is_empty() || receipt.degrade_branches.len() <= 1);
     assert!(flow
         .fs_root
@@ -412,7 +462,7 @@ fn clock_skew_refuses() {
     let runner = MockRunner::new(Vec::<(String, Output)>::new());
     let ctx = ctx_for(&flow, &runner, &env, false);
     let fetcher = node111::util::http::Fetcher::new(Duration::from_secs(10), 64 << 20).unwrap();
-    let err = run_with(&ctx, &fetcher).unwrap_err();
+    let err = run_with_components(&ctx, &fetcher, &harness_components()).unwrap_err();
     assert!(err.to_string().contains("clock"), "{err}");
 }
 
@@ -434,7 +484,8 @@ fn f1_torn_stage_heals() {
     let runner = MockRunner::new(script(&flow.layout, false, true));
     let ctx = ctx_for(&flow, &runner, &env, false);
     let fetcher = node111::util::http::Fetcher::new(Duration::from_secs(10), 64 << 20).unwrap();
-    let receipt = run_with(&ctx, &fetcher).unwrap_or_else(|e| panic!("heal install failed: {e:#}"));
+    let receipt = run_with_components(&ctx, &fetcher, &harness_components())
+        .unwrap_or_else(|e| panic!("heal install failed: {e:#}"));
     assert_eq!(receipt.version, RELEASE);
     // debris gone, real tree verified
     assert!(!flow
@@ -655,7 +706,7 @@ fn install_builds_the_presence_venv_from_the_pinned_lock() {
     let runner = fake_python::Routed::new(&mock, &py);
     let ctx = ctx_for(&flow, &runner, &env, false);
     let fetcher = node111::util::http::Fetcher::new(Duration::from_secs(10), 64 << 20).unwrap();
-    let receipt = run_with(&ctx, &fetcher)
+    let receipt = run_with_components(&ctx, &fetcher, &harness_components())
         .unwrap_or_else(|e| panic!("install failed: {e:#}\ncalls: {:?}", runner.order()));
     assert_eq!(receipt.version, RELEASE);
     assert!(
@@ -734,7 +785,7 @@ fn install_builds_the_presence_venv_from_the_pinned_lock() {
     let mock2 = MockRunner::new(without_python(script(&flow.layout, true, true)));
     let runner2 = fake_python::Routed::new(&mock2, &py);
     let ctx2 = ctx_for(&flow, &runner2, &env, false);
-    run_with(&ctx2, &fetcher)
+    run_with_components(&ctx2, &fetcher, &harness_components())
         .unwrap_or_else(|e| panic!("re-run failed: {e:#}\ncalls: {:?}", runner2.order()));
     mock2.assert_exhausted();
     let rerun = py.calls()[before..].to_vec();
@@ -853,7 +904,7 @@ fn a_failed_presence_venv_is_a_receipt_degrade_branch() {
     let runner = fake_python::Routed::new(&mock, &py);
     let ctx = ctx_for(&flow, &runner, &env, false);
     let fetcher = node111::util::http::Fetcher::new(Duration::from_secs(10), 64 << 20).unwrap();
-    let receipt = run_with(&ctx, &fetcher)
+    let receipt = run_with_components(&ctx, &fetcher, &harness_components())
         .unwrap_or_else(|e| panic!("install failed: {e:#}\ncalls: {:?}", runner.order()));
     mock.assert_exhausted();
     let root = &flow.layout.root;
@@ -891,7 +942,7 @@ fn rns_closure_is_prefetched_without_a_host_pip() {
     let runner = fake_python::Routed::new(&mock, &py);
     let ctx = ctx_for(&flow, &runner, &env, false);
     let fetcher = node111::util::http::Fetcher::new(Duration::from_secs(10), 64 << 20).unwrap();
-    let receipt = run_with(&ctx, &fetcher)
+    let receipt = run_with_components(&ctx, &fetcher, &harness_components())
         .unwrap_or_else(|e| panic!("install failed: {e:#}\ncalls: {:?}", runner.order()));
     mock.assert_exhausted();
     assert!(
@@ -949,7 +1000,7 @@ fn rns_closure_is_prefetched_without_a_host_pip() {
     let mock = MockRunner::new(without_python(script(&flow.layout, false, true)));
     let runner = fake_python::Routed::new(&mock, &py);
     let ctx = ctx_for(&flow, &runner, &env, false);
-    let receipt = run_with(&ctx, &fetcher)
+    let receipt = run_with_components(&ctx, &fetcher, &harness_components())
         .unwrap_or_else(|e| panic!("install failed: {e:#}\ncalls: {:?}", runner.order()));
     mock.assert_exhausted();
     assert_eq!(

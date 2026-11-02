@@ -208,6 +208,8 @@ interface Seed {
   text: string;
   state?: ForeignMessage["state"];
   reason?: string | null;
+  /** A hand-off no answer came for (`meta.handoff` pending): the contract's `uncertain`. */
+  uncertain?: boolean;
   sender?: { native: string; name: string };
   auth?: ForeignMessage["auth"];
   ago: number;
@@ -272,7 +274,7 @@ export function buildBridgeRich(now: number): BridgeData {
     { conv: "fc-1", dir: "own", text: "(1/3) Long update, part one of three.", state: "relayed", group: "sg-6", part: { k: 1, n: 3 }, ago: 8 * MIN },
     { conv: "fc-1", dir: "own", text: "(2/3) Part two goes out second.", state: "sent", group: "sg-6", part: { k: 2, n: 3 }, ago: 8 * MIN },
     { conv: "fc-1", dir: "own", text: "(3/3) Part three is still waiting.", state: "queued", group: "sg-6", part: { k: 3, n: 3 }, ago: 8 * MIN },
-    { conv: "fc-1", dir: "own", text: "Sent just before the node stopped.", state: "queued", reason: "handoff_pending", group: "sg-7", ago: 7 * MIN },
+    { conv: "fc-1", dir: "own", text: "Sent just before the node stopped.", state: "queued", reason: "handoff_pending", uncertain: true, group: "sg-7", ago: 7 * MIN },
     { conv: "fc-1", dir: "in", text: `${"This is a very long message. ".repeat(12)}`, sender: A, auth: "channel-key", ago: 6 * MIN, truncated: 70_000 },
     { conv: "fc-2", dir: "in", text: "Camp is set up at the second lake.", sender: MARA, auth: "channel-key", ago: 15 * MIN },
     { conv: "fc-3", dir: "in", text: "Are you at the ridge?", sender: MARA, auth: "pki", ago: 12 * MIN },
@@ -307,6 +309,7 @@ export function buildBridgeRich(now: number): BridgeData {
       at: iso(now - s.ago),
       claim_ts: s.claim != null ? iso(now - s.ago + s.claim) : null,
       truncated: s.truncated ?? null,
+      ...(s.uncertain ? { uncertain: true } : {}),
     });
     const c = d.conversations.find((x) => x.id === s.conv)!;
     c.last_seq = seq;
@@ -587,7 +590,7 @@ export function createBridgeMock(d: BridgeData, env: BridgeEnv) {
       const step = steps[i];
       if (!step) return void chain.delete(m.id);
       env.later(step[0], () => {
-        if (!d.messages.includes(m) || m.reason_code === "cancelled") return void chain.delete(m.id);
+        if (!d.messages.includes(m) || m.reason_code === "cancelled" || m.state === "failed") return void chain.delete(m.id);
         setState(m, step[1], null);
         next(i + 1);
       });
@@ -872,13 +875,28 @@ export function createBridgeMock(d: BridgeData, env: BridgeEnv) {
       },
     },
 
-    /** `POST /messages/{id}/retry` on an `fm-…` id. */
+    /**
+     * The node refuses a row it still held (`queued`) before it left: `failed` with the reason (§4, "refused before air"). A stand-in for the
+     * adapter's answer; a row that already left, or is not ours, is untouched.
+     */
+    refuse: (id: string, reason: string): void => {
+      const m = row(id);
+      if (!m || m.dir !== "own" || m.state !== "queued") return;
+      delete m.uncertain;
+      setState(m, "failed", reason);
+    },
+    /**
+     * `POST /messages/{id}/retry` on an `fm-…` id: the node accepts a row that is `failed` or uncertain (a hand-off no answer came for) and
+     * refuses every other state with 409 ("cannot retry now"). The real node answers with a NEW row and marks the old one resent; the mock
+     * re-queues the same row, which the page cannot tell apart because it re-reads the window either way.
+     */
     retry: (id: string): void => {
       const m = row(id);
       if (!m) throw problem(404, "not_found", "No such message", id);
-      if (m.dir !== "own" || (m.state !== "queued" && m.state !== "sent" && m.state !== "failed")) throw problem(409, "bad_request", "Not retryable", "Only an own message that is waiting, sent or refused before air can be retried.");
-      if (m.state === "failed") setState(m, "queued", null);
-      else if (m.reason_code === "handoff_pending") setState(m, "queued", null);
+      const uncertain = m.uncertain === true || m.reason_code === "handoff_pending";
+      if (m.dir !== "own" || (m.state !== "failed" && !uncertain)) throw problem(409, "bad_request", "Not retryable", "Only a message that was refused before air, or handed over without an answer, can be retried.");
+      delete m.uncertain;
+      setState(m, "queued", null);
       dispatch(m);
     },
     /** `POST /messages/{id}/cancel` on an `fm-…` id: drops a queued row with nothing sent. */

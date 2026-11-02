@@ -182,6 +182,106 @@ for c in kdf["cases"]:
     check(f"store-kdf {c['name']}", key.hex(), c["store_key"])
     check(f"store-kdf sqlcipher literal {c['name']}", f"x'{key.hex()}'", c["sqlcipher_key"])
 
+
+# -------------------------------------------------------- layer7/dest-hub.json
+# Layer 7 §5.4: ext TLV 0x02 dest_hub (type 0x02 ‖ len 8 ‖ the dest's home-hub
+# hint) in the inner header of a member's CUSTODY_PUT, re-derived from the
+# spec alone; n_ext present whenever HAS_EXT; CUSTODY_PUT only.
+l7 = load(os.path.join("layer7", "dest-hub.json"))
+l7id = {k: bytes.fromhex(v["node_id"]) for k, v in l7["identities"].items()}
+l7enc = {k: bytes.fromhex(v["enc_pubkey"]) for k, v in l7["identities"].items()}
+l7ss = bytes.fromhex(l7["pair"]["shared"])
+l7key = b2b(b"111/pair/v1" + l7ss + l7enc["a"] + l7enc["b"], 32)
+check("layer7 pair key a->b", l7key.hex(), l7["pair"]["key_a_to_b"])
+l7item = bytes.fromhex(l7["item"])
+check("layer7 item is a sealed-packet size", 88 <= len(l7item) <= 65535, True)
+L5_WRAP = 64 + 4 + 1 + 1 + 2 + 32 + 16  # outer ‖ sender_ref kind flags 0‖0 ‖ dest ‖ pair_mac
+l7wrap = {}
+for c in l7["cases"]:
+    name = "layer7 " + c["name"]
+    check(f"{name} kind", c["kind"], 0x03)
+    sender = l7id[c["sender"]]
+    recipient = l7id[c["recipient"]]
+    extra = bytes([c["priority"] << 6]) + recipient[:4]
+    header = bytes([1, 1]) + int(c["counter"]).to_bytes(8, "little") + bytes([5]) + extra
+    check(f"{name} header", header.hex(), c["header"])
+    tlvs = []
+    if c["dest_hub"] is not None:
+        hint = bytes.fromhex(c["dest_hub"])
+        check(f"{name} dest_hub is the far hub's NodeId[0..8]", hint, l7id["far_hub"][:8])
+        tlvs.append(bytes([0x02, 8]) + hint)
+    for t, v in c["unknown_tlvs"]:
+        v = bytes.fromhex(v)
+        check(f"{name} unknown type is unregistered", t not in (0x01, 0x02, 0x10, 0x20, 0x21), True)
+        tlvs.append(bytes([t, len(v)]) + v)
+    ext = bytes([len(tlvs)]) + b"".join(tlvs) if tlvs else b""
+    flags = 0x02 if tlvs else 0x00
+    check(f"{name} ext", ext.hex() if ext else None, c["ext"])
+    payload = l7id["dest"] + l7item
+    check(f"{name} payload", payload.hex(), c["payload"])
+    before = sender[:4] + bytes([0x03, flags]) + uvarint(0) + uvarint(0) + ext + payload
+    check(f"{name} inner_before_auth", before.hex(), c["inner_before_auth"])
+    mac = b2b(header + bytes.fromhex(c["epk"]) + before, 16, key=l7key)
+    check(f"{name} pair_mac", mac.hex(), c["pair_mac"])
+    check(f"{name} inner", (before + mac).hex(), c["inner"])
+    plen = len(header) + 32 + len(before) + 16 + 16
+    check(f"{name} packet_len", plen, c["packet_len"])
+    check(f"{name} wrap", plen - len(l7item), c["wrap"])
+    check(f"{name} wrap = L5 wrap + ext", c["wrap"], L5_WRAP + len(ext))
+    l7wrap[(c["dest_hub"] is not None, bool(c["unknown_tlvs"]))] = c["wrap"]
+check("layer7 wrap without a TLV", l7wrap[(False, False)], 120)
+check("layer7 wrap with dest_hub alone (11 B)", l7wrap[(True, False)], 131)
+check("layer7 dest_hub beside another TLV (10 B)", l7wrap[(True, True)] - l7wrap[(False, True)], 10)
+
+L7KIND = {0x01: "Msg", 0x02: "Ack", 0x03: "CustodyPut", 0x04: "CustodyAck", 0x05: "MailboxFetch",
+          0x06: "MailboxItem", 0x07: "MailboxCommit", 0x08: "Enroll", 0x09: "EnrollOk",
+          0x10: "AgentOp", 0x11: "Kb", 0x12: "Update", 0x13: "Patch", 0x14: "Sync"}
+
+
+def l7_varint(b, i):
+    v = shift = 0
+    while True:
+        x = b[i]
+        i += 1
+        v |= (x & 0x7F) << shift
+        shift += 7
+        if not x & 0x80:
+            return v, i
+
+
+def l7_reason(b):
+    """The §5.4 rule a before-auth region breaks (the TLV walk in wire order)."""
+    kind, flags = b[4], b[5]
+    if flags & 0x02 == 0:
+        return None
+    _, i = l7_varint(b, 6)
+    _, i = l7_varint(b, i)
+    n, i = b[i], i + 1
+    seen, hinted = set(), False
+    for _ in range(n):
+        t, ln = b[i], b[i + 1]
+        i += 2 + ln
+        if t in seen:
+            return f"DuplicateTlv({t})"
+        seen.add(t)
+        if t == 0x02:
+            if ln != 8:
+                return f"DestHubLength({ln})"
+            hinted = True
+    if hinted and kind != 0x03:
+        return f"DestHubNotAllowed({L7KIND[kind]})"
+    return None
+
+
+l7kinds = set()
+for r in l7["reject"]:
+    b = bytes.fromhex(r["before_auth"])
+    check(f"layer7 reject {r['name']}", l7_reason(b), r["expect"])
+    if r["expect"].startswith("DestHubNotAllowed"):
+        l7kinds.add(b[4])
+check("layer7 rejects cover every built kind but CUSTODY_PUT", sorted(l7kinds),
+      sorted(k for k in L7KIND if k != 0x03))
+
 if FAILS:
     print("\n".join(FAILS))
     print(f"crosscheck: {len(FAILS)} mismatches")

@@ -439,6 +439,140 @@ class Sending(unittest.TestCase):
         self.assertEqual(self.w.states("x1")[-1]["state"], "failed")
 
 
+class PathRequests(unittest.TestCase):
+    """Spec section 6 (4): a send parked as peer_unannounced asks the network for the peer's path, once per
+    destination per parked period, again with back-off (at most once per 30 s), outside the state lock."""
+
+    def setUp(self):
+        self.w = World()
+        self.addCleanup(self.w.close)
+        self.tr = self.w.fakes.transport
+
+    def test_a_parked_send_requests_the_path_once_per_destination(self):
+        bob = self.w.fakes.peer(announced=False)
+        self.w.send(bob, "p1")
+        self.assertEqual(self.w.states("p1")[-1]["reason"], "peer_unannounced")
+        self.assertEqual(self.tr.path_requests, [bob.dest_hash()])
+        self.w.send(bob, "p2")  # a second send parked on the same destination adds no request
+        self.assertEqual(self.tr.path_requests, [bob.dest_hash()])
+        carol = self.w.fakes.peer(announced=False)
+        self.w.send(carol, "p3")
+        self.assertEqual(self.tr.path_requests, [bob.dest_hash(), carol.dest_hash()])
+
+    def test_a_known_peer_is_never_path_requested_by_the_helper(self):
+        self.w.send(self.w.fakes.peer(), "k1")  # recall works: the library's own pathing applies
+        self.assertEqual(self.tr.path_requests, [])
+
+    def test_re_requested_with_back_off_at_most_every_30_s(self):
+        bob = self.w.fakes.peer(announced=False)
+        self.w.send(bob, "p1")
+        h, clock = self.w.helper, self.w.clock
+        self.assertLessEqual(h.next_wakeup(), sc.PATH_REQUEST_SECS)
+        times = []
+        for _ in range(int(3000 / 0.5)):
+            clock.advance(0.5)
+            n = len(self.tr.path_requests)
+            h.tick()
+            if len(self.tr.path_requests) > n:
+                times.append(clock())
+        self.assertEqual(len(times), len(self.tr.path_requests) - 1)
+        gaps = [b - a for a, b in zip([1000.0] + times, times)]
+        self.assertEqual(gaps[:5], [30.0, 60.0, 120.0, 240.0, 480.0])
+        self.assertTrue(all(g >= sc.PATH_REQUEST_SECS for g in gaps))
+        self.assertTrue(all(g == sc.PATH_REQUEST_MAX_SECS for g in gaps[4:]))
+        self.assertEqual(set(self.tr.path_requests), {bob.dest_hash()})
+
+    def test_the_heard_ends_the_parked_period_and_a_new_park_requests_again(self):
+        bob = self.w.fakes.peer(announced=False)
+        self.w.send(bob, "p1")
+        self.w.fakes.announce(bob, "Bob")  # heard: the parked send goes, the parked period ends
+        self.assertEqual(len(self.w.router.outbound), 1)
+        self.assertEqual(self.w.helper.path_reqs, {})
+        self.w.clock.advance(3600)
+        self.w.helper.tick()
+        self.assertEqual(self.tr.path_requests, [bob.dest_hash()])  # nothing re-requested after the resume
+        self.w.router.outbound[0].lib_deliver()  # nothing in flight, nothing parked: only the link check wakes it
+        self.assertAlmostEqual(self.w.helper.next_wakeup(), max(0.0, self.w.helper.next_link_poll - self.w.clock()))
+        del self.w.fakes.known[bob.dest_hash()]  # the library forgot it (a new parked period)
+        self.w.send(bob, "p2")
+        self.assertEqual(self.tr.path_requests, [bob.dest_hash(), bob.dest_hash()])
+
+    def test_rnsd_answers_from_its_path_table_and_the_send_resumes(self):
+        """The restart case: a shared-instance client keeps no known destinations across a restart, but
+        its rnsd does; the path response is an announce, so the parked send resumes without the peer
+        re-announcing (the heard is reported and the send handed over once)."""
+        bob = self.w.fakes.peer(announced=False)
+        self.w.fakes.path_table[bob.dest_hash()] = (bob, "Bob")
+        self.w.send(bob, "p1")
+        self.assertEqual(self.tr.path_requests, [bob.dest_hash()])
+        self.assertEqual([x["state"] + "/" + str(x.get("reason")) for x in self.w.states("p1")],
+                         ["queued/peer_unannounced"])
+        self.assertEqual([h["dest"] for h in self.w.of("heard")], [bob.dest_hash().hex()])
+        (m,) = self.w.router.outbound
+        self.assertEqual(m.destination_hash, bob.dest_hash())
+        self.assertEqual(self.w.helper.path_reqs, {})
+
+    def test_a_restarted_helper_requests_every_destination_it_parks_again(self):
+        bob = self.w.fakes.peer(announced=False)
+        self.w.send(bob, "p1")
+        self.assertEqual(self.tr.path_requests, [bob.dest_hash()])
+        # a new run: a fresh helper (its own state), the same destination parked again
+        w2 = World()
+        self.addCleanup(w2.close)
+        w2.fakes.known.pop(bob.dest_hash(), None)
+        w2.send(bob, "p1")
+        self.assertEqual(w2.fakes.transport.path_requests, [bob.dest_hash()])
+
+    def test_request_path_is_called_without_the_state_lock(self):
+        """The transport may hold its own locks while a library thread calls our announce handler (which
+        takes the state lock): holding ours across request_path could deadlock (as with the router)."""
+        free = []
+        orig = self.tr.request_path
+
+        def probe(d, **kw):
+            done = threading.Event()
+
+            def other():
+                with self.w.helper.lock:
+                    done.set()
+
+            th = threading.Thread(target=other, daemon=True)
+            th.start()
+            free.append(done.wait(3))
+            th.join(1)
+            orig(d, **kw)
+
+        self.tr.request_path = probe
+        self.w.send(self.w.fakes.peer(announced=False), "l1")  # the send command path
+        self.w.clock.advance(sc.PATH_REQUEST_SECS)
+        self.w.helper.tick()  # the re-request path
+        self.w.cmd({"type": "send", "id": "l2", "to": self.w.fakes.peer(announced=False).dest_hash().hex(),
+                    "text": "x"})
+        self.assertEqual(free, [True, True, True])
+
+    def test_a_failing_or_missing_request_path_is_not_a_crash(self):
+        def boom(d, **kw):
+            raise IOError(FOREIGN)
+
+        self.tr.request_path = boom
+        self.w.send(self.w.fakes.peer(announced=False), "f1")
+        self.assertEqual(self.w.states("f1")[-1]["reason"], "peer_unannounced")
+        self.assertIn("path request failed (OSError)", self.w.stderr.getvalue())
+        self.assertNotIn(FOREIGN, self.w.stderr.getvalue())
+        del self.tr.request_path
+        self.w.send(self.w.fakes.peer(announced=False), "f2")
+        self.assertEqual(self.w.states("f2")[-1]["reason"], "peer_unannounced")
+
+    def test_failed_before_air_does_not_request_a_path(self):
+        """A FAILED while OUTBOUND is reported queued/peer_unannounced, but the library already holds the
+        identity and does its own pathing: the helper requests nothing for it."""
+        peer = self.w.fakes.peer()
+        self.w.send(peer, "o1")
+        self.w.router.outbound[0].lib_fail()
+        self.assertEqual(self.w.states("o1")[-1]["reason"], "peer_unannounced")
+        self.assertEqual(self.tr.path_requests, [])
+
+
 class StateMachine(unittest.TestCase):
     """The v0.3 mapping, the monotone rule and the seven-library-state matrix."""
 

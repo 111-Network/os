@@ -1569,25 +1569,26 @@ fn pending_node_ids_persist_until_removed() {
 
 #[test]
 fn a_v1_store_migrates_to_the_current_schema_in_place() {
-    let (t, s) = ready();
-    s.conn
-        .execute_batch(
-            "DROP TABLE foreign_seen; DROP TABLE relay_edges; DROP TABLE foreign_messages;
-             DROP TABLE send_groups; DROP TABLE foreign_conversations;
-             DROP TABLE pending_node_ids; PRAGMA user_version = 1;",
-        )
-        .unwrap();
-    s.close(1).unwrap();
+    // A V1 store as a V1 build leaves it: the first migration alone (v4
+    // adds columns, so the store cannot be faked by dropping tables).
+    let t = tempfile::tempdir().unwrap();
+    old_store(t.path(), 1).close().unwrap();
     let (mut s, _) = open(t.path(), 1);
     assert_eq!(
         pragma_int(&s.conn, "user_version").unwrap(),
         schema::SCHEMA_VERSION
     );
-    assert_eq!(schema::SCHEMA_VERSION, 3);
+    assert_eq!(schema::SCHEMA_VERSION, 4);
+    s.record_epoch(1).unwrap();
     assert!(s.pending_node_id_put(&PEER).unwrap());
     assert_eq!(s.pending_node_ids().unwrap(), vec![PEER]);
     s.foreign_conversation_upsert("lxmf", "me", ForeignKind::Dm, "dm:ab", None)
         .unwrap();
+    let q = accepted(
+        s.custody_put_fwd(&PEER2, b"v4", Fwd::FromMember(PEER))
+            .unwrap(),
+    );
+    assert_eq!(raw_fwd(&s, q), (1, Some(PEER.to_vec())));
 }
 
 #[test]
@@ -1737,7 +1738,7 @@ fn fseq(s: &Store, id: i64) -> u64 {
 
 #[test]
 fn class_foreign_is_pinned_never_from_a_kind_and_never_refusable() {
-    assert_eq!(Class::ALL.len(), 10);
+    assert_eq!(Class::ALL.len(), 11);
     assert_eq!(Class::Foreign as u8, 9);
     assert_eq!(Class::ALL[9], Class::Foreign);
     assert!((0..=255u8).all(|k| Class::from_kind(k) != Class::Foreign));
@@ -1755,17 +1756,24 @@ fn class_foreign_is_pinned_never_from_a_kind_and_never_refusable() {
     ));
 }
 
-/// A V2 store written by the V2 migrations alone (the shape a V2 build
-/// leaves on disk).
-fn write_v2_fixture(dir: &Path) {
+/// A store at `version`, written by the first `version` migrations alone
+/// (the shape a build of that version leaves on disk); open for seeding.
+fn old_store(dir: &Path, version: usize) -> rusqlite::Connection {
     fs::create_dir_all(dir).unwrap();
     let conn = rusqlite::Connection::open(dir.join(DB_FILE)).unwrap();
     apply_key_and_pragmas(&conn, &key()).unwrap();
-    for (i, sql) in schema::MIGRATIONS[..2].iter().enumerate() {
+    for (i, sql) in schema::MIGRATIONS[..version].iter().enumerate() {
         conn.execute_batch(sql).unwrap();
         conn.pragma_update(None, "user_version", i as i64 + 1)
             .unwrap();
     }
+    conn
+}
+
+/// A V2 store written by the V2 migrations alone (the shape a V2 build
+/// leaves on disk).
+fn write_v2_fixture(dir: &Path) {
+    let conn = old_store(dir, 2);
     conn.execute(
         "INSERT INTO pending_node_ids (node_id, local_seq) VALUES (?1, 1)",
         [&PEER2[..]],
@@ -1776,11 +1784,14 @@ fn write_v2_fixture(dir: &Path) {
 }
 
 #[test]
-fn a_v2_store_opens_at_v3_and_keeps_its_rows() {
+fn a_v2_store_opens_at_the_current_schema_and_keeps_its_rows() {
     let t = tempfile::tempdir().unwrap();
     write_v2_fixture(t.path());
     let (mut s, _) = open(t.path(), 1);
-    assert_eq!(pragma_int(&s.conn, "user_version").unwrap(), 3);
+    assert_eq!(
+        pragma_int(&s.conn, "user_version").unwrap(),
+        schema::SCHEMA_VERSION
+    );
     assert_eq!(s.pending_node_ids().unwrap(), vec![PEER2]);
     s.record_epoch(1).unwrap();
     let c = fconv(&mut s, "meshtastic", ForeignKind::Channel, "ch:LongFast:00");
@@ -1791,17 +1802,17 @@ fn a_v2_store_opens_at_v3_and_keeps_its_rows() {
 }
 
 #[test]
-fn a_store_newer_than_v3_is_refused() {
-    // The "V3 refused by a V2 build" rule is the same check one version up:
-    // this build refuses user_version 4.
+fn a_store_newer_than_this_build_is_refused() {
+    // The "V4 refused by a V3 build" rule is the same check one version up:
+    // this build refuses user_version 5.
     let (t, s) = ready();
-    s.conn.pragma_update(None, "user_version", 4).unwrap();
+    s.conn.pragma_update(None, "user_version", 5).unwrap();
     s.close(1).unwrap();
     assert!(matches!(
         Store::open(t.path(), &key(), &params(1)),
         Err(StoreError::SchemaTooNew {
-            found: 4,
-            supported: 3
+            found: 5,
+            supported: 4
         })
     ));
 }
@@ -3133,4 +3144,692 @@ fn one_batch_numbers_a_copys_parts_in_order_and_origins_ascending() {
         .unwrap();
     assert_eq!(ids.len(), 5);
     assert_eq!(s.edge(e).unwrap().unwrap().relayed_seq, fseq(&s, o2));
+}
+
+// ---------------------------------------------------------------------------
+// Layer 7 §5.3 amendments 5 and 6, §5.8: schema v4, forward rows, Transit
+// ---------------------------------------------------------------------------
+
+const LEAF: [u8; 32] = [0xD0; 32];
+const CARRIER: [u8; 32] = [0xD1; 32];
+const STRANGER: [u8; 32] = [0xE0; 32];
+
+fn accepted(p: CustodyPut) -> u64 {
+    match p {
+        CustodyPut::Accepted(q) => q,
+        other => panic!("{other:?}"),
+    }
+}
+
+/// The raw v4 columns of one `custody` row.
+fn raw_fwd(s: &Store, seq: u64) -> (i64, Option<Vec<u8>>) {
+    s.conn
+        .query_row(
+            "SELECT fwd, fwd_from FROM custody WHERE custody_seq = ?1",
+            [seq as i64],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap()
+}
+
+/// What one forward row of an `len`-byte item counts (item, `fwd_from`,
+/// row overhead).
+fn fwd_bytes(len: usize) -> u64 {
+    (len + FWD_FROM_LEN) as u64 + prune::ROW_OVERHEAD
+}
+
+#[test]
+fn a_v3_store_opens_at_v4_and_its_custody_rows_read_as_member_rows() {
+    let t = tempfile::tempdir().unwrap();
+    {
+        let conn = old_store(t.path(), 3);
+        for (item, committed) in [(&b"v3-open"[..], 0), (b"v3-done", 1)] {
+            conn.execute(
+                "INSERT INTO custody (dest, pkt_ref, bytes, committed, local_seq)
+                 VALUES (?1, ?2, ?3, ?4, 1)",
+                rusqlite::params![
+                    &PEER[..],
+                    &crate::custody::pkt_ref(item)[..],
+                    item,
+                    committed
+                ],
+            )
+            .unwrap();
+        }
+        assert_eq!(pragma_int(&conn, "user_version").unwrap(), 3);
+        conn.close().unwrap();
+    }
+    let (mut s, _) = open(t.path(), 1);
+    s.record_epoch(1).unwrap();
+    assert_eq!(pragma_int(&s.conn, "user_version").unwrap(), 4);
+    let cols: Vec<String> = s
+        .conn
+        .prepare("SELECT name FROM pragma_table_info('custody')")
+        .unwrap()
+        .query_map([], |r| r.get(0))
+        .unwrap()
+        .map(|r| r.unwrap())
+        .collect();
+    assert_eq!(
+        cols,
+        [
+            "custody_seq",
+            "dest",
+            "pkt_ref",
+            "bytes",
+            "committed",
+            "local_seq",
+            "fwd",
+            "fwd_from"
+        ]
+    );
+    // Old rows are member rows: fwd 0, fwd_from NULL, fetched as before.
+    assert_eq!(raw_fwd(&s, 1), (0, None));
+    assert_eq!(raw_fwd(&s, 2), (0, None));
+    let got = s.custody_fetch(&PEER, 0, 10).unwrap();
+    assert_eq!(got.len(), 2);
+    assert_eq!((got[0].committed, got[1].committed), (false, true));
+    assert!(s.forward_pending(0, 10).unwrap().is_empty());
+    assert_eq!(s.forward_item(1).unwrap(), None);
+    assert_eq!(
+        s.class_bytes(Class::Custody).unwrap(),
+        (7 + 7) + 2 * prune::ROW_OVERHEAD
+    );
+    assert_eq!(s.class_bytes(Class::Transit).unwrap(), 0);
+    // Dedup spans member and forward rows; the sequence continues.
+    assert_eq!(
+        s.custody_put(&PEER, b"v3-open").unwrap(),
+        CustodyPut::Duplicate(1)
+    );
+    assert_eq!(
+        s.custody_put_fwd(&STRANGER, b"v3-done", Fwd::FromLeaf(LEAF))
+            .unwrap(),
+        CustodyPut::Duplicate(2)
+    );
+    assert_eq!(accepted(s.custody_put(&PEER, b"v4-item").unwrap()), 3);
+    s.close(1).unwrap();
+}
+
+#[test]
+fn a_v4_store_is_refused_by_a_v3_build() {
+    let (t, mut s) = ready();
+    accepted(
+        s.custody_put_fwd(&STRANGER, b"fwd", Fwd::FromMember(PEER))
+            .unwrap(),
+    );
+    s.close(1).unwrap();
+    // A v3 build runs this `migrate` with its own list, `[V1, V2, V3]`.
+    let conn = rusqlite::Connection::open(t.path().join(DB_FILE)).unwrap();
+    apply_key_and_pragmas(&conn, &key()).unwrap();
+    assert!(matches!(
+        schema::migrate_with(&conn, &schema::MIGRATIONS[..3]),
+        Err(StoreError::SchemaTooNew {
+            found: 4,
+            supported: 3
+        })
+    ));
+    // Refused, never downgraded: the file is still v4 and this build opens it.
+    assert_eq!(pragma_int(&conn, "user_version").unwrap(), 4);
+    conn.close().unwrap();
+    let (s, _) = open(t.path(), 1);
+    assert_eq!(s.forward_pending(0, 10).unwrap().len(), 1);
+}
+
+#[test]
+fn the_v4_checks_refuse_a_forward_row_without_its_origin() {
+    let (_t, s) = ready();
+    let ins = |fwd: i64, from: Option<&[u8]>, salt: u8| {
+        s.conn.execute(
+            "INSERT INTO custody (dest, pkt_ref, bytes, local_seq, fwd, fwd_from)
+             VALUES (?1, ?2, x'00', 1, ?3, ?4)",
+            rusqlite::params![&STRANGER[..], &[salt; 16][..], fwd, from],
+        )
+    };
+    assert!(ins(4, Some(&PEER[..]), 1).is_err(), "fwd outside 0..=3");
+    assert!(ins(1, None, 2).is_err(), "a forward row names its origin");
+    assert!(ins(0, Some(&PEER[..]), 3).is_err(), "a member row has none");
+    assert!(ins(2, Some(&[1u8; 31][..]), 4).is_err(), "a NodeId is 32 B");
+    assert!(ins(3, Some(&CARRIER[..]), 5).is_ok());
+    assert!(ins(0, None, 6).is_ok());
+    // The typed reader agrees and fails closed on a pair it cannot hold.
+    assert_eq!(Fwd::from_parts(0, None).unwrap(), Fwd::Member);
+    assert_eq!(
+        Fwd::from_parts(3, Some(CARRIER.to_vec())).unwrap(),
+        Fwd::FromCarrier(CARRIER)
+    );
+    for (fwd, from) in [
+        (1, None),
+        (0, Some(PEER.to_vec())),
+        (4, Some(PEER.to_vec())),
+        (2, Some(vec![1; 31])),
+    ] {
+        assert!(matches!(
+            Fwd::from_parts(fwd, from),
+            Err(StoreError::Corrupt(_))
+        ));
+    }
+}
+
+#[test]
+fn class_transit_is_pinned_quota_only_and_never_from_a_kind() {
+    assert_eq!(Class::ALL.len(), 11);
+    assert_eq!(Class::Transit as u8, 10);
+    assert_eq!(Class::ALL[10], Class::Transit);
+    assert_eq!(Class::ALL[8], Class::Custody);
+    assert!((0..=255u8).all(|k| Class::from_kind(k) != Class::Transit));
+    assert!(Class::Transit.is_refusable() && Class::Transit.has_quota());
+    assert_eq!(Class::Transit.name(), "transit");
+    assert_eq!(Class::from_i64(10).unwrap(), Class::Transit);
+    assert!(Class::from_i64(11).is_err());
+    // The class of a row comes from its `fwd`.
+    assert_eq!(Fwd::Member.class(), Class::Custody);
+    for (f, code) in [
+        (Fwd::FromMember(PEER), 1),
+        (Fwd::FromLeaf(LEAF), 2),
+        (Fwd::FromCarrier(CARRIER), 3),
+    ] {
+        assert_eq!(f.class(), Class::Transit);
+        assert_eq!(f.code(), code);
+        assert!(f.is_forward() && f.origin().is_some());
+    }
+    assert_eq!((Fwd::Member.code(), Fwd::Member.origin()), (0, None));
+    // The capacity mask persists bit 10 like any other class.
+    let (t, mut s) = ready();
+    s.set_quota(Class::Transit, Some(0)).unwrap();
+    accepted(s.custody_put(&PEER, b"member").unwrap());
+    s.conn
+        .execute(
+            "INSERT INTO custody (dest, pkt_ref, bytes, local_seq, fwd, fwd_from)
+             VALUES (?1, ?2, x'01', 1, 1, ?3)",
+            rusqlite::params![&STRANGER[..], &[9u8; 16][..], &PEER[..]],
+        )
+        .unwrap();
+    let r = s.prune(DiskSpace::UNKNOWN).unwrap();
+    assert_eq!(r.full_classes, vec![Class::Transit]);
+    s.close(1).unwrap();
+    let (s, _) = open(t.path(), 1);
+    assert_eq!(s.full_classes(), &[Class::Transit]);
+}
+
+#[test]
+fn custody_splits_by_fwd_between_custody_and_transit() {
+    let (_t, mut s) = ready();
+    let member = accepted(s.custody_put(&PEER, &[1; 1000]).unwrap());
+    let f1 = accepted(
+        s.custody_put_fwd(&STRANGER, &[2; 2000], Fwd::FromMember(PEER))
+            .unwrap(),
+    );
+    let f2 = accepted(
+        s.custody_put_fwd(&STRANGER, &[3; 3000], Fwd::FromLeaf(LEAF))
+            .unwrap(),
+    );
+    let f3 = accepted(
+        s.custody_put_fwd(&PEER2, &[4; 500], Fwd::FromCarrier(CARRIER))
+            .unwrap(),
+    );
+    assert_eq!(raw_fwd(&s, member), (0, None));
+    assert_eq!(raw_fwd(&s, f1), (1, Some(PEER.to_vec())));
+    assert_eq!(raw_fwd(&s, f2), (2, Some(LEAF.to_vec())));
+    assert_eq!(raw_fwd(&s, f3), (3, Some(CARRIER.to_vec())));
+    assert_eq!(
+        s.class_bytes(Class::Custody).unwrap(),
+        1000 + prune::ROW_OVERHEAD
+    );
+    assert_eq!(
+        s.class_bytes(Class::Transit).unwrap(),
+        fwd_bytes(2000) + fwd_bytes(3000) + fwd_bytes(500)
+    );
+    // Strangers' items never count against members' custody quota: the
+    // member class has 100 B of room although Transit holds 5.6 KB.
+    s.set_quota(Class::Custody, Some(1000 + prune::ROW_OVERHEAD + 100))
+        .unwrap();
+    s.set_quota(Class::Transit, Some(1 << 20)).unwrap();
+    let m2 = accepted(s.custody_put(&PEER, &[5; 100]).unwrap());
+    assert_eq!(
+        s.custody_put(&PEER, &[6; 100]).unwrap(),
+        CustodyPut::RejectFull
+    );
+    // A forward row still fits Transit.
+    let f4 = accepted(
+        s.custody_put_fwd(&STRANGER, &[7; 100], Fwd::FromMember(PEER2))
+            .unwrap(),
+    );
+    // The forwarder's view: forward rows only, ascending, typed.
+    let pending = s.forward_pending(0, 10).unwrap();
+    assert_eq!(
+        pending
+            .iter()
+            .map(|i| (i.custody_seq, i.fwd))
+            .collect::<Vec<_>>(),
+        vec![
+            (f1, Fwd::FromMember(PEER)),
+            (f2, Fwd::FromLeaf(LEAF)),
+            (f3, Fwd::FromCarrier(CARRIER)),
+            (f4, Fwd::FromMember(PEER2)),
+        ]
+    );
+    assert_eq!(pending[1].bytes, vec![3; 3000]);
+    assert_eq!(pending[1].dest, STRANGER);
+    assert_eq!(pending[1].pkt_ref, crate::custody::pkt_ref(&[3; 3000]));
+    assert!(!pending[1].committed);
+    assert_eq!(
+        s.forward_pending(f2, 1).unwrap()[0].custody_seq,
+        f3,
+        "after and limit page"
+    );
+    assert_eq!(s.forward_item(member).unwrap(), None);
+    assert_eq!(s.forward_item(f3).unwrap().unwrap().fwd.code(), 3);
+    assert_eq!(
+        s.forward_by_ref(&crate::custody::pkt_ref(&[2; 2000]))
+            .unwrap()
+            .unwrap()
+            .custody_seq,
+        f1
+    );
+    assert_eq!(
+        s.forward_by_ref(&crate::custody::pkt_ref(&[1; 1000]))
+            .unwrap(),
+        None,
+        "a member row is not a forward row"
+    );
+    assert_eq!(s.forward_stats().unwrap(), (4, 2000 + 3000 + 500 + 100));
+    // A member's fetch reads its own dest only; the totals stay whole.
+    assert_eq!(
+        s.custody_fetch(&PEER, 0, 10)
+            .unwrap()
+            .iter()
+            .map(|i| i.custody_seq)
+            .collect::<Vec<_>>(),
+        vec![member, m2]
+    );
+    assert_eq!(s.custody_stats().unwrap().0, 6);
+}
+
+/// Layer 7 §5.9 (M4c): the forwarder's page query reads the rows'
+/// heads, the same rows in the same order as `forward_pending`, with the
+/// item's length and never its bytes.
+#[test]
+fn forward_heads_page_like_forward_pending_without_the_bytes() {
+    let (_t, mut s) = ready();
+    let member = accepted(s.custody_put(&PEER, &[1; 1000]).unwrap());
+    let f1 = accepted(
+        s.custody_put_fwd(&STRANGER, &[2; 2000], Fwd::FromMember(PEER))
+            .unwrap(),
+    );
+    let f2 = accepted(
+        s.custody_put_fwd(&PEER2, &[3; 3000], Fwd::FromLeaf(LEAF))
+            .unwrap(),
+    );
+    let f3 = accepted(
+        s.custody_put_fwd(&STRANGER, &[4; 500], Fwd::FromCarrier(CARRIER))
+            .unwrap(),
+    );
+    assert!(s.forward_commit(f2).unwrap());
+    let heads = s.forward_pending_lens(0, 10).unwrap();
+    assert_eq!(
+        heads,
+        vec![
+            ForwardHead {
+                custody_seq: f1,
+                dest: STRANGER,
+                pkt_ref: crate::custody::pkt_ref(&[2; 2000]),
+                len: 2000,
+                fwd: Fwd::FromMember(PEER),
+            },
+            ForwardHead {
+                custody_seq: f3,
+                dest: STRANGER,
+                pkt_ref: crate::custody::pkt_ref(&[4; 500]),
+                len: 500,
+                fwd: Fwd::FromCarrier(CARRIER),
+            },
+        ],
+        "protected forward rows only: no member row, no committed one"
+    );
+    let full = s.forward_pending(0, 10).unwrap();
+    assert_eq!(
+        full.iter()
+            .map(|i| (
+                i.custody_seq,
+                i.dest,
+                i.pkt_ref,
+                i.bytes.len() as u64,
+                i.fwd
+            ))
+            .collect::<Vec<_>>(),
+        heads
+            .iter()
+            .map(|h| (h.custody_seq, h.dest, h.pkt_ref, h.len, h.fwd))
+            .collect::<Vec<_>>(),
+        "the same rows as forward_pending"
+    );
+    // `after` is exclusive and `limit` pages.
+    assert_eq!(s.forward_pending_lens(f1, 1).unwrap()[0].custody_seq, f3);
+    assert_eq!(s.forward_pending_lens(0, 1).unwrap().len(), 1);
+    assert!(s.forward_pending_lens(f3, 10).unwrap().is_empty());
+    assert!(s.forward_pending_lens(member, 0).unwrap().is_empty());
+}
+
+#[test]
+fn the_transit_quota_defaults_to_a_quarter_and_the_share_to_an_eighth() {
+    let (_t, mut s) = ready();
+    assert_eq!(s.quota(Class::Custody).unwrap(), None);
+    assert_eq!(
+        s.quota(Class::Transit).unwrap(),
+        Some(prune::DEFAULT_HIGH_WATERMARK / 4)
+    );
+    assert_eq!(s.quota(Class::Transit).unwrap(), Some(128 << 20));
+    assert_eq!(s.transit_share().unwrap(), 16 << 20);
+    // The base is the store's (configured) high watermark ...
+    s.set_watermarks(Watermarks::with_high(64 << 20)).unwrap();
+    assert_eq!(s.quota(Class::Transit).unwrap(), Some(16 << 20));
+    // ... or a quarter of the custody quota when one is set ...
+    s.set_quota(Class::Custody, Some(40_000)).unwrap();
+    assert_eq!(s.quota(Class::Transit).unwrap(), Some(10_000));
+    assert_eq!(s.transit_share().unwrap(), 1_250);
+    // ... and an explicit `quota.transit` wins; clearing it restores the
+    // derived default, never "no cap".
+    s.set_quota(Class::Transit, Some(800)).unwrap();
+    assert_eq!(s.quota(Class::Transit).unwrap(), Some(800));
+    assert_eq!(s.transit_share().unwrap(), 100);
+    s.set_quota(Class::Transit, None).unwrap();
+    assert_eq!(s.quota(Class::Transit).unwrap(), Some(10_000));
+    assert_eq!(s.quota(Class::Custody).unwrap(), Some(40_000));
+    assert_eq!(s.quota(Class::Kb).unwrap(), None);
+}
+
+#[test]
+fn an_origin_over_its_share_is_refused_while_others_are_admitted() {
+    let (_t, mut s) = ready();
+    // Share = quota / 8 = 2.5 rows of 1,000 B.
+    s.set_quota(Class::Transit, Some(8 * (2 * fwd_bytes(1000) + 500)))
+        .unwrap();
+    let share = s.transit_share().unwrap();
+    assert_eq!(share, 2 * fwd_bytes(1000) + 500);
+    let m = Fwd::FromMember(PEER);
+    let a = accepted(s.custody_put_fwd(&STRANGER, &[1; 1000], m).unwrap());
+    let b = accepted(s.custody_put_fwd(&STRANGER, &[2; 1000], m).unwrap());
+    assert_eq!(s.forward_origin_bytes(&PEER).unwrap(), 2 * fwd_bytes(1000));
+    assert_eq!(
+        s.custody_put_fwd(&STRANGER, &[3; 1000], m).unwrap(),
+        CustodyPut::RejectFull,
+        "over its share"
+    );
+    // Dedup comes first: a repeat of a held item is still a duplicate.
+    assert_eq!(
+        s.custody_put_fwd(&STRANGER, &[1; 1000], m).unwrap(),
+        CustodyPut::Duplicate(a)
+    );
+    // Other origins are admitted: another member, a leaf hub, a carrier.
+    accepted(
+        s.custody_put_fwd(&STRANGER, &[3; 1000], Fwd::FromMember(PEER2))
+            .unwrap(),
+    );
+    accepted(
+        s.custody_put_fwd(&STRANGER, &[4; 1000], Fwd::FromLeaf(LEAF))
+            .unwrap(),
+    );
+    accepted(
+        s.custody_put_fwd(&STRANGER, &[5; 1000], Fwd::FromCarrier(CARRIER))
+            .unwrap(),
+    );
+    // Member rows never count in a share, even for the same NodeId.
+    accepted(s.custody_put(&PEER, &[6; 1000]).unwrap());
+    assert_eq!(s.forward_origin_bytes(&PEER).unwrap(), 2 * fwd_bytes(1000));
+    // A committed row (handed over) or a refused one pins nothing: the
+    // origin is admitted again.
+    assert!(s.forward_commit(a).unwrap());
+    assert_eq!(s.forward_origin_bytes(&PEER).unwrap(), fwd_bytes(1000));
+    let c = accepted(s.custody_put_fwd(&STRANGER, &[7; 1000], m).unwrap());
+    assert_eq!(
+        s.custody_put_fwd(&STRANGER, &[8; 1000], m).unwrap(),
+        CustodyPut::RejectFull
+    );
+    assert!(s.forward_refuse(b).unwrap());
+    accepted(s.custody_put_fwd(&STRANGER, &[8; 1000], m).unwrap());
+    assert!(s.forward_item(c).unwrap().is_some());
+}
+
+#[test]
+fn refused_forward_rows_are_step_one_evictable_and_protected_ones_never() {
+    let (_t, mut s) = ready();
+    let refused = accepted(
+        s.custody_put_fwd(&STRANGER, &[1; 4000], Fwd::FromMember(PEER))
+            .unwrap(),
+    );
+    let handed = accepted(
+        s.custody_put_fwd(&STRANGER, &[2; 100], Fwd::FromLeaf(LEAF))
+            .unwrap(),
+    );
+    let protected = accepted(
+        s.custody_put_fwd(&PEER2, &[3; 3000], Fwd::FromCarrier(CARRIER))
+            .unwrap(),
+    );
+    let member = accepted(s.custody_put(&PEER, &[4; 2000]).unwrap());
+    // The refused mark and the commit are idempotent, forward rows only.
+    assert!(s.forward_refuse(refused).unwrap());
+    assert!(!s.forward_refuse(refused).unwrap());
+    assert!(s.forward_commit(handed).unwrap());
+    assert!(!s.forward_commit(member).unwrap(), "never a member row");
+    assert!(!s.forward_commit(999).unwrap());
+    assert!(s.forward_item(refused).unwrap().unwrap().committed);
+    assert_eq!(
+        s.forward_pending(0, 10)
+            .unwrap()
+            .iter()
+            .map(|i| i.custody_seq)
+            .collect::<Vec<_>>(),
+        vec![protected]
+    );
+    assert_eq!(s.forward_stats().unwrap(), (1, 3000));
+    let r = s
+        .prune_with(DiskSpace::UNKNOWN, Watermarks { high: 0, low: 0 })
+        .unwrap();
+    assert_eq!(
+        r.pruned
+            .iter()
+            .map(|p| (p.step, p.item))
+            .collect::<Vec<_>>(),
+        vec![
+            (PruneStep::Evictable, PrunedRef::Custody(refused)),
+            (PruneStep::Evictable, PrunedRef::Custody(handed)),
+        ]
+    );
+    assert_eq!(r.pruned[0].bytes, fwd_bytes(4000));
+    // Step 4: uncommitted custody, forward rows included, stays.
+    assert!(r.store_full);
+    assert!(s.forward_item(refused).unwrap().is_none());
+    assert!(!s.forward_item(protected).unwrap().unwrap().committed);
+    assert_eq!(
+        s.custody_fetch(&PEER, 0, 10).unwrap()[0].custody_seq,
+        member
+    );
+    // `pkt_ref` stays until the row is evicted, then a re-put is new.
+    s.set_watermarks(Watermarks::with_high(u64::MAX / 2))
+        .unwrap();
+    s.prune(DiskSpace::UNKNOWN).unwrap();
+    assert!(
+        s.custody_put_fwd(&STRANGER, &[1; 4000], Fwd::FromMember(PEER))
+            .unwrap()
+            != CustodyPut::Duplicate(refused)
+    );
+}
+
+#[test]
+fn over_transit_with_only_protected_rows_forward_puts_are_refused_member_puts_admitted() {
+    let (_t, mut s) = ready();
+    // Eight origins at their full share fill Transit exactly.
+    let row = fwd_bytes(100);
+    s.set_quota(Class::Transit, Some(8 * row)).unwrap();
+    assert_eq!(s.transit_share().unwrap(), row);
+    let origins: Vec<[u8; 32]> = (0..9u8).map(|i| [0x40 + i; 32]).collect();
+    let mut seqs = Vec::new();
+    for (i, o) in origins[..8].iter().enumerate() {
+        seqs.push(accepted(
+            s.custody_put_fwd(&STRANGER, &[i as u8; 100], Fwd::FromMember(*o))
+                .unwrap(),
+        ));
+    }
+    assert_eq!(s.class_bytes(Class::Transit).unwrap(), 8 * row);
+    // A committed member row the Transit quota must never touch.
+    let member_done = accepted(s.custody_put(&PEER, &[0xAA; 500]).unwrap());
+    s.custody_commit(&PEER, member_done).unwrap();
+    // The ninth origin is inside its share but Transit is full of
+    // protected rows: refused. A member put is admitted.
+    assert_eq!(
+        s.custody_put_fwd(&STRANGER, &[0xF0; 100], Fwd::FromLeaf(origins[8]))
+            .unwrap(),
+        CustodyPut::RejectFull
+    );
+    accepted(s.custody_put(&PEER, &[0xAB; 100]).unwrap());
+    // One forward row handed over: the quota evicts it (Transit only) and
+    // admits the new origin.
+    assert!(s.forward_commit(seqs[0]).unwrap());
+    accepted(
+        s.custody_put_fwd(&STRANGER, &[0xF0; 100], Fwd::FromLeaf(origins[8]))
+            .unwrap(),
+    );
+    assert!(s.forward_item(seqs[0]).unwrap().is_none());
+    assert_eq!(
+        s.custody_fetch(&PEER, 0, 10).unwrap()[0].custody_seq,
+        member_done,
+        "the committed member row is not Transit's to evict"
+    );
+}
+
+#[test]
+fn protected_transit_counts_toward_the_high_watermark() {
+    let (_t, mut s) = ready();
+    let before = s.live_bytes().unwrap();
+    let mut fwd = Vec::new();
+    for i in 0..4u8 {
+        fwd.push(accepted(
+            s.custody_put_fwd(&STRANGER, &[i; 60_000], Fwd::FromMember(PEER))
+                .unwrap(),
+        ));
+    }
+    let live = s.live_bytes().unwrap();
+    assert!(live - before >= 4 * 60_000, "{before} → {live}");
+    // The store is at its high watermark with only protected rows: a member
+    // item that needs room is refused (REJECT_FULL), one that fits is
+    // admitted up to the watermark.
+    s.set_watermarks(Watermarks {
+        high: live + 6_000,
+        low: live + 6_000,
+    })
+    .unwrap();
+    assert_eq!(
+        s.custody_put(&PEER, &[0xA0; 20_000]).unwrap(),
+        CustodyPut::RejectFull
+    );
+    assert!(!s.store_full(), "the store itself is not over");
+    accepted(s.custody_put(&PEER, &[0xA1; 500]).unwrap());
+    assert_eq!(
+        s.custody_put_fwd(&STRANGER, &[0xA2; 20_000], Fwd::FromMember(PEER2))
+            .unwrap(),
+        CustodyPut::RejectFull
+    );
+    // Refused rows release the watermark: step 1 evicts them for the item.
+    for q in &fwd {
+        assert!(s.forward_refuse(*q).unwrap());
+    }
+    accepted(s.custody_put(&PEER, &[0xA0; 20_000]).unwrap());
+    assert!(fwd.iter().any(|q| s.forward_item(*q).unwrap().is_none()));
+}
+
+#[test]
+fn the_prune_order_places_forward_rows_by_their_commit_state() {
+    let (_t, mut s) = ready();
+    let fx = fixture(&mut s);
+    // After the fixture: a handed-over forward row (newest, mid-sized) and
+    // a protected one (larger than every evictable item but the first).
+    let handed = accepted(
+        s.custody_put_fwd(&STRANGER, &[0x11; 20_000], Fwd::FromLeaf(LEAF))
+            .unwrap(),
+    );
+    s.forward_commit(handed).unwrap();
+    let protected = accepted(
+        s.custody_put_fwd(&STRANGER, &[0x22; 30_000], Fwd::FromMember(PEER2))
+            .unwrap(),
+    );
+    // A zero watermark would make the derived Transit quota zero too (a
+    // quarter of it): keep the quota out of this pass, and see it below.
+    s.set_quota(Class::Transit, Some(1 << 30)).unwrap();
+    s.set_watermarks(Watermarks { high: 0, low: 0 }).unwrap();
+    let r = s.prune(DiskSpace::UNKNOWN).unwrap();
+    let order: Vec<(PruneStep, PrunedRef)> = r.pruned.iter().map(|p| (p.step, p.item)).collect();
+    // Step 1 by size × age (the forward row among the member rows and the
+    // re-fetchable chunk), then step 2; the protected forward row is in
+    // step 4's "never" tier.
+    assert_eq!(
+        order,
+        vec![
+            (PruneStep::Evictable, PrunedRef::Custody(fx.custody_big)),
+            (PruneStep::Evictable, PrunedRef::Custody(handed)),
+            (PruneStep::Evictable, PrunedRef::Blob(fx.blob_refetch)),
+            (PruneStep::Evictable, PrunedRef::Custody(fx.custody_small)),
+            (PruneStep::Superseded, PrunedRef::Blob(fx.blob_superseded)),
+        ]
+    );
+    assert!(r.store_full && r.export_offer_needed);
+    assert!(s.forward_item(protected).unwrap().is_some());
+    assert_eq!(
+        s.custody_fetch(&PEER2, 0, 10).unwrap()[0].custody_seq,
+        fx.custody_open
+    );
+    // With the derived quota (a quarter of a zero watermark, so 0) a
+    // committed forward row goes first, as Transit's quota step.
+    s.set_watermarks(Watermarks::with_high(u64::MAX / 2))
+        .unwrap();
+    let late = accepted(
+        s.custody_put_fwd(&STRANGER, &[0x33; 10], Fwd::FromLeaf(LEAF))
+            .unwrap(),
+    );
+    s.forward_commit(late).unwrap();
+    s.set_quota(Class::Transit, None).unwrap();
+    s.set_watermarks(Watermarks { high: 0, low: 0 }).unwrap();
+    assert_eq!(s.quota(Class::Transit).unwrap(), Some(0));
+    let r = s.prune(DiskSpace::UNKNOWN).unwrap();
+    assert_eq!(
+        (r.pruned[0].step, r.pruned[0].item),
+        (PruneStep::Quota(Class::Transit), PrunedRef::Custody(late))
+    );
+    assert!(
+        r.full_classes.contains(&Class::Transit),
+        "protected rows remain"
+    );
+}
+
+#[test]
+fn no_pairing_writes_exactly_the_member_row() {
+    let (_t, mut s) = ready();
+    let a = accepted(s.custody_put(&PEER, b"plain").unwrap());
+    let b = accepted(s.custody_put_fwd(&PEER, b"also", Fwd::Member).unwrap());
+    for q in [a, b] {
+        assert_eq!(raw_fwd(&s, q), (0, None));
+    }
+    assert_eq!(s.class_bytes(Class::Transit).unwrap(), 0);
+    assert_eq!(s.forward_stats().unwrap(), (0, 0));
+    assert!(s.forward_pending(0, 10).unwrap().is_empty());
+    assert_eq!(
+        s.class_bytes(Class::Custody).unwrap(),
+        5 + 4 + 2 * prune::ROW_OVERHEAD
+    );
+    // A pass with no forward rows prunes and reports what v3 did.
+    s.custody_commit(&PEER, a).unwrap();
+    let r = s
+        .prune_with(DiskSpace::UNKNOWN, Watermarks { high: 0, low: 0 })
+        .unwrap();
+    assert_eq!(
+        r.pruned
+            .iter()
+            .map(|p| (p.step, p.item, p.bytes))
+            .collect::<Vec<_>>(),
+        vec![(
+            PruneStep::Evictable,
+            PrunedRef::Custody(a),
+            5 + prune::ROW_OVERHEAD
+        )]
+    );
+    assert!(r.full_classes.is_empty());
 }

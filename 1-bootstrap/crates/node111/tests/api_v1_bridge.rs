@@ -25,7 +25,15 @@
 //! - the agent's bearer reads (`GET /networks`) and is refused (`401`) on every Layer 6
 //!   write;
 //! - SSE `network_message` and `bridge` frames observed on `/events`;
-//! - a fresh Layer 6 wiring spawns nothing: no recv task, no runtime task, nothing enabled.
+//! - a fresh Layer 6 wiring spawns nothing: no recv task, no runtime task, nothing enabled
+//!   (the LXMF seam and the Nearby sink registered all the same);
+//! - W1: `POST /messages/fm-…/retry|cancel` (`Bridge::resend` / `Bridge::cancel`; a `msg-…`
+//!   id keeps the Layer 5 path), and the LXMF seam end to end against a scripted helper —
+//!   the client config written with rnsd's `rpc_key` only once the notice passes and a
+//!   spine exists (fail closed otherwise), the run arguments, the adapter attached and
+//!   live in `GET /networks`, its `heard` merged into `GET /nearby` as a `reticulum`
+//!   source with the SSE `nearby` frame, and disable removing the network, the source and
+//!   the child.
 
 use axum::extract::connect_info::MockConnectInfo;
 use node111::daemon::bridge::{
@@ -568,6 +576,11 @@ async fn serve(api: &Arc<ApiState>, peer: Option<&str>) -> u16 {
 }
 
 async fn node() -> Node {
+    node_with(vec![demo_component()]).await
+}
+
+/// A node whose optional components are `declared`.
+async fn node_with(declared: Vec<Component>) -> Node {
     let dir = tempfile::tempdir().unwrap();
     std::fs::create_dir_all(dir.path().join("state")).unwrap();
     std::fs::create_dir_all(dir.path().join("current")).unwrap();
@@ -598,7 +611,7 @@ async fn node() -> Node {
     };
     let components = Components::new(
         ccfg,
-        vec![demo_component()],
+        declared,
         Wiring {
             cmd: Arc::new(node111::testkit::MockRunner::new(Vec::<(
                 String,
@@ -1815,15 +1828,20 @@ fn a_fresh_layer6_spawns_nothing_and_enables_nothing() {
             ),
             *key,
         );
-        tokio::time::sleep(Duration::from_millis(200)).await;
+        // F5: the production wiring, spine included (its routes' state, its restart hooks)
+        let spine = layer6_spine(&layout);
+        let facts = node111::daemon::transport::rnstatus::FactsCache::new(
+            node111::daemon::transport::rnstatus::TickConfig::default(),
+        );
+        // F5: the fabric quiesced — the same count on two reads 100 ms apart
         let metrics = tokio::runtime::Handle::current().metrics();
-        let before = metrics.num_alive_tasks();
+        let before = quiesced(&metrics).await;
         let l6 = node111::daemon::start_layer6(node111::daemon::Layer6Parts {
             api: Arc::clone(&api),
             fabric,
             ports: Arc::new(PortTable::new()),
             tick: Arc::new(|| 0),
-            transport: None,
+            transport: Some((Arc::clone(&spine), facts)),
             mesh_client: Some(Arc::clone(&client)),
             cmd: Arc::new(node111::testkit::MockRunner::new(Vec::<(
                 String,
@@ -1844,14 +1862,1261 @@ fn a_fresh_layer6_spawns_nothing_and_enables_nothing() {
             !client.running(),
             "the client starts only while meshtastic is LIVE"
         );
-        let after = metrics.num_alive_tasks();
-        assert!(
-            after <= before,
-            "Layer 6 spawned {} task(s)",
-            after - before
-        );
+        let after = quiesced(&metrics).await;
+        assert_eq!(after, before, "Layer 6 left task(s) alive");
         assert!(api.ext::<Arc<Bridge>>().is_some());
+        assert!(api
+            .ext::<Arc<node111::daemon::dashboard::api_v1::transport::TransportApi>>()
+            .is_some());
         assert!(api.ext::<Components>().is_some());
+        // W1: the LXMF seam and the Nearby sink are registered, and still nothing runs
+        let adapters = api
+            .ext::<Arc<node111::daemon::dashboard::api_v1::bridge::ComponentAdapters>>()
+            .unwrap();
+        assert!(adapters.registered("lxmf"));
+        let heard = api
+            .ext::<Arc<node111::daemon::dashboard::api_v1::nearby::BridgeNearby>>()
+            .unwrap();
+        assert!(heard.sources().is_empty());
+        assert!(
+            l6.components.stdio("lxmf").await.is_none(),
+            "no helper child"
+        );
+        assert!(
+            !dir.path().join("bridge/lxmf").exists(),
+            "no file of the helper while it is disabled"
+        );
+        // W3: the Delta Chat network's hooks and factory are registered, and still nothing
+        // of either component runs or exists on disk
+        assert!(
+            adapters.registered("deltachat"),
+            "the core's adapter factory"
+        );
+        assert!(adapters.prepares("deltachat"), "the core's prepare hook");
+        assert!(adapters.prepares("madmail"), "the relay's prepare hook");
+        assert!(
+            !adapters.registered("madmail"),
+            "the relay carries no adapter"
+        );
+        for id in ["deltachat", "madmail"] {
+            assert!(l6.components.stdio(id).await.is_none(), "no {id} child");
+        }
+        assert!(
+            !dir.path().join("bridge/deltachat").exists(),
+            "no file of Delta Chat or Madmail while they are disabled"
+        );
         l6.shutdown().await;
     });
+}
+
+/// The alive tokio tasks once the count holds still across two reads 100 ms apart (F5:
+/// the fabric's own start-up tasks settled; at most 5 s).
+async fn quiesced(metrics: &tokio::runtime::RuntimeMetrics) -> usize {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let mut last = metrics.num_alive_tasks();
+    loop {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let now = metrics.num_alive_tasks();
+        if now == last {
+            return now;
+        }
+        assert!(Instant::now() < deadline, "the task count never settled");
+        last = now;
+    }
+}
+
+/// A transport spine on `layout` with rnsd's config rendered (no rnsd child: nothing runs).
+fn layer6_spine(layout: &DaemonLayout) -> Arc<node111::daemon::transport::posture::Spine> {
+    use node111::daemon::devices;
+    use node111::daemon::transport::{config, interfaces, posture::Spine, rnstatus::Rnstatus};
+    let st = layout.state_dir();
+    let startup = interfaces::startup(
+        &st,
+        &st.join(devices::store::FILE),
+        &config::config_path(layout),
+    );
+    let spine = Spine::new(
+        layout.clone(),
+        startup,
+        Arc::new(Rnstatus::new(Arc::new(NullRnstatus), &layout.root)),
+        false,
+        None,
+    );
+    spine.write_config().unwrap();
+    spine
+}
+
+/// C1-bounce F2: the daemon tick is detached and the Meshtastic client reads `running()`
+/// until `meshtastic.stop_and_wait`, after `layer6.shutdown()` and `fabric.shutdown()`; a
+/// tick in that window must not re-enable the adapter (a recv task ingesting into a closed
+/// fabric).
+#[test]
+fn f2_a_tick_after_shutdown_never_re_enables_the_meshtastic_adapter() {
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .unwrap();
+    rt.block_on(async {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("state")).unwrap();
+        let layout = DaemonLayout {
+            root: dir.path().to_path_buf(),
+            etc: dir.path().join("etc"),
+        };
+        let identity = node111::identity::generate(&layout.identity_dir()).unwrap();
+        let key = node111::daemon::bridge_conv_key(&identity.keyset().to_bytes()).unwrap();
+        let dash: SharedState = Arc::new(RwLock::new(DashboardState::new("2026.10.19")));
+        let mut acfg = ApiConfig::new(layout.clone(), false);
+        acfg.persist_auth = false;
+        let api = ApiState::new(dash, acfg);
+        let mut c = FabricConfig::production(&layout, None);
+        c.listen = "127.0.0.1:0".parse().unwrap();
+        c.housekeeping = Duration::from_secs(3600);
+        let fabric = fabric::start(c, Some(identity), &api).await;
+        assert!(fabric.running());
+        // a client whose connection task runs (it retries a closed downlink): running()
+        let closed = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let downlink = closed.local_addr().unwrap();
+        drop(closed);
+        let client = node111::daemon::meshtastic::client::MeshtasticAdapter::new(
+            node111::daemon::meshtastic::client::ClientConfig::production(downlink),
+            *key,
+        );
+        client.start();
+        assert!(client.running());
+        let l6 = node111::daemon::start_layer6(node111::daemon::Layer6Parts {
+            api: Arc::clone(&api),
+            fabric: Arc::clone(&fabric),
+            ports: Arc::new(PortTable::new()),
+            tick: Arc::new(|| 0),
+            transport: None,
+            mesh_client: Some(Arc::clone(&client)),
+            cmd: Arc::new(node111::testkit::MockRunner::new(Vec::<(
+                String,
+                node111::util::run::Output,
+            )>::new())),
+        });
+        // while the daemon runs, the tick enables the adapter (B3's rule)
+        l6.tick_once().await;
+        assert_eq!(l6.bridge.enabled(), vec!["meshtastic".to_string()]);
+        assert_eq!(l6.bridge.recv_tasks(), 1);
+        // the daemon's stop order: layer6, then the fabric; the client still runs
+        l6.shutdown().await;
+        assert!(l6.stopping());
+        assert!(l6.bridge.enabled().is_empty());
+        fabric.shutdown().await;
+        assert!(client.running(), "the window: meshtastic stops last");
+        for _ in 0..3 {
+            l6.tick_once().await;
+        }
+        assert!(
+            l6.bridge.enabled().is_empty(),
+            "a tick after shutdown re-enabled {:?}",
+            l6.bridge.enabled()
+        );
+        assert_eq!(l6.bridge.recv_tasks(), 0, "no recv task after shutdown");
+        // and a late resume does nothing either
+        l6.resume(&api).await;
+        assert!(l6.bridge.enabled().is_empty());
+        client.stop().await;
+    });
+}
+
+/// Every file under `dir` (relative path → its SHA-256), symlinks recorded by target.
+fn tree_hashes(dir: &std::path::Path) -> std::collections::BTreeMap<String, String> {
+    let mut out = std::collections::BTreeMap::new();
+    let Ok(rd) = std::fs::read_dir(dir) else {
+        return out;
+    };
+    for e in rd.flatten() {
+        let p = e.path();
+        let name = e.file_name().to_string_lossy().into_owned();
+        let meta = std::fs::symlink_metadata(&p).unwrap();
+        let v = if meta.file_type().is_symlink() {
+            format!("-> {}", std::fs::read_link(&p).unwrap().display())
+        } else if meta.is_dir() {
+            for (k, h) in tree_hashes(&p) {
+                out.insert(format!("{name}/{k}"), h);
+            }
+            continue;
+        } else {
+            sha256_bytes(&std::fs::read(&p).unwrap())
+        };
+        out.insert(name, v);
+    }
+    out
+}
+
+/// C1-bounce F1: the LXMF prepare hook reads rnsd's `rpc_key` without minting — no key is
+/// `requires_unmet`, a malformed key `install_failed`, and with the hub IFAC on and its
+/// passphrase absent the enable passes without minting one; `secrets/` is byte-unchanged
+/// in every case.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn f1_the_lxmf_client_config_never_mints_or_rewrites_rnsd_secrets() {
+    use node111::daemon::dashboard::api_v1::bridge::ComponentAdapters;
+    use node111::daemon::dashboard::api_v1::transport::TransportApi;
+    use node111::daemon::transport::config;
+    use node111::daemon::transport::rnstatus::{FactsCache, TickConfig};
+    let n = node_with(vec![lxmf_component()]).await;
+    let root = n.layout.root.clone();
+    let cache = root.join("cache/packages/lxmf");
+    std::fs::create_dir_all(&cache).unwrap();
+    std::fs::write(cache.join("lxmf-fake"), lxmf_bin()).unwrap();
+    let adapters = Arc::new(ComponentAdapters::default());
+    node111::daemon::register_lxmf(&adapters, &n.api, &n.bridge);
+    n.api.insert_ext(Arc::clone(&adapters));
+    let spine = lxmf_spine(&n);
+    n.api.insert_ext(Arc::new(TransportApi {
+        spine: Arc::clone(&spine),
+        facts: FactsCache::new(TickConfig::default()),
+    }));
+    let enable = "/api/v1/bridge/components/lxmf/enable";
+    let hash = lxmf_component().notice_hash();
+    let secrets = config::secrets_dir(&root);
+    let key = secrets.join("rns-rpc-key");
+    let client = config::client_config_path(&root);
+    let good = std::fs::read(&key).unwrap();
+
+    // no key (rnsd's config never rendered): requires_unmet, nothing minted
+    std::fs::remove_file(&key).unwrap();
+    let before = tree_hashes(&secrets);
+    let pb = n
+        .post(enable, json!({ "accept_notice_hash": hash }))
+        .problem(409, "component_unavailable");
+    assert_eq!(pb["reason_code"], "requires_unmet", "{pb}");
+    assert_eq!(tree_hashes(&secrets), before, "secrets/ unchanged");
+    assert!(!key.exists(), "no key minted");
+    assert!(!client.exists());
+    assert!(n.components.stdio("lxmf").await.is_none());
+
+    // a malformed key: install_failed, the bytes stay as they are
+    std::fs::write(
+        &key,
+        "not-a-key
+",
+    )
+    .unwrap();
+    let before = tree_hashes(&secrets);
+    let pb = n
+        .post(enable, json!({ "accept_notice_hash": hash }))
+        .problem(409, "component_unavailable");
+    assert_eq!(pb["reason_code"], "install_failed", "{pb}");
+    assert_eq!(tree_hashes(&secrets), before, "secrets/ unchanged");
+    assert_eq!(
+        std::fs::read(&key).unwrap(),
+        b"not-a-key
+"
+    );
+    assert!(!client.exists());
+    assert!(n.components.stdio("lxmf").await.is_none());
+
+    // the good key back, the hub IFAC on with its passphrase absent: the enable passes
+    // and mints no passphrase (load_or_mint would have)
+    std::fs::write(&key, &good).unwrap();
+    spine
+        .update(|f| f.posture.lan.backbone.ifac = true)
+        .await
+        .unwrap();
+    let _ = std::fs::remove_file(secrets.join("rns-ifac"));
+    let before = tree_hashes(&secrets);
+    let r = n.post(enable, json!({ "accept_notice_hash": hash }));
+    check_op("enableBridgeComponent", &r);
+    assert_eq!(r.json()["state"], "running", "{}", r.body);
+    assert_eq!(tree_hashes(&secrets), before, "secrets/ unchanged");
+    assert!(
+        !secrets.join("rns-ifac").exists(),
+        "no IFAC passphrase minted"
+    );
+    let text = std::fs::read_to_string(&client).unwrap();
+    let k = String::from_utf8(good).unwrap();
+    assert!(text.contains(&format!("rpc_key = {}", k.trim())), "{text}");
+    n.post("/api/v1/bridge/components/lxmf/disable", json!({}));
+    assert!(n.components.stdio("lxmf").await.is_none());
+}
+
+/// C1-bounce F4: the prepare hook passes, then `enable_with` refuses (the payload is not
+/// cached): the client config (a 0600 copy of rnsd's `rpc_key`) and its empty dirs are
+/// removed; nothing is installed or started.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn f4_a_refused_enable_after_a_passing_hook_leaves_no_client_config() {
+    use node111::daemon::dashboard::api_v1::bridge::ComponentAdapters;
+    use node111::daemon::dashboard::api_v1::transport::TransportApi;
+    use node111::daemon::transport::config;
+    use node111::daemon::transport::rnstatus::{FactsCache, TickConfig};
+    let n = node_with(vec![lxmf_component()]).await;
+    let root = n.layout.root.clone();
+    let adapters = Arc::new(ComponentAdapters::default());
+    node111::daemon::register_lxmf(&adapters, &n.api, &n.bridge);
+    n.api.insert_ext(Arc::clone(&adapters));
+    n.api.insert_ext(Arc::new(TransportApi {
+        spine: lxmf_spine(&n),
+        facts: FactsCache::new(TickConfig::default()),
+    }));
+    // the hook can pass (spine, shared instance, rnsd's key) but no payload is cached
+    let hash = lxmf_component().notice_hash();
+    let pb = n
+        .post(
+            "/api/v1/bridge/components/lxmf/enable",
+            json!({ "accept_notice_hash": hash }),
+        )
+        .problem(409, "component_unavailable");
+    assert_ne!(pb["reason_code"], "requires_unmet", "the hook passed: {pb}");
+    assert!(
+        !config::client_config_path(&root).exists(),
+        "no copy of rnsd's rpc_key left behind"
+    );
+    assert!(!root.join("bridge/lxmf").exists(), "{pb}");
+    assert!(!root.join("components/lxmf").exists(), "nothing installed");
+    assert!(n.components.stdio("lxmf").await.is_none(), "no child");
+    assert!(n.bridge.enabled().is_empty());
+}
+
+/// C1-bounce F6: the node-id stamp is checked on every Layer 6 kind — a `bridge_edge`
+/// stamped for another node, and one proposal of each kind with `node_id: null`, are each
+/// `502 upstream_error` with no decision file and nothing applied.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn f6_a_foreign_or_missing_stamp_is_refused_on_every_layer6_kind() {
+    let p = pair().await;
+    let n = &p.n;
+    let edge = format!(
+        "from: {}\nto: {}\n\nthe two channels talk about the same thing",
+        fjson::fc_id(p.src),
+        fjson::fc_id(p.dst)
+    );
+    let message = format!("to: {}\n\nhello\n", fjson::fc_id(p.src));
+    let device = r#"{"why":"x","actions":[{"action":"radio.region.set","region":"EU_868"}]}"#;
+    let other = "ab".repeat(32);
+    let cases: [(&str, &str, &str, Option<&str>); 4] = [
+        (
+            "prop-st1",
+            "bridge_edge",
+            edge.as_str(),
+            Some(other.as_str()),
+        ),
+        ("prop-st2", "bridge_edge", edge.as_str(), None),
+        ("prop-st3", "bridge_message", message.as_str(), None),
+        ("prop-st4", "device", device, None),
+    ];
+    let rows = n.rows(p.src).await.len();
+    for (id, kind, body, stamp) in cases {
+        n.propose(id, kind, body, stamp);
+        let pb = n.decide(id, None).problem(502, "upstream_error");
+        assert!(n.decision_file(id).is_none(), "{id}: {pb}");
+        assert!(
+            n.get(&format!("/api/v1/proposals/{id}")).json()["decision"].is_null(),
+            "{id} stays open"
+        );
+    }
+    assert_eq!(n.get("/api/v1/bridge/edges").json()["edges"], json!([]));
+    assert_eq!(n.rows(p.src).await.len(), rows, "nothing queued");
+}
+
+// ---------------------------------------------------------------- W1: foreign retry / cancel
+
+/// The `ForeignMessage` JSON of row `id` in `conv`'s thread (`None`: not listed).
+fn listed(n: &Node, net: &str, conv: i64, id: i64) -> Option<Value> {
+    let t = n
+        .get(&format!(
+            "/api/v1/networks/{net}/conversations/{}",
+            fjson::fc_id(conv)
+        ))
+        .json();
+    t["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|m| m["id"] == fjson::fm_id(id))
+        .cloned()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn foreign_rows_retry_and_cancel_by_fm_id_and_msg_ids_keep_the_layer5_path() {
+    use mesh111::store::ForeignState;
+    let p = pair().await;
+    let n = &p.n;
+    let path = format!(
+        "/api/v1/networks/stub-a/conversations/{}/messages",
+        fjson::fc_id(p.src)
+    );
+    let send = |text: &str| {
+        let r = n.post(&path, json!({ "text": text }));
+        check_op("sendForeignMessage", &r);
+        fjson::parse_fm_id(r.json()["id"].as_str().unwrap()).unwrap()
+    };
+    let retry = |id: &str| n.post(&format!("/api/v1/messages/{id}/retry"), json!({}));
+    let cancel = |id: &str| n.post(&format!("/api/v1/messages/{id}/cancel"), json!({}));
+
+    // queued, nothing handed: cancel deletes the row (202), GET shows it gone
+    let q = send("cancel me");
+    assert!(listed(n, "stub-a", p.src, q).is_some());
+    let r = cancel(&fjson::fm_id(q));
+    assert_eq!(r.status, 202, "{}", r.body);
+    assert_eq!(r.json()["id"], fjson::fm_id(q));
+    assert!(n.fab().foreign_message(q).await.is_err(), "deleted");
+    assert!(
+        listed(n, "stub-a", p.src, q).is_none(),
+        "gone from the thread"
+    );
+    cancel(&fjson::fm_id(q)).problem(404, "not_found");
+
+    // a sent row: not cancellable (409, Layer 5 copy) and not waiting for a decision
+    let s = send("on air");
+    n.fab().foreign_handoff_begin(s).await.unwrap();
+    n.fab().foreign_accepted(s, "native-1").await.unwrap();
+    n.fab()
+        .foreign_set_state(s, ForeignState::Sent, Some("accepted by the radio"), None)
+        .await
+        .unwrap();
+    let pb = cancel(&fjson::fm_id(s)).problem(409, "bad_request");
+    assert!(pb["title"].as_str().unwrap().contains("cancelled"), "{pb}");
+    assert_eq!(
+        n.fab().foreign_message(s).await.unwrap().state,
+        ForeignState::Sent,
+        "kept"
+    );
+    retry(&fjson::fm_id(s)).problem(409, "bad_request");
+
+    // an uncertain row (handed, never answered, not in flight): may have been sent, so it
+    // is not cancelled; retry sends it again as a new row and the old one records it
+    let u = send("maybe sent");
+    n.fab().foreign_handoff_begin(u).await.unwrap();
+    assert!(n.bridge.uncertain(u).await.unwrap());
+    let row = listed(n, "stub-a", p.src, u).unwrap();
+    assert_eq!(row["uncertain"], true, "{row}");
+    assert_eq!(row["reason_code"], "handoff_pending", "{row}");
+    cancel(&fjson::fm_id(u)).problem(409, "bad_request");
+    let r = retry(&fjson::fm_id(u));
+    assert_eq!(r.status, 200, "{}", r.body);
+    assert_schema("ForeignSendAccepted", &r.json());
+    let new = fjson::parse_fm_id(r.json()["id"].as_str().unwrap()).unwrap();
+    assert_ne!(new, u, "a new row");
+    let old = n.fab().foreign_message(u).await.unwrap();
+    assert!(
+        old.meta.contains(&format!("\"resent_as\":{new}")),
+        "{}",
+        old.meta
+    );
+    assert_eq!(
+        old.state,
+        ForeignState::Queued,
+        "the old row keeps its state"
+    );
+    let fresh = n.fab().foreign_message(new).await.unwrap();
+    assert_eq!(fresh.state, ForeignState::Queued);
+    assert_eq!(fresh.body, "maybe sent");
+    assert!(listed(n, "stub-a", p.src, new).is_some());
+    // V5-3: the old row is superseded — the thread says by which row, and a second retry
+    // of it is refused (409) and queues nothing (it would send the text twice more)
+    let row = listed(n, "stub-a", p.src, u).unwrap();
+    assert_eq!(row["superseded_by"], fjson::fm_id(new), "{row}");
+    assert!(
+        listed(n, "stub-a", p.src, new).unwrap()["superseded_by"].is_null(),
+        "the new row is nobody's copy"
+    );
+    let rows_before = n
+        .fab()
+        .foreign_thread(p.src, None, 10_000)
+        .await
+        .unwrap()
+        .messages
+        .len();
+    let pb = retry(&fjson::fm_id(u)).problem(409, "bad_request");
+    assert!(
+        pb["detail"].as_str().unwrap().contains(&fjson::fm_id(new)),
+        "{pb}"
+    );
+    assert_eq!(
+        n.fab()
+            .foreign_thread(p.src, None, 10_000)
+            .await
+            .unwrap()
+            .messages
+            .len(),
+        rows_before,
+        "nothing queued"
+    );
+    // an inbound row is neither
+    p.a.feed(text(&p.ca, "!a1", "Alice", "in-1", "hello"));
+    let rows = n.wait_rows(p.src, 4).await;
+    let inbound = rows
+        .iter()
+        .find(|r| r.dir == mesh111::store::ForeignDir::In)
+        .unwrap()
+        .id;
+    cancel(&fjson::fm_id(inbound)).problem(409, "bad_request");
+    retry(&fjson::fm_id(inbound)).problem(409, "bad_request");
+
+    // unknown and malformed fm- ids
+    for id in ["fm-999999", "fm-0", "fm-x", "fm-"] {
+        retry(id).problem(404, "not_found");
+        cancel(id).problem(404, "not_found");
+    }
+    // a Layer 5 id takes the Layer 5 path: msg-<n> never names foreign row n
+    let k = send("a foreign row");
+    cancel(&format!("msg-{k}")).problem(404, "not_found");
+    retry(&format!("msg-{k}")).problem(404, "not_found");
+    assert!(n.fab().foreign_message(k).await.is_ok(), "untouched");
+    // the agent's bearer is refused by the global gate before any handler
+    for op in ["retry", "cancel"] {
+        http(
+            n.port,
+            "POST",
+            &format!("/api/v1/messages/{}/{op}", fjson::fm_id(k)),
+            &[("Authorization", &n.bearer())],
+            Some(&json!({})),
+        )
+        .problem(401, "unauthenticated");
+    }
+    assert!(n.fab().foreign_message(k).await.is_ok());
+}
+
+// ---------------------------------------------------------------- W1: the LXMF seam
+
+/// Our delivery destination and a peer the scripted helper hears.
+const LX_DEST: &str = "0123456789abcdef0123456789abcdef";
+const LX_PEER: &str = "fedcba9876543210fedcba9876543210";
+
+/// A scripted LXMF helper (a binary payload): records its arguments under `$HOME`, says
+/// `ready`, reports one `heard`, then reads stdin until it is stopped (its stdout stays
+/// open: a closed stdout ends the run for the adapter).
+fn lxmf_bin() -> Vec<u8> {
+    format!(
+        "#!/bin/sh\nprintf '%s\\n' \"$*\" > \"$HOME/lxmf-args\"\n\
+         printf '%s\\n' '{{\"type\":\"ready\",\"dest\":\"{LX_DEST}\",\"pubkey\":\"{pk}\",\"instance\":\"111\"}}'\n\
+         printf '%s\\n' '{{\"type\":\"heard\",\"dest\":\"{LX_PEER}\",\"name\":\"Bob\"}}'\n\
+         while IFS= read -r line; do :; done\n",
+        pk = "ab".repeat(64)
+    )
+    .into_bytes()
+}
+
+/// The `lxmf` component as a binary payload running [`lxmf_bin`] (the real declaration is
+/// a pip closure on Python 3.11 after rnsd; the seam under test does not depend on it).
+fn lxmf_component() -> Component {
+    let bin = lxmf_bin();
+    let toml = format!(
+        r#"id = "lxmf"
+adapter = "lxmf"
+title = "Reticulum / LXMF helper"
+[payload]
+kind = "binary"
+url = "https://example.invalid/dl/lxmf-fake"
+sha256 = "{sha}"
+size = {size}
+[run]
+program = "lxmf-fake"
+args = ["--config-dir", "{{bridge}}/rns"]
+ports = []
+health = "ready"
+health_timeout_secs = 10
+[license]
+spdx = "LicenseRef-Reticulum"
+read_at = "https://example.invalid/LICENSE"
+notice = "This installs a scripted LXMF helper for a test; read its licence at https://example.invalid/LICENSE. You install it."
+"#,
+        sha = sha256_bytes(&bin),
+        size = bin.len(),
+    );
+    let mut all = manifest::load(&[("lxmf.toml".to_string(), toml.into_bytes())]);
+    assert_eq!(all.len(), 1, "the test declaration registers");
+    all.pop().unwrap()
+}
+
+fn network<'a>(v: &'a Value, id: &str) -> &'a Value {
+    v["networks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|x| x["id"] == id)
+        .unwrap_or_else(|| panic!("no network {id}: {v}"))
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_lxmf_seam_writes_the_client_config_attaches_the_adapter_and_feeds_nearby() {
+    use node111::daemon::dashboard::api_v1::bridge::ComponentAdapters;
+    use node111::daemon::dashboard::api_v1::transport::TransportApi;
+    use node111::daemon::transport::config;
+    use node111::daemon::transport::rnstatus::{FactsCache, TickConfig};
+    use std::os::unix::fs::PermissionsExt;
+    let n = node_with(vec![lxmf_component()]).await;
+    let root = n.layout.root.clone();
+    let cache = root.join("cache/packages/lxmf");
+    std::fs::create_dir_all(&cache).unwrap();
+    std::fs::write(cache.join("lxmf-fake"), lxmf_bin()).unwrap();
+    let adapters = Arc::new(ComponentAdapters::default());
+    node111::daemon::register_lxmf(&adapters, &n.api, &n.bridge);
+    n.api.insert_ext(Arc::clone(&adapters));
+    node111::daemon::wire_bridge_nearby(&n.api, &n.bridge);
+    assert!(adapters.registered("lxmf"));
+    let enable = "/api/v1/bridge/components/lxmf/enable";
+    let hash = lxmf_component().notice_hash();
+    let client = config::client_config_path(&root);
+
+    // without the acknowledgement: 409 consent_required, and the hook wrote nothing
+    n.post(enable, json!({})).problem(409, "consent_required");
+    assert!(!root.join("bridge/lxmf").exists());
+    // without a transport spine: fail closed — the contract's problem, nothing started
+    let pb = n
+        .post(enable, json!({ "accept_notice_hash": hash }))
+        .problem(409, "component_unavailable");
+    assert_eq!(pb["reason_code"], "requires_unmet", "{pb}");
+    assert!(!client.exists());
+    assert!(!root.join("components/lxmf").exists(), "nothing installed");
+    assert!(n.components.stdio("lxmf").await.is_none(), "no child");
+    assert!(n.bridge.enabled().is_empty());
+
+    // the spine, with rnsd's config (and its rpc_key) rendered
+    let spine = lxmf_spine(&n);
+    n.api.insert_ext(Arc::new(TransportApi {
+        spine,
+        facts: FactsCache::new(TickConfig::default()),
+    }));
+    let head = n.api.events.head();
+    let r = n.post(enable, json!({ "accept_notice_hash": hash }));
+    check_op("enableBridgeComponent", &r);
+    assert_eq!(r.json()["state"], "running", "{}", r.body);
+    // the client config: 0600 in a 0700 dir, rnsd's key and instance, no interfaces
+    let text = std::fs::read_to_string(&client).unwrap();
+    let key = std::fs::read_to_string(root.join("secrets/rns-rpc-key")).unwrap();
+    assert!(
+        text.contains(&format!("rpc_key = {}", key.trim())),
+        "{text}"
+    );
+    assert!(text.contains("share_instance = Yes") && text.contains("instance_name = 111"));
+    let mode = |p: &std::path::Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+    assert_eq!(mode(&client), 0o600);
+    assert_eq!(mode(&config::client_dir(&root)), 0o700);
+    // the run arguments the adapter appends (§6 (3))
+    let args = std::fs::read_to_string(root.join("lxmf-args")).unwrap();
+    assert!(args.contains("--config-dir"), "{args}");
+    assert!(args.contains("--announce-interval 60"), "{args}");
+    // the adapter is enabled in the core and goes live on the helper's ready line
+    assert_eq!(n.bridge.enabled(), vec!["lxmf".to_string()]);
+    let deadline = Instant::now() + Duration::from_secs(20);
+    loop {
+        let r = n.get("/api/v1/networks");
+        check_op("listNetworks", &r);
+        if network(&r.json(), "lxmf")["state"] == "live" {
+            break;
+        }
+        assert!(Instant::now() < deadline, "never live: {}", r.body);
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    // its heard reaches GET /nearby as a `reticulum` source (the core's pass delivers it)
+    let deadline = Instant::now() + Duration::from_secs(20);
+    let src = loop {
+        n.bridge.tick_once().await;
+        let r = n.get("/api/v1/nearby");
+        check_op("listNearby", &r);
+        let v = r.json();
+        if let Some(s) = v["sources"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|s| s["kind"] == "reticulum")
+        {
+            break s.clone();
+        }
+        assert!(Instant::now() < deadline, "never heard: {v}");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    };
+    assert_schema("NearbySource", &src);
+    assert_eq!(src["id"], format!("reticulum:{LX_DEST}"));
+    assert_eq!(src["label"], "heard via Reticulum");
+    assert_eq!(src["device_id"], Value::Null);
+    assert_eq!(src["nodes"].as_array().unwrap().len(), 1);
+    let node = &src["nodes"][0];
+    assert_eq!(node["id"], LX_PEER);
+    assert_eq!(node["num"], 0);
+    assert_eq!(node["long_name"], "Bob");
+    assert_eq!(node["short_name"], &LX_PEER[..8]);
+    // and the SSE `nearby` frame carries the merged list
+    let raw = sse_after(n.port, head, |s| s.contains("event: nearby"));
+    let frame = frames(&raw)
+        .into_iter()
+        .find(|(e, _)| e == "nearby")
+        .unwrap_or_else(|| panic!("no nearby frame: {raw}"));
+    let v: Value = serde_json::from_str(&frame.1).unwrap();
+    assert_schema("SseNearby", &v);
+    assert!(frame.1.contains(LX_PEER), "{}", frame.1);
+
+    // disable: the adapter goes (before the child), its source with it, the child stops
+    let r = n.post("/api/v1/bridge/components/lxmf/disable", json!({}));
+    check_op("disableBridgeComponent", &r);
+    assert_ne!(r.json()["state"], "running");
+    assert!(n.bridge.enabled().is_empty());
+    let v = n.get("/api/v1/networks").json();
+    assert_eq!(network(&v, "lxmf")["state"], "disabled", "{v}");
+    let v = n.get("/api/v1/nearby").json();
+    assert!(v["sources"].as_array().unwrap().is_empty(), "{v}");
+    let st = n.components.status("lxmf").await.unwrap();
+    assert_ne!(st.state, ComponentState::Running);
+    assert!(
+        n.components.stdio("lxmf").await.is_none(),
+        "no child, no stdio"
+    );
+}
+
+/// A transport spine over `n`'s root with rnsd's config rendered (its `rpc_key` minted).
+fn lxmf_spine(n: &Node) -> Arc<node111::daemon::transport::posture::Spine> {
+    use node111::daemon::devices;
+    use node111::daemon::transport::{config, interfaces, posture::Spine, rnstatus::Rnstatus};
+    let st = n.layout.state_dir();
+    let startup = interfaces::startup(
+        &st,
+        &st.join(devices::store::FILE),
+        &config::config_path(&n.layout),
+    );
+    let spine = Spine::new(
+        n.layout.clone(),
+        startup,
+        Arc::new(Rnstatus::new(Arc::new(NullRnstatus), &n.layout.root)),
+        false,
+        None,
+    );
+    spine.write_config().unwrap();
+    spine
+}
+
+// ---------------------------------------------------------------- W3: the resume loop
+
+/// W3: `Layer6::resume` runs the one loop (`Components::resume_enabled_with`) through
+/// `enable_component`: a component whose prepare hook fails stays off (its switch as it
+/// was, nothing started or written), and resumes — hook, child, adapter — once the hook
+/// can pass.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn resume_runs_the_prepare_hook_and_a_failing_hook_leaves_the_component_off() {
+    use node111::daemon::components::consent;
+    use node111::daemon::dashboard::api_v1::bridge::ComponentAdapters;
+    use node111::daemon::dashboard::api_v1::transport::TransportApi;
+    use node111::daemon::transport::config;
+    use node111::daemon::transport::rnstatus::{FactsCache, TickConfig};
+    let n = node_with(vec![lxmf_component()]).await;
+    let root = n.layout.root.clone();
+    let cache = root.join("cache/packages/lxmf");
+    std::fs::create_dir_all(&cache).unwrap();
+    std::fs::write(cache.join("lxmf-fake"), lxmf_bin()).unwrap();
+    let adapters = Arc::new(ComponentAdapters::default());
+    node111::daemon::register_lxmf(&adapters, &n.api, &n.bridge);
+    n.api.insert_ext(Arc::clone(&adapters));
+    // the switch is on and the notice acknowledged (an earlier lifetime enabled it)
+    consent::require(
+        &root,
+        &lxmf_component(),
+        Some(&lxmf_component().notice_hash()),
+    )
+    .unwrap();
+    consent::update(&root, "lxmf", |r| r.enabled = true).unwrap();
+    let l6 = node111::daemon::Layer6::new(Arc::clone(&n.bridge), n.components.clone(), None);
+
+    // no transport spine: the hook refuses, so nothing starts and nothing is written
+    l6.resume(&n.api).await;
+    assert!(n.components.stdio("lxmf").await.is_none(), "no child");
+    assert!(!config::client_config_path(&root).exists());
+    assert!(!root.join("components/lxmf").exists(), "nothing installed");
+    assert!(n.bridge.enabled().is_empty());
+    assert!(
+        consent::load(&root).record("lxmf").enabled,
+        "the switch stays as it was"
+    );
+
+    // with the spine the same resume passes the hook, starts the child, attaches
+    n.api.insert_ext(Arc::new(TransportApi {
+        spine: lxmf_spine(&n),
+        facts: FactsCache::new(TickConfig::default()),
+    }));
+    l6.resume(&n.api).await;
+    assert!(
+        n.components.stdio("lxmf").await.is_some(),
+        "the helper runs"
+    );
+    assert!(config::client_config_path(&root).is_file());
+    assert_eq!(n.bridge.enabled(), vec!["lxmf".to_string()]);
+    l6.shutdown().await;
+    assert!(n.bridge.enabled().is_empty());
+    assert!(n.components.stdio("lxmf").await.is_none());
+}
+
+// ---------------------------------------------------------------- W3: Delta Chat + Madmail
+
+/// The fake relay (as `tests/bridge_deltachat.rs`'s): records its arguments beside its
+/// config, answers the one-shot CLI and `create-user`; for `run` it listens on the IMAP
+/// address of the configuration 111 wrote — unless `NOLISTEN` sits beside the config,
+/// then it only keeps its stdio open.
+const W3_MADMAIL: &str = r#"#!/bin/sh
+echo "$5 $6 $7" >> "$(dirname "$2")/madmail-calls.log"
+case "$5" in
+  run)
+    if [ -e "$(dirname "$2")/NOLISTEN" ]; then
+      while IFS= read -r line; do :; done
+      exit 0
+    fi
+    exec python3 -I -c '
+import socket, sys, tomllib
+cfg = tomllib.load(open(sys.argv[1], "rb"))
+host, port = cfg["imap_tls_listen"].rsplit(":", 1)
+s = socket.socket()
+s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+s.bind((host, int(port)))
+s.listen(8)
+while True:
+    c, _ = s.accept()
+    c.close()
+' "$2" ;;
+  --json) printf '{"dclogin":"dclogin:hub@[127.0.0.1]/?p=pw&v=1&ih=127.0.0.1&ip=11242&is=ssl&sh=127.0.0.1&sp=11241&ss=ssl&ic=3","email":"hub@[127.0.0.1]","password":"pw","username":"hub"}\n' ;;
+  *) exit 0 ;;
+esac
+"#;
+
+fn w3_python3() -> PathBuf {
+    std::env::var_os("PATH")
+        .and_then(|p| {
+            std::env::split_paths(&p)
+                .map(|d| d.join("python3"))
+                .find(|c| c.is_file())
+        })
+        .unwrap_or_else(|| PathBuf::from("/usr/bin/python3"))
+}
+
+/// The core: `tests/fake_deltachat_rpc.py` behind a shell stub.
+fn w3_core() -> String {
+    format!(
+        "#!/bin/sh\nexec \"{}\" -I \"{}\" --log \"$FAKE_DC_LOG\"\n",
+        w3_python3().display(),
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fake_deltachat_rpc.py")
+            .display()
+    )
+}
+
+fn w3_decl(id: &str, file: &str, payload: &[u8], run: &str, requires: &str) -> Component {
+    let toml = format!(
+        r#"id = "{id}"
+adapter = "app:deltachat"
+title = "{title}"
+[payload]
+kind = "binary"
+url = "https://example.invalid/dl/{file}"
+sha256 = "{sha}"
+size = {size}
+[requires]
+{requires}
+[run]
+program = "{file}"
+{run}
+health = "none"
+[license]
+spdx = "MPL-2.0"
+read_at = "https://example.invalid/LICENSE"
+notice = "Test notice for {id}. You install it."
+"#,
+        title = if id == "madmail" {
+            "Madmail"
+        } else {
+            "Delta Chat core"
+        },
+        sha = sha256_bytes(payload),
+        size = payload.len(),
+    );
+    let mut all = manifest::load(&[(format!("{id}.toml"), toml.into_bytes())]);
+    assert_eq!(all.len(), 1, "the test declaration of {id} registers");
+    all.pop().unwrap()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_deltachat_seam_renders_the_relay_requires_its_listener_and_attaches_the_core() {
+    use node111::daemon::bridge::deltachat::{DcConfig, RelayPaths, RelayPorts};
+    use node111::daemon::dashboard::api_v1::bridge::ComponentAdapters;
+    let ports = {
+        let l: Vec<std::net::TcpListener> = (0..4)
+            .map(|_| std::net::TcpListener::bind("127.0.0.1:0").unwrap())
+            .collect();
+        let p: Vec<u16> = l.iter().map(|l| l.local_addr().unwrap().port()).collect();
+        RelayPorts {
+            smtp: p[0],
+            submission: p[1],
+            imap: p[2],
+            https: p[3],
+        }
+    };
+    let core = w3_core();
+    let relay = w3_decl(
+        "madmail",
+        "madmail-test",
+        W3_MADMAIL.as_bytes(),
+        &format!(
+            "args = [\"--config\", \"{{bridge}}/madmail.toml\", \"--state-dir\", \"{{bridge}}/madmail\", \"run\"]\nports = {:?}",
+            ports.all()
+        ),
+        "",
+    );
+    let rpc = w3_decl(
+        "deltachat",
+        "deltachat-test",
+        core.as_bytes(),
+        "env = { DC_ACCOUNTS_PATH = \"{bridge}/accounts\", FAKE_DC_LOG = \"{bridge}/fake-log.jsonl\" }",
+        "component = \"madmail\"",
+    );
+    let (relay_hash, rpc_hash) = (relay.notice_hash(), rpc.notice_hash());
+    let n = node_with(vec![relay, rpc]).await;
+    let root = n.layout.root.clone();
+    for (id, file, bytes) in [
+        ("madmail", "madmail-test", W3_MADMAIL.as_bytes()),
+        ("deltachat", "deltachat-test", core.as_bytes()),
+    ] {
+        let d = root.join("cache/packages").join(id);
+        std::fs::create_dir_all(&d).unwrap();
+        std::fs::write(d.join(file), bytes).unwrap();
+    }
+    let adapters = Arc::new(ComponentAdapters::default());
+    node111::daemon::register_deltachat_with(
+        &adapters,
+        &n.api,
+        &n.bridge,
+        node111::daemon::DeltaChatWiring {
+            cli: Arc::new(node111::util::run::SystemRunner),
+            ports,
+            cfg: DcConfig {
+                call_timeout: Duration::from_secs(5),
+                configure_timeout: Duration::from_secs(5),
+                settle_timeout: Duration::from_secs(2),
+                ..DcConfig::default()
+            },
+            listen_timeout: Duration::from_secs(3),
+        },
+    );
+    n.api.insert_ext(Arc::clone(&adapters));
+    assert_eq!(
+        node111::daemon::deltachat_relay_bind(&n.api),
+        node111::daemon::bridge::deltachat::RelayBind::Loopback,
+        "LAN sharing is off: loopback"
+    );
+    let paths = RelayPaths::of(&root);
+    let calls = || std::fs::read_to_string(paths.dir.join("madmail-calls.log")).unwrap_or_default();
+    let (relay_on, core_on) = (
+        "/api/v1/bridge/components/madmail/enable",
+        "/api/v1/bridge/components/deltachat/enable",
+    );
+
+    // without the relay's acknowledgement: 409, and its hook wrote nothing
+    n.post(relay_on, json!({})).problem(409, "consent_required");
+    assert!(
+        !paths.dir.exists(),
+        "nothing written before the notice passes"
+    );
+    // the core before the relay: requires_unmet, nothing started
+    let pb = n
+        .post(core_on, json!({ "accept_notice_hash": rpc_hash }))
+        .problem(409, "component_unavailable");
+    assert_eq!(pb["reason_code"], "requires_unmet", "{pb}");
+    assert!(n.components.stdio("deltachat").await.is_none());
+
+    // the relay: its first configuration is loopback-only, written before its child starts
+    let r = n.post(relay_on, json!({ "accept_notice_hash": relay_hash }));
+    check_op("enableBridgeComponent", &r);
+    assert_eq!(r.json()["state"], "running", "{}", r.body);
+    let conf = std::fs::read_to_string(&paths.config).unwrap();
+    assert!(conf.contains("loopback only"), "{conf}");
+    assert!(conf.contains(&format!("imap_tls_listen = \"127.0.0.1:{}\"", ports.imap)));
+    assert!(
+        n.bridge.enabled().is_empty(),
+        "the relay alone carries no network"
+    );
+
+    // a relay whose IMAP listener never opens: the core's hook refuses, the core never starts
+    std::fs::write(paths.dir.join("NOLISTEN"), "").unwrap();
+    n.post(relay_on, json!({})); // idempotent: already running, its config kept
+    let r = n.post(core_on, json!({ "accept_notice_hash": rpc_hash }));
+    let pb = r.problem(409, "component_unavailable");
+    assert_eq!(pb["reason_code"], "health_failed", "{pb}");
+    assert!(
+        pb["detail"].as_str().unwrap().contains("IMAP listener"),
+        "{pb}"
+    );
+    assert!(n.components.stdio("deltachat").await.is_none(), "no core");
+    assert!(!paths.accounts.join("fake-state.json").exists());
+    assert!(n.bridge.enabled().is_empty());
+
+    // the listener opens: settled (push off, federation rejected, registration closed on
+    // loopback), re-rendered, restarted, then the core starts and its adapter attaches
+    std::fs::remove_file(paths.dir.join("NOLISTEN")).unwrap();
+    let r = n.post(core_on, json!({ "accept_notice_hash": rpc_hash }));
+    check_op("enableBridgeComponent", &r);
+    assert_eq!(r.json()["state"], "running", "{}", r.body);
+    let log = calls();
+    for want in ["push off", "federation policy reject", "registration close"] {
+        assert!(log.lines().any(|l| l.trim() == want), "{want}: {log}");
+    }
+    assert_eq!(n.bridge.enabled(), vec!["app:deltachat".to_string()]);
+    let deadline = Instant::now() + Duration::from_secs(20);
+    loop {
+        let r = n.get("/api/v1/networks");
+        check_op("listNetworks", &r);
+        if network(&r.json(), "app:deltachat")["state"] == "live" {
+            break;
+        }
+        assert!(Instant::now() < deadline, "never live: {}", r.body);
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let log = calls();
+    assert!(
+        log.lines().any(|l| l.trim() == "--json create-user"),
+        "the bridge account was created on the relay: {log}"
+    );
+    assert!(
+        paths.accounts.join("fake-state.json").is_file(),
+        "DC_ACCOUNTS_PATH"
+    );
+    // enabling the core again changes nothing (no relay restart under a live core)
+    let runs = |t: &str| t.lines().filter(|l| l.trim() == "run").count();
+    let before = runs(&calls());
+    let r = n.post(core_on, json!({}));
+    assert_eq!(r.status, 200, "{}", r.body);
+    assert_eq!(runs(&calls()), before, "the relay was not restarted");
+
+    // disable: the network leaves the core first, then nothing of either runs
+    let r = n.post("/api/v1/bridge/components/deltachat/disable", json!({}));
+    check_op("disableBridgeComponent", &r);
+    assert!(n.bridge.enabled().is_empty());
+    let v = n.get("/api/v1/networks").json();
+    assert_ne!(network(&v, "app:deltachat")["state"], "live", "{v}");
+    let r = n.post("/api/v1/bridge/components/madmail/disable", json!({}));
+    check_op("disableBridgeComponent", &r);
+    for id in ["deltachat", "madmail"] {
+        let st = n.components.status(id).await.unwrap();
+        assert_ne!(st.state, ComponentState::Running, "{id}");
+        assert!(n.components.stdio(id).await.is_none(), "{id}: no child");
+    }
+    n.components.shutdown().await;
+}
+
+// ---------------------------------------------------------------- fix wave B (items 1, 2)
+
+/// The Delta Chat rig of the W3 test (fake relay + `fake_deltachat_rpc.py`) with the core's
+/// `FAKE_DC_MUTE` set to `mute` and the adapter's call timeout `call`; both payloads cached.
+struct DcRig {
+    n: Node,
+    relay_hash: String,
+    rpc_hash: String,
+    paths: node111::daemon::bridge::deltachat::RelayPaths,
+    adapters: Arc<node111::daemon::dashboard::api_v1::bridge::ComponentAdapters>,
+}
+
+async fn dc_rig(mute: &str, call: Duration) -> DcRig {
+    use node111::daemon::bridge::deltachat::{DcConfig, RelayPaths, RelayPorts};
+    use node111::daemon::dashboard::api_v1::bridge::ComponentAdapters;
+    let ports = {
+        let l: Vec<std::net::TcpListener> = (0..4)
+            .map(|_| std::net::TcpListener::bind("127.0.0.1:0").unwrap())
+            .collect();
+        let p: Vec<u16> = l.iter().map(|l| l.local_addr().unwrap().port()).collect();
+        RelayPorts {
+            smtp: p[0],
+            submission: p[1],
+            imap: p[2],
+            https: p[3],
+        }
+    };
+    let core = w3_core();
+    let relay = w3_decl(
+        "madmail",
+        "madmail-test",
+        W3_MADMAIL.as_bytes(),
+        &format!(
+            "args = [\"--config\", \"{{bridge}}/madmail.toml\", \"--state-dir\", \"{{bridge}}/madmail\", \"run\"]\nports = {:?}",
+            ports.all()
+        ),
+        "",
+    );
+    let rpc = w3_decl(
+        "deltachat",
+        "deltachat-test",
+        core.as_bytes(),
+        &format!(
+            "env = {{ DC_ACCOUNTS_PATH = \"{{bridge}}/accounts\", FAKE_DC_LOG = \"{{bridge}}/fake-log.jsonl\", FAKE_DC_MUTE = \"{mute}\" }}"
+        ),
+        "component = \"madmail\"",
+    );
+    let (relay_hash, rpc_hash) = (relay.notice_hash(), rpc.notice_hash());
+    let n = node_with(vec![relay, rpc]).await;
+    let root = n.layout.root.clone();
+    for (id, file, bytes) in [
+        ("madmail", "madmail-test", W3_MADMAIL.as_bytes()),
+        ("deltachat", "deltachat-test", core.as_bytes()),
+    ] {
+        let d = root.join("cache/packages").join(id);
+        std::fs::create_dir_all(&d).unwrap();
+        std::fs::write(d.join(file), bytes).unwrap();
+    }
+    let adapters = Arc::new(ComponentAdapters::default());
+    node111::daemon::register_deltachat_with(
+        &adapters,
+        &n.api,
+        &n.bridge,
+        node111::daemon::DeltaChatWiring {
+            cli: Arc::new(node111::util::run::SystemRunner),
+            ports,
+            cfg: DcConfig {
+                call_timeout: call,
+                configure_timeout: Duration::from_secs(5),
+                settle_timeout: Duration::from_secs(2),
+                ..DcConfig::default()
+            },
+            listen_timeout: Duration::from_secs(3),
+        },
+    );
+    n.api.insert_ext(Arc::clone(&adapters));
+    let paths = RelayPaths::of(&root);
+    DcRig {
+        n,
+        relay_hash,
+        rpc_hash,
+        paths,
+        adapters,
+    }
+}
+
+/// Item 1: the component route's Delta Chat factory waits for the core's first handshake
+/// (§2.1 rule 4): a core that never answers `get_system_info` answers `409
+/// component_unavailable` / `health_failed`, the core is disabled (no child, switch off,
+/// nothing attached) and the relay stays on.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn item1_a_muted_deltachat_core_answers_409_health_failed_and_keeps_the_relay() {
+    use node111::daemon::components::consent;
+    let rig = dc_rig("get_system_info", Duration::from_secs(2)).await;
+    let n = &rig.n;
+    let r = n.post(
+        "/api/v1/bridge/components/madmail/enable",
+        json!({ "accept_notice_hash": rig.relay_hash }),
+    );
+    check_op("enableBridgeComponent", &r);
+    let t0 = Instant::now();
+    let pb = n
+        .post(
+            "/api/v1/bridge/components/deltachat/enable",
+            json!({ "accept_notice_hash": rig.rpc_hash }),
+        )
+        .problem(409, "component_unavailable");
+    assert!(t0.elapsed() < Duration::from_secs(30), "bounded");
+    assert_eq!(pb["reason_code"], "health_failed", "{pb}");
+    assert!(
+        pb["detail"].as_str().unwrap().contains("handshake failed"),
+        "{pb}"
+    );
+    let log = std::fs::read_to_string(rig.paths.dir.join("fake-log.jsonl")).unwrap_or_default();
+    assert!(
+        log.contains("\"get_system_info\""),
+        "the core was asked: {log}"
+    );
+    assert!(
+        n.components.stdio("deltachat").await.is_none(),
+        "the core is stopped"
+    );
+    assert_eq!(
+        n.components.status("deltachat").await.unwrap().state,
+        ComponentState::Disabled
+    );
+    assert!(
+        !consent::load(&n.layout.root).record("deltachat").enabled,
+        "switch off"
+    );
+    assert!(n.bridge.enabled().is_empty(), "nothing attached");
+    assert_eq!(
+        n.components.status("madmail").await.unwrap().state,
+        ComponentState::Running,
+        "the relay stays"
+    );
+    n.post("/api/v1/bridge/components/madmail/disable", json!({}));
+    n.components.shutdown().await;
+}
+
+/// Item 1: `Layer6::resume` bounds the factory's handshake wait by
+/// `RESUME_ATTACH_BOUND`: with a core that never answers (and a call timeout far beyond
+/// the bound) the resume returns within the bound plus the relay's own start, and the
+/// adapter is in the core reading its own state (not live).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn item1_a_resume_with_a_dead_core_returns_within_the_bound() {
+    use node111::daemon::components::consent;
+    let rig = dc_rig("get_system_info", Duration::from_secs(120)).await;
+    let n = &rig.n;
+    let root = n.layout.root.clone();
+    for (c, h) in [("madmail", &rig.relay_hash), ("deltachat", &rig.rpc_hash)] {
+        let decl = n.components.get(c).unwrap().clone();
+        consent::require(&root, &decl, Some(h)).unwrap();
+        consent::update(&root, c, |r| r.enabled = true).unwrap();
+    }
+    let l6 = node111::daemon::Layer6::new(Arc::clone(&n.bridge), n.components.clone(), None);
+    let t0 = Instant::now();
+    l6.resume(&n.api).await;
+    let took = t0.elapsed();
+    assert!(
+        took < node111::daemon::RESUME_ATTACH_BOUND + Duration::from_secs(15),
+        "resume took {took:?}"
+    );
+    assert!(
+        n.components.stdio("deltachat").await.is_some(),
+        "the core runs"
+    );
+    assert_eq!(
+        n.bridge.enabled(),
+        vec!["app:deltachat".to_string()],
+        "attached"
+    );
+    let v = n.get("/api/v1/networks").json();
+    assert_ne!(network(&v, "app:deltachat")["state"], "live", "{v}");
+    assert!(rig.adapters.registered("deltachat"));
+    l6.shutdown().await;
+    assert!(n.components.stdio("deltachat").await.is_none());
+}
+
+/// Item 2: an adapter factory that fails after the component started (here the LXMF
+/// helper's, replaced by one that refuses) answers `409 component_unavailable` /
+/// `health_failed`: the helper is stopped, its switch off, its client config (the
+/// prepare hook's 0600 copy of rnsd's key) removed, nothing attached.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn item2_a_failing_lxmf_factory_answers_409_and_stops_the_helper() {
+    use node111::daemon::components::consent;
+    use node111::daemon::dashboard::api_v1::bridge::{AdapterFactory, ComponentAdapters};
+    use node111::daemon::dashboard::api_v1::transport::TransportApi;
+    use node111::daemon::transport::config;
+    use node111::daemon::transport::rnstatus::{FactsCache, TickConfig};
+    let n = node_with(vec![lxmf_component()]).await;
+    let root = n.layout.root.clone();
+    let cache = root.join("cache/packages/lxmf");
+    std::fs::create_dir_all(&cache).unwrap();
+    std::fs::write(cache.join("lxmf-fake"), lxmf_bin()).unwrap();
+    let adapters = Arc::new(ComponentAdapters::default());
+    node111::daemon::register_lxmf(&adapters, &n.api, &n.bridge);
+    let refusing: AdapterFactory =
+        Arc::new(|_| Box::pin(async { Err("scripted: the helper never answered".to_string()) }));
+    adapters.register("lxmf", refusing);
+    n.api.insert_ext(Arc::clone(&adapters));
+    n.api.insert_ext(Arc::new(TransportApi {
+        spine: lxmf_spine(&n),
+        facts: FactsCache::new(TickConfig::default()),
+    }));
+    let pb = n
+        .post(
+            "/api/v1/bridge/components/lxmf/enable",
+            json!({ "accept_notice_hash": lxmf_component().notice_hash() }),
+        )
+        .problem(409, "component_unavailable");
+    assert_eq!(pb["reason_code"], "health_failed", "{pb}");
+    assert!(pb["detail"].as_str().unwrap().contains("scripted"), "{pb}");
+    assert!(
+        n.components.stdio("lxmf").await.is_none(),
+        "the helper is stopped"
+    );
+    assert_ne!(
+        n.components.status("lxmf").await.unwrap().state,
+        ComponentState::Running
+    );
+    assert!(!consent::load(&root).record("lxmf").enabled, "switch off");
+    assert!(
+        !config::client_config_path(&root).exists(),
+        "the hook's file is gone"
+    );
+    assert!(n.bridge.enabled().is_empty());
+    n.components.shutdown().await;
 }

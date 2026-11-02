@@ -38,7 +38,7 @@
 //! sent twice and never sent after being dismissed.
 //!
 //! **Layer 6 kinds** (`os/6-transport/README.md` §8, §9, §12, §13; bodies
-//! parsed by [`crate::daemon::fabric::proposal`]). `KINDS` grows to eight.
+//! parsed by [`crate::daemon::fabric::proposal`]). `KINDS` grows to eight (Layer 7: nine, `relay`).
 //! Accepting one is applied like `message`, under the same lock, with the
 //! same record discipline (`applied: {pending: true}` first, the result
 //! after, a refusal before anything ran removes the pending record and the
@@ -65,7 +65,10 @@
 //!   snapshot → apply → probe → keep or revert; the one-shots `identify` —
 //!   the acceptance is the consent — and `service.restart`, `409
 //!   not_supervised` for a child 111d does not supervise). The applier writes
-//!   the decision record itself; this file does not also decide it. Without
+//!   the decision record itself; this file does not also decide it. The loop
+//!   runs in a task of its own that the handler awaits
+//!   (`devices::applier::apply_detached`, V5-1): a client that goes away
+//!   mid-apply never leaves a change unreverted or a record pending. Without
 //!   an applier in ext (the device core not wired) a device proposal is `409
 //!   unsupported_action` and stays open.
 //!
@@ -96,8 +99,9 @@ use time::OffsetDateTime;
 
 /// List cap (newest first).
 pub const MAX_LIST: usize = 200;
-/// `Proposal.kind` (contract enum; Layer 6 adds three, §10).
-pub const KINDS: [&str; 8] = [
+/// `Proposal.kind` (contract enum; Layer 6 adds three, §10; Layer 7 adds `relay`, `7-relay/README.md`
+/// §13.2, the ninth).
+pub const KINDS: [&str; 9] = [
     "diagnose",
     "propose",
     "patch",
@@ -106,6 +110,7 @@ pub const KINDS: [&str; 8] = [
     "bridge_message",
     "bridge_edge",
     "device",
+    "relay",
 ];
 /// `Proposal.kind` of a message the agent proposes (§17).
 pub const MESSAGE_KIND: &str = "message";
@@ -1031,7 +1036,11 @@ async fn accept_device(api: &ApiState, p: &Proposal) -> Result<Proposal, Problem
         ));
     };
     let req = ApplierRequest::from_body(&p.id, &p.body).map_err(|e| e.problem())?;
-    applier::apply(&ap, req).await.map_err(|e| e.problem())?;
+    // V5-1: the loop runs to its end in a task of its own (a tab that navigates away
+    // drops this future, never the probe, the revert or the decision record)
+    applier::apply_detached(ap, req)
+        .await
+        .map_err(|e| e.problem())?;
     let (layout, id) = (api.layout.clone(), p.id.clone());
     tokio::task::spawn_blocking(move || get_checked(&layout, &id))
         .await
@@ -1137,6 +1146,31 @@ mod tests {
                 .decision,
             "accepted"
         );
+    }
+
+    /// The enum on the `Proposal.kind` line of the contract, read from the checkout (skipped without it).
+    fn contract_kinds() -> Option<Vec<String>> {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../../4-interface/api/openapi.yaml");
+        let text = std::fs::read_to_string(path).ok()?;
+        let line = text.lines().find(|l| {
+            l.trim_start()
+                .starts_with("kind: { type: string, enum: [diagnose, propose, patch, chat,")
+        })?;
+        let list = line.split("enum: [").nth(1)?.split(']').next()?;
+        Some(list.split(',').map(|k| k.trim().to_string()).collect())
+    }
+
+    #[test]
+    fn kinds_mirror_the_contract_enum_with_relay_last() {
+        assert_eq!(KINDS.len(), 9);
+        assert_eq!(KINDS[8], "relay");
+        if let Some(contract) = contract_kinds() {
+            assert_eq!(
+                contract, KINDS,
+                "openapi.yaml Proposal.kind and KINDS differ"
+            );
+        }
     }
 
     #[test]

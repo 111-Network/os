@@ -1,0 +1,33 @@
+# Optional component declaration (Layer 6 §2.1, §7 "SimpleX (second; glibc hubs only)"; C5). D27: SimpleX ships only by the
+# owner's hand-selection, and this release does not select it. So `kind = "none"`: nothing is pinned, cached or
+# downloaded, `111 install` prints no notice for it, and enabling it refuses: on Termux and musl hosts first with the
+# [requires] copy (its CLI is a glibc Linux build), on a glibc hub with the note below. The placeholder adapter is
+# `daemon/bridge/simplex.rs`; there is no bot-API client in this release.
+#
+# When the owner selects it: replace [payload] with per-target pins of the SimpleX CLI (and smp-server) read from their
+# releases, measure [weight], set the glibc floor from the binaries' symbols, and build the adapter on the CLI's local
+# WebSocket bot API (loopback 11232, `peerType: "bot"`; `smp-server init -y -l --ip <LAN address>` for the offline
+# server), the Delta Chat adapter's shape.
+id = "simplex"
+adapter = "app:simplex"
+title = "SimpleX"
+kb_entry = "projects/simplex-chat"
+
+[payload]
+kind = "none"
+note = "SimpleX is not enabled in this release"
+
+[requires]
+glibc = "2.31"                          # doc only (R03 §3.11: Ubuntu-glibc builds; dynamic linking unverified)
+glibc_distros = "Debian 11 / Ubuntu 20.04"
+
+[run]
+program = "simplex-chat"
+args = ["-p", "11232", "-d", "{bridge}/simplex"]
+ports = [11232]                         # the CLI's WebSocket bot API, loopback (§2 ports)
+health = "none"
+
+[license]
+spdx = "AGPL-3.0-only"
+read_at = "https://github.com/simplex-chat/simplex-chat/blob/stable/LICENSE"
+notice = "SimpleX (the SimpleX Chat CLI and smp-server, licensed under the GNU AGPL version 3; read it at https://github.com/simplex-chat/simplex-chat/blob/stable/LICENSE) is not part of this release: it ships only when the owner selects it. When it does, it runs on glibc Linux hubs only, never on Termux, and you install it: 111 is not its distributor."

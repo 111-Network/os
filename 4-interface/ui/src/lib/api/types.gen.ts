@@ -267,7 +267,7 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** @description Record the human's decision. A `kind: message` proposal is applied on acceptance (Layer 5 §17): its body must be `to: <64 hex>` + a blank line + the text, its node-id stamp must name this node and the recipient must be an accepted contact; then 111d queues the message itself and the decision is recorded (the agent never sends). A refused acceptance answers the problem below and leaves the proposal open; the agent's bearer never decides a message proposal (401). Layer 6: a `bridge_message` proposal runs the fan-out validation on acceptance, a `bridge_edge` proposal the edge-enable consent round-trip, a `device` proposal the apply, probe, revert loop (or the one-shot `identify` / `service.restart`). A consent gate answers 409 `consent_required` with `consent` {text, hash}; the client shows the text and repeats the decision with `accept_warning` = the hash. A refusal leaves the proposal open. */
+        /** @description Record the human's decision. A `kind: message` proposal is applied on acceptance (Layer 5 §17): its body must be `to: <64 hex>` + a blank line + the text, its node-id stamp must name this node and the recipient must be an accepted contact; then 111d queues the message itself and the decision is recorded (the agent never sends). A refused acceptance answers the problem below and leaves the proposal open; the agent's bearer never decides a message proposal (401). Layer 6: a `bridge_message` proposal runs the fan-out validation on acceptance, a `bridge_edge` proposal the edge-enable consent round-trip, a `device` proposal the apply, probe, revert loop (or the one-shot `identify` / `service.restart`). A consent gate answers 409 `consent_required` with `consent` {text, hash}; the client shows the text and repeats the decision with `accept_warning` = the hash. Layer 7: a `relay` proposal runs the same validation, consent and refusal paths as `PATCH /relay/settings`, `POST /relay/carrier/flush` and the pairing screen (`gateway.enable`, `carrier.flush`, `hub.pair`); `presence.interval` is refused `unsupported_action` in v1. A refusal leaves the proposal open. */
         post: operations["decideProposal"];
         delete?: never;
         options?: never;
@@ -970,6 +970,202 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/relay": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * The relay status: gateway badge, paired hubs, forward counters, presence switches, discovery bits, origin, update check, metered links (§13.1)
+         * @description Every Layer 7 setting and fact in one document. Secrets (the carrier token and topic secret) are write-only: they appear only as `{set: true|false}` and are never echoed, logged or sent on SSE. Ages are seconds from a monotonic clock; there is no wall-clock timestamp. A change publishes the SSE `relay` frame (a full `RelayStatus`). With nothing configured every switch reads off and every list is empty.
+         */
+        get: operations["getRelay"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/relay/settings": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        /** @description Partial merge of the Layer 7 settings (`state/relay.json`, §6.3). A consent gate (`carrier_enable` when a carrier is turned on or its metered cap set or raised, `gateway_bit`, `origin_serve`) answers 409 `consent_required` with `consent` {action, subject, warning_text, hash, addons}; the client shows `warning_text` verbatim and repeats the call with `accept_warning` = the hash; a changed text has a new hash, so a stale echo is refused again. A write of `presence.heartbeat` answers 409 `no_such_transport` (every transport in v1) or, for `rns`, 409 `settings_locked` whose `detail` names `PATCH /api/v1/bridge/settings` (§2.4); nothing is written. `gateway.enabled: true` on a node that is not a hub answers 409 `needs_hub`. The validator also answers `licensed_board` (a licensed board) and 400 `bad_request` (a phone category below 9 min). The agent's bearer is refused (401); the agent proposes (`kind: relay`). */
+        patch: operations["patchRelaySettings"];
+        trace?: never;
+    };
+    "/api/v1/relay/pair/offer": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** @description Show side of pairing (§4.6 step 1): mint an enrolment offer and the pairing bundle `111PAIR:<card>:<code>:<link SPKI>:<address or empty>:<role>:<via>` as text and QR. `role` is the role THIS hub records for the other hub, from this hub's side; the scanning side must pick the complement (`peer`↔`peer`, `leaf`↔`gateway`) with the same `via`. A new offer invalidates the outstanding code; it is dismissed with `DELETE /fabric/hub/offer` (the Layer 5 route). Loopback-only (403 `loopback_only` otherwise). Public material and a one-time code only; no key material. */
+        post: operations["offerRelayPair"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/relay/pair": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** @description Scan side of pairing (§4.6 steps 2-4): pin the far hub's link key from the bundle, enrol both ways, record the pair. 202 with the new `PairedHub`: enrolment and the first connection finish in the background and show on `/relay` and the `relay` frame. `role` and `via` are picked from this hub's side and must complement the bundle's (409 `pair_role_mismatch`, nothing recorded). `lan` (default false) is the owner's mark that the link is a LAN or an adopted tunnel and runs plain (§4.1 rule 1). When the far address is not private and TLS cannot be negotiated, the first call answers 409 `consent_required` with `consent.action` = `pair_plain` (subject: the far hub's NodeId) and the repeat carries `accept_warning` = the hash. 409 `needs_hub` without the hub role. Loopback-only (403 `loopback_only` otherwise), like its Layer 5 siblings; the CLI `111 fabric pair` covers the phone case. The agent proposes `hub.pair {}`, which only opens the screen. */
+        post: operations["pairRelayHub"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/relay/paired/{node_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /** @description Unpair: forget the pair and its pinned link key. Forward rows held for it return to the other targets (§5.9). Idempotent: 204 whether or not the hub was paired. Loopback-only (403 `loopback_only` otherwise). */
+        delete: operations["unpairRelayHub"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/relay/carrier/check": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** @description Run the carrier's test now (§3.1): one request to the configured carrier. 202; the outcome arrives on `/relay` (`gateway.state`, `checked_ago_s`) and the `relay` frame. Counts against the metered window. 409 `consent_required` (`carrier_enable` not yet accepted), `metered_cap` (the daily cap is reached: no request is made), `licensed_board`; 409 `bad_request` when no carrier is configured. A human on a loopback or paired session; the agent's bearer is refused (401). */
+        post: operations["checkRelayCarrier"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/relay/carrier/flush": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** @description Flush the carrier now (§5.9, §6.2): post what waits in the forward rows and drain what the peer posted. 202; progress arrives on `/relay` (`gateway.pending`, `last_flush_ago_s`, `paired_hubs[].pending`). Errors as `carrier/check`. A human on a loopback or paired session; the agent's bearer is refused (401); the agent proposes `carrier.flush {}`. */
+        post: operations["flushRelayCarrier"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/registry": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * The Service Discovery Registry: 111 nodes found on this network (§7)
+         * @description Rows say which layer answered (`answered_by`): a DNS-SD record is an unauthenticated hint, a role bit is signed by that contact. Every string is untrusted and rendered as text. Empty until a browse has run (`POST /registry/browse`) or a signed role is heard. No timer refreshes it; a change publishes the SSE `registry` frame.
+         */
+        get: operations["listRegistry"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/registry/browse": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** @description Look for 111 nodes here (§7.1, §7.7): a DNS-SD browse of `_111._tcp` for at most 5 s, then stop. 202; the rows arrive on the `registry` frame. Only where the dashboard's mDNS daemon already runs: 409 `lan_off` while LAN sharing is off (nothing is started). A human; the agent's bearer is refused (401). */
+        post: operations["browseRegistry"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/nearby/hops": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** @description Read Reticulum hop counts (§10.1 rule 1): one read-only `rnpath -t -j` through the `rnstatus` runner, only when the supervised rnsd holds the instance. A POST because it spawns a program and the agent's bearer reads every GET. 202; the hop counts arrive on the `nearby` frame (`hops_away` of the `reticulum` source). 409 `component_unavailable` while the Reticulum component is off; 429 `rate_limited` within 30 s of the last run. A human; the agent's bearer is refused (401). */
+        post: operations["runNearbyHops"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/update/origins": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Where updates come from, in the order they are tried (§9.3)
+         * @description The visible order is the home hub (counted only while its announce carries the origin role), `install.111.network`, then GitHub Releases; a directory or URL typed for `111 update --from` is listed with its own record. `last_answer` and `newest_seen` come from a monotonic clock and the signed manifests this node verified; a hub or `--from` answer never counts as the dashboard's last successful check.
+         */
+        get: operations["listUpdateOrigins"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/events": {
         parameters: {
             query?: never;
@@ -998,7 +1194,7 @@ export interface components {
             status: number;
             detail?: string;
             /** @enum {string} */
-            code: "unauthenticated" | "loopback_only" | "lan_read_only" | "agent_unavailable" | "model_unavailable" | "bad_request" | "not_found" | "rate_limited" | "already_decided" | "not_supervised" | "settings_locked" | "offer_stale" | "needs_hub" | "upstream_error" | "internal" | "port_busy" | "panel_ticket_expired" | "restore_pending" | "consent_required" | "oversize" | "component_unavailable" | "unsupported_action";
+            code: "unauthenticated" | "loopback_only" | "lan_read_only" | "agent_unavailable" | "model_unavailable" | "bad_request" | "not_found" | "rate_limited" | "already_decided" | "not_supervised" | "settings_locked" | "offer_stale" | "needs_hub" | "upstream_error" | "internal" | "port_busy" | "panel_ticket_expired" | "restore_pending" | "consent_required" | "oversize" | "component_unavailable" | "unsupported_action" | "no_such_transport" | "licensed_board" | "metered_cap" | "lan_off" | "pair_role_mismatch";
             errors?: {
                 pointer?: string;
                 message: string;
@@ -1023,7 +1219,7 @@ export interface components {
             state: components["schemas"]["ServiceState"];
             /** Format: date-time */
             since: string;
-            /** @description stable snake_case, display-only for clients. Emitted set (111d): healthy, health_pending, spawn_pending, child_degraded, child_stopped, child_backoff, health_error, health_503, health_unreachable, binary_absent, no_model, no_python, venv_unavailable, transport_degraded, joined, isolated, no_radio, radio_unbound, radio_bound_rnode, radio_bound_meshtastic, stack_waiting, stack_down, verify_failed, kb_absent, wan_ok, wan_unknown, wan_offline, not_hub, opencode_found, opencode_absent. Layer 5 adds: store_full (fabric), port_busy (meshtastic); fabric and meshtastic rows add their own snake_case codes, additively. */
+            /** @description stable snake_case, display-only for clients. Emitted set (111d): healthy, health_pending, spawn_pending, child_degraded, child_stopped, child_backoff, health_error, health_503, health_unreachable, binary_absent, no_model, no_python, venv_unavailable, transport_degraded, joined, isolated, no_radio, radio_unbound, radio_bound_rnode, radio_bound_meshtastic, stack_waiting, stack_down, verify_failed, kb_absent, not_hub, opencode_found, opencode_absent. Layer 5 adds: store_full (fabric), port_busy (meshtastic); fabric and meshtastic rows add their own snake_case codes, additively. Layer 7 (§3.5) retires wan_ok, wan_unknown and wan_offline and emits, for the `gateway` row, gateway_none (state unset: no gateway configured), carrier_ok (live), carrier_pending (unset: the last check failed or items wait) and gateway_off (unset: off by choice). */
             reason_code: string;
             /** @description one plain sentence */
             reason: string;
@@ -1038,6 +1234,7 @@ export interface components {
             /** @description Layer 5 (§13): the hosted panel for this service's LIVE page, or null. Additive: absent on older daemons */
             panel?: components["schemas"]["Panel"] | null;
             actions: ("restart" | "log")[];
+            /** @description per-service facts. The `gateway` row's detail is `GatewayDetail` (Layer 7, §3.5) */
             detail: {
                 [key: string]: unknown;
             };
@@ -1191,10 +1388,10 @@ export interface components {
             node_id: string | null;
             task_id: string | null;
             /**
-             * @description Layer 6 adds `bridge_message` (body: `to: <fc-id>` lines, a blank line, then the text verbatim; accepting runs the fan-out validation and, if a consent gate applies, the 409 `consent_required` round-trip), `bridge_edge` (body: a `from: <fc-id>` line and a `to: <fc-id>` line, then the agent's reason; accepting runs the edge-enable consent round-trip) and `device` (body: one JSON object `{"why": string, "actions": [Action]}` where an Action is `{"action": name, …args}` from the closed vocabulary `rns.interface.upsert {device_id, type, params}`, `rns.interface.remove {name}`, `rns.posture.set {share_instance, enable_transport}`, `radio.region.set {region}`, plus the one-shots `identify {device_id}` and `service.restart {service_id}`; 111d validates, applies, probes and reverts; the other vocabulary entries are refused `unsupported_action`; a body that is not that shape is 502 `upstream_error`). RENDERING RULE: the text part of a `bridge_message` or `bridge_edge` body quotes foreign, untrusted text and is rendered as a preformatted text block, never as Markdown (no links, no emphasis); `device` bodies render as a card from the parsed JSON. Layer 5 adds `message` (§17 `messages.send`): the body is exactly `to: <64 lowercase hex>` + a blank line + the text verbatim; accepting it (POST /proposals/{id}/decision) makes 111d send it — only to an accepted contact and only when the proposal's `node_id` names this node — and the decision is recorded after the store committed the message
+             * @description Layer 7 adds `relay` (§13.2; body: one JSON object `{"why": string, "actions": [Action]}` where an Action is `{"action": name, …args}` from the closed vocabulary `gateway.enable {carrier, mode}`, `hub.pair {}`, `presence.interval {transport, minutes}`, `carrier.flush {}`; accepting it runs the same validation, consent and refusal paths as the routes (a consent gate answers 409 `consent_required` and the human repeats the decision with `accept_warning`); `presence.interval` is refused `unsupported_action` in v1; a body that is not that shape is 502 `upstream_error`; it renders as a card from the parsed JSON, never as Markdown). Layer 6 adds `bridge_message` (body: `to: <fc-id>` lines, a blank line, then the text verbatim; accepting runs the fan-out validation and, if a consent gate applies, the 409 `consent_required` round-trip), `bridge_edge` (body: a `from: <fc-id>` line and a `to: <fc-id>` line, then the agent's reason; accepting runs the edge-enable consent round-trip) and `device` (body: one JSON object `{"why": string, "actions": [Action]}` where an Action is `{"action": name, …args}` from the closed vocabulary `rns.interface.upsert {device_id, type, params}`, `rns.interface.remove {name}`, `rns.posture.set {share_instance, enable_transport}`, `radio.region.set {region}`, plus the one-shots `identify {device_id}` and `service.restart {service_id}`; 111d validates, applies, probes and reverts; the other vocabulary entries are refused `unsupported_action`; a body that is not that shape is 502 `upstream_error`). RENDERING RULE: the text part of a `bridge_message` or `bridge_edge` body quotes foreign, untrusted text and is rendered as a preformatted text block, never as Markdown (no links, no emphasis); `device` bodies render as a card from the parsed JSON. Layer 5 adds `message` (§17 `messages.send`): the body is exactly `to: <64 lowercase hex>` + a blank line + the text verbatim; accepting it (POST /proposals/{id}/decision) makes 111d send it — only to an accepted contact and only when the proposal's `node_id` names this node — and the decision is recorded after the store committed the message
              * @enum {string}
              */
-            kind: "diagnose" | "propose" | "patch" | "chat" | "message" | "bridge_message" | "bridge_edge" | "device";
+            kind: "diagnose" | "propose" | "patch" | "chat" | "message" | "bridge_message" | "bridge_edge" | "device" | "relay";
             title: string;
             /** @description markdown */
             body: string;
@@ -1386,7 +1583,7 @@ export interface components {
         /** @description `msg-…`, minted by 111d for the local row. Not the wire msg_id (§4), which only Advanced views show (`Message.msg_id`) */
         MessageId: string;
         /**
-         * @description Delivery evidence (§9), own messages only. queued: no path, key missing, or the peer's hub is not yours (see `reason_code`). sent: a frame was written to a link, or a custody reject kept it here (see `reason_code`). relayed: an authenticated CUSTODY_ACK from a mailbox node for a known member — saved and held for them, not yet at them. delivered: the recipient's own ACK. Only that ACK releases the sender's copy.
+         * @description Delivery evidence (§9), own messages only. queued: no path, key missing, or the peer's hub is not yours (see `reason_code`). sent: a frame was written to a link, or a custody reject kept it here (see `reason_code`). relayed: an authenticated CUSTODY_ACK from a mailbox node for a known member — saved and held for them, not yet at them. Layer 7 widens it: also a hub's CUSTODY_ACK for a recipient whose home-hub hint names ANOTHER hub, with `reason_code` `forwarding` — held, and passed on to that hub; never 'the recipient's hub was found'. delivered: the recipient's own ACK. Only that ACK releases the sender's copy.
          * @enum {string}
          */
         MessageState: "queued" | "sent" | "relayed" | "delivered";
@@ -1406,7 +1603,7 @@ export interface components {
             text: string;
             /** @description dir=in is always `delivered` (it arrived here; a held message request is not acknowledged to its sender until accepted) */
             state: components["schemas"]["MessageState"];
-            /** @description stable snake_case, display-only for clients, set while the state needs an explanation. Emitted set (111d): waiting_for_key (queued, the peer's card has not arrived), hub_not_yours (queued while your hub is unreachable and their card names another hub; or sent after your hub answered REJECT_UNKNOWN_DEST — your hub does not know them, §9; either way delivered when you meet directly), restore_pending (queued, the identity holder reports a restore floor so nothing is sealed), store_full (queued, the local store refuses new work), mailbox_full (sent, the hub answered REJECT_FULL), not_enrolled (sent, the hub answered REJECT_UNENROLLED: it no longer lists this node), cancelled (queued, the user cancelled it before it left; an empty placeholder goes instead so no number is abandoned, §4). null when nothing needs explaining. */
+            /** @description stable snake_case, display-only for clients, set while the state needs an explanation. Emitted set (111d): waiting_for_key (queued, the peer's card has not arrived), hub_not_yours (queued while your hub is unreachable and their card names another hub; or sent after your hub answered REJECT_UNKNOWN_DEST — your hub does not know them, §9; either way delivered when you meet directly), restore_pending (queued, the identity holder reports a restore floor so nothing is sealed), store_full (queued, the local store refuses new work), mailbox_full (sent, the hub answered REJECT_FULL), not_enrolled (sent, the hub answered REJECT_UNENROLLED: it no longer lists this node), cancelled (queued, the user cancelled it before it left; an empty placeholder goes instead so no number is abandoned, §4), forwarding (Layer 7, relayed: 'Your hub holds it and passes it to their hub.'). null when nothing needs explaining. */
             reason_code: string | null;
             /** @description one plain sentence for `reason_code` */
             reason: string | null;
@@ -1649,6 +1846,8 @@ export interface components {
             card: components["schemas"]["Card"];
             /** @description what the member scans or pastes: the hub's card, address and code in one text and QR */
             bundle: components["schemas"]["Card"];
+            /** @description Layer 7 (§7.5): present while this hub is a gateway; the member learns it once, here. Absent or null otherwise */
+            gateway?: components["schemas"]["GatewayOffer"] | null;
         };
         /** @description One node heard through a source (§14). Every string is an untrusted RF-origin value (names truncated to 40 bytes, control characters stripped): render as text only, and hand it to the agent only inside a labelled untrusted block. Never a contact: Meshtastic is a different identity system. */
         NearbyNode: {
@@ -1674,15 +1873,25 @@ export interface components {
                 alt_m?: number | null;
             } | null;
             channel_utilization?: number | null;
+            /** @description Layer 7 (§2.1): seconds since this node's own monotonic clock last proved the node was heard; display only, never a peer's clock. No timer refreshes it: the UI computes ages from this value and its own clock between frames. Absent on Meshtastic and Reticulum rows */
+            heard_ago_s?: number | null;
+            /** @description Layer 7: the store sequence (`local_seq`) of the event that proved it; monotone, survives restarts */
+            heard_seq?: number | null;
+            /** @description Layer 7: one entry per transport the node was heard on (a contact heard on the LAN and through its hub has two). Untrusted text */
+            evidence?: components["schemas"]["NearbyEvidence"][];
+            /** @description Layer 7: the contact's signed role names (e.g. mailbox, gateway); text only */
+            roles?: string[];
+            /** @description Layer 7 (§10.1 rule 4): the channel's position precision. v1 knows none (null): the radar draws the coarsest cell */
+            position_precision_bits?: number | null;
         };
         /** @description A presence source. v1: one per identified Meshtastic board, grouped as 'heard via Meshtastic on <board alias>'. */
         NearbySource: {
             id: string;
             /**
-             * @description Layer 6 adds `reticulum`: announces the LXMF helper hears. For a `reticulum` source a node's `id` is the 32-hex destination hash, `num` is 0, `long_name` is the announced display name (untrusted) and `short_name` its first 8 hex; `device_id` is null. Unknown kinds render as `unknown`
+             * @description Layer 7 adds `111` (§2.3): the contacts and paired hubs this node has a presence fact for this session, one source labelled '111 nodes heard by this node', `device_id` null; a node's `id` is the NodeId (64 hex), `num` is 0, `long_name` the local alias or the L2 label, `short_name` the label, `last_heard_hint` null, and `heard_ago_s`, `heard_seq`, `evidence`, `roles` are set. A 111 node is never merged into a Meshtastic or Reticulum row. Layer 6 adds `reticulum`: announces the LXMF helper hears. For a `reticulum` source a node's `id` is the 32-hex destination hash, `num` is 0, `long_name` is the announced display name (untrusted) and `short_name` its first 8 hex; `device_id` is null. Unknown kinds render as `unknown`
              * @enum {string}
              */
-            kind: "meshtastic" | "reticulum";
+            kind: "meshtastic" | "reticulum" | "111";
             /** @description plain heading, e.g. heard via Meshtastic on Bench radio */
             label: string;
             /** @description the DeviceRecord this source reads through */
@@ -1990,6 +2199,22 @@ export interface components {
             uncertain?: boolean;
             /** @description Layer 6 C1 (additive): why an inbound row was kept from every relay edge — `marker` (it already carries a relay marker `[name/TAG]`, §8 guard 3: a copy is never relayed again, and a human who types a marker gets no relay). null when not applicable; absent from older daemons */
             not_relayed?: string | null;
+            /** @description Layer 6 FC5 (additive): the structured relay field a received row carried — LXMF `FIELD_CUSTOM_TYPE = "111.relay"`, `{v, net, id, mid}` (§6 "Relay marker and fields"): another 111 node's edge says it copied this text from `net`, where `id` named the sender and `mid` the message. The ingest function admits exactly that shape (`v` 1, `net` a registered network, `id` and `mid` clean, 1–64 bytes, without `]` or `/`) and drops anything else. A peer's claim, untrusted and naming nothing on this node: unlike `relayed_from` (an own copy one of this node's edges made, by local ids). On an inbound DM, which no edge reads (`not_relayed` stays null there), it is the only sign the text is a relayed copy. null when the row carried none; absent from older daemons (read as null) */
+            relay?: {
+                /**
+                 * @description the field's version
+                 * @enum {integer}
+                 */
+                v: 1;
+                /** @description the network the copy came from */
+                net: components["schemas"]["NetworkId"];
+                /** @description the origin sender's name or id on `net`; untrusted */
+                id: string;
+                /** @description the origin message's id on `net`; untrusted */
+                mid: string;
+            } | null;
+            /** @description Layer 6 V5 (additive): the id of the row this own row was sent again as (`POST /messages/{id}/retry`). A superseded row is never retried again (`409 bad_request`: retry the new row); the UI reads it 'resent as …'. null otherwise; absent from older daemons (read as null) */
+            superseded_by?: components["schemas"]["ForeignMessageId"] | null;
         };
         ForeignThread: {
             schema: number;
@@ -2043,10 +2268,10 @@ export interface components {
         /** @description The 409 consent round-trip (§2.1, §8): the daemon states the exact text, the client shows it and echoes `hash` back (`accept_warning` or `accept_notice_hash`). A text that changed since (a live fact moved) has a new hash, so a stale echo is refused again. Never a bare PATCH. */
         ConsentRequired: {
             /**
-             * @description which confirmation this is
+             * @description which confirmation this is. Layer 7 appends `carrier_enable` (ntfy on, or its metered cap set or raised; subject `<kind>:<server>`), `pair_plain` (pairing over an unencrypted non-private link; subject the far hub's NodeId), `gateway_bit` (the public gateway role bit) and `origin_serve` (serving update files to the LAN)
              * @enum {string}
              */
-            action: "edge_enable" | "edge_resume" | "component_enable" | "ham_confirm" | "uplink_send";
+            action: "edge_enable" | "edge_resume" | "component_enable" | "ham_confirm" | "uplink_send" | "carrier_enable" | "pair_plain" | "gateway_bit" | "origin_serve";
             /** @description what it is about: the edge id or `src>dst` pair, the component id, the account, or the channel's `fc-…` id */
             subject: string;
             /** @description the exact text the user is confirming; may quote untrusted channel names: text only */
@@ -2377,6 +2602,283 @@ export interface components {
             code: "oversize" | "consent_required";
             detail: string;
             consent: components["schemas"]["ConsentRequired"] | null;
+        };
+        /**
+         * @description The gateway badge's four states (§3.5, §3.8), never 'online': gateway_none (no gateway configured), carrier_ok (the carrier answered at the last check), carrier_pending (the last check failed or items wait), gateway_off (off by choice). Also the `reason_code` of the `gateway` service row. Unknown values render as `unknown`.
+         * @enum {string}
+         */
+        RelayGatewayState: "gateway_none" | "carrier_ok" | "carrier_pending" | "gateway_off";
+        /** @description The hub's own gateway badge (§3.8): never a member's view of its hub. */
+        RelayGateway: {
+            /** @description `gateway.enabled`; true only on a hub */
+            enabled: boolean;
+            state: components["schemas"]["RelayGatewayState"];
+            /** @description the carrier the claim rests on: `ntfy`, `paired-hub` or null. Open vocabulary (chatmail joins after §6.5): unknown values render as `unknown` */
+            carrier: string | null;
+            /** @description the carrier's host, or the paired hub's label. Untrusted: render as text */
+            endpoint: string | null;
+            /**
+             * @description 5A: requests on a schedule the flush sets; 5B: a held stream (never on a Termux hub)
+             * @enum {string|null}
+             */
+            mode: "5A" | "5B" | null;
+            /** @description seconds since the last carrier check; null before one ran. A monotonic clock, display only */
+            checked_ago_s: number | null;
+            last_flush_ago_s: number | null;
+            /** @description items waiting for the carrier */
+            pending: number;
+            /** @description the rolling 24 h cap of a metered link is reached: no flush runs (§12) */
+            metered_cap_reached: boolean;
+            /** @description `gateway.termux_poll_min` (default 15): read only on a Termux hub whose netlink bind failed (§3.4) */
+            termux_poll_min?: number;
+        };
+        /** @description A write-only secret: whether one is stored, never its value. */
+        RelaySecret: {
+            set: boolean;
+        };
+        /** @description The carrier switch (§6.3). `kind: none` constructs nothing: no socket, task, thread or file write. */
+        RelayCarrier: {
+            /**
+             * @description `chatmail` joins after §6.5; unknown values render as `unknown`
+             * @enum {string}
+             */
+            kind: "none" | "ntfy";
+            /** @description an https:// URL; http:// only for a private address, and then the token crosses that LAN in clear (§9.5 T6). Untrusted: render as text */
+            server: string | null;
+            /** @enum {string} */
+            mode: "5A" | "5B";
+            token: components["schemas"]["RelaySecret"];
+            topic_secret: components["schemas"]["RelaySecret"];
+            /** @description the hash of the `carrier_enable` text the human accepted; null until then */
+            consent_hash: components["schemas"]["Sha256Hex"] | null;
+        };
+        /**
+         * @description The role the far hub has, from this hub's side (§4.6 row 2): `peer` (default), `leaf` (this hub is its gateway) or `gateway` (it is this hub's upstream). Roles are complementary across the two hubs: peer-peer, leaf-gateway.
+         * @enum {string}
+         */
+        PairRole: "peer" | "leaf" | "gateway";
+        /**
+         * @description The link (§4.6 row 2): `tcp` (default) or `carrier` (a far gateway reached through this hub's carrier; `peer` only).
+         * @enum {string}
+         */
+        PairVia: "tcp" | "carrier";
+        /**
+         * @description How the link is protected (§12): rpk (TLS 1.3 raw public keys), plain (a non-private address the owner accepted unencrypted after the `pair_plain` warning), none (not applicable: a `lan` pair runs plain on a private link by the owner's mark, and a `carrier` pair talks only through its carrier).
+         * @enum {string}
+         */
+        PairTls: "rpk" | "plain" | "none";
+        /** @description One paired hub (§4.6, §13.1). Forwards only when both sides hold the pair. */
+        PairedHub: {
+            node_id: components["schemas"]["NodeId"];
+            /** @description the L2 label of the far hub (`xxxx-xxxx-xx`), a display form of the NodeId */
+            label: string;
+            role: components["schemas"]["PairRole"];
+            via: components["schemas"]["PairVia"];
+            tls: components["schemas"]["PairTls"];
+            /** @description the owner marked this pair a LAN or an adopted tunnel, so it runs plain (§4.1 rule 1) */
+            lan: boolean;
+            reachable: boolean;
+            /** @description forward rows waiting for this pair */
+            pending: number;
+            /** @description carrier re-posts of §5.9 (C6) */
+            reposts: number;
+        };
+        /** @description One transport's presence beat (§2.4): visible and inert in v1 (every write is refused). `0` is events only. */
+        RelayHeartbeat: {
+            /** @description e.g. tcp-lan, kiss-modem, meshtastic-client, rns */
+            transport: string;
+            interval_min: number;
+            /** @description who owns the setting: `layer7`, or `layer6` for `rns` (the LXMF helper's announce interval, written through `PATCH /bridge/settings`) */
+            owner: string;
+        };
+        RelayDiscovery: {
+            /** @description the `_111._tcp` DNS-SD record (§7.1); needs LAN sharing and a LAN-bound listener */
+            lan_record: boolean;
+            /** @description role bit 3 (§7.2): everyone who receives the card learns this node has internet; needs its `gateway_bit` consent */
+            public_gateway_bit: boolean;
+            /** @description role bit 4: serves model inference to paired LAN members */
+            offload_bit: boolean;
+        };
+        RelayOrigin: {
+            /** @description role bit 5 and the three `/origin/v1/*` routes (§9.1); needs `hub_role`, LAN sharing and its `origin_serve` consent */
+            serve: boolean;
+            /** @description target triples this hub holds and serves; default: its own */
+            targets: string[];
+            /** @description size of `state/origin/` */
+            bytes: number;
+        };
+        /** @description A link the user marks metered (§12). Carrier bytes count in a rolling 24 h window on a monotonic clock; past the cap no flush runs. The SSID is a hint the user marks: Termux cannot read Android's metered flag. */
+        MeteredLink: {
+            /** @description Exactly one of `iface` or `ssid`. */
+            match: {
+                iface?: string;
+                ssid?: string;
+            };
+            daily_cap_bytes: number;
+        };
+        /** @description The whole Layer 7 state (§13.1). No secret is in it, ever: the agent's bearer reads it. */
+        RelayStatus: {
+            schema: number;
+            gateway: components["schemas"]["RelayGateway"];
+            carrier: components["schemas"]["RelayCarrier"];
+            paired_hubs: components["schemas"]["PairedHub"][];
+            /** @description The fabric's session counters `forward_refused` and `forward_too_large` (§5.8, §5.2) */
+            forward: {
+                refused: number;
+                too_large: number;
+            };
+            presence: {
+                heartbeat: components["schemas"]["RelayHeartbeat"][];
+            };
+            discovery: components["schemas"]["RelayDiscovery"];
+            origin: components["schemas"]["RelayOrigin"];
+            updates: {
+                /** @description false: the hourly loop contacts no internet base (§9.3) */
+                check_internet: boolean;
+            };
+            metered: components["schemas"]["MeteredLink"][];
+        };
+        /** @description Partial merge of `RelayStatus`'s writable keys (§13.1). Secrets are write-only strings here (`carrier.token`, `carrier.topic_secret`; null clears). `accept_warning` is the hash of the consent text the human was shown for `carrier_enable`, `gateway_bit` or `origin_serve`; absent on the first call. */
+        RelaySettingsPatch: {
+            gateway?: {
+                enabled?: boolean;
+                termux_poll_min?: number;
+            };
+            carrier?: {
+                /** @enum {string} */
+                kind?: "none" | "ntfy";
+                server?: string | null;
+                /** @enum {string} */
+                mode?: "5A" | "5B";
+                /** @description write-only */
+                token?: string | null;
+                /** @description write-only; 32 B base32 */
+                topic_secret?: string | null;
+            };
+            /** @description Every write is refused in v1 (§2.4): 409 `no_such_transport`, or `settings_locked` for `rns`. */
+            presence?: {
+                heartbeat?: {
+                    transport: string;
+                    interval_min: number;
+                }[];
+            };
+            discovery?: {
+                lan_record?: boolean;
+                public_gateway_bit?: boolean;
+                offload_bit?: boolean;
+            };
+            origin?: {
+                serve?: boolean;
+                targets?: string[];
+            };
+            updates?: {
+                check_internet?: boolean;
+            };
+            /** @description replaces the list */
+            metered?: components["schemas"]["MeteredLink"][];
+            accept_warning?: components["schemas"]["Sha256Hex"];
+        };
+        /** @description The role this hub proposes for the other hub, and the link (§4.6 step 1). */
+        PairOfferRequest: {
+            role: components["schemas"]["PairRole"];
+            via: components["schemas"]["PairVia"];
+        };
+        PairOffer: {
+            schema: number;
+            /** @description the `111PAIR:` bundle as text and QR */
+            bundle: components["schemas"]["Card"];
+            /** @description the one-time enrolment code, shown once */
+            code: string;
+            /** @description the link key's SPKI, base32 (public) */
+            link_spki: string;
+        };
+        PairRequest: {
+            /** @description the far hub's `111PAIR:` text, scanned or pasted */
+            bundle: string;
+            role: components["schemas"]["PairRole"];
+            via: components["schemas"]["PairVia"];
+            /**
+             * @description mark the link a LAN or an adopted tunnel: it runs plain (§4.1 rule 1)
+             * @default false
+             */
+            lan: boolean;
+            /** @description the hash of the `pair_plain` text the user was shown; absent on the first call */
+            accept_warning?: components["schemas"]["Sha256Hex"];
+        };
+        RelayAccepted: {
+            schema: number;
+            started: boolean;
+        };
+        /**
+         * @description Which layer answered (§7.6): hint = a DNS-SD record, 'hint (unverified)'; signed = a role bit, 'signed by this contact'. 'asked just now' (a query reply) joins in v1.1. Unknown values render as `unknown`.
+         * @enum {string}
+         */
+        RegistryAnswer: "hint" | "signed";
+        /** @description One 111 node the registry knows (§7). Every string is untrusted (a forged TXT record is possible): render as text. A row binds nothing: only the handshake and a verified packet do. */
+        RegistryRow: {
+            /** @description stable within this list: the NodeId when known, else the DNS-SD instance */
+            id: string;
+            /** @description the L2 label of the instance; never an alias */
+            label: string;
+            /** @description the `k` TXT value of a hint, or the contact's NodeId; unverified for a hint */
+            node_id: components["schemas"]["NodeId"] | null;
+            /** @description host:port of the fabric listener from the record; null for a signed row */
+            address: string | null;
+            /** @description role names (mailbox, hub, gateway, offload, origin), from the TXT `r` or the contact's signed bits */
+            roles: string[];
+            answered_by: components["schemas"]["RegistryAnswer"];
+            heard_ago_s: number | null;
+        };
+        /** @description One update origin (§9.3). A hub or `--from` origin has its own record and never writes the dashboard's 'last successful check'. */
+        UpdateOrigin: {
+            /**
+             * @description hub: the home hub's origin; internet: install.111.network or GitHub Releases; directory and url: typed for `111 update --from`. Unknown values render as `unknown`
+             * @enum {string}
+             */
+            kind: "hub" | "internet" | "directory" | "url";
+            /** @description the origin base. Untrusted: render as text */
+            url: string;
+            /** @description null before this origin was asked */
+            last_answer: {
+                ok: boolean;
+                ago_s: number;
+                detail?: string | null;
+            } | null;
+            /** @description the newest release calver this origin served and this node verified (T4: 'newest release seen: <calver> from <origin>') */
+            newest_seen: string | null;
+        };
+        /** @description `ServiceRecord.detail` of the `gateway` row (§3.5 item 3; replaces `{online, probe_url, checked_at, error, interval_sec}`). Ages come from a monotonic clock; there is no wall-clock `checked_at`. */
+        GatewayDetail: {
+            /** @description `ntfy`, `paired-hub` or null; open vocabulary */
+            carrier: string | null;
+            endpoint: string | null;
+            /** @enum {string|null} */
+            mode: "5A" | "5B" | null;
+            checked_ago_s: number | null;
+            last_flush_ago_s: number | null;
+            pending: number;
+            error: string | null;
+        };
+        /** @description What the hub offer tells a member about its hub's gateway, once, at enrolment (§7.5). Nothing about it rides INTRO or cards. */
+        GatewayOffer: {
+            /** @enum {string} */
+            carrier: "ntfy";
+            /** @enum {string} */
+            mode: "5A" | "5B";
+        };
+        /**
+         * @description Closed (§2.3): tcp-lan (a connection attributed to the peer, the home hub's row and a `tcp` pair's row), hub (heard through the home hub), carrier (a `carrier` pair's row).
+         * @enum {string}
+         */
+        NearbyEvidenceTransport: "tcp-lan" | "hub" | "carrier";
+        NearbyEvidence: {
+            transport: components["schemas"]["NearbyEvidenceTransport"];
+            /** @description the §2.2 evidence string, e.g. 'a message from them arrived (verified)' */
+            text: string;
+        };
+        SseRelay: components["schemas"]["RelayStatus"];
+        SseRegistry: {
+            rows: components["schemas"]["RegistryRow"][];
         };
     };
     responses: {
@@ -2861,7 +3363,7 @@ export interface operations {
             content: {
                 "application/json": {
                     decision: components["schemas"]["Decision"];
-                    /** @description Layer 6: the hash of the consent text the user was shown (`bridge_edge`, or a `bridge_message` behind a consent gate); absent on the first call */
+                    /** @description Layer 6/7: the hash of the consent text the user was shown (`bridge_edge`, a `bridge_message` behind a consent gate, or a `relay` action behind `carrier_enable` / `gateway_bit` / `origin_serve`); absent on the first call */
                     accept_warning?: components["schemas"]["Sha256Hex"];
                 };
             };
@@ -2877,7 +3379,7 @@ export interface operations {
                 };
             };
             404: components["responses"]["Problem"];
-            /** @description already_decided; for kind message also bad_request (the recipient is not a contact, or is a pending message request) and restore_pending (the identity holder reports a restore floor, so nothing is sealed yet); Layer 6 adds consent_required (`consent` carries text + hash), oversize and component_unavailable (bridge kinds), unsupported_action (a `device` action outside the four applied and two one-shot actions) and not_supervised (`service.restart` on a child 111d does not supervise) — the proposal stays open */
+            /** @description already_decided; for kind message also bad_request (the recipient is not a contact, or is a pending message request) and restore_pending (the identity holder reports a restore floor, so nothing is sealed yet); Layer 6 adds consent_required (`consent` carries text + hash), oversize and component_unavailable (bridge kinds), unsupported_action (a `device` action outside the four applied and two one-shot actions) and not_supervised (`service.restart` on a child 111d does not supervise); Layer 7 adds, for a `relay` proposal, consent_required (`carrier_enable`, `gateway_bit`), unsupported_action (`presence.interval` in v1, or an action outside the vocabulary), needs_hub, no_such_transport, licensed_board and metered_cap — the proposal stays open */
             409: components["responses"]["Problem"];
             /** @description upstream_error: the agent wrote a kind outside the enum, or (kind message) a body that does not follow the `to:` contract or a node-id stamp that does not name this node */
             502: components["responses"]["Problem"];
@@ -4111,6 +4613,267 @@ export interface operations {
             };
             /** @description bad_request: LAN sharing is off, or this node is not a relay */
             409: components["responses"]["Problem"];
+        };
+    };
+    getRelay: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RelayStatus"];
+                };
+            };
+        };
+    };
+    patchRelaySettings: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["RelaySettingsPatch"];
+            };
+        };
+        responses: {
+            /** @description The relay status after the change */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RelayStatus"];
+                };
+            };
+            400: components["responses"]["Problem"];
+            /** @description consent_required (`consent` carries the text and its hash), no_such_transport, settings_locked, needs_hub, licensed_board, bad_request */
+            409: components["responses"]["Problem"];
+        };
+    };
+    offerRelayPair: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["PairOfferRequest"];
+            };
+        };
+        responses: {
+            /** @description Offer minted */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PairOffer"];
+                };
+            };
+            400: components["responses"]["Problem"];
+            403: components["responses"]["Problem"];
+            /** @description needs_hub (this node holds no hub role: pairing needs `hub_role`), pair_role_mismatch (a `carrier` pair must be `peer`; a `leaf` or `gateway` pair is `tcp` only), restore_pending */
+            409: components["responses"]["Problem"];
+        };
+    };
+    pairRelayHub: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["PairRequest"];
+            };
+        };
+        responses: {
+            /** @description Accepted */
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PairedHub"];
+                };
+            };
+            400: components["responses"]["Problem"];
+            403: components["responses"]["Problem"];
+            /** @description consent_required (pair_plain), pair_role_mismatch, needs_hub, bad_request (already paired with that hub) */
+            409: components["responses"]["Problem"];
+            /** @description upstream_error: the far hub is unreachable or refused the code */
+            502: components["responses"]["Problem"];
+        };
+    };
+    unpairRelayHub: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                node_id: components["schemas"]["NodeId"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Unpaired */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            403: components["responses"]["Problem"];
+        };
+    };
+    checkRelayCarrier: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Started */
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RelayAccepted"];
+                };
+            };
+            /** @description consent_required, metered_cap, licensed_board, bad_request */
+            409: components["responses"]["Problem"];
+        };
+    };
+    flushRelayCarrier: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Started */
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RelayAccepted"];
+                };
+            };
+            /** @description consent_required, metered_cap, licensed_board, bad_request */
+            409: components["responses"]["Problem"];
+        };
+    };
+    listRegistry: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        schema: number;
+                        rows: components["schemas"]["RegistryRow"][];
+                    };
+                };
+            };
+        };
+    };
+    browseRegistry: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Started */
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RelayAccepted"];
+                };
+            };
+            /** @description lan_off */
+            409: components["responses"]["Problem"];
+        };
+    };
+    runNearbyHops: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Started */
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RelayAccepted"];
+                };
+            };
+            /** @description component_unavailable */
+            409: components["responses"]["Problem"];
+            429: components["responses"]["Problem"];
+        };
+    };
+    listUpdateOrigins: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        schema: number;
+                        origins: components["schemas"]["UpdateOrigin"][];
+                    };
+                };
+            };
         };
     };
     events: {

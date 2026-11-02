@@ -44,18 +44,26 @@
 //!   (`src_kind`/`dst_kind` are `channel` or `group`). `meta` and
 //!   `send_groups.targets` are JSON text (`json_valid`). Typed access:
 //!   [`super::foreign`].
+//! - v4 (Layer 7 §5.3 amendment 5, §5.1, §5.8; additive amendment of
+//!   §10.3): `custody.fwd` (0 member · 1 from a member · 2 from a leaf hub ·
+//!   3 from the carrier) and `custody.fwd_from` (the 32 B NodeId of the
+//!   member or pair that put a forward row, NULL for `fwd = 0`; the
+//!   per-origin share needs it). Two `ADD COLUMN`s: a row written before v4
+//!   reads `fwd = 0`, `fwd_from` NULL, and a hub with no pairing keeps
+//!   writing exactly that, so its rows and its pruning are unchanged. Typed
+//!   access: [`super::rows::Fwd`].
 
 use rusqlite::Connection;
 
 use super::{Result, StoreError};
 
-/// The schema version this build writes (v3: Layer 6 §3).
-pub const SCHEMA_VERSION: i64 = 3;
+/// The schema version this build writes (v4: Layer 7 §5.3 amendment 5).
+pub const SCHEMA_VERSION: i64 = 4;
 
 /// Migration `i` takes `user_version` from `i` to `i + 1`. Append only: a
 /// released migration is never edited (crate-visible so the tests can build
 /// an older store from the first entries).
-pub(crate) const MIGRATIONS: &[&str] = &[V1, V2, V3];
+pub(crate) const MIGRATIONS: &[&str] = &[V1, V2, V3, V4];
 
 const V1: &str = "
 CREATE TABLE settings (
@@ -308,10 +316,35 @@ CREATE INDEX foreign_seen_by_age ON foreign_seen (edge, local_seq);
 CREATE INDEX foreign_seen_by_key ON foreign_seen (conv, sender_native, native_msg_id);
 ";
 
+/// v4 (Layer 7 §5.3 amendment 5, §5.1, §5.8): the forward-table columns of
+/// `custody` (module doc).
+///
+/// The two statements are amendment 5's; `fwd_from` also carries a
+/// fail-closed `CHECK` (an as-built addition, the house rule for every
+/// NodeId column): it is exactly 32 B, and it is NULL exactly when
+/// `fwd = 0` (a forward row always names its origin, a member row never
+/// does). Every row a v3 store already has passes both checks (`fwd`
+/// defaults to 0, `fwd_from` to NULL), so the migration never fails on old
+/// rows.
+const V4: &str = "
+ALTER TABLE custody ADD COLUMN fwd INTEGER NOT NULL DEFAULT 0 CHECK (fwd IN (0, 1, 2, 3));
+ALTER TABLE custody ADD COLUMN fwd_from BLOB
+    CHECK ((fwd_from IS NULL OR length(fwd_from) = 32) AND ((fwd = 0) = (fwd_from IS NULL)));
+";
+
 /// Bring the schema to [`SCHEMA_VERSION`].
 pub(crate) fn migrate(conn: &Connection) -> Result<()> {
+    migrate_with(conn, MIGRATIONS)
+}
+
+/// [`migrate`] over an explicit migration list: `migrations.len()` is the
+/// newest version that list writes. The tests pass a prefix of
+/// [`MIGRATIONS`] to stand in for an older build (a v3 build is this code
+/// with `[V1, V2, V3]`), so "a v4 store is refused by a v3 build" is
+/// checked against the exact `SchemaTooNew` path such a build runs.
+pub(crate) fn migrate_with(conn: &Connection, migrations: &[&str]) -> Result<()> {
     let found = super::pragma_int(conn, "user_version")?;
-    let supported = MIGRATIONS.len() as i64;
+    let supported = migrations.len() as i64;
     if found > supported {
         return Err(StoreError::SchemaTooNew { found, supported });
     }
@@ -328,7 +361,7 @@ pub(crate) fn migrate(conn: &Connection) -> Result<()> {
     }
     conn.pragma_update(None, "synchronous", "FULL")?;
     let res = (|| -> Result<()> {
-        for (i, sql) in MIGRATIONS.iter().enumerate().skip(found as usize) {
+        for (i, sql) in migrations.iter().enumerate().skip(found as usize) {
             let tx = conn.unchecked_transaction()?;
             tx.execute_batch(sql)?;
             tx.pragma_update(None, "user_version", i as i64 + 1)?;

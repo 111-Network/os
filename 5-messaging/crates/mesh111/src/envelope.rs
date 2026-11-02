@@ -21,6 +21,13 @@
 //! no length for the variable-size card, so `HAS_EXT` is followed by a 1 B
 //! TLV count and `INTRO` by a 1 B card length.
 //!
+//! The ext TLV registry (§3; Layer 7 §5.3 amendment 7): `0x01`
+//! `seen_peer_seq`, `0x02` `dest_hub` (Layer 7 §5.4: the dest's 8 B home-hub
+//! hint, `CUSTODY_PUT` only, any other kind ⇒ reject), `0x10` / `0x21`
+//! reserved ⇒ reject, `0x20` delegation ⇒ reject; every other type is
+//! skipped as unknown. The encoder writes `0x01`, then `0x02`, then the
+//! unknown TLVs in their stored order.
+//!
 //! Verification order (§3, §18 rule 1): outer gates (size, version,
 //! crypto-mode, reserved `prio_flags` bits, `dest_hint`) before decrypt; then
 //! **`pair_mac` before anything else** — only the flags byte at its fixed
@@ -112,6 +119,20 @@ pub mod flags {
 
 /// Ext TLV 0x01 — `seen_peer_seq` (two-varint `msg_seq`, §4).
 pub const TLV_SEEN_PEER_SEQ: u8 = 0x01;
+/// Ext TLV 0x02 — `dest_hub`: the dest contact's home-hub hint
+/// (`contacts.home_hub`, the hub's NodeId[0..8]) on a member's `CUSTODY_PUT`
+/// (Layer 7 §5.4; L5 §3 amendment 7). Any other kind ⇒ reject; a Layer 5
+/// build skips it as unknown and applies today's gate.
+pub const TLV_DEST_HUB: u8 = 0x02;
+/// Layer 7 §5.4: the `dest_hub` value is exactly 8 B.
+pub const DEST_HUB_LEN: usize = 8;
+/// Layer 7 §5.4 (C12): `type(1) ‖ len(1) ‖ value(8)` = 10 B, the cost of
+/// the hint beside another TLV (`n_ext` is already present).
+pub const DEST_HUB_TLV_LEN: usize = 2 + DEST_HUB_LEN;
+/// Layer 7 §5.4 (C12): 11 B when `dest_hub` is the only TLV (`n_ext` is then
+/// a new byte): the reserve `plan_mtu` adds to `CUSTODY_WRAP` for
+/// `Route::Hub`, so a hinted put costs 131 B around its item (§5.3 am. 4).
+pub const DEST_HUB_ALONE_LEN: usize = 1 + DEST_HUB_TLV_LEN;
 /// Ext TLV 0x10 — ratchet pubkey, reserved (RATCHET is 0 in v1 ⇒ reject).
 pub const TLV_RATCHET_PUBKEY: u8 = 0x10;
 /// Ext TLV 0x20 — delegation trailer ⇒ REJECT in v1 (L2 §6.7).
@@ -197,6 +218,12 @@ pub enum EnvelopeError {
     /// A malformed `seen_peer_seq` value.
     #[error("malformed seen_peer_seq")]
     BadSeenPeerSeq,
+    /// TLV 0x02 `dest_hub` on a kind other than `CUSTODY_PUT` (Layer 7 §5.4).
+    #[error("dest_hub TLV (0x02) on {0:?} (CUSTODY_PUT only)")]
+    DestHubNotAllowed(Kind),
+    /// TLV 0x02 `dest_hub` whose length byte is not 8 (Layer 7 §5.4).
+    #[error("dest_hub TLV length {0} (8)")]
+    DestHubLength(usize),
     /// A TLV that cannot be encoded (value > 255 B, > 255 TLVs, or an
     /// "unknown" TLV using a registered type).
     #[error("unencodable ext TLV")]
@@ -641,7 +668,7 @@ impl FragPos {
 /// An ext TLV this codec does not interpret (skipped on receive, §3).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RawTlv {
-    /// Type byte (never 0x01, 0x10, 0x20 or 0x21).
+    /// Type byte (never 0x01, 0x02, 0x10, 0x20 or 0x21).
     pub tlv_type: u8,
     /// Value (≤ 255 B).
     pub value: Vec<u8>,
@@ -652,6 +679,9 @@ pub struct RawTlv {
 pub struct Ext {
     /// TLV 0x01: the highest `msg_seq` the sender had seen from the peer (§4).
     pub seen_peer_seq: Option<MsgSeq>,
+    /// TLV 0x02: the dest contact's home-hub hint (Layer 7 §5.4), set only on
+    /// a `CUSTODY_PUT` ([`Inner::validate`] rejects it on any other kind).
+    pub dest_hub: Option<[u8; DEST_HUB_LEN]>,
     /// Unknown TLVs, kept in wire order (skipped semantically).
     pub unknown: Vec<RawTlv>,
 }
@@ -659,11 +689,13 @@ pub struct Ext {
 impl Ext {
     /// True when no TLV is present (`HAS_EXT` clear).
     pub fn is_empty(&self) -> bool {
-        self.seen_peer_seq.is_none() && self.unknown.is_empty()
+        self.seen_peer_seq.is_none() && self.dest_hub.is_none() && self.unknown.is_empty()
     }
 
     fn count(&self) -> usize {
-        usize::from(self.seen_peer_seq.is_some()) + self.unknown.len()
+        usize::from(self.seen_peer_seq.is_some())
+            + usize::from(self.dest_hub.is_some())
+            + self.unknown.len()
     }
 
     fn validate(&self) -> Result<(), EnvelopeError> {
@@ -679,7 +711,11 @@ impl Ext {
         for t in &self.unknown {
             if matches!(
                 t.tlv_type,
-                TLV_SEEN_PEER_SEQ | TLV_RATCHET_PUBKEY | TLV_DELEGATION | TLV_SIGNER_PUBKEY
+                TLV_SEEN_PEER_SEQ
+                    | TLV_DEST_HUB
+                    | TLV_RATCHET_PUBKEY
+                    | TLV_DELEGATION
+                    | TLV_SIGNER_PUBKEY
             ) || t.value.len() > usize::from(u8::MAX)
             {
                 return Err(EnvelopeError::BadTlv);
@@ -697,6 +733,11 @@ impl Ext {
             out.push(TLV_SEEN_PEER_SEQ);
             out.push(s.encoded_len() as u8); // ≤ 15
             s.encode(out);
+        }
+        if let Some(h) = &self.dest_hub {
+            out.push(TLV_DEST_HUB);
+            out.push(DEST_HUB_LEN as u8);
+            out.extend_from_slice(h);
         }
         for t in &self.unknown {
             out.push(t.tlv_type);
@@ -727,6 +768,11 @@ impl Ext {
                         return Err(EnvelopeError::BadSeenPeerSeq);
                     }
                     ext.seen_peer_seq = Some(s);
+                }
+                TLV_DEST_HUB => {
+                    let h = <[u8; DEST_HUB_LEN]>::try_from(value)
+                        .map_err(|_| EnvelopeError::DestHubLength(len))?;
+                    ext.dest_hub = Some(h);
                 }
                 TLV_DELEGATION => return Err(EnvelopeError::DelegationTrailer),
                 TLV_RATCHET_PUBKEY | TLV_SIGNER_PUBKEY => {
@@ -840,6 +886,7 @@ impl Inner {
             FragPos::check(u64::from(f.idx), u64::from(f.count))?;
         }
         self.ext.validate()?;
+        dest_hub_kind(k, &self.ext)?;
         if let Some(a) = &self.ack {
             if k == Kind::Ack {
                 return Err(EnvelopeError::PiggybackOnAck);
@@ -924,6 +971,9 @@ impl Inner {
         } else {
             Ext::default()
         };
+        // Layer 7 §5.4: refused before the rest is parsed, so the reason is
+        // the same whatever follows.
+        dest_hub_kind(kind, &ext)?;
         let ack = if f & flags::PIGGYBACK_ACK != 0 {
             if kind == Kind::Ack {
                 return Err(EnvelopeError::PiggybackOnAck);
@@ -969,6 +1019,15 @@ impl Inner {
         }
         out
     }
+}
+
+/// Layer 7 §5.4 / §5.3 amendment 7: `dest_hub` rides a `CUSTODY_PUT` only;
+/// any other kind carrying it is rejected.
+fn dest_hub_kind(kind: Kind, ext: &Ext) -> Result<(), EnvelopeError> {
+    if ext.dest_hub.is_some() && kind != Kind::CustodyPut {
+        return Err(EnvelopeError::DestHubNotAllowed(kind));
+    }
+    Ok(())
 }
 
 fn auth_len(signed: bool) -> usize {
@@ -2139,5 +2198,521 @@ mod tests {
             Some(65_535 - 90)
         );
         assert_eq!(payload_budget(80, true, small, None, false), None);
+    }
+
+    /// Layer 7 §5.4: `dest_hub` round-trips on a `CUSTODY_PUT`, alone (11 B)
+    /// and beside another TLV (10 B), and is refused everywhere else.
+    #[test]
+    fn dest_hub_tlv_codec() {
+        let (a, b) = pair();
+        let hint = [0x5a; DEST_HUB_LEN];
+        let put = |ext: Ext| {
+            let mut i = Inner::new(
+                &a.node_id(),
+                Kind::CustodyPut,
+                MsgSeq::CONTROL,
+                vec![7; 120],
+            );
+            i.ext = ext;
+            i
+        };
+        let plain = put(Ext::default()).encode_before_auth().unwrap();
+        let alone = put(Ext {
+            dest_hub: Some(hint),
+            ..Ext::default()
+        });
+        let alone_bytes = alone.encode_before_auth().unwrap();
+        assert_eq!(alone_bytes.len() - plain.len(), DEST_HUB_ALONE_LEN);
+        assert_eq!(DEST_HUB_ALONE_LEN, 11);
+        assert_eq!(
+            &alone_bytes[8..19],
+            &[1, 2, 8, 0x5a, 0x5a, 0x5a, 0x5a, 0x5a, 0x5a, 0x5a, 0x5a]
+        );
+        assert_eq!(alone.flags(), flags::HAS_EXT);
+        assert_eq!(Inner::decode_before_auth(&alone_bytes).unwrap(), alone);
+        let other = RawTlv {
+            tlv_type: 0x42,
+            value: vec![0xee],
+        };
+        let one = put(Ext {
+            unknown: vec![other.clone()],
+            ..Ext::default()
+        })
+        .encode_before_auth()
+        .unwrap();
+        let beside = put(Ext {
+            dest_hub: Some(hint),
+            unknown: vec![other],
+            ..Ext::default()
+        });
+        let beside_bytes = beside.encode_before_auth().unwrap();
+        assert_eq!(beside_bytes.len() - one.len(), DEST_HUB_TLV_LEN);
+        assert_eq!(DEST_HUB_TLV_LEN, 10);
+        assert_eq!(Inner::decode_before_auth(&beside_bytes).unwrap(), beside);
+        // a TLV 0x02 that arrives after another one decodes to the same field
+        let mut swapped = one.clone();
+        swapped[8] = 2;
+        swapped.splice(
+            12..12,
+            [2, 8, 0x5a, 0x5a, 0x5a, 0x5a, 0x5a, 0x5a, 0x5a, 0x5a],
+        );
+        assert_eq!(Inner::decode_before_auth(&swapped).unwrap(), beside);
+        // sealed and opened: the hub reads the hint; the wrap is 131 B
+        let pkt = seal_envelope(&a, &b.keys(), Priority::Interactive, &alone).unwrap();
+        assert_eq!(
+            pkt.len(),
+            crate::frag::CUSTODY_WRAP - 32 + DEST_HUB_ALONE_LEN + alone.payload.len()
+        );
+        let got = open_envelope(&b, &pkt, &lookup_of(vec![a.keys()])).unwrap();
+        assert_eq!(got.inner.ext.dest_hub, Some(hint));
+        // encode side: any other kind, and 0x02 as an "unknown" TLV
+        for k in Kind::ALL.into_iter().filter(|k| k.built_in_v1()) {
+            if k == Kind::CustodyPut {
+                continue;
+            }
+            let seq = if k.carries_msg_seq() {
+                MsgSeq::new(1, 1)
+            } else {
+                MsgSeq::CONTROL
+            };
+            let mut i = Inner::new(&a.node_id(), k, seq, vec![1]);
+            i.ext.dest_hub = Some(hint);
+            if k == Kind::Enroll {
+                i.card = Some(a.own_announce());
+            }
+            assert!(
+                matches!(i.encode_before_auth(), Err(EnvelopeError::DestHubNotAllowed(x)) if x == k),
+                "{k:?}"
+            );
+        }
+        let raw = put(Ext {
+            unknown: vec![RawTlv {
+                tlv_type: TLV_DEST_HUB,
+                value: vec![0; 8],
+            }],
+            ..Ext::default()
+        });
+        assert!(matches!(
+            raw.encode_before_auth(),
+            Err(EnvelopeError::BadTlv)
+        ));
+        // decode side: wrong length, duplicate, another kind
+        let with = |f: &dyn Fn(&mut Vec<u8>)| {
+            let mut v = alone_bytes.clone();
+            f(&mut v);
+            Inner::decode_before_auth(&v)
+        };
+        assert!(matches!(
+            with(&|v| {
+                v[10] = 7;
+                v.remove(11);
+            }),
+            Err(EnvelopeError::DestHubLength(7))
+        ));
+        assert!(matches!(
+            with(&|v| {
+                v[10] = 9;
+                v.insert(11, 0);
+            }),
+            Err(EnvelopeError::DestHubLength(9))
+        ));
+        assert!(matches!(
+            with(&|v| {
+                v[8] = 2;
+                v.splice(9..9, [2, 8, 0, 0, 0, 0, 0, 0, 0, 0]);
+            }),
+            Err(EnvelopeError::DuplicateTlv(TLV_DEST_HUB))
+        ));
+        assert!(matches!(
+            with(&|v| {
+                v[4] = Kind::MailboxItem.byte();
+            }),
+            Err(EnvelopeError::DestHubNotAllowed(Kind::MailboxItem))
+        ));
+    }
+
+    /// Layer 7 vectors (`test-vectors/layer7/`, Layer 7 §5.4): generator,
+    /// drift gate and loader. The frozen Layer 5 files and their drift gate
+    /// (`test_double::frozen`) are untouched.
+    mod layer7 {
+        use super::*;
+        use crate::frag::CUSTODY_WRAP;
+        use crate::mailbox::{decode_put, encode_put};
+        use crate::test_double::{hex, load, vectors_dir, J};
+
+        const FILE: &str = "layer7/dest-hub.json";
+        const WRITTEN: &str = "2026-11-02";
+
+        fn s(v: &str) -> String {
+            format!("\"{}\"", v.replace('\\', "\\\\").replace('"', "\\\""))
+        }
+
+        fn h(b: &[u8]) -> String {
+            s(&hex(b))
+        }
+
+        fn obj(fields: &[(&str, String)]) -> String {
+            let body: Vec<String> = fields
+                .iter()
+                .map(|(k, v)| format!("{}: {v}", s(k)))
+                .collect();
+            format!("{{{}}}", body.join(", "))
+        }
+
+        fn arr(items: &[String]) -> String {
+            format!("[\n    {}\n  ]", items.join(",\n    "))
+        }
+
+        fn doc(fields: &[(&str, String)]) -> String {
+            let body: Vec<String> = fields
+                .iter()
+                .map(|(k, v)| format!("  {}: {v}", s(k)))
+                .collect();
+            format!("{{\n{}\n}}\n", body.join(",\n"))
+        }
+
+        fn tok<E: std::fmt::Debug>(e: E) -> String {
+            format!("{e:?}")
+        }
+
+        fn epk(name: &str) -> [u8; 32] {
+            blake2b_256(&[b"l7-vector-epk", name.as_bytes()])
+        }
+
+        /// The dest contact and the hub its announce names (not `b`).
+        fn dest() -> TestSealer {
+            TestSealer::from_label("l7-dest")
+        }
+
+        fn far_hub() -> TestSealer {
+            TestSealer::from_label("l7-far-hub")
+        }
+
+        fn hint() -> [u8; DEST_HUB_LEN] {
+            let mut h = [0u8; DEST_HUB_LEN];
+            h.copy_from_slice(&far_hub().node_id().as_bytes()[..DEST_HUB_LEN]);
+            h
+        }
+
+        /// A stand-in for the sealed item a member hands its hub: opaque here,
+        /// sized as a sealed packet (`decode_put` checks only the size).
+        fn item() -> Vec<u8> {
+            (0..96u8).map(|i| i.wrapping_mul(37) ^ 0xa5).collect()
+        }
+
+        fn other_tlv() -> RawTlv {
+            RawTlv {
+                tlv_type: 0x42,
+                value: vec![0xee],
+            }
+        }
+
+        /// (name, dest_hub, unknown TLVs).
+        type Case = (&'static str, Option<[u8; DEST_HUB_LEN]>, Vec<RawTlv>);
+
+        fn cases() -> Vec<Case> {
+            vec![
+                ("CUSTODY_PUT without a TLV (the Layer 5 put)", None, vec![]),
+                ("CUSTODY_PUT with dest_hub alone", Some(hint()), vec![]),
+                (
+                    "CUSTODY_PUT with an unknown TLV 0x42 alone",
+                    None,
+                    vec![other_tlv()],
+                ),
+                (
+                    "CUSTODY_PUT with dest_hub beside an unknown TLV 0x42",
+                    Some(hint()),
+                    vec![other_tlv()],
+                ),
+            ]
+        }
+
+        fn put_inner(a: &TestSealer, dest_hub: Option<[u8; 8]>, unknown: Vec<RawTlv>) -> Inner {
+            let mut i = Inner::new(
+                &a.node_id(),
+                Kind::CustodyPut,
+                MsgSeq::CONTROL,
+                encode_put(&dest().node_id(), &item()),
+            );
+            i.ext = Ext {
+                seen_peer_seq: None,
+                dest_hub,
+                unknown,
+            };
+            i
+        }
+
+        /// The TLV region (`n_ext ‖ TLVs`) of an encoded inner, if any.
+        fn ext_region(before: &[u8], i: &Inner) -> Option<Vec<u8>> {
+            if i.ext.is_empty() {
+                return None;
+            }
+            // sender_ref 4 ‖ kind 1 ‖ flags 1 ‖ msg_seq 0‖0 (2); the payload
+            // follows the TLVs (no ack, no card on a CUSTODY_PUT)
+            let start = SENDER_REF_LEN + 2 + i.seq.encoded_len();
+            Some(before[start..before.len() - i.payload.len()].to_vec())
+        }
+
+        /// Inner bytes before auth that the codec must refuse, each with the
+        /// rule of §5.4 it breaks.
+        fn rejects(a: &TestSealer) -> Vec<(String, Vec<u8>)> {
+            let r = node_prefix(&a.node_id());
+            let tlv = |len: u8, value: &[u8]| {
+                let mut v = vec![TLV_DEST_HUB, len];
+                v.extend_from_slice(value);
+                v
+            };
+            let m = |kind: u8, seq: &[u8], tlvs: &[Vec<u8>], tail: &[u8]| {
+                let mut v = r.to_vec();
+                v.push(kind);
+                v.push(flags::HAS_EXT);
+                v.extend_from_slice(seq);
+                v.push(tlvs.len() as u8);
+                for t in tlvs {
+                    v.extend_from_slice(t);
+                }
+                v.extend_from_slice(tail);
+                v
+            };
+            let h = hint();
+            let mut out = Vec::new();
+            for k in Kind::ALL.into_iter().filter(|k| k.built_in_v1()) {
+                if k == Kind::CustodyPut {
+                    continue;
+                }
+                let seq: &[u8] = if k.carries_msg_seq() {
+                    &[1, 1]
+                } else {
+                    &[0, 0]
+                };
+                out.push((
+                    format!("dest_hub on {k:?}"),
+                    m(k.byte(), seq, &[tlv(8, &h)], &[1]),
+                ));
+            }
+            let put = encode_put(&dest().node_id(), &item());
+            for len in [0u8, 7, 9] {
+                let value = vec![0x5a; usize::from(len)];
+                out.push((
+                    format!("dest_hub of length {len} on CustodyPut"),
+                    m(Kind::CustodyPut.byte(), &[0, 0], &[tlv(len, &value)], &put),
+                ));
+            }
+            out.push((
+                "dest_hub twice on CustodyPut".into(),
+                m(
+                    Kind::CustodyPut.byte(),
+                    &[0, 0],
+                    &[tlv(8, &h), tlv(8, &h)],
+                    &put,
+                ),
+            ));
+            out
+        }
+
+        fn generate() -> String {
+            let (a, b) = pair();
+            let ss = a.keyset().ecdh(&b.enc_pubkey()).unwrap();
+            let key = derive_pair_key(&ss, &a.enc_pubkey(), &b.enc_pubkey());
+            let ident = |t: &TestSealer| {
+                obj(&[
+                    ("node_id", h(t.node_id().as_bytes())),
+                    ("enc_pubkey", h(&t.enc_pubkey())),
+                ])
+            };
+            let cs: Vec<String> = cases()
+                .into_iter()
+                .enumerate()
+                .map(|(n, (name, dh, unknown))| {
+                    let i = put_inner(&a, dh, unknown);
+                    let counter = 7_000 + n as u64;
+                    let header =
+                        OuterExtra::to(Priority::Interactive, &b.node_id()).header(counter);
+                    let hb = header_bytes(&header).unwrap();
+                    let e = epk(name);
+                    let before = i.encode_before_auth().unwrap();
+                    let mac = pair_mac(&key, &hb, &e, &before).unwrap();
+                    let inner = Inner::finish(&before, &mac, None);
+                    let packet_len = hb.len() + EPK_LEN + inner.len() + TAG_LEN;
+                    obj(&[
+                        ("name", s(name)),
+                        ("sender", s("a")),
+                        ("recipient", s("b")),
+                        ("counter", s(&counter.to_string())),
+                        ("priority", (Priority::Interactive as u8).to_string()),
+                        ("epk", h(&e)),
+                        ("kind", Kind::CustodyPut.byte().to_string()),
+                        ("dest_hub", i.ext.dest_hub.map_or("null".into(), |d| h(&d))),
+                        (
+                            "unknown_tlvs",
+                            format!(
+                                "[{}]",
+                                i.ext
+                                    .unknown
+                                    .iter()
+                                    .map(|t| format!("[{}, {}]", t.tlv_type, h(&t.value)))
+                                    .collect::<Vec<_>>()
+                                    .join(", ")
+                            ),
+                        ),
+                        ("payload", h(&i.payload)),
+                        (
+                            "ext",
+                            ext_region(&before, &i).map_or("null".into(), |x| h(&x)),
+                        ),
+                        ("header", h(&hb)),
+                        ("inner_before_auth", h(&before)),
+                        ("pair_mac", h(&mac)),
+                        ("inner", h(&inner)),
+                        ("packet_len", packet_len.to_string()),
+                        ("wrap", (packet_len - item().len()).to_string()),
+                    ])
+                })
+                .collect();
+            let rj: Vec<String> = rejects(&a)
+                .iter()
+                .map(|(n, v)| {
+                    obj(&[
+                        ("name", s(n)),
+                        ("before_auth", h(v)),
+                        ("expect", s(&tok(Inner::decode_before_auth(v).unwrap_err()))),
+                    ])
+                })
+                .collect();
+            doc(&[
+                ("spec", s("Layer 7 §5.4 the hint TLV 0x02 dest_hub (L5 §3 ext TLV registry, Layer 7 §5.3 amendment 7)")),
+                ("written", s(WRITTEN)),
+                ("description", s("A member's CUSTODY_PUT to its hub carries the dest contact's home-hub hint (8 B, the hub's NodeId[0..8] from the contact's signed appdata) as ext TLV 0x02 in the hub-sealed put's inner header: type 0x02 ‖ len 8 ‖ value. n_ext (1 B) is present whenever HAS_EXT (flags bit 1) is set, so the hint costs 11 B when it is the only TLV and 10 B beside another TLV (C12). It never follows the payload: the payload is dest(32) ‖ item, and decode_put takes the rest as the item. The encoder writes TLV 0x01, then 0x02, then unknown TLVs. 'ext' is the n_ext ‖ TLVs region; 'wrap' = packet_len − item length (120 B without a TLV, CUSTODY_WRAP; 131 B with the hint alone). 'reject' lists inner-before-auth bytes the codec refuses: 0x02 on any kind other than CUSTODY_PUT (0x03), a length other than 8, the type twice. 'expect' is the Debug form of mesh111::envelope::EnvelopeError. pair_mac and pair key as in ../envelope.json; epk is a fixed stand-in for the sealer's ephemeral.")),
+                ("provenance", s("Generated by mesh111 envelope::tests::layer7::write_layer7_vectors (ignored) from identities a (canonical-12, the member) and b (canonical-24, its hub); dest and far_hub are deterministic test identities. layer7_files_match_generation fails on drift; layer7_vectors re-asserts every field; crosscheck.py's layer7/ section re-derives the TLV bytes from §5.4 alone.")),
+                (
+                    "identities",
+                    format!(
+                        "{{\n    \"a\": {},\n    \"b\": {},\n    \"dest\": {},\n    \"far_hub\": {}\n  }}",
+                        ident(&a),
+                        ident(&b),
+                        ident(&dest()),
+                        ident(&far_hub())
+                    ),
+                ),
+                (
+                    "pair",
+                    obj(&[("shared", h(&*ss)), ("key_a_to_b", h(&*key))]),
+                ),
+                ("item", h(&item())),
+                ("cases", arr(&cs)),
+                ("reject", arr(&rj)),
+            ])
+        }
+
+        /// Regenerate `layer7/dest-hub.json`. Run ONLY under a signed-off
+        /// amendment: `cargo test -p mesh111 write_layer7_vectors -- --ignored`.
+        #[test]
+        #[ignore]
+        fn write_layer7_vectors() {
+            let dir = vectors_dir().join("layer7");
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(vectors_dir().join(FILE), generate()).unwrap();
+        }
+
+        /// The file on disk is exactly what the code generates (drift gate);
+        /// a missing file fails here.
+        #[test]
+        fn layer7_files_match_generation() {
+            let p = vectors_dir().join(FILE);
+            let disk =
+                std::fs::read_to_string(&p).unwrap_or_else(|e| panic!("read {}: {e}", p.display()));
+            assert!(
+                disk == generate(),
+                "{FILE}: implementation drifted from the vector"
+            );
+        }
+
+        fn node(v: &J, who: &str) -> NodeId {
+            NodeId::from(v.get("identities").get(who).get("node_id").h32())
+        }
+
+        /// Every field of the vector re-asserted against the public API.
+        #[test]
+        fn layer7_vectors() {
+            let v = load(FILE);
+            let (a, b) = pair();
+            assert_eq!(node(&v, "a"), a.node_id());
+            assert_eq!(node(&v, "b"), b.node_id());
+            let dest = node(&v, "dest");
+            let far = node(&v, "far_hub");
+            let ss = a.keyset().ecdh(&b.enc_pubkey()).unwrap();
+            let key = derive_pair_key(&ss, &a.enc_pubkey(), &b.enc_pubkey());
+            assert_eq!(hex(&*key), v.get("pair").get("key_a_to_b").s());
+            let item = v.get("item").hex();
+            let cases = v.get("cases").a();
+            assert_eq!(cases.len(), 4);
+            let mut wraps = Vec::new();
+            for x in cases {
+                let name = x.get("name").s();
+                assert_eq!(x.get("kind").n(), u64::from(Kind::CustodyPut.byte()));
+                let dest_hub = (!x.get("dest_hub").is_null())
+                    .then(|| <[u8; 8]>::try_from(x.get("dest_hub").hex()).unwrap());
+                if let Some(dh) = dest_hub {
+                    assert_eq!(dh[..], far.as_bytes()[..DEST_HUB_LEN], "{name}");
+                }
+                let unknown: Vec<RawTlv> = x
+                    .get("unknown_tlvs")
+                    .a()
+                    .iter()
+                    .map(|t| RawTlv {
+                        tlv_type: t.a()[0].n() as u8,
+                        value: t.a()[1].hex(),
+                    })
+                    .collect();
+                let i = put_inner(&a, dest_hub, unknown);
+                assert_eq!(hex(&i.payload), x.get("payload").s(), "{name}");
+                let (d, it) = decode_put(&i.payload).unwrap();
+                assert_eq!((d, it), (dest, &item[..]), "{name}");
+                let header = OuterExtra::to(Priority::Interactive, &b.node_id())
+                    .header(x.get("counter").dec());
+                let hb = header_bytes(&header).unwrap();
+                assert_eq!(hex(&hb), x.get("header").s(), "{name}");
+                let e = x.get("epk").h32();
+                assert_eq!(e, epk(name));
+                let before = i.encode_before_auth().unwrap();
+                assert_eq!(hex(&before), x.get("inner_before_auth").s(), "{name}");
+                let got = Inner::decode_before_auth(&before).unwrap();
+                assert_eq!(got, i, "{name}");
+                assert_eq!(got.ext.dest_hub, dest_hub, "{name}");
+                let region = ext_region(&before, &i);
+                match region {
+                    Some(r) => assert_eq!(hex(&r), x.get("ext").s(), "{name}"),
+                    None => assert!(x.get("ext").is_null(), "{name}"),
+                }
+                let mac = pair_mac(&key, &hb, &e, &before).unwrap();
+                assert_eq!(hex(&mac), x.get("pair_mac").s(), "{name}");
+                assert!(verify_pair_mac(&key, &hb, &e, &before, &mac));
+                let inner = Inner::finish(&before, &mac, None);
+                assert_eq!(hex(&inner), x.get("inner").s(), "{name}");
+                // the full seal/open path: same length, the hub reads the hint
+                let pkt = seal_envelope(&a, &b.keys(), Priority::Interactive, &i).unwrap();
+                assert_eq!(pkt.len() as u64, x.get("packet_len").n(), "{name}");
+                let opened = open_envelope(&b, &pkt, &lookup_of(vec![a.keys()])).unwrap();
+                assert_eq!(opened.inner.ext.dest_hub, dest_hub, "{name}");
+                let wrap = x.get("wrap").n() as usize;
+                assert_eq!(wrap, pkt.len() - item.len(), "{name}");
+                wraps.push(wrap);
+            }
+            // §5.3 am. 4 and §5.4 (C12): 120 B, 131 B; 10 B beside a TLV
+            assert_eq!(wraps[0], CUSTODY_WRAP);
+            assert_eq!(wraps[1], CUSTODY_WRAP + DEST_HUB_ALONE_LEN);
+            assert_eq!(wraps[1], 131);
+            assert_eq!(wraps[3] - wraps[2], DEST_HUB_TLV_LEN);
+            let rejects = v.get("reject").a();
+            assert_eq!(rejects.len(), rejects_len());
+            for x in rejects {
+                let got = Inner::decode_before_auth(&x.get("before_auth").hex()).unwrap_err();
+                assert_eq!(tok(got), x.get("expect").s(), "{}", x.get("name").s());
+            }
+        }
+
+        fn rejects_len() -> usize {
+            rejects(&TestSealer::from_words(MNEMONIC_A)).len()
+        }
     }
 }

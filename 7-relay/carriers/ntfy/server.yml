@@ -1,0 +1,66 @@
+# 7-relay/carriers/ntfy/server.yml — the recommended self-host config for the 111 ntfy carrier
+# (spec 7-relay/README.md §6.2 "The recommended self-host config"; row P1; D30 Q15).
+#
+# The server is the owner's: ntfy.sh is for a manual check only. Upstream: binwiederhier/ntfy
+# (Apache-2.0 and GPL-2.0), v2.36.0 of 2026-10-31. The keys below are upstream's `server/server.yml`
+# keys as R07g1 §3 items 3-5 read them; this box could not run a real server, so every value is
+# *unverified from this box* until the G10 log (`7-relay/verify/logs/ntfy-smoke-<calver>.md`, row V4)
+# runs against it. Copy this file to /etc/ntfy/server.yml and change the paths and base-url.
+#
+# What the 111 carrier needs from the server: two topics per gateway pair (`111` + 32 base32
+# characters, one per direction), message bodies up to 4,096 B, `GET /<topic>/json?poll=1&since=<id>`
+# and a held `GET /<topic>/json`. It never uses attachments, the web app or push forwarding.
+
+# The public URL the gateways are configured with (`carrier.ntfy.server`, https://).
+base-url: "https://ntfy.example.org"
+
+# Listen behind TLS (or behind a reverse proxy that terminates it; then set behind-proxy: true so
+# the visitor limits apply per client address, not per proxy). An http:// server is accepted by a
+# 111 hub only on a private address, and then the token crosses that LAN in clear (§9.5 T6).
+listen-http: ":80"
+# listen-https: ":443"
+# key-file: "/etc/letsencrypt/live/ntfy.example.org/privkey.pem"
+# cert-file: "/etc/letsencrypt/live/ntfy.example.org/fullchain.pem"
+# behind-proxy: false
+
+# Retention. The default cache is 12 h in memory and lost on a restart; a lost batch costs a
+# re-post, never a message (§5.9), but a 5A gateway away for longer than the cache loses its
+# mailbox. A cache file survives restarts; 168 h is longer than the expected gap between two
+# gateways' flushes (a default; change it to taste).
+cache-file: "/var/cache/ntfy/cache.db"
+cache-duration: "168h"
+
+# Access control: nothing is readable or writable without a token. One user and one read-write
+# token per gateway pair, limited to that pair's topics (both directions):
+#
+#   ntfy user add 111-pair-ab                                 # once per pair
+#   ntfy access 111-pair-ab '<topic(A→B)>' rw                 # the pair's two topic names
+#   ntfy access 111-pair-ab '<topic(B→A)>' rw                 # (§6.2 "Topic")
+#   ntfy token add 111-pair-ab                                # → carrier.ntfy.token on both hubs
+#
+# (On a server that serves only 111 pairs, `ntfy access 111-pair-ab '111*' rw` is the coarse
+# form: every pair's token then reaches every pair's topics, which still hold sealed bytes only.)
+# The client sends the token as `Authorization: Bearer <token>` (unverified from this box).
+auth-file: "/var/lib/ntfy/user.db"
+auth-default-access: "deny-all"
+
+# Attachments off: no attachment-cache-dir, so a body over 4,096 B is refused (413) instead of
+# being stored as a file. The 111 carrier never posts one (max_frame 3,068 B).
+# attachment-cache-dir: (unset)
+
+# No push forwarding: leave both unset, so messages are not passed to Firebase or to an upstream
+# ntfy server for iOS push (whether a given server forwards is a G10 log item).
+# firebase-key-file: (unset)
+# upstream-base-url: (unset)
+
+# Upstream's defaults, written out (the G10 log measures them; the carrier's 5B read timeout is
+# 3 × keepalive-interval, so a gateway's `keepalive` setting should match this value).
+keepalive-interval: "45s"
+visitor-request-limit-burst: 60
+visitor-request-limit-replenish: "5s"
+visitor-subscription-limit: 30
+
+# The web app and sign-up are not needed by 111 (a smaller surface).
+# web-root: "disable"
+# enable-signup: false
+# enable-login: false

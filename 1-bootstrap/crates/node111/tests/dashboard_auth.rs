@@ -1078,6 +1078,25 @@ async fn framework_errors_are_problem_json() {
     r.problem(413, "bad_request");
     // the Layer 1 seam is GET-only: 405 there is problem+json as well
     request(port, "POST", "/api/status", Some("127.0.0.1"), &[], None).problem(405, "bad_request");
+    // a doubled slash routes nowhere (axum does not collapse it): the unknown
+    // API route, any method, with a bearer too — not the catch-all's bare 405
+    let token = auth::DaemonToken::mint().unwrap();
+    n.api.insert_ext(token.clone());
+    let json = [
+        ("Content-Type", "application/json"),
+        ("Authorization", &bearer(&token)),
+    ];
+    for path in [
+        "//api/v1/node/restart",
+        "//api/v1/status",
+        "///api/status",
+        "/api",
+    ] {
+        for method in ["POST", "GET", "DELETE"] {
+            request(port, method, path, Some("127.0.0.1"), &json, Some("{}"))
+                .problem(404, "not_found");
+        }
+    }
     // non-API paths keep their plain answers
     let r = get(port, "/missing.js");
     assert_eq!(r.status, 404);
@@ -1380,11 +1399,24 @@ fn concrete(path: &str) -> String {
         .replace("{net}", "meshtastic")
         .replace("{conv}", "fc-1")
         .replace("{id}", "abcd1234")
+        .replace("{node_id}", &"cd".repeat(32))
 }
 
 /// Contract operations 111d serves no route for (contract-only: `404` for everyone, so a
-/// bearer reaches nothing there either).
-const UNROUTED: &[&str] = &["flashDevice"];
+/// bearer reaches nothing there either). The Layer 7 writes are in the contract ahead of
+/// their routes (`7-relay/TASKS.md` C1 before the D-rows): the row that routes one removes
+/// it from here, so the walk then holds it to the rule like every other write.
+const UNROUTED: &[&str] = &[
+    "flashDevice",
+    "patchRelaySettings",
+    "offerRelayPair",
+    "pairRelayHub",
+    "unpairRelayHub",
+    "checkRelayCarrier",
+    "flushRelayCarrier",
+    "browseRegistry",
+    "runNearbyHops",
+];
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn the_agent_bearer_is_refused_on_every_write_of_the_contract() {

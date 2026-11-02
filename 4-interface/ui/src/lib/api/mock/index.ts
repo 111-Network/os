@@ -43,6 +43,8 @@ import { SERVICE_IDS } from "../types";
 import { MockBus, realClock, type MockClock } from "./bus";
 import { finalSentence, pickReply, tokenize } from "./chat";
 import { createBridgeMock } from "./bridge";
+import type { RelayAdapter } from "../relay";
+import { createRelayMock, type RelayRoutes } from "./relay";
 import { buildFixtures, iso, layersRunning, logLine } from "./fixtures";
 import { HUB, MOCK_HUB_ADDRESS, MOCK_REASONS, buildNearby, buildPanels, cancelQueued, fabricRow, hex64, hubBundleText, makeContact, meshtasticLiveRow, pageOf, threadsOf } from "./messaging";
 import { cardFor } from "./qr";
@@ -72,6 +74,13 @@ export interface MockControls {
   readonly bus: MockBus;
   /** Drop the event stream for `ms`, then reconnect with Last-Event-ID replay (or reset). */
   dropConnection(ms: number): void;
+  /** The node refuses a still-queued foreign own row before air (`failed` with `reason`), as a scenario script's `bridgeRefuse` does. */
+  bridgeRefuse(id: string, reason: string): void;
+  /** A foreign text arrives from the air, as a scenario script's `bridgeReceive` does (a `network_message` frame; the conversation's `unread` rises). */
+  bridgeReceive(conv: string, sender: { native: string; name: string }, text: string, o?: { via_internet?: boolean }): void;
+  /** Layer 7: the relay adapter over the same bus (`getRelay()` in ../index.ts returns it for a mock page), and its mock controls. */
+  readonly relay: RelayAdapter;
+  readonly relayControl: RelayRoutes["control"];
   dispose(): void;
 }
 
@@ -356,6 +365,23 @@ export function createMockAdapter(opts: MockOptions = {}): MockAdapter {
     sendTo111: queueText,
   });
 
+  // --- Layer 7: relay status and settings, pairing, registry, update origins (mock/relay.ts) --------------------------------------
+  const R = createRelayMock({ now: () => clock.now(), later, publish: (f) => bus.publish(f), loopback: () => state.auth.loopback, onHops: () => publishNearby() });
+  const relay: RelayAdapter = {
+    kind: "mock",
+    status: () => rest(() => R.status()),
+    patchSettings: (patch, acceptWarning) => rest(() => R.patchSettings(patch, acceptWarning)),
+    pairOffer: (body) => rest(() => R.pairOffer(body)),
+    pair: (body) => rest(() => R.pair(body)),
+    unpair: (nodeId) => rest(() => R.unpair(nodeId)).then(() => undefined),
+    checkCarrier: () => rest(() => R.checkCarrier()),
+    flushCarrier: () => rest(() => R.flushCarrier()),
+    registry: () => rest(() => R.registry()),
+    browseRegistry: () => rest(() => R.browseRegistry()),
+    nearbyHops: () => rest(() => R.nearbyHops()),
+    updateOrigins: () => rest(() => R.updateOrigins()),
+  };
+
   const ctx: ScriptContext = {
     now: () => clock.now(),
     patchStatus(fn) {
@@ -403,6 +429,9 @@ export function createMockAdapter(opts: MockOptions = {}): MockAdapter {
     },
     bridgeReceive(convId, sender, text, o) {
       B.receive(convId, sender, text, o);
+    },
+    bridgeRefuse(id, reason) {
+      B.refuse(id, reason);
     },
   };
 
@@ -1145,6 +1174,10 @@ export function createMockAdapter(opts: MockOptions = {}): MockAdapter {
     state,
     bus,
     dropConnection: (ms) => bus.disconnect(ms),
+    bridgeRefuse: (id, reason) => B.refuse(id, reason),
+    bridgeReceive: (conv, sender, text, o) => B.receive(conv, sender, text, o),
+    relay,
+    relayControl: R.control,
     dispose() {
       disposed = true;
       bus.stop();

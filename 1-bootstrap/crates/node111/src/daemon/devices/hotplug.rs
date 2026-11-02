@@ -193,12 +193,48 @@ fn recv_from(fd: libc::c_int, buf: &mut [u8]) -> std::io::Result<(usize, u32)> {
     Ok((rc as usize, from.nl_pid))
 }
 
+/// What a `recvfrom` error means for the source (C4 review minor).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RecvStep {
+    /// `ENOBUFS`: the kernel dropped events — one kick, the tick re-reads sysfs.
+    Overrun,
+    /// `EINTR`, `EAGAIN` / `EWOULDBLOCK`: nothing lost, read again.
+    Retry,
+    /// Anything else: the source closes (logged once; the 5 s poll stays the fallback).
+    Close,
+}
+
+fn recv_step(e: &std::io::Error) -> RecvStep {
+    match e.raw_os_error() {
+        Some(libc::ENOBUFS) => RecvStep::Overrun,
+        // EWOULDBLOCK is EAGAIN on Linux
+        Some(libc::EINTR) | Some(libc::EAGAIN) => RecvStep::Retry,
+        _ if e.kind() == std::io::ErrorKind::Interrupted
+            || e.kind() == std::io::ErrorKind::WouldBlock =>
+        {
+            RecvStep::Retry
+        }
+        _ => RecvStep::Close,
+    }
+}
+
+/// The one line a closing source logs (the daemon then runs on the 5 s poll alone).
+fn log_closed(why: &dyn std::fmt::Display) {
+    eprintln!("111 devices: the uevent source closed ({why}); the 5 s device poll stays");
+}
+
 impl HotplugSource for NetlinkUevent {
     fn next_event(&mut self) -> BoxFut<'_, Option<Uevent>> {
         Box::pin(async move {
             let mut buf = vec![0u8; MAX_UEVENT_BYTES];
             loop {
-                let mut guard = self.fd.readable().await.ok()?;
+                let mut guard = match self.fd.readable().await {
+                    Ok(g) => g,
+                    Err(e) => {
+                        log_closed(&e);
+                        return None;
+                    }
+                };
                 let got = guard.try_io(|inner| {
                     use std::os::unix::io::AsRawFd;
                     recv_from(inner.get_ref().as_raw_fd(), &mut buf)
@@ -212,16 +248,23 @@ impl HotplugSource for NetlinkUevent {
                         }
                     }
                     Ok(Ok(_)) => {}
-                    Ok(Err(e)) if e.raw_os_error() == Some(libc::ENOBUFS) => {
-                        // the kernel dropped events: the tick re-reads sysfs
-                        return Some(Uevent {
-                            action: Action::Add,
-                            subsystem: Subsystem::Usb,
-                            devpath: "(overrun)".into(),
-                            devname: None,
-                        });
-                    }
-                    Ok(Err(_)) => return None,
+                    Ok(Err(e)) => match recv_step(&e) {
+                        RecvStep::Overrun => {
+                            // the kernel dropped events: the tick re-reads sysfs
+                            return Some(Uevent {
+                                action: Action::Add,
+                                subsystem: Subsystem::Usb,
+                                devpath: "(overrun)".into(),
+                                devname: None,
+                            });
+                        }
+                        RecvStep::Retry => continue,
+                        RecvStep::Close => {
+                            // the forward task ends after this: logged once
+                            log_closed(&e);
+                            return None;
+                        }
+                    },
                     Err(_would_block) => continue,
                 }
             }
@@ -358,12 +401,61 @@ mod tests {
         task.await.unwrap();
     }
 
+    /// Whether this kernel/sandbox offers `AF_NETLINK` uevent sockets at all.
+    fn netlink_available() -> Result<(), std::io::Error> {
+        // SAFETY: plain socket(2); the fd is closed right away.
+        let fd = unsafe {
+            libc::socket(
+                libc::AF_NETLINK,
+                libc::SOCK_DGRAM | libc::SOCK_CLOEXEC,
+                NETLINK_KOBJECT_UEVENT,
+            )
+        };
+        if fd < 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        // SAFETY: fd is ours.
+        unsafe { libc::close(fd) };
+        Ok(())
+    }
+
     #[tokio::test]
     async fn the_uevent_socket_binds_unprivileged() {
-        // a real socket (skipped where netlink is not available)
-        match NetlinkUevent::new() {
-            Ok(_) => {}
-            Err(e) => eprintln!("uevent netlink unavailable here ({e:#})"),
+        // a real socket: it must open and bind wherever AF_NETLINK exists
+        match netlink_available() {
+            Ok(()) => {
+                let src = NetlinkUevent::new();
+                assert!(src.is_ok(), "uevent socket: {:?}", src.err());
+            }
+            Err(e) => eprintln!("SKIP the_uevent_socket_binds_unprivileged: no AF_NETLINK ({e})"),
+        }
+    }
+
+    #[test]
+    fn recv_errors_retry_on_eintr_and_eagain_and_close_otherwise() {
+        use std::io::Error;
+        assert_eq!(
+            recv_step(&Error::from_raw_os_error(libc::EINTR)),
+            RecvStep::Retry
+        );
+        assert_eq!(
+            recv_step(&Error::from_raw_os_error(libc::EAGAIN)),
+            RecvStep::Retry
+        );
+        assert_eq!(
+            recv_step(&Error::from_raw_os_error(libc::EWOULDBLOCK)),
+            RecvStep::Retry
+        );
+        assert_eq!(
+            recv_step(&Error::from_raw_os_error(libc::ENOBUFS)),
+            RecvStep::Overrun
+        );
+        for e in [libc::EBADF, libc::ENOTSOCK, libc::EINVAL, libc::ENOMEM] {
+            assert_eq!(
+                recv_step(&Error::from_raw_os_error(e)),
+                RecvStep::Close,
+                "{e}"
+            );
         }
     }
 }

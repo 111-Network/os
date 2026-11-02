@@ -607,11 +607,12 @@ impl Meshtastic {
         vec![NearbySource::meshtastic(&id, &label, nodes)]
     }
 
+    /// The SSE `nearby` frame on a change of this module's sources: the merged list
+    /// `GET /nearby` answers (this module's sources, then the bridge's `reticulum` ones,
+    /// `api_v1::nearby::publish`; W3, Layer 6 §14), so a Meshtastic change never sends a
+    /// frame without the other sources.
     fn publish_nearby(&self, api: &ApiState) {
-        api.events.publish(
-            "nearby",
-            &serde_json::json!({ "sources": self.nearby_sources() }),
-        );
+        crate::daemon::dashboard::api_v1::nearby::publish(api);
     }
 
     // ------------------------------------------------------------ lifecycle
@@ -1172,5 +1173,70 @@ mod tests {
             uplink_present(&wifi, dir.path(), Path::new("/")),
             Some(true)
         );
+    }
+
+    /// W3: a Meshtastic change publishes the merged list — with one reticulum node in
+    /// `BridgeNearby`, the frame lists the board's source and the reticulum one.
+    #[tokio::test]
+    async fn a_meshtastic_nearby_change_publishes_the_reticulum_sources_too() {
+        use crate::daemon::dashboard::api_v1::nearby::BridgeNearby;
+        use crate::daemon::dashboard::{ApiConfig, DashboardState};
+        let dir = tempfile::tempdir().unwrap();
+        let layout = DaemonLayout {
+            root: dir.path().to_path_buf(),
+            etc: dir.path().join("etc"),
+        };
+        let dash = Arc::new(std::sync::RwLock::new(DashboardState::new("2026.10.23")));
+        let api = ApiState::new(dash, ApiConfig::new(layout.clone(), false));
+        let m = Meshtastic::new(
+            MeshtasticConfig::production(&layout, false),
+            Arc::new(PortTable::new()),
+        );
+        api.insert_ext(Arc::clone(&m));
+        // a bound board with a node DB of one
+        std::fs::create_dir_all(m.presence.path().parent().unwrap()).unwrap();
+        std::fs::write(
+            m.presence.path(),
+            r#"{"schema":1,"nodes":[{"id":"!00000002","num":2,"long_name":"Ann","short_name":"AN"}]}"#,
+        )
+        .unwrap();
+        assert_eq!(m.presence.refresh(), presence::Refresh::Changed);
+        *lock(&m.service) = Some(Service {
+            device_id: "dev-1".into(),
+            uplink: Uplink::serial("/dev/serial/by-id/usb-w3-test").unwrap(),
+            meshmud: None,
+            reader: None,
+            port_held_by: None,
+            awaiting_binary: false,
+            identify_born: false,
+        });
+        // one reticulum node heard by the LXMF helper
+        let heard = Arc::new(BridgeNearby::default());
+        let me = "0123456789abcdef0123456789abcdef";
+        let peer = "fedcba9876543210fedcba9876543210";
+        assert!(heard.push(
+            crate::daemon::bridge::NETWORK_LXMF,
+            &crate::daemon::bridge::lxmf::nearby_source(me, peer, "Bob"),
+        ));
+        api.insert_ext(heard);
+        let head = api.events.head();
+        m.publish_nearby(&api);
+        let sub = api.events.subscribe(Some(head));
+        let frames: Vec<serde_json::Value> = sub
+            .replay
+            .iter()
+            .filter(|f| f.event == "nearby")
+            .map(|f| serde_json::from_str(&f.data).unwrap())
+            .collect();
+        assert_eq!(frames.len(), 1, "one frame per change");
+        let kinds: Vec<&str> = frames[0]["sources"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|s| s["kind"].as_str().unwrap())
+            .collect();
+        assert_eq!(kinds, ["meshtastic", "reticulum"], "{}", frames[0]);
+        assert_eq!(frames[0]["sources"][0]["nodes"][0]["id"], "!00000002");
+        assert_eq!(frames[0]["sources"][1]["nodes"][0]["id"], peer);
     }
 }

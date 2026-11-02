@@ -6,7 +6,7 @@ Messages, sends one text into several networks as per-target messages, and relay
 **device core** (hotplug, port ownership, consented identify, RNode stanza proposals, a narrow apply→verify→undo cut) carry the radios. Every adopted
 program is a separate, on-demand component that weighs nothing at runtime while it is off.
 
-Status: ✅ **v1.0, locked (D27, 2026-10-19)** — v0.3 as reviewed (three-judge fable panel on v0.1, one re-check on v0.2; D25, D26). Nothing here is built yet. Build tasks will live in `TASKS.md` per
+Status: ✅ **v1.0, locked (D27, 2026-10-19)** — v0.3 as reviewed (three-judge fable panel on v0.1, one re-check on v0.2; D25, D26). **Built and locked as built on 2026-10-23 (D29):** the build board `TASKS.md` carries every task's as-built facts, the gates, the measured Pi floor, the recorded amendments and the open items; the spec text below is unchanged.
 `os/plan/EXECUTION.md` (not written yet). Anything beyond the options brief and research lens 4 §4.8 is marked **(draft proposal)**. The changelog
 from v0.1 is at the end.
 

@@ -14,9 +14,10 @@
 //!   to show (N bytes)"). Native ids and accounts are cleaned but never cut: one over the
 //!   store's field cap is refused (counted as noise), because a cut id could merge two
 //!   senders.
-//! - **`meta`** is rebuilt from a closed set of keys (`snr`, `rssi`, `hops`, `via_mqtt`,
-//!   `ok_to_mqtt`), each type-checked; anything else the adapter sent is dropped (the core
-//!   interprets no foreign field).
+//! - **`meta`** is rebuilt from a closed set of keys, each type-checked and capped: the
+//!   Meshtastic ones (`snr`, `rssi`, `hops`, `via_mqtt`, `ok_to_mqtt`, §5) and the LXMF ones
+//!   (`why_unsigned`, `relay`, `attachments`, `helper_truncated`, `fields_truncated`, §6);
+//!   anything else the adapter sent is dropped (the core interprets no foreign field).
 //! - **Dedupe** is the store's (§3 key `(conv, sender_native, native_msg_id)`): the
 //!   adapter's [`super::AdapterFacts::ids_globally_unique`] picks key-alone (LXMF hash,
 //!   app ids) or key + body within the last 32 inbound rows (Meshtastic's 32-bit ids).
@@ -125,7 +126,69 @@ pub fn body(s: &str) -> (String, Option<u64>) {
     }
 }
 
-/// The closed `meta` keys an adapter may report (§3), type-checked; plus `truncated`.
+/// A non-empty body made only of what [`clean`] strips (Cc and Cf; V5-4): it would be
+/// stored as an empty bubble, so the core drops it as noise (counted, never stored). An
+/// empty body stays a row (an adapter may report attachments with no text). Looks at what
+/// [`body`] looks at (the first `4 × 64 KiB`).
+pub fn cleans_to_nothing(raw: &str) -> bool {
+    !raw.is_empty() && cut(raw, MAX_RAW_BYTES).chars().all(is_stripped)
+}
+
+/// The `why_unsigned` values (§6 (5): the library's `unverified_reason`, or `unverified`).
+pub const WHY_UNSIGNED: &[&str] = &["source_unknown", "signature_invalid", "unverified"];
+/// The registered network ids a relay field may name (§3, §8).
+const RELAY_NETS: &[&str] = &[
+    super::NETWORK_MESHTASTIC,
+    super::NETWORK_LXMF,
+    super::NETWORK_DELTACHAT,
+    super::NETWORK_SIMPLEX,
+];
+/// A relay field's `id` / `mid` at most (the LXMF adapter's cap: a §3 name).
+pub const MAX_RELAY_PART: usize = MAX_NAME_BYTES;
+
+/// A relay field's text part: non-empty, at most `max` bytes, already clean (§3) and in
+/// the §8 marker alphabet (no `]`, no `/`); anything else is dropped, never repaired.
+fn relay_part(v: Option<&Value>, max: usize) -> Option<&str> {
+    let s = v?.as_str()?;
+    let ok = !s.is_empty()
+        && s.len() <= max
+        && !s.chars().any(|c| c == ']' || c == '/' || is_stripped(c))
+        && clean(s) == s;
+    ok.then_some(s)
+}
+
+/// `meta.relay` (§6 "Relay marker and fields", the received custom field the LXMF adapter
+/// surfaces): exactly `{v: 1, net, id, mid}` with `net` a registered network.
+fn relay_meta(v: &Value) -> Option<Value> {
+    let o = v.as_object()?;
+    if o.len() != 4 || o.get("v").and_then(Value::as_u64) != Some(1) {
+        return None;
+    }
+    let net = o.get("net").and_then(Value::as_str)?;
+    if !RELAY_NETS.contains(&net) {
+        return None;
+    }
+    let id = relay_part(o.get("id"), MAX_RELAY_PART)?;
+    let mid = relay_part(o.get("mid"), MAX_RELAY_PART)?;
+    Some(serde_json::json!({ "v": 1, "net": net, "id": id, "mid": mid }))
+}
+
+/// `meta.attachments` (§6 (5): counted, never ingested): exactly `{count, bytes}`, two
+/// non-negative integers, `count` ≥ 1.
+fn attachments_meta(v: &Value) -> Option<Value> {
+    let o = v.as_object()?;
+    let count = o.get("count").and_then(Value::as_u64).filter(|n| *n > 0)?;
+    let bytes = o.get("bytes").and_then(Value::as_u64)?;
+    (o.len() == 2).then(|| serde_json::json!({ "count": count, "bytes": bytes }))
+}
+
+/// The closed `meta` keys an adapter may report (§3), each type-checked; anything else is
+/// dropped, and a key whose value does not fit is dropped alone. Meshtastic (§5): `snr`,
+/// `rssi` (numbers), `hops` (a non-negative integer), `via_mqtt`, `ok_to_mqtt` (booleans).
+/// LXMF (§6 (5), the adapter's `msg` mapping): `why_unsigned` (one of [`WHY_UNSIGNED`]),
+/// `relay` ([`relay_meta`]), `attachments` ([`attachments_meta`]), `helper_truncated` and
+/// `fields_truncated` (`true` only: the helper cut the text or dropped fields). Plus
+/// `truncated`, which only this function sets (the original size of a body cut here).
 fn meta(adapter: &Value, truncated: Option<u64>) -> Option<String> {
     let mut out = Map::new();
     if let Value::Object(m) = adapter {
@@ -140,6 +203,24 @@ fn meta(adapter: &Value, truncated: Option<u64>) -> Option<String> {
         for key in ["via_mqtt", "ok_to_mqtt"] {
             if let Some(v) = m.get(key).filter(|v| v.is_boolean()) {
                 out.insert(key.into(), v.clone());
+            }
+        }
+        if let Some(why) = m
+            .get("why_unsigned")
+            .and_then(Value::as_str)
+            .filter(|w| WHY_UNSIGNED.contains(w))
+        {
+            out.insert("why_unsigned".into(), Value::from(why));
+        }
+        if let Some(r) = m.get("relay").and_then(relay_meta) {
+            out.insert("relay".into(), r);
+        }
+        if let Some(a) = m.get("attachments").and_then(attachments_meta) {
+            out.insert("attachments".into(), a);
+        }
+        for key in ["helper_truncated", "fields_truncated"] {
+            if m.get(key) == Some(&Value::Bool(true)) {
+                out.insert(key.into(), Value::Bool(true));
             }
         }
     }
@@ -162,17 +243,46 @@ pub fn auth(a: super::Auth) -> ForeignAuth {
 }
 
 /// One inbound text as the store row it becomes (§3), or `None` when it is noise (no
-/// usable sender, an over-long native id). `conv` is the conversation's row id; the
-/// adapter's auth label passes through (§3 "Authentication label").
+/// usable sender, an over-long native id, a body that cleans to nothing —
+/// [`cleans_to_nothing`]). `conv` is the conversation's row id; the adapter's auth label
+/// passes through (§3 "Authentication label").
 pub fn prepare(t: &InboundText, conv: i64, ids_globally_unique: bool) -> Option<ForeignInsert> {
+    if cleans_to_nothing(&t.body) {
+        return None;
+    }
+    let (sender_native, native_msg_id) = ids(t)?;
+    Some(prepare_ids(
+        t,
+        conv,
+        ids_globally_unique,
+        sender_native,
+        native_msg_id,
+    ))
+}
+
+/// The cleaned `(sender_native, native_msg_id)` of an inbound text ([`native`] on both,
+/// once), or `None` when it is noise (no usable sender, an over-long id). The core cleans
+/// once and uses these values for §8 guard 2 and for the stored row alike (F9).
+pub fn ids(t: &InboundText) -> Option<(String, Option<String>)> {
     let sender_native = native(&t.sender_native)?;
     let native_msg_id = if t.native_msg_id.is_empty() {
         None
     } else {
         Some(native(&t.native_msg_id)?)
     };
+    Some((sender_native, native_msg_id))
+}
+
+/// [`prepare`] with the ids already cleaned by [`ids`].
+pub fn prepare_ids(
+    t: &InboundText,
+    conv: i64,
+    ids_globally_unique: bool,
+    sender_native: String,
+    native_msg_id: Option<String>,
+) -> ForeignInsert {
     let (body, truncated) = body(&t.body);
-    Some(ForeignInsert {
+    ForeignInsert {
         conv,
         sender_native,
         sender_name: name(&t.sender_name),
@@ -182,7 +292,7 @@ pub fn prepare(t: &InboundText, conv: i64, ids_globally_unique: bool) -> Option<
         claim_ts: t.claim_ts,
         meta: meta(&t.meta, truncated),
         id_globally_unique: ids_globally_unique,
-    })
+    }
 }
 
 /// §8 guard 2: the native ids of our own accepted sends, bounded per network (oldest
@@ -221,9 +331,29 @@ impl OwnEcho {
 
 /// Is `t` our own echo (§8 guard 2): from an account of this node on its network, or
 /// carrying a native id of one of our own sends?
+/// The ids are compared cleaned, as the store would hold them (F9).
 pub fn is_own_echo(t: &InboundText, accounts: &[super::AccountFacts], echo: &OwnEcho) -> bool {
-    accounts.iter().any(|a| a.id == t.sender_native)
-        || (!t.native_msg_id.is_empty() && echo.is_ours(&t.conv.network, &t.native_msg_id))
+    match ids(t) {
+        Some((sender, msg)) => {
+            is_own_echo_ids(&t.conv.network, &sender, msg.as_deref(), accounts, echo)
+        }
+        None => accounts.iter().any(|a| a.id == t.sender_native),
+    }
+}
+
+/// §8 guard 2 on ids already cleaned by [`ids`]: `sender` is an account of this node on
+/// `network` (compared raw and cleaned), or `msg` is one of our recorded own ids.
+pub fn is_own_echo_ids(
+    network: &str,
+    sender: &str,
+    msg: Option<&str>,
+    accounts: &[super::AccountFacts],
+    echo: &OwnEcho,
+) -> bool {
+    accounts
+        .iter()
+        .any(|a| a.id == sender || native(&a.id).as_deref() == Some(sender))
+        || msg.is_some_and(|m| echo.is_ours(network, m))
 }
 
 /// Does `s` match an anchored recipient-syntax pattern (`caps.recipient_syntax`, the
@@ -406,6 +536,107 @@ mod tests {
     }
 
     #[test]
+    fn v5_4_a_body_of_only_cc_and_cf_is_noise_an_empty_one_is_not() {
+        for raw in [
+            "\u{202E}\u{200B}\u{FEFF}",
+            "\u{7}\r\u{0}",
+            "\u{AD}",
+            "\u{E0041}\u{2066}",
+        ] {
+            assert!(cleans_to_nothing(raw), "{raw:?}");
+            assert!(
+                prepare(&text(raw, "Ann"), 3, false).is_none(),
+                "{raw:?}: noise"
+            );
+        }
+        // an empty body stays a row (attachments with no text); any kept char keeps it
+        assert!(!cleans_to_nothing(""));
+        assert!(prepare(&text("", "Ann"), 3, false).is_some());
+        for raw in ["\u{202E}a", "\n", "\t", " "] {
+            assert!(!cleans_to_nothing(raw), "{raw:?}");
+            assert!(prepare(&text(raw, "Ann"), 3, false).is_some(), "{raw:?}");
+        }
+    }
+
+    fn lxmf(meta: Value) -> InboundText {
+        let mut t = text("hi", "Ann");
+        t.conv.network = "lxmf".into();
+        t.auth = Auth::None;
+        t.meta = meta;
+        t
+    }
+
+    fn meta_of(t: &InboundText) -> Value {
+        prepare(t, 9, true)
+            .unwrap()
+            .meta
+            .map_or(Value::Null, |m| serde_json::from_str(&m).unwrap())
+    }
+
+    #[test]
+    fn every_lxmf_meta_key_round_trips_with_its_type() {
+        let all = serde_json::json!({
+            "why_unsigned": "source_unknown",
+            "relay": {"v": 1, "net": "meshtastic", "id": "W1AW7", "mid": "00ff"},
+            "attachments": {"count": 2, "bytes": 1200},
+            "helper_truncated": true,
+            "fields_truncated": true,
+        });
+        assert_eq!(meta_of(&lxmf(all.clone())), all);
+        for why in WHY_UNSIGNED {
+            assert_eq!(
+                meta_of(&lxmf(serde_json::json!({ "why_unsigned": why }))),
+                serde_json::json!({ "why_unsigned": why })
+            );
+        }
+        // Meshtastic and LXMF keys live in one closed set
+        let mixed = serde_json::json!({"snr": 1.5, "why_unsigned": "unverified"});
+        assert_eq!(meta_of(&lxmf(mixed.clone())), mixed);
+    }
+
+    #[test]
+    fn a_wrong_type_or_shape_drops_that_key_alone() {
+        for bad in [
+            serde_json::json!({"why_unsigned": "because"}),
+            serde_json::json!({"why_unsigned": 1}),
+            serde_json::json!({"relay": "x"}),
+            serde_json::json!({"relay": {"v": 2, "net": "meshtastic", "id": "a", "mid": "b"}}),
+            serde_json::json!({"relay": {"v": 1, "net": "elsewhere", "id": "a", "mid": "b"}}),
+            serde_json::json!({"relay": {"v": 1, "net": "lxmf", "id": "a/b", "mid": "b"}}),
+            serde_json::json!({"relay": {"v": 1, "net": "lxmf", "id": "a]", "mid": "b"}}),
+            serde_json::json!({"relay": {"v": 1, "net": "lxmf", "id": "a\u{202e}", "mid": "b"}}),
+            serde_json::json!({"relay": {"v": 1, "net": "lxmf", "id": "", "mid": "b"}}),
+            serde_json::json!({"relay": {"v": 1, "net": "lxmf", "id": "a".repeat(65), "mid": "b"}}),
+            serde_json::json!({"relay": {"v": 1, "net": "lxmf", "id": "a"}}),
+            serde_json::json!({"relay": {"v": 1, "net": "lxmf", "id": "a", "mid": "b", "x": 1}}),
+            serde_json::json!({"attachments": 3}),
+            serde_json::json!({"attachments": {"count": 0, "bytes": 0}}),
+            serde_json::json!({"attachments": {"count": -1, "bytes": 5}}),
+            serde_json::json!({"attachments": {"count": 1, "bytes": "5"}}),
+            serde_json::json!({"attachments": {"count": 1, "bytes": 5, "names": ["a"]}}),
+            serde_json::json!({"helper_truncated": "yes"}),
+            serde_json::json!({"helper_truncated": false}),
+            serde_json::json!({"fields_truncated": 1}),
+        ] {
+            assert_eq!(meta_of(&lxmf(bad.clone())), Value::Null, "{bad}");
+        }
+        // the good keys beside a bad one survive
+        let m = meta_of(&lxmf(serde_json::json!({
+            "why_unsigned": "unverified", "relay": {"v": 1, "net": "x", "id": "a", "mid": "b"}
+        })));
+        assert_eq!(m, serde_json::json!({"why_unsigned": "unverified"}));
+    }
+
+    #[test]
+    fn unknown_keys_are_dropped_and_truncated_is_ours_only() {
+        let m = meta_of(&lxmf(serde_json::json!({
+            "fields": {"5": 1}, "hash": "ab", "handoff": "pending", "resent_as": 3,
+            "truncated": 99, "title": "<b>x</b>", "helper_truncated": true,
+        })));
+        assert_eq!(m, serde_json::json!({"helper_truncated": true}));
+    }
+
+    #[test]
     fn own_echo_by_account_or_recorded_native_id() {
         let accounts = vec![
             crate::daemon::bridge::AccountFacts {
@@ -433,6 +664,37 @@ mod tests {
         }
         assert_eq!(echo.len("meshtastic"), ECHO_IDS, "bounded");
         assert!(!echo.is_ours("meshtastic", "5000000a"), "oldest forgotten");
+    }
+
+    /// F9: guard 2 compares the cleaned ids the store would hold, not the raw ones.
+    #[test]
+    fn f9_own_echo_compares_cleaned_ids() {
+        let accounts = vec![crate::daemon::bridge::AccountFacts {
+            id: "!0badc0de".into(),
+            label: None,
+            licensed: false,
+        }];
+        let mut echo = OwnEcho::default();
+        let mut t = text("hello", "me");
+        t.sender_native = "!0bad\u{200B}c0de".into(); // a zero-width space in our own id
+        assert!(is_own_echo(&t, &accounts, &echo), "our account, cleaned");
+        t.sender_native = "!a1b2c3d4".into();
+        echo.record("meshtastic", "5000000a");
+        t.native_msg_id = "5000\u{2066}000a".into();
+        assert!(is_own_echo(&t, &accounts, &echo), "our native id, cleaned");
+        let (sender, msg) = ids(&t).unwrap();
+        assert_eq!(
+            (sender.as_str(), msg.as_deref()),
+            ("!a1b2c3d4", Some("5000000a"))
+        );
+        let row = prepare(&t, 7, false).unwrap();
+        assert_eq!(
+            row.native_msg_id.as_deref(),
+            Some("5000000a"),
+            "the same value stored"
+        );
+        t.sender_native = "\u{200B}".into();
+        assert!(ids(&t).is_none(), "nothing left: noise");
     }
 
     #[test]

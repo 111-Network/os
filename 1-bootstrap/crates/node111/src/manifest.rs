@@ -1,9 +1,33 @@
 //! `channel-111-stable.toml` — rustup-v2-style signed channel manifest.
 //!
-//! Order of operations is contractual: **parse → verify minisig → check floor →
+//! Order of operations is contractual (`os/7-relay/README.md` §9.5 T1, T2; S24):
+//! **parse the untrusted bytes → walk the keychain from the compiled key → verify
+//! the minisig under the generation reached → check the channel and the floor →
 //! only then may any pin inside be trusted.** Use `parse_verified` for the full
-//! chain; `parse` alone is for tooling/tests that handle signature verification
+//! chain (the one function the daemon's updater, the root helper and the installer
+//! call); `parse` alone is for tooling/tests that handle signature verification
 //! separately.
+//!
+//! ## Trust (§9.5 T1, T2)
+//!
+//! - **Channel (T1).** The verified manifest's `channel` must be [`STABLE_CHANNEL`],
+//!   the only channel a node asks for (`channel-111-stable.toml`): a validly signed
+//!   `beta` served under the stable name is refused.
+//! - **Keychain walk (T2).** The compiled key anchors the generation whose
+//!   `pubkey` decodes to the same key (the first such entry). Generation `g + 1`
+//!   is reached only if its `pubkey` decodes and its `signature_by_previous` is a
+//!   minisig over the exact bytes of that `pubkey` string (the base64 `RW…` line,
+//!   no newline) that verifies under generation `g`'s key; the first broken link
+//!   ends the chain, and nothing after it counts. The manifest must verify under
+//!   the **highest** generation reached (a rotated-out key no longer signs), and
+//!   that generation must be ≥ the floor's `highest_keychain_generation`. A
+//!   keychain that does not list the compiled key (or an empty one) reaches no
+//!   listed generation: the compiled key alone signs, counted as generation 0, so
+//!   the floor check is at its strictest. On the `Ok` result the keychain holds
+//!   only the entries up to the generation reached, none in that last case
+//!   ([`ChannelManifest::keychain`], [`ChannelManifest::trusted_generation`]), so
+//!   every caller that ratchets the floor from the keychain's maximum ratchets it
+//!   to a generation it walked.
 //!
 //! ## TOML layout (canonical example: tests/fixtures/manifest/channel-111-stable.toml)
 //!
@@ -60,8 +84,11 @@
 //!
 //! Validation at parse time: sha256 fields must be 64-char lowercase hex, sizes > 0,
 //! URLs must be http(s) (https in production; http is tolerated for loopback test
-//! fixtures), keychain generations strictly consecutive starting at 0, unknown
-//! fields rejected (`deny_unknown_fields` — evolution bumps `manifest-version`).
+//! fixtures), keychain generations strictly consecutive starting at 0 and at most
+//! [`KEYCHAIN_MAX`] of them, unknown fields rejected (`deny_unknown_fields` —
+//! evolution bumps `manifest-version`). `parse_verified` refuses a manifest over
+//! [`MANIFEST_MAX_BYTES`] or a signature over [`SIGNATURE_MAX_BYTES`] before it
+//! parses either.
 //!
 //! ## Layer 5 entries (D20; `os/5-messaging/README.md` §2, §13, §14, §19 L1)
 //!
@@ -121,6 +148,20 @@ use serde::Deserialize;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
+
+/// The only channel a node asks for (§9.5 T1): `parse_verified` refuses any other.
+pub const STABLE_CHANNEL: &str = "stable";
+
+/// Largest manifest `parse_verified` reads (checked before the TOML parse). A full
+/// release manifest is a few KB; the cap only bounds what foreign bytes can cost.
+pub const MANIFEST_MAX_BYTES: usize = 1024 * 1024;
+
+/// Largest detached `.minisig` text `parse_verified` reads (a real one is ~300 B).
+pub const SIGNATURE_MAX_BYTES: usize = 8 * 1024;
+
+/// Most keychain generations a manifest may carry (bounds the T2 walk: one
+/// signature check per link).
+pub const KEYCHAIN_MAX: usize = 256;
 
 /// The `meshmud` package (Layer 5 §14): the Meshtastic multiplexer, per target.
 pub const MESHMUD_PACKAGE: &str = "meshmud";
@@ -203,6 +244,24 @@ pub struct ChannelManifest {
     keychain: Vec<KeyEntry>,
     bundles: Vec<Bundle>,
     presence_lock: Option<PinnedArtifact>,
+    /// The keychain generation `parse_verified` reached from the compiled key and
+    /// verified the manifest under (§9.5 T2); `None` on a bare `parse`.
+    trusted_generation: Option<u32>,
+}
+
+/// Where the T2 walk ended (§9.5): the generation the manifest must verify under.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Reached {
+    /// The highest generation reached (0 when the keychain does not list the
+    /// compiled key).
+    generation: u32,
+    /// That generation's key, as the base64 `RW…` line.
+    pubkey: String,
+    /// How many leading keychain entries the walk covers (0 when the keychain does
+    /// not list the compiled key; else the generation reached + 1).
+    covered: usize,
+    /// Why the walk stopped before the end of the listed keychain, if it did.
+    stopped: Option<String>,
 }
 
 // ---------- raw serde layer ----------
@@ -445,6 +504,11 @@ impl ChannelManifest {
             .map(|r| artifact("platform-tools".into(), "platform-tools", r))
             .transpose()?;
 
+        anyhow::ensure!(
+            raw.keychain.len() <= KEYCHAIN_MAX,
+            "keychain carries {} generations (at most {KEYCHAIN_MAX})",
+            raw.keychain.len()
+        );
         let mut keychain = Vec::new();
         for (i, entry) in raw.keychain.iter().enumerate() {
             anyhow::ensure!(
@@ -487,21 +551,69 @@ impl ChannelManifest {
             keychain,
             bundles,
             presence_lock,
+            trusted_generation: None,
         })
     }
 
-    /// The contractual chain: verify the detached minisig over the raw bytes,
-    /// parse, then check the monotonic floor. Only the Ok result may be trusted.
+    /// The contractual chain (§9.5 T1, T2; S24), the one function the daemon's
+    /// updater, the root helper and the installer call with the compiled key
+    /// (`pubkey_b64`): sizes → parse the untrusted bytes → walk the keychain from
+    /// the compiled key → verify the detached minisig over the raw bytes under the
+    /// highest generation reached → the channel is [`STABLE_CHANNEL`] → the floor
+    /// (release, manifest date, and the generation reached ≥ the floor's
+    /// generation). Only the Ok result may be trusted; its keychain is cut to the
+    /// generations the walk reached (module doc, "Trust").
     pub fn parse_verified(
         toml_bytes: &[u8],
         signature_b64: &str,
         pubkey_b64: &str,
         floor: &Floor,
     ) -> anyhow::Result<Self> {
-        crate::minisign::verify_detached(toml_bytes, signature_b64, pubkey_b64)?;
+        anyhow::ensure!(
+            toml_bytes.len() <= MANIFEST_MAX_BYTES,
+            "manifest is {} bytes (at most {MANIFEST_MAX_BYTES})",
+            toml_bytes.len()
+        );
+        anyhow::ensure!(
+            signature_b64.len() <= SIGNATURE_MAX_BYTES,
+            "manifest signature is {} bytes (at most {SIGNATURE_MAX_BYTES})",
+            signature_b64.len()
+        );
+        let compiled = minisign_verify::PublicKey::from_base64(pubkey_b64.trim())
+            .map_err(|e| anyhow::anyhow!("invalid compiled-in minisign public key: {e}"))?;
+
+        // 1. Parse the untrusted bytes (nothing inside is trusted yet).
         let text =
             std::str::from_utf8(toml_bytes).map_err(|_| anyhow::anyhow!("manifest not UTF-8"))?;
-        let m = Self::parse(text)?;
+        let mut m = Self::parse(text)?;
+
+        // 2. Walk the keychain from the compiled key.
+        let reached = walk_keychain(&m.keychain, &compiled, pubkey_b64.trim());
+
+        // 3. The minisig under the highest generation reached.
+        crate::minisign::verify_detached(toml_bytes, signature_b64, &reached.pubkey).map_err(
+            |e| {
+                let why = reached
+                    .stopped
+                    .as_deref()
+                    .map(|w| format!("; the keychain walk stopped: {w}"))
+                    .unwrap_or_default();
+                anyhow::anyhow!(
+                    "manifest does not verify under keychain generation {}, the highest reached \
+                     from the compiled key{why}: {e:#}",
+                    reached.generation
+                )
+            },
+        )?;
+
+        // 4. The channel asked for (T1), then the floor (T2) at the generation reached.
+        anyhow::ensure!(
+            m.channel == STABLE_CHANNEL,
+            "manifest channel {:?} is not the channel asked for ({STABLE_CHANNEL:?})",
+            m.channel
+        );
+        m.keychain.truncate(reached.covered);
+        m.trusted_generation = Some(reached.generation);
         m.check_floor(floor)?;
         Ok(m)
     }
@@ -541,8 +653,17 @@ impl ChannelManifest {
     pub fn kb(&self) -> &PinnedArtifact {
         &self.kb
     }
+    /// The keychain entries. On a `parse_verified` result only the entries up to
+    /// the generation reached from the compiled key (§9.5 T2); on a bare `parse`
+    /// every listed entry, unverified.
     pub fn keychain(&self) -> &[KeyEntry] {
         &self.keychain
+    }
+
+    /// The generation `parse_verified` verified this manifest under (§9.5 T2);
+    /// `None` on a bare `parse`.
+    pub fn trusted_generation(&self) -> Option<u32> {
+        self.trusted_generation
     }
 
     /// Release payload tarball for a target triple, if shipped.
@@ -677,15 +798,18 @@ impl ChannelManifest {
     }
 
     /// Refuse anything at/below the floor (anti-replay; replayed old-but-valid
-    /// signatures included). Compares release, manifest date, and the keychain's
-    /// maximum generation against the stored floor.
+    /// signatures included). Compares release, manifest date, and the keychain
+    /// generation against the stored floor: the generation reached from the
+    /// compiled key on a `parse_verified` result (§9.5 T2), else the keychain's
+    /// maximum listed generation.
     pub fn check_floor(&self, floor: &Floor) -> anyhow::Result<()> {
-        let max_gen = self
-            .keychain
-            .iter()
-            .map(|k| k.generation)
-            .max()
-            .unwrap_or(0);
+        let max_gen = self.trusted_generation.unwrap_or_else(|| {
+            self.keychain
+                .iter()
+                .map(|k| k.generation)
+                .max()
+                .unwrap_or(0)
+        });
         anyhow::ensure!(
             !floor.refuses(&self.release, &self.date, max_gen),
             "manifest at/below monotonic floor (release {} date {} keychain gen {} vs floor {:?})",
@@ -695,6 +819,56 @@ impl ChannelManifest {
             floor
         );
         Ok(())
+    }
+}
+
+/// The §9.5 T2 walk over a parsed (still untrusted) keychain. The compiled key
+/// anchors the first entry whose `pubkey` decodes to it; each next entry counts only
+/// if its `pubkey` decodes and its `signature_by_previous` verifies over the exact
+/// bytes of that `pubkey` string under the previous entry's key; the first broken
+/// link ends the walk. No listed anchor ⇒ the compiled key alone, as generation 0.
+/// Never fails: an unreachable generation only lowers what the manifest must
+/// verify under. Generations are consecutive from 0 (checked by `parse`), so an
+/// entry's index is its generation.
+fn walk_keychain(
+    keychain: &[KeyEntry],
+    compiled: &minisign_verify::PublicKey,
+    compiled_b64: &str,
+) -> Reached {
+    let decodes_to_compiled = |e: &KeyEntry| {
+        minisign_verify::PublicKey::from_base64(&e.pubkey).is_ok_and(|k| &k == compiled)
+    };
+    let Some(anchor) = keychain.iter().position(decodes_to_compiled) else {
+        return Reached {
+            generation: 0,
+            pubkey: compiled_b64.to_string(),
+            covered: 0,
+            stopped: (!keychain.is_empty())
+                .then(|| "the keychain does not list the compiled key".to_string()),
+        };
+    };
+    let mut at = anchor;
+    let mut stopped = None;
+    for next in &keychain[anchor + 1..] {
+        let prev = &keychain[at];
+        let link_ok = minisign_verify::PublicKey::from_base64(&next.pubkey).is_ok()
+            && next.signature_by_previous.as_deref().is_some_and(|sig| {
+                crate::minisign::verify_detached(next.pubkey.as_bytes(), sig, &prev.pubkey).is_ok()
+            });
+        if !link_ok {
+            stopped = Some(format!(
+                "generation {}'s signature_by_previous does not verify under generation {}",
+                next.generation, prev.generation
+            ));
+            break;
+        }
+        at += 1;
+    }
+    Reached {
+        generation: keychain[at].generation,
+        pubkey: keychain[at].pubkey.clone(),
+        covered: at + 1,
+        stopped,
     }
 }
 
@@ -827,5 +1001,115 @@ fn walk_bundle(
 mod tests {
     // Known-answer + tamper tests live in tests/manifest_parse.rs against the
     // committed fixture (tests/fixtures/manifest/channel-111-stable.toml); the
-    // Layer 5 entries in tests/manifest_layer5.rs.
+    // Layer 5 entries in tests/manifest_layer5.rs; the §9.5 T1/T2 refusals in
+    // tests/manifest_trust.rs. Here: the walk itself and the pre-parse caps.
+    use super::*;
+
+    const CANONICAL: &str = include_str!("../tests/fixtures/manifest/channel-111-stable.toml");
+    const GEN1: &str = include_str!("../tests/fixtures/l7-L1/gen1/channel-111-stable.toml");
+    const GEN2_BROKEN: &str =
+        include_str!("../tests/fixtures/l7-L1/gen2-broken/channel-111-stable.toml");
+    const UNLISTED: &str =
+        include_str!("../tests/fixtures/l7-L1/unlisted-root/channel-111-stable.toml");
+    const TEST_PUB: &str = include_str!("../tests/fixtures/minisign/test.pub");
+    const GEN1_PUB: &str = include_str!("../tests/fixtures/l7-L1/gen1.pub");
+    const OTHER_PUB: &str = include_str!("../tests/fixtures/minisign/other.pub");
+
+    fn key_line(pub_file: &str) -> &str {
+        pub_file.lines().last().unwrap().trim()
+    }
+
+    fn walk(toml: &str, pub_file: &str) -> Reached {
+        let m = ChannelManifest::parse(toml).unwrap();
+        let b64 = key_line(pub_file);
+        let key = minisign_verify::PublicKey::from_base64(b64).unwrap();
+        walk_keychain(m.keychain(), &key, b64)
+    }
+
+    #[test]
+    fn placeholder_link_ends_the_chain_at_the_anchor() {
+        let r = walk(CANONICAL, TEST_PUB);
+        assert_eq!((r.generation, r.covered), (0, 1));
+        assert_eq!(r.pubkey, key_line(TEST_PUB));
+        assert!(r.stopped.unwrap().contains("generation 1"));
+    }
+
+    #[test]
+    fn valid_link_reaches_generation_one() {
+        let r = walk(GEN1, TEST_PUB);
+        assert_eq!((r.generation, r.covered, r.stopped), (1, 2, None));
+        assert_eq!(r.pubkey, key_line(GEN1_PUB));
+    }
+
+    #[test]
+    fn a_newer_binary_anchors_at_its_own_generation() {
+        let r = walk(GEN1, GEN1_PUB);
+        assert_eq!((r.generation, r.covered, r.stopped), (1, 2, None));
+    }
+
+    #[test]
+    fn broken_second_link_stops_at_generation_one() {
+        let r = walk(GEN2_BROKEN, TEST_PUB);
+        assert_eq!((r.generation, r.covered), (1, 2));
+        assert!(r.stopped.unwrap().contains("generation 2"));
+    }
+
+    #[test]
+    fn unlisted_compiled_key_stands_alone_as_generation_zero() {
+        let r = walk(UNLISTED, TEST_PUB);
+        assert_eq!((r.generation, r.covered), (0, 0));
+        assert_eq!(r.pubkey, key_line(TEST_PUB));
+        // An unrelated compiled key reaches nothing either.
+        let r = walk(GEN1, OTHER_PUB);
+        assert_eq!((r.generation, r.covered), (0, 0));
+        assert_eq!(r.pubkey, key_line(OTHER_PUB));
+    }
+
+    #[test]
+    fn empty_keychain_is_the_compiled_key_alone() {
+        let text = UNLISTED.split("[[keychain]]").next().unwrap();
+        let r = walk(text, TEST_PUB);
+        assert_eq!((r.generation, r.covered, r.stopped), (0, 0, None));
+    }
+
+    #[test]
+    fn oversize_inputs_are_refused_before_parse() {
+        let floor = Floor::initial();
+        let big = vec![b'x'; MANIFEST_MAX_BYTES + 1];
+        let e = ChannelManifest::parse_verified(&big, "", key_line(TEST_PUB), &floor)
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("at most"), "{e}");
+        let sig = "x".repeat(SIGNATURE_MAX_BYTES + 1);
+        let e = ChannelManifest::parse_verified(GEN1.as_bytes(), &sig, key_line(TEST_PUB), &floor)
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("signature is"), "{e}");
+    }
+
+    #[test]
+    fn invalid_compiled_key_is_refused() {
+        let e = ChannelManifest::parse_verified(GEN1.as_bytes(), "", "garbage", &Floor::initial())
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("compiled-in"), "{e}");
+    }
+
+    #[test]
+    fn keychain_longer_than_the_cap_does_not_parse() {
+        let head = UNLISTED.split("[[keychain]]").next().unwrap();
+        let mut text = head.to_string();
+        for g in 0..=KEYCHAIN_MAX {
+            text.push_str(&format!(
+                "[[keychain]]\ngeneration = {g}\npubkey = \"RWx\"\n{}\n",
+                if g == 0 {
+                    ""
+                } else {
+                    "signature_by_previous = \"x\""
+                }
+            ));
+        }
+        let e = ChannelManifest::parse(&text).unwrap_err().to_string();
+        assert!(e.contains("at most"), "{e}");
+    }
 }

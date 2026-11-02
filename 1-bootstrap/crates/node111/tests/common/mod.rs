@@ -53,6 +53,22 @@ pub fn serve_dir(dir: PathBuf, date_header: Option<String>) -> u16 {
     port
 }
 
+/// The minisign CLI the tests sign with: `$MINISIGN`, else the lead's
+/// `~/.local/bin/minisign` when it exists, else `minisign` on `PATH` (a CI
+/// runner's apt package).
+pub fn minisign_bin() -> PathBuf {
+    if let Ok(p) = std::env::var("MINISIGN") {
+        return PathBuf::from(p);
+    }
+    if let Ok(home) = std::env::var("HOME") {
+        let local = PathBuf::from(home).join(".local/bin/minisign");
+        if local.is_file() {
+            return local;
+        }
+    }
+    PathBuf::from("minisign")
+}
+
 /// Sign a file with the throwaway test key (minisign CLI).
 pub fn minisign_fixture_key() -> PathBuf {
     PathBuf::from(format!(
@@ -69,8 +85,7 @@ pub fn minisign_other_key() -> PathBuf {
 }
 
 pub fn sign_file(key: &std::path::Path, file: &std::path::Path) {
-    let minisign = format!("{}/.local/bin/minisign", std::env::var("HOME").unwrap());
-    let out = std::process::Command::new(minisign)
+    let out = std::process::Command::new(minisign_bin())
         .args([
             "-S",
             "-W",

@@ -146,6 +146,12 @@ fn unhex32(s: &str) -> Option<[u8; 32]> {
 /// Read a secret file: `O_NOFOLLOW`, regular, ≤ 256 bytes, mode repaired
 /// to 0600. `Ok(None)` when absent.
 fn read_secret(p: &Path) -> anyhow::Result<Option<String>> {
+    read_secret_with(p, true)
+}
+
+/// [`read_secret`], repairing the mode only when `repair` (the non-minting
+/// reader, [`Secrets::load_existing`], changes nothing on disk).
+fn read_secret_with(p: &Path, repair: bool) -> anyhow::Result<Option<String>> {
     use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
     let f = match std::fs::OpenOptions::new()
         .read(true)
@@ -163,7 +169,7 @@ fn read_secret(p: &Path) -> anyhow::Result<Option<String>> {
         "{} is too large",
         p.display()
     );
-    if meta.permissions().mode() & 0o777 != 0o600 {
+    if repair && meta.permissions().mode() & 0o777 != 0o600 {
         f.set_permissions(std::fs::Permissions::from_mode(0o600))?;
     }
     let mut buf = Vec::new();
@@ -289,6 +295,25 @@ impl Secrets {
             ifac_passphrase,
             client_ifac,
         })
+    }
+
+    /// rnsd's `rpc_key` exactly as the spine rendered it, for a consumer that
+    /// must never rotate it (the LXMF helper's client config, §6 (1), §11;
+    /// C1-bounce F1): read through the same `O_NOFOLLOW`, regular, size-capped
+    /// path as [`Secrets::load_or_mint`], but **nothing is minted, created,
+    /// rewritten or re-moded** — not the key, not the hub IFAC passphrase (not
+    /// read at all), not `secrets/` itself. `Ok(None)` when the key file is
+    /// absent (rnsd's config was never rendered); an error when it is
+    /// unreadable, a symlink, not a regular file, oversized or not a 32-byte
+    /// hex key. The result carries the key only (no IFAC passphrases).
+    pub fn load_existing(root: &Path) -> anyhow::Result<Option<Secrets>> {
+        let key_path = secrets_dir(root).join(RPC_KEY_FILE);
+        let Some(text) = read_secret_with(&key_path, false)? else {
+            return Ok(None);
+        };
+        let rpc_key = unhex32(&text)
+            .ok_or_else(|| anyhow::anyhow!("{} is not a 32-byte hex key", key_path.display()))?;
+        Ok(Some(Secrets::new(rpc_key)))
     }
 
     /// [`Secrets::load_or_mint`] for what `ifs` needs.
@@ -826,6 +851,45 @@ mod tests {
         let c = Secrets::load_or_mint(dir.path(), true, &[]).unwrap();
         assert_eq!(c.rpc_key_hex(), a.rpc_key_hex(), "never rotated");
         assert_eq!(c.ifac_passphrase(), Some(pass.as_str()), "never rotated");
+    }
+
+    /// C1-bounce F1: the non-minting reader writes nothing — absent is
+    /// `None` (no `secrets/` created), a malformed or symlinked key is an
+    /// error and stays byte-for-byte (and mode) as it was, the IFAC
+    /// passphrase is never minted.
+    #[test]
+    fn f1_load_existing_never_mints_or_rewrites() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        assert!(Secrets::load_existing(dir.path()).unwrap().is_none());
+        assert!(!secrets_dir(dir.path()).exists(), "nothing created");
+        let a = Secrets::load_or_mint(dir.path(), false, &[]).unwrap();
+        let key = secrets_dir(dir.path()).join(RPC_KEY_FILE);
+        let got = Secrets::load_existing(dir.path()).unwrap().unwrap();
+        assert_eq!(got.rpc_key_hex(), a.rpc_key_hex());
+        assert!(got.ifac_passphrase().is_none());
+        assert!(
+            !secrets_dir(dir.path()).join(IFAC_FILE).exists(),
+            "no IFAC passphrase minted"
+        );
+        // a loose mode is read, not repaired
+        std::fs::set_permissions(&key, std::fs::Permissions::from_mode(0o640)).unwrap();
+        assert!(Secrets::load_existing(dir.path()).unwrap().is_some());
+        let mode = key.metadata().unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o640, "the mode is not touched");
+        // malformed: an error, the bytes stay
+        std::fs::write(&key, "zz\n").unwrap();
+        assert!(Secrets::load_existing(dir.path()).is_err());
+        assert_eq!(std::fs::read(&key).unwrap(), b"zz\n");
+        // a symlink: an error, still a symlink
+        let held = dir.path().join("held");
+        std::fs::rename(&key, &held).unwrap();
+        std::os::unix::fs::symlink(&held, &key).unwrap();
+        assert!(Secrets::load_existing(dir.path()).is_err());
+        assert!(std::fs::symlink_metadata(&key)
+            .unwrap()
+            .file_type()
+            .is_symlink());
     }
 
     /// B4 review F5: an invalid or unreadable interfaces.toml never renders

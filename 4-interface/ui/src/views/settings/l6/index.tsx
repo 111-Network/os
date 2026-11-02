@@ -10,6 +10,7 @@ import { Panel } from "../../../components/panel";
 import { SectionHeader } from "../../../components/section-header";
 import { StatusDot } from "../../../components/status-dot";
 import { useBridgeSettings, useComponents, useConnection, useEdges, useNetworks, useServices, useStatus, useTransport } from "../../../lib/api/hooks";
+import { enabledNetworks, foreignPath, orderedNetworks } from "../../../lib/api/networks";
 import { layerBySlug } from "../../../lib/layers";
 import { dotState } from "../../../lib/nav";
 import { buildPrompt } from "../../../lib/prompts";
@@ -26,6 +27,11 @@ const H2 = "font-mono text-[10px] uppercase tracking-widest text-foreground";
 
 function RelaysRow() {
   const edges = useEdges();
+  const networks = useNetworks();
+  const settings = useBridgeSettings();
+  // The relays are managed on a network's page; the first enabled network in the node's order, or the Messages list when none is on.
+  const first = enabledNetworks(orderedNetworks(networks ?? [], settings?.order ?? []))[0];
+  const manage = first ? foreignPath(first.id) : "/messages";
   const mine = edges ?? [];
   const paused = mine.filter((e) => e.paused).length;
   const tooLong = mine.reduce((n, e) => n + e.counters.refused, 0);
@@ -46,7 +52,7 @@ function RelaysRow() {
           </p>
         )}
         <div>
-          <ButtonLink href={hrefTo("/messages/net/meshtastic")} size="sm">
+          <ButtonLink href={hrefTo(manage)} size="sm" data-testid="manage-relays">
             Manage relays in Messages
           </ButtonLink>
         </div>

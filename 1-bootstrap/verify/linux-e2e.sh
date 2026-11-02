@@ -43,7 +43,7 @@ unshare -rm true 2>/dev/null || { echo "SKIP: user namespaces unavailable"; exit
 
 T=$(mktemp -d /tmp/111-e2e.XXXXXX)
 SRV=""
-# shellcheck disable=SC2317  # invoked via trap, not direct flow
+# shellcheck disable=SC2317,SC2329  # invoked via trap, not direct flow
 cleanup() {
   [ -n "$SRV" ] && kill "$SRV" 2>/dev/null
   rm -rf "$T"

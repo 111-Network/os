@@ -347,6 +347,778 @@ impl Adapter for StubAdapter {
     }
 }
 
+/// The debug-build-only G1 scenario hook (§16 G1; `6-transport/verify/bridge.sh`): with
+/// `NODE111_BRIDGE_STUBS=<file>` set, a **debug** `111 daemon` enables the [`StubAdapter`]s
+/// that file declares in its running bridge core and drives them from a control directory,
+/// so the gate script exercises the bridge through the real `/api/v1` of a real daemon.
+/// Compiled out of release builds entirely (`cfg(debug_assertions)`): a shipped `111`
+/// carries no stub, no hook and no reader of the variable (`AGENTS.md`: the Raspberry Pi is
+/// the floor). With the variable unset, [`scenario::start`] returns at once and spawns
+/// nothing.
+///
+/// - **The scenario file** (JSON, ≤ 1 MiB, `deny_unknown_fields`): `control` (a directory),
+///   `node` (a short name), optional `air` (a directory shared by the nodes of one run),
+///   and `stubs`: per stub `id` (a network id), `label`, `tag`, optional `kinds`,
+///   `max_text_bytes`, `airtime`, `recipient_syntax`, `facts` ([`AdapterFacts`]),
+///   `inbound_cap` and `air_name` (the name this node's account carries on the air).
+/// - **Control** (polled every 100 ms by one task, debug builds only): the script writes
+///   `<control>/<seq>.json` (atomically, by rename); the hook runs it, writes
+///   `<seq>.done` (`{"ok": true, ...}` or `{"ok": false, "error": ...}`) and removes the
+///   command. Operations (`op`): `feed` (`items`: [`Inbound`] values), `burst` (`n` texts
+///   in one conversation, one wake-up), `script` (send outcomes, in order; `replace` drops
+///   what is still scripted), `facts`
+///   (replace the live facts), `state` (the adapter state, and the matching
+///   `Inbound::Link` — `Live` up, anything else down — so the core publishes the rail's
+///   `bridge` frame on its next tick as for a product adapter), `queue_full`, `emit_held`,
+///   `pin` (a conversation's pinned flag, which no R-B route sets).
+/// - **Sends** are appended to `<control>/<id>.sent.jsonl` (one line per `send`, the
+///   conversation, the text and the scripted outcome), so the script counts what reached
+///   the stub — across a `kill -9` and a restart (the native ids continue from the log's
+///   line count, so a restarted stub never reuses one).
+/// - **The air**: an accepted send is appended to `<air>/<node>.jsonl`; every other node's
+///   file is read from where it stood at start and fed to the stub of the same network id
+///   as an inbound text from the sending account (the cross-node loop cases of §8).
+///
+/// Errors in a command are answered in its `.done` file; nothing here panics on input.
+#[cfg(debug_assertions)]
+pub mod scenario {
+    use super::{
+        lock, Adapter, AdapterFacts, AdapterState, Caps, ConvKind, ConvRef, ForeignMessageState,
+        Inbound, InboundText, LinkState, PerKind, Reason, Retry, SendEvent, SendHandle, SendOpts,
+        StubAdapter, StubOutcome,
+    };
+    use crate::daemon::bridge::{AirtimeProfile, Auth, Bridge, Syntax};
+    use futures_util::future::BoxFuture;
+    use serde::Deserialize;
+    use serde_json::{json, Value};
+    use std::collections::{BTreeMap, VecDeque};
+    use std::io::Write;
+    use std::path::{Path, PathBuf};
+    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+    use std::sync::{Arc, Mutex};
+    use std::time::Duration;
+
+    /// The variable naming the scenario file.
+    pub const ENV: &str = "NODE111_BRIDGE_STUBS";
+    /// Largest scenario or command file read (checked before parsing).
+    const MAX_FILE: u64 = 1 << 20;
+    /// Largest `burst`.
+    const MAX_BURST: usize = 100_000;
+    /// Control and air poll period.
+    const POLL: Duration = Duration::from_millis(100);
+
+    #[derive(Debug, Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct ScenarioFile {
+        control: PathBuf,
+        #[serde(default)]
+        node: String,
+        #[serde(default)]
+        air: Option<PathBuf>,
+        stubs: Vec<Spec>,
+    }
+
+    #[derive(Debug, Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Spec {
+        id: String,
+        label: String,
+        tag: String,
+        #[serde(default)]
+        kinds: Option<Vec<ConvKind>>,
+        #[serde(default)]
+        max_text_bytes: Option<PerKind>,
+        #[serde(default)]
+        airtime: Option<AirtimeProfile>,
+        #[serde(default)]
+        recipient_syntax: Option<Syntax>,
+        #[serde(default)]
+        facts: Option<AdapterFacts>,
+        #[serde(default)]
+        inbound_cap: Option<usize>,
+        #[serde(default)]
+        air_name: Option<String>,
+    }
+
+    /// A scripted send outcome as the control file spells it.
+    #[derive(Debug, Deserialize)]
+    #[serde(rename_all = "snake_case", deny_unknown_fields)]
+    enum Outcome {
+        Accept {
+            #[serde(default)]
+            native_id: Option<String>,
+            #[serde(default)]
+            evidence: Vec<(ForeignMessageState, String)>,
+        },
+        AcceptThenFail {
+            #[serde(default)]
+            native_id: Option<String>,
+            #[serde(default)]
+            evidence: Vec<(ForeignMessageState, String)>,
+            reason: Reason,
+            retry: Retry,
+        },
+        Fail {
+            reason: Reason,
+            retry: Retry,
+        },
+        Silent,
+        Hold,
+    }
+
+    /// An event for a held handle (`emit_held`).
+    #[derive(Debug, Deserialize)]
+    #[serde(rename_all = "snake_case", deny_unknown_fields)]
+    enum HeldEvent {
+        Accepted {
+            native_id: String,
+        },
+        Evidence {
+            state: ForeignMessageState,
+            evidence: String,
+        },
+        Failed {
+            reason: Reason,
+            retry: Retry,
+        },
+    }
+
+    #[derive(Debug, Deserialize)]
+    #[serde(tag = "op", rename_all = "snake_case", deny_unknown_fields)]
+    enum Command {
+        Feed {
+            stub: String,
+            items: Vec<Inbound>,
+        },
+        Burst {
+            stub: String,
+            conv: ConvRef,
+            n: usize,
+            sender_native: String,
+            sender_name: String,
+            prefix: String,
+        },
+        Script {
+            stub: String,
+            outcomes: Vec<Outcome>,
+            /// Drop what is still scripted first.
+            #[serde(default)]
+            replace: bool,
+        },
+        Facts {
+            stub: String,
+            facts: AdapterFacts,
+        },
+        State {
+            stub: String,
+            state: AdapterState,
+        },
+        QueueFull {
+            stub: String,
+            on: bool,
+        },
+        EmitHeld {
+            stub: String,
+            index: usize,
+            event: HeldEvent,
+        },
+        /// Pin or unpin a foreign conversation (`fc-<conv>`; no route sets it in R-B, and
+        /// pinned rows are on the prune "never" list, §3).
+        Pin {
+            conv: i64,
+            pinned: bool,
+        },
+    }
+
+    /// One line on the air.
+    #[derive(Debug, Deserialize)]
+    struct AirLine {
+        node: String,
+        conv: ConvRef,
+        native_id: String,
+        text: String,
+        name: String,
+    }
+
+    /// A [`StubAdapter`] with the hook's send log, its own outcome queue (so a restarted
+    /// stub never reuses a native id) and the air.
+    struct ScenarioStub {
+        id: &'static str,
+        inner: Arc<StubAdapter>,
+        outcomes: Mutex<VecDeque<Outcome>>,
+        queue_full: AtomicBool,
+        sends: AtomicU64,
+        log: PathBuf,
+        node: String,
+        air: Option<PathBuf>,
+        air_name: String,
+    }
+
+    fn append(path: &Path, line: &Value) {
+        let r = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+            .and_then(|mut f| writeln!(f, "{line}"));
+        if let Err(e) = r {
+            eprintln!("111 bridge scenario: {}: {e}", path.display());
+        }
+    }
+
+    fn file_slug(id: &str) -> String {
+        id.replace(':', "-")
+    }
+
+    impl ScenarioStub {
+        fn native_id(&self, n: u64, given: Option<String>) -> String {
+            given.unwrap_or_else(|| format!("{}-{}-{n}", self.id, self.node))
+        }
+
+        fn outcome(&self, n: u64) -> (StubOutcome, &'static str) {
+            if self.queue_full.load(Ordering::SeqCst) {
+                return (
+                    StubOutcome::Fail {
+                        reason: Reason::RateLimited,
+                        retry: Retry::Later,
+                    },
+                    "queue_full",
+                );
+            }
+            match lock(&self.outcomes).pop_front() {
+                Some(Outcome::Accept {
+                    native_id,
+                    evidence,
+                }) => (
+                    StubOutcome::Accept {
+                        native_id: self.native_id(n, native_id),
+                        evidence,
+                    },
+                    "accept",
+                ),
+                Some(Outcome::AcceptThenFail {
+                    native_id,
+                    evidence,
+                    reason,
+                    retry,
+                }) => (
+                    StubOutcome::AcceptThenFail {
+                        native_id: self.native_id(n, native_id),
+                        evidence,
+                        reason,
+                        retry,
+                    },
+                    "accept_then_fail",
+                ),
+                Some(Outcome::Fail { reason, retry }) => {
+                    (StubOutcome::Fail { reason, retry }, "fail")
+                }
+                Some(Outcome::Silent) => (StubOutcome::Silent, "silent"),
+                Some(Outcome::Hold) => (StubOutcome::Hold, "hold"),
+                None => (
+                    StubOutcome::Accept {
+                        native_id: self.native_id(n, None),
+                        evidence: vec![(
+                            ForeignMessageState::Sent,
+                            "accepted by the radio".to_string(),
+                        )],
+                    },
+                    "accept",
+                ),
+            }
+        }
+    }
+
+    impl Adapter for ScenarioStub {
+        fn id(&self) -> &'static str {
+            self.id
+        }
+
+        fn caps(&self) -> Caps {
+            self.inner.caps()
+        }
+
+        fn facts(&self) -> AdapterFacts {
+            self.inner.facts()
+        }
+
+        fn recv(&self) -> BoxFuture<'_, Inbound> {
+            self.inner.recv()
+        }
+
+        fn send(&self, conv: &ConvRef, text: &str, o: SendOpts) -> BoxFuture<'_, SendHandle> {
+            let n = self.sends.fetch_add(1, Ordering::SeqCst) + 1;
+            let (outcome, tag) = self.outcome(n);
+            let native = match &outcome {
+                StubOutcome::Accept { native_id, .. }
+                | StubOutcome::AcceptThenFail { native_id, .. } => Some(native_id.clone()),
+                _ => None,
+            };
+            append(
+                &self.log,
+                &json!({"n": n, "conv": conv, "text": text, "outcome": tag, "native_id": native}),
+            );
+            if let (Some(air), Some(native_id)) = (&self.air, &native) {
+                append(
+                    &air.join(format!("{}.jsonl", self.node)),
+                    &json!({"node": self.node, "conv": conv, "native_id": native_id,
+                            "text": text, "name": self.air_name}),
+                );
+            }
+            self.inner.script(outcome);
+            self.inner.send(conv, text, o)
+        }
+    }
+
+    struct Hook {
+        bridge: Arc<Bridge>,
+        stubs: BTreeMap<String, Arc<ScenarioStub>>,
+        control: PathBuf,
+        node: String,
+        air: Option<PathBuf>,
+        /// Read offsets of the other nodes' air files.
+        offsets: BTreeMap<PathBuf, u64>,
+    }
+
+    fn read_capped(path: &Path) -> Result<Vec<u8>, String> {
+        let len = std::fs::metadata(path).map_err(|e| e.to_string())?.len();
+        if len > MAX_FILE {
+            return Err(format!("{} is larger than 1 MiB", path.display()));
+        }
+        std::fs::read(path).map_err(|e| e.to_string())
+    }
+
+    fn build_stub(spec: Spec, sc: &ScenarioFile) -> Result<Arc<ScenarioStub>, String> {
+        // the network id must outlive the adapter (`Adapter::id` is 'static): leaked once
+        // per stub per daemon start, debug builds only
+        let id: &'static str = Box::leak(spec.id.clone().into_boxed_str());
+        let mut caps = StubAdapter::default_caps(&spec.label, &spec.tag);
+        if let Some(k) = spec.kinds {
+            caps.kinds = k;
+        }
+        if let Some(m) = spec.max_text_bytes {
+            caps.max_text_bytes = m;
+        }
+        caps.airtime = spec.airtime;
+        caps.recipient_syntax = spec.recipient_syntax;
+        let mut inner = StubAdapter::new(id, caps).with_facts(spec.facts.unwrap_or_default());
+        if let Some(c) = spec.inbound_cap {
+            inner = inner.with_inbound_cap(c);
+        }
+        let log = sc.control.join(format!("{}.sent.jsonl", file_slug(id)));
+        let before = std::fs::read_to_string(&log)
+            .map(|t| t.lines().count() as u64)
+            .unwrap_or(0);
+        let air_name = spec.air_name.unwrap_or_else(|| format!("node {}", sc.node));
+        Ok(Arc::new(ScenarioStub {
+            id,
+            inner: Arc::new(inner),
+            outcomes: Mutex::new(VecDeque::new()),
+            queue_full: AtomicBool::new(false),
+            sends: AtomicU64::new(before),
+            log,
+            node: sc.node.clone(),
+            air: sc.air.clone(),
+            air_name,
+        }))
+    }
+
+    /// Daemon start (debug builds): enable the stubs `$NODE111_BRIDGE_STUBS` declares and
+    /// spawn the one control task. Returns at once, spawning nothing, when it is unset.
+    pub fn start(bridge: Arc<Bridge>) {
+        let Some(path) = std::env::var_os(ENV) else {
+            return;
+        };
+        let path = PathBuf::from(path);
+        tokio::spawn(async move {
+            if let Err(e) = run(bridge, &path).await {
+                eprintln!("111 bridge scenario: {}: {e}", path.display());
+            }
+        });
+    }
+
+    async fn run(bridge: Arc<Bridge>, path: &Path) -> Result<(), String> {
+        let raw = read_capped(path)?;
+        let sc: ScenarioFile = serde_json::from_slice(&raw).map_err(|e| e.to_string())?;
+        std::fs::create_dir_all(&sc.control).map_err(|e| e.to_string())?;
+        if let Some(a) = &sc.air {
+            std::fs::create_dir_all(a).map_err(|e| e.to_string())?;
+        }
+        let mut stubs = BTreeMap::new();
+        let ScenarioFile {
+            control,
+            node,
+            air,
+            stubs: specs,
+        } = sc;
+        let sc_ref = ScenarioFile {
+            control: control.clone(),
+            node: node.clone(),
+            air: air.clone(),
+            stubs: Vec::new(),
+        };
+        for spec in specs {
+            let s = build_stub(spec, &sc_ref)?;
+            stubs.insert(s.id.to_string(), s);
+        }
+        // the bridge needs the fabric open; retry briefly while it starts
+        for s in stubs.values() {
+            let mut tries = 0;
+            loop {
+                match bridge.enable(Arc::clone(s) as Arc<dyn Adapter>).await {
+                    Ok(()) => break,
+                    Err(e) if tries < 100 => {
+                        tries += 1;
+                        if tries == 1 {
+                            eprintln!("111 bridge scenario: enable {}: {e} (retrying)", s.id);
+                        }
+                        tokio::time::sleep(POLL).await;
+                    }
+                    Err(e) => return Err(format!("enable {}: {e}", s.id)),
+                }
+            }
+        }
+        let mut hook = Hook {
+            bridge,
+            stubs,
+            control,
+            node,
+            air,
+            offsets: BTreeMap::new(),
+        };
+        hook.init_air();
+        let names: Vec<&str> = hook.stubs.keys().map(String::as_str).collect();
+        eprintln!(
+            "111 bridge scenario: node {} enabled {}",
+            hook.node,
+            names.join(", ")
+        );
+        append(
+            &hook.control.join("ready.jsonl"),
+            &json!({"node": hook.node, "stubs": names}),
+        );
+        loop {
+            hook.control_pass().await;
+            hook.air_pass();
+            if hook.bridge.enabled().is_empty() {
+                // the daemon is stopping (Layer6::shutdown disabled every adapter)
+                return Ok(());
+            }
+            tokio::time::sleep(POLL).await;
+        }
+    }
+
+    impl Hook {
+        fn stub(&self, id: &str) -> Result<&Arc<ScenarioStub>, String> {
+            self.stubs.get(id).ok_or_else(|| format!("no stub {id:?}"))
+        }
+
+        fn init_air(&mut self) {
+            let Some(dir) = &self.air else { return };
+            for p in self.air_files(dir) {
+                let len = std::fs::metadata(&p).map(|m| m.len()).unwrap_or(0);
+                self.offsets.insert(p, len);
+            }
+        }
+
+        fn air_files(&self, dir: &Path) -> Vec<PathBuf> {
+            let own = format!("{}.jsonl", self.node);
+            let Ok(rd) = std::fs::read_dir(dir) else {
+                return Vec::new();
+            };
+            let mut v: Vec<PathBuf> = rd
+                .filter_map(|e| e.ok().map(|e| e.path()))
+                .filter(|p| {
+                    p.extension().is_some_and(|x| x == "jsonl")
+                        && p.file_name().is_some_and(|n| n.to_string_lossy() != own)
+                })
+                .collect();
+            v.sort();
+            v
+        }
+
+        /// Feed what the other nodes transmitted since the last pass.
+        fn air_pass(&mut self) {
+            let Some(dir) = self.air.clone() else { return };
+            for p in self.air_files(&dir) {
+                let from = *self.offsets.get(&p).unwrap_or(&0);
+                let Ok(bytes) = std::fs::read(&p) else {
+                    continue;
+                };
+                if (bytes.len() as u64) <= from {
+                    continue;
+                }
+                let new = &bytes[from as usize..];
+                // only whole lines; a partial last line waits for the next pass
+                let Some(end) = new.iter().rposition(|b| *b == b'\n') else {
+                    continue;
+                };
+                self.offsets.insert(p.clone(), from + end as u64 + 1);
+                for line in new[..end].split(|b| *b == b'\n') {
+                    let Ok(l) = serde_json::from_slice::<AirLine>(line) else {
+                        continue;
+                    };
+                    let Some(s) = self.stubs.get(&l.conv.network) else {
+                        continue;
+                    };
+                    let account = s
+                        .inner
+                        .facts()
+                        .accounts
+                        .first()
+                        .map(|a| a.id.clone())
+                        .unwrap_or_else(|| l.conv.account.clone());
+                    let _ = &l.node;
+                    s.inner.feed(Inbound::Text(InboundText {
+                        conv: ConvRef {
+                            network: l.conv.network.clone(),
+                            account,
+                            kind: l.conv.kind,
+                            native_id: l.conv.native_id.clone(),
+                        },
+                        sender_native: l.conv.account.clone(),
+                        sender_name: l.name,
+                        auth: Auth::ChannelKey,
+                        native_msg_id: l.native_id,
+                        body: l.text,
+                        claim_ts: None,
+                        meta: json!({}),
+                    }));
+                }
+            }
+        }
+
+        async fn control_pass(&mut self) {
+            let Ok(rd) = std::fs::read_dir(&self.control) else {
+                return;
+            };
+            let mut cmds: Vec<PathBuf> = rd
+                .filter_map(|e| e.ok().map(|e| e.path()))
+                .filter(|p| p.extension().is_some_and(|x| x == "json"))
+                .collect();
+            cmds.sort();
+            for p in cmds {
+                let answer = match read_capped(&p)
+                    .and_then(|b| serde_json::from_slice::<Command>(&b).map_err(|e| e.to_string()))
+                {
+                    Ok(c) => match self.apply(c).await {
+                        Ok(v) => json!({"ok": true, "result": v}),
+                        Err(e) => json!({"ok": false, "error": e}),
+                    },
+                    Err(e) => json!({"ok": false, "error": e}),
+                };
+                let done = p.with_extension("done");
+                let tmp = p.with_extension("done.tmp");
+                let w = std::fs::write(&tmp, answer.to_string())
+                    .and_then(|()| std::fs::rename(&tmp, &done));
+                if let Err(e) = w {
+                    eprintln!("111 bridge scenario: {}: {e}", done.display());
+                }
+                let _ = std::fs::remove_file(&p);
+            }
+        }
+
+        async fn apply(&self, c: Command) -> Result<Value, String> {
+            match c {
+                Command::Feed { stub, items } => {
+                    let n = items.len();
+                    self.stub(&stub)?.inner.feed_many(items);
+                    Ok(json!({"fed": n}))
+                }
+                Command::Burst {
+                    stub,
+                    conv,
+                    n,
+                    sender_native,
+                    sender_name,
+                    prefix,
+                } => {
+                    if n > MAX_BURST {
+                        return Err(format!("a burst is at most {MAX_BURST} texts"));
+                    }
+                    let s = self.stub(&stub)?;
+                    s.inner.feed_many((1..=n).map(|i| {
+                        Inbound::Text(InboundText {
+                            conv: conv.clone(),
+                            sender_native: sender_native.clone(),
+                            sender_name: sender_name.clone(),
+                            auth: Auth::ChannelKey,
+                            native_msg_id: format!("{prefix}-{i}"),
+                            body: format!("{prefix} {i:06}"),
+                            claim_ts: None,
+                            meta: json!({}),
+                        })
+                    }));
+                    Ok(json!({"fed": n}))
+                }
+                Command::Script {
+                    stub,
+                    outcomes,
+                    replace,
+                } => {
+                    let n = outcomes.len();
+                    let s = self.stub(&stub)?;
+                    let mut q = lock(&s.outcomes);
+                    let dropped = if replace { q.drain(..).count() } else { 0 };
+                    q.extend(outcomes);
+                    Ok(json!({"scripted": n, "dropped": dropped}))
+                }
+                Command::Facts { stub, facts } => {
+                    self.stub(&stub)?.inner.update_facts(|f| *f = facts);
+                    Ok(json!({}))
+                }
+                Command::State { stub, state } => {
+                    // V5-5: the state change also reaches the core as a link item, as a
+                    // product adapter reports it (Live = up, anything else = down), so
+                    // the rail's `bridge` frame follows on the next tick
+                    let s = self.stub(&stub)?;
+                    let link = if state == AdapterState::Live {
+                        LinkState::Up
+                    } else {
+                        LinkState::Down
+                    };
+                    s.inner.set_state(state);
+                    s.inner.feed(Inbound::Link(link));
+                    Ok(json!({}))
+                }
+                Command::QueueFull { stub, on } => {
+                    self.stub(&stub)?.queue_full.store(on, Ordering::SeqCst);
+                    Ok(json!({}))
+                }
+                Command::EmitHeld { stub, index, event } => {
+                    let ev = match event {
+                        HeldEvent::Accepted { native_id } => SendEvent::Accepted { native_id },
+                        HeldEvent::Evidence { state, evidence } => {
+                            SendEvent::Evidence { state, evidence }
+                        }
+                        HeldEvent::Failed { reason, retry } => SendEvent::Failed { reason, retry },
+                    };
+                    let ok = self.stub(&stub)?.inner.emit_held(index, ev);
+                    Ok(json!({"emitted": ok}))
+                }
+                Command::Pin { conv, pinned } => {
+                    let f = self.bridge.fab().map_err(|e| e.to_string())?;
+                    f.foreign_conversation_pin(conv, pinned)
+                        .await
+                        .map_err(|e| e.to_string())?;
+                    Ok(json!({"pinned": pinned}))
+                }
+            }
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn commands_and_scenario_files_parse_closed() {
+            let c: Command = serde_json::from_str(
+                r#"{"op":"script","stub":"stub-mesh","outcomes":["hold",{"fail":{"reason":"region_unset","retry":"later"}},{"accept":{}}]}"#,
+            )
+            .unwrap();
+            assert!(matches!(c, Command::Script { ref outcomes, .. } if outcomes.len() == 3));
+            assert!(serde_json::from_str::<Command>(r#"{"op":"nope"}"#).is_err());
+            assert!(serde_json::from_str::<Command>(
+                r#"{"op":"queue_full","stub":"x","on":true,"extra":1}"#
+            )
+            .is_err());
+            let f: Command = serde_json::from_str(
+                r#"{"op":"feed","stub":"s","items":[{"Link":"up"},{"Conversation":{"conv":{"network":"s","account":"a","kind":"channel","native_id":"ch:x"},"title":"x"}}]}"#,
+            )
+            .unwrap();
+            assert!(matches!(f, Command::Feed { ref items, .. } if items.len() == 2));
+            // V5-5: the state op as G1 sends it
+            let st: Command = serde_json::from_str(
+                r#"{"op":"state","stub":"stub-app","state":{"state":"error","detail":"adapter_down"}}"#,
+            )
+            .unwrap();
+            assert!(
+                matches!(st, Command::State { state: AdapterState::Error(ref d), .. } if d == "adapter_down")
+            );
+            let st: Command = serde_json::from_str(
+                r#"{"op":"state","stub":"stub-app","state":{"state":"live"}}"#,
+            )
+            .unwrap();
+            assert!(matches!(
+                st,
+                Command::State {
+                    state: AdapterState::Live,
+                    ..
+                }
+            ));
+            let s: ScenarioFile = serde_json::from_str(
+                r#"{"control":"/c","node":"a","stubs":[{"id":"stub-mesh","label":"M","tag":"SM","max_text_bytes":{"channel":232,"dm":220,"group":null}}]}"#,
+            )
+            .unwrap();
+            assert_eq!(s.stubs[0].max_text_bytes.unwrap().channel, Some(232));
+        }
+
+        #[tokio::test]
+        async fn a_scenario_stub_logs_sends_continues_native_ids_and_writes_the_air() {
+            let dir = std::env::temp_dir().join(format!("g1-hook-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(dir.join("air")).unwrap();
+            let sc = ScenarioFile {
+                control: dir.clone(),
+                node: "a".into(),
+                air: Some(dir.join("air")),
+                stubs: Vec::new(),
+            };
+            let spec = || Spec {
+                id: "stub-mesh".into(),
+                label: "Mesh".into(),
+                tag: "SM".into(),
+                kinds: None,
+                max_text_bytes: None,
+                airtime: None,
+                recipient_syntax: None,
+                facts: None,
+                inbound_cap: None,
+                air_name: Some("]".into()),
+            };
+            let conv = ConvRef {
+                network: "stub-mesh".into(),
+                account: "!a".into(),
+                kind: ConvKind::Channel,
+                native_id: "ch:x".into(),
+            };
+            let s = build_stub(spec(), &sc).unwrap();
+            let mut h = s.send(&conv, "one", SendOpts::default()).await;
+            assert_eq!(
+                h.events.recv().await,
+                Some(SendEvent::Accepted {
+                    native_id: "stub-mesh-a-1".into()
+                })
+            );
+            s.queue_full.store(true, Ordering::SeqCst);
+            let mut h = s.send(&conv, "two", SendOpts::default()).await;
+            assert!(matches!(
+                h.events.recv().await,
+                Some(SendEvent::Failed {
+                    reason: Reason::RateLimited,
+                    ..
+                })
+            ));
+            // a restart: the ids continue from the log
+            let s2 = build_stub(spec(), &sc).unwrap();
+            let mut h = s2.send(&conv, "three", SendOpts::default()).await;
+            assert_eq!(
+                h.events.recv().await,
+                Some(SendEvent::Accepted {
+                    native_id: "stub-mesh-a-3".into()
+                })
+            );
+            let log = std::fs::read_to_string(dir.join("stub-mesh.sent.jsonl")).unwrap();
+            assert_eq!(log.lines().count(), 3);
+            let air = std::fs::read_to_string(dir.join("air/a.jsonl")).unwrap();
+            assert_eq!(air.lines().count(), 2, "only accepted sends are on the air");
+            let l: AirLine = serde_json::from_str(air.lines().next().unwrap()).unwrap();
+            assert_eq!((l.name.as_str(), l.text.as_str()), ("]", "one"));
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -23,15 +23,33 @@
 //!   `queued`, `reason_code: cancelled` until it leaves. Any other state, or
 //!   an incoming message, is `409 bad_request`; an unknown id `404`.
 //!
+//! - **Foreign rows** (Layer 6 `6-transport/README.md` §4, §9, §10; W1): the
+//!   same two routes take a `fm-…` id (`ForeignMessageId`, [`json::parse_fm_id`]);
+//!   every other id keeps the Layer 5 path above unchanged. `retry` is
+//!   `Bridge::resend`: an own row that is uncertain ("may have been sent;
+//!   resend?", `handoff_pending`) or `failed` is sent again as a new row (the
+//!   old one keeps its state and records `meta.resent_as`); the answer is the
+//!   bridge's `ForeignSendAccepted` `{schema, id, plan}` with the NEW row's id
+//!   (the contract's `Message` cannot carry a foreign row; the UI re-reads the
+//!   thread and ignores the body). Any other state is `409 bad_request`, a
+//!   relay copy too; a consent gate or an oversize text answers its own `409`.
+//!   `cancel` is `Bridge::cancel`: an own row still `queued` and never handed
+//!   to a carrier is deleted (§9: nothing was numbered on the foreign side), the
+//!   answer `202 {schema, id}`; anything else is `409 bad_request` with the
+//!   Layer 5 copy, an unknown id `404`.
+//!
 //! Auth: behind `require_session` like every gated route; the agent's bearer
-//! may **read** (§17) but never send or retry — it proposes (`kind: message`)
-//! and the human accepts in the UI (§18 rule 9): a bearer on a write is `401`.
+//! may **read** (§17) but never send, retry or cancel — it proposes (`kind:
+//! message`) and the human accepts in the UI (§18 rule 9): the global write
+//! gate (`auth::bearer_write_refused`, first in `require_session`) answers a
+//! bearer on any write `401` before a handler runs.
 
 use super::{ApiRouter, ApiState, Problem};
+use crate::daemon::bridge::{Bridge, BridgeError};
 use crate::daemon::fabric::{self, json, FabricHandle};
 use axum::body::Bytes;
 use axum::extract::{Path, RawQuery, State};
-use axum::http::{HeaderMap, StatusCode};
+use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::Json;
@@ -63,21 +81,6 @@ pub(crate) fn handle(api: &ApiState) -> Result<Arc<FabricHandle>, Problem> {
     api.ext::<Arc<FabricHandle>>()
         .filter(|h| h.running())
         .ok_or_else(fabric::not_running)
-}
-
-/// `401` for the agent's bearer on a write (§17, §18 rule 9).
-pub(crate) fn refuse_bearer(headers: &HeaderMap) -> Result<(), Problem> {
-    if super::auth::bearer_tokens(headers).is_empty() {
-        return Ok(());
-    }
-    Err(Problem::new(
-        StatusCode::UNAUTHORIZED,
-        "unauthenticated",
-        "a dashboard session is required",
-    )
-    .detail(
-        "The agent reads messages and contacts; it sends only through proposals the user accepts.",
-    ))
 }
 
 pub(crate) fn bad_request(detail: impl Into<String>) -> Problem {
@@ -262,10 +265,7 @@ struct SendReq {
     text: String,
 }
 
-async fn send(State(api): State<Arc<ApiState>>, headers: HeaderMap, body: Bytes) -> Response {
-    if let Err(p) = refuse_bearer(&headers) {
-        return p.into_response();
-    }
+async fn send(State(api): State<Arc<ApiState>>, body: Bytes) -> Response {
     let req: SendReq = match serde_json::from_slice(&body) {
         Ok(r) => r,
         Err(_) => {
@@ -300,13 +300,9 @@ async fn send(State(api): State<Arc<ApiState>>, headers: HeaderMap, body: Bytes)
     }
 }
 
-async fn retry(
-    State(api): State<Arc<ApiState>>,
-    Path(id): Path<String>,
-    headers: HeaderMap,
-) -> Response {
-    if let Err(p) = refuse_bearer(&headers) {
-        return p.into_response();
+async fn retry(State(api): State<Arc<ApiState>>, Path(id): Path<String>) -> Response {
+    if id.starts_with(FOREIGN_PREFIX) {
+        return foreign_retry(&api, &id).await;
     }
     let Some(id) = json::parse_msg_id(&id) else {
         return not_found("message").into_response();
@@ -325,13 +321,9 @@ async fn retry(
     }
 }
 
-async fn cancel(
-    State(api): State<Arc<ApiState>>,
-    Path(id): Path<String>,
-    headers: HeaderMap,
-) -> Response {
-    if let Err(p) = refuse_bearer(&headers) {
-        return p.into_response();
+async fn cancel(State(api): State<Arc<ApiState>>, Path(id): Path<String>) -> Response {
+    if id.starts_with(FOREIGN_PREFIX) {
+        return foreign_cancel(&api, &id).await;
     }
     let Some(id) = json::parse_msg_id(&id) else {
         return not_found("message").into_response();
@@ -342,14 +334,6 @@ async fn cancel(
     };
     let Some(f) = h.fabric() else {
         return fabric::not_running().into_response();
-    };
-    let not_cancellable = || {
-        Problem::new(
-            StatusCode::CONFLICT,
-            "bad_request",
-            "Only your own message that has not left yet can be cancelled.",
-        )
-        .detail("It was already sent (or it is an incoming message); it cannot be called back.")
     };
     match f.cancel(id).await {
         Ok(v) => (StatusCode::ACCEPTED, Json(h.message_json(&v))).into_response(),
@@ -362,6 +346,76 @@ async fn cancel(
         },
         Err(FabricError::NotRetryable) => not_cancellable().into_response(),
         Err(e) => fabric::problem(&e).into_response(),
+    }
+}
+
+/// The `409` for a message that is not cancellable (Layer 5 copy; foreign rows share it).
+fn not_cancellable() -> Problem {
+    Problem::new(
+        StatusCode::CONFLICT,
+        "bad_request",
+        "Only your own message that has not left yet can be cancelled.",
+    )
+    .detail("It was already sent (or it is an incoming message); it cannot be called back.")
+}
+
+// ---------------------------------------------------------------- foreign rows (Layer 6)
+
+/// The prefix of a `ForeignMessageId` (contract): such an id never takes the Layer 5 path.
+pub const FOREIGN_PREFIX: &str = "fm-";
+
+/// `fm-<n>` → the foreign row id, the bridge core, or the problem (`404` for an id that
+/// names nothing; `503` without a bridge).
+fn foreign_target(api: &ApiState, id: &str) -> Result<(i64, Arc<Bridge>), Problem> {
+    let id = json::parse_fm_id(id).ok_or_else(|| not_found("message"))?;
+    Ok((id, super::bridge::bridge_of(api)?))
+}
+
+/// `POST /messages/fm-…/retry` (module doc): `Bridge::resend`.
+async fn foreign_retry(api: &ApiState, id: &str) -> Response {
+    let (id, b) = match foreign_target(api, id) {
+        Ok(x) => x,
+        Err(p) => return p.into_response(),
+    };
+    match b.resend(id).await {
+        Ok(v) => Json(v).into_response(),
+        Err(BridgeError::NotFound(_) | BridgeError::Fabric(FabricError::NotFound)) => {
+            not_found("message").into_response()
+        }
+        // not an own row waiting for a decision, or a relay copy: the Layer 5 code
+        Err(BridgeError::BadRequest(why)) => Problem::new(
+            StatusCode::CONFLICT,
+            "bad_request",
+            "This message cannot be sent again in its current state.",
+        )
+        .detail(why)
+        .into_response(),
+        Err(e) => e.into_response(),
+    }
+}
+
+/// `POST /messages/fm-…/cancel` (module doc): `Bridge::cancel`.
+async fn foreign_cancel(api: &ApiState, id: &str) -> Response {
+    let (row, b) = match foreign_target(api, id) {
+        Ok(x) => x,
+        Err(p) => return p.into_response(),
+    };
+    match b.cancel(row).await {
+        Ok(()) => (
+            StatusCode::ACCEPTED,
+            Json(json!({ "schema": 1, "id": json::fm_id(row) })),
+        )
+            .into_response(),
+        Err(BridgeError::NotFound(_) | BridgeError::Fabric(FabricError::NotFound)) => {
+            not_found("message").into_response()
+        }
+        // an inbound row, a relay copy, a handed, accepted or sent row (refused by the
+        // fabric or the store)
+        Err(
+            BridgeError::Fabric(FabricError::NotRetryable | FabricError::Invalid(_))
+            | BridgeError::BadRequest(_),
+        ) => not_cancellable().into_response(),
+        Err(e) => e.into_response(),
     }
 }
 

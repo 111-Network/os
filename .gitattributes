@@ -1,0 +1,10 @@
+* text=auto eol=lf
+# Byte-exact fixtures and saved diffs are never normalised.
+*.golden -text
+*.patch -text
+*.minisig -text
+*.png binary
+*.jpg binary
+*.gif binary
+*.woff binary
+*.woff2 binary
