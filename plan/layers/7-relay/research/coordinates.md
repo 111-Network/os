@@ -74,6 +74,15 @@ at `~/.claude/projects/…/subagents/workflows/wf_60f165f1-80f/journal.jsonl` on
   the floor rows and the form → `review/board-check.md`; Fix: one planner pass and a re-check when the judge says fix-first).
 - Run id: `wf_125acb61-573` (launched 2026-11-02 from the tree `78b0d08`). Resume:
   `Workflow({scriptPath: "<repo>/plan/layers/7-relay/runs/workflows/board.js", resumeFromRunId: "wf_125acb61-573"})`.
-- Next: the lead reads the board and the judge's report, fixes what is left, commits the board → the build waves per the board (one workflow per
-  wave under `runs/workflows/`, the lead runs every check, reads every diff, commits per verified task).
+- Result (2026-11-02): the board (141 lines; T0, Wave 0 P1–P2/L1–L3/M1–M7/D1/C1, Wave 1 D2–D10/U1–U3/A1/K1–K2, Wave 2 D11/L4/V1/K3–K4, a gated
+  D12, Wave 3 V2–V10, the Pi-floor record, the external gates); the judge: fix-first (one blocker, the `lan` mark no row set; two majors; eleven
+  minors) → fix pass → **ready** with five minors (n1–n5) applied by the lead; `review/board-check.md`.
+
+## Run 5 — T0 scaffold (2026-11-02)
+
+- Script: `runs/workflows/t0.js` (one opus agent lays the T0 row: the verify skeleton, the module and router stubs, the ntfy KB candidate entry,
+  the LICENSING fix; the lead runs fmt, clippy, `build.py --check`, shellcheck, reads the diff and commits "Layer 7 scaffold").
+- Run id: `wf_0cc2beb9-430` (launched 2026-11-02 from the tree `561cb5e`). Resume:
+  `Workflow({scriptPath: "<repo>/plan/layers/7-relay/runs/workflows/t0.js", resumeFromRunId: "wf_0cc2beb9-430"})`.
+- Next: Wave 0 per the board (P1 first; one workflow `runs/workflows/wave-0.js`), the lead runs every check, reads every diff, commits per verified task.
 
