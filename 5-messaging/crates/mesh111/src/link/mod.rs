@@ -5,8 +5,8 @@
 //! for the §20 G1 Tier-1 scenario). Owner: F1.
 //!
 //! The trait is exactly §8's shape (futures boxed so it stays object-safe).
-//! Three small seams sit **beside** it rather than in it, so the trait stays
-//! the contract Layer 6 drivers implement:
+//! Small seams sit **beside** it rather than in it, so the trait stays the
+//! contract Layer 6 drivers implement:
 //!
 //! - [`LinkEvent`] — connection up/down facts an adapter reports to the
 //!   fabric over an [`EventSink`] (§9 "members fetch on link-up"; §9 "retries
@@ -15,7 +15,10 @@
 //!   pinned keys is dropped" check, answered by the fabric from the contacts
 //!   table (authoritative, L2 amendment A7);
 //! - [`Dialer`] — keep an outbound connection to a known address up
-//!   (reconnect with back-off is a transport detail, §8.1).
+//!   (reconnect with back-off is a transport detail, §8.1);
+//! - [`tcp_lan::StreamWrap`] — the `tcp-lan` stream seam (Layer 7 §4.4,
+//!   §19 code seam 1): the host may wrap each `tcp-lan` connection (TLS for
+//!   paired hubs, in node111); `None` by default, byte-identical.
 //!
 //! The fabric never rate-limits: airtime and duty cycle are facts an adapter
 //! advertises ([`Airtime`]), never limits this layer imposes (§1, §8).
