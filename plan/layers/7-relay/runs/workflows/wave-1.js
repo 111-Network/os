@@ -63,10 +63,25 @@ WAVE 0 LANDED (read the files, not this summary, before you rely on a name):
   internet bases keep \`last-update-check.json\`); \`UpdaterStatus::settle()\`; \`util::http::{check_url(url, Option<HttpException>) -> Result<Scheme,
   UrlRefused>, HttpException::{HomeHubOrigin, UserTypedFrom}, Fetcher::allowing_http(e), Fetcher::get_capped(url, max), is_not_found(&err)}\` (T6:
   https:// always; http:// to a loopback IP literal, or to any host under a typed exception; no redirect on http://, https-only redirects on https://).
+- node111 relay settings (D1): \`N/relay/settings.rs\`: \`relay::settings::{load(state_dir) -> Loaded {settings, invalid}, save(state_dir, &s),
+  update(state_dir, |s: &mut RelaySettings| -> Result<(), E>) -> Result<(RelaySettings, bool), UpdateError<E>>}\` (no file until the first real change;
+  an invalid file is moved aside to \`relay.json.invalid-<n>\` and reads all off); \`RelaySettings\` getters/setters per §6.3 key (\`gateway_enabled\`,
+  \`termux_poll_min\`, \`carrier_kind\` (\`CarrierKind::{None, Ntfy}\`), \`ntfy_server\`, \`ntfy_token\`/\`ntfy_topic_secret\` (\`Secret\`, Debug prints only
+  "set"; \`ntfy_topic_secret() -> Option<Zeroizing<[u8; 32]>>\`), \`carrier_mode\`/\`carrier_mode_for(termux)\` (\`CarrierMode::{FiveA, FiveB}\`; 5B refused
+  on Termux), \`consent_hash(ConsentKind)\`/\`set_consent_hash\` (\`ConsentKind::{CarrierEnable, GatewayBit, OriginServe}\`), \`heartbeat_min(transport)\`
+  (read-only: no setter in v1), \`lan_record\`, \`public_gateway_bit\`, \`offload_bit\`, \`origin_serve\`, \`origin_targets\` (the own target first),
+  \`check_internet\`, \`metered\`/\`set_metered(Vec<MeteredLink>)\`, \`metered_window\`/\`set_metered_window\` (CLOCK_BOOTTIME slots + boot_id: relay::metered's
+  to bucket), \`drain_cursor(topic)\`/\`set_drain_cursor(topic, id)\`); \`view() -> SettingsView\` serialises to the contract's RelayStatus keys this file
+  owns (gateway.enabled/termux_poll_min, carrier (secrets as {set}), presence.heartbeat (the three Layer 7 transports, owner layer7; D10 appends the
+  rns row), discovery, origin.serve/targets, updates, metered). Not here: quota.transit (the store), the pairs and pair_plain's hash (fabric/settings).
+  The file uses deny_unknown_fields on every object: a new key is added here, never written blind.
+- node111 update helper (L3): \`update_helper::check_min_upgrade_from(installed: Option<Calver>, &manifest)\` (T3; an unreadable installed release is
+  refused too); a \`--from\` staged bundle passes the same chain as an internet one.
+- M4's minimal node111 compile fixes already in the tree: \`Counters.forward_refused\`/\`forward_too_large\` (mirrored by RelayStatus.forward, not
+  FabricCounters), a \`FabricEvent::Forward { .. }\` arm in \`FabricHandle::publish\`, \`paired_hubs: Vec::new()\` in fabric/settings decode.
 WAVE0_FACTS_PENDING: M4 (fabric: the widened gate, PairedHub in FabricSettings, FabricEvent::Forward, the hand-off API, set_carrier_max_frame),
 M5 (node111 fabric/settings paired_hubs, the tap in FabricHandle::publish, TcpLanConfig.wrap from relay::tls::wrap(), the home-hub address call, the
-X25519 behind the identity handle), D1 (N/relay/settings.rs: load/save/typed accessors/view), L3 (helper guard) — the lead replaces this line with
-their as-built names before the launch.
+X25519 behind the identity handle) — the lead replaces this line with their as-built names before the launch.
 `
 
 const CTX = `
