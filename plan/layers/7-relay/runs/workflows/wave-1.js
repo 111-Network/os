@@ -115,7 +115,7 @@ WAVE 0 LANDED (read the files, not this summary, before you rely on a name):
   restart). \`N/fabric/sealer.rs\`: \`IdentitySealer::carrier_topic_x25519(&peer_enc_pk) -> Result<Zeroizing<Key32>, SealerError>\` (on no API; D11 feeds it
   to carrier::ntfy::topic_key), \`stored_hub_hint(&fabric_dir)\`. \`N/relay/tls.rs\`: \`pub fn wrap(fabric_dir: &Path, pairs: &PairTable) -> Option<Arc<dyn
   StreamWrap>>\` (the None stub D5 replaces, same signature).
-- mesh111 fabric, the fix wave (M4b, __M4B__): wholeness is RECORDED: \`PairedHub { node_id, role, via, ours: bool, theirs: bool }\` with
+- mesh111 fabric, the fix wave (M4b, 6516032): wholeness is RECORDED: \`PairedHub { node_id, role, via, ours: bool, theirs: bool }\` with
   \`PairedHub::whole()\` = ours && theirs (\`valid()\` unchanged); \`Fabric::offer_pair(address: Option<SocketAddr>, role: PairRole, via: PairVia) ->
   Result<OfferView>\` mints a PAIRING code (OfferView.bundle is None: the 111PAIR bundle is the daemon's, D6; one open offer at a time, member or
   pairing); the far hub's ENROLL that redeems it records \`theirs\` and pins its card at oob (never a member); \`Fabric::pair(...)\` (same signature)
