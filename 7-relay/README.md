@@ -1,4 +1,4 @@
-# Layer 7 - Relay & Presence: spec v0.2 (draft for the re-check)
+# Layer 7 - Relay & Presence: spec v1.0 (locked 2026-11-02, D32)
 
 The layer that makes reachability honest and lets delivery cross islands. **Presence** is event-driven: a node shows who it heard, over which transport, how
 long ago by its own clock, and from what evidence. **Hubs pair** with other hubs and hand custody of sealed items to each other, one copy at a time. A hub
@@ -7,10 +7,11 @@ nodes that never see the internet. The layer pins the **mesh epoch** that Layer 
 routing protocol, no resident process and no timer to a node that is not a hub, and nothing leaves a node unsealed except what the user publishes or
 bridges.
 
-Status: ✍️ **v0.2, draft (2026-11-02)**, v0.1 (written from D30, the owner took every pick and every default of the options brief) amended after the
-three-judge panel by the lead's triage (`plan/layers/7-relay/review/triage.md`) and D31. Nothing here is built. Next: one re-check
-(`plan/layers/7-relay/review/recheck.md`), the lock (D32), `7-relay/TASKS.md`. The six owner forks of D31 are applied as the lead recommends (§19
-"Owner forks"); a different answer lands as v0.3.
+Status: 🔒 **locked v1.0 (2026-11-02, D32)** = v0.2 as re-checked. v0.1 (written from D30: the owner took every pick and every default of the
+options brief) → three-judge panel → the lead's triage (`plan/layers/7-relay/review/triage.md`) and D31 → v0.2 → one fable re-check
+(`plan/layers/7-relay/review/recheck.md`: verdict lock, three minors folded into this lock edit) → lock. Nothing here is built; the build board is
+`7-relay/TASKS.md`. The six owner forks of D31 are applied as the lead recommends (§19 "Owner forks"); a different answer lands as a lock amendment,
+recorded in `plan/DECISIONS.md`.
 
 ## 0. Reading guide
 
@@ -116,8 +117,8 @@ gateway carriage of foreign-network text (a gateway carries sealed 111 frames on
 |---|---|---|
 | an inbound message from a contact (`Message`, `dir = in`) | `111` row; transport = `attributed_on(peer)`: `tcp-lan` when a connection is attributed to them, else `hub` ("through your hub") | "a message from them arrived (verified)" |
 | an own message turns `delivered` | `111` row; transport by the same rule | "they confirmed your message" |
-| the home hub answered on its connection (`hub.reachable`) | the hub's row | "your hub answered" |
-| a paired hub answered (a `CUSTODY_ACK` or a forward put, §5.9) | that hub's row | "paired hub answered" |
+| the home hub answered on its connection (`hub.reachable`) | the hub's row, transport `tcp-lan` | "your hub answered" |
+| a paired hub answered (a `CUSTODY_ACK` or a forward put, §5.9) | that hub's row, transport = the pair's `via` (`tcp-lan` or `carrier`) | "paired hub answered" |
 | an own message turns `relayed` | nothing about the peer | the message shows "your hub holds it"; the peer's row is not refreshed |
 | a card, an announce, a hello, a keepalive | nothing | a stored announce is accepted with no state change and proves no liveness (L2 A6; `2-identity/README.md:348-351`) |
 
@@ -127,7 +128,8 @@ gateway carriage of foreign-network text (a gateway carries sealed 111 frames on
   this node", `device_id` null. A node row is created only for a contact with a fact this session; `id` = the NodeId (64 hex), `num` = 0, `long_name` = the
   local alias or the L2 label, `short_name` = the label, `last_heard_hint` = null.
 - Additive optional `NearbyNode` fields: `heard_ago_s` (integer or null, from `heard_at`, display only), `heard_seq` (the `local_seq`), `evidence`
-  (`[{transport, text}]`, the strings above; `transport` is `tcp-lan` or `hub`, §2.2), `roles` (the contact's signed role names).
+  (`[{transport, text}]`, the strings above; `transport` is a closed set: `tcp-lan` or `hub` for a contact (§2.2 row 1), `tcp-lan` for the home hub's row
+  and a `tcp` pair's row, `carrier` for a `carrier` pair's row (the pair's `via`, §4.6; its ack arrives through `carrier_inbound` with no link), §2.2), `roles` (the contact's signed role names).
 - The `111` source rides the same sink and the same cap as the bridge sources: at most 512 rows (`MAX_BRIDGE_NODES`, `N/dashboard/api_v1/nearby.rs:41`), the
   oldest heard forgotten first (`:129`). It publishes the existing SSE `nearby` frame on a change (`API:1170`). No timer refreshes ages: the UI computes them
   from `heard_ago_s` and its own clock between frames.
@@ -138,10 +140,10 @@ gateway carriage of foreign-network text (a gateway carries sealed 111 frames on
    (`6-transport/README.md:334`). A beat re-mints the node's announce (a fresh counter value, committed with an fsync before it is sent,
    `M/sealer.rs:53-54`) and sends it on that transport only.
 2. **Visible and inert in v1 (I4; §19 D15).** No transport takes a beat in v1: `tcp-lan` needs none (the 25 s keepalive already proves the link,
-   `M/link/tcp_lan.rs:125`) and the LoRa transports have no sealed link yet. Every write to `presence.heartbeat.<transport>` (a `PATCH /relay/settings` or
-   an accepted proposal) answers `409 no_such_transport`, except `rns`, which answers `409 settings_locked` with a `detail` that names
+   `M/link/tcp_lan.rs:125`) and the LoRa transports have no sealed link yet. Every write to `presence.heartbeat.<transport>` (a `PATCH /relay/settings`)
+   answers `409 no_such_transport`, except `rns`, which answers `409 settings_locked` with a `detail` that names
    `PATCH /api/v1/bridge/settings`: the LXMF helper's announce interval (default 60 min) is Layer 6's setting and is shown here, never written through.
-   The proposal action `presence.interval` is refused `unsupported_action` in v1 (§13.2). The switch is visible until a sealed LoRa link exists (v1.1).
+   The proposal action `presence.interval` is refused `unsupported_action` in v1, before any transport check (§13.2). The switch is visible until a sealed LoRa link exists (v1.1).
 3. **Bans (the validator, built in v1, reached over HTTP from v1.1):** after the transport check, never on a duty-cycle-limited band (the region table says
    so) or a board marked licensed (`409 licensed_board`); on a phone (Termux category) never below 9 min (`400 bad_request`; Doze fires exact alarms at most
    once per nine minutes, R01 §3 finding 9). Because step 2 refuses every v1 write first, node111 unit tests call the validator with a transport the test
@@ -515,7 +517,9 @@ never redeliver (L5 §4). (d) Retransmits reuse the stored sealed bytes (`M/fabr
 - **Refused (C1 (a); D31 (6)).** A forward row is marked refused (`committed = 1`) once every target the §5.1 table allows it has answered a refusal (a
   `REJECT_UNKNOWN_DEST` on an attributed connection, a carrier's `REJECT_UNKNOWN_DEST` or `Rejected`, §5.9) or the item fits no target left. Step 1 may then
   evict it like any committed row; `forward_refused` counts it in `FabricStatus` and the hub's fabric view shows the count. A target that is down keeps the
-  row protected until it answers; the per-origin share bounds what a dead pair can pin. The member keeps `relayed` (§5.6).
+  row protected until it answers; the per-origin share bounds what a dead pair can pin per origin (across origins, up to the Transit quota). The member
+  keeps `relayed` (§5.6). The count is this session's (`Counters`, `M/fabric.rs:645`): it restarts at zero with the daemon, and a refused row is thereafter
+  an ordinary committed row.
 - **The high watermark (C1 (c)).** Protected Transit rows count toward the store's high watermark (`live_bytes` in `admit_inner`, `M/store/prune.rs:818-833`).
   At the 512 MiB default up to 128 MiB of it may be other people's items, so member custody is refused once the store is full even when no member quota is
   reached; the owner's `quota.transit` bounds that exposure.
@@ -1068,7 +1072,7 @@ carrier re-posts of §5.9 (C6); `forward` mirrors the fabric's `forward_refused`
      `test/layer6-contract.test.ts` (closed enums and enum growth, the precedent a Layer 7 contract test follows), and the mock adapters, whose frames
      validate against `x-sse-events`.
   6. node111's `dashboard/api_v1/` mirrors: the `NearbySource` kinds (`kind_for`, `N/dashboard/api_v1/nearby.rs:54-56`), the `Problem` codes and the
-     `ConsentRequired` actions, beside the new routes.
+     `ConsentRequired` actions, the `evidence[].transport` set (`tcp-lan`, `hub`, `carrier`, §2.3), beside the new routes.
 
 ### 13.3 Agent tools (the Layer 3 set grows; fixed, shell-free, schema-validated)
 
@@ -1391,7 +1395,7 @@ recorded baseline (§3.7) · the DNS-SD browse window 5 s (§7.1) · Transit 128
   share `quota.transit / 8` (V4 gains `fwd_from`); protected Transit rows count toward the high watermark; the member keeps `relayed` (Q6).
 - **C2** §5.2, §5.5, §5.6, G9: a no-hint put is held and `ACCEPTED` when any target exists, then probed after the ack; none ⇒ `REJECT_UNKNOWN_DEST`; the
   hinted-unmatched clause matches; `ACCEPTED` means "held and will be offered".
-- **C3** §4.6, §5.1, §5.2, §5.7, §13.1, G9: the bundle carries the shower's proposed role and link; the pick must be the complement or 409
+- **C3** §4.6, §5.1, §5.2, §5.7, §13.1, G9: the bundle carries the showing hub's proposed role and link; the pick must be the complement or 409
   `pair_role_mismatch`; carrier pairs `peer` only, leaf pairs `tcp` only; a put against the record is refused.
 - **C4** §5.1, §17: a hub's own messages cross islands only through its home hub in v1; the own-send forward route is v1.1 (Q3).
 - **C5** §5.3 amendment 2: the whole scope sentence replaced, with the `queued` / `sent` reading the code gives.
@@ -1466,3 +1470,15 @@ recorded baseline (§3.7) · the DNS-SD browse window 5 s (§7.1) · Transit 128
 - **D7**: accepted as recorded; text unchanged.
 - **D9**: accepted as recorded; text unchanged.
 - **Numbers** §3.4, §3.7, §6.2, §7.1, §8.1, §5.8, §19: each marked "a default; the owner may change".
+
+## Changelog v0.2 → v1.0 (lock)
+
+2026-11-02: the fable re-check (`plan/layers/7-relay/review/recheck.md`) returned lock with three minors, folded in here; locked by D32.
+
+- **R1** §2.4 item 2: a `PATCH` answers `no_such_transport` (or `settings_locked` for `rns`); the proposal action `presence.interval` is refused
+  `unsupported_action` before any transport check; "or an accepted proposal" dropped.
+- **R2** §2.2, §2.3, §13.2: `evidence[].transport` is the closed set `tcp-lan`, `hub`, `carrier`; the home hub's and a `tcp` pair's row carry `tcp-lan`, a
+  `carrier` pair's row carries `carrier` (the pair's `via`); the set joins the pin list's node111 mirrors.
+- **R3** §5.8: `forward_refused` is a session counter (`Counters`); it restarts with the daemon and a refused row is thereafter an ordinary committed row;
+  "per origin" stated for what a dead pair can pin.
+- Changelog C3: "showing hub's" (typo).

@@ -1,11 +1,12 @@
 # Layer 7 — Relay & Presence: plan folder
 
-**Status** (summarised from [`INDEX.md`](../../INDEX.md) row 7, which stays the source of truth): ✍️ speccing — kickoff 2026-11-01
+**Status** (summarised from [`INDEX.md`](../../INDEX.md) row 7, which stays the source of truth): 🔨 building — kickoff 2026-11-01
 (cloud session, branch `claude/layer-6-implementation-006mte`): the research sweep ran (`runs/workflows/research.js`: opus seams scout,
-five sonnet lens scouts, opus completeness critic, two sonnet gap-fill scouts; `research/00`–`07`) and the lead wrote
-[`options.md`](options.md), complete with the gap-fills folded in; **the owner decided on 2026-11-01 (D30: every pick and default of the brief); next the spec `os/7-relay/README.md`, the fable panel, the lock, `TASKS.md`, the build**
-(`INDEX.md` "Process (per layer)": research → options brief → decision → adversarial pass → build; `EXECUTION.md` applies once the spec is
-decided).
+five sonnet lens scouts, opus completeness critic, two sonnet gap-fill scouts; `research/00`–`07`), the lead wrote [`options.md`](options.md),
+the owner decided on 2026-11-01 (D30: every pick and default of the brief); the spec `os/7-relay/README.md` was drafted (`runs/workflows/spec.js`),
+panelled by three fable judges (`review/custody.md`, `carriers.md`, `integration.md`), triaged by the lead (`review/triage.md`, D31), amended to
+v0.2 (`runs/workflows/spec-fix.js`) and re-checked (`review/recheck.md`: lock); **locked v1.0 on 2026-11-02 (D32)**; the build runs per
+`os/7-relay/TASKS.md` (`EXECUTION.md`). The six D31 owner forks are applied as the lead recommends until the owner answers (DECISIONS Pending).
 
 **What the layer is:** `os/README.md` §7 (heartbeats, gateways, the adopted asynchronous store-and-forward transport, dynamic
 delivery paths) and "Category 5: Global Gateways" (an overlay role: 5A intermittent, 5B permanent). Layer 7 runs on every

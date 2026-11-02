@@ -526,8 +526,8 @@ may pin later); a CD workflow now (needs the musl toolchains on the runner, a re
     Flush now or a since-miss, counted; acks consumed on take and never retried; the prune-class rules by `fwd` named at their lines; the
     `mdns-sd` re-arm procedure and its bind-failure fallback; the origin base on the dashboard port and the `blob/<sha256>` fetch for hub and
     `--from` origins; the carrier's own `ureq::Agent`, 5A in `spawn_blocking`, 5B on one named thread with a threads row in the weight table;
-    every Layer 7 consent in the pinned `ConsentRequired` shape with four appended actions; `needs_hub` and four appended error codes with the
-    six-item pin list; the heartbeat switch visible and inert in v1 (every transport `409 no_such_transport`, `rns` pointed at the bridge
+    every Layer 7 consent in the pinned `ConsentRequired` shape with four appended actions; `needs_hub` and five appended error codes (the four
+    of I3 and C3's `pair_role_mismatch`) with the six-item pin list; the heartbeat switch visible and inert in v1 (every transport `409 no_such_transport`, `rns` pointed at the bridge
     settings); members-only gateway advertisement in v1; a human-only `POST /nearby/hops` for the `rnpath` read; and the forty minors.
   - **Numbers kept as the lead's defaults (the owner may change any):** Termux fallback poll 15 min · ntfy `cache-duration` 168 h · epoch origin
     day 2026-01-01 · no-timer gate pass line 1.10 × the first recorded baseline · DNS-SD browse window 5 s · Transit 128 MiB, per-origin 16 MiB.
@@ -540,11 +540,39 @@ may pin later); a CD workflow now (needs the musl toolchains on the runner, a re
 - **Next:** v0.2 (one spec editor) → one fable re-check (`review/recheck.md`) → the lock entry (D32) → `7-relay/TASKS.md` → build, the ntfy
   carrier prototype first.
 
+## D32 — Layer 7 spec locked (v1.0); build starts
+
+- **Date:** 2026-11-02
+- **Decision:** the Layer 7 (Relay & Presence) spec `os/7-relay/README.md` is **locked at v1.0** = draft v0.2 as re-checked: v0.1 (one spec drafter,
+  from D30 + the options brief + research 00–07g2, modelled on the Layer 6 spec) → three fable judges (custody · carriers · integration; all
+  amend-then-lock, four blockers, seventeen majors, forty minors; `plan/layers/7-relay/review/{custody,carriers,integration}.md`) → lead triage
+  accepting all 61 with six owner forks (`triage.md`) → **D31** → v0.2 (every finding and the drafter's eleven deviations applied; sixteen recorded
+  editor deviations, all within the triage) → one fable re-check (**lock**: no blocker, no major, three minors; `recheck.md`) → the lock edit
+  (R1 the heartbeat refusal codes, R2 the `evidence[].transport` closed set gains `carrier`, R3 the refused count is a session counter; one typo) →
+  v1.0. No second re-check: the lead applied the three minors by hand and read the diff.
+  - **What v1 commits to** (D30 F10): event-driven presence with the `111` Nearby kind and the per-transport heartbeat switch visible and inert ·
+    the event-driven gateway test (netlink address/route groups, the 60 s `HEAD` probe removed, the `mdns-sd` re-arm, Termux polling fallback) and the
+    no-timer gate · hub-to-hub `tcp-lan` wrapped in TLS 1.3 raw public keys through `tokio-rustls` (one lockfile entry; one code seam in the tcp-lan
+    adapter) and pairing after one direct meeting · single-copy push hand-over of custody (the `fwd` table with `fwd_from`, the hint TLV, `Class::Transit`
+    with a per-origin share, refused rows that end, the forwarder and its hand-off API) with the twelve additive Layer 5 amendments and the §19 code
+    seams · the carrier contract with the ntfy prototype (5A on events, 5B one held connection on one named thread) behind its KB smoke log · the hub
+    as update and KB origin with `111 update --from` and the staging lock · the three-layer registry (DNS-SD record, role bits, the sealed query pinned
+    for v1.1) · the hub-distributed day epoch (format and unit; nothing built in v1) · the SVG radar · the public-frame formats pinned · every consent
+    in the pinned shape, the metered-link cap. v1.1 (§17): the radio form of custody, chains, the sealed registry query, the own-send routes, the
+    heartbeat on a sealed LoRa link, the map bucket, Nostr/LXMF-propagation/iroh carriers, the frame consumers.
+  - **Build:** `os/7-relay/TASKS.md` per `EXECUTION.md` (the ntfy carrier prototype and its KB smoke log first; the Layer 1 trust amendments early; the
+    twelve Layer 5 amendments as one wave; gates G8–G12 and the extended G7 in `7-relay/verify/`); opus for Rust, sonnet for UI/docs/KB, fable for the
+    integrated review; the box rules and Linux hygiene of `AGENTS.md`; nothing resident, periodic or heavier on a non-hub node (§5.11, §16).
+- **Open (owner):** the six D31 forks stay applied as the lead recommends until the owner confirms or flips them (Pending); the numbers kept as
+  defaults (§19); the `checkpoint-layer-6` tag the lead creates before G9's lock run (the Layer 6 lock commit, D29).
+- **Why:** the panel's blockers were seams and honesty gaps, D31 closed the forks, the re-check found nothing of weight, and the spec is wired to the
+  built layers by citations re-read at the lock head.
+
 ## Pending
 
 - Move deep architecture content out of `os/README.md` into per-layer specs (Layers 0–6 have their homes; the README's Layer 7–9 content waits for theirs).
 - **Layer 0 hook activation** — owner chose to leave it off (D17); `build.py --check` stays manual per task.
 - **Release source offer** — the release checklist must publish the tagged Corresponding Source beside every binary release (D22; `LICENSING.md` section 8).
 - **Layer 6 owner questions** (D29 "Open at the lock" and the board Summary's owner-question list), among them the `[install] prefetch` default for the 104 MB Delta Chat + Madmail payloads, the LXMF helper's licence contact with upstream, the additive `superseded_by` field and the synchronous paired-LAN posture PATCH.
-- **Layer 7 (Relay & Presence) spec in amendment** (D30 picks, D31 amendments after the panel) — v0.2 → one fable re-check → lock (D32) → `7-relay/TASKS.md`; no Layer 7 build task before the lock.
+- **Layer 7 (Relay & Presence) building** (D30 picks, D31 amendments, lock D32 2026-11-02) — board `7-relay/TASKS.md`; the ntfy carrier prototype and its KB smoke log first.
 - **Layer 7 owner questions (D31, applied as the lead recommends until answered):** (1) the tcp-lan stream seam for TLS-RPK as a code seam, or tunnel-only pairing in v1; (2) byte-identical code seams listed beside the twelve, or no `attributed_on` accessor; (3) a hub's own messages cross islands only via its home hub in v1; (4) the sealed registry query in v1.1; (5) hubs meet once over tcp-lan to pair; (6) refused forward rows end and Transit has a per-origin share.
