@@ -114,6 +114,46 @@ times); cargo test -p node111 --test settings_lan --test dashboard_auth --test a
 -D warnings; cargo fmt --all -- --check.
 NOTES must list the exact names that changed (stored_hub_hint's new return type, any new pub fn), the lag rule for the tap's consumers, and the
 far_holds_address rule for D6.` },
+  M5c: { model: 'opus', effort: 'high', brief: `TASK M5c (row "| M5c |" in the Wave 0 table of ${ROOT}/7-relay/TASKS.md): the bounce on M5b (landed; read
+N/fabric/mod.rs on_settings, publish, pump_batch, the Rehomed doc, void_rehome_on and replace_home_hub_address first). Files you own:
+${ROOT}/1-bootstrap/crates/node111/src/daemon/fabric/mod.rs, ${ROOT}/1-bootstrap/crates/node111/src/daemon/fabric/settings.rs. Nothing else (mesh111 is not
+yours: where a mesh111 seam would be the better fix, say so in deviations and do the daemon-side fix). ANOTHER AGENT (M4c) IS EDITING
+5-messaging/crates/mesh111/src/fabric.rs RIGHT NOW and node111 compiles mesh111 from disk: when a cargo command fails only with errors inside
+mesh111, wait 90 s and retry, up to 20 times, before reporting blocked-by: M4c; never touch mesh111. The findings of the read-only re-review of
+M5b (verify each against the file as it now is):
+
+S1 CONFIRMED (medium): a pump lag now voids the §7.7 override every time, and the void path releases the hub's NEW address (the one live,
+  handshake-verified connection to the home hub), after which nothing dials the hub again. Scenario: a member recovered its hub through
+  replace_home_hub_address(to) (the fabric still holds {hub, from}, the daemon released from); later a burst of more than 1,024 events (a mailbox
+  fetch or a bridge import on a Pi) overflows the fabric's broadcast channel; pump_batch sees Lagged, voids the override, re-reads the current
+  settings ({hub, from}); apply_rehome takes the void arm and returns Some(to); holds_address(snapshot, to) is false, so Dialer::release(to). Before
+  M5b a lag did not touch the override. FIX: a lag never voids the override on its own. On a lag, re-read the current settings and the hub's
+  contact (Fabric::contact / status) and void only when they show the membership changed: the hub is at neither from nor to, or the contact is
+  gone, or (to catch a forget-and-re-enrol at from that the lag hid) a membership marker taken when Rehomed was recorded differs (the contact's
+  pin/enrolment time, or the mailbox cursor row); otherwise keep the override and its dial. In every void path, never release an address that is
+  the currently shown home-hub address. Test: the scenario above (a Lagged batch with the override live keeps the dial and the override; a lag
+  that hides a forget voids it).
+
+S2 PLAUSIBLE (low): the "drop a half only when the fabric's current settings lack its record" rule still drops a fresh half set after an unpairing
+  the pump has not applied yet: D6 runs Fabric::unpair(B) (a Settings event without B is queued) and immediately set_pair_link(B') ahead of a new
+  Fabric::pair; set_pair_link replaces the half while persisted.fabric still holds B's old record (recorded = true); the pump's on_settings then
+  computes gone = [B] (the re-read also lacks B: no ENROLL_OK yet) and drops B'. FIX: in set_pair_link, under persist, re-read the fabric's
+  current settings and fold the record drop into persisted.fabric BEFORE storing the new half, so the pending unpair is applied first and the new
+  half counts as not yet recorded (kept in memory, written with its record later). Test: unpair, set_pair_link before the pump runs, then
+  on_settings(without B): the new half survives.
+
+S3 PLAUSIBLE (low, record only unless trivial): the F4 refusal in replace_home_hub_address sees only connected addresses (Link::peers); a
+  fabric-owned dial target at the candidate address that is in back-off (an M4 pairing dial with no daemon half) is invisible, and on timeout
+  Dialer::release(address) releases that foreign target. A mesh111 seam (Dialer::is_target(addr), or a Fabric call naming the node attributed at
+  an address) is the real fix: do NOT add it (not your file); instead make the daemon release only a dial it started itself (if maintain was a
+  no-op because the address was already a target, do not release on timeout), and record the residual.
+
+Keep every M5/M5b test green (lib fabric 58, settings_lan, dashboard_auth, api_v1_status_services), the Layer 6 file bytes pinned, no await under
+a std mutex, no new task/timer/socket.
+CHECK (all green, paste the tail): from ${ROOT}/1-bootstrap with CARGO_TARGET_DIR=${SP}/target/node111: cargo test -p node111 --lib fabric (three
+times); cargo test -p node111 --test settings_lan --test dashboard_auth --test api_v1_status_services; cargo clippy --workspace --all-targets --
+-D warnings; cargo fmt --all -- --check.
+NOTES: the void rule as built, and the residual for D8.` },
 }
 
 const RESULT = {
@@ -148,15 +188,16 @@ const run = (ids, ph) => parallel(ids.filter(id => !ONLY || ONLY.includes(id)).m
 )).then(rs => rs.filter(Boolean))
 
 phase('Fix')
-const F = await run(['M5b'], 'Fix')
+const IDS = ONLY || ['M5b']
+const F = await run(IDS, 'Fix')
 log('fix: ' + F.map(r => `${r.id}=${r.status}`).join(' · '))
 if (a.stopAfter === 'fix' || !F.length || F[0].status === 'blocked') return { F }
 
 phase('Re-review')
 const R = await agent(`You are a read-only adversarial reviewer of one Rust change in ${ROOT} (the 111network mesh OS). Do NOT run cargo, do NOT edit any
 file, do NOT start any process; read only. The change: the uncommitted working-tree diff of 1-bootstrap/crates/node111/src/daemon/fabric/{mod,settings,sealer}.rs
-(run: cd ${ROOT} && git diff --histogram -- <those paths>). It is task M5b, the fix of these findings on the earlier change (read them first, they are
-the claims to verify):
+(run: cd ${ROOT} && git diff --histogram -- <those paths>). It is task ${F[0].id}, a fix of review findings on the earlier change; its brief (read it: the claims to verify) is in
+${ROOT}/plan/layers/7-relay/runs/workflows/wave-0c.js under T.${F[0].id}. The original M5 findings, for context:
 ${FINDINGS}
 The author's own report: ${JSON.stringify(F[0]).slice(0, 6000)}
 Spec: ${ROOT}/7-relay/README.md §4.6, §7.7, §19 (C7). Verify: (1) each finding is actually closed by a real code path (trace it, cite file:line in

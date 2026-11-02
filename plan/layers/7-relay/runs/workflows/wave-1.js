@@ -133,8 +133,24 @@ WAVE 0 LANDED (read the files, not this summary, before you rely on a name):
   N/fabric/settings.rs): \`paired_hubs[].ours\` and \`.theirs\` (JSON bools after \`via\`, always written, false when absent).
   \`#[doc(hidden)] Fabric::forward_target_computations() -> Result<u64>\` is a test counter. D6: use offer_pair for the pair offer route and refuse
   a pair() whose code did not come from a 111PAIR bundle (the ENROLL_OK cannot tell a member code from a pairing code: a recorded limitation).
-WAVE0_FACTS_PENDING: M4c (the window fairness bounce) and M5b (the daemon fix wave) — the lead replaces this line with their as-built names before
-the launch.
+- node111 fabric seams, the fix wave (M5b, 0f822e5): \`sealer::StoredHubHint::{NoAnnounce, NoHub, Hub([u8; 8])}\`, \`IdentitySealer::stored_hub_hint(&fabric_dir)
+  -> StoredHubHint\`; \`settings::rebuild_home_hub(enrolled, hint, announced: StoredHubHint, pairs)\` (a valid stored announce is authoritative: NoHub ⇒
+  nothing rebuilt; Hub(a) ⇒ the pick must match; the cursor rule only without a stored announce); \`settings::pair_address_refusal(&Persisted, &PairLink)
+  -> Option<&'static str>\` (an address the home hub, a peer or another pair uses is refused; \`set_pair_link\` calls it); \`pair_dials\` dials WHOLE
+  tcp pairs only (a half pair's second ENROLL rides the fabric's own pairing dial); the pair halves are published to the PairTable and written to
+  the file in one order under \`FabricHandle.persist\` (a tokio mutex; the bytes are built under the std lock, no await there), a half is dropped only
+  for a record absent from the fabric's CURRENT settings (re-read when an incoming Settings lacks a record this handle holds); the pump's lag rule:
+  after a broadcast lag the lost events are NOT replayed: the daemon drops the batch's Settings, re-reads the settings (sync_settings) and the tap
+  sees exactly one FabricEvent::Fabric meaning "re-read everything" (D11: forward_take per carrier pair; D2/D3: re-read the status and the pair
+  table); the tap runs after the batch's last Settings is applied, so pair_table() and persisted() read the batch's state; \`relay::tap(&FabricEvent)\`
+  is a free function with no handle: D2, D3 and D11 keep their on/off and per-consumer state in process statics (OnceLock/atomics) read at no cost
+  while off, unless D10 adds a handle in ApiState ext; \`replace_home_hub_address\` refuses an address already connected (Link::peers) and a peer's
+  or a pair's address. For D6: set \`PairLink.far_holds_address = true\` only when the far hub will actually record this hub's address (the address
+  in this hub's bundle passes the far hub's dial_refusal and is reachable from its network); otherwise leave it false (this hub then dials whenever
+  it holds the far address): a private LAN address shown to a hub on another network with far_holds_address = true makes the far hub dial forever
+  while this hub waits. A settings row written before M4b (ours/theirs absent) reads as a half pair.
+WAVE0_FACTS_PENDING: M4c (the window fairness bounce: the eviction rule, the store head query) and M5c (the §7.7 void rule) — the lead replaces this
+line with their as-built names before the launch.
 `
 
 const CTX = `
