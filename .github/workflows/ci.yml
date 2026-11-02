@@ -45,7 +45,7 @@ jobs:
       - uses: pnpm/action-setup@v4
         with:
           package_json_file: 4-interface/ui/package.json
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: 22
           cache: pnpm
@@ -116,7 +116,7 @@ jobs:
       - uses: pnpm/action-setup@v4
         with:
           package_json_file: 4-interface/ui/package.json
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: 22
           cache: pnpm
