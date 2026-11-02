@@ -14,7 +14,7 @@ const FROM = a.from || 'v0.1'
 const TO = a.to || 'v0.2'
 
 const FIX_PROMPT = `
-You are the spec editor for the 111network OS, Layer 7 (Relay & Presence). Today is 2026-11-01. Repo root ${ROOT}. You edit exactly one
+You are the spec editor for the 111network OS, Layer 7 (Relay & Presence). Today is 2026-11-02. Repo root ${ROOT}. You edit exactly one
 file: ${ROOT}/7-relay/README.md (draft ${FROM}), producing ${TO}. You edit nothing else, run no git write commands, no cargo build or
 test, start no process; read-only greps and file reads are fine.
 
@@ -24,7 +24,7 @@ variation text wins), owner-answered (the answer text wins), or rejected (do not
 disposition to the spec, exactly, in the section the finding names; where a finding's fix conflicts with another accepted fix, the
 triage says which wins; if it does not, apply the stricter (fail-closed, lighter on the Pi floor) reading and record it in your
 deviations. The law stays ${ROOT}/plan/DECISIONS.md D30 (and D31 if the triage says it exists): no change may widen v1 beyond D30, add
-a Layer 5 change beyond the twelve, or add resident weight on a non-hub node.
+a Layer 5 spec amendment beyond the twelve (the byte-identical code seams the triage accepts under Q1 and Q2 are recorded in §19, not counted among the twelve), or add resident weight on a non-hub node.
 
 RULES FOR THE TEXT: keep the section numbers and the voice; every new built-code claim cited file:line and verified by reading; no
 model names or identifiers anywhere (write "the lead", "the panel", "a judge"); no attribution lines; every new setting named with
@@ -60,7 +60,7 @@ file:line claims by reading when a disposition depends on them).
 METHOD: for every finding with an accepted or owner-answered disposition, find where ${TO} carries it and judge whether it does what
 the disposition says (landed | partial | missing | landed-wrong). For every rejected finding, confirm the spec did not change for it.
 Then read the whole spec once more for regressions the edits introduced: a contradiction between sections, a number that no longer
-matches, a default that is no longer off, a v1.1 item pulled into v1, a Layer 5 change beyond the twelve, a resident cost added on a
+matches, a default that is no longer off, a v1.1 item pulled into v1, a Layer 5 spec amendment beyond the twelve (the §19 code seams under Q1/Q2 are allowed), a resident cost added on a
 non-hub node, a model name. Severity as the panel used: blocker, major, minor.
 
 WRITE ${ROOT}/plan/layers/7-relay/review/recheck.md: a verdict line (lock | amend-again), a table of every disposition with its state,
