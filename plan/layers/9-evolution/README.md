@@ -48,6 +48,7 @@ apply patterns from proven projects) · D22 licensing · Reticulum stays a separ
 | `research/04-evolution-kb-agent.md` | Lens 4: the agent improving itself, the KB and the bridging logic: KB authoring with validation and provenance, prompt/tool evolution with guardrails, evaluation harnesses, scoping to the layers a device runs. |
 | `research/05-ui-consent-floor.md` | Lens 5: the Repairs page, incident timeline, consent levels (observe / propose / auto-apply reversible / never code), Android limits, the Pi-floor weight table of every candidate program. |
 | `research/06-critic.md` | Completeness critique of 00 to 05, with the unverified-claims list. |
-| `research/07-gap-N.md` | Gap-fill reports (cap 2), if the critic found blocking gaps. |
-| `options.md` | The options brief for the owner (written by the lead after the sweep). |
-| [`runs/workflows/`](runs/workflows/) | Workflow scripts, one per run (`research.js` first); run ids in `research/coordinates.md`. |
+| `research/07-gap-N.md` | Gap-fill reports: `07-gap-1` from the sweep (the critic's blocking gap), `07-gap-2` and `07-gap-3` from the brief run (the major gaps the critic left to the lead). |
+| [`options.md`](options.md) | The options brief for the owner: settled facts, fourteen polled forks with picks, detail picks, plan corrections, owner questions, the critic and gap-fill digest. |
+| [`runs/workflows/`](runs/workflows/) | Workflow scripts, one per run (`research.js`, `options.js`); run ids in `research/coordinates.md`. |
+| `review/options-check.md` | The fable judge's check of the brief (two rounds). |

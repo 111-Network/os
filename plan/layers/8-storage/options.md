@@ -287,7 +287,8 @@ D30 K1) and its on-disk layout (one new row, F1).
   §12); progress rides the SSE stream only while a job runs. Reach in v1: the LAN and hubs with a reachable address (a public address or Layer 7's
   reach layer); a dataset never rides a carrier or LoRa (Berlin's 84 MB is about 9 days of LongFast airtime, 02 finding 12). **Cost:** nothing
   resident; a fetch thread and one bounded buffer only during a job; one sequential write per file plus its sidecar, one fsync and a rename (57 GB
-  is about 47 min at an assumed 20 MB/s, 02 finding 13); no new listener; a bad block costs 16 MiB, where a whole-file check would cost 57 GB
+  is about 47 min at an assumed 20 MB/s, 02 finding 13); no new listener; the metered counter's persistence cadence is Layer 7's (L7 §12,
+  unmeasured): a dataset pull adds bytes to it, not writes; a bad block costs 16 MiB, where a whole-file check would cost 57 GB
   again (12.7 h at 10 Mbit/s, 02 finding 4). *(pick: 02 fork A A1; 01 §5 Q1 answered "both")*
 - B. Sneakernet only: the first copy always arrives on a disk or from another hub; safest, slowest.
 - C. A hosted rqbit or iroh-blobs for multi-hub swarming: resident while on, a second identity and listener (rqbit "a few tens of MB", a
@@ -490,7 +491,8 @@ D30 K1) and its on-disk layout (one new row, F1).
 11. `4-interface/README.md:697` "storage (L8)" leaves the deferred list; `UI/views/settings/model.ts:221-222` drop "arrives with Layer 8".
 12. This folder: `research/01-datasets-hub.md` §4's "Cat 4A on Pi, 64 GB / 32 GB SD" rows contradict `categorize.rs:102-104` (fact 24) and their
     budgets are marked "(guess)"; `06-critic.md` §4's "3,396 × 64 B" is 3,397 pairs = 217,408 B (07-gap-3 §1); 01 and 02 quote the March 2024 mini
-    (13 GB) without the November 2024 figure (7.4 GB) (fact 13).
+    (13 GB) without the November 2024 figure (7.4 GB) (fact 13); the folder's `README.md` said "up to two gap-fill scouts" and "cap 2" where three
+    ran (G1 blocking; G2–G4 major, closed by the brief's own run): corrected by the lead with the status update.
 13. Layer 9's research: incidents at `state/incidents.jsonl` (L9 `01` §3.2), the per-record node-key signature (L9 `05` §4.1) and two tag
     spellings (L9 `00`, `03`) give way to the joint contract (F2) once both owners' decisions agree.
 14. Found in passing (00 §4): `/api/status` is session-gated in code (`N/dashboard/routes.rs:472-478`) while Layer 1's text and `routes.rs:28` call
@@ -562,7 +564,7 @@ F2. The eighteen owner forks: 1 F3 · 2 F1 · 3 F11 · 4 F7 · 5 F5 · 6 F8, Q16
 14 F9 · 15 F10, Q13 · 16 F9, Q9-Q10 · 17 F12, Q21 · 18 Q12. Custom code the critic flagged: the chunk sidecar (now the adopted bao-tree outboard)
 and Layer 9's own audit chain (F2 drops it: SQLCipher's page HMACs already catch corruption, and a same-disk chain proves nothing). Resident
 costs it found without a number (the second SQLCipher connection, kiwix-serve and its stop, `quick_check`, the persisted metered counter, the
-p2panda-core and `age` deltas) are marked unmeasured where they appear.
+p2panda-core and `age` deltas) are marked unmeasured where they appear (the metered counter in F6 A's cost and the measurements list below).
 
 **Gap-fill (three scouts).** `07-gap-1.md` (G1) tabled six mechanisms against D26 (2), L2's zero-key rule and the Pi floor; only "111d persists
 chat and ingests the proposal spool" breaks none, with plaintext-and-caps as the fallback; it also found that "zero key material" is enforced by
@@ -580,7 +582,7 @@ registers only that spelling.
   date; raster against vector PMTiles sizes; the Termux kiwix closure, the APK trio, the debs; the 111 release source tarball.
 - *Binaries:* kiwix-tools 3.8.2 static tarballs for aarch64 and x86_64, and whether they are musl; release dates of kiwix-tools, libzim and
   libkiwix; Syncthing's current tag; libtorrent's date; kiwix-serve's bind-address flag name.
-- *Measurements:* kiwix-serve memory (anonymous against file-backed), wakeups and writes; Martin, rqbit (and whether its DHT turns off),
+- *Measurements:* kiwix-serve memory (anonymous against file-backed), wakeups and writes; the persisted metered counter's writes (L7 §12); Martin, rqbit (and whether its DHT turns off),
   Syncthing v2 and iroh idle cost; the second SQLCipher connection; 111d's idle `write_bytes` (5.9 MB a day is derived) and SD amplification;
   BLAKE3 and sha256 throughput on Pi 4 and Pi 5; the p2panda-core, Loro, Automerge and `age` binary deltas; `quick_check` time on SD; the Range
   arm and fetcher size; the 16 MiB buffer beside kiwix-serve on a 512 MB board; the Storage page chunk.

@@ -1,10 +1,13 @@
 # Layer 8 — Storage & Shared State: plan folder
 
-**Status** (summarised from [`INDEX.md`](../../INDEX.md) row 8, which stays the source of truth): 🔬 researching — kickoff 2026-11-02
-(cloud session, branch `claude/layer-6-implementation-006mte`; the owner: "start layer 8 and 9 research in parallel now and document
-all"): the research sweep (`runs/workflows/research.js`: an opus seams scout, five sonnet lens scouts, an opus completeness critic, up to
-two gap-fill scouts; reports `research/00`–`07`) runs beside Layer 7's spec work; then the lead writes `options.md`; **the owner decides
-before any Layer 8 code is written** (`INDEX.md` "Process (per layer)": research → options brief → decision → adversarial pass → build).
+**Status** (summarised from [`INDEX.md`](../../INDEX.md) row 8, which stays the source of truth): 🧭 deciding — kickoff 2026-11-02
+(cloud session, branch `claude/layer-6-implementation-006mte`; the owner: "start layer 8 and 9 research in parallel now and document all"):
+the research sweep ran (`runs/workflows/research.js`: an opus seams scout, five sonnet lens scouts, an opus completeness critic, one gap-fill;
+`research/00`–`07-gap-1`), two more gap-fill scouts closed the critic's major gaps (`07-gap-2` software updates beyond the 111 release,
+`07-gap-3` the chunk sidecar and Pi prior art), an opus drafter wrote [`options.md`](options.md) and a fable judge verified it against the reports
+and the locked rules (`review/options-check.md`: ready after one fix pass; the lead applied the last two minors); **the owner decides before any
+Layer 8 code is written** (`INDEX.md` "Process (per layer)": research → options brief → decision → adversarial pass → build). F2, the joint
+storage contract, is decided together with Layer 9's brief (the same seven items, word for word, in both).
 
 **What the layer is:** `os/README.md` §8, verbatim: "Each node keeps an encrypted local store, pruned by capacity rather than by
 imposed rules. Knowledge hubs host the large shared datasets: offline encyclopedias, regional maps, software updates, and network
@@ -43,6 +46,7 @@ capacity, never by rule) · Reticulum stays a separate program · no hardware ye
 | `research/04-local-store.md` | Lens 4: the encrypted local store: SQLCipher as built, capacity pruning, disk budgets per category, backup/restore, Android/Termux encryption at rest, the store API other layers use. |
 | `research/05-ui-consent-floor.md` | Lens 5: the Storage page, dataset catalogue and downloads with consent (metered links), hosted panels (Kiwix), the Pi-floor weight table of every candidate program. |
 | `research/06-critic.md` | Completeness critique of 00 to 05, with the unverified-claims list (this box's network policy denies most doc sites). |
-| `research/07-gap-N.md` | Gap-fill reports (cap 2), if the critic found blocking gaps. |
-| `options.md` | The options brief for the owner (written by the lead after the sweep). |
-| [`runs/workflows/`](runs/workflows/) | Workflow scripts, one per run (`research.js` first); run ids in `research/coordinates.md`. |
+| `research/07-gap-N.md` | Gap-fill reports: `07-gap-1` from the sweep (the critic's blocking gap), `07-gap-2` and `07-gap-3` from the brief run (the major gaps the critic left to the lead). |
+| [`options.md`](options.md) | The options brief for the owner: settled facts, thirteen polled forks with picks, detail picks, plan corrections, owner questions, the critic and gap-fill digest. |
+| [`runs/workflows/`](runs/workflows/) | Workflow scripts, one per run (`research.js`, `options.js`); run ids in `research/coordinates.md`. |
+| `review/options-check.md` | The fable judge's check of the brief (two rounds). |

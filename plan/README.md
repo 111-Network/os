@@ -52,7 +52,7 @@ and `os/N-<slug>/TASKS.md`, where the layer's code is.
 | 5 Messaging & Data | `layers/5-messaging/` | full set: research, options, review, runs |
 | 6 Transport & Bridge | `layers/6-transport/` | research (R00–R08 + coordinates), options, review (the 3-judge panel, the recheck, V5 `review/v5-integrated.md`), runs (workflows `runs/workflows/*.js`, journals); opener brief [`cross-layer/devices.md`](cross-layer/devices.md); built and locked 2026-10-23 (D29) |
 | 7 Relay & Presence | `layers/7-relay/` | research (kickoff 2026-11-01: `research/00`–`07`, `runs/workflows/research.js`, `research/coordinates.md`), options brief (`options.md`, decided D30 2026-11-01), spec runs (`runs/workflows/spec.js`, `spec-fix.js`), review (`review/`: three panel reports, `triage.md`, `recheck.md`; D31, lock D32 2026-11-02); 🔨 building per `os/7-relay/TASKS.md` |
-| 8 Storage & Shared State | `layers/8-storage/` | research (kickoff 2026-11-02: `research/`, `runs/workflows/research.js`, `research/coordinates.md`); 🔬 researching; the owner decides on the brief before any build |
+| 8 Storage & Shared State | `layers/8-storage/` | research (kickoff 2026-11-02: `research/00`–`07-gap-3`, `runs/workflows/research.js`, `research/coordinates.md`), options brief (`options.md`, `runs/workflows/options.js`, `review/options-check.md`); 🧭 deciding: the owner decides → spec → fable panel → lock → build |
 | 9 Self-Healing & Evolution | `layers/9-evolution/` | research (kickoff 2026-11-02: `research/00`–`07-gap-3`, `runs/workflows/research.js`, `research/coordinates.md`), options brief (`options.md`, `runs/workflows/options.js`, `review/options-check.md`); 🧭 deciding: the owner decides → spec → fable panel → lock → build |
 
 ## Naming conventions
