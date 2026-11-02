@@ -282,7 +282,9 @@ pub struct FabricHandle {
 /// last one), or a `Contact` event `Added` or `Removed` for the hub (it was
 /// forgotten, or enrolled at again: an enrollment with a card always emits
 /// `Added`). A forget-and-re-enrol at `from` therefore never has `to`
-/// written over it (M5b F5).
+/// written over it (M5b F5); one during the trial wait, while no override
+/// exists to catch its events, is caught by re-reading the hub and its
+/// marker just before the override is recorded (M5c re-review).
 ///
 /// A **pump lag** (events were lost) does not void it on its own (M5c S1:
 /// the void would release `to`, the one verified connection to the hub,
@@ -1491,6 +1493,30 @@ impl FabricHandle {
             return Err(e);
         }
         let one = self.persist.lock().await;
+        // M5c re-review: during the wait no override existed to catch the
+        // events of a forget-and-re-enrol, so the hub and its marker are
+        // read again before anything is recorded (under `persist`, which
+        // the pump's settings path holds too).
+        let still = match l.fabric.settings().await {
+            Ok(s) => s.home_hub,
+            Err(e) => {
+                drop(one);
+                self.release_trial(address, fabric_hub.address).await;
+                return Err(e);
+            }
+        };
+        if still.is_some_and(|h| h.node_id == fabric_hub.node_id && h.address == Some(address)) {
+            // the fabric's own copy moved here meanwhile: nothing to override
+            drop(one);
+            return Ok(true);
+        }
+        let forgotten = marked.1.is_some()
+            && matches!(self.hub_marker(fabric_hub.node_id).await, Ok(m) if m != marked.1);
+        if still != Some(fabric_hub) || forgotten {
+            drop(one);
+            self.release_trial(address, fabric_hub.address).await;
+            return Ok(false);
+        }
         if let Ok(mut r) = self.rehomed.lock() {
             *r = (fabric_hub.address != Some(address)).then_some(Rehomed {
                 hub: fabric_hub.node_id,
@@ -2707,6 +2733,85 @@ mod tests {
     /// for a re-pairing of the same hub: the half survives the unpairing's
     /// late `Settings` event (and an older view that still holds the
     /// record), kept in memory until its record arrives.
+    /// M5c re-review: a forget-and-re-enrol of the hub during the trial
+    /// wait (no override exists yet to catch its events) is caught before
+    /// the override is recorded: the hub stays where the re-enrolment put
+    /// it, nothing is written, the trial's dial is released.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_forget_during_the_trial_records_no_override() {
+        use mesh111::link::Link;
+        let (hd, md) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+        let (ha, ma) = (test_api(hd.path()), test_api(md.path()));
+        let hid = crate::identity::generate(&hd.path().join("identity")).unwrap();
+        let hub = start(lo_cfg(hd.path(), true), Some(hid), &ha).await;
+        let mid = crate::identity::generate(&md.path().join("identity")).unwrap();
+        let m = start(lo_cfg(md.path(), false), Some(mid), &ma).await;
+        assert!(hub.running() && m.running());
+        let at = hub.listen_addr().await.unwrap();
+        let offer = hub.fabric().unwrap().offer(Some(at)).await.unwrap();
+        m.fabric()
+            .unwrap()
+            .enroll(at, &offer.code, Some(&offer.card))
+            .await
+            .unwrap();
+        m.sync_settings().await.unwrap();
+        let hub_id = hub.sealer().unwrap().node_id();
+        let relay = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let moved = relay.local_addr().unwrap();
+        // the first proxied connection is held until the gate opens, so the
+        // trial waits with its TCP connection up and no handshake through
+        let (accepted_tx, accepted_rx) = tokio::sync::oneshot::channel::<()>();
+        let (gate_tx, gate_rx) = tokio::sync::oneshot::channel::<()>();
+        let forward = tokio::spawn(async move {
+            let mut first = Some((accepted_tx, gate_rx));
+            while let Ok((mut inbound, _)) = relay.accept().await {
+                if let Some((accepted, gate)) = first.take() {
+                    let _ = accepted.send(());
+                    let _ = gate.await;
+                }
+                tokio::spawn(async move {
+                    if let Ok(mut out) = tokio::net::TcpStream::connect(at).await {
+                        let _ = tokio::io::copy_bidirectional(&mut inbound, &mut out).await;
+                    }
+                });
+            }
+        });
+        let m2 = Arc::clone(&m);
+        let trial = tokio::spawn(async move {
+            m2.replace_home_hub_address(moved, Duration::from_secs(10))
+                .await
+        });
+        accepted_rx.await.unwrap();
+        let marker = m.hub_marker(hub_id).await.unwrap();
+        assert!(marker.is_some());
+        let hb = *hub_id.as_bytes();
+        m.fabric()
+            .unwrap()
+            .with_store(move |s| {
+                let row = s.contact(&hb).unwrap().unwrap();
+                assert!(s.contact_forget(&hb).unwrap());
+                s.contact_upsert(&row).unwrap();
+            })
+            .await
+            .unwrap();
+        assert_ne!(m.hub_marker(hub_id).await.unwrap(), marker);
+        gate_tx.send(()).unwrap();
+        let r = trial.await.unwrap();
+        assert!(matches!(r, Ok(false)), "{r:?}");
+        assert!(m.rehomed.lock().unwrap().is_none());
+        assert_eq!(m.persisted().fabric.home_hub.unwrap().address, Some(at));
+        let file = std::fs::read_to_string(settings::path(&m.cfg.fabric_dir)).unwrap();
+        assert!(!file.contains(&moved.to_string()), "{file}");
+        until("the trial's dial released", || {
+            (!Link::peers(m.tcp().unwrap()).contains(&PeerAddr::Tcp(moved))).then_some(())
+        })
+        .await;
+        forward.abort();
+        for h in [m, hub] {
+            h.shutdown().await;
+        }
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_re_pairing_half_survives_the_unpairings_late_event() {
         use mesh111::fabric::{PairRole, PairVia, PairedHub};
