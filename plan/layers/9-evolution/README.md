@@ -1,10 +1,12 @@
 # Layer 9 — Self-Healing & Evolution: plan folder
 
-**Status** (summarised from [`INDEX.md`](../../INDEX.md) row 9, which stays the source of truth): 🔬 researching — kickoff 2026-11-02
-(cloud session, branch `claude/layer-6-implementation-006mte`; the owner: "start layer 8 and 9 research in parallel now and document
-all"): the research sweep (`runs/workflows/research.js`: an opus seams scout, five sonnet lens scouts, an opus completeness critic, up to
-two gap-fill scouts; reports `research/00`–`07`) runs beside Layer 7's spec work and Layer 8's sweep; then the lead writes
-`options.md`; **the owner decides before any Layer 9 code is written** (`INDEX.md` "Process (per layer)").
+**Status** (summarised from [`INDEX.md`](../../INDEX.md) row 9, which stays the source of truth): 🧭 deciding — kickoff 2026-11-02
+(cloud session, branch `claude/layer-6-implementation-006mte`; the owner: "start layer 8 and 9 research in parallel now and document all"):
+the research sweep ran (`runs/workflows/research.js`: an opus seams scout, five sonnet lens scouts, an opus completeness critic, one gap-fill;
+`research/00`–`07-gap-1`), two more gap-fill scouts closed the critic's major gaps (`07-gap-2` `AGENT_OP` delegation, `07-gap-3` playbook rules), an
+opus drafter wrote [`options.md`](options.md) and a fable judge verified it against the reports and the locked rules (`review/options-check.md`:
+ready after one fix pass; the lead applied the last four minors); **the owner decides before any Layer 9 code is written** (`INDEX.md` "Process
+(per layer)": research → options brief → decision → adversarial pass → build). F3, the joint storage contract, is decided together with Layer 8's brief.
 
 **What the layer is:** `os/README.md` §9, verbatim: "The local agent continuously observes the health of every layer the device runs.
 On detecting a failure or degradation it formulates a diagnosis, generates and internally validates a corrective change, and — if

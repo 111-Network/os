@@ -37,5 +37,10 @@ Sessions die; this file is what the next session needs.
 - Run id: `wf_e390b830-02a` (launched 2026-11-02 from the tree `dfd6828`, beside the other layer's run and the Layer 7 fix run). Resume:
   `Workflow({scriptPath: "<repo>/plan/layers/9-evolution/runs/workflows/options.js", args: {layer: "9-evolution"}, resumeFromRunId: "wf_e390b830-02a"})`.
 
-Next after the run: the lead reads the judge's report and the brief, fixes what the judge left, presents the decision sheet to the owner →
-the owner decides → `DECISIONS.md` → spec `os/9-evolution/README.md` → fable adversarial panel → `TASKS.md` → build.
+- Result (2026-11-02): complete — 6 agents (two gap-fill scouts: `07-gap-2.md`, `07-gap-3.md`; the drafter: 583 lines; the judge: fix-first,
+  two majors (the joint contract's wording against the Layer 8 draft; the member-side consent for an automatic delegation) and six minors; the fix
+  pass: all eight applied, 598 lines; the re-check: **ready**, four minors (K1–K4) applied by the lead). `options.md` has fourteen polled forks
+  (F1–F14), detail picks, plan corrections, 23 owner questions and the critic/gap-fill digest with the unverified-claims list.
+
+Next: the owner decides on `options.md` (F3 jointly with Layer 8's brief) → `DECISIONS.md` → spec `os/9-evolution/README.md` → fable adversarial
+panel → `TASKS.md` → build.
