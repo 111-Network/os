@@ -2,7 +2,7 @@ export const meta = {
   name: 'layer-7-wave-1',
   description: 'Layer 7 build Wave 1 per 7-relay/TASKS.md: D2-D10 the daemon side (presence, gateway row, netlink, TLS, pairing, origin, DNS-SD, roles, relay status), U1-U3 the UI, A1 agent tools, K1-K2 spec text; three stages for the landing order; two slots; the lead reviews and commits each',
   phases: [
-    { title: 'Stage A', detail: 'D5 · D4 · D9 · D3 · D7 · U1 · U3 · K1 · K2 (disjoint files)' },
+    { title: 'Stage A', detail: 'D5 · D4 · D9 · D3 · D7 · U1 · U3 · K1 · K2 (disjoint files); each code row reviewed read-only as it returns' },
     { title: 'Stage B', detail: 'D6 (after D5) · D8 (after D4) · D2 (after D9) · A1 · U2' },
     { title: 'Stage C', detail: 'D10 (last: assembles D1-D9)' },
   ],
@@ -199,20 +199,58 @@ const RESULT = {
   },
 }
 
-const run = (ids, ph) => parallel(ids.filter(id => !ONLY || ONLY.includes(id)).map(id => () =>
-  agent(CTX + '\n\n' + T[id].brief, { label: `L7:${id}`, phase: ph, schema: RESULT, model: T[id].model, effort: T[id].effort })
-    .then(r => r && { ...r, id })
-)).then(rs => rs.filter(Boolean))
+const REVIEW = {
+  type: 'object',
+  required: ['task', 'findings', 'sound', 'coverage_gaps'],
+  properties: {
+    task: { type: 'string' },
+    findings: { type: 'array', items: { type: 'object', required: ['severity', 'verdict', 'where', 'defect', 'scenario', 'fix'], properties: {
+      severity: { type: 'string', enum: ['high', 'medium', 'low'] },
+      verdict: { type: 'string', enum: ['CONFIRMED', 'PLAUSIBLE'] },
+      where: { type: 'string' }, defect: { type: 'string' }, scenario: { type: 'string' }, fix: { type: 'string' } } } },
+    sound: { type: 'array', items: { type: 'string' } },
+    coverage_gaps: { type: 'array', items: { type: 'string' } },
+  },
+}
+
+// Rows whose diff gets an independent read-only adversarial review as soon as the row returns (the Wave 0 lesson: the lead's read alone
+// missed three confirmed defects in M4). Doc-only rows (K1, K2) are read by the lead.
+const REVIEWED = new Set(['D5', 'D4', 'D9', 'D3', 'D7', 'U1', 'U3', 'D6', 'D8', 'D2', 'A1', 'U2', 'D10'])
+
+const review = (r, ph) => agent(`You are a read-only adversarial reviewer in ${ROOT} (the 111network mesh OS, Layer 7 build Wave 1). Do NOT run cargo,
+pnpm, node or any build; do NOT edit any file; do NOT start any process; read only (cat/sed/grep/git diff are fine). Other agents are editing
+other files right now: review ONLY the files the task reports (below), as they are on disk now, and the uncommitted diff of those files
+(cd ${ROOT} && git diff --histogram -- <those paths>; a new file has no diff: read it whole).
+
+The task: row "| ${r.id} |" of ${ROOT}/7-relay/TASKS.md (read the row whole: Task, Criteria, Check, Files, the "never adds" clause); the spec
+sections it names in ${ROOT}/7-relay/README.md; the contract ${ROOT}/4-interface/api/openapi.yaml (the "Layer 7" block) for any route or shape.
+The author's own report (its declared deviations are NOT findings; report what they did not declare):
+${'$'}{JSON.stringify(r).slice(0, 7000)}
+
+Hunt for: (1) correctness bugs reachable from a real path (trace them; cite file:line in the CURRENT file); (2) a criterion of the row not met or
+met only by a test helper; (3) the "never adds" clause broken (a resident task, timer, poll, listener, file write, runtime dependency, or work
+that grows with the data held: the Raspberry Pi floor); (4) security: a route reachable with the agent's bearer on a write, a secret echoed,
+logged or framed, foreign bytes trusted, a size unchecked before parse, a consent round-trip that can be skipped; (5) a contract mismatch (a
+shape, code or event name differs from openapi.yaml); (6) tests that do not exercise the claims. Report only what you can show with a concrete
+path; CONFIRMED when traced end to end, PLAUSIBLE otherwise; list what you checked and found sound and what is not covered. Set task to "${r.id}".`,
+  { label: `L7:${r.id}-review`, phase: ph, schema: REVIEW, model: 'opus', effort: 'high' })
+
+// Each row runs, and the moment it returns its diff is reviewed (no barrier between the two); the stage ends with every row's result and review.
+const run = (ids, ph) => pipeline(ids.filter(id => !ONLY || ONLY.includes(id)),
+  id => agent(CTX + '\n\n' + T[id].brief, { label: `L7:${id}`, phase: ph, schema: RESULT, model: T[id].model, effort: T[id].effort })
+    .then(r => r && { ...r, id }),
+  r => (r && REVIEWED.has(r.id) && r.status !== 'blocked') ? review(r, ph).then(v => ({ ...r, review: v })) : r
+).then(rs => rs.filter(Boolean))
 
 phase('Stage A')
 const A = await run(['D5', 'D4', 'D9', 'D3', 'D7', 'U1', 'U3', 'K1', 'K2'], 'Stage A')
-log('stage A: ' + A.map(r => `${r.id}=${r.status}`).join(' · '))
+log('stage A: ' + A.map(r => `${r.id}=${r.status}${r.review ? ' (' + r.review.findings.length + ' findings)' : ''}`).join(' · '))
 if (a.stopAfter === 'A') return { A }
 phase('Stage B')
 const B = await run(['D6', 'D8', 'D2', 'A1', 'U2'], 'Stage B')
-log('stage B: ' + B.map(r => `${r.id}=${r.status}`).join(' · '))
+log('stage B: ' + B.map(r => `${r.id}=${r.status}${r.review ? ' (' + r.review.findings.length + ' findings)' : ''}`).join(' · '))
 if (a.stopAfter === 'B') return { A, B }
 phase('Stage C')
 const C = await run(['D10'], 'Stage C')
-log('stage C: ' + C.map(r => `${r.id}=${r.status}`).join(' · '))
+log('stage C: ' + C.map(r => `${r.id}=${r.status}${r.review ? ' (' + r.review.findings.length + ' findings)' : ''}`).join(' · '))
 return { A, B, C }
