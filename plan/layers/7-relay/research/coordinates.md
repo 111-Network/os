@@ -113,3 +113,22 @@ at `~/.claude/projects/…/subagents/workflows/wf_60f165f1-80f/journal.jsonl` on
   re-review; run id `wf_5307572b-24b`) runs before Wave 1; M5 got the same review (result pending at this note). Owner question recorded on
   row M4 (the `forwarding` reason narrower than amendment 8). Lesson for the next waves: an independent read-only review of every Rust row
   before its commit, not only the lead's read (the wave-1 script gets a review stage).
+
+## Run 7 — the fix waves after the Wave 0 reviews (2026-11-02)
+
+- Scripts: `runs/workflows/wave-0b.js` (mesh111: one opus fix task from the lead's design, then one read-only re-review; T map M4b, M4c;
+  `args.only`), `runs/workflows/wave-0c.js` (node111: the same shape; T map M5b, M5c). Each row's re-review becomes the next bounce's brief, so a
+  row lands only with its findings either fixed or recorded as a residual on the board.
+- Run ids: M4b `wf_5307572b-24b` (landed `6516032`), M5b `wf_5f2cd194-be0` (landed `0f822e5`), M5c `wf_cd48e688-19a` (launched from `4f02080`;
+  node111 only, run before M4c because node111 compiles mesh111 from disk and an M4c edit mid-flight would taint the M5c checks), M4c (next:
+  `Workflow({scriptPath: "<repo>/plan/layers/7-relay/runs/workflows/wave-0b.js", args: {only: ["M4c"]}})`).
+- Result so far (2026-11-02, ~07:40 UTC): M4b fixed the three confirmed M4 defects (a member enrolment no longer counts as a whole pair:
+  `PairedHub { ours, theirs }` + `whole()`; per-target queues and an O(1) untrack make the forwarder's work per trigger independent of the row
+  count; REJECT_FULL retries one window per trigger; rule (1) applies at the next `forward_take` once per row); its re-review found five
+  non-blocking points (the M4c bounce: window fairness under eviction, the store head query). M5b fixed the M5 findings (the stored announce
+  decides the home-hub rebuild through `StoredHubHint`; the pair halves are published and written in one order under a tokio `persist` mutex;
+  `pair_address_refusal`; whole-pair dials only; the pump lag drops the batch's `Settings`, re-reads and sends one `fabric` frame); its
+  re-review found S1 (a lag voids the §7.7 override unconditionally and the void arm can release the hub's live new address), S2 (a fresh half set
+  after a pending unpair is dropped by the unpair's late event) and S3 (the trial dial's timeout releases a foreign dial target; the mesh111
+  `Dialer::is_target` seam is a D8 residual): the M5c bounce. The lead's rule since Wave 0 holds: every Rust row gets one independent read-only
+  review before its commit, and a review finding is either fixed in a bounce or written on the row as `open:`.
