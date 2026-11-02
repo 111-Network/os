@@ -77,8 +77,12 @@ Gates still unread from this box (D30 Q16 accepts them for a prototype behind th
   built only after this entry reaches `testing` (§6.5, D30 Q4).
 - Nostr relays, LXMF propagation and iroh: v1.1 (§6.7).
 - A direct hub-to-hub link over TLS 1.3 with raw public keys: used where the hubs can reach each other (§4).
-- 2026-11-02 — desk research only: the two licence files, the README and the release list read upstream;
-  the prototype's stub smoke log (row P1) is still to come.
+- 2026-11-02 — desk research: the two licence files, the README and the release list read upstream.
+- 2026-11-02 — the prototype's stub smoke log (row P1): `7-relay/verify/logs/ntfy-smoke-2026.11.02-stub.md`,
+  written by `7-relay/verify/carrier.sh --smoke` against `7-relay/verify/stub-ntfy.py` (the stdlib stand-in on
+  loopback, not ntfy): the 5A flush order over the fake hand-off, the 4,096 / 4,097 B body boundary, a 429, `since`
+  after a stub restart, the 5B held stream with its keepalive, RSS during a flush and bytes per frame; the eleven
+  owner-server items (token header, `since` on a real server, retention, limits) are marked "not run from this box".
 - Only the owner-run G10 smoke log (`7-relay/verify/logs/ntfy-smoke-<calver>.md`) moves this entry to `testing`.
 
 ## Links
