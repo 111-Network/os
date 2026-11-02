@@ -115,8 +115,26 @@ WAVE 0 LANDED (read the files, not this summary, before you rely on a name):
   restart). \`N/fabric/sealer.rs\`: \`IdentitySealer::carrier_topic_x25519(&peer_enc_pk) -> Result<Zeroizing<Key32>, SealerError>\` (on no API; D11 feeds it
   to carrier::ntfy::topic_key), \`stored_hub_hint(&fabric_dir)\`. \`N/relay/tls.rs\`: \`pub fn wrap(fabric_dir: &Path, pairs: &PairTable) -> Option<Arc<dyn
   StreamWrap>>\` (the None stub D5 replaces, same signature).
-WAVE0_FACTS_PENDING: M4b (the fix wave on M4: PairedHub gains persisted \`ours\`/\`theirs\` (whole = both), \`Fabric::offer_pair(address, role, via)\` for
-pairing offers, FORWARD_RESIDENT, the pairing dial released once whole) — the lead replaces this line with M4b's as-built names before the launch.
+- mesh111 fabric, the fix wave (M4b, __M4B__): wholeness is RECORDED: \`PairedHub { node_id, role, via, ours: bool, theirs: bool }\` with
+  \`PairedHub::whole()\` = ours && theirs (\`valid()\` unchanged); \`Fabric::offer_pair(address: Option<SocketAddr>, role: PairRole, via: PairVia) ->
+  Result<OfferView>\` mints a PAIRING code (OfferView.bundle is None: the 111PAIR bundle is the daemon's, D6; one open offer at a time, member or
+  pairing); the far hub's ENROLL that redeems it records \`theirs\` and pins its card at oob (never a member); \`Fabric::pair(...)\` (same signature)
+  records \`ours\` on its ENROLL_OK and returns the record read back. A member code never records a pair; a recorded pair presenting a member code,
+  the home hub presenting a pairing code, a role/via mismatch with an existing record are refused before the code is spent. Every forward path
+  admits a pair only when whole (and not broken this session); a half pair's put meets REJECT_UNENROLLED; the daemon learns a pair became whole
+  from FabricEvent::Settings (the two bools in paired_hubs); \`unpair\` drops the record only (the far hub's contact stays as it is). The fabric's
+  pairing dial is kept only while the pair is half and released once whole (the daemon's step-5 rule holds a tcp pair's one connection: dial
+  WHOLE pairs only, M5b). Every pairing and forwarding path is gated on \`hub_role\` (with it off the records stay, the rows wait in the store, the
+  view shows whole = false, reachable = false, pending = 0). The forwarder does bounded work per trigger (per-target queues, dirty-row
+  retargeting, O(1) untrack via the row's pkt_ref); \`pub const FORWARD_RESIDENT: usize = 4_096\` resident rows, the rest paged from the store in
+  custody order (PairView.pending counts resident rows; Store::forward_stats has the totals); REJECT_FULL retries release one window per trigger;
+  re-post rule (1) is applied at the next \`forward_take\` after a far frame; a pair's tcp CUSTODY_ACK is read only when fresh, attributed and from
+  the pair the put went to; \`carrier_inbound\`/\`forward_take\`/\`forward_repost\` accept only whole carrier pairs. Settings-file keys (M4b in
+  N/fabric/settings.rs): \`paired_hubs[].ours\` and \`.theirs\` (JSON bools after \`via\`, always written, false when absent).
+  \`#[doc(hidden)] Fabric::forward_target_computations() -> Result<u64>\` is a test counter. D6: use offer_pair for the pair offer route and refuse
+  a pair() whose code did not come from a 111PAIR bundle (the ENROLL_OK cannot tell a member code from a pairing code: a recorded limitation).
+WAVE0_FACTS_PENDING: M4c (the window fairness bounce) and M5b (the daemon fix wave) — the lead replaces this line with their as-built names before
+the launch.
 `
 
 const CTX = `

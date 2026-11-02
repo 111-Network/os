@@ -146,6 +146,44 @@ cargo test -p mesh111 --test forward --test hub_flow three times in a row; then 
 cargo test -p node111 --lib fabric; cargo clippy -p node111 --all-targets -- -D warnings; cargo fmt -p node111 -- --check.
 NOTES must list, for the lead and for Wave 1's D6/D11/M5 facts: the exact new names (offer_pair, the PairedHub fields, FORWARD_RESIDENT, anything
 renamed), the settings-file keys, and every behaviour that changed from M4's board row.` },
+  M4c: { model: 'opus', effort: 'high', brief: `TASK M4c (row "| M4c |" in the Wave 0 table of ${ROOT}/7-relay/TASKS.md): the bounce on M4b (landed; read the
+module doc "Pairing and cross-hub forwarding" of M/fabric.rs, then the types FwdRow/Slot/TargetQ/HitCache/Forwarder and the Layer 7 block from
+"// Layer 7: pairing, the gate's forward branch"). Files you own: ${ROOT}/5-messaging/crates/mesh111/src/fabric.rs,
+${ROOT}/5-messaging/crates/mesh111/tests/forward.rs, and for one additive read-only query ${ROOT}/5-messaging/crates/mesh111/src/store/{rows,mod}.rs
+(+ its test in store/tests.rs). Nothing else. The findings of the read-only re-review of M4b (verify each against the file as it now is):
+
+R1 CONFIRMED (medium): the resident window blocks rows across pairs. Once FORWARD_RESIDENT rows are resident, track_forward sends every new row to
+  the store only (more = true); page_in reads more only when at least FORWARD_LOAD_PAGE slots are free; idle rows whose turn is a DOWN pair never
+  leave memory. Scenario: pair B is away for an hour while members put 5,000 rows whose turn is B; the first 4,096 fill the window; rows for dests
+  behind C (up) then go to the store only and put_due(C) finds C's idle queue empty: nothing reaches C until B comes back and drains 256 rows.
+  THE DESIGN (lead): the window is shared fairly. When the window is full and a row must enter (a new put, or a page-in), EVICT idle rows whose
+  turn is a target that is down (not sendable now: no attributed connection for a tcp pair; a carrier pair whose bound is unset) — they are in
+  the store already; drop them from memory (untrack without refusing; remember the lowest evicted custody_seq so paging resumes from it, i.e.
+  'loaded' moves back to min(loaded, evicted_seq - 1) or keep a separate "evicted floor") — oldest first, at most FORWARD_LOAD_PAGE per pass
+  (bounded work), and only while some target that is up has rows waiting in the store (so an all-down hub does not churn). Page-in then skips
+  nothing: a paged row whose target is still down is evicted again only when the window is full and another target can move. Add a test: B down,
+  5,000 rows for B, then rows for C (up): C's rows are delivered while B is down; when B comes back everything for B is delivered too, in custody
+  order per target, with no row lost or duplicated (count forward_stats).
+
+R2 PLAUSIBLE (low): FabricEvent::Forward is no longer emitted for re-post rule (1): carrier_inbound only sets far_frame; a drain carrying only acks
+  for other rows calls nothing that notifies, so the unacknowledged post waits for an unrelated trigger. FIX: in forward_events, add a carrier pair
+  to notify when it is in far_frame and its 'posted' set is non-empty (the re-arm itself stays in forward_take). Test: a drain of acks for R1, R2
+  only, with R3 posted, emits one Forward for the pair.
+
+R3 PLAUSIBLE (low): rule (1) is bounded at one re-post per row for the row's whole life (Slot::Spent); the spec (§5.9 and G10 #3: "one post per
+  row per far-hub round") allows one extra re-post per round. FIX: bound rule (1) at once per far-hub round: clear the row's rule1 bit when a
+  drain that began after its re-post returns a far frame carrying no ack for it (a new round), so it can be re-armed once more; keep the
+  "never twice within one round" property. Test it with two rounds.
+
+R5 PLAUSIBLE (low): page_in reads a page of up to 256 rows through forward_pending, whose columns include 'bytes', only to take bytes.len(): a drain
+  of large Transit items reads up to 256 × item size transiently per page on the single actor. FIX: one additive store query (rows.rs, M1's API
+  style: forward_pending_lens(after, limit) -> Vec<ForwardHead { custody_seq, dest, pkt_ref, len, fwd }> using length(bytes)), used by page_in
+  and load_forward_rows; a store test beside M1's. (The hint column for paged rows is NOT yours: it stays a recorded follow-up.)
+
+Keep: every M4b test passing or rewritten to the same claim; hub_flow.rs unchanged; no timer, task or listener; the work per trigger bounded.
+CHECK (all green, paste the tail): from ${ROOT}/5-messaging: CARGO_TARGET_DIR=${SP}/target/mesh111 sh scripts/check.sh (musl SKIP); then cargo test -p
+mesh111 --test forward --test hub_flow twice; from ${ROOT}/1-bootstrap: cargo check -p node111 (node111 compiles mesh111 from disk).
+NOTES: the exact names added (the store query, any constant), and the eviction rule as built.` },
 }
 
 const RESULT = {
@@ -180,16 +218,17 @@ const run = (ids, ph) => parallel(ids.filter(id => !ONLY || ONLY.includes(id)).m
 )).then(rs => rs.filter(Boolean))
 
 phase('Fix')
-const F = await run(['M4b'], 'Fix')
+const IDS = ONLY || ['M4b']
+const F = await run(IDS, 'Fix')
 log('fix: ' + F.map(r => `${r.id}=${r.status}`).join(' · '))
 if (a.stopAfter === 'fix' || !F.length || F[0].status === 'blocked') return { F }
 
 phase('Re-review')
 const R = await agent(`You are a read-only adversarial reviewer of one Rust change in ${ROOT} (the 111network mesh OS). Do NOT run cargo, do NOT edit any
 file, do NOT start any process; read only. The change: the uncommitted working-tree diff of 5-messaging/crates/mesh111/src/fabric.rs, src/lib.rs,
-tests/forward.rs and 1-bootstrap/crates/node111/src/daemon/fabric/settings.rs (run: cd ${ROOT} && git diff --histogram -- <those paths>; the
-default diff misaligns one untouched section). It is task M4b, the fix of these findings on the earlier change (read them first, they are the
-claims to verify):
+tests/forward.rs, src/store/{rows,mod,tests}.rs and 1-bootstrap/crates/node111/src/daemon/fabric/settings.rs (run: cd ${ROOT} && git diff --histogram -- <those
+paths>; the default diff misaligns one untouched section). It is task ${F[0].id}, a fix of review findings on the earlier change; its brief
+(read it: the claims to verify) is in ${ROOT}/plan/layers/7-relay/runs/workflows/wave-0b.js under T.${F[0].id}. The original M4 findings, for context:
 ${FINDINGS}
 The author's own report: ${JSON.stringify(F[0]).slice(0, 6000)}
 Spec: ${ROOT}/7-relay/README.md §4.6, §5.1-§5.9, §13.1; Layer 5 amendments in ${ROOT}/5-messaging/README.md. Verify: (1) each finding is actually

@@ -84,6 +84,12 @@ F6 (spec-level, low; for the lead's facts, no code unless trivial): far_holds_ad
   LAN address in its bundle; B on another network records it and dials forever while A waits) gives zero connections. Note in your notes for D6:
   set far_holds_address only when the far hub will record the address (its dial_refusal passes); the lead records the case.
 
+F8 (from the M4b re-review, low): settings::pair_dials dials every recorded tcp pair; with the two persisted bools (M4b: PairedHub.ours/.theirs,
+  whole() = both) it should dial only WHOLE pairs: a half pair's second ENROLL rides the fabric's own pairing dial (M4b keeps that dial while the
+  pair is half and releases it once whole), so the daemon's §4.6 step 5 dial is for whole pairs only. Also: a settings file written before M4b
+  decodes its rows as half pairs (both bools absent → false); say so in the module doc (such rows stop forwarding until re-paired; there is no
+  such file outside this branch).
+
 F7 minor: (a) set_pair_link does not refuse an address that a configured peer or the home hub already uses (pair_link_refusal, settings.rs ~305):
   maintain then keeps the other node's expected and the pair can never connect — refuse it; (b) the tap in publish (~1450) runs before the
   batch's Settings is applied (~1470), so a consumer reading pair_table() on that batch's Fabric event sees the old table — apply Settings first
