@@ -225,7 +225,7 @@ other files right now: review ONLY the files the task reports (below), as they a
 The task: row "| ${r.id} |" of ${ROOT}/7-relay/TASKS.md (read the row whole: Task, Criteria, Check, Files, the "never adds" clause); the spec
 sections it names in ${ROOT}/7-relay/README.md; the contract ${ROOT}/4-interface/api/openapi.yaml (the "Layer 7" block) for any route or shape.
 The author's own report (its declared deviations are NOT findings; report what they did not declare):
-${'$'}{JSON.stringify(r).slice(0, 7000)}
+${JSON.stringify(r).slice(0, 7000)}
 
 Hunt for: (1) correctness bugs reachable from a real path (trace them; cite file:line in the CURRENT file); (2) a criterion of the row not met or
 met only by a test helper; (3) the "never adds" clause broken (a resident task, timer, poll, listener, file write, runtime dependency, or work
