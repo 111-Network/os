@@ -6,8 +6,9 @@ import { contactName } from "../../lib/api/contacts";
 import { formatBytes, hubSummary } from "../../lib/api/fabric";
 import { cleanPeerText } from "../../lib/api/messages";
 import { own } from "../../lib/api/own";
-import type { Contact, FabricCustody, FabricHub, FabricLink, FabricPathProfile } from "../../lib/api/types";
+import type { Contact, FabricCustody, FabricHub, FabricLink, FabricPathProfile, PairedHub, RelayStatus } from "../../lib/api/types";
 import { MAX_NAME_CHARS, plain } from "../nearby/model";
+import { gatewayBadge } from "./model";
 
 /** The link kinds of section 8, in words. An unknown kind (a newer daemon) reads "unknown link". */
 const LINK_LABEL = {
@@ -74,3 +75,61 @@ export const STORE_PRUNE_TEXT =
 export function storeUsageText(used: number, watermark: number): string {
   return `${formatBytes(used)} of ${formatBytes(watermark)} before the store starts freeing space`;
 }
+
+// ------------------------------------------------------------------------------------ paired hubs (Layer 7)
+
+/**
+ * The largest item one carrier post can pass: ntfy's 4,096 B body holds 3,072 raw bytes, so a put frame is 3,068 B and the item inside it
+ * 3,068 - 120 - 11 = 2,937 B (Layer 7 section 6.2). An item over it never goes to a carrier (it can still go over a `tcp` pair).
+ */
+export const CARRIER_MAX_ITEM_BYTES = 2937;
+
+/** `2937` -> "2,937" (no locale: the digits group the same everywhere). */
+export const groupDigits = (n: number): string => String(Math.max(0, Math.floor(Number.isFinite(n) ? n : 0))).replace(/\B(?=(\d{3})+(?!\d))/g, ",");
+
+const PAIR_ROLE = { peer: "peer hub", leaf: "leaf (this hub is its gateway)", gateway: "gateway (it is this hub's upstream)" } as const;
+export const pairRoleWord = (role: string): string => (own(PAIR_ROLE, role) ? PAIR_ROLE[role] : "unknown role");
+
+const PAIR_VIA = { tcp: "over the network", carrier: "through the carrier" } as const;
+export const pairViaWord = (via: string): string => (own(PAIR_VIA, via) ? PAIR_VIA[via] : "unknown link");
+
+/**
+ * How a pair's link is protected (section 12): `tls rpk` (TLS 1.3 raw public keys), `lan` (the owner marked it a LAN or an adopted tunnel,
+ * so it runs plain), `plain (warned)` (plain on a non-private address, after the owner accepted the warning). A pair that rides the carrier
+ * has no link of its own to protect. An unknown value reads "unknown".
+ */
+export function pairLinkState(p: Pick<PairedHub, "tls" | "lan" | "via">): string {
+  switch (p.tls) {
+    case "rpk":
+      return "tls rpk";
+    case "plain":
+      return "plain (warned)";
+    case "none":
+      return p.via === "carrier" ? "carrier" : p.lan ? "lan" : "unknown";
+    default:
+      return "unknown";
+  }
+}
+
+/** The number of items, with its noun: "1 item", "3 items". */
+const items = (n: number): string => (n === 1 ? "1 item" : `${groupDigits(n)} items`);
+
+/** What one pair's row says, in order: its role, its link, how it is protected, whether it answers, what waits, and the carrier re-posts. */
+export function pairFacts(p: PairedHub): string[] {
+  const out = [pairRoleWord(p.role), pairViaWord(p.via), pairLinkState(p), p.reachable ? "reachable" : "not reachable", p.pending === 0 ? "nothing waiting" : `${items(p.pending)} waiting`];
+  if (p.via === "carrier" || p.reposts > 0) out.push(p.reposts === 1 ? "re-posted once" : `re-posted ${groupDigits(p.reposts)} times`);
+  return out;
+}
+
+/** `forward.refused`: this session's count (it restarts at zero with the daemon); the sender keeps its own copy and still reads `relayed` (section 5.6). */
+export function refusedText(n: number): string {
+  return `${items(n)} refused by every hub they could go to since this node started. The sender still reads relayed and keeps its own copy until it is delivered.`;
+}
+
+/** `forward.too_large`: the contract carries a count only, so the copy names the bound, not a per-item size. */
+export function tooLargeText(n: number): string {
+  return `${items(n)} too large for the carrier since this node started: one carrier post passes an item of up to ${groupDigits(CARRIER_MAX_ITEM_BYTES)} B. The sender keeps its own copy.`;
+}
+
+/** The hub's own gateway badge from the relay snapshot (the badge is never a member's view of its hub, section 3.8). */
+export const relayBadge = (r: Partial<Pick<RelayStatus, "gateway">>): string => gatewayBadge(r.gateway?.state, r.gateway);

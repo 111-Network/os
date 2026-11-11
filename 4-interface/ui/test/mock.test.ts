@@ -312,10 +312,10 @@ describe("blank-board and the flash route (Layer 6 contract, mocked)", () => {
 });
 
 describe("scenarios", () => {
-  it("healthy: everything that can run is live; radio and code agent are not available here", async () => {
+  it("healthy: everything that can run is live (the gateway is a hub-only switch, NOT SET on this member); radio and code agent are not available here", async () => {
     const { a } = make("healthy");
     const states = Object.fromEntries((await a.services()).map((s) => [s.id, s.state]));
-    expect(states).toEqual({ agent: "live", model: "live", transport: "live", radio: "unset", kb: "live", gateway: "live", codeagent: "unset", fabric: "live", meshtastic: "unset" });
+    expect(states).toEqual({ agent: "live", model: "live", transport: "live", radio: "unset", kb: "live", gateway: "unset", codeagent: "unset", fabric: "live", meshtastic: "unset" });
     const status = await a.status();
     expect(status.transport_state).toBe("joined");
     expect(status.health.status).toBe("ok");

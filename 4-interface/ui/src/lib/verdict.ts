@@ -11,7 +11,8 @@
 //        joined       -> "Your node is running and connected to nearby nodes - messages can flow."  (ok)
 //        isolated     -> "Your node is running. It is alone on the mesh right now - no nearby nodes heard."  (attention)
 //        no transport -> "Your node is running. It has no mesh transport yet - ask the agent to set one up."  (attention)
-//   5. " It can reach the internet." is appended when the gateway service is live (any non-loading rule).
+//   5. " Its gateway carrier answered at the last check." is appended only when the gateway service row has reason_code `carrier_ok` (any non-loading
+//      rule): a claim about the hub's carrier, never about the internet (Layer 7 section 3.8). An older daemon's live `wan_ok` row gets no clause.
 //
 // The tone drives only the status dot next to the sentence; the sentence itself stays monochrome.
 import type { DotState } from "../components/status-dot";
@@ -31,7 +32,7 @@ const NOUN: Record<string, string> = {
   transport: "mesh transport",
   radio: "LoRa radio",
   kb: "knowledge base",
-  gateway: "internet gateway",
+  gateway: "gateway",
   codeagent: "code agent",
   // Layer 5: the `fabric` row only goes to ERROR for a store that failed to open or is full.
   fabric: "message store",
@@ -57,7 +58,7 @@ export function verdict(
 ): Verdict {
   if (!status) return { sentence: "Checking your node…", tone: "attention" };
   const list = services ?? [];
-  const internet = list.some((s) => s.id === "gateway" && s.state === "live") ? " It can reach the internet." : "";
+  const gatewayClause = list.some((s) => s.id === "gateway" && s.reason_code === "carrier_ok") ? " Its gateway carrier answered at the last check." : "";
 
   const parts = list.filter((s) => s.state === "error").map((s) => `the ${noun(s)}`);
   let things = parts.length; // "2 connected devices" is one phrase but two things
@@ -72,24 +73,24 @@ export function verdict(
     things += badDevices;
   }
 
-  if (parts.length > 0) return { sentence: problemSentence(parts, things) + internet, tone: "error" };
+  if (parts.length > 0) return { sentence: problemSentence(parts, things) + gatewayClause, tone: "error" };
   if (status.health.status === "error") {
-    return { sentence: `Your node is running, but its health check reports a problem.${internet}`, tone: "error" };
+    return { sentence: `Your node is running, but its health check reports a problem.${gatewayClause}`, tone: "error" };
   }
 
   if (list.some((s) => s.id === "transport" && s.state === "starting") && status.transport_state !== "joined") {
-    return { sentence: `Your node is running. The mesh transport is still starting.${internet}`, tone: "attention" };
+    return { sentence: `Your node is running. The mesh transport is still starting.${gatewayClause}`, tone: "attention" };
   }
 
   switch (status.transport_state) {
     case "joined":
-      return { sentence: `Your node is running and connected to nearby nodes — messages can flow.${internet}`, tone: "ok" };
+      return { sentence: `Your node is running and connected to nearby nodes — messages can flow.${gatewayClause}`, tone: "ok" };
     case "isolated":
-      return { sentence: `Your node is running. It is alone on the mesh right now — no nearby nodes heard.${internet}`, tone: "attention" };
+      return { sentence: `Your node is running. It is alone on the mesh right now — no nearby nodes heard.${gatewayClause}`, tone: "attention" };
     case "no transport":
-      return { sentence: `Your node is running. It has no mesh transport yet — ask the agent to set one up.${internet}`, tone: "attention" };
+      return { sentence: `Your node is running. It has no mesh transport yet — ask the agent to set one up.${gatewayClause}`, tone: "attention" };
     default:
-      return { sentence: `Your node is running.${internet}`, tone: "attention" };
+      return { sentence: `Your node is running.${gatewayClause}`, tone: "attention" };
   }
 }
 

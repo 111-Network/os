@@ -190,6 +190,26 @@ export const RADIO_BOARD_FOUND = {
   detail: { devices: [HELTEC_ID] as string[], port: 4403 },
 };
 
+/** `GatewayDetail` of a node that is not a gateway (Layer 7 section 3.5 item 3): every fact null, nothing pending. */
+export const GATEWAY_NONE_DETAIL = { carrier: null, endpoint: null, mode: null, checked_ago_s: null, last_flush_ago_s: null, pending: 0, error: null };
+
+/**
+ * The `gateway` row of a hub whose ntfy carrier answered at the last check (`carrier_ok`, LIVE), as a patch for the `hub` scenario; and the
+ * same hub a moment later with three items waiting (`carrier_pending`, NOT SET). Ages are monotonic seconds (section 3.5 item 3).
+ */
+export const GATEWAY_CARRIER_OK = {
+  state: "live",
+  reason_code: "carrier_ok",
+  reason: "Gateway: carrier reachable at last check, 4 min ago",
+  detail: { carrier: "ntfy", endpoint: "ntfy.example.org", mode: "5A", checked_ago_s: 240, last_flush_ago_s: 240, pending: 0, error: null },
+} as const;
+export const GATEWAY_CARRIER_PENDING = {
+  state: "unset",
+  reason_code: "carrier_pending",
+  reason: "Gateway: last flush 5 min ago, 3 waiting",
+  detail: { carrier: "ntfy", endpoint: "ntfy.example.org", mode: "5A", checked_ago_s: 20, last_flush_ago_s: 300, pending: 3, error: null },
+} as const;
+
 export function heltecDevice(now: number): DeviceRecord {
   return {
     id: HELTEC_ID,
@@ -362,20 +382,24 @@ export function buildFixtures(now: number): Fixtures {
       actions: [],
       detail: { sha256: KB_SHA, entries: KB_COUNT },
     }),
+    // Layer 7 (section 3.5): the badge's home. The healthy node is a member, so its gateway row is `gateway_none` ("Not a gateway", state
+    // unset): a gateway exists only on a hub, and the badge is the hub's own (section 3.8). The `hub` scenario carries `carrier_ok` and
+    // `carrier_pending` (GATEWAY_CARRIER_OK / GATEWAY_CARRIER_PENDING above). `detail` is `GatewayDetail`: monotonic ages, no wall-clock stamp.
     svc({
       id: "gateway",
-      name: "wan",
-      plain_name: "Internet gateway",
+      name: "gateway",
+      plain_name: "Gateway",
       kind: "detected",
-      state: "live",
+      state: "unset",
       sinceMs: 3 * HOUR,
-      reason_code: "wan_ok",
-      reason: "The internet is reachable from this node.",
+      reason_code: "gateway_none",
+      reason: "Not a gateway",
       can_run_here: true,
+      requires: "A carrier you configured (Settings \u2192 Layer 7)",
       description:
-        "Shows whether this node can reach the internet. A node with a working connection can later act as a gateway for others on the mesh.",
+        "Whether this hub carries messages to other islands, and whether its carrier answered at the last check. Nothing is checked unless you turn a gateway on.",
       actions: [],
-      detail: { probe: "204", interval_sec: 60, last_probe: iso(now - 40_000) },
+      detail: GATEWAY_NONE_DETAIL,
     }),
     svc({
       id: "codeagent",
