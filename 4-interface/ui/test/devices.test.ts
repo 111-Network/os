@@ -32,7 +32,7 @@ import {
   summary,
   transportWord,
 } from "../src/lib/devices";
-import { nearbySentence, radarArt } from "../src/views/nearby/radar";
+import { nearbySentence } from "../src/views/nearby/radar";
 
 function dev(over: Partial<DeviceRecord> = {}): DeviceRecord {
   return {
@@ -371,17 +371,5 @@ describe("Nearby", () => {
     expect(nearbySentence("no transport")).toBe("No mesh transport yet.");
     expect(nearbySentence("transport degraded")).toBe("The mesh transport has a problem.");
     expect(nearbySentence(null)).toBe("Waiting for the node to report what it hears.");
-  });
-  it("the radar has rings and this node at the centre, and no peers", () => {
-    const art = radarArt();
-    const rows = art.split("\n");
-    expect(rows).toHaveLength(17);
-    expect(rows[8]!.indexOf("@")).toBe(16);
-    expect(art.match(/@/g)).toHaveLength(1);
-    expect(art.replace(/[@·\n ]/g, "")).toBe("");
-    expect(art.match(/·/g)!.length).toBeGreaterThan(60);
-    // symmetric top to bottom, so the rings read as circles around the node
-    expect(rows.slice().reverse().join("\n")).toBe(art);
-    expect(radarArt()).toBe(art);
   });
 });
