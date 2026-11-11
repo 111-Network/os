@@ -8,9 +8,11 @@ export const meta = {
   ],
 }
 
-const ROOT = '/home/user/os'
-const SP = '/tmp/claude-0/-home-user-os/f8991dd8-132d-5f0d-807d-446e0e7eb394/scratchpad'
 const a = args || {}
+// args.root: a git worktree of the repo to build in (the lead applies its diff to the main tree), so Rust rows can run while another agent
+// edits mesh111 in the main tree. Default: the main tree.
+const ROOT = typeof a.root === 'string' ? a.root : '/home/user/os'
+const SP = '/tmp/claude-0/-home-user-os/f8991dd8-132d-5f0d-807d-446e0e7eb394/scratchpad'
 const ONLY = Array.isArray(a.only) ? a.only : null
 
 // What Wave 0 landed (the lead fills this from the committed tree before the launch; the rows build on these names).
