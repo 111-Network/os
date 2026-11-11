@@ -1512,6 +1512,39 @@ impl Store {
     pub fn local_seq(&self) -> Result<u64> {
         current_local_seq(&self.conn)
     }
+
+    /// Whether a protected forward row (`fwd != 0`, `committed = 0`) of
+    /// `dest` above `custody_seq` `above` (exclusive) waits outside the
+    /// forwarder's resident window, which holds `resident` of them: true
+    /// when more than `resident` such rows exist (Layer 7 §5.5, §5.9: a
+    /// hit-cache entry added or changed for `dest` restarts the swap probe
+    /// only then). One read through `custody_by_dest` (`dest`,
+    /// `custody_seq`), at most `resident + 1` rows returned (the index has
+    /// no `fwd` or `committed`: the read steps over that dest's member and
+    /// committed rows above `above`); v4 columns only.
+    pub(crate) fn forward_waits_for_dest(
+        &self,
+        dest: &[u8; 32],
+        above: u64,
+        resident: usize,
+    ) -> Result<bool> {
+        let want = resident.saturating_add(1);
+        let mut st = self.conn.prepare(
+            "SELECT custody_seq FROM custody
+             WHERE dest = ?1 AND custody_seq > ?2 AND fwd != 0 AND committed = 0
+             LIMIT ?3",
+        )?;
+        let mut rows = st.query(params![
+            &dest[..],
+            to_i64(above, "custody_seq")?,
+            i64::try_from(want).unwrap_or(i64::MAX)
+        ])?;
+        let mut n = 0usize;
+        while rows.next()?.is_some() {
+            n += 1;
+        }
+        Ok(n > resident)
+    }
 }
 
 type ContactRaw = (

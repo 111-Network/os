@@ -4516,3 +4516,71 @@ fn no_pairing_writes_exactly_the_member_row() {
     );
     assert!(r.full_classes.is_empty());
 }
+
+/// Layer 7 §5.5 (M4e): whether a protected forward row of a dest waits
+/// above the paging floor outside the forwarder's window. Member rows of
+/// the same dest and committed rows never count; `above` is exclusive; the
+/// answer is "more than `resident`"; the read goes through `custody_by_dest`
+/// and never scans the table.
+#[test]
+fn forward_waits_for_dest_counts_protected_rows_of_that_dest_only() {
+    let (_t, mut s) = ready();
+    let put = |s: &mut Store, dest: &[u8; 32], tag: u8, fwd: Fwd| {
+        accepted(s.custody_put_fwd(dest, &[tag; 64], fwd).unwrap())
+    };
+    let m1 = put(&mut s, &STRANGER, 1, Fwd::Member);
+    let f1 = put(&mut s, &STRANGER, 2, Fwd::FromMember(PEER));
+    let other = put(&mut s, &PEER2, 3, Fwd::FromLeaf(LEAF));
+    let f2 = put(&mut s, &STRANGER, 4, Fwd::FromCarrier(CARRIER));
+    let c1 = put(&mut s, &STRANGER, 5, Fwd::FromMember(PEER));
+    let m2 = put(&mut s, &STRANGER, 6, Fwd::Member);
+    assert!(s.forward_commit(c1).unwrap());
+    assert!(m1 < f1 && f1 < other && other < f2 && f2 < c1 && c1 < m2);
+    let waits = |s: &Store, dest: &[u8; 32], above: u64, resident: usize| {
+        s.forward_waits_for_dest(dest, above, resident).unwrap()
+    };
+    // STRANGER: two protected forward rows (f1, f2); its member rows and
+    // the committed c1 never count.
+    assert!(waits(&s, &STRANGER, 0, 0));
+    assert!(waits(&s, &STRANGER, 0, 1), "two rows, one resident");
+    assert!(!waits(&s, &STRANGER, 0, 2), "both resident");
+    assert!(!waits(&s, &STRANGER, 0, 5), "n resident, fewer stored");
+    assert!(waits(&s, &STRANGER, f1 - 1, 1), "f1 is above f1 - 1");
+    assert!(!waits(&s, &STRANGER, f1, 1), "above is exclusive: f2 only");
+    assert!(waits(&s, &STRANGER, f1, 0));
+    assert!(!waits(&s, &STRANGER, f2, 0), "only c1 and m2 above f2");
+    assert!(!waits(&s, &STRANGER, c1, 0));
+    // The other dest: its own row only.
+    assert!(waits(&s, &PEER2, 0, 0));
+    assert!(!waits(&s, &PEER2, 0, 1));
+    assert!(!waits(&s, &PEER2, other, 0));
+    assert!(!waits(&s, &PEER, 0, 0), "a dest with no row");
+    // Committing f2 leaves f1 alone above the floor.
+    assert!(s.forward_commit(f2).unwrap());
+    assert!(waits(&s, &STRANGER, 0, 0));
+    assert!(!waits(&s, &STRANGER, 0, 1));
+    // The same statement's plan: a search of `custody_by_dest` on the dest
+    // and the floor, no table scan.
+    let plan: Vec<String> = {
+        let mut st = s
+            .conn
+            .prepare(
+                "EXPLAIN QUERY PLAN SELECT custody_seq FROM custody
+                 WHERE dest = ?1 AND custody_seq > ?2 AND fwd != 0 AND committed = 0
+                 LIMIT ?3",
+            )
+            .unwrap();
+        let rows = st
+            .query_map(rusqlite::params![&STRANGER[..], 0i64, 1i64], |r| {
+                r.get::<_, String>(3)
+            })
+            .unwrap();
+        rows.map(|r| r.unwrap()).collect()
+    };
+    assert!(
+        plan.iter()
+            .any(|d| d.starts_with("SEARCH") && d.contains("USING INDEX custody_by_dest")),
+        "{plan:?}"
+    );
+    assert!(plan.iter().all(|d| !d.contains("SCAN")), "{plan:?}");
+}
