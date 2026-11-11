@@ -159,6 +159,71 @@ FILES YOU OWN: M/fabric.rs, M/tests/forward.rs. Leave M4e's two END-of-file addi
 CHECK: from ${ROOT}/5-messaging: sh scripts/check.sh (fmt, clippy -D warnings, the whole suite; musl SKIP) green, then cargo test -p mesh111
 --test forward --test hub_flow once more. Before you return, turn your fix off once (ignore the dropped dest) and show test (b) fails, then
 restore it and say the file is back.` },
+  M4g: { model: 'opus', effort: 'xhigh', brief: (ROOT) => `TASK M4g: the bounce on M4f (M4e + M4f LANDED as e733307, M1c LANDED: read rows "| M4e |", "| M4f |", "| M1c |" and
+"| M4g |" of ${ROOT}/7-relay/TASKS.md whole, then M/fabric.rs (Core::cache_changed, Forwarder::cache_put, HitCache::put, on_forward_ack, retarget,
+page_in, restart_probe, pair_link_down) and M/store/{rows,schema,prune}.rs as they now are). The independent re-review of M4e + M4f confirmed:
+
+F1 (medium) Store::forward_waits_for_dest (the last item of impl Store in M/store/rows.rs) is bounded in the rows it RETURNS (LIMIT resident + 1),
+not in the rows it VISITS: it runs through custody_by_dest (dest, custody_seq), which holds neither fwd nor committed, so SQLite steps over every
+committed row and every member row of that dest above the floor and fetches the table row behind each to test fwd and committed. In the very state
+the rule exists for (the window full of a down pair's rows, the floor standing still, probe done) each new up-turn row is admitted, committed and
+left as a committed = 1 row above the floor until a capacity prune, so a dest's committed history above the floor grows with traffic, and M4f made
+the read run up to twice per commit. The fabric.rs docs (the module doc and cache_changed) claim "bounded reads, never a sweep": false today.
+  FIX: the read must be bounded in rows visited. M1c added partial indexes to schema v5 (read V5 and the heal at open in M/store/schema.rs for the
+  exact names and predicates: custody_open_by_dest ON custody (dest, custody_seq) WHERE committed = 0 is the one that fits; custody_forward_open
+  is (custody_seq) WHERE fwd != 0 AND committed = 0). Shape the statement so the planner SEARCHes a partial index whose predicate leaves the
+  committed rows out (the WHERE clause must imply the index predicate as SQLite's planner matches it: write committed = 0 literally), and decide
+  with evidence what is left to step over: with custody_open_by_dest it is the uncommitted MEMBER rows (fwd = 0) of the same dest above the floor.
+  Trace when a dest can hold both member rows and protected forward rows on one hub (a member that enrolled or left while rows were held; am. 11
+  the former member's rows) and what bounds that set. If it is bounded by a constant or by the window, say so in the doc with the path; if it is
+  bounded only by a quota (it grows with the rows held), make it exact instead: a partial index ON custody (dest, custody_seq) WHERE fwd != 0 AND
+  committed = 0 in V5 (and in M1c's heal list, so a store created before it gains it at open), replacing custody_open_by_dest ONLY IF you show no
+  other statement needs that one (grep every plan assertion and statement M1c wrote that names it), and state the write cost (one index entry per
+  uncommitted forward row: an insert at the put, a delete at the commit). Do not bump the schema version: v5 is unreleased; M1c's heal covers stores
+  made by an earlier v5.
+  PROVE IT: (a) a plan assertion in M/store/tests.rs in the style M1b/M1c use (EXPLAIN QUERY PLAN: SEARCH ... USING INDEX <the partial index>, no
+  SCAN); (b) a test with teeth on the rows visited: one dest with R resident-equivalent protected rows and K committed forward rows plus K member
+  rows of that dest above the floor, for K = 10 and K = 2,000; the statement's SQLITE_STMTSTATUS_VM_STEP (rusqlite Statement::get_status with
+  StatementStatus::VmStep; reset between runs; M1c's status-counter checks show the pattern) must not grow with K beyond a small constant, and
+  FULLSCAN_STEP must be 0. Turn the fix off once (the old statement through custody_by_dest) and show the test fails; report the two step counts.
+  Then correct the fabric.rs docs (module doc, cache_changed, forward_waits_for_dest's own doc) to the real bound, in the file's voice.
+
+F2 (low) Forwarder::cache_put, the CHANGED branch (r.turn != Some(pair) && !r.refused.contains(&pair)): a resident Idle row of the dest whose turn
+came from the OLD entry is not marked when the new pair is one it refused, so it keeps a turn the new list would not give it. The review's
+sequence: pairs in probe order [a, q, p], all tcp; row R of dest X with no hint. (1) X → p is cached, R is offered to p, p answers
+REJECT_UNKNOWN_DEST: R.refused = [p], its turn is a. (2) another X row commits at q: X → q (changed); R is marked and its turn becomes q. (3) p
+accepts another X row (one hinted to p): X → p (changed); R is not marked, yet retarget would give [p, a, q] → first unrefused = a. If q then goes
+down while a is up, R waits on q.
+  FIX: in the changed branch mark every Idle row of the dest whose turn != Some(pair), refused or not (retarget keeps the refusal; the cost stays
+  bounded by the dest's resident rows). The DROP branch is exact as it is (the review traced it): leave it. Add a unit test that drives exactly the
+  sequence above through the real paths (the M4e/M4f unit tests in fabric.rs show the harness) and asserts R's turn is a after step 3 and that R's
+  refusal of p is still recorded; turn the fix off once and show it fails.
+
+GAPS the review listed (close each, or say precisely why it cannot be closed without a pub API or a production-only seam):
+  G1 a store error inside Core::cache_changed restarts the probe and counts an error: no test injects one. Find the cheapest honest injection
+     (a #[cfg(test)] hook on the store handle the fabric holds, or a store whose statement fails for a reason a test can cause: read how the existing
+     fabric tests make a store call fail, if any do). No production-visible seam.
+  G2 no test has BOTH the hit's dest and the dropped dest holding stored rows outside the window: assert exactly one probe restart for the commit
+     and, with a #[cfg(test)] counter of forward_waits_for_dest calls on the core, at most two reads for the commit and exactly one once the first
+     restarted the probe.
+  G3 a row that is InFlight or Full at pair p when its dest's entry X → p is dropped or changed is not marked (only Idle rows are); it returns to
+     Idle later (pair_link_down sets Idle; a REJECT_FULL row leaves Full when its pair has room; an ack timeout). TRACE every path that returns a
+     row to Idle and say, with file:line, whether the row's turn is recomputed there (is it marked dirty, does retarget run for it before the next
+     offer). The author of M4f held that a row keeps its pair like a changed-dest row and that C16 (a REJECT_FULL row stays with its pair) wants
+     that. If every path recomputes, add one test that pins it for the dropped-entry case; if a path keeps a turn that only the vanished entry
+     justified AND that can strand the row (its pair down, another target up, nothing judging it again), fix it at the point the row returns to
+     Idle (mark it dirty: bounded, one row) and test it; C16's rule for a Full row whose pair is up stays.
+
+NEVER ADDS: a timer, a task, a listener, a pub API (pub(crate) and #[cfg(test)] only), a constant or FwdRow change, a store read on a non-hub or
+with fwd.more false, a pass over the rows held on any per-item path, a schema version bump.
+
+FILES: M/fabric.rs, M/store/rows.rs, M/store/schema.rs (only for the index, with its heal entry), M/store/tests.rs, M/tests/forward.rs (only if an
+integration assertion needs it). Nothing else.
+
+CHECK: cd ${ROOT}/5-messaging && sh scripts/check.sh (musl stages SKIP); then cargo test -p mesh111 --test forward --test hub_flow a second time
+(the forward suite takes 3-6 minutes: other agents share the CPUs; a timing-only failure under load is re-run once alone before you call it a
+defect); then cd ${ROOT}/1-bootstrap && cargo check -p node111 with its own target dir. Report: the plan line, the two step counts with the fix on
+and off, the F2 test failing with its fix off, each gap closed or the precise reason it is not.` },
 }
 
 const RESULT = {
@@ -208,6 +273,16 @@ restarts; (3) a row a pair refused keeps its refusal through the recomputation; 
 storm between two dests alternating in a full cache: bound it); (4) the tests exercise the claims and the reported negative check is
 credible; the loosened bound of the M4e integration test still fails when M4e's fix is off; (5) every other restart site of M4d is
 unchanged; (6) no Layer 5 no-pair behaviour changed, no pub API, no constant or FwdRow change, nothing resident unbounded.`,
+  M4g: `Verify: (1) forward_waits_for_dest now runs as a SEARCH on a partial index that leaves committed rows out; derive from the schema and the
+statement (not from the author's report) what it can still step over and whether that is bounded by the window or a constant; the plan assertion
+and the step-counter test have teeth (they fail on the old statement; K really differs between the two runs; the counter is reset); if an index
+was added or replaced in V5, the heal at open creates it on a store made by an earlier v5, every statement that used the replaced index still has
+its plan asserted, and the write cost is stated; no schema version bump; (2) the fabric.rs docs now state the real bound; (3) the changed branch
+of cache_put marks every Idle row of the dest whose turn is another target and the refusal survives; the unit test drives the review's three-step
+sequence through real paths; no restart storm or recompute loop is opened by the wider marking (two dests or two pairs alternating: bound it);
+(4) each gap G1-G3 is closed by a test that exercises the real path, or the reason given is true; for G3 re-trace every path that returns a row
+to Idle yourself; (5) every other restart site and the M4d/M4e/M4f behaviour is unchanged; no Layer 5 no-pair behaviour changed, no pub API, no
+constant or FwdRow change, nothing resident unbounded, no per-item pass over the rows held.`,
 }
 
 const review = (r) => {
@@ -227,7 +302,7 @@ list what you checked and found sound and what is not covered. Set task to "${r.
   { label: `L7:${r.id}-review`, phase: 'Review', schema: REVIEW, model: 'opus', effort: 'high' })
 }
 
-const ids = ['M1c', 'M4f'].filter(id => !ONLY || ONLY.includes(id))
+const ids = ['M1c', 'M4f', 'M4g'].filter(id => !ONLY || ONLY.includes(id))
 const out = await pipeline(ids,
   id => agent(ctx(id) + '\n\n' + T[id].brief(rootOf(id)), { label: `L7:${id}`, phase: 'Fix', schema: RESULT, model: T[id].model, effort: T[id].effort })
     .then(r => r && { ...r, id }),
