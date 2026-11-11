@@ -7,14 +7,14 @@ export const meta = {
   ],
 }
 
-const SP = '/tmp/claude-0/-home-user-os/e7852691-6eb6-50f1-9e84-b01d744ea3a9/scratchpad'
+const SP = '/tmp/claude-0/-home-user-os/f8991dd8-132d-5f0d-807d-446e0e7eb394/scratchpad'
 const a = args || {}
 const ROOT = a.root || '/home/user/os'
 const ONLY = Array.isArray(a.only) ? a.only : null
 
 const CTX = `
-You are a BUILD subagent for the 111network OS, Layer 7 (Relay & Presence). Today is 2026-11-02. Repo root: ${ROOT} (a git repo on branch
-claude/layer-6-implementation-006mte; you NEVER run git commit/add/stash/checkout/reset: the lead reviews and commits). You will not be messaged
+You are a BUILD subagent for the 111network OS, Layer 7 (Relay & Presence). Today is 2026-11-11. Repo root: ${ROOT} (a git repo on branch
+claude/confident-ramanujan-y5ob49; you NEVER run git commit/add/stash/checkout/reset: the lead reviews and commits). You will not be messaged
 mid-task; everything you need is in this brief and on disk.
 
 THE LAW: the locked spec ${ROOT}/7-relay/README.md (v1.0, D32; §0 gives the path abbreviations M/ N/ NI/ ID/ A/ UI/ API RS/ LC/ L5:), the Layer 5 spec

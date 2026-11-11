@@ -9,7 +9,7 @@ export const meta = {
 }
 
 const ROOT = '/home/user/os'
-const SP = '/tmp/claude-0/-home-user-os/e7852691-6eb6-50f1-9e84-b01d744ea3a9/scratchpad'
+const SP = '/tmp/claude-0/-home-user-os/f8991dd8-132d-5f0d-807d-446e0e7eb394/scratchpad'
 const a = args || {}
 const ONLY = Array.isArray(a.only) ? a.only : null
 
@@ -169,8 +169,8 @@ WAVE 0 LANDED (read the files, not this summary, before you rely on a name):
 `
 
 const CTX = `
-You are a BUILD subagent for the 111network OS, Layer 7 (Relay & Presence). Today is 2026-11-02. Repo root: ${ROOT} (a git repo on branch
-claude/layer-6-implementation-006mte; you NEVER run git commit/add/stash/checkout/reset: the lead reviews and commits each task). You will not be
+You are a BUILD subagent for the 111network OS, Layer 7 (Relay & Presence). Today is 2026-11-11. Repo root: ${ROOT} (a git repo on branch
+claude/confident-ramanujan-y5ob49; you NEVER run git commit/add/stash/checkout/reset: the lead reviews and commits each task). You will not be
 messaged mid-task; everything you need is in this brief and on disk.
 
 THE LAW: the locked spec ${ROOT}/7-relay/README.md (v1.0, D32; §0 gives the path abbreviations M/ N/ NI/ ID/ A/ UI/ API RS/ LC/ L5:) and your task
@@ -198,7 +198,7 @@ loopback-only where the contract says; never a model name or identifier in any f
 strict, the lazy-chunk rule (${ROOT}/4-interface/README.md budgets; pnpm budget must stay green), every peer string through cleanPeerText, no
 secret rendered, vitest tests beside the existing ones.
 
-BOX: 4 CPUs, 15 GB RAM, a fixed disk allowance (about 10 GB free; do NOT cargo clean, do NOT create another target dir). Shared WARM target dirs,
+BOX: 4 CPUs, 15 GB RAM, a fixed disk allowance (about 25 GB free; do NOT cargo clean, do NOT create another target dir). Shared WARM target dirs,
 one per workspace, which cargo's own lock serializes between agents: 1-bootstrap (node111) → CARGO_TARGET_DIR=${SP}/target/node111 · 5-messaging
 (mesh111) → ${SP}/target/mesh111 · 2-identity → ${SP}/target/id111 · 3-intelligence → ${SP}/target/agent111. Always export the right one with
 CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=2 and TMPDIR unset before any cargo command, from that workspace's directory. Iterate with narrow commands
@@ -207,7 +207,7 @@ task owns (another agent is mid-edit; node111 compiles mesh111 and id111 from di
 never touch that file. Toolchain: cargo 1.97 stable (rustfmt, clippy); no musl cross toolchains (musl stages SKIP: say so, never fake them); node 22 +
 pnpm (UI deps installed in 4-interface/ui; pnpm build writes dist/ which is gitignored: build into a scratch outDir or delete dist/ after); python
 3.13; shellcheck at /usr/local/bin/shellcheck; minisign at /root/.local/bin/minisign; jq, curl, strace present; unprivileged netns work (unshare
--Urnm) but there is no ip binary; the proxy denies most live services. Scratch files under ${SP}/<task-id>/ only. Linux hygiene: nothing of yours
+-Urnm) and iproute2 (ip) is installed; the proxy denies most live services. Scratch files under ${SP}/<task-id>/ only. Linux hygiene: nothing of yours
 stays running when you return (ps and ss check), kill what you started, delete your scratch.
 
 RUN YOUR CHECK (the row's Check column, refined in your brief) until it is green; paste its tail.
