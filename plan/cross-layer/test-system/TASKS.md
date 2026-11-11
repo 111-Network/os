@@ -1,0 +1,49 @@
+# Cross-layer test system — build tasks (D36, D37)
+
+Per `os/plan/EXECUTION.md`. Design: [`options.md`](options.md) (the survey's brief; every recommendation F1–F8 taken, D37) with the seam ×
+evidence matrix [`matrix.md`](matrix.md) and the five survey reports under [`research/`](research/). What it is: one entry point,
+`python3 -I verify/run.py`, over the gates and harnesses that exist (it replaces none): it runs any slice by layer, seam, check or cost tier,
+enforces the box rules itself, and writes one machine-readable record per result (the seam, the layers joined, PASS / FAIL / SKIPPED with a
+reason, the failing assertion's own words, the log and line, a one-check re-run command, the spec section and the source files on each side,
+which side to read first), plus a short human summary. The seam map is data (`verify/seams.toml`, `verify/checks.toml`) held to the tree by a
+lint. The system lives in the repo only: nothing of it is installed on a node (the Pi floor).
+
+Rules: tasks that share a file never run in parallel (the Files column is the ownership record); a row that edits a locked layer's harness
+changes no assertion and keeps its text output byte-identical unless the row says otherwise; every row leaves nothing running and keeps its
+scratch under the session scratchpad; the box rules of `AGENTS.md` hold (at most two cargo builds at once, never `smoke.sh` and
+`panel-lint.sh` together, one verify harness at a time). The lead reviews every task against its check before commit; each code row gets one
+independent read-only review. Order: X2 (the core and the map's schema) → X1, X3, X4 in parallel → the lead's first real run (`--lint`,
+`--list`, `--tier fast`, then `slow`) → X5 → N5, N3, N1, N2, N4 → X6–X9 → N6–N11. Layer 7's gate rows (V2–V8) and the Layer 8 and 9 boards
+register their gates in `verify/checks.toml` and promote their seams as they land (F5).
+
+Lead additions to the brief (D37): `run.py --explain <seam-or-check-id>` prints one seam's or check's whole record from the map (both sides'
+files, the spec sections, the symptom, the checks that prove it with their tier and re-run command, the fakes on it) so an agent can orient
+before it runs anything (row X4); every record of a failed check carries `after` when it follows an earlier failure of the same harness;
+`verify/README.md` opens with the three commands an agent needs (row X9).
+
+Legend: ⬜ todo · 🔨 in flight · ✅ verified+committed · ❌ bounced
+
+| # | Task | Files (owned) | Check | Model | Status |
+|---|---|---|---|---|---|
+| X1 | Seam map and catalog from `matrix.md` (89 + 14 rows, every check of 3.6, fakes, known, unmapped) | `verify/seams.toml`, `verify/checks.toml` | `run.py --lint` green; every matrix id present | sonnet | ⬜ |
+| X2 | Runner core: selection, tiers, locks, sessions, timeouts, hygiene, scratch, records, summary, exit codes | `verify/run.py`, `verify/t111/{select,run,locks,hygiene,record,summary}.py` | `python3 -I -m unittest discover -s verify/tests`: fake checks that pass, fail, skip, hang (killed), leak a process (caught), dirty the tree (caught); never > 2 cargo slots; `verify` lock serial; nothing outside `--scratch` | opus | ⬜ |
+| X3 | Adapters of 3.4 | `verify/t111/adapters.py`, `verify/tests/fixtures/<adapter>/*.txt` + `.jsonl` | golden JSONL per captured output, including smoke's silent-abort shape and a skip-after-FAIL | opus | ⬜ |
+| X4 | Lint of 3.5, `--matrix`, `--changed` | `verify/t111/{lint,matrix,changed}.py` | unittest on mutated maps; `--matrix` reproduces `matrix.md`'s tables | sonnet | ⬜ |
+| X5 | Harness honesty: (a) `smoke.sh`/`panel-lint.sh` ERR trap prints `FAIL: aborted in <phase> at line N` and the result file says `DONE=1` only at the end; (b) `skip_or_fail` exits 1 once `FAILS>0`; (c) `bridge.sh` failed build = FAIL; (d) `local-smoke.sh` per-gate log under `mktemp -d`, exit 77 = SKIPPED; (e) `carrier.sh --smoke` log under `$T111_SCRATCH` when set, `ss`/`pgrep` in the precheck; (f) `gen.test.ts` fails when `openapi-typescript` is absent | the six scripts/tests named | per item a hermetic proof (a forced abort prints FAIL and exits 1), shellcheck | sonnet | ⬜ |
+| X6 | Shared emitter (F3 phase 2) | `verify/lib/result.sh`; the `ok`/`fail`/`skip` helpers in `smoke.sh`, `panel-lint.sh`, `6-transport/verify/lib.sh`, `spine/node.sh` | hermetic `verify/tests/result-sh-gate.sh`; text output byte-identical with `T111_RESULTS` unset | sonnet | ⬜ |
+| X7 | `check.sh` keep-going: `CHECK_KEEP_GOING=1` runs every stage and still exits 1 | `1-bootstrap/scripts/check.sh`, `scripts/tests/check-summary-gate.sh` | the summary gate gains the keep-going cases | sonnet | ⬜ |
+| X8 | CI job `cross-layer` and the widened shellcheck | `ci.yml`, `plan/cross-layer/ci-cd.md` | the job green on a PR, `results.jsonl` artifact present | haiku | ⬜ |
+| X9 | Docs: how an agent reads a failure; pointers | `verify/README.md`, `AGENTS.md` (one line), `plan/README.md` row, `plan/cross-layer/test-system/TASKS.md` | `build.py --check`; lint resolves every path named | sonnet | ⬜ |
+| N1 | Contract routes, both directions | `1-bootstrap/crates/node111/tests/dashboard_auth.rs` | `cargo test -p node111 --test dashboard_auth` | opus | ⬜ |
+| N2 | Agent stub-daemon fixtures validated against the contract | `3-intelligence/crates/agent111/tests/{daemon_tools,layer6_tools,task_engine}.rs`, `tests/fixtures/daemon/`, `4-interface/ui/test/agent-fixtures.test.ts` | agent111 `check.sh`; vitest | opus | ⬜ |
+| N3 | L6/L7 tapes read | `4-interface/ui/test/tapes.test.ts` | vitest | haiku | ⬜ |
+| N4 | G7 inside S1 | `4-interface/verify/smoke.sh` | S1 GREEN with `G7 GREEN` in it | sonnet | ⬜ |
+| N5 | Independent vector legs and `--selftest` in the catalog | `verify/checks.toml` | each green via `run.py --check` | haiku | ⬜ |
+| N6 | LXMF fake parity transcript | `6-transport/sidecars/lxmf-sidecar/tests/`, `1-bootstrap/crates/node111/tests/fake_lxmf_sidecar.py` | sidecar `run-tests.sh` | sonnet | ⬜ |
+| N7 | Presence file schema on three sides | `5-messaging/sidecars/meshtastic-presence/{presence.schema.json,tests/}`, both `stub-meshmud.py`, `daemon/meshtastic/presence.rs` tests | sidecar tests; `cargo test` presence | sonnet | ⬜ |
+| N8 | Smoke's payload from `gen-manifest.py` | `4-interface/verify/smoke.sh` | S1 GREEN | sonnet | ⬜ |
+| N9 | Real agent → L6 tool in G1 | `6-transport/verify/bridge.sh`, `6-transport/verify/root.sh` | G1 GREEN | sonnet | ⬜ |
+| N10 | Watchdog unit test; `systemd-analyze` no longer `\ | \ | true` \| `daemon/watchdog.rs`, `1-bootstrap/scripts/check.sh` \| `cargo test -p node111 watchdog`; summary gate | opus | ⬜ |
+| N11 | Prompts name real tools | `3-intelligence/crates/agent111/tests/chat_loop.rs`, `tests/fixtures/tools.json`, `4-interface/ui/test/prompts.test.ts` | agent111 tests; vitest | opus | ⬜ |
+
+## Summary (append when done)
