@@ -167,6 +167,82 @@ being written by another agent (X1) right now: do not edit them, and do not make
 finish, run python3 -I verify/run.py --lint once and report its output under notes without fixing the map. You own exactly those four
 modules, their tests and the lint fixtures. Check: cd ${ROOT} && python3 -I -m unittest discover -s verify/tests -t . (all green, X2's
 tests included); python3 -I verify/run.py --explain and --changed and --matrix on the fixture map.` },
+  X2b: { model: 'opus', effort: 'high', phase: 'Later rows', brief: `TASK X2b (row "| X2b |"): the fix wave on the runner core. X2 has LANDED (7674c6a: read ${ROOT}/verify/t111/*.py and
+${ROOT}/verify/tests/ whole before you change a line; the module docstring of engine.py gives the order of operations per check). An independent
+read-only review confirmed the defects below; the lead's ruling follows each. Two other tasks run beside you on OTHER files (X1 writes
+verify/seams.toml and verify/checks.toml; X4 writes verify/t111/{lint,matrix,changed,explain}.py and its own test files): the interfaces they
+use (schema.load_map, SeamMap, record.read_results, cli.estimates, select.select, the main(args, root, map_dir) contract, the field names of
+the TOML tables) MUST NOT change. X3 (the adapters) starts after you land and builds on the adapter contract as you leave it.
+
+F1 (high) A worker can reap another check's exit status. hygiene.kill_leftovers calls reap_orphans(runner_pid) with no keep list, which waitpid()s
+   every zombie child of the runner, including the leader of a check that just exited while its own worker is between WNOHANG polls; Popen then
+   reports status 0 and the exit adapter records PASS for a failed check. Helper subprocesses (the userns probe) are hit the same way.
+   RULING: never reap a pid that subprocess owns. One registry of every pid spawned through Popen (check leaders and helper children), guarded by
+   the lock that already guards the live checks; every reap_orphans call keeps those pids. Prove it: an e2e test with --jobs 2, one quick failing
+   check beside one that leaks a process, looped enough times to hit the window (and a unit test that drives the race deterministically if you
+   can: reap while a registered child is a zombie); the failing check is never PASS.
+F2 (high) A killed runner orphans its checks. Only KeyboardInterrupt is handled; on SIGTERM or SIGHUP (a timeout wrapper, an agent tool's
+   timeout, a closed terminal) the running check lives on in its own session, the flocks die with the runner, and no leftover scan runs. On
+   Ctrl-C only the process groups are killed, so a setsid or double-forked daemon stays.
+   RULING: (a) SIGTERM and SIGHUP do what Ctrl-C does, and all three then run the leftover scan and kill what is proven ours (the run marker, the
+   runner's descendants, the scratch dir), write the records they can and end with VERIFY RED and exit 1 (an interrupted run is never GREEN).
+   (b) The lock fds are handed to the check (pass_fds, not CLOEXEC), so a flock lives as long as any process of the check: the box rules (two
+   cargo checks, one namespace harness) then hold even when a runner dies. Because a leftover can now hold a lock, waiting for a lock is bounded
+   and names its holder: the lock file carries the holder's run id and pid (written after the lock is taken), a waiter prints one progress line
+   "waiting for <lock> held by run <id> (pid <n>)" and after --lock-wait seconds (default 1800) the check FAILs "lock <name> not free after N s
+   (held by run <id>, pid <n>)" instead of hanging. (c) No PR_SET_PDEATHSIG (it is tied to the parent THREAD and preexec_fn is unsafe with
+   threads). Instead a start-of-run sweep: every process whose environment carries T111_RUN of another run AND whose T111_RUNNER_PID (add it to
+   the environment each check gets) is no longer a live runner of that run is a leftover of a dead run: TERM, then KILL, and one summary line
+   "note: killed N leftover process(es) of dead run <id>" (a note, not a FAIL of this run; never touch a process without the marker).
+F3 (medium) The [[known]] rule can hide the engine's own failures. It runs after the safety rules and applies to every record, so a glob that
+   matches a check id turns "timeout after N s", "could not start", "exit N but no failing result was parsed" or a hygiene/* record into SKIPPED;
+   and mark_after runs first, so a FAIL can point at a record that became SKIPPED.
+   RULING: engine-made records and hygiene records are never eligible (mark them at creation); known applies only to results an adapter parsed
+   from a test's own output. mark_after runs after apply_known and counts only records that are still FAIL.
+F4 (medium) One SKIPPED record switches off the non-zero-exit backstop (engine.py: not any(r.status in ("FAIL", "SKIPPED"))). X3's adapters emit
+   SKIPPED for ignored tests as a matter of course, so a crash after some parsed results stays green.
+   RULING: a non-zero exit with no FAIL record ALWAYS adds the FAIL "exit N but no failing result was parsed", unless the adapter declared that
+   exit: add AdapterContext.exit_declared (bool, default False; an adapter sets it True only when its records explain this exact exit status,
+   e.g. a harness whose documented skip code is 77 and whose log says why). Write the rule into the adapter contract docstring for X3 and test
+   both sides (declared: SKIPPED stands; undeclared: FAIL added even with PASS and SKIPPED records present).
+F5 (medium) The exit adapter keeps the last 40 lines and then record.clip cuts them to the FIRST 2 KB, so the real last error line is dropped and
+   the headline shows a line from the middle. RULING: a tail is clipped from the END on a line boundary (keep the last 2 KB), log_line moves with
+   it, and the summary headline is the last non-empty line that looks like an error if one is in the kept text, else the last non-empty line.
+F6 (low) A file name that is not UTF-8 in a tree-hygiene reason raises UnicodeEncodeError in ResultsWriter.write and the run dies with a traceback,
+   no summary and no VERIFY line. RULING: paths are decoded with backslashreplace for display (raw bytes for hashing); results.jsonl and
+   summary.txt are written so that no text can raise (ensure_ascii or errors="backslashreplace"); and whatever happens inside the engine, the
+   run still prints a last line: an internal error is caught at the top, written as a FAIL record "runner error: <type>: <text>", and the run
+   ends VERIFY RED exit 1 (test it by making a writer raise).
+F7 (low) test_e2e's "--scratch inside the tree exits 2" does not pass --scratch. RULING: pass it, assert exit 2 and that the dir was not made.
+F8 (low) A check that cannot start yields two FAIL records with one id. RULING: one record (replace, as the timeout branch does).
+F9 (low) The tree diff is charged to the check that ran while it happened; on a box where other agents edit the tree, or with --jobs > 1, that is
+   a false RED an agent would chase. The same holds for the report-only "looks like ours" process rule (a vite or a 111 another agent started).
+   RULING: the default stays strict (a quiet tree: CI, and a lead's run after its workers returned): FAIL, worded "changed during the check" and
+   naming every check that overlapped the window. A new flag --shared-box (also T111_SHARED_BOX=1) is for a run beside other writers: a tree
+   change during a check, and a look-alike process with no marker, are then written as SKIPPED "not attributed (shared box): <what>", so the
+   run ends "VERIFY GREEN (n SKIPPED - not a full run)" and never RED on something it cannot prove; a process or change PROVEN ours (the marker,
+   a descendant, the scratch dir in its command line; a path only this check could have written is not provable: do not guess) stays FAIL in
+   both modes. --require turns those SKIPPED into FAIL like any other. --help says in one line when to use it.
+F10 (low) requires ignores covered_by: a unit that requires a unit whose covering gate is in the plan pulls that unit in, so its suite runs
+   twice. RULING: the requirement is then on the gate (its status decides; the plan shows it).
+F11 (low) out.log has no size cap and is read whole, twice. RULING: cap it (--log-cap MB, default 64): past the cap the runner stops copying,
+   keeps draining the pipe so the check is not blocked, and the record says "log cut at N MB"; tails are read by seeking from the end.
+F12 (low) The default rerun leaves {scratch} {tmp} {run} unrendered, drops check.env and does not quote {root}. RULING: the printed rerun is a
+   command a person can paste: tokens rendered ({scratch}/{tmp} as a fresh path under "$TMPDIR" the text names, or the kept path under --keep),
+   the check's env as KEY=value prefixes, every substituted value shlex-quoted.
+ALSO: say in the module docs what is by design and not checked (listeners inside another network namespace are not named, only their process is
+found; cargo builds started outside the runner are not counted; the lock dir is per box, mode 1777 when the runner creates it). Keep --help
+truthful for every flag you add (--shared-box, --lock-wait, --log-cap).
+
+FILES: ${ROOT}/verify/run.py, ${ROOT}/verify/t111/{engine,hygiene,run,record,select,cli,summary,locks,adapters,schema}.py (adapters.py: only
+AdapterContext.exit_declared, the exit adapter's tail and the contract docstring; schema.py: only if a ruling needs a field, and then additive
+with a default so X1's files stay valid), ${ROOT}/verify/tests/** (your own tests and fixtures; test files named test_lint*, test_matrix*,
+test_changed*, test_explain* are X4's: never touch them). Nothing else.
+
+CHECK: cd ${ROOT} && TMPDIR=${SP}/X2b python3 -I -B -m unittest discover -s verify/tests -t . (five times in a row: the concurrency tests must
+not flake; other agents load this box, so a test that needs a quiet CPU is a defect of the test), python3 -I -B verify/run.py --help, py_compile
+of every file. If X4's or X1's files appear in verify/ while you work and one of THEIR tests fails, that is theirs: report it, do not fix it.
+Report per finding: fixed + the test that pins it, or why not.` },
 }
 
 // Later rows carry no long brief here: the board row plus options.md are the brief (the lead passes args.only and, when a row needs
