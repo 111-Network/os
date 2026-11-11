@@ -27,6 +27,12 @@
 //!   `fwd_from`, in their own class ([`Class::Transit`]) with a default
 //!   quota and a per-origin share ([`prune`], Layer 7 §5.8). With no pairing
 //!   nothing writes one: every row stays `fwd = 0`, `fwd_from` NULL.
+//! - **Custody totals (schema v5)** ([`schema`], [`prune::custody_total`]):
+//!   triggers on `custody` keep the row count and byte sums of the member
+//!   rows, the forward rows, the protected forward rows and each origin's
+//!   protected forward rows, so the Custody and Transit quotas, an origin's
+//!   share and the forward gauge are one primary-key read per put — never a
+//!   pass over the rows a hub holds (the Pi floor).
 //!
 //! No wall clock anywhere: ages are the store's local insertion sequence.
 

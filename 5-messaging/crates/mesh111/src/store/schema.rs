@@ -52,18 +52,28 @@
 //!   reads `fwd = 0`, `fwd_from` NULL, and a hub with no pairing keeps
 //!   writing exactly that, so its rows and its pruning are unchanged. Typed
 //!   access: [`super::rows::Fwd`].
+//! - v5 (Layer 7 §5.8, the Pi floor; additive amendment of §10.3):
+//!   `custody_totals` — the running row count and byte sums of `custody`
+//!   under four kinds of key (member rows · forward rows · protected
+//!   forward rows · the protected forward rows of one origin), kept by
+//!   triggers on `custody` inside the writing transaction and backfilled by
+//!   the migration. The §10.4 class totals of Custody and Transit, the
+//!   §5.8 per-origin share and the forward gauge read one row by primary
+//!   key instead of summing `custody` on every put. No `custody` column
+//!   changes; a store with no forward rows holds three fixed rows only.
+//!   Typed access: [`super::prune::custody_total`].
 
 use rusqlite::Connection;
 
 use super::{Result, StoreError};
 
-/// The schema version this build writes (v4: Layer 7 §5.3 amendment 5).
-pub const SCHEMA_VERSION: i64 = 4;
+/// The schema version this build writes (v5: the custody totals).
+pub const SCHEMA_VERSION: i64 = 5;
 
 /// Migration `i` takes `user_version` from `i` to `i + 1`. Append only: a
 /// released migration is never edited (crate-visible so the tests can build
 /// an older store from the first entries).
-pub(crate) const MIGRATIONS: &[&str] = &[V1, V2, V3, V4];
+pub(crate) const MIGRATIONS: &[&str] = &[V1, V2, V3, V4, V5];
 
 const V1: &str = "
 CREATE TABLE settings (
@@ -330,6 +340,144 @@ const V4: &str = "
 ALTER TABLE custody ADD COLUMN fwd INTEGER NOT NULL DEFAULT 0 CHECK (fwd IN (0, 1, 2, 3));
 ALTER TABLE custody ADD COLUMN fwd_from BLOB
     CHECK ((fwd_from IS NULL OR length(fwd_from) = 32) AND ((fwd = 0) = (fwd_from IS NULL)));
+";
+
+/// v5 (Layer 7 §5.8; L5 §10.3, §10.4; the Pi floor): `custody_totals`
+/// (module doc), so admission costs O(1) in the rows a hub holds.
+///
+/// - **Keys.** `x'00'` the member rows (`fwd = 0`, [`super::Class::Custody`])
+///   · `x'01'` every forward row (`fwd != 0`, [`super::Class::Transit`]) ·
+///   `x'02'` the protected forward rows (`fwd != 0 AND committed = 0`) ·
+///   `x'03' ‖ fwd_from` (33 B) the protected forward rows of one origin. A
+///   row counts under its class key and, while it is a protected forward
+///   row, under `x'02'` and its origin's key.
+/// - **Values.** `rows` counts rows, `item_bytes` sums `length(bytes)`,
+///   `from_bytes` sums `coalesce(length(fwd_from), 0)`. The per-row
+///   overhead is never stored: the reader multiplies `rows` by it
+///   ([`super::prune::CustodyTotal::bytes`]), so the totals are the same
+///   facts the §10.4 sums read.
+/// - **Triggers.** After an insert, a delete, or an update of `fwd`,
+///   `fwd_from`, `committed` or `bytes`, the old row's contribution leaves
+///   every key it counted under and the new row's joins every key it
+///   counts under (an upsert by primary key); an origin key whose `rows`
+///   reach 0 is deleted, so the table never grows with the origins ever
+///   seen. They run inside the writing statement's transaction: a
+///   rollback takes the totals back with the rows. No other trigger,
+///   foreign key or `REPLACE` writes `custody` (every writer is an
+///   `INSERT`, an `UPDATE … SET committed` or a `DELETE` by `custody_seq`).
+/// - **Fail closed.** The counters carry `CHECK (… >= 0)` and the key its
+///   shape, so a total that would go negative fails the write, never
+///   reads as room. The three fixed keys are written by the backfill and
+///   never deleted; an origin key exists exactly while it has rows.
+/// - **Backfill.** One grouped pass over `custody` in the migration's
+///   transaction (`g`, at most 2 + 2 × origins groups), then the keys
+///   from `g`: a v4 store opens with exact totals.
+const V5: &str = "
+CREATE TABLE custody_totals (
+    key        BLOB PRIMARY KEY NOT NULL
+               CHECK (key IN (x'00', x'01', x'02')
+                      OR (length(key) = 33 AND substr(key, 1, 1) = x'03')),
+    rows       INTEGER NOT NULL CHECK (rows >= 0),
+    item_bytes INTEGER NOT NULL CHECK (item_bytes >= 0),
+    from_bytes INTEGER NOT NULL CHECK (from_bytes >= 0)
+) STRICT, WITHOUT ROWID;
+
+WITH g AS MATERIALIZED (
+    SELECT fwd != 0 AS f,
+           fwd != 0 AND committed = 0 AS p,
+           fwd_from AS o,
+           count(*) AS n,
+           sum(length(bytes)) AS ib,
+           sum(coalesce(length(fwd_from), 0)) AS fb
+    FROM custody
+    GROUP BY 1, 2, 3
+)
+INSERT INTO custody_totals (key, rows, item_bytes, from_bytes)
+    SELECT x'00', coalesce(sum(n), 0), coalesce(sum(ib), 0), coalesce(sum(fb), 0)
+    FROM g WHERE NOT f
+    UNION ALL
+    SELECT x'01', coalesce(sum(n), 0), coalesce(sum(ib), 0), coalesce(sum(fb), 0)
+    FROM g WHERE f
+    UNION ALL
+    SELECT x'02', coalesce(sum(n), 0), coalesce(sum(ib), 0), coalesce(sum(fb), 0)
+    FROM g WHERE p
+    UNION ALL
+    SELECT CAST(x'03' || o AS BLOB), n, ib, fb
+    FROM g WHERE p;
+
+CREATE TRIGGER custody_totals_insert AFTER INSERT ON custody
+BEGIN
+    INSERT INTO custody_totals (key, rows, item_bytes, from_bytes)
+        SELECT CASE WHEN NEW.fwd = 0 THEN x'00' ELSE x'01' END,
+               1, length(NEW.bytes), coalesce(length(NEW.fwd_from), 0)
+        WHERE true
+        ON CONFLICT (key) DO UPDATE SET rows = rows + 1,
+            item_bytes = item_bytes + excluded.item_bytes,
+            from_bytes = from_bytes + excluded.from_bytes;
+    INSERT INTO custody_totals (key, rows, item_bytes, from_bytes)
+        SELECT x'02', 1, length(NEW.bytes), length(NEW.fwd_from)
+        WHERE NEW.fwd != 0 AND NEW.committed = 0
+        ON CONFLICT (key) DO UPDATE SET rows = rows + 1,
+            item_bytes = item_bytes + excluded.item_bytes,
+            from_bytes = from_bytes + excluded.from_bytes;
+    INSERT INTO custody_totals (key, rows, item_bytes, from_bytes)
+        SELECT CAST(x'03' || NEW.fwd_from AS BLOB), 1, length(NEW.bytes), length(NEW.fwd_from)
+        WHERE NEW.fwd != 0 AND NEW.committed = 0
+        ON CONFLICT (key) DO UPDATE SET rows = rows + 1,
+            item_bytes = item_bytes + excluded.item_bytes,
+            from_bytes = from_bytes + excluded.from_bytes;
+END;
+
+CREATE TRIGGER custody_totals_delete AFTER DELETE ON custody
+BEGIN
+    UPDATE custody_totals SET rows = rows - 1,
+        item_bytes = item_bytes - length(OLD.bytes),
+        from_bytes = from_bytes - coalesce(length(OLD.fwd_from), 0)
+        WHERE key = CASE WHEN OLD.fwd = 0 THEN x'00' ELSE x'01' END;
+    UPDATE custody_totals SET rows = rows - 1,
+        item_bytes = item_bytes - length(OLD.bytes),
+        from_bytes = from_bytes - length(OLD.fwd_from)
+        WHERE OLD.fwd != 0 AND OLD.committed = 0
+          AND key IN (x'02', CAST(x'03' || OLD.fwd_from AS BLOB));
+    DELETE FROM custody_totals
+        WHERE OLD.fwd != 0 AND OLD.committed = 0
+          AND key = CAST(x'03' || OLD.fwd_from AS BLOB) AND rows = 0;
+END;
+
+CREATE TRIGGER custody_totals_update AFTER UPDATE OF fwd, fwd_from, committed, bytes ON custody
+BEGIN
+    UPDATE custody_totals SET rows = rows - 1,
+        item_bytes = item_bytes - length(OLD.bytes),
+        from_bytes = from_bytes - coalesce(length(OLD.fwd_from), 0)
+        WHERE key = CASE WHEN OLD.fwd = 0 THEN x'00' ELSE x'01' END;
+    UPDATE custody_totals SET rows = rows - 1,
+        item_bytes = item_bytes - length(OLD.bytes),
+        from_bytes = from_bytes - length(OLD.fwd_from)
+        WHERE OLD.fwd != 0 AND OLD.committed = 0
+          AND key IN (x'02', CAST(x'03' || OLD.fwd_from AS BLOB));
+    INSERT INTO custody_totals (key, rows, item_bytes, from_bytes)
+        SELECT CASE WHEN NEW.fwd = 0 THEN x'00' ELSE x'01' END,
+               1, length(NEW.bytes), coalesce(length(NEW.fwd_from), 0)
+        WHERE true
+        ON CONFLICT (key) DO UPDATE SET rows = rows + 1,
+            item_bytes = item_bytes + excluded.item_bytes,
+            from_bytes = from_bytes + excluded.from_bytes;
+    INSERT INTO custody_totals (key, rows, item_bytes, from_bytes)
+        SELECT x'02', 1, length(NEW.bytes), length(NEW.fwd_from)
+        WHERE NEW.fwd != 0 AND NEW.committed = 0
+        ON CONFLICT (key) DO UPDATE SET rows = rows + 1,
+            item_bytes = item_bytes + excluded.item_bytes,
+            from_bytes = from_bytes + excluded.from_bytes;
+    INSERT INTO custody_totals (key, rows, item_bytes, from_bytes)
+        SELECT CAST(x'03' || NEW.fwd_from AS BLOB), 1, length(NEW.bytes), length(NEW.fwd_from)
+        WHERE NEW.fwd != 0 AND NEW.committed = 0
+        ON CONFLICT (key) DO UPDATE SET rows = rows + 1,
+            item_bytes = item_bytes + excluded.item_bytes,
+            from_bytes = from_bytes + excluded.from_bytes;
+    DELETE FROM custody_totals
+        WHERE OLD.fwd != 0 AND OLD.committed = 0
+          AND key = CAST(x'03' || OLD.fwd_from AS BLOB) AND rows = 0;
+END;
 ";
 
 /// Bring the schema to [`SCHEMA_VERSION`].

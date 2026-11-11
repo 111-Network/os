@@ -61,6 +61,10 @@
 //! while other origins are admitted ([`Store::custody_put_fwd`]). Protected
 //! forward rows are DB rows, so they count in live bytes toward the high
 //! watermark like every other row: at the cap, member custody is refused too.
+//! The Custody and Transit totals and an origin's protected bytes are read
+//! from the schema v5 `custody_totals` ([`custody_total`]), one row by
+//! primary key, so a put costs the same on a hub holding 10 rows or 10^6
+//! (the Pi floor); the answers are the sums the rows give.
 //!
 //! **Live bytes** are DB pages, so the v3 foreign tables count as soon as
 //! they hold rows; [`Store::class_bytes`] of `Foreign` is the rows' body and
@@ -243,7 +247,9 @@ fn key(r: &PrunedRef) -> (u8, i128, [u8; 32]) {
 
 /// Bytes one `custody` row accounts for (SQL expression): the item plus,
 /// for a forward row, its 32 B `fwd_from` (NULL, so 0, for a member row:
-/// member rows count exactly what they counted before v4).
+/// member rows count exactly what they counted before v4). The v5
+/// `custody_totals` keep the same two parts per key (`item_bytes`,
+/// `from_bytes`; [`CustodyTotal::bytes`]).
 const CUSTODY_ROW_BYTES: &str = "length(bytes) + coalesce(length(fwd_from), 0)";
 
 /// Step 1 candidates. A committed `custody` row is [`Class::Custody`] when
@@ -509,22 +515,96 @@ pub(crate) fn live_bytes(c: &Connection) -> Result<u64> {
     Ok(db.saturating_add(to_u64(blobs, "blobs.disk_bytes")?))
 }
 
+/// One `custody_totals` row (schema v5, [`super::schema`]): the count and
+/// byte sums of the `custody` rows under one [`TotalKey`], kept by the v5
+/// triggers in every writing transaction. Reading one costs a primary-key
+/// lookup, whatever the rows held (the Pi floor: no work per put that grows
+/// with the store).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct CustodyTotal {
+    /// Rows under the key.
+    pub(crate) rows: u64,
+    /// `Σ length(bytes)`: the items.
+    pub(crate) item_bytes: u64,
+    /// `Σ coalesce(length(fwd_from), 0)`: 32 B per forward row, 0 per
+    /// member row.
+    pub(crate) from_bytes: u64,
+}
+
+impl CustodyTotal {
+    /// The bytes these rows account for (§10.4; Layer 7 §5.8): per row
+    /// [`CUSTODY_ROW_BYTES`] plus [`ROW_OVERHEAD`], summed — exactly what a
+    /// `SUM` of that expression over the same rows returns. An overflow is
+    /// a corrupt total (a store never holds 2^64 bytes), never a wrap.
+    pub(crate) fn bytes(&self) -> Result<u64> {
+        self.rows
+            .checked_mul(ROW_OVERHEAD)
+            .and_then(|o| o.checked_add(self.item_bytes))
+            .and_then(|b| b.checked_add(self.from_bytes))
+            .ok_or(StoreError::Corrupt("custody_totals"))
+    }
+}
+
+/// The key of one `custody_totals` row (schema v5).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TotalKey<'a> {
+    /// `x'00'`: the member rows (`fwd = 0`) — [`Class::Custody`].
+    Member,
+    /// `x'01'`: every forward row (`fwd != 0`) — [`Class::Transit`].
+    Forward,
+    /// `x'02'`: the protected forward rows (`fwd != 0`, `committed = 0`).
+    Protected,
+    /// `x'03' ‖ origin`: the protected forward rows whose `fwd_from` is
+    /// `origin` (Layer 7 §5.8 share).
+    Origin(&'a [u8; 32]),
+}
+
+/// Read one `custody_totals` row by its primary key (crate-visible so the
+/// tests can show its plan).
+pub(crate) const CUSTODY_TOTAL_SQL: &str =
+    "SELECT rows, item_bytes, from_bytes FROM custody_totals WHERE key = ?1";
+
+/// The totals under `key`: a primary-key lookup. A key with no row holds
+/// no rows (an origin with no protected forward row has none; the three
+/// fixed keys always have one).
+pub(crate) fn custody_total(c: &Connection, key: TotalKey<'_>) -> Result<CustodyTotal> {
+    let mut origin_key = [0u8; 33];
+    let k: &[u8] = match key {
+        TotalKey::Member => &[0x00],
+        TotalKey::Forward => &[0x01],
+        TotalKey::Protected => &[0x02],
+        TotalKey::Origin(o) => {
+            origin_key[0] = 0x03;
+            origin_key[1..].copy_from_slice(o);
+            &origin_key
+        }
+    };
+    let row: Option<(i64, i64, i64)> = c
+        .query_row(CUSTODY_TOTAL_SQL, [k], |r| {
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+        })
+        .optional()?;
+    let Some((rows, item, from)) = row else {
+        return Ok(CustodyTotal::default());
+    };
+    Ok(CustodyTotal {
+        rows: to_u64(rows, "custody_totals.rows")?,
+        item_bytes: to_u64(item, "custody_totals.item_bytes")?,
+        from_bytes: to_u64(from, "custody_totals.from_bytes")?,
+    })
+}
+
 /// Bytes a class accounts for. `custody` splits by `fwd` (Layer 7 §5.3
 /// amendment 6): `Custody` is the member rows (`fwd = 0`), `Transit` the
-/// forward rows (`fwd != 0`, each with its `fwd_from`).
+/// forward rows (`fwd != 0`, each with its `fwd_from`); both read their
+/// schema v5 total ([`custody_total`]), O(1) in the rows held.
 pub(crate) fn class_bytes(c: &Connection, class: Class) -> Result<u64> {
-    let v: i64 = if class == Class::Custody || class == Class::Transit {
-        let rows = if class == Class::Custody {
-            "fwd = 0"
-        } else {
-            "fwd != 0"
-        };
-        c.query_row(
-            &format!("SELECT coalesce(sum({CUSTODY_ROW_BYTES} + ?1), 0) FROM custody WHERE {rows}"),
-            [ROW_OVERHEAD as i64],
-            |r| r.get(0),
-        )?
-    } else if class == Class::Foreign {
+    match class {
+        Class::Custody => return custody_total(c, TotalKey::Member)?.bytes(),
+        Class::Transit => return custody_total(c, TotalKey::Forward)?.bytes(),
+        _ => {}
+    }
+    let v: i64 = if class == Class::Foreign {
         c.query_row(
             &format!("SELECT coalesce(sum({FOREIGN_ROW_BYTES} + ?1), 0) FROM foreign_messages m"),
             [ROW_OVERHEAD as i64],

@@ -1457,15 +1457,11 @@ impl Store {
     }
 
     /// `(count, bytes)` of protected forward rows (`fwd != 0`,
-    /// `committed = 0`; bytes = the items).
+    /// `committed = 0`; bytes = the items): the schema v5 total of the
+    /// protected forward rows, one primary-key read (Layer 7 §5.8).
     pub fn forward_stats(&self) -> Result<(u64, u64)> {
-        let (n, b): (i64, i64) = self.conn.query_row(
-            "SELECT count(*), coalesce(sum(length(bytes)), 0) FROM custody
-             WHERE fwd != 0 AND committed = 0",
-            [],
-            |r| Ok((r.get(0)?, r.get(1)?)),
-        )?;
-        Ok((to_u64(n, "count")?, to_u64(b, "bytes")?))
+        let t = super::prune::custody_total(&self.conn, super::prune::TotalKey::Protected)?;
+        Ok((t.rows, t.item_bytes))
     }
 
     /// Bytes of `origin`'s protected forward rows (`fwd_from = origin`,
@@ -1473,15 +1469,10 @@ impl Store {
     /// what its share ([`Store::transit_share`]) is measured against (Layer
     /// 7 §5.8). Committed rows (handed over or refused) are step-1 evictable
     /// and evicted first by the Transit quota, so they pin nothing and do
-    /// not hold the share.
+    /// not hold the share. Read from the origin's schema v5 total, one
+    /// primary-key read whatever the rows held (0 for an origin with none).
     pub fn forward_origin_bytes(&self, origin: &[u8; 32]) -> Result<u64> {
-        let v: i64 = self.conn.query_row(
-            "SELECT coalesce(sum(length(bytes) + length(fwd_from) + ?2), 0) FROM custody
-             WHERE fwd != 0 AND committed = 0 AND fwd_from = ?1",
-            params![&origin[..], super::prune::ROW_OVERHEAD as i64],
-            |r| r.get(0),
-        )?;
-        to_u64(v, "forward bytes")
+        super::prune::custody_total(&self.conn, super::prune::TotalKey::Origin(origin))?.bytes()
     }
 
     // -- cursors (member side, §9) -----------------------------------------
