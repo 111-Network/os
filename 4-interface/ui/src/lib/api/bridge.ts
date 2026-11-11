@@ -5,18 +5,20 @@
 // the call with the hash. The text may quote untrusted channel names, so it is drawn as text only.
 import type { Adapter } from "./adapter";
 import { isApiError } from "./problem";
-import type { BridgeComponent, BridgeEdge, ConsentRequired, ForeignConversation, NetworkCaps, TargetRefusal } from "./types";
+import { CONSENT_ACTIONS, type BridgeComponent, type BridgeEdge, type ConsentRequired, type ForeignConversation, type NetworkCaps, type TargetRefusal } from "./types";
 
 const HASH = /^[0-9a-f]{64}$/;
 
-const CONSENT_ACTIONS: readonly string[] = ["edge_enable", "edge_resume", "component_enable", "ham_confirm", "uplink_send"];
+// The closed set is the generated tuple (Layer 7 appended carrier_enable, pair_plain, gateway_bit and origin_serve): a hand-kept copy here
+// would drop a new action and the consent dialog would never open for it.
+const CONSENT_ACTIONS_LIST: readonly string[] = CONSENT_ACTIONS;
 
 /** A well-formed `ConsentRequired`, or null. A malformed one is never offered for confirmation (fail closed). */
 export function readConsent(x: unknown): ConsentRequired | null {
   if (typeof x !== "object" || x === null) return null;
   const c = x as Partial<ConsentRequired>;
   if (typeof c.warning_text !== "string" || c.warning_text === "" || typeof c.hash !== "string" || !HASH.test(c.hash)) return null;
-  if (typeof c.action !== "string" || !CONSENT_ACTIONS.includes(c.action) || typeof c.subject !== "string") return null;
+  if (typeof c.action !== "string" || !CONSENT_ACTIONS_LIST.includes(c.action) || typeof c.subject !== "string") return null;
   const addons = Array.isArray(c.addons) ? c.addons.filter((a): a is string => typeof a === "string") : [];
   return { action: c.action as ConsentRequired["action"], subject: c.subject, warning_text: c.warning_text, hash: c.hash, addons };
 }
