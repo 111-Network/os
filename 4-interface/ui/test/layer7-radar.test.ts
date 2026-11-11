@@ -20,7 +20,11 @@ import {
   dotPoint,
   evidenceLine,
   glyphFor,
+  GLYPH_KEY,
   idAngleDeg,
+  labelStep,
+  LABEL_WEDGE_HALF_DEG,
+  RADAR_LABEL_SIZE,
   nearbyState,
   MAX_HOP_RINGS,
   MAX_RADAR_DOTS,
@@ -247,6 +251,41 @@ describe("angle (rule 3)", () => {
     expect(m1.dots[0]!.angle).toBe(m2.dots[0]!.angle);
   });
 
+  it("a hash angle never falls in the 40 degree wedge at 12 o'clock where the ring labels sit, and is stable", () => {
+    let min = 360;
+    let max = 0;
+    for (let i = 0; i < 600; i++) {
+      const id = `!${i.toString(16).padStart(8, "0")}`;
+      const a = idAngleDeg(id);
+      expect(a).toBe(idAngleDeg(id));
+      expect(a).toBeGreaterThanOrEqual(LABEL_WEDGE_HALF_DEG);
+      expect(a).toBeLessThan(360 - LABEL_WEDGE_HALF_DEG);
+      min = Math.min(min, a);
+      max = Math.max(max, a);
+    }
+    expect(min).toBeLessThan(40); // the arc is used from its start to its end, not squeezed into a corner
+    expect(max).toBeGreaterThan(320);
+    const dots = model([mesh(Array.from({ length: 40 }, (_, i) => node({ id: `!x${i}`, hops_away: 0 })))]).dots;
+    for (const d of dots) {
+      expect(d.angleFrom).toBe("id");
+      expect(d.angle).toBeGreaterThanOrEqual(LABEL_WEDGE_HALF_DEG);
+      expect(d.angle).toBeLessThan(360 - LABEL_WEDGE_HALF_DEG);
+    }
+  });
+
+  it("a real bearing inside the wedge is left exactly as computed", () => {
+    const north = node({ id: "!n", hops_away: 0, position: { lat: 53, lon: 5 } });
+    const nne = node({ id: "!k", hops_away: 0, position: { lat: 53, lon: 5.2 } });
+    const m = model([mesh([north, nne])], { own: OWN });
+    const want = bearingDeg(OWN, { lat: 53, lon: 5.2 });
+    expect(want).not.toBeNull();
+    expect(want!).toBeGreaterThan(0);
+    expect(want!).toBeLessThan(LABEL_WEDGE_HALF_DEG);
+    expect(dotOf(m, "!k").angleFrom).toBe("bearing");
+    expect(dotOf(m, "!k").angle).toBe(want);
+    expect(dotOf(m, "!n").angle).toBeCloseTo(0, 3);
+  });
+
   it("an out-of-range or non-finite position gives no bearing and no cell", () => {
     const bad = node({ id: "!bad", hops_away: 0, position: { lat: 95, lon: 5 } });
     const nan = node({ id: "!nan", hops_away: 0, position: { lat: Number.NaN, lon: 5 } });
@@ -329,6 +368,27 @@ describe("glyphs, ages and caps", () => {
     const svg = renderToStaticMarkup(h(RadarSvg, { model: m }));
     expect(svg).toContain("<polygon");
     expect(svg).toContain("<circle");
+  });
+
+  it("the glyph key names the centre mark along with the three glyphs", () => {
+    expect(GLYPH_KEY).toBe("Marks: the ringed dot in the centre is this node; triangle is a 111 node, circle a Meshtastic node, diamond a Reticulum node.");
+    expect(renderToStaticMarkup(h(NearbyView, null))).not.toContain("Marks: triangle");
+  });
+
+  it("ring labels are about 3.3% of the box and every ring keeps its label at 8 hop rings (the closest spacing)", () => {
+    expect(RADAR_LABEL_SIZE / RADAR_BOX.size).toBeGreaterThan(0.032);
+    expect(RADAR_LABEL_SIZE / RADAR_BOX.size).toBeLessThan(0.034);
+    const nodes = Array.from({ length: MAX_HOP_RINGS + 3 }, (_, i) => node({ id: `!h${i}`, hops_away: i <= MAX_HOP_RINGS + 1 ? i : null }));
+    const m = model([mesh(nodes)]);
+    expect(m.rings).toBe(MAX_HOP_RINGS);
+    expect(labelStep(m.rings)).toBe(1);
+    const svg = renderToStaticMarkup(h(RadarSvg, { model: m }));
+    const ys = [...svg.matchAll(/data-testid="radar-ring-label"[^>]*? y="([\d.]+)"/g)].map((x) => Number(x[1]));
+    expect(ys.length).toBe(MAX_HOP_RINGS + 1);
+    for (let i = 1; i < ys.length; i++) expect(Math.abs(ys[i]! - ys[i - 1]!)).toBeGreaterThanOrEqual(RADAR_LABEL_SIZE * 1.2);
+    for (const name of ["heard directly", "hops unknown", "7+ hops"]) expect(svg).toContain(`>${name}<`);
+    // tighter rings than a label is tall drop alternate labels, the outer one always stays
+    expect(labelStep(20)).toBe(2);
   });
 
   it("a 111 row's age is its heard_ago_s plus the page's own clock since the frame, and never from a node's clock", () => {

@@ -4,7 +4,7 @@
 import { createElement as h, type ReactElement } from "react";
 import { ageLabel } from "../../lib/api/nearby";
 import type { Status } from "../../lib/api/types";
-import { cellSidePx, dotPoint, RADAR_BOX, ringName, ringRadius, type RadarDot, type RadarModel } from "./model";
+import { cellSidePx, dotPoint, labelStep, RADAR_BOX, RADAR_LABEL_SIZE, ringName, ringRadius, type RadarDot, type RadarModel } from "./model";
 
 /** One honest sentence from `status.transport_state`. Null (no status yet) says nothing is known. */
 export function nearbySentence(state: Status["transport_state"] | null | undefined): string {
@@ -58,11 +58,23 @@ export function RadarSvg({ model }: { model: RadarModel }): ReactElement {
   const { size, centre } = RADAR_BOX;
   const R = model.rings;
   const bands: ReactElement[] = [];
+  // Ring names are drawn last, over the dots, each with a halo in the card's colour: a dot or a ring line under a name
+  // never makes it unreadable (the innermost names are wider than their rings).
+  const names: ReactElement[] = [];
+  const step = labelStep(R);
   for (let j = 1; j <= R + 1; j++) {
     const outer = j === R + 1;
     const r = ringRadius(j, R);
     bands.push(h("circle", { key: `ring-${j}`, cx: centre, cy: centre, r, fill: "none", stroke: "currentColor", strokeWidth: 1, strokeDasharray: outer ? "4 3" : undefined, className: "text-border" }));
-    bands.push(h("text", { key: `name-${j}`, x: centre, y: centre - r + 8, textAnchor: "middle", fontSize: 7, fill: "currentColor", className: "text-muted-foreground" }, outer ? ringName(null) : ringName(j, model.capped)));
+    if ((R + 1 - j) % step === 0) {
+      names.push(
+        h(
+          "text",
+          { key: `name-${j}`, "data-testid": "radar-ring-label", x: centre, y: centre - r + 4, textAnchor: "middle", fontSize: RADAR_LABEL_SIZE, fill: "currentColor", stroke: "var(--card)", strokeWidth: 3, strokeLinejoin: "miter", paintOrder: "stroke", className: "text-muted-foreground" },
+          outer ? ringName(null) : ringName(j, model.capped),
+        ),
+      );
+    }
   }
   const cells: ReactElement[] = [];
   const marks: ReactElement[] = [];
@@ -104,5 +116,6 @@ export function RadarSvg({ model }: { model: RadarModel }): ReactElement {
     h("circle", { key: "me", cx: centre, cy: centre, r: 4, fill: "currentColor", className: "text-foreground" }),
     h("circle", { key: "me-ring", cx: centre, cy: centre, r: 7, fill: "none", stroke: "currentColor", strokeWidth: 1, className: "text-foreground" }),
     ...marks,
+    ...names,
   );
 }

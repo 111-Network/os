@@ -245,14 +245,22 @@ export function bearingDeg(from: Fix, to: Fix): number | null {
   return (((Math.atan2(y, x) * 180) / Math.PI) % 360 + 360) % 360;
 }
 
-/** A stable angle in [0, 360) from an id (FNV-1a over its UTF-16 units): the same id is on the same bearing on every page load. */
+/** Half the wedge around 12 o'clock (0 degrees, clockwise) kept free of hash-derived dots: the ring labels are drawn there. */
+export const LABEL_WEDGE_HALF_DEG = 20;
+
+/**
+ * A stable angle from an id (FNV-1a over its UTF-16 units): the same id is on the same bearing on every page load. The hash is mapped onto
+ * the arc from 20 to 340 degrees, so it never lands in the 40 degree wedge at 12 o'clock where the ring labels sit. A real bearing is
+ * never passed through here.
+ */
 export function idAngleDeg(id: string): number {
   let h = 0x811c9dc5;
   for (let i = 0; i < id.length; i++) {
     h ^= id.charCodeAt(i);
     h = Math.imul(h, 0x01000193) >>> 0;
   }
-  return (h % 3600) / 10;
+  const arc = 360 - 2 * LABEL_WEDGE_HALF_DEG;
+  return LABEL_WEDGE_HALF_DEG + ((h % (arc * 10)) / 10);
 }
 
 export type RadarGlyph = "triangle" | "circle" | "diamond" | "square";
@@ -260,7 +268,7 @@ export type RadarGlyph = "triangle" | "circle" | "diamond" | "square";
 export function glyphFor(kind: string): RadarGlyph {
   return kind === "111" ? "triangle" : kind === "meshtastic" ? "circle" : kind === "reticulum" ? "diamond" : "square";
 }
-export const GLYPH_KEY = "Marks: triangle is a 111 node, circle a Meshtastic node, diamond a Reticulum node.";
+export const GLYPH_KEY = "Marks: the ringed dot in the centre is this node; triangle is a 111 node, circle a Meshtastic node, diamond a Reticulum node.";
 
 /** Where this node is, when it says so. v1 has no position setting and a 111 node never shares one, so the page passes null. */
 export type OwnFix = Fix | null;
@@ -388,6 +396,15 @@ export function ringName(ring: number | null, capped = false): string {
 
 /** Drawing constants of the radar's 320 x 320 box: the node's marker, the inner edge of ring 1 and the outer edge of the unplaced ring. */
 export const RADAR_BOX = { size: 320, centre: 160, inner: 10, outer: 150 } as const;
+
+/** The ring labels' font size in box units: 3.3% of the box, so a 270 px wide radar on a phone sets them about 9 px tall. */
+export const RADAR_LABEL_SIZE = 10.5;
+
+/** Every how-many-th ring is labelled, counted in from the outer one: 1 while the rings sit farther apart than a label is tall (always, up to 8 hop rings), else the step that fits. */
+export function labelStep(rings: number): number {
+  const spacing = (RADAR_BOX.outer - RADAR_BOX.inner) / (rings + 1);
+  return Math.max(1, Math.ceil((RADAR_LABEL_SIZE * 1.25) / spacing));
+}
 
 /** The radius of ring boundary `j` (0 = the node's marker, `rings` = the last hop ring, `rings + 1` = the outer unplaced ring). */
 export const ringRadius = (j: number, rings: number): number => RADAR_BOX.inner + ((RADAR_BOX.outer - RADAR_BOX.inner) * j) / (rings + 1);
