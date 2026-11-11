@@ -299,25 +299,41 @@
 //!   without its hint, as after a restart. **The window is shared fairly**
 //!   (§5.5: a target that is down never holds back another's rows): a
 //!   target is *up* when it can take a row now (a `tcp` pair with a
-//!   sendable connection, a `carrier` pair while the carrier bound is set).
+//!   sendable connection, a `carrier` pair while the carrier bound is set)
+//!   and no `REJECT_FULL` row of it waits (a full target counts as down
+//!   until its next trigger, C16, clears or accepts those rows).
 //!   While the window is full and rows wait in the store, the **swap
 //!   probe** reads one page of row heads per pass, in custody order; each
 //!   stored row whose turn (the table, the hit cache, the probe order; no
-//!   hint) is up enters in place of the **newest** idle resident row whose
-//!   turn is down or that has no target (evicted: it is in the store
-//!   already, leaves memory without a refusal, and the paging floor moves
-//!   below it), and the others stay in the store. Newest first, so every
-//!   target's resident rows stay older than its stored ones and it is
-//!   offered its rows in custody order when it comes up. The probe reads
+//!   hint) is up enters in place of the **newest** idle (or `REJECT_FULL`)
+//!   resident row whose turn is down or that has no target (evicted: it is
+//!   in the store already, leaves memory without a refusal, and the paging
+//!   floor moves below it), and the others stay in the store. Newest first
+//!   per target, so every target's resident rows stay older than its
+//!   stored ones and it is offered its rows in custody order when it comes
+//!   up; across targets a row with no hint, no refusal and not orphaned
+//!   goes first, since eviction drops all three (residual, beside the
+//!   paged rows' lost hint above: an evicted row that had them comes back
+//!   without, so a `fwd = 1` row whose hint named no pair may also be
+//!   offered to the near `tcp` pairs, a carrier pair that refused it is
+//!   offered it once more, and an orphaned one waits instead of being
+//!   refused). A tick runs at most four passes; when the last read was a
+//!   full page (the probe, or a page in, has more to read) the actor
+//!   queues **one self-wake** (`Input::Continue`) to its own mailbox, so
+//!   the next tick reads on while every other input interleaves: no timer,
+//!   at most one queued, the work per tick bounded. The probe reads
 //!   nothing while no target is up or nothing can be evicted, and once it
 //!   reached the end of the store with nothing to move it stops until a
-//!   target comes up (it then starts again from the floor); meanwhile a
-//!   new row whose turn is up enters at once, with its hint, in place of an
-//!   evicted one. So an all-down hub, or a store of rows for down targets
-//!   only, does not churn, and each pass does at most one read and one page
-//!   of evictions. The view's `pending` counts resident rows;
-//!   `Store::forward_stats` has the totals. A non-hub node holds the empty
-//!   structure only.
+//!   stored row's turn can have changed: a target comes up, the pair set
+//!   changes (a pairing, an unpairing, a pair break), the carrier bound
+//!   changes, or a hit-cache entry is added or changed (each one restarts
+//!   it from the floor, so stored rows move before a newer row for the
+//!   same target); meanwhile a new row whose turn is up enters at once,
+//!   with its hint, in place of an evicted one. So an all-down hub, or a
+//!   store of rows for down targets only, does not churn, and each pass
+//!   does at most one read and one page of evictions. The view's `pending`
+//!   counts resident rows; `Store::forward_stats` has the totals. A non-hub
+//!   node holds the empty structure only.
 //! - **The hub role off** (a `custody_opt_in` node keeps member custody):
 //!   the records stay in `paired_hubs` and forward nothing, the resident
 //!   rows leave memory and wait in the store (never refused), no pair is
@@ -354,6 +370,11 @@
 //!   re-armed). A re-post needs a far frame after it to be re-armed again:
 //!   one re-post per row per far-hub round, never two within one (C6, §15
 //!   G10 item 3); flushes while the far hub is silent post nothing again.
+//!   The round is counted per verified far frame, not per drain (§5.9 "a
+//!   drain that began after its post"): under a drain, take, flush, drain
+//!   cycle the two agree, but a held stream hands in one far flush frame by
+//!   frame, so the daemon's held-stream driver (D11) must call
+//!   [`Fabric::forward_take`] only at a drain boundary.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::net::SocketAddr;
@@ -433,6 +454,10 @@ const FORWARD_LOAD_PAGE: usize = 256;
 /// only. Rows beyond it wait in the store, not yet offered, and are paged
 /// in custody order as the window drains.
 pub const FORWARD_RESIDENT: usize = 4_096;
+/// Forwarder passes per run (`Core::run_forwarder`): at most one store read
+/// each, so a tick reads at most this many pages of row heads before the
+/// forwarder's self-wake hands the rest to the next tick.
+const FORWARD_PASSES: usize = 4;
 
 /// Whether an item of `item_len` sealed bytes fits a carrier whose largest
 /// frame is `max_frame` (Layer 7 §5.2, §6.1 item 3): item +
@@ -1135,7 +1160,7 @@ impl Fabric {
             pending_events: BTreeMap::new(),
             foreign_convs: HashMap::new(),
             outq: Vec::new(),
-            _control: input.clone(),
+            control: input.clone(),
             frames,
             tasks: Tasks(Vec::new()),
         };
@@ -1572,6 +1597,11 @@ enum Input {
     Frame(Inbound),
     Link(LinkEvent),
     Run(Job),
+    /// The forwarder's self-wake (module doc "The resident window"): a
+    /// tick that left the swap probe with more of the store to read queues
+    /// one of these to its own mailbox (never a timer; at most one queued),
+    /// so the next tick reads on while every other input interleaves.
+    Continue,
     Shutdown(oneshot::Sender<Result<()>>),
 }
 
@@ -2166,12 +2196,17 @@ struct Forwarder {
     /// window was full and found unable to move.
     probe: u64,
     /// The probe read to the end of the store and found nothing it could
-    /// swap in: no store read for it until a target comes up (or a new row
-    /// that can move is held).
+    /// swap in: no store read for it until a target comes up or a stored
+    /// row's turn can have changed ([`Forwarder::restart_probe`]).
     probe_done: bool,
     /// The targets that were up when the probe last looked: one coming up
     /// restarts the probe from `loaded`.
     up: HashSet<NodeId>,
+    /// The last store read of this tick's runs (a page in or a probe page)
+    /// was full: more of the store is left to read.
+    read_on: bool,
+    /// A self-wake ([`Input::Continue`]) is queued: at most one at a time.
+    wake: bool,
     /// The pending map `pkt_ref → (custody_seq, target)` of puts out.
     pending: HashMap<[u8; 16], (u64, NodeId)>,
     /// The hit cache `dest → pair`.
@@ -2266,25 +2301,58 @@ impl Forwarder {
     /// The resident row the window gives up first when a row that can move
     /// must enter (module doc "The resident window"): the newest idle (or
     /// `REJECT_FULL`) row whose turn is a target not in `up`, or that has no
-    /// target now, with its targets settled (not dirty). Newest first, so each target's
-    /// resident rows stay older than its rows in the store: it is offered
-    /// its rows in custody order when it comes up. O(targets).
+    /// target now, with its targets settled (not dirty). Newest first per
+    /// target, so each target's resident rows stay older than its rows in
+    /// the store: it is offered its rows in custody order when it comes up.
+    /// Among those candidates (one per target, one with no target) a row
+    /// that loses nothing by leaving memory goes first: no hint, no
+    /// refusal, not orphaned (eviction drops all three); with none such,
+    /// the newest candidate. O(targets).
     fn evictable(&self, up: &HashSet<NodeId>) -> Option<u64> {
         let settled = |s: &&u64| !self.dirty.contains(s);
-        let mut best = self.unturned.iter().rev().find(settled).copied();
+        let plain = |s: u64| {
+            self.rows
+                .get(&s)
+                .is_some_and(|r| r.hint.is_none() && r.refused.is_empty() && !r.orphaned)
+        };
+        let (mut best, mut best_plain) = (None, None);
+        let mut see = |cand: Option<u64>| {
+            if let Some(s) = cand {
+                best = best.max(Some(s));
+                if plain(s) {
+                    best_plain = best_plain.max(Some(s));
+                }
+            }
+        };
+        see(self.unturned.iter().rev().find(settled).copied());
         for (t, q) in &self.targets {
             if up.contains(t) {
                 continue;
             }
             // Idle, or kept after a `REJECT_FULL` (retried on the pair's
-            // next link-up either way, C16).
-            for set in [&q.idle, &q.full] {
-                if let Some(s) = set.iter().rev().find(settled) {
-                    best = best.max(Some(*s));
-                }
-            }
+            // next link-up either way, C16): the target's newest of both.
+            let idle = q.idle.iter().rev().find(settled).copied();
+            let full = q.full.iter().rev().find(settled).copied();
+            see(idle.max(full));
         }
-        best
+        best_plain.or(best)
+    }
+
+    /// Every stored row is judged again by the swap probe (module doc "The
+    /// resident window"): a change that can turn a stored row's turn up (the
+    /// pair set, a pair break, the carrier bound, a changed hit-cache entry)
+    /// restarts it from the paging floor, so the rows already in the store
+    /// move before a newer row for the same target is admitted.
+    fn restart_probe(&mut self) {
+        self.probe = self.loaded;
+        self.probe_done = false;
+    }
+
+    /// The pair set or the carrier bound changed: every idle row is
+    /// recomputed by the next pass, and the probe judges the store again.
+    fn all_changed(&mut self) {
+        self.all_dirty = true;
+        self.restart_probe();
     }
 
     /// Evict the idle row `seq` from the window: it is in the store already
@@ -2369,6 +2437,9 @@ impl Forwarder {
         if !self.cache.put(dest, pair) {
             return;
         }
+        // Stored rows of that dest may now have an up turn (rare per dest;
+        // the re-sweep is bounded per tick and paced by the self-wake).
+        self.restart_probe();
         let Some(seqs) = self.by_dest.get(&dest) else {
             return;
         };
@@ -2452,8 +2523,9 @@ struct Core {
     foreign_convs: HashMap<i64, ConvFacts>,
     outq: Vec<Out>,
     /// Keeps the control channel open while the actor runs (dropping every
-    /// handle does not stop it, module doc).
-    _control: mpsc::UnboundedSender<Input>,
+    /// handle does not stop it, module doc); the forwarder's self-wake
+    /// ([`Input::Continue`]) is queued on it.
+    control: mpsc::UnboundedSender<Input>,
     /// The bounded frame queue's sender, cloned into each link's loop.
     frames: mpsc::Sender<Inbound>,
     tasks: Tasks,
@@ -2471,6 +2543,10 @@ impl Core {
                 // state it reports: emit what this tick has so far first.
                 self.emit();
                 job(self)
+            }
+            Input::Continue => {
+                self.fwd.wake = false;
+                self.fwd.run = true;
             }
             Input::Shutdown(_) => {}
         }
@@ -5536,7 +5612,7 @@ impl Core {
         if rec.whole() {
             self.fwd.retry_full.insert(rec.node_id);
         }
-        self.fwd.all_dirty = true;
+        self.fwd.all_changed();
         self.fwd.run = true;
         self.settings_changed();
         self.fabric_changed();
@@ -5585,7 +5661,7 @@ impl Core {
         self.fwd.notify.remove(node);
         self.fwd.retry_full.remove(node);
         self.fwd.cache.forget_pair(node);
-        self.fwd.all_dirty = true;
+        self.fwd.all_changed();
         self.release_pair_dial(node);
         self.settings_changed();
         self.fabric_changed();
@@ -5597,7 +5673,7 @@ impl Core {
     fn pair_broken(&mut self, node: NodeId) {
         self.fwd.broken.insert(node);
         self.fwd.orphan(&node);
-        self.fwd.all_dirty = true;
+        self.fwd.all_changed();
         self.fabric_changed();
     }
 
@@ -5671,6 +5747,8 @@ impl Core {
                 heard: old.heard,
                 reposts: old.reposts,
                 computed: old.computed,
+                // A self-wake may still be queued: at most one at a time.
+                wake: old.wake,
                 ..Forwarder::default()
             };
             for a in dials {
@@ -5846,16 +5924,25 @@ impl Core {
 
     /// The targets that can take a row now (module doc "The resident
     /// window"): a `tcp` pair with a sendable connection, a `carrier` pair
-    /// while the carrier bound is set. A target that was not up when the
-    /// probe last looked restarts the probe from the paging floor (its rows
-    /// in the store are read again). O(pairs × connections), only while the
-    /// window is full.
+    /// while the carrier bound is set, either one with no `REJECT_FULL` row
+    /// waiting (a full target counts as down for admission until its next
+    /// trigger clears or accepts its rows, C16). A target that was not up
+    /// when the probe last looked restarts the probe from the paging floor
+    /// (its rows in the store are read again). O(pairs × connections), only
+    /// while the window is full.
     fn up_targets(&mut self, pairs: &[PairedHub]) -> HashSet<NodeId> {
         let up: HashSet<NodeId> = pairs
             .iter()
             .filter(|p| match p.via {
                 PairVia::Tcp => self.sendable_conn(&p.node_id).is_some(),
                 PairVia::Carrier => self.fwd.carrier_max.is_some(),
+            })
+            .filter(|p| {
+                !self
+                    .fwd
+                    .targets
+                    .get(&p.node_id)
+                    .is_some_and(|q| !q.full.is_empty())
             })
             .map(|p| p.node_id)
             .collect();
@@ -5887,6 +5974,7 @@ impl Core {
         if page.len() < want {
             self.fwd.more = false;
         }
+        self.fwd.read_on = self.fwd.more;
         let n = page.len();
         for h in page {
             self.fwd.loaded = self.fwd.loaded.max(h.custody_seq);
@@ -5903,9 +5991,12 @@ impl Core {
     /// turn is down (evicted to the store), and the others stay in the
     /// store. Bounded: one read of at most [`FORWARD_LOAD_PAGE`] heads and
     /// as many evictions per pass; nothing is read while no target is up,
-    /// nothing can be evicted, or the probe found nothing to move since a
-    /// target last came up (an all-down hub, or a store of rows for down
-    /// targets only, does not churn). Returns how many rows came in.
+    /// nothing can be evicted, or the probe found nothing to move since it
+    /// was last restarted (a target came up, or a stored row's turn can
+    /// have changed: [`Forwarder::restart_probe`]); an all-down hub, or a
+    /// store of rows for down targets only, does not churn. A full page
+    /// leaves `read_on` set (the self-wake, [`Core::run_forwarder`]).
+    /// Returns how many rows came in.
     fn swap_in(&mut self, pairs: &[PairedHub]) -> Result<usize> {
         let resident = self.fwd.rows.len();
         let room = FORWARD_RESIDENT.saturating_sub(resident);
@@ -5943,14 +6034,15 @@ impl Core {
             pos = h.custody_seq;
         }
         self.fwd.probe = pos;
-        if !blocked {
-            if heads.len() < FORWARD_LOAD_PAGE {
-                self.fwd.probe_done = true;
-            } else {
-                // The next pass reads on (at most four a tick).
-                self.fwd.run = true;
-            }
+        let full = !blocked && heads.len() == FORWARD_LOAD_PAGE;
+        if full {
+            // The next pass reads on (at most four a tick, then the
+            // self-wake: `run_forwarder`).
+            self.fwd.run = true;
+        } else if !blocked {
+            self.fwd.probe_done = true;
         }
+        self.fwd.read_on = full;
         Ok(moved)
     }
 
@@ -5968,13 +6060,25 @@ impl Core {
     // -- the forwarder (§5.5, §5.9) ----------------------------------------
 
     /// Run while a trigger asked (module doc); a pass that changes a row's
-    /// target asks again, so the tick settles (bounded).
+    /// target asks again, so the tick settles (bounded: at most
+    /// [`FORWARD_PASSES`] passes, each at most one store read). When the
+    /// passes ran out with the last store read full (the swap probe, or a
+    /// page in, has more to read), one [`Input::Continue`] is queued to the
+    /// actor's own mailbox (module doc "The resident window"): the next tick
+    /// reads on, every other input interleaves, and no timer runs. The
+    /// mailbox is unbounded and at most one self-wake is queued at a time;
+    /// were the send to fail (the actor is going), the next input resumes
+    /// the probe.
     fn run_forwarder(&mut self) {
-        for _ in 0..4 {
+        self.fwd.read_on = false;
+        for _ in 0..FORWARD_PASSES {
             if !std::mem::take(&mut self.fwd.run) {
                 return;
             }
             self.forward_pass();
+        }
+        if self.fwd.run && self.fwd.read_on && !self.fwd.wake {
+            self.fwd.wake = self.control.send(Input::Continue).is_ok();
         }
     }
 
@@ -6320,7 +6424,7 @@ impl Core {
     fn set_carrier_max_frame(&mut self, max: Option<usize>) {
         if self.fwd.carrier_max != max {
             self.fwd.carrier_max = max;
-            self.fwd.all_dirty = true;
+            self.fwd.all_changed();
         }
         self.fwd.run = true;
         let carriers: Vec<NodeId> = self
@@ -8132,6 +8236,54 @@ mod tests {
         assert_eq!(f.evictable(&all), None, "every target up");
         f.set_state(1, Turn::Full);
         assert_eq!(f.evictable(&up), Some(1), "kept after REJECT_FULL");
+    }
+
+    /// M4d (module doc "The resident window"): each down target still gives
+    /// up only its newest row, and among those candidates a row with no
+    /// hint, no refusal and not orphaned goes first (eviction drops all
+    /// three); with none such, the newest candidate.
+    #[test]
+    fn eviction_prefers_a_row_that_loses_nothing() {
+        let mut f = Forwarder::default();
+        let (b, c, d) = (
+            NodeId::from([1u8; 32]),
+            NodeId::from([2u8; 32]),
+            NodeId::from([3u8; 32]),
+        );
+        for seq in 1..=5u64 {
+            let n = u8::try_from(seq).unwrap();
+            let hint = (seq == 4).then_some([9u8; DEST_HUB_LEN]);
+            f.insert(seq, Core::fwd_row([n; 32], [n; 16], 100, 1, hint));
+        }
+        f.dirty.clear();
+        for (seq, t) in [(1, b), (2, c), (3, c), (4, b)] {
+            f.mutate(seq, |r| {
+                r.fresh = false;
+                r.turn = Some(t);
+            });
+        }
+        f.mutate(5, |r| {
+            r.fresh = false;
+            r.orphaned = true;
+        });
+        f.loaded = 5;
+        let none = HashSet::new();
+        assert_eq!(
+            f.evictable(&none),
+            Some(3),
+            "C's newest (plain) before B's newer hinted row or the orphan"
+        );
+        f.evict(3);
+        f.mutate(2, |r| r.refused.push(d));
+        assert_eq!(
+            f.evictable(&none),
+            Some(5),
+            "no plain candidate (B's 4 hinted, C's 2 refused, 5 orphaned): the newest"
+        );
+        f.evict(5);
+        assert_eq!(f.evictable(&none), Some(4), "B's newest, never its older 1");
+        let up: HashSet<NodeId> = [b].into_iter().collect();
+        assert_eq!(f.evictable(&up), Some(2), "B is up: C's only row");
     }
 }
 
