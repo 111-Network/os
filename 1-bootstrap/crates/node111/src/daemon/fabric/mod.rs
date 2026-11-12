@@ -108,6 +108,22 @@
 //!   releases the address the home hub is shown at.
 //! - **The carrier topic's X25519** (§6.2) stays behind the identity handle
 //!   ([`IdentitySealer::carrier_topic_x25519`]), on no API.
+//! - **Role bits 3–5** (§7.2, §19 code seam 4; row D9): `appdata` carries
+//!   [`sealer::ROLE_GATEWAY`], [`sealer::ROLE_OFFLOAD`] and
+//!   [`sealer::ROLE_ORIGIN`] beside mesh111's bits 0–2, from
+//!   `state/relay.json` ([`RelayRoles`]): read once at start (before the
+//!   first announce is ensured, so a restart re-mints nothing), then only
+//!   when the relay settings route hands the new settings to
+//!   [`FabricHandle::set_relay_settings`] (D10). A change re-mints the
+//!   announce once (one counter value committed with an fsync before it
+//!   exists, `id111` `next_announce_counter`); the same roles never re-mint
+//!   (`ensure_announce` keeps the stored bytes). Every re-mint computes the
+//!   `appdata` from the current fabric settings and relay roles under the
+//!   re-mint lock, so concurrent changes settle on the latest. The layout
+//!   is unchanged (`[1][roles u16 LE][0]` plus the hint, no TLV, §19 C8).
+//! - **The offer's gateway fact** (§7.5): [`FabricHandle::gateway_offer`]
+//!   gives `POST /fabric/hub/offer` its additive `gateway {carrier, mode}`;
+//!   the `111HUB:` bundle, INTRO and cards carry nothing new.
 //!
 //! [`FabricHandle::shutdown`] stops the link, closes the fabric cleanly
 //! (`Fabric::shutdown`: the store writes its clean-shutdown record with
@@ -129,6 +145,9 @@ pub mod settings;
 pub mod times;
 
 use crate::daemon::dashboard::api_v1::{ApiState, Problem};
+use crate::daemon::relay::settings::{
+    self as relay_settings, CarrierKind, CarrierMode, ConsentKind,
+};
 use crate::daemon::services::probe::Provider;
 use crate::daemon::services::FabricFacts;
 use crate::daemon::DaemonLayout;
@@ -196,6 +215,9 @@ pub struct FabricConfig {
     pub fabric_dir: PathBuf,
     /// `<root>/identity` (the L2 `counters` file lives there).
     pub identity_dir: PathBuf,
+    /// `<root>/state`: `relay.json` (Layer 7 §6.3) is read there once at
+    /// start for the role bits 3–5 ([`RelayRoles`]).
+    pub state_dir: PathBuf,
     /// The `tcp-lan` listener address when the settings ask for one
     /// (production: `0.0.0.0:11183`).
     pub listen: SocketAddr,
@@ -219,6 +241,7 @@ impl FabricConfig {
         FabricConfig {
             fabric_dir: layout.root.join(FABRIC_DIR),
             identity_dir: layout.identity_dir(),
+            state_dir: layout.state_dir(),
             listen: SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), DEFAULT_PORT),
             tcp: TcpTuning::default(),
             hub_default: settings::is_hub_category(category),
@@ -251,6 +274,11 @@ pub struct FabricHandle {
     listener: tokio::sync::Mutex<Option<SocketAddr>>,
     /// Serializes announce re-mints on settings changes.
     remint: tokio::sync::Mutex<()>,
+    /// Layer 7 §7.2, §7.5: the relay switches behind role bits 3–5 and the
+    /// offer's gateway fact (read at start, then set by D10).
+    relay: Mutex<RelayRoles>,
+    /// LAN sharing this lifetime (`ApiState::lan_enabled`; role bit 5).
+    lan: bool,
     tasks: Mutex<Vec<JoinHandle<()>>>,
     /// Layer 7 §4.6: the daemon's pairing rows, shared with the stream wrap.
     pairs: settings::PairTable,
@@ -432,7 +460,82 @@ pub fn disk_space(path: &Path) -> Option<DiskSpace> {
     })
 }
 
-fn roles(s: &FabricSettings) -> u16 {
+/// The Layer 7 switches behind role bits 3–5 and the hub offer's gateway
+/// fact (§7.2, §7.5), taken from `state/relay.json`
+/// ([`RelayRoles::from_settings`]). Each is fail closed: a switch whose
+/// consent is not recorded counts as off.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct RelayRoles {
+    /// `discovery.public_gateway_bit` with its `gateway_bit` consent
+    /// recorded (§12).
+    pub gateway_bit: bool,
+    /// `discovery.offload_bit`.
+    pub offload_bit: bool,
+    /// `origin.serve` with its `origin_serve` consent recorded (§12).
+    pub origin_serve: bool,
+    /// The carrier while the gateway is on (`gateway.enabled`, a carrier
+    /// kind, its server and the `carrier_enable` consent recorded): the
+    /// carrier kind and the mode it runs in (5B reads as 5A on Termux,
+    /// §3.1). `None` otherwise.
+    pub carrier: Option<GatewayOffer>,
+}
+
+/// The hub offer's `gateway {carrier, mode}` (§7.5; contract `GatewayOffer`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GatewayOffer {
+    /// `carrier.kind` (never `none`).
+    pub carrier: CarrierKind,
+    /// The mode the carrier runs in.
+    pub mode: CarrierMode,
+}
+
+impl GatewayOffer {
+    /// The contract's JSON object.
+    pub fn json(&self) -> Value {
+        json!({ "carrier": self.carrier.as_str(), "mode": self.mode.as_str() })
+    }
+}
+
+impl RelayRoles {
+    /// The switches as `r` holds them (`termux`: this node runs on Termux,
+    /// where 5B runs as 5A).
+    pub fn from_settings(r: &relay_settings::RelaySettings, termux: bool) -> RelayRoles {
+        let consent = |k| r.consent_hash(k).is_some();
+        let carrier_ready = match r.carrier_kind() {
+            CarrierKind::None => false,
+            CarrierKind::Ntfy => r.ntfy_server().is_some(),
+        };
+        RelayRoles {
+            gateway_bit: r.public_gateway_bit() && consent(ConsentKind::GatewayBit),
+            offload_bit: r.offload_bit(),
+            origin_serve: r.origin_serve() && consent(ConsentKind::OriginServe),
+            carrier: (r.gateway_enabled() && carrier_ready && consent(ConsentKind::CarrierEnable))
+                .then(|| GatewayOffer {
+                    carrier: r.carrier_kind(),
+                    mode: r.carrier_mode_for(termux),
+                }),
+        }
+    }
+
+    /// The gateway fact while this node can act on it: the carrier is on
+    /// and the node holds the hub role (§3.1: a gateway is a hub; with the
+    /// role off no pairing or forwarding path runs, M4b).
+    fn gateway(&self, s: &FabricSettings) -> Option<GatewayOffer> {
+        self.carrier.filter(|_| s.hub_role)
+    }
+}
+
+/// The `appdata` role bits for the fabric settings `s`, the Layer 7
+/// switches `relay` and LAN sharing `lan` (`ApiState::lan_enabled`, fixed
+/// for the daemon's lifetime). Bits 0–1 as Layer 5 sets them (§7.3 A8);
+/// bits 3–5 (Layer 7 §7.2) only while what they promise holds:
+/// - 3 `ROLE_GATEWAY`: the public bit consented **and** the gateway on
+///   with the hub role (the offer's gateway fact, [`RelayRoles::carrier`]);
+/// - 4 `ROLE_OFFLOAD`: `discovery.offload_bit`;
+/// - 5 `ROLE_ORIGIN`: `origin.serve` consented, the hub role and LAN sharing
+///   (§9.1: the origin is served only while all three are on; otherwise it
+///   answers 404, and the bit would promise files nobody can fetch).
+fn roles(s: &FabricSettings, relay: &RelayRoles, lan: bool) -> u16 {
     let mut r = 0;
     if s.holds_custody() {
         r |= ROLE_MAILBOX;
@@ -440,7 +543,23 @@ fn roles(s: &FabricSettings) -> u16 {
     if s.hub_role {
         r |= ROLE_ALWAYS_ON_HUB;
     }
+    if relay.gateway_bit && relay.gateway(s).is_some() {
+        r |= sealer::ROLE_GATEWAY;
+    }
+    if relay.offload_bit {
+        r |= sealer::ROLE_OFFLOAD;
+    }
+    if relay.origin_serve && s.hub_role && lan {
+        r |= sealer::ROLE_ORIGIN;
+    }
     r
+}
+
+/// The relay switches at start (Layer 7 §6.3: absent ⇒ all off; an invalid
+/// file reads all off and is moved aside by `relay::settings::load`).
+fn load_relay_roles(state_dir: &Path) -> RelayRoles {
+    let loaded = relay_settings::load(state_dir);
+    RelayRoles::from_settings(&loaded.settings, crate::config::on_termux())
 }
 
 fn ensure_dir(dir: &Path) -> std::io::Result<()> {
@@ -458,6 +577,7 @@ async fn boot(
     persisted: &mut settings::Persisted,
     recover: Option<&settings::Recover>,
     pairs: &settings::PairTable,
+    extra: (&RelayRoles, bool),
 ) -> Result<Live, String> {
     let identity = identity.ok_or("no identity is loaded")?;
     let (counters, how) = sealer::open_counters(&cfg.identity_dir)
@@ -469,7 +589,7 @@ async fn boot(
         );
     }
     let sealer = Arc::new(IdentitySealer::new(identity, counters));
-    match boot_with(cfg, &sealer, persisted, recover, pairs).await {
+    match boot_with(cfg, &sealer, persisted, recover, pairs, extra).await {
         Ok(l) => Ok(l),
         Err(e) => {
             // a no-op while restore-pending (no counter reset, L2 §8.4)
@@ -555,6 +675,7 @@ async fn boot_with(
     persisted: &mut settings::Persisted,
     recover: Option<&settings::Recover>,
     pairs: &settings::PairTable,
+    (relay, lan): (&RelayRoles, bool),
 ) -> Result<Live, String> {
     let node_id = sealer.node_id();
     let secret = Zeroizing::new(
@@ -593,7 +714,7 @@ async fn boot_with(
     }
 
     let app = sealer::appdata(
-        roles(&persisted.fabric),
+        roles(&persisted.fabric, relay, lan),
         persisted.fabric.home_hub.as_ref().map(|h| &h.node_id),
     );
     // Restore-pending ⇒ `Missing`, even with a valid stored announce.
@@ -662,6 +783,8 @@ pub async fn start(
     let mut persisted = settings::Persisted::default();
     let pairs: settings::PairTable = Arc::default();
     let no_identity = identity.is_none();
+    let lan = api.lan_enabled;
+    let mut relay = RelayRoles::default();
     let live = match ensure_dir(&cfg.fabric_dir) {
         Err(e) => {
             down = Some(format!("{}: {e}", cfg.fabric_dir.display()));
@@ -673,12 +796,16 @@ pub async fn start(
             if let Ok(mut t) = pairs.write() {
                 t.clone_from(&persisted.pairs);
             }
+            // Layer 7 §7.2: read before the first announce is ensured, so
+            // a restart with the same switches re-mints nothing.
+            relay = load_relay_roles(&cfg.state_dir);
             match boot(
                 &cfg,
                 identity,
                 &mut persisted,
                 loaded.recover.as_ref(),
                 &pairs,
+                (&relay, lan),
             )
             .await
             {
@@ -717,6 +844,8 @@ pub async fn start(
         contacts: Mutex::new(HashMap::new()),
         listener: tokio::sync::Mutex::new(None),
         remint: tokio::sync::Mutex::new(()),
+        relay: Mutex::new(relay),
+        lan,
         tasks: Mutex::new(Vec::new()),
         pairs,
         pair_dials: tokio::sync::Mutex::new(HashMap::new()),
@@ -1123,7 +1252,7 @@ impl FabricHandle {
         }
         drop(one);
         self.reconcile_listener(&s).await;
-        self.refresh_announce(&s).await;
+        self.refresh_announce().await;
         self.reconcile_pair_dials().await;
         s
     }
@@ -1579,16 +1708,20 @@ impl FabricHandle {
         drop(one);
     }
 
-    /// Re-mint the own announce for `s` (§7.3 A8: roles, home-hub hint —
-    /// `ensure_announce` keeps the stored one when its `appdata` already
-    /// matches; a new one is counter-committed first, §6.2) and give it to
-    /// `tcp-lan` for new connections. Nothing without a link (no announce
-    /// is presented while restore-pending).
-    async fn refresh_announce(&self, s: &FabricSettings) {
+    /// Re-mint the own announce for the current settings (§7.3 A8: roles,
+    /// home-hub hint; Layer 7 §7.2: role bits 3–5 — `ensure_announce` keeps
+    /// the stored one when its `appdata` already matches; a new one is
+    /// counter-committed first, §6.2) and give it to `tcp-lan` for new
+    /// connections. The `appdata` is computed under the re-mint lock from
+    /// the persisted fabric settings and the relay switches as they are
+    /// then, so two changes racing settle on the latest and an unchanged
+    /// state never re-mints. Nothing without a link (no announce is
+    /// presented while restore-pending).
+    async fn refresh_announce(&self) {
         let Some(l) = &self.live else { return };
         let Some(tcp) = &l.tcp else { return };
         let _one = self.remint.lock().await;
-        let app = sealer::appdata(roles(s), s.home_hub.as_ref().map(|h| &h.node_id));
+        let app = self.current_appdata();
         let (handle, dir) = (Arc::clone(&l.sealer), self.cfg.fabric_dir.clone());
         match tokio::task::spawn_blocking(move || handle.ensure_announce(&dir, &app)).await {
             Ok(AnnounceOutcome::Missing) => {}
@@ -1600,6 +1733,57 @@ impl FabricHandle {
             }
             Err(e) => eprintln!("111 fabric: announce re-mint: {e}"),
         }
+    }
+
+    /// The `appdata` the current state calls for (the persisted fabric
+    /// settings, the relay switches, LAN sharing).
+    fn current_appdata(&self) -> Vec<u8> {
+        let s = self.persisted().fabric;
+        let relay = self.relay_roles();
+        sealer::appdata(
+            roles(&s, &relay, self.lan),
+            s.home_hub.as_ref().map(|h| &h.node_id),
+        )
+    }
+
+    /// The relay switches behind role bits 3–5 as last set (Layer 7 §7.2).
+    pub fn relay_roles(&self) -> RelayRoles {
+        self.relay.lock().map(|r| *r).unwrap_or_default()
+    }
+
+    /// Hand the relay settings just written to `state/relay.json` to the
+    /// fabric (Layer 7 §7.2, §7.5; the relay settings route, D10, calls it
+    /// after every successful write): the role bits 3–5 and the offer's
+    /// gateway fact follow them. The own announce is re-minted once when the
+    /// role bits changed (one counter value, fsynced before the announce
+    /// exists) and not at all when they did not. Returns whether the bits
+    /// this node announces changed.
+    pub async fn set_relay_settings(&self, r: &relay_settings::RelaySettings) -> bool {
+        self.set_relay_roles(RelayRoles::from_settings(r, crate::config::on_termux()))
+            .await
+    }
+
+    /// [`FabricHandle::set_relay_settings`] with the switches already read.
+    pub async fn set_relay_roles(&self, new: RelayRoles) -> bool {
+        let before = {
+            let Ok(mut r) = self.relay.lock() else {
+                return false;
+            };
+            std::mem::replace(&mut *r, new)
+        };
+        let s = self.persisted().fabric;
+        let changed = roles(&s, &before, self.lan) != roles(&s, &new, self.lan);
+        if changed {
+            self.refresh_announce().await;
+        }
+        changed
+    }
+
+    /// The hub offer's `gateway {carrier, mode}` (Layer 7 §7.5): `Some`
+    /// while the carrier is on and this node holds the hub role, else
+    /// `None` (the offer then carries no `gateway` key).
+    pub fn gateway_offer(&self) -> Option<GatewayOffer> {
+        self.relay_roles().gateway(&self.persisted().fabric)
     }
 
     /// Persist and apply the fabric's current settings now — the enroll
@@ -2015,12 +2199,92 @@ mod tests {
 
     #[test]
     fn roles_follow_settings() {
+        use sealer::{ROLE_GATEWAY, ROLE_OFFLOAD, ROLE_ORIGIN};
+        let off = RelayRoles::default();
         let mut s = FabricSettings::default();
-        assert_eq!(roles(&s), 0);
+        assert_eq!(roles(&s, &off, true), 0);
         s.custody_opt_in = true;
-        assert_eq!(roles(&s), ROLE_MAILBOX);
+        assert_eq!(roles(&s, &off, true), ROLE_MAILBOX);
         s.hub_role = true;
-        assert_eq!(roles(&s), ROLE_MAILBOX | ROLE_ALWAYS_ON_HUB);
+        assert_eq!(roles(&s, &off, true), ROLE_MAILBOX | ROLE_ALWAYS_ON_HUB);
+
+        // Layer 7 §7.2: bits 3–5, each only while what it promises holds
+        let hub = ROLE_MAILBOX | ROLE_ALWAYS_ON_HUB;
+        let carrier = Some(GatewayOffer {
+            carrier: CarrierKind::Ntfy,
+            mode: CarrierMode::FiveA,
+        });
+        let all = RelayRoles {
+            gateway_bit: true,
+            offload_bit: true,
+            origin_serve: true,
+            carrier,
+        };
+        assert_eq!(
+            roles(&s, &all, true),
+            hub | ROLE_GATEWAY | ROLE_OFFLOAD | ROLE_ORIGIN
+        );
+        // the public bit without the gateway on promises nothing
+        let no_carrier = RelayRoles {
+            carrier: None,
+            ..all
+        };
+        assert_eq!(
+            roles(&s, &no_carrier, true),
+            hub | ROLE_OFFLOAD | ROLE_ORIGIN
+        );
+        // the gateway on without the public bit: no bit (members learn it
+        // from the offer only, §7.5)
+        let quiet = RelayRoles {
+            gateway_bit: false,
+            ..all
+        };
+        assert_eq!(roles(&s, &quiet, true), hub | ROLE_OFFLOAD | ROLE_ORIGIN);
+        // the origin is served only with LAN sharing (§9.1)
+        assert_eq!(roles(&s, &all, false), hub | ROLE_GATEWAY | ROLE_OFFLOAD);
+        // without the hub role: no gateway, no origin; offload stays
+        s.hub_role = false;
+        assert_eq!(roles(&s, &all, true), ROLE_MAILBOX | ROLE_OFFLOAD);
+        s.custody_opt_in = false;
+        assert_eq!(roles(&s, &all, true), ROLE_OFFLOAD);
+        assert_eq!(roles(&s, &off, true), 0);
+    }
+
+    #[test]
+    fn relay_roles_read_the_switches_fail_closed() {
+        use relay_settings::RelaySettings;
+        const HASH: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+        let mut r = RelaySettings::default();
+        assert_eq!(RelayRoles::from_settings(&r, false), RelayRoles::default());
+        // a switch without its consent counts as off
+        r.set_public_gateway_bit(true);
+        r.set_origin_serve(true);
+        r.set_offload_bit(true);
+        let x = RelayRoles::from_settings(&r, false);
+        assert!(!x.gateway_bit && !x.origin_serve && x.offload_bit);
+        r.set_consent_hash(ConsentKind::GatewayBit, Some(HASH))
+            .unwrap();
+        r.set_consent_hash(ConsentKind::OriginServe, Some(HASH))
+            .unwrap();
+        let x = RelayRoles::from_settings(&r, false);
+        assert!(x.gateway_bit && x.origin_serve && x.carrier.is_none());
+        // the carrier: on, a kind, its server and its consent
+        r.set_gateway_enabled(true);
+        r.set_carrier_kind(CarrierKind::Ntfy);
+        assert!(RelayRoles::from_settings(&r, false).carrier.is_none());
+        r.set_ntfy_server(Some("https://ntfy.example.org")).unwrap();
+        assert!(RelayRoles::from_settings(&r, false).carrier.is_none());
+        r.set_consent_hash(ConsentKind::CarrierEnable, Some(HASH))
+            .unwrap();
+        r.set_carrier_mode(CarrierMode::FiveB, false).unwrap();
+        let g = RelayRoles::from_settings(&r, false).carrier.unwrap();
+        assert_eq!((g.carrier, g.mode), (CarrierKind::Ntfy, CarrierMode::FiveB));
+        assert_eq!(g.json(), json!({"carrier": "ntfy", "mode": "5B"}));
+        // 5B runs as 5A on Termux (§3.1)
+        let g = RelayRoles::from_settings(&r, true).carrier.unwrap();
+        assert_eq!(g.mode, CarrierMode::FiveA);
+        r.set_gateway_enabled(false);
+        assert!(RelayRoles::from_settings(&r, false).carrier.is_none());
     }
 
     #[test]
@@ -2052,6 +2316,10 @@ mod tests {
     }
 
     fn test_api(dir: &Path) -> Arc<ApiState> {
+        test_api_lan(dir, false)
+    }
+
+    fn test_api_lan(dir: &Path, lan: bool) -> Arc<ApiState> {
         use crate::daemon::dashboard::api_v1::ApiConfig;
         use crate::daemon::dashboard::DashboardState;
         std::fs::create_dir_all(dir.join("state")).unwrap();
@@ -2059,7 +2327,7 @@ mod tests {
             root: dir.to_path_buf(),
             etc: dir.join("etc"),
         };
-        let mut cfg = ApiConfig::new(layout, false);
+        let mut cfg = ApiConfig::new(layout, lan);
         cfg.persist_auth = false;
         ApiState::new(Arc::new(RwLock::new(DashboardState::new("t"))), cfg)
     }
@@ -2068,6 +2336,7 @@ mod tests {
         FabricConfig {
             fabric_dir: dir.join(FABRIC_DIR),
             identity_dir: dir.join("identity"),
+            state_dir: dir.join("state"),
             listen: SocketAddr::from((Ipv4Addr::LOCALHOST, 0)),
             tcp: TcpTuning::default(),
             hub_default: false,
@@ -2306,6 +2575,139 @@ mod tests {
         h.shutdown().await;
     }
 
+    /// The own announce's role bits and counter (§7.2).
+    fn announced(h: &FabricHandle) -> (u16, u64, Vec<u8>) {
+        let b = h.own_announce();
+        let a = id111::announce::Announce::parse(&b).unwrap();
+        let roles = mesh111::contacts::AppData::parse(a.appdata()).roles;
+        (roles, a.counter(), b)
+    }
+
+    /// Layer 7 §7.2 (row D9): role bits 3–5 follow `state/relay.json`; a
+    /// change re-mints the announce once (exactly one announce counter
+    /// value), the same switches never re-mint (a repeated set, an
+    /// unrelated settings change, a restart), and the offer's gateway fact
+    /// follows the carrier and the hub role (§7.5).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_role_bit_change_re_mints_the_announce_once() {
+        use relay_settings::RelaySettings;
+        use sealer::{ROLE_GATEWAY, ROLE_OFFLOAD, ROLE_ORIGIN};
+        const HASH: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+        let dir = tempfile::tempdir().unwrap();
+        let api = test_api_lan(dir.path(), true);
+        let state = dir.path().join("state");
+        // the switches written while the daemon is down: offload and origin
+        let (mut r, wrote) = relay_settings::update(&state, |r: &mut RelaySettings| {
+            r.set_offload_bit(true);
+            r.set_origin_serve(true);
+            r.set_consent_hash(ConsentKind::OriginServe, Some(HASH))
+        })
+        .unwrap();
+        assert!(wrote);
+        let identity = crate::identity::generate(&dir.path().join("identity")).unwrap();
+        let h = start(lo_cfg(dir.path(), true), Some(identity), &api).await;
+        assert!(h.running(), "{:?}", h.down_reason());
+        let hub = ROLE_MAILBOX | ROLE_ALWAYS_ON_HUB;
+        let (roles0, n0, bytes0) = announced(&h);
+        assert_eq!(roles0, hub | ROLE_OFFLOAD | ROLE_ORIGIN);
+        assert_eq!(h.gateway_offer(), None);
+        let last = |h: &FabricHandle| h.sealer().unwrap().announce_last();
+        // the announce counter at start (the epoch mint may take later
+        // values of the same counter, so `l0` ≥ `n0`)
+        let l0 = last(&h);
+        assert!(n0 <= l0);
+
+        // the same switches again: nothing re-minted
+        assert!(!h.set_relay_settings(&r).await);
+        assert_eq!(last(&h), l0);
+        assert_eq!(announced(&h).2, bytes0);
+        // a switch whose bit is gated off changes no bit: the gateway bit
+        // consented while the gateway is off
+        r.set_public_gateway_bit(true);
+        r.set_consent_hash(ConsentKind::GatewayBit, Some(HASH))
+            .unwrap();
+        assert!(!h.set_relay_settings(&r).await);
+        assert_eq!(last(&h), l0);
+        // an unrelated fabric settings change: nothing re-minted
+        h.patch_settings(mesh111::fabric::SettingsPatch {
+            listen_lan: Some(true),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+        assert_eq!(last(&h), l0);
+        assert_eq!(announced(&h).2, bytes0);
+
+        // the gateway on with its carrier: bit 3 and the offer fact, one
+        // re-mint
+        r.set_gateway_enabled(true);
+        r.set_carrier_kind(CarrierKind::Ntfy);
+        r.set_ntfy_server(Some("https://ntfy.example.org")).unwrap();
+        r.set_consent_hash(ConsentKind::CarrierEnable, Some(HASH))
+            .unwrap();
+        assert!(h.set_relay_settings(&r).await);
+        let (roles1, n1, bytes1) = announced(&h);
+        assert_eq!(roles1, hub | ROLE_GATEWAY | ROLE_OFFLOAD | ROLE_ORIGIN);
+        assert_eq!(last(&h), l0 + 1);
+        assert_eq!(n1, l0 + 1);
+        assert_eq!(
+            h.gateway_offer(),
+            Some(GatewayOffer {
+                carrier: CarrierKind::Ntfy,
+                mode: CarrierMode::FiveA
+            })
+        );
+        // the mode alone changes no bit: no re-mint, the offer follows
+        r.set_carrier_mode(CarrierMode::FiveB, false).unwrap();
+        let termux = crate::config::on_termux();
+        assert!(!h.set_relay_settings(&r).await);
+        assert_eq!(last(&h), l0 + 1);
+        let want = if termux {
+            CarrierMode::FiveA
+        } else {
+            CarrierMode::FiveB
+        };
+        assert_eq!(h.gateway_offer().map(|g| g.mode), Some(want));
+
+        // offload off: one more re-mint, one counter value
+        r.set_offload_bit(false);
+        assert!(h.set_relay_settings(&r).await);
+        assert_eq!(last(&h), l0 + 2);
+        assert_eq!(announced(&h).0, hub | ROLE_GATEWAY | ROLE_ORIGIN);
+
+        // the hub role off takes bits 1, 3, 5 and the offer fact with it
+        // (bit 0 stays only with custody opt-in): one re-mint
+        h.patch_settings(mesh111::fabric::SettingsPatch {
+            hub_role: Some(false),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+        assert_eq!(announced(&h).0, 0);
+        assert_eq!(last(&h), l0 + 3);
+        assert_eq!(h.gateway_offer(), None);
+        h.patch_settings(mesh111::fabric::SettingsPatch {
+            hub_role: Some(true),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+        let (roles2, n2, bytes2) = announced(&h);
+        assert_eq!(roles2, hub | ROLE_GATEWAY | ROLE_ORIGIN);
+        assert_eq!(n2, l0 + 4);
+        assert_ne!(bytes2, bytes1);
+        relay_settings::save(&state, &r).unwrap();
+        h.shutdown().await;
+        drop(h);
+
+        // a restart with the same switches keeps the stored announce
+        let identity = crate::identity::load(&dir.path().join("identity")).unwrap();
+        let h = start(lo_cfg(dir.path(), true), Some(identity), &api).await;
+        assert!(h.running(), "{:?}", h.down_reason());
+        assert_eq!(announced(&h).2, bytes2);
+        h.shutdown().await;
+    }
+
     /// Layer 7 §4.6 step 5: two paired hubs that hold each other's address
     /// keep one connection, dialled by the lower NodeId; an unpairing
     /// releases it and takes the row out of `fabric/settings`.
@@ -2356,6 +2758,9 @@ mod tests {
             let link = settings::PairLink {
                 address: Some(addrs[1 - i]),
                 link_spki: None,
+                // loopback is not a private range (§4.1): marked LAN so the
+                // pair runs plain once D5's wrap reads the table
+                lan: true,
                 far_holds_address: true,
                 ..settings::PairLink::new(node[1 - i])
             };
