@@ -7,9 +7,11 @@
 //! status (`GET :11182/v1/agent/status`, for `/status.intelligence`), PATH
 //! lookups (`opencode`, `python3`) and one board-detection pass (R4's
 //! `devices::detect::scan` + `devices::rns::bindings`, matched against the
-//! LoRa table here); a separate WAN
-//! task every 60 s (HTTP 204 probe, 3 s timeout per URL, same URLs as the
-//! installer's connectivity check).
+//! LoRa table here). There is no WAN probe (Layer 7 §3.5, D30 Q14): the
+//! `gateway` row reads the relay module's facts on the same tick
+//! ([`crate::daemon::relay::gateway`]), which contact nothing unless the
+//! owner turned a gateway on; [`wan_probe_urls`] stays for the installer's
+//! `NODE111_PROBE_204` knob.
 //!
 //! meshtasticd serves one API client at a time: a TCP connect every tick would
 //! evict the user's real client (the phone app, the web client). Its port is
@@ -24,8 +26,8 @@
 //! the tick task and must return a cached snapshot without blocking.
 
 use super::{
-    rfc3339_now, AgentStatusProbe, ChildFacts, FabricFacts, Facts, GatewayFacts, MeshmudFacts,
-    PanelInfo, Probe, Radio, RadioFacts, Registry, RnodeBound, MESHTASTIC_PORT,
+    rfc3339_now, AgentStatusProbe, ChildFacts, FabricFacts, Facts, MeshmudFacts, PanelInfo, Probe,
+    Radio, RadioFacts, Registry, RnodeBound, MESHTASTIC_PORT,
 };
 use crate::daemon::dashboard::ApiState;
 use crate::daemon::devices::detect::{self, Roots, Scan, UsbInfo};
@@ -37,14 +39,12 @@ use crate::daemon::DaemonLayout;
 use crate::install::probe::{lora_table, RadioRule};
 use std::net::Ipv4Addr;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 pub const TICK: Duration = Duration::from_secs(2);
 pub const HEALTH_TIMEOUT: Duration = Duration::from_secs(2);
 pub const PORT_TIMEOUT: Duration = Duration::from_secs(1);
-pub const WAN_INTERVAL: Duration = Duration::from_secs(60);
-pub const WAN_TIMEOUT: Duration = Duration::from_secs(3);
 /// Ticks between the slower probes (agent status, PATH, sysfs): 10 s.
 const SLOW_EVERY: u64 = 5;
 
@@ -239,7 +239,8 @@ pub async fn tcp_open(port: u16, timeout: Duration) -> bool {
 // ---------------------------------------------------------------- WAN
 
 /// The installer's HTTP-204 probe URLs (`NODE111_PROBE_204` overrides,
-/// comma-separated — same knob as `111 install`).
+/// comma-separated — same knob as `111 install`). The daemon no longer probes
+/// them (Layer 7 §3.5 item 1); kept for that knob.
 pub fn wan_probe_urls() -> Vec<String> {
     match std::env::var("NODE111_PROBE_204") {
         Ok(v) if !v.trim().is_empty() => v
@@ -252,41 +253,6 @@ pub fn wan_probe_urls() -> Vec<String> {
             crate::install::preflight::PROBE_204_FALLBACK.to_string(),
         ],
     }
-}
-
-/// Blocking WAN probe: online iff some URL answers exactly `204` (a captive
-/// portal's 200 page does not count).
-pub fn wan_probe(urls: &[String], timeout: Duration) -> GatewayFacts {
-    let tls = ureq::tls::TlsConfig::builder()
-        .root_certs(ureq::tls::RootCerts::WebPki)
-        .build();
-    let config = ureq::Agent::config_builder()
-        .tls_config(tls)
-        .timeout_global(Some(timeout))
-        .http_status_as_error(false)
-        .build();
-    let agent = ureq::Agent::new_with_config(config);
-    let mut last = GatewayFacts {
-        online: Some(false),
-        checked_at: Some(rfc3339_now()),
-        ..GatewayFacts::default()
-    };
-    for url in urls {
-        last.url = Some(url.clone());
-        match agent.head(url).call() {
-            Ok(resp) if resp.status().as_u16() == 204 => {
-                last.online = Some(true);
-                last.error = None;
-                return last;
-            }
-            Ok(resp) => last.error = Some(format!("answered {}", resp.status().as_u16())),
-            Err(e) => last.error = Some(e.to_string()),
-        }
-    }
-    if urls.is_empty() {
-        last.error = Some("no probe URLs configured".into());
-    }
-    last
 }
 
 // ---------------------------------------------------------------- files / PATH / sysfs
@@ -537,26 +503,10 @@ impl SpawnTracker {
 // ---------------------------------------------------------------- the task
 
 /// Start the registry: inserts `Arc<Registry>` into `api` ext, spawns the 2 s
-/// tick and the 60 s WAN probe, publishes `services` frames on change.
+/// tick, publishes `services` frames on change. No WAN probe (Layer 7 §3.5).
 pub fn spawn(api: Arc<ApiState>, src: Sources) -> Arc<Registry> {
     let registry = Arc::new(Registry::new());
     api.insert_ext(Arc::clone(&registry));
-    let gateway = Arc::new(Mutex::new(GatewayFacts::default()));
-
-    {
-        let gateway = Arc::clone(&gateway);
-        tokio::spawn(async move {
-            let urls = wan_probe_urls();
-            loop {
-                let urls = urls.clone();
-                let g = tokio::task::spawn_blocking(move || wan_probe(&urls, WAN_TIMEOUT))
-                    .await
-                    .unwrap_or_default();
-                *gateway.lock().unwrap() = g;
-                tokio::time::sleep(WAN_INTERVAL).await;
-            }
-        });
-    }
 
     {
         let registry = Arc::clone(&registry);
@@ -614,6 +564,11 @@ pub fn spawn(api: Arc<ApiState>, src: Sources) -> Arc<Registry> {
                 let meshmud = provided(&src.meshmud);
                 let meshmud_bound = provided(&src.meshmud_bound).unwrap_or_default();
                 let panels = provided(&src.panels).unwrap_or_default();
+                // Layer 7 §3.5: the gateway badge's facts (a no-op while no
+                // switch is on; stale pair facts re-read here, no timer of
+                // their own)
+                crate::daemon::relay::gateway::refresh().await;
+                let gateway = crate::daemon::relay::gateway::facts();
                 let (meshtastic_seen, down_for) = stack.observe(
                     StackObs {
                         rnode_configured: !slow.rnode.is_empty(),
@@ -666,7 +621,7 @@ pub fn spawn(api: Arc<ApiState>, src: Sources) -> Arc<Registry> {
                         },
                         kb: d.kb.clone(),
                         kb_payload_present: files.kb_payload_present,
-                        gateway: gateway.lock().unwrap().clone(),
+                        gateway,
                         opencode: slow.opencode.clone(),
                         fabric,
                         meshmud,

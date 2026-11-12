@@ -265,6 +265,11 @@ pub struct Meshtastic {
     client_nearby: AtomicBool,
     /// The client's node-DB version last published as SSE `nearby`.
     client_nearby_published: AtomicU64,
+    /// Wakes the parked monitor (Layer 7 §3.6): fired whenever this module's
+    /// children change ([`Meshtastic::install_supervised`]: identify's bind,
+    /// a reconcile, a drop) and on shutdown. One consumer (the monitor), so
+    /// `notify_one`: a wake while it runs leaves one permit, never a queue.
+    monitor_wake: Arc<tokio::sync::Notify>,
 }
 
 fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
@@ -359,6 +364,20 @@ pub fn on_revocation(
     }
 }
 
+/// The panel revocations' 2 s tick has work (Layer 7 §3.6): the `meshtastic`
+/// service is set up (its panel can be enabled, so a session can be minted)
+/// or a `meshtastic` panel session is open (`sessions`).
+pub fn panel_ticks_wanted(
+    services: &[crate::daemon::services::ServiceRecord],
+    sessions: &[crate::daemon::panels::ticket::PanelSessionRec],
+) -> bool {
+    services.iter().any(|r| {
+        r.id == ServiceId::Meshtastic && r.state != crate::daemon::services::ServiceState::Unset
+    }) || sessions
+        .iter()
+        .any(|s| s.panel == ServiceId::Meshtastic.as_str())
+}
+
 impl Meshtastic {
     pub fn new(cfg: MeshtasticConfig, ports: Arc<PortTable>) -> Arc<Self> {
         let presence = Arc::new(Presence::new(cfg.presence_dir.join(presence::FILE)));
@@ -377,6 +396,7 @@ impl Meshtastic {
             client: Mutex::new(None),
             client_nearby: AtomicBool::new(true),
             client_nearby_published: AtomicU64::new(0),
+            monitor_wake: Arc::new(tokio::sync::Notify::new()),
         })
     }
 
@@ -485,6 +505,12 @@ impl Meshtastic {
     /// off), and every tick the shim's drop count is reported for
     /// `panel.state.dropped`. Falling behind the revocation stream closes
     /// every session (fail closed: a viewer reconnects on its next call).
+    ///
+    /// The tick runs only while [`panel_ticks_wanted`] (Layer 7 §3.6): the
+    /// `meshtastic` service is set up or a `meshtastic` panel session is
+    /// open; otherwise it parks on the services registry's state change
+    /// (a session can only be minted for an enabled panel, which needs the
+    /// service set up). The revocation stream is followed throughout.
     pub fn attach_panels(self: &Arc<Self>, host: &Arc<PanelHost>) -> tokio::task::JoinHandle<()> {
         let shim = self.shim();
         let mut rx = host.revocations();
@@ -495,6 +521,44 @@ impl Meshtastic {
             let mut t = tokio::time::interval(every);
             t.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
             loop {
+                let (registry, sessions) = {
+                    let (Some(h), Some(m)) = (host.upgrade(), me.upgrade()) else {
+                        break;
+                    };
+                    if m.stopping.load(Ordering::SeqCst) {
+                        break;
+                    }
+                    let registry = m
+                        .ctx()
+                        .and_then(|(api, _)| api.ext::<Arc<crate::daemon::services::Registry>>());
+                    (registry, h.sessions.snapshot())
+                };
+                let parked = match &registry {
+                    Some(reg) => {
+                        let changed = reg.state_changed();
+                        tokio::pin!(changed);
+                        // enabled before the snapshot is read: no change is missed
+                        changed.as_mut().enable();
+                        if panel_ticks_wanted(&reg.snapshot(), &sessions) {
+                            false
+                        } else {
+                            tokio::select! {
+                                r = rx.recv() => {
+                                    if !on_revocation(&shim, r) {
+                                        break;
+                                    }
+                                }
+                                _ = changed => {}
+                            }
+                            true
+                        }
+                    }
+                    // before `start` (no registry reachable yet): the tick as before
+                    None => false,
+                };
+                if parked {
+                    continue;
+                }
                 tokio::select! {
                     r = rx.recv() => {
                         if !on_revocation(&shim, r) {
@@ -646,12 +710,24 @@ impl Meshtastic {
         self.tick_once().await;
         let me = Arc::downgrade(self);
         let every = self.cfg.tick;
+        let wake = Arc::clone(&self.monitor_wake);
         tokio::spawn(async move {
             let mut t = tokio::time::interval(every);
             t.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
             t.tick().await;
             loop {
-                t.tick().await;
+                // Layer 7 §3.6: no binding, no wakeup; the next one comes
+                // from a change of this module's children or shutdown
+                let parked = match me.upgrade() {
+                    Some(m) => !m.monitor_wanted(),
+                    None => break,
+                };
+                if parked {
+                    wake.notified().await;
+                    t.reset();
+                } else {
+                    t.tick().await;
+                }
                 let Some(m) = me.upgrade() else { break };
                 if m.stopping.load(Ordering::SeqCst) {
                     break;
@@ -659,6 +735,24 @@ impl Meshtastic {
                 m.tick_once().await;
             }
         });
+    }
+
+    /// The 2 s monitor has work (Layer 7 §3.6, D30 Q1): a Meshtastic binding
+    /// is in `interfaces.toml`, this module runs a service (identify's child
+    /// before its binding is written, or one being dropped), or a board is
+    /// identified as Meshtastic but not bound (its row's facts: label,
+    /// firmware). With none of these the monitor parks on
+    /// [`Meshtastic::monitor_wake`]; a binding appears at runtime only through
+    /// identify, which installs its child (and so wakes it) before it writes
+    /// the binding.
+    fn monitor_wanted(&self) -> bool {
+        if lock(&self.service).is_some() {
+            return true;
+        }
+        let Some((_, reg)) = self.ctx() else {
+            return false;
+        };
+        reg.meshtastic_binding().is_some() || reg.identified_unbound_meshtastic().is_some()
     }
 
     /// One monitor pass: reconcile (skipped while an identify runs), then
@@ -674,8 +768,11 @@ impl Meshtastic {
         self.reconcile_client().await;
     }
 
-    /// Re-insert `Arc<Supervised>` = base + meshmud, then the reader.
+    /// Re-insert `Arc<Supervised>` = base + meshmud, then the reader. Every
+    /// change of this module's children passes here, so it also wakes the
+    /// monitor (Layer 7 §3.6).
     fn install_supervised(&self) {
+        self.monitor_wake.notify_one();
         let Some((api, _)) = self.ctx() else { return };
         let base = match lock(&self.ctx).as_ref() {
             Some(c) => c.base.clone(),
@@ -1051,6 +1148,8 @@ impl Meshtastic {
     /// the reader's `--once` timeout.
     pub async fn stop_and_wait(&self, grace: Duration) {
         self.stopping.store(true, Ordering::SeqCst);
+        // a parked monitor sees `stopping` and ends
+        self.monitor_wake.notify_one();
         self.stop_client().await;
         let _t = self.transition.lock().await;
         let svc = lock(&self.service).take();
@@ -1173,6 +1272,86 @@ mod tests {
             uplink_present(&wifi, dir.path(), Path::new("/")),
             Some(true)
         );
+    }
+
+    /// Layer 7 §3.6: the revocations' tick runs only while the service is
+    /// set up or a `meshtastic` panel session is open.
+    #[test]
+    fn panel_ticks_park_while_no_session_or_service_needs_them() {
+        use crate::daemon::panels::ticket::{Binding, PanelSessionRec};
+        use crate::daemon::services::{compute, Facts, Registry, ServiceState};
+        let reg = Registry::new();
+        reg.tick(compute(&Facts::default()), "t0");
+        let mut rows = reg.snapshot();
+        assert!(
+            !panel_ticks_wanted(&rows, &[]),
+            "nothing set up, no session"
+        );
+        let session = |panel: &str| PanelSessionRec {
+            id: "0".repeat(32),
+            hash: "0".repeat(64),
+            panel: panel.into(),
+            peer: "loopback".into(),
+            binding: Binding::Session {
+                hash: "0".repeat(64),
+            },
+            lan: false,
+            seq: 1,
+            created: String::new(),
+        };
+        assert!(!panel_ticks_wanted(&rows, &[session("fabric")]));
+        assert!(panel_ticks_wanted(&rows, &[session("meshtastic")]));
+        for r in rows.iter_mut().filter(|r| r.id == ServiceId::Agent) {
+            r.state = ServiceState::Live;
+        }
+        assert!(!panel_ticks_wanted(&rows, &[]), "another service set up");
+        for r in rows.iter_mut().filter(|r| r.id == ServiceId::Meshtastic) {
+            r.state = ServiceState::Starting;
+        }
+        assert!(panel_ticks_wanted(&rows, &[]));
+    }
+
+    /// Layer 7 §3.6: with no binding and no service the monitor has no work,
+    /// and a change of the module's children (or shutdown) wakes it.
+    #[tokio::test]
+    async fn the_monitor_parks_without_a_binding_and_wakes_on_a_child_change() {
+        let dir = tempfile::tempdir().unwrap();
+        let layout = DaemonLayout {
+            root: dir.path().to_path_buf(),
+            etc: dir.path().join("etc"),
+        };
+        let m = Meshtastic::new(
+            MeshtasticConfig::production(&layout, false),
+            Arc::new(PortTable::new()),
+        );
+        assert!(!m.monitor_wanted(), "no binding, no service: park");
+        let wake = Arc::clone(&m.monitor_wake);
+        let parked = tokio::spawn(async move { wake.notified().await });
+        tokio::task::yield_now().await;
+        assert!(!parked.is_finished());
+        m.install_supervised();
+        tokio::time::timeout(Duration::from_secs(1), parked)
+            .await
+            .expect("a child change wakes the parked monitor")
+            .unwrap();
+        *lock(&m.service) = Some(Service {
+            device_id: "dev-1".into(),
+            uplink: Uplink::serial("/dev/serial/by-id/usb-l7-test").unwrap(),
+            meshmud: None,
+            reader: None,
+            port_held_by: None,
+            awaiting_binary: false,
+            identify_born: true,
+        });
+        assert!(
+            m.monitor_wanted(),
+            "a service (identify's child) keeps it ticking"
+        );
+        *lock(&m.service) = None;
+        m.stop_and_wait(Duration::from_millis(10)).await;
+        tokio::time::timeout(Duration::from_secs(1), m.monitor_wake.notified())
+            .await
+            .expect("shutdown leaves a wake for the parked monitor");
     }
 
     /// W3: a Meshtastic change publishes the merged list — with one reticulum node in

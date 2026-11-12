@@ -58,7 +58,9 @@ pub const PANEL_PORTS: std::ops::RangeInclusive<u16> = 11190..=11229;
 /// `state/panels.json` (slot assignments; no secrets, 0644).
 pub const SLOTS_FILE: &str = "panels.json";
 
-/// The reconcile cadence (same 2 s tick as the services registry).
+/// The reconcile cadence (same 2 s tick as the services registry) while the
+/// reconcile has work ([`PanelHost::needs_reconcile`]); otherwise it parks on
+/// the services registry's state change (Layer 7 §3.6).
 pub const RECONCILE_EVERY: Duration = Duration::from_secs(2);
 
 /// A failed listener bind is retried after this.
@@ -482,6 +484,20 @@ impl PanelHost {
             .revoke(|r| !ticket::binding_alive(api, &r.binding))
     }
 
+    /// The reconcile has work (Layer 7 §3.6, D30 Q1): a declared panel's
+    /// service is set up (`setup`), a panel holds a listener (or a bind
+    /// retry), or a session or ticket is open (the sweep revokes those of a
+    /// gone dashboard session). Otherwise nothing it does can change until
+    /// the services registry publishes a change: a ticket is minted only
+    /// for an enabled panel, and a panel is enabled only while its service
+    /// is set up.
+    pub fn needs_reconcile(&self, setup: &(dyn Fn(ServiceId) -> bool + Sync)) -> bool {
+        self.panels.iter().any(|p| setup(p.id()))
+            || !self.lock().live.is_empty()
+            || !self.tickets.is_empty()
+            || !self.sessions.snapshot().is_empty()
+    }
+
     /// Bring listeners in line with `setup` (the services registry's view:
     /// `Some(f)` once it has published, `None` before — then nothing changes),
     /// sweep dead sessions, refresh health, and publish a `panels` frame when
@@ -646,21 +662,33 @@ pub fn provider(host: &Arc<PanelHost>) -> crate::daemon::services::probe::Provid
     Arc::new(move || Some(host.panels()))
 }
 
-/// The daemon task: every [`RECONCILE_EVERY`], read the services registry
-/// (`Arc<Registry>` in `api` ext) and reconcile. A panel's service counts as
-/// set up when its published state is not `unset`.
+/// The daemon task: read the services registry (`Arc<Registry>` in `api`
+/// ext) and reconcile, every [`RECONCILE_EVERY`] while the reconcile has work
+/// ([`PanelHost::needs_reconcile`]); otherwise park until the registry
+/// publishes a change (Layer 7 §3.6: no wakeup while no session or declared
+/// service needs it). A panel's service counts as set up when its published
+/// state is not `unset`. Without a registry in ext the 2 s tick runs as
+/// before.
 pub fn spawn(api: Arc<ApiState>, host: Arc<PanelHost>) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         let mut tick = tokio::time::interval(RECONCILE_EVERY);
+        // after a park the next tick is due at once: the change is acted on
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {
             tick.tick().await;
-            let snapshot = api
-                .ext::<Arc<crate::daemon::services::Registry>>()
-                .map(|r| r.snapshot())
-                .unwrap_or_default();
+            let Some(registry) = api.ext::<Arc<crate::daemon::services::Registry>>() else {
+                host.reconcile(&api, None).await;
+                continue;
+            };
+            // enabled before the snapshot is read: a change published between
+            // the read and the park still wakes it
+            let changed = registry.state_changed();
+            tokio::pin!(changed);
+            changed.as_mut().enable();
+            let snapshot = registry.snapshot();
             if snapshot.is_empty() {
                 host.reconcile(&api, None).await;
+                changed.await;
                 continue;
             }
             let setup = move |id: ServiceId| {
@@ -669,6 +697,9 @@ pub fn spawn(api: Arc<ApiState>, host: Arc<PanelHost>) -> tokio::task::JoinHandl
                     .any(|r| r.id == id && r.state != ServiceState::Unset)
             };
             host.reconcile(&api, Some(&setup)).await;
+            if !host.needs_reconcile(&setup) {
+                changed.await;
+            }
         }
     })
 }
@@ -735,5 +766,73 @@ mod tests {
         h.observe(PanelHealth::Down);
         h.observe(PanelHealth::Down);
         assert_eq!(h.published, PanelHealth::Down);
+    }
+
+    struct Named;
+    impl Shim for Named {
+        fn name(&self) -> &'static str {
+            "meshtastic-http"
+        }
+        fn handle<'a>(
+            &'a self,
+            _s: &'a ShimSession,
+            _r: ShimRequest,
+        ) -> futures_util::future::BoxFuture<'a, Result<ShimResponse, ShimError>> {
+            Box::pin(async { Err(ShimError::NotFound) })
+        }
+    }
+
+    /// The shipped declarations (the Meshtastic panel), nothing persisted.
+    fn host(dir: &std::path::Path) -> PanelHost {
+        let cfg = PanelsConfig {
+            state_dir: dir.join("state"),
+            bundle_root: dir.join("current"),
+            ports: 11190..=11191,
+            ticket_ttl: ticket::TICKET_TTL,
+            timeouts: listener::Timeouts::default(),
+            proc_net: dir.join("net"),
+            persist: false,
+            force_loopback: true,
+        };
+        let mut shims = ShimRegistry::new();
+        shims.register(Arc::new(Named)).unwrap();
+        PanelHost::new(cfg, manifest::embedded(), &shims, false)
+    }
+
+    #[test]
+    fn the_reconcile_parks_while_nothing_needs_it() {
+        let dir = std::env::temp_dir().join(format!("panels-park-{}", std::process::id()));
+        let h = host(&dir);
+        assert_eq!(h.registered().len(), 1, "the shipped panel is declared");
+        let none = |_: ServiceId| false;
+        assert!(
+            !h.needs_reconcile(&none),
+            "no service set up, no session: park"
+        );
+        let other = |id: ServiceId| id == ServiceId::Agent;
+        assert!(
+            !h.needs_reconcile(&other),
+            "an undeclared service set up: park"
+        );
+        let mesh = |id: ServiceId| id == ServiceId::Meshtastic;
+        assert!(
+            h.needs_reconcile(&mesh),
+            "a declared panel's service is set up"
+        );
+        // an open session keeps the sweep running
+        h.sessions
+            .create(
+                ServiceId::Meshtastic,
+                PeerClass::Loopback,
+                ticket::Binding::Session {
+                    hash: "00".repeat(32),
+                },
+                false,
+            )
+            .unwrap();
+        assert!(h.needs_reconcile(&none), "a session is open");
+        h.sessions.revoke(|_| true);
+        assert!(!h.needs_reconcile(&none));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
