@@ -286,12 +286,22 @@ shape, code or event name differs from openapi.yaml); (6) tests that do not exer
 path; CONFIRMED when traced end to end, PLAUSIBLE otherwise; list what you checked and found sound and what is not covered. Set task to "${r.id}".`,
   { label: `L7:${r.id}-review`, phase: ph, schema: REVIEW, model: 'opus', effort: 'high' })
 
+// args.extra = { <id>: '<text>' }: a lead note appended to that row's brief (e.g. an interrupted attempt whose edits are on disk).
+const note = (id) => (a.extra && a.extra[id]) ? `\n\nLEAD NOTE (read first): ${a.extra[id]}` : ''
+
 // Each row runs, and the moment it returns its diff is reviewed (no barrier between the two); the stage ends with every row's result and review.
 const run = (ids, ph) => pipeline(ids.filter(id => !ONLY || ONLY.includes(id)),
-  id => agent(CTX + '\n\n' + T[id].brief, { label: `L7:${id}`, phase: ph, schema: RESULT, model: T[id].model, effort: T[id].effort })
+  id => agent(CTX + '\n\n' + T[id].brief + note(id), { label: `L7:${id}`, phase: ph, schema: RESULT, model: T[id].model, effort: T[id].effort })
     .then(r => r && { ...r, id }),
   r => (r && REVIEWED.has(r.id) && r.status !== 'blocked') ? review(r, ph).then(v => ({ ...r, review: v })) : r
 ).then(rs => rs.filter(Boolean))
+
+// args.reviewOnly = { <id>: <the author's returned result> }: only the read-only review runs (a review that died, the author's work on disk).
+if (a.reviewOnly) {
+  const rs = Object.entries(a.reviewOnly).map(([id, r]) => ({ ...r, id }))
+  const vs = await parallel(rs.map(r => () => review(r, 'Stage A').then(v => ({ ...r, review: v }))))
+  return { reviewed: vs.filter(Boolean) }
+}
 
 phase('Stage A')
 const A = await run(['D5', 'D4', 'D9', 'D3', 'D7', 'U1', 'U3', 'K1', 'K2'], 'Stage A')

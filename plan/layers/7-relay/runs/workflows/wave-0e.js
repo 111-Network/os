@@ -302,9 +302,17 @@ list what you checked and found sound and what is not covered. Set task to "${r.
   { label: `L7:${r.id}-review`, phase: 'Review', schema: REVIEW, model: 'opus', effort: 'high' })
 }
 
+// args.reviewOnly = { <id>: <the author's returned result> }: only the read-only review runs (a review that died, the author's work on disk).
+if (a.reviewOnly) {
+  const rs = Object.entries(a.reviewOnly).map(([id, r]) => ({ ...r, id }))
+  const vs = await parallel(rs.map(r => () => review(r).then(v => ({ ...r, review: v }))))
+  return vs.filter(Boolean)
+}
+// args.extra = { <id>: '<text>' }: a lead note appended to that row's brief (e.g. an interrupted attempt whose edits are on disk).
+const note = (id) => (a.extra && a.extra[id]) ? `\n\nLEAD NOTE (read first): ${a.extra[id]}` : ''
 const ids = ['M1c', 'M4f', 'M4g'].filter(id => !ONLY || ONLY.includes(id))
 const out = await pipeline(ids,
-  id => agent(ctx(id) + '\n\n' + T[id].brief(rootOf(id)), { label: `L7:${id}`, phase: 'Fix', schema: RESULT, model: T[id].model, effort: T[id].effort })
+  id => agent(ctx(id) + '\n\n' + T[id].brief(rootOf(id)) + note(id), { label: `L7:${id}`, phase: 'Fix', schema: RESULT, model: T[id].model, effort: T[id].effort })
     .then(r => r && { ...r, id }),
   r => (r && r.status !== 'blocked') ? review(r).then(v => ({ ...r, review: v })) : r,
 )

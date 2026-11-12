@@ -299,9 +299,11 @@ outside the row's files. Report only what you can show with a concrete path (fil
 CONFIRMED when shown, PLAUSIBLE otherwise; list what you checked and found sound and what is not covered. Set task to "${r.id}".`,
   { label: `TS:${r.id}-review`, phase: 'Review', schema: REVIEW, model: 'opus', effort: 'high' })
 
+// args.extra = { <id>: '<text>' } also reaches the rows with a long brief above, as a lead note (later rows already read it).
+const note = (id) => (a.extra && a.extra[id]) ? `\n\nLEAD NOTE (read first): ${a.extra[id]}` : ''
 const build = (id) => {
   const t = T[id] || later(id)
-  return agent(CTX + '\n\n' + t.brief, { label: `TS:${id}`, phase: t.phase, schema: RESULT, model: t.model, effort: t.effort })
+  return agent(CTX + '\n\n' + t.brief + (T[id] ? note(id) : ''), { label: `TS:${id}`, phase: t.phase, schema: RESULT, model: t.model, effort: t.effort })
     .then(r => r && { ...r, id })
 }
 const withReview = (r) => (r && r.status !== 'blocked') ? review(r).then(v => ({ ...r, review: v })) : r
