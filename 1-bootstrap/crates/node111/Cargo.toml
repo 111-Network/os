@@ -81,6 +81,18 @@ unicode-normalization = "0.1.25"
 # (`daemon/meshtastic/client.rs`, spec §5 fallback). GPL-3.0: the shipped `111d` is
 # effectively GPL-3.0-only once this links (LICENSING.md §7).
 meshtastic = { version = "=0.1.9", default-features = false }
+# Layer 7 D5 (os/7-relay/README.md §4.3, §4.5; D30 Q17; sign-off: the "Layer 7
+# additions" row under "Dependency policy" in os/1-bootstrap/TASKS.md): TLS 1.3
+# with RFC 7250 raw public keys for non-private paired-hub links
+# (`daemon/relay/tls.rs`). rustls is already in the graph through ureq at the
+# same pin: this direct line asks for exactly ureq's selection (default features
+# off; `ring`, `logging`, `std`, `tls12`), so no second copy, no `aws-lc-rs`, no
+# second crypto provider (+0 crates).
+rustls = { version = "0.23", default-features = false, features = ["ring", "logging", "std", "tls12"] }
+# The one new lockfile entry (MIT OR Apache-2.0): rustls's tokio stream adapter,
+# default features off (they pull `aws_lc_rs`), the `ring` provider only. No
+# runtime weight until a hub pairs with a non-LAN hub.
+tokio-rustls = { version = "0.26.6", default-features = false, features = ["ring"] }
 
 [features]
 default = ["mdns"]
