@@ -9,7 +9,7 @@ export const meta = {
   ],
 }
 
-// args: { only: ['8'] | ['9'], panelOnly: true } — the same script serves both layers (they share one storage contract).
+// args: { only: ['8'] | ['9'], panelOnly: true, lenses: { '8': [...] } } — the same script serves both layers (they share one storage contract).
 const ROOT = '/home/user/os'
 const a = args || {}
 const ONLY = Array.isArray(a.only) ? a.only : ['8', '9']
@@ -220,7 +220,9 @@ const draft = async (c) => {
 }
 
 const panel = async (c) => {
-  const ps = (await parallel(c.lenses.map(l => () =>
+  // args.lenses = { '8': ['datasets', 'integration'] }: only those lenses of that layer (the others' reports are already on disk).
+  const want = (a.lenses && a.lenses[String(c.n)]) || null
+  const ps = (await parallel(c.lenses.filter(l => !want || want.includes(l.key)).map(l => () =>
     agent(judgeCtx(c, l.key) + '\n\n' + l.prompt + ' Your ids start with ' + l.letter + '.',
       { label: `judge${c.n}:${l.key}`, phase: `Panel ${c.n}`, model: 'fable', effort: 'high', schema: JUDGE_SCHEMA })
       .then(r => r && { ...r, lens: l.key })
