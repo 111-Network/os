@@ -806,9 +806,13 @@ pub(crate) enum TotalKey<'a> {
 pub(crate) const CUSTODY_TOTAL_SQL: &str =
     "SELECT rows, item_bytes, from_bytes FROM custody_totals WHERE key = ?1";
 
-/// The totals under `key`: a primary-key lookup. A key with no row holds
-/// no rows (an origin with no protected forward row has none; the three
-/// fixed keys always have one).
+/// The totals under `key`: a primary-key lookup. An origin key with no
+/// row holds no rows (an origin with no protected forward row has none).
+/// The three fixed keys always have one (the v5 backfill writes them, no
+/// trigger deletes them, and [`super::schema::heal`] re-creates a lost
+/// one at open with the totals rebuilt): a fixed key with no row is a
+/// corrupt store, never a silent zero (a gauge or a quota would
+/// under-count).
 pub(crate) fn custody_total(c: &Connection, key: TotalKey<'_>) -> Result<CustodyTotal> {
     let mut origin_key = [0u8; 33];
     let k: &[u8] = match key {
@@ -827,7 +831,10 @@ pub(crate) fn custody_total(c: &Connection, key: TotalKey<'_>) -> Result<Custody
         })
         .optional()?;
     let Some((rows, item, from)) = row else {
-        return Ok(CustodyTotal::default());
+        return match key {
+            TotalKey::Origin(_) => Ok(CustodyTotal::default()),
+            _ => Err(StoreError::Corrupt("custody_totals")),
+        };
     };
     Ok(CustodyTotal {
         rows: to_u64(rows, "custody_totals.rows")?,
@@ -1369,12 +1376,167 @@ fn capacity_saved(
     Ok(true)
 }
 
+/// The pre-M1c step lists, verbatim from `4b9e521`
+/// (`git show 4b9e521:5-messaging/crates/mesh111/src/store/prune.rs`):
+/// the comparator `sort_by_weight` with its `key`, and the step-1, 2, 2a
+/// and 2b reads, every candidate of every class. The oracle
+/// ([`Store::prune_eager`]) and the tests' sorted lists are built with
+/// these, never with [`Ranked`], [`Head`], [`step_list`] or
+/// [`EVICTABLE_CUSTODY_SQL`], so a later change to the order or to the
+/// step-1 read shows up as a difference instead of being compared with
+/// itself (Layer 7 M4g, the M1c review). The blob and message candidates
+/// are read by today's [`blob_candidates`] and [`message_candidates`] with
+/// [`Only::All`]: the same SQL text as then (no class filter).
+#[cfg(test)]
+mod eager {
+    use super::*;
+
+    pub(super) fn sort_by_weight(v: &mut [Candidate], now: u64) {
+        v.sort_by(|a, b| {
+            let wa = u128::from(a.bytes) * u128::from(now.saturating_sub(a.local_seq) + 1);
+            let wb = u128::from(b.bytes) * u128::from(now.saturating_sub(b.local_seq) + 1);
+            wb.cmp(&wa)
+                .then(a.local_seq.cmp(&b.local_seq))
+                .then(key(&a.item).cmp(&key(&b.item)))
+        });
+    }
+
+    fn key(r: &PrunedRef) -> (u8, i128, [u8; 32]) {
+        match r {
+            PrunedRef::Custody(s) => (0, i128::from(*s), [0; 32]),
+            PrunedRef::Blob(h) => (1, 0, h.0),
+            PrunedRef::Message(id) => (2, i128::from(*id), [0; 32]),
+            PrunedRef::Foreign(id) => (3, i128::from(*id), [0; 32]),
+            PrunedRef::RelayCopy(id) => (4, i128::from(*id), [0; 32]),
+        }
+    }
+
+    const CUSTODY_ROW_BYTES: &str = "length(bytes) + coalesce(length(fwd_from), 0)";
+
+    pub(super) fn evictable(c: &Connection) -> Result<Vec<Candidate>> {
+        let mut out = Vec::new();
+        {
+            let mut st = c.prepare(&format!(
+                "SELECT custody_seq, {CUSTODY_ROW_BYTES}, local_seq, fwd FROM custody
+             WHERE committed = 1"
+            ))?;
+            let rows = st.query_map([], |r| {
+                Ok((
+                    r.get::<_, i64>(0)?,
+                    r.get::<_, i64>(1)?,
+                    r.get::<_, i64>(2)?,
+                    r.get::<_, i64>(3)?,
+                ))
+            })?;
+            for r in rows {
+                let (seq, len, local, fwd) = r?;
+                out.push(Candidate {
+                    item: PrunedRef::Custody(to_u64(seq, "custody_seq")?),
+                    bytes: to_u64(len, "custody.len")? + ROW_OVERHEAD,
+                    local_seq: to_u64(local, "custody.local_seq")?,
+                    class: if fwd == 0 {
+                        Class::Custody
+                    } else {
+                        Class::Transit
+                    },
+                });
+            }
+        }
+        blob_candidates(
+            c,
+            "public = 1 AND refetchable = 1 AND present = 1 AND pinned = 0",
+            Only::All,
+            |cand| out.push(cand),
+        )?;
+        message_candidates(
+            c,
+            "dir = 2 AND state = 3 AND pinned = 0",
+            "local_seq",
+            Only::All,
+            |cand| out.push(cand),
+        )?;
+        Ok(out)
+    }
+
+    pub(super) fn superseded(c: &Connection) -> Result<Vec<Candidate>> {
+        let mut out = Vec::new();
+        blob_candidates(
+            c,
+            "superseded = 1 AND present = 1 AND pinned = 0 AND NOT (public = 1 AND refetchable = 1)",
+            Only::All,
+            |cand| out.push(cand),
+        )?;
+        Ok(out)
+    }
+
+    pub(super) fn foreign_inbound(c: &Connection) -> Result<Vec<Candidate>> {
+        let mut st = c.prepare(&format!(
+            "SELECT m.id, {FOREIGN_ROW_BYTES}, m.local_seq FROM foreign_messages m
+         JOIN foreign_conversations fc ON fc.id = m.conv
+         WHERE fc.pinned = 0
+           AND (m.dir = 'in'
+                OR (m.edge_id IS NOT NULL
+                    AND (m.state <> 'queued'
+                         OR json_extract(m.meta, '$.handoff') IS 'pending')))"
+        ))?;
+        let rows = st.query_map([], |r| {
+            Ok((
+                r.get::<_, i64>(0)?,
+                r.get::<_, i64>(1)?,
+                r.get::<_, i64>(2)?,
+            ))
+        })?;
+        let mut out = Vec::new();
+        for r in rows {
+            let (id, len, local) = r?;
+            out.push(Candidate {
+                item: PrunedRef::Foreign(id),
+                bytes: to_u64(len, "foreign.len")? + ROW_OVERHEAD,
+                local_seq: to_u64(local, "foreign.local_seq")?,
+                class: Class::Foreign,
+            });
+        }
+        Ok(out)
+    }
+
+    pub(super) fn relay_backlog(c: &Connection) -> Result<Vec<Candidate>> {
+        let mut st = c.prepare(&format!(
+            "SELECT min(m.id), sum({FOREIGN_ROW_BYTES} + ?1), min(m.local_seq)
+         FROM foreign_messages m
+         JOIN foreign_conversations fc ON fc.id = m.conv
+         WHERE fc.pinned = 0 AND m.dir = 'own' AND m.edge_id IS NOT NULL
+           AND m.state = 'queued' AND json_extract(m.meta, '$.handoff') IS NOT 'pending'
+         GROUP BY m.edge_id, m.origin_msg
+         ORDER BY min(m.local_seq), min(m.id)"
+        ))?;
+        let rows = st.query_map([ROW_OVERHEAD as i64], |r| {
+            Ok((
+                r.get::<_, i64>(0)?,
+                r.get::<_, i64>(1)?,
+                r.get::<_, i64>(2)?,
+            ))
+        })?;
+        let mut out = Vec::new();
+        for r in rows {
+            let (id, len, local) = r?;
+            out.push(Candidate {
+                item: PrunedRef::RelayCopy(id),
+                bytes: to_u64(len, "foreign.len")?,
+                local_seq: to_u64(local, "foreign.local_seq")?,
+                class: Class::Foreign,
+            });
+        }
+        Ok(out)
+    }
+}
+
 /// The pass as it was before the at-rest path and the lazy step lists:
 /// every step list read up front for every class inside the write
-/// transaction, a quota step skipping the other classes' candidates and
-/// every step skipping what an earlier one removed. Kept only as the
-/// oracle the tests hold [`Store::prune_inner`] to (byte-identical
-/// reports, flags and rows).
+/// transaction ([`eager`]: the pre-M1c reads and order, not today's), a
+/// quota step skipping the other classes' candidates and every step
+/// skipping what an earlier one removed. Kept only as the oracle the tests
+/// hold [`Store::prune_inner`] to (byte-identical reports, flags and
+/// rows).
 #[cfg(test)]
 impl Store {
     pub(super) fn prune_eager(
@@ -1406,10 +1568,13 @@ impl Store {
         let mut triggered = false;
         self.with_tx(Durability::Normal, |tx| {
             let now = current_local_seq(tx)?;
-            let step1 = step_list(tx, Step::One, Only::All, None, now)?;
-            let step2 = step_list(tx, Step::Two, Only::All, None, now)?;
-            let step2a = step_list(tx, Step::TwoA, Only::All, None, now)?;
-            let step2b = step_list(tx, Step::TwoB, Only::All, None, now)?;
+            let mut step1 = eager::evictable(tx)?;
+            eager::sort_by_weight(&mut step1, now);
+            let mut step2 = eager::superseded(tx)?;
+            eager::sort_by_weight(&mut step2, now);
+            let mut step2a = eager::foreign_inbound(tx)?;
+            eager::sort_by_weight(&mut step2a, now);
+            let step2b = eager::relay_backlog(tx)?; // oldest first, as queried
             let mut gone: Vec<PrunedRef> = Vec::new();
             for (class, quota) in &quotas {
                 let extra_here = match extra {
@@ -1572,11 +1737,13 @@ mod tests {
             .collect()
     }
 
-    /// The pre-M1c list: every candidate, sorted by weight.
+    /// The pre-M1c list: every candidate, sorted by the pre-M1c
+    /// comparator ([`eager::sort_by_weight`], verbatim), never by
+    /// [`Ranked`]: a [`Head`] is held to it.
     fn sorted(v: &[Candidate], now: u64) -> Vec<Candidate> {
-        let mut r: Vec<Ranked> = v.iter().map(|c| Ranked::new(*c, now)).collect();
-        r.sort();
-        r.into_iter().map(|r| r.cand).collect()
+        let mut r = v.to_vec();
+        eager::sort_by_weight(&mut r, now);
+        r
     }
 
     /// What a pass takes from a list while it is short of `need` bytes.

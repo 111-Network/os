@@ -4009,10 +4009,17 @@ const COMMIT_SQL: &str = "UPDATE custody SET committed = 1
 const FLOOR_SQL: &str = "SELECT min(custody_seq) FROM custody WHERE dest = ?1 AND committed = 0";
 const PENDING_TAIL: &str = "WHERE fwd != 0 AND committed = 0 AND custody_seq > ?1
              ORDER BY custody_seq LIMIT ?2";
-const PENDING_SQL: &str =
-    "SELECT custody_seq, dest, pkt_ref, bytes, fwd, fwd_from, committed FROM custody
-             WHERE fwd != 0 AND committed = 0 AND custody_seq > ?1
-             ORDER BY custody_seq LIMIT ?2";
+
+/// [`Store::forward_pending`]'s statement as it runs: its source text
+/// (with `{FORWARD_COLS}`, checked in `rows.rs`) with the real column list
+/// put in, so its plan is asserted on the statement itself (M4g, the M1c
+/// review), never on a hand copy of the columns.
+fn pending_sql() -> String {
+    format!(
+        "SELECT {} FROM custody\n             {PENDING_TAIL}",
+        rows::FORWARD_COLS
+    )
+}
 const LENS_SQL: &str =
     "SELECT custody_seq, dest, pkt_ref, length(bytes), fwd, fwd_from FROM custody
              WHERE fwd != 0 AND committed = 0 AND custody_seq > ?1
@@ -4020,11 +4027,10 @@ const LENS_SQL: &str =
 const FWD_COMMIT_SQL: &str = "UPDATE custody SET committed = 1
              WHERE custody_seq = ?1 AND fwd != 0 AND committed = 0";
 const PRUNE_DELETE_SQL: &str = "DELETE FROM custody WHERE custody_seq = ?1";
-/// [`Store::forward_waits_for_dest`] (Layer 7 M4e): it names
-/// `committed = 0`, so it searches `custody_open_by_dest` too.
-const WAITS_SQL: &str = "SELECT custody_seq FROM custody
-             WHERE dest = ?1 AND custody_seq > ?2 AND fwd != 0 AND committed = 0
-             LIMIT ?3";
+/// [`Store::forward_waits_for_dest`] (Layer 7 M4e, M4g): the statement
+/// itself ([`rows::FORWARD_WAITS_SQL`]); it searches the covering partial
+/// index `custody_forward_open_by_dest` (a dest's protected forward rows).
+const WAITS_SQL: &str = rows::FORWARD_WAITS_SQL;
 
 /// A forward origin no seeded row uses.
 const PROBE: [u8; 32] = [0x77; 32];
@@ -4098,12 +4104,13 @@ fn read_counted(s: &Store, sql: &str, p: impl rusqlite::Params) -> (Vec<Option<i
 #[test]
 fn the_per_item_reads_search_a_partial_index() {
     let rows_rs = include_str!("rows.rs");
-    for sql in [COMMIT_SQL, FLOOR_SQL, LENS_SQL, FWD_COMMIT_SQL, WAITS_SQL] {
+    for sql in [COMMIT_SQL, FLOOR_SQL, LENS_SQL, FWD_COMMIT_SQL] {
         assert!(rows_rs.contains(sql), "rows.rs no longer runs {sql}");
     }
     assert!(rows_rs.contains(&format!(
         "SELECT {{FORWARD_COLS}} FROM custody\n             {PENDING_TAIL}"
     )));
+    assert!(rows_rs.contains("self.conn.prepare(FORWARD_WAITS_SQL)"));
     assert!(include_str!("prune.rs").contains(PRUNE_DELETE_SQL));
     assert!(
         !rows_rs.contains(OLD_CUSTODY_STATS_SQL),
@@ -4114,6 +4121,7 @@ fn the_per_item_reads_search_a_partial_index() {
     // `custody_by_dest`, the rowid range walked across member and
     // committed rows, a `SCAN custody` for step 1).
     let (_t, s) = seeded_hub(5_000, 8, 3, 2_000);
+    let pending = pending_sql();
     for (sql, want) in [
         (
             COMMIT_SQL,
@@ -4125,10 +4133,10 @@ fn the_per_item_reads_search_a_partial_index() {
         ),
         (
             WAITS_SQL,
-            "SEARCH custody USING INDEX custody_open_by_dest (dest=? AND custody_seq>?)",
+            "SEARCH custody USING COVERING INDEX custody_forward_open_by_dest (dest=? AND custody_seq>?)",
         ),
         (
-            PENDING_SQL,
+            pending.as_str(),
             "SEARCH custody USING INDEX custody_forward_open (custody_seq>?)",
         ),
         (
@@ -4302,7 +4310,8 @@ fn v5_objects(s: &Store) -> Vec<String> {
         .conn
         .prepare(
             "SELECT name FROM sqlite_master WHERE name LIKE 'custody_totals%'
-             OR name IN ('custody_open_by_dest', 'custody_forward_open', 'custody_committed')
+             OR name IN ('custody_open_by_dest', 'custody_forward_open', 'custody_committed',
+                         'custody_forward_open_by_dest')
              ORDER BY name",
         )
         .unwrap();
@@ -4317,6 +4326,7 @@ fn open_heals_a_missing_v5_trigger_index_or_table() {
     let all = [
         "custody_committed",
         "custody_forward_open",
+        "custody_forward_open_by_dest",
         "custody_open_by_dest",
         "custody_totals",
         "custody_totals_delete",
@@ -4330,7 +4340,8 @@ fn open_heals_a_missing_v5_trigger_index_or_table() {
         s.custody_put_fwd(&STRANGER, &[2; 100], Fwd::FromMember(PEER))
             .unwrap(),
     );
-    // A whole store: one read of sqlite_master, no write.
+    // A whole store: one read of sqlite_master and one of the fixed
+    // totals keys, no write.
     let changes = s.conn.total_changes();
     schema::heal(&s.conn).unwrap();
     assert_eq!(s.conn.total_changes(), changes);
@@ -4572,6 +4583,29 @@ fn random_store(seed: u64) -> (tempfile::TempDir, Store) {
                     .unwrap();
             }
         }
+    }
+    // Two committed member rows of equal weight (size × age) and different
+    // ages at the passes' `now` (a pass adds no item, so every pass of the
+    // draw sees the tie): only the comparator's `local_seq` tie-break
+    // orders them, and both are large, so a pass that prunes takes them
+    // early (M4g: the oracle's order is checked, not only its weights).
+    let now = s.local_seq().unwrap();
+    let base = 2_000 + r.below(2_000);
+    for (age, len) in [(2u64, 2 * base + prune::ROW_OVERHEAD), (4, base)] {
+        let mut v = vec![0xEE; len as usize];
+        v[..8].copy_from_slice(&age.to_le_bytes());
+        s.conn
+            .execute(
+                "INSERT INTO custody (dest, pkt_ref, bytes, committed, local_seq)
+                 VALUES (?1, ?2, ?3, 1, ?4)",
+                rusqlite::params![
+                    &PEER[..],
+                    &crate::custody::pkt_ref(&v)[..],
+                    &v,
+                    i64::try_from(now + 1 - age).unwrap()
+                ],
+            )
+            .unwrap();
     }
     if r.chance(50) {
         s.set_export_offered(true).unwrap();
@@ -5223,8 +5257,8 @@ fn no_pairing_writes_exactly_the_member_row() {
 /// Layer 7 §5.5 (M4e): whether a protected forward row of a dest waits
 /// above the paging floor outside the forwarder's window. Member rows of
 /// the same dest and committed rows never count; `above` is exclusive; the
-/// answer is "more than `resident`"; the read goes through the v5 partial
-/// index `custody_open_by_dest` and never scans the table.
+/// answer is "more than `resident`"; the read searches the v5 partial
+/// index `custody_forward_open_by_dest` (M4g) and never scans the table.
 #[test]
 fn forward_waits_for_dest_counts_protected_rows_of_that_dest_only() {
     let (_t, mut s) = ready();
@@ -5262,16 +5296,13 @@ fn forward_waits_for_dest_counts_protected_rows_of_that_dest_only() {
     assert!(s.forward_commit(f2).unwrap());
     assert!(waits(&s, &STRANGER, 0, 0));
     assert!(!waits(&s, &STRANGER, 0, 1));
-    // The same statement's plan: a search of `custody_open_by_dest` (v5,
-    // uncommitted rows only) on the dest and the floor, no table scan.
+    // The same statement's plan: a search of the covering partial index
+    // `custody_forward_open_by_dest` (v5, a dest's protected forward rows
+    // only) on the dest and the floor, no table scan.
     let plan: Vec<String> = {
         let mut st = s
             .conn
-            .prepare(
-                "EXPLAIN QUERY PLAN SELECT custody_seq FROM custody
-                 WHERE dest = ?1 AND custody_seq > ?2 AND fwd != 0 AND committed = 0
-                 LIMIT ?3",
-            )
+            .prepare(&format!("EXPLAIN QUERY PLAN {}", rows::FORWARD_WAITS_SQL))
             .unwrap();
         let rows = st
             .query_map(rusqlite::params![&STRANGER[..], 0i64, 1i64], |r| {
@@ -5280,10 +5311,275 @@ fn forward_waits_for_dest_counts_protected_rows_of_that_dest_only() {
             .unwrap();
         rows.map(|r| r.unwrap()).collect()
     };
-    assert!(
-        plan.iter()
-            .any(|d| d.starts_with("SEARCH") && d.contains("USING INDEX custody_open_by_dest")),
-        "{plan:?}"
+    assert_eq!(
+        plan,
+        vec![
+            "SEARCH custody USING COVERING INDEX custody_forward_open_by_dest (dest=? AND custody_seq>?)"
+                .to_string()
+        ]
     );
     assert!(plan.iter().all(|d| !d.contains("SCAN")), "{plan:?}");
+}
+
+// ---------------------------------------------------------------------------
+// Layer 7 §5.5 (M4g): the probe-restart read bounded in the rows it visits;
+// the M1c review's lows (heal, the fixed totals keys)
+// ---------------------------------------------------------------------------
+
+/// A hub's `custody` for the M4g read: for STRANGER, `k` uncommitted member
+/// rows (a dest that is, or was, a member here), then `k` committed forward
+/// rows (handed over, waiting for a capacity prune), then `r` protected
+/// forward rows; and `k` rows of PEER2 beside them. Every row lies above
+/// the floor 0, the protected ones last, so a walk of a wider index must
+/// pass every other row of the dest before it reaches them.
+fn dest_with_history(k: u32, r: u32) -> (tempfile::TempDir, Store) {
+    let (t, mut s) = ready();
+    s.with_tx(Durability::Normal, |tx| {
+        let mut st = tx.prepare(
+            "INSERT INTO custody (dest, pkt_ref, bytes, committed, local_seq, fwd, fwd_from)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+        )?;
+        let mut n = 0u32;
+        let mut put = |dest: &[u8; 32], committed: bool, fwd: bool| {
+            n += 1;
+            let mut item = n.to_le_bytes().to_vec();
+            item.extend_from_slice(&[n as u8; 60]);
+            st.execute(rusqlite::params![
+                &dest[..],
+                &crate::custody::pkt_ref(&item)[..],
+                &item,
+                committed,
+                i64::from(n),
+                i64::from(fwd),
+                fwd.then_some(&PROBE[..])
+            ])
+            .map(|_| ())
+        };
+        for _ in 0..k {
+            put(&STRANGER, false, false)?;
+        }
+        for _ in 0..k {
+            put(&STRANGER, true, true)?;
+        }
+        for _ in 0..k {
+            put(&PEER2, false, true)?;
+        }
+        for _ in 0..r {
+            put(&STRANGER, false, true)?;
+        }
+        set_u64(tx, K_LOCAL_SEQ, u64::from(3 * k + r))
+    })
+    .unwrap();
+    (t, s)
+}
+
+/// M4g (F1; Layer 7 §5.5; the Pi floor): [`Store::forward_waits_for_dest`]
+/// is bounded in the rows it visits, not only in the rows it returns. One
+/// dest with `R` protected forward rows (as many as the window holds of it)
+/// and, above the floor beside them, `K` committed forward rows and `K`
+/// uncommitted member rows of the same dest: the statement's VM steps are
+/// the same for `K = 10` and `K = 2,000`, with no full-scan step, and its
+/// plan is a search of the covering partial index. The same statement
+/// forced through the wider indexes (`custody_by_dest`, the read before
+/// M1c; `custody_open_by_dest`, the read before M4g) costs steps that grow
+/// with `K`: the check has teeth.
+#[test]
+fn forward_waits_for_dest_visits_the_window_whatever_the_dests_history() {
+    const R: u32 = 40;
+    let wider = |index: &str| {
+        WAITS_SQL.replace(
+            "FROM custody\n",
+            &format!("FROM custody INDEXED BY {index}\n"),
+        )
+    };
+    let mut steps = Vec::new();
+    for k in [10u32, 2_000] {
+        let (_t, s) = dest_with_history(k, R);
+        assert_eq!(
+            plan(&s, WAITS_SQL),
+            vec![
+                "SEARCH custody USING COVERING INDEX custody_forward_open_by_dest (dest=? AND custody_seq>?)"
+                    .to_string()
+            ]
+        );
+        // The answer: R rows wait above the floor, so "more than R - 1
+        // resident" and not "more than R".
+        assert!(s
+            .forward_waits_for_dest(&STRANGER, 0, R as usize - 1)
+            .unwrap());
+        assert!(!s.forward_waits_for_dest(&STRANGER, 0, R as usize).unwrap());
+        // The read `forward_waits_for_dest(dest, 0, R)` makes: LIMIT R + 1.
+        let run = |sql: &str| {
+            let (rows, k) = read_counted(&s, sql, rusqlite::params![&STRANGER[..], 0, R + 1]);
+            assert_eq!(rows.len(), R as usize, "{sql}");
+            k
+        };
+        let ours = run(WAITS_SQL);
+        let by_dest = run(&wider("custody_by_dest"));
+        let open = run(&wider("custody_open_by_dest"));
+        eprintln!(
+            "M4g: K = {k}: forward_waits_for_dest {ours:?} (full-scan, VM steps); \
+             through custody_by_dest {by_dest:?}; through custody_open_by_dest {open:?}"
+        );
+        steps.push((ours, by_dest, open));
+    }
+    let ((small, by_dest_small, open_small), (big, by_dest_big, open_big)) = (steps[0], steps[1]);
+    assert_eq!(small.0, 0, "no full-scan step");
+    assert_eq!(big.0, 0, "no full-scan step");
+    assert_eq!(small, big, "the steps do not grow with K (10 vs 2,000)");
+    // Teeth: the wider indexes step over the dest's other rows.
+    assert!(
+        by_dest_big.1 > by_dest_small.1 + 2 * 1_990,
+        "{by_dest_small:?} {by_dest_big:?}"
+    );
+    assert!(
+        open_big.1 > open_small.1 + 1_990,
+        "{open_small:?} {open_big:?}"
+    );
+}
+
+/// M4g (the M1c review, S2): a missing index changes no fact, so a failed
+/// re-create at open is counted, never fatal (on a nearly full disk
+/// `SQLITE_FULL` would otherwise stop the fabric from starting exactly
+/// when the store is under pressure): the statement rolls back alone and
+/// the reads run on the wider index. A missing trigger or totals table
+/// guards correctness: a failed re-create stays fatal.
+#[test]
+fn a_failed_index_heal_is_counted_and_a_failed_totals_heal_is_fatal() {
+    let (t, mut s) = ready();
+    accepted(s.custody_put(&PEER, &[1; 100]).unwrap());
+    let q = accepted(
+        s.custody_put_fwd(&STRANGER, &[2; 100], Fwd::FromMember(PEER))
+            .unwrap(),
+    );
+    assert_eq!(s.heal_failed, 0);
+    let ours = vec![
+        "SEARCH custody USING COVERING INDEX custody_forward_open_by_dest (dest=? AND custody_seq>?)"
+            .to_string(),
+    ];
+    assert_eq!(plan(&s, WAITS_SQL), ours);
+
+    // A full disk: the index's first page cannot be written (its old
+    // pages leave the freelist first, so none can be reused).
+    s.conn
+        .execute_batch("DROP INDEX custody_forward_open_by_dest; PRAGMA incremental_vacuum;")
+        .unwrap();
+    let pages: i64 = s
+        .conn
+        .query_row("PRAGMA page_count", [], |r| r.get(0))
+        .unwrap();
+    let cap: i64 = s
+        .conn
+        .query_row(&format!("PRAGMA max_page_count = {pages}"), [], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    assert_eq!(cap, pages);
+    assert!(s
+        .conn
+        .execute_batch("CREATE INDEX probe_full ON custody (local_seq);")
+        .is_err_and(|e| e.sqlite_error_code() == Some(rusqlite::ErrorCode::DiskFull)));
+    assert_eq!(schema::heal(&s.conn).unwrap(), 1, "counted, not fatal");
+    assert!(s.conn.is_autocommit(), "nothing left open");
+    assert!(!v5_objects(&s).contains(&"custody_forward_open_by_dest".to_string()));
+    // The read runs on the wider index meanwhile, with the same answer.
+    assert_eq!(
+        plan(&s, WAITS_SQL),
+        vec![
+            "SEARCH custody USING INDEX custody_open_by_dest (dest=? AND custody_seq>?)"
+                .to_string()
+        ]
+    );
+    assert!(s.forward_waits_for_dest(&STRANGER, 0, 0).unwrap());
+    assert!(!s.forward_waits_for_dest(&STRANGER, 0, 1).unwrap());
+    // Room again: the next heal re-creates it.
+    s.conn
+        .query_row("PRAGMA max_page_count = 1073741823", [], |r| {
+            r.get::<_, i64>(0)
+        })
+        .unwrap();
+    assert_eq!(schema::heal(&s.conn).unwrap(), 0);
+    assert_eq!(plan(&s, WAITS_SQL), ours);
+
+    // Through the open: an index the open cannot re-create (here a table
+    // already holds its name) leaves the open standing and is counted.
+    s.conn
+        .execute_batch(
+            "DROP INDEX custody_forward_open_by_dest;
+             CREATE TABLE custody_forward_open_by_dest (x INTEGER);",
+        )
+        .unwrap();
+    s.close(1).unwrap();
+    let (mut s, _) = open(t.path(), 1);
+    assert_eq!(s.heal_failed, 1, "counted at open");
+    assert!(s.forward_waits_for_dest(&STRANGER, 0, 0).unwrap());
+    assert!(s.forward_commit(q).unwrap());
+    assert!(!s.forward_waits_for_dest(&STRANGER, 0, 0).unwrap());
+    assert_totals_exact(&s);
+    s.conn
+        .execute_batch("DROP TABLE custody_forward_open_by_dest;")
+        .unwrap();
+    s.close(1).unwrap();
+    let (s, _) = open(t.path(), 1);
+    assert_eq!(s.heal_failed, 0);
+    assert_eq!(plan(&s, WAITS_SQL), ours);
+
+    // A trigger or the totals table that cannot be re-created fails the
+    // heal (a read-only connection stands in for any write failure).
+    for drop in [
+        "DROP TRIGGER custody_totals_insert;",
+        "DROP TABLE custody_totals;",
+    ] {
+        s.conn.execute_batch(drop).unwrap();
+        s.conn.execute_batch("PRAGMA query_only = ON;").unwrap();
+        assert!(schema::heal(&s.conn).is_err(), "{drop}: fatal");
+        assert!(s.conn.is_autocommit());
+        s.conn.execute_batch("PRAGMA query_only = OFF;").unwrap();
+        assert_eq!(schema::heal(&s.conn).unwrap(), 0, "{drop}: healed");
+        assert_totals_exact(&s);
+    }
+}
+
+/// M4g (the M1c review, S5): the three fixed totals keys always exist (the
+/// backfill writes them, no trigger deletes them), so a missing one is a
+/// corrupt store, never a silent zero: the gauges and the class totals
+/// that read it fail closed, and the next open re-creates it with the
+/// totals rebuilt from the rows. An origin with no row still reads zero.
+#[test]
+fn a_missing_fixed_totals_key_fails_closed_and_is_healed_at_open() {
+    let (t, mut s) = ready();
+    accepted(s.custody_put(&PEER, &[1; 100]).unwrap());
+    accepted(
+        s.custody_put_fwd(&STRANGER, &[2; 100], Fwd::FromMember(PEER))
+            .unwrap(),
+    );
+    let stats = s.custody_stats().unwrap();
+    let fwd = s.forward_stats().unwrap();
+    assert_eq!(
+        s.forward_origin_bytes(&PROBE).unwrap(),
+        0,
+        "an origin with no row"
+    );
+    let corrupt = |r: Result<u64>| matches!(r, Err(StoreError::Corrupt("custody_totals")));
+    s.conn
+        .execute("DELETE FROM custody_totals WHERE key = x'02'", [])
+        .unwrap();
+    assert!(matches!(
+        s.forward_stats(),
+        Err(StoreError::Corrupt("custody_totals"))
+    ));
+    s.conn
+        .execute("DELETE FROM custody_totals WHERE key IN (x'00', x'01')", [])
+        .unwrap();
+    assert!(matches!(
+        s.custody_stats(),
+        Err(StoreError::Corrupt("custody_totals"))
+    ));
+    assert!(corrupt(s.class_bytes(Class::Custody)));
+    assert!(corrupt(s.class_bytes(Class::Transit)));
+    s.close(1).unwrap();
+    let (s, _) = open(t.path(), 1);
+    assert_eq!(s.custody_stats().unwrap(), stats);
+    assert_eq!(s.forward_stats().unwrap(), fwd);
+    assert_totals_exact(&s);
 }

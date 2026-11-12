@@ -30,21 +30,25 @@
 //! - **Custody totals and indexes (schema v5)** ([`schema`],
 //!   [`prune::custody_total`]): triggers on `custody` keep the row count
 //!   and byte sums of the member rows, the forward rows, the protected
-//!   forward rows and each origin's protected forward rows; three partial
-//!   indexes hold a member's uncommitted rows, the protected forward rows
-//!   and the committed rows; [`schema::heal`] re-creates a missing one at
-//!   open. What that makes of the per-item paths on a hub (the Pi floor):
-//!   **constant in the `custody` rows held** — a put's dedup, origin share,
-//!   class quota and insert (its triggers and one index entry for a member
-//!   row, two for a forward row), the custody and forward gauges
+//!   forward rows and each origin's protected forward rows; four partial
+//!   indexes hold a dest's uncommitted rows, the protected forward rows,
+//!   the committed rows and a dest's protected forward rows;
+//!   [`schema::heal`] re-creates a missing one at open. What that makes
+//!   of the per-item paths on a hub (the Pi floor): **constant in the
+//!   `custody` rows held** — a put's dedup, origin share, class quota and
+//!   insert (its triggers and one partial-index entry for a member row,
+//!   three for a forward row), the custody and forward gauges
 //!   ([`Store::custody_stats`], [`Store::forward_stats`]), a forward
 //!   commit, a prune delete, a pass at rest's custody inputs; **bounded by
 //!   what is read** — a member's `MAILBOX_COMMIT` and `ENROLL_OK` floor
 //!   (that member's uncommitted rows), a forwarder page (the rows it
-//!   returns), a pass that prunes (the committed rows of the classes it
-//!   prunes, [`prune`]); **still growing with the store** — live bytes, a
-//!   sum over the present blobs, on every admission and every pass, and the
-//!   total of a bulk class or Foreign that has a quota set ([`prune`]).
+//!   returns), the forwarder's probe-restart read (at most the resident
+//!   window's worth of a dest's protected forward rows,
+//!   `Store::forward_waits_for_dest`), a pass that prunes (the committed
+//!   rows of the classes it prunes, [`prune`]); **still growing with the
+//!   store** — live bytes, a sum over the present blobs, on every
+//!   admission and every pass, and the total of a bulk class or Foreign
+//!   that has a quota set ([`prune`]).
 //!
 //! No wall clock anywhere: ages are the store's local insertion sequence.
 
@@ -209,6 +213,10 @@ pub struct Store {
     pub(crate) store_full: bool,
     pub(crate) full_classes: Vec<Class>,
     pub(crate) last_disk: Option<DiskSpace>,
+    /// Missing schema v5 indexes the open could not re-create
+    /// ([`schema::heal`]: never fatal; the fabric counts them as errors at
+    /// start, and the next open tries again).
+    pub(crate) heal_failed: u32,
 }
 
 impl std::fmt::Debug for Store {
@@ -241,8 +249,9 @@ impl Store {
 
     /// Open (or create) `dir/store.db` and `dir/blobs/`, apply the §10.1
     /// pragmas, migrate the schema (and re-create any missing schema v5
-    /// trigger or index, [`schema::heal`]), and decide the §4 epoch for
-    /// this run.
+    /// trigger, index or fixed totals key, [`schema::heal`]; an index it
+    /// cannot re-create is counted in `heal_failed`, never fatal), and
+    /// decide the §4 epoch for this run.
     ///
     /// The clean-shutdown record is consumed: after this returns, a crash
     /// leaves it absent, so the next open mints.
@@ -270,7 +279,7 @@ impl Store {
         )?;
         apply_key_and_pragmas(&conn, key)?;
         schema::migrate(&conn)?;
-        schema::heal(&conn)?;
+        let heal_failed = schema::heal(&conn)?;
 
         let blobs = BlobDir::open(dir.join(BLOB_DIR))?;
         let mut store = Store {
@@ -281,6 +290,7 @@ impl Store {
             store_full: false,
             full_classes: Vec::new(),
             last_disk: None,
+            heal_failed,
         };
         let decision = store.decide_epoch(params)?;
         store.epoch = match decision {

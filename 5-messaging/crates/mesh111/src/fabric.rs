@@ -282,7 +282,11 @@
 //!   per-target queues by state (custody order), a row's targets are
 //!   recomputed only when its inputs changed (a new or paged-in row, a
 //!   refusal, an orphaning, the pair set or the carrier bound, a changed
-//!   or dropped cache entry for its dest), and the put stage visits only
+//!   or dropped cache entry for its dest) or when it returns to idle from
+//!   a put that was out (its link went down, the write failed, the carrier
+//!   answered `Retry`: those changes recompute idle rows only, so a row out
+//!   meanwhile is judged on its return; a `REJECT_FULL` row released by
+//!   its pair's trigger keeps that pair, C16), and the put stage visits only
 //!   the `tcp` pairs that are up and have window room; a row is forgotten
 //!   in one lookup (its `pkt_ref` keys the pending map). One put per row at
 //!   a time, at most [`FORWARD_WINDOW`] in flight per `tcp` pair
@@ -342,15 +346,20 @@
 //!   restarts it from the floor, so stored rows move before a newer row
 //!   for the same target; the dropped dest's resident idle rows are
 //!   recomputed like a changed dest's). Whether one waits is one indexed
-//!   read (`Store::forward_waits_for_dest`, through `custody_by_dest`),
-//!   made only for a changed or dropped entry while the window holds rows
-//!   back (at most two a commit): the store has more protected rows of
-//!   that dest above the floor than the window holds, so a hub whose
-//!   members talk to more dests than the cache holds does not restart the
-//!   probe on every commit. Meanwhile a new row whose turn is up enters at
-//!   once, with its hint, in place of an evicted one. So an all-down hub,
-//!   or a store of rows for down targets only, does not churn, and each
-//!   pass does at most one read and one page of evictions. The view's
+//!   read (`Store::forward_waits_for_dest`), made only for a changed or
+//!   dropped entry while the window holds rows back (at most two a
+//!   commit): the store has more protected rows of that dest above the
+//!   floor than the window holds, so a hub whose members talk to more
+//!   dests than the cache holds does not restart the probe on every
+//!   commit. The read searches the schema v5 partial index
+//!   `custody_forward_open_by_dest` (that dest's protected forward rows
+//!   only; it covers the read), so it visits at most one more index entry
+//!   than the window holds of that dest, and no table row, however many
+//!   committed or member rows that dest has above the floor. Meanwhile a
+//!   new row whose turn is up enters at once, with its hint, in place of
+//!   an evicted one. So an all-down hub, or a store of rows for down
+//!   targets only, does not churn, and each pass does at most one read and
+//!   one page of evictions. The view's
 //!   `pending` counts resident rows; `Store::forward_stats` has the totals.
 //!   A non-hub node holds the empty structure only.
 //! - **The hub role off** (a `custody_opt_in` node keeps member custody):
@@ -1148,6 +1157,12 @@ impl Fabric {
         let (events, _) = broadcast::channel(1024);
         let (sink, mut sink_rx) = mpsc::unbounded_channel::<LinkEvent>();
         let keys = KeyCache::rebuild(&store.contacts()?);
+        // A schema v5 index the open could not re-create (never fatal,
+        // `schema::heal`): a store failure, counted.
+        let counters = Counters {
+            errors: u64::from(store.heal_failed),
+            ..Counters::default()
+        };
         let gate = Arc::new(FabricGate {
             own,
             cache: RwLock::new(keys.clone()),
@@ -1178,7 +1193,7 @@ impl Fabric {
             enrolling: None,
             peer_dials: HashSet::new(),
             read_marks: HashMap::new(),
-            counters: Counters::default(),
+            counters,
             fwd: Forwarder::default(),
             events: events.clone(),
             pending_events: BTreeMap::new(),
@@ -2294,6 +2309,10 @@ struct Forwarder {
     /// Self-wakes queued ([`Input::Continue`]): the unit tests' view only.
     #[cfg(test)]
     wakes: u64,
+    /// Store reads [`Core::cache_changed`] made
+    /// ([`Store::forward_waits_for_dest`]): the unit tests' view only.
+    #[cfg(test)]
+    waits_reads: u64,
 }
 
 impl Forwarder {
@@ -2498,28 +2517,33 @@ impl Forwarder {
         self.run = true;
     }
 
-    /// A hit for `dest` at `pair` (§5.5): when the entry changed, the idle
-    /// rows of that dest that `pair` has not refused and whose turn is
-    /// another target are recomputed (the cache goes first). When the put
+    /// A hit for `dest` at `pair` (§5.5): when the entry changed, every
+    /// idle row of that dest whose turn is another target is recomputed,
+    /// whether `pair` refused it or not: the cache goes first, and a row
+    /// `pair` refused (it keeps the refusal, [`Core::retarget`]) may still
+    /// hold a turn the old entry gave it (M4g: with pairs `[a, q, p]`, a
+    /// row that refused `p` under `X → p` took `a`, took `q` under
+    /// `X → q`, and under `X → p` again its turn is `a`, the list
+    /// `[p, a, q]`'s first it has not refused, not `q`). When the put
     /// dropped the oldest entry `dropped → p` for room, that dest's idle
     /// rows whose turn is `p` are recomputed too: the cache put `p` first,
     /// and without it their turn is the probe order's (a row `p` refused
     /// has another turn and keeps its refusal; no other row's turn came
     /// from the entry, which only moves `p` to the front of the list).
-    /// Both are bounded by the dest's resident rows. Returns what the put
-    /// did: the stored rows of either dest are the caller's, since only
-    /// the store knows whether one waits ([`Core::cache_changed`] restarts
-    /// the swap probe then).
+    /// Both are bounded by the dest's resident rows. A row out (in flight,
+    /// taken) is not idle: it is judged again when it returns to idle
+    /// (module doc; a `REJECT_FULL` row keeps its pair, C16, and a posted
+    /// row waits for the far hub's ack, §5.9). Returns what the put did:
+    /// the stored rows of either dest are the caller's, since only the
+    /// store knows whether one waits ([`Core::cache_changed`] restarts the
+    /// swap probe then).
     fn cache_put(&mut self, dest: [u8; 32], pair: NodeId) -> CachePut {
         let put = self.cache.put(dest, pair);
         if put.changed {
             if let Some(seqs) = self.by_dest.get(&dest) {
                 for seq in seqs {
                     if let Some(r) = self.rows.get(seq) {
-                        if r.state == Turn::Idle
-                            && r.turn != Some(pair)
-                            && !r.refused.contains(&pair)
-                        {
+                        if r.state == Turn::Idle && r.turn != Some(pair) {
                             self.dirty.insert(*seq);
                         }
                     }
@@ -3673,7 +3697,11 @@ impl Core {
             }
             (Tag::None | Tag::Push(_) | Tag::Commit(_) | Tag::Forward(_), Ok(())) => {}
             (Tag::Forward(seq), Err(e)) => {
-                // Not written: the row waits for its turn's next connection.
+                // Not written: the row waits for its turn's next connection,
+                // judged again first (M4g: its inputs may have changed while
+                // it was out; no run is asked for here, so a write that keeps
+                // failing on a live connection is not retried in a loop: a
+                // closed one is, through `pair_link_down`).
                 if self
                     .fwd
                     .rows
@@ -3682,6 +3710,7 @@ impl Core {
                 {
                     self.fwd.unpend(seq);
                     self.fwd.set_state(seq, Turn::Idle);
+                    self.fwd.dirty.insert(seq);
                 }
                 self.on_send_error(ck, &e);
             }
@@ -5783,9 +5812,17 @@ impl Core {
         self.fwd.run = true;
     }
 
-    /// A pair's connection went: its puts in flight wait for the next one,
-    /// and a `tcp` pair's refusals end with their connection (§5.5); a
-    /// whole pair's pairing dial is released (never redialed).
+    /// A pair's connection went: its puts in flight return to idle and are
+    /// judged again (M4g: a hit-cache entry changed or dropped, or the pair
+    /// set or the carrier bound changed, while a put was out recomputed the
+    /// idle rows only; a row whose turn only the vanished entry justified
+    /// would otherwise wait for this pair while another target is up), so
+    /// each keeps this pair while its inputs still give it this pair (a
+    /// pair that is down keeps its turn until its next link-up, §5.5) and
+    /// waits for the next connection; a `tcp` pair's refusals end with
+    /// their connection (§5.5); a whole pair's pairing dial is released
+    /// (never redialed). Bounded: at most [`FORWARD_WINDOW`] rows in flight
+    /// to it.
     fn pair_link_down(&mut self, node: &NodeId) {
         let tcp = self.find_pair(node).is_some_and(|p| p.via == PairVia::Tcp);
         if tcp {
@@ -5809,6 +5846,7 @@ impl Core {
         for seq in out {
             self.fwd.unpend(seq);
             self.fwd.set_state(seq, Turn::Idle);
+            self.fwd.dirty.insert(seq);
         }
         if self.whole_pair(node).is_some() {
             self.release_pair_dial(node);
@@ -6535,10 +6573,20 @@ impl Core {
     /// nothing back or the probe already starts from the floor (a restart
     /// would change nothing: so a commit's second call, for the dropped
     /// entry, reads nothing after its first restarted), none on a non-hub;
-    /// a failed read restarts (the conservative side). A hub whose members
-    /// talk to more dests than the cache holds so pays at most two reads of
-    /// a dest's index range above the floor per commit (the hit's entry
-    /// and the dropped one), never a sweep of the store.
+    /// a failed read restarts (the conservative side) and counts an error.
+    /// **The bound** (the Pi floor; M4g): the read is one `SEARCH` of the
+    /// schema v5 partial index `custody_forward_open_by_dest`, which holds
+    /// the protected forward rows only and covers the read, so it visits
+    /// at most `resident + 1` index entries of `dest` above the floor and
+    /// no table row; `resident` is that dest's resident rows above the
+    /// floor, at most [`FORWARD_RESIDENT`]. That dest's committed rows
+    /// (kept until a capacity prune) and its member rows (a dest that is or
+    /// was a member here: kept uncommitted up to a quota) are not in the
+    /// index, so the cost does not grow with its history or the rows held.
+    /// A hub whose members talk to more dests than the cache holds so pays
+    /// at most two such reads per commit (the hit's entry and the dropped
+    /// one): at most `2 × (FORWARD_RESIDENT + 1)` index entries, never a
+    /// sweep of the store.
     fn cache_changed(&mut self, dest: &[u8; 32]) {
         if !self.settings.hub_role || !self.fwd.more {
             return;
@@ -6547,6 +6595,10 @@ impl Core {
             return;
         }
         let resident = self.fwd.resident_above_floor(dest);
+        #[cfg(test)]
+        {
+            self.fwd.waits_reads += 1;
+        }
         let waits = self
             .store
             .forward_waits_for_dest(dest, self.fwd.loaded, resident)
@@ -6710,11 +6762,16 @@ impl Core {
                 r.heard = false;
                 r.state = Turn::Posted { repost: false };
             }),
-            // Stays for the next flush; no event (a carrier that is down
-            // is not asked again in a loop).
+            // Stays for the next flush, judged again first (M4g: its inputs
+            // may have changed while the carrier held it, the carrier bound
+            // among them); no event (a carrier that is down is not asked
+            // again in a loop): a run recomputes it, and only a turn that
+            // changed to a carrier pair notifies.
             ForwardDone::Retry => {
                 self.fwd.unpend(seq);
                 self.fwd.set_state(seq, Turn::Idle);
+                self.fwd.dirty.insert(seq);
+                self.fwd.run = true;
             }
             ForwardDone::Rejected { .. } => {
                 if let Some(t) = turn {
@@ -9084,6 +9141,349 @@ mod tests {
             recomputed >= FORWARD_RESIDENT as u64,
             "every idle row was recomputed ({recomputed})"
         );
+    }
+
+    // -- M4g: a refused row's stale turn, the read's gaps -------------------
+
+    /// A pair's `CUSTODY_ACK` for the put of `pkt_ref`.
+    fn ack_for(pkt_ref: [u8; 16], status: CustodyStatus) -> CustodyAck {
+        CustodyAck {
+            receipt: CustodyReceipt {
+                status,
+                custody_seq: 1,
+                pkt_ref,
+            },
+            custody_sig: None,
+        }
+    }
+
+    /// M4g (F2, §5.5): a changed entry recomputes every idle row of its
+    /// dest whose turn is another target, one the new pair refused too.
+    /// Pairs [A, Q, P], all `tcp`; R is a row of X with no hint (turn A).
+    /// (1) A row of X hinted to P commits there: X → P, R's turn is P; R is
+    /// offered to P, which answers `REJECT_UNKNOWN_DEST`: R refused P, its
+    /// turn is A. (2) A row of X commits at Q: X → Q, R's turn is Q. (3)
+    /// P accepts a row of X: X → P again, R's list is [P, A, Q] and its
+    /// turn is A, the first it has not refused (it kept Q, a turn only
+    /// the old entry gave it, before M4g); its refusal of P stays.
+    #[tokio::test]
+    async fn a_changed_entry_recomputes_a_row_the_new_pair_refused() {
+        let (an, qn, pn) = (
+            NodeId::from([0xA0; 32]),
+            NodeId::from([0x51; 32]),
+            NodeId::from([0x90; 32]),
+        );
+        let pairs = vec![
+            peer_pair(an, PairVia::Tcp),
+            peer_pair(qn, PairVia::Tcp),
+            peer_pair(pn, PairVia::Tcp),
+        ];
+        let h = hub_with("m4g-refused", pairs);
+        let x = [0x58; 32];
+        let out =
+            h.f.call(move |c| {
+                let turn = |c: &Core, s: u64| c.fwd.rows.get(&s).and_then(|r| r.turn);
+                let (rs, rrow) = hold(c, x, 1, 200, None);
+                let rref = rrow.pkt_ref;
+                c.track_forward(rs, rrow);
+                c.run_forwarder();
+                let mut turns = vec![turn(c, rs)];
+                // (1) X → P; R offered to P, refused there.
+                assert!(commit_through(c, x, 2, pn));
+                turns.push(turn(c, rs));
+                c.fwd.pending.insert(rref, (rs, pn));
+                c.fwd.set_state(rs, Turn::InFlight);
+                c.on_forward_ack(&pn, &ack_for(rref, CustodyStatus::RejectUnknownDest));
+                c.run_forwarder();
+                turns.push(turn(c, rs));
+                // (2) X → Q.
+                assert!(commit_through(c, x, 3, qn));
+                turns.push(turn(c, rs));
+                // (3) X → P again.
+                assert!(commit_through(c, x, 4, pn));
+                turns.push(turn(c, rs));
+                let r = &c.fwd.rows[&rs];
+                (turns, r.refused.clone(), r.state, c.fwd.cache.get(&x))
+            })
+            .await
+            .expect("actor");
+        let (turns, refused, state, entry) = out;
+        let (a, q, p) = (Some(an), Some(qn), Some(pn));
+        assert_eq!(turns[..3], [a, p, a], "probe order A; X → P; P refused");
+        assert_eq!(turns[3], q, "X → Q put Q first");
+        assert_eq!(entry, p);
+        assert_eq!(turns[4], a, "X → P again: [P, A, Q], P refused: A");
+        assert_eq!(refused, vec![pn], "the refusal stays");
+        assert_eq!(state, Turn::Idle);
+    }
+
+    /// M4g (G1, §5.5): a store error inside `Core::cache_changed` restarts
+    /// the swap probe (the conservative side) and counts an error. Pairs
+    /// [C, P]: the window is full of P's rows (down), a row of X waits
+    /// behind it with its turn at P (the entry X → P), C is up and the
+    /// probe found nothing to move. The store's read fails (a temporary
+    /// table named `custody` shadows the real one, so the statement does
+    /// not prepare: a real SQLite error, no seam) while X's entry changes to
+    /// C: one read, one error, one restart and a run owed. With the shadow
+    /// gone the run moves X's row to C.
+    #[tokio::test]
+    async fn a_store_error_in_cache_changed_restarts_the_probe() {
+        let (cn, pn) = (NodeId::from([0xC0; 32]), NodeId::from([0x90; 32]));
+        let pairs = vec![peer_pair(cn, PairVia::Tcp), peer_pair(pn, PairVia::Tcp)];
+        let h = hub_with("m4g-store-error", pairs);
+        let x = [0x58; 32];
+        let out =
+            h.f.call(move |c| {
+                fill_window(c, pn);
+                conn_up(c, cn);
+                c.fwd.cache.put(x, pn);
+                let (xs, xrow) = hold(c, x, 1, 200, None);
+                c.track_forward(xs, xrow);
+                c.run_forwarder();
+                let swept = (c.fwd.probe_done, c.fwd.rows.contains_key(&xs));
+                // The read fails while the entry changes.
+                c.store
+                    .conn
+                    .execute_batch("CREATE TEMP TABLE custody (shadow INTEGER);")
+                    .expect("shadow");
+                let failing = c.store.forward_waits_for_dest(&x, 0, 0).is_err();
+                let before = (c.counters.errors, c.fwd.restarts, c.fwd.waits_reads);
+                c.fwd.run = false;
+                let put = c.fwd.cache_put(x, cn);
+                c.cache_changed(&x);
+                let after = (
+                    c.counters.errors - before.0,
+                    c.fwd.restarts - before.1,
+                    c.fwd.waits_reads - before.2,
+                    c.fwd.run,
+                    c.fwd.probe_done,
+                );
+                c.store
+                    .conn
+                    .execute_batch("DROP TABLE temp.custody;")
+                    .expect("unshadow");
+                c.run_forwarder();
+                (
+                    swept,
+                    failing,
+                    put,
+                    after,
+                    c.fwd.rows.get(&xs).and_then(|r| r.turn),
+                )
+            })
+            .await
+            .expect("actor");
+        let (swept, failing, put, after, moved) = out;
+        assert_eq!(swept, (true, false), "C up: one sweep, X's row waits");
+        assert!(failing, "the shadowed read fails");
+        assert!(put.changed && put.dropped.is_none());
+        assert_eq!(
+            after,
+            (1, 1, 1, true, false),
+            "(errors, restarts, reads, run owed, probe done)"
+        );
+        assert_eq!(moved, Some(cn), "the restarted probe moved X's row to C");
+    }
+
+    /// M4g (G2, §5.5): a commit whose hit adds one entry and drops another
+    /// for room reads the store at most twice and restarts the probe at
+    /// most once: exactly one read once the first restarted it. Pairs
+    /// [P, C]: the window is full of P's rows (down), C is up; Y's entry
+    /// (Y → P) is the oldest of a full cache and X is new to it. Rows of
+    /// X, of Y, of both or of neither wait in the store behind the window
+    /// (turn P, first in the probe order), and the probe found nothing to
+    /// move. One row of X hinted to C commits there: X → C is added and
+    /// Y → P dropped. `(reads, restarts)` for that commit.
+    #[tokio::test]
+    async fn a_commit_that_adds_and_drops_an_entry_reads_at_most_twice() {
+        let (pn, cn) = (NodeId::from([0x90; 32]), NodeId::from([0xC0; 32]));
+        let (x, y) = ([0x58; 32], [0x59; 32]);
+        let mut seen = Vec::new();
+        for (i, (x_rows, y_rows)) in [(true, true), (false, true), (true, false), (false, false)]
+            .into_iter()
+            .enumerate()
+        {
+            let pairs = vec![peer_pair(pn, PairVia::Tcp), peer_pair(cn, PairVia::Tcp)];
+            let h = hub_with(&format!("m4g-two-{i}"), pairs);
+            let out =
+                h.f.call(move |c| {
+                    fill_window(c, pn);
+                    c.fwd.cache.put(y, pn);
+                    // The filler's entry newer than Y's: Y's is the oldest.
+                    c.fwd.cache.put(FILL, pn);
+                    for k in 0..FORWARD_CACHE as u32 - 2 {
+                        c.fwd.cache.put(far(k), cn);
+                    }
+                    let full = c.fwd.cache.len();
+                    // Distinct items (a `pkt_ref` is the item's hash).
+                    for (dest, stored, base) in [(x, x_rows, 0u32), (y, y_rows, 1_000)] {
+                        for k in 0..20u32 {
+                            if stored {
+                                let (seq, row) = hold(c, dest, base + k, 200, None);
+                                c.track_forward(seq, row);
+                            }
+                        }
+                    }
+                    // C comes up: one sweep, even with nothing stored.
+                    conn_up(c, cn);
+                    c.fwd.run = true;
+                    c.run_forwarder();
+                    let swept = c.fwd.probe_done;
+                    let (reads, restarts) = (c.fwd.waits_reads, c.fwd.restarts);
+                    let admitted = commit_through(c, x, 100, cn);
+                    (
+                        full,
+                        swept,
+                        admitted,
+                        c.fwd.cache.get(&x),
+                        c.fwd.cache.get(&y),
+                        c.fwd.waits_reads - reads,
+                        c.fwd.restarts - restarts,
+                    )
+                })
+                .await
+                .expect("actor");
+            let (full, swept, admitted, xe, ye, reads, restarts) = out;
+            assert_eq!(full, FORWARD_CACHE, "case {i}: the cache is full");
+            assert!(
+                swept && admitted,
+                "case {i}: swept, the row admitted at once"
+            );
+            assert_eq!((xe, ye), (Some(cn), None), "case {i}: X added, Y dropped");
+            seen.push((x_rows, y_rows, reads, restarts));
+        }
+        assert_eq!(
+            seen,
+            vec![
+                (true, true, 1, 1),
+                (false, true, 2, 1),
+                (true, false, 1, 1),
+                (false, false, 2, 0),
+            ],
+            "(X rows stored, Y rows stored, reads, restarts)"
+        );
+    }
+
+    /// M4g (G3, §5.5, module doc): a row that is out when its dest's entry
+    /// is dropped is judged again when it returns to idle. Pairs [C, P]
+    /// (`tcp`) and G (`carrier`), C up; the entries X → P and Z → G put
+    /// their pair first, so X's rows R1, R2 went to P and Z's row R3 to G.
+    /// R1 and R2 are in flight on P's connection, R3 taken by the carrier.
+    /// Commits for other dests drop both entries for room: no idle row of
+    /// X or Z had that turn, so nothing is recomputed then. R2's write
+    /// fails (an I/O error: the connection stays), P's connection then
+    /// closes (R1), and the carrier answers `Retry` for R3: each returns to
+    /// idle and is recomputed, its turn the probe order's first, C (the
+    /// entry that gave it P or G is gone).
+    #[tokio::test]
+    async fn a_row_out_when_its_entry_is_dropped_is_judged_on_its_return() {
+        let (cn, pn, gn) = (
+            NodeId::from([0xC0; 32]),
+            NodeId::from([0x90; 32]),
+            NodeId::from([0x60; 32]),
+        );
+        let pairs = vec![
+            peer_pair(cn, PairVia::Tcp),
+            peer_pair(pn, PairVia::Tcp),
+            peer_pair(gn, PairVia::Carrier),
+        ];
+        let h = hub_with("m4g-out", pairs);
+        let (x, z) = ([0x58; 32], [0x5B; 32]);
+        let out =
+            h.f.call(move |c| {
+                conn_up(c, cn);
+                conn_up(c, pn);
+                let pk: ConnKey = (usize::MAX, PeerAddr::Opaque(pn.as_bytes().to_vec()));
+                c.fwd.cache_put(x, pn);
+                c.fwd.cache_put(z, gn);
+                for (seq, dest) in [(1u64, x), (2, x), (3, z)] {
+                    let n = u8::try_from(seq).unwrap();
+                    c.fwd
+                        .insert(seq, Core::fwd_row(dest, [n; 16], 200, 1, None));
+                }
+                c.run_forwarder();
+                let turn = |c: &Core, s: u64| c.fwd.rows.get(&s).and_then(|r| r.turn);
+                let before: Vec<_> = (1..=3).map(|s| turn(c, s)).collect();
+                for (seq, t, state) in [
+                    (1u64, pn, Turn::InFlight),
+                    (2, pn, Turn::InFlight),
+                    (3, gn, Turn::Taken),
+                ] {
+                    let n = u8::try_from(seq).unwrap();
+                    c.fwd.pending.insert([n; 16], (seq, t));
+                    c.fwd.set_state(seq, state);
+                }
+                let mut dropped = Vec::new();
+                for i in 0..FORWARD_CACHE as u32 {
+                    if let Some((d, _)) = c.fwd.cache_put(far(i), cn).dropped {
+                        dropped.push(d);
+                    }
+                }
+                let marked = c.fwd.dirty.len();
+                c.on_sent(
+                    &pk,
+                    Tag::Forward(2),
+                    Err(LinkError::Io(std::io::Error::other("write failed"))),
+                );
+                let r2_waits = (c.conns.contains_key(&pk), c.fwd.rows[&2].state);
+                c.drop_conn(&pk);
+                c.forward_done(3, ForwardDone::Retry);
+                c.run_forwarder();
+                let after: Vec<_> = (1..=3).map(|s| turn(c, s)).collect();
+                let states: Vec<_> = (1..=3).map(|s| c.fwd.rows[&s].state).collect();
+                (before, dropped, marked, r2_waits, after, states)
+            })
+            .await
+            .expect("actor");
+        let (before, dropped, marked, r2_waits, after, states) = out;
+        assert_eq!(
+            before,
+            vec![Some(pn), Some(pn), Some(gn)],
+            "the entries' pairs"
+        );
+        assert_eq!(dropped, vec![x, z], "both entries dropped for room");
+        assert_eq!(
+            marked, 0,
+            "no idle row had that turn: nothing recomputed then"
+        );
+        assert_eq!(
+            r2_waits,
+            (true, Turn::Idle),
+            "R2's write failed, P's connection stays"
+        );
+        assert_eq!(
+            after,
+            vec![Some(cn); 3],
+            "each judged again on its return: C"
+        );
+        assert_eq!(states, vec![Turn::Idle; 3]);
+    }
+
+    /// M4g (the M1c review, S2): an index the store's open could not
+    /// re-create (here a table holds its name) leaves the open standing,
+    /// and the fabric counts it as an error at start.
+    #[tokio::test]
+    async fn an_index_the_open_could_not_heal_counts_as_an_error() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let sealer = Arc::new(TestSealer::from_label("m4g-heal"));
+        let key = StoreKey::from_bytes([0x5e; 32]);
+        let params = OpenParams {
+            announce_last: sealer.announce_last(),
+            restore_floor_set: false,
+        };
+        let (store, _) = Store::open(dir.path(), &key, &params).expect("store");
+        store
+            .conn
+            .execute_batch(
+                "DROP INDEX custody_forward_open_by_dest;
+                 CREATE TABLE custody_forward_open_by_dest (x INTEGER);",
+            )
+            .expect("sql");
+        store.close(sealer.announce_last()).expect("close");
+        let (store, decision) = Store::open(dir.path(), &key, &params).expect("store");
+        assert_eq!(store.heal_failed, 1);
+        let f = Fabric::start(sealer, store, decision, FabricSettings::default()).expect("fabric");
+        assert_eq!(f.status().await.expect("status").counters.errors, 1);
     }
 }
 

@@ -594,8 +594,22 @@ pub enum CustodyPut {
     RejectFull,
 }
 
-/// The columns of a forward-row SELECT, in the order [`raw_forward`] reads.
-const FORWARD_COLS: &str = "custody_seq, dest, pkt_ref, bytes, fwd, fwd_from, committed";
+/// The columns of a forward-row SELECT, in the order [`raw_forward`] reads
+/// (crate-visible within the store so the tests assert the plan of the
+/// statement [`Store::forward_pending`] runs, not a copy of it).
+pub(super) const FORWARD_COLS: &str = "custody_seq, dest, pkt_ref, bytes, fwd, fwd_from, committed";
+
+/// [`Store::forward_waits_for_dest`]'s one read (Layer 7 §5.5, M4g). The
+/// `WHERE` names `fwd != 0 AND committed = 0` exactly as the partial index
+/// `custody_forward_open_by_dest` does, so the planner may use it, and the
+/// index carries `fwd`, so it covers the read and wins over the wider
+/// `custody_open_by_dest` (same leading columns, member rows included)
+/// whatever order the two were created in (a [`super::schema::heal`]
+/// re-create makes an index the newest; with the two tied on cost the
+/// newest would win). Crate-visible within the store so the tests run it.
+pub(super) const FORWARD_WAITS_SQL: &str = "SELECT custody_seq FROM custody
+             WHERE dest = ?1 AND custody_seq > ?2 AND fwd != 0 AND committed = 0
+             LIMIT ?3";
 
 /// Bytes one stored forward row accounts for in its origin's share: the
 /// item, its `fwd_from` and the per-row overhead (the same sum
@@ -1536,12 +1550,20 @@ impl Store {
     /// `dest` above `custody_seq` `above` (exclusive) waits outside the
     /// forwarder's resident window, which holds `resident` of them: true
     /// when more than `resident` such rows exist (Layer 7 §5.5, §5.9: a
-    /// hit-cache entry added or changed for `dest` restarts the swap probe
-    /// only then). One read through the schema v5 partial index
-    /// `custody_open_by_dest` (`dest`, `custody_seq`; uncommitted rows
-    /// only), at most `resident + 1` rows returned (the index has no
-    /// `fwd`: the read steps over that dest's uncommitted member rows above
-    /// `above`, never its committed ones); v4 columns only.
+    /// hit-cache entry added, changed or dropped for `dest` restarts the
+    /// swap probe only then).
+    ///
+    /// **Bounded in the rows it visits** (the Pi floor; Layer 7 M4g): one
+    /// `SEARCH` of the schema v5 partial index `custody_forward_open_by_dest`
+    /// ([`FORWARD_WAITS_SQL`]), which holds the protected forward rows only
+    /// and covers the read, so it visits at most `resident + 1` index
+    /// entries of `dest` above `above` and no table row, whatever that
+    /// dest's history: its committed rows (handed over or refused, kept
+    /// until a capacity prune) and its member rows (a dest that is, or
+    /// was, a member here: an uncommitted member row is never pruned and
+    /// stays until its member commits it, bounded only by a quota) are
+    /// not in the index. The caller passes the resident rows of that dest
+    /// above the floor, so `resident ≤ FORWARD_RESIDENT` (the window).
     pub(crate) fn forward_waits_for_dest(
         &self,
         dest: &[u8; 32],
@@ -1549,11 +1571,7 @@ impl Store {
         resident: usize,
     ) -> Result<bool> {
         let want = resident.saturating_add(1);
-        let mut st = self.conn.prepare(
-            "SELECT custody_seq FROM custody
-             WHERE dest = ?1 AND custody_seq > ?2 AND fwd != 0 AND committed = 0
-             LIMIT ?3",
-        )?;
+        let mut st = self.conn.prepare(FORWARD_WAITS_SQL)?;
         let mut rows = st.query(params![
             &dest[..],
             to_i64(above, "custody_seq")?,

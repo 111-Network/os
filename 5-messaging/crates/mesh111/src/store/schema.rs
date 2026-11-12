@@ -61,11 +61,12 @@
 //!   §5.8 per-origin share, the forward gauge and the custody gauge read
 //!   one or two rows by primary key instead of summing `custody`. No
 //!   `custody` column changes; a store with no forward rows holds three
-//!   fixed rows only. Typed access: [`super::prune::custody_total`]. Three
-//!   partial indexes on `custody` (a member's uncommitted rows, the
-//!   protected forward rows, the committed rows) make the commit, floor,
-//!   forwarder-page and step-1 reads bounded searches ([`V5`]); [`heal`]
-//!   re-creates a missing v5 trigger or index at open.
+//!   fixed rows only. Typed access: [`super::prune::custody_total`]. Four
+//!   partial indexes on `custody` (a dest's uncommitted rows, the
+//!   protected forward rows, the committed rows, a dest's protected
+//!   forward rows) make the commit, floor, forwarder-page, probe-restart
+//!   and step-1 reads bounded searches ([`V5`]); [`heal`] re-creates a
+//!   missing v5 trigger, index or fixed totals key at open.
 
 use rusqlite::Connection;
 
@@ -511,11 +512,22 @@ macro_rules! v5_index_committed {
     };
 }
 
+/// v5 (Layer 7 M4g): the protected forward rows of one dest by
+/// `custody_seq` ([`V5`]; `fwd` rides along so the read it serves is
+/// covered).
+macro_rules! v5_index_forward_dest {
+    () => {
+        "CREATE INDEX custody_forward_open_by_dest ON custody (dest, custody_seq, fwd)
+    WHERE fwd != 0 AND committed = 0;
+"
+    };
+}
+
 /// v5 (Layer 7 §5.8; L5 §10.3, §10.4; the Pi floor): `custody_totals`
 /// (module doc), so admission reads one row per total whatever the rows a
-/// hub holds, and three partial indexes on `custody`, so a member's
-/// commit and floor, the forwarder's pages and the §10.4 step-1 read
-/// search only the rows they want.
+/// hub holds, and four partial indexes on `custody`, so a member's
+/// commit and floor, the forwarder's pages, its probe-restart read and
+/// the §10.4 step-1 read search only the rows they want.
 ///
 /// - **Keys.** `x'00'` the member rows (`fwd = 0`, [`super::Class::Custody`])
 ///   · `x'01'` every forward row (`fwd != 0`, [`super::Class::Transit`]) ·
@@ -556,13 +568,24 @@ macro_rules! v5_index_committed {
 ///   only, never the member or committed rows between them ·
 ///   `custody_committed (fwd) WHERE committed = 1` — the §10.4 step-1 read
 ///   ([`super::prune`]) reads the committed rows of the class it prunes
-///   only, never a protected row. A put writes one entry (a member row) or
-///   two (a forward row); a commit moves a row from the open indexes to
-///   `custody_committed`; a delete removes it.
+///   only, never a protected row ·
+///   `custody_forward_open_by_dest (dest, custody_seq, fwd) WHERE fwd != 0
+///   AND committed = 0` (Layer 7 M4g) — the forwarder's probe-restart read
+///   ([`super::Store::forward_waits_for_dest`]) visits a dest's protected
+///   forward rows only, never its committed rows or its member rows
+///   (`custody_open_by_dest` holds the latter, which a dest that is or was
+///   a member here keeps uncommitted up to a quota); `fwd` rides along so
+///   the index covers that read and the planner prefers it to
+///   `custody_open_by_dest` in any creation order. A put writes one entry
+///   (a member row) or three (a forward row) in these partial indexes; a
+///   commit moves a row from the open indexes (one for a member row, three
+///   for a forward row) to `custody_committed`; a delete removes it.
 /// - **Self-heal** ([`heal`]): at every open the store checks that these
-///   triggers and indexes exist (one read of `sqlite_master`) and
-///   re-creates any that is missing; a missing trigger also rebuilds the
-///   totals from the rows ([`rebuild_custody_totals`]).
+///   triggers and indexes exist (one read of `sqlite_master`) and that the
+///   three fixed keys do (three primary-key lookups), and re-creates what
+///   is missing; a missing trigger, table or fixed key also rebuilds the
+///   totals from the rows ([`rebuild_custody_totals`]); an index that
+///   cannot be re-created is counted, never fatal.
 const V5: &str = concat!(
     v5_table!(),
     "\n",
@@ -577,11 +600,12 @@ const V5: &str = concat!(
     v5_index_open!(),
     v5_index_forward!(),
     v5_index_committed!(),
+    v5_index_forward_dest!(),
 );
 
 /// The v5 objects [`heal`] checks at open: `(type, name, DDL)` as
 /// `sqlite_master` names them, the DDL the same text [`V5`] runs.
-const V5_OBJECTS: [(&str, &str, &str); 7] = [
+const V5_OBJECTS: [(&str, &str, &str); 8] = [
     ("table", "custody_totals", v5_table!()),
     ("trigger", "custody_totals_insert", v5_trigger_insert!()),
     ("trigger", "custody_totals_delete", v5_trigger_delete!()),
@@ -589,63 +613,102 @@ const V5_OBJECTS: [(&str, &str, &str); 7] = [
     ("index", "custody_open_by_dest", v5_index_open!()),
     ("index", "custody_forward_open", v5_index_forward!()),
     ("index", "custody_committed", v5_index_committed!()),
+    (
+        "index",
+        "custody_forward_open_by_dest",
+        v5_index_forward_dest!(),
+    ),
 ];
 
-/// The one read [`heal`] makes: which v5 objects `sqlite_master` holds
-/// (a handful of schema rows; no `custody` row is read).
-const V5_PRESENT_SQL: &str = "SELECT type, name FROM sqlite_master
-     WHERE name IN ('custody_totals', 'custody_totals_insert', 'custody_totals_delete',
-                    'custody_totals_update', 'custody_open_by_dest', 'custody_forward_open',
-                    'custody_committed')";
+/// The read [`heal`] makes of `sqlite_master`: which [`V5_OBJECTS`] it
+/// holds, one `?` per object, bound to their names (a handful of schema
+/// rows; no `custody` row is read). Built from [`V5_OBJECTS`], so the two
+/// cannot disagree.
+fn v5_present(conn: &Connection) -> Result<Vec<(String, String)>> {
+    let marks = vec!["?"; V5_OBJECTS.len()].join(", ");
+    let mut st = conn.prepare(&format!(
+        "SELECT type, name FROM sqlite_master WHERE name IN ({marks})"
+    ))?;
+    let rows = st.query_map(
+        rusqlite::params_from_iter(V5_OBJECTS.iter().map(|(_, name, _)| *name)),
+        |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)),
+    )?;
+    let mut present = Vec::with_capacity(V5_OBJECTS.len());
+    for r in rows {
+        present.push(r?);
+    }
+    Ok(present)
+}
+
+/// How many of the three fixed `custody_totals` keys (`x'00'`, `x'01'`,
+/// `x'02'`, [`V5`]) are present: three primary-key lookups.
+const FIXED_KEYS_SQL: &str =
+    "SELECT count(*) FROM custody_totals WHERE key IN (x'00', x'01', x'02')";
 
 /// Recompute `custody_totals` from the `custody` rows: empty it, then the
 /// v5 backfill ([`V5`]'s own text). Runs inside the caller's transaction,
 /// so the rows and their totals change together (the migration's, or
 /// [`heal`]'s); one grouped pass over `custody`, used only when the
-/// totals cannot be trusted (a trigger was missing).
+/// totals cannot be trusted (a trigger or a fixed key was missing).
 pub(crate) fn rebuild_custody_totals(c: &Connection) -> Result<()> {
     c.execute_batch(concat!("DELETE FROM custody_totals;\n", v5_backfill!()))?;
     Ok(())
 }
 
 /// Self-heal at open (v5, the Pi floor): after [`migrate`], read which v5
-/// triggers and indexes exist ([`V5_PRESENT_SQL`]) and, in one
-/// transaction, re-create each missing one from its v5 text. When the
-/// totals table or a trigger was missing, writes may have bypassed the
-/// totals, so they are rebuilt from the rows ([`rebuild_custody_totals`])
-/// in the same transaction: a drifted total would otherwise read as room
-/// or fail a later write on its `CHECK` (wedging eviction). A missing
-/// index changes no fact, so it is only re-created. A whole store pays
-/// the one read and nothing else. Drift with every trigger present (a
-/// hand edit of `custody_totals`) is not detected here: that needs a pass
-/// over the rows.
-pub(crate) fn heal(conn: &Connection) -> Result<()> {
-    let mut present: Vec<(String, String)> = Vec::with_capacity(V5_OBJECTS.len());
-    {
-        let mut st = conn.prepare(V5_PRESENT_SQL)?;
-        let rows = st.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
-        for r in rows {
-            present.push(r?);
-        }
-    }
+/// objects exist ([`v5_present`]) and whether the three fixed totals keys
+/// do ([`FIXED_KEYS_SQL`]), then re-create what is missing from its v5
+/// text. Returns how many missing indexes could not be re-created.
+///
+/// - **Fatal: the totals.** When the totals table, a trigger or a fixed
+///   key was missing, writes may have bypassed the totals (or a reader
+///   would take a missing key for zero), so in one transaction the
+///   missing table and triggers are re-created and the totals rebuilt from
+///   the rows ([`rebuild_custody_totals`]): a drifted total would read as
+///   room or fail a later write on its `CHECK` (wedging eviction). Any
+///   error here fails the open: the totals guard correctness.
+/// - **Not fatal: an index.** A missing index changes no fact, so each is
+///   re-created on its own, after the totals, as one autocommit statement:
+///   a failure (`SQLITE_FULL` on a nearly full disk, the very moment the
+///   store is under pressure) rolls that statement back alone, is counted
+///   in the return value (the fabric counts it as an error at start) and
+///   the open carries on; the statements it served run on the wider index
+///   or the table until a later open re-creates it.
+///
+/// A whole store pays the two reads and nothing else. Drift with every
+/// trigger and key present (a hand edit of `custody_totals`) is not
+/// detected here: that needs a pass over the rows.
+pub(crate) fn heal(conn: &Connection) -> Result<u32> {
+    let present = v5_present(conn)?;
     let missing: Vec<&(&str, &str, &str)> = V5_OBJECTS
         .iter()
         .filter(|(ty, name, _)| !present.iter().any(|(t, n)| t == ty && n == name))
         .collect();
-    if missing.is_empty() {
-        return Ok(());
-    }
-    let tx = conn.unchecked_transaction()?;
-    let mut rebuild = false;
-    for (ty, _, ddl) in missing {
-        tx.execute_batch(ddl)?;
-        rebuild |= *ty != "index";
-    }
-    if rebuild {
+    let table_present = !missing.iter().any(|(ty, _, _)| *ty == "table");
+    let keys_lost =
+        table_present && conn.query_row(FIXED_KEYS_SQL, [], |r| r.get::<_, i64>(0))? < 3;
+    let (indexes, totals): (Vec<_>, Vec<_>) =
+        missing.into_iter().partition(|(ty, _, _)| *ty == "index");
+    if !totals.is_empty() || keys_lost {
+        let tx = conn.unchecked_transaction()?;
+        for (_, _, ddl) in totals {
+            tx.execute_batch(ddl)?;
+        }
         rebuild_custody_totals(&tx)?;
+        tx.commit()?;
     }
-    tx.commit()?;
-    Ok(())
+    let mut failed = 0u32;
+    for (_, _, ddl) in indexes {
+        if conn.execute_batch(ddl).is_err() {
+            failed += 1;
+            // An autocommit statement rolls back alone; were SQLite to
+            // leave a transaction open, it goes too (nothing else is in it).
+            if !conn.is_autocommit() {
+                conn.execute_batch("ROLLBACK;")?;
+            }
+        }
+    }
+    Ok(failed)
 }
 
 /// Bring the schema to [`SCHEMA_VERSION`].
