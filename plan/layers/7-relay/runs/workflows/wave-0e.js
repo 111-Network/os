@@ -159,7 +159,7 @@ FILES YOU OWN: M/fabric.rs, M/tests/forward.rs. Leave M4e's two END-of-file addi
 CHECK: from ${ROOT}/5-messaging: sh scripts/check.sh (fmt, clippy -D warnings, the whole suite; musl SKIP) green, then cargo test -p mesh111
 --test forward --test hub_flow once more. Before you return, turn your fix off once (ignore the dropped dest) and show test (b) fails, then
 restore it and say the file is back.` },
-  M4g: { model: 'opus', effort: 'xhigh', brief: (ROOT) => `TASK M4g: the bounce on M4f (M4e + M4f LANDED as e733307, M1c LANDED: read rows "| M4e |", "| M4f |", "| M1c |" and
+  M4g: { model: 'opus', effort: 'xhigh', brief: (ROOT) => `TASK M4g: the bounce on M4f and the M1c review's lows (M4e + M4f LANDED as e733307, M1c LANDED: read rows "| M4e |", "| M4f |", "| M1c |" and
 "| M4g |" of ${ROOT}/7-relay/TASKS.md whole, then M/fabric.rs (Core::cache_changed, Forwarder::cache_put, HitCache::put, on_forward_ack, retarget,
 page_in, restart_probe, pair_link_down) and M/store/{rows,schema,prune}.rs as they now are). The independent re-review of M4e + M4f confirmed:
 
@@ -171,7 +171,8 @@ left as a committed = 1 row above the floor until a capacity prune, so a dest's 
 the read run up to twice per commit. The fabric.rs docs (the module doc and cache_changed) claim "bounded reads, never a sweep": false today.
   FIX: the read must be bounded in rows visited. M1c added partial indexes to schema v5 (read V5 and the heal at open in M/store/schema.rs for the
   exact names and predicates: custody_open_by_dest ON custody (dest, custody_seq) WHERE committed = 0 is the one that fits; custody_forward_open
-  is (custody_seq) WHERE fwd != 0 AND committed = 0). Shape the statement so the planner SEARCHes a partial index whose predicate leaves the
+  is (custody_seq) WHERE fwd != 0 AND committed = 0). M1c ALREADY moved this statement's plan to custody_open_by_dest and re-pinned its plan
+  assertion (the planner picked the narrower index once it existed): confirm it, then do what is still owed. Shape the statement so the planner SEARCHes a partial index whose predicate leaves the
   committed rows out (the WHERE clause must imply the index predicate as SQLite's planner matches it: write committed = 0 literally), and decide
   with evidence what is left to step over: with custody_open_by_dest it is the uncommitted MEMBER rows (fwd = 0) of the same dest above the floor.
   Trace when a dest can hold both member rows and protected forward rows on one hub (a member that enrolled or left while rows were held; am. 11
@@ -214,11 +215,26 @@ GAPS the review listed (close each, or say precisely why it cannot be closed wit
      justified AND that can strand the row (its pair down, another target up, nothing judging it again), fix it at the point the row returns to
      Idle (mark it dirty: bounded, one row) and test it; C16's rule for a Full row whose pair is up stays.
 
+ALSO, the independent review of M1c (landed; four lows, all in the store files you already own here):
+  S1 the cfg(test) oracle prune_eager in M/store/prune.rs is described as the pass as it was before M1c, but it builds its lists with the NEW
+     step_list, the new evictable SQL and the new Ranked/Head ordering, and the test helper sorted uses Ranked too: on list construction and
+     ordering the random-store test compares the new pass with itself. FIX: the oracle carries a verbatim copy of the pre-M1c comparator and
+     evictable-custody statement (git show 4b9e521:5-messaging/crates/mesh111/src/store/prune.rs: sort_by_weight and the step-1 custody read)
+     so a later change to Ranked::cmp or EVICTABLE_CUSTODY_SQL is caught; show it by flipping the local_seq tie-break once (the test fails).
+  S2 schema::heal runs CREATE INDEX for a missing index inside Store::open and any error fails the open: on a nearly full disk SQLITE_FULL
+     then stops the fabric from starting, exactly when the store is under pressure. A missing index changes no fact. FIX: a failed index
+     re-create is not fatal (roll that statement back, count it, carry on: the statements then run on the wider index or the table); a missing
+     trigger or totals table stays fatal with its rebuild, since it guards correctness. Test both.
+  S3 the forward_pending plan is asserted on a hand-written copy of the column list: build the asserted text from rows::FORWARD_COLS (pub(super))
+     so the EXPLAIN always runs on the real statement.
+  S4 V5_PRESENT_SQL repeats V5_OBJECTS' names by hand: derive one from the other, or assert they agree in a test.
+  S5 custody_total returns zeros for a missing fixed key, so custody_stats would under-report silently: a missing fixed key is a heal case
+     (re-create and rebuild) or an error, never a silent zero; pick the one that fits heal's design and test it.
+
 NEVER ADDS: a timer, a task, a listener, a pub API (pub(crate) and #[cfg(test)] only), a constant or FwdRow change, a store read on a non-hub or
 with fwd.more false, a pass over the rows held on any per-item path, a schema version bump.
 
-FILES: M/fabric.rs, M/store/rows.rs, M/store/schema.rs (only for the index, with its heal entry), M/store/tests.rs, M/tests/forward.rs (only if an
-integration assertion needs it). Nothing else.
+FILES: M/fabric.rs, M/store/{rows,schema,prune,mod,tests}.rs, M/tests/forward.rs (only if an integration assertion needs it). Nothing else.
 
 CHECK: cd ${ROOT}/5-messaging && sh scripts/check.sh (musl stages SKIP); then cargo test -p mesh111 --test forward --test hub_flow a second time
 (the forward suite takes 3-6 minutes: other agents share the CPUs; a timing-only failure under load is re-run once alone before you call it a
