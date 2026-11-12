@@ -19,8 +19,15 @@
 //!   node's own floor) and blobs whose sha256 and size match a payload pin of that manifest, for
 //!   the hub's own target and the others listed in `origin.targets` ([`Origin::admit`]). The
 //!   daemon is the only writer; a blob is named by the sha256 of the bytes written, hashed as
-//!   they are copied. A blob request is answered only when the held manifest pins that sha256
-//!   with the file's exact size, so a stray file under `blob/` is never served.
+//!   they are copied. A blob already held counts for a new manifest only after it is hashed
+//!   again (a mismatch removes it and reports its target missing). A blob request is answered
+//!   only when the held manifest pins that sha256 with the file's exact size, so a stray file
+//!   under `blob/` is never served. Source blobs are opened as served ones are
+//!   (`O_NOFOLLOW | O_NONBLOCK`, regular files only), so a FIFO or a symlink handed to
+//!   [`Origin::admit`] never blocks or redirects the store.
+//! - **The pair (§9.1).** The manifest and its signature are written to temporary names first,
+//!   then renamed signature first, manifest second; a failure before the manifest's rename puts
+//!   the previous signature back, so the previous pair stays served.
 //! - **How (§9.1).** Bodies stream from disk in 64 KiB chunks (`tokio::fs` and a body stream),
 //!   never read whole; files are opened `O_NOFOLLOW | O_NONBLOCK` and must be regular.
 //! - **Size (§13.2 `RelayOrigin.bytes`).** [`Origin::bytes`] walks `state/origin/` on demand and
@@ -60,6 +67,11 @@ pub const ROUTE_PREFIX: &str = "/origin/v1/";
 
 /// Read and stream chunk size.
 const CHUNK: usize = 64 * 1024;
+/// The open flags of every file this module reads (served or admitted): never a symlink, never
+/// a blocking open (a FIFO), never inherited.
+const READ_FLAGS: i32 = libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC;
+/// The longest parser detail logged (debug builds only; [`AdmitError`] carries none).
+const DETAIL_MAX: usize = 160;
 /// Prefix of a blob being written (never a sha256, so never served; removed by the next prune).
 const TMP_PREFIX: &str = ".tmp-";
 const FILE_MODE: u32 = 0o600;
@@ -91,8 +103,11 @@ pub fn serving(api: &ApiState) -> bool {
 /// Why [`Origin::admit`] stored nothing (log-safe: no foreign bytes beyond a calver or a path).
 #[derive(Debug)]
 pub enum AdmitError {
-    /// The manifest and signature did not pass `parse_verified` (or the floor is unreadable).
-    Unverified(String),
+    /// The manifest and signature did not pass `parse_verified` (or the floor is unreadable):
+    /// one fixed reason per failure class ([`UNVERIFIED_SIZE`], [`UNVERIFIED_FLOOR`],
+    /// [`UNVERIFIED_SIGNATURE`]), never the parser's text (it can quote the offered bytes; a
+    /// debug build logs it, escaped and capped).
+    Unverified(&'static str),
     /// The offered release is older than the one held (an origin never steps back, §9.5 T4).
     Older {
         /// The release held now.
@@ -124,6 +139,40 @@ impl std::fmt::Display for AdmitError {
 }
 
 impl std::error::Error for AdmitError {}
+
+/// [`AdmitError::Unverified`]: the manifest or its signature is over its size cap.
+pub const UNVERIFIED_SIZE: &str = "the manifest or its signature is over its size cap";
+/// [`AdmitError::Unverified`]: this node's floor (`state/floor.json`) could not be read.
+pub const UNVERIFIED_FLOOR: &str = "this node's update floor is unreadable";
+/// [`AdmitError::Unverified`]: `parse_verified` refused the pair (signature, keychain, channel,
+/// floor or format).
+pub const UNVERIFIED_SIGNATURE: &str =
+    "the manifest and its signature do not verify under the compiled key and this node's floor";
+
+/// The detail behind a fixed reason: logged only in a debug build, escaped (no control byte or
+/// newline reaches the log) and capped at [`DETAIL_MAX`] characters.
+fn debug_detail(reason: &'static str, detail: &anyhow::Error) {
+    if cfg!(debug_assertions) {
+        eprintln!("111 origin: {reason}: {}", log_safe(&format!("{detail:#}")));
+    }
+}
+
+/// `s` escaped (`char::escape_debug`) and capped at [`DETAIL_MAX`] characters.
+fn log_safe(s: &str) -> String {
+    let mut out: String = s
+        .chars()
+        .flat_map(char::escape_debug)
+        .take(DETAIL_MAX)
+        .collect();
+    if s.chars()
+        .flat_map(char::escape_debug)
+        .nth(DETAIL_MAX)
+        .is_some()
+    {
+        out.push('…');
+    }
+    out
+}
 
 fn io_err(what: &str, path: &Path, e: impl std::fmt::Display) -> AdmitError {
     AdmitError::Io(format!("{what} {}: {e}", path.display()))
@@ -203,14 +252,10 @@ impl Origin {
         }
     }
 
-    /// The daemon's one store (`ApiState` ext `Arc<Origin>`), registered on first use.
+    /// The daemon's one store (`ApiState` ext `Arc<Origin>`), registered on first use under the
+    /// ext's write lock: two first callers share one `Origin` and so one write mutex.
     pub fn shared(api: &ApiState) -> Arc<Origin> {
-        if let Some(o) = api.ext::<Arc<Origin>>() {
-            return o;
-        }
-        let o = Arc::new(Origin::new(&api.layout.state_dir()));
-        api.insert_ext(Arc::clone(&o));
-        o
+        api.ext_or_insert_with(|| Arc::new(Origin::new(&api.layout.state_dir())))
     }
 
     /// `state/origin/`.
@@ -235,7 +280,10 @@ impl Origin {
         blobs: &[&Path],
     ) -> Result<Admitted, AdmitError> {
         let floor = Floor::read(&self.state_dir.join("floor.json"))
-            .map_err(|e| AdmitError::Unverified(format!("{e:#}")))?
+            .map_err(|e| {
+                debug_detail(UNVERIFIED_FLOOR, &e);
+                AdmitError::Unverified(UNVERIFIED_FLOOR)
+            })?
             .unwrap_or_else(Floor::initial);
         let trust = Trust {
             pubkey: crate::daemon::updater::MANIFEST_PUBKEY.trim(),
@@ -256,15 +304,37 @@ impl Origin {
         signature: &str,
         blobs: &[&Path],
     ) -> Result<Admitted, AdmitError> {
+        self.admit_faulty(
+            trust,
+            targets,
+            manifest_bytes,
+            signature,
+            blobs,
+            &|_| Ok(()),
+        )
+    }
+
+    /// [`Origin::admit_with`], with `fault` called at each step of the pair's publication (a
+    /// test fails it there; production passes one that never fails).
+    fn admit_faulty(
+        &self,
+        trust: &Trust<'_>,
+        targets: &[String],
+        manifest_bytes: &[u8],
+        signature: &str,
+        blobs: &[&Path],
+        fault: &dyn Fn(PairStep) -> std::io::Result<()>,
+    ) -> Result<Admitted, AdmitError> {
         // Sizes before anything is parsed (parse_verified checks them too).
         if manifest_bytes.len() > MANIFEST_MAX_BYTES || signature.len() > SIGNATURE_MAX_BYTES {
-            return Err(AdmitError::Unverified(
-                "the manifest or its signature is over its size cap".into(),
-            ));
+            return Err(AdmitError::Unverified(UNVERIFIED_SIZE));
         }
         let m =
             ChannelManifest::parse_verified(manifest_bytes, signature, trust.pubkey, &trust.floor)
-                .map_err(|e| AdmitError::Unverified(format!("{e:#}")))?;
+                .map_err(|e| {
+                    debug_detail(UNVERIFIED_SIGNATURE, &e);
+                    AdmitError::Unverified(UNVERIFIED_SIGNATURE)
+                })?;
         let _w = self.write.lock().unwrap_or_else(|p| p.into_inner());
         if let Some(held) = self.held_manifest() {
             if held.release() > m.release() {
@@ -293,8 +363,16 @@ impl Origin {
                 None => unpinned.push(path.to_path_buf()),
             }
         }
-        let held_after =
-            |p: &Pin| kept.iter().any(|c| c.sha256 == p.sha256) || held_blob(&blob_dir, p);
+        // A blob already held counts only once hashed again (bounded by this manifest's pins
+        // for the served targets; a mismatch is removed and its target reported missing).
+        let copied = |p: &Pin| kept.iter().any(|c| c.sha256 == p.sha256);
+        let mut on_disk: BTreeSet<&str> = BTreeSet::new();
+        for p in &pins {
+            if !copied(p) && !on_disk.contains(p.sha256.as_str()) && verify_held(&blob_dir, p) {
+                on_disk.insert(&p.sha256);
+            }
+        }
+        let held_after = |p: &Pin| copied(p) || on_disk.contains(p.sha256.as_str());
         if !pins.iter().any(|p| p.target == own && held_after(p)) {
             return Err(AdmitError::OwnPayloadMissing(own));
         }
@@ -315,13 +393,7 @@ impl Origin {
         }
         cleanup.0.clear();
         crate::util::fs::fsync_dir(&blob_dir).map_err(|e| AdmitError::Io(format!("{e:#}")))?;
-        for (name, bytes) in [
-            (MANIFEST_NAME, manifest_bytes),
-            (SIGNATURE_NAME, signature.as_bytes()),
-        ] {
-            crate::util::fs::atomic_write(&self.dir.join(name), bytes, FILE_MODE)
-                .map_err(|e| AdmitError::Io(format!("{e:#}")))?;
-        }
+        publish_pair(&self.dir, manifest_bytes, signature.as_bytes(), fault)?;
         let keep: BTreeSet<String> = pins.iter().map(|p| p.sha256.clone()).collect();
         prune(&blob_dir, &keep);
         self.generation.fetch_add(1, Ordering::Relaxed);
@@ -423,10 +495,64 @@ fn make_dir(dir: &Path) -> Result<(), AdmitError> {
         .map_err(|e| io_err("create", dir, e))
 }
 
-/// Is the pin's blob already held (a regular file of the pinned size)?
-fn held_blob(blob_dir: &Path, p: &Pin) -> bool {
-    std::fs::symlink_metadata(blob_dir.join(&p.sha256))
-        .is_ok_and(|m| m.file_type().is_file() && m.len() == p.size)
+/// Open `path` for reading as every file here is opened ([`READ_FLAGS`]).
+fn open_read(path: &Path) -> std::io::Result<std::fs::File> {
+    std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(READ_FLAGS)
+        .open(path)
+}
+
+/// The sha256 (lowercase hex) of exactly `size` bytes read from `f`; `None` when the file
+/// holds more or fewer bytes, or a read fails.
+fn sha256_exact(
+    f: &mut std::fs::File,
+    size: u64,
+    mut sink: impl FnMut(&[u8]) -> bool,
+) -> Option<String> {
+    let mut hasher = sha2::Sha256::new();
+    let mut buf = vec![0u8; CHUNK];
+    let mut total: u64 = 0;
+    loop {
+        let n = f.read(&mut buf).ok()?;
+        if n == 0 {
+            break;
+        }
+        total += n as u64;
+        if total > size {
+            return None; // grew while read
+        }
+        hasher.update(&buf[..n]);
+        if !sink(&buf[..n]) {
+            return None;
+        }
+    }
+    (total == size).then(|| {
+        hasher
+            .finalize()
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect()
+    })
+}
+
+/// Is the pin's blob held, and do its bytes still hash to the pin (row D5b: a held blob is
+/// hashed again before it counts)? A file at the pinned name that is not a regular file of the
+/// pinned size and hash is removed (a symlink is removed, never followed). Blocking.
+fn verify_held(blob_dir: &Path, p: &Pin) -> bool {
+    let path = blob_dir.join(&p.sha256);
+    let ok = match open_read(&path) {
+        Ok(mut f) => {
+            f.metadata().is_ok_and(|m| m.is_file() && m.len() == p.size)
+                && sha256_exact(&mut f, p.size, |_| true).is_some_and(|h| h == p.sha256)
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return false,
+        Err(_) => false,
+    };
+    if !ok {
+        let _ = std::fs::remove_file(&path);
+    }
+    ok
 }
 
 /// Copy `src` into `blob_dir` under a temporary name, hashing the bytes as they are written.
@@ -434,7 +560,8 @@ fn held_blob(blob_dir: &Path, p: &Pin) -> bool {
 /// the file is not regular, its size matches no pin, it changed while read or its hash matches
 /// none. Only an I/O failure in `blob_dir` is an error.
 fn copy_hashed(src: &Path, blob_dir: &Path, pins: &[Pin]) -> Result<Option<Copied>, AdmitError> {
-    let Ok(mut from) = std::fs::File::open(src) else {
+    // As the serving side opens: no symlink, no blocking open (a FIFO), regular files only.
+    let Ok(mut from) = open_read(src) else {
         return Ok(None);
     };
     let Ok(meta) = from.metadata() else {
@@ -444,56 +571,111 @@ fn copy_hashed(src: &Path, blob_dir: &Path, pins: &[Pin]) -> Result<Option<Copie
     if !meta.is_file() || !pins.iter().any(|p| p.size == size) {
         return Ok(None);
     }
-    static COUNTER: AtomicU64 = AtomicU64::new(0);
-    let (mut to, tmp) = loop {
-        let n = COUNTER.fetch_add(1, Ordering::Relaxed);
-        let tmp = blob_dir.join(format!("{TMP_PREFIX}{}-{n}", std::process::id()));
-        match std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(FILE_MODE)
-            .custom_flags(libc::O_NOFOLLOW)
-            .open(&tmp)
-        {
-            Ok(f) => break (f, tmp),
-            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
-            Err(e) => return Err(io_err("create", &tmp, e)),
-        }
-    };
+    let (mut to, tmp) = create_tmp(blob_dir)?;
     let mut guard = TmpGuard(vec![tmp.clone()]);
-    let mut hasher = sha2::Sha256::new();
-    let mut buf = vec![0u8; CHUNK];
-    let mut total: u64 = 0;
-    loop {
-        let n = match from.read(&mut buf) {
-            Ok(n) => n,
-            Err(_) => return Ok(None),
-        };
-        if n == 0 {
-            break;
+    let mut write_err = None;
+    let hashed = sha256_exact(&mut from, size, |chunk| match to.write_all(chunk) {
+        Ok(()) => true,
+        Err(e) => {
+            write_err = Some(e);
+            false
         }
-        total += n as u64;
-        if total > size {
-            return Ok(None); // grew while read
-        }
-        hasher.update(&buf[..n]);
-        to.write_all(&buf[..n])
-            .map_err(|e| io_err("write", &tmp, e))?;
+    });
+    if let Some(e) = write_err {
+        return Err(io_err("write", &tmp, e));
     }
-    if total != size {
+    let Some(sha256) = hashed else {
         return Ok(None);
-    }
-    let sha256: String = hasher
-        .finalize()
-        .iter()
-        .map(|b| format!("{b:02x}"))
-        .collect();
+    };
     if !pins.iter().any(|p| p.sha256 == sha256 && p.size == size) {
         return Ok(None);
     }
     to.sync_all().map_err(|e| io_err("fsync", &tmp, e))?;
     guard.0.clear(); // the caller's guard owns it now
     Ok(Some(Copied { tmp, sha256 }))
+}
+
+/// The steps of [`publish_pair`] a test may fail.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PairStep {
+    /// Both temporary files are written and synced; nothing renamed yet.
+    Written,
+    /// The new signature is in place; the manifest is not.
+    SignatureRenamed,
+}
+
+/// A new file under `dir` with a temporary name (`.tmp-…`, never one of the served names),
+/// created exclusively, 0600, never through a symlink.
+fn create_tmp(dir: &Path) -> Result<(std::fs::File, PathBuf), AdmitError> {
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    loop {
+        let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+        let tmp = dir.join(format!("{TMP_PREFIX}{}-{n}", std::process::id()));
+        match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(FILE_MODE)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+            .open(&tmp)
+        {
+            Ok(f) => return Ok((f, tmp)),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(io_err("create", &tmp, e)),
+        }
+    }
+}
+
+/// `bytes` in a synced temporary file under `dir` (removed by `guard` unless renamed).
+fn write_tmp(dir: &Path, bytes: &[u8], guard: &mut TmpGuard) -> Result<PathBuf, AdmitError> {
+    let (mut f, tmp) = create_tmp(dir)?;
+    guard.0.push(tmp.clone());
+    f.write_all(bytes).map_err(|e| io_err("write", &tmp, e))?;
+    f.sync_all().map_err(|e| io_err("fsync", &tmp, e))?;
+    Ok(tmp)
+}
+
+/// Publish the manifest and its signature as one pair (§9.1, row D5b): both are written to
+/// temporary names and synced first; then the signature is renamed into place, then the
+/// manifest. The previous signature is kept under a hard link until the manifest's rename
+/// succeeded: a failure before it puts the previous signature back, so the previous pair (or
+/// none) stays served. A reader between the two renames may meet the new signature beside the
+/// old manifest; `parse_verified` refuses that pair and the reader tries again.
+fn publish_pair(
+    dir: &Path,
+    manifest: &[u8],
+    signature: &[u8],
+    fault: &dyn Fn(PairStep) -> std::io::Result<()>,
+) -> Result<(), AdmitError> {
+    let (sig_path, man_path) = (dir.join(SIGNATURE_NAME), dir.join(MANIFEST_NAME));
+    let mut guard = TmpGuard(Vec::new());
+    let tmp_man = write_tmp(dir, manifest, &mut guard)?;
+    let tmp_sig = write_tmp(dir, signature, &mut guard)?;
+    fault(PairStep::Written).map_err(|e| io_err("publish", dir, e))?;
+    // The previous signature, kept until the manifest is in place.
+    let previous = match std::fs::symlink_metadata(&sig_path) {
+        Ok(m) if m.is_file() => {
+            let (f, keep) = create_tmp(dir)?;
+            drop(f);
+            guard.0.push(keep.clone());
+            std::fs::remove_file(&keep).map_err(|e| io_err("remove", &keep, e))?;
+            std::fs::hard_link(&sig_path, &keep).map_err(|e| io_err("link", &keep, e))?;
+            Some(keep)
+        }
+        _ => None,
+    };
+    std::fs::rename(&tmp_sig, &sig_path).map_err(|e| io_err("rename", &sig_path, e))?;
+    let second =
+        fault(PairStep::SignatureRenamed).and_then(|()| std::fs::rename(&tmp_man, &man_path));
+    if let Err(e) = second {
+        // Put the previous signature back (or remove the new one when there was none).
+        let _ = match &previous {
+            Some(keep) => std::fs::rename(keep, &sig_path),
+            None => std::fs::remove_file(&sig_path),
+        };
+        return Err(io_err("rename", &man_path, e));
+    }
+    drop(guard); // the kept signature and nothing else is left to remove
+    crate::util::fs::fsync_dir(dir).map_err(|e| AdmitError::Io(format!("{e:#}")))
 }
 
 /// Remove every entry of `blob_dir` not named in `keep` (temporary files included). Returns the
@@ -531,11 +713,7 @@ fn walk_bytes(dir: &Path) -> u64 {
 
 /// A regular file of at most `max` bytes, read whole (only the manifest, ≤ 1 MiB, transiently).
 fn read_capped(path: &Path, max: u64) -> Option<Vec<u8>> {
-    let mut f = std::fs::OpenOptions::new()
-        .read(true)
-        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
-        .open(path)
-        .ok()?;
+    let mut f = open_read(path).ok()?;
     let m = f.metadata().ok()?;
     if !m.is_file() || m.len() > max {
         return None;
@@ -626,7 +804,7 @@ async fn serve_file(
     }
     let Ok(file) = tokio::fs::OpenOptions::new()
         .read(true)
-        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .custom_flags(READ_FLAGS)
         .open(path)
         .await
     else {
@@ -910,6 +1088,227 @@ mod tests {
             .unwrap();
         let want2 = m2.len() as u64 + s2.len() as u64 + std::fs::metadata(&p2).unwrap().len();
         assert_eq!(o.bytes(), want2);
+    }
+
+    /// Row D5b: a FIFO handed as a source blob is skipped at once (opened `O_NONBLOCK`, not a
+    /// regular file) instead of blocking the store with its write mutex held; a symlink is not
+    /// followed. Without the flags the FIFO's open waits for a writer forever.
+    #[test]
+    fn a_fifo_or_a_symlink_source_never_blocks_or_redirects() {
+        let d = tempfile::tempdir().unwrap();
+        let fifo = d.path().join("fifo");
+        let c = std::ffi::CString::new(fifo.as_os_str().as_encoded_bytes()).unwrap();
+        // SAFETY: a valid NUL-terminated path; mkfifo only creates the node.
+        assert_eq!(unsafe { libc::mkfifo(c.as_ptr(), 0o600) }, 0);
+        let p = payload(R1, "x86_64");
+        let link = d.path().join("link.bin");
+        std::os::unix::fs::symlink(&p, &link).unwrap();
+        let state = d.path().join("state");
+        let (tx, rx) = std::sync::mpsc::channel();
+        let (f, l, pp) = (fifo.clone(), link.clone(), p.clone());
+        std::thread::spawn(move || {
+            let o = Origin::new(&state);
+            let (m, s) = release(R1);
+            let _ = tx.send(o.admit_with(&trust(), &own(), &m, &s, &[&f, &l, &pp]));
+        });
+        let a = rx
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("admit returned (a FIFO source blocked it)")
+            .unwrap();
+        assert_eq!(a.unpinned, vec![fifo, link]);
+        assert_eq!(a.held, own());
+    }
+
+    /// Row D5b: the pair is published signature first, manifest second; a failure before the
+    /// manifest's rename leaves the previous pair served byte-exact (the previous signature is
+    /// put back), and no temporary file stays behind. With no previous pair, nothing is left.
+    #[test]
+    fn a_failed_publish_leaves_the_previous_pair() {
+        let d = tempfile::tempdir().unwrap();
+        let o = Origin::new(d.path());
+        let (m1, s1) = release(R1);
+        let (m2, s2) = release(R2);
+        let p1 = payload(R1, "x86_64");
+        let p2 = payload(R2, "x86_64");
+        let listing = |o: &Origin| -> BTreeSet<String> {
+            std::fs::read_dir(o.dir())
+                .unwrap()
+                .flatten()
+                .map(|e| e.file_name().to_string_lossy().into_owned())
+                .collect()
+        };
+        // No previous pair: a failure after the signature's rename leaves nothing served.
+        let fail_at = |at: PairStep| {
+            move |step: PairStep| {
+                if step == at {
+                    Err(std::io::Error::other("injected"))
+                } else {
+                    Ok(())
+                }
+            }
+        };
+        let e = o
+            .admit_faulty(
+                &trust(),
+                &own(),
+                &m1,
+                &s1,
+                &[&p1],
+                &fail_at(PairStep::SignatureRenamed),
+            )
+            .unwrap_err();
+        assert!(matches!(e, AdmitError::Io(_)), "{e}");
+        assert!(!o.dir().join(MANIFEST_NAME).exists());
+        assert!(
+            !o.dir().join(SIGNATURE_NAME).exists(),
+            "the new signature removed"
+        );
+        o.admit_with(&trust(), &own(), &m1, &s1, &[&p1]).unwrap();
+        for at in [PairStep::Written, PairStep::SignatureRenamed] {
+            let e = o
+                .admit_faulty(&trust(), &own(), &m2, &s2, &[&p2], &fail_at(at))
+                .unwrap_err();
+            assert!(matches!(e, AdmitError::Io(_)), "{at:?}: {e}");
+            assert_eq!(
+                std::fs::read(o.dir().join(MANIFEST_NAME)).unwrap(),
+                m1,
+                "{at:?}"
+            );
+            assert_eq!(
+                std::fs::read_to_string(o.dir().join(SIGNATURE_NAME)).unwrap(),
+                s1,
+                "{at:?}: the previous signature is served"
+            );
+            assert_eq!(
+                listing(&o),
+                BTreeSet::from([BLOB_DIR.into(), MANIFEST_NAME.into(), SIGNATURE_NAME.into()]),
+                "{at:?}: no temporary file left"
+            );
+            // The previous release's payload is still held (no prune ran).
+            assert!(blobs(&o).contains(&sha(&p1)), "{at:?}");
+        }
+        o.admit_with(&trust(), &own(), &m2, &s2, &[&p2]).unwrap();
+        assert_eq!(std::fs::read(o.dir().join(MANIFEST_NAME)).unwrap(), m2);
+        assert_eq!(
+            std::fs::read_to_string(o.dir().join(SIGNATURE_NAME)).unwrap(),
+            s2
+        );
+        assert_eq!(
+            listing(&o),
+            BTreeSet::from([BLOB_DIR.into(), MANIFEST_NAME.into(), SIGNATURE_NAME.into()])
+        );
+    }
+
+    /// Row D5b: a blob already held is hashed again before it counts. A held blob whose bytes
+    /// changed (same name, same size) is removed and its target reported missing; for the own
+    /// target the admission is refused (and the corrupt bytes are gone, so never served).
+    #[test]
+    fn a_held_blob_is_hashed_again() {
+        let d = tempfile::tempdir().unwrap();
+        let o = Origin::new(d.path());
+        let (m, s) = release(R1);
+        let (x, a) = (payload(R1, "x86_64"), payload(R1, "aarch64"));
+        let both = vec![X86.to_string(), ARM.to_string()];
+        o.admit_with(&trust(), &both, &m, &s, &[&x, &a]).unwrap();
+        let corrupt = |p: &Path| {
+            let at = o.dir().join(BLOB_DIR).join(sha(p));
+            let mut b = std::fs::read(&at).unwrap();
+            b[7] ^= 0x40;
+            std::fs::write(&at, b).unwrap();
+        };
+        // Another target's held blob changed: reported missing and removed.
+        corrupt(&a);
+        let r = o.admit_with(&trust(), &both, &m, &s, &[&x]).unwrap();
+        assert_eq!((r.held, r.missing), (own(), vec![ARM.to_string()]));
+        assert_eq!(blobs(&o), BTreeSet::from([sha(&x)]));
+        // The own target's held blob changed: refused, and the bad bytes removed.
+        corrupt(&x);
+        let e = o.admit_with(&trust(), &both, &m, &s, &[]).unwrap_err();
+        assert!(matches!(e, AdmitError::OwnPayloadMissing(_)), "{e}");
+        assert!(
+            blobs(&o).is_empty(),
+            "the corrupt blob is not left to be served"
+        );
+        // An intact held blob still counts without being given again.
+        o.admit_with(&trust(), &own(), &m, &s, &[&x]).unwrap();
+        let r = o.admit_with(&trust(), &own(), &m, &s, &[]).unwrap();
+        assert_eq!(r.held, own());
+        // A symlink at a pinned name is removed, never followed.
+        let at = o.dir().join(BLOB_DIR).join(sha(&x));
+        std::fs::remove_file(&at).unwrap();
+        std::os::unix::fs::symlink(&x, &at).unwrap();
+        let e = o.admit_with(&trust(), &own(), &m, &s, &[]).unwrap_err();
+        assert!(matches!(e, AdmitError::OwnPayloadMissing(_)), "{e}");
+        assert!(std::fs::symlink_metadata(&at).is_err());
+        assert!(x.exists(), "the target of the link is untouched");
+    }
+
+    /// Row D5b: `AdmitError::Unverified` carries a fixed reason per failure class, never the
+    /// parser's text (which can quote the offered bytes): whatever was offered, the error's
+    /// text is one of the three fixed sentences.
+    #[test]
+    fn unverified_carries_a_fixed_reason_only() {
+        let d = tempfile::tempdir().unwrap();
+        let o = Origin::new(d.path());
+        let (m, s) = release(R1);
+        let p = payload(R1, "x86_64");
+        let marker = "\u{1b}[31mEVIL-MARKER";
+        let mut bad_m = String::from_utf8(m.clone()).unwrap();
+        bad_m.insert_str(0, &format!("evil = \"{marker}\"\n"));
+        let bad_s = format!("untrusted comment: {marker}\n{marker}\n");
+        let cases: [(&[u8], &str, &str); 4] = [
+            (bad_m.as_bytes(), &s, UNVERIFIED_SIGNATURE),
+            (&m, &bad_s, UNVERIFIED_SIGNATURE),
+            (marker.as_bytes(), marker, UNVERIFIED_SIGNATURE),
+            (&m, &"x".repeat(SIGNATURE_MAX_BYTES + 1), UNVERIFIED_SIZE),
+        ];
+        for (mb, sb, want) in cases {
+            let e = o.admit_with(&trust(), &own(), mb, sb, &[&p]).unwrap_err();
+            assert!(matches!(e, AdmitError::Unverified(r) if r == want), "{e:?}");
+            let shown = format!("{e} {e:?}");
+            assert!(
+                !shown.contains("EVIL") && !shown.contains('\u{1b}'),
+                "{shown}"
+            );
+            assert_eq!(
+                e.to_string(),
+                format!("the manifest does not verify: {want}")
+            );
+        }
+        // The debug-only detail is escaped and capped.
+        let shown = log_safe(&format!("{marker}\n{}", "y".repeat(400)));
+        assert!(
+            !shown.contains('\u{1b}') && !shown.contains('\n'),
+            "{shown}"
+        );
+        assert_eq!(shown.chars().count(), DETAIL_MAX + 1);
+    }
+
+    /// Row D5b: a body of several frames streams byte-exact, each frame at most [`CHUNK`]
+    /// bytes, and a length shorter than the file stops exactly there, across a frame boundary.
+    #[tokio::test]
+    async fn a_body_streams_over_several_frames() {
+        use futures_util::StreamExt;
+        async fn frames(path: &Path, len: u64) -> Vec<Bytes> {
+            let f = tokio::fs::File::open(path).await.unwrap();
+            stream_body(f, len)
+                .into_data_stream()
+                .map(|r| r.unwrap())
+                .collect()
+                .await
+        }
+        let d = tempfile::tempdir().unwrap();
+        let path = d.path().join("big.bin");
+        let want: Vec<u8> = (0..5 * CHUNK + 1_234).map(|i| (i % 251) as u8).collect();
+        std::fs::write(&path, &want).unwrap();
+        let got = frames(&path, want.len() as u64).await;
+        assert!(got.len() >= 6, "{} frames", got.len());
+        assert!(got.iter().all(|f| !f.is_empty() && f.len() <= CHUNK));
+        assert_eq!(got.concat(), want, "byte-exact");
+        let cut = CHUNK as u64 + 10;
+        let got = frames(&path, cut).await;
+        assert!(got.len() >= 2, "{} frames", got.len());
+        assert_eq!(got.concat(), want[..cut as usize].to_vec());
     }
 
     #[test]

@@ -12,7 +12,9 @@
 //! - a missing, unpinned, planted or misnamed blob 404s; another target's payload is held and
 //!   served only when `origin.targets` lists it;
 //! - `Origin::admit` refuses unverified bytes and serves nothing then; `Origin::bytes` is the
-//!   size of `state/origin/`.
+//!   size of `state/origin/`;
+//! - one `Origin` per process: first callers racing on `Origin::shared` share one store (row
+//!   D5b).
 //!
 //! Fixtures: `tests/fixtures/l7-D7/` (two releases signed by the compiled DEV key; its README).
 
@@ -423,6 +425,44 @@ async fn another_target_only_from_origin_targets() {
     assert_eq!(get(port, &format!("/origin/v1/blob/{gone}")).status, 404);
     let [_, _, bp] = paths();
     assert_eq!(get(port, &bp).status, 200);
+}
+
+/// Row D5b: `Origin::shared` registers one store per process even when its first callers
+/// race (the look-up and the insert under one lock): every caller gets the same `Arc`, so one
+/// write mutex serializes every admission. Many rounds of eight threads released together.
+#[test]
+fn first_callers_share_one_origin() {
+    const THREADS: usize = 8;
+    for round in 0..200 {
+        let dir = tempfile::tempdir().unwrap();
+        let layout = DaemonLayout {
+            root: dir.path().to_path_buf(),
+            etc: dir.path().join("etc"),
+        };
+        let mut cfg = ApiConfig::new(layout, false);
+        cfg.persist_auth = false;
+        let api = ApiState::new(
+            Arc::new(RwLock::new(DashboardState::new("2026.10.14"))),
+            cfg,
+        );
+        let gate = Arc::new(std::sync::Barrier::new(THREADS));
+        let got: Vec<Arc<Origin>> = std::thread::scope(|s| {
+            let hs: Vec<_> = (0..THREADS)
+                .map(|_| {
+                    let (api, gate) = (Arc::clone(&api), Arc::clone(&gate));
+                    s.spawn(move || {
+                        gate.wait();
+                        Origin::shared(&api)
+                    })
+                })
+                .collect();
+            hs.into_iter().map(|h| h.join().unwrap()).collect()
+        });
+        let kept = Origin::shared(&api);
+        for o in &got {
+            assert!(Arc::ptr_eq(o, &kept), "round {round}: two stores");
+        }
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

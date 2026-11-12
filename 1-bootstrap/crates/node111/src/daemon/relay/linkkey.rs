@@ -24,16 +24,20 @@
 //!   onto a new device has no link key and mints one at its next pairing.
 //! - **Re-minted after a restore** (§4.2): [`discard`] removes the key so the
 //!   next pairing mints a fresh one; the far hubs then re-pin it from a fresh
-//!   bundle. The restore path (`111 identity restore`, `NI/cli.rs`) is the
-//!   caller (a Layer 1 line, recorded for the lead in row D5).
+//!   bundle. `111 identity restore` (`NI/cli.rs`, row D5b) calls it right
+//!   after a successful restore; its error is logged, not fatal (the
+//!   identity is already restored).
 //!
 //! Nothing here runs, opens or allocates until a caller asks: the TLS wrap
-//! (`relay::tls`) reads the key at its first TLS handshake only, and the
-//! pairing path mints it. No process, timer, thread or open file.
+//! (`relay::tls`) reads the key at its first TLS handshake and again only
+//! when the file changed (one `lstat` per handshake against the stamp it
+//! kept, and [`generation`] for a mint or discard made in this process), and
+//! the pairing path mints it. No process, timer, thread or open file.
 
 use crate::daemon::fabric::settings::LinkSpki;
 use rustls::pki_types::{CertificateDer, PrivatePkcs8KeyDer};
 use rustls::sign::{CertifiedKey, SigningKey};
+use std::collections::BTreeMap;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -56,6 +60,27 @@ const PKCS8_ED25519_PREFIX: [u8; 16] = [
 /// Mints and discards run one at a time in this process, so two pairings
 /// started together never show two different keys (only the daemon mints).
 static WRITE_LOCK: Mutex<()> = Mutex::new(());
+
+/// Per key file (`<root>/secrets/link-key`), bumped by every mint and every
+/// [`discard`] of it in this process: the TLS wrap's cache key beside the
+/// file's stamp (a change by another process is seen through the stamp
+/// alone). One entry per node root (one in the daemon).
+static GENERATIONS: Mutex<BTreeMap<PathBuf, u64>> = Mutex::new(BTreeMap::new());
+
+fn bump(root: &Path) {
+    let mut g = GENERATIONS.lock().unwrap_or_else(|e| e.into_inner());
+    let n = g.entry(path(root)).or_insert(0);
+    *n = n.wrapping_add(1);
+}
+
+/// The in-process change counter of the link key under `root` (bumped by a
+/// mint and by [`discard`] of that file; 0 before either); equality only,
+/// never an ordering. A key under another root never moves it.
+pub fn generation(root: &Path) -> u64 {
+    let key = path(root);
+    let g = GENERATIONS.lock().unwrap_or_else(|e| e.into_inner());
+    g.get(&key).copied().unwrap_or(0)
+}
 
 /// Why the link key could not be read or minted.
 #[derive(Debug)]
@@ -150,8 +175,11 @@ impl LinkKey {
             text.push(hex_digit(b & 0x0f));
         }
         text.push('\n');
-        crate::util::fs::atomic_write(&path(root), text.as_bytes(), 0o600)
-            .map_err(|e| LinkKeyError::Io(std::io::Error::other(format!("{e:#}"))))?;
+        let written = crate::util::fs::atomic_write(&path(root), text.as_bytes(), 0o600);
+        // Bumped whatever the outcome: a failed rename may still have moved
+        // the file (the wrap then re-reads it, which costs one load).
+        bump(root);
+        written.map_err(|e| LinkKeyError::Io(std::io::Error::other(format!("{e:#}"))))?;
         Ok(key)
     }
 
@@ -197,7 +225,9 @@ impl LinkKey {
 /// there was none. A symlink at the path is removed, never followed.
 pub fn discard(root: &Path) -> std::io::Result<bool> {
     let _one = WRITE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    match std::fs::remove_file(path(root)) {
+    let removed = std::fs::remove_file(path(root));
+    bump(root);
+    match removed {
         Ok(()) => Ok(true),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
         Err(e) => Err(e),
@@ -439,6 +469,27 @@ mod tests {
         assert!(LinkKey::load(d.path()).unwrap().is_none());
         let new = LinkKey::load_or_mint(d.path()).unwrap();
         assert_ne!(new.spki(), old.spki());
+    }
+
+    /// The in-process change counter moves on every mint and discard (the
+    /// TLS wrap's cache key, row D5b) and not on a load.
+    #[test]
+    fn mint_and_discard_bump_the_generation() {
+        let d = tempfile::tempdir().unwrap();
+        let other = tempfile::tempdir().unwrap();
+        assert_eq!(generation(d.path()), 0);
+        LinkKey::load_or_mint(d.path()).unwrap();
+        assert_eq!(generation(d.path()), 1, "a mint bumps it");
+        LinkKey::load(d.path()).unwrap().unwrap();
+        LinkKey::load_or_mint(d.path()).unwrap(); // a load, no mint
+        assert_eq!(generation(d.path()), 1, "a load does not");
+        LinkKey::load_or_mint(other.path()).unwrap();
+        assert!(discard(other.path()).unwrap());
+        assert_eq!(generation(d.path()), 1, "another root's key never moves it");
+        assert!(discard(d.path()).unwrap());
+        assert_eq!(generation(d.path()), 2, "a discard bumps it");
+        assert!(!discard(d.path()).unwrap());
+        assert_eq!(generation(d.path()), 3, "a discard of nothing too");
     }
 
     /// The RFC 7250 identity rustls presents is the SPKI itself.

@@ -195,6 +195,20 @@ impl ApiState {
     pub fn ext<T: Clone + Send + Sync + 'static>(&self) -> Option<T> {
         self.ext.read().unwrap().get::<T>().cloned()
     }
+
+    /// Read a submodule's shared state, inserting `make()` first when there
+    /// is none: the look-up and the insert run under one write lock, so two
+    /// first callers get the same value (Layer 7 row D5b: one `Origin` per
+    /// process). The common case (already there) takes the read lock only.
+    pub fn ext_or_insert_with<T: Clone + Send + Sync + 'static>(
+        &self,
+        make: impl FnOnce() -> T,
+    ) -> T {
+        if let Some(v) = self.ext::<T>() {
+            return v;
+        }
+        self.ext.write().unwrap().get_or_insert_with(make).clone()
+    }
 }
 
 /// RFC 9457 `application/problem+json` envelope (`Problem` schema; `code` is the

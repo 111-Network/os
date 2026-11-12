@@ -19,7 +19,9 @@
 
 use id111::announce::Announce;
 use id111::keyset::{Keyset, NodeId};
-use mesh111::link::tcp_lan::{encode_frame, read_frame, read_hello, TcpLan, TcpLanConfig};
+use mesh111::link::tcp_lan::{
+    encode_frame, read_frame, read_hello, StreamWrap, TcpLan, TcpLanConfig,
+};
 use mesh111::link::tcp_lan::{HELLO, T_ANNOUNCE};
 use mesh111::link::{AdmitAll, Dialer, Frame, Link, LinkEvent, LinkId, PeerAddr};
 use node111::daemon::fabric::settings::{LinkSpki, PairLink, PairTable};
@@ -708,7 +710,9 @@ async fn a_wrong_server_key_is_refused_before_any_111_byte() {
 }
 
 /// §4.3 "no X.509": an X.509 certificate is refused on both sides, even one
-/// whose key is the pinned key (the certificate type is negotiated first).
+/// whose key is the pinned key, before any 111 byte. Which check refuses is
+/// pinned by `each_refusal_is_the_checks_own_error` (the certificate type,
+/// negotiated first); this test shows the end-to-end outcome only.
 #[tokio::test]
 async fn an_x509_certificate_is_refused_both_ways() {
     let a = Hub::keyed(1);
@@ -727,7 +731,10 @@ async fn an_x509_certificate_is_refused_both_ways() {
     a.lan.shutdown();
 }
 
-/// §4.3 "TLS 1.3 only": a TLS 1.2 client and a TLS 1.2 server are refused.
+/// §4.3 "TLS 1.3 only": a TLS 1.2 client and a TLS 1.2 server are refused,
+/// before any 111 byte. TLS 1.3 is guarded twice (the version list and the
+/// TLS 1.3-only provider; removing one alone changes nothing here), each
+/// pinned by `relay::tls`'s unit test `tls13_only_by_both_guards`.
 #[tokio::test]
 async fn tls12_is_refused_both_ways() {
     let a = Hub::keyed(1);
@@ -744,7 +751,12 @@ async fn tls12_is_refused_both_ways() {
     a.lan.shutdown();
 }
 
-/// §4.3 "Ed25519 only": an ECDSA P-256 raw public key is refused both ways.
+/// §4.3 "Ed25519 only": an ECDSA P-256 raw public key is refused both ways,
+/// before any 111 byte. Here the pin comparison refuses it first (an Ed25519
+/// pin never equals an ECDSA SPKI), so this test cannot see the scheme
+/// check; that check is isolated in `relay::tls`'s unit test
+/// `the_scheme_check_refuses_a_valid_non_ed25519_signature` (a valid ECDSA
+/// signature over a key handed in as if pinned).
 #[tokio::test]
 async fn a_non_ed25519_key_is_refused_both_ways() {
     let a = Hub::keyed(1);
@@ -755,6 +767,131 @@ async fn a_non_ed25519_key_is_refused_both_ways() {
     let (sat, server) = raw_server(rpk_server(ecdsa())).await;
     refused_by_the_dialer(&mut b, ident(5).0, a.spki(), sat, server).await;
     a.lan.shutdown();
+}
+
+/// The rustls error inside an `io::Error` from the wrap or a raw peer.
+fn rustls_err(e: &std::io::Error) -> Option<rustls::Error> {
+    e.get_ref()
+        .and_then(|i| i.downcast_ref::<rustls::Error>())
+        .cloned()
+}
+
+/// A raw client `cfg` dials `w`'s inbound side: the wrap's error.
+async fn inbound_refusal(w: &dyn StreamWrap, cfg: ClientConfig) -> Option<rustls::Error> {
+    let l = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let client = tokio::spawn(raw_attempt(l.local_addr().unwrap(), cfg));
+    let (s, remote) = l.accept().await.unwrap();
+    let e = w.inbound(remote, s).await.err().expect("refused");
+    assert_eq!(client.await.unwrap(), Vec::<u8>::new(), "no 111 byte");
+    rustls_err(&e)
+}
+
+/// `w` dials a raw server `cfg` as pair `far` pinned to `pin`: the wrap's
+/// error and the far server's.
+async fn outbound_refusal(
+    root: &Path,
+    far: NodeId,
+    pin: LinkSpki,
+    cfg: ServerConfig,
+) -> (Option<rustls::Error>, Option<rustls::Error>) {
+    let l = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let at = l.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        let (tcp, _) = l.accept().await.unwrap();
+        let r = tokio_rustls::TlsAcceptor::from(Arc::new(cfg))
+            .accept(tcp)
+            .await;
+        r.err().and_then(|e| rustls_err(&e))
+    });
+    let pairs: PairTable = Arc::new(RwLock::new(vec![PairLink {
+        address: Some(at),
+        link_spki: Some(pin),
+        ..PairLink::new(far)
+    }]));
+    let w = tls::wrap(&root.join("fabric"), &pairs).unwrap();
+    let tcp = TcpStream::connect(at).await.unwrap();
+    let e = w.outbound(at, Some(far), tcp).await.err().expect("refused");
+    (rustls_err(&e), server.await.unwrap())
+}
+
+/// §4.3, row D5b: each refusal carries the error of the check that makes
+/// it, at the wrap, so removing that check changes the error and fails this
+/// test (checked by mutation on 2026-11-12: with the client-certificate-type
+/// check off, an X.509 client certificate reaches the pin comparison and
+/// fails as `InvalidCertificate(ApplicationVerificationFailure)` instead).
+/// - Inbound, an X.509 client that asks for this hub's raw key: the
+///   client-certificate type (`PinnedClients::requires_raw_public_keys`),
+///   `PeerIncompatible(IncorrectCertificateTypeExtension)`.
+/// - Inbound, an X.509 client that does not: the server-certificate type
+///   (raw keys only), the same error.
+/// - Inbound, TLS 1.2: `PeerIncompatible(Tls12NotOfferedOrEnabled)` (two
+///   guards; see `tls12_is_refused_both_ways`).
+/// - Inbound, an unpinned raw key: the pin comparison,
+///   `InvalidCertificate(ApplicationVerificationFailure)`.
+/// - Outbound, an X.509 server: this hub's hello offers raw keys only, and
+///   the far rustls server refuses it (`IncorrectCertificateTypeExtension`
+///   there, `AlertReceived(HandshakeFailure)` here). A far end that ignored
+///   the offer and sent a certificate would meet the pin comparison (a 44 B
+///   SPKI never equals a certificate); `requires_raw_public_keys` on both
+///   verifiers is asserted in `relay::tls`'s unit tests.
+/// - Outbound, a TLS 1.2 server: `AlertReceived(ProtocolVersion)` here,
+///   `Tls12NotOfferedOrEnabled` there.
+#[tokio::test]
+async fn each_refusal_is_the_checks_own_error() {
+    use rustls::{AlertDescription, CertificateError, Error, PeerIncompatible};
+    let root = tempfile::tempdir().unwrap();
+    LinkKey::load_or_mint(root.path()).unwrap();
+    let far = ident(5).0;
+    let pinned = spki_of(&ed25519(&unhex32(RFC8032_SEED)));
+    let pairs: PairTable = Arc::new(RwLock::new(vec![PairLink {
+        link_spki: Some(pinned),
+        ..PairLink::new(far)
+    }]));
+    let w = tls::wrap(&root.path().join("fabric"), &pairs).unwrap();
+    let cert_type = Some(Error::PeerIncompatible(
+        PeerIncompatible::IncorrectCertificateTypeExtension,
+    ));
+    let tls13 = &[&rustls::version::TLS13][..];
+    let tls12 = &[&rustls::version::TLS12][..];
+    assert_eq!(
+        inbound_refusal(w.as_ref(), x509_client(tls13, true)).await,
+        cert_type,
+        "the client-certificate type"
+    );
+    assert_eq!(
+        inbound_refusal(w.as_ref(), x509_client(tls13, false)).await,
+        cert_type,
+        "the server-certificate type"
+    );
+    assert_eq!(
+        inbound_refusal(w.as_ref(), x509_client(tls12, false)).await,
+        Some(Error::PeerIncompatible(
+            PeerIncompatible::Tls12NotOfferedOrEnabled
+        ))
+    );
+    assert_eq!(
+        inbound_refusal(w.as_ref(), rpk_client(ed25519(&[0x47; 32]))).await,
+        Some(Error::InvalidCertificate(
+            CertificateError::ApplicationVerificationFailure
+        )),
+        "the pin comparison"
+    );
+    assert_eq!(
+        outbound_refusal(root.path(), far, pinned, x509_server(tls13)).await,
+        (
+            Some(Error::AlertReceived(AlertDescription::HandshakeFailure)),
+            cert_type
+        )
+    );
+    assert_eq!(
+        outbound_refusal(root.path(), far, pinned, x509_server(tls12)).await,
+        (
+            Some(Error::AlertReceived(AlertDescription::ProtocolVersion)),
+            Some(Error::PeerIncompatible(
+                PeerIncompatible::Tls12NotOfferedOrEnabled
+            ))
+        )
+    );
 }
 
 /// S7 (§4.4): a TLS peer whose key matched pair B and whose first announce

@@ -11,9 +11,11 @@
 //!   `lan = true`; otherwise it runs inside TLS with the pinned link key, and
 //!   a non-private pair with no pinned key runs plain only when its
 //!   `pair_plain` warning hash is recorded, else the dial is refused before
-//!   any byte (rule 4). Loopback is never a peer (`tcp-lan` refuses it by
-//!   default), so it is not private here: a test that turns the refusal off
-//!   gets TLS over loopback.
+//!   any byte (rule 4). Loopback (`127.0.0.0/8`, `::1`) is not private: §4.1
+//!   lists RFC 1918, RFC 6598, ULA and link-local only (the lead's ruling,
+//!   row D5b). It is never a peer either (`tcp-lan` refuses it by default),
+//!   so a test that turns that refusal off gets TLS over loopback, or marks
+//!   the pair `lan = true` for plain.
 //! - **Inbound** on `:11183` (rule 2): with no pinned pair at all the stream
 //!   passes through untouched (nothing is read first, so the wire and its
 //!   order are what they were: the listener's hello and announce go first,
@@ -26,6 +28,13 @@
 //!   unpinned one ends the handshake, before any 111 byte. The wrap names the
 //!   pair whose pinned SPKI matched (S7), and `tcp-lan` refuses a first
 //!   announce naming another NodeId.
+//! - **The peek runs whenever any pair holds a pin, a `lan` pair's
+//!   included** (the lead's ruling, row D5b; a declared exception to the D5
+//!   row's "no weight before a non-LAN pair"). `lan` is this hub's own mark:
+//!   the far hub may not have marked the pair `lan` and then dials TLS, and
+//!   refusing its `0x16` would break a valid pairing. The cost on a hub
+//!   whose pairs are all `lan`: one `peek` per inbound connection; no file is
+//!   read and no TLS state is built until a `0x16` arrives.
 //!
 //! **The configuration (§4.3, normative).** TLS 1.3 only (the provider keeps
 //! only the TLS 1.3 suites and both builders take `TLS13` alone); Ed25519
@@ -50,8 +59,17 @@
 //! restart. While no pair holds a pinned key, its calls box the `TcpStream`
 //! and return it: no peek, no file read, no TLS state. The link key and the
 //! rustls configurations are read and built at the first TLS handshake and
-//! kept (rebuilt only when the key file changed). No process, thread, timer
-//! or listener.
+//! kept: every later handshake costs one `lstat` of `secrets/link-key`,
+//! compared with the stamp taken at the load (device, inode, length, mtime,
+//! ctime) and the key file's in-process generation (`linkkey::generation`,
+//! bumped by a mint and a discard of it). The file is read, hex-decoded and the
+//! key derived again only when one of them changed (row D5b: before it, any
+//! host reaching the fabric port could make the hub do that work with one
+//! `0x16` byte). A missing key drops the cached state. The residual: a
+//! rewrite in place by another process, of the same length, within one tick
+//! of the kernel's file-time clock after the previous write, is seen only at
+//! the file's next change (nothing of ours writes it that way: a mint is an
+//! atomic rename, a new inode). No process, thread, timer or listener.
 //!
 //! **Buffered writes.** `tcp-lan`'s writer never flushes (a `TcpStream` has
 //! nothing to flush), while rustls may keep the tail of a write when the
@@ -62,7 +80,7 @@
 //! writer parked on a full TLS buffer; the reader hands it on once its flush
 //! completes.
 
-use super::linkkey::LinkKey;
+use super::linkkey::{self, LinkKey};
 use crate::daemon::fabric::settings::{LinkSpki, PairLink, PairTable};
 use futures_util::future::BoxFuture;
 use id111::keyset::NodeId;
@@ -79,8 +97,10 @@ use rustls::{
 };
 use std::io;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::task::{ready, Context, Poll, Waker};
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
@@ -90,6 +110,10 @@ use tokio::net::TcpStream;
 pub const TLS_HANDSHAKE_RECORD: u8 = 0x16;
 /// The first byte of the `111F` hello (§4.1 rule 2; L5 §8.1).
 pub const PLAIN_HELLO_FIRST: u8 = mesh111::link::tcp_lan::HELLO[0];
+
+/// The protocol versions both builders take (§4.3: TLS 1.3 only; the
+/// provider keeps only TLS 1.3 suites as a second guard).
+const TLS_VERSIONS: &[&rustls::SupportedProtocolVersion] = &[&rustls::version::TLS13];
 
 /// The one signature scheme either side accepts (§4.3: Ed25519 only).
 const SCHEMES: [SignatureScheme; 1] = [SignatureScheme::ED25519];
@@ -317,8 +341,6 @@ fn provider() -> Arc<CryptoProvider> {
 
 /// The TLS state of one link key, built at the first TLS handshake.
 struct TlsState {
-    /// The own key's SPKI (the cache key: a re-minted key rebuilds).
-    spki: LinkSpki,
     provider: Arc<CryptoProvider>,
     resolver_client: Arc<AlwaysResolvesClientRawPublicKeys>,
     server: Arc<ServerConfig>,
@@ -330,7 +352,7 @@ impl TlsState {
         let algs = provider.signature_verification_algorithms;
         let certified = key.certified();
         let mut server = ServerConfig::builder_with_provider(Arc::clone(&provider))
-            .with_protocol_versions(&[&rustls::version::TLS13])?
+            .with_protocol_versions(TLS_VERSIONS)?
             .with_client_cert_verifier(Arc::new(PinnedClients {
                 pairs: Arc::clone(pairs),
                 algs,
@@ -342,7 +364,6 @@ impl TlsState {
         server.send_tls13_tickets = 0;
         server.max_early_data_size = 0;
         Ok(TlsState {
-            spki: *key.spki(),
             provider,
             resolver_client: Arc::new(AlwaysResolvesClientRawPublicKeys::new(certified)),
             server: Arc::new(server),
@@ -352,7 +373,7 @@ impl TlsState {
     /// A client configuration for one dial, the far hub pinned to `pin`.
     fn client(&self, pin: LinkSpki) -> Result<Arc<ClientConfig>, rustls::Error> {
         let mut c = ClientConfig::builder_with_provider(Arc::clone(&self.provider))
-            .with_protocol_versions(&[&rustls::version::TLS13])?
+            .with_protocol_versions(TLS_VERSIONS)?
             .dangerous()
             .with_custom_certificate_verifier(Arc::new(PinnedServer {
                 pin,
@@ -370,6 +391,40 @@ fn io_err(kind: io::ErrorKind, what: impl std::fmt::Display) -> io::Error {
     io::Error::new(kind, what.to_string())
 }
 
+/// What `secrets/link-key` was when it was last loaded (module doc,
+/// "Weight"): compared for equality only, never ordered (no clock decides
+/// anything here; a changed time only forces one more read).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct KeyStamp {
+    /// `linkkey::generation(root)` (a mint or discard of this file in this
+    /// process).
+    generation: u64,
+    dev: u64,
+    ino: u64,
+    len: u64,
+    mtime: (i64, i64),
+    ctime: (i64, i64),
+}
+
+impl KeyStamp {
+    fn of(m: &std::fs::Metadata, generation: u64) -> KeyStamp {
+        KeyStamp {
+            generation,
+            dev: m.dev(),
+            ino: m.ino(),
+            len: m.len(),
+            mtime: (m.mtime(), m.mtime_nsec()),
+            ctime: (m.ctime(), m.ctime_nsec()),
+        }
+    }
+}
+
+/// The TLS state kept for the key file as stamped.
+struct Cached {
+    stamp: KeyStamp,
+    state: Arc<TlsState>,
+}
+
 /// The `tcp-lan` stream wrap (§4.4): the rules of §4.1 over the live pair
 /// table, TLS through `tokio-rustls` where they ask for it.
 pub struct RpkWrap {
@@ -377,8 +432,11 @@ pub struct RpkWrap {
     root: PathBuf,
     /// The daemon's live pairing table (M5).
     pairs: PairTable,
-    /// Built at the first TLS handshake (module doc, "Weight").
-    tls: Mutex<Option<Arc<TlsState>>>,
+    /// Built at the first TLS handshake and kept until the key file
+    /// changes (module doc, "Weight").
+    tls: Mutex<Option<Cached>>,
+    /// How many times the key file was read (the cache's own counter).
+    key_loads: AtomicU64,
 }
 
 impl std::fmt::Debug for RpkWrap {
@@ -397,7 +455,14 @@ impl RpkWrap {
             root,
             pairs,
             tls: Mutex::new(None),
+            key_loads: AtomicU64::new(0),
         }
+    }
+
+    /// How many times this wrap read and decoded `secrets/link-key` (module
+    /// doc, "Weight": once per key file, not once per handshake).
+    pub fn key_loads(&self) -> u64 {
+        self.key_loads.load(Ordering::SeqCst)
     }
 
     /// Whether the TLS state exists (it does only after a TLS handshake).
@@ -414,21 +479,44 @@ impl RpkWrap {
             .unwrap_or(true)
     }
 
-    /// The TLS state for the stored link key; rebuilt when the key changed.
-    /// No key ⇒ an error: TLS cannot run before this hub's first pairing.
+    /// The TLS state for the stored link key (module doc, "Weight"): one
+    /// `lstat` against the kept stamp; the file is read and the state rebuilt
+    /// only when the stamp or the generation changed. The lock is held across
+    /// a reload, so handshakes that arrive together read the file once. No
+    /// key ⇒ an error and nothing kept: TLS cannot run before this hub's
+    /// first pairing.
     fn tls(&self) -> io::Result<Arc<TlsState>> {
+        let mut held = self.tls.lock().unwrap_or_else(|e| e.into_inner());
+        // The generation before the stat: a mint racing this call leaves a
+        // stale pair, which only forces one more read next time.
+        let generation = linkkey::generation(&self.root);
+        let stamp = match std::fs::symlink_metadata(linkkey::path(&self.root)) {
+            Ok(m) => KeyStamp::of(&m, generation),
+            Err(e) => {
+                *held = None;
+                return Err(if e.kind() == io::ErrorKind::NotFound {
+                    io_err(io::ErrorKind::NotFound, "no link key")
+                } else {
+                    io_err(io::ErrorKind::PermissionDenied, e)
+                });
+            }
+        };
+        if let Some(c) = held.as_ref().filter(|c| c.stamp == stamp) {
+            return Ok(Arc::clone(&c.state));
+        }
+        *held = None;
+        self.key_loads.fetch_add(1, Ordering::SeqCst);
         let key = LinkKey::load(&self.root)
             .map_err(|e| io_err(io::ErrorKind::PermissionDenied, e))?
             .ok_or_else(|| io_err(io::ErrorKind::NotFound, "no link key"))?;
-        let mut held = self.tls.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some(s) = held.as_ref().filter(|s| s.spki == *key.spki()) {
-            return Ok(Arc::clone(s));
-        }
-        let s = Arc::new(
+        let state = Arc::new(
             TlsState::new(&key, &self.pairs).map_err(|e| io_err(io::ErrorKind::Other, e))?,
         );
-        *held = Some(Arc::clone(&s));
-        Ok(s)
+        *held = Some(Cached {
+            stamp,
+            state: Arc::clone(&state),
+        });
+        Ok(state)
     }
 
     async fn accept(&self, stream: TcpStream) -> io::Result<(BoxedStream, Option<NodeId>)> {
@@ -674,14 +762,26 @@ mod tests {
             "100.128.0.1",
             "100.63.255.255",
             "8.8.8.8",
-            "127.0.0.1",
-            "::1",
             "2001:db8::1",
             "fec0::1",
             "::ffff:203.0.113.7",
             "0.0.0.0",
         ] {
             assert!(!is_private(p.parse().unwrap()), "{p}");
+        }
+        // Loopback is NOT private (the lead's ruling, row D5b): §4.1 lists
+        // RFC 1918, RFC 6598, ULA and link-local only. A loopback pair runs
+        // TLS, or plain only when marked `lan = true`.
+        for p in [
+            "127.0.0.1",
+            "127.1.2.3",
+            "127.255.255.254",
+            "::1",
+            "::ffff:127.0.0.1",
+        ] {
+            let ip: IpAddr = p.parse().unwrap();
+            assert!(ip.to_canonical().is_loopback(), "{p}");
+            assert!(!is_private(ip), "loopback is not private: {p}");
         }
     }
 
@@ -792,9 +892,8 @@ mod tests {
         assert!(v
             .verify_server_cert(&ok, std::slice::from_ref(&ok), &name, &[], now)
             .is_err());
-        // The scheme check (Ed25519 only) runs in the handshake tests
-        // (`tests/relay_tls.rs`: an ECDSA peer); a `DigitallySignedStruct`
-        // cannot be built outside rustls.
+        // The scheme check (Ed25519 only) is isolated in
+        // `the_scheme_check_refuses_a_valid_non_ed25519_signature`.
         assert_eq!(v.supported_verify_schemes(), vec![SignatureScheme::ED25519]);
         assert!(v.requires_raw_public_keys());
     }
@@ -821,6 +920,90 @@ mod tests {
             v.verify_client_cert(&c, &[], now).is_err(),
             "unpinned at once"
         );
+    }
+
+    /// §4.3 "TLS 1.3 only", each guard pinned on its own (row D5b): either
+    /// alone refuses a TLS 1.2 peer, so the end-to-end refusal cannot tell
+    /// whether one was removed. The version list both builders take is TLS
+    /// 1.3 alone, and the provider keeps TLS 1.3 suites only.
+    #[test]
+    fn tls13_only_by_both_guards() {
+        let versions: Vec<_> = TLS_VERSIONS.iter().map(|v| v.version).collect();
+        assert_eq!(versions, vec![rustls::ProtocolVersion::TLSv1_3]);
+        let p = provider();
+        assert!(!p.cipher_suites.is_empty());
+        assert!(p
+            .cipher_suites
+            .iter()
+            .all(|s| matches!(s, SupportedCipherSuite::Tls13(_))));
+    }
+
+    /// A `DigitallySignedStruct` as the wire carries it (scheme, u16 length,
+    /// signature), read through rustls's own codec (`rustls::internal`, the
+    /// one way to build it outside rustls; test-only).
+    fn dss(scheme: SignatureScheme, sig: &[u8]) -> DigitallySignedStruct {
+        use rustls::internal::msgs::codec::Codec;
+        let mut wire = u16::from(scheme).to_be_bytes().to_vec();
+        wire.extend_from_slice(&u16::try_from(sig.len()).unwrap().to_be_bytes());
+        wire.extend_from_slice(sig);
+        DigitallySignedStruct::read_bytes(&wire).unwrap()
+    }
+
+    /// A raw-public-key identity's signature over `msg` with `scheme`.
+    fn signed(key: &dyn rustls::sign::SigningKey, scheme: SignatureScheme, msg: &[u8]) -> Vec<u8> {
+        key.choose_scheme(&[scheme]).unwrap().sign(msg).unwrap()
+    }
+
+    /// §4.3 "Ed25519 only", isolated (row D5b): an ECDSA P-256 key whose
+    /// signature over the handshake is VALID and whose SPKI is the one the
+    /// verifier was handed (as if the pin matched) is still refused, with the
+    /// scheme check's own error. The control shows rustls's raw-key check
+    /// alone admits the same input, so only `check_signature`'s scheme test
+    /// refuses it; without that test this fails.
+    #[test]
+    fn the_scheme_check_refuses_a_valid_non_ed25519_signature() {
+        let algs = rustls::crypto::ring::default_provider().signature_verification_algorithms;
+        let der = std::fs::read(
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/l7-D5/ecdsa-p256.pk8.der"),
+        )
+        .unwrap();
+        let ecdsa = rustls::crypto::ring::sign::any_ecdsa_type(
+            &rustls::pki_types::PrivateKeyDer::Pkcs8(der.into()),
+        )
+        .unwrap();
+        let cert = CertificateDer::from(ecdsa.public_key().unwrap().as_ref().to_vec());
+        let msg = b"the TLS 1.3 CertificateVerify content";
+        let scheme = SignatureScheme::ECDSA_NISTP256_SHA256;
+        let d = dss(scheme, &signed(ecdsa.as_ref(), scheme, msg));
+        assert!(
+            rustls::crypto::verify_tls13_signature_with_raw_key(
+                msg,
+                &SubjectPublicKeyInfoDer::from(cert.as_ref()),
+                &d,
+                &algs
+            )
+            .is_ok(),
+            "the control: the library alone admits it"
+        );
+        let refused = Some(rustls::PeerMisbehaved::SignedHandshakeWithUnadvertisedSigScheme.into());
+        assert_eq!(check_signature(msg, &cert, &d, &algs).err(), refused);
+        let server = PinnedServer { pin: spki(2), algs };
+        assert_eq!(server.verify_tls13_signature(msg, &cert, &d).err(), refused);
+        let clients = PinnedClients {
+            pairs: Arc::new(RwLock::new(vec![])),
+            algs,
+        };
+        assert_eq!(
+            clients.verify_tls13_signature(msg, &cert, &d).err(),
+            refused
+        );
+        // An Ed25519 signature over the same message passes (the path works).
+        let d = tempfile::tempdir().unwrap();
+        let k = LinkKey::load_or_mint(d.path()).unwrap();
+        let ck = k.certified();
+        let sig = signed(ck.key.as_ref(), SignatureScheme::ED25519, msg);
+        let ed = dss(SignatureScheme::ED25519, &sig);
+        assert!(check_signature(msg, &ck.cert[0], &ed, &algs).is_ok());
     }
 
     async fn loopback() -> (TcpStream, TcpStream) {
@@ -898,6 +1081,96 @@ mod tests {
         c.write_all(&[0x16, 0x03, 0x01, 0x00, 0x05]).await.unwrap();
         assert!(w.inbound(c.local_addr().unwrap(), s).await.is_err());
         assert!(!w.tls_built());
+    }
+
+    /// One handshake A (server) ← B (client) through the two wraps; the pair
+    /// A's verifier matched, or the error of either side.
+    async fn handshake(
+        a: &RpkWrap,
+        b: &RpkWrap,
+        l: &TcpListener,
+        far: NodeId,
+    ) -> io::Result<Option<NodeId>> {
+        let at = l.local_addr().unwrap();
+        let c = TcpStream::connect(at).await.unwrap();
+        let (s, remote) = l.accept().await.unwrap();
+        let (inb, outb) = tokio::join!(a.inbound(remote, s), b.outbound(at, Some(far), c));
+        let (_sa, matched) = inb?;
+        outb?;
+        Ok(matched)
+    }
+
+    /// Module doc, "Weight" (row D5b): N handshakes read the link key file
+    /// once on each side; the file is read again only when it changed: a
+    /// re-mint in this process (the generation), an in-place rewrite by
+    /// another process (the stamp: same inode and length), a discard (the
+    /// state is dropped, and a `0x16` then meets no key).
+    #[tokio::test]
+    async fn the_link_key_is_read_once_for_many_handshakes() {
+        const N: u64 = 8;
+        let (da, db) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+        let ka = LinkKey::load_or_mint(da.path()).unwrap();
+        let kb = LinkKey::load_or_mint(db.path()).unwrap();
+        let l = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let at = l.local_addr().unwrap();
+        let pa: PairTable = Arc::new(RwLock::new(vec![PairLink {
+            link_spki: Some(*kb.spki()),
+            ..PairLink::new(id(2))
+        }]));
+        let pb: PairTable = Arc::new(RwLock::new(vec![PairLink {
+            address: Some(at),
+            link_spki: Some(*ka.spki()),
+            ..PairLink::new(id(1))
+        }]));
+        let a = RpkWrap::new(da.path().to_path_buf(), Arc::clone(&pa));
+        let b = RpkWrap::new(db.path().to_path_buf(), Arc::clone(&pb));
+        assert_eq!(
+            (a.key_loads(), b.key_loads()),
+            (0, 0),
+            "nothing before a handshake"
+        );
+        for _ in 0..N {
+            assert_eq!(handshake(&a, &b, &l, id(1)).await.unwrap(), Some(id(2)));
+        }
+        assert_eq!(
+            (a.key_loads(), b.key_loads()),
+            (1, 1),
+            "{N} handshakes, one read each"
+        );
+
+        // A re-mint in this process: A reads its new key once more.
+        assert!(linkkey::discard(da.path()).unwrap());
+        let ka2 = LinkKey::load_or_mint(da.path()).unwrap();
+        pb.write().unwrap()[0].link_spki = Some(*ka2.spki());
+        for _ in 0..2 {
+            assert_eq!(handshake(&a, &b, &l, id(1)).await.unwrap(), Some(id(2)));
+        }
+        assert_eq!((a.key_loads(), b.key_loads()), (2, 1));
+
+        // Another process rewrites the file in place (same inode, same
+        // length, no generation bump here): the stamp sees it.
+        // File times come from the kernel's coarse clock (one tick, at most
+        // 10 ms): wait past one, so the rewrite's mtime differs.
+        let path = linkkey::path(da.path());
+        let before = std::fs::metadata(&path).unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+        std::fs::write(&path, format!("{}\n", "9d".repeat(32))).unwrap();
+        let after = std::fs::metadata(&path).unwrap();
+        assert_eq!((after.ino(), after.len()), (before.ino(), before.len()));
+        assert_ne!(
+            (after.mtime(), after.mtime_nsec()),
+            (before.mtime(), before.mtime_nsec())
+        );
+        let ka3 = LinkKey::load(da.path()).unwrap().unwrap();
+        pb.write().unwrap()[0].link_spki = Some(*ka3.spki());
+        assert_eq!(handshake(&a, &b, &l, id(1)).await.unwrap(), Some(id(2)));
+        assert_eq!(a.key_loads(), 3);
+
+        // Discarded: the kept state goes and a TLS hello is refused.
+        assert!(linkkey::discard(da.path()).unwrap());
+        assert!(handshake(&a, &b, &l, id(1)).await.is_err());
+        assert!(!a.tls_built(), "no state kept without a key");
+        assert_eq!(a.key_loads(), 3, "a missing file is not read");
     }
 
     /// §4.1 rule 4 at the wrap: a refused dial returns before any byte.
