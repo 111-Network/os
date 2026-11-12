@@ -1,11 +1,15 @@
-//! Interface-change watch (RTMGRP_LINK) with debounce — rnsd config
-//! regeneration trigger (spec §Transport). The event source is a trait so tests
-//! inject synthetic changes.
+//! Interface-change watch with debounce — rnsd config regeneration trigger
+//! (spec §Transport) and, through a second instance, the Layer 7 address and
+//! route watch (`os/7-relay/README.md` §3.3; `daemon::relay::netwatch`). The
+//! event source is a trait so tests inject synthetic changes.
 //!
 //! The production source is a raw netlink socket via libc (no crate-API
-//! surface to drift): bind AF_NETLINK/NETLINK_ROUTE with the RTMGRP_LINK
-//! multicast group, tokio AsyncFd for readiness. rtnetlink remains in the dep
-//! set for Layer 6's richer routing work.
+//! surface to drift): bind AF_NETLINK/NETLINK_ROUTE with the multicast groups
+//! the caller names ([`NetlinkEvents::new`] takes the mask, §3.3), tokio
+//! AsyncFd for readiness. The spine passes [`RTMGRP_LINK`] only
+//! (`transport::LINK_WATCH_GROUPS`), so an address or route change (a DHCP
+//! renew) never reaches its `debounced` instance (S15; §19 D8). rtnetlink
+//! remains in the dep set for Layer 6's richer routing work.
 
 /// One "something changed about interfaces" event (details don't matter — the
 /// reaction is always: debounce, maybe regenerate).
@@ -15,8 +19,29 @@ pub trait LinkEvents: Send {
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Option<()>> + Send + '_>>;
 }
 
-/// RTMGRP_LINK multicast group id (linux/netlink.h).
-const RTMGRP_LINK: u32 = 1;
+/// A boxed source is a source (`relay::netwatch` holds its opener's result as one).
+impl<T: LinkEvents + ?Sized> LinkEvents for Box<T> {
+    fn next_change(
+        &mut self,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Option<()>> + Send + '_>> {
+        (**self).next_change()
+    }
+}
+
+/// `RTMGRP_LINK` multicast group bit (`linux/rtnetlink.h`; `LC/:2321`).
+pub const RTMGRP_LINK: u32 = 0x1;
+/// `RTMGRP_IPV4_IFADDR` (`LC/:2325`): IPv4 address added or removed.
+pub const RTMGRP_IPV4_IFADDR: u32 = 0x10;
+/// `RTMGRP_IPV4_ROUTE` (`LC/:2327`): IPv4 route added or removed.
+pub const RTMGRP_IPV4_ROUTE: u32 = 0x40;
+/// `RTMGRP_IPV6_IFADDR` (`LC/:2329`): IPv6 address added or removed.
+pub const RTMGRP_IPV6_IFADDR: u32 = 0x100;
+/// `RTMGRP_IPV6_ROUTE` (`LC/:2331`): IPv6 route added or removed.
+pub const RTMGRP_IPV6_ROUTE: u32 = 0x400;
+/// The Layer 7 address and route mask (§3.3): `0x1 | 0x10 | 0x40 | 0x100 | 0x400`.
+/// Only `relay::netwatch`'s second socket binds it; the spine never does.
+pub const ADDRESS_ROUTE_GROUPS: u32 =
+    RTMGRP_LINK | RTMGRP_IPV4_IFADDR | RTMGRP_IPV4_ROUTE | RTMGRP_IPV6_IFADDR | RTMGRP_IPV6_ROUTE;
 
 /// Production source: raw netlink socket, readiness via tokio AsyncFd.
 pub struct NetlinkEvents {
@@ -24,7 +49,10 @@ pub struct NetlinkEvents {
 }
 
 impl NetlinkEvents {
-    pub fn new() -> anyhow::Result<Self> {
+    /// Open and bind a route-netlink socket subscribed to `groups` (a mask of the
+    /// `RTMGRP_*` bits above; §3.3: the caller names the mask). Close-on-exec and
+    /// non-blocking; the error names the mask so a failed bind is attributable.
+    pub fn new(groups: u32) -> anyhow::Result<Self> {
         use std::os::unix::io::FromRawFd;
         let fd = unsafe {
             libc::socket(
@@ -40,7 +68,7 @@ impl NetlinkEvents {
         );
         let mut addr: libc::sockaddr_nl = unsafe { std::mem::zeroed() };
         addr.nl_family = libc::AF_NETLINK as u16;
-        addr.nl_groups = RTMGRP_LINK;
+        addr.nl_groups = groups;
         let rc = unsafe {
             libc::bind(
                 fd,
@@ -51,12 +79,31 @@ impl NetlinkEvents {
         if rc != 0 {
             let err = std::io::Error::last_os_error();
             unsafe { libc::close(fd) };
-            anyhow::bail!("netlink bind (RTMGRP_LINK): {err}");
+            anyhow::bail!("netlink bind (groups {groups:#x}): {err}");
         }
         let file = unsafe { std::fs::File::from_raw_fd(fd) };
         Ok(NetlinkEvents {
             fd: tokio::io::unix::AsyncFd::new(file)?,
         })
+    }
+
+    /// The multicast groups the kernel holds for this socket (`getsockname`'s
+    /// `nl_groups`): the proof of the bound mask (the spine's is `RTMGRP_LINK` only).
+    pub fn groups(&self) -> std::io::Result<u32> {
+        use std::os::unix::io::AsRawFd;
+        let mut addr: libc::sockaddr_nl = unsafe { std::mem::zeroed() };
+        let mut len = std::mem::size_of::<libc::sockaddr_nl>() as libc::socklen_t;
+        let rc = unsafe {
+            libc::getsockname(
+                self.fd.get_ref().as_raw_fd(),
+                &mut addr as *mut libc::sockaddr_nl as *mut libc::sockaddr,
+                &mut len,
+            )
+        };
+        if rc != 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        Ok(addr.nl_groups)
     }
 }
 
@@ -159,9 +206,52 @@ mod tests {
     #[tokio::test]
     async fn netlink_socket_binds() {
         // Real socket smoke test (skipped in restricted sandboxes).
-        match NetlinkEvents::new() {
+        match NetlinkEvents::new(RTMGRP_LINK) {
             Ok(_) => {}
             Err(e) => eprintln!("netlink unavailable here ({e:#}) — acceptable in sandboxes"),
         }
+    }
+
+    #[test]
+    fn the_group_bits_are_the_kernel_s() {
+        // §3.3: `0x1 | 0x10 | 0x40 | 0x100 | 0x400` (LC/:2321-2331).
+        assert_eq!(RTMGRP_LINK, libc::RTMGRP_LINK as u32);
+        assert_eq!(RTMGRP_IPV4_IFADDR, libc::RTMGRP_IPV4_IFADDR as u32);
+        assert_eq!(RTMGRP_IPV4_ROUTE, libc::RTMGRP_IPV4_ROUTE as u32);
+        assert_eq!(RTMGRP_IPV6_IFADDR, libc::RTMGRP_IPV6_IFADDR as u32);
+        assert_eq!(RTMGRP_IPV6_ROUTE, libc::RTMGRP_IPV6_ROUTE as u32);
+        assert_eq!(ADDRESS_ROUTE_GROUPS, 0x551);
+        // the spine's mask carries no address or route bit (S15)
+        assert_eq!(
+            crate::daemon::transport::LINK_WATCH_GROUPS & !RTMGRP_LINK,
+            0,
+            "the spine subscribes RTMGRP_LINK only"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_socket_holds_the_mask_it_was_given() {
+        // Each mask the kernel accepts reads back exactly; a sandbox that refuses the
+        // socket skips (the bind failure path is relay::netwatch's fake-opener test).
+        for mask in [RTMGRP_LINK, ADDRESS_ROUTE_GROUPS] {
+            match NetlinkEvents::new(mask) {
+                Ok(ev) => assert_eq!(ev.groups().unwrap(), mask, "mask {mask:#x}"),
+                Err(e) => {
+                    let text = format!("{e:#}");
+                    assert!(text.contains(&format!("{mask:#x}")) || text.contains("socket"));
+                    eprintln!("netlink unavailable here ({text}) — acceptable in sandboxes");
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn a_boxed_source_forwards() {
+        let (tx, rx) = tokio::sync::mpsc::channel(1);
+        let mut boxed: Box<dyn LinkEvents> = Box::new(ScriptedEvents { rx });
+        tx.send(()).await.unwrap();
+        assert_eq!(boxed.next_change().await, Some(()));
+        drop(tx);
+        assert_eq!(boxed.next_change().await, None);
     }
 }

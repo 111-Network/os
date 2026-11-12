@@ -1,10 +1,906 @@
-//! Layer 7 (§3.2–§3.4): T0 stub; filled by row D4.
+//! Layer 7 (§3.2–§3.4; S15; §19 D8): the address and route watch.
 //!
-//! The second netlink socket (`RTMGRP_LINK`, `IPV4_IFADDR`, `IPV4_ROUTE`, `IPV6_IFADDR`,
-//! `IPV6_ROUTE`), opened only while a consumer is subscribed (a configured carrier, the running
-//! mdns-sd daemon) and closed with the last, debounced 2 s (§3.3; §19 D8); the Termux fallback poll
-//! only on a Termux hub whose bind failed (§3.4). No socket, task or timer without a consumer.
-#![allow(dead_code)]
+//! The spine's netlink socket binds `RTMGRP_LINK` only and its `debounced` instance re-renders
+//! rnsd (`transport::LINK_WATCH_GROUPS`, `transport/mod.rs`); it is untouched. This module owns a
+//! **second** route-netlink socket bound to [`GROUPS`] (`RTMGRP_LINK | RTMGRP_IPV4_IFADDR |
+//! RTMGRP_IPV4_ROUTE | RTMGRP_IPV6_IFADDR | RTMGRP_IPV6_ROUTE`, `0x551`, §3.3), fed through a
+//! second `netlink::debounced` instance ([`DEBOUNCE`], 2 s), so a burst of route updates is one
+//! [`NetEvent::Changed`] and a DHCP renew never reaches the spine.
+//!
+//! **Consumers subscribe** ([`NetWatch::subscribe`]): a configured carrier (row D11, its check
+//! of §3.2 (a)) and the running mdns-sd daemon (row D8, the §3.3 re-arm). The first subscriber
+//! opens the socket and spawns its one reader task; the last [`Subscription`] dropped aborts the
+//! task, which closes the socket. With no subscriber there is no socket, task or timer here, so
+//! a node with neither a carrier nor the mdns-sd daemon keeps the Layer 6 socket set exactly
+//! (§3.3; §1 rule 2). Netlink sockets per configuration: none ⇒ the spine's one (Layer 6,
+//! unchanged); mdns-sd on ⇒ two; a carrier on ⇒ two; both ⇒ two (one shared second socket); a
+//! failed bind ⇒ the spine's one.
+//!
+//! **A failed bind** is logged once per process and reported to every subscriber through
+//! [`Subscription::watching`] ([`Watching::Failed`]); a socket that later stops answering is
+//! reported as [`NetEvent::Failed`]. No retry runs while subscribed (no timer); the next first
+//! subscriber tries again. For mdns-sd a failure keeps its default 5 s IP check (§3.3, D8's
+//! rule); for a carrier it selects the Termux fallback.
+//!
+//! **The Termux fallback (§3.4).** Only on a Termux node ([`crate::config::on_termux`]), only
+//! while a [`Consumer::Carrier`] is subscribed (a carrier is hub-only, §3.1) and only while the
+//! bind failed: a coarse poll every `gateway.termux_poll_min` minutes (default 15, floor 9,
+//! [`super::settings`]). The poll reads the routing tables, `/proc/net/route` and
+//! `/proc/net/ipv6_route` (two small text reads, no socket; lighter than a netlink dump, which
+//! needs a socket of the very kind whose bind failed, a request and a multipart parse), and
+//! delivers [`NetEvent::Poll`] to the carrier when their fingerprint changed (the counter
+//! columns ignored) or when neither table can be read (then every tick: the check is the only
+//! way left to learn the network). No other node, and no other consumer, polls.
+//!
+//! Every wait is a monotonic `tokio::time` sleep; no wall clock decides anything here.
 
-/// The address and route event source (§3.3). T0: the name only.
-pub struct NetWatch;
+use crate::daemon::relay::settings::{MAX_TERMUX_POLL_MIN, MIN_TERMUX_POLL_MIN};
+use crate::daemon::transport::netlink::{self, LinkEvents, ADDRESS_ROUTE_GROUPS};
+use std::hash::{Hash, Hasher};
+use std::io::Read;
+use std::sync::atomic::{AtomicU32, AtomicU8, Ordering};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock, Weak};
+use std::time::Duration;
+use tokio::runtime::Handle;
+use tokio::sync::Notify;
+use tokio::task::JoinHandle;
+
+/// The second socket's multicast groups (§3.3; `LC/:2321-2331`).
+pub const GROUPS: u32 = ADDRESS_ROUTE_GROUPS;
+/// The second `debounced` instance's quiet window (§3.3: 2 s, as the spine's).
+pub const DEBOUNCE: Duration = Duration::from_secs(2);
+/// The Termux poll's unit (`gateway.termux_poll_min` is in minutes).
+pub const POLL_UNIT: Duration = Duration::from_secs(60);
+/// The IPv4 routing table the Termux poll reads (§3.4).
+pub const PROC_ROUTE: &str = "/proc/net/route";
+/// The IPv6 routing table the Termux poll reads (§3.4).
+pub const PROC_ROUTE6: &str = "/proc/net/ipv6_route";
+/// Largest routing table read (bytes); the rest of a larger file is not read.
+pub const ROUTE_READ_MAX: u64 = 64 * 1024;
+
+const CHANGED: u8 = 1;
+const POLL: u8 = 2;
+const FAILED: u8 = 4;
+
+/// Who subscribes (§3.3). Only these two consumers exist in v1.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Consumer {
+    /// A configured carrier (row D11): each event is one carrier check (§3.2 (a)).
+    /// `termux_poll_min` is `gateway.termux_poll_min`; it matters only for the §3.4 fallback
+    /// (clamped to 9..=1440 minutes). A changed setting is a new subscription.
+    Carrier { termux_poll_min: u32 },
+    /// The running mdns-sd daemon's IP-check re-arm (row D8, §3.3 S2).
+    Mdns,
+}
+
+/// One event to a subscriber. Pending events coalesce: a subscriber that has not yet called
+/// [`Subscription::next`] sees each kind at most once.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NetEvent {
+    /// A debounced address, route or link change (§3.3): one per burst.
+    Changed,
+    /// A Termux fallback tick that saw the routing tables change, or could not read them (§3.4).
+    Poll,
+    /// The bound socket stopped answering; [`Subscription::watching`] now reads
+    /// [`Watching::Failed`] (mdns-sd: restore the 5 s check; carrier: §3.4 applies).
+    Failed,
+}
+
+/// What the watch rests on, as a subscriber sees it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Watching {
+    /// The second socket is bound: events arrive as [`NetEvent::Changed`].
+    Netlink,
+    /// The bind failed (logged once). `poll` is the §3.4 period when this subscriber is a
+    /// carrier on a Termux node, else `None` (no event source: the consumer keeps its default).
+    Failed {
+        error: String,
+        poll: Option<Duration>,
+    },
+}
+
+/// Why [`NetWatch::subscribe`] refused.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum NetWatchError {
+    /// Called outside a tokio runtime (the reader task and the socket's readiness need one).
+    NoRuntime,
+}
+
+impl std::fmt::Display for NetWatchError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            NetWatchError::NoRuntime => f.write_str("the address watch needs a tokio runtime"),
+        }
+    }
+}
+
+impl std::error::Error for NetWatchError {}
+
+/// Opens the second socket (production: [`NetlinkOpener`]; tests inject a fake).
+pub trait Opener: Send + Sync {
+    /// Open a source bound to `groups`; an error is a failed bind.
+    fn open(&self, groups: u32) -> anyhow::Result<Box<dyn LinkEvents>>;
+}
+
+/// The production opener: `netlink::NetlinkEvents::new(groups)`.
+pub struct NetlinkOpener;
+
+impl Opener for NetlinkOpener {
+    fn open(&self, groups: u32) -> anyhow::Result<Box<dyn LinkEvents>> {
+        Ok(Box::new(netlink::NetlinkEvents::new(groups)?))
+    }
+}
+
+/// Reads the routing tables' fingerprint for the §3.4 poll (production: [`ProcRoutes`]).
+pub trait RouteRead: Send + Sync {
+    /// `None` when no table could be read.
+    fn fingerprint(&self) -> Option<u64>;
+}
+
+/// The production reader: [`PROC_ROUTE`] and [`PROC_ROUTE6`], each capped at [`ROUTE_READ_MAX`].
+pub struct ProcRoutes;
+
+impl RouteRead for ProcRoutes {
+    fn fingerprint(&self) -> Option<u64> {
+        route_fingerprint(
+            read_capped(PROC_ROUTE).as_deref(),
+            read_capped(PROC_ROUTE6).as_deref(),
+        )
+    }
+}
+
+fn read_capped(path: &str) -> Option<String> {
+    let file = std::fs::File::open(path).ok()?;
+    let mut text = String::new();
+    file.take(ROUTE_READ_MAX).read_to_string(&mut text).ok()?;
+    Some(text)
+}
+
+/// The fingerprint of the two routing tables (§3.4): every row's columns except the counters
+/// (`/proc/net/route`'s RefCnt and Use, `/proc/net/ipv6_route`'s refcnt and use), the header
+/// dropped. `None` only when neither table was read (an absent IPv6 table is not a failure).
+pub fn route_fingerprint(v4: Option<&str>, v6: Option<&str>) -> Option<u64> {
+    if v4.is_none() && v6.is_none() {
+        return None;
+    }
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    if let Some(t) = v4 {
+        0u8.hash(&mut h);
+        // Iface Destination Gateway Flags RefCnt Use Metric Mask MTU Window IRTT
+        for line in t.lines().skip(1) {
+            for (i, col) in line.split_whitespace().enumerate() {
+                if i != 4 && i != 5 {
+                    col.hash(&mut h);
+                }
+            }
+            b'\n'.hash(&mut h);
+        }
+    }
+    if let Some(t) = v6 {
+        1u8.hash(&mut h);
+        // dest plen src plen nexthop metric refcnt use flags dev (no header)
+        for line in t.lines() {
+            for (i, col) in line.split_whitespace().enumerate() {
+                if i != 6 && i != 7 {
+                    col.hash(&mut h);
+                }
+            }
+            b'\n'.hash(&mut h);
+        }
+    }
+    Some(h.finish())
+}
+
+/// The watch's timings and host facts (production: [`Config::production`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Config {
+    /// The debounce quiet window ([`DEBOUNCE`]).
+    pub quiet: Duration,
+    /// One `termux_poll_min` minute ([`POLL_UNIT`]; tests shrink it).
+    pub poll_unit: Duration,
+    /// This node runs under Termux (§3.4).
+    pub termux: bool,
+}
+
+impl Config {
+    /// 2 s debounce, minutes of 60 s, and this host's Termux detection
+    /// ([`crate::config::on_termux`]).
+    pub fn production() -> Self {
+        Config {
+            quiet: DEBOUNCE,
+            poll_unit: POLL_UNIT,
+            termux: crate::config::on_termux(),
+        }
+    }
+}
+
+/// The §3.4 period for `gateway.termux_poll_min` (clamped to the settings' bounds).
+pub fn poll_period(termux_poll_min: u32, unit: Duration) -> Duration {
+    unit * termux_poll_min.clamp(MIN_TERMUX_POLL_MIN, MAX_TERMUX_POLL_MIN)
+}
+
+/// The address and route watch (§3.3). One per process ([`global`]); constructing it opens
+/// nothing.
+pub struct NetWatch {
+    inner: Arc<Inner>,
+}
+
+/// One consumer's hold on the watch. Dropping the last one closes the socket.
+pub struct Subscription {
+    slot: Arc<Slot>,
+    inner: Arc<Inner>,
+}
+
+struct Slot {
+    id: u64,
+    consumer: Consumer,
+    pending: AtomicU8,
+    notify: Notify,
+}
+
+struct Inner {
+    cfg: Config,
+    opener: Box<dyn Opener>,
+    routes: Arc<dyn RouteRead>,
+    failures_logged: AtomicU32,
+    state: Mutex<State>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Link {
+    Idle,
+    Bound,
+    Failed(String),
+}
+
+struct State {
+    next_id: u64,
+    slots: Vec<Arc<Slot>>,
+    /// Bumped at every open, so a reader that ends after a close and a reopen changes nothing.
+    epoch: u64,
+    link: Link,
+    reader: Option<JoinHandle<()>>,
+    poll: Option<(Duration, JoinHandle<()>)>,
+    rt: Option<Handle>,
+}
+
+static GLOBAL: OnceLock<NetWatch> = OnceLock::new();
+
+/// The process's watch (production opener, `/proc` routes, [`Config::production`]). Built on
+/// first use, by the first consumer; building it opens nothing.
+pub fn global() -> &'static NetWatch {
+    GLOBAL.get_or_init(|| {
+        NetWatch::new(
+            Config::production(),
+            Box::new(NetlinkOpener),
+            Arc::new(ProcRoutes),
+        )
+    })
+}
+
+impl NetWatch {
+    /// A watch over `opener` and `routes`. Opens nothing until the first subscriber.
+    pub fn new(cfg: Config, opener: Box<dyn Opener>, routes: Arc<dyn RouteRead>) -> Self {
+        NetWatch {
+            inner: Arc::new(Inner {
+                cfg,
+                opener,
+                routes,
+                failures_logged: AtomicU32::new(0),
+                state: Mutex::new(State {
+                    next_id: 0,
+                    slots: Vec::new(),
+                    epoch: 0,
+                    link: Link::Idle,
+                    reader: None,
+                    poll: None,
+                    rt: None,
+                }),
+            }),
+        }
+    }
+
+    /// Subscribe `consumer` (§3.3). The first subscriber opens the socket (a failed bind is
+    /// logged once and reported by [`Subscription::watching`]); a carrier on a Termux node
+    /// whose bind failed starts the §3.4 poll. Must run inside a tokio runtime.
+    pub fn subscribe(&self, consumer: Consumer) -> Result<Subscription, NetWatchError> {
+        let rt = Handle::try_current().map_err(|_| NetWatchError::NoRuntime)?;
+        let mut st = self.inner.lock();
+        st.rt = Some(rt);
+        st.next_id += 1;
+        let slot = Arc::new(Slot {
+            id: st.next_id,
+            consumer,
+            pending: AtomicU8::new(0),
+            notify: Notify::new(),
+        });
+        st.slots.push(Arc::clone(&slot));
+        if st.slots.len() == 1 {
+            self.inner.open(&mut st);
+        }
+        self.inner.reconcile_poll(&mut st);
+        drop(st);
+        Ok(Subscription {
+            slot,
+            inner: Arc::clone(&self.inner),
+        })
+    }
+
+    /// Subscribers now.
+    pub fn subscribers(&self) -> usize {
+        self.inner.lock().slots.len()
+    }
+
+    /// The second socket is open (a reader task holds it).
+    pub fn is_open(&self) -> bool {
+        self.inner.lock().reader.is_some()
+    }
+
+    /// The §3.4 poll runs, and its period.
+    pub fn polling(&self) -> Option<Duration> {
+        self.inner.lock().poll.as_ref().map(|(p, _)| *p)
+    }
+
+    /// Failed binds logged so far (at most one per process: "logged once").
+    pub fn failures_logged(&self) -> u32 {
+        self.inner.failures_logged.load(Ordering::Relaxed)
+    }
+}
+
+impl Subscription {
+    /// The consumer this subscription was made for.
+    pub fn consumer(&self) -> Consumer {
+        self.slot.consumer
+    }
+
+    /// What the watch rests on now (§3.3: the bind failure is reported here).
+    pub fn watching(&self) -> Watching {
+        let st = self.inner.lock();
+        match &st.link {
+            Link::Bound => Watching::Netlink,
+            Link::Failed(error) => Watching::Failed {
+                error: error.clone(),
+                poll: match self.slot.consumer {
+                    Consumer::Carrier { .. } => st.poll.as_ref().map(|(p, _)| *p),
+                    Consumer::Mdns => None,
+                },
+            },
+            // unreachable while a subscription exists; fail closed
+            Link::Idle => Watching::Failed {
+                error: "the address watch is closed".into(),
+                poll: None,
+            },
+        }
+    }
+
+    /// The next event (cancel-safe: a pending event stays pending if the future is dropped).
+    /// [`NetEvent::Failed`] comes first; a pending change and poll coalesce into one
+    /// [`NetEvent::Changed`].
+    pub async fn next(&self) -> NetEvent {
+        loop {
+            let bits = self.slot.pending.swap(0, Ordering::AcqRel);
+            if bits & FAILED != 0 {
+                let rest = bits & !FAILED;
+                if rest != 0 {
+                    self.slot.pending.fetch_or(rest, Ordering::AcqRel);
+                }
+                return NetEvent::Failed;
+            }
+            if bits & CHANGED != 0 {
+                return NetEvent::Changed;
+            }
+            if bits & POLL != 0 {
+                return NetEvent::Poll;
+            }
+            self.slot.notify.notified().await;
+        }
+    }
+}
+
+impl Drop for Subscription {
+    fn drop(&mut self) {
+        let mut st = self.inner.lock();
+        st.slots.retain(|s| s.id != self.slot.id);
+        if st.slots.is_empty() {
+            self.inner.close(&mut st);
+        } else {
+            self.inner.reconcile_poll(&mut st);
+        }
+    }
+}
+
+impl Inner {
+    fn lock(&self) -> MutexGuard<'_, State> {
+        self.state.lock().unwrap_or_else(|p| p.into_inner())
+    }
+
+    /// First subscriber: bind the socket and spawn its reader (the second `debounced`).
+    fn open(self: &Arc<Self>, st: &mut State) {
+        st.epoch += 1;
+        let epoch = st.epoch;
+        let Some(rt) = st.rt.clone() else {
+            st.link = Link::Failed("no runtime".into());
+            return;
+        };
+        match self.opener.open(GROUPS) {
+            Ok(source) => {
+                st.link = Link::Bound;
+                let weak: Weak<Inner> = Arc::downgrade(self);
+                let quiet = self.cfg.quiet;
+                st.reader = Some(rt.spawn(async move {
+                    let fire_to = weak.clone();
+                    netlink::debounced(source, quiet, move || {
+                        if let Some(inner) = fire_to.upgrade() {
+                            let st = inner.lock();
+                            deliver(&st, CHANGED, |_| true);
+                        }
+                    })
+                    .await;
+                    if let Some(inner) = weak.upgrade() {
+                        inner.source_ended(epoch);
+                    }
+                }));
+            }
+            Err(e) => {
+                let error = format!("{e:#}");
+                self.log_failure(&error);
+                st.link = Link::Failed(error);
+            }
+        }
+    }
+
+    /// Last subscriber gone: abort the reader (dropping the source closes the socket) and the
+    /// poll.
+    fn close(&self, st: &mut State) {
+        if let Some(h) = st.reader.take() {
+            h.abort();
+        }
+        if let Some((_, h)) = st.poll.take() {
+            h.abort();
+        }
+        st.link = Link::Idle;
+        st.rt = None;
+    }
+
+    /// The reader's stream ended (the socket errored): report it and fall back.
+    fn source_ended(self: &Arc<Self>, epoch: u64) {
+        let mut st = self.lock();
+        if st.epoch != epoch || st.link != Link::Bound {
+            return;
+        }
+        st.reader = None;
+        let error = "the netlink stream ended".to_string();
+        self.log_failure(&error);
+        st.link = Link::Failed(error);
+        deliver(&st, FAILED, |_| true);
+        self.reconcile_poll(&mut st);
+    }
+
+    fn log_failure(&self, error: &str) {
+        if self
+            .failures_logged
+            .compare_exchange(0, 1, Ordering::AcqRel, Ordering::Relaxed)
+            .is_ok()
+        {
+            eprintln!(
+                "111 relay: the address and route watch cannot use netlink ({error}); mdns-sd \
+                 keeps its 5 s address check{}",
+                if self.cfg.termux {
+                    ", a carrier polls every gateway.termux_poll_min"
+                } else {
+                    ""
+                }
+            );
+        }
+    }
+
+    /// Run the §3.4 poll exactly when this is a Termux node, the bind failed and a carrier is
+    /// subscribed (the shortest subscribed period wins).
+    fn reconcile_poll(self: &Arc<Self>, st: &mut State) {
+        let want = if self.cfg.termux && matches!(st.link, Link::Failed(_)) {
+            st.slots
+                .iter()
+                .filter_map(|s| match s.consumer {
+                    Consumer::Carrier { termux_poll_min } => {
+                        Some(poll_period(termux_poll_min, self.cfg.poll_unit))
+                    }
+                    Consumer::Mdns => None,
+                })
+                .min()
+        } else {
+            None
+        };
+        if st.poll.as_ref().map(|(p, _)| *p) == want {
+            return;
+        }
+        if let Some((_, h)) = st.poll.take() {
+            h.abort();
+        }
+        let (Some(period), Some(rt)) = (want, st.rt.clone()) else {
+            return;
+        };
+        let weak: Weak<Inner> = Arc::downgrade(self);
+        let routes = Arc::clone(&self.routes);
+        st.poll = Some((
+            period,
+            rt.spawn(async move {
+                let mut last = routes.fingerprint();
+                loop {
+                    tokio::time::sleep(period).await;
+                    let now = routes.fingerprint();
+                    if now.is_none() || now != last {
+                        let Some(inner) = weak.upgrade() else { return };
+                        let st = inner.lock();
+                        deliver(&st, POLL, |c| matches!(c, Consumer::Carrier { .. }));
+                    }
+                    last = now;
+                }
+            }),
+        ));
+    }
+}
+
+/// Mark `bit` pending on every matching subscriber and wake it.
+fn deliver(st: &State, bit: u8, to: impl Fn(&Consumer) -> bool) {
+    for s in st.slots.iter().filter(|s| to(&s.consumer)) {
+        s.pending.fetch_or(bit, Ordering::AcqRel);
+        s.notify.notify_one();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::daemon::transport::netlink::ScriptedEvents;
+    use std::sync::atomic::AtomicUsize;
+
+    /// A fake opener: hands out scripted sources (or fails), counting opens and live sources.
+    struct Fake {
+        fail: bool,
+        opens: Arc<AtomicUsize>,
+        live: Arc<AtomicUsize>,
+        feed: Arc<Mutex<Vec<tokio::sync::mpsc::Sender<()>>>>,
+    }
+
+    struct Counted {
+        inner: ScriptedEvents,
+        live: Arc<AtomicUsize>,
+    }
+
+    impl LinkEvents for Counted {
+        fn next_change(
+            &mut self,
+        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Option<()>> + Send + '_>> {
+            self.inner.next_change()
+        }
+    }
+
+    impl Drop for Counted {
+        fn drop(&mut self) {
+            self.live.fetch_sub(1, Ordering::SeqCst);
+        }
+    }
+
+    impl Opener for Fake {
+        fn open(&self, groups: u32) -> anyhow::Result<Box<dyn LinkEvents>> {
+            assert_eq!(groups, 0x551, "§3.3: the second socket's mask");
+            self.opens.fetch_add(1, Ordering::SeqCst);
+            if self.fail {
+                anyhow::bail!("netlink bind (groups {groups:#x}): Permission denied");
+            }
+            let (tx, rx) = tokio::sync::mpsc::channel(64);
+            self.feed.lock().unwrap().push(tx);
+            self.live.fetch_add(1, Ordering::SeqCst);
+            Ok(Box::new(Counted {
+                inner: ScriptedEvents { rx },
+                live: Arc::clone(&self.live),
+            }))
+        }
+    }
+
+    struct Handles {
+        opens: Arc<AtomicUsize>,
+        live: Arc<AtomicUsize>,
+        feed: Arc<Mutex<Vec<tokio::sync::mpsc::Sender<()>>>>,
+    }
+
+    impl Handles {
+        fn sender(&self) -> tokio::sync::mpsc::Sender<()> {
+            self.feed.lock().unwrap().last().unwrap().clone()
+        }
+    }
+
+    /// Routes whose fingerprint the test sets (`None` = unreadable); counts reads.
+    struct Routes {
+        value: Mutex<Option<u64>>,
+        reads: AtomicUsize,
+    }
+
+    impl RouteRead for Routes {
+        fn fingerprint(&self) -> Option<u64> {
+            self.reads.fetch_add(1, Ordering::SeqCst);
+            *self.value.lock().unwrap()
+        }
+    }
+
+    fn routes(v: Option<u64>) -> Arc<Routes> {
+        Arc::new(Routes {
+            value: Mutex::new(v),
+            reads: AtomicUsize::new(0),
+        })
+    }
+
+    fn watch(fail: bool, termux: bool, routes: Arc<Routes>) -> (NetWatch, Handles) {
+        let h = Handles {
+            opens: Arc::new(AtomicUsize::new(0)),
+            live: Arc::new(AtomicUsize::new(0)),
+            feed: Arc::new(Mutex::new(Vec::new())),
+        };
+        let fake = Fake {
+            fail,
+            opens: Arc::clone(&h.opens),
+            live: Arc::clone(&h.live),
+            feed: Arc::clone(&h.feed),
+        };
+        let cfg = Config {
+            quiet: Duration::from_millis(50),
+            poll_unit: Duration::from_millis(5),
+            termux,
+        };
+        (NetWatch::new(cfg, Box::new(fake), routes), h)
+    }
+
+    async fn eventually(what: &str, f: impl Fn() -> bool) {
+        for _ in 0..200 {
+            if f() {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        panic!("timed out waiting for: {what}");
+    }
+
+    async fn quiet_for(sub: &Subscription, ms: u64) -> Option<NetEvent> {
+        tokio::time::timeout(Duration::from_millis(ms), sub.next())
+            .await
+            .ok()
+    }
+
+    #[tokio::test]
+    async fn nothing_opens_without_a_subscriber() {
+        let (w, h) = watch(false, true, routes(Some(1)));
+        tokio::time::sleep(Duration::from_millis(30)).await;
+        assert_eq!(h.opens.load(Ordering::SeqCst), 0);
+        assert!(!w.is_open());
+        assert_eq!(w.polling(), None);
+        assert_eq!(w.subscribers(), 0);
+    }
+
+    #[tokio::test]
+    async fn the_first_subscriber_opens_and_the_last_closes() {
+        let (w, h) = watch(false, false, routes(Some(1)));
+        let carrier = w
+            .subscribe(Consumer::Carrier {
+                termux_poll_min: 15,
+            })
+            .unwrap();
+        assert_eq!(h.opens.load(Ordering::SeqCst), 1);
+        assert_eq!(h.live.load(Ordering::SeqCst), 1);
+        assert!(w.is_open());
+        assert_eq!(carrier.watching(), Watching::Netlink);
+        // a second consumer shares the one socket
+        let mdns = w.subscribe(Consumer::Mdns).unwrap();
+        assert_eq!(
+            h.opens.load(Ordering::SeqCst),
+            1,
+            "one second socket, shared"
+        );
+        assert_eq!(w.subscribers(), 2);
+        drop(carrier);
+        assert!(w.is_open(), "mdns-sd still holds it");
+        assert_eq!(h.live.load(Ordering::SeqCst), 1);
+        drop(mdns);
+        assert!(!w.is_open());
+        eventually("the socket closed", || h.live.load(Ordering::SeqCst) == 0).await;
+        assert_eq!(w.polling(), None, "no timer without a consumer");
+        // and a new first subscriber opens again
+        let again = w.subscribe(Consumer::Mdns).unwrap();
+        assert_eq!(h.opens.load(Ordering::SeqCst), 2);
+        assert_eq!(h.live.load(Ordering::SeqCst), 1);
+        drop(again);
+        eventually("closed again", || h.live.load(Ordering::SeqCst) == 0).await;
+    }
+
+    #[tokio::test]
+    async fn a_route_burst_is_one_event_to_every_subscriber() {
+        let (w, h) = watch(false, false, routes(Some(1)));
+        let carrier = w
+            .subscribe(Consumer::Carrier {
+                termux_poll_min: 15,
+            })
+            .unwrap();
+        let mdns = w.subscribe(Consumer::Mdns).unwrap();
+        let tx = h.sender();
+        for _ in 0..20 {
+            tx.send(()).await.unwrap();
+            tokio::time::sleep(Duration::from_millis(2)).await;
+        }
+        assert_eq!(quiet_for(&carrier, 1_000).await, Some(NetEvent::Changed));
+        assert_eq!(quiet_for(&mdns, 1_000).await, Some(NetEvent::Changed));
+        assert_eq!(quiet_for(&carrier, 200).await, None, "one event per burst");
+        assert_eq!(quiet_for(&mdns, 200).await, None);
+        // a later, separate change is a second event
+        tx.send(()).await.unwrap();
+        assert_eq!(quiet_for(&carrier, 1_000).await, Some(NetEvent::Changed));
+        assert_eq!(quiet_for(&mdns, 1_000).await, Some(NetEvent::Changed));
+    }
+
+    #[tokio::test]
+    async fn a_failed_bind_is_logged_once_and_reported() {
+        let (w, h) = watch(true, false, routes(Some(1)));
+        let mdns = w.subscribe(Consumer::Mdns).unwrap();
+        match mdns.watching() {
+            Watching::Failed { error, poll } => {
+                assert!(error.contains("Permission denied"), "{error}");
+                assert_eq!(poll, None, "mdns-sd keeps its own 5 s check");
+            }
+            other => panic!("{other:?}"),
+        }
+        assert!(!w.is_open(), "no reader task without a socket");
+        assert_eq!(w.polling(), None, "not Termux: nothing polls");
+        let carrier = w
+            .subscribe(Consumer::Carrier {
+                termux_poll_min: 15,
+            })
+            .unwrap();
+        assert!(matches!(
+            carrier.watching(),
+            Watching::Failed { poll: None, .. }
+        ));
+        assert_eq!(w.polling(), None, "a carrier off Termux never polls");
+        drop((mdns, carrier));
+        // the next first subscriber tries again; the failure is not logged twice
+        let again = w.subscribe(Consumer::Mdns).unwrap();
+        assert_eq!(h.opens.load(Ordering::SeqCst), 2);
+        assert_eq!(w.failures_logged(), 1, "logged once");
+        assert_eq!(quiet_for(&again, 100).await, None);
+    }
+
+    #[tokio::test]
+    async fn a_stream_that_ends_is_reported_as_failed() {
+        let (w, h) = watch(false, false, routes(Some(1)));
+        let mdns = w.subscribe(Consumer::Mdns).unwrap();
+        h.feed.lock().unwrap().clear(); // drop the only sender: the source ends
+        assert_eq!(quiet_for(&mdns, 1_000).await, Some(NetEvent::Failed));
+        assert!(matches!(mdns.watching(), Watching::Failed { .. }));
+        assert!(!w.is_open());
+        assert_eq!(w.failures_logged(), 1);
+    }
+
+    #[tokio::test]
+    async fn the_termux_poll_runs_only_for_a_carrier_whose_bind_failed() {
+        let r = routes(Some(1));
+        let (w, _h) = watch(true, true, Arc::clone(&r));
+        // mdns-sd alone: no poll
+        let mdns = w.subscribe(Consumer::Mdns).unwrap();
+        assert_eq!(w.polling(), None);
+        // a carrier: the poll at gateway.termux_poll_min (clamped to ≥ 9)
+        let carrier = w
+            .subscribe(Consumer::Carrier { termux_poll_min: 3 })
+            .unwrap();
+        let period = Duration::from_millis(5) * 9;
+        assert_eq!(w.polling(), Some(period));
+        assert_eq!(
+            carrier.watching(),
+            Watching::Failed {
+                error: "netlink bind (groups 0x551): Permission denied".into(),
+                poll: Some(period),
+            }
+        );
+        // unchanged tables: no event
+        eventually("the poll read the tables", || {
+            r.reads.load(Ordering::SeqCst) >= 3
+        })
+        .await;
+        assert_eq!(quiet_for(&carrier, 20).await, None);
+        // a changed table: one Poll to the carrier, nothing to mdns-sd
+        *r.value.lock().unwrap() = Some(2);
+        assert_eq!(quiet_for(&carrier, 1_000).await, Some(NetEvent::Poll));
+        assert_eq!(quiet_for(&mdns, 100).await, None);
+        // unreadable tables: every tick checks
+        *r.value.lock().unwrap() = None;
+        assert_eq!(quiet_for(&carrier, 1_000).await, Some(NetEvent::Poll));
+        assert_eq!(quiet_for(&carrier, 1_000).await, Some(NetEvent::Poll));
+        // the carrier leaves: the poll stops though mdns-sd stays
+        drop(carrier);
+        assert_eq!(w.polling(), None);
+        let before = r.reads.load(Ordering::SeqCst);
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        assert!(
+            r.reads.load(Ordering::SeqCst) <= before + 1,
+            "no read after the stop"
+        );
+        drop(mdns);
+    }
+
+    #[tokio::test]
+    async fn a_bound_socket_on_termux_never_polls() {
+        let (w, _h) = watch(false, true, routes(Some(1)));
+        let carrier = w
+            .subscribe(Consumer::Carrier {
+                termux_poll_min: 15,
+            })
+            .unwrap();
+        assert_eq!(carrier.watching(), Watching::Netlink);
+        assert_eq!(w.polling(), None);
+    }
+
+    #[tokio::test]
+    async fn a_lost_stream_on_termux_starts_the_carrier_poll() {
+        let r = routes(None);
+        let (w, h) = watch(false, true, Arc::clone(&r));
+        let carrier = w
+            .subscribe(Consumer::Carrier { termux_poll_min: 9 })
+            .unwrap();
+        assert_eq!(w.polling(), None);
+        h.feed.lock().unwrap().clear();
+        assert_eq!(quiet_for(&carrier, 1_000).await, Some(NetEvent::Failed));
+        assert!(w.polling().is_some());
+        assert_eq!(quiet_for(&carrier, 1_000).await, Some(NetEvent::Poll));
+    }
+
+    #[test]
+    fn subscribing_outside_a_runtime_is_refused() {
+        let (w, h) = watch(false, false, routes(Some(1)));
+        assert_eq!(
+            w.subscribe(Consumer::Mdns).err(),
+            Some(NetWatchError::NoRuntime)
+        );
+        assert_eq!(h.opens.load(Ordering::SeqCst), 0);
+        assert_eq!(w.subscribers(), 0);
+    }
+
+    #[test]
+    fn the_fingerprint_ignores_counters_and_headers() {
+        let v4a =
+            "Iface\tDestination\tGateway \tFlags\tRefCnt\tUse\tMetric\tMask\t\tMTU\tWindow\tIRTT\n\
+                   eth0\t00000000\t0102A8C0\t0003\t0\t0\t100\t00000000\t0\t0\t0\n";
+        let v4b = v4a.replace("\t0003\t0\t0\t100", "\t0003\t7\t42\t100");
+        let v4c = v4a.replace("0102A8C0", "0103A8C0");
+        let v6a = "fe800000000000000000000000000000 40 00000000000000000000000000000000 00 \
+                   00000000000000000000000000000000 00000100 00000001 00000000 00000001 eth0\n";
+        let v6b = v6a.replace("00000001 00000000 00000001", "00000009 00000123 00000001");
+        assert_eq!(
+            route_fingerprint(Some(v4a), Some(v6a)),
+            route_fingerprint(Some(&v4b), Some(&v6b)),
+            "counters are ignored"
+        );
+        assert_ne!(
+            route_fingerprint(Some(v4a), Some(v6a)),
+            route_fingerprint(Some(&v4c), Some(v6a)),
+            "a new gateway is a change"
+        );
+        assert_ne!(
+            route_fingerprint(Some(v4a), None),
+            route_fingerprint(Some(v4a), Some(v6a))
+        );
+        assert_eq!(route_fingerprint(None, None), None);
+        assert!(route_fingerprint(None, Some(v6a)).is_some());
+        // the real tables read (or not) without a panic
+        let _ = ProcRoutes.fingerprint();
+    }
+
+    #[test]
+    fn the_poll_period_is_clamped_to_the_settings_bounds() {
+        let m = Duration::from_secs(60);
+        assert_eq!(poll_period(15, m), Duration::from_secs(900));
+        assert_eq!(poll_period(0, m), Duration::from_secs(9 * 60));
+        assert_eq!(poll_period(u32::MAX, m), Duration::from_secs(1440 * 60));
+    }
+
+    #[test]
+    fn the_mask_is_the_spec_s() {
+        assert_eq!(GROUPS, 0x1 | 0x10 | 0x40 | 0x100 | 0x400);
+        assert_eq!(DEBOUNCE, Duration::from_secs(2));
+    }
+}

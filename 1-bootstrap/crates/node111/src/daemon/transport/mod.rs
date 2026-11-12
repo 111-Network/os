@@ -31,6 +31,12 @@ pub mod posture;
 pub mod rnstatus;
 pub mod venv;
 
+/// The netlink groups the spine's link watch binds: `RTMGRP_LINK` only. The
+/// address and route groups ride Layer 7's second socket (`relay::netwatch`,
+/// `os/7-relay/README.md` §3.3), so a DHCP renew never re-renders rnsd (S15;
+/// §19 D8).
+pub const LINK_WATCH_GROUPS: u32 = netlink::RTMGRP_LINK;
+
 use crate::daemon::health::TransportHealth;
 use crate::daemon::supervise::{self, ChildControl, ChildHandle, ChildSpec};
 use crate::daemon::DaemonLayout;
@@ -496,7 +502,7 @@ pub async fn start(args: TransportArgs<'_>) -> TransportHandle {
 
     // netlink → debounced re-render → diff → --reload the AutoInterface
     // (restart only for posture), never pkill (§11).
-    if let Ok(events) = netlink::NetlinkEvents::new() {
+    if let Ok(events) = netlink::NetlinkEvents::new(LINK_WATCH_GROUPS) {
         let spine = Arc::clone(&spine);
         tasks.push(tokio::spawn(async move {
             netlink::debounced(events, std::time::Duration::from_secs(2), || {
