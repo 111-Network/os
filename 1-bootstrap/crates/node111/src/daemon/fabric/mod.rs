@@ -157,7 +157,7 @@ use id111::keyset::NodeId;
 use mesh111::contacts::{ROLE_ALWAYS_ON_HUB, ROLE_MAILBOX};
 use mesh111::fabric::{
     ContactChange, Fabric, FabricError, FabricEvent, FabricSettings, FabricStatus, ForeignChange,
-    ForeignGroupPart, ForeignQueue, MessageChange, MessageView, MAX_PAIRED_HUBS,
+    ForeignGroupPart, ForeignQueue, MessageChange, MessageView, PairView, MAX_PAIRED_HUBS,
 };
 use mesh111::keys::ModeS;
 use mesh111::link::tcp_lan::{TcpLan, TcpLanConfig, DEFAULT_PORT};
@@ -172,7 +172,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, RwLock, Weak};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::sync::broadcast;
 use tokio::task::JoinHandle;
 use zeroize::Zeroizing;
@@ -282,6 +282,9 @@ pub struct FabricHandle {
     tasks: Mutex<Vec<JoinHandle<()>>>,
     /// Layer 7 §4.6: the daemon's pairing rows, shared with the stream wrap.
     pairs: settings::PairTable,
+    /// Layer 7 §3.2 (row D3b): the per-pair views as last read from
+    /// `Fabric::status`, for readers that must not wait on the actor.
+    pair_views: Mutex<PairViews>,
     /// Layer 7 §4.6 step 5: the pair dials this handle started (far hub →
     /// address); also serializes their reconciliation.
     pair_dials: tokio::sync::Mutex<HashMap<NodeId, SocketAddr>>,
@@ -332,6 +335,26 @@ struct Rehomed {
     /// taken; `None` (no row) never confirms the membership after a lag.
     marker: Option<u64>,
     void: bool,
+}
+
+/// The per-pair views (Layer 7 §3.2, §5.3 amendment 11: `reachable`,
+/// `pending`) as this handle last read them from `Fabric::status`: at every
+/// `fabric` frame it publishes for a fabric event, every `GET /fabric` and
+/// every housekeeping pass (module doc, step 7). Kept so a reader on a tick
+/// (the `gateway` row, row D3b) never waits on the fabric actor: reading them
+/// is one lock, no round trip.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PairViews {
+    /// Bumped whenever the views changed, the daemon's pairing halves were
+    /// published ([`FabricHandle::pair_table`]: an address or `lan` set by
+    /// [`FabricHandle::set_pair_link`] emits no fabric event) or a settings
+    /// change was applied. A reader compares it to skip an unchanged read.
+    pub generation: u64,
+    /// When the views were last read from the fabric (monotonic); `None`
+    /// before the first read.
+    pub at: Option<Instant>,
+    /// `FabricStatus::paired` as then read.
+    pub views: Vec<PairView>,
 }
 
 impl std::fmt::Debug for FabricHandle {
@@ -879,6 +902,7 @@ pub async fn start(
         lan,
         tasks: Mutex::new(Vec::new()),
         pairs,
+        pair_views: Mutex::new(PairViews::default()),
         pair_dials: tokio::sync::Mutex::new(HashMap::new()),
         rehomed: Mutex::new(None),
         rehome: tokio::sync::Mutex::new(()),
@@ -907,6 +931,49 @@ pub async fn start(
 }
 
 impl FabricHandle {
+    /// A handle with no fabric behind it (down, no actor, no task) holding
+    /// `persisted` (tests of readers that must never reach the actor: a
+    /// round trip here fails as "not running").
+    #[cfg(test)]
+    pub(crate) fn detached(cfg: FabricConfig, persisted: settings::Persisted) -> Arc<FabricHandle> {
+        let pairs: settings::PairTable = Arc::new(RwLock::new(persisted.pairs.clone()));
+        Arc::new(FabricHandle {
+            facts: RwLock::new(FabricFacts::default()),
+            cfg,
+            live: None,
+            down: Some("detached (test)".into()),
+            persisted: Mutex::new(persisted),
+            times: Mutex::new(times::DisplayTimes::memory()),
+            foreign_times: Mutex::new(times::DisplayTimes::memory()),
+            contacts: Mutex::new(HashMap::new()),
+            listener: tokio::sync::Mutex::new(None),
+            remint: tokio::sync::Mutex::new(()),
+            relay: Mutex::new(RelayRoles::default()),
+            lan: false,
+            tasks: Mutex::new(Vec::new()),
+            pairs,
+            pair_views: Mutex::new(PairViews::default()),
+            pair_dials: tokio::sync::Mutex::new(HashMap::new()),
+            rehomed: Mutex::new(None),
+            rehome: tokio::sync::Mutex::new(()),
+            persist: tokio::sync::Mutex::new(()),
+        })
+    }
+
+    /// Tests: record `views` as if `Fabric::status` had just returned them.
+    #[cfg(test)]
+    pub(crate) fn observe_pair_views(&self, views: &[PairView]) {
+        self.store_pair_views(views);
+    }
+
+    /// Tests: publish `pairs` as the daemon's halves, as a pairing route does.
+    #[cfg(test)]
+    pub(crate) fn replace_pair_links(&self, pairs: Vec<settings::PairLink>) {
+        let mut p = self.persisted.lock().unwrap_or_else(|p| p.into_inner());
+        p.pairs = pairs;
+        self.publish_pairs(&p.pairs);
+    }
+
     /// The running fabric.
     ///
     /// Foreign **writes** (Layer 6 §3: ingest, send groups, relay copies)
@@ -1192,6 +1259,42 @@ impl FabricHandle {
         if let Ok(mut f) = self.facts.write() {
             *f = facts;
         }
+        self.store_pair_views(&st.paired);
+    }
+
+    /// Keep `views` as the latest read (Layer 7 §3.2, row D3b): the time is
+    /// always taken, the generation bumped only when they changed.
+    fn store_pair_views(&self, views: &[PairView]) {
+        let mut v = self.pair_views.lock().unwrap_or_else(|p| p.into_inner());
+        v.at = Some(Instant::now());
+        if v.views != views {
+            v.views = views.to_vec();
+            v.generation = v.generation.wrapping_add(1);
+        }
+    }
+
+    /// Something a reader of [`FabricHandle::pair_views`] derives its pair
+    /// set from changed (the pairing halves, the settings).
+    fn bump_pair_generation(&self) {
+        let mut v = self.pair_views.lock().unwrap_or_else(|p| p.into_inner());
+        v.generation = v.generation.wrapping_add(1);
+    }
+
+    /// The per-pair views as last read ([`PairViews`]): one lock, never an
+    /// actor round trip (Layer 7 §3.2, row D3b).
+    pub fn pair_views(&self) -> PairViews {
+        self.pair_views
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone()
+    }
+
+    /// [`PairViews::generation`] alone (one lock, nothing cloned).
+    pub fn pair_generation(&self) -> u64 {
+        self.pair_views
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .generation
     }
 
     /// Refresh the service facts from `Fabric::status`.
@@ -1271,6 +1374,7 @@ impl FabricHandle {
                     self.publish_pairs(&p.pairs);
                 }
                 p.fabric = s.clone();
+                self.bump_pair_generation();
                 (p.clone(), settings::encoded(&p))
             }
             Err(_) => return s,
@@ -1427,6 +1531,8 @@ impl FabricHandle {
         if let Ok(mut t) = self.pairs.write() {
             *t = pairs.to_vec();
         }
+        // a changed address or `lan` emits no fabric event (row D3b)
+        self.bump_pair_generation();
     }
 
     /// Layer 7 §4.6 step 5: dial the pairs [`settings::pair_dials`] names
@@ -1756,9 +1862,15 @@ impl FabricHandle {
     /// one is minted from the then-current state); `Err` when the re-mint
     /// failed and the previous announce (or none) is still what peers see.
     async fn refresh_announce(&self) -> Result<(), ReannounceError> {
+        let _one = self.remint.lock().await;
+        self.refresh_announce_locked().await
+    }
+
+    /// [`FabricHandle::refresh_announce`] with the re-mint lock already held
+    /// by the caller.
+    async fn refresh_announce_locked(&self) -> Result<(), ReannounceError> {
         let Some(l) = &self.live else { return Ok(()) };
         let Some(tcp) = &l.tcp else { return Ok(()) };
-        let _one = self.remint.lock().await;
         let app = self.current_appdata();
         let (handle, dir) = (Arc::clone(&l.sealer), self.cfg.fabric_dir.clone());
         let outcome = tokio::task::spawn_blocking(move || handle.ensure_announce(&dir, &app)).await;
@@ -1823,24 +1935,46 @@ impl FabricHandle {
     }
 
     /// [`FabricHandle::set_relay_settings`] with the switches already read.
+    ///
+    /// The swap, the compare, the re-mint and the revert all run under the
+    /// re-mint lock (row D4c), so two calls serialise: a second call never
+    /// answers `Ok(false)` while the first's re-mint is still in flight and
+    /// may yet fail and put the old switches back. "Changed" is decided
+    /// against the role bits the presented announce carries (what peers
+    /// see), not against the switches the handle held: after a failed
+    /// re-mint the same call finds the bits unannounced and tries again.
+    /// Without a presented announce (no link, restore-pending) the switches
+    /// held before are the reference.
     pub async fn set_relay_roles(&self, new: RelayRoles) -> Result<bool, ReannounceError> {
+        let _one = self.remint.lock().await;
         let before = std::mem::replace(
             &mut *self.relay.lock().unwrap_or_else(|p| p.into_inner()),
             new,
         );
         let s = self.persisted().fabric;
-        if roles(&s, &before, self.lan) == roles(&s, &new, self.lan) {
+        let want = roles(&s, &new, self.lan);
+        let reference = self
+            .presented_roles()
+            .unwrap_or_else(|| roles(&s, &before, self.lan));
+        if reference == want {
             return Ok(false);
         }
-        if let Err(e) = self.refresh_announce().await {
-            // put the previous switches back unless a later call replaced them meanwhile
-            let mut r = self.relay.lock().unwrap_or_else(|p| p.into_inner());
-            if *r == new {
-                *r = before;
-            }
+        if let Err(e) = self.refresh_announce_locked().await {
+            // put the previous switches back (no other call ran meanwhile:
+            // the re-mint lock is held), so the peers' view and this handle agree
+            *self.relay.lock().unwrap_or_else(|p| p.into_inner()) = before;
             return Err(e);
         }
         Ok(true)
+    }
+
+    /// The role bits of the announce `tcp-lan` presents now; `None` when
+    /// none is presented (no link) or it cannot be read.
+    fn presented_roles(&self) -> Option<u16> {
+        self.tcp()?;
+        let bytes = self.own_announce();
+        let a = id111::announce::Announce::parse(&bytes).ok()?;
+        Some(mesh111::contacts::AppData::parse(a.appdata()).roles)
     }
 
     /// The hub offer's `gateway {carrier, mode}` (Layer 7 §7.5): `Some`
@@ -2820,6 +2954,64 @@ mod tests {
         // and once only
         assert_eq!(h.set_relay_settings(&r).await, Ok(false));
         assert_eq!(last(&h), l0 + 1);
+        h.shutdown().await;
+    }
+
+    /// Layer 7 §7.2 (row D4c item 4): two overlapping role writes, the first
+    /// failing. The second never answers `Ok(false)` ("already announced")
+    /// while the first's re-mint is in flight and then reverts: the calls
+    /// serialise under the re-mint lock and "changed" is decided against
+    /// the presented announce, so the second tries (and here fails) too, and
+    /// the handle and the announce agree after both.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 3)]
+    async fn overlapping_role_writes_serialise_and_agree_with_the_announce() {
+        use relay_settings::RelaySettings;
+        use sealer::ROLE_OFFLOAD;
+        let dir = tempfile::tempdir().unwrap();
+        let api = test_api_lan(dir.path(), true);
+        let identity_dir = dir.path().join("identity");
+        let identity = crate::identity::generate(&identity_dir).unwrap();
+        let h = start(lo_cfg(dir.path(), true), Some(identity), &api).await;
+        assert!(h.running(), "{:?}", h.down_reason());
+        let hub = ROLE_MAILBOX | ROLE_ALWAYS_ON_HUB;
+        let last = |h: &FabricHandle| h.sealer().unwrap().announce_last();
+        let l0 = last(&h);
+        let blocker = identity_dir.join(format!("{}.tmp", id111::counters::COUNTERS_FILE));
+        std::fs::create_dir(&blocker).unwrap();
+        std::fs::write(blocker.join("keep"), b"x").unwrap();
+        let mut r = RelaySettings::default();
+        r.set_offload_bit(true);
+
+        // a re-mint is in flight (the lock held), then the two calls arrive
+        let held = h.remint.lock().await;
+        let first = tokio::spawn({
+            let (h, r) = (Arc::clone(&h), r.clone());
+            async move { h.set_relay_settings(&r).await }
+        });
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let second = tokio::spawn({
+            let (h, r) = (Arc::clone(&h), r.clone());
+            async move { h.set_relay_settings(&r).await }
+        });
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert!(!second.is_finished(), "the second call waits its turn");
+        drop(held);
+        let (a, b) = (first.await.unwrap(), second.await.unwrap());
+        assert_eq!(a, Err(ReannounceError::NoCounter));
+        assert_eq!(
+            b,
+            Err(ReannounceError::NoCounter),
+            "never Ok(false) for bits that are not announced"
+        );
+        assert_eq!(last(&h), l0);
+        assert_eq!(announced(&h).0, hub);
+        assert_eq!(h.relay_roles(), RelayRoles::default(), "they agree");
+
+        // fixed: one call mints, the next finds the bits announced
+        std::fs::remove_dir_all(&blocker).unwrap();
+        assert_eq!(h.set_relay_settings(&r).await, Ok(true));
+        assert_eq!(h.set_relay_settings(&r).await, Ok(false));
+        assert_eq!((announced(&h).0, last(&h)), (hub | ROLE_OFFLOAD, l0 + 1));
         h.shutdown().await;
     }
 

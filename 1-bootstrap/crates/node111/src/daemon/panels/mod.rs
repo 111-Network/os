@@ -234,12 +234,17 @@ impl HealthTrack {
     }
 }
 
+/// A shim's live drop-oldest counter (§14 `panel.state.dropped`), read whenever the panel facts
+/// are read ([`PanelHost::set_dropped_source`]).
+pub type DroppedSource = Arc<dyn Fn() -> u64 + Send + Sync>;
+
 #[derive(Default)]
 struct HostState {
     enabled: std::collections::HashSet<ServiceId>,
     live: HashMap<ServiceId, Live>,
     health: HashMap<ServiceId, HealthTrack>,
     dropped: HashMap<ServiceId, u64>,
+    dropped_from: HashMap<ServiceId, DroppedSource>,
     last_published: Option<Vec<PanelInfo>>,
 }
 
@@ -261,6 +266,9 @@ pub struct PanelHost {
     pub tickets: Tickets,
     pub sessions: SessionStore,
     state: Mutex<HostState>,
+    /// Tests: reconcile passes run (the parking proof, row D3b).
+    #[cfg(test)]
+    passes: std::sync::atomic::AtomicU64,
 }
 
 impl std::fmt::Debug for PanelHost {
@@ -343,6 +351,8 @@ impl PanelHost {
             panels,
             state: Mutex::new(HostState::default()),
             cfg,
+            #[cfg(test)]
+            passes: std::sync::atomic::AtomicU64::new(0),
         }
     }
 
@@ -384,6 +394,13 @@ impl PanelHost {
     /// `panel.state.dropped`.
     pub fn report_dropped(&self, id: ServiceId, total: u64) {
         self.lock().dropped.insert(id, total);
+    }
+
+    /// Shim seam (§14; Layer 7 §3.6, row D3b): the shim's live drop counter, read each time the
+    /// panel facts are read (it wins over a reported count). Nothing has to wake to copy it,
+    /// so a shim that registers one needs no tick.
+    pub fn set_dropped_source(&self, id: ServiceId, source: DroppedSource) {
+        self.lock().dropped_from.insert(id, source);
     }
 
     /// Session revocations as they happen (shims drop per-session upstream
@@ -507,6 +524,9 @@ impl PanelHost {
         api: &Arc<ApiState>,
         setup: Option<&(dyn Fn(ServiceId) -> bool + Sync)>,
     ) -> bool {
+        #[cfg(test)]
+        self.passes
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         if let Some(setup) = setup {
             let now = Instant::now();
             let mut to_start = Vec::new();
@@ -648,7 +668,11 @@ fn info(p: &Panel, st: &HostState) -> PanelInfo {
                 .get(&m.id)
                 .map(|h| h.published)
                 .unwrap_or(PanelHealth::Unknown),
-            dropped: st.dropped.get(&m.id).copied(),
+            dropped: st
+                .dropped_from
+                .get(&m.id)
+                .map(|f| f())
+                .or_else(|| st.dropped.get(&m.id).copied()),
         },
         title: Some(m.title.clone()),
         secure_note: m.secure_note.clone(),
@@ -834,5 +858,55 @@ mod tests {
         h.sessions.revoke(|_| true);
         assert!(!h.needs_reconcile(&none));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Layer 7 §3.6 (row D3b, G6): the spawned reconcile loop parks while nothing needs it — no
+    /// pass over two of its 2 s ticks — and a published change of the services registry wakes
+    /// it. Real time (no tokio `test-util` in this crate): a parked loop runs no pass however
+    /// slow the box; the woken pass comes eventually.
+    #[tokio::test]
+    async fn the_spawned_reconcile_parks_and_wakes_on_a_change() {
+        use crate::daemon::dashboard::{ApiConfig, DashboardState};
+        use crate::daemon::services::{compute, Facts, Registry, ServiceState};
+        use std::sync::atomic::Ordering;
+        let dir = tempfile::tempdir().unwrap();
+        let layout = crate::daemon::DaemonLayout {
+            root: dir.path().to_path_buf(),
+            etc: dir.path().join("etc"),
+        };
+        let dash = Arc::new(std::sync::RwLock::new(DashboardState::new("2026.11.12")));
+        let api = ApiState::new(dash, ApiConfig::new(layout, false));
+        let registry = Arc::new(Registry::new());
+        assert!(registry.tick(compute(&Facts::default()), "t0"));
+        api.insert_ext(Arc::clone(&registry));
+        let h = Arc::new(host(dir.path()));
+        let task = spawn(Arc::clone(&api), Arc::clone(&h));
+        let passes = || h.passes.load(Ordering::SeqCst);
+        let until = |n: u64| async move {
+            let deadline = std::time::Instant::now() + Duration::from_secs(10);
+            while passes() < n {
+                assert!(std::time::Instant::now() < deadline, "no pass {n}");
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        };
+        until(1).await;
+        // two of its ticks and some: nothing set up, no session, so parked
+        tokio::time::sleep(RECONCILE_EVERY * 2 + Duration::from_millis(300)).await;
+        assert_eq!(passes(), 1, "parked: no pass while nothing needs it");
+        // the Meshtastic service is set up: the published change (the registry publishes a
+        // new state on its second consecutive tick) wakes it
+        let set_up = || {
+            let mut c = compute(&Facts::default());
+            for r in c.iter_mut().filter(|r| r.id == ServiceId::Meshtastic) {
+                r.state = ServiceState::Starting;
+            }
+            c
+        };
+        assert!(!registry.tick(set_up(), "t1"), "pending, not yet published");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert_eq!(passes(), 1, "nothing published: still parked");
+        assert!(registry.tick(set_up(), "t2"));
+        until(2).await;
+        task.abort();
     }
 }

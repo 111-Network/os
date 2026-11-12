@@ -565,9 +565,10 @@ pub fn spawn(api: Arc<ApiState>, src: Sources) -> Arc<Registry> {
                 let meshmud_bound = provided(&src.meshmud_bound).unwrap_or_default();
                 let panels = provided(&src.panels).unwrap_or_default();
                 // Layer 7 §3.5: the gateway badge's facts (a no-op while no
-                // switch is on; stale pair facts re-read here, no timer of
-                // their own)
-                crate::daemon::relay::gateway::refresh().await;
+                // switch is on; the pair facts re-read here from the fabric
+                // handle's kept views: synchronous, no actor round trip and
+                // no timer of their own)
+                crate::daemon::relay::gateway::refresh();
                 let gateway = crate::daemon::relay::gateway::facts();
                 let (meshtastic_seen, down_for) = stack.observe(
                     StackObs {

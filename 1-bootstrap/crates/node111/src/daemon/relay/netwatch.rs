@@ -25,6 +25,18 @@
 //! and it adds no task, timer or socket. A burst that never goes quiet for [`DEBOUNCE`] is still
 //! checked [`DEBOUNCE_MAX`] after its first datagram, so the event is never starved.
 //!
+//! **What the fingerprint cannot see (row D4c).** Its route part is `/proc/net/route` (the main
+//! table) and `/proc/net/ipv6_route`, while the socket delivers route messages of every table:
+//! a default route changed in a policy table (a VPN, Tailscale's exit node, NetworkManager,
+//! Android's per-network tables) with the addresses unchanged would read as no change. So the
+//! reader also looks at each datagram's message headers (`netlink::classify`, sizes checked
+//! before every read): a burst that carried a route message of a table other than main or
+//! local, a deleted address, any link message, or a short, unknown or unparsable message is
+//! delivered without asking the fingerprint (which is still read, as the next baseline). A
+//! burst of `RTM_NEWADDR` and main / local table route messages only is settled by the
+//! fingerprint as above, so a lifetime-only refresh still delivers nothing. What remains: a
+//! change made and reverted inside one burst of that second kind only is not seen.
+//!
 //! **Consumers subscribe** ([`NetWatch::subscribe`]): a configured carrier (row D11, its check
 //! of §3.2 (a)) and the running mdns-sd daemon (row D8, the §3.3 re-arm). The first subscriber
 //! opens the socket and spawns its one reader task; the last [`Subscription`] dropped aborts the
@@ -43,12 +55,17 @@
 //! **The Termux fallback (§3.4).** Only on a Termux node ([`crate::config::on_termux`]), only
 //! while a [`Consumer::Carrier`] is subscribed (a carrier is hub-only, §3.1) and only while the
 //! bind failed: a coarse poll every `gateway.termux_poll_min` minutes (default 15, floor 9,
-//! [`super::settings`]). The poll reads the routing tables, `/proc/net/route` and
-//! `/proc/net/ipv6_route` (two small text reads, no socket; lighter than a netlink dump, which
-//! needs a socket of the very kind whose bind failed, a request and a multipart parse), and
-//! delivers [`NetEvent::Poll`] to the carrier when their fingerprint changed (the counter
-//! columns ignored) or when neither table can be read (then every tick: the check is the only
-//! way left to learn the network). No other node, and no other consumer, polls. The last
+//! [`super::settings`]). The poll reads the same [`change_fingerprint`] the netlink path uses
+//! (row D4c): the interfaces, their `IFF_UP | IFF_RUNNING` and their addresses through one
+//! `getifaddrs(3)`, plus the routing tables `/proc/net/route` and `/proc/net/ipv6_route` (small
+//! text reads, no socket; lighter than a netlink dump, which needs a socket of the very kind
+//! whose bind failed, a request and a multipart parse). On Android the IPv4 main table is
+//! mostly empty (per-network policy tables), so a Wi-Fi / cellular switch may not move the
+//! routes; it moves the addresses. It delivers [`NetEvent::Poll`] to the carrier when that
+//! fingerprint changed (the counter columns and address lifetimes ignored) or when it cannot
+//! be read (then every tick: the check is the only way left to learn the network; an Android
+//! that hides `/proc/net/route` from apps is such a host). One bounded read per tick, nothing
+//! new resident. No other node, and no other consumer, polls. The last
 //! fingerprint the poll read lives in the watch's state, so a poll restarted for a new period
 //! (a changed `termux_poll_min`, a second carrier) compares against it and a change that
 //! happened since the old task's last tick is still delivered; it is forgotten only when the
@@ -455,10 +472,11 @@ struct State {
     /// a burst is delivered only when it moved, or when it is `None` (unreadable).
     seen: Option<u64>,
     poll: Option<(Duration, JoinHandle<()>)>,
-    /// Bumped at every poll start, so a replaced poll task that already woke changes nothing.
+    /// Bumped at every poll start and wherever a poll task is aborted (a restart, a stop, the
+    /// close), so a task that already woke and read changes nothing after it (row D4c).
     poll_gen: u64,
-    /// The §3.4 poll's last routing-table reading (`Some(None)`: unreadable), kept across a poll
-    /// restart and forgotten when the poll stops.
+    /// The §3.4 poll's last [`change_fingerprint`] reading (`Some(None)`: unreadable), kept
+    /// across a poll restart and forgotten when the poll stops.
     poll_seen: Option<Option<u64>>,
     rt: Option<Handle>,
 }
@@ -633,9 +651,9 @@ impl Inner {
                 let (quiet, max) = (self.cfg.quiet, self.cfg.max_wait);
                 st.reader = Some(rt.spawn(async move {
                     let fire_to = weak.clone();
-                    netlink::debounced_within(source, quiet, max, move || {
+                    netlink::debounced_within(source, quiet, max, move |forced| {
                         if let Some(inner) = fire_to.upgrade() {
-                            inner.settle(epoch);
+                            inner.settle(epoch, forced);
                         }
                     })
                     .await;
@@ -660,6 +678,7 @@ impl Inner {
         }
         if let Some((_, h)) = st.poll.take() {
             h.abort();
+            st.poll_gen += 1;
         }
         st.link = Link::Idle;
         st.seen = None;
@@ -667,16 +686,17 @@ impl Inner {
         st.rt = None;
     }
 
-    /// A debounced burst ended (row D4b): deliver [`NetEvent::Changed`] only when the
-    /// fingerprint moved since the last delivery (or the open), or cannot be read. The read
-    /// runs before the lock is taken.
-    fn settle(&self, epoch: u64) {
+    /// A debounced burst ended (row D4b): deliver [`NetEvent::Changed`] when the burst was
+    /// `forced` (a message in it counts as a change on its own, row D4c), or when the
+    /// fingerprint moved since the last delivery (or the open), or cannot be read. The
+    /// fingerprint is read either way (the next burst's baseline), before the lock is taken.
+    fn settle(&self, epoch: u64, forced: bool) {
         let now = change_fingerprint(&*self.net);
         let mut st = self.lock();
         if st.epoch != epoch || st.link != Link::Bound {
             return;
         }
-        if now.is_none() || now != st.seen {
+        if forced || now.is_none() || now != st.seen {
             deliver(&st, CHANGED, |_| true);
         }
         st.seen = now;
@@ -735,6 +755,8 @@ impl Inner {
         }
         if let Some((_, h)) = st.poll.take() {
             h.abort();
+            // a tick already past its read must not write its reading back (row D4c)
+            st.poll_gen += 1;
         }
         let (Some(period), Some(rt)) = (want, st.rt.clone()) else {
             // the poll stops: its reading is forgotten (the next start reads a new baseline)
@@ -744,7 +766,7 @@ impl Inner {
         // a restart (a new period) keeps the last reading as its baseline: a change since the
         // old task's last tick is delivered at the new task's first tick (row D4b)
         if st.poll_seen.is_none() {
-            st.poll_seen = Some(self.net.routes());
+            st.poll_seen = Some(change_fingerprint(&*self.net));
         }
         st.poll_gen += 1;
         let gen = st.poll_gen;
@@ -755,7 +777,7 @@ impl Inner {
             rt.spawn(async move {
                 loop {
                     tokio::time::sleep(period).await;
-                    let now = net.routes();
+                    let now = change_fingerprint(&*net);
                     let Some(inner) = weak.upgrade() else { return };
                     let mut st = inner.lock();
                     if st.poll_gen != gen {
@@ -791,11 +813,14 @@ mod tests {
         opens: Arc<AtomicUsize>,
         live: Arc<AtomicUsize>,
         feed: Arc<Mutex<Vec<tokio::sync::mpsc::Sender<()>>>>,
+        forced: Arc<std::sync::atomic::AtomicBool>,
     }
 
     struct Counted {
         inner: ScriptedEvents,
         live: Arc<AtomicUsize>,
+        /// The test marks the burst in flight forced (`netlink::classify` said so).
+        forced: Arc<std::sync::atomic::AtomicBool>,
     }
 
     impl LinkEvents for Counted {
@@ -803,6 +828,10 @@ mod tests {
             &mut self,
         ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Option<()>> + Send + '_>> {
             self.inner.next_change()
+        }
+
+        fn take_forced(&mut self) -> bool {
+            self.forced.swap(false, Ordering::SeqCst)
         }
     }
 
@@ -825,6 +854,7 @@ mod tests {
             Ok(Box::new(Counted {
                 inner: ScriptedEvents { rx },
                 live: Arc::clone(&self.live),
+                forced: Arc::clone(&self.forced),
             }))
         }
     }
@@ -833,6 +863,7 @@ mod tests {
         opens: Arc<AtomicUsize>,
         live: Arc<AtomicUsize>,
         feed: Arc<Mutex<Vec<tokio::sync::mpsc::Sender<()>>>>,
+        forced: Arc<std::sync::atomic::AtomicBool>,
     }
 
     impl Handles {
@@ -904,18 +935,24 @@ mod tests {
     }
 
     fn watch_cfg(fail: bool, cfg: Config, routes: Arc<Routes>) -> (NetWatch, Handles) {
+        watch_net(fail, cfg, routes)
+    }
+
+    fn watch_net(fail: bool, cfg: Config, net: Arc<dyn NetRead>) -> (NetWatch, Handles) {
         let h = Handles {
             opens: Arc::new(AtomicUsize::new(0)),
             live: Arc::new(AtomicUsize::new(0)),
             feed: Arc::new(Mutex::new(Vec::new())),
+            forced: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         };
         let fake = Fake {
             fail,
             opens: Arc::clone(&h.opens),
             live: Arc::clone(&h.live),
             feed: Arc::clone(&h.feed),
+            forced: Arc::clone(&h.forced),
         };
-        (NetWatch::new(cfg, Box::new(fake), routes), h)
+        (NetWatch::new(cfg, Box::new(fake), net), h)
     }
 
     async fn eventually(what: &str, f: impl Fn() -> bool) {
@@ -1375,6 +1412,146 @@ mod tests {
         assert_eq!(poll_period(15, m), Duration::from_secs(900));
         assert_eq!(poll_period(0, m), Duration::from_secs(9 * 60));
         assert_eq!(poll_period(u32::MAX, m), Duration::from_secs(1440 * 60));
+    }
+
+    /// Row D4c (2): a burst whose datagrams carried a message that counts on its own (a policy
+    /// table's route, a deleted address, a link message) is delivered though the fingerprint
+    /// (main table, addresses) did not move; an unforced burst is still settled by it.
+    #[tokio::test]
+    async fn a_forced_burst_is_delivered_without_the_fingerprint() {
+        let r = routes(Some(1));
+        let (w, h) = watch(false, false, Arc::clone(&r));
+        let mdns = w.subscribe(Consumer::Mdns).unwrap();
+        let tx = h.sender();
+        tx.send(()).await.unwrap();
+        assert_eq!(quiet_for(&mdns, 300).await, None, "unforced, unchanged");
+        // `ip route add default ... table 52`: the fingerprint reads the same
+        h.forced.store(true, Ordering::SeqCst);
+        tx.send(()).await.unwrap();
+        tx.send(()).await.unwrap();
+        assert_eq!(quiet_for(&mdns, 1_000).await, Some(NetEvent::Changed));
+        assert_eq!(quiet_for(&mdns, 200).await, None, "one event per burst");
+        // the mark is the burst's: the next unforced one is settled by the fingerprint
+        tx.send(()).await.unwrap();
+        assert_eq!(quiet_for(&mdns, 300).await, None);
+        // a forced burst still leaves the fingerprint as the next baseline
+        *r.value.lock().unwrap() = Some(2);
+        h.forced.store(true, Ordering::SeqCst);
+        tx.send(()).await.unwrap();
+        assert_eq!(quiet_for(&mdns, 1_000).await, Some(NetEvent::Changed));
+        tx.send(()).await.unwrap();
+        assert_eq!(quiet_for(&mdns, 300).await, None, "baseline taken");
+    }
+
+    /// Row D4c (1): the Termux poll compares the full fingerprint, so a network switch that
+    /// moves the addresses but not the main routing table (Android) is delivered.
+    #[tokio::test]
+    async fn the_termux_poll_sees_an_address_change_with_the_routes_unchanged() {
+        let r = routes(Some(1));
+        let (w, _h) = watch(true, true, Arc::clone(&r));
+        let carrier = w
+            .subscribe(Consumer::Carrier { termux_poll_min: 9 })
+            .unwrap();
+        eventually("two ticks", || r.reads.load(Ordering::SeqCst) >= 3).await;
+        assert_eq!(quiet_for(&carrier, 20).await, None);
+        // Wi-Fi to cellular: the old address gone, a new one on another interface
+        *r.addrs.lock().unwrap() = Some(vec![
+            link("eth0", 2, libc::IFF_UP as u32),
+            link("rmnet0", 5, LINK_FLAGS),
+            addr("rmnet0", 5, 77, 30),
+        ]);
+        assert_eq!(quiet_for(&carrier, 1_000).await, Some(NetEvent::Poll));
+        assert_eq!(quiet_for(&carrier, 200).await, None, "once");
+        // the interfaces unreadable: every tick (the check is the only way left)
+        *r.addrs.lock().unwrap() = None;
+        assert_eq!(quiet_for(&carrier, 1_000).await, Some(NetEvent::Poll));
+        assert_eq!(quiet_for(&carrier, 1_000).await, Some(NetEvent::Poll));
+    }
+
+    /// A host whose next read blocks once, on demand, until released (a poll tick caught past
+    /// its sleep, inside its read).
+    struct Gate {
+        armed: std::sync::atomic::AtomicBool,
+        entered: std::sync::atomic::AtomicBool,
+        open: (Mutex<bool>, std::sync::Condvar),
+        value: std::sync::atomic::AtomicU64,
+    }
+
+    impl Gate {
+        fn new() -> Arc<Gate> {
+            Arc::new(Gate {
+                armed: false.into(),
+                entered: false.into(),
+                open: (Mutex::new(false), std::sync::Condvar::new()),
+                value: 1.into(),
+            })
+        }
+
+        fn release(&self) {
+            *self.open.0.lock().unwrap() = true;
+            self.open.1.notify_all();
+        }
+    }
+
+    impl NetRead for Gate {
+        fn routes(&self) -> Option<u64> {
+            if self.armed.swap(false, Ordering::SeqCst) {
+                self.entered.store(true, Ordering::SeqCst);
+                let mut open = self.open.0.lock().unwrap();
+                while !*open {
+                    open = self.open.1.wait(open).unwrap();
+                }
+            }
+            Some(self.value.load(Ordering::SeqCst))
+        }
+
+        fn addresses(&self) -> Option<u64> {
+            Some(7)
+        }
+    }
+
+    /// Row D4c (3): a poll stopped (the carrier leaves while mdns-sd stays) or closed (the
+    /// last subscriber leaves) while one of its ticks is inside its read: that tick writes
+    /// nothing back after the stop, so the next poll reads a fresh baseline.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[ignore = "hangs (never returns; row D3b was stopped while debugging it): 7-relay/TASKS.md row D3b"]
+    async fn a_stopped_poll_s_tick_writes_nothing_back() {
+        for close in [false, true] {
+            let gate = Gate::new();
+            let (w, _h) = watch_net(true, test_cfg(true), Arc::clone(&gate) as Arc<dyn NetRead>);
+            let mdns = (!close).then(|| w.subscribe(Consumer::Mdns).unwrap());
+            let carrier = w
+                .subscribe(Consumer::Carrier { termux_poll_min: 9 })
+                .unwrap();
+            assert!(w.polling().is_some());
+            assert!(w.inner.lock().poll_seen.is_some(), "the baseline");
+            // a failed assertion must not leave a worker blocked in the read (the runtime's
+            // shutdown would wait for it forever)
+            struct Release(Arc<Gate>);
+            impl Drop for Release {
+                fn drop(&mut self) {
+                    self.0.release();
+                }
+            }
+            let _release = Release(Arc::clone(&gate));
+            gate.armed.store(true, Ordering::SeqCst);
+            eventually("a tick inside its read", || {
+                gate.entered.load(Ordering::SeqCst)
+            })
+            .await;
+            drop(carrier);
+            assert_eq!(w.polling(), None);
+            assert_eq!(w.inner.lock().poll_seen, None, "forgotten at the stop");
+            gate.value.store(2, Ordering::SeqCst);
+            gate.release();
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            assert_eq!(
+                w.inner.lock().poll_seen,
+                None,
+                "close = {close}: the stale tick wrote its reading back"
+            );
+            drop(mdns);
+        }
     }
 
     #[test]
