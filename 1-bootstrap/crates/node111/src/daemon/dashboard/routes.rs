@@ -16,6 +16,11 @@
 //! - `/api/status` and `/v1` are gated like `/api/v1/*` (loopback or a valid
 //!   session, else `401 unauthenticated`); `/`, static files and `/health`
 //!   stay open (a LAN visitor needs the UI to reach `/pair`).
+//! - Layer 7 §9.1 (S8, I7): the hub's update-origin files
+//!   `GET /origin/v1/{channel-111-stable.toml, channel-111-stable.toml.minisig,
+//!   blob/{sha256}}` join the open set beside `/health` (`crate::daemon::origin`):
+//!   GET only (405 otherwise), no session, no CSRF, the same CSP and Host
+//!   guard; 404 unless `hub_role`, LAN sharing and `origin.serve` are all on.
 //! - Every response carries [`CSP`] (`/v1` adds the hash of its one inline
 //!   script), `X-Content-Type-Options: nosniff` and `Referrer-Policy:
 //!   no-referrer`. Layer 5 §13: the policy is **per request** — when panels
@@ -25,8 +30,9 @@
 //! - Layer 5 §13: the main listener answers `Host: localhost` with a `308` to
 //!   the same path on `127.0.0.1` ([`localhost_location`]), so panels never
 //!   see `localhost` (`[::1]` is matched bracketed and not redirected). The
-//!   Layer 1 machine contracts `/health` and `/api/status` are exempt (they
-//!   stay unchanged for any accepted Host).
+//!   Layer 1 machine contracts `/health`, `/api/status` and the origin files
+//!   `/origin/v1/*` (Layer 7 §9.1) are exempt (they stay unchanged for any
+//!   accepted Host).
 //! - Any `/api/*` error that is not already JSON (axum extractor rejections,
 //!   413, 405, unknown routes) is rewritten to `application/problem+json`
 //!   with the same status ([`api_problems`]).
@@ -133,9 +139,11 @@ async fn security_headers(State(api): State<Arc<ApiState>>, req: Request, next: 
 
 /// Where a `Host: localhost` request is sent (Layer 5 §13): the same path and
 /// query on `127.0.0.1`, same port. `None` for any other host and for the
-/// Layer 1 machine contracts (`/health`, `/api/status`).
+/// Layer 1 machine contracts (`/health`, `/api/status`, `/origin/v1/*`).
 pub fn localhost_location(headers: &HeaderMap, uri: &axum::http::Uri) -> Option<String> {
-    if matches!(uri.path(), "/health" | "/api/status") {
+    if matches!(uri.path(), "/health" | "/api/status")
+        || uri.path().starts_with(crate::daemon::origin::ROUTE_PREFIX)
+    {
         return None;
     }
     let (host, port) = headers
@@ -467,6 +475,8 @@ pub fn app(api: Arc<ApiState>) -> axum::Router {
     let open = axum::Router::new()
         .route("/", get(ui_index))
         .route("/health", get(health))
+        // Layer 7 §9.1: the update-origin files, the `/health` posture.
+        .merge(crate::daemon::origin::routes())
         .route("/api/{*rest}", any(api_not_found))
         .route("/{*path}", get(ui_path));
     // Layer 1 seam + minimal page: node facts, so pairing-gated like /api/v1.
