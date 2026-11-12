@@ -156,5 +156,5 @@ L9 forks: F1 autonomy in v1 · F2 observation (observer, wake, witness of 111d's
 | L1-L9:observer-change-engine | observer waking/witness of 111d death; typed apply→verify→undo through a root helper; consumes `agent/decisions/<id>.json` | L9 F2, F6; L3-L4:proposals-fs | P |
 | L3-L9:diagnosis-playbooks | diagnosis tiers, where the model runs, playbook grammar/evaluator, new task kinds | L9 F4, F5 | P |
 | L2-L9:fix-signing | `111/fix/v1`, `111/fix-vouch/v1` node-key signatures on the two outbound artefacts only | L9 F9 | P |
-| L5/L7-L9:fix-sharing-delegation | proven-fix exchange over the fabric; `AGENT_OP` delegation for Cat 2A/3; PRs to GitHub (gateway) | L9 F8, F10, F11; L5 `:832` | P |
+| L5/7-L9:fix-sharing-delegation | proven-fix exchange over the fabric; `AGENT_OP` delegation for Cat 2A/3; PRs to GitHub (gateway) | L9 F8, F10, F11; L5 `:832` | P |
 | L0-L9:evolution | agent/KB/bridging-logic evolution; amending locked specs by permission | L9 F12, F13 | P |

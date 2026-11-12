@@ -176,7 +176,7 @@ Harness shorthand: S1/S2 = smoke.sh phases (`5e`, scenario `(8)` …); `n111:<fi
 
 L3-L8:agent-state · L1-L8:state-service · L8-L9:heal-store · L5-L8:tier2-objects · L2-L8:dataset-signing · L7-L8:move-datasets ·
 L4-L8:hub-content · L1-L8:updates-backup · L8-L8:shared-log · L1-L9:observer-change-engine · L3-L9:diagnosis-playbooks ·
-L2-L9:fix-signing · L5/L7-L9:fix-sharing-delegation · L0-L9:evolution: no code, **N / D** by construction. They enter the seam map
+L2-L9:fix-signing · L5/7-L9:fix-sharing-delegation · L0-L9:evolution: no code, **N / D** by construction. They enter the seam map
 as `planned` rows now so each spec's seam section reuses the ids (options.md F5).
 
 ## Totals
