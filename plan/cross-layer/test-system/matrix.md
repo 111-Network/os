@@ -155,7 +155,7 @@ Harness shorthand: S1/S2 = smoke.sh phases (`5e`, scenario `(8)` …); `n111:<fi
 | L5-L7:custody-store | `m111` `store::` lib (81), `forward`; S2 13b quota → `mailbox_full` (member rows only) | I | B |
 | L5-L7:fabric-tap | none (S) | N | D |
 | L5-L7:role-bits | `m111` hub/forward tests for bits 0–2; bits 3–5 unbuilt; `ui:layer7-contract` | I | B |
-| L6-L7:netlink-gateway | `netlink.rs` unit (2); D3/D4 ⬜; G7-extended `idle.sh` a stub | N | D |
+| L6-L7:netlink-gateway | `netlink.rs` unit; `relay/netwatch.rs` unit (17, a scripted netlink source and a fake opener; D4 `71af200`, D4b `18282f7`); D3 landed `77ffb2c`; G7-extended `idle.sh` a stub | F | D |
 | L6-L7:hops | none (planned) | N | D |
 | L1-L7:origin | client side: `updater_stage`, `helper_guard` (L2, L3 landed); server `origin/mod.rs` 11-line stub; G12 stub | I | B client; D server |
 | L1-L7:relay-state | `relay/settings.rs` unit (19, D1 landed); `/relay` routes 404 until D10 | I | B |
@@ -185,9 +185,9 @@ as `planned` rows now so each spec's seam section reuses the ids (options.md F5)
 |---|---|---|
 | R running system | 42 | 0 (only `ui:tapes` replays a recording of one) |
 | I integration with the real peer | 15 | all, through the cargo suites (bootstrap-gate, identity, intelligence jobs) |
-| F fake of the other side | 13 | all, through the cargo suites |
+| F fake of the other side | 14 | all, through the cargo suites |
 | C compiled / static | 9 | all except the `bridge-stubs` release claim and plan-vs-code citations |
-| N none | 10 | — |
+| N none | 9 | — |
 
 Two of the 42 R rows (`L1-L1:install-state-tree`, `L1-X:pi-floor`) need a hand step first (a prebuilt musl binary; a live daemon).
 

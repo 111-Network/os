@@ -2,9 +2,11 @@
 #
 # One [[seam]] per layer-to-layer interface of plan/cross-layer/test-system/research/05-seams.md and matrix.md, sorted by id:
 # the 89 that exist (status built, or stub when a side is still a Layer 7 T0 stub or not built yet) and the 14 planned
-# Layer 8 / 9 rows (status planned, no files yet). a is the side of the id's first layer, b the second; read_first is the side
-# whose data the failing assertions read (the producer), where a running-system failure points first; symptom is what a daemon
-# log, an API answer or the UI shows when the seam breaks; gap says in one sentence what no check of strength R covers.
+# Layer 8 / 9 rows (status planned, no files yet). a is the side of the id's first layer, b the second (X1b: the lint does not
+# hold this, a read does; one seam had them swapped); read_first is the side whose data the failing assertions read (the
+# producer), where a running-system failure points first; symptom is what a daemon log, an API answer or the UI shows when the
+# seam breaks, in the words the code and the contract use (a service row's state is live | unset | error | starting, a
+# network's live | not_set | error | disabled); gap says in one sentence what no check of strength R covers.
 # Which checks prove a seam is read from checks.toml (a check lists it under seams or phases). The schema is
 # verify/t111/schema.py; the lint (python3 -I verify/run.py --lint) holds every path and spec section to the tree.
 
@@ -209,12 +211,12 @@ gap = "Agent side only: config_guard exercises the agent's precedence; nothing r
 id = "L1-L3:health-restart"
 status = "built"
 spec = ["3-intelligence/README.md Contracts"]
-a = { layer = 3, files = ["3-intelligence/crates/agent111/src/health.rs", "3-intelligence/crates/agent111/src/status.rs"] }
-b = { layer = 1, files = [
+a = { layer = 1, files = [
   "1-bootstrap/crates/node111/src/daemon/supervise.rs",
   "1-bootstrap/crates/node111/src/daemon/services/probe.rs",
 ] }
-read_first = "b"
+b = { layer = 3, files = ["3-intelligence/crates/agent111/src/health.rs", "3-intelligence/crates/agent111/src/status.rs"] }
+read_first = "a"
 symptom = "the UI shows the agent up when it is dead (or the reverse): services agent state and reason_code"
 gap = "Agent kill -9 then restart within 10 s is asserted nowhere."
 
@@ -396,7 +398,7 @@ b = { layer = 5, files = [
   "5-messaging/crates/mesh111/src/link/tcp_lan.rs",
 ] }
 read_first = "a"
-symptom = "no messaging: the fabric service row shows error or not_set; GET /fabric"
+symptom = "no messaging: the fabric service row shows error or unset; GET /fabric"
 gap = ""
 
 [[seam]]
@@ -426,9 +428,12 @@ gap = "Stub meshmud and presence children are supervised by the real daemon in S
 id = "L1-L6:bridge-stubs"
 status = "built"
 spec = ["6-transport/README.md §18"]
-a = { layer = 1, files = ["1-bootstrap/crates/node111/src/daemon/bridge/stub.rs"] }
-b = { layer = 6, files = ["1-bootstrap/crates/node111/src/daemon/bridge/mod.rs"] }
-read_first = "a"
+a = { layer = 1, files = [
+  "1-bootstrap/crates/node111/src/daemon/bridge/mod.rs",
+  "1-bootstrap/crates/node111/src/daemon/bridge/core.rs",
+] }
+b = { layer = 6, files = ["1-bootstrap/crates/node111/src/daemon/bridge/stub.rs"] }
+read_first = "b"
 symptom = "test-only seam: nothing shows in a release build (a leak would show as a scenario hook in the binary)"
 gap = "G1 uses the hook, but the claim that a release build compiles none of it is checked by nothing."
 
@@ -1158,7 +1163,7 @@ b = { layer = 7, files = [
 ] }
 read_first = "a"
 symptom = "the gateway state is stale: services gateway reason_code (gateway_none, carrier_ok)"
-gap = "None beyond two unit tests of netlink.rs; rows D3 and D4 are open and G7-extended idle.sh is a T0 stub."
+gap = "netwatch.rs (row D4, landed) has 17 unit tests against a scripted netlink source and a fake opener, and netlink.rs has two; gateway.rs (row D3) is still a T0 stub and G7-extended idle.sh prints SKIPPED, so no running system exercises the seam."
 
 [[seam]]
 id = "L7-L8:move-datasets"

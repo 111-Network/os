@@ -8,7 +8,20 @@
 # strength is the evidence a check gives its seams: R running system, I integration with the real peer,
 # F against a fake, C compiled or static only, N none (the T0 stubs). A seam's strength is its best check, so a
 # check never rates higher than the matrix rates the seams it lists. Timeouts: three times a stated runtime, else
-# 1800 s for slow and ns (a stated runtime leaves out a cold cargo build). The schema is verify/t111/schema.py.
+# 1800 s for slow and ns (a stated runtime leaves out a cold cargo build; l1.gate takes the 90 min CI bound, 5400 s).
+# The schema is verify/t111/schema.py.
+#
+# SEAM ORDER IS MEANING, NEVER SORTED. A record takes its sides, its read_first and (for an F check) its fake from the
+# FIRST seam of the check's `seams` list, or of the `phases` entry its phase matches (t111/record.py enrich). So in every
+# `seams` list and every `phases` value the PRIMARY seam comes first: the seam whose files the check's assertions
+# exercise, decided by reading the test or harness (the test fns, the phase headers), not by the seam's name. The seams
+# after it follow by how much of the check they carry. A check with one seam has no order to keep.
+#
+# Locks: every ns check takes "verify" (one harness at a time). "ui-dist" is the lock of 4-interface/ui/dist: held by every
+# check that builds or rewrites it (vite empties the output dir first): l1.gate, l4.ui, l4.budget, l4.smoke, l4.smoke3,
+# l4.panel-lint. A cargo test that only reads dist (rust-embed reads it per request in a debug build) takes no lock.
+# `needs` lists the tool a check's cmd starts with (cargo, bash, pnpm, python3) so a box without it is SKIPPED, not RED.
+# A need that names no tool on this box (x5-log-to-scratch) keeps a check SKIPPED until its row lands.
 #
 # Per-unit rerun templates fill {test} with the failing test's own name; {check} and {root} are filled too.
 
@@ -16,11 +29,11 @@
 # FAST: seconds, no cargo or pnpm build, no namespace
 # ========================================================================
 
-# The map lint (options.md 3.5): holds seams.toml and checks.toml to the tree. Writes nothing.
+# The map lint (options.md 3.5): holds seams.toml and checks.toml to the tree. Writes nothing (-B: no import cache in the tree).
 [[check]]
 id = "x.seams.lint"
 kind = "gate"
-cmd = ["python3", "-I", "verify/run.py", "--lint"]
+cmd = ["python3", "-I", "-B", "verify/run.py", "--lint"]
 tier = "fast"
 layers = ["X"]
 seams = ["X:plan-vs-code"]
@@ -161,6 +174,7 @@ strength = "C"
 needs = ["python3"]
 
 # Hermetic gate test: the escape hatches, CC/AR pins and static/SQLCipher asserts of scripts/musl-env.sh.
+# Adapter exit: the script prints bare `FAIL:` lines and ends with one `ok: musl-env.sh ...` line, no `<GATE> GREEN`.
 [[check]]
 id = "l1.gates.musl-env"
 kind = "unit"
@@ -168,7 +182,7 @@ cmd = ["sh", "scripts/musl-env-test.sh"]
 cwd = "1-bootstrap"
 tier = "fast"
 layers = [1]
-adapter = "okfail"
+adapter = "exit"
 timeout_s = 300
 rerun_cost = "fast, ~10 s"
 covered_by = "l1.gate"
@@ -220,6 +234,7 @@ covered_by = "l1.gate"
 strength = "C"
 
 # Hermetic gate test: the meshmud and meshtastic-web build scripts' verify paths on synthetic tarballs.
+# Adapter exit: it prints `build-gate: FAIL: ...` and ends `build-gate: all ok`, no `<GATE> GREEN` line.
 [[check]]
 id = "l1.gates.build-scripts"
 kind = "unit"
@@ -228,7 +243,7 @@ cwd = "1-bootstrap"
 tier = "fast"
 layers = [1, 5]
 seams = ["L1-L5:payload-assets"]
-adapter = "okfail"
+adapter = "exit"
 timeout_s = 300
 rerun_cost = "fast, ~20 s"
 covered_by = "l1.gate"
@@ -311,15 +326,25 @@ needs = ["python3"]
 # Layer 1 aggregate: fmt, clippy, musl check, node111 cargo test, shellcheck, the hermetic gate tests, notices,
 # systemd-analyze, the nested mesh111 gate, G2, the presence sidecar, the UI pnpm check. Stops at the first failure.
 # A skipped stage prints SKIPPED and the run still exits 0: REQUIRE_G2=1 makes the G2 skip a failure (lock runs).
-# Timeout 3600 s: the 90 min CI bound is a ceiling, a cold build of node111 and mesh111 is not in any stated runtime.
+# Timeout 5400 s, the 90 min CI bound: a cold build of node111 and mesh111 on a 2-job box (clippy, test, musl x2, mesh111,
+# G2, UI) is in no stated runtime and passes 60 min.
 # Strength C: the gate's own stages (fmt, clippy, check, notices, the UI budget) are static; the tests it runs are the
 # units below, each with its own strength. Its phases attribute the static stages to the seams they compile or check.
+# Layers: the ones this gate owns: 1, plus those of its own static stages (build scripts 1 and 5, clippy 1 and 6,
+# presence sidecar 5 and 6, UI budget and types 4, notices X). Not 2, 3 or 7: the suites it runs belong to the units.
+# A unit covered by this gate still selects it (select.py: a layer-N unit whose gate is out of the layer filter is
+# replaced by the gate), so `--layer 2|4|5|6|7` can still plan this 25 min gate; `--check` and `--seam` run the units.
+# A FULL run runs two suites twice, on purpose: the mesh111 suites (this gate's nested 5-messaging/scripts/check.sh
+# stage, then l5.gate, whose forward suite alone is ~3 min) and the UI `pnpm check` (this gate's last stage, then
+# l4.ui). That is CI parity (plan/cross-layer/ci-cd.md, D28): the bootstrap-gate job must run check.sh whole, so the
+# gate stays whole here; do not "fix" the repeat by dropping l5.gate or l4.ui (they are the quick path alone).
+# Units attribute their records out of this gate's output: the node111 --lib records go three ways (see l1.node111.lib).
 [[check]]
 id = "l1.gate"
 kind = "gate"
 cmd = ["sh", "1-bootstrap/scripts/check.sh"]
 tier = "slow"
-layers = [1, 2, 4, 5, 6, 7]
+layers = [1, 4, 5, 6, "X"]
 seams = [
   "L1-L5:payload-assets",
   "L1-L6:bridge-stubs",
@@ -328,13 +353,15 @@ seams = [
   "L5-L6:presence-file",
   "X:licensing-notices",
 ]
-phases = { "build scripts" = ["L1-L5:payload-assets"], "clippy" = ["L1-L6:bridge-stubs"], "notices" = ["X:licensing-notices"], "presence sidecar" = ["L5-L6:presence-file"], "ui" = ["L4-L4:budget", "L4-L4:openapi-ts"] }
+phases = { "build scripts" = ["L1-L5:payload-assets"], "clippy" = ["L1-L6:bridge-stubs"], "notices" = ["X:licensing-notices"], "presence sidecar" = ["L5-L6:presence-file"], "ui" = ["L4-L4:openapi-ts", "L4-L4:budget"] }
 adapter = "stagewise"
 cargo = true
-timeout_s = 3600
+lock = "ui-dist"
+timeout_s = 5400
 rerun_cost = "slow, ~25 min warm"
 strength = "C"
 needs = ["cargo"]
+requires = ["l4.contract.fresh"]
 
 # Reads 4-interface/ui/test/contract.gen.ts, so it requires l4.contract.fresh (a stale
 # digest would be read as truth).
@@ -344,7 +371,7 @@ kind = "unit"
 cmd = ["cargo", "test", "--manifest-path", "1-bootstrap/Cargo.toml", "-p", "node111", "--test", "api_v1_bridge"]
 tier = "slow"
 layers = [1, 4, 5, 6]
-seams = ["L1-L4:openapi-rust", "L4-L6:networks-bridge-api", "L5-L6:foreign-tables"]
+seams = ["L4-L6:networks-bridge-api", "L5-L6:foreign-tables", "L1-L4:openapi-rust"]
 adapter = "libtest"
 cargo = true
 timeout_s = 1800
@@ -353,6 +380,7 @@ rerun_cost = "slow, ~20 s warm"
 covered_by = "l1.gate"
 strength = "I"
 requires = ["l4.contract.fresh"]
+needs = ["cargo"]
 
 [[check]]
 id = "l1.node111.api_v1_devices"
@@ -368,6 +396,7 @@ rerun = "cargo test --manifest-path 1-bootstrap/Cargo.toml -p node111 --test api
 rerun_cost = "slow, ~20 s warm"
 covered_by = "l1.gate"
 strength = "F"
+needs = ["cargo"]
 
 [[check]]
 id = "l1.node111.api_v1_meshtastic"
@@ -383,6 +412,7 @@ rerun = "cargo test --manifest-path 1-bootstrap/Cargo.toml -p node111 --test api
 rerun_cost = "slow, ~20 s warm"
 covered_by = "l1.gate"
 strength = "F"
+needs = ["cargo"]
 
 # Reads 4-interface/ui/test/contract.gen.ts, so it requires l4.contract.fresh (a stale
 # digest would be read as truth).
@@ -393,13 +423,13 @@ cmd = ["cargo", "test", "--manifest-path", "1-bootstrap/Cargo.toml", "-p", "node
 tier = "slow"
 layers = [1, 2, 4, 5]
 seams = [
-  "L1-L3:daemon-token",
-  "L1-L4:openapi-rust",
+  "L4-L5:messages-api",
   "L1-L5:fabric-start",
+  "L4-L5:sse-fanout",
   "L2-L5:sealer",
   "L2-L5:store-key",
-  "L4-L5:messages-api",
-  "L4-L5:sse-fanout",
+  "L1-L3:daemon-token",
+  "L1-L4:openapi-rust",
 ]
 adapter = "libtest"
 cargo = true
@@ -409,6 +439,7 @@ rerun_cost = "slow, ~20 s warm"
 covered_by = "l1.gate"
 strength = "I"
 requires = ["l4.contract.fresh"]
+needs = ["cargo"]
 
 [[check]]
 id = "l1.node111.api_v1_panels"
@@ -424,6 +455,7 @@ rerun = "cargo test --manifest-path 1-bootstrap/Cargo.toml -p node111 --test api
 rerun_cost = "slow, ~20 s warm"
 covered_by = "l1.gate"
 strength = "I"
+needs = ["cargo"]
 
 [[check]]
 id = "l1.node111.api_v1_relay"
@@ -431,7 +463,7 @@ kind = "unit"
 cmd = ["cargo", "test", "--manifest-path", "1-bootstrap/Cargo.toml", "-p", "node111", "--test", "api_v1_relay"]
 tier = "slow"
 layers = [1, 3, 4]
-seams = ["L3-L4:agent-events", "L3-L4:chat-relay", "L3-L4:proposals-fs", "L3-L4:task-route"]
+seams = ["L3-L4:chat-relay", "L3-L4:agent-events", "L3-L4:proposals-fs", "L3-L4:task-route"]
 adapter = "libtest"
 cargo = true
 timeout_s = 1800
@@ -439,6 +471,7 @@ rerun = "cargo test --manifest-path 1-bootstrap/Cargo.toml -p node111 --test api
 rerun_cost = "slow, ~20 s warm"
 covered_by = "l1.gate"
 strength = "F"
+needs = ["cargo"]
 
 [[check]]
 id = "l1.node111.api_v1_status_services"
@@ -455,7 +488,7 @@ cmd = [
 ]
 tier = "slow"
 layers = [1, 3, 4, 5]
-seams = ["L0-L4:kb-api", "L1-L3:offer-hook", "L1-L4:legacy-contract", "L1-L4:openapi-rust", "L1-L4:services-registry"]
+seams = ["L1-L4:services-registry", "L1-L4:openapi-rust", "L1-L4:legacy-contract", "L0-L4:kb-api", "L1-L3:offer-hook"]
 adapter = "libtest"
 cargo = true
 timeout_s = 1800
@@ -463,6 +496,7 @@ rerun = "cargo test --manifest-path 1-bootstrap/Cargo.toml -p node111 --test api
 rerun_cost = "slow, ~20 s warm"
 covered_by = "l1.gate"
 strength = "I"
+needs = ["cargo"]
 
 # Reads 4-interface/ui/test/contract.gen.ts, so it requires l4.contract.fresh (a stale
 # digest would be read as truth).
@@ -472,7 +506,7 @@ kind = "unit"
 cmd = ["cargo", "test", "--manifest-path", "1-bootstrap/Cargo.toml", "-p", "node111", "--test", "api_v1_transport"]
 tier = "slow"
 layers = [1, 4, 6]
-seams = ["L1-L4:openapi-rust", "L4-L6:transport-api"]
+seams = ["L4-L6:transport-api", "L1-L4:openapi-rust"]
 adapter = "libtest"
 cargo = true
 timeout_s = 1800
@@ -481,6 +515,7 @@ rerun_cost = "slow, ~20 s warm"
 covered_by = "l1.gate"
 strength = "F"
 requires = ["l4.contract.fresh"]
+needs = ["cargo"]
 
 # Reads 4-interface/ui/test/contract.gen.ts, so it requires l4.contract.fresh (a stale
 # digest would be read as truth).
@@ -490,7 +525,7 @@ kind = "unit"
 cmd = ["cargo", "test", "--manifest-path", "1-bootstrap/Cargo.toml", "-p", "node111", "--test", "bridge_core"]
 tier = "slow"
 layers = [1, 5, 6]
-seams = ["L1-L4:openapi-rust", "L5-L6:foreign-tables"]
+seams = ["L5-L6:foreign-tables", "L1-L4:openapi-rust"]
 adapter = "libtest"
 cargo = true
 timeout_s = 1800
@@ -499,6 +534,7 @@ rerun_cost = "slow, ~20 s warm"
 covered_by = "l1.gate"
 strength = "F"
 requires = ["l4.contract.fresh"]
+needs = ["cargo"]
 
 [[check]]
 id = "l1.node111.bridge_deltachat"
@@ -514,6 +550,7 @@ rerun = "cargo test --manifest-path 1-bootstrap/Cargo.toml -p node111 --test bri
 rerun_cost = "slow, ~20 s warm"
 covered_by = "l1.gate"
 strength = "F"
+needs = ["cargo"]
 
 [[check]]
 id = "l1.node111.bridge_lxmf"
@@ -521,7 +558,7 @@ kind = "unit"
 cmd = ["cargo", "test", "--manifest-path", "1-bootstrap/Cargo.toml", "-p", "node111", "--test", "bridge_lxmf"]
 tier = "slow"
 layers = [1, 2, 6]
-seams = ["L2-L6:attest-bridge", "L6-L6:lxmf-sidecar"]
+seams = ["L6-L6:lxmf-sidecar", "L2-L6:attest-bridge"]
 adapter = "libtest"
 cargo = true
 timeout_s = 1800
@@ -529,6 +566,7 @@ rerun = "cargo test --manifest-path 1-bootstrap/Cargo.toml -p node111 --test bri
 rerun_cost = "slow, ~20 s warm"
 covered_by = "l1.gate"
 strength = "F"
+needs = ["cargo"]
 
 [[check]]
 id = "l1.node111.carrier_ntfy"
@@ -544,6 +582,7 @@ rerun = "cargo test --manifest-path 1-bootstrap/Cargo.toml -p node111 --test car
 rerun_cost = "slow, ~20 s warm"
 covered_by = "l1.gate"
 strength = "F"
+needs = ["cargo"]
 
 [[check]]
 id = "l1.node111.categorize_table"
@@ -558,6 +597,7 @@ rerun = "cargo test --manifest-path 1-bootstrap/Cargo.toml -p node111 --test cat
 rerun_cost = "slow, ~20 s warm"
 covered_by = "l1.gate"
 strength = "I"
+needs = ["cargo"]
 
 [[check]]
 id = "l1.node111.components"
@@ -573,6 +613,7 @@ rerun = "cargo test --manifest-path 1-bootstrap/Cargo.toml -p node111 --test com
 rerun_cost = "slow, ~20 s warm"
 covered_by = "l1.gate"
 strength = "I"
+needs = ["cargo"]
 
 [[check]]
 id = "l1.node111.daemon_presence_venv"
@@ -597,6 +638,7 @@ rerun = "cargo test --manifest-path 1-bootstrap/Cargo.toml -p node111 --test dae
 rerun_cost = "slow, ~20 s warm"
 covered_by = "l1.gate"
 strength = "F"
+needs = ["cargo"]
 
 # Reads 4-interface/ui/test/contract.gen.ts, so it requires l4.contract.fresh (a stale
 # digest would be read as truth).
@@ -606,7 +648,7 @@ kind = "unit"
 cmd = ["cargo", "test", "--manifest-path", "1-bootstrap/Cargo.toml", "-p", "node111", "--test", "dashboard_auth"]
 tier = "slow"
 layers = [1, 4]
-seams = ["L1-L3:daemon-token", "L1-L4:bind-host", "L1-L4:events-bus", "L1-L4:openapi-rust", "L1-L4:pairing-auth"]
+seams = ["L1-L4:pairing-auth", "L1-L3:daemon-token", "L1-L4:bind-host", "L1-L4:events-bus", "L1-L4:openapi-rust"]
 adapter = "libtest"
 cargo = true
 timeout_s = 1800
@@ -615,6 +657,7 @@ rerun_cost = "slow, ~20 s warm"
 covered_by = "l1.gate"
 strength = "I"
 requires = ["l4.contract.fresh"]
+needs = ["cargo"]
 
 [[check]]
 id = "l1.node111.dashboard_http"
@@ -630,6 +673,7 @@ rerun = "cargo test --manifest-path 1-bootstrap/Cargo.toml -p node111 --test das
 rerun_cost = "slow, ~20 s warm"
 covered_by = "l1.gate"
 strength = "I"
+needs = ["cargo"]
 
 [[check]]
 id = "l1.node111.devices_core"
@@ -645,6 +689,7 @@ rerun = "cargo test --manifest-path 1-bootstrap/Cargo.toml -p node111 --test dev
 rerun_cost = "slow, ~20 s warm"
 covered_by = "l1.gate"
 strength = "F"
+needs = ["cargo"]
 
 [[check]]
 id = "l1.node111.helper_guard"
@@ -660,6 +705,7 @@ rerun = "cargo test --manifest-path 1-bootstrap/Cargo.toml -p node111 --test hel
 rerun_cost = "slow, ~20 s warm"
 covered_by = "l1.gate"
 strength = "I"
+needs = ["cargo"]
 
 [[check]]
 id = "l1.node111.install_flow"
@@ -675,6 +721,7 @@ rerun = "cargo test --manifest-path 1-bootstrap/Cargo.toml -p node111 --test ins
 rerun_cost = "slow, ~20 s warm"
 covered_by = "l1.gate"
 strength = "F"
+needs = ["cargo"]
 
 [[check]]
 id = "l1.node111.intelligence_children"
@@ -699,6 +746,7 @@ rerun = "cargo test --manifest-path 1-bootstrap/Cargo.toml -p node111 --test int
 rerun_cost = "slow, ~20 s warm"
 covered_by = "l1.gate"
 strength = "F"
+needs = ["cargo"]
 
 [[check]]
 id = "l1.node111.manifest_layer5"
@@ -706,7 +754,7 @@ kind = "unit"
 cmd = ["cargo", "test", "--manifest-path", "1-bootstrap/Cargo.toml", "-p", "node111", "--test", "manifest_layer5"]
 tier = "slow"
 layers = [1, 5]
-seams = ["L0-L1:kb-payload", "L1-L5:payload-assets"]
+seams = ["L1-L5:payload-assets", "L0-L1:kb-payload"]
 adapter = "libtest"
 cargo = true
 timeout_s = 1800
@@ -714,6 +762,7 @@ rerun = "cargo test --manifest-path 1-bootstrap/Cargo.toml -p node111 --test man
 rerun_cost = "slow, ~20 s warm"
 covered_by = "l1.gate"
 strength = "I"
+needs = ["cargo"]
 
 [[check]]
 id = "l1.node111.manifest_parse"
@@ -729,6 +778,7 @@ rerun = "cargo test --manifest-path 1-bootstrap/Cargo.toml -p node111 --test man
 rerun_cost = "slow, ~20 s warm"
 covered_by = "l1.gate"
 strength = "I"
+needs = ["cargo"]
 
 [[check]]
 id = "l1.node111.manifest_trust"
@@ -744,6 +794,7 @@ rerun = "cargo test --manifest-path 1-bootstrap/Cargo.toml -p node111 --test man
 rerun_cost = "slow, ~20 s warm"
 covered_by = "l1.gate"
 strength = "I"
+needs = ["cargo"]
 
 [[check]]
 id = "l1.node111.meshtastic_client"
@@ -759,6 +810,7 @@ rerun = "cargo test --manifest-path 1-bootstrap/Cargo.toml -p node111 --test mes
 rerun_cost = "slow, ~20 s warm"
 covered_by = "l1.gate"
 strength = "F"
+needs = ["cargo"]
 
 [[check]]
 id = "l1.node111.minisign_verify"
@@ -774,6 +826,7 @@ rerun = "cargo test --manifest-path 1-bootstrap/Cargo.toml -p node111 --test min
 rerun_cost = "slow, ~20 s warm"
 covered_by = "l1.gate"
 strength = "I"
+needs = ["cargo"]
 
 [[check]]
 id = "l1.node111.phone_flow"
@@ -788,6 +841,7 @@ rerun = "cargo test --manifest-path 1-bootstrap/Cargo.toml -p node111 --test pho
 rerun_cost = "slow, ~20 s warm"
 covered_by = "l1.gate"
 strength = "F"
+needs = ["cargo"]
 
 [[check]]
 id = "l1.node111.probe_fixtures"
@@ -802,6 +856,7 @@ rerun = "cargo test --manifest-path 1-bootstrap/Cargo.toml -p node111 --test pro
 rerun_cost = "slow, ~20 s warm"
 covered_by = "l1.gate"
 strength = "I"
+needs = ["cargo"]
 
 [[check]]
 id = "l1.node111.settings_lan"
@@ -809,7 +864,7 @@ kind = "unit"
 cmd = ["cargo", "test", "--manifest-path", "1-bootstrap/Cargo.toml", "-p", "node111", "--test", "settings_lan"]
 tier = "slow"
 layers = [1, 4]
-seams = ["L1-L1:cli-config", "L1-L3:offer-hook", "L1-L4:bind-host"]
+seams = ["L1-L1:cli-config", "L1-L4:bind-host", "L1-L3:offer-hook"]
 adapter = "libtest"
 cargo = true
 timeout_s = 1800
@@ -817,6 +872,7 @@ rerun = "cargo test --manifest-path 1-bootstrap/Cargo.toml -p node111 --test set
 rerun_cost = "slow, ~20 s warm"
 covered_by = "l1.gate"
 strength = "I"
+needs = ["cargo"]
 
 [[check]]
 id = "l1.node111.supervise_pdeathsig"
@@ -841,6 +897,7 @@ rerun = "cargo test --manifest-path 1-bootstrap/Cargo.toml -p node111 --test sup
 rerun_cost = "slow, ~20 s warm"
 covered_by = "l1.gate"
 strength = "F"
+needs = ["cargo"]
 
 [[check]]
 id = "l1.node111.supervise_piped"
@@ -855,6 +912,7 @@ rerun = "cargo test --manifest-path 1-bootstrap/Cargo.toml -p node111 --test sup
 rerun_cost = "slow, ~20 s warm"
 covered_by = "l1.gate"
 strength = "I"
+needs = ["cargo"]
 
 [[check]]
 id = "l1.node111.transport_spine"
@@ -870,6 +928,7 @@ rerun = "cargo test --manifest-path 1-bootstrap/Cargo.toml -p node111 --test tra
 rerun_cost = "slow, ~20 s warm"
 covered_by = "l1.gate"
 strength = "I"
+needs = ["cargo"]
 
 [[check]]
 id = "l1.node111.transport_venv"
@@ -885,14 +944,18 @@ rerun = "cargo test --manifest-path 1-bootstrap/Cargo.toml -p node111 --test tra
 rerun_cost = "slow, ~20 s warm"
 covered_by = "l1.gate"
 strength = "F"
+needs = ["cargo"]
 
+# The tests drive the daemon's updater (updater/fetch.rs, updater/stage.rs): those files are side a of L1-L7:origin, so
+# that seam is first (its read_first points at them), although most tests stage from the internet base and only five use
+# a hub origin; the helper they request (L1-L1:updater-helper's read_first) is run by helper_guard, not here.
 [[check]]
 id = "l1.node111.updater_stage"
 kind = "unit"
 cmd = ["cargo", "test", "--manifest-path", "1-bootstrap/Cargo.toml", "-p", "node111", "--test", "updater_stage"]
 tier = "slow"
 layers = [1, 7]
-seams = ["L1-L1:manifest-trust", "L1-L1:updater-helper", "L1-L7:origin"]
+seams = ["L1-L7:origin", "L1-L1:updater-helper", "L1-L1:manifest-trust"]
 adapter = "libtest"
 cargo = true
 timeout_s = 1800
@@ -900,6 +963,7 @@ rerun = "cargo test --manifest-path 1-bootstrap/Cargo.toml -p node111 --test upd
 rerun_cost = "slow, ~20 s warm"
 covered_by = "l1.gate"
 strength = "F"
+needs = ["cargo"]
 
 [[check]]
 id = "l1.node111.util_fs"
@@ -914,19 +978,37 @@ rerun = "cargo test --manifest-path 1-bootstrap/Cargo.toml -p node111 --test uti
 rerun_cost = "slow, ~20 s warm"
 covered_by = "l1.gate"
 strength = "I"
+needs = ["cargo"]
 
-# The 566 in-crate unit tests of node111 (kb.rs, identity, probe.rs, install/verify.rs, fabric/sealer.rs,
-# bridge/attest.rs, bridge/simplex.rs, meshtastic/presence.rs, intelligence.rs ...).
+# The in-crate unit tests of node111 (kb.rs, identity, probe.rs, install/verify.rs, fabric/sealer.rs, bridge/attest.rs,
+# bridge/simplex.rs, meshtastic/presence.rs, intelligence.rs ...), except the two modules below that own their records.
+# WHO OWNS WHICH --lib RECORDS (the same in a unit run and in a gate run, where l1.gate's one `cargo test` prints them
+# all): a test whose path starts daemon::relay::settings:: belongs to l1.node111.lib-relay, one that starts
+# daemon::relay::netwatch:: to l1.node111.lib-netwatch, every other --lib test to this unit. The two --skip filters make
+# that true when this unit runs alone: without them a relay test would be recorded under this unit's seams as well
+# (the `--skip=<path>` spelling keeps the two entries distinct: the schema refuses a repeated list entry).
+# Reads 4-interface/ui/test/contract.gen.ts (fabric/json.rs foreign_tests), so it requires l4.contract.fresh.
 [[check]]
 id = "l1.node111.lib"
 kind = "unit"
-cmd = ["cargo", "test", "--manifest-path", "1-bootstrap/Cargo.toml", "-p", "node111", "--lib"]
+cmd = [
+  "cargo",
+  "test",
+  "--manifest-path",
+  "1-bootstrap/Cargo.toml",
+  "-p",
+  "node111",
+  "--lib",
+  "--",
+  "--skip=daemon::relay::settings::",
+  "--skip=daemon::relay::netwatch::",
+]
 tier = "slow"
 layers = [1, 2, 3, 5, 6]
 seams = [
+  "L1-L2:identity-dir",
   "L0-L1:kb-payload",
   "L1-L2:cli-verbs",
-  "L1-L2:identity-dir",
   "L1-L3:health-restart",
   "L1-L4:install-print",
   "L1-L4:ui-embed",
@@ -943,23 +1025,46 @@ rerun = "cargo test --manifest-path 1-bootstrap/Cargo.toml -p node111 --lib -- -
 rerun_cost = "slow, ~30 s warm"
 covered_by = "l1.gate"
 strength = "F"
+needs = ["cargo"]
+requires = ["l4.contract.fresh"]
 
-# The relay:: unit tests (relay/settings.rs, 19 tests, D1 landed), kept apart from the rest of --lib because the
-# matrix rates their seam I while the other unit tests rate F.
+# The daemon::relay::settings:: unit tests (relay/settings.rs, 19 tests, D1 landed), kept apart from the rest of --lib
+# because the matrix rates their seam I while the other unit tests rate F. The filter is the full module path: a bare
+# `relay::` also matches dashboard::api_v1::relay (the Layer 3 to 4 chat-relay translator) and relay::netwatch.
 [[check]]
 id = "l1.node111.lib-relay"
 kind = "unit"
-cmd = ["cargo", "test", "--manifest-path", "1-bootstrap/Cargo.toml", "-p", "node111", "--lib", "relay::"]
+cmd = ["cargo", "test", "--manifest-path", "1-bootstrap/Cargo.toml", "-p", "node111", "--lib", "daemon::relay::settings::"]
 tier = "slow"
 layers = [1, 7]
 seams = ["L1-L7:relay-state"]
 adapter = "libtest"
 cargo = true
 timeout_s = 1800
-rerun = "cargo test --manifest-path 1-bootstrap/Cargo.toml -p node111 --lib relay:: -- --exact {test}"
+rerun = "cargo test --manifest-path 1-bootstrap/Cargo.toml -p node111 --lib daemon::relay::settings:: -- --exact {test}"
 rerun_cost = "slow, ~30 s warm"
 covered_by = "l1.gate"
 strength = "I"
+needs = ["cargo"]
+
+# The daemon::relay::netwatch:: unit tests (relay/netwatch.rs, 17 tests, row D4 landed 71af200): the address and route
+# watch against a scripted netlink event source (transport::netlink::ScriptedEvents) and a fake opener, never a real
+# socket. Strength F: the seam's other side, relay/gateway.rs, is still a T0 stub (row D3) and G7-extended is a stub.
+[[check]]
+id = "l1.node111.lib-netwatch"
+kind = "unit"
+cmd = ["cargo", "test", "--manifest-path", "1-bootstrap/Cargo.toml", "-p", "node111", "--lib", "daemon::relay::netwatch::"]
+tier = "slow"
+layers = [1, 6, 7]
+seams = ["L6-L7:netlink-gateway"]
+adapter = "libtest"
+cargo = true
+timeout_s = 1800
+rerun = "cargo test --manifest-path 1-bootstrap/Cargo.toml -p node111 --lib daemon::relay::netwatch:: -- --exact {test}"
+rerun_cost = "slow, ~30 s warm"
+covered_by = "l1.gate"
+strength = "F"
+needs = ["cargo"]
 
 # Layer 2 has no script: this is the three cargo steps of the CI job 'identity', verbatim.
 [[check]]
@@ -994,6 +1099,7 @@ rerun = "cargo test --manifest-path 2-identity/Cargo.toml -p id111 --test confor
 rerun_cost = "slow, ~20 s warm"
 covered_by = "l2.gate"
 strength = "I"
+needs = ["cargo"]
 
 [[check]]
 id = "l2.id111.layer5_amendments"
@@ -1009,6 +1115,7 @@ rerun = "cargo test --manifest-path 2-identity/Cargo.toml -p id111 --test layer5
 rerun_cost = "slow, ~20 s warm"
 covered_by = "l2.gate"
 strength = "I"
+needs = ["cargo"]
 
 [[check]]
 id = "l2.id111.layer6_attest"
@@ -1016,7 +1123,7 @@ kind = "unit"
 cmd = ["cargo", "test", "--manifest-path", "2-identity/Cargo.toml", "-p", "id111", "--test", "layer6_attest"]
 tier = "slow"
 layers = [2, 6]
-seams = ["L2-L5:test-vectors", "L2-L6:attest-bridge"]
+seams = ["L2-L6:attest-bridge", "L2-L5:test-vectors"]
 adapter = "libtest"
 cargo = true
 timeout_s = 1800
@@ -1024,6 +1131,7 @@ rerun = "cargo test --manifest-path 2-identity/Cargo.toml -p id111 --test layer6
 rerun_cost = "slow, ~20 s warm"
 covered_by = "l2.gate"
 strength = "I"
+needs = ["cargo"]
 
 # The in-crate id111 tests, among them the counters/store contract tests node111 must not hand-roll.
 [[check]]
@@ -1040,9 +1148,11 @@ rerun = "cargo test --manifest-path 2-identity/Cargo.toml -p id111 --lib -- --ex
 rerun_cost = "slow, ~20 s warm"
 covered_by = "l2.gate"
 strength = "I"
+needs = ["cargo"]
 
-# Layer 3 aggregate: fmt, clippy, tests, musl check. No stage headers and no skip logic: without the musl
-# target installed it FAILS (CI installs it).
+# Layer 3 aggregate: fmt, clippy, tests, musl check. No stage headers and no skip logic: its last stage is
+# `cargo check --target x86_64-unknown-linux-musl`, so a box without that rust-std target FAILS there after fmt,
+# clippy and the tests passed (CI installs it). needs lists cargo only: a missing target cannot be probed as a need.
 [[check]]
 id = "l3.gate"
 kind = "gate"
@@ -1070,6 +1180,7 @@ rerun = "cargo test --manifest-path 3-intelligence/Cargo.toml -p agent111 --test
 rerun_cost = "slow, ~20 s warm"
 covered_by = "l3.gate"
 strength = "C"
+needs = ["cargo"]
 
 [[check]]
 id = "l3.agent111.config_guard"
@@ -1085,6 +1196,7 @@ rerun = "cargo test --manifest-path 3-intelligence/Cargo.toml -p agent111 --test
 rerun_cost = "slow, ~20 s warm"
 covered_by = "l3.gate"
 strength = "F"
+needs = ["cargo"]
 
 [[check]]
 id = "l3.agent111.daemon_tools"
@@ -1092,7 +1204,7 @@ kind = "unit"
 cmd = ["cargo", "test", "--manifest-path", "3-intelligence/Cargo.toml", "-p", "agent111", "--test", "daemon_tools"]
 tier = "slow"
 layers = [3, 5]
-seams = ["L1-L3:daemon-token", "L3-L5:daemon-tools"]
+seams = ["L3-L5:daemon-tools", "L1-L3:daemon-token"]
 adapter = "libtest"
 cargo = true
 timeout_s = 1800
@@ -1100,6 +1212,7 @@ rerun = "cargo test --manifest-path 3-intelligence/Cargo.toml -p agent111 --test
 rerun_cost = "slow, ~20 s warm"
 covered_by = "l3.gate"
 strength = "F"
+needs = ["cargo"]
 
 [[check]]
 id = "l3.agent111.events_status"
@@ -1115,6 +1228,7 @@ rerun = "cargo test --manifest-path 3-intelligence/Cargo.toml -p agent111 --test
 rerun_cost = "slow, ~20 s warm"
 covered_by = "l3.gate"
 strength = "F"
+needs = ["cargo"]
 
 [[check]]
 id = "l3.agent111.kb_ritual"
@@ -1130,6 +1244,7 @@ rerun = "cargo test --manifest-path 3-intelligence/Cargo.toml -p agent111 --test
 rerun_cost = "slow, ~20 s warm"
 covered_by = "l3.gate"
 strength = "F"
+needs = ["cargo"]
 
 [[check]]
 id = "l3.agent111.layer6_tools"
@@ -1145,6 +1260,7 @@ rerun = "cargo test --manifest-path 3-intelligence/Cargo.toml -p agent111 --test
 rerun_cost = "slow, ~20 s warm"
 covered_by = "l3.gate"
 strength = "F"
+needs = ["cargo"]
 
 [[check]]
 id = "l3.agent111.model_client"
@@ -1159,6 +1275,7 @@ rerun = "cargo test --manifest-path 3-intelligence/Cargo.toml -p agent111 --test
 rerun_cost = "slow, ~20 s warm"
 covered_by = "l3.gate"
 strength = "F"
+needs = ["cargo"]
 
 [[check]]
 id = "l3.agent111.task_engine"
@@ -1174,6 +1291,29 @@ rerun = "cargo test --manifest-path 3-intelligence/Cargo.toml -p agent111 --test
 rerun_cost = "slow, ~20 s warm"
 covered_by = "l3.gate"
 strength = "F"
+needs = ["cargo"]
+
+# The in-crate agent111 tests (config.rs, health.rs, status.rs, http.rs, tasks.rs, tools.rs, model.rs): pure functions
+# of the agent's own side, no peer and no fake, hence strength C. They are what a targeted run of L1-L3:env-precedence,
+# L3-L7:offload, L1-L3:health-restart or L3-L6:l6-tools reaches on the agent side besides the integration tests:
+# config.rs (the loopback and private-address tables, the env-file parser), health.rs and status.rs (the 503 / degraded /
+# ok derivation), tools.rs (ids checked against their closed shapes, actions rendered in a fixed key order, the closed
+# vocabulary refusing the rest). http.rs (host allowlist), tasks.rs and model.rs prove no seam on their own.
+[[check]]
+id = "l3.agent111.lib"
+kind = "unit"
+cmd = ["cargo", "test", "--manifest-path", "3-intelligence/Cargo.toml", "-p", "agent111", "--lib"]
+tier = "slow"
+layers = [1, 3, 6, 7]
+seams = ["L1-L3:env-precedence", "L3-L7:offload", "L1-L3:health-restart", "L3-L6:l6-tools"]
+adapter = "libtest"
+cargo = true
+timeout_s = 1800
+rerun = "cargo test --manifest-path 3-intelligence/Cargo.toml -p agent111 --lib -- --exact {test}"
+rerun_cost = "slow, ~20 s warm"
+covered_by = "l3.gate"
+strength = "C"
+needs = ["cargo"]
 
 # Layer 5 (mesh111) aggregate: fmt, clippy, tests, musl check x2. Nested inside l1.gate, so a full run that
 # selects both runs the mesh111 suites twice; a unit names only this gate as its covering gate.
@@ -1204,6 +1344,7 @@ rerun = "cargo test --manifest-path 5-messaging/Cargo.toml -p mesh111 --test con
 rerun_cost = "slow, ~20 s warm"
 covered_by = "l5.gate"
 strength = "I"
+needs = ["cargo"]
 
 [[check]]
 id = "l5.mesh111.flood"
@@ -1218,6 +1359,7 @@ rerun = "cargo test --manifest-path 5-messaging/Cargo.toml -p mesh111 --test flo
 rerun_cost = "slow, ~20 s warm"
 covered_by = "l5.gate"
 strength = "I"
+needs = ["cargo"]
 
 [[check]]
 id = "l5.mesh111.foreign_burst"
@@ -1233,6 +1375,7 @@ rerun = "cargo test --manifest-path 5-messaging/Cargo.toml -p mesh111 --test for
 rerun_cost = "slow, ~20 s warm"
 covered_by = "l5.gate"
 strength = "I"
+needs = ["cargo"]
 
 [[check]]
 id = "l5.mesh111.forward"
@@ -1240,7 +1383,7 @@ kind = "unit"
 cmd = ["cargo", "test", "--manifest-path", "5-messaging/Cargo.toml", "-p", "mesh111", "--test", "forward"]
 tier = "slow"
 layers = [5, 7]
-seams = ["L5-L7:custody-store", "L5-L7:forwarder-handoff", "L5-L7:pair-gate", "L5-L7:role-bits"]
+seams = ["L5-L7:forwarder-handoff", "L5-L7:pair-gate", "L5-L7:custody-store", "L5-L7:role-bits"]
 adapter = "libtest"
 cargo = true
 timeout_s = 1800
@@ -1248,6 +1391,7 @@ rerun = "cargo test --manifest-path 5-messaging/Cargo.toml -p mesh111 --test for
 rerun_cost = "slow, ~3 min"
 covered_by = "l5.gate"
 strength = "I"
+needs = ["cargo"]
 
 [[check]]
 id = "l5.mesh111.hub_flow"
@@ -1263,6 +1407,7 @@ rerun = "cargo test --manifest-path 5-messaging/Cargo.toml -p mesh111 --test hub
 rerun_cost = "slow, ~20 s warm"
 covered_by = "l5.gate"
 strength = "I"
+needs = ["cargo"]
 
 [[check]]
 id = "l5.mesh111.links"
@@ -1278,6 +1423,7 @@ rerun = "cargo test --manifest-path 5-messaging/Cargo.toml -p mesh111 --test lin
 rerun_cost = "slow, ~20 s warm"
 covered_by = "l5.gate"
 strength = "I"
+needs = ["cargo"]
 
 [[check]]
 id = "l5.mesh111.lossy"
@@ -1293,6 +1439,7 @@ rerun = "cargo test --manifest-path 5-messaging/Cargo.toml -p mesh111 --test los
 rerun_cost = "slow, ~20 s warm"
 covered_by = "l5.gate"
 strength = "I"
+needs = ["cargo"]
 
 [[check]]
 id = "l5.mesh111.recovery"
@@ -1308,6 +1455,7 @@ rerun = "cargo test --manifest-path 5-messaging/Cargo.toml -p mesh111 --test rec
 rerun_cost = "slow, ~20 s warm"
 covered_by = "l5.gate"
 strength = "I"
+needs = ["cargo"]
 
 [[check]]
 id = "l5.mesh111.requests"
@@ -1322,6 +1470,7 @@ rerun = "cargo test --manifest-path 5-messaging/Cargo.toml -p mesh111 --test req
 rerun_cost = "slow, ~20 s warm"
 covered_by = "l5.gate"
 strength = "I"
+needs = ["cargo"]
 
 # The in-crate mesh111 tests: store:: (81), the frozen-vector drift test, keys, enroll, envelope.
 [[check]]
@@ -1330,7 +1479,7 @@ kind = "unit"
 cmd = ["cargo", "test", "--manifest-path", "5-messaging/Cargo.toml", "-p", "mesh111", "--lib"]
 tier = "slow"
 layers = [5, 2]
-seams = ["L2-L5:store-key", "L2-L5:test-vectors", "L5-L7:custody-store"]
+seams = ["L5-L7:custody-store", "L2-L5:store-key", "L2-L5:test-vectors"]
 adapter = "libtest"
 cargo = true
 timeout_s = 1800
@@ -1338,8 +1487,11 @@ rerun = "cargo test --manifest-path 5-messaging/Cargo.toml -p mesh111 --lib -- -
 rerun_cost = "slow, ~60 s warm"
 covered_by = "l5.gate"
 strength = "I"
+needs = ["cargo"]
 
-# Layer 4 gate: typecheck, vitest, vite build, size budget. check.sh also runs it as its last stage.
+# Layer 4 gate: typecheck, vitest, vite build, size budget. check.sh also runs it as its last stage (a full run
+# therefore runs this check twice, see l1.gate). Its seams are those of its static stages (the typecheck reads the
+# generated types, the budget reads the built chunks); the vitest files are the units below, each with its own seams.
 [[check]]
 id = "l4.ui"
 kind = "gate"
@@ -1347,7 +1499,9 @@ cmd = ["pnpm", "check"]
 cwd = "4-interface/ui"
 tier = "slow"
 layers = [4]
+seams = ["L4-L4:openapi-ts", "L4-L4:budget"]
 adapter = "vitest"
+lock = "ui-dist"
 timeout_s = 1800
 rerun_cost = "slow, ~3 min"
 strength = "C"
@@ -1356,7 +1510,16 @@ needs = ["pnpm"]
 [[check]]
 id = "l4.ui.budget"
 kind = "unit"
-cmd = ["pnpm", "exec", "vitest", "run", "test/budget.test.ts"]
+cmd = [
+  "pnpm",
+  "exec",
+  "vitest",
+  "run",
+  "test/budget.test.ts",
+  "--reporter=default",
+  "--reporter=json",
+  "--outputFile={scratch}/vitest.json",
+]
 cwd = "4-interface/ui"
 tier = "slow"
 layers = [4]
@@ -1372,7 +1535,16 @@ needs = ["pnpm"]
 [[check]]
 id = "l4.ui.contacts"
 kind = "unit"
-cmd = ["pnpm", "exec", "vitest", "run", "test/contacts.test.ts"]
+cmd = [
+  "pnpm",
+  "exec",
+  "vitest",
+  "run",
+  "test/contacts.test.ts",
+  "--reporter=default",
+  "--reporter=json",
+  "--outputFile={scratch}/vitest.json",
+]
 cwd = "4-interface/ui"
 tier = "slow"
 layers = [2, 4]
@@ -1388,11 +1560,20 @@ needs = ["pnpm"]
 [[check]]
 id = "l4.ui.gen"
 kind = "unit"
-cmd = ["pnpm", "exec", "vitest", "run", "test/gen.test.ts"]
+cmd = [
+  "pnpm",
+  "exec",
+  "vitest",
+  "run",
+  "test/gen.test.ts",
+  "--reporter=default",
+  "--reporter=json",
+  "--outputFile={scratch}/vitest.json",
+]
 cwd = "4-interface/ui"
 tier = "slow"
 layers = [4]
-seams = ["L1-L4:services-registry", "L4-L4:openapi-ts"]
+seams = ["L4-L4:openapi-ts", "L1-L4:services-registry"]
 adapter = "vitest"
 timeout_s = 1800
 rerun = "pnpm --dir 4-interface/ui exec vitest run test/gen.test.ts"
@@ -1404,7 +1585,16 @@ needs = ["pnpm"]
 [[check]]
 id = "l4.ui.http"
 kind = "unit"
-cmd = ["pnpm", "exec", "vitest", "run", "test/http.test.ts"]
+cmd = [
+  "pnpm",
+  "exec",
+  "vitest",
+  "run",
+  "test/http.test.ts",
+  "--reporter=default",
+  "--reporter=json",
+  "--outputFile={scratch}/vitest.json",
+]
 cwd = "4-interface/ui"
 tier = "slow"
 layers = [4]
@@ -1420,7 +1610,16 @@ needs = ["pnpm"]
 [[check]]
 id = "l4.ui.layer6-api"
 kind = "unit"
-cmd = ["pnpm", "exec", "vitest", "run", "test/layer6-api.test.ts"]
+cmd = [
+  "pnpm",
+  "exec",
+  "vitest",
+  "run",
+  "test/layer6-api.test.ts",
+  "--reporter=default",
+  "--reporter=json",
+  "--outputFile={scratch}/vitest.json",
+]
 cwd = "4-interface/ui"
 tier = "slow"
 layers = [4, 6]
@@ -1436,7 +1635,16 @@ needs = ["pnpm"]
 [[check]]
 id = "l4.ui.layer6-contract"
 kind = "unit"
-cmd = ["pnpm", "exec", "vitest", "run", "test/layer6-contract.test.ts"]
+cmd = [
+  "pnpm",
+  "exec",
+  "vitest",
+  "run",
+  "test/layer6-contract.test.ts",
+  "--reporter=default",
+  "--reporter=json",
+  "--outputFile={scratch}/vitest.json",
+]
 cwd = "4-interface/ui"
 tier = "slow"
 layers = [4, 6]
@@ -1452,7 +1660,16 @@ needs = ["pnpm"]
 [[check]]
 id = "l4.ui.layer7-contract"
 kind = "unit"
-cmd = ["pnpm", "exec", "vitest", "run", "test/layer7-contract.test.ts"]
+cmd = [
+  "pnpm",
+  "exec",
+  "vitest",
+  "run",
+  "test/layer7-contract.test.ts",
+  "--reporter=default",
+  "--reporter=json",
+  "--outputFile={scratch}/vitest.json",
+]
 cwd = "4-interface/ui"
 tier = "slow"
 layers = [4, 7]
@@ -1468,7 +1685,16 @@ needs = ["pnpm"]
 [[check]]
 id = "l4.ui.layer7-views"
 kind = "unit"
-cmd = ["pnpm", "exec", "vitest", "run", "test/layer7-views.test.ts"]
+cmd = [
+  "pnpm",
+  "exec",
+  "vitest",
+  "run",
+  "test/layer7-views.test.ts",
+  "--reporter=default",
+  "--reporter=json",
+  "--outputFile={scratch}/vitest.json",
+]
 cwd = "4-interface/ui"
 tier = "slow"
 layers = [4, 7]
@@ -1484,7 +1710,16 @@ needs = ["pnpm"]
 [[check]]
 id = "l4.ui.messaging-mock"
 kind = "unit"
-cmd = ["pnpm", "exec", "vitest", "run", "test/messaging-mock.test.ts"]
+cmd = [
+  "pnpm",
+  "exec",
+  "vitest",
+  "run",
+  "test/messaging-mock.test.ts",
+  "--reporter=default",
+  "--reporter=json",
+  "--outputFile={scratch}/vitest.json",
+]
 cwd = "4-interface/ui"
 tier = "slow"
 layers = [4, 5]
@@ -1500,7 +1735,16 @@ needs = ["pnpm"]
 [[check]]
 id = "l4.ui.mock"
 kind = "unit"
-cmd = ["pnpm", "exec", "vitest", "run", "test/mock.test.ts"]
+cmd = [
+  "pnpm",
+  "exec",
+  "vitest",
+  "run",
+  "test/mock.test.ts",
+  "--reporter=default",
+  "--reporter=json",
+  "--outputFile={scratch}/vitest.json",
+]
 cwd = "4-interface/ui"
 tier = "slow"
 layers = [4]
@@ -1517,7 +1761,16 @@ needs = ["pnpm"]
 [[check]]
 id = "l4.ui.prompts"
 kind = "unit"
-cmd = ["pnpm", "exec", "vitest", "run", "test/prompts.test.ts"]
+cmd = [
+  "pnpm",
+  "exec",
+  "vitest",
+  "run",
+  "test/prompts.test.ts",
+  "--reporter=default",
+  "--reporter=json",
+  "--outputFile={scratch}/vitest.json",
+]
 cwd = "4-interface/ui"
 tier = "slow"
 layers = [3, 4]
@@ -1533,7 +1786,16 @@ needs = ["pnpm"]
 [[check]]
 id = "l4.ui.settings-l5"
 kind = "unit"
-cmd = ["pnpm", "exec", "vitest", "run", "test/settings-l5.test.ts"]
+cmd = [
+  "pnpm",
+  "exec",
+  "vitest",
+  "run",
+  "test/settings-l5.test.ts",
+  "--reporter=default",
+  "--reporter=json",
+  "--outputFile={scratch}/vitest.json",
+]
 cwd = "4-interface/ui"
 tier = "slow"
 layers = [4, 5]
@@ -1546,16 +1808,54 @@ covered_by = "l4.ui"
 strength = "C"
 needs = ["pnpm"]
 
+# The Layer 7 settings view on the mock. It also validates the mock's RelayStatus, PairOffer and UpdateOrigin answers
+# against the contract (helpers/validate) and builds the UI into a temp dir to run check-budget.mjs on it (the page
+# is a lazy chunk of at most 64 KB gzip): so it proves the openapi-ts and budget seams, not daemon output. The build
+# goes to a temp outDir, never to 4-interface/ui/dist, so it needs no ui-dist lock.
+[[check]]
+id = "l4.ui.settings-l7"
+kind = "unit"
+cmd = [
+  "pnpm",
+  "exec",
+  "vitest",
+  "run",
+  "test/settings-l7.test.ts",
+  "--reporter=default",
+  "--reporter=json",
+  "--outputFile={scratch}/vitest.json",
+]
+cwd = "4-interface/ui"
+tier = "slow"
+layers = [4, 7]
+seams = ["L4-L4:openapi-ts", "L4-L4:budget"]
+adapter = "vitest"
+timeout_s = 1800
+rerun = "pnpm --dir 4-interface/ui exec vitest run test/settings-l7.test.ts"
+rerun_cost = "slow, ~1 min"
+covered_by = "l4.ui"
+strength = "C"
+needs = ["pnpm"]
+
 # Replays the 11 recorded SSE tapes through the real UI parser: the recordings come from a real daemon (S1/S2),
 # which is why the matrix rates this seam R although vitest runs no daemon.
 [[check]]
 id = "l4.ui.tapes"
 kind = "unit"
-cmd = ["pnpm", "exec", "vitest", "run", "test/tapes.test.ts"]
+cmd = [
+  "pnpm",
+  "exec",
+  "vitest",
+  "run",
+  "test/tapes.test.ts",
+  "--reporter=default",
+  "--reporter=json",
+  "--outputFile={scratch}/vitest.json",
+]
 cwd = "4-interface/ui"
 tier = "slow"
 layers = [4, 1]
-seams = ["L1-L4:events-bus", "L3-L4:chat-relay", "L4-L1:tapes", "L4-L5:sse-fanout"]
+seams = ["L4-L1:tapes", "L1-L4:events-bus", "L4-L5:sse-fanout", "L3-L4:chat-relay"]
 adapter = "vitest"
 timeout_s = 1800
 rerun = "pnpm --dir 4-interface/ui exec vitest run test/tapes.test.ts"
@@ -1572,16 +1872,20 @@ cmd = ["sh", "-c", "pnpm build && pnpm budget"]
 cwd = "4-interface/ui"
 tier = "slow"
 layers = [4]
-seams = ["L1-X:pi-floor", "L4-L4:budget"]
+seams = ["L4-L4:budget", "L1-X:pi-floor"]
 timeout_s = 1800
 rerun = "pnpm --dir 4-interface/ui build && pnpm --dir 4-interface/ui budget"
 rerun_cost = "slow, ~1 min"
 covered_by = "l4.ui"
 strength = "C"
 needs = ["pnpm"]
+lock = "ui-dist"
 
-# G10-smoke: the ntfy carrier against stub-ntfy.py on loopback; no namespace, no root. It writes the smoke log into
-# the tracked tree (7-relay/verify/logs/) until row X5(e): the runner's tree hygiene will name it.
+# G10-smoke: the ntfy carrier against stub-ntfy.py on loopback; no namespace, no root. It writes the smoke log
+# 7-relay/verify/logs/ntfy-smoke-<date>-stub.md into the TRACKED tree on every run (carrier.sh:127-130), which the runner's
+# tree hygiene reports as a FAIL, so a default run (slow is a default tier) could never be GREEN. Until row X5(e) moves
+# that log under $T111_SCRATCH, the check needs "x5-log-to-scratch": no such tool exists, so the runner reports it
+# SKIPPED "needs x5-log-to-scratch (missing)", which is the truth. Row X5 removes that need (and no other change).
 [[check]]
 id = "l7.g10-smoke"
 kind = "unit"
@@ -1594,7 +1898,7 @@ cargo = true
 timeout_s = 1800
 rerun_cost = "slow, ~2 min warm"
 strength = "F"
-needs = ["python3", "cargo", "ss", "pgrep"]
+needs = ["bash", "python3", "cargo", "ss", "pgrep", "x5-log-to-scratch"]
 
 # ========================================================================
 # NS: unprivileged user/net/mount namespaces (or root); one at a time, lock "verify"
@@ -1609,6 +1913,7 @@ cmd = ["bash", "4-interface/verify/smoke.sh"]
 tier = "ns"
 layers = [4, 1, 3, 0]
 seams = [
+  "L1-L4:ui-embed",
   "L0-L1:kb-payload",
   "L0-L3:kb-grounding",
   "L0-L4:kb-api",
@@ -1623,7 +1928,6 @@ seams = [
   "L1-L4:pairing-auth",
   "L1-L4:restart-update",
   "L1-L4:services-registry",
-  "L1-L4:ui-embed",
   "L1-X:pi-floor",
   "L2-L4:identity-display",
   "L3-L4:agent-events",
@@ -1631,23 +1935,23 @@ seams = [
   "L3-L4:proposals-fs",
   "L3-L4:task-route",
 ]
-phases = { "4." = ["L1-L3:child-spawn"], "5a" = ["L1-L4:bind-host", "L1-L4:ui-embed"], "5b" = [
-  "L0-L1:kb-payload",
-  "L0-L4:kb-api",
-  "L1-L2:identity-dir",
-  "L1-L4:devices-api",
+phases = { "4." = ["L1-L3:child-spawn"], "5a" = ["L1-L4:ui-embed", "L1-L4:bind-host"], "5b" = [
   "L1-L4:legacy-contract",
   "L1-L4:services-registry",
+  "L0-L4:kb-api",
+  "L1-L4:devices-api",
   "L2-L4:identity-display",
-], "5c" = ["L1-L4:events-bus"], "5d" = ["L1-L1:cli-config", "L1-L4:legacy-contract", "L1-L4:pairing-auth"], "5e" = ["L0-L3:kb-grounding", "L1-L3:child-spawn", "L3-L4:chat-relay"], "5f" = ["L3-L4:agent-events", "L3-L4:proposals-fs", "L3-L4:task-route"], "5g" = ["L1-L3:health-restart", "L1-L4:restart-update"], "5h" = ["L1-L4:restart-update", "L1-X:pi-floor"] }
+  "L1-L2:identity-dir",
+  "L0-L1:kb-payload",
+], "5c" = ["L1-L4:events-bus"], "5d" = ["L1-L4:pairing-auth", "L1-L1:cli-config", "L1-L4:legacy-contract"], "5e" = ["L3-L4:chat-relay", "L0-L3:kb-grounding", "L1-L3:child-spawn"], "5f" = ["L3-L4:proposals-fs", "L3-L4:task-route", "L3-L4:agent-events"], "5g" = ["L1-L4:restart-update", "L1-L3:health-restart"], "5h" = ["L1-L4:restart-update", "L1-X:pi-floor"] }
 adapter = "okfail"
 cargo = true
-lock = "verify"
+lock = "ui-dist"
 timeout_s = 1800
 rerun = "SMOKE_KEEP=1 bash 4-interface/verify/smoke.sh"
 rerun_cost = "ns, ~4 min"
 strength = "R"
-needs = ["userns", "netns", "curl", "jq", "python3", "ip", "sha256sum", "pnpm"]
+needs = ["bash", "userns", "netns", "curl", "jq", "python3", "ip", "sha256sum", "pnpm", "cargo"]
 
 # S2: hub H, members A and B and an unenrolled C as four real daemons over a bridge of veths (Layers 2, 5, 3, 4, 1).
 # Scenario numbers are the phase names; chains of checks cascade, so read the first FAIL first.
@@ -1658,6 +1962,7 @@ cmd = ["bash", "4-interface/verify/smoke.sh", "--three-node"]
 tier = "ns"
 layers = [4, 5, 2, 3, 1]
 seams = [
+  "L4-L5:messages-api",
   "L1-L3:daemon-token",
   "L1-L3:health-restart",
   "L1-L5:fabric-cli",
@@ -1668,19 +1973,18 @@ seams = [
   "L2-L5:sealer",
   "L2-L5:store-key",
   "L3-L5:daemon-tools",
-  "L4-L5:messages-api",
   "L4-L5:panels",
   "L4-L5:sse-fanout",
 ]
-phases = { "5." = ["L1-L5:fabric-start"], "6." = ["L1-L5:fabric-cli"], "7." = ["L2-L4:identity-display", "L2-L5:announce-cards"], "8." = ["L2-L5:sealer", "L4-L5:messages-api", "L4-L5:sse-fanout"], "9." = ["L2-L5:sealer"], "10." = ["L4-L5:messages-api"], "11." = ["L4-L5:messages-api"], "12." = ["L1-L3:daemon-token", "L3-L5:daemon-tools"], "14." = ["L1-L3:health-restart", "L2-L5:counters-epoch", "L2-L5:store-key"], "15." = ["L4-L5:panels"], "16." = ["L2-L5:counters-epoch"] }
+phases = { "5." = ["L1-L5:fabric-start"], "6." = ["L1-L5:fabric-cli"], "7." = ["L2-L5:announce-cards", "L2-L4:identity-display"], "8." = ["L4-L5:messages-api", "L2-L5:sealer", "L4-L5:sse-fanout"], "9." = ["L2-L5:sealer"], "10." = ["L4-L5:messages-api"], "11." = ["L4-L5:messages-api"], "12." = ["L3-L5:daemon-tools", "L1-L3:daemon-token"], "14." = ["L2-L5:counters-epoch", "L2-L5:store-key", "L1-L3:health-restart"], "15." = ["L4-L5:panels"], "16." = ["L2-L5:counters-epoch"] }
 adapter = "okfail"
 cargo = true
-lock = "verify"
+lock = "ui-dist"
 timeout_s = 1800
 rerun = "SMOKE_KEEP=1 bash 4-interface/verify/smoke.sh --three-node"
 rerun_cost = "ns, ~5 min"
 strength = "R"
-needs = ["userns", "netns", "curl", "jq", "python3", "ip", "nsenter", "sha256sum"]
+needs = ["bash", "userns", "netns", "curl", "jq", "python3", "ip", "nsenter", "sha256sum", "cargo"]
 
 # S3: the hosted-panel origin guard, a curl matrix and headless Chrome over CDP (stable rule ids <scope>/<rule>).
 # Needs a Chrome (CHROME=, google-chrome or a playwright chromium) and Node >= 22; fixed port 11180.
@@ -1691,16 +1995,16 @@ kind = "unit"
 cmd = ["bash", "4-interface/verify/panel-lint.sh"]
 tier = "ns"
 layers = [4, 5]
-seams = ["L1-L4:pairing-auth", "L4-L5:panels"]
-phases = { "3b" = ["L4-L5:panels"], "3c" = ["L1-L4:pairing-auth", "L4-L5:panels"] }
+seams = ["L4-L5:panels", "L1-L4:pairing-auth"]
+phases = { "3b" = ["L4-L5:panels"], "3c" = ["L4-L5:panels", "L1-L4:pairing-auth"] }
 adapter = "okfail"
 cargo = true
-lock = "verify"
+lock = "ui-dist"
 timeout_s = 1800
 rerun = "PANEL_LINT_KEEP=1 bash 4-interface/verify/panel-lint.sh"
 rerun_cost = "ns, ~5 min"
 strength = "R"
-needs = ["userns", "netns", "curl", "jq", "python3", "ip", "sha256sum", "node", "ss", "pnpm"]
+needs = ["bash", "userns", "netns", "curl", "jq", "python3", "ip", "sha256sum", "node", "ss", "pnpm", "cargo"]
 
 # G1: two real daemons with the debug-only scenario hook (NODE111_BRIDGE_STUBS) and three stub adapters, plus 6
 # named mesh111 store tests. Needs the git tag checkpoint-layer-5 (a shallow clone without tags FAILS, not SKIPs).
@@ -1710,7 +2014,7 @@ kind = "unit"
 cmd = ["bash", "6-transport/verify/bridge.sh"]
 tier = "ns"
 layers = [6, 1, 3, 4, 5]
-seams = ["L1-L3:daemon-token", "L4-L5:sse-fanout", "L4-L6:networks-bridge-api", "L5-L6:foreign-tables"]
+seams = ["L4-L6:networks-bridge-api", "L5-L6:foreign-tables", "L4-L5:sse-fanout", "L1-L3:daemon-token"]
 phases = { "4." = ["L5-L6:foreign-tables"], "5." = ["L1-L3:daemon-token"], "6." = ["L4-L6:networks-bridge-api"], "7." = ["L4-L6:networks-bridge-api"], "10." = ["L4-L5:sse-fanout"], "11." = ["L5-L6:foreign-tables"], "12." = ["L4-L6:networks-bridge-api"], "13." = ["L4-L5:sse-fanout"], "cargo" = ["L5-L6:foreign-tables"] }
 adapter = "okfail"
 cargo = true
@@ -1719,7 +2023,7 @@ timeout_s = 1800
 rerun = "SMOKE_KEEP=1 bash 6-transport/verify/bridge.sh"
 rerun_cost = "ns, ~4 min"
 strength = "R"
-needs = ["userns", "netns", "curl", "jq", "python3", "nsenter", "ip", "sha256sum", "cargo", "git", "tar"]
+needs = ["bash", "userns", "netns", "curl", "jq", "python3", "nsenter", "ip", "sha256sum", "cargo", "git", "tar"]
 
 # G3: two real daemons, each with a real rnsd 1.5.7 and the real LXMF helper (component enabled through the API).
 # Needs the package index once (hash-locked wheels), so --offline skips it; SKIPPED without it, silently, unless
@@ -1730,8 +2034,8 @@ kind = "unit"
 cmd = ["bash", "6-transport/verify/lxmf.sh"]
 tier = "ns"
 layers = [6, 1, 2, 5]
-seams = ["L1-L6:component-cache", "L1-L6:rnsd-child", "L1-X:pi-floor", "L2-L6:attest-bridge", "L6-L6:lxmf-sidecar"]
-phases = { "2." = ["L1-L6:rnsd-child", "L6-L6:lxmf-sidecar"], "3." = ["L1-L6:component-cache"], "5." = ["L2-L6:attest-bridge", "L6-L6:lxmf-sidecar"], "6." = ["L1-L6:rnsd-child"], "7." = ["L6-L6:lxmf-sidecar"], "9." = ["L1-L6:component-cache"], "10." = ["L1-X:pi-floor"], "12." = ["L1-X:pi-floor"] }
+seams = ["L6-L6:lxmf-sidecar", "L1-L6:rnsd-child", "L1-L6:component-cache", "L2-L6:attest-bridge", "L1-X:pi-floor"]
+phases = { "2." = ["L6-L6:lxmf-sidecar", "L1-L6:rnsd-child"], "3." = ["L1-L6:component-cache"], "5." = ["L6-L6:lxmf-sidecar", "L2-L6:attest-bridge"], "6." = ["L1-L6:rnsd-child"], "7." = ["L6-L6:lxmf-sidecar"], "9." = ["L1-L6:component-cache"], "10." = ["L1-X:pi-floor"], "12." = ["L1-X:pi-floor"] }
 adapter = "okfail"
 cargo = true
 lock = "verify"
@@ -1739,7 +2043,7 @@ timeout_s = 1800
 rerun = "SMOKE_KEEP=1 bash 6-transport/verify/lxmf.sh"
 rerun_cost = "ns, ~4 min"
 strength = "R"
-needs = ["userns", "netns", "python3", "strace", "ip", "nsenter", "curl", "jq", "ss", "sha256sum"]
+needs = ["bash", "userns", "netns", "python3", "strace", "ip", "nsenter", "curl", "jq", "ss", "sha256sum", "cargo"]
 offline_skip = true
 
 # G4: the transport spine. Its cargo stage runs before the venv check, so a cargo FAIL followed by a missing
@@ -1759,7 +2063,7 @@ timeout_s = 1800
 rerun = "SMOKE_KEEP=1 bash 6-transport/verify/spine.sh"
 rerun_cost = "ns, ~4 min"
 strength = "R"
-needs = ["userns", "netns", "python3", "cargo", "ip", "nsenter", "curl", "jq", "ss", "sha256sum", "od"]
+needs = ["bash", "userns", "netns", "python3", "cargo", "ip", "nsenter", "curl", "jq", "ss", "sha256sum", "od"]
 offline_skip = true
 
 # G5: device core with private /dev and /sys trees (needs a mount namespace to overmount /sys/class/tty), the package
@@ -1770,7 +2074,7 @@ kind = "unit"
 cmd = ["bash", "6-transport/verify/devices.sh"]
 tier = "ns"
 layers = [6, 1, 4]
-seams = ["L1-L4:devices-api", "L1-L6:devices-hotplug"]
+seams = ["L1-L6:devices-hotplug", "L1-L4:devices-api"]
 adapter = "okfail"
 cargo = true
 lock = "verify"
@@ -1778,11 +2082,13 @@ timeout_s = 1800
 rerun = "SMOKE_KEEP=1 bash 6-transport/verify/devices.sh"
 rerun_cost = "ns, ~3 min"
 strength = "R"
-needs = ["userns", "netns", "python3", "cargo", "ip", "nsenter", "curl", "jq", "ss", "sha256sum"]
+needs = ["bash", "userns", "netns", "python3", "cargo", "ip", "nsenter", "curl", "jq", "ss", "sha256sum"]
 offline_skip = true
 
 # V8 variant: the real musl 111 installed into a mount namespace against a signed fixture channel. Needs a prebuilt
 # /tmp/dist-test (scripts/cross-build.sh 2026.10.12 /tmp/dist-test); exits 77 (SKIP) when it is absent. Fixed port 11180.
+# Adapter exit77 (row X3): exit 0 PASS; exit 77 SKIPPED with the last `SKIP: ...` line as the reason; anything else FAIL.
+# The script speaks neither ok: nor <GATE> GREEN: it ends `V8-variant namespace e2e: PASS` or `: FAIL`.
 [[check]]
 id = "l1.linux-e2e"
 kind = "unit"
@@ -1790,7 +2096,7 @@ cmd = ["sh", "1-bootstrap/verify/linux-e2e.sh", "--namespace"]
 tier = "ns"
 layers = [1, 2]
 seams = ["L1-L1:install-state-tree", "L1-L2:identity-dir"]
-adapter = "okfail"
+adapter = "exit77"
 lock = "verify"
 timeout_s = 1800
 rerun = "sh 1-bootstrap/verify/linux-e2e.sh --namespace"
@@ -1813,6 +2119,7 @@ lock = "verify"
 timeout_s = 1800
 rerun_cost = "ns, T0 stub: SKIPPED today"
 strength = "N"
+needs = ["bash"]
 
 # G8 presence: the 111 Nearby kind, the LAN/hub split, the registry TXT, hops. Row V2.
 # A T0 stub: it prints '<G> SKIPPED: not built yet (T0 stub)' and exits 0 (7-relay/TASKS.md row V2). Strength N
@@ -1823,12 +2130,13 @@ kind = "unit"
 cmd = ["bash", "7-relay/verify/presence.sh"]
 tier = "ns"
 layers = [7]
-seams = ["L1-L7:registry-dnssd", "L5-L7:fabric-tap", "L6-L7:hops"]
+seams = ["L5-L7:fabric-tap", "L1-L7:registry-dnssd", "L6-L7:hops"]
 adapter = "okfail"
 lock = "verify"
 timeout_s = 1800
 rerun_cost = "ns, T0 stub: SKIPPED today"
 strength = "N"
+needs = ["bash"]
 
 # G9 cross-hub custody over TEST-NET-1 with TLS. Row V3. Needs the tag checkpoint-layer-6 (absent).
 # A T0 stub: it prints '<G> SKIPPED: not built yet (T0 stub)' and exits 0 (7-relay/TASKS.md row V3). Strength N
@@ -1845,6 +2153,7 @@ lock = "verify"
 timeout_s = 1800
 rerun_cost = "ns, T0 stub: SKIPPED today"
 strength = "N"
+needs = ["bash"]
 
 # G10 the ntfy carrier through stub-ntfy.py in five namespaces. Row V4 (--smoke is l7.g10-smoke).
 # A T0 stub: it prints '<G> SKIPPED: not built yet (T0 stub)' and exits 0 (7-relay/TASKS.md row V4). Strength N
@@ -1861,6 +2170,7 @@ lock = "verify"
 timeout_s = 1800
 rerun_cost = "ns, T0 stub: SKIPPED today"
 strength = "N"
+needs = ["bash"]
 
 # G11 TLS 1.3 raw public keys between two hubs. Row V5.
 # A T0 stub: it prints '<G> SKIPPED: not built yet (T0 stub)' and exits 0 (7-relay/TASKS.md row V5). Strength N
@@ -1877,6 +2187,7 @@ lock = "verify"
 timeout_s = 1800
 rerun_cost = "ns, T0 stub: SKIPPED today"
 strength = "N"
+needs = ["bash"]
 
 # G12 the hub as update origin. Row V6.
 # A T0 stub: it prints '<G> SKIPPED: not built yet (T0 stub)' and exits 0 (7-relay/TASKS.md row V6). Strength N
@@ -1887,12 +2198,13 @@ kind = "unit"
 cmd = ["bash", "7-relay/verify/origin.sh"]
 tier = "ns"
 layers = [7]
-seams = ["L1-L1:manifest-trust", "L1-L7:origin"]
+seams = ["L1-L7:origin", "L1-L1:manifest-trust"]
 adapter = "okfail"
 lock = "verify"
 timeout_s = 1800
 rerun_cost = "ns, T0 stub: SKIPPED today"
 strength = "N"
+needs = ["bash"]
 
 # ========================================================================
 # FAKES: stand-ins for one side of a seam. parity = "none" counts as a gap on every run.
@@ -2010,7 +2322,8 @@ mirrors = "b"
 seam = "L1-L3:child-spawn"
 parity = "none"
 
-# the debug-only StubAdapter and scenario hook G1 drives (NODE111_BRIDGE_STUBS)
+# the debug-only StubAdapter and scenario hook G1 drives (NODE111_BRIDGE_STUBS): side b of the seam, standing in for the
+# real foreign-network adapters under the bridge core (side a)
 [[fake]]
 path = "1-bootstrap/crates/node111/src/daemon/bridge/stub.rs"
 mirrors = "b"
@@ -2024,11 +2337,12 @@ mirrors = "b"
 seam = "L1-L6:rnsd-child"
 parity = "none"
 
-# a fake rnstatus Runner and a fake rnsd child
+# a fake rnstatus Runner and a fake rnsd child: they stand in for Reticulum (rnsd and rnstatus), the Layer 6 program the
+# daemon's transport module supervises (side b of the rnsd-child seam), under the real /transport routes of the test
 [[fake]]
 path = "1-bootstrap/crates/node111/tests/api_v1_transport.rs"
 mirrors = "b"
-seam = "L4-L6:transport-api"
+seam = "L1-L6:rnsd-child"
 parity = "none"
 
 # stands in for venvs/rns/bin/rnodeconf in G5: a golden text chosen by the port argument
@@ -2059,66 +2373,69 @@ mirrors = "b"
 seam = "L4-L1:tapes"
 parity = "none"
 
+# the fake opener and the scripted netlink event source in the tests of relay/netwatch.rs: they stand in for the Layer 6
+# spine's route-netlink socket (side a of the seam), under the address and route watch of Layer 7 (side b)
+[[fake]]
+path = "1-bootstrap/crates/node111/src/daemon/relay/netwatch.rs"
+mirrors = "a"
+seam = "L6-L7:netlink-gateway"
+parity = "none"
+
 # ========================================================================
 # KNOWN (options.md F7): results that are known under a condition. A matching FAIL becomes SKIPPED with the
 # reason 'known: ...'; --require turns it back into FAIL. The eight tests below fail on a root box because they
 # assume a non-root user (7 in phone_flow, 1 in api_v1_messages); 6-transport/TASKS.md:80 records the count, the
 # names are in plan/layers/6-transport/runs/workflows/wave-3.js (AS_BUILT). HANDOFF-2026-11-02 also names
 # install_flow ('free space') as root-failing, but no test fn is named for it, so it is not listed.
+# No entry names a `check`: a record carries the unit's id in a unit run and may carry the gate's in a gate run, and an
+# entry that named the unit would match only the first shape. Each */<test fn> pattern is unique in the tree (grep: one
+# test fn each), so the pattern alone is exact.
 # ========================================================================
 
 [[known]]
 test = "*/preflight_happy"
-check = "l1.node111.phone_flow"
 condition = "euid0"
 source = "6-transport/TASKS.md:80"
 reason = "fails as root (adb.rs:28 refuses root)"
 
 [[known]]
 test = "*/preflight_two_devices_refused"
-check = "l1.node111.phone_flow"
 condition = "euid0"
 source = "6-transport/TASKS.md:80"
 reason = "fails as root (adb.rs:28 refuses root)"
 
 [[known]]
 test = "*/preflight_serial_flag_selects"
-check = "l1.node111.phone_flow"
 condition = "euid0"
 source = "6-transport/TASKS.md:80"
 reason = "fails as root (adb.rs:28 refuses root)"
 
 [[known]]
 test = "*/preflight_sdk21_refused"
-check = "l1.node111.phone_flow"
 condition = "euid0"
 source = "6-transport/TASKS.md:80"
 reason = "fails as root (adb.rs:28 refuses root)"
 
 [[known]]
 test = "*/preflight_armeabi_refused"
-check = "l1.node111.phone_flow"
 condition = "euid0"
 source = "6-transport/TASKS.md:80"
 reason = "fails as root (adb.rs:28 refuses root)"
 
 [[known]]
 test = "*/preflight_bbk_old_build_refused_and_override"
-check = "l1.node111.phone_flow"
 condition = "euid0"
 source = "6-transport/TASKS.md:80"
 reason = "fails as root (adb.rs:28 refuses root)"
 
 [[known]]
 test = "*/preflight_miui_simless_refused_with_sim_ok"
-check = "l1.node111.phone_flow"
 condition = "euid0"
 source = "6-transport/TASKS.md:80"
 reason = "fails as root (adb.rs:28 refuses root)"
 
 [[known]]
 test = "*/message_proposals_are_checked_then_applied_once"
-check = "l1.node111.api_v1_messages"
 condition = "euid0"
 source = "6-transport/TASKS.md:80"
 reason = "fails as root (set_permissions(0o500) at api_v1_messages.rs:1469 has no effect as root)"
@@ -2127,7 +2444,6 @@ reason = "fails as root (set_permissions(0o500) at api_v1_messages.rs:1469 has n
 # counts it PASS, so under euid 0 its PASS is rewritten SKIPPED.
 [[known]]
 test = "*/unopenable_tty_is_an_error"
-check = "l1.node111.api_v1_devices"
 condition = "euid0"
 kind = "vacuous"
 source = "6-transport/TASKS.md:80"
@@ -2174,7 +2490,6 @@ reason = "returns early as root (access(2) always succeeds), so a PASS here prov
 "4-interface/ui/test/select.test.ts" = "adapter selection (mock or http); no seam"
 "4-interface/ui/test/services.test.ts" = "services fixtures of the mock; the registry seam is proved by gen and the Rust tests"
 "4-interface/ui/test/settings.test.ts" = "settings view logic over the mock; no seam"
-"4-interface/ui/test/settings-l7.test.ts" = "Layer 7 settings view on the mock (consent round trip, chunk size); no daemon output"
 "4-interface/ui/test/shell.test.ts" = "UI shell formatting and announcer logic; no seam"
 "4-interface/ui/test/sse.test.ts" = "the SSE parser on fake chunk streams; the recorded-tape seam is proved by tapes"
 "4-interface/ui/test/store.test.ts" = "the UI store over a fake adapter; no seam"
