@@ -131,6 +131,36 @@ cargo "Running tests/<file>.rs" / "Running unittests src/lib.rs" lines, and say 
 Every adapter is tested against a REAL log: capture one from the tree's own gate or unit where it is cheap (a cargo unit of a small crate, one
 vitest file, the knowledge-base check), never only a hand-written sample.
 
+ALSO YOURS (row "| X2c |" on the board: the re-review of X2b, landed; you own the engine files for this, so no other task touches them now;
+the full text is ${SP}/results/X2b-review.json if it still exists). Each gets a test that fails without the fix:
+ C1 (medium) [[known]] can still hide a failing exit: the non-zero-exit backstop runs in parse, before apply_known, and the exit adapter's own
+    "exit N" FAIL is not engine-made, so a glob on the check id turns it SKIPPED. RULING: the exit adapter's record is engine-made (it is the
+    exit status, not a parsed test); the backstop runs again after apply_known (exit != 0, no FAIL left, not exit_declared ⇒ "exit N but no
+    failing result was parsed"); an adapter sets exit_declared only when its parse accounts for the exit (libtest: the failed count of every
+    "test result:" line equals the FAIL records it parsed).
+ C2 (medium) a wait on a lock held by another check of the SAME live run is bounded by --lock-wait like a dead run's leftover, so a long sibling
+    turns the waiter into a FAIL. RULING: the scheduler starts a check only when this run holds no lock it needs (pick another startable check
+    instead); a wait on this run's own holder is not bounded; the bound stays for holders of other or dead runs.
+ C3 (medium) the rerun prints a literal {test} for a record with no parsed test (timeouts, could not start, the backstop, requires / offline /
+    needs SKIPs): pasted, cargo runs 0 tests and exits 0. RULING: when the template uses a token that has no value, the rerun is the check's own
+    command (env prefixes, tokens rendered).
+ C4 the log cap keeps the head and drops the tail the adapters read. RULING: keep the head up to the cap and the last 1 MB (a marker line
+    between them says how much was dropped); a cut log adds one note line to the summary.
+ C5 --log-cap inf / --lock-wait inf pass validation. RULING: non-finite values are usage errors (exit 2).
+ C6 a process whose command line merely names the scratch or run dir (an agent's tail -f on a log) counts as proven ours and is killed.
+    RULING: proof is the run marker or descent from the runner; naming the dir alone is "unattributed" (strict: a hygiene FAIL that says
+    "[not killed]"; --shared-box: SKIPPED; never killed).
+ C7 test_dead_run_swept_at_the_next_start asserts the box-wide sweep count exactly. RULING: assert only its own dead run's entry; give each
+    test sandbox its own marker so concurrent suites do not sweep each other.
+ C8 the engine's record ids "runner" and "hygiene/run" are not reserved. RULING: the schema refuses a check named runner or run (a MapError).
+ C9 a check the runner stopped that traps TERM and exits 0 is recorded PASS. RULING: every check in the stopped set gets the interrupt FAIL.
+ C10 the stop handlers are installed after the map load; a late signal is ignored; a progress line to a closed stderr raises in a worker.
+    RULING: handlers first thing in main; a signal seen before the report makes the run RED; writes to stderr never raise.
+ C11 a lock file made by another user's runner is opened read-only and the holder line silently not written. RULING: the waiter then says
+    "held by another user's runner (holder not recorded)".
+ C12 the lock-wait line prints once under --ci too (it is a diagnosis, not progress). And add the parser line --results FILE (type Path) to
+    the commands group in cli.py: matrix.py (row X4) already reads args.results; X4b tests it.
+
 TASK X3 (row "| X3 |"): the adapters of options.md section 3.4. Row X2 has LANDED the registry and its contract: read
 ${ROOT}/verify/t111/adapters.py, record.py and schema.py first. Fill ${ROOT}/verify/t111/adapters.py with: libtest (cargo test output:
 the "Running <path>" lines name the binary, one record per test fn, the "---- <name> stdout ----" block gives the assertion (the
