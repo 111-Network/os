@@ -496,6 +496,37 @@ impl GatewayOffer {
     }
 }
 
+/// Why the own announce does not carry the role bits just set (Layer 7
+/// §7.2; row D4b): [`FabricHandle::set_relay_settings`] puts the previous
+/// switches back and returns it, so the same call tries again.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ReannounceError {
+    /// No announce counter could be committed (the identity `counters` file
+    /// cannot be written, or the counter space is exhausted, §6.2): the
+    /// previous announce is still presented (or none).
+    NoCounter,
+    /// The blocking mint task failed (it panicked or was cancelled).
+    Task(String),
+}
+
+impl std::fmt::Display for ReannounceError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ReannounceError::NoCounter => f.write_str(
+                "the role bits are not announced yet: no announce counter could be committed",
+            ),
+            ReannounceError::Task(e) => {
+                write!(
+                    f,
+                    "the role bits are not announced yet: the re-mint failed ({e})"
+                )
+            }
+        }
+    }
+}
+
+impl std::error::Error for ReannounceError {}
+
 impl RelayRoles {
     /// The switches as `r` holds them (`termux`: this node runs on Termux,
     /// where 5B runs as 5A).
@@ -1252,7 +1283,8 @@ impl FabricHandle {
         }
         drop(one);
         self.reconcile_listener(&s).await;
-        self.refresh_announce().await;
+        // a failed re-mint is logged inside; the next settings change tries again
+        let _ = self.refresh_announce().await;
         self.reconcile_pair_dials().await;
         s
     }
@@ -1717,22 +1749,38 @@ impl FabricHandle {
     /// then, so two changes racing settle on the latest and an unchanged
     /// state never re-mints. Nothing without a link (no announce is
     /// presented while restore-pending).
-    async fn refresh_announce(&self) {
-        let Some(l) = &self.live else { return };
-        let Some(tcp) = &l.tcp else { return };
+    ///
+    /// Reports its outcome (Layer 7 row D4b): `Ok` when the presented
+    /// announce carries the current `appdata` (kept or minted), or when no
+    /// announce is presented at all (no link, or restore-pending: the next
+    /// one is minted from the then-current state); `Err` when the re-mint
+    /// failed and the previous announce (or none) is still what peers see.
+    async fn refresh_announce(&self) -> Result<(), ReannounceError> {
+        let Some(l) = &self.live else { return Ok(()) };
+        let Some(tcp) = &l.tcp else { return Ok(()) };
         let _one = self.remint.lock().await;
         let app = self.current_appdata();
         let (handle, dir) = (Arc::clone(&l.sealer), self.cfg.fabric_dir.clone());
-        match tokio::task::spawn_blocking(move || handle.ensure_announce(&dir, &app)).await {
-            Ok(AnnounceOutcome::Missing) => {}
-            Ok(_) => {
+        let outcome = tokio::task::spawn_blocking(move || handle.ensure_announce(&dir, &app)).await;
+        let result = match outcome {
+            Ok(AnnounceOutcome::Missing) if l.sealer.restore_pending() => return Ok(()),
+            Ok(AnnounceOutcome::Missing) => Err(ReannounceError::NoCounter),
+            Ok(o) => {
                 let bytes = l.sealer.own_announce();
                 if !bytes.is_empty() {
                     tcp.set_announce(bytes);
                 }
+                match o {
+                    AnnounceOutcome::Stale => Err(ReannounceError::NoCounter),
+                    _ => Ok(()),
+                }
             }
-            Err(e) => eprintln!("111 fabric: announce re-mint: {e}"),
+            Err(e) => Err(ReannounceError::Task(e.to_string())),
+        };
+        if let Err(e) = &result {
+            eprintln!("111 fabric: announce re-mint: {e}");
         }
+        result
     }
 
     /// The `appdata` the current state calls for (the persisted fabric
@@ -1748,7 +1796,7 @@ impl FabricHandle {
 
     /// The relay switches behind role bits 3–5 as last set (Layer 7 §7.2).
     pub fn relay_roles(&self) -> RelayRoles {
-        self.relay.lock().map(|r| *r).unwrap_or_default()
+        *self.relay.lock().unwrap_or_else(|p| p.into_inner())
     }
 
     /// Hand the relay settings just written to `state/relay.json` to the
@@ -1756,27 +1804,43 @@ impl FabricHandle {
     /// after every successful write): the role bits 3–5 and the offer's
     /// gateway fact follow them. The own announce is re-minted once when the
     /// role bits changed (one counter value, fsynced before the announce
-    /// exists) and not at all when they did not. Returns whether the bits
-    /// this node announces changed.
-    pub async fn set_relay_settings(&self, r: &relay_settings::RelaySettings) -> bool {
+    /// exists) and not at all when they did not.
+    ///
+    /// `Ok(true)`: the bits changed and the announce carries them (or no
+    /// announce is presented now and the next one will); `Ok(false)`: the
+    /// bits did not change, nothing re-minted. `Err`: the bits changed but
+    /// the re-mint failed ([`ReannounceError`]): the previous switches are
+    /// put back (the offer's gateway fact with them), so the peers' view and
+    /// this handle agree, and the same call with the same settings tries
+    /// again (row D4b). The settings file keeps what was written; the
+    /// caller tells the owner the bits are not announced yet.
+    pub async fn set_relay_settings(
+        &self,
+        r: &relay_settings::RelaySettings,
+    ) -> Result<bool, ReannounceError> {
         self.set_relay_roles(RelayRoles::from_settings(r, crate::config::on_termux()))
             .await
     }
 
     /// [`FabricHandle::set_relay_settings`] with the switches already read.
-    pub async fn set_relay_roles(&self, new: RelayRoles) -> bool {
-        let before = {
-            let Ok(mut r) = self.relay.lock() else {
-                return false;
-            };
-            std::mem::replace(&mut *r, new)
-        };
+    pub async fn set_relay_roles(&self, new: RelayRoles) -> Result<bool, ReannounceError> {
+        let before = std::mem::replace(
+            &mut *self.relay.lock().unwrap_or_else(|p| p.into_inner()),
+            new,
+        );
         let s = self.persisted().fabric;
-        let changed = roles(&s, &before, self.lan) != roles(&s, &new, self.lan);
-        if changed {
-            self.refresh_announce().await;
+        if roles(&s, &before, self.lan) == roles(&s, &new, self.lan) {
+            return Ok(false);
         }
-        changed
+        if let Err(e) = self.refresh_announce().await {
+            // put the previous switches back unless a later call replaced them meanwhile
+            let mut r = self.relay.lock().unwrap_or_else(|p| p.into_inner());
+            if *r == new {
+                *r = before;
+            }
+            return Err(e);
+        }
+        Ok(true)
     }
 
     /// The hub offer's `gateway {carrier, mode}` (Layer 7 §7.5): `Some`
@@ -2618,7 +2682,7 @@ mod tests {
         assert!(n0 <= l0);
 
         // the same switches again: nothing re-minted
-        assert!(!h.set_relay_settings(&r).await);
+        assert!(!h.set_relay_settings(&r).await.unwrap());
         assert_eq!(last(&h), l0);
         assert_eq!(announced(&h).2, bytes0);
         // a switch whose bit is gated off changes no bit: the gateway bit
@@ -2626,7 +2690,7 @@ mod tests {
         r.set_public_gateway_bit(true);
         r.set_consent_hash(ConsentKind::GatewayBit, Some(HASH))
             .unwrap();
-        assert!(!h.set_relay_settings(&r).await);
+        assert!(!h.set_relay_settings(&r).await.unwrap());
         assert_eq!(last(&h), l0);
         // an unrelated fabric settings change: nothing re-minted
         h.patch_settings(mesh111::fabric::SettingsPatch {
@@ -2645,7 +2709,7 @@ mod tests {
         r.set_ntfy_server(Some("https://ntfy.example.org")).unwrap();
         r.set_consent_hash(ConsentKind::CarrierEnable, Some(HASH))
             .unwrap();
-        assert!(h.set_relay_settings(&r).await);
+        assert!(h.set_relay_settings(&r).await.unwrap());
         let (roles1, n1, bytes1) = announced(&h);
         assert_eq!(roles1, hub | ROLE_GATEWAY | ROLE_OFFLOAD | ROLE_ORIGIN);
         assert_eq!(last(&h), l0 + 1);
@@ -2660,7 +2724,7 @@ mod tests {
         // the mode alone changes no bit: no re-mint, the offer follows
         r.set_carrier_mode(CarrierMode::FiveB, false).unwrap();
         let termux = crate::config::on_termux();
-        assert!(!h.set_relay_settings(&r).await);
+        assert!(!h.set_relay_settings(&r).await.unwrap());
         assert_eq!(last(&h), l0 + 1);
         let want = if termux {
             CarrierMode::FiveA
@@ -2671,7 +2735,7 @@ mod tests {
 
         // offload off: one more re-mint, one counter value
         r.set_offload_bit(false);
-        assert!(h.set_relay_settings(&r).await);
+        assert!(h.set_relay_settings(&r).await.unwrap());
         assert_eq!(last(&h), l0 + 2);
         assert_eq!(announced(&h).0, hub | ROLE_GATEWAY | ROLE_ORIGIN);
 
@@ -2705,6 +2769,57 @@ mod tests {
         let h = start(lo_cfg(dir.path(), true), Some(identity), &api).await;
         assert!(h.running(), "{:?}", h.down_reason());
         assert_eq!(announced(&h).2, bytes2);
+        h.shutdown().await;
+    }
+
+    /// Layer 7 §7.2 (row D4b): a re-mint that fails (no announce counter can
+    /// be committed: the identity `counters` file cannot be written) reports
+    /// it, puts the previous switches back and leaves the old announce; the
+    /// same call with the same settings then mints once.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_failed_re_mint_is_reported_and_the_same_call_tries_again() {
+        use relay_settings::RelaySettings;
+        use sealer::ROLE_OFFLOAD;
+        let dir = tempfile::tempdir().unwrap();
+        let api = test_api_lan(dir.path(), true);
+        let identity_dir = dir.path().join("identity");
+        let identity = crate::identity::generate(&identity_dir).unwrap();
+        let h = start(lo_cfg(dir.path(), true), Some(identity), &api).await;
+        assert!(h.running(), "{:?}", h.down_reason());
+        let hub = ROLE_MAILBOX | ROLE_ALWAYS_ON_HUB;
+        let (roles0, _, bytes0) = announced(&h);
+        assert_eq!(roles0, hub);
+        let last = |h: &FabricHandle| h.sealer().unwrap().announce_last();
+        let l0 = last(&h);
+
+        // the counter commit fails once: a directory where its temp file goes
+        // (EISDIR, also for root)
+        let blocker = identity_dir.join(format!("{}.tmp", id111::counters::COUNTERS_FILE));
+        std::fs::create_dir(&blocker).unwrap();
+        std::fs::write(blocker.join("keep"), b"x").unwrap();
+        let mut r = RelaySettings::default();
+        r.set_offload_bit(true);
+        assert_eq!(
+            h.set_relay_settings(&r).await,
+            Err(ReannounceError::NoCounter)
+        );
+        assert_eq!(last(&h), l0, "no counter value committed");
+        assert_eq!(announced(&h).2, bytes0, "the old announce stays");
+        assert_eq!(
+            h.relay_roles(),
+            RelayRoles::default(),
+            "the switches put back"
+        );
+
+        // the disk is fixed: the same call tries again and mints once
+        std::fs::remove_dir_all(&blocker).unwrap();
+        assert_eq!(h.set_relay_settings(&r).await, Ok(true));
+        assert_eq!(last(&h), l0 + 1);
+        assert_eq!(announced(&h).0, hub | ROLE_OFFLOAD);
+        assert!(h.relay_roles().offload_bit);
+        // and once only
+        assert_eq!(h.set_relay_settings(&r).await, Ok(false));
+        assert_eq!(last(&h), l0 + 1);
         h.shutdown().await;
     }
 

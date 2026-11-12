@@ -37,6 +37,45 @@ pub mod venv;
 /// §19 D8).
 pub const LINK_WATCH_GROUPS: u32 = netlink::RTMGRP_LINK;
 
+/// The spine's debounce quiet window (spec §Transport: 2 s).
+pub const LINK_WATCH_QUIET: Duration = Duration::from_secs(2);
+
+/// The spine's link-watch source, exactly as [`start`] opens it: one
+/// route-netlink socket bound to [`LINK_WATCH_GROUPS`] (`RTMGRP_LINK`
+/// only, Layer 7 S15). `tests/transport_spine.rs` reads the mask back from
+/// the socket this returns, so a change of the wiring fails a test.
+pub fn link_watch_source() -> anyhow::Result<netlink::NetlinkEvents> {
+    netlink::NetlinkEvents::new(LINK_WATCH_GROUPS)
+}
+
+/// The spine's link watch as [`start`] spawns it: `source` → one
+/// `netlink::debounced` instance (`quiet`; [`LINK_WATCH_QUIET`] in
+/// production) → [`Spine::on_link_change`] per quiet burst (re-render →
+/// diff → `--reload` the AutoInterface, restart only for posture, never
+/// pkill, §11). Tests drive it with a scripted source.
+pub fn spawn_link_watch<S: netlink::LinkEvents + 'static>(
+    source: S,
+    spine: Arc<Spine>,
+    quiet: Duration,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        netlink::debounced(source, quiet, || {
+            let spine = Arc::clone(&spine);
+            tokio::spawn(async move {
+                match spine.on_link_change().await {
+                    Ok(a) if a.restarted || !a.diff.is_empty() => eprintln!(
+                        "111 transport: interfaces changed — {}",
+                        a.actions.join(", ")
+                    ),
+                    Ok(_) | Err(posture::ApplyError::NewerConfig) => {}
+                    Err(e) => eprintln!("111 transport: link change: {e}"),
+                }
+            });
+        })
+        .await;
+    })
+}
+
 use crate::daemon::health::TransportHealth;
 use crate::daemon::supervise::{self, ChildControl, ChildHandle, ChildSpec};
 use crate::daemon::DaemonLayout;
@@ -502,24 +541,12 @@ pub async fn start(args: TransportArgs<'_>) -> TransportHandle {
 
     // netlink → debounced re-render → diff → --reload the AutoInterface
     // (restart only for posture), never pkill (§11).
-    if let Ok(events) = netlink::NetlinkEvents::new(LINK_WATCH_GROUPS) {
-        let spine = Arc::clone(&spine);
-        tasks.push(tokio::spawn(async move {
-            netlink::debounced(events, std::time::Duration::from_secs(2), || {
-                let spine = Arc::clone(&spine);
-                tokio::spawn(async move {
-                    match spine.on_link_change().await {
-                        Ok(a) if a.restarted || !a.diff.is_empty() => eprintln!(
-                            "111 transport: interfaces changed — {}",
-                            a.actions.join(", ")
-                        ),
-                        Ok(_) | Err(posture::ApplyError::NewerConfig) => {}
-                        Err(e) => eprintln!("111 transport: link change: {e}"),
-                    }
-                });
-            })
-            .await;
-        }));
+    if let Ok(events) = link_watch_source() {
+        tasks.push(spawn_link_watch(
+            events,
+            Arc::clone(&spine),
+            LINK_WATCH_QUIET,
+        ));
     }
 
     // the facts tick (rnstatus into the cache); the rnsd.log heuristic is

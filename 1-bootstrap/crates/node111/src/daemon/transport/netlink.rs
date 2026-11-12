@@ -171,6 +171,35 @@ pub async fn debounced<S: LinkEvents, F: FnMut() + Send>(
     }
 }
 
+/// [`debounced`] with a bound (Layer 7 §3.3; `relay::netwatch`): a burst
+/// fires after `quiet` of silence, or `max` after its first event when it
+/// never goes quiet, so a source that never pauses for `quiet` still fires
+/// at most once per `max` and never starves its consumer. The deadline is a
+/// monotonic `tokio::time::Instant`; no timer exists between bursts. The
+/// spine keeps the plain [`debounced`] (its behaviour is Layer 6's).
+pub async fn debounced_within<S: LinkEvents, F: FnMut() + Send>(
+    mut source: S,
+    quiet: std::time::Duration,
+    max: std::time::Duration,
+    mut fire: F,
+) {
+    while source.next_change().await.is_some() {
+        let deadline = tokio::time::Instant::now() + max;
+        loop {
+            let left = deadline.saturating_duration_since(tokio::time::Instant::now());
+            if left.is_zero() {
+                break; // the bound: fire although the burst goes on
+            }
+            match tokio::time::timeout(quiet.min(left), source.next_change()).await {
+                Ok(Some(())) => continue, // burst continues
+                Ok(None) => return,       // source closed
+                Err(_) => break,          // quiet elapsed (or the bound) → fire once
+            }
+        }
+        fire();
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -201,6 +230,74 @@ mod tests {
         assert_eq!(fires.load(std::sync::atomic::Ordering::SeqCst), 2);
         drop(tx);
         let _ = task.await;
+    }
+
+    #[tokio::test]
+    async fn a_burst_that_never_goes_quiet_still_fires_within_the_bound() {
+        use std::sync::atomic::{AtomicU32, Ordering};
+        use std::time::Duration;
+        let (tx, rx) = tokio::sync::mpsc::channel(8);
+        let fires = std::sync::Arc::new(AtomicU32::new(0));
+        let f2 = std::sync::Arc::clone(&fires);
+        let task = tokio::spawn(debounced_within(
+            ScriptedEvents { rx },
+            Duration::from_millis(100),
+            Duration::from_millis(300),
+            move || {
+                f2.fetch_add(1, Ordering::SeqCst);
+            },
+        ));
+        // an event every 20 ms (never 100 ms of quiet) for 1 s
+        let start = tokio::time::Instant::now();
+        let mut first_fire = None;
+        while start.elapsed() < Duration::from_millis(1_000) {
+            tx.send(()).await.unwrap();
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            if first_fire.is_none() && fires.load(Ordering::SeqCst) > 0 {
+                first_fire = Some(start.elapsed());
+            }
+        }
+        let at = first_fire.expect("the bound fired during the burst");
+        assert!(at < Duration::from_millis(600), "fired at {at:?}");
+        let n = fires.load(Ordering::SeqCst);
+        assert!((2..=4).contains(&n), "at most one fire per bound: {n}");
+        // (a plain debounce fires never during that burst); one last event, then
+        // quiet: the tail fires
+        tx.send(()).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert!(fires.load(Ordering::SeqCst) > n);
+        drop(tx);
+        let _ = task.await;
+    }
+
+    #[tokio::test]
+    async fn the_bounded_debounce_still_collapses_a_short_burst() {
+        use std::sync::atomic::{AtomicU32, Ordering};
+        use std::time::Duration;
+        let (tx, rx) = tokio::sync::mpsc::channel(8);
+        let fires = std::sync::Arc::new(AtomicU32::new(0));
+        let f2 = std::sync::Arc::clone(&fires);
+        let task = tokio::spawn(debounced_within(
+            ScriptedEvents { rx },
+            Duration::from_millis(50),
+            Duration::from_secs(10),
+            move || {
+                f2.fetch_add(1, Ordering::SeqCst);
+            },
+        ));
+        for _ in 0..5 {
+            tx.send(()).await.unwrap();
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        assert_eq!(fires.load(Ordering::SeqCst), 1);
+        drop(tx);
+        let _ = task.await;
+        assert_eq!(
+            fires.load(Ordering::SeqCst),
+            1,
+            "a closed source fires nothing more"
+        );
     }
 
     #[tokio::test]

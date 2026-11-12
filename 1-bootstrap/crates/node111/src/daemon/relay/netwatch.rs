@@ -4,8 +4,26 @@
 //! rnsd (`transport::LINK_WATCH_GROUPS`, `transport/mod.rs`); it is untouched. This module owns a
 //! **second** route-netlink socket bound to [`GROUPS`] (`RTMGRP_LINK | RTMGRP_IPV4_IFADDR |
 //! RTMGRP_IPV4_ROUTE | RTMGRP_IPV6_IFADDR | RTMGRP_IPV6_ROUTE`, `0x551`, §3.3), fed through a
-//! second `netlink::debounced` instance ([`DEBOUNCE`], 2 s), so a burst of route updates is one
-//! [`NetEvent::Changed`] and a DHCP renew never reaches the spine.
+//! second debounce instance ([`DEBOUNCE`], 2 s, bounded by [`DEBOUNCE_MAX`]:
+//! `netlink::debounced_within`), so a burst of route updates is one [`NetEvent::Changed`] and a
+//! DHCP renew never reaches the spine.
+//!
+//! **Only a real change is delivered.** The kernel sends `RTM_NEWADDR` for an address whose
+//! lifetimes alone were refreshed (a DHCP renew; on an IPv6 LAN every Router Advertisement that
+//! refreshes a SLAAC address): measured in a network namespace (row D4b), `ip addr change` with
+//! the same address and prefix and new `valid_lft`/`preferred_lft` sends one `RTM_NEWADDR` per
+//! refresh. Counting each datagram would wake the carrier check (D11) and the mdns-sd re-arm
+//! (D8) all day with nothing changed (against the Pi floor's "idle outbound 0"). So after each
+//! debounced burst the watch reads one fingerprint ([`change_fingerprint`]) of what its
+//! consumers care about: the set of (interface index, name, family, address, prefix length),
+//! each interface's `IFF_UP | IFF_RUNNING`, and the routing tables (the §3.4 read, counters
+//! ignored); lifetimes are not in it. [`NetEvent::Changed`] is delivered only when it moved
+//! since the last delivery (or the open), or when it cannot be read (then every burst counts,
+//! as before). The read is one `getifaddrs(3)` (the libc the crate links) plus the two capped
+//! `/proc` reads, once per burst, in the reader task that exists anyway: lighter than parsing
+//! every datagram, which needs a dump request at open to know what an `RTM_NEWADDR` refreshes,
+//! and it adds no task, timer or socket. A burst that never goes quiet for [`DEBOUNCE`] is still
+//! checked [`DEBOUNCE_MAX`] after its first datagram, so the event is never starved.
 //!
 //! **Consumers subscribe** ([`NetWatch::subscribe`]): a configured carrier (row D11, its check
 //! of §3.2 (a)) and the running mdns-sd daemon (row D8, the §3.3 re-arm). The first subscriber
@@ -30,7 +48,11 @@
 //! needs a socket of the very kind whose bind failed, a request and a multipart parse), and
 //! delivers [`NetEvent::Poll`] to the carrier when their fingerprint changed (the counter
 //! columns ignored) or when neither table can be read (then every tick: the check is the only
-//! way left to learn the network). No other node, and no other consumer, polls.
+//! way left to learn the network). No other node, and no other consumer, polls. The last
+//! fingerprint the poll read lives in the watch's state, so a poll restarted for a new period
+//! (a changed `termux_poll_min`, a second carrier) compares against it and a change that
+//! happened since the old task's last tick is still delivered; it is forgotten only when the
+//! poll stops.
 //!
 //! Every wait is a monotonic `tokio::time` sleep; no wall clock decides anything here.
 
@@ -49,6 +71,11 @@ use tokio::task::JoinHandle;
 pub const GROUPS: u32 = ADDRESS_ROUTE_GROUPS;
 /// The second `debounced` instance's quiet window (§3.3: 2 s, as the spine's).
 pub const DEBOUNCE: Duration = Duration::from_secs(2);
+/// The bound on one burst (row D4b): a burst that never goes quiet for [`DEBOUNCE`] is checked
+/// this long after its first datagram.
+pub const DEBOUNCE_MAX: Duration = Duration::from_secs(10);
+/// Most `getifaddrs` entries walked; a longer list reads as unknown (every burst counts).
+pub const IFADDRS_MAX: usize = 4_096;
 /// The Termux poll's unit (`gateway.termux_poll_min` is in minutes).
 pub const POLL_UNIT: Duration = Duration::from_secs(60);
 /// The IPv4 routing table the Termux poll reads (§3.4).
@@ -77,7 +104,8 @@ pub enum Consumer {
 /// [`Subscription::next`] sees each kind at most once.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NetEvent {
-    /// A debounced address, route or link change (§3.3): one per burst.
+    /// A debounced address, route or link change (§3.3): at most one per burst, and only when
+    /// [`change_fingerprint`] moved (or cannot be read; row D4b).
     Changed,
     /// A Termux fallback tick that saw the routing tables change, or could not read them (§3.4).
     Poll,
@@ -131,22 +159,182 @@ impl Opener for NetlinkOpener {
     }
 }
 
-/// Reads the routing tables' fingerprint for the §3.4 poll (production: [`ProcRoutes`]).
-pub trait RouteRead: Send + Sync {
+/// Reads the host's network fingerprints (production: [`HostNet`]; tests inject a fake).
+pub trait NetRead: Send + Sync {
+    /// The routing tables' fingerprint ([`route_fingerprint`]; the §3.4 poll reads only this).
     /// `None` when no table could be read.
-    fn fingerprint(&self) -> Option<u64>;
+    fn routes(&self) -> Option<u64>;
+    /// The interfaces' and addresses' fingerprint ([`address_fingerprint`]). `None` when they
+    /// could not be read.
+    fn addresses(&self) -> Option<u64>;
 }
 
-/// The production reader: [`PROC_ROUTE`] and [`PROC_ROUTE6`], each capped at [`ROUTE_READ_MAX`].
-pub struct ProcRoutes;
+/// What a netlink burst is checked against (row D4b): the addresses and the routes together.
+/// `None` when either cannot be read (the burst then counts as a change).
+pub fn change_fingerprint(net: &dyn NetRead) -> Option<u64> {
+    let (a, r) = (net.addresses()?, net.routes()?);
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    (a, r).hash(&mut h);
+    Some(h.finish())
+}
 
-impl RouteRead for ProcRoutes {
-    fn fingerprint(&self) -> Option<u64> {
+/// The production reader: [`PROC_ROUTE`] and [`PROC_ROUTE6`], each capped at
+/// [`ROUTE_READ_MAX`], and one `getifaddrs(3)` walk capped at [`IFADDRS_MAX`] entries.
+pub struct HostNet;
+
+impl NetRead for HostNet {
+    fn routes(&self) -> Option<u64> {
         route_fingerprint(
             read_capped(PROC_ROUTE).as_deref(),
             read_capped(PROC_ROUTE6).as_deref(),
         )
     }
+
+    fn addresses(&self) -> Option<u64> {
+        read_interfaces().map(|mut v| address_fingerprint(&mut v))
+    }
+}
+
+/// One row of the address fingerprint (row D4b). Lifetimes and address flags are not here: a
+/// refresh that changes only them is no change.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum NetEntry {
+    /// An interface: its index, name and `IFF_UP | IFF_RUNNING` bits (a link that goes down or
+    /// loses its carrier is a change).
+    Link {
+        index: u32,
+        name: String,
+        flags: u32,
+    },
+    /// An address: its interface's index (0 when the walk named none) and name, the family
+    /// (`AF_INET`, `AF_INET6`), the address bytes and the prefix length.
+    Addr {
+        index: u32,
+        name: String,
+        family: u16,
+        addr: Vec<u8>,
+        prefix: u8,
+    },
+}
+
+/// The order-free fingerprint of `entries` (sorted in place, then hashed).
+pub fn address_fingerprint(entries: &mut [NetEntry]) -> u64 {
+    entries.sort_unstable();
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    entries.hash(&mut h);
+    h.finish()
+}
+
+/// The `IFF_*` bits an interface row keeps.
+const LINK_FLAGS: u32 = (libc::IFF_UP | libc::IFF_RUNNING) as u32;
+
+/// Frees a `getifaddrs` list on every path.
+struct IfAddrs(*mut libc::ifaddrs);
+
+impl Drop for IfAddrs {
+    fn drop(&mut self) {
+        if !self.0.is_null() {
+            // SAFETY: the list came from getifaddrs and is freed once, here.
+            unsafe { libc::freeifaddrs(self.0) };
+        }
+    }
+}
+
+/// One `getifaddrs(3)` walk into [`NetEntry`] rows. `None` when the call fails or the list is
+/// longer than [`IFADDRS_MAX`]. Entries of another family are skipped.
+fn read_interfaces() -> Option<Vec<NetEntry>> {
+    let mut head: *mut libc::ifaddrs = std::ptr::null_mut();
+    // SAFETY: getifaddrs writes a list head we own and free through `IfAddrs`.
+    if unsafe { libc::getifaddrs(&mut head) } != 0 {
+        return None;
+    }
+    let list = IfAddrs(head);
+    let mut links: Vec<NetEntry> = Vec::new();
+    let mut addrs: Vec<(String, u16, Vec<u8>, u8)> = Vec::new();
+    let mut cur = list.0;
+    let mut walked = 0usize;
+    while !cur.is_null() {
+        walked += 1;
+        if walked > IFADDRS_MAX {
+            return None;
+        }
+        // SAFETY: `cur` is a non-null node of the list getifaddrs returned, alive until drop.
+        let ifa = unsafe { &*cur };
+        cur = ifa.ifa_next;
+        if ifa.ifa_name.is_null() || ifa.ifa_addr.is_null() {
+            continue;
+        }
+        // SAFETY: a non-null, NUL-terminated name owned by the list.
+        let name = unsafe { std::ffi::CStr::from_ptr(ifa.ifa_name) }
+            .to_string_lossy()
+            .into_owned();
+        // SAFETY: ifa_addr is non-null; every sockaddr starts with its family.
+        let family = i32::from(unsafe { (*ifa.ifa_addr).sa_family });
+        match family {
+            libc::AF_PACKET => {
+                // SAFETY: an AF_PACKET entry's address is a sockaddr_ll (packet(7)).
+                let ll = unsafe { &*(ifa.ifa_addr as *const libc::sockaddr_ll) };
+                links.push(NetEntry::Link {
+                    index: u32::try_from(ll.sll_ifindex).unwrap_or(0),
+                    name,
+                    flags: ifa.ifa_flags & LINK_FLAGS,
+                });
+            }
+            libc::AF_INET => {
+                // SAFETY: an AF_INET entry's address (and netmask, when set) is a sockaddr_in.
+                let a = unsafe { &*(ifa.ifa_addr as *const libc::sockaddr_in) };
+                let prefix = if ifa.ifa_netmask.is_null() {
+                    u8::MAX
+                } else {
+                    let m = unsafe { &*(ifa.ifa_netmask as *const libc::sockaddr_in) };
+                    m.sin_addr.s_addr.count_ones() as u8
+                };
+                let bytes = a.sin_addr.s_addr.to_ne_bytes().to_vec();
+                addrs.push((name, libc::AF_INET as u16, bytes, prefix));
+            }
+            libc::AF_INET6 => {
+                // SAFETY: an AF_INET6 entry's address (and netmask, when set) is a sockaddr_in6.
+                let a = unsafe { &*(ifa.ifa_addr as *const libc::sockaddr_in6) };
+                let prefix = if ifa.ifa_netmask.is_null() {
+                    u8::MAX
+                } else {
+                    let m = unsafe { &*(ifa.ifa_netmask as *const libc::sockaddr_in6) };
+                    m.sin6_addr
+                        .s6_addr
+                        .iter()
+                        .map(|b| b.count_ones())
+                        .sum::<u32>() as u8
+                };
+                addrs.push((
+                    name,
+                    libc::AF_INET6 as u16,
+                    a.sin6_addr.s6_addr.to_vec(),
+                    prefix,
+                ));
+            }
+            _ => {}
+        }
+    }
+    drop(list);
+    let index_of: std::collections::HashMap<&str, u32> = links
+        .iter()
+        .filter_map(|l| match l {
+            NetEntry::Link { index, name, .. } => Some((name.as_str(), *index)),
+            NetEntry::Addr { .. } => None,
+        })
+        .collect();
+    let mut out: Vec<NetEntry> = addrs
+        .into_iter()
+        .map(|(name, family, addr, prefix)| NetEntry::Addr {
+            index: index_of.get(name.as_str()).copied().unwrap_or(0),
+            name,
+            family,
+            addr,
+            prefix,
+        })
+        .collect();
+    out.append(&mut links);
+    Some(out)
 }
 
 fn read_capped(path: &str) -> Option<String> {
@@ -196,6 +384,8 @@ pub fn route_fingerprint(v4: Option<&str>, v6: Option<&str>) -> Option<u64> {
 pub struct Config {
     /// The debounce quiet window ([`DEBOUNCE`]).
     pub quiet: Duration,
+    /// The bound on one burst ([`DEBOUNCE_MAX`]).
+    pub max_wait: Duration,
     /// One `termux_poll_min` minute ([`POLL_UNIT`]; tests shrink it).
     pub poll_unit: Duration,
     /// This node runs under Termux (§3.4).
@@ -203,11 +393,12 @@ pub struct Config {
 }
 
 impl Config {
-    /// 2 s debounce, minutes of 60 s, and this host's Termux detection
+    /// 2 s debounce bounded at 10 s, minutes of 60 s, and this host's Termux detection
     /// ([`crate::config::on_termux`]).
     pub fn production() -> Self {
         Config {
             quiet: DEBOUNCE,
+            max_wait: DEBOUNCE_MAX,
             poll_unit: POLL_UNIT,
             termux: crate::config::on_termux(),
         }
@@ -241,7 +432,7 @@ struct Slot {
 struct Inner {
     cfg: Config,
     opener: Box<dyn Opener>,
-    routes: Arc<dyn RouteRead>,
+    net: Arc<dyn NetRead>,
     failures_logged: AtomicU32,
     state: Mutex<State>,
 }
@@ -260,32 +451,40 @@ struct State {
     epoch: u64,
     link: Link,
     reader: Option<JoinHandle<()>>,
+    /// The netlink path's last delivered fingerprint ([`change_fingerprint`], read at the open):
+    /// a burst is delivered only when it moved, or when it is `None` (unreadable).
+    seen: Option<u64>,
     poll: Option<(Duration, JoinHandle<()>)>,
+    /// Bumped at every poll start, so a replaced poll task that already woke changes nothing.
+    poll_gen: u64,
+    /// The §3.4 poll's last routing-table reading (`Some(None)`: unreadable), kept across a poll
+    /// restart and forgotten when the poll stops.
+    poll_seen: Option<Option<u64>>,
     rt: Option<Handle>,
 }
 
 static GLOBAL: OnceLock<NetWatch> = OnceLock::new();
 
-/// The process's watch (production opener, `/proc` routes, [`Config::production`]). Built on
+/// The process's watch (production opener, [`HostNet`], [`Config::production`]). Built on
 /// first use, by the first consumer; building it opens nothing.
 pub fn global() -> &'static NetWatch {
     GLOBAL.get_or_init(|| {
         NetWatch::new(
             Config::production(),
             Box::new(NetlinkOpener),
-            Arc::new(ProcRoutes),
+            Arc::new(HostNet),
         )
     })
 }
 
 impl NetWatch {
-    /// A watch over `opener` and `routes`. Opens nothing until the first subscriber.
-    pub fn new(cfg: Config, opener: Box<dyn Opener>, routes: Arc<dyn RouteRead>) -> Self {
+    /// A watch over `opener` and `net`. Opens nothing until the first subscriber.
+    pub fn new(cfg: Config, opener: Box<dyn Opener>, net: Arc<dyn NetRead>) -> Self {
         NetWatch {
             inner: Arc::new(Inner {
                 cfg,
                 opener,
-                routes,
+                net,
                 failures_logged: AtomicU32::new(0),
                 state: Mutex::new(State {
                     next_id: 0,
@@ -293,7 +492,10 @@ impl NetWatch {
                     epoch: 0,
                     link: Link::Idle,
                     reader: None,
+                    seen: None,
                     poll: None,
+                    poll_gen: 0,
+                    poll_seen: None,
                     rt: None,
                 }),
             }),
@@ -425,14 +627,15 @@ impl Inner {
         match self.opener.open(GROUPS) {
             Ok(source) => {
                 st.link = Link::Bound;
+                // the baseline a burst is compared with (row D4b)
+                st.seen = change_fingerprint(&*self.net);
                 let weak: Weak<Inner> = Arc::downgrade(self);
-                let quiet = self.cfg.quiet;
+                let (quiet, max) = (self.cfg.quiet, self.cfg.max_wait);
                 st.reader = Some(rt.spawn(async move {
                     let fire_to = weak.clone();
-                    netlink::debounced(source, quiet, move || {
+                    netlink::debounced_within(source, quiet, max, move || {
                         if let Some(inner) = fire_to.upgrade() {
-                            let st = inner.lock();
-                            deliver(&st, CHANGED, |_| true);
+                            inner.settle(epoch);
                         }
                     })
                     .await;
@@ -459,7 +662,24 @@ impl Inner {
             h.abort();
         }
         st.link = Link::Idle;
+        st.seen = None;
+        st.poll_seen = None;
         st.rt = None;
+    }
+
+    /// A debounced burst ended (row D4b): deliver [`NetEvent::Changed`] only when the
+    /// fingerprint moved since the last delivery (or the open), or cannot be read. The read
+    /// runs before the lock is taken.
+    fn settle(&self, epoch: u64) {
+        let now = change_fingerprint(&*self.net);
+        let mut st = self.lock();
+        if st.epoch != epoch || st.link != Link::Bound {
+            return;
+        }
+        if now.is_none() || now != st.seen {
+            deliver(&st, CHANGED, |_| true);
+        }
+        st.seen = now;
     }
 
     /// The reader's stream ended (the socket errored): report it and fall back.
@@ -517,23 +737,34 @@ impl Inner {
             h.abort();
         }
         let (Some(period), Some(rt)) = (want, st.rt.clone()) else {
+            // the poll stops: its reading is forgotten (the next start reads a new baseline)
+            st.poll_seen = None;
             return;
         };
+        // a restart (a new period) keeps the last reading as its baseline: a change since the
+        // old task's last tick is delivered at the new task's first tick (row D4b)
+        if st.poll_seen.is_none() {
+            st.poll_seen = Some(self.net.routes());
+        }
+        st.poll_gen += 1;
+        let gen = st.poll_gen;
         let weak: Weak<Inner> = Arc::downgrade(self);
-        let routes = Arc::clone(&self.routes);
+        let net = Arc::clone(&self.net);
         st.poll = Some((
             period,
             rt.spawn(async move {
-                let mut last = routes.fingerprint();
                 loop {
                     tokio::time::sleep(period).await;
-                    let now = routes.fingerprint();
-                    if now.is_none() || now != last {
-                        let Some(inner) = weak.upgrade() else { return };
-                        let st = inner.lock();
+                    let now = net.routes();
+                    let Some(inner) = weak.upgrade() else { return };
+                    let mut st = inner.lock();
+                    if st.poll_gen != gen {
+                        return; // replaced while this tick read the tables
+                    }
+                    if now.is_none() || st.poll_seen != Some(now) {
                         deliver(&st, POLL, |c| matches!(c, Consumer::Carrier { .. }));
                     }
-                    last = now;
+                    st.poll_seen = Some(now);
                 }
             }),
         ));
@@ -610,16 +841,41 @@ mod tests {
         }
     }
 
-    /// Routes whose fingerprint the test sets (`None` = unreadable); counts reads.
+    /// A host whose routes fingerprint the test sets (`None` = unreadable; route reads are
+    /// counted) and whose interface rows it edits (`None` = getifaddrs failed).
     struct Routes {
         value: Mutex<Option<u64>>,
         reads: AtomicUsize,
+        addrs: Mutex<Option<Vec<NetEntry>>>,
     }
 
-    impl RouteRead for Routes {
-        fn fingerprint(&self) -> Option<u64> {
+    impl NetRead for Routes {
+        fn routes(&self) -> Option<u64> {
             self.reads.fetch_add(1, Ordering::SeqCst);
             *self.value.lock().unwrap()
+        }
+
+        fn addresses(&self) -> Option<u64> {
+            let mut rows = self.addrs.lock().unwrap().clone()?;
+            Some(address_fingerprint(&mut rows))
+        }
+    }
+
+    fn addr(name: &str, index: u32, last: u8, prefix: u8) -> NetEntry {
+        NetEntry::Addr {
+            index,
+            name: name.into(),
+            family: libc::AF_INET as u16,
+            addr: vec![192, 168, 1, last],
+            prefix,
+        }
+    }
+
+    fn link(name: &str, index: u32, flags: u32) -> NetEntry {
+        NetEntry::Link {
+            index,
+            name: name.into(),
+            flags,
         }
     }
 
@@ -627,10 +883,27 @@ mod tests {
         Arc::new(Routes {
             value: Mutex::new(v),
             reads: AtomicUsize::new(0),
+            addrs: Mutex::new(Some(vec![
+                link("eth0", 2, LINK_FLAGS),
+                addr("eth0", 2, 20, 24),
+            ])),
         })
     }
 
+    fn test_cfg(termux: bool) -> Config {
+        Config {
+            quiet: Duration::from_millis(50),
+            max_wait: Duration::from_secs(10),
+            poll_unit: Duration::from_millis(5),
+            termux,
+        }
+    }
+
     fn watch(fail: bool, termux: bool, routes: Arc<Routes>) -> (NetWatch, Handles) {
+        watch_cfg(fail, test_cfg(termux), routes)
+    }
+
+    fn watch_cfg(fail: bool, cfg: Config, routes: Arc<Routes>) -> (NetWatch, Handles) {
         let h = Handles {
             opens: Arc::new(AtomicUsize::new(0)),
             live: Arc::new(AtomicUsize::new(0)),
@@ -641,11 +914,6 @@ mod tests {
             opens: Arc::clone(&h.opens),
             live: Arc::clone(&h.live),
             feed: Arc::clone(&h.feed),
-        };
-        let cfg = Config {
-            quiet: Duration::from_millis(50),
-            poll_unit: Duration::from_millis(5),
-            termux,
         };
         (NetWatch::new(cfg, Box::new(fake), routes), h)
     }
@@ -713,7 +981,8 @@ mod tests {
 
     #[tokio::test]
     async fn a_route_burst_is_one_event_to_every_subscriber() {
-        let (w, h) = watch(false, false, routes(Some(1)));
+        let r = routes(Some(1));
+        let (w, h) = watch(false, false, Arc::clone(&r));
         let carrier = w
             .subscribe(Consumer::Carrier {
                 termux_poll_min: 15,
@@ -721,6 +990,7 @@ mod tests {
             .unwrap();
         let mdns = w.subscribe(Consumer::Mdns).unwrap();
         let tx = h.sender();
+        *r.value.lock().unwrap() = Some(2); // the default route moved
         for _ in 0..20 {
             tx.send(()).await.unwrap();
             tokio::time::sleep(Duration::from_millis(2)).await;
@@ -730,9 +1000,125 @@ mod tests {
         assert_eq!(quiet_for(&carrier, 200).await, None, "one event per burst");
         assert_eq!(quiet_for(&mdns, 200).await, None);
         // a later, separate change is a second event
+        *r.value.lock().unwrap() = Some(3);
         tx.send(()).await.unwrap();
         assert_eq!(quiet_for(&carrier, 1_000).await, Some(NetEvent::Changed));
         assert_eq!(quiet_for(&mdns, 1_000).await, Some(NetEvent::Changed));
+    }
+
+    /// Row D4b: a datagram is a change only when what the consumers care about moved. Each
+    /// step is one burst; the fingerprint is the real one over the fake host's rows.
+    #[tokio::test]
+    async fn only_a_real_address_or_route_change_is_delivered() {
+        let r = routes(Some(1));
+        let (w, h) = watch(false, false, Arc::clone(&r));
+        let mdns = w.subscribe(Consumer::Mdns).unwrap();
+        let tx = h.sender();
+        let burst = |n: usize| {
+            let tx = tx.clone();
+            async move {
+                for _ in 0..n {
+                    tx.send(()).await.unwrap();
+                }
+            }
+        };
+        // a lifetime-only refresh (a DHCP renew, a Router Advertisement): RTM_NEWADDR for
+        // the same rows delivers nothing
+        burst(3).await;
+        assert_eq!(quiet_for(&mdns, 300).await, None, "a refresh is no change");
+        // an added address: one Changed
+        r.addrs
+            .lock()
+            .unwrap()
+            .as_mut()
+            .unwrap()
+            .push(addr("eth0", 2, 21, 24));
+        burst(2).await;
+        assert_eq!(quiet_for(&mdns, 1_000).await, Some(NetEvent::Changed));
+        assert_eq!(quiet_for(&mdns, 200).await, None);
+        // its refresh again: nothing
+        burst(1).await;
+        assert_eq!(quiet_for(&mdns, 300).await, None);
+        // the address removed: one Changed
+        r.addrs.lock().unwrap().as_mut().unwrap().pop();
+        burst(2).await;
+        assert_eq!(quiet_for(&mdns, 1_000).await, Some(NetEvent::Changed));
+        assert_eq!(quiet_for(&mdns, 200).await, None);
+        // a changed prefix length is a change too
+        *r.addrs
+            .lock()
+            .unwrap()
+            .as_mut()
+            .unwrap()
+            .last_mut()
+            .unwrap() = addr("eth0", 2, 20, 16);
+        burst(1).await;
+        assert_eq!(quiet_for(&mdns, 1_000).await, Some(NetEvent::Changed));
+        // the default route changed (the real route fingerprint over two tables)
+        let v4 = |gw: &str| {
+            format!(
+                "Iface\tDestination\tGateway \tFlags\tRefCnt\tUse\tMetric\tMask\t\tMTU\tWindow\tIRTT\n\
+                 eth0\t00000000\t{gw}\t0003\t0\t0\t100\t00000000\t0\t0\t0\n"
+            )
+        };
+        *r.value.lock().unwrap() = route_fingerprint(Some(&v4("0101A8C0")), None);
+        burst(1).await;
+        assert_eq!(quiet_for(&mdns, 1_000).await, Some(NetEvent::Changed));
+        *r.value.lock().unwrap() = route_fingerprint(Some(&v4("FE01A8C0")), None);
+        burst(2).await;
+        assert_eq!(quiet_for(&mdns, 1_000).await, Some(NetEvent::Changed));
+        assert_eq!(quiet_for(&mdns, 200).await, None);
+        // the link lost its carrier (IFF_RUNNING gone): a change
+        *r.addrs
+            .lock()
+            .unwrap()
+            .as_mut()
+            .unwrap()
+            .first_mut()
+            .unwrap() = link("eth0", 2, libc::IFF_UP as u32);
+        burst(1).await;
+        assert_eq!(quiet_for(&mdns, 1_000).await, Some(NetEvent::Changed));
+        // unreadable addresses: every burst counts (as before D4b), twice in a row
+        *r.addrs.lock().unwrap() = None;
+        burst(1).await;
+        assert_eq!(quiet_for(&mdns, 1_000).await, Some(NetEvent::Changed));
+        burst(1).await;
+        assert_eq!(quiet_for(&mdns, 1_000).await, Some(NetEvent::Changed));
+    }
+
+    /// Row D4b: a burst that never goes quiet for the debounce window is still checked within
+    /// the bound, and delivers when the fingerprint moved.
+    #[tokio::test]
+    async fn a_burst_that_never_goes_quiet_delivers_within_the_bound() {
+        let r = routes(Some(1));
+        let cfg = Config {
+            max_wait: Duration::from_millis(250),
+            ..test_cfg(false)
+        };
+        let (w, h) = watch_cfg(false, cfg, Arc::clone(&r));
+        let carrier = w
+            .subscribe(Consumer::Carrier {
+                termux_poll_min: 15,
+            })
+            .unwrap();
+        let tx = h.sender();
+        *r.value.lock().unwrap() = Some(2);
+        // a datagram every 10 ms (never 50 ms of quiet) for 800 ms
+        let feeder = tokio::spawn(async move {
+            for _ in 0..80 {
+                if tx.send(()).await.is_err() {
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        });
+        let start = tokio::time::Instant::now();
+        assert_eq!(quiet_for(&carrier, 600).await, Some(NetEvent::Changed));
+        assert!(start.elapsed() < Duration::from_millis(600));
+        assert!(!feeder.is_finished(), "delivered while the burst went on");
+        // the burst goes on with nothing moved: no second event
+        assert_eq!(quiet_for(&carrier, 300).await, None);
+        feeder.abort();
     }
 
     #[tokio::test]
@@ -887,7 +1273,100 @@ mod tests {
         assert_eq!(route_fingerprint(None, None), None);
         assert!(route_fingerprint(None, Some(v6a)).is_some());
         // the real tables read (or not) without a panic
-        let _ = ProcRoutes.fingerprint();
+        let _ = HostNet.routes();
+    }
+
+    #[test]
+    fn the_address_fingerprint_is_order_free_and_ignores_nothing_it_keeps() {
+        let a = vec![link("eth0", 2, LINK_FLAGS), addr("eth0", 2, 20, 24)];
+        let mut b = a.clone();
+        b.reverse();
+        assert_eq!(
+            address_fingerprint(&mut a.clone()),
+            address_fingerprint(&mut b)
+        );
+        for other in [
+            vec![link("eth0", 3, LINK_FLAGS), addr("eth0", 3, 20, 24)],
+            vec![link("eth0", 2, LINK_FLAGS), addr("eth0", 2, 21, 24)],
+            vec![link("eth0", 2, LINK_FLAGS), addr("eth0", 2, 20, 25)],
+            vec![link("eth0", 2, 0), addr("eth0", 2, 20, 24)],
+        ] {
+            assert_ne!(
+                address_fingerprint(&mut a.clone()),
+                address_fingerprint(&mut other.clone()),
+                "{other:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn this_host_s_interfaces_read_stably() {
+        // getifaddrs on the build host: two reads with nothing changed agree (a sandbox where
+        // it fails reads None, which the watch treats as "every burst counts")
+        match (HostNet.addresses(), HostNet.addresses()) {
+            (Some(x), Some(y)) => assert_eq!(x, y),
+            (None, None) => eprintln!("getifaddrs unavailable here"),
+            other => panic!("unstable read: {other:?}"),
+        }
+        if let Some(rows) = read_interfaces() {
+            assert!(rows.len() <= IFADDRS_MAX);
+            // loopback is always listed with its index and 127.0.0.1/8 when IPv4 is up
+            let lo = rows.iter().find_map(|r| match r {
+                NetEntry::Addr {
+                    name,
+                    addr,
+                    prefix,
+                    index,
+                    ..
+                } if name == "lo" && addr == &[127, 0, 0, 1] => Some((*prefix, *index)),
+                _ => None,
+            });
+            if let Some((prefix, index)) = lo {
+                assert_eq!(prefix, 8);
+                assert!(index > 0);
+            }
+        }
+    }
+
+    /// Row D4b (1): a poll restarted for a new period keeps the last reading as its baseline,
+    /// so a route change since the old task's last tick is still delivered, once.
+    #[tokio::test]
+    async fn a_poll_restart_keeps_the_last_fingerprint() {
+        let r = routes(Some(1));
+        let cfg = Config {
+            poll_unit: Duration::from_millis(20),
+            ..test_cfg(true)
+        };
+        let (w, _h) = watch_cfg(true, cfg, Arc::clone(&r));
+        let slow = w
+            .subscribe(Consumer::Carrier {
+                termux_poll_min: 12,
+            })
+            .unwrap();
+        assert_eq!(w.polling(), Some(Duration::from_millis(240)));
+        // the routes change before the old task's first tick...
+        *r.value.lock().unwrap() = Some(2);
+        // ...and a second carrier with a shorter period restarts the poll
+        let fast = w
+            .subscribe(Consumer::Carrier { termux_poll_min: 9 })
+            .unwrap();
+        assert_eq!(w.polling(), Some(Duration::from_millis(180)));
+        // the restarted task's first tick delivers one Poll to each carrier
+        assert_eq!(quiet_for(&fast, 1_000).await, Some(NetEvent::Poll));
+        assert_eq!(quiet_for(&slow, 100).await, Some(NetEvent::Poll));
+        assert_eq!(quiet_for(&fast, 400).await, None, "once");
+        // the slow carrier leaves: a restart again (back to 240 ms), nothing to deliver
+        drop(fast);
+        assert_eq!(w.polling(), Some(Duration::from_millis(240)));
+        assert_eq!(quiet_for(&slow, 600).await, None);
+        // the poll stops with the last carrier; a new one reads a fresh baseline
+        drop(slow);
+        assert_eq!(w.polling(), None);
+        *r.value.lock().unwrap() = Some(3);
+        let again = w
+            .subscribe(Consumer::Carrier { termux_poll_min: 9 })
+            .unwrap();
+        assert_eq!(quiet_for(&again, 500).await, None, "no stale baseline");
     }
 
     #[test]

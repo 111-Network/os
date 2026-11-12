@@ -1038,8 +1038,9 @@ async fn an_address_change_never_re_renders_rnsd() {
         | netlink::RTMGRP_IPV6_ROUTE;
     assert_eq!(transport::LINK_WATCH_GROUPS & addr_route, 0);
     assert_eq!(netwatch::GROUPS, netlink::RTMGRP_LINK | addr_route);
-    // and the kernel holds exactly that mask (a sandbox without netlink skips)
-    match netlink::NetlinkEvents::new(transport::LINK_WATCH_GROUPS) {
+    // the socket transport::start opens (the same function) holds exactly RTMGRP_LINK in
+    // the kernel (a sandbox that refuses the bind skips, with the reason)
+    match transport::link_watch_source() {
         Ok(ev) => assert_eq!(ev.groups().unwrap(), netlink::RTMGRP_LINK),
         Err(e) => eprintln!("netlink unavailable here ({e:#}): mask read skipped"),
     }
@@ -1052,24 +1053,14 @@ async fn an_address_change_never_re_renders_rnsd() {
     let cfg_path = config::config_path(&layout_at(dir.path()));
     let before = std::fs::read(&cfg_path).unwrap();
 
-    // the spine's instance, wired as transport::start wires it, on a link-only source
+    // the spine's instance, spawned by the function transport::start spawns it with, on a
+    // link-only scripted source
     let (link_tx, link_rx) = tokio::sync::mpsc::channel(8);
-    let spine_fires = Arc::new(std::sync::atomic::AtomicU32::new(0));
-    let spine_task = {
-        let spine = Arc::clone(&spine);
-        let fires = Arc::clone(&spine_fires);
-        tokio::spawn(netlink::debounced(
-            netlink::ScriptedEvents { rx: link_rx },
-            Duration::from_millis(50),
-            move || {
-                fires.fetch_add(1, Ordering::SeqCst);
-                let spine = Arc::clone(&spine);
-                tokio::spawn(async move {
-                    let _ = spine.on_link_change().await;
-                });
-            },
-        ))
-    };
+    let spine_task = transport::spawn_link_watch(
+        netlink::ScriptedEvents { rx: link_rx },
+        Arc::clone(&spine),
+        Duration::from_millis(50),
+    );
 
     // the second watch, its socket a scripted address/route source
     struct Scripted(Mutex<Option<tokio::sync::mpsc::Receiver<()>>>);
@@ -1080,25 +1071,32 @@ async fn an_address_change_never_re_renders_rnsd() {
             Ok(Box::new(netlink::ScriptedEvents { rx }))
         }
     }
-    struct NoRoutes;
-    impl netwatch::RouteRead for NoRoutes {
-        fn fingerprint(&self) -> Option<u64> {
-            None
+    /// The host: one address the renew changes (the new lease), the routes unchanged.
+    struct Host(Mutex<u64>);
+    impl netwatch::NetRead for Host {
+        fn routes(&self) -> Option<u64> {
+            Some(0)
+        }
+        fn addresses(&self) -> Option<u64> {
+            Some(*self.0.lock().unwrap())
         }
     }
+    let host = Arc::new(Host(Mutex::new(1)));
     let (addr_tx, addr_rx) = tokio::sync::mpsc::channel(64);
     let watch = NetWatch::new(
         netwatch::Config {
             quiet: Duration::from_millis(50),
+            max_wait: Duration::from_secs(10),
             poll_unit: Duration::from_millis(5),
             termux: false,
         },
         Box::new(Scripted(Mutex::new(Some(addr_rx)))),
-        Arc::new(NoRoutes),
+        Arc::clone(&host) as Arc<dyn netwatch::NetRead>,
     );
     let sub = watch.subscribe(Consumer::Mdns).unwrap();
 
-    // a DHCP renew: address and route updates in a burst
+    // a DHCP renew with a new lease: address and route updates in a burst
+    *host.0.lock().unwrap() = 2;
     for _ in 0..12 {
         addr_tx.send(()).await.unwrap();
     }
@@ -1107,12 +1105,10 @@ async fn an_address_change_never_re_renders_rnsd() {
         .expect("the second watch fires");
     assert_eq!(ev, NetEvent::Changed);
     tokio::time::sleep(Duration::from_millis(200)).await;
-    assert_eq!(
-        spine_fires.load(Ordering::SeqCst),
-        0,
-        "the spine never fired"
+    assert!(
+        take(&log).is_empty(),
+        "the spine never fired: no rnstatus call"
     );
-    assert!(take(&log).is_empty(), "no rnstatus call: rnsd untouched");
     assert_eq!(std::fs::read(&cfg_path).unwrap(), before, "no re-render");
 
     // a link change still takes the spine's path, as before
@@ -1123,8 +1119,8 @@ async fn an_address_change_never_re_renders_rnsd() {
         }
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
-    assert_eq!(spine_fires.load(Ordering::SeqCst), 1);
-    assert_eq!(take(&log), ["rnstatus --reload Auto Interface"]);
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert_eq!(take(&log), ["rnstatus --reload Auto Interface"], "one fire");
     drop(link_tx);
     let _ = spine_task.await;
     drop(sub);
