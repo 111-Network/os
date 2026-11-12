@@ -122,7 +122,16 @@ tiers without error, and every path named in either file exists (script it; past
 check. Under notes: the counts (seams by status, checks by tier and kind, fakes, known, unmapped) and every place where the tree differed
 from the matrix.` },
 
-  X3: { model: 'opus', effort: 'high', phase: 'Map, adapters, lint', brief: `TASK X3 (row "| X3 |"): the adapters of options.md section 3.4. Row X2 has LANDED the registry and its contract: read
+  X3: { model: 'opus', effort: 'high', phase: 'Map, adapters, lint', brief: `LEAD ADDENDUM (binding, read with the task below): X2b has LANDED on top of X2 (read adapters.py's contract docstring as it now is: a non-zero
+exit with no FAIL record always adds a FAIL unless the adapter set ctx.exit_declared; known applies only to adapter-parsed records). The catalog (X1,
+X1b) names one adapter beyond options.md 3.4: "exit77" (exit 0 PASS; exit 77 SKIPPED with the last "SKIP:" line of the log as its reason and
+exit_declared set; anything else FAIL with the tail): build it. A record a gate yields for a test that a unit covers carries check = that unit's
+id (so the unit's seams, rerun and the [[known]] patterns "*/<test fn>" apply): build the attribution from the gate's stage headers and the
+cargo "Running tests/<file>.rs" / "Running unittests src/lib.rs" lines, and say in your notes exactly which id format your libtest records use.
+Every adapter is tested against a REAL log: capture one from the tree's own gate or unit where it is cheap (a cargo unit of a small crate, one
+vitest file, the knowledge-base check), never only a hand-written sample.
+
+TASK X3 (row "| X3 |"): the adapters of options.md section 3.4. Row X2 has LANDED the registry and its contract: read
 ${ROOT}/verify/t111/adapters.py, record.py and schema.py first. Fill ${ROOT}/verify/t111/adapters.py with: libtest (cargo test output:
 the "Running <path>" lines name the binary, one record per test fn, the "---- <name> stdout ----" block gives the assertion (the
 "panicked at" line and its message) and the log line; ignored tests are SKIPPED "ignored"; a binary that did not finish is one FAIL),
@@ -243,6 +252,80 @@ CHECK: cd ${ROOT} && TMPDIR=${SP}/X2b python3 -I -B -m unittest discover -s veri
 not flake; other agents load this box, so a test that needs a quiet CPU is a defect of the test), python3 -I -B verify/run.py --help, py_compile
 of every file. If X4's or X1's files appear in verify/ while you work and one of THEIR tests fails, that is theirs: report it, do not fix it.
 Report per finding: fixed + the test that pins it, or why not.` },
+  X1b: { model: 'sonnet', effort: 'high', phase: 'Later rows', brief: `TASK X1b (row "| X1b |"): the review's findings on the seam map and the check catalog (X1 LANDED b847745: ${ROOT}/verify/seams.toml,
+${ROOT}/verify/checks.toml; read their header comments and ${ROOT}/verify/t111/schema.py first). The full review with file:line and scenarios is
+${SP}/results/X1-review.json if that file still exists; the list below is complete without it. You edit ONLY the two TOML files. Edit them in
+place (the generator script is gone); keep every comment that is still true. The lead's ruling on each finding:
+ 1 l1.node111.lib-relay's libtest filter "relay::" also matches dashboard::api_v1::relay (the chat relay) and relay::netwatch. RULING: the filter
+   is daemon::relay::settings:: in cmd and rerun; relay::netwatch gets its own unit (l1.node111.lib-netwatch, filter daemon::relay::netwatch::)
+   on L6-L7:netlink-gateway (D4 has landed: 71af200; netwatch.rs is built, gateway.rs is still a T0 stub, so that seam stays stub with a gap
+   that says so); say in the l1.node111.lib comment which unit owns which --lib records in a gate run.
+ 2 every multi-seam seams list and phases value is sorted alphabetically, but a record's sides, read_first and fake come from the FIRST seam.
+   RULING: the primary seam (the one whose files the check's assertions exercise) goes first in every check's seams and in every phase list;
+   never sort them; say so in the catalog's header comment. Decide each primary by reading the test or harness, not by its name.
+ 3 l7.g10-smoke (tier slow, a default tier) writes 7-relay/verify/logs/ntfy-smoke-<date>-stub.md into the tracked tree on every run, so a
+   default run could never be GREEN. RULING: until row X5 moves that log under the scratch dir, the check carries needs = ["x5-log-to-scratch"]
+   (no such tool exists: the runner reports it SKIPPED with that reason, which is the truth) and a comment naming X5; X5 removes the need.
+ 4 options.md 3.6: every Rust unit that reads contract.gen.ts requires l4.contract.fresh. RULING: add the requires to l1.node111.lib and to
+   l1.gate (and to any other reader you find by grep for contract.gen.ts under the crates).
+ 5 every [[known]] names check = the unit id, so in a gate run (records carry the gate's id unless the adapter rewrites it) none matches.
+   RULING: drop check from the [[known]] entries; the */<test fn> patterns are unique (verify by grep).
+ 6 l1.gates.musl-env, l1.gates.build-scripts and l1.linux-e2e use adapter okfail but do not speak its vocabulary. RULING: adapter = "exit" for the
+   first two; l1.linux-e2e and every other harness whose documented skip is "SKIP: ..." + exit 77 (grep the verify/ and scripts/ dirs for
+   "exit 77") gets adapter = "exit77" (row X3 builds it: exit 0 PASS, exit 77 SKIPPED with the last SKIP: line as its reason and the exit
+   declared, anything else FAIL with the tail). Re-read each okfail check's script and keep okfail only where the script really ends with a
+   "<GATE> GREEN" line and prints ok:/FAIL:/SKIPPED lines.
+ 7 the l4.ui.* vitest units lack the reporter flags of options.md 3.4. RULING: append "--reporter=default", "--reporter=json",
+   "--outputFile={scratch}/vitest.json" to each.
+ 8 five checks rebuild 4-interface/ui/dist with no common lock. RULING: lock = "ui-dist" on every check that builds or reads dist (l1.gate,
+   l4.ui, l4.budget, l4.smoke, l4.smoke3, l4.panel-lint and any other you find).
+ 9 two [[fake]] entries name the wrong side (L4-L6:transport-api, L1-L6:bridge-stubs). RULING: the fake names what it stands in for; fix as the
+   review says (the rnsd / rnstatus fake belongs with L1-L6:rnsd-child; for bridge-stubs side a is the bridge core and side b the StubAdapter).
+10 l1.gate timeout_s 3600 is below the file's own rule and CI's bound. RULING: 5400.
+11 59 cargo units lack needs = ["cargo"]. RULING: add it (and "bash", "pnpm", "python3" where the cmd starts with them).
+12 x.seams.lint runs without -B. RULING: "-I", "-B".
+13 agent111 has no --lib unit. RULING: add l3.agent111.lib (covered_by l3.gate) with the seams its in-crate tests prove (read the seven files).
+14 l1.gate nests the mesh111 check and the UI check, and lists layers [1,2,4,5,6,7], so --layer 5 pulls the 25-minute aggregate. RULING:
+   l1.gate.layers = the layers it owns (1 plus those of its own static stages); its comment states which suites a full run runs twice and why
+   (CI parity), so nobody "fixes" it by dropping a gate.
+15 l3.gate ends with cargo check --target x86_64-unknown-linux-musl. The lead installed that rust-std target on this box today, so it passes
+   here; add needs = ["cargo"] only, and say in the comment that a box without the target fails that last stage.
+ALSO: the review's coverage gaps: audit read_first and the symptom of each of the 103 seams against the two sides' files (one pass; fix what is
+wrong, list what you changed); check each [unmapped] reason against its file. The seam id L5/7-L9:fix-sharing-delegation is right (matrix.md was
+corrected). RUN: python3 -I -B verify/run.py --lint (LINT GREEN; the stub-marker and fake-parity notes are expected until X4b and N-rows),
+--list --tier fast,slow,ns, --matrix (totals R 42 / I 15 / F 13 / C 9 / N 10 unless you promote a seam, then say which and why), --explain on
+five seams, and the unit suite (python3 -I -B -m unittest discover -s verify/tests -t .). Execute nothing from the catalog.` },
+  X4b: { model: 'sonnet', effort: 'high', phase: 'Later rows', brief: `TASK X4b (row "| X4b |"): the review's findings on the map commands (X4 LANDED d990310: ${ROOT}/verify/t111/{lint,matrix,changed,explain}.py
+and their tests; X2b has LANDED: read cli.py as it now is). The full review is ${SP}/results/X4-review.json if it still exists; the list below
+is complete without it. Each fix gets a test that fails without it. The lead's rulings:
+ 1 rule "files" resolves a spec section only against '#' heading lines; the real specs mark many subsections with bold leads ("**9.4 The KB**",
+   "- **Probation ...**", "**Binds:**"). RULING: a line that starts (optionally after "- ") with "**N.M" is a section anchor, and a section name
+   also matches a bold lead-in up to its closing "**" or ":"; add these real shapes to the tests (copy three real lines from 7-relay/README.md
+   and 1-bootstrap/README.md).
+ 2 the pi-floor detector misses the usual ways shell and Python name the root verify/ (a quoted variable before the slash, the bare directory,
+   ../verify, os.path.join parts, a $(...) prefix), and passes silently when a PI_FLOOR_PATHS entry no longer exists. RULING: match "verify" as a
+   whole path part in those forms, and FAIL when a PI_FLOOR_PATHS entry is missing from the tree.
+ 3 a cargo test with --lib / --doc / --bin(s) / --example(s) and no --test(s) claims every tests/*.rs of its package, so rule "unclaimed" goes
+   blind for that package. RULING: such a command claims no tests/*.rs file. (The catalog has units for each test binary; X1b keeps them.)
+ 4 matrix.py reads args.results but the parser has no --results. RULING: add --results FILE to the commands group in cli.py (your one line
+   there) with an end-to-end test through run.py.
+ 5 no rule checks [[known]]. RULING: fail when known.check (if present) names no check, when a test pattern's check prefix names no check, or
+   when the file part of known.source does not exist.
+ 6 rule "unclaimed" (fnmatch: * crosses /) and rule "files" (Path.glob: it does not) read the same glob differently. RULING: one matcher for
+   both, with * as one path segment and ** crossing segments; update the catalog's reading in the docstring.
+ 7 --changed misses the old path of a rename. RULING: git diff --no-renames.
+ 8 a check id with no l<N>. or x. prefix skips the layer half of rule "ids". RULING: such an id fails the rule.
+ 9 test_changed's git helper passes GIT_* through. RULING: strip GIT_* as changed._git does.
+10 (from X1's author) stub-marker warns for every side file of a stub seam that has no T0 marker, so the built side of a mixed seam is told to
+   promote the row. RULING: warn only when NO side file of the seam carries the marker.
+11 (from X1's author) a cmd token with glob characters (test_*.py) is read as a missing file. RULING: a token with * ? [ is not a path.
+12 gaps to close: rule "files" also checks script paths inside sh -c "..." style tokens when the first word is a path that exists or looks like
+   one (ends in .sh/.py); UNCLAIMED_GLOBS also sees one level deeper under */verify/ (6-transport/verify/spine/node.sh and the like: X1b will
+   map or [unmapped] them: run the lint on the real map and report what it now says, do not edit the TOML files); --matrix says "last run was
+   a selection of N checks" when the newest run under --scratch did not run every check.
+FILES: ${ROOT}/verify/t111/{lint,matrix,changed,explain}.py, the one parser line in cli.py, ${ROOT}/verify/tests/test_{lint,matrix,changed,explain}.py,
+${ROOT}/verify/tests/fixtures/lint/**. CHECK: the unit suite (python3 -I -B -m unittest discover -s verify/tests -t .), then on the real map:
+--lint, --matrix, --changed HEAD~5, --explain on two seams and one check; report the lint's output on the real map verbatim.` },
 }
 
 // Later rows carry no long brief here: the board row plus options.md are the brief (the lead passes args.only and, when a row needs
