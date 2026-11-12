@@ -4,29 +4,32 @@ Run::
 
     python3 -I verify/run.py --scratch DIR [--layer 3,4] [--seam ID] [--check ID] [--tier fast,slow,ns] [--gate]
                              [--require] [--keep] [--cargo-slots 1|2] [--jobs N] [--offline] [--ci]
+                             [--shared-box] [--lock-wait S] [--log-cap MB]
 
 Commands that run no check: ``--list`` (the plan: tiers, locks, est. time), ``--lint``, ``--matrix``,
 ``--changed [REF]``, ``--explain ID``. The last four live in ``t111.lint``, ``t111.matrix``, ``t111.changed`` and
 ``t111.explain`` (row X4); each exposes ``main(args, root, map_dir) -> int`` and, until it exists, the command prints
 ``not built yet (row X4)`` and exits 2.
 
-Exit codes: 0 green (also green with SKIPPED), 1 red, 2 usage error (bad flags, an unknown id, a map that does not
-load, a selection that matches nothing).
+Exit codes: 0 green (also green with SKIPPED), 1 red (also every run a signal stopped: SIGINT, SIGTERM, SIGHUP; and a
+runner error), 2 usage error (bad flags, an unknown id, a map that does not load, a selection that matches nothing).
 """
 
 from __future__ import annotations
 
 import argparse
 import importlib
+import os
 import sys
 from pathlib import Path
 from typing import Sequence
 
 from . import engine, locks as locks_mod
 from .record import read_results
+from .run import LOG_CAP_MB
 from .schema import TIERS, SchemaError, load_map
 from .select import Plan, Selection, SelectionError, select
-from .summary import EXIT_USAGE, duration
+from .summary import EXIT_RED, EXIT_USAGE, duration
 
 VERIFY_DIR = Path(__file__).resolve().parent.parent
 """``verify/``: the default map dir."""
@@ -42,13 +45,24 @@ def _csv(value: str) -> list[str]:
     return [part.strip() for part in value.split(",") if part.strip()]
 
 
+def _positive(value: str) -> float:
+    try:
+        number = float(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"not a number: {value!r}") from None
+    if not number > 0:
+        raise argparse.ArgumentTypeError(f"must be > 0: {value!r}")
+    return number
+
+
 def parser() -> argparse.ArgumentParser:
     """The argument parser (every flag of options.md §3.1, plus ``--jobs``)."""
     p = argparse.ArgumentParser(
         prog="verify/run.py",
         description="Run any slice of the repo's gates and harnesses under the box rules; one JSON record per result "
                     "in <scratch>/<run-id>/results.jsonl, a summary on stdout.",
-        epilog="Exit: 0 VERIFY GREEN (also with SKIPPED), 1 VERIFY RED, 2 usage error.")
+        epilog="Exit: 0 VERIFY GREEN (also with SKIPPED), 1 VERIFY RED (also a run stopped by SIGINT, SIGTERM or "
+               "SIGHUP: its checks are killed and its leftovers swept), 2 usage error.")
     sel = p.add_argument_group("selection (default: every check of tiers fast,slow)")
     sel.add_argument("--layer", action="append", default=[], metavar="N[,N]",
                      help="checks that touch these layers (0..9, X); a full run of that slice")
@@ -70,6 +84,16 @@ def parser() -> argparse.ArgumentParser:
     run.add_argument("--offline", action="store_true",
                      help="checks that need the package index are SKIPPED 'offline' up front")
     run.add_argument("--ci", action="store_true", help="CI mode: no progress lines on stderr")
+    run.add_argument("--shared-box", action="store_true",
+                     help="use beside other writers (agents editing the tree or starting servers): a tree change or a "
+                          "look-alike process the run cannot prove its own is SKIPPED 'not attributed', not FAIL "
+                          "(also T111_SHARED_BOX=1)")
+    run.add_argument("--lock-wait", type=_positive, default=locks_mod.LOCK_WAIT_S, metavar="S",
+                     help="seconds a check waits for a lock (another check or run holds it) before it FAILs naming the holder "
+                          f"(default {locks_mod.LOCK_WAIT_S:g})")
+    run.add_argument("--log-cap", type=_positive, default=LOG_CAP_MB, metavar="MB",
+                     help=f"keep at most MB of a check's output in its out.log; the rest is read and dropped, and the "
+                          f"record says 'log cut' (default {LOG_CAP_MB:g})")
     cmd = p.add_argument_group("commands that run no check")
     cmd.add_argument("--list", action="store_true", help="print the plan (checks, tiers, locks, est. time)")
     cmd.add_argument("--lint", action="store_true", help="hold the seam map to the tree (row X4)")
@@ -208,8 +232,10 @@ def main(argv: Sequence[str] | None = None) -> int:
             ports = tuple(int(x) for x in _csv(args.ns_ports))
         except ValueError:
             p.error("--ns-ports takes a comma list of port numbers")
+    shared = args.shared_box or os.environ.get("T111_SHARED_BOX", "") == "1"
     cfg = engine.Config(root=root, scratch=scratch, seam_map=seam_map, plan=plan, cargo_slots=args.cargo_slots,
                         jobs=args.jobs, keep=args.keep, offline=args.offline, require=args.require, ci=args.ci,
+                        shared_box=shared, lock_wait_s=args.lock_wait, log_cap_mb=args.log_cap,
                         argv=["verify/run.py", *raw])
     if args.kill_grace is not None:
         cfg.kill_grace_s = args.kill_grace
@@ -217,6 +243,6 @@ def main(argv: Sequence[str] | None = None) -> int:
         cfg.ns_ports = ports
     try:
         return engine.execute(cfg).exit_code
-    except KeyboardInterrupt:
-        print("verify/run.py: interrupted; running checks were killed", file=sys.stderr)
-        return 130
+    except KeyboardInterrupt:  # Ctrl-C before the engine took over the stop signals: nothing ran
+        engine.interrupted_before_start(None, "SIGINT")
+        return EXIT_RED

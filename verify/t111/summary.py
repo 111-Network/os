@@ -10,7 +10,8 @@ The form::
     VERIFY RED (2 FAIL)
 
 One line of counts (then, when the map has fakes checked against nothing, one ``note:`` line with their count, the
-reminder §3.5 asks every run to repeat), one block per FAIL, one line per SKIPPED, and the last line:
+reminder §3.5 asks every run to repeat, and one ``note:`` line per dead run whose leftovers the start-of-run sweep
+killed), one block per FAIL, one line per SKIPPED, and the last line:
 ``VERIFY GREEN`` (exit 0), ``VERIFY GREEN (n SKIPPED — not a full run)`` (exit 0) or ``VERIFY RED (n FAIL)`` (exit 1).
 ``--require`` has already turned every SKIPPED into FAIL before this module counts. A usage error exits 2
 (``EXIT_USAGE``).
@@ -18,9 +19,14 @@ reminder §3.5 asks every run to repeat), one block per FAIL, one line per SKIPP
 
 from __future__ import annotations
 
+import re
 from typing import Iterable
 
-from .record import Record
+from .record import Record, safe_text
+
+ERROR_LIKE = re.compile(r"(?i)(\berr(or)?\b|\bfail|\bpanic|\bassert|exception|traceback|\bfatal\b|\babort|\bnot ok\b|"
+                        r"\bdenied\b|\brefused\b|\btimed? ?out\b|\bunexpected\b|\bmismatch|✗|✘)")
+"""A line that looks like an error (the headline prefers the last such line of the assertion)."""
 
 EXIT_GREEN = 0
 EXIT_RED = 1
@@ -43,12 +49,22 @@ def layer_tag(layers: Iterable[object]) -> str:
     return "[" + ("↔".join(names) if names else "-") + "]"
 
 
+def key_line(text: str | None) -> str | None:
+    """The line of ``text`` a headline quotes: the last non-empty line that looks like an error, else the last
+    non-empty line (None for no text)."""
+    lines = [line.strip() for line in (text or "").splitlines() if line.strip()]
+    if not lines:
+        return None
+    errors = [line for line in lines if ERROR_LIKE.search(line)]
+    return errors[-1] if errors else lines[-1]
+
+
 def headline(rec: Record) -> str:
-    """The one line a FAIL block opens with: the reason and the assertion's last line, or the assertion's first."""
-    lines = [line.strip() for line in (rec.assertion or "").splitlines() if line.strip()]
+    """The one line a FAIL block opens with: the reason, then the assertion's key line (``key_line``)."""
+    line = key_line(rec.assertion)
     if rec.reason:
-        return f"{rec.reason}: {lines[-1]}" if lines and lines[-1] != rec.reason else rec.reason
-    return lines[0] if lines else "(no assertion text)"
+        return f"{rec.reason}: {line}" if line and line != rec.reason else rec.reason
+    return line or "(no assertion text)"
 
 
 def fail_block(rec: Record) -> list[str]:
@@ -89,8 +105,9 @@ def last_line(n_fail: int, n_skipped: int) -> tuple[str, int]:
 
 
 def render(records: list[Record], *, n_checks: int, tiers: Iterable[str], duration_s: float, results: str,
-           parity_none: int = 0) -> tuple[str, int]:
-    """The summary text (ending in a newline) and the exit code."""
+           parity_none: int = 0, notes: Iterable[str] = ()) -> tuple[str, int]:
+    """The summary text (ending in a newline; ``safe_text``, so printing it never raises) and the exit code.
+    ``notes`` are extra ``note: ...`` lines after the counts."""
     n_pass = sum(1 for r in records if r.status == "PASS")
     n_fail = sum(1 for r in records if r.status == "FAIL")
     n_skip = sum(1 for r in records if r.status == "SKIPPED")
@@ -98,6 +115,7 @@ def render(records: list[Record], *, n_checks: int, tiers: Iterable[str], durati
              f"{duration(duration_s)} — {results}"]
     if parity_none:
         lines.append(f"note: {parity_none} fake(s) checked against nothing they mirror (parity = \"none\")")
+    lines.extend(notes)
     for rec in records:
         if rec.status == "FAIL":
             lines.extend(fail_block(rec))
@@ -107,4 +125,4 @@ def render(records: list[Record], *, n_checks: int, tiers: Iterable[str], durati
             lines.append(f"SKIPPED {seam} {rec.id}: {rec.reason}")
     closing, code = last_line(n_fail, n_skip)
     lines.append(closing)
-    return "\n".join(lines) + "\n", code
+    return safe_text("\n".join(lines) + "\n"), code

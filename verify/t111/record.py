@@ -6,8 +6,21 @@ record per result, one JSON object per line. ``status`` is only PASS, FAIL or SK
 
 An adapter (``t111.adapters``) returns bare ``Record`` objects (id, status, reason, assertion, log_line, maybe phase,
 seams, after, rerun, test). ``enrich`` fills the rest from the map: the layers, the spec, the two sides, ``read_first``,
-the fake, the strength, the tier, the rerun command and its cost. ``mark_after`` adds the cascade link, ``apply_known``
-the ``[[known]]`` rule (F7) and ``apply_require`` the ``--require`` rule.
+the fake, the strength, the tier, the rerun command and its cost. ``apply_known`` applies the ``[[known]]`` rule (F7),
+``apply_require`` the ``--require`` rule and ``mark_after`` the cascade link, in that order (the engine's ``finish``).
+
+``[[known]]`` applies only to a result an adapter parsed from a test's own output: a record the engine makes (a skip
+before the start, a lock wait, a timeout, ``could not start``, ``exit N but no failing result was parsed``, an
+interrupt, a runner error) carries ``engine = True`` from its creation, and no ``hygiene/...`` record is ever eligible.
+
+The rerun command is one a person can paste: a template's tokens (``{id}``, ``{test}``, ``{check}``, ``{root}``,
+``{scratch}``, ``{tmp}``, ``{run}``) are substituted shell-quoted (so a template never quotes a token itself); the
+default (the check's own cmd) renders the cmd's tokens the same way and puts the check's ``env`` in front as
+``KEY=value``. ``{scratch}``/``{tmp}`` become the kept scratch under ``--keep``, else a fresh dir the text makes with
+``mktemp -d "${TMPDIR:-/tmp}/t111-rerun.XXXXXX"``.
+
+Nothing written can raise on its text: ``results.jsonl`` is written with ``errors="backslashreplace"`` (a lone
+surrogate from an undecodable file name becomes ``\\udcff``), and ``safe_text`` does the same for the summary.
 
 ``read_first`` follows one rule: a check against a fake (strength F with a ``[[fake]]`` on the seam) points at the side
 under test, the one the fake does not mirror; every other failure points at the seam's ``read_first`` (the producer of
@@ -18,6 +31,7 @@ from __future__ import annotations
 
 import fnmatch
 import json
+import re
 import shlex
 import threading
 from dataclasses import dataclass, field
@@ -51,6 +65,7 @@ class Record:
     - ``rerun``: set by an adapter for a single-test command; else rendered from the check's template.
     - ``test``: the test name an adapter parsed (fills ``{test}`` in the rerun template; not written).
     - ``check``: the catalog check the record belongs to; an adapter of a gate may set a covered unit's id here.
+    - ``engine``: True for a record the engine made (never eligible for ``[[known]]``); not written.
     """
 
     id: str
@@ -75,6 +90,7 @@ class Record:
     strength: str | None = None
     tier: str | None = None
     duration_s: float | None = None
+    engine: bool = False
 
     def to_json(self) -> dict[str, Any]:
         """The JSON object of the record, keys in the order of options.md §3.3."""
@@ -124,13 +140,92 @@ def render(template: str, values: Mapping[str, str | None]) -> str:
 
 
 def default_rerun(check: Check) -> str:
-    """The rerun command when the check has no template: the cmd itself, from its cwd."""
+    """The rerun command when the check has no template: the cmd itself, from its cwd (tokens left as written; the
+    form ``--explain`` prints; a run's records use ``rerun_command``)."""
     cmd = " ".join(shlex.quote(part) for part in check.cmd)
     return cmd if check.cwd in ("", ".") else f"(cd {shlex.quote(check.cwd)} && {cmd})"
 
 
-def enrich(rec: Record, check: Check, seam_map: SeamMap, *, root: Path | None = None) -> Record:
-    """Fill every map-derived field of ``rec`` from ``check`` (or the unit an adapter named in ``rec.check``)."""
+RERUN_VAR = "T111_RERUN"
+"""The shell variable a rerun text sets to its fresh scratch dir."""
+
+RERUN_FRESH = f'{RERUN_VAR}="$(mktemp -d "${{TMPDIR:-/tmp}}/t111-rerun.XXXXXX")" && mkdir -p "${RERUN_VAR}/tmp" && '
+"""The prefix of a rerun that needs a scratch dir and has none kept: a fresh one under ``$TMPDIR``."""
+
+_TOKEN_RE = re.compile(r"\{(id|test|check|root|scratch|tmp|run)\}")
+
+
+@dataclass(frozen=True)
+class RerunPaths:
+    """Where a rerun points its tokens: the repo root, the run dir, and the check's kept scratch (None: a fresh one)."""
+
+    root: Path
+    run: Path
+    scratch: Path | None = None
+
+
+def _quoted_tokens(where: RerunPaths, values: Mapping[str, str | None]) -> dict[str, str]:
+    out = {key: shlex.quote(value) for key, value in values.items() if value is not None}
+    out["root"] = shlex.quote(str(where.root))
+    out["run"] = shlex.quote(str(where.run))
+    if where.scratch is not None:
+        out["scratch"] = shlex.quote(str(where.scratch))
+        out["tmp"] = shlex.quote(str(where.scratch / "tmp"))
+    else:
+        out["scratch"] = f'"${RERUN_VAR}"'
+        out["tmp"] = f'"${RERUN_VAR}/tmp"'
+    return out
+
+
+def _shell_word(text: str, tokens: Mapping[str, str]) -> str:
+    """One shell word: the literal parts of ``text`` quoted, each known token replaced by its quoted value."""
+    parts: list[str] = []
+    pos = 0
+    for match in _TOKEN_RE.finditer(text):
+        value = tokens.get(match.group(1))
+        if value is None:
+            continue
+        if match.start() > pos:
+            parts.append(shlex.quote(text[pos:match.start()]))
+        parts.append(value)
+        pos = match.end()
+    if pos < len(text) or not parts:
+        parts.append(shlex.quote(text[pos:]))
+    return "".join(parts)
+
+
+def _template(text: str, tokens: Mapping[str, str]) -> str:
+    """A rerun template with each known token replaced by its quoted value (unknown or unset ones stay)."""
+    return _TOKEN_RE.sub(lambda m: tokens.get(m.group(1), m.group(0)), text)
+
+
+def _needs_fresh(texts: Iterable[str], where: RerunPaths) -> bool:
+    if where.scratch is not None:
+        return False
+    return any(m.group(1) in ("scratch", "tmp") for text in texts for m in _TOKEN_RE.finditer(text))
+
+
+def rerun_command(check: Check, where: RerunPaths, values: Mapping[str, str | None] | None = None) -> str:
+    """The pasteable rerun of a record of ``check``: its template, or its cmd with ``env`` as ``KEY=value`` prefixes,
+    every substituted value shell-quoted (``values``: ``id``, ``test``, ``check``)."""
+    tokens = _quoted_tokens(where, values or {})
+    if check.rerun:
+        fresh = RERUN_FRESH if _needs_fresh([check.rerun], where) else ""
+        return fresh + _template(check.rerun, tokens)
+    words = [f"{key}={_shell_word(value, tokens)}" for key, value in check.env.items()]
+    words += [_shell_word(part, tokens) for part in check.cmd]
+    cmd = " ".join(words)
+    if check.cwd not in ("", "."):
+        cmd = f"(cd {shlex.quote(check.cwd)} && {cmd})"
+    fresh = RERUN_FRESH if _needs_fresh([*check.cmd, *check.env.values()], where) else ""
+    return fresh + cmd
+
+
+def enrich(rec: Record, check: Check, seam_map: SeamMap, *, root: Path | None = None,
+           where: RerunPaths | None = None) -> Record:
+    """Fill every map-derived field of ``rec`` from ``check`` (or the unit an adapter named in ``rec.check``).
+
+    With ``where`` the rerun is ``rerun_command`` (pasteable); without it, the template rendered as written."""
     owner = check
     if rec.check and rec.check != check.id:
         unit = seam_map.check(rec.check)
@@ -142,9 +237,12 @@ def enrich(rec: Record, check: Check, seam_map: SeamMap, *, root: Path | None = 
     rec.tier = rec.tier or owner.tier
     rec.strength = rec.strength or owner.strength
     if rec.rerun is None:
-        template = owner.rerun or default_rerun(owner)
-        rec.rerun = render(template, {"id": rec.id, "test": rec.test, "check": owner.id,
-                                      "root": str(root) if root else None})
+        values = {"id": rec.id, "test": rec.test, "check": owner.id}
+        if where is not None:
+            rec.rerun = rerun_command(owner, where, values)
+        else:
+            template = owner.rerun or default_rerun(owner)
+            rec.rerun = render(template, {**values, "root": str(root) if root else None})
     if rec.rerun_cost is None:
         rec.rerun_cost = owner.rerun_cost or owner.tier
     layers: list[Any] = list(owner.layers)
@@ -178,7 +276,9 @@ def enrich(rec: Record, check: Check, seam_map: SeamMap, *, root: Path | None = 
 
 
 def mark_after(records: Iterable[Record]) -> None:
-    """Give every FAIL after the first FAIL of the same check ``after = <first FAIL id>`` (unless an adapter set it)."""
+    """Give every FAIL after the first FAIL of the same check ``after = <first FAIL id>`` (unless an adapter set it).
+
+    Run it after ``apply_known``: only records that are still FAIL count, so ``after`` never points at a SKIPPED."""
     first: dict[str, str] = {}
     for rec in records:
         if rec.status != "FAIL" or rec.id.startswith("hygiene/"):
@@ -202,7 +302,11 @@ def known_condition_holds(condition: str, facts: Mapping[str, bool]) -> bool:
 
 
 def apply_known(rec: Record, known: Iterable[Known], facts: Mapping[str, bool]) -> Record:
-    """The F7 rule: a matching FAIL (``fails``) or PASS (``vacuous``) under a holding condition becomes SKIPPED."""
+    """The F7 rule: a matching FAIL (``fails``) or PASS (``vacuous``) under a holding condition becomes SKIPPED.
+
+    Only an adapter's parsed result is eligible: an engine-made record (``engine``) or a ``hygiene/`` one never is."""
+    if rec.engine or rec.id.startswith("hygiene/"):
+        return rec
     for entry in known:
         if entry.check and entry.check != rec.check:
             continue
@@ -228,17 +332,27 @@ def apply_require(rec: Record) -> Record:
     return rec
 
 
+def safe_text(text: str) -> str:
+    """``text`` with anything UTF-8 cannot encode (a lone surrogate) as a backslash escape: printable, never raising."""
+    return text.encode("utf-8", "backslashreplace").decode("utf-8")
+
+
 class ResultsWriter:
-    """Appends JSON lines to ``results.jsonl``, one write and flush per record, safe across worker threads."""
+    """Appends JSON lines to ``results.jsonl``, one write and flush per record, safe across worker threads.
+
+    No text can make it raise: the file is written with ``errors="backslashreplace"`` and a value JSON cannot hold is
+    written as its ``str``. A write after ``close`` is dropped (a worker the run stopped waiting for)."""
 
     def __init__(self, path: Path):
         self.path = path
         self._lock = threading.Lock()
-        self._fh = path.open("a", encoding="utf-8")
+        self._fh = path.open("a", encoding="utf-8", errors="backslashreplace")
 
     def write(self, obj: Mapping[str, Any]) -> None:
-        line = json.dumps(obj, ensure_ascii=False, sort_keys=False) + "\n"
+        line = json.dumps(obj, ensure_ascii=False, sort_keys=False, default=str) + "\n"
         with self._lock:
+            if self._fh.closed:
+                return
             self._fh.write(line)
             self._fh.flush()
 

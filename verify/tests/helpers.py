@@ -37,6 +37,14 @@ FX_SCRIPTS: dict[str, str] = {
     "stamp.sh": ("python3 -I fx/stamp.py \"$EVENTS\" start \"$T111_CHECK\"\nsleep 0.4\n"
                  "python3 -I fx/stamp.py \"$EVENTS\" end \"$T111_CHECK\"\n"),
     "stamp.py": STAMP_PY,
+    # X2b fixtures
+    "quickfail.sh": "echo 'error: quick failure' >&2\nsleep 0.2\nexit 3\n",
+    "long.sh": ("setsid sleep 302 >/dev/null 2>&1 &\nsleep 303 >/dev/null 2>&1 &\necho 'long: started'\n"
+                "sleep 60\necho 'never printed'\n"),
+    "gate.sh": ("echo 'long: waiting for the go file'\ni=0\nwhile [ ! -e \"$T111_GO\" ] && [ $i -lt 600 ]; do\n"
+                "  sleep 0.05\n  i=$((i + 1))\ndone\necho 'long: go'\n"),
+    "big.sh": "head -c 3000000 /dev/zero | tr '\\0' 'x'\necho\necho 'big: the end'\n",
+    "badname.sh": "printf 'x' > \"$(printf 'bad-\\377.txt')\"\necho 'wrote a file whose name is not UTF-8'\n",
 }
 
 
@@ -59,6 +67,7 @@ class Sandbox:
     """A temp dir with a git tree of fake checks, a scratch dir and a lock dir."""
 
     def __init__(self, test: unittest.TestCase):
+        self.extra_env: dict[str, str] = {}
         self.base = Path(tempfile.mkdtemp(prefix="t111-test-"))
         test.addCleanup(shutil.rmtree, self.base, True)
         self.tree = self.base / "tree"
@@ -77,8 +86,10 @@ class Sandbox:
         env = dict(os.environ)
         env["T111_LOCKS"] = str(self.locks)
         env["EVENTS"] = str(self.events)
-        for key in ("T111_RUN", "T111_CHECK", "T111_SCRATCH", "T111_HELPER", "T111_RESULTS"):
+        for key in ("T111_RUN", "T111_CHECK", "T111_SCRATCH", "T111_HELPER", "T111_RESULTS", "T111_RUNNER_PID",
+                    "T111_RUNNER_START", "T111_SHARED_BOX"):
             env.pop(key, None)
+        env.update(self.extra_env)
         return env
 
     def argv(self, *args: str, scratch: bool = True) -> list[str]:
@@ -111,6 +122,28 @@ class Sandbox:
         shutil.copytree(FIXTURE_MAP, dest)
         self.map_dir = dest
         return dest
+
+    def add_checks(self, toml: str) -> Path:
+        """Append ``[[check]]`` tables to a copy of the fixture map (made on the first call)."""
+        mapdir = self.map_dir if self.map_dir != FIXTURE_MAP else self.copy_map()
+        with (mapdir / "checks.toml").open("a", encoding="utf-8") as fh:
+            fh.write("\n" + toml)
+        return mapdir
+
+
+def unit_toml(check_id: str, cmd: list[str], **fields: object) -> str:
+    """One ``[[check]]`` table of a fast unit on L1-L2:fx-alpha (``fields`` add or override keys)."""
+    import json
+    base: dict[str, object] = {"id": check_id, "kind": "unit", "cmd": cmd, "tier": "fast", "layers": [1],
+                               "seams": ["L1-L2:fx-alpha"], "strength": "I", "timeout_s": 30}
+    base.update(fields)
+    def value(v: object) -> str:
+        if isinstance(v, dict):
+            return "{ " + ", ".join(f"{json.dumps(k)} = {json.dumps(x)}" for k, x in v.items()) + " }"
+        return json.dumps(v)
+
+    lines = ["[[check]]"] + [f"{key} = {value(v)}" for key, v in base.items()]
+    return "\n".join(lines) + "\n"
 
 
 def by_id(records: list[dict]) -> dict[str, dict]:

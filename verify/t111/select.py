@@ -11,7 +11,9 @@ Two shapes of run:
   unit covers a seam, within the tiers (default ``fast,slow``). With ``--gate`` each unit is replaced by its gate.
 
 Then, in every shape: each selected check pulls in its ``requires`` (transitively), and the plan is ordered fast, then
-slow, then ns, catalog order within a tier, with every prerequisite before the checks that require it.
+slow, then ns, catalog order within a tier, with every prerequisite before the checks that require it. A required unit
+whose covering gate (``covered_by``) is in the plan is not pulled in (its suite would run twice): the requirement is
+then on that gate, whose status decides (``Plan.via`` maps the unit to the gate; a note says so).
 """
 
 from __future__ import annotations
@@ -44,13 +46,19 @@ class Selection:
 @dataclass
 class Plan:
     """The checks to run in order; ``pulled`` names prerequisites added by ``requires``; ``notes`` explain choices
-    (for ``--list``), ``omitted`` names checks that cover the selection but sit in a tier not asked for."""
+    (for ``--list``), ``omitted`` names checks that cover the selection but sit in a tier not asked for, ``via`` maps a
+    required unit that is not in the plan to the covering gate that stands in for it."""
 
     checks: list[Check]
     tiers: tuple[str, ...]
     pulled: set[str] = field(default_factory=set)
     notes: list[str] = field(default_factory=list)
     omitted: list[str] = field(default_factory=list)
+    via: dict[str, str] = field(default_factory=dict)
+
+    def requirement(self, check_id: str) -> str:
+        """The plan check whose status decides a requirement on ``check_id`` (the covering gate, or itself)."""
+        return self.via.get(check_id, check_id)
 
 
 def _layer_key(layer: object) -> str:
@@ -144,25 +152,35 @@ def select(seam_map: SeamMap, sel: Selection) -> Plan:
                 add(check.id)
 
     pulled: set[str] = set()
+    via: dict[str, str] = {}
     queue = list(chosen)
     while queue:
         current = by_id[queue.pop(0)]
         for req in current.requires:
-            if req not in chosen:
-                chosen.append(req)
-                pulled.add(req)
-                queue.append(req)
-                notes.append(f"{req}: pulled in, {current.id} requires it")
+            if req in chosen or req in via:
+                continue
+            gate = gate_of(by_id[req])
+            if gate is not None and gate.id in chosen and gate.id != current.id:
+                via[req] = gate.id
+                notes.append(f"{req}: covered by {gate.id}, which is in the plan; {current.id}'s requirement is on "
+                             f"{gate.id}")
+                continue
+            chosen.append(req)
+            pulled.add(req)
+            queue.append(req)
+            notes.append(f"{req}: pulled in, {current.id} requires it")
 
     if not chosen:
         raise SelectionError("the selection matches no check" + (f" ({'; '.join(notes)})" if notes else ""))
     if sel.targeted and not explicit_tiers:  # an explicit --check may sit in any tier: name the tiers it runs
         tiers = tuple(t for t in TIERS if any(by_id[i].tier == t for i in chosen))
-    return Plan(_order([by_id[i] for i in chosen], seam_map), tiers, pulled, notes, sorted(set(omitted)))
+    return Plan(_order([by_id[i] for i in chosen], seam_map, via), tiers, pulled, notes, sorted(set(omitted)), via)
 
 
-def _order(checks: list[Check], seam_map: SeamMap) -> list[Check]:
-    """Fast, slow, ns; catalog order within a tier; every prerequisite first (a stable topological order)."""
+def _order(checks: list[Check], seam_map: SeamMap, via: dict[str, str] | None = None) -> list[Check]:
+    """Fast, slow, ns; catalog order within a tier; every prerequisite (or the gate standing in for it) first (a
+    stable topological order)."""
+    via = via or {}
     catalog = {c.id: i for i, c in enumerate(seam_map.checks)}
     rank = {tier: i for i, tier in enumerate(TIERS)}
     pending = sorted(checks, key=lambda c: (rank[c.tier], catalog[c.id]))
@@ -171,7 +189,7 @@ def _order(checks: list[Check], seam_map: SeamMap) -> list[Check]:
     done: set[str] = set()
     while pending:
         for index, check in enumerate(pending):
-            if all(r in done or r not in ids for r in check.requires):
+            if all(via.get(r, r) in done or via.get(r, r) not in ids for r in check.requires):
                 placed.append(check)
                 done.add(check.id)
                 del pending[index]

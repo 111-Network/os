@@ -289,8 +289,11 @@ class Commands(unittest.TestCase):
         self.assertEqual(box.run("--check", "fx.pass", scratch=False).returncode, 2)
         self.assertEqual(box.run("--check", "fx.pass", "--cargo-slots", "3").returncode, 2)
         self.assertEqual(box.run("--list", "--lint").returncode, 2)
-        inside = box.run("--check", "fx.pass", scratch=False)
-        self.assertEqual(inside.returncode, 2)
+        in_tree = box.tree / "scratch-inside"
+        inside = box.run("--check", "fx.pass", "--scratch", str(in_tree), scratch=False)
+        self.assertEqual(inside.returncode, 2, inside.stderr)
+        self.assertIn("--scratch must be outside the tree", inside.stderr)
+        self.assertFalse(in_tree.exists(), "a refused --scratch is not created")
         bad = box.copy_map()
         (bad / "checks.toml").write_text('[[check]]\nid = "x"\nkind = "unit"\ntier = "medium"\n')
         broken = box.run("--check", "x")
