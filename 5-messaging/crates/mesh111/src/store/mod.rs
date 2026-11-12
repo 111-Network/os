@@ -27,12 +27,24 @@
 //!   `fwd_from`, in their own class ([`Class::Transit`]) with a default
 //!   quota and a per-origin share ([`prune`], Layer 7 §5.8). With no pairing
 //!   nothing writes one: every row stays `fwd = 0`, `fwd_from` NULL.
-//! - **Custody totals (schema v5)** ([`schema`], [`prune::custody_total`]):
-//!   triggers on `custody` keep the row count and byte sums of the member
-//!   rows, the forward rows, the protected forward rows and each origin's
-//!   protected forward rows, so the Custody and Transit quotas, an origin's
-//!   share and the forward gauge are one primary-key read per put — never a
-//!   pass over the rows a hub holds (the Pi floor).
+//! - **Custody totals and indexes (schema v5)** ([`schema`],
+//!   [`prune::custody_total`]): triggers on `custody` keep the row count
+//!   and byte sums of the member rows, the forward rows, the protected
+//!   forward rows and each origin's protected forward rows; three partial
+//!   indexes hold a member's uncommitted rows, the protected forward rows
+//!   and the committed rows; [`schema::heal`] re-creates a missing one at
+//!   open. What that makes of the per-item paths on a hub (the Pi floor):
+//!   **constant in the `custody` rows held** — a put's dedup, origin share,
+//!   class quota and insert (its triggers and one index entry for a member
+//!   row, two for a forward row), the custody and forward gauges
+//!   ([`Store::custody_stats`], [`Store::forward_stats`]), a forward
+//!   commit, a prune delete, a pass at rest's custody inputs; **bounded by
+//!   what is read** — a member's `MAILBOX_COMMIT` and `ENROLL_OK` floor
+//!   (that member's uncommitted rows), a forwarder page (the rows it
+//!   returns), a pass that prunes (the committed rows of the classes it
+//!   prunes, [`prune`]); **still growing with the store** — live bytes, a
+//!   sum over the present blobs, on every admission and every pass, and the
+//!   total of a bulk class or Foreign that has a quota set ([`prune`]).
 //!
 //! No wall clock anywhere: ages are the store's local insertion sequence.
 
@@ -228,7 +240,9 @@ impl Store {
     }
 
     /// Open (or create) `dir/store.db` and `dir/blobs/`, apply the §10.1
-    /// pragmas, migrate the schema, and decide the §4 epoch for this run.
+    /// pragmas, migrate the schema (and re-create any missing schema v5
+    /// trigger or index, [`schema::heal`]), and decide the §4 epoch for
+    /// this run.
     ///
     /// The clean-shutdown record is consumed: after this returns, a crash
     /// leaves it absent, so the next open mints.
@@ -256,6 +270,7 @@ impl Store {
         )?;
         apply_key_and_pragmas(&conn, key)?;
         schema::migrate(&conn)?;
+        schema::heal(&conn)?;
 
         let blobs = BlobDir::open(dir.join(BLOB_DIR))?;
         let mut store = Store {
