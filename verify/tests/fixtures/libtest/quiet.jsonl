@@ -1,0 +1,3 @@
+{"exit_declared": true}
+{"id": "fx.lt/tests::multi_line_panic", "status": "FAIL", "assertion": "thread 'tests::multi_line_panic' (12336) panicked at src/lib.rs:13:9:\nfirst line of the message\nsecond line: details\nthird line", "log_line": 14, "test": "tests::multi_line_panic"}
+{"id": "fx.lt/tests::planted_fail", "status": "FAIL", "assertion": "thread 'tests::planted_fail' (12337) panicked at src/lib.rs:8:25:\nassertion `left == right` failed: two and two\n  left: 4\n right: 5", "log_line": 35, "test": "tests::planted_fail", "after": "fx.lt/tests::multi_line_panic"}

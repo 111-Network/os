@@ -207,7 +207,8 @@ class F2StopSignals(unittest.TestCase):
         self.assertIn(f"t111: {note}", done.stderr)
         self.assertEqual(last_line(done.stdout), "VERIFY GREEN")
         self.assertEqual(marked("fx.long"), [])
-        self.assertEqual(box.results()[0]["swept"], {dead: len(survivors)})
+        # X2c C7: only this sandbox's dead run is asserted (each sandbox has its own lock dir, its sweep domain)
+        self.assertEqual(box.results()[0]["swept"].get(dead), len(survivors))
 
     def test_unmarked_and_live_runs_are_never_swept(self) -> None:
         env = dict(os.environ, T111_RUN="RUN-other", T111_CHECK="c.x")
@@ -549,15 +550,22 @@ class F11LogCap(unittest.TestCase):
         rec = by_id(box.results())["fx.big"]
         self.assertEqual((rec["status"], rec["reason"]), ("PASS", "log cut at 1 MB"))
         log = Path(rec["log"])
-        self.assertLessEqual(log.stat().st_size, 1024 * 1024 + 200)
-        self.assertEqual(last_line(log.read_text()), "t111: log cut at 1 MB (the rest of the output was read and "
-                                                     "dropped)")
+        # X2c C4: the head up to the cap, one marker line, and the last 1 MB (where the adapters read) are kept
+        self.assertLessEqual(log.stat().st_size, 2 * 1024 * 1024 + 300)
+        text = log.read_text()
+        self.assertEqual(last_line(text), "big: the end", "the real last line survives the cut")
+        markers = [ln for ln in text.splitlines() if ln.startswith("t111: log cut at 1 MB: ")]
+        self.assertEqual(len(markers), 1, "one marker between the head and the tail")
+        self.assertRegex(markers[0], r"^t111: log cut at 1 MB: \d+ bytes dropped here \(the head above, the last "
+                                     r"\d+ bytes below\)$")
+        self.assertTrue(text.startswith("x" * 1000), "the head is kept")
+        self.assertIn("note: fx.big: log cut at 1 MB: ", done.stdout, "a cut log is one note line of the summary")
         self.assertEqual(box.results()[0]["log_cap_mb"], 1.0)
 
     def test_bad_values_are_usage_errors(self) -> None:
         box = Sandbox(self)
         for flag in ("--log-cap", "--lock-wait"):
-            for bad in ("0", "-1", "x"):
+            for bad in ("0", "-1", "x", "inf", "-inf", "nan", "1e999"):  # X2c C5: non-finite too
                 self.assertEqual(box.run("--check", "fx.pass", flag, bad).returncode, 2, (flag, bad))
 
 

@@ -1,0 +1,5 @@
+ok: the stand-in agent answered
+FAIL: the bridge row exists after accept  [HTTP 404: {"code":"not_found"}]
+
+G1: 1 ok, 1 FAIL in 2.0s
+G1 GREEN

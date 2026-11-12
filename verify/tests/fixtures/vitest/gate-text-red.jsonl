@@ -1,0 +1,8 @@
+{"exit_declared": true}
+{"id": "fx.vt.redfile/parseNodeId > accepts a good id", "status": "PASS", "log_line": 5, "test": "parseNodeId > accepts a good id", "check": "fx.vt.redfile"}
+{"id": "fx.vt.redfile/parseNodeId > planted failure", "status": "FAIL", "assertion": "AssertionError: expected { a: 1, b: 'x' } to deeply equal { a: 2, b: 'x' }\n\n- Expected\n+ Received\n\n  {\n-   \"a\": 2,\n+   \"a\": 1,\n    \"b\": \"x\",\n  }\n\n ❯ test/red.test.ts:3:58", "log_line": 34, "test": "parseNodeId > planted failure", "check": "fx.vt.redfile"}
+{"id": "fx.vt.redfile/parseNodeId > a skipped one", "status": "SKIPPED", "reason": "skipped", "log_line": 8, "test": "parseNodeId > a skipped one", "check": "fx.vt.redfile"}
+{"id": "fx.vt.redfile/parseNodeId > a todo one", "status": "SKIPPED", "reason": "skipped", "log_line": 9, "test": "parseNodeId > a todo one", "check": "fx.vt.redfile"}
+{"id": "fx.vt.redfile/parseNodeId > nested > throws a multi-line error", "status": "FAIL", "assertion": "Error: first line\nsecond line\nthird line\n ❯ test/red.test.ts:7:51", "log_line": 56, "test": "parseNodeId > nested > throws a multi-line error", "check": "fx.vt.redfile", "after": "fx.vt.redfile/parseNodeId > planted failure"}
+{"id": "fx.vt.greenfile", "status": "PASS", "log_line": 14, "check": "fx.vt.greenfile"}
+{"id": "fx.vt.gate/test/broken.test.ts", "status": "FAIL", "reason": "the test file failed to load", "assertion": "Error: Cannot find module './does-not-exist' imported from '/tmp/x3/vt/test/broken.test.ts'\n ❯ test/broken.test.ts:1:1", "log_line": 18, "after": "fx.vt.redfile/parseNodeId > planted failure"}

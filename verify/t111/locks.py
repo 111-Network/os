@@ -17,9 +17,17 @@ like two processes do.
 The lock lives with the check (F2). The engine hands the held fds to the check (``pass_fds``), and a release only closes
 the runner's fd (never ``LOCK_UN``, which would free the description for every holder): the lock stays held while any
 process of the check keeps the fd, even when the runner itself died. So a wait is bounded and names its holder: after
-taking a lock the holder writes ``run=<run id> pid=<runner pid>`` into the lock file; a waiter reports one line
-``waiting for <lock> held by run <id> (pid <n>)`` and after ``wait_s`` (``--lock-wait``, default 1800 s) gives up with
-``LockTimeout``: ``lock <name> not free after N s (held by run <id>, pid <n>)``.
+taking a lock the holder writes ``run=<run id> pid=<runner pid> uid=<euid>`` into the lock file; a waiter reports one
+line ``waiting for <lock> held by run <id> (pid <n>)`` and after ``wait_s`` (``--lock-wait``, default 1800 s) gives up
+with ``LockTimeout``: ``lock <name> not free after N s (held by run <id>, pid <n>)``. The bound is for holders of other
+or dead runs: a wait on this run's own holder (the holder line names this run) is not bounded (the engine's scheduler
+never starts a check that needs a lock this run holds, so this is a leftover of one of its own checks).
+
+A lock file another user's runner made may be opened read-only (``fs.protected_regular`` refuses ``O_CREAT`` on it):
+the holder then cannot write its line into it and writes it into its own note file ``<name>.lock.holder.<euid>``. A
+waiter names the newest mark (the lock file's line or a note file, by mtime): a note file is the words ``another
+user's runner (holder not recorded in the lock file; its note: run <id>, pid <n>)``; no mark at all, with a lock file
+we cannot write either, is ``another user's runner (holder not recorded)``.
 """
 
 from __future__ import annotations
@@ -82,7 +90,7 @@ def ensure_dir(directory: Path) -> None:
 
 def _open(path: Path) -> int:
     """Open (create) a lock file; read-only when another user's runner made it (``flock`` works on either; the
-    holder line is then not written)."""
+    holder line then goes into the holder's note file, ``_mark``)."""
     ensure_dir(path.parent)
     try:
         fd = os.open(path, os.O_RDWR | os.O_CREAT | os.O_CLOEXEC, 0o666)
@@ -96,23 +104,52 @@ def _open(path: Path) -> int:
     return fd
 
 
-def read_holder(path: Path) -> tuple[str, str] | None:
-    """(run id, pid) from a lock file's ``run=<id> pid=<n>`` line, or None."""
-    try:
-        text = path.read_text(encoding="utf-8", errors="replace")
-    except OSError:
-        return None
+def _parse_mark(text: str) -> tuple[str, str] | None:
     fields = dict(part.split("=", 1) for part in text.split() if "=" in part)
     if "run" in fields and "pid" in fields:
         return fields["run"], fields["pid"]
     return None
 
 
+def note_path(path: Path, uid: int | None = None) -> Path:
+    """The note file a holder writes its line into when it cannot write the lock file: ``<lock>.holder.<euid>``."""
+    return path.with_name(f"{path.name}.holder.{os.geteuid() if uid is None else uid}")
+
+
+def newest_mark(path: Path) -> tuple[tuple[str, str] | None, bool]:
+    """(run id, pid) of the newest holder mark of a lock (its line, or a note file, by mtime), and whether that mark is
+    a note file (the holder could not write the lock file). (None, False) when there is no mark."""
+    marks: list[tuple[float, tuple[str, str], bool]] = []
+    candidates = [(path, False)] + [(p, True) for p in path.parent.glob(f"{path.name}.holder.*")]
+    for candidate, is_note in candidates:
+        try:
+            stat = candidate.stat()
+            text = candidate.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        mark = _parse_mark(text)
+        if mark is not None:
+            marks.append((stat.st_mtime_ns, mark, is_note))
+    if not marks:
+        return None, False
+    _mtime, mark, is_note = max(marks, key=lambda item: item[0])
+    return mark, is_note
+
+
+def read_holder(path: Path) -> tuple[str, str] | None:
+    """(run id, pid) of the newest holder mark of a lock (``newest_mark``), or None."""
+    return newest_mark(path)[0]
+
+
 def _holder_words(path: Path, waiting: bool) -> str:
-    holder = read_holder(path)
+    holder, is_note = newest_mark(path)
     if holder is None:
+        if not os.access(path, os.W_OK):
+            return "another user's runner (holder not recorded)"
         return "an unknown holder"
     run_id, pid = holder
+    if is_note:
+        return f"another user's runner (holder not recorded in the lock file; its note: run {run_id}, pid {pid})"
     return f"run {run_id} (pid {pid})" if waiting else f"run {run_id}, pid {pid}"
 
 
@@ -149,13 +186,30 @@ class Locks:
     def _slot(self, index: int) -> Path:
         return self.directory / f"cargo-slot-{index}.lock"
 
-    def _mark(self, fd: int) -> None:
-        line = f"run={self.run_id} pid={self.pid}\n".encode()
+    def _mark(self, fd: int, path: Path) -> None:
+        """Write the holder line into the lock file, or (a read-only fd) into this holder's note file."""
+        line = f"run={self.run_id} pid={self.pid} uid={os.geteuid()}\n".encode()
         try:
             os.ftruncate(fd, 0)
             os.pwrite(fd, line, 0)
+            return
         except OSError:
             pass
+        note = note_path(path)
+        try:
+            tmp = note.with_name(note.name + f".{os.getpid()}")
+            tmp.write_bytes(line)
+            os.replace(tmp, note)
+        except OSError:
+            pass
+
+    def _ours(self, paths: list[Path]) -> bool:
+        """True when every one of ``paths`` is held by this run (its newest mark names this run id)."""
+        for path in paths:
+            holder, _note = newest_mark(path)
+            if holder is None or holder[0] != self.run_id or self.run_id == "-":
+                return False
+        return True
 
     def _acquire(self, paths: list[Path], fds: list[int], cancel: threading.Event | None,
                  on_wait: Callable[[str], None] | None) -> int:
@@ -168,7 +222,7 @@ class Locks:
                     fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
                 except BlockingIOError:
                     continue
-                self._mark(fd)
+                self._mark(fd, paths[index])
                 return index
             if cancel is not None and cancel.is_set():
                 raise LockCancelled(", ".join(p.stem for p in paths))
@@ -178,8 +232,11 @@ class Locks:
                     held = "; ".join(f"{p.stem} held by {_holder_words(p, True)}" for p in paths)
                     on_wait(f"waiting for {held}")
             if time.monotonic() >= deadline:
-                raise LockTimeout("|".join(p.stem for p in paths), self.wait_s,
-                                  [_holder_words(p, False) for p in paths])
+                if self._ours(paths):  # this run's own holder: the wait is not bounded
+                    deadline = time.monotonic() + self.wait_s
+                else:
+                    raise LockTimeout("|".join(p.stem for p in paths), self.wait_s,
+                                      [_holder_words(p, False) for p in paths])
             time.sleep(POLL_S)
 
     def take_named(self, name: str, *, cancel: threading.Event | None = None,

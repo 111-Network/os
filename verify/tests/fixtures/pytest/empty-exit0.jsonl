@@ -1,0 +1,2 @@
+{"exit_declared": false}
+{"id": "fx.py", "status": "FAIL", "reason": "no test summary ('Ran N tests' / pytest's '… in Ns') was printed", "assertion": "nothing was printed by the tests", "log_line": 1}

@@ -65,6 +65,7 @@ class Record:
     - ``rerun``: set by an adapter for a single-test command; else rendered from the check's template.
     - ``test``: the test name an adapter parsed (fills ``{test}`` in the rerun template; not written).
     - ``check``: the catalog check the record belongs to; an adapter of a gate may set a covered unit's id here.
+    - ``kept``: the scratch dir the harness itself kept (``note: scratch kept at <dir>``), when it said so.
     - ``engine``: True for a record the engine made (never eligible for ``[[known]]``); not written.
     """
 
@@ -79,6 +80,7 @@ class Record:
     rerun: str | None = None
     test: str | None = None
     check: str | None = None
+    kept: str | None = None
     # filled by enrich() / the engine
     layers: list[Any] = field(default_factory=list)
     log: str | None = None
@@ -117,6 +119,7 @@ class Record:
             "duration_s": self.duration_s,
             "phase": self.phase,
             "after": self.after,
+            "kept": self.kept,
         }
 
 
@@ -207,9 +210,13 @@ def _needs_fresh(texts: Iterable[str], where: RerunPaths) -> bool:
 
 def rerun_command(check: Check, where: RerunPaths, values: Mapping[str, str | None] | None = None) -> str:
     """The pasteable rerun of a record of ``check``: its template, or its cmd with ``env`` as ``KEY=value`` prefixes,
-    every substituted value shell-quoted (``values``: ``id``, ``test``, ``check``)."""
+    every substituted value shell-quoted (``values``: ``id``, ``test``, ``check``).
+
+    A template that uses a token with no value for this record (``{test}`` of a timeout, a skip, an exit backstop:
+    no parsed test) is not used: a literal ``{test}`` would filter every test out and the rerun would pass for
+    nothing. The rerun is then the check's own command."""
     tokens = _quoted_tokens(where, values or {})
-    if check.rerun:
+    if check.rerun and all(m.group(1) in tokens for m in _TOKEN_RE.finditer(check.rerun)):
         fresh = RERUN_FRESH if _needs_fresh([check.rerun], where) else ""
         return fresh + _template(check.rerun, tokens)
     words = [f"{key}={_shell_word(value, tokens)}" for key, value in check.env.items()]
@@ -275,15 +282,18 @@ def enrich(rec: Record, check: Check, seam_map: SeamMap, *, root: Path | None = 
     return rec
 
 
-def mark_after(records: Iterable[Record]) -> None:
+def mark_after(records: Iterable[Record], *, one_harness: bool = False) -> None:
     """Give every FAIL after the first FAIL of the same check ``after = <first FAIL id>`` (unless an adapter set it).
 
-    Run it after ``apply_known``: only records that are still FAIL count, so ``after`` never points at a SKIPPED."""
+    With ``one_harness`` every record passed in belongs to one harness run (the engine's call, per check: a gate's
+    records attributed to the units it covers are one run, so the cascade crosses them). Run it after
+    ``apply_known``: only records that are still FAIL count, so ``after`` never points at a SKIPPED. ``hygiene/``
+    records never take part."""
     first: dict[str, str] = {}
     for rec in records:
         if rec.status != "FAIL" or rec.id.startswith("hygiene/"):
             continue
-        key = rec.check or ""
+        key = "" if one_harness else (rec.check or "")
         if key in first:
             if rec.after is None:
                 rec.after = first[key]

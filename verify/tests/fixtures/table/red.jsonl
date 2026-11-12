@@ -1,0 +1,12 @@
+{"exit_declared": true}
+{"id": "fx.table/built-in-primitive-kats", "status": "PASS", "log_line": 13}
+{"id": "fx.table/ed25519-rfc8032.json", "status": "PASS", "log_line": 14}
+{"id": "fx.table/x25519-rfc7748.json", "status": "FAIL", "reason": "1 of 11 checks failed", "assertion": "FAIL [x25519-rfc7748.json] vector 3 (RFC 7748 §6.1 Alice/Bob): shared secret mismatch", "log_line": 10}
+{"id": "fx.table/slip0010-published.json", "status": "PASS", "log_line": 16}
+{"id": "fx.table/slip0010-project-paths.json", "status": "PASS", "log_line": 17}
+{"id": "fx.table/keyset-project.json", "status": "PASS", "log_line": 18}
+{"id": "fx.table/edge-vectors.json", "status": "PASS", "log_line": 19}
+{"id": "fx.table/announce.json", "status": "PASS", "log_line": 20}
+{"id": "fx.table/sealed-packet.json", "status": "PASS", "log_line": 21}
+{"id": "fx.table/attestation.json", "status": "PASS", "log_line": 22}
+{"id": "fx.table/supplement-cofactor-edges.json-non-frozen", "status": "PASS", "log_line": 23}

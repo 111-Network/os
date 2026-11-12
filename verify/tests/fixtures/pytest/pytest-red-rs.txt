@@ -1,0 +1,14 @@
+..F.s                                                                    [100%]
+=================================== FAILURES ===================================
+_________________________________ test_planted _________________________________
+
+    def test_planted():
+>       assert decode(b"x") == 2
+E       assert 1 == 2
+E        +  where 1 = decode(b'x')
+
+tests/test_presence.py:14: AssertionError
+=========================== short test summary info ============================
+SKIPPED [1] tests/test_presence.py:20: no meshtastic module
+FAILED tests/test_presence.py::test_planted - assert 1 == 2
+1 failed, 3 passed, 1 skipped in 0.12s

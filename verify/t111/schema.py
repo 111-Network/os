@@ -63,6 +63,9 @@ KNOWN_KINDS: tuple[str, ...] = ("fails", "vacuous")
 CHECK_ID_RE = re.compile(r"^[a-z0-9][a-z0-9._-]*$")
 """A check id: lower case, digits, ``.``, ``_``, ``-``; no ``/`` (record ids are ``<check>/<…>``)."""
 
+RESERVED_CHECK_IDS: frozenset[str] = frozenset({"runner", "run"})
+"""Check ids the engine's own records use (``runner``, ``hygiene/run``): a check may not take them."""
+
 SEAM_ID_RE = re.compile(r"^(?:L\d(?:/\d)*-(?:L\d(?:/\d)*|X)|X):[a-z0-9][a-z0-9.-]*$")
 """A seam id: ``L<a>-L<b>:<name>``, ``L<a>-X:<name>`` or ``X:<name>`` (``L0-L5/6/7:entries`` is allowed)."""
 
@@ -473,7 +476,9 @@ def _parse_check(errors: list[MapError], file: str, index: int, raw: Any) -> Che
     cid = t.str_("id", required=True)
     if cid and not CHECK_ID_RE.match(cid):
         t.err("id", f"{cid!r} is not a check id ([a-z0-9][a-z0-9._-]*)")
-    kind = t.str_("kind", required=True, choices=CHECK_KINDS)
+    elif cid in RESERVED_CHECK_IDS:
+        t.err("id", f"{cid!r} is reserved for the engine's own records (runner, hygiene/run)")
+    kind =t.str_("kind", required=True, choices=CHECK_KINDS)
     cmd = t.strs("cmd", required=True, nonempty=False)
     if "cmd" in t.raw and not cmd and isinstance(t.raw["cmd"], list):
         t.err("cmd", "must not be empty")

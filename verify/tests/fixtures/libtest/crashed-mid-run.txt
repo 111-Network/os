@@ -1,0 +1,9 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.01s
+     Running tests/crash.rs (/tmp/x3/redtarget/debug/deps/crash-fb4c96ee6bfb5cee)
+
+running 2 tests
+test a_before_crash ... ok
+error: test failed, to rerun pass `--test crash`
+
+Caused by:
+  process didn't exit successfully: `/tmp/x3/redtarget/debug/deps/crash-fb4c96ee6bfb5cee` (signal: 6, SIGABRT: process abort signal)

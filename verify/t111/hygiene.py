@@ -3,11 +3,11 @@
 - **Leftovers.** The runner makes itself a child subreaper (``prctl(PR_SET_CHILD_SUBREAPER)``), so a process a check
   left behind (backgrounded, double-forked, ``setsid``) stays the runner's descendant instead of moving to init. After a
   check ends, ``find_leftovers`` reads ``/proc`` and returns every process that (1) descends from the runner and belongs
-  to no check still running, (2) carries this run's marker (``T111_RUN``/``T111_CHECK``) in its environ, or (3) names
-  the check's scratch dir in its cmdline or environ. Those become a ``hygiene/<check>`` FAIL naming pid and cmdline and
-  are killed. A process whose binary is ours (``111``, ``111-agent``, ``stub-*.py``, rnsd, meshmud, a headless
-  browser, vite) that appeared during the check but carries none of the above is reported, not killed: nothing proves
-  it is not another agent's.
+  to no check still running, or (2) carries this run's marker (``T111_RUN``/``T111_CHECK``) in its environ: the proof.
+  Those become a ``hygiene/<check>`` FAIL naming pid and cmdline and are killed. Two kinds are reported, never killed,
+  because nothing proves they are this run's: a process that only names the check's scratch dir in its cmdline or
+  environ (an agent's ``tail -f`` on a log), and a process whose binary is ours (``111``, ``111-agent``,
+  ``stub-*.py``, rnsd, meshmud, a headless browser, vite) that appeared during the check with no marker.
 - **Listeners.** The listening TCP sockets of ``/proc/net/tcp`` and ``tcp6``, joined to a pid through
   ``/proc/<pid>/fd``; a leftover's listening ports are named in its FAIL.
 - **Ports.** ``port_holders`` is the pre-check of an ``ns`` check (11180, 11183, 11230, 11280 by default).
@@ -25,8 +25,11 @@ mistakes it for a check's process.
   skips the registered pids, so a reap never steals the exit status ``subprocess`` is waiting for.
 - **Dead runs (F2).** Every check carries ``T111_RUNNER_PID`` and ``T111_RUNNER_START`` (the runner's pid and its start
   time in ticks). ``sweep_dead_runs`` finds every process whose environ carries ``T111_RUN`` of another run whose runner
-  is gone (no such pid, a zombie, or another process under that pid); ``terminate`` sends TERM, then KILL. A process
-  without the marker is never touched. ``sweep_run`` is the backstop of an interrupted run: everything proven this run's.
+  is gone (no such pid, a zombie, or another process under that pid) and that shares this run's lock dir
+  (``T111_LOCKS``, the box domain: two test sandboxes with their own lock dirs never sweep each other);
+  ``terminate`` sends TERM, then KILL. A process without the marker is never touched. ``sweep_run`` is the backstop
+  of an interrupted run: everything proven this run's (the marker, descent), and, reported but never killed, a
+  process that only names the run dir.
 
 By design not checked: a listener inside another network namespace is not named (its process is found, its port is not:
 ``/proc/net`` shows the runner's namespace only); a process that changed its marker environment and left the runner's
@@ -95,14 +98,15 @@ class Leftover:
     rule: str
     ports: list[int]
     kill: bool
+    why_not: str = "our binary, but nothing ties it to this run"
 
     def describe(self) -> str:
-        """``pid 123 (sleep 300)`` plus ``listening :11180`` when it listens."""
+        """``pid 123 (sleep 300)`` plus ``listening :11180`` when it listens, plus ``[not killed: …]``."""
         text = f"pid {self.proc.pid} ({self.proc.cmdline[:200]})"
         if self.ports:
             text += " listening " + ",".join(f":{p}" for p in self.ports)
         if not self.kill:
-            text += " [not killed: our binary, but nothing ties it to this run]"
+            text += f" [not killed: {self.why_not}]"
         return text
 
 
@@ -332,11 +336,15 @@ def find_leftovers(*, runner_pid: int, run_id: str, finished: str, scratch: Path
             rule = "descends from the runner"
         elif same_run:
             rule = "carries this run's marker"
-        elif names_scratch:
-            rule = "names the check's scratch dir"
         if rule:
             out.append(Leftover(proc, owner, rule, sorted({listening[i] for i in socket_inodes(proc.pid)
                                                            if i in listening}), True))
+            continue
+        if names_scratch:
+            out.append(Leftover(proc, finished, "names the check's scratch dir",
+                                sorted({listening[i] for i in socket_inodes(proc.pid) if i in listening}), False,
+                                why_not="it names the check's scratch dir, but no marker or descent ties it to this "
+                                        "run"))
             continue
         if is_ours(proc) and proc.key not in before and not env.get("T111_RUN"):
             out.append(Leftover(proc, finished, "our binary, appeared during the check",
@@ -440,10 +448,22 @@ def runner_alive(pid_text: str | None, start_text: str | None) -> bool:
     return True
 
 
-def sweep_dead_runs(run_id: str, self_pid: int | None = None) -> dict[str, list[Proc]]:
+def same_lock_dir(env: Mapping[str, str], lock_dir: Path | None) -> bool:
+    """True when a process's ``T111_LOCKS`` (default: the default lock dir) names ``lock_dir`` (None: any)."""
+    if lock_dir is None:
+        return True
+    theirs = env.get("T111_LOCKS") or "/tmp/111-verify-locks"
+    try:
+        return os.path.realpath(theirs) == os.path.realpath(str(lock_dir))
+    except (OSError, ValueError):
+        return theirs == str(lock_dir)
+
+
+def sweep_dead_runs(run_id: str, self_pid: int | None = None, lock_dir: Path | None = None) -> dict[str, list[Proc]]:
     """The leftovers of dead runs: run id -> processes whose environ carries ``T111_RUN`` of another run and whose
-    ``T111_RUNNER_PID`` (with ``T111_RUNNER_START``) no longer names a live runner. Never this process or an ancestor
-    of it, never a process without both markers."""
+    ``T111_RUNNER_PID`` (with ``T111_RUNNER_START``) no longer names a live runner, and (with ``lock_dir``) whose
+    ``T111_LOCKS`` names the same lock dir. Never this process or an ancestor of it, never a process without both
+    markers."""
     me = os.getpid() if self_pid is None else self_pid
     procs = snapshot()
     spared = {me, *ancestors(procs, me)}
@@ -455,6 +475,8 @@ def sweep_dead_runs(run_id: str, self_pid: int | None = None) -> dict[str, list[
         other = env.get("T111_RUN")
         if not other or other == run_id or not env.get("T111_RUNNER_PID"):
             continue
+        if not same_lock_dir(env, lock_dir):
+            continue
         if runner_alive(env.get("T111_RUNNER_PID"), env.get("T111_RUNNER_START")):
             continue
         out.setdefault(other, []).append(proc)
@@ -462,8 +484,9 @@ def sweep_dead_runs(run_id: str, self_pid: int | None = None) -> dict[str, list[
 
 
 def sweep_run(*, runner_pid: int, run_id: str, run_dir: Path) -> list[Leftover]:
-    """Every process proven this run's at its end (the backstop of an interrupted run): it descends from the runner,
-    carries this run's marker, or names the run dir; helpers and the pids ``subprocess`` owns excepted."""
+    """Every process proven this run's at its end (the backstop of an interrupted run): it descends from the runner
+    or carries this run's marker (``kill``); a process that only names the run dir is listed with ``kill`` False
+    (reported, never killed); helpers and the pids ``subprocess`` owns excepted."""
     procs = snapshot()
     listening = listening_inodes()
     run_dir_s = str(run_dir)
@@ -485,8 +508,10 @@ def sweep_run(*, runner_pid: int, run_id: str, run_dir: Path) -> list[Leftover]:
             rule = "names the run dir"
         if rule:
             owner = env.get("T111_CHECK") if env.get("T111_RUN") == run_id else None
+            proven = rule != "names the run dir"
             out.append(Leftover(proc, owner or "run", rule,
-                                sorted({listening[i] for i in socket_inodes(proc.pid) if i in listening}), True))
+                                sorted({listening[i] for i in socket_inodes(proc.pid) if i in listening}), proven,
+                                why_not="it names the run dir, but no marker or descent ties it to this run"))
     return sorted(out, key=lambda lo: lo.proc.pid)
 
 

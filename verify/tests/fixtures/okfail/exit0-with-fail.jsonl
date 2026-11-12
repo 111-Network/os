@@ -1,0 +1,3 @@
+{"exit_declared": false}
+{"id": "fx.ok/the-stand-in-agent-answered", "status": "PASS", "log_line": 1}
+{"id": "fx.ok/the-bridge-row-exists-after-accept", "status": "FAIL", "assertion": "the bridge row exists after accept  [HTTP 404: {\"code\":\"not_found\"}]", "log_line": 2}

@@ -1,0 +1,3 @@
+FAIL: namespace install errored
+--- fixture server log ---
+listening on 127.0.0.1:41234

@@ -1,0 +1,2 @@
+{"exit_declared": false}
+{"id": "fx.lt/build", "status": "FAIL", "reason": "cargo could not compile the tests", "assertion": "error[E0308]: mismatched types\n --> src/lib.rs:1:37\n  |\n1 | pub fn add(a: u32, b: u32) -> u32 { \"x\" }\n  |                               ---   ^^^ expected `u32`, found `&str`\n  |                               |\n  |                               expected `u32` because of return type", "log_line": 2}

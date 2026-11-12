@@ -1,0 +1,2 @@
+{"exit_declared": false}
+{"id": "fx.exit", "status": "FAIL", "reason": "exit 1", "assertion": "SELFTEST FAILED:\n  - generation is not deterministic (second run differed)", "log_line": 1}

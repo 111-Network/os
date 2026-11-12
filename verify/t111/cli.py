@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import argparse
 import importlib
+import math
 import os
 import sys
 from pathlib import Path
@@ -50,8 +51,8 @@ def _positive(value: str) -> float:
         number = float(value)
     except ValueError:
         raise argparse.ArgumentTypeError(f"not a number: {value!r}") from None
-    if not number > 0:
-        raise argparse.ArgumentTypeError(f"must be > 0: {value!r}")
+    if not math.isfinite(number) or not number > 0:
+        raise argparse.ArgumentTypeError(f"must be a finite number > 0: {value!r}")
     return number
 
 
@@ -101,6 +102,8 @@ def parser() -> argparse.ArgumentParser:
     cmd.add_argument("--changed", nargs="?", const="HEAD", metavar="REF",
                      help="the seams the changed paths touch (row X4)")
     cmd.add_argument("--explain", metavar="ID", help="one seam's or check's whole record from the map (row X4)")
+    cmd.add_argument("--results", metavar="FILE", type=Path, default=None,
+                     help="with --matrix: the results.jsonl to read (default: the newest under --scratch)")
     # for the runner's own tests: another tree, another map, a shorter kill grace, other ns ports
     p.add_argument("--root", type=Path, default=REPO_ROOT, help=argparse.SUPPRESS)
     p.add_argument("--map", dest="map_dir", type=Path, default=VERIFY_DIR, help=argparse.SUPPRESS)
@@ -191,7 +194,23 @@ def render_list(plan: Plan, args: argparse.Namespace) -> str:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    """Parse, load the map, select, then list, dispatch or run. Returns the exit code."""
+    """Install the stop handlers, parse, load the map, select, then list, dispatch or run. Returns the exit code.
+
+    The stop handlers (SIGINT, SIGTERM, SIGHUP) are the first thing: a signal during the map load or the selection
+    ends a run ``VERIFY RED`` before anything starts, one during the run stops it (``t111.engine``)."""
+    stop = engine.StopState()
+    stop.install()
+    try:
+        code = _main(argv, stop)
+        if stop.name is not None and code != EXIT_RED:  # a command that runs no check, stopped: never success
+            print(f"verify/run.py: interrupted by {stop.name}", file=sys.stderr)
+            code = EXIT_RED
+        return code
+    finally:
+        stop.restore()
+
+
+def _main(argv: Sequence[str] | None, stop: "engine.StopState") -> int:
     raw = list(sys.argv[1:] if argv is None else argv)
     p = parser()
     args = p.parse_args(raw)
@@ -233,10 +252,13 @@ def main(argv: Sequence[str] | None = None) -> int:
         except ValueError:
             p.error("--ns-ports takes a comma list of port numbers")
     shared = args.shared_box or os.environ.get("T111_SHARED_BOX", "") == "1"
+    if stop.name is not None:  # a stop signal before the run was set up: nothing ran, still never green
+        engine.interrupted_before_start(None, stop.name)
+        return EXIT_RED
     cfg = engine.Config(root=root, scratch=scratch, seam_map=seam_map, plan=plan, cargo_slots=args.cargo_slots,
                         jobs=args.jobs, keep=args.keep, offline=args.offline, require=args.require, ci=args.ci,
                         shared_box=shared, lock_wait_s=args.lock_wait, log_cap_mb=args.log_cap,
-                        argv=["verify/run.py", *raw])
+                        argv=["verify/run.py", *raw], stop_state=stop)
     if args.kill_grace is not None:
         cfg.kill_grace_s = args.kill_grace
     if ports is not None:

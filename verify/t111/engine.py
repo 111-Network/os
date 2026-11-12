@@ -7,33 +7,42 @@ For each check, in this order:
 1. SKIPPED up front when a prerequisite did not pass (``requires <id> (<status>)``; a required unit whose covering gate
    is in the plan is decided by that gate, ``Plan.via``), under ``--offline`` for an ``offline_skip`` check
    (``offline``), or for a missing need (``needs <x> (missing)``);
-2. its named locks, then a cargo slot when ``cargo = true`` (``t111.locks``). A wait prints one line naming the holder
-   (``waiting for <lock> held by run <id> (pid <n>)``) and is bounded: after ``--lock-wait`` s the check FAILs
-   ``lock <name> not free after N s (held by run <id>, pid <n>)``. The held lock fds are handed to the check, so a lock
-   lives as long as any process of the check (even when this runner dies);
+2. its named locks, then a cargo slot when ``cargo = true`` (``t111.locks``). The scheduler starts a check only when
+   this run holds none of the locks it needs (no named lock a running check of this run holds, a cargo slot free of
+   this run's checks): it picks another startable check instead, so a check never waits on its own run. A wait on
+   another run prints one line naming the holder (``waiting for <lock> held by run <id> (pid <n>)``, under ``--ci``
+   too: it is a diagnosis) and is bounded: after ``--lock-wait`` s the check FAILs ``lock <name> not free after N s
+   (held by run <id>, pid <n>)``. The held lock fds are handed to the check, so a lock lives as long as any process of
+   the check (even when this runner dies);
 3. for an ``ns`` check, the port pre-check (``port 11180 held by pid N (<cmdline>)`` = SKIPPED);
 4. the process and tree snapshots, the subprocess session (``t111.run``; its output capped at ``--log-cap`` MB), the
    leftover scan (``hygiene/<check>``, killed) and the tree diff (``hygiene/<check>/tree``, naming every check that
    ran in that window);
-5. the adapter, then the engine's rules: a check that could not start is one FAIL; a timeout is a FAIL; a non-zero exit
-   with no FAIL record is a FAIL unless the adapter declared that exit (``AdapterContext.exit_declared``); then the map
-   enrichment, the ``[[known]]`` rule (adapter-parsed results only), ``--require`` and the cascade link ``after``
-   (only over records that are still FAIL);
+5. the adapter, then the engine's rules: a check that could not start is one FAIL; a check the runner stopped is the
+   interrupt FAIL whatever its exit status; a timeout is a FAIL; a non-zero exit with no FAIL record is a FAIL unless
+   the adapter declared that exit (``AdapterContext.exit_declared``); then the map enrichment, the ``[[known]]`` rule
+   (adapter-parsed results only), the non-zero-exit rule once more (a known FAIL turned SKIPPED never hides the exit),
+   ``--require`` and the cascade link ``after`` (over the records of this harness run that are still FAIL);
 6. the check's scratch is deleted when it has no FAIL (unless ``--keep``); a red one is kept and named in its records.
 
-Records stream to ``results.jsonl`` as checks finish; ``summary.txt`` and stdout get the summary in plan order.
+Records stream to ``results.jsonl`` as checks finish; ``summary.txt`` and stdout get the summary in plan order; a log
+cut at ``--log-cap`` adds one ``note:`` line to the summary.
 
-**Stopping.** SIGINT, SIGTERM and SIGHUP (a signal the parent set to ignore stays ignored) stop the run the same way:
+**Stopping.** SIGINT, SIGTERM and SIGHUP (a signal the parent set to ignore stays ignored) stop the run the same way.
+``t111.cli.main`` installs the handlers first thing (``StopState``), so a signal during the map load, the selection or
+the set-up is noted too, and one that arrives after the checks but before the report still makes the run RED:
 no new check starts, the running checks' process groups get SIGTERM and, after the kill grace, SIGKILL; then the
 leftover scan kills everything proven this run's (the run marker, the runner's descendants, the run dir in a command
-line or environment: ``hygiene.sweep_run``), the records that can be written are written (a killed check: one FAIL
+line or environment: ``hygiene.sweep_run``; one that only names the run dir is reported, never killed), the records
+that can be written are written (a killed check, whatever its exit status: one FAIL
 ``interrupted by SIGTERM: the runner killed the check``; one not reached: SKIPPED ``not started``), one FAIL record
 ``runner`` says why, and the run ends ``VERIFY RED`` with exit 1: an interrupted run is never green. An internal error
 of the runner takes the same path with the FAIL ``runner error: <type>: <text>`` (and its traceback on stderr): whatever
-happens, the last line printed is a ``VERIFY`` line.
+happens, the last line printed is a ``VERIFY`` line, and no write to stdout or stderr raises (a closed pipe).
 
-**Dead runs.** Every check carries ``T111_RUNNER_PID``/``T111_RUNNER_START``. At its start a run kills (TERM, then
-KILL) every process whose environ carries ``T111_RUN`` of another run whose runner is gone (``hygiene.sweep_dead_runs``)
+**Dead runs.** Every check carries ``T111_RUNNER_PID``/``T111_RUNNER_START`` and ``T111_LOCKS``. At its start a run
+kills (TERM, then KILL) every process whose environ carries ``T111_RUN`` of another run whose runner is gone and that
+shares this run's lock dir (``hygiene.sweep_dead_runs``)
 and prints one line ``note: killed N leftover process(es) of dead run <id>`` (also in the summary; a note, not a FAIL).
 A process without the marker is never touched.
 
@@ -41,7 +50,9 @@ A process without the marker is never touched.
 change during a check and a look-alike process (our binary, no marker) are FAIL. With ``--shared-box`` (or
 ``T111_SHARED_BOX=1``), for a run beside other writers, both are SKIPPED ``not attributed (shared box): ...``: the run
 never ends RED on something it cannot prove. A process proven ours (the marker, a descendant, the scratch dir) stays
-FAIL in both modes; no tree path is ever "proven" (a path only this check could have written is a guess).
+FAIL in both modes; no tree path is ever "proven" (a path only this check could have written is a guess). A process
+that only names the check's scratch dir (an agent's ``tail -f`` on a log) is never proven: strict, a FAIL saying
+``[not killed: …]``; ``--shared-box``, SKIPPED; never killed.
 """
 
 from __future__ import annotations
@@ -110,6 +121,7 @@ class Config:
     argv: list[str] = field(default_factory=list)
     out: TextIO | None = None
     err: TextIO | None = None
+    stop_state: "StopState | None" = None
 
 
 @dataclass
@@ -168,12 +180,53 @@ def make_run_dir(scratch: Path, head: str | None) -> tuple[str, Path]:
 
 
 def emit(stream: TextIO, text: str) -> None:
-    """Write ``text`` to ``stream`` and flush; never raises on an encoding (falls back to ASCII escapes)."""
+    """Write ``text`` to ``stream`` and flush; never raises (an encoding falls back to ASCII escapes; a closed or
+    broken stream, an agent's ``| head``, is ignored: stdout and stderr are advisory, the records are the file)."""
     try:
-        stream.write(text)
-    except UnicodeEncodeError:
-        stream.write(text.encode("ascii", "backslashreplace").decode("ascii"))
-    stream.flush()
+        try:
+            stream.write(text)
+        except UnicodeEncodeError:
+            stream.write(text.encode("ascii", "backslashreplace").decode("ascii"))
+        stream.flush()
+    except (OSError, ValueError):
+        pass
+
+
+class StopState:
+    """The stop signals of one process (SIGINT, SIGTERM, SIGHUP): the first one is noted (``name``), never acted on in
+    the handler. ``t111.cli.main`` installs it before anything else; the engine reads it (and installs it itself when
+    run in process without the cli). A signal the parent set to ignore stays ignored."""
+
+    def __init__(self) -> None:
+        self.name: str | None = None
+        self._old: dict[int, Any] = {}
+
+    @property
+    def installed(self) -> bool:
+        return bool(self._old)
+
+    def handler(self, signum: int, _frame: Any) -> None:
+        if self.name is None:
+            self.name = signal.Signals(signum).name
+
+    def install(self) -> None:
+        if threading.current_thread() is not threading.main_thread():
+            return
+        for sig in STOP_SIGNALS:
+            try:
+                if signal.getsignal(sig) == signal.SIG_IGN:
+                    continue
+                self._old[sig] = signal.signal(sig, self.handler)
+            except (ValueError, OSError):
+                continue
+
+    def restore(self) -> None:
+        for sig, old in self._old.items():
+            try:
+                signal.signal(sig, old)
+            except (ValueError, OSError, TypeError):
+                pass
+        self._old.clear()
 
 
 def runner_fail(reason: str) -> Record:
@@ -218,8 +271,10 @@ class Engine:
         self._stop = threading.Event()
         self._stop_why = ""
         self._stopped_live: set[str] = set()
-        self._interrupt: str | None = None
-        self._old_handlers: dict[int, Any] = {}
+        self.stop_state = cfg.stop_state or StopState()
+        self._own_handlers = False
+        self._held_names: dict[str, set[str]] = {}
+        self._held_cargo: set[str] = set()
         self.notes: list[str] = []
         self.swept: dict[str, int] = {}
 
@@ -247,29 +302,20 @@ class Engine:
 
     # -- signals -------------------------------------------------------------------------------------------------
 
-    def _on_signal(self, signum: int, _frame: Any) -> None:
-        """Note the first stop signal; the main thread's join loop acts on it (a handler never raises)."""
-        if self._interrupt is None:
-            self._interrupt = signal.Signals(signum).name
+    @property
+    def _interrupt(self) -> str | None:
+        """The first stop signal seen (by the cli's handlers or the engine's own), or None."""
+        return self.stop_state.name
 
     def _install_signals(self) -> None:
-        if threading.current_thread() is not threading.main_thread():
-            return
-        for sig in STOP_SIGNALS:
-            try:
-                if signal.getsignal(sig) == signal.SIG_IGN:
-                    continue
-                self._old_handlers[sig] = signal.signal(sig, self._on_signal)
-            except (ValueError, OSError):
-                continue
+        if not self.stop_state.installed:
+            self.stop_state.install()
+            self._own_handlers = True
 
     def _restore_signals(self) -> None:
-        for sig, old in self._old_handlers.items():
-            try:
-                signal.signal(sig, old)
-            except (ValueError, OSError, TypeError):
-                pass
-        self._old_handlers.clear()
+        if self._own_handlers:
+            self.stop_state.restore()
+            self._own_handlers = False
 
     # -- scheduling ----------------------------------------------------------------------------------------------
 
@@ -281,10 +327,26 @@ class Engine:
                 plan_ids = {c.id for c in self.cfg.plan.checks}
                 for index, check in enumerate(self._pending):
                     needed = [self.cfg.plan.requirement(r) for r in check.requires]
-                    if all(r in self._status or r not in plan_ids for r in needed):
+                    if all(r in self._status or r not in plan_ids for r in needed) and self._free_here(check):
                         del self._pending[index]
+                        self._held_names[check.id] = set(check.locks())
+                        if check.cargo:
+                            self._held_cargo.add(check.id)
                         return check
                 self._cv.wait(0.5)
+
+    def _free_here(self, check: Check) -> bool:
+        """True when no running check of this run holds a lock ``check`` needs (call under ``_cv``): a named lock
+        another of our checks holds, or every cargo slot taken by our checks, makes the scheduler pick another."""
+        names = set(check.locks())
+        if any(names & held for held in self._held_names.values()):
+            return False
+        return not (check.cargo and len(self._held_cargo) >= self.cfg.cargo_slots)
+
+    def _release_here(self, check: Check) -> None:
+        """Forget a finished check's locks (call under ``_cv``)."""
+        self._held_names.pop(check.id, None)
+        self._held_cargo.discard(check.id)
 
     def _worker(self) -> None:
         try:
@@ -292,7 +354,12 @@ class Engine:
                 check = self._next()
                 if check is None:
                     return
-                done = self.process(check)
+                try:
+                    done = self.process(check)
+                finally:
+                    with self._cv:
+                        self._release_here(check)
+                        self._cv.notify_all()
                 with self._cv:
                     if done is not None:
                         self._status[check.id], self._records[check.id] = done
@@ -318,7 +385,7 @@ class Engine:
 
     def sweep_dead(self) -> None:
         """Kill the marked leftovers of dead runs (module docstring); one note line per dead run."""
-        for other, procs in sorted(hygiene.sweep_dead_runs(self.run_id).items()):
+        for other, procs in sorted(hygiene.sweep_dead_runs(self.run_id, lock_dir=self.locks.directory).items()):
             killed = hygiene.terminate(procs, runner_pid=self.runner_pid)
             if not killed:
                 continue
@@ -355,6 +422,8 @@ class Engine:
                 extra = self.stop(workers, why) + extra
             else:
                 hygiene.reap_orphans(self.runner_pid)
+                if self._interrupt is not None:  # a signal while the orphans were reaped: still never green
+                    extra = self.stop(workers, f"interrupted by {self._interrupt}")
             return self.report(began, extra)
         except Exception as exc:  # the report itself failed: still a last line
             return self.last_resort(exc)
@@ -379,13 +448,18 @@ class Engine:
         self._join(workers, time.monotonic() + STOP_JOIN_S)
         out: list[Record] = []
         left = hygiene.sweep_run(runner_pid=self.runner_pid, run_id=self.run_id, run_dir=self.run_dir)
-        hygiene.terminate([lo.proc for lo in left], runner_pid=self.runner_pid)
+        hygiene.terminate([lo.proc for lo in left if lo.kill], runner_pid=self.runner_pid)
         hygiene.reap_orphans(self.runner_pid)
-        if left:
-            text = "left running when the run stopped (killed): " + "; ".join(
-                f"{lo.describe()} [{lo.owner}, {lo.rule}]" for lo in left)
+        shown = [lo for lo in left if lo.kill or not self.cfg.shared_box]
+        unproven = [lo for lo in left if not lo.kill and self.cfg.shared_box]
+        if shown:
+            text = "left running when the run stopped (killed unless marked): " + "; ".join(
+                f"{lo.describe()} [{lo.owner}, {lo.rule}]" for lo in shown)
             out.append(Record(id="hygiene/run", status="FAIL", reason=text, assertion=record.clip(text), seams=[],
                               engine=True))
+        if unproven:
+            text = f"{NOT_ATTRIBUTED}: " + "; ".join(lo.describe() for lo in unproven)
+            out.append(Record(id="hygiene/run/unattributed", status="SKIPPED", reason=text, seams=[], engine=True))
         with self._cv:
             done = {cid: list(recs) for cid, recs in self._records.items()}
         with self._live_lock:
@@ -485,9 +559,10 @@ class Engine:
         kept = paths.scratch if (self.cfg.keep and paths is not None) else None
         return RerunPaths(root=self.cfg.root, run=self.run_dir, scratch=kept)
 
-    def finish(self, check: Check, recs: list[Record], *, paths: Paths | None,
-               seconds: float | None) -> tuple[str, list[Record]]:
-        """Enrich, apply the known, require and after rules, write; return the check's status and its records."""
+    def finish(self, check: Check, recs: list[Record], *, paths: Paths | None, seconds: float | None,
+               exit_status: int | None = None, declared: bool = False) -> tuple[str, list[Record]]:
+        """Enrich, apply the known rule, the non-zero-exit rule again (``exit_status`` of a check that ran, unless the
+        adapter ``declared`` it), the require and after rules, write; return the check's status and its records."""
         where = self.rerun_paths(paths)
         for rec in recs:
             if rec.seams is None and rec.id.startswith("hygiene/"):
@@ -496,9 +571,18 @@ class Engine:
             rec.duration_s = None if seconds is None else round(seconds, 3)
         for rec in recs:
             record.apply_known(rec, self.cfg.seam_map.known, self.facts)
-            if self.cfg.require:
+        if exit_status not in (None, 0) and not declared and paths is not None and not any(
+                r.status == "FAIL" and not r.id.startswith("hygiene/") for r in recs):
+            tail, line = adapters.log_tail(paths.log)
+            rec = Record(id=check.id, status="FAIL", reason=f"exit {exit_status} but no failing result was parsed",
+                         assertion=tail or None, log_line=line or None, engine=True)
+            record.enrich(rec, check, self.cfg.seam_map, root=self.cfg.root, where=where)
+            rec.duration_s = None if seconds is None else round(seconds, 3)
+            recs = replace_own(recs, check.id, rec)
+        if self.cfg.require:
+            for rec in recs:
                 record.apply_require(rec)
-        record.mark_after(recs)
+        record.mark_after(recs, one_harness=True)
         red = any(r.status == "FAIL" for r in recs)
         kept = paths is not None and paths.scratch.exists() and (red or self.cfg.keep)
         if paths is not None and paths.scratch.exists() and not kept:
@@ -532,9 +616,8 @@ class Engine:
             return self.finish(check, self.made(check, "FAIL", f"unknown adapter {check.adapter!r} (registered: "
                                                 f"{', '.join(sorted(adapters.REGISTRY))})"), paths=None, seconds=None)
 
-        def waiting(text: str) -> None:
-            if not self.cfg.ci:
-                emit(self.err, f"t111: {check.id} {text}\n")
+        def waiting(text: str) -> None:  # a diagnosis, not progress: printed under --ci too
+            emit(self.err, f"t111: {check.id} {text}\n")
 
         try:
             with self.locks.for_check(check.locks(), check.cargo, cancel=self._stop, on_wait=waiting) as held:
@@ -547,9 +630,11 @@ class Engine:
             return None
         if isinstance(ran, str):
             return self.finish(check, self.made(check, "SKIPPED", ran), paths=None, seconds=None)
-        recs = self.parse(check, adapter, ran)
+        recs, declared = self.parse_declared(check, adapter, ran)
         recs += self.hygiene_records(check, ran)
-        return self.finish(check, recs, paths=ran.paths, seconds=ran.outcome.duration_s)
+        status = None if (ran.outcome.timed_out or check.id in self._stopped_live) else ran.outcome.status
+        return self.finish(check, recs, paths=ran.paths, seconds=ran.outcome.duration_s, exit_status=status,
+                           declared=declared)
 
     def run_locked(self, check: Check, fds: list[int]) -> Ran | str | None:
         """Steps 3–4 under the check's locks: a skip reason (the port pre-check), None (the run stopped first), or
@@ -575,7 +660,7 @@ class Engine:
         outcome = run_check(check, root=self.cfg.root, paths=paths, run_id=self.run_id, run_dir=self.run_dir,
                             kill_grace_s=self.cfg.kill_grace_s, on_start=started, start_lock=self._live_lock,
                             pass_fds=fds, log_cap_mb=self.cfg.log_cap_mb, drain_later=True,
-                            cancelled=self._stop.is_set)
+                            cancelled=self._stop.is_set, lock_dir=self.locks.directory)
         if outcome.not_started:
             with self._live_lock:
                 self._windows.pop(check.id, None)
@@ -587,6 +672,9 @@ class Engine:
                                            scratch=paths.scratch, live=dict(self._live), before=before)
             hygiene.kill_leftovers(found, self.runner_pid)
         cut = outcome.finish_log()
+        if cut and outcome.pump is not None:
+            with self._cv:
+                self.notes.append(f"note: {check.id}: {outcome.pump.describe()}")
         tree_after = hygiene.tree_state(self.cfg.root, self.run_id)
         with self._live_lock:
             window = sorted(self._windows.pop(check.id, {check.id}))
@@ -607,8 +695,7 @@ class Engine:
             out.append(Record(id=f"hygiene/{owner}", status="FAIL", reason=text, assertion=record.clip(text), seams=[],
                               check=owner if self.cfg.seam_map.check(owner) else check.id, engine=True))
         if unproven:
-            text = (f"{NOT_ATTRIBUTED}: our binary appeared during the check: "
-                    + "; ".join(lo.describe() for lo in unproven))
+            text = f"{NOT_ATTRIBUTED}: " + "; ".join(lo.describe() for lo in unproven)
             out.append(Record(id=f"hygiene/{check.id}/unattributed", status="SKIPPED", reason=text, seams=[],
                               engine=True))
         if ran.changed:
@@ -626,6 +713,10 @@ class Engine:
 
     def parse(self, check: Check, adapter: adapters.Adapter, ran: Ran) -> list[Record]:
         """The adapter's records plus the engine's rules (module docstring, step 5); one record per check id."""
+        return self.parse_declared(check, adapter, ran)[0]
+
+    def parse_declared(self, check: Check, adapter: adapters.Adapter, ran: Ran) -> tuple[list[Record], bool]:
+        """``parse``, and whether the adapter declared the exit (``AdapterContext.exit_declared``)."""
         paths, outcome = ran.paths, ran.outcome
         cache: dict[str, tuple[str, int]] = {}
 
@@ -637,20 +728,10 @@ class Engine:
                           engine=True)
 
         def replace(recs: list[Record], new: Record) -> list[Record]:
-            """``new`` in place of the check's own record (where the first one stood), never two with one id."""
-            out: list[Record] = []
-            for rec in recs:
-                if rec.id == check.id:
-                    if new not in out:
-                        out.append(new)
-                else:
-                    out.append(rec)
-            if new not in out:
-                out.append(new)
-            return out
+            return replace_own(recs, check.id, new)
 
         if outcome.error is not None:
-            return [fail(f"could not start: {outcome.error}")]
+            return [fail(f"could not start: {outcome.error}")], False
         ctx = AdapterContext(root=self.cfg.root, scratch=paths.scratch, tmp=paths.tmp, results=paths.results,
                              timed_out=outcome.timed_out, seam_map=self.cfg.seam_map, facts=dict(self.facts))
         try:
@@ -664,7 +745,7 @@ class Engine:
                 rec.engine = True
             if rec.status == "SKIPPED" and not rec.reason:
                 rec.reason = "skipped (no reason given)"
-        if check.id in self._stopped_live and outcome.status != 0:
+        if check.id in self._stopped_live:  # stopped: never PASS, whatever a TERM trap made the exit status
             recs = replace(recs, fail(f"{self._stop_why}: the runner killed the check"))
         elif outcome.timed_out:
             how = f"timeout after {check.timeout_s} s (TERM to the group, then KILL after {self.cfg.kill_grace_s:g} s)"
@@ -683,7 +764,21 @@ class Engine:
             target = next((r for r in recs if r.id == check.id), recs[0])
             words = f"log cut at {self.cfg.log_cap_mb:g} MB"
             target.reason = f"{target.reason}; {words}" if target.reason else words
-        return recs
+        return recs, ctx.exit_declared
+
+
+def replace_own(recs: list[Record], check_id: str, new: Record) -> list[Record]:
+    """``new`` in place of the check's own record (where the first one stood), never two with one id."""
+    out: list[Record] = []
+    for rec in recs:
+        if rec.id == check_id:
+            if new not in out:
+                out.append(new)
+        else:
+            out.append(rec)
+    if new not in out:
+        out.append(new)
+    return out
 
 
 def failed_start(cfg: Config, exc: BaseException) -> Result:

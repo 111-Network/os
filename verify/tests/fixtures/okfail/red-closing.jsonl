@@ -1,0 +1,3 @@
+{"exit_declared": true}
+{"id": "fx.ok/2/the-helper-waits-for-rnsd", "status": "PASS", "log_line": 3, "phase": "2. the helper started before rnsd never becomes the instance (R07 check 1b)"}
+{"id": "fx.ok/2/the-helper-became-the-shared-instance", "status": "FAIL", "assertion": "the helper became the shared instance  [HTTP ?: ]", "log_line": 4, "phase": "2. the helper started before rnsd never becomes the instance (R07 check 1b)"}

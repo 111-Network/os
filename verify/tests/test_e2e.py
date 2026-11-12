@@ -11,7 +11,7 @@ import unittest
 from pathlib import Path
 
 from . import helpers
-from .helpers import Sandbox, by_id, max_overlap
+from .helpers import unit_toml, Sandbox, by_id, max_overlap
 
 
 def last_line(text: str) -> str:
@@ -213,23 +213,48 @@ class Ordering(unittest.TestCase):
         self.assertEqual(recs["fx.requires"]["reason"], "requires fx.fail (FAIL)")
         self.assertEqual(recs["fx.after-pass"]["status"], "PASS")
 
+    LIBTEST_KNOWN = ("printf '%s\\n' 'running 2 tests' 'test passes ... ok' 'test known_fails ... FAILED' '' "
+                     "'failures:' '' '---- known_fails stdout ----' "
+                     "\"thread 'known_fails' panicked at tests/x.rs:1:1:\" 'fails as root' '' 'failures:' "
+                     "'    known_fails' '' 'test result: FAILED. 1 passed; 1 failed; 0 ignored; 0 measured; "
+                     "0 filtered out; finished in 0.00s'; exit 101")
+    """A cargo test binary's output with one failing test (exit 101): a parsed result ``[[known]]`` can match."""
+
     def test_known(self) -> None:
+        box = Sandbox(self)
+        mapdir = box.copy_map()
+        holds = "euid0" if os.geteuid() == 0 else "nonroot"
+        text = (mapdir / "checks.toml").read_text().replace('condition = "euid0"', f'condition = "{holds}"')
+        text += "\n" + unit_toml("fx.known2", ["sh", "-c", self.LIBTEST_KNOWN], adapter="libtest")
+        text += (f'\n[[known]]\ntest = "*/known_fails"\ncheck = "fx.known2"\ncondition = "{holds}"\n'
+                 'source = "fx/TASKS.md:1"\nreason = "fails as root in the fixture"\n')
+        (mapdir / "checks.toml").write_text(text)
+        done = box.run("--check", "fx.known2")
+        self.assertEqual(done.returncode, 0, done.stdout)
+        recs = by_id(box.results())
+        rec = recs["fx.known2/known_fails"]
+        self.assertEqual(rec["status"], "SKIPPED")
+        self.assertEqual(rec["reason"], "known: fails as root in the fixture (fx/TASKS.md:1)")
+        self.assertEqual(recs["fx.known2/passes"]["status"], "PASS")
+        self.assertNotIn("fx.known2", recs, "the parse accounts for exit 101: no backstop FAIL")
+        req = box.run("--check", "fx.known2", "--require")
+        self.assertEqual(req.returncode, 1)
+        self.assertEqual(by_id(box.results())["fx.known2/known_fails"]["status"], "FAIL")
+        other = "nonroot" if holds == "euid0" else "euid0"
+        (mapdir / "checks.toml").write_text(text.replace(f'condition = "{holds}"', f'condition = "{other}"'))
+        self.assertEqual(box.run("--check", "fx.known2").returncode, 1, "the condition does not hold: FAIL stands")
+
+    def test_known_never_hides_an_exit_status(self) -> None:
+        """X2c C1: a glob on an ``exit``-adapter check's id matches nothing (its record is the exit status)."""
         box = Sandbox(self)
         mapdir = box.copy_map()
         holds = "euid0" if os.geteuid() == 0 else "nonroot"
         text = (mapdir / "checks.toml").read_text().replace('condition = "euid0"', f'condition = "{holds}"')
         (mapdir / "checks.toml").write_text(text)
         done = box.run("--check", "fx.known")
-        self.assertEqual(done.returncode, 0, done.stdout)
+        self.assertEqual(done.returncode, 1, done.stdout)
         rec = by_id(box.results())["fx.known"]
-        self.assertEqual(rec["status"], "SKIPPED")
-        self.assertEqual(rec["reason"], "known: fails as root in the fixture (fx/TASKS.md:1)")
-        req = box.run("--check", "fx.known", "--require")
-        self.assertEqual(req.returncode, 1)
-        self.assertEqual(by_id(box.results())["fx.known"]["status"], "FAIL")
-        other = "nonroot" if holds == "euid0" else "euid0"
-        (mapdir / "checks.toml").write_text(text.replace(f'condition = "{holds}"', f'condition = "{other}"'))
-        self.assertEqual(box.run("--check", "fx.known").returncode, 1, "the condition does not hold: FAIL stands")
+        self.assertEqual((rec["status"], rec["reason"]), ("FAIL", "exit 3"))
 
 
 class Locks(unittest.TestCase):

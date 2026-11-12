@@ -249,7 +249,10 @@ class HygieneUnits(unittest.TestCase):
         self.assertEqual(pids[marked.pid].owner, "c.one")
         self.assertIn(named.pid, pids, "scratch rule")
         self.assertNotIn(other.pid, pids, "a live check's process is not a leftover")
-        self.assertTrue(all(lo.kill for lo in found if lo.proc.pid in (marked.pid, named.pid)))
+        self.assertTrue(pids[marked.pid].kill, "the marker is proof: killed")
+        # X2c C6: naming the scratch dir alone is no proof (an agent's tail -f): reported, never killed
+        self.assertFalse(pids[named.pid].kill)
+        self.assertIn("[not killed: it names the check's scratch dir", pids[named.pid].describe())
 
     def test_is_ours(self) -> None:
         P = hygiene.Proc

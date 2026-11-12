@@ -1,0 +1,2 @@
+{"exit_declared": false}
+{"id": "fx.kb", "status": "FAIL", "reason": "build.py did not finish (no 'N error(s), M warning(s)' line)", "assertion": "Traceback (most recent call last):\n  File \"/repo/0-knowledge/_meta/build.py\", line 12, in <module>\n    import yaml\nModuleNotFoundError: No module named 'yaml'", "log_line": 1}

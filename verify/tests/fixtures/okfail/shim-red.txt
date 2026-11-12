@@ -1,0 +1,83 @@
+t1-test: ok: dash: happy path verifies + dry-run prints commands
+t1-test: FAIL: dash: --phone dry-run (rc=1)
+111-shim: 111 Network bootstrap shim v2026.10.12
+111-shim: downloading 111 v2026.10.12 for x86_64-unknown-linux-musl
+111-shim: fetched from primary: http://127.0.0.1:34554/111-x86_64-unknown-linux-musl
+111-shim: sha256 verified: 4d389d797e48b8604ba8485dd42c7b4926662bf679c4fb887e5d058458a70867
+111-shim: dry-run: would run: install -m 0755 /tmp/x3/111-shim.k7VyYi/111 /tmp/111-shim-test.sPoFkA/ro-bin/111-bootstrap
+111-shim: WARNING: --phone must run as your normal user, not root (adb authorization is per-user).
+111-shim: run this as your normal user (no sudo) to provision the phone:
+  /tmp/111-shim-test.sPoFkA/ro-bin/111-bootstrap install --min-installer-version=2026.10.01 '--phone'
+t1-test: FAIL: dash: --phone user run (rc=1, priv calls: )
+111-shim: 111 Network bootstrap shim v2026.10.12
+111-shim: downloading 111 v2026.10.12 for x86_64-unknown-linux-musl
+111-shim: fetched from primary: http://127.0.0.1:34554/111-x86_64-unknown-linux-musl
+111-shim: sha256 verified: 4d389d797e48b8604ba8485dd42c7b4926662bf679c4fb887e5d058458a70867
+111-shim: installed root-owned /tmp/111-shim-test.sPoFkA/rw-bin/111-bootstrap
+111-shim: WARNING: --phone must run as your normal user, not root (adb authorization is per-user).
+111-shim: run this as your normal user (no sudo) to provision the phone:
+  /tmp/111-shim-test.sPoFkA/rw-bin/111-bootstrap install --min-installer-version=2026.10.01 '--phone' '--yes'
+t1-test: FAIL: dash: --phone no-privilege path (rc=0)
+111-shim: 111 Network bootstrap shim v2026.10.12
+111-shim: downloading 111 v2026.10.12 for x86_64-unknown-linux-musl
+111-shim: fetched from primary: http://127.0.0.1:34554/111-x86_64-unknown-linux-musl
+111-shim: sha256 verified: 4d389d797e48b8604ba8485dd42c7b4926662bf679c4fb887e5d058458a70867
+111-shim: installed /tmp/111-shim-test.sPoFkA/ro-bin/111-bootstrap
+fake 111 installer x86_64: install --min-installer-version=2026.10.01 --phone
+fake uid=0
+t1-test: ok: dash: tampered hash refused before exec
+t1-test: ok: dash: armv7l refused
+t1-test: ok: dash: 32-bit userspace warns + uses kernel arch
+t1-test: ok: dash: no-privilege prints su -c line
+t1-test: ok: dash: truncated shim never reaches verification
+t1-test: ok: bash: happy path verifies + dry-run prints commands
+t1-test: FAIL: bash: --phone dry-run (rc=1)
+111-shim: 111 Network bootstrap shim v2026.10.12
+111-shim: downloading 111 v2026.10.12 for x86_64-unknown-linux-musl
+111-shim: fetched from primary: http://127.0.0.1:34554/111-x86_64-unknown-linux-musl
+111-shim: sha256 verified: 4d389d797e48b8604ba8485dd42c7b4926662bf679c4fb887e5d058458a70867
+111-shim: dry-run: would run: install -m 0755 /tmp/x3/111-shim.Foer29/111 /tmp/111-shim-test.sPoFkA/ro-bin/111-bootstrap
+111-shim: WARNING: --phone must run as your normal user, not root (adb authorization is per-user).
+111-shim: run this as your normal user (no sudo) to provision the phone:
+  /tmp/111-shim-test.sPoFkA/ro-bin/111-bootstrap install --min-installer-version=2026.10.01 '--phone'
+t1-test: FAIL: bash: --phone user run (rc=1, priv calls: )
+111-shim: 111 Network bootstrap shim v2026.10.12
+111-shim: downloading 111 v2026.10.12 for x86_64-unknown-linux-musl
+111-shim: fetched from primary: http://127.0.0.1:34554/111-x86_64-unknown-linux-musl
+111-shim: sha256 verified: 4d389d797e48b8604ba8485dd42c7b4926662bf679c4fb887e5d058458a70867
+111-shim: installed root-owned /tmp/111-shim-test.sPoFkA/rw-bin/111-bootstrap
+111-shim: WARNING: --phone must run as your normal user, not root (adb authorization is per-user).
+111-shim: run this as your normal user (no sudo) to provision the phone:
+  /tmp/111-shim-test.sPoFkA/rw-bin/111-bootstrap install --min-installer-version=2026.10.01 '--phone' '--yes'
+t1-test: FAIL: bash: --phone no-privilege path (rc=0)
+111-shim: 111 Network bootstrap shim v2026.10.12
+111-shim: downloading 111 v2026.10.12 for x86_64-unknown-linux-musl
+111-shim: fetched from primary: http://127.0.0.1:34554/111-x86_64-unknown-linux-musl
+111-shim: sha256 verified: 4d389d797e48b8604ba8485dd42c7b4926662bf679c4fb887e5d058458a70867
+111-shim: installed /tmp/111-shim-test.sPoFkA/ro-bin/111-bootstrap
+fake 111 installer x86_64: install --min-installer-version=2026.10.01 --phone
+fake uid=0
+t1-test: ok: bash: tampered hash refused before exec
+t1-test: ok: bash: armv7l refused
+t1-test: ok: bash: 32-bit userspace warns + uses kernel arch
+t1-test: ok: bash: no-privilege prints su -c line
+t1-test: ok: bash: truncated shim never reaches verification
+t1-test: FAIL: busybox: happy path (rc=127)
+1-bootstrap/shim/tests/run.sh: 90: busybox: not found
+t1-test: FAIL: busybox: --phone dry-run (rc=127)
+1-bootstrap/shim/tests/run.sh: 90: busybox: not found
+t1-test: FAIL: busybox: --phone user run (rc=127, priv calls: )
+1-bootstrap/shim/tests/run.sh: 90: busybox: not found
+t1-test: FAIL: busybox: --phone no-privilege path (rc=127)
+1-bootstrap/shim/tests/run.sh: 90: busybox: not found
+t1-test: FAIL: busybox: tamper refusal
+1-bootstrap/shim/tests/run.sh: 101: busybox: not found
+t1-test: FAIL: busybox: armv7l refusal
+1-bootstrap/shim/tests/run.sh: 90: busybox: not found
+t1-test: FAIL: busybox: 32-bit userspace handling
+1-bootstrap/shim/tests/run.sh: 90: busybox: not found
+t1-test: FAIL: busybox: no-privilege path (rc=127)
+1-bootstrap/shim/tests/run.sh: 90: busybox: not found
+t1-test: ok: busybox: truncated shim never reaches verification
+
+t1-test: 14 case(s) failed

@@ -1,0 +1,4 @@
+{"exit_declared": false}
+{"id": "fx.ok/3/root-made", "status": "PASS", "log_line": 3, "phase": "3. scratch node root"}
+{"id": "fx.ok/4/daemon-up-on-127.0.0.1-n-within-4s", "status": "PASS", "log_line": 6, "phase": "4. namespace + daemon"}
+{"id": "fx.ok", "status": "FAIL", "reason": "harness did not finish (last phase: 4. namespace + daemon)", "assertion": "== 3. scratch node root  (t+95.4s)\nok: root made\nG7 GREEN\n== 4. namespace + daemon  (t+96.1s)\nok: daemon up on 127.0.0.1:11180 within 4s", "log_line": 2}

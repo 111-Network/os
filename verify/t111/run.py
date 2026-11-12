@@ -8,10 +8,14 @@ check declares on top of the runner's, plus:
 - ``T111_SCRATCH=<scratch>``, ``T111_RUN=<run-id>``, ``T111_CHECK=<check id>`` (the hygiene markers),
 - ``T111_RUNNER_PID=<pid>``, ``T111_RUNNER_START=<start ticks>`` (the runner, so a later run can tell a dead run's
   leftovers from a live run's processes: ``t111.hygiene.sweep_dead_runs``),
-- ``T111_RESULTS=<scratch>/emit.jsonl`` (the shared emitter's output file, F3 phase 2).
+- ``T111_RESULTS=<scratch>/emit.jsonl`` (the shared emitter's output file, F3 phase 2),
+- ``T111_LOCKS=<lock dir>`` (the runner's lock dir: a nested runner shares the box's locks, and the dead-run sweep
+  of ``t111.hygiene`` only touches the processes of runs that share its lock dir).
 
-The pipe is copied into ``out.log`` by a ``LogPump`` thread up to a cap (``--log-cap``, 64 MB): past it the pump keeps
-reading and drops the bytes (the check never blocks on a full pipe) and the log ends with one ``t111: log cut`` line.
+The pipe is copied into ``out.log`` by a ``LogPump`` thread: the head up to a cap (``--log-cap``, 64 MB), then the
+pump keeps reading (the check never blocks on a full pipe) and keeps only the last 1 MB, where the adapters read the
+summary and the last error. A cut log holds the head, one line ``t111: log cut at N MB: M bytes dropped here …``
+and that last MB (from its first whole line).
 The leader's pid is registered in ``t111.hygiene.SPAWNED`` in the same critical section as the fork; ``pass_fds`` hands
 the check the lock fds it holds (``t111.locks``). At ``timeout_s`` the whole process group gets SIGTERM, then SIGKILL
 after ``kill_grace_s`` (10 s). The outcome carries the exit status, whether it timed out, and the duration (for the
@@ -39,6 +43,9 @@ KILL_GRACE_S = 10.0
 LOG_CAP_MB = 64.0
 """How many MB of a check's output ``out.log`` keeps (``--log-cap``)."""
 
+TAIL_KEEP_BYTES = 1 << 20
+"""How many closing bytes of a cut log ``LogPump`` keeps after the cut marker."""
+
 DRAIN_MAX_READS = 256
 """At most this many 64 KB reads after ``LogPump.finish`` (16 MB): what was written before the stop is in the pipe."""
 
@@ -63,32 +70,51 @@ class Paths:
 
 
 class LogPump:
-    """Copies a check's output from the read end of its pipe into ``log``, at most ``cap_bytes`` bytes.
+    """Copies a check's output from the read end of its pipe into ``log``: the first ``cap_bytes`` bytes, and of the
+    rest the last ``TAIL_KEEP_BYTES``.
 
     The thread reads until EOF (every writer gone) or until ``finish`` asks it to stop; then it drains what the pipe
-    still holds without blocking and closes. Past the cap it keeps reading and drops the bytes, and the log gets one
-    closing line ``t111: log cut at N MB``. ``cut`` says whether that happened.
+    still holds without blocking and closes. Past the cap it keeps reading into a bounded tail buffer; at the close a
+    cut log gets one marker line ``t111: log cut at N MB: M bytes dropped here (the head above, the last … below)``
+    and then the tail (from its first whole line). ``cut`` says whether that happened, ``dropped`` how many bytes.
     """
 
     def __init__(self, fd: int, log: Path, cap_bytes: int, cap_mb: float):
         self._fd = fd
-        self._log = log.open("ab")
+        self._log = log.open("ab", buffering=0)  # unbuffered: a reader of out.log sees the check live
         self.cap_bytes = max(0, cap_bytes)
         self.cap_mb = cap_mb
         self.written = 0
         self.cut = False
+        self.dropped = 0
+        self._tail = bytearray()
         self._stop = threading.Event()
         self._thread = threading.Thread(target=self._run, name="t111-log-pump", daemon=True)
         self._thread.start()
+
+    def _write(self, data: bytes) -> None:
+        """Write all of ``data`` to the unbuffered log (a raw write may take only part of it)."""
+        view = memoryview(data)
+        while view:
+            n = self._log.write(view)
+            if not n:  # nothing taken (a full disk): give up rather than spin
+                return
+            view = view[n:]
 
     def _keep(self, chunk: bytes) -> None:
         room = self.cap_bytes - self.written
         if room > 0:
             part = chunk[:room]
-            self._log.write(part)
+            self._write(part)
             self.written += len(part)
-        if len(chunk) > max(room, 0):
+            chunk = chunk[room:]
+        if chunk:
             self.cut = True
+            self._tail += chunk
+            over = len(self._tail) - TAIL_KEEP_BYTES
+            if over > 0:
+                del self._tail[:over]
+                self.dropped += over
 
     def _drain(self) -> None:
         """Read what the pipe holds now, without blocking (bounded: a writer that never stops cannot hold us)."""
@@ -121,8 +147,15 @@ class LogPump:
             except OSError:
                 pass
             if self.cut:
-                self._log.write(f"\nt111: log cut at {self.cap_mb:g} MB (the rest of the output was read and "
-                                f"dropped)\n".encode())
+                tail = bytes(self._tail)
+                if self.dropped:
+                    cut = tail.find(b"\n")
+                    if 0 <= cut < len(tail) - 1:
+                        self.dropped += cut + 1
+                        tail = tail[cut + 1:]
+                self._write(f"\nt111: log cut at {self.cap_mb:g} MB: {self.dropped} bytes dropped here (the "
+                                f"head above, the last {len(tail)} bytes below)\n".encode())
+                self._write(tail)
             self._log.close()
 
     def finish(self) -> bool:
@@ -130,6 +163,11 @@ class LogPump:
         self._stop.set()
         self._thread.join()
         return self.cut
+
+    def describe(self) -> str:
+        """The note of a cut log (for the summary)."""
+        return (f"log cut at {self.cap_mb:g} MB: {self.dropped} bytes dropped between the head and the last "
+                f"{TAIL_KEEP_BYTES // (1 << 20)} MB")
 
 
 @dataclass(frozen=True)
@@ -170,7 +208,7 @@ def runner_marker() -> dict[str, str]:
 
 
 def check_env(check: Check, *, paths: Paths, run_id: str, tokens: Mapping[str, str],
-              base: Mapping[str, str] | None = None) -> dict[str, str]:
+              base: Mapping[str, str] | None = None, lock_dir: Path | None = None) -> dict[str, str]:
     """The environment of a check: the runner's, the check's ``env`` (tokens expanded), then the runner's markers."""
     env = dict(os.environ if base is None else base)
     env.pop("T111_HELPER", None)
@@ -182,6 +220,8 @@ def check_env(check: Check, *, paths: Paths, run_id: str, tokens: Mapping[str, s
     env["T111_CHECK"] = check.id
     env.update(runner_marker())
     env["T111_RESULTS"] = str(paths.results)
+    if lock_dir is not None:
+        env["T111_LOCKS"] = str(lock_dir)
     return env
 
 
@@ -196,7 +236,7 @@ def run_check(check: Check, *, root: Path, paths: Paths, run_id: str, run_dir: P
               kill_grace_s: float = KILL_GRACE_S, on_start: Callable[[int], None] | None = None,
               start_lock: threading.Lock | threading.RLock | None = None, pass_fds: Sequence[int] = (),
               log_cap_mb: float = LOG_CAP_MB, drain_later: bool = False,
-              cancelled: Callable[[], bool] | None = None) -> Outcome:
+              cancelled: Callable[[], bool] | None = None, lock_dir: Path | None = None) -> Outcome:
     """Run ``check`` to completion (or its timeout) and return the outcome.
 
     ``on_start(pid)`` is called with the session leader's pid right after it starts, under ``start_lock`` when given
@@ -210,7 +250,7 @@ def run_check(check: Check, *, root: Path, paths: Paths, run_id: str, run_dir: P
     tokens = {"root": str(root), "scratch": str(paths.scratch), "tmp": str(paths.tmp), "run": str(run_dir)}
     argv = [expand(part, tokens) for part in check.cmd]
     cwd = root / check.cwd
-    env = check_env(check, paths=paths, run_id=run_id, tokens=tokens)
+    env = check_env(check, paths=paths, run_id=run_id, tokens=tokens, lock_dir=lock_dir)
     began = time.monotonic()
     read_fd, write_fd = os.pipe()
     proc: subprocess.Popen | None = None

@@ -1,0 +1,6 @@
+
+== 3. scratch node root  (t+95.4s)
+ok: root made
+G7 GREEN
+== 4. namespace + daemon  (t+96.1s)
+ok: daemon up on 127.0.0.1:11180 within 4s

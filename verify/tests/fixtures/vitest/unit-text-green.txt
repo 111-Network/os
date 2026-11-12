@@ -1,0 +1,11 @@
+
+ RUN  v3.2.7 /repo/4-interface/ui
+
+ ✓ test/contacts.test.ts (50 tests) 252ms
+
+ Test Files  1 passed (1)
+      Tests  50 passed (50)
+   Start at  10:24:46
+   Duration  1.07s (transform 370ms, setup 0ms, collect 390ms, tests 252ms, environment 0ms, prepare 183ms)
+
+JSON report written to /tmp/x3/cap/vitest-contacts.json

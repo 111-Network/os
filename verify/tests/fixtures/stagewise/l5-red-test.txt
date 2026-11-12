@@ -1,0 +1,286 @@
+== fmt ==
+== clippy ==
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.21s
+== test ==
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.15s
+     Running unittests src/lib.rs (/tmp/x3/target/mesh111/debug/deps/mesh111-73e1432ffebbe9f1)
+
+running 200 tests
+test ack::tests::ack_epoch_above_i64_max_is_rejected_before_any_state ... ok
+test ack::tests::canonical_rules ... ok
+test ack::tests::round_trip_two_epochs ... ok
+test ack::tests::ack_len_is_exact ... ok
+test ack::tests::payload_tail_is_zero_or_sig ... ok
+test blobs::tests::plaintext_len_rejects_noncanonical ... ok
+test blobs::tests::outboard_overheads ... ok
+test blobs::tests::corrupted_data_is_refused ... ok
+test blobs::tests::public_round_trip_and_files ... ok
+test blobs::tests::root_identical_across_chunk_groups ... ok
+test blobs::tests::private_nonce_and_ad_layout ... ok
+test blobs::tests::verified_ranges_across_groups_share_the_address ... ok
+test blobs::tests::write_limits_and_expected_hash ... ok
+test contacts::tests::appdata_and_bundle ... ok
+test contacts::tests::base32_round_trip_and_rfc4648_vectors ... ok
+test contacts::tests::cards_verify_and_classify ... ok
+test contacts::tests::node_ids_parse_hex_and_bech32 ... ok
+test custody::tests::pkt_ref_is_domain_tagged_and_exact ... ok
+test blobs::tests::private_tamper_reorder_truncate_wrong_key ... ok
+test custody::tests::status_seq_pairing ... ok
+test enroll::tests::hash_binds_secret_member_and_code ... ok
+test blobs::tests::truncation_at_a_chunk_boundary_fails_decryption ... ok
+test enroll::tests::offer_single_use_and_lockout ... ok
+test enroll::tests::strict_parser_matches_frozen_rejections ... ok
+test enroll::tests::keyed_hash_known_answers ... ok
+test envelope::tests::decode_rejections ... ok
+test custody::tests::round_trip_and_transferable_sig ... ok
+test envelope::tests::forged_sender_ref_and_collisions ... ok
+test envelope::tests::dest_hub_tlv_codec ... ok
+test envelope::tests::layer7::layer7_files_match_generation ... ok
+test envelope::tests::layer7::write_layer7_vectors ... ignored
+test envelope::tests::layer7::layer7_vectors ... ok
+test envelope::tests::outer_extra_bits ... ok
+test envelope::tests::packet_size_gates ... ok
+test envelope::tests::pair_mac_binds_header_epk_and_inner ... ok
+test envelope::tests::losing_intro_candidate_is_forgotten ... ok
+test envelope::tests::pair_mac_is_checked_before_inner_parse ... ok
+test envelope::tests::intro_first_contact_and_conflicts ... ok
+test envelope::tests::piggyback_and_ext_round_trip ... ok
+test envelope::tests::seal_open_round_trip_tier0 ... ok
+test blobs::tests::private_round_trip_and_framing ... ok
+test envelope::tests::reserved_bits_rejected_under_valid_pair_mac ... ok
+test envelope::tests::resealed_signature_never_authenticates ... ok
+test envelope::tests::split_auth_reads_only_flags ... ok
+test fabric::foreign_tests::a_pre_air_refusal_aborts_the_handoff_mark ... ok
+test envelope::tests::sig_binds_fragment_position ... ok
+test fabric::foreign_tests::an_uncached_identical_upsert_emits_nothing ... ok
+test fabric::foreign_tests::cancel_only_while_queued_and_never_handed_off ... ok
+test fabric::foreign_tests::edge_options_are_set_without_touching_the_consent_or_the_marks ... ok
+test fabric::foreign_tests::edges_through_the_actor ... ok
+test fabric::foreign_tests::own_rows_states_and_meta_are_per_message ... ok
+test fabric::foreign_tests::queue_order_puts_user_rows_ahead_of_relay_copies ... ok
+test fabric::foreign_tests::ingest_is_one_bounded_batch_per_call ... ok
+test envelope::tests::signed_kinds_and_dest_binding ... ok
+test envelope::tests::size_table ... ok
+test fabric::foreign_tests::thread_pages_read_marks_and_more ... ok
+test fabric::foreign_tests::unpinned_channel_traffic_coalesces_per_conversation_dms_per_message ... ok
+test fabric::tests::a_resident_row_is_small ... ok
+test fabric::tests::conn_send_rule ... ok
+test fabric::tests::eviction_prefers_a_row_that_loses_nothing ... ok
+test fabric::tests::eviction_takes_the_newest_idle_row_whose_turn_is_down ... ok
+test fabric::tests::forward_targets_follow_the_table ... ok
+test fabric::tests::a_commit_is_kept_until_queued_and_resent_beside_the_fetch ... ok
+test fabric::tests::pair_roles_links_and_their_rules ... ok
+test fabric::tests::sealed_len_matches_the_size_table ... ok
+test fabric::tests::the_carrier_bound ... ok
+test fabric::tests::the_hit_cache_is_bounded ... ok
+test frag::tests::budgets_match_the_size_table ... ok
+test frag::tests::loss_inference_uses_send_order ... ok
+test frag::tests::plan_never_leaves_an_empty_fragment ... ok
+test frag::tests::plan_tiers_and_bounds ... ok
+test frag::tests::replace_semantics_regress_evicted_bits ... ok
+test frag::tests::slices_are_even_deterministic_and_cover ... ok
+test ids::tests::epoch_rule ... ok
+test ids::tests::msg_seq_wire_form ... ok
+test ids::tests::reader_bounds ... ok
+test ids::tests::varint_rejects_overlong_overflow_truncation ... ok
+test ids::tests::varint_round_trip_and_lengths ... ok
+test keys::tests::mode_s_known_answers ... ok
+test keys::tests::mode_s_provider_matches_kdf_and_binds_node_id ... ok
+test keys::tests::mode_t_is_unsupported ... ok
+test keys::tests::sqlcipher_literal_form ... ok
+test keys::tests::store_kdf_vectors ... ok
+test link::lossy::tests::announce_first_then_mtu_loss_reorder ... ok
+test fabric::tests::no_pairing_and_no_hand_off_without_the_hub_role ... ok
+test link::tcp_lan::tests::a_refused_wrap_writes_no_111_byte ... ok
+test fabric::tests::a_refused_intro_leaves_no_heard_entry ... ok
+test link::tcp_lan::tests::a_mismatched_first_announce_ends_the_connection ... ok
+test link::tcp_lan::tests::caps_are_checked_before_the_body ... ok
+test link::tcp_lan::tests::frame_encoding_is_type_len_be_body ... ok
+test link::tcp_lan::tests::loopback_detection_covers_mapped_v6 ... ok
+test link::tcp_lan::tests::read_frame_refuses_oversize_without_reading_body ... ok
+test link::tcp_lan::tests::set_announce_applies_to_new_connections ... ok
+test link::tcp_lan::tests::the_default_is_no_wrap ... ok
+test link::tests::frames ... ok
+test link::tests::profiles_match_the_spec_table ... ok
+test mailbox::tests::codes_normalize_like_the_pair_code ... ok
+test mailbox::tests::enroll_ok_round_trip_and_refusals ... ok
+test mailbox::tests::push_window_flow_control ... ok
+test mailbox::tests::put_item_cursor_round_trip ... ok
+test outbox::tests::ack_basic_prefix_and_ranges ... ok
+test outbox::tests::ack_ordering_rule_selects_the_acknowledged_range_first ... ok
+test outbox::tests::ack_respects_the_byte_budget_and_keeps_the_acked_partial ... ok
+test outbox::tests::body_is_deterministic_cbor ... ok
+test outbox::tests::forwarding_reason_code_and_sentence ... ok
+test outbox::tests::highest_seen_reads_the_newest_epoch ... ok
+test outbox::tests::reasons_round_trip ... ok
+test outbox::tests::strong_receipts_only_for_acknowledged ... ok
+test store::rx::tests::decode_rejects_bad_rows ... ok
+test store::rx::tests::prefix_and_range_merging ... ok
+test store::rx::tests::range_bound_defers_never_forgets ... ok
+test store::rx::tests::top_of_n_space ... ok
+test store::tests::a_copy_with_a_pending_handoff_is_pruned_as_handed_never_shed ... ok
+test fabric::tests::a_push_counts_only_once_queued_and_rolls_back_on_a_send_error ... ok
+test link::tcp_lan::tests::a_wrapped_inbound_stream_carries_the_wire_unchanged ... ok
+test link::tcp_lan::tests::a_wrapped_dial_names_the_pair_and_carries_the_wire ... ok
+test store::tests::a_full_class_never_refuses_another_class ... ok
+test store::tests::a_second_copy_of_one_origin_on_one_edge_is_refused ... ok
+test store::tests::a_store_newer_than_this_build_is_refused ... ok
+test store::tests::a_pending_mint_survives_a_clean_close ... ok
+test store::tests::a_pending_handoff_is_aborted_only_on_a_queued_own_row ... ok
+test store::tests::a_v3_store_opens_at_v4_and_its_custody_rows_read_as_member_rows ... ok
+test store::tests::a_v1_store_migrates_to_the_current_schema_in_place ... ok
+test store::tests::a_v2_store_opens_at_the_current_schema_and_keeps_its_rows ... ok
+test store::tests::a_v4_store_is_refused_by_a_v3_build ... ok
+test store::tests::an_origin_over_its_share_is_refused_while_others_are_admitted ... ok
+test store::tests::backup_restored_onto_a_live_identity_mints_although_closed_cleanly ... ok
+test store::tests::bounded_ranges_defer_and_never_forget ... ok
+test store::tests::cancel_drops_unsent_parts_only_one_by_one ... ok
+test store::tests::class_foreign_is_pinned_never_from_a_kind_and_never_refusable ... ok
+test store::tests::class_transit_is_pinned_quota_only_and_never_from_a_kind ... ok
+test store::tests::contact_trust_is_monotone_and_flags_survive_refresh ... ok
+test store::tests::clean_close_and_reopen_keeps_the_epoch_and_n ... ok
+test store::tests::contacts_keys_are_immutable_and_stale_announces_change_nothing ... ok
+test store::tests::conversations_upsert_by_identity_and_refuse_bad_ids ... ok
+test store::tests::custody_dedup_fetch_commit_and_monotonic_sequence ... ok
+test store::tests::custody_floor_sits_below_what_is_still_held_uncommitted ... ok
+test store::tests::blob_round_trips_refcounts_and_sweep ... ok
+test store::tests::custody_pkt_ref_is_computed_from_the_item_bytes ... ok
+test store::tests::custody_splits_by_fwd_between_custody_and_transit ... ok
+test store::tests::dedup_matrix_persists_across_reopen ... ok
+test store::tests::dedupe_matrix_repeating_ids_need_the_body_in_the_window ... ok
+test store::tests::disabling_an_edge_drops_its_never_handed_copies ... ok
+test store::tests::edge_inputs_honour_cursor_and_relayed_seq_and_skip_copies ... ok
+test store::tests::edge_options_change_alone_and_report_whether_they_changed ... ok
+test store::tests::foreign_rows_share_the_one_local_seq_with_111_rows ... ok
+test store::tests::every_allocated_n_names_a_stored_message ... ok
+test store::tests::epoch_eviction_drops_fragment_bytes ... ok
+test store::tests::forward_heads_page_like_forward_pending_without_the_bytes ... ok
+test store::tests::foreign_states_are_monotone ... ok
+test store::tests::fragment_bytes_survive_a_crash_and_the_message_finishes ... ok
+test store::tests::fresh_store_requires_a_mint_before_any_allocation ... ok
+test store::tests::fragments_partials_and_completion ... ok
+test store::tests::frozen_epochs_keep_delivering_and_evicted_epochs_stay_dead ... ok
+test store::tests::free_disk_below_one_percent_triggers_pruning ... ok
+test store::tests::incoming_items_never_displace_own_history ... ok
+test store::tests::just_over_the_watermark_prunes_exactly_the_heaviest_item ... ok
+test store::tests::keyless_private_blobs_and_store_minted_keys ... ok
+test store::tests::message_states_never_regress_and_delivery_releases_the_outbox ... ok
+test store::tests::no_pairing_writes_exactly_the_member_row ... ok
+test store::tests::n_space_exhaustion_refuses_then_mints ... ok
+test store::tests::ingest_batches_are_bounded_one_transaction_with_contiguous_seqs ... ok
+test store::tests::open_applies_pragmas_and_encrypts_the_file ... ok
+test store::tests::one_batch_numbers_a_copys_parts_in_order_and_origins_ascending ... ok
+test store::tests::own_rows_are_either_user_composed_or_a_copy_on_a_live_edge ... ok
+test store::tests::own_unplanned_lists_numbered_messages_without_outbox_rows ... ok
+test store::tests::over_transit_with_only_protected_rows_forward_puts_are_refused_member_puts_admitted ... ok
+test store::tests::pending_node_ids_persist_until_removed ... ok
+test store::tests::pruning_runs_2a_then_2b_between_steps_2_and_3_and_keeps_the_never_list ... ok
+test store::tests::protected_transit_counts_toward_the_high_watermark ... ok
+test store::tests::pruning_follows_the_normative_order_and_raises_store_full ... ok
+test store::tests::queue_own_message_commits_n_with_content ... ok
+test store::tests::queue_order_puts_user_composed_rows_first_and_holds_pending_handoffs ... ok
+test store::tests::quotas_shape_refusable_classes_only ... ok
+test store::tests::receive_message_dedups_and_re_acks_never_redelivers ... ok
+test store::tests::refused_forward_rows_are_step_one_evictable_and_protected_ones_never ... ok
+test store::tests::restore_floor_set_since_last_run_mints ... ok
+test store::tests::restore_pending_refuses_allocation_until_an_epoch_is_recorded ... ok
+test store::tests::schema_newer_than_build_is_refused ... ok
+test store::tests::sequence_transactions_run_at_synchronous_full ... ok
+test store::tests::step_one_evicts_delivered_transit_messages ... ok
+test store::tests::store_full_survives_a_reopen ... ok
+test store::tests::the_foreign_shaping_quota_evicts_first_and_never_refuses ... ok
+test store::tests::the_dedupe_window_counts_inbound_rows_only ... ok
+test store::tests::the_handoff_meta_key_is_reserved ... ok
+test store::tests::request_admission_quota_store_full_and_live_bytes ... ok
+test store::tests::the_transit_quota_defaults_to_a_quarter_and_the_share_to_an_eighth ... ok
+test store::tests::the_v4_checks_refuse_a_forward_row_without_its_origin ... ok
+test store::tests::the_prune_order_places_forward_rows_by_their_commit_state ... ok
+test store::tests::thread_queries_read_the_newest_page_and_counts_only ... ok
+2026-11-11 21:39:33.446: ERROR CORE sqlcipher_page_cipher: hmac check failed for pgno=1
+2026-11-11 21:39:33.447: ERROR CORE sqlite3Codec: error decrypting page 1 data: 1
+2026-11-11 21:39:33.447: ERROR CORE sqlcipher_codec_ctx_set_error 1
+test store::tests::wrong_key_and_mode_t_are_refused ... ok
+test store::tests::unclean_shutdown_forces_an_epoch_jump ... ok
+test test_double::frozen::enroll_vectors ... ok
+test test_double::frozen::ack_vectors ... ok
+test test_double::frozen::custody_vectors ... ok
+test test_double::frozen::ids_vectors ... ok
+test test_double::frozen::write_vectors ... ignored
+test test_double::frozen::envelope_vectors ... ok
+test test_double::frozen::frozen_files_match_generation ... ok
+test store::tests::foreign_seen_is_bounded_per_edge_and_evicts_the_oldest ... ok
+
+test result: ok. 198 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; finished in 2.84s
+
+     Running tests/contacts.rs (/tmp/x3/target/mesh111/debug/deps/contacts-4559af941027cb32)
+
+running 1 test
+test node_id_contacts_survive_restarts_until_forgotten ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.10s
+
+     Running tests/flood.rs (/tmp/x3/target/mesh111/debug/deps/flood-905073e24c93cea1)
+
+running 1 test
+test a_flooding_peer_is_back_pressured_not_buffered ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 3.61s
+
+     Running tests/foreign_burst.rs (/tmp/x3/target/mesh111/debug/deps/foreign_burst-6fb34716c1511c10)
+
+running 1 test
+test a_thousand_row_burst_does_not_starve_111_delivery ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.41s
+
+     Running tests/forward.rs (/tmp/x3/target/mesh111/debug/deps/forward-86f72ef4ee369128)
+
+running 26 tests
+test a_far_frame_with_a_post_outstanding_emits_forward ... FAILED
+test a_former_member_pairs_only_by_two_recorded_enrollments ... ok
+test a_half_pair_forwards_nothing ... ok
+test a_hinted_message_crosses_to_the_other_island_and_its_ack_comes_back ... ok
+test a_hubs_own_messages_never_enter_its_forward_table ... ok
+test a_replayed_or_misdirected_pair_ack_changes_nothing ... ok
+test a_whole_pair_keeps_no_pairing_dial ... ok
+test an_origin_over_its_share_gets_reject_full_while_another_is_admitted ... ok
+test a_6000_row_backlog_drains_through_the_resident_window has been running for over 60 seconds
+test a_down_pairs_backlog_never_holds_back_an_up_pairs_rows has been running for over 60 seconds
+test a_full_pair_never_holds_back_another_pairs_stored_rows has been running for over 60 seconds
+test a_full_pair_never_holds_back_another_pairs_stored_rows ... ok
+test every_target_refusing_marks_the_row_refused_and_a_down_pair_keeps_it ... ok
+test leaf_to_leaf_across_the_carrier_and_back ... ok
+test no_hint_probes_in_paired_hubs_order_then_the_cache_answers ... ok
+test protected_rows_resume_after_a_restart ... ok
+test an_unpairing_moves_stored_rows_before_newer_ones ... ok
+test reject_unenrolled_breaks_the_pair_and_returns_the_row ... ok
+test reject_full_keeps_the_row_for_its_pair_and_retries_on_events_only ... ok
+test rule_1_re_arms_a_post_once_per_far_hub_round ... ok
+test the_carrier_hand_off_posts_once_reposts_on_cue_and_consumes_acks ... ok
+test the_gate_table_with_the_carrier_bound ... ok
+test target_computations_stay_linear_in_a_1000_row_drain ... ok
+test unpairing_returns_rows_and_the_far_hub_is_no_member_after ... ok
+test with_no_pairing_frames_and_answers_are_layer_5s ... ok
+test with_the_hub_role_off_pairs_wait_and_nothing_is_forwarded ... ok
+test the_swap_probe_reads_a_deep_store_on_its_own ... ok
+test a_down_pairs_backlog_never_holds_back_an_up_pairs_rows ... ok
+test a_6000_row_backlog_drains_through_the_resident_window ... ok
+
+
+failures:
+
+---- a_far_frame_with_a_post_outstanding_emits_forward stdout ----
+
+thread 'a_far_frame_with_a_post_outstanding_emits_forward' (40121) panicked at crates/mesh111/tests/forward.rs:212:5:
+assertion `left == right` failed: the forward frame names the far hub
+  left: None
+ right: Some("hub-b")
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    a_far_frame_with_a_post_outstanding_emits_forward
+
+test result: FAILED. 25 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 149.64s
+
+error: test failed, to rerun pass `-p mesh111 --test forward`

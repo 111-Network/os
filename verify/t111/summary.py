@@ -92,6 +92,8 @@ def fail_block(rec: Record) -> list[str]:
         tail.append(f"log: {rec.log}" + (f":{rec.log_line}" if rec.log_line else ""))
     if tail:
         out.append("     " + " · ".join(tail))
+    if rec.kept:
+        out.append(f"     kept by the harness: {rec.kept}")
     return out
 
 

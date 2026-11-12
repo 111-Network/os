@@ -1,0 +1,32 @@
+    Checking agent111 v2026.10.12 (/repo/3-intelligence/crates/agent111)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 3.10s
+   Compiling agent111 v2026.10.12 (/repo/3-intelligence/crates/agent111)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 9.82s
+     Running unittests src/lib.rs (/repo/3-intelligence/target/debug/deps/agent111-5e6f7a8b9c0d1e2f)
+
+running 1 test
+test tools::tests::schema_lists_every_tool ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/chat_loop.rs (/repo/3-intelligence/target/debug/deps/chat_loop-0f1e2d3c4b5a6978)
+
+running 2 tests
+test a_tool_call_round_trips ... ok
+test the_loop_stops_at_the_turn_limit ... FAILED
+
+failures:
+
+---- the_loop_stops_at_the_turn_limit stdout ----
+
+thread 'the_loop_stops_at_the_turn_limit' panicked at crates/agent111/tests/chat_loop.rs:88:5:
+the loop ran 9 turns, the limit is 8
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    the_loop_stops_at_the_turn_limit
+
+test result: FAILED. 1 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.31s
+
+error: test failed, to rerun pass `-p agent111 --test chat_loop`

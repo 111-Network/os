@@ -1,0 +1,16 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.01s
+     Running tests/alpha.rs (/tmp/x3/redtarget/debug/deps/alpha-cbe2aa4c01e77308)
+
+running 2 tests
+test alpha_ignored ... ignored
+test alpha_ok ... ok
+
+test result: ok. 1 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/zulu.rs (/tmp/x3/redtarget/debug/deps/zulu-24eacfa906ddf479)
+
+running 1 test
+test zulu_ok ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+

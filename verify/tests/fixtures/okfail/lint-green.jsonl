@@ -1,0 +1,8 @@
+{"exit_declared": false}
+{"id": "fx.ok/1/ids-ids-are-unique-and-match-their-layers", "status": "PASS", "log_line": 2, "phase": "1. ids"}
+{"id": "fx.ok/2/files-side-files-check-scripts-and-test-files-spec-files", "status": "PASS", "log_line": 4, "phase": "2. files"}
+{"id": "fx.ok/3/unknown-seam-every-seam-a-check-names-is-in-the-map", "status": "PASS", "log_line": 6, "phase": "3. unknown-seam"}
+{"id": "fx.ok/4/unclaimed-every-verify-script-and-test-file-is-claimed-by-a", "status": "PASS", "log_line": 8, "phase": "4. unclaimed"}
+{"id": "fx.ok/5/built-gap-every-built-seam-has-a-proving-check-of-strength", "status": "PASS", "log_line": 10, "phase": "5. built-gap"}
+{"id": "fx.ok/6/fake-mirror-every-fake-names-a-real-seam-file-mirrored-side", "status": "PASS", "log_line": 12, "phase": "6. fake-mirror"}
+{"id": "fx.ok/7/pi-floor-nothing-the-release-payload-or-the-cross-build", "status": "PASS", "log_line": 14, "phase": "7. pi-floor"}

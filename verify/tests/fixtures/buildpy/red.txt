@@ -1,0 +1,7 @@
+
+decisions/d36-test-system.md:
+  ERROR:3  F02: unknown field 'statuss'
+  ERROR  F06: status 'shipped' invalid
+  WARN  N05: recipe target 'meshtastic' is not status proven
+
+2 error(s), 1 warning(s)
