@@ -297,6 +297,9 @@ const LAYER6_TOOLS: [&str; 7] = [
     "service.restart",
 ];
 
+/// The three tools Layer 7 appends, in the §13.3 order.
+const LAYER7_TOOLS: [&str; 3] = ["presence.read", "gateway.read", "relay.propose"];
+
 /// Valid arguments for each daemon tool (messages.send to an accepted contact).
 fn valid_args(name: &str) -> Value {
     match name {
@@ -309,15 +312,17 @@ fn valid_args(name: &str) -> Value {
 // ---------------------------------------------------------------- schemas
 
 #[test]
-fn schema_set_is_the_seventeen_tools_in_order() {
+fn schema_set_is_the_twenty_tools_in_order() {
     let names: Vec<String> = tools::schemas()
         .iter()
         .map(|s| s["function"]["name"].as_str().unwrap().to_string())
         .collect();
-    // Layer 3's five, Layer 5's five, Layer 6's seven (transport §13).
-    assert_eq!(names.len(), 17);
+    // Layer 3's five, Layer 5's five, Layer 6's seven (transport §13),
+    // Layer 7's three (relay §13.3).
+    assert_eq!(names.len(), 20);
     assert_eq!(&names[5..10], DAEMON_TOOLS);
-    assert_eq!(&names[10..], LAYER6_TOOLS);
+    assert_eq!(&names[10..17], LAYER6_TOOLS);
+    assert_eq!(&names[17..], LAYER7_TOOLS);
     for s in tools::schemas() {
         assert_eq!(s["type"], "function");
         assert_eq!(s["function"]["parameters"]["type"], "object", "{s}");

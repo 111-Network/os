@@ -295,7 +295,7 @@ fn grounded_flow_reads_kb_then_answers() {
 
     let chats = model.chats();
     assert_eq!(chats.len(), 2);
-    // Request 1: system prompt = preamble + category + KB index; all 17 tools.
+    // Request 1: system prompt = preamble + category + KB index; all 20 tools.
     let first = chats[0]["messages"].as_array().unwrap();
     assert_eq!(roles(first), ["system", "user"]);
     let system = first[0]["content"].as_str().unwrap();
@@ -305,7 +305,7 @@ fn grounded_flow_reads_kb_then_answers() {
         system.contains("Alpha Project"),
         "KB index missing: {system}"
     );
-    assert_eq!(chats[0]["tools"].as_array().unwrap().len(), 17);
+    assert_eq!(chats[0]["tools"].as_array().unwrap().len(), 20);
     // Request 2: carries the tool result with the fixture entry's marker.
     let second = chats[1]["messages"].as_array().unwrap();
     let tool = second
@@ -652,9 +652,9 @@ fn bare_state(kb_dir: &Path) -> (Arc<AppState>, tempfile::TempDir) {
 }
 
 #[test]
-fn schemas_are_exactly_the_seventeen_tools() {
+fn schemas_are_exactly_the_twenty_tools() {
     // Layer 3's five, the five Layer 5 adds (messaging §17), the seven
-    // Layer 6 adds (transport §13).
+    // Layer 6 adds (transport §13), the three Layer 7 adds (relay §13.3).
     let names: Vec<String> = tools::schemas()
         .iter()
         .map(|s| s["function"]["name"].as_str().unwrap().to_string())
@@ -679,6 +679,9 @@ fn schemas_are_exactly_the_seventeen_tools() {
             "device.identify",
             "device.propose",
             "service.restart",
+            "presence.read",
+            "gateway.read",
+            "relay.propose",
         ]
     );
 }

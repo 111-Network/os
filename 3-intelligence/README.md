@@ -172,19 +172,19 @@ can reset a board); a device whose record already carries `firmware.source == "p
 writes nothing. `service.restart` writes the single action `service.restart` and makes **no** daemon call at all: a restart
 route is never requested, and 111d answers `not_supervised` on accept for an unsupervised child.
 
-Count pins: `tests/daemon_tools.rs` (schema count 17, new names in order) and `tests/chat_loop.rs` (17 tools offered).
+Count pins: `tests/daemon_tools.rs` (schema count 17, new names in order) and `tests/chat_loop.rs` (17 tools offered). Since Layer 7 both pins read 20: the appendix below.
 New tests: `tests/layer6_tools.rs` (a stub 111d serving the new GET routes). No dependency, resident process or timer is
 added: the tools are plain functions that run only inside a chat turn.
 
 ## Appendix — Layer 7 tools (D30-D32, 2026-11-11)
 
-Additive (`os/7-relay/README.md` §13.3, §18, §19 item 6; recorded here by Layer 7 task K2). Specified here; built by Layer 7 row A1, which has not
-landed, so the code still offers seventeen. The tool set stays fixed, shell-free and schema-validated (D10) and grows, with row A1, from seventeen
-to **twenty**: `presence.read` (the `111` Nearby source rows with their evidence, inside a labelled untrusted block) · `gateway.read` (the relay
+Additive (`os/7-relay/README.md` §13.3, §18, §19 item 6; recorded here by Layer 7 task K2). Built by Layer 7 row A1: the code offers twenty.
+The tool set stays fixed, shell-free and schema-validated (D10) and grows from seventeen to **twenty**: `presence.read` (the `111` Nearby
+source rows with their evidence, inside a labelled untrusted block) · `gateway.read` (the relay
 status, with no secret in it) · `relay.propose` (a proposal of kind `relay`: gateway enable, pairing screen, carrier flush; a heartbeat interval is
-refused `unsupported_action` in v1). `nearby.read` grows: it will include the `111` source and, after a human ran the hop lookup, the Reticulum hop
+refused `unsupported_action` in v1). `nearby.read` grows: it includes the `111` source and, after a human ran the hop lookup, the Reticulum hop
 counts; it never triggers a run. The agent writes nothing and never accepts a consent, enters a code or sees a secret: its bearer is refused on
 every non-GET, and names and evidence reach the model only as untrusted text. Offload keeps the private-IP-literal rule: a registry row becomes an
 offload target only as the guarded model base admits (typed by the user in v1, a query reply in v1.1), never from a DNS-SD record, and a hub never
-proxies inference to the WAN. The count pins move 17 → 20 when A1 lands (`tests/daemon_tools.rs`, `tests/chat_loop.rs`); until then the Layer 6
-appendix's 17 holds. No dependency, resident process or timer is added.
+proxies inference to the WAN. The count pins are 20 (`tests/daemon_tools.rs`, `tests/chat_loop.rs`, `tests/layer6_tools.rs`); new tests:
+`tests/layer7_tools.rs`. No dependency, resident process or timer is added.
