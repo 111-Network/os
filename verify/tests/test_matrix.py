@@ -173,6 +173,17 @@ class SelectionNote(Base):
         self.assertEqual(Results([{"kind": "run", "run_id": "x"}]).selection_note(self.map), "")
         self.assertEqual(Results([]).selection_note(self.map), "")
 
+    def test_a_malformed_plan_in_a_run_record_is_a_value_error(self) -> None:
+        for field, value in (("via", 5), ("via", "l1.alpha"), ("via", ["l1.alpha"]), ("tiers", "fast"), ("tiers", 5),
+                             ("tiers", {"a": 1}), ("checks", "l1.alpha"), ("checks", 3)):
+            with self.assertRaises(ValueError, msg=f"{field}={value!r}") as ctx:
+                Results([{**RESULTS[0], "checks": ["l1.alpha"], field: value}])
+            self.assertIn(f"`{field}`", str(ctx.exception))
+
+    def test_an_absent_or_null_plan_field_is_fine(self) -> None:
+        for fields in ({}, {"via": None}, {"tiers": None}, {"checks": None}, {"via": {}, "tiers": [], "checks": []}):
+            Results([dict(RESULTS[0], **fields)])
+
     def test_the_header_of_the_matrix_carries_the_note(self) -> None:
         results = Results([dict(RESULTS[0], checks=["l1.alpha"], tiers=["fast"])] + RESULTS[1:])
         text = render(self.map, results, results_path="r.jsonl")
@@ -254,6 +265,20 @@ class Cli(Base):
             self.assertEqual(proc.stdout, "", label)
         proc = self.run_matrix("--results", str(self.tmp))
         self.assertEqual((proc.returncode, "Traceback" in proc.stderr), (2, False), "a directory")
+
+    def test_a_run_record_with_a_malformed_plan_is_a_named_error_never_a_traceback(self) -> None:
+        bad = {"via a number": {"via": 5}, "via a string": {"via": "l1.alpha"}, "via a list": {"via": ["l1.alpha"]},
+               "tiers a string": {"tiers": "fast"}, "tiers an object": {"tiers": {"fast": 1}},
+               "checks a string": {"checks": "l1.alpha"}}
+        for label, fields in bad.items():
+            rows = [{**RESULTS[0], "checks": ["l1.alpha"], **fields}] + RESULTS[1:]
+            path = self.results_file(rows, name="bad-run.jsonl")
+            proc = self.run_matrix("--results", str(path))
+            self.assertEqual(proc.returncode, 2, label)
+            self.assertIn("--matrix: cannot read results", proc.stderr, label)
+            self.assertIn("run record", proc.stderr, label)
+            self.assertNotIn("Traceback", proc.stderr, label)
+            self.assertEqual(proc.stdout, "", label)
 
     def test_an_empty_results_file_shows_every_check_as_not_run(self) -> None:
         path = self.tmp / "empty.jsonl"

@@ -12,16 +12,17 @@ Failing rules:
                     ``sh -c "<script> ..."`` token starts with), a ``[[unmapped]]`` path or a spec file is missing, or a
                     ``§N.M`` reference matches no section of its file. A section is a heading line, or a bold lead (a
                     line that starts, after an optional ``- ``, with ``**9.4 The KB**``, ``**Binds:**``); a number
-                    matches a heading carrying it or a lead starting with it, a name matches any heading or lead
-                    containing it (``"<path> Updates & rollback"``). A ``planned`` seam is not held to the tree (its
+                    matches a heading carrying it or a lead starting with it (followed by ``.``, by a space and a
+                    capitalised word or ``(``, or by the end of the lead: ``**3 nodes** is`` is prose), a name
+                    matches any heading or lead containing it (``"<path> Updates & rollback"``). A ``planned`` seam is not held to the tree (its
                     files and spec may not exist yet);
 - ``unknown-seam``  a check names a seam (``seams`` or ``phases``) that is not in the map;
 - ``unclaimed``     a file matched by ``UNCLAIMED_GLOBS`` is claimed by no check and absent from ``[unmapped]``. A check
                     claims a file when a ``cmd`` token resolves to it (from the check's ``cwd``), to a directory holding it,
-                    or when it is a ``cargo test`` whose ``--test`` names it (or, with no ``--test``, whose package or
-                    manifest scope holds it; a ``--lib``, ``--doc``, ``--bin(s)`` or ``--example(s)`` run with no
-                    ``--test`` claims no ``tests/*.rs``). A ``cmd`` token with ``*``, ``?`` or ``[`` is a pattern, not a
-                    path;
+                    or when it is a ``cargo test`` whose ``--test`` names it (a name or a glob matched against the file
+                    stem) or, with no ``--test``, whose package or manifest scope holds it; a ``--lib``, ``--doc``,
+                    ``--bin(s)``, ``--example(s)`` or ``--bench(es)`` run with no ``--test`` claims no
+                    ``tests/*.rs``). A ``cmd`` token with ``*``, ``?`` or ``[`` is a pattern, not a path;
 - ``built-gap``     a ``built`` seam has no proving check, or (``GAP_NEEDS_R``) none of strength R, and no ``gap`` text;
 - ``fake-mirror``   a ``[[fake]]`` names an unknown seam, a missing file, a mirrored side with no files, or an unknown
                     parity check;
@@ -29,14 +30,15 @@ Failing rules:
                     generator and the cross build), or a ``PI_FLOOR_PATHS`` entry is missing from the tree: the test
                     system never ships on a node;
 - ``known``         a ``[[known]]`` whose ``check`` names no check, whose ``test`` pattern starts with a check prefix that
-                    matches no check, or whose ``source`` file does not exist.
+                    matches no check (or not its own ``check``), or whose ``source`` is not an existing file of the tree
+                    (absolute, or outside it, fails).
 
 One glob reading for every map path (a side file, an ``[unmapped]`` entry, ``UNCLAIMED_GLOBS``; ``glob_match`` and
 ``glob_paths``): ``*``, ``?`` and ``[..]`` stay inside one path segment, ``**`` as a whole segment crosses any number of
 segments; a glob entry also matches everything below a directory it matches, as a plain directory entry does.
 
-Warnings (``note:`` lines, never a failure): ``stub-marker`` (a ``stub`` seam none of whose side files carries the T0
-marker, or a ``planned`` seam's side file has appeared: promote the row) and ``fake-parity`` (the count of fakes with
+Warnings (``note:`` lines, never a failure): ``stub-marker`` (a ``stub`` seam none of whose side files (a glob or a directory
+read as the files it stands for) carries the T0 marker, or a ``planned`` seam's side file has appeared: promote the row) and ``fake-parity`` (the count of fakes with
 ``parity = "none"``). A map that does not load fails as rule ``schema`` (the loader's own messages); duplicate ids are
 reported under ``ids`` and dropped so the other rules still run.
 
@@ -50,6 +52,7 @@ from __future__ import annotations
 
 import argparse
 import fnmatch
+import os
 import re
 import sys
 import tomllib
@@ -290,8 +293,16 @@ def section_matches(heading: str, number: str) -> bool:
 def lead_matches(lead: str, number: str) -> bool:
     """True when a bold lead starts with the section number ``number`` (``9.4`` in ``9.4 The KB``, ``§9.4``, also
     ``9.4.1``; never ``19.4`` or ``9.45``): a lead is a section anchor only by its first words, a number inside a
-    sentence is not."""
-    return re.match(r"\s*§?\s*" + re.escape(number) + r"(?!\w)", lead) is not None
+    sentence is not. The number is an anchor only when it is followed by ``.``, by a space and a capitalised word or
+    ``(``, or by the end of the lead: ``**3 nodes** is the minimum`` and ``**1-bootstrap/README.md**`` are prose."""
+    m = re.match(r"\s*§?\s*" + re.escape(number), lead)
+    if m is None:
+        return False
+    rest = lead[m.end():]
+    if not rest.strip() or rest.startswith("."):
+        return True
+    word = rest.lstrip()
+    return rest[0].isspace() and (word[0] == "(" or word[0].isupper())
 
 
 def _unquote(text: str) -> str:
@@ -396,7 +407,8 @@ def check_files(check: Check, root: Path) -> list[tuple[str, Path]]:
 
 
 def _cargo_claims(check: Check, candidates: Iterable[str]) -> set[str]:
-    """The candidate test files a ``cargo test`` check runs (by ``--test``, ``-p`` and the manifest scope)."""
+    """The candidate test files a ``cargo test`` check runs (by ``--test``, a name or a glob matched against the file
+    stem, by ``-p`` and by the manifest scope)."""
     cmd = list(check.cmd)
     if not cmd or Path(cmd[0]).name != "cargo":
         return set()
@@ -411,8 +423,8 @@ def _cargo_claims(check: Check, candidates: Iterable[str]) -> set[str]:
     non_integration = False
     it = iter(args)
     for arg in it:
-        if arg in ("--lib", "--doc", "--bin", "--bins", "--example", "--examples") or arg.startswith(
-                ("--bin=", "--example=")):
+        if arg in ("--lib", "--doc", "--bin", "--bins", "--example", "--examples", "--bench", "--benches") or \
+                arg.startswith(("--bin=", "--example=", "--bench=")):
             non_integration = True
         if arg == "--test":
             tests.append(next(it, ""))
@@ -427,7 +439,7 @@ def _cargo_claims(check: Check, candidates: Iterable[str]) -> set[str]:
         elif arg.startswith("--manifest-path="):
             manifest = arg.split("=", 1)[1]
     if non_integration and not tests and "--tests" not in args:
-        return set()  # --lib, --doc, --bin(s), --example(s) run no tests/*.rs file
+        return set()  # --lib, --doc, --bin(s), --example(s), --bench(es) run no tests/*.rs file
     scope = ""
     if manifest:
         parent = Path(check.cwd, manifest).parent.as_posix()
@@ -441,8 +453,8 @@ def _cargo_claims(check: Check, candidates: Iterable[str]) -> set[str]:
         path = Path(cand)
         if "tests" not in path.parts or path.suffix != ".rs":
             continue
-        if tests and path.stem not in tests:
-            continue
+        if tests and not any(fnmatch.fnmatchcase(path.stem, pattern) for pattern in tests):
+            continue  # --test takes a name or a glob (``--test '*'`` runs every integration test file)
         if pkgs and not any(f"/{pkg}/" in f"/{cand}" for pkg in pkgs):
             continue
         if scope and not (cand == scope or cand.startswith(scope + "/")):
@@ -665,6 +677,9 @@ _VERIFY_WORD = re.compile(r"(?<![\w.\-])verify(?![\w\-])")
 _JOIN_CONTEXT = re.compile(r"join\(|Path\(|/\s*[\"']verify[\"']")
 _COPY_COMMAND = re.compile(r"^\s*(?:sudo\s+)?(?:cp|mv|rsync|tar|install|ln|zip)\s")
 _COMPONENT = re.compile(r"[^\s/=:(,\"']+$")
+_QUOTED = re.compile(r"\"([^\"]*)\"|'([^']*)'")
+_EXCLUDED_VALUE = re.compile(r"--(?:exclude|filter)(?:=|\s+)[\"']?(?:[-+]\s+)?[^\s\"']*$")
+_PRUNED = re.compile(r"^[^\s]*\s+-prune\b")
 
 
 def _root_prefix(before: str) -> bool:
@@ -683,10 +698,13 @@ def verify_hits(text: str) -> list[tuple[int, str]]:
 
     ``verify`` counts as a whole path part, in these forms: ``verify/x`` at the start of a word; after ``./``, ``../``, a
     variable, a quoted variable or a ``$(...)`` (``$ROOT/verify/x``, ``"$ROOT"/verify/x``, ``"$ROOT/verify"``,
-    ``../verify``, ``$(git rev-parse --show-toplevel)/verify/x``); a quoted ``"verify"`` argument of ``os.path.join(...)``,
-    ``Path(...)`` or ``/ "verify"``; the bare directory handed to ``cp``, ``mv``, ``rsync``, ``tar``, ``install``, ``ln``
-    or ``zip``. ``4-interface/verify/x`` and ``my-verify/x`` (a layer's own verify folder, a longer word), a ``verify``
-    in prose and a lone ``verify/`` are not hits.
+    ``../verify``, ``$(git rev-parse --show-toplevel)/verify/x``); ``verify/`` followed by a glob character
+    (``glob("verify/*")``); a quoted ``"verify"`` argument of ``os.path.join(...)``, ``Path(...)`` or ``/ "verify"``
+    (earlier parts made only of dots, ``".."``, ``"."`` or ``os.pardir``, do not name a layer folder:
+    ``join(here, "..", "..", "verify")`` is the root); the bare directory handed to ``cp``, ``mv``, ``rsync``, ``tar``,
+    ``install``, ``ln`` or ``zip``. ``4-interface/verify/x`` and ``my-verify/x`` (a layer's own verify folder, a longer
+    word), a ``verify`` in prose and a lone ``verify/`` are not hits; nor is a ``verify`` that is kept out of a payload:
+    the value of ``--exclude``, ``--exclude=`` or ``--filter``, or a word before ``-prune``.
     """
     hits: list[tuple[int, str]] = []
     for number, line in enumerate(text.splitlines(), 1):
@@ -698,17 +716,22 @@ def verify_hits(text: str) -> list[tuple[int, str]]:
 def _is_verify_path(line: str, m: re.Match[str]) -> bool:
     """True when the ``verify`` word ``m`` found in ``line`` is the root ``verify/`` directory (see ``verify_hits``)."""
     before, after = line[: m.start()], line[m.end():]
+    if _EXCLUDED_VALUE.search(before) or _PRUNED.match(after):
+        return False  # an exclusion keeps verify/ OUT of the payload (tar --exclude=./verify, find -path ./verify -prune)
     if after[:1] == "." and after[1:2] and (after[1].isalnum() or after[1] == "_"):
         return False  # verify.sh and the like: a file, not the directory
     if before.endswith("/"):
         return _root_prefix(before)
-    if after[:1] == "/" and after[1:2] and _PATH_CHAR.match(after[1]):
-        return True  # verify/x at the start of a word
+    if after[:1] == "/" and after[1:2] and (_PATH_CHAR.match(after[1]) or after[1] in "*?["):
+        return True  # verify/x and the glob verify/* at the start of a word
     if before[-1:] in ("\"", "'") and after[:1] == before[-1:] and _JOIN_CONTEXT.search(line):
         anchor = max(before.rfind("join("), before.rfind("Path("))
         literals = before[anchor if anchor >= 0 else 0:][:-1]
-        # join(root, "verify", ...) is the root verify/; join(root, "6-transport", "verify") is a layer's own
-        return not re.search(r"[\"']", literals)
+        # join(root, "verify", ...) is the root verify/; join(root, "6-transport", "verify") is a layer's own; the dots
+        # (and slashes) of join(here, "..", "..", "verify") or join(here, "../..", "verify") only climb to the root
+        if re.search(r"[\"']", _QUOTED.sub("", literals)):
+            return False  # a stray quote: not read, so not a dotted part
+        return all(set(first or second) <= {".", "/"} for first, second in _QUOTED.findall(literals))
     return bool(_COPY_COMMAND.match(line)) and (not before.strip() or before[-1:].isspace() or before[-1:] in "\"'")
 
 
@@ -739,19 +762,26 @@ def rule_pi_floor(seam_map: SeamMap, root: Path) -> list[Finding]:
 def rule_known(seam_map: SeamMap, root: Path) -> list[Finding]:
     """Rule ``known``: a ``[[known]]`` that can never match (a ``vacuous`` entry with a typo keeps a PASS that proves
     nothing) or whose source is gone: ``check`` names no check, the check prefix of ``test`` (the text before its first
-    ``/``, a glob allowed) matches no check, ``source`` (``<file>[:line]``, first word) is not a file of the tree."""
+    ``/``, a glob allowed) matches no check, the two name different checks (``apply_known`` needs both: the prefix must
+    match ``check``), ``source`` (``<file>[:line]``, first word) is absolute, leaves the tree or is not a file of it."""
     out: list[Finding] = []
     ids = [c.id for c in seam_map.checks]
     for known in seam_map.known:
+        prefix = known.test.split("/", 1)[0]
         if known.check and seam_map.check(known.check) is None:
             out.append(_fail("known", known.test, f"check names {known.check!r}, which is not in checks.toml"))
-        prefix = known.test.split("/", 1)[0]
+        elif known.check and not fnmatch.fnmatchcase(known.check, prefix):
+            out.append(_fail("known", known.test, f"check names {known.check!r} but the check prefix {prefix!r} of "
+                                                  f"test does not match it: the entry can never apply"))
         if not any(fnmatch.fnmatchcase(i, prefix) for i in ids):
             out.append(_fail("known", known.test, f"the check prefix {prefix!r} of test matches no check in "
                                                   f"checks.toml"))
         words = known.source.split()
         source = _KNOWN_LINE.sub("", words[0]) if words else ""
-        if not source or not (root / source).is_file():
+        if source and (Path(source).is_absolute() or _rel(root / source, root) is None):
+            out.append(_fail("known", known.test, f"source {known.source!r}: {source} is absolute or leaves the tree "
+                                                  f"(a source is a file of the tree)"))
+        elif not source or not (root / source).is_file():
             out.append(_fail("known", known.test, f"source {known.source!r}: {source or 'no path'} is not a file of "
                                                   f"the tree"))
     return out
@@ -770,14 +800,42 @@ RULE_FUNCS = {
 """Rule id -> function ``(seam_map, root) -> list[Finding]``, one per entry of ``RULES``."""
 
 
+def _side_files(entry: str, root: Path) -> list[str]:
+    """The repo-relative files one side entry names: the file itself, the files a glob matches, and the files below a
+    directory (a plain entry or a glob match), sorted; symlinked directories are not walked."""
+    found: set[str] = set()
+    paths = list(glob_paths(root, entry)) if has_glob(entry) else [root / entry]
+    for path in paths:
+        if path.is_dir() and not path.is_symlink():
+            for base, dirs, names in os.walk(path):
+                dirs.sort()
+                found.update(rel for name in names if (rel := _rel(Path(base, name), root)) is not None)
+        elif path.is_file():
+            rel = _rel(path, root)
+            if rel is not None:
+                found.add(rel)
+    return sorted(found)
+
+
+def _head(path: Path) -> list[str]:
+    """The first ``T0_MARKER_LINES`` lines of a file (as many as it has; an unreadable file has none)."""
+    try:
+        with path.open(encoding="utf-8", errors="replace") as handle:
+            return [line for _, line in zip(range(T0_MARKER_LINES), handle)]
+    except OSError:
+        return []
+
+
 def warn_stub_marker(seam_map: SeamMap, root: Path) -> list[Finding]:
     """Warning ``stub-marker``: a planned seam's side file appeared, or a stub seam none of whose side files carries
-    the T0 marker (a mixed seam, one side built and the other still a T0 stub, is a stub that keeps its marker)."""
+    the T0 marker (a mixed seam, one side built and the other still a T0 stub, is a stub that keeps its marker). A side
+    entry is read as every map path is: a glob or a directory stands for the files it matches (files only)."""
     out: list[Finding] = []
     for seam in seam_map.seams:
         if seam.status not in ("stub", "planned"):
             continue
-        present = [(name, rel) for name in ("a", "b") for rel in seam.side(name).files if (root / rel).is_file()]
+        present = [(name, rel) for name in ("a", "b") for entry in seam.side(name).files
+                   for rel in _side_files(entry, root)]
         if seam.status == "planned":
             out.extend(_warn("stub-marker", seam.id, f"planned, but side {name} file {rel} exists: promote the row "
                                                      f"(stub or built)") for name, rel in present)
@@ -786,12 +844,12 @@ def warn_stub_marker(seam_map: SeamMap, root: Path) -> list[Finding]:
             continue
         marked = False
         for _, rel in present:
-            head = (root / rel).read_text(encoding="utf-8", errors="replace").splitlines()[:T0_MARKER_LINES]
-            if any(T0_MARKER.search(line) for line in head):
+            if any(T0_MARKER.search(line) for line in _head(root / rel)):
                 marked = True
                 break
         if not marked:
-            shown = ", ".join(f"side {name} {rel}" for name, rel in present)
+            shown = ", ".join(f"side {name} {rel}" for name, rel in present[:5])
+            shown += f", and {len(present) - 5} more" if len(present) > 5 else ""
             out.append(_warn("stub-marker", seam.id, f"stub, but no side file carries a T0 marker in its first lines "
                                                       f"({shown}): promote the row"))
     return out

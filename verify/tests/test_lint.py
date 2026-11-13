@@ -269,6 +269,32 @@ class Known(Base):
     def test_a_source_with_a_line_range_and_words_passes(self) -> None:
         self.assertEqual(self.lint_known(test="l4.api/*", source="fx/SPEC.md:1-9 (the spec)").fails(), [])
 
+    def test_a_check_and_a_test_prefix_that_name_different_checks_fail(self) -> None:
+        result = self.lint_known(test="l4.api/*", source="fx/SPEC.md:1", check="l1.alpha", kind="vacuous")
+        self.assertEqual(result.failing_rules(), ["known"])
+        self.assertEqual(len(result.fails()), 1)
+        self.assertIn("'l1.alpha'", result.fails()[0].message)
+        self.assertIn("can never apply", result.fails()[0].message)
+
+    def test_a_check_and_a_test_prefix_that_agree_pass(self) -> None:
+        for test in ("l4.api/*", "l4.*/x", "*/x", "l4.a?i/x"):
+            self.assertEqual(self.lint_known(test=test, source="fx/SPEC.md:1", check="l4.api").fails(), [], test)
+
+    def test_a_check_that_names_no_check_is_one_finding(self) -> None:
+        result = self.lint_known(test="l4.api/*", source="fx/SPEC.md:1", check="l4.apx")
+        self.assertEqual(len(result.fails()), 1, "the mismatch is not reported on top of the missing check")
+
+    def test_a_source_that_is_absolute_or_leaves_the_tree_fails(self) -> None:
+        (self.tmp / "outside.txt").write_text("not in the tree\n")
+        for source in (str(self.tmp / "outside.txt"), str(self.tmp / "outside.txt") + ":3", "../outside.txt",
+                       "../outside.txt:1 (a note)", "fx/../../outside.txt", "/etc/hostname"):
+            result = self.lint_known(test="l4.api/*", source=source)
+            self.assertEqual(result.failing_rules(), ["known"], source)
+            self.assertIn("absolute or leaves the tree", result.fails()[0].message, source)
+
+    def test_a_source_with_dots_that_stays_in_the_tree_passes(self) -> None:
+        self.assertEqual(self.lint_known(test="l4.api/*", source="fx/gen/../SPEC.md:1").fails(), [])
+
 
 class Unclaimed(Base):
     def test_a_new_verify_script_nobody_claims_fails(self) -> None:
@@ -336,6 +362,34 @@ class Unclaimed(Base):
             self.assertEqual(got, {cands[0]} if "--tests" not in extra else set(cands), " ".join(extra))
         self.assertEqual(claimed_files(replace(api, cmd=("cargo", "test", "--lib"), cwd="1-bootstrap"), self.tree,
                                        cands), set(), "a cwd scope with --lib claims nothing either")
+
+    def test_cargo_bench_runs_claim_no_integration_test(self) -> None:
+        m = load_map(compose_map(self.tmp))
+        api = m.check("l4.api")
+        assert api is not None
+        cands = ["1-bootstrap/crates/node111/tests/api_x.rs", "1-bootstrap/crates/node111/tests/other.rs"]
+        base = ("cargo", "test", "--manifest-path", "1-bootstrap/Cargo.toml", "-p", "node111")
+        for extra in (("--bench", "b"), ("--benches",), ("--bench=b",), ("--benches", "--", "--exact", "x")):
+            self.assertEqual(claimed_files(replace(api, cmd=base + extra), self.tree, cands) & set(cands), set(),
+                             " ".join(extra))
+        self.assertEqual(claimed_files(replace(api, cmd=base + ("--benches", "--tests")), self.tree, cands) & set(cands),
+                         set(cands), "--tests still runs every integration file")
+        self.assertEqual(claimed_files(replace(api, cmd=base + ("--benches", "--test", "api_x")), self.tree,
+                                       cands) & set(cands), {cands[0]})
+
+    def test_cargo_test_with_a_glob_claims_the_files_whose_stem_matches(self) -> None:
+        m = load_map(compose_map(self.tmp))
+        api = m.check("l4.api")
+        assert api is not None
+        cands = ["1-bootstrap/crates/node111/tests/api_x.rs", "1-bootstrap/crates/node111/tests/api_y.rs",
+                 "1-bootstrap/crates/node111/tests/other.rs"]
+        base = ("cargo", "test", "--manifest-path", "1-bootstrap/Cargo.toml", "-p", "node111")
+        for extra, want in ((("--test", "*"), cands), (("--test=*",), cands), (("--test", "api_*"), cands[:2]),
+                            (("--test", "api_?"), cands[:2]), (("--test", "api_[x]"), cands[:1]),
+                            (("--test", "oth*", "--test", "api_y"), [cands[2], cands[1]]),
+                            (("--test", "nothing_*"), []), (("--test", "api_x"), cands[:1])):
+            got = claimed_files(replace(api, cmd=base + extra), self.tree, cands) & set(cands)
+            self.assertEqual(got, set(want), " ".join(extra))
 
     def test_a_lib_unit_leaves_the_integration_file_unclaimed(self) -> None:
         text = (LINT_FIXTURES / "clean" / "checks.toml").read_text().replace(
@@ -443,6 +497,46 @@ class PiFloor(Base):
         for line in miss:
             self.assertEqual(verify_hits(line), [], line)
 
+    def test_dots_only_parts_climb_to_the_root_and_a_glob_of_the_root_is_a_hit(self) -> None:
+        hit = ['p = os.path.join(os.path.dirname(__file__), "..", "..", "verify")',
+               "p = Path(__file__).parent / '..' / '..' / 'verify'", 'p = os.path.join(here, os.pardir, "verify")',
+               'p = os.path.join(here, ".", "verify", "run.py")', 'p = os.path.join(here, "../..", "verify")',
+               'files = glob.glob("verify/*")', "ls verify/**", "cp verify/[a-z]* out/", 'glob.glob("verify/?.py")',
+               'glob.glob("../verify/*.py")', 'sh -c "cat $ROOT/verify/*"']
+        miss = ['p = os.path.join(here, "6-transport", "verify")', 'p = os.path.join("..", "6-transport", "verify")',
+                "p = Path(__file__).parent / '..' / '6-transport' / 'verify'", 'glob.glob("6-transport/verify/*")',
+                "cp 4-interface/verify/* out/", 'files = glob.glob("my-verify/*")', 'x = os.path.join(a, "..", "verify.sh")',
+                "p = Path(__file__) / 'it's' / 'verify'"]
+        for line in hit:
+            self.assertEqual(len(verify_hits(line)), 1, line)
+        for line in miss:
+            self.assertEqual(verify_hits(line), [], line)
+
+    def test_each_dotted_or_glob_spelling_fails_the_rule_in_a_script(self) -> None:
+        for line in ('p = os.path.join(os.path.dirname(__file__), "..", "..", "verify")', 'files = glob.glob("verify/*")',
+                     "p = Path(__file__) / '..' / 'verify'"):
+            make_tree(self.tree, {"1-bootstrap/manifest/gen.py": f"import os\n{line}\n"})
+            self.assertEqual([f.subject for f in self.lint().fails("pi-floor")], ["1-bootstrap/manifest/gen.py:2"], line)
+
+    def test_an_exclusion_of_verify_keeps_it_out_of_the_payload_and_is_no_hit(self) -> None:
+        miss = ["tar --exclude=./verify -czf payload.tgz .", "rsync -a --exclude verify ./ /out",
+                "find . -path ./verify -prune -o -print", "tar --exclude='verify' -czf p.tgz .",
+                'tar --exclude="$ROOT/verify" -czf p.tgz "$ROOT"', "rsync -a --filter='- verify' ./ out/",
+                'rsync -a --filter "- ./verify/" ./ out/', "rsync -a --exclude verify --exclude .git ./ out/",
+                "find $ROOT -path $ROOT/verify -prune -o -type f -print", "find . -path './verify' -prune -o -print",
+                "tar czf p.tgz --exclude ../verify ."]
+        hit = ["rsync -a --exclude .git verify ./out", "tar --exclude=.git -czf p.tgz verify", "cp -r verify dist",
+               "rsync -a --exclude=./build ./verify/ out/", "find . -path ./verify -o -print", "tar --exclude foo -czf p.tgz ../verify"]
+        for line in miss:
+            self.assertEqual(verify_hits(line), [], line)
+        for line in hit:
+            self.assertEqual(len(verify_hits(line)), 1, line)
+
+    def test_a_script_that_excludes_verify_passes_the_rule(self) -> None:
+        make_tree(self.tree, {"1-bootstrap/scripts/cross-build.sh":
+                              "#!/bin/sh\ntar --exclude=./verify -czf payload.tgz .\nrsync -a --exclude verify ./ out\n"})
+        self.assertEqual(self.lint().fails(), [])
+
     def test_each_spelling_fails_the_rule_in_a_script(self) -> None:
         for line in ('cp -r "$ROOT/verify" "$OUT/"', 'cp "$(git rev-parse --show-toplevel)/verify/run.py" x',
                      "cp -r ../verify dist/"):
@@ -538,6 +632,57 @@ class Warnings(Base):
         self.assertIn("fx/stub.rs", warns[0].message)
         self.assertIn("fx/built-side.rs", warns[0].message)
 
+    def seam_sides(self, side_a: str) -> Path:
+        text = (LINT_FIXTURES / "clean" / "seams.toml").read_text()
+        old = 'a = { layer = 1, files = ["fx/stub.rs"] }'
+        self.assertIn(old, text)
+        m = compose_map(self.tmp)
+        (m / "seams.toml").write_text(text.replace(old, f"a = {{ layer = 1, files = {side_a} }}"))
+        return m
+
+    def put(self, rel: str, text: str) -> None:
+        """One file in the tree, without ``make_tree`` rewriting the rest (``fx/stub.rs`` carries the marker)."""
+        (self.tree / rel).parent.mkdir(parents=True, exist_ok=True)
+        (self.tree / rel).write_text(text)
+
+    def test_a_glob_side_file_is_read_for_the_marker(self) -> None:
+        m = self.seam_sides('["fx/stub*.rs"]')
+        (self.tree / "fx/stub.rs").unlink()
+        self.put("fx/stub1.rs", "//! Layer 1: the real thing.\n")
+        result = lint_dir(m, self.tree)
+        self.assertEqual(result.fails(), [])
+        warns = result.warns("stub-marker")
+        self.assertEqual([w.subject for w in warns], ["L1-L7:stubbed"])
+        self.assertIn("fx/stub1.rs", warns[0].message)
+        self.put("fx/stub1.rs", "//! Layer 1: T0 stub.\n")
+        self.assertEqual(lint_dir(m, self.tree).warns("stub-marker"), [], "a matched file with the marker")
+        self.put("fx/stub2.rs", "//! built, no marker\n")
+        self.assertEqual(lint_dir(m, self.tree).warns("stub-marker"), [], "one marked match is a stub that keeps it")
+
+    def test_a_directory_side_file_is_read_for_the_marker(self) -> None:
+        m = self.seam_sides('["fx/gen"]')
+        self.put("fx/gen/deep/y.rs", "//! built\n")
+        warns = lint_dir(m, self.tree).warns("stub-marker")
+        self.assertEqual([w.subject for w in warns], ["L1-L7:stubbed"])
+        self.assertIn("fx/gen/deep/y.rs", warns[0].message)
+        self.assertIn("fx/gen/x.txt", warns[0].message)
+        self.put("fx/gen/deep/z.rs", "//! T0 stub\n")
+        self.assertEqual(lint_dir(m, self.tree).warns("stub-marker"), [])
+
+    def test_a_glob_that_matches_nothing_and_a_glob_of_directories_do_not_warn_or_crash(self) -> None:
+        self.assertEqual(lint_dir(self.seam_sides('["fx/nope*.rs"]'), self.tree).warns("stub-marker"), [])
+        self.put("fx/gen/q.rs", "//! T0 stub\n")
+        self.assertEqual(lint_dir(self.seam_sides('["fx/g*"]'), self.tree).warns("stub-marker"), [])
+
+    def test_a_planned_seam_with_a_glob_side_warns_when_a_match_appears(self) -> None:
+        text = (LINT_FIXTURES / "clean" / "seams.toml").read_text().replace('files = ["fx/future-a.rs"]',
+                                                                          'files = ["fx/future-*.rs"]')
+        m = compose_map(self.tmp)
+        (m / "seams.toml").write_text(text)
+        self.assertEqual(lint_dir(m, self.tree).warns("stub-marker"), [])
+        self.put("fx/future-a.rs", "//! T0 stub\n")
+        self.assertEqual([w.subject for w in lint_dir(m, self.tree).warns("stub-marker")], ["L8-L9:later"])
+
     def test_a_stub_with_no_side_file_on_disk_does_not_warn(self) -> None:
         (self.tree / "fx/stub.rs").unlink()
         self.assertEqual(self.lint().warns("stub-marker"), [])
@@ -604,6 +749,23 @@ class Spec(unittest.TestCase):
         self.assertEqual(len(self.problems("s.md §9.5")), 1)
         self.assertEqual(len(self.problems("s.md §19.4")), 1)
         self.assertEqual(len(self.problems("s.md §4", "see **9.4 The KB** and 4.1 in prose\n")), 1)
+
+    def test_a_lead_that_starts_with_a_number_is_an_anchor_only_by_its_form(self) -> None:
+        text = "# Spec\n\n**3 nodes** is the minimum mesh.\n- **1-bootstrap/README.md** is the other spec.\n" \
+               "**2.5 GB** of room.\n**7 (draft)** x\n**8**\n**4.** y\n**5 Nodes** z\n"
+        for number, anchor in (("3", False), ("1", False), ("7", True), ("8", True), ("4", True), ("5", True)):
+            self.assertEqual(self.problems(f"s.md §{number}", text) == [], anchor, f"§{number}")
+        self.assertEqual(len(self.problems("s.md §3", text)), 1)
+        self.assertEqual(len(self.problems("s.md §1", text)), 1)
+
+    def test_lead_matches_table(self) -> None:
+        for lead, number, want in [
+            ("3 nodes", "3", False), ("1-bootstrap/README.md", "1", False), ("3 Nodes", "3", True),
+            ("3", "3", True), ("3.", "3", True), ("3. nodes", "3", True), ("9.4 The KB", "9.4", True),
+            ("9.4.1 Sub", "9.4", True), ("9.45 x", "9.4", False), ("§9.4 The KB", "9.4", True),
+            ("9.4(a)", "9.4", False), ("9.4 (a)", "9.4", True), ("10.1 Rules (n).", "10", True),
+            ("Offload 5/7", "5", False), ("19.4 X", "9.4", False), ("2-way sync", "2", False), ("3\u00a0Nodes", "3", True)]:
+            self.assertEqual(lint.lead_matches(lead, number), want, f"{lead!r} vs §{number}")
 
     def test_a_bold_lead_in_a_code_fence_or_mid_line_is_not_an_anchor(self) -> None:
         text = "```\n**9.9 Fenced**\n```\nsome text **9.8 Mid-line** here\n"

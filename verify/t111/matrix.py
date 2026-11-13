@@ -9,8 +9,8 @@ With a ``results.jsonl`` (``--results FILE``, or without it the newest ``<scratc
 ``--scratch``) every check also shows its last status for that seam: ``PASS``, ``FAIL``, ``SKIPPED`` (the worst of its
 records) or ``not run``. When that run did not run every check of the map (a ``--seam`` / ``--check`` / ``--layer``
 selection, or a default run that leaves the ``ns`` tier out) the header says ``last run was a selection of N checks``, so
-``not run`` is not read as never run. A results file that is missing, unreadable or not JSON lines exits 2 with a
-named error. Output is Markdown, deterministic (no clock), and writes nothing.
+``not run`` is not read as never run. A results file that is missing, unreadable, not JSON lines or whose run record has a
+``checks``, ``tiers`` or ``via`` of the wrong shape exits 2 with a named error. Output is Markdown, deterministic (no clock), and writes nothing.
 """
 
 from __future__ import annotations
@@ -62,6 +62,16 @@ def worst(statuses: Iterable[str]) -> str | None:
     return min(got, key=lambda s: STATUS_RANK[s]) if got else None
 
 
+def _check_run_record(row: Mapping[str, Any]) -> None:
+    """A run record's plan fields have the shapes ``engine.run_record`` writes (``checks`` and ``tiers`` lists, ``via`` an
+    object, each possibly absent or null); anything else is a ``ValueError`` (``main`` reports it, exit 2) rather than a
+    note read from the wrong thing."""
+    for key, kind, name in (("checks", list, "a list"), ("tiers", list, "a list"), ("via", Mapping, "an object")):
+        value = row.get(key)
+        if value is not None and not isinstance(value, kind):
+            raise ValueError(f"the run record's `{key}` is not {name}: {str(value)[:60]!r}")
+
+
 class Results:
     """The check records of one ``results.jsonl``, indexed for the matrix."""
 
@@ -71,6 +81,8 @@ class Results:
         for row in rows:
             if not isinstance(row, Mapping):
                 raise ValueError(f"a line of the results is not a JSON object: {str(row)[:60]!r}")
+            if row.get("kind") == "run":
+                _check_run_record(row)
             if row.get("kind") == "run" and not self.run:
                 self.run = row
             elif row.get("kind") == "check":
@@ -235,7 +247,7 @@ def main(args: argparse.Namespace, root: Path, map_dir: Path) -> int:
     if path is not None:
         try:
             results = Results(read_results(Path(path)))
-        except (OSError, ValueError) as exc:  # a missing file, a directory, bad UTF-8, bad JSON, a non-object line
+        except (OSError, ValueError) as exc:  # a missing file, a directory, bad UTF-8, bad JSON, a non-object line, a malformed run record
             print(f"--matrix: cannot read results {path}: {exc}", file=sys.stderr)
             return 2
     sys.stdout.write(render(seam_map, results, results_path=str(path) if path else ""))
