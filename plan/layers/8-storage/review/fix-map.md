@@ -1,4 +1,4 @@
-# Layer 8 spec v0.1 → v0.2 → v0.3 — fix map (one row per finding id, under `triage.md`, then under `recheck.md`)
+# Layer 8 spec v0.1 → v0.2 → v0.3 → v1.0 (locked 2026-11-13, D38) — fix map (one row per finding id, under `triage.md`, then `recheck.md`, then `recheck-2.md`)
 
 | id | sections changed | what the text now says |
 |---|---|---|
@@ -125,3 +125,20 @@ Applied under `recheck.md` and the lead's ruling on it; the spec reads "draft v0
 | R19 | §2.5, G13 (5) | The conversation's head records `legacy_lines`, the lines imported from its file; a later import appends only the lines beyond that count; G13 (5) adds a turn under N before the revert. |
 | R20 | §3 J9, §4.5 `full`, G13 (15) | A spool ingest is written whatever the class's state, as a decision is. |
 | R21 | §17 exposure table | New row: a catalogue check tells each source the home hub's id and every publisher the node follows. |
+
+## v1.0 (the lock edit)
+
+The second re-check (`recheck-2.md`: verdict lock) applied as written; no rule, route, field or gate added, nothing renumbered; the citation pin stays at `8936a8e`.
+
+| id | sections changed | what the text now says |
+|---|---|---|
+| Regression 1 | §13.6 (3) | The guard's `revert_to` step moves the legacy files back whenever they exist (they exist only until the release that imported them is confirmed); the legacy files' trigger begins "At every other `ExecStartPre`". |
+| Regression 2 | §13.6 (5) | A no-copy revert leaves the store closed (`SchemaTooNew`) until the next update or `111 store import`; Start an empty store is for a damaged store only. |
+| Regression 3 | §13.7 | After `start-empty` the node-state store is created at its next use, the fabric store at the next daemon start, and the page says so after the 204. |
+| Regression 4 | §15.1 "Who writes them" | A paired session changes none but `update_without_copy`, through its own route. |
+| Regression 5 | §13.6 (5) | The refusal happens when the manifest is read, before anything is staged. |
+| Regression 6 | §7.6 | After a refused adopt the verb deletes what it staged; a dataset verb taking `import.lock` first deletes any leftover `adopt-*.json` and staged catalogue copy. |
+| Regression 7 | G13 (10) | Asserts the 404 of the delete route (live store file or unlisted name, nothing deleted) and the 400 of `start-empty` for an open store. |
+| Regression 8 | §16.6 (2) | The two `&names[17..]` pins (`A/tests/daemon_tools.rs:325`, `A/tests/layer7_tools.rs:316`, read at `8936a8e`) become `[17..20]`. |
+| Editorial | §13.7, §2.2 rule 7 | "The checks' time on an SD card"; "migrates, the next idle pass closes it". |
+| Status | title, Status paragraph, §0 citations, Changelog | Locked v1.0 (D38); the pin sentence says every `file:line` is read at `8936a8e`; the re-pin promise is dropped; the v1.0 changelog line. |

@@ -1,4 +1,4 @@
-# Layer 8 - Storage & Shared State: spec v0.3 (draft for the adversarial panel)
+# Layer 8 - Storage & Shared State: spec v1.0 (locked 2026-11-13, D38)
 
 The layer that keeps each node's own state encrypted and bounded by the disk the node has, and lets a hub hold the large public files a community shares.
 **The node-state store** is a second SQLCipher file that only `111d` opens: the agent's conversations, proposals, tasks and decisions, and Layer 9's repair
@@ -8,11 +8,12 @@ encyclopedias (an adopted kiwix-serve, started on demand), regional maps (PMTile
 holds, all as files named by their sha256 in the one object tree Layer 7 built for releases, listed in a catalogue the publisher's node key signs, and checked
 block by block. v1 adds **no shared log**, and no resident process, listener, timer or crate to the required configuration.
 
-Status: **draft v0.3, 2026-11-13** for the adversarial panel. Written from D34 (the owner took every pick, detail pick, plan correction and default of the
-options brief), D36, the brief (`plan/layers/8-storage/options.md`), its judge's check (`review/options-check.md`: ready), research R00-R07g3 and the as-built
-code, then amended under the lead's triage of the panel's three reports (`review/triage.md`) and under the re-check of v0.2 (`review/recheck.md`, with the
-lead's ruling on it); the map from each finding to the text is `review/fix-map.md`.
-Nothing here is built. No Layer 8 code is written before the lock; the build board `8-storage/TASKS.md` follows the lock.
+Status: 🔒 **locked v1.0 (2026-11-13, D38)** = draft v0.3 as re-checked. v0.1 (written from D34: the owner took every pick, detail pick, plan
+correction and default of the options brief, and from D36, the brief (`plan/layers/8-storage/options.md`), its judge's check (`review/options-check.md`:
+ready), research R00-R07g3 and the as-built code) → a three-judge panel (`plan/layers/8-storage/review/{store,datasets,integration}.md`: 92 findings) → the
+lead's triage (`review/triage.md`) → v0.2 → one re-check (`review/recheck.md`: amend-then-lock) → v0.3 → a second re-check (`review/recheck-2.md`: lock,
+eight minors folded into this lock edit) → lock; the map from each finding to the text is `review/fix-map.md`.
+Nothing here is built; the build board is `8-storage/TASKS.md`.
 
 ## 0. Reading guide
 
@@ -25,11 +26,10 @@ brief (OB) and research R00 (seams), R01-R05 (lenses), R06 (critic), R07g1-R07g3
 
 **Citations.** `M/` = `5-messaging/crates/mesh111/src` · `N/` = `1-bootstrap/crates/node111/src/daemon` · `NI/` = `1-bootstrap/crates/node111/src` · `A/` =
 `3-intelligence/crates/agent111` · `UI/` = `4-interface/ui` · `API` = `4-interface/api/openapi.yaml` · `BT/` = the bao-tree 0.16.1 registry source · `L0`…`L7`
-= the layer READMEs. Every `file:line` is pinned at head `8936a8e` (2026-11-13), and every fact this spec states about the code is a fact at that head
+= the layer READMEs. Every `file:line` is pinned at head `8936a8e` (2026-11-13): read each at that commit (`git show 8936a8e:<path>`), since later commits move lines. Every fact this spec states about the code is a fact at that head
 ("the pinned head" below). Layer 7 rows M1b (`4b9e521`, schema v5 and `custody_totals`), M1c (`4209e32`, a capacity pass at rest writes nothing while its
 outcome is unchanged) and A1 (`443cf66`, the agent's three Layer 7 tools) are committed: the fabric schema is **v5** (`M/store/schema.rs:76`) and the agent
-has 20 tools. Files that carry uncommitted edits of other rows in the working tree are cited as committed (`git show HEAD:…`). Every citation is re-pinned
-once more at the lock head. **Evidence:** *(src)* source read · *(doc)* docs read by a scout · *(design)* not
+has 20 tools. Files that carry uncommitted edits of other rows in the working tree are cited as committed (`git show HEAD:…`). The pin is not moved at the lock. **Evidence:** *(src)* source read · *(doc)* docs read by a scout · *(design)* not
 built · *(unverified from this box)* a claim no scout could fetch (R06 §7, OB §6).
 
 **Normative:** numbered rules, byte and path tables, settings with defaults, gate assertions. **Informative:** "why" sentences, arithmetic, cost tables,
@@ -157,7 +157,7 @@ signal). "The agent holds zero key material" (`L2:234`) is kept by what code hol
    `node/lock` (§13.2). The agent reads through `GET` tools only; no Layer 8 route accepts the bearer on a non-GET.
 7. **Open on use.** `111d` opens the store on its first use (a chat turn, an ingest, a history read, a reclaim, a Layer 9 write, a status read before the
    totals are known, and the first start of a build that writes a newer node-state version than the file holds: that start opens the store before the
-   daemon reports health, takes the migration copy, migrates and closes it, §13.6 (1)) and closes it on the first capacity pass that finds no use since the previous pass: no timer of its own, and no open file on an idle
+   daemon reports health, takes the migration copy and migrates, §13.6 (1); the next idle pass closes it) and closes it on the first capacity pass that finds no use since the previous pass: no timer of its own, and no open file on an idle
    node. A turn in flight or an operation still running is a use, so a slow turn spanning two passes keeps the store open. `111d` reads `ns_totals` at the
    first open after a daemon start and then keeps them in memory from its own writes, so the pass reads the store only to reclaim. A close runs
    `wal_checkpoint(TRUNCATE)`, which writes nothing when only reads ran (its cost is in §2.8).
@@ -624,7 +624,7 @@ the tuple it hashed (§5.5). The adopt body names that file (`request`) and carr
 catalogue to install), `drafts` (`111 dataset add`'s entries, as `DatasetEntry`), `in_place` (`{sha256, path}` per registered file), `follow` and
 `sources`. `111d` verifies each staged catalogue's signature again (§6.1) and its `seq` against the one it holds (§6.3), and `stat`s each in-place path
 again and compares it with the tuple the request file recorded; any item that fails refuses the whole request (400 `bad_request` naming the item, or 409
-`untrusted_publisher`, `needs_hub` for a draft on a node without the hub role) and nothing is written. Otherwise it renames the copies into `blob/`,
+`untrusted_publisher`, `needs_hub` for a draft on a node without the hub role) and nothing is written; the verb then deletes what it staged, and a dataset verb that takes `import.lock` first deletes any `adopt-*.json` and staged catalogue copy left there. Otherwise it renames the copies into `blob/`,
 writes `state/origin/catalogue/`, `state/origin/drafts/<id>@<version>.toml`, `state/datasets.json` (the in-place records with their path and tuple) and
 (for `--follow` and a URL's `sources`) `state/storage.json`, rebuilds the kiwix library and deletes the request file and the staged catalogue copies:
 `111d` is the only writer of the catalogue, the drafts and the two JSON files while it runs. With the daemon stopped (the `node/lock` of §13.2 is free) the
@@ -983,12 +983,12 @@ start timeout, a power cut) is only ever a `.tmp`, never renamed into place. Cop
 `agent/legacy-v0/` and `state/heal/legacy-v0.jsonl` (§2.5) once the probation journal (`state/update.json`, `L1:141`) shows the release confirmed. · (3) A probation revert by the guard
 runs release N's own `111 update-guard` before the flip (`ExecStartPre=+/usr/local/bin/111 update-guard`, `1-bootstrap/systemd/111node.service:22`;
 `revert_to`, `NI/update_guard.rs:22-33`). It gains one step: for each store with a `.pre-v<N>` copy, it moves the store and its `-wal` and `-shm` aside to
-`<file>.rolled-back-v<N>` and renames the copy into place (owner `node111`, 0600); the legacy files move back under their own trigger (below). A
+`<file>.rolled-back-v<N>` and renames the copy into place (owner `node111`, 0600); and it moves the legacy files back whenever they exist (they exist only until the release that imported them is confirmed, item (2), so the release it flips to writes no node-state store). A
 READY-but-unhealthy release is reverted by the root helper instead (`handle_revert_request`, `NI/update_helper.rs:282-308`): it flips, clears the journal
 and restarts, so the next `ExecStartPre` runs release N−1's guard (`/usr/local/bin/111` is `current/bin/111`, `L1:146`) with no journal to act on. So the
 restore is also a content rule the guard applies at every `ExecStartPre`, whatever flipped `current`: for each store with a `.pre-v<K>` whose K is above
 the schema version the running guard's build writes, the same set-aside and rename; a `.pre-v<K>.tmp` is deleted, never renamed in. **The legacy files'
-own trigger.** When `agent/legacy-v0/` or `state/heal/legacy-v0.jsonl` exists and the running guard's build writes no node-state store, the guard moves
+own trigger.** At every other `ExecStartPre`, when `agent/legacy-v0/` or `state/heal/legacy-v0.jsonl` exists and the running guard's build writes no node-state store, the guard moves
 the files of `agent/legacy-v0/` back to their places and `state/heal/legacy-v0.jsonl` back to `state/heal/journal.jsonl`, whether or not any store has a
 copy: the first release with the node-state store creates `state.db` new (no migration from 0, so no copy) and may migrate nothing else. Both rules run
 on both revert paths, the guard's `revert_to` and the root helper's revert followed by N−1's guard. They ship in the release before the first migrating
@@ -1004,7 +1004,7 @@ before the first one that carries the node-state store; if that release is Layer
 a health confirmation after the deadline is ignored (`NI/update_helper.rs:326-330`), so a copy that outlasts it leaves a revert at some later start. The
 release manifest names the store schema versions each release writes (`[stores]`: `fabric`, `node_state`; additive, as `[source]`, §11.6). Release N−1's
 updater compares them with the versions it writes; an update that migrates a store whose copy does not fit above the floor (free − the store's size <
-floor), or cannot be copied inside the probation window at the rate measured on an SD card at build, is refused before the flip: no request waits on
+floor), or cannot be copied inside the probation window at the rate measured on an SD card at build, is refused when its manifest is read, before anything is staged: no request waits on
 the updater (`POST /api/v1/update/check` answers 202, `API:190-195`), so the refusal is an updater state, `/status.update.last_result` =
 `refused_space` (`API:749`, one value appended), with the notice `update_refused_space` naming the release, the store and the bytes needed (§16.2), shown
 on the Storage page and Layer 7's update page. A human may accept "update without a rollback copy" (consent `update_without_copy`, §15.2), whose text says
@@ -1012,7 +1012,7 @@ that if this release fails, that store stays closed until the next update. The c
 /api/v1/storage/update-without-copy` `{release, store, accept_warning?}` (§16.1): a human's, in a dashboard session or on loopback, never the agent's
 bearer; it answers 409 `consent_required` with the text first and 204 once the repeat carries the hash. `111d` records it in `state/storage.json`
 (`update_without_copy`, one entry per release and store, §15.1); the updater reads it at its next check, and only for that release and that store does
-the migration run without a copy; a revert then leaves the store closed (`SchemaTooNew`) with §13.7's choices. The entry is forgotten once that release
+the migration run without a copy; a revert then leaves the store closed (`SchemaTooNew`) until the next update or `111 store import` (§13.2); Start an empty store is for a damaged store only (§13.7). The entry is forgotten once that release
 is confirmed (the moment of (2)) or reverted (`111d`'s first start under another release). The seconds per GiB on an SD card are a build measurement that
 sets the bound (`8-storage/TASKS.md`).
 
@@ -1023,8 +1023,7 @@ may hold 1.49 GiB or more: the store opens and serves at once, and the checks ru
 /api/v1/storage` shows that store as `checking` (§16.2). On failure the store is closed and moved aside to `<file>.damaged-<n>` (the fabric store's blob
 files kept, §2.7 S3) and stays closed with that reason; the Storage page offers "Start an empty store (the damaged file is kept)" and "Import an export"
 (§13.2). Start an empty store is `POST /api/v1/storage/start-empty` `{store, accept_warning?}` (§16.1), loopback only: it names the store, answers 409
-`consent_required` (`store_start_empty`, §15.2) until the repeat carries the hash, then lifts the closed state, so the next open creates an empty store in
-its place (the fabric store through its boot, as on a first start). Deleting a set-aside file is `DELETE /api/v1/storage/set-aside/{file}`, loopback only. Never a silent re-creation (Layer 1's "never silent re-key", `L1:204`). Their time on an SD card is measured at build.
+`consent_required` (`store_start_empty`, §15.2) until the repeat carries the hash, then lifts the closed state; the node-state store is created at its next use, the fabric store at the next daemon start (its boot runs once per start), and the page says so after the 204. Deleting a set-aside file is `DELETE /api/v1/storage/set-aside/{file}`, loopback only. Never a silent re-creation (Layer 1's "never silent re-key", `L1:204`). The checks' time on an SD card is measured at build.
 
 **13.8 Child log rings (normative; Q6).** `open_log` opens a child's log create-and-append with no cap (`N/supervise.rs:752-755`). On the pass, a capped log
 above `logs.max_file_bytes` (default 4 MiB, the drafter's) has its last half copied to `<name>.1`, replacing it, and is truncated to zero; the child keeps
@@ -1083,7 +1082,7 @@ default. Not a small regular file, or not JSON ⇒ moved aside to `storage.json.
 **Who writes them.** Every key `state/storage.json` holds is written through `PATCH /api/v1/storage/settings`, which is loopback-only (403
 `loopback_only` otherwise), the posture of its Layer 5 sibling `PATCH /api/v1/fabric/settings` (`4-interface/api/README.md:49`), except
 `update_without_copy`, which only `POST /api/v1/storage/update-without-copy` writes (§16.1); the adopt route of the dataset verbs (§7.6) is loopback-only
-too. A paired session reads every setting (`GET /api/v1/storage`, `GET /api/v1/datasets`) and changes none. An
+too. A paired session reads every setting (`GET /api/v1/storage`, `GET /api/v1/datasets`) and changes none but `update_without_copy`, through its own route. An
 accepted `quota.set` (§16.4) applies through the route it names with that route's own `loopback_only` check: decided from a session that is not on
 loopback it answers 403 `loopback_only`, nothing is applied and the proposal stays open.
 
@@ -1258,7 +1257,7 @@ schemas are appended after Layer 7's, the A1 precedent (the list ends with `rela
 **16.6 The pin list (the conventions' form, `4-interface/api/README.md:127`; the change is not done until all are green).** (1) `Proposal.kind` +1
 (`storage`): `KINDS` in `N/dashboard/api_v1/proposals.rs:104-114` (nine at the pinned head), the UI's proposal card, the agent's writer. · (2) The agent
 tool count +3, 20 → 23: the four count pins of §16.5, a `LAYER8_TOOLS` constant beside `LAYER7_TOOLS` (`A/tests/daemon_tools.rs:301`,
-`A/tests/layer7_tools.rs:45`; `DAEMON_TOOLS` unchanged, as A1 left it), `A/src/tools.rs` schemas and dispatch. · (3) `pnpm gen:types`, then `node scripts/gen-sse.mjs --check`; the new enum
+`A/tests/layer7_tools.rs:45`; `DAEMON_TOOLS` unchanged, as A1 left it), the two `&names[17..]` pins (`A/tests/daemon_tools.rs:325`, `A/tests/layer7_tools.rs:316`) become `[17..20]`, `A/src/tools.rs` schemas and dispatch. · (3) `pnpm gen:types`, then `node scripts/gen-sse.mjs --check`; the new enum
 tuples and aliases (`StorageClass.id`, `Problem.code`, `ConsentRequired.action`, `Proposal.kind`, `Job.state`, the two events) are listed in
 `UI/scripts/gen-sse.mjs`. · (4) `x-sse-events.events` (`API:2044-2059`) gains `storage` and `dataset`; the UI store's `switch (frame.event)` handles them. ·
 (5) The contract tests: `UI/test/gen.test.ts`, `UI/test/http.test.ts`, a new `UI/test/layer8-contract.test.ts` (the `layer7-contract.test.ts` precedent), and
@@ -1422,7 +1421,7 @@ stop it runs neither; a corrupted page makes them fail, and the store is set asi
 `state.db-wal` is the signal and a clean close leaves none; `POST /api/v1/storage/start-empty {store}` answers 409 `consent_required`
 (`store_start_empty`) until the repeat carries the hash, then the next open creates an empty store and the `.damaged-<n>` file is still there; while a
 set-aside fabric store exists the open's orphan sweep removes no blob file, and after `DELETE /api/v1/storage/set-aside/{file}` the next open's sweep
-removes the orphans; both routes answer 403 `loopback_only` from a paired session off loopback. · (11) `[L3-L8:agent-state]` A conversation whose stored messages exceed 2 MiB still answers a
+removes the orphans; both routes answer 403 `loopback_only` from a paired session off loopback; `DELETE /api/v1/storage/set-aside/{file}` naming a live store file, or a name no `set_aside_store` notice lists, answers 404 and deletes nothing; `start-empty` for a store that is open answers 400. · (11) `[L3-L8:agent-state]` A conversation whose stored messages exceed 2 MiB still answers a
 new turn (no 413); a tool result over 512 KiB is saved cut, with its marker, and the turn is not lost. · (12) `[L3-L8:agent-state]` The decision protocol:
 an accept writes the pending record through `decision_begin` before the action and the result through `decision_complete`; a refused apply removes it
 through `decision_reopen`; Layer 6's applier writes through the same calls; no `agent/decisions/*.json` file appears; a `pending` decision survives a
@@ -1877,3 +1876,5 @@ publisher's NodeId (§5.1, the lead's) · the daemon's exit status while a store
 - 2026-11-13 (v0.3): the re-check of v0.2 (`review/recheck.md`) applied with the lead's ruling: the seven partly fixed ids (the sidecar's name proven,
   the re-pin finished at one head, the consent text's list) and R1-R21 (the adopt route's body, the update-without-copy route, the legacy files' own
   trigger, `Proposal.decision.applied`, the two set-aside routes, one dataset state enum, and the minors); the fix-map gains a v0.3 section.
+- 2026-11-13 (v1.0): locked under D38: the second re-check (`review/recheck-2.md`: verdict lock) applied, its eight minors folded in and two editorial
+  lines; no rule, route, field or gate added or renumbered; the citation pin stays at `8936a8e`.

@@ -596,6 +596,37 @@ may pin later); a CD workflow now (needs the musl toolchains on the runner, a re
 - **The Pi floor:** the test system adds nothing to an installed node; `verify/` is never in a payload (a lint item).
 - **Rejected:** a POSIX sh runner (JSON, TOML, timeouts, slot locks and process-group cleanup hand-rolled) · a Rust `xtask` · parse-only for ever (heuristics) · an id on every assertion now (≈ 350 call sites in six green harnesses of locked layers) · moving every CI job onto the runner at once · fixing the eight root-only tests first.
 
+## D38 — Layer 8 spec locked (v1.0); build starts
+
+- **Date:** 2026-11-13
+- **Decision:** the Layer 8 (Storage & Shared State) spec `os/8-storage/README.md` is **locked at v1.0** = draft v0.3 as re-checked: v0.1 (one spec
+  drafter, from D34, the options brief and research R00–R07g3) → three judges (store · datasets · integration; each amend-then-lock, nine blockers, 92
+  findings; `plan/layers/8-storage/review/{store,datasets,integration}.md`) → the lead's triage (every finding accepted, every fork ruled:
+  `triage.md`) → v0.2 (three authors in sequence, one per report, then a citation re-pin; `fix-map.md` maps each finding to the text) → one re-check
+  (`recheck.md`: amend-then-lock; 85 of 92 fixed, 7 partly, and 21 new findings R1–R21 of which five majors; no fork open) → the lead's ruling (every
+  item accepted with its fix, five additions) → v0.3 → a second re-check (`recheck-2.md`: **lock**; all 24 rows fixed; eight one-sentence minors) →
+  the lock edit (the eight minors and two editorial lines by one editor; the lead read the diff) → v1.0. The citations stay pinned at commit
+  `8936a8e` (the second re-check found none wrong at that head): later commits move lines, and the pin does not chase them.
+  - **What v1 commits to:** the node-state store (a second SQLCipher file only `111d` opens: the agent's conversations, proposals, tasks and
+    decisions and Layer 9's records; the agent holds no key) with the proposal spool's hand-off rule and the joint contract J1–J9 that Layer 9
+    consumes · one node budget sized from the disk, shown on a Storage page; nothing deleted for its age, a dataset never deleted behind the user's
+    back · the housekeeping interval owned by a daemon-level task (the same one interval: no timer added) · `node/lock` and `import.lock`, with the
+    verbs' adopt hand-off · datasets as files named by their sha256 in Layer 7's object tree, the publisher-signed catalogue (its `seq` from the
+    Layer 2 announce counter), pulls checked block by block with every name proven before its rename · kiwix-serve as an on-demand child panel that
+    stops when idle, PMTiles behind a `Range` route, the agent's `encyclopedia.search` · the role bit `ROLE_DATASETS` (bit 7) · export, import and
+    the migration copy, with a migrating update that cannot keep a rollback copy refused until a human accepts "update without a rollback copy" ·
+    budget and settings writes loopback-only · no shared log, and no resident process, listener, timer or crate added to the required
+    configuration. Where v1 delivers less than the root README says, §0 states the limit (D36).
+  - **Build:** `os/8-storage/TASKS.md` per `EXECUTION.md`, in the order the triage's last section gives (the housekeeping owner moves first; the
+    export, the migration copy, the integrity checks and the sha256 pass are measured on the largest store the defaults allow); gates G13–G18 and
+    the extended G7 in `8-storage/verify/`; the additive changes it asks of locked layers (the Layer 4 contract, Layer 6's crash-guard assertion
+    that moves to G13, Layer 7's metered sentence, the Layer 3 tool pins) land with the rows that need them and are listed in the spec's §21.
+- **Open (owner):** the forks taken on the lead's default stay applied until the owner confirms or flips them (the spec's §22 "Deviations" and the
+  triage's "listed for the owner"): the refused update without room for a rollback copy · kiwix-serve's idle stop · `kb.search` renamed
+  `encyclopedia.search` · loopback-only budget writes · the public "this hub has a catalogue" role bit · Layer 8's 12 KB share of what is left of
+  the lazy UI budget (D21), which leaves Layer 9 about 5 KB · the legal reads and Q25 · every number marked "default, measured at build".
+- **Why:** two re-checks, the second with nothing of weight; no fork open; and Layer 9's fix pass needs the storage contract as locked text.
+
 ## Pending
 
 - Move deep architecture content out of `os/README.md` into per-layer specs (Layers 0–6 have their homes; the README's Layer 7–9 content waits for theirs).
