@@ -1409,9 +1409,6 @@ fn concrete(path: &str) -> String {
 const UNROUTED: &[&str] = &[
     "flashDevice",
     "patchRelaySettings",
-    "offerRelayPair",
-    "pairRelayHub",
-    "unpairRelayHub",
     "checkRelayCarrier",
     "flushRelayCarrier",
     "browseRegistry",

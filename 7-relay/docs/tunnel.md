@@ -27,18 +27,24 @@ Neither is a Layer 7 dependency.
 ## Pairing inside a tunnel
 
 1. Bring the tunnel up on both hubs and check that each can reach the other's tunnel address.
-2. On each hub, open Settings → Layer 7 → "Pair with another hub" (or run `111 fabric pair --show`), and show the pairing bundle (§4.6 step 1). At
-   least one bundle must carry an address the other hub can dial through the tunnel, on port 11183 (§4.6 step 3: one dialled address suffices); a
-   LAN address the other hub cannot reach is no use. No control for choosing that address is pinned yet. For the Layer 5 hub offer the daemon takes
-   the address from the fabric's `offer_host` when one is configured, else the hub's first LAN IPv4 (`offer_address` in
-   `1-bootstrap/crates/node111/src/daemon/fabric/mod.rs`), and the production configuration sets no `offer_host`. Read the address the bundle
-   shows before you hand it over, and do not pair through the tunnel until it is the tunnel's address.
+2. On each hub, open Settings → Layer 7 → "Pair with another hub", or run `111 fabric pair --show` (add `--role leaf|gateway` or `--via carrier`
+   for another role or link; the default is a `peer` over `tcp`), and show the pairing bundle (§4.6 step 1). The command prints the bundle, its QR,
+   the one-time code and the address the bundle carries ("Hub address:"). At least one bundle must carry an address the other hub can dial through
+   the tunnel, on port 11183 (§4.6 step 3: one dialled address suffices); a LAN address the other hub cannot reach is no use. As built, the pairing
+   bundle takes its address exactly as the Layer 5 hub offer does (`FabricHandle::offer_address` in
+   `1-bootstrap/crates/node111/src/daemon/fabric/mod.rs`): the address the `tcp-lan` listener is bound to, and with the production bind
+   (`0.0.0.0:11183`, no `offer_host`) the lowest-numbered IPv4 address of the node's interfaces, skipping loopback, link-local and container bridges
+   (`lan_ipv4s` in `daemon/dashboard/bind.rs`). A tunnel interface (`wg0`, `tailscale0`) is not skipped, so its address is in the bundle only when it
+   is numerically the lowest. No control picks another address, so read the address the bundle shows before you hand it over, and do not pair through
+   the tunnel until it is the tunnel's address. **Open gap:** a tunnel pairing needs the tunnel address in the bundle, and today that holds only by
+   that numeric accident on at least one of the two hubs.
 3. Scan or paste the other hub's bundle and pair as usual (§4.6): the two hubs meet once over `tcp-lan` through the tunnel.
-4. **Mark the pair `lan = true`:** the pairing request's `lan` field (`PairRequest` in `4-interface/api/openapi.yaml`; Layer 7 §4.6; the Settings
-   control arrives with the pairing rows of the Layer 7 build). The tunnel already encrypts the path, so the pair runs plain `tcp-lan` inside it
-   (§4.1 rule 1), with no second TLS layer and no "this link cannot be encrypted" warning. Without the mark a pair whose address is not private
-   runs TLS 1.3 with raw public keys. The range `100.64.0.0/10`, which Tailscale and Headscale use, counts as private for that rule; set the field
-   anyway, so the record says what it is.
+4. **Mark the pair `lan = true`** when you pair in step 3, on each hub (the mark is each hub's own): `111 fabric pair '<the other hub's 111PAIR:
+   bundle>' --lan`, or the `lan` field of `POST /api/v1/relay/pair` (`PairRequest` in `4-interface/api/openapi.yaml`; Layer 7 §4.6; loopback
+   only; the Settings control arrives with the pairing rows of the Layer 7 build). The tunnel already encrypts the path, so the pair runs plain
+   `tcp-lan` inside it (§4.1 rule 1), with no second TLS layer and no "this link cannot be encrypted" warning. Without the mark a pair whose
+   address is not private runs TLS 1.3 with raw public keys. The range `100.64.0.0/10`, which Tailscale and Headscale use, counts as private for
+   that rule; set the field anyway, so the record says what it is.
 
 The mark is yours to make and 111 cannot check it. If the address is not inside the tunnel, a `lan = true` pair sends the hub-to-hub frames in clear
 across whatever path the address takes; the sealed message contents stay sealed, but the path sees which hubs talk, when and how much (§4.7).

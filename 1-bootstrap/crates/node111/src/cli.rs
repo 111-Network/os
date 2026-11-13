@@ -1,5 +1,5 @@
 //! CLI surface: install · daemon · identity backup|restore|commission ·
-//! config · dashboard [rotate] · fabric status|offer|enroll · uninstall ·
+//! config · dashboard [rotate] · fabric status|offer|enroll|pair · uninstall ·
 //! update-helper · update-guard.
 //! Flags: --phone --serial --keep-adb --reboot-test --yes --allow-degraded --min-installer-version
 //! --version (calver). Host install and --phone are mutually exclusive.
@@ -207,6 +207,10 @@ USAGE:
   111 fabric status | offer | enroll [111HUB:BUNDLE] [--address HOST:PORT] [--card CARD]
                                    (messaging: home hub, offers, enrollment — via the running daemon;
                                     without a bundle the one-time code is typed when asked, never on argv)
+  111 fabric pair --show [--role peer|leaf|gateway] [--via tcp|carrier]
+  111 fabric pair 111PAIR:BUNDLE [--role R] [--via V] [--lan]
+                                   (hub to hub: show this hub's pairing bundle, or pair with another
+                                    hub's; --lan marks a LAN or tunnel link, which then runs plain)
   111 uninstall [--phone] [--serial SERIAL]
   111 update-helper | 111 update-guard     (root oneshots via systemd)
   111 --version";
