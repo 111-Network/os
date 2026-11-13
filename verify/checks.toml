@@ -16,10 +16,20 @@
 # `seams` list and every `phases` value the PRIMARY seam comes first: the seam whose files the check's assertions
 # exercise, decided by reading the test or harness (the test fns, the phase headers), not by the seam's name. The seams
 # after it follow by how much of the check they carry. A check with one seam has no order to keep.
+# FAKE ORDER IS MEANING TOO: for a check of strength F the record names the FIRST [[fake]] declared on its primary seam
+# (t111/record.py enrich), whichever check it belongs to. So the fake a F check itself runs against comes first on its
+# primary seam, and two F checks that face a seam from opposite sides cannot share a primary seam (they would name each
+# other's fake and read the wrong side first): the second gets a seam of its own (L6-X:rns-lxmf-api for the LXMF helper).
+# MODULE PATHS: a libtest unit whose cmd carries test filters owns the tests whose path contains one (the adapter
+# attributes a gate's records by the longest matching filter, the unit with no filter takes the rest): the node111 --lib
+# tests are split by module path into the l1.node111.lib-* units below, so each failure names the seam of its own module.
 #
 # Locks: every ns check takes "verify" (one harness at a time). "ui-dist" is the lock of 4-interface/ui/dist: held by every
 # check that builds or rewrites it (vite empties the output dir first): l1.gate, l4.ui, l4.budget, l4.smoke, l4.smoke3,
-# l4.panel-lint. A cargo test that only reads dist (rust-embed reads it per request in a debug build) takes no lock.
+# l4.panel-lint, and also the three cargo units that READ it (rust-embed reads dist per request in a debug build, and
+# dashboard_auth reads index.html twice, a request and then ui_embedded(), so a build between the two reads fails it):
+# l1.node111.{dashboard_auth,dashboard_http,api_v1_panels}. In a full run l1.gate already serialises them; the lock only
+# costs a targeted run that selects them beside a UI build.
 # `needs` lists the tool a check's cmd starts with (cargo, bash, pnpm, python3) so a box without it is SKIPPED, not RED.
 # A need that names no tool on this box (x5-log-to-scratch) keeps a check SKIPPED until its row lands.
 #
@@ -72,8 +82,9 @@ rerun_cost = "fast, ~5 s"
 strength = "C"
 needs = ["python3"]
 
-# Freshness of sse.gen.ts and test/contract.gen.ts against api/openapi.yaml. Every Rust unit that reads
-# contract.gen.ts requires it, so a Rust-only run never trusts a stale digest (survey 04, weak point 3).
+# Freshness of sse.gen.ts and test/contract.gen.ts against api/openapi.yaml. Every Rust unit and every vitest unit that
+# reads contract.gen.ts (directly, or through test/helpers/validate.ts) requires it, so a run of one of them never trusts a
+# stale digest (survey 04, weak point 3); l4.ui.gen is the freshness test itself and needs no prerequisite.
 [[check]]
 id = "l4.contract.fresh"
 kind = "gate"
@@ -305,14 +316,18 @@ covered_by = "l1.gate"
 strength = "C"
 needs = ["python3"]
 
-# The LXMF helper's 128 tests on a fake RNS/LXMF surface. CI runs it in knowledge-contract-hygiene only.
+# The LXMF helper's 128 tests on a fake RNS/LXMF surface (tests/_support.py, the first fake of L6-X:rns-lxmf-api, which
+# mirrors the libraries: the helper, side a, is under test, so a record reads it first). The same tests drive the helper's
+# stdio protocol as the daemon would, hence the second seam, whose first fake is node111's own fake sidecar (it belongs to
+# bridge_lxmf, which faces the seam from the other side: that is why the primary seam here is not the protocol one).
+# CI runs it in knowledge-contract-hygiene only.
 [[check]]
 id = "l6.lxmf-sidecar"
 kind = "unit"
 cmd = ["sh", "6-transport/sidecars/lxmf-sidecar/run-tests.sh"]
 tier = "fast"
 layers = [6]
-seams = ["L6-L6:lxmf-sidecar"]
+seams = ["L6-X:rns-lxmf-api", "L6-L6:lxmf-sidecar"]
 adapter = "pytest"
 timeout_s = 600
 rerun_cost = "fast, ~30 s"
@@ -338,7 +353,11 @@ needs = ["python3"]
 # stage, then l5.gate, whose forward suite alone is ~3 min) and the UI `pnpm check` (this gate's last stage, then
 # l4.ui). That is CI parity (plan/cross-layer/ci-cd.md, D28): the bootstrap-gate job must run check.sh whole, so the
 # gate stays whole here; do not "fix" the repeat by dropping l5.gate or l4.ui (they are the quick path alone).
-# Units attribute their records out of this gate's output: the node111 --lib records go three ways (see l1.node111.lib).
+# Units attribute their records out of this gate's output: the node111 --lib records go to the l1.node111.lib-* units by
+# module path (see l1.node111.lib).
+# No `requires`: the gate's fmt, clippy, node111 tests and shellcheck do not read the contract digest, and a box without node
+# (or with a stale digest) must still run them: its ui stage prints SKIPPED and the rest runs. l4.contract.fresh is a fast
+# default check, so a stale digest turns a default or layer run RED by itself; the units that read the digest require it.
 [[check]]
 id = "l1.gate"
 kind = "gate"
@@ -361,7 +380,6 @@ timeout_s = 5400
 rerun_cost = "slow, ~25 min warm"
 strength = "C"
 needs = ["cargo"]
-requires = ["l4.contract.fresh"]
 
 # Reads 4-interface/ui/test/contract.gen.ts, so it requires l4.contract.fresh (a stale
 # digest would be read as truth).
@@ -450,6 +468,7 @@ layers = [1, 4, 5]
 seams = ["L4-L5:panels"]
 adapter = "libtest"
 cargo = true
+lock = "ui-dist"
 timeout_s = 1800
 rerun = "cargo test --manifest-path 1-bootstrap/Cargo.toml -p node111 --test api_v1_panels -- --exact {test}"
 rerun_cost = "slow, ~20 s warm"
@@ -651,6 +670,7 @@ layers = [1, 4]
 seams = ["L1-L4:pairing-auth", "L1-L3:daemon-token", "L1-L4:bind-host", "L1-L4:events-bus", "L1-L4:openapi-rust"]
 adapter = "libtest"
 cargo = true
+lock = "ui-dist"
 timeout_s = 1800
 rerun = "cargo test --manifest-path 1-bootstrap/Cargo.toml -p node111 --test dashboard_auth -- --exact {test}"
 rerun_cost = "slow, ~20 s warm"
@@ -668,6 +688,7 @@ layers = [1, 4]
 seams = ["L1-L4:legacy-contract", "L1-L4:restart-update", "L2-L4:identity-display"]
 adapter = "libtest"
 cargo = true
+lock = "ui-dist"
 timeout_s = 1800
 rerun = "cargo test --manifest-path 1-bootstrap/Cargo.toml -p node111 --test dashboard_http -- --exact {test}"
 rerun_cost = "slow, ~20 s warm"
@@ -828,6 +849,28 @@ covered_by = "l1.gate"
 strength = "I"
 needs = ["cargo"]
 
+# Row D7 (landed): the hub as update origin, the serving side, through the real dashboard app on loopback sockets: 404 while
+# any of the three switches is off, 405 on other methods, no session, the Host guard, a missing, unpinned, planted or
+# misnamed blob 404s, unverified bytes refused, one Origin per process, a torn pair not served. No fake: the client is a raw
+# HTTP request, so strength I with the seam's own read_first (the hub's origin, side b). Fixtures: tests/fixtures/l7-D7/.
+# Reads dist (the real dashboard app serves it), so it takes the ui-dist lock.
+[[check]]
+id = "l1.node111.origin_serve"
+kind = "unit"
+cmd = ["cargo", "test", "--manifest-path", "1-bootstrap/Cargo.toml", "-p", "node111", "--test", "origin_serve"]
+tier = "slow"
+layers = [1, 7]
+seams = ["L1-L7:origin"]
+adapter = "libtest"
+cargo = true
+lock = "ui-dist"
+timeout_s = 1800
+rerun = "cargo test --manifest-path 1-bootstrap/Cargo.toml -p node111 --test origin_serve -- --exact {test}"
+rerun_cost = "slow, ~20 s warm"
+covered_by = "l1.gate"
+strength = "I"
+needs = ["cargo"]
+
 [[check]]
 id = "l1.node111.phone_flow"
 kind = "unit"
@@ -856,6 +899,48 @@ rerun = "cargo test --manifest-path 1-bootstrap/Cargo.toml -p node111 --test pro
 rerun_cost = "slow, ~20 s warm"
 covered_by = "l1.gate"
 strength = "I"
+needs = ["cargo"]
+
+# Row D6 (landed ffc1419; its review, row D6b, is open): pairing through the real dashboard app and the CLI, two hubs with
+# the real identity handle and fabric on loopback: the bundle round trip, the complement matrix (409 pair_role_mismatch),
+# needs_hub, loopback only, the pair_plain warning, a lan pair running plain, two hubs paired end to end inside TLS 1.3,
+# unpair. Both ends are real, so strength I; the routes are the first seam, which reads the dashboard side (relay7.rs,
+# pair.rs), the code under test.
+[[check]]
+id = "l1.node111.relay_pair"
+kind = "unit"
+cmd = ["cargo", "test", "--manifest-path", "1-bootstrap/Cargo.toml", "-p", "node111", "--test", "relay_pair"]
+tier = "slow"
+layers = [1, 4, 5, 7]
+seams = ["L4-L7:relay-api", "L5-L7:pair-gate"]
+adapter = "libtest"
+cargo = true
+timeout_s = 1800
+rerun = "cargo test --manifest-path 1-bootstrap/Cargo.toml -p node111 --test relay_pair -- --exact {test}"
+rerun_cost = "slow, ~20 s warm"
+covered_by = "l1.gate"
+strength = "I"
+needs = ["cargo"]
+
+# Row D5 (landed): TLS 1.3 with raw public keys for paired-hub links through mesh111's tcp-lan stream seam: two real TcpLan
+# adapters on loopback with relay::tls::wrap over their own pair tables and link keys; raw rustls peers stand in for the
+# misbehaving far ends (a wrong client key, a wrong server key, X.509, TLS 1.2, a non-Ed25519 key: each refused before any
+# 111 byte, one test per check). The raw peers are the fake on pair-gate (declared first there; it mirrors side a), so the
+# record reads side b (tls.rs, linkkey.rs), the code under test. The second seam is the link key (mint, pin, cache).
+[[check]]
+id = "l1.node111.relay_tls"
+kind = "unit"
+cmd = ["cargo", "test", "--manifest-path", "1-bootstrap/Cargo.toml", "-p", "node111", "--test", "relay_tls"]
+tier = "slow"
+layers = [1, 2, 5, 7]
+seams = ["L5-L7:pair-gate", "L2-L7:epoch-linkkey"]
+adapter = "libtest"
+cargo = true
+timeout_s = 1800
+rerun = "cargo test --manifest-path 1-bootstrap/Cargo.toml -p node111 --test relay_tls -- --exact {test}"
+rerun_cost = "slow, ~20 s warm"
+covered_by = "l1.gate"
+strength = "F"
 needs = ["cargo"]
 
 [[check]]
@@ -947,8 +1032,10 @@ strength = "F"
 needs = ["cargo"]
 
 # The tests drive the daemon's updater (updater/fetch.rs, updater/stage.rs): those files are side a of L1-L7:origin, so
-# that seam is first (its read_first points at them), although most tests stage from the internet base and only five use
-# a hub origin; the helper they request (L1-L1:updater-helper's read_first) is run by helper_guard, not here.
+# that seam is first, although most tests stage from the internet base and only five use a hub origin. They run against a
+# hand-written hub (LogServer, a [[fake]] mirroring side b, declared first on the seam), so the record reads side a, the
+# updater; origin_serve (strength I, no fake) reads the seam's own read_first, the hub's origin. The helper they request
+# (L1-L1:updater-helper's read_first) is run by helper_guard, not here.
 [[check]]
 id = "l1.node111.updater_stage"
 kind = "unit"
@@ -980,14 +1067,34 @@ covered_by = "l1.gate"
 strength = "I"
 needs = ["cargo"]
 
-# The in-crate unit tests of node111 (kb.rs, identity, probe.rs, install/verify.rs, fabric/sealer.rs, bridge/attest.rs,
-# bridge/simplex.rs, meshtastic/presence.rs, intelligence.rs ...), except the two modules below that own their records.
-# WHO OWNS WHICH --lib RECORDS (the same in a unit run and in a gate run, where l1.gate's one `cargo test` prints them
-# all): a test whose path starts daemon::relay::settings:: belongs to l1.node111.lib-relay, one that starts
-# daemon::relay::netwatch:: to l1.node111.lib-netwatch, every other --lib test to this unit. The two --skip filters make
-# that true when this unit runs alone: without them a relay test would be recorded under this unit's seams as well
-# (the `--skip=<path>` spelling keeps the two entries distinct: the schema refuses a repeated list entry).
-# Reads 4-interface/ui/test/contract.gen.ts (fabric/json.rs foreign_tests), so it requires l4.contract.fresh.
+# THE node111 --lib TESTS, SPLIT BY MODULE PATH. One `cargo test -p node111 --lib` runs them all (in a gate run too: l1.gate's
+# one cargo test prints them under the single binary `unittests src/lib.rs`), and the libtest adapter gives each test to
+# the unit whose filter (a substring of the test's path, the longest wins) it contains, and to the unit with no filter when
+# none does. So a record names the seam of its own module, not of the first module of a 700-test list. The owners:
+#   identity::                         lib-identity      (identity/, identity/commission.rs)
+#   daemon::kb:: daemon::health::      lib-kb
+#   daemon::supervise:: daemon::services::probe::   lib-health
+#   install::verify::                  lib-install
+#   daemon::intelligence::             lib-intelligence
+#   daemon::fabric::sealer::           lib-sealer
+#   daemon::bridge::attest::           lib-attest
+#   daemon::bridge::simplex::          lib-simplex
+#   daemon::relay::settings::          lib-relay
+#   daemon::relay::netwatch:: daemon::transport::netlink::   lib-netwatch
+#   daemon::relay::gateway::           lib-gateway
+#   daemon::relay::pair:: daemon::relay::tls::               lib-pair
+#   every other --lib test             l1.node111.lib (below)
+# The filters are full module paths from the crate root: a bare `cli::` also matches daemon::fabric::cli, a bare `relay::`
+# matches dashboard::api_v1::relay. The residual unit skips what the others own (`--skip=<path>`), so a unit run of any of
+# them runs each test once. Not split (a unit of its own would take another unit's fake on its seam, see the header):
+# meshtastic/presence.rs (seam L5-L6:presence-file: its first fake is the presence reader's own, which mirrors the other
+# side), and the modules with no seam of their own (relay/linkkey.rs and origin/mod.rs have origin_serve and relay_tls).
+
+# The residual of node111 --lib: every test no lib-* unit above owns (calver, cli, config, floor, manifest, the bridge core,
+# the carrier, the components, the dashboard routes and api_v1 handlers, the devices, the fabric but its sealer, the
+# meshtastic client and presence, the panels, the relay linkkey, the transport but netlink, the updater, the origin, the rest
+# of install, util ...). It proves no seam of its own: a record of it has no seam and so no read_first, which is better than
+# a wrong one. Reads 4-interface/ui/test/contract.gen.ts (fabric/json.rs foreign_tests), so it requires l4.contract.fresh.
 [[check]]
 id = "l1.node111.lib"
 kind = "unit"
@@ -1000,24 +1107,25 @@ cmd = [
   "node111",
   "--lib",
   "--",
+  "--skip=identity::",
+  "--skip=daemon::kb::",
+  "--skip=daemon::health::",
+  "--skip=daemon::supervise::",
+  "--skip=daemon::services::probe::",
+  "--skip=install::verify::",
+  "--skip=daemon::intelligence::",
+  "--skip=daemon::fabric::sealer::",
+  "--skip=daemon::bridge::attest::",
+  "--skip=daemon::bridge::simplex::",
   "--skip=daemon::relay::settings::",
   "--skip=daemon::relay::netwatch::",
+  "--skip=daemon::transport::netlink::",
+  "--skip=daemon::relay::gateway::",
+  "--skip=daemon::relay::pair::",
+  "--skip=daemon::relay::tls::",
 ]
 tier = "slow"
-layers = [1, 2, 3, 5, 6]
-seams = [
-  "L1-L2:identity-dir",
-  "L0-L1:kb-payload",
-  "L1-L2:cli-verbs",
-  "L1-L3:health-restart",
-  "L1-L4:install-print",
-  "L1-L4:ui-embed",
-  "L2-L3:signer-none",
-  "L2-L5:sealer",
-  "L2-L6:attest-bridge",
-  "L5-L6:presence-file",
-  "L6-L6:simplex",
-]
+layers = [1, 4, 5, 6]
 adapter = "libtest"
 cargo = true
 timeout_s = 1800
@@ -1027,6 +1135,143 @@ covered_by = "l1.gate"
 strength = "F"
 needs = ["cargo"]
 requires = ["l4.contract.fresh"]
+
+# identity/ and identity/commission.rs: the identity directory (quarantine, never a silent re-key) and the backup and restore
+# verbs over id111.
+[[check]]
+id = "l1.node111.lib-identity"
+kind = "unit"
+cmd = ["cargo", "test", "--manifest-path", "1-bootstrap/Cargo.toml", "-p", "node111", "--lib", "--", "identity::"]
+tier = "slow"
+layers = [1, 2]
+seams = ["L1-L2:identity-dir", "L1-L2:cli-verbs"]
+adapter = "libtest"
+cargo = true
+timeout_s = 1800
+rerun = "cargo test --manifest-path 1-bootstrap/Cargo.toml -p node111 --lib -- --exact {test}"
+rerun_cost = "slow, ~30 s warm"
+covered_by = "l1.gate"
+strength = "F"
+needs = ["cargo"]
+
+# daemon/kb.rs and daemon/health.rs: the payload manifest the /health kb flag reads.
+[[check]]
+id = "l1.node111.lib-kb"
+kind = "unit"
+cmd = ["cargo", "test", "--manifest-path", "1-bootstrap/Cargo.toml", "-p", "node111", "--lib", "--", "daemon::kb::", "daemon::health::"]
+tier = "slow"
+layers = [1, 0]
+seams = ["L0-L1:kb-payload"]
+adapter = "libtest"
+cargo = true
+timeout_s = 1800
+rerun = "cargo test --manifest-path 1-bootstrap/Cargo.toml -p node111 --lib -- --exact {test}"
+rerun_cost = "slow, ~30 s warm"
+covered_by = "l1.gate"
+strength = "F"
+needs = ["cargo"]
+
+# daemon/supervise.rs and daemon/services/probe.rs: the restart policy and the agent probe behind the services agent state.
+[[check]]
+id = "l1.node111.lib-health"
+kind = "unit"
+cmd = ["cargo", "test", "--manifest-path", "1-bootstrap/Cargo.toml", "-p", "node111", "--lib", "--", "daemon::supervise::", "daemon::services::probe::"]
+tier = "slow"
+layers = [1, 3]
+seams = ["L1-L3:health-restart"]
+adapter = "libtest"
+cargo = true
+timeout_s = 1800
+rerun = "cargo test --manifest-path 1-bootstrap/Cargo.toml -p node111 --lib -- --exact {test}"
+rerun_cost = "slow, ~30 s warm"
+covered_by = "l1.gate"
+strength = "F"
+needs = ["cargo"]
+
+# install/verify.rs: the installer's success block (the URLs, the pair code, the 'dashboard UI not built' warning).
+[[check]]
+id = "l1.node111.lib-install"
+kind = "unit"
+cmd = ["cargo", "test", "--manifest-path", "1-bootstrap/Cargo.toml", "-p", "node111", "--lib", "--", "install::verify::"]
+tier = "slow"
+layers = [1, 4]
+seams = ["L1-L4:install-print", "L1-L4:ui-embed"]
+adapter = "libtest"
+cargo = true
+timeout_s = 1800
+rerun = "cargo test --manifest-path 1-bootstrap/Cargo.toml -p node111 --lib -- --exact {test}"
+rerun_cost = "slow, ~30 s warm"
+covered_by = "l1.gate"
+strength = "F"
+needs = ["cargo"]
+
+# daemon/intelligence.rs: the child spec of the agent and the node id the daemon hands it (the signer).
+[[check]]
+id = "l1.node111.lib-intelligence"
+kind = "unit"
+cmd = ["cargo", "test", "--manifest-path", "1-bootstrap/Cargo.toml", "-p", "node111", "--lib", "--", "daemon::intelligence::"]
+tier = "slow"
+layers = [1, 2, 3]
+seams = ["L2-L3:signer-none"]
+adapter = "libtest"
+cargo = true
+timeout_s = 1800
+rerun = "cargo test --manifest-path 1-bootstrap/Cargo.toml -p node111 --lib -- --exact {test}"
+rerun_cost = "slow, ~30 s warm"
+covered_by = "l1.gate"
+strength = "F"
+needs = ["cargo"]
+
+# daemon/fabric/sealer.rs: the daemon's sealer over id111's seal functions.
+[[check]]
+id = "l1.node111.lib-sealer"
+kind = "unit"
+cmd = ["cargo", "test", "--manifest-path", "1-bootstrap/Cargo.toml", "-p", "node111", "--lib", "--", "daemon::fabric::sealer::"]
+tier = "slow"
+layers = [1, 2, 5]
+seams = ["L2-L5:sealer"]
+adapter = "libtest"
+cargo = true
+timeout_s = 1800
+rerun = "cargo test --manifest-path 1-bootstrap/Cargo.toml -p node111 --lib -- --exact {test}"
+rerun_cost = "slow, ~30 s warm"
+covered_by = "l1.gate"
+strength = "F"
+needs = ["cargo"]
+
+# daemon/bridge/attest.rs: the foreign-identity attestation over id111.
+[[check]]
+id = "l1.node111.lib-attest"
+kind = "unit"
+cmd = ["cargo", "test", "--manifest-path", "1-bootstrap/Cargo.toml", "-p", "node111", "--lib", "--", "daemon::bridge::attest::"]
+tier = "slow"
+layers = [1, 2, 6]
+seams = ["L2-L6:attest-bridge"]
+adapter = "libtest"
+cargo = true
+timeout_s = 1800
+rerun = "cargo test --manifest-path 1-bootstrap/Cargo.toml -p node111 --lib -- --exact {test}"
+rerun_cost = "slow, ~30 s warm"
+covered_by = "l1.gate"
+strength = "F"
+needs = ["cargo"]
+
+# daemon/bridge/simplex.rs: the SimpleX component's state.
+[[check]]
+id = "l1.node111.lib-simplex"
+kind = "unit"
+cmd = ["cargo", "test", "--manifest-path", "1-bootstrap/Cargo.toml", "-p", "node111", "--lib", "--", "daemon::bridge::simplex::"]
+tier = "slow"
+layers = [1, 6]
+seams = ["L6-L6:simplex"]
+adapter = "libtest"
+cargo = true
+timeout_s = 1800
+rerun = "cargo test --manifest-path 1-bootstrap/Cargo.toml -p node111 --lib -- --exact {test}"
+rerun_cost = "slow, ~30 s warm"
+covered_by = "l1.gate"
+strength = "F"
+needs = ["cargo"]
 
 # The daemon::relay::settings:: unit tests (relay/settings.rs, 19 tests, D1 landed), kept apart from the rest of --lib
 # because the matrix rates their seam I while the other unit tests rate F. The filter is the full module path: a bare
@@ -1047,20 +1292,58 @@ covered_by = "l1.gate"
 strength = "I"
 needs = ["cargo"]
 
-# The daemon::relay::netwatch:: unit tests (relay/netwatch.rs, 17 tests, row D4 landed 71af200): the address and route
-# watch against a scripted netlink event source (transport::netlink::ScriptedEvents) and a fake opener, never a real
-# socket. Strength F: the seam's other side, relay/gateway.rs, is still a T0 stub (row D3) and G7-extended is a stub.
+# The address and route watch and the netlink source under it (rows D4 and D4c landed): daemon::relay::netwatch:: (relay/
+# netwatch.rs, 20 tests: the watch against a scripted netlink event source, transport::netlink::ScriptedEvents and
+# ScriptedBursts, and a fake opener, never a real socket) and daemon::transport::netlink:: (transport/netlink.rs: the group
+# masks and `classify` over the kernel's message shapes seen on a veth pair). Strength F: both run against the scripted
+# source, the fake on this seam (mirrors side a, so a failure reads side b first: for a netlink.rs test read side a).
 [[check]]
 id = "l1.node111.lib-netwatch"
 kind = "unit"
-cmd = ["cargo", "test", "--manifest-path", "1-bootstrap/Cargo.toml", "-p", "node111", "--lib", "daemon::relay::netwatch::"]
+cmd = ["cargo", "test", "--manifest-path", "1-bootstrap/Cargo.toml", "-p", "node111", "--lib", "--", "daemon::relay::netwatch::", "daemon::transport::netlink::"]
 tier = "slow"
 layers = [1, 6, 7]
 seams = ["L6-L7:netlink-gateway"]
 adapter = "libtest"
 cargo = true
 timeout_s = 1800
-rerun = "cargo test --manifest-path 1-bootstrap/Cargo.toml -p node111 --lib daemon::relay::netwatch:: -- --exact {test}"
+rerun = "cargo test --manifest-path 1-bootstrap/Cargo.toml -p node111 --lib -- --exact {test}"
+rerun_cost = "slow, ~30 s warm"
+covered_by = "l1.gate"
+strength = "F"
+needs = ["cargo"]
+
+# The gateway row (relay/gateway.rs, 17 tests, rows D3 and D3b landed): the detail shape, the monotonic ages, the carrier
+# facts reset on a change of carrier, the paired-hub carrier fact, fed by scripted facts and netwatch events.
+[[check]]
+id = "l1.node111.lib-gateway"
+kind = "unit"
+cmd = ["cargo", "test", "--manifest-path", "1-bootstrap/Cargo.toml", "-p", "node111", "--lib", "--", "daemon::relay::gateway::"]
+tier = "slow"
+layers = [1, 6, 7]
+seams = ["L6-L7:netlink-gateway"]
+adapter = "libtest"
+cargo = true
+timeout_s = 1800
+rerun = "cargo test --manifest-path 1-bootstrap/Cargo.toml -p node111 --lib -- --exact {test}"
+rerun_cost = "slow, ~30 s warm"
+covered_by = "l1.gate"
+strength = "F"
+needs = ["cargo"]
+
+# The pairing and the pinned-key TLS wrap in process (relay/pair.rs, 8 tests, row D6; relay/tls.rs, 14 tests, row D5; both
+# landed). The seam's first fake is relay_tls.rs (it mirrors side a), so a failure reads side b first.
+[[check]]
+id = "l1.node111.lib-pair"
+kind = "unit"
+cmd = ["cargo", "test", "--manifest-path", "1-bootstrap/Cargo.toml", "-p", "node111", "--lib", "--", "daemon::relay::pair::", "daemon::relay::tls::"]
+tier = "slow"
+layers = [1, 5, 7]
+seams = ["L5-L7:pair-gate"]
+adapter = "libtest"
+cargo = true
+timeout_s = 1800
+rerun = "cargo test --manifest-path 1-bootstrap/Cargo.toml -p node111 --lib -- --exact {test}"
 rerun_cost = "slow, ~30 s warm"
 covered_by = "l1.gate"
 strength = "F"
@@ -1262,6 +1545,27 @@ covered_by = "l3.gate"
 strength = "F"
 needs = ["cargo"]
 
+# Row A1 (landed): the three Layer 7 agent tools (presence.read, gateway.read, relay.propose; nearby.read's 111 source)
+# against a stub 111d serving the contract's GET routes (hand-typed answers, with secret bait and injection text in
+# RelayStatus): untrusted-block labelling, no secret reaches the model, relay.propose writes a `relay` proposal and calls
+# nothing, the closed action vocabulary (presence.interval refused). The stub is the fake of side b, so the record reads the
+# agent's tools.rs. The routes it reads are not built in the daemon yet (D2, D10): the seam stays stub.
+[[check]]
+id = "l3.agent111.layer7_tools"
+kind = "unit"
+cmd = ["cargo", "test", "--manifest-path", "3-intelligence/Cargo.toml", "-p", "agent111", "--test", "layer7_tools"]
+tier = "slow"
+layers = [3, 7]
+seams = ["L3-L7:l7-tools"]
+adapter = "libtest"
+cargo = true
+timeout_s = 1800
+rerun = "cargo test --manifest-path 3-intelligence/Cargo.toml -p agent111 --test layer7_tools -- --exact {test}"
+rerun_cost = "slow, ~20 s warm"
+covered_by = "l3.gate"
+strength = "F"
+needs = ["cargo"]
+
 [[check]]
 id = "l3.agent111.model_client"
 kind = "unit"
@@ -1299,12 +1603,16 @@ needs = ["cargo"]
 # config.rs (the loopback and private-address tables, the env-file parser), health.rs and status.rs (the 503 / degraded /
 # ok derivation), tools.rs (ids checked against their closed shapes, actions rendered in a fixed key order, the closed
 # vocabulary refusing the rest). http.rs (host allowlist), tasks.rs and model.rs prove no seam on their own.
+# layers = [3]: the tests touch Layer 3 code only (a record carries the layers of its seams anyway). A layer-1, -6 or -7 run
+# must not plan l3.gate for this unit: l3.gate ends in a musl `cargo check` that fails on a box without that target.
+# Its records carry the first seam's read_first (config.rs, tests/config_guard.rs) whatever the module (health.rs, tools.rs):
+# the agent111 --lib modules are too few and too mixed to split by path; read the failing test's own file.
 [[check]]
 id = "l3.agent111.lib"
 kind = "unit"
 cmd = ["cargo", "test", "--manifest-path", "3-intelligence/Cargo.toml", "-p", "agent111", "--lib"]
 tier = "slow"
-layers = [1, 3, 6, 7]
+layers = [3]
 seams = ["L1-L3:env-precedence", "L3-L7:offload", "L1-L3:health-restart", "L3-L6:l6-tools"]
 adapter = "libtest"
 cargo = true
@@ -1492,6 +1800,12 @@ needs = ["cargo"]
 # Layer 4 gate: typecheck, vitest, vite build, size budget. check.sh also runs it as its last stage (a full run
 # therefore runs this check twice, see l1.gate). Its seams are those of its static stages (the typecheck reads the
 # generated types, the budget reads the built chunks); the vitest files are the units below, each with its own seams.
+# `pnpm check` = typecheck, vitest, build, budget. NO `seams`: a vitest failure in one of the test files no unit owns (the
+# [unmapped] ones: markdown, shell, store ...) must not read as a break of the contract generator or the budget. The units
+# below own the files that prove a seam; their records carry their own seams. `phases` names what each stage proves (the
+# `--seam` selection reads it) but the vitest adapter reads no stage header from `pnpm check` (t111/adapters.py: the vitest
+# scope has no phase), so today the gate's own records (a typecheck error, `exit 1 but no failing result was parsed` for a
+# build or budget failure) carry no seam and no read_first. Reading the stage from the `> ui@... typecheck` lines is X3 work.
 [[check]]
 id = "l4.ui"
 kind = "gate"
@@ -1499,7 +1813,7 @@ cmd = ["pnpm", "check"]
 cwd = "4-interface/ui"
 tier = "slow"
 layers = [4]
-seams = ["L4-L4:openapi-ts", "L4-L4:budget"]
+phases = { "typecheck" = ["L4-L4:openapi-ts"], "build" = ["L4-L4:budget"], "budget" = ["L4-L4:budget"] }
 adapter = "vitest"
 lock = "ui-dist"
 timeout_s = 1800
@@ -1606,6 +1920,7 @@ rerun_cost = "slow, ~10 s"
 covered_by = "l4.ui"
 strength = "C"
 needs = ["pnpm"]
+requires = ["l4.contract.fresh"]
 
 [[check]]
 id = "l4.ui.layer6-api"
@@ -1631,6 +1946,7 @@ rerun_cost = "slow, ~10 s"
 covered_by = "l4.ui"
 strength = "C"
 needs = ["pnpm"]
+requires = ["l4.contract.fresh"]
 
 [[check]]
 id = "l4.ui.layer6-contract"
@@ -1656,6 +1972,7 @@ rerun_cost = "slow, ~10 s"
 covered_by = "l4.ui"
 strength = "C"
 needs = ["pnpm"]
+requires = ["l4.contract.fresh"]
 
 [[check]]
 id = "l4.ui.layer7-contract"
@@ -1681,6 +1998,7 @@ rerun_cost = "slow, ~10 s"
 covered_by = "l4.ui"
 strength = "C"
 needs = ["pnpm"]
+requires = ["l4.contract.fresh"]
 
 [[check]]
 id = "l4.ui.layer7-views"
@@ -1706,6 +2024,7 @@ rerun_cost = "slow, ~10 s"
 covered_by = "l4.ui"
 strength = "C"
 needs = ["pnpm"]
+requires = ["l4.contract.fresh"]
 
 [[check]]
 id = "l4.ui.messaging-mock"
@@ -1731,6 +2050,7 @@ rerun_cost = "slow, ~10 s"
 covered_by = "l4.ui"
 strength = "C"
 needs = ["pnpm"]
+requires = ["l4.contract.fresh"]
 
 [[check]]
 id = "l4.ui.mock"
@@ -1756,6 +2076,7 @@ rerun_cost = "slow, ~10 s"
 covered_by = "l4.ui"
 strength = "C"
 needs = ["pnpm"]
+requires = ["l4.contract.fresh"]
 
 # Pins the UI's hand-written prompts on the mock only; it gives the prompts seam no evidence the tools exist.
 [[check]]
@@ -1836,6 +2157,7 @@ rerun_cost = "slow, ~1 min"
 covered_by = "l4.ui"
 strength = "C"
 needs = ["pnpm"]
+requires = ["l4.contract.fresh"]
 
 # Replays the 11 recorded SSE tapes through the real UI parser: the recordings come from a real daemon (S1/S2),
 # which is why the matrix rates this seam R although vitest runs no daemon.
@@ -1863,6 +2185,7 @@ rerun_cost = "slow, ~10 s"
 covered_by = "l4.ui"
 strength = "R"
 needs = ["pnpm"]
+requires = ["l4.contract.fresh"]
 
 # The eager/lazy gzip byte budget (D21); needs a fresh dist, so it builds first.
 [[check]]
@@ -2034,7 +2357,7 @@ kind = "unit"
 cmd = ["bash", "6-transport/verify/lxmf.sh"]
 tier = "ns"
 layers = [6, 1, 2, 5]
-seams = ["L6-L6:lxmf-sidecar", "L1-L6:rnsd-child", "L1-L6:component-cache", "L2-L6:attest-bridge", "L1-X:pi-floor"]
+seams = ["L6-L6:lxmf-sidecar", "L1-L6:rnsd-child", "L1-L6:component-cache", "L2-L6:attest-bridge", "L1-X:pi-floor", "L6-X:rns-lxmf-api"]
 phases = { "2." = ["L6-L6:lxmf-sidecar", "L1-L6:rnsd-child"], "3." = ["L1-L6:component-cache"], "5." = ["L6-L6:lxmf-sidecar", "L2-L6:attest-bridge"], "6." = ["L1-L6:rnsd-child"], "7." = ["L6-L6:lxmf-sidecar"], "9." = ["L1-L6:component-cache"], "10." = ["L1-X:pi-floor"], "12." = ["L1-X:pi-floor"] }
 adapter = "okfail"
 cargo = true
@@ -2210,6 +2533,54 @@ needs = ["bash"]
 # FAKES: stand-ins for one side of a seam. parity = "none" counts as a gap on every run.
 # ========================================================================
 
+# the presence reader's own tests (l5.presence-sidecar): a fake meshtastic interface in, and the presence file read back by
+# the test as the daemon's reader would parse it. Declared FIRST on the seam: the record of the check reads side a, the reader.
+[[fake]]
+path = "5-messaging/sidecars/meshtastic-presence/tests/test_presence.py"
+mirrors = "b"
+seam = "L5-L6:presence-file"
+parity = "none"
+
+# a fake RNS + LXMF surface injected through sys.modules (Reticulum, Identity, Destination, Transport, LXMRouter, LXMessage),
+# semantics read from rns 1.5.7 / lxmf 1.2.1; nothing imports the real libraries (l6.lxmf-sidecar). Unverified against them: G3.
+[[fake]]
+path = "6-transport/sidecars/lxmf-sidecar/tests/_support.py"
+mirrors = "b"
+seam = "L6-X:rns-lxmf-api"
+parity = "none"
+
+# raw std-only HTTP clients that read /v1/agent/events and /health as the daemon's relay would (l3.agent111.events_status);
+# declared FIRST on the seam, before node111's stub agent that mirrors the other side.
+[[fake]]
+path = "3-intelligence/crates/agent111/tests/events_status.rs"
+mirrors = "b"
+seam = "L3-L4:agent-events"
+parity = "none"
+
+# stub 111d serving the contract's GET routes with hand-typed answers (GET /nearby with a meshtastic, a reticulum and a 111
+# source, GET /relay salted with secret bait and injection text); never validated against the contract (N2).
+[[fake]]
+path = "3-intelligence/crates/agent111/tests/layer7_tools.rs"
+mirrors = "b"
+seam = "L3-L7:l7-tools"
+parity = "none"
+
+# LogServer (:711): a hand-written hub that serves an origin directory under /origin/v1/ and counts every request; it stands
+# in for the hub's origin (side b) under the daemon's updater. Declared first on the seam: the record reads the updater.
+[[fake]]
+path = "1-bootstrap/crates/node111/tests/updater_stage.rs"
+mirrors = "b"
+seam = "L1-L7:origin"
+parity = "none"
+
+# raw rustls peers (a wrong key, an X.509 certificate, TLS 1.2, an ECDSA key) and raw TCP peers that stand in for the far end
+# of a paired-hub link under relay::tls::wrap (side b is under test).
+[[fake]]
+path = "1-bootstrap/crates/node111/tests/relay_tls.rs"
+mirrors = "a"
+seam = "L5-L7:pair-gate"
+parity = "none"
+
 # stub_daemon() (:110): hand-typed JSON for the daemon's GET /api/v1/* answers, never validated against the contract (N2)
 [[fake]]
 path = "3-intelligence/crates/agent111/tests/daemon_tools.rs"
@@ -2345,6 +2716,13 @@ mirrors = "b"
 seam = "L1-L6:rnsd-child"
 parity = "none"
 
+# a fake rnodeconf (text goldens by port) for the identify sequence (devices_core): declared first, it is the unit's own fake
+[[fake]]
+path = "1-bootstrap/crates/node111/tests/fake_rnodeconf/mod.rs"
+mirrors = "b"
+seam = "L1-L6:devices-hotplug"
+parity = "none"
+
 # stands in for venvs/rns/bin/rnodeconf in G5: a golden text chosen by the port argument
 [[fake]]
 path = "6-transport/verify/devices/fake-rnodeconf.sh"
@@ -2355,13 +2733,6 @@ parity = "none"
 # a pty whose far end answers (or not) as a MeshCore KISS modem in G5
 [[fake]]
 path = "6-transport/verify/devices/meshcore-pty.py"
-mirrors = "b"
-seam = "L1-L6:devices-hotplug"
-parity = "none"
-
-# a fake rnodeconf (text goldens by port) for the identify sequence
-[[fake]]
-path = "1-bootstrap/crates/node111/tests/fake_rnodeconf/mod.rs"
 mirrors = "b"
 seam = "L1-L6:devices-hotplug"
 parity = "none"
@@ -2457,6 +2828,8 @@ reason = "returns early as root (access(2) always succeeds), so a PASS here prov
 "1-bootstrap/verify/local-smoke.sh" = "an aggregate that re-runs gates this catalog lists singly (F1-F6 as cargo tests, shim, termux, check.sh pieces, linux-e2e, smoke.sh); X5(d) fixes its one shared log and its exit-77 miscount"
 "6-transport/verify/lib.sh" = "sourced helper (ok/fail/skip_or_fail/finish), not a check; every L6 and L7 harness sources it"
 "6-transport/verify/rns-venv.sh" = "sourced helper that builds the hash-locked rnsd/LXMF venv for G3, G4 and G5; not a check"
+"6-transport/verify/devices/fake-rnodeconf.sh" = "G5's fake rnodeconf (also a [[fake]] on L1-L6:devices-hotplug): devices.sh installs a rendered copy as venvs/rns/bin/rnodeconf; not a check"
+"6-transport/verify/spine/node.sh" = "sourced helper of the G4 and G5 gates (spine.sh and devices.sh: ok/fail/note counting, req/jb/t/tw, nx/api, roots, daemons); not a check"
 "6-transport/verify/root.sh" = "sourced helper (g6_make_root, g6_identity) for G1 and the Layer 7 lib; not a check"
 "6-transport/verify/zero-weight.sh" = "G7 needs an already-running daemon (NODE111_ROOT) and prints SKIPPED alone; row N4 runs it inside smoke.sh against the harness's own daemon, then it gets a check"
 "7-relay/verify/lib.sh" = "sourced helper: port, namespace and address names for G7-extended to G12; creates nothing, not a check"

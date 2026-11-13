@@ -498,17 +498,17 @@ gap = "The stub-ntfy.py stand-in is unverified against a real ntfy server (11 lo
 
 [[seam]]
 id = "L1-L7:origin"
-status = "stub"
+status = "built"
 spec = ["7-relay/README.md §9", "1-bootstrap/README.md Updates & rollback"]
 a = { layer = 1, files = [
   "1-bootstrap/crates/node111/src/daemon/updater/fetch.rs",
   "1-bootstrap/crates/node111/src/daemon/updater/stage.rs",
   "1-bootstrap/crates/node111/src/cli.rs",
 ] }
-b = { layer = 7, files = ["1-bootstrap/crates/node111/src/daemon/origin/mod.rs"] }
-read_first = "a"
+b = { layer = 7, files = ["1-bootstrap/crates/node111/src/daemon/origin/mod.rs", "1-bootstrap/crates/node111/src/daemon/dashboard/routes.rs"] }
+read_first = "b"
 symptom = "LAN nodes cannot update offline: GET /update/origins lists nothing; 404 on /origin/v1/*"
-gap = "The client side is tested (updater_stage, helper_guard); the server origin/mod.rs is an 11-line stub and G12 prints SKIPPED."
+gap = "Rows D7 and D5b landed: the serving side runs in process (origin_serve through the real dashboard app, the origin lib tests) and the client side against a hand-written hub (updater_stage, helper_guard); G12 still prints SKIPPED, so no running system updates one node from another."
 
 [[seam]]
 id = "L1-L7:registry-dnssd"
@@ -666,13 +666,13 @@ gap = ""
 
 [[seam]]
 id = "L2-L7:epoch-linkkey"
-status = "stub"
+status = "built"
 spec = ["7-relay/README.md §4.2", "2-identity/README.md §13.2"]
 a = { layer = 2, files = ["2-identity/README.md"] }
 b = { layer = 7, files = ["1-bootstrap/crates/node111/src/daemon/relay/linkkey.rs"] }
 read_first = "b"
 symptom = "the hub link is not authenticated: the pair status shows tls instead of rpk"
-gap = "T0 stub: relay/linkkey.rs is a 10-line stub and G11 tls.sh prints SKIPPED with exit 0."
+gap = "Rows D5 and D5b landed: the link key (mint, cache, discard after a restore) runs in process under relay_tls and the linkkey lib tests; G11 tls.sh still prints SKIPPED with exit 0, so no running system shows the pair status reading rpk."
 
 [[seam]]
 id = "L2-L8:dataset-signing"
@@ -798,8 +798,8 @@ spec = ["3-intelligence/README.md Layer 7 tools", "7-relay/README.md §13.3"]
 a = { layer = 3, files = ["3-intelligence/crates/agent111/src/tools.rs"] }
 b = { layer = 7, files = ["1-bootstrap/crates/node111/src/daemon/relay/mod.rs"] }
 read_first = "a"
-symptom = "the tool-count pin moves; today the code offers 17 tools"
-gap = "None: row A1 has not landed, the agent offers 17 tools and no check covers the three Layer 7 tools."
+symptom = "the tool-count pin moves: the agent offers 20 tools (17 and presence.read, gateway.read, relay.propose)"
+gap = "Row A1 landed and layer7_tools runs the three tools against a hand-typed stub daemon; the routes they read (GET /relay of D10, the 111 source of GET /nearby of D2) are not built, so no real daemon answers them."
 
 [[seam]]
 id = "L3-L7:offload"
@@ -961,7 +961,7 @@ b = { layer = 7, files = [
 ] }
 read_first = "b"
 symptom = "Settings > Relay is dead: the routes answer 404; the layer7 tests run on the mock only"
-gap = "ui:layer7-contract uses hand fixtures 'not daemon output', and eight Layer 7 operations sit in dashboard_auth's UNROUTED list."
+gap = "ui:layer7-contract uses hand fixtures 'not daemon output', and eight Layer 7 operations sit in dashboard_auth's UNROUTED list; relay_pair (row D6, landed) drives the three pair routes through the real dashboard app."
 
 [[seam]]
 id = "L4-L8:hub-content"
@@ -1071,13 +1071,13 @@ gap = "B on the mesh side (forward.rs); carrier/mod.rs has no tests and G9 and G
 
 [[seam]]
 id = "L5-L7:pair-gate"
-status = "stub"
+status = "built"
 spec = ["7-relay/README.md §4.4", "7-relay/README.md §4.6", "7-relay/README.md §5.2"]
 a = { layer = 5, files = ["5-messaging/crates/mesh111/src/fabric.rs", "5-messaging/crates/mesh111/src/link/tcp_lan.rs"] }
 b = { layer = 7, files = ["1-bootstrap/crates/node111/src/daemon/relay/pair.rs", "1-bootstrap/crates/node111/src/daemon/relay/tls.rs"] }
 read_first = "a"
 symptom = "hubs cannot pair: 409 pair_role_mismatch; PairedHub.tls"
-gap = "The mesh side runs real tcp-lan on loopback (a ~3 min suite); the daemon side is a T0 stub and G9 prints SKIPPED."
+gap = "The mesh side runs real tcp-lan on loopback (a ~3 min suite); the daemon side is tested in process (relay_tls, row D5: pinned-key TLS between two real tcp-lan adapters; relay_pair, row D6: pairing through the dashboard routes and the CLI, two hubs paired end to end) and G9 prints SKIPPED, so no two daemons pair in a running system."
 
 [[seam]]
 id = "L5-L7:role-bits"
@@ -1154,7 +1154,7 @@ gap = "None: planned; POST /nearby/hops is not built."
 
 [[seam]]
 id = "L6-L7:netlink-gateway"
-status = "stub"
+status = "built"
 spec = ["7-relay/README.md §3.3"]
 a = { layer = 6, files = ["1-bootstrap/crates/node111/src/daemon/transport/netlink.rs"] }
 b = { layer = 7, files = [
@@ -1163,7 +1163,17 @@ b = { layer = 7, files = [
 ] }
 read_first = "a"
 symptom = "the gateway state is stale: services gateway reason_code (gateway_none, carrier_ok)"
-gap = "netwatch.rs (row D4, landed) has 17 unit tests against a scripted netlink source and a fake opener, and netlink.rs has two; gateway.rs (row D3) is still a T0 stub and G7-extended idle.sh prints SKIPPED, so no running system exercises the seam."
+gap = "Rows D3, D4, D3b and D4c landed: netwatch.rs (20 unit tests) runs against a scripted netlink source and a fake opener, gateway.rs (17) against scripted facts, netlink.rs (the group masks and the classifier of the kernel's message shapes) against byte shapes; the one test that reads the real kernel (transport::netlink::tests::the_kernel_s_messages_classify_as_documented, NODE111_NETNS_CHECK=1 under unshare -Urn) is ignored and run by hand, and G7-extended idle.sh still prints SKIPPED, so no running system exercises the seam."
+
+[[seam]]
+id = "L6-X:rns-lxmf-api"
+status = "built"
+spec = ["6-transport/README.md §6"]
+a = { layer = 6, files = ["6-transport/sidecars/lxmf-sidecar/lxmf_sidecar.py"] }
+b = { layer = "X", files = ["6-transport/sidecars/lxmf-sidecar/requirements.in", "6-transport/sidecars/lxmf-sidecar/lxmf-sidecar-lock.txt"] }
+read_first = "a"
+symptom = "the LXMF helper dies at import or on first use after a pin bump: the helper's stderr names the rns or LXMF call; the network shows adapter_down"
+gap = "The helper's own tests run on a fake RNS and LXMF surface written from rns 1.5.7 and lxmf 1.2.1; only G3 runs the real libraries, and it needs the package index (SKIPPED offline)."
 
 [[seam]]
 id = "L7-L8:move-datasets"

@@ -1,37 +1,21 @@
 == 1. ids
-ok: ids: ids are unique and match their layers (103 seams, 113 checks)
+ok: ids: ids are unique and match their layers (104 seams, 130 checks)
 == 2. files
 ok: files: side files, check scripts and test files, spec files and sections exist
 == 3. unknown-seam
 ok: unknown-seam: every seam a check names is in the map
 == 4. unclaimed
-ok: unclaimed: every verify script and test file is claimed by a check or listed in [unmapped] (122 verify and test files)
+ok: unclaimed: every verify script and test file is claimed by a check or listed in [unmapped] (128 verify and test files)
 == 5. built-gap
 ok: built-gap: every built seam has a proving check of strength R or says its gap
 == 6. fake-mirror
-ok: fake-mirror: every [[fake]] names a real seam, file, mirrored side and parity check (23 fakes)
+ok: fake-mirror: every [[fake]] names a real seam, file, mirrored side and parity check (30 fakes)
 == 7. pi-floor
 ok: pi-floor: nothing the release payload or the cross build names lives under verify/
-note: warn stub-marker: L1-L3:model-manifest: stub, but side a file 1-bootstrap/manifest/gen-manifest.py has no T0 marker in its first lines: promote the row
-note: warn stub-marker: L1-L3:model-manifest: stub, but side a file 1-bootstrap/crates/node111/src/manifest.rs has no T0 marker in its first lines: promote the row
-note: warn stub-marker: L1-L3:model-manifest: stub, but side b file 1-bootstrap/crates/node111/src/daemon/intelligence.rs has no T0 marker in its first lines: promote the row
-note: warn stub-marker: L1-L5:blob-intake: stub, but side a file 1-bootstrap/crates/node111/src/daemon/updater/mod.rs has no T0 marker in its first lines: promote the row
-note: warn stub-marker: L1-L5:blob-intake: stub, but side b file 5-messaging/crates/mesh111/src/blobs.rs has no T0 marker in its first lines: promote the row
-note: warn stub-marker: L1-L7:origin: stub, but side a file 1-bootstrap/crates/node111/src/daemon/updater/fetch.rs has no T0 marker in its first lines: promote the row
-note: warn stub-marker: L1-L7:origin: stub, but side a file 1-bootstrap/crates/node111/src/daemon/updater/stage.rs has no T0 marker in its first lines: promote the row
-note: warn stub-marker: L1-L7:origin: stub, but side a file 1-bootstrap/crates/node111/src/cli.rs has no T0 marker in its first lines: promote the row
-note: warn stub-marker: L1-L7:registry-dnssd: stub, but side b file 1-bootstrap/crates/node111/src/daemon/dashboard/mdns.rs has no T0 marker in its first lines: promote the row
-note: warn stub-marker: L1-L7:relay-state: stub, but side a file 1-bootstrap/crates/node111/src/daemon/relay/settings.rs has no T0 marker in its first lines: promote the row
-note: warn stub-marker: L2-L7:epoch-linkkey: stub, but side a file 2-identity/README.md has no T0 marker in its first lines: promote the row
-note: warn stub-marker: L3-L7:offload: stub, but side a file 3-intelligence/crates/agent111/src/config.rs has no T0 marker in its first lines: promote the row
-note: warn stub-marker: L4-L7:relay-api: stub, but side a file 4-interface/ui/src/lib/api/relay.ts has no T0 marker in its first lines: promote the row
-note: warn stub-marker: L5-L7:fabric-tap: stub, but side a file 1-bootstrap/crates/node111/src/daemon/fabric/mod.rs has no T0 marker in its first lines: promote the row
-note: warn stub-marker: L5-L7:forwarder-handoff: stub, but side a file 5-messaging/crates/mesh111/src/fabric.rs has no T0 marker in its first lines: promote the row
-note: warn stub-marker: L5-L7:pair-gate: stub, but side a file 5-messaging/crates/mesh111/src/fabric.rs has no T0 marker in its first lines: promote the row
-note: warn stub-marker: L5-L7:pair-gate: stub, but side a file 5-messaging/crates/mesh111/src/link/tcp_lan.rs has no T0 marker in its first lines: promote the row
-note: warn stub-marker: L6-L7:hops: stub, but side a file 1-bootstrap/crates/node111/src/daemon/transport/rnstatus.rs has no T0 marker in its first lines: promote the row
-note: warn stub-marker: L6-L7:hops: stub, but side b file 1-bootstrap/crates/node111/src/daemon/dashboard/api_v1/nearby.rs has no T0 marker in its first lines: promote the row
-note: warn stub-marker: L6-L7:netlink-gateway: stub, but side a file 1-bootstrap/crates/node111/src/daemon/transport/netlink.rs has no T0 marker in its first lines: promote the row
-note: warn stub-marker: L6-L7:netlink-gateway: stub, but side b file 1-bootstrap/crates/node111/src/daemon/relay/netwatch.rs has no T0 marker in its first lines: promote the row
-note: warn fake-parity: [[fake]]: 23 of 23 fake(s) checked against nothing they mirror (parity = "none")
+== 8. known
+ok: known: every [[known]] names a real check and an existing source file
+note: warn stub-marker: L1-L3:model-manifest: stub, but no side file carries a T0 marker in its first lines (side a 1-bootstrap/manifest/gen-manifest.py, side a 1-bootstrap/crates/node111/src/manifest.rs, side b 1-bootstrap/crates/node111/src/daemon/intelligence.rs): promote the row
+note: warn stub-marker: L1-L5:blob-intake: stub, but no side file carries a T0 marker in its first lines (side a 1-bootstrap/crates/node111/src/daemon/updater/mod.rs, side b 5-messaging/crates/mesh111/src/blobs.rs): promote the row
+note: warn stub-marker: L6-L7:hops: stub, but no side file carries a T0 marker in its first lines (side a 1-bootstrap/crates/node111/src/daemon/transport/rnstatus.rs, side b 1-bootstrap/crates/node111/src/daemon/dashboard/api_v1/nearby.rs): promote the row
+note: warn fake-parity: [[fake]]: 30 of 30 fake(s) checked against nothing they mirror (parity = "none")
 LINT GREEN

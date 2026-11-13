@@ -6,3 +6,4 @@
 {"id": "fx.ok/5/built-gap-every-built-seam-has-a-proving-check-of-strength-r", "status": "PASS", "log_line": 10, "phase": "5. built-gap"}
 {"id": "fx.ok/6/fake-mirror-every-fake-names-a-real-seam-file-mirrored-side", "status": "PASS", "log_line": 12, "phase": "6. fake-mirror"}
 {"id": "fx.ok/7/pi-floor-nothing-the-release-payload-or-the-cross-build", "status": "PASS", "log_line": 14, "phase": "7. pi-floor"}
+{"id": "fx.ok/8/known-every-known-names-a-real-check-and-an-existing-source", "status": "PASS", "log_line": 16, "phase": "8. known"}
