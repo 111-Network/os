@@ -1,0 +1,13 @@
+{"exit_declared": false}
+{"id": "fx.ok/every-stage-ran-g2-on-both-targets-all-green", "status": "PASS", "log_line": 1}
+{"id": "fx.ok/g2-ran-other-tools-absent-green", "status": "PASS", "log_line": 2}
+{"id": "fx.ok/no-cross-toolchains-g2-skipped-never-all-green", "status": "PASS", "log_line": 3}
+{"id": "fx.ok/one-cross-toolchain-only-g2-skipped-no-musl-build-attempted", "status": "PASS", "log_line": 4}
+{"id": "fx.ok/require-g2-1-without-cross-toolchains-fails-before-any-stage", "status": "PASS", "log_line": 5}
+{"id": "fx.ok/aarch64-mesh111-lib-tests-without-sqlcipher-s-codec", "status": "PASS", "log_line": 6}
+{"id": "fx.ok/x86-64-mesh111-lib-tests-without-openssl-3.6.3-red", "status": "PASS", "log_line": 7}
+{"id": "fx.ok/an-x86-64-test-binary-with-a-dt-needed-entry-red", "status": "PASS", "log_line": 8}
+{"id": "fx.ok/an-aarch64-test-binary-with-a-pt-interp-header-red", "status": "PASS", "log_line": 9}
+{"id": "fx.ok/no-mesh111-lib-test-binary-among-the-x86-64-ones-red", "status": "PASS", "log_line": 10}
+{"id": "fx.ok/messaging-one-cross-toolchain-only-musl-checks-skipped-said", "status": "PASS", "log_line": 11}
+{"id": "fx.ok/messaging-both-cross-toolchains-both-musl-checks-cc-pinned", "status": "PASS", "log_line": 12}

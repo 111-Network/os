@@ -49,12 +49,13 @@ const overview = (search = "") => html(routed("/overview", "/overview", Overview
 const STALE = [/nearby-nodes table/i, /relay and presence layers/i, /coming with layer 5/i, /messaging arrives with/i, /structural stub/i];
 
 describe("Overview: the Nearby card after Layer 5", () => {
-  it("advanced mode points at the Nearby page and names radar and map as Layer 7's", async () => {
+  it("advanced mode points at the Nearby page, which shows the radar; a map view is not in this version", async () => {
     await load("healthy");
     const out = overview("?mode=advanced");
     expect(out).toContain("This card only says whether anyone has been heard.");
     expect(out).toContain("The Meshtastic nodes a board has heard are listed on the Nearby page");
-    expect(out).toContain("radar and map views arrive with Layer 7 (Relay &amp; presence)");
+    expect(out).toContain("which also shows the radar; a map view is not in this version");
+    expect(out).not.toContain("arrive with Layer 7");
     expect(out).toContain('href="#/nearby"');
     expect(out).not.toContain("The nearby-nodes table arrives");
   });

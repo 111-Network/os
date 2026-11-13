@@ -1,0 +1,3 @@
+  ok: unit
+  ok: identity/keyset 0600
+V8-variant namespace e2e: PASS (real binary, fixture channel, full contract)

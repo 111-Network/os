@@ -1,0 +1,271 @@
+# Fixture catalog for the runner's own tests (verify/tests). Every cmd runs a tiny script the tests write into a temp
+# git repo under fx/ (helpers.FX_SCRIPTS); nothing here runs a gate of the real repo.
+
+[[check]]
+id = "fx.pass"
+kind = "unit"
+cmd = ["sh", "fx/pass.sh"]
+tier = "fast"
+layers = [1, 2]
+seams = ["L1-L2:fx-alpha"]
+strength = "I"
+timeout_s = 30
+rerun = "sh fx/pass.sh  # {check}"
+rerun_cost = "fast, ~0 s"
+
+[[check]]
+id = "fx.fail"
+kind = "unit"
+cmd = ["sh", "fx/fail.sh"]
+tier = "fast"
+layers = [3, 4]
+seams = ["L3-L4:fx-faked"]
+strength = "F"
+timeout_s = 30
+
+[[check]]
+id = "fx.needs"
+kind = "unit"
+cmd = ["sh", "fx/pass.sh"]
+tier = "fast"
+layers = [1]
+seams = ["L1-L2:fx-alpha"]
+strength = "I"
+timeout_s = 30
+needs = ["t111-no-such-tool-anywhere"]
+
+[[check]]
+id = "fx.hang"
+kind = "unit"
+cmd = ["sh", "fx/hang.sh"]
+tier = "fast"
+layers = [1]
+seams = ["L1-L2:fx-alpha"]
+strength = "I"
+timeout_s = 1
+
+[[check]]
+id = "fx.leak"
+kind = "unit"
+cmd = ["sh", "fx/leak.sh"]
+tier = "fast"
+layers = [1]
+seams = ["L1-L2:fx-alpha"]
+strength = "I"
+timeout_s = 30
+
+[[check]]
+id = "fx.dirty"
+kind = "unit"
+cmd = ["sh", "fx/dirty.sh"]
+tier = "fast"
+layers = [1]
+seams = ["L1-L2:fx-alpha"]
+strength = "I"
+timeout_s = 30
+
+[[check]]
+id = "fx.ignored"
+kind = "unit"
+cmd = ["sh", "fx/ignored.sh"]
+tier = "fast"
+layers = [1]
+seams = ["L1-L2:fx-alpha"]
+strength = "I"
+timeout_s = 30
+
+[[check]]
+id = "fx.writer"
+kind = "unit"
+cmd = ["sh", "fx/writer.sh"]
+tier = "fast"
+layers = [2]
+seams = ["L1-L2:fx-alpha"]
+strength = "I"
+timeout_s = 30
+
+[[check]]
+id = "fx.requires"
+kind = "unit"
+cmd = ["sh", "fx/pass.sh"]
+tier = "fast"
+layers = [3]
+seams = ["L3-L4:fx-faked"]
+strength = "I"
+timeout_s = 30
+requires = ["fx.fail"]
+
+[[check]]
+id = "fx.after-pass"
+kind = "unit"
+cmd = ["sh", "fx/pass.sh"]
+tier = "fast"
+layers = [1]
+seams = ["L1-L2:fx-alpha"]
+strength = "I"
+timeout_s = 30
+requires = ["fx.pass"]
+
+[[check]]
+id = "fx.offline"
+kind = "unit"
+cmd = ["sh", "fx/pass.sh"]
+tier = "fast"
+layers = [6]
+strength = "R"
+timeout_s = 30
+offline_skip = true
+needs = ["network"]
+
+[[check]]
+id = "fx.known"
+kind = "unit"
+cmd = ["sh", "fx/fail.sh"]
+tier = "fast"
+layers = [1]
+seams = ["L1-L2:fx-alpha"]
+strength = "I"
+timeout_s = 30
+
+[[check]]
+id = "fx.ns"
+kind = "unit"
+cmd = ["sh", "fx/pass.sh"]
+tier = "ns"
+layers = [4]
+seams = ["L1-L2:fx-alpha"]
+strength = "R"
+timeout_s = 30
+
+[[check]]
+id = "fx.gate"
+kind = "gate"
+cmd = ["sh", "fx/pass.sh"]
+tier = "fast"
+layers = [5]
+seams = ["L1-L2:fx-alpha"]
+strength = "I"
+timeout_s = 30
+
+[[check]]
+id = "fx.covered"
+kind = "unit"
+cmd = ["sh", "fx/pass.sh"]
+tier = "fast"
+layers = [5, 0]
+seams = ["L3-L4:fx-faked"]
+strength = "I"
+timeout_s = 30
+covered_by = "fx.gate"
+
+[[check]]
+id = "fx.slowgate"
+kind = "gate"
+cmd = ["sh", "fx/pass.sh"]
+tier = "slow"
+layers = [7]
+strength = "I"
+timeout_s = 30
+
+[[check]]
+id = "fx.slowcovered"
+kind = "unit"
+cmd = ["sh", "fx/pass.sh"]
+tier = "fast"
+layers = [7]
+strength = "I"
+timeout_s = 30
+covered_by = "fx.slowgate"
+
+[[check]]
+id = "fx.cargo1"
+kind = "unit"
+cmd = ["sh", "fx/stamp.sh"]
+tier = "slow"
+layers = [5]
+strength = "I"
+timeout_s = 30
+cargo = true
+
+[[check]]
+id = "fx.cargo2"
+kind = "unit"
+cmd = ["sh", "fx/stamp.sh"]
+tier = "slow"
+layers = [5]
+strength = "I"
+timeout_s = 30
+cargo = true
+
+[[check]]
+id = "fx.cargo3"
+kind = "unit"
+cmd = ["sh", "fx/stamp.sh"]
+tier = "slow"
+layers = [5]
+strength = "I"
+timeout_s = 30
+cargo = true
+
+[[check]]
+id = "fx.cargo4"
+kind = "unit"
+cmd = ["sh", "fx/stamp.sh"]
+tier = "slow"
+layers = [5]
+strength = "I"
+timeout_s = 30
+cargo = true
+
+[[check]]
+id = "fx.verify1"
+kind = "unit"
+cmd = ["sh", "fx/stamp.sh"]
+tier = "fast"
+layers = [6]
+strength = "R"
+timeout_s = 30
+lock = "verify"
+
+[[check]]
+id = "fx.verify2"
+kind = "unit"
+cmd = ["sh", "fx/stamp.sh"]
+tier = "fast"
+layers = [6]
+strength = "R"
+timeout_s = 30
+lock = "verify"
+
+[[check]]
+id = "fx.free1"
+kind = "unit"
+cmd = ["sh", "fx/stamp.sh"]
+tier = "fast"
+layers = [6]
+strength = "R"
+timeout_s = 30
+
+[[check]]
+id = "fx.free2"
+kind = "unit"
+cmd = ["sh", "fx/stamp.sh"]
+tier = "fast"
+layers = [6]
+strength = "R"
+timeout_s = 30
+
+[[fake]]
+path = "fx/fake-daemon.py"
+mirrors = "b"
+seam = "L3-L4:fx-faked"
+parity = "none"
+
+[[known]]
+test = "fx.known"
+condition = "euid0"
+source = "fx/TASKS.md:1"
+reason = "fails as root in the fixture"
+
+[unmapped]
+"fx/unrelated.sh" = "a fixture script tied to no seam"

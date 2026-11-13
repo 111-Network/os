@@ -49,7 +49,8 @@
 //!
 //! [`Meshtastic::attach_panels`] follows the panel host: a revoked
 //! `meshtastic` panel session closes its shim downlink at once, and the
-//! shim's drop count is reported for `panel.state.dropped`.
+//! shim's drop count is read for `panel.state.dropped` whenever the panel
+//! facts are read (no tick: Layer 7 §3.6, row D3b).
 //!
 //! Facts for the registry (`Facts.meshmud`, `Facts.radio.meshmud_bound`) come
 //! from cached snapshots ([`Meshtastic::facts`], [`Meshtastic::bound_ports`]):
@@ -265,6 +266,14 @@ pub struct Meshtastic {
     client_nearby: AtomicBool,
     /// The client's node-DB version last published as SSE `nearby`.
     client_nearby_published: AtomicU64,
+    /// Wakes the parked monitor (Layer 7 §3.6): fired whenever this module's
+    /// children change ([`Meshtastic::install_supervised`]: identify's bind,
+    /// a reconcile, a drop) and on shutdown. One consumer (the monitor), so
+    /// `notify_one`: a wake while it runs leaves one permit, never a queue.
+    monitor_wake: Arc<tokio::sync::Notify>,
+    /// Tests: monitor passes run (the parking proof, row D3b).
+    #[cfg(test)]
+    passes: AtomicU64,
 }
 
 fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
@@ -377,6 +386,9 @@ impl Meshtastic {
             client: Mutex::new(None),
             client_nearby: AtomicBool::new(true),
             client_nearby_published: AtomicU64::new(0),
+            monitor_wake: Arc::new(tokio::sync::Notify::new()),
+            #[cfg(test)]
+            passes: AtomicU64::new(0),
         })
     }
 
@@ -482,32 +494,39 @@ impl Meshtastic {
 
     /// Follow the panel host (§13/§14): a revoked `meshtastic` panel session
     /// closes its shim downlink at once (cookie revoked, panel disabled, LAN
-    /// off), and every tick the shim's drop count is reported for
-    /// `panel.state.dropped`. Falling behind the revocation stream closes
-    /// every session (fail closed: a viewer reconnects on its next call).
+    /// off). Falling behind the revocation stream closes every session (fail
+    /// closed: a viewer reconnects on its next call). The shim's drop count
+    /// reaches `panel.state.dropped` as a live source the host reads whenever
+    /// it reads the panel facts ([`PanelHost::set_dropped_source`]).
+    ///
+    /// No tick (Layer 7 §3.6, row D3b). The 2 s tick that copied the drop
+    /// count ran while the service was set up; §3.6 lets it run only while a
+    /// Meshtastic panel session is open, and the session's creation fires
+    /// nothing this module can wait on (`SessionStore::create` in
+    /// `panels/ticket.rs`, called from `panels/listener.rs`, neither in this
+    /// row's files). Reading the counter where it is shown needs no wakeup at
+    /// all, so the task waits on the revocation stream alone: no wakeup until
+    /// a session is revoked. It ends when the stream closes (the host is
+    /// gone) or, at the next revocation, when the module is stopping.
     pub fn attach_panels(self: &Arc<Self>, host: &Arc<PanelHost>) -> tokio::task::JoinHandle<()> {
         let shim = self.shim();
+        {
+            let shim = shim.clone();
+            host.set_dropped_source(ServiceId::Meshtastic, Arc::new(move || shim.dropped()));
+        }
         let mut rx = host.revocations();
-        let host = Arc::downgrade(host);
         let me = Arc::downgrade(self);
-        let every = self.cfg.tick;
         tokio::spawn(async move {
-            let mut t = tokio::time::interval(every);
-            t.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
             loop {
-                tokio::select! {
-                    r = rx.recv() => {
-                        if !on_revocation(&shim, r) {
-                            break;
-                        }
-                    }
-                    _ = t.tick() => {
-                        let (Some(h), Some(m)) = (host.upgrade(), me.upgrade()) else { break };
-                        if m.stopping.load(Ordering::SeqCst) {
-                            break;
-                        }
-                        h.report_dropped(ServiceId::Meshtastic, shim.dropped());
-                    }
+                let r = rx.recv().await;
+                if !on_revocation(&shim, r) {
+                    break;
+                }
+                if me
+                    .upgrade()
+                    .is_none_or(|m| m.stopping.load(Ordering::SeqCst))
+                {
+                    break;
                 }
             }
         })
@@ -646,12 +665,24 @@ impl Meshtastic {
         self.tick_once().await;
         let me = Arc::downgrade(self);
         let every = self.cfg.tick;
+        let wake = Arc::clone(&self.monitor_wake);
         tokio::spawn(async move {
             let mut t = tokio::time::interval(every);
             t.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
             t.tick().await;
             loop {
-                t.tick().await;
+                // Layer 7 §3.6: no binding, no wakeup; the next one comes
+                // from a change of this module's children or shutdown
+                let parked = match me.upgrade() {
+                    Some(m) => !m.monitor_wanted(),
+                    None => break,
+                };
+                if parked {
+                    wake.notified().await;
+                    t.reset();
+                } else {
+                    t.tick().await;
+                }
                 let Some(m) = me.upgrade() else { break };
                 if m.stopping.load(Ordering::SeqCst) {
                     break;
@@ -661,9 +692,29 @@ impl Meshtastic {
         });
     }
 
+    /// The 2 s monitor has work (Layer 7 §3.6, D30 Q1): a Meshtastic binding
+    /// is in `interfaces.toml`, this module runs a service (identify's child
+    /// before its binding is written, or one being dropped), or a board is
+    /// identified as Meshtastic but not bound (its row's facts: label,
+    /// firmware). With none of these the monitor parks on
+    /// [`Meshtastic::monitor_wake`]; a binding appears at runtime only through
+    /// identify, which installs its child (and so wakes it) before it writes
+    /// the binding.
+    fn monitor_wanted(&self) -> bool {
+        if lock(&self.service).is_some() {
+            return true;
+        }
+        let Some((_, reg)) = self.ctx() else {
+            return false;
+        };
+        reg.meshtastic_binding().is_some() || reg.identified_unbound_meshtastic().is_some()
+    }
+
     /// One monitor pass: reconcile (skipped while an identify runs), then
     /// refresh the cached facts and the presence snapshot.
     pub async fn tick_once(&self) {
+        #[cfg(test)]
+        self.passes.fetch_add(1, Ordering::SeqCst);
         if self.stopping.load(Ordering::SeqCst) {
             return;
         }
@@ -674,8 +725,11 @@ impl Meshtastic {
         self.reconcile_client().await;
     }
 
-    /// Re-insert `Arc<Supervised>` = base + meshmud, then the reader.
+    /// Re-insert `Arc<Supervised>` = base + meshmud, then the reader. Every
+    /// change of this module's children passes here, so it also wakes the
+    /// monitor (Layer 7 §3.6).
     fn install_supervised(&self) {
+        self.monitor_wake.notify_one();
         let Some((api, _)) = self.ctx() else { return };
         let base = match lock(&self.ctx).as_ref() {
             Some(c) => c.base.clone(),
@@ -1051,6 +1105,8 @@ impl Meshtastic {
     /// the reader's `--once` timeout.
     pub async fn stop_and_wait(&self, grace: Duration) {
         self.stopping.store(true, Ordering::SeqCst);
+        // a parked monitor sees `stopping` and ends
+        self.monitor_wake.notify_one();
         self.stop_client().await;
         let _t = self.transition.lock().await;
         let svc = lock(&self.service).take();
@@ -1173,6 +1229,183 @@ mod tests {
             uplink_present(&wifi, dir.path(), Path::new("/")),
             Some(true)
         );
+    }
+
+    /// A host with the shipped Meshtastic panel declared, its shim `m`'s.
+    fn panel_host(dir: &Path, m: &Meshtastic) -> Arc<PanelHost> {
+        use crate::daemon::panels::{listener, ticket, PanelsConfig, ShimRegistry};
+        let cfg = PanelsConfig {
+            state_dir: dir.join("state"),
+            bundle_root: dir.join("current"),
+            ports: 11190..=11191,
+            ticket_ttl: ticket::TICKET_TTL,
+            timeouts: listener::Timeouts::default(),
+            proc_net: dir.join("net"),
+            persist: false,
+            force_loopback: true,
+        };
+        let mut shims = ShimRegistry::new();
+        shims.register(Arc::new(m.shim())).unwrap();
+        Arc::new(PanelHost::new(
+            cfg,
+            crate::daemon::panels::manifest::embedded(),
+            &shims,
+            false,
+        ))
+    }
+
+    /// Layer 7 §3.6 (row D3b, G4 + G6): the revocations task has no tick. The
+    /// drop count is read live where it is shown, a revoked session closes its
+    /// shim state, and over many former ticks nothing copies anything. Real
+    /// time (no tokio `test-util` in this crate): only what load cannot break.
+    #[tokio::test]
+    async fn the_panel_follower_has_no_tick_and_reads_the_drop_count_live() {
+        use crate::daemon::panels::ticket::{Binding, PeerClass};
+        let dir = tempfile::tempdir().unwrap();
+        let layout = DaemonLayout {
+            root: dir.path().to_path_buf(),
+            etc: dir.path().join("etc"),
+        };
+        let mut cfg = MeshtasticConfig::production(&layout, false);
+        cfg.tick = Duration::from_millis(10);
+        let m = Meshtastic::new(cfg, Arc::new(PortTable::new()));
+        let host = panel_host(dir.path(), &m);
+        let task = m.attach_panels(&host);
+        let dropped = |h: &PanelHost| {
+            h.panels()
+                .into_iter()
+                .find(|p| p.id == ServiceId::Meshtastic)
+                .and_then(|p| p.state.dropped)
+        };
+        assert_eq!(dropped(&host), Some(m.shim().dropped()), "live, no tick");
+        // twenty former ticks: the task is still parked on the stream
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert!(!task.is_finished());
+        // a session minted and revoked: the task takes the revocation and parks again
+        let s = host
+            .sessions
+            .create(
+                ServiceId::Meshtastic,
+                PeerClass::Loopback,
+                Binding::Session {
+                    hash: "00".repeat(32),
+                },
+                false,
+            )
+            .unwrap();
+        assert_eq!(host.sessions.revoke(|r| r.id == s.rec.id), 1);
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(!task.is_finished(), "one revocation, then parked again");
+        // stopping: the next revocation ends it
+        m.stopping.store(true, Ordering::SeqCst);
+        let s = host
+            .sessions
+            .create(
+                ServiceId::Meshtastic,
+                PeerClass::Loopback,
+                Binding::Session {
+                    hash: "11".repeat(32),
+                },
+                false,
+            )
+            .unwrap();
+        host.sessions.revoke(|r| r.id == s.rec.id);
+        tokio::time::timeout(Duration::from_secs(5), task)
+            .await
+            .expect("ends once stopping")
+            .unwrap();
+    }
+
+    /// Layer 7 §3.6 (row D3b, G6): the spawned monitor loop parks without a
+    /// binding — no pass over many of its ticks — and a change of the module's
+    /// children wakes it for one pass. Real time (no tokio `test-util`): a
+    /// parked loop runs no pass however slow the box; the woken pass comes
+    /// eventually.
+    #[tokio::test]
+    async fn the_spawned_monitor_parks_and_wakes_once_on_a_child_change() {
+        use crate::daemon::dashboard::{ApiConfig, DashboardState};
+        use crate::daemon::devices::{DeviceRegistry, RegistryConfig};
+        let dir = tempfile::tempdir().unwrap();
+        let layout = DaemonLayout {
+            root: dir.path().to_path_buf(),
+            etc: dir.path().join("etc"),
+        };
+        std::fs::create_dir_all(layout.state_dir()).unwrap();
+        let dash = Arc::new(std::sync::RwLock::new(DashboardState::new("2026.11.12")));
+        let api = ApiState::new(dash, ApiConfig::new(layout.clone(), false));
+        let reg = Arc::new(DeviceRegistry::new(RegistryConfig::production(&layout)));
+        let mut cfg = MeshtasticConfig::production(&layout, false);
+        cfg.tick = Duration::from_millis(10);
+        let m = Meshtastic::new(cfg, Arc::new(PortTable::new()));
+        m.start(Arc::clone(&api), reg, Supervised::default()).await;
+        let passes = || m.passes.load(Ordering::SeqCst);
+        // The known count of start passes (row D5c item 8): start's own pass,
+        // then the one the permit of its child install leaves (`notify_one`
+        // with no waiter stores it; the spawned loop's first park consumes
+        // it). Waited for by count, never by a quiet window, so a loaded box
+        // that schedules the loop late cannot measure the park too early.
+        let settled = 2;
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while passes() < settled {
+            assert!(std::time::Instant::now() < deadline, "start's passes");
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        // thirty of its 10 ms ticks: no pass while parked
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert_eq!(passes(), settled, "parked");
+        // a child change wakes it: one pass, then parked again
+        m.install_supervised();
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while passes() == settled {
+            assert!(std::time::Instant::now() < deadline, "never woke");
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert_eq!(passes(), settled + 1, "one pass per wake");
+        m.stop_and_wait(Duration::from_millis(10)).await;
+    }
+
+    /// Layer 7 §3.6: with no binding and no service the monitor has no work,
+    /// and a change of the module's children (or shutdown) wakes it.
+    #[tokio::test]
+    async fn the_monitor_parks_without_a_binding_and_wakes_on_a_child_change() {
+        let dir = tempfile::tempdir().unwrap();
+        let layout = DaemonLayout {
+            root: dir.path().to_path_buf(),
+            etc: dir.path().join("etc"),
+        };
+        let m = Meshtastic::new(
+            MeshtasticConfig::production(&layout, false),
+            Arc::new(PortTable::new()),
+        );
+        assert!(!m.monitor_wanted(), "no binding, no service: park");
+        let wake = Arc::clone(&m.monitor_wake);
+        let parked = tokio::spawn(async move { wake.notified().await });
+        tokio::task::yield_now().await;
+        assert!(!parked.is_finished());
+        m.install_supervised();
+        tokio::time::timeout(Duration::from_secs(1), parked)
+            .await
+            .expect("a child change wakes the parked monitor")
+            .unwrap();
+        *lock(&m.service) = Some(Service {
+            device_id: "dev-1".into(),
+            uplink: Uplink::serial("/dev/serial/by-id/usb-l7-test").unwrap(),
+            meshmud: None,
+            reader: None,
+            port_held_by: None,
+            awaiting_binary: false,
+            identify_born: true,
+        });
+        assert!(
+            m.monitor_wanted(),
+            "a service (identify's child) keeps it ticking"
+        );
+        *lock(&m.service) = None;
+        m.stop_and_wait(Duration::from_millis(10)).await;
+        tokio::time::timeout(Duration::from_secs(1), m.monitor_wake.notified())
+            .await
+            .expect("shutdown leaves a wake for the parked monitor");
     }
 
     /// W3: a Meshtastic change publishes the merged list — with one reticulum node in

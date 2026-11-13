@@ -10,6 +10,35 @@ Status: ✅ **v1.0, locked (D27, 2026-10-19)** — v0.3 as reviewed (three-judge
 `os/plan/EXECUTION.md` (not written yet). Anything beyond the options brief and research lens 4 §4.8 is marked **(draft proposal)**. The changelog
 from v0.1 is at the end.
 
+> **Layer 7 amendments (D30-D32, 2026-11-11).** Additive (`os/7-relay/README.md` §3, §10.1, §2.4, §15, §18, §19; recorded here by Layer 7 task K2);
+> the locked text is unchanged. What Layer 7 changes in Layer 6's files and what it documents:
+>
+> - **Netlink.** `NetlinkEvents::new` takes a group mask. The spine keeps `RTMGRP_LINK` only. A **second socket** (link, IPv4 and IPv6 address, IPv4
+>   and IPv6 route groups) is opened **only while a consumer is on** (a configured carrier, or the mdns-sd daemon while LAN sharing is on) and
+>   closes with the last one; a node with neither has Layer 6's socket set exactly. Its events go through a second 2 s `netlink::debounced` instance
+>   that feeds only the carrier check and the mdns-sd re-arm, so a DHCP renew never re-renders rnsd (Layer 7 §3.3).
+> - **mdns-sd on events.** The daemon's own 5 s IP check is set to 0 once the second socket is bound, and each debounced address event re-arms one
+>   check. A failed bind keeps the default check and is logged once (Layer 7 §3.3).
+> - **The WAN loop is removed** (the 60 s probe, `N/services/probe.rs`); `wan_probe_urls` stays for the installer's `NODE111_PROBE_204` knob. The
+>   `gateway` service row keeps its id and becomes the gateway badge's home: codes `gateway_none`, `carrier_ok`, `carrier_pending`, `gateway_off`
+>   (`wan_ok`, `wan_offline`, `wan_unknown` retire), `detail` `{carrier, endpoint, mode, checked_ago_s, last_flush_ago_s, pending, error}` with ages
+>   from a monotonic clock (Layer 7 §3.5).
+> - **Three 2 s ticks parked** (the Meshtastic monitor, the Meshtastic panel revocations, the panels reconcile): each waits on a `Notify` and runs
+>   only while a Meshtastic binding exists, a Meshtastic panel session is open, or a declared panel's service is set up (Layer 7 §3.6).
+> - **`[order]` is read as a path preference:** every enabled network stays on, in parallel, and the user's order is the preference per peer; today it
+>   sorts the display only. Layer 0's `concepts/preferred-networks` is updated to match by Layer 7 row K3
+>   (Layer 7 §18 L0, §19 item 10).
+> - **`receipt.gateway` is an install fact** (always `true`) that the daemon never reads; it is documented as such (Layer 7 §18 L6).
+> - **G7 gains `idle.sh`.** `7-relay/verify/idle.sh` runs beside `6-transport/verify/zero-weight.sh`: idle wakeups per minute against a recorded
+>   baseline and zero outbound traffic with every Layer 7 switch off (Layer 7 §3.7).
+> - **`rnpath` hops through the human-only route.** The `reticulum` Nearby source gains hop counts from `rnpath`, read only through
+>   `POST /api/v1/nearby/hops` and the `rnstatus` runner (its owner guard and timeout apply); a GET never spawns it and the agent's bearer is refused
+>   on it (Layer 7 §10.1).
+> - **The `rns` heartbeat stays Layer 6's:** the LXMF helper's announce interval, `PATCH /bridge/settings`; Layer 7 shows it and never writes it
+>   (Layer 7 §2.4). The bridge stub (`NODE111_BRIDGE_STUBS`) serves G8 and G10's licensed-board items.
+> - **Recorded as the code stands** (Layer 7 §19 item 2): `ROLE_LORA_ATTACHED` is defined and never set; mdns-sd advertises the dashboard only until
+>   Layer 7's optional `_111._tcp` record; the phone-relay QR joins rnsd's Backbone, not the fabric.
+
 ## 0. Reading guide
 
 Reads with: `os/README.md` §6 · `os/5-messaging/README.md` §8, §10, §13–§15, §18–§21 (the locked v1.2 fabric this layer amends additively) ·

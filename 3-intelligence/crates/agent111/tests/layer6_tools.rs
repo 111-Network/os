@@ -392,8 +392,8 @@ fn schemas_are_the_seven_new_tools_in_section_13_order() {
         .iter()
         .map(|s| s["function"]["name"].as_str().unwrap())
         .collect();
-    assert_eq!(names.len(), 17);
-    assert_eq!(&names[10..], LAYER6_TOOLS);
+    assert_eq!(names.len(), 20, "Layer 7 appends three (relay §13.3)");
+    assert_eq!(&names[10..17], LAYER6_TOOLS);
     let by_name = |n: &str| all.iter().find(|s| s["function"]["name"] == n).unwrap();
     for n in LAYER6_TOOLS {
         let s = by_name(n);

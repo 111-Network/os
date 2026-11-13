@@ -1,0 +1,50 @@
+vendor: SHA256SUMS verified (Monocypher 4.0.3, see VENDOR.md)
+cc: cc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0  flags: -std=c99 -O2 -Wall -Wextra -Werror
+inventory: all 14 vector files accounted for
+  [edge-vectors.json] ed25519_strict: 40 vectors, 39 oracle-rejects; raw crypto_ed25519_check ACCEPTED 13 of them; wrapped accepted 0; exact variant match 40/40
+  [edge-vectors.json] rejecting leg histogram: NonCanonicalPublicKey=3 NonCanonicalR=4 NonCanonicalS=4 MalformedPublicKey=1 InvalidSignature(small-order/torsion/undecodable R/equation)=27
+  [attestation.json] node-leg executed for 11 entries whose expected outcome is decided at a later stage (transport leg = Layer 7 seam, expiry, supersedure); expiry[] x5 skipped (epoch policy, no crypto)
+  KNOWN-DELTA mixed-order R = [r]B + order-8 torsion, S = r + h*a: oracle=reject raw Monocypher=ACCEPT wrapped=reject  [closed]
+  KNOWN-DELTA mixed-order R = [r]B + order-2 torsion, S = r + h*a: oracle=reject raw Monocypher=ACCEPT wrapped=reject  [closed]
+  KNOWN-DELTA mixed-order A' = A + order-8 torsion (attacker-chosen NodeId), honest signing key a: oracle=reject raw Monocypher=ACCEPT wrapped=reject  [closed]
+  FAIL [x25519-rfc7748.json] vector 3 (RFC 7748 §6.1 Alice/Bob): shared secret mismatch
+
+FILE                                       VECTORS  CHECKS   PASS  FAIL  SKIP  RESULT
+(built-in primitive KATs)                        8      19     19     0     0  PASS
+ed25519-rfc8032.json                             4      32     32     0     0  PASS
+x25519-rfc7748.json                              4      11     10     1     0  FAIL
+slip0010-published.json                         12      36     36     0     0  PASS
+slip0010-project-paths.json                      4       8      8     0     0  PASS
+keyset-project.json                              2      12     12     0     0  PASS
+edge-vectors.json                               64     141    141     0     0  PASS
+announce.json                                   45      82     82     0     0  PASS
+sealed-packet.json                              27      41     41     0     0  PASS
+attestation.json                                41      46     46     0     5  PASS
+supplement/cofactor-edges.json (non-frozen)       8      14     14     0     0  PASS
+TOTAL                                          219     442    441     1     5  FAIL
+encoding.json                              n/a -- hex/bech32/label presentation encodings; no Monocypher primitive involved
+weak-key.json                              n/a -- section 4.5 keygen-time pattern self-test (policy on key bytes); no Monocypher primitive
+backup-format.json                         n/a -- section 8/13 backup framing, NFKC hygiene, descriptor policy; no Monocypher primitive
+restore-counters.json                      n/a -- section 6.2/6.5 counter state-machine arithmetic; no Monocypher primitive
+d9-migration.json                          n/a -- Layer-1 directory migration/quarantine; no Monocypher primitive
+
+STRICT-PREDICATE DELTA (edge-vectors.json ed25519_strict): raw crypto_ed25519_check vs section-3 wrapper vs oracle
+  #    vector                                                         oracle raw    wrapped  rejecting leg
+  21   small-order A: identity (y=1), order 1 (R = identity, S = 0)   reject ACCEPT reject   InvalidSignature
+  22   small-order A: y=-1 (p-1), order 2 (R = identity, S = 0)       reject ACCEPT reject   InvalidSignature
+  23   small-order A: y=0, order 4 (R = identity, S = 0)              reject ACCEPT reject   InvalidSignature
+  24   small-order A: y=0 with x-sign bit, order 4 (R = identity, S = reject ACCEPT reject   InvalidSignature
+  25   small-order A: order 8 (a) (R = identity, S = 0)               reject ACCEPT reject   InvalidSignature
+  26   small-order A: order 8 (b) (R = identity, S = 0)               reject ACCEPT reject   InvalidSignature
+  27   small-order A: order 8 (c) (R = identity, S = 0)               reject ACCEPT reject   InvalidSignature
+  28   small-order A: order 8 (d) (R = identity, S = 0)               reject ACCEPT reject   InvalidSignature
+  29   small-order A = R = identity, S = 0 (empty message)            reject ACCEPT reject   InvalidSignature
+  36   mixed-order R = [r]B + order-8 torsion, S = r + h*a            reject ACCEPT reject   InvalidSignature
+  37   mixed-order R = [r]B + order-2 torsion, S = r + h*a            reject ACCEPT reject   InvalidSignature
+  38   mixed-order A' = A + order-8 torsion, h mod 8 != 0             reject ACCEPT reject   InvalidSignature
+  39   mixed-order A' = A + order-8 torsion, h ground to 0 mod 8      reject ACCEPT reject   InvalidSignature
+  -> 13 of 40 vectors: raw Monocypher verdict differs from the oracle (every one is repaired by the wrapper)
+X25519 DELTA (edge-vectors.json x25519_low_order): 11 low-order inputs; raw crypto_x25519 returned all-zero for 11 and a non-zero value for 0 (Monocypher 4.x has no native rejection; ingress blacklist + all-zero abort are mandatory)
+SUPPLEMENT (cofactor-edges.json, non-frozen): 8 rows = 1 control + 3 wrapper-bites + 1 wrapper-redundant + 3 residual-mixed-order;
+  residual rows: raw Monocypher accepted 3/3, wrapper accepted 0/3 (strict oracle rejects all) -> CLOSED (spec v2.1 torsion-free A/R leg)
+run.sh: HARNESS FAILED (exit 1)

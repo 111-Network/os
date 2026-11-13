@@ -1,0 +1,17 @@
+{"exit_declared": true}
+{"id": "fx.smoke/1/dist-built", "status": "PASS", "log_line": 3, "phase": "1. UI build", "kept": "/tmp/x3/smoke.Ab12Cd/work"}
+{"id": "fx.smoke/2/111-and-111-agent-built", "status": "PASS", "log_line": 6, "phase": "2. cargo build (debug)", "kept": "/tmp/x3/smoke.Ab12Cd/work"}
+{"id": "fx.smoke/3/identity-generated", "status": "PASS", "log_line": 9, "phase": "3. scratch node root", "kept": "/tmp/x3/smoke.Ab12Cd/work"}
+{"id": "fx.smoke/3/root-releases-n.10.12", "status": "PASS", "log_line": 10, "phase": "3. scratch node root", "kept": "/tmp/x3/smoke.Ab12Cd/work"}
+{"id": "fx.smoke/4/namespace-shell-has-default-sigint-sigterm", "status": "PASS", "log_line": 13, "phase": "4. namespace + daemon", "seams": ["L1-L2:fx-alpha"], "kept": "/tmp/x3/smoke.Ab12Cd/work"}
+{"id": "fx.smoke/4/daemon-up-on-127.0.0.1-n-within-4s", "status": "PASS", "log_line": 14, "phase": "4. namespace + daemon", "seams": ["L1-L2:fx-alpha"], "kept": "/tmp/x3/smoke.Ab12Cd/work"}
+{"id": "fx.smoke/5a/get-serves-index.html", "status": "PASS", "log_line": 17, "phase": "5a. static UI + Host guard", "seams": ["L4-L5:fx-ui"], "kept": "/tmp/x3/smoke.Ab12Cd/work"}
+{"id": "fx.smoke/5a/a-foreign-host-header-is-refused", "status": "PASS", "log_line": 18, "phase": "5a. static UI + Host guard", "seams": ["L4-L5:fx-ui"], "kept": "/tmp/x3/smoke.Ab12Cd/work"}
+{"id": "fx.smoke/5b/get-api-v1-node", "status": "PASS", "log_line": 21, "phase": "5b. /api/v1 reads (loopback)", "kept": "/tmp/x3/smoke.Ab12Cd/work"}
+{"id": "fx.smoke/5b/get-api-v1-peers", "status": "PASS", "log_line": 22, "phase": "5b. /api/v1 reads (loopback)", "kept": "/tmp/x3/smoke.Ab12Cd/work"}
+{"id": "fx.smoke/5c/a-reset-frame-first", "status": "PASS", "log_line": 25, "phase": "5c. events: reset, then Last-Event-ID replay", "kept": "/tmp/x3/smoke.Ab12Cd/work"}
+{"id": "fx.smoke/5d/lan-without-a-token-is-401", "status": "PASS", "log_line": 28, "phase": "5d. auth from a real non-loopback source (192.168.77.5 on dummy0)", "kept": "/tmp/x3/smoke.Ab12Cd/work"}
+{"id": "fx.smoke/5e/the-stream-ends-with-a-done-frame", "status": "FAIL", "assertion": "the stream ends with a done frame  [HTTP 502: {\"code\":\"agent_unreachable\",\"detail\":\"connect: refused\"}]", "log_line": 31, "phase": "5e. chat relay (stub model through the real 111-agent)", "seams": ["L3-L4:fx-agent"], "kept": "/tmp/x3/smoke.Ab12Cd/work"}
+{"id": "fx.smoke/5f/a-decision-frame-follows-the-accept", "status": "FAIL", "assertion": "a decision frame follows the accept  [HTTP 000: ]", "log_line": 34, "phase": "5f. proposals, decisions, agent task → proposal frames", "after": "fx.smoke/5e/the-stream-ends-with-a-done-frame", "kept": "/tmp/x3/smoke.Ab12Cd/work"}
+{"id": "fx.smoke/5g/the-agent-restarts-alone", "status": "PASS", "log_line": 37, "phase": "5g. per-service restart (supervised child vs not)", "kept": "/tmp/x3/smoke.Ab12Cd/work"}
+{"id": "fx.smoke/5h/update-check-answers-204", "status": "PASS", "log_line": 40, "phase": "5h. update check + node restart", "kept": "/tmp/x3/smoke.Ab12Cd/work"}

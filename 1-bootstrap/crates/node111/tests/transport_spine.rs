@@ -1021,6 +1021,112 @@ async fn reticulum_change_restarts_with_dependants_in_order() {
     assert!(take(&log).is_empty());
 }
 
+/// Layer 7 S15 (`os/7-relay/README.md` §3.3; §19 D8): the spine's link watch
+/// binds `RTMGRP_LINK` only, and an address or route change (a DHCP renew)
+/// reaches the second, Layer 7 watch (`relay::netwatch`), never the spine's
+/// `debounced` instance: no re-render, no `--reload`, the config untouched.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_address_change_never_re_renders_rnsd() {
+    use node111::daemon::relay::netwatch::{self, Consumer, NetEvent, NetWatch};
+    use node111::daemon::transport::{self, netlink};
+
+    // the mask the spine passes (transport::start) carries no address or route bit
+    assert_eq!(transport::LINK_WATCH_GROUPS, netlink::RTMGRP_LINK);
+    let addr_route = netlink::RTMGRP_IPV4_IFADDR
+        | netlink::RTMGRP_IPV4_ROUTE
+        | netlink::RTMGRP_IPV6_IFADDR
+        | netlink::RTMGRP_IPV6_ROUTE;
+    assert_eq!(transport::LINK_WATCH_GROUPS & addr_route, 0);
+    assert_eq!(netwatch::GROUPS, netlink::RTMGRP_LINK | addr_route);
+    // the socket transport::start opens (the same function) holds exactly RTMGRP_LINK in
+    // the kernel (a sandbox that refuses the bind skips, with the reason)
+    match transport::link_watch_source() {
+        Ok(ev) => assert_eq!(ev.groups().unwrap(), netlink::RTMGRP_LINK),
+        Err(e) => eprintln!("netlink unavailable here ({e:#}): mask read skipped"),
+    }
+
+    let dir = tempfile::tempdir().unwrap();
+    let log = Arc::new(Mutex::new(Vec::new()));
+    let rec = Rec::new(&log);
+    let spine = spine_at(dir.path(), &rec, false, &[]);
+    take(&log);
+    let cfg_path = config::config_path(&layout_at(dir.path()));
+    let before = std::fs::read(&cfg_path).unwrap();
+
+    // the spine's instance, spawned by the function transport::start spawns it with, on a
+    // link-only scripted source
+    let (link_tx, link_rx) = tokio::sync::mpsc::channel(8);
+    let spine_task = transport::spawn_link_watch(
+        netlink::ScriptedEvents { rx: link_rx },
+        Arc::clone(&spine),
+        Duration::from_millis(50),
+    );
+
+    // the second watch, its socket a scripted address/route source
+    struct Scripted(Mutex<Option<tokio::sync::mpsc::Receiver<()>>>);
+    impl netwatch::Opener for Scripted {
+        fn open(&self, groups: u32) -> anyhow::Result<Box<dyn netlink::LinkEvents>> {
+            assert_eq!(groups, netwatch::GROUPS);
+            let rx = self.0.lock().unwrap().take().expect("opened once");
+            Ok(Box::new(netlink::ScriptedEvents { rx }))
+        }
+    }
+    /// The host: one address the renew changes (the new lease), the routes unchanged.
+    struct Host(Mutex<u64>);
+    impl netwatch::NetRead for Host {
+        fn routes(&self) -> Option<u64> {
+            Some(0)
+        }
+        fn addresses(&self) -> Option<u64> {
+            Some(*self.0.lock().unwrap())
+        }
+    }
+    let host = Arc::new(Host(Mutex::new(1)));
+    let (addr_tx, addr_rx) = tokio::sync::mpsc::channel(64);
+    let watch = NetWatch::new(
+        netwatch::Config {
+            quiet: Duration::from_millis(50),
+            max_wait: Duration::from_secs(10),
+            poll_unit: Duration::from_millis(5),
+            termux: false,
+        },
+        Box::new(Scripted(Mutex::new(Some(addr_rx)))),
+        Arc::clone(&host) as Arc<dyn netwatch::NetRead>,
+    );
+    let sub = watch.subscribe(Consumer::Mdns).unwrap();
+
+    // a DHCP renew with a new lease: address and route updates in a burst
+    *host.0.lock().unwrap() = 2;
+    for _ in 0..12 {
+        addr_tx.send(()).await.unwrap();
+    }
+    let ev = tokio::time::timeout(Duration::from_secs(2), sub.next())
+        .await
+        .expect("the second watch fires");
+    assert_eq!(ev, NetEvent::Changed);
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert!(
+        take(&log).is_empty(),
+        "the spine never fired: no rnstatus call"
+    );
+    assert_eq!(std::fs::read(&cfg_path).unwrap(), before, "no re-render");
+
+    // a link change still takes the spine's path, as before
+    link_tx.send(()).await.unwrap();
+    for _ in 0..100 {
+        if !log.lock().unwrap().is_empty() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert_eq!(take(&log), ["rnstatus --reload Auto Interface"], "one fire");
+    drop(link_tx);
+    let _ = spine_task.await;
+    drop(sub);
+    assert!(!watch.is_open());
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_real_child_control_restarts_rnsd() {
     let dir = tempfile::tempdir().unwrap();

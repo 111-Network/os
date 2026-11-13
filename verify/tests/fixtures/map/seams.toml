@@ -1,0 +1,30 @@
+# Fixture seam map for the runner's own tests (verify/tests). Not the repo's map: the side files live in the temp
+# git repo the tests build (fx/...), never in the real tree.
+
+[[seam]]
+id = "L1-L2:fx-alpha"
+status = "built"
+spec = ["fx/SPEC.md §1"]
+a = { layer = 1, files = ["fx/a.txt"] }
+b = { layer = 2, files = ["fx/b.txt"] }
+read_first = "a"
+symptom = "the alpha fixture says no"
+gap = ""
+
+[[seam]]
+id = "L3-L4:fx-faked"
+status = "built"
+spec = ["fx/SPEC.md §2", "fx/API.md"]
+a = { layer = 3, files = ["fx/agent.txt"] }
+b = { layer = 4, files = ["fx/daemon.txt"] }
+read_first = "b"
+symptom = "the faked fixture answers 502"
+gap = "only a fake stands in for side b"
+
+[[seam]]
+id = "L8-L9:fx-planned"
+status = "planned"
+spec = []
+a = { layer = 8, files = [] }
+b = { layer = 9, files = [] }
+read_first = "a"

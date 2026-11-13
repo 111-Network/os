@@ -1,0 +1,15 @@
+
+concepts/secure-contexts.md:
+  WARN:42  B05: body line >120 chars
+
+llms.txt:
+  WARN  B09: root index ~2253 tokens / 70 lines / 51 entries (caps 1500/60; warning only, reviewed at each layer's KB intake)
+
+projects/meshtastic-web.md:
+  WARN:27  B05: body line >120 chars
+
+recipes/install-meshtastic-on-heltec-wifi-lora-32-v3.md:
+  WARN  N05: recipe target 'heltec-wifi-lora-32-v3' is not status proven
+  WARN  N05: recipe target 'meshtastic' is not status proven
+
+0 error(s), 5 warning(s)

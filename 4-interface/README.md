@@ -6,6 +6,25 @@ Spec v2 (2026-10-13) · Decisions: D11, D15 (`os/plan/DECISIONS.md`) · Supersed
 amendments" (§6.6, §7.2, §10.2, §11.1) record what Layer 5 (`os/5-messaging/README.md`, locked v1.2) adds to this layer. The
 locked text is unchanged; a one-line pointer sits next to each sentence that is superseded.
 
+**Layer 7 amendments (D30-D32, 2026-11-11):** one additive block (below), beside the Layer 5 blocks; the locked text is unchanged
+(`os/7-relay/README.md` §10, §12, §13, §18; recorded here by Layer 7 task K2; the binding form of every `/api/v1` route is `api/openapi.yaml`).
+
+- **`/settings/l7`, "Relay & presence"** (§6.7): its own lazy chunk, at most 64 KB gzipped (the `/settings/l6` precedent). Sections: Presence (the
+  interval per transport, shown and inert in v1, with the airtime line and the bans) · Gateway (on, carrier, server, mode, consent, "Check now", "Flush
+  now", the badge) · Paired hubs (my pairing bundle, scan theirs, role, link state per pair, unpair) · Discovery (the LAN record, the role bits and their
+  costs) · Updates (the origin order, the internet check, "serve updates for", the `--from` instruction) · Metered networks. Every consent is the
+  existing `409 consent_required` round-trip with `warning_text` shown verbatim; no secret is ever rendered.
+- **The radar** (§6.4): Nearby gains an own SVG radar in the lazy `nearby` chunk, replacing the ASCII placeholder and the line "radar and map views
+  arrive with Layer 7": rings count hops, direction means something only when both nodes shared a position, a position is an uncertainty cell and
+  never a pin, and the outer ring holds nodes whose hop count is unknown. Nearby also lists the `111` source (who this node heard, over which
+  transport, how long ago, from what evidence).
+- **Contract growth** (§10): the Layer 7 routes (`/relay`, `/relay/settings`, `/relay/pair/offer`, `/relay/pair`, `/relay/paired/{node_id}`,
+  `/relay/carrier/check` and `/flush`, `/registry`, `/registry/browse`, `/nearby/hops`, `/update/origins`), the SSE events `relay` and `registry`, the
+  proposal kind `relay`, and the appended `Problem.code` and `ConsentRequired.action` values. `/origin/v1/*` joins the conventions' "Not gated" list
+  and stays out of `openapi.yaml`.
+- **The D21 map amendment, recorded now and made in v1.1** (Layer 7 §10.5, for Layer 8): an exempt "map" bucket in the budget gate, on the fonts
+  precedent (Leaflet, PMTiles and protomaps-leaflet, loaded only where the node lists a tile set). v1 ships no map: the D21 budgets stay as they are.
+
 The dashboard is the node's face: a local, offline-first web app served by `111d` itself, opened in any
 browser. Two things are the core and are always one tap away: **Overview** (is my node OK, who is
 near, which services are live) and **Agent** (a plain chat box to the node's local AI). Everything
@@ -243,11 +262,12 @@ and pairing records; the UI only reads it and edits aliases.
 Other people's nodes around you. v1 shows what `111d` knows (`transport_state`: joined/isolated/
 none/degraded) as one sentence + a reserved canvas with the ASCII radar placeholder ("radar and
 map views arrive with Layer 7"), and "Ask the agent who is nearby". No fake peers.
+*[Layer 7 (D30-D32) delivers the radar in v1; the map is v1.1, see the Layer 7 amendments at the top.]*
 
 > **Layer 5 delivers (D20, 2026-10-14):** the real list, grouped by source ("heard via Meshtastic on {board alias}"), from
 > `GET /api/v1/nearby` + SSE `nearby` (`os/5-messaging/README.md` §14): name, short name, SNR/RSSI, hops, position, channel
 > utilization, and `last_heard` shown as a hint. Names are untrusted RF-origin strings, rendered as text only. No fake peers; a
-> Meshtastic node is never a contact, and "Message them" is not offered until a bridge exists. Radar and map stay Layer 7.
+> Meshtastic node is never a contact, and "Message them" is not offered until a bridge exists. Radar and map stay Layer 7. *[Layer 7 (D30-D32) delivers the radar in v1; the map is v1.1, see the Layer 7 amendments at the top.]*
 >
 > **As built (U2):** one panel per source headed by the daemon's label ("heard via Meshtastic on <board>"; if it is empty the heading
 > is built from the board's alias in the device list, then a plain "heard via Meshtastic"). Each node: display name (long, else short,

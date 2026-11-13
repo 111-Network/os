@@ -1,5 +1,5 @@
 // Settings (spec section 6.7). The router sends `/settings` and `/settings/:layer` here:
-// no param = Essentials, `l5` = Messaging & data and `l6` = Transport (real controls), the other `l0`..`l9` = a layer page, anything else = 404.
+// no param = Essentials, `l5` = Messaging & data, `l6` = Transport and `l7` = Relay & presence (real controls), the other `l0`..`l9` = a layer page, anything else = 404.
 import { useParams } from "wouter";
 import { Empty } from "../../components/empty";
 import { ButtonLink } from "../../components/button";
@@ -10,13 +10,15 @@ import { Essentials } from "./essentials";
 import { LayerPage } from "./layer-page";
 import { MessagingSettings } from "./messaging";
 
-// Layer 6 has its own lazy chunk (D21: at most 64 KB gzip).
+// Layers 6 and 7 each have their own lazy chunk (D21: at most 64 KB gzip).
 const TransportSettings = lazy(() => import("./l6"));
+const RelaySettings = lazy(() => import("./l7"));
 
 export default function SettingsView() {
   const { layer } = useParams<{ layer?: string }>();
   if (layer === undefined) return <Essentials />;
   if (layer === "l6") return <TransportSettings />; // Layer 6: adapters, order, posture, region, relays, lists, components, confirmations (l6/)
+  if (layer === "l7") return <RelaySettings />; // Layer 7: presence, gateway and carrier, paired hubs, discovery, updates, metered (l7/)
   if (layer === "l5") return <MessagingSettings />; // Layer 5 has real rows (messaging.tsx); the other layer pages are structure only
   const info = layerBySlug(layer);
   if (!info) {

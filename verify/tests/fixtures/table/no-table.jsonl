@@ -1,0 +1,2 @@
+{"exit_declared": false}
+{"id": "fx.table", "status": "FAIL", "reason": "the harness printed no result table", "assertion": "run.sh: vendored Monocypher files do not match SHA256SUMS", "log_line": 1}

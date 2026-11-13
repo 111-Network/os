@@ -1,0 +1,3 @@
+{"exit_declared": true}
+{"id": "fx.kb/decisions/d36-test-system.md:3/F02", "status": "FAIL", "reason": "knowledge-base error", "assertion": "decisions/d36-test-system.md:3: F02: unknown field 'statuss'", "log_line": 3}
+{"id": "fx.kb/decisions/d36-test-system.md/F06", "status": "FAIL", "reason": "knowledge-base error", "assertion": "decisions/d36-test-system.md: F06: status 'shipped' invalid", "log_line": 4, "after": "fx.kb/decisions/d36-test-system.md:3/F02"}

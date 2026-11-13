@@ -1,0 +1,35 @@
+test_one (test_green.Green.test_one) ... ok
+test_two (test_green.Green.test_two) ... skipped 'no meshtastic'
+test_error (test_red.Red.test_error) ... ERROR
+test_ok (test_red.Red.test_ok) ... ok
+test_planted_fail (test_red.Red.test_planted_fail) ... FAIL
+test_skipped (test_red.Red.test_skipped) ... skipped 'needs a radio'
+
+======================================================================
+ERROR: test_error (test_red.Red.test_error)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/tmp/x3/ut/tests/test_red.py", line 8, in test_error
+    raise RuntimeError("first line\nsecond line")
+RuntimeError: first line
+second line
+
+======================================================================
+FAIL: test_planted_fail (test_red.Red.test_planted_fail)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/tmp/x3/ut/tests/test_red.py", line 6, in test_planted_fail
+    self.assertEqual({"a": 1}, {"a": 2}, "the map differs")
+    ~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: {'a': 1} != {'a': 2}
+- {'a': 1}
+?       ^
+
++ {'a': 2}
+?       ^
+ : the map differs
+
+----------------------------------------------------------------------
+Ran 6 tests in 0.003s
+
+FAILED (failures=1, errors=1, skipped=2)

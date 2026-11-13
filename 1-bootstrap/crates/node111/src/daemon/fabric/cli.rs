@@ -1,17 +1,30 @@
 //! `111 fabric offer | enroll [bundle] | status` (`os/5-messaging/README.md`
 //! §7.3: "`111 fabric offer` or Settings → Messaging & Data → Let a node use
-//! this hub"). The CLI owns no fabric state: it calls the running daemon's
-//! loopback `/api/v1` exactly like the dashboard on the node does —
-//! session-less where the dashboard trusts loopback peers (not under Termux,
-//! where `401` is reported with the way forward). `POST /fabric/hub/offer`
-//! is loopback-only on the API, which this terminal is.
+//! this hub"), and Layer 7's `111 fabric pair --show` and `111 fabric pair
+//! <111PAIR: bundle> [--lan]` (`os/7-relay/README.md` §4.6 steps 1–2, §13.1:
+//! the phone case of the loopback-only pairing routes). The CLI owns no fabric
+//! state: it calls the running daemon's loopback `/api/v1` exactly like the
+//! dashboard on the node does — session-less where the dashboard trusts
+//! loopback peers (not under Termux, where `401` is reported with the way
+//! forward). `POST /fabric/hub/offer` and the pairing routes are
+//! loopback-only on the API, which this terminal is.
 //!
 //! The enrollment code is a secret until spent (it survives wrong attempts up
 //! to the hub's lockout), so a **bare code is never taken on the command
 //! line** (argv shows in `ps` and shell history): `111 fabric enroll
 //! --address HOST:PORT` asks for it on the terminal, input hidden. The whole
 //! `111HUB:` bundle a member scans from the hub's QR may ride argv (the
-//! offer's own "On the member: …" line prints it so).
+//! offer's own "On the member: …" line prints it so), and so may a whole
+//! `111PAIR:` bundle (`111 fabric pair --show` prints the line to run on the
+//! other hub); a bare code never does.
+//!
+//! `111 fabric pair <bundle>` picks, unless told otherwise, the complement of
+//! the bundle's role and the bundle's link (§4.6 step 2: `peer` with `peer`,
+//! `leaf` with `gateway`); `--role` and `--via` pick explicitly, and a pick
+//! that does not fit is the daemon's `409 pair_role_mismatch`. When the link
+//! cannot be encrypted (§4.6 step 6) the daemon's warning is printed verbatim
+//! and asked on the terminal; only a "yes" repeats the request with the
+//! warning's hash, and without a terminal nothing is paired.
 //!
 //! The client is a tiny blocking HTTP/1.1 exchange over `std::net` (one
 //! request, `Connection: close`, ≤ 1 MiB answer, bounded waits): no new
@@ -19,8 +32,10 @@
 //! chunked body is reassembled before any UTF-8 decoding — no input can
 //! split a character and panic the client).
 
+use crate::daemon::relay::pair::{PairBundle, PAIR_PREFIX};
 use anyhow::Context;
 use mesh111::contacts::{HubBundle, BUNDLE_PREFIX};
+use mesh111::fabric::{PairRole, PairVia};
 use serde_json::Value;
 use std::io::{Read, Write};
 use std::net::{Ipv4Addr, SocketAddr, TcpStream};
@@ -49,11 +64,28 @@ pub enum FabricCmd {
         address: Option<String>,
         card: Option<String>,
     },
+    /// `111 fabric pair --show [--role R] [--via V]` (Layer 7 §4.6 step 1):
+    /// the role this hub proposes for the other hub, and the link.
+    PairShow { role: PairRole, via: PairVia },
+    /// `111 fabric pair 111PAIR:BUNDLE [--role R] [--via V] [--lan]` (§4.6
+    /// steps 2–6): `None` picks the complement of the bundle's role and the
+    /// bundle's link.
+    Pair {
+        bundle: String,
+        role: Option<PairRole>,
+        via: Option<PairVia>,
+        lan: bool,
+    },
 }
 
 /// Usage line (the top-level `USAGE` repeats it).
-pub const USAGE: &str =
-    "usage: 111 fabric status | offer | enroll [111HUB:BUNDLE] [--address HOST:PORT] [--card CARD]";
+pub const USAGE: &str = "usage: 111 fabric status | offer | enroll [111HUB:BUNDLE] [--address HOST:PORT] [--card CARD]\n       \
+     111 fabric pair --show [--role peer|leaf|gateway] [--via tcp|carrier] | pair 111PAIR:BUNDLE [--role R] [--via V] [--lan]";
+
+/// A bare code where a pairing bundle belongs (module doc).
+const NO_PAIR_CODE_ON_ARGV: &str = "a pairing code is never taken on the command line (it would \
+     show in `ps` and shell history): pass the other hub's whole 111PAIR: bundle (its \
+     `111 fabric pair --show` prints the line to run here)";
 
 /// A bare code on the command line (module doc).
 const NO_CODE_ON_ARGV: &str = "an enrollment code is never taken on the command line (it would \
@@ -138,8 +170,110 @@ pub fn parse(args: &[String]) -> anyhow::Result<FabricCmd> {
                 card,
             })
         }
+        Some("pair") => parse_pair(&args[1..]),
         _ => anyhow::bail!("{USAGE}"),
     }
+}
+
+fn has_pair_prefix(text: &str) -> bool {
+    text.trim()
+        .get(..PAIR_PREFIX.len())
+        .is_some_and(|h| h.eq_ignore_ascii_case(PAIR_PREFIX))
+}
+
+/// The words after `111 fabric pair`.
+fn parse_pair(args: &[String]) -> anyhow::Result<FabricCmd> {
+    let (mut show, mut lan) = (false, false);
+    let (mut role, mut via, mut bundle) = (None, None, None);
+    let mut i = 0;
+    while i < args.len() {
+        let a = args[i].as_str();
+        let mut value = |name: &str| -> anyhow::Result<String> {
+            i += 1;
+            args.get(i)
+                .cloned()
+                .ok_or_else(|| anyhow::anyhow!("{name} needs a value"))
+        };
+        let (flag, inline) = match a.split_once('=') {
+            Some((f, v)) if f.starts_with("--") => (f, Some(v.to_string())),
+            _ => (a, None),
+        };
+        match flag {
+            "--show" if inline.is_none() => show = true,
+            "--lan" if inline.is_none() => lan = true,
+            "--role" => {
+                let v = match inline {
+                    Some(v) => v,
+                    None => value("--role")?,
+                };
+                role = Some(PairRole::from_code(&v).ok_or_else(|| {
+                    anyhow::anyhow!("--role is peer, leaf or gateway, not {v:?}")
+                })?);
+            }
+            "--via" => {
+                let v = match inline {
+                    Some(v) => v,
+                    None => value("--via")?,
+                };
+                via = Some(
+                    PairVia::from_code(&v)
+                        .ok_or_else(|| anyhow::anyhow!("--via is tcp or carrier, not {v:?}"))?,
+                );
+            }
+            f if f.starts_with("--") => anyhow::bail!("unknown fabric pair flag {a:?}"),
+            _ if !has_pair_prefix(a) => anyhow::bail!("{NO_PAIR_CODE_ON_ARGV}"),
+            _ if bundle.is_none() => {
+                PairBundle::parse(a).map_err(|e| anyhow::anyhow!("that 111PAIR: bundle: {e}"))?;
+                bundle = Some(a.trim().to_string());
+            }
+            _ => anyhow::bail!("{USAGE}"),
+        }
+        i += 1;
+    }
+    match (show, bundle) {
+        (true, None) => {
+            anyhow::ensure!(
+                !lan,
+                "--lan is the scanning side's mark: pass it with the other hub's bundle"
+            );
+            Ok(FabricCmd::PairShow {
+                role: role.unwrap_or(PairRole::Peer),
+                via: via.unwrap_or(PairVia::Tcp),
+            })
+        }
+        (false, Some(bundle)) => Ok(FabricCmd::Pair {
+            bundle,
+            role,
+            via,
+            lan,
+        }),
+        (true, Some(_)) => {
+            anyhow::bail!("--show prints this hub's bundle; scanning another's is a separate run")
+        }
+        (false, None) => anyhow::bail!("{USAGE}"),
+    }
+}
+
+/// The `POST /relay/pair` body for `bundle` (the role and link picked as the
+/// module doc says), with the accepted warning's hash on the repeat.
+pub fn pair_body(
+    bundle: &str,
+    role: Option<PairRole>,
+    via: Option<PairVia>,
+    lan: bool,
+    accept_warning: Option<&str>,
+) -> anyhow::Result<Value> {
+    let b = PairBundle::parse(bundle).map_err(|e| anyhow::anyhow!("that 111PAIR: bundle: {e}"))?;
+    let mut body = serde_json::json!({
+        "bundle": bundle,
+        "role": role.unwrap_or(b.role.complement()).code(),
+        "via": via.unwrap_or(b.via).code(),
+        "lan": lan,
+    });
+    if let Some(h) = accept_warning {
+        body["accept_warning"] = Value::String(h.to_string());
+    }
+    Ok(body)
 }
 
 /// The enrollment request body: a bundle carries card, code and address
@@ -321,9 +455,126 @@ pub fn read_code_from_tty() -> anyhow::Result<Zeroizing<String>> {
 }
 
 /// Run `cmd` against the API on `port`, writing the human report to `out`
-/// (a bare enrollment code is read from the terminal).
+/// (a bare enrollment code is read from the terminal; the pairing warning is
+/// asked there).
 pub fn run_on(port: u16, cmd: &FabricCmd, out: &mut dyn Write) -> anyhow::Result<()> {
     run_with(port, cmd, out, &mut read_code_from_tty)
+}
+
+/// The owner's answer to the pairing warning (§4.6 step 6), on the terminal:
+/// the text verbatim, then `[y/N]`; no terminal is a "no".
+pub fn confirm_on_tty(text: &str) -> anyhow::Result<bool> {
+    anyhow::ensure!(
+        unsafe { libc::isatty(0) } == 1,
+        "this link cannot be encrypted, and the warning needs an answer on a terminal: {text}"
+    );
+    eprint!("\n{text} [y/N] ");
+    std::io::stderr().flush()?;
+    let mut line = String::new();
+    std::io::stdin().read_line(&mut line)?;
+    let a = line.trim();
+    Ok(a.eq_ignore_ascii_case("y") || a.eq_ignore_ascii_case("yes"))
+}
+
+/// `111 fabric pair …` against the API on `port`; `confirm` answers the
+/// pairing warning (module doc).
+pub fn run_pair_with(
+    port: u16,
+    cmd: &FabricCmd,
+    out: &mut dyn Write,
+    confirm: &mut dyn FnMut(&str) -> anyhow::Result<bool>,
+) -> anyhow::Result<()> {
+    match cmd {
+        FabricCmd::PairShow { role, via } => {
+            let body = serde_json::json!({ "role": role.code(), "via": via.code() });
+            let a = request(port, "POST", "/api/v1/relay/pair/offer", Some(&body))?;
+            if a.status != 200 {
+                return Err(fail(&a));
+            }
+            let v = a
+                .json()
+                .ok_or_else(|| anyhow::anyhow!("unreadable pairing offer"))?;
+            let bundle = v["bundle"]["text"].as_str().unwrap_or("");
+            let shown = PairBundle::parse(bundle).ok();
+            writeln!(
+                out,
+                "Pairing code: {}   (single use; shown once)",
+                v["code"].as_str().unwrap_or("?")
+            )?;
+            writeln!(
+                out,
+                "Proposed:     the other hub is this hub's {} over {}",
+                role.code(),
+                via.code()
+            )?;
+            match shown.as_ref().and_then(|b| b.address) {
+                Some(addr) => writeln!(out, "Hub address:  {addr}")?,
+                None => writeln!(
+                    out,
+                    "Hub address:  none (the other hub must reach this one, or dial it first)"
+                )?,
+            }
+            writeln!(
+                out,
+                "Link key:     {}",
+                v["link_spki"].as_str().unwrap_or("?")
+            )?;
+            writeln!(out, "On the other hub: 111 fabric pair '{bundle}'")?;
+            if let Ok(qr) = crate::cli::render_qr(bundle) {
+                writeln!(out, "\nOr scan:\n{qr}")?;
+            }
+        }
+        FabricCmd::Pair {
+            bundle,
+            role,
+            via,
+            lan,
+        } => {
+            let body = pair_body(bundle, *role, *via, *lan, None)?;
+            let mut a = request(port, "POST", "/api/v1/relay/pair", Some(&body))?;
+            if a.status == 409 {
+                if let Some(c) = a
+                    .json()
+                    .filter(|p| p["code"] == "consent_required")
+                    .map(|p| p["consent"].clone())
+                {
+                    let text = c["warning_text"].as_str().unwrap_or("");
+                    let hash = c["hash"].as_str().unwrap_or("");
+                    if !confirm(text)? {
+                        writeln!(out, "Not paired.")?;
+                        return Ok(());
+                    }
+                    let again = pair_body(bundle, *role, *via, *lan, Some(hash))?;
+                    a = request(port, "POST", "/api/v1/relay/pair", Some(&again))?;
+                }
+            }
+            if a.status != 202 {
+                return Err(fail(&a));
+            }
+            let v = a.json().unwrap_or(Value::Null);
+            writeln!(
+                out,
+                "Pairing with hub {} ({}) as this hub's {} over {}, link {}{}.",
+                v["label"].as_str().unwrap_or("?"),
+                v["node_id"].as_str().unwrap_or("?"),
+                v["role"].as_str().unwrap_or("?"),
+                v["via"].as_str().unwrap_or("?"),
+                v["tls"].as_str().unwrap_or("?"),
+                if yes(&v["lan"]) {
+                    ", marked LAN or tunnel"
+                } else {
+                    ""
+                },
+            )?;
+            writeln!(
+                out,
+                "The pair forwards once both hubs have enrolled: scan this hub's bundle on the \
+                 other hub too (111 fabric pair --show here)."
+            )?;
+        }
+        _ => anyhow::bail!("{USAGE}"),
+    }
+    Ok(())
 }
 
 /// [`run_on`] with the source of a bare enrollment code supplied.
@@ -399,6 +650,9 @@ pub fn run_with(
                 v["address"].as_str().unwrap_or("?"),
                 hub_state(&v)
             )?;
+        }
+        FabricCmd::PairShow { .. } | FabricCmd::Pair { .. } => {
+            run_pair_with(port, cmd, out, &mut confirm_on_tty)?;
         }
     }
     Ok(())
@@ -661,6 +915,99 @@ mod tests {
         assert!(enroll_body(None, None, Some("10.0.0.1:1"), None).is_err());
         assert!(enroll_body(None, Some("  "), Some("10.0.0.1:1"), None).is_err());
         assert!(enroll_body(Some("111HUB:CARD:CODE:"), None, None, None).is_err());
+    }
+
+    /// A `111PAIR:` bundle for the parser tests (shape only: the daemon
+    /// verifies the card).
+    fn pair_bundle(role: &str, via: &str) -> String {
+        let spki = crate::daemon::fabric::settings::LinkSpki::from_der(
+            &[
+                &crate::daemon::fabric::settings::ED25519_SPKI_PREFIX[..],
+                &[3u8; 32][..],
+            ]
+            .concat(),
+        )
+        .unwrap()
+        .text();
+        format!("111PAIR:CARDTEXT:BCDF2345:{spki}:[2001:db8::7]:11183:{role}:{via}")
+    }
+
+    /// Layer 7 §4.6: `111 fabric pair --show` and `111 fabric pair <bundle>`.
+    #[test]
+    fn pair_parse_matrix() {
+        assert_eq!(
+            parse(&s(&["pair", "--show"])).unwrap(),
+            FabricCmd::PairShow {
+                role: PairRole::Peer,
+                via: PairVia::Tcp
+            }
+        );
+        assert_eq!(
+            parse(&s(&["pair", "--show", "--role", "leaf", "--via=tcp"])).unwrap(),
+            FabricCmd::PairShow {
+                role: PairRole::Leaf,
+                via: PairVia::Tcp
+            }
+        );
+        let b = pair_bundle("gateway", "tcp");
+        assert_eq!(
+            parse(&s(&["pair", &b, "--lan"])).unwrap(),
+            FabricCmd::Pair {
+                bundle: b.clone(),
+                role: None,
+                via: None,
+                lan: true
+            }
+        );
+        assert_eq!(
+            parse(&s(&["pair", "--role=leaf", &b])).unwrap(),
+            FabricCmd::Pair {
+                bundle: b.clone(),
+                role: Some(PairRole::Leaf),
+                via: None,
+                lan: false
+            }
+        );
+        for bad in [
+            vec!["pair"],
+            vec!["pair", "--show", &b],
+            vec!["pair", "--show", "--lan"],
+            vec!["pair", "--show", "--role", "member"],
+            vec!["pair", "--show", "--via"],
+            vec!["pair", &b, &b],
+            vec!["pair", &b, "--bogus"],
+            vec!["pair", "111PAIR:junk"],
+            vec!["pair", "--show=yes"],
+        ] {
+            assert!(parse(&s(&bad)).is_err(), "{bad:?}");
+        }
+        // a bare code never rides argv
+        let e = parse(&s(&["pair", "BCDF-2345"])).unwrap_err().to_string();
+        assert!(e.contains("never taken on the command line"), "{e}");
+    }
+
+    /// §4.6 step 2: the default pick is the complement of the bundle's role
+    /// and the bundle's link; the repeat carries the accepted hash.
+    #[test]
+    fn pair_bodies_pick_the_complement() {
+        for (shown, picked) in [("peer", "peer"), ("leaf", "gateway"), ("gateway", "leaf")] {
+            let b = pair_bundle(shown, "tcp");
+            let v = pair_body(&b, None, None, false, None).unwrap();
+            assert_eq!(v["role"], picked);
+            assert_eq!(v["via"], "tcp");
+            assert_eq!(v["lan"], false);
+            assert!(v.get("accept_warning").is_none());
+            assert_eq!(v["bundle"], b.as_str());
+        }
+        let b = pair_bundle("peer", "carrier");
+        let h = "ab".repeat(32);
+        let v = pair_body(&b, Some(PairRole::Leaf), None, true, Some(&h)).unwrap();
+        assert_eq!(
+            (v["role"].as_str(), v["via"].as_str(), v["lan"].as_bool()),
+            (Some("leaf"), Some("carrier"), Some(true))
+        );
+        assert_eq!(v["accept_warning"], h.as_str());
+        assert!(pair_body("111PAIR:x", None, None, false, None).is_err());
     }
 
     /// F2 review m4: chunked bodies are reassembled as bytes — a multibyte

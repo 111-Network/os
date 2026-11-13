@@ -1578,7 +1578,8 @@ fn a_v1_store_migrates_to_the_current_schema_in_place() {
         pragma_int(&s.conn, "user_version").unwrap(),
         schema::SCHEMA_VERSION
     );
-    assert_eq!(schema::SCHEMA_VERSION, 4);
+    assert_eq!(schema::SCHEMA_VERSION, 5);
+    assert_totals_exact(&s);
     s.record_epoch(1).unwrap();
     assert!(s.pending_node_id_put(&PEER).unwrap());
     assert_eq!(s.pending_node_ids().unwrap(), vec![PEER]);
@@ -1589,6 +1590,7 @@ fn a_v1_store_migrates_to_the_current_schema_in_place() {
             .unwrap(),
     );
     assert_eq!(raw_fwd(&s, q), (1, Some(PEER.to_vec())));
+    assert_totals_exact(&s);
 }
 
 #[test]
@@ -1803,16 +1805,16 @@ fn a_v2_store_opens_at_the_current_schema_and_keeps_its_rows() {
 
 #[test]
 fn a_store_newer_than_this_build_is_refused() {
-    // The "V4 refused by a V3 build" rule is the same check one version up:
-    // this build refuses user_version 5.
+    // The "V5 refused by a V4 build" rule is the same check one version up:
+    // this build refuses user_version 6.
     let (t, s) = ready();
-    s.conn.pragma_update(None, "user_version", 5).unwrap();
+    s.conn.pragma_update(None, "user_version", 6).unwrap();
     s.close(1).unwrap();
     assert!(matches!(
         Store::open(t.path(), &key(), &params(1)),
         Err(StoreError::SchemaTooNew {
-            found: 5,
-            supported: 4
+            found: 6,
+            supported: 5
         })
     ));
 }
@@ -3201,7 +3203,12 @@ fn a_v3_store_opens_at_v4_and_its_custody_rows_read_as_member_rows() {
     }
     let (mut s, _) = open(t.path(), 1);
     s.record_epoch(1).unwrap();
-    assert_eq!(pragma_int(&s.conn, "user_version").unwrap(), 4);
+    // Through v4 to the current schema (v5 adds a table, no custody column).
+    assert_eq!(
+        pragma_int(&s.conn, "user_version").unwrap(),
+        schema::SCHEMA_VERSION
+    );
+    assert_totals_exact(&s);
     let cols: Vec<String> = s
         .conn
         .prepare("SELECT name FROM pragma_table_info('custody')")
@@ -3252,12 +3259,22 @@ fn a_v3_store_opens_at_v4_and_its_custody_rows_read_as_member_rows() {
 
 #[test]
 fn a_v4_store_is_refused_by_a_v3_build() {
-    let (t, mut s) = ready();
-    accepted(
-        s.custody_put_fwd(&STRANGER, b"fwd", Fwd::FromMember(PEER))
-            .unwrap(),
-    );
-    s.close(1).unwrap();
+    // A v4 store as a v4 build leaves it (this build would write v5).
+    let t = tempfile::tempdir().unwrap();
+    {
+        let conn = old_store(t.path(), 4);
+        conn.execute(
+            "INSERT INTO custody (dest, pkt_ref, bytes, local_seq, fwd, fwd_from)
+             VALUES (?1, ?2, x'667764', 1, 1, ?3)",
+            rusqlite::params![
+                &STRANGER[..],
+                &crate::custody::pkt_ref(b"fwd")[..],
+                &PEER[..]
+            ],
+        )
+        .unwrap();
+        conn.close().unwrap();
+    }
     // A v3 build runs this `migrate` with its own list, `[V1, V2, V3]`.
     let conn = rusqlite::Connection::open(t.path().join(DB_FILE)).unwrap();
     apply_key_and_pragmas(&conn, &key()).unwrap();
@@ -3273,6 +3290,7 @@ fn a_v4_store_is_refused_by_a_v3_build() {
     conn.close().unwrap();
     let (s, _) = open(t.path(), 1);
     assert_eq!(s.forward_pending(0, 10).unwrap().len(), 1);
+    assert_totals_exact(&s);
 }
 
 #[test]
@@ -3308,6 +3326,1408 @@ fn the_v4_checks_refuse_a_forward_row_without_its_origin() {
             Err(StoreError::Corrupt(_))
         ));
     }
+}
+
+// ---------------------------------------------------------------------------
+// Layer 7 §5.8 (M1b): schema v5, the custody totals in O(1)
+// ---------------------------------------------------------------------------
+
+/// An origin whose NodeId is no text (NULs, 0xFF, a cut UTF-8 lead, a lone
+/// continuation byte): the `x'03' ‖ fwd_from` key the v5 triggers build
+/// must be the exact bytes.
+const ODD: [u8; 32] = {
+    let mut a = [0u8; 32];
+    let mut i = 0;
+    while i < 32 {
+        a[i] = [0x00, 0xFF, 0xC3, 0x28, 0x80][i % 5];
+        i += 1;
+    }
+    a
+};
+/// An all-zero origin.
+const NUL: [u8; 32] = [0; 32];
+
+/// The pre-v5 readers' queries, kept here only as the oracle (never on a
+/// production path): `class_bytes` of Custody / Transit (`{rows}` is the
+/// `fwd` filter), `forward_origin_bytes`, `forward_stats`, `custody_stats`.
+const OLD_CLASS_SQL: &str =
+    "SELECT coalesce(sum(length(bytes) + coalesce(length(fwd_from), 0) + ?1), 0) FROM custody WHERE {rows}";
+const OLD_ORIGIN_SQL: &str =
+    "SELECT coalesce(sum(length(bytes) + length(fwd_from) + ?2), 0) FROM custody
+     WHERE fwd != 0 AND committed = 0 AND fwd_from = ?1";
+const OLD_STATS_SQL: &str = "SELECT count(*), coalesce(sum(length(bytes)), 0) FROM custody
+     WHERE fwd != 0 AND committed = 0";
+const OLD_CUSTODY_STATS_SQL: &str = "SELECT count(*), coalesce(sum(length(bytes)), 0) FROM custody";
+
+/// What `custody_put_fwd` runs on its admission path besides the totals
+/// read ([`prune::CUSTODY_TOTAL_SQL`]), verbatim from `rows.rs` (the O(1)
+/// test checks they are still there).
+const DEDUP_SQL: &str = "SELECT custody_seq FROM custody WHERE pkt_ref = ?1";
+const INSERT_MEMBER_SQL: &str =
+    "INSERT INTO custody (dest, pkt_ref, bytes, local_seq) VALUES (?1, ?2, ?3, ?4)";
+const INSERT_FWD_SQL: &str = concat!(
+    "INSERT INTO custody (dest, pkt_ref, bytes, local_seq, fwd, fwd_from)\n",
+    "                     VALUES (?1, ?2, ?3, ?4, ?5, ?6)"
+);
+
+type TotalsRow = (Vec<u8>, i64, i64, i64);
+
+/// Every `custody_totals` row, in key order.
+fn totals_rows(s: &Store) -> Vec<TotalsRow> {
+    let mut st = s
+        .conn
+        .prepare("SELECT key, rows, item_bytes, from_bytes FROM custody_totals ORDER BY key")
+        .unwrap();
+    st.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))
+        .unwrap()
+        .map(|r| r.unwrap())
+        .collect()
+}
+
+/// The v5 oracle: recompute every `custody_totals` row from the `custody`
+/// rows with `SUM` / `GROUP BY` and require the table to be exactly that —
+/// the three fixed keys present, one key per origin that holds protected
+/// forward rows, no other key, no origin key at zero rows — then require
+/// the five readers to return exactly what the pre-v5 sums return.
+fn assert_totals_exact(s: &Store) {
+    let sums = |filter: &str| -> (i64, i64, i64) {
+        s.conn
+            .query_row(
+                &format!(
+                    "SELECT count(*), coalesce(sum(length(bytes)), 0),
+                            coalesce(sum(coalesce(length(fwd_from), 0)), 0)
+                     FROM custody WHERE {filter}"
+                ),
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap()
+    };
+    let mut want: Vec<TotalsRow> = Vec::new();
+    for (key, filter) in [
+        (0u8, "fwd = 0"),
+        (1, "fwd != 0"),
+        (2, "fwd != 0 AND committed = 0"),
+    ] {
+        let (n, item, from) = sums(filter);
+        want.push((vec![key], n, item, from));
+    }
+    let mut st = s
+        .conn
+        .prepare(
+            "SELECT fwd_from, count(*), sum(length(bytes)), sum(length(fwd_from)) FROM custody
+             WHERE fwd != 0 AND committed = 0 GROUP BY fwd_from",
+        )
+        .unwrap();
+    let origins: Vec<TotalsRow> = st
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))
+        .unwrap()
+        .map(|r| r.unwrap())
+        .collect();
+    for (origin, n, item, from) in origins {
+        let mut k = vec![0x03];
+        k.extend_from_slice(&origin);
+        want.push((k, n, item, from));
+    }
+    want.sort();
+    let got = totals_rows(s);
+    assert_eq!(got, want, "custody_totals differs from the rows' sums");
+    assert!(
+        got.iter().all(|(k, n, _, _)| k.len() == 1 || *n > 0),
+        "an origin key at zero rows"
+    );
+
+    // The readers answer what the pre-v5 sums answer, to the byte.
+    let old_class = |rows: &str| -> u64 {
+        let v: i64 = s
+            .conn
+            .query_row(
+                &OLD_CLASS_SQL.replace("{rows}", rows),
+                [prune::ROW_OVERHEAD as i64],
+                |r| r.get(0),
+            )
+            .unwrap();
+        v as u64
+    };
+    assert_eq!(s.class_bytes(Class::Custody).unwrap(), old_class("fwd = 0"));
+    assert_eq!(
+        s.class_bytes(Class::Transit).unwrap(),
+        old_class("fwd != 0")
+    );
+    let (n, b): (i64, i64) = s
+        .conn
+        .query_row(OLD_STATS_SQL, [], |r| Ok((r.get(0)?, r.get(1)?)))
+        .unwrap();
+    assert_eq!(s.forward_stats().unwrap(), (n as u64, b as u64));
+    let (n, b): (i64, i64) = s
+        .conn
+        .query_row(OLD_CUSTODY_STATS_SQL, [], |r| Ok((r.get(0)?, r.get(1)?)))
+        .unwrap();
+    assert_eq!(s.custody_stats().unwrap(), (n as u64, b as u64));
+    // Every origin ever stored (one with committed rows only reads 0) and
+    // every NodeId these tests name.
+    let mut ids: Vec<[u8; 32]> = s
+        .conn
+        .prepare("SELECT DISTINCT fwd_from FROM custody WHERE fwd_from IS NOT NULL")
+        .unwrap()
+        .query_map([], |r| r.get::<_, Vec<u8>>(0))
+        .unwrap()
+        .map(|r| id32(r.unwrap(), "fwd_from").unwrap())
+        .collect();
+    ids.extend([PEER, PEER2, LEAF, CARRIER, STRANGER, ODD, NUL, ME]);
+    for o in ids {
+        let old: i64 = s
+            .conn
+            .query_row(
+                OLD_ORIGIN_SQL,
+                rusqlite::params![&o[..], prune::ROW_OVERHEAD as i64],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(s.forward_origin_bytes(&o).unwrap(), old as u64, "{o:?}");
+    }
+}
+
+/// The key of `origin`'s total.
+fn origin_key(origin: &[u8; 32]) -> Vec<u8> {
+    let mut k = vec![0x03];
+    k.extend_from_slice(origin);
+    k
+}
+
+#[test]
+fn custody_totals_follow_every_write_path() {
+    let (t, mut s) = ready();
+    // An empty store: the three fixed keys, at zero.
+    assert_eq!(
+        totals_rows(&s),
+        vec![(vec![0], 0, 0, 0), (vec![1], 0, 0, 0), (vec![2], 0, 0, 0)]
+    );
+    assert_totals_exact(&s);
+
+    // A member put; forward puts from three origins (two NodeIds that are
+    // no text).
+    let m1 = accepted(s.custody_put(&PEER, &[1; 700]).unwrap());
+    assert_totals_exact(&s);
+    let a1 = accepted(
+        s.custody_put_fwd(&STRANGER, &[2; 1000], Fwd::FromMember(PEER))
+            .unwrap(),
+    );
+    assert_totals_exact(&s);
+    let a2 = accepted(
+        s.custody_put_fwd(&STRANGER, &[3; 1000], Fwd::FromMember(PEER))
+            .unwrap(),
+    );
+    let b1 = accepted(
+        s.custody_put_fwd(&PEER2, &[4; 500], Fwd::FromLeaf(ODD))
+            .unwrap(),
+    );
+    assert_totals_exact(&s);
+    let c1 = accepted(
+        s.custody_put_fwd(&PEER2, &[5; 300], Fwd::FromCarrier(NUL))
+            .unwrap(),
+    );
+    assert_totals_exact(&s);
+    assert_eq!(s.forward_origin_bytes(&PEER).unwrap(), 2 * fwd_bytes(1000));
+    assert_eq!(s.forward_origin_bytes(&ODD).unwrap(), fwd_bytes(500));
+    assert_eq!(s.forward_origin_bytes(&NUL).unwrap(), fwd_bytes(300));
+
+    // A duplicate, a share rejection and a quota rejection change nothing.
+    let before = totals_rows(&s);
+    assert_eq!(
+        s.custody_put_fwd(&STRANGER, &[2; 1000], Fwd::FromLeaf(LEAF))
+            .unwrap(),
+        CustodyPut::Duplicate(a1)
+    );
+    assert_eq!(
+        s.custody_put(&PEER, &[1; 700]).unwrap(),
+        CustodyPut::Duplicate(m1)
+    );
+    assert_eq!(totals_rows(&s), before);
+    s.set_quota(Class::Transit, Some(8 * (2 * fwd_bytes(1000) + 10)))
+        .unwrap();
+    assert_eq!(
+        s.custody_put_fwd(&STRANGER, &[6; 1000], Fwd::FromMember(PEER))
+            .unwrap(),
+        CustodyPut::RejectFull,
+        "over its share"
+    );
+    assert_eq!(totals_rows(&s), before);
+    assert_totals_exact(&s);
+    // Custody holds 700 + 64 B of protected rows: 100 B more are over the
+    // quota, and the pruning pass admission runs finds nothing to evict.
+    s.set_quota(Class::Custody, Some(800)).unwrap();
+    assert_eq!(
+        s.custody_put(&PEER, &[7; 100]).unwrap(),
+        CustodyPut::RejectFull,
+        "over the custody quota"
+    );
+    assert_eq!(totals_rows(&s), before);
+    assert_totals_exact(&s);
+    s.set_quota(Class::Custody, None).unwrap();
+
+    // The commit and the refused mark move a row out of its origin's key;
+    // an origin's last protected row takes its key with it.
+    assert!(s.forward_commit(a1).unwrap());
+    assert_totals_exact(&s);
+    assert!(s.forward_commit(c1).unwrap());
+    assert_totals_exact(&s);
+    assert!(!totals_rows(&s).iter().any(|r| r.0 == origin_key(&NUL)));
+    assert!(s.forward_refuse(b1).unwrap());
+    assert_totals_exact(&s);
+    assert!(!totals_rows(&s).iter().any(|r| r.0 == origin_key(&ODD)));
+    let before = totals_rows(&s);
+    assert!(!s.forward_refuse(b1).unwrap());
+    assert!(!s.forward_commit(m1).unwrap());
+    assert_eq!(
+        totals_rows(&s),
+        before,
+        "an idempotent repeat moves nothing"
+    );
+
+    // The member's ack (MAILBOX_COMMIT) marks; pruning deletes.
+    let m2 = accepted(s.custody_put(&PEER, &[8; 200]).unwrap());
+    assert_eq!(s.custody_commit(&PEER, m1).unwrap(), 1);
+    assert_totals_exact(&s);
+    // Transit's quota evicts the three committed forward rows (step 1).
+    s.set_quota(Class::Transit, Some(fwd_bytes(1000))).unwrap();
+    let r = s.prune(DiskSpace::UNKNOWN).unwrap();
+    let mut gone: Vec<PrunedRef> = r.pruned.iter().map(|p| p.item).collect();
+    gone.sort_by_key(|p| match p {
+        PrunedRef::Custody(q) => *q,
+        _ => u64::MAX,
+    });
+    assert_eq!(
+        gone,
+        vec![
+            PrunedRef::Custody(a1),
+            PrunedRef::Custody(b1),
+            PrunedRef::Custody(c1)
+        ]
+    );
+    assert!(r
+        .pruned
+        .iter()
+        .all(|p| p.step == PruneStep::Quota(Class::Transit)));
+    assert_totals_exact(&s);
+    s.set_quota(Class::Transit, None).unwrap();
+    // The watermark evicts the committed member row.
+    let r = s
+        .prune_with(DiskSpace::UNKNOWN, Watermarks { high: 0, low: 0 })
+        .unwrap();
+    assert_eq!(
+        r.pruned.iter().map(|p| p.item).collect::<Vec<_>>(),
+        vec![PrunedRef::Custody(m1)]
+    );
+    assert_totals_exact(&s);
+    s.prune_with(DiskSpace::UNKNOWN, Watermarks::with_high(u64::MAX / 2))
+        .unwrap();
+    assert!(!s.store_full());
+
+    // A failed transaction: the rows and their totals roll back together.
+    let before = totals_rows(&s);
+    let res = s.with_tx(Durability::Normal, |tx| {
+        tx.execute(
+            "INSERT INTO custody (dest, pkt_ref, bytes, local_seq, fwd, fwd_from)
+             VALUES (?1, ?2, x'0102', 1, 2, ?3)",
+            rusqlite::params![&STRANGER[..], &[0x77u8; 16][..], &LEAF[..]],
+        )?;
+        tx.execute(
+            "UPDATE custody SET committed = 1 WHERE custody_seq = ?1",
+            [a2 as i64],
+        )?;
+        tx.execute("DELETE FROM custody WHERE custody_seq = ?1", [m2 as i64])?;
+        let inside: i64 = tx.query_row(
+            "SELECT count(*) FROM custody_totals WHERE key = ?1",
+            [&origin_key(&LEAF)[..]],
+            |r| r.get(0),
+        )?;
+        assert_eq!(inside, 1, "the triggers ran inside the transaction");
+        Err::<(), _>(StoreError::Invalid("roll back"))
+    });
+    assert!(matches!(res, Err(StoreError::Invalid("roll back"))));
+    assert_eq!(totals_rows(&s), before);
+    assert_totals_exact(&s);
+    // A statement that fails on its second row: the first row's trigger
+    // work leaves with it.
+    let dup = crate::custody::pkt_ref(&[3; 1000]);
+    assert!(s
+        .conn
+        .execute(
+            "INSERT INTO custody (dest, pkt_ref, bytes, local_seq, fwd, fwd_from)
+             VALUES (?1, ?2, x'03', 1, 1, ?3), (?1, ?4, x'04', 1, 1, ?3)",
+            rusqlite::params![&STRANGER[..], &[0x78u8; 16][..], &CARRIER[..], &dup[..]],
+        )
+        .is_err());
+    assert_eq!(totals_rows(&s), before);
+    assert_totals_exact(&s);
+
+    // A reopen: the totals are on disk with the rows, and keep counting.
+    s.close(1).unwrap();
+    let (mut s, _) = open(t.path(), 1);
+    assert_eq!(totals_rows(&s), before);
+    assert_totals_exact(&s);
+    accepted(
+        s.custody_put_fwd(&STRANGER, &[9; 64], Fwd::FromLeaf(ODD))
+            .unwrap(),
+    );
+    assert_totals_exact(&s);
+    s.close(1).unwrap();
+}
+
+#[test]
+fn a_v4_store_opens_at_v5_with_exact_custody_totals() {
+    assert_eq!(schema::MIGRATIONS.len() as i64, schema::SCHEMA_VERSION);
+    let t = tempfile::tempdir().unwrap();
+    // Every kind of row a v4 hub holds: member rows open and committed;
+    // protected forward rows of three origins (one with two rows, two
+    // whose NodeIds are no text); a handed-over row of an origin that keeps
+    // a protected one; an origin with committed rows only. Each: the item,
+    // `committed`, `fwd`, `fwd_from`.
+    type V4Row = (Vec<u8>, i64, i64, Option<[u8; 32]>);
+    let rows: [V4Row; 8] = [
+        (b"m-open".to_vec(), 0, 0, None),
+        (b"m-done".to_vec(), 1, 0, None),
+        (vec![1; 900], 0, 1, Some(PEER)),
+        (vec![2; 1100], 0, 1, Some(PEER)),
+        (vec![3; 70], 1, 1, Some(PEER)),
+        (vec![4; 40], 0, 2, Some(ODD)),
+        (vec![5; 33], 0, 3, Some(NUL)),
+        (vec![6; 500], 1, 3, Some(CARRIER)),
+    ];
+    {
+        let conn = old_store(t.path(), 4);
+        for (i, (item, committed, fwd, from)) in rows.iter().enumerate() {
+            conn.execute(
+                "INSERT INTO custody (dest, pkt_ref, bytes, committed, local_seq, fwd, fwd_from)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                rusqlite::params![
+                    &STRANGER[..],
+                    &crate::custody::pkt_ref(item)[..],
+                    item,
+                    committed,
+                    i as i64 + 1,
+                    fwd,
+                    from.as_ref().map(|f| &f[..])
+                ],
+            )
+            .unwrap();
+        }
+        let tables: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM sqlite_master WHERE name LIKE 'custody_totals%'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(tables, 0, "a v4 store has no totals");
+        assert_eq!(pragma_int(&conn, "user_version").unwrap(), 4);
+        conn.close().unwrap();
+    }
+    let (mut s, _) = open(t.path(), 1);
+    assert_eq!(pragma_int(&s.conn, "user_version").unwrap(), 5);
+    assert_totals_exact(&s);
+    let fwd_from = 32;
+    let mut want: Vec<TotalsRow> = vec![
+        (vec![0], 2, 12, 0),
+        (vec![1], 6, 900 + 1100 + 70 + 40 + 33 + 500, 6 * fwd_from),
+        (vec![2], 4, 900 + 1100 + 40 + 33, 4 * fwd_from),
+        (origin_key(&PEER), 2, 2000, 2 * fwd_from),
+        (origin_key(&ODD), 1, 40, fwd_from),
+        (origin_key(&NUL), 1, 33, fwd_from),
+    ];
+    want.sort();
+    assert_eq!(totals_rows(&s), want, "no key for CARRIER: committed only");
+    assert_eq!(
+        s.forward_origin_bytes(&PEER).unwrap(),
+        fwd_bytes(900) + fwd_bytes(1100)
+    );
+    assert_eq!(s.forward_origin_bytes(&CARRIER).unwrap(), 0);
+    // The triggers carry on from the backfill.
+    let q = accepted(
+        s.custody_put_fwd(&STRANGER, &[7; 10], Fwd::FromCarrier(CARRIER))
+            .unwrap(),
+    );
+    assert_totals_exact(&s);
+    assert!(s.forward_commit(q).unwrap());
+    assert_eq!(s.custody_commit(&STRANGER, 1).unwrap(), 1);
+    assert_totals_exact(&s);
+    s.close(1).unwrap();
+}
+
+#[test]
+fn a_v5_store_is_refused_by_a_v4_build() {
+    let (t, mut s) = ready();
+    accepted(
+        s.custody_put_fwd(&STRANGER, b"fwd", Fwd::FromMember(PEER))
+            .unwrap(),
+    );
+    s.close(1).unwrap();
+    // A v4 build runs this `migrate` with its own list, `[V1, V2, V3, V4]`.
+    let conn = rusqlite::Connection::open(t.path().join(DB_FILE)).unwrap();
+    apply_key_and_pragmas(&conn, &key()).unwrap();
+    assert!(matches!(
+        schema::migrate_with(&conn, &schema::MIGRATIONS[..4]),
+        Err(StoreError::SchemaTooNew {
+            found: 5,
+            supported: 4
+        })
+    ));
+    // Refused, never downgraded: the file is still v5 and this build opens it.
+    assert_eq!(pragma_int(&conn, "user_version").unwrap(), 5);
+    conn.close().unwrap();
+    let (s, _) = open(t.path(), 1);
+    assert_eq!(s.forward_pending(0, 10).unwrap().len(), 1);
+    assert_totals_exact(&s);
+}
+
+/// `EXPLAIN QUERY PLAN` of `sql` (parameters bound to NULL): one detail
+/// line per plan step.
+fn plan(s: &Store, sql: &str) -> Vec<String> {
+    let mut st = s
+        .conn
+        .prepare(&format!("EXPLAIN QUERY PLAN {sql}"))
+        .unwrap();
+    let n = st.parameter_count();
+    st.query_map(
+        rusqlite::params_from_iter(std::iter::repeat_n(rusqlite::types::Null, n)),
+        |r| r.get::<_, String>(3),
+    )
+    .unwrap()
+    .map(|r| r.unwrap())
+    .collect()
+}
+
+/// A plan step that walks all of `custody` (not `custody_totals`).
+fn scans_custody(plan: &[String]) -> bool {
+    plan.iter().any(|d| {
+        let mut w = d.split_whitespace();
+        w.next() == Some("SCAN") && w.next() == Some("custody")
+    })
+}
+
+/// Run the four statements of a forward put's admission path exactly as
+/// `custody_put_fwd` runs them (the dedup lookup, the origin's total, the
+/// class total, the insert with its triggers) for `item` from `origin`;
+/// SQLite's own counters summed over the four: (full-scan steps, VM steps).
+/// A trigger's subprogram counts toward the statement that fired it.
+fn put_counters(s: &Store, item: &[u8], origin: &[u8; 32]) -> (i32, i32) {
+    use rusqlite::StatementStatus::{FullscanStep, VmStep};
+    let pkt_ref = crate::custody::pkt_ref(item);
+    let mut out = (0, 0);
+    let mut count = |st: &rusqlite::Statement<'_>| {
+        out.0 += st.get_status(FullscanStep);
+        out.1 += st.get_status(VmStep);
+    };
+    let mut st = s.conn.prepare(DEDUP_SQL).unwrap();
+    let dup: Option<i64> = st
+        .query_row([&pkt_ref[..]], |r| r.get(0))
+        .optional()
+        .unwrap();
+    assert_eq!(dup, None);
+    count(&st);
+    for key in [origin_key(origin), vec![0x01]] {
+        let mut st = s.conn.prepare(prune::CUSTODY_TOTAL_SQL).unwrap();
+        let n: i64 = st.query_row([&key[..]], |r| r.get(0)).unwrap();
+        assert!(n > 0);
+        count(&st);
+    }
+    let mut st = s.conn.prepare(INSERT_FWD_SQL).unwrap();
+    st.execute(rusqlite::params![
+        &STRANGER[..],
+        &pkt_ref[..],
+        item,
+        1,
+        1,
+        &origin[..]
+    ])
+    .unwrap();
+    count(&st);
+    out
+}
+
+#[test]
+fn the_admission_path_never_scans_custody() {
+    // The statements are the ones `custody_put_fwd` runs (rows.rs).
+    let rows_rs = include_str!("rows.rs");
+    for sql in [DEDUP_SQL, INSERT_MEMBER_SQL, INSERT_FWD_SQL] {
+        assert!(rows_rs.contains(sql), "rows.rs no longer runs {sql}");
+    }
+
+    // A hub holding 5,000 forward rows (8 origins, a third committed)
+    // and 50 member rows, seeded in one transaction through the triggers.
+    let origins: Vec<[u8; 32]> = (0..8u8).map(|i| [0x40 + i; 32]).collect();
+    let (_t, mut s) = ready();
+    s.with_tx(Durability::Normal, |tx| {
+        let mut st = tx.prepare(
+            "INSERT INTO custody (dest, pkt_ref, bytes, committed, local_seq, fwd, fwd_from)
+             VALUES (?1, ?2, ?3, ?4, 1, ?5, ?6)",
+        )?;
+        for i in 0..5_050u32 {
+            let mut item = i.to_le_bytes().to_vec();
+            item.extend_from_slice(&[i as u8; 60]);
+            let member = i >= 5_000;
+            st.execute(rusqlite::params![
+                &STRANGER[..],
+                &crate::custody::pkt_ref(&item)[..],
+                &item,
+                i % 3 == 0,
+                if member { 0 } else { 1 + i % 3 },
+                (!member).then_some(&origins[i as usize % 8][..])
+            ])?;
+        }
+        Ok(())
+    })
+    .unwrap();
+    assert_totals_exact(&s);
+    assert_eq!(s.forward_stats().unwrap().0, 5_000 - 1_667);
+
+    // Plans: the reads on the admission path search, never walk `custody`.
+    // (The two INSERTs have no plan of their own; what they cost, their
+    // trigger programs and index writes included, is in the counters
+    // below.)
+    for (what, sql) in [("dedup", DEDUP_SQL), ("totals", prune::CUSTODY_TOTAL_SQL)] {
+        let p = plan(&s, sql);
+        assert!(!scans_custody(&p), "{what}: {p:?}");
+    }
+    assert!(plan(&s, DEDUP_SQL)
+        .iter()
+        .any(|d| d.starts_with("SEARCH custody USING")));
+    assert!(plan(&s, prune::CUSTODY_TOTAL_SQL)
+        .iter()
+        .any(|d| d.starts_with("SEARCH custody_totals USING PRIMARY KEY")));
+    // The check has teeth: the pre-v5 class sum walks every row.
+    assert!(scans_custody(&plan(
+        &s,
+        &OLD_CLASS_SQL.replace("{rows}", "fwd != 0")
+    )));
+    let mut st = s
+        .conn
+        .prepare(&OLD_CLASS_SQL.replace("{rows}", "fwd != 0"))
+        .unwrap();
+    let _: i64 = st
+        .query_row([prune::ROW_OVERHEAD as i64], |r| r.get(0))
+        .unwrap();
+    assert!(st.get_status(rusqlite::StatementStatus::FullscanStep) >= 5_000);
+    drop(st);
+
+    // Counters: the put into 5,050 rows takes no full-scan step and the
+    // same VM steps as into a store of two rows (a B-tree seek is one
+    // step at any depth), so its work does not grow with the rows held.
+    let big = put_counters(&s, b"probe into a full hub", &origins[0]);
+    let (_t2, mut small) = ready();
+    accepted(small.custody_put(&PEER, &[1; 64]).unwrap());
+    accepted(
+        small
+            .custody_put_fwd(&STRANGER, &[2; 64], Fwd::FromMember(origins[0]))
+            .unwrap(),
+    );
+    let little = put_counters(&small, b"probe into a full hub", &origins[0]);
+    assert_eq!(big.0, 0, "full-scan steps");
+    assert_eq!(big, little, "(full-scan, VM) steps: 5,052 rows vs 3");
+    assert_totals_exact(&s);
+    assert_totals_exact(&small);
+
+    // And the real put, through admission, into the full hub.
+    accepted(
+        s.custody_put_fwd(&STRANGER, b"a real put", Fwd::FromLeaf(origins[1]))
+            .unwrap(),
+    );
+    assert_totals_exact(&s);
+}
+
+/// The readers and the admission path answer from `custody_totals`, not
+/// from the rows (so the O(1) plans above are the plans the put runs), and
+/// a total that would go negative fails the write instead of reading as
+/// room.
+#[test]
+fn admission_reads_the_totals_and_a_drifted_total_fails_closed() {
+    let (_t, mut s) = ready();
+    accepted(s.custody_put(&PEER, &[1; 100]).unwrap());
+    let q = accepted(
+        s.custody_put_fwd(&STRANGER, &[2; 100], Fwd::FromMember(PEER))
+            .unwrap(),
+    );
+    assert_totals_exact(&s);
+    // Shift every stored total by 1,000 item bytes: the readers follow.
+    s.conn
+        .execute(
+            "UPDATE custody_totals SET item_bytes = item_bytes + 1000",
+            [],
+        )
+        .unwrap();
+    assert_eq!(
+        s.class_bytes(Class::Custody).unwrap(),
+        1100 + prune::ROW_OVERHEAD
+    );
+    assert_eq!(
+        s.class_bytes(Class::Transit).unwrap(),
+        fwd_bytes(100) + 1000
+    );
+    assert_eq!(s.forward_stats().unwrap(), (1, 1100));
+    assert_eq!(
+        s.forward_origin_bytes(&PEER).unwrap(),
+        fwd_bytes(100) + 1000
+    );
+    // So does admission: an origin whose stored total fills its share is
+    // refused although its rows leave room; another origin is admitted.
+    let share = s.transit_share().unwrap();
+    s.conn
+        .execute(
+            "UPDATE custody_totals SET item_bytes = ?2 WHERE key = ?1",
+            rusqlite::params![origin_key(&PEER), share as i64],
+        )
+        .unwrap();
+    assert_eq!(
+        s.custody_put_fwd(&STRANGER, &[3; 10], Fwd::FromMember(PEER))
+            .unwrap(),
+        CustodyPut::RejectFull
+    );
+    accepted(
+        s.custody_put_fwd(&STRANGER, &[3; 10], Fwd::FromMember(PEER2))
+            .unwrap(),
+    );
+    // A total that would go below zero fails the write (the counters'
+    // CHECK) and the row is left as it was.
+    s.conn
+        .execute("UPDATE custody_totals SET rows = 0 WHERE key = x'01'", [])
+        .unwrap();
+    assert!(matches!(s.forward_commit(q), Err(StoreError::Sql(_))));
+    assert!(!s.forward_item(q).unwrap().unwrap().committed);
+}
+
+// ---------------------------------------------------------------------------
+// Layer 7 §5.8 (M1c): no pass over the rows held on a per-item path
+// ---------------------------------------------------------------------------
+
+/// The per-item statements on `custody`, verbatim from `rows.rs` and
+/// `prune.rs` (the tests check they are still there): a member's
+/// `MAILBOX_COMMIT`, its `ENROLL_OK` floor, the forwarder's two pages, a
+/// forward commit, a prune delete.
+const COMMIT_SQL: &str = "UPDATE custody SET committed = 1
+             WHERE dest = ?1 AND custody_seq <= ?2 AND committed = 0";
+const FLOOR_SQL: &str = "SELECT min(custody_seq) FROM custody WHERE dest = ?1 AND committed = 0";
+const PENDING_TAIL: &str = "WHERE fwd != 0 AND committed = 0 AND custody_seq > ?1
+             ORDER BY custody_seq LIMIT ?2";
+
+/// [`Store::forward_pending`]'s statement as it runs: its source text
+/// (with `{FORWARD_COLS}`, checked in `rows.rs`) with the real column list
+/// put in, so its plan is asserted on the statement itself (M4g, the M1c
+/// review), never on a hand copy of the columns.
+fn pending_sql() -> String {
+    format!(
+        "SELECT {} FROM custody\n             {PENDING_TAIL}",
+        rows::FORWARD_COLS
+    )
+}
+const LENS_SQL: &str =
+    "SELECT custody_seq, dest, pkt_ref, length(bytes), fwd, fwd_from FROM custody
+             WHERE fwd != 0 AND committed = 0 AND custody_seq > ?1
+             ORDER BY custody_seq LIMIT ?2";
+const FWD_COMMIT_SQL: &str = "UPDATE custody SET committed = 1
+             WHERE custody_seq = ?1 AND fwd != 0 AND committed = 0";
+const PRUNE_DELETE_SQL: &str = "DELETE FROM custody WHERE custody_seq = ?1";
+/// [`Store::forward_waits_for_dest`] (Layer 7 M4e, M4g): the statement
+/// itself ([`rows::FORWARD_WAITS_SQL`]); it searches the covering partial
+/// index `custody_forward_open_by_dest` (a dest's protected forward rows).
+const WAITS_SQL: &str = rows::FORWARD_WAITS_SQL;
+
+/// A forward origin no seeded row uses.
+const PROBE: [u8; 32] = [0x77; 32];
+
+/// A hub's `custody` for the M1c checks, seeded in one transaction through
+/// the triggers and the indexes: `fwd` forward rows to STRANGER over
+/// `origins` origins (row `i` committed when `every != 0` and `i % every
+/// == 0`), then `member` rows for PEER, every one committed (acknowledged
+/// by its member's `MAILBOX_COMMIT`, waiting for step 1).
+fn seeded_hub(fwd: u32, origins: u32, every: u32, member: u32) -> (tempfile::TempDir, Store) {
+    let (t, mut s) = ready();
+    let ids: Vec<[u8; 32]> = (0..origins.max(1))
+        .map(|i| {
+            let mut a = [0x40; 32];
+            a[..4].copy_from_slice(&i.to_le_bytes());
+            a
+        })
+        .collect();
+    s.with_tx(Durability::Normal, |tx| {
+        let mut st = tx.prepare(
+            "INSERT INTO custody (dest, pkt_ref, bytes, committed, local_seq, fwd, fwd_from)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+        )?;
+        for i in 0..fwd + member {
+            let mut item = i.to_le_bytes().to_vec();
+            item.extend_from_slice(&[i as u8; 60]);
+            let m = i >= fwd;
+            st.execute(rusqlite::params![
+                if m { &PEER[..] } else { &STRANGER[..] },
+                &crate::custody::pkt_ref(&item)[..],
+                &item,
+                m || (every != 0 && i % every == 0),
+                i64::from(i) + 1,
+                if m { 0 } else { 1 + i % 3 },
+                (!m).then_some(&ids[(i % origins.max(1)) as usize][..])
+            ])?;
+        }
+        set_u64(tx, K_LOCAL_SEQ, u64::from(fwd + member))
+    })
+    .unwrap();
+    (t, s)
+}
+
+/// SQLite's own counters of one statement: (full-scan steps, VM steps). A
+/// trigger's program and the index writes count toward the statement that
+/// fired them.
+fn status(st: &rusqlite::Statement<'_>) -> (i32, i32) {
+    use rusqlite::StatementStatus::{FullscanStep, VmStep};
+    (st.get_status(FullscanStep), st.get_status(VmStep))
+}
+
+/// Run a writing statement once: the rows it changed and its counters.
+fn write_counted(s: &Store, sql: &str, p: impl rusqlite::Params) -> (usize, (i32, i32)) {
+    let mut st = s.conn.prepare(sql).unwrap();
+    let n = st.execute(p).unwrap();
+    (n, status(&st))
+}
+
+/// Run a reading statement once: its first column per row and its
+/// counters.
+fn read_counted(s: &Store, sql: &str, p: impl rusqlite::Params) -> (Vec<Option<i64>>, (i32, i32)) {
+    let mut st = s.conn.prepare(sql).unwrap();
+    let v = st
+        .query_map(p, |r| r.get::<_, Option<i64>>(0))
+        .unwrap()
+        .map(|r| r.unwrap())
+        .collect();
+    (v, status(&st))
+}
+
+#[test]
+fn the_per_item_reads_search_a_partial_index() {
+    let rows_rs = include_str!("rows.rs");
+    for sql in [COMMIT_SQL, FLOOR_SQL, LENS_SQL, FWD_COMMIT_SQL] {
+        assert!(rows_rs.contains(sql), "rows.rs no longer runs {sql}");
+    }
+    assert!(rows_rs.contains(&format!(
+        "SELECT {{FORWARD_COLS}} FROM custody\n             {PENDING_TAIL}"
+    )));
+    assert!(rows_rs.contains("self.conn.prepare(FORWARD_WAITS_SQL)"));
+    assert!(include_str!("prune.rs").contains(PRUNE_DELETE_SQL));
+    assert!(
+        !rows_rs.contains(OLD_CUSTODY_STATS_SQL),
+        "custody_stats reads the totals"
+    );
+    // A hub of 7,000 rows: the plans are bounded searches of the v5
+    // partial indexes (before v5: a member's committed rows walked by
+    // `custody_by_dest`, the rowid range walked across member and
+    // committed rows, a `SCAN custody` for step 1).
+    let (_t, s) = seeded_hub(5_000, 8, 3, 2_000);
+    let pending = pending_sql();
+    for (sql, want) in [
+        (
+            COMMIT_SQL,
+            "SEARCH custody USING COVERING INDEX custody_open_by_dest (dest=? AND custody_seq<?)",
+        ),
+        (
+            FLOOR_SQL,
+            "SEARCH custody USING COVERING INDEX custody_open_by_dest (dest=?)",
+        ),
+        (
+            WAITS_SQL,
+            "SEARCH custody USING COVERING INDEX custody_forward_open_by_dest (dest=? AND custody_seq>?)",
+        ),
+        (
+            pending.as_str(),
+            "SEARCH custody USING INDEX custody_forward_open (custody_seq>?)",
+        ),
+        (
+            LENS_SQL,
+            "SEARCH custody USING INDEX custody_forward_open (custody_seq>?)",
+        ),
+        (
+            prune::EVICTABLE_CUSTODY_SQL,
+            "SEARCH custody USING INDEX custody_committed (fwd>? AND fwd<?)",
+        ),
+        (
+            FWD_COMMIT_SQL,
+            "SEARCH custody USING INTEGER PRIMARY KEY (rowid=?)",
+        ),
+        (
+            PRUNE_DELETE_SQL,
+            "SEARCH custody USING INTEGER PRIMARY KEY (rowid=?)",
+        ),
+    ] {
+        assert_eq!(plan(&s, sql), vec![want.to_string()], "{sql}");
+    }
+    assert_totals_exact(&s);
+}
+
+/// The per-item writes and reads cost the same VM steps, and no full-scan
+/// step, in a hub of 10 rows, of 7,000 rows over 8 origins and of 7,000
+/// rows over 2,500 origins: a member's commit (2,000 of its rows already
+/// committed in the big hubs), its floor, the forwarder's page past the
+/// last forward row (2,000 member rows after it), a forward commit, a
+/// prune delete, the custody totals read a pass at rest makes, and the
+/// step-1 read of a class with no committed row (5,000 protected forward
+/// rows and 2,000 committed member rows beside it).
+#[test]
+fn per_item_statements_cost_the_same_at_any_size() {
+    type Costs = Vec<(&'static str, (i32, i32))>;
+    let mut seen: Vec<Costs> = Vec::new();
+    for (fwd, origins, member) in [(6, 2, 4), (5_000, 8, 2_000), (5_000, 2_500, 2_000)] {
+        let (_t, mut s) = seeded_hub(fwd, origins, 3, member);
+        let q = accepted(
+            s.custody_put_fwd(&STRANGER, b"m1c forward probe", Fwd::FromCarrier(PROBE))
+                .unwrap(),
+        );
+        let m = accepted(s.custody_put(&PEER, b"m1c member probe").unwrap());
+        let done = accepted(s.custody_put(&PEER2, b"m1c committed probe").unwrap());
+        assert_eq!(s.custody_commit(&PEER2, done).unwrap(), 1);
+        let mut c: Costs = Vec::new();
+        let (page, k) = read_counted(&s, LENS_SQL, rusqlite::params![fwd, 256]);
+        assert_eq!(page, vec![Some(q as i64)]);
+        c.push(("forward page", k));
+        let (floor, k) = read_counted(&s, FLOOR_SQL, [&PEER[..]]);
+        assert_eq!(floor, vec![Some(m as i64)]);
+        c.push(("floor", k));
+        let (n, k) = write_counted(&s, COMMIT_SQL, rusqlite::params![&PEER[..], m as i64]);
+        assert_eq!(n, 1);
+        c.push(("custody_commit", k));
+        let (n, k) = write_counted(&s, FWD_COMMIT_SQL, [q as i64]);
+        assert_eq!(n, 1);
+        c.push(("forward_commit", k));
+        let (n, k) = write_counted(&s, PRUNE_DELETE_SQL, [done as i64]);
+        assert_eq!(n, 1);
+        c.push(("prune delete", k));
+        let (_, k) = read_counted(&s, prune::CUSTODY_TOTAL_SQL, [&[0x01u8][..]]);
+        c.push(("transit total", k));
+        assert_totals_exact(&s);
+        seen.push(c);
+    }
+    for c in &seen {
+        assert!(c.iter().all(|(_, (full, _))| *full == 0), "{c:?}");
+    }
+    assert_eq!(seen[0], seen[1], "10 rows vs 7,000");
+    assert_eq!(seen[1], seen[2], "8 origins vs 2,500");
+
+    // Step 1 for a class with nothing committed reads none of the rows
+    // beside it: the same steps over 4 committed member rows and 6
+    // protected forward rows as over 2,000 and 5,000.
+    let mut step1 = Vec::new();
+    for (fwd, member) in [(6, 4), (5_000, 2_000)] {
+        let (_t, s) = seeded_hub(fwd, 8, 0, member);
+        let (rows, k) = read_counted(&s, prune::EVICTABLE_CUSTODY_SQL, [1, 3]);
+        assert!(rows.is_empty());
+        step1.push(k);
+    }
+    assert_eq!(step1[0], step1[1]);
+    assert_eq!(step1[0].0, 0);
+}
+
+/// §10.4: a pass with nothing over (the 60 s capacity pass of every node
+/// with a fabric, and admission while the store is full or a quota hit
+/// clears) reads no candidate list and writes nothing while the persisted
+/// outcome is unchanged; it writes the outcome when it changes, as every
+/// pass did.
+#[test]
+fn a_pass_at_rest_reads_no_candidate_and_writes_nothing() {
+    for (fwd, member) in [(6, 4), (5_000, 2_000)] {
+        let (_t, mut s) = seeded_hub(fwd, 8, 3, member);
+        // A committed row no list can hold (an age below zero is a corrupt
+        // row): only a pass that reads step 1 meets it.
+        s.conn
+            .execute(
+                "INSERT INTO custody (dest, pkt_ref, bytes, committed, local_seq)
+                 VALUES (?1, ?2, x'00', 1, -1)",
+                rusqlite::params![&PEER2[..], &[0x99u8; 16][..]],
+            )
+            .unwrap();
+        // The first pass writes the outcome a fresh store has never had.
+        let first = s.prune(DiskSpace::UNKNOWN).unwrap();
+        assert!(!first.triggered && first.pruned.is_empty() && !first.store_full);
+        let changes = s.conn.total_changes();
+        let reps = 20u32;
+        let t0 = std::time::Instant::now();
+        for _ in 0..reps {
+            let r = s.prune(DiskSpace::UNKNOWN).unwrap();
+            assert_eq!(
+                r,
+                PruneReport {
+                    triggered: false,
+                    live_before: r.live_before,
+                    live_after: r.live_before,
+                    pruned: Vec::new(),
+                    store_full: false,
+                    export_offer_needed: false,
+                    full_classes: Vec::new(),
+                }
+            );
+        }
+        let per_pass = t0.elapsed() / reps;
+        assert_eq!(
+            s.conn.total_changes(),
+            changes,
+            "a pass at rest writes nothing"
+        );
+        eprintln!(
+            "a pass at rest over {} rows: {per_pass:?} per pass (debug build)",
+            fwd + member + 1
+        );
+        // New disk figures change the outcome: written, as before.
+        let disk = DiskSpace {
+            free: 1 << 40,
+            total: 1 << 41,
+        };
+        assert!(s.prune(disk).unwrap().pruned.is_empty());
+        assert!(s.conn.total_changes() > changes);
+        assert_eq!(
+            get_u64(&s.conn, "capacity.disk_free").unwrap(),
+            Some(1 << 40)
+        );
+        // A store_full left by the last pass is cleared by a pass at rest,
+        // in memory and on disk.
+        let r = s
+            .prune_with(DiskSpace::UNKNOWN, Watermarks { high: 0, low: 0 })
+            .unwrap_err();
+        assert!(matches!(r, StoreError::Corrupt("custody.local_seq")), "{r}");
+        s.conn
+            .execute("DELETE FROM custody WHERE local_seq = -1", [])
+            .unwrap();
+        s.set_quota(Class::Transit, Some(1 << 40)).unwrap();
+        let full = s
+            .prune_with(DiskSpace::UNKNOWN, Watermarks { high: 0, low: 0 })
+            .unwrap();
+        assert!(full.store_full && s.store_full());
+        let r = s.prune(DiskSpace::UNKNOWN).unwrap();
+        assert!(!r.store_full && !s.store_full() && r.pruned.is_empty());
+        assert_eq!(get_i64(&s.conn, "capacity.store_full").unwrap(), Some(0));
+        assert_totals_exact(&s);
+    }
+}
+
+/// The v5 objects present in `sqlite_master`, by name.
+fn v5_objects(s: &Store) -> Vec<String> {
+    let mut st = s
+        .conn
+        .prepare(
+            "SELECT name FROM sqlite_master WHERE name LIKE 'custody_totals%'
+             OR name IN ('custody_open_by_dest', 'custody_forward_open', 'custody_committed',
+                         'custody_forward_open_by_dest')
+             ORDER BY name",
+        )
+        .unwrap();
+    st.query_map([], |r| r.get(0))
+        .unwrap()
+        .map(|r| r.unwrap())
+        .collect()
+}
+
+#[test]
+fn open_heals_a_missing_v5_trigger_index_or_table() {
+    let all = [
+        "custody_committed",
+        "custody_forward_open",
+        "custody_forward_open_by_dest",
+        "custody_open_by_dest",
+        "custody_totals",
+        "custody_totals_delete",
+        "custody_totals_insert",
+        "custody_totals_update",
+    ];
+    let (t, mut s) = ready();
+    assert_eq!(v5_objects(&s), all);
+    accepted(s.custody_put(&PEER, &[1; 100]).unwrap());
+    accepted(
+        s.custody_put_fwd(&STRANGER, &[2; 100], Fwd::FromMember(PEER))
+            .unwrap(),
+    );
+    // A whole store: one read of sqlite_master and one of the fixed
+    // totals keys, no write.
+    let changes = s.conn.total_changes();
+    schema::heal(&s.conn).unwrap();
+    assert_eq!(s.conn.total_changes(), changes);
+
+    // A lost insert trigger: rows written without it leave the totals
+    // behind (Transit still reads one row).
+    s.conn
+        .execute_batch("DROP TRIGGER custody_totals_insert;")
+        .unwrap();
+    let q = accepted(
+        s.custody_put_fwd(&STRANGER, &[3; 200], Fwd::FromLeaf(LEAF))
+            .unwrap(),
+    );
+    accepted(s.custody_put(&PEER2, &[4; 300]).unwrap());
+    assert_eq!(s.class_bytes(Class::Transit).unwrap(), fwd_bytes(100));
+    s.close(1).unwrap();
+    // The open puts it back and rebuilds the totals from the rows.
+    let (mut s, _) = open(t.path(), 1);
+    assert_eq!(v5_objects(&s), all);
+    assert_totals_exact(&s);
+    accepted(s.custody_put(&PEER, &[5; 10]).unwrap());
+    assert!(s.forward_commit(q).unwrap());
+    assert_totals_exact(&s);
+
+    // Lost indexes: the open re-creates them and the reads use them again.
+    s.conn
+        .execute_batch("DROP INDEX custody_committed; DROP INDEX custody_open_by_dest;")
+        .unwrap();
+    assert_ne!(
+        plan(&s, FLOOR_SQL),
+        vec!["SEARCH custody USING COVERING INDEX custody_open_by_dest (dest=?)".to_string()]
+    );
+    s.close(1).unwrap();
+    let (mut s, _) = open(t.path(), 1);
+    assert_eq!(v5_objects(&s), all);
+    assert_eq!(
+        plan(&s, FLOOR_SQL),
+        vec!["SEARCH custody USING COVERING INDEX custody_open_by_dest (dest=?)".to_string()]
+    );
+    assert_totals_exact(&s);
+
+    // A lost totals table: every custody write fails (fail closed) until
+    // the open re-creates it and counts the rows again.
+    s.conn.execute_batch("DROP TABLE custody_totals;").unwrap();
+    assert!(s.custody_put(&PEER, &[6; 10]).is_err());
+    s.close(1).unwrap();
+    let (mut s, _) = open(t.path(), 1);
+    assert_eq!(v5_objects(&s), all);
+    assert_totals_exact(&s);
+    accepted(s.custody_put(&PEER, &[6; 10]).unwrap());
+    assert_totals_exact(&s);
+    s.close(1).unwrap();
+}
+
+/// M1c question (Layer 7 §5.1-§5.2; L5 §7.3, §9): a forward row is held
+/// only for a `dest` that is not a member then, but that `dest` may enroll
+/// here later. Its mailbox serves every row of its `dest`: the `ENROLL_OK`
+/// floor counts the forward row (so its cursor starts below it) and
+/// `MAILBOX_FETCH` (`custody_fetch`, the fabric's push) streams it. The
+/// member is given the row, so its `MAILBOX_COMMIT` committing it is right
+/// (the item reached its dest) and the row leaves the forwarder's pages;
+/// a commit below it commits nothing.
+#[test]
+fn a_dest_that_enrolls_later_is_given_its_forward_rows_and_commits_them() {
+    let (_t, mut s) = ready();
+    accepted(s.custody_put(&PEER, b"another member's item").unwrap());
+    let q = accepted(
+        s.custody_put_fwd(&STRANGER, b"held for forwarding", Fwd::FromMember(PEER))
+            .unwrap(),
+    );
+    let floor = s.custody_floor(&STRANGER).unwrap();
+    assert_eq!(floor, q - 1);
+    assert_eq!(
+        s.custody_fetch(&STRANGER, floor, 10).unwrap(),
+        vec![CustodyItem {
+            custody_seq: q,
+            dest: STRANGER,
+            bytes: b"held for forwarding".to_vec(),
+            committed: false,
+        }]
+    );
+    assert_eq!(s.custody_commit(&STRANGER, floor).unwrap(), 0);
+    assert_eq!(s.forward_pending(0, 10).unwrap().len(), 1);
+    assert_eq!(s.custody_commit(&STRANGER, q).unwrap(), 1);
+    assert!(s.forward_item(q).unwrap().unwrap().committed);
+    assert!(s.forward_pending(0, 10).unwrap().is_empty());
+    assert!(s.forward_pending_lens(0, 10).unwrap().is_empty());
+    assert_eq!(s.forward_stats().unwrap(), (0, 0));
+    assert_eq!(s.forward_origin_bytes(&PEER).unwrap(), 0);
+    assert_eq!(
+        s.custody_floor(&STRANGER).unwrap(),
+        s.custody_high().unwrap()
+    );
+    assert!(!s.custody_fetch(&PEER, 0, 10).unwrap()[0].committed);
+    assert_totals_exact(&s);
+}
+
+/// A small deterministic generator (xorshift64*): a failing seed replays.
+struct Rng(u64);
+
+impl Rng {
+    fn new(seed: u64) -> Self {
+        Rng(seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1)
+    }
+    fn next(&mut self) -> u64 {
+        let mut x = self.0;
+        x ^= x >> 12;
+        x ^= x << 25;
+        x ^= x >> 27;
+        self.0 = x;
+        x.wrapping_mul(0x2545_F491_4F6C_DD1D)
+    }
+    fn below(&mut self, n: u64) -> u64 {
+        self.next() % n
+    }
+    fn chance(&mut self, pct: u64) -> bool {
+        self.below(100) < pct
+    }
+    fn pick<T: Copy>(&mut self, v: &[T]) -> T {
+        v[self.below(v.len() as u64) as usize]
+    }
+}
+
+/// A store holding every kind of §10.4 item — member and forward custody
+/// open and committed, re-fetchable and superseded blobs (pinned or not),
+/// own and inbound history, transit messages, foreign inbound rows and
+/// relay copies queued and handed — with sizes, ages and classes drawn
+/// from `seed`: the same seed builds the same store, row for row.
+fn random_store(seed: u64) -> (tempfile::TempDir, Store) {
+    let (t, mut s) = ready();
+    let mut r = Rng::new(seed);
+    let classes = [
+        Class::Human,
+        Class::Kb,
+        Class::Update,
+        Class::Object,
+        Class::Custody,
+        Class::Transit,
+        Class::Foreign,
+    ];
+    let a = fconv(&mut s, "meshtastic", ForeignKind::Channel, "ch:a:1");
+    let b = fconv(&mut s, "meshtastic", ForeignKind::Channel, "ch:b:1");
+    let p = fconv(&mut s, "meshtastic", ForeignKind::Channel, "ch:p:1");
+    s.foreign_conversation_set_pinned(p, true).unwrap();
+    let edge = mk_edge(&mut s, a, b);
+    let mut n = 0u32;
+    let mut item = |len: u64| -> Vec<u8> {
+        n += 1;
+        let mut v = n.to_le_bytes().to_vec();
+        v.resize(4 + len as usize, n as u8);
+        v
+    };
+    let mut seq = 0u64;
+    for _ in 0..(30 + r.below(50)) {
+        match r.below(11) {
+            0 | 1 => {
+                let dest = r.pick(&[PEER, PEER2]);
+                let q = accepted(s.custody_put(&dest, &item(r.below(3000))).unwrap());
+                if r.chance(60) {
+                    s.custody_commit(&dest, q).unwrap();
+                }
+            }
+            2 | 3 => {
+                let fwd = match r.below(3) {
+                    0 => Fwd::FromMember(PEER),
+                    1 => Fwd::FromLeaf(LEAF),
+                    _ => Fwd::FromCarrier(CARRIER),
+                };
+                let q = accepted(
+                    s.custody_put_fwd(&STRANGER, &item(r.below(3000)), fwd)
+                        .unwrap(),
+                );
+                if r.chance(50) {
+                    s.forward_commit(q).unwrap();
+                }
+            }
+            4 | 5 => {
+                let h = s
+                    .blob_put_public(&item(r.below(6000)), r.pick(&classes), r.chance(60))
+                    .unwrap();
+                if r.chance(40) {
+                    s.blob_mark_superseded(&h).unwrap();
+                }
+                if r.chance(15) {
+                    s.blob_set_pinned(&h, true).unwrap();
+                }
+            }
+            6 => {
+                let body = item(r.below(800));
+                let m = NewMessage {
+                    class: r.pick(&classes),
+                    ..own(PEER, 0, &body)
+                };
+                let (id, _) = s.queue_own_message(&m).unwrap();
+                if r.chance(80) {
+                    s.set_message_state(id, MsgState::Delivered, None).unwrap();
+                }
+                if r.chance(10) {
+                    s.set_message_pinned(id, true).unwrap();
+                }
+            }
+            7 => {
+                seq += 1;
+                let body = item(r.below(800));
+                let m = NewMessage {
+                    sender: PEER2,
+                    class: r.pick(&classes),
+                    ..own(PEER, 0, &body)
+                };
+                let state = if r.chance(70) {
+                    MsgState::Delivered
+                } else {
+                    MsgState::Sent
+                };
+                s.with_tx(Durability::Normal, |tx| {
+                    rows::insert_message(tx, &m, Seq { epoch: 1, n: seq }, Dir::Transit, state)
+                })
+                .unwrap();
+            }
+            8 | 9 => {
+                let conv = if r.chance(80) { a } else { p };
+                let body = "x".repeat(1 + r.below(900) as usize);
+                let id = ingest1(&mut s, fin(conv, "!a1", None, &body, false));
+                if conv == a && r.chance(60) {
+                    let text = "c".repeat(1 + r.below(300) as usize);
+                    let c = s
+                        .foreign_queue_send(&copy_send(edge, id, b, &text, 1, 1))
+                        .unwrap();
+                    if r.chance(40) {
+                        s.foreign_set_state(c, ForeignState::Sent, None, None)
+                            .unwrap();
+                    }
+                }
+            }
+            _ => {
+                seq += 1;
+                let body = item(r.below(800));
+                s.receive_message(&inbound(PEER2, &body), Seq { epoch: 4, n: seq })
+                    .unwrap();
+            }
+        }
+    }
+    // Two committed member rows of equal weight (size × age) and different
+    // ages at the passes' `now` (a pass adds no item, so every pass of the
+    // draw sees the tie): only the comparator's `local_seq` tie-break
+    // orders them, and both are large, so a pass that prunes takes them
+    // early (M4g: the oracle's order is checked, not only its weights).
+    let now = s.local_seq().unwrap();
+    let base = 2_000 + r.below(2_000);
+    for (age, len) in [(2u64, 2 * base + prune::ROW_OVERHEAD), (4, base)] {
+        let mut v = vec![0xEE; len as usize];
+        v[..8].copy_from_slice(&age.to_le_bytes());
+        s.conn
+            .execute(
+                "INSERT INTO custody (dest, pkt_ref, bytes, committed, local_seq)
+                 VALUES (?1, ?2, ?3, 1, ?4)",
+                rusqlite::params![
+                    &PEER[..],
+                    &crate::custody::pkt_ref(&v)[..],
+                    &v,
+                    i64::try_from(now + 1 - age).unwrap()
+                ],
+            )
+            .unwrap();
+    }
+    if r.chance(50) {
+        s.set_export_offered(true).unwrap();
+    }
+    (t, s)
+}
+
+/// What a pass may change, as text: the custody rows and their commit
+/// marks, the blobs and their presence, the message, foreign and copy ids,
+/// the edges' shed counts and marks, the unread counts and the persisted
+/// capacity outcome.
+fn prune_state(s: &Store) -> Vec<String> {
+    [
+        "SELECT group_concat(custody_seq || ':' || committed, ',')
+         FROM (SELECT * FROM custody ORDER BY custody_seq)",
+        "SELECT group_concat(hex(hash) || ':' || present, ',') FROM (SELECT * FROM blobs ORDER BY hash)",
+        "SELECT group_concat(id, ',') FROM (SELECT id FROM messages ORDER BY id)",
+        "SELECT group_concat(id || ':' || state, ',') FROM (SELECT * FROM foreign_messages ORDER BY id)",
+        "SELECT group_concat(id || ':' || shed || ':' || relayed_seq, ',')
+         FROM (SELECT * FROM relay_edges ORDER BY id)",
+        "SELECT group_concat(id || ':' || unread, ',') FROM (SELECT * FROM foreign_conversations ORDER BY id)",
+        "SELECT group_concat(key || '=' || quote(value), ',')
+         FROM (SELECT * FROM settings WHERE key LIKE 'capacity.%' ORDER BY key)",
+    ]
+    .iter()
+    .map(|sql| {
+        s.conn
+            .query_row(sql, [], |r| r.get::<_, Option<String>>(0))
+            .unwrap()
+            .unwrap_or_default()
+    })
+    .collect()
+}
+
+/// §10.4, M1c: the pass with its at-rest path and its lazy, class-filtered,
+/// bounded step lists removes the same items in the same order, reports
+/// the same flags and persists the same outcome as the pass that read
+/// every list up front ([`Store::prune_eager`], the pre-M1c code) — over
+/// random stores and random quotas, watermarks, disk figures and incoming
+/// items, four passes in a row on each pair of identical stores.
+#[test]
+fn the_lazy_pass_equals_the_eager_pass_on_random_stores() {
+    let quota_classes = [
+        Class::Custody,
+        Class::Transit,
+        Class::Kb,
+        Class::Update,
+        Class::Object,
+        Class::Foreign,
+    ];
+    let refusable: Vec<Class> = Class::ALL
+        .into_iter()
+        .filter(|c| c.is_refusable())
+        .collect();
+    let (mut at_rest, mut pruning, mut taken) = (0, 0, 0);
+    for seed in 0..40u64 {
+        let (_ta, mut a) = random_store(seed);
+        let (_tb, mut b) = random_store(seed);
+        assert_eq!(
+            prune_state(&a),
+            prune_state(&b),
+            "seed {seed}: the same store"
+        );
+        let mut r = Rng::new(seed ^ 0xA5A5);
+        for pass in 0..4 {
+            for c in quota_classes {
+                let q = if r.chance(35) {
+                    Some(a.class_bytes(c).unwrap() * r.below(130) / 100)
+                } else {
+                    None
+                };
+                a.set_quota(c, q).unwrap();
+                b.set_quota(c, q).unwrap();
+            }
+            let live = a.live_bytes().unwrap();
+            let w = if r.chance(30) {
+                Watermarks::with_high(live * 4)
+            } else {
+                let high = live * (40 + r.below(80)) / 100;
+                Watermarks {
+                    high,
+                    low: high - high * r.below(40) / 100,
+                }
+            };
+            let disk = match r.below(10) {
+                0 => DiskSpace {
+                    free: r.below(9_000),
+                    total: 1_000_000,
+                },
+                1 => DiskSpace {
+                    free: 1 << 30,
+                    total: 1 << 31,
+                },
+                _ => DiskSpace::UNKNOWN,
+            };
+            let extra = match r.below(5) {
+                0 | 1 => None,
+                2 | 3 => Some((Some(r.pick(&refusable)), 1 + r.below(20_000))),
+                _ => Some((None, 1 + r.below(20_000))),
+            };
+            let lazy = a.prune_inner(disk, w, extra).unwrap();
+            let eager = b.prune_eager(disk, w, extra).unwrap();
+            assert_eq!(lazy, eager, "seed {seed}, pass {pass}");
+            assert_eq!(prune_state(&a), prune_state(&b), "seed {seed}, pass {pass}");
+            assert_eq!(
+                (a.store_full(), a.full_classes()),
+                (b.store_full(), b.full_classes())
+            );
+            assert_totals_exact(&a);
+            if lazy.0.pruned.is_empty() && !lazy.0.triggered && lazy.0.full_classes.is_empty() {
+                at_rest += 1;
+            } else {
+                pruning += 1;
+            }
+            taken += lazy.0.pruned.len();
+        }
+    }
+    // The draw covers both paths and real pruning.
+    assert!(
+        at_rest > 10 && pruning > 40 && taken > 200,
+        "{at_rest} {pruning} {taken}"
+    );
 }
 
 #[test]
@@ -3832,4 +5252,334 @@ fn no_pairing_writes_exactly_the_member_row() {
         )]
     );
     assert!(r.full_classes.is_empty());
+}
+
+/// Layer 7 §5.5 (M4e): whether a protected forward row of a dest waits
+/// above the paging floor outside the forwarder's window. Member rows of
+/// the same dest and committed rows never count; `above` is exclusive; the
+/// answer is "more than `resident`"; the read searches the v5 partial
+/// index `custody_forward_open_by_dest` (M4g) and never scans the table.
+#[test]
+fn forward_waits_for_dest_counts_protected_rows_of_that_dest_only() {
+    let (_t, mut s) = ready();
+    let put = |s: &mut Store, dest: &[u8; 32], tag: u8, fwd: Fwd| {
+        accepted(s.custody_put_fwd(dest, &[tag; 64], fwd).unwrap())
+    };
+    let m1 = put(&mut s, &STRANGER, 1, Fwd::Member);
+    let f1 = put(&mut s, &STRANGER, 2, Fwd::FromMember(PEER));
+    let other = put(&mut s, &PEER2, 3, Fwd::FromLeaf(LEAF));
+    let f2 = put(&mut s, &STRANGER, 4, Fwd::FromCarrier(CARRIER));
+    let c1 = put(&mut s, &STRANGER, 5, Fwd::FromMember(PEER));
+    let m2 = put(&mut s, &STRANGER, 6, Fwd::Member);
+    assert!(s.forward_commit(c1).unwrap());
+    assert!(m1 < f1 && f1 < other && other < f2 && f2 < c1 && c1 < m2);
+    let waits = |s: &Store, dest: &[u8; 32], above: u64, resident: usize| {
+        s.forward_waits_for_dest(dest, above, resident).unwrap()
+    };
+    // STRANGER: two protected forward rows (f1, f2); its member rows and
+    // the committed c1 never count.
+    assert!(waits(&s, &STRANGER, 0, 0));
+    assert!(waits(&s, &STRANGER, 0, 1), "two rows, one resident");
+    assert!(!waits(&s, &STRANGER, 0, 2), "both resident");
+    assert!(!waits(&s, &STRANGER, 0, 5), "n resident, fewer stored");
+    assert!(waits(&s, &STRANGER, f1 - 1, 1), "f1 is above f1 - 1");
+    assert!(!waits(&s, &STRANGER, f1, 1), "above is exclusive: f2 only");
+    assert!(waits(&s, &STRANGER, f1, 0));
+    assert!(!waits(&s, &STRANGER, f2, 0), "only c1 and m2 above f2");
+    assert!(!waits(&s, &STRANGER, c1, 0));
+    // The other dest: its own row only.
+    assert!(waits(&s, &PEER2, 0, 0));
+    assert!(!waits(&s, &PEER2, 0, 1));
+    assert!(!waits(&s, &PEER2, other, 0));
+    assert!(!waits(&s, &PEER, 0, 0), "a dest with no row");
+    // Committing f2 leaves f1 alone above the floor.
+    assert!(s.forward_commit(f2).unwrap());
+    assert!(waits(&s, &STRANGER, 0, 0));
+    assert!(!waits(&s, &STRANGER, 0, 1));
+    // The same statement's plan: a search of the covering partial index
+    // `custody_forward_open_by_dest` (v5, a dest's protected forward rows
+    // only) on the dest and the floor, no table scan.
+    let plan: Vec<String> = {
+        let mut st = s
+            .conn
+            .prepare(&format!("EXPLAIN QUERY PLAN {}", rows::FORWARD_WAITS_SQL))
+            .unwrap();
+        let rows = st
+            .query_map(rusqlite::params![&STRANGER[..], 0i64, 1i64], |r| {
+                r.get::<_, String>(3)
+            })
+            .unwrap();
+        rows.map(|r| r.unwrap()).collect()
+    };
+    assert_eq!(
+        plan,
+        vec![
+            "SEARCH custody USING COVERING INDEX custody_forward_open_by_dest (dest=? AND custody_seq>?)"
+                .to_string()
+        ]
+    );
+    assert!(plan.iter().all(|d| !d.contains("SCAN")), "{plan:?}");
+}
+
+// ---------------------------------------------------------------------------
+// Layer 7 §5.5 (M4g): the probe-restart read bounded in the rows it visits;
+// the M1c review's lows (heal, the fixed totals keys)
+// ---------------------------------------------------------------------------
+
+/// A hub's `custody` for the M4g read: for STRANGER, `k` uncommitted member
+/// rows (a dest that is, or was, a member here), then `k` committed forward
+/// rows (handed over, waiting for a capacity prune), then `r` protected
+/// forward rows; and `k` rows of PEER2 beside them. Every row lies above
+/// the floor 0, the protected ones last, so a walk of a wider index must
+/// pass every other row of the dest before it reaches them.
+fn dest_with_history(k: u32, r: u32) -> (tempfile::TempDir, Store) {
+    let (t, mut s) = ready();
+    s.with_tx(Durability::Normal, |tx| {
+        let mut st = tx.prepare(
+            "INSERT INTO custody (dest, pkt_ref, bytes, committed, local_seq, fwd, fwd_from)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+        )?;
+        let mut n = 0u32;
+        let mut put = |dest: &[u8; 32], committed: bool, fwd: bool| {
+            n += 1;
+            let mut item = n.to_le_bytes().to_vec();
+            item.extend_from_slice(&[n as u8; 60]);
+            st.execute(rusqlite::params![
+                &dest[..],
+                &crate::custody::pkt_ref(&item)[..],
+                &item,
+                committed,
+                i64::from(n),
+                i64::from(fwd),
+                fwd.then_some(&PROBE[..])
+            ])
+            .map(|_| ())
+        };
+        for _ in 0..k {
+            put(&STRANGER, false, false)?;
+        }
+        for _ in 0..k {
+            put(&STRANGER, true, true)?;
+        }
+        for _ in 0..k {
+            put(&PEER2, false, true)?;
+        }
+        for _ in 0..r {
+            put(&STRANGER, false, true)?;
+        }
+        set_u64(tx, K_LOCAL_SEQ, u64::from(3 * k + r))
+    })
+    .unwrap();
+    (t, s)
+}
+
+/// M4g (F1; Layer 7 §5.5; the Pi floor): [`Store::forward_waits_for_dest`]
+/// is bounded in the rows it visits, not only in the rows it returns. One
+/// dest with `R` protected forward rows (as many as the window holds of it)
+/// and, above the floor beside them, `K` committed forward rows and `K`
+/// uncommitted member rows of the same dest: the statement's VM steps are
+/// the same for `K = 10` and `K = 2,000`, with no full-scan step, and its
+/// plan is a search of the covering partial index. The same statement
+/// forced through the wider indexes (`custody_by_dest`, the read before
+/// M1c; `custody_open_by_dest`, the read before M4g) costs steps that grow
+/// with `K`: the check has teeth.
+#[test]
+fn forward_waits_for_dest_visits_the_window_whatever_the_dests_history() {
+    const R: u32 = 40;
+    let wider = |index: &str| {
+        WAITS_SQL.replace(
+            "FROM custody\n",
+            &format!("FROM custody INDEXED BY {index}\n"),
+        )
+    };
+    let mut steps = Vec::new();
+    for k in [10u32, 2_000] {
+        let (_t, s) = dest_with_history(k, R);
+        assert_eq!(
+            plan(&s, WAITS_SQL),
+            vec![
+                "SEARCH custody USING COVERING INDEX custody_forward_open_by_dest (dest=? AND custody_seq>?)"
+                    .to_string()
+            ]
+        );
+        // The answer: R rows wait above the floor, so "more than R - 1
+        // resident" and not "more than R".
+        assert!(s
+            .forward_waits_for_dest(&STRANGER, 0, R as usize - 1)
+            .unwrap());
+        assert!(!s.forward_waits_for_dest(&STRANGER, 0, R as usize).unwrap());
+        // The read `forward_waits_for_dest(dest, 0, R)` makes: LIMIT R + 1.
+        let run = |sql: &str| {
+            let (rows, k) = read_counted(&s, sql, rusqlite::params![&STRANGER[..], 0, R + 1]);
+            assert_eq!(rows.len(), R as usize, "{sql}");
+            k
+        };
+        let ours = run(WAITS_SQL);
+        let by_dest = run(&wider("custody_by_dest"));
+        let open = run(&wider("custody_open_by_dest"));
+        eprintln!(
+            "M4g: K = {k}: forward_waits_for_dest {ours:?} (full-scan, VM steps); \
+             through custody_by_dest {by_dest:?}; through custody_open_by_dest {open:?}"
+        );
+        steps.push((ours, by_dest, open));
+    }
+    let ((small, by_dest_small, open_small), (big, by_dest_big, open_big)) = (steps[0], steps[1]);
+    assert_eq!(small.0, 0, "no full-scan step");
+    assert_eq!(big.0, 0, "no full-scan step");
+    assert_eq!(small, big, "the steps do not grow with K (10 vs 2,000)");
+    // Teeth: the wider indexes step over the dest's other rows.
+    assert!(
+        by_dest_big.1 > by_dest_small.1 + 2 * 1_990,
+        "{by_dest_small:?} {by_dest_big:?}"
+    );
+    assert!(
+        open_big.1 > open_small.1 + 1_990,
+        "{open_small:?} {open_big:?}"
+    );
+}
+
+/// M4g (the M1c review, S2): a missing index changes no fact, so a failed
+/// re-create at open is counted, never fatal (on a nearly full disk
+/// `SQLITE_FULL` would otherwise stop the fabric from starting exactly
+/// when the store is under pressure): the statement rolls back alone and
+/// the reads run on the wider index. A missing trigger or totals table
+/// guards correctness: a failed re-create stays fatal.
+#[test]
+fn a_failed_index_heal_is_counted_and_a_failed_totals_heal_is_fatal() {
+    let (t, mut s) = ready();
+    accepted(s.custody_put(&PEER, &[1; 100]).unwrap());
+    let q = accepted(
+        s.custody_put_fwd(&STRANGER, &[2; 100], Fwd::FromMember(PEER))
+            .unwrap(),
+    );
+    assert_eq!(s.heal_failed, 0);
+    let ours = vec![
+        "SEARCH custody USING COVERING INDEX custody_forward_open_by_dest (dest=? AND custody_seq>?)"
+            .to_string(),
+    ];
+    assert_eq!(plan(&s, WAITS_SQL), ours);
+
+    // A full disk: the index's first page cannot be written (its old
+    // pages leave the freelist first, so none can be reused).
+    s.conn
+        .execute_batch("DROP INDEX custody_forward_open_by_dest; PRAGMA incremental_vacuum;")
+        .unwrap();
+    let pages: i64 = s
+        .conn
+        .query_row("PRAGMA page_count", [], |r| r.get(0))
+        .unwrap();
+    let cap: i64 = s
+        .conn
+        .query_row(&format!("PRAGMA max_page_count = {pages}"), [], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    assert_eq!(cap, pages);
+    assert!(s
+        .conn
+        .execute_batch("CREATE INDEX probe_full ON custody (local_seq);")
+        .is_err_and(|e| e.sqlite_error_code() == Some(rusqlite::ErrorCode::DiskFull)));
+    assert_eq!(schema::heal(&s.conn).unwrap(), 1, "counted, not fatal");
+    assert!(s.conn.is_autocommit(), "nothing left open");
+    assert!(!v5_objects(&s).contains(&"custody_forward_open_by_dest".to_string()));
+    // The read runs on the wider index meanwhile, with the same answer.
+    assert_eq!(
+        plan(&s, WAITS_SQL),
+        vec![
+            "SEARCH custody USING INDEX custody_open_by_dest (dest=? AND custody_seq>?)"
+                .to_string()
+        ]
+    );
+    assert!(s.forward_waits_for_dest(&STRANGER, 0, 0).unwrap());
+    assert!(!s.forward_waits_for_dest(&STRANGER, 0, 1).unwrap());
+    // Room again: the next heal re-creates it.
+    s.conn
+        .query_row("PRAGMA max_page_count = 1073741823", [], |r| {
+            r.get::<_, i64>(0)
+        })
+        .unwrap();
+    assert_eq!(schema::heal(&s.conn).unwrap(), 0);
+    assert_eq!(plan(&s, WAITS_SQL), ours);
+
+    // Through the open: an index the open cannot re-create (here a table
+    // already holds its name) leaves the open standing and is counted.
+    s.conn
+        .execute_batch(
+            "DROP INDEX custody_forward_open_by_dest;
+             CREATE TABLE custody_forward_open_by_dest (x INTEGER);",
+        )
+        .unwrap();
+    s.close(1).unwrap();
+    let (mut s, _) = open(t.path(), 1);
+    assert_eq!(s.heal_failed, 1, "counted at open");
+    assert!(s.forward_waits_for_dest(&STRANGER, 0, 0).unwrap());
+    assert!(s.forward_commit(q).unwrap());
+    assert!(!s.forward_waits_for_dest(&STRANGER, 0, 0).unwrap());
+    assert_totals_exact(&s);
+    s.conn
+        .execute_batch("DROP TABLE custody_forward_open_by_dest;")
+        .unwrap();
+    s.close(1).unwrap();
+    let (s, _) = open(t.path(), 1);
+    assert_eq!(s.heal_failed, 0);
+    assert_eq!(plan(&s, WAITS_SQL), ours);
+
+    // A trigger or the totals table that cannot be re-created fails the
+    // heal (a read-only connection stands in for any write failure).
+    for drop in [
+        "DROP TRIGGER custody_totals_insert;",
+        "DROP TABLE custody_totals;",
+    ] {
+        s.conn.execute_batch(drop).unwrap();
+        s.conn.execute_batch("PRAGMA query_only = ON;").unwrap();
+        assert!(schema::heal(&s.conn).is_err(), "{drop}: fatal");
+        assert!(s.conn.is_autocommit());
+        s.conn.execute_batch("PRAGMA query_only = OFF;").unwrap();
+        assert_eq!(schema::heal(&s.conn).unwrap(), 0, "{drop}: healed");
+        assert_totals_exact(&s);
+    }
+}
+
+/// M4g (the M1c review, S5): the three fixed totals keys always exist (the
+/// backfill writes them, no trigger deletes them), so a missing one is a
+/// corrupt store, never a silent zero: the gauges and the class totals
+/// that read it fail closed, and the next open re-creates it with the
+/// totals rebuilt from the rows. An origin with no row still reads zero.
+#[test]
+fn a_missing_fixed_totals_key_fails_closed_and_is_healed_at_open() {
+    let (t, mut s) = ready();
+    accepted(s.custody_put(&PEER, &[1; 100]).unwrap());
+    accepted(
+        s.custody_put_fwd(&STRANGER, &[2; 100], Fwd::FromMember(PEER))
+            .unwrap(),
+    );
+    let stats = s.custody_stats().unwrap();
+    let fwd = s.forward_stats().unwrap();
+    assert_eq!(
+        s.forward_origin_bytes(&PROBE).unwrap(),
+        0,
+        "an origin with no row"
+    );
+    let corrupt = |r: Result<u64>| matches!(r, Err(StoreError::Corrupt("custody_totals")));
+    s.conn
+        .execute("DELETE FROM custody_totals WHERE key = x'02'", [])
+        .unwrap();
+    assert!(matches!(
+        s.forward_stats(),
+        Err(StoreError::Corrupt("custody_totals"))
+    ));
+    s.conn
+        .execute("DELETE FROM custody_totals WHERE key IN (x'00', x'01')", [])
+        .unwrap();
+    assert!(matches!(
+        s.custody_stats(),
+        Err(StoreError::Corrupt("custody_totals"))
+    ));
+    assert!(corrupt(s.class_bytes(Class::Custody)));
+    assert!(corrupt(s.class_bytes(Class::Transit)));
+    s.close(1).unwrap();
+    let (s, _) = open(t.path(), 1);
+    assert_eq!(s.custody_stats().unwrap(), stats);
+    assert_eq!(s.forward_stats().unwrap(), fwd);
+    assert_totals_exact(&s);
 }

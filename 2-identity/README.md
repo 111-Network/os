@@ -8,6 +8,12 @@ Status of this document: **spec v2.1 — LOCKED** (v2.1 = v2 + one §3 amendment
 carries a one-line pointer wherever a sentence is superseded (§6.2–§6.5, §8.4, §10, §13). A5 is asked later (§15). A12
 (2026-10-19, from the Layer 5 integrated review) is recorded the same way, with a §6.5 pointer.
 
+**Layer 7 amendments (D30-D32, locked 2026-11-02; recorded 2026-11-11):** A13-A18 are recorded additively in §13.2; the locked text is
+unchanged and carries a one-line pointer wherever a sentence is superseded (§6.2, §6.7, §9, §10, §13). They reserve `transport_id` `0x04`,
+register three domain tags, fix the mesh-epoch unit and source (closing §13's hand-off), pin the attestation carriage rule, name `appdata`
+bits 3-5, and record the carrier-topic derivation behind the identity handle (built in node111, Layer 7 task M5). `id111` gains no code and
+v1 builds nothing for the epoch.
+
 The keywords **MUST / MUST NOT / SHOULD / MAY** are normative (RFC 2119).
 
 ## 1. Scope & non-goals
@@ -101,6 +107,8 @@ Base 137B, max 169B — the lean ~100–170B class (MeshCore advert ≈ 100B; Re
 
 > **Amended by Layer 5 (A6, A8; §13.1):** "stale ⇒ drop" does not apply to an announce with identical key material (accepted
 > with no state change); the `appdata` v1 layout is pinned in §13.1.
+>
+> **Amended by Layer 7 (A17; §13.2):** `appdata` role bits 3-5 are named there ("Layer 7 appends", node111 only).
 
 ### 6.3 Key distribution — TOFU + immutable key material, bounded store
 
@@ -151,6 +159,8 @@ When both peers are online, links **SHOULD** upgrade to **Noise IK** (2 messages
 ### 6.7 Envelope identity hooks (contracted to Layer 5)
 
 The envelope reserves, and this spec owns the semantics of: **`signer_pubkey`** (32B; equals NodeId when the root signs) · a **versioned optional delegation-proof trailer** (§9; **v1-conformant verifiers MUST reject any envelope with a non-empty trailer** — the cert branch activates at the delegation milestone, and an undefined mesh-epoch source means expiry is never evaluated in v1) · **reserved ratchet-field space** (v1: absent; size pinned by L5 at envelope lock, §15). The trailer's empty encoding is **absent-field**, not zero-length. Everything else in the envelope is Layer 5's; the per-peer counter/window **state machine** is this layer's, its **serialization placement** in the envelope is L5's. Envelope-version and crypto-mode changes require identity-layer sign-off (§6.4).
+
+> **Amended by Layer 7 (A15; §13.2):** the mesh-epoch source is now defined there; v1 still builds none and never evaluates expiry.
 
 ## 7. Encodings & display
 
@@ -223,6 +233,9 @@ Two timings, by category (panel seams#4/complete#18 — the gate never blocks no
 - Cat 1 relays **MAY** ignore the trailer entirely — they only check node signatures.
 - Recorded for Layer 3: the **signer-daemon** pattern (v1 custody: the agent holds **zero** key material and requests signatures from the identity holder — the NIP-46-at-MCP precedent; post-activation the agent holds **only** its own attenuated key, never root or seed material) with a **default-deny policy engine**: durable per-scope grants, an activity log, background signing only after durable approval (Amber/NIP-55 model; approval-fatigue trade-off documented).
 
+> **Amended by Layer 7 (A15; §13.2):** the mesh-epoch unit (a day of the issuer's powered-on time) and its source are fixed there, closing
+> the hand-off named in §13; v1 still never evaluates expiry (§6.7).
+
 ## 10. Transport attestation (F1)
 
 Node identity is transport-independent. Any global-transport credential (a nostr npub or a future transport's key) is a **separate per-node key** bound to the node by **bidirectional cross-signed attestation** (Keybase-proof / Matrix cross-signing pattern; precedented inside nostr by NIP-46's client-key/user-key split).
@@ -237,6 +250,8 @@ Node identity is transport-independent. Any global-transport credential (a nostr
 
 > **Amended by Layer 5 (A10; §13.1):** `transport_id` gains entries for bridge identities; a 64 B Reticulum key binds by hash;
 > link keys are never seed-derived.
+>
+> **Amended by Layer 7 (A13, A16; §13.2):** `transport_id` `0x04` is reserved; the attestation's carriage rule is pinned there.
 
 ## 11. Audit & the proven path (G1)
 
@@ -301,6 +316,9 @@ Plus two written residuals outside the table: **recipient-side harvest-now-decry
 - **Layers 6/7 (Transport / Relay & Presence) — open questions handed over, not decided here:** Cat-1 relay announce-verification policy (verify-before-relay vs relay-blind; Ed25519 verify is Cat-1-feasible) · announce-as-routing vs announce-as-identity-only (the biggest cross-layer question the wire shape forces) · announce rate-limit policy (Reticulum caps ~2% interface bandwidth — announce flooding is the registry-free tax) · attestation gossip and gateway publication (§10) · the **mesh-epoch source** that §9/§10 expiries count in (v1 fail-mode pinned in §6.7: undefined ⇒ not evaluated, non-empty trailers rejected). `appdata` is 0–32B and versioned — the stated escape if L6/7's routing data outgrows it; transport-mutable data (hop counts) rides outside L2's signed blob. Safe to defer: v1 emits no announces at all (Layer 1's transport child has independent identity), so these gate L6/7's start, not v1's deployment. *[Superseded in part by Layer 5 A6, §13.1: v1 emits announces on demand — in a card, on link-up, inside an INTRO — and none unsolicited or periodic.]*
 - **Layer 0 (Knowledge):** receives the §16 entries at build.
 - **Cross-layer connection check:** the 20-item checklist this spec must be re-verified against when sibling layers land lives in `os/plan/layers/2-identity/review/triage.md`.
+
+> **Amended by Layer 7 (A15; §13.2):** the mesh-epoch source handed over in the "Layers 6/7" bullet above is decided there; the hand-off
+> is closed.
 
 ### 13.1 Layer 5 amendments (D20, 2026-10-14)
 
@@ -414,6 +432,65 @@ rejection, for kinds without `msg_seq`) and the send-side jump are unchanged. **
 replayed after the crash, can attribute a socket for pushes of sealed items it cannot read and for card answers — the same
 bounded residual §6.5 already hands to Layer 5 idempotency (A11). Test: `counters::tests::a12_unclean_open_keeps_a_live_peer_fresh`,
 with the `a12_*` set beside it (floor bound, clean open, batch commits, restart, small jump, `on_receive` bookkeeping).
+
+### 13.2 Layer 7 amendments (D30-D32, locked 2026-11-02; recorded 2026-11-11)
+
+The A numbers continue §13.1's series (A1-A12) and are this spec's own, unrelated to any build-board task id.
+
+Requested by Layer 7 (`os/7-relay/README.md` §18, locked v1.0) and recorded here as text only. Additive: the locked text above is
+unchanged, `id111` gains no code, the frozen vectors are untouched, and v1 builds nothing for the epoch.
+
+**A13 — `transport_id` `0x04` reserved (§10).** `0x04` = `111-link-ed25519`, the node's link key (Layer 7 §4.2: one fresh Ed25519 key per
+node, drawn from the OS CSPRNG at the first pairing and shared by all pairings, **never seed-derived**, never the identity key, never in a
+backup; F2 stays rejected). The id is reserved, not assigned: no verifier exists in v1 and every byte not assigned in the registry still
+**fails closed**, `0x04` included, until Layer 7 assigns its `transport_key` and `transport_sig` rules in its v1.1 (Layer 7 §4.2, §17). When
+it lands it is a two-sided record (both signatures) and replaces TOFU pinning of the link key. The §10 wire is unchanged.
+
+**A14 — domain tags (§6.1, A4).** Registered here; each tag leads its input, and every signed or keyed use of it is pinned by its
+owning layer's spec:
+
+| Tag | Use (owner) |
+|---|---|
+| `111/carrier-topic/v1` | the carrier topic key (Layer 7 §6.2): see A18 |
+| `111/epoch/v1` | Ed25519 by the issuer over `tag ‖ issuer(32) ‖ epoch(8 LE)` (A15) |
+| `111/broadcast/v1` | Ed25519 by the publisher over `tag ‖` all preceding bytes of a `BROADCAST` frame (Layer 7 §11.1) |
+
+**A15 — the mesh epoch (§9, §10, §13).** Closes §13's "mesh-epoch source" hand-off.
+- **Unit:** one epoch is **one day of the issuer's powered-on time**. No wall clock anywhere (§6.5): a node's persisted monotonic
+  counter, accumulated across boots, advances it.
+- **Source:** **hub-distributed, floored by the release.** A member adopts the greatest valid beacon from its pinned home hub only, never
+  below the floor its installed release carries; a hub uses its own counter, floored the same way. Nobody adopts a paired hub's or a
+  stranger's value. Expiry fields (§9 certificate `expiry`, §10 `expiry_epoch`) count in this unit.
+- **Beacon:** `epoch` (8 B LE u64) ‖ `sig` (64 B), the Ed25519 signature by the issuer's identity key over
+  `"111/epoch/v1" ‖ issuer(32) ‖ epoch(8 LE)`. **Wire form: 72 B** (`epoch ‖ sig`; the issuer is the sealed frame's authenticated
+  sender, so it is not repeated). **Transferable form: 104 B** (`issuer ‖ epoch ‖ sig`), the form API objects carry, because the
+  signature makes the value transferable and it then needs the issuer beside it. The signature is verified under the §3 strict predicate.
+- **Not evaluated in v1.** v1 builds nothing for the epoch: no beacon is minted, carried or checked; `verify_full` keeps taking a caller's
+  epoch and the bridge keeps passing none (§6.7: undefined ⇒ not evaluated). This text pins the unit so every record counts in days from
+  the start. Layer 7 §8 carries the bytes, the floor and the threats; its first consumer is the freeze check for updates.
+- **Distinction:** this epoch is not the `msg_seq` epoch of A3, which is one announce-counter value minted per store open.
+
+**A16 — attestation carriage (§10).** The 202 B record rides INTRO and `ENROLL` / `ENROLL_OK` as an envelope extension TLV, and the card
+API object as an additive `attestations` array; it never rides a LoRa announce (`appdata` is at most 32 B, §6.2). Supersedure is
+unchanged: per (`node_pubkey`, `transport_id`) the greatest `expiry_epoch` wins, and a verifier keeps only that one. Layer 7 §11.2
+carries the TLV number. Pinned now, made in Layer 7's v1.1 with its consumer (Layer 7 §17, §18); v1 carries no attestation.
+
+**A17 — `appdata` role bits 3-5 (§6.2, A8).** "Layer 7 appends" is made concrete for the roles field only: bit 3 gateway (this node has
+internet), bit 4 offload (serves inference to paired LAN members), bit 5 origin (serves the verified update files). Each is a setting,
+default off, set by `node111` alone: the names, the settings behind them and the consent text are Layer 7 §7.2, and `id111` and
+`mesh111` carry bits 3-5 as opaque. A reader that does not know a bit keeps it and names nothing for it (mesh111 `AppData::role_names`
+today names bits 0-2 only). The announce wire (§6.2) is unchanged.
+
+**A18 — the topic key behind the identity handle (§5; A9 pattern).** The carrier topic key is `topic_key = BLAKE2b-256(key = X25519(own_enc_sk,
+peer_enc_pk), data = "111/carrier-topic/v1" ‖ lo(enc_pk_a, enc_pk_b) ‖ hi(enc_pk_a, enc_pk_b))`, where `lo`/`hi` order the two X25519 public
+keys bytewise. As built, the X25519 output is computed **behind the identity handle** (node111 `IdentitySealer::carrier_topic_x25519`) and
+crosses it only as a zeroizing 32 B value, never cached, on no API, log, frame or file; the keyed-BLAKE2b topic KDF runs in the carrier
+(node111 `carrier::ntfy`). This differs from A9, whose store secret is derived wholly inside the handle: here the handle returns the X25519
+output, and moving the KDF inside the handle is recorded for the Layer 7 lock amendment. It is keyed BLAKE2b, the same BLAKE2b family as §6.4,
+with no second hash family, and the topic key is never written to disk. Only the two paired hubs can compute it. It names a mailbox and
+protects no content (§12 rule 12: static-static ECDH never protects confidentiality; the carried frames are sealed anyway). Its vectors are
+frozen: the topic KDF in Layer 7 task P1 (node111 `carrier::ntfy` test `topic_known_answers`) and the X25519 behind the handle in task M5
+(node111 `fabric::sealer` test `carrier_topic_x25519_known_answers_and_refusals`).
 
 ## 14. Test vectors & conformance
 

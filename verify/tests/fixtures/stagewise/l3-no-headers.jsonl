@@ -1,0 +1,4 @@
+{"exit_declared": true}
+{"id": "fx.gate3/lib/tools::tests::schema_lists_every_tool", "status": "PASS", "log_line": 8, "test": "tools::tests::schema_lists_every_tool"}
+{"id": "fx.agent.chat_loop/a_tool_call_round_trips", "status": "PASS", "log_line": 15, "test": "a_tool_call_round_trips", "check": "fx.agent.chat_loop"}
+{"id": "fx.agent.chat_loop/the_loop_stops_at_the_turn_limit", "status": "FAIL", "assertion": "thread 'the_loop_stops_at_the_turn_limit' panicked at crates/agent111/tests/chat_loop.rs:88:5:\nthe loop ran 9 turns, the limit is 8", "log_line": 22, "test": "the_loop_stops_at_the_turn_limit", "check": "fx.agent.chat_loop"}

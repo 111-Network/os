@@ -1,0 +1,4 @@
+{"exit_declared": false}
+{"id": "fx.ok/unshare-is-usable", "status": "PASS", "log_line": 1}
+{"id": "fx.ok/mktemp", "status": "FAIL", "assertion": "mktemp", "log_line": 2}
+{"id": "fx.ok", "status": "FAIL", "reason": "harness did not finish (last phase: none)", "assertion": "ok: unshare is usable\nFAIL: mktemp", "log_line": 1, "after": "fx.ok/mktemp"}

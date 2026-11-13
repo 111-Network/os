@@ -2,7 +2,7 @@
 // script of timed events (relative to adapter creation). The adapter (index.ts) owns the live
 // state and implements ScriptContext; scenarios only describe what changes and when.
 import { buildBridgeRich, type BridgeData } from "./bridge";
-import { RADIO_BOARD_FOUND, RADIO_NO_BOARD, VERSION, heltecDevice, iso, layersRunning, logLine, type Fixtures } from "./fixtures";
+import { GATEWAY_CARRIER_OK, GATEWAY_CARRIER_PENDING, RADIO_BOARD_FOUND, RADIO_NO_BOARD, VERSION, heltecDevice, iso, layersRunning, logLine, type Fixtures } from "./fixtures";
 import { ADA, DOV, ELI, FAY, buildNearby, fabricRow, makeContact, type MessagingData } from "./messaging";
 import type { AgentEvent, AgentStatus, Contact, DeviceRecord, FlashOffer, NearbySource, NodeId, Proposal, ServiceId, ServiceRecord, Settings, Status } from "../types";
 
@@ -21,6 +21,7 @@ export const SCENARIO_NAMES = [
   "requests",
   "store-full",
   "restore-pending",
+  "hub",
   "meshtastic",
   "bridge",
 ] as const;
@@ -523,6 +524,25 @@ export const restorePending: ScenarioFn = (base) => {
   };
 };
 
+/**
+ * A hub (Layer 7): the fabric has `hub_role` true and two members, and only a hub has a gateway, so only here does the `gateway` row carry
+ * `carrier_ok` (the badge's four states live on a hub, section 3.8). 10 s in the carrier misses a check and three items wait (`carrier_pending`).
+ */
+export const hub: ScenarioFn = (base) => {
+  const data = dataFrom(base);
+  const m = data.messaging;
+  m.fabric.settings = { ...m.fabric.settings, hub_role: true };
+  m.fabric.hub = { ...m.fabric.hub, members: 2 };
+  syncFabricRow(data);
+  Object.assign(svc(data, "gateway"), structuredClone(GATEWAY_CARRIER_OK));
+  return {
+    name: "hub",
+    summary: "A hub node: hub role on with two members, and a gateway whose ntfy carrier answered at the last check (carrier_ok, LIVE). 10 s in three items wait (carrier_pending, NOT SET).",
+    data,
+    script: [{ atMs: 10_000, label: "the carrier misses a check and three items wait", run: (ctx) => ctx.patchService("gateway", structuredClone(GATEWAY_CARRIER_PENDING)) }],
+  };
+};
+
 export const meshtastic: ScenarioFn = (base) => {
   const data = dataFrom(base);
   // The same Heltec as everywhere, but one that Meshtastic could be on: it offers the consented identify probe.
@@ -626,6 +646,7 @@ export const scenarios: Record<ScenarioName, ScenarioFn> = {
   requests,
   "store-full": storeFull,
   "restore-pending": restorePending,
+  hub,
   meshtastic,
   bridge,
 };

@@ -1364,9 +1364,16 @@ async fn panel_list_slots_and_registry_facts() {
     // the services-registry provider hands the same facts
     let provided = (panels::provider(&fx.host))().expect("facts");
     assert_eq!(serde_json::to_value(&provided).unwrap(), j["panels"]);
-    // a shim drop count is surfaced
-    fx.host.report_dropped(ServiceId::Meshtastic, 3);
+    // a shim drop count is surfaced, read live from the shim's source (row D5c item 9)
+    let count = Arc::new(std::sync::atomic::AtomicU64::new(3));
+    let c = Arc::clone(&count);
+    fx.host.set_dropped_source(
+        ServiceId::Meshtastic,
+        Arc::new(move || c.load(std::sync::atomic::Ordering::Relaxed)),
+    );
     assert_eq!(fx.host.panels()[0].state.dropped, Some(3));
+    count.store(5, std::sync::atomic::Ordering::Relaxed);
+    assert_eq!(fx.host.panels()[0].state.dropped, Some(5));
 
     // slots are stable in state/panels.json
     let slots: serde_json::Value = serde_json::from_slice(

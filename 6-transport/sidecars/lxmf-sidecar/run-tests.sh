@@ -5,7 +5,7 @@ set -eu
 cd "$(dirname "$0")"
 PYTHON=${PYTHON:-python3}
 export PYTHONDONTWRITEBYTECODE=1
-if "$PYTHON" -I -c 'import pytest' >/dev/null 2>&1; then
-  exec "$PYTHON" -I -m pytest -q -p no:cacheprovider tests
+if "$PYTHON" -I -B -c 'import pytest' >/dev/null 2>&1; then
+  exec "$PYTHON" -I -B -m pytest -q -p no:cacheprovider tests
 fi
-exec "$PYTHON" -I -m unittest discover -s tests
+exec "$PYTHON" -I -B -m unittest discover -v -s tests

@@ -3,6 +3,7 @@
 import { isApiError } from "../../lib/api/problem";
 import { classifyHref, kbRoutePath, normalizeKbPath } from "../../lib/markdown";
 import { serviceGoal, type PromptGoal } from "../../lib/prompts";
+import { own } from "../../lib/api/own";
 import type { ServiceRecord } from "../../lib/api/types";
 
 // ------------------------------------------------------------------------------------------ time
@@ -52,6 +53,9 @@ export function humanizeKey(key: string): string {
 }
 
 const MAX_ROWS = 40;
+
+/** Labels for the `*_ago_s` keys the daemon sends; any other key of that shape is humanized without the suffix. */
+const AGE_LABEL: Record<string, string> = { checked_ago_s: "Last check", last_flush_ago_s: "Last flush" };
 const MAX_VALUE = 300;
 
 const clip = (s: string): string => (s.length > MAX_VALUE ? `${s.slice(0, MAX_VALUE)}…` : s);
@@ -101,6 +105,12 @@ export function flattenDetail(detail: Record<string, unknown> | null | undefined
     } else push(label, compactJson(v));
   };
   for (const [key, v] of Object.entries(detail ?? {})) {
+    // A monotonic age (`checked_ago_s`, `last_flush_ago_s`: the gateway row, Layer 7 section 3.5) reads as an age, under its own name.
+    const aged = /^(.+)_ago_s$/.exec(key);
+    if (aged && typeof v === "number") {
+      push(AGE_LABEL[key] ?? humanizeKey(aged[1]!), ageAgoText(v));
+      continue;
+    }
     const label = humanizeKey(key);
     if (isPlainObject(v)) {
       for (const [k2, v2] of Object.entries(v)) anyValue(`${label} ${humanizeKey(k2).toLowerCase()}`, v2);
@@ -142,8 +152,9 @@ export interface ServicePageState {
 }
 
 /**
- * Services with nothing to set up: the gateway turns live by itself once the node reaches the internet
- * (spec 7: "no setup action"). Everything else that can run here and is unset offers "Set up with the agent".
+ * Services with no agent hand-off: the gateway is the owner's own switch (Layer 7 section 3.5: Settings -> Layer 7 turns a carrier and a
+ * gateway on; `gateway_none` and `gateway_off` are NOT SET until then), not something the agent sets up, so its row offers no "Set up with
+ * the agent". Everything else that can run here and is unset offers it.
  */
 export const NO_SETUP_SERVICES: ReadonlySet<string> = new Set(["gateway"]);
 
@@ -233,9 +244,66 @@ const NOT_SET_REASON: Record<string, string> = {
   no_python: "Python is not installed on this machine yet. The mesh transport needs it.",
 };
 
-/** What to show as the service's reason: the daemon's text, except for NOT SET codes reworded above. */
-export function reasonText(service: Pick<ServiceRecord, "state" | "reason" | "reason_code">): string {
+/**
+ * What to show as the service's reason: the daemon's text, except for NOT SET codes reworded above and the `gateway` row, which is
+ * always worded by `gatewayBadge` (Layer 7 section 3.8: the four codes, and `unknown` for anything else) so the page says exactly what the check supports. `id` and `detail` are
+ * optional: a caller that has only the three reason fields gets the daemon's sentence for the gateway row too.
+ */
+export function reasonText(service: Pick<ServiceRecord, "state" | "reason" | "reason_code"> & Partial<Pick<ServiceRecord, "id" | "detail">>): string {
+  // The gateway row is worded by the badge alone: a code outside the four (an older node's retired `wan_*`) reads `unknown`, never the node's own sentence.
+  if (service.id === "gateway") return gatewayBadge(service.reason_code, service.detail);
   return (service.state === "unset" ? NOT_SET_REASON[service.reason_code] : undefined) ?? service.reason;
+}
+
+// ------------------------------------------------------------------------------ gateway badge
+
+/**
+ * The four states of the gateway badge (Layer 7 section 3.5 item 2, section 3.8), keyed by the `gateway` row's `reason_code`. The words
+ * never say "online": the badge is the hub's own claim from its carrier's last answer, not a statement about the internet. A code this
+ * table does not know (an older node still sends `wan_ok`) renders as `unknown`.
+ */
+const GATEWAY_BADGE = {
+  gateway_none: "Not a gateway",
+  carrier_ok: "Gateway: carrier reachable at last check",
+  carrier_pending: "Gateway: last flush",
+  gateway_off: "Gateway off (by you)",
+} as const;
+
+/** The metered line that sits beside the badge (section 12): past a metered link's daily cap no flush runs. */
+export const METERED_CAP_TEXT = "Metered cap reached: no flush runs until the 24 hour allowance frees up.";
+
+/** "just now", "45 s ago", "4 min ago": a monotonic age in seconds (the contract carries no wall-clock stamp); null for a missing or bad age. */
+export function ageAgoText(sec: unknown): string | null {
+  if (typeof sec !== "number" || !Number.isFinite(sec) || sec < 0) return null;
+  return sec < 10 ? "just now" : `${formatDuration(sec)} ago`;
+}
+
+const count = (v: unknown): number => (typeof v === "number" && Number.isFinite(v) && v > 0 ? Math.floor(v) : 0);
+
+/**
+ * The badge as one sentence from the gateway row's `reason_code` and `detail` (`GatewayDetail`, section 3.5 item 3), the same for every
+ * node. `carrier_pending` says what it is waiting on: items (`K waiting`) or, with nothing waiting, a check the carrier did not answer.
+ */
+export function gatewayBadge(code: string | null | undefined, detail?: Record<string, unknown> | null): string {
+  if (typeof code !== "string" || !own(GATEWAY_BADGE, code)) return "unknown";
+  const d = detail ?? {};
+  switch (code) {
+    case "carrier_ok": {
+      const ago = ageAgoText(d.checked_ago_s);
+      return ago ? `${GATEWAY_BADGE.carrier_ok}, ${ago}` : GATEWAY_BADGE.carrier_ok;
+    }
+    case "carrier_pending": {
+      const waiting = count(d.pending);
+      if (waiting === 0) {
+        const ago = ageAgoText(d.checked_ago_s);
+        return ago ? `Gateway: the carrier did not answer at the last check, ${ago}` : "Gateway: the carrier did not answer at the last check";
+      }
+      const flush = ageAgoText(d.last_flush_ago_s);
+      return `${GATEWAY_BADGE.carrier_pending} ${flush ?? "not yet"}, ${waiting} waiting`;
+    }
+    default:
+      return GATEWAY_BADGE[code];
+  }
 }
 
 export const KIND_LABEL: Record<ServiceRecord["kind"], string> = {
