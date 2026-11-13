@@ -23,8 +23,11 @@ that unit). The engine fills everything else from the map. The engine's rules ho
 - a check that could not start, or that the runner killed on an interrupt, yields one FAIL with the check's id;
 - ``[[known]]`` (F7) applies only to the records an adapter parsed from a test's own output: every record the engine
   makes (the rules above, skips before the start, lock waits, hygiene) is never eligible, and neither is the record
-  of the ``exit`` and ``exit77`` adapters (it is the exit status, not a parsed test: those two adapters, and only
-  they, set ``Record.engine``);
+  of the ``exit`` and ``exit77`` adapters (it is the exit status, not a parsed test: they set ``Record.engine``).
+  Neither is a harness-level verdict of any other adapter (``harness did not finish``, ``SKIPPED after N FAIL
+  line(s)``, ``no test summary``, ``printed no result table``, ``build.py did not finish``, ``the test binary did not
+  finish``, ``cargo could not compile``, a broken ``T111_RESULTS`` line): it judges the whole run, not a test, so it
+  sets ``Record.engine`` too;
 - the engine keeps one record per check id: a rule above replaces the adapter's record of the check's own id;
 - the engine links a cascade: every FAIL after the first FAIL of one harness run carries ``after`` (read that first).
 
@@ -49,7 +52,9 @@ The record ids (stable between a gate run and a unit run, so the ``[[known]]`` p
   owns; nested stages are ``messaging/test``.
 - **table**: ``<check>/<file>``; **buildpy**: ``<check>/<path>:<line>/<code>``.
 
-A repeated id within one check gets ``#2``, ``#3``.
+A repeated id within one check gets ``#2``, ``#3``. The ids of a gate's attributed records are the unit's own on
+purpose (``l5.mesh111.forward/<test>`` from ``l5.gate`` and from the nested stage of ``l1.gate``): one test, one id,
+whoever ran it; the record's ``log`` and ``phase`` say which run it came from.
 
 ``log_tail`` is the helper for a tail: it reads from the end of the log (never the whole file into memory), keeps the
 last lines within the 2 KB of an ``assertion`` (clipped from the end on a line boundary) and returns the 1-based line
@@ -59,10 +64,11 @@ overwrite keeps its last text), and hold at most one stage's last 40 lines and o
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
-from collections import deque
+from collections import Counter, deque
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Callable, Iterable, Iterator
@@ -257,16 +263,38 @@ def read_lines(log: Path) -> Iterator[tuple[int, str]]:
 
 
 _VOLATILE_RE = re.compile(r"\b(?:\d{4,}|[0-9a-f]{8,})\b")
+_ASSET_HASH_RE = re.compile(r"-(?P<hash>[A-Za-z0-9_-]{8})(?P<ext>\.(?:m?js|css|map|wasm|woff2?|ttf|svg|png|webp|ico)\b)")
+_MIXED_TOKEN_RE = re.compile(r"(?<![a-z0-9])[a-z0-9]{8,}(?![a-z0-9])")
+
+
+def _hashed_asset(m: re.Match[str]) -> str:
+    """``-<8 chars>.<ext>`` of a bundler's hashed file name (``index-B8fJ2kLq.js``) as ``-n.<ext>``; a plain word
+    (``-readme.png``, all lower case letters, or all letters of one case) stays."""
+    digest = m.group("hash")
+    mixed = bool(re.search(r"\d", digest) and re.search(r"[A-Za-z]", digest)) or \
+        bool(re.search(r"[A-Z]", digest) and re.search(r"[a-z]", digest))
+    return f"-n{m.group('ext')}" if mixed else m.group(0)
+
+
+def _random_looking(m: re.Match[str]) -> str:
+    """A run of 8+ ``[a-z0-9]`` that switches between letters and digits at least three times (``b8fj2klq``, an id)
+    as ``n``; ``sha256``, ``mesh111``, ``ed25519`` and ``aes256gcm`` switch less and stay."""
+    token = m.group(0)
+    switches = sum(1 for a, b in zip(token, token[1:]) if a.isdigit() != b.isdigit())
+    return "n" if switches >= 3 else token
 
 
 def slug(text: str, limit: int = 60) -> str:
-    """A stable id piece: lower case, ``[a-z0-9.]`` runs joined by ``-``, long numbers and hex as ``n``, at most
-    ``limit`` characters (cut at a ``-``); ``x`` when nothing is left."""
-    s = _VOLATILE_RE.sub("n", text.lower())
+    """A stable id piece: lower case, ``[a-z0-9.]`` runs joined by ``-``, long numbers and hex as ``n``, a bundler's
+    hashed asset name and a random-looking token as ``n``, at most ``limit`` characters (cut at a ``-``, a cut that
+    falls exactly between two words keeps both); ``x`` when nothing is left."""
+    s = _VOLATILE_RE.sub("n", _MIXED_TOKEN_RE.sub(_random_looking, _ASSET_HASH_RE.sub(_hashed_asset, text).lower()))
     s = re.sub(r"[^a-z0-9.]+", "-", s).strip("-.")
     if len(s) > limit:
         head = s[:limit]
-        s = head.rsplit("-", 1)[0] if "-" in head else head
+        if s[limit] != "-":
+            head = head.rsplit("-", 1)[0] if "-" in head else head
+        s = head
     return s or "x"
 
 
@@ -419,17 +447,24 @@ def script_texts(check: Check, root: Path) -> list[str]:
 _STAGE_ECHO_RE = re.compile(r"""(?:echo|printf)\s+(?:'[^']*'\s+)?["']== (?P<name>.+?) ==(?:\\n)?["']""")
 
 
-def declared_stages(texts: Iterable[str]) -> list[tuple[str, str]]:
-    """(stage name, the script text of that stage) for every ``echo "== name =="`` of the scripts, in order. A name
-    with a shell expansion keeps the text before it (a prefix)."""
-    out: list[tuple[str, str]] = []
+def declared_stage_marks(texts: Iterable[str]) -> list[tuple[str, str, bool]]:
+    """(stage name, the script text of that stage, conditional) for every ``echo "== name =="`` of the scripts, in
+    order. A name with a shell expansion keeps the text before it (a prefix). ``conditional``: the echo is indented or
+    follows something on its line (inside an ``if``), so the stage may be absent from a run that went on."""
+    out: list[tuple[str, str, bool]] = []
     for text in texts:
         marks = list(_STAGE_ECHO_RE.finditer(text))
         for index, m in enumerate(marks):
             end = marks[index + 1].start() if index + 1 < len(marks) else len(text)
             name = m.group("name").split("$", 1)[0].rstrip()
-            out.append((name, text[m.end():end]))
+            line_start = text.rfind("\n", 0, m.start()) + 1
+            out.append((name, text[m.end():end], m.start() > line_start))
     return out
+
+
+def declared_stages(texts: Iterable[str]) -> list[tuple[str, str]]:
+    """(stage name, the script text of that stage) for every ``echo "== name =="`` of the scripts, in order."""
+    return [(name, body) for name, body, _conditional in declared_stage_marks(texts)]
 
 
 _FUNC_START_RE = re.compile(r"^(?P<name>[A-Za-z_][\w-]*)\s*\(\)\s*\{?\s*$")
@@ -578,6 +613,7 @@ _RESULT_RE = re.compile(r"^test result: (?P<res>ok|FAILED)\. (?P<passed>\d+) pas
                         r"(?P<ignored>\d+) ignored")
 _CARGO_FAILED_RE = re.compile(r"(?:^|\s)error: test failed, to rerun pass (?P<what>.+)$")
 _NOT_EXIT_RE = re.compile(r"process didn't exit successfully: .*\((?P<why>(?:signal|exit (?:status|code))[^)]*)\)\s*$")
+_TARGETS_FAILED_RE = re.compile(r"^error: \d+ targets? failed")
 _COMPILE_ERR_RE = re.compile(r"^error(?:\[E\d+\])?: ")
 _COULD_NOT_RE = re.compile(r"^error: could not compile ")
 _PANIC_RE = re.compile(r"^thread '[^']*'(?: \(\d+\))? panicked at ")
@@ -636,6 +672,8 @@ class Libtest:
         self.compile_err: list[tuple[int, str]] = []
         self.compile_open = False
         self.could_not: tuple[int, str] | None = None
+        self.stopped: tuple[int, str] | None = None  # cargo's ``error: test failed, to rerun pass <what>``
+        self.kept_going = False  # cargo's ``error: N targets failed:`` (--no-fail-fast: every binary ran)
 
     # -- attribution
     def _candidates(self, kind: str, name: str) -> list[CargoUnit]:
@@ -694,6 +732,12 @@ class Libtest:
     def feed(self, no: int, text: str) -> None:
         if self.cur is not None:
             self.cur.tail.append((no, text))
+        if text.startswith("error: ") and _TARGETS_FAILED_RE.match(text):
+            self.kept_going = True
+        if self.stopped is None and "error: test failed" in text:
+            stop = _CARGO_FAILED_RE.search(text)
+            if stop:
+                self.stopped = (no, stop.group("what").strip())
         if self.compile_open:
             if text.strip():
                 self.compile_err.append((no, text))
@@ -723,7 +767,7 @@ class Libtest:
         if _COULD_NOT_RE.match(text) and self.could_not is None:
             self.could_not = (no, text)
         elif _COMPILE_ERR_RE.match(text) and not self.compile_err and not text.startswith("error: test failed") \
-                and not text.startswith("error: could not compile") and not re.match(r"^error: \d+ targets? failed", text):
+                and not text.startswith("error: could not compile") and not _TARGETS_FAILED_RE.match(text):
             self.compile_err.append((no, text))
             self.compile_open = True
         m = _RUN_N_RE.match(text)
@@ -810,7 +854,7 @@ class Libtest:
             lines = self.compile_err or ([self.could_not] if self.could_not else [])
             text, line = join_clip(t for _, t in lines), lines[0][0]
             out.append(self.scope.record("build", "FAIL", reason="cargo could not compile the tests",
-                                         assertion=text, log_line=line))
+                                         assertion=text, log_line=line, engine=True))
         return out
 
     def _name(self, binary: _Binary, test: str | None) -> tuple[str | None, Check | None]:
@@ -849,7 +893,7 @@ class Libtest:
                     first = binary.crash_lines[0][0]
                 out.append(self.scope.record(tail, "FAIL", unit=unit,
                                              reason=f"the test binary did not finish ({why})",
-                                             assertion=crash_text, log_line=first or binary.line))
+                                             assertion=crash_text, log_line=first or binary.line, engine=True))
         return out
 
     def accounts_for(self, status: int) -> bool:
@@ -1298,7 +1342,7 @@ def _py_adapter(check: Check, log: Path, status: int, ctx: AdapterContext) -> li
     if parser.ended == 0 and status == 0 and not ctx.timed_out:
         tail, line = log_tail(log)
         recs.append(Record(id=check.id, status="FAIL", reason="no test summary ('Ran N tests' / pytest's '… in Ns') "
-                           "was printed", assertion=tail or None, log_line=line or None))
+                           "was printed", assertion=tail or None, log_line=line or None, engine=True))
     ctx.exit_declared = parser.accounts_for(status)
     return recs
 
@@ -1356,7 +1400,7 @@ def read_emitter(path: Path, scope: Scope, lines_of: dict[str, int] | None = Non
         status = EMIT_STATUSES.get(str(obj.get("status"))) if isinstance(obj, dict) else None
         if not isinstance(obj, dict) or status is None:
             out.append(scope.record("emitter", "FAIL", reason=f"T111_RESULTS line {index} is not a result object",
-                                    assertion=clip(line)))
+                                    assertion=clip(line), engine=True))
             continue
         text = str(obj.get("text") or obj.get("desc") or "")
         phase = str(obj.get("phase") or "") or None
@@ -1376,11 +1420,13 @@ def read_emitter(path: Path, scope: Scope, lines_of: dict[str, int] | None = Non
 
 class OkFail:
     """The ``ok:`` / ``FAIL:`` / ``note:`` parser with ``== <phase>`` headers. ``strict`` adds the closing-line
-    rules of a whole harness (a stage of a gate is not strict)."""
+    rules of a whole harness (a stage of a gate is not strict); ``phases`` False reads no ``== …`` line as a phase
+    (the stage of a gate owns those: a header inside a stage is its sub-harness's quoted output)."""
 
-    def __init__(self, scope: Scope, *, strict: bool = True):
+    def __init__(self, scope: Scope, *, strict: bool = True, phases: bool = True):
         self.scope = scope
         self.strict = strict
+        self.phases = phases
         self.recs: list[Record] = []
         self.phase: str | None = None
         self.phases_seen: list[str] = []
@@ -1394,7 +1440,7 @@ class OkFail:
         self.lines_of: dict[str, int] = {}
 
     def feed(self, no: int, text: str) -> None:
-        m = _PHASE_RE.match(text)
+        m = _PHASE_RE.match(text) if self.phases else None
         if m:
             self.phase = m.group("name")
             self.phases_seen.append(self.phase)
@@ -1460,6 +1506,7 @@ class OkFail:
         def verdict(status: str, reason: str, assertion: str | None = None, line: int | None = None) -> Record:
             rec = self.scope.record(None, status, reason=reason, assertion=assertion, log_line=line)
             rec.kept = self.kept
+            rec.engine = True  # a verdict on the whole harness, not a test result: [[known]] never applies
             return rec
 
         if closing is None:
@@ -1505,7 +1552,8 @@ def okfail_adapter(check: Check, log: Path, status: int, ctx: AdapterContext) ->
     of options.md §3.4): a missing closing line or an inner run whose last phase never came is FAIL ``harness did not
     finish (last phase: <name>)``; a ``<G> SKIPPED: <reason>`` after ``FAIL:`` lines is FAIL; ``note: scratch kept at
     <dir>`` fills ``kept``. A ``T111_RESULTS`` file with lines replaces the ``ok:``/``FAIL:`` parse (the closing line
-    is still judged from the log)."""
+    is still judged from the log), except that a ``FAIL:`` line of the log the file lacks stays a FAIL record
+    (``merge_emitted``)."""
     scope = base_scope(check, ctx)
     parser = OkFail(scope)
     tail: deque = deque(maxlen=TAIL_LINES)
@@ -1513,12 +1561,32 @@ def okfail_adapter(check: Check, log: Path, status: int, ctx: AdapterContext) ->
         parser.feed(no, text)
         tail.append((no, text))
     recs = parser.finish(harness_script_groups(check, ctx.root), tail_clip(list(tail)))
-    emitted = read_emitter(ctx.results, replace(scope, ids=IdBook()), parser.lines_of) if ctx.results else None
+    emit_scope = replace(scope, ids=IdBook())
+    emitted = read_emitter(ctx.results, emit_scope, parser.lines_of) if ctx.results else None
     if emitted:
-        verdicts = [r for r in recs if r.id == check.id]
-        recs = emitted + verdicts
+        recs = merge_emitted(emitted, recs, check, emit_scope)
     ctx.exit_declared = parser.accounts_for(status)
     return recs
+
+
+def merge_emitted(emitted: list[Record], log_recs: list[Record], check: Check, scope: Scope) -> list[Record]:
+    """The records of a run whose ``T111_RESULTS`` file holds lines: the emitted ones replace the log's ``ok:`` /
+    ``FAIL:`` parse, except that a ``FAIL:`` line of the log with no emitted FAIL of the same words (a partly
+    instrumented harness, a helper or sub-script that prints ``FAIL:`` without the emitter, a write that failed) is
+    kept as its own FAIL record (the emitter file never hides a red line of the log), then the log's harness-level
+    verdicts. ``scope`` names the kept records (its id book is the emitted records')."""
+    unmatched = Counter(r.assertion for r in emitted if r.status == "FAIL")
+    kept: list[Record] = []
+    for rec in log_recs:
+        if rec.id == check.id or rec.status != "FAIL":
+            continue
+        if unmatched[rec.assertion] > 0:
+            unmatched[rec.assertion] -= 1
+            continue
+        rec.id = scope.ids.take(rec.id)
+        rec.reason = rec.reason or "a FAIL: line of the log that the T111_RESULTS file lacks"
+        kept.append(rec)
+    return emitted + kept + [r for r in log_recs if r.id == check.id]
 
 
 @register("emitter")
@@ -1579,7 +1647,7 @@ def table_adapter(check: Check, log: Path, status: int, ctx: AdapterContext) -> 
     if not rows:
         text, line = tail_clip(list(tail))
         recs.append(Record(id=check.id, status="FAIL", reason="the harness printed no result table", assertion=text,
-                           log_line=line))
+                           log_line=line, engine=True))
     ctx.exit_declared = status != 0 and any(r.status == "FAIL" for r in recs) and bool(rows)
     return recs
 
@@ -1621,12 +1689,12 @@ def buildpy_adapter(check: Check, log: Path, status: int, ctx: AdapterContext) -
     if total is None:
         text, line = tail_clip(list(tail))
         recs.append(Record(id=check.id, status="FAIL", reason="build.py did not finish (no 'N error(s), M warning(s)' "
-                           "line)", assertion=text, log_line=line))
+                           "line)", assertion=text, log_line=line, engine=True))
     elif not recs and total == 0:
         recs.append(Record(id=check.id, status="PASS"))
     elif total != sum(1 for r in recs if r.status == "FAIL"):
         recs.append(Record(id=check.id, status="FAIL", reason=f"build.py counted {total} error(s), the log shows "
-                           f"{sum(1 for r in recs if r.status == 'FAIL')}"))
+                           f"{sum(1 for r in recs if r.status == 'FAIL')}", engine=True))
     ctx.exit_declared = status == 1 and total is not None and total > 0 and total == len(recs)
     return recs
 
@@ -1638,7 +1706,61 @@ def buildpy_adapter(check: Check, log: Path, status: int, ctx: AdapterContext) -
 _STAGE_RE = re.compile(r"^== (?P<name>.+?) ==\s*$")
 _STAGE_CLOSE_RE = re.compile(r"^(?:ALL GREEN|GREEN \(.*\).*|check\.sh: (?:all green|green\b.*))\s*$")
 _NESTED_CLOSE_RE = re.compile(r"^check\.sh: (?:all green|green\b.*)\s*$")
-_STAGE_SKIP_RE = re.compile(r"^(?:!! )?(?P<what>.*?)\s*—\s*(?P<name>[^—]*?)\s*SKIPPED\b(?P<rest>.*)$")
+_SKIPPED_WORD_RE = re.compile(r"SKIPPED\b")
+
+
+def stage_skip(text: str) -> str | None:
+    """What a gate's skip line names: ``<anything> — <name> SKIPPED[ …]`` gives ``<name>`` (``""`` when it names
+    nothing: ``shellcheck not found — SKIPPED``), None for a line that is no skip line. A line the pre-filter
+    (``—`` and ``SKIPPED`` both present) rejects costs one scan each; no pattern backtracks on whitespace."""
+    if "—" not in text or "SKIPPED" not in text:
+        return None
+    body = text[3:] if text.startswith("!! ") else text
+    for m in _SKIPPED_WORD_RE.finditer(body):
+        dash = body.rfind("—", 0, m.start())
+        if dash >= 0:
+            return body[dash + 1:m.start()].strip()
+    return None
+
+
+_SKIP_NOISE = frozenset({"check", "checks", "gate", "gates", "test", "tests", "stage", "skipped", "not", "found"})
+
+
+def _name_words(text: str) -> frozenset[str]:
+    """The lower-case words of a stage or skip name before its first `` (``, without the words every gate uses."""
+    head = text.split(" (", 1)[0].lower()
+    return frozenset(w for w in re.findall(r"[a-z0-9]+", head) if w not in _SKIP_NOISE)
+
+
+def names_stage(stage: str, named: str) -> bool:
+    """Whether a skip line's ``<name>`` is the open stage's own (they share a word: ``UI checks`` and ``ui``,
+    ``build-scripts gate`` and ``build scripts (…)``, ``sidecar checks`` and ``presence sidecar (…)``); ``musl
+    checks`` in the ``clippy (host)`` stage is another stage's."""
+    return bool(_name_words(stage) & _name_words(named))
+
+
+class _StageOrder:
+    """Which ``== name ==`` lines of a gate's log are stage headers: the script declares its stages in order; a header
+    opens a stage only when it names one of the declared stages after the last one seen with nothing unconditional
+    in between (an indented ``echo`` may be skipped, a top-level one ran). Any other such line is stage content: the
+    summary gate's failure dump, a sub-harness's own headers. No declared stage (a script nobody can read): every
+    header opens a stage."""
+
+    def __init__(self, marks: list[tuple[str, bool]]):
+        self.marks = marks
+        self.pos = -1
+
+    def accept(self, name: str) -> bool:
+        if not self.marks:
+            return True
+        for index in range(self.pos + 1, len(self.marks)):
+            declared, conditional = self.marks[index]
+            if name.startswith(declared):
+                self.pos = index
+                return True
+            if not conditional:
+                return False
+        return False
 
 STAGE_INNER: tuple[tuple[re.Pattern[str], str], ...] = (
     (re.compile(r"^(?:test\b|G2\b)"), "libtest"),
@@ -1695,23 +1817,77 @@ def stage_slug(*names: str) -> str:
     return "/".join(slug(name, 32) for name in names if name)
 
 
+def colliding_stages(declared: list[tuple[str, str]]) -> set[str]:
+    """The declared stage names whose 32-character slug another declared stage shares (their ids would depend on the
+    order a run meets them in, as ``#2``): each gets a short hash of its full name (``stage_piece``)."""
+    slugs = [(name, slug(name, 32)) for name, _body in declared]
+    count = Counter(sg for _name, sg in slugs)
+    return {name for name, sg in slugs if count[sg] > 1}
+
+
+def stage_piece(name: str, declared: list[tuple[str, str]], collide: set[str]) -> str:
+    """``slug(name, 32)``, plus ``-<6 hex of the declared name>`` when the stage is one of ``colliding_stages``."""
+    piece = slug(name, 32)
+    matches = [known for known, _body in declared if name.startswith(known)]
+    if not matches:
+        return piece
+    known = max(matches, key=len)
+    return f"{piece}-{hashlib.sha1(known.encode('utf-8')).hexdigest()[:6]}" if known in collide else piece
+
+
+def _unreached_units(stage: _Stage, units: list[CargoUnit]) -> list[Record]:
+    """cargo stops at the first failing test binary (the gates do not pass ``--no-fail-fast``): the units this
+    gate covers whose binary never printed are SKIPPED ``not reached (cargo stopped at <binary>)``, so a red
+    gate never reads as having run what it never reached. Only a ``test`` stage (or the header-less text before the
+    first stage) whose log shows cargo's ``error: test failed`` and no ``error: N targets failed:`` (that is
+    ``--no-fail-fast``: every binary ran); the units are those covered by the gate the stage
+    belongs to (a nested stage: the nested gate)."""
+    parser = stage.parser
+    base = stage.name.rsplit("/", 1)[-1]
+    if not isinstance(parser, Libtest) or parser.stopped is None or parser.kept_going or \
+            not (base == "" or base.startswith("test")):
+        return []
+    gate = stage.scope.prefer[0] if stage.scope.prefer else stage.scope.check.id
+    ran = {u.check.id for binary in parser.binaries for u in binary.candidates}
+    line, what = parser.stopped
+    out: list[Record] = []
+    for unit in units:
+        if unit.check.covered_by != gate or unit.check.id in ran:
+            continue
+        out.append(Record(id=stage.scope.ids.take(unit.check.id), status="SKIPPED", check=unit.check.id,
+                          reason=f"not reached (cargo stopped at {what})", phase=stage.path or None, log_line=line))
+    return out
+
+
 @register("stagewise")
 def stagewise_adapter(check: Check, log: Path, status: int, ctx: AdapterContext) -> list[Record]:
     """A gate of ``== name ==`` stages (options.md §3.4): each stage's lines go to its inner adapter
-    (``STAGE_INNER``); a ``… — <what> SKIPPED`` line is a SKIPPED record (``<gate>/<what>``, or the open stage when it
-    names nothing); a stage that ran with no inner result is one PASS ``<gate>/<stage>``; on a non-zero exit the open
-    stage FAILs with its last 40 lines (unless its inner adapter parsed a FAIL there) and the stages the gate's
-    script declares after it are SKIPPED ``not reached (stopped at <stage>)``."""
+    (``STAGE_INNER``); a ``== name ==`` line opens a stage only when it is the next stage the gate's script declares
+    (``_StageOrder``: a line quoted by a sub-harness is the stage's content); a ``… — <what> SKIPPED`` line is the
+    open stage's own SKIPPED when it names nothing or names that stage (``names_stage``), else a SKIPPED record
+    ``<gate>/<what>`` (not inside a sub-harness stage, whose output only quotes such lines), and never a line an
+    ``ok:`` / ``FAIL:`` result carries; a stage that ran with no inner result is one PASS ``<gate>/<stage>``; on a
+    non-zero exit the open stage FAILs with its last 40 lines (unless its inner adapter parsed a FAIL there), the
+    units a ``test`` stage never reached because cargo stopped at the first failing binary are SKIPPED ``not reached
+    (cargo stopped at <binary>)``, and the stages the gate's script declares after it are SKIPPED ``not reached
+    (stopped at <stage>)``. Two declared stages whose 32-character slugs collide get a hash each."""
     ids = IdBook()
-    declared = declared_stages(script_texts(check, ctx.root))
+    marks = declared_stage_marks(script_texts(check, ctx.root))
+    declared = [(name, body) for name, body, _conditional in marks]
     bodies = dict(declared)
+    collide = colliding_stages(declared)
+    top_order = _StageOrder([(name, conditional) for name, _body, conditional in marks])
+    nested_order = _StageOrder([])
     units = cargo_units(ctx.seam_map)
     skips: list[Record] = []
+
+    def piece(*names: str) -> str:
+        return "/".join(stage_piece(n, declared, collide) for n in names if n)
 
     def make(name: str, path: str, no: int, prefer: tuple[str, ...], body: str, parent: str = "") -> _Stage:
         kind = inner_kind(name)
         scope = Scope(check=check, seam_map=ctx.seam_map, ids=ids,
-                      prefix=f"{check.id}/{stage_slug(parent, name)}" if path else check.id, unit_run=False,
+                      prefix=f"{check.id}/{piece(parent, name)}" if path else check.id, unit_run=False,
                       phase=path or None, seams=phase_seams(check, path) or phase_seams(check, name), prefer=prefer)
         parser: Libtest | Vitest | PyTests | OkFail | None = None
         if kind == "libtest":
@@ -1720,7 +1896,7 @@ def stagewise_adapter(check: Check, log: Path, status: int, ctx: AdapterContext)
             parser = Vitest(scope, ctx.root / check.cwd)
         elif kind in ("pytest", "okfail"):
             scope.owner = stage_unit(check, ctx.seam_map, body, kind, prefer)
-            parser = PyTests(scope) if kind == "pytest" else OkFail(scope, strict=False)
+            parser = PyTests(scope) if kind == "pytest" else OkFail(scope, strict=False, phases=False)
         return _Stage(name, path, no, scope, parser)
 
     current = make("", "", 0, (check.id,), "")
@@ -1729,7 +1905,7 @@ def stagewise_adapter(check: Check, log: Path, status: int, ctx: AdapterContext)
     nested_gate: str | None = None  # set while a nesting stage runs another gate's stages
     for no, text in read_lines(log):
         m = _STAGE_RE.match(text)
-        if m:
+        if m and (nested_order if top is not None and nested_gate is not None else top_order).accept(m.group("name")):
             name = m.group("name")
             if top is not None and nested_gate is not None:
                 current = make(name, f"{top.name}/{name}", no, (nested_gate, check.id), "", parent=top.name)
@@ -1738,6 +1914,10 @@ def stagewise_adapter(check: Check, log: Path, status: int, ctx: AdapterContext)
                 if inner_kind(name) == "nested":
                     script = next((sc for prefix, sc in NESTED_GATES.items() if name.startswith(prefix)), None)
                     nested_gate = (_gate_of_script(ctx.seam_map, script) if script else None) or check.id
+                    inner_check = ctx.seam_map.check(nested_gate) if nested_gate != check.id else None
+                    nested_order = _StageOrder(
+                        [(n, c) for n, _b, c in declared_stage_marks(script_texts(inner_check, ctx.root))]
+                        if inner_check is not None else [])
             stages.append(current)
             continue
         if nested_gate is not None and _NESTED_CLOSE_RE.match(text):
@@ -1745,19 +1925,18 @@ def stagewise_adapter(check: Check, log: Path, status: int, ctx: AdapterContext)
             current = top  # type: ignore[assignment]
             continue
         current.tail.append((no, text))
-        if not _STAGE_CLOSE_RE.match(text):
-            m = _STAGE_SKIP_RE.match(text)
-            if m:
-                named = m.group("name").strip()
-                reason = (text[3:] if text.startswith("!! ") else text).strip()
-                if named:
-                    nest = top.name if top is not None and current is not top else ""
-                    where = f"{nest}/{named}" if nest else named
-                    skips.append(Record(id=ids.take(f"{check.id}/{stage_slug(nest, named)}"), status="SKIPPED",
-                                        reason=reason, log_line=no, phase=where,
-                                        seams=phase_seams(check, where) or phase_seams(check, named)))
-                else:
-                    current.skipped, current.skip_line = reason, no
+        named = None if _STAGE_CLOSE_RE.match(text) else stage_skip(text)
+        if named is not None and not _OK_RE.match(text):  # an ok:/FAIL: line that quotes a skip line is a result
+            reason = (text[3:] if text.startswith("!! ") else text).strip()
+            if not named or names_stage(current.name, named):
+                current.skipped, current.skip_line = reason, no  # nothing, or this stage, did not run
+                continue
+            if not isinstance(current.parser, OkFail):  # (a sub-harness's own output may quote skip lines)
+                nest = top.name if top is not None and current is not top else ""
+                where = f"{nest}/{named}" if nest else named
+                skips.append(Record(id=ids.take(f"{check.id}/{piece(nest, named)}"), status="SKIPPED",
+                                    reason=reason, log_line=no, phase=where,
+                                    seams=phase_seams(check, where) or phase_seams(check, named)))
                 continue
         if current.parser is not None:
             current.parser.feed(no, text)
@@ -1767,6 +1946,7 @@ def stagewise_adapter(check: Check, log: Path, status: int, ctx: AdapterContext)
         inner = stage.parser.finish() if stage.parser is not None else []
         recs.extend(inner)
         if status != 0 and stage is current:
+            recs.extend(_unreached_units(stage, units))
             if any(r.status == "FAIL" for r in inner):
                 declared_exit = isinstance(stage.parser, (Libtest, PyTests, OkFail)) and \
                     stage.parser.accounts_for(status)
@@ -1789,7 +1969,7 @@ def stagewise_adapter(check: Check, log: Path, status: int, ctx: AdapterContext)
         for name, _body in declared[(max(reached) + 1) if reached else 0:]:
             if any(s.startswith(name) for s in seen):
                 continue
-            recs.append(Record(id=ids.take(f"{check.id}/{stage_slug(name)}"), status="SKIPPED",
+            recs.append(Record(id=ids.take(f"{check.id}/{piece(name)}"), status="SKIPPED",
                                reason=f"not reached (stopped at {stopped})", phase=name,
                                seams=phase_seams(check, name)))
     ctx.exit_declared = declared_exit

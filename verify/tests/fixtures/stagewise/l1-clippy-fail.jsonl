@@ -12,6 +12,6 @@
 {"id": "fx.gate1/systemd-analyze", "status": "SKIPPED", "reason": "not reached (stopped at clippy (host))", "phase": "systemd-analyze"}
 {"id": "fx.gate1/messaging-mesh111-workspace", "status": "SKIPPED", "reason": "not reached (stopped at clippy (host))", "phase": "messaging (mesh111 workspace)"}
 {"id": "fx.gate1/g2-sqlcipher-static-link-run", "status": "SKIPPED", "reason": "not reached (stopped at clippy (host))", "phase": "G2: SQLCipher static link + run (mesh111 tests, musl x86_64)"}
-{"id": "fx.gate1/g2-sqlcipher-static-link", "status": "SKIPPED", "reason": "not reached (stopped at clippy (host))", "phase": "G2: SQLCipher static link (mesh111 tests, musl aarch64; run = external gate G2)"}
+{"id": "fx.gate1/g2-sqlcipher-static-link-mesh111", "status": "SKIPPED", "reason": "not reached (stopped at clippy (host))", "phase": "G2: SQLCipher static link (mesh111 tests, musl aarch64; run = external gate G2)"}
 {"id": "fx.gate1/presence-sidecar-meshtastic", "status": "SKIPPED", "reason": "not reached (stopped at clippy (host))", "phase": "presence sidecar (meshtastic-presence: tests + venv lock structure)"}
 {"id": "fx.gate1/ui", "status": "SKIPPED", "reason": "not reached (stopped at clippy (host))", "phase": "ui", "seams": ["L4-L5:fx-ui"]}

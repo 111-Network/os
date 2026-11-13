@@ -115,6 +115,9 @@ CASES: dict[str, tuple[str, int]] = {
     "stagewise/l1-clippy-fail": ("fx.gate1", 101),
     "stagewise/l1-green-skips": ("fx.gate1", 0),
     "stagewise/l3-no-headers": ("fx.gate3", 101),
+    "stagewise/l1-tools-missing": ("fx.gate1", 0),
+    "stagewise/l1-summary-gate-dump": ("fx.gate1", 1),
+    "stagewise/l1-cargo-stops": ("fx.gate1", 101),
     # vitest
     "vitest/unit-json-green": ("fx.ui.contacts", 0),
     "vitest/unit-json-red": ("fx.vt.red", 1),
@@ -147,6 +150,7 @@ CASES: dict[str, tuple[str, int]] = {
     # emitter
     "emitter/instrumented": ("fx.emit", 1),
     "emitter/not-instrumented": ("fx.emit", 0),
+    "emitter/log-fail-missing": ("fx.emit", 1),
     # table, buildpy
     "table/green": ("fx.table", 0),
     "table/red": ("fx.table", 1),
@@ -238,8 +242,9 @@ class Goldens(unittest.TestCase):
                 meta, expected = read_golden(case)
                 self.assertEqual([project(r) for r in recs], expected)
                 self.assertEqual(ctx.exit_declared, meta["exit_declared"], "exit_declared")
-                self.assertFalse(any(r.engine for r in recs) and check_adapter(case) not in ("exit", "exit77"),
-                                 "only the exit-status adapters make engine records")
+                if check_adapter(case) not in ("exit", "exit77"):  # X3b: only a harness verdict is an engine record
+                    self.assertEqual([r.id for r in recs if r.engine and (r.test or not r.reason)], [],
+                                     "outside the exit-status adapters an engine record is a verdict (a reason, no test)")
 
     def test_every_adapter_has_golden_cases(self) -> None:
         used = {check_adapter(case) for case in CASES}

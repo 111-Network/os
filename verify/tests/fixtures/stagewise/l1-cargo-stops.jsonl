@@ -1,0 +1,19 @@
+{"exit_declared": true}
+{"id": "fx.gate1/fmt", "status": "PASS", "log_line": 1, "phase": "fmt"}
+{"id": "fx.gate1/clippy-host", "status": "PASS", "log_line": 2, "phase": "clippy (host)", "seams": ["L1-X:fx-gate"]}
+{"id": "fx.node.relay/relay_streams_until_done", "status": "PASS", "log_line": 10, "phase": "test (host)", "test": "relay_streams_until_done", "check": "fx.node.relay"}
+{"id": "fx.node.relay/relay_maps_a_problem_code", "status": "FAIL", "assertion": "thread 'relay_maps_a_problem_code' (4242) panicked at tests/api_v1_relay.rs:88:5:\nassertion `left == right` failed: the problem code\n  left: 502\n right: 503", "log_line": 16, "phase": "test (host)", "test": "relay_maps_a_problem_code", "check": "fx.node.relay"}
+{"id": "fx.node.lib", "status": "SKIPPED", "reason": "not reached (cargo stopped at `-p node111 --test api_v1_relay`)", "log_line": 27, "phase": "test (host)", "check": "fx.node.lib"}
+{"id": "fx.node.lib-relay", "status": "SKIPPED", "reason": "not reached (cargo stopped at `-p node111 --test api_v1_relay`)", "log_line": 27, "phase": "test (host)", "check": "fx.node.lib-relay"}
+{"id": "fx.gate1/musl-checks", "status": "SKIPPED", "reason": "musl cross toolchains absent (~/.local/toolchains: x86_64- and aarch64-linux-musl-gcc/-ar) — musl checks SKIPPED", "log_line": 4, "phase": "musl checks"}
+{"id": "fx.gate1/shellcheck", "status": "SKIPPED", "reason": "not reached (stopped at test (host))", "phase": "shellcheck"}
+{"id": "fx.gate1/gate-assertions-hermetic-musl", "status": "SKIPPED", "reason": "not reached (stopped at test (host))", "phase": "gate assertions (hermetic: musl-env.sh self-test, this script's summary + G2 asserts, cross-build UI gate + release asserts)"}
+{"id": "fx.gate1/notices", "status": "SKIPPED", "reason": "not reached (stopped at test (host))", "phase": "notices"}
+{"id": "fx.gate1/notices-generator-tests-go", "status": "SKIPPED", "reason": "not reached (stopped at test (host))", "phase": "notices generator tests (Go / Python-venv / pin paths; SQLCipher + OpenSSL notices)"}
+{"id": "fx.gate1/build-scripts-meshmud-build.sh", "status": "SKIPPED", "reason": "not reached (stopped at test (host))", "phase": "build scripts (meshmud-build.sh / meshtastic-web-build.sh verify paths, hermetic)"}
+{"id": "fx.gate1/systemd-analyze", "status": "SKIPPED", "reason": "not reached (stopped at test (host))", "phase": "systemd-analyze"}
+{"id": "fx.gate1/messaging-mesh111-workspace", "status": "SKIPPED", "reason": "not reached (stopped at test (host))", "phase": "messaging (mesh111 workspace)"}
+{"id": "fx.gate1/g2-sqlcipher-static-link-run", "status": "SKIPPED", "reason": "not reached (stopped at test (host))", "phase": "G2: SQLCipher static link + run (mesh111 tests, musl x86_64)"}
+{"id": "fx.gate1/g2-sqlcipher-static-link-mesh111", "status": "SKIPPED", "reason": "not reached (stopped at test (host))", "phase": "G2: SQLCipher static link (mesh111 tests, musl aarch64; run = external gate G2)"}
+{"id": "fx.gate1/presence-sidecar-meshtastic", "status": "SKIPPED", "reason": "not reached (stopped at test (host))", "phase": "presence sidecar (meshtastic-presence: tests + venv lock structure)"}
+{"id": "fx.gate1/ui", "status": "SKIPPED", "reason": "not reached (stopped at test (host))", "phase": "ui", "seams": ["L4-L5:fx-ui"]}

@@ -1,0 +1,81 @@
+== fmt ==
+== clippy (host) ==
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.40s
+!! musl cross toolchains absent (~/.local/toolchains: x86_64- and aarch64-linux-musl-gcc/-ar) — musl checks SKIPPED
+== test (host) ==
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.31s
+     Running unittests src/lib.rs (/tmp/x3/target/node111/debug/deps/node111-0a1b2c3d4e5f6a7b)
+
+running 3 tests
+test relay::netwatch::tests::a_flap_is_debounced ... ok
+test daemon::config::tests::defaults_hold ... ok
+test daemon::watchdog::tests::interval_is_half ... ignored, needs a NOTIFY_SOCKET
+
+test result: ok. 2 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.02s
+
+     Running tests/api_v1_relay.rs (/tmp/x3/target/node111/debug/deps/api_v1_relay-1f2e3d4c5b6a7980)
+
+running 2 tests
+test relay_streams_until_done ... ok
+test relay_maps_a_problem_code ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.40s
+
+     Running tests/unmapped_bin.rs (/tmp/x3/target/node111/debug/deps/unmapped_bin-99aa88bb77cc66dd)
+
+running 1 test
+test nobody_covers_this ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+== shellcheck ==
+shellcheck not found — SKIPPED
+== gate assertions (hermetic: musl-env.sh self-test, this script's summary + G2 asserts, cross-build UI gate + release asserts) ==
+ok: musl-env.sh — escape hatches unset, CC/AR/linkers pinned (same as messaging), openssl_src_version, sqlcipher_linked, static_elf
+check-gate: ok: every stage ran, G2 on both targets → ALL GREEN
+check-gate: ALL CASES GREEN
+ui-gate: ok: a stale dist is refused before any build
+ui-gate: ALL CASES GREEN
+asserts-gate: ok: a dynamic binary is refused
+asserts-gate: ALL CASES GREEN
+== notices ==
+python3 not found — notices check SKIPPED
+== build scripts (meshmud-build.sh / meshtastic-web-build.sh verify paths, hermetic) ==
+git not found — build-scripts gate SKIPPED
+== systemd-analyze ==
+systemd-analyze or the units absent — SKIPPED
+== messaging (mesh111 workspace) ==
+== fmt ==
+== clippy ==
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.21s
+== test ==
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.15s
+     Running unittests src/lib.rs (/tmp/x3/target/mesh111/debug/deps/mesh111-73e1432ffebbe9f1)
+
+running 1 test
+test ack::tests::canonical_rules ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests/contacts.rs (/tmp/x3/target/mesh111/debug/deps/contacts-4559af941027cb32)
+
+running 1 test
+test node_id_contacts_survive_restarts_until_forgotten ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.10s
+
+   Doc-tests mesh111
+
+running 1 test
+test crates/mesh111/src/store/tx.rs - store::tx::Store::queue_own_message (line 86) - compile ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.16s
+
+!! musl cross toolchains absent (~/.local/toolchains: x86_64- and aarch64-linux-musl-gcc/-ar) — musl checks SKIPPED
+check.sh: green (musl checks SKIPPED)
+!! musl cross toolchains absent — G2 (SQLCipher static link) SKIPPED; REQUIRE_G2=1 makes this a failure
+== presence sidecar (meshtastic-presence: tests + venv lock structure) ==
+python3 not found — sidecar checks SKIPPED
+== ui ==
+pnpm not found — UI checks SKIPPED (4-interface/ui: pnpm check = typecheck + test + build + budget)
+GREEN (G2 SKIPPED — not a lock run); also skipped: musl checks, shellcheck, notices, build-scripts gate, systemd-analyze, presence sidecar, ui
