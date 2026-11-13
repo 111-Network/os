@@ -156,7 +156,7 @@ needs = ["python3"]
 [[check]]
 id = "x.notices.tests-layer5"
 kind = "unit"
-cmd = ["python3", "-I", "-B", "-m", "unittest", "discover", "-s", "scripts/notices/tests"]
+cmd = ["python3", "-I", "-B", "-m", "unittest", "discover", "-v", "-s", "scripts/notices/tests"]
 cwd = "1-bootstrap"
 tier = "fast"
 layers = ["X", 5]
@@ -172,7 +172,7 @@ needs = ["python3"]
 [[check]]
 id = "x.notices.tests-native"
 kind = "unit"
-cmd = ["python3", "-I", "-B", "-m", "unittest", "discover", "-s", "scripts/tests", "-ptest_*.py"]
+cmd = ["python3", "-I", "-B", "-m", "unittest", "discover", "-v", "-s", "scripts/tests", "-ptest_*.py"]
 cwd = "1-bootstrap"
 tier = "fast"
 layers = ["X"]

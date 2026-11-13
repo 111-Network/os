@@ -286,7 +286,7 @@ class Engine:
         needs = sorted({n for c in plan for n in c.needs if n not in hygiene.Probes.NAMED})
         tools = {t: shutil.which(t) is not None for t in sorted(set(DEFAULT_TOOLS) | set(needs))}
         want_ns = any(c.tier == "ns" or {"userns", "netns"} & set(c.needs) for c in plan)
-        tree = hygiene.tree_state(self.cfg.root, self.run_id)
+        tree = hygiene.tree_state(self.cfg.root, self.run_id, self.cfg.scratch)
         return {
             "v": record.RECORD_VERSION, "kind": "run", "run_id": self.run_id, "head": self.head,
             "dirty": None if tree is None else bool(tree), "euid": os.geteuid(), "tools": tools,
@@ -649,7 +649,7 @@ class Engine:
         with self._live_lock:
             self._windows[check.id] = set(self._live) | {check.id}
         before = hygiene.process_keys()
-        tree_before = hygiene.tree_state(self.cfg.root, self.run_id)
+        tree_before = hygiene.tree_state(self.cfg.root, self.run_id, self.cfg.scratch)
 
         def started(pid: int) -> None:  # under _live_lock (run_check holds it across the fork)
             self._live[check.id] = pid
@@ -675,7 +675,7 @@ class Engine:
         if cut and outcome.pump is not None:
             with self._cv:
                 self.notes.append(f"note: {check.id}: {outcome.pump.describe()}")
-        tree_after = hygiene.tree_state(self.cfg.root, self.run_id)
+        tree_after = hygiene.tree_state(self.cfg.root, self.run_id, self.cfg.scratch)
         with self._live_lock:
             window = sorted(self._windows.pop(check.id, {check.id}))
         return Ran(paths, outcome, found, hygiene.tree_diff(tree_before, tree_after), window, cut)

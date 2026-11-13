@@ -13,6 +13,10 @@ SRV_PID=""
 # shellcheck disable=SC2317,SC2329  # invoked via trap
 cleanup() {
 	[ -n "$SRV_PID" ] && kill "$SRV_PID" 2>/dev/null
+	# the fake runsvdir's background sleep(s): it must look alive while the cases run, and nothing outlives the harness
+	if [ -f "$T/fake-runsvdir.pids" ]; then
+		while read -r _p; do kill "$_p" 2>/dev/null; done < "$T/fake-runsvdir.pids"
+	fi
 	rm -rf "$T"
 }
 trap cleanup EXIT
@@ -50,6 +54,7 @@ cat > "$BIN/runsvdir" <<EOF
 echo "runsvdir: \$*" >> "$CALLS"
 touch "$T/runsvdir.up"
 sleep 30 &
+echo "\$!" >> "$T/fake-runsvdir.pids"
 EOF
 chmod 0755 "$BIN/runsvdir"
 

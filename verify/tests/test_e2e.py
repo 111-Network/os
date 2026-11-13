@@ -159,6 +159,29 @@ class Hygiene(unittest.TestCase):
         box2 = Sandbox(self)
         self.assertEqual(box2.run("--check", "fx.writer").returncode, 0)
 
+    def test_tree_ignored_file_written(self) -> None:
+        """R1b: a file a check writes that git ignores (a __pycache__) is a tree finding; a pre-existing ignored file,
+        and a check that writes nothing, are not."""
+        box = Sandbox(self)
+        (box.tree / "fx" / "ignored-dir").mkdir()
+        (box.tree / "fx" / "ignored-dir" / "old.txt").write_text("was here before the run")
+        done = box.run("--check", "fx.ignored")
+        self.assertEqual(done.returncode, 1, done.stdout + done.stderr)
+        rec = by_id(box.results())["hygiene/fx.ignored/tree"]
+        self.assertEqual(rec["status"], "FAIL")
+        self.assertIn("fx/ignored-dir/new.txt", rec["reason"])
+        self.assertNotIn("old.txt", rec["reason"])
+        shared = Sandbox(self)
+        shared.run("--check", "fx.ignored", "--shared-box")
+        srec = by_id(shared.results())["hygiene/fx.ignored/tree"]
+        self.assertEqual(srec["status"], "SKIPPED")
+        self.assertIn("not attributed", srec["reason"])
+        quiet = Sandbox(self)
+        (quiet.tree / "fx" / "ignored-dir").mkdir()
+        (quiet.tree / "fx" / "ignored-dir" / "old.txt").write_text("was here before the run")
+        self.assertEqual(quiet.run("--check", "fx.writer").returncode, 0)
+        self.assertNotIn("hygiene/fx.writer/tree", by_id(quiet.results()))
+
     def test_nothing_written_outside_scratch(self) -> None:
         box = Sandbox(self)
 

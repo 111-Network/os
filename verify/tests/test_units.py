@@ -221,6 +221,30 @@ class HygieneUnits(unittest.TestCase):
         self.assertEqual(hygiene.tree_diff(s1, s1), [])
         self.assertIsNone(hygiene.tree_state(Path("/proc")))
 
+    def test_tree_state_sees_new_ignored_files(self) -> None:
+        d = tmpdir(self)
+        subprocess.run(["git", "init", "-q", "."], cwd=d, check=True, timeout=30)
+        (d / ".gitignore").write_text("cache/\n*.pyc\n")
+        (d / "cache").mkdir()
+        (d / "cache" / "old.bin").write_text("before")  # ignored, there before the check
+        s0 = hygiene.tree_state(d)
+        self.assertEqual(s0["cache/old.bin"], "!!:ignored")
+        self.assertEqual(hygiene.tree_diff(s0, hygiene.tree_state(d)), [], "a pre-existing ignored file is not reported")
+        (d / "cache" / "new.bin").write_text("after")
+        (d / "mod.pyc").write_text("x")
+        self.assertEqual(hygiene.tree_diff(s0, hygiene.tree_state(d)), ["cache/new.bin", "mod.pyc"])
+
+    def test_tree_state_excludes_only_the_given_dir(self) -> None:
+        d = tmpdir(self)
+        subprocess.run(["git", "init", "-q", "."], cwd=d, check=True, timeout=30)
+        (d / "scr").mkdir()
+        s0 = hygiene.tree_state(d, exclude=d / "scr")
+        (d / "scr" / "a.txt").write_text("1")
+        (d / "scrap.txt").write_text("2")  # a sibling whose name starts like the excluded dir is not excluded
+        self.assertEqual(hygiene.tree_diff(s0, hygiene.tree_state(d, exclude=d / "scr")), ["scrap.txt"])
+        self.assertEqual(hygiene.tree_diff(s0, hygiene.tree_state(d)), ["scr/a.txt", "scrap.txt"])
+        self.assertEqual(hygiene.tree_state(d, exclude=Path("/nonexistent-elsewhere")), hygiene.tree_state(d))
+
     def test_port_holders(self) -> None:
         sock = socket.socket()
         self.addCleanup(sock.close)

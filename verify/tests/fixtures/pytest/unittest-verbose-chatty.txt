@@ -1,0 +1,8 @@
+test_after (test_chatty.Chatty.test_after) ... ok
+test_chatty (test_chatty.Chatty.test_chatty) ... noise without a newlineok
+test_quiet (test_chatty.Chatty.test_quiet) ... ok
+
+----------------------------------------------------------------------
+Ran 3 tests in 0.000s
+
+OK

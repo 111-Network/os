@@ -128,6 +128,8 @@ CASES: dict[str, tuple[str, int]] = {
     # pytest / unittest
     "pytest/unittest-red": ("fx.py", 1),
     "pytest/unittest-red-verbose": ("fx.py", 1),
+    "pytest/unittest-verbose-doc-red": ("fx.py", 1),
+    "pytest/unittest-verbose-chatty": ("fx.py", 0),
     "pytest/unittest-green-skip": ("fx.py", 0),
     "pytest/presence-sidecar-green": ("fx.py", 0),
     "pytest/pytest-red-rs": ("fx.py", 1),

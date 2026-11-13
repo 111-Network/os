@@ -1161,7 +1161,9 @@ def vitest_adapter(check: Check, log: Path, status: int, ctx: AdapterContext) ->
 # pytest / unittest
 
 
-_UT_VERBOSE_RE = re.compile(r"^(?P<name>\w+) \((?P<cls>[\w.]+)\)(?: \[.*\])? \.\.\. (?P<rest>.*)$")
+_UT_VERBOSE_RE = re.compile(r"^(?P<name>\w+) \((?P<cls>[\w.]+)\)(?P<sub> \[.*\])? \.\.\. (?P<rest>.*)$")
+_UT_PENDING_RE = re.compile(r"^(?P<name>\w+) \((?P<cls>[\w.]+)\)$")  # a test with a docstring: the result is on the next line
+_UT_DOC_RESULT_RE = re.compile(r"^.* \.\.\. (?P<rest>ok|FAIL|ERROR|expected failure|unexpected success|skipped\b.*)$")
 _UT_HEAD_RE = re.compile(r"^(?P<kind>FAIL|ERROR): (?P<name>\w+) \((?P<cls>[\w.]+)\)")
 _UT_RAN_RE = re.compile(r"^Ran (?P<n>\d+) tests? in ")
 _UT_END_RE = re.compile(r"^(?P<res>OK|FAILED|NO TESTS RAN)(?: \((?P<extra>.*)\))?\s*$")
@@ -1204,6 +1206,8 @@ class PyTests:
         self.skip_counts: list[int] = []
         self.verbose_skips = 0
         self.ok_results = 0
+        self.result_lines = 0  # per-test result lines of the current run (unittest -v), the cross-check of "Ran N tests"
+        self.pending: tuple[str, str] | None = None
         self.py_section: tuple[str, int, list[str]] | None = None
         self.py_blocks: dict[str, tuple[str | None, int]] = {}
 
@@ -1226,8 +1230,12 @@ class PyTests:
             return
         key, no, lines = self.block
         body = lines
-        if body and re.match(r"^-{20,}$", body[0]):
-            body = body[1:]
+        for at, ln in enumerate(body):  # the rule under the header (after a docstring line, if the test has one)
+            if re.match(r"^-{20,}$", ln):
+                body = body[:at] + body[at + 1:]
+                break
+            if ln.startswith("Traceback (most recent call last):"):
+                break
         reason = "error" if self.block_kind == "ERROR" else None
         self.put(key, "FAIL", assertion=exception_text(body), log_line=no, reason=reason)
         self.block = None
@@ -1244,7 +1252,12 @@ class PyTests:
                 self.py_section[2].append(text)
                 return
         if self.block is not None:
-            if re.match(r"^={20,}$", text) or (re.match(r"^-{20,}$", text) and self.block[2]):
+            seen = self.block[2]
+            # a dashes line ends the block once the traceback (or the header's own dashes) is behind it; before that
+            # it is the rule under the header, which a test's docstring line may precede
+            closes = bool(re.match(r"^-{20,}$", text)) and any(
+                ln.startswith("Traceback (most recent call last):") or re.match(r"^-{20,}$", ln) for ln in seen)
+            if re.match(r"^={20,}$", text) or closes:
                 self._end_block()
                 if re.match(r"^-{20,}$", text):
                     return
@@ -1257,9 +1270,16 @@ class PyTests:
             self.block = (_ut_name(m.group("name"), m.group("cls")), no, [])
             return
         m = _UT_VERBOSE_RE.match(text)
-        if m:
-            key = _ut_name(m.group("name"), m.group("cls"))
-            rest = m.group("rest").strip()
+        pending, self.pending = self.pending, None
+        doc = _UT_DOC_RESULT_RE.match(text) if m is None and pending is not None else None
+        if m or doc:
+            if m:
+                key, rest = _ut_name(m.group("name"), m.group("cls")), m.group("rest").strip()
+                counted = not m.group("sub")  # a subtest line is not a test of the "Ran N tests" count
+            else:
+                key, rest, counted = _ut_name(*pending), doc.group("rest").strip(), True
+            known = rest in ("ok", "expected failure", "FAIL", "ERROR", "unexpected success") or rest.startswith("skipped")
+            self.result_lines += 1 if counted and known else 0  # a line with other text after "..." is no result
             if rest == "ok" or rest == "expected failure":
                 self.put(key, "PASS", log_line=no)
                 self.ok_results += 1
@@ -1269,6 +1289,10 @@ class PyTests:
                 why = rest[len("skipped"):].strip().strip("'\"")
                 self.put(key, "SKIPPED", log_line=no, reason=f"skipped: {why}" if why else "skipped")
                 self.verbose_skips += 1
+            return
+        m = _UT_PENDING_RE.match(text)
+        if m:
+            self.pending = (m.group("name"), m.group("cls"))
             return
         m = _UT_RAN_RE.match(text)
         if m:
@@ -1313,6 +1337,11 @@ class PyTests:
     def _close_run(self, no: int, res: str, skipped: int) -> None:
         self._end_block()
         self.ended += 1
+        if self.result_lines and self.ran is not None and self.result_lines != self.ran:
+            self.recs.append(self.scope.record("harness", "FAIL", log_line=no, engine=True, reason=(
+                f"the log has {self.result_lines} per-test result line(s) but the summary says 'Ran {self.ran} tests': "
+                "the parse and the run disagree")))
+        self.result_lines = 0
         if res == "NO TESTS RAN" or self.ran == 0:
             self.recs.append(self.scope.record(None if self.scope.unit_run or self.scope.owner else "run", "FAIL",
                                                reason="no tests ran", log_line=no))

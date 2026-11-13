@@ -65,6 +65,16 @@ strength = "I"
 timeout_s = 30
 
 [[check]]
+id = "fx.ignored"
+kind = "unit"
+cmd = ["sh", "fx/ignored.sh"]
+tier = "fast"
+layers = [1]
+seams = ["L1-L2:fx-alpha"]
+strength = "I"
+timeout_s = 30
+
+[[check]]
 id = "fx.writer"
 kind = "unit"
 cmd = ["sh", "fx/writer.sh"]

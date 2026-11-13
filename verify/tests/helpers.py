@@ -33,6 +33,8 @@ FX_SCRIPTS: dict[str, str] = {
     "hang.sh": "echo 'started, now hanging'\nsleep 30\necho 'never printed'\n",
     "leak.sh": "sleep 300 &\nsetsid sleep 301 &\nsleep 0.5\necho 'left two sleepers behind'\n",
     "dirty.sh": "echo dirt > fx-dirty.txt\necho 'wrote into the tree'\n",
+    ".gitignore": "ignored-dir/\n",
+    "ignored.sh": "mkdir -p fx/ignored-dir\necho cache > fx/ignored-dir/new.txt\necho 'wrote an ignored file into the tree'\n",
     "writer.sh": "mktemp >/dev/null\necho data > \"$T111_SCRATCH/own.txt\"\necho data > \"$TMPDIR/t.txt\"\n",
     "stamp.sh": ("python3 -I fx/stamp.py \"$EVENTS\" start \"$T111_CHECK\"\nsleep 0.4\n"
                  "python3 -I fx/stamp.py \"$EVENTS\" end \"$T111_CHECK\"\n"),
