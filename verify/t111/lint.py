@@ -1,30 +1,42 @@
 """The seam map's lint (``python3 -I verify/run.py --lint``; options.md §3.5; catalog check ``x.seams.lint``).
 
-It holds ``verify/seams.toml`` and ``verify/checks.toml`` to the tree. Seven rules fail, two things only warn. Every
+It holds ``verify/seams.toml`` and ``verify/checks.toml`` to the tree. Eight rules fail, two things only warn. Every
 rule is one function with a stable id (``RULES``); a finding names the rule, the subject (a seam id, a check id or a
 path) and what is wrong.
 
 Failing rules:
 
 - ``ids``           an id is duplicated, or does not match its layers (a seam ``L3-L4:x`` joins layers 3 and 4, a check
-                    ``l4.x`` touches layer 4, ``x.x`` layer ``X``);
-- ``files``         a side file, a check's script or test file (a path in its ``cmd``, or its ``cwd``), a ``[[unmapped]]``
-                    path or a spec file is missing, or a ``§N.M`` reference matches no heading line of its file (unnumbered
-                    sections match by heading text, ``"<path> Updates & rollback"``). A ``planned`` seam is not held to the
-                    tree (its files and spec may not exist yet);
+                    ``l4.x`` touches layer 4, ``x.x`` layer ``X``; a check id with no ``l<N>.`` or ``x.`` prefix fails);
+- ``files``         a side file, a check's script or test file (a path in its ``cmd``, or its ``cwd``; also the script a
+                    ``sh -c "<script> ..."`` token starts with), a ``[[unmapped]]`` path or a spec file is missing, or a
+                    ``§N.M`` reference matches no section of its file. A section is a heading line, or a bold lead (a
+                    line that starts, after an optional ``- ``, with ``**9.4 The KB**``, ``**Binds:**``); a number
+                    matches a heading carrying it or a lead starting with it, a name matches any heading or lead
+                    containing it (``"<path> Updates & rollback"``). A ``planned`` seam is not held to the tree (its
+                    files and spec may not exist yet);
 - ``unknown-seam``  a check names a seam (``seams`` or ``phases``) that is not in the map;
 - ``unclaimed``     a file matched by ``UNCLAIMED_GLOBS`` is claimed by no check and absent from ``[unmapped]``. A check
                     claims a file when a ``cmd`` token resolves to it (from the check's ``cwd``), to a directory holding it,
                     or when it is a ``cargo test`` whose ``--test`` names it (or, with no ``--test``, whose package or
-                    manifest scope holds it);
+                    manifest scope holds it; a ``--lib``, ``--doc``, ``--bin(s)`` or ``--example(s)`` run with no
+                    ``--test`` claims no ``tests/*.rs``). A ``cmd`` token with ``*``, ``?`` or ``[`` is a pattern, not a
+                    path;
 - ``built-gap``     a ``built`` seam has no proving check, or (``GAP_NEEDS_R``) none of strength R, and no ``gap`` text;
 - ``fake-mirror``   a ``[[fake]]`` names an unknown seam, a missing file, a mirrored side with no files, or an unknown
                     parity check;
 - ``pi-floor``      a path under the root ``verify/`` is named by ``PI_FLOOR_PATHS`` (the release payload's manifest
-                    generator and the cross build): the test system never ships on a node.
+                    generator and the cross build), or a ``PI_FLOOR_PATHS`` entry is missing from the tree: the test
+                    system never ships on a node;
+- ``known``         a ``[[known]]`` whose ``check`` names no check, whose ``test`` pattern starts with a check prefix that
+                    matches no check, or whose ``source`` file does not exist.
 
-Warnings (``note:`` lines, never a failure): ``stub-marker`` (a ``stub`` seam's side file lost its T0 marker, or a
-``planned`` seam's side file has appeared: promote the row) and ``fake-parity`` (the count of fakes with
+One glob reading for every map path (a side file, an ``[unmapped]`` entry, ``UNCLAIMED_GLOBS``; ``glob_match`` and
+``glob_paths``): ``*``, ``?`` and ``[..]`` stay inside one path segment, ``**`` as a whole segment crosses any number of
+segments; a glob entry also matches everything below a directory it matches, as a plain directory entry does.
+
+Warnings (``note:`` lines, never a failure): ``stub-marker`` (a ``stub`` seam none of whose side files carries the T0
+marker, or a ``planned`` seam's side file has appeared: promote the row) and ``fake-parity`` (the count of fakes with
 ``parity = "none"``). A map that does not load fails as rule ``schema`` (the loader's own messages); duplicate ids are
 reported under ``ids`` and dropped so the other rules still run.
 
@@ -43,7 +55,7 @@ import sys
 import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Iterable, Mapping
+from typing import Any, Iterable, Mapping, NamedTuple
 
 from .record import Record
 from .schema import Check, MapError, SchemaError, SeamMap, load_map, parse_map
@@ -59,6 +71,7 @@ RULES: tuple[tuple[str, str], ...] = (
     ("built-gap", "every built seam has a proving check of strength R or says its gap"),
     ("fake-mirror", "every [[fake]] names a real seam, file, mirrored side and parity check"),
     ("pi-floor", "nothing the release payload or the cross build names lives under verify/"),
+    ("known", "every [[known]] names a real check and an existing source file"),
 )
 """The failing rules in order: stable id, one line. The header of each block is ``== <n>. <id>``."""
 
@@ -70,6 +83,7 @@ WARNINGS: tuple[str, ...] = ("stub-marker", "fake-parity")
 
 UNCLAIMED_GLOBS: tuple[str, ...] = (
     "[0-9]-*/verify/*.sh",
+    "[0-9]-*/verify/*/*.sh",
     "1-bootstrap/crates/node111/tests/*.rs",
     "5-messaging/crates/mesh111/tests/*.rs",
     "2-identity/crates/id111/tests/*.rs",
@@ -77,10 +91,12 @@ UNCLAIMED_GLOBS: tuple[str, ...] = (
     "4-interface/ui/test/*.test.ts",
     "[0-9]-*/sidecars/*/run-tests.sh",
 )
-"""Rule ``unclaimed``: the files that must be claimed by a check or listed in ``[unmapped]`` (repo-relative globs)."""
+"""Rule ``unclaimed``: the files that must be claimed by a check or listed in ``[unmapped]`` (repo-relative globs, read
+as ``glob_paths`` reads them: ``*`` is one path segment; ``verify/*/*.sh`` is one level deeper than ``verify/*.sh``)."""
 
 PI_FLOOR_PATHS: tuple[str, ...] = ("1-bootstrap/manifest", "1-bootstrap/scripts/cross-build.sh")
-"""Rule ``pi-floor``: files and directories (searched recursively) that must not name any path under ``verify/``."""
+"""Rule ``pi-floor``: files and directories (searched recursively) that must not name any path under ``verify/``. An
+entry missing from the tree fails the rule (a renamed generator would otherwise pass on nothing)."""
 
 PI_FLOOR_MAX_BYTES = 2_000_000
 """A file larger than this is not searched by ``pi-floor`` (it is no script)."""
@@ -99,6 +115,8 @@ SCRIPT_EXTS: tuple[str, ...] = (".sh", ".py", ".mjs", ".cjs", ".js", ".ts", ".rs
 _PLACEHOLDER = re.compile(r"\{[a-z_]+\}")
 _SECTION = re.compile(r"§\s*([A-Za-z]?\d+(?:\.\d+)*)")
 _HEADING = re.compile(r"^#{1,6}\s+(.*?)\s*#*\s*$")
+_BOLD_LEAD = re.compile(r"^\s*(?:[-*+]\s+)?\*\*(\S.*)$")
+_KNOWN_LINE = re.compile(r":\d+(?:-\d+)?$")
 _SEAM_ID_LAYERS = re.compile(r"^(?:(L[\d/L]+|X)-(L[\d/L]+|X)|X):")
 _CHECK_ID_LAYER = re.compile(r"^(?:l(\d)|(x))\.")
 
@@ -150,11 +168,67 @@ def _warn(rule: str, subject: str, message: str) -> Finding:
 # tree helpers
 
 
+def has_glob(entry: str) -> bool:
+    """True when a map path carries a glob character (``*``, ``?``, ``[``)."""
+    return any(c in entry for c in "*?[")
+
+
+def _match_segments(pattern: list[str], parts: list[str]) -> bool:
+    if not pattern:
+        return not parts
+    head, rest = pattern[0], pattern[1:]
+    if head == "**":
+        return any(_match_segments(rest, parts[i:]) for i in range(len(parts) + 1))
+    return bool(parts) and fnmatch.fnmatchcase(parts[0], head) and _match_segments(rest, parts[1:])
+
+
+def glob_match(pattern: str, path: str) -> bool:
+    """The one glob of the map: ``pattern`` matches the whole of ``path`` (both repo-relative, ``/``-separated).
+    ``*``, ``?`` and ``[..]`` never cross a ``/``; a segment that is exactly ``**`` matches any number of segments
+    (none too)."""
+    return _match_segments([s for s in pattern.split("/") if s], [s for s in path.split("/") if s])
+
+
+def glob_paths(root: Path, pattern: str) -> Iterable[Path]:
+    """Every path under ``root`` that ``glob_match`` accepts for ``pattern`` (the same reading, walking the tree one
+    segment at a time; a ``**`` descends through real directories only, never through a symlink)."""
+
+    def walk(base: Path, segs: list[str]) -> Iterable[Path]:
+        if not segs:
+            if base.exists():
+                yield base
+            return
+        head, rest = segs[0], segs[1:]
+        if head == "**":
+            yield from walk(base, rest)
+            for child in _children(base):
+                if child.is_dir() and not child.is_symlink():
+                    yield from walk(child, segs)
+                elif not rest:
+                    yield child  # a trailing ** matches files too
+        elif not has_glob(head):
+            if (base / head).exists():
+                yield from walk(base / head, rest)
+        else:
+            for child in _children(base):
+                if fnmatch.fnmatchcase(child.name, head):
+                    yield from walk(child, rest)
+
+    yield from walk(root, [s for s in pattern.split("/") if s])
+
+
+def _children(base: Path) -> list[Path]:
+    try:
+        return sorted(base.iterdir())
+    except OSError:
+        return []
+
+
 def _candidates(root: Path) -> list[str]:
     """The repo-relative posix paths of every file ``UNCLAIMED_GLOBS`` matches, sorted."""
     found: set[str] = set()
     for pattern in UNCLAIMED_GLOBS:
-        for path in root.glob(pattern):
+        for path in glob_paths(root, pattern):
             if path.is_file():
                 found.add(path.relative_to(root).as_posix())
     return sorted(found)
@@ -168,9 +242,18 @@ def _rel(path: Path, root: Path) -> str | None:
         return None
 
 
-def _headings(path: Path) -> list[str]:
-    """The heading texts of a Markdown file (``#`` lines outside code fences)."""
-    out: list[str] = []
+class Anchors(NamedTuple):
+    """What a Markdown spec offers as sections: ``headings`` (the ``#`` lines) and ``leads`` (the bold lead-in of a line
+    that starts with ``**``, optionally after ``- ``: ``**9.4 The KB**`` gives ``9.4 The KB``, ``**Binds:**`` gives
+    ``Binds:``, ``- **Probation (the actor ...):** text`` gives ``Probation (the actor ...):``)."""
+
+    headings: list[str]
+    leads: list[str]
+
+
+def _anchors(path: Path) -> Anchors:
+    """The headings and bold leads of a Markdown file (lines outside code fences)."""
+    out = Anchors([], [])
     fence = False
     for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
         if line.lstrip().startswith(("```", "~~~")):
@@ -180,7 +263,13 @@ def _headings(path: Path) -> list[str]:
             continue
         m = _HEADING.match(line)
         if m:
-            out.append(m.group(1))
+            out.headings.append(m.group(1))
+            continue
+        lead = _BOLD_LEAD.match(line)
+        if lead:
+            body = lead.group(1)
+            end = body.find("**")
+            out.leads.append(body[:end] if end >= 0 else body.split(":", 1)[0] + (":" if ":" in body else ""))
     return out
 
 
@@ -198,11 +287,18 @@ def section_matches(heading: str, number: str) -> bool:
     return re.search(r"(?<![\w.])" + re.escape(number) + r"(?!\w)", heading) is not None
 
 
+def lead_matches(lead: str, number: str) -> bool:
+    """True when a bold lead starts with the section number ``number`` (``9.4`` in ``9.4 The KB``, ``§9.4``, also
+    ``9.4.1``; never ``19.4`` or ``9.45``): a lead is a section anchor only by its first words, a number inside a
+    sentence is not."""
+    return re.match(r"\s*§?\s*" + re.escape(number) + r"(?!\w)", lead) is not None
+
+
 def _unquote(text: str) -> str:
     return text.strip().strip("\"'`“”‘’ ").strip()
 
 
-def _spec_problems(ref: str, root: Path, cache: dict[str, list[str]]) -> list[str]:
+def _spec_problems(ref: str, root: Path, cache: dict[str, Anchors]) -> list[str]:
     """What is wrong with one spec reference (empty list = resolves)."""
     rel, rest = split_spec(ref)
     if not rel:
@@ -213,17 +309,18 @@ def _spec_problems(ref: str, root: Path, cache: dict[str, list[str]]) -> list[st
     if not rest:
         return []
     if rel not in cache:
-        cache[rel] = _headings(path) if rel.lower().endswith((".md", ".markdown")) else []
-    heads = cache[rel]
+        cache[rel] = _anchors(path) if rel.lower().endswith((".md", ".markdown")) else Anchors([], [])
+    anchors = cache[rel]
     sections = _SECTION.findall(rest)
     problems: list[str] = []
     if sections:
         for number in sections:
-            if not any(section_matches(h, number) for h in heads):
+            if not (any(section_matches(h, number) for h in anchors.headings)
+                    or any(lead_matches(lead, number) for lead in anchors.leads)):
                 problems.append(f"{rel} has no heading for §{number}")
         return problems
     wanted = " ".join(_unquote(rest).lower().split())
-    if wanted and not any(wanted in " ".join(h.lower().split()) for h in heads):
+    if wanted and not any(wanted in " ".join(h.lower().split()) for h in (*anchors.headings, *anchors.leads)):
         problems.append(f"{rel} has no heading containing {_unquote(rest)!r}")
     return problems
 
@@ -233,7 +330,8 @@ def _spec_problems(ref: str, root: Path, cache: dict[str, list[str]]) -> list[st
 
 
 def _tokens(check: Check) -> list[str]:
-    """The ``cmd`` tokens that can name a file: before any bare ``--``, no placeholders, option values unpacked."""
+    """The ``cmd`` tokens that can name a file: before any bare ``--``, no placeholders, option values unpacked. A
+    token with ``*``, ``?`` or ``[`` is a pattern for the tool (``test_*.py``), not a path, and is left out."""
     out: list[str] = []
     for token in check.cmd:
         if token == "--":
@@ -242,9 +340,30 @@ def _tokens(check: Check) -> list[str]:
             if "=" not in token or not token.startswith("--"):
                 continue
             token = token.split("=", 1)[1]
-        if not token or any(c.isspace() for c in token):
+        if not token or any(c.isspace() for c in token) or has_glob(token):
             continue
         out.append(token)
+    return out
+
+
+_SHELL_C = re.compile(r"^-[a-z]*c$")
+
+
+def _shell_scripts(check: Check) -> list[str]:
+    """The script a ``sh -c "<script> args"`` token starts with: the first word of a token that follows ``-c`` (or
+    ``-lc``, ``-ec``), when it ends in ``SCRIPT_EXTS`` (a path that exists is checked too, below). Words with a
+    placeholder or a glob character are left out."""
+    out: list[str] = []
+    cmd = list(check.cmd)
+    if "--" in cmd:
+        cmd = cmd[: cmd.index("--")]
+    for before, token in zip(cmd, cmd[1:]):
+        if not _SHELL_C.match(before) or not any(c.isspace() for c in token.strip()):
+            continue
+        words = token.split()
+        first = words[0].strip("\"'") if words else ""
+        if first and not has_glob(first) and not first.startswith(("-", "$")):
+            out.append(first)
     return out
 
 
@@ -261,13 +380,18 @@ def _resolve(check: Check, token: str, root: Path) -> Path | None:
 
 
 def check_files(check: Check, root: Path) -> list[tuple[str, Path]]:
-    """The files a check needs: ``cmd`` tokens ending in ``SCRIPT_EXTS`` with the path each resolves to."""
+    """The files a check needs: ``cmd`` tokens ending in ``SCRIPT_EXTS`` with the path each resolves to, and the script
+    a ``sh -c "<script> ..."`` token starts with (when it ends in ``SCRIPT_EXTS`` or names a path that exists)."""
     out: list[tuple[str, Path]] = []
     for token in _tokens(check):
         if token.endswith(SCRIPT_EXTS):
             path = _resolve(check, token, root)
             if path is not None:
                 out.append((token, path))
+    for first in _shell_scripts(check):
+        path = _resolve(check, first, root)
+        if path is not None and (first.endswith(SCRIPT_EXTS) or path.exists()) and (first, path) not in out:
+            out.append((first, path))
     return out
 
 
@@ -284,8 +408,12 @@ def _cargo_claims(check: Check, candidates: Iterable[str]) -> set[str]:
     tests: list[str] = []
     pkgs: list[str] = []
     manifest = ""
+    non_integration = False
     it = iter(args)
     for arg in it:
+        if arg in ("--lib", "--doc", "--bin", "--bins", "--example", "--examples") or arg.startswith(
+                ("--bin=", "--example=")):
+            non_integration = True
         if arg == "--test":
             tests.append(next(it, ""))
         elif arg.startswith("--test="):
@@ -298,6 +426,8 @@ def _cargo_claims(check: Check, candidates: Iterable[str]) -> set[str]:
             manifest = next(it, "")
         elif arg.startswith("--manifest-path="):
             manifest = arg.split("=", 1)[1]
+    if non_integration and not tests and "--tests" not in args:
+        return set()  # --lib, --doc, --bin(s), --example(s) run no tests/*.rs file
     scope = ""
     if manifest:
         parent = Path(check.cwd, manifest).parent.as_posix()
@@ -342,11 +472,16 @@ def claimed_files(check: Check, root: Path, candidates: Iterable[str]) -> set[st
 
 
 def matches_entry(entry: str, path: str) -> bool:
-    """An ``[unmapped]`` entry matches a path: exactly, as a directory prefix, or as a glob."""
+    """A map path entry (``[unmapped]``, a seam's side file) matches a path: exactly, as a directory prefix, or as a
+    glob in the one reading of ``glob_match`` (``*`` is one segment, ``**`` crosses segments); a glob also matches
+    everything below a directory it matches."""
     entry = entry.rstrip("/")
     if path == entry or path.startswith(entry + "/"):
         return True
-    return any(c in entry for c in "*?[") and fnmatch.fnmatchcase(path, entry)
+    if not has_glob(entry):
+        return False
+    parts = [p for p in path.split("/") if p]
+    return any(glob_match(entry, "/".join(parts[:i])) for i in range(1, len(parts) + 1))
 
 
 def proving_checks(seam_map: SeamMap, seam_id: str) -> list[Check]:
@@ -390,6 +525,9 @@ def rule_ids(seam_map: SeamMap, root: Path) -> list[Finding]:
     for check in seam_map.checks:
         m = _CHECK_ID_LAYER.match(check.id)
         if not m:
+            out.append(_fail("ids", check.id, "the id has no layer prefix (l<N>. for a layer, x. for the cross-layer "
+                                              "system), so it cannot be held to layers = "
+                                              f"{list(check.layers)}"))
             continue
         layer: Any = int(m.group(1)) if m.group(1) is not None else "X"
         if layer not in check.layers:
@@ -428,7 +566,7 @@ def _duplicates(seams_doc: Mapping[str, Any], checks_doc: Mapping[str, Any]) -> 
 def rule_files(seam_map: SeamMap, root: Path) -> list[Finding]:
     """Rule ``files``: side files, check scripts and test files, ``[unmapped]`` paths, spec files and sections."""
     out: list[Finding] = []
-    cache: dict[str, list[str]] = {}
+    cache: dict[str, Anchors] = {}
     for seam in seam_map.seams:
         if seam.status == "planned":
             continue
@@ -454,8 +592,8 @@ def rule_files(seam_map: SeamMap, root: Path) -> list[Finding]:
 
 def _entry_exists(entry: str, root: Path) -> bool:
     """A map path exists: a file or directory, or a glob that matches at least one path."""
-    if any(c in entry for c in "*?["):
-        return any(True for _ in root.glob(entry))
+    if has_glob(entry):
+        return any(True for _ in glob_paths(root, entry))
     return (root / entry).exists()
 
 
@@ -523,36 +661,67 @@ def rule_fake_mirror(seam_map: SeamMap, root: Path) -> list[Finding]:
 
 
 _PATH_CHAR = re.compile(r"[\w.\-]")
+_VERIFY_WORD = re.compile(r"(?<![\w.\-])verify(?![\w\-])")
+_JOIN_CONTEXT = re.compile(r"join\(|Path\(|/\s*[\"']verify[\"']")
+_COPY_COMMAND = re.compile(r"^\s*(?:sudo\s+)?(?:cp|mv|rsync|tar|install|ln|zip)\s")
+_COMPONENT = re.compile(r"[^\s/=:(,\"']+$")
+
+
+def _root_prefix(before: str) -> bool:
+    """True when ``before`` (the text ahead of ``verify``, ending in ``/``) names the repo root: ``./``, ``../``, a
+    variable (``$ROOT/``, ``"${REPO}"/``, ``{root}/``) or a command substitution (``$(git rev-parse ...)/``)."""
+    head = before[:-1].rstrip("\"'")
+    comp = _COMPONENT.search(head)
+    name = comp.group(0) if comp else ""
+    if name in (".", "..") or "$" in name or name.endswith("}"):
+        return True
+    return head.endswith((")", "`")) and ("$(" in head or "`" in head)
 
 
 def verify_hits(text: str) -> list[tuple[int, str]]:
     """The ``(line, snippet)`` of every mention of a path under the root ``verify/`` in ``text``.
 
-    ``verify/x`` at the start of a word, after ``./``, ``../`` or after a variable (``$ROOT/``, ``${REPO}/``) is a hit;
-    ``4-interface/verify/x`` and ``my-verify/x`` (a layer's own verify folder, a longer word) are not.
+    ``verify`` counts as a whole path part, in these forms: ``verify/x`` at the start of a word; after ``./``, ``../``, a
+    variable, a quoted variable or a ``$(...)`` (``$ROOT/verify/x``, ``"$ROOT"/verify/x``, ``"$ROOT/verify"``,
+    ``../verify``, ``$(git rev-parse --show-toplevel)/verify/x``); a quoted ``"verify"`` argument of ``os.path.join(...)``,
+    ``Path(...)`` or ``/ "verify"``; the bare directory handed to ``cp``, ``mv``, ``rsync``, ``tar``, ``install``, ``ln``
+    or ``zip``. ``4-interface/verify/x`` and ``my-verify/x`` (a layer's own verify folder, a longer word), a ``verify``
+    in prose and a lone ``verify/`` are not hits.
     """
     hits: list[tuple[int, str]] = []
     for number, line in enumerate(text.splitlines(), 1):
-        for m in re.finditer(r"verify/[\w.\-]", line):
-            before = line[: m.start()]
-            if before and _PATH_CHAR.match(before[-1]):
-                continue
-            if before.endswith("/"):
-                comp = re.search(r"([^\s/\"'=:(]*)/$", before)
-                name = comp.group(1) if comp else ""
-                if not (name in (".", "..") or "$" in name or name.endswith("}")):
-                    continue
+        if any(_is_verify_path(line, m) for m in _VERIFY_WORD.finditer(line)):
             hits.append((number, line.strip()[:120]))
-            break
     return hits
 
 
+def _is_verify_path(line: str, m: re.Match[str]) -> bool:
+    """True when the ``verify`` word ``m`` found in ``line`` is the root ``verify/`` directory (see ``verify_hits``)."""
+    before, after = line[: m.start()], line[m.end():]
+    if after[:1] == "." and after[1:2] and (after[1].isalnum() or after[1] == "_"):
+        return False  # verify.sh and the like: a file, not the directory
+    if before.endswith("/"):
+        return _root_prefix(before)
+    if after[:1] == "/" and after[1:2] and _PATH_CHAR.match(after[1]):
+        return True  # verify/x at the start of a word
+    if before[-1:] in ("\"", "'") and after[:1] == before[-1:] and _JOIN_CONTEXT.search(line):
+        anchor = max(before.rfind("join("), before.rfind("Path("))
+        literals = before[anchor if anchor >= 0 else 0:][:-1]
+        # join(root, "verify", ...) is the root verify/; join(root, "6-transport", "verify") is a layer's own
+        return not re.search(r"[\"']", literals)
+    return bool(_COPY_COMMAND.match(line)) and (not before.strip() or before[-1:].isspace() or before[-1:] in "\"'")
+
+
 def rule_pi_floor(seam_map: SeamMap, root: Path) -> list[Finding]:
-    """Rule ``pi-floor``: ``PI_FLOOR_PATHS`` name nothing under the root ``verify/``."""
+    """Rule ``pi-floor``: ``PI_FLOOR_PATHS`` name nothing under the root ``verify/`` (and each exists)."""
     out: list[Finding] = []
     for entry in PI_FLOOR_PATHS:
         base = root / entry
-        files = [base] if base.is_file() else sorted(p for p in base.rglob("*") if p.is_file()) if base.is_dir() else []
+        if not base.exists():
+            out.append(_fail("pi-floor", entry, "is named by PI_FLOOR_PATHS but is missing from the tree (renamed or "
+                                                "moved? update lint.PI_FLOOR_PATHS: the rule passes on nothing)"))
+            continue
+        files = [base] if base.is_file() else sorted(p for p in base.rglob("*") if p.is_file())
         for path in files:
             try:
                 if path.stat().st_size > PI_FLOOR_MAX_BYTES:
@@ -567,6 +736,27 @@ def rule_pi_floor(seam_map: SeamMap, root: Path) -> list[Finding]:
     return out
 
 
+def rule_known(seam_map: SeamMap, root: Path) -> list[Finding]:
+    """Rule ``known``: a ``[[known]]`` that can never match (a ``vacuous`` entry with a typo keeps a PASS that proves
+    nothing) or whose source is gone: ``check`` names no check, the check prefix of ``test`` (the text before its first
+    ``/``, a glob allowed) matches no check, ``source`` (``<file>[:line]``, first word) is not a file of the tree."""
+    out: list[Finding] = []
+    ids = [c.id for c in seam_map.checks]
+    for known in seam_map.known:
+        if known.check and seam_map.check(known.check) is None:
+            out.append(_fail("known", known.test, f"check names {known.check!r}, which is not in checks.toml"))
+        prefix = known.test.split("/", 1)[0]
+        if not any(fnmatch.fnmatchcase(i, prefix) for i in ids):
+            out.append(_fail("known", known.test, f"the check prefix {prefix!r} of test matches no check in "
+                                                  f"checks.toml"))
+        words = known.source.split()
+        source = _KNOWN_LINE.sub("", words[0]) if words else ""
+        if not source or not (root / source).is_file():
+            out.append(_fail("known", known.test, f"source {known.source!r}: {source or 'no path'} is not a file of "
+                                                  f"the tree"))
+    return out
+
+
 RULE_FUNCS = {
     "ids": rule_ids,
     "files": rule_files,
@@ -575,29 +765,35 @@ RULE_FUNCS = {
     "built-gap": rule_built_gap,
     "fake-mirror": rule_fake_mirror,
     "pi-floor": rule_pi_floor,
+    "known": rule_known,
 }
 """Rule id -> function ``(seam_map, root) -> list[Finding]``, one per entry of ``RULES``."""
 
 
 def warn_stub_marker(seam_map: SeamMap, root: Path) -> list[Finding]:
-    """Warning ``stub-marker``: a stub's side file lost its T0 marker, or a planned seam's side file appeared."""
+    """Warning ``stub-marker``: a planned seam's side file appeared, or a stub seam none of whose side files carries
+    the T0 marker (a mixed seam, one side built and the other still a T0 stub, is a stub that keeps its marker)."""
     out: list[Finding] = []
     for seam in seam_map.seams:
         if seam.status not in ("stub", "planned"):
             continue
-        for name in ("a", "b"):
-            for rel in seam.side(name).files:
-                path = root / rel
-                if not path.is_file():
-                    continue
-                if seam.status == "planned":
-                    out.append(_warn("stub-marker", seam.id, f"planned, but side {name} file {rel} exists: promote "
-                                                              f"the row (stub or built)"))
-                    continue
-                head = path.read_text(encoding="utf-8", errors="replace").splitlines()[:T0_MARKER_LINES]
-                if not any(T0_MARKER.search(line) for line in head):
-                    out.append(_warn("stub-marker", seam.id, f"stub, but side {name} file {rel} has no T0 marker in "
-                                                              f"its first lines: promote the row"))
+        present = [(name, rel) for name in ("a", "b") for rel in seam.side(name).files if (root / rel).is_file()]
+        if seam.status == "planned":
+            out.extend(_warn("stub-marker", seam.id, f"planned, but side {name} file {rel} exists: promote the row "
+                                                     f"(stub or built)") for name, rel in present)
+            continue
+        if not present:
+            continue
+        marked = False
+        for _, rel in present:
+            head = (root / rel).read_text(encoding="utf-8", errors="replace").splitlines()[:T0_MARKER_LINES]
+            if any(T0_MARKER.search(line) for line in head):
+                marked = True
+                break
+        if not marked:
+            shown = ", ".join(f"side {name} {rel}" for name, rel in present)
+            out.append(_warn("stub-marker", seam.id, f"stub, but no side file carries a T0 marker in its first lines "
+                                                      f"({shown}): promote the row"))
     return out
 
 

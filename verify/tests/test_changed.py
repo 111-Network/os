@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import os
 import shutil
 import subprocess
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from t111 import changed
 from t111.changed import GitError, analyse, changed_paths, seams_for_path
@@ -17,6 +19,12 @@ from .helpers import RUN_PY
 from .test_lint import compose_map, make_tree
 
 GIT = ["git", "-c", "user.name=t", "-c", "user.email=t@example.invalid", "-c", "commit.gpgsign=false"]
+
+
+def clean_env() -> dict[str, str]:
+    """The environment without any ``GIT_*`` variable (a git hook sets ``GIT_DIR`` and ``GIT_INDEX_FILE``: the temp repo
+    must never act on the real one), as ``changed._git`` does."""
+    return {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
 
 
 class Repo(unittest.TestCase):
@@ -32,13 +40,13 @@ class Repo(unittest.TestCase):
 
     def git(self, *args: str) -> str:
         proc = subprocess.run(["git", *args], cwd=self.tree, text=True, capture_output=True, timeout=60,
-                              start_new_session=True, check=True)
+                              start_new_session=True, check=True, env=clean_env())
         return proc.stdout
 
     def commit(self, msg: str) -> None:
         self.git("add", "-A")
         subprocess.run(GIT + ["commit", "-q", "-m", msg], cwd=self.tree, check=True, capture_output=True, timeout=60,
-                       start_new_session=True)
+                       start_new_session=True, env=clean_env())
 
     def write(self, rel: str, text: str) -> None:
         path = self.tree / rel
@@ -54,6 +62,30 @@ class Repo(unittest.TestCase):
                               check=False)
 
 
+class Helper(unittest.TestCase):
+    def test_the_helper_environment_drops_every_git_variable(self) -> None:
+        with mock.patch.dict(os.environ, {"GIT_DIR": "/nonexistent", "GIT_INDEX_FILE": "/nonexistent/index",
+                                          "GIT_WORK_TREE": "/nonexistent"}):
+            env = clean_env()
+        self.assertEqual([k for k in env if k.startswith("GIT_")], [])
+        self.assertIn("PATH", env)
+
+
+class PoisonedGit(Repo):
+    """The temp repo is built while ``GIT_DIR`` and ``GIT_INDEX_FILE`` point elsewhere, as inside a git hook."""
+
+    def setUp(self) -> None:
+        patch = mock.patch.dict(os.environ, {"GIT_DIR": "/nonexistent/.git", "GIT_INDEX_FILE": "/nonexistent/index"})
+        patch.start()
+        self.addCleanup(patch.stop)
+        super().setUp()
+
+    def test_a_temp_repo_ignores_a_hooks_git_environment(self) -> None:
+        self.assertEqual(self.git("rev-parse", "--show-toplevel").strip(), str(self.tree.resolve()))
+        self.assertEqual(self.git("log", "--format=%s").strip(), "base")
+        self.assertFalse(Path("/nonexistent").exists())
+
+
 class Mapping(Repo):
     def test_side_files_map_to_seams_exact_directory_and_glob(self) -> None:
         got = lambda p: [(s.id, side) for s, side in seams_for_path(self.map, p)]  # noqa: E731
@@ -61,6 +93,16 @@ class Mapping(Repo):
         self.assertEqual(got("fx/a.txt"), [("L1-L2:alpha", "a"), ("X:notices", "a")])
         self.assertEqual(got("fx/gen/deep/x.txt"), [("X:notices", "b")], "a side file may be a directory")
         self.assertEqual(got("fx/other.txt"), [])
+
+    def test_a_glob_entry_reads_star_as_one_segment(self) -> None:
+        from dataclasses import replace
+        seam = self.map.seam("L1-L2:alpha")
+        assert seam is not None
+        smap = replace(self.map, seams=(replace(seam, a=replace(seam.a, files=("fx/*.txt", "fx/**/x.txt"))),))
+        got = lambda p: [s.id for s, _ in seams_for_path(smap, p)]  # noqa: E731
+        self.assertEqual(got("fx/a.txt"), ["L1-L2:alpha"])
+        self.assertEqual(got("fx/gen/x.txt"), ["L1-L2:alpha"], "through ** only")
+        self.assertEqual(got("fx/gen/y.txt"), [], "* does not cross a /")
 
     def test_a_glob_entry_matches(self) -> None:
         from dataclasses import replace
@@ -130,6 +172,21 @@ class Git(Repo):
         self.assertIn("changed against HEAD~1: 1 path(s) (1 tracked, 0 untracked)", proc.stdout)
         self.assertIn("L1-L2:alpha [built] <- fx/a.txt (side a, L1)", proc.stdout)
         self.assertIn("X:notices [built] <- fx/a.txt (side a, X)", proc.stdout)
+
+    def test_a_renamed_file_lists_its_old_path_too(self) -> None:
+        self.git("mv", "fx/c.txt", "fx/c2.txt")
+        tracked, untracked = changed_paths(self.tree, "HEAD")
+        self.assertEqual((tracked, untracked), (["fx/c.txt", "fx/c2.txt"], []))
+        proc = self.run_changed()
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIn("L3-L4:faked [built] <- fx/c.txt (side a, L4)", proc.stdout, "the seam of the old path is touched")
+        self.assertIn("python3 -I verify/run.py --scratch DIR --seam L3-L4:faked", proc.stdout)
+        self.assertIn("no seam and no check maps 1 path(s): fx/c2.txt", proc.stdout)
+
+    def test_a_renamed_file_in_a_commit_range(self) -> None:
+        self.git("mv", "fx/c.txt", "fx/c2.txt")
+        self.commit("rename")
+        self.assertEqual(changed_paths(self.tree, "HEAD~1..HEAD"), (["fx/c.txt", "fx/c2.txt"], []))
 
     def test_a_range_ignores_untracked_files(self) -> None:
         self.write("fx/a.txt", "second\n")

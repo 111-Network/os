@@ -1,7 +1,7 @@
 """``python3 -I verify/run.py --changed [REV]``: which seams and checks the changed paths touch (options.md §5).
 
-``git diff --name-only REV`` (default ``HEAD``: the working tree against the last commit; a range ``A..B`` works too)
-plus the untracked files gives the changed paths. Each path is mapped through the seams' side files (an exact file, a
+``git diff --name-only --no-renames REV`` (default ``HEAD``: the working tree against the last commit; a range
+``A..B`` works too) plus the untracked files gives the changed paths; a renamed file lists both its old and its new path. Each path is mapped through the seams' side files (an exact file, a
 directory prefix or a glob) and through the checks' own files (a test file or script a check's ``cmd`` claims). The
 output names the seams touched, the checks that claim a changed file, the paths nothing maps, and one ``run.py``
 command that runs the units covering them (the plan the runner would build, so ``--list`` agrees). A change to the map
@@ -54,7 +54,8 @@ def changed_paths(root: Path, rev: str) -> tuple[list[str], list[str]]:
     (none for a ``A..B`` range). Raises ``GitError``."""
     if rev.startswith("-") or "\0" in rev or not rev.strip():
         raise GitError(f"not a revision: {rev!r}")
-    tracked = sorted(set(_split(_git(root, ["diff", "--name-only", "-z", rev, "--"]))))
+    # --no-renames: a moved file lists its old path too, so the seam it belonged to is still touched
+    tracked = sorted(set(_split(_git(root, ["diff", "--name-only", "--no-renames", "-z", rev, "--"]))))
     untracked: list[str] = []
     if ".." not in rev:
         untracked = sorted(set(_split(_git(root, ["ls-files", "-z", "--others", "--exclude-standard"]))) - set(tracked))

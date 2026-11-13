@@ -146,6 +146,46 @@ class WithResults(Base):
         self.assertIsNone(matrix.latest_results(None))
 
 
+class SelectionNote(Base):
+    def note(self, run_fields: dict) -> str:
+        run = dict(RESULTS[0], **run_fields)
+        return Results([run]).selection_note(self.map)
+
+    def test_a_run_of_a_few_checks_says_so(self) -> None:
+        text = self.note({"checks": ["l1.alpha", "l4.api"], "tiers": ["fast", "slow"]})
+        self.assertIn("Last run was a selection of 2 checks (of 6 in the map, tiers fast+slow)", text)
+        self.assertIn("4 not in it show `not run`", text)
+
+    def test_a_run_of_every_check_has_no_note(self) -> None:
+        every = [c.id for c in self.map.checks]
+        self.assertEqual(self.note({"checks": every}), "")
+
+    def test_a_gate_stands_in_for_the_units_it_covers(self) -> None:
+        text = self.note({"checks": ["l1.gate", "l4.api", "l4.ui.a", "l5.side", "x.fixture"]})
+        self.assertEqual(text, "", "l1.alpha is covered by l1.gate, which ran")
+        self.assertNotEqual(self.note({"checks": ["l4.api", "l4.ui.a", "l5.side", "x.fixture"]}), "")
+
+    def test_a_requirement_served_by_a_gate_counts_as_run(self) -> None:
+        text = self.note({"checks": ["l1.gate", "l4.api", "l4.ui.a", "l5.side", "x.fixture"], "via": {"l1.alpha": "l1.gate"}})
+        self.assertEqual(text, "")
+
+    def test_a_run_record_with_no_plan_has_no_note(self) -> None:
+        self.assertEqual(Results([{"kind": "run", "run_id": "x"}]).selection_note(self.map), "")
+        self.assertEqual(Results([]).selection_note(self.map), "")
+
+    def test_the_header_of_the_matrix_carries_the_note(self) -> None:
+        results = Results([dict(RESULTS[0], checks=["l1.alpha"], tiers=["fast"])] + RESULTS[1:])
+        text = render(self.map, results, results_path="r.jsonl")
+        head = text.split("## Layer")[0]
+        self.assertIn("Last run was a selection of 1 checks", head)
+        self.assertNotIn("selection of", render(self.map, Results(RESULTS), results_path="r.jsonl"))
+        self.assertNotIn("selection of", render(self.map))
+
+    def test_a_non_object_line_is_a_value_error(self) -> None:
+        with self.assertRaises(ValueError):
+            Results([[1]])  # type: ignore[list-item]
+
+
 class Cli(Base):
     def run_matrix(self, *extra: str) -> subprocess.CompletedProcess:
         return subprocess.run([sys.executable, "-I", str(RUN_PY), "--matrix", "--root", str(self.tree), "--map",
@@ -158,6 +198,15 @@ class Cli(Base):
         self.assertTrue(proc.stdout.startswith("# Seam x evidence matrix"))
         self.assertIn("## Totals", proc.stdout)
 
+    def test_a_scratch_run_of_a_selection_says_so(self) -> None:
+        scratch = self.tmp / "scratch"
+        (scratch / "20261111T000000Z-abc").mkdir(parents=True)
+        rows = [dict(RESULTS[0], checks=["l1.alpha"], tiers=["fast"])] + RESULTS[1:]
+        shutil.copyfile(self.results_file(rows), scratch / "20261111T000000Z-abc" / "results.jsonl")
+        proc = self.run_matrix("--scratch", str(scratch))
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIn("Last run was a selection of 1 checks (of 6 in the map, tiers fast)", proc.stdout)
+
     def test_scratch_with_a_run_brings_the_last_statuses(self) -> None:
         scratch = self.tmp / "scratch"
         (scratch / "20261111T000000Z-abc").mkdir(parents=True)
@@ -165,6 +214,54 @@ class Cli(Base):
         proc = self.run_matrix("--scratch", str(scratch))
         self.assertEqual(proc.returncode, 0, proc.stderr)
         self.assertIn("`l1.alpha` [fast, R] FAIL", proc.stdout)
+
+    def test_results_flag_reads_that_file(self) -> None:
+        path = self.results_file(name="mine.jsonl")
+        proc = self.run_matrix("--results", str(path))
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIn(f"Last status from `{path}` (run 20261111T000000Z-abc1234, head abc1234de)", proc.stdout)
+        self.assertIn("`l1.alpha` [fast, R] FAIL", proc.stdout)
+        self.assertIn("`l4.api` [slow, F] SKIPPED", proc.stdout)
+        self.assertIn("| last status | checks |", proc.stdout)
+
+    def test_results_flag_wins_over_the_newest_run_under_scratch(self) -> None:
+        scratch = self.tmp / "scratch"
+        (scratch / "20261111T000000Z-new").mkdir(parents=True)
+        newer = [RESULTS[0], run_row(id="l1.alpha", check="l1.alpha", seams=["L1-L2:alpha"], status="SKIPPED")]
+        (scratch / "20261111T000000Z-new" / "results.jsonl").write_text("".join(json.dumps(r) + "\n" for r in newer))
+        proc = self.run_matrix("--scratch", str(scratch), "--results", str(self.results_file()))
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIn("`l1.alpha` [fast, R] FAIL", proc.stdout, "the named file, not the scratch run")
+
+    def test_a_missing_results_file_is_a_named_error(self) -> None:
+        proc = self.run_matrix("--results", str(self.tmp / "no-such.jsonl"))
+        self.assertEqual(proc.returncode, 2)
+        self.assertIn("--matrix: cannot read results", proc.stderr)
+        self.assertIn("no-such.jsonl", proc.stderr)
+        self.assertNotIn("Traceback", proc.stderr)
+        self.assertEqual(proc.stdout, "", "no matrix is printed as if nothing had run")
+
+    def test_unreadable_results_are_named_errors_never_a_traceback(self) -> None:
+        bad = {"not json": b"{not json\n", "not utf-8": b"\xff\xfe\n", "a list line": b"[1, 2]\n",
+               "a bare number": b"3\n"}
+        for label, data in bad.items():
+            path = self.tmp / "bad.jsonl"
+            path.write_bytes(data)
+            proc = self.run_matrix("--results", str(path))
+            self.assertEqual(proc.returncode, 2, label)
+            self.assertIn("cannot read results", proc.stderr, label)
+            self.assertNotIn("Traceback", proc.stderr, label)
+            self.assertEqual(proc.stdout, "", label)
+        proc = self.run_matrix("--results", str(self.tmp))
+        self.assertEqual((proc.returncode, "Traceback" in proc.stderr), (2, False), "a directory")
+
+    def test_an_empty_results_file_shows_every_check_as_not_run(self) -> None:
+        path = self.tmp / "empty.jsonl"
+        path.write_text("")
+        proc = self.run_matrix("--results", str(path))
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIn("`l1.alpha` [fast, R] not run", proc.stdout)
+        self.assertNotIn("PASS", proc.stdout.split("## Totals")[1], "a file with no record is not a green run")
 
     def test_an_unreadable_results_file_exits_2(self) -> None:
         scratch = self.tmp / "scratch"

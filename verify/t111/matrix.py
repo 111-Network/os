@@ -7,7 +7,10 @@ totals per strength and status; the built seams without running-system evidence;
 
 With a ``results.jsonl`` (``--results FILE``, or without it the newest ``<scratch>/<run-id>/results.jsonl`` under
 ``--scratch``) every check also shows its last status for that seam: ``PASS``, ``FAIL``, ``SKIPPED`` (the worst of its
-records) or ``not run``. Output is Markdown, deterministic (no clock), and writes nothing.
+records) or ``not run``. When that run did not run every check of the map (a ``--seam`` / ``--check`` / ``--layer``
+selection, or a default run that leaves the ``ns`` tier out) the header says ``last run was a selection of N checks``, so
+``not run`` is not read as never run. A results file that is missing, unreadable or not JSON lines exits 2 with a
+named error. Output is Markdown, deterministic (no clock), and writes nothing.
 """
 
 from __future__ import annotations
@@ -66,6 +69,8 @@ class Results:
         self.run: Mapping[str, Any] = {}
         self.records: list[Mapping[str, Any]] = []
         for row in rows:
+            if not isinstance(row, Mapping):
+                raise ValueError(f"a line of the results is not a JSON object: {str(row)[:60]!r}")
             if row.get("kind") == "run" and not self.run:
                 self.run = row
             elif row.get("kind") == "check":
@@ -79,6 +84,22 @@ class Results:
         if ident.startswith("hygiene/"):
             return ident.split("/")[1]
         return ident.split("/")[0]
+
+    def selection_note(self, seam_map: SeamMap) -> str:
+        """``last run was a selection of N checks (...)`` when the run record's plan leaves out checks of the map (a
+        gate stands in for the units it covers); an empty string when it ran them all or the record has no plan."""
+        planned = self.run.get("checks")
+        if not isinstance(planned, list):
+            return ""
+        ran = {str(c) for c in planned} | {str(c) for c in (self.run.get("via") or {})}
+        gates = {c for c in ran if (chk := seam_map.check(c)) is not None and chk.kind == "gate"}
+        missing = [c.id for c in seam_map.checks if c.id not in ran and c.covered_by not in gates]
+        if not missing:
+            return ""
+        tiers = self.run.get("tiers")
+        where = f", tiers {'+'.join(str(t) for t in tiers)}" if isinstance(tiers, list) and tiers else ""
+        return (f"Last run was a selection of {len(planned)} checks (of {len(seam_map.checks)} in the map{where}); "
+                f"{len(missing)} not in it show `not run`.")
 
     def status(self, check_id: str, seam_id: str | None = None) -> str:
         """The last status of ``check_id`` (for ``seam_id`` when records carry it), or ``NOT_RUN``."""
@@ -146,6 +167,9 @@ def render(seam_map: SeamMap, results: Results | None = None, *, results_path: s
         head = run.get("head")
         extra = f" (run {run['run_id']}, head {str(head)[:9]}{', dirty tree' if run.get('dirty') else ''})" if run else ""
         lines += [f"Last status from `{results_path}`{extra}; a check's status is the worst of its records.", ""]
+        note = results.selection_note(seam_map)
+        if note:
+            lines += [note, ""]
     lines += ["Strength = the best check that proves the seam: " + ", ".join(STRENGTH_NAMES[s] for s in STRENGTHS)
               + ". `[tier, strength]` follow each check.", ""]
     by_section: dict[tuple[int, str], list[Seam]] = {}
@@ -211,7 +235,7 @@ def main(args: argparse.Namespace, root: Path, map_dir: Path) -> int:
     if path is not None:
         try:
             results = Results(read_results(Path(path)))
-        except (OSError, ValueError) as exc:
+        except (OSError, ValueError) as exc:  # a missing file, a directory, bad UTF-8, bad JSON, a non-object line
             print(f"--matrix: cannot read results {path}: {exc}", file=sys.stderr)
             return 2
     sys.stdout.write(render(seam_map, results, results_path=str(path) if path else ""))
