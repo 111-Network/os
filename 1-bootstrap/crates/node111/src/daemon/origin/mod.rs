@@ -27,7 +27,11 @@
 //!   [`Origin::admit`] never blocks or redirects the store.
 //! - **The pair (§9.1).** The manifest and its signature are written to temporary names first,
 //!   then renamed signature first, manifest second; a failure before the manifest's rename puts
-//!   the previous signature back, so the previous pair stays served.
+//!   the previous signature back (kept under a hard link, or a synced copy where the state
+//!   directory refuses `link()`), so the previous pair stays served. A pair that does not verify
+//!   together (a crash between the two renames) is never served: the routes answer as when no
+//!   release is held until the next admission replaces it ([`Origin::pair_served`], checked
+//!   where the routes first open the origin and again only when either file changed).
 //! - **How (§9.1).** Bodies stream from disk in 64 KiB chunks (`tokio::fs` and a body stream),
 //!   never read whole; files are opened `O_NOFOLLOW | O_NONBLOCK` and must be regular.
 //! - **Size (§13.2 `RelayOrigin.bytes`).** [`Origin::bytes`] walks `state/origin/` on demand and
@@ -238,6 +242,14 @@ pub struct Origin {
     /// Bumped by every write here (the size cache's in-process key).
     generation: AtomicU64,
     cache: Mutex<Option<(Stamp, u64)>>,
+    /// The compiled key the held pair is checked under ([`Origin::pair_served`]).
+    pubkey: &'static str,
+    /// Whether the held pair verifies, keyed on the two files' identity: one verify per pair
+    /// seen (row D5c item 4).
+    pair: Mutex<Option<(PairStamp, bool)>>,
+    /// Tests: pair verifies run (the "once per pair" proof, row D5c item 4).
+    #[cfg(test)]
+    pair_checks: AtomicU64,
 }
 
 impl Origin {
@@ -249,6 +261,10 @@ impl Origin {
             write: Mutex::new(()),
             generation: AtomicU64::new(0),
             cache: Mutex::new(None),
+            pubkey: crate::daemon::updater::MANIFEST_PUBKEY.trim(),
+            pair: Mutex::new(None),
+            #[cfg(test)]
+            pair_checks: AtomicU64::new(0),
         }
     }
 
@@ -368,7 +384,7 @@ impl Origin {
         let copied = |p: &Pin| kept.iter().any(|c| c.sha256 == p.sha256);
         let mut on_disk: BTreeSet<&str> = BTreeSet::new();
         for p in &pins {
-            if !copied(p) && !on_disk.contains(p.sha256.as_str()) && verify_held(&blob_dir, p) {
+            if !copied(p) && !on_disk.contains(p.sha256.as_str()) && verify_held(&blob_dir, p)? {
                 on_disk.insert(&p.sha256);
             }
         }
@@ -394,8 +410,11 @@ impl Origin {
         cleanup.0.clear();
         crate::util::fs::fsync_dir(&blob_dir).map_err(|e| AdmitError::Io(format!("{e:#}")))?;
         publish_pair(&self.dir, manifest_bytes, signature.as_bytes(), fault)?;
+        // The pair just published verified (under the node's floor too): no second verify.
+        *lock(&self.pair) = Some((self.pair_stamp(), true));
         let keep: BTreeSet<String> = pins.iter().map(|p| p.sha256.clone()).collect();
         prune(&blob_dir, &keep);
+        prune_tmp(&self.dir);
         self.generation.fetch_add(1, Ordering::Relaxed);
         Ok(Admitted {
             release: m.release(),
@@ -423,6 +442,63 @@ impl Origin {
             self.generation.fetch_add(1, Ordering::Relaxed);
         }
         removed
+    }
+
+    /// Is the held pair one to serve (§9.1; row D5c item 4)? The manifest and its signature
+    /// must verify together under the compiled key (`parse_verified`: the keychain walk, the
+    /// signature over these bytes, the channel). A crash between the two renames of
+    /// [`publish_pair`] leaves the new signature beside the old manifest: that torn pair is
+    /// never served (every route answers 404, as when no release is held) and the next
+    /// admission replaces it. No pair held ⇒ `false`.
+    ///
+    /// Checked where the routes first open the origin and then only when either file changed
+    /// (their device, inode, length, mtime and ctime, compared for equality only): one verify
+    /// of a pair the routes read anyway, no task, no timer. An admission here records its own
+    /// pair as verified. The node's floor is not applied: it rises when this node updates and
+    /// gates admission (§9.5 T4), not what is already held. Blocking (two `lstat`s; the verify
+    /// reads the pair).
+    pub fn pair_served(&self) -> bool {
+        let stamp = self.pair_stamp();
+        if let Some((held, ok)) = *lock(&self.pair) {
+            if held == stamp {
+                return ok;
+            }
+        }
+        let ok = self.pair_verifies();
+        if self.pair_stamp() != stamp {
+            return false; // changed while read: fail closed, the next call checks again
+        }
+        *lock(&self.pair) = Some((stamp, ok));
+        ok
+    }
+
+    fn pair_verifies(&self) -> bool {
+        #[cfg(test)]
+        self.pair_checks.fetch_add(1, Ordering::Relaxed);
+        let man = read_capped(&self.dir.join(MANIFEST_NAME), MANIFEST_MAX_BYTES as u64);
+        let sig = read_capped(&self.dir.join(SIGNATURE_NAME), SIGNATURE_MAX_BYTES as u64);
+        let (Some(man), Some(sig)) = (man, sig) else {
+            return false;
+        };
+        let Ok(sig) = std::str::from_utf8(&sig) else {
+            return false;
+        };
+        ChannelManifest::parse_verified(&man, sig, self.pubkey, &Floor::initial()).is_ok()
+    }
+
+    fn pair_stamp(&self) -> PairStamp {
+        let meta = |name: &str| {
+            std::fs::symlink_metadata(self.dir.join(name))
+                .ok()
+                .map(|m| FileStamp {
+                    dev: m.dev(),
+                    ino: m.ino(),
+                    len: m.len(),
+                    mtime: (m.mtime(), m.mtime_nsec()),
+                    ctime: (m.ctime(), m.ctime_nsec()),
+                })
+        };
+        PairStamp([meta(MANIFEST_NAME), meta(SIGNATURE_NAME)])
     }
 
     /// The held manifest, parsed (it passed `parse_verified` when it was admitted).
@@ -475,6 +551,25 @@ struct Stamp {
     files: [Option<(i64, i64, u64, u64)>; 4],
 }
 
+/// One file of the held pair as last seen: compared for equality only (no ordering decision
+/// rides a file time).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct FileStamp {
+    dev: u64,
+    ino: u64,
+    len: u64,
+    mtime: (i64, i64),
+    ctime: (i64, i64),
+}
+
+/// The manifest's and the signature's [`FileStamp`] (`None`: absent).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct PairStamp([Option<FileStamp>; 2]);
+
+fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    m.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
 /// Temporary blob files removed on a refusal.
 struct TmpGuard(Vec<PathBuf>);
 
@@ -503,56 +598,93 @@ fn open_read(path: &Path) -> std::io::Result<std::fs::File> {
         .open(path)
 }
 
-/// The sha256 (lowercase hex) of exactly `size` bytes read from `f`; `None` when the file
-/// holds more or fewer bytes, or a read fails.
+/// The sha256 (lowercase hex) of exactly `size` bytes read from `f`: `Ok(None)` when it holds
+/// more or fewer bytes (a complete read proved it) or `sink` refused a chunk; `Err` when a read
+/// failed (an interrupted read is retried), so the caller can tell a proven mismatch from an
+/// I/O error (row D5c item 2).
 fn sha256_exact(
-    f: &mut std::fs::File,
+    f: &mut impl Read,
     size: u64,
     mut sink: impl FnMut(&[u8]) -> bool,
-) -> Option<String> {
+) -> std::io::Result<Option<String>> {
     let mut hasher = sha2::Sha256::new();
     let mut buf = vec![0u8; CHUNK];
     let mut total: u64 = 0;
     loop {
-        let n = f.read(&mut buf).ok()?;
+        let n = match f.read(&mut buf) {
+            Ok(n) => n,
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(e) => return Err(e),
+        };
         if n == 0 {
             break;
         }
         total += n as u64;
         if total > size {
-            return None; // grew while read
+            return Ok(None); // grew while read
         }
         hasher.update(&buf[..n]);
         if !sink(&buf[..n]) {
-            return None;
+            return Ok(None);
         }
     }
-    (total == size).then(|| {
+    Ok((total == size).then(|| {
         hasher
             .finalize()
             .iter()
             .map(|b| format!("{b:02x}"))
             .collect()
-    })
+    }))
 }
 
 /// Is the pin's blob held, and do its bytes still hash to the pin (row D5b: a held blob is
-/// hashed again before it counts)? A file at the pinned name that is not a regular file of the
-/// pinned size and hash is removed (a symlink is removed, never followed). Blocking.
-fn verify_held(blob_dir: &Path, p: &Pin) -> bool {
+/// hashed again before it counts)? Blocking.
+///
+/// The file is removed only on a proven mismatch (row D5c item 2): a symlink at the pinned
+/// name (never followed), a file that is not regular, a wrong size, or a complete read whose
+/// sha256 differs. An open or read error (EMFILE, EIO, EACCES, …) proves nothing about the
+/// bytes: it is returned as [`AdmitError::Io`] and the file stays (a good blob the served
+/// manifest may pin too is never destroyed by a transient error). Absent ⇒ `Ok(false)`.
+fn verify_held(blob_dir: &Path, p: &Pin) -> Result<bool, AdmitError> {
+    verify_held_with(blob_dir, p, |path| {
+        let f = open_read(path)?;
+        let m = f.metadata()?;
+        Ok((m, f))
+    })
+}
+
+/// [`verify_held`] with the open step given (`open` returns the opened file's metadata and a
+/// reader; a test fails it or its reads).
+fn verify_held_with<R: Read>(
+    blob_dir: &Path,
+    p: &Pin,
+    open: impl FnOnce(&Path) -> std::io::Result<(std::fs::Metadata, R)>,
+) -> Result<bool, AdmitError> {
     let path = blob_dir.join(&p.sha256);
-    let ok = match open_read(&path) {
-        Ok(mut f) => {
-            f.metadata().is_ok_and(|m| m.is_file() && m.len() == p.size)
-                && sha256_exact(&mut f, p.size, |_| true).is_some_and(|h| h == p.sha256)
+    let (meta, mut f) = match open(&path) {
+        Ok(opened) => opened,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        // O_NOFOLLOW on a symlink: proven not the pinned regular file
+        Err(e) if e.raw_os_error() == Some(libc::ELOOP) && is_symlink(&path) => {
+            let _ = std::fs::remove_file(&path);
+            return Ok(false);
         }
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return false,
-        Err(_) => false,
+        Err(e) => return Err(io_err("open", &path, e)),
     };
-    if !ok {
+    let proven_match = meta.is_file()
+        && meta.len() == p.size
+        && sha256_exact(&mut f, p.size, |_| true)
+            .map_err(|e| io_err("read", &path, e))?
+            .is_some_and(|h| h == p.sha256);
+    drop(f);
+    if !proven_match {
         let _ = std::fs::remove_file(&path);
     }
-    ok
+    Ok(proven_match)
+}
+
+fn is_symlink(path: &Path) -> bool {
+    std::fs::symlink_metadata(path).is_ok_and(|m| m.file_type().is_symlink())
 }
 
 /// Copy `src` into `blob_dir` under a temporary name, hashing the bytes as they are written.
@@ -584,7 +716,9 @@ fn copy_hashed(src: &Path, blob_dir: &Path, pins: &[Pin]) -> Result<Option<Copie
     if let Some(e) = write_err {
         return Err(io_err("write", &tmp, e));
     }
-    let Some(sha256) = hashed else {
+    // A source that cannot be read whole is not admitted (a foreign file's error is not the
+    // store's): reported unpinned, as before.
+    let Ok(Some(sha256)) = hashed else {
         return Ok(None);
     };
     if !pins.iter().any(|p| p.sha256 == sha256 && p.size == size) {
@@ -600,6 +734,9 @@ fn copy_hashed(src: &Path, blob_dir: &Path, pins: &[Pin]) -> Result<Option<Copie
 enum PairStep {
     /// Both temporary files are written and synced; nothing renamed yet.
     Written,
+    /// The previous signature is about to be kept under a hard link (a test fails it as a
+    /// state directory that refuses `link()` would, so the copy is taken instead).
+    Link,
     /// The new signature is in place; the manifest is not.
     SignatureRenamed,
 }
@@ -636,10 +773,23 @@ fn write_tmp(dir: &Path, bytes: &[u8], guard: &mut TmpGuard) -> Result<PathBuf, 
 
 /// Publish the manifest and its signature as one pair (§9.1, row D5b): both are written to
 /// temporary names and synced first; then the signature is renamed into place, then the
-/// manifest. The previous signature is kept under a hard link until the manifest's rename
-/// succeeded: a failure before it puts the previous signature back, so the previous pair (or
-/// none) stays served. A reader between the two renames may meet the new signature beside the
-/// old manifest; `parse_verified` refuses that pair and the reader tries again.
+/// manifest. The previous signature is kept until the manifest's rename succeeded: a failure
+/// before it puts the previous signature back, so the previous pair (or none) stays served. A
+/// reader between the two renames may meet the new signature beside the old manifest;
+/// `parse_verified` refuses that pair and the reader tries again.
+///
+/// The previous signature is kept under a hard link where the state directory allows one, and
+/// otherwise (row D5c item 1: Android app storage under Termux, FUSE, vfat or exFAT refuse
+/// `link()` with EPERM, EACCES, ENOTSUP, …) as a copy: its bytes (at most
+/// [`SIGNATURE_MAX_BYTES`], read `O_NOFOLLOW`) written to a temporary name in the same
+/// directory (exclusive, `O_NOFOLLOW`, 0600) and synced before the first rename, so putting it
+/// back is again one `rename` on the same filesystem. Only "already exists" (a race for the
+/// temporary name) is an error. Either way the crash-safety argument is the same: until the
+/// signature's rename the served pair is untouched; after it, an in-process failure renames the
+/// kept signature back (the kept bytes are the previous signature's, since this process's
+/// write mutex is held and another writer takes `state/staging.lock`); a crash between the two
+/// renames leaves a torn pair that is never served ([`Origin::pair_served`]) and that the next
+/// admission replaces.
 fn publish_pair(
     dir: &Path,
     manifest: &[u8],
@@ -653,14 +803,7 @@ fn publish_pair(
     fault(PairStep::Written).map_err(|e| io_err("publish", dir, e))?;
     // The previous signature, kept until the manifest is in place.
     let previous = match std::fs::symlink_metadata(&sig_path) {
-        Ok(m) if m.is_file() => {
-            let (f, keep) = create_tmp(dir)?;
-            drop(f);
-            guard.0.push(keep.clone());
-            std::fs::remove_file(&keep).map_err(|e| io_err("remove", &keep, e))?;
-            std::fs::hard_link(&sig_path, &keep).map_err(|e| io_err("link", &keep, e))?;
-            Some(keep)
-        }
+        Ok(m) if m.is_file() => Some(keep_previous(dir, &sig_path, &mut guard, fault)?),
         _ => None,
     };
     std::fs::rename(&tmp_sig, &sig_path).map_err(|e| io_err("rename", &sig_path, e))?;
@@ -676,6 +819,50 @@ fn publish_pair(
     }
     drop(guard); // the kept signature and nothing else is left to remove
     crate::util::fs::fsync_dir(dir).map_err(|e| AdmitError::Io(format!("{e:#}")))
+}
+
+/// The previous signature at `sig_path`, kept under a temporary name in `dir` (removed by
+/// `guard` unless renamed back): a hard link, or a synced copy where `link()` is refused
+/// ([`publish_pair`]).
+fn keep_previous(
+    dir: &Path,
+    sig_path: &Path,
+    guard: &mut TmpGuard,
+    fault: &dyn Fn(PairStep) -> std::io::Result<()>,
+) -> Result<PathBuf, AdmitError> {
+    let (f, keep) = create_tmp(dir)?;
+    drop(f);
+    guard.0.push(keep.clone());
+    std::fs::remove_file(&keep).map_err(|e| io_err("remove", &keep, e))?;
+    match fault(PairStep::Link).and_then(|()| std::fs::hard_link(sig_path, &keep)) {
+        Ok(()) => Ok(keep),
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => Err(io_err("link", &keep, e)),
+        Err(_) => {
+            let bytes = read_capped(sig_path, SIGNATURE_MAX_BYTES as u64).ok_or_else(|| {
+                AdmitError::Io(format!(
+                    "keep {}: the previous signature cannot be read",
+                    sig_path.display()
+                ))
+            })?;
+            write_tmp(dir, &bytes, guard)
+        }
+    }
+}
+
+/// Remove the temporary entries (`.tmp-…`) directly in `state/origin/` that a crash left
+/// (row D5c item 4; `blob/` has [`prune`]). Called after a publication, under the write mutex.
+fn prune_tmp(dir: &Path) {
+    let Ok(rd) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for e in rd.flatten() {
+        let name = e.file_name();
+        if name.to_str().is_some_and(|n| n.starts_with(TMP_PREFIX))
+            && e.file_type().is_ok_and(|t| !t.is_dir())
+        {
+            let _ = std::fs::remove_file(e.path());
+        }
+    }
 }
 
 /// Remove every entry of `blob_dir` not named in `keep` (temporary files included). Returns the
@@ -744,7 +931,19 @@ fn not_found() -> Response {
         .into_response()
 }
 
+/// The held pair verifies ([`Origin::pair_served`]); checked after [`serving`], so a node that
+/// does not serve never reads it.
+async fn pair_served(api: &ApiState) -> bool {
+    let origin = Origin::shared(api);
+    tokio::task::spawn_blocking(move || origin.pair_served())
+        .await
+        .unwrap_or(false)
+}
+
 async fn manifest(State(api): State<Arc<ApiState>>) -> Response {
+    if !serving(&api) || !pair_served(&api).await {
+        return not_found();
+    }
     let path = dir(&api.layout.state_dir()).join(MANIFEST_NAME);
     serve_file(
         &api,
@@ -757,13 +956,16 @@ async fn manifest(State(api): State<Arc<ApiState>>) -> Response {
 }
 
 async fn signature(State(api): State<Arc<ApiState>>) -> Response {
+    if !serving(&api) || !pair_served(&api).await {
+        return not_found();
+    }
     let path = dir(&api.layout.state_dir()).join(SIGNATURE_NAME);
     let ctype = "text/plain; charset=utf-8";
     serve_file(&api, &path, None, SIGNATURE_MAX_BYTES as u64, ctype).await
 }
 
 async fn blob(State(api): State<Arc<ApiState>>, UrlPath(sha256): UrlPath<String>) -> Response {
-    if !serving(&api) || !is_sha256_hex(&sha256) {
+    if !serving(&api) || !is_sha256_hex(&sha256) || !pair_served(&api).await {
         return not_found();
     }
     let origin = dir(&api.layout.state_dir());
@@ -1197,6 +1399,233 @@ mod tests {
             listing(&o),
             BTreeSet::from([BLOB_DIR.into(), MANIFEST_NAME.into(), SIGNATURE_NAME.into()])
         );
+    }
+
+    /// The names directly in `state/origin/`.
+    fn listing(o: &Origin) -> BTreeSet<String> {
+        std::fs::read_dir(o.dir())
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect()
+    }
+
+    fn served_names() -> BTreeSet<String> {
+        BTreeSet::from([BLOB_DIR.into(), MANIFEST_NAME.into(), SIGNATURE_NAME.into()])
+    }
+
+    /// Row D5c item 1: a state directory that refuses `link()` (EPERM, as Android app storage
+    /// under Termux does) still admits a release after the first: the previous signature is
+    /// kept as a synced copy instead. A failure after the signature's rename then puts the
+    /// copy back byte-exact; only "already exists" is an error. Without the fallback the
+    /// second admission fails with "link".
+    #[test]
+    fn a_refused_link_keeps_a_copy_and_a_second_admission_lands() {
+        let d = tempfile::tempdir().unwrap();
+        let o = Origin::new(d.path());
+        let (m1, s1) = release(R1);
+        let (m2, s2) = release(R2);
+        let (p1, p2) = (payload(R1, "x86_64"), payload(R2, "x86_64"));
+        let refuse = |kind: std::io::ErrorKind, also: Option<PairStep>| {
+            move |step: PairStep| {
+                if step == PairStep::Link {
+                    Err(match kind {
+                        std::io::ErrorKind::AlreadyExists => std::io::Error::from(kind),
+                        _ => std::io::Error::from_raw_os_error(libc::EPERM),
+                    })
+                } else if Some(step) == also {
+                    Err(std::io::Error::other("injected"))
+                } else {
+                    Ok(())
+                }
+            }
+        };
+        let eperm = std::io::ErrorKind::PermissionDenied;
+        // The first admission links nothing (no previous signature).
+        o.admit_faulty(&trust(), &own(), &m1, &s1, &[&p1], &refuse(eperm, None))
+            .unwrap();
+        // A failure after the signature's rename: the copy is put back byte-exact.
+        let e = o
+            .admit_faulty(
+                &trust(),
+                &own(),
+                &m2,
+                &s2,
+                &[&p2],
+                &refuse(eperm, Some(PairStep::SignatureRenamed)),
+            )
+            .unwrap_err();
+        assert!(matches!(e, AdmitError::Io(_)), "{e}");
+        assert_eq!(std::fs::read(o.dir().join(MANIFEST_NAME)).unwrap(), m1);
+        assert_eq!(
+            std::fs::read_to_string(o.dir().join(SIGNATURE_NAME)).unwrap(),
+            s1,
+            "the kept copy is the previous signature"
+        );
+        assert_eq!(listing(&o), served_names(), "no temporary file left");
+        assert!(o.pair_served());
+        // "already exists" is a race for the temporary name: an error, nothing changed.
+        let exists = std::io::ErrorKind::AlreadyExists;
+        let e = o
+            .admit_faulty(&trust(), &own(), &m2, &s2, &[&p2], &refuse(exists, None))
+            .unwrap_err();
+        assert!(
+            matches!(e, AdmitError::Io(ref w) if w.contains("link")),
+            "{e}"
+        );
+        assert_eq!(std::fs::read(o.dir().join(MANIFEST_NAME)).unwrap(), m1);
+        assert_eq!(listing(&o), served_names());
+        // The second admission lands with link() refused.
+        let a = o
+            .admit_faulty(&trust(), &own(), &m2, &s2, &[&p2], &refuse(eperm, None))
+            .unwrap();
+        assert_eq!(a.release.to_string(), R2);
+        assert_eq!(std::fs::read(o.dir().join(MANIFEST_NAME)).unwrap(), m2);
+        assert_eq!(
+            std::fs::read_to_string(o.dir().join(SIGNATURE_NAME)).unwrap(),
+            s2
+        );
+        assert_eq!(listing(&o), served_names(), "the copy is removed");
+        assert_eq!(blobs(&o), BTreeSet::from([sha(&p2)]));
+        assert!(o.pair_served());
+    }
+
+    /// A reader that fails its first `fail` reads with `err`, then reads `inner`.
+    struct Flaky<R> {
+        inner: R,
+        fail: u32,
+        err: fn() -> std::io::Error,
+    }
+
+    impl<R: Read> Read for Flaky<R> {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            if self.fail > 0 {
+                self.fail -= 1;
+                return Err((self.err)());
+            }
+            self.inner.read(buf)
+        }
+    }
+
+    /// Row D5c item 2: a held blob is removed only on a proven mismatch. An open error
+    /// (EMFILE) and a read error (EIO) are returned and the file stays; an interrupted read is
+    /// retried and the blob counts; a wrong size, a changed byte (a complete read) and a
+    /// symlink are proven and removed.
+    #[test]
+    fn a_held_blob_is_removed_only_on_a_proven_mismatch() {
+        let d = tempfile::tempdir().unwrap();
+        let o = Origin::new(d.path());
+        let (m, s) = release(R1);
+        let x = payload(R1, "x86_64");
+        o.admit_with(&trust(), &own(), &m, &s, &[&x]).unwrap();
+        let blob_dir = o.dir().join(BLOB_DIR);
+        let pin = Pin {
+            target: X86.into(),
+            sha256: sha(&x),
+            size: std::fs::metadata(&x).unwrap().len(),
+        };
+        let at = blob_dir.join(&pin.sha256);
+        let good = std::fs::read(&at).unwrap();
+        let opened = |fail: u32, err: fn() -> std::io::Error| {
+            move |path: &Path| {
+                let f = open_read(path)?;
+                Ok((
+                    f.metadata()?,
+                    Flaky {
+                        inner: f,
+                        fail,
+                        err,
+                    },
+                ))
+            }
+        };
+        // EMFILE at open: an error, the file stays
+        let e = verify_held_with(&blob_dir, &pin, |_: &Path| {
+            Err::<(std::fs::Metadata, std::fs::File), _>(std::io::Error::from_raw_os_error(
+                libc::EMFILE,
+            ))
+        })
+        .unwrap_err();
+        assert!(
+            matches!(e, AdmitError::Io(ref w) if w.starts_with("open")),
+            "{e}"
+        );
+        assert_eq!(std::fs::read(&at).unwrap(), good, "kept after EMFILE");
+        // EIO on a read: an error, the file stays
+        let eio = || std::io::Error::from_raw_os_error(libc::EIO);
+        let e = verify_held_with(&blob_dir, &pin, opened(1, eio)).unwrap_err();
+        assert!(
+            matches!(e, AdmitError::Io(ref w) if w.starts_with("read")),
+            "{e}"
+        );
+        assert_eq!(std::fs::read(&at).unwrap(), good, "kept after EIO");
+        // an interrupted read is retried
+        let eintr = || std::io::Error::from(std::io::ErrorKind::Interrupted);
+        assert!(verify_held_with(&blob_dir, &pin, opened(3, eintr)).unwrap());
+        assert!(verify_held(&blob_dir, &pin).unwrap());
+        // a proven mismatch is removed: one byte changed (a complete read) ...
+        let mut bad = good.clone();
+        bad[7] ^= 0x40;
+        std::fs::write(&at, &bad).unwrap();
+        assert!(!verify_held(&blob_dir, &pin).unwrap());
+        assert!(!at.exists(), "a changed byte is removed");
+        // ... a wrong size ...
+        std::fs::write(&at, &good[1..]).unwrap();
+        assert!(!verify_held(&blob_dir, &pin).unwrap());
+        assert!(!at.exists(), "a wrong size is removed");
+        // ... a symlink (never followed); absent is Ok(false)
+        std::os::unix::fs::symlink(&x, &at).unwrap();
+        assert!(!verify_held(&blob_dir, &pin).unwrap());
+        assert!(std::fs::symlink_metadata(&at).is_err() && x.exists());
+        assert!(!verify_held(&blob_dir, &pin).unwrap());
+    }
+
+    /// Row D5c item 4: a crash between the signature's rename and the manifest's leaves the new
+    /// signature beside the old manifest. That pair is not served (by this store and by a
+    /// fresh one, as at the next start); the next admission repairs it and removes the
+    /// temporary files the crash left in `state/origin/`. Checked once per pair seen.
+    #[test]
+    fn a_torn_pair_is_not_served_until_the_next_admission() {
+        let d = tempfile::tempdir().unwrap();
+        let o = Origin::new(d.path());
+        assert!(!o.pair_served(), "nothing held");
+        let (m1, s1) = release(R1);
+        let (m2, s2) = release(R2);
+        o.admit_with(&trust(), &own(), &m1, &s1, &[&payload(R1, "x86_64")])
+            .unwrap();
+        assert!(o.pair_served());
+        assert_eq!(
+            o.pair_checks.load(Ordering::Relaxed),
+            1,
+            "the empty store's one check; the admitted pair needs none"
+        );
+        // the crash: R2's signature renamed into place, R1's manifest still there, the
+        // temporary copies left behind
+        let sig = o.dir().join(SIGNATURE_NAME);
+        let tmp = o.dir().join(format!("{TMP_PREFIX}1-0"));
+        std::fs::write(&tmp, &s2).unwrap();
+        std::fs::rename(&tmp, &sig).unwrap();
+        std::fs::write(o.dir().join(format!("{TMP_PREFIX}1-1")), &m2).unwrap();
+        assert!(!o.pair_served(), "the torn pair, seen by the running store");
+        let fresh = Origin::new(d.path());
+        assert!(!fresh.pair_served(), "the torn pair, at the next start");
+        assert!(!fresh.pair_served());
+        assert_eq!(fresh.pair_checks.load(Ordering::Relaxed), 1, "one verify");
+        // the next admission repairs it
+        let p2 = payload(R2, "x86_64");
+        fresh
+            .admit_with(&trust(), &own(), &m2, &s2, &[&p2])
+            .unwrap();
+        assert!(fresh.pair_served());
+        assert!(o.pair_served(), "a write by another store is seen too");
+        assert_eq!(
+            listing(&fresh),
+            served_names(),
+            "the crash's leftovers removed"
+        );
+        // the old manifest beside the new signature the other way round is refused too
+        std::fs::write(o.dir().join(MANIFEST_NAME), &m1).unwrap();
+        assert!(!o.pair_served());
     }
 
     /// Row D5b: a blob already held is hashed again before it counts. A held blob whose bytes

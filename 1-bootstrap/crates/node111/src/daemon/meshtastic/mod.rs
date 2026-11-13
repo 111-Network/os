@@ -1339,17 +1339,17 @@ mod tests {
         let m = Meshtastic::new(cfg, Arc::new(PortTable::new()));
         m.start(Arc::clone(&api), reg, Supervised::default()).await;
         let passes = || m.passes.load(Ordering::SeqCst);
-        // start's own pass and the wake its child install left, then quiet
-        let mut settled = passes();
-        for _ in 0..50 {
-            tokio::time::sleep(Duration::from_millis(30)).await;
-            let now = passes();
-            if now == settled {
-                break;
-            }
-            settled = now;
+        // The known count of start passes (row D5c item 8): start's own pass,
+        // then the one the permit of its child install leaves (`notify_one`
+        // with no waiter stores it; the spawned loop's first park consumes
+        // it). Waited for by count, never by a quiet window, so a loaded box
+        // that schedules the loop late cannot measure the park too early.
+        let settled = 2;
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while passes() < settled {
+            assert!(std::time::Instant::now() < deadline, "start's passes");
+            tokio::time::sleep(Duration::from_millis(5)).await;
         }
-        assert!(settled <= 2, "start's pass and at most one wake: {settled}");
         // thirty of its 10 ms ticks: no pass while parked
         tokio::time::sleep(Duration::from_millis(300)).await;
         assert_eq!(passes(), settled, "parked");

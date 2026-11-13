@@ -14,7 +14,10 @@
 //! - `Origin::admit` refuses unverified bytes and serves nothing then; `Origin::bytes` is the
 //!   size of `state/origin/`;
 //! - one `Origin` per process: first callers racing on `Origin::shared` share one store (row
-//!   D5b).
+//!   D5b);
+//! - a torn pair (a crash between the signature's rename and the manifest's) is not served:
+//!   all three names answer 404, as when no release is held, until the next admission (row
+//!   D5c item 4).
 //!
 //! Fixtures: `tests/fixtures/l7-D7/` (two releases signed by the compiled DEV key; its README).
 
@@ -488,5 +491,44 @@ async fn unverified_bytes_are_refused_by_admit() {
     let port = n.serve(None).await;
     for path in paths() {
         assert_eq!(get(port, &path).status, 404, "{path}");
+    }
+}
+
+/// Row D5c item 4: R2's signature beside R1's manifest (what a crash between the two renames
+/// leaves) is never served: the manifest, the signature and the held blob answer 404, as when
+/// no release is held. The next admission repairs it and the pair is served again.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_torn_pair_answers_404_until_the_next_admission() {
+    const R2: &str = "2026.11.02";
+    let n = node(ALL_ON).await;
+    n.admit(R1, &[TARGET_TRIPLE]).unwrap();
+    let port = n.serve(None).await;
+    for path in paths() {
+        assert_eq!(get(port, &path).status, 200, "{path}");
+    }
+    // the crash: the new signature renamed into place, the manifest's rename never ran
+    let origin_dir = n.state_dir.join("origin");
+    let (_, s2) = release(R2);
+    let tmp = origin_dir.join(".tmp-crash-0");
+    std::fs::write(&tmp, &s2).unwrap();
+    std::fs::rename(&tmp, origin_dir.join(SIGNATURE_NAME)).unwrap();
+    for path in paths() {
+        assert_eq!(get(port, &path).status, 404, "torn: {path}");
+    }
+    // the next admission repairs it
+    n.admit(R2, &[TARGET_TRIPLE]).unwrap();
+    let (m2, s2) = release(R2);
+    let p2 = payload(R2, TARGET_TRIPLE);
+    for (path, want) in [
+        (format!("/origin/v1/{MANIFEST_NAME}"), m2),
+        (format!("/origin/v1/{SIGNATURE_NAME}"), s2.into_bytes()),
+        (
+            format!("/origin/v1/blob/{}", sha(&p2)),
+            std::fs::read(&p2).unwrap(),
+        ),
+    ] {
+        let r = get(port, &path);
+        assert_eq!(r.status, 200, "repaired: {path}");
+        assert_eq!(r.body, want, "{path}");
     }
 }

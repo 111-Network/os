@@ -348,7 +348,16 @@ struct TlsState {
 
 impl TlsState {
     fn new(key: &LinkKey, pairs: &PairTable) -> Result<TlsState, rustls::Error> {
-        let provider = provider();
+        TlsState::with_provider(provider(), key, pairs)
+    }
+
+    /// [`TlsState::new`] with the provider given: a test hands one that keeps TLS 1.2 suites,
+    /// so only the version list both builders take can refuse TLS 1.2 (row D5c item 3).
+    fn with_provider(
+        provider: Arc<CryptoProvider>,
+        key: &LinkKey,
+        pairs: &PairTable,
+    ) -> Result<TlsState, rustls::Error> {
         let algs = provider.signature_verification_algorithms;
         let certified = key.certified();
         let mut server = ServerConfig::builder_with_provider(Arc::clone(&provider))
@@ -936,6 +945,83 @@ mod tests {
             .cipher_suites
             .iter()
             .all(|s| matches!(s, SupportedCipherSuite::Tls13(_))));
+    }
+
+    /// The first flight of `from` handed to `to`; `to`'s error on it.
+    fn first_flight_error(
+        from: &mut impl std::ops::DerefMut<Target = rustls::ConnectionCommon<impl Sized>>,
+        to: &mut impl std::ops::DerefMut<Target = rustls::ConnectionCommon<impl Sized>>,
+    ) -> Option<rustls::Error> {
+        let mut wire = Vec::new();
+        from.write_tls(&mut wire).unwrap();
+        assert!(!wire.is_empty(), "a first flight");
+        to.read_tls(&mut wire.as_slice()).unwrap();
+        to.process_new_packets().err()
+    }
+
+    /// No resolver: a server that never gets as far as choosing a key.
+    #[derive(Debug)]
+    struct NoServerKey;
+
+    impl rustls::server::ResolvesServerCert for NoServerKey {
+        fn resolve(
+            &self,
+            _: rustls::server::ClientHello<'_>,
+        ) -> Option<Arc<rustls::sign::CertifiedKey>> {
+            None
+        }
+    }
+
+    /// §4.3 "TLS 1.3 only", through the real builders (row D5c item 3): the
+    /// server and client configs [`TlsState`] builds, with a provider that
+    /// KEEPS TLS 1.2 suites, so the version list the builders pass is the
+    /// only guard left. The built server refuses a TLS 1.2 hello for its
+    /// version, and the built client's hello offers no TLS 1.2 (a TLS
+    /// 1.2-only server refuses it for its version). Either builder handed
+    /// `rustls::ALL_VERSIONS` instead of [`TLS_VERSIONS`] fails this test.
+    #[test]
+    fn the_built_configs_offer_tls13_only() {
+        use rustls::{ClientConnection, Error, PeerIncompatible, ServerConnection};
+        let full = Arc::new(rustls::crypto::ring::default_provider());
+        assert!(
+            full.cipher_suites
+                .iter()
+                .any(|s| matches!(s, SupportedCipherSuite::Tls12(_))),
+            "the provider keeps TLS 1.2 suites (the suite guard is off)"
+        );
+        let d = tempfile::tempdir().unwrap();
+        let key = LinkKey::load_or_mint(d.path()).unwrap();
+        let pairs: PairTable = Arc::new(RwLock::new(vec![pair(2, "203.0.113.7:1")]));
+        let state = TlsState::with_provider(Arc::clone(&full), &key, &pairs).unwrap();
+        let name = ServerName::IpAddress(Ipv4Addr::new(203, 0, 113, 7).into());
+        let refused = Some(Error::PeerIncompatible(
+            PeerIncompatible::Tls12NotOfferedOrEnabled,
+        ));
+
+        // The built server: a TLS 1.2-only hello is refused for its version.
+        let tls12 = |verifier: Arc<dyn ServerCertVerifier>| {
+            ClientConfig::builder_with_provider(Arc::clone(&full))
+                .with_protocol_versions(&[&rustls::version::TLS12])
+                .unwrap()
+                .dangerous()
+                .with_custom_certificate_verifier(verifier)
+                .with_no_client_auth()
+        };
+        let algs = full.signature_verification_algorithms;
+        let pin = PinnedServer { pin: spki(2), algs };
+        let mut c = ClientConnection::new(Arc::new(tls12(Arc::new(pin))), name.clone()).unwrap();
+        let mut srv = ServerConnection::new(Arc::clone(&state.server)).unwrap();
+        assert_eq!(first_flight_error(&mut c, &mut srv), refused, "server");
+
+        // The built client: its hello offers no TLS 1.2.
+        let only12 = ServerConfig::builder_with_provider(Arc::clone(&full))
+            .with_protocol_versions(&[&rustls::version::TLS12])
+            .unwrap()
+            .with_no_client_auth()
+            .with_cert_resolver(Arc::new(NoServerKey));
+        let mut c = ClientConnection::new(state.client(spki(2)).unwrap(), name).unwrap();
+        let mut srv = ServerConnection::new(Arc::new(only12)).unwrap();
+        assert_eq!(first_flight_error(&mut c, &mut srv), refused, "client");
     }
 
     /// A `DigitallySignedStruct` as the wire carries it (scheme, u16 length,

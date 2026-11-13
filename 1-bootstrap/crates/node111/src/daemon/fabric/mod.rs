@@ -1945,6 +1945,15 @@ impl FabricHandle {
     /// re-mint the same call finds the bits unannounced and tries again.
     /// Without a presented announce (no link, restore-pending) the switches
     /// held before are the reference.
+    ///
+    /// A failed re-mint puts the previous switches back only when the relay
+    /// switches' own bits differ (`roles(s, before)` ≠ `roles(s, new)`; row
+    /// D5c item 7). When they are equal (a carrier-mode-only write, say) and
+    /// only other pending bits made the presented announce stale (an earlier
+    /// settings re-mint failed and was logged), the write is kept: it
+    /// changes no announced bit, so the answer is `Ok(false)` and the
+    /// re-mint error is logged (by `refresh_announce_locked`) for the next
+    /// write or settings change to retry.
     pub async fn set_relay_roles(&self, new: RelayRoles) -> Result<bool, ReannounceError> {
         let _one = self.remint.lock().await;
         let before = std::mem::replace(
@@ -1953,6 +1962,7 @@ impl FabricHandle {
         );
         let s = self.persisted().fabric;
         let want = roles(&s, &new, self.lan);
+        let own_bits_differ = roles(&s, &before, self.lan) != want;
         let reference = self
             .presented_roles()
             .unwrap_or_else(|| roles(&s, &before, self.lan));
@@ -1960,6 +1970,10 @@ impl FabricHandle {
             return Ok(false);
         }
         if let Err(e) = self.refresh_announce_locked().await {
+            if !own_bits_differ {
+                // the relay switches announce nothing new: keep the write
+                return Ok(false);
+            }
             // put the previous switches back (no other call ran meanwhile:
             // the re-mint lock is held), so the peers' view and this handle agree
             *self.relay.lock().unwrap_or_else(|p| p.into_inner()) = before;
@@ -3012,6 +3026,69 @@ mod tests {
         assert_eq!(h.set_relay_settings(&r).await, Ok(true));
         assert_eq!(h.set_relay_settings(&r).await, Ok(false));
         assert_eq!((announced(&h).0, last(&h)), (hub | ROLE_OFFLOAD, l0 + 1));
+        h.shutdown().await;
+    }
+
+    /// Layer 7 §7.2 (row D5c item 7): the presented announce is stale (an
+    /// earlier settings re-mint failed and was only logged), and a relay
+    /// write that changes no announced bit (the carrier mode alone) meets the
+    /// same failing re-mint: the write is kept and answers `Ok(false)`. A
+    /// write that does change a relay bit is still put back with `Err`.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_write_that_announces_nothing_new_is_kept_when_a_stale_re_mint_fails() {
+        use sealer::ROLE_OFFLOAD;
+        let dir = tempfile::tempdir().unwrap();
+        let api = test_api_lan(dir.path(), true);
+        let identity_dir = dir.path().join("identity");
+        let identity = crate::identity::generate(&identity_dir).unwrap();
+        let h = start(lo_cfg(dir.path(), true), Some(identity), &api).await;
+        assert!(h.running(), "{:?}", h.down_reason());
+        let hub = ROLE_MAILBOX | ROLE_ALWAYS_ON_HUB;
+        let last = |h: &FabricHandle| h.sealer().unwrap().announce_last();
+        let carrier = |mode| RelayRoles {
+            carrier: Some(GatewayOffer {
+                carrier: CarrierKind::Ntfy,
+                mode,
+            }),
+            ..RelayRoles::default()
+        };
+        // the carrier on (no gateway bit consented): no announced bit changes
+        let five_a = carrier(CarrierMode::FiveA);
+        assert_eq!(h.set_relay_roles(five_a).await, Ok(false));
+        assert_eq!(h.relay_roles(), five_a);
+        let l0 = last(&h);
+
+        // the counter commit fails from here on, and a settings change's
+        // re-mint fails with it (logged only): the announce still shows the hub
+        let blocker = identity_dir.join(format!("{}.tmp", id111::counters::COUNTERS_FILE));
+        std::fs::create_dir(&blocker).unwrap();
+        std::fs::write(blocker.join("keep"), b"x").unwrap();
+        h.patch_settings(mesh111::fabric::SettingsPatch {
+            hub_role: Some(false),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+        assert_eq!(announced(&h).0, hub, "the announce is stale");
+        assert_eq!(last(&h), l0);
+
+        // a carrier-mode-only write: kept, nothing announced
+        let five_b = carrier(CarrierMode::FiveB);
+        assert_eq!(h.set_relay_roles(five_b).await, Ok(false));
+        assert_eq!(h.relay_roles(), five_b, "the write is kept");
+        assert_eq!(last(&h), l0);
+
+        // a write that changes a relay bit is still put back
+        let offload = RelayRoles {
+            offload_bit: true,
+            ..five_b
+        };
+        assert_eq!(
+            h.set_relay_roles(offload).await,
+            Err(ReannounceError::NoCounter)
+        );
+        assert_eq!(h.relay_roles(), five_b, "the switches put back");
+        assert_eq!(announced(&h).0 & ROLE_OFFLOAD, 0);
         h.shutdown().await;
     }
 

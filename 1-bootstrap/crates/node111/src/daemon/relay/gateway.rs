@@ -44,7 +44,7 @@ use id111::encoding::NodeIdDisplay;
 use id111::keyset::NodeId;
 use mesh111::fabric::{FabricEvent, PairVia, PairView};
 use serde_json::{json, Value};
-use std::net::IpAddr;
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, Weak};
 use std::time::Instant;
@@ -282,11 +282,47 @@ impl PairFact {
 
 /// An address a paired hub claims the internet at (§4.1 rule 1): not private (RFC 1918, RFC
 /// 6598, ULA, link-local: [`super::tls::is_private`], the TLS path's own test), not loopback
-/// (never a peer), not unspecified and not multicast. An IPv4-mapped IPv6 address is judged by
-/// its IPv4 address.
+/// (never a peer), not unspecified and not multicast. Stricter than the TLS rule, which
+/// [`super::tls::is_private`] stays (row D5c item 5): it also refuses the limited broadcast
+/// `255.255.255.255`, "this network" `0.0.0.0/8`, the benchmarking block `198.18.0.0/15`, the
+/// IETF protocol block `192.0.0.0/24` and the deprecated site-local `fec0::/10`. An IPv6
+/// address that carries an IPv4 one is judged by that IPv4 address: IPv4-mapped
+/// `::ffff:a.b.c.d`, the deprecated IPv4-compatible `::a.b.c.d`, NAT64 `64:ff9b::/96` and
+/// 6to4 `2002::/16` (so `::127.0.0.1` is loopback and `64:ff9b::c0a8:404` is RFC 1918).
 pub fn internet_address(ip: IpAddr) -> bool {
-    let ip = ip.to_canonical();
-    !super::tls::is_private(ip) && !ip.is_loopback() && !ip.is_unspecified() && !ip.is_multicast()
+    let ip = match ip.to_canonical() {
+        IpAddr::V6(a) => embedded_v4(a).map_or(IpAddr::V6(a), IpAddr::V4),
+        v4 => v4,
+    };
+    if super::tls::is_private(ip) || ip.is_loopback() || ip.is_unspecified() || ip.is_multicast() {
+        return false;
+    }
+    match ip {
+        IpAddr::V4(a) => {
+            let o = a.octets();
+            !(a.is_broadcast()
+                || o[0] == 0
+                || (o[0] == 198 && o[1] & 0xfe == 18)
+                || (o[0] == 192 && o[1] == 0 && o[2] == 0))
+        }
+        IpAddr::V6(a) => a.segments()[0] & 0xffc0 != 0xfec0,
+    }
+}
+
+/// The IPv4 address an IPv6 address carries ([`internet_address`]): the IPv4-compatible form
+/// `::a.b.c.d` (the first 96 bits zero; `::` and `::1` become `0.0.0.0` and `0.0.0.1`, both
+/// refused as `0.0.0.0/8`), NAT64 `64:ff9b::/96`, 6to4 `2002:AABB:CCDD::/48`. The mapped form
+/// `::ffff:a.b.c.d` is `to_canonical`'s.
+fn embedded_v4(a: Ipv6Addr) -> Option<Ipv4Addr> {
+    let (s, o) = (a.segments(), a.octets());
+    let tail = || Ipv4Addr::new(o[12], o[13], o[14], o[15]);
+    if s[..6] == [0; 6] || s[..6] == [0x64, 0xff9b, 0, 0, 0, 0] {
+        Some(tail())
+    } else if s[0] == 0x2002 {
+        Some(Ipv4Addr::new(o[2], o[3], o[4], o[5]))
+    } else {
+        None
+    }
 }
 
 /// The pairs a paired-hub claim rests on (§3.2, §4.1): whole `tcp` pairs whose daemon half is
@@ -1026,7 +1062,7 @@ mod tests {
     /// unknown address claims nothing (fails without the fix: every unmarked pair claimed).
     #[test]
     fn a_pair_claims_the_internet_only_at_a_known_public_address() {
-        let cases: [(Option<&str>, bool); 12] = [
+        let cases: [(Option<&str>, bool); 13] = [
             (Some("192.168.1.20:11183"), false),
             (Some("10.1.2.3:11183"), false),
             (Some("172.16.0.9:11183"), false),
@@ -1037,6 +1073,7 @@ mod tests {
             (Some("[fe80::1]:11183"), false),
             (Some("[::ffff:192.168.1.20]:11183"), false),
             (Some("127.0.0.1:11183"), false),
+            (Some("[64:ff9b::c0a8:404]:11183"), false),
             (None, false),
             (Some("203.0.113.7:11183"), true),
         ];
@@ -1055,8 +1092,39 @@ mod tests {
             ("0.0.0.0", false),
             ("224.0.0.1", false),
             ("::1", false),
+            // row D5c item 5: stricter than the TLS rule
+            ("255.255.255.255", false),
+            ("0.1.2.3", false),
+            ("198.18.0.1", false),
+            ("198.19.255.254", false),
+            ("198.17.255.255", true),
+            ("198.20.0.0", true),
+            ("192.0.0.9", false),
+            ("192.0.1.1", true),
+            ("fec0::1", false),
+            ("feff::1", false),
+            // an IPv4 address inside an IPv6 one is judged as IPv4
+            ("::127.0.0.1", false),
+            ("::192.168.4.4", false),
+            ("::203.0.113.7", true),
+            ("64:ff9b::c0a8:404", false),
+            ("64:ff9b::7f00:1", false),
+            ("64:ff9b::cb00:7107", true),
+            ("2002:c0a8:404::1", false),
+            ("2002:a00:1::", false),
+            ("2002:cb00:7107::1", true),
+            ("::ffff:255.255.255.255", false),
         ] {
             assert_eq!(internet_address(ip.parse().unwrap()), claims, "{ip}");
+        }
+        // the TLS rule is untouched: these are not private there
+        for ip in [
+            "198.18.0.1",
+            "64:ff9b::c0a8:404",
+            "2002:c0a8:404::1",
+            "fec0::1",
+        ] {
+            assert!(!super::super::tls::is_private(ip.parse().unwrap()), "{ip}");
         }
     }
 

@@ -243,7 +243,6 @@ struct HostState {
     enabled: std::collections::HashSet<ServiceId>,
     live: HashMap<ServiceId, Live>,
     health: HashMap<ServiceId, HealthTrack>,
-    dropped: HashMap<ServiceId, u64>,
     dropped_from: HashMap<ServiceId, DroppedSource>,
     last_published: Option<Vec<PanelInfo>>,
 }
@@ -390,15 +389,11 @@ impl PanelHost {
             .unwrap_or_default()
     }
 
-    /// Shim seam (§14): the shim reports its drop-oldest count for
-    /// `panel.state.dropped`.
-    pub fn report_dropped(&self, id: ServiceId, total: u64) {
-        self.lock().dropped.insert(id, total);
-    }
-
-    /// Shim seam (§14; Layer 7 §3.6, row D3b): the shim's live drop counter, read each time the
-    /// panel facts are read (it wins over a reported count). Nothing has to wake to copy it,
-    /// so a shim that registers one needs no tick.
+    /// Shim seam (§14; Layer 7 §3.6, row D3b): the shim's live drop counter for
+    /// `panel.state.dropped`, read each time the panel facts are read. Nothing has to wake to
+    /// copy it, so a shim that registers one needs no tick. The one way a count reaches the
+    /// facts (row D5c item 9: the pushed `report_dropped` seam is removed); a later call for
+    /// the same panel replaces the source; none registered ⇒ `dropped` is `None`.
     pub fn set_dropped_source(&self, id: ServiceId, source: DroppedSource) {
         self.lock().dropped_from.insert(id, source);
     }
@@ -668,11 +663,7 @@ fn info(p: &Panel, st: &HostState) -> PanelInfo {
                 .get(&m.id)
                 .map(|h| h.published)
                 .unwrap_or(PanelHealth::Unknown),
-            dropped: st
-                .dropped_from
-                .get(&m.id)
-                .map(|f| f())
-                .or_else(|| st.dropped.get(&m.id).copied()),
+            dropped: st.dropped_from.get(&m.id).map(|f| f()),
         },
         title: Some(m.title.clone()),
         secure_note: m.secure_note.clone(),
@@ -821,6 +812,38 @@ mod tests {
         let mut shims = ShimRegistry::new();
         shims.register(Arc::new(Named)).unwrap();
         PanelHost::new(cfg, manifest::embedded(), &shims, false)
+    }
+
+    /// §14 `panel.state.dropped` (row D5c item 9): the count is read from its source each time
+    /// the facts are read, so a changed count shows at the next `panels()` with nothing woken
+    /// to copy it; no source ⇒ `None`; a later source replaces the earlier one.
+    #[test]
+    fn the_drop_count_is_read_live_from_its_source() {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        let dir = tempfile::tempdir().unwrap();
+        let h = host(dir.path());
+        let dropped = |h: &PanelHost| {
+            h.panels()
+                .into_iter()
+                .find(|p| p.id == ServiceId::Meshtastic)
+                .expect("the shipped panel")
+                .state
+                .dropped
+        };
+        assert_eq!(dropped(&h), None, "no source registered");
+        let count = Arc::new(AtomicU64::new(0));
+        let c = Arc::clone(&count);
+        h.set_dropped_source(
+            ServiceId::Meshtastic,
+            Arc::new(move || c.load(Ordering::Relaxed)),
+        );
+        assert_eq!(dropped(&h), Some(0));
+        count.store(7, Ordering::Relaxed);
+        assert_eq!(dropped(&h), Some(7), "the changed count, read live");
+        count.fetch_add(2, Ordering::Relaxed);
+        assert_eq!(dropped(&h), Some(9));
+        h.set_dropped_source(ServiceId::Meshtastic, Arc::new(|| 42));
+        assert_eq!(dropped(&h), Some(42), "a later source replaces it");
     }
 
     #[test]
