@@ -1468,39 +1468,25 @@ mod tests {
         assert_eq!(quiet_for(&carrier, 1_000).await, Some(NetEvent::Poll));
     }
 
-    /// A host whose next read blocks once, on demand, until released (a poll tick caught past
-    /// its sleep, inside its read).
+    /// A host whose next armed read stops the poll from inside that read: it drops the
+    /// subscription it holds, as a carrier leaving while a tick is past its sleep would (the
+    /// tick reads without the watch's lock, so the stop runs in between). Nothing blocks: a
+    /// test that parks a runtime worker in a read starves the timer driver and never returns
+    /// (the cause of the hang this test replaced).
     struct Gate {
         armed: std::sync::atomic::AtomicBool,
-        entered: std::sync::atomic::AtomicBool,
-        open: (Mutex<bool>, std::sync::Condvar),
+        stopped: std::sync::atomic::AtomicBool,
+        stop: Mutex<Option<Subscription>>,
         value: std::sync::atomic::AtomicU64,
-    }
-
-    impl Gate {
-        fn new() -> Arc<Gate> {
-            Arc::new(Gate {
-                armed: false.into(),
-                entered: false.into(),
-                open: (Mutex::new(false), std::sync::Condvar::new()),
-                value: 1.into(),
-            })
-        }
-
-        fn release(&self) {
-            *self.open.0.lock().unwrap() = true;
-            self.open.1.notify_all();
-        }
     }
 
     impl NetRead for Gate {
         fn routes(&self) -> Option<u64> {
             if self.armed.swap(false, Ordering::SeqCst) {
-                self.entered.store(true, Ordering::SeqCst);
-                let mut open = self.open.0.lock().unwrap();
-                while !*open {
-                    open = self.open.1.wait(open).unwrap();
-                }
+                drop(self.stop.lock().unwrap().take());
+                // the network moved meanwhile: a write-back would differ from the baseline
+                self.value.store(2, Ordering::SeqCst);
+                self.stopped.store(true, Ordering::SeqCst);
             }
             Some(self.value.load(Ordering::SeqCst))
         }
@@ -1512,12 +1498,18 @@ mod tests {
 
     /// Row D4c (3): a poll stopped (the carrier leaves while mdns-sd stays) or closed (the
     /// last subscriber leaves) while one of its ticks is inside its read: that tick writes
-    /// nothing back after the stop, so the next poll reads a fresh baseline.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    #[ignore = "hangs (never returns; row D3b was stopped while debugging it): 7-relay/TASKS.md row D3b"]
+    /// nothing back after the stop, so the next poll reads a fresh baseline (fails without the
+    /// fix: the stop cleared `poll_seen` and the stale tick, its generation unchanged, wrote
+    /// its reading back).
+    #[tokio::test]
     async fn a_stopped_poll_s_tick_writes_nothing_back() {
         for close in [false, true] {
-            let gate = Gate::new();
+            let gate = Arc::new(Gate {
+                armed: false.into(),
+                stopped: false.into(),
+                stop: Mutex::new(None),
+                value: 1.into(),
+            });
             let (w, _h) = watch_net(true, test_cfg(true), Arc::clone(&gate) as Arc<dyn NetRead>);
             let mdns = (!close).then(|| w.subscribe(Consumer::Mdns).unwrap());
             let carrier = w
@@ -1525,31 +1517,32 @@ mod tests {
                 .unwrap();
             assert!(w.polling().is_some());
             assert!(w.inner.lock().poll_seen.is_some(), "the baseline");
-            // a failed assertion must not leave a worker blocked in the read (the runtime's
-            // shutdown would wait for it forever)
-            struct Release(Arc<Gate>);
-            impl Drop for Release {
-                fn drop(&mut self) {
-                    self.0.release();
-                }
-            }
-            let _release = Release(Arc::clone(&gate));
+            // the test, the watch and the poll task hold the host
+            assert_eq!(Arc::strong_count(&gate), 3);
+            *gate.stop.lock().unwrap() = Some(carrier);
             gate.armed.store(true, Ordering::SeqCst);
-            eventually("a tick inside its read", || {
-                gate.entered.load(Ordering::SeqCst)
+            eventually("a tick stopped inside its read", || {
+                gate.stopped.load(Ordering::SeqCst)
             })
             .await;
-            drop(carrier);
             assert_eq!(w.polling(), None);
-            assert_eq!(w.inner.lock().poll_seen, None, "forgotten at the stop");
-            gate.value.store(2, Ordering::SeqCst);
-            gate.release();
-            tokio::time::sleep(Duration::from_millis(100)).await;
+            // the aborted task ends at its next await (after this tick, written back or not)
+            eventually("the stopped task ended", || Arc::strong_count(&gate) == 2).await;
             assert_eq!(
                 w.inner.lock().poll_seen,
                 None,
                 "close = {close}: the stale tick wrote its reading back"
             );
+            // a new poll takes a fresh baseline (the network as it is now)
+            let again = w
+                .subscribe(Consumer::Carrier { termux_poll_min: 9 })
+                .unwrap();
+            assert_eq!(
+                w.inner.lock().poll_seen,
+                Some(change_fingerprint(&*gate)),
+                "close = {close}"
+            );
+            drop(again);
             drop(mdns);
         }
     }

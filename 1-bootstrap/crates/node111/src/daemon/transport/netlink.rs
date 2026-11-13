@@ -626,9 +626,11 @@ mod tests {
         }
         ip("link set lo up");
         drain(&mut ev, "lo up").await;
-        ip("link add d0 type dummy");
+        // a veth pair (an unprivileged namespace on this box has no `dummy` type)
+        ip("link add d0 type veth peer name d1");
+        ip("link set d1 up");
         ip("link set d0 up");
-        drain(&mut ev, "dummy up").await;
+        drain(&mut ev, "veth up").await;
         ip("addr add 10.9.0.2/24 dev d0");
         assert!(!drain(&mut ev, "address added (main/local routes)").await);
         ip("addr change 10.9.0.2/24 dev d0 valid_lft 300 preferred_lft 200");

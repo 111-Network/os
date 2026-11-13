@@ -1163,6 +1163,22 @@ mod tests {
         assert_eq!(d["endpoint"], NodeIdDisplay::new(far.as_bytes()).label());
         assert_eq!(d["mode"], PAIRED_HUB_MODE);
         assert_eq!(d["checked_ago_s"], 0);
+        // and the services registry's `gateway` row built from these facts
+        let sf = crate::daemon::services::Facts {
+            gateway: f.clone(),
+            ..Default::default()
+        };
+        let rows = crate::daemon::services::compute(&sf);
+        let row = rows
+            .iter()
+            .find(|r| r.id == crate::daemon::services::ServiceId::Gateway)
+            .unwrap();
+        assert_eq!(
+            (row.state, row.reason_code),
+            (crate::daemon::services::ServiceState::Live, "carrier_ok")
+        );
+        assert_eq!(row.detail["carrier"], CARRIER_PAIRED_HUB);
+        assert_eq!(row.detail["error"], Value::Null);
         // the owner marks the pair LAN: no fabric event, the generation moves
         let before = fh.pair_generation();
         fh.replace_pair_links(vec![link(far, Some("203.0.113.9:11183"), true)]);
