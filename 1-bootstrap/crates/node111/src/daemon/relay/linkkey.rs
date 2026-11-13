@@ -307,7 +307,7 @@ fn read_seed(root: &Path) -> Result<Stored, LinkKeyError> {
         return Ok(Stored::Invalid);
     }
     let mut seed = Zeroizing::new([0u8; SEED_LEN]);
-    for (i, pair) in text.chunks_exact(2).enumerate() {
+    for (i, pair) in text.as_chunks::<2>().0.iter().enumerate() {
         match (unhex(pair[0]), unhex(pair[1])) {
             (Some(h), Some(l)) => seed[i] = (h << 4) | l,
             _ => return Ok(Stored::Invalid),
