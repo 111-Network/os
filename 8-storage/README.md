@@ -1,4 +1,4 @@
-# Layer 8 - Storage & Shared State: spec v0.2 (draft for the adversarial panel)
+# Layer 8 - Storage & Shared State: spec v0.3 (draft for the adversarial panel)
 
 The layer that keeps each node's own state encrypted and bounded by the disk the node has, and lets a hub hold the large public files a community shares.
 **The node-state store** is a second SQLCipher file that only `111d` opens: the agent's conversations, proposals, tasks and decisions, and Layer 9's repair
@@ -8,9 +8,10 @@ encyclopedias (an adopted kiwix-serve, started on demand), regional maps (PMTile
 holds, all as files named by their sha256 in the one object tree Layer 7 built for releases, listed in a catalogue the publisher's node key signs, and checked
 block by block. v1 adds **no shared log**, and no resident process, listener, timer or crate to the required configuration.
 
-Status: **draft v0.2, 2026-11-12** for the adversarial panel. Written from D34 (the owner took every pick, detail pick, plan correction and default of the
+Status: **draft v0.3, 2026-11-13** for the adversarial panel. Written from D34 (the owner took every pick, detail pick, plan correction and default of the
 options brief), D36, the brief (`plan/layers/8-storage/options.md`), its judge's check (`review/options-check.md`: ready), research R00-R07g3 and the as-built
-code, then amended under the lead's triage of the panel's three reports (`review/triage.md`; the map from each finding to the text is `review/fix-map.md`).
+code, then amended under the lead's triage of the panel's three reports (`review/triage.md`) and under the re-check of v0.2 (`review/recheck.md`, with the
+lead's ruling on it); the map from each finding to the text is `review/fix-map.md`.
 Nothing here is built. No Layer 8 code is written before the lock; the build board `8-storage/TASKS.md` follows the lock.
 
 ## 0. Reading guide
@@ -24,12 +25,11 @@ brief (OB) and research R00 (seams), R01-R05 (lenses), R06 (critic), R07g1-R07g3
 
 **Citations.** `M/` = `5-messaging/crates/mesh111/src` · `N/` = `1-bootstrap/crates/node111/src/daemon` · `NI/` = `1-bootstrap/crates/node111/src` · `A/` =
 `3-intelligence/crates/agent111` · `UI/` = `4-interface/ui` · `API` = `4-interface/api/openapi.yaml` · `BT/` = the bao-tree 0.16.1 registry source · `L0`…`L7`
-= the layer READMEs. Every `file:line` is pinned at head `e1cdbd1` (2026-11-13). The v0.1 draft read head `f0b6806`; the cited files that changed
-since (`M/store/{mod,prune,rows,schema}.rs`, `M/fabric.rs`, `N/fabric/mod.rs`, `N/origin/mod.rs`, `N/dashboard/routes.rs`,
-`UI/src/views/settings/index.tsx`, `LICENSING.md`) were re-read and re-pinned; every other cited file is the same at both heads. Layer 7 rows M1b
-(`4b9e521`, schema v5 and `custody_totals`) and M1c (`4209e32`, a capacity pass at rest writes nothing while its outcome is unchanged) are committed: the
-fabric schema is **v5** (`M/store/schema.rs:76`). `N/fabric/mod.rs` carries uncommitted Layer 7 edits in the working tree; its citations read the committed
-file (`git show HEAD:…`). Every citation is re-pinned once more at the lock head. **Evidence:** *(src)* source read · *(doc)* docs read by a scout · *(design)* not
+= the layer READMEs. Every `file:line` is pinned at head `8936a8e` (2026-11-13), and every fact this spec states about the code is a fact at that head
+("the pinned head" below). Layer 7 rows M1b (`4b9e521`, schema v5 and `custody_totals`), M1c (`4209e32`, a capacity pass at rest writes nothing while its
+outcome is unchanged) and A1 (`443cf66`, the agent's three Layer 7 tools) are committed: the fabric schema is **v5** (`M/store/schema.rs:76`) and the agent
+has 20 tools. Files that carry uncommitted edits of other rows in the working tree are cited as committed (`git show HEAD:…`). Every citation is re-pinned
+once more at the lock head. **Evidence:** *(src)* source read · *(doc)* docs read by a scout · *(design)* not
 built · *(unverified from this box)* a claim no scout could fetch (R06 §7, OB §6).
 
 **Normative:** numbered rules, byte and path tables, settings with defaults, gate assertions. **Informative:** "why" sentences, arithmetic, cost tables,
@@ -63,7 +63,7 @@ it. Where v1 builds less than a README sentence promises, the table below says s
 | §8 "Knowledge hubs host the large shared datasets: offline encyclopedias, regional maps, software updates, and network troubleshooting patches" | encyclopedias (§9), regional maps (§10), the 111 release and the components' pinned payloads (§11); no dataset ships and no default catalogue entry exists (Q9); patches travel as Layer 9's sealed `PATCH` messages, not from a hub shelf. The release manifest's Termux deb and APK pins are served (§11.1) only once `LICENSING.md` carries each one's verified licence; both rows are unverified today (`LICENSING.md:64-65`), so v1 ships that pin source off | v1.1: the hub fix shelf (catalogue class `patch`), the Termux apt directory and APK index, hub-to-hub bulk (Tier 2); the Termux pins: a verified licence read per pin |
 | §5 "The same fabric carries every kind of traffic the layers need: … knowledge-base synchronization, software updates" | datasets and component payloads move over HTTP on the LAN and to reachable hubs (§7), never on the fabric; the KB rides the release payload (L7 §9.4) | v1.1: Tier 2 on the fabric (§8) |
 | Category 4A "Nodes equipped with expanded storage that host local offline databases" | any node with `hub_role` may host; the 4A probe (≥ 512 GB free, ≥ 8 GB RAM, `NI/install/categorize.rs:102-105`) names the class, it gates nothing | not a limit; stated so a Pi hub on an SD card is not called 4A (OB fact 24) |
-| §8 "Knowledge hubs host …" and Category 4A "host … for" the community: the encyclopedia and the map a hub holds | the encyclopedia and the map on a hub are read by devices paired with that hub: a LAN session in v1 is the paired, full-control one (`lan_read_only` is "unused in v1 but reserved", `4-interface/README.md:591`); any other member downloads the raw files (`origin.datasets`, §9.5) to its own node | v1.1: a read-only LAN session |
+| §8 "Knowledge hubs host the large shared datasets…" and Category 4A "Nodes equipped with expanded storage that host local offline databases" | the encyclopedia and the map on a hub are read by devices paired with that hub: a LAN session in v1 is the paired, full-control one (`lan_read_only` is "unused in v1 but reserved", `4-interface/README.md:591`); any other member downloads the raw files (`origin.datasets`, §9.5) to its own node | v1.1: a read-only LAN session |
 | §8 "offline encyclopedias" on a Pi hub | the kiwix component's `aarch64-linux` pin rests on a static kiwix-tools 3.8.2 build no scout could fetch *(unverified from this box)*; the lock run sets `REQUIRE_G16=1` with that pin (§9.2, G16). If no such build exists, this row reads "a Pi hub has no encyclopedia in v1" | a static `aarch64-linux` build that passes G16 |
 
 ## 1. Scope & non-goals
@@ -156,7 +156,8 @@ signal). "The agent holds zero key material" (`L2:234`) is kept by what code hol
 6. **One writer.** `111d` is the only process that opens the file while it runs; `111 store export | import` open it only with the daemon stopped, holding
    `node/lock` (§13.2). The agent reads through `GET` tools only; no Layer 8 route accepts the bearer on a non-GET.
 7. **Open on use.** `111d` opens the store on its first use (a chat turn, an ingest, a history read, a reclaim, a Layer 9 write, a status read before the
-   totals are known) and closes it on the first capacity pass that finds no use since the previous pass: no timer of its own, and no open file on an idle
+   totals are known, and the first start of a build that writes a newer node-state version than the file holds: that start opens the store before the
+   daemon reports health, takes the migration copy, migrates and closes it, §13.6 (1)) and closes it on the first capacity pass that finds no use since the previous pass: no timer of its own, and no open file on an idle
    node. A turn in flight or an operation still running is a use, so a slow turn spanning two passes keeps the store open. `111d` reads `ns_totals` at the
    first open after a daemon start and then keeps them in memory from its own writes, so the pass reads the store only to reclaim. A close runs
    `wal_checkpoint(TRUNCATE)`, which writes nothing when only reads ran (its cost is in §2.8).
@@ -214,11 +215,12 @@ signal). "The agent holds zero key material" (`L2:234`) is kept by what code hol
 **2.5 The legacy import (once, normative).** At the first start of a release that carries the node-state store, `111d` ingests every
 `agent/conversations/*.jsonl` (one conversation per file, its lines in file order), `agent/proposals/*.json`, `agent/decisions/*.json` and every finished
 `agent/tasks/*.json`, one transaction per file, each committed `FULL`, then moves the file to `agent/legacy-v0/` (same name and subdirectory). A proposal,
-task or decision is idempotent by id. A conversation is merged by line count: when its id is already in the store, the file's lines beyond the stream's
-length are appended, so turns an older release appended after a rollback are kept. Conversations take their `seq` in the order the import reads them; their
-ids order nothing (a client may choose one, `A/src/chat.rs:105-112`). `agent/legacy-v0/` is deleted when the probation journal shows the release confirmed
-(the `.pre-v<N>` rule, §13.6 (2)); the update guard's restore (§13.6 (3)) moves the files back, so a release N−1 without the node-state store keeps its
-conversations, proposals and decisions (J8: "kept"). A crash mid-file repeats that file. Afterwards `agent/conversations/` holds nothing and the agent never
+task or decision is idempotent by id. A conversation is merged by line count: the conversation's head records the number of lines imported from its file
+(`legacy_lines`), and when its id is already in the store a later import appends only the file's lines beyond that count and raises it, so turns an older
+release appended after a rollback are kept even when this release added turns to the stream before the revert. Conversations take their `seq` in the order
+the import reads them; their ids order nothing (a client may choose one, `A/src/chat.rs:105-112`). `agent/legacy-v0/` is deleted when the probation journal
+shows the release confirmed (the `.pre-v<N>` rule, §13.6 (2)); the update guard's restore moves the files back under its own trigger, on both revert paths
+(§13.6 (3)), so a release N−1 without the node-state store keeps its conversations, proposals and decisions (J8: "kept"). A crash mid-file repeats that file. Afterwards `agent/conversations/` holds nothing and the agent never
 writes there again. **The J7 ring.** When Layer 9 built before the store (J7), the same start ingests `state/heal/journal.jsonl` into `heal/`: its lines in
 file order, each record idempotent by its namespace and id, one `FULL` transaction, then the file moves to `state/heal/legacy-v0.jsonl` under the same rule
 (deleted once the release is confirmed, moved back by the guard's restore), so a release N−1 that writes the ring keeps it.
@@ -237,7 +239,7 @@ operators); Android's file-based encryption covers Termux's app-private data *(u
   clean record alone (the export verb, §13.2, and the migration copy, §13.6, use it). The fabric store's open is unchanged.
 - **S3** `sweep_blob_orphans` (`M/store/blobs.rs:345-365`, called from every open, `M/store/mod.rs:301`) removes temp entries only, never a blob file, while a
   set-aside fabric store (`store.db.rolled-back-v<N>`, `.damaged-<n>`, `.replaced-<n>`) exists in `fabric/` (§13.6, §13.7, §13.2): its rows may still list
-  those blobs. The sweep resumes when the user deletes the set-aside file.
+  those blobs. The sweep resumes when the user deletes the set-aside file (`DELETE /api/v1/storage/set-aside/{file}`, loopback only, §16.1).
 
 **2.8 Costs.** No new crate, process, listener or timer; the agent's dependency list is unchanged and its state code shrinks. The WAL written per chat turn
 is measured at build for the schema as written: a turn touches `records` and its three indexes, `entries` and its two, `ns_totals` and `meta`, where R07g1
@@ -255,7 +257,8 @@ the API that make them buildable.
   tools.
 - **J2 Before the store opens.** Three small files stay plaintext (0600, atomic writes, the probation-journal pattern), because a shell hook writes them or
   they must be read before the store opens: the run marker `state/heal/run`, the witness inbox `state/heal/inbox` (one line per daemon exit: code, signal,
-  boot id; no free text; the hook keeps the newest 256 lines, through a temp file and a rename, so a crash loop with the store unopenable cannot grow it) and
+  boot id; no free text; the hook keeps the newest 256 lines, through a temp file and a rename, so a crash loop with the store unopenable cannot grow it;
+  an exit with status 75, the daemon's answer to a store verb holding `node/lock` (§13.2), is recorded with its code and never counted as a crash) and
   the armed undo record `state/heal/undo` of an apply in progress. `111d` reads them at start before serving, folds them into `heal/` and clears them; if the
   store does not open, they stay and the Repairs page says so.
 - **J3 Pruning.** By capacity only, as the `heal` class of the node budget (§4): oldest closed incident first by the store's `seq`; then a `heal` stream (the
@@ -297,7 +300,7 @@ the API that make them buildable.
   states it never touches); Layer 8 supplies the default (oldest `seq` first, protected states skipped, a stream deleted with its head) and writes the J3
   marker. The states a reclaim never touches are declared per namespace (`open`, `armed`, `undecided`, `running`, `pending`). A reclaim ends with `PRAGMA
   incremental_vacuum` (the store is `auto_vacuum = INCREMENTAL`, rule 3 of §2.2) and returns the bytes freed from the file. A write to a class that is `full`
-  (§4.5) returns `Full`, which Layer 9's spec handles; the three decision calls are written whatever the class's state. The decision calls are the only
+  (§4.5) returns `Full`, which Layer 9's spec handles; the three decision calls and a spool ingest (§2.4 rule 2) are written whatever the class's state. The decision calls are the only
   writers of `agent/decisions`: `decision_begin` writes `applied: {pending: true}` and refuses an id already decided (`already_decided`),
   `decision_complete` replaces it with the result, `decision_reopen` removes a pending record whose apply was refused before anything ran.
 
@@ -371,12 +374,14 @@ the pass runs:
    paused at a busy source sends one request to that source on a pass, after a gap counted in passes that doubles from 1 to 32 (1, 2, 4 … 32, then every
    32nd pass), and resumes when the source answers; the gap resets when the job resumes (§7.4).
 7. The node-state store closes if no operation used it since the previous pass (§2.2 rule 7).
-8. A change of `disk_low`, `store_full` or a class's `full`, or a reclaim, publishes one `storage` frame (§16.3). Nothing is published otherwise. The pass's
-   added time and reads, with the node-state store open, are measured at build (OB §3).
-9. A running kiwix-serve that no request reached through its panel's proxy for 30 passes is stopped (§9.3): one comparison of a counter the proxy resets.
+8. A change §16.3 lists publishes one `storage` frame (the one list of what sends it; the store's close in step 7 sends none). Nothing is published
+   otherwise. The pass's added time and reads, with the node-state store open, are measured at build (OB §3).
+9. A running kiwix-serve that no request reached through its panel's proxy and no search reached through `111d` (§9.4) for 30 passes is stopped (§9.3): one
+   comparison of a counter the proxy and the search route reset.
 
-Steps 2 to 9 run whether the fabric is live or not: with the fabric down (a newer `user_version`, a damaged store, §13.7) the node-state store still closes,
-`agent` and `heal` still reclaim, logs still rotate, a paused job still resumes and an idle kiwix-serve still stops.
+Steps 2 and 4 to 9 run whether the fabric is live or not; step 3 waits for the fabric (it writes the fabric store's settings). With the fabric down (a newer
+`user_version`, a damaged store, §13.7) the node-state store still closes, `agent` and `heal` still reclaim, logs still rotate, a paused job still resumes
+and an idle kiwix-serve still stops.
 
 **4.4 Rules per class (normative).**
 - `fabric`: L5 §10.4 unchanged (`M/store/prune.rs:8-42`): re-fetchable and committed items first, own history only at hard capacity and after the export offer
@@ -399,7 +404,7 @@ step waits.
 **`full` (`agent` and `heal`).** When the pass must reclaim a class (§4.3 step 4) and its offer is unanswered, the class stops growing and says so:
 `StorageStatus.classes[].full` is true; a chat turn is answered and not saved, with the §2.2 rule 8 notice ("History is not being saved: the space set aside
 for the agent is full. Answer the export offer on the Storage page."); a J9 write to the class returns `Full`, which Layer 9's spec handles; decisions are
-still written. The class leaves `full` once the offer is answered and the reclaim made room, or once the budget has room again.
+still written. A spool ingest is written whatever the class's state, as a decision is, so a new proposal is never left plaintext and unlisted. The class leaves `full` once the offer is answered and the reclaim made room, or once the budget has room again.
 
 **4.6 Datasets are never pruned automatically (normative; Q1).** Only the user, or a `dataset.remove` proposal the user accepts, removes a dataset. A fetch,
 a draft, an import and a component cache check free space first, else `409 insufficient_space` before any byte moves (§7.7). On the root's filesystem the
@@ -434,11 +439,12 @@ operator who keeps datasets on an attached disk mounts it at `<root>/state/origi
 | `state/origin/blob/<sha256>` | a verified file: payload, dataset or sidecar | `111d`; the import verbs only with the daemon stopped |
 | `state/origin/catalogue/<publisher hex>.toml`, `<publisher hex>.toml.sig` | the highest verified catalogue per publisher (§6.3) and its detached signature (one name on disk and on the route, §16.7) | `111d`; the import verb only with the daemon stopped |
 | `state/origin/incoming/<sha256>.part` + `.blocks` | a pull or a verb's copy in progress and its block bitmap (a hint; the hashes are the proof); the `.blocks` header records the boot id (§7.3 (5)) | the job, the import verbs |
+| `state/origin/incoming/<publisher hex>.toml` + `.toml.sig`, `state/origin/incoming/adopt-<n>.json` | a dataset verb's staged catalogue copies and its one request file, until the daemon adopts them (§7.6) | the dataset verbs; `111d` deletes them once adopted |
 | `state/origin/import.lock` | the dataset verbs' `flock` (§7.6) | the verbs, `111d` while it adopts |
 | `state/origin/drafts/<id>@<version>.toml` | an entry not yet published (§6.4) | `111d`; `111 dataset add` only with the daemon stopped |
 | `state/datasets.json` (0600) | the holdings index (§5.5) | `111d`; the import verbs only with the daemon stopped |
 | `state/storage.json` (0600) | Layer 8's settings and consent hashes (§15.1) | `111d`; the import verb's `--follow` only with the daemon stopped |
-| `state/kiwix/library.xml`, `state/kiwix/zim/<id>-<version>.zim` → `../../origin/blob/<sha256>`, `state/kiwix/kiwix.log` | the kiwix component's state and log directory (an adapterless component's is `state/<id>/`, §9.2): the library, one symlink per ZIM, the child's log (in the §13.8 ring); "remove files" removes it | `111d` (through `kiwix-manage`); the child writes its log |
+| `state/kiwix/library.xml`, `state/kiwix/zim/<publisher short>-<id>-<version>.zim` → `../../origin/blob/<sha256>`, `state/kiwix/kiwix.log` | the kiwix component's state and log directory (an adapterless component's is `state/<id>/`, §9.2): the library, one symlink per held ZIM, keyed by publisher as a holding is (§5.5), where `<publisher short>` is the first 16 hex characters of the publisher's NodeId (the same short form names a publisher in a consent's subject, §7.7, §15.2), the child's log (in the §13.8 ring); "remove files" removes it | `111d` (through `kiwix-manage`); the child writes its log |
 | `node/state.db` (0600, dir 0700) | the node-state store (§2.2) | `111d` |
 | `node/lock` (0600) | the daemon's lifetime `flock`; the store verbs take it (§13.2) | `111d`, `111 store export` and `import` |
 | `agent/legacy-v0/` | the v0 agent files until the release is confirmed (§2.5) | `111d`, the update guard's restore |
@@ -446,7 +452,8 @@ operator who keeps datasets on an attached disk mounts it at `<root>/state/origi
 
 **5.2 The sidecar (normative; G3).** (1) A dataset's sidecar is the bao-tree post-order outboard (`outboard_post_order`, `BT/io/sync.rs:706`) at
 `BlockSize::from_chunk_log(ob_log)` (`BT/tree.rs:144`): `ob_log = 14` (16 MiB blocks) for files of 1 GiB and more, 12 (4 MiB) below (§22 D9); a Pi hub may
-choose 12 for any file after measurement (Q18). It is stored as one more blob, named by its own sha256: an address, not a trust anchor. · (2) Its size is
+choose 12 for any file after measurement (Q18). It is stored as one more blob, named by its own sha256: an address, not a trust anchor, and proven against
+its bytes before its rename into `blob/` exactly as a dataset file's name is (§5.1 (3), §7.3 (3)(a), §7.6). · (2) Its size is
 `(blocks − 1) × 64` B (`BT/lib.rs:511`): 28,224 B for 7.4e9 B, 49,536 B for 13e9 B, 217,408 B for 57e9 B (3,398 blocks), 423,424 B for 111e9 B (R07g3 §3
 finding 2), all at `ob_log = 14`. The exact length a node expects is `(ceil(size / 2^(10 + ob_log)) − 1) × 64`, computed from the signed `size` and
 `ob_log`: any other length is refused at fetch and at publish, and an entry whose figure exceeds 8 MiB is refused (at `ob_log = 12` a 111e9 B file's
@@ -462,7 +469,7 @@ comes from a mirror (§7.5, §7.6).
 |---|---|---|
 | `id` | `^[a-z0-9][a-z0-9_.-]{0,63}$` | stable across versions; never a path |
 | `kind` | `zim` · `pmtiles` | the reader (`patch` is reserved for v1.1); a reader skips an entry whose `kind` it does not know (§5.4) |
-| `name` · `version` | strings ≤ 120 · ≤ 40 | shown; `version` is never ordered |
+| `name` · `version` | string ≤ 120 · `^[A-Za-z0-9][A-Za-z0-9_.+-]{0,39}$` | shown; `version` is never ordered and is never a path, though it is a URL path segment (§16.1) and part of file names (§5.1); a catalogue holding an entry whose `version` does not match is refused whole (§5.4) |
 | `seq` | u64 | the catalogue `seq` at which this (`id`, `version`) first appeared: orders the versions of an `id` |
 | `size` | u64 | bytes |
 | `sha256` · `blake3` | 64 hex each | the address in the tree · the root every block is checked against |
@@ -478,18 +485,23 @@ comes from a mirror (§7.5, §7.6).
 
 **5.4 The catalogue file (normative).** `schema = 1`, `publisher = "<64 hex NodeId>"`, `seq` (u64, strictly increasing per publisher, minted from the
 publisher's L2 announce counter at each publish, §6.4), then `[[entry]]` tables. At most 1,000 entries and 1 MiB, checked before parsing; every (`id`,
-`version`) unique; the detached signature `<publisher hex>.toml.sig` beside it (§6.1). **Unknown kinds.** An entry whose `kind` the reader does not know is
+`version`) unique, and an `id` or a `version` that does not match its §5.3 pattern refuses the file; the detached signature `<publisher hex>.toml.sig` beside it (§6.1). **Unknown kinds.** An entry whose `kind` the reader does not know is
 skipped whole (its other keys are not read) and counted: the Datasets view says "N entries need a newer 111" (`Publisher.skipped`, §16.2). Every other
 unknown key, in the file or in an entry of a known `kind`, still refuses the file. `schema` changes only for a change a skip cannot carry, so a v1 node keeps
 reading the catalogue of a hub that updated first and lists one `patch` entry.
 
 **5.5 The holdings index (normative).** `state/datasets.json`: per held (publisher, `id`, `version`) its `sha256`, its location (`origin`, or `in_place` with
-an absolute path), its state (`partial`, `present`, `unverified`, or `absent (disk not attached)`), for a file served from outside the tree its tuple
-(device, inode, mtime ns, size), the hash of the consent that fetched it, and its job. **Files outside the tree.** A file served from outside
-`state/origin/blob/` (an in-place dataset; a component blob in the root-owned cache, §11.1) is hashed once and the result kept against its tuple; the Range
-arm's existing metadata read (`N/panels/static.rs:220-227`) compares the tuple on every request. A changed tuple, a missing file or an unclean shutdown makes
-it `unverified` (or `absent (disk not attached)` when the path is gone): it answers 404 and leaves the kiwix library and the tiles list, and it is re-hashed as
-a queued job on the `111d-dataset` thread (§7.4); a match makes it `present` again. Nothing is hashed per request. **Crash order.** The `partial` record is
+an absolute path), its state (`partial`, `present`, `unverified`, or `disk_absent`: the one enum of §16.2, where `not_held` is the state of a listed entry
+the index does not hold), for a file served from outside the tree its tuple (device, inode, mtime ns, size), the hash of the consent that fetched it, and
+its job. **Files outside the tree.** A file served from outside `state/origin/blob/` (an in-place dataset; a component blob in the root-owned cache, §11.1)
+is hashed once and the result kept against its tuple; the Range arm's existing metadata read (`N/panels/static.rs:220-227`) compares the tuple on every
+request, and `111d` makes one `stat` per in-place ZIM against its tuple before it starts kiwix-serve and before it rebuilds the library (§9.2), since
+kiwix-serve reads an in-place ZIM itself through its symlink and no request of ours touches it while `origin.datasets` is off. A changed tuple, a missing
+file or an unclean shutdown makes it `unverified` (or `disk_absent` when the path is gone): it answers 404 and leaves the kiwix library (before the start
+or the rebuild) and the tiles list, and it is re-hashed as a queued job on the `111d-dataset` thread (§7.4); a match makes it `present` again. Nothing is
+hashed per request. **The unclean signal** is the fabric store's own for this start: its clean record absent at open (`unclean`,
+`M/store/mod.rs:156-158`). When the fabric store did not open at this start (a newer `user_version`, a damaged file, §13.7), every out-of-tree file is
+`unverified` at that start. **Crash order.** The `partial` record is
 written before the first byte of a pull; at daemon start a `partial` record whose `blob/<sha256>` exists becomes `present` (a crash fell between the rename
 and the index write), so the index never misses a blob the tree holds. The index is written on a state change only; a job's progress lives in its
 `.blocks` file, never here. Written atomically and only on change, with the `state/relay.json` file rules (`N/relay/settings.rs:16-36`: absent ⇒ defaults; not a small
@@ -559,12 +571,16 @@ in memory under one global timeout, `NI/util/http.rs:134-151`, `:172-200`) is un
 hub's `origin_base` (`HttpException::HomeHubOrigin`, `:25-32`) or to a URL the user typed for a dataset, a new typed exception `UserTypedDataset` beside
 `UserTypedFrom`. · (3) **A pull from a node origin:** (a) fetch the sidecar `blob/<outboard_sha256>`, asking for exactly its length, `(ceil(size / 2^(10 +
 ob_log)) − 1) × 64` B from the signed `size` and `ob_log` (§5.2 (2); any other length is refused, and an entry whose figure exceeds 8 MiB is refused before
-any request), and check it with `valid_outboard_ranges` against the entry's root, so a swapped sidecar fails before any data byte; (b) request block-aligned
+any request), and check it with `valid_outboard_ranges` against the entry's root, so a swapped sidecar fails before any data byte; its sha256, computed as
+it arrives (or as it is read from a directory, §7.6), must equal the entry's `outboard_sha256` before the sidecar is renamed into `blob/`: a mismatch ends
+the job `failed (name mismatch)` before any data byte is requested and deletes the sidecar's copy, so a signed `outboard_sha256` that names a release pin
+or another publisher's file never places bytes under that name; (b) request block-aligned
 ranges, one block per request, into `state/origin/incoming/<sha256>.part`; (c) check each block with `valid_ranges`, refetch a failed block once from the
 same source and then from the next source of the job's source list (§7.4); (d) set its bit in `.blocks`; (e) after the last block, `fsync`, then **prove the name**: the sha256 over the
 file's bytes, hashed in arrival order when the pull ran front to back from its first block in this process, else by one sequential read of the `.part`.
-A mismatch ends the job `failed (name mismatch)` and deletes the `.part` and its bitmap; a match renames the file and the sidecar into `blob/` and updates
-the holdings index. An existing `blob/<sha256>` is never replaced: a pull whose name the tree already holds keeps the held file and discards its own. The
+A mismatch ends the job `failed (name mismatch)` and deletes the `.part` and its bitmap; a match renames the file and the sidecar (its name proven in (a))
+into `blob/` and updates the holdings index. An existing `blob/<sha256>` is never replaced, the sidecar's name included: a pull whose name the tree already
+holds keeps the held file and discards its own. The
 BLAKE3 root is proven block by block (R07g3 finding 5); the sha256 proves that the name in the shared tree (release payloads, other publishers' files, §11.1)
 belongs to these bytes, so one publisher's entry can never place bytes under another pin's name. · (4) Hash-named URLs make a resume against any source
 safe; two hubs can serve different blocks of one file with no extra protocol (R02 finding 3). · (5) The `.blocks` header records the boot id
@@ -574,7 +590,7 @@ writes) it re-checks every marked block against the sidecar.
 
 **7.4 Jobs (normative).** At most one dataset job runs per node; accepted fetches queue in order. A job runs on one named thread, `111d-dataset`, that exists
 only while a job runs, with one block buffer. · States: `queued` · `running` · `paused (offline)` · `paused (metered cap)` · `paused (metered link)` ·
-`paused (disk low)` · `paused (source busy)` · `done` · `failed (<reason>)` (`failed (name mismatch)`, §7.3 (3)(e), and `failed (source cannot resume)`,
+`paused (disk low)` · `paused (source busy)` · `done` · `failed (<reason>)` (`failed (name mismatch)`, §7.3 (3)(a) and (e), and `failed (source cannot resume)`,
 §7.3 (1), among them) · `cancelled`. A pause is a state, never an error (OB §3). · What resumes a paused job, with no timer of its own: offline — the source
 hub's link attribution (L7 §9.3's event), the user's Resume, a daemon start; metered cap, disk low — the capacity pass (§4.3 step 6); source busy — a retry
 on the capacity pass after a gap counted in passes that doubles from 1 to 32 (§4.3 step 6); metered link — the human accepting the new text (§7.8). An
@@ -597,16 +613,25 @@ when the pull ran front to back in this process, else one sequential read of the
 
 **7.6 Sneakernet (normative).** `111 dataset import --from <dir|url> [--in-place] [--follow [<publisher hex>]]` runs once as the node user (the `111 update --from` pattern, L7
 §9.2): it reads `catalogue/<publisher hex>.toml`, `catalogue/<publisher hex>.toml.sig` and `blob/<sha256>` from a directory or a URL in the origin layout,
-verifies the signature (an unfollowed publisher: it prints the NodeId and refuses unless `--follow`, which adds it to `follow`), checks each sidecar and
-every block, and copies into the tree. A directory is listed; a URL cannot be, so from a URL the verb asks for the names a check asks for (§6.2: the home
+verifies the signature (an unfollowed publisher: it prints the NodeId and refuses unless `--follow`, which adds it to `follow`), checks each sidecar (its
+sha256 against the entry's `outboard_sha256` and its root, as §7.3 (3)(a); a mismatch refuses that entry with "name mismatch") and every block, and copies
+into the tree. A directory is listed; a URL cannot be, so from a URL the verb asks for the names a check asks for (§6.2: the home
 hub's and every followed publisher's `catalogue/<hex>.toml`) plus the publisher `--follow <publisher hex>` names, and adds the URL to `sources` for each
 publisher it found there (§15.1). · **One writer.** The dataset verbs take an `flock` on `state/origin/import.lock`, verify and copy into `incoming/`, then hand the result to the
-running daemon on loopback (`POST /api/v1/datasets/adopt`, loopback-only, §16.1), which renames into `blob/`, writes `state/datasets.json` and (for
-`--follow` and a URL's `sources`) `state/storage.json`, and rebuilds the kiwix library: `111d` is the only writer of the two JSON files while it runs. With the daemon stopped (the
-`node/lock` of §13.2 is free) the verb writes them itself under both locks. · `--in-place` (hubs only) registers a file on an attached disk with one hash
+running daemon on loopback (`POST /api/v1/datasets/adopt`, loopback-only, §16.1). Beside its verified copies the verb stages in `incoming/` the catalogue
+files it verified (`<publisher hex>.toml` and `.toml.sig`) and one request file, `adopt-<n>.json`, which lists what it staged and, for each in-place file,
+the tuple it hashed (§5.5). The adopt body names that file (`request`) and carries `incoming` (the copies), `catalogues` (the publishers whose staged
+catalogue to install), `drafts` (`111 dataset add`'s entries, as `DatasetEntry`), `in_place` (`{sha256, path}` per registered file), `follow` and
+`sources`. `111d` verifies each staged catalogue's signature again (§6.1) and its `seq` against the one it holds (§6.3), and `stat`s each in-place path
+again and compares it with the tuple the request file recorded; any item that fails refuses the whole request (400 `bad_request` naming the item, or 409
+`untrusted_publisher`, `needs_hub` for a draft on a node without the hub role) and nothing is written. Otherwise it renames the copies into `blob/`,
+writes `state/origin/catalogue/`, `state/origin/drafts/<id>@<version>.toml`, `state/datasets.json` (the in-place records with their path and tuple) and
+(for `--follow` and a URL's `sources`) `state/storage.json`, rebuilds the kiwix library and deletes the request file and the staged catalogue copies:
+`111d` is the only writer of the catalogue, the drafts and the two JSON files while it runs. With the daemon stopped (the `node/lock` of §13.2 is free) the
+verb writes them itself under both locks. · `--in-place` (hubs only) registers a file on an attached disk with one hash
 pass and copies no data: the sidecar (a small blob in `blob/`) and the index are written, the file stays where it is; it refuses a path the daemon's user cannot read (the unit runs `ProtectSystem=strict` and `ProtectHome=true`,
 `1-bootstrap/systemd/111node.service:35-37`). The file is then checked by its tuple (§5.5): a changed or missing file, or an unclean shutdown, makes it
-`unverified` or `absent (disk not attached)`, and it is hashed again before it is served (Q19). · `111 dataset add <file> --id --kind --name --version
+`unverified` or `disk_absent`, and it is hashed again before it is served (Q19). · `111 dataset add <file> --id --kind --name --version
 --licence --attribution --source-url [--sha256 HEX] [--ob-log N] [--in-place]` (hubs only) computes sha256, BLAKE3 and the sidecar in one pass, places the
 file and writes a draft, through the same lock and hand-off. ·
 FAT32 caps a file at 4 GiB: the docs name exFAT or ext4; no `zimsplit` (Q19). On Termux datasets stay app-private, and the copy says that uninstalling Termux
@@ -622,7 +647,7 @@ and its cap). The live figures travel beside it in `ConsentRequired.facts` (§16
 no longer fits says so before any byte moves (`409 insufficient_space`). Accepting a `dataset.fetch` proposal opens the same dialog and never skips it.
 
 **7.8 Metered links (amends L7 §12, additive).** Dataset fetch bytes (bodies and headers, both ways) count in Layer 7's rolling 24 h window on
-`CLOCK_BOOTTIME` (`7-relay/README.md:1002-1004`; a stub at `6dd9f4f`, `N/relay/metered.rs:1-9`, row D11). **Before every block** the job asks Layer 7's
+`CLOCK_BOOTTIME` (`7-relay/README.md:1002-1004`; a stub at the pinned head, `N/relay/metered.rs:1-9`, row D11). **Before every block** the job asks Layer 7's
 metered module (row D11) which `metered` rule matches the job's connection (its interface, and the SSID a rule may name, L7 §12). A match the accepted
 consent text did not name (a phone that left one Wi-Fi for another, or for mobile data) pauses the job `paused (metered link)` until the human accepts the
 new text, which names the new rule. With `metered = []` nothing is metered and the dialog says "No metered link is set." **The carrier's reserve.** Past a
@@ -682,7 +707,7 @@ apply the dashboard's own CSP") and the static panel's lint cannot read a child'
 `Content-Security-Policy: connect-src 'self'`: a page's scripts reach only the panel's own origin, never the internet from the reader's browser (§17
 states the residual). · (4) The panel's origin is its own port in the panel block (`N/panels/mod.rs:56`), so a ZIM's JavaScript runs there, never in the
 dashboard's origin (R01 finding 5). · (5) **Id, enablement, health and place.** A panel's id is a `ServiceId` today: the manifest parser answers "not a
-service id" otherwise (`N/panels/manifest.rs:387`), the enum is closed at nine (`N/services/mod.rs:80-108`) and the contract's `panelId` is that enum
+service id" otherwise (`N/panels/manifest.rs:387`), the enum is closed at nine (`N/services/mod.rs:87-99`) and the contract's `panelId` is that enum
 (`API:674`, `:696`), so `POST /api/v1/panels/kiwix/session` would answer 404. A panel is enabled only when it is registered, its bundle directory exists and
 its service is set up (`N/panels/mod.rs:22-27`, `:536`), and a `child` panel has neither a service nor a bundle. Layer 8 amends: a `child` panel's id is its
 component's id, so `panelId` is a `ServiceId` or a `ComponentId` (`API:1278`) and the parser accepts a declared component id for `kind = "child"` only; it
@@ -694,8 +719,9 @@ has no `bundle`; it is enabled while its component is enabled, so it holds its p
 `N/components/manifest.rs:1-5`, `:88`). Today's parser refuses such a declaration; this is the whole additive set it needs (§21 L6, pinned in §16.6
 (7)). · **No `adapter`.** A server component names no network; today `adapter` is required and must be a network id
 (`N/components/manifest.rs:685-686`), `Component.required` holds it (`API:1304`, a `NetworkId`, `:1308`) and the UI row labels the component by it
-(`UI/src/views/settings/l6/components.tsx:52`, `:63`). It becomes optional in the parser, nullable in `Component` and in the UI row (null = a server
-component, labelled by its `title`). An adapterless component's state and log directory is `state/<id>/` (today a component's log is
+(`UI/src/views/settings/l6/components.tsx:52`, `:63`). It becomes optional in the parser, nullable in `Component` (it stays in `Component.required`, typed
+`NetworkId` or null, so no key vanishes from an answer, `4-interface/api/README.md:17`) and in the UI row (null = a server component, labelled by its
+`title`). An adapterless component's state and log directory is `state/<id>/` (today a component's log is
 `bridge/<adapter dir>/<id>.log`, `N/components/mod.rs:830`, `registry.rs:58`), inside the §13.8 ring; "remove files" removes it as it removes
 `bridge/<adapter>/` today (`N/components/mod.rs:20`). The routes stay `/api/v1/bridge/components/*`. · **Payload.** `kind = "binary"` with per-target tables
 (`N/components/manifest.rs:21-31`); a `.tar.gz` unpacks whole into `components/kiwix/` (`N/components/registry.rs:599-607`), so `kiwix-serve` and
@@ -719,9 +745,11 @@ declared one. A node111 unit test parses the embedded `kiwix.toml` and `panels/k
 GPL-2.0-or-later (libzim), read upstream (R01 candidates). A separate program: D22's linking boundary is untouched. `[weight]` is measured at build (§19). ·
 **Panel** `assets/panels/kiwix.toml`: `id = "kiwix"` (the component's id, §9.1 (5)), no `bundle`; `[source] kind = "child"`, `component = "kiwix"`,
 `upstream = "127.0.0.1:11250"`; `[auth] mode = "111-session"`;
-`[license] spdx = "GPL-3.0-or-later"`, `served = "unmodified"`. · **The library.** `111d` keeps one symlink per held ZIM (`state/kiwix/zim/<id>-<version>.zim`
-→ its blob, so the file name carries the extension) and rebuilds `library.xml` with `kiwix-manage` (adopted, from the same tarball) when a ZIM is added or
-removed, then sends `SIGHUP` to a running kiwix-serve, which reloads its library without a watcher (R07g3 §4 finding 6).
+`[license] spdx = "GPL-3.0-or-later"`, `served = "unmodified"`. · **The library.** `111d` keeps one symlink per held ZIM
+(`state/kiwix/zim/<publisher short>-<id>-<version>.zim` → its blob, §5.1, so the file name carries the extension and two publishers holding one `id` and
+version never collide) and rebuilds `library.xml` with `kiwix-manage` (adopted, from the same tarball) when a ZIM is added or removed, then sends `SIGHUP`
+to a running kiwix-serve, which reloads its library without a watcher (R07g3 §4 finding 6). Before it starts kiwix-serve and before each rebuild it makes
+one `stat` per in-place ZIM against its tuple, and a ZIM that no longer matches leaves the library first (§5.5).
 
 **9.3 Lifecycle (normative).** (1) Enable is Layer 6's: the licence notice and its `component_enable` consent, the cache check, the install
 (`N/components/mod.rs:12-20`). Enable today runs install → claim and pre-bind the ports → start → health (`N/components/mod.rs:12-19`), and every enabled
@@ -729,16 +757,18 @@ component is enabled again at daemon start (`resume_enabled`, `:948-960`). With 
 `resume_enabled` skips the component: nothing is claimed, bound or started. · (2) The first panel session mint (`POST /api/v1/panels/kiwix/session`)
 claims and pre-binds the port, starts kiwix-serve as a supervised child, with the runner's back-off, and answers once its port answers (`health =
 "listen"`). · (3) It stops when the user stops it (Stop on Storage → Datasets: `POST /api/v1/bridge/components/{id}/stop`, a new route valid for an
-`on_demand` component only, §16.1; or disable), at daemon stop, and on the existing capacity pass when no request reached the panel's proxy for 30 passes (the
-lead's number; §4.3 step 9: the proxy sees every request, so the idle stop needs no timer of ours). The next panel open starts it again. kiwix-serve wakes once a second
+`on_demand` component only, §16.1; or disable), at daemon stop, and on the existing capacity pass when no request reached the panel's proxy and no
+`encyclopedia.search` reached the search route (§9.4) for 30 passes (the lead's number; §4.3 step 9: the proxy and the route see every request, and each
+resets the same counter, so the idle stop needs no timer of ours and never stops kiwix-serve under an agent that is searching). The next panel open starts it again. kiwix-serve wakes once a second
 while it runs (`kiwix-serve.cpp:423,451`, R07g3 §1); the idle stop keeps it from being left resident (R05 finding 16). · (4) While off: no process, listener, timer or open
 file of kiwix-serve (G7's zero-weight gate, `6-transport/verify/zero-weight.sh`); while the component is enabled, the panel's own listener (§9.1 (5), §19).
 
 **9.4 `encyclopedia.search` (normative).** The agent tool is named after what it searches: `kb.` is the Layer 0 knowledge base's prefix (`kb.read`,
-`A/src/tools.rs:78`; the budget class `kb`), which a model would pair with it (§22 D25). `GET /api/v1/datasets/search?q=<text>&book=<id>&n=<1..20>` (session; the agent's bearer reads). While kiwix-serve runs,
+`A/src/tools.rs:78`; the budget class `kb`), which a model would pair with it (§22 D25). `GET /api/v1/datasets/search?q=<text>&book=<id>&publisher=<hex>&n=<1..20>` (session; the agent's bearer reads). While kiwix-serve runs,
 `111d` asks `http://127.0.0.1:11250/search?pattern=…&books.name=…&format=xml&pageLength=n` (a documented public endpoint, R05 finding 12) and answers
-`{schema, format: "opensearch-xml", body}`, `body` the upstream text capped at 8 KiB. `books.name` is the ZIM's own `Name` metadata (R05 finding 12), not
-the catalogue `id` and not the symlink's name, so `book=<id>` is mapped to the held entry's `book` field (§5.3); an entry without one answers `400
+`{schema, format: "opensearch-xml", body}`, `body` the upstream text capped at 8 KiB; each search resets the idle-stop counter (§9.3 (3)). `books.name` is
+the ZIM's own `Name` metadata (R05 finding 12), not the catalogue `id` and not the symlink's name, so `book=<id>` is mapped to the `book` field (§5.3) of
+the entry that `publisher` (optional, default the home hub, as `dataset.fetch` takes it, §16.4) holds under that `id`; an entry without one answers `400
 bad_request` ("This encyclopedia cannot be searched by name"), and without `book` the search covers every held ZIM. While it is off: `409 component_unavailable` with "The encyclopedia is
 off." `111d` parses nothing (no XML crate is in the lock); the agent tool labels the body untrusted. The agent may say a person can open the encyclopedia from
 Settings → Storage; it never starts it (the session mint is a POST, refused to the bearer). It does not propose turning it on: no proposal kind enables a
@@ -884,7 +914,7 @@ It is set by node111's `roles()` beside bits 3-5 (`N/fabric/mod.rs:592-607`) and
 `origin.serve` consented, so a Layer 7 member's behaviour is unchanged; `origin.components` changes no bit. **The check.** A member asks its home hub for
 the hub's catalogue with one GET on the link-attribution event L7 §9.3 uses for releases, only while the hub's signed announce carries `ROLE_DATASETS`
 (no "last answer" state is kept), and whenever the user opens the Datasets view or taps Check now (`POST /api/v1/datasets/check`). The GET sends
-`If-None-Match` with the ETag of the catalogue it holds (the hub answers 304 when it is unchanged: the `If-None-Match` handling of `file_body`, `N/panels/static.rs:231-237`, which the Range arm keeps),
+`If-None-Match` with the ETag of the catalogue it holds (the hub answers 304 when it is unchanged: the `If-None-Match` handling of `file_response`, the serving function beside `file_body`, `N/panels/static.rs:231-237`, which the Range arm keeps),
 its bytes count in the metered window (§7.8), and it is skipped while that window's cap is reached. A check also asks the node's other sources for the
 followed publishers' catalogues (§6.2). A hub without the bit gets no request on attribution; one that turns `origin.datasets` on later is noticed at its
 next announce. The Datasets view's empty state offers Check now. No head frame, no timer, no gossip. A followed publisher's new entry will travel as a
@@ -915,7 +945,10 @@ Hub-storable, never published (L2 §8.5(i)). No new crate. `age` stays a possibl
 **13.2 The verbs (normative).** `111 store export --out <file>` and `111 store import --from <file>` run as the node user on a local terminal, never over HTTP
 (the `identity backup` rule, `L2:311`), with the daemon stopped: both refuse while `111d` runs ("Stop the node first: sudo systemctl stop 111node"). **The
 lock.** `111d` holds an exclusive `flock` on `<root>/node/lock` (0600) for its lifetime: one descriptor, opened `O_CLOEXEC` at start (the
-`state/staging.lock` pattern, `N/updater/stage.rs:20`, `:39-79`); the verbs take the same lock without waiting and refuse when it is held. **Export** opens
+`state/staging.lock` pattern, `N/updater/stage.rs:20`, `:39-79`); the verbs take the same lock without waiting and refuse when it is held. A `111d` that
+starts while a verb holds the lock does not wait: it exits with status 75 and the message "a store verb is running", the unit restarts it after its
+`RestartSec=5` (`Restart=always`, `1-bootstrap/systemd/111node.service:42-43`), and Layer 9's J2 hook records each such exit with its code and never as a
+crash (§3 J2). **Export** opens
 each store with its key through the §2.7 S2 open (no epoch decision, the clean record untouched), runs `PRAGMA wal_checkpoint(TRUNCATE)` (after a crash the
 last commits sit in `-wal`, which a tar of the main file alone would drop) and reads `user_version`, then tars; a store that does not open is refused, never
 skipped. **Import** refuses an export from another NodeId and a store whose `user_version` is newer than the build writes. It sets each existing store aside
@@ -950,27 +983,38 @@ start timeout, a power cut) is only ever a `.tmp`, never renamed into place. Cop
 `agent/legacy-v0/` and `state/heal/legacy-v0.jsonl` (§2.5) once the probation journal (`state/update.json`, `L1:141`) shows the release confirmed. · (3) A probation revert by the guard
 runs release N's own `111 update-guard` before the flip (`ExecStartPre=+/usr/local/bin/111 update-guard`, `1-bootstrap/systemd/111node.service:22`;
 `revert_to`, `NI/update_guard.rs:22-33`). It gains one step: for each store with a `.pre-v<N>` copy, it moves the store and its `-wal` and `-shm` aside to
-`<file>.rolled-back-v<N>` and renames the copy into place (owner `node111`, 0600), and moves the files of `agent/legacy-v0/` back to their places (and `state/heal/legacy-v0.jsonl` back to `state/heal/journal.jsonl`). A
+`<file>.rolled-back-v<N>` and renames the copy into place (owner `node111`, 0600); the legacy files move back under their own trigger (below). A
 READY-but-unhealthy release is reverted by the root helper instead (`handle_revert_request`, `NI/update_helper.rs:282-308`): it flips, clears the journal
 and restarts, so the next `ExecStartPre` runs release N−1's guard (`/usr/local/bin/111` is `current/bin/111`, `L1:146`) with no journal to act on. So the
 restore is also a content rule the guard applies at every `ExecStartPre`, whatever flipped `current`: for each store with a `.pre-v<K>` whose K is above
-the schema version the running guard's build writes, the same set-aside and rename, and the legacy files moved back; a `.pre-v<K>.tmp` is deleted, never
-renamed in. The rule ships in the release before the first migrating one (item 4). N−1 then opens a store it reads, instead of refusing it (`SchemaTooNew`,
+the schema version the running guard's build writes, the same set-aside and rename; a `.pre-v<K>.tmp` is deleted, never renamed in. **The legacy files'
+own trigger.** When `agent/legacy-v0/` or `state/heal/legacy-v0.jsonl` exists and the running guard's build writes no node-state store, the guard moves
+the files of `agent/legacy-v0/` back to their places and `state/heal/legacy-v0.jsonl` back to `state/heal/journal.jsonl`, whether or not any store has a
+copy: the first release with the node-state store creates `state.db` new (no migration from 0, so no copy) and may migrate nothing else. Both rules run
+on both revert paths, the guard's `revert_to` and the root helper's revert followed by N−1's guard. They ship in the release before the first migrating
+one and in the release before the first one with the node-state store (item 4). N−1 then opens a store it reads, instead of refusing it (`SchemaTooNew`,
 `M/store/schema.rs:727-728`; R04 finding 12). The restored fabric store has no clean record, so its first open mints a new epoch (`decide_epoch`,
 `M/store/mod.rs:306-329`): the copy was taken before release N allocated sequence numbers under the old epoch, its `tx_state` is behind them, and keeping
 the epoch would reuse an `(epoch, n)` for new content that receivers drop as delivered (L5 §4, `5-messaging/README.md:196-203`). What arrived during
 probation stays in the rolled-back file, its blob files kept (§2.7 S3), which the Storage page lists and only the user deletes. · (4) No signed release has
 shipped (`NI/manifest.rs:140-143`), so no field store has migrated: Layer 7's V4 and V5 (`M/store/schema.rs:76`; committed, rows M1b and M1c) run on
 development nodes only. The copy exists before the first migration after the first signed release; if Layer 7's migration is that one, Layer 7's build
-takes this step (Q21, a cross-layer request, §21 L7). · (5) **The bound, before the flip.** A probation lasts 600 s from the flip (`NI/probation.rs:57`) and
+takes this step (Q21, a cross-layer request, §21 L7). Likewise the guard's two rules of (3), the legacy files' trigger included, ship in the release
+before the first one that carries the node-state store; if that release is Layer 7's, its build carries them (the same cross-layer request). · (5) **The bound, before the flip.** A probation lasts 600 s from the flip (`NI/probation.rs:57`) and
 a health confirmation after the deadline is ignored (`NI/update_helper.rs:326-330`), so a copy that outlasts it leaves a revert at some later start. The
 release manifest names the store schema versions each release writes (`[stores]`: `fabric`, `node_state`; additive, as `[source]`, §11.6). Release N−1's
 updater compares them with the versions it writes; an update that migrates a store whose copy does not fit above the floor (free − the store's size <
-floor), or cannot be copied inside the probation window at the rate measured on an SD card at build, is refused before the flip with `409
-insufficient_space`, naming the bytes needed, and shown on the Storage page and Layer 7's update page. A human may accept "update without a rollback copy"
-(consent `update_without_copy`, §15.2), whose text says that if this release fails, that store stays closed until the next update. Then, and only then, the
-migration runs without a copy, and a revert leaves the store closed (`SchemaTooNew`) with §13.7's choices. The seconds per GiB on an SD card are a build
-measurement that sets the bound (`8-storage/TASKS.md`).
+floor), or cannot be copied inside the probation window at the rate measured on an SD card at build, is refused before the flip: no request waits on
+the updater (`POST /api/v1/update/check` answers 202, `API:190-195`), so the refusal is an updater state, `/status.update.last_result` =
+`refused_space` (`API:749`, one value appended), with the notice `update_refused_space` naming the release, the store and the bytes needed (§16.2), shown
+on the Storage page and Layer 7's update page. A human may accept "update without a rollback copy" (consent `update_without_copy`, §15.2), whose text says
+that if this release fails, that store stays closed until the next update. The consent is taken by one route, `POST
+/api/v1/storage/update-without-copy` `{release, store, accept_warning?}` (§16.1): a human's, in a dashboard session or on loopback, never the agent's
+bearer; it answers 409 `consent_required` with the text first and 204 once the repeat carries the hash. `111d` records it in `state/storage.json`
+(`update_without_copy`, one entry per release and store, §15.1); the updater reads it at its next check, and only for that release and that store does
+the migration run without a copy; a revert then leaves the store closed (`SchemaTooNew`) with §13.7's choices. The entry is forgotten once that release
+is confirmed (the moment of (2)) or reverted (`111d`'s first start under another release). The seconds per GiB on an SD card are a build measurement that
+sets the bound (`8-storage/TASKS.md`).
 
 **13.7 Integrity checks after an unclean shutdown (normative).** `PRAGMA quick_check` and `PRAGMA cipher_integrity_check` (page HMACs, R04 finding 10) run
 once when a store's unclean signal is present at open (the fabric store: its clean record absent, `unclean`, `M/store/mod.rs:156-158`; the node-state
@@ -978,7 +1022,9 @@ store: a non-empty `state.db-wal`, §2.2 rule 9), never on a clean boot. A power
 may hold 1.49 GiB or more: the store opens and serves at once, and the checks run on a second, read-only connection on a blocking thread, while `GET
 /api/v1/storage` shows that store as `checking` (§16.2). On failure the store is closed and moved aside to `<file>.damaged-<n>` (the fabric store's blob
 files kept, §2.7 S3) and stays closed with that reason; the Storage page offers "Start an empty store (the damaged file is kept)" and "Import an export"
-(§13.2). Never a silent re-creation (Layer 1's "never silent re-key", `L1:204`). Their time on an SD card is measured at build.
+(§13.2). Start an empty store is `POST /api/v1/storage/start-empty` `{store, accept_warning?}` (§16.1), loopback only: it names the store, answers 409
+`consent_required` (`store_start_empty`, §15.2) until the repeat carries the hash, then lifts the closed state, so the next open creates an empty store in
+its place (the fabric store through its boot, as on a first start). Deleting a set-aside file is `DELETE /api/v1/storage/set-aside/{file}`, loopback only. Never a silent re-creation (Layer 1's "never silent re-key", `L1:204`). Their time on an SD card is measured at build.
 
 **13.8 Child log rings (normative; Q6).** `open_log` opens a child's log create-and-append with no cap (`N/supervise.rs:752-755`). On the pass, a capped log
 above `logs.max_file_bytes` (default 4 MiB, the drafter's) has its last half copied to `<name>.1`, replacing it, and is truncated to zero; the child keeps
@@ -1032,10 +1078,12 @@ default. Not a small regular file, or not JSON ⇒ moved aside to `storage.json.
 | `origin.max_streams` | 4 (1..=16) | same | a human on loopback | — |
 | the L5 class quotas | unset, as built; `quota.transit` written once at its effective value when the budget first sets the watermark (§4.2 item 4) | `fabric/store.db` (`PATCH /api/v1/fabric/settings`, `API:1132-1145`) | a human on loopback (that route is loopback-only, `4-interface/api/README.md:49`), or an accepted `quota.set` decided on loopback | — |
 | `metered` | `[]` | `state/relay.json` (Layer 7, L7 §12) | a human | Layer 7's |
+| `update_without_copy` | `[]`: `[{release, store, hash}]` | `state/storage.json` | a human in a dashboard session or on loopback, through its own route only (§13.6 (5)); `111d` forgets an entry once its release is confirmed or reverted | `update_without_copy` |
 
 **Who writes them.** Every key `state/storage.json` holds is written through `PATCH /api/v1/storage/settings`, which is loopback-only (403
-`loopback_only` otherwise), the posture of its Layer 5 sibling `PATCH /api/v1/fabric/settings` (`4-interface/api/README.md:49`); the adopt route of the
-dataset verbs (§7.6) is loopback-only too. A paired session reads every setting (`GET /api/v1/storage`, `GET /api/v1/datasets`) and changes none. An
+`loopback_only` otherwise), the posture of its Layer 5 sibling `PATCH /api/v1/fabric/settings` (`4-interface/api/README.md:49`), except
+`update_without_copy`, which only `POST /api/v1/storage/update-without-copy` writes (§16.1); the adopt route of the dataset verbs (§7.6) is loopback-only
+too. A paired session reads every setting (`GET /api/v1/storage`, `GET /api/v1/datasets`) and changes none. An
 accepted `quota.set` (§16.4) applies through the route it names with that route's own `loopback_only` check: decided from a session that is not on
 loopback it answers 403 `loopback_only`, nothing is applied and the proposal stays open.
 
@@ -1059,8 +1107,11 @@ hub shows them on its Credits page." · **`components_serve`** (same subject): "
 for itself (<list>)<, and the Termux install files (<size>), which this hub downloads first,> without signing in. When you share a program file, you are
 the one who passes it on under its licence: this hub serves each file with its licence notice and where its source is, which is what those licences ask
 of you. 111 and its author do not distribute these files." The bracketed part appears with addon `termux` (§11.5). · **`update_without_copy`** (subject `<release>:<store>`, §13.6 (5)):
-"Install <release> without a rollback copy of <messages | the agent's history and repair records>. There is not enough free space to keep a copy while it
-updates (<needed> needed, <free> free). If this release fails, <messages stay | the agent's history and repair records stay> closed until the next update."
+"Install <release> without a rollback copy of <messages | the agent's history and repair records>. This node cannot keep a copy while it updates: there
+is not enough free space, or the copy would not finish in time. If this release fails, <messages stay | the agent's history and repair records stay>
+closed until the next update." `facts` = `{needed, free}`, shown as "Needed: <needed>; free now: <free>."
+· **`store_start_empty`** (subject the store, `fabric` or `node_state`, §13.7): "Start an empty store for <messages | the agent's history and repair
+records>. The damaged file stays on this node as <file> and is not read again; only you can delete it. What it held comes back only from an export."
 
 Each consent records its text hash; a changed text asks again. The hashed text holds stable facts only; live figures ride `facts` (§16.2), unhashed. "You
 won't be warned in future" is the pattern refused (R05 finding 6). "Paused (offline)", "paused (metered cap)" and "paused (metered link)" are states,
@@ -1078,6 +1129,7 @@ never errors.
 | export · import | never (a CLI verb with the daemon stopped) | only |
 | prune | never: the budget prunes by capacity | answers the export offer |
 | start the encyclopedia | never; it says it is off and proposes nothing (no proposal kind enables a component, §9.4, §22 D24) | opens the panel |
+| update without a rollback copy · start an empty store · delete a set-aside store file | never | only (§13.6 (5), §13.7; the last two on loopback) |
 
 The bearer is refused on every non-GET route Layer 8 adds (D26 (2)); the agent never accepts a consent and never sees a consent hash.
 
@@ -1089,7 +1141,8 @@ with its default and rule, and `keep.effective` when it differs (§4.2 item 3); 
 store's file size beside the class figures and the spool, `agent/work/` and `agent/legacy-v0/` measured on request; caps editable on loopback and
 read-only in a paired session (§15.1 "Who writes them"); the export offers (§4.5);
 the scaled Transit figure as a suggestion (§4.2 item 4); a store being checked (§13.7); damaged, rolled-back and replaced store files (§13.2, §13.6, §13.7),
-an update refused for space (§13.6 (5)) and unreadable agent files (§2.4). · **Datasets:** the home hub's
+each with Delete, and Start an empty store for a damaged one (both on loopback, read-only in a paired session); an update refused for space with "Update
+without a rollback copy" (§13.6 (5)); and unreadable agent files (§2.4). · **Datasets:** the home hub's
 and the followed publishers' catalogues (newest `seq` and its source, §6.3); held entries with a `used_by` chip each (`map`, `encyclopedia`, `agent`,
 `updates`), so "what do I lose" is answered before a delete (R05 finding 10); Get, Refresh, Remove; jobs with their progress, their source and their
 pauses; "N entries need a newer 111" when a catalogue held entries of an unknown `kind` (§5.4); the followed publishers and each one's `sources` (§7.4),
@@ -1119,14 +1172,17 @@ the gate asserts it and the lazy total (G17). If Layer 8's part cannot fit, rais
 | `/api/v1/datasets/jobs/{job}` · `/resume` | DELETE · POST | cancel · resume a paused job; `{accept_warning?, accept_override?}` on resume: a job `paused (metered link)` answers 409 `consent_required` with the text naming the new rule until the repeat carries its hash, and a job `paused (metered cap)` answers 409 `consent_required` (`dataset_override`) until the repeat carries `accept_override` (§7.4, §7.8) | a human; bearer 401 |
 | `/api/v1/datasets/drafts` | GET · POST | `{schema, drafts: [{draft, entry}]}` (`draft` the `<id>@<version>` name `publish` takes, `entry` a `DatasetEntry`) · a first-copy job (§7.5; consent `dataset_fetch`) → 202 `Job`; 409 `needs_hub` | session or loopback, bearer reads · a human, bearer 401 |
 | `/api/v1/datasets/publish` | POST | `{drafts: [string], remove: [{id, version}]}` → 200 `{seq}` (§6.4); 409 `needs_hub` | loopback or a paired session, a human |
-| `/api/v1/datasets/search` | GET | §9.4; 409 `component_unavailable` | session or loopback; bearer reads |
+| `/api/v1/datasets/search` | GET | §9.4 (`q`, `book?`, `publisher?` defaulting to the home hub, `n?`); 409 `component_unavailable` | session or loopback; bearer reads |
 | `/api/v1/tiles` | GET | `{schema, sets: [{id, publisher, version, name, bytes, licence, attribution, url}]}` (`url` the path below) | session or loopback; bearer reads (every GET, `4-interface/api/README.md:87`) |
 | `/api/v1/tiles/{publisher}/{id}/{version}` | GET, HEAD | the file through the Range arm (206; 416 with a `problem+json` body, code `range_not_satisfiable`, §7.1), `application/octet-stream` | session or loopback; bearer reads |
 | `/api/v1/chat/history` | GET | unchanged shape, answered by `111d` (§2.3); 503 `store_unavailable` | as today |
 | `/api/v1/proposals` · `/api/v1/proposals/{id}` · `/api/v1/proposals/{id}/decision` | GET · GET · POST | unchanged shapes, answered from the store after a spool sweep (§2.4 rule 2); the decision route answers 503 `store_unavailable` and applies nothing while the store is unavailable | as today |
-| `/api/v1/datasets/adopt` | POST | `{incoming: [sha256], follow?: [publisher hex], sources?: {publisher hex: [origin URL]}}` → 204: a verb's verified copies in `incoming/` are renamed into the tree and indexed, `follow` and `sources` written, the library rebuilt (§7.6) | loopback only; never a session, never the bearer |
+| `/api/v1/datasets/adopt` | POST | `{request: "adopt-<n>.json", incoming: [sha256], catalogues: [publisher hex], drafts: [DatasetEntry], in_place: [{sha256, path}], follow?: [publisher hex], sources?: {publisher hex: [origin URL]}}` → 204: each staged catalogue's signature and `seq` checked again and installed, the drafts written, each in-place path `stat`ed again against the tuple the request file recorded and indexed with its path and tuple, the verified copies in `incoming/` renamed into the tree and indexed, `follow` and `sources` written, the library rebuilt, the request file deleted (§7.6); any item that fails: 400 `bad_request` naming it, 409 `untrusted_publisher` or `needs_hub`, and nothing written | loopback only; never a session, never the bearer |
 | `/api/v1/bridge/components/{id}/stop` | POST | 204: stops a running `on_demand` component (kiwix-serve, §9.3); its files and its enable switch stay; 400 `bad_request` for a component that is not `on_demand` | a human; bearer 401 |
 | `/api/v1/panels/{id}/session` | POST | unchanged shape; `{id}` is a `ServiceId` or, for a `child` panel, its `ComponentId` (§9.1 (5)); for kiwix the first mint starts kiwix-serve (§9.3 (2)) | as today |
+| `/api/v1/storage/update-without-copy` | POST | `{release, store: "fabric" \| "node_state", accept_warning?}` → 409 `consent_required` (`update_without_copy`, subject `<release>:<store>`) until the repeat carries the hash, then 204: the consent recorded in `state/storage.json` for that release and store, read by the updater at its next check (§13.6 (5)); 400 `bad_request` for a release and store that no `update_refused_space` notice names | a human in a dashboard session or on loopback; bearer 401 |
+| `/api/v1/storage/set-aside/{file}` | DELETE | → 204: deletes one set-aside store file a `set_aside_store` notice names (`.rolled-back-v<N>`, `.damaged-<n>`, `.replaced-<n>`, with its `-wal` and `-shm`); 404 for any other name; the blob sweep resumes once no set-aside fabric store remains (§2.7 S3) | a human on loopback only (403 `loopback_only` otherwise); never the bearer |
+| `/api/v1/storage/start-empty` | POST | `{store: "fabric" \| "node_state", accept_warning?}` → 409 `consent_required` (`store_start_empty`, subject the store) until the repeat carries the hash, then 204: the store's closed state lifted, the next open creates it empty, the damaged file kept (§13.7); 400 `bad_request` for a store that is not closed after a set-aside | a human on loopback only (403 `loopback_only` otherwise); never the bearer |
 
 **16.2 Shapes.**
 
@@ -1148,20 +1204,27 @@ due), `checking`, `ok`, `failed` (§13.7). `classes[].full` (§4.5) is false for
 `update_refused_space` (`{kind, release, store, needed_bytes}`, §13.6 (5)) and `set_aside_store` (`{kind, file, bytes}`: a `.rolled-back-v<N>`,
 `.damaged-<n>` or `.replaced-<n>` file). · `Publisher {node_id, label,
 home, seq, source, sources, skipped, entries: [DatasetEntry]}` (`sources` the origin URLs `sources` lists for it, §7.4; `skipped` the entries of an
-unknown `kind`, §5.4); `DatasetEntry` = the §5.3 fields plus `state` (`absent`, `partial`, `present`, `in_place`, `unverified`) and
-`non_commercial`. `Holding {publisher, id, version, sha256, bytes, location, state, used_by}`. `Job {id, publisher, entry, version, state, done_bytes,
+unknown `kind`, §5.4); `DatasetEntry` = the §5.3 fields plus `state`, `location` and `non_commercial`. **One state enum** for `DatasetEntry.state` and
+`Holding.state`: `not_held` (listed, not held; an entry only), `partial`, `present`, `unverified`, `disk_absent` (an in-place file whose disk is not
+attached) (§5.5); `location` ∈ `origin`, `in_place` on both, `null` on an entry that is `not_held`. `Holding {publisher, id, version, sha256, bytes, location, state, used_by}`. `Job {id, publisher, entry, version, state, done_bytes,
 total_bytes, source, metered: {match, cap, days} | null, override_bytes}` (`id` a new id family, `job-…`, minted by `111d`, which the conventions' IDs line gains, `4-interface/api/README.md:221`; states §7.4, `paused (metered link)` and `failed (source cannot resume)` among
 them; `override_bytes` the bytes moved past a cap under `dataset_override`, §7.8). · `FabricStatus` gains an optional `unconsumed {agent_op, kb, update,
-patch, sync}` (§12.3). `Proposal.kind` gains `storage` (§16.4). `ConsentRequired.action` (`API:1497`) gains `dataset_fetch`, `dataset_override`,
-`datasets_serve`, `components_serve`, `update_without_copy` (§13.6 (5)), appended. `ConsentRequired` gains an optional `facts` object (additive; absent for
+patch, sync}` (§12.3). `Proposal.kind` gains `storage` (§16.4). `Proposal.decision` (`API:852`, `{decision, at}`) gains an optional `applied` member
+(additive): the record's `applied` as the store holds it, `{pending: true}` while an apply runs, then the result (§2.4 rule 5), so a harness reads a
+half-applied decision through `GET /api/v1/proposals/{id}` (§18). `Status.update.last_result` (`API:749`) gains `refused_space` (§13.6 (5)), appended.
+`ConsentRequired.action` (`API:1497`) gains `dataset_fetch`, `dataset_override`, `datasets_serve`, `components_serve`, `update_without_copy` (§13.6
+(5)), `store_start_empty` (§13.7), appended. `ConsentRequired` gains an optional `facts` object (additive; absent for
 every earlier action): the live figures shown under `warning_text` and never part of `hash` (§7.7): `{free, free_after, days?}` for `dataset_fetch`,
-`{remaining}` for `dataset_override`. `StorageSettings` (§15.1) carries `sources` and `origin.termux`. `Component.adapter` becomes nullable and leaves
-`Component.required` (null = a server component, §9.2); `Component` gains `start` (`always` | `on_demand`). `Problem.code` (`API:692`) gains `insufficient_space`, `untrusted_publisher`, `job_running`, `store_unavailable`, `range_not_satisfiable` (416, §7.1), appended. ·
+`{remaining}` for `dataset_override`, `{needed, free}` for `update_without_copy`. `StorageSettings` (§15.1) carries `sources` and `origin.termux`. `Component.adapter` becomes nullable and stays in
+`Component.required`, typed `NetworkId` or null (null = a server component, §9.2), so the key never vanishes from an answer
+(`4-interface/api/README.md:17`); `Component` gains `start` (`always` | `on_demand`). `Problem.code` (`API:692`) gains `insufficient_space`, `untrusted_publisher`, `job_running`, `store_unavailable`, `range_not_satisfiable` (416, §7.1), appended. ·
 **Publisher strings.** `Publisher.label` and an entry's `name`, `version`, `licence`, `attribution`, `source_url`, `built` and `book` are the publisher's: untrusted,
 rendered as text only (never Markdown or HTML), the conventions' rule for names and labels (`4-interface/api/README.md:160-161`), and so are the
 same strings wherever they appear inside a consent's `warning_text` (§15.2).
 
-**16.3 Events.** `storage` → `SseStorage` on a change of `disk_low`, `store_full`, a class's `full`, `node_state` or `integrity`, or after a reclaim: the
+**16.3 Events.** `storage` → `SseStorage` on a change of `disk_low`, `store_full`, a class's `full`, `node_state.state` to or from `unavailable` (or its
+`reason`), or `integrity`, or after a reclaim; this is the one list of what sends it (§4.3 step 8 cites it), and an open or a close of the node-state store
+on use (`open` ↔ `closed`) sends none, so opening the store for a chat turn sends no frame. The frame carries the
 fields the pass already holds, `{schema, disk, keep, node_state, integrity, classes, notices}` with `classes` the four budgeted ones (§4.1), never a figure
 that needs a walk (`updates`, `bridge`, `kb`) or a read of the index or the registry (`datasets`, `components`); the page refetches `GET /api/v1/storage`
 on the frame for the rest (§4.3 step 2: the pass walks nothing). `dataset` → `SseDataset` (a `Job`), coalesced per job (§7.4): at most one per 5 s
@@ -1182,24 +1245,27 @@ renders as a card from the parsed JSON, never as Markdown.
 | Tool | Kind | Shape | Gate |
 |---|---|---|---|
 | `storage.read` | read | `{datasets?}` → one GET: `StorageStatus` (`GET /api/v1/storage`), or with `datasets: true` the `/api/v1/datasets` listing (no secret, no consent hash in either); one call per use, the agent's rule (`3-intelligence/README.md:119-122`) | none |
-| `encyclopedia.search` | read | `{query, book?, n?}` → §9.4, inside a labelled untrusted block | none |
+| `encyclopedia.search` | read | `{query, book?, publisher?, n?}` → §9.4 (`publisher` defaults to the home hub), inside a labelled untrusted block | none |
 | `storage.propose` | write intent | `{actions, why}` → a proposal `kind: storage` | a human accepts |
 
-The count grows by three from the count the build finds: 17 at `6dd9f4f` (`A/tests/daemon_tools.rs:318`, `A/tests/chat_loop.rs:308`), 20 after Layer 7's
-§13.3, 23 after this. Schemas beside `fabric.read` (`A/src/tools.rs:197`), dispatch beside `:392`. `proposal.write` takes only a title and a body
+The count grows by three from the count the build finds: 20 at the pinned head, Layer 7's three tools of its §13.3 included (row A1;
+`A/tests/daemon_tools.rs:322`, `A/tests/chat_loop.rs:308`, `A/tests/layer6_tools.rs:395`, `A/tests/layer7_tools.rs:315`), 23 after this. The three
+schemas are appended after Layer 7's, the A1 precedent (the list ends with `relay.propose`, `A/src/tools.rs:352`; dispatch beside `:403`), so
+`names[17..20]` stays Layer 7's and Layer 8's are `names[20..]`. `proposal.write` takes only a title and a body
 (`A/src/tools.rs:113-121`), so a typed proposal needs its own tool, the `device.propose` pattern (`:281`; §22 D1). The agent reads freely and writes nothing
 (`3-intelligence/README.md:119-122`).
 
 **16.6 The pin list (the conventions' form, `4-interface/api/README.md:127`; the change is not done until all are green).** (1) `Proposal.kind` +1
-(`storage`): `KINDS` in `N/dashboard/api_v1/proposals.rs:104-114` (nine at `6dd9f4f`), the UI's proposal card, the agent's writer. · (2) The agent tool count
-+3: both tests, the `DAEMON_TOOLS` list, `A/src/tools.rs` schemas and dispatch. · (3) `pnpm gen:types`, then `node scripts/gen-sse.mjs --check`; the new enum
+(`storage`): `KINDS` in `N/dashboard/api_v1/proposals.rs:104-114` (nine at the pinned head), the UI's proposal card, the agent's writer. · (2) The agent
+tool count +3, 20 → 23: the four count pins of §16.5, a `LAYER8_TOOLS` constant beside `LAYER7_TOOLS` (`A/tests/daemon_tools.rs:301`,
+`A/tests/layer7_tools.rs:45`; `DAEMON_TOOLS` unchanged, as A1 left it), `A/src/tools.rs` schemas and dispatch. · (3) `pnpm gen:types`, then `node scripts/gen-sse.mjs --check`; the new enum
 tuples and aliases (`StorageClass.id`, `Problem.code`, `ConsentRequired.action`, `Proposal.kind`, `Job.state`, the two events) are listed in
 `UI/scripts/gen-sse.mjs`. · (4) `x-sse-events.events` (`API:2044-2059`) gains `storage` and `dataset`; the UI store's `switch (frame.event)` handles them. ·
 (5) The contract tests: `UI/test/gen.test.ts`, `UI/test/http.test.ts`, a new `UI/test/layer8-contract.test.ts` (the `layer7-contract.test.ts` precedent), and
 the mock adapters, whose frames validate against `x-sse-events`. · (6) node111's mirrors in `dashboard/api_v1/`: the `Problem` codes, the `ConsentRequired`
 actions, the class ids and the job states. · (7) The panel and component contract (§9.1 (5), §9.2, §9.3): `panelId` (`API:674`) becomes `oneOf`
 `ServiceId` | `ComponentId`, with node111's panel manifest parser (`N/panels/manifest.rs:387`) and the panel host's enabled rule (`N/panels/mod.rs:22-27`)
-following it; `Component.adapter` nullable and out of `Component.required` (`API:1304`, `:1308`), the parser's `adapter` optional
+following it; `Component.adapter` typed `NetworkId` or null and kept in `Component.required` (`API:1304`, `:1308`), the parser's `adapter` optional
 (`N/components/manifest.rs:685-686`) and the UI row's label falling back to `title` (`UI/src/views/settings/l6/components.tsx:52`, `:63`); `[run] start`,
 `health = "listen"` and the per-target `program` in the parser and its tests; the new route `POST /api/v1/bridge/components/{id}/stop` in `API`, its
 client method in the UI adapter and its mock; `ConsentRequired.facts`; a node111 unit test parsing the embedded `kiwix.toml` and `panels/kiwix.toml`. ·
@@ -1207,7 +1273,12 @@ client method in the UI adapter and its mock; `ConsentRequired.facts`; a node111
 chunk), importing `./storage` dynamically, only when a Layer 8 view or the store (after a `storage` or `dataset` frame) asks; the mock's storage is reached
 through the mock adapter inside the same `import.meta.env.DEV` guard; `resetAdapterForTests` forgets it. Its size counts in Layer 8's lazy allowance
 (§15.4). · (9) The conventions (`4-interface/api/README.md`): the IDs line (`:221`) gains `job-…` minted by `111d`; the loopback-only writes gain
-`PATCH /storage/settings` and `POST /datasets/adopt` (§15.1); the Layer 8 additions name the `storage` frame's fields and the `dataset` coalescing (§16.3).
+`PATCH /storage/settings`, `POST /datasets/adopt`, `DELETE /storage/set-aside/{file}` and `POST /storage/start-empty` (§15.1, §16.1); the Layer 8
+additions name the `storage` frame's fields and the `dataset` coalescing (§16.3). · (10) The v0.3 additions: `Proposal.decision.applied` (optional, with
+node111's proposals mirror and the UI's decision view), `Status.update.last_result` `refused_space`, `ConsentRequired.action` `store_start_empty`, the one
+`DatasetEntry.state` / `Holding.state` enum and `DatasetEntry.location` (listed in `UI/scripts/gen-sse.mjs` with the tuples of (3)), the three routes
+`POST /storage/update-without-copy`, `DELETE /storage/set-aside/{file}` and `POST /storage/start-empty` in `API` with their client methods in the storage
+adapter and its mock, and the search route's and the tool's `publisher`.
 
 **16.7 Origin routes (outside `API`; Layer 7's §9.1 posture).** Read-only, unauthenticated, GET and HEAD only (405 otherwise), no CSRF, the same CSP, on the
 existing listener, outside the session gate; listed with `/origin/v1/*` in the conventions' "Not gated" list (`4-interface/api/README.md:210`) and Layer 1's
@@ -1225,7 +1296,8 @@ machine contracts.
 the node-state store's key never leaves `111d`. · (2) **Never delete what the user fetched or wrote by policy.** No dataset is removed automatically; no
 undecided proposal, running task, open incident or armed undo is ever pruned; no class prunes own history before its export offer. · (3) **Never serve an
 unverified byte.** A blob is served only when a pin list the hub holds names it (§11.1) and its bytes passed: sha256 at import, publish and the end of
-every pull, BLAKE3 per block on a pull; an out-of-tree file only while its tuple matches (§5.5); an existing `blob/<sha256>` is never replaced. · (4) **The release key never signs a dataset;** the node key signs a catalogue only on a human action, under its own tag. · (5) **Never fetch without
+every pull (a sidecar's before its rename), BLAKE3 per block on a pull; an out-of-tree file only while its tuple matches (§5.5); an existing
+`blob/<sha256>` is never replaced. · (4) **The release key never signs a dataset;** the node key signs a catalogue only on a human action, under its own tag. · (5) **Never fetch without
 the consent** that names size, licence, signer, `used_by` and connection, with the free space shown beside it (§7.7); never past a metered cap without the override; never on a carrier or
 LoRa. · (6) **kiwix-serve is never LAN-bound;** it is reached only through its panel, the hub's session and its own origin. · (7) **No wall clock** orders,
 freshens or prunes anything: `seq`, the boot id and `CLOCK_BOOTTIME` do. · (8) **No telemetry:** requests are never logged; nothing about a node leaves it
@@ -1237,6 +1309,7 @@ described honestly** (§2.1): copies and backups, not a stolen disk with a reada
 | Path | On the path | At the far end |
 |---|---|---|
 | a member's catalogue check or dataset pull (LAN, plain HTTP) | IPs, timing, sizes, the hashes asked for | the hub: which member pulled which file, when (never logged) |
+| a catalogue check (§6.2, §12.4) | IPs, timing, the catalogue names asked for | each source a check asks: the home hub's id and every publisher this node follows |
 | `origin.datasets` | — | anyone on the LAN: the holdings, versions, contents, a map's area; every holder of the hub's card: that it serves datasets (`ROLE_DATASETS`, §12.4) |
 | `origin.components` | — | anyone on the LAN: which programs the hub cached |
 | the kiwix panel, the map tab | as the dashboard | the hub's session holder only |
@@ -1249,12 +1322,15 @@ catalogue:** the signature fails under the pinned key, or the publisher is not f
 lower `seq` is refused; a stale mirror can only withhold, until the node reaches another source (§6.3). · **A publisher that signs a sha256 that does not
 match its BLAKE3** (to place its bytes under a release pin's name or another publisher's file in the shared tree): the pull's sha256 check after the last
 block fails, the job ends `failed (name mismatch)` and the `.part` is deleted; no byte enters `blob/` under a name it does not hash to, and a file already
-held under that name is never replaced, so no other pin source and no other publisher's followers are affected (§7.3 (3)(e)). · **A ZIM's JavaScript:** it runs in the panel's own origin (L5 §13), never the dashboard's; ZIMs come only from catalogues
+held under that name is never replaced, so no other pin source and no other publisher's followers are affected (§7.3 (3)(e)). The same holds for a signed
+`outboard_sha256` that does not hash the sidecar: its sha256 is proven before its rename and the job ends `failed (name mismatch)` before any data byte
+(§7.3 (3)(a)). · **A ZIM's JavaScript:** it runs in the panel's own origin (L5 §13), never the dashboard's; ZIMs come only from catalogues
 the user follows. kiwix-serve runs with `--blockexternal` (its links to the internet are refused) and a `child` panel's answers carry `connect-src 'self'`
 (§9.1 (3)), so a page's scripts cannot send to the internet from the reader's browser. The residual, stated: a ZIM page's own markup may still name an
 image, a stylesheet or a frame on the internet, which an online reader's browser loads (no `img-src`, `style-src` or `frame-src` of ours is added, since a
 ZIM's pages use their own); the hub does not see or log it. · **Bulk abuse on the LAN** (a 57 GB route hammered): four streams at most, single ranges only, 64 KiB streaming, no multipart body, a body that accepts no byte for 60 s closed (§7.2). ·
-**Path tricks in a catalogue:** an `id` matches a fixed pattern and is never a path; files are named by hash. · **Filling the disk through fetches:** the
+**Path tricks in a catalogue:** an `id` and a `version` each match a fixed pattern (§5.3; no `/`, no control character, no leading dot) and are never
+paths, though both name files and URL path segments; a catalogue with another is refused whole; blobs are named by hash. · **Filling the disk through fetches:** the
 free-space check before any byte and the floor (§4.2). · **A compromised agent:** it reads what GETs return; it cannot write, fetch, serve, prune or accept.
 The same-uid residual is stated (§2.1). · **A tampered export:** the signature over the BLAKE3 prehash fails before any decryption. · **A store swapped at
 rollback:** the guard renames only a `.pre-v<N>` copy that release N completed and renamed (never a `.tmp`), same owner, same key; the moved-aside file is
@@ -1278,7 +1354,10 @@ archive of a few vector tiles the script draws, no third-party data, into the ha
 `7-relay/verify/lib.sh:14-19` does and names the netns, veth, address and port names (names only). The conventions are `6-transport/verify/lib.sh:1-29`: each
 check prints `ok:` or `FAIL:` (`note:` informs); a gate whose prerequisites are absent (unprivileged netns through `unshare -Urnm`, a built binary,
 `KIWIX_BIN`, a fixture) prints `<GATE> SKIPPED: <reason>` and exits 0 unless its `REQUIRE_<GATE>=1` (a lock run) makes it a FAIL; the last line is `<GATE>
-GREEN` or `<GATE>: N FAIL`. Every harness stops what it started, leaves nothing listening, and runs alone (AGENTS.md, Linux hygiene).
+GREEN` or `<GATE>: N FAIL`. Every harness stops what it started, leaves nothing listening, and runs alone (AGENTS.md, Linux hygiene). **The pass knob.**
+Every gate item that waits on capacity passes (among them G13 (8), G14 (5), (9) and (11), G15 (13) and G16's idle stop) runs a debug `111 daemon` whose housekeeping interval a
+build-only test setting shortens, `NODE111_TEST_HOUSEKEEPING_MS`, read by a debug build only (the `NODE111_BRIDGE_STUBS` and `NODE111_STUB_CHILD`
+pattern; a release build has no such setting, so it adds no runtime weight); the pass still runs every `PRUNE_EVERY` = 12 ticks.
 
 **Seam ids (D36 (2), D37).** The ids are the cross-layer map's: Layer 8's planned rows (`plan/cross-layer/test-system/matrix.md:177-178`, entering
 `verify/seams.toml` under D37 F5) plus three new rows, `L6-L8:server-component`, `L5-L8:consumer-registry` and `L5-L8:child-panel`, so a FAIL in the consumer registry or the panel proxy
@@ -1289,21 +1368,21 @@ prefix `checks.toml` maps to a seam (D37 §3.5), so the runner needs no adapter 
 | Seam id | Layers | What Layer 8's gates prove there | Gates |
 |---|---|---|---|
 | `L3-L8:agent-state` | 3 ↔ 8, through `111d`'s relay | the chat body's `history` and the `done` frame's `messages`, the history route, the spool and its events, the legacy import | G13 |
-| `L1-L8:state-service` | 1 ↔ 8, on 5's store code | the node-state store's key, open and modes; the budget on the housekeeping pass, `set_watermarks`, no idle write, the log ring | G13, G14 |
+| `L1-L8:state-service` | 1 ↔ 8, on 5's store code | the node-state store's key, open and modes; the budget on the housekeeping pass, `set_watermarks`, no idle write, the log ring; datasets never pruned by the budget, the index's crash order | G13, G14, G15, G7 |
 | `L8-L9:heal-store` | 8 ↔ 9 | the J2 files, the J3 marker, the J9 API (a fake Layer 9 writer until Layer 9 builds) | G13 |
-| `L5-L8:tier2-objects` | 5 ↔ 8 | the sidecar on Layer 5's BLAKE3 roots; Tier 2 later | G15 |
+| `L5-L8:tier2-objects` | 5 ↔ 8 | nothing in v1: the gap text "Tier 2 later (§8)"; the sidecar's checks are G15's under `L2-L8:dataset-signing` and `L7-L8:move-datasets` | none |
 | `L2-L8:dataset-signing` | 2 ↔ 8 | `111/catalogue/v1`, `111/export/v1`, the `111/node-state/v1` vector | G13, G15 |
 | `L7-L8:move-datasets` | 7 ↔ 8, and 1's fetcher | `/origin/v1/*`, the admission rule and the switches, the Range arm, the stream cap, `get_to_file`, the consent round-trip, the metered window | G15 |
-| `L4-L8:hub-content` | 4 ↔ 8 | `/api/v1/storage*`, `/datasets*`, `/tiles*`, the two frames, `/settings/l8` and its lazy allowance, the `map` bucket, `encyclopedia.search` | G14, G16, G17 |
+| `L4-L8:hub-content` | 4 ↔ 8 | `/api/v1/storage*`, `/datasets*`, `/tiles*`, the two frames, `/settings/l8` and its lazy allowance, the `map` bucket, `encyclopedia.search` | G14, G15, G16, G17 |
 | `L1-L8:updates-backup` | 1 ↔ 8, and 6's cache | the migration copy and the guard's restore, `111 store export` and `import`, the installer's origin list, the files table, `origin.components` | G13, G18 |
-| `L6-L8:server-component` (new) | 6 ↔ 8 | a declaration with no `adapter`, `start = "on_demand"`, `health = "listen"`, a per-target `program`, the stop route, the `child` panel keyed by a component id, zero weight while off | G16, G7 |
+| `L6-L8:server-component` (new) | 6 ↔ 8 | a declaration with no `adapter`, `start = "on_demand"`, `health = "listen"`, a per-target `program`, the stop route, zero weight while off | G16, G7 |
 | `L8-L8:shared-log` | 8 | nothing in v1: the gap text "no log in v1 (§12)" | none |
 | `L5-L8:consumer-registry` (new) | 5 ↔ 8, and 9's consumers | the dispatch hook for 0x10-0x14 (§12.3): no message row, the consumer's durable write before the fabric's commit and acknowledgement, redelivery after a crash between them; `mesh111` `tests/consumers.rs` | G14 |
 | `L5-L8:child-panel` (new) | 5 ↔ 8 | L5 §13's panel host with a `child` source (§9.1): the ticket and cookie, the stripped cookies, the appended `connect-src 'self'`, the refused WebSocket, the panel keyed by a component id, start on mint | G16 |
 
 **G13, the node-state store and the joint contract** (`state.sh`: one netns node with the real `111d`, the real `111-agent` and a stub model, the Layer 4
-smoke pattern; plus node111, mesh111 and agent111 tests). Asserts: (1) `[L1-L8:state-service]` `node/` is 0700 and `state.db` 0600; the file opens only with
-the `111/node-state/v1` key (a known-answer vector beside `store-kdf.json`, reached through `KeyProvider::key_for`; `store_key()` equals
+smoke pattern; plus node111, mesh111 and agent111 tests). Asserts: (1) `[L1-L8:state-service]` `node/` is 0700 and `state.db` 0600;
+`[L2-L8:dataset-signing]` the file opens only with the `111/node-state/v1` key (a known-answer vector beside `store-kdf.json`, reached through `KeyProvider::key_for`; `store_key()` equals
 `key_for(STORE_KDF_TAG)` byte for byte); a plaintext SQLite is refused; a wrong key fails on page 1. · (2)
 `[L3-L8:agent-state]` A turn through `POST /api/v1/chat` writes no `agent/conversations/*.jsonl`; the store holds its messages; the agent receives at most
 512 KiB of `history`; no `message` frame reaches the browser and its `done` frame carries no `messages`; a `stream: false` answer reaches the browser
@@ -1315,9 +1394,11 @@ failed and an orphaned task are ingested on `task.failed` and `task.orphaned` an
 was down, its event missed across a reconnect, is ingested at the resubscription and listed by `GET /api/v1/proposals`, whatever its timestamp; a
 proposal file seeded with no agent running is ingested by the sweep before `GET /api/v1/proposals/{id}` answers and is returned by it; a
 `.tmp-` file is never ingested and the agent removes it at its next start. · (5) `[L3-L8:agent-state]` The legacy import: a root seeded with v0 agent files
-ends with the files moved to `agent/legacy-v0/` and the records in the store; after a probation revert they are back in place and release N−1 lists the
-same conversations and the undecided proposal; a second update merges a conversation N−1 appended to (its new lines appended, none lost); a confirmed
-release deletes `agent/legacy-v0/`. · (6) `[L3-L8:agent-state]`
+ends with the files moved to `agent/legacy-v0/` and the records in the store; release N adds a turn to an imported conversation; then, on each revert
+path in turn (the guard's `revert_to` after an expired probation, and the root helper's revert followed by N−1's guard at the next `ExecStartPre`), with
+no `.pre-v<N>` copy of any store, the files are back in place (the legacy files' own trigger, §13.6 (3)) and release N−1 lists the same conversations
+and the undecided proposal; N−1 appends turns to that conversation's file; a second update merges it: the head's `legacy_lines` count is raised and
+exactly N−1's new lines are appended after N's turn, none lost and none taken twice; a confirmed release deletes `agent/legacy-v0/`. · (6) `[L3-L8:agent-state]`
 Every non-GET route Layer 8 adds answers 401 to the agent's bearer. · (7) `[L8-L9:heal-store]` With a fake Layer 9 writer (node111 tests): the J2 files are
 folded and cleared at start; with the store unopenable they stay and the status names the reason, and after 300 daemon exits the inbox holds 256 lines; a
 reclaim never touches `open`, `armed` or `pending` records and leaves one marker; `list` and `read_stream` return at most `limit` rows after the cursor; a
@@ -1328,23 +1409,37 @@ Opening a store one version behind writes `<file>.pre-v<N>.tmp`, then `<file>.pr
 mid-copy) leaves only a `.tmp`, which the guard deletes and never renames in; both revert paths restore the copy and keep `.rolled-back-v<N>`: the
 guard's `revert_to` (an expired probation) and the root helper's revert followed by N−1's guard at the next `ExecStartPre` (a READY-but-unhealthy release);
 the restored fabric store's first open returns `EpochDecision::Mint`, and a message sent after it reaches its receiver (never dropped as already
-delivered); the blob files that arrived during probation are still on disk; a confirmed probation deletes the copy. · (9) `[L1-L8:updates-backup]` `111
-store export` and `import` refuse while the daemon holds `node/lock`; with it stopped, an export taken after a `kill -9` (commits still in `-wal`) holds
+delivered); the blob files that arrived during probation are still on disk; a confirmed probation deletes the copy; a daemon whose build writes a newer
+node-state version than `state.db` holds takes the node-state copy and migrates at its first start, before it reports ready (`READY=1` follows the
+migration), with no chat turn or other use, and closes the store on the next idle pass. · (9) `[L1-L8:updates-backup]` `111
+store export` and `import` refuse while the daemon holds `node/lock`; a `111d` started while `111 store export` holds the lock exits with status 75 and
+the message "a store verb is running" and is started again by the unit once the verb ends; with it stopped, an export taken after a `kill -9` (commits still in `-wal`) holds
 those commits and the fabric's attachment files; one flipped byte makes `111 store import` refuse before decrypting; import refuses a store newer than the
 build and sets an existing store aside as `<file>.replaced-<n>`; a round trip restores both stores, they pass `quick_check`, and the imported fabric store's
 first open returns `EpochDecision::Mint`, through the real import. · (10) `[L1-L8:state-service]` After `kill -9` the next open runs `quick_check` and
 `cipher_integrity_check` once, on a second read-only connection while the store already serves (`integrity` reads `checking`, then `ok`); after a clean
 stop it runs neither; a corrupted page makes them fail, and the store is set aside as `.damaged-<n>` and closed; for the node-state store a non-empty
-`state.db-wal` is the signal and a clean close leaves none. · (11) `[L3-L8:agent-state]` A conversation whose stored messages exceed 2 MiB still answers a
+`state.db-wal` is the signal and a clean close leaves none; `POST /api/v1/storage/start-empty {store}` answers 409 `consent_required`
+(`store_start_empty`) until the repeat carries the hash, then the next open creates an empty store and the `.damaged-<n>` file is still there; while a
+set-aside fabric store exists the open's orphan sweep removes no blob file, and after `DELETE /api/v1/storage/set-aside/{file}` the next open's sweep
+removes the orphans; both routes answer 403 `loopback_only` from a paired session off loopback. · (11) `[L3-L8:agent-state]` A conversation whose stored messages exceed 2 MiB still answers a
 new turn (no 413); a tool result over 512 KiB is saved cut, with its marker, and the turn is not lost. · (12) `[L3-L8:agent-state]` The decision protocol:
 an accept writes the pending record through `decision_begin` before the action and the result through `decision_complete`; a refused apply removes it
 through `decision_reopen`; Layer 6's applier writes through the same calls; no `agent/decisions/*.json` file appears; a `pending` decision survives a
-reclaim; with the store unavailable the decision route answers 503 `store_unavailable` and nothing is applied. · (13) `[L1-L8:state-service]` After a daemon
+reclaim; with the store unavailable the decision route answers 503 `store_unavailable` and nothing is applied; `GET /api/v1/proposals/{id}` carries
+`decision.applied` as stored (`{pending: true}` mid-apply, then the result); a node111 test that kills the writer after `decision_begin` committed
+(the `kill -9` of Layer 6's G5, `6-transport/verify/devices.sh:358-359`) reopens the store with its key and reads the record `applied: {pending: true}`,
+and a retried accept answers 409 `already_decided` with the record unchanged. · (13) `[L1-L8:state-service]` After a daemon
 start, `GET /api/v1/storage` and a history read open the node-state store and leave `state.db` and its WAL unchanged (size and mtime). · (14)
-`[L1-L8:updates-backup]` (node111 tests) An update whose manifest names a newer store version is refused before the flip with 409 `insufficient_space`,
-naming the bytes needed, when the store's copy does not fit above the floor; after the `update_without_copy` consent it installs with no `.pre-v<N>`, and a
-revert leaves that store closed with the reason shown. · (15) `[L1-L8:state-service]` Over a test-sized budget with `agent`'s offer unanswered the class
-reads `full`: a chat turn is answered and not saved, with the notice; a J9 write to a `full` `heal` returns `Full`; a decision is still written. · (16)
+`[L1-L8:updates-backup]` (node111 tests) An update whose manifest names a newer store version is refused before the flip when the store's copy does not
+fit above the floor: nothing is staged, `/status.update.last_result` reads `refused_space` and the `update_refused_space` notice names the release, the
+store and the bytes needed; with a test copy rate set in the test so slow that a copy that fits cannot finish inside the 600 s probation, it is refused
+the same way; `POST /api/v1/storage/update-without-copy` answers 409 `consent_required` (`update_without_copy`) until the repeat carries the hash, from a
+paired session as from loopback, and 401 to the agent's bearer; the consent is recorded in `state/storage.json` for that release and store only, the
+updater's next check installs that release with no `.pre-v<N>` of that store, and a revert leaves that store closed with the reason shown; the entry is
+gone after the release is confirmed, and after a revert. · (15) `[L1-L8:state-service]` Over a test-sized budget with `agent`'s offer unanswered the class
+reads `full`: a chat turn is answered and not saved, with the notice; a J9 write to a `full` `heal` returns `Full`; a decision is still written; a
+proposal the agent writes while `agent` is `full` is still ingested (its spool file is gone) and listed by `GET /api/v1/proposals`. · (16)
 `[L3-L8:agent-state]` With the node-state store unavailable (a `state.db` whose `user_version` is newer than the build): a chat turn is answered through the
 relay and not saved, the chat view's notice names the reason, `GET /api/v1/chat/history` answers 503 `store_unavailable`, `GET /api/v1/storage` reports
 `node_state.state` `unavailable` with the reason, and a proposal stays in the spool (§2.2 rule 8). · (17) `[L3-L8:agent-state]` The three agent tools
@@ -1368,15 +1463,17 @@ between passes (so free space moves), `fabric/store.db`, its WAL and `node/state
 (6) `[L1-L8:state-service]` A child log past the cap holds at most the cap after the next pass, `.1` holds its previous tail, and the child keeps writing;
 the `logs` figure and reserve count every capped file that exists (each cap × 1.5, plus 1 MiB). · (7) `[L4-L8:hub-content]` `GET /api/v1/storage` lists
 the closed class set with figures that add up, and writes nothing; on a disk small enough that the fabric's 512 MiB minimum exceeds its share, the figures
-add up to `keep.effective` and the page shows it; a `storage` frame is sent only on a change and carries no `updates`, `bridge`, `kb`, `datasets` or
+add up to `keep.effective` and the page shows it; a `storage` frame is sent only on a change §16.3 lists (a chat turn that opens the node-state store
+and the idle pass that closes it send none) and carries no `updates`, `bridge`, `kb`, `datasets` or
 `components` figure, and publishing it walks no tree (node111 test: no `tree_bytes` call on the pass). · (8) `[L5-L8:consumer-registry]` (mesh111
 `tests/consumers.rs`) An inbound `SYNC`, `KB`, `UPDATE`, `PATCH` or `AGENT_OP` from a contact never becomes a message row; with no consumer it is
 acknowledged and counted; with a consumer registered it reaches the consumer once, and the fabric commits and acknowledges only after the consumer
 returned; a consumer that fails leaves the frame unacknowledged and the retransmission reaches it again; a process killed after the consumer's write and
 before the fabric's commit (a test fault point) redelivers the frame at the next connection, and the consumer, idempotent by `msg_id`, keeps one record; a
 duplicate is re-acknowledged and never reaches the consumer. · (9) `[L1-L8:state-service]` **Fabric down:** with `fabric/store.db` unopenable (a newer `user_version`), the housekeeping interval still
-runs: the node-state store closes after an idle pass, a log over its cap rotates, a job paused at low disk resumes when space returns; the daemon holds the
-same one interval as with the fabric live (no second timer). · (10) `[L4-L8:hub-content]` (node111 tests) Two `GET /api/v1/storage` within 60 s walk
+runs: the node-state store closes after an idle pass, a log over its cap rotates, a job paused at low disk resumes when space returns, and step 3 writes
+nothing (a changed `keep` reaches `set_watermarks` once the fabric is live again); the daemon holds the same one interval as with the fabric live (no
+second timer). · (10) `[L4-L8:hub-content]` (node111 tests) Two `GET /api/v1/storage` within 60 s walk
 `updates`, `bridge` and `kb` once; a release flip or a component change between them walks again; a tree over 100,000 entries stops the walk there and
 reports its figure as a lower bound. · (11) `[L1-L8:state-service]` The fabric's export offer: over a test-sized fabric watermark whose excess is the
 node's own history, the fabric's step 3 prunes nothing and `classes[fabric].export_offer_needed` is true until `POST /api/v1/storage/export-offer
@@ -1389,7 +1486,7 @@ ob_log)) − 1) × 64`, asserted at `ob_log` 12 and 14; a sidecar of another len
 entry's `seq` equal the announce-counter value the publish minted; one flipped byte fails the check. · (2) `[L7-L8:move-datasets]` With `hub_role`, LAN sharing or `origin.datasets` off, the
 catalogue and the blobs answer 404; with all on they are served with no session; a non-GET answers 405. · (3) `[L7-L8:move-datasets]` The Range arm: 206 with
 `Content-Range`; `bytes=-n`; 416 past the end and for two ranges; an `If-Range` mismatch serves 200; `Content-Length` always; never gzip or chunked; a fifth
-concurrent blob body answers 503. · (4) `[L7-L8:move-datasets]` M's fetch: the first call answers 409 `consent_required` whose text names size, free space,
+concurrent blob body answers 503. · (4) `[L7-L8:move-datasets]` M's fetch: the first call answers 409 `consent_required` whose text names size,
 licence, signer, `used_by` and the connection, and whose `facts` carry the free space, its "free after" reserving the unused budget; a file written on
 M between the 409 and the repeat leaves the hash unchanged and the repeat with the hash answers 202, while a repeat that no longer fits answers
 `insufficient_space`; `dataset` frames flow while the job runs, at most one per 5 s per job plus one per state change, and stop after it; the file lands by rename and no `.part` remains; a second fetch of another
@@ -1397,7 +1494,9 @@ entry while the job runs answers 202 and queues, a second fetch of the same entr
 block); with H2 listed in M's `sources` for H's publisher, a corrupted block from the stub is fetched again from H2 (one block of extra bytes) and
 `Job.source` names H2; a swapped sidecar fails before any data byte moves; an entry
 whose `sha256` does not hash its bytes ends `failed (name mismatch)` and leaves no `.part`; an entry whose `sha256` names a blob H already holds (the
-release payload) leaves that blob byte-identical; a job resumed under the same boot id re-checks one block, under another boot id every marked block. ·
+release payload) leaves that blob byte-identical; an entry whose `outboard_sha256` names the release payload, with the stub serving the entry's true sidecar
+under that name (it passes its length and its root), ends `failed (name mismatch)` before any data byte is requested (the stub's log), and the payload stays byte-identical; the
+same entry handed to `111 dataset import --from <dir>` is refused with "name mismatch" and nothing of it is adopted; a job resumed under the same boot id re-checks one block, under another boot id every marked block. ·
 (6)
 `[L7-L8:move-datasets]` On an interface marked metered with a test cap the job pauses `paused (metered cap)` with the carrier reserve (10 % of the cap,
 at least 1 MiB) still left in the window, its bytes count in Layer 7's window, its Resume answers 409 `consent_required` (`dataset_override`) until the
@@ -1407,12 +1506,20 @@ mid-job (the test marks the job's interface metered between two blocks) pauses i
 `consent_required` naming that rule until the repeat carries its hash; the bearer cannot accept either consent. · (7) `[L2-L8:dataset-signing]` A catalogue from an unfollowed publisher is
 not listed; the CLI import refuses without `--follow`; a lower `seq` is refused after a higher one; H, restored from its words onto a new root with an
 operator-supplied counter floor, publishes a catalogue whose `seq` is above its last and M accepts it; a catalogue that lists one entry of an unknown
-`kind` (`patch`) is listed with its other entries and `skipped` = 1, while an unknown key in an entry of a known `kind` refuses the file. · (8) `[L7-L8:move-datasets]` `111 dataset import --from
+`kind` (`patch`) is listed with its other entries and `skipped` = 1, while an unknown key in an entry of a known `kind` refuses the file, and so does an
+entry whose `version` holds a `/`, a control character or a leading `.`. · (8) `[L7-L8:move-datasets]` `111 dataset import --from
 <dir>` verifies and copies under `state/origin/import.lock` and hands its copies to the running daemon (`POST /api/v1/datasets/adopt`, refused off
 loopback), which alone writes `state/datasets.json`; with the daemon stopped the verb writes it; `--in-place` copies no data (only the sidecar lands in
 `state/origin/blob/` and the index is written) and refuses a path the daemon's user cannot read; `--from http://<H2>/origin/v1/` reads the catalogue names a
 check asks for, adds that URL to `sources` through the adopt route, and with `--follow <hex>` imports a publisher it could not list; after an unclean shutdown, or once its mtime changes, the in-place file is `unverified`, answers 404 and leaves
-the kiwix library until it is hashed again; an unplugged one is `absent (disk not attached)`. · (9) `[L1-L8:state-service]` Filling the budgeted classes
+the kiwix library until it is hashed again; an unplugged one is `disk_absent`, in `Holding.state` and `DatasetEntry.state` alike (`location`
+`in_place`), and an entry listed but not held reads `not_held`; with `fabric/store.db` unopenable at a start (a newer `user_version`), every in-place
+file reads `unverified` at that start; with `origin.datasets` off, an in-place ZIM replaced on its disk while kiwix-serve is stopped is out of the
+library before the next start (no request of ours touched it), and one replaced while it runs is out at the next rebuild. **The adopt route carries what
+the verbs hand off:** the import's catalogue reaches `state/origin/catalogue/` only through `111d` (its staged `.toml.sig` tampered with between the
+verb and the hand-off: 400 `bad_request` and nothing written), `111 dataset add` on H with the daemon running leaves a draft that `GET
+/api/v1/datasets/drafts` lists, and `--in-place` leaves an index record with its path and tuple, while a file touched between the verb's hash and the
+hand-off is refused with nothing written; the request file and the staged catalogue copies are gone after each adopt. · (9) `[L1-L8:state-service]` Filling the budgeted classes
 past `keep` removes no dataset; a fetch that does not fit answers `insufficient_space` before any byte, and so does one that fits the disk but not beside the
 unused budget; `DELETE` removes the file and its sidecar. · (10) `[L1-L8:state-service]` A job killed between the rename and the index write: at the next
 start the `partial` record whose blob exists reads `present`; `state/datasets.json` is not rewritten while a job runs (its mtime unchanged between the
@@ -1434,7 +1541,9 @@ refresh that does not fit beside the old version answers `insufficient_space` be
 holding one `id`, and two versions of one `id`, each answer on their own `/api/v1/datasets/entries/{publisher}/{id}/{version}` and
 `/api/v1/tiles/{publisher}/{id}/{version}` paths; an entry whose `id` is `check`, `drafts`, `publish`, `search`, `jobs` or `adopt` is fetched and
 deleted under `entries/` with no collision; a 416 on the tiles route carries a `problem+json` body, code `range_not_satisfiable`; a `Job.id` starts
-`job-`; `PATCH /api/v1/storage/settings` from a paired session off loopback answers 403 `loopback_only` and changes nothing. **Pass:** `G15 GREEN`.
+`job-`; `PATCH /api/v1/storage/settings` from a paired session off loopback answers 403 `loopback_only` and changes nothing; two publishers holding one
+`id` and version of a ZIM each have their own symlink, `state/kiwix/zim/<publisher short>-<id>-<version>.zim` (16 hex characters), and `library.xml`
+lists both. **Pass:** `G15 GREEN`.
 
 **G16, the encyclopedia** (`kiwix.sh`, in two parts). **Part A, our own code, always run** (its prerequisites are the netns and a debug build only):
 the stub child `stub-child.py` stands in for kiwix-serve, run as the kiwix component's program through a debug-build-only override (the
@@ -1451,13 +1560,14 @@ on 127.0.0.1:11250 only (`ss`) and answers once its port answers; a request thro
 one without it answers 403; the child's echo shows neither the panel cookie nor the dashboard's session cookie; a WebSocket upgrade is refused at the
 panel listener and never reaches the child (no 101); every answer carries the appended `connect-src 'self'` · `[L6-L8:server-component]` `POST
 /api/v1/bridge/components/kiwix/stop` leaves no process and keeps the files; the same route for a component that is not `on_demand` answers 400; with no
-request through the proxy for 30 passes (a build-only test setting of the housekeeping interval shortens the wait; no runtime weight) the child stops and
-the next mint starts it; after a stop and after the idle stop the child has no process, listener or open file; "remove files" removes `state/kiwix/` ·
+request through the proxy for 30 passes (the pass knob of "Gate homes") the child stops and the next mint starts it, while a `GET
+/api/v1/datasets/search` sent every 20 passes with no panel request keeps it running past 30 passes (each search reaches the child, its log); after a stop and after the idle stop the child has no process, listener or open file; "remove files" removes `state/kiwix/` ·
 `[L4-L8:hub-content]` the bearer's session mint answers 401; `encyclopedia.search` while the component is off answers 409 `component_unavailable`.
 Asserts, part B: `[L6-L8:server-component]` the real kiwix-serve runs with `--blockexternal` (`/proc/<pid>/cmdline`) and answers once its port answers ·
 `[L6-L8:server-component]` a held ZIM added or removed rebuilds the library with `kiwix-manage` and sends `SIGHUP`, with no restart (the same pid) ·
 `[L4-L8:hub-content]` `encyclopedia.search` returns at most 8 KiB in an untrusted block while it runs; `book=<id>` finds the held ZIM by its `book` name,
-and an entry without `book` answers 400 `bad_request`. **Pass:** `G16 GREEN` (part B counted only when it ran).
+and an entry without `book` answers 400 `bad_request`; with the same `id` held from two publishers under different `book` names, `publisher=<hex>`
+selects that publisher's book and no `publisher` selects the home hub's. **Pass:** `G16 GREEN` (part B counted only when it ran).
 
 **G17, maps** (`maps.sh` with a PMTiles fixture `gen-pmtiles.py` writes into the scratch root, so G17 needs no download and never SKIPs for a fixture;
 UI tests). Asserts, in `maps.sh`: `[L4-L8:hub-content]` `GET /api/v1/tiles` lists the held set; `/api/v1/tiles/{publisher}/{id}/{version}` serves ranges
@@ -1474,24 +1584,30 @@ consent) only a pinned hash is served, from `cache/packages/`, with its notice; 
 log), and a 404, a wrong size or a wrong hash falls through to the upstream URL; a pip closure arrives through the files table; the `lxmf` closure answers 404
 (Q25); removing `cache/packages/<id>/` ends the serving; a cache file is hashed when `origin.components` turns on, and one whose tuple changes (a new
 mtime) answers 404 until it is hashed again, with no hash per request; `GET /origin/v1/notice/{sha256}` answers the declaration's `spdx`, `read_at` and
-`notice` verbatim, and a node111 unit test checks that every embedded declaration's `notice` names a source URL · (with a fixture manifest) with
-`origin.components` on and the Termux tick off, a `[[deb]]` or `[apk.*]` pin answers 404 and nothing is fetched; a build whose licence list marks the
-pins verified offers the tick, its job fetches each pin from its pinned URL into `state/origin/blob/` (sha256 and size checked, counted in the metered
-window), and they are served · a hub with `origin.serve` on fetches the `[source]` pin after it staged its payload, from its home hub first, sha256 and
+`notice` verbatim, and a node111 unit test checks that every embedded declaration's `notice` names a source URL · `[L1-L8:updates-backup]` (with a
+fixture manifest) with `origin.components` on and the Termux tick off, a `[[deb]]` or `[apk.*]` pin answers 404 and nothing is fetched; a build whose
+licence list marks the pins verified offers the tick, its job fetches each pin from its pinned URL into `state/origin/blob/` (sha256 and size checked,
+counted in the metered window), and they are served · `[L1-L8:updates-backup]` a hub with `origin.serve` on fetches the `[source]` pin after it staged its payload, from its home hub first, sha256 and
 size checked and counted in the window, and serves it; when that fetch fails the payload's notice names the upstream URL. **Pass:** `G18 GREEN`.
 
-**G7, extended:** `zero-weight.sh` with kiwix declared and disabled; Layer 7's `idle.sh` no-timer line unchanged with Layer 8 present (L7 §3.7). **Pass:**
-both.
+**G7, extended:** `[L6-L8:server-component]` `zero-weight.sh` with kiwix declared and disabled · `[L1-L8:state-service]` Layer 7's `idle.sh` no-timer
+line unchanged with Layer 8 present (L7 §3.7). **Pass:** both.
 
 **Unit and integration test homes.** mesh111: `src/store/tests.rs` (save on change, `journal_size_limit`, the migration copy, `open_encrypted`, the
 orphan sweep beside a set-aside store, `KeyProvider::key_for`),
-`tests/consumers.rs` (new); its vectors in `5-messaging/test-vectors/`. node111 (`1-bootstrap/crates/node111/tests/`, 35 files today): new `node_state.rs`,
+`tests/consumers.rs` (new); its vectors in `5-messaging/test-vectors/`. node111 (`1-bootstrap/crates/node111/tests/`, 37 test files at the pinned head): new `node_state.rs`,
 `storage_budget.rs`, `range.rs`, `datasets_origin.rs`, `update_guard_store.rs`, `export.rs`, `panels_child.rs`, `install_origin.rs`; the embedded
 `kiwix.toml` and `panels/kiwix.toml` parse tests beside the manifest parsers' own (`N/components/manifest.rs`, `N/panels/manifest.rs`). agent111:
-`tests/chat_loop.rs` (`history` in, `messages` out; the tool count), `tests/daemon_tools.rs` (the three tools), new `tests/store_atomic.rs`. UI: new
+`tests/chat_loop.rs` (`history` in, `messages` out; the tool count), `tests/daemon_tools.rs` (the three tools), `tests/layer6_tools.rs` and
+`tests/layer7_tools.rs` (their count pins), new `tests/store_atomic.rs`. UI: new
 `test/layer8-contract.test.ts`, `test/layer8-views.test.ts`; `test/budget.test.ts` (the `map` bucket). The harnesses that seed or read decision files
 today move to the store with §2.4 rule 5 (§21 L4, L6): `4-interface/verify/smoke.sh:515-529` (phase 5f) and `6-transport/verify/devices.sh`, which reads
-decisions through `decision_file` (`6-transport/verify/spine/node.sh:239`; `devices.sh:151`, `:329`, `:356-368`, `:402`, `:417`).
+decisions through `decision_file` (`6-transport/verify/spine/node.sh:239`; `devices.sh:151`, `:329`, `:356-368`, `:402`, `:417`). The store is
+SQLCipher and only `111d` opens it, so both read the decision through `GET /api/v1/proposals/{id}`, whose `decision` carries `applied` as stored
+(§16.2): smoke's phase 5f checks `decision.decision` there in place of the file (`smoke.sh:529`); `devices.sh` reads `decision.applied.pending` there
+while the daemon runs (`:351-352`) and after the restart (`:363-364`), and compares the `decision` object before and after the retry in place of the
+file's sha256 (`:356`, `:367-368`). Its one assertion made while the daemon is dead after `kill -9` (`:358-359`, the pending record surviving the kill)
+moves to G13 (12), a node111 test that reopens the store.
 `6-transport/verify/bridge.sh:696-700` seeds a proposal file with no agent running and reads it by id: it keeps working through the sweep before `GET
 /api/v1/proposals/{id}` (§2.4 rule 2).
 
@@ -1570,19 +1686,22 @@ owner says otherwise.
   join the routes; one admission rule over four pin sources (§11.1; the Termux pins off in v1); `origin.datasets` and `origin.components` gate their own files and live in
   `state/storage.json` (§22 C1); the Range arm and the stream cap; the release's source tarball served beside its payload (§11.6) · (2) §10.5: "≈ 69 KB"
   (`7-relay/README.md:951`) → 83.9 KB, bucket 90 KB · (3) §12: dataset fetch bytes count in the same window as carrier bytes; `ConsentRequired.action` gains
-  four values after Layer 7's four; one sentence: "A dataset job asks the metered module which rule matches before every block, pauses with the carrier's
+  six values after Layer 7's four (§16.2); one sentence: "A dataset job asks the metered module which rule matches before every block, pauses with the carrier's
   reserve (10 % of the cap, at least 1 MiB) left in the window, and adds no override bytes to it, so a dataset never closes the carrier's gate (Layer 8
   §7.8)." · (3a) §7.2: the role table gains bit 7 `ROLE_DATASETS` (set while `origin.datasets` is consented, with the hub role and LAN sharing; named
   `datasets`), defined in node111 beside bits 3-5 and Layer 9's bit 6 (Layer 8 §12.4); bit 5 is unchanged · (3b) §9.1: the release manifest's `[[deb]]` and
   `[apk.*]` pins are a pin source under `origin.components`, not `origin.serve` (§11.1, §11.5); the updater of a hub with `origin.serve` fetches the
   `[source]` pin after staging its payload (§11.6) · (4) §17: the Tier 2 row gains its owner, Layer 8 (later); the map bucket row (`:1265`) moves to Layer 8 v1 · (5) §9.5 T6:
-  `UserTypedDataset` joins the typed exceptions · (6) the update page (`UI/src/views/settings/l7/updates.tsx`) shows an update refused for space and
-  offers the `update_without_copy` consent (§13.6 (5)); the manifest's `[stores]` table and the updater's bound are Layer 1's (below). **No effect on §5.8:** an unset
+  `UserTypedDataset` joins the typed exceptions · (6) the update page (`UI/src/views/settings/l7/updates.tsx`) shows an update refused for space
+  (`/status.update.last_result` `refused_space`) and offers the `update_without_copy` consent through `POST /api/v1/storage/update-without-copy`
+  (§13.6 (5), §16.1); the manifest's `[stores]` table and the updater's bound are Layer 1's (below). **No effect on §5.8:** an unset
   `quota.transit` is written once at its effective value when the budget first sets the watermark, so L7 §5.8's figure holds until a human changes it (§4.2
-  item 4). **Cross-layer request:** the migration copy in Layer 7's build if its migration is the first after a signed release (§13.6 item 4). §9.6's "signed by their
+  item 4). **Cross-layer request:** the migration copy in Layer 7's build if its migration is the first after a signed release, and the update guard's two
+  restore rules (the legacy files' own trigger included) in Layer 7's build if its release is the one before the first release with the node-state store
+  (§13.6 (3), (4)). §9.6's "signed by their
   publisher" (`:923`) is made concrete by §6.
-- **Layer 6 (locked v1.0):** §2.1 rule 1, the whole additive set of §9.2-§9.3: `adapter` optional in the parser, nullable in `Component` and in the UI row
-  (null = a server component); an adapterless component's state and log directory `state/<id>/`, removed by "remove files"; a per-target `program` key in
+- **Layer 6 (locked v1.0):** §2.1 rule 1, the whole additive set of §9.2-§9.3: `adapter` optional in the parser, nullable in `Component` (kept in
+  `Component.required`, `NetworkId` or null) and in the UI row (null = a server component); an adapterless component's state and log directory `state/<id>/`, removed by "remove files"; a per-target `program` key in
   `[payload.targets.<t>]` that `{payload}` names; `[run] start = "on_demand"` (enable stops after the install, `resume_enabled` skips it, claim, pre-bind
   and start at the first session mint); `[run] health = "listen"`; the route `POST /api/v1/bridge/components/{id}/stop`, for an `on_demand` component
   only · §2.1 rule 3 (`6-transport/README.md:145-146`): the
@@ -1590,19 +1709,28 @@ owner says otherwise.
   `DecisionFile` (`N/devices/applier.rs:581-660`) writes through J9's three decision calls (§2.4 rule 5), and the harnesses that read
   `agent/decisions/<id>.json` read the store instead: `6-transport/verify/devices.sh` through `decision_file` (`6-transport/verify/spine/node.sh:239`);
   `6-transport/verify/bridge.sh:696-700`, which seeds a proposal file and reads it by id, keeps working through the spool sweep (§2.4 rule 2).
+  **Lock-amendment candidate (the owner's):** Layer 6's G5 crash-guard assertions in `devices.sh` move from the decision file to `GET
+  /api/v1/proposals/{id}` and its `decision.applied` (`:351-352`, `:356`, `:363-364`, `:367-368`), and the one made while the daemon is dead after
+  `kill -9` (`:358-359`) moves to Layer 8's G13 (12), a node111 test that reopens the store (§18 test homes): the gate keeps its property and changes its
+  means.
 - **Layer 4 (locked):** the §16 contract and its pin list · `/settings/l8` · the `map` bucket in `check-budget.mjs` · `4-interface/README.md:717` "storage
   (L8)" leaves the deferred list · `UI/src/views/settings/model.ts:222` · the conventions' "Not gated" list (`4-interface/api/README.md:210`) gains
   `/origin/v1/catalogue/*` and `/origin/v1/notice/*` · `4-interface/verify/smoke.sh:515-529` (phase 5f asserts `agent/decisions/prop-smoke.json`) reads the
-  decision from the store (§2.4 rule 5) · `panelId` widened to `ServiceId` | `ComponentId`, `Component.adapter` nullable, the components stop route,
+  decision through `GET /api/v1/proposals/prop-smoke` (§2.4 rule 5, §18) · additive contract changes: `Proposal.decision` gains the optional `applied`
+  member as stored (§16.2), `Status.update.last_result` gains `refused_space` (§13.6 (5)), `ConsentRequired.action` gains `store_start_empty`, one
+  `DatasetEntry.state` / `Holding.state` enum with `DatasetEntry.location`, the routes `POST /storage/update-without-copy` (a session or loopback),
+  `DELETE /storage/set-aside/{file}` and `POST /storage/start-empty` (loopback only), the search route's `publisher` (§16.1, §16.6 (10)) · `panelId`
+  widened to `ServiceId` | `ComponentId`, `Component.adapter` typed `NetworkId` or null and kept in `required`, the components stop route,
   `ConsentRequired.facts` shown under the text and never hashed (§16.6 (7)) · the conventions (§16.6 (9)): the `job-…` id family,
-  `PATCH /storage/settings` and `POST /datasets/adopt` among the loopback-only writes, the `storage` frame's fields and the `dataset` coalescing,
+  `PATCH /storage/settings`, `POST /datasets/adopt`, `DELETE /storage/set-aside/{file}` and `POST /storage/start-empty` among the loopback-only writes, the `storage` frame's fields and the `dataset` coalescing,
   `range_not_satisfiable` · the storage adapter seam `getStorage()` (§16.6 (8)) · the Storage page in two lazy chunks inside Layer 8's 12 KB allowance
   (§15.4).
 - **Layer 3 (locked):** an additive note under `3-intelligence/README.md:50`: "As built by Layer 8: conversations, proposals, tasks and decisions live in
   `111d`'s encrypted `node/state.db`; the agent holds no key, sends nothing but GETs, and spools proposals and tasks under `agent/` until `111d` ingests them
   (Layer 8 §2)." The agent contract (`3-intelligence/TASKS.md:22`, `:27-28`, `:37`): the chat body's `history` (at most 512 KiB, the body limit 2 MiB), the
   turn's `message` frames before `done` (each at most 512 KiB) and `messages` in a non-streamed answer, proposals and tasks as an atomic spool with
-  `.tmp-` temp names removed at the agent's start (§2.3, §2.4). Tools +3 (§16.5), `encyclopedia.search` among them, and `storage.read` makes one GET per call. The `conversations` count comes from `111d`.
+  `.tmp-` temp names removed at the agent's start (§2.3, §2.4). Tools +3, 20 → 23, appended after Layer 7's (§16.5), `encyclopedia.search` among them
+  (with an optional `publisher`), and `storage.read` makes one GET per call. The `conversations` count comes from `111d`.
 - **Layer 2 (locked v2):** one block §13.3 "Layers 8 and 9 amendments": **A19** domain tags: `111/catalogue/v1` (Ed25519 by the publisher over `tag ‖
   publisher ‖ catalogue bytes`, §6.1) · `111/export/v1` (Ed25519 by the node over `tag ‖ NodeId ‖ length ‖ BLAKE3(the blob before the signature)`, §13.1) ·
   `111/node-state/v1` (a key-derivation input, the `111/store/v1` pattern of A9) · reserved `111/catalogue-vouch/v1` · Layer 9's `111/fix/v1` and
@@ -1617,8 +1745,10 @@ owner says otherwise.
   export|import` and `111 dataset add|import` (the subcommand set, `NI/cli.rs:153-192`) · the fetcher's `get_to_file` and `UserTypedDataset`;
   `PayloadFetcher::fetch_pin` with the origin list, the root installer reading `home_hub.address` from `fabric/settings` (§11.3); the manifest's `[source]`
   pin (§11.6), fetched by the updater of a node with `origin.serve` on after it staged its payload, and `[stores]` table (§13.6 (5)) · the update guard's store
-  restore, in `revert_to` and as a content rule at every `ExecStartPre` (§13.6 (3)); the updater's space bound before the flip and `EXTEND_TIMEOUT_USEC`
-  while a migration runs (§13.6 (1), (5)) · the housekeeping interval as a daemon-level task (§4.3) · the child log ring (§13.8) · text: "a USB drop into the same directory is the offline
+  restore, in `revert_to` and as a content rule at every `ExecStartPre`, and its own trigger for the legacy files (§13.6 (3)); the updater's space and time
+  bound before the flip, its state `last_result: refused_space`, its read of the `update_without_copy` consent from `state/storage.json` at its next
+  check, and `EXTEND_TIMEOUT_USEC` while a migration runs, the node-state store's included at the first start of a newer build (§2.2 rule 7, §13.6 (1),
+  (5)) · the daemon's exit with status 75 ("a store verb is running") while a store verb holds `node/lock`, restarted by the unit (§13.2) · the housekeeping interval as a daemon-level task (§4.3) · the child log ring (§13.8) · text: "a USB drop into the same directory is the offline
   alternative" (`L1:252-266`) gains "or the home hub's origin (Layer 8 §11)"; "Updater intake (seam)" (`L1:247-248`) is superseded by `state/origin/blob/`;
   the machine contracts (`L1:162`) gain `/origin/v1/catalogue/*` and `/origin/v1/notice/*` · dependencies, signed off under "Dependency policy" in
   `1-bootstrap/TASKS.md` with the `blake2 = "=0.11.0"` precedent (`1-bootstrap/crates/node111/Cargo.toml:69-71`): direct `rusqlite` (=0.40.2,
@@ -1636,7 +1766,8 @@ owner says otherwise.
   from no third-party data" (G16, G17). The Termux deb and APK rows (`:64-65`) gain their
   verified licences before §11.5's pin source is offered. D26 (5) gains the §11.7 sentence; D21 gains a note: the exempt `map` bucket, 90 KB gzip (D30 F9
   recorded the bucket with no figure and stands), and, only if the owner raises it, the lazy budget (§22 D22).
-- **Hand-off to Layer 9:** §3 (J1-J9), cited by number; the consumer registry for 0x10 and 0x13 (§12.3); the hub fix shelf, later: a catalogue class `patch`
+- **Hand-off to Layer 9:** §3 (J1-J9), cited by number; the J2 hook records the daemon's exit status 75 (a store verb holds `node/lock`, §13.2) with
+  its code and never as a crash; the consumer registry for 0x10 and 0x13 (§12.3); the hub fix shelf, later: a catalogue class `patch`
   on the same tree, signed by its author and vouched for with `111/fix-vouch/v1`; Layer 8 adds storage, a class and the Range path, never a format (R01
   finding 9). In v1 Layer 9's fix artefacts (under 4 KiB, a 64 KiB attachment cap) travel as sealed `PATCH` messages (OB §3).
 - **Hand-offs this layer closes:** Layer 3 "State ← Layer 8" (§2, §3) · Layer 4's Storage stub and its deferred "storage (L8)" (§15.4) · Layer 5's prune
@@ -1653,8 +1784,8 @@ promises atomic writes while `save_proposal` and `save_task` use `std::fs::write
 `7-relay/README.md`: §10.5 "≈ 69 KB", §12, §9.1 and the GPL source offer, §17: §21 L7 (1)-(4). · (5) `1-bootstrap/README.md`: the layout rows; the components
 text, now at `:252-266` (the brief cited `:227-246`); `:185` "APK refresh = Layer 9 maintenance task" is Layer 9's (text unchanged here). · (6)
 `6-transport/README.md`: the origin list, now at `:145-146` (the brief cited `:113-117`); `adapter` optional. · (7) `2-identity/README.md` §13.1 A4: the tags
-join the registry (§21 L2, as §13.3, C4); §8.5(i) names its tag. · (8) `LICENSING.md:56`: **already done** ("Text verified 2026-11-01", read at `6dd9f4f`);
-`:145` already carries the 0.17 note; the §8 rows and the notices: §21. · (9) `plan/DECISIONS.md`: the D26 (5) sentence and the D21 note (§21). · (10)
+join the registry (§21 L2, as §13.3, C4); §8.5(i) names its tag. · (8) `LICENSING.md:56`: **already done** ("Text verified 2026-11-01", read at the
+pinned head); `:151` already carries the 0.17 note; the §8 rows and the notices: §21. · (9) `plan/DECISIONS.md`: the D26 (5) sentence and the D21 note (§21). · (10)
 `0-knowledge/projects/age.md:5` and the new candidates (§21 L0). · (11) `4-interface/README.md` "storage (L8)", now at `:717` (the brief cited `:697`);
 `UI/src/views/settings/model.ts:222` (cited `:221-222`). · (12) This folder's research: R01 §4's "Cat 4A on Pi" rows contradict
 `NI/install/categorize.rs:102-105` (Cat 4A needs ≥ 512 GB free and ≥ 8 GB RAM); R06 §4's "3,396 × 64 B" is 3,397 pairs = 217,408 B; R01 and R02 quote the
@@ -1672,21 +1803,23 @@ not persisted at all (`M/store/prune.rs:1337-1350`, `:1279-1295`; `N/fabric/mod.
 `save_capacity` `:1337-1350` (was `:869-888`), `PRUNE_EVERY` `N/fabric/mod.rs:183` (was `:115`), the capacity pass `:2235` (was `:1131`),
 `apply_key_and_pragmas` `M/store/mod.rs:433-493` (was `:396-456`), `A/src/events.rs:19-21` (was `:3`, `:17-21`), `L2:91`, `:216-218`, `:234`, `:311` (were
 `:85`, `:206-208`, `:224`, `:296`). · **C4** Layer 7's tags are already registered as A14 (`L2:449-456`, recorded 2026-11-11), so J5's "one amendment" carries
-the tags of Layers 8 and 9 (§21 L2). · **C5** `Proposal.kind` holds nine kinds (`N/dashboard/api_v1/proposals.rs:104-114`, `relay` built) while the agent's
-tool count is still 17 (`A/tests/daemon_tools.rs:318`): every bump is stated relative (§16.5, §16.6). · **C6** The fabric schema is v5 at `6dd9f4f`
+the tags of Layers 8 and 9 (§21 L2). · **C5** `Proposal.kind` holds nine kinds (`N/dashboard/api_v1/proposals.rs:104-114`, `relay` built) and the agent's
+tool count is 20 at the pinned head (`A/tests/daemon_tools.rs:322`; Layer 7 row A1 added its three): every bump is stated relative, 20 → 23 (§16.5,
+§16.6). · **C6** The fabric schema is v5 at the pinned head
 (`M/store/schema.rs:76`; Layer 7 rows M1b and M1c committed); no signed release has shipped (`NI/manifest.rs:140-143`), so the migration copy's first field use is the first
 migration after one (§13.6 item 4). · **C7** The probe has no storage-medium fact (`NI/install/probe.rs:70-75`, `:372`): §4.2's `keep` rule (D5). · **C8**
 `proposal.write` takes only a title and a body (`A/src/tools.rs:113-121`): a typed proposal needs its own tool (D1). · **C9** The components cache is
 root-owned (`L1:142`): component blobs are served in place, never copied into `state/origin/blob/` (§11.1; D18). · **C10** The chat relay drops the agent's
 stream when the browser leaves (`N/dashboard/api_v1/relay.rs:585-612`): the relay task owns it (§2.3 rule 4). · **C11** The consents and the metered window
-are stubs at `6dd9f4f` (`N/relay/consent.rs`, `N/relay/metered.rs:1-9`); the origin is built (Layer 7 row D7, `N/origin/mod.rs:1-37`; a stub at `f0b6806`):
+are stubs at the pinned head (`N/relay/consent.rs`, `N/relay/metered.rs:1-9`); the origin is built (Layer 7 row D7, `N/origin/mod.rs:1-37`; a stub when
+the brief was written):
 Layer 8's origin work builds on D7 and waits for Layer 7 rows D10 and D11 (§14). · **C12** mesh111's `rusqlite` has no `backup` feature (`5-messaging/crates/mesh111/Cargo.toml:17`): the export runs with the daemon
-stopped (D6). · **C13** `N/dashboard/routes.rs:33` (`:28` at `f0b6806`; the code at `:142-144`) concerns the `localhost` redirect, not the session gate (brief §4 item 14). · **C14** The Transit default
+stopped (D6). · **C13** `N/dashboard/routes.rs:33` (the brief cited `:28`; the code at `:142-144`) concerns the `localhost` redirect, not the session gate (brief §4 item 14). · **C14** The Transit default
 is a quarter of the custody quota when one is set, else of the high watermark (`M/store/prune.rs:52-66`, `:925-944`): left unset it would scale once the
 budget sets the watermark, so the budget writes its effective value once (§4.2 item 4). · **C15** The agent
 counts conversation files for its status (`A/src/store.rs:88-95`): `111d` fills the count from the store (§2.3 rule 6). · **C16** kiwix-serve wakes once a
-second while it runs (R07g3 §1), but the panel's proxy sees every request, so an idle stop needs no timer of ours: a counter on the existing capacity
-pass stops kiwix-serve after 30 passes with no request (§9.3 (3), §4.3 step 9; D21). · **C17** D37 (decided on 2026-11-11, after the brief)
+second while it runs (R07g3 §1), but the panel's proxy and `111d`'s search route see every request, so an idle stop needs no timer of ours: a counter on
+the existing capacity pass, reset by both, stops kiwix-serve after 30 passes with no request (§9.3 (3), §4.3 step 9; D21). · **C17** D37 (decided on 2026-11-11, after the brief)
 fixed the cross-layer seam ids and the runner's map (`verify/seams.toml`, `verify/checks.toml`): §18 uses its Layer 8 ids and adds three rows,
 `L6-L8:server-component`, `L5-L8:consumer-registry` and `L5-L8:child-panel`. · **C18** The brief's "reset account", the one control it gives
 foreign databases (OB F3, `options.md:217`), already exists: Layer 6's "remove files" deletes `bridge/<adapter>/` with the account store
@@ -1706,11 +1839,11 @@ is answered and not saved, and history answers `503 store_unavailable` (a new co
 the log ring copies the tail and truncates, because the child holds an appending descriptor · **D16** J5's "one amendment" is the §13.3 block for Layers 8 and
 9 (C4) · **D17** the watermark never drops below 512 MiB until a human sets `keep` (the inert default) · **D18** component payloads are served in place from
 `cache/packages/`, where F4 says every public file lives in the tree (C9) · **D19** an update that migrates a store whose rollback copy does not fit above
-the floor, or cannot be made inside the probation window, is refused before the flip (`409 insufficient_space`) unless a human accepts "update without a
+the floor, or cannot be made inside the probation window, is refused before the flip (the updater state `refused_space`) unless a human accepts "update without a
 rollback copy", after which a revert leaves that store closed until the next update (§13.6 (5); the lead's ruling on the panel's fork, both rules in that
 order; F12 named the copy and no bound) · **D20** with every Layer 8 switch off the daemon holds one descriptor of Layer 8 for its lifetime, the `flock` on
 `node/lock` (§13.2), so §19's first two columns read 1 open file where v0.1 read 0: no process, poll, timer or write is added · **D21** kiwix-serve
-also stops on the existing capacity pass when no request reached its panel's proxy for 30 passes, and the next panel open starts it again (§9.3 (3); the
+also stops on the existing capacity pass when no request reached its panel's proxy or its search route for 30 passes, and the next panel open starts it again (§9.3 (3); the
 lead's ruling, by the Pi-floor rule), where F8 A says it is "stopped by the user or at daemon stop" · **D22** the lazy UI budget: after Layer 7's U2
 the lazy bucket leaves 17.1 KB of D21's 256 KB (§15.4); Layer 8 splits its page (`l8`, `l8-hub`) and takes at most 12 KB of it; if its chunks cannot fit,
 raising D21's budget is the owner's, and this spec assumes no raise · **D23** Q24's default reads "each measured on a Pi before the spec locks"
@@ -1732,8 +1865,15 @@ accepts no byte for 60 s is closed (§7.2) · the `updates`, `bridge` and `kb` w
 32 passes, doubling (§4.3 step 6). The drafter's, set in v0.2 (default; measured at build): `get_to_file`'s stall bound, a range's length at a floor rate
 of 64 KiB/s (§7.3 (1)) · an upstream window of 16 MiB per call (§7.3 (1), §7.5) · a size walk stops at 100,000 entries (§4.1). The drafter's, set in v0.2 from the integration report (default; measured at build): a
 `dataset` frame at most once per 5 s per job, plus state changes (§7.4, §16.3) · Layer 8's lazy UI allowance, 12 KB gzip for its chunks, adapter and card
-(§15.4).
+(§15.4). Set in v0.3 from the re-check (fixed values, not defaults; nothing in them is measured): `<publisher short>` is the first 16 hex characters of the
+publisher's NodeId (§5.1, the lead's) · the daemon's exit status while a store verb holds `node/lock` is 75 (§13.2, the drafter's; `EX_TEMPFAIL`) · a
+`version` matches `^[A-Za-z0-9][A-Za-z0-9_.+-]{0,39}$`, the 40 characters it already had (§5.3).
 
-## Changelog v0.1
+## Changelog
 
-- 2026-11-11: first draft from D34, D36, the options brief, research R00-R07g3 and the code at `f0b6806`, for the adversarial panel.
+- 2026-11-11 (v0.1): first draft from D34, D36, the options brief, research R00-R07g3 and the code of head `f0b6806`, for the adversarial panel.
+- 2026-11-12 (v0.2): the panel's three reports (store, datasets, integration; 92 finding ids) applied under the lead's triage (`review/triage.md`), each id
+  mapped to its sections in `review/fix-map.md`; the forks ruled as the triage states (S5 with I22, D1 with D2 and I3, D29 with I5); citations re-pinned.
+- 2026-11-13 (v0.3): the re-check of v0.2 (`review/recheck.md`) applied with the lead's ruling: the seven partly fixed ids (the sidecar's name proven,
+  the re-pin finished at one head, the consent text's list) and R1-R21 (the adopt route's body, the update-without-copy route, the legacy files' own
+  trigger, `Proposal.decision.applied`, the two set-aside routes, one dataset state enum, and the minors); the fix-map gains a v0.3 section.
