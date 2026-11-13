@@ -117,6 +117,7 @@ CASES: dict[str, tuple[str, int]] = {
     "stagewise/l3-no-headers": ("fx.gate3", 101),
     "stagewise/l1-tools-missing": ("fx.gate1", 0),
     "stagewise/l1-summary-gate-dump": ("fx.gate1", 1),
+    "stagewise/l1-summary-gate-dump-notices": ("fx.gate1", 1),
     "stagewise/l1-cargo-stops": ("fx.gate1", 101),
     # vitest
     "vitest/unit-json-green": ("fx.ui.contacts", 0),
@@ -147,6 +148,7 @@ CASES: dict[str, tuple[str, int]] = {
     "okfail/aborted-no-closing": ("fx.ok", 1),
     "okfail/red-without-fail-lines": ("fx.ok", 1),
     "okfail/nested-green-then-abort": ("fx.ok", 0),
+    "okfail/green-no-result": ("fx.ok", 0),
     # emitter
     "emitter/instrumented": ("fx.emit", 1),
     "emitter/not-instrumented": ("fx.emit", 0),

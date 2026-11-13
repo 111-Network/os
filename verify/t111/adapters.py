@@ -447,24 +447,26 @@ def script_texts(check: Check, root: Path) -> list[str]:
 _STAGE_ECHO_RE = re.compile(r"""(?:echo|printf)\s+(?:'[^']*'\s+)?["']== (?P<name>.+?) ==(?:\\n)?["']""")
 
 
-def declared_stage_marks(texts: Iterable[str]) -> list[tuple[str, str, bool]]:
-    """(stage name, the script text of that stage, conditional) for every ``echo "== name =="`` of the scripts, in
-    order. A name with a shell expansion keeps the text before it (a prefix). ``conditional``: the echo is indented or
-    follows something on its line (inside an ``if``), so the stage may be absent from a run that went on."""
-    out: list[tuple[str, str, bool]] = []
+def declared_stage_marks(texts: Iterable[str]) -> list[tuple[str, str, bool, bool]]:
+    """(stage name, the script text of that stage, conditional, cut) for every ``echo "== name =="`` of the scripts,
+    in order. A name with a shell expansion keeps the text before it (a prefix: ``cut`` is True, and only then may a
+    log header match the name by its start). ``conditional``: the echo is indented or follows something on its line
+    (inside an ``if``), so the stage may be absent from a run that went on."""
+    out: list[tuple[str, str, bool, bool]] = []
     for text in texts:
         marks = list(_STAGE_ECHO_RE.finditer(text))
         for index, m in enumerate(marks):
             end = marks[index + 1].start() if index + 1 < len(marks) else len(text)
-            name = m.group("name").split("$", 1)[0].rstrip()
+            full = m.group("name")
+            name = full.split("$", 1)[0].rstrip()
             line_start = text.rfind("\n", 0, m.start()) + 1
-            out.append((name, text[m.end():end], m.start() > line_start))
+            out.append((name, text[m.end():end], m.start() > line_start, name != full))
     return out
 
 
 def declared_stages(texts: Iterable[str]) -> list[tuple[str, str]]:
     """(stage name, the script text of that stage) for every ``echo "== name =="`` of the scripts, in order."""
-    return [(name, body) for name, body, _conditional in declared_stage_marks(texts)]
+    return [(name, body) for name, body, _conditional, _cut in declared_stage_marks(texts)]
 
 
 _FUNC_START_RE = re.compile(r"^(?P<name>[A-Za-z_][\w-]*)\s*\(\)\s*\{?\s*$")
@@ -1355,8 +1357,23 @@ register("unittest")(_py_adapter)
 # okfail (every sh harness) and the emitter file
 
 
-_OK_RE = re.compile(r"^\s*(?:(?P<who>[\w.-]+): )?(?P<kind>ok|FAIL|note): (?P<text>.*?)\s*$")
-_PHASE_RE = re.compile(r"^== (?P<name>.+?)(?:\s+\(t\+[\d.]+s\))?(?: ==)?\s*$")
+_OK_RE = re.compile(r"^\s*(?:(?P<who>[\w.-]+): )?(?P<kind>ok|FAIL|note): (?P<text>.*)$")  # text: rstrip() in code
+_PHASE_RE = re.compile(r"^== (?P<name>.+)$")  # the `(t+Ns)` and ` ==` tails: phase_name() in code
+_PHASE_TIME_RE = re.compile(r"\(t\+[\d.]+s\)")
+_WHO_CLOSE_RE = re.compile(r"^[\w.-]+: (?:ALL CASES GREEN|\d+ case\(s\) failed)\s*$")
+
+
+def phase_name(raw: str) -> str:
+    """The phase a ``== <name> [(t+Ns)] [==]`` line names (``raw``: what ``_PHASE_RE`` captured). The tails are cut in
+    code, not by a lazy regex group before ``\\s*$``, which backtracks quadratically on a line padded with spaces."""
+    name = raw.rstrip()
+    if name.endswith(" =="):
+        name = name[:-3].rstrip()
+    if name.endswith(")"):
+        at = name.rfind("(t+")
+        if at > 0 and name[at - 1].isspace() and _PHASE_TIME_RE.fullmatch(name, at):
+            name = name[:at].rstrip()
+    return name or raw
 _SKIPPED_CLOSE_RE = re.compile(r"^(?P<gate>[A-Z][\w-]*) SKIPPED: (?P<reason>.+?)\s*$")
 _GREEN_CLOSE_RE = re.compile(r"^(?:[\w.-]+: )?(?:[A-Z][\w-]*(?: [\w-]+)*? )?(?:ALL (?:CASES )?)?GREEN\b|"
                              r"^(?:[\w.-]+: )?all ok\s*$|^[\w .-]+: PASS\b")
@@ -1438,17 +1455,31 @@ class OkFail:
         self.red_count: int | None = None
         self.last_fail: tuple[int, str] | None = None
         self.lines_of: dict[str, int] = {}
+        self.quoting = False
+
+    def quote(self) -> None:
+        """A ``== x ==`` line the gate did not accept as a stage was seen (the summary gate quotes the tail of a
+        stubbed run): until the sub-harness's own closing line (``<who>: ALL CASES GREEN`` / ``<who>: N case(s)
+        failed``) an ``ok:`` or ``note:`` line is quoted output, not a result of this stage (the check it names ran in
+        a stub tree). A ``FAIL:`` line is always kept: the variant that can never turn a red into a green (a quoted
+        FAIL is at worst one more red record; a quoted ``ok:`` kept would be a PASS for work that never ran here)."""
+        self.quoting = True
 
     def feed(self, no: int, text: str) -> None:
         m = _PHASE_RE.match(text) if self.phases else None
         if m:
-            self.phase = m.group("name")
+            self.phase = phase_name(m.group("name"))
             self.phases_seen.append(self.phase)
             self.closing = None  # a closing line counts only as the harness's last word
             return
+        if self.quoting and _WHO_CLOSE_RE.match(text):
+            self.quoting = False  # the sub-harness's own last line: what follows is its next sibling's output
+            return
         m = _OK_RE.match(text)
         if m:
-            kind, desc = m.group("kind"), m.group("text")
+            kind, desc = m.group("kind"), m.group("text").rstrip()
+            if self.quoting and kind != "FAIL":
+                return
             if kind != "note":
                 self.lines_of.setdefault(desc, no)
             if kind == "note":
@@ -1527,7 +1558,7 @@ class OkFail:
         if kind == "red" and not self.fails:
             recs.append(verdict("FAIL", "the harness reported failures but printed no FAIL: line", text, line))
         elif kind == "green" and not self.recs:
-            recs.append(verdict("PASS", None, None, line))  # type: ignore[arg-type]
+            recs.append(verdict("PASS", "the harness closed green with no result line", None, line))
         return recs
 
     def _unclosed_run(self, groups: list[list[str]]) -> str | None:
@@ -1741,12 +1772,13 @@ def names_stage(stage: str, named: str) -> bool:
 
 class _StageOrder:
     """Which ``== name ==`` lines of a gate's log are stage headers: the script declares its stages in order; a header
-    opens a stage only when it names one of the declared stages after the last one seen with nothing unconditional
-    in between (an indented ``echo`` may be skipped, a top-level one ran). Any other such line is stage content: the
-    summary gate's failure dump, a sub-harness's own headers. No declared stage (a script nobody can read): every
-    header opens a stage."""
+    opens a stage only when it is one of the declared stages after the last one seen with nothing unconditional
+    in between (an indented ``echo`` may be skipped, a top-level one ran). A header is a declared name exactly; it
+    matches by its start only a name the script cut at a ``$`` expansion (``cut``): ``notices generator tests (…)``
+    is not the stage ``notices``. Any other such line is stage content: the summary gate's failure dump, a
+    sub-harness's own headers. No declared stage (a script nobody can read): every header opens a stage."""
 
-    def __init__(self, marks: list[tuple[str, bool]]):
+    def __init__(self, marks: list[tuple[str, bool, bool]]):
         self.marks = marks
         self.pos = -1
 
@@ -1754,8 +1786,8 @@ class _StageOrder:
         if not self.marks:
             return True
         for index in range(self.pos + 1, len(self.marks)):
-            declared, conditional = self.marks[index]
-            if name.startswith(declared):
+            declared, conditional, cut = self.marks[index]
+            if name == declared or (cut and declared and name.startswith(declared)):
                 self.pos = index
                 return True
             if not conditional:
@@ -1873,10 +1905,10 @@ def stagewise_adapter(check: Check, log: Path, status: int, ctx: AdapterContext)
     (stopped at <stage>)``. Two declared stages whose 32-character slugs collide get a hash each."""
     ids = IdBook()
     marks = declared_stage_marks(script_texts(check, ctx.root))
-    declared = [(name, body) for name, body, _conditional in marks]
+    declared = [(name, body) for name, body, _conditional, _cut in marks]
     bodies = dict(declared)
     collide = colliding_stages(declared)
-    top_order = _StageOrder([(name, conditional) for name, _body, conditional in marks])
+    top_order = _StageOrder([(name, conditional, cut) for name, _body, conditional, cut in marks])
     nested_order = _StageOrder([])
     units = cargo_units(ctx.seam_map)
     skips: list[Record] = []
@@ -1905,7 +1937,18 @@ def stagewise_adapter(check: Check, log: Path, status: int, ctx: AdapterContext)
     nested_gate: str | None = None  # set while a nesting stage runs another gate's stages
     for no, text in read_lines(log):
         m = _STAGE_RE.match(text)
-        if m and (nested_order if top is not None and nested_gate is not None else top_order).accept(m.group("name")):
+        if m and isinstance(current.parser, OkFail):
+            # The gate runs under ``set -eu``: once an okfail-kind stage parsed a ``FAIL:`` line nothing after it ran
+            # as a stage, so a later header is quoted output (the summary gate's dump). Any header this stage's
+            # parser does not get as its own stage puts the parser in quoting mode (``OkFail.quote``).
+            if current.parser.fails > 0 or not (nested_order if top is not None and nested_gate is not None
+                                                else top_order).accept(m.group("name")):
+                current.parser.quote()
+                m = None
+        elif m and not (nested_order if top is not None and nested_gate is not None else top_order).accept(
+                m.group("name")):
+            m = None
+        if m:
             name = m.group("name")
             if top is not None and nested_gate is not None:
                 current = make(name, f"{top.name}/{name}", no, (nested_gate, check.id), "", parent=top.name)
@@ -1916,7 +1959,7 @@ def stagewise_adapter(check: Check, log: Path, status: int, ctx: AdapterContext)
                     nested_gate = (_gate_of_script(ctx.seam_map, script) if script else None) or check.id
                     inner_check = ctx.seam_map.check(nested_gate) if nested_gate != check.id else None
                     nested_order = _StageOrder(
-                        [(n, c) for n, _b, c in declared_stage_marks(script_texts(inner_check, ctx.root))]
+                        [(n, c, k) for n, _b, c, k in declared_stage_marks(script_texts(inner_check, ctx.root))]
                         if inner_check is not None else [])
             stages.append(current)
             continue
@@ -1925,7 +1968,8 @@ def stagewise_adapter(check: Check, log: Path, status: int, ctx: AdapterContext)
             current = top  # type: ignore[assignment]
             continue
         current.tail.append((no, text))
-        named = None if _STAGE_CLOSE_RE.match(text) else stage_skip(text)
+        quoting = isinstance(current.parser, OkFail) and current.parser.quoting
+        named = None if quoting or _STAGE_CLOSE_RE.match(text) else stage_skip(text)
         if named is not None and not _OK_RE.match(text):  # an ok:/FAIL: line that quotes a skip line is a result
             reason = (text[3:] if text.startswith("!! ") else text).strip()
             if not named or names_stage(current.name, named):

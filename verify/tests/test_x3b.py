@@ -324,5 +324,163 @@ class StageSkipLineIsLinear(unittest.TestCase):
                 self.assertIsNone(adapters.stage_skip(text))
 
 
+GATE_SCRIPT = ('echo "== gate assertions (hermetic) =="\nsh scripts/tests/check-summary-gate.sh\n'
+               'echo "== notices =="\ntrue\n'
+               'echo "== build scripts (hermetic) =="\ntrue\n')
+
+
+def run_gate(case: unittest.TestCase, log: str, status: int, script: str = GATE_SCRIPT) -> list[Record]:
+    return StageIdsDoNotCollide.run_gate(case, script, log, status)  # type: ignore[arg-type]
+
+
+class ADumpIsNotAStage(unittest.TestCase):
+    """X3c medium: a header matches a declared stage exactly (a prefix only for a name the script cut at ``$``), and
+    after a ``FAIL:`` of the open okfail stage no top-level header is a stage."""
+
+    def test_the_real_dump_that_starts_at_the_notices_generator_header(self) -> None:
+        """The summary gate's dump is the last 25 lines of a stubbed ``check.sh`` run: it starts at ``== notices
+        generator tests (…) ==``, which begins with the declared ``notices``. The golden holds the exact records."""
+        recs, ctx = run_case("stagewise/l1-summary-gate-dump-notices")
+        got = by_id(recs)
+        self.assertEqual([r.id for r in recs if r.status == "FAIL"],
+                         ["fx.gate1/gate-assertions-hermetic-musl/full-run"])
+        self.assertEqual([r.id for r in recs if r.status == "PASS" and ("gate-assertions" in r.id
+                                                                          or "build-scripts" in r.id)], [],
+                         "a PASS for work that ran in the stub tree")
+        for ident in ("fx.gate1/notices", "fx.gate1/build-scripts-meshmud-build.sh", "fx.gate1/ui",
+                      "fx.gate1/g2-sqlcipher-static-link-run", "fx.gate1/systemd-analyze"):
+            self.assertEqual(got[ident].status, "SKIPPED", ident)
+            self.assertIn("not reached", got[ident].reason or "", ident)
+        self.assertNotIn("fx.gate1/ui-checks", got)  # the dumped skip line is not a record of this run
+        self.assertEqual(len({r.id for r in recs}), len(recs))
+        self.assertFalse(ctx.exit_declared)
+
+    def test_a_header_is_a_declared_name_exactly(self) -> None:
+        order = adapters._StageOrder([("notices", False, False), ("notices generator tests (x)", True, False),
+                                      ("build scripts", False, False)])
+        self.assertFalse(order.accept("notices generator tests (x)"), "the prefix `notices` is not the stage")
+        self.assertTrue(order.accept("notices"))
+        self.assertTrue(order.accept("notices generator tests (x)"))
+        self.assertTrue(order.accept("build scripts"))
+
+    def test_a_name_cut_at_a_shell_expansion_matches_by_its_start(self) -> None:
+        marks = adapters.declared_stage_marks(['echo "== check (musl $T) =="\necho "== plain =="\n'])
+        self.assertEqual([(n, cut) for n, _b, _c, cut in marks], [("check (musl", True), ("plain", False)])
+        order = adapters._StageOrder([(n, c, k) for n, _b, c, k in marks])
+        self.assertTrue(order.accept("check (musl x86_64)"))
+        self.assertFalse(adapters._StageOrder([("plain", False, False)]).accept("plain and more"))
+
+    def test_after_a_fail_of_the_open_stage_no_top_level_header_opens_a_stage(self) -> None:
+        """``== notices ==`` is the next declared stage, so the order alone accepts it; the FAIL says it is quoted."""
+        log = ("== gate assertions (hermetic) ==\ncheck-gate: FAIL: full run\n== notices ==\nquoted\n"
+               "== build scripts (hermetic) ==\nquoted\ncheck-gate: 1 case(s) failed\n")
+        recs = run_gate(self, log, 1)
+        self.assertEqual([(r.id, r.status) for r in recs if r.status != "SKIPPED"],
+                         [("fx.gx/gate-assertions-hermetic/full-run", "FAIL")])
+        self.assertEqual(sorted(r.id for r in recs if r.status == "SKIPPED"),
+                         ["fx.gx/build-scripts-hermetic", "fx.gx/notices"])
+
+    def test_without_a_fail_the_next_declared_header_still_opens_the_stage(self) -> None:
+        log = "== gate assertions (hermetic) ==\ncheck-gate: ok: one\n== notices ==\nfine\n"
+        got = by_id(run_gate(self, log, 0))
+        self.assertEqual(got["fx.gx/notices"].status, "PASS")
+        self.assertEqual(got["fx.gx/gate-assertions-hermetic/one"].status, "PASS")
+
+
+class QuotedOkLinesAreNotResults(unittest.TestCase):
+    """X3c low: an ``ok:`` line a gate-assertions stage quotes (a dump of a stub run) is no PASS of that stage.
+
+    Variant chosen: after a ``== x ==`` line the gate did not accept, ``ok:`` / ``note:`` lines are dropped until the
+    sub-harness's own ``<who>: ALL CASES GREEN`` / ``<who>: N case(s) failed`` line, and a ``FAIL:`` line is always
+    kept. Why: a dropped quoted ``ok:`` costs at most a PASS record the quoted run owned, a dropped ``FAIL:`` could turn
+    red into green, so the one kind that can hide a failure is never dropped; and ending only at the sub-harness's own
+    prefixed closing line (the dump's ``ALL GREEN`` has no prefix) keeps the next sibling harness's results."""
+
+    def test_a_quoted_ok_line_is_not_a_pass(self) -> None:
+        log = ("== gate assertions (hermetic) ==\ncheck-gate: FAIL: full run\n== G2: x ==\nok: 2 x86_64 binaries static\n"
+               "check-gate: 1 case(s) failed\n")
+        recs = run_gate(self, log, 1)
+        self.assertEqual([r.id for r in recs if r.status == "PASS"], [])
+
+    def test_a_quoted_fail_line_is_kept(self) -> None:
+        log = ("== gate assertions (hermetic) ==\ncheck-gate: ok: one\n== notices generator tests (x) ==\n"
+               "ok: quoted\nFAIL: quoted red\ncheck-gate: ALL CASES GREEN\n")
+        recs = run_gate(self, log, 1)
+        self.assertEqual([(r.id, r.status) for r in recs if r.status in ("PASS", "FAIL")],
+                         [("fx.gx/gate-assertions-hermetic/one", "PASS"),
+                          ("fx.gx/gate-assertions-hermetic/quoted-red", "FAIL")])
+
+    def test_the_next_sub_harness_after_the_closing_line_counts_again(self) -> None:
+        log = ("== gate assertions (hermetic) ==\ncheck-gate: ok: one\n== notices generator tests (x) ==\n"
+               "ok: quoted\nALL GREEN\nok: still quoted\ncheck-gate: ALL CASES GREEN\nui-gate: ok: after\n"
+               "ui-gate: ALL CASES GREEN\n")
+        recs = run_gate(self, log, 0)
+        self.assertEqual(sorted(r.id for r in recs if r.status == "PASS"),
+                         ["fx.gx/gate-assertions-hermetic/after", "fx.gx/gate-assertions-hermetic/one"])
+
+
+class OkFailLinesAreLinear(unittest.TestCase):
+    """X3c low: a line padded with whitespace costs ``_OK_RE`` and ``_PHASE_RE`` one scan, not a quadratic backtrack."""
+
+    PAD = " " * 30000
+
+    def timed(self, log: str, status: int, case: str = "emitter/not-instrumented") -> list[Record]:
+        started = time.monotonic()
+        recs, _ctx = run_case(case, log_text=log, status=status, emit_text="")
+        took = time.monotonic() - started
+        self.assertLess(took, 0.5, "a regex backtracks on whitespace")  # a record of speed, not a verdict
+        return recs
+
+    def test_an_ok_line(self) -> None:
+        recs = self.timed(f"== 5a. x\nok: a{self.PAD}b\nSMOKE GREEN — all passed in 1.0s\n", 0)
+        self.assertEqual([r.status for r in recs if r.id != "fx.emit"], ["PASS"])
+
+    def test_a_fail_line(self) -> None:
+        recs = self.timed(f"== 5a. x\nFAIL: a{self.PAD}b\nSMOKE RED — 1 FAIL line(s) in 1.0s\n", 1)
+        self.assertEqual([r.status for r in recs if r.id != "fx.emit"], ["FAIL"])
+
+    def test_a_phase_line(self) -> None:
+        recs = self.timed(f"== 5a. x{self.PAD}b\nok: a\nSMOKE GREEN — all passed in 1.0s\n", 0)
+        self.assertTrue(recs[0].phase and recs[0].phase.startswith("5a. x"))
+
+    def test_a_padded_fail_line_in_a_gate_stage(self) -> None:
+        self.timed(HEADERS_L1 + f"check-gate: FAIL: x{self.PAD}y\ncheck-gate: 1 case(s) failed\n", 1,
+                   "stagewise/l1-green-skips")
+
+    def test_the_phase_tails_are_cut_as_before(self) -> None:
+        for raw, name in (("a (t+1.5s) ==", "a"), ("a ==", "a"), ("a", "a"), ("5a. x (t+2s)", "5a. x"),
+                          ("a(t+1s)", "a(t+1s)"), ("a == ==", "a =="), ("a  (t+12.5s)  ==  ", "a")):
+            with self.subTest(raw=raw):
+                self.assertEqual(adapters.phase_name(raw), name)
+
+
+class AGreenCloseWithNoResultLineHasAReason(unittest.TestCase):
+    def test_the_verdict_says_why(self) -> None:
+        recs, ctx = run_case("okfail/green-no-result")
+        self.assertEqual([(r.id, r.status, r.engine) for r in recs], [("fx.ok", "PASS", True)])
+        self.assertEqual(recs[0].reason, "the harness closed green with no result line")
+        self.assertFalse(ctx.exit_declared)
+
+
+class TheG2SkipLineAndTheTwoG2StagesHaveThreeIds(unittest.TestCase):
+    """X3c low: the skip line of G2 (``g2-sqlcipher-static-link``) and both declared G2 stages (``…-run``, ``…-mesh111``)
+    in one run are three distinct ids, none with a ``#n``. (The real script prints the skip line only on a run that
+    never reaches the G2 stages, so this log puts it in an early stage, which is the shape that holds the three ids
+    side by side.)"""
+
+    def test_three_distinct_ids(self) -> None:
+        log = fixture("stagewise/l1-clippy-fail").replace(
+            "== clippy (host) ==\n",
+            "== clippy (host) ==\n!! musl cross toolchains absent — G2 (SQLCipher static link) SKIPPED; "
+            "REQUIRE_G2=1 makes this a failure\n", 1)
+        recs, _ctx = run_case("stagewise/l1-clippy-fail", log_text=log)
+        ids = [r.id for r in recs if r.id.startswith("fx.gate1/g2-")]
+        self.assertEqual(sorted(ids), ["fx.gate1/g2-sqlcipher-static-link",
+                                       "fx.gate1/g2-sqlcipher-static-link-mesh111",
+                                       "fx.gate1/g2-sqlcipher-static-link-run"])
+        self.assertEqual(len({r.id for r in recs}), len(recs))
+        self.assertFalse([r.id for r in recs if "#" in r.id])
+
+
 if __name__ == "__main__":
     unittest.main()
