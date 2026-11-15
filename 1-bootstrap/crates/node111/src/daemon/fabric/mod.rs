@@ -490,11 +490,12 @@ pub fn disk_space(path: &Path) -> Option<DiskSpace> {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct RelayRoles {
     /// `discovery.public_gateway_bit` with its `gateway_bit` consent
-    /// recorded (§12).
+    /// recorded under the text owed now (§12; `relay::consent::holds`).
     pub gateway_bit: bool,
     /// `discovery.offload_bit`.
     pub offload_bit: bool,
-    /// `origin.serve` with its `origin_serve` consent recorded (§12).
+    /// `origin.serve` with its `origin_serve` consent recorded under the
+    /// text owed now (§12; `relay::consent::holds`).
     pub origin_serve: bool,
     /// The carrier while the gateway is on (`gateway.enabled`, a carrier
     /// kind, its server and the `carrier_enable` consent recorded): the
@@ -554,16 +555,20 @@ impl RelayRoles {
     /// The switches as `r` holds them (`termux`: this node runs on Termux,
     /// where 5B runs as 5A).
     pub fn from_settings(r: &relay_settings::RelaySettings, termux: bool) -> RelayRoles {
-        let consent = |k| r.consent_hash(k).is_some();
+        // bits 3 and 5: the consent recorded is the one owed now (a text changed by an update
+        // stops the bit until the human consents again, Layer 7 §12)
+        // and the carrier the same way: a cap set or raised, or another server, owes a new
+        // `carrier_enable` (row D10), so the offer goes until it is given
+        let current = |k| crate::daemon::relay::consent::holds(r, k);
         let carrier_ready = match r.carrier_kind() {
             CarrierKind::None => false,
             CarrierKind::Ntfy => r.ntfy_server().is_some(),
         };
         RelayRoles {
-            gateway_bit: r.public_gateway_bit() && consent(ConsentKind::GatewayBit),
+            gateway_bit: r.public_gateway_bit() && current(ConsentKind::GatewayBit),
             offload_bit: r.offload_bit(),
-            origin_serve: r.origin_serve() && consent(ConsentKind::OriginServe),
-            carrier: (r.gateway_enabled() && carrier_ready && consent(ConsentKind::CarrierEnable))
+            origin_serve: r.origin_serve() && current(ConsentKind::OriginServe),
+            carrier: (r.gateway_enabled() && carrier_ready && current(ConsentKind::CarrierEnable))
                 .then(|| GatewayOffer {
                     carrier: r.carrier_kind(),
                     mode: r.carrier_mode_for(termux),
@@ -2416,6 +2421,16 @@ async fn housekeeping(me: Weak<FabricHandle>, api: Weak<ApiState>) {
 mod tests {
     use super::*;
 
+    /// The hash of the `gateway_bit` text owed now (Layer 7 §12).
+    fn gateway_hash() -> String {
+        crate::daemon::relay::consent::gateway_bit().hash
+    }
+
+    /// The hash of the `origin_serve` text owed now (Layer 7 §12).
+    fn origin_hash() -> String {
+        crate::daemon::relay::consent::origin_serve().hash
+    }
+
     #[test]
     fn roles_follow_settings() {
         use sealer::{ROLE_GATEWAY, ROLE_OFFLOAD, ROLE_ORIGIN};
@@ -2481,9 +2496,19 @@ mod tests {
         r.set_offload_bit(true);
         let x = RelayRoles::from_settings(&r, false);
         assert!(!x.gateway_bit && !x.origin_serve && x.offload_bit);
+        // a consent recorded under another text (an update changed the copy) counts as none
         r.set_consent_hash(ConsentKind::GatewayBit, Some(HASH))
             .unwrap();
         r.set_consent_hash(ConsentKind::OriginServe, Some(HASH))
+            .unwrap();
+        let x = RelayRoles::from_settings(&r, false);
+        assert!(
+            !x.gateway_bit && !x.origin_serve,
+            "a stale consent stops bits 3 and 5"
+        );
+        r.set_consent_hash(ConsentKind::GatewayBit, Some(&gateway_hash()))
+            .unwrap();
+        r.set_consent_hash(ConsentKind::OriginServe, Some(&origin_hash()))
             .unwrap();
         let x = RelayRoles::from_settings(&r, false);
         assert!(x.gateway_bit && x.origin_serve && x.carrier.is_none());
@@ -2493,8 +2518,15 @@ mod tests {
         assert!(RelayRoles::from_settings(&r, false).carrier.is_none());
         r.set_ntfy_server(Some("https://ntfy.example.org")).unwrap();
         assert!(RelayRoles::from_settings(&r, false).carrier.is_none());
-        r.set_consent_hash(ConsentKind::CarrierEnable, Some(HASH))
-            .unwrap();
+        r.set_consent_hash(
+            ConsentKind::CarrierEnable,
+            Some(
+                &crate::daemon::relay::consent::owed(&r, ConsentKind::CarrierEnable)
+                    .unwrap()
+                    .hash,
+            ),
+        )
+        .unwrap();
         r.set_carrier_mode(CarrierMode::FiveB, false).unwrap();
         let g = RelayRoles::from_settings(&r, false).carrier.unwrap();
         assert_eq!((g.carrier, g.mode), (CarrierKind::Ntfy, CarrierMode::FiveB));
@@ -2811,7 +2843,6 @@ mod tests {
     async fn a_role_bit_change_re_mints_the_announce_once() {
         use relay_settings::RelaySettings;
         use sealer::{ROLE_GATEWAY, ROLE_OFFLOAD, ROLE_ORIGIN};
-        const HASH: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
         let dir = tempfile::tempdir().unwrap();
         let api = test_api_lan(dir.path(), true);
         let state = dir.path().join("state");
@@ -2819,7 +2850,7 @@ mod tests {
         let (mut r, wrote) = relay_settings::update(&state, |r: &mut RelaySettings| {
             r.set_offload_bit(true);
             r.set_origin_serve(true);
-            r.set_consent_hash(ConsentKind::OriginServe, Some(HASH))
+            r.set_consent_hash(ConsentKind::OriginServe, Some(&origin_hash()))
         })
         .unwrap();
         assert!(wrote);
@@ -2843,7 +2874,7 @@ mod tests {
         // a switch whose bit is gated off changes no bit: the gateway bit
         // consented while the gateway is off
         r.set_public_gateway_bit(true);
-        r.set_consent_hash(ConsentKind::GatewayBit, Some(HASH))
+        r.set_consent_hash(ConsentKind::GatewayBit, Some(&gateway_hash()))
             .unwrap();
         assert!(!h.set_relay_settings(&r).await.unwrap());
         assert_eq!(last(&h), l0);
@@ -2862,8 +2893,15 @@ mod tests {
         r.set_gateway_enabled(true);
         r.set_carrier_kind(CarrierKind::Ntfy);
         r.set_ntfy_server(Some("https://ntfy.example.org")).unwrap();
-        r.set_consent_hash(ConsentKind::CarrierEnable, Some(HASH))
-            .unwrap();
+        r.set_consent_hash(
+            ConsentKind::CarrierEnable,
+            Some(
+                &crate::daemon::relay::consent::owed(&r, ConsentKind::CarrierEnable)
+                    .unwrap()
+                    .hash,
+            ),
+        )
+        .unwrap();
         assert!(h.set_relay_settings(&r).await.unwrap());
         let (roles1, n1, bytes1) = announced(&h);
         assert_eq!(roles1, hub | ROLE_GATEWAY | ROLE_OFFLOAD | ROLE_ORIGIN);

@@ -145,7 +145,9 @@ fn relay(serve: bool, consent: bool) -> RelaySettings {
     let mut r = RelaySettings::default();
     r.set_origin_serve(serve);
     if consent {
-        r.set_consent_hash(ConsentKind::OriginServe, Some(&"ab".repeat(32)))
+        // the hash of the text owed now (role bit 5 reads only a current consent, Layer 7 §12)
+        let hash = node111::daemon::relay::consent::origin_serve().hash;
+        r.set_consent_hash(ConsentKind::OriginServe, Some(&hash))
             .unwrap();
     }
     r

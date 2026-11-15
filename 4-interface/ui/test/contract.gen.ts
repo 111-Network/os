@@ -871,13 +871,13 @@ export const schemas: Record<string, JsonSchema> = {
       "quotas": {
         "type": "object",
         "additionalProperties": {"type":["integer","null"],"minimum":0},
-        "description": "capacity shaping per refusable stored-data class, in bytes: kb, update, patch, sync, object, custody, foreign (Layer 6: foreign-network rows, §3; messages and agent ops are never refused, §10.4, so they take no quota); null means no quota. Not a per-sender limit; those do not exist"
+        "description": "capacity shaping per refusable stored-data class, in bytes: kb, update, patch, sync, object, custody, foreign, transit (Layer 6: foreign-network rows, §3; messages and agent ops are never refused, §10.4, so they take no quota); null means no quota. Layer 7 (§5.8, §6.3) adds `transit`: a hub's forward rows for its paired hubs, apart from its members' `custody`; it always has a quota, so while the fabric runs it reads a number: unset, one quarter of the custody quota, else of the store's high watermark (128 MiB at the default), and each origin of forward rows holds at most one eighth of it (no key of its own). While the fabric is stopped `quotas` is empty (no class is read), and a class whose quota the store cannot read reads null. Not a per-sender limit; those do not exist"
       }
     }
   },
   "FabricSettingsPatch": {
     "type": "object",
-    "description": "Partial merge. In `quotas`, a class set to null drops its quota; only the refusable classes (kb, update, patch, sync, object, custody, foreign) take one — any other key is 400.",
+    "description": "Partial merge. In `quotas`, a class set to null drops its quota (`transit`, Layer 7 §5.8, then reads its derived default again: one quarter of the custody quota, else of the high watermark); only the refusable classes (kb, update, patch, sync, object, custody, foreign, transit) take one — any other key is 400.",
     "properties": {
       "hub_role": {"type":"boolean"},
       "listen_lan": {"type":"boolean"},
@@ -2997,7 +2997,7 @@ export const operations: Record<string, ContractOperation> = {
     },
     "query": [],
     "pathParams": ["id"],
-    "errors": [404,409,502]
+    "errors": [404,409,500,502]
   },
   "getSettings": {
     "method": "GET",
@@ -3786,7 +3786,7 @@ export const operations: Record<string, ContractOperation> = {
     "requestSchema": {"$ref":"#/components/schemas/RelaySettingsPatch"},
     "query": [],
     "pathParams": [],
-    "errors": [400,409]
+    "errors": [400,409,500]
   },
   "offerRelayPair": {
     "method": "POST",

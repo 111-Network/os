@@ -1003,7 +1003,7 @@ export interface paths {
         delete?: never;
         options?: never;
         head?: never;
-        /** @description Partial merge of the Layer 7 settings (`state/relay.json`, §6.3). A consent gate (`carrier_enable` when a carrier is turned on or its metered cap set or raised, `gateway_bit`, `origin_serve`) answers 409 `consent_required` with `consent` {action, subject, warning_text, hash, addons}; the client shows `warning_text` verbatim and repeats the call with `accept_warning` = the hash; a changed text has a new hash, so a stale echo is refused again. A write of `presence.heartbeat` answers 409 `no_such_transport` (every transport in v1) or, for `rns`, 409 `settings_locked` whose `detail` names `PATCH /api/v1/bridge/settings` (§2.4); nothing is written. `gateway.enabled: true` on a node that is not a hub answers 409 `needs_hub`. The validator also answers `licensed_board` (a licensed board) and 400 `bad_request` (a phone category below 9 min). The agent's bearer is refused (401); the agent proposes (`kind: relay`). */
+        /** @description Partial merge of the Layer 7 settings (`state/relay.json`, §6.3). A consent gate (`carrier_enable` when a carrier is turned on or its server set, or any metered link's cap set or raised while it is on — its text names every metered link's match and cap, so lowering or removing caps asks nothing; `gateway_bit` when `discovery.public_gateway_bit` is turned on, or on any `discovery` write while it is on and its consent was recorded under another text; `origin_serve` likewise for `origin.serve` and the `origin` section) answers 409 `consent_required` with `consent` {action, subject, warning_text, hash, addons}; the client shows `warning_text` verbatim and repeats the call with `accept_warning` = the hash; a changed text has a new hash, so a stale echo is refused again. A write of `presence.heartbeat` answers 409 `no_such_transport` (every transport in v1) or, for `rns`, 409 `settings_locked` whose `detail` names `PATCH /api/v1/bridge/settings` (§2.4); nothing is written. `gateway.enabled: true` or `origin.serve: true` on a node that is not a hub answers 409 `needs_hub`; `origin.serve: true` with LAN sharing off answers 409 `lan_off`; an `origin.targets` list without this hub's own target answers 409 `bad_request` (the `detail` names it), and so does `carrier.mode` `5B` on a Termux hub. The validator also answers `licensed_board` (a licensed board) and 400 `bad_request` (a phone category below 9 min). The agent's bearer is refused (401); the agent proposes (`kind: relay`). */
         patch: operations["patchRelaySettings"];
         trace?: never;
     };
@@ -1777,12 +1777,12 @@ export interface components {
             listen_lan: boolean;
             /** @description an always-on laptop or a phone opts in to hold custody (Cat 4 hubs default on) */
             custody_opt_in: boolean;
-            /** @description capacity shaping per refusable stored-data class, in bytes: kb, update, patch, sync, object, custody, foreign (Layer 6: foreign-network rows, §3; messages and agent ops are never refused, §10.4, so they take no quota); null means no quota. Not a per-sender limit; those do not exist */
+            /** @description capacity shaping per refusable stored-data class, in bytes: kb, update, patch, sync, object, custody, foreign, transit (Layer 6: foreign-network rows, §3; messages and agent ops are never refused, §10.4, so they take no quota); null means no quota. Layer 7 (§5.8, §6.3) adds `transit`: a hub's forward rows for its paired hubs, apart from its members' `custody`; it always has a quota, so while the fabric runs it reads a number: unset, one quarter of the custody quota, else of the store's high watermark (128 MiB at the default), and each origin of forward rows holds at most one eighth of it (no key of its own). While the fabric is stopped `quotas` is empty (no class is read), and a class whose quota the store cannot read reads null. Not a per-sender limit; those do not exist */
             quotas: {
                 [key: string]: number | null;
             };
         };
-        /** @description Partial merge. In `quotas`, a class set to null drops its quota; only the refusable classes (kb, update, patch, sync, object, custody, foreign) take one — any other key is 400. */
+        /** @description Partial merge. In `quotas`, a class set to null drops its quota (`transit`, Layer 7 §5.8, then reads its derived default again: one quarter of the custody quota, else of the high watermark); only the refusable classes (kb, update, patch, sync, object, custody, foreign, transit) take one — any other key is 400. */
         FabricSettingsPatch: {
             hub_role?: boolean;
             listen_lan?: boolean;
@@ -3381,6 +3381,8 @@ export interface operations {
             404: components["responses"]["Problem"];
             /** @description already_decided; for kind message also bad_request (the recipient is not a contact, or is a pending message request) and restore_pending (the identity holder reports a restore floor, so nothing is sealed yet); Layer 6 adds consent_required (`consent` carries text + hash), oversize and component_unavailable (bridge kinds), unsupported_action (a `device` action outside the four applied and two one-shot actions) and not_supervised (`service.restart` on a child 111d does not supervise); Layer 7 adds, for a `relay` proposal, consent_required (`carrier_enable`, `gateway_bit`), unsupported_action (`presence.interval` in v1, or an action outside the vocabulary), needs_hub, no_such_transport, licensed_board and metered_cap — the proposal stays open */
             409: components["responses"]["Problem"];
+            /** @description internal: for a `relay` proposal, the `gateway.enable` settings were saved but the role bits are not announced yet (the own announce could not be re-minted); the proposal stays open and deciding it again retries the announce */
+            500: components["responses"]["Problem"];
             /** @description upstream_error: the agent wrote a kind outside the enum, or (kind message) a body that does not follow the `to:` contract or a node-id stamp that does not name this node */
             502: components["responses"]["Problem"];
         };
@@ -4658,8 +4660,10 @@ export interface operations {
                 };
             };
             400: components["responses"]["Problem"];
-            /** @description consent_required (`consent` carries the text and its hash), no_such_transport, settings_locked, needs_hub, licensed_board, bad_request */
+            /** @description consent_required (`consent` carries the text and its hash), no_such_transport, settings_locked, needs_hub (`gateway.enabled` or `origin.serve` on a node that is not a hub), lan_off (`origin.serve` with LAN sharing off), licensed_board, bad_request (an `origin.targets` list without this hub's own target, or `5B` on a Termux hub) */
             409: components["responses"]["Problem"];
+            /** @description internal: `state/relay.json` could not be written (nothing changed), or the settings were saved but the role bits are not announced yet (the own announce could not be re-minted; the fabric keeps the previous switches): the same request again retries the announce */
+            500: components["responses"]["Problem"];
         };
     };
     offerRelayPair: {

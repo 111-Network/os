@@ -922,6 +922,34 @@ covered_by = "l1.gate"
 strength = "I"
 needs = ["cargo"]
 
+# Row D10: the relay status, settings and consents through the real dashboard app (GET /relay, PATCH /relay/settings, POST
+# /relay/carrier/check and /flush, decideProposal for kind relay), nodes with the real identity handle and fabric on loopback:
+# RelayStatus with everything off and the rns row from Layer 6, the carrier_enable, gateway_bit and origin_serve round trips
+# (the copies verbatim, hashes recorded, a stale hash refused, a switch turned off asking again, two gates converging), the
+# secrets write-only (never in a GET, frame or problem), every heartbeat write 409 with nothing written, needs_hub and
+# lan_off, the lead's rulings (consent through PATCH alone, the own target kept, a private pair's tls), a metered cap set or
+# raised re-asking, check and flush refused in order then handed to the carrier hook, bearer 401, the relay proposals, the
+# relay frame (after a write, relay::changed() from any thread, a fabric event that moved the status; never a GET); the
+# review fixes: a failed role-bit re-mint retried by the same PATCH and by deciding the relay proposal again, every metered
+# link's cap in the carrier text (a second link or a non-max cap raised asks), a consent recorded under another text off
+# for bits 3 and 5 and asked on the next write to its section, quota.transit set and null restoring its derived quarter.
+# Both ends are real, so strength I.
+[[check]]
+id = "l1.node111.api_v1_relay7"
+kind = "unit"
+cmd = ["cargo", "test", "--manifest-path", "1-bootstrap/Cargo.toml", "-p", "node111", "--test", "api_v1_relay7"]
+tier = "slow"
+layers = [1, 4, 5, 7]
+seams = ["L1-L7:relay-state", "L4-L7:relay-api"]
+adapter = "libtest"
+cargo = true
+timeout_s = 1800
+rerun = "cargo test --manifest-path 1-bootstrap/Cargo.toml -p node111 --test api_v1_relay7 -- --exact {test}"
+rerun_cost = "slow, ~5 s warm"
+covered_by = "l1.gate"
+strength = "I"
+needs = ["cargo"]
+
 # Row D8: the Service Discovery Registry (§7.1, §7.6, §7.7). The `_n111._tcp` record's presence rule and TXT over real fabrics on
 # loopback with a recording daemon (never on Termux; an idle sync reads nothing; a refused register waits for an input change;
 # the shutdown goodbye withdraws a record a sync in flight registers), the record resolved between two real mdns-sd daemons

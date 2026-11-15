@@ -302,7 +302,8 @@ pub fn quota_classes() -> impl Iterator<Item = Class> {
 }
 
 /// A quota class by its contract key (`kb`, `update`, `patch`, `sync`,
-/// `object`, `custody`, `foreign`).
+/// `object`, `custody`, `foreign`, `transit`; `transit` set to `null`
+/// reads its derived default again, Layer 7 §5.8).
 pub fn quota_class(name: &str) -> Option<Class> {
     quota_classes().find(|c| c.name() == name)
 }

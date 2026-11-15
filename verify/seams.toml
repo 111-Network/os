@@ -522,7 +522,7 @@ gap = "Row D8 landed: the record, the browse and the lost-hub rehome run against
 
 [[seam]]
 id = "L1-L7:relay-state"
-status = "stub"
+status = "built"
 spec = ["7-relay/README.md §6.3"]
 a = { layer = 1, files = [
   "1-bootstrap/crates/node111/src/daemon/relay/settings.rs",
@@ -531,7 +531,7 @@ a = { layer = 1, files = [
 b = { layer = 7, files = ["1-bootstrap/crates/node111/src/daemon/dashboard/api_v1/relay7.rs"] }
 read_first = "a"
 symptom = "settings are lost or a secret leaks: the GET /relay shape"
-gap = "relay/settings.rs has 19 unit tests, but the /relay routes answer 404 until D10 and the link-key file is a stub."
+gap = "Row D10 landed: GET /relay and PATCH /relay/settings run on D1's settings cell, every consent round trip and refusal through the real router (tests/api_v1_relay7.rs); the link-key file is D5's. No two-host run yet (G9-G11 SKIPPED)."
 
 [[seam]]
 id = "L1-L8:state-service"
@@ -950,7 +950,7 @@ gap = ""
 
 [[seam]]
 id = "L4-L7:relay-api"
-status = "stub"
+status = "built"
 spec = ["7-relay/README.md §13", "4-interface/api/README.md"]
 a = { layer = 4, files = ["4-interface/ui/src/lib/api/relay.ts"] }
 b = { layer = 7, files = [
@@ -961,7 +961,7 @@ b = { layer = 7, files = [
 ] }
 read_first = "b"
 symptom = "Settings > Relay is dead: the routes answer 404; the layer7 tests run on the mock only"
-gap = "ui:layer7-contract uses hand fixtures 'not daemon output', and eight Layer 7 operations sit in dashboard_auth's UNROUTED list; relay_pair (row D6, landed) drives the three pair routes through the real dashboard app."
+gap = "Row D10 landed: the relay routes, the relay frame and the relay proposals answer the contract (tests/api_v1_relay7.rs, the dashboard_auth contract walk); the carrier check and flush answer through a no-op hook until row D11."
 
 [[seam]]
 id = "L4-L8:hub-content"

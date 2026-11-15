@@ -1406,12 +1406,7 @@ fn concrete(path: &str) -> String {
 /// bearer reaches nothing there either). The Layer 7 writes are in the contract ahead of
 /// their routes (`7-relay/TASKS.md` C1 before the D-rows): the row that routes one removes
 /// it from here, so the walk then holds it to the rule like every other write.
-const UNROUTED: &[&str] = &[
-    "flashDevice",
-    "patchRelaySettings",
-    "checkRelayCarrier",
-    "flushRelayCarrier",
-];
+const UNROUTED: &[&str] = &["flashDevice"];
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn the_agent_bearer_is_refused_on_every_write_of_the_contract() {
