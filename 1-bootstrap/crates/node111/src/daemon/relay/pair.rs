@@ -37,11 +37,23 @@
 //!   nothing is left recorded), then answers `202` while the attempt goes on for at most
 //!   [`PAIR_WINDOW`]: the far owner must pin this hub (scan its bundle) before a TLS dial is
 //!   admitted, so the dial retries with the adapter's back-off until then. A bundle with no
-//!   address and no connection yet waits for the far hub's own `ENROLL` to arrive here (a
-//!   `FabricEvent::Settings` naming it with `theirs`), then enrols on that connection. When the
+//!   address and no connection yet waits (row D6b) for an edge, never for a level: the far
+//!   record's `theirs` going from false to true (the far hub's own `ENROLL` landed here: a
+//!   `FabricEvent::Settings`), or, once `theirs` is held, a connection attributed to the far hub
+//!   coming up (`FabricEvent::Fabric`, which the fabric emits on a link-up and on a connection's
+//!   attribution; read back as `PairView::reachable`); and it runs `Fabric::pair` again only
+//!   when a sendable connection is there, so an unrelated settings change never takes the
+//!   fabric's single enrolment slot from another pairing or a member's enrolment. When the
 //!   window ends or the far hub refuses, the attempt is dropped (mesh111 releases its dial) and
 //!   this hub's half is forgotten unless the fabric holds a record for the hub. The fabric has
 //!   one enrolment slot: a newer pairing or enrolment supersedes an older one.
+//! - **What the scan refuses before anything moves** (row D6b): a re-scan of a hub whose attempt
+//!   is in flight replaces that attempt only once the new half is accepted
+//!   ([`FabricHandle::set_pair_link`]'s refusals run first), so a refused re-scan leaves the old
+//!   attempt, its half and its window-bound cleanup as they were; a bundle whose link key is this
+//!   hub's own, or a key already pinned for another hub, is `400` (two halves pinning one key make
+//!   `relay::tls::pinned_pair` name no pair, and the TLS server verifier would refuse the
+//!   legitimate one).
 //! - **Unpair** ([`unpair`], §13.1 `DELETE /relay/paired/{node_id}`): the attempt in flight for
 //!   the hub is dropped, `Fabric::unpair` drops the record and returns the forward rows held for it
 //!   to the other targets (M4's `drop_pair` → `fwd.orphan`), and the half and its pinned key go
@@ -53,7 +65,7 @@
 
 use crate::daemon::components::consent::{ConsentRequired, ProblemWith};
 use crate::daemon::dashboard::api_v1::Problem;
-use crate::daemon::fabric::settings::{dial_refusal, LinkSpki, PairLink};
+use crate::daemon::fabric::settings::{dial_refusal, LinkSpki, PairLink, PairTable};
 use crate::daemon::fabric::{self, json, FabricHandle};
 use crate::daemon::relay::linkkey::LinkKey;
 use crate::daemon::relay::tls::is_private;
@@ -691,8 +703,15 @@ pub async fn pair_within(
     } else {
         None
     };
-    // §4.2: this hub's link key exists before its first TLS handshake.
-    link_key(root.to_path_buf()).await?;
+    // §4.2: this hub's link key exists before its first TLS handshake. A bundle can carry it
+    // only if it existed before, so this mints nothing on that refusal.
+    let own_key = link_key(root.to_path_buf()).await?;
+    if bundle.link_spki.as_ref() == Some(own_key.spki()) {
+        return Err(bad_request(
+            "the bundle's link key is this hub's own: a hub never pins its own key for another",
+        )
+        .into());
+    }
     let tcp = pick.via == PairVia::Tcp;
     let link = PairLink {
         node_id: far,
@@ -713,14 +732,21 @@ pub async fn pair_within(
     };
     let (tx, rx) = oneshot::channel();
     {
+        // Under the registry lock every scan holds while it pins, so two scans never pin one key.
         let mut inflight = attempts.inflight.lock().await;
-        if let Some(old) = inflight.remove(&far) {
-            old.task.abort();
+        if let Some(why) = pinned_elsewhere(&h.pair_table(), &far, bundle.link_spki.as_ref()) {
+            return Err(bad_request(why).into());
         }
+        // Row D6b: the new half is accepted (or refused, leaving the attempt in flight and its
+        // half as they were) before the old attempt is dropped; its end_attempt then finds
+        // another id and leaves the new half alone.
         h.set_pair_link(link.clone()).await.map_err(|e| match e {
             FabricError::Invalid("pairing needs the hub role") => needs_hub(),
             e => fabric::problem(&e),
         })?;
+        if let Some(old) = inflight.remove(&far) {
+            old.task.abort();
+        }
         let id = attempts.next.fetch_add(1, Ordering::Relaxed);
         let task = tokio::spawn(run_attempt(
             Arc::clone(h),
@@ -761,13 +787,50 @@ pub async fn unpair(
 ) -> Result<(), Problem> {
     let f = h.fabric().ok_or_else(fabric::not_running)?;
     let mut inflight = attempts.inflight.lock().await;
+    // Dropped first, so the attempt cannot record its enrolment after the record is gone.
     if let Some(old) = inflight.remove(&far) {
         old.task.abort();
     }
-    f.unpair(far).await.map_err(|e| fabric::problem(&e))?;
+    if let Err(e) = f.unpair(far).await {
+        // Row D6b: the attempt is gone, so its end_attempt will not run: the same step here
+        // (the half goes unless the fabric still shows a record for the hub).
+        forget_unless_recorded(h, far).await;
+        return Err(fabric::problem(&e));
+    }
     h.forget_pair_link(&far).await;
     drop(inflight);
     Ok(())
+}
+
+/// Row D6b: why a half pinning `spki` for `far` would be refused: another hub's half in the pair
+/// `table` already pins that key (`relay::tls::pinned_pair` names a pair only when exactly one
+/// half pins its key).
+fn pinned_elsewhere(table: &PairTable, far: &NodeId, spki: Option<&LinkSpki>) -> Option<String> {
+    let spki = spki?;
+    let pairs = table.read().unwrap_or_else(|p| p.into_inner());
+    let other = pairs
+        .iter()
+        .find(|l| l.node_id != *far && l.link_spki.as_ref() == Some(spki))?;
+    Some(format!(
+        "the bundle's link key is already pinned for hub {}: one key names one hub",
+        NodeIdDisplay::new(other.node_id.as_bytes()).label()
+    ))
+}
+
+/// This hub's half of `far` goes unless the fabric records the hub (a read that fails counts as
+/// recorded: nothing is forgotten on what could not be seen).
+async fn forget_unless_recorded(h: &Arc<FabricHandle>, far: NodeId) {
+    let recorded = match h.fabric() {
+        Some(f) => f
+            .settings()
+            .await
+            .map(|s| s.paired_hubs.iter().any(|p| p.node_id == far))
+            .unwrap_or(true),
+        None => true,
+    };
+    if !recorded {
+        h.forget_pair_link(&far).await;
+    }
 }
 
 /// One attempt (module doc): `Fabric::pair` within the window; with no address to dial, wait
@@ -789,8 +852,13 @@ async fn run_attempt(
         return;
     };
     let deadline = tokio::time::Instant::now() + a.window;
-    // subscribed before the first try: the far hub's ENROLL may land between the two
+    // Subscribed before the first try (the far hub's ENROLL may land between the two), and the
+    // far record read right after: the edges are taken against it (row D6b).
     let mut events = a.address.is_none().then(|| f.subscribe());
+    let mut seen = match events {
+        Some(_) => far_seen(f, &a.far).await.unwrap_or_default(),
+        None => FarSeen::default(),
+    };
     let outcome = loop {
         let attempt = f.pair(a.address, &a.code, &a.card, a.role, a.via);
         match tokio::time::timeout_at(deadline, attempt).await {
@@ -802,7 +870,9 @@ async fn run_attempt(
                 let Some(rx) = events.as_mut() else {
                     break Err(None);
                 };
-                if !far_enrolled_here(f, rx, &a.far, deadline).await {
+                // no sendable connection at the try: a later one is an edge
+                seen.reachable = false;
+                if !far_ready(f, rx, &a.far, &mut seen, deadline).await {
                     break Err(None);
                 }
             }
@@ -847,27 +917,83 @@ async fn run_attempt(
     }
 }
 
-/// Wait (at most until `deadline`) for the far hub's `ENROLL` to be recorded here: a
-/// `Settings` event whose record of `far` has `theirs` (after a lag, the settings re-read).
-async fn far_enrolled_here(
+/// What a waiting attempt last saw of the far hub (row D6b): its record's `theirs` (the far
+/// hub's `ENROLL` landed here) and `reachable` (`PairView::reachable`: a connection attributed
+/// to it, which `Fabric::pair` can send its `ENROLL` on).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct FarSeen {
+    theirs: bool,
+    reachable: bool,
+}
+
+impl FarSeen {
+    /// The far hub as one status read shows it (no record: neither).
+    fn of(st: &mesh111::fabric::FabricStatus, far: &NodeId) -> FarSeen {
+        st.paired
+            .iter()
+            .find(|v| v.hub.node_id == *far)
+            .map_or_else(FarSeen::default, |v| FarSeen {
+                theirs: v.hub.theirs,
+                reachable: v.reachable,
+            })
+    }
+
+    /// Row D6b: `now` is an edge worth one more `Fabric::pair`: the far hub holds `theirs` and a
+    /// connection to it is up, and one of the two was not so when last seen.
+    fn edge(self, now: FarSeen) -> bool {
+        now.theirs && now.reachable && !(self.theirs && self.reachable)
+    }
+}
+
+/// [`FarSeen::of`] from a fresh `Fabric::status` read; `None` when the read fails.
+async fn far_seen(f: &mesh111::fabric::Fabric, far: &NodeId) -> Option<FarSeen> {
+    f.status().await.ok().map(|st| FarSeen::of(&st, far))
+}
+
+/// Wait (at most until `deadline`) until `Fabric::pair` can ride a connection to the far hub
+/// (module doc, row D6b): `FabricEvent::Settings` is read only for the edge of the far record's
+/// `theirs` (an unrelated settings change, whatever it holds, wakes nothing); while `theirs` is
+/// held, `FabricEvent::Fabric` (emitted on a link-up and on a connection's attribution) is read
+/// for a connection coming up. Either is then checked with one status read, and `true` is
+/// answered only on [`FarSeen::edge`]; after a lag the status is re-read the same way. `seen` is
+/// kept up to date.
+async fn far_ready(
     f: &mesh111::fabric::Fabric,
     rx: &mut broadcast::Receiver<FabricEvent>,
     far: &NodeId,
+    seen: &mut FarSeen,
     deadline: tokio::time::Instant,
 ) -> bool {
     let theirs = |s: &mesh111::fabric::FabricSettings| {
         s.paired_hubs.iter().any(|p| p.node_id == *far && p.theirs)
     };
     loop {
-        match tokio::time::timeout_at(deadline, rx.recv()).await {
+        let look = match tokio::time::timeout_at(deadline, rx.recv()).await {
             Err(_) | Ok(Err(broadcast::error::RecvError::Closed)) => return false,
-            Ok(Ok(FabricEvent::Settings(s))) if theirs(&s) => return true,
-            Ok(Ok(_)) => {}
-            Ok(Err(broadcast::error::RecvError::Lagged(_))) => {
-                if f.settings().await.is_ok_and(|s| theirs(&s)) {
-                    return true;
+            Ok(Ok(FabricEvent::Settings(s))) => {
+                let now = theirs(&s);
+                if now && !seen.theirs {
+                    true // the edge: the status read below takes `seen` along
+                } else {
+                    seen.theirs = now;
+                    seen.reachable &= now;
+                    false
                 }
             }
+            Ok(Ok(FabricEvent::Fabric)) => seen.theirs,
+            Ok(Ok(_)) => false,
+            Ok(Err(broadcast::error::RecvError::Lagged(_))) => true,
+        };
+        if !look {
+            continue;
+        }
+        let Some(now) = far_seen(f, far).await else {
+            continue;
+        };
+        let go = seen.edge(now);
+        *seen = now;
+        if go {
+            return true;
         }
     }
 }
@@ -887,19 +1013,8 @@ async fn end_attempt(
         return;
     }
     inflight.remove(&far);
-    if enrolled {
-        return;
-    }
-    let recorded = match h.fabric() {
-        Some(f) => f
-            .settings()
-            .await
-            .map(|s| s.paired_hubs.iter().any(|p| p.node_id == far))
-            .unwrap_or(true),
-        None => true,
-    };
-    if !recorded {
-        h.forget_pair_link(&far).await;
+    if !enrolled {
+        forget_unless_recorded(h, far).await;
     }
 }
 
@@ -1164,6 +1279,48 @@ mod tests {
         assert_eq!(v["pending"], 0);
         assert_eq!(v["reposts"], 0);
         assert_eq!(v["label"].as_str().unwrap().len(), "xxxx-xxxx-xx".len());
+    }
+
+    #[test]
+    fn a_waiting_attempt_runs_again_only_on_an_edge() {
+        let s = |theirs, reachable| FarSeen { theirs, reachable };
+        // theirs rising with a connection up, or a connection coming up once theirs is held
+        assert!(s(false, false).edge(s(true, true)));
+        assert!(s(true, false).edge(s(true, true)));
+        assert!(s(false, true).edge(s(true, true)));
+        // no edge: both held already (an unrelated change), or either one missing now
+        assert!(!s(true, true).edge(s(true, true)));
+        for prev in [
+            s(false, false),
+            s(true, false),
+            s(false, true),
+            s(true, true),
+        ] {
+            assert!(!prev.edge(s(true, false)));
+            assert!(!prev.edge(s(false, true)));
+            assert!(!prev.edge(s(false, false)));
+        }
+    }
+
+    #[test]
+    fn a_key_pinned_for_another_hub_is_refused() {
+        let (b, c) = (NodeId::from([0xb; 32]), NodeId::from([0xc; 32]));
+        let table: PairTable = Arc::new(std::sync::RwLock::new(vec![
+            PairLink {
+                link_spki: Some(spki(5)),
+                ..PairLink::new(c)
+            },
+            PairLink::new(NodeId::from([0xd; 32])),
+        ]));
+        let why = pinned_elsewhere(&table, &b, Some(&spki(5))).expect("refused");
+        assert!(
+            why.contains(&NodeIdDisplay::new(c.as_bytes()).label()),
+            "{why}"
+        );
+        // the hub's own half, another key, or no key: nothing to refuse
+        assert_eq!(pinned_elsewhere(&table, &c, Some(&spki(5))), None);
+        assert_eq!(pinned_elsewhere(&table, &b, Some(&spki(6))), None);
+        assert_eq!(pinned_elsewhere(&table, &b, None), None);
     }
 
     #[test]

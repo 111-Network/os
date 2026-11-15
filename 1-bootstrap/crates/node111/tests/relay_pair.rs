@@ -15,7 +15,10 @@
 //!   is refused until the other has pinned it, both `ENROLL`s land, both records are whole, the
 //!   row reaches `fabric/settings`; then unpaired, idempotently;
 //! - `111 fabric pair --show` and `111 fabric pair <bundle> [--lan]` with the warning asked;
-//! - a pin added or removed is seen by the next handshake while the TLS state stays cached.
+//! - a pin added or removed is seen by the next handshake while the TLS state stays cached;
+//! - row D6b: a waiting attempt runs again only on an edge with a connection; a refused re-scan
+//!   leaves the attempt in flight and its cleanup; a bundle with this hub's own key or another
+//!   hub's pin is refused.
 
 use axum::extract::connect_info::MockConnectInfo;
 use id111::keyset::NodeId;
@@ -568,6 +571,16 @@ fn rewritten(bundle: &str, address: &str, keep_key: bool) -> String {
     .text()
 }
 
+/// `bundle` with its address field empty (the scanning hub has nothing to dial: it waits for
+/// the far hub's connection).
+fn addressless(bundle: &str) -> String {
+    PairBundle {
+        address: None,
+        ..PairBundle::parse(bundle).unwrap()
+    }
+    .text()
+}
+
 // ---------------------------------------------------------------- tests
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -1029,6 +1042,269 @@ async fn an_attempt_nobody_answers_ends_with_its_window_and_leaves_nothing() {
     assert!(a.link(&b.id).is_none());
     assert!(a.records().await.is_empty());
     assert!(!attempts.in_flight(&b.id).await);
+}
+
+/// Row D6b finding 1. A no-address attempt waits for an edge: with the far record's `theirs`
+/// already held and the far hub's connection down, an unrelated settings change runs
+/// `Fabric::pair` zero times (a member enrolment in flight is not superseded: each run would take
+/// the fabric's single enrolment slot); the far hub's connection coming up attributed (the
+/// `FabricEvent::Fabric` edge) runs it once, riding that connection.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_waiting_attempt_runs_again_only_on_an_edge_with_a_connection() {
+    use mesh111::fabric::{FabricEvent, SettingsPatch};
+    use node111::daemon::relay::pair::{pair_within, PairAttempts, PairPick};
+    let a = node(true).await;
+    let b = node(true).await;
+    let c = node(false).await;
+    let fa = a.fabric.fabric().unwrap().clone();
+    let attempts = Arc::new(PairAttempts::default());
+    let no_address = |bundle: &str| PairPick {
+        bundle: addressless(bundle),
+        role: PairRole::Peer,
+        via: PairVia::Tcp,
+        lan: false,
+        accept_warning: None,
+    };
+    let window = Duration::from_secs(120);
+    // 1. a pins b (b's bundle without its address: the attempt waits); b's offer is then
+    //    dismissed, so a's ENROLL is refused once b's lands here: a holds `theirs` for b, half
+    let r = pair_within(
+        &a.fabric,
+        &attempts,
+        &a.layout.root,
+        no_address(&b.offer("peer", "tcp")),
+        window,
+    )
+    .await;
+    assert!(r.is_ok(), "{r:?}");
+    assert!(attempts.in_flight(&b.id).await);
+    assert_eq!(b.delete("/api/v1/fabric/hub/offer").status, 204);
+    let r = b.pair(json!({"bundle": a.offer("peer", "tcp"), "role": "peer", "via": "tcp"}));
+    assert_eq!(r.status, 202, "{}", r.body);
+    until(30, "a holds theirs for b, its attempt refused", || async {
+        let half = a
+            .records()
+            .await
+            .iter()
+            .any(|p| p.node_id == b.id && p.theirs && !p.ours);
+        let ours = b
+            .records()
+            .await
+            .iter()
+            .any(|p| p.node_id == a.id && p.ours);
+        (half && ours && !attempts.in_flight(&b.id).await).then_some(())
+    })
+    .await;
+    assert!(a.link(&b.id).is_some(), "a recorded pair keeps its half");
+    // 2. b drops its side: its dial is released and the connection goes
+    assert_eq!(b.unpair(&a.id).status, 204);
+    until(15, "no connection between a and b", || async {
+        (a.fabric.tcp().unwrap().connection_count() == 0).then_some(())
+    })
+    .await;
+    // 3. a scans a fresh bundle of b, again without its address: `theirs` is held, no
+    //    connection: the attempt waits
+    let r = pair_within(
+        &a.fabric,
+        &attempts,
+        &a.layout.root,
+        no_address(&b.offer("peer", "tcp")),
+        window,
+    )
+    .await;
+    assert!(r.is_ok(), "{r:?}");
+    assert!(attempts.in_flight(&b.id).await);
+    // 4. a member enrolment in flight on a (at an address nobody answers)
+    let card_c = c.get("/api/v1/contacts/me/card").json()["text"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let fe = fa.clone();
+    let member = tokio::spawn(async move {
+        fe.enroll(
+            "192.0.2.9:11183".parse().unwrap(),
+            "BCDF2345",
+            Some(&card_c),
+        )
+        .await
+    });
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(!member.is_finished(), "the member enrolment is in flight");
+    // 5. an unrelated settings change: the attempt runs nothing, the enrolment stays
+    let mut events = fa.subscribe();
+    fa.patch_settings(SettingsPatch {
+        request_quota: Some(Some(77)),
+        ..SettingsPatch::default()
+    })
+    .await
+    .unwrap();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if let Ok(FabricEvent::Settings(s)) = events.recv().await {
+                assert!(s.paired_hubs.iter().any(|p| p.node_id == b.id && p.theirs));
+                break;
+            }
+        }
+    })
+    .await
+    .expect("the settings event");
+    tokio::time::sleep(Duration::from_millis(800)).await;
+    assert!(
+        !member.is_finished(),
+        "an unrelated settings event superseded the member's enrolment: {:?}",
+        member.await
+    );
+    assert!(attempts.in_flight(&b.id).await);
+    member.abort();
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    // 6. b scans a again and dials it: the connection comes up attributed, the waiting attempt
+    //    runs once and rides it; both sides whole
+    let r = b.pair(json!({"bundle": a.offer("peer", "tcp"), "role": "peer", "via": "tcp"}));
+    assert_eq!(r.status, 202, "{}", r.body);
+    let whole =
+        |recs: Vec<PairedHub>, far: NodeId| recs.iter().any(|p| p.node_id == far && p.whole());
+    until(30, "both pairs whole after the connection edge", || async {
+        (whole(a.records().await, b.id) && whole(b.records().await, a.id)).then_some(())
+    })
+    .await;
+    until(10, "a's attempt ended", || async {
+        (!attempts.in_flight(&b.id).await).then_some(())
+    })
+    .await;
+    use node111::daemon::relay::pair::unpair;
+    unpair(&a.fabric, &attempts, b.id).await.unwrap();
+    assert_eq!(b.unpair(&a.id).status, 204);
+}
+
+/// Row D6b finding 2. A re-scan that `set_pair_link` refuses (its address is another pair's)
+/// leaves the attempt in flight, its half and its window-bound cleanup as they were. (The first
+/// attempt has no address, so it waits without the fabric's enrolment slot, which the second
+/// hub's attempt takes.)
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_refused_rescan_leaves_the_attempt_and_its_cleanup() {
+    use node111::daemon::relay::pair::{pair_within, unpair, PairAttempts, PairPick, PairRefusal};
+    let a = node(true).await;
+    let b = node(true).await;
+    let c = node(true).await;
+    let attempts = Arc::new(PairAttempts::default());
+    let pick = |bundle: String| PairPick {
+        bundle,
+        role: PairRole::Peer,
+        via: PairVia::Tcp,
+        lan: true,
+        accept_warning: None,
+    };
+    let shown_b = b.offer("peer", "tcp");
+    // b with no address and no connection: the attempt waits out its window
+    let r = pair_within(
+        &a.fabric,
+        &attempts,
+        &a.layout.root,
+        pick(addressless(&shown_b)),
+        Duration::from_secs(8),
+    )
+    .await;
+    assert!(r.is_ok(), "{r:?}");
+    // c at an address nobody answers
+    let r = pair_within(
+        &a.fabric,
+        &attempts,
+        &a.layout.root,
+        pick(rewritten(&c.offer("peer", "tcp"), "192.0.2.8:11183", true)),
+        Duration::from_secs(120),
+    )
+    .await;
+    assert!(r.is_ok(), "{r:?}");
+    assert!(attempts.in_flight(&b.id).await);
+    // b again, at c's address: refused (another pair uses it)
+    match pair_within(
+        &a.fabric,
+        &attempts,
+        &a.layout.root,
+        pick(rewritten(&shown_b, "192.0.2.8:11183", true)),
+        Duration::from_secs(120),
+    )
+    .await
+    {
+        Err(PairRefusal::Problem(p)) => assert_eq!((p.status, p.code), (400, "bad_request")),
+        other => panic!("{other:?}"),
+    }
+    // the attempt and its half are untouched
+    assert!(attempts.in_flight(&b.id).await, "the old attempt runs on");
+    let half = a.link(&b.id).expect("b's half is kept");
+    assert_eq!(half.address, None);
+    assert_eq!(
+        half.link_spki,
+        PairBundle::parse(&shown_b).unwrap().link_spki
+    );
+    // and its window still ends it: the half goes, the fabric recording nothing for b
+    until(20, "b's half forgotten with its window", || async {
+        (a.link(&b.id).is_none() && !attempts.in_flight(&b.id).await).then_some(())
+    })
+    .await;
+    assert!(a.records().await.is_empty());
+    assert!(a.link(&c.id).is_some());
+    unpair(&a.fabric, &attempts, c.id).await.unwrap();
+    assert!(a.table().is_empty());
+}
+
+/// Row D6b finding 3. A bundle whose link key is this hub's own, or a key already pinned for
+/// another hub, is `400` and pins nothing: two halves pinning one key make
+/// `tls::pinned_pair` name no pair, and the legitimate pair's inbound TLS would be refused. (c's
+/// bundle has no address, so its attempt waits without the enrolment slot b's then takes.)
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_bundle_with_this_hubs_key_or_another_hubs_pin_is_refused() {
+    let a = node(true).await;
+    let b = node(true).await;
+    let c = node(true).await;
+    let own = PairBundle::parse(&a.offer("peer", "tcp"))
+        .unwrap()
+        .link_spki
+        .unwrap();
+    let shown_b =
+        PairBundle::parse(&rewritten(&b.offer("peer", "tcp"), "192.0.2.7:11183", true)).unwrap();
+    let with_key = |k: LinkSpki| {
+        PairBundle {
+            link_spki: Some(k),
+            ..shown_b.clone()
+        }
+        .text()
+    };
+    // this hub's own key
+    a.pair(json!({"bundle": with_key(own), "role": "peer", "via": "tcp"}))
+        .problem(400, "bad_request");
+    assert!(a.table().is_empty());
+    // c pinned; then b's bundle carrying c's key
+    let shown_c = addressless(&c.offer("peer", "tcp"));
+    let key_c = PairBundle::parse(&shown_c).unwrap().link_spki.unwrap();
+    let r = a.pair(json!({"bundle": shown_c, "role": "peer", "via": "tcp"}));
+    assert_eq!(r.status, 202, "{}", r.body);
+    let r = a.pair(json!({"bundle": with_key(key_c), "role": "peer", "via": "tcp"}));
+    r.problem(400, "bad_request");
+    assert!(r.json()["detail"]
+        .as_str()
+        .unwrap()
+        .contains("already pinned"));
+    assert!(a.link(&b.id).is_none());
+    assert_eq!(
+        tls::pinned_pair(&a.table(), key_c.as_der().as_slice()),
+        Some(c.id)
+    );
+    // b's own key pairs, and each key names its one hub
+    let r = a.pair(json!({"bundle": shown_b.text(), "role": "peer", "via": "tcp"}));
+    assert_eq!(r.status, 202, "{}", r.body);
+    let key_b = shown_b.link_spki.unwrap();
+    assert_eq!(
+        tls::pinned_pair(&a.table(), key_b.as_der().as_slice()),
+        Some(b.id)
+    );
+    assert_eq!(
+        tls::pinned_pair(&a.table(), key_c.as_der().as_slice()),
+        Some(c.id)
+    );
+    assert_eq!(a.unpair(&b.id).status, 204);
+    assert_eq!(a.unpair(&c.id).status, 204);
+    assert!(a.table().is_empty());
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
