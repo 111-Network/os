@@ -47,6 +47,16 @@
 //!   [`TimedRunner`], which kills an rnstatus that runs past
 //!   [`RNSTATUS_TIMEOUT`] and caps its output at [`MAX_OUTPUT`] before any
 //!   parse.
+//! - **Hops (Layer 7 `os/7-relay/README.md` §10.1 rule 1, §13.1; I6).**
+//!   [`Rnstatus::path_table`] runs one read-only `rnpath --config <root>/rns
+//!   -t -j` (`<root>/venvs/rns/bin/rnpath`, [`rnpath_program`]) through the
+//!   same runner, so the same timeout and output cap, behind the same owner
+//!   gate (no spawn unless the supervised rnsd holds the instance). Only a
+//!   human's `POST /api/v1/nearby/hops` calls it, never a GET and never a
+//!   tick. Its JSON is untrusted ([`parse_path_table`]: size first, then a
+//!   bounded walk; a destination is 32 lowercase hex, a hop count a byte;
+//!   *unverified*: the shape the RNS source prints, `[{"hash", "hops", "via",
+//!   "interface", "timestamp", "expires"}, …]`, not captured from a run).
 
 use crate::daemon::devices::clean;
 use crate::util::run::{Output, Runner};
@@ -63,6 +73,13 @@ pub const RNSTATUS_TIMEOUT: Duration = Duration::from_secs(10);
 pub const MAX_OUTPUT: usize = 256 * 1024;
 /// Most interfaces kept from one reading.
 pub const MAX_FACTS: usize = 64;
+/// Most path-table entries looked at from one `rnpath -t -j` (Layer 7 §10.1 rule 1).
+pub const MAX_PATHS: usize = 4096;
+/// Highest hop count taken (`NearbyNode.hops_away` is a byte; RNS caps a path at 128 hops).
+pub const MAX_HOPS: u64 = 255;
+
+/// A path table as hop counts: destination hash (32 lowercase hex) → the fewest hops listed.
+pub type PathHops = std::collections::BTreeMap<String, u8>;
 
 /// One rnsd interface (contract `TransportInterface`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -94,6 +111,9 @@ pub enum RnstatusError {
     /// Not run (FA1): the shared instance is not (yet) held by the
     /// supervised rnsd, so an rnstatus started now could take it over.
     NotOwned(String),
+    /// It ran, but its output is not the shape this reads (Layer 7: the
+    /// `rnpath -t -j` path table); nothing of it is taken.
+    Unparsed(&'static str),
 }
 
 impl std::fmt::Display for RnstatusError {
@@ -106,6 +126,7 @@ impl std::fmt::Display for RnstatusError {
                 write!(f, "rnstatus exited {status}: {detail}")
             }
             RnstatusError::NotOwned(why) => write!(f, "rnstatus not run: {why}"),
+            RnstatusError::Unparsed(what) => write!(f, "{what} did not parse"),
         }
     }
 }
@@ -120,6 +141,8 @@ pub type PidSource = Arc<dyn Fn() -> Option<u32> + Send + Sync>;
 pub struct Rnstatus {
     runner: Arc<dyn Runner>,
     program: String,
+    /// `<root>/venvs/rns/bin/rnpath` (Layer 7 §10.1 rule 1).
+    rnpath: String,
     config_dir: String,
     root: PathBuf,
     /// The rendered config's `share_instance` (set by the spine on every
@@ -137,6 +160,7 @@ impl Rnstatus {
         Rnstatus {
             runner,
             program: program(root).to_string_lossy().into_owned(),
+            rnpath: rnpath_program(root).to_string_lossy().into_owned(),
             config_dir: root.join("rns").to_string_lossy().into_owned(),
             root: root.to_path_buf(),
             shared: AtomicBool::new(true),
@@ -242,11 +266,77 @@ impl Rnstatus {
         }
         Ok(parse_text(&out.stdout))
     }
+
+    /// The path table's hop counts (Layer 7 §10.1 rule 1; blocking): one `rnpath --config
+    /// <root>/rns -t -j` through this runner (its timeout and output cap) behind the owner gate
+    /// ([`RnstatusError::NotOwned`] without spawning anything), parsed as untrusted JSON
+    /// ([`parse_path_table`]). Only the human's `POST /api/v1/nearby/hops` calls it.
+    pub fn path_table(&self) -> Result<PathHops, RnstatusError> {
+        self.gate()?;
+        let out = self
+            .runner
+            .run(&self.rnpath, &["--config", &self.config_dir, "-t", "-j"])
+            .map_err(|e| RnstatusError::Spawn(detail(&format!("{e:#}"))))?;
+        if no_instance(&out.stdout) || no_instance(&out.stderr) {
+            return Err(RnstatusError::NoInstance);
+        }
+        if !out.ok() {
+            return Err(RnstatusError::Exit {
+                status: out.status,
+                detail: detail(&format!("{}\n{}", out.stdout, out.stderr)),
+            });
+        }
+        parse_path_table(&out.stdout).ok_or(RnstatusError::Unparsed("the rnpath path table"))
+    }
 }
 
 /// `<root>/venvs/rns/bin/rnstatus`.
 pub fn program(root: &Path) -> PathBuf {
     root.join("venvs/rns/bin/rnstatus")
+}
+
+/// `<root>/venvs/rns/bin/rnpath` (Layer 7 §10.1 rule 1).
+pub fn rnpath_program(root: &Path) -> PathBuf {
+    root.join("venvs/rns/bin/rnpath")
+}
+
+fn is_dest_hex(s: &str) -> bool {
+    s.len() == 32 && s.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+}
+
+/// Parse `rnpath -t -j` (Layer 7 §10.1 rule 1; untrusted, *unverified*: the shape the RNS source
+/// prints, a JSON array of `{"hash", "timestamp", "via", "hops", "expires", "interface"}` with
+/// the bytes as lowercase hex). The size is checked before the parse; at most [`MAX_PATHS`]
+/// entries are looked at; an entry whose `hash` is not 32 lowercase hex or whose `hops` is not an
+/// integer in `0..=`[`MAX_HOPS`] is skipped; a destination listed twice (two interfaces) keeps the
+/// fewest hops. `None`: not a JSON array (nothing is taken).
+pub fn parse_path_table(text: &str) -> Option<PathHops> {
+    if text.len() > MAX_OUTPUT {
+        return None;
+    }
+    let v: serde_json::Value = serde_json::from_str(text.trim()).ok()?;
+    let mut out = PathHops::new();
+    for e in v.as_array()?.iter().take(MAX_PATHS) {
+        let Some(hash) = e
+            .get("hash")
+            .and_then(serde_json::Value::as_str)
+            .filter(|h| is_dest_hex(h))
+        else {
+            continue;
+        };
+        let Some(hops) = e
+            .get("hops")
+            .and_then(serde_json::Value::as_u64)
+            .filter(|h| *h <= MAX_HOPS)
+            .and_then(|h| u8::try_from(h).ok())
+        else {
+            continue;
+        };
+        out.entry(hash.to_string())
+            .and_modify(|h| *h = (*h).min(hops))
+            .or_insert(hops);
+    }
+    Some(out)
 }
 
 fn no_instance(text: &str) -> bool {

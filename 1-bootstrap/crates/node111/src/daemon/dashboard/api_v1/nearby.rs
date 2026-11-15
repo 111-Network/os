@@ -1,5 +1,7 @@
 //! `GET /api/v1/nearby` — presence per source (Layer 5 §14 "Nearby", §15;
-//! contract `listNearby`). Two kinds of source:
+//! contract `listNearby`) — and `POST /api/v1/nearby/hops` (Layer 7
+//! `os/7-relay/README.md` §10.1 rule 1, §13.1; contract `runNearbyHops`).
+//! Three kinds of source:
 //!
 //! - `meshtastic`: the bound Meshtastic board's node DB, as validated by
 //!   `daemon::meshtastic::presence` (or the bridge client's node DB), grouped
@@ -12,7 +14,27 @@
 //!   forgotten), merged per source; no timer, no poll — `GET` reads what is
 //!   there, and a change publishes the SSE `nearby` frame (`{sources}`, the
 //!   merged list, the frame the Meshtastic module publishes on its changes).
-//!   A disabled adapter's source is cleared ([`BridgeNearby::clear`]).
+//!   A disabled adapter's source is cleared ([`BridgeNearby::clear`]). Its
+//!   `hops_away` comes only from a human's hop read (below) and stays with
+//!   the node when the node is heard again;
+//! - `111` (Layer 7 §2.3): "111 nodes heard by this node", built by
+//!   `relay::presence` from the fabric's events (its own path: no adapter can
+//!   push it, [`BridgeNearby::push`] drops it), listed last whenever presence
+//!   is installed (empty until a fact). Its rows' `id` is the 64-hex NodeId
+//!   presence writes from a NodeId; nothing foreign is parsed for it, so the
+//!   32-hex check of the `reticulum` ids stays theirs alone.
+//!
+//! **The hop read (§10.1 rule 1; I6).** `POST /nearby/hops` (a human: the
+//! global write gate refuses the agent's bearer, 401) runs one read-only
+//! `rnpath -t -j` through the `rnstatus` runner, its timeout and its owner
+//! guard ([`Rnstatus::path_table`]), off the request path; the hop counts
+//! land in `hops_away` of the `reticulum` source only and go out on the
+//! `nearby` frame. `202 RelayAccepted` once started; `409
+//! component_unavailable` while the Reticulum component (the LXMF helper, the
+//! source's only producer) is off, the transport spine is absent, or the
+//! supervised rnsd does not hold the shared instance (nothing spawned); `429
+//! rate_limited` within [`HOPS_MIN_INTERVAL`] of the last run. A `GET` never
+//! spawns anything.
 //!
 //! Every node string is an **untrusted RF-origin value** (the contract's
 //! `NearbyNode` description says so): re-validated here whatever the adapter
@@ -24,18 +46,23 @@
 //! has produced a node DB, and with no LXMF heard, the list is empty — no
 //! fake peers.
 
-use super::{ApiRouter, ApiState};
-use crate::daemon::bridge::{NearbySink, NETWORK_111, NETWORK_LXMF};
+use super::transport::TransportApi;
+use super::{ApiRouter, ApiState, Problem};
+use crate::daemon::bridge::{Bridge, NearbySink, NETWORK_111, NETWORK_LXMF};
 use crate::daemon::meshtastic::presence::{sanitize_name, NearbyNode, NearbySource};
 use crate::daemon::meshtastic::Meshtastic;
+use crate::daemon::relay::presence::Presence;
+use crate::daemon::transport::rnstatus::{PathHops, Rnstatus, RnstatusError};
 use axum::extract::State;
+use axum::http::{header, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
-use axum::routing::get;
+use axum::routing::{get, post};
 use axum::Json;
 use serde_json::Value;
 use std::collections::{BTreeMap, VecDeque};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, Weak};
+use std::time::{Duration, Instant};
 
 /// Nodes kept per bridge source (the oldest heard is forgotten first).
 pub const MAX_BRIDGE_NODES: usize = 512;
@@ -49,6 +76,8 @@ const MAX_RAW_NAME: usize = 1024;
 pub const MAX_BRIDGE_SOURCES: usize = 8;
 /// The `reticulum` source's heading.
 pub const RETICULUM_LABEL: &str = "heard via Reticulum";
+/// `POST /nearby/hops` answers `429 rate_limited` within this long of the last run (§13.1).
+pub const HOPS_MIN_INTERVAL: Duration = Duration::from_secs(30);
 
 /// `NearbyNode.evidence[].transport` (Layer 7 `7-relay/README.md` §2.3, contract `NearbyEvidenceTransport`): the closed set a `111` row's
 /// evidence may name. `tcp-lan` is a connection attributed to the peer (also the home hub's row and a `tcp` pair's row), `hub` a contact
@@ -80,6 +109,8 @@ struct BridgeSource {
 pub struct BridgeNearby {
     sources: Mutex<BTreeMap<String, BridgeSource>>,
     version: AtomicU64,
+    /// When the last hop read started (`POST /nearby/hops`, §13.1): the 30 s window.
+    hops_run: Mutex<Option<Instant>>,
 }
 
 impl BridgeNearby {
@@ -127,10 +158,12 @@ impl BridgeNearby {
             nodes: VecDeque::new(),
         });
         let mut changed = false;
-        for n in nodes {
+        for mut n in nodes {
             match src.nodes.iter().position(|x| x.id == n.id) {
                 Some(i) => {
                     let old = src.nodes.remove(i);
+                    // the hop count is the human's last read (§10.1), never the adapter's
+                    n.hops_away = old.as_ref().and_then(|o| o.hops_away);
                     changed |= old.as_ref() != Some(&n);
                 }
                 None => changed = true,
@@ -162,6 +195,47 @@ impl BridgeNearby {
     /// Bumped on every change (tests; a reader that caches).
     pub fn version(&self) -> u64 {
         self.version.load(Ordering::SeqCst)
+    }
+
+    /// One hop read's result (§10.1 rule 1): every `reticulum` node's `hops_away` becomes its
+    /// count in `table`, or unknown when the table does not list it (the read replaces the last
+    /// one). Only the `reticulum` sources are touched; no node is added. Returns whether what
+    /// `GET /nearby` shows changed.
+    pub fn set_hops(&self, table: &PathHops) -> bool {
+        let mut all = self.lock();
+        let mut changed = false;
+        for src in all.values_mut().filter(|s| s.network == NETWORK_LXMF) {
+            for n in src.nodes.iter_mut() {
+                let hops = table.get(&n.id).copied();
+                if n.hops_away != hops {
+                    n.hops_away = hops;
+                    changed = true;
+                }
+            }
+        }
+        if changed {
+            self.version.fetch_add(1, Ordering::SeqCst);
+        }
+        changed
+    }
+
+    /// Reserve a hop read at `now`: `Err(retry_after_s)` within [`HOPS_MIN_INTERVAL`] of the last
+    /// one; `Ok(previous)` holds what [`BridgeNearby::cancel_hops`] restores when nothing ran.
+    fn begin_hops(&self, now: Instant) -> Result<Option<Instant>, u64> {
+        let mut last = self.hops_run.lock().unwrap_or_else(|p| p.into_inner());
+        if let Some(t) = *last {
+            let since = now.saturating_duration_since(t);
+            if since < HOPS_MIN_INTERVAL {
+                let left = HOPS_MIN_INTERVAL - since;
+                return Err(left.as_secs() + u64::from(left.subsec_nanos() > 0));
+            }
+        }
+        Ok(last.replace(now))
+    }
+
+    /// Undo a reservation that spawned nothing (the owner gate refused).
+    fn cancel_hops(&self, previous: Option<Instant>) {
+        *self.hops_run.lock().unwrap_or_else(|p| p.into_inner()) = previous;
     }
 
     /// The sources, by id; each source's nodes most recently heard first.
@@ -208,14 +282,22 @@ fn reticulum_node(v: &Value) -> Option<NearbyNode> {
     })
 }
 
-/// Every source `GET /nearby` lists: the Meshtastic module's, then the bridge's.
-pub fn sources(api: &ApiState) -> Vec<NearbySource> {
-    let mut out = api
+/// Every source `GET /nearby` lists: the Meshtastic module's, then the bridge's, then the `111`
+/// source while presence is installed (Layer 7 §2.3).
+pub fn sources(api: &ApiState) -> Vec<Value> {
+    let mut out: Vec<NearbySource> = api
         .ext::<Arc<Meshtastic>>()
         .map(|m| m.nearby_sources())
         .unwrap_or_default();
     if let Some(b) = api.ext::<Arc<BridgeNearby>>() {
         out.extend(b.sources());
+    }
+    let mut out: Vec<Value> = out
+        .iter()
+        .filter_map(|s| serde_json::to_value(s).ok())
+        .collect();
+    if let Some(p) = api.ext::<Arc<Presence>>() {
+        out.push(p.source_now());
     }
     out
 }
@@ -243,8 +325,135 @@ async fn list(State(api): State<Arc<ApiState>>) -> Response {
     Json(serde_json::json!({ "schema": 1, "sources": sources(&api) })).into_response()
 }
 
+/// `409 component_unavailable` for the hop read (module doc); nothing was spawned.
+fn hops_unavailable(detail: &str) -> Problem {
+    Problem::new(
+        StatusCode::CONFLICT,
+        "component_unavailable",
+        "Reticulum hop counts are not available now.",
+    )
+    .detail(detail.to_string())
+}
+
+/// Why the hop read was not started (module doc).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HopsRefusal {
+    /// `409 component_unavailable`, with a plain detail.
+    Unavailable(&'static str),
+    /// `429 rate_limited`, with the seconds left.
+    RateLimited(u64),
+}
+
+impl IntoResponse for HopsRefusal {
+    fn into_response(self) -> Response {
+        match self {
+            HopsRefusal::Unavailable(why) => hops_unavailable(why).into_response(),
+            HopsRefusal::RateLimited(left) => {
+                let mut resp = Problem::new(
+                    StatusCode::TOO_MANY_REQUESTS,
+                    "rate_limited",
+                    "Hop counts were read less than 30 seconds ago.",
+                )
+                .detail(format!("Wait {left} s before reading them again."))
+                .into_response();
+                resp.headers_mut()
+                    .insert(header::RETRY_AFTER, HeaderValue::from(left));
+                resp
+            }
+        }
+    }
+}
+
+/// Start one hop read (§10.1 rule 1): the component checks, the 30 s window, the owner gate
+/// (before anything is spawned; a refusal there releases the window), then ONE blocking task that
+/// runs `rnpath -t -j`, writes the counts into `heard` and, on a change, publishes the `nearby`
+/// frame through `publish` (the daemon's: [`publish`] on the API state, held weakly). The
+/// returned handle answers whether the read changed what `GET /nearby` shows (tests await it).
+pub async fn start_hops(
+    lxmf_enabled: bool,
+    rn: Option<Arc<Rnstatus>>,
+    heard: Option<Arc<BridgeNearby>>,
+    publish: impl Fn() + Send + 'static,
+) -> Result<tokio::task::JoinHandle<bool>, HopsRefusal> {
+    if !lxmf_enabled {
+        return Err(HopsRefusal::Unavailable(
+            "The Reticulum component (the LXMF helper) is off.",
+        ));
+    }
+    let (Some(rn), Some(heard)) = (rn, heard) else {
+        return Err(HopsRefusal::Unavailable(
+            "The Reticulum transport is not running on this node.",
+        ));
+    };
+    let previous = heard
+        .begin_hops(Instant::now())
+        .map_err(HopsRefusal::RateLimited)?;
+    let gate = {
+        let rn = Arc::clone(&rn);
+        tokio::task::spawn_blocking(move || rn.gate()).await
+    };
+    if !matches!(gate, Ok(Ok(()))) {
+        heard.cancel_hops(previous);
+        return Err(HopsRefusal::Unavailable(
+            "The supervised rnsd does not hold the shared Reticulum instance.",
+        ));
+    }
+    Ok(tokio::task::spawn_blocking(move || match rn.path_table() {
+        Ok(table) => {
+            let changed = heard.set_hops(&table);
+            if changed {
+                publish();
+            }
+            changed
+        }
+        Err(e) => {
+            // a fixed line: nothing rnpath printed reaches the log
+            let why = match e {
+                RnstatusError::Exit { status, .. } => format!("rnpath exited {status}"),
+                RnstatusError::Spawn(_) => {
+                    "rnpath did not run or was stopped at the timeout".into()
+                }
+                RnstatusError::NotOwned(_) => {
+                    "the supervised rnsd no longer holds the instance".into()
+                }
+                RnstatusError::NoInstance | RnstatusError::NotFound(_) => {
+                    "no shared rnsd instance answered".into()
+                }
+                RnstatusError::Unparsed(_) => "the path table did not parse".into(),
+            };
+            eprintln!("111 nearby: the hop read failed: {why}");
+            false
+        }
+    }))
+}
+
+/// `POST /api/v1/nearby/hops` (module doc): a human's; `202 RelayAccepted` once started.
+async fn hops(State(api): State<Arc<ApiState>>) -> Response {
+    let lxmf_enabled = api
+        .ext::<Arc<Bridge>>()
+        .is_some_and(|b| b.enabled().iter().any(|n| n == NETWORK_LXMF));
+    let rn = api.ext::<Arc<TransportApi>>().map(|t| t.spine.rnstatus());
+    let heard = api.ext::<Arc<BridgeNearby>>();
+    let weak: Weak<ApiState> = Arc::downgrade(&api);
+    let publish_frame = move || {
+        if let Some(api) = weak.upgrade() {
+            publish(&api);
+        }
+    };
+    match start_hops(lxmf_enabled, rn, heard, publish_frame).await {
+        Ok(_) => (
+            StatusCode::ACCEPTED,
+            Json(serde_json::json!({ "schema": 1, "started": true })),
+        )
+            .into_response(),
+        Err(r) => r.into_response(),
+    }
+}
+
 pub fn router() -> ApiRouter {
-    axum::Router::new().route("/api/v1/nearby", get(list))
+    axum::Router::new()
+        .route("/api/v1/nearby", get(list))
+        .route("/api/v1/nearby/hops", post(hops))
 }
 
 #[cfg(test)]
@@ -366,5 +575,204 @@ mod tests {
         assert_eq!(s[0].label, RETICULUM_LABEL);
         assert_eq!(s[0].nodes[0].rssi, None);
         assert_eq!(s[0].nodes[0].short_name, "00112233");
+    }
+
+    fn api_state() -> (Arc<ApiState>, tempfile::TempDir) {
+        use crate::daemon::dashboard::{ApiConfig, DashboardState};
+        use crate::daemon::DaemonLayout;
+        let dir = tempfile::tempdir().unwrap();
+        let layout = DaemonLayout {
+            root: dir.path().to_path_buf(),
+            etc: dir.path().join("etc"),
+        };
+        let dash = Arc::new(std::sync::RwLock::new(DashboardState::new("2026.11.13")));
+        (ApiState::new(dash, ApiConfig::new(layout, false)), dir)
+    }
+
+    /// Layer 7 §2.3 (A1's read): the `111` source is listed last whenever presence is installed,
+    /// empty until a fact, beside the bridge's sources; without presence it is absent.
+    #[test]
+    fn the_111_source_is_listed_last_and_empty_until_a_fact() {
+        let (api, _dir) = api_state();
+        let heard = Arc::new(BridgeNearby::default());
+        assert!(heard.push("lxmf", &doc(D, "Bob")));
+        api.insert_ext(Arc::clone(&heard));
+        let kinds = |api: &ApiState| -> Vec<String> {
+            sources(api)
+                .iter()
+                .map(|s| s["kind"].as_str().unwrap_or("").to_string())
+                .collect()
+        };
+        assert_eq!(kinds(&api), ["reticulum"]);
+        api.insert_ext(Arc::new(Presence::default()));
+        assert_eq!(kinds(&api), ["reticulum", "111"]);
+        let s = sources(&api);
+        assert_eq!(s[1]["label"], "111 nodes heard by this node");
+        assert_eq!(s[1]["device_id"], Value::Null);
+        assert_eq!(s[1]["nodes"], json!([]));
+        // the reticulum rows keep their contract shape through the Value form
+        assert_eq!(s[0]["nodes"][0]["id"], D);
+        assert_eq!(s[0]["nodes"][0]["hops_away"], Value::Null);
+        // the frame carries the same list
+        let head = api.events.head();
+        publish(&api);
+        let sub = api.events.subscribe(Some(head));
+        let frame = sub
+            .replay
+            .iter()
+            .find(|f| f.event == "nearby")
+            .expect("frame");
+        let v: Value = serde_json::from_str(&frame.data).unwrap();
+        assert_eq!(v["sources"][1]["kind"], "111");
+    }
+
+    /// §10.1 rule 1: a hop read sets `hops_away` of the `reticulum` nodes only (unlisted:
+    /// unknown), adds no node, and the count stays with a node heard again.
+    #[test]
+    fn hop_counts_land_on_reticulum_nodes_only() {
+        let b = BridgeNearby::default();
+        let other = "00112233445566778899aabbccddeeff";
+        assert!(b.push("lxmf", &doc(D, "Bob")));
+        assert!(b.push("lxmf", &doc(other, "Ann")));
+        let mut t = PathHops::new();
+        t.insert(D.to_string(), 2);
+        t.insert("ffffffffffffffffffffffffffffffff".into(), 1);
+        let v = b.version();
+        assert!(b.set_hops(&t));
+        assert!(b.version() > v);
+        let hops = |b: &BridgeNearby| -> Vec<(String, Option<u8>)> {
+            b.sources()[0]
+                .nodes
+                .iter()
+                .map(|n| (n.id.clone(), n.hops_away))
+                .collect()
+        };
+        assert_eq!(
+            hops(&b),
+            [(other.to_string(), None), (D.to_string(), Some(2))],
+            "no node added from the table"
+        );
+        assert!(!b.set_hops(&t), "the same read: no change");
+        // heard again: the count stays (the adapter never reports one)
+        assert!(!b.push("lxmf", &doc(D, "Bob")), "same node, same count");
+        assert!(b.push("lxmf", &doc(D, "Robert")));
+        assert_eq!(hops(&b)[0], (D.to_string(), Some(2)));
+        // a later read that no longer lists it: unknown
+        assert!(b.set_hops(&PathHops::new()));
+        assert!(hops(&b).iter().all(|(_, h)| h.is_none()));
+    }
+
+    /// §13.1: `429` within 30 s of the last run, with the seconds left (rounded up); a refusal
+    /// that spawned nothing gives the window back.
+    #[test]
+    fn the_hop_read_window_is_thirty_seconds() {
+        let b = BridgeNearby::default();
+        let t0 = Instant::now();
+        assert_eq!(b.begin_hops(t0), Ok(None));
+        assert_eq!(b.begin_hops(t0 + Duration::from_secs(10)), Err(20));
+        assert_eq!(b.begin_hops(t0 + Duration::from_millis(29_500)), Err(1));
+        assert_eq!(b.begin_hops(t0 + HOPS_MIN_INTERVAL), Ok(Some(t0)));
+        let t1 = t0 + HOPS_MIN_INTERVAL;
+        b.cancel_hops(Some(t0));
+        assert_eq!(b.begin_hops(t1), Ok(Some(t0)), "cancelled: free again");
+        let r = HopsRefusal::RateLimited(12).into_response();
+        assert_eq!(r.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(r.headers()[header::RETRY_AFTER], "12");
+        let r = HopsRefusal::Unavailable("off").into_response();
+        assert_eq!(r.status(), StatusCode::CONFLICT);
+    }
+
+    fn rnpath_cmd(root: &std::path::Path) -> String {
+        format!(
+            "{} --config {} -t -j",
+            crate::daemon::transport::rnstatus::rnpath_program(root).display(),
+            root.join("rns").display()
+        )
+    }
+
+    /// §10.1 rule 1, G8 (I6): one `rnpath` per run through the rnstatus runner, the counts on
+    /// the `reticulum` source and one published frame; a second POST within 30 s is `429` and
+    /// spawns nothing.
+    #[tokio::test]
+    async fn a_hop_read_runs_rnpath_once_and_publishes_once() {
+        use crate::testkit::MockRunner;
+        use crate::util::run::Output;
+        let dir = tempfile::tempdir().unwrap();
+        let table = format!(
+            r#"[{{"hash":"{D}","timestamp":1.5,"via":"{ME}","hops":3,"expires":9.0,"interface":"x"}}]"#
+        );
+        let runner = Arc::new(MockRunner::new(vec![(
+            rnpath_cmd(dir.path()),
+            Output {
+                status: 0,
+                stdout: table,
+                stderr: String::new(),
+            },
+        )]));
+        let rn = Arc::new(Rnstatus::new(
+            Arc::clone(&runner) as Arc<dyn crate::util::run::Runner>,
+            dir.path(),
+        ));
+        let heard = Arc::new(BridgeNearby::default());
+        assert!(heard.push("lxmf", &doc(D, "Bob")));
+        let published = Arc::new(AtomicU64::new(0));
+        let count = {
+            let p = Arc::clone(&published);
+            move || {
+                p.fetch_add(1, Ordering::SeqCst);
+            }
+        };
+        let run = start_hops(true, Some(Arc::clone(&rn)), Some(Arc::clone(&heard)), count)
+            .await
+            .expect("started");
+        assert!(run.await.expect("joined"), "the count changed the source");
+        assert_eq!(published.load(Ordering::SeqCst), 1);
+        assert_eq!(heard.sources()[0].nodes[0].hops_away, Some(3));
+        let again = start_hops(true, Some(rn), Some(heard), || {}).await;
+        assert!(
+            matches!(again, Err(HopsRefusal::RateLimited(s)) if (1..=30).contains(&s)),
+            "{again:?}"
+        );
+        assert_eq!(runner.calls().len(), 1, "one spawn for one accepted POST");
+        runner.assert_exhausted();
+    }
+
+    /// §13.1: `409 component_unavailable` while the Reticulum component is off, without the
+    /// transport spine, or while the supervised rnsd does not hold the instance; nothing spawned,
+    /// and the 30 s window is not taken by a refusal.
+    #[tokio::test]
+    async fn the_hop_read_is_refused_while_the_component_is_off() {
+        use crate::testkit::MockRunner;
+        let dir = tempfile::tempdir().unwrap();
+        let none: Vec<(String, crate::util::run::Output)> = Vec::new();
+        let runner = Arc::new(MockRunner::new(none));
+        let rn = Arc::new(Rnstatus::new(
+            Arc::clone(&runner) as Arc<dyn crate::util::run::Runner>,
+            dir.path(),
+        ));
+        let heard = Arc::new(BridgeNearby::default());
+        let off = start_hops(
+            false,
+            Some(Arc::clone(&rn)),
+            Some(Arc::clone(&heard)),
+            || {},
+        )
+        .await;
+        assert!(matches!(off, Err(HopsRefusal::Unavailable(_))), "{off:?}");
+        let no_spine = start_hops(true, None, Some(Arc::clone(&heard)), || {}).await;
+        assert!(matches!(no_spine, Err(HopsRefusal::Unavailable(_))));
+        // FA1's gate: no supervised rnsd pid, so nothing may run
+        rn.set_owner_gate(Arc::new(|| None));
+        for _ in 0..2 {
+            let gated =
+                start_hops(true, Some(Arc::clone(&rn)), Some(Arc::clone(&heard)), || {}).await;
+            assert!(
+                matches!(gated, Err(HopsRefusal::Unavailable(_))),
+                "never 429 after a refusal: {gated:?}"
+            );
+        }
+        assert!(runner.calls().is_empty(), "nothing spawned");
+        let r = HopsRefusal::Unavailable("x").into_response();
+        assert_eq!(r.status(), StatusCode::CONFLICT);
     }
 }

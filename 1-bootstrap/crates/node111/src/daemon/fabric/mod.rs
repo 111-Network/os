@@ -2242,6 +2242,9 @@ impl FabricHandle {
         if fabric {
             self.publish_fabric(api).await;
         }
+        // Layer 7 §2.1–§2.3 (row D2): the tap's presence work for this batch, read after the
+        // `fabric` frame refreshed the kept pair views; a no-op until relay::start installs it
+        crate::daemon::relay::presence::settle(self, api).await;
     }
 
     /// One capacity pass (§10.4) with the filesystem's figures; a change of

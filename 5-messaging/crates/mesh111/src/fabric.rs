@@ -1587,6 +1587,19 @@ impl Fabric {
         self.call(move |c| c.forward_repost(target)).await?
     }
 
+    /// Layer 7 §2.1 rule 4 (a code seam beside the twelve, §19 "Code seams"
+    /// 2; D31 (2)): the kind of the link whose connection is attributed to
+    /// `peer` (it answered on it since it came up: a `pair_mac`-verified
+    /// packet the L2 window judged fresh), or `None` while no connection is.
+    /// A `tcp-lan` connection wins when several links hold one; otherwise
+    /// the first in connection order. Read-only: it changes no state and
+    /// sends no byte, and it knows nothing of a message's own path (the
+    /// daemon reads it when it handles the event, the spec's honest limit).
+    /// A `carrier` pair has no connection, so it reads `None`.
+    pub async fn attributed_on(&self, peer: NodeId) -> Result<Option<LinkKind>> {
+        self.call(move |c| c.attributed_on(&peer)).await
+    }
+
     /// A test hook, not an API: the §5.1 target computations this session
     /// (the gate's and the forwarder's). The forwarder recomputes a row's
     /// targets only when its inputs changed, so a drain of N rows costs
@@ -3147,6 +3160,25 @@ impl Core {
         self.conns
             .values()
             .any(|c| c.attributed.as_ref() == Some(hub))
+    }
+
+    /// [`Fabric::attributed_on`] (Layer 7 §2.1): read-only. A slot whose
+    /// link is gone names no kind.
+    fn attributed_on(&self, peer: &NodeId) -> Option<LinkKind> {
+        let mut first = None;
+        for ((link, _), c) in &self.conns {
+            if c.attributed.as_ref() != Some(peer) {
+                continue;
+            }
+            let Some(kind) = self.links.get(*link).map(|s| s.link.kind()) else {
+                continue;
+            };
+            if kind == LinkKind::TcpLan {
+                return Some(kind);
+            }
+            first.get_or_insert(kind);
+        }
+        first
     }
 
     fn profile(&self, ck: &ConnKey) -> (PathProfile, LinkKind) {
@@ -7964,6 +7996,104 @@ mod tests {
             "a refused INTRO leaves nothing but a counter"
         );
         assert!(filed_heard, "a filed request's sender holds our card");
+    }
+
+    /// Layer 7 §2.1 (§19 code seam 2): `attributed_on` names the link kind
+    /// of a connection attributed to the peer, prefers `tcp-lan`, ignores a
+    /// connection merely claimed or dialled, and changes nothing.
+    #[tokio::test]
+    async fn attributed_on_reads_the_attributed_link_kind_and_nothing_else() {
+        let n = test_node("me", FabricSettings::default());
+        let bob = TestSealer::from_label("bob").node_id();
+        let carol = TestSealer::from_label("carol").node_id();
+        let link = |id: &str, kind: LinkKind| {
+            let (events, _rx) = mpsc::unbounded_channel();
+            let (end, _far) = lossy::pair(
+                EndSpec {
+                    id: LinkId::new(id),
+                    announce: n.sealer.own_announce(),
+                    events: n.f.link_events(),
+                    cfg: LossyConfig {
+                        kind,
+                        ..LossyConfig::default()
+                    },
+                },
+                EndSpec {
+                    id: LinkId::new(format!("{id}-far")),
+                    announce: TestSealer::from_label(id).own_announce(),
+                    events,
+                    cfg: LossyConfig::default(),
+                },
+            );
+            end
+        };
+        let kiss =
+            n.f.add_link(link("kiss", LinkKind::KissModem), None)
+                .await
+                .expect("link");
+        let lan =
+            n.f.add_link(link("lan", LinkKind::TcpLan), None)
+                .await
+                .expect("link");
+        assert_eq!(n.f.attributed_on(bob).await.expect("actor"), None);
+        // Claimed and dialled for bob, attributed to nobody: nothing.
+        let before =
+            n.f.call(move |c| {
+                let conn = c
+                    .conns
+                    .entry((kiss, PeerAddr::Opaque(b"k".to_vec())))
+                    .or_default();
+                conn.claimed = Some(bob);
+                conn.expected = Some(bob);
+                conn.outbound = true;
+                (c.counters, c.conns.len())
+            })
+            .await
+            .expect("actor");
+        assert_eq!(n.f.attributed_on(bob).await.expect("actor"), None);
+        // Attributed on the KISS link only: that kind.
+        n.f.call(move |c| {
+            if let Some(conn) = c.conns.get_mut(&(kiss, PeerAddr::Opaque(b"k".to_vec()))) {
+                conn.attributed = Some(bob);
+            }
+        })
+        .await
+        .expect("actor");
+        assert_eq!(
+            n.f.attributed_on(bob).await.expect("actor"),
+            Some(LinkKind::KissModem)
+        );
+        assert_eq!(n.f.attributed_on(carol).await.expect("actor"), None);
+        // Also attributed on the LAN: tcp-lan wins over the earlier link.
+        n.f.call(move |c| {
+            c.conns
+                .entry((lan, PeerAddr::Opaque(b"l".to_vec())))
+                .or_default()
+                .attributed = Some(bob);
+        })
+        .await
+        .expect("actor");
+        assert_eq!(
+            n.f.attributed_on(bob).await.expect("actor"),
+            Some(LinkKind::TcpLan)
+        );
+        // A slot whose link is gone names no kind.
+        n.f.call(move |c| {
+            c.conns
+                .entry((usize::MAX, PeerAddr::Opaque(b"x".to_vec())))
+                .or_default()
+                .attributed = Some(carol);
+        })
+        .await
+        .expect("actor");
+        assert_eq!(n.f.attributed_on(carol).await.expect("actor"), None);
+        // Read-only: the counters and the connection table are as they were.
+        let after =
+            n.f.call(|c| (c.counters, c.conns.len()))
+                .await
+                .expect("actor");
+        assert_eq!(after.0, before.0, "no counter moved");
+        assert_eq!(after.1, before.1 + 2, "only the test's own inserts");
     }
 
     #[tokio::test]
