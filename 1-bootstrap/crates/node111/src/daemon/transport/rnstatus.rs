@@ -50,8 +50,11 @@
 //! - **Hops (Layer 7 `os/7-relay/README.md` §10.1 rule 1, §13.1; I6).**
 //!   [`Rnstatus::path_table`] runs one read-only `rnpath --config <root>/rns
 //!   -t -j` (`<root>/venvs/rns/bin/rnpath`, [`rnpath_program`]) through the
-//!   same runner, so the same timeout and output cap, behind the same owner
-//!   gate (no spawn unless the supervised rnsd holds the instance). Only a
+//!   same timeout, behind the same owner gate (no spawn unless the
+//!   supervised rnsd holds the instance), with its own output cap
+//!   [`MAX_PATH_OUTPUT`], sized to [`MAX_PATHS`] entries (the rnstatus cap
+//!   would cut a table near a thousand entries); a table over it is refused
+//!   as [`RnstatusError::Unparsed`], never parsed cut. Only a
 //!   human's `POST /api/v1/nearby/hops` calls it, never a GET and never a
 //!   tick. Its JSON is untrusted ([`parse_path_table`]: size first, then a
 //!   bounded walk; a destination is 32 lowercase hex, a hop count a byte;
@@ -75,6 +78,13 @@ pub const MAX_OUTPUT: usize = 256 * 1024;
 pub const MAX_FACTS: usize = 64;
 /// Most path-table entries looked at from one `rnpath -t -j` (Layer 7 §10.1 rule 1).
 pub const MAX_PATHS: usize = 4096;
+/// The bytes one path-table entry may take in `rnpath -t -j` (two 32-hex hashes, two float
+/// times, the hop count and an interface name such as
+/// `TCPInterface[Testnet/amsterdam.connect.reticulum.network:4965]`: about 250).
+pub const PATH_ENTRY_BYTES: usize = 384;
+/// The `rnpath -t -j` output cap (bytes): [`MAX_PATHS`] entries of [`PATH_ENTRY_BYTES`],
+/// 1.5 MiB, read only by a human's hop read and dropped once parsed.
+pub const MAX_PATH_OUTPUT: usize = MAX_PATHS * PATH_ENTRY_BYTES;
 /// Highest hop count taken (`NearbyNode.hops_away` is a byte; RNS caps a path at 128 hops).
 pub const MAX_HOPS: u64 = 255;
 
@@ -140,6 +150,8 @@ pub type PidSource = Arc<dyn Fn() -> Option<u32> + Send + Sync>;
 /// rnstatus against one rnsd config dir.
 pub struct Rnstatus {
     runner: Arc<dyn Runner>,
+    /// The runner of `rnpath` (the production one caps output at [`MAX_PATH_OUTPUT`]).
+    path_runner: Arc<dyn Runner>,
     program: String,
     /// `<root>/venvs/rns/bin/rnpath` (Layer 7 §10.1 rule 1).
     rnpath: String,
@@ -157,8 +169,18 @@ pub struct Rnstatus {
 impl Rnstatus {
     /// `<root>/venvs/rns/bin/rnstatus --config <root>/rns` through `runner`.
     pub fn new(runner: Arc<dyn Runner>, root: &Path) -> Self {
+        Self::with_path_runner(Arc::clone(&runner), runner, root)
+    }
+
+    /// [`Rnstatus::new`] with a separate runner for `rnpath` (its own output cap).
+    pub fn with_path_runner(
+        runner: Arc<dyn Runner>,
+        path_runner: Arc<dyn Runner>,
+        root: &Path,
+    ) -> Self {
         Rnstatus {
             runner,
+            path_runner,
             program: program(root).to_string_lossy().into_owned(),
             rnpath: rnpath_program(root).to_string_lossy().into_owned(),
             config_dir: root.join("rns").to_string_lossy().into_owned(),
@@ -201,9 +223,14 @@ impl Rnstatus {
         self.shared.load(Ordering::SeqCst)
     }
 
-    /// The production runner: [`TimedRunner`] with `HOME=<root>`.
+    /// The production runner: [`TimedRunner`] with `HOME=<root>`; `rnpath` gets one capped at
+    /// [`MAX_PATH_OUTPUT`].
     pub fn production(root: &Path) -> Self {
-        Self::new(Arc::new(TimedRunner::new(root)), root)
+        Self::with_path_runner(
+            Arc::new(TimedRunner::new(root)),
+            Arc::new(TimedRunner::path_table(root)),
+            root,
+        )
     }
 
     /// The program path this runs.
@@ -268,15 +295,23 @@ impl Rnstatus {
     }
 
     /// The path table's hop counts (Layer 7 §10.1 rule 1; blocking): one `rnpath --config
-    /// <root>/rns -t -j` through this runner (its timeout and output cap) behind the owner gate
-    /// ([`RnstatusError::NotOwned`] without spawning anything), parsed as untrusted JSON
-    /// ([`parse_path_table`]). Only the human's `POST /api/v1/nearby/hops` calls it.
+    /// <root>/rns -t -j` through the path runner (the timeout, the [`MAX_PATH_OUTPUT`] cap)
+    /// behind the owner gate ([`RnstatusError::NotOwned`] without spawning anything), parsed as
+    /// untrusted JSON ([`parse_path_table`]); a table over the cap is
+    /// [`RnstatusError::Unparsed`] (never parsed cut). Only the human's
+    /// `POST /api/v1/nearby/hops` calls it.
     pub fn path_table(&self) -> Result<PathHops, RnstatusError> {
         self.gate()?;
         let out = self
-            .runner
+            .path_runner
             .run(&self.rnpath, &["--config", &self.config_dir, "-t", "-j"])
             .map_err(|e| RnstatusError::Spawn(detail(&format!("{e:#}"))))?;
+        // the cut first: whatever rnpath's exit, a table past the cap is named as such
+        if out.stdout.len() > MAX_PATH_OUTPUT {
+            return Err(RnstatusError::Unparsed(
+                "the rnpath path table (over its 1.5 MiB cap)",
+            ));
+        }
         if no_instance(&out.stdout) || no_instance(&out.stderr) {
             return Err(RnstatusError::NoInstance);
         }
@@ -311,7 +346,7 @@ fn is_dest_hex(s: &str) -> bool {
 /// integer in `0..=`[`MAX_HOPS`] is skipped; a destination listed twice (two interfaces) keeps the
 /// fewest hops. `None`: not a JSON array (nothing is taken).
 pub fn parse_path_table(text: &str) -> Option<PathHops> {
-    if text.len() > MAX_OUTPUT {
+    if text.len() > MAX_PATH_OUTPUT {
         return None;
     }
     let v: serde_json::Value = serde_json::from_str(text.trim()).ok()?;
@@ -918,11 +953,17 @@ garbage line
 // ---------------------------------------------------------------- runner
 
 /// The production [`Runner`] for rnstatus: no shell, stdin closed, `HOME`
-/// set, stdout and stderr capped at [`MAX_OUTPUT`], killed after the
-/// timeout (then an error, never a partial reading).
+/// set, stdout and stderr capped at `max_output` ([`MAX_OUTPUT`]; `rnpath`'s
+/// [`MAX_PATH_OUTPUT`]) plus one byte, so a reader can tell a cut stream
+/// from a whole one; the rest is read and dropped (the child is never cut
+/// off by a closed pipe, so it exits as it would and the cut, not a broken
+/// pipe, is what the reader sees); killed after the timeout (then an
+/// error, never a partial reading).
 pub struct TimedRunner {
     pub timeout: Duration,
     pub home: PathBuf,
+    /// Bytes kept per stream (one more is read to mark a cut).
+    pub max_output: usize,
 }
 
 impl TimedRunner {
@@ -930,18 +971,38 @@ impl TimedRunner {
         TimedRunner {
             timeout: RNSTATUS_TIMEOUT,
             home: root.to_path_buf(),
+            max_output: MAX_OUTPUT,
+        }
+    }
+
+    /// The `rnpath -t -j` runner (Layer 7 §10.1 rule 1): the same timeout, the
+    /// [`MAX_PATH_OUTPUT`] cap.
+    pub fn path_table(root: &Path) -> Self {
+        TimedRunner {
+            max_output: MAX_PATH_OUTPUT,
+            ..TimedRunner::new(root)
         }
     }
 }
 
-fn drain(r: Option<impl Read + Send + 'static>) -> std::thread::JoinHandle<Vec<u8>> {
+/// Keep `cap + 1` bytes of `r` and read the rest into nothing until the child closes it (no
+/// `EPIPE` for the child; the timeout still bounds a stream that never ends).
+fn drain(r: Option<impl Read + Send + 'static>, cap: usize) -> std::thread::JoinHandle<Vec<u8>> {
     std::thread::spawn(move || {
         let mut buf = Vec::new();
-        if let Some(r) = r {
-            let _ = r.take(MAX_OUTPUT as u64).read_to_end(&mut buf);
+        if let Some(mut r) = r {
+            let _ = (&mut r).take(cap as u64 + 1).read_to_end(&mut buf);
+            if buf.len() > cap {
+                let _ = std::io::copy(&mut r, &mut std::io::sink());
+            }
         }
         buf
     })
+}
+
+/// The bytes as text, without a second copy when they are already UTF-8.
+fn text(bytes: Vec<u8>) -> String {
+    String::from_utf8(bytes).unwrap_or_else(|e| String::from_utf8_lossy(e.as_bytes()).into_owned())
 }
 
 impl Runner for TimedRunner {
@@ -955,8 +1016,8 @@ impl Runner for TimedRunner {
             .stderr(Stdio::piped())
             .spawn()
             .map_err(|e| anyhow::anyhow!("spawn {program}: {e}"))?;
-        let out = drain(child.stdout.take());
-        let err = drain(child.stderr.take());
+        let out = drain(child.stdout.take(), self.max_output);
+        let err = drain(child.stderr.take(), self.max_output);
         let t0 = Instant::now();
         let status = loop {
             match child.try_wait() {
@@ -985,8 +1046,8 @@ impl Runner for TimedRunner {
         };
         Ok(Output {
             status: code,
-            stdout: String::from_utf8_lossy(&stdout).into_owned(),
-            stderr: String::from_utf8_lossy(&stderr).into_owned(),
+            stdout: text(stdout),
+            stderr: text(stderr),
         })
     }
 
@@ -1453,5 +1514,140 @@ mod tests {
         }
         let woke = tokio::time::timeout(Duration::from_millis(50), c.nudge.notified()).await;
         assert!(woke.is_err(), "no wake within the period after record_down");
+    }
+    // ------------------------------------------------------------ the hop read (Layer 7 §10.1)
+
+    /// One realistic `rnpath -t -j` entry (about 250 bytes) for destination `i`.
+    fn path_entry(i: usize, hops: u64) -> String {
+        format!(
+            r#"{{"hash": "{i:032x}", "timestamp": 1731000000.123456, "via": "{:032x}", "hops": {hops}, "expires": 1731604800.123456, "interface": "TCPInterface[Testnet/amsterdam.connect.reticulum.network:4965]"}}"#,
+            i + 1
+        )
+    }
+
+    fn path_table_text(n: usize) -> String {
+        let entries: Vec<String> = (0..n).map(|i| path_entry(i, (i % 7) as u64)).collect();
+        format!("[{}]", entries.join(", "))
+    }
+
+    /// Review finding 6: a table of [`MAX_PATHS`] entries is bigger than the rnstatus cap
+    /// ([`MAX_OUTPUT`]) and fits the path table's own ([`MAX_PATH_OUTPUT`]): all of it parses.
+    #[test]
+    fn a_full_path_table_fits_its_own_cap_and_parses() {
+        let text = path_table_text(MAX_PATHS);
+        assert!(text.len() > MAX_OUTPUT, "{} bytes", text.len());
+        assert!(text.len() <= MAX_PATH_OUTPUT, "{} bytes", text.len());
+        let t = parse_path_table(&text).expect("parsed");
+        assert_eq!(t.len(), MAX_PATHS);
+        assert_eq!(t[&format!("{:032x}", 8)], 1);
+        // untrusted entries: a bad hash, a hop count past a byte, a duplicate keeps the fewest
+        let text = format!(
+            "[{}, {}, {}, {}]",
+            path_entry(1, 4),
+            r#"{"hash": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", "hops": 2}"#,
+            path_entry(2, 300),
+            path_entry(1, 3)
+        );
+        let t = parse_path_table(&text).expect("parsed");
+        assert_eq!(t.len(), 1, "{t:?}");
+        assert_eq!(t[&format!("{:032x}", 1)], 3);
+        assert!(parse_path_table("{}").is_none());
+        assert!(parse_path_table(&" ".repeat(MAX_PATH_OUTPUT + 1)).is_none());
+    }
+
+    fn rnpath_cmd(root: &Path) -> String {
+        format!(
+            "{} --config {} -t -j",
+            rnpath_program(root).display(),
+            root.join("rns").display()
+        )
+    }
+
+    /// Review finding 6: `path_table` goes through the path runner, and a stream past the cap
+    /// (the runner keeps one byte more) is refused, never parsed cut.
+    #[test]
+    fn the_path_table_runs_rnpath_and_refuses_a_cut_table() {
+        use crate::testkit::MockRunner;
+        let dir = tempfile::tempdir().unwrap();
+        let ok = Output {
+            status: 0,
+            stdout: path_table_text(MAX_PATHS),
+            stderr: String::new(),
+        };
+        let cut = Output {
+            status: 0,
+            stdout: "x".repeat(MAX_PATH_OUTPUT + 1),
+            stderr: String::new(),
+        };
+        let status = Arc::new(MockRunner::new(Vec::<(String, Output)>::new()));
+        let paths = Arc::new(MockRunner::new(vec![
+            (rnpath_cmd(dir.path()), ok),
+            (rnpath_cmd(dir.path()), cut),
+        ]));
+        let rn = Rnstatus::with_path_runner(
+            Arc::clone(&status) as Arc<dyn Runner>,
+            Arc::clone(&paths) as Arc<dyn Runner>,
+            dir.path(),
+        );
+        assert_eq!(rn.path_table().expect("read").len(), MAX_PATHS);
+        let e = rn.path_table().unwrap_err();
+        assert!(
+            matches!(e, RnstatusError::Unparsed(w) if w.contains("cap")),
+            "{e:?}"
+        );
+        assert!(
+            status.calls().is_empty(),
+            "rnpath never runs on the rnstatus runner"
+        );
+        paths.assert_exhausted();
+    }
+
+    /// Review finding 6: the production runner keeps `max_output` bytes plus one (a cut is
+    /// visible), and the path-table runner's cap is [`MAX_PATH_OUTPUT`].
+    #[test]
+    fn the_timed_runner_caps_each_stream_and_marks_a_cut() {
+        let dir = tempfile::tempdir().unwrap();
+        let script = format!("head -c {} /dev/zero", MAX_OUTPUT * 2);
+        let out = TimedRunner::new(dir.path())
+            .run("/bin/sh", &["-c", &script])
+            .expect("ran");
+        assert_eq!(out.stdout.len(), MAX_OUTPUT + 1, "one byte past the cap");
+        // the rest (far past the pipe buffer) was read and dropped: no broken pipe
+        assert_eq!(out.status, 0, "{}", out.stderr);
+        let paths = TimedRunner::path_table(dir.path());
+        assert_eq!(paths.max_output, MAX_PATH_OUTPUT);
+        assert_eq!(paths.timeout, RNSTATUS_TIMEOUT);
+        let out = paths.run("/bin/sh", &["-c", &script]).expect("ran");
+        assert_eq!(out.stdout.len(), MAX_OUTPUT * 2, "whole under its own cap");
+    }
+
+    /// Review of the fix pass: with the production runner, a table past the cap (far past the
+    /// pipe buffer) reaches `path_table` as the cut, named as such, not as rnpath's broken pipe.
+    #[test]
+    fn a_real_rnpath_past_the_cap_is_refused_as_the_cut() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let bin = rnpath_program(dir.path());
+        std::fs::create_dir_all(bin.parent().unwrap()).unwrap();
+        // a writer that fails on a closed pipe, as Python's BrokenPipeError does
+        std::fs::write(
+            &bin,
+            format!(
+                "#!/bin/sh\nhead -c {} /dev/zero || exit 1\n",
+                MAX_PATH_OUTPUT * 2
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let rn = Rnstatus::with_path_runner(
+            Arc::new(TimedRunner::new(dir.path())),
+            Arc::new(TimedRunner::path_table(dir.path())),
+            dir.path(),
+        );
+        let e = rn.path_table().unwrap_err();
+        assert!(
+            matches!(e, RnstatusError::Unparsed(w) if w.contains("cap")),
+            "{e:?}"
+        );
     }
 }

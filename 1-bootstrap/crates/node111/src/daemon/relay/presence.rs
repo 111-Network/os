@@ -18,37 +18,52 @@
 //! | event | fact |
 //! |---|---|
 //! | an inbound message from a contact (`New`, `dir = in`; never a message request) | the contact's row, "a message from them arrived (verified)" |
-//! | an own message that is `delivered` | the contact's row, "they confirmed your message" |
+//! | an own message that is `delivered` (once per message, in any order: its `local_seq` not among the last [`CONFIRMED_KEPT`] counted for that peer) | the contact's row, "they confirmed your message" |
 //! | `hub.reachable` (a connection attributed to the home hub) | the hub's row, `tcp-lan`, "your hub answered" |
 //! | a whole `tcp` pair with an attributed connection | its row, `tcp-lan`, "paired hub answered" |
 //! | a whole `carrier` pair's first verified carrier frame this session | its row, `carrier`, "paired hub answered" |
 //! | `relayed`, a card, an announce, a hello, a keepalive, a message request | nothing (L2 A6) |
 //!
-//! A message's transport is [`Fabric::attributed_on`] (§19 code seam 2) read when the daemon
-//! handles the event: `tcp-lan` while a connection is attributed to the peer, else `hub` ("through
-//! your hub"); on a node with no home hub nothing else can have carried it, so `tcp-lan`. The
-//! honest limit of §2.1 stands: a message that came through the hub while a direct connection to
-//! its sender was also attributed counts as `tcp-lan`. A `carrier` pair's `reachable` view is
-//! sticky for the session (M4: "a verified frame from it arrived through the carrier this
-//! session"), so only its rising edge is a fact; a `tcp` pair's and the hub's attribution end with
-//! their connection, so each batch that sees them attributed refreshes their fact.
+//! A message's transport is §2.2's rule on [`Fabric::attributed_on`] (§19 code seam 2), read when
+//! the daemon handles the event: `tcp-lan` while a connection is attributed to the peer (whatever
+//! link holds it: v1 builds only `tcp-lan` links, and the contract's closed set has no other
+//! direct transport), else `hub` ("through your hub"). The honest limit of §2.1 stands: a message
+//! that came through the hub while a direct connection to its sender was also attributed counts
+//! as `tcp-lan`. A delivered fact's `heard_seq` is the message's own `local_seq`: the store keeps
+//! no sequence for the confirmation itself, and no byte is added for it (§19 C3).
+//!
+//! **A paired hub (a recorded deviation, the D33 candidate on row D2).** §2.2 names a pair's
+//! `CUSTODY_ACK` or forward put; mesh111 exposes no per-pair evidence of either (no event, no
+//! counter, no view field), only [`PairView::reachable`]: for `tcp`, a connection attributed to the
+//! far hub (any fresh verified packet on it, as `hub.reachable` for the home hub); for `carrier`, a
+//! verified carrier frame this session (the carrier carries only puts and acks, so that one is
+//! §2.2's evidence, but sticky). So a `tcp` pair refreshes on each batch that sees it attributed,
+//! and a `carrier` pair counts once per rising edge of its view; the edge is consumed only once
+//! its row is written (or the far hub is known not to be a contact), so a failed contact read
+//! retries on the next `Fabric` event.
 //!
 //! **The `111` source (§2.3).** One source, `kind` `111`, label "111 nodes heard by this node",
 //! `device_id` null, listed whenever presence is installed (empty until a fact). A row exists only
 //! for a contact with a fact this session (a forgotten contact's row goes): `id` the 64-hex
 //! NodeId, `num` 0, `long_name` the local alias (cleaned, 40 bytes) or the L2 label,
 //! `short_name` the label, `last_heard_hint` null, `heard_ago_s`, `heard_seq`, `evidence` (one
-//! entry per transport), `roles` (the signed role names, bits 0–5 through D9's map). At most
-//! [`MAX_BRIDGE_NODES`] rows, the oldest heard forgotten first. A change publishes the SSE
-//! `nearby` frame once per batch; a refreshed age alone is a change only once it moved by
-//! [`FRAME_AGE_STEP`] (the UI ages a row from `heard_ago_s` and its own clock between frames).
+//! entry per transport heard this session, the contract's `NearbyEvidence` with no age of its
+//! own: `heard_ago_s` is the row's, from its latest fact, §2.3), `roles` (the signed role names,
+//! bits 0–5 through D9's map). At most [`MAX_BRIDGE_NODES`] rows, the oldest heard forgotten
+//! first. A change publishes the SSE `nearby` frame once per batch; a refreshed age alone is a
+//! change only once it moved [`FRAME_AGE_STEP`] past the age the last published frame carried
+//! (the UI ages a row from `heard_ago_s` and its own clock between frames), so facts refreshed
+//! every few seconds still move the frame once a minute.
 //!
 //! **Weight (§1 rule 2; the Pi floor).** Nothing here owns a task, a timer, a socket or a file:
 //! [`install`] allocates the empty book, [`on_event`] is one lock, and [`settle`] runs inside the
-//! fabric pump that exists anyway, reading the actor once per changed message (its view and its
-//! attribution, the contact only for a new row or a renamed one) and once per batch for the home
-//! hub; the pairs come from the handle's kept views. **After a pump lag** the lost message events
-//! are not replayed (M5b): the synthetic `Fabric` event re-reads the hub and the pairs only.
+//! fabric pump that exists anyway, reading the actor per message event: none for a message
+//! request, one (`message`) for an event that proves nothing, two (`message`, `attributed_on`)
+//! for a fact on an existing row, three with the `contact` read of a new row; per `Fabric` batch
+//! one `attributed_on` for the home hub (plus a new row's contact); the pairs come from the
+//! handle's kept views. Each is one round trip to the actor that runs anyway. **After a pump
+//! lag** the lost message events are not replayed (M5b): the synthetic `Fabric` event re-reads
+//! the hub and the pairs only.
 //!
 //! **The heartbeat switch (§2.4).** Visible and inert in v1: [`check_heartbeat`] is the pure
 //! validator D10's `PATCH /relay/settings` and the `presence.interval` proposal action call. It
@@ -94,6 +109,13 @@ pub const FRAME_AGE_STEP: Duration = Duration::from_secs(60);
 /// Distinct message and contact events noted per batch at most (a pump batch is smaller; the
 /// rest of an overfull batch is dropped and counted, never an unbounded queue).
 pub const MAX_WORK: usize = 1024;
+/// Own-message `local_seq`s a row keeps as counted "they confirmed your message". mesh111 emits
+/// `delivered` once per message (`Core::delivered` removes it), but the tap reads a message's
+/// state when it handles the event, so an earlier event of the same message handled in a later
+/// batch (its `sent`, say) reads `delivered` too: that repeat comes within moments of the real
+/// one, with few other deliveries for the peer in between. A delivery out of send order (a
+/// message fetched from the hub after a later one went direct) is a fact of its own and counts.
+pub const CONFIRMED_KEPT: usize = 4;
 
 /// Where a node was heard (`NearbyEvidence.transport`, §2.3; the closed set
 /// `nearby::EVIDENCE_TRANSPORTS`).
@@ -188,8 +210,21 @@ struct Row {
     heard_seq: Option<u64>,
     /// The latest fact's time.
     heard_at: Instant,
-    /// The last own message counted as confirmed (a repeated event for it is not a new fact).
-    confirmed: Option<i64>,
+    /// The `heard_at` the last published source carried for this row: a refreshed age is a
+    /// change once `heard_at` moved [`FRAME_AGE_STEP`] past it.
+    shown_at: Instant,
+    /// The last [`CONFIRMED_KEPT`] own-message `local_seq`s counted as "they confirmed your
+    /// message", newest first: a delivered message among them is a repeat, no new fact.
+    confirmed: [Option<u64>; CONFIRMED_KEPT],
+}
+
+impl Row {
+    fn note_confirmed(&mut self, seq: u64) {
+        if !self.confirmed.contains(&Some(seq)) {
+            self.confirmed.rotate_right(1);
+            self.confirmed[0] = Some(seq);
+        }
+    }
 }
 
 /// The session's rows, oldest heard first, at most [`MAX_BRIDGE_NODES`].
@@ -207,9 +242,25 @@ impl Book {
         self.position(peer).is_some()
     }
 
+    /// Whether the own message `seq` to `peer` was already counted as delivered.
+    fn confirmed(&self, peer: &NodeId, seq: u64) -> bool {
+        self.rows
+            .iter()
+            .find(|r| r.peer == *peer)
+            .is_some_and(|r| r.confirmed.contains(&Some(seq)))
+    }
+
+    /// The rows as a published frame shows them: each row's age is current there.
+    fn mark_shown(&mut self) {
+        for r in self.rows.iter_mut() {
+            r.shown_at = r.heard_at;
+        }
+    }
+
     /// Record one fact at `now`. A new row needs `names` (a contact); without them nothing is
     /// created. Returns whether the shown source changed (module doc: a new row or transport,
-    /// other evidence, a higher `heard_seq`, or an age moved by [`FRAME_AGE_STEP`]).
+    /// other evidence, a higher `heard_seq`, other names, or the row's age moved
+    /// [`FRAME_AGE_STEP`] past the one last shown).
     fn record(
         &mut self,
         peer: NodeId,
@@ -234,7 +285,8 @@ impl Book {
                 facts: vec![fresh],
                 heard_seq: seq,
                 heard_at: now,
-                confirmed: None,
+                shown_at: now,
+                confirmed: [None; CONFIRMED_KEPT],
             });
             while self.rows.len() > MAX_BRIDGE_NODES {
                 self.rows.pop_front();
@@ -248,7 +300,6 @@ impl Book {
         match row.facts.iter_mut().find(|f| f.transport == transport) {
             Some(f) => {
                 changed |= f.evidence != evidence;
-                changed |= now.saturating_duration_since(f.heard_at) >= FRAME_AGE_STEP;
                 *f = fresh;
             }
             None => {
@@ -269,6 +320,10 @@ impl Book {
             }
         }
         row.heard_at = now;
+        changed |= now.saturating_duration_since(row.shown_at) >= FRAME_AGE_STEP;
+        if changed {
+            row.shown_at = now;
+        }
         self.rows.push_back(row);
         changed
     }
@@ -399,6 +454,18 @@ impl Reads for Fabric {
     }
 }
 
+/// What [`Presence::lookup`] found for a peer.
+enum Lookup {
+    /// The row exists (its names stand).
+    Row,
+    /// A contact without a row yet.
+    New(Names),
+    /// Not a contact (or a message request): no row.
+    NotContact,
+    /// The read failed: no row now, the fact may come again.
+    Failed,
+}
+
 /// What the fabric handle knows without the actor, read once per batch: the home hub and the
 /// per-pair views it kept from its last `Fabric::status` (`FabricHandle::pair_views`).
 #[derive(Debug, Clone, Default)]
@@ -494,6 +561,10 @@ impl Presence {
             }
         }
         for (id, peer, change) in &work.messages {
+            // a message request proves nothing (§2.2): not even read
+            if *change == MessageChange::Request {
+                continue;
+            }
             let Ok(v) = r.message(*id).await else {
                 continue;
             };
@@ -505,13 +576,8 @@ impl Presence {
                     (Evidence::MessageIn, v.received_seq.unwrap_or(v.local_seq))
                 }
                 (Dir::Own, _, MsgState::Delivered) => {
-                    let counted = self
-                        .lock()
-                        .book
-                        .rows
-                        .iter()
-                        .any(|row| row.peer == *peer && row.confirmed == Some(*id));
-                    if counted {
+                    // once per message, in any order ([`CONFIRMED_KEPT`])
+                    if self.lock().book.confirmed(peer, v.local_seq) {
                         continue;
                     }
                     (Evidence::Delivered, v.local_seq)
@@ -519,15 +585,16 @@ impl Presence {
                 // relayed, sent, queued, failed, a message request: nothing (§2.2)
                 _ => continue,
             };
+            // §2.2: `tcp-lan` when a connection is attributed to them, else `hub`
             let transport = match r.attributed_on(*peer).await {
-                Ok(Some(LinkKind::TcpLan)) => Transport::TcpLan,
-                Ok(_) if kept.home_hub.is_some() => Transport::Hub,
-                // no home hub: only a direct connection (since closed) can have carried it
-                Ok(_) => Transport::TcpLan,
+                Ok(Some(_)) => Transport::TcpLan,
+                Ok(None) => Transport::Hub,
                 Err(_) => continue,
             };
-            let Some(names) = self.names_for(r, peer).await else {
-                continue;
+            let names = match self.lookup(r, peer).await {
+                Lookup::Row => None,
+                Lookup::New(n) => Some(n),
+                Lookup::NotContact | Lookup::Failed => continue,
             };
             let mut s = self.lock();
             changed |= s
@@ -535,12 +602,16 @@ impl Presence {
                 .record(*peer, names, (transport, evidence), Some(seq), now);
             if evidence == Evidence::Delivered {
                 if let Some(row) = s.book.rows.iter_mut().find(|row| row.peer == *peer) {
-                    row.confirmed = Some(*id);
+                    row.note_confirmed(seq);
                 }
             }
         }
         if work.fabric {
             changed |= self.apply_fabric(r, kept, now).await;
+        }
+        if changed {
+            // the frame settle publishes now carries every row's current age
+            self.lock().book.mark_shown();
         }
         changed
     }
@@ -550,7 +621,12 @@ impl Presence {
         let mut changed = false;
         if let Some(hub) = kept.home_hub {
             if let Ok(Some(_)) = r.attributed_on(hub).await {
-                if let Some(names) = self.names_for(r, &hub).await {
+                let names = match self.lookup(r, &hub).await {
+                    Lookup::Row => Some(None),
+                    Lookup::New(n) => Some(Some(n)),
+                    Lookup::NotContact | Lookup::Failed => None,
+                };
+                if let Some(names) = names {
                     changed |= self.lock().book.record(
                         hub,
                         names,
@@ -569,26 +645,35 @@ impl Presence {
                 PairVia::Tcp => continue,
                 PairVia::Carrier => {
                     let mut s = self.lock();
-                    let seen = s.carrier_heard.contains(&id);
                     if !answered {
                         s.carrier_heard.retain(|n| *n != id);
                         continue;
                     }
-                    if seen {
+                    if s.carrier_heard.contains(&id) {
                         continue;
                     }
-                    s.carrier_heard.push(id);
                     Transport::Carrier
                 }
             };
-            if let Some(names) = self.names_for(r, &id).await {
-                changed |= self.lock().book.record(
-                    id,
-                    names,
-                    (transport, Evidence::PairAnswered),
-                    None,
-                    now,
-                );
+            // a carrier pair's rising edge is consumed only once it is settled: its row
+            // written, or the far hub known not to be a contact; a failed read keeps it
+            let names = match self.lookup(r, &id).await {
+                Lookup::Row => None,
+                Lookup::New(n) => Some(n),
+                Lookup::NotContact => {
+                    if transport == Transport::Carrier {
+                        self.lock().carrier_heard.push(id);
+                    }
+                    continue;
+                }
+                Lookup::Failed => continue,
+            };
+            let mut s = self.lock();
+            changed |= s
+                .book
+                .record(id, names, (transport, Evidence::PairAnswered), None, now);
+            if transport == Transport::Carrier && !s.carrier_heard.contains(&id) {
+                s.carrier_heard.push(id);
             }
         }
         // a pair that is no longer listed starts a new rising edge if it returns
@@ -598,15 +683,16 @@ impl Presence {
         changed
     }
 
-    /// `Some(None)`: the row exists (its names stand); `Some(Some(names))`: a contact without a
-    /// row yet; `None`: not a contact (or a message request), or the read failed — no row.
-    async fn names_for<R: Reads>(&self, r: &R, peer: &NodeId) -> Option<Option<Names>> {
+    /// Whether `peer` has a row, or may get one: a row needs a contact (§2.3), read only when
+    /// there is none yet.
+    async fn lookup<R: Reads>(&self, r: &R, peer: &NodeId) -> Lookup {
         if self.lock().book.has(peer) {
-            return Some(None);
+            return Lookup::Row;
         }
         match r.contact(*peer).await {
-            Ok(c) if !c.request => Some(Some(Names::of(&c))),
-            _ => None,
+            Ok(c) if !c.request => Lookup::New(Names::of(&c)),
+            Ok(_) | Err(FabricError::NotFound) => Lookup::NotContact,
+            Err(_) => Lookup::Failed,
         }
     }
 
@@ -874,6 +960,8 @@ mod tests {
         messages: HashMap<i64, MessageView>,
         contacts: HashMap<NodeId, ContactView>,
         attributed: HashMap<NodeId, LinkKind>,
+        /// Every `contact` read fails (the actor is busy or stopping), not "not found".
+        contact_fails: std::sync::atomic::AtomicBool,
         calls: Mutex<Vec<String>>,
     }
 
@@ -904,6 +992,9 @@ mod tests {
             id: NodeId,
         ) -> impl Future<Output = Result<ContactView, FabricError>> + Send {
             self.log("contact".into());
+            if self.contact_fails.load(std::sync::atomic::Ordering::SeqCst) {
+                return std::future::ready(Err(FabricError::Stopped));
+            }
             std::future::ready(self.contacts.get(&id).cloned().ok_or(FabricError::NotFound))
         }
         fn attributed_on(
@@ -1061,29 +1152,36 @@ mod tests {
         assert_eq!(r.count("attributed_on"), 2);
     }
 
-    /// No home hub: a message with no attributed connection can only have come over a direct
-    /// one (since closed), so it is `tcp-lan`, never "through your hub".
+    /// §2.2's mapping exactly (review finding 7): `tcp-lan` when a connection is attributed to
+    /// the peer, whatever link holds it, else `hub`, with or without a home hub.
     #[tokio::test]
-    async fn without_a_home_hub_an_unattributed_message_is_lan() {
-        let bob = nid(2);
+    async fn the_transport_is_the_specs_mapping_of_attributed_on() {
+        let (bob, carol) = (nid(2), nid(3));
         let mut r = Fake::default();
         r.contacts.insert(bob, contact(bob, None, 0));
+        r.contacts.insert(carol, contact(carol, None, 0));
         r.messages
             .insert(1, msg(1, bob, Dir::In, MsgState::Delivered, 5));
+        r.messages
+            .insert(2, msg(2, carol, Dir::In, MsgState::Delivered, 6));
+        r.attributed.insert(carol, LinkKind::KissModem);
         let p = Presence::default();
         let now = Instant::now();
-        assert!(
-            p.apply(
-                &r,
-                messages(&[(1, bob, MessageChange::New)]),
-                &Kept::default(),
-                now
-            )
-            .await
+        let w = messages(&[(1, bob, MessageChange::New), (2, carol, MessageChange::New)]);
+        assert!(p.apply(&r, w, &Kept::default(), now).await);
+        let all = rows(&p, now);
+        let row = |n: NodeId| all.iter().find(|row| row["id"] == hex(n)).unwrap();
+        assert_eq!(
+            evidence(row(bob))[0].0,
+            "hub",
+            "no home hub: still §2.2's else"
         );
-        let row = &rows(&p, now)[0];
-        assert_eq!(evidence(row)[0].0, "tcp-lan");
-        assert_eq!(row["long_name"], label(bob), "no alias: the label");
+        assert_eq!(row(bob)["long_name"], label(bob), "no alias: the label");
+        assert_eq!(
+            evidence(row(carol))[0].0,
+            "tcp-lan",
+            "attributed on another link: a connection is attributed"
+        );
     }
 
     /// §2.2 rows 2 and 5: a delivered own message is "they confirmed your message"; relayed,
@@ -1129,6 +1227,145 @@ mod tests {
         assert!(!p.apply(&r, w, &kept, later).await);
         assert_eq!(r.count("attributed_on"), reads, "not even read");
         assert_eq!(rows(&p, later)[0]["heard_ago_s"], 120, "not refreshed");
+    }
+
+    /// Review finding 3 and its re-check: a delivered fact counts once per message, whatever
+    /// order the deliveries come in: a repeat read of a counted message is no new fact; a newer
+    /// message's delivery is one, and so is an older message delivered after a newer one.
+    #[tokio::test]
+    async fn a_delivery_counts_once_per_message_in_any_order() {
+        let (bob, hub) = (nid(2), nid(7));
+        let mut r = Fake::default();
+        r.contacts.insert(bob, contact(bob, None, 0));
+        r.messages
+            .insert(1, msg(1, bob, Dir::Own, MsgState::Delivered, 50));
+        r.messages
+            .insert(2, msg(2, bob, Dir::Own, MsgState::Delivered, 60));
+        r.messages
+            .insert(3, msg(3, bob, Dir::Own, MsgState::Delivered, 70));
+        let kept = Kept {
+            home_hub: Some(hub),
+            pairs: Vec::new(),
+        };
+        let p = Presence::default();
+        let t0 = Instant::now();
+        assert!(
+            p.apply(&r, messages(&[(1, bob, MessageChange::State)]), &kept, t0)
+                .await
+        );
+        let t1 = t0 + FRAME_AGE_STEP * 2;
+        assert!(
+            p.apply(&r, messages(&[(2, bob, MessageChange::State)]), &kept, t1)
+                .await
+        );
+        // an event for message 1 again, read in a later batch (its earlier `sent` event
+        // handled after it was delivered): a repeat, no new fact
+        let t2 = t1 + FRAME_AGE_STEP * 2;
+        assert!(
+            !p.apply(&r, messages(&[(1, bob, MessageChange::State)]), &kept, t2)
+                .await,
+            "a repeat is no new fact"
+        );
+        assert_eq!(rows(&p, t2)[0]["heard_ago_s"], 120, "not refreshed");
+        assert_eq!(rows(&p, t2)[0]["heard_seq"], 60);
+        assert!(
+            p.apply(&r, messages(&[(3, bob, MessageChange::State)]), &kept, t2)
+                .await
+        );
+        assert_eq!(rows(&p, t2)[0]["heard_ago_s"], 0);
+        assert_eq!(rows(&p, t2)[0]["heard_seq"], 70);
+        // review of the fix pass: a message delivered out of send order (sent before 70, held
+        // at the hub, fetched later) is that message's one confirmation: a fresh fact
+        r.messages
+            .insert(4, msg(4, bob, Dir::Own, MsgState::Delivered, 55));
+        let t3 = t2 + FRAME_AGE_STEP * 10;
+        assert!(
+            p.apply(&r, messages(&[(4, bob, MessageChange::State)]), &kept, t3)
+                .await,
+            "an out-of-order delivery is a fact"
+        );
+        assert_eq!(rows(&p, t3)[0]["heard_ago_s"], 0, "refreshed");
+        assert_eq!(rows(&p, t3)[0]["heard_seq"], 70, "heard_seq stays monotone");
+        assert!(
+            !p.apply(&r, messages(&[(4, bob, MessageChange::State)]), &kept, t3)
+                .await,
+            "and counts once"
+        );
+    }
+
+    /// Review finding 1: a fact refreshed more often than [`FRAME_AGE_STEP`] (the hub
+    /// attributed on every `Fabric` event, 20–50 s apart) still moves the frame once its age
+    /// moved a step past the one the last frame carried, and not more often.
+    #[tokio::test]
+    async fn a_frequently_refreshed_age_still_moves_the_frame_once_a_step() {
+        let hub = nid(7);
+        let mut r = Fake::default();
+        r.contacts.insert(hub, contact(hub, None, 0x0003));
+        r.attributed.insert(hub, LinkKind::TcpLan);
+        let kept = Kept {
+            home_hub: Some(hub),
+            pairs: Vec::new(),
+        };
+        let p = Presence::default();
+        let t0 = Instant::now();
+        assert!(p.apply(&r, fabric_event(), &kept, t0).await, "a new row");
+        let mut frames = Vec::new();
+        for i in 1..=8u64 {
+            let t = t0 + Duration::from_secs(30 * i);
+            if p.apply(&r, fabric_event(), &kept, t).await {
+                frames.push(30 * i);
+            }
+        }
+        assert_eq!(frames, [60, 120, 180, 240], "once per step of real change");
+    }
+
+    /// The tap's actor reads per message event (review finding 8, recorded on the board): a
+    /// message request none, an event that proves nothing one, a fact on a row two, a new row
+    /// three; a `Fabric` batch one for the home hub.
+    #[tokio::test]
+    async fn the_actor_reads_per_event_are_counted() {
+        let (bob, hub) = (nid(2), nid(7));
+        let mut r = Fake::default();
+        r.contacts.insert(bob, contact(bob, None, 0));
+        r.contacts.insert(hub, contact(hub, None, 0x0003));
+        r.messages
+            .insert(1, msg(1, bob, Dir::In, MsgState::Delivered, 1));
+        r.messages
+            .insert(2, msg(2, bob, Dir::In, MsgState::Delivered, 2));
+        r.messages
+            .insert(3, msg(3, bob, Dir::Own, MsgState::Relayed, 3));
+        r.messages
+            .insert(4, msg(4, bob, Dir::In, MsgState::Delivered, 4));
+        let kept = Kept {
+            home_hub: Some(hub),
+            pairs: Vec::new(),
+        };
+        let p = Presence::default();
+        let now = Instant::now();
+        let reads = |r: &Fake| r.calls.lock().unwrap().len();
+        p.apply(&r, messages(&[(1, bob, MessageChange::New)]), &kept, now)
+            .await;
+        assert_eq!(reads(&r), 3, "a new row: message, attributed_on, contact");
+        p.apply(&r, messages(&[(2, bob, MessageChange::New)]), &kept, now)
+            .await;
+        assert_eq!(reads(&r), 5, "a fact on a row: two");
+        p.apply(&r, messages(&[(3, bob, MessageChange::State)]), &kept, now)
+            .await;
+        assert_eq!(reads(&r), 6, "relayed: the message only");
+        p.apply(
+            &r,
+            messages(&[(4, bob, MessageChange::Request)]),
+            &kept,
+            now,
+        )
+        .await;
+        assert_eq!(reads(&r), 6, "a message request: nothing read");
+        p.apply(&r, fabric_event(), &kept, now).await;
+        assert_eq!(
+            reads(&r),
+            7,
+            "the hub: attributed_on (not attributed: no row)"
+        );
     }
 
     /// A row only for a contact (§2.3): a message request, a stranger, a request contact and a
@@ -1326,6 +1563,52 @@ mod tests {
             .find(|row| row["id"] == hex(car))
             .unwrap();
         assert_eq!(row["heard_ago_s"], 0, "a new rising edge");
+    }
+
+    /// Review finding 2: a carrier pair's rising edge is not lost to a failed contact read; it
+    /// is consumed once the row is written, and only then.
+    #[tokio::test]
+    async fn a_carrier_edge_survives_a_failed_contact_read() {
+        let car = nid(31);
+        let mut r = Fake::default();
+        r.contacts.insert(car, contact(car, None, 0x0002));
+        let kept = Kept {
+            home_hub: None,
+            pairs: vec![pair(car, PairVia::Carrier, true, true)],
+        };
+        let p = Presence::default();
+        let t0 = Instant::now();
+        r.contact_fails
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        assert!(!p.apply(&r, fabric_event(), &kept, t0).await);
+        assert!(rows(&p, t0).is_empty(), "the read failed: no row yet");
+        r.contact_fails
+            .store(false, std::sync::atomic::Ordering::SeqCst);
+        let t1 = t0 + Duration::from_secs(20);
+        assert!(
+            p.apply(&r, fabric_event(), &kept, t1).await,
+            "the edge stayed"
+        );
+        let row = &rows(&p, t1)[0];
+        assert_eq!(
+            evidence(row),
+            [("carrier".to_string(), "paired hub answered".to_string())]
+        );
+        // consumed now: the sticky view is no new fact
+        let t2 = t1 + FRAME_AGE_STEP * 2;
+        let contacts = r.count("contact");
+        assert!(!p.apply(&r, fabric_event(), &kept, t2).await);
+        assert_eq!(r.count("contact"), contacts, "no read once consumed");
+        // a far hub that is not a contact settles the edge too (no read on every batch)
+        let stranger = nid(40);
+        let kept = Kept {
+            home_hub: None,
+            pairs: vec![pair(stranger, PairVia::Carrier, true, true)],
+        };
+        let before = r.count("contact");
+        assert!(!p.apply(&r, fabric_event(), &kept, t2).await);
+        assert!(!p.apply(&r, fabric_event(), &kept, t2).await);
+        assert_eq!(r.count("contact"), before + 1, "read once");
     }
 
     /// The cap (§2.3): at most 512 rows, the oldest heard forgotten first; rows are listed most

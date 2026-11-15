@@ -2453,6 +2453,10 @@ async fn the_lxmf_seam_writes_the_client_config_attaches_the_adapter_and_feeds_n
     let hash = lxmf_component().notice_hash();
     let client = config::client_config_path(&root);
 
+    // Layer 7 §13.1 (row D2): the hop read while the Reticulum component is off is 409
+    // component_unavailable, and nothing ran
+    n.post(HOPS, json!({}))
+        .problem(409, "component_unavailable");
     // without the acknowledgement: 409 consent_required, and the hook wrote nothing
     n.post(enable, json!({})).problem(409, "consent_required");
     assert!(!root.join("bridge/lxmf").exists());
@@ -2541,6 +2545,29 @@ async fn the_lxmf_seam_writes_the_client_config_attaches_the_adapter_and_feeds_n
     assert_schema("SseNearby", &v);
     assert!(frame.1.contains(LX_PEER), "{}", frame.1);
 
+    // Layer 7 §10.1 rule 1, §13.1 (row D2): the hop read over HTTP. The agent's bearer is
+    // refused (401) and takes no window; a person's POST starts one read (202; this spine's
+    // rnstatus runner answers nothing, so the read changes nothing and logs one line); a second
+    // within 30 s is 429 rate_limited with Retry-After
+    http(
+        n.port,
+        "POST",
+        HOPS,
+        &[("Authorization", &n.bearer())],
+        Some(&json!({})),
+    )
+    .problem(401, "unauthenticated");
+    let r = n.post(HOPS, json!({}));
+    check_op("runNearbyHops", &r);
+    assert_eq!(r.status, 202, "{}", r.body);
+    let r = n.post(HOPS, json!({}));
+    r.problem(429, "rate_limited");
+    let wait: u64 = r
+        .header("retry-after")
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0);
+    assert!((1..=30).contains(&wait), "Retry-After {wait}");
+
     // disable: the adapter goes (before the child), its source with it, the child stops
     let r = n.post("/api/v1/bridge/components/lxmf/disable", json!({}));
     check_op("disableBridgeComponent", &r);
@@ -2557,6 +2584,9 @@ async fn the_lxmf_seam_writes_the_client_config_attaches_the_adapter_and_feeds_n
         "no child, no stdio"
     );
 }
+
+/// `runNearbyHops` (Layer 7 §13.1).
+const HOPS: &str = "/api/v1/nearby/hops";
 
 /// A transport spine over `n`'s root with rnsd's config rendered (its `rpc_key` minted).
 fn lxmf_spine(n: &Node) -> Arc<node111::daemon::transport::posture::Spine> {
