@@ -592,7 +592,15 @@ mod tests {
 
     #[test]
     fn wayland_socket_scan_skips_locks_and_plain_files() {
-        let dir = tempfile::tempdir().unwrap();
+        // a Unix socket path is at most 108 bytes (SUN_LEN): a long TMPDIR (a runner's scratch
+        // root) cannot hold one, so the socket's directory falls back to /tmp
+        let tmp = std::env::temp_dir();
+        let base = if tmp.as_os_str().len() > 64 {
+            std::path::PathBuf::from("/tmp")
+        } else {
+            tmp
+        };
+        let dir = tempfile::tempdir_in(base).unwrap();
         let d = dir.path().to_str().unwrap();
         assert_eq!(wayland_socket_in(d), None);
         std::fs::write(dir.path().join("wayland-0.lock"), "").unwrap();
@@ -609,8 +617,9 @@ mod tests {
         assert_eq!(run_opener("true", &[], short), Opened::Yes);
         assert_eq!(run_opener("false", &[], short), Opened::No);
         assert_eq!(run_opener("/nonexistent/xdg-open", &[], short), Opened::No);
-        // still running at the deadline = a browser launching
-        assert_eq!(run_opener("sleep", &["5".to_string()], short), Opened::Yes);
+        // still running at the deadline = a browser launching (a second, so the opener the
+        // test leaves behind ends soon after: a gate's hygiene check finds nothing running)
+        assert_eq!(run_opener("sleep", &["1".to_string()], short), Opened::Yes);
     }
 
     #[test]
