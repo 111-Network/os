@@ -43,6 +43,18 @@ const ESP_BY_ID: &str = "usb-Espressif_USB_JTAG_serial_debug_unit_F4:12:FA:00:11
 const CH340_BY_ID: &str = "usb-1a86_USB_Serial-if00-port0";
 const FTDI_BY_ID: &str = "usb-FTDI_FT232R_USB_UART_A50285BI-if00-port0";
 
+/// A temp dir whose paths fit the devices layer's 128-byte path facts (`MAX_PATH_FACT`): a
+/// runner's scratch root as TMPDIR is too long for the fake `/dev` paths, so this falls back to
+/// /tmp (the production root is `/dev`).
+fn short_tempdir() -> tempfile::TempDir {
+    let tmp = std::env::temp_dir();
+    if tmp.as_os_str().len() > 48 {
+        tempfile::tempdir_in("/tmp").unwrap()
+    } else {
+        tempfile::tempdir().unwrap()
+    }
+}
+
 struct Tree {
     root: PathBuf,
 }
@@ -402,7 +414,7 @@ fn write_sessions(state: &Path) {
 }
 
 fn node_with(setup: impl FnOnce(&Tree), sessions: bool) -> Node {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = short_tempdir();
     let state = dir.path().join("state");
     std::fs::create_dir_all(&state).unwrap();
     if sessions {
@@ -1571,7 +1583,7 @@ async fn pairing_records_the_user_agent_for_companions() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn routes_answer_503_when_the_registry_is_not_running() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = short_tempdir();
     std::fs::create_dir_all(dir.path().join("state")).unwrap();
     let layout = DaemonLayout {
         root: dir.path().to_path_buf(),
