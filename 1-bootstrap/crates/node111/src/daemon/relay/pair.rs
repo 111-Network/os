@@ -41,7 +41,8 @@
 //!   record's `theirs` going from false to true (the far hub's own `ENROLL` landed here: a
 //!   `FabricEvent::Settings`), or, once `theirs` is held, a connection attributed to the far hub
 //!   coming up (`FabricEvent::Fabric`, which the fabric emits on a link-up and on a connection's
-//!   attribution; read back as `PairView::reachable`); and it runs `Fabric::pair` again only
+//!   attribution; read back as `Fabric::attributed_on`, row D6c, so a `carrier` pair's wait sees
+//!   it too); and it runs `Fabric::pair` again only
 //!   when a sendable connection is there, so an unrelated settings change never takes the
 //!   fabric's single enrolment slot from another pairing or a member's enrolment. When the
 //!   window ends or the far hub refuses, the attempt is dropped (mesh111 releases its dial) and
@@ -917,9 +918,10 @@ async fn run_attempt(
     }
 }
 
-/// What a waiting attempt last saw of the far hub (row D6b): its record's `theirs` (the far
-/// hub's `ENROLL` landed here) and `reachable` (`PairView::reachable`: a connection attributed
-/// to it, which `Fabric::pair` can send its `ENROLL` on).
+/// What a waiting attempt last saw of the far hub (rows D6b, D6c): its record's `theirs` (the far
+/// hub's `ENROLL` landed here) and `reachable` (a connection attributed to it,
+/// `Fabric::attributed_on`, which `Fabric::pair` can send its `ENROLL` on, whatever the pair's
+/// `via`).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 struct FarSeen {
     theirs: bool,
@@ -927,17 +929,6 @@ struct FarSeen {
 }
 
 impl FarSeen {
-    /// The far hub as one status read shows it (no record: neither).
-    fn of(st: &mesh111::fabric::FabricStatus, far: &NodeId) -> FarSeen {
-        st.paired
-            .iter()
-            .find(|v| v.hub.node_id == *far)
-            .map_or_else(FarSeen::default, |v| FarSeen {
-                theirs: v.hub.theirs,
-                reachable: v.reachable,
-            })
-    }
-
     /// Row D6b: `now` is an edge worth one more `Fabric::pair`: the far hub holds `theirs` and a
     /// connection to it is up, and one of the two was not so when last seen.
     fn edge(self, now: FarSeen) -> bool {
@@ -945,17 +936,29 @@ impl FarSeen {
     }
 }
 
-/// [`FarSeen::of`] from a fresh `Fabric::status` read; `None` when the read fails.
+/// The far hub as the fabric holds it now (row D6c): `theirs` from the settings' pair record and
+/// the connection from [`mesh111::fabric::Fabric::attributed_on`] (row D2), not from
+/// `PairView::reachable`, which mesh111 computes from the carrier's heard set for a `carrier`
+/// pair, and not from a whole status read (the contact table, custody and watermarks for two bits
+/// of one hub). `None` when a read fails.
 async fn far_seen(f: &mesh111::fabric::Fabric, far: &NodeId) -> Option<FarSeen> {
-    f.status().await.ok().map(|st| FarSeen::of(&st, far))
+    let theirs = f
+        .settings()
+        .await
+        .ok()?
+        .paired_hubs
+        .iter()
+        .any(|p| p.node_id == *far && p.theirs);
+    let reachable = f.attributed_on(*far).await.ok()?.is_some();
+    Some(FarSeen { theirs, reachable })
 }
 
 /// Wait (at most until `deadline`) until `Fabric::pair` can ride a connection to the far hub
 /// (module doc, row D6b): `FabricEvent::Settings` is read only for the edge of the far record's
 /// `theirs` (an unrelated settings change, whatever it holds, wakes nothing); while `theirs` is
 /// held, `FabricEvent::Fabric` (emitted on a link-up and on a connection's attribution) is read
-/// for a connection coming up. Either is then checked with one status read, and `true` is
-/// answered only on [`FarSeen::edge`]; after a lag the status is re-read the same way. `seen` is
+/// for a connection coming up. Either is then checked with one read of the far hub ([`far_seen`]), and `true` is
+/// answered only on [`FarSeen::edge`]; after a lag it is re-read the same way. `seen` is
 /// kept up to date.
 async fn far_ready(
     f: &mesh111::fabric::Fabric,

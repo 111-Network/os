@@ -1176,6 +1176,56 @@ async fn a_waiting_attempt_runs_again_only_on_an_edge_with_a_connection() {
     assert_eq!(b.unpair(&a.id).status, 204);
 }
 
+/// Row D6c finding 1. A waiting attempt on a `carrier` pair (an addressless bundle) runs again
+/// once the far hub dials and enrols here: the gate reads the attributed connection
+/// (`Fabric::attributed_on`), not `PairView::reachable`, which mesh111 fills from the carrier's
+/// heard set (a whole pair only), so before the fix the attempt waited out its window.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_carrier_pair_waiting_without_an_address_runs_on_the_far_hubs_connection() {
+    use node111::daemon::relay::pair::{pair_within, PairAttempts, PairPick};
+    let a = node(true).await;
+    let b = node(true).await;
+    let attempts = Arc::new(PairAttempts::default());
+    // 1. a scans b's carrier bundle without its address: nothing to dial, the attempt waits
+    let r = pair_within(
+        &a.fabric,
+        &attempts,
+        &a.layout.root,
+        PairPick {
+            bundle: addressless(&b.offer("peer", "carrier")),
+            role: PairRole::Peer,
+            via: PairVia::Carrier,
+            lan: false,
+            accept_warning: None,
+        },
+        Duration::from_secs(120),
+    )
+    .await;
+    assert!(r.is_ok(), "{r:?}");
+    assert!(attempts.in_flight(&b.id).await);
+    // 2. b scans a's carrier bundle and dials it: b enrols here (`theirs`) on a connection
+    //    attributed to b, the waiting attempt rides it, and both pairs become whole
+    let r = b.pair(json!({"bundle": a.offer("peer", "carrier"), "role": "peer", "via": "carrier"}));
+    assert_eq!(r.status, 202, "{}", r.body);
+    let whole =
+        |recs: Vec<PairedHub>, far: NodeId| recs.iter().any(|p| p.node_id == far && p.whole());
+    until(
+        30,
+        "both carrier pairs whole on the far hub's connection",
+        || async {
+            (whole(a.records().await, b.id) && whole(b.records().await, a.id)).then_some(())
+        },
+    )
+    .await;
+    until(10, "a's attempt ended", || async {
+        (!attempts.in_flight(&b.id).await).then_some(())
+    })
+    .await;
+    use node111::daemon::relay::pair::unpair;
+    unpair(&a.fabric, &attempts, b.id).await.unwrap();
+    assert_eq!(b.unpair(&a.id).status, 204);
+}
+
 /// Row D6b finding 2. A re-scan that `set_pair_link` refuses (its address is another pair's)
 /// leaves the attempt in flight, its half and its window-bound cleanup as they were. (The first
 /// attempt has no address, so it waits without the fabric's enrolment slot, which the second
