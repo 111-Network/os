@@ -6,7 +6,8 @@
 //! - `routes`  — app assembly, Host guard, static UI, legacy routes
 //! - `api_v1`  — `/api/v1/*` (auth, events bus, R2/R3 submodules)
 //! - `bind`    — listeners, LAN config, own addresses, `state/dashboard.json`
-//! - `mdns`    — `111.local` announce while LAN-bound
+//! - `mdns`    — `111.local` announce while LAN-bound; the Layer 7 `_n111._tcp`
+//!   record and browse ride its daemon (`daemon::registry`, row D8)
 
 pub mod api_v1;
 pub mod bind;
@@ -165,8 +166,12 @@ pub struct DashboardHandle {
 }
 
 impl DashboardHandle {
-    /// Withdraw the mDNS record (listeners die with the runtime).
+    /// Withdraw the mDNS records (the registry's `_n111._tcp` first, then
+    /// `111.local`; listeners die with the runtime).
     pub fn stop(&self) {
+        if let Some(reg) = crate::daemon::registry::get(&self.api) {
+            reg.withdraw();
+        }
         if let Some(a) = &self.mdns {
             a.stop();
         }
@@ -228,6 +233,13 @@ fn publish_urls(api: &ApiState, inp: &UrlInputs, force: bool) -> Option<BindInfo
 /// (LAN) a 30 s refresh of the own addresses and the URL list (DHCP can move
 /// the LAN IP). Never fails: bind errors are logged (the daemon keeps running
 /// headless, as before).
+///
+/// Layer 7 (row D8): the registry (`daemon::registry::Registry`) is put in
+/// `ApiState` ext on every node, holding the announcer's daemon only when one
+/// runs; the announcer's §3.3 re-arm subscribes the address watch
+/// (`relay::netwatch::global()`) and hands each re-armed event to the
+/// registry's lost-hub check; the existing 30 s refresh also re-syncs the
+/// `_n111._tcp` record (no timer of its own).
 pub async fn start(
     state: SharedState,
     layout: crate::daemon::DaemonLayout,
@@ -260,25 +272,54 @@ pub async fn start(
         let port = if bound.port80_ok { 80 } else { DEFAULT_PORT };
         let weak = Arc::downgrade(&api);
         let inp = Arc::clone(&inputs);
+        let rt = tokio::runtime::Handle::try_current().ok();
         mdns::Announcer::start(
             port,
             Box::new(move |host: String| {
-                *inp.mdns_host.lock().unwrap() = Some(host);
+                *inp.mdns_host.lock().unwrap() = Some(host.clone());
                 if let Some(api) = weak.upgrade() {
                     publish_urls(&api, &inp, false);
+                    // the `_n111._tcp` record follows the renamed host (§7.1)
+                    if let Some(reg) = crate::daemon::registry::get(&api) {
+                        reg.set_host(&host);
+                        if let Some(rt) = &rt {
+                            rt.spawn(async move { reg.sync_record().await });
+                        }
+                    }
                 }
             }),
         )
     } else {
         None
     };
-    if mdns.is_some() {
+    let host = if mdns.is_some() {
         // a rename may already have landed from the monitor thread; keep it
         inputs
             .mdns_host
             .lock()
             .unwrap()
-            .get_or_insert_with(|| mdns::HOSTNAME.trim_end_matches('.').to_string());
+            .get_or_insert_with(|| mdns::HOSTNAME.trim_end_matches('.').to_string())
+            .clone()
+    } else {
+        mdns::HOSTNAME.trim_end_matches('.').to_string()
+    };
+    let registry = Arc::new(crate::daemon::registry::Registry::new(
+        mdns.as_ref().and_then(|a| a.ops()),
+        &host,
+        crate::config::on_termux(),
+    ));
+    registry.bind_api(&api);
+    api.insert_ext(Arc::clone(&registry));
+    if let Some(a) = &mdns {
+        let weak = Arc::downgrade(&registry);
+        a.start_rearm(
+            crate::daemon::relay::netwatch::global(),
+            Arc::new(move || {
+                if let Some(reg) = weak.upgrade() {
+                    reg.on_address_event();
+                }
+            }),
+        );
     }
     let info = publish_urls(&api, &inputs, true).unwrap_or_default();
     if !info.urls.is_empty() {
@@ -308,6 +349,10 @@ pub async fn start(
                         "111 daemon: dashboard URLs changed: {}",
                         info.urls.join(" · ")
                     );
+                }
+                // Layer 7 §7.1: a fabric settings change shows here (no timer of its own)
+                if let Some(reg) = crate::daemon::registry::get(&api) {
+                    reg.sync_record().await;
                 }
             }
         });

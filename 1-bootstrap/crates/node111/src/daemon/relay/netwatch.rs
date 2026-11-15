@@ -259,7 +259,7 @@ impl Drop for IfAddrs {
 
 /// One `getifaddrs(3)` walk into [`NetEntry`] rows. `None` when the call fails or the list is
 /// longer than [`IFADDRS_MAX`]. Entries of another family are skipped.
-fn read_interfaces() -> Option<Vec<NetEntry>> {
+pub(crate) fn read_interfaces() -> Option<Vec<NetEntry>> {
     let mut head: *mut libc::ifaddrs = std::ptr::null_mut();
     // SAFETY: getifaddrs writes a list head we own and free through `IfAddrs`.
     if unsafe { libc::getifaddrs(&mut head) } != 0 {

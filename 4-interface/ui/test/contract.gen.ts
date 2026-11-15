@@ -2413,7 +2413,7 @@ export const schemas: Record<string, JsonSchema> = {
     "properties": {
       "lan_record": {
         "type": "boolean",
-        "description": "the `_111._tcp` DNS-SD record (§7.1); needs LAN sharing and a LAN-bound listener"
+        "description": "the `_n111._tcp` DNS-SD record (§7.1); needs LAN sharing and a LAN-bound listener"
       },
       "public_gateway_bit": {
         "type": "boolean",

@@ -512,13 +512,13 @@ gap = "Rows D7 and D5b landed: the serving side runs in process (origin_serve th
 
 [[seam]]
 id = "L1-L7:registry-dnssd"
-status = "stub"
+status = "built"
 spec = ["7-relay/README.md §7"]
 a = { layer = 1, files = ["1-bootstrap/crates/node111/src/daemon/registry/mod.rs"] }
 b = { layer = 7, files = ["1-bootstrap/crates/node111/src/daemon/dashboard/mdns.rs"] }
 read_first = "a"
-symptom = "no 'Find my hub': 409 lan_off, an empty GET /registry"
-gap = "None: a T0 stub."
+symptom = "no 'Find my hub': 409 lan_off, an empty GET /registry; the _n111._tcp record missing or stale"
+gap = "Row D8 landed: the record, the browse and the lost-hub rehome run against real mdns-sd daemons and real fabrics on loopback (tests/registry_mdns.rs), the re-arm in a network namespace; G8 (presence.sh) still prints SKIPPED, so no two-host LAN run."
 
 [[seam]]
 id = "L1-L7:relay-state"

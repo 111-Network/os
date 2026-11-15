@@ -1411,7 +1411,6 @@ const UNROUTED: &[&str] = &[
     "patchRelaySettings",
     "checkRelayCarrier",
     "flushRelayCarrier",
-    "browseRegistry",
 ];
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

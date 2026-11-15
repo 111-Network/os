@@ -35,6 +35,9 @@ pub fn start(api: &Arc<ApiState>, fabric: &Arc<FabricHandle>) {
     // §2.1–§2.3 (D2): presence has no switch (event-derived on every node); this binds the empty
     // book to the fabric handle and lists the `111` Nearby source. Nothing spawned or scheduled.
     presence::install(api, fabric);
+    // §7.1 (D8): the registry binds the fabric and syncs the `_n111._tcp` record once; it holds
+    // an mDNS daemon only where the dashboard's announcer runs (nothing started here).
+    crate::daemon::registry::install(api, fabric);
 }
 
 /// One fabric event to the Layer 7 consumers: the presence facts (§2.1, §2.2; D2) and the `gateway`

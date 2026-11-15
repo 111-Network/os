@@ -228,7 +228,7 @@ export const DISCOVERY_BITS: readonly DiscoveryBit[] = [
   {
     id: "lan_record",
     label: "LAN record",
-    cost: "Announces this node on your local network as _111._tcp so others can find it without a code. It is a hint, not a proof: anyone on the network can read it and anyone could forge one. Needs LAN sharing.",
+    cost: "Announces this node on your local network as _n111._tcp so others can find it without a code. It is a hint, not a proof: anyone on the network can read it and anyone could forge one. Needs LAN sharing.",
   },
   {
     id: "public_gateway_bit",

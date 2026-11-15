@@ -1772,8 +1772,12 @@ impl FabricHandle {
                 return Err(e);
             }
         };
-        if still.is_some_and(|h| h.node_id == fabric_hub.node_id && h.address == Some(address)) {
-            // the fabric's own copy moved here meanwhile: nothing to override
+        if fabric_hub.address != Some(address)
+            && still.is_some_and(|h| h.node_id == fabric_hub.node_id && h.address == Some(address))
+        {
+            // the fabric's own copy moved here meanwhile: nothing to override. When it was here
+            // from the start (an override elsewhere, then the hub back at the fabric's own
+            // address: Layer 7 row D8), the override is dropped below and its dial released
             drop(one);
             return Ok(true);
         }

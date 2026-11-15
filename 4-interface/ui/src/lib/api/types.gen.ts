@@ -1121,7 +1121,7 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** @description Look for 111 nodes here (§7.1, §7.7): a DNS-SD browse of `_111._tcp` for at most 5 s, then stop. 202; the rows arrive on the `registry` frame. Only where the dashboard's mDNS daemon already runs: 409 `lan_off` while LAN sharing is off (nothing is started). A human; the agent's bearer is refused (401). */
+        /** @description Look for 111 nodes here (§7.1, §7.7): a DNS-SD browse of `_n111._tcp` for at most 5 s, then stop. 202; the rows arrive on the `registry` frame. Only where the dashboard's mDNS daemon already runs: 409 `lan_off` while LAN sharing is off (nothing is started). A human; the agent's bearer is refused (401). */
         post: operations["browseRegistry"];
         delete?: never;
         options?: never;
@@ -2692,7 +2692,7 @@ export interface components {
             owner: string;
         };
         RelayDiscovery: {
-            /** @description the `_111._tcp` DNS-SD record (§7.1); needs LAN sharing and a LAN-bound listener */
+            /** @description the `_n111._tcp` DNS-SD record (§7.1); needs LAN sharing and a LAN-bound listener */
             lan_record: boolean;
             /** @description role bit 3 (§7.2): everyone who receives the card learns this node has internet; needs its `gateway_bit` consent */
             public_gateway_bit: boolean;

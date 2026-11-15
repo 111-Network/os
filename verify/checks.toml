@@ -922,6 +922,30 @@ covered_by = "l1.gate"
 strength = "I"
 needs = ["cargo"]
 
+# Row D8: the Service Discovery Registry (§7.1, §7.6, §7.7). The `_n111._tcp` record's presence rule and TXT over real fabrics on
+# loopback with a recording daemon (never on Termux; an idle sync reads nothing; a refused register waits for an input change;
+# the shutdown goodbye withdraws a record a sync in flight registers), the record resolved between two real mdns-sd daemons
+# under the real type, a real browse stopped within 5 s, POST /registry/browse through the real dashboard app (409 lan_off,
+# bearer 401, 202 and the registry frame), and "Find my hub" on a member: a forged hint refused by the handshake, the held
+# dead address never taken for success, the hub's new address kept only after its handshake (M5's replace_home_hub_address),
+# no browse while the redial back-off grows, the same browse with no call once it sits at its maximum, a forged flood held
+# to REHOME_MAX tries per browse with a human's call queued (its frame arrives) and the real record reached next browse.
+[[check]]
+id = "l1.node111.registry_mdns"
+kind = "unit"
+cmd = ["cargo", "test", "--manifest-path", "1-bootstrap/Cargo.toml", "-p", "node111", "--test", "registry_mdns"]
+tier = "slow"
+layers = [1, 4, 5, 7]
+seams = ["L1-L7:registry-dnssd", "L4-L7:relay-api"]
+adapter = "libtest"
+cargo = true
+timeout_s = 1800
+rerun = "cargo test --manifest-path 1-bootstrap/Cargo.toml -p node111 --test registry_mdns -- --exact {test}"
+rerun_cost = "slow, ~10 s warm"
+covered_by = "l1.gate"
+strength = "I"
+needs = ["cargo"]
+
 # Row D5 (landed): TLS 1.3 with raw public keys for paired-hub links through mesh111's tcp-lan stream seam: two real TcpLan
 # adapters on loopback with relay::tls::wrap over their own pair tables and link keys; raw rustls peers stand in for the
 # misbehaving far ends (a wrong client key, a wrong server key, X.509, TLS 1.2, a non-Ed25519 key: each refused before any
