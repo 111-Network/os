@@ -568,6 +568,18 @@ may pin later); a CD workflow now (needs the musl toolchains on the runner, a re
 - **Why:** the panel's blockers were seams and honesty gaps, D31 closed the forks, the re-check found nothing of weight, and the spec is wired to the
   built layers by citations re-read at the lock head.
 
+## D33 — Layer 7 lock amendment (open)
+
+- **Date:** opened 2026-11-15; closes with the Layer 7 Summary (`7-relay/TASKS.md`), when the candidates written on the board rows are ruled.
+- **Ruled so far:**
+  - **The DNS-SD service type is `_n111._tcp`** (owner, 2026-11-15). The spec's `_111._tcp` is not a valid service name: RFC 6335 §5.1 requires
+    at least one letter, and `mdns-sd` (`check_service_name`) refuses to register it, so the record could never exist; browsing it still worked.
+    Found by the D8 author. Applied to `7-relay/README.md`, `4-interface/api/openapi.yaml` (descriptions only, no schema change) and the
+    reference in `6-transport/README.md`; plan research and options keep the old name as history.
+  - **Rejected:** `_mesh111._tcp`, `_node111._tcp` (longer, no gain); keeping `_111._tcp` with a patched `mdns-sd` (a fork for a name).
+- **Candidates still open:** on the board rows (the handoff of 2026-11-15 lists them: store v5, the struck README rewordings, consent through
+  PATCH, the node's own target triple, the topic KDF, the `wan` row name, D6's deviations, D2's paired-hub evidence, D8's `redial_at_max` seam).
+
 ## D34 — Layer 8 (Storage & Shared State) design decisions
 
 - **Date:** 2026-11-11
