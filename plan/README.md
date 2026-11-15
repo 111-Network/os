@@ -20,7 +20,7 @@ os/plan/
   INDEX.md             status board
   DECISIONS.md         decision log
   EXECUTION.md         build protocol
-  HANDOFF-<date>.md    session handoff (the newest open one is current: HANDOFF-2026-11-02.md; see "Handoffs")
+  HANDOFF-<date>.md    session handoff (the newest open one is current: HANDOFF-2026-11-15.md; see "Handoffs")
   cross-layer/         material that spans layers (devices.md, parked.md, ci-cd.md — CI/CD + GitHub hygiene, D28)
     devices.md           device-connection core brief (Layer 6 opener; read by Layers 4, 5, 6)
     parked.md            ideas parked by the owner for later layers
@@ -98,7 +98,7 @@ and `os/N-<slug>/TASKS.md`, where the layer's code is.
 
 A handoff is the one document a fresh session needs to continue exactly where work stopped. It lives at the plan root as
 `HANDOFF-YYYY-MM-DD.md` while it is current. Once its work is done it is marked closed at the top and stays as the record; the newest open one is current.
-The handoffs so far: [`HANDOFF-2026-10-15.md`](HANDOFF-2026-10-15.md) (Layer 5, historical) and [`HANDOFF-2026-10-20.md`](HANDOFF-2026-10-20.md) (Layer 6, closed 2026-10-23) and [`HANDOFF-2026-11-02.md`](HANDOFF-2026-11-02.md) (Layer 7, **open**: the current state).
+The handoffs so far: [`HANDOFF-2026-10-15.md`](HANDOFF-2026-10-15.md) (Layer 5, historical) and [`HANDOFF-2026-10-20.md`](HANDOFF-2026-10-20.md) (Layer 6, closed 2026-10-23) and [`HANDOFF-2026-11-02.md`](HANDOFF-2026-11-02.md) (Layer 7 paused after Wave 0, superseded) and [`HANDOFF-2026-11-12.md`](HANDOFF-2026-11-12.md) (the owner's stop, closed 2026-11-15) and [`HANDOFF-2026-11-15.md`](HANDOFF-2026-11-15.md) (written for the merge of pull request 5, **open**: the current state).
 The 2026-10-15 handoff's paths were rewritten to the numbered layer folders on 2026-10-18 and again on 2026-10-20; the state it describes is unchanged.
 
 > The paths in the section below are as they were on 2026-10-15. The layer folders at the repo root and under `layers/`

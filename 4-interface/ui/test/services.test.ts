@@ -1,6 +1,6 @@
 // Service page logic: the state matrix (what each state shows and offers) and the detail flattening.
 import { describe, expect, it } from "vitest";
-import { buildFixtures } from "../src/lib/api/mock/fixtures";
+import { buildFixtures, GATEWAY_CARRIER_OK } from "../src/lib/api/mock/fixtures";
 import type { ServiceRecord } from "../src/lib/api/types";
 import { ApiError } from "../src/lib/api/problem";
 import {
@@ -59,7 +59,7 @@ describe("servicePageState", () => {
     expect(servicePageState(svc("radio", { can_run_here: false }), true)).toMatchObject({ body: "unavailable", handoff: null });
   });
 
-  it("unset with no setup step (internet gateway): explains, offers nothing", () => {
+  it("unset with no agent hand-off (gateway: the owner's own switch in Settings, Layer 7): explains, offers nothing", () => {
     expect(NO_SETUP_SERVICES.has("gateway")).toBe(true);
     const p = servicePageState(svc("gateway", { state: "unset" }), true);
     expect(p).toMatchObject({ body: "unset", handoff: null });
@@ -160,7 +160,7 @@ describe("flattenDetail", () => {
 
   it("works on every real fixture record", () => {
     for (const s of fx.services) expect(() => flattenDetail(s.detail, NOW)).not.toThrow();
-    expect(flattenDetail(svc("gateway").detail, NOW).map((r) => r.label)).toEqual(["Probe", "Interval sec", "Last probe"]);
+    expect(flattenDetail(svc("gateway", { detail: { ...GATEWAY_CARRIER_OK.detail } }).detail, NOW).map((r) => r.label)).toEqual(["Carrier", "Endpoint", "Mode", "Last check", "Last flush", "Pending"]);
   });
 });
 

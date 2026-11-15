@@ -1,0 +1,3 @@
+{"exit_declared": true}
+{"id": "fx.emit/4/daemon-up-on-127.0.0.1-n-within-4s", "status": "PASS", "log_line": 3, "phase": "4. namespace + daemon", "seams": ["L1-L2:fx-alpha"]}
+{"id": "fx.emit/5a/get-serves-index.html", "status": "FAIL", "reason": "a FAIL: line of the log that the T111_RESULTS file lacks", "assertion": "GET / serves index.html  [HTTP 500: boom]", "log_line": 6, "phase": "5a. static UI + Host guard", "seams": ["L4-L5:fx-ui"]}

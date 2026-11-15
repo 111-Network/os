@@ -1,0 +1,22 @@
+test_doc_fails (test_doc.Doc.test_doc_fails)
+A failing one with a docstring. ... FAIL
+test_doc_skip (test_doc.Doc.test_doc_skip)
+Skipped, documented. ... skipped 'not on this box'
+test_plain (test_doc.Doc.test_plain) ... ok
+test_with_doc (test_doc.Doc.test_with_doc)
+Explains itself in a docstring. ... ok
+
+======================================================================
+FAIL: test_doc_fails (test_doc.Doc.test_doc_fails)
+A failing one with a docstring.
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/tmp/x3/ut/tests/test_doc.py", line 9, in test_doc_fails
+    self.assertEqual(1, 2)
+    ~~~~~~~~~~~~~~~~^^^^^^
+AssertionError: 1 != 2
+
+----------------------------------------------------------------------
+Ran 4 tests in 0.001s
+
+FAILED (failures=1, skipped=1)

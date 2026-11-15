@@ -106,7 +106,7 @@ function SettingToggle({ id, label, help, field, gated, fabric }: { id: string; 
 
 // ------------------------------------------------------------------------------------------ enroll
 
-function ScanBox({ onText }: { onText: (text: string) => void }) {
+export function ScanBox({ onText }: { onText: (text: string) => void }) {
   const [scanning, setScanning] = useState(false);
   const [problem, setProblem] = useState<string | null>(null);
   const file = useRef<HTMLInputElement>(null);

@@ -1,0 +1,43 @@
+
+== 1. UI build  (t+0.0s)
+ok: dist built (vite, 412 modules)
+
+== 2. cargo build (debug)  (t+31.2s)
+ok: 111 and 111-agent built
+
+== 3. scratch node root  (t+95.4s)
+ok: identity generated (6f1c2a9e0b7d4c3a8e5f1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8091a2b3c4d)
+ok: root: releases/2026.10.12 (bin/111-agent → target, bin/llama-server → stub-llama.py), 3 KB entries pinned, models/current/stub.gguf, etc/env DASHBOARD_LAN=true
+
+== 4. namespace + daemon  (t+96.1s)
+ok: namespace shell has default SIGINT/SIGTERM (SigIgn=0000000000000000)
+ok: daemon up on 127.0.0.1:11180 within 4s
+
+== 5a. static UI + Host guard  (t+99.0s)
+ok: GET / serves index.html (200)
+ok: a foreign Host header is refused (421)
+
+== 5b. /api/v1 reads (loopback)  (t+101.3s)
+ok: GET /api/v1/node (200)
+ok: GET /api/v1/peers (200)
+
+== 5c. events: reset, then Last-Event-ID replay  (t+103.0s)
+ok: a reset frame first
+
+== 5d. auth from a real non-loopback source (192.168.77.5 on dummy0)  (t+104.2s)
+ok: LAN without a token is 401
+
+== 5e. chat relay (stub model through the real 111-agent)  (t+107.9s)
+FAIL: the stream ends with a done frame  [HTTP 502: {"code":"agent_unreachable","detail":"connect: refused"}]
+
+== 5f. proposals, decisions, agent task → proposal frames  (t+130.4s)
+FAIL: a decision frame follows the accept  [HTTP 000: ]
+
+== 5g. per-service restart (supervised child vs not)  (t+140.0s)
+ok: the agent restarts alone
+
+== 5h. update check + node restart  (t+150.2s)
+ok: update check answers 204
+
+SMOKE RED — 2 FAIL line(s) in 160.7s
+note: scratch kept at /tmp/x3/smoke.Ab12Cd/work (daemon.log, agent/, http/)

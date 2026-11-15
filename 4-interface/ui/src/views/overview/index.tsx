@@ -1,5 +1,5 @@
 // Overview (spec 6.2): one verdict sentence, what needs the user, then the node at a glance.
-import { useEffect, useMemo } from "react";
+import { useEffect, useMemo, useSyncExternalStore } from "react";
 import { hrefTo, routeFragment, useAppLocation } from "../../app/location";
 import { useNow } from "../../app/hooks";
 import { Button } from "../../components/button";
@@ -12,20 +12,29 @@ import { SectionHeader } from "../../components/section-header";
 import { SpecTable, type SpecRow } from "../../components/spec-table";
 import { StatusDot } from "../../components/status-dot";
 import { useActivity, useAttention, useConnection, useDevices, useProposals, useServices, useStatus } from "../../lib/api/hooks";
-import type { ServiceRecord } from "../../lib/api/types";
+import { apiStore } from "../../lib/api/store";
+import type { RelayStatus, ServiceRecord } from "../../lib/api/types";
 import { cx, FOCUS_RING } from "../../lib/cx";
 import { Adv } from "../../lib/mode";
 import { deviceDot } from "../../lib/devices";
 import { categoryLabel, dotState } from "../../lib/nav";
 import { agentHrefFor, buildPrompt, stagePrompt } from "../../lib/prompts";
 import { verdict, verdictDot } from "../../lib/verdict";
-import { reasonText } from "../services/model";
+import { METERED_CAP_TEXT, reasonText } from "../services/model";
 import { NeedsFirmwareTag } from "../devices/needs-firmware";
 import { RouteLink } from "../services/shared";
 import { devicesSummary, needsYou, nearbySentence, nodeFacts, NEEDS_YOU_ID, recentActivity, type ChecklistRow, type NeedItem } from "./model";
 
 const LABEL = "font-mono text-[10px] uppercase tracking-widest text-muted-foreground";
 const TEXT = "font-mono text-xs leading-relaxed text-muted-foreground";
+
+/**
+ * The Layer 7 relay slice, read here only for the metered line beside the badge (the badge itself comes from the `gateway` service row, which
+ * every node has). The daemon sends a `relay` frame only on change, so a cold load would never fill it: Overview asks once (a one-shot GET, no
+ * poll) when that row says this node is a gateway (`carrier_ok` or `carrier_pending`). A node without a gateway, or without Layer 7, costs nothing.
+ */
+const relaySlice = (): RelayStatus | null => apiStore.getState().relay;
+const useRelaySlice = (): RelayStatus | null => useSyncExternalStore(apiStore.subscribe, relaySlice, relaySlice);
 
 const KIND_LABEL: Record<NeedItem["kind"], string> = { proposal: "proposal", service: "service", device: "device", request: "messages" };
 
@@ -179,9 +188,20 @@ function ServicesGrid() {
   );
 }
 
+/** The gateway row says this node is a gateway whose carrier answers or whose items wait: the only states with a metered line to show. */
+const isGateway = (services: readonly ServiceRecord[] | null): boolean => {
+  const code = services?.find((s) => s.id === "gateway")?.reason_code;
+  return code === "carrier_ok" || code === "carrier_pending";
+};
+
 export default function OverviewView() {
+  const relay = useRelaySlice();
   const status = useStatus();
   const services = useServices();
+  const gateway = isGateway(services);
+  useEffect(() => {
+    if (gateway) void apiStore.refreshRelay();
+  }, [gateway]);
   const devices = useDevices();
   const activity = useActivity();
   const { disconnected } = useConnection();
@@ -217,7 +237,15 @@ export default function OverviewView() {
         { label: "Uptime", value: facts.uptime },
         { label: "Updates", value: facts.update },
         { label: "Last update check", value: facts.lastCheck },
-        { label: "Internet gateway", value: facts.gateway },
+        {
+          label: "Gateway",
+          value: (
+            <span className="flex flex-col items-end" data-testid="gateway-badge">
+              <span>{facts.gateway}</span>
+              {relay?.gateway?.metered_cap_reached === true ? <span className="text-muted-foreground">{METERED_CAP_TEXT}</span> : null}
+            </span>
+          ),
+        },
         {
           label: "Dashboard address",
           value:
@@ -259,7 +287,7 @@ export default function OverviewView() {
           <p className="font-mono text-sm leading-relaxed text-foreground">{nearbySentence(status)}</p>
           <Adv>
             <p className={TEXT}>
-              This card only says whether anyone has been heard. The Meshtastic nodes a board has heard are listed on the Nearby page; radar and map views arrive with Layer 7 (Relay &amp; presence).
+              This card only says whether anyone has been heard. The Meshtastic nodes a board has heard are listed on the Nearby page, which also shows the radar; a map view is not in this version.
             </p>
           </Adv>
           <RouteLink to="/nearby" className="inline-flex min-h-11 items-center font-mono text-xs">

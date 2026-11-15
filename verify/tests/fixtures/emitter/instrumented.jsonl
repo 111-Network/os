@@ -1,0 +1,5 @@
+{"exit_declared": true}
+{"id": "fx.emit/4/daemon-up-on-127.0.0.1-n-within-4s", "status": "PASS", "log_line": 3, "phase": "4. namespace + daemon", "seams": ["L1-L2:fx-alpha"]}
+{"id": "fx.emit/5a/get-serves-index.html", "status": "FAIL", "assertion": "GET / serves index.html  [HTTP 500: boom]", "log_line": 6, "phase": "5a. static UI + Host guard", "seams": ["L4-L5:fx-ui"]}
+{"id": "fx.emit/5d/lan", "status": "SKIPPED", "reason": "no dummy0 module", "phase": "5d. auth"}
+{"id": "fx.emit/emitter", "status": "FAIL", "reason": "T111_RESULTS line 4 is not a result object", "assertion": "this line is not JSON", "after": "fx.emit/5a/get-serves-index.html"}

@@ -1,0 +1,85 @@
+# The clean lint fixture's catalog (see seams.toml).
+
+[[check]]
+id = "l1.gate"
+kind = "gate"
+cmd = ["python3", "-I", "fx/check.py", "--gate"]
+tier = "slow"
+layers = [1, 2]
+seams = ["L1-L2:alpha"]
+phases = { "5e" = ["L1-L2:alpha"], "8" = ["X:notices"] }
+strength = "R"
+timeout_s = 600
+rerun_cost = "slow, ~4 min"
+
+[[check]]
+id = "l1.alpha"
+kind = "unit"
+cmd = ["python3", "-I", "fx/check.py"]
+tier = "fast"
+layers = [1, 2]
+seams = ["L1-L2:alpha"]
+strength = "R"
+timeout_s = 30
+rerun = "python3 -I fx/check.py {test}  # {check}"
+rerun_cost = "fast, ~1 s"
+covered_by = "l1.gate"
+
+[[check]]
+id = "l4.api"
+kind = "unit"
+cmd = ["cargo", "test", "--manifest-path", "1-bootstrap/Cargo.toml", "-p", "node111", "--test", "api_x", "--", "--exact", "{test}"]
+tier = "slow"
+layers = [3, 4]
+seams = ["L3-L4:faked"]
+strength = "F"
+cargo = true
+timeout_s = 600
+
+[[check]]
+id = "l4.ui.a"
+kind = "unit"
+cmd = ["pnpm", "exec", "vitest", "run", "test/a.test.ts"]
+cwd = "4-interface/ui"
+tier = "slow"
+layers = [4]
+seams = ["L3-L4:faked"]
+strength = "F"
+timeout_s = 300
+needs = ["pnpm"]
+
+[[check]]
+id = "l5.side"
+kind = "unit"
+cmd = ["sh", "run-tests.sh"]
+cwd = "5-messaging/sidecars/side"
+tier = "fast"
+layers = [5]
+strength = "I"
+timeout_s = 60
+
+[[check]]
+id = "x.fixture"
+kind = "unit"
+cmd = ["python3", "-I", "{root}/fx/check.py", "--out", "{scratch}/x.json"]
+tier = "fast"
+layers = ["X"]
+seams = ["X:notices"]
+strength = "C"
+timeout_s = 30
+
+[[fake]]
+path = "fx/fake.txt"
+mirrors = "b"
+seam = "L3-L4:faked"
+parity = "none"
+
+[[known]]
+test = "l4.api/*"
+condition = "euid0"
+source = "fx/SPEC.md:1"
+check = "l4.api"
+
+[unmapped]
+"3-intelligence/verify/helper.sh" = "a helper sourced by other scripts"
+"1-bootstrap/crates/node111/tests/skip_*.rs" = "scratch tests with no seam"

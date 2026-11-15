@@ -1,0 +1,7 @@
+
+== 2. the helper started before rnsd never becomes the instance (R07 check 1b)  (t+3.2s)
+ok: the helper waits for rnsd
+FAIL: the helper became the shared instance  [HTTP ?: ]
+
+G3: 1 ok, 1 FAIL in 9.4s
+G3: 1 FAIL

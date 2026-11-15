@@ -1,0 +1,8 @@
+
+== 4. namespace + daemon  (t+1.0s)
+ok: daemon up on 127.0.0.1:11180 within 4s
+
+== 5a. static UI + Host guard  (t+2.0s)
+FAIL: GET / serves index.html  [HTTP 500: boom]
+
+SMOKE RED — 1 FAIL line(s) in 3.0s

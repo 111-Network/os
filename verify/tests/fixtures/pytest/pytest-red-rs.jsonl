@@ -1,0 +1,3 @@
+{"exit_declared": true}
+{"id": "fx.py/tests/test_presence.py:20", "status": "SKIPPED", "reason": "skipped: no meshtastic module", "log_line": 12, "test": "tests/test_presence.py:20"}
+{"id": "fx.py/tests/test_presence.py::test_planted", "status": "FAIL", "assertion": "E       assert 1 == 2\nE        +  where 1 = decode(b'x')\ntests/test_presence.py:14: AssertionError", "log_line": 3, "test": "tests/test_presence.py::test_planted"}

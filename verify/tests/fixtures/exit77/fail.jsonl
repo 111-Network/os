@@ -1,0 +1,2 @@
+{"exit_declared": false}
+{"id": "fx.e77", "status": "FAIL", "reason": "exit 1", "assertion": "FAIL: namespace install errored\n--- fixture server log ---\nlistening on 127.0.0.1:41234", "log_line": 1}

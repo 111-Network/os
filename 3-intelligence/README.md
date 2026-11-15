@@ -45,7 +45,7 @@ The agent's only curated knowledge source is the local KB snapshot at `/var/lib/
 
 - **Chat → Layer 4.** `111-agent` owns the backend: `POST /v1/chat` (grounded multi-turn chat), `GET /v1/agent/events` (activity stream for the notifications surface), `GET /v1/agent/status`. Layer 4 renders; it never talks to llama-server directly. Localhost only until Layer 4 auth exists — LAN binding follows the bootstrap dashboard's explicit opt-in rule.
 - **Tasks → Layer 9.** `POST /v1/agent/task` `{kind: diagnose | propose | patch, refs…}` → task id; progress rides the events stream; the result is a proposal document under `/var/lib/111/agent/proposals/`. `patch` requires a hub (opencode); elsewhere it refuses with `needs hub` — the bootstrap refusal philosophy: clear message, never a silent skip.
-- **Offload ← Layers 5/7.** A model-less node's `111-agent` points its model base URL at a nearby hub discovered via the Service Discovery Registry (Layer 7 broadcasts hub role, model, load); traffic rides Layer 5's encrypted fabric. Layer 3 invents no mesh protocol, and a hub never proxies inference to the WAN. *[In v1 (Layer 5, D20) offload stays on the LAN binding + pairing auth — not v1 fabric traffic.]*
+- **Offload ← Layers 5/7.** A model-less node's `111-agent` points its model base URL at a nearby hub discovered via the Service Discovery Registry (Layer 7's registry: the hub role as a signed bit, model and load by a sealed query, Layer 7 §7); in v1 offload rides the LAN binding with pairing and a private IP literal. Layer 3 invents no mesh protocol, and a hub never proxies inference to the WAN. *[In v1 (Layer 5, D20) offload stays on the LAN binding + pairing auth — not v1 fabric traffic.]*
 - **Identity ← Layer 2.** The agent signs its outbound artifacts (proposals, patch PRs) with the node key; hub offload endpoints authenticate peers by node identity. Until Layer 2 lands, the provisional secp256k1 identity (D9) sits behind the same seam.
 - **State ← Layer 8.** Conversations, task journal, and proposals live under `/var/lib/111/agent/` in the encrypted local store — capacity-pruned, never policy-expired.
 - **Health ← Layer 1, → Layer 9.** Both children expose `/health` (200/503); `111d` restarts a dead child ≤10 s and owns the watchdog. Agent state is honest and distinct: `local | offloaded | unavailable`.
@@ -172,6 +172,19 @@ can reset a board); a device whose record already carries `firmware.source == "p
 writes nothing. `service.restart` writes the single action `service.restart` and makes **no** daemon call at all: a restart
 route is never requested, and 111d answers `not_supervised` on accept for an unsupervised child.
 
-Count pins: `tests/daemon_tools.rs` (schema count 17, new names in order) and `tests/chat_loop.rs` (17 tools offered).
+Count pins: `tests/daemon_tools.rs` (schema count 17, new names in order) and `tests/chat_loop.rs` (17 tools offered). Since Layer 7 both pins read 20: the appendix below.
 New tests: `tests/layer6_tools.rs` (a stub 111d serving the new GET routes). No dependency, resident process or timer is
 added: the tools are plain functions that run only inside a chat turn.
+
+## Appendix — Layer 7 tools (D30-D32, 2026-11-11)
+
+Additive (`os/7-relay/README.md` §13.3, §18, §19 item 6; recorded here by Layer 7 task K2). Built by Layer 7 row A1: the code offers twenty.
+The tool set stays fixed, shell-free and schema-validated (D10) and grows from seventeen to **twenty**: `presence.read` (the `111` Nearby
+source rows with their evidence, inside a labelled untrusted block) · `gateway.read` (the relay
+status, with no secret in it) · `relay.propose` (a proposal of kind `relay`: gateway enable, pairing screen, carrier flush; a heartbeat interval is
+refused `unsupported_action` in v1). `nearby.read` grows: it includes the `111` source and, after a human ran the hop lookup, the Reticulum hop
+counts; it never triggers a run. The agent writes nothing and never accepts a consent, enters a code or sees a secret: its bearer is refused on
+every non-GET, and names and evidence reach the model only as untrusted text. Offload keeps the private-IP-literal rule: a registry row becomes an
+offload target only as the guarded model base admits (typed by the user in v1, a query reply in v1.1), never from a DNS-SD record, and a hub never
+proxies inference to the WAN. The count pins are 20 (`tests/daemon_tools.rs`, `tests/chat_loop.rs`, `tests/layer6_tools.rs`); new tests:
+`tests/layer7_tools.rs`. No dependency, resident process or timer is added.

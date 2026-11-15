@@ -1,0 +1,76 @@
+
+ RUN  v3.2.7 /tmp/x3/vt
+
+ ❯ test/red.test.ts (5 tests | 2 failed | 2 skipped) 12ms
+   ✓ parseNodeId > accepts a good id 1ms
+   × parseNodeId > planted failure 9ms
+     → expected { a: 1, b: 'x' } to deeply equal { a: 2, b: 'x' }
+   ↓ parseNodeId > a skipped one
+   ↓ parseNodeId > a todo one
+   × parseNodeId > nested > throws a multi-line error 1ms
+     → first line
+second line
+third line
+ ✓ test/green.test.ts (1 test) 3ms
+
+⎯⎯⎯⎯⎯⎯ Failed Suites 1 ⎯⎯⎯⎯⎯⎯⎯
+
+ FAIL  test/broken.test.ts [ test/broken.test.ts ]
+Error: Cannot find module './does-not-exist' imported from '/tmp/x3/vt/test/broken.test.ts'
+ ❯ test/broken.test.ts:1:1
+      1| import { nothing } from './does-not-exist'
+       | ^
+      2| describe('broken', () => { it('never runs', () => { expect(nothing).to…
+      3| 
+
+Caused by: Error: Failed to load url ./does-not-exist (resolved id: ./does-not-exist) in /tmp/x3/vt/test/broken.test.ts. Does the file exist?
+ ❯ loadAndTransform ../../../../../../../repo/4-interface/ui/node_modules/.pnpm/vite@7.3.7_@types+node@24.19.2_jiti@2.7.0_lightningcss@1.32.0/node_modules/vite/dist/node/chunks/config.js:22907:33
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/3]⎯
+
+
+⎯⎯⎯⎯⎯⎯⎯ Failed Tests 2 ⎯⎯⎯⎯⎯⎯⎯
+
+ FAIL  test/red.test.ts > parseNodeId > planted failure
+AssertionError: expected { a: 1, b: 'x' } to deeply equal { a: 2, b: 'x' }
+
+[32m- Expected[39m
+[31m+ Received[39m
+
+[2m  {[22m
+[32m-   "a": 2,[39m
+[31m+   "a": 1,[39m
+[2m    "b": "x",[22m
+[2m  }[22m
+
+ ❯ test/red.test.ts:3:58
+      1| describe('parseNodeId', () => {
+      2|   it('accepts a good id', () => { expect(1 + 1).toBe(2) })
+      3|   it('planted failure', () => { expect({ a: 1, b: 'x' }).toEqual({ a: …
+       |                                                          ^
+      4|   it.skip('a skipped one', () => {})
+      5|   it.todo('a todo one')
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[2/3]⎯
+
+ FAIL  test/red.test.ts > parseNodeId > nested > throws a multi-line error
+Error: first line
+second line
+third line
+ ❯ test/red.test.ts:7:51
+      5|   it.todo('a todo one')
+      6|   describe('nested', () => {
+      7|     it('throws a multi-line error', () => { throw new Error('first lin…
+       |                                                   ^
+      8|   })
+      9| })
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[3/3]⎯
+
+
+ Test Files  2 failed | 1 passed (3)
+      Tests  2 failed | 2 passed | 1 skipped | 1 todo (6)
+   Start at  10:28:05
+   Duration  718ms (transform 94ms, setup 0ms, collect 52ms, tests 15ms, environment 0ms, prepare 583ms)
+
+JSON report written to /tmp/x3/cap/vitest-red.json

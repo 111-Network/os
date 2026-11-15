@@ -1409,13 +1409,9 @@ fn concrete(path: &str) -> String {
 const UNROUTED: &[&str] = &[
     "flashDevice",
     "patchRelaySettings",
-    "offerRelayPair",
-    "pairRelayHub",
-    "unpairRelayHub",
     "checkRelayCarrier",
     "flushRelayCarrier",
     "browseRegistry",
-    "runNearbyHops",
 ];
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

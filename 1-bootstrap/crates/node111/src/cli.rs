@@ -1,5 +1,5 @@
 //! CLI surface: install · daemon · identity backup|restore|commission ·
-//! config · dashboard [rotate] · fabric status|offer|enroll · uninstall ·
+//! config · dashboard [rotate] · fabric status|offer|enroll|pair · uninstall ·
 //! update-helper · update-guard.
 //! Flags: --phone --serial --keep-adb --reboot-test --yes --allow-degraded --min-installer-version
 //! --version (calver). Host install and --phone are mutually exclusive.
@@ -207,6 +207,10 @@ USAGE:
   111 fabric status | offer | enroll [111HUB:BUNDLE] [--address HOST:PORT] [--card CARD]
                                    (messaging: home hub, offers, enrollment — via the running daemon;
                                     without a bundle the one-time code is typed when asked, never on argv)
+  111 fabric pair --show [--role peer|leaf|gateway] [--via tcp|carrier]
+  111 fabric pair 111PAIR:BUNDLE [--role R] [--via V] [--lan]
+                                   (hub to hub: show this hub's pairing bundle, or pair with another
+                                    hub's; --lan marks a LAN or tunnel link, which then runs plain)
   111 uninstall [--phone] [--serial SERIAL]
   111 update-helper | 111 update-guard     (root oneshots via systemd)
   111 --version";
@@ -617,6 +621,7 @@ fn identity_restore() -> anyhow::Result<()> {
         "restore aborted: old instance not confirmed retired (nothing written)"
     );
     let outcome = crate::identity::restore(&dir, &words, descriptor, true)?;
+    discard_link_key_after_restore(&crate::util::paths::root());
     println!("identity restored:");
     print_node_id(&outcome.display());
     if outcome.counter_floor_pending {
@@ -628,6 +633,25 @@ fn identity_restore() -> anyhow::Result<()> {
     }
     println!("Restart the node daemon to pick the identity up.");
     Ok(())
+}
+
+/// Layer 7 §4.2 (row D5b): the link key never survives an identity restore.
+/// Called right after a successful restore: the key is removed, so the next
+/// pairing mints a fresh one and the far hubs re-pin it from a new bundle. Its
+/// error is logged and not fatal (the identity is already restored; a key left
+/// behind is reported so the owner can remove `secrets/link-key` by hand).
+fn discard_link_key_after_restore(root: &std::path::Path) {
+    match crate::daemon::relay::linkkey::discard(root) {
+        Ok(true) => {
+            println!("the paired-hub link key was discarded; the next pairing mints a new one")
+        }
+        Ok(false) => {}
+        Err(e) => eprintln!(
+            "111 identity restore: could not discard the paired-hub link key {}: {e} \
+             (remove it by hand before the next pairing)",
+            crate::daemon::relay::linkkey::path(root).display()
+        ),
+    }
 }
 
 /// `111 identity commission` (L2 §8.3, Cat-1 ceremony, commissioner side).
@@ -690,6 +714,41 @@ fn identity_generate(burn: bool) -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Layer 7 §4.2 (row D5b): a restore discards the link key; a failure to
+    /// discard is not fatal. `identity_restore` itself needs a terminal, so
+    /// its body is checked to make the call right after a successful
+    /// `identity::restore` (removing the call fails this test).
+    #[test]
+    fn identity_restore_discards_the_link_key() {
+        use crate::daemon::relay::linkkey::{self, LinkKey};
+        let d = tempfile::tempdir().unwrap();
+        discard_link_key_after_restore(d.path()); // no key: nothing to do
+        let old = LinkKey::load_or_mint(d.path()).unwrap();
+        discard_link_key_after_restore(d.path());
+        assert!(LinkKey::load(d.path()).unwrap().is_none(), "discarded");
+        assert_ne!(LinkKey::load_or_mint(d.path()).unwrap().spki(), old.spki());
+        // A path that cannot be removed (a non-empty directory) is logged,
+        // not fatal.
+        std::fs::remove_file(linkkey::path(d.path())).unwrap();
+        std::fs::create_dir_all(linkkey::path(d.path()).join("x")).unwrap();
+        discard_link_key_after_restore(d.path());
+        assert!(linkkey::path(d.path()).is_dir());
+
+        let src = include_str!("cli.rs");
+        let start = src
+            .find("\nfn identity_restore()")
+            .expect("identity_restore");
+        let body = &src[start..];
+        let body = &body[..body[1..].find("\nfn ").map_or(body.len(), |e| e + 1)];
+        let restored = body
+            .find("crate::identity::restore(")
+            .expect("the restore call");
+        let discarded = body
+            .find("discard_link_key_after_restore(")
+            .expect("identity_restore discards the link key");
+        assert!(restored < discarded, "after the restore, not before");
+    }
 
     #[test]
     fn install_components_flag_takes_component_ids() {

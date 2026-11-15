@@ -1,0 +1,17 @@
+{"exit_declared": false}
+{"id": "fx.gate1/fmt", "status": "PASS", "log_line": 1, "phase": "fmt"}
+{"id": "fx.gate1/clippy-host", "status": "FAIL", "reason": "exit 101 in stage clippy (host)", "assertion": "    Checking node111 v2026.10.12 (/repo/1-bootstrap/crates/node111)\nerror: this `if` has identical blocks\n   --> crates/node111/src/daemon/relay/mod.rs:120:22\n    |\n120 |         if quiet { return None; } else { return None; }\n    |                  ^^^^^^^^^^^^^^^^\n    |\n    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#if_same_then_else\n    = note: `-D clippy::if-same-then-else` implied by `-D warnings`\n\nerror: could not compile `node111` (lib) due to 1 previous error", "log_line": 3, "phase": "clippy (host)", "seams": ["L1-X:fx-gate"]}
+{"id": "fx.gate1/check-musl-x86-64", "status": "SKIPPED", "reason": "not reached (stopped at clippy (host))", "phase": "check (musl x86_64)"}
+{"id": "fx.gate1/check-musl-aarch64", "status": "SKIPPED", "reason": "not reached (stopped at clippy (host))", "phase": "check (musl aarch64)"}
+{"id": "fx.gate1/test-host", "status": "SKIPPED", "reason": "not reached (stopped at clippy (host))", "phase": "test (host)"}
+{"id": "fx.gate1/shellcheck", "status": "SKIPPED", "reason": "not reached (stopped at clippy (host))", "phase": "shellcheck"}
+{"id": "fx.gate1/gate-assertions-hermetic-musl", "status": "SKIPPED", "reason": "not reached (stopped at clippy (host))", "phase": "gate assertions (hermetic: musl-env.sh self-test, this script's summary + G2 asserts, cross-build UI gate + release asserts)"}
+{"id": "fx.gate1/notices", "status": "SKIPPED", "reason": "not reached (stopped at clippy (host))", "phase": "notices"}
+{"id": "fx.gate1/notices-generator-tests-go", "status": "SKIPPED", "reason": "not reached (stopped at clippy (host))", "phase": "notices generator tests (Go / Python-venv / pin paths; SQLCipher + OpenSSL notices)"}
+{"id": "fx.gate1/build-scripts-meshmud-build.sh", "status": "SKIPPED", "reason": "not reached (stopped at clippy (host))", "phase": "build scripts (meshmud-build.sh / meshtastic-web-build.sh verify paths, hermetic)"}
+{"id": "fx.gate1/systemd-analyze", "status": "SKIPPED", "reason": "not reached (stopped at clippy (host))", "phase": "systemd-analyze"}
+{"id": "fx.gate1/messaging-mesh111-workspace", "status": "SKIPPED", "reason": "not reached (stopped at clippy (host))", "phase": "messaging (mesh111 workspace)"}
+{"id": "fx.gate1/g2-sqlcipher-static-link-run", "status": "SKIPPED", "reason": "not reached (stopped at clippy (host))", "phase": "G2: SQLCipher static link + run (mesh111 tests, musl x86_64)"}
+{"id": "fx.gate1/g2-sqlcipher-static-link-mesh111", "status": "SKIPPED", "reason": "not reached (stopped at clippy (host))", "phase": "G2: SQLCipher static link (mesh111 tests, musl aarch64; run = external gate G2)"}
+{"id": "fx.gate1/presence-sidecar-meshtastic", "status": "SKIPPED", "reason": "not reached (stopped at clippy (host))", "phase": "presence sidecar (meshtastic-presence: tests + venv lock structure)"}
+{"id": "fx.gate1/ui", "status": "SKIPPED", "reason": "not reached (stopped at clippy (host))", "phase": "ui", "seams": ["L4-L5:fx-ui"]}

@@ -1,0 +1,2 @@
+SELFTEST FAILED:
+  - generation is not deterministic (second run differed)

@@ -594,8 +594,22 @@ pub enum CustodyPut {
     RejectFull,
 }
 
-/// The columns of a forward-row SELECT, in the order [`raw_forward`] reads.
-const FORWARD_COLS: &str = "custody_seq, dest, pkt_ref, bytes, fwd, fwd_from, committed";
+/// The columns of a forward-row SELECT, in the order [`raw_forward`] reads
+/// (crate-visible within the store so the tests assert the plan of the
+/// statement [`Store::forward_pending`] runs, not a copy of it).
+pub(super) const FORWARD_COLS: &str = "custody_seq, dest, pkt_ref, bytes, fwd, fwd_from, committed";
+
+/// [`Store::forward_waits_for_dest`]'s one read (Layer 7 §5.5, M4g). The
+/// `WHERE` names `fwd != 0 AND committed = 0` exactly as the partial index
+/// `custody_forward_open_by_dest` does, so the planner may use it, and the
+/// index carries `fwd`, so it covers the read and wins over the wider
+/// `custody_open_by_dest` (same leading columns, member rows included)
+/// whatever order the two were created in (a [`super::schema::heal`]
+/// re-create makes an index the newest; with the two tied on cost the
+/// newest would win). Crate-visible within the store so the tests run it.
+pub(super) const FORWARD_WAITS_SQL: &str = "SELECT custody_seq FROM custody
+             WHERE dest = ?1 AND custody_seq > ?2 AND fwd != 0 AND committed = 0
+             LIMIT ?3";
 
 /// Bytes one stored forward row accounts for in its origin's share: the
 /// item, its `fwd_from` and the per-row overhead (the same sum
@@ -1282,6 +1296,14 @@ impl Store {
     /// §9 `MAILBOX_COMMIT {cursor}`: mark `dest`'s items ≤ `cursor`
     /// committed (evict-first, not deleted). Idempotent and monotonic — the
     /// effective cursor is `max(cursor)`. Returns rows newly committed.
+    ///
+    /// Every row of `dest`, a forward row included: its mailbox served it
+    /// ([`Store::custody_fetch`] reads `dest` alone, and
+    /// [`Store::custody_floor`] counts it), so a `dest` that enrolled after
+    /// a forward row was held for it has been given that row (Layer 7
+    /// §5.1). A bounded search of the schema v5 partial index
+    /// `custody_open_by_dest`: it reads the rows it commits, never the
+    /// rows of `dest` already committed.
     pub fn custody_commit(&mut self, dest: &[u8; 32], cursor: u64) -> Result<u64> {
         let n = self.conn.execute(
             "UPDATE custody SET committed = 1
@@ -1310,6 +1332,8 @@ impl Store {
     /// member that re-enrolls (a new device, a fresh offer) starts its
     /// cursor below what waits for it; [`Store::custody_high`] when nothing
     /// uncommitted is held (a first enrollment skips nobody's history).
+    /// The first entry of `dest` in `custody_open_by_dest` (schema v5): one
+    /// seek, whatever `dest` holds committed.
     pub fn custody_floor(&self, dest: &[u8; 32]) -> Result<u64> {
         let low: Option<i64> = self.conn.query_row(
             "SELECT min(custody_seq) FROM custody WHERE dest = ?1 AND committed = 0",
@@ -1322,14 +1346,21 @@ impl Store {
         }
     }
 
-    /// `(count, bytes)` of custody held (`GET /fabric`).
+    /// `(count, bytes)` of custody held (`GET /fabric`): every row, member
+    /// and forward, and the sum of their items (`length(bytes)`). Read from
+    /// the schema v5 totals of the member rows and the forward rows, two
+    /// primary-key reads whatever the rows held (the fabric gauge runs on
+    /// every accepted put on a hub); the numbers a count and a sum over
+    /// `custody` give. An overflow is a corrupt total, never a wrap.
     pub fn custody_stats(&self) -> Result<(u64, u64)> {
-        let (n, b): (i64, i64) = self.conn.query_row(
-            "SELECT count(*), coalesce(sum(length(bytes)), 0) FROM custody",
-            [],
-            |r| Ok((r.get(0)?, r.get(1)?)),
-        )?;
-        Ok((to_u64(n, "count")?, to_u64(b, "bytes")?))
+        use super::prune::{custody_total, TotalKey};
+        let m = custody_total(&self.conn, TotalKey::Member)?;
+        let f = custody_total(&self.conn, TotalKey::Forward)?;
+        let corrupt = || StoreError::Corrupt("custody_totals");
+        Ok((
+            m.rows.checked_add(f.rows).ok_or_else(corrupt)?,
+            m.item_bytes.checked_add(f.item_bytes).ok_or_else(corrupt)?,
+        ))
     }
 
     // -- forward rows (hub role, Layer 7 §5) --------------------------------
@@ -1337,7 +1368,9 @@ impl Store {
     /// Protected forward rows (`fwd != 0`, `committed = 0`) above
     /// `custody_seq` `after` (exclusive), ascending, at most `limit`: what
     /// the forwarder still owes a next custodian (Layer 7 §5.9; after a
-    /// restart it resumes from here, §15 G9 item 6).
+    /// restart it resumes from here, §15 G9 item 6). A search of the schema
+    /// v5 partial index `custody_forward_open`: it reads the rows it
+    /// returns, never the member or committed rows between them.
     pub fn forward_pending(&self, after: u64, limit: usize) -> Result<Vec<ForwardItem>> {
         let mut st = self.conn.prepare(&format!(
             "SELECT {FORWARD_COLS} FROM custody
@@ -1361,7 +1394,7 @@ impl Store {
     /// [`Store::forward_pending`]'s rows as heads: the same rows in the
     /// same order, with the item's length instead of its bytes (Layer 7
     /// §5.9: the forwarder pages its window from here, so a page of large
-    /// Transit items never reads the blobs).
+    /// Transit items never reads the blobs), through the same index.
     pub fn forward_pending_lens(&self, after: u64, limit: usize) -> Result<Vec<ForwardHead>> {
         let mut st = self.conn.prepare(
             "SELECT custody_seq, dest, pkt_ref, length(bytes), fwd, fwd_from FROM custody
@@ -1457,15 +1490,11 @@ impl Store {
     }
 
     /// `(count, bytes)` of protected forward rows (`fwd != 0`,
-    /// `committed = 0`; bytes = the items).
+    /// `committed = 0`; bytes = the items): the schema v5 total of the
+    /// protected forward rows, one primary-key read (Layer 7 §5.8).
     pub fn forward_stats(&self) -> Result<(u64, u64)> {
-        let (n, b): (i64, i64) = self.conn.query_row(
-            "SELECT count(*), coalesce(sum(length(bytes)), 0) FROM custody
-             WHERE fwd != 0 AND committed = 0",
-            [],
-            |r| Ok((r.get(0)?, r.get(1)?)),
-        )?;
-        Ok((to_u64(n, "count")?, to_u64(b, "bytes")?))
+        let t = super::prune::custody_total(&self.conn, super::prune::TotalKey::Protected)?;
+        Ok((t.rows, t.item_bytes))
     }
 
     /// Bytes of `origin`'s protected forward rows (`fwd_from = origin`,
@@ -1473,15 +1502,10 @@ impl Store {
     /// what its share ([`Store::transit_share`]) is measured against (Layer
     /// 7 §5.8). Committed rows (handed over or refused) are step-1 evictable
     /// and evicted first by the Transit quota, so they pin nothing and do
-    /// not hold the share.
+    /// not hold the share. Read from the origin's schema v5 total, one
+    /// primary-key read whatever the rows held (0 for an origin with none).
     pub fn forward_origin_bytes(&self, origin: &[u8; 32]) -> Result<u64> {
-        let v: i64 = self.conn.query_row(
-            "SELECT coalesce(sum(length(bytes) + length(fwd_from) + ?2), 0) FROM custody
-             WHERE fwd != 0 AND committed = 0 AND fwd_from = ?1",
-            params![&origin[..], super::prune::ROW_OVERHEAD as i64],
-            |r| r.get(0),
-        )?;
-        to_u64(v, "forward bytes")
+        super::prune::custody_total(&self.conn, super::prune::TotalKey::Origin(origin))?.bytes()
     }
 
     // -- cursors (member side, §9) -----------------------------------------
@@ -1520,6 +1544,44 @@ impl Store {
     /// The current local sequence (the store's age clock; diagnostics).
     pub fn local_seq(&self) -> Result<u64> {
         current_local_seq(&self.conn)
+    }
+
+    /// Whether a protected forward row (`fwd != 0`, `committed = 0`) of
+    /// `dest` above `custody_seq` `above` (exclusive) waits outside the
+    /// forwarder's resident window, which holds `resident` of them: true
+    /// when more than `resident` such rows exist (Layer 7 §5.5, §5.9: a
+    /// hit-cache entry added, changed or dropped for `dest` restarts the
+    /// swap probe only then).
+    ///
+    /// **Bounded in the rows it visits** (the Pi floor; Layer 7 M4g): one
+    /// `SEARCH` of the schema v5 partial index `custody_forward_open_by_dest`
+    /// ([`FORWARD_WAITS_SQL`]), which holds the protected forward rows only
+    /// and covers the read, so it visits at most `resident + 1` index
+    /// entries of `dest` above `above` and no table row, whatever that
+    /// dest's history: its committed rows (handed over or refused, kept
+    /// until a capacity prune) and its member rows (a dest that is, or
+    /// was, a member here: an uncommitted member row is never pruned and
+    /// stays until its member commits it, bounded only by a quota) are
+    /// not in the index. The caller passes the resident rows of that dest
+    /// above the floor, so `resident ≤ FORWARD_RESIDENT` (the window).
+    pub(crate) fn forward_waits_for_dest(
+        &self,
+        dest: &[u8; 32],
+        above: u64,
+        resident: usize,
+    ) -> Result<bool> {
+        let want = resident.saturating_add(1);
+        let mut st = self.conn.prepare(FORWARD_WAITS_SQL)?;
+        let mut rows = st.query(params![
+            &dest[..],
+            to_i64(above, "custody_seq")?,
+            i64::try_from(want).unwrap_or(i64::MAX)
+        ])?;
+        let mut n = 0usize;
+        while rows.next()?.is_some() {
+            n += 1;
+        }
+        Ok(n > resident)
     }
 }
 

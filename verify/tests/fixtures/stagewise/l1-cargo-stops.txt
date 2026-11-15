@@ -1,0 +1,27 @@
+== fmt ==
+== clippy (host) ==
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.40s
+!! musl cross toolchains absent (~/.local/toolchains: x86_64- and aarch64-linux-musl-gcc/-ar) — musl checks SKIPPED
+== test (host) ==
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.31s
+     Running tests/api_v1_relay.rs (/tmp/x3/target/node111/debug/deps/api_v1_relay-1f2e3d4c5b6a7980)
+
+running 2 tests
+test relay_streams_until_done ... ok
+test relay_maps_a_problem_code ... FAILED
+
+failures:
+
+---- relay_maps_a_problem_code stdout ----
+thread 'relay_maps_a_problem_code' (4242) panicked at tests/api_v1_relay.rs:88:5:
+assertion `left == right` failed: the problem code
+  left: 502
+ right: 503
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+failures:
+    relay_maps_a_problem_code
+
+test result: FAILED. 1 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.40s
+
+error: test failed, to rerun pass `-p node111 --test api_v1_relay`

@@ -1,0 +1,4 @@
+{"v":1,"status":"ok","text":"daemon up on 127.0.0.1:11180 within 4s","phase":"4. namespace + daemon"}
+{"v":1,"status":"FAIL","text":"GET / serves index.html  [HTTP 500: boom]","phase":"5a. static UI + Host guard"}
+{"v":1,"status":"SKIPPED","text":"the LAN source","phase":"5d. auth","reason":"no dummy0 module","id":"5d/lan"}
+this line is not JSON

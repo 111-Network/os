@@ -1,0 +1,11 @@
+{"exit_declared": false}
+{"id": "fx.lt/tests::adds", "status": "PASS", "log_line": 5, "test": "tests::adds"}
+{"id": "fx.lt/tests::expected_panic", "status": "PASS", "log_line": 6, "test": "tests::expected_panic"}
+{"id": "fx.lt/tests::ignored_one", "status": "SKIPPED", "reason": "ignored: needs a radio", "log_line": 7, "test": "tests::ignored_one"}
+{"id": "fx.lt/tests::multi_line_panic", "status": "FAIL", "assertion": "thread 'tests::multi_line_panic' (12281) panicked at src/lib.rs:13:9:\nfirst line of the message\nsecond line: details\nthird line", "log_line": 17, "test": "tests::multi_line_panic"}
+{"id": "fx.lt/tests::planted_fail", "status": "FAIL", "assertion": "thread 'tests::planted_fail' (12282) panicked at src/lib.rs:8:25:\nassertion `left == right` failed: two and two\n  left: 4\n right: 5", "log_line": 38, "test": "tests::planted_fail", "after": "fx.lt/tests::multi_line_panic"}
+{"id": "fx.lt/alpha_ignored", "status": "SKIPPED", "reason": "ignored", "log_line": 72, "test": "alpha_ignored"}
+{"id": "fx.lt/alpha_ok", "status": "PASS", "log_line": 73, "test": "alpha_ok"}
+{"id": "fx.lt/a_before_crash", "status": "PASS", "log_line": 80, "test": "a_before_crash"}
+{"id": "fx.lt/b_crashes", "status": "FAIL", "reason": "the test binary died during this test (signal: 6, SIGABRT: process abort signal)", "assertion": "error: test failed, to rerun pass `--test crash`\nprocess didn't exit successfully: `/tmp/x3/redtarget/debug/deps/crash-fb4c96ee6bfb5cee --test-threads=1` (signal: 6, SIGABRT: process abort signal)", "log_line": 81, "test": "b_crashes", "after": "fx.lt/tests::multi_line_panic"}
+{"id": "fx.lt/zulu_ok", "status": "PASS", "log_line": 88, "test": "zulu_ok"}

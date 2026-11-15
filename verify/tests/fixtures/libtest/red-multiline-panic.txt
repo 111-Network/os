@@ -1,0 +1,69 @@
+   Compiling redcrate v0.1.0 (/tmp/x3/redcrate)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.36s
+     Running unittests src/lib.rs (/tmp/x3/redtarget/debug/deps/redcrate-071ae16c928fdf25)
+
+running 5 tests
+test tests::adds ... ok
+test tests::expected_panic - should panic ... ok
+test tests::ignored_one ... ignored, needs a radio
+test tests::multi_line_panic ... FAILED
+test tests::planted_fail ... FAILED
+
+failures:
+
+---- tests::multi_line_panic stdout ----
+stderr: about to fail
+stdout: some context
+
+thread 'tests::multi_line_panic' (12263) panicked at src/lib.rs:13:9:
+first line of the message
+second line: details
+third line
+stack backtrace:
+   0: __rustc::rust_begin_unwind
+             at /rustc/2d8144b7880597b6e6d3dfd63a9a9efae3f533d3/library/std/src/panicking.rs:689:5
+   1: core::panicking::panic_fmt
+             at /rustc/2d8144b7880597b6e6d3dfd63a9a9efae3f533d3/library/core/src/panicking.rs:80:14
+   2: redcrate::tests::multi_line_panic
+             at ./src/lib.rs:13:9
+   3: redcrate::tests::multi_line_panic::{closure#0}
+             at ./src/lib.rs:10:26
+   4: <redcrate::tests::multi_line_panic::{closure#0} as core::ops::function::FnOnce<()>>::call_once
+             at /rustc/2d8144b7880597b6e6d3dfd63a9a9efae3f533d3/library/core/src/ops/function.rs:250:5
+   5: <fn() -> core::result::Result<(), alloc::string::String> as core::ops::function::FnOnce<()>>::call_once
+             at /rustc/2d8144b7880597b6e6d3dfd63a9a9efae3f533d3/library/core/src/ops/function.rs:250:5
+note: Some details are omitted, run with `RUST_BACKTRACE=full` for a verbose backtrace.
+
+---- tests::planted_fail stdout ----
+
+thread 'tests::planted_fail' (12264) panicked at src/lib.rs:8:25:
+assertion `left == right` failed: two and two
+  left: 4
+ right: 5
+stack backtrace:
+   0: __rustc::rust_begin_unwind
+             at /rustc/2d8144b7880597b6e6d3dfd63a9a9efae3f533d3/library/std/src/panicking.rs:689:5
+   1: core::panicking::panic_fmt
+             at /rustc/2d8144b7880597b6e6d3dfd63a9a9efae3f533d3/library/core/src/panicking.rs:80:14
+   2: core::panicking::assert_failed_inner
+             at /rustc/2d8144b7880597b6e6d3dfd63a9a9efae3f533d3/library/core/src/panicking.rs:434:23
+   3: core::panicking::assert_failed::<u32, u32>
+             at /rustc/2d8144b7880597b6e6d3dfd63a9a9efae3f533d3/library/core/src/panicking.rs:394:5
+   4: redcrate::tests::planted_fail
+             at ./src/lib.rs:8:25
+   5: redcrate::tests::planted_fail::{closure#0}
+             at ./src/lib.rs:8:22
+   6: <redcrate::tests::planted_fail::{closure#0} as core::ops::function::FnOnce<()>>::call_once
+             at /rustc/2d8144b7880597b6e6d3dfd63a9a9efae3f533d3/library/core/src/ops/function.rs:250:5
+   7: <fn() -> core::result::Result<(), alloc::string::String> as core::ops::function::FnOnce<()>>::call_once
+             at /rustc/2d8144b7880597b6e6d3dfd63a9a9efae3f533d3/library/core/src/ops/function.rs:250:5
+note: Some details are omitted, run with `RUST_BACKTRACE=full` for a verbose backtrace.
+
+
+failures:
+    tests::multi_line_panic
+    tests::planted_fail
+
+test result: FAILED. 2 passed; 2 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.10s
+
+error: test failed, to rerun pass `--lib`

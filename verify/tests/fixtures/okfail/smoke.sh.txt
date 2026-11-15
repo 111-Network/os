@@ -1,0 +1,69 @@
+# the phase lines of 4-interface/verify/smoke.sh (its inner runs), for the okfail goldens
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+inner() {
+  phase "4. namespace + daemon"
+  phase "5a. static UI + Host guard"
+  phase "5b. /api/v1 reads (loopback)"
+  phase "5c. events: reset, then Last-Event-ID replay"
+  phase "5d. auth from a real non-loopback source ($LANIP on dummy0)"
+  phase "5e. chat relay (stub model through the real 111-agent)"
+  phase "5f. proposals, decisions, agent task → proposal frames"
+  phase "5g. per-service restart (supervised child vs not)"
+  phase "5h. update check + node restart"
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+inner3() {
+  phase "4. namespaces: br0 10.111.0.1/24 + one netns per node (veth)"
+  phase "5. recording relays, fake board, four daemons"
+  phase "6. hub role + enrollment (§7.3; H by PATCH, A by the CLI through R2, B by the API)"
+  phase "7. (1) cards: node1… card request via the hub, pasted cards both ways (§7.2)"
+  phase "8. (2) direct A → B over tcp-lan (through R1): a 16-fragment message, then a small one"
+  phase "9. (5) replay: A's recorded sealed frames to B on a fresh socket (§4 A11, §8.1)"
+  phase "10. (4) B → C (not enrolled at H): REJECT_UNKNOWN_DEST shown honestly (§9)"
+  phase "11. (7) message request: C (no contact entry on A) writes first over tcp-lan (INTRO)"
+  phase "12. (8) agent tools on A (stub model → 111-agent → daemon-minted bearer → 111d)"
+  phase "13. (3) hub custody: A off the LAN, B → A relayed by H, A back → delivered once (§9)"
+  phase "13b. (3, G1) custody refused at capacity (mailbox_full), then the hub killed -9 while it holds A's item"
+  phase "14. (6) A killed -9: custody fetched by cursor, a replayed announce gets no push, new epoch"
+  phase "15. (9) Meshtastic on H: stub meshmud downlink, bound board, Nearby, panel ticket (§13, §14)"
+  phase "16. (10) clean shutdown of every node, reopen without an epoch jump (§4, §10.1)"
+}
+}
+phase "1. UI build"
+phase "2. cargo build (debug)"
+}
+  phase "3. scratch roots H A B C (identities, fabric/settings, H's Meshtastic binding)"
+  phase "3. scratch node root"

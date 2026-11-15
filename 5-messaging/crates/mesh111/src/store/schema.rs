@@ -52,18 +52,33 @@
 //!   reads `fwd = 0`, `fwd_from` NULL, and a hub with no pairing keeps
 //!   writing exactly that, so its rows and its pruning are unchanged. Typed
 //!   access: [`super::rows::Fwd`].
+//! - v5 (Layer 7 §5.8, the Pi floor; additive amendment of §10.3):
+//!   `custody_totals` — the running row count and byte sums of `custody`
+//!   under four kinds of key (member rows · forward rows · protected
+//!   forward rows · the protected forward rows of one origin), kept by
+//!   triggers on `custody` inside the writing transaction and backfilled by
+//!   the migration. The §10.4 class totals of Custody and Transit, the
+//!   §5.8 per-origin share, the forward gauge and the custody gauge read
+//!   one or two rows by primary key instead of summing `custody`. No
+//!   `custody` column changes; a store with no forward rows holds three
+//!   fixed rows only. Typed access: [`super::prune::custody_total`]. Four
+//!   partial indexes on `custody` (a dest's uncommitted rows, the
+//!   protected forward rows, the committed rows, a dest's protected
+//!   forward rows) make the commit, floor, forwarder-page, probe-restart
+//!   and step-1 reads bounded searches ([`V5`]); [`heal`] re-creates a
+//!   missing v5 trigger, index or fixed totals key at open.
 
 use rusqlite::Connection;
 
 use super::{Result, StoreError};
 
-/// The schema version this build writes (v4: Layer 7 §5.3 amendment 5).
-pub const SCHEMA_VERSION: i64 = 4;
+/// The schema version this build writes (v5: the custody totals).
+pub const SCHEMA_VERSION: i64 = 5;
 
 /// Migration `i` takes `user_version` from `i` to `i + 1`. Append only: a
 /// released migration is never edited (crate-visible so the tests can build
 /// an older store from the first entries).
-pub(crate) const MIGRATIONS: &[&str] = &[V1, V2, V3, V4];
+pub(crate) const MIGRATIONS: &[&str] = &[V1, V2, V3, V4, V5];
 
 const V1: &str = "
 CREATE TABLE settings (
@@ -331,6 +346,370 @@ ALTER TABLE custody ADD COLUMN fwd INTEGER NOT NULL DEFAULT 0 CHECK (fwd IN (0, 
 ALTER TABLE custody ADD COLUMN fwd_from BLOB
     CHECK ((fwd_from IS NULL OR length(fwd_from) = 32) AND ((fwd = 0) = (fwd_from IS NULL)));
 ";
+
+// v5 is written as pieces (each a string literal, so `V5` stays one
+// literal through `concat!`): the migration runs them all, and [`heal`]
+// re-runs a missing trigger or index and the backfill from the same text.
+
+/// v5: the totals table (key shapes and fail-closed counters, [`V5`]).
+macro_rules! v5_table {
+    () => {
+        "CREATE TABLE custody_totals (
+    key        BLOB PRIMARY KEY NOT NULL
+               CHECK (key IN (x'00', x'01', x'02')
+                      OR (length(key) = 33 AND substr(key, 1, 1) = x'03')),
+    rows       INTEGER NOT NULL CHECK (rows >= 0),
+    item_bytes INTEGER NOT NULL CHECK (item_bytes >= 0),
+    from_bytes INTEGER NOT NULL CHECK (from_bytes >= 0)
+) STRICT, WITHOUT ROWID;
+"
+    };
+}
+
+/// v5: the backfill, one grouped pass over `custody` into an empty
+/// `custody_totals` ([`V5`]; [`rebuild_custody_totals`]).
+macro_rules! v5_backfill {
+    () => {
+        "WITH g AS MATERIALIZED (
+    SELECT fwd != 0 AS f,
+           fwd != 0 AND committed = 0 AS p,
+           fwd_from AS o,
+           count(*) AS n,
+           sum(length(bytes)) AS ib,
+           sum(coalesce(length(fwd_from), 0)) AS fb
+    FROM custody
+    GROUP BY 1, 2, 3
+)
+INSERT INTO custody_totals (key, rows, item_bytes, from_bytes)
+    SELECT x'00', coalesce(sum(n), 0), coalesce(sum(ib), 0), coalesce(sum(fb), 0)
+    FROM g WHERE NOT f
+    UNION ALL
+    SELECT x'01', coalesce(sum(n), 0), coalesce(sum(ib), 0), coalesce(sum(fb), 0)
+    FROM g WHERE f
+    UNION ALL
+    SELECT x'02', coalesce(sum(n), 0), coalesce(sum(ib), 0), coalesce(sum(fb), 0)
+    FROM g WHERE p
+    UNION ALL
+    SELECT CAST(x'03' || o AS BLOB), n, ib, fb
+    FROM g WHERE p;
+"
+    };
+}
+
+/// v5: a new row joins every key it counts under ([`V5`]).
+macro_rules! v5_trigger_insert {
+    () => {
+        "CREATE TRIGGER custody_totals_insert AFTER INSERT ON custody
+BEGIN
+    INSERT INTO custody_totals (key, rows, item_bytes, from_bytes)
+        SELECT CASE WHEN NEW.fwd = 0 THEN x'00' ELSE x'01' END,
+               1, length(NEW.bytes), coalesce(length(NEW.fwd_from), 0)
+        WHERE true
+        ON CONFLICT (key) DO UPDATE SET rows = rows + 1,
+            item_bytes = item_bytes + excluded.item_bytes,
+            from_bytes = from_bytes + excluded.from_bytes;
+    INSERT INTO custody_totals (key, rows, item_bytes, from_bytes)
+        SELECT x'02', 1, length(NEW.bytes), length(NEW.fwd_from)
+        WHERE NEW.fwd != 0 AND NEW.committed = 0
+        ON CONFLICT (key) DO UPDATE SET rows = rows + 1,
+            item_bytes = item_bytes + excluded.item_bytes,
+            from_bytes = from_bytes + excluded.from_bytes;
+    INSERT INTO custody_totals (key, rows, item_bytes, from_bytes)
+        SELECT CAST(x'03' || NEW.fwd_from AS BLOB), 1, length(NEW.bytes), length(NEW.fwd_from)
+        WHERE NEW.fwd != 0 AND NEW.committed = 0
+        ON CONFLICT (key) DO UPDATE SET rows = rows + 1,
+            item_bytes = item_bytes + excluded.item_bytes,
+            from_bytes = from_bytes + excluded.from_bytes;
+END;
+"
+    };
+}
+
+/// v5: a deleted row leaves every key it counted under ([`V5`]).
+macro_rules! v5_trigger_delete {
+    () => {
+        "CREATE TRIGGER custody_totals_delete AFTER DELETE ON custody
+BEGIN
+    UPDATE custody_totals SET rows = rows - 1,
+        item_bytes = item_bytes - length(OLD.bytes),
+        from_bytes = from_bytes - coalesce(length(OLD.fwd_from), 0)
+        WHERE key = CASE WHEN OLD.fwd = 0 THEN x'00' ELSE x'01' END;
+    UPDATE custody_totals SET rows = rows - 1,
+        item_bytes = item_bytes - length(OLD.bytes),
+        from_bytes = from_bytes - length(OLD.fwd_from)
+        WHERE OLD.fwd != 0 AND OLD.committed = 0
+          AND key IN (x'02', CAST(x'03' || OLD.fwd_from AS BLOB));
+    DELETE FROM custody_totals
+        WHERE OLD.fwd != 0 AND OLD.committed = 0
+          AND key = CAST(x'03' || OLD.fwd_from AS BLOB) AND rows = 0;
+END;
+"
+    };
+}
+
+/// v5: an updated row leaves its old keys and joins its new ones ([`V5`]).
+macro_rules! v5_trigger_update {
+    () => {
+        "CREATE TRIGGER custody_totals_update AFTER UPDATE OF fwd, fwd_from, committed, bytes ON custody
+BEGIN
+    UPDATE custody_totals SET rows = rows - 1,
+        item_bytes = item_bytes - length(OLD.bytes),
+        from_bytes = from_bytes - coalesce(length(OLD.fwd_from), 0)
+        WHERE key = CASE WHEN OLD.fwd = 0 THEN x'00' ELSE x'01' END;
+    UPDATE custody_totals SET rows = rows - 1,
+        item_bytes = item_bytes - length(OLD.bytes),
+        from_bytes = from_bytes - length(OLD.fwd_from)
+        WHERE OLD.fwd != 0 AND OLD.committed = 0
+          AND key IN (x'02', CAST(x'03' || OLD.fwd_from AS BLOB));
+    INSERT INTO custody_totals (key, rows, item_bytes, from_bytes)
+        SELECT CASE WHEN NEW.fwd = 0 THEN x'00' ELSE x'01' END,
+               1, length(NEW.bytes), coalesce(length(NEW.fwd_from), 0)
+        WHERE true
+        ON CONFLICT (key) DO UPDATE SET rows = rows + 1,
+            item_bytes = item_bytes + excluded.item_bytes,
+            from_bytes = from_bytes + excluded.from_bytes;
+    INSERT INTO custody_totals (key, rows, item_bytes, from_bytes)
+        SELECT x'02', 1, length(NEW.bytes), length(NEW.fwd_from)
+        WHERE NEW.fwd != 0 AND NEW.committed = 0
+        ON CONFLICT (key) DO UPDATE SET rows = rows + 1,
+            item_bytes = item_bytes + excluded.item_bytes,
+            from_bytes = from_bytes + excluded.from_bytes;
+    INSERT INTO custody_totals (key, rows, item_bytes, from_bytes)
+        SELECT CAST(x'03' || NEW.fwd_from AS BLOB), 1, length(NEW.bytes), length(NEW.fwd_from)
+        WHERE NEW.fwd != 0 AND NEW.committed = 0
+        ON CONFLICT (key) DO UPDATE SET rows = rows + 1,
+            item_bytes = item_bytes + excluded.item_bytes,
+            from_bytes = from_bytes + excluded.from_bytes;
+    DELETE FROM custody_totals
+        WHERE OLD.fwd != 0 AND OLD.committed = 0
+          AND key = CAST(x'03' || OLD.fwd_from AS BLOB) AND rows = 0;
+END;
+"
+    };
+}
+
+/// v5: a member's uncommitted rows by `custody_seq` ([`V5`]).
+macro_rules! v5_index_open {
+    () => {
+        "CREATE INDEX custody_open_by_dest ON custody (dest, custody_seq) WHERE committed = 0;
+"
+    };
+}
+
+/// v5: the protected forward rows by `custody_seq` ([`V5`]).
+macro_rules! v5_index_forward {
+    () => {
+        "CREATE INDEX custody_forward_open ON custody (custody_seq) WHERE fwd != 0 AND committed = 0;
+"
+    };
+}
+
+/// v5: the committed (step-1 evictable) rows by `fwd` ([`V5`]).
+macro_rules! v5_index_committed {
+    () => {
+        "CREATE INDEX custody_committed ON custody (fwd) WHERE committed = 1;
+"
+    };
+}
+
+/// v5 (Layer 7 M4g): the protected forward rows of one dest by
+/// `custody_seq` ([`V5`]; `fwd` rides along so the read it serves is
+/// covered).
+macro_rules! v5_index_forward_dest {
+    () => {
+        "CREATE INDEX custody_forward_open_by_dest ON custody (dest, custody_seq, fwd)
+    WHERE fwd != 0 AND committed = 0;
+"
+    };
+}
+
+/// v5 (Layer 7 §5.8; L5 §10.3, §10.4; the Pi floor): `custody_totals`
+/// (module doc), so admission reads one row per total whatever the rows a
+/// hub holds, and four partial indexes on `custody`, so a member's
+/// commit and floor, the forwarder's pages, its probe-restart read and
+/// the §10.4 step-1 read search only the rows they want.
+///
+/// - **Keys.** `x'00'` the member rows (`fwd = 0`, [`super::Class::Custody`])
+///   · `x'01'` every forward row (`fwd != 0`, [`super::Class::Transit`]) ·
+///   `x'02'` the protected forward rows (`fwd != 0 AND committed = 0`) ·
+///   `x'03' ‖ fwd_from` (33 B) the protected forward rows of one origin. A
+///   row counts under its class key and, while it is a protected forward
+///   row, under `x'02'` and its origin's key.
+/// - **Values.** `rows` counts rows, `item_bytes` sums `length(bytes)`,
+///   `from_bytes` sums `coalesce(length(fwd_from), 0)`. The per-row
+///   overhead is never stored: the reader multiplies `rows` by it
+///   ([`super::prune::CustodyTotal::bytes`]), so the totals are the same
+///   facts the §10.4 sums read.
+/// - **Triggers.** After an insert, a delete, or an update of `fwd`,
+///   `fwd_from`, `committed` or `bytes`, the old row's contribution leaves
+///   every key it counted under and the new row's joins every key it
+///   counts under (an upsert by primary key); an origin key whose `rows`
+///   reach 0 is deleted, so the table never grows with the origins ever
+///   seen. They run inside the writing statement's transaction: a
+///   rollback takes the totals back with the rows. No other trigger,
+///   foreign key or `REPLACE` writes `custody` (every writer is an
+///   `INSERT`, an `UPDATE … SET committed` or a `DELETE` by `custody_seq`).
+/// - **Fail closed.** The counters carry `CHECK (… >= 0)` and the key its
+///   shape, so a total that would go negative fails the write, never
+///   reads as room. The three fixed keys are written by the backfill and
+///   never deleted; an origin key exists exactly while it has rows.
+/// - **Backfill.** One grouped pass over `custody` in the migration's
+///   transaction (`g`, at most 2 + 2 × origins groups), then the keys
+///   from `g`: a v4 store opens with exact totals.
+/// - **Partial indexes** (each holds only the rows its readers want, so
+///   each read is a bounded `SEARCH`): `custody_open_by_dest (dest,
+///   custody_seq) WHERE committed = 0` — a member's `MAILBOX_COMMIT`
+///   ([`super::Store::custody_commit`]) and its `ENROLL_OK` floor
+///   ([`super::Store::custody_floor`]) read its uncommitted rows only,
+///   never the committed ones it already acknowledged ·
+///   `custody_forward_open (custody_seq) WHERE fwd != 0 AND committed = 0`
+///   — the forwarder's pages ([`super::Store::forward_pending`],
+///   [`super::Store::forward_pending_lens`]) read protected forward rows
+///   only, never the member or committed rows between them ·
+///   `custody_committed (fwd) WHERE committed = 1` — the §10.4 step-1 read
+///   ([`super::prune`]) reads the committed rows of the class it prunes
+///   only, never a protected row ·
+///   `custody_forward_open_by_dest (dest, custody_seq, fwd) WHERE fwd != 0
+///   AND committed = 0` (Layer 7 M4g) — the forwarder's probe-restart read
+///   ([`super::Store::forward_waits_for_dest`]) visits a dest's protected
+///   forward rows only, never its committed rows or its member rows
+///   (`custody_open_by_dest` holds the latter, which a dest that is or was
+///   a member here keeps uncommitted up to a quota); `fwd` rides along so
+///   the index covers that read and the planner prefers it to
+///   `custody_open_by_dest` in any creation order. A put writes one entry
+///   (a member row) or three (a forward row) in these partial indexes; a
+///   commit moves a row from the open indexes (one for a member row, three
+///   for a forward row) to `custody_committed`; a delete removes it.
+/// - **Self-heal** ([`heal`]): at every open the store checks that these
+///   triggers and indexes exist (one read of `sqlite_master`) and that the
+///   three fixed keys do (three primary-key lookups), and re-creates what
+///   is missing; a missing trigger, table or fixed key also rebuilds the
+///   totals from the rows ([`rebuild_custody_totals`]); an index that
+///   cannot be re-created is counted, never fatal.
+const V5: &str = concat!(
+    v5_table!(),
+    "\n",
+    v5_backfill!(),
+    "\n",
+    v5_trigger_insert!(),
+    "\n",
+    v5_trigger_delete!(),
+    "\n",
+    v5_trigger_update!(),
+    "\n",
+    v5_index_open!(),
+    v5_index_forward!(),
+    v5_index_committed!(),
+    v5_index_forward_dest!(),
+);
+
+/// The v5 objects [`heal`] checks at open: `(type, name, DDL)` as
+/// `sqlite_master` names them, the DDL the same text [`V5`] runs.
+const V5_OBJECTS: [(&str, &str, &str); 8] = [
+    ("table", "custody_totals", v5_table!()),
+    ("trigger", "custody_totals_insert", v5_trigger_insert!()),
+    ("trigger", "custody_totals_delete", v5_trigger_delete!()),
+    ("trigger", "custody_totals_update", v5_trigger_update!()),
+    ("index", "custody_open_by_dest", v5_index_open!()),
+    ("index", "custody_forward_open", v5_index_forward!()),
+    ("index", "custody_committed", v5_index_committed!()),
+    (
+        "index",
+        "custody_forward_open_by_dest",
+        v5_index_forward_dest!(),
+    ),
+];
+
+/// The read [`heal`] makes of `sqlite_master`: which [`V5_OBJECTS`] it
+/// holds, one `?` per object, bound to their names (a handful of schema
+/// rows; no `custody` row is read). Built from [`V5_OBJECTS`], so the two
+/// cannot disagree.
+fn v5_present(conn: &Connection) -> Result<Vec<(String, String)>> {
+    let marks = vec!["?"; V5_OBJECTS.len()].join(", ");
+    let mut st = conn.prepare(&format!(
+        "SELECT type, name FROM sqlite_master WHERE name IN ({marks})"
+    ))?;
+    let rows = st.query_map(
+        rusqlite::params_from_iter(V5_OBJECTS.iter().map(|(_, name, _)| *name)),
+        |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)),
+    )?;
+    let mut present = Vec::with_capacity(V5_OBJECTS.len());
+    for r in rows {
+        present.push(r?);
+    }
+    Ok(present)
+}
+
+/// How many of the three fixed `custody_totals` keys (`x'00'`, `x'01'`,
+/// `x'02'`, [`V5`]) are present: three primary-key lookups.
+const FIXED_KEYS_SQL: &str =
+    "SELECT count(*) FROM custody_totals WHERE key IN (x'00', x'01', x'02')";
+
+/// Recompute `custody_totals` from the `custody` rows: empty it, then the
+/// v5 backfill ([`V5`]'s own text). Runs inside the caller's transaction,
+/// so the rows and their totals change together (the migration's, or
+/// [`heal`]'s); one grouped pass over `custody`, used only when the
+/// totals cannot be trusted (a trigger or a fixed key was missing).
+pub(crate) fn rebuild_custody_totals(c: &Connection) -> Result<()> {
+    c.execute_batch(concat!("DELETE FROM custody_totals;\n", v5_backfill!()))?;
+    Ok(())
+}
+
+/// Self-heal at open (v5, the Pi floor): after [`migrate`], read which v5
+/// objects exist ([`v5_present`]) and whether the three fixed totals keys
+/// do ([`FIXED_KEYS_SQL`]), then re-create what is missing from its v5
+/// text. Returns how many missing indexes could not be re-created.
+///
+/// - **Fatal: the totals.** When the totals table, a trigger or a fixed
+///   key was missing, writes may have bypassed the totals (or a reader
+///   would take a missing key for zero), so in one transaction the
+///   missing table and triggers are re-created and the totals rebuilt from
+///   the rows ([`rebuild_custody_totals`]): a drifted total would read as
+///   room or fail a later write on its `CHECK` (wedging eviction). Any
+///   error here fails the open: the totals guard correctness.
+/// - **Not fatal: an index.** A missing index changes no fact, so each is
+///   re-created on its own, after the totals, as one autocommit statement:
+///   a failure (`SQLITE_FULL` on a nearly full disk, the very moment the
+///   store is under pressure) rolls that statement back alone, is counted
+///   in the return value (the fabric counts it as an error at start) and
+///   the open carries on; the statements it served run on the wider index
+///   or the table until a later open re-creates it.
+///
+/// A whole store pays the two reads and nothing else. Drift with every
+/// trigger and key present (a hand edit of `custody_totals`) is not
+/// detected here: that needs a pass over the rows.
+pub(crate) fn heal(conn: &Connection) -> Result<u32> {
+    let present = v5_present(conn)?;
+    let missing: Vec<&(&str, &str, &str)> = V5_OBJECTS
+        .iter()
+        .filter(|(ty, name, _)| !present.iter().any(|(t, n)| t == ty && n == name))
+        .collect();
+    let table_present = !missing.iter().any(|(ty, _, _)| *ty == "table");
+    let keys_lost =
+        table_present && conn.query_row(FIXED_KEYS_SQL, [], |r| r.get::<_, i64>(0))? < 3;
+    let (indexes, totals): (Vec<_>, Vec<_>) =
+        missing.into_iter().partition(|(ty, _, _)| *ty == "index");
+    if !totals.is_empty() || keys_lost {
+        let tx = conn.unchecked_transaction()?;
+        for (_, _, ddl) in totals {
+            tx.execute_batch(ddl)?;
+        }
+        rebuild_custody_totals(&tx)?;
+        tx.commit()?;
+    }
+    let mut failed = 0u32;
+    for (_, _, ddl) in indexes {
+        if conn.execute_batch(ddl).is_err() {
+            failed += 1;
+            // An autocommit statement rolls back alone; were SQLite to
+            // leave a transaction open, it goes too (nothing else is in it).
+            if !conn.is_autocommit() {
+                conn.execute_batch("ROLLBACK;")?;
+            }
+        }
+    }
+    Ok(failed)
+}
 
 /// Bring the schema to [`SCHEMA_VERSION`].
 pub(crate) fn migrate(conn: &Connection) -> Result<()> {

@@ -169,6 +169,40 @@ pub fn appdata(roles: u16, home_hub: Option<&NodeId>) -> Vec<u8> {
     out
 }
 
+/// `appdata` role bit 3 (Layer 7 §7.2): a public gateway. Set from
+/// `discovery.public_gateway_bit` once its `gateway_bit` consent is recorded
+/// (§12: every listener learns this node has internet). Bits 0–2 are
+/// mesh111's (`mesh111::contacts::ROLE_*`); bits 3–5 are node111's alone
+/// (§19 code seam 4, I9: no mesh111 constant).
+pub const ROLE_GATEWAY: u16 = 1 << 3;
+/// `appdata` role bit 4 (Layer 7 §7.2): serves model inference to paired LAN
+/// members (L3 offload), from `discovery.offload_bit`.
+pub const ROLE_OFFLOAD: u16 = 1 << 4;
+/// `appdata` role bit 5 (Layer 7 §7.2): serves the verified update files
+/// (§9.1), from `origin.serve`.
+pub const ROLE_ORIGIN: u16 = 1 << 5;
+/// The Layer 7 role bits (3–5) together.
+pub const LAYER7_ROLES: u16 = ROLE_GATEWAY | ROLE_OFFLOAD | ROLE_ORIGIN;
+
+/// The role names of `roles` for the contract (`NearbyNode.roles`,
+/// `Contact.roles`; Layer 7 §7.2 name map): mesh111's names for bits 0–2
+/// (`mailbox`, `always_on_hub`, `lora_attached`), then `gateway`, `offload`,
+/// `origin` for bits 3–5. Any other bit has no name and is left out (an
+/// unknown bit from a newer node is ignored, never shown as a number).
+pub fn role_names(roles: u16) -> Vec<&'static str> {
+    let mut v = mesh111::contacts::AppData::role_names(roles);
+    for (bit, name) in [
+        (ROLE_GATEWAY, "gateway"),
+        (ROLE_OFFLOAD, "offload"),
+        (ROLE_ORIGIN, "origin"),
+    ] {
+        if roles & bit != 0 {
+            v.push(name);
+        }
+    }
+    v
+}
+
 /// What this node's stored announce says about its home hub
 /// ([`IdentitySealer::stored_hub_hint`]; Layer 7 §19 C7). The input to
 /// `settings::rebuild_home_hub`: a verified own announce is authoritative
@@ -751,6 +785,36 @@ mod tests {
         assert_eq!(s.stored_hub_hint(&fabric), StoredHubHint::NoAnnounce);
         std::fs::write(fabric.join(ANNOUNCE_FILE), b"junk").unwrap();
         assert_eq!(s.stored_hub_hint(&fabric), StoredHubHint::NoAnnounce);
+    }
+
+    #[test]
+    fn layer7_role_bits_and_names() {
+        use mesh111::contacts::{AppData, ROLE_ALWAYS_ON_HUB, ROLE_LORA_ATTACHED, ROLE_MAILBOX};
+        // bits 3–5, disjoint from mesh111's 0–2
+        assert_eq!((ROLE_GATEWAY, ROLE_OFFLOAD, ROLE_ORIGIN), (8, 16, 32));
+        assert_eq!(
+            LAYER7_ROLES & (ROLE_MAILBOX | ROLE_ALWAYS_ON_HUB | ROLE_LORA_ATTACHED),
+            0
+        );
+        assert!(role_names(0).is_empty());
+        assert_eq!(
+            role_names(ROLE_MAILBOX | ROLE_ALWAYS_ON_HUB | ROLE_GATEWAY | ROLE_ORIGIN),
+            vec!["mailbox", "always_on_hub", "gateway", "origin"]
+        );
+        assert_eq!(role_names(ROLE_OFFLOAD), vec!["offload"]);
+        // an unknown bit has no name
+        assert!(role_names(1 << 9).is_empty());
+        // the layout is unchanged: `[1][roles u16 LE][0]` plus the hint, no
+        // TLV (§7.2, §19 C8); mesh111 reads the bits back as they were set
+        let all = 0x3f;
+        let h = NodeId::from([0x5a; 32]);
+        let a = appdata(all, Some(&h));
+        assert_eq!(&a[..4], &[1, 0x3f, 0, 0]);
+        assert_eq!(a.len(), 12);
+        let p = AppData::parse(&a);
+        assert_eq!(p.roles, all);
+        assert_eq!(p.home_hub, Some([0x5a; 8]));
+        assert_eq!(appdata(ROLE_ORIGIN, None), vec![1, 0x20, 0, 0]);
     }
 
     #[test]

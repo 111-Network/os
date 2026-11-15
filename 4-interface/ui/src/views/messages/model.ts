@@ -39,6 +39,11 @@ export const REASON_COPY: Record<string, string> = {
  * is waiting for a direct meeting. Keyed (state, code); consulted before `REASON_COPY`.
  */
 export const REASON_COPY_BY_STATE: Partial<Record<MessageState, Record<string, string>>> = {
+  // Layer 7 section 5.6: `forwarding` rides `relayed` only (the hub durably holds it and the recipient's hint names another hub). The words
+  // say what the hub does; none says their hub was found, because a held item is not a located one.
+  relayed: {
+    forwarding: "Your hub holds it and passes it to their hub.",
+  },
   sent: {
     hub_not_yours: "Your hub does not know them, so it cannot hold this for them. Your copy is kept here; it is delivered when you meet directly.",
   },
@@ -112,6 +117,7 @@ export function evidenceName(m: Pick<Message, "dir" | "state" | "reason_code">):
       if (m.reason_code === "hub_not_yours") return "CUSTODY_ACK REJECT_UNKNOWN_DEST from the hub";
       return "frame written to a link";
     case "relayed":
+      if (m.reason_code === "forwarding") return "CUSTODY_ACK ACCEPTED from your hub, which holds it for the hub their address hint names; nothing yet says that hub took it";
       return "CUSTODY_ACK ACCEPTED from a mailbox-role node for a known member";
     case "delivered":
       return "ACK from the recipient";

@@ -1,6 +1,6 @@
 // Overview logic: the verdict sentence rules, the Needs-you derivation, and the small summaries.
 import { describe, expect, it } from "vitest";
-import { buildFixtures } from "../src/lib/api/mock/fixtures";
+import { buildFixtures, GATEWAY_CARRIER_OK } from "../src/lib/api/mock/fixtures";
 import type { AgentEvent, DeviceRecord, ServiceRecord, Status } from "../src/lib/api/types";
 import { IDENTITY_BACKUP_COMMAND } from "../src/lib/commands";
 import { verdict, verdictDot } from "../src/lib/verdict";
@@ -30,13 +30,23 @@ describe("verdict", () => {
     expect(verdict(null, null, null)).toEqual({ sentence: "Checking your node\u2026", tone: "attention" });
   });
 
-  it("joined: connected, ok, plus the internet clause when the gateway is live", () => {
-    const v = verdict(status({ transport_state: "joined" }), services(), devices());
-    expect(v.sentence).toBe("Your node is running and connected to nearby nodes \u2014 messages can flow. It can reach the internet.");
+  it("joined: connected, ok, plus the carrier clause when the gateway is live (carrier_ok: a carrier claim, never the internet)", () => {
+    const v = verdict(status({ transport_state: "joined" }), services({ gateway: { ...GATEWAY_CARRIER_OK, detail: { ...GATEWAY_CARRIER_OK.detail } } }), devices());
+    expect(v.sentence).toBe("Your node is running and connected to nearby nodes \u2014 messages can flow. Its gateway carrier answered at the last check.");
+    expect(v.sentence).not.toMatch(/internet|online/i);
     expect(v.tone).toBe("ok");
   });
 
-  it("omits the internet clause when the gateway is not live", () => {
+  it("an older daemon's live wan_ok gateway row gets no clause", () => {
+    const v = verdict(status({ transport_state: "joined" }), services({ gateway: { state: "live", reason_code: "wan_ok" } }), devices());
+    expect(v.sentence).toBe("Your node is running and connected to nearby nodes \u2014 messages can flow.");
+  });
+
+  it("the healthy fixture is a member: no gateway, so no clause", () => {
+    expect(verdict(status({ transport_state: "joined" }), services(), devices()).sentence).toBe("Your node is running and connected to nearby nodes \u2014 messages can flow.");
+  });
+
+  it("omits the carrier clause when the gateway is not live", () => {
     const v = verdict(status({ transport_state: "joined" }), services({ gateway: { state: "unset" } }), devices());
     expect(v.sentence).toBe("Your node is running and connected to nearby nodes \u2014 messages can flow.");
   });
@@ -249,14 +259,14 @@ describe("nearby, devices and node summaries", () => {
   });
 
   it("nodeFacts humanizes uptime, last check, gateway and reach", () => {
-    const f = nodeFacts(fx.status, fx.services, NOW);
+    const f = nodeFacts(fx.status, services({ gateway: { ...GATEWAY_CARRIER_OK, detail: { ...GATEWAY_CARRIER_OK.detail } } }), NOW);
     expect(f).toMatchObject({
       name: "Workshop laptop",
       label: "k7m2-9x4p-aa",
       version: "2026.10.13",
       uptime: "7 h 6 min",
       lastCheck: "3 h ago",
-      gateway: "internet reachable",
+      gateway: "Gateway: carrier reachable at last check, 4 min ago",
       reach: "devices on your local network can open it",
     });
     expect(f.bech32).toMatch(/^node1/);
@@ -268,8 +278,8 @@ describe("nearby, devices and node summaries", () => {
     s.node.alias = null;
     s.update.last_check = null;
     s.bind = { urls: [], lan: false };
-    const f = nodeFacts(s, services({ gateway: { state: "unset" } }), NOW);
-    expect(f).toMatchObject({ name: "k7m2-9x4p-aa", lastCheck: "never", gateway: "no internet", reach: "this device only" });
+    const f = nodeFacts(s, services({ gateway: { state: "unset", reason_code: "gateway_none" } }), NOW);
+    expect(f).toMatchObject({ name: "k7m2-9x4p-aa", lastCheck: "never", gateway: "Not a gateway", reach: "this device only" });
     expect(nodeFacts(s, null, NOW).gateway).toBe("unknown");
   });
 });

@@ -42,6 +42,16 @@ export const isPrivateAddress = (address: string): boolean => {
   return PRIVATE_V4.test(host) || /^f[cd][0-9a-f]{2}:/i.test(host) || /^fe80:/i.test(host);
 };
 
+/**
+ * What the running scenario says about this node's Layer 7 state (mock/scenarios.ts): the fabric's `hub_role` and the `gateway` service row
+ * (`reason_code` and `detail`, a `GatewayDetail`; an optional `metered_cap_reached: true` in it is the scenario's metered flag). The `hub`
+ * scenario seeds a configured gateway; a member scenario (`gateway_none`) leaves the defaults below untouched.
+ */
+export interface RelaySeed {
+  hub: boolean;
+  gateway: { reason_code: string | null; detail: Record<string, unknown> } | null;
+}
+
 export interface RelayMockDeps {
   now(): number;
   later(ms: number, fn: () => void): void;
@@ -50,6 +60,11 @@ export interface RelayMockDeps {
   loopback(): boolean;
   /** A `nearby` frame is due (the hop read changed `hops_away`). */
   onHops?(): void;
+  /**
+   * The scenario's facts, read when the mock is made and again on every status read while the mock follows them (they stay in force until a
+   * gateway or carrier setting is written or a control moves, so a scripted change of the `gateway` row reaches `GET /relay` too).
+   */
+  seed?(): RelaySeed;
 }
 
 export interface RelayMockOptions {
@@ -124,6 +139,24 @@ export function createRelayMock(deps: RelayMockDeps, opts: RelayMockOptions = {}
     updates: { check_internet: true },
     metered: [],
   };
+  // --- the scenario seed (hub scenario: a configured gateway; the status then follows the scenario's `gateway` row) ---
+  const GATEWAY_STATES: readonly string[] = ["carrier_ok", "carrier_pending", "gateway_off"];
+  const seedRow = (): RelaySeed["gateway"] => {
+    const seed = deps.seed?.();
+    return seed && seed.hub && seed.gateway && seed.gateway.reason_code !== null && GATEWAY_STATES.includes(seed.gateway.reason_code) ? seed.gateway : null;
+  };
+  const first = seedRow();
+  let follow = first !== null;
+  if (first) {
+    const d = first.detail;
+    const server = `https://${typeof d.endpoint === "string" && d.endpoint !== "" ? d.endpoint : "ntfy.example.org"}`;
+    s.gateway.enabled = first.reason_code !== "gateway_off";
+    s.carrier.kind = "ntfy";
+    s.carrier.server = server;
+    s.carrier.mode = d.mode === "5B" ? "5B" : "5A";
+    s.carrier.consent_hash = sha256Hex(carrierConsentText(server, "the other hub", null));
+  }
+  const num = (v: unknown): number | null => (typeof v === "number" && Number.isFinite(v) && v >= 0 ? Math.floor(v) : null);
   let gatewayBitHash: string | null = null;
   let originHash: string | null = null;
   const origins: UpdateOrigin[] = [
@@ -138,13 +171,35 @@ export function createRelayMock(deps: RelayMockDeps, opts: RelayMockOptions = {}
 
   function derive(): void {
     const g = s.gateway;
+    const row = follow ? seedRow() : null;
+    if (follow && row === null) follow = false; // the scenario no longer has a configured gateway: the mock's own state stands
     const configured = s.carrier.kind !== "none";
     g.carrier = configured ? s.carrier.kind : null;
     g.endpoint = configured && s.carrier.server ? new URL(s.carrier.server).host : null;
     g.mode = configured ? (s.carrier.mode as "5A" | "5B") : null;
+    if (row) {
+      const d = row.detail;
+      g.checked_ago_s = num(d.checked_ago_s);
+      g.last_flush_ago_s = num(d.last_flush_ago_s);
+      g.pending = num(d.pending) ?? 0;
+      g.metered_cap_reached = d.metered_cap_reached === true;
+      g.state = row.reason_code as RelayStatus["gateway"]["state"];
+      return;
+    }
     g.checked_ago_s = ageS(checkedAt);
     g.last_flush_ago_s = ageS(flushedAt);
     g.state = !configured ? "gateway_none" : !g.enabled ? "gateway_off" : checkedAt !== null && carrierReachable && g.pending === 0 ? "carrier_ok" : "carrier_pending";
+  }
+  /** A gateway or carrier setting is written, or a control moves: keep what the scenario showed so far and let this mock own it from here. */
+  function unfollow(): void {
+    if (!follow) return;
+    derive();
+    if (!follow) return;
+    const g = s.gateway;
+    checkedAt = g.checked_ago_s === null ? null : deps.now() - g.checked_ago_s * 1000;
+    flushedAt = g.last_flush_ago_s === null ? null : deps.now() - g.last_flush_ago_s * 1000;
+    carrierReachable = !(g.state === "carrier_pending" && g.pending === 0);
+    follow = false;
   }
   const snapshot = (): RelayStatus => {
     derive();
@@ -164,7 +219,9 @@ export function createRelayMock(deps: RelayMockDeps, opts: RelayMockOptions = {}
 
   function guardCarrierCall(): void {
     if (s.carrier.kind === "none") throw problem(409, "bad_request", "No carrier", "Set up a carrier first (Settings, Layer 7).");
-    if (s.carrier.consent_hash === null) throw consent("carrier_enable", `${s.carrier.kind}:${s.carrier.server ?? ""}`, carrierConsentText(s.carrier.server ?? "", farLabel(), capBytes()));
+    // Owed again whenever the text now owed is not the one on record (the far hub's name or the cap changed since it was accepted).
+    const text = carrierConsentText(s.carrier.server ?? "", farLabel(), capBytes());
+    if (s.carrier.consent_hash !== sha256Hex(text)) throw consent("carrier_enable", `${s.carrier.kind}:${s.carrier.server ?? ""}`, text, s.metered.length > 0 ? ["metered"] : []);
     if (s.gateway.metered_cap_reached) throw problem(409, "metered_cap", "Daily cap reached", "The carrier has used today's allowance on this metered link; nothing is sent until it passes.");
   }
 
@@ -173,6 +230,7 @@ export function createRelayMock(deps: RelayMockDeps, opts: RelayMockOptions = {}
 
     patchSettings(patch, acceptWarning) {
       const accept = acceptWarning ?? patch.accept_warning;
+      if (patch.gateway || patch.carrier) unfollow();
       const hb = patch.presence?.heartbeat;
       if (hb && hb.length > 0) {
         if (hb.some((h) => h.transport === "rns")) throw problem(409, "settings_locked", "Set by Layer 6", "The Reticulum announce interval is Layer 6's setting: change it with PATCH /api/v1/bridge/settings.");
@@ -200,7 +258,14 @@ export function createRelayMock(deps: RelayMockDeps, opts: RelayMockOptions = {}
         const text = carrierConsentText(next.server ?? "", farLabel(), next.metered.length > 0 ? Math.max(...next.metered.map((m) => m.daily_cap_bytes)) : null);
         const turningOn = s.carrier.kind !== "ntfy" || next.server !== s.carrier.server || (patch.metered !== undefined && JSON.stringify(patch.metered) !== JSON.stringify(s.metered));
         if (turningOn && needConsent(accept, s.carrier.consent_hash, text)) throw consent("carrier_enable", `ntfy:${next.server}`, text, next.metered.length > 0 ? ["metered"] : []);
-        if (turningOn) s.carrier.consent_hash = sha256Hex(text);
+        // The human's answer to the text they were shown is recorded when it is the hash of the text owed NOW for the carrier the node holds,
+        // even when the write changes no stored value (Check now and Flush now meet this consent and take no hash themselves). A stale or
+        // foreign hash is refused with the current text, as everywhere; a hash of another consent in the same write is that consent's.
+        const hashNow = sha256Hex(text);
+        const ownsHash = accept === hashNow;
+        const otherHash = accept === sha256Hex(GATEWAY_BIT_TEXT) || accept === sha256Hex(ORIGIN_SERVE_TEXT);
+        if (!turningOn && accept !== undefined && !ownsHash && !otherHash && s.carrier.consent_hash !== hashNow) throw consent("carrier_enable", `ntfy:${next.server}`, text, next.metered.length > 0 ? ["metered"] : []);
+        if (turningOn || ownsHash) s.carrier.consent_hash = hashNow;
       }
       if (patch.discovery?.public_gateway_bit === true && !s.discovery.public_gateway_bit && needConsent(accept, gatewayBitHash, GATEWAY_BIT_TEXT)) throw consent("gateway_bit", "public_gateway_bit", GATEWAY_BIT_TEXT);
       if (patch.origin?.serve === true && !s.origin.serve && needConsent(accept, originHash, ORIGIN_SERVE_TEXT)) throw consent("origin_serve", "origin.serve", ORIGIN_SERVE_TEXT);
@@ -297,6 +362,7 @@ export function createRelayMock(deps: RelayMockDeps, opts: RelayMockOptions = {}
     },
 
     checkCarrier() {
+      unfollow();
       guardCarrierCall();
       deps.later(400, () => {
         checkedAt = deps.now();
@@ -306,6 +372,7 @@ export function createRelayMock(deps: RelayMockDeps, opts: RelayMockOptions = {}
     },
 
     flushCarrier() {
+      unfollow();
       guardCarrierCall();
       deps.later(600, () => {
         checkedAt = deps.now();
@@ -345,18 +412,22 @@ export function createRelayMock(deps: RelayMockDeps, opts: RelayMockOptions = {}
 
     control: {
       setMeteredCapReached(on) {
+        unfollow();
         s.gateway.metered_cap_reached = on;
         changed();
       },
       setCarrierReachable(ok) {
+        unfollow();
         carrierReachable = ok;
         changed();
       },
       setPending(n) {
+        unfollow();
         s.gateway.pending = Math.max(0, n);
         changed();
       },
       bumpForward(by) {
+        unfollow();
         s.forward.refused += by.refused ?? 0;
         s.forward.too_large += by.too_large ?? 0;
         changed();

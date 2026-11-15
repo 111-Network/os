@@ -1,0 +1,57 @@
+# Mutation of ../clean/seams.toml: a built seam with no check and no gap (rule built-gap)
+# The clean lint fixture: passes every rule on the tree test_lint.make_tree() builds. Other fixture dirs hold ONE
+# mutated file (seams.toml or checks.toml) and borrow the other from here.
+
+[[seam]]
+id = "L1-L2:alpha"
+status = "built"
+spec = ["fx/SPEC.md §1", "fx/SPEC.md §2.1"]
+a = { layer = 1, files = ["fx/a.txt"] }
+b = { layer = 2, files = ["fx/b.txt"] }
+read_first = "a"
+symptom = "alpha says no"
+gap = ""
+
+[[seam]]
+id = "L3-L4:faked"
+status = "built"
+spec = ["fx/SPEC.md Updates & rollback", "fx/SPEC.md"]
+a = { layer = 4, files = ["fx/c.txt"] }
+b = { layer = 3, files = ["fx/d.txt"] }
+read_first = "b"
+symptom = "the faked seam answers 502"
+gap = "only a fake stands in for side b"
+
+[[seam]]
+id = "L1-L7:stubbed"
+status = "stub"
+spec = []
+a = { layer = 1, files = ["fx/stub.rs"] }
+b = { layer = 7, files = [] }
+read_first = "a"
+
+[[seam]]
+id = "L8-L9:later"
+status = "planned"
+spec = ["fx/FUTURE.md §1"]
+a = { layer = 8, files = ["fx/future-a.rs"] }
+b = { layer = 9, files = [] }
+read_first = "a"
+
+[[seam]]
+id = "X:notices"
+status = "built"
+spec = []
+a = { layer = "X", files = ["fx/a.txt"] }
+b = { layer = "X", files = ["fx/gen/"] }
+read_first = "a"
+symptom = "the notices diff is red"
+gap = ""
+
+[[seam]]
+id = "L2-L3:orphan"
+status = "built"
+spec = []
+a = { layer = 2, files = ["fx/a.txt"] }
+b = { layer = 3, files = ["fx/b.txt"] }
+read_first = "a"

@@ -1,0 +1,28 @@
+{"exit_declared": true}
+{"id": "fx.ok/dash-happy-path-verifies-dry-run-prints-commands", "status": "PASS", "log_line": 1}
+{"id": "fx.ok/dash-phone-dry-run", "status": "FAIL", "assertion": "dash: --phone dry-run (rc=1)", "log_line": 2}
+{"id": "fx.ok/dash-phone-user-run", "status": "FAIL", "assertion": "dash: --phone user run (rc=1, priv calls: )", "log_line": 11, "after": "fx.ok/dash-phone-dry-run"}
+{"id": "fx.ok/dash-phone-no-privilege-path", "status": "FAIL", "assertion": "dash: --phone no-privilege path (rc=0)", "log_line": 20, "after": "fx.ok/dash-phone-dry-run"}
+{"id": "fx.ok/dash-tampered-hash-refused-before-exec", "status": "PASS", "log_line": 28}
+{"id": "fx.ok/dash-armv7l-refused", "status": "PASS", "log_line": 29}
+{"id": "fx.ok/dash-32-bit-userspace-warns-uses-kernel-arch", "status": "PASS", "log_line": 30}
+{"id": "fx.ok/dash-no-privilege-prints-su-c-line", "status": "PASS", "log_line": 31}
+{"id": "fx.ok/dash-truncated-shim-never-reaches-verification", "status": "PASS", "log_line": 32}
+{"id": "fx.ok/bash-happy-path-verifies-dry-run-prints-commands", "status": "PASS", "log_line": 33}
+{"id": "fx.ok/bash-phone-dry-run", "status": "FAIL", "assertion": "bash: --phone dry-run (rc=1)", "log_line": 34, "after": "fx.ok/dash-phone-dry-run"}
+{"id": "fx.ok/bash-phone-user-run", "status": "FAIL", "assertion": "bash: --phone user run (rc=1, priv calls: )", "log_line": 43, "after": "fx.ok/dash-phone-dry-run"}
+{"id": "fx.ok/bash-phone-no-privilege-path", "status": "FAIL", "assertion": "bash: --phone no-privilege path (rc=0)", "log_line": 52, "after": "fx.ok/dash-phone-dry-run"}
+{"id": "fx.ok/bash-tampered-hash-refused-before-exec", "status": "PASS", "log_line": 60}
+{"id": "fx.ok/bash-armv7l-refused", "status": "PASS", "log_line": 61}
+{"id": "fx.ok/bash-32-bit-userspace-warns-uses-kernel-arch", "status": "PASS", "log_line": 62}
+{"id": "fx.ok/bash-no-privilege-prints-su-c-line", "status": "PASS", "log_line": 63}
+{"id": "fx.ok/bash-truncated-shim-never-reaches-verification", "status": "PASS", "log_line": 64}
+{"id": "fx.ok/busybox-happy-path", "status": "FAIL", "assertion": "busybox: happy path (rc=127)", "log_line": 65, "after": "fx.ok/dash-phone-dry-run"}
+{"id": "fx.ok/busybox-phone-dry-run", "status": "FAIL", "assertion": "busybox: --phone dry-run (rc=127)", "log_line": 67, "after": "fx.ok/dash-phone-dry-run"}
+{"id": "fx.ok/busybox-phone-user-run", "status": "FAIL", "assertion": "busybox: --phone user run (rc=127, priv calls: )", "log_line": 69, "after": "fx.ok/dash-phone-dry-run"}
+{"id": "fx.ok/busybox-phone-no-privilege-path", "status": "FAIL", "assertion": "busybox: --phone no-privilege path (rc=127)", "log_line": 71, "after": "fx.ok/dash-phone-dry-run"}
+{"id": "fx.ok/busybox-tamper-refusal", "status": "FAIL", "assertion": "busybox: tamper refusal", "log_line": 73, "after": "fx.ok/dash-phone-dry-run"}
+{"id": "fx.ok/busybox-armv7l-refusal", "status": "FAIL", "assertion": "busybox: armv7l refusal", "log_line": 75, "after": "fx.ok/dash-phone-dry-run"}
+{"id": "fx.ok/busybox-32-bit-userspace-handling", "status": "FAIL", "assertion": "busybox: 32-bit userspace handling", "log_line": 77, "after": "fx.ok/dash-phone-dry-run"}
+{"id": "fx.ok/busybox-no-privilege-path", "status": "FAIL", "assertion": "busybox: no-privilege path (rc=127)", "log_line": 79, "after": "fx.ok/dash-phone-dry-run"}
+{"id": "fx.ok/busybox-truncated-shim-never-reaches-verification", "status": "PASS", "log_line": 81}

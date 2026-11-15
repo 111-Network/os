@@ -33,6 +33,12 @@
 //!   code is shown once) — loopback-only (`403 loopback_only`); `409
 //!   bad_request` when this node holds no custody (turn on the hub role
 //!   first), `409 restore_pending` while it has no card to put in the bundle.
+//!   Layer 7 §7.5 (row D9): while this hub is a gateway (the carrier on and
+//!   the hub role held, `FabricHandle::gateway_offer`) the offer carries the
+//!   additive `gateway {carrier, mode}`; otherwise the key is absent and the
+//!   offer is as before. The `111HUB:` text bundle is unchanged, so the fact
+//!   reaches the offer screen only: a member that scans the QR learns
+//!   nothing of it (INTRO and cards carry nothing new either).
 //! - `DELETE /fabric/hub/offer` → `204` (idempotent) — loopback-only.
 //! - `PATCH /fabric/settings` → `FabricSettings` — loopback-only; unknown
 //!   keys, unknown quota classes and wrong types are `400`. The listener is
@@ -44,7 +50,7 @@
 use super::auth::LoopbackOnly;
 use super::messages::{bad_request, handle};
 use super::{ApiRouter, ApiState, Problem};
-use crate::daemon::fabric::{self, json, settings::dial_refusal, FabricHandle};
+use crate::daemon::fabric::{self, json, settings::dial_refusal, FabricHandle, GatewayOffer};
 use axum::body::Bytes;
 use axum::extract::State;
 use axum::http::{header, HeaderValue, StatusCode};
@@ -320,7 +326,8 @@ async fn offer(_lo: LoopbackOnly, State(api): State<Arc<ApiState>>) -> Response 
     };
     with_current_card(&mut view, &h.own_announce());
     match json::offer(&view) {
-        Ok(v) => {
+        Ok(mut v) => {
+            with_gateway(&mut v, h.gateway_offer());
             let mut resp = Json(v).into_response();
             resp.headers_mut()
                 .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
@@ -364,6 +371,16 @@ fn with_current_card(view: &mut mesh111::fabric::OfferView, announce: &[u8]) {
         None => {}
     }
     view.card = card;
+}
+
+/// Add the offer's `gateway {carrier, mode}` (Layer 7 §7.5; contract
+/// `HubOffer.gateway`, `GatewayOffer`) while this hub is a gateway; with no
+/// gateway the key stays absent (the pre-Layer 7 offer, byte for byte). The
+/// `bundle` text is never touched.
+fn with_gateway(offer: &mut Value, gateway: Option<GatewayOffer>) {
+    if let (Some(g), Some(o)) = (gateway, offer.as_object_mut()) {
+        o.insert("gateway".into(), g.json());
+    }
 }
 
 async fn dismiss(_lo: LoopbackOnly, State(api): State<Arc<ApiState>>) -> Response {
@@ -468,6 +485,49 @@ mod tests {
                 String::from_utf8_lossy(bad)
             );
         }
+    }
+
+    /// Layer 7 §7.5 (row D9): the offer's gateway fact is additive; the
+    /// bundle text is untouched and no gateway leaves the offer as before.
+    #[test]
+    fn the_offer_names_the_gateway_only_while_there_is_one() {
+        use crate::daemon::relay::settings::{CarrierKind, CarrierMode};
+        let before = serde_json::json!({
+            "schema": 1,
+            "code": "ABCD-EFGH",
+            "address": "192.168.1.4:11183",
+            "card": {"text": "C"},
+            "bundle": {"text": "111HUB:C:ABCDEFGH:"},
+        });
+        let mut v = before.clone();
+        with_gateway(&mut v, None);
+        assert_eq!(v, before);
+        assert!(v.get("gateway").is_none());
+        with_gateway(
+            &mut v,
+            Some(GatewayOffer {
+                carrier: CarrierKind::Ntfy,
+                mode: CarrierMode::FiveB,
+            }),
+        );
+        assert_eq!(
+            v["gateway"],
+            serde_json::json!({"carrier": "ntfy", "mode": "5B"})
+        );
+        // every other key as it was, the bundle text included
+        let mut rest = v.clone();
+        rest.as_object_mut().unwrap().remove("gateway");
+        assert_eq!(rest, before);
+        // a non-object is left alone (never panics)
+        let mut odd = serde_json::json!([]);
+        with_gateway(
+            &mut odd,
+            Some(GatewayOffer {
+                carrier: CarrierKind::Ntfy,
+                mode: CarrierMode::FiveA,
+            }),
+        );
+        assert_eq!(odd, serde_json::json!([]));
     }
 
     #[test]

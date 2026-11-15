@@ -941,20 +941,63 @@ fn rows_kb_gateway_codeagent() {
     assert_eq!(k.detail["entries"], 7);
     assert_eq!(k.detail["sha256"], "cd".repeat(32));
 
-    assert_eq!(st(&f, ServiceId::Gateway), (U, "wan_unknown", true));
-    f.gateway = GatewayFacts {
-        online: Some(false),
-        url: Some("https://install.111.network/204".into()),
-        checked_at: Some("2026-10-13T10:00:00Z".into()),
-        error: Some("timeout".into()),
-    };
+    // Layer 7 §3.5, §3.8: the gateway badge's four states replace wan_*
+    assert_eq!(st(&f, ServiceId::Gateway), (U, "gateway_none", true));
     let g = row(&f, ServiceId::Gateway);
-    assert_eq!((g.state, g.reason_code), (U, "wan_offline"));
     assert!(g.actions.is_empty(), "gateway never offers actions");
-    f.gateway.online = Some(true);
+    assert_eq!(
+        g.detail,
+        json!({"carrier": null, "endpoint": null, "mode": null, "checked_ago_s": null,
+               "last_flush_ago_s": null, "pending": 0, "error": null})
+    );
+    // a carrier configured, the gateway off by choice
+    f.gateway = GatewayFacts {
+        configured: true,
+        enabled: false,
+        carrier: Some("ntfy"),
+        endpoint: Some("ntfy.example.net".into()),
+        mode: Some("5A"),
+        ..GatewayFacts::default()
+    };
+    assert_eq!(st(&f, ServiceId::Gateway), (U, "gateway_off", true));
+    // on: the last check failed
+    f.gateway.enabled = true;
+    f.gateway.answered = Some(false);
+    f.gateway.checked_ago_s = Some(42);
+    f.gateway.error = Some("connection refused".into());
     let g = row(&f, ServiceId::Gateway);
-    assert_eq!((g.state, g.reason_code), (L, "wan_ok"));
+    assert_eq!((g.state, g.reason_code), (U, "carrier_pending"));
+    assert_eq!(g.detail["checked_ago_s"], 42);
+    assert_eq!(g.detail["error"], "connection refused");
+    // the carrier answered at its last check
+    f.gateway.answered = Some(true);
+    f.gateway.error = None;
+    f.gateway.last_flush_ago_s = Some(120);
+    let g = row(&f, ServiceId::Gateway);
+    assert_eq!((g.state, g.reason_code), (L, "carrier_ok"));
     assert!(g.actions.is_empty());
+    assert_eq!(
+        g.detail,
+        json!({"carrier": "ntfy", "endpoint": "ntfy.example.net", "mode": "5A",
+               "checked_ago_s": 42, "last_flush_ago_s": 120, "pending": 0, "error": null})
+    );
+    // items wait
+    f.gateway.pending = 3;
+    let g = row(&f, ServiceId::Gateway);
+    assert_eq!(
+        (g.state, g.reason_code, g.detail["pending"].clone()),
+        (U, "carrier_pending", json!(3))
+    );
+    for retired in ["online", "probe_url", "checked_at", "interval_sec"] {
+        assert!(
+            g.detail.get(retired).is_none(),
+            "{retired} retired (§3.5 item 3)"
+        );
+    }
+    assert!(
+        !g.reason.to_lowercase().contains("online"),
+        "never 'online' (§3.8)"
+    );
 
     // codeagent: hub ∧ opencode
     assert_eq!(st(&f, ServiceId::Codeagent), (U, "not_hub", false));

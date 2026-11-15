@@ -1,0 +1,5 @@
+
+== 4. namespace + daemon  (t+1.0s)
+ok: daemon up on 127.0.0.1:11180 within 4s
+
+SMOKE GREEN — 1 checks ok, 0 FAIL, in 3.0s

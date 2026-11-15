@@ -1,0 +1,5 @@
+{"exit_declared": true}
+{"id": "fx.py/test_doc.Doc.test_doc_fails", "status": "FAIL", "assertion": "AssertionError: 1 != 2", "log_line": 10, "test": "test_doc.Doc.test_doc_fails"}
+{"id": "fx.py/test_doc.Doc.test_doc_skip", "status": "SKIPPED", "reason": "skipped: not on this box", "log_line": 4, "test": "test_doc.Doc.test_doc_skip"}
+{"id": "fx.py/test_doc.Doc.test_plain", "status": "PASS", "log_line": 5, "test": "test_doc.Doc.test_plain"}
+{"id": "fx.py/test_doc.Doc.test_with_doc", "status": "PASS", "log_line": 7, "test": "test_doc.Doc.test_with_doc"}

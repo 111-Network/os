@@ -1,0 +1,8 @@
+{"exit_declared": true}
+{"id": "fx.vt.red", "status": "FAIL", "reason": "the test file failed to load", "assertion": "Cannot find module './does-not-exist' imported from '/tmp/x3/vt/test/broken.test.ts'", "log_line": 18}
+{"id": "fx.vt.red/green > passes", "status": "PASS", "test": "green > passes"}
+{"id": "fx.vt.red/parseNodeId > accepts a good id", "status": "PASS", "test": "parseNodeId > accepts a good id"}
+{"id": "fx.vt.red/parseNodeId > planted failure", "status": "FAIL", "assertion": "AssertionError: expected { a: 1, b: 'x' } to deeply equal { a: 2, b: 'x' }", "log_line": 34, "test": "parseNodeId > planted failure", "after": "fx.vt.red"}
+{"id": "fx.vt.red/parseNodeId > a skipped one", "status": "SKIPPED", "reason": "skipped", "test": "parseNodeId > a skipped one"}
+{"id": "fx.vt.red/parseNodeId > a todo one", "status": "SKIPPED", "reason": "todo", "test": "parseNodeId > a todo one"}
+{"id": "fx.vt.red/parseNodeId > nested > throws a multi-line error", "status": "FAIL", "assertion": "Error: first line\nsecond line\nthird line", "log_line": 56, "test": "parseNodeId > nested > throws a multi-line error", "after": "fx.vt.red"}

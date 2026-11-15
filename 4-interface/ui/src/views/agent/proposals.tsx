@@ -9,10 +9,34 @@ import { announce } from "../../app/LiveRegion";
 import { Badge } from "../../components/badge";
 import { Button } from "../../components/button";
 import { Disclosure } from "../../components/disclosure";
-import { apiStore, getAdapter, isApiError } from "../../lib/api";
+import { apiStore, getAdapter, isApiError, type Adapter } from "../../lib/api";
 import type { Decision, Proposal } from "../../lib/api/sse.gen";
 import { useConsentFlow } from "../messages/net/consent";
 import { ProposalBody, isBridgeKind } from "./proposal-body";
+
+/**
+ * Accepting a bridge (Layer 6) or a relay (Layer 7) proposal runs the same validation as the direct route, so it can answer 409
+ * `consent_required`: the card shows the dialog and repeats the decision with the hash. Every other kind is recorded as it is.
+ */
+export const acceptRunsConsent = (kind: string | undefined): boolean => isBridgeKind(kind) || kind === "relay";
+
+type Attempt = ReturnType<typeof useConsentFlow>["attempt"];
+
+/**
+ * Record a decision. Accepting a bridge (Layer 6) or a relay (Layer 7) proposal runs the same validation as the direct route, so a consent
+ * gate answers 409 with the exact text: the person reads it in the card's dialog (`attempt`), and the decision is repeated with its hash.
+ * "cancelled": the person said no to the text, and the proposal stays open. Any refusal is thrown.
+ */
+export async function decideProposal(adapter: Pick<Adapter, "decide">, attempt: Attempt, proposal: Pick<Proposal, "id" | "kind">, decision: Decision): Promise<"done" | "cancelled"> {
+  if (decision === "accepted" && acceptRunsConsent(proposal.kind)) {
+    const out = await attempt((hash) => adapter.decide(proposal.id, decision, hash));
+    if (out.ok) return "done";
+    if (out.cancelled) return "cancelled";
+    throw out.error;
+  }
+  await adapter.decide(proposal.id, decision);
+  return "done";
+}
 
 function createdText(iso: string, now: number): string {
   const t = Date.parse(iso);
@@ -36,15 +60,7 @@ function ProposalCard({ proposal, now, onWhy, onDecided }: CardProps) {
     setError(null);
     try {
       const adapter = await getAdapter();
-      if (decision === "accepted" && isBridgeKind(proposal.kind)) {
-        // Accepting a bridge proposal runs the same validation as the direct route. A consent gate answers 409 with the exact text:
-        // the person reads it here, and the decision is repeated with its hash. A refusal leaves the proposal open.
-        const out = await attempt((hash) => adapter.decide(proposal.id, decision, hash));
-        if (!out.ok) {
-          if (!out.cancelled) throw out.error;
-          return;
-        }
-      } else await adapter.decide(proposal.id, decision);
+      if ((await decideProposal(adapter, attempt, proposal, decision)) === "cancelled") return;
       announce(decision === "accepted" ? "proposal marked accepted" : "proposal dismissed");
       onDecided();
     } catch (err) {

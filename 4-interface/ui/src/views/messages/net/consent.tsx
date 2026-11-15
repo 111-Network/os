@@ -18,13 +18,17 @@ const ADDON_WORD: Record<string, string> = {
   uplinked_channel: "published to the internet",
 };
 
-// Partial: Layer 7 appends four actions (carrier_enable, pair_plain, gateway_bit, origin_serve) whose words its own views supply; until then they read "Confirm".
+// Partial: an action with no entry here reads "Confirm". The last four are Layer 7's (os/7-relay/README.md §12).
 const ACTION_WORD: Partial<Record<ConsentRequired["action"], string>> = {
   edge_enable: "Start this relay",
   edge_resume: "Resume this relay",
   component_enable: "Install and turn this on",
   ham_confirm: "Confirm readable sends from a licensed board",
   uplink_send: "Turn on sending on an uplinked channel",
+  carrier_enable: "Turn the carrier on",
+  pair_plain: "Pair on an unencrypted link",
+  gateway_bit: "Advertise this node as a gateway",
+  origin_serve: "Serve update files",
 };
 
 export const addonWord = (a: string): string => (Object.prototype.hasOwnProperty.call(ADDON_WORD, a) ? ADDON_WORD[a]! : a.replace(/[^\w .:/-]/g, "").slice(0, 60));

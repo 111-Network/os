@@ -1,0 +1,27 @@
+{"exit_declared": false}
+{"id": "fx.gate1/fmt", "status": "PASS", "log_line": 1, "phase": "fmt"}
+{"id": "fx.gate1/clippy-host", "status": "PASS", "log_line": 2, "phase": "clippy (host)", "seams": ["L1-X:fx-gate"]}
+{"id": "fx.node.lib-relay/relay::netwatch::tests::a_flap_is_debounced", "status": "PASS", "log_line": 10, "phase": "test (host)", "test": "relay::netwatch::tests::a_flap_is_debounced", "check": "fx.node.lib-relay"}
+{"id": "fx.node.lib/daemon::config::tests::defaults_hold", "status": "PASS", "log_line": 11, "phase": "test (host)", "test": "daemon::config::tests::defaults_hold", "check": "fx.node.lib"}
+{"id": "fx.node.lib/daemon::watchdog::tests::interval_is_half", "status": "SKIPPED", "reason": "ignored: needs a NOTIFY_SOCKET", "log_line": 12, "phase": "test (host)", "test": "daemon::watchdog::tests::interval_is_half", "check": "fx.node.lib"}
+{"id": "fx.node.relay/relay_streams_until_done", "status": "PASS", "log_line": 19, "phase": "test (host)", "test": "relay_streams_until_done", "check": "fx.node.relay"}
+{"id": "fx.node.relay/relay_maps_a_problem_code", "status": "PASS", "log_line": 20, "phase": "test (host)", "test": "relay_maps_a_problem_code", "check": "fx.node.relay"}
+{"id": "fx.gate1/test-host/unmapped_bin/nobody_covers_this", "status": "PASS", "log_line": 27, "phase": "test (host)", "test": "nobody_covers_this"}
+{"id": "fx.gate1/shellcheck", "status": "SKIPPED", "reason": "shellcheck not found — SKIPPED", "log_line": 32, "phase": "shellcheck"}
+{"id": "fx.gate1/gate-assertions-hermetic-musl/musl-env.sh-escape-hatches-unset-cc-ar-linkers-pinned", "status": "PASS", "log_line": 34, "phase": "gate assertions (hermetic: musl-env.sh self-test, this script's summary + G2 asserts, cross-build UI gate + release asserts)"}
+{"id": "fx.gate1/gate-assertions-hermetic-musl/every-stage-ran-g2-on-both-targets-all-green", "status": "PASS", "log_line": 35, "phase": "gate assertions (hermetic: musl-env.sh self-test, this script's summary + G2 asserts, cross-build UI gate + release asserts)"}
+{"id": "fx.gate1/gate-assertions-hermetic-musl/a-stale-dist-is-refused-before-any-build", "status": "PASS", "log_line": 37, "phase": "gate assertions (hermetic: musl-env.sh self-test, this script's summary + G2 asserts, cross-build UI gate + release asserts)"}
+{"id": "fx.gate1/gate-assertions-hermetic-musl/a-dynamic-binary-is-refused", "status": "PASS", "log_line": 39, "phase": "gate assertions (hermetic: musl-env.sh self-test, this script's summary + G2 asserts, cross-build UI gate + release asserts)"}
+{"id": "fx.gate1/notices", "status": "SKIPPED", "reason": "python3 not found — notices check SKIPPED", "log_line": 42, "phase": "notices"}
+{"id": "fx.gate1/build-scripts-meshmud-build.sh", "status": "SKIPPED", "reason": "git not found — build-scripts gate SKIPPED", "log_line": 44, "phase": "build scripts (meshmud-build.sh / meshtastic-web-build.sh verify paths, hermetic)"}
+{"id": "fx.gate1/systemd-analyze", "status": "SKIPPED", "reason": "systemd-analyze or the units absent — SKIPPED", "log_line": 46, "phase": "systemd-analyze"}
+{"id": "fx.gate1/messaging-mesh111-workspace/fmt", "status": "PASS", "log_line": 48, "phase": "messaging (mesh111 workspace)/fmt"}
+{"id": "fx.gate1/messaging-mesh111-workspace/clippy", "status": "PASS", "log_line": 49, "phase": "messaging (mesh111 workspace)/clippy", "seams": ["L1-X:fx-gate"]}
+{"id": "fx.mesh.lib/ack::tests::canonical_rules", "status": "PASS", "log_line": 56, "phase": "messaging (mesh111 workspace)/test", "test": "ack::tests::canonical_rules", "check": "fx.mesh.lib"}
+{"id": "fx.mesh.contacts/node_id_contacts_survive_restarts_until_forgotten", "status": "PASS", "log_line": 63, "phase": "messaging (mesh111 workspace)/test", "test": "node_id_contacts_survive_restarts_until_forgotten", "check": "fx.mesh.contacts"}
+{"id": "fx.gate1/messaging-mesh111-workspace/test/doc/crates/mesh111/src/store/tx.rs - store::tx::Store::queue_own_message (line 86) - compile", "status": "PASS", "log_line": 70, "phase": "messaging (mesh111 workspace)/test", "test": "crates/mesh111/src/store/tx.rs - store::tx::Store::queue_own_message (line 86) - compile"}
+{"id": "fx.gate1/presence-sidecar-meshtastic", "status": "SKIPPED", "reason": "python3 not found — sidecar checks SKIPPED", "log_line": 78, "phase": "presence sidecar (meshtastic-presence: tests + venv lock structure)"}
+{"id": "fx.gate1/ui", "status": "SKIPPED", "reason": "pnpm not found — UI checks SKIPPED (4-interface/ui: pnpm check = typecheck + test + build + budget)", "log_line": 80, "phase": "ui", "seams": ["L4-L5:fx-ui"]}
+{"id": "fx.gate1/musl-checks", "status": "SKIPPED", "reason": "musl cross toolchains absent (~/.local/toolchains: x86_64- and aarch64-linux-musl-gcc/-ar) — musl checks SKIPPED", "log_line": 4, "phase": "musl checks"}
+{"id": "fx.gate1/messaging-mesh111-workspace/musl-checks", "status": "SKIPPED", "reason": "musl cross toolchains absent (~/.local/toolchains: x86_64- and aarch64-linux-musl-gcc/-ar) — musl checks SKIPPED", "log_line": 74, "phase": "messaging (mesh111 workspace)/musl checks"}
+{"id": "fx.gate1/g2-sqlcipher-static-link", "status": "SKIPPED", "reason": "musl cross toolchains absent — G2 (SQLCipher static link) SKIPPED; REQUIRE_G2=1 makes this a failure", "log_line": 76, "phase": "G2 (SQLCipher static link)"}

@@ -1,0 +1,2 @@
+{"exit_declared": false}
+{"id": "fx.emit/4/daemon-up-on-127.0.0.1-n-within-4s", "status": "PASS", "log_line": 3, "phase": "4. namespace + daemon", "seams": ["L1-L2:fx-alpha"]}

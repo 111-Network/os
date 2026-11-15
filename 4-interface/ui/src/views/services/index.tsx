@@ -377,6 +377,14 @@ function ServicePage({ service }: { service: ServiceRecord }) {
             ) : (
               <p className={TEXT}>There is no setup step for this one. It turns live by itself once the condition above is met.</p>
             )}
+            {/* Layer 7 (section 3.5): the gateway is the owner's own switch; an unset row sends them to where it is. */}
+            {service.id === "gateway" && (service.reason_code === "gateway_none" || service.reason_code === "gateway_off") ? (
+              <div>
+                <ButtonLink href={hrefTo("/settings/l7")} data-testid="gateway-settings-link">
+                  Settings {"->"} Layer 7
+                </ButtonLink>
+              </div>
+            ) : null}
           </Panel>
           {service.id === "fabric" ? <FabricDetails /> : null}
           <Links page={page} skipRecipe={page.handoff?.mode === "request" && page.kbPath !== null} />

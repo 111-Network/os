@@ -31,7 +31,11 @@ use std::sync::Arc;
 
 /// Start Layer 7 (§6.3): read `state/relay.json` (D1) and build only what a switch turned on (D10,
 /// D11). T0 stub: returns at once; nothing is read, spawned, bound or scheduled.
-pub fn start(_api: &Arc<ApiState>, _fabric: &Arc<FabricHandle>) {}
+pub fn start(api: &Arc<ApiState>, fabric: &Arc<FabricHandle>) {
+    // §2.1–§2.3 (D2): presence has no switch (event-derived on every node); this binds the empty
+    // book to the fabric handle and lists the `111` Nearby source. Nothing spawned or scheduled.
+    presence::install(api, fabric);
+}
 
 /// One fabric event to the Layer 7 consumers: the presence facts (§2.1, §2.2; D2) and the `gateway`
 /// row (§3.5; D3). Called from the fabric's fan-out once M5 hooks it (see the module doc); each

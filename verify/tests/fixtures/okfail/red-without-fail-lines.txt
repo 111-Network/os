@@ -1,0 +1,5 @@
+
+== 4. namespace + daemon  (t+96.1s)
+ok: daemon up on 127.0.0.1:11180 within 4s
+
+SMOKE RED — 2 FAIL line(s) in 120.4s

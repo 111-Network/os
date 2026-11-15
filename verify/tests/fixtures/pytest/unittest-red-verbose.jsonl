@@ -1,0 +1,7 @@
+{"exit_declared": true}
+{"id": "fx.py/test_green.Green.test_one", "status": "PASS", "log_line": 1, "test": "test_green.Green.test_one"}
+{"id": "fx.py/test_green.Green.test_two", "status": "SKIPPED", "reason": "skipped: no meshtastic", "log_line": 2, "test": "test_green.Green.test_two"}
+{"id": "fx.py/test_red.Red.test_error", "status": "FAIL", "reason": "error", "assertion": "RuntimeError: first line\nsecond line", "log_line": 9, "test": "test_red.Red.test_error"}
+{"id": "fx.py/test_red.Red.test_ok", "status": "PASS", "log_line": 4, "test": "test_red.Red.test_ok"}
+{"id": "fx.py/test_red.Red.test_planted_fail", "status": "FAIL", "assertion": "AssertionError: {'a': 1} != {'a': 2}\n- {'a': 1}\n?       ^\n\n+ {'a': 2}\n?       ^\n : the map differs", "log_line": 18, "test": "test_red.Red.test_planted_fail", "after": "fx.py/test_red.Red.test_error"}
+{"id": "fx.py/test_red.Red.test_skipped", "status": "SKIPPED", "reason": "skipped: needs a radio", "log_line": 6, "test": "test_red.Red.test_skipped"}

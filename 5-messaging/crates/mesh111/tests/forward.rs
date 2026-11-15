@@ -14,7 +14,12 @@
 //! bound, a replayed or misdirected pair ack, the resident window and
 //! the forwarder's linear work. The M4c fixes: the window shared fairly (a
 //! down pair's backlog never holds back an up pair's rows), `Forward` on a
-//! far frame with a post outstanding, rule (1) once per far-hub round.
+//! far frame with a post outstanding, rule (1) once per far-hub round. The
+//! M4d fixes: the swap probe reads a deep store on its own (the self-wake),
+//! an unpairing restarts it, a full pair counts as down for the window. The
+//! M4e fixes: a hit-cache entry restarts the probe only for a dest whose
+//! rows wait in the store (commits for many dests never sweep it again, a
+//! dest's first hit moves its stored rows first).
 
 mod common;
 
@@ -34,7 +39,7 @@ use mesh111::envelope::{
 };
 use mesh111::fabric::{
     Fabric, FabricError, FabricEvent, FabricSettings, ForwardDone, PairView, SettingsPatch,
-    FORWARD_RESIDENT,
+    FORWARD_CACHE, FORWARD_RESIDENT,
 };
 use mesh111::ids::MsgSeq;
 use mesh111::link::tcp_lan::{
@@ -1548,9 +1553,6 @@ async fn with_the_hub_role_off_pairs_wait_and_nothing_is_forwarded() {
     assert_eq!(protected(&a.f).await, 0);
 }
 
-/// M4b: §5.9 re-post rule (1) is applied at the take after the drain was
-/// handed in (the drain's own acks commit first, nothing is re-armed in
-/// between) and re-arms a post at most once in its life.
 /// The `FabricEvent::Forward`s for `target` among `events`.
 fn forwards(events: &[FabricEvent], target: &Node) -> Vec<u32> {
     let id = target.id();
@@ -1955,4 +1957,417 @@ async fn a_down_pairs_backlog_never_holds_back_an_up_pairs_rows() {
     assert_eq!(st.counters.forward_refused, 0, "evicted, never refused");
     assert_eq!(pair_view(&a.f, &b).await.pending, 0);
     assert_eq!(pair_view(&a.f, &c).await.pending, 0);
+}
+
+/// Rows held at `h` (its custody count): how a test watches a hub without
+/// calling the hub under test.
+async fn held(h: &Node) -> u64 {
+    h.f.status().await.unwrap().custody.0
+}
+
+/// Wait until `h` reports `.reachable` for `of` false.
+async fn until_down(h: &Node, of: &Node) {
+    until(10, || async {
+        (!pair_view(&h.f, of).await.reachable).then_some(())
+    })
+    .await;
+}
+
+/// M4d (§5.5, module doc "The resident window"): the swap probe reads a
+/// deep store on its own. B's rows (B down) fill the window and 1,536 more
+/// (six pages) wait in the store ahead of one row for Yuri, whose turn is
+/// the carrier pair G′ (the hit cache) while the carrier bound is unset.
+/// The one trigger, setting the bound, is a tick of four passes (four
+/// pages); after it nothing calls the hub: each tick that leaves the probe
+/// more to read queues one self-wake, so the probe reaches Yuri's row and
+/// the hub tells the carrier it is owed. Watched only through the hub's
+/// event stream.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_swap_probe_reads_a_deep_store_on_its_own() {
+    let d = Dirs::new();
+    let a = hub(&d, "hub-a").await;
+    let b = hub(&d, "hub-b").await;
+    let g2 = hub(&d, "hub-g2").await;
+    pair(&a, &b, PairRole::Peer, PairVia::Tcp).await;
+    pair(&a, &g2, PairRole::Peer, PairVia::Carrier).await;
+    for h in [&a, &g2] {
+        h.f.set_carrier_max_frame(Some(3_068)).await.unwrap();
+    }
+    let m = member(&d, "mary", &a, false).await;
+    let dd = member(&d, "dave", &b, false).await;
+    let y = member(&d, "yuri", &g2, false).await;
+    dd.t.release(b.addr);
+    y.t.release(g2.addr);
+    // Yuri's first row crosses the carrier and G′ accepts it: the cache
+    // names G′ for Yuri.
+    let warm = numbered(1_000_000);
+    let mut raw = Raw::open(a.addr, &m.ident, &a).await;
+    let upstream = Some([0xEE; DEST_HUB_LEN]);
+    assert_eq!(raw.put(&y.id(), &warm, upstream).await, Accepted);
+    carry(&a, &g2).await;
+    carry(&a, &g2).await;
+    assert!(row(&a.f, &warm).await.unwrap().committed);
+    // The carrier goes away (a held row for G′ waits) and B too.
+    a.f.set_carrier_max_frame(None).await.unwrap();
+    b.t.release(a.addr);
+    until_down(&a, &b).await;
+    const N: u32 = FORWARD_RESIDENT as u32 + 1_536;
+    let for_b: Vec<Vec<u8>> = (0..N).map(numbered).collect();
+    let blast = Raw::open(a.addr, &m.ident, &a).await;
+    assert_eq!(blast.blast(&dd.id(), &for_b).await, N as usize);
+    let yuri = numbered(2_000_000);
+    assert_eq!(raw.put(&y.id(), &yuri, None).await, Accepted);
+    assert_eq!(protected(&a.f).await, u64::from(N) + 1);
+    assert_eq!(
+        pair_view(&a.f, &g2).await.pending,
+        0,
+        "Yuri's row waits in the store behind B's"
+    );
+    let mut ev = a.f.subscribe();
+    a.f.set_carrier_max_frame(Some(3_068)).await.unwrap();
+    // From here on nothing calls A: only its own self-wakes move it on.
+    let owed = tokio::time::timeout(Duration::from_secs(30), async {
+        loop {
+            match ev.recv().await {
+                Ok(FabricEvent::Forward { target, pending }) if target == g2.id() => {
+                    return pending;
+                }
+                Ok(_) | Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
+                Err(e) => panic!("{e}"),
+            }
+        }
+    })
+    .await
+    .expect("the probe reached Yuri's row with no call into the hub");
+    assert_eq!(owed, 1, "Yuri's row only");
+    let out = a.f.forward_take(g2.id(), 64).await.unwrap();
+    assert_eq!(out.len(), 1);
+    assert_eq!(first_puts(&a, &g2, &y.id()), [1_000_000, 2_000_000]);
+    assert!(puts(&a, &g2).iter().all(|(dest, _, _)| *dest == y.id()));
+    let st = a.f.status().await.unwrap();
+    assert_eq!(st.counters.forward_refused, 0, "evicted, never refused");
+    assert_eq!(protected(&a.f).await, u64::from(N) + 1);
+}
+
+/// M4d (§5.5): a change that turns stored rows' turn up restarts the
+/// probe. Pairs [B, C, D]: D's rows (D down) fill the window; Carl's rows
+/// wait in the store with their turn at B (down, first in the probe
+/// order) and the probe found nothing to move. The owner unpairs B: those
+/// rows now go to C, before newer puts for Carl, in custody order.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_unpairing_moves_stored_rows_before_newer_ones() {
+    let d = Dirs::new();
+    let a = hub(&d, "hub-a").await;
+    let b = hub(&d, "hub-b").await;
+    let c = hub(&d, "hub-c").await;
+    let dh = hub(&d, "hub-d").await;
+    pair(&a, &b, PairRole::Peer, PairVia::Tcp).await;
+    pair(&a, &c, PairRole::Peer, PairVia::Tcp).await;
+    pair(&a, &dh, PairRole::Peer, PairVia::Tcp).await;
+    let m = member(&d, "mary", &a, false).await;
+    let cc = member(&d, "carl", &c, false).await;
+    let dd = member(&d, "dave", &dh, false).await;
+    cc.t.release(c.addr);
+    dd.t.release(dh.addr);
+    // B and C refuse Dave's first row and D takes it: the cache names D.
+    let warm = numbered(1_000_000);
+    let mut raw = Raw::open(a.addr, &m.ident, &a).await;
+    assert_eq!(raw.put(&dd.id(), &warm, None).await, Accepted);
+    until(10, || async {
+        row(&a.f, &warm).await?.committed.then_some(())
+    })
+    .await;
+    b.t.release(a.addr);
+    dh.t.release(a.addr);
+    until_down(&a, &b).await;
+    until_down(&a, &dh).await;
+    const W: u32 = FORWARD_RESIDENT as u32;
+    const S: u32 = 100;
+    const P: u32 = 20;
+    let for_d: Vec<Vec<u8>> = (0..W).map(numbered).collect();
+    let blast = Raw::open(a.addr, &m.ident, &a).await;
+    assert_eq!(blast.blast(&dd.id(), &for_d).await, W as usize);
+    let for_carl: Vec<Vec<u8>> = (W..W + S).map(numbered).collect();
+    let blast = Raw::open(a.addr, &m.ident, &a).await;
+    assert_eq!(blast.blast(&cc.id(), &for_carl).await, S as usize);
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(protected(&a.f).await, u64::from(W + S));
+    assert_eq!(
+        pair_view(&a.f, &c).await.pending,
+        0,
+        "Carl's rows wait for B in the store"
+    );
+    assert!(first_puts(&a, &c, &cc.id()).is_empty());
+    assert!(a.f.unpair(b.id()).await.unwrap());
+    let newer: Vec<Vec<u8>> = (W + S..W + S + P).map(numbered).collect();
+    let blast = Raw::open(a.addr, &m.ident, &a).await;
+    assert_eq!(blast.blast(&cc.id(), &newer).await, P as usize);
+    until(60, || async {
+        (held(&c).await == u64::from(S + P)).then_some(())
+    })
+    .await;
+    assert_eq!(
+        first_puts(&a, &c, &cc.id()),
+        (W..W + S + P).collect::<Vec<_>>(),
+        "the ex-B rows first, then the newer ones, in custody order"
+    );
+    let st = a.f.status().await.unwrap();
+    assert_eq!(st.counters.forward_refused, 0, "evicted, never refused");
+    assert_eq!(protected(&a.f).await, u64::from(W), "D's rows wait for D");
+}
+
+/// M4d (§5.5, C16): a pair whose `REJECT_FULL` rows wait counts as down
+/// for the window. C's rows fill it and C answers every put `REJECT_FULL`
+/// (its custody quota is full); Dora's rows (turn D, the hit cache) wait
+/// in the store. D comes up: Dora's rows enter in place of C's newest
+/// (full or idle, evicted to the store, never refused) and reach D in
+/// custody order while C stays full.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_full_pair_never_holds_back_another_pairs_stored_rows() {
+    let d = Dirs::new();
+    let a = hub(&d, "hub-a").await;
+    let c = hub(&d, "hub-c").await;
+    let dh = hub(&d, "hub-d").await;
+    pair(&a, &c, PairRole::Peer, PairVia::Tcp).await;
+    pair(&a, &dh, PairRole::Peer, PairVia::Tcp).await;
+    let m = member(&d, "mary", &a, false).await;
+    let cc = member(&d, "carl", &c, false).await;
+    let dd = member(&d, "dora", &dh, false).await;
+    cc.t.release(c.addr);
+    dd.t.release(dh.addr);
+    // C refuses Dora's first row and D takes it: the cache names D.
+    let warm = numbered(1_000_000);
+    let mut raw = Raw::open(a.addr, &m.ident, &a).await;
+    assert_eq!(raw.put(&dd.id(), &warm, None).await, Accepted);
+    until(10, || async {
+        row(&a.f, &warm).await?.committed.then_some(())
+    })
+    .await;
+    c.t.release(a.addr);
+    dh.t.release(a.addr);
+    until_down(&a, &c).await;
+    until_down(&a, &dh).await;
+    c.f.patch_settings(SettingsPatch {
+        quotas: vec![(Class::Custody, Some(1))],
+        ..SettingsPatch::default()
+    })
+    .await
+    .unwrap();
+    const W: u32 = FORWARD_RESIDENT as u32;
+    const K: u32 = 100;
+    let for_c: Vec<Vec<u8>> = (0..W).map(numbered).collect();
+    let blast = Raw::open(a.addr, &m.ident, &a).await;
+    assert_eq!(blast.blast(&cc.id(), &for_c).await, W as usize);
+    let for_d: Vec<Vec<u8>> = (W..W + K).map(numbered).collect();
+    let blast = Raw::open(a.addr, &m.ident, &a).await;
+    assert_eq!(blast.blast(&dd.id(), &for_d).await, K as usize);
+    // C comes back full: its link-up releases one window of puts, each
+    // answered REJECT_FULL, and nothing retries them.
+    c.t.maintain(a.addr, Some(a.id()));
+    until(10, || async { (puts(&a, &c).len() >= 32).then_some(()) }).await;
+    let mut seen = 0;
+    for _ in 0..30 {
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        let now = puts(&a, &c).len();
+        if now == seen {
+            break;
+        }
+        seen = now;
+    }
+    assert_eq!(held(&c).await, 0, "C is full");
+    assert_eq!(held(&dh).await, 1);
+    dh.t.maintain(a.addr, Some(a.id()));
+    until(60, || async {
+        (held(&dh).await == u64::from(K) + 1).then_some(())
+    })
+    .await;
+    assert_eq!(
+        first_puts(&a, &dh, &dd.id()),
+        [1_000_000].into_iter().chain(W..W + K).collect::<Vec<_>>(),
+        "D got Dora's rows in custody order, once each"
+    );
+    let st = a.f.status().await.unwrap();
+    assert_eq!(st.counters.forward_refused, 0, "evicted, never refused");
+    assert_eq!(protected(&a.f).await, u64::from(W), "C's rows wait for C");
+}
+
+/// A raw connection speaking for the pair `p` (its own fabric is gone): one
+/// fetch attributes it, so `a` puts to `p` on it.
+async fn raw_pair(a: &Node, p: &Node) -> Raw {
+    let mut r = Raw::open(a.addr, &p.ident, a).await;
+    r.send(Kind::MailboxFetch, encode_cursor(0)).await;
+    until(10, || async {
+        pair_view(&a.f, p).await.reachable.then_some(())
+    })
+    .await;
+    r
+}
+
+/// The next put written to a raw pair, answered `ACCEPTED`: `(dest, the
+/// numbered index of its item)`.
+async fn take_put(r: &mut Raw) -> (NodeId, u32) {
+    let put = r.next(Kind::CustodyPut, T).await.expect("a put in time");
+    let (dest, it) = decode_put(&put).unwrap();
+    let it = it.to_vec();
+    r.ack(&dest, &it, Accepted).await;
+    (dest, u32::from_le_bytes(it[1..5].try_into().unwrap()))
+}
+
+/// The `i`-th of many distinct dests no hub holds as a member.
+fn far_dest(i: u32) -> NodeId {
+    let mut b = [0x7D; 32];
+    b[..4].copy_from_slice(&i.to_le_bytes());
+    NodeId::from(b)
+}
+
+/// Pairs [D, C] at hub A: D away, C a raw connection that takes every put.
+/// `held` rows for `x` (turn D: first in the probe order, no hint, no cache
+/// entry) fill the window and wait behind it, then `zoe` rows for `zoe`
+/// (numbered on). C comes up and the probe sweeps the store once, moving
+/// nothing (one run: at most four pages). Returns A, Mary (A's member),
+/// the raw C and the hubs to keep alive.
+async fn behind_a_down_pair(
+    d: &Dirs,
+    x: NodeId,
+    held: u32,
+    zoe: NodeId,
+    zoes: u32,
+) -> (Node, Node, Node, Raw, Node) {
+    let a = hub(d, "hub-a").await;
+    let dh = hub(d, "hub-d").await;
+    let c = hub(d, "hub-c").await;
+    pair(&a, &dh, PairRole::Peer, PairVia::Tcp).await;
+    pair(&a, &c, PairRole::Peer, PairVia::Tcp).await;
+    let m = member(d, "mary", &a, false).await;
+    c.f.abort();
+    c.t.shutdown();
+    dh.t.release(a.addr);
+    until_down(&a, &c).await;
+    until_down(&a, &dh).await;
+    let for_x: Vec<Vec<u8>> = (0..held).map(numbered).collect();
+    let blast = Raw::open(a.addr, &m.ident, &a).await;
+    assert_eq!(blast.blast(&x, &for_x).await, held as usize);
+    if zoes > 0 {
+        let for_zoe: Vec<Vec<u8>> = (held..held + zoes).map(numbered).collect();
+        let blast = Raw::open(a.addr, &m.ident, &a).await;
+        assert_eq!(blast.blast(&zoe, &for_zoe).await, zoes as usize);
+    }
+    let behind = u64::from(held + zoes) - FORWARD_RESIDENT as u64;
+    assert!(behind <= 4 * 256, "one run sweeps it");
+    let before = a.f.forward_target_computations().await.unwrap();
+    let rc = raw_pair(&a, &c).await;
+    // C's coming up restarts the probe: one sweep, one target computation
+    // per stored row, nothing moves (every stored row's turn is D).
+    until(10, || async {
+        let now = a.f.forward_target_computations().await.ok()?;
+        (now >= before + behind).then_some(())
+    })
+    .await;
+    assert_eq!(pair_view(&a.f, &c).await.pending, 0, "nothing moved");
+    (a, m, c, rc, dh)
+}
+
+/// M4e (§5.5, the re-review's F1): a hit-cache entry added for a dest with
+/// no row in the store restarts nothing. D's rows fill the window and 512
+/// more wait behind it; C is up and the probe found nothing to move. Rows
+/// hinted to C for more dests than the hit cache holds: each commit adds
+/// an entry (the cache churns), none restarts the probe, so each row is
+/// admitted at once and no page of the store is read again: three target
+/// computations a row (the gate's, the admission's, the pass's), where a
+/// sweep would cost one per stored row at every commit.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_cache_entry_for_a_dest_with_no_stored_row_never_restarts_the_probe() {
+    let d = Dirs::new();
+    const W: u32 = FORWARD_RESIDENT as u32;
+    const S: u32 = 512;
+    let x = NodeId::from([0x71; 32]);
+    let (a, m, c, mut rc, _dh) = behind_a_down_pair(&d, x, W + S, x, 0).await;
+    let hint = Some(prefix(&c.id()));
+    let mut raw = Raw::open(a.addr, &m.ident, &a).await;
+    let before = a.f.forward_target_computations().await.unwrap();
+    const N: u32 = FORWARD_CACHE as u32 + 44;
+    for i in 0..N {
+        let it = numbered(1_000_000 + i);
+        assert_eq!(raw.put(&far_dest(i), &it, hint).await, Accepted);
+        assert_eq!(take_put(&mut rc).await, (far_dest(i), 1_000_000 + i));
+    }
+    let last = numbered(1_000_000 + N - 1);
+    until(10, || async {
+        row(&a.f, &last).await?.committed.then_some(())
+    })
+    .await;
+    let spent = a.f.forward_target_computations().await.unwrap() - before;
+    // What the test means: no commit restarts the probe, so the store is
+    // not swept again at each commit. A row costs three target computations
+    // (the gate's, the admission's, the pass's: 3N = 900), and a sweep one
+    // per stored row above the floor (S + 1 = 513: the first admission
+    // evicted one of x's rows from the full window). The bound allows twice
+    // the per-row cost and four whole sweeps, 6N + 4(S + 1) = 3,852, so a
+    // computation more per row or a stray legitimate restart (or the hit
+    // cache's own dropped entries, M4f: those dests hold no row anywhere)
+    // passes; a restart on every changed entry (M4d's rule) sweeps the S + 1
+    // rows after each of the N commits, about N(S + 1) = 153,900, and fails
+    // it forty times over.
+    let bound = 6 * u64::from(N) + 4 * (u64::from(S) + 1);
+    assert!(
+        spent < bound,
+        "{spent} target computations for {N} rows (bound {bound}): the store was swept again"
+    );
+    assert_eq!(
+        protected(&a.f).await,
+        u64::from(W + S),
+        "D's rows wait for D"
+    );
+    let st = a.f.status().await.unwrap();
+    assert_eq!(st.counters.forward_refused, 0);
+}
+
+/// M4e (§5.5): a dest's first hit at C restarts the probe when rows of that
+/// dest wait in the store. D's rows fill the window and 100 more wait,
+/// then 40 rows for Zoe (turn D: no hint, no cache entry); C is up and the
+/// probe found nothing to move. A row for Zoe hinted to C is admitted at
+/// once and C takes it: the new cache entry finds Zoe's rows in the store,
+/// the probe restarts, and they reach C in custody order before a newer
+/// row for Zoe put after that commit.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_dests_first_hit_moves_its_stored_rows_before_a_newer_one() {
+    let d = Dirs::new();
+    const W: u32 = FORWARD_RESIDENT as u32;
+    const S: u32 = 100;
+    const Z: u32 = 40;
+    let (x, zoe) = (NodeId::from([0x71; 32]), NodeId::from([0x2E; 32]));
+    let (a, m, c, mut rc, _dh) = behind_a_down_pair(&d, x, W + S, zoe, Z).await;
+    let mut raw = Raw::open(a.addr, &m.ident, &a).await;
+    let first = numbered(2_000_000);
+    let hint = Some(prefix(&c.id()));
+    assert_eq!(raw.put(&zoe, &first, hint).await, Accepted);
+    assert_eq!(take_put(&mut rc).await, (zoe, 2_000_000));
+    until(10, || async {
+        row(&a.f, &first).await?.committed.then_some(())
+    })
+    .await;
+    let newer = numbered(2_000_001);
+    assert_eq!(raw.put(&zoe, &newer, None).await, Accepted);
+    let mut got = Vec::new();
+    for _ in 0..=Z {
+        let (dest, i) = take_put(&mut rc).await;
+        assert_eq!(dest, zoe);
+        got.push(i);
+    }
+    assert_eq!(
+        got,
+        (W + S..W + S + Z).chain([2_000_001]).collect::<Vec<_>>(),
+        "Zoe's stored rows first, in custody order, then the newer one"
+    );
+    until(10, || async {
+        row(&a.f, &newer).await?.committed.then_some(())
+    })
+    .await;
+    assert_eq!(
+        protected(&a.f).await,
+        u64::from(W + S),
+        "D's rows wait for D"
+    );
+    let st = a.f.status().await.unwrap();
+    assert_eq!(st.counters.forward_refused, 0, "evicted, never refused");
 }

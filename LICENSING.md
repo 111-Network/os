@@ -71,6 +71,7 @@ declare `license = "GPL-3.0-or-later"`, and `4-interface/ui/package.json` sets `
 | **`deltachat-rpc-server`** (chatmail core) | github.com/chatmail/core, **pinned v2.63.0** (tag commit `de6f46971002c64b293d6095e66d8a1b7a11fd43`) in `assets/components/deltachat.toml`: `deltachat-rpc-server-x86_64-linux` (26 811 824 B, sha256 `57cab329…40d517`), `-aarch64-linux` (21 009 952 B, `040b0c36…bdbd13`), `-arm64-v8a-android` (21 897 944 B, `3e2d0c93…9d658c`); no armv7 build | `MPL-2.0` (upstream `LICENSE`, read 2026-10-19; the notice points at it at the v2.63.0 tag). *Owner review of the final pin pending* | Separate process, JSON-RPC over stdio, run unmodified. Not pre-downloaded by `111 install` (`prefetch = false`); fetched hash-checked by `sudo 111 install --components deltachat,madmail`, installed from the cache on enable | MPL-2.0 file-level terms follow the binary: keep the licence text and point to the pinned tag's source. Compatible with GPL-3.0 by its section 3.3 either way. Section 9 item 18 |
 | **SimpleX Chat CLI and `smp-server`** (optional, built after Delta Chat) | github.com/simplex-chat/simplex-chat, github.com/simplex-chat/simplexmq; **no pin in this release** (`assets/components/simplex.toml` is `kind = "none"`: declared, nothing pinned, cached or downloaded; enabling refuses) | `AGPL-3.0` (upstream `LICENSE` and README, read 2026-10-19). The SimpleX name, logo and graphic assets are outside the licence (separate TRADEMARK and ASSETS_LICENSE files) | When the owner selects it: separate processes, per-target pins fetched hash-checked into the install-time cache, glibc hosts only (refused on Termux) | AGPL section 13 source offer naming the pinned tags; the name and logo are not reused. Section 9 item 18 |
 | **Briar headless** (`briar-headless`) | github.com/briar/briar | `GPL-3.0-or-later` (upstream `LICENSE.txt` notice, read 2026-10-19; the KB entry is updated to match) | **Documented, not built.** It registers only the Tor plugin on Linux, so it is online-only | If ever built it is a separate process under the same duties as the other GPL programs (section 7). Nothing of it is in a release |
+| **ntfy server** (HTTP pub/sub; the Layer 7 carrier's far end) | github.com/binwiederhier/ntfy (v2.36.0 on 2026-10-31 when read; no pin, nothing of it is in a release) | `Apache-2.0` and `GPL-2.0`, dual-licensed (both licence files read, Layer 7 research R06 section 4); we take neither as a distributor, because none of its code reaches us | **An owner-run server, never linked, never shipped, never installed or started by 111.** The owner runs (or chooses) the server and names it in Settings; the `ntfy` carrier (`7-relay/README.md` section 6, `daemon/carrier/ntfy.rs`, our own code) speaks its HTTP(S) publish, poll and held-stream API to it as a client, over the `ureq` and `rustls` that `111d` already links, only when the owner switches the carrier on (`carrier_enable` consent). The public `ntfy.sh` is for a manual check only, never a default | Nothing to convey: no ntfy bytes in `111`, in a payload or in the install cache. The owner's server is the owner's own program under its own licence (Apache-2.0 is GPL-3.0-compatible; GPL-2.0-only code is not, which is one more reason it stays a separate program on the owner's machine). The client sends sealed hub-to-hub packets on a topic only the two paired hubs can derive; the server's operator sees their outer headers, sizes and times, and the access token when the server uses one (`7-relay/README.md` section 6.2) |
 | **Test fixtures:** `meshtasticd` (`-s` simulator), **Meshtasticator**, **Sideband**, **Columba** | github.com/meshtastic/firmware; github.com/meshtastic/Meshtasticator; github.com/markqvist/Sideband; github.com/torlando-tech/columba | `meshtasticd` GPL-3.0; Meshtasticator `CC-BY-4.0` (its README, read 2026-10-19; no licence file on the default branch); Sideband `CC BY-NC-SA 4.0`; Columba `MPL-2.0` | Test tools only. `meshtasticd` and Meshtasticator run in tests on a developer or CI machine and are **never shipped**. Sideband is **never shipped** and fails the KB's OSI gate. **Columba is linked from the dashboard** (a link-out, spec section 7), no APK is shipped | Meshtasticator's licence is a content licence, which is acceptable for a tool that stays out of releases. A Columba link needs no licence action |
 
 The Layer 5 libraries that **are** linked into `111` (`rusqlite` / `libsqlite3-sys` with SQLCipher and OpenSSL, `blake3`, `bao-tree`, `ciborium`) and the dashboard's `jsQR` are not
@@ -85,6 +86,7 @@ these would be a new connected service and gets its own row here before it ships
 | Item | Version | License | Where | Notes |
 |---|---|---|---|---|
 | **Monocypher** (`monocypher.c/.h`, `optional/monocypher-ed25519.c/.h`) | 4.0.3 (tarball sha256 `8cc9bc34...8ee66`) | `BSD-2-Clause OR CC0-1.0`, dual (vendored `LICENCE.md`) | `2-identity/monocypher-harness/vendor/` | Test harness only: it proves the C code agrees with Rust `id111`. Not linked into `111`, `111-agent` or the dashboard. Copyright lines: Loup Vaillant 2017-2023, Michael Savage 2017-2019, Fabio Scotoni 2017-2023. `LICENCE.md` travels with the sources; files are hash-pinned (`SHA256SUMS`) and never edited in place |
+| **icm-architect** (an agent skill: `SKILL.md`, `references/`, `assets/templates/`, four standard-library Python scripts) | upstream `RinDig/icm-architect` at commit `8bc2f56` (2026-10-23) | `MIT` (vendored `LICENSE`; copyright 2026 Jake Van Clief) | `.claude/skills/icm-architect/` | Development tooling only: a method document an agent session reads to design or audit a folder structure. Unmodified; `LICENSE` travels with it. Not built, not linked and not run by `111`; no binary payload carries it (a source archive of this tree does, with its `LICENSE`). `scripts/viz.py` writes an HTML page that loads two scripts from a public CDN when a person opens it: it is not used by anything of ours |
 
 Nothing else is vendored. The only other C files in `os/` are our `harness.c`.
 Layer 5 keeps that true: `meshmud` and the Meshtastic web client are **built in CI from pinned upstream sources** (tag, commit and tarball or asset sha256 in their build scripts) and their source is never copied into `os/`.
@@ -100,21 +102,26 @@ The count includes compile-time proc-macro crates. The full `Cargo.lock` graph, 
 
 | License family | `111` (bootstrap, includes `id111`) | `111-agent` |
 |---|---|---|
-| `MIT OR Apache-2.0` (all spellings) | 121 | 39 |
-| MIT only | 40 | 19 |
-| Apache-2.0 only (`sync_wrapper`) | 1 | 1 |
-| Multi-license with another permissive option (Unlicense, Zlib, 0BSD, BSD-3-Clause, ISC, BSL-1.0) | 10 | 2 |
-| Single BSD-3-Clause / ISC / CC0-1.0 | 9 | 0 |
+| `MIT OR Apache-2.0` (all spellings) | 146 | 39 |
+| MIT only | 45 | 19 |
+| Apache-2.0 only (`ciborium` and its two helper crates, `prost`, `prost-derive`, `sync_wrapper`) | 6 | 1 |
+| Multi-license with another permissive option (Unlicense, Zlib, 0BSD, BSD-2-Clause, BSD-3-Clause, ISC, BSL-1.0, CC0-1.0, MIT-0, LLVM-exception) | 18 | 2 |
+| Multi-license with a copyleft option (`self_cell`: `Apache-2.0 OR GPL-2.0-only`; we take Apache-2.0) | 1 | 0 |
+| Single BSD-3-Clause / ISC / CC0-1.0 / Zlib | 10 | 0 |
 | Conjunctive, all terms apply: `ring` (Apache-2.0 AND ISC), `matchit` (MIT AND BSD-3-Clause), `unicode-ident` ((MIT OR Apache-2.0) AND Unicode-3.0) | 3 | 2 |
 | CDLA-Permissive-2.0 data: `webpki-roots` | 1 | 0 |
-| **Total** | **185** | **63** |
+| GPL-3.0, copyleft: `meshtastic` (Layer 6, table below) | 1 | 0 |
+| **Total** | **231** | **63** |
 
-187 distinct crate versions across both binaries. Full lock graphs (all platforms, dev and build): bootstrap 255, identity 64, intelligence 108.
+233 distinct crate versions across both binaries. Full lock graphs (all platforms, dev and build; third-party entries of each `Cargo.lock`): bootstrap 317, identity 64, intelligence 108.
+*Re-counted 2026-11-12 (Layer 7 K4) from `1-bootstrap/Cargo.lock` as it stands with D5 (`cargo tree -e normal` for both musl targets, the method above; the table dated 2026-10-14 had not been re-counted when Layers 5 and 6 landed).* The `111-agent` column and the intelligence graph are unchanged: `3-intelligence/Cargo.lock` is byte-identical to the one the previous notices recorded, and its closure is read from `THIRD-PARTY-NOTICES.md`, because this box's cargo registry lacks 31 `agent111`-only crates and cannot resolve that workspace offline.
 
-- **Copyleft:** none linked in the lock graphs scanned on 2026-10-14. *Layer 6 changes this when task B3 lands:* the `meshtastic` crate is GPL-3.0 (table below). `r-efi 6.0.0` offers `LGPL-2.1-or-later` as a third alternative to MIT and Apache-2.0. It appears only in the bootstrap and
-  intelligence lock graphs, not in the Linux builds. We take the MIT/Apache option if it ever links.
-- **Single BSD-3/CC0/ISC crates:** `ed25519-dalek`, `curve25519-dalek`, `x25519-dalek`, `subtle` (BSD-3-Clause); `bip39`, `bitcoin_hashes`, `hex-conservative`
-  (CC0-1.0); `rustls-webpki`, `untrusted` (ISC).
+- **Copyleft:** one crate is linked: `meshtastic` (GPL-3.0, linked into `111` since Layer 6 task B3; section 7 records what that means for the
+  binary). Two crates offer a copyleft licence only as an alternative, and we take the permissive option: `self_cell 1.3.0` (`Apache-2.0 OR
+  GPL-2.0-only`: we take Apache-2.0) and `r-efi 6.0.0` (`LGPL-2.1-or-later` as a third alternative to MIT and Apache-2.0; it appears only in the
+  bootstrap and intelligence lock graphs, not in the Linux builds; we take the MIT/Apache option if it ever links).
+- **Single BSD-3/CC0/ISC/Zlib crates:** `ed25519-dalek`, `curve25519-dalek`, `x25519-dalek`, `subtle` (BSD-3-Clause); `bip39`, `bitcoin_hashes`, `hex-conservative`
+  (CC0-1.0); `rustls-webpki`, `untrusted` (ISC); `foldhash` (Zlib).
 - **`ring`:** its `LICENSE` points to separate ISC, BoringSSL (Apache-2.0 and ISC parts) and `once_cell` (Apache-2.0/MIT) license files (read locally in the cargo registry).
 - **`webpki-roots`:** embeds Mozilla's CA roots as data under CDLA-Permissive-2.0. Sharing the data requires the agreement text to accompany it (clause 2.1).
 - `mdns-sd` and `qrcode` (added for Layer 4) are Apache-2.0/MIT and MIT/Apache-2.0 (`1-bootstrap/TASKS.md`).
@@ -157,6 +164,17 @@ None is copyleft, so the section 7 rule (no GPL, LGPL, AGPL or SSPL linked) stil
 
 **Effect (D25 F2):** the shipped `111d` binary is **effectively `GPL-3.0-only`**, because it links GPL-3.0 code whose licence text names no later version. Our own files stay `GPL-3.0-or-later`; the combined binary is conveyed under the narrower terms. This does not conflict with our license (section 7).
 
+**Layer 7 additions (linked; task D5 wired it into `111d`; `7-relay/README.md` section 4.5, D30 Q17, D31 Q1).** One new lockfile entry. Read from the crate in the local cargo registry and from `1-bootstrap/Cargo.lock` on 2026-11-12.
+
+> `tokio-rustls` (MIT OR Apache-2.0): TLS 1.3 stream adapter linked into `111d` for paired-hub links (Layer 7 §4); permissive, GPL-3.0-compatible; no runtime weight until a hub pairs with a non-LAN hub.
+
+| Component | Version in `1-bootstrap/Cargo.lock` | License | Notes |
+|---|---|---|---|
+| `tokio-rustls` | 0.26.6 | `MIT OR Apache-2.0` | `default-features = false`, feature `ring` only (the default features pull `aws_lc_rs`; `cargo tree -p node111 -i aws-lc-rs` finds no such package). Build-time weight only; sign-off row "Layer 7 additions" under "Dependency policy" in `1-bootstrap/TASKS.md` |
+| `rustls` (now also a direct dependency of `node111`) | 0.23.45 | `Apache-2.0 OR ISC OR MIT` | Already linked through `ureq` at the same pin; the direct line asks for exactly `ureq`'s selection (`ring`, `logging`, `std`, `tls12`), so it adds no crate and no second crypto provider |
+
+Neither is copyleft, so the section 7 rule still holds for Layer 7. The ntfy server the carrier talks to is an owner-run program, never linked or shipped (section 3).
+
 **Fonts** (`4-interface/FONTS.md`, self-hosted woff2, byte-for-byte copies; four files): Geist Mono and Geist Pixel Line (SIL OFL 1.1, Copyright 2023 Vercel with
 basement.studio) and Silkscreen 400 and 700 (SIL OFL 1.1, Copyright 2001 The Silkscreen Project Authors). OFL texts ship next to the files and in `dist/fonts/`.
 
@@ -186,6 +204,7 @@ package versions, matched for GPL, LGPL, AGPL, SSPL, MPL, EPL, CDDL, EUPL, OSL, 
 |---|---|---|---|
 | Apache-2.0 crates (`sync_wrapper`, `ciborium`, `ring`'s BoringSSL parts, OpenSSL 3.x through `openssl-src`) | Apache-2.0 | Compatible with GPL-3.0 (it is not compatible with GPL-2.0: one reason our license is version 3 "or later", never 2) | Keep "version 3 or later" |
 | `r-efi` 6.0.0 | `MIT OR Apache-2.0 OR LGPL-2.1-or-later` | All three options are compatible. Not in the Linux musl dependency trees anyway (`cargo tree -i` finds nothing; UEFI only) | n/a |
+| `self_cell` 1.3.0 | `Apache-2.0 OR GPL-2.0-only` | We take Apache-2.0, which is compatible with GPL-3.0-or-later; the GPL-2.0-only alternative is not elected | n/a |
 | `lightningcss` 1.32.0 and its Linux binary | MPL-2.0 (file-level copyleft) | Dev-only build tool under Tailwind and Vite, not in `dist/`; MPL-2.0 is GPL-compatible in any case | n/a |
 | `caniuse-lite`, `argparse` | CC-BY-4.0 (data), Python-2.0 | Dev-only, never shipped | n/a |
 | Fonts | SIL OFL 1.1 | OFL is not itself GPL-compatible, but the font files are data placed beside the program, not part of it, and OFL allows bundling with software under any license. The font files stay OFL and may not be sold on their own | Keep the OFL texts beside the files |
@@ -214,7 +233,7 @@ derived in our code (sections 1 and 8); the helper `lxmf-sidecar` is a separate 
 
 ## 8. Obligations we actually have to meet
 
-- [ ] **Third-party notices in every release.** `THIRD-PARTY-NOTICES.md` now exists: 187 Rust crates, 6 JS packages (5 MIT plus `wouter`), the 4 font files,
+- [ ] **Third-party notices in every release.** `THIRD-PARTY-NOTICES.md` now exists: 233 Rust crates, 6 JS packages (5 MIT plus `wouter`), the 4 font files,
   Monocypher, the Layer 5 additions (14 Go modules of `meshmud`, 16 Python packages of the presence venv, the Meshtastic web client bundle, GPL source offers naming the pinned tags), and the license texts including the CDLA agreement for `webpki-roots` and the GPL-3.0 text. Generated by `1-bootstrap/scripts/gen-notices.py` and gated by `check.sh`. Still to do: ship it in the release payload as a manifest item and link it from the
   dashboard (Settings, Essentials, "Licenses").
 - [ ] **Our own license (GPL-3.0-or-later):** ship `LICENSE.md` beside the third-party notices in every release. For every conveyed binary of our own code, publish the

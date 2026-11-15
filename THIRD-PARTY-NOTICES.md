@@ -35,7 +35,7 @@ this list is in `LICENSING.md`.
 Inputs at generation time (SHA-256):
 
 ```
-b896ea7a174b39896299bf844bb2369ce38bf3ade7c294b74f79b0d9f661eb6e  1-bootstrap/Cargo.lock
+182bddc4d5b6a674ce360e91e9c4c59bd10ccde83143faa80543ee7dfe25755d  1-bootstrap/Cargo.lock
 9f779bdf23242c905a0106412a0cc6aa7b1b90ad985547d18674f6639e0b1d47  3-intelligence/Cargo.lock
 08c2709c1e59a5a9274d4ac88ff32ccfaa019b3e0042ea50c7f609e35d4fb225  4-interface/ui/pnpm-lock.yaml
 cf48326b784772c17f4528dc6739cf2678503e094f1b3aff09e4cbf91530eaaa  1-bootstrap/scripts/meshmud-build.sh#pins
@@ -60,7 +60,7 @@ The output is sorted and contains no timestamps, so identical inputs give identi
 
 | Group | Components |
 |---|---|
-| Rust crates | 232 |
+| Rust crates | 233 |
 | JavaScript packages | 7 |
 | Go modules (meshmud closure, CI-built binary) | 14 + meshmud + the Go standard library |
 | Python packages (presence venv) | 16 |
@@ -71,7 +71,7 @@ The output is sorted and contains no timestamps, so identical inputs give identi
 
 ## Rust crates
 
-232 crates, grouped by the license expression in their `Cargo.toml`. The last field says which binary links the crate:
+233 crates, grouped by the license expression in their `Cargo.toml`. The last field says which binary links the crate:
 `111`, `111-agent` or `both`.
 
 
@@ -128,7 +128,7 @@ The output is sorted and contains no timestamps, so identical inputs give identi
 
 - `rustls` 0.23.45 — https://github.com/rustls/rustls — Copyright (c) 2016, Joseph Birr-Pixton; Copyright (c) 2016 Joseph Birr-Pixton — 111
 
-### Apache-2.0 OR MIT (145)
+### Apache-2.0 OR MIT (146)
 
 - `aead` 0.6.1 — https://github.com/RustCrypto/traits — Copyright (c) 2019-2026 The RustCrypto Project Developers; Copyright (c) 2019 MobileCoin, LLC — 111
 - `anyhow` 1.0.104 — https://github.com/dtolnay/anyhow — authors: David Tolnay — both
@@ -261,6 +261,7 @@ The output is sorted and contains no timestamps, so identical inputs give identi
 - `thiserror-impl` 2.0.21 — https://github.com/dtolnay/thiserror — authors: David Tolnay — 111
 - `time` 0.3.55 — https://github.com/time-rs/time — Copyright (c) Jacob Pratt et al — both
 - `time-core` 0.1.9 — https://github.com/time-rs/time — Copyright (c) Jacob Pratt et al — both
+- `tokio-rustls` 0.26.6 — https://github.com/rustls/tokio-rustls — Copyright 2017 quininer kel; Copyright (c) 2017 quininer kel — 111
 - `toml` 0.8.23 — https://github.com/toml-rs/toml — Copyright (c) Individual contributors — 111
 - `toml_datetime` 0.6.11 — https://github.com/toml-rs/toml — Copyright (c) Individual contributors — 111
 - `toml_edit` 0.22.27 — https://github.com/toml-rs/toml — Copyright (c) Individual contributors — 111

@@ -1,0 +1,3 @@
+{"exit_declared": false}
+{"id": "fx.ok/4/daemon-up-on-127.0.0.1-n-within-4s", "status": "PASS", "log_line": 3, "phase": "4. namespace + daemon"}
+{"id": "fx.ok", "status": "FAIL", "reason": "the harness reported failures but printed no FAIL: line", "assertion": "SMOKE RED — 2 FAIL line(s) in 120.4s", "log_line": 5}

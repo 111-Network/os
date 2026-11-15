@@ -1,0 +1,1236 @@
+# verify/seams.toml: the seam map of the cross-layer test runner (row X1; options.md 3.5).
+#
+# One [[seam]] per layer-to-layer interface of plan/cross-layer/test-system/research/05-seams.md and matrix.md, sorted by id:
+# the 89 that exist (status built, or stub when a side is still a Layer 7 T0 stub or not built yet) and the 14 planned
+# Layer 8 / 9 rows (status planned, no files yet). a is the side of the id's first layer, b the second (X1b: the lint does not
+# hold this, a read does; one seam had them swapped); read_first is the side whose data the failing assertions read (the
+# producer), where a running-system failure points first; symptom is what a daemon log, an API answer or the UI shows when the
+# seam breaks, in the words the code and the contract use (a service row's state is live | unset | error | starting, a
+# network's live | not_set | error | disabled); gap says in one sentence what no check of strength R covers.
+# Which checks prove a seam is read from checks.toml (a check lists it under seams or phases). The schema is
+# verify/t111/schema.py; the lint (python3 -I verify/run.py --lint) holds every path and spec section to the tree.
+
+[[seam]]
+id = "L0-L1:index-gate"
+status = "built"
+spec = ["0-knowledge/README.md Index contract"]
+a = { layer = 0, files = ["0-knowledge/_meta/build.py"] }
+b = { layer = 1, files = ["hooks/pre-commit"] }
+read_first = "a"
+symptom = "build.py --check exits non-zero and names the file, line and rule; the agent reads a stale index"
+gap = "Static check only: build.py --check can go red by date alone (STALE_ERROR_DAYS) and --selftest was run by nothing before this catalog."
+
+[[seam]]
+id = "L0-L1:kb-payload"
+status = "built"
+spec = ["1-bootstrap/README.md Artifacts per release", "7-relay/README.md §9"]
+a = { layer = 0, files = ["0-knowledge/README.md", "1-bootstrap/manifest/gen-manifest.py"] }
+b = { layer = 1, files = ["1-bootstrap/crates/node111/src/daemon/kb.rs", "1-bootstrap/crates/node111/src/daemon/health.rs"] }
+read_first = "b"
+symptom = "/health answers 503 with kb false; the log says 'payload manifest unreadable at ...'; no grounding"
+gap = "S1 builds payload.manifest by hand (make_root); the real generator gen-manifest.py never feeds a running node."
+
+[[seam]]
+id = "L0-L3:kb-grounding"
+status = "built"
+spec = ["3-intelligence/README.md Grounding", "0-knowledge/AGENTS.md"]
+a = { layer = 0, files = ["0-knowledge/AGENTS.md", "0-knowledge/README.md"] }
+b = { layer = 3, files = [
+  "3-intelligence/crates/agent111/src/kb.rs",
+  "3-intelligence/crates/agent111/tests/kb_ritual.rs",
+  "1-bootstrap/crates/node111/src/daemon/intelligence.rs",
+] }
+read_first = "b"
+symptom = "the chat tool_trace has no kb.read; the reply invents project facts or admits the knowledge base is absent"
+gap = ""
+
+[[seam]]
+id = "L0-L4:kb-api"
+status = "built"
+spec = ["4-interface/README.md §10"]
+a = { layer = 0, files = ["0-knowledge/README.md"] }
+b = { layer = 4, files = ["1-bootstrap/crates/node111/src/daemon/dashboard/api_v1/kb.rs", "4-interface/ui/src/lib/api/http.ts"] }
+read_first = "b"
+symptom = "the KB page is empty; 404 or bad_request on GET /kb/entry"
+gap = ""
+
+[[seam]]
+id = "L0-L5/6/7:entries"
+status = "built"
+spec = ["6-transport/README.md §18", "7-relay/README.md §18"]
+a = { layer = 0, files = ["0-knowledge/README.md"] }
+b = { layer = [5, 6, 7], files = ["5-messaging/README.md", "6-transport/README.md", "7-relay/README.md"] }
+read_first = "a"
+symptom = "only the lint (build.py --check) ever notices a wrong adoption fact; no runtime error"
+gap = "Format only: build.py --check lints the entries; no code reads them."
+
+[[seam]]
+id = "L0-L9:evolution"
+status = "planned"
+spec = ["9-evolution/README.md"]
+a = { layer = 0, files = [] }
+b = { layer = 9, files = [] }
+read_first = "a"
+symptom = "agent, knowledge-base and bridging-logic evolution; amending locked specs by permission"
+gap = "None: planned; no code and no spec section yet."
+
+[[seam]]
+id = "L1-L1:cli-config"
+status = "built"
+spec = ["1-bootstrap/README.md Dashboard", "4-interface/README.md §11"]
+a = { layer = 1, files = ["1-bootstrap/crates/node111/src/cli.rs"] }
+b = { layer = 1, files = ["1-bootstrap/crates/node111/src/config.rs"] }
+read_first = "a"
+symptom = "a setting is silently ignored; PATCH answers 409 settings_locked when the environment pins it"
+gap = ""
+
+[[seam]]
+id = "L1-L1:install-state-tree"
+status = "built"
+spec = ["1-bootstrap/README.md On-disk layout"]
+a = { layer = 1, files = [
+  "1-bootstrap/crates/node111/src/install/stage.rs",
+  "1-bootstrap/crates/node111/src/install/supervise.rs",
+  "1-bootstrap/crates/node111/src/install/receipt.rs",
+  "1-bootstrap/crates/node111/src/install/packages.rs",
+] }
+b = { layer = 1, files = ["1-bootstrap/crates/node111/src/daemon/mod.rs"] }
+read_first = "a"
+symptom = "daemon EACCES on a state file (the log names the path); /health shows an error state"
+gap = "linux-e2e needs a prebuilt /tmp/dist-test (exit 77 when absent) and, as root, permission faults are invisible."
+
+[[seam]]
+id = "L1-L1:manifest-trust"
+status = "built"
+spec = ["1-bootstrap/README.md Updates & rollback", "7-relay/README.md §9"]
+a = { layer = 1, files = ["1-bootstrap/crates/node111/src/manifest.rs", "1-bootstrap/crates/node111/src/minisign.rs"] }
+b = { layer = 1, files = ["1-bootstrap/crates/node111/src/daemon/updater/fetch.rs", "1-bootstrap/crates/node111/src/install/stage.rs"] }
+read_first = "a"
+symptom = "an update is refused or accepted wrongly; /status.update and the installer's hard failure say why"
+gap = "In-process tests with the real minisign CLI only; G12 is a T0 stub, so no running system exercises it."
+
+[[seam]]
+id = "L1-L1:probation-guard"
+status = "built"
+spec = ["1-bootstrap/README.md Updates & rollback"]
+a = { layer = 1, files = ["1-bootstrap/crates/node111/src/update_guard.rs"] }
+b = { layer = 1, files = ["1-bootstrap/crates/node111/src/daemon/mod.rs"] }
+read_first = "a"
+symptom = "a bad release stays: boot loop, the journal is never cleared"
+gap = "Integration on temp roots only (helper_guard f2/f3); no running system exercises the guard."
+
+[[seam]]
+id = "L1-L1:updater-helper"
+status = "built"
+spec = ["1-bootstrap/README.md Updates & rollback"]
+a = { layer = 1, files = ["1-bootstrap/crates/node111/src/daemon/updater/stage.rs"] }
+b = { layer = 1, files = [
+  "1-bootstrap/crates/node111/src/update_helper.rs",
+  "1-bootstrap/crates/node111/src/floor.rs",
+  "1-bootstrap/crates/node111/src/probation.rs",
+] }
+read_first = "b"
+symptom = "the update never flips or does not revert; /api/status.update stays pending or reverting"
+gap = "helper_guard and updater_stage run the helper on temp roots with a scripted systemctl; the root path runs only in the V8 VM runbook."
+
+[[seam]]
+id = "L1-L1:watchdog"
+status = "built"
+spec = ["1-bootstrap/README.md Supervision"]
+a = { layer = 1, files = ["1-bootstrap/crates/node111/src/daemon/watchdog.rs"] }
+b = { layer = 1, files = ["1-bootstrap/systemd/111node.service"] }
+read_first = "a"
+symptom = "systemd logs 'watchdog timeout' for a hung daemon, or kills a healthy one"
+gap = "None: watchdog.rs has no tests and 'systemd-analyze verify ... || true' cannot fail."
+
+[[seam]]
+id = "L1-L2:cli-verbs"
+status = "built"
+spec = ["2-identity/README.md §13"]
+a = { layer = 1, files = ["1-bootstrap/crates/node111/src/cli.rs", "1-bootstrap/crates/node111/src/identity/commission.rs"] }
+b = { layer = 2, files = [
+  "2-identity/crates/id111/src/backup.rs",
+  "2-identity/crates/id111/src/commission.rs",
+  "2-identity/crates/id111/src/migrate.rs",
+] }
+read_first = "a"
+symptom = "the user cannot back up or restore: a non-TTY refusal, a words checksum error"
+gap = "Unit tests against fakes; a break at the CLI level is silent: no backup then restore through the 111 CLI runs anywhere."
+
+[[seam]]
+id = "L1-L2:counters-peers-owner"
+status = "built"
+spec = ["2-identity/README.md §13"]
+a = { layer = 1, files = ["1-bootstrap/crates/node111/src/identity/mod.rs"] }
+b = { layer = 2, files = ["2-identity/crates/id111/src/counters.rs", "2-identity/crates/id111/src/store.rs"] }
+read_first = "b"
+symptom = "replay and pin state diverge after a restore; an id111 contract test fails"
+gap = "Contract tests inside id111 only; no running system restores identity state and replays."
+
+[[seam]]
+id = "L1-L2:identity-dir"
+status = "built"
+spec = ["2-identity/README.md §13", "1-bootstrap/README.md Identity"]
+a = { layer = 1, files = ["1-bootstrap/crates/node111/src/identity/mod.rs"] }
+b = { layer = 2, files = ["2-identity/crates/id111/src/backup.rs", "2-identity/crates/id111/src/keyset.rs"] }
+read_first = "a"
+symptom = "the node has no identity: dashboard ErrorState, /health identity false, a quarantine dir; never a silent re-key"
+gap = ""
+
+[[seam]]
+id = "L1-L3:child-spawn"
+status = "built"
+spec = ["3-intelligence/README.md Contracts", "1-bootstrap/README.md Layer 5 amendments"]
+a = { layer = 1, files = ["1-bootstrap/crates/node111/src/daemon/intelligence.rs", "1-bootstrap/crates/node111/src/daemon/supervise.rs"] }
+b = { layer = 3, files = ["3-intelligence/crates/agent111/src/main.rs", "3-intelligence/crates/agent111/src/config.rs"] }
+read_first = "a"
+symptom = "chat is dead: /api/status.intelligence says absent, backoff or degraded; the agent and model service rows"
+gap = ""
+
+[[seam]]
+id = "L1-L3:daemon-token"
+status = "built"
+spec = ["4-interface/README.md §11.1", "3-intelligence/README.md Layer 5 amendments"]
+a = { layer = 1, files = ["1-bootstrap/crates/node111/src/daemon/dashboard/api_v1/auth.rs"] }
+b = { layer = 3, files = ["3-intelligence/crates/agent111/src/tools.rs"] }
+read_first = "a"
+symptom = "every agent GET tool fails: the tool result carries an error and the daemon answers 401 unauthenticated on loopback"
+gap = ""
+
+[[seam]]
+id = "L1-L3:env-precedence"
+status = "built"
+spec = ["3-intelligence/README.md Model profiles"]
+a = { layer = 1, files = ["1-bootstrap/crates/node111/src/cli.rs", "1-bootstrap/crates/node111/src/config.rs"] }
+b = { layer = 3, files = ["3-intelligence/crates/agent111/src/config.rs", "3-intelligence/crates/agent111/tests/config_guard.rs"] }
+read_first = "b"
+symptom = "the agent talks to a wrong or public model; it exits at start with a guard message"
+gap = "Agent side only: config_guard exercises the agent's precedence; nothing runs node111's env and agent.env through to the real agent."
+
+[[seam]]
+id = "L1-L3:health-restart"
+status = "built"
+spec = ["3-intelligence/README.md Contracts"]
+a = { layer = 1, files = [
+  "1-bootstrap/crates/node111/src/daemon/supervise.rs",
+  "1-bootstrap/crates/node111/src/daemon/services/probe.rs",
+] }
+b = { layer = 3, files = ["3-intelligence/crates/agent111/src/health.rs", "3-intelligence/crates/agent111/src/status.rs"] }
+read_first = "a"
+symptom = "the UI shows the agent up when it is dead (or the reverse): services agent state and reason_code"
+gap = "Agent kill -9 then restart within 10 s is asserted nowhere."
+
+[[seam]]
+id = "L1-L3:model-manifest"
+status = "stub"
+spec = ["3-intelligence/README.md Model profiles"]
+a = { layer = 1, files = ["1-bootstrap/manifest/gen-manifest.py", "1-bootstrap/crates/node111/src/manifest.rs"] }
+b = { layer = 3, files = ["1-bootstrap/crates/node111/src/daemon/intelligence.rs"] }
+read_first = "a"
+symptom = "a bad model is not reverted: the probation journal reverts the whole release"
+gap = "None: the model is not yet pinned in the signed manifest (status S/P) and nothing checks that a bad model reverts."
+
+[[seam]]
+id = "L1-L3:offer-hook"
+status = "built"
+spec = ["1-bootstrap/README.md Seams for later layers", "3-intelligence/README.md Model profiles"]
+a = { layer = 1, files = ["1-bootstrap/crates/node111/src/install/offer.rs", "1-bootstrap/crates/node111/src/daemon/mod.rs"] }
+b = { layer = 3, files = ["1-bootstrap/crates/node111/src/daemon/dashboard/api_v1/settings.rs"] }
+read_first = "a"
+symptom = "the offer is never shown or re-asked: /api/v1/status.offer"
+gap = "In-process tests and an installer stub only; no running node shows the offer element."
+
+[[seam]]
+id = "L1-L4:bind-host"
+status = "built"
+spec = ["4-interface/README.md §1", "4-interface/README.md §11", "1-bootstrap/README.md Dashboard"]
+a = { layer = 1, files = [
+  "1-bootstrap/crates/node111/src/daemon/dashboard/bind.rs",
+  "1-bootstrap/crates/node111/src/daemon/dashboard/mdns.rs",
+  "1-bootstrap/crates/node111/src/daemon/dashboard/routes.rs",
+  "1-bootstrap/crates/node111/src/config.rs",
+] }
+b = { layer = 4, files = ["4-interface/ui/src/lib/api/http.ts"] }
+read_first = "a"
+symptom = "the UI is unreachable or exposed: a 400 host-guard problem, the bind log line, Settings.lan_locked"
+gap = "':80' is only a note when it does not bind."
+
+[[seam]]
+id = "L1-L4:devices-api"
+status = "built"
+spec = ["4-interface/README.md §7.1", "6-transport/README.md §12"]
+a = { layer = 1, files = [
+  "1-bootstrap/crates/node111/src/daemon/devices/registry.rs",
+  "1-bootstrap/crates/node111/src/daemon/dashboard/api_v1/devices.rs",
+] }
+b = { layer = 4, files = ["4-interface/ui/src/lib/devices.ts"] }
+read_first = "a"
+symptom = "an attached board is not shown: GET /devices records, 409 port_busy"
+gap = "The root case of api_v1_devices returns early and counts PASS; G5 needs a mount namespace and a 100 MB download."
+
+[[seam]]
+id = "L1-L4:events-bus"
+status = "built"
+spec = ["4-interface/README.md §10.1"]
+a = { layer = 1, files = ["1-bootstrap/crates/node111/src/daemon/dashboard/api_v1/events.rs"] }
+b = { layer = 4, files = ["4-interface/ui/src/lib/api/events-client.ts", "4-interface/ui/src/lib/api/store.ts"] }
+read_first = "a"
+symptom = "the UI is stale after a reconnect: no reset frame, a store slice is not refetched"
+gap = ""
+
+[[seam]]
+id = "L1-L4:install-print"
+status = "built"
+spec = ["4-interface/README.md §12"]
+a = { layer = 1, files = ["1-bootstrap/crates/node111/src/install/verify.rs"] }
+b = { layer = 4, files = ["1-bootstrap/crates/node111/src/daemon/dashboard/mod.rs"] }
+read_first = "a"
+symptom = "the user cannot find the dashboard: the installer's success block lacks the URLs or the pair code"
+gap = "Unit tests only (install/verify.rs); no installer run prints the block and checks it."
+
+[[seam]]
+id = "L1-L4:legacy-contract"
+status = "built"
+spec = ["1-bootstrap/README.md Dashboard", "4-interface/README.md §13"]
+a = { layer = 1, files = [
+  "1-bootstrap/crates/node111/src/daemon/dashboard/routes.rs",
+  "1-bootstrap/crates/node111/src/daemon/health.rs",
+] }
+b = { layer = 4, files = ["1-bootstrap/crates/node111/src/daemon/dashboard/api_v1/status.rs"] }
+read_first = "a"
+symptom = "probation and monitoring read a wrong field: the /health code, the /api/status JSON schema"
+gap = ""
+
+[[seam]]
+id = "L1-L4:openapi-rust"
+status = "built"
+spec = ["4-interface/api/README.md"]
+a = { layer = 1, files = [
+  "1-bootstrap/crates/node111/src/daemon/dashboard/api_v1/proposals.rs",
+  "1-bootstrap/crates/node111/src/daemon/dashboard/api_v1/nearby.rs",
+  "1-bootstrap/crates/node111/src/daemon/dashboard/api_v1/status.rs",
+  "1-bootstrap/crates/node111/src/daemon/dashboard/api_v1/services.rs",
+] }
+b = { layer = 4, files = ["4-interface/api/openapi.yaml"] }
+read_first = "a"
+symptom = "the daemon answers a code or enum the UI or agent does not know: an assert_schema panic in a node111 test"
+gap = "No check compares the daemon's routes with the yaml (dashboard_auth UNROUTED lists 9 contract-only operations); five Rust test files each carry their own validator port (N1)."
+
+[[seam]]
+id = "L1-L4:pairing-auth"
+status = "built"
+spec = ["4-interface/README.md §11"]
+a = { layer = 1, files = ["1-bootstrap/crates/node111/src/daemon/dashboard/api_v1/auth.rs"] }
+b = { layer = 4, files = ["4-interface/ui/src/lib/api/http.ts"] }
+read_first = "a"
+symptom = "a LAN user is locked out or anyone gets in: 401 unauthenticated, 403 loopback_only, 429 rate_limited"
+gap = ""
+
+[[seam]]
+id = "L1-L4:restart-update"
+status = "built"
+spec = ["4-interface/README.md §10"]
+a = { layer = 1, files = ["1-bootstrap/crates/node111/src/daemon/supervise.rs", "1-bootstrap/crates/node111/src/daemon/updater/mod.rs"] }
+b = { layer = 4, files = ["1-bootstrap/crates/node111/src/daemon/dashboard/api_v1/actions.rs"] }
+read_first = "b"
+symptom = "the buttons do nothing: a 409 code, status.update.last_check unchanged"
+gap = ""
+
+[[seam]]
+id = "L1-L4:services-registry"
+status = "built"
+spec = ["4-interface/README.md §7", "5-messaging/README.md §15"]
+a = { layer = 1, files = [
+  "1-bootstrap/crates/node111/src/daemon/services/mod.rs",
+  "1-bootstrap/crates/node111/src/daemon/services/probe.rs",
+] }
+b = { layer = 4, files = ["4-interface/ui/src/lib/api/types.gen.ts", "4-interface/api/openapi.yaml"] }
+read_first = "a"
+symptom = "a wrong state shows for up to two ticks: GET /services state, reason_code and since"
+gap = "Rust ServiceId::COUNT = 9 against the yaml enum has no automatic check."
+
+[[seam]]
+id = "L1-L4:ui-embed"
+status = "built"
+spec = ["4-interface/README.md §2", "4-interface/README.md §12"]
+a = { layer = 1, files = [
+  "1-bootstrap/crates/node111/src/daemon/dashboard/routes.rs",
+  "1-bootstrap/crates/node111/src/install/verify.rs",
+] }
+b = { layer = 4, files = ["4-interface/ui/package.json", "4-interface/ui/vite.config.ts"] }
+read_first = "a"
+symptom = "the user sees the 'dashboard UI not built' notice instead of the app"
+gap = "check.sh runs cargo test before the UI build, so Rust tests see the 'not built' fallback."
+
+[[seam]]
+id = "L1-L5:blob-intake"
+status = "stub"
+spec = ["1-bootstrap/README.md Layer 5 amendments", "7-relay/README.md §9"]
+a = { layer = 1, files = ["1-bootstrap/crates/node111/src/daemon/updater/mod.rs"] }
+b = { layer = 5, files = ["5-messaging/crates/mesh111/src/blobs.rs"] }
+read_first = "a"
+symptom = "no symptom yet: the updater intake of a staged payload at fabric/blobs is planned (wire fill v1.1)"
+gap = "None: planned, no code on the updater side."
+
+[[seam]]
+id = "L1-L5:fabric-cli"
+status = "built"
+spec = ["5-messaging/README.md §7.3"]
+a = { layer = 1, files = ["1-bootstrap/crates/node111/src/daemon/fabric/cli.rs"] }
+b = { layer = 5, files = ["1-bootstrap/crates/node111/src/daemon/dashboard/api_v1/fabric.rs"] }
+read_first = "a"
+symptom = "hub enrolment is impossible on a phone or CLI: the CLI exit text, 409 bad_request"
+gap = ""
+
+[[seam]]
+id = "L1-L5:fabric-start"
+status = "built"
+spec = ["5-messaging/README.md §2", "5-messaging/README.md §19", "1-bootstrap/README.md Layer 5 amendments"]
+a = { layer = 1, files = [
+  "1-bootstrap/crates/node111/src/daemon/fabric/mod.rs",
+  "1-bootstrap/crates/node111/src/daemon/fabric/settings.rs",
+  "1-bootstrap/crates/node111/src/daemon/fabric/times.rs",
+  "1-bootstrap/crates/node111/src/daemon/fabric/json.rs",
+] }
+b = { layer = 5, files = [
+  "5-messaging/crates/mesh111/src/fabric.rs",
+  "5-messaging/crates/mesh111/src/store/mod.rs",
+  "5-messaging/crates/mesh111/src/link/tcp_lan.rs",
+] }
+read_first = "a"
+symptom = "no messaging: the fabric service row shows error or unset; GET /fabric"
+gap = ""
+
+[[seam]]
+id = "L1-L5:payload-assets"
+status = "built"
+spec = ["1-bootstrap/README.md Layer 5 amendments"]
+a = { layer = 1, files = ["1-bootstrap/manifest/gen-manifest.py", "1-bootstrap/scripts/meshmud-build.sh"] }
+b = { layer = 5, files = ["1-bootstrap/crates/node111/src/manifest.rs", "1-bootstrap/crates/node111/tests/manifest_layer5.rs"] }
+read_first = "a"
+symptom = "the node ships without the panel or the binary: gen-manifest.py refuses"
+gap = "Hermetic checks on synthetic tarballs and a fake pip; nothing builds and ships the real payload."
+
+[[seam]]
+id = "L1-L5:sidecar-children"
+status = "built"
+spec = ["5-messaging/README.md §14", "1-bootstrap/README.md Layer 5 amendments"]
+a = { layer = 1, files = [
+  "1-bootstrap/crates/node111/src/daemon/meshtastic/meshmud.rs",
+  "1-bootstrap/crates/node111/src/daemon/supervise.rs",
+] }
+b = { layer = 5, files = ["5-messaging/sidecars/meshtastic-presence/meshtastic_presence.py"] }
+read_first = "a"
+symptom = "no Nearby or panel: the meshtastic service row, the presence venv status reason"
+gap = "Stub meshmud and presence children are supervised by the real daemon in S2 and panel-lint, but the real meshmud binary runs in no harness."
+
+[[seam]]
+id = "L1-L6:bridge-stubs"
+status = "built"
+spec = ["6-transport/README.md §18"]
+a = { layer = 1, files = [
+  "1-bootstrap/crates/node111/src/daemon/bridge/mod.rs",
+  "1-bootstrap/crates/node111/src/daemon/bridge/core.rs",
+] }
+b = { layer = 6, files = ["1-bootstrap/crates/node111/src/daemon/bridge/stub.rs"] }
+read_first = "b"
+symptom = "test-only seam: nothing shows in a release build (a leak would show as a scenario hook in the binary)"
+gap = "G1 uses the hook, but the claim that a release build compiles none of it is checked by nothing."
+
+[[seam]]
+id = "L1-L6:component-cache"
+status = "built"
+spec = ["6-transport/README.md §2.1", "1-bootstrap/README.md Layer 6: optional components"]
+a = { layer = 1, files = ["1-bootstrap/crates/node111/src/install/packages.rs"] }
+b = { layer = 6, files = [
+  "1-bootstrap/crates/node111/src/daemon/components/manifest.rs",
+  "1-bootstrap/crates/node111/src/daemon/components/registry.rs",
+  "1-bootstrap/crates/node111/src/daemon/components/runner.rs",
+  "1-bootstrap/crates/node111/src/daemon/components/consent.rs",
+] }
+read_first = "b"
+symptom = "enabling fails or a process stays: 409 component_unavailable or consent_required; ps and ss residue"
+gap = ""
+
+[[seam]]
+id = "L1-L6:devices-hotplug"
+status = "built"
+spec = ["6-transport/README.md §12"]
+a = { layer = 1, files = [
+  "1-bootstrap/crates/node111/src/daemon/devices/detect.rs",
+  "1-bootstrap/crates/node111/src/daemon/devices/hotplug.rs",
+  "1-bootstrap/crates/node111/src/daemon/devices/applier.rs",
+  "1-bootstrap/crates/node111/src/daemon/devices/identify/mod.rs",
+  "1-bootstrap/crates/node111/src/daemon/ports.rs",
+] }
+b = { layer = 6, files = ["1-bootstrap/systemd/99-111-lora.rules"] }
+read_first = "a"
+symptom = "a board is not detected or a port is stolen: 409 port_busy, the device reason_code"
+gap = "G5 needs a mount namespace, the package index and a 100 MB download."
+
+[[seam]]
+id = "L1-L6:rnsd-child"
+status = "built"
+spec = ["1-bootstrap/README.md Transport", "6-transport/README.md §11"]
+a = { layer = 1, files = [
+  "1-bootstrap/crates/node111/src/daemon/transport/mod.rs",
+  "1-bootstrap/crates/node111/src/daemon/transport/config.rs",
+  "1-bootstrap/crates/node111/src/daemon/transport/interfaces.rs",
+  "1-bootstrap/crates/node111/src/daemon/transport/posture.rs",
+  "1-bootstrap/crates/node111/src/daemon/transport/rnstatus.rs",
+  "1-bootstrap/crates/node111/src/daemon/transport/venv.rs",
+  "1-bootstrap/crates/node111/src/daemon/transport/netlink.rs",
+] }
+b = { layer = 6, files = ["1-bootstrap/crates/node111/assets/rns/config.tmpl"] }
+read_first = "a"
+symptom = "no transport: the dashboard shows 'no transport', isolated or degraded; the /health transport component"
+gap = "G3 and G4 SKIP silently without the package index."
+
+[[seam]]
+id = "L1-L7:carrier-ntfy"
+status = "built"
+spec = ["7-relay/README.md §6"]
+a = { layer = 1, files = ["1-bootstrap/crates/node111/src/daemon/carrier/ntfy.rs"] }
+b = { layer = 7, files = ["7-relay/verify/stub-ntfy.py", "7-relay/carriers/ntfy/server.yml"] }
+read_first = "a"
+symptom = "cross-island custody is stuck: 409 metered_cap, RelayStatus.carrier"
+gap = "The stub-ntfy.py stand-in is unverified against a real ntfy server (11 log items 'not run from this box')."
+
+[[seam]]
+id = "L1-L7:origin"
+status = "built"
+spec = ["7-relay/README.md §9", "1-bootstrap/README.md Updates & rollback"]
+a = { layer = 1, files = [
+  "1-bootstrap/crates/node111/src/daemon/updater/fetch.rs",
+  "1-bootstrap/crates/node111/src/daemon/updater/stage.rs",
+  "1-bootstrap/crates/node111/src/cli.rs",
+] }
+b = { layer = 7, files = ["1-bootstrap/crates/node111/src/daemon/origin/mod.rs", "1-bootstrap/crates/node111/src/daemon/dashboard/routes.rs"] }
+read_first = "b"
+symptom = "LAN nodes cannot update offline: GET /update/origins lists nothing; 404 on /origin/v1/*"
+gap = "Rows D7 and D5b landed: the serving side runs in process (origin_serve through the real dashboard app, the origin lib tests) and the client side against a hand-written hub (updater_stage, helper_guard); G12 still prints SKIPPED, so no running system updates one node from another."
+
+[[seam]]
+id = "L1-L7:registry-dnssd"
+status = "stub"
+spec = ["7-relay/README.md §7"]
+a = { layer = 1, files = ["1-bootstrap/crates/node111/src/daemon/registry/mod.rs"] }
+b = { layer = 7, files = ["1-bootstrap/crates/node111/src/daemon/dashboard/mdns.rs"] }
+read_first = "a"
+symptom = "no 'Find my hub': 409 lan_off, an empty GET /registry"
+gap = "None: a T0 stub."
+
+[[seam]]
+id = "L1-L7:relay-state"
+status = "stub"
+spec = ["7-relay/README.md §6.3"]
+a = { layer = 1, files = [
+  "1-bootstrap/crates/node111/src/daemon/relay/settings.rs",
+  "1-bootstrap/crates/node111/src/daemon/relay/linkkey.rs",
+] }
+b = { layer = 7, files = ["1-bootstrap/crates/node111/src/daemon/dashboard/api_v1/relay7.rs"] }
+read_first = "a"
+symptom = "settings are lost or a secret leaks: the GET /relay shape"
+gap = "relay/settings.rs has 19 unit tests, but the /relay routes answer 404 until D10 and the link-key file is a stub."
+
+[[seam]]
+id = "L1-L8:state-service"
+status = "planned"
+spec = ["8-storage/README.md"]
+a = { layer = 1, files = [] }
+b = { layer = 8, files = [] }
+read_first = "a"
+symptom = "the node111 state service and the SQLCipher state file with its budget classes"
+gap = "None: planned; no code and no spec section yet."
+
+[[seam]]
+id = "L1-L8:updates-backup"
+status = "planned"
+spec = ["8-storage/README.md"]
+a = { layer = 1, files = [] }
+b = { layer = 8, files = [] }
+read_first = "a"
+symptom = "dataset and package updates beyond the 111 release; store export and migrations"
+gap = "None: planned; no code and no spec section yet."
+
+[[seam]]
+id = "L1-L9:observer-change-engine"
+status = "planned"
+spec = ["9-evolution/README.md"]
+a = { layer = 1, files = [] }
+b = { layer = 9, files = [] }
+read_first = "a"
+symptom = "the observer waking and witnessing 111d's death; typed apply, verify, undo through a root helper"
+gap = "None: planned; no code and no spec section yet."
+
+[[seam]]
+id = "L1-X:pi-floor"
+status = "built"
+spec = ["AGENTS.md", "7-relay/README.md §1"]
+a = { layer = 1, files = ["6-transport/verify/zero-weight.sh", "6-transport/verify/baseline-listeners.txt"] }
+b = { layer = "X", files = ["7-relay/verify/idle.sh", "AGENTS.md"] }
+read_first = "a"
+symptom = "the node is heavier on a Pi: an extra listener or pid in ss/ps against baseline-listeners.txt"
+gap = "G7 zero-weight.sh needs a live daemon and no harness runs it (N4 adds it to S1); here only 'no child left' after restart (S1) and G3's hygiene stand in."
+
+[[seam]]
+id = "L2-L3:signer-none"
+status = "built"
+spec = ["2-identity/README.md §13", "3-intelligence/README.md Contracts"]
+a = { layer = 2, files = ["1-bootstrap/crates/node111/src/identity/mod.rs", "1-bootstrap/crates/node111/src/daemon/intelligence.rs"] }
+b = { layer = 3, files = ["3-intelligence/crates/agent111/src/tasks.rs", "3-intelligence/crates/agent111/src/config.rs"] }
+read_first = "b"
+symptom = "a proposal is not attributable: Proposal.node_id is empty"
+gap = "Only a sh fake agent and a unit test set AGENT111_NODE_ID; nothing checks that the real agent stamps Proposal.node_id."
+
+[[seam]]
+id = "L2-L4:identity-display"
+status = "built"
+spec = ["2-identity/README.md §13", "4-interface/api/README.md"]
+a = { layer = 2, files = ["2-identity/crates/id111/src/encoding.rs"] }
+b = { layer = 4, files = ["1-bootstrap/crates/node111/src/daemon/dashboard/api_v1/status.rs", "4-interface/ui/src/lib/api/http.ts"] }
+read_first = "b"
+symptom = "the wrong node is shown or key material leaks: /api/v1/status.node fields, a grep for key bytes in responses"
+gap = ""
+
+[[seam]]
+id = "L2-L5:announce-cards"
+status = "built"
+spec = ["5-messaging/README.md §7", "2-identity/README.md §13.1"]
+a = { layer = 2, files = ["2-identity/crates/id111/src/announce.rs", "2-identity/crates/id111/src/store.rs"] }
+b = { layer = 5, files = ["5-messaging/crates/mesh111/src/contacts.rs"] }
+read_first = "b"
+symptom = "adding a contact fails or a key conflicts: POST /contacts answers 409 bad_request; the request stays pending"
+gap = ""
+
+[[seam]]
+id = "L2-L5:counters-epoch"
+status = "built"
+spec = ["5-messaging/README.md §4", "2-identity/README.md §13.1"]
+a = { layer = 2, files = ["2-identity/crates/id111/src/counters.rs"] }
+b = { layer = 5, files = ["5-messaging/crates/mesh111/src/ids.rs", "1-bootstrap/crates/node111/src/daemon/fabric/sealer.rs"] }
+read_first = "b"
+symptom = "duplicates or drops after a restore or crash: a replayed message delivered twice or never"
+gap = ""
+
+[[seam]]
+id = "L2-L5:sealer"
+status = "built"
+spec = ["5-messaging/README.md §3", "2-identity/README.md §13.1"]
+a = { layer = 2, files = ["2-identity/crates/id111/src/seal.rs"] }
+b = { layer = 5, files = ["5-messaging/crates/mesh111/src/sealer.rs", "1-bootstrap/crates/node111/src/daemon/fabric/sealer.rs"] }
+read_first = "b"
+symptom = "no message opens or sends: Message.reason_code waiting_for_key; fabric status errors"
+gap = ""
+
+[[seam]]
+id = "L2-L5:store-key"
+status = "built"
+spec = ["5-messaging/README.md §10.2", "2-identity/README.md §13.1"]
+a = { layer = 2, files = ["2-identity/crates/id111/src/keyset.rs"] }
+b = { layer = 5, files = ["5-messaging/crates/mesh111/src/keys.rs", "1-bootstrap/crates/node111/src/daemon/fabric/mod.rs"] }
+read_first = "b"
+symptom = "the store will not open: a fabric start error and an error row for the fabric service"
+gap = ""
+
+[[seam]]
+id = "L2-L5:test-vectors"
+status = "built"
+spec = ["2-identity/README.md §14", "5-messaging/README.md §20"]
+a = { layer = 2, files = [
+  "2-identity/crates/id111/tests/conformance.rs",
+  "2-identity/crates/id111/tests/layer5_amendments.rs",
+  "2-identity/test-vectors/crosscheck.py",
+] }
+b = { layer = 5, files = [
+  "5-messaging/test-vectors/crosscheck.py",
+  "5-messaging/crates/mesh111/src/test_double.rs",
+  "5-messaging/crates/mesh111/src/envelope.rs",
+] }
+read_first = "a"
+symptom = "silent wire drift between layers; a vector mismatch names the vector file"
+gap = "In-process vector tests only (I); the independent legs (both crosscheck.py and the Monocypher harness) run in no CI job."
+
+[[seam]]
+id = "L2-L6:attest-bridge"
+status = "built"
+spec = ["6-transport/README.md §14", "6-transport/README.md §18"]
+a = { layer = 2, files = ["2-identity/crates/id111/src/attest.rs", "2-identity/test-vectors/layer6/attest-transport-ids.json"] }
+b = { layer = 6, files = [
+  "1-bootstrap/crates/node111/src/daemon/bridge/attest.rs",
+  "1-bootstrap/crates/node111/src/daemon/bridge/fanout.rs",
+] }
+read_first = "a"
+symptom = "a foreign identity shows unverified or wrongly: ForeignAuth is not attested-111"
+gap = ""
+
+[[seam]]
+id = "L2-L7:epoch-linkkey"
+status = "built"
+spec = ["7-relay/README.md §4.2", "2-identity/README.md §13.2"]
+a = { layer = 2, files = ["2-identity/README.md"] }
+b = { layer = 7, files = ["1-bootstrap/crates/node111/src/daemon/relay/linkkey.rs"] }
+read_first = "b"
+symptom = "the hub link is not authenticated: the pair status shows tls instead of rpk"
+gap = "Rows D5 and D5b landed: the link key (mint, cache, discard after a restore) runs in process under relay_tls and the linkkey lib tests; G11 tls.sh still prints SKIPPED with exit 0, so no running system shows the pair status reading rpk."
+
+[[seam]]
+id = "L2-L8:dataset-signing"
+status = "planned"
+spec = ["8-storage/README.md"]
+a = { layer = 2, files = [] }
+b = { layer = 8, files = [] }
+read_first = "a"
+symptom = "the 111/catalogue/v1 and 111/export/v1 signing tags"
+gap = "None: planned; no code and no spec section yet."
+
+[[seam]]
+id = "L2-L9:fix-signing"
+status = "planned"
+spec = ["9-evolution/README.md"]
+a = { layer = 2, files = [] }
+b = { layer = 9, files = [] }
+read_first = "a"
+symptom = "node-key signatures (111/fix/v1, 111/fix-vouch/v1) on the two outbound artefacts"
+gap = "None: planned; no code and no spec section yet."
+
+[[seam]]
+id = "L3-L4:agent-events"
+status = "built"
+spec = ["4-interface/README.md §10.1"]
+a = { layer = 3, files = ["3-intelligence/crates/agent111/src/events.rs"] }
+b = { layer = 4, files = ["1-bootstrap/crates/node111/src/daemon/dashboard/api_v1/relay.rs"] }
+read_first = "a"
+symptom = "notifications are dead or duplicated: no agent frames on /events"
+gap = ""
+
+[[seam]]
+id = "L3-L4:chat-relay"
+status = "built"
+spec = ["4-interface/README.md §10", "4-interface/api/README.md"]
+a = { layer = 3, files = ["3-intelligence/crates/agent111/src/http.rs", "3-intelligence/crates/agent111/src/chat.rs"] }
+b = { layer = 4, files = [
+  "1-bootstrap/crates/node111/src/daemon/dashboard/api_v1/relay.rs",
+  "1-bootstrap/crates/node111/src/util/http_async.rs",
+  "4-interface/ui/src/lib/api/http.ts",
+] }
+read_first = "b"
+symptom = "the UI error banner shows a problem code; the relay log; the stream ends without done"
+gap = ""
+
+[[seam]]
+id = "L3-L4:prompts-tools"
+status = "built"
+spec = ["4-interface/README.md §8"]
+a = { layer = 3, files = ["3-intelligence/crates/agent111/src/tools.rs"] }
+b = { layer = 4, files = ["4-interface/ui/src/lib/prompts.ts"] }
+read_first = "b"
+symptom = "a hand-off prompt names a tool the agent lacks; the agent answers 'I cannot'"
+gap = "ui:prompts runs on the mock; nothing checks that a prompt's tool exists in tools.rs (N11)."
+
+[[seam]]
+id = "L3-L4:proposals-fs"
+status = "built"
+spec = ["4-interface/README.md §10", "3-intelligence/README.md Contracts"]
+a = { layer = 3, files = ["3-intelligence/crates/agent111/src/tasks.rs", "3-intelligence/crates/agent111/src/store.rs"] }
+b = { layer = 4, files = [
+  "1-bootstrap/crates/node111/src/daemon/dashboard/api_v1/proposals.rs",
+  "4-interface/ui/src/views/agent/proposal-body.tsx",
+] }
+read_first = "a"
+symptom = "proposals vanish or mis-render: 502 upstream_error, a kind skipped in the list"
+gap = "The agent's proposal kinds, the daemon's KINDS[9] and the yaml enum are pinned by hand on each side (N2 adds the kind pin)."
+
+[[seam]]
+id = "L3-L4:task-route"
+status = "built"
+spec = ["3-intelligence/README.md Contracts", "4-interface/api/README.md"]
+a = { layer = 3, files = ["3-intelligence/crates/agent111/src/tasks.rs"] }
+b = { layer = 4, files = ["1-bootstrap/crates/node111/src/daemon/dashboard/api_v1/relay.rs"] }
+read_first = "b"
+symptom = "tasks do nothing: 409 needs_hub, the task id missing from the events"
+gap = ""
+
+[[seam]]
+id = "L3-L4:tool-count-pin"
+status = "built"
+spec = ["4-interface/api/README.md"]
+a = { layer = 3, files = ["3-intelligence/crates/agent111/src/tools.rs", "3-intelligence/crates/agent111/tests/chat_loop.rs"] }
+b = { layer = 4, files = ["4-interface/api/README.md"] }
+read_first = "a"
+symptom = "a test goes red after a tool is added"
+gap = "The pin in chat_loop (17 tools) is static and the API README pin list is prose; the count lives in three places."
+
+[[seam]]
+id = "L3-L5:daemon-tools"
+status = "built"
+spec = ["3-intelligence/README.md Layer 5 amendments", "5-messaging/README.md §17"]
+a = { layer = 3, files = ["3-intelligence/crates/agent111/src/tools.rs"] }
+b = { layer = 5, files = [
+  "1-bootstrap/crates/node111/src/daemon/fabric/proposal.rs",
+  "1-bootstrap/crates/node111/src/daemon/dashboard/api_v1/messages.rs",
+  "1-bootstrap/crates/node111/src/daemon/dashboard/api_v1/contacts.rs",
+  "1-bootstrap/crates/node111/src/daemon/dashboard/api_v1/fabric.rs",
+  "1-bootstrap/crates/node111/src/daemon/dashboard/api_v1/nearby.rs",
+] }
+read_first = "b"
+symptom = "the agent cannot read mesh state or sends on its own; the count pin of 5 tools in daemon_tools.rs"
+gap = "agent111's stub daemon is hand-typed JSON never validated against the contract: a renamed contract field leaves the agent side green (N2)."
+
+[[seam]]
+id = "L3-L6:l6-tools"
+status = "built"
+spec = ["3-intelligence/README.md Layer 6 tools", "6-transport/README.md §13"]
+a = { layer = 3, files = ["3-intelligence/crates/agent111/tests/layer6_tools.rs", "3-intelligence/crates/agent111/src/tools.rs"] }
+b = { layer = 6, files = [
+  "1-bootstrap/crates/node111/src/daemon/fabric/proposal.rs",
+  "1-bootstrap/crates/node111/src/daemon/bridge/core.rs",
+  "1-bootstrap/crates/node111/src/daemon/devices/applier.rs",
+] }
+read_first = "b"
+symptom = "an accepted proposal is rejected unsupported_action: 409 on POST /proposals/{id}/decision"
+gap = "No real agent ever calls an L6 tool: a second stub-daemon copy stands in, and G5 decides only harness-written device proposals (N9)."
+
+[[seam]]
+id = "L3-L7:l7-tools"
+status = "stub"
+spec = ["3-intelligence/README.md Layer 7 tools", "7-relay/README.md §13.3"]
+a = { layer = 3, files = ["3-intelligence/crates/agent111/src/tools.rs"] }
+b = { layer = 7, files = ["1-bootstrap/crates/node111/src/daemon/relay/mod.rs"] }
+read_first = "a"
+symptom = "the tool-count pin moves: the agent offers 20 tools (17 and presence.read, gateway.read, relay.propose)"
+gap = "Row A1 landed and layer7_tools runs the three tools against a hand-typed stub daemon; the routes they read (GET /relay of D10, the 111 source of GET /nearby of D2) are not built, so no real daemon answers them."
+
+[[seam]]
+id = "L3-L7:offload"
+status = "stub"
+spec = ["3-intelligence/README.md Model profiles", "7-relay/README.md §7"]
+a = { layer = 3, files = ["3-intelligence/crates/agent111/src/config.rs"] }
+b = { layer = 7, files = ["1-bootstrap/crates/node111/src/daemon/registry/mod.rs"] }
+read_first = "a"
+symptom = "a model-less node has no model: the agent state is unavailable (not a hang)"
+gap = "The private-IP refusal is tested on the agent side only; the hub registry it would read is a T0 stub."
+
+[[seam]]
+id = "L3-L8:agent-state"
+status = "planned"
+spec = ["8-storage/README.md"]
+a = { layer = 3, files = [] }
+b = { layer = 8, files = [] }
+read_first = "a"
+symptom = "agent state (conversations, tasks, proposals) moves into the 111d-owned encrypted store"
+gap = "None: planned; no code and no spec section yet."
+
+[[seam]]
+id = "L3-L9:diagnosis-playbooks"
+status = "planned"
+spec = ["9-evolution/README.md"]
+a = { layer = 3, files = [] }
+b = { layer = 9, files = [] }
+read_first = "a"
+symptom = "diagnosis tiers, the playbook grammar and evaluator, new task kinds"
+gap = "None: planned; no code and no spec section yet."
+
+[[seam]]
+id = "L4-L1:tapes"
+status = "built"
+spec = ["4-interface/README.md §9"]
+a = { layer = 4, files = ["4-interface/ui/test/tapes.test.ts", "4-interface/ui/test/tapes/README.md"] }
+b = { layer = 1, files = [
+  "1-bootstrap/crates/node111/src/daemon/dashboard/api_v1/events.rs",
+  "1-bootstrap/crates/node111/src/daemon/dashboard/api_v1/relay.rs",
+] }
+read_first = "b"
+symptom = "the UI parser rejects the live stream while the tests stay green on stale tapes; a failure names the tape and frame"
+gap = "Stale tapes stay green: the tapes change only when re-recorded with SMOKE_TAPES=1 in a namespace run, and the two Layer 6 tapes have no reader (N3)."
+
+[[seam]]
+id = "L4-L4:budget"
+status = "built"
+spec = ["4-interface/README.md §2"]
+a = { layer = 4, files = ["4-interface/ui/scripts/check-budget.mjs"] }
+b = { layer = 4, files = ["4-interface/ui/vite.config.ts"] }
+read_first = "a"
+symptom = "the UI is too heavy for a Pi browser: check-budget names the chunk"
+gap = "Static byte budget only; the failure names the chunk, not the module that grew."
+
+[[seam]]
+id = "L4-L4:openapi-ts"
+status = "built"
+spec = ["4-interface/api/README.md"]
+a = { layer = 4, files = ["4-interface/api/openapi.yaml"] }
+b = { layer = 4, files = [
+  "4-interface/ui/src/lib/api/types.gen.ts",
+  "4-interface/ui/src/lib/api/sse.gen.ts",
+  "4-interface/ui/test/contract.gen.ts",
+  "4-interface/ui/scripts/gen-sse.mjs",
+] }
+read_first = "a"
+symptom = "the UI renders unknown for a new enum; gen-sse --check prints 'stale: <file>'; vitest names the enum"
+gap = "Compiled and static only: the types.gen.ts compare in gen.test.ts returns silently when the openapi-typescript binary is absent."
+
+[[seam]]
+id = "L4-L5:messages-api"
+status = "built"
+spec = ["5-messaging/README.md §9", "5-messaging/README.md §15", "4-interface/api/README.md"]
+a = { layer = 4, files = [
+  "1-bootstrap/crates/node111/src/daemon/dashboard/api_v1/messages.rs",
+  "1-bootstrap/crates/node111/src/daemon/dashboard/api_v1/contacts.rs",
+  "1-bootstrap/crates/node111/src/daemon/dashboard/api_v1/fabric.rs",
+  "1-bootstrap/crates/node111/src/daemon/dashboard/api_v1/nearby.rs",
+] }
+b = { layer = 5, files = [
+  "5-messaging/crates/mesh111/src/outbox.rs",
+  "5-messaging/crates/mesh111/src/mailbox.rs",
+  "5-messaging/crates/mesh111/src/store/tx.rs",
+] }
+read_first = "a"
+symptom = "a message is stuck: Message.state and reason_code (waiting_for_key, hub_not_yours, store_full, mailbox_full)"
+gap = ""
+
+[[seam]]
+id = "L4-L5:panels"
+status = "built"
+spec = ["5-messaging/README.md §13", "4-interface/README.md §11.1"]
+a = { layer = 4, files = ["1-bootstrap/crates/node111/assets/panels/meshtastic.toml"] }
+b = { layer = 5, files = [
+  "1-bootstrap/crates/node111/src/daemon/panels/listener.rs",
+  "1-bootstrap/crates/node111/src/daemon/panels/ticket.rs",
+  "1-bootstrap/crates/node111/src/daemon/panels/guard.rs",
+  "1-bootstrap/crates/node111/src/daemon/panels/headers.rs",
+  "1-bootstrap/crates/node111/src/daemon/panels/static.rs",
+  "1-bootstrap/crates/node111/src/daemon/panels/shim.rs",
+  "1-bootstrap/crates/node111/src/daemon/dashboard/routes.rs",
+] }
+read_first = "b"
+symptom = "the panel does not frame: 403 panel_ticket_expired on the panel port, a CSP console error, a panel-lint rule id"
+gap = "panel-lint is RED by default on three 'blocked-by P1 guard.rs' gaps unless PANEL_LINT_KNOWN_GAPS=1."
+
+[[seam]]
+id = "L4-L5:sse-fanout"
+status = "built"
+spec = ["4-interface/README.md §10.2"]
+a = { layer = 4, files = ["1-bootstrap/crates/node111/src/daemon/dashboard/api_v1/events.rs", "4-interface/ui/src/lib/api/store.ts"] }
+b = { layer = 5, files = ["1-bootstrap/crates/node111/src/daemon/fabric/mod.rs"] }
+read_first = "b"
+symptom = "the UI does not update or the ring floods: a missing frame, a reset needed"
+gap = ""
+
+[[seam]]
+id = "L4-L6:networks-bridge-api"
+status = "built"
+spec = ["6-transport/README.md §10", "4-interface/api/README.md"]
+a = { layer = 4, files = ["4-interface/ui/src/lib/api/networks.ts", "4-interface/ui/src/lib/api/bridge.ts"] }
+b = { layer = 6, files = [
+  "1-bootstrap/crates/node111/src/daemon/dashboard/api_v1/networks.rs",
+  "1-bootstrap/crates/node111/src/daemon/dashboard/api_v1/bridge.rs",
+  "1-bootstrap/crates/node111/src/daemon/dashboard/api_v1/fanout.rs",
+  "1-bootstrap/crates/node111/src/daemon/bridge/core.rs",
+  "1-bootstrap/crates/node111/src/daemon/bridge/edges.rs",
+  "1-bootstrap/crates/node111/src/daemon/bridge/settings.rs",
+  "1-bootstrap/crates/node111/src/daemon/components/consent.rs",
+] }
+read_first = "b"
+symptom = "send and consent flows break: a 409 consent object (action, hash), 409 oversize with targets"
+gap = ""
+
+[[seam]]
+id = "L4-L6:transport-api"
+status = "built"
+spec = ["6-transport/README.md §11"]
+a = { layer = 4, files = ["4-interface/ui/src/lib/api/transport.ts"] }
+b = { layer = 6, files = [
+  "1-bootstrap/crates/node111/src/daemon/dashboard/api_v1/transport.rs",
+  "1-bootstrap/crates/node111/src/daemon/transport/posture.rs",
+  "1-bootstrap/crates/node111/src/daemon/transport/join.rs",
+] }
+read_first = "b"
+symptom = "the posture cannot be changed: 409 consent_required or unsupported_action"
+gap = ""
+
+[[seam]]
+id = "L4-L7:relay-api"
+status = "stub"
+spec = ["7-relay/README.md §13", "4-interface/api/README.md"]
+a = { layer = 4, files = ["4-interface/ui/src/lib/api/relay.ts"] }
+b = { layer = 7, files = [
+  "1-bootstrap/crates/node111/src/daemon/dashboard/api_v1/relay7.rs",
+  "1-bootstrap/crates/node111/src/daemon/dashboard/api_v1/pair.rs",
+  "1-bootstrap/crates/node111/src/daemon/dashboard/api_v1/registry.rs",
+  "1-bootstrap/crates/node111/src/daemon/dashboard/api_v1/origins.rs",
+] }
+read_first = "b"
+symptom = "Settings > Relay is dead: the routes answer 404; the layer7 tests run on the mock only"
+gap = "ui:layer7-contract uses hand fixtures 'not daemon output', and eight Layer 7 operations sit in dashboard_auth's UNROUTED list; relay_pair (row D6, landed) drives the three pair routes through the real dashboard app."
+
+[[seam]]
+id = "L4-L8:hub-content"
+status = "planned"
+spec = ["8-storage/README.md"]
+a = { layer = 4, files = [] }
+b = { layer = 8, files = [] }
+read_first = "a"
+symptom = "encyclopedias and maps served to the LAN; new UI views and routes"
+gap = "None: planned; no code and no spec section yet."
+
+[[seam]]
+id = "L5-L6:foreign-tables"
+status = "built"
+spec = ["6-transport/README.md §3", "6-transport/README.md §18"]
+a = { layer = 5, files = [
+  "5-messaging/crates/mesh111/src/store/foreign.rs",
+  "5-messaging/crates/mesh111/src/store/schema.rs",
+  "5-messaging/crates/mesh111/src/fabric.rs",
+] }
+b = { layer = 6, files = [
+  "1-bootstrap/crates/node111/src/daemon/bridge/core.rs",
+  "1-bootstrap/crates/node111/src/daemon/bridge/ingest.rs",
+  "1-bootstrap/crates/node111/src/daemon/bridge/fanout.rs",
+] }
+read_first = "b"
+symptom = "bridged messages are lost or misfiled: ForeignMessage.state and reason_code on GET /networks/{net}/conversations/{conv}"
+gap = ""
+
+[[seam]]
+id = "L5-L6:link-trait"
+status = "built"
+spec = ["5-messaging/README.md §8", "6-transport/README.md §18"]
+a = { layer = 5, files = [
+  "5-messaging/crates/mesh111/src/link/mod.rs",
+  "5-messaging/crates/mesh111/src/link/lossy.rs",
+  "5-messaging/crates/mesh111/src/link/tcp_lan.rs",
+] }
+b = { layer = 6, files = [] }
+read_first = "a"
+symptom = "no LoRa: Link::peers is empty; the 160 B frame budget"
+gap = "The kiss-modem and ble drivers are unbuilt: only the test link and tcp-lan implement the trait."
+
+[[seam]]
+id = "L5-L6:meshmud-client"
+status = "built"
+spec = ["6-transport/README.md §5", "5-messaging/README.md §14"]
+a = { layer = 5, files = [
+  "1-bootstrap/crates/node111/src/daemon/meshtastic/client.rs",
+  "1-bootstrap/crates/node111/src/daemon/meshtastic/allowlist.rs",
+  "1-bootstrap/crates/node111/src/daemon/meshtastic/meshmud.rs",
+] }
+b = { layer = 6, files = ["1-bootstrap/scripts/meshmud-build.sh"] }
+read_first = "a"
+symptom = "Meshtastic send and receive break: Network.state error with reason_code adapter_down"
+gap = "Three fakes of one peer (two stub-meshmud.py with JSON payloads, one hand-encoded protobuf board); the real meshmud binary runs in no harness."
+
+[[seam]]
+id = "L5-L6:presence-file"
+status = "built"
+spec = ["5-messaging/README.md §14"]
+a = { layer = 5, files = ["5-messaging/sidecars/meshtastic-presence/meshtastic_presence.py"] }
+b = { layer = 6, files = [
+  "1-bootstrap/crates/node111/src/daemon/meshtastic/presence.rs",
+  "1-bootstrap/crates/node111/src/daemon/dashboard/api_v1/nearby.rs",
+] }
+read_first = "a"
+symptom = "Nearby is empty: GET /nearby shows no meshtastic source"
+gap = "No shared schema between the real reader and the daemon; S2 uses a stub presence role (N7)."
+
+[[seam]]
+id = "L5-L7:custody-store"
+status = "built"
+spec = ["7-relay/README.md §5.3", "7-relay/README.md §5.8"]
+a = { layer = 5, files = [
+  "5-messaging/crates/mesh111/src/store/schema.rs",
+  "5-messaging/crates/mesh111/src/store/prune.rs",
+  "5-messaging/crates/mesh111/src/store/tx.rs",
+] }
+b = { layer = 7, files = ["5-messaging/crates/mesh111/src/store/rows.rs", "5-messaging/crates/mesh111/src/fabric.rs"] }
+read_first = "a"
+symptom = "the custody quota is wrong: store_full or mailbox_full early"
+gap = "In-process only; S2 13b exercises the quota for member rows alone."
+
+[[seam]]
+id = "L5-L7:fabric-tap"
+status = "stub"
+spec = ["7-relay/README.md §2.1", "7-relay/README.md §3.5"]
+a = { layer = 5, files = ["1-bootstrap/crates/node111/src/daemon/fabric/mod.rs"] }
+b = { layer = 7, files = [
+  "1-bootstrap/crates/node111/src/daemon/relay/presence.rs",
+  "1-bootstrap/crates/node111/src/daemon/relay/gateway.rs",
+] }
+read_first = "a"
+symptom = "no 111 Nearby kind: GET /nearby has no 111 source"
+gap = "None: a T0 stub on the relay side."
+
+[[seam]]
+id = "L5-L7:forwarder-handoff"
+status = "stub"
+spec = ["7-relay/README.md §5.9"]
+a = { layer = 5, files = ["5-messaging/crates/mesh111/src/fabric.rs"] }
+b = { layer = 7, files = ["1-bootstrap/crates/node111/src/daemon/carrier/mod.rs"] }
+read_first = "a"
+symptom = "custody is not forwarded: a message stays relayed with reason_code forwarding and never reaches delivered"
+gap = "B on the mesh side (forward.rs); carrier/mod.rs has no tests and G9 and G10 are stubs, so the daemon side is silent."
+
+[[seam]]
+id = "L5-L7:pair-gate"
+status = "built"
+spec = ["7-relay/README.md §4.4", "7-relay/README.md §4.6", "7-relay/README.md §5.2"]
+a = { layer = 5, files = ["5-messaging/crates/mesh111/src/fabric.rs", "5-messaging/crates/mesh111/src/link/tcp_lan.rs"] }
+b = { layer = 7, files = ["1-bootstrap/crates/node111/src/daemon/relay/pair.rs", "1-bootstrap/crates/node111/src/daemon/relay/tls.rs"] }
+read_first = "a"
+symptom = "hubs cannot pair: 409 pair_role_mismatch; PairedHub.tls"
+gap = "The mesh side runs real tcp-lan on loopback (a ~3 min suite); the daemon side is tested in process (relay_tls, row D5: pinned-key TLS between two real tcp-lan adapters; relay_pair, row D6: pairing through the dashboard routes and the CLI, two hubs paired end to end) and G9 prints SKIPPED, so no two daemons pair in a running system."
+
+[[seam]]
+id = "L5-L7:role-bits"
+status = "built"
+spec = ["7-relay/README.md §7", "2-identity/README.md §13.2"]
+a = { layer = 5, files = ["5-messaging/crates/mesh111/src/contacts.rs"] }
+b = { layer = 7, files = ["1-bootstrap/crates/node111/src/daemon/relay/settings.rs"] }
+read_first = "a"
+symptom = "a wrong role is advertised: the registry TXT r field"
+gap = "Bits 0-2 are tested in mesh111; bits 3-5 (gateway, origin, registry) are defined in node111 but unbuilt on the wire."
+
+[[seam]]
+id = "L5-L8:tier2-objects"
+status = "planned"
+spec = ["8-storage/README.md"]
+a = { layer = 5, files = [] }
+b = { layer = 8, files = [] }
+read_first = "a"
+symptom = "OBJ_ADVERT, OBJ_REQ and OBJ_CHUNK on the wire with a verified object tree"
+gap = "None: planned; no code and no spec section yet."
+
+[[seam]]
+id = "L5/7-L9:fix-sharing-delegation"
+status = "planned"
+spec = ["9-evolution/README.md"]
+a = { layer = [5, 7], files = [] }
+b = { layer = 9, files = [] }
+read_first = "a"
+symptom = "proven-fix exchange over the fabric, AGENT_OP delegation and pull requests"
+gap = "None: planned; no code and no spec section yet."
+
+[[seam]]
+id = "L6-L6:deltachat-madmail"
+status = "built"
+spec = ["6-transport/README.md §7", "6-transport/README.md §14"]
+a = { layer = 6, files = [
+  "1-bootstrap/crates/node111/src/daemon/bridge/deltachat.rs",
+  "1-bootstrap/crates/node111/src/daemon/components/runner.rs",
+] }
+b = { layer = 6, files = ["1-bootstrap/crates/node111/assets/components/madmail.toml"] }
+read_first = "a"
+symptom = "chat over email is dead: the app:deltachat state is error or not_set"
+gap = "The fake accepts Madmail verbs the real core never ran; no harness runs deltachat-rpc-server."
+
+[[seam]]
+id = "L6-L6:lxmf-sidecar"
+status = "built"
+spec = ["6-transport/README.md §6"]
+a = { layer = 6, files = ["1-bootstrap/crates/node111/src/daemon/bridge/lxmf.rs", "1-bootstrap/crates/node111/src/daemon/supervise.rs"] }
+b = { layer = 6, files = ["6-transport/sidecars/lxmf-sidecar/lxmf_sidecar.py"] }
+read_first = "b"
+symptom = "LXMF is dead: the network shows adapter_down; the component state is not running"
+gap = "The cargo fake (fake_lxmf_sidecar.py) and the helper's own tests share only the README text (N6)."
+
+[[seam]]
+id = "L6-L6:simplex"
+status = "built"
+spec = ["6-transport/README.md §7"]
+a = { layer = 6, files = ["1-bootstrap/crates/node111/src/daemon/bridge/simplex.rs"] }
+b = { layer = 6, files = ["1-bootstrap/crates/node111/assets/components/simplex.toml"] }
+read_first = "a"
+symptom = "SimpleX chat is dead: the app:simplex state"
+gap = "One unit test only; nothing runs simplex-chat."
+
+[[seam]]
+id = "L6-L7:hops"
+status = "stub"
+spec = ["7-relay/README.md §10"]
+a = { layer = 6, files = ["1-bootstrap/crates/node111/src/daemon/transport/rnstatus.rs"] }
+b = { layer = 7, files = ["1-bootstrap/crates/node111/src/daemon/dashboard/api_v1/nearby.rs"] }
+read_first = "b"
+symptom = "no hop counts: rate_limited or component_unavailable on POST /nearby/hops"
+gap = "None: planned; POST /nearby/hops is not built."
+
+[[seam]]
+id = "L6-L7:netlink-gateway"
+status = "built"
+spec = ["7-relay/README.md §3.3"]
+a = { layer = 6, files = ["1-bootstrap/crates/node111/src/daemon/transport/netlink.rs"] }
+b = { layer = 7, files = [
+  "1-bootstrap/crates/node111/src/daemon/relay/netwatch.rs",
+  "1-bootstrap/crates/node111/src/daemon/relay/gateway.rs",
+] }
+read_first = "a"
+symptom = "the gateway state is stale: services gateway reason_code (gateway_none, carrier_ok)"
+gap = "Rows D3, D4, D3b and D4c landed: netwatch.rs (20 unit tests) runs against a scripted netlink source and a fake opener, gateway.rs (17) against scripted facts, netlink.rs (the group masks and the classifier of the kernel's message shapes) against byte shapes; the one test that reads the real kernel (transport::netlink::tests::the_kernel_s_messages_classify_as_documented, NODE111_NETNS_CHECK=1 under unshare -Urn) is ignored and run by hand, and G7-extended idle.sh still prints SKIPPED, so no running system exercises the seam."
+
+[[seam]]
+id = "L6-X:rns-lxmf-api"
+status = "built"
+spec = ["6-transport/README.md §6"]
+a = { layer = 6, files = ["6-transport/sidecars/lxmf-sidecar/lxmf_sidecar.py"] }
+b = { layer = "X", files = ["6-transport/sidecars/lxmf-sidecar/requirements.in", "6-transport/sidecars/lxmf-sidecar/lxmf-sidecar-lock.txt"] }
+read_first = "a"
+symptom = "the LXMF helper dies at import or on first use after a pin bump: the helper's stderr names the rns or LXMF call; the network shows adapter_down"
+gap = "The helper's own tests run on a fake RNS and LXMF surface written from rns 1.5.7 and lxmf 1.2.1; only G3 runs the real libraries, and it needs the package index (SKIPPED offline)."
+
+[[seam]]
+id = "L7-L8:move-datasets"
+status = "planned"
+spec = ["8-storage/README.md"]
+a = { layer = 7, files = [] }
+b = { layer = 8, files = [] }
+read_first = "a"
+symptom = "the metered cap and the hub origin or carrier as the dataset transfer path"
+gap = "None: planned; no code and no spec section yet."
+
+[[seam]]
+id = "L8-L8:shared-log"
+status = "planned"
+spec = ["8-storage/README.md"]
+a = { layer = 8, files = [] }
+b = { layer = 8, files = [] }
+read_first = "a"
+symptom = "the shared log behind an admission gate"
+gap = "None: planned; no code and no spec section yet."
+
+[[seam]]
+id = "L8-L9:heal-store"
+status = "planned"
+spec = ["8-storage/README.md"]
+a = { layer = 8, files = [] }
+b = { layer = 9, files = [] }
+read_first = "a"
+symptom = "the heal/ namespace and three plaintext boot files read before serving"
+gap = "None: planned; no code and no spec section yet."
+
+[[seam]]
+id = "X:licensing-notices"
+status = "built"
+spec = ["AGENTS.md"]
+a = { layer = 1, files = ["1-bootstrap/scripts/gen-notices.py"] }
+b = { layer = "X", files = ["LICENSING.md", "THIRD-PARTY-NOTICES.md"] }
+read_first = "a"
+symptom = "a release is blocked or carries a wrong licence claim: the gen-notices --check diff"
+gap = "Static: an offline lockfile-hash compare and two unittest suites; nothing checks that the licences are right."
+
+[[seam]]
+id = "X:manifest-pins"
+status = "built"
+spec = ["1-bootstrap/README.md Artifacts per release"]
+a = { layer = 1, files = ["1-bootstrap/manifest/gen-manifest.py"] }
+b = { layer = 1, files = ["1-bootstrap/crates/node111/src/manifest.rs"] }
+read_first = "a"
+symptom = "install or update refuses: a hash mismatch naming the file"
+gap = "In-process manifest tests and a hermetic release-assert gate; only linux-e2e installs the real signed payload, from a hand-built binary."
+
+[[seam]]
+id = "X:plan-vs-code"
+status = "built"
+spec = ["AGENTS.md"]
+a = { layer = "X", files = ["plan/INDEX.md", "plan/README.md"] }
+b = { layer = "X", files = ["hooks/pre-commit"] }
+read_first = "a"
+symptom = "agents read stale facts: a board cites a file:line that moved"
+gap = "file:line citations in the boards are checked by nothing; pre-commit runs build.py and CI greps one-digit folder names only."

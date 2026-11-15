@@ -1,0 +1,4 @@
+{"exit_declared": false}
+{"id": "fx.py/test_chatty.Chatty.test_after", "status": "PASS", "log_line": 1, "test": "test_chatty.Chatty.test_after"}
+{"id": "fx.py/test_chatty.Chatty.test_quiet", "status": "PASS", "log_line": 3, "test": "test_chatty.Chatty.test_quiet"}
+{"id": "fx.py/harness", "status": "FAIL", "reason": "the log has 2 per-test result line(s) but the summary says 'Ran 3 tests': the parse and the run disagree", "log_line": 8}

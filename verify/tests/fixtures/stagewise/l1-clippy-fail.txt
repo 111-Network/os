@@ -1,0 +1,13 @@
+== fmt ==
+== clippy (host) ==
+    Checking node111 v2026.10.12 (/repo/1-bootstrap/crates/node111)
+error: this `if` has identical blocks
+   --> crates/node111/src/daemon/relay/mod.rs:120:22
+    |
+120 |         if quiet { return None; } else { return None; }
+    |                  ^^^^^^^^^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#if_same_then_else
+    = note: `-D clippy::if-same-then-else` implied by `-D warnings`
+
+error: could not compile `node111` (lib) due to 1 previous error

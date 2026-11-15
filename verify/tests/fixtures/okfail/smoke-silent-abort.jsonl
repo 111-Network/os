@@ -1,0 +1,11 @@
+{"exit_declared": false}
+{"id": "fx.smoke/1/dist-built", "status": "PASS", "log_line": 3, "phase": "1. UI build"}
+{"id": "fx.smoke/2/111-and-111-agent-built", "status": "PASS", "log_line": 6, "phase": "2. cargo build (debug)"}
+{"id": "fx.smoke/3/identity-generated", "status": "PASS", "log_line": 9, "phase": "3. scratch node root"}
+{"id": "fx.smoke/3/root-releases-n.10.12", "status": "PASS", "log_line": 10, "phase": "3. scratch node root"}
+{"id": "fx.smoke/4/namespace-shell-has-default-sigint-sigterm", "status": "PASS", "log_line": 13, "phase": "4. namespace + daemon", "seams": ["L1-L2:fx-alpha"]}
+{"id": "fx.smoke/4/daemon-up-on-127.0.0.1-n-within-4s", "status": "PASS", "log_line": 14, "phase": "4. namespace + daemon", "seams": ["L1-L2:fx-alpha"]}
+{"id": "fx.smoke/5a/get-serves-index.html", "status": "PASS", "log_line": 17, "phase": "5a. static UI + Host guard", "seams": ["L4-L5:fx-ui"]}
+{"id": "fx.smoke/5a/a-foreign-host-header-is-refused", "status": "PASS", "log_line": 18, "phase": "5a. static UI + Host guard", "seams": ["L4-L5:fx-ui"]}
+{"id": "fx.smoke/5b/get-api-v1-node", "status": "PASS", "log_line": 21, "phase": "5b. /api/v1 reads (loopback)"}
+{"id": "fx.smoke", "status": "FAIL", "reason": "harness did not finish (last phase: 5b. /api/v1 reads (loopback))", "assertion": "SMOKE GREEN — 9 checks ok, 0 FAIL, in 120.4s", "log_line": 23}

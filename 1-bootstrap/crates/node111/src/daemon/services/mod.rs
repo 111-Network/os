@@ -5,17 +5,24 @@
 //!
 //! Split so the rules are testable without processes or sockets:
 //! - [`Facts`] — everything one tick observed (child states, health probes,
-//!   radio/WAN/PATH facts, and the Layer 5 `fabric` / `meshmud` / panel facts
-//!   from optional providers). Production fills it in [`probe`]; tests build
+//!   radio/PATH facts, the Layer 7 `gateway` facts, and the Layer 5 `fabric` /
+//!   `meshmud` / panel facts from optional providers). Production fills it in [`probe`]; tests build
 //!   it.
 //! - [`compute`] — the §7 table as a pure function
 //!   `Facts → [Computed; ServiceId::COUNT]`.
 //! - [`Registry`] — the debounce: a `(state, reason_code, can_run_here)` change
 //!   is published only after **two consecutive identical ticks**; `since` is
 //!   when the published state last changed. The first tick publishes as-is.
-//! - [`probe::spawn`] — the daemon task: a 2 s tick, the WAN probe every 60 s,
-//!   the agent status probe every 10 s; publishes `services` on the events bus
-//!   on every published change.
+//!   Every published change also wakes the waiters of
+//!   [`Registry::state_changed`] (Layer 7 §3.6: the panel ticks park on it).
+//! - [`probe::spawn`] — the daemon task: a 2 s tick and the agent status probe
+//!   every 10 s; publishes `services` on the events bus on every published
+//!   change. There is no WAN probe (Layer 7 §3.5, D30 Q14).
+//!
+//! `gateway` (Layer 7 §3.5, §3.8) is the gateway badge's home: one of four
+//! states (`gateway_none`, `carrier_ok`, `carrier_pending`, `gateway_off`),
+//! never "online", from [`crate::daemon::relay::gateway`]; nothing is checked
+//! unless the owner turns a gateway on.
 //!
 //! `starting` grace: a child whose health probe has not passed yet is
 //! `starting` for [`AGENT_GRACE`] (90 s) after its current PID first appeared
@@ -337,13 +344,15 @@ pub fn catalogue(id: ServiceId) -> Catalogue {
                 release. The agent reads it to answer questions, and you can browse it here.",
             kb_entry: None,
         },
+        // Layer 7 §3.5 item 4: the copy is the spec's, verbatim
         ServiceId::Gateway => Catalogue {
             name: "wan",
             plain_name: "Internet gateway",
             kind: Kind::Detected,
-            requires: Some("An internet connection: Wi-Fi, Ethernet or a phone hotspot."),
-            description: "Whether this node can reach the internet right now. Nothing needs \
-                setting up here; the node checks once a minute.",
+            requires: Some("A carrier you configured (Settings → Layer 7)"),
+            description: "Whether this hub carries messages to other islands, and whether its \
+                carrier answered at the last check. Nothing is checked unless you turn a gateway \
+                on.",
             kb_entry: None,
         },
         ServiceId::Codeagent => Catalogue {
@@ -469,15 +478,9 @@ pub struct RadioFacts {
     pub down_for: Option<Duration>,
 }
 
-#[derive(Debug, Clone, Default)]
-pub struct GatewayFacts {
-    /// `None` until the first WAN probe completes.
-    pub online: Option<bool>,
-    /// The URL that answered 204 (or the last one tried).
-    pub url: Option<String>,
-    pub checked_at: Option<String>,
-    pub error: Option<String>,
-}
+/// The `gateway` row's facts (Layer 7 §3.5): kept by the relay module, read
+/// once per tick; tests build them directly.
+pub use crate::daemon::relay::gateway::GatewayFacts;
 
 /// The agent's own view (`GET :11182/v1/agent/status`, cached 10 s).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -1041,36 +1044,44 @@ fn kb(f: &Facts) -> Computed {
     out
 }
 
+/// The gateway badge (Layer 7 §3.5 item 2, §3.8): four states, never
+/// "online"; the reason is the badge's sentence without its ages (the ages are
+/// in `detail`, taken from a monotonic clock).
 fn gateway(f: &Facts) -> Computed {
+    use crate::daemon::relay::gateway::GatewayState;
     let id = ServiceId::Gateway;
     let g = &f.gateway;
-    let mut out = match g.online {
-        Some(true) => Computed::new(
+    let state = g.state();
+    let mut out = match state {
+        GatewayState::None => {
+            Computed::new(id, ServiceState::Unset, state.code(), "Not a gateway.")
+        }
+        GatewayState::CarrierOk => Computed::new(
             id,
             ServiceState::Live,
-            "wan_ok",
-            "This node can reach the internet.",
+            state.code(),
+            "Gateway: carrier reachable at the last check.",
         ),
-        Some(false) => Computed::new(
+        GatewayState::CarrierPending => Computed::new(
             id,
             ServiceState::Unset,
-            "wan_offline",
-            "This node cannot reach the internet right now.",
+            state.code(),
+            if g.answered == Some(true) {
+                "Gateway: items wait for the carrier."
+            } else if g.answered == Some(false) {
+                "Gateway: the carrier did not answer at the last check."
+            } else {
+                "Gateway: the carrier has not been checked yet."
+            },
         ),
-        None => Computed::new(
+        GatewayState::Off => Computed::new(
             id,
             ServiceState::Unset,
-            "wan_unknown",
-            "The internet check has not finished yet.",
+            state.code(),
+            "Gateway off (by you).",
         ),
     };
-    out.detail = json!({
-        "online": g.online,
-        "probe_url": g.url,
-        "checked_at": g.checked_at,
-        "error": g.error,
-        "interval_sec": 60,
-    });
+    out.detail = g.detail();
     out
 }
 
@@ -1435,6 +1446,9 @@ struct Slot {
 pub struct Registry {
     slots: RwLock<Option<Vec<Slot>>>,
     agent_status: RwLock<Option<AgentStatusProbe>>,
+    /// Woken on every published change (Layer 7 §3.6, S25): the state-change
+    /// signal beside [`Registry::snapshot`].
+    changed: tokio::sync::Notify,
 }
 
 impl Registry {
@@ -1444,8 +1458,25 @@ impl Registry {
 
     /// Feed one tick. Returns `true` when the published set changed (first
     /// tick, or a state flip confirmed by two identical ticks) — the caller
-    /// publishes a `services` frame then. Detail refreshes every tick.
+    /// publishes a `services` frame then, and every waiter of
+    /// [`Registry::state_changed`] is woken. Detail refreshes every tick.
     pub fn tick(&self, computed: [Computed; ServiceId::COUNT], now: &str) -> bool {
+        let changed = self.tick_slots(computed, now);
+        if changed {
+            self.changed.notify_waiters();
+        }
+        changed
+    }
+
+    /// The state-change signal (Layer 7 §3.6): resolves at the next published
+    /// change. A waiter that must not miss a change between reading
+    /// [`Registry::snapshot`] and waiting enables the future first
+    /// (`Notified::enable`), then reads, then awaits it.
+    pub fn state_changed(&self) -> tokio::sync::futures::Notified<'_> {
+        self.changed.notified()
+    }
+
+    fn tick_slots(&self, computed: [Computed; ServiceId::COUNT], now: &str) -> bool {
         let mut slots = self.slots.write().unwrap();
         let Some(slots) = slots.as_mut() else {
             *slots = Some(
@@ -2033,5 +2064,64 @@ mod tests {
         assert!(s.children(ServiceId::Meshtastic).is_empty());
         let s = s.with_children(ServiceId::Meshtastic, Vec::new());
         assert!(s.children(ServiceId::Meshtastic).is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_published_change_wakes_the_state_change_waiters() {
+        use std::time::Duration;
+        let r = Registry::new();
+        // the first tick publishes: a waiter enabled before it is woken
+        let n = r.state_changed();
+        tokio::pin!(n);
+        n.as_mut().enable();
+        assert!(r.tick(compute(&Facts::default()), "t0"));
+        tokio::time::timeout(Duration::from_secs(1), n)
+            .await
+            .expect("the first publish wakes");
+        // an unchanged tick, and the first sight of a flip, wake nobody
+        let f = Facts {
+            kb_payload_present: true,
+            ..Facts::default()
+        };
+        let n = r.state_changed();
+        tokio::pin!(n);
+        n.as_mut().enable();
+        assert!(!r.tick(compute(&Facts::default()), "t1"));
+        assert!(!r.tick(compute(&f), "t2"), "first sight: pending only");
+        assert!(tokio::time::timeout(Duration::from_millis(50), n.as_mut())
+            .await
+            .is_err());
+        // the confirming tick publishes and wakes
+        assert!(r.tick(compute(&f), "t3"));
+        tokio::time::timeout(Duration::from_secs(1), n)
+            .await
+            .expect("a published flip wakes");
+    }
+
+    #[test]
+    fn the_gateway_row_is_the_badge() {
+        let mut f = Facts::default();
+        let g = &compute(&f)[ServiceId::Gateway.index()];
+        assert_eq!(
+            (g.state, g.reason_code),
+            (ServiceState::Unset, "gateway_none")
+        );
+        assert_eq!(g.detail["pending"], 0);
+        f.gateway.configured = true;
+        f.gateway.enabled = true;
+        f.gateway.answered = Some(true);
+        let g = &compute(&f)[ServiceId::Gateway.index()];
+        assert_eq!((g.state, g.reason_code), (ServiceState::Live, "carrier_ok"));
+        let cat = catalogue(ServiceId::Gateway);
+        assert_eq!(
+            cat.requires,
+            Some("A carrier you configured (Settings → Layer 7)")
+        );
+        assert_eq!(
+            cat.description,
+            "Whether this hub carries messages to other islands, and whether its carrier \
+             answered at the last check. Nothing is checked unless you turn a gateway on."
+        );
+        assert!(!cat.description.contains("online") && !cat.description.contains("minute"));
     }
 }

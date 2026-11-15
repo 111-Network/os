@@ -5,7 +5,7 @@ import type { DotState } from "../../components/status-dot";
 import { IDENTITY_BACKUP_COMMAND } from "../../lib/commands";
 import { displayName, summary } from "../../lib/devices";
 import { sanitizeLine } from "../../lib/prompts";
-import { agoText, formatDuration, reasonText } from "../services/model";
+import { agoText, formatDuration, gatewayBadge, reasonText } from "../services/model";
 
 export const NEEDS_YOU_ID = "needs-you";
 
@@ -181,6 +181,7 @@ export interface NodeFacts {
   uptime: string;
   update: string;
   lastCheck: string;
+  /** The gateway badge (Layer 7 section 3.8): one of four sentences, never "online"; "unknown" for a code this page does not know. */
   gateway: string;
   addresses: string[];
   /** Who can open the dashboard: "this device only" or "devices on your local network". */
@@ -223,7 +224,7 @@ export function nodeFacts(status: Status, services: readonly ServiceRecord[] | n
     uptime: formatDuration(n.uptime_sec),
     update: updateText(status.update, n.version),
     lastCheck: status.update.last_check ? agoText(status.update.last_check, now) : "never",
-    gateway: !gw ? "unknown" : gw.state === "live" ? "internet reachable" : gw.state === "starting" ? "checking" : "no internet",
+    gateway: !gw ? "unknown" : gatewayBadge(gw.reason_code, gw.detail),
     addresses: status.bind.urls,
     reach: status.bind.lan ? "devices on your local network can open it" : "this device only",
   };

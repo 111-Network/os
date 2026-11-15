@@ -1,0 +1,668 @@
+"""Hygiene around a check (options.md §3.2): leftovers, listeners, the tree, ports, and the capability probes.
+
+- **Leftovers.** The runner makes itself a child subreaper (``prctl(PR_SET_CHILD_SUBREAPER)``), so a process a check
+  left behind (backgrounded, double-forked, ``setsid``) stays the runner's descendant instead of moving to init. After a
+  check ends, ``find_leftovers`` reads ``/proc`` and returns every process that (1) descends from the runner and belongs
+  to no check still running, or (2) carries this run's marker (``T111_RUN``/``T111_CHECK``) in its environ: the proof.
+  Those become a ``hygiene/<check>`` FAIL naming pid and cmdline and are killed. Two kinds are reported, never killed,
+  because nothing proves they are this run's: a process that only names the check's scratch dir in its cmdline or
+  environ (an agent's ``tail -f`` on a log), and a process whose binary is ours (``111``, ``111-agent``,
+  ``stub-*.py``, rnsd, meshmud, a headless browser, vite) that appeared during the check with no marker.
+- **Listeners.** The listening TCP sockets of ``/proc/net/tcp`` and ``tcp6``, joined to a pid through
+  ``/proc/<pid>/fd``; a leftover's listening ports are named in its FAIL.
+- **Ports.** ``port_holders`` is the pre-check of an ``ns`` check (11180, 11183, 11230, 11280 by default).
+- **Tree.** ``tree_state`` is ``git status --porcelain --ignored`` plus a content hash per listed path (an ignored path
+  is listed by name only, no hash: ``node_modules`` is thousands of files); ``tree_diff`` names the paths a check
+  changed, so a file a check writes that git ignores (a ``__pycache__``, a ``target/``) is a finding too. The only
+  exclusion is the run's own scratch dir (``exclude``). The listing costs about 22 ms on a 160 MB tree with 5,700
+  ignored files (``git status`` without ``--ignored``: 6 ms), twice per check.
+- **Probes.** ``Probes`` answers a check's ``needs`` (``userns``, ``netns``, ``root``, ``nonroot``, ``network``, any
+  tool on PATH), once per run.
+
+Every helper subprocess (git, unshare) runs with ``T111_HELPER=<run-id>`` in its environment so the leftover scan never
+mistakes it for a check's process.
+
+- **Reaping (F1).** The subreaper inherits zombies, and they must be collected. ``SPAWNED`` is the one registry of every
+  pid this process started through ``subprocess`` (check leaders and helper children) and has not waited for yet; a pid
+  is registered under ``SPAWNED.lock`` in the same critical section as the fork, and every reap runs under that lock and
+  skips the registered pids, so a reap never steals the exit status ``subprocess`` is waiting for.
+- **Dead runs (F2).** Every check carries ``T111_RUNNER_PID`` and ``T111_RUNNER_START`` (the runner's pid and its start
+  time in ticks). ``sweep_dead_runs`` finds every process whose environ carries ``T111_RUN`` of another run whose runner
+  is gone (no such pid, a zombie, or another process under that pid) and that shares this run's lock dir
+  (``T111_LOCKS``, the box domain: two test sandboxes with their own lock dirs never sweep each other);
+  ``terminate`` sends TERM, then KILL. A process without the marker is never touched. ``sweep_run`` is the backstop
+  of an interrupted run: everything proven this run's (the marker, descent), and, reported but never killed, a
+  process that only names the run dir.
+
+By design not checked: a listener inside another network namespace is not named (its process is found, its port is not:
+``/proc/net`` shows the runner's namespace only); a process that changed its marker environment and left the runner's
+tree is not found; a cargo build started outside a runner is not counted by the cargo slots (``t111.locks``); the lock
+dir is per box (mode 1777 when the runner creates it), so runners in other containers do not share it; a look-alike
+process (our binary, no marker) is reported, never killed, and under ``--shared-box`` not even reported as a FAIL.
+"""
+
+from __future__ import annotations
+
+import ctypes
+import fnmatch
+import hashlib
+import os
+import shutil
+import signal
+import subprocess
+import threading
+import time
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any, Iterable, Mapping
+
+NS_PORTS: tuple[int, ...] = (11180, 11183, 11230, 11280)
+"""The fixed ports of the namespace harnesses; an ``ns`` check is SKIPPED when one is held."""
+
+OUR_BINARIES: frozenset[str] = frozenset({"111", "111d", "111-agent", "rnsd", "meshmud", "llama-server"})
+"""Executable basenames that are ours."""
+
+OUR_SCRIPT_GLOBS: tuple[str, ...] = ("stub-*.py", "stub_*.py", "fake-*.py", "fake_*.py")
+"""Script basenames (any argv element) that are ours."""
+
+PR_SET_CHILD_SUBREAPER = 36
+
+
+@dataclass
+class Proc:
+    """One process as read from ``/proc``. ``environ`` is None when it could not be read."""
+
+    pid: int
+    ppid: int
+    pgid: int
+    sid: int
+    state: str
+    start: int
+    argv: list[str]
+    environ: dict[str, str] | None = field(default=None, repr=False)
+
+    @property
+    def key(self) -> tuple[int, int]:
+        """(pid, start time in ticks): survives pid reuse."""
+        return (self.pid, self.start)
+
+    @property
+    def cmdline(self) -> str:
+        """The argv joined by spaces (``[<name>]`` for a kernel thread or a zombie)."""
+        return " ".join(self.argv) if self.argv else "[?]"
+
+
+@dataclass
+class Leftover:
+    """A process a check left behind: the check it is attributed to, why, its ports, and whether it gets killed."""
+
+    proc: Proc
+    owner: str
+    rule: str
+    ports: list[int]
+    kill: bool
+    why_not: str = "our binary, but nothing ties it to this run"
+
+    def describe(self) -> str:
+        """``pid 123 (sleep 300)`` plus ``listening :11180`` when it listens, plus ``[not killed: …]``."""
+        text = f"pid {self.proc.pid} ({self.proc.cmdline[:200]})"
+        if self.ports:
+            text += " listening " + ",".join(f":{p}" for p in self.ports)
+        if not self.kill:
+            text += f" [not killed: {self.why_not}]"
+        return text
+
+
+def set_subreaper() -> bool:
+    """Make this process a child subreaper; False when the kernel or libc refuses."""
+    try:
+        libc = ctypes.CDLL(None, use_errno=True)
+        return libc.prctl(PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0) == 0
+    except (OSError, AttributeError):
+        return False
+
+
+class Spawned:
+    """The registry of every pid this process started through ``subprocess`` and has not waited for yet (F1).
+
+    ``lock`` is a re-entrant lock: hold it across a fork (``popen``) and across every reap, so that between the fork and
+    the registration no reap can run. The engine uses the same lock to guard its table of live checks.
+    """
+
+    def __init__(self) -> None:
+        self.lock = threading.RLock()
+        self._pids: set[int] = set()
+
+    def popen(self, argv: list[str], **kwargs: Any) -> subprocess.Popen:
+        """``subprocess.Popen(argv, **kwargs)`` with the child registered before anyone can reap it."""
+        with self.lock:
+            proc = subprocess.Popen(argv, **kwargs)
+            self._pids.add(proc.pid)
+            return proc
+
+    def done(self, proc: subprocess.Popen) -> None:
+        """Unregister ``proc`` once ``subprocess`` has collected its status (``returncode`` is set)."""
+        if proc.returncode is not None:
+            with self.lock:
+                self._pids.discard(proc.pid)
+
+    def wait(self, proc: subprocess.Popen, timeout: float | None = None) -> int:
+        """``proc.wait(timeout)``, then unregister (raises ``TimeoutExpired`` with the pid still registered)."""
+        status = proc.wait(timeout=timeout)
+        self.done(proc)
+        return status
+
+    def pids(self) -> frozenset[int]:
+        """The registered pids (a copy)."""
+        with self.lock:
+            return frozenset(self._pids)
+
+
+SPAWNED = Spawned()
+"""The process-wide registry (module state on purpose: ``helper_run``, ``t111.run`` and the reaps share it)."""
+
+
+def _read(path: str) -> bytes | None:
+    try:
+        with open(path, "rb") as fh:
+            return fh.read()
+    except OSError:
+        return None
+
+
+def read_proc(pid: int, *, with_environ: bool = True) -> Proc | None:
+    """Read one process, or None when it is gone."""
+    stat = _read(f"/proc/{pid}/stat")
+    if stat is None:
+        return None
+    text = stat.decode("utf-8", "replace")
+    close = text.rfind(")")
+    if close < 0:
+        return None
+    fields = text[close + 2:].split()
+    try:
+        state, ppid, pgid, sid, start = fields[0], int(fields[1]), int(fields[2]), int(fields[3]), int(fields[19])
+    except (IndexError, ValueError):
+        return None
+    raw_cmd = _read(f"/proc/{pid}/cmdline") or b""
+    argv = [a.decode("utf-8", "replace") for a in raw_cmd.split(b"\0") if a]
+    environ: dict[str, str] | None = None
+    if with_environ:
+        raw_env = _read(f"/proc/{pid}/environ")
+        if raw_env is not None:
+            environ = {}
+            for item in raw_env.split(b"\0"):
+                if b"=" in item:
+                    key, _, value = item.partition(b"=")
+                    environ[key.decode("utf-8", "replace")] = value.decode("utf-8", "replace")
+    return Proc(pid, ppid, pgid, sid, state, start, argv, environ)
+
+
+def snapshot(*, with_environ: bool = True) -> dict[int, Proc]:
+    """Every process visible in ``/proc``."""
+    out: dict[int, Proc] = {}
+    for entry in os.listdir("/proc"):
+        if entry.isdigit():
+            proc = read_proc(int(entry), with_environ=with_environ)
+            if proc is not None:
+                out[proc.pid] = proc
+    return out
+
+
+def process_keys() -> set[tuple[int, int]]:
+    """(pid, start) of every process: the cheap snapshot taken before a check."""
+    return {p.key for p in snapshot(with_environ=False).values()}
+
+
+def ancestors(procs: Mapping[int, Proc], pid: int) -> list[int]:
+    """The parent chain of ``pid`` (nearest first), as far as ``procs`` knows it."""
+    chain: list[int] = []
+    seen = {pid}
+    cur = procs.get(pid)
+    while cur is not None and cur.ppid > 0 and cur.ppid not in seen:
+        chain.append(cur.ppid)
+        seen.add(cur.ppid)
+        cur = procs.get(cur.ppid)
+    return chain
+
+
+def is_ours(proc: Proc) -> bool:
+    """True when the process's binary or script is one of ours."""
+    if not proc.argv:
+        return False
+    names = [os.path.basename(a) for a in proc.argv[:3]]
+    if names[0] in OUR_BINARIES:
+        return True
+    for name in names:
+        if any(fnmatch.fnmatchcase(name, g) for g in OUR_SCRIPT_GLOBS):
+            return True
+    if ("chrome" in names[0] or "chromium" in names[0]) and any(a.startswith("--headless") for a in proc.argv):
+        return True
+    return any(n in ("vite", "vite.js") for n in names)
+
+
+def listening_inodes() -> dict[int, int]:
+    """Socket inode -> port of every listening TCP socket (IPv4 and IPv6) in this network namespace."""
+    out: dict[int, int] = {}
+    for table in ("/proc/net/tcp", "/proc/net/tcp6"):
+        raw = _read(table)
+        if raw is None:
+            continue
+        for line in raw.decode("ascii", "replace").splitlines()[1:]:
+            parts = line.split()
+            if len(parts) < 10 or parts[3] != "0A":
+                continue
+            try:
+                port = int(parts[1].rsplit(":", 1)[1], 16)
+                inode = int(parts[9])
+            except (IndexError, ValueError):
+                continue
+            out[inode] = port
+    return out
+
+
+def socket_inodes(pid: int) -> set[int]:
+    """The socket inodes a process holds open."""
+    out: set[int] = set()
+    try:
+        fds = os.listdir(f"/proc/{pid}/fd")
+    except OSError:
+        return out
+    for fd in fds:
+        try:
+            target = os.readlink(f"/proc/{pid}/fd/{fd}")
+        except OSError:
+            continue
+        if target.startswith("socket:["):
+            try:
+                out.add(int(target[8:-1]))
+            except ValueError:
+                pass
+    return out
+
+
+def ports_of(pid: int, listening: Mapping[int, int] | None = None) -> list[int]:
+    """The ports a process listens on."""
+    table = listening_inodes() if listening is None else listening
+    return sorted({table[i] for i in socket_inodes(pid) if i in table})
+
+
+def port_holders(ports: Iterable[int]) -> dict[int, tuple[int | None, str]]:
+    """For each held port of ``ports``: (holder pid or None, holder cmdline or ``unknown``)."""
+    wanted = set(ports)
+    listening = {inode: port for inode, port in listening_inodes().items() if port in wanted}
+    if not listening:
+        return {}
+    held: dict[int, tuple[int | None, str]] = {port: (None, "unknown") for port in listening.values()}
+    for entry in os.listdir("/proc"):
+        if not entry.isdigit():
+            continue
+        pid = int(entry)
+        for inode in socket_inodes(pid):
+            port = listening.get(inode)
+            if port is not None and held[port][0] is None:
+                proc = read_proc(pid, with_environ=False)
+                held[port] = (pid, proc.cmdline if proc else "unknown")
+    return held
+
+
+def find_leftovers(*, runner_pid: int, run_id: str, finished: str, scratch: Path, live: Mapping[str, int],
+                   before: set[tuple[int, int]]) -> list[Leftover]:
+    """The processes check ``finished`` left behind (see the module docstring for the three rules and the report-only
+    fourth). ``live`` maps each check still running to its session leader pid; ``before`` is the process snapshot taken
+    when ``finished`` started."""
+    procs = snapshot()
+    listening = listening_inodes()
+    scratch_s = str(scratch)
+    live_roots = set(live.values())
+    runner = procs.get(runner_pid)
+    out: list[Leftover] = []
+    for proc in procs.values():
+        if proc.pid == runner_pid or proc.state == "Z":
+            continue
+        if runner is not None and proc.ppid == runner_pid and proc.argv == runner.argv:
+            continue  # the runner forking a helper or a check, caught between fork and exec
+        env = proc.environ or {}
+        if env.get("T111_HELPER"):
+            continue
+        chain = ancestors(procs, proc.pid)
+        if proc.pid in live_roots or proc.sid in live_roots or live_roots.intersection(chain):
+            continue
+        same_run = env.get("T111_RUN") == run_id
+        marker = env.get("T111_CHECK") if same_run else None
+        if marker is not None and marker in live:
+            continue
+        names_scratch = scratch_s in proc.cmdline or any(scratch_s in v for v in env.values())
+        owner = marker or finished
+        rule = ""
+        if runner_pid in chain:
+            rule = "descends from the runner"
+        elif same_run:
+            rule = "carries this run's marker"
+        if rule:
+            out.append(Leftover(proc, owner, rule, sorted({listening[i] for i in socket_inodes(proc.pid)
+                                                           if i in listening}), True))
+            continue
+        if names_scratch:
+            out.append(Leftover(proc, finished, "names the check's scratch dir",
+                                sorted({listening[i] for i in socket_inodes(proc.pid) if i in listening}), False,
+                                why_not="it names the check's scratch dir, but no marker or descent ties it to this "
+                                        "run"))
+            continue
+        if is_ours(proc) and proc.key not in before and not env.get("T111_RUN"):
+            out.append(Leftover(proc, finished, "our binary, appeared during the check",
+                                sorted({listening[i] for i in socket_inodes(proc.pid) if i in listening}), False))
+    return sorted(out, key=lambda lo: lo.proc.pid)
+
+
+def kill_leftovers(leftovers: Iterable[Leftover], runner_pid: int, wait_s: float = 2.0) -> None:
+    """SIGKILL every leftover marked ``kill`` and reap the ones that are the runner's children."""
+    victims = [lo.proc for lo in leftovers if lo.kill]
+    for proc in victims:
+        try:
+            os.kill(proc.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        except PermissionError:
+            pass
+    deadline = time.monotonic() + wait_s
+    pending = {p.pid for p in victims}
+    while pending and time.monotonic() < deadline:
+        for pid in list(pending):
+            now = read_proc(pid, with_environ=False)
+            if now is None:
+                pending.discard(pid)
+            elif now.state == "Z":
+                if now.ppid == runner_pid:
+                    reap(pid)
+                pending.discard(pid)
+        if pending:
+            time.sleep(0.02)
+    reap_orphans(runner_pid)
+
+
+def reap(pid: int) -> None:
+    """Collect one dead child's status, unless ``subprocess`` owns it (a pid of ``SPAWNED``)."""
+    with SPAWNED.lock:
+        if pid in SPAWNED.pids():
+            return
+        try:
+            os.waitpid(pid, os.WNOHANG)
+        except ChildProcessError:
+            pass
+
+
+def reap_orphans(runner_pid: int, keep: Iterable[int] = ()) -> None:
+    """Reap zombies the subreaper inherited: never a pid in ``keep`` and never a pid of ``SPAWNED`` (those
+    ``subprocess`` still waits for), all under ``SPAWNED.lock``."""
+    with SPAWNED.lock:
+        skip = set(keep) | SPAWNED.pids()
+        for proc in snapshot(with_environ=False).values():
+            if proc.state == "Z" and proc.ppid == runner_pid and proc.pid not in skip:
+                reap(proc.pid)
+
+
+def same_process(proc: Proc) -> bool:
+    """True while ``proc``'s pid still names the same process (its start time) and it is not a zombie."""
+    now = read_proc(proc.pid, with_environ=False)
+    return now is not None and now.start == proc.start and now.state != "Z"
+
+
+def terminate(procs: Iterable[Proc], grace_s: float = 2.0, runner_pid: int | None = None) -> int:
+    """SIGTERM every process of ``procs`` that is still the same process, SIGKILL what outlives ``grace_s``; return how
+    many were signalled. Zombies that are ``runner_pid``'s children are reaped (``reap_orphans``)."""
+    targets = [p for p in procs if same_process(p)]
+    for proc in targets:
+        try:
+            os.kill(proc.pid, signal.SIGTERM)
+        except (ProcessLookupError, PermissionError):
+            pass
+    deadline = time.monotonic() + grace_s
+    pending = list(targets)
+    while pending and time.monotonic() < deadline:
+        pending = [p for p in pending if same_process(p)]
+        if pending:
+            time.sleep(0.02)
+    for proc in pending:
+        if same_process(proc):
+            try:
+                os.kill(proc.pid, signal.SIGKILL)
+            except (ProcessLookupError, PermissionError):
+                pass
+    if runner_pid is not None:
+        reap_orphans(runner_pid)
+    return len(targets)
+
+
+def runner_alive(pid_text: str | None, start_text: str | None) -> bool:
+    """True when ``T111_RUNNER_PID``/``T111_RUNNER_START`` still name a live process (start ticks must match)."""
+    try:
+        pid = int(pid_text or "")
+    except ValueError:
+        return False
+    proc = read_proc(pid, with_environ=False)
+    if proc is None or proc.state == "Z":
+        return False
+    if start_text:
+        try:
+            return proc.start == int(start_text)
+        except ValueError:
+            return False
+    return True
+
+
+def same_lock_dir(env: Mapping[str, str], lock_dir: Path | None) -> bool:
+    """True when a process's ``T111_LOCKS`` (default: the default lock dir) names ``lock_dir`` (None: any)."""
+    if lock_dir is None:
+        return True
+    theirs = env.get("T111_LOCKS") or "/tmp/111-verify-locks"
+    try:
+        return os.path.realpath(theirs) == os.path.realpath(str(lock_dir))
+    except (OSError, ValueError):
+        return theirs == str(lock_dir)
+
+
+def sweep_dead_runs(run_id: str, self_pid: int | None = None, lock_dir: Path | None = None) -> dict[str, list[Proc]]:
+    """The leftovers of dead runs: run id -> processes whose environ carries ``T111_RUN`` of another run and whose
+    ``T111_RUNNER_PID`` (with ``T111_RUNNER_START``) no longer names a live runner, and (with ``lock_dir``) whose
+    ``T111_LOCKS`` names the same lock dir. Never this process or an ancestor of it, never a process without both
+    markers."""
+    me = os.getpid() if self_pid is None else self_pid
+    procs = snapshot()
+    spared = {me, *ancestors(procs, me)}
+    out: dict[str, list[Proc]] = {}
+    for proc in procs.values():
+        if proc.pid in spared or proc.state == "Z":
+            continue
+        env = proc.environ or {}
+        other = env.get("T111_RUN")
+        if not other or other == run_id or not env.get("T111_RUNNER_PID"):
+            continue
+        if not same_lock_dir(env, lock_dir):
+            continue
+        if runner_alive(env.get("T111_RUNNER_PID"), env.get("T111_RUNNER_START")):
+            continue
+        out.setdefault(other, []).append(proc)
+    return out
+
+
+def sweep_run(*, runner_pid: int, run_id: str, run_dir: Path) -> list[Leftover]:
+    """Every process proven this run's at its end (the backstop of an interrupted run): it descends from the runner
+    or carries this run's marker (``kill``); a process that only names the run dir is listed with ``kill`` False
+    (reported, never killed); helpers and the pids ``subprocess`` owns excepted."""
+    procs = snapshot()
+    listening = listening_inodes()
+    run_dir_s = str(run_dir)
+    owned = SPAWNED.pids()
+    out: list[Leftover] = []
+    for proc in procs.values():
+        if proc.pid == runner_pid or proc.state == "Z" or proc.pid in owned:
+            continue
+        env = proc.environ or {}
+        if env.get("T111_HELPER"):
+            continue
+        chain = ancestors(procs, proc.pid)
+        rule = ""
+        if runner_pid in chain:
+            rule = "descends from the runner"
+        elif env.get("T111_RUN") == run_id:
+            rule = "carries this run's marker"
+        elif run_dir_s in proc.cmdline or any(run_dir_s in v for v in env.values()):
+            rule = "names the run dir"
+        if rule:
+            owner = env.get("T111_CHECK") if env.get("T111_RUN") == run_id else None
+            proven = rule != "names the run dir"
+            out.append(Leftover(proc, owner or "run", rule,
+                                sorted({listening[i] for i in socket_inodes(proc.pid) if i in listening}), proven,
+                                why_not="it names the run dir, but no marker or descent ties it to this run"))
+    return sorted(out, key=lambda lo: lo.proc.pid)
+
+
+# ---------------------------------------------------------------------------------------------------------------------
+# the tree
+
+
+def helper_run(argv: list[str], *, cwd: Path, run_id: str, timeout: float = 120.0) -> subprocess.CompletedProcess:
+    """Run one helper command of the runner itself (marked, own session, explicit cwd and timeout), its pid in
+    ``SPAWNED`` until its status is collected. On timeout its group is killed and ``TimeoutExpired`` raised."""
+    env = dict(os.environ)
+    env["T111_HELPER"] = run_id or "1"
+    for key in ("T111_RUN", "T111_CHECK", "T111_RUNNER_PID", "T111_RUNNER_START"):
+        env.pop(key, None)
+    proc = SPAWNED.popen(argv, cwd=cwd, env=env, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                         stderr=subprocess.PIPE, start_new_session=True)
+    try:
+        try:
+            out, err = proc.communicate(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            try:
+                os.killpg(proc.pid, signal.SIGKILL)
+            except (ProcessLookupError, PermissionError):
+                pass
+            proc.communicate()
+            raise
+    finally:
+        SPAWNED.done(proc)
+    return subprocess.CompletedProcess(argv, proc.returncode, out, err)
+
+
+def _hash(path: Path) -> str:
+    try:
+        if path.is_symlink():
+            return "link:" + os.readlink(path)
+        if path.is_dir():
+            return "dir"
+        digest = hashlib.sha256()
+        with path.open("rb") as fh:
+            for chunk in iter(lambda: fh.read(1 << 16), b""):
+                digest.update(chunk)
+        return digest.hexdigest()
+    except FileNotFoundError:
+        return "missing"
+    except OSError as exc:
+        return f"error:{exc.errno}"
+
+
+def display_path(raw: bytes) -> str:
+    """A path as text for a record: UTF-8, any other byte as ``\\xNN`` (never a lone surrogate, so no writer raises)."""
+    return raw.decode("utf-8", "backslashreplace")
+
+
+def tree_state(root: Path, run_id: str = "", exclude: Path | None = None) -> dict[str, str] | None:
+    """``{path: "<XY>:<content hash>"}`` for every path ``git status`` lists, ignored ones included (``!!:ignored``, no
+    hash), or None when ``root`` is no work tree. Paths under ``exclude`` (the run's scratch dir) are left out.
+
+    The keys are display text (``display_path``); the hash reads the file by its raw bytes."""
+    skip = ""
+    if exclude is not None:
+        try:
+            rel = os.path.relpath(Path(exclude).resolve(), Path(root).resolve())
+        except ValueError:
+            rel = ".."
+        if rel != ".." and not rel.startswith(".." + os.sep) and rel != ".":
+            skip = rel.replace(os.sep, "/").rstrip("/") + "/"
+    if shutil.which("git") is None:
+        return None
+    try:
+        done = helper_run(["git", "--no-optional-locks", "-C", str(root), "status", "--porcelain=v1", "-z",
+                           "--untracked-files=all", "--ignored"], cwd=root, run_id=run_id)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if done.returncode != 0:
+        return None
+    entries = done.stdout.split(b"\0")
+    state: dict[str, str] = {}
+    i = 0
+    while i < len(entries):
+        item = entries[i]
+        i += 1
+        if len(item) < 4:
+            continue
+        xy, raw = item[:2].decode("ascii", "replace"), item[3:]
+        if xy[0] in "RC":
+            i += 1  # the next entry is the source path of the rename or copy
+        name = display_path(raw)
+        if skip and (name + "/").startswith(skip):
+            continue
+        if xy == "!!":
+            state[name] = "!!:ignored"
+            continue
+        state[name] = f"{xy}:{_hash(Path(os.fsdecode(os.path.join(os.fsencode(root), raw))))}"
+    return state
+
+
+def tree_diff(before: Mapping[str, str] | None, after: Mapping[str, str] | None) -> list[str]:
+    """The paths whose ``git status`` line or content changed between two ``tree_state`` snapshots."""
+    if before is None or after is None:
+        return []
+    return sorted(p for p in set(before) | set(after) if before.get(p) != after.get(p))
+
+
+# ---------------------------------------------------------------------------------------------------------------------
+# capability probes
+
+
+class Probes:
+    """Answers ``needs`` once per run: ``userns``/``netns``, ``root``, ``nonroot``, ``network``, or a tool on PATH."""
+
+    NAMED: tuple[str, ...] = ("userns", "netns", "root", "nonroot", "network")
+
+    def __init__(self, *, offline: bool, run_id: str, cwd: Path):
+        self.offline = offline
+        self.run_id = run_id
+        self.cwd = cwd
+        self._lock = threading.Lock()
+        self._cache: dict[str, bool] = {}
+
+    def _probe(self, need: str) -> bool:
+        if need in ("userns", "netns"):
+            if shutil.which("unshare") is None:
+                return False
+            try:
+                done = helper_run(["unshare", "-Urnm", "true"], cwd=self.cwd, run_id=self.run_id, timeout=20)
+            except (OSError, subprocess.TimeoutExpired):
+                return False
+            return done.returncode == 0
+        if need == "root":
+            return os.geteuid() == 0
+        if need == "nonroot":
+            return os.geteuid() != 0
+        if need == "network":
+            return not self.offline
+        return shutil.which(need) is not None
+
+    def has(self, need: str) -> bool:
+        """True when the need is met (cached)."""
+        with self._lock:
+            if need not in self._cache:
+                self._cache[need] = self._probe(need)
+            return self._cache[need]
+
+    def missing(self, needs: Iterable[str]) -> list[str]:
+        """The needs that are not met, in order."""
+        return [n for n in needs if not self.has(n)]
+
+    def found(self) -> dict[str, bool]:
+        """Every need probed so far."""
+        with self._lock:
+            return dict(self._cache)

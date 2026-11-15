@@ -1,0 +1,4 @@
+{"exit_declared": false}
+{"id": "fx.ok/0/the-debug-111-is-built", "status": "PASS", "log_line": 3, "phase": "0. prerequisites: the venv and wheels from the lock (/tmp/x3/g4-cache), the debug 111"}
+{"id": "fx.ok/0/g4-the-lxmf-helper-source-is-missing", "status": "FAIL", "assertion": "G4: the LXMF helper source is missing (/repo/6-transport/sidecars/lxmf-sidecar/lxmf_helper.py)", "log_line": 4, "phase": "0. prerequisites: the venv and wheels from the lock (/tmp/x3/g4-cache), the debug 111"}
+{"id": "fx.ok", "status": "FAIL", "reason": "SKIPPED after 1 FAIL line(s): no unprivileged user namespaces (unshare -Urnm failed)", "assertion": "G4 SKIPPED: no unprivileged user namespaces (unshare -Urnm failed)", "log_line": 5, "after": "fx.ok/0/g4-the-lxmf-helper-source-is-missing"}

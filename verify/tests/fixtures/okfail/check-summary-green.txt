@@ -1,0 +1,13 @@
+check-gate: ok: every stage ran, G2 on both targets → ALL GREEN
+check-gate: ok: G2 ran, other tools absent → GREEN (… SKIPPED — not a lock run)
+check-gate: ok: no cross toolchains → G2 skipped, never ALL GREEN
+check-gate: ok: one cross toolchain only → G2 skipped, no musl build attempted
+check-gate: ok: REQUIRE_G2=1 without cross toolchains → fails before any stage
+check-gate: ok: aarch64 mesh111 lib tests without SQLCipher's codec (mesh111's own strings only) → red
+check-gate: ok: x86_64 mesh111 lib tests without OpenSSL 3.6.3 → red
+check-gate: ok: an x86_64 test binary with a DT_NEEDED entry → red
+check-gate: ok: an aarch64 test binary with a PT_INTERP header → red
+check-gate: ok: no mesh111 lib-test binary among the x86_64 ones → red
+check-gate: ok: messaging: one cross toolchain only → musl checks skipped, said so
+check-gate: ok: messaging: both cross toolchains → both musl checks, CC pinned
+check-gate: ALL CASES GREEN

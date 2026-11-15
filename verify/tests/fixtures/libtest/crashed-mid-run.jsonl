@@ -1,0 +1,3 @@
+{"exit_declared": false}
+{"id": "fx.lt/a_before_crash", "status": "PASS", "log_line": 5, "test": "a_before_crash"}
+{"id": "fx.lt", "status": "FAIL", "reason": "the test binary did not finish (signal: 6, SIGABRT: process abort signal)", "assertion": "error: test failed, to rerun pass `--test crash`\nprocess didn't exit successfully: `/tmp/x3/redtarget/debug/deps/crash-fb4c96ee6bfb5cee` (signal: 6, SIGABRT: process abort signal)", "log_line": 6}

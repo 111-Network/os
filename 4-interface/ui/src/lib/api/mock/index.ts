@@ -366,12 +366,32 @@ export function createMockAdapter(opts: MockOptions = {}): MockAdapter {
   });
 
   // --- Layer 7: relay status and settings, pairing, registry, update origins (mock/relay.ts) --------------------------------------
-  const R = createRelayMock({ now: () => clock.now(), later, publish: (f) => bus.publish(f), loopback: () => state.auth.loopback, onHops: () => publishNearby() });
+  const R = createRelayMock({
+    now: () => clock.now(),
+    later,
+    publish: (f) => bus.publish(f),
+    loopback: () => state.auth.loopback,
+    onHops: () => publishNearby(),
+    // The scenario's own facts (the hub scenario's `hub_role` and `gateway` row) so `GET /relay` agrees with the services list.
+    seed: () => {
+      const g = state.services.find((x) => x.id === "gateway");
+      return { hub: state.messaging.fabric.settings.hub_role === true, gateway: g ? { reason_code: g.reason_code, detail: g.detail } : null };
+    },
+  });
   const relay: RelayAdapter = {
     kind: "mock",
     status: () => rest(() => R.status()),
     patchSettings: (patch, acceptWarning) => rest(() => R.patchSettings(patch, acceptWarning)),
-    pairOffer: (body) => rest(() => R.pairOffer(body)),
+    // The code a pair offer mints is the hub's one outstanding code: the fabric slice shows it (`offer_active`) and Layer 5's
+    // `DELETE /fabric/hub/offer` dismisses it (openapi offerRelayPair).
+    pairOffer: (body) =>
+      rest(() => {
+        const offer = R.pairOffer(body);
+        M.offer = { code: offer.code };
+        M.fabric.hub = { ...M.fabric.hub, offer_active: true };
+        publishFabric();
+        return offer;
+      }),
     pair: (body) => rest(() => R.pair(body)),
     unpair: (nodeId) => rest(() => R.unpair(nodeId)).then(() => undefined),
     checkCarrier: () => rest(() => R.checkCarrier()),
