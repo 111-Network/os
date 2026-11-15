@@ -364,13 +364,13 @@ gap = "check.sh runs cargo test before the UI build, so Rust tests see the 'not 
 
 [[seam]]
 id = "L1-L5:blob-intake"
-status = "stub"
+status = "planned"
 spec = ["1-bootstrap/README.md Layer 5 amendments", "7-relay/README.md §9"]
 a = { layer = 1, files = ["1-bootstrap/crates/node111/src/daemon/updater/mod.rs"] }
 b = { layer = 5, files = ["5-messaging/crates/mesh111/src/blobs.rs"] }
 read_first = "a"
 symptom = "no symptom yet: the updater intake of a staged payload at fabric/blobs is planned (wire fill v1.1)"
-gap = "None: planned, no code on the updater side."
+gap = "Deferred to v1.1 (1-bootstrap/README.md:247, 7-relay/README.md §17): the wire transfer that fills `fabric/blobs` for the updater arrives in v1.1; no v1 row builds either side."
 
 [[seam]]
 id = "L1-L5:fabric-cli"
@@ -793,23 +793,23 @@ gap = "No real agent ever calls an L6 tool: a second stub-daemon copy stands in,
 
 [[seam]]
 id = "L3-L7:l7-tools"
-status = "stub"
+status = "built"
 spec = ["3-intelligence/README.md Layer 7 tools", "7-relay/README.md §13.3"]
 a = { layer = 3, files = ["3-intelligence/crates/agent111/src/tools.rs"] }
 b = { layer = 7, files = ["1-bootstrap/crates/node111/src/daemon/relay/mod.rs"] }
 read_first = "a"
 symptom = "the tool-count pin moves: the agent offers 20 tools (17 and presence.read, gateway.read, relay.propose)"
-gap = "Row A1 landed and layer7_tools runs the three tools against a hand-typed stub daemon; the routes they read (GET /relay of D10, the 111 source of GET /nearby of D2) are not built, so no real daemon answers them."
+gap = "Rows A1, D2 and D10 landed: the agent's three Layer 7 tools (A/src/tools.rs) read GET /nearby's 111 source and GET /relay, both routed by the daemon now; layer7_tools still runs them against a hand-typed stub daemon (F), and no test drives the real daemon's routes from the agent."
 
 [[seam]]
 id = "L3-L7:offload"
-status = "stub"
+status = "built"
 spec = ["3-intelligence/README.md Model profiles", "7-relay/README.md §7"]
 a = { layer = 3, files = ["3-intelligence/crates/agent111/src/config.rs"] }
 b = { layer = 7, files = ["1-bootstrap/crates/node111/src/daemon/registry/mod.rs"] }
 read_first = "a"
 symptom = "a model-less node has no model: the agent state is unavailable (not a hang)"
-gap = "The private-IP refusal is tested on the agent side only; the hub registry it would read is a T0 stub."
+gap = "Rows D8 and D9 landed: a hub's registry row carries the offload role (bit 4) and the agent refuses a public model base (`guard_model_base`, A/src/config.rs; F in config_guard); by design no code turns a registry row into the agent's model base (the human types it, Layer 7 §7), so the integration proof is a node111 test feeding a registry row's private IP literal to the guard (not written)."
 
 [[seam]]
 id = "L3-L8:agent-state"
@@ -1048,7 +1048,7 @@ gap = "In-process only; S2 13b exercises the quota for member rows alone."
 
 [[seam]]
 id = "L5-L7:fabric-tap"
-status = "stub"
+status = "built"
 spec = ["7-relay/README.md §2.1", "7-relay/README.md §3.5"]
 a = { layer = 5, files = ["1-bootstrap/crates/node111/src/daemon/fabric/mod.rs"] }
 b = { layer = 7, files = [
@@ -1057,7 +1057,7 @@ b = { layer = 7, files = [
 ] }
 read_first = "a"
 symptom = "no 111 Nearby kind: GET /nearby has no 111 source"
-gap = "None: a T0 stub on the relay side."
+gap = "Row D2 landed: the fabric tap (`relay::tap`, N/relay/mod.rs) hands each fabric batch to presence, the gateway row and the relay frame; the presence book is unit-tested against fake reads (`--lib daemon::relay::presence`, inside l1.node111.lib); no running system shows a 111 row yet: G8 (`7-relay/verify/presence.sh`, row V2) is a T0 stub."
 
 [[seam]]
 id = "L5-L7:forwarder-handoff"
@@ -1144,13 +1144,13 @@ gap = "One unit test only; nothing runs simplex-chat."
 
 [[seam]]
 id = "L6-L7:hops"
-status = "stub"
+status = "built"
 spec = ["7-relay/README.md §10"]
 a = { layer = 6, files = ["1-bootstrap/crates/node111/src/daemon/transport/rnstatus.rs"] }
 b = { layer = 7, files = ["1-bootstrap/crates/node111/src/daemon/dashboard/api_v1/nearby.rs"] }
 read_first = "b"
 symptom = "no hop counts: rate_limited or component_unavailable on POST /nearby/hops"
-gap = "None: planned; POST /nearby/hops is not built."
+gap = "Row D2 landed: POST /nearby/hops runs one `rnpath -t -j` through the rnstatus runner (its timeout, output cap and owner gate) into the reticulum source's `hops_away`; tests/api_v1_bridge.rs drives the route (409 component_unavailable, 401 for the agent's bearer, 202, 429 within 30 s) and the rnstatus unit tests parse scripted path tables; no harness runs a real rnpath: G8 (row V2) is a T0 stub."
 
 [[seam]]
 id = "L6-L7:netlink-gateway"
