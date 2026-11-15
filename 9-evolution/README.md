@@ -30,7 +30,7 @@ under `os/plan/layers/9-evolution/`.
 `L0`…`L8` = the layer READMEs; locked Layer 7 and the Layer 8 draft are cited by section and item, never by line. The v0.1 citations were read on 2026-11-11
 at head `fa1daeb`, which is behind HEAD in committed code, not only in the working tree (for example `M/fabric.rs:1237-1243` was `send` there and is
 `link_events` at HEAD); a citation v0.2 changed was read at head `680162d`, or at `0d1dd41` (committed content) for those its integration fixes
-added; every `file:line` is re-pinned at the lock head before the lock (§24 C12).
+added, each re-read at `61ae26d` (committed content); every `file:line` is re-pinned at the lock head before the lock (§24 C12).
 The working tree carries uncommitted Layer 7 edits; no citation here reads them: the two UI files cited (`proposals.tsx`, `settings/index.tsx`) are read from the committed tree. **Evidence:** *(src)* source read ·
 *(doc)* docs read by a scout · *(design)* not built · *(unverified from this box)* a claim no scout could fetch (R06 §7, OB §6).
 
@@ -475,7 +475,7 @@ tagged on `p` with no fallback variant. The twelve predicates (Q9 default):
 | `health_is` | `of` ∈ `daemon` (`ok`, `error`; `N/health.rs:24-40`) or `agent` (`ok`, `error`: the code the services probe keeps, `N/services/probe.rs:162-165`; the agent's `degraded` answers 200, `L3:84`, so v1 cannot read it), `is` | the health struct `111d` holds (`status.rs:332-337`); the probe's last code for the agent |
 | `file_exists` | `root` ∈ `state`, `run`, `data`; `rel` matching `^[a-z0-9._-]+(/[a-z0-9._-]+)*$` | one `metadata()` call, never a read |
 | `log_contains` | `id` (an own child), `literal` ≤ 64 B | the last 100 lines or 8 KiB of the sanitised tail (`N/services/log.rs:12-17`); no regex |
-| `disk_free_below` | `percent` | the fabric's `statvfs` (`N/fabric/mod.rs:420-432`) |
+| `disk_free_below` | `percent` | the fabric's `statvfs` (`N/fabric/mod.rs:471-484`) |
 | `unclean_exit` | — | §3.3's marker |
 | `component_enabled` | `id`, `is` | `Components::status` |
 | `release_at_least` | `calver` | the running release |
@@ -954,7 +954,7 @@ Download PR.md; a received fix is accepted only from its full review screen, nev
 loaded, refused with "needs release X") · **Audit** (advanced) · the **consent block** (§17). Event-fed (`incident`, `proposal`): no UI timer and no
 ticking countdown.
 
-**The lazy budget (normative).** After Layer 7's row U2 the lazy bucket holds 238.9 of D21's 256 KB (`7-relay/TASKS.md:90`; the `l7` chunk is 11.9 KB
+**The lazy budget (normative).** After Layer 7's row U2 the lazy bucket holds 238.9 of D21's 256 KB (`7-relay/TASKS.md:91` at `61ae26d`; the `l7` chunk is 11.9 KB
 gzip), and Layer 8 takes 12 KB gzip of the 17.1 KB left for its chunks, adapter and card (L8 §15.4). Layer 9's allowance is what Layer 8 leaves:
 5.1 KB gzip for the Repairs page, its proposal cards and its adapter together (default; measured at build), restated against the bucket at the lock
 head. The advanced sections (Playbooks, Audit, Fixes) are their own chunk where that saves bytes. When the measured chunks exceed the allowance, the
@@ -1226,7 +1226,7 @@ families; `seq` values are the store's.
 ## 20. Verification (lock gates; netns, no hardware)
 
 **Gate homes.** New `9-evolution/verify/{observer,engine,diagnose,share,delegate,codefix,evolution}.sh`, a stdlib-only stub model
-`9-evolution/verify/stub-model.py` (replays recorded completions on the model port inside a netns), known-answer vectors under `9-evolution/verify/vectors/`,
+`9-evolution/verify/stub-model.py` (replays recorded completions on the model port inside a netns), known-answer vectors under `9-evolution/verify/vectors/`, recorded tapes under `9-evolution/verify/tapes/` (G20 (1), G22 (6)),
 and `9-evolution/verify/lib.sh`, which sources `6-transport/verify/lib.sh` and `6-transport/verify/root.sh` as `7-relay/verify/lib.sh` does and names the
 netns, veth, addresses (10.111.9x.0/24) and ports. The conventions are `6-transport/verify/lib.sh`: each check prints `ok:` or `FAIL:` (`note:` informs); a
 gate whose prerequisites are absent (unprivileged netns through `unshare -Urnm`, a built binary, `OPENCODE_BIN`) prints `<GATE> SKIPPED: <reason>` and exits
@@ -1513,13 +1513,13 @@ baseline and idle RSS under its ceiling (G7, extended). A change to the first co
   with `111 install` and `111 install --phone` only; `111d` reads the unit and the hook at start and opens `witness_absent` with its `human_step` when
   the witness is absent; it never writes either, §3.3 rule 7); `111 heal-witness` exits 0 on every error; the hook writes `result=exit` or
   `result=signal`; the inbox keeps the newest 256 lines. The removal widened (§3.3 rule 6): `termux/cron/*`; the `CRON_HEALTH` include and its install
-  step (`NI/install/phone/mod.rs:24`, `:224-229`); `termux/tests/dryrun.sh:99-110`; `L1:156`'s text; the provisioner deletes the copy already pushed to
+  step (`NI/install/phone/mod.rs:24`, `:224-229`); `termux/tests/dryrun.sh:102-120`; `L1:156`'s text; the provisioner deletes the copy already pushed to
   `$PREFIX/var/lib/111/share/termux/cron-healthcheck.sh` on its next run; "Release assets", the Termux .deb closure row (`L1:68`): `cronie` leaves the
   minimum, with `LICENSING.md:65`'s row, the minimum in `1-bootstrap/crates/node111/tests/manifest_parse.rs:76-82` and the `cronie` entries of the
   manifest fixtures (`tests/fixtures/l7-*/**/channel-111-stable.toml`); its deb size is the measured saving. (item 19, **new**) the CLI gains
   `111 heal settings [<key> <value>]`, which calls the loopback `PATCH /api/v1/repairs/settings`, prints the consent text and asks y/N (§17.1).
   Conditional, not in v1: the `termux-api` deb joins the closure only on the owner's word (§14.4). Code seams, no spec text: `ChildControl::exits()` (§3.2); the run marker and
-  inbox under `state/heal/` (J8); `state/heal.json` in the layout table. The hand-offs closed: "Layer 9: supervision-tree handles, `/health` contract,
+  inbox under `state/heal/` (J2, J8; the directory is L8 §21 L1's layout row); `state/heal.json` in the layout table. The hand-offs closed: "Layer 9: supervision-tree handles, `/health` contract,
   exit(0)-restart, watchdog heartbeat" (`L1:277`) and "APK refresh = Layer 9 maintenance task" (`L1:185`).
 - **Layer 2 (locked v2):** (item 6) `111/fix/v1` and `111/fix-vouch/v1` with the constructions of §10.2, in the one Layers 8 and 9 block (L8 §21 L2, A19);
   id111 gains no code; vectors in `9-evolution/verify/vectors/`. The construction of `111/fix/v1` keeps `attachment_hash`, 32 zero bytes in v1; vouch
@@ -1626,7 +1626,7 @@ items 13-14. · (13) `L6:487-488` (cited `:458-459`) stays true. · (14) `L0:32`
   (`M/envelope.rs:1395-1401`), not a profile; the registry's change signal is `N/services/mod.rs:1451`, `:1474-1477`, `snapshot` `:1515`, the
   `services` publish `:1576`, the row key `:1433-1435`; the services tick is `N/services/probe.rs:45`, its loop `:520`; netlink's one consumer is
   `debounced`, `N/transport/netlink.rs:315`. At `0d1dd41`: the agent view's Layer 9 line is `UI/src/views/agent/proposals.tsx:137` (was `:121`); the
-  lazy-bucket figure is `7-relay/TASKS.md:90` (row U2). v0.2 re-read the
+  lazy-bucket figure is row U2 of `7-relay/TASKS.md`, `:91` at `61ae26d` (`:90` at `0d1dd41`; it moves as that board grows). v0.2 re-read the
   citations it changed at `680162d`; every citation is re-pinned at the lock head before the lock.
 - **C13** The brief's model lifecycle is not built: `111d` starts llama-server with `--model --host --port` only and keeps it resident wherever the
   binary and a GGUF exist (`N/intelligence.rs:172-192`); `--sleep-idle-seconds` is in no argv. There is no on-demand load and nothing to reload: T1 and
