@@ -21,7 +21,27 @@
 //!   test, so CI fails on drift);
 //! - a literal missing from the table fails, and so does a state the scan cannot read: the scan
 //!   run over mutated copies of the source.
+//!
+//! Row D4 (§6.1, §6.2 grammar v1, §6.3 the loader; §7.2 the action type; §19 hard rule 8; §24
+//! D19, D21, D29; G21 (1), (8) and (11), G19 (5)'s unit half), the tests named `grammar_*`,
+//! `loader_*` and `kb_*`:
+//! - every case of `tests/fixtures/playbooks/cases.toml` (the one fixture directory, which
+//!   `build.py --selftest` reads too): each accept parses, renders its filename, loads under it and
+//!   opens; each reject is refused for its one rule, by the grammar and by the loader's start scan,
+//!   and opens nothing (refused whole, never run in part); every rule but the loader's own two has
+//!   a reject case;
+//! - the limits at and past their bounds (depth 3 and 4, 16 and 17 leaves, a 2,048 and a 2,049 B
+//!   block), `"@subject"` the one substitution, the loader's refusals of G21 (8) and (11), §6.2's
+//!   example block (read from the spec) parsing and loading, `[match] {3, model, child_exit}`
+//!   rendering `repair-model-child-exit.md`, no parsed playbook held after the last incident
+//!   closes, and the held `[match]` table's size (§21 memory, printed);
+//! - every file under `0-knowledge/playbooks/` loads (vacuous until row K3).
 
+use node111::daemon::heal::action::{Action, Ref, Supervised, SUBJECT};
+use node111::daemon::heal::playbook::grammar::{
+    self, Predicate, Refusal, Rule, Severity, MAX_BLOCK_BYTES, MAX_DEPTH, MAX_LEAVES,
+};
+use node111::daemon::heal::playbook::{Held, Library, LoadState, Opened};
 use node111::daemon::heal::vocab::{self, VocabRow, ANY, CHILD_EXIT, ROWS};
 use node111::daemon::services::{catalogue, Kind, ServiceId};
 use serde::Deserialize;
@@ -1268,4 +1288,704 @@ fn vocabulary_scan_lets_the_other_state_fields_be_set() {
             scan(&mutated).err()
         );
     }
+}
+
+// ---------------------------------------------------------------- grammar v1, the loader (row D4)
+
+/// The running release the refusals name in these tests.
+const RELEASE: &str = "2026.11.16";
+
+/// The repository root (`node111` is `1-bootstrap/crates/node111`).
+fn repo_root() -> &'static Path {
+    manifest_dir()
+        .ancestors()
+        .nth(3)
+        .expect("the crate sits three levels under the repository root")
+}
+
+/// The one fixture directory (§6.3).
+fn fixtures_dir() -> PathBuf {
+    manifest_dir().join("tests/fixtures/playbooks")
+}
+
+#[derive(Deserialize)]
+struct Cases {
+    schema: u32,
+    case: Vec<Case>,
+}
+
+#[derive(Deserialize, Debug)]
+#[serde(deny_unknown_fields)]
+struct Case {
+    file: String,
+    verdict: String,
+    rule: Option<String>,
+    renders: Option<String>,
+}
+
+fn cases() -> Vec<Case> {
+    let path = fixtures_dir().join("cases.toml");
+    let text =
+        std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
+    let cases: Cases = toml::from_str(&text).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+    assert_eq!(cases.schema, 1);
+    cases.case
+}
+
+fn fixture(name: &str) -> String {
+    let path = fixtures_dir().join(name);
+    std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()))
+}
+
+/// A playbook directory holding `files` (name, text).
+fn library_of(files: &[(&str, &str)]) -> (tempfile::TempDir, Library) {
+    let tmp = tempfile::tempdir().expect("a temporary directory");
+    for (name, text) in files {
+        std::fs::write(tmp.path().join(name), text).expect("write a playbook");
+    }
+    let lib = Library::scan(tmp.path(), RELEASE);
+    (tmp, lib)
+}
+
+/// The held playbook of `open`, or a panic naming what it found.
+fn held(opened: Opened) -> Held {
+    match opened {
+        Opened::Loaded(h) => h,
+        other => panic!("no playbook held: {other:?}"),
+    }
+}
+
+/// A document holding `block` under `### Checks`.
+fn doc(block: &str) -> String {
+    format!("## Details\n\n### Checks\n\n```toml\n{block}```\n")
+}
+
+/// §6.2's example block, read from the spec itself.
+fn spec_block() -> String {
+    let path = repo_root().join("9-evolution/README.md");
+    let text =
+        std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
+    let at = text
+        .find("One valid block (`repair-model-child-exit.md`")
+        .expect("§6.2's example");
+    let start = at + text[at..].find("```toml\n").expect("its fence") + "```toml\n".len();
+    let end = start + text[start..].find("```\n").expect("its closing fence");
+    text[start..end].to_string()
+}
+
+#[test]
+fn grammar_every_fixture_gets_its_verdict() {
+    let cases = cases();
+    // one case per .md file of the folder, and a file for each case
+    let mut files: Vec<String> = std::fs::read_dir(fixtures_dir())
+        .expect("the fixture folder")
+        .map(|e| e.unwrap().file_name().into_string().unwrap())
+        .filter(|n| n.ends_with(".md"))
+        .collect();
+    files.sort();
+    let mut listed: Vec<String> = cases.iter().map(|c| c.file.clone()).collect();
+    listed.sort();
+    assert_eq!(
+        files, listed,
+        "cases.toml and the folder's .md files differ"
+    );
+
+    let mut rules_seen = BTreeSet::new();
+    let (mut accepted, mut refused) = (0, 0);
+    let mut wrong: Vec<String> = Vec::new();
+    for case in &cases {
+        let text = fixture(&case.file);
+        let parsed = grammar::parse_document(&text);
+        match (case.verdict.as_str(), &parsed) {
+            ("accept", Ok(p)) => {
+                accepted += 1;
+                let renders = case
+                    .renders
+                    .as_deref()
+                    .expect("an accept names its rendering");
+                assert_eq!(p.filename(), renders, "{}", case.file);
+                assert!(case.rule.is_none(), "{}", case.file);
+                // the loader keeps it under its rendered name and parses it again on open
+                let (_tmp, lib) = library_of(&[(renders, &text)]);
+                let entry = &lib.entries()[0];
+                assert_eq!(entry.state, LoadState::Loaded, "{}", case.file);
+                let key = entry.key.expect("a loaded entry keeps its key");
+                let subject = if key.subject == ANY {
+                    "deltachat"
+                } else {
+                    key.subject
+                };
+                let h = held(lib.open(key.layer, subject, key.reason));
+                assert_eq!(*h.playbook(), *p, "{}", case.file);
+                assert_eq!(lib.held(), 1);
+                drop(h);
+                assert_eq!(lib.held(), 0);
+            }
+            ("reject", Err(r)) => {
+                let want = case.rule.as_deref().expect("a reject names its rule");
+                if r.rule.id() != want {
+                    wrong.push(format!("{}: {want}, refused for {r}", case.file));
+                    continue;
+                }
+                refused += 1;
+                assert!(case.renders.is_none(), "{}", case.file);
+                rules_seen.insert(r.rule.id());
+                // refused whole by the start scan too, and never opened: nothing of it runs
+                let (_tmp, lib) = library_of(&[("repair-model-child-exit.md", &text)]);
+                let entry = &lib.entries()[0];
+                match &entry.state {
+                    LoadState::Refused { rule, reason } => {
+                        assert_eq!(rule.id(), want, "{}", case.file);
+                        assert!(
+                            reason.starts_with("unsupported grammar ")
+                                && reason.contains(", needs release newer than 2026.11.16 ("),
+                            "{}: {reason}",
+                            case.file
+                        );
+                    }
+                    LoadState::Loaded => panic!("{} loaded", case.file),
+                }
+                assert!(matches!(
+                    lib.open(3, "model", "child_exit"),
+                    Opened::NoPlaybook
+                ));
+                assert_eq!(lib.held(), 0);
+            }
+            (verdict, got) => wrong.push(format!("{}: {verdict}, got {got:?}", case.file)),
+        }
+    }
+    // every case is tried, and every one that does not get its verdict is named
+    assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+    assert!(
+        accepted >= 10 && refused >= 60,
+        "{accepted} accept, {refused} reject"
+    );
+    // every rule of the document has a reject case; the loader's two have their own tests
+    for rule in Rule::ALL {
+        if !matches!(rule, Rule::File | Rule::Filename) {
+            assert!(
+                rules_seen.contains(rule.id()),
+                "no reject case for {}",
+                rule.id()
+            );
+        }
+    }
+    eprintln!("note: {accepted} accept and {refused} reject cases");
+}
+
+#[test]
+fn grammar_limits_at_and_past_their_bounds() {
+    let base = spec_block();
+    let leaf = "{ p = \"unclean_exit\" }";
+    let with_test = |test: &str| {
+        format!(
+            "{base}\n[[check]]\nid = \"extra\"\ntest = {test}\n\n[[cause]]\nid = \"extra\"\n\
+             when = [\"extra\"]\naction = {{ action = \"advise\", text = \"x\" }}\n"
+        )
+    };
+    let nested = |depth: usize| {
+        let mut t = leaf.to_string();
+        for _ in 1..depth {
+            t = format!("{{ p = \"not\", of = {t} }}");
+        }
+        t
+    };
+    // depth: 3 parses, 4 is refused whole
+    let p = grammar::parse_block(&with_test(&nested(MAX_DEPTH))).unwrap();
+    assert_eq!(p.check("extra").unwrap().test.depth(), MAX_DEPTH);
+    let r = grammar::parse_block(&with_test(&nested(MAX_DEPTH + 1))).unwrap_err();
+    assert_eq!(r.rule, Rule::Depth, "{r}");
+
+    // leaves, the whole block's: the example holds 3, so 13 more reach 16 and 14 more 17
+    let all = |n: usize| format!("{{ p = \"all\", of = [{}] }}", vec![leaf; n].join(", "));
+    let p = grammar::parse_block(&with_test(&all(MAX_LEAVES - 3))).unwrap();
+    assert_eq!(p.leaves(), MAX_LEAVES);
+    let r = grammar::parse_block(&with_test(&all(MAX_LEAVES - 2))).unwrap_err();
+    assert_eq!(r.rule, Rule::Leaves, "{r}");
+    // 17 leaves in one check as well
+    let one = format!(
+        "schema = 1\n[match]\nlayer = 3\nsubject = \"model\"\nreason = \"child_exit\"\n\
+         [[check]]\nid = \"c\"\ntest = {}\n[[cause]]\nid = \"k\"\nwhen = [\"c\"]\n\
+         action = {{ action = \"advise\", text = \"x\" }}\n",
+        all(MAX_LEAVES + 1)
+    );
+    assert_eq!(grammar::parse_block(&one).unwrap_err().rule, Rule::Leaves);
+
+    // whatever form a test takes: serde would read an array as a table's fields in order, so
+    // v1 refuses one where it takes a table, and a depth of 5 or 40 leaves written as arrays
+    // is refused whole, by the parse and by the start scan (review finding 1)
+    let deep = "[\"all\", [[\"all\", [[\"all\", [[\"all\", [[\"unclean_exit\"]]]]]]]]]";
+    let wide = format!(
+        "[\"any\", [{}]]",
+        vec!["[\"incident_count_at_least\", 1]"; 40].join(", ")
+    );
+    for test in [deep.to_string(), wide] {
+        let b = format!(
+            "schema = 1\n[match]\nlayer = 3\nsubject = \"model\"\nreason = \"child_exit\"\n\
+             [[check]]\nid = \"c\"\ntest = {test}\n[[cause]]\nid = \"k\"\nwhen = [\"c\"]\n\
+             action = {{ action = \"advise\", text = \"x\" }}\n"
+        );
+        assert!(b.len() <= MAX_BLOCK_BYTES, "{} B", b.len());
+        let r = grammar::parse_block(&b).unwrap_err();
+        assert_eq!(r.rule, Rule::Value, "{test}: {r}");
+        let (_tmp, lib) = library_of(&[("repair-model-child-exit.md", &doc(&b))]);
+        assert!(
+            matches!(
+                lib.entries()[0].state,
+                LoadState::Refused {
+                    rule: Rule::Value,
+                    ..
+                }
+            ),
+            "{test}: {:?}",
+            lib.entries()[0].state
+        );
+        assert!(matches!(
+            lib.open(3, "model", CHILD_EXIT),
+            Opened::NoPlaybook
+        ));
+    }
+
+    // the block's size: 2,048 B parses, 2,049 B is refused before any parse
+    let pad = |n: usize| {
+        let mut b = base.clone();
+        let need = n - b.len();
+        b.push('#');
+        b.push_str(&"x".repeat(need - 2));
+        b.push('\n');
+        assert_eq!(b.len(), n);
+        b
+    };
+    assert!(grammar::parse_block(&pad(MAX_BLOCK_BYTES)).is_ok());
+    let r = grammar::parse_block(&pad(MAX_BLOCK_BYTES + 1)).unwrap_err();
+    assert_eq!((r.rule, r.schema), (Rule::BlockSize, None), "{r}");
+    assert!(r.detail.contains("2049 B"), "{r}");
+    // and in a document, as the two fixtures hold them exactly
+    for (name, len) in [
+        ("accept-block-2048.md", MAX_BLOCK_BYTES),
+        ("reject-block-2049.md", MAX_BLOCK_BYTES + 1),
+    ] {
+        let text = fixture(name);
+        let block = grammar::checks_block(&text).unwrap();
+        assert_eq!(block.len(), len, "{name}");
+        assert!(block.starts_with(&base), "{name}");
+    }
+}
+
+#[test]
+fn grammar_subject_is_the_only_substitution() {
+    // bound: every subject field of the model playbook names the incident's subject
+    let text = fixture("accept-subject-bound.md");
+    let (_tmp, lib) = library_of(&[("repair-model-child-exit.md", &text)]);
+    let h = held(lib.open(3, "model", "child_exit"));
+    assert_eq!(h.subject(), "model");
+    let mut refs = 0;
+    for c in &h.checks {
+        c.test.for_each_leaf(&mut |p| {
+            let id: &Ref<Supervised> = match p {
+                Predicate::ServiceState { id, .. }
+                | Predicate::RestartsAtLeast { id, .. }
+                | Predicate::LogContains { id, .. } => id,
+                Predicate::ExitIs(e) => &e.id,
+                other => panic!("{other:?}"),
+            };
+            assert!(id.is_subject());
+            assert_eq!(id.resolve(h.subject()), "model");
+            refs += 1;
+        });
+    }
+    assert_eq!(refs, 4);
+    let restart = h.causes[0]
+        .action
+        .subject_ref()
+        .expect("service.restart's field");
+    assert_eq!(restart.resolve(h.subject()), "model");
+    // serialised back, the action still says "@subject": the binding is the reader's, at plan()
+    assert_eq!(
+        serde_json::to_value(&h.causes[0].action).unwrap(),
+        serde_json::json!({"action": "service.restart", "service_id": SUBJECT})
+    );
+
+    // no other substitution: an `@` value anywhere else is refused whole ...
+    let model = "schema = 1\n[match]\nlayer = 3\nsubject = \"model\"\nreason = \"child_exit\"\n\
+                 [[check]]\nid = \"c\"\ntest = { p = \"service_state\", id = \"model\", \
+                 is = \"degraded\" }\n";
+    let with_action =
+        |a: &str| format!("{model}[[cause]]\nid = \"k\"\nwhen = [\"c\"]\naction = {a}\n");
+    for a in [
+        "{ action = \"service.restart\", service_id = \"@service\" }",
+        "{ action = \"service.restart\", service_id = \"@model\" }",
+        "{ action = \"advise\", text = \"@subject\" }",
+        "{ action = \"human_step\", steps = [\"@subject\"] }",
+        "{ action = \"radio.region.set\", region = \"@region\" }",
+        "{ action = \"component.enable\", id = \"@subject\" }",
+        "{ action = \"settings.set\", key = \"@subject\", value = true }",
+    ] {
+        let r = grammar::parse_block(&with_action(a)).unwrap_err();
+        assert_eq!(r.rule, Rule::Subject, "{a}: {r}");
+    }
+    for test in [
+        "{ p = \"log_contains\", id = \"model\", literal = \"@subject\" }",
+        "{ p = \"file_exists\", root = \"state\", rel = \"@subject\" }",
+        "{ p = \"service_reason\", id = \"model\", is = \"@subject\" }",
+        "{ p = \"release_at_least\", calver = \"@release\" }",
+        "{ p = \"component_enabled\", id = \"@subject\", is = true }",
+    ] {
+        let b = format!(
+            "{model}[[check]]\nid = \"d\"\ntest = {test}\n[[cause]]\nid = \"k\"\n\
+             when = [\"c\", \"d\"]\naction = {{ action = \"advise\", text = \"x\" }}\n"
+        );
+        let r = grammar::parse_block(&b).unwrap_err();
+        assert_eq!(r.rule, Rule::Subject, "{test}: {r}");
+    }
+    // ... and text that only looks like a template is plain text, kept as written
+    for literal in [
+        "restart @subject now",
+        "{{subject}}",
+        "${SUBJECT}",
+        "%s",
+        "$(id)",
+    ] {
+        let b = with_action(&format!("{{ action = \"advise\", text = \"{literal}\" }}"));
+        let p = grammar::parse_block(&b).unwrap();
+        match &p.causes[0].action {
+            Action::Advise { text } => assert_eq!(text.as_str(), literal),
+            other => panic!("{other:?}"),
+        }
+    }
+}
+
+#[test]
+fn loader_refuses_g21_8_forms() {
+    // each file named for its [match], so only the grammar's rule can refuse it
+    let key = |layer: u8, subject: &str, reason: &str| {
+        format!(
+            "schema = 1\n[match]\nlayer = {layer}\nsubject = \"{subject}\"\nreason = \"{reason}\"\n"
+        )
+    };
+    let check = |id: &str, test: &str| format!("[[check]]\nid = \"{id}\"\ntest = {test}\n");
+    let cause = |when: &str, action: &str| {
+        format!("[[cause]]\nid = \"k\"\nwhen = [\"{when}\"]\naction = {action}\n")
+    };
+    let state = "{ p = \"service_state\", id = \"model\", is = \"degraded\" }";
+    let oom = "{ p = \"log_contains\", id = \"model\", literal = \"failed to allocate\" }";
+    let open = "{ p = \"incident_count_at_least\", n = 1 }";
+    let cases: Vec<(&str, String, Rule)> = vec![
+        // a typed action on log text alone (§24 D21)
+        (
+            "repair-model-child-exit.md",
+            key(3, "model", "child_exit")
+                + &check("oom", oom)
+                + &cause(
+                    "oom",
+                    "{ action = \"service.restart\", service_id = \"@subject\" }",
+                ),
+            Rule::LogOnly,
+        ),
+        // a bridge action and an interface action (§7.2's †, §24 D19)
+        (
+            "repair-model-child-exit.md",
+            key(3, "model", "child_exit")
+                + &check("c", state)
+                + &cause("c", "{ action = \"bridge.order.set\", order = [\"lxmf\"] }"),
+            Rule::HumanOnly,
+        ),
+        (
+            "repair-model-child-exit.md",
+            key(3, "model", "child_exit")
+                + &check("c", state)
+                + &cause(
+                    "c",
+                    "{ action = \"rns.interface.remove\", name = \"RNode\" }",
+                ),
+            Rule::HumanOnly,
+        ),
+        // `@subject` outside the compiled subject table: a component's, then 111d's
+        (
+            "repair-any-child-exit.md",
+            key(6, ANY, CHILD_EXIT)
+                + &check("c", open)
+                + &cause(
+                    "c",
+                    "{ action = \"service.restart\", service_id = \"@subject\" }",
+                ),
+            Rule::Subject,
+        ),
+        (
+            "repair-111d-unclean-exit.md",
+            key(1, "111d", "unclean_exit")
+                + &check("c", "{ p = \"exit_is\", id = \"@subject\", signal = 9 }")
+                + &cause("c", "{ action = \"advise\", text = \"x\" }"),
+            Rule::Subject,
+        ),
+    ];
+    for (name, block, rule) in cases {
+        // the same block with an advise (or a literal id) loads: the one rule refuses it
+        let (_tmp, lib) = library_of(&[(name, &doc(&block))]);
+        let entry = &lib.entries()[0];
+        match &entry.state {
+            LoadState::Refused { rule: got, reason } => {
+                assert_eq!(*got, rule, "{block}");
+                assert!(
+                    reason
+                        .starts_with("unsupported grammar 1, needs release newer than 2026.11.16"),
+                    "{reason}"
+                );
+            }
+            LoadState::Loaded => panic!("loaded:\n{block}"),
+        }
+        let row = vocab::ROWS
+            .iter()
+            .find(|r| grammar::render_filename(r) == name)
+            .unwrap();
+        let subject = if row.subject == ANY {
+            "lxmf"
+        } else {
+            row.subject
+        };
+        assert!(matches!(
+            lib.open(row.layer, subject, row.reason),
+            Opened::NoPlaybook
+        ));
+    }
+}
+
+#[test]
+fn loader_refuses_g21_11_forms() {
+    // §24 D29: `within_events` is gone, and the agent's health reads ok or error only
+    for (test, rule) in [
+        (
+            "{ p = \"restarts_at_least\", id = \"model\", n = 5, within_events = 10 }",
+            Rule::UnknownField,
+        ),
+        (
+            "{ p = \"health_is\", of = \"agent\", is = \"degraded\" }",
+            Rule::Value,
+        ),
+        (
+            "{ p = \"health_is\", of = \"daemon\", is = \"degraded\" }",
+            Rule::Value,
+        ),
+    ] {
+        let block = format!(
+            "schema = 1\n[match]\nlayer = 3\nsubject = \"model\"\nreason = \"child_exit\"\n\
+             [[check]]\nid = \"c\"\ntest = {test}\n[[cause]]\nid = \"k\"\nwhen = [\"c\"]\n\
+             action = {{ action = \"advise\", text = \"x\" }}\n"
+        );
+        let (_tmp, lib) = library_of(&[("repair-model-child-exit.md", &doc(&block))]);
+        match &lib.entries()[0].state {
+            LoadState::Refused { rule: got, .. } => assert_eq!(*got, rule, "{test}"),
+            LoadState::Loaded => panic!("loaded: {test}"),
+        }
+        assert!(matches!(
+            lib.open(3, "model", "child_exit"),
+            Opened::NoPlaybook
+        ));
+        // the forms v1 keeps parse
+        let kept = block
+            .replace(", within_events = 10", "")
+            .replace("is = \"degraded\"", "is = \"error\"");
+        assert!(grammar::parse_block(&kept).is_ok(), "{kept}");
+    }
+}
+
+#[test]
+fn grammar_spec_example_parses_and_loads() {
+    let block = spec_block();
+    // the fixture holds it byte for byte, in a whole Layer 0 entry
+    let entry = fixture("accept-spec-example.md");
+    assert_eq!(grammar::checks_block(&entry).unwrap(), block);
+
+    let p = grammar::parse_block(&block).unwrap();
+    assert_eq!(p.schema, 1);
+    assert_eq!(p.severity, Severity::Error);
+    assert_eq!(
+        (p.key.layer, p.key.subject, p.key.reason),
+        (3, "model", CHILD_EXIT)
+    );
+    let ids: Vec<&str> = p.checks.iter().map(|c| c.id.as_str()).collect();
+    assert_eq!(ids, ["degraded", "oom"]);
+    assert_eq!(p.check("oom").unwrap().test.leaves(), 2);
+    assert_eq!(p.leaves(), 3);
+    let causes: Vec<(&str, &str)> = p
+        .causes
+        .iter()
+        .map(|c| (c.id.as_str(), c.action.name()))
+        .collect();
+    assert_eq!(
+        causes,
+        [
+            ("held_degraded", "service.restart"),
+            ("out_of_memory", "advise")
+        ]
+    );
+    assert_eq!(
+        p.causes[0].verify.as_ref().map(|v| v.0.as_str()),
+        Some("the model row leaves error and the child stays up")
+    );
+
+    let (_tmp, lib) = library_of(&[("repair-model-child-exit.md", &entry)]);
+    assert_eq!(lib.entries()[0].state, LoadState::Loaded);
+    assert_eq!(lib.entries()[0].schema, Some(1));
+    let h = held(lib.open(3, "model", CHILD_EXIT));
+    assert_eq!(*h.playbook(), p);
+    // a severity left out reads warning (§6.2's layout)
+    let quiet = block.replace("severity = \"error\"\n", "");
+    assert_eq!(
+        grammar::parse_block(&quiet).unwrap().severity,
+        Severity::Warning
+    );
+}
+
+#[test]
+fn grammar_match_renders_the_filename() {
+    let row = vocab::lookup("model", CHILD_EXIT).unwrap();
+    assert_eq!(
+        (row.layer, row.subject, row.reason),
+        (3, "model", CHILD_EXIT)
+    );
+    assert_eq!(grammar::render_filename(row), "repair-model-child-exit.md");
+    assert_eq!(
+        grammar::render_filename(vocab::lookup(ANY, CHILD_EXIT).unwrap()),
+        "repair-any-child-exit.md"
+    );
+    // every row renders its own name, a Layer 0 slug (N01: `^[a-z0-9]+(-[a-z0-9]+)*\.md$`)
+    let mut names = BTreeSet::new();
+    for r in ROWS {
+        let name = grammar::render_filename(r);
+        let stem = name.strip_suffix(".md").unwrap();
+        assert!(
+            stem.split('-').all(|p| !p.is_empty()
+                && p.bytes()
+                    .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit())),
+            "{name}"
+        );
+        assert!(names.insert(name.clone()), "{name} twice");
+    }
+}
+
+#[test]
+fn loader_holds_no_parsed_playbook_after_the_last_incident_closes() {
+    // G19 (5)'s unit half: a playbook is parsed when an incident with its fingerprint opens and
+    // dropped when none is open; the library keeps only its [match] table
+    let model = fixture("accept-spec-example.md");
+    let any = fixture("accept-any-component.md");
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::write(tmp.path().join("repair-model-child-exit.md"), &model).unwrap();
+    std::fs::write(tmp.path().join("repair-any-child-exit.md"), &any).unwrap();
+    let lib = Library::scan(tmp.path(), RELEASE);
+    assert_eq!(lib.held(), 0, "the start scan keeps no parsed playbook");
+
+    // the observer's open incidents, each holding its playbook while it is open
+    let mut open: BTreeMap<(u8, String, String), Held> = BTreeMap::new();
+    for (layer, subject) in [(3, "model"), (6, "deltachat"), (6, "lxmf")] {
+        let h = held(lib.open(layer, subject, CHILD_EXIT));
+        open.insert((layer, subject.to_string(), CHILD_EXIT.to_string()), h);
+    }
+    assert_eq!(lib.held(), 3);
+    // an incident no playbook serves holds nothing
+    assert!(matches!(
+        lib.open(1, "111d", "unclean_exit"),
+        Opened::NoPlaybook
+    ));
+    let keys: Vec<_> = open.keys().cloned().collect();
+    for (i, k) in keys.iter().enumerate() {
+        open.remove(k);
+        assert_eq!(lib.held(), keys.len() - i - 1);
+    }
+    assert_eq!(
+        lib.held(),
+        0,
+        "after the last incident closes no parsed playbook is held"
+    );
+
+    // a re-open parses the file again (no copy was kept)
+    let edited = model.replace(
+        "a smaller model or more free memory is needed.",
+        "a smaller model is needed.",
+    );
+    std::fs::write(tmp.path().join("repair-model-child-exit.md"), edited).unwrap();
+    let h = held(lib.open(3, "model", CHILD_EXIT));
+    match &h.causes[1].action {
+        Action::Advise { text } => assert!(text.as_str().ends_with("a smaller model is needed.")),
+        other => panic!("{other:?}"),
+    }
+    drop(h);
+    assert_eq!(lib.held(), 0);
+}
+
+#[test]
+fn loader_held_table_figure() {
+    // §21 memory, the held [match] table: one loaded playbook per vocabulary row, the most a
+    // release ships; printed for the Pi-floor record
+    let tmp = tempfile::tempdir().unwrap();
+    for r in ROWS {
+        let block = format!(
+            "schema = 1\n[match]\nlayer = {}\nsubject = \"{}\"\nreason = \"{}\"\n[[check]]\n\
+             id = \"open\"\ntest = {{ p = \"incident_count_at_least\", n = 1 }}\n[[cause]]\n\
+             id = \"seen\"\nwhen = [\"open\"]\n\
+             action = {{ action = \"advise\", text = \"Seen.\" }}\n",
+            r.layer, r.subject, r.reason
+        );
+        std::fs::write(tmp.path().join(grammar::render_filename(r)), doc(&block)).unwrap();
+    }
+    let started = std::time::Instant::now();
+    let lib = Library::scan(tmp.path(), RELEASE);
+    let took = started.elapsed();
+    assert_eq!(lib.entries().len(), ROWS.len());
+    assert!(lib.entries().iter().all(|e| e.is_loaded()));
+    for r in ROWS {
+        let subject = if r.subject == ANY { "kiwix" } else { r.subject };
+        assert_eq!(
+            lib.find(r.layer, subject, r.reason).and_then(|e| e.key),
+            Some(r)
+        );
+    }
+    let bytes = lib.table_bytes();
+    eprintln!(
+        "note: the held [match] table for {} playbooks: {bytes} B ({} B per entry), the start \
+         scan {:?} (this build), no parsed playbook held",
+        ROWS.len(),
+        std::mem::size_of::<node111::daemon::heal::playbook::PlaybookEntry>(),
+        took
+    );
+    assert!(bytes < 8 * 1024, "{bytes} B");
+    assert_eq!(lib.held(), 0);
+}
+
+#[test]
+fn kb_every_playbook_loads() {
+    // §6.3: a node111 test loads every file under 0-knowledge/playbooks/ and fails on any
+    // refusal (vacuous until row K3 writes the first playbooks)
+    let dir = repo_root().join("0-knowledge/playbooks");
+    let lib = Library::scan(&dir, RELEASE);
+    let refused: Vec<String> = lib
+        .entries()
+        .iter()
+        .filter_map(|e| match &e.state {
+            LoadState::Refused { reason, .. } => Some(format!("{}.md: {reason}", e.slug)),
+            LoadState::Loaded => None,
+        })
+        .collect();
+    assert!(refused.is_empty(), "refused:\n{}", refused.join("\n"));
+    assert_eq!(lib.skipped(), 0);
+    eprintln!(
+        "note: {} playbook(s) under {} load",
+        lib.entries().len(),
+        dir.display()
+    );
+}
+
+#[test]
+fn grammar_a_refusal_names_its_grammar_and_the_release() {
+    let r = Refusal::new(Some(2), Rule::Schema, "this release reads grammar 1 to 1");
+    assert_eq!(
+        r.reason(RELEASE),
+        "unsupported grammar 2, needs release newer than 2026.11.16 (schema: this release reads \
+         grammar 1 to 1)"
+    );
+    let r = grammar::parse_document("no heading\n").unwrap_err();
+    assert!(r
+        .reason("dev")
+        .starts_with("unsupported grammar ?, needs release newer than this one (checks_block: "));
 }
