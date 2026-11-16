@@ -1046,6 +1046,282 @@ fn blob_round_trips_refcounts_and_sweep() {
     );
 }
 
+// ---------------------------------------------------------------------------
+// Layer 8 §2.7 S3: the orphan sweep beside a set-aside fabric store
+// ---------------------------------------------------------------------------
+
+/// `<from>` in `fabric/` with its `-wal` and `-shm` renamed to `<to>` with
+/// theirs, as a set-aside (Layer 8 §13.2, §13.6 (3), §13.7) or a put-back
+/// moves a store; a file that is not there is skipped.
+fn move_store_files(fabric: &Path, from: &str, to: &str) {
+    for suffix in ["", "-wal", "-shm"] {
+        let src = fabric.join(format!("{from}{suffix}"));
+        if src.exists() {
+            fs::rename(&src, fabric.join(format!("{to}{suffix}"))).unwrap();
+        }
+    }
+}
+
+/// A blob's files with no row, as a crash between the files and the row
+/// leaves them: an orphan for the sweep.
+fn plant_orphan(s: &Store, bytes: &[u8]) -> BlobHash {
+    s.blob_dir().write(bytes).unwrap().hash
+}
+
+/// The temp entries under `fabric/blobs/`.
+fn temp_entries(s: &Store) -> Vec<String> {
+    let names = s.blob_dir().entries().unwrap().into_iter().map(|(n, _)| n);
+    names
+        .filter(|n| n.starts_with(crate::blobs::TMP_PREFIX))
+        .collect()
+}
+
+/// Layer 8 §2.7 S3 (S6; §13.2, §13.6 (3), §13.7): the store in place is an
+/// earlier copy of the store set aside beside it (a revert's copy, an
+/// import's export), and the set-aside store lists blobs this copy does not:
+/// one that arrived later (no row here) and one this copy had pruned and the
+/// later store fetched again (`present = 0` here, its files back on disk).
+/// For each set-aside kind the open's sweep keeps both, their bytes intact,
+/// and still removes the temp entries; the set-aside store, put back in
+/// place, reads both.
+#[test]
+fn a_set_aside_fabric_store_keeps_the_blob_files_its_rows_list() {
+    const BOTH: &[u8] = b"listed by both stores";
+    const ARRIVAL: &[u8] = b"arrived after the copy";
+    const FETCHED: &[u8] = b"pruned, then fetched again";
+    for set_aside in [
+        "store.db.rolled-back-v6",
+        "store.db.damaged-1",
+        "store.db.replaced-2",
+    ] {
+        let t = tempfile::tempdir().unwrap();
+        let fabric = t.path().join("fabric");
+        // The earlier store: a blob both list, and a re-fetchable one it
+        // pruned (the row kept with `present = 0`, the files removed).
+        let (mut s, _) = open(&fabric, 1);
+        s.record_epoch(1).unwrap();
+        let both = s.blob_put_public(BOTH, Class::Kb, false).unwrap();
+        let fetched = s.blob_put_public(FETCHED, Class::Object, true).unwrap();
+        s.conn
+            .execute(
+                "UPDATE blobs SET present = 0 WHERE hash = ?1",
+                [&fetched.0[..]],
+            )
+            .unwrap();
+        s.blob_dir().remove(&fetched).unwrap();
+        s.close(1).unwrap();
+        let earlier = fs::read(fabric.join(DB_FILE)).unwrap();
+        // The later store gains a blob and fetches the pruned one again.
+        let (mut s, _) = open(&fabric, 1);
+        let arrival = s.blob_put_public(ARRIVAL, Class::Object, false).unwrap();
+        assert_eq!(
+            s.blob_put_public(FETCHED, Class::Object, true).unwrap(),
+            fetched
+        );
+        assert!(s.blob(&fetched).unwrap().unwrap().present);
+        s.close(1).unwrap();
+        // It is set aside, the earlier store placed instead, and a crash
+        // mid-write left two temp entries.
+        move_store_files(&fabric, DB_FILE, set_aside);
+        fs::write(fabric.join(DB_FILE), &earlier).unwrap();
+        fs::create_dir(fabric.join(BLOB_DIR).join(".tmp-123")).unwrap();
+        fs::write(fabric.join(BLOB_DIR).join(".tmp-9"), b"partial").unwrap();
+
+        let (s, _) = open(&fabric, 1);
+        assert!(s.blob(&arrival).unwrap().is_none(), "{set_aside}");
+        assert!(!s.blob(&fetched).unwrap().unwrap().present, "{set_aside}");
+        for (h, bytes) in [(both, BOTH), (arrival, ARRIVAL), (fetched, FETCHED)] {
+            assert_eq!(
+                s.blob_dir().read(&h, u64::MAX).unwrap(),
+                bytes,
+                "{set_aside}: the blob file is kept"
+            );
+        }
+        assert!(
+            temp_entries(&s).is_empty(),
+            "{set_aside}: the temp entries still go"
+        );
+        s.close(1).unwrap();
+
+        // Put back in place, the set-aside store reads what it lists.
+        move_store_files(&fabric, DB_FILE, "store.db.replaced-9");
+        move_store_files(&fabric, set_aside, DB_FILE);
+        let (s, _) = open(&fabric, 1);
+        assert_eq!(s.blob_read(&arrival, u64::MAX).unwrap(), ARRIVAL);
+        assert_eq!(s.blob_read(&fetched, u64::MAX).unwrap(), FETCHED);
+        s.close(1).unwrap();
+    }
+}
+
+/// Layer 8 §2.7 S3 (R17): the hold is read from `fabric/` at each open, by
+/// name. A migration copy and one cut short, a set-aside store's `-wal` and
+/// `-shm` alone, near-miss names, the node-state store's set-aside name, the
+/// name inside `blobs/` and one outside `fabric/` hold nothing: the open
+/// sweeps as built. Two set-aside stores hold it until the user deletes the
+/// last (`DELETE /api/v1/storage/set-aside/{file}`, §16.1); the next open then
+/// removes the orphan directory and the files of the row marked
+/// `present = 0`, and keeps the listed blob.
+#[test]
+fn the_sweep_resumes_once_no_set_aside_fabric_store_remains() {
+    let t = tempfile::tempdir().unwrap();
+    let fabric = t.path().join("fabric");
+    let (mut s, _) = open(&fabric, 1);
+    s.record_epoch(1).unwrap();
+    let listed = s.blob_put_public(b"listed", Class::Kb, false).unwrap();
+    for name in [
+        "store.db.pre-v6",
+        "store.db.pre-v7.tmp",
+        "store.db.damaged-1-wal",
+        "store.db.damaged-1-shm",
+        "store.db.damaged-",
+        "store.db.rolled-back-6",
+        "store.db.replaced-1.tmp",
+        "state.db.damaged-1",
+    ] {
+        fs::write(fabric.join(name), b"x").unwrap();
+    }
+    fs::write(fabric.join(BLOB_DIR).join("store.db.replaced-1"), b"x").unwrap();
+    fs::write(t.path().join("store.db.replaced-1"), b"x").unwrap();
+    let orphan = plant_orphan(&s, b"an orphan");
+    s.close(1).unwrap();
+    let (mut s, _) = open(&fabric, 1);
+    assert!(
+        !s.blob_dir().path(&orphan).exists(),
+        "no set-aside fabric store: swept as built"
+    );
+    assert!(
+        fabric.join(BLOB_DIR).join("store.db.replaced-1").exists(),
+        "an unknown name in blobs/ is left alone"
+    );
+
+    // An orphan directory and a row marked `present = 0` whose files a
+    // pruning pass had not removed yet; two set-aside stores.
+    let orphan = plant_orphan(&s, b"another orphan");
+    let pruned = s.blob_put_public(b"pruned", Class::Object, true).unwrap();
+    s.conn
+        .execute(
+            "UPDATE blobs SET present = 0 WHERE hash = ?1",
+            [&pruned.0[..]],
+        )
+        .unwrap();
+    fs::write(fabric.join("store.db.rolled-back-v6"), b"x").unwrap();
+    fs::write(fabric.join("store.db.damaged-1"), b"x").unwrap();
+    s.close(1).unwrap();
+    let (s, _) = open(&fabric, 1);
+    assert!(s.blob_dir().exists(&orphan) && s.blob_dir().exists(&pruned));
+    s.close(1).unwrap();
+    fs::remove_file(fabric.join("store.db.rolled-back-v6")).unwrap();
+    let (s, _) = open(&fabric, 1);
+    assert!(
+        s.blob_dir().exists(&orphan) && s.blob_dir().exists(&pruned),
+        "one set-aside store remains: held"
+    );
+    s.close(1).unwrap();
+    // The last one deleted; its `-wal` and `-shm` stay, and alone they are
+    // not a store.
+    fs::remove_file(fabric.join("store.db.damaged-1")).unwrap();
+    let (s, _) = open(&fabric, 1);
+    assert!(!s.blob_dir().path(&orphan).exists(), "swept");
+    assert!(!s.blob_dir().path(&pruned).exists(), "swept");
+    assert_eq!(s.blob_read(&listed, u64::MAX).unwrap(), b"listed");
+    assert!(fabric.join("store.db.damaged-1-wal").exists());
+    s.close(1).unwrap();
+}
+
+/// Layer 8 §13.7 and §2.7 S3: a damaged fabric store set aside after a crash,
+/// and an empty store created in its place ("Start an empty store", the next
+/// start): every blob file is an orphan to the new store, and all are kept,
+/// an own private attachment's included, while the damaged file stays on the
+/// node. Once it is deleted with its `-wal` and `-shm`, the next open sweeps
+/// them.
+#[test]
+fn a_store_started_empty_beside_a_damaged_one_keeps_its_blob_files() {
+    let t = tempfile::tempdir().unwrap();
+    let fabric = t.path().join("fabric");
+    let (mut s, _) = open(&fabric, 1);
+    s.record_epoch(1).unwrap();
+    let public = s
+        .blob_put_public(b"the damaged store's", Class::Object, false)
+        .unwrap();
+    let (private, _) = s
+        .blob_put_private(b"an own attachment", Class::Object)
+        .unwrap();
+    drop(s); // crash: no clean record
+    move_store_files(&fabric, DB_FILE, "store.db.damaged-1");
+
+    let (s, d) = open(&fabric, 1);
+    assert!(
+        matches!(d, EpochDecision::Mint(r) if r.unclean),
+        "a new store"
+    );
+    for h in [public, private] {
+        assert!(s.blob(&h).unwrap().is_none());
+        assert!(s.blob_dir().exists(&h), "kept beside the damaged store");
+    }
+    drop(s);
+    for suffix in ["", "-wal", "-shm"] {
+        let file = fabric.join(format!("store.db.damaged-1{suffix}"));
+        if file.exists() {
+            fs::remove_file(&file).unwrap();
+        }
+    }
+    let (s, _) = open(&fabric, 1);
+    for h in [public, private] {
+        assert!(!s.blob_dir().path(&h).exists(), "swept");
+    }
+}
+
+/// Layer 8 §2.7 S3 (`8-storage/TASKS.md` M3, "never adds"): a sweep (one per
+/// open, [`Store::open`]) reads `fabric/` at most once, and not at all when no
+/// blob file would go. Its set-aside check is counted: no call beside listed
+/// blobs, an unknown name and temp entries only; exactly one, with the fabric
+/// directory, beside four orphan directories and the files of a row marked
+/// `present = 0`, whether it answers held (all five kept) or not (all five
+/// removed); the temp entries go and the listed blob stays either way.
+#[test]
+fn the_sweep_reads_the_fabric_directory_at_most_once() {
+    let (t, mut s) = ready();
+    let fabric = t.path();
+    let blobs = fabric.join(BLOB_DIR);
+    let listed = s.blob_put_public(b"listed", Class::Kb, false).unwrap();
+    fs::create_dir(blobs.join(".tmp-1")).unwrap();
+    fs::write(blobs.join("unknown"), b"x").unwrap();
+    let mut reads = Vec::new();
+    s.sweep_blob_orphans_with(|dir| {
+        reads.push(dir.to_path_buf());
+        true
+    })
+    .unwrap();
+    assert!(reads.is_empty(), "no blob file would go: no read");
+    assert!(temp_entries(&s).is_empty());
+    assert!(blobs.join("unknown").exists(), "an unknown name stays");
+
+    let mut swept: Vec<BlobHash> = (0..4u8).map(|i| plant_orphan(&s, &[i; 9])).collect();
+    let pruned = s.blob_put_public(b"pruned", Class::Object, true).unwrap();
+    s.conn
+        .execute(
+            "UPDATE blobs SET present = 0 WHERE hash = ?1",
+            [&pruned.0[..]],
+        )
+        .unwrap();
+    swept.push(pruned);
+    for held in [true, false] {
+        fs::create_dir(blobs.join(".tmp-2")).unwrap();
+        let mut reads = Vec::new();
+        s.sweep_blob_orphans_with(|dir| {
+            reads.push(dir.to_path_buf());
+            held
+        })
+        .unwrap();
+        assert_eq!(reads, [fabric], "held: {held}: one read");
+        assert!(temp_entries(&s).is_empty(), "held: {held}");
+        for h in &swept {
+            assert_eq!(s.blob_dir().exists(h), held, "held: {held}");
+        }
+        assert_eq!(s.blob_read(&listed, u64::MAX).unwrap(), b"listed");
+    }
+}
+
 #[test]
 fn a_full_class_never_refuses_another_class() {
     let (_t, mut s) = ready();

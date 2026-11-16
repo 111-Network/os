@@ -6,6 +6,10 @@
 //! deleted (or marked `present = 0`) **before** their files are removed.
 //! A crash therefore leaves at most an orphan directory, which
 //! [`Store::open`] sweeps — never a row that points at a missing file.
+//! While `fabric/` holds a set-aside fabric store (Layer 8 §2.7 S3: a
+//! `store.db.rolled-back-v<N>`, `.damaged-<n>` or `.replaced-<n>`), whose rows
+//! may still list blob files the store in place does not, the sweep removes
+//! temp entries only (`Store::sweep_blob_orphans`).
 //! New bulk passes §10.4 admission first (`StoreFull` when refused).
 //!
 //! Keys: a private object's `object_key` is generated here
@@ -15,6 +19,10 @@
 //! (§10.3, §11); its row has `public = 0` and no `object_key`, and
 //! [`Store::blob_read_private`] answers [`StoreError::NoObjectKey`].
 
+use std::ffi::OsStr;
+use std::fs;
+use std::path::Path;
+
 use rusqlite::{params, OptionalExtension};
 use zeroize::Zeroizing;
 
@@ -23,7 +31,7 @@ use crate::blobs::{
 };
 
 use super::rows::Class;
-use super::{id32, next_local_seq, to_i64, to_u64, Durability, Result, Store, StoreError};
+use super::{id32, next_local_seq, to_i64, to_u64, Durability, Result, Store, StoreError, DB_FILE};
 
 /// A `blobs` row (the object key is never part of it; see
 /// [`Store::blob_object_key`]).
@@ -342,13 +350,42 @@ impl Store {
 
     /// At open: remove temp directories, directories without a row, and the
     /// files of rows marked `present = 0`. Unknown names are left alone.
+    ///
+    /// Layer 8 §2.7 S3 (§13.2, §13.6 (3), §13.7): while the fabric directory
+    /// holds a set-aside fabric store ([`is_set_aside_store`]), whose rows may
+    /// still list blob files this store does not, the sweep removes temp
+    /// entries only, never a blob file. Whether one is there is read by one
+    /// `readdir` of the fabric directory, made only once the sweep meets a
+    /// blob file it would remove (an open with no orphan reads nothing more
+    /// than before); once none remains, the next open sweeps as built.
     pub(crate) fn sweep_blob_orphans(&mut self) -> Result<()> {
+        self.sweep_blob_orphans_with(set_aside_store_present)
+    }
+
+    /// [`Store::sweep_blob_orphans`] with the set-aside check as a closure
+    /// over the fabric directory: [`set_aside_store_present`] at open, a
+    /// counting one in tests. It is `FnOnce`, so a sweep reads `fabric/` at
+    /// most once (Layer 8 §2.7 S3; `8-storage/TASKS.md` M3: at most one
+    /// `readdir` of `fabric/` per open): when the first blob file would go,
+    /// its answer then holding for the rest of the sweep, and never when none
+    /// would go.
+    pub(super) fn sweep_blob_orphans_with(
+        &mut self,
+        set_aside_present: impl FnOnce(&Path) -> bool,
+    ) -> Result<()> {
+        // The check until a blob file would go; then its answer, `held`.
+        let mut check = Some(set_aside_present);
+        let mut held = false;
         for (name, parsed) in self.blobs.entries()? {
             if name.starts_with(TMP_PREFIX) {
                 self.blobs.remove_entry(&name)?;
                 continue;
             }
             let Some(hash) = parsed else { continue };
+            if held {
+                // A set-aside store is there: no blob file goes this open.
+                continue;
+            }
             let present: Option<bool> = self
                 .conn
                 .query_row(
@@ -357,10 +394,152 @@ impl Store {
                     |r| r.get(0),
                 )
                 .optional()?;
-            if present != Some(true) {
+            if present == Some(true) {
+                continue;
+            }
+            if let Some(read) = check.take() {
+                held = read(&self.dir);
+            }
+            if !held {
                 self.blobs.remove(&hash)?;
             }
         }
         Ok(())
+    }
+}
+
+/// The set-aside fabric stores (Layer 8 §2.7 S3), each named [`DB_FILE`], a
+/// dot, one of these kinds and a decimal number: `rolled-back-v<N>` (§13.6
+/// (3): the store a probation revert moved aside, N the schema version of the
+/// release reverted), `damaged-<n>` (§13.7: a store that failed its
+/// integrity checks) and `replaced-<n>` (§13.2: the store an import
+/// replaced).
+const SET_ASIDE_KINDS: [&str; 3] = ["rolled-back-v", "damaged-", "replaced-"];
+
+/// Whether `name`, an entry of the fabric directory, is a set-aside fabric
+/// store (Layer 8 §2.7 S3): `store.db.rolled-back-v<N>`,
+/// `store.db.damaged-<n>` or `store.db.replaced-<n>`, the number one or more
+/// ASCII digits with nothing after it. Its `-wal` and `-shm` alone are not a
+/// store, nor is a migration copy (`store.db.pre-v<N>`, §13.6 (1)), nor the
+/// node-state store's files (they live in `node/`). The name alone decides,
+/// whatever the entry is.
+fn is_set_aside_store(name: &OsStr) -> bool {
+    let Some(rest) = name
+        .to_str()
+        .and_then(|n| n.strip_prefix(DB_FILE))
+        .and_then(|n| n.strip_prefix('.'))
+    else {
+        return false;
+    };
+    SET_ASIDE_KINDS.iter().any(|kind| {
+        rest.strip_prefix(kind)
+            .is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
+    })
+}
+
+/// One `readdir` of the fabric directory `dir` (Layer 8 §2.7 S3): whether it
+/// holds a set-aside fabric store. A directory or an entry that cannot be
+/// read counts as holding one, so the sweep then removes no blob file (never
+/// one a set-aside store may still list) and the next open reads again.
+fn set_aside_store_present(dir: &Path) -> bool {
+    match fs::read_dir(dir) {
+        Ok(mut entries) => entries.any(|e| e.map_or(true, |e| is_set_aside_store(&e.file_name()))),
+        Err(_) => true,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    //! The set-aside names and the one `readdir` (Layer 8 §2.7 S3); the sweep
+    //! itself is tested in `store/tests.rs`, through [`Store::open`] and, for
+    //! its reads of `fabric/`, through [`Store::sweep_blob_orphans_with`].
+
+    use std::os::unix::ffi::OsStrExt;
+
+    use super::*;
+
+    #[test]
+    fn a_set_aside_fabric_store_is_store_db_a_kind_and_a_number() {
+        for name in [
+            "store.db.rolled-back-v6",
+            "store.db.rolled-back-v10",
+            "store.db.damaged-1",
+            "store.db.damaged-0",
+            "store.db.replaced-2",
+            "store.db.replaced-007",
+            "store.db.replaced-99999999999999999999999",
+        ] {
+            assert!(is_set_aside_store(OsStr::new(name)), "{name}");
+        }
+        for name in [
+            // The store in place, its WAL and index, and a set-aside store's.
+            "store.db",
+            "store.db-wal",
+            "store.db-shm",
+            "store.db.rolled-back-v6-wal",
+            "store.db.rolled-back-v6-shm",
+            "store.db.damaged-1-wal",
+            "store.db.replaced-2-shm",
+            // The migration copy and a copy cut short (§13.6 (1)).
+            "store.db.pre-v6",
+            "store.db.pre-v6.tmp",
+            // No number, or something else after the kind or the number.
+            "store.db.rolled-back-v",
+            "store.db.rolled-back-6",
+            "store.db.damaged-",
+            "store.db.damaged-x",
+            "store.db.damaged-1x",
+            "store.db.damaged--1",
+            "store.db.damaged-+1",
+            "store.db.damaged-1.tmp",
+            "store.db.damaged-1 ",
+            "store.db.damaged-١",
+            // Another file, another case, another separator.
+            " store.db.damaged-1",
+            "store.dbx.damaged-1",
+            "store.db..damaged-1",
+            "store.dbdamaged-1",
+            "store.db-damaged-1",
+            "store.db.Damaged-1",
+            "STORE.DB.DAMAGED-1",
+            "state.db.damaged-1",
+            "state.db.rolled-back-v1",
+            "blobs",
+            "display-times.json",
+            ".tmp-1",
+            "",
+        ] {
+            assert!(!is_set_aside_store(OsStr::new(name)), "{name:?}");
+        }
+        // A name that is not UTF-8 is not one.
+        assert!(!is_set_aside_store(OsStr::from_bytes(
+            b"store.db.damaged-1\xff"
+        )));
+    }
+
+    #[test]
+    fn one_readdir_finds_a_set_aside_store_and_an_unreadable_directory_holds() {
+        let t = tempfile::tempdir().unwrap();
+        let fabric = t.path();
+        assert!(!set_aside_store_present(fabric), "an empty directory");
+        for name in ["store.db", "store.db-wal", "store.db.pre-v6"] {
+            fs::write(fabric.join(name), b"x").unwrap();
+        }
+        fs::create_dir(fabric.join("blobs")).unwrap();
+        fs::write(fabric.join("blobs").join("store.db.damaged-1"), b"x").unwrap();
+        // A set-aside store's WAL and index alone are not a store.
+        fs::write(fabric.join("store.db.damaged-1-wal"), b"x").unwrap();
+        fs::write(fabric.join("store.db.damaged-1-shm"), b"x").unwrap();
+        assert!(!set_aside_store_present(fabric));
+        fs::write(fabric.join("store.db.damaged-1"), b"x").unwrap();
+        assert!(set_aside_store_present(fabric));
+        fs::remove_file(fabric.join("store.db.damaged-1")).unwrap();
+        assert!(!set_aside_store_present(fabric));
+        // Any kind of entry under the name holds it.
+        fs::create_dir(fabric.join("store.db.rolled-back-v6")).unwrap();
+        assert!(set_aside_store_present(fabric));
+        // A fabric directory that cannot be read counts as holding one.
+        assert!(set_aside_store_present(&fabric.join("absent")));
+        assert!(set_aside_store_present(&fabric.join("store.db")));
     }
 }
