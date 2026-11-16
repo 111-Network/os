@@ -4506,7 +4506,8 @@ fn per_item_statements_cost_the_same_at_any_size() {
 /// with a fabric, and admission while the store is full or a quota hit
 /// clears) reads no candidate list and writes nothing while the persisted
 /// outcome is unchanged; it writes the outcome when it changes, as every
-/// pass did.
+/// pass did. New disk figures are not part of that outcome (Layer 8 §13.4
+/// (2)).
 #[test]
 fn a_pass_at_rest_reads_no_candidate_and_writes_nothing() {
     for (fwd, member) in [(6, 4), (5_000, 2_000)] {
@@ -4551,17 +4552,16 @@ fn a_pass_at_rest_reads_no_candidate_and_writes_nothing() {
             "a pass at rest over {} rows: {per_pass:?} per pass (debug build)",
             fwd + member + 1
         );
-        // New disk figures change the outcome: written, as before.
+        // New disk figures do not change the persisted outcome (Layer 8
+        // §13.4 (2)): nothing is written; the pass keeps them in memory.
         let disk = DiskSpace {
             free: 1 << 40,
             total: 1 << 41,
         };
         assert!(s.prune(disk).unwrap().pruned.is_empty());
-        assert!(s.conn.total_changes() > changes);
-        assert_eq!(
-            get_u64(&s.conn, "capacity.disk_free").unwrap(),
-            Some(1 << 40)
-        );
+        assert_eq!(s.conn.total_changes(), changes, "new disk figures");
+        assert_eq!(s.last_disk, Some(disk));
+        assert_eq!(get_u64(&s.conn, "capacity.disk_free").unwrap(), None);
         // A store_full left by the last pass is cleared by a pass at rest,
         // in memory and on disk.
         let r = s
@@ -4580,6 +4580,257 @@ fn a_pass_at_rest_reads_no_candidate_and_writes_nothing() {
         assert!(!r.store_full && !s.store_full() && r.pruned.is_empty());
         assert_eq!(get_i64(&s.conn, "capacity.store_full").unwrap(), Some(0));
         assert_totals_exact(&s);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Layer 8 §13.4: the disk figures are not persisted
+// ---------------------------------------------------------------------------
+
+/// The keys an earlier build persisted the disk figures as (Layer 8 §13.4
+/// (2)), spelled out here rather than taken from `prune.rs`.
+const OLD_DISK_KEYS: [&str; 2] = ["capacity.disk_free", "capacity.disk_total"];
+
+/// The WAL beside the fabric store in `dir`.
+fn wal_of(dir: &Path) -> PathBuf {
+    dir.join(format!("{DB_FILE}-wal"))
+}
+
+/// A checkpoint that copies every frame back and cuts the WAL to 0 bytes,
+/// so the frames that follow are exactly the commits made since.
+fn truncate_wal(s: &Store, wal: &Path) {
+    let busy: i64 = s
+        .conn
+        .query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(busy, 0, "the checkpoint completed");
+    assert_eq!(len_of(wal), 0, "the WAL is empty");
+}
+
+/// The commits in the WAL since it was last empty: the frames whose header
+/// carries the database size, which SQLite writes on the last frame of a
+/// transaction only (SQLCipher encrypts the page a frame holds, not the
+/// 24-byte frame header).
+fn wal_commits(wal: &Path) -> usize {
+    let bytes = fs::read(wal).unwrap_or_default();
+    if bytes.is_empty() {
+        return 0;
+    }
+    assert!(bytes.len() >= 32, "a WAL header");
+    let page = u32::from_be_bytes(bytes[8..12].try_into().unwrap()) as usize;
+    let frames = &bytes[32..];
+    assert_eq!(frames.len() % (24 + page), 0, "whole frames of {page} B");
+    frames
+        .chunks(24 + page)
+        .filter(|f| f[4..8] != [0; 4])
+        .count()
+}
+
+/// Whether `settings` holds a row under `key`, whatever its value.
+fn setting_present(s: &Store, key: &str) -> bool {
+    s.conn
+        .query_row("SELECT count(*) FROM settings WHERE key = ?1", [key], |r| {
+            r.get::<_, i64>(0)
+        })
+        .unwrap()
+        == 1
+}
+
+/// Layer 8 §13.4 (2)-(3), §1 rule 3, §22 C2: free space moves with any
+/// write on the filesystem, so the disk figures are not part of the
+/// persisted outcome. Three passes at rest whose figures differ each time
+/// (another program wrote, then freed more than it wrote, then `statvfs`
+/// gave none) commit nothing: `total_changes` and the WAL's size are
+/// unchanged, the WAL a checkpoint emptied stays empty, and no disk key is
+/// written. Each pass's figures still reach admission, in memory only.
+#[test]
+fn passes_whose_free_space_moves_commit_nothing() {
+    let (t, mut s) = ready();
+    accepted(s.custody_put(&PEER, &[1; 3000]).unwrap());
+    s.blob_put_public(b"a kb item", Class::Kb, false).unwrap();
+    let gib = 1u64 << 30;
+    // The first pass writes the outcome a fresh store has never had.
+    let r = s
+        .prune(DiskSpace {
+            free: 10 * gib,
+            total: 32 * gib,
+        })
+        .unwrap();
+    assert!(!r.triggered && r.pruned.is_empty() && !r.store_full);
+    let wal = wal_of(t.path());
+    truncate_wal(&s, &wal);
+    let changes = s.conn.total_changes();
+    for disk in [
+        DiskSpace {
+            free: 10 * gib - 4096,
+            total: 32 * gib,
+        },
+        DiskSpace {
+            free: 10 * gib + (64 << 20),
+            total: 32 * gib,
+        },
+        DiskSpace::UNKNOWN,
+    ] {
+        let r = s.prune(disk).unwrap();
+        assert!(
+            !r.triggered && r.pruned.is_empty() && !r.store_full,
+            "{disk:?}"
+        );
+        assert_eq!(s.conn.total_changes(), changes, "{disk:?}: no row written");
+        assert_eq!(len_of(&wal), 0, "{disk:?}: no frame in the WAL");
+        assert_eq!(s.last_disk, Some(disk), "{disk:?}: kept for admission");
+    }
+    for key in OLD_DISK_KEYS {
+        assert!(!setting_present(&s, key), "{key} never written");
+    }
+    assert_eq!(get_i64(&s.conn, "capacity.store_full").unwrap(), Some(0));
+    assert_eq!(get_u64(&s.conn, "capacity.full_classes").unwrap(), Some(0));
+}
+
+/// Layer 8 §13.4 (1) (built by Layer 7 row M1c, kept): the record a pass at
+/// rest compares is `store_full` and the class mask. A class over its quota
+/// with nothing a step may take is marked full by a pruning pass, which
+/// writes the mask in its own transaction; once the quota is lifted, the
+/// first pass at rest finds the stored mask changed and commits once, the
+/// two keys in one transaction; the passes after it, free space still
+/// moving, commit nothing, and a reopen reads the cleared mask.
+#[test]
+fn a_changed_mask_commits_once() {
+    let (t, mut s) = ready();
+    // A KB item no step may take: neither re-fetchable nor superseded.
+    s.blob_put_public(&[7; 2000], Class::Kb, false).unwrap();
+    let disk = |free: u64| DiskSpace {
+        free,
+        total: 1 << 40,
+    };
+    assert!(s.prune(disk(1 << 39)).unwrap().full_classes.is_empty());
+    let wal = wal_of(t.path());
+
+    s.set_quota(Class::Kb, Some(100)).unwrap();
+    truncate_wal(&s, &wal);
+    let r = s.prune(disk((1 << 39) - 4096)).unwrap();
+    assert_eq!(r.full_classes, vec![Class::Kb]);
+    assert!(r.pruned.is_empty() && !r.store_full);
+    assert_eq!(
+        wal_commits(&wal),
+        1,
+        "the pruning pass: its own transaction"
+    );
+    assert_eq!(
+        get_u64(&s.conn, "capacity.full_classes").unwrap(),
+        Some(1 << (Class::Kb as u8))
+    );
+
+    s.set_quota(Class::Kb, None).unwrap();
+    truncate_wal(&s, &wal);
+    let changes = s.conn.total_changes();
+    let r = s.prune(disk((1 << 39) + 8192)).unwrap();
+    assert!(r.full_classes.is_empty() && !r.triggered && r.pruned.is_empty());
+    assert_eq!(
+        s.conn.total_changes(),
+        changes + 2,
+        "the record's two keys, written once"
+    );
+    assert_eq!(wal_commits(&wal), 1, "one commit");
+    assert_eq!(get_u64(&s.conn, "capacity.full_classes").unwrap(), Some(0));
+    let after = len_of(&wal);
+    for free in [1 << 38, (1 << 39) + 1, 3 << 38] {
+        assert!(s.prune(disk(free)).unwrap().full_classes.is_empty());
+        assert_eq!(s.conn.total_changes(), changes + 2, "free {free}");
+        assert_eq!((len_of(&wal), wal_commits(&wal)), (after, 1), "free {free}");
+    }
+    for key in OLD_DISK_KEYS {
+        assert!(!setting_present(&s, key), "{key} never written");
+    }
+    s.close(1).unwrap();
+    let (s, _) = open(t.path(), 1);
+    assert!(s.full_classes().is_empty() && !s.store_full());
+}
+
+/// Layer 8 §13.4 (2), §22 C2: the keys an earlier build persisted the disk
+/// figures as are deleted at the first open of this build, in one
+/// transaction, and never written again: a later open has nothing to
+/// delete (two rows changed and one commit fewer than the first), and no
+/// pass writes them. The figures are not restored: `last_disk` stays unset
+/// until the first pass fills it (admission reads [`DiskSpace::UNKNOWN`]
+/// until then), while `store_full` and the mask are restored as before. One
+/// key alone, or a value that is not an integer, goes the same way, and the
+/// open still succeeds.
+#[test]
+fn the_disk_keys_are_gone_after_the_first_open() {
+    // A store as an earlier build left it: full, the KB class full, and the
+    // figures of a disk under the floor.
+    let (t, s) = ready();
+    let kb = 1i64 << (Class::Kb as u8);
+    for (key, value) in [
+        ("capacity.store_full", 1),
+        ("capacity.full_classes", kb),
+        ("capacity.disk_free", 5),
+        ("capacity.disk_total", 1000),
+    ] {
+        set_i64(&s.conn, key, value).unwrap();
+    }
+    s.close(1).unwrap();
+    let wal = wal_of(t.path());
+
+    let (s, d) = open(t.path(), 1);
+    assert_eq!(d, EpochDecision::Keep { epoch: 1 });
+    let (first, first_commits) = (s.conn.total_changes(), wal_commits(&wal));
+    for key in OLD_DISK_KEYS {
+        assert!(!setting_present(&s, key), "{key} deleted at the first open");
+    }
+    assert_eq!(s.last_disk, None, "the figures are not restored");
+    assert!(s.store_full());
+    assert_eq!(s.full_classes(), &[Class::Kb]);
+    s.close(1).unwrap();
+
+    let (mut s, _) = open(t.path(), 1);
+    assert_eq!(
+        (first, first_commits),
+        (s.conn.total_changes() + 2, wal_commits(&wal) + 1),
+        "the two keys deleted once, in one transaction, at the first open only"
+    );
+    assert_eq!(s.last_disk, None);
+    assert!(s.store_full() && s.full_classes() == [Class::Kb]);
+    // The first pass fills the figures, in memory; a disk with room and no
+    // quota clear the outcome, and neither key is written.
+    let disk = DiskSpace {
+        free: 1 << 39,
+        total: 1 << 40,
+    };
+    let r = s.prune(disk).unwrap();
+    assert!(!r.store_full && r.full_classes.is_empty());
+    assert_eq!(s.last_disk, Some(disk));
+    for key in OLD_DISK_KEYS {
+        assert!(!setting_present(&s, key), "{key} never written");
+    }
+    s.close(1).unwrap();
+    let (s, _) = open(t.path(), 1);
+    assert!(!s.store_full() && s.full_classes().is_empty());
+    assert_eq!(s.last_disk, None);
+    s.close(1).unwrap();
+
+    // One key alone, whatever its value: deleted, and the open succeeds.
+    for (key, value) in [
+        ("capacity.disk_free", "x'2a'"),
+        ("capacity.disk_total", "'not a figure'"),
+        ("capacity.disk_total", "-1"),
+        ("capacity.disk_free", "NULL"),
+    ] {
+        let (t, s) = ready();
+        s.conn
+            .execute(
+                &format!("INSERT INTO settings (key, value) VALUES (?1, {value})"),
+                [key],
+            )
+            .unwrap();
+        s.close(1).unwrap();
+        let (s, _) = open(t.path(), 1);
+        for k in OLD_DISK_KEYS {
+            assert!(!setting_present(&s, k), "{key} = {value}: {k}");
+        }
+        assert_eq!(s.last_disk, None, "{key} = {value}");
+        s.close(1).unwrap();
     }
 }
 

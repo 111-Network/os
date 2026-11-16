@@ -107,11 +107,20 @@
 //! Pending message requests have a count quota ([`Store::request_quota`],
 //! default [`DEFAULT_REQUEST_QUOTA`]).
 //!
-//! **Persistence:** `store_full`, the classes over quota and the last disk
-//! figures are persisted in `settings` by every pass (a pass at rest writes
-//! them only when they differ from what is stored) and read back at open,
-//! so a full store stays full across a restart until a pass with room
-//! clears it.
+//! **Persistence:** `store_full` and the classes over quota (a mask) are
+//! persisted in `settings` by every pass (a pass at rest writes them only
+//! when they differ from what is stored) and read back at open, so a full
+//! store stays full across a restart until a pass with room clears it.
+//! The disk figures are not persisted (Layer 8 §13.4 (2), §1 rule 3, §22 C2
+//! and D4): free space moves with any write on the filesystem, a log line
+//! or another program's, so a record holding them was committed again at
+//! almost every pass of an idle node. A pass takes them from its caller and
+//! keeps the last in memory for admission ([`Store::admit`]); until the
+//! first pass after an open, admission reads [`DiskSpace::UNKNOWN`] (the
+//! floor never triggers), and node111 runs that pass on its housekeeping
+//! interval's first tick. The keys an earlier build persisted them as,
+//! `capacity.disk_free` and `capacity.disk_total`, are deleted at the first
+//! open of this build ([`Store::load_capacity`]) and never written again.
 
 use std::cmp::Ordering;
 use std::collections::BinaryHeap;
@@ -140,8 +149,10 @@ const K_EXPORT_OFFERED: &str = "export_offered";
 const K_REQUEST_QUOTA: &str = "quota.requests";
 const K_STORE_FULL: &str = "capacity.store_full";
 const K_FULL_CLASSES: &str = "capacity.full_classes";
-const K_DISK_FREE: &str = "capacity.disk_free";
-const K_DISK_TOTAL: &str = "capacity.disk_total";
+/// The keys an earlier build persisted the last disk figures as (free,
+/// total). Layer 8 §13.4 (2): deleted at the first open of this build
+/// ([`Store::load_capacity`]), never written.
+const DISK_KEYS: [&str; 2] = ["capacity.disk_free", "capacity.disk_total"];
 
 fn quota_key(c: Class) -> String {
     format!("quota.{}", c.name())
@@ -1174,8 +1185,10 @@ impl Store {
             {
                 clamp_unread(tx)?;
             }
-            // Persist the outcome: a full store is still full after a restart.
-            save_capacity(tx, store_full, &full_classes, disk)
+            // Persist the outcome in the pass's own transaction: a full store
+            // is still full after a restart. `store_full` and the mask only:
+            // the disk figures are never persisted (Layer 8 §13.4 (2)).
+            save_capacity(tx, store_full, &full_classes)
         })?;
 
         // Blob files after the rows are committed.
@@ -1184,7 +1197,12 @@ impl Store {
                 self.blobs.remove(&h)?;
             }
         }
-        self.conn.execute_batch("PRAGMA incremental_vacuum;")?;
+        // The removed rows' pages are on the freelist (`auto_vacuum =
+        // INCREMENTAL`): vacuumed when it holds some, as at rest (Layer 8
+        // §13.4 (3)); with none there is nothing to free.
+        if super::pragma_int(&self.conn, "freelist_count")? > 0 {
+            self.conn.execute_batch("PRAGMA incremental_vacuum;")?;
+        }
         let live_after = self.live_bytes()?;
         self.store_full = store_full;
         self.full_classes = full_classes.clone();
@@ -1206,17 +1224,19 @@ impl Store {
     /// A pass at rest ([`Store::prune_inner`]): nothing is over, so the
     /// report is the one a full pass gives (not triggered, nothing pruned,
     /// not full, no class full, the item fits) and the persisted outcome is
-    /// `store_full = 0`, no full class and these disk figures. Those
-    /// settings are written only when they differ from what is stored (a
-    /// change from the last pass: a store leaving `store_full`, new disk
-    /// figures), and the freelist is vacuumed only when it holds pages, so
-    /// a store at rest with the same figures reads a few settings by
-    /// primary key and the live-bytes inputs and writes nothing. `live_after`
-    /// is measured again whenever either ran, as a full pass measures it.
+    /// `store_full = 0` and no full class. Those two settings are written
+    /// only when they differ from what is stored (a change from the last
+    /// pass: a store leaving `store_full`, a class leaving full), and the
+    /// freelist is vacuumed only when it holds pages, so a store at rest
+    /// reads a few settings by primary key and the live-bytes inputs and
+    /// writes nothing. The disk figures are kept in memory only (Layer 8
+    /// §13.4 (2)): a pass whose free space moved commits nothing either.
+    /// `live_after` is measured again whenever a write or the vacuum ran,
+    /// as a full pass measures it.
     fn rest_pass(&mut self, disk: DiskSpace, live_before: u64) -> Result<(PruneReport, bool)> {
-        let wrote = !capacity_saved(&self.conn, false, &[], disk)?;
+        let wrote = !capacity_saved(&self.conn, false, &[])?;
         if wrote {
-            self.with_tx(Durability::Normal, |tx| save_capacity(tx, false, &[], disk))?;
+            self.with_tx(Durability::Normal, |tx| save_capacity(tx, false, &[]))?;
         }
         let vacuumed = super::pragma_int(&self.conn, "freelist_count")? > 0;
         if vacuumed {
@@ -1275,7 +1295,18 @@ impl Store {
         Ok(fits)
     }
 
-    /// At open: the capacity state the last pass persisted.
+    /// At open: the capacity outcome the last pass persisted, `store_full`
+    /// and the mask of full classes.
+    ///
+    /// The disk figures are not restored (Layer 8 §13.4 (2), §22 C2):
+    /// `last_disk` stays unset, as [`Store::open`] makes it, until the first
+    /// pass fills it (node111 runs one on its housekeeping interval's first
+    /// tick), and admission reads [`DiskSpace::UNKNOWN`] until then. The keys
+    /// an earlier build persisted them as ([`DISK_KEYS`]) are deleted here in
+    /// one transaction when either is present, whatever its value: at the
+    /// first open of this build, after which no pass writes them; an open of
+    /// a store without them reads the two keys by primary key and writes
+    /// nothing more.
     pub(crate) fn load_capacity(&mut self) -> Result<()> {
         self.store_full = super::get_i64(&self.conn, K_STORE_FULL)? == Some(1);
         let mask = get_u64(&self.conn, K_FULL_CLASSES)?.unwrap_or(0);
@@ -1283,13 +1314,14 @@ impl Store {
             .into_iter()
             .filter(|c| mask & (1u64 << (*c as u8)) != 0)
             .collect();
-        self.last_disk = match (
-            get_u64(&self.conn, K_DISK_FREE)?,
-            get_u64(&self.conn, K_DISK_TOTAL)?,
-        ) {
-            (Some(free), Some(total)) => Some(DiskSpace { free, total }),
-            _ => None,
-        };
+        if disk_keys_present(&self.conn)? {
+            self.with_tx(Durability::Normal, |tx| {
+                for key in DISK_KEYS {
+                    super::del(tx, key)?;
+                }
+                Ok(())
+            })?;
+        }
         Ok(())
     }
 }
@@ -1307,73 +1339,59 @@ fn clamp_unread(c: &Connection) -> Result<()> {
     Ok(())
 }
 
-/// The settings one pass's capacity outcome is persisted as: `store_full`,
-/// the mask of full classes and the disk figures (`None`: the key absent,
-/// as for [`DiskSpace::UNKNOWN`]; saturated, since settings hold i64 and a
-/// figure above `i64::MAX` is "plenty").
-fn capacity_record(
-    store_full: bool,
-    full_classes: &[Class],
-    disk: DiskSpace,
-) -> [(&'static str, Option<i64>); 4] {
+/// The settings one pass's capacity outcome is persisted as: `store_full`
+/// and the mask of full classes (bit `class as u8`). The disk figures are
+/// not part of it (Layer 8 §13.4 (2)), so the free space a pass is given
+/// never decides whether it writes.
+fn capacity_record(store_full: bool, full_classes: &[Class]) -> [(&'static str, i64); 2] {
     let mask = full_classes
         .iter()
         .fold(0i64, |m, cl| m | (1i64 << (*cl as u8)));
-    let (free, total) = if disk == DiskSpace::UNKNOWN {
-        (None, None)
-    } else {
-        let sat = |v: u64| i64::try_from(v).unwrap_or(i64::MAX);
-        (Some(sat(disk.free)), Some(sat(disk.total)))
-    };
     [
-        (K_STORE_FULL, Some(i64::from(store_full))),
-        (K_FULL_CLASSES, Some(mask)),
-        (K_DISK_FREE, free),
-        (K_DISK_TOTAL, total),
+        (K_STORE_FULL, i64::from(store_full)),
+        (K_FULL_CLASSES, mask),
     ]
 }
 
 /// Persist one pass's capacity outcome (inside the pass's transaction).
-fn save_capacity(
-    c: &Connection,
-    store_full: bool,
-    full_classes: &[Class],
-    disk: DiskSpace,
-) -> Result<()> {
-    for (key, value) in capacity_record(store_full, full_classes, disk) {
-        match value {
-            Some(v) => set_i64(c, key, v)?,
-            None => super::del(c, key)?,
-        }
+fn save_capacity(c: &Connection, store_full: bool, full_classes: &[Class]) -> Result<()> {
+    for (key, value) in capacity_record(store_full, full_classes) {
+        set_i64(c, key, value)?;
     }
     Ok(())
 }
 
 /// Whether the settings already hold exactly what [`save_capacity`] would
-/// write (an integer per present key, no row per absent one): primary-key
-/// reads, no write.
-fn capacity_saved(
-    c: &Connection,
-    store_full: bool,
-    full_classes: &[Class],
-    disk: DiskSpace,
-) -> Result<bool> {
-    for (key, want) in capacity_record(store_full, full_classes, disk) {
+/// write, compared as Layer 7 row M1c built it: the same integer under each
+/// key, an absent key or a value of another type being a difference.
+/// Primary-key reads, no write.
+fn capacity_saved(c: &Connection, store_full: bool, full_classes: &[Class]) -> Result<bool> {
+    for (key, want) in capacity_record(store_full, full_classes) {
         let got: Option<Value> = c
             .query_row("SELECT value FROM settings WHERE key = ?1", [key], |r| {
                 r.get(0)
             })
             .optional()?;
-        let same = match (got, want) {
-            (None, None) => true,
-            (Some(Value::Integer(g)), Some(w)) => g == w,
-            _ => false,
-        };
-        if !same {
+        if !matches!(got, Some(Value::Integer(g)) if g == want) {
             return Ok(false);
         }
     }
     Ok(true)
+}
+
+/// Whether `settings` holds either of [`DISK_KEYS`] (Layer 8 §13.4 (2)),
+/// whatever its value: an earlier build wrote integers, and any other value
+/// under those keys goes the same way. Primary-key reads, no write.
+fn disk_keys_present(c: &Connection) -> Result<bool> {
+    for key in DISK_KEYS {
+        let found = c
+            .query_row("SELECT 1 FROM settings WHERE key = ?1", [key], |_| Ok(()))
+            .optional()?;
+        if found.is_some() {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 /// The pre-M1c step lists, verbatim from `4b9e521`
@@ -1536,7 +1554,8 @@ mod eager {
 /// quota step skipping the other classes' candidates and every step
 /// skipping what an earlier one removed. Kept only as the oracle the tests
 /// hold [`Store::prune_inner`] to (byte-identical reports, flags and
-/// rows).
+/// rows). Its outcome is persisted through today's [`save_capacity`]
+/// (`store_full` and the mask, Layer 8 §13.4 (2)), as the pass's is.
 #[cfg(test)]
 impl Store {
     pub(super) fn prune_eager(
@@ -1674,7 +1693,7 @@ impl Store {
             {
                 clamp_unread(tx)?;
             }
-            save_capacity(tx, store_full, &full_classes, disk)
+            save_capacity(tx, store_full, &full_classes)
         })?;
         for p in &pruned {
             if let PrunedRef::Blob(h) = p.item {
