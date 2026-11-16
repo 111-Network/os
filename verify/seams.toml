@@ -66,13 +66,20 @@ gap = "Format only: build.py --check lints the entries; no code reads them."
 
 [[seam]]
 id = "L0-L9:evolution"
-status = "planned"
-spec = ["9-evolution/README.md"]
-a = { layer = 0, files = [] }
-b = { layer = 9, files = [] }
+status = "stub"
+spec = ["9-evolution/README.md §6.1", "9-evolution/README.md §6.2", "9-evolution/README.md §6.3", "9-evolution/README.md §13", "9-evolution/README.md §20"]
+a = { layer = 0, files = ["0-knowledge/_meta/build.py", "0-knowledge/_meta/schema.md"] }
+b = { layer = 9, files = [
+  "1-bootstrap/crates/node111/src/daemon/heal/vocab.rs",
+  "1-bootstrap/crates/node111/src/daemon/heal/playbook/mod.rs",
+  "1-bootstrap/crates/node111/src/daemon/heal/playbook/grammar.rs",
+  "1-bootstrap/crates/node111/src/daemon/heal/playbook/eval.rs",
+  "1-bootstrap/crates/node111/src/daemon/heal/action.rs",
+  "1-bootstrap/crates/node111/src/daemon/heal/drafts.rs",
+] }
 read_first = "a"
-symptom = "agent, knowledge-base and bridging-logic evolution; amending locked specs by permission"
-gap = "None: planned; no code and no spec section yet."
+symptom = "a playbook does not load or the lint and the loader disagree: GET /api/v1/repairs/playbooks lists it refused ('unsupported grammar N, needs release X'); build.py --check fails N06 or B10; 0-knowledge/_meta/playbook-vocabulary.toml differs from the compiled table; a tampered share/agent/ file leaves the agent row in error with prompts_invalid; an accepted kb_draft writes under current/share/kb/"
+gap = "None: a T0 stub; rows D3 to D5, D48, D49, K1 to K4 and A6 build it, and G21 and G25 print SKIPPED."
 
 [[seam]]
 id = "L1-L1:cli-config"
@@ -570,13 +577,30 @@ gap = "None: a T0 stub; rows M6, D16, D17, D21, D46, L2 to L5 and L9 to L11 buil
 
 [[seam]]
 id = "L1-L9:observer-change-engine"
-status = "planned"
-spec = ["9-evolution/README.md"]
-a = { layer = 1, files = [] }
-b = { layer = 9, files = [] }
+status = "stub"
+spec = ["9-evolution/README.md §3.1", "9-evolution/README.md §3.2", "9-evolution/README.md §3.3", "9-evolution/README.md §3.4", "9-evolution/README.md §7.5", "9-evolution/README.md §12.6", "1-bootstrap/README.md Supervision"]
+a = { layer = 1, files = [
+  "1-bootstrap/crates/node111/src/daemon/supervise.rs",
+  "1-bootstrap/crates/node111/src/daemon/services/mod.rs",
+  "1-bootstrap/crates/node111/src/daemon/dashboard/api_v1/events.rs",
+  "1-bootstrap/crates/node111/src/daemon/updater/mod.rs",
+  "1-bootstrap/crates/node111/src/probation.rs",
+  "1-bootstrap/systemd/111node.service",
+  "1-bootstrap/termux/sv/111node/finish",
+] }
+b = { layer = 9, files = [
+  "1-bootstrap/crates/node111/src/daemon/heal/mod.rs",
+  "1-bootstrap/crates/node111/src/daemon/heal/observer.rs",
+  "1-bootstrap/crates/node111/src/daemon/heal/incident.rs",
+  "1-bootstrap/crates/node111/src/daemon/heal/facts.rs",
+  "1-bootstrap/crates/node111/src/daemon/heal/witness.rs",
+  "1-bootstrap/crates/node111/src/daemon/heal/undo.rs",
+  "1-bootstrap/crates/node111/src/daemon/heal/apk.rs",
+  "1-bootstrap/crates/node111/src/heal_witness.rs",
+] }
 read_first = "a"
-symptom = "the observer waking and witnessing 111d's death; typed apply, verify, undo through a root helper"
-gap = "None: planned; no code and no spec section yet."
+symptom = "a failure is missed or miscounted: a supervised child's unrequested exit opens no (layer, id, child_exit) incident in GET /api/v1/repairs/incidents, while a requested restart or a graceful stop opens one; a kill -9 of 111d leaves no (1, 111d, unclean_exit); state/heal/inbox holds more than 256 lines; an armed state/heal/undo is not restored at the next start (its decision does not read reverted (daemon restart))"
+gap = "None: a T0 stub; row D1 landed the exit facts (ChildControl::exits in supervise.rs); rows D2, D6, D10 to D12, D16, D21, D50 and L1 to L4 build the rest, and G19 and G20 print SKIPPED."
 
 [[seam]]
 id = "L1-X:pi-floor"
@@ -706,13 +730,13 @@ gap = "None: a T0 stub; rows M1, D23, D24, D28 and L2 build it, and G13 and G15 
 
 [[seam]]
 id = "L2-L9:fix-signing"
-status = "planned"
-spec = ["9-evolution/README.md"]
-a = { layer = 2, files = [] }
-b = { layer = 9, files = [] }
-read_first = "a"
-symptom = "node-key signatures (111/fix/v1, 111/fix-vouch/v1) on the two outbound artefacts"
-gap = "None: planned; no code and no spec section yet."
+status = "stub"
+spec = ["9-evolution/README.md §10.1", "9-evolution/README.md §10.2", "9-evolution/README.md §11.1", "2-identity/README.md §6.1"]
+a = { layer = 2, files = ["2-identity/crates/id111/src/keyset.rs"] }
+b = { layer = 9, files = ["1-bootstrap/crates/node111/src/daemon/heal/fix/body.rs"] }
+read_first = "b"
+symptom = "a fix or a vouch verifies where it must not, or not where it must: the receiver drops and counts a well-signed fix, a flipped body byte still verifies, or 9-evolution/verify/vectors/fix-v1.json disagrees with the build"
+gap = "None: a T0 stub; rows D7, D36, D37 and D39 build it, and G22 prints SKIPPED."
 
 [[seam]]
 id = "L3-L4:agent-events"
@@ -850,14 +874,31 @@ symptom = "a chat turn is answered but not kept: the chat view says 'History is 
 gap = "None: a T0 stub; rows D3, D5, D6, D8 and A1 build it, and G13 prints SKIPPED."
 
 [[seam]]
-id = "L3-L9:diagnosis-playbooks"
-status = "planned"
-spec = ["9-evolution/README.md"]
-a = { layer = 3, files = [] }
-b = { layer = 9, files = [] }
+id = "L3-L9:code-drafts"
+status = "stub"
+spec = ["9-evolution/README.md §8.1", "9-evolution/README.md §8.3", "9-evolution/README.md Applies cleanly", "9-evolution/README.md §9", "9-evolution/README.md §20", "3-intelligence/README.md Tasks"]
+a = { layer = 3, files = ["3-intelligence/crates/agent111/src/tasks.rs"] }
+b = { layer = 9, files = [
+  "1-bootstrap/crates/node111/src/daemon/heal/drafts.rs",
+  "1-bootstrap/crates/node111/src/daemon/heal/export.rs",
+] }
 read_first = "a"
-symptom = "diagnosis tiers, the playbook grammar and evaluator, new task kinds"
-gap = "None: planned; no code and no spec section yet."
+symptom = "a code draft escapes or misleads: a patch task's opencode.json lacks the deny block, or opencode connects to 127.0.0.1:11180; a file outside the task's work dir reaches a model request or the diff; a draft reads 'drafted and applies cleanly, not built' for a diff that does not apply; fix-<id>.mbox fails git am, or git mailsplit finds two patches; the task route's patch mode submits a task with no source tarball matching the [source] pin instead of answering 409 component_unavailable"
+gap = "None: a T0 stub on Layer 9's side; row A1 landed the deny block in tasks.rs (l3.agent111.opencode_config, strength F: a recorder stands in for opencode); rows A4, A5, D9, D44 to D47 and L7 build the rest, and G24 prints SKIPPED."
+
+[[seam]]
+id = "L3-L9:diagnosis-playbooks"
+status = "stub"
+spec = ["9-evolution/README.md §5.1", "9-evolution/README.md §5.2", "9-evolution/README.md §5.3", "9-evolution/README.md §18.3", "3-intelligence/README.md Contracts", "3-intelligence/README.md Tasks"]
+a = { layer = 3, files = [
+  "3-intelligence/crates/agent111/src/http.rs",
+  "3-intelligence/crates/agent111/src/tasks.rs",
+  "3-intelligence/crates/agent111/src/tools.rs",
+] }
+b = { layer = 9, files = ["1-bootstrap/crates/node111/src/daemon/heal/diagnose.rs"] }
+read_first = "a"
+symptom = "an incident's diagnosis is wrong or costly: one satisfied cause still makes a model request; the T1 request lacks the incident block, carries daemon_health or recent_events, or has no response_format cause enum; a reply citing an unknown evidence id is kept; the result shows in GET /api/v1/proposals and the open count instead of on the incident; two incidents make two model requests at once"
+gap = "None: a T0 stub; rows A2, A3, A9, D13, D23, D24 and D54 build it, and G21 and G25 print SKIPPED."
 
 [[seam]]
 id = "L4-L1:tapes"
@@ -1011,6 +1052,27 @@ symptom = "Settings > Storage and the Datasets view are empty: /api/v1/storage, 
 gap = "None: a T0 stub (three empty routers, 404); rows C1, C2, D13, D14, D29, D35, D42 to D44 and U1 to U7 build it, and G14 to G17 print SKIPPED."
 
 [[seam]]
+id = "L4-L9:repairs-api"
+status = "stub"
+spec = ["9-evolution/README.md §18.1", "9-evolution/README.md §18.4", "9-evolution/README.md §14.1", "9-evolution/README.md §17.1", "9-evolution/README.md §20", "4-interface/api/README.md"]
+a = { layer = 4, files = [
+  "1-bootstrap/crates/node111/src/daemon/dashboard/api_v1/proposals.rs",
+  "1-bootstrap/crates/node111/src/daemon/dashboard/api_v1/events.rs",
+  "4-interface/api/openapi.yaml",
+  "4-interface/ui/src/views/settings/index.tsx",
+] }
+b = { layer = 9, files = [
+  "1-bootstrap/crates/node111/src/daemon/dashboard/api_v1/repairs.rs",
+  "1-bootstrap/crates/node111/src/daemon/heal/proposal.rs",
+  "1-bootstrap/crates/node111/src/daemon/heal/settings.rs",
+  "1-bootstrap/crates/node111/src/daemon/heal/notify.rs",
+  "1-bootstrap/crates/node111/src/heal_cmd.rs",
+] }
+read_first = "b"
+symptom = "the Repairs page is empty or acts wrongly: /api/v1/repairs* answer 404 (the T0 router) or a shape the contract does not give; no incident frame arrives on /api/v1/events; a LAN session's accept of a repair holding a loopback-only key applies instead of answering 403 loopback_only; the bearer's POST on a Layer 9 route is not 401; 111 heal settings writes before its y/N"
+gap = "None: a T0 stub (an empty router, 404); rows C1 to C6, D14, D22, D24 to D26, D31 to D36, D40, D47, D51, D53, L6 and U1 to U5 build it, and G20 prints SKIPPED."
+
+[[seam]]
 id = "L5-L6:foreign-tables"
 status = "built"
 spec = ["6-transport/README.md §3", "6-transport/README.md §18"]
@@ -1158,13 +1220,27 @@ gap = "None: planned; no code and no spec section yet."
 
 [[seam]]
 id = "L5/7-L9:fix-sharing-delegation"
-status = "planned"
-spec = ["9-evolution/README.md"]
-a = { layer = [5, 7], files = [] }
-b = { layer = 9, files = [] }
+status = "stub"
+spec = ["9-evolution/README.md §11.2", "9-evolution/README.md §11.3", "9-evolution/README.md §11.4", "9-evolution/README.md §12.1", "9-evolution/README.md §12.2", "9-evolution/README.md §12.3", "7-relay/README.md §5", "7-relay/README.md §7.2"]
+a = { layer = [5, 7], files = [
+  "5-messaging/crates/mesh111/src/fabric.rs",
+  "5-messaging/crates/mesh111/src/envelope.rs",
+  "1-bootstrap/crates/node111/src/daemon/fabric/mod.rs",
+] }
+b = { layer = 9, files = [
+  "1-bootstrap/crates/node111/src/daemon/heal/fix/mod.rs",
+  "1-bootstrap/crates/node111/src/daemon/heal/fix/body.rs",
+  "1-bootstrap/crates/node111/src/daemon/heal/fix/send.rs",
+  "1-bootstrap/crates/node111/src/daemon/heal/fix/receive.rs",
+  "1-bootstrap/crates/node111/src/daemon/heal/fix/peer.rs",
+  "1-bootstrap/crates/node111/src/daemon/heal/delegate/mod.rs",
+  "1-bootstrap/crates/node111/src/daemon/heal/delegate/cbor.rs",
+  "1-bootstrap/crates/node111/src/daemon/heal/delegate/member.rs",
+  "1-bootstrap/crates/node111/src/daemon/heal/delegate/hub.rs",
+] }
 read_first = "a"
-symptom = "proven-fix exchange over the fabric, AGENT_OP delegation and pull requests"
-gap = "None: planned; no code and no spec section yet."
+symptom = "a fix or a delegation does not cross, or crosses where it must not: with heal.fixes.send off a fix leaves the node (capture); a received fix shows as a textless chat row instead of in GET /api/v1/repairs/fixes; a diagnose to the home hub gets no answer, or refuse 3 on every re-send; a fix sealed to at most 2,937 B is not stored on the far island after one carrier hop"
+gap = "None: a T0 stub; rows M2, M3, L5, D36 to D43 and D54 build it, and G22 and G23 print SKIPPED."
 
 [[seam]]
 id = "L6-L6:deltachat-madmail"
@@ -1233,6 +1309,30 @@ symptom = "kiwix-serve is resident while off, or never starts: zero-weight.sh li
 gap = "None: planned (8-storage/README.md §18, a new seam); Layer 8 rows D39, D40, D42 and D47 build it, and G16 and the extended G7 print SKIPPED."
 
 [[seam]]
+id = "L6-L9:typed-actions"
+status = "stub"
+spec = ["9-evolution/README.md §7.1", "9-evolution/README.md §7.2", "9-evolution/README.md §7.4", "9-evolution/README.md §20", "6-transport/README.md §12"]
+a = { layer = 6, files = [
+  "1-bootstrap/crates/node111/src/daemon/devices/applier.rs",
+  "1-bootstrap/crates/node111/src/daemon/transport/posture.rs",
+] }
+b = { layer = 9, files = [
+  "1-bootstrap/crates/node111/src/daemon/heal/engine.rs",
+  "1-bootstrap/crates/node111/src/daemon/heal/undo.rs",
+  "1-bootstrap/crates/node111/src/daemon/heal/ledger.rs",
+  "1-bootstrap/crates/node111/src/daemon/heal/action.rs",
+  "1-bootstrap/crates/node111/src/daemon/heal/actions/mod.rs",
+  "1-bootstrap/crates/node111/src/daemon/heal/actions/device.rs",
+  "1-bootstrap/crates/node111/src/daemon/heal/actions/service.rs",
+  "1-bootstrap/crates/node111/src/daemon/heal/actions/settings_set.rs",
+  "1-bootstrap/crates/node111/src/daemon/heal/actions/component.rs",
+  "1-bootstrap/crates/node111/src/daemon/heal/actions/bridge.rs",
+] }
+read_first = "b"
+symptom = "an accepted action differs from the Layer 6 applier or does not come back: a device proposal's files and decision records differ from 9-evolution/verify/tapes/applier-l6/; a failed probe does not revert byte-exact and record reverted; a second accept waits instead of answering 409 busy; a revert that needs a consent passes it instead of stopping revert_blocked"
+gap = "None: a T0 stub; row P1 recorded the applier tape; rows D19, D20, D26 to D30, D52 and M1 build it, and G20 prints SKIPPED."
+
+[[seam]]
 id = "L6-X:rns-lxmf-api"
 status = "built"
 spec = ["6-transport/README.md §6"]
@@ -1275,12 +1375,15 @@ gap = "None: planned; no code and no spec section yet."
 [[seam]]
 id = "L8-L9:heal-store"
 status = "stub"
-spec = ["8-storage/README.md §3", "8-storage/README.md §2.5"]
+spec = ["8-storage/README.md §3", "8-storage/README.md §2.5", "9-evolution/README.md §4", "9-evolution/README.md §4.1", "9-evolution/README.md §4.2"]
 a = { layer = 8, files = ["1-bootstrap/crates/node111/src/daemon/state/heal.rs"] }
-b = { layer = 9, files = [] }
+b = { layer = 9, files = [
+  "1-bootstrap/crates/node111/src/daemon/heal/store.rs",
+  "1-bootstrap/crates/node111/src/daemon/heal/witness.rs",
+] }
 read_first = "a"
 symptom = "state/heal/{run,inbox,undo} stay unfolded and the Repairs page says the store did not open; a J9 write to heal/ returns Full"
-gap = "None: a T0 stub; rows D3, D4 and D8 build Layer 8's side, Layer 9 the other after its T0, and G13 prints SKIPPED."
+gap = "None: a T0 stub on both sides; Layer 8 rows D3, D4 and D8 build Layer 8's, Layer 9 rows D15 to D18 Layer 9's (the J9 adapter, the J2 folder, the reclaimer, the degraded modes), and G13 and G19 print SKIPPED."
 
 [[seam]]
 id = "X:licensing-notices"

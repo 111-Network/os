@@ -69,6 +69,7 @@ pub mod proposals;
 pub mod registry;
 pub mod relay;
 pub mod relay7;
+pub mod repairs;
 pub mod services;
 pub mod settings;
 pub mod status;
@@ -293,6 +294,8 @@ pub fn router(state: Arc<ApiState>) -> axum::Router {
         .merge(storage::router())
         .merge(datasets::router())
         .merge(tiles::router())
+        // Layer 9 (§18.1): the Repairs routes
+        .merge(repairs::router())
         .route_layer(middleware::from_fn_with_state(
             Arc::clone(&state),
             auth::require_session,

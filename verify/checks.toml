@@ -1715,13 +1715,15 @@ needs = ["cargo"]
 # Layer 9 row A1, the containment correction (9-evolution/README.md §8.1; G24 (1) in the crate): a patch task's opencode.json
 # parses equal to the deny block, the child's HOME, four XDG directories and TMPDIR are inside the task's work dir, the five
 # OPENCODE_DISABLE_* switches are 1 and npm is offline, no auto-approve switch is in its argv. A recorder script stands in for opencode, hence
-# strength F. No seam yet: L3-L9:code-drafts arrives with Layer 9's T0 (planned); layers = [3, 9] so a Layer 9 run plans it.
+# strength F. Its seam is L3-L9:code-drafts (added by Layer 9's T0; this check proves side a, agent111's tasks.rs); layers = [3, 9] so a
+# Layer 9 run plans it.
 [[check]]
 id = "l3.agent111.opencode_config"
 kind = "unit"
 cmd = ["cargo", "test", "--manifest-path", "3-intelligence/Cargo.toml", "-p", "agent111", "--test", "opencode_config"]
 tier = "slow"
 layers = [3, 9]
+seams = ["L3-L9:code-drafts"]
 adapter = "libtest"
 cargo = true
 timeout_s = 1800
@@ -2824,6 +2826,142 @@ rerun_cost = "ns, T0 stub: SKIPPED today"
 strength = "N"
 needs = ["bash"]
 
+# G19 the observer: one netns node with the real 111d, a real supervised stub child and the real agent off; node111 tests. Row V3.
+# A T0 stub: it prints '<G> SKIPPED: not built yet (T0 stub)' and exits 0 (9-evolution/TASKS.md row V3). Strength N
+# until the row lands; promote it to R then (and to cargo = true if the gate builds).
+[[check]]
+id = "l9.g19"
+kind = "unit"
+cmd = ["bash", "9-evolution/verify/observer.sh"]
+tier = "ns"
+layers = [9]
+seams = ["L1-L9:observer-change-engine", "L8-L9:heal-store"]
+adapter = "okfail"
+lock = "verify"
+timeout_s = 1800
+rerun_cost = "ns, T0 stub: SKIPPED today"
+strength = "N"
+needs = ["bash"]
+
+# G20 the engine: G1's bridge stubs, G5's device fakes and the Layer 6 applier tape under the Action trait; node111 and UI tests. Row V4.
+# A T0 stub: it prints '<G> SKIPPED: not built yet (T0 stub)' and exits 0 (9-evolution/TASKS.md row V4). Strength N
+# until the row lands; promote it to R then (and to cargo = true if the gate builds).
+[[check]]
+id = "l9.g20"
+kind = "unit"
+cmd = ["bash", "9-evolution/verify/engine.sh"]
+tier = "ns"
+layers = [9]
+seams = ["L6-L9:typed-actions", "L4-L9:repairs-api", "L1-L9:observer-change-engine"]
+adapter = "okfail"
+lock = "verify"
+timeout_s = 1800
+rerun_cost = "ns, T0 stub: SKIPPED today"
+strength = "N"
+needs = ["bash"]
+
+# G21 diagnosis: one node with the real agent and stub-model.py as the model child; node111 and agent111 tests. Row V5.
+# A T0 stub: it prints '<G> SKIPPED: not built yet (T0 stub)' and exits 0 (9-evolution/TASKS.md row V5). Strength N
+# until the row lands; promote it to R then (and to cargo = true if the gate builds).
+[[check]]
+id = "l9.g21"
+kind = "unit"
+cmd = ["bash", "9-evolution/verify/diagnose.sh"]
+tier = "ns"
+layers = [9]
+seams = ["L3-L9:diagnosis-playbooks", "L0-L9:evolution"]
+adapter = "okfail"
+lock = "verify"
+timeout_s = 1800
+rerun_cost = "ns, T0 stub: SKIPPED today"
+strength = "N"
+needs = ["bash"]
+
+# G22 sharing fixes: nodes A and B and hub H over tcp-lan, item (11) on Layer 7's G9 topology; node111 and mesh111 tests. Row V6.
+# A T0 stub: it prints '<G> SKIPPED: not built yet (T0 stub)' and exits 0 (9-evolution/TASKS.md row V6). Strength N
+# until the row lands; promote it to R then (and to cargo = true if the gate builds).
+[[check]]
+id = "l9.g22"
+kind = "unit"
+cmd = ["bash", "9-evolution/verify/share.sh"]
+tier = "ns"
+layers = [9]
+seams = ["L5/7-L9:fix-sharing-delegation", "L2-L9:fix-signing"]
+adapter = "okfail"
+lock = "verify"
+timeout_s = 1800
+rerun_cost = "ns, T0 stub: SKIPPED today"
+strength = "N"
+needs = ["bash"]
+
+# G23 delegation: hub H and members M1, M2 over tcp-lan, stub-model.py on H; mesh111 tests. Row V7.
+# A T0 stub: it prints '<G> SKIPPED: not built yet (T0 stub)' and exits 0 (9-evolution/TASKS.md row V7). Strength N
+# until the row lands; promote it to R then (and to cargo = true if the gate builds).
+[[check]]
+id = "l9.g23"
+kind = "unit"
+cmd = ["bash", "9-evolution/verify/delegate.sh"]
+tier = "ns"
+layers = [9]
+seams = ["L5/7-L9:fix-sharing-delegation"]
+adapter = "okfail"
+lock = "verify"
+timeout_s = 1800
+rerun_cost = "ns, T0 stub: SKIPPED today"
+strength = "N"
+needs = ["bash"]
+
+# G24 code drafts: OPENCODE_BIN a pinned opencode, else SKIPPED (the lock run sets REQUIRE_G24=1); the deny block, the mbox. Row V8.
+# A T0 stub: it prints '<G> SKIPPED: not built yet (T0 stub)' and exits 0 (9-evolution/TASKS.md row V8). Strength N
+# until the row lands; promote it to R then (and to cargo = true if the gate builds).
+[[check]]
+id = "l9.g24"
+kind = "unit"
+cmd = ["bash", "9-evolution/verify/codefix.sh"]
+tier = "ns"
+layers = [9]
+seams = ["L3-L9:code-drafts"]
+adapter = "okfail"
+lock = "verify"
+timeout_s = 1800
+rerun_cost = "ns, T0 stub: SKIPPED today"
+strength = "N"
+needs = ["bash"]
+
+# G25 evolution: build.py's playbook lint and fixtures, the agent's data by release, kb_draft; agent111 tests. Row V9.
+# A T0 stub: it prints '<G> SKIPPED: not built yet (T0 stub)' and exits 0 (9-evolution/TASKS.md row V9). Strength N
+# until the row lands; promote it to R then (and to cargo = true if the gate builds).
+[[check]]
+id = "l9.g25"
+kind = "unit"
+cmd = ["bash", "9-evolution/verify/evolution.sh"]
+tier = "ns"
+layers = [9]
+seams = ["L0-L9:evolution", "L3-L9:diagnosis-playbooks"]
+adapter = "okfail"
+lock = "verify"
+timeout_s = 1800
+rerun_cost = "ns, T0 stub: SKIPPED today"
+strength = "N"
+needs = ["bash"]
+
+# G7 extended for Layer 9 (§20): zero-weight.sh against observer.sh's own idle daemon (idle RSS under the Layer 8 build's plus 512 KiB), and idle.sh's no-timer line. Row V10.
+# A T0 stub: it prints 'G7 SKIPPED: not built yet (T0 stub; ...)' and exits 0 (9-evolution/TASKS.md row V10). Strength N
+# until the row lands; promote it to R then (and to cargo = true if the gate builds).
+[[check]]
+id = "l9.g7ext"
+kind = "unit"
+cmd = ["bash", "-c", "echo 'G7 SKIPPED: not built yet (T0 stub; Layer 9 row V10 runs 6-transport/verify/zero-weight.sh and 7-relay/verify/idle.sh with Layer 9 present)'"]
+tier = "ns"
+layers = [9]
+seams = ["L1-X:pi-floor"]
+adapter = "okfail"
+lock = "verify"
+timeout_s = 1800
+rerun_cost = "ns, T0 stub: SKIPPED today"
+strength = "N"
+needs = ["bash"]
+
 # ========================================================================
 # FAKES: stand-ins for one side of a seam. parity = "none" counts as a gap on every run.
 # ========================================================================
@@ -3130,6 +3268,7 @@ reason = "returns early as root (access(2) always succeeds), so a PASS here prov
 "6-transport/verify/zero-weight.sh" = "G7 needs an already-running daemon (NODE111_ROOT) and prints SKIPPED alone; row N4 runs it inside smoke.sh against the harness's own daemon, then it gets a check"
 "7-relay/verify/lib.sh" = "sourced helper: port, namespace and address names for G7-extended to G12; creates nothing, not a check"
 "8-storage/verify/lib.sh" = "sourced helper: netns, veth, address and port names for G13 to G18; creates nothing, not a check"
+"9-evolution/verify/lib.sh" = "sourced helper: netns, veth, address and port names for G19 to G25; creates nothing, not a check"
 "2-identity/monocypher-harness/mutation-check.sh" = "evidence that the Monocypher harness kills 17 mutants, 'not part of the gate' (2-identity/monocypher-harness/README.md); run by hand"
 "4-interface/ui/test/agent.test.ts" = "agent view logic over the mock and the generated types; no seam"
 "4-interface/ui/test/bus.test.ts" = "the mock event bus; no seam"

@@ -12,6 +12,8 @@ pub mod config;
 pub mod daemon;
 pub mod dataset_cmd;
 pub mod floor;
+pub mod heal_cmd;
+pub mod heal_witness;
 pub mod identity;
 pub mod install;
 pub mod manifest;

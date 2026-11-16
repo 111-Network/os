@@ -36,6 +36,7 @@ pub mod dashboard;
 pub mod datasets;
 pub mod devices;
 pub mod fabric;
+pub mod heal;
 pub mod health;
 pub mod housekeeping;
 pub mod intelligence;
