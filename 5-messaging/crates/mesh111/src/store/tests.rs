@@ -5667,3 +5667,511 @@ fn mode_t_key_for_is_unsupported() {
     ));
     assert!(!t.path().join(DB_FILE).exists());
 }
+
+// ---------------------------------------------------------------------------
+// Layer 8 §2.7 S2 and §13.5: `open_encrypted`, `migrate_with` over a
+// caller's own list, `journal_size_limit`
+// ---------------------------------------------------------------------------
+
+/// The node-state store's key (Layer 8 §2.2 rule 2) over the secret and
+/// NodeId [`key`] derives the fabric store's from.
+fn node_state_key() -> StoreKey {
+    derive_tagged_key(NODE_STATE_KDF_TAG, &[1; 32], &ME).unwrap()
+}
+
+/// A caller's own append-only list, the shape of the node-state store's
+/// schema (Layer 8 §2.2 rule 4), abridged.
+const OWN: &[&str] = &[
+    "CREATE TABLE meta (key TEXT PRIMARY KEY NOT NULL, value ANY) STRICT, WITHOUT ROWID;",
+    "CREATE TABLE records (ns TEXT NOT NULL, id TEXT NOT NULL, seq INTEGER NOT NULL UNIQUE,
+         body BLOB, PRIMARY KEY (ns, id)) STRICT;",
+];
+
+fn mode_of(p: &Path) -> u32 {
+    fs::metadata(p).unwrap().permissions().mode() & 0o777
+}
+
+/// The size of a file, 0 when it is absent (a WAL after a clean close).
+fn len_of(p: &Path) -> u64 {
+    fs::metadata(p).map(|m| m.len()).unwrap_or(0)
+}
+
+/// `<file>-wal` / `<file>-shm` beside a store file.
+fn beside(file: &Path, suffix: &str) -> PathBuf {
+    let mut s = file.as_os_str().to_owned();
+    s.push(suffix);
+    PathBuf::from(s)
+}
+
+/// A pragma's value as text (SQLCipher answers some pragmas as text).
+fn pragma_str(c: &Connection, p: &str) -> String {
+    c.query_row(&format!("PRAGMA {p}"), [], |r| {
+        r.get::<_, rusqlite::types::Value>(0)
+    })
+    .map(|v| match v {
+        rusqlite::types::Value::Integer(i) => i.to_string(),
+        rusqlite::types::Value::Text(t) => t,
+        other => format!("{other:?}"),
+    })
+    .unwrap()
+}
+
+fn tables(c: &Connection) -> Vec<String> {
+    let mut st = c
+        .prepare("SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name")
+        .unwrap();
+    let names = st.query_map([], |r| r.get::<_, String>(0)).unwrap();
+    names.map(|n| n.unwrap()).collect()
+}
+
+/// Layer 8 §2.7 S2, §2.2 rules 1 and 3, G13 (1): the node-state store's
+/// path gets `node/` 0700 and `state.db` 0600 (its `-wal` and `-shm`
+/// too), the fabric store's engine and nothing else: no table and no
+/// `user_version` until the caller migrates its own list; an existing file
+/// is set back to 0600 and stays encrypted at rest.
+#[test]
+fn open_encrypted_gives_node_0700_state_db_0600_and_the_fabric_engine() {
+    let t = tempfile::tempdir().unwrap();
+    let node = t.path().join("node");
+    let db = node.join("state.db");
+    let conn = open_encrypted(&db, &node_state_key()).unwrap();
+    assert_eq!(mode_of(&node), 0o700);
+    assert_eq!(mode_of(&db), 0o600);
+    // A new file: its header page alone, no WAL frame.
+    assert_eq!(len_of(&db), 4096);
+    assert_eq!(len_of(&beside(&db, "-wal")), 0);
+    for (pragma, want) in [
+        ("journal_mode", "wal"),
+        ("auto_vacuum", "2"), // INCREMENTAL
+        ("secure_delete", "1"),
+        ("temp_store", "2"),  // MEMORY
+        ("synchronous", "1"), // NORMAL
+        ("foreign_keys", "1"),
+        ("journal_size_limit", "4194304"),
+        ("cipher_page_size", "4096"), // the SQLCipher 4 format
+        ("cipher_hmac_algorithm", "HMAC_SHA512"),
+        ("cipher_kdf_algorithm", "PBKDF2_HMAC_SHA512"),
+    ] {
+        assert_eq!(pragma_str(&conn, pragma), want, "{pragma}");
+    }
+    assert!(!pragma_str(&conn, "cipher_version").is_empty());
+    // No schema of its own and no epoch: the caller's list comes next.
+    assert!(tables(&conn).is_empty());
+    assert_eq!(pragma_int(&conn, "user_version").unwrap(), 0);
+    schema::migrate_with(&conn, OWN).unwrap();
+    assert_eq!(tables(&conn), ["meta", "records"]);
+    conn.execute("INSERT INTO meta (key, value) VALUES ('next_seq', 1)", [])
+        .unwrap();
+    assert_eq!(mode_of(&beside(&db, "-wal")), 0o600);
+    assert_eq!(mode_of(&beside(&db, "-shm")), 0o600);
+    conn.close().map_err(|(_, e)| e).unwrap();
+    let head = fs::read(&db).unwrap();
+    assert!(head.len() >= 4096);
+    assert_ne!(
+        &head[..16],
+        b"SQLite format 3\0",
+        "state.db must be encrypted"
+    );
+
+    // An existing file is set back to 0600, and so are the -wal and -shm
+    // SQLite made with its 0644 at the page-1 read (they are set once the
+    // key has opened the file); an existing directory is left as it is (the
+    // fabric store's rule: its mode is set when it is made).
+    fs::set_permissions(&db, fs::Permissions::from_mode(0o644)).unwrap();
+    fs::set_permissions(&node, fs::Permissions::from_mode(0o750)).unwrap();
+    let conn = open_encrypted(&db, &node_state_key()).unwrap();
+    assert_eq!(mode_of(&db), 0o600);
+    assert_eq!(mode_of(&beside(&db, "-wal")), 0o600);
+    assert_eq!(mode_of(&beside(&db, "-shm")), 0o600);
+    assert_eq!(mode_of(&node), 0o750);
+    let next: i64 = conn
+        .query_row("SELECT value FROM meta WHERE key = 'next_seq'", [], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    assert_eq!(next, 1);
+    conn.close().map_err(|(_, e)| e).unwrap();
+}
+
+/// A file's mode, ctime and mtime. A chmod moves the ctime even when it
+/// sets the mode the file already has.
+fn stamp(p: &Path) -> (u32, i64, i64, i64, i64) {
+    use std::os::unix::fs::MetadataExt;
+    let m = fs::metadata(p).unwrap();
+    let mode = m.mode() & 0o7777;
+    (mode, m.ctime(), m.ctime_nsec(), m.mtime(), m.mtime_nsec())
+}
+
+/// Longer than a coarse file-timestamp tick, so that a chmod or a write
+/// made after it moves the stamp.
+fn tick() {
+    std::thread::sleep(std::time::Duration::from_millis(25));
+}
+
+/// Layer 8 §2.7 S2, G13 (1), §2.2 rule 1: a plaintext SQLite file and a
+/// wrong key both fail at the open, on its first read of page 1, and leave
+/// the file as it was, its mode and ctime included (the open sets 0600 only
+/// once the key has opened a file): a 0644 plaintext file, the same file
+/// reached through a link at the store's path, and a 0644 store opened
+/// with two wrong keys. The right key then opens the store and sets it, its
+/// `-wal` and its `-shm` to 0600.
+#[test]
+fn open_encrypted_refuses_a_plaintext_file_and_a_wrong_key_on_page_1() {
+    let t = tempfile::tempdir().unwrap();
+    // A plaintext SQLite file: with no key, SQLCipher writes plain pages.
+    let plain = t.path().join("plain.db");
+    let c = Connection::open(&plain).unwrap();
+    c.execute_batch("CREATE TABLE t (x); INSERT INTO t VALUES (1);")
+        .unwrap();
+    c.close().map_err(|(_, e)| e).unwrap();
+    fs::set_permissions(&plain, fs::Permissions::from_mode(0o644)).unwrap();
+    let (bytes, before) = (fs::read(&plain).unwrap(), stamp(&plain));
+    assert_eq!(&bytes[..16], b"SQLite format 3\0");
+    let link = t.path().join("link").join("state.db");
+    fs::create_dir(link.parent().unwrap()).unwrap();
+    std::os::unix::fs::symlink(&plain, &link).unwrap();
+    tick();
+    for at in [&plain, &link] {
+        assert!(matches!(
+            open_encrypted(at, &node_state_key()),
+            Err(StoreError::WrongKey)
+        ));
+    }
+    assert_eq!(stamp(&plain), before, "a refused open sets no mode");
+    assert!(
+        fs::read(&plain).unwrap() == bytes,
+        "a refused open writes nothing"
+    );
+
+    let db = t.path().join("node").join("state.db");
+    let conn = open_encrypted(&db, &node_state_key()).unwrap();
+    schema::migrate_with(&conn, OWN).unwrap();
+    conn.close().map_err(|(_, e)| e).unwrap();
+    fs::set_permissions(&db, fs::Permissions::from_mode(0o644)).unwrap();
+    let (bytes, before) = (fs::read(&db).unwrap(), stamp(&db));
+    tick();
+    // The fabric store's key (same secret and NodeId, another tag) and the
+    // node-state tag over another secret: both wrong for this file.
+    for wrong in [
+        key(),
+        derive_tagged_key(NODE_STATE_KDF_TAG, &[2; 32], &ME).unwrap(),
+    ] {
+        assert!(matches!(
+            open_encrypted(&db, &wrong),
+            Err(StoreError::WrongKey)
+        ));
+    }
+    assert_eq!(stamp(&db), before, "a refused open sets no mode");
+    assert!(
+        fs::read(&db).unwrap() == bytes,
+        "a refused open writes nothing"
+    );
+    let conn = open_encrypted(&db, &node_state_key()).unwrap();
+    assert_eq!(pragma_int(&conn, "user_version").unwrap(), 2);
+    for f in [db.clone(), beside(&db, "-wal"), beside(&db, "-shm")] {
+        assert_eq!(mode_of(&f), 0o600, "{}", f.display());
+    }
+    conn.close().map_err(|(_, e)| e).unwrap();
+}
+
+/// Layer 8 §2.2 rules 1 and 9, §2.7 S2: an open of a store already 0600
+/// makes no chmod, so the file's ctime stays (as its bytes and mtime do,
+/// the open only reads); a path that is not a regular file is refused
+/// before SQLite opens it, and its mode is kept.
+#[test]
+fn open_encrypted_sets_no_mode_on_a_0600_store_and_refuses_a_directory() {
+    let t = tempfile::tempdir().unwrap();
+    let db = t.path().join("node").join("state.db");
+    let conn = open_encrypted(&db, &node_state_key()).unwrap();
+    schema::migrate_with(&conn, OWN).unwrap();
+    conn.close().map_err(|(_, e)| e).unwrap();
+    let (bytes, before) = (fs::read(&db).unwrap(), stamp(&db));
+    assert_eq!(before.0, 0o600);
+    tick();
+    let conn = open_encrypted(&db, &node_state_key()).unwrap();
+    schema::migrate_with(&conn, OWN).unwrap();
+    conn.close().map_err(|(_, e)| e).unwrap();
+    assert_eq!(stamp(&db), before, "no chmod (the ctime stays)");
+    assert!(fs::read(&db).unwrap() == bytes, "no write");
+
+    let dir = t.path().join("dir").join("state.db");
+    DirBuilder::new()
+        .recursive(true)
+        .mode(0o755)
+        .create(&dir)
+        .unwrap();
+    assert!(matches!(
+        open_encrypted(&dir, &node_state_key()),
+        Err(StoreError::Invalid(_))
+    ));
+    assert_eq!(mode_of(&dir), 0o755);
+}
+
+/// Layer 8 §13.7, §2.2 rule 9: a refused open does not checkpoint. A WAL a
+/// crash left (here the files copied while the store held commits in its
+/// WAL, a power cut's files) is opened before page 1 is read; with a wrong
+/// key the open fails, and its close leaves the file and the WAL byte for
+/// byte (the WAL is the node-state store's unclean signal). The right key
+/// then reads the WAL's commits.
+#[test]
+fn a_refused_open_leaves_a_wal_a_crash_left_as_it_was() {
+    let t = tempfile::tempdir().unwrap();
+    let live = t.path().join("live").join("state.db");
+    let c = open_encrypted(&live, &node_state_key()).unwrap();
+    schema::migrate_with(&c, OWN).unwrap();
+    c.execute("INSERT INTO meta (key, value) VALUES ('kept', 7)", [])
+        .unwrap();
+    let db = t.path().join("node").join("state.db");
+    fs::create_dir(db.parent().unwrap()).unwrap();
+    fs::copy(&live, &db).unwrap();
+    fs::copy(beside(&live, "-wal"), beside(&db, "-wal")).unwrap();
+    c.close().map_err(|(_, e)| e).unwrap();
+    let main = fs::read(&db).unwrap();
+    let wal = fs::read(beside(&db, "-wal")).unwrap();
+    assert!(wal.len() > 4096, "the WAL holds the commits");
+    for wrong in [
+        key(),
+        derive_tagged_key(NODE_STATE_KDF_TAG, &[2; 32], &ME).unwrap(),
+    ] {
+        assert!(matches!(
+            open_encrypted(&db, &wrong),
+            Err(StoreError::WrongKey)
+        ));
+        assert!(fs::read(&db).unwrap() == main, "the file is not written");
+        assert!(
+            fs::read(beside(&db, "-wal")).is_ok_and(|w| w == wal),
+            "the WAL stays as the crash left it"
+        );
+    }
+    let c = open_encrypted(&db, &node_state_key()).unwrap();
+    let kept: i64 = c
+        .query_row("SELECT value FROM meta WHERE key = 'kept'", [], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    assert_eq!(kept, 7);
+    c.close().map_err(|(_, e)| e).unwrap();
+}
+
+/// Layer 8 §2.2 rule 9, §2.7 S2: the open writes nothing to a keyed file
+/// with tables and no auto-vacuum (one this code did not create: SQLite
+/// cannot set INCREMENTAL there without a VACUUM and writes nothing), open
+/// after open, and `migrate_with` is the check that refuses it. A FULL file
+/// is converted to INCREMENTAL by its first open (one commit, as the open
+/// always did) and is written no more after.
+#[test]
+fn a_file_without_incremental_is_not_written_by_the_open_and_migrate_with_refuses_it() {
+    let t = tempfile::tempdir().unwrap();
+    let keyed = |mode: &str| -> PathBuf {
+        let db = t.path().join(mode).join("state.db");
+        fs::create_dir(db.parent().unwrap()).unwrap();
+        let c = Connection::open(&db).unwrap();
+        let lit = node_state_key().sqlcipher_literal();
+        c.execute_batch(&format!("PRAGMA key = \"{}\";", lit.as_str()))
+            .unwrap();
+        c.execute_batch(&format!(
+            "PRAGMA cipher_compatibility = 4; PRAGMA auto_vacuum = {mode};
+             PRAGMA journal_mode = WAL; CREATE TABLE t (x INTEGER) STRICT;"
+        ))
+        .unwrap();
+        c.close().map_err(|(_, e)| e).unwrap();
+        db
+    };
+    let none = keyed("NONE");
+    let before = fs::read(&none).unwrap();
+    for _ in 0..2 {
+        let c = open_encrypted(&none, &node_state_key()).unwrap();
+        assert_eq!(len_of(&beside(&none, "-wal")), 0, "no commit");
+        assert_eq!(pragma_int(&c, "auto_vacuum").unwrap(), 0);
+        assert!(matches!(
+            schema::migrate_with(&c, &[]),
+            Err(StoreError::Pragma("auto_vacuum"))
+        ));
+        c.close().map_err(|(_, e)| e).unwrap();
+        assert_eq!(fs::read(&none).unwrap(), before);
+    }
+
+    let full = keyed("FULL");
+    let c = open_encrypted(&full, &node_state_key()).unwrap();
+    assert_eq!(pragma_int(&c, "auto_vacuum").unwrap(), 2);
+    assert_eq!(
+        len_of(&beside(&full, "-wal")),
+        32 + 24 + 4096,
+        "one commit of page 1"
+    );
+    schema::migrate_with(&c, &[]).unwrap();
+    c.close().map_err(|(_, e)| e).unwrap();
+    let converted = fs::read(&full).unwrap();
+    let c = open_encrypted(&full, &node_state_key()).unwrap();
+    assert_eq!(len_of(&beside(&full, "-wal")), 0, "no commit");
+    c.close().map_err(|(_, e)| e).unwrap();
+    assert_eq!(fs::read(&full).unwrap(), converted);
+}
+
+/// Layer 8 §2.7 S2, §2.2 rule 9, §13.2: on an existing fabric store the S2
+/// open takes no epoch decision and leaves the clean record alone (the
+/// export and the migration copy open `store.db` this way), and an open
+/// that only reads commits nothing: the WAL holds no frame and `store.db` is
+/// byte for byte as the clean close left it, so the next `Store::open`
+/// still keeps the epoch.
+#[test]
+fn open_encrypted_writes_nothing_and_leaves_the_clean_record_and_the_epoch() {
+    let (t, s) = ready();
+    s.close(1).unwrap();
+    let db = t.path().join(DB_FILE);
+    let before = fs::read(&db).unwrap();
+    let conn = open_encrypted(&db, &key()).unwrap();
+    assert_eq!(get_i64(&conn, K_CLEAN).unwrap(), Some(1));
+    assert_eq!(get_u64(&conn, K_EPOCH).unwrap(), Some(1));
+    // At its own version a migration list only reads.
+    schema::migrate_with(&conn, schema::MIGRATIONS).unwrap();
+    assert_eq!(len_of(&beside(&db, "-wal")), 0, "no frame written");
+    conn.close().map_err(|(_, e)| e).unwrap();
+    assert_eq!(
+        fs::read(&db).unwrap(),
+        before,
+        "an open that only reads commits nothing"
+    );
+    let (s, d) = open(t.path(), 1);
+    assert_eq!(d, EpochDecision::Keep { epoch: 1 });
+    s.close(1).unwrap();
+}
+
+/// Layer 8 §2.7 S2, §2.2 rule 4: `migrate_with` runs a caller's own list
+/// by the file's own `user_version` (an appended entry runs alone, the
+/// connection back at NORMAL after), refuses a `user_version` newer than
+/// the list (`SchemaTooNew`, nothing downgraded) and a negative one.
+#[test]
+fn migrate_with_runs_a_callers_own_list_by_its_own_user_version() {
+    let t = tempfile::tempdir().unwrap();
+    let db = t.path().join("node").join("state.db");
+    let conn = open_encrypted(&db, &node_state_key()).unwrap();
+    schema::migrate_with(&conn, &OWN[..1]).unwrap();
+    assert_eq!(pragma_int(&conn, "user_version").unwrap(), 1);
+    assert_eq!(tables(&conn), ["meta"]);
+    conn.execute("INSERT INTO meta (key, value) VALUES ('kept', 7)", [])
+        .unwrap();
+    schema::migrate_with(&conn, OWN).unwrap();
+    assert_eq!(pragma_int(&conn, "user_version").unwrap(), 2);
+    assert_eq!(tables(&conn), ["meta", "records"]);
+    assert_eq!(pragma_int(&conn, "synchronous").unwrap(), 1);
+    // STRICT, as the caller wrote it.
+    assert!(conn
+        .execute(
+            "INSERT INTO records (ns, id, seq, body) VALUES ('storage', 'a', 'x', NULL)",
+            [],
+        )
+        .is_err());
+    conn.close().map_err(|(_, e)| e).unwrap();
+
+    // An older build's shorter list refuses the file and changes nothing.
+    let conn = open_encrypted(&db, &node_state_key()).unwrap();
+    assert!(matches!(
+        schema::migrate_with(&conn, &OWN[..1]),
+        Err(StoreError::SchemaTooNew {
+            found: 2,
+            supported: 1
+        })
+    ));
+    assert_eq!(pragma_int(&conn, "user_version").unwrap(), 2);
+    let kept: i64 = conn
+        .query_row("SELECT value FROM meta WHERE key = 'kept'", [], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    assert_eq!(kept, 7);
+    conn.pragma_update(None, "user_version", -1).unwrap();
+    assert!(matches!(
+        schema::migrate_with(&conn, OWN),
+        Err(StoreError::Corrupt("user_version"))
+    ));
+    conn.close().map_err(|(_, e)| e).unwrap();
+}
+
+/// Layer 8 §13.5 (amends §10.1): both opens, the fabric store's and the S2
+/// open's, set `journal_size_limit` to 4 MiB, and `wal_autocheckpoint`,
+/// `cache_size` and `mmap_size` stay what an untouched SQLCipher connection
+/// reads (unset).
+#[test]
+fn journal_size_limit_is_4_mib_on_both_opens_and_the_rest_stay_unset() {
+    let (t, s) = ready();
+    let n = open_encrypted(&t.path().join("node").join("state.db"), &node_state_key()).unwrap();
+    // An untouched connection to another keyed file: SQLCipher's defaults.
+    let bare = Connection::open(t.path().join("bare.db")).unwrap();
+    let lit = node_state_key().sqlcipher_literal();
+    bare.execute_batch(&format!("PRAGMA key = \"{}\";", lit.as_str()))
+        .unwrap();
+    assert_eq!(pragma_int(&bare, "journal_size_limit").unwrap(), -1);
+    for c in [&s.conn, &n] {
+        assert_eq!(pragma_int(c, "journal_size_limit").unwrap(), 4_194_304);
+        for p in ["wal_autocheckpoint", "cache_size", "mmap_size"] {
+            assert_eq!(
+                pragma_int(c, p).unwrap(),
+                pragma_int(&bare, p).unwrap(),
+                "{p}"
+            );
+        }
+    }
+    n.close().map_err(|(_, e)| e).unwrap();
+    s.close(1).unwrap();
+}
+
+/// One transaction of about 6 MiB, so the WAL grows past 4 MiB; a passive
+/// checkpoint that copies every frame back (the 1,000-page automatic one
+/// already ran at the commit); then one small commit. Returns the WAL's size
+/// after the checkpoint and after that commit.
+fn grow_checkpoint_commit(c: &Connection, wal: &Path) -> (u64, u64) {
+    c.execute_batch("CREATE TABLE ballast (b BLOB) STRICT;")
+        .unwrap();
+    c.execute(
+        "INSERT INTO ballast (b) VALUES (zeroblob(6 * 1024 * 1024))",
+        [],
+    )
+    .unwrap();
+    let (busy, log, done): (i64, i64, i64) = c
+        .query_row("PRAGMA wal_checkpoint(PASSIVE)", [], |r| {
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+        })
+        .unwrap();
+    assert_eq!((busy, log), (0, done), "every frame copied back");
+    let grown = len_of(wal);
+    c.execute("INSERT INTO ballast (b) VALUES (x'00')", [])
+        .unwrap();
+    (grown, len_of(wal))
+}
+
+/// Layer 8 §13.5, R04 fork 4: a WAL grown past 4 MiB is cut back to the
+/// limit by the first commit after a completed checkpoint, on both opens;
+/// with SQLite's default (no limit, -1) the same steps keep the high-water
+/// size, so the limit is what cuts it.
+#[test]
+fn a_wal_grown_past_4_mib_is_truncated_after_a_checkpoint() {
+    let limit = JOURNAL_SIZE_LIMIT as u64;
+    let (t, s) = ready();
+    let (grown, after) = grow_checkpoint_commit(&s.conn, &t.path().join("store.db-wal"));
+    assert!(grown > limit, "the fabric store's WAL grew to {grown}");
+    assert_eq!(
+        after, limit,
+        "the fabric store's WAL is cut back to the limit"
+    );
+    s.close(1).unwrap();
+
+    let db = t.path().join("node").join("state.db");
+    let n = open_encrypted(&db, &node_state_key()).unwrap();
+    let (grown, after) = grow_checkpoint_commit(&n, &beside(&db, "-wal"));
+    assert!(grown > limit, "the node-state WAL grew to {grown}");
+    assert_eq!(after, limit, "the node-state WAL is cut back to the limit");
+    n.close().map_err(|(_, e)| e).unwrap();
+
+    // The control: SQLite's default keeps the WAL at its high-water size.
+    let other = t.path().join("control").join("state.db");
+    let c = open_encrypted(&other, &node_state_key()).unwrap();
+    c.pragma_update(None, "journal_size_limit", -1).unwrap();
+    let (grown, after) = grow_checkpoint_commit(&c, &beside(&other, "-wal"));
+    assert!(grown > limit);
+    assert_eq!(
+        after, grown,
+        "without the limit the WAL keeps {grown} bytes"
+    );
+    c.close().map_err(|(_, e)| e).unwrap();
+}

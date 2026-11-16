@@ -721,7 +721,19 @@ pub(crate) fn migrate(conn: &Connection) -> Result<()> {
 /// [`MIGRATIONS`] to stand in for an older build (a v3 build is this code
 /// with `[V1, V2, V3]`), so "a v4 store is refused by a v3 build" is
 /// checked against the exact `SchemaTooNew` path such a build runs.
-pub(crate) fn migrate_with(conn: &Connection, migrations: &[&str]) -> Result<()> {
+///
+/// **Public for a caller's own list (Layer 8 §2.7 S2, §2.2 rule 4):** a
+/// file opened through [`super::open_encrypted`] (Layer 8's node-state
+/// store, `node/state.db`) keeps its own `user_version` and its own
+/// append-only list, migrated by the same rules: entry `i` runs in one
+/// transaction at `synchronous = FULL` and sets `user_version` to `i + 1`
+/// (NORMAL again after the last), a `user_version` above `migrations.len()`
+/// is refused ([`StoreError::SchemaTooNew`], never downgraded), a negative
+/// one is [`StoreError::Corrupt`], and the file must carry
+/// `auto_vacuum = INCREMENTAL` ([`super::open_encrypted`] gives a new file
+/// that mode). A file already at `migrations.len()` is only read: nothing is
+/// written.
+pub fn migrate_with(conn: &Connection, migrations: &[&str]) -> Result<()> {
     let found = super::pragma_int(conn, "user_version")?;
     let supported = migrations.len() as i64;
     if found > supported {
