@@ -1733,6 +1733,28 @@ covered_by = "l3.gate"
 strength = "F"
 needs = ["cargo"]
 
+# Layer 8 row A1, the agent's side of the store (8-storage/README.md §2.4 rule 1, §2.3 rule 2; G13 (2) and (4) in the crate):
+# proposals/ and tasks/ written through a .tmp- file, fsync and rename (a rewrite is a new inode, a reader listing <id>.json never
+# reads a torn file), every .tmp- of the two spool directories removed at the agent's start and never read as a task, and a chat turn
+# whose body carries history leaves no conversation file and its sentences in no file (the real router, a scripted model). No 111d
+# and no fake of it, hence strength C. Its seam is L3-L8:agent-state (this check proves side a); layers = [3, 8] so a Layer 8 run
+# plans it.
+[[check]]
+id = "l3.agent111.store_atomic"
+kind = "unit"
+cmd = ["cargo", "test", "--manifest-path", "3-intelligence/Cargo.toml", "-p", "agent111", "--test", "store_atomic"]
+tier = "slow"
+layers = [3, 8]
+seams = ["L3-L8:agent-state"]
+adapter = "libtest"
+cargo = true
+timeout_s = 1800
+rerun = "cargo test --manifest-path 3-intelligence/Cargo.toml -p agent111 --test store_atomic -- --exact {test}"
+rerun_cost = "slow, ~20 s warm"
+covered_by = "l3.gate"
+strength = "C"
+needs = ["cargo"]
+
 # The in-crate agent111 tests (config.rs, health.rs, status.rs, http.rs, tasks.rs, tools.rs, model.rs): pure functions
 # of the agent's own side, no peer and no fake, hence strength C. They are what a targeted run of L1-L3:env-precedence,
 # L3-L7:offload, L1-L3:health-restart or L3-L6:l6-tools reaches on the agent side besides the integration tests:
