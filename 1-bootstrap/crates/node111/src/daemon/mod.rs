@@ -1082,12 +1082,14 @@ async fn daemon_main() -> anyhow::Result<()> {
     // revoked Meshtastic panel sessions close their shim downlink; drop count
     let _mesh_panels = meshtastic.attach_panels(&panel_host);
     // POST /api/v1/services/{id}/restart: the children this daemon supervises
-    // (the Meshtastic module re-inserts it with meshmud + the reader added)
+    // (the Meshtastic module re-inserts it with meshmud + the reader added). Published with
+    // its generation (Layer 9 §3.1 rule 4, row D2), which every clone shares, the base
+    // handed to the Meshtastic module below included
     let supervised = services::Supervised::default()
         .with(services::ServiceId::Agent, intelligence.agent_control())
         .with(services::ServiceId::Model, intelligence.model_control())
         .with(services::ServiceId::Transport, transport.control());
-    dashboard.api.insert_ext(Arc::new(supervised.clone()));
+    supervised.publish(&dashboard.api);
     dashboard::api_v1::status::spawn_heartbeat(Arc::clone(&dashboard.api));
     let restart = Arc::new(tokio::sync::Notify::new());
     let restart_signal = dashboard::api_v1::actions::RestartSignal(Arc::clone(&restart));

@@ -54,14 +54,15 @@
 pub mod log;
 pub mod probe;
 
-use crate::daemon::dashboard::{OfferState, TransportState};
+use crate::daemon::dashboard::{ApiState, OfferState, TransportState};
 use crate::daemon::intelligence::ChildDisplay;
 use crate::daemon::kb::KbStatus;
-use crate::daemon::supervise::ChildControl;
+use crate::daemon::supervise::{ChildControl, ChildState};
 use serde::Serialize;
 use serde_json::{json, Value};
-use std::sync::RwLock;
+use std::sync::{Arc, Mutex, PoisonError, RwLock};
 use std::time::Duration;
+use tokio::sync::watch;
 
 /// `starting` window after a child spawn (spec §7: ≤ 90 s).
 pub const AGENT_GRACE: Duration = Duration::from_secs(90);
@@ -167,14 +168,49 @@ pub enum Action {
     Log,
 }
 
-/// The children 111d supervises, by service. The daemon start hook inserts an
-/// `Arc<Supervised>` into `ApiState` ext; `POST /services/{id}/restart` reads
-/// it (no entry ⇒ `409 not_supervised`). A service may own several children,
-/// restarted in registration order (Layer 5 §14: `meshtastic` = meshmud, then
-/// the presence reader).
+/// The children 111d supervises, by service. The daemon start hook publishes
+/// an `Arc<Supervised>` into `ApiState` ext ([`Supervised::publish`]);
+/// `POST /services/{id}/restart` reads it (no entry ⇒ `409 not_supervised`).
+/// A service may own several children, restarted in registration order
+/// (Layer 5 §14: `meshtastic` = meshmud, then the presence reader).
+///
+/// **The generation** (Layer 9 §3.1 rule 4, §23 "Code seams in locked
+/// crates"; row D2; an additive Layer 1 seam). Children also join and leave
+/// at run time: meshmud and the presence reader are handed over by
+/// re-publishing the daemon's set with them added, and without them once
+/// they are dropped. Every clone shares one generation `watch`
+/// ([`Supervised::generation`]), bumped once by each publication whose
+/// control list ([`Supervised::controls`]) differs from the one published
+/// before: a child joined or left. A task awaiting it re-reads
+/// `Arc<Supervised>` from ext and awaits the new children's state and exit
+/// watches. A publication that adds or removes no child bumps nothing;
+/// nothing polls, and no task, socket or timer is added.
 #[derive(Clone, Default)]
 pub struct Supervised {
     children: Vec<(ServiceId, Vec<ChildControl>)>,
+    /// Shared by every clone (Layer 9 §3.1 rule 4).
+    generation: Arc<Generation>,
+}
+
+/// [`Supervised`]'s generation (Layer 9 §3.1 rule 4): one per set built from
+/// `Supervised::default()`, shared by its clones.
+#[derive(Default)]
+struct Generation {
+    /// Publications that added or removed a child.
+    tx: watch::Sender<u64>,
+    /// The control list of the last publication, each child by its state
+    /// channel (one per spawn: the child's identity). Its lock serialises the
+    /// publications.
+    published: Mutex<Vec<Identity>>,
+}
+
+/// A child in a published control list: its service and its state channel.
+type Identity = (ServiceId, watch::Receiver<ChildState>);
+
+/// Every child of `x` is in `y`, under the same service.
+fn all_in(x: &[Identity], y: &[Identity]) -> bool {
+    x.iter()
+        .all(|(i, c)| y.iter().any(|(j, d)| i == j && c.same_channel(d)))
 }
 
 impl Supervised {
@@ -205,6 +241,47 @@ impl Supervised {
             .find(|(i, _)| *i == id)
             .map(|(_, c)| c.as_slice())
             .unwrap_or(&[])
+    }
+
+    /// The control list the generation numbers (Layer 9 §3.1 rule 4): every
+    /// child with its service, service by service in registration order.
+    pub fn controls(&self) -> impl Iterator<Item = (ServiceId, &ChildControl)> + '_ {
+        self.children
+            .iter()
+            .flat_map(|(id, cs)| cs.iter().map(move |c| (*id, c)))
+    }
+
+    /// A receiver of the generation (Layer 9 §3.1 rule 4), at its current
+    /// value: `changed()` resolves at the next publication that adds or
+    /// removes a child. The same channel for every clone of this set. Read
+    /// `Arc<Supervised>` from ext after subscribing, and again after each
+    /// `borrow_and_update()`, so no publication falls between the two.
+    pub fn generation(&self) -> watch::Receiver<u64> {
+        self.generation.tx.subscribe()
+    }
+
+    /// Insert this set into `api` ext as `Arc<Supervised>` (the daemon start
+    /// hook, and every run-time hand-over: the Meshtastic module adding or
+    /// dropping meshmud and the presence reader), then bump the generation
+    /// once when its control list differs from the last publication's: a
+    /// child joined or left (Layer 9 §3.1 rule 4). Publications are
+    /// serialised and the insert comes first, so a task woken by the bump
+    /// reads this set.
+    pub fn publish(&self, api: &ApiState) {
+        let now: Vec<Identity> = self
+            .controls()
+            .map(|(id, c)| (id, c.state_watch()))
+            .collect();
+        let mut last = self
+            .generation
+            .published
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        api.insert_ext(Arc::new(self.clone()));
+        if !(all_in(&now, &last) && all_in(&last, &now)) {
+            *last = now;
+            self.generation.tx.send_modify(|g| *g = g.wrapping_add(1));
+        }
     }
 }
 
@@ -2064,6 +2141,104 @@ mod tests {
         assert!(s.children(ServiceId::Meshtastic).is_empty());
         let s = s.with_children(ServiceId::Meshtastic, Vec::new());
         assert!(s.children(ServiceId::Meshtastic).is_empty());
+    }
+
+    /// Layer 9 §3.1 rule 4 (row D2): the generation counts the publications
+    /// that add or remove a child. The daemon's start set; meshmud's hand-over
+    /// as the Meshtastic module makes it (its base re-published with meshmud
+    /// and the reader added) bumps once and the set read back from ext names
+    /// both; a re-publication of the same children (a settings change, the
+    /// module's install with nothing bound) bumps nothing; the identify child
+    /// swapped for the service's bumps once, its drop once.
+    #[tokio::test]
+    async fn the_generation_bumps_once_per_publication_that_adds_or_removes_a_child() {
+        use crate::daemon::dashboard::{ApiConfig, DashboardState};
+        use crate::daemon::supervise::{spawn_child, BackoffPolicy, ChildHandle, ChildSpec};
+        use crate::daemon::DaemonLayout;
+        let dir = tempfile::tempdir().unwrap();
+        let layout = DaemonLayout {
+            root: dir.path().to_path_buf(),
+            etc: dir.path().join("etc"),
+        };
+        let mut cfg = ApiConfig::new(layout, false);
+        cfg.persist_auth = false;
+        let api = ApiState::new(Arc::new(RwLock::new(DashboardState::new("t"))), cfg);
+        let sleeper = |name: &str| -> ChildHandle {
+            spawn_child(ChildSpec {
+                name: name.into(),
+                program: "/bin/sleep".into(),
+                args: vec!["30".into()],
+                env: vec![],
+                backoff: BackoffPolicy::default(),
+                stdout_log: None,
+            })
+        };
+        let names = |api: &ApiState| -> Vec<(ServiceId, String)> {
+            api.ext::<Arc<Supervised>>()
+                .expect("published")
+                .controls()
+                .map(|(id, c)| (id, c.name().to_string()))
+                .collect()
+        };
+        let agent = sleeper("111-agent");
+        // the daemon's start set (`N/mod.rs`): built, then published once
+        let base = Supervised::default().with(ServiceId::Agent, Some(agent.control()));
+        let mut g = base.generation();
+        assert_eq!(*g.borrow(), 0, "built, not published: nothing numbered");
+        base.publish(&api);
+        assert_eq!(*g.borrow_and_update(), 1, "the start set: the agent joined");
+        // what a task reads back from ext numbers on the same channel
+        let seen = api.ext::<Arc<Supervised>>().unwrap().generation();
+        assert!(seen.same_channel(&g), "every clone shares the generation");
+        assert!(!Supervised::default().generation().same_channel(&g));
+        // nothing bound: the module's start install re-publishes its base as is
+        base.clone().publish(&api);
+        assert!(!g.has_changed().unwrap(), "no child joined: no bump");
+        // meshmud's hand-over: base + meshmud and the reader, one publication
+        let (mm, reader) = (sleeper("meshmud"), sleeper("meshtastic-presence"));
+        let both = || vec![mm.control(), reader.control()];
+        base.clone()
+            .with_children(ServiceId::Meshtastic, both())
+            .publish(&api);
+        assert_eq!(*g.borrow_and_update(), 2, "meshmud's hand-over bumps once");
+        assert!(
+            seen.has_changed().unwrap(),
+            "the reader of ext is woken too"
+        );
+        assert_eq!(
+            names(&api),
+            [
+                (ServiceId::Agent, "111-agent".to_string()),
+                (ServiceId::Meshtastic, "meshmud".to_string()),
+                (ServiceId::Meshtastic, "meshtastic-presence".to_string()),
+            ],
+            "the woken task re-reads the hand-over"
+        );
+        // the same children published again (a settings change re-publishes; also
+        // in another order): no child joined or left
+        base.clone()
+            .with_children(ServiceId::Meshtastic, both())
+            .publish(&api);
+        base.clone()
+            .with_children(ServiceId::Meshtastic, vec![reader.control(), mm.control()])
+            .publish(&api);
+        assert!(!g.has_changed().unwrap(), "a settings change bumps nothing");
+        // the identify child swapped for the service child: one left, one joined, one bump
+        let service = sleeper("meshmud");
+        base.clone()
+            .with_children(
+                ServiceId::Meshtastic,
+                vec![service.control(), reader.control()],
+            )
+            .publish(&api);
+        assert_eq!(*g.borrow_and_update(), 3, "the swap bumps once");
+        // forget: base again, both left
+        base.clone().publish(&api);
+        assert_eq!(*g.borrow_and_update(), 4, "the drop bumps once");
+        assert_eq!(names(&api), [(ServiceId::Agent, "111-agent".to_string())]);
+        for h in [&agent, &mm, &reader, &service] {
+            h.stop_and_wait(Duration::from_secs(5)).await;
+        }
     }
 
     #[tokio::test]

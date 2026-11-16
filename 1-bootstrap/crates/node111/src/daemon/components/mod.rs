@@ -65,6 +65,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
+use tokio::sync::watch;
 
 /// The services a component may start after (§6 "Start order").
 pub trait Dependencies: Send + Sync {
@@ -303,9 +304,30 @@ struct Inner {
     runners: tokio::sync::Mutex<HashMap<String, ComponentRunner>>,
     /// The last failure per id, for the status' reason.
     last_error: std::sync::Mutex<HashMap<String, (&'static str, String)>>,
+    /// The control list's generation (Layer 9 §3.1 rule 4; [`Components::generation`]).
+    generation: watch::Sender<u64>,
+    /// The control list: each enabled component's runner child slot, in
+    /// enable order. Changed only while `runners` is held and read without
+    /// it, so a reader never waits behind an enable.
+    attached: std::sync::Mutex<Vec<Slot>>,
 }
 
+/// A component on the control list: its id and its runner's child watch.
+type Slot = (String, watch::Receiver<Option<ChildControl>>);
+
 /// The optional components of this node (module doc). Cheap to clone.
+///
+/// **The generation** (Layer 9 §3.1 rule 4, §23 "Code seams in locked
+/// crates"; row D2; an additive Layer 1 seam). A component's runner is a child
+/// that joins at run time (an enable) and leaves (a disable, the daemon's
+/// stop), and the runner spawns and stops its own child as its dependency
+/// comes and goes. [`Components::generation`] is bumped once per change of the
+/// control list ([`Components::controls`]): a runner put on it or taken off,
+/// or an attached runner's child spawned or stopped. A task awaiting it
+/// re-reads the list and awaits the new children's state and exit watches.
+/// [`Components::status`] is unchanged; a change that adds or removes no child
+/// (a refused or repeated enable, an acknowledgement, a removal of files)
+/// bumps nothing; nothing polls, and no task, socket or timer is added.
 #[derive(Clone)]
 pub struct Components {
     inner: Arc<Inner>,
@@ -320,8 +342,53 @@ impl Components {
                 wiring,
                 runners: tokio::sync::Mutex::new(HashMap::new()),
                 last_error: std::sync::Mutex::new(HashMap::new()),
+                generation: watch::Sender::default(),
+                attached: std::sync::Mutex::new(Vec::new()),
             }),
         }
+    }
+
+    /// A receiver of the control list's generation (Layer 9 §3.1 rule 4), at
+    /// its current value: `changed()` resolves at the next change of
+    /// [`Self::controls`]. Read the list after subscribing, and again after
+    /// each `borrow_and_update()`, so no change falls between the two.
+    pub fn generation(&self) -> watch::Receiver<u64> {
+        self.inner.generation.subscribe()
+    }
+
+    /// The control list (Layer 9 §3.1 rule 4): every enabled component by
+    /// id, in enable order, with the child its runner runs now (`None` while
+    /// it waits for its dependency, is held, or between a stop and a spawn).
+    /// Never waits behind an enable or a disable.
+    pub fn controls(&self) -> Vec<(String, Option<ChildControl>)> {
+        self.attached()
+            .iter()
+            .map(|(id, child)| (id.clone(), child.borrow().clone()))
+            .collect()
+    }
+
+    fn attached(&self) -> std::sync::MutexGuard<'_, Vec<Slot>> {
+        self.inner
+            .attached
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// `id`'s runner joins the control list (an enable): one bump, and from
+    /// now on one per spawn or stop of its child. The caller holds `runners`.
+    fn attach(&self, id: &str, runner: &ComponentRunner) {
+        let mut list = self.attached();
+        list.push((id.to_string(), runner.child_watch()));
+        runner.attach(&self.inner.generation);
+    }
+
+    /// `id`'s runner leaves the control list (a disable, the daemon's stop):
+    /// one bump; its child's stop that follows bumps nothing. The caller
+    /// holds `runners`.
+    fn detach(&self, id: &str, runner: &ComponentRunner) {
+        let mut list = self.attached();
+        list.retain(|(i, _)| i != id);
+        runner.detach();
     }
 
     /// Every registered declaration.
@@ -653,6 +720,8 @@ impl Components {
         // 7. health
         match self.health(c, &runner).await {
             Ok(waiting) => {
+                // the runner joins the control list (Layer 9 §3.1 rule 4)
+                self.attach(&c.id, &runner);
                 runners.insert(c.id.clone(), runner);
                 Ok(waiting)
             }
@@ -896,6 +965,7 @@ impl Components {
         let c = self.get(id)?.clone();
         let mut runners = self.inner.runners.lock().await;
         if let Some(r) = runners.remove(&c.id) {
+            self.detach(&c.id, &r);
             r.shutdown().await;
         }
         self.release_ports(&c);
@@ -977,10 +1047,11 @@ impl Components {
         order.into_iter().map(|c| c.id.clone()).collect()
     }
 
-    /// Daemon stop: every runner shut down.
+    /// Daemon stop: every runner off the control list and shut down.
     pub async fn shutdown(&self) {
         let mut runners = self.inner.runners.lock().await;
-        for (_, r) in runners.drain() {
+        for (id, r) in runners.drain() {
+            self.detach(&id, &r);
             r.shutdown().await;
         }
     }
@@ -1362,5 +1433,192 @@ mod tests {
         for id in ["relay", "core", "off"] {
             assert!(comps.stdio(id).await.is_none(), "{id} runs nothing");
         }
+    }
+
+    /// Layer 9 §3.1 rule 4 (row D2): the control list's generation. An enable
+    /// bumps once and the list names the component with its child; a refused
+    /// enable bumps nothing; a settings change adds or removes no child, so it
+    /// bumps nothing and the same child runs on (a repeated enable, the
+    /// acknowledgement recorded again, new adapter arguments, a bridge settings
+    /// change handed in through `enable_component` and its prepare hook, a
+    /// refused removal); a planned dependency restart bumps once for the
+    /// child's stop and once for the new child; a disable bumps once and the
+    /// stop of its child that follows bumps nothing.
+    #[tokio::test]
+    async fn the_generation_bumps_once_per_enable_and_disable_and_never_on_a_settings_change() {
+        use crate::daemon::dashboard::api_v1::bridge::{
+            enable_component, ComponentAdapters, PrepareHook,
+        };
+        const BIN: &[u8] = b"#!/bin/sh\necho '{\"type\":\"ready\",\"dest\":\"00\"}'\nexec cat\n";
+        const LIMIT: Duration = Duration::from_secs(10);
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("root");
+        std::fs::create_dir_all(root.join("current")).unwrap();
+        let toml = format!(
+            "id = \"demo\"\nadapter = \"app:demo\"\ntitle = \"Demo\"\n[payload]\n\
+             kind = \"binary\"\nurl = \"https://example.invalid/dl/demo-bin\"\n\
+             sha256 = \"{sha}\"\nsize = {size}\n[run]\nprogram = \"demo-bin\"\nports = []\n\
+             health = \"ready\"\nhealth_timeout_secs = 5\n[license]\nspdx = \"MPL-2.0\"\n\
+             read_at = \"https://example.invalid/L\"\n\
+             notice = \"Test notice for demo. You install it.\"\n",
+            sha = crate::util::hash::sha256_bytes(BIN),
+            size = BIN.len()
+        );
+        let list = manifest::load(&[("demo.toml".to_string(), toml.into_bytes())]);
+        assert_eq!(list.len(), 1, "the test declaration registers");
+        let cache = root.join("cache/packages/demo");
+        std::fs::create_dir_all(&cache).unwrap();
+        std::fs::write(cache.join("demo-bin"), BIN).unwrap();
+        struct NoDeps;
+        impl Dependencies for NoDeps {
+            fn child(&self, _: ServiceId) -> Option<ChildControl> {
+                None
+            }
+            fn serving(&self, _: ServiceId) -> bool {
+                false
+            }
+        }
+        let mut cfg = ComponentsConfig::new(&root);
+        cfg.runner = RunnerConfig {
+            retry: Duration::from_millis(50),
+            retry_max: Duration::from_millis(200),
+            settle: Duration::ZERO,
+            grace: Duration::from_secs(2),
+        };
+        let comps = Components::new(
+            cfg,
+            list.clone(),
+            Wiring {
+                cmd: Arc::new(crate::testkit::MockRunner::new(Vec::<(
+                    String,
+                    crate::util::run::Output,
+                )>::new())),
+                ports: Arc::new(PortTable::new()),
+                deps: Arc::new(NoDeps),
+                tick: Arc::new(|| 0),
+            },
+        );
+        let mut g = comps.generation();
+        // refused (no acknowledgement): nothing runs, nothing bumps
+        let e = comps.enable("demo", None).await.unwrap_err();
+        assert_eq!(e.reason_code(), "consent_required", "{e:?}");
+        assert!(comps.controls().is_empty());
+        assert!(!g.has_changed().unwrap(), "a refused enable bumps nothing");
+        // the enable: the runner joins with its child, one bump
+        comps
+            .enable("demo", Some(&list[0].notice_hash()))
+            .await
+            .unwrap();
+        assert_eq!(*g.borrow_and_update(), 1, "an enable bumps once");
+        let ctl = comps.controls();
+        assert_eq!(ctl.len(), 1);
+        assert_eq!(ctl[0].0, "demo");
+        let first = ctl[0].1.clone().expect("the runner's child");
+        assert_eq!(first.name(), "demo");
+        // settings changes, each through this module or its caller, none adding or
+        // removing a child: a repeated enable; the acknowledgement recorded again;
+        // new adapter arguments for the running component; the bridge's announce
+        // name changed (its section of the consent file, as `PATCH /bridge/settings`
+        // writes it) and handed in through `enable_component`, the function the
+        // component route and Layer 9's `component.enable` call, whose prepare hook
+        // answers the arguments of the settings as they read now (the LXMF helper's
+        // hook does the same); a refused removal
+        comps.enable("demo", None).await.unwrap();
+        comps
+            .enable("demo", Some(&list[0].notice_hash()))
+            .await
+            .unwrap();
+        comps
+            .enable_with("demo", None, vec!["--name".into(), "Demo".into()])
+            .await
+            .unwrap();
+        let api = {
+            use crate::daemon::dashboard::{ApiConfig, ApiState, DashboardState};
+            let layout = crate::daemon::DaemonLayout {
+                root: root.clone(),
+                etc: dir.path().join("etc"),
+            };
+            let mut cfg = ApiConfig::new(layout, false);
+            cfg.persist_auth = false;
+            ApiState::new(
+                Arc::new(std::sync::RwLock::new(DashboardState::new("t"))),
+                cfg,
+            )
+        };
+        let answered = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let prepare: PrepareHook = {
+            let (root, answered) = (root.clone(), Arc::clone(&answered));
+            Arc::new(move || {
+                let announce = consent::load(&root)
+                    .announce
+                    .unwrap_or(consent::AnnounceRecord {
+                        name: None,
+                        interval_min: 0,
+                    });
+                let args = crate::daemon::bridge::lxmf::run_args(&announce);
+                answered.lock().unwrap().push(args.clone());
+                Box::pin(async move { Ok(args) })
+            })
+        };
+        let adapters = Arc::new(ComponentAdapters::default());
+        adapters.register_prepare("demo", prepare);
+        api.insert_ext(adapters);
+        consent::update_file(&root, |f| {
+            f.announce = Some(consent::AnnounceRecord {
+                name: Some("Renamed".into()),
+                interval_min: 30,
+            });
+            Ok(())
+        })
+        .unwrap();
+        enable_component(&api, &comps, "demo", None).await.unwrap();
+        assert_eq!(
+            *answered.lock().unwrap(),
+            [["--announce-interval", "30", "--name", "Renamed"]],
+            "the changed settings reached the enable"
+        );
+        assert_eq!(
+            comps.remove_files("demo").await.unwrap_err(),
+            RemoveError::Running
+        );
+        assert!(comps.status("demo").await.is_some());
+        assert!(!g.has_changed().unwrap(), "a settings change bumps nothing");
+        let ctl = comps.controls();
+        assert_eq!(ctl.len(), 1, "one runner on the list");
+        let child = ctl[0].1.as_ref().expect("its child").state_watch();
+        assert!(
+            child.same_channel(&first.state_watch()),
+            "the same child runs on"
+        );
+        // a planned restart of its dependency: held (the child stopped), resumed (a new one)
+        assert!(comps.stop_before("demo").await);
+        assert_eq!(*g.borrow_and_update(), 2, "the child's stop bumps once");
+        assert!(comps.controls()[0].1.is_none(), "held: no child");
+        comps.start_after("demo").await;
+        tokio::time::timeout(LIMIT, g.changed())
+            .await
+            .expect("the new child is handed over")
+            .unwrap();
+        assert_eq!(*g.borrow_and_update(), 3, "the new child bumps once");
+        let second = comps.controls()[0].1.clone().expect("a new child");
+        assert!(
+            !second.state_watch().same_channel(&first.state_watch()),
+            "another child, with its own state and exit watches"
+        );
+        // the disable: off the list, one bump; the child's stop after it bumps nothing
+        comps.disable("demo").await.unwrap();
+        assert_eq!(*g.borrow_and_update(), 4, "a disable bumps once");
+        assert!(comps.controls().is_empty());
+        assert_eq!(
+            second.state(),
+            crate::daemon::supervise::ChildState::Stopped
+        );
+        assert!(
+            !g.has_changed().unwrap(),
+            "the stop that follows bumps nothing"
+        );
+        // disabled again (idempotent): nothing to take off
+        comps.disable("demo").await.unwrap();
+        assert!(!g.has_changed().unwrap());
     }
 }

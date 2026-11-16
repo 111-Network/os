@@ -725,9 +725,10 @@ impl Meshtastic {
         self.reconcile_client().await;
     }
 
-    /// Re-insert `Arc<Supervised>` = base + meshmud, then the reader. Every
-    /// change of this module's children passes here, so it also wakes the
-    /// monitor (Layer 7 §3.6).
+    /// Re-publish `Arc<Supervised>` = base + meshmud, then the reader: into
+    /// ext, bumping the generation the base shares when a child joined or
+    /// left (Layer 9 §3.1 rule 4). Every change of this module's children
+    /// passes here, so it also wakes the monitor (Layer 7 §3.6).
     fn install_supervised(&self) {
         self.monitor_wake.notify_one();
         let Some((api, _)) = self.ctx() else { return };
@@ -750,7 +751,7 @@ impl Meshtastic {
         } else {
             base.with_children(ServiceId::Meshtastic, controls)
         };
-        api.insert_ext(Arc::new(sup));
+        sup.publish(&api);
     }
 
     /// Bring the children in line with the binding (caller holds the
