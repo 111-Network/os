@@ -67,11 +67,16 @@ L7_G9_OLD_TAG=checkpoint-layer-6 # the old hub B of item 6 (4689dbf), exported u
 
 # ---- G10 the carrier (§15 G10): gateways G and G' in two netns, each with a leaf hub, joined only through the stub
 L7_G10_WAN_BR=l7g10wan
-L7_G10_WAN_NET=198.51.100.0/24 # TEST-NET-2 (RFC 5737)
+# V4 moved the WAN from TEST-NET-2 to RFC 1918: the daemon accepts an http:// ntfy server only at a private, loopback
+# or link-local IP literal (N/carrier/ntfy.rs check_server, §6.3), and the stub speaks no TLS; the carrier pair itself
+# is a `carrier` pair (talks only through the stub), its one-off enrolment runs plain at a private address (§4.1)
+L7_G10_WAN_NET=10.111.71.0/24
 L7_G10_NODES="G GP LG LGP NTFY"
-L7_G10_IP_NTFY=198.51.100.1
-L7_G10_IP_G=198.51.100.11
-L7_G10_IP_GP=198.51.100.12 # G' (G prime)
+L7_G10_IP_NTFY=10.111.71.1
+L7_G10_IP_G=10.111.71.11
+L7_G10_IP_GP=10.111.71.12 # G' (G prime)
+L7_G10_LAN_IP_G=10.111.70.1 # added by V4: G's address on its LAN (LG's hub address)
+L7_G10_LAN_IP_GP=10.111.80.1 # added by V4: G' on its LAN
 L7_G10_LAN_G=10.111.70.0/24 # G and its leaf hub LG
 L7_G10_IP_LG=10.111.70.11
 L7_G10_LAN_GP=10.111.80.0/24 # G' and its leaf hub LGP

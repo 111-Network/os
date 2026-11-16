@@ -2797,8 +2797,12 @@ strength = "R"
 needs = ["bash", "userns", "netns", "python3", "ip", "nsenter", "curl", "jq", "nft", "ss", "git", "cargo"]
 
 # G10 the ntfy carrier through stub-ntfy.py in five namespaces. Row V4 (--smoke is l7.g10-smoke).
-# A T0 stub: it prints '<G> SKIPPED: not built yet (T0 stub)' and exits 0 (7-relay/TASKS.md row V4). Strength N
-# until the row lands; promote it to R then (and to cargo = true if the gate builds).
+# Two real `111 daemon` gateways G and G' (each with a member) in a user + net + pid namespace; the stub in a fifth netns; after the
+# one-off enrolment the two gateway ports are isolated on the bridge, so the stub is the only path. 5A (no request until an event; the
+# drain-post-drain on a Forward event, a route event and Flush now; idle afterwards), the commit on the far ack only, 5B (one stream, one
+# thread, a stub restart), re-posts counted, a dropped ack healed, 4,096 B / 2,937 B / 413 / 429, a third client, the metered cap, the
+# switch off under strace. NTFY_BIN (a real ntfy) is absent: its items are SKIPPED, REQUIRE_NTFY=1 makes that a FAIL. Writes
+# 7-relay/verify/logs/ntfy-smoke-<calver>-stub.md (a tracked file). Needs a built 111 (BIN111 or CARGO_TARGET_DIR).
 [[check]]
 id = "l7.g10"
 kind = "unit"
@@ -2809,9 +2813,9 @@ seams = ["L1-L7:carrier-ntfy", "L5-L7:forwarder-handoff"]
 adapter = "okfail"
 lock = "verify"
 timeout_s = 1800
-rerun_cost = "ns, T0 stub: SKIPPED today"
-strength = "N"
-needs = ["bash"]
+rerun_cost = "ns, about 8 min (four daemons, enrolment and pairing, a netlink debounce of 2 s after each route event, the 5B phase, the strace windows; needs a built 111)"
+strength = "R"
+needs = ["bash", "userns", "netns", "python3", "ip", "nsenter", "curl", "jq", "ss", "strace"]
 
 # G11 TLS 1.3 raw public keys between two hubs. Row V5.
 # Four real `111 daemon`s (X and Y the pair, Z a plain member, Q a third hub) in network namespaces on TEST-NET-3

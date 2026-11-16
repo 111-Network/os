@@ -501,7 +501,7 @@ a = { layer = 1, files = ["1-bootstrap/crates/node111/src/daemon/carrier/ntfy.rs
 b = { layer = 7, files = ["7-relay/verify/stub-ntfy.py", "7-relay/carriers/ntfy/server.yml"] }
 read_first = "a"
 symptom = "cross-island custody is stuck: 409 metered_cap, RelayStatus.carrier"
-gap = "The stub-ntfy.py stand-in is unverified against a real ntfy server (11 log items 'not run from this box')."
+gap = "G10 (carrier.sh, row V4, REQUIRE_G10=1 GREEN) runs two real gateways against stub-ntfy.py, the stdlib stand-in, which is unverified against a real ntfy server: NTFY_BIN is unset on this box, so the real-server items are SKIPPED (REQUIRE_NTFY=1 makes them a FAIL), and D12 waits for the owner-run smoke log."
 
 [[seam]]
 id = "L1-L7:origin"
@@ -538,7 +538,7 @@ a = { layer = 1, files = [
 b = { layer = 7, files = ["1-bootstrap/crates/node111/src/daemon/dashboard/api_v1/relay7.rs"] }
 read_first = "a"
 symptom = "settings are lost or a secret leaks: the GET /relay shape"
-gap = "Row D10 landed: GET /relay and PATCH /relay/settings run on D1's settings cell, every consent round trip and refusal through the real router (tests/api_v1_relay7.rs); the link-key file is D5's. On running daemons: G11 (tls.sh, row V5) and G9 (forward.sh, row V3) read GET /relay on paired hubs; PATCH /relay/settings between hosts waits for G10 (carrier.sh, row V4)."
+gap = "Row D10 landed: GET /relay and PATCH /relay/settings run on D1's settings cell, every consent round trip and refusal through the real router (tests/api_v1_relay7.rs); the link-key file is D5's. On running daemons: G11 (tls.sh, row V5) and G9 (forward.sh, row V3) read GET /relay on paired hubs; G10 (carrier.sh, row V4) switches the gateway and carrier through PATCH /relay/settings on real gateways."
 
 [[seam]]
 id = "L1-L8:state-service"
@@ -1166,7 +1166,7 @@ a = { layer = 5, files = ["5-messaging/crates/mesh111/src/fabric.rs"] }
 b = { layer = 7, files = ["1-bootstrap/crates/node111/src/daemon/carrier/mod.rs"] }
 read_first = "a"
 symptom = "custody is not forwarded: a message stays relayed with reason_code forwarding and never reaches delivered"
-gap = "Row D11 landed: the carrier runtime (N/carrier/mod.rs) drains the forwarder and posts through ntfy, proven at I against stub-ntfy.py by l1.node111.carrier_flow (two real hubs and a member at each); no real ntfy server has carried it (D12 waits for the owner-run smoke log). G9 (forward.sh, row V3, REQUIRE_G9=1 GREEN) forwards between three real hubs over TEST-NET with TLS-RPK: the hint, the probe order, every pair refusing, restarts with deduplication, the Transit quota, REJECT_FULL, a Layer 6 hub; G10 (carrier.sh, row V4) is a T0 stub."
+gap = "Row D11 landed: the carrier runtime (N/carrier/mod.rs) drains the forwarder and posts through ntfy, proven at I against stub-ntfy.py by l1.node111.carrier_flow (two real hubs and a member at each); no real ntfy server has carried it (D12 waits for the owner-run smoke log). G9 (forward.sh, row V3, REQUIRE_G9=1 GREEN) forwards between three real hubs over TEST-NET with TLS-RPK: the hint, the probe order, every pair refusing, restarts with deduplication, the Transit quota, REJECT_FULL, a Layer 6 hub; G10 (carrier.sh, row V4, REQUIRE_G10=1 GREEN) carries forwards between two real gateways through stub-ntfy.py on a private WAN (5A and 5B, the commit on the far ack only, re-posts, the body limits); its leaf-hub phase (§5 rows 2 and 3) is open."
 
 [[seam]]
 id = "L5-L7:pair-gate"
