@@ -196,6 +196,59 @@ else
 	fail "finish failed-write handling (rc=$RC)"
 fi
 
+# --- case 9: the APK step's record, state/apk.json (Layer 9 §12.6; G19 (11), dry-run half) ---
+# `111 install --phone` installs the three pinned APKs (step 3) and keeps their pins; on step 4's
+# run-as channel, once Termux is bootstrapped (this fake tree), it writes them to state/apk.json.
+# REC and the three commands are the provisioner's own, byte for byte and in its order, for the
+# pins of three fixed APK fixtures: tests/phone_flow.rs fails when `111 install --phone` sends
+# anything else, and its transcript test puts them after the APK step. Replayed here as run-as
+# runs them: each one `sh -c` in the Termux root, the write with the record on stdin.
+REC='{"schema":1,"apk":{"com.termux":"5d994501492ad52262147b765f6b51344bc4221a5bfe5015a5054046ffcb9857","com.termux.api":"1bbdd4e8285ec36bff0487be380941f7519871c4bad07083cb9c9fa9bd0d92cf","com.termux.boot":"b289a36d7a2cfb5f957b5bd795b61d3a6f7d3ddb8699be01f81547c8a0cc9343"}}'
+# shellcheck disable=SC2016 # the provisioner's text: $PREFIX expands in run-as's shell
+REC_WRITE='mkdir -p $(dirname $PREFIX/var/lib/111/state/.apk.json.tmp) && cat > $PREFIX/var/lib/111/state/.apk.json.tmp  && echo WRITE_OK'
+# shellcheck disable=SC2016 # as above
+REC_HASH='sha256sum $PREFIX/var/lib/111/state/.apk.json.tmp | cut -d'\'' '\'' -f1 | grep -qx 2af6c5161f4b74954bf82cc0b92e1ee4be4fe4ab9f7a2b2e8487dfddf7332756 && echo HASH_OK'
+# shellcheck disable=SC2016 # as above
+REC_LAND='chmod 0600 $PREFIX/var/lib/111/state/.apk.json.tmp && mv -f $PREFIX/var/lib/111/state/.apk.json.tmp $PREFIX/var/lib/111/state/apk.json && echo APK_RECORD_OK'
+# the three calls in order, each answering the marker the provisioner checks for
+push_record() {
+	[ "$(printf '%s\n' "$REC" | sh -c "$REC_WRITE")" = WRITE_OK ] \
+		&& [ "$(sh -c "$REC_HASH")" = HASH_OK ] \
+		&& [ "$(sh -c "$REC_LAND")" = APK_RECORD_OK ]
+}
+# the file holds the record and a newline, 0600, and no temp file is left beside it
+record_ok() { # $1 = the Termux root's state/
+	[ -f "$1/apk.json" ] \
+		&& [ "$(sha256sum < "$1/apk.json" | cut -d' ' -f1)" = "$(printf '%s\n' "$REC" | sha256sum | cut -d' ' -f1)" ] \
+		&& [ "$(stat -c %a "$1/apk.json")" = 600 ] && [ ! -e "$1/.apk.json.tmp" ]
+}
+# a phone whose node never started: no state/ yet, the record creates it
+FRESH="$T/fresh-prefix"
+mkdir -p "$FRESH/var/lib/111"
+if (PREFIX="$FRESH" && export PREFIX && push_record) && record_ok "$FRESH/var/lib/111/state"; then
+	pass "apk record: the provisioner's write lands state/apk.json, 0600, state/ created"
+else
+	fail "apk record on a phone with no state/"
+fi
+# a re-run: an old world-readable record and the temp file of a killed run are replaced whole
+RS="$PREF/var/lib/111/state"
+printf '%s\n' '{"schema":1,"apk":{}}' > "$RS/apk.json"
+printf 'half a rec' > "$RS/.apk.json.tmp"
+chmod 0644 "$RS/apk.json" "$RS/.apk.json.tmp"
+if push_record && record_ok "$RS"; then
+	pass "apk record: a re-run replaces the old record whole, 0600, through the temp file"
+else
+	fail "apk record re-run"
+fi
+# the Termux side leaves it as pushed: Termux:Boot's script, a daemon start, a daemon exit
+echo 0 > "$RS/111node.laststart" # past the run script's 2 s throttle
+sh boot/00-111-node.sh && sh "$PREF/var/service/111node/run" && sh sv/111node/finish 0 0 && RC=0 || RC=$?
+if [ "$RC" -eq 0 ] && record_ok "$RS"; then
+	pass "apk record: boot, run and finish leave state/apk.json byte for byte, 0600"
+else
+	fail "apk record across boot, run and finish (rc=$RC)"
+fi
+
 echo
 if [ "$FAILS" -eq 0 ]; then
 	say "ALL CASES GREEN"

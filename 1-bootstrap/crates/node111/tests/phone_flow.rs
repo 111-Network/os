@@ -985,26 +985,36 @@ fn push_verified_script(local: &std::path::Path, remote: &str, sha: &str) -> Vec
     ]
 }
 
-/// Step 4 whole on the run-as channel, as `phone::run` calls it: the exact transcript puts the
-/// three service files and the one delete after the payload's extract and before the debs, so a
-/// step 4 that drops them, or moves them out of the run-as branch, fails here (`run` itself needs
-/// a real adb and the network: the owner's real-device run covers it).
-#[test]
-fn step_4_writes_the_service_files_and_deletes_the_cron_script_before_the_debs() {
+/// A host cache holding what step 4 pushes, with their pins: the aarch64 payload and one `.deb`.
+fn step_4_cache() -> (tempfile::TempDir, PinnedArtifact, Vec<PinnedArtifact>) {
     let cache = tempfile::tempdir().unwrap();
-    let payload = cache.path().join("payload-aarch64.tar.gz");
-    std::fs::write(&payload, b"payload-bytes").unwrap();
-    let deb = cache.path().join("openssh.deb");
-    std::fs::write(&deb, b"deb-bytes").unwrap();
+    std::fs::write(
+        cache.path().join("payload-aarch64.tar.gz"),
+        b"payload-bytes",
+    )
+    .unwrap();
+    std::fs::write(cache.path().join("openssh.deb"), b"deb-bytes").unwrap();
     let payload_pin = artifact(
         "aarch64-unknown-linux-musl",
         &node111::util::hash::sha256_bytes(b"payload-bytes"),
     );
-    let debs = [artifact(
+    let debs = vec![artifact(
         "openssh",
         &node111::util::hash::sha256_bytes(b"deb-bytes"),
     )];
-    let release: node111::calver::Calver = "2026.11.16".parse().unwrap();
+    (cache, payload_pin, debs)
+}
+
+/// Step 4 whole on the run-as channel for [`step_4_cache`]'s cache and release 2026.11.16, the
+/// exact transcript `phone::headless_channel` must issue: the bootstrap wait, the boot script,
+/// the payload and its extract, the three service files and the one delete, then, given
+/// `record` (the bytes of the APK step's record), its three calls, then the debs and the guard.
+fn step_4_script(
+    cache: &std::path::Path,
+    payload_pin: &PinnedArtifact,
+    debs: &[PinnedArtifact],
+    record: Option<&[u8]>,
+) -> Vec<(String, Output)> {
     let boot = "/data/data/com.termux/files/home/.termux/boot/00-111-node.sh";
     let boot_sha = node111::util::hash::sha256_bytes(&termux_asset("boot/00-111-node.sh"));
     let rel = "$PREFIX/var/lib/111/releases";
@@ -1034,7 +1044,7 @@ fn step_4_writes_the_service_files_and_deletes_the_cron_script_before_the_debs()
         ),
     ];
     script.extend(push_verified_script(
-        &payload,
+        &cache.join("payload-aarch64.tar.gz"),
         &format!("{rel}/payload.tar.gz"),
         &payload_pin.sha256,
     ));
@@ -1049,7 +1059,14 @@ fn step_4_writes_the_service_files_and_deletes_the_cron_script_before_the_debs()
         ra(&format!("rm -f {OLD_CRON_SCRIPT} && echo RM_OK")),
         out(0, "RM_OK\n"),
     ));
-    script.extend(push_verified_script(&deb, deb_remote, &debs[0].sha256));
+    if let Some(record) = record {
+        script.extend(apk_record_script(record));
+    }
+    script.extend(push_verified_script(
+        &cache.join("openssh.deb"),
+        deb_remote,
+        &debs[0].sha256,
+    ));
     script.extend([
         (
             ra(&format!("dpkg -i {deb_remote} && echo DPKG_OK")),
@@ -1060,14 +1077,26 @@ fn step_4_writes_the_service_files_and_deletes_the_cron_script_before_the_debs()
             out(0, "CLEAN\n"),
         ),
     ]);
-    let runner = MockRunner::new(script);
+    script
+}
+
+/// Step 4 whole on the run-as channel, as `phone::run` calls it: the exact transcript puts the
+/// three service files and the one delete after the payload's extract and before the debs, so a
+/// step 4 that drops them, or moves them out of the run-as branch, fails here (`run` itself needs
+/// a real adb and the network: the owner's real-device run covers it). Without the pins of an
+/// APK step (a run resuming a marker an earlier provisioner wrote) it writes no record.
+#[test]
+fn step_4_writes_the_service_files_and_deletes_the_cron_script_before_the_debs() {
+    let (cache, payload_pin, debs) = step_4_cache();
+    let runner = MockRunner::new(step_4_script(cache.path(), &payload_pin, &debs, None));
     node111::install::phone::headless_channel(
         &adb_of(&runner),
-        &payload,
+        &cache.path().join("payload-aarch64.tar.gz"),
         &payload_pin,
-        release,
+        "2026.11.16".parse().unwrap(),
         cache.path(),
         &debs,
+        None,
     )
     .unwrap();
     runner.assert_exhausted();
@@ -1076,4 +1105,341 @@ fn step_4_writes_the_service_files_and_deletes_the_cron_script_before_the_debs()
     // the boot script and the three service files; no write names the cron script
     assert_eq!(writes.len(), 4, "{writes:#?}");
     assert!(writes.iter().all(|c| !c.contains("cron")), "{writes:#?}");
+    assert!(calls.iter().all(|c| !c.contains("apk.json")), "{calls:#?}");
+}
+
+// ---------- the APK step's record: state/apk.json (Layer 9 §12.6) ----------
+
+/// Where the record lands in the Termux root, and the temp file it lands through (spelled out
+/// here, not borrowed from the crate).
+const APK_RECORD: &str = "$PREFIX/var/lib/111/state/apk.json";
+const APK_RECORD_TMP: &str = "$PREFIX/var/lib/111/state/.apk.json.tmp";
+
+/// The three pinned APKs (`apk::APK_PACKAGES`, spelled out): package, manifest name, the
+/// versionName the post-install probe reads, and the bytes of this test's fake APK.
+const APKS: [(&str, &str, &str, &[u8]); 3] = [
+    ("com.termux", "termux", "0.118.3", b"termux-bytes"),
+    ("com.termux.boot", "termux-boot", "0.8.1", b"boot-bytes"),
+    ("com.termux.api", "termux-api", "0.53.0", b"api-bytes"),
+];
+
+/// The record of [`APKS`]' pins, byte for byte; `termux/tests/dryrun.sh` replays this one.
+const APK_RECORD_BYTES: &str = concat!(
+    r#"{"schema":1,"apk":{"#,
+    r#""com.termux":"5d994501492ad52262147b765f6b51344bc4221a5bfe5015a5054046ffcb9857","#,
+    r#""com.termux.api":"1bbdd4e8285ec36bff0487be380941f7519871c4bad07083cb9c9fa9bd0d92cf","#,
+    r#""com.termux.boot":"b289a36d7a2cfb5f957b5bd795b61d3a6f7d3ddb8699be01f81547c8a0cc9343""#,
+    "}}\n"
+);
+
+/// [`APKS`]' pins, as the APK step returns them.
+fn apk_pins() -> node111::install::phone::ApkPins {
+    APKS.iter()
+        .map(|(package, _, _, fake)| (package.to_string(), node111::util::hash::sha256_bytes(fake)))
+        .collect()
+}
+
+/// [`APKS`] written into `cache` as the prefetch leaves them, and their manifest pins.
+fn apk_cache(cache: &std::path::Path) -> Vec<PinnedArtifact> {
+    APKS.iter()
+        .map(|(_, name, _, fake)| {
+            std::fs::write(cache.join(format!("{name}.apk")), fake).unwrap();
+            artifact(name, &node111::util::hash::sha256_bytes(fake))
+        })
+        .collect()
+}
+
+/// The APK step's exact transcript for [`apk_cache`]'s cache: per APK, `adb install -r`, then
+/// its versionName probe.
+fn apk_step_script(cache: &std::path::Path) -> Vec<(String, Output)> {
+    let mut script = Vec::new();
+    for (package, name, version, _) in APKS {
+        script.push((
+            format!(
+                "adb -s SER1 install -r {}",
+                cache.join(format!("{name}.apk")).to_string_lossy()
+            ),
+            out(0, "Performing Streamed Install\nSuccess\n"),
+        ));
+        script.push((
+            format!("adb -s SER1 shell dumpsys package {package} | grep -m1 versionName"),
+            out(0, &format!("    versionName={version}\n")),
+        ));
+    }
+    script
+}
+
+/// The three run-as calls of the record: the write to the temp file (on stdin) and its hash
+/// probe (`runas::install_file`), then 0600 and the rename onto `state/apk.json`.
+fn apk_record_script(record: &[u8]) -> Vec<(String, Output)> {
+    let mut script = install_file_script(record, APK_RECORD_TMP, false);
+    script.push((
+        ra(&format!(
+            "chmod 0600 {APK_RECORD_TMP} && mv -f {APK_RECORD_TMP} {APK_RECORD} && echo APK_RECORD_OK"
+        )),
+        out(0, "APK_RECORD_OK\n"),
+    ));
+    script
+}
+
+/// Step 3 then step 4 on one exact transcript, as `phone::run` sequences them: the APK step
+/// installs the three APKs and returns their pins, writing nothing to the phone; step 4 then
+/// pushes the record of exactly those pins over run-as, after the service files and before the
+/// debs (its hash probe pins the bytes written).
+#[test]
+fn the_apk_record_is_pushed_after_the_apk_step() {
+    let (cache, payload_pin, debs) = step_4_cache();
+    let apks = apk_cache(cache.path());
+    let mut script = apk_step_script(cache.path());
+    script.extend(step_4_script(
+        cache.path(),
+        &payload_pin,
+        &debs,
+        Some(APK_RECORD_BYTES.as_bytes()),
+    ));
+    let runner = MockRunner::new(script);
+    let adb = adb_of(&runner);
+
+    let pins = node111::install::phone::install_apks(&adb, cache.path(), &apks).unwrap();
+    assert_eq!(pins, apk_pins());
+    let step_3 = runner.calls();
+    assert_eq!(step_3.len(), 6, "{step_3:#?}");
+    assert!(step_3.iter().all(|c| !c.contains("run-as")), "{step_3:#?}");
+
+    node111::install::phone::headless_channel(
+        &adb,
+        &cache.path().join("payload-aarch64.tar.gz"),
+        &payload_pin,
+        "2026.11.16".parse().unwrap(),
+        cache.path(),
+        &debs,
+        Some(&pins),
+    )
+    .unwrap();
+    runner.assert_exhausted();
+    let calls = runner.calls();
+    let last_install = calls
+        .iter()
+        .rposition(|c| c.contains(" install -r "))
+        .unwrap();
+    let first_record = calls.iter().position(|c| c.contains("apk.json")).unwrap();
+    assert!(last_install < first_record, "{calls:#?}");
+    let writes: Vec<&String> = calls.iter().filter(|c| c.contains("<stdin:")).collect();
+    // the boot script, the three service files, then the record: its bytes and nothing else
+    assert_eq!(writes.len(), 5, "{writes:#?}");
+    assert!(
+        writes[4].contains(".apk.json.tmp")
+            && writes[4].ends_with(&format!("<stdin:{}B>", APK_RECORD_BYTES.len())),
+        "{writes:#?}"
+    );
+}
+
+/// No record without a completed APK step: an install that fails ends the step with no pins and
+/// nothing written to the phone (`run` stops there, before step 4).
+#[test]
+fn a_failed_apk_step_records_nothing() {
+    let cache = tempfile::tempdir().unwrap();
+    let apks = apk_cache(cache.path());
+    let mut script = apk_step_script(cache.path());
+    script.truncate(2);
+    script.push((
+        format!(
+            "adb -s SER1 install -r {}",
+            cache.path().join("termux-boot.apk").to_string_lossy()
+        ),
+        out(1, "Failure [INSTALL_FAILED_USER_RESTRICTED]\n"),
+    ));
+    let runner = MockRunner::new(script);
+    let err =
+        node111::install::phone::install_apks(&adb_of(&runner), cache.path(), &apks).unwrap_err();
+    assert!(err.to_string().contains("com.termux.boot"), "{err}");
+    runner.assert_exhausted();
+    let calls = runner.calls();
+    assert!(
+        calls
+            .iter()
+            .all(|c| !c.contains("run-as") && !c.contains("apk.json")),
+        "{calls:#?}"
+    );
+}
+
+/// The record's bytes: `{"schema":1,"apk":{<package>:<sha256>}}` and a newline, the packages in
+/// byte order, parsing back to the pins the APK step installed; anything but one to three pinned
+/// packages, each with a 64-lowercase-hex pin, is refused before anything reaches the phone.
+#[test]
+fn the_apk_record_bytes_and_its_refusals() {
+    use node111::install::phone::{apk_record, push_apk_record, ApkPins};
+    let bytes = apk_record(&apk_pins()).unwrap();
+    assert_eq!(bytes, APK_RECORD_BYTES.as_bytes());
+    let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(v["schema"], 1);
+    let apk = v["apk"].as_object().unwrap();
+    assert_eq!(apk.len(), 3);
+    for (package, _, _, fake) in APKS {
+        assert_eq!(apk[package], node111::util::hash::sha256_bytes(fake));
+    }
+
+    let pin = node111::util::hash::sha256_bytes(b"x");
+    let with = |package: &str, sha: &str| {
+        let mut pins = apk_pins();
+        pins.remove("com.termux.api");
+        pins.insert(package.to_string(), sha.to_string());
+        pins
+    };
+    for (why, pins) in [
+        ("no package", ApkPins::new()),
+        ("a package that is not pinned", with("com.example", &pin)),
+        ("a short pin", with("com.termux.api", &pin[..63])),
+        ("a long pin", with("com.termux.api", &format!("{pin}0"))),
+        (
+            "an uppercase pin",
+            with("com.termux.api", &pin.to_uppercase()),
+        ),
+        (
+            "a pin that is not hex",
+            with("com.termux.api", &"g".repeat(64)),
+        ),
+    ] {
+        assert!(apk_record(&pins).is_err(), "{why}");
+        let runner = MockRunner::new(Vec::<(String, Output)>::new());
+        assert!(push_apk_record(&adb_of(&runner), &pins).is_err(), "{why}");
+        assert!(runner.calls().is_empty(), "{why}");
+    }
+}
+
+/// On a sandboxed Termux tree: the record lands as `state/apk.json`, its bytes and 0600, in three
+/// run-as calls, `state/` created on a phone whose node never started and no temp file left; a
+/// later run replaces it whole and 0600 again, also when a killed run left a world-readable temp
+/// file behind (written with no `chmod`, the record would keep that file's 0644).
+#[test]
+fn the_apk_record_lands_as_state_apk_json_0600() {
+    use std::os::unix::fs::PermissionsExt;
+    let mode = |p: &std::path::Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+    let phone = SandboxPhone::new();
+    let adb = Adb::new(&phone, Some("SER1".into()), "adb");
+    let state = phone.lib().join("state");
+    let record = state.join("apk.json");
+    let temp = state.join(".apk.json.tmp");
+    assert!(!state.exists());
+
+    node111::install::phone::push_apk_record(&adb, &apk_pins()).unwrap();
+    assert_eq!(std::fs::read(&record).unwrap(), APK_RECORD_BYTES.as_bytes());
+    assert_eq!(mode(&record), 0o600);
+    assert!(!temp.exists());
+    assert_eq!(phone.calls.lock().unwrap().len(), 3);
+
+    std::fs::write(&temp, b"half a rec").unwrap();
+    for p in [&record, &temp] {
+        std::fs::set_permissions(p, std::fs::Permissions::from_mode(0o644)).unwrap();
+    }
+    let newer_api = node111::util::hash::sha256_bytes(b"api-bytes-0.54.0");
+    let mut newer = apk_pins();
+    newer.insert("com.termux.api".into(), newer_api.clone());
+    node111::install::phone::push_apk_record(&adb, &newer).unwrap();
+    let want =
+        APK_RECORD_BYTES.replace(&node111::util::hash::sha256_bytes(b"api-bytes"), &newer_api);
+    assert_eq!(std::fs::read_to_string(&record).unwrap(), want);
+    assert_eq!(mode(&record), 0o600);
+    let left: Vec<String> = std::fs::read_dir(&state)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(left, ["apk.json"], "no temp file left");
+}
+
+/// The pins step 3 installed survive a resume: saved with its marker and read back by the run
+/// that resumes it; a marker without pins (an earlier provisioner's, or one before step 3) is
+/// saved without the key and read with none; a marker whose pins are not a valid record is a
+/// fresh state, every step redone.
+#[test]
+fn the_apk_pins_survive_a_resume() {
+    use node111::install::phone::ProvisionState;
+    let dir = tempfile::tempdir().unwrap();
+    let marker = dir.path().join("phone-provision-SER1.json");
+
+    let mut s = ProvisionState::load(&marker, "SER1");
+    assert!(s.apk_pins().is_none());
+    s.mark("collision", &marker);
+    assert!(!std::fs::read_to_string(&marker)
+        .unwrap()
+        .contains("\"apk\""));
+    s.set_apk_pins(apk_pins());
+    s.mark("apks", &marker);
+    let resumed = ProvisionState::load(&marker, "SER1");
+    assert!(resumed.is_done("apks"));
+    assert_eq!(resumed.apk_pins(), Some(&apk_pins()));
+    assert!(ProvisionState::load(&marker, "SER2").apk_pins().is_none());
+
+    std::fs::write(
+        &marker,
+        r#"{"serial":"SER1","done":["collision","apks","channel"]}"#,
+    )
+    .unwrap();
+    let earlier = ProvisionState::load(&marker, "SER1");
+    assert!(earlier.is_done("channel"));
+    assert!(earlier.apk_pins().is_none());
+
+    std::fs::write(
+        &marker,
+        r#"{"serial":"SER1","done":["collision","apks"],"apk":{"com.termux":"not-a-pin"}}"#,
+    )
+    .unwrap();
+    let fresh = ProvisionState::load(&marker, "SER1");
+    assert!(!fresh.is_done("apks"));
+    assert!(fresh.apk_pins().is_none());
+}
+
+/// What run-as runs of one recorded `adb shell run-as` call: the device shell's parse of the
+/// call's text (the host `sh`, as [`SandboxPhone`] does), the Termux env and its space removed.
+fn run_as_inner(call: &str) -> String {
+    let quoted = call
+        .strip_prefix("adb -s SER1 shell run-as com.termux sh -c ")
+        .unwrap_or_else(|| panic!("not a run-as call: {call}"));
+    let parsed = std::process::Command::new("sh")
+        .args(["-c", &format!("printf '%s\\n' {quoted}")])
+        .output()
+        .unwrap();
+    let text = String::from_utf8(parsed.stdout).unwrap();
+    let lines: Vec<&str> = text.lines().collect();
+    assert_eq!(lines.len(), 1, "split into several words: {call}");
+    lines[0]
+        .strip_prefix(&format!("{TERMUX_ENV} "))
+        .unwrap_or_else(|| panic!("missing the Termux env: {}", lines[0]))
+        .to_string()
+}
+
+/// G19 (11)'s dry-run half: `termux/tests/dryrun.sh` replays the record on its fake Termux tree,
+/// and it must be this provisioner's own: the record of [`APKS`] (`REC`), then the three commands
+/// run-as runs (`REC_WRITE`, `REC_HASH`, `REC_LAND`), each quoted as the harness assigns it, in
+/// the order the provisioner sends them.
+#[test]
+fn the_dry_run_replays_the_provisioners_apk_record() {
+    let dry = std::fs::read_to_string(format!(
+        "{}/../../termux/tests/dryrun.sh",
+        env!("CARGO_MANIFEST_DIR")
+    ))
+    .unwrap();
+    let phone = SandboxPhone::new();
+    node111::install::phone::push_apk_record(
+        &Adb::new(&phone, Some("SER1".into()), "adb"),
+        &apk_pins(),
+    )
+    .unwrap();
+    let calls = phone.calls.lock().unwrap().clone();
+    assert_eq!(calls.len(), 3, "{calls:#?}");
+    let rec = format!(
+        "REC={}",
+        runas::sh_quote(APK_RECORD_BYTES.trim_end_matches('\n'))
+    );
+    let mut at = dry
+        .find(&rec)
+        .unwrap_or_else(|| panic!("dryrun.sh lacks the record: {rec}"))
+        + rec.len();
+    for (name, call) in ["REC_WRITE", "REC_HASH", "REC_LAND"].iter().zip(&calls) {
+        let line = format!("{name}={}", runas::sh_quote(&run_as_inner(call)));
+        let found = dry[at..]
+            .find(&line)
+            .unwrap_or_else(|| panic!("dryrun.sh lacks, after the line before it: {line}"));
+        at += found + line.len();
+    }
 }

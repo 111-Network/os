@@ -16,6 +16,7 @@ use crate::cli::InstallArgs;
 use crate::manifest::{ChannelManifest, PinnedArtifact};
 use adb::Adb;
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 const BOOT_SCRIPT: &str = include_str!("../../../../../termux/boot/00-111-node.sh");
@@ -26,23 +27,40 @@ const SV_FINISH: &str = include_str!("../../../../../termux/sv/111node/finish");
 /// tree with the cron seam (Layer 9 §1 rule 2, §3.3 rule 6); [`install_service_files`] deletes a
 /// copy still on the phone.
 const OLD_CRON_SCRIPT: &str = "$PREFIX/var/lib/111/share/termux/cron-healthcheck.sh";
+/// `state/apk.json` in the Termux root: the record of the APK step, which `111d` compares with
+/// the manifest's `apk.*` pins after each verified manifest check (Layer 9 §12.6, §4's path table).
+const APK_RECORD: &str = "$PREFIX/var/lib/111/state/apk.json";
+/// The record lands through this temp file and one rename, so a reader never sees half of one.
+const APK_RECORD_TMP: &str = "$PREFIX/var/lib/111/state/.apk.json.tmp";
 
-/// Host-side resume marker (per device serial): which steps completed.
+/// What the APK step installed (Layer 9 §12.6): each pinned package ([`apk::APK_PACKAGES`]) and
+/// the sha256 its APK was installed from, so at most three entries.
+pub type ApkPins = BTreeMap<String, String>;
+
+/// Host-side resume marker (per device serial): which steps completed, and the pins step 3
+/// installed (kept beside its marker so a resumed run still records them, Layer 9 §12.6).
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct ProvisionState {
     serial: String,
     done: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    apk: Option<ApkPins>,
 }
 
 impl ProvisionState {
+    /// The marker for `serial`; a missing, unreadable or foreign one (another serial, or pins
+    /// that are not a valid APK record) is a fresh state.
     pub fn load(path: &Path, serial: &str) -> Self {
         std::fs::read_to_string(path)
             .ok()
             .and_then(|t| serde_json::from_str(&t).ok())
-            .filter(|s: &ProvisionState| s.serial == serial)
+            .filter(|s: &ProvisionState| {
+                s.serial == serial && s.apk.as_ref().is_none_or(|p| apk_record(p).is_ok())
+            })
             .unwrap_or(ProvisionState {
                 serial: serial.to_string(),
                 done: Vec::new(),
+                apk: None,
             })
     }
     fn save(&self, path: &Path) {
@@ -59,6 +77,93 @@ impl ProvisionState {
         self.done.push(step.to_string());
         self.save(path);
     }
+    /// The pins the APK step installed, in this run or in the run this one resumes; `None`
+    /// when no APK step of this provisioner completed for the phone.
+    pub fn apk_pins(&self) -> Option<&ApkPins> {
+        self.apk.as_ref()
+    }
+    /// Keep the pins step 3 installed; saved with that step's [`mark`](Self::mark).
+    pub fn set_apk_pins(&mut self, pins: ApkPins) {
+        self.apk = Some(pins);
+    }
+}
+
+/// Step 3, the APK step (Layer 1 "Install flow — phone over USB-C", step 3): the three pinned
+/// APKs resolved from `cache` against `apks`, installed (`adb install -r`, each `versionName`
+/// verified); returns the pins it installed. Nothing is written to the phone here: the record of
+/// these pins waits for step 4's run-as channel ([`push_apk_record`]), because Termux unpacks
+/// its bootstrap into `$PREFIX` at its first start, which step 4 waits for, and skips that unpack
+/// when `$PREFIX` already holds files.
+pub fn install_apks(
+    adb: &Adb<'_>,
+    cache: &Path,
+    apks: &[PinnedArtifact],
+) -> anyhow::Result<ApkPins> {
+    let set = apk::resolve(cache, apks)?;
+    apk::install_all(adb, &set)?;
+    Ok(set
+        .files
+        .iter()
+        .map(|(package, artifact, _)| (package.clone(), artifact.sha256.clone()))
+        .collect())
+}
+
+/// The bytes of `state/apk.json` (Layer 9 §12.6): `{"schema":1,"apk":{<package>:<sha256>,…}}`
+/// and a newline, the packages in byte order. Refused unless it names one to three packages,
+/// each one of [`apk::APK_PACKAGES`], each pin 64 lowercase hex.
+pub fn apk_record(pins: &ApkPins) -> anyhow::Result<Vec<u8>> {
+    anyhow::ensure!(
+        (1..=apk::APK_PACKAGES.len()).contains(&pins.len()),
+        "an APK record names 1 to {} packages, not {}",
+        apk::APK_PACKAGES.len(),
+        pins.len()
+    );
+    for (package, sha256) in pins {
+        anyhow::ensure!(
+            apk::APK_PACKAGES.iter().any(|(p, _, _)| p == package),
+            "{package:?} is not a pinned APK package"
+        );
+        anyhow::ensure!(
+            sha256.len() == 64
+                && sha256
+                    .bytes()
+                    .all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')),
+            "the pin of {package} is not 64 lowercase hex"
+        );
+    }
+    #[derive(Serialize)]
+    struct Record<'a> {
+        schema: u32,
+        apk: &'a ApkPins,
+    }
+    let mut bytes = serde_json::to_vec(&Record {
+        schema: 1,
+        apk: pins,
+    })?;
+    bytes.push(b'\n');
+    Ok(bytes)
+}
+
+/// Push the record of the APK step to the phone as `state/apk.json`, 0600 (Layer 9 §12.6; §4's
+/// path table): [`runas::install_file`] writes it to `.apk.json.tmp` beside it and checks its
+/// sha256 on the device, then one run-as command sets 0600 and renames it into place. A record
+/// already there is replaced whole. Only step 4 calls this, over its run-as channel, so the
+/// record is never written before the APK step nor by `111d`.
+pub fn push_apk_record(adb: &Adb<'_>, pins: &ApkPins) -> anyhow::Result<()> {
+    let record = apk_record(pins)?;
+    runas::install_file(adb, &record, APK_RECORD_TMP, false)?;
+    let out = runas::run_as_output(
+        adb,
+        &format!(
+            "chmod 0600 {APK_RECORD_TMP} && mv -f {APK_RECORD_TMP} {APK_RECORD} && echo APK_RECORD_OK"
+        ),
+    )?;
+    anyhow::ensure!(
+        out.contains("APK_RECORD_OK"),
+        "landing state/apk.json failed: {}",
+        out.trim()
+    );
+    Ok(())
 }
 
 pub fn cache_dir() -> PathBuf {
@@ -143,10 +248,11 @@ pub fn install_service_files(adb: &Adb<'_>) -> anyhow::Result<()> {
 
 /// Step 4, the headless channel (Layer 1 "Install flow — phone over USB-C", step 4), whole: the
 /// bootstrap wait, then over run-as the boot script, the payload (pushed, hash-checked, extracted
-/// as `release`), [`install_service_files`] (with Layer 9 §3.3 rule 6's one delete) and the
-/// `.deb` closure from `cache`; when run-as is broken, the E2 fallback instead (the stub over
-/// `adb reverse`); last, the `allow-external-apps` guard. One function so a transcript test
-/// pins the order `run` provisions in.
+/// as `release`), [`install_service_files`] (with Layer 9 §3.3 rule 6's one delete), the record
+/// of the APK step when `apk_pins` holds the pins step 3 installed ([`push_apk_record`], Layer 9
+/// §12.6) and the `.deb` closure from `cache`; when run-as is broken, the E2 fallback instead
+/// (the stub over `adb reverse`; no record); last, the `allow-external-apps` guard. One
+/// function so a transcript test pins the order `run` provisions in.
 pub fn headless_channel(
     adb: &Adb<'_>,
     payload_path: &Path,
@@ -154,6 +260,7 @@ pub fn headless_channel(
     release: Calver,
     cache: &Path,
     debs: &[PinnedArtifact],
+    apk_pins: Option<&ApkPins>,
 ) -> anyhow::Result<()> {
     runas::wait_bootstrap(adb, 120)?;
     if runas::run_as_works(adb) {
@@ -177,9 +284,18 @@ pub fn headless_channel(
         );
         // profile + runit service; an earlier provisioner's cron script deleted
         install_service_files(adb)?;
+        // the record of the APK step: the pins step 3 installed (Layer 9 §12.6)
+        if let Some(pins) = apk_pins {
+            push_apk_record(adb, pins)?;
+        }
         runas::install_debs(adb, cache, debs)?;
     } else {
         eprintln!("111 phone: run-as channel broken — E2 fallback (typed stub + adb reverse)");
+        if apk_pins.is_some() {
+            eprintln!(
+                "111 phone: state/apk.json (the APK step's record) needs run-as: not written"
+            );
+        }
         let port = 18111u16;
         runas::e2e_reverse(adb, port)?;
         let stub = resolve_e2e_stub(port, payload)?;
@@ -261,13 +377,13 @@ pub fn run(args: InstallArgs) -> anyhow::Result<()> {
         apk::collision_check(&adb)?;
     });
 
-    // 3. APKs
+    // 3. APKs; the pins they were installed from are kept with the step's marker
     step!(state, &marker, "apks", {
-        let set = apk::resolve(&cache, manifest.termux_apks())?;
-        apk::install_all(&adb, &set)?;
+        let pins = install_apks(&adb, &cache, manifest.termux_apks())?;
+        state.set_apk_pins(pins);
     });
 
-    // 4. headless channel
+    // 4. headless channel, which also records the APK step's pins (Layer 9 §12.6)
     step!(state, &marker, "channel", {
         headless_channel(
             &adb,
@@ -276,6 +392,7 @@ pub fn run(args: InstallArgs) -> anyhow::Result<()> {
             manifest.release(),
             &cache,
             manifest.termux_debs(),
+            state.apk_pins(),
         )?;
     });
 
@@ -482,5 +599,29 @@ mod tests {
         assert!(t.contains(
             "ssh -p 8022 -i /k/id_ed25519 <phone-ip> '. $PREFIX/var/lib/111/profile.env && 111 dashboard'"
         ));
+    }
+
+    /// `run` needs a real adb and the network, so its hand-off of the APK step's pins (Layer 9
+    /// §12.6) is pinned on its source: step 3 keeps the pins it installed with its marker, step 4
+    /// passes the marker's pins to the channel, and nothing else in `run` reaches the record.
+    #[test]
+    fn run_hands_the_apk_steps_pins_to_step_4() {
+        let src = include_str!("mod.rs").split("#[cfg(test)]").next().unwrap();
+        let run = src.split("pub fn run(").nth(1).unwrap();
+        let run = run.split("\n}\n").next().unwrap();
+        let step = |name: &str| {
+            let head = format!("step!(state, &marker, {name:?}, {{");
+            let body = run.split(&head).nth(1).unwrap();
+            body.split("\n    });\n").next().unwrap().to_string()
+        };
+        let apks = step("apks");
+        assert!(
+            apks.contains("install_apks(&adb, &cache, manifest.termux_apks())?")
+                && apks.contains("state.set_apk_pins(pins);"),
+            "{apks}"
+        );
+        assert!(step("channel").contains("state.apk_pins(),"), "{run}");
+        assert_eq!(run.matches("apk_pins").count(), 2, "{run}");
+        assert!(!run.contains("push_apk_record"), "{run}");
     }
 }
