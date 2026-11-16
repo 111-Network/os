@@ -93,6 +93,17 @@ rustls = { version = "0.23", default-features = false, features = ["ring", "logg
 # default features off (they pull `aws_lc_rs`), the `ring` provider only. No
 # runtime weight until a hub pairs with a non-LAN hub.
 tokio-rustls = { version = "0.26.6", default-features = false, features = ["ring"] }
+# Layer 8 L1 (os/8-storage/README.md §1 rule 2, §5.6, §21 L1; D34, D38; sign-off:
+# the "Layer 8 additions" line under "Dependency policy" in os/1-bootstrap/TASKS.md):
+# the node-state store (SQLCipher, §2), the dataset sidecar and its BLAKE3 root
+# (§5.2) and the export's BLAKE3 prehash (§13.1). The `blake2` precedent above:
+# all three are already in the graph through mesh111 at these exact pins, and each
+# line asks for exactly mesh111's selection (rusqlite's default features plus
+# `bundled-sqlcipher-vendored-openssl`; bao-tree's and blake3's defaults), so no
+# crate, feature or build script is added (+0 crates).
+rusqlite = { version = "=0.40.2", features = ["bundled-sqlcipher-vendored-openssl"] }
+bao-tree = "=0.16.1"
+blake3 = "=1.8.7"
 
 [features]
 default = ["mdns"]

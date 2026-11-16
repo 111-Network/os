@@ -35,7 +35,7 @@ this list is in `LICENSING.md`.
 Inputs at generation time (SHA-256):
 
 ```
-182bddc4d5b6a674ce360e91e9c4c59bd10ccde83143faa80543ee7dfe25755d  1-bootstrap/Cargo.lock
+0ea81c6960ebc274d111890a1713915fd44afa95a6b5273ff83078c67aa3c53b  1-bootstrap/Cargo.lock
 9f779bdf23242c905a0106412a0cc6aa7b1b90ad985547d18674f6639e0b1d47  3-intelligence/Cargo.lock
 08c2709c1e59a5a9274d4ac88ff32ccfaa019b3e0042ea50c7f609e35d4fb225  4-interface/ui/pnpm-lock.yaml
 cf48326b784772c17f4528dc6739cf2678503e094f1b3aff09e4cbf91530eaaa  1-bootstrap/scripts/meshmud-build.sh#pins

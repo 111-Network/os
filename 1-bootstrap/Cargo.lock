@@ -1315,7 +1315,9 @@ version = "0.0.0"
 dependencies = [
  "anyhow",
  "axum",
+ "bao-tree",
  "blake2",
+ "blake3",
  "flate2",
  "futures-util",
  "getrandom 0.2.17",
@@ -1332,6 +1334,7 @@ dependencies = [
  "os_info",
  "qrcode",
  "rtnetlink",
+ "rusqlite",
  "rust-embed",
  "rustls",
  "sd-notify",
