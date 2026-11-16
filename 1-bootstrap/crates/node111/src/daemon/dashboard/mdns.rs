@@ -5,9 +5,11 @@
 //! are announced: the LAN listener is `0.0.0.0` (IPv4-only), so an AAAA record
 //! would send IPv6-preferring clients to a port nothing answers on. On a name
 //! conflict `mdns-sd` renames the host to `111-N.local.` and reports it — again
-//! on every further conflict (`111-2` → `111-3` …); each rename is logged and
-//! handed to `on_rename` so the URL list stays truthful (the Host guard already
-//! accepts `111-N.local`). Stopped on daemon shutdown.
+//! on every further conflict (`111-2` → `111-3` …); each rename is logged, the
+//! service is registered again under the name it now holds ([`follow_host`]),
+//! and only then handed to `on_rename` so the URL list stays truthful (the Host
+//! guard already accepts `111-N.local`) and the registry's record follows.
+//! Stopped on daemon shutdown.
 //!
 //! **Layer 7 (§3.3, §7.1; row D8).** The same daemon carries the registry's
 //! `_n111._tcp.local.` record ([`Record111`], registered by `daemon::registry`
@@ -53,6 +55,13 @@ pub const REARM_CHECK_SECS: u32 = 1;
 /// The re-arm's one-shot sleep before the check is switched off again (§3.3 S2): long enough
 /// for the 1 s check to run once, short enough that a second one never does.
 pub const REARM_SLEEP: Duration = Duration::from_millis(1_500);
+
+/// The dashboard service's re-registration under a renamed host ([`follow_host`]) is tried
+/// this many times while the daemon's command queue is full, [`FOLLOW_RETRY`] apart.
+pub const FOLLOW_TRIES: u32 = 20;
+
+/// The wait between two tries of [`follow_host`] (the queue drains on its own).
+pub const FOLLOW_RETRY: Duration = Duration::from_millis(50);
 
 /// A refused restore of the 5 s check is tried again after this, doubling up to
 /// [`RESTORE_RETRY_MAX`] (the daemon's command channel was full: it drains on its own).
@@ -197,6 +206,12 @@ pub fn random_below(n: usize) -> usize {
 /// holds one of these while the dashboard's announcer runs.
 pub trait MdnsOps: Send + Sync {
     /// Register `rec` (A records follow the interfaces, IPv4 only); returns its full name.
+    /// Registering again under the same full name updates the record in place (mdns-sd: "No
+    /// need to call unregister first"): no goodbye, which the daemon would read back as a
+    /// conflict with the update's probe and rename the instance or the host. mdns-sd probes
+    /// every changed record again (a TXT or SRV change, and the A records under a host whose
+    /// name the dashboard's service does not already hold the same way), so an update leaves
+    /// the record unanswered for about a second on each interface.
     fn register(&self, rec: &Record111) -> Result<String, String>;
     /// Withdraw a record registered by [`MdnsOps::register`] (a goodbye packet), waiting at
     /// most `wait` for the daemon to confirm it was sent (`ZERO`: no wait).
@@ -461,6 +476,58 @@ impl MdnsOps for mdns_sd::ServiceDaemon {
 
 // ---------------------------------------------------------------- the announcer
 
+/// The dashboard's service: `_http._tcp`, instance `111`, `host` (FQDN), port `port`, IPv4 A
+/// records following the interfaces.
+#[cfg(feature = "mdns")]
+fn dashboard_service(port: u16, host: &str) -> Result<mdns_sd::ServiceInfo, mdns_sd::Error> {
+    let props = std::collections::HashMap::from([("path".to_string(), "/".to_string())]);
+    let mut info = mdns_sd::ServiceInfo::new("_http._tcp.local.", "111", host, (), port, props)?
+        .enable_addr_auto();
+    info.set_interfaces(vec![mdns_sd::IfKind::IPv4]);
+    Ok(info)
+}
+
+/// Register the dashboard's service again under `host`, the name mdns-sd just renamed it to
+/// (row D8 follow-up, G8 phase 12's unbounded loop). mdns-sd 0.21.5 answers a direct query for
+/// a service (SRV, TXT or ANY: what its own probe asks, and what a resolver asks) with the host
+/// name it was registered under, not the renamed one, and reads its own packets back: a rename
+/// of the host while the service is announced (the host was under a probe another
+/// registration started, such as the registry's `_n111._tcp` record under the renamed name,
+/// and a peer answered it) re-probes the service's SRV, the daemon answers its own probe with
+/// the old name, takes that as a conflict and renames the instance (`111 (2)`, `111 (3)` …)
+/// about every 100 ms, with no end and no `NameChange`; a resolver is told the old name too.
+/// Registered under the name it holds, the service probes that name itself and is not
+/// announced (so answers nothing) while the probe runs, so the registry's record (registered
+/// after this, on the same command queue) joins that probe instead of opening one beside an
+/// announced service; a rename that lands anyway ends at its own `NameChange`, which comes
+/// here. After a re-number that drops the interface's names (mdns-sd's registry wipe) the
+/// service probes the name the URL list shows, not `111.local`. A full command queue is
+/// retried ([`FOLLOW_TRIES`]); nothing else is started.
+#[cfg(feature = "mdns")]
+fn follow_host(daemon: &mdns_sd::ServiceDaemon, port: u16, host: &str) {
+    let fqdn = format!("{}.", host.trim_end_matches('.'));
+    let info = match dashboard_service(port, &fqdn) {
+        Ok(info) => info,
+        Err(e) => {
+            eprintln!("111 daemon: mDNS: the dashboard cannot be announced as {host}: {e}");
+            return;
+        }
+    };
+    for _ in 0..FOLLOW_TRIES {
+        match daemon.register(info.clone()) {
+            Ok(()) => return,
+            Err(mdns_sd::Error::Again) => std::thread::sleep(FOLLOW_RETRY),
+            Err(e) => {
+                eprintln!("111 daemon: mDNS: the dashboard's announce as {host} failed: {e}");
+                return;
+            }
+        }
+    }
+    eprintln!(
+        "111 daemon: mDNS: the dashboard's announce as {host} was refused (a full command queue)"
+    );
+}
+
 pub struct Announcer {
     #[cfg(feature = "mdns")]
     daemon: mdns_sd::ServiceDaemon,
@@ -480,14 +547,11 @@ impl Announcer {
             if let Err(e) = daemon.disable_interface(mdns_sd::IfKind::IPv6) {
                 eprintln!("111 daemon: mDNS: cannot disable IPv6 ({e}); announcing A records only");
             }
-            let props = std::collections::HashMap::from([("path".to_string(), "/".to_string())]);
-            let mut info =
-                mdns_sd::ServiceInfo::new("_http._tcp.local.", "111", HOSTNAME, (), port, props)?
-                    .enable_addr_auto();
-            info.set_interfaces(vec![mdns_sd::IfKind::IPv4]);
+            let info = dashboard_service(port, HOSTNAME)?;
             let fullname = info.get_fullname().to_string();
             let monitor = daemon.monitor()?;
             daemon.register(info)?;
+            let follow = daemon.clone();
             std::thread::Builder::new()
                 .name("111d-mdns-mon".into())
                 .spawn(move || {
@@ -500,6 +564,9 @@ impl Announcer {
                                     "111 daemon: mDNS name conflict — announcing as {host} instead of {current}"
                                 );
                                 current = host.clone();
+                                // the service first, under the name it now holds; then the URL
+                                // list and the registry's record (same command queue, in order)
+                                follow_host(&follow, port, &host);
                                 on_rename(host);
                             }
                         }

@@ -6,8 +6,9 @@
 //!   `r=<roles>`, `k=<NodeId>`, 78 B). Present only while `discovery.lan_record`, a LAN-bound
 //!   dashboard (the announcer runs) and a LAN-bound fabric listener (`hub_role` or `listen_lan`,
 //!   bound), and never on Termux (§7.1: no browse or answer there): [`Registry::sync_record`]
-//!   compares and registers or withdraws. It runs at [`install`], after a rename of the mDNS
-//!   host, when D10 sets the switch ([`Registry::set_lan_record`]) and on the dashboard's
+//!   compares and registers, updates in place (`register` again: no goodbye) or withdraws. It
+//!   runs at [`install`], after a rename of the mDNS host, when D10 sets the switch
+//!   ([`Registry::set_lan_record`]) and on the dashboard's
 //!   existing 30 s LAN refresh (a fabric settings change shows there; no timer of its own). A
 //!   sync with nothing changed costs a few locks and a copy of the own announce's bytes: the
 //!   fabric's settings are cloned only after a settings change (the fabric's pair generation)
@@ -90,6 +91,13 @@ pub const LABEL_MAX: usize = 63;
 
 /// How long the shutdown goodbye waits for the daemon to send it.
 pub const GOODBYE_WAIT: Duration = Duration::from_secs(1);
+
+/// An instance whose goodbye left less than this ago is not registered again by a sync (a
+/// later one does: an input change or the 30 s refresh). mdns-sd sends a goodbye twice, the
+/// second 120 ms after the first, and reads its own packets back: a registration in between
+/// whose TXT or SRV differs from the withdrawn one is probed against its own goodbye and
+/// renamed (`<label> (2)`, kept until mdns-sd forgets its names) (row D8 follow-up).
+pub const GOODBYE_GUARD: Duration = Duration::from_secs(1);
 
 /// Which layer answered (§7.6; the contract's `RegistryAnswer`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -513,12 +521,34 @@ enum Phase {
 }
 
 /// The registered record (with its full name), a record the daemon refused (not tried again
-/// until an input changes), and whether the goodbye was sent (no record after it).
+/// until an input changes), the last goodbye a sync sent (its instance and when:
+/// [`GOODBYE_GUARD`]), and whether the shutdown goodbye was sent (no record after it).
 #[derive(Default)]
 struct RecordState {
     cur: Option<(Record111, String)>,
     refused: Option<Record111>,
+    goodbye: Option<(String, Instant)>,
     closed: bool,
+}
+
+impl RecordState {
+    /// Withdraw `rec` (its full name `full`): the goodbye, remembered for [`GOODBYE_GUARD`].
+    fn goodbye(&mut self, mdns: &dyn MdnsOps, rec: &Record111, full: &str) {
+        mdns.unregister(full, Duration::ZERO);
+        self.goodbye = Some((rec.instance.clone(), Instant::now()));
+    }
+
+    /// `rec` would be a new registration of an instance whose goodbye is still in flight.
+    fn too_soon(&self, rec: &Record111) -> bool {
+        let fresh = self
+            .cur
+            .as_ref()
+            .is_none_or(|(r, _)| !r.instance.eq_ignore_ascii_case(&rec.instance));
+        fresh
+            && self.goodbye.as_ref().is_some_and(|(instance, at)| {
+                instance.eq_ignore_ascii_case(&rec.instance) && at.elapsed() < GOODBYE_GUARD
+            })
+    }
 }
 
 /// The fabric-derived inputs as last read: the settings part kept until the fabric's settings
@@ -729,9 +759,23 @@ impl Registry {
         i
     }
 
-    /// Register, replace or withdraw the `_n111._tcp` record so it matches §7.1's rule now.
+    /// Register, update or withdraw the `_n111._tcp` record so it matches §7.1's rule now.
     /// Only on the daemon the dashboard runs, never on Termux; nothing is started here. A
     /// record the daemon refused is not tried again until one of its inputs changes.
+    ///
+    /// A registered record whose roles, port or host change is registered again under the
+    /// same full name: mdns-sd's documented update, with no unregister first (the changed
+    /// records are probed again: about a second unanswered). A goodbye is sent only when the
+    /// record goes (withdrawn, refused, or its full name changed), and an instance whose
+    /// goodbye left less than [`GOODBYE_GUARD`] ago is registered by a later sync, not this
+    /// one. An unregister before each update was the G8 phase 12 busy loop (row D8 follow-up):
+    /// the daemon reads its own goodbye back (multicast loop and `lo`; TTL 0 read as 1; the
+    /// resend 120 ms later leaves on whichever interface the socket last named) as a conflict
+    /// with the probe the new record starts, renames the instance (`<label> (2)`) or the host
+    /// (`111-N.local`), and every host rename came back here as one more update. After a host
+    /// rename the dashboard's announcer has already registered its own service under the new
+    /// name, so the record's A records join that service's probe of the name
+    /// (`dashboard::mdns::follow_host`).
     pub async fn sync_record(&self) {
         let Some(mdns) = self.mdns.as_ref() else {
             return;
@@ -754,17 +798,31 @@ impl Registry {
         if want.is_some() && st.refused == want {
             return; // refused as it stands: wait for an input to change
         }
-        if let Some((_, full)) = st.cur.take() {
-            mdns.unregister(&full, Duration::ZERO);
+        if want.as_ref().is_some_and(|rec| st.too_soon(rec)) {
+            return; // its goodbye is still in flight: a later sync registers it
         }
         st.refused = None;
-        if let Some(rec) = want {
-            match mdns.register(&rec) {
-                Ok(full) => st.cur = Some((rec, full)),
-                Err(e) => {
-                    eprintln!("111 daemon: the _n111._tcp record could not be registered: {e}");
-                    st.refused = Some(rec);
+        let old = st.cur.take();
+        let Some(rec) = want else {
+            if let Some((gone, full)) = old {
+                st.goodbye(&**mdns, &gone, &full); // withdrawn
+            }
+            return;
+        };
+        match mdns.register(&rec) {
+            Ok(full) => {
+                // the same full name was updated in place; another one leaves with a goodbye
+                if let Some((gone, f)) = old.filter(|(_, f)| !f.eq_ignore_ascii_case(&full)) {
+                    st.goodbye(&**mdns, &gone, &f);
                 }
+                st.cur = Some((rec, full));
+            }
+            Err(e) => {
+                if let Some((gone, f)) = old {
+                    st.goodbye(&**mdns, &gone, &f);
+                }
+                eprintln!("111 daemon: the _n111._tcp record could not be registered: {e}");
+                st.refused = Some(rec);
             }
         }
     }

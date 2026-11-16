@@ -525,7 +525,7 @@ a = { layer = 1, files = ["1-bootstrap/crates/node111/src/daemon/registry/mod.rs
 b = { layer = 7, files = ["1-bootstrap/crates/node111/src/daemon/dashboard/mdns.rs"] }
 read_first = "a"
 symptom = "no 'Find my hub': 409 lan_off, an empty GET /registry; the _n111._tcp record missing or stale"
-gap = "Row D8 landed: the record, the browse and the lost-hub rehome run against real mdns-sd daemons and real fabrics on loopback (tests/registry_mdns.rs), the re-arm in a network namespace; G8 (presence.sh) still prints SKIPPED, so no two-host LAN run."
+gap = "Row D8 landed with its follow-up: the record, the browse and the lost-hub rehome run against real mdns-sd daemons and real fabrics on loopback (tests/registry_mdns.rs, each fabric beside the daemon's housekeeping interval), the re-arm and two rename tests on a real daemon in network namespaces; G8 (presence.sh, row V2, REQUIRE_G8=1 GREEN) runs the record and its gates, a renumber and back, and lost-hub recovery on three real daemons over one LAN bridge. mdns-sd 0.21.5's own bugs behind the follow-up are worked around in node111, not fixed upstream."
 
 [[seam]]
 id = "L1-L7:relay-state"
@@ -1156,7 +1156,7 @@ b = { layer = 7, files = [
 ] }
 read_first = "a"
 symptom = "no 111 Nearby kind: GET /nearby has no 111 source"
-gap = "Row D2 landed: the fabric tap (`relay::tap`, N/relay/mod.rs) hands each fabric batch to presence, the gateway row and the relay frame; the presence book is unit-tested against fake reads (`--lib daemon::relay::presence`, inside l1.node111.lib); no running system shows a 111 row yet: G8 (`7-relay/verify/presence.sh`, row V2) is a T0 stub."
+gap = "Row D2 landed: the fabric tap (`relay::tap`, N/relay/mod.rs) hands each fabric batch to presence, the gateway row and the relay frame; the presence book is unit-tested against fake reads (`--lib daemon::relay::presence`, inside l1.node111.lib); G8 (`7-relay/verify/presence.sh`, row V2, REQUIRE_G8=1 GREEN) shows the 111 rows on three real daemons: the §2.2 strings, the LAN-vs-hub split, nothing refreshed by a replayed announce, a card or a keepalive."
 
 [[seam]]
 id = "L5-L7:forwarder-handoff"
@@ -1283,7 +1283,7 @@ a = { layer = 6, files = ["1-bootstrap/crates/node111/src/daemon/transport/rnsta
 b = { layer = 7, files = ["1-bootstrap/crates/node111/src/daemon/dashboard/api_v1/nearby.rs"] }
 read_first = "b"
 symptom = "no hop counts: rate_limited or component_unavailable on POST /nearby/hops"
-gap = "Row D2 landed: POST /nearby/hops runs one `rnpath -t -j` through the rnstatus runner (its timeout, output cap and owner gate) into the reticulum source's `hops_away`; tests/api_v1_bridge.rs drives the route (409 component_unavailable, 401 for the agent's bearer, 202, 429 within 30 s) and the rnstatus unit tests parse scripted path tables; no harness runs a real rnpath: G8 (row V2) is a T0 stub."
+gap = "Row D2 landed: POST /nearby/hops runs one `rnpath -t -j` through the rnstatus runner (its timeout, output cap and owner gate) into the reticulum source's `hops_away`; tests/api_v1_bridge.rs drives the route (409 component_unavailable, 401 for the agent's bearer, 202, 429 within 30 s) and the rnstatus unit tests parse scripted path tables; G8 (row V2) drives the route on running daemons with a fake Reticulum (one `rnpath` per 30 s, 409 without the component, no spawn on any GET); no harness runs a real rnpath."
 
 [[seam]]
 id = "L6-L7:netlink-gateway"
