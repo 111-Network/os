@@ -62,6 +62,7 @@ use crate::blobs::{BlobDir, BlobError};
 use crate::keys::{KeyError, KeyProvider, StoreKey};
 
 pub mod blobs;
+mod copy;
 pub mod foreign;
 pub mod prune;
 pub mod rows;

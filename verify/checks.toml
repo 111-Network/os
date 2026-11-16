@@ -2664,6 +2664,125 @@ rerun_cost = "ns, T0 stub: SKIPPED today"
 strength = "N"
 needs = ["bash"]
 
+# G13 the node-state store and the joint contract: one node with the real 111d, the real 111-agent and a stub model. Row V3.
+# A T0 stub: it prints '<G> SKIPPED: not built yet (T0 stub)' and exits 0 (8-storage/TASKS.md row V3). Strength N
+# until the row lands; promote it to R then (and to cargo = true if the gate builds).
+[[check]]
+id = "l8.g13"
+kind = "unit"
+cmd = ["bash", "8-storage/verify/state.sh"]
+tier = "ns"
+layers = [8]
+seams = ["L3-L8:agent-state", "L1-L8:state-service", "L8-L9:heal-store", "L2-L8:dataset-signing", "L1-L8:updates-backup"]
+adapter = "okfail"
+lock = "verify"
+timeout_s = 1800
+rerun_cost = "ns, T0 stub: SKIPPED today"
+strength = "N"
+needs = ["bash"]
+
+# G14 the budget: one node whose root is a small tmpfs; the log rings, no idle write, the consumer registry. Row V4.
+# A T0 stub: it prints '<G> SKIPPED: not built yet (T0 stub)' and exits 0 (8-storage/TASKS.md row V4). Strength N
+# until the row lands; promote it to R then (and to cargo = true if the gate builds).
+[[check]]
+id = "l8.g14"
+kind = "unit"
+cmd = ["bash", "8-storage/verify/budget.sh"]
+tier = "ns"
+layers = [8]
+seams = ["L1-L8:state-service", "L4-L8:hub-content", "L5-L8:consumer-registry"]
+adapter = "okfail"
+lock = "verify"
+timeout_s = 1800
+rerun_cost = "ns, T0 stub: SKIPPED today"
+strength = "N"
+needs = ["bash"]
+
+# G15 datasets: hubs H and H2 and a member M on one bridge with the stub mirror. Row V5.
+# A T0 stub: it prints '<G> SKIPPED: not built yet (T0 stub)' and exits 0 (8-storage/TASKS.md row V5). Strength N
+# until the row lands; promote it to R then (and to cargo = true if the gate builds).
+[[check]]
+id = "l8.g15"
+kind = "unit"
+cmd = ["bash", "8-storage/verify/datasets.sh"]
+tier = "ns"
+layers = [8]
+seams = ["L1-L8:state-service", "L2-L8:dataset-signing", "L7-L8:move-datasets", "L4-L8:hub-content"]
+adapter = "okfail"
+lock = "verify"
+timeout_s = 1800
+rerun_cost = "ns, T0 stub: SKIPPED today"
+strength = "N"
+needs = ["bash"]
+
+# G16 the encyclopedia: part A the stub child as the kiwix program; part B kiwix-serve (KIWIX_BIN, KIWIX_ZIM). Row V6.
+# A T0 stub: it prints '<G> SKIPPED: not built yet (T0 stub)' and exits 0 (8-storage/TASKS.md row V6). Strength N
+# until the row lands; promote it to R then (and to cargo = true if the gate builds).
+[[check]]
+id = "l8.g16"
+kind = "unit"
+cmd = ["bash", "8-storage/verify/kiwix.sh"]
+tier = "ns"
+layers = [8]
+seams = ["L4-L8:hub-content", "L6-L8:server-component", "L5-L8:child-panel"]
+adapter = "okfail"
+lock = "verify"
+timeout_s = 1800
+rerun_cost = "ns, T0 stub: SKIPPED today"
+strength = "N"
+needs = ["bash"]
+
+# G17 maps: the tiles routes over a PMTiles fixture gen-pmtiles.py writes into the scratch root; the UI checks. Row V7.
+# A T0 stub: it prints '<G> SKIPPED: not built yet (T0 stub)' and exits 0 (8-storage/TASKS.md row V7). Strength N
+# until the row lands; promote it to R then (and to cargo = true if the gate builds).
+[[check]]
+id = "l8.g17"
+kind = "unit"
+cmd = ["bash", "8-storage/verify/maps.sh"]
+tier = "ns"
+layers = [8]
+seams = ["L4-L8:hub-content"]
+adapter = "okfail"
+lock = "verify"
+timeout_s = 1800
+rerun_cost = "ns, T0 stub: SKIPPED today"
+strength = "N"
+needs = ["bash"]
+
+# G18 component pins from a hub: origin.components, the installer's origin list, the files table, the tarball. Row V8.
+# A T0 stub: it prints '<G> SKIPPED: not built yet (T0 stub)' and exits 0 (8-storage/TASKS.md row V8). Strength N
+# until the row lands; promote it to R then (and to cargo = true if the gate builds).
+[[check]]
+id = "l8.g18"
+kind = "unit"
+cmd = ["bash", "8-storage/verify/components.sh"]
+tier = "ns"
+layers = [8]
+seams = ["L1-L8:updates-backup"]
+adapter = "okfail"
+lock = "verify"
+timeout_s = 1800
+rerun_cost = "ns, T0 stub: SKIPPED today"
+strength = "N"
+needs = ["bash"]
+
+# G7 extended for Layer 8 (§18): zero-weight.sh with kiwix declared and disabled, and idle.sh's no-timer line. Row V9.
+# A T0 stub: it prints 'G7 SKIPPED: not built yet (T0 stub; ...)' and exits 0 (8-storage/TASKS.md row V9). Strength N
+# until the row lands; promote it to R then (and to cargo = true if the gate builds).
+[[check]]
+id = "l8.g7ext"
+kind = "unit"
+cmd = ["bash", "-c", "echo 'G7 SKIPPED: not built yet (T0 stub; Layer 8 row V9 runs 6-transport/verify/zero-weight.sh and 7-relay/verify/idle.sh with Layer 8 present)'"]
+tier = "ns"
+layers = [8]
+seams = ["L1-L8:state-service", "L6-L8:server-component"]
+adapter = "okfail"
+lock = "verify"
+timeout_s = 1800
+rerun_cost = "ns, T0 stub: SKIPPED today"
+strength = "N"
+needs = ["bash"]
+
 # ========================================================================
 # FAKES: stand-ins for one side of a seam. parity = "none" counts as a gap on every run.
 # ========================================================================
@@ -2969,6 +3088,7 @@ reason = "returns early as root (access(2) always succeeds), so a PASS here prov
 "6-transport/verify/root.sh" = "sourced helper (g6_make_root, g6_identity) for G1 and the Layer 7 lib; not a check"
 "6-transport/verify/zero-weight.sh" = "G7 needs an already-running daemon (NODE111_ROOT) and prints SKIPPED alone; row N4 runs it inside smoke.sh against the harness's own daemon, then it gets a check"
 "7-relay/verify/lib.sh" = "sourced helper: port, namespace and address names for G7-extended to G12; creates nothing, not a check"
+"8-storage/verify/lib.sh" = "sourced helper: netns, veth, address and port names for G13 to G18; creates nothing, not a check"
 "2-identity/monocypher-harness/mutation-check.sh" = "evidence that the Monocypher harness kills 17 mutants, 'not part of the gate' (2-identity/monocypher-harness/README.md); run by hand"
 "4-interface/ui/test/agent.test.ts" = "agent view logic over the mock and the generated types; no seam"
 "4-interface/ui/test/bus.test.ts" = "the mock event bus; no seam"

@@ -33,9 +33,11 @@ pub mod bridge;
 pub mod carrier;
 pub mod components;
 pub mod dashboard;
+pub mod datasets;
 pub mod devices;
 pub mod fabric;
 pub mod health;
+pub mod housekeeping;
 pub mod intelligence;
 pub mod kb;
 pub mod meshtastic;
@@ -45,6 +47,8 @@ pub mod ports;
 pub mod registry;
 pub mod relay;
 pub mod services;
+pub mod state;
+pub mod storage;
 pub mod supervise;
 pub mod transport;
 pub mod updater;
@@ -810,6 +814,17 @@ async fn daemon_main() -> anyhow::Result<()> {
             unsafe { std::env::set_var(k, v) };
         }
     }
+    // Layer 8 (`os/8-storage/README.md` §13.2): `node/lock`, held for the daemon's lifetime and
+    // taken before any store opens; a store verb holding it ⇒ exit 75, and the unit starts the
+    // daemon again after `RestartSec=5` (T0: `acquire` returns at once and opens nothing)
+    let _node_lock = match storage::lock::acquire(&layout.root) {
+        Ok(lock) => lock,
+        Err(storage::lock::LockError::Held) => {
+            eprintln!("111 daemon: a store verb is running");
+            std::process::exit(75)
+        }
+        Err(e) => return Err(e.into()),
+    };
 
     let version = current_version(&layout);
     let state: SharedState = Arc::new(RwLock::new(DashboardState::new(&version)));
@@ -1017,6 +1032,9 @@ async fn daemon_main() -> anyhow::Result<()> {
         dashboard.api.lan_enabled,
     ));
     dashboard.api.insert_ext(Arc::clone(&panel_host));
+    // Layer 8 (`os/8-storage/README.md` §2.2): the node-state store's start (the J2 fold, the
+    // legacy import, the spool sweep); returns at once until its rows land (nothing opened or read)
+    state::start(&layout);
     // Layer 5 F2: the messaging fabric (store, identity handle, tcp-lan,
     // routes' state, SSE `message`/`contact`/`fabric`, `fabric` service facts).
     let fabric = {

@@ -41,6 +41,9 @@
 //! Never adds: a listener, a task, a timer or a resident buffer (§1 rule 2, §16). Disk: one
 //! payload per served target plus the manifest and its signature (§16).
 
+pub mod pins;
+pub mod termux;
+
 use crate::calver::Calver;
 use crate::daemon::dashboard::ApiState;
 use crate::daemon::fabric::FabricHandle;
