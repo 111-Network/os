@@ -19,6 +19,9 @@
 //! - row D6b: a waiting attempt runs again only on an edge with a connection; a refused re-scan
 //!   leaves the attempt in flight and its cleanup; a bundle with this hub's own key or another
 //!   hub's pin is refused.
+//!
+//! Row D6d's `relay` frame test is `tests/relay_pair_frame.rs`, a binary of its own: the frame's
+//! binding is one per process, and the scans here would publish frames on its bus.
 
 use axum::extract::connect_info::MockConnectInfo;
 use id111::keyset::NodeId;

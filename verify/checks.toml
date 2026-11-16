@@ -943,6 +943,27 @@ covered_by = "l1.gate"
 strength = "I"
 needs = ["cargo"]
 
+# Row D6d: the relay frame follows a pairing scan (§13.1 with §4.6), two hubs with the real identity handle and fabric on
+# loopback, the scan, offer and unpair called as their routes call them: the half a scan records is on the frame at once (no
+# fabric event moves it), nothing publishes while the attempt dials, and the attempt's end after its route answered is followed
+# by exactly one frame, the last status apart from its ages. A binary of its own with one test: the frame's binding is one per
+# process, so the scans of relay_pair would publish frames on its bus. Both ends are real, so strength I.
+[[check]]
+id = "l1.node111.relay_pair_frame"
+kind = "unit"
+cmd = ["cargo", "test", "--manifest-path", "1-bootstrap/Cargo.toml", "-p", "node111", "--test", "relay_pair_frame"]
+tier = "slow"
+layers = [1, 4, 5, 7]
+seams = ["L4-L7:relay-api", "L5-L7:pair-gate"]
+adapter = "libtest"
+cargo = true
+timeout_s = 1800
+rerun = "cargo test --manifest-path 1-bootstrap/Cargo.toml -p node111 --test relay_pair_frame -- --exact {test}"
+rerun_cost = "slow, ~15 s warm"
+covered_by = "l1.gate"
+strength = "I"
+needs = ["cargo"]
+
 # Row D10: the relay status, settings and consents through the real dashboard app (GET /relay, PATCH /relay/settings, POST
 # /relay/carrier/check and /flush, decideProposal for kind relay), nodes with the real identity handle and fabric on loopback:
 # RelayStatus with everything off and the rns row from Layer 6, the carrier_enable, gateway_bit and origin_serve round trips

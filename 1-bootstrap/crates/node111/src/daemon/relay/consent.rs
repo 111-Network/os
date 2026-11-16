@@ -8,10 +8,11 @@
 //! `gateway_bit` and `origin_serve`.
 //!
 //! **The hash rule.** `hash` is the SHA-256 of the exact UTF-8 bytes of `warning_text`, as 64
-//! lowercase hex characters (the contract's `Sha256Hex`); [`hash`] is the one function. The hash
-//! of the text the human accepted is recorded (`state/relay.json` for `carrier_enable`,
-//! `gateway_bit` and `origin_serve`, row D1; the pair's row in `fabric/settings` for `pair_plain`,
-//! row D6), so a changed text has another hash and asks again.
+//! lowercase hex characters (the contract's `Sha256Hex`); [`digest`] is the one function and
+//! [`hash`] its hex form. The hash of the text the human accepted is recorded (`state/relay.json`
+//! for `carrier_enable`, `gateway_bit` and `origin_serve`, row D1, as hex; the pair's row in
+//! `fabric/settings` for `pair_plain`, row D6, as the 32 bytes of [`digest`]), so a changed text
+//! has another hash and asks again.
 //!
 //! **The texts.** [`GATEWAY_BIT_TEXT`] and [`ORIGIN_SERVE_TEXT`] are §12's copies verbatim;
 //! [`carrier_enable_text`] is §6.2's copy with its two placeholders filled (`<far hub>` and
@@ -20,8 +21,8 @@
 //! text ("setting or raising `daily_cap_bytes` while the carrier is on re-asks `carrier_enable`
 //! with the cap in `warning_text` and `metered` in `addons`"), and naming every link makes any
 //! cap set or raised, on any link, another text with another hash; [`PAIR_PLAIN_WARNING`] is
-//! §4.6 step 6's (the constant row D6 built, re-exported here so every Layer 7 text is reached
-//! from this module).
+//! §4.6 step 6's verbatim, with its consent [`pair_plain`] (defined here since row D6d, the one
+//! place for every Layer 7 text; `relay::pair` re-exports the constant and asks it on the scan).
 //!
 //! **Current, not merely recorded.** [`holds`] is the one test of a recorded consent: its hash
 //! is the hash of the text owed now. Role bits 3 and 5 (row D9) read it, so a consent recorded
@@ -36,14 +37,15 @@
 //! settings route keeps it so, row D10).
 
 use crate::daemon::dashboard::api_v1::Problem;
+use crate::daemon::fabric::json;
 use crate::daemon::relay::settings::{
     CarrierKind, ConsentKind, MeteredLink, MeteredMatch, RelaySettings,
 };
 use axum::http::StatusCode;
+use id111::keyset::NodeId;
 use sha2::{Digest, Sha256};
 
 pub use crate::daemon::components::consent::{ConsentRequired, ProblemWith};
-pub use crate::daemon::relay::pair::PAIR_PLAIN_WARNING;
 
 /// `ConsentRequired.action` of the carrier's switch (ntfy on, or its metered cap set or raised).
 pub const ACTION_CARRIER_ENABLE: &str = "carrier_enable";
@@ -75,13 +77,22 @@ pub const ORIGIN_SERVE_TEXT: &str = "Any device on this network can download thi
 update files without signing in. They are public files signed by the 111 release key; nothing \
 about you is in them.";
 
-/// SHA-256 of the exact UTF-8 bytes of `text`, 64 lowercase hex characters (the contract's
-/// `Sha256Hex`, the form `accept_warning` echoes and the files record).
+/// §4.6 step 6 (D30 Q21), the pairing warning, verbatim: asked by the scan (row D6) when a pair
+/// would run plain over an address that is not private (`relay::pair` re-exports it).
+pub const PAIR_PLAIN_WARNING: &str = "This hub is on the open internet and this link cannot be \
+encrypted. Anyone on the path between the two hubs can see which hubs talk, when, and how much. \
+Message contents stay sealed. Pair anyway?";
+
+/// SHA-256 of the exact UTF-8 bytes of `text`, the hash rule (module doc): the 32 bytes a pair's
+/// row keeps for `pair_plain` (`PairLink::warning_hash`, §4.6 step 6).
+pub fn digest(text: &str) -> [u8; 32] {
+    Sha256::digest(text.as_bytes()).into()
+}
+
+/// [`digest`] as 64 lowercase hex characters (the contract's `Sha256Hex`, the form
+/// `accept_warning` echoes and `state/relay.json` records).
 pub fn hash(text: &str) -> String {
-    Sha256::digest(text.as_bytes())
-        .iter()
-        .map(|b| format!("{b:02x}"))
-        .collect()
+    digest(text).iter().map(|b| format!("{b:02x}")).collect()
 }
 
 /// §6.2's copy with `<far hub>` = [`CARRIER_FAR_HUBS`] and `<server>` = `server` (the URL as
@@ -191,6 +202,18 @@ pub fn origin_serve() -> ConsentRequired {
     }
 }
 
+/// The `pair_plain` consent (§4.6 step 6, §12): [`PAIR_PLAIN_WARNING`], subject the far hub's
+/// NodeId as 64 lowercase hex.
+pub fn pair_plain(far: &NodeId) -> ConsentRequired {
+    ConsentRequired {
+        action: ACTION_PAIR_PLAIN,
+        subject: json::hex(far),
+        warning_text: PAIR_PLAIN_WARNING.to_string(),
+        hash: hash(PAIR_PLAIN_WARNING),
+        addons: Vec::new(),
+    }
+}
+
 /// `409 consent_required` with `c` as the `consent` member (§12, I2): nothing was written for
 /// the switch it guards.
 pub fn problem(c: &ConsentRequired) -> ProblemWith {
@@ -262,15 +285,22 @@ mod tests {
         assert!(h.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')));
         // one character more is another hash: a changed text asks again
         assert_ne!(hash(&format!("{GATEWAY_BIT_TEXT} ")), h);
-        // the same rule as Layer 6's consents and row D6's pair_plain hash
+        // the same rule as Layer 6's consents
         assert_eq!(
             h,
             crate::daemon::bridge::settings::sha256_hex(GATEWAY_BIT_TEXT)
         );
+        // row D6d: one rule for the pairing warning too; the pair row keeps the 32 bytes whose
+        // hex the route asks for (the digest of the verbatim text, pinned: sha256sum of it)
+        let warned = "e32303b0492bd0208597558793644763413feb2fe37302ec0b05ff5769e6a80e";
+        assert_eq!(hash(PAIR_PLAIN_WARNING), warned);
+        let bytes = digest(PAIR_PLAIN_WARNING);
         assert_eq!(
-            hash(PAIR_PLAIN_WARNING),
-            crate::daemon::relay::pair::pair_plain_hash_hex()
+            bytes.iter().map(|b| format!("{b:02x}")).collect::<String>(),
+            warned
         );
+        assert_eq!(crate::daemon::relay::pair::pair_plain_hash(), bytes);
+        assert_eq!(crate::daemon::relay::pair::pair_plain_hash_hex(), warned);
     }
 
     #[test]
@@ -286,6 +316,13 @@ mod tests {
             "Any device on this network can download this hub's verified update files without \
              signing in. They are public files signed by the 111 release key; nothing about you \
              is in them."
+        );
+        // §4.6 step 6 (D30 Q21)
+        assert_eq!(
+            PAIR_PLAIN_WARNING,
+            "This hub is on the open internet and this link cannot be encrypted. Anyone on the \
+             path between the two hubs can see which hubs talk, when, and how much. Message \
+             contents stay sealed. Pair anyway?"
         );
         let t = carrier_enable_text("https://ntfy.example.org", &[]);
         assert_eq!(
@@ -355,10 +392,12 @@ mod tests {
 
     #[test]
     fn the_problem_is_the_pinned_round_trip() {
+        let far = NodeId::from([9; 32]);
         for c in [
             gateway_bit(),
             origin_serve(),
             carrier_enable("ntfy", "https://n.example", &[]),
+            pair_plain(&far),
         ] {
             let b = problem(&c).body();
             assert_eq!(b["status"], 409);
@@ -371,5 +410,12 @@ mod tests {
         }
         assert_eq!(gateway_bit().subject, "discovery.public_gateway_bit");
         assert_eq!(origin_serve().subject, "origin.serve");
+        // §4.6 step 6: the far hub's NodeId, the verbatim warning, no addons
+        let c = pair_plain(&far);
+        assert_eq!(c.action, "pair_plain");
+        assert_eq!(c.subject, "09".repeat(32));
+        assert_eq!(c.warning_text, PAIR_PLAIN_WARNING);
+        assert_eq!(c.hash, hash(PAIR_PLAIN_WARNING));
+        assert!(c.addons.is_empty());
     }
 }

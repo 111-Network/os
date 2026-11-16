@@ -20,7 +20,9 @@
 //!   meet at is not private, the scan answers `409 consent_required` with `consent.action =
 //!   pair_plain`, the subject the far NodeId and [`PAIR_PLAIN_WARNING`] verbatim; the repeat with
 //!   `accept_warning` = its SHA-256 records the hash with the pair ([`PairLink::warning_hash`]);
-//!   refusing pairs nothing. A `lan = true` pair runs plain with no consent (§4.1 rule 1).
+//!   refusing pairs nothing. A `lan = true` pair runs plain with no consent (§4.1 rule 1). The
+//!   text, its consent and the hash rule are `relay::consent`'s, the one place for every Layer 7
+//!   consent (row D6d; the constant is re-exported here).
 //! - **Pin, then enrol both ways** (§4.6 steps 3–4; S22): the scan mints this hub's link key if
 //!   it has none ([`LinkKey::load_or_mint`], §4.2), records this hub's half of the row
 //!   ([`FabricHandle::set_pair_link`]: the far address, the far link SPKI pinned for the TLS
@@ -48,6 +50,19 @@
 //!   window ends or the far hub refuses, the attempt is dropped (mesh111 releases its dial) and
 //!   this hub's half is forgotten unless the fabric holds a record for the hub. The fabric has
 //!   one enrolment slot: a newer pairing or enrolment supersedes an older one.
+//! - **The `relay` frame** (§13.1, row D6d): a half recorded ([`FabricHandle::set_pair_link`])
+//!   emits no fabric event, so the scan calls `relay::changed()` right after it (the status reads
+//!   a record's `tls` and `lan` from the half; with no record yet, the frame repeats the last
+//!   status). An attempt that ends after its route answered calls it too, once its end is
+//!   applied, from the one exit every end takes (`finish`): the route took its `Waiting`, or
+//!   stopped waiting (its first wait ended, and it closed the channel before answering, so a
+//!   first answer sent from then on fails; or its request went), and the end then reaches no
+//!   route. That frame asks clients to re-read; it reports no end: `RelayStatus` holds no
+//!   attempt, so an end shows only through what it changed in the fabric. A record made is a row
+//!   (its own `Fabric` event publishes that row too); a refused or timed-out end changes nothing
+//!   the status shows (the half goes only when no record holds a row for it), so its frame
+//!   repeats the last status with fresh ages, and only the daemon's log tells that end. An
+//!   attempt that ends inside the first wait is the route's answer.
 //! - **What the scan refuses before anything moves** (row D6b): a re-scan of a hub whose attempt
 //!   is in flight replaces that attempt only once the new half is accepted
 //!   ([`FabricHandle::set_pair_link`]'s refusals run first), so a refused re-scan leaves the old
@@ -62,12 +77,15 @@
 //!
 //! **Never adds** (row D6): a dial, a record, a key or a task on a node without the hub role:
 //! both routes answer `409 needs_hub` before anything is minted, pinned or started. On a hub the
-//! only weight is the attempt an owner started, bounded by [`PAIR_WINDOW`].
+//! only weight is the attempt an owner started, bounded by [`PAIR_WINDOW`], and one `relay`
+//! frame build for its half and one for an end after its route answered (row D6d; the frame
+//! coalesces them, and nothing stays running between them).
 
-use crate::daemon::components::consent::{ConsentRequired, ProblemWith};
 use crate::daemon::dashboard::api_v1::Problem;
 use crate::daemon::fabric::settings::{dial_refusal, LinkSpki, PairLink, PairTable};
 use crate::daemon::fabric::{self, json, FabricHandle};
+use crate::daemon::relay;
+use crate::daemon::relay::consent::{self, ConsentRequired, ProblemWith};
 use crate::daemon::relay::linkkey::LinkKey;
 use crate::daemon::relay::tls::is_private;
 use axum::http::StatusCode;
@@ -77,7 +95,6 @@ use mesh111::contacts::{card_text, parse_card_text, verify_card, MAX_CARD_TEXT};
 use mesh111::fabric::{FabricError, FabricEvent, PairRole, PairVia, PairView, PairedHub};
 use mesh111::sealer::Sealer;
 use serde_json::{json, Value};
-use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr};
 use std::path::{Path, PathBuf};
@@ -94,10 +111,8 @@ pub const BUNDLE_MAX: usize = 1024;
 pub const ADDRESS_MAX: usize = 47;
 /// The longest code field read (the code is 8 symbols, L5 §7.3; a typed form may carry dashes).
 pub const CODE_MAX: usize = 16;
-/// The D30 Q21 warning, verbatim (§4.6 step 6).
-pub const PAIR_PLAIN_WARNING: &str = "This hub is on the open internet and this link cannot be \
-encrypted. Anyone on the path between the two hubs can see which hubs talk, when, and how much. \
-Message contents stay sealed. Pair anyway?";
+/// The D30 Q21 warning, verbatim (§4.6 step 6): defined in `relay::consent` (row D6d).
+pub use crate::daemon::relay::consent::PAIR_PLAIN_WARNING;
 /// How long the scan route waits for the attempt's first answer before it answers `202`.
 pub const PAIR_FIRST_WAIT: Duration = Duration::from_secs(3);
 /// How long one pairing attempt may wait for the far hub (its owner scans this hub's bundle,
@@ -320,18 +335,16 @@ fn bad_request(detail: impl Into<String>) -> Problem {
 
 // ---------------------------------------------------------------- the warning
 
-/// SHA-256 of [`PAIR_PLAIN_WARNING`]: what a pair accepted unencrypted records (§4.6 step 6).
+/// SHA-256 of [`PAIR_PLAIN_WARNING`]: what a pair accepted unencrypted records (§4.6 step 6;
+/// `relay::consent`'s hash rule, [`consent::digest`]).
 pub fn pair_plain_hash() -> [u8; 32] {
-    Sha256::digest(PAIR_PLAIN_WARNING.as_bytes()).into()
+    consent::digest(PAIR_PLAIN_WARNING)
 }
 
 /// [`pair_plain_hash`] as 64 lowercase hex characters (the contract's `Sha256Hex`, the form
-/// `accept_warning` echoes).
+/// `accept_warning` echoes; [`consent::hash`]).
 pub fn pair_plain_hash_hex() -> String {
-    pair_plain_hash()
-        .iter()
-        .map(|b| format!("{b:02x}"))
-        .collect()
+    consent::hash(PAIR_PLAIN_WARNING)
 }
 
 /// §4.6 step 6, §4.1 rule 4: the pair would run plain over a non-private address. TLS cannot be
@@ -342,15 +355,10 @@ pub fn needs_pair_plain(far_spki: Option<LinkSpki>, lan: bool, meet: Option<Sock
     far_spki.is_none() && !lan && !meet.is_some_and(|a| is_private(a.ip()))
 }
 
-/// The `consent` member of the `pair_plain` round trip (contract `ConsentRequired`).
+/// The `consent` member of the `pair_plain` round trip (contract `ConsentRequired`):
+/// [`consent::pair_plain`].
 pub fn pair_plain_consent(far: &NodeId) -> ConsentRequired {
-    ConsentRequired {
-        action: "pair_plain",
-        subject: json::hex(far),
-        warning_text: PAIR_PLAIN_WARNING.to_string(),
-        hash: pair_plain_hash_hex(),
-        addons: Vec::new(),
-    }
+    consent::pair_plain(far)
 }
 
 /// `409 consent_required` with the `pair_plain` consent (§13.1; nothing recorded).
@@ -745,6 +753,9 @@ pub async fn pair_within(
             FabricError::Invalid("pairing needs the hub role") => needs_hub(),
             e => fabric::problem(&e),
         })?;
+        // §13.1 (row D6d): a half emits no fabric event; the frame shows it (a record's `tls`
+        // and `lan` read the half)
+        relay::changed();
         if let Some(old) = inflight.remove(&far) {
             old.task.abort();
         }
@@ -765,11 +776,21 @@ pub async fn pair_within(
         );
     }
     let first_wait = PAIR_FIRST_WAIT.min(h.enroll_timeout());
-    let record = match tokio::time::timeout(first_wait, rx).await {
-        Ok(Ok(First::Refused(p))) => return Err(p.into()),
-        Ok(Ok(First::Done(rec))) => Some(rec),
+    let mut rx = rx;
+    let first = match tokio::time::timeout(first_wait, &mut rx).await {
+        Ok(got) => got.ok(),
+        // Row D6d: closed before the route answers, so the attempt's first answer from now on
+        // fails and its end publishes the `relay` frame; one sent before the close is read here.
+        Err(_) => {
+            rx.close();
+            rx.try_recv().ok()
+        }
+    };
+    let record = match first {
+        Some(First::Refused(p)) => return Err(p.into()),
+        Some(First::Done(rec)) => Some(rec),
         // waiting, still dialling, or replaced meanwhile by a newer scan: 202
-        Ok(Ok(First::Waiting)) | Ok(Err(_)) | Err(_) => None,
+        Some(First::Waiting) | None => None,
     };
     let role = record.map_or(pick.role, |r| r.role);
     let via = record.map_or(pick.via, |r| r.via);
@@ -834,8 +855,29 @@ async fn forget_unless_recorded(h: &Arc<FabricHandle>, far: NodeId) {
     }
 }
 
-/// One attempt (module doc): `Fabric::pair` within the window; with no address to dial, wait
-/// for the far hub's `ENROLL` to arrive here and enrol on its connection.
+/// Hand the scan route the attempt's first answer: `true` when the route still waits for it (the
+/// send went through), `false` when the route answered already (row D6d: it took an earlier
+/// answer, or stopped waiting and closed or dropped its end of the channel).
+fn answer(first: &mut Option<oneshot::Sender<First>>, a: First) -> bool {
+    first.take().is_some_and(|tx| tx.send(a).is_ok())
+}
+
+/// The attempt's last answer, once its end is applied (the half forgotten or the record made):
+/// to the route while it still waits; else the end reaches no route, and `relay::changed()`
+/// asks the `relay` frame's clients to re-read (§13.1, row D6d). The frame shows the end only
+/// through what it changed in the fabric (module doc): a record made, which the record's own
+/// `Fabric` event publishes too; after a refused or timed-out end it repeats the last status
+/// with fresh ages.
+fn finish(first: &mut Option<oneshot::Sender<First>>, last: First) {
+    if !answer(first, last) {
+        relay::changed();
+    }
+}
+
+/// One attempt, spawned by the scan: [`attempt`] runs it, and its last answer leaves through
+/// [`finish`] here, the one exit every end takes (the far hub enrolled, refused or never
+/// answered; the fabric down), so no end reaches the route or the `relay` frame another way (row
+/// D6d).
 async fn run_attempt(
     h: Arc<FabricHandle>,
     attempts: Arc<PairAttempts>,
@@ -844,13 +886,25 @@ async fn run_attempt(
     first: oneshot::Sender<First>,
 ) {
     let mut first = Some(first);
+    let last = attempt(&h, &attempts, id, &a, &mut first).await;
+    finish(&mut first, last);
+}
+
+/// The attempt (module doc): `Fabric::pair` within the window; with no address to dial, wait for
+/// the far hub's `ENROLL` to arrive here and enrol on its connection (the `Waiting` answer goes
+/// to the route as that wait starts). Its end is applied ([`end_attempt`]) before its last
+/// answer is returned.
+async fn attempt(
+    h: &Arc<FabricHandle>,
+    attempts: &Arc<PairAttempts>,
+    id: u64,
+    a: &AttemptArgs,
+    first: &mut Option<oneshot::Sender<First>>,
+) -> First {
     let label = NodeIdDisplay::new(a.far.as_bytes()).label();
     let Some(f) = h.fabric() else {
-        end_attempt(&h, &attempts, id, a.far, false).await;
-        if let Some(tx) = first.take() {
-            let _ = tx.send(First::Refused(fabric::not_running()));
-        }
-        return;
+        end_attempt(h, attempts, id, a.far, false).await;
+        return First::Refused(fabric::not_running());
     };
     let deadline = tokio::time::Instant::now() + a.window;
     // Subscribed before the first try (the far hub's ENROLL may land between the two), and the
@@ -861,13 +915,11 @@ async fn run_attempt(
         None => FarSeen::default(),
     };
     let outcome = loop {
-        let attempt = f.pair(a.address, &a.code, &a.card, a.role, a.via);
-        match tokio::time::timeout_at(deadline, attempt).await {
+        let enrol = f.pair(a.address, &a.code, &a.card, a.role, a.via);
+        match tokio::time::timeout_at(deadline, enrol).await {
             Ok(Ok(rec)) => break Ok(rec),
             Ok(Err(FabricError::NoLink)) if a.address.is_none() => {
-                if let Some(tx) = first.take() {
-                    let _ = tx.send(First::Waiting);
-                }
+                answer(first, First::Waiting);
                 let Some(rx) = events.as_mut() else {
                     break Err(None);
                 };
@@ -883,7 +935,7 @@ async fn run_attempt(
     };
     match outcome {
         Ok(rec) => {
-            end_attempt(&h, &attempts, id, a.far, true).await;
+            end_attempt(h, attempts, id, a.far, true).await;
             eprintln!(
                 "111 relay: enrolled at hub {label} ({}): {}",
                 a.via.code(),
@@ -893,12 +945,10 @@ async fn run_attempt(
                     "the pair forwards once that hub has enrolled here too"
                 }
             );
-            if let Some(tx) = first.take() {
-                let _ = tx.send(First::Done(rec));
-            }
+            First::Done(rec)
         }
         Err(e) => {
-            end_attempt(&h, &attempts, id, a.far, false).await;
+            end_attempt(h, attempts, id, a.far, false).await;
             let problem = match &e {
                 Some(e) => attempt_problem(e),
                 None => Problem::new(
@@ -911,9 +961,7 @@ async fn run_attempt(
                 "111 relay: pairing with hub {label} ended: {}",
                 problem.detail.as_deref().unwrap_or(&problem.title)
             );
-            if let Some(tx) = first.take() {
-                let _ = tx.send(First::Refused(problem));
-            }
+            First::Refused(problem)
         }
     }
 }
@@ -1183,13 +1231,7 @@ mod tests {
         assert!(!needs_pair_plain(None, true, Some(public)));
         assert!(!needs_pair_plain(None, false, Some(lan)));
         assert!(!needs_pair_plain(None, false, Some(cgnat)));
-        // the text and its hash, verbatim (D30 Q21)
-        assert_eq!(
-            PAIR_PLAIN_WARNING,
-            "This hub is on the open internet and this link cannot be encrypted. Anyone on the \
-             path between the two hubs can see which hubs talk, when, and how much. Message \
-             contents stay sealed. Pair anyway?"
-        );
+        // the text's hash (the text verbatim is `relay::consent`'s test, its one definition)
         let hex = pair_plain_hash_hex();
         assert_eq!(hex.len(), 64);
         assert!(hex.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')));
@@ -1324,6 +1366,36 @@ mod tests {
         assert_eq!(pinned_elsewhere(&table, &c, Some(&spki(5))), None);
         assert_eq!(pinned_elsewhere(&table, &b, Some(&spki(6))), None);
         assert_eq!(pinned_elsewhere(&table, &b, None), None);
+    }
+
+    #[test]
+    fn the_route_has_answered_once_it_took_a_wait_or_stopped_waiting() {
+        // the route waits: the first answer reaches it, and only once
+        let (tx, mut rx) = oneshot::channel();
+        let mut first = Some(tx);
+        assert!(answer(&mut first, First::Waiting));
+        assert!(matches!(rx.try_recv(), Ok(First::Waiting)));
+        assert!(first.is_none());
+        assert!(!answer(&mut first, First::Waiting), "it took the wait");
+        // the first wait ended: the route closes its end, then reads what came before
+        let (tx, mut rx) = oneshot::channel();
+        let mut first = Some(tx);
+        assert!(answer(&mut first, First::Waiting));
+        rx.close();
+        assert!(
+            matches!(rx.try_recv(), Ok(First::Waiting)),
+            "sent before the close"
+        );
+        let (tx, mut rx) = oneshot::channel::<First>();
+        let mut first = Some(tx);
+        rx.close();
+        assert!(!answer(&mut first, First::Waiting), "sent after the close");
+        assert!(rx.try_recv().is_err());
+        // the route's request went: its end is dropped
+        let (tx, rx) = oneshot::channel::<First>();
+        drop(rx);
+        let mut first = Some(tx);
+        assert!(!answer(&mut first, First::Waiting));
     }
 
     #[test]
