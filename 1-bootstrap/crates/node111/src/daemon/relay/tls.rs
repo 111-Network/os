@@ -16,25 +16,26 @@
 //!   row D5b). It is never a peer either (`tcp-lan` refuses it by default),
 //!   so a test that turns that refusal off gets TLS over loopback, or marks
 //!   the pair `lan = true` for plain.
-//! - **Inbound** on `:11183` (rule 2): with no pinned pair at all the stream
-//!   passes through untouched (nothing is read first, so the wire and its
-//!   order are what they were: the listener's hello and announce go first,
-//!   and a TLS client then meets exactly what every plain peer is shown, its
-//!   record fails the hello check and the connection ends; with no pin there
-//!   is no TLS peer to admit). Otherwise the first byte is peeked without
-//!   consuming it: `0x16` (a TLS handshake record) goes to the TLS path,
-//!   `0x31` (the `111F` hello) is served plain as today, anything else closes
-//!   the connection. A TLS client must present a pinned link key; an
-//!   unpinned one ends the handshake, before any 111 byte. The wrap names the
-//!   pair whose pinned SPKI matched (S7), and `tcp-lan` refuses a first
-//!   announce naming another NodeId.
-//! - **The peek runs whenever any pair holds a pin, a `lan` pair's
-//!   included** (the lead's ruling, row D5b; a declared exception to the D5
-//!   row's "no weight before a non-LAN pair"). `lan` is this hub's own mark:
-//!   the far hub may not have marked the pair `lan` and then dials TLS, and
-//!   refusing its `0x16` would break a valid pairing. The cost on a hub
-//!   whose pairs are all `lan`: one `peek` per inbound connection; no file is
-//!   read and no TLS state is built until a `0x16` arrives.
+//! - **Inbound** on `:11183` (rule 2): the first byte is peeked without
+//!   consuming it, on every inbound connection: `0x31` (the `111F` hello) is
+//!   served plain as today, `0x16` (a TLS handshake record) goes to the TLS
+//!   path, anything else closes the connection. A TLS client must present a
+//!   pinned link key; an unpinned one ends the handshake, and with no pinned
+//!   pair at all there is none to present, so a `0x16` closes at once: no
+//!   TLS state is built, no key read, and in every case the connection ends
+//!   before any 111 byte (the listener's hello and announce are never shown
+//!   to a TLS client, G11 "no cleartext announce"). The wrap names the pair
+//!   whose pinned SPKI matched (S7), and `tcp-lan` refuses a first announce
+//!   naming another NodeId.
+//! - **The peek on every inbound connection** (the lead's ruling after G11,
+//!   row V5, 2026-11-16; before it, a node with no pin passed the stream
+//!   through unread and its hello and announce went first, also to a TLS
+//!   client). Both sides of `tcp-lan` write their hello at once (L5 §8.1,
+//!   "announce first"), so waiting for the peer's first byte delays no `111`
+//!   peer, a member built before Layer 7 included; a silent connection waits
+//!   inside `tcp-lan`'s handshake deadline. The cost: one `peek` per inbound
+//!   connection, nothing resident; no file is read and no TLS state is built
+//!   until a `0x16` arrives while a pair holds a pin.
 //!
 //! **The configuration (§4.3, normative).** TLS 1.3 only (the provider keeps
 //! only the TLS 1.3 suites and both builders take `TLS13` alone); Ed25519
@@ -56,8 +57,9 @@
 //! small object on every node that runs `tcp-lan` (it holds the path of the
 //! node root and a clone of the live pair table): the fabric reads it once
 //! when it builds the adapter, and a hub that pairs later must not need a
-//! restart. While no pair holds a pinned key, its calls box the `TcpStream`
-//! and return it: no peek, no file read, no TLS state. The link key and the
+//! restart. While no pair holds a pinned key, an outbound call boxes the
+//! `TcpStream` and returns it and an inbound call peeks one byte (rule 2):
+//! no file read, no TLS state. The link key and the
 //! rustls configurations are read and built at the first TLS handshake and
 //! kept: every later handshake costs one `lstat` of `secrets/link-key`,
 //! compared with the stamp taken at the load (device, inode, length, mtime,
@@ -529,15 +531,18 @@ impl RpkWrap {
     }
 
     async fn accept(&self, stream: TcpStream) -> io::Result<(BoxedStream, Option<NodeId>)> {
-        if !self.any_pin() {
-            return Ok((Box::new(stream), None));
-        }
         let mut first = [0u8; 1];
         if stream.peek(&mut first).await? == 0 {
             return Err(io_err(io::ErrorKind::UnexpectedEof, "closed before a byte"));
         }
         match first[0] {
             PLAIN_HELLO_FIRST => Ok((Box::new(stream), None)),
+            // Rule 2: the client must present a pinned key, and with no pin
+            // there is none; closed before any 111 byte, nothing read or built.
+            TLS_HANDSHAKE_RECORD if !self.any_pin() => Err(io_err(
+                io::ErrorKind::PermissionDenied,
+                "no pinned pair: a TLS client cannot be admitted",
+            )),
             TLS_HANDSHAKE_RECORD => {
                 let state = self.tls()?;
                 let tls = tokio_rustls::TlsAcceptor::from(Arc::clone(&state.server))
@@ -1099,30 +1104,51 @@ mod tests {
         (c, s)
     }
 
-    /// The "never adds" clause: with no pinned pair a stream passes through
-    /// unread (the server's hello may go first, as before Layer 7), and no
-    /// key is read, no `secrets/` made, no TLS state built.
+    /// The "never adds" clause under rule 2's peek (row V5's ruling): with no
+    /// pinned pair an inbound call peeks one byte and nothing else. `0x31` is
+    /// served plain with the byte left in the stream, a silent client is not
+    /// answered, a `0x16` closes before any 111 byte; no key is read, no
+    /// `secrets/` made, no TLS state built, and an outbound dial passes through.
     #[tokio::test]
-    async fn without_a_pin_nothing_is_read_or_built() {
+    async fn without_a_pin_only_the_peek_runs() {
         let d = tempfile::tempdir().unwrap();
         let pairs: PairTable = Arc::new(RwLock::new(vec![PairLink::new(id(2))]));
         let w = RpkWrap::new(d.path().to_path_buf(), pairs);
+
         let (mut c, s) = loopback().await;
         let remote = c.local_addr().unwrap();
-        let (mut s, matched) =
-            tokio::time::timeout(std::time::Duration::from_secs(2), w.inbound(remote, s))
-                .await
-                .expect("no byte awaited")
-                .unwrap();
+        c.write_all(b"111F\x01").await.unwrap();
+        let (mut s, matched) = w.inbound(remote, s).await.unwrap();
         assert_eq!(matched, None);
-        s.write_all(b"111F\x01").await.unwrap();
         let mut b = [0u8; 5];
-        c.read_exact(&mut b).await.unwrap();
-        assert_eq!(&b, b"111F\x01");
+        s.read_exact(&mut b).await.unwrap();
+        assert_eq!(&b, b"111F\x01", "nothing consumed");
+
+        // nothing is sent before the client's first byte (tcp-lan's handshake
+        // deadline bounds the wait)
+        let (c, s) = loopback().await;
+        let remote = c.local_addr().unwrap();
+        let waited =
+            tokio::time::timeout(std::time::Duration::from_millis(300), w.inbound(remote, s)).await;
+        assert!(waited.is_err(), "a silent client is not answered");
+        drop(c);
+
+        // a TLS client meets no 111 byte: the listener's hello and announce
+        // are never shown to it (G11 "no cleartext announce")
+        let (mut c, s) = loopback().await;
+        let remote = c.local_addr().unwrap();
+        c.write_all(&[0x16, 0x03, 0x01, 0x00, 0x05]).await.unwrap();
+        let refused = w.inbound(remote, s).await.err().map(|e| e.kind());
+        assert_eq!(refused, Some(io::ErrorKind::PermissionDenied));
+        let mut got = Vec::new();
+        let _ = c.read_to_end(&mut got).await; // an end of stream or a reset
+        assert!(got.is_empty(), "a byte reached the TLS client: {got:?}");
+
         let (_c2, s2) = loopback().await;
         let at = s2.peer_addr().unwrap();
         w.outbound(at, Some(id(9)), s2).await.unwrap();
         assert!(!w.tls_built());
+        assert_eq!(w.key_loads(), 0);
         assert!(
             std::fs::read_dir(d.path()).unwrap().next().is_none(),
             "nothing on disk"

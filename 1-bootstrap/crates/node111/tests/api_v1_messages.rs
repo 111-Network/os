@@ -621,10 +621,15 @@ impl Node {
     }
 }
 
-/// The hello and the announce a `tcp-lan` listener opens a connection with.
+/// The hello and the announce a `tcp-lan` listener opens a connection with,
+/// once the client's own hello arrived (Layer 7 §4.1 rule 2: the listener
+/// peeks the first byte before it writes; every `111` peer writes its hello at
+/// once).
 async fn opening_announce(at: SocketAddr) -> Vec<u8> {
-    use mesh111::link::tcp_lan::{read_frame, read_hello, T_ANNOUNCE};
+    use mesh111::link::tcp_lan::{read_frame, read_hello, HELLO, T_ANNOUNCE};
+    use tokio::io::AsyncWriteExt;
     let mut s = tokio::net::TcpStream::connect(at).await.unwrap();
+    s.write_all(&HELLO).await.unwrap();
     read_hello(&mut s).await.unwrap();
     let (ty, body) = read_frame(&mut s).await.unwrap();
     assert_eq!(ty, T_ANNOUNCE);
