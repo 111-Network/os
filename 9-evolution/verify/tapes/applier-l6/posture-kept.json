@@ -1,0 +1,94 @@
+{
+  "case": "posture-kept",
+  "decision": {
+    "applied": {
+      "actions": [
+        {
+          "action": "rns.posture.set",
+          "applied": true,
+          "reason": null,
+          "reverted": false,
+          "skipped": false
+        }
+      ],
+      "applied": true,
+      "reason": null,
+      "reverted": false
+    },
+    "at": "NORMALISED",
+    "decision": "accepted",
+    "schema": 1
+  },
+  "files": [
+    {
+      "mode": "600",
+      "path": "agent/decisions/prop-p1-posture-kept.json",
+      "sha256": "326dd412e377c03d99210166c5983228e1e7af7ca932c0b2eebacf356e4192aa"
+    },
+    {
+      "mode": "600",
+      "path": "rns/config",
+      "sha256": "b96e1f3cd3fc040a839822cd9d3407c53b44674b485a597db98b2997c8cc84d0"
+    },
+    {
+      "mode": "600",
+      "path": "state/dashboard-pair.json",
+      "sha256": null
+    },
+    {
+      "mode": "600",
+      "path": "state/dashboard-sessions.json",
+      "sha256": null
+    },
+    {
+      "mode": "644",
+      "path": "state/dashboard.json",
+      "sha256": null
+    },
+    {
+      "mode": "600",
+      "path": "state/devices.json",
+      "sha256": null
+    },
+    {
+      "mode": "600",
+      "path": "state/interfaces.toml",
+      "sha256": "079e430a5c1b341c50810fa63547865a8b2a0fbea7685944551b2b1177d2da77"
+    },
+    {
+      "mode": "644",
+      "path": "state/panels.json",
+      "sha256": null
+    },
+    {
+      "mode": "600",
+      "path": "state/staging.lock",
+      "sha256": null
+    }
+  ],
+  "http_status": 200,
+  "proposal": {
+    "actions": [
+      {
+        "action": "rns.posture.set",
+        "enable_transport": true
+      }
+    ],
+    "why": "P1 posture"
+  },
+  "recorded_at_commit": "3da8e300eb0af0b4bd9855a987e197ca364f7f86",
+  "report": {
+    "actions": [
+      {
+        "action": "rns.posture.set",
+        "applied": true,
+        "reason": null,
+        "reverted": false,
+        "skipped": false
+      }
+    ],
+    "applied": true,
+    "reason": null,
+    "reverted": false
+  }
+}

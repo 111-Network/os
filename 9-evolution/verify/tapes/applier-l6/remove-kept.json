@@ -1,0 +1,94 @@
+{
+  "case": "remove-kept",
+  "decision": {
+    "applied": {
+      "actions": [
+        {
+          "action": "rns.interface.remove",
+          "applied": true,
+          "reason": null,
+          "reverted": false,
+          "skipped": false
+        }
+      ],
+      "applied": true,
+      "reason": null,
+      "reverted": false
+    },
+    "at": "NORMALISED",
+    "decision": "accepted",
+    "schema": 1
+  },
+  "files": [
+    {
+      "mode": "600",
+      "path": "agent/decisions/prop-p1-remove-kept.json",
+      "sha256": "162b3650bf421e722f24140fcdfd0649bea79a8b82b9fe7269165e7ce88ecca7"
+    },
+    {
+      "mode": "600",
+      "path": "rns/config",
+      "sha256": "a8a14d9a5ecf52d52a0fb7cf84e776bedf602e8783558b65874221905ed49e55"
+    },
+    {
+      "mode": "600",
+      "path": "state/dashboard-pair.json",
+      "sha256": null
+    },
+    {
+      "mode": "600",
+      "path": "state/dashboard-sessions.json",
+      "sha256": null
+    },
+    {
+      "mode": "644",
+      "path": "state/dashboard.json",
+      "sha256": null
+    },
+    {
+      "mode": "600",
+      "path": "state/devices.json",
+      "sha256": null
+    },
+    {
+      "mode": "600",
+      "path": "state/interfaces.toml",
+      "sha256": "367c7e56d2b5d74513603149ca4338f552e1928011dbb495476f11e497e7297f"
+    },
+    {
+      "mode": "644",
+      "path": "state/panels.json",
+      "sha256": null
+    },
+    {
+      "mode": "600",
+      "path": "state/staging.lock",
+      "sha256": null
+    }
+  ],
+  "http_status": 200,
+  "proposal": {
+    "actions": [
+      {
+        "action": "rns.interface.remove",
+        "name": "P1 board 2"
+      }
+    ],
+    "why": "P1 remove"
+  },
+  "recorded_at_commit": "3da8e300eb0af0b4bd9855a987e197ca364f7f86",
+  "report": {
+    "actions": [
+      {
+        "action": "rns.interface.remove",
+        "applied": true,
+        "reason": null,
+        "reverted": false,
+        "skipped": false
+      }
+    ],
+    "applied": true,
+    "reason": null,
+    "reverted": false
+  }
+}

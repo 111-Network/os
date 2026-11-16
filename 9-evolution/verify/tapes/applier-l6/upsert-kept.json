@@ -1,0 +1,102 @@
+{
+  "case": "upsert-kept",
+  "decision": {
+    "applied": {
+      "actions": [
+        {
+          "action": "rns.interface.upsert",
+          "applied": true,
+          "reason": null,
+          "reverted": false,
+          "skipped": false
+        }
+      ],
+      "applied": true,
+      "reason": null,
+      "reverted": false
+    },
+    "at": "NORMALISED",
+    "decision": "accepted",
+    "schema": 1
+  },
+  "files": [
+    {
+      "mode": "600",
+      "path": "agent/decisions/prop-p1-upsert-kept.json",
+      "sha256": "d8e32bfadf2f63b82bcce2291d2feb1d058d5ef478acf89d59afbefbc8eb4569"
+    },
+    {
+      "mode": "600",
+      "path": "rns/config",
+      "sha256": "430445942c4002f6f0f53aecc8a4dd27411a01c238e40fc8c9643258f91a6994"
+    },
+    {
+      "mode": "600",
+      "path": "state/dashboard-pair.json",
+      "sha256": null
+    },
+    {
+      "mode": "600",
+      "path": "state/dashboard-sessions.json",
+      "sha256": null
+    },
+    {
+      "mode": "644",
+      "path": "state/dashboard.json",
+      "sha256": null
+    },
+    {
+      "mode": "600",
+      "path": "state/devices.json",
+      "sha256": null
+    },
+    {
+      "mode": "600",
+      "path": "state/interfaces.toml",
+      "sha256": "a85ba1621a0b1c25d7ae134a227cd598ce3f395247040c960bf26bd2381876ba"
+    },
+    {
+      "mode": "644",
+      "path": "state/panels.json",
+      "sha256": null
+    },
+    {
+      "mode": "600",
+      "path": "state/staging.lock",
+      "sha256": null
+    }
+  ],
+  "http_status": 200,
+  "proposal": {
+    "actions": [
+      {
+        "action": "rns.interface.upsert",
+        "device_id": "e1c08a8c036880a9",
+        "params": {
+          "bandwidth": 125000,
+          "codingrate": 5,
+          "frequency": 869525000,
+          "spreadingfactor": 8,
+          "txpower": 14
+        },
+        "type": "RNodeInterface"
+      }
+    ],
+    "why": "P1 upsert"
+  },
+  "recorded_at_commit": "3da8e300eb0af0b4bd9855a987e197ca364f7f86",
+  "report": {
+    "actions": [
+      {
+        "action": "rns.interface.upsert",
+        "applied": true,
+        "reason": null,
+        "reverted": false,
+        "skipped": false
+      }
+    ],
+    "applied": true,
+    "reason": null,
+    "reverted": false
+  }
+}

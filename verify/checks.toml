@@ -2965,6 +2965,7 @@ reason = "returns early as root (access(2) always succeeds), so a PASS here prov
 "6-transport/verify/rns-venv.sh" = "sourced helper that builds the hash-locked rnsd/LXMF venv for G3, G4 and G5; not a check"
 "6-transport/verify/devices/fake-rnodeconf.sh" = "G5's fake rnodeconf (also a [[fake]] on L1-L6:devices-hotplug): devices.sh installs a rendered copy as venvs/rns/bin/rnodeconf; not a check"
 "6-transport/verify/spine/node.sh" = "sourced helper of the G4 and G5 gates (spine.sh and devices.sh: ok/fail/note counting, req/jb/t/tw, nx/api, roots, daemons); not a check"
+"9-evolution/verify/record-applier-tape.sh" = "Layer 9 row P1: a one-off recorder of the Layer 6 applier tape (9-evolution/verify/tapes/applier-l6/), run once before Layer 8 row D7; not a check, its tapes are what G20 (1) compares the port against"
 "6-transport/verify/root.sh" = "sourced helper (g6_make_root, g6_identity) for G1 and the Layer 7 lib; not a check"
 "6-transport/verify/zero-weight.sh" = "G7 needs an already-running daemon (NODE111_ROOT) and prints SKIPPED alone; row N4 runs it inside smoke.sh against the harness's own daemon, then it gets a check"
 "7-relay/verify/lib.sh" = "sourced helper: port, namespace and address names for G7-extended to G12; creates nothing, not a check"
