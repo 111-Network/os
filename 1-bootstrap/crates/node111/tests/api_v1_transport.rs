@@ -22,6 +22,7 @@ use node111::daemon::dashboard::{
 };
 use node111::daemon::devices::store;
 use node111::daemon::fabric::{self, FabricConfig};
+use node111::daemon::housekeeping;
 use node111::daemon::transport::config;
 use node111::daemon::transport::interfaces;
 use node111::daemon::transport::posture::{BoxFut, RnsdChild, Spine};
@@ -875,6 +876,8 @@ async fn the_bridge_settings_order_is_the_spines() {
     c.housekeeping = Duration::from_secs(3600);
     let fabric = fabric::start(c, Some(identity), &n.api).await;
     assert!(fabric.running());
+    // the daemon's one housekeeping interval, spawned where `daemon/mod.rs` spawns it
+    let house = housekeeping::spawn(&n.api, &fabric);
     let bridge = Bridge::new(
         BridgeConfig::new(&n.spine.layout().root),
         Arc::clone(&fabric),
@@ -911,6 +914,8 @@ async fn the_bridge_settings_order_is_the_spines() {
         .collect();
     assert_eq!(ids[..2], ["app:simplex", "lxmf"], "{ids:?}");
     assert_eq!(ids[2..], ["meshtastic", "app:deltachat"], "{ids:?}");
+    // the daemon's stop order: the housekeeping interval, then the fabric
+    house.stop().await;
     fabric.shutdown().await;
 }
 

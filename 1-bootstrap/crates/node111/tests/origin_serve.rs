@@ -25,6 +25,7 @@ use axum::extract::connect_info::MockConnectInfo;
 use node111::daemon::dashboard::routes::{self, CSP};
 use node111::daemon::dashboard::{serve_listener, ApiConfig, ApiState, DashboardState};
 use node111::daemon::fabric::{self, FabricConfig, FabricHandle};
+use node111::daemon::housekeeping::{self, Housekeeping};
 use node111::daemon::origin::{AdmitError, Origin, MANIFEST_NAME, SIGNATURE_NAME};
 use node111::daemon::relay::settings::{self as relay_settings, ConsentKind, RelaySettings};
 use node111::daemon::updater::fetch::TARGET_TRIPLE;
@@ -137,6 +138,9 @@ const ALL_ON: Switches = Switches {
 struct Node {
     api: Arc<ApiState>,
     fabric: Arc<FabricHandle>,
+    /// The daemon's housekeeping interval (Layer 8 row D1; it runs with the fabric down too),
+    /// alive as long as `fabric`.
+    _house: Housekeeping,
     state_dir: PathBuf,
     _dir: tempfile::TempDir,
 }
@@ -179,9 +183,12 @@ async fn node(sw: Switches) -> Node {
         .await
         .expect("the relay switches are applied");
     api.insert_ext(Arc::clone(&fabric));
+    // the daemon's one housekeeping interval, spawned where `daemon/mod.rs` spawns it
+    let house = housekeeping::spawn(&api, &fabric);
     Node {
         api,
         fabric,
+        _house: house,
         state_dir,
         _dir: dir,
     }

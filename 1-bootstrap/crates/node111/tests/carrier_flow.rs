@@ -24,10 +24,12 @@
 use axum::extract::connect_info::MockConnectInfo;
 use id111::keyset::NodeId;
 use mesh111::fabric::{PairRole, PairVia};
+use mesh111::store::{Dir, MsgState};
 use node111::daemon::carrier::{ntfy, CarrierRuntime, RuntimeOptions};
 use node111::daemon::dashboard::api_v1::relay7;
 use node111::daemon::dashboard::{routes, ApiConfig, ApiState, DashboardState, SharedState};
 use node111::daemon::fabric::{self, FabricConfig, FabricHandle};
+use node111::daemon::housekeeping::{self, Housekeeping};
 use node111::daemon::relay::netwatch::{self, NetRead, NetWatch, Opener};
 use node111::daemon::relay::pair::{self, pair_within, PairAttempts, PairPick};
 use node111::daemon::relay::settings::{
@@ -237,6 +239,8 @@ fn fired_watch() -> (&'static NetWatch, tokio::sync::mpsc::UnboundedSender<()>) 
 struct Node {
     api: Arc<ApiState>,
     fabric: Arc<FabricHandle>,
+    /// The daemon's housekeeping interval for `fabric` (Layer 8 row D1), alive as long as it.
+    _house: Housekeeping,
     rt: Option<Arc<CarrierRuntime>>,
     port: u16,
     layout: DaemonLayout,
@@ -305,6 +309,9 @@ async fn node(hub: bool, settings: Option<RelaySettings>, opts: Option<RuntimeOp
     let fabric = fabric::start(test_config(&layout, hub), Some(identity), &api).await;
     assert!(fabric.running(), "{:?}", fabric.down_reason());
     api.insert_ext(Arc::clone(&fabric));
+    // the daemon's one housekeeping interval, spawned where `daemon/mod.rs` spawns it: it
+    // refreshes the facts and the pair views every `housekeeping` (200 ms here)
+    let house = housekeeping::spawn(&api, &fabric);
     let rt = opts.map(|o| {
         let rt = CarrierRuntime::new(&api, &fabric, o);
         api.insert_ext(rt.clone() as Arc<dyn CarrierHook>);
@@ -322,6 +329,7 @@ async fn node(hub: bool, settings: Option<RelaySettings>, opts: Option<RuntimeOp
     Node {
         api,
         fabric,
+        _house: house,
         rt,
         port,
         layout,
@@ -633,6 +641,37 @@ fn state_file(n: &Node) -> String {
 
 // ---------------------------------------------------------------- tests
 
+/// The harness runs the daemon's composition (Layer 8 row D1 moved the housekeeping interval out
+/// of `fabric::start` into `housekeeping::spawn`, which `daemon/mod.rs` calls after the fabric):
+/// a node built by [`node`] refreshes the `fabric` facts and the per-pair views the carrier and
+/// the `gateway` row read on its own, every `housekeeping` period (200 ms here), with no event,
+/// frame or route asking (each `refresh_facts` stamps `FabricHandle::pair_views().at`). Without
+/// the interval nothing refreshes them after `fabric::start`'s one read, and this suite's flows
+/// run on whatever else happens to wake the fabric.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_node_refreshes_its_facts_and_pair_views_on_its_own() {
+    let _one = SERIAL.lock().await;
+    let n = node(true, None, None).await;
+    let mut at = n.fabric.pair_views().at.expect("read at start");
+    // three refreshes take about 0.6 s; the 10 s leave a starved runner room (each tick waits on
+    // the fabric's store), and a node with no interval gets none however long it waits
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    let mut refreshes = 0;
+    while refreshes < 3 {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "{refreshes} refreshes of the pair views in 10 s at a 200 ms period: the node runs \
+             no housekeeping interval"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        let now = n.fabric.pair_views().at.expect("read at start");
+        if now > at {
+            refreshes += 1;
+            at = now;
+        }
+    }
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn nothing_is_built_while_off_and_no_request_before_an_event() {
     let _one = SERIAL.lock().await;
@@ -742,8 +781,10 @@ async fn drain_post_drain_commits_on_the_far_ack_and_posts_an_ack_once() {
     // B's Flush now: B drains the put, answers the ack, drains once
     let (s, v) = w.b.carrier("flush");
     assert_eq!((s, v["started"].as_bool()), (202, Some(true)), "{v}");
+    // the ack is B's first post; MB's delivery report to MA (MB → B → the carrier → A) rides
+    // with it or follows it in a round of B's own, at times within one poll of this wait
     until(30, "B posted the ack", || async {
-        (count(&stub.requests(), |r| r.is_post(&w.t_ba)) == 1).then_some(())
+        (count(&stub.requests(), |r| r.is_post(&w.t_ba)) >= 1).then_some(())
     })
     .await;
     w.b.idle().await;
@@ -762,18 +803,39 @@ async fn drain_post_drain_commits_on_the_far_ack_and_posts_an_ack_once() {
     })
     .await;
     w.a.idle().await;
-    // the ack is posted once: B's next flush (the member's delivery may owe B more frames, but
-    // never the same ack) posts nothing to A while A owes nothing
-    let acks_before = count(&stub.requests(), |r| r.is_post(&w.t_ba));
-    w.b.rt().check();
-    w.b.idle().await;
-    assert_eq!(count(&stub.requests(), |r| r.is_post(&w.t_ba)), acks_before);
     // the member at B gets it
     until(30, "MB holds the message", || async {
         let th = w.mb.fabric.fabric()?.thread(w.ma.id, 10).await.ok()?;
         (!th.messages.is_empty()).then_some(())
     })
     .await;
+    // its delivery report crosses back when B's rounds take it: A checks until MA holds the
+    // delivery, so B has posted the report and A has posted its ack, and nothing more is owed
+    // between the hubs (that ack, once B reads it, commits B's row and asks for no answer)
+    until(30, "MA's message delivered", || async {
+        w.a.rt().check();
+        w.a.idle().await;
+        let th = w.ma.fabric.fabric()?.thread(w.mb.id, 10).await.ok()?;
+        th.messages
+            .iter()
+            .any(|m| m.dir == Dir::Own && m.state == MsgState::Delivered)
+            .then_some(())
+    })
+    .await;
+    w.b.idle().await;
+    // the ack is posted once: B's next check posts nothing to A, by B's own count and by the
+    // stub's log (read once it holds every post B made: a thread of its own reads the stderr)
+    let b_posts = || w.b.rt().carrier_stats().unwrap().posts;
+    let posted = b_posts();
+    let logged = until(10, "the stub logged B's posts", || async {
+        let n = count(&stub.requests(), |r| r.is_post(&w.t_ba));
+        (n as u64 >= posted).then_some(n)
+    })
+    .await;
+    w.b.rt().check();
+    w.b.idle().await;
+    assert_eq!(b_posts(), posted, "B posted again");
+    assert_eq!(count(&stub.requests(), |r| r.is_post(&w.t_ba)), logged);
     eprintln!(
         "D11 record: RSS of the test process {rss_before} kB before, {rss_during} kB during a \
          5A flush (four daemons in this process); held connections after it: 0"

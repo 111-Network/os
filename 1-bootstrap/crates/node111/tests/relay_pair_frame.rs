@@ -27,6 +27,7 @@ use node111::daemon::dashboard::api_v1::{events, relay7};
 use node111::daemon::dashboard::{ApiConfig, ApiState, DashboardState, SharedState};
 use node111::daemon::fabric::settings::PairLink;
 use node111::daemon::fabric::{self, FabricConfig, FabricHandle};
+use node111::daemon::housekeeping::{self, Housekeeping};
 use node111::daemon::relay;
 use node111::daemon::relay::pair::{self, PairAttempts, PairBundle, PairPick};
 use node111::daemon::DaemonLayout;
@@ -41,6 +42,8 @@ use tokio::time::Instant;
 struct Hub {
     api: Arc<ApiState>,
     fabric: Arc<FabricHandle>,
+    /// The daemon's housekeeping interval for `fabric` (Layer 8 row D1), alive as long as it.
+    _house: Housekeeping,
     attempts: Arc<PairAttempts>,
     layout: DaemonLayout,
     id: NodeId,
@@ -62,8 +65,9 @@ fn test_config(layout: &DaemonLayout) -> FabricConfig {
     c
 }
 
-/// A hub with the real identity handle and fabric (no dashboard socket: nothing here goes
-/// through HTTP, and `relay::start` is not run, so no carrier runtime is built).
+/// A hub with the real identity handle and fabric and the daemon's housekeeping interval (no
+/// dashboard socket: nothing here goes through HTTP, and `relay::start` is not run, so no
+/// carrier runtime is built).
 async fn hub() -> Hub {
     let dir = tempfile::tempdir().unwrap();
     std::fs::create_dir_all(dir.path().join("state")).unwrap();
@@ -80,9 +84,12 @@ async fn hub() -> Hub {
     let fabric = fabric::start(test_config(&layout), Some(identity), &api).await;
     assert!(fabric.running(), "{:?}", fabric.down_reason());
     api.insert_ext(Arc::clone(&fabric));
+    // the daemon's one housekeeping interval, spawned where `daemon/mod.rs` spawns it
+    let house = housekeeping::spawn(&api, &fabric);
     Hub {
         api,
         fabric,
+        _house: house,
         attempts: Arc::new(PairAttempts::default()),
         layout,
         id,

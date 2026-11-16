@@ -49,11 +49,12 @@ use node111::daemon::dashboard::{
 };
 use node111::daemon::fabric::cli::{self as fcli, FabricCmd};
 use node111::daemon::fabric::{self, json as fjson, FabricConfig, FabricHandle};
+use node111::daemon::housekeeping::{self, Housekeeping};
 use node111::daemon::DaemonLayout;
 use serde_json::{json, Map, Value};
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpStream};
-use std::sync::{Arc, OnceLock, RwLock};
+use std::sync::{Arc, Mutex, OnceLock, RwLock};
 use std::time::Duration;
 use zeroize::Zeroizing;
 
@@ -479,6 +480,10 @@ struct Opts {
 struct Node {
     api: Arc<ApiState>,
     fabric: Arc<FabricHandle>,
+    /// The daemon's housekeeping interval for `fabric` (Layer 8 row D1), alive as long as it;
+    /// [`Node::shutdown`] stops it before the fabric, as the daemon does, and
+    /// [`Node::restart`] starts a new one for the new fabric.
+    house: Mutex<Option<Housekeeping>>,
     /// Dashboard on a real loopback socket (trusted loopback).
     port: u16,
     /// The same app with every request from a LAN peer.
@@ -544,11 +549,14 @@ async fn node(o: Opts) -> Node {
     let fabric = fabric::start(test_config(&layout, o), Some(identity), &api).await;
     assert!(fabric.running(), "{:?}", fabric.down_reason());
     api.insert_ext(Arc::clone(&fabric));
+    // the daemon's one housekeeping interval, spawned where `daemon/mod.rs` spawns it
+    let house = housekeeping::spawn(&api, &fabric);
     let port = serve(&api, None).await;
     let lan = serve(&api, Some(LAN_PEER)).await;
     Node {
         api,
         fabric,
+        house: Mutex::new(Some(house)),
         port,
         lan,
         layout,
@@ -602,20 +610,33 @@ impl Node {
         self.api.events.subscribe(Some(self.api.events.head())).rx
     }
 
-    /// Stop this node's fabric, run `between` on the stopped root (it may
-    /// hand back the identity to start with; otherwise it is re-read from
-    /// disk), and start the fabric again, serving the same dashboard app.
+    /// Stop this node as the daemon stops (`daemon/mod.rs`): the housekeeping
+    /// interval first, so no pass races the close, then the fabric.
+    async fn shutdown(&self) {
+        let house = self.house.lock().unwrap().take();
+        if let Some(h) = house {
+            h.stop().await;
+        }
+        self.fabric.shutdown().await;
+    }
+
+    /// Stop this node's fabric (its housekeeping interval first), run
+    /// `between` on the stopped root (it may hand back the identity to start
+    /// with; otherwise it is re-read from disk), and start the fabric again,
+    /// with a housekeeping interval of its own, serving the same dashboard
+    /// app.
     async fn restart(
         &mut self,
         o: Opts,
         between: impl FnOnce(&DaemonLayout) -> Option<node111::identity::Identity>,
     ) -> Arc<FabricHandle> {
-        self.fabric.shutdown().await;
+        self.shutdown().await;
         let identity = between(&self.layout)
             .unwrap_or_else(|| node111::identity::load(&self.layout.identity_dir()).unwrap());
         let again = fabric::start(test_config(&self.layout, o), Some(identity), &self.api).await;
         assert!(again.running(), "{:?}", again.down_reason());
         self.api.insert_ext(Arc::clone(&again));
+        *self.house.get_mut().unwrap() = Some(housekeeping::spawn(&self.api, &again));
         self.fabric = Arc::clone(&again);
         again
     }
@@ -1140,7 +1161,7 @@ async fn hub_offer_enroll_send_and_every_route() {
     );
 
     for n in [&a, &b, &d, &e] {
-        n.fabric.shutdown().await;
+        n.shutdown().await;
     }
 }
 
@@ -1282,8 +1303,8 @@ async fn auth_matrix_session_bearer_nothing() {
     );
     assert!(a.get("/api/v1/proposals/prop-bearer").json()["decision"].is_null());
 
-    a.fabric.shutdown().await;
-    b.fabric.shutdown().await;
+    a.shutdown().await;
+    b.shutdown().await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -1343,8 +1364,8 @@ async fn sse_coalesces_a_sixteen_fragment_transfer() {
     assert_eq!(inc.len(), 1, "{inc:?}");
     assert_eq!(inc[0]["change"], "new");
     assert_eq!(inc[0]["message"]["text"], text);
-    a.fabric.shutdown().await;
-    b.fabric.shutdown().await;
+    a.shutdown().await;
+    b.shutdown().await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -1508,7 +1529,7 @@ async fn message_proposals_are_checked_then_applied_once() {
     assert_eq!(own[0]["text"], "hi");
 
     for n in [&a, &b, &c] {
-        n.fabric.shutdown().await;
+        n.shutdown().await;
     }
 }
 
@@ -1550,8 +1571,8 @@ async fn restore_pending_answers_409_and_seals_nothing() {
         b.get("/api/v1/fabric").json()["store"]["restore_pending"],
         false
     );
-    r.fabric.shutdown().await;
-    b.fabric.shutdown().await;
+    r.shutdown().await;
+    b.shutdown().await;
     // F2 review M1: the clean stop wrote no counters file (no reset)
     let dir = r.layout.identity_dir();
     assert!(!dir.join("counters").exists());
@@ -1615,14 +1636,14 @@ async fn restore_pending_with_a_stored_announce_runs_no_link_and_resets_nothing(
     assert_eq!(st.json()["links"], json!([]));
     let facts = (again.provider())().unwrap();
     assert!(facts.store_open && facts.restore_pending, "{facts:?}");
-    again.shutdown().await;
+    r.shutdown().await;
     assert!(!dir.join("counters").exists(), "no counter reset on disk");
     let mut floor = id111::counters::CounterStore::restore_pending(&dir).unwrap();
     assert!(matches!(
         floor.next_announce_counter(),
         Err(id111::counters::CounterError::RestoreFloorRequired)
     ));
-    other.fabric.shutdown().await;
+    other.shutdown().await;
 }
 
 /// F2 review m9 (test gap): the production rule — loopback is never a peer
@@ -1703,7 +1724,7 @@ async fn refuse_loopback_refuses_loopback_dials_accepts_and_enrollment() {
     tokio::time::sleep(Duration::from_millis(300)).await;
     assert_eq!(q.fabric.tcp().unwrap().connection_count(), 0);
     for n in [&hub, &p, &q] {
-        n.fabric.shutdown().await;
+        n.shutdown().await;
     }
 }
 
@@ -1748,8 +1769,8 @@ async fn peers_from_settings_dial_a_listen_lan_node() {
     })
     .await;
     assert_eq!(thread_of(&a, &b.id)["messages"][0]["text"], "direct");
-    a.fabric.shutdown().await;
-    b.fabric.shutdown().await;
+    a.shutdown().await;
+    b.shutdown().await;
 }
 
 /// F2P (three-node smoke gap): a member that presents a spent code is
@@ -1817,7 +1838,7 @@ async fn a_refused_enrollment_leaves_no_dial_and_no_hub_card() {
     assert_eq!(tcp_peers(&hub), Some(1));
     assert_eq!(hub.get("/api/v1/fabric").json()["hub"]["members"], 1);
     for n in [&hub, &a, &c] {
-        n.fabric.shutdown().await;
+        n.shutdown().await;
     }
 }
 
@@ -1892,8 +1913,8 @@ async fn corrupt_settings_are_moved_aside_and_the_home_hub_rebuilt() {
         )
         .await;
     assert!(h2.persisted().fabric.home_hub.is_none());
-    m.fabric.shutdown().await;
-    hub.fabric.shutdown().await;
+    m.shutdown().await;
+    hub.shutdown().await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1926,23 +1947,28 @@ async fn restart_keeps_the_announce_store_and_settings() {
     assert_eq!(bundle.card, current);
     assert_eq!(bundle.address, at.to_string());
     a.delete("/api/v1/fabric/hub/offer");
-    a.fabric.shutdown().await;
+    a.shutdown().await;
     // custody_opt_in changes the announce roles: the next start re-mints
+    // (each start with its housekeeping interval, stopped before its fabric)
     let id = node111::identity::load(&a.layout.identity_dir()).unwrap();
     let again = fabric::start(test_config(&a.layout, Opts::default()), Some(id), &a.api).await;
     assert!(again.running(), "{:?}", again.down_reason());
+    let house = housekeeping::spawn(&a.api, &again);
     let second = again.own_announce();
     assert_ne!(first, second, "roles changed ⇒ a new announce");
     assert_eq!(second, now, "the re-minted announce was stored");
     assert!(again.persisted().fabric.custody_opt_in);
+    house.stop().await;
     again.shutdown().await;
     let id = node111::identity::load(&a.layout.identity_dir()).unwrap();
     let third = fabric::start(test_config(&a.layout, Opts::default()), Some(id), &a.api).await;
+    let house = housekeeping::spawn(&a.api, &third);
     assert_eq!(
         third.own_announce(),
         second,
         "unchanged roles ⇒ the stored announce"
     );
+    house.stop().await;
     third.shutdown().await;
 }
 

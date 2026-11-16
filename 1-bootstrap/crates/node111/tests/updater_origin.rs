@@ -33,6 +33,7 @@ use node111::daemon::dashboard::{
     routes, serve_listener, ApiConfig, ApiState, DashboardState, DEFAULT_PORT,
 };
 use node111::daemon::fabric::{self, sealer::ROLE_ORIGIN, FabricConfig, FabricHandle};
+use node111::daemon::housekeeping::{self, Housekeeping};
 use node111::daemon::origin::Origin as OriginStore;
 use node111::daemon::relay::settings::{self as rs, ConsentKind, RelaySettings};
 use node111::daemon::updater::fetch::{
@@ -733,8 +734,9 @@ fn the_verb_admits_into_the_origin_of_a_serving_hub() {
 // ---------------------------------------------------------------- the daemon's hook
 
 /// A hub with LAN sharing, the hub role and `origin.serve` per `serve`; its fabric is down (no
-/// identity), as in `origin_serve.rs`.
-async fn hub_api(serve: bool) -> (Arc<ApiState>, tempfile::TempDir) {
+/// identity), as in `origin_serve.rs`, and the daemon's housekeeping interval runs all the same
+/// (Layer 8 row D1), held by the caller as long as the API state.
+async fn hub_api(serve: bool) -> (Arc<ApiState>, Housekeeping, tempfile::TempDir) {
     let dir = tempfile::tempdir().unwrap();
     let layout = layout_at(dir.path());
     let mut c = ApiConfig::new(layout.clone(), true);
@@ -748,8 +750,10 @@ async fn hub_api(serve: bool) -> (Arc<ApiState>, tempfile::TempDir) {
     };
     rs::save(&layout.state_dir(), &relay).unwrap();
     f.set_relay_settings(&relay).await.unwrap();
-    api.insert_ext(f);
-    (api, dir)
+    api.insert_ext(Arc::clone(&f));
+    // the daemon's one housekeeping interval, spawned where `daemon/mod.rs` spawns it
+    let house = housekeeping::spawn(&api, &f);
+    (api, house, dir)
 }
 
 /// §9.1: the daemon's after-stage hook admits only while `origin::serving` holds.
@@ -758,7 +762,7 @@ async fn a_serving_hub_admits_what_it_stages_and_no_other_does() {
     let payload = common::build_payload();
     let dir = origin_dir(RELEASE, &payload);
     for serve in [true, false] {
-        let (api, _root) = hub_api(serve).await;
+        let (api, _house, _root) = hub_api(serve).await;
         assert_eq!(node111::daemon::origin::serving(&api), serve);
         let layout = api.layout.clone();
         let hook = updater::daemon_after_stage(Arc::clone(&api));
@@ -938,6 +942,9 @@ async fn the_origins_route_lists_the_order_and_the_answers() {
 struct Peer {
     api: Arc<ApiState>,
     fabric: Arc<FabricHandle>,
+    /// The daemon's housekeeping interval for `fabric` (Layer 8 row D1), alive as long as it;
+    /// [`Peer::shutdown`] stops it before the fabric, as the daemon does.
+    house: Mutex<Option<Housekeeping>>,
     id: NodeId,
     _dir: tempfile::TempDir,
 }
@@ -972,11 +979,26 @@ async fn peer(hub: bool, lan: bool, relay: Option<RelaySettings>) -> Peer {
     let fabric = fabric::start(fabric_config(&layout, hub), Some(identity), &api).await;
     assert!(fabric.running(), "{:?}", fabric.down_reason());
     api.insert_ext(Arc::clone(&fabric));
+    // the daemon's one housekeeping interval, spawned where `daemon/mod.rs` spawns it
+    let house = housekeeping::spawn(&api, &fabric);
     Peer {
         api,
         fabric,
+        house: Mutex::new(Some(house)),
         id,
         _dir: dir,
+    }
+}
+
+impl Peer {
+    /// Stop as the daemon stops (`daemon/mod.rs`): the housekeeping interval first, so no pass
+    /// races the close, then the fabric.
+    async fn shutdown(&self) {
+        let house = self.house.lock().unwrap().take();
+        if let Some(h) = house {
+            h.stop().await;
+        }
+        self.fabric.shutdown().await;
     }
 }
 
@@ -1157,8 +1179,8 @@ async fn the_watch_on_a_real_fabric_asks_its_hub_once_per_attribution() {
     assert_eq!(rows[1]["kind"], "internet");
 
     watch.abort();
-    member.fabric.shutdown().await;
-    hub.fabric.shutdown().await;
+    member.shutdown().await;
+    hub.shutdown().await;
 }
 
 /// Review of row L4 (D9): a member of a real hub that does not announce `ROLE_ORIGIN` (LAN
@@ -1189,6 +1211,6 @@ async fn a_real_hub_without_the_origin_role_is_never_asked() {
     assert!(!kinds.contains(&"hub"), "{json}");
 
     watch.abort();
-    member.fabric.shutdown().await;
-    hub.fabric.shutdown().await;
+    member.shutdown().await;
+    hub.shutdown().await;
 }

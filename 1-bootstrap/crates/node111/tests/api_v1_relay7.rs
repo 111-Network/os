@@ -37,6 +37,7 @@ use node111::daemon::dashboard::{
     routes, serve_listener, ApiConfig, ApiState, DashboardState, SharedState,
 };
 use node111::daemon::fabric::{self, FabricConfig, FabricHandle};
+use node111::daemon::housekeeping::{self, Housekeeping};
 use node111::daemon::relay::pair::PairBundle;
 use node111::daemon::relay::settings::{
     self as rs, CarrierKind, MeteredLink, MeteredMatch, RelaySettings,
@@ -441,6 +442,8 @@ const LAN_PEER: &str = "192.168.1.50:40000";
 struct Node {
     api: Arc<ApiState>,
     fabric: Arc<FabricHandle>,
+    /// The daemon's housekeeping interval for `fabric` (Layer 8 row D1), alive as long as it.
+    _house: Housekeeping,
     /// Dashboard on a real loopback socket (trusted loopback).
     port: u16,
     /// The same app with every request from a LAN peer (no session).
@@ -505,12 +508,15 @@ async fn node_with(hub: bool, lan: bool, seed: impl FnOnce(&Path)) -> Node {
     let fabric = fabric::start(test_config(&layout, hub), Some(identity), &api).await;
     assert!(fabric.running(), "{:?}", fabric.down_reason());
     api.insert_ext(Arc::clone(&fabric));
+    // the daemon's one housekeeping interval, spawned where `daemon/mod.rs` spawns it
+    let house = housekeeping::spawn(&api, &fabric);
     relay::start(&api, &fabric);
     let port = serve(&api, None).await;
     let lan_port = serve(&api, Some(LAN_PEER)).await;
     Node {
         api,
         fabric,
+        _house: house,
         port,
         lan: lan_port,
         layout,

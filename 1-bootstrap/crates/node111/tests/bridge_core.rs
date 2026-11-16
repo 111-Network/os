@@ -32,9 +32,10 @@ use node111::daemon::bridge::{
 };
 use node111::daemon::dashboard::{ApiConfig, ApiState, DashboardState, SharedState};
 use node111::daemon::fabric::{self, json as fjson, FabricConfig, FabricHandle};
+use node111::daemon::housekeeping::{self, Housekeeping};
 use node111::daemon::DaemonLayout;
 use serde_json::{json, Map, Value};
-use std::sync::{Arc, OnceLock, RwLock};
+use std::sync::{Arc, Mutex, OnceLock, RwLock};
 use std::time::{Duration, Instant};
 
 // ---------------------------------------------------------------- a counting allocator
@@ -283,6 +284,9 @@ fn assert_schema(v: &Value, name: &str) {
 struct Node {
     api: Arc<ApiState>,
     handle: Arc<FabricHandle>,
+    /// The daemon's housekeeping interval for `handle` (Layer 8 row D1), alive as long as it;
+    /// [`Node::shutdown`] stops it before the fabric, as the daemon does.
+    house: Mutex<Option<Housekeeping>>,
     bridge: Arc<Bridge>,
     layout: DaemonLayout,
     _dir: tempfile::TempDir,
@@ -306,12 +310,15 @@ async fn node_with(f: impl FnOnce(&mut BridgeConfig)) -> Node {
     c.housekeeping = Duration::from_secs(3600);
     let handle = fabric::start(c, Some(identity), &api).await;
     assert!(handle.running(), "{:?}", handle.down_reason());
+    // the daemon's one housekeeping interval, spawned where `daemon/mod.rs` spawns it
+    let house = housekeeping::spawn(&api, &handle);
     let mut bc = BridgeConfig::new(&layout.root);
     f(&mut bc);
     let bridge = Bridge::new(bc, Arc::clone(&handle), &api);
     Node {
         api,
         handle,
+        house: Mutex::new(Some(house)),
         bridge,
         layout,
         _dir: dir,
@@ -325,6 +332,16 @@ async fn node() -> Node {
 impl Node {
     fn fab(&self) -> mesh111::fabric::Fabric {
         self.handle.fabric().unwrap().clone()
+    }
+
+    /// Stop as the daemon stops (`daemon/mod.rs`): the housekeeping interval first, so no pass
+    /// races the close, then the fabric.
+    async fn shutdown(&self) {
+        let house = self.house.lock().unwrap().take();
+        if let Some(h) = house {
+            h.stop().await;
+        }
+        self.handle.shutdown().await;
     }
 
     async fn conv(&self, r: &ConvRef) -> i64 {
@@ -545,7 +562,7 @@ async fn with_no_adapter_tick_once_does_nothing_and_allocates_nothing() {
     assert!(n.bridge.disable("stub-a").await);
     assert_eq!(n.bridge.recv_tasks(), 0);
     assert!(!n.bridge.disable("stub-a").await);
-    n.handle.shutdown().await;
+    n.shutdown().await;
 }
 
 // ---------------------------------------------------------------- ingest
@@ -601,7 +618,7 @@ async fn ingest_strips_cc_and_cf_nfc_normalises_and_caps_names() {
     assert_eq!(rows[2].body, "after");
     assert!(rows.iter().all(|r| !r.body.is_empty()));
     assert_eq!(p.n.bridge.noise(), noise + 1, "counted");
-    p.n.handle.shutdown().await;
+    p.n.shutdown().await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -662,7 +679,7 @@ async fn dedupe_matrix_window_with_body_versus_key_alone() {
     let rows2 = n.inbound_rows(lc).await;
     assert_eq!(rows.len(), 2);
     assert_eq!(rows2.len(), 2, "hash1 twice is one row");
-    n.handle.shutdown().await;
+    n.shutdown().await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -700,7 +717,7 @@ async fn own_echo_from_a_second_account_or_a_recorded_native_id_is_dropped() {
     assert_eq!(rows.len(), 2);
     assert_eq!(rows[1].body, "sentinel 2");
     assert_eq!(p.n.bridge.echoes("stub-a"), 3);
-    p.n.handle.shutdown().await;
+    p.n.shutdown().await;
 }
 
 // ---------------------------------------------------------------- relay edges
@@ -741,7 +758,7 @@ async fn markers_for_bracket_and_slash_named_boards_and_a_part_prefix() {
         .map(|r| r.sender_native.as_str())
         .collect();
     assert_eq!(noted, vec!["s3", "s4"]);
-    p.n.handle.shutdown().await;
+    p.n.shutdown().await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -850,8 +867,8 @@ async fn two_nodes_split_both_ways_with_reverse_edges_do_not_loop() {
             .count()
             == parts1
     );
-    n1.handle.shutdown().await;
-    n2.handle.shutdown().await;
+    n1.shutdown().await;
+    n2.shutdown().await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -871,7 +888,7 @@ async fn history_before_enable_is_never_relayed() {
     assert_eq!(texts(&p.b), vec!["[S/A] new".to_string()]);
     let row = p.n.edge_row(e).await;
     assert_eq!(row.relayed, 1);
-    p.n.handle.shutdown().await;
+    p.n.shutdown().await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -933,7 +950,7 @@ async fn relayed_seq_holds_after_a_shed_and_a_relayed_copy_is_never_relayed() {
     assert_eq!(texts(&p.b), vec!["[S/A] second".to_string()]);
     assert_eq!(p.a.sent_count(), 0, "a relayed copy is never relayed");
     assert_eq!(p.n.edge_row(back).await.relayed, 0);
-    p.n.handle.shutdown().await;
+    p.n.shutdown().await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -962,7 +979,7 @@ async fn dm_and_self_endpoints_are_refused() {
         Err(BridgeError::NotFound(_)) => {}
         other => panic!("404: {other:?}"),
     }
-    p.n.handle.shutdown().await;
+    p.n.shutdown().await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1200,7 +1217,7 @@ async fn consent_round_trip_live_pause_and_the_gates_on_relay_copies() {
             .permissions(),
     );
     assert_eq!(mode & 0o777, 0o600);
-    p.n.handle.shutdown().await;
+    p.n.shutdown().await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1249,7 +1266,7 @@ async fn honour_ok_to_mqtt_on_refuses_and_counts_off_relays() {
     assert_eq!(to_other.len(), 3, "off by default: everything relays");
     assert_eq!(p.n.edge_row(honour).await.refused, 1);
     assert_eq!(p.n.edge_row(plain).await.refused, 0);
-    p.n.handle.shutdown().await;
+    p.n.shutdown().await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1291,7 +1308,7 @@ async fn oversize_refuse_counts_and_split_leads_every_part_with_the_marker() {
     let e = p.n.edge_row(split).await;
     assert_eq!((e.relayed, e.refused), (1, 0), "one copy, counted once");
     assert_eq!(p.b.sent_count(), n);
-    p.n.handle.shutdown().await;
+    p.n.shutdown().await;
 }
 
 // ---------------------------------------------------------------- fan-out
@@ -1369,7 +1386,7 @@ async fn fanout_refusal_is_atomic_split_is_one_row_per_part_and_cancel_drops_uns
         p.n.bridge.cancel(left[0].id).await.is_err(),
         "a handed part is not cancelled"
     );
-    p.n.handle.shutdown().await;
+    p.n.shutdown().await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1417,7 +1434,7 @@ async fn adapter_state_is_not_a_call_error_rows_queue_with_the_reason() {
     p.n.wait_state("stub-b", "live").await;
     p.n.ticks(1).await;
     assert_eq!(p.b.sent_count(), 1);
-    p.n.handle.shutdown().await;
+    p.n.shutdown().await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1454,8 +1471,8 @@ async fn a_111_target_rides_fabric_send_beside_the_foreign_rows() {
         Err(BridgeError::NotFound(_))
     ));
     assert_eq!(p.n.own_rows(p.src).await.len(), 1);
-    p.n.handle.shutdown().await;
-    other.handle.shutdown().await;
+    p.n.shutdown().await;
+    other.shutdown().await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1545,7 +1562,7 @@ async fn ham_and_uplink_gates_on_a_direct_send_need_the_text_hash() {
         p.n.bridge.send_text("stub-a", p.src, "hi", None).await,
         Err(BridgeError::Consent(_))
     ));
-    p.n.handle.shutdown().await;
+    p.n.shutdown().await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1645,7 +1662,7 @@ async fn a_recipient_list_is_one_dm_per_member_and_an_edge_destination_only() {
         "the lowest state among its DMs"
     );
     assert!(copy.native_msg_id.is_some());
-    n.handle.shutdown().await;
+    n.shutdown().await;
 }
 
 // ---------------------------------------------------------------- state machine
@@ -1778,7 +1795,7 @@ async fn state_machine_is_monotone_and_post_air_naks_keep_sent() {
     ));
     p.n.ticks(1).await;
     assert_eq!(state(seven).await.0, ForeignMessageState::Delivered);
-    p.n.handle.shutdown().await;
+    p.n.shutdown().await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1863,7 +1880,7 @@ async fn a_pending_row_after_a_crash_is_never_resent_and_resend_mints_a_new_row(
     }
     assert_eq!(a2.sent_count(), 2, "handed once");
     assert!(b2.uncertain(silent).await.unwrap());
-    n.handle.shutdown().await;
+    n.shutdown().await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1939,7 +1956,7 @@ async fn later_retries_back_off_on_ticks_and_wake_on_an_adapter_event() {
     );
     assert!(!n.bridge.is_tracked(id));
     assert_eq!(heard.lock().unwrap()[0].0, "stub-a");
-    n.handle.shutdown().await;
+    n.shutdown().await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1994,7 +2011,7 @@ async fn a_full_queue_waits_for_the_radio_and_a_flap_wakes_it() {
         n.bridge.row_state(id).await.unwrap().0,
         ForeignMessageState::Sent
     );
-    n.handle.shutdown().await;
+    n.shutdown().await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -2024,7 +2041,7 @@ async fn user_rows_go_ahead_of_relay_copies() {
         ]
     );
     let _ = &p.cb;
-    p.n.handle.shutdown().await;
+    p.n.shutdown().await;
 }
 
 // ---------------------------------------------------------------- load
@@ -2061,7 +2078,7 @@ async fn a_thousand_row_flood_ingests_in_four_batches_and_never_blocks_a_send() 
     assert!(send_took < Duration::from_secs(5), "{send_took:?}");
     let net = p.n.bridge.networks().await.unwrap();
     assert_eq!(net["networks"].as_array().unwrap().len(), 6);
-    p.n.handle.shutdown().await;
+    p.n.shutdown().await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -2090,7 +2107,7 @@ async fn an_inbound_overflow_is_counted_never_silent() {
         .unwrap()
         .clone();
     assert_eq!(net["dropped"], 2);
-    n.handle.shutdown().await;
+    n.shutdown().await;
 }
 
 // ---------------------------------------------------------------- views
@@ -2214,7 +2231,7 @@ async fn every_view_matches_the_contract() {
     ] {
         assert_schema(&bad.problem().body(), "Problem");
     }
-    p.n.handle.shutdown().await;
+    p.n.shutdown().await;
 }
 
 // ---------------------------------------------------------------- B2 bounce (review findings)
@@ -2290,7 +2307,7 @@ async fn f1_a_rate_limited_row_is_withdrawn_retried_once_due_and_survives_a_rest
     b2.tick_once().await;
     assert_eq!(a2.sent_count(), 2);
     b2.cancel(gone).await.unwrap();
-    n.handle.shutdown().await;
+    n.shutdown().await;
 }
 
 /// F-extra-2: cancelling a row the core tracks for a `Later` retry drops the track; the
@@ -2322,7 +2339,7 @@ async fn f_extra_2_cancel_of_a_later_row_drops_its_track_and_never_re_hands() {
     assert_eq!(a.sent_count(), 1, "the cancelled row is never handed again");
     assert_eq!(n.bridge.tracked(), 0);
     assert!(n.fab().foreign_message(id).await.is_err(), "deleted");
-    n.handle.shutdown().await;
+    n.shutdown().await;
 }
 
 /// F2: a DM's post-air NAK (`Failed { max_retransmit, Later }` after `Accepted`, the
@@ -2427,7 +2444,7 @@ async fn f2_a_dm_post_air_nak_is_resent_once_on_that_peers_upsert() {
     n.ticks(4).await;
     assert_eq!(a.sent_count(), 2, "once per upsert");
     assert!(!n.bridge.is_tracked(id));
-    n.handle.shutdown().await;
+    n.shutdown().await;
 }
 
 /// F5: with `honour_ok_to_mqtt` on, a Meshtastic origin whose adapter reported no
@@ -2470,7 +2487,7 @@ async fn f5_a_meshtastic_origin_without_ok_to_mqtt_is_not_relayed_when_honoured(
     n.ticks(3).await;
     assert_eq!(texts(&b), vec!["[S/M] may leave"]);
     assert_eq!(n.edge_row(e).await.refused, 1);
-    n.handle.shutdown().await;
+    n.shutdown().await;
 }
 
 /// F-extra: the `bridge` SSE snapshot lists the networks in the spine's `[order]`, as
@@ -2523,7 +2540,7 @@ async fn f_extra_the_bridge_snapshot_follows_the_spine_order() {
         .map(|x| x["id"].as_str().unwrap().to_string())
         .collect();
     assert_eq!(ids, order, "the same order as GET /networks");
-    n.handle.shutdown().await;
+    n.shutdown().await;
 }
 
 /// F7: link changes and dropped counts on the recv path only mark the snapshot due; the
@@ -2561,7 +2578,7 @@ async fn f7_recv_side_changes_publish_one_snapshot_on_the_tick() {
     assert_eq!(count(head), 1, "one snapshot on the tick");
     n.ticks(2).await;
     assert_eq!(count(head), 1, "and none while nothing changed");
-    n.handle.shutdown().await;
+    n.shutdown().await;
 }
 
 /// FB1 item 6: the `bridge` snapshot follows a network's conversation counts through the
@@ -2645,5 +2662,5 @@ async fn item6_conversation_count_changes_publish_one_snapshot_on_the_tick() {
     tokio::time::sleep(Duration::from_millis(200)).await;
     n.ticks(2).await;
     assert!(frames(head).is_empty(), "{:?}", frames(head));
-    n.handle.shutdown().await;
+    n.shutdown().await;
 }

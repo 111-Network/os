@@ -473,18 +473,24 @@ fn layers_of(port: u16) -> Vec<u64> {
         .collect()
 }
 
-/// Start the fabric on `n` (the daemon's wiring, `fabric::start`) and hand
-/// it to the API like the daemon does.
+/// Start the fabric on `n` (the daemon's wiring, `fabric::start`), hand it
+/// to the API and start the daemon's housekeeping interval for it (Layer 8
+/// row D1), like the daemon does; the interval is stopped before the fabric.
 async fn with_fabric(
     n: &Node,
     identity: Option<node111::identity::Identity>,
-) -> Arc<node111::daemon::fabric::FabricHandle> {
+) -> (
+    Arc<node111::daemon::fabric::FabricHandle>,
+    node111::daemon::housekeeping::Housekeeping,
+) {
     use node111::daemon::fabric::{self, FabricConfig};
+    use node111::daemon::housekeeping;
     let mut cfg = FabricConfig::production(&n.api.layout, None);
     cfg.listen = "127.0.0.1:0".parse().unwrap();
     let h = fabric::start(cfg, identity, &n.api).await;
     n.api.insert_ext(Arc::clone(&h));
-    h
+    let house = housekeeping::spawn(&n.api, &h);
+    (h, house)
 }
 
 /// F2P: Layer 5 is listed while the message fabric runs and is not
@@ -500,11 +506,12 @@ async fn layers_list_5_only_while_the_fabric_runs() {
 
     // healthy: running, an epoch, links
     let id = node111::identity::generate(&n.api.layout.identity_dir()).unwrap();
-    let h = with_fabric(&n, Some(id)).await;
+    let (h, house) = with_fabric(&n, Some(id)).await;
     assert!(h.running() && !h.restore_pending(), "{:?}", h.down_reason());
     let l = layers_of(port);
     assert!(l.contains(&5), "{l:?}");
     assert_eq!(l.last(), Some(&5), "ascending: {l:?}");
+    house.stop().await;
     h.shutdown().await;
 
     // restore-pending: the L2 counters file is absent (§4)
@@ -513,15 +520,16 @@ async fn layers_list_5_only_while_the_fabric_runs() {
     let dir = r.api.layout.identity_dir();
     let id = node111::identity::generate(&dir).unwrap();
     std::fs::remove_file(dir.join("counters")).unwrap();
-    let h = with_fabric(&r, Some(id)).await;
+    let (h, house) = with_fabric(&r, Some(id)).await;
     assert!(h.running() && h.restore_pending());
     assert!(!layers_of(rport).contains(&5), "{:?}", layers_of(rport));
+    house.stop().await;
     h.shutdown().await;
 
     // down: no identity loaded, so the store never opened
     let d = node();
     let dport = serve(&d.api, None).await;
-    let h = with_fabric(&d, None).await;
+    let (h, _house) = with_fabric(&d, None).await;
     assert!(!h.running());
     assert!(!layers_of(dport).contains(&5), "{:?}", layers_of(dport));
 }
