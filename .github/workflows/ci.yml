@@ -95,8 +95,9 @@ jobs:
 
   knowledge-contract-hygiene:
     # The knowledge base (the pre-commit hook's check), the LXMF sidecar's offline tests, the
-    # API contract's generated TypeScript (must be committed current), and two repo-hygiene
-    # rules from AGENTS.md: no two-digit layer paths, no attribution lines in commits.
+    # API contract's generated TypeScript (must be committed current), the Layer 7+ verify
+    # scripts' lint, and two repo-hygiene rules from AGENTS.md: no two-digit layer paths, no
+    # attribution lines in commits.
     name: Knowledge base, sidecar, contract drift, repo hygiene
     runs-on: ubuntu-latest
     timeout-minutes: 20
@@ -126,6 +127,14 @@ jobs:
           pnpm --dir 4-interface/ui install --frozen-lockfile
           pnpm --dir 4-interface/ui gen:types
           git diff --exit-code -- 4-interface/ui/src/lib/api
+      - name: Layer 7 and later verify scripts (stub-ntfy.py compiles; shellcheck on the netns harnesses, which CI does not run)
+        # The harnesses (7-relay/verify/*.sh) need unshare -Urnm, so CI only lints them. 8-storage/verify and
+        # 9-evolution/verify are globbed and may be absent or hold no .sh file; the lint tolerates both.
+        run: |
+          python3 -I -c "import py_compile; py_compile.compile('7-relay/verify/stub-ntfy.py', cfile='/tmp/stub-ntfy.pyc', doraise=True)"
+          shopt -s nullglob
+          files=(7-relay/verify/*.sh 8-storage/verify/*.sh 9-evolution/verify/*.sh)
+          if [ "${#files[@]}" -gt 0 ]; then shellcheck -x "${files[@]}"; fi
       - name: Layer folders are one-digit (AGENTS.md; journals, the move records and the Layer 5 tag's tree excepted)
         # 6-transport/verify/bridge.sh reads the mesh111 tree at the checkpoint-layer-5 tag, whose folders carry the old names.
         run: |

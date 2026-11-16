@@ -53,12 +53,18 @@
 //!    `id`. Foreign display times ("received" / "queued") live in the second
 //!    instance, `fabric/display-times.foreign`, opened beside the first
 //!    ([`FabricHandle::foreign_ingest`] records them for the bridge core).
-//! 7. **Housekeeping**: every few seconds the `fabric` service facts
-//!    ([`FabricHandle::provider`] → the registry rule) are refreshed from
-//!    `Fabric::status`; every minute a §10.4 capacity pass runs with the
+//! 7. **Housekeeping** — no longer started here (Layer 8 §4.3, row D1): the
+//!    one housekeeping interval is the daemon's
+//!    ([`crate::daemon::housekeeping`]), spawned once with or without a live
+//!    fabric, at [`FabricConfig::housekeeping`]. While the fabric is live it
+//!    calls [`FabricHandle::refresh_facts`] on every tick, so the `fabric`
+//!    service facts ([`FabricHandle::provider`] → the registry rule) are
+//!    refreshed from `Fabric::status`, and every minute
+//!    [`FabricHandle::capacity_pass`]: a §10.4 capacity pass with the
 //!    filesystem's free/total bytes (`statvfs`; unknown ⇒ the store's
-//!    `DiskSpace::UNKNOWN`, the floor never triggers). This is capacity
-//!    monitoring, not a protocol timer: the fabric itself has none.
+//!    `DiskSpace::UNKNOWN`, the floor never triggers), whose figure and live
+//!    bytes the rest of that pass reuses. This is capacity monitoring, not a
+//!    protocol timer: the fabric itself has none.
 //!
 //! ## Layer 7 seams (`os/7-relay/README.md`; board row M5)
 //!
@@ -125,10 +131,12 @@
 //!   gives `POST /fabric/hub/offer` its additive `gateway {carrier, mode}`;
 //!   the `111HUB:` bundle, INTRO and cards carry nothing new.
 //!
-//! [`FabricHandle::shutdown`] stops the link, closes the fabric cleanly
-//! (`Fabric::shutdown`: the store writes its clean-shutdown record with
-//! `announce_last`, §10.1) — `Fabric::abort` (unclean: the next open mints a
-//! new epoch) only when that does not finish within the grace — and then
+//! [`FabricHandle::shutdown`] (the daemon stops its housekeeping interval
+//! first, so no pass races the close) stops the event pump and the link,
+//! closes the fabric cleanly (`Fabric::shutdown`: the store writes its
+//! clean-shutdown record with `announce_last`, §10.1) — `Fabric::abort`
+//! (unclean: the next open mints a new epoch) only when that does not
+//! finish within the grace — and then
 //! commits the L2 counters clean (skipped while restore-pending: a counters
 //! file written then would carry `announce_last = 0` and read as state
 //! present at the next start — a counter reset, never a floor).
@@ -179,8 +187,6 @@ use zeroize::Zeroizing;
 
 /// The fabric directory under the node root (§2).
 pub const FABRIC_DIR: &str = "fabric";
-/// Housekeeping ticks between capacity passes (≈ 1 min at 5 s).
-const PRUNE_EVERY: u64 = 12;
 /// Fabric events taken per SSE batch.
 const BATCH: usize = 1024;
 
@@ -226,7 +232,11 @@ pub struct FabricConfig {
     pub hub_default: bool,
     /// `POST /fabric/hub/enroll` waits this long for `ENROLL_OK`.
     pub enroll_timeout: Duration,
-    /// Facts refresh interval (capacity passes every [`PRUNE_EVERY`]).
+    /// The housekeeping interval's period (5 s): the daemon-level interval
+    /// ([`crate::daemon::housekeeping::spawn`], Layer 8 §4.3) ticks at it,
+    /// refreshes the facts on every tick and runs a capacity pass every
+    /// [`crate::daemon::housekeeping::PRUNE_EVERY`] ticks; the fabric spawns
+    /// no interval of its own.
     pub housekeeping: Duration,
     /// `Fabric::shutdown` grace before `Fabric::abort`.
     pub shutdown_grace: Duration,
@@ -468,6 +478,20 @@ pub fn problem(e: &FabricError) -> Problem {
 /// first opens).
 static OPEN_LOCK: Mutex<()> = Mutex::new(());
 
+/// What one capacity pass took and found ([`FabricHandle::capacity_pass`];
+/// Layer 8 §4.3 step 1): handed to the rest of the daemon's housekeeping pass,
+/// which reads neither again.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CapacityFigures {
+    /// The `statvfs` figure of `fabric/` the store's `prune` was given;
+    /// `None` when `statvfs` failed (the store was given
+    /// `DiskSpace::UNKNOWN`, so the floor never triggered).
+    pub disk: Option<DiskSpace>,
+    /// The store's live bytes after the pass (`PruneReport::live_after`);
+    /// `None` when the pass failed.
+    pub live_bytes: Option<u64>,
+}
+
 /// Free/total bytes of the filesystem holding `path` (`statvfs`).
 pub fn disk_space(path: &Path) -> Option<DiskSpace> {
     use std::os::unix::ffi::OsStrExt;
@@ -490,11 +514,12 @@ pub fn disk_space(path: &Path) -> Option<DiskSpace> {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct RelayRoles {
     /// `discovery.public_gateway_bit` with its `gateway_bit` consent
-    /// recorded (§12).
+    /// recorded under the text owed now (§12; `relay::consent::holds`).
     pub gateway_bit: bool,
     /// `discovery.offload_bit`.
     pub offload_bit: bool,
-    /// `origin.serve` with its `origin_serve` consent recorded (§12).
+    /// `origin.serve` with its `origin_serve` consent recorded under the
+    /// text owed now (§12; `relay::consent::holds`).
     pub origin_serve: bool,
     /// The carrier while the gateway is on (`gateway.enabled`, a carrier
     /// kind, its server and the `carrier_enable` consent recorded): the
@@ -554,16 +579,20 @@ impl RelayRoles {
     /// The switches as `r` holds them (`termux`: this node runs on Termux,
     /// where 5B runs as 5A).
     pub fn from_settings(r: &relay_settings::RelaySettings, termux: bool) -> RelayRoles {
-        let consent = |k| r.consent_hash(k).is_some();
+        // bits 3 and 5: the consent recorded is the one owed now (a text changed by an update
+        // stops the bit until the human consents again, Layer 7 §12)
+        // and the carrier the same way: a cap set or raised, or another server, owes a new
+        // `carrier_enable` (row D10), so the offer goes until it is given
+        let current = |k| crate::daemon::relay::consent::holds(r, k);
         let carrier_ready = match r.carrier_kind() {
             CarrierKind::None => false,
             CarrierKind::Ntfy => r.ntfy_server().is_some(),
         };
         RelayRoles {
-            gateway_bit: r.public_gateway_bit() && consent(ConsentKind::GatewayBit),
+            gateway_bit: r.public_gateway_bit() && current(ConsentKind::GatewayBit),
             offload_bit: r.offload_bit(),
-            origin_serve: r.origin_serve() && consent(ConsentKind::OriginServe),
-            carrier: (r.gateway_enabled() && carrier_ready && consent(ConsentKind::CarrierEnable))
+            origin_serve: r.origin_serve() && current(ConsentKind::OriginServe),
+            carrier: (r.gateway_enabled() && carrier_ready && current(ConsentKind::CarrierEnable))
                 .then(|| GatewayOffer {
                     carrier: r.carrier_kind(),
                     mode: r.carrier_mode_for(termux),
@@ -921,10 +950,10 @@ pub async fn start(
         handle.refresh_facts().await;
         let rx = l.fabric.subscribe();
         let pump = tokio::spawn(pump(Arc::downgrade(&handle), Arc::downgrade(api), rx));
-        let house = tokio::spawn(housekeeping(Arc::downgrade(&handle), Arc::downgrade(api)));
+        // Layer 8 §4.3 (row D1): no housekeeping interval here; the daemon's one
+        // (`daemon::housekeeping`) calls `capacity_pass` and `refresh_facts`
         if let Ok(mut t) = handle.tasks.lock() {
             t.push(pump);
-            t.push(house);
         }
     }
     handle
@@ -998,6 +1027,14 @@ impl FabricHandle {
     /// How long `POST /fabric/hub/enroll` waits for `ENROLL_OK`.
     pub fn enroll_timeout(&self) -> Duration {
         self.cfg.enroll_timeout
+    }
+
+    /// The housekeeping interval's period ([`FabricConfig::housekeeping`]),
+    /// read once by the daemon-level interval that owns it
+    /// ([`crate::daemon::housekeeping::spawn`], Layer 8 §4.3), with or
+    /// without a live fabric.
+    pub fn housekeeping_period(&self) -> Duration {
+        self.cfg.housekeeping
     }
 
     /// Is the fabric running?
@@ -1772,8 +1809,12 @@ impl FabricHandle {
                 return Err(e);
             }
         };
-        if still.is_some_and(|h| h.node_id == fabric_hub.node_id && h.address == Some(address)) {
-            // the fabric's own copy moved here meanwhile: nothing to override
+        if fabric_hub.address != Some(address)
+            && still.is_some_and(|h| h.node_id == fabric_hub.node_id && h.address == Some(address))
+        {
+            // the fabric's own copy moved here meanwhile: nothing to override. When it was here
+            // from the start (an override elsewhere, then the hub back at the fabric's own
+            // address: Layer 7 row D8), the override is dropped below and its dial released
             drop(one);
             return Ok(true);
         }
@@ -2249,25 +2290,44 @@ impl FabricHandle {
 
     /// One capacity pass (§10.4) with the filesystem's figures; a change of
     /// `store_full` is published as a `fabric` frame.
-    pub async fn capacity_pass(&self, api: &ApiState) {
-        let Some(f) = self.fabric() else { return };
-        let disk = disk_space(&self.cfg.fabric_dir).unwrap_or(DiskSpace::UNKNOWN);
+    ///
+    /// Layer 8 §4.3 step 1 (row D1): the daemon-level housekeeping pass calls
+    /// it while the fabric is live and hands the rest of that pass the
+    /// figures it returns (the `statvfs` figure it gave the store, the live
+    /// bytes after it), so no later step takes its own. The pass itself is
+    /// unchanged: the same `prune` with the same figure, the same frame.
+    /// `None`, with nothing read, while the fabric is down.
+    pub async fn capacity_pass(&self, api: &ApiState) -> Option<CapacityFigures> {
+        let f = self.fabric()?;
+        let taken = disk_space(&self.cfg.fabric_dir);
+        let disk = taken.unwrap_or(DiskSpace::UNKNOWN);
         let r = f
             .with_store(move |s| {
                 let before = s.store_full();
-                let r = s.prune(disk).map(|_| ());
+                let r = s.prune(disk).map(|report| report.live_after);
                 (before, s.store_full(), r)
             })
             .await;
-        match r {
-            Ok((before, after, Ok(()))) => {
+        let live_bytes = match r {
+            Ok((before, after, Ok(live))) => {
                 if before != after {
                     self.publish_fabric(api).await;
                 }
+                Some(live)
             }
-            Ok((_, _, Err(e))) => eprintln!("111 fabric: capacity pass: {e}"),
-            Err(e) => eprintln!("111 fabric: capacity pass: {e}"),
-        }
+            Ok((_, _, Err(e))) => {
+                eprintln!("111 fabric: capacity pass: {e}");
+                None
+            }
+            Err(e) => {
+                eprintln!("111 fabric: capacity pass: {e}");
+                None
+            }
+        };
+        Some(CapacityFigures {
+            disk: taken,
+            live_bytes,
+        })
     }
 
     /// Clean stop (module doc).
@@ -2386,31 +2446,19 @@ async fn pump(
     }
 }
 
-/// Facts refresh + capacity passes (module doc, step 7).
-async fn housekeeping(me: Weak<FabricHandle>, api: Weak<ApiState>) {
-    let every = match me.upgrade() {
-        Some(h) => h.cfg.housekeeping,
-        None => return,
-    };
-    let mut tick = tokio::time::interval(every);
-    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-    let mut n: u64 = 0;
-    loop {
-        tick.tick().await;
-        let (Some(h), Some(api)) = (me.upgrade(), api.upgrade()) else {
-            return;
-        };
-        if n.is_multiple_of(PRUNE_EVERY) {
-            h.capacity_pass(&api).await;
-        }
-        h.refresh_facts().await;
-        n = n.wrapping_add(1);
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The hash of the `gateway_bit` text owed now (Layer 7 §12).
+    fn gateway_hash() -> String {
+        crate::daemon::relay::consent::gateway_bit().hash
+    }
+
+    /// The hash of the `origin_serve` text owed now (Layer 7 §12).
+    fn origin_hash() -> String {
+        crate::daemon::relay::consent::origin_serve().hash
+    }
 
     #[test]
     fn roles_follow_settings() {
@@ -2477,9 +2525,19 @@ mod tests {
         r.set_offload_bit(true);
         let x = RelayRoles::from_settings(&r, false);
         assert!(!x.gateway_bit && !x.origin_serve && x.offload_bit);
+        // a consent recorded under another text (an update changed the copy) counts as none
         r.set_consent_hash(ConsentKind::GatewayBit, Some(HASH))
             .unwrap();
         r.set_consent_hash(ConsentKind::OriginServe, Some(HASH))
+            .unwrap();
+        let x = RelayRoles::from_settings(&r, false);
+        assert!(
+            !x.gateway_bit && !x.origin_serve,
+            "a stale consent stops bits 3 and 5"
+        );
+        r.set_consent_hash(ConsentKind::GatewayBit, Some(&gateway_hash()))
+            .unwrap();
+        r.set_consent_hash(ConsentKind::OriginServe, Some(&origin_hash()))
             .unwrap();
         let x = RelayRoles::from_settings(&r, false);
         assert!(x.gateway_bit && x.origin_serve && x.carrier.is_none());
@@ -2489,8 +2547,15 @@ mod tests {
         assert!(RelayRoles::from_settings(&r, false).carrier.is_none());
         r.set_ntfy_server(Some("https://ntfy.example.org")).unwrap();
         assert!(RelayRoles::from_settings(&r, false).carrier.is_none());
-        r.set_consent_hash(ConsentKind::CarrierEnable, Some(HASH))
-            .unwrap();
+        r.set_consent_hash(
+            ConsentKind::CarrierEnable,
+            Some(
+                &crate::daemon::relay::consent::owed(&r, ConsentKind::CarrierEnable)
+                    .unwrap()
+                    .hash,
+            ),
+        )
+        .unwrap();
         r.set_carrier_mode(CarrierMode::FiveB, false).unwrap();
         let g = RelayRoles::from_settings(&r, false).carrier.unwrap();
         assert_eq!((g.carrier, g.mode), (CarrierKind::Ntfy, CarrierMode::FiveB));
@@ -2807,7 +2872,6 @@ mod tests {
     async fn a_role_bit_change_re_mints_the_announce_once() {
         use relay_settings::RelaySettings;
         use sealer::{ROLE_GATEWAY, ROLE_OFFLOAD, ROLE_ORIGIN};
-        const HASH: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
         let dir = tempfile::tempdir().unwrap();
         let api = test_api_lan(dir.path(), true);
         let state = dir.path().join("state");
@@ -2815,7 +2879,7 @@ mod tests {
         let (mut r, wrote) = relay_settings::update(&state, |r: &mut RelaySettings| {
             r.set_offload_bit(true);
             r.set_origin_serve(true);
-            r.set_consent_hash(ConsentKind::OriginServe, Some(HASH))
+            r.set_consent_hash(ConsentKind::OriginServe, Some(&origin_hash()))
         })
         .unwrap();
         assert!(wrote);
@@ -2839,7 +2903,7 @@ mod tests {
         // a switch whose bit is gated off changes no bit: the gateway bit
         // consented while the gateway is off
         r.set_public_gateway_bit(true);
-        r.set_consent_hash(ConsentKind::GatewayBit, Some(HASH))
+        r.set_consent_hash(ConsentKind::GatewayBit, Some(&gateway_hash()))
             .unwrap();
         assert!(!h.set_relay_settings(&r).await.unwrap());
         assert_eq!(last(&h), l0);
@@ -2858,8 +2922,15 @@ mod tests {
         r.set_gateway_enabled(true);
         r.set_carrier_kind(CarrierKind::Ntfy);
         r.set_ntfy_server(Some("https://ntfy.example.org")).unwrap();
-        r.set_consent_hash(ConsentKind::CarrierEnable, Some(HASH))
-            .unwrap();
+        r.set_consent_hash(
+            ConsentKind::CarrierEnable,
+            Some(
+                &crate::daemon::relay::consent::owed(&r, ConsentKind::CarrierEnable)
+                    .unwrap()
+                    .hash,
+            ),
+        )
+        .unwrap();
         assert!(h.set_relay_settings(&r).await.unwrap());
         let (roles1, n1, bytes1) = announced(&h);
         assert_eq!(roles1, hub | ROLE_GATEWAY | ROLE_OFFLOAD | ROLE_ORIGIN);
@@ -3757,5 +3828,71 @@ mod tests {
             json::foreign_tests::assert_schema(v, "SseNetworkMessage");
         }
         h.shutdown().await;
+    }
+
+    // ------------------------------------------------------------ Layer 8 (row D1)
+
+    /// Layer 8 §4.3 (row D1): a live fabric spawns no housekeeping interval of
+    /// its own — its one task is the event pump — however short its period;
+    /// the daemon-level interval (`daemon::housekeeping`) reads the period
+    /// and is the only one.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_live_fabric_spawns_no_housekeeping_interval_of_its_own() {
+        let dir = tempfile::tempdir().unwrap();
+        let api = test_api(dir.path());
+        let identity = crate::identity::generate(&dir.path().join("identity")).unwrap();
+        let mut cfg = test_cfg(dir.path());
+        cfg.housekeeping = Duration::from_millis(10);
+        let h = start(cfg, Some(identity), &api).await;
+        assert!(h.running(), "{:?}", h.down_reason());
+        assert_eq!(h.tasks.lock().unwrap().len(), 1, "the pump only");
+        assert_eq!(h.housekeeping_period(), Duration::from_millis(10));
+        h.shutdown().await;
+    }
+
+    /// Layer 8 §4.3 step 1 (row D1): the capacity pass as built, now handing the
+    /// housekeeping pass the `statvfs` figure it gave the store and the live
+    /// bytes after it; with no fabric it reads nothing and returns `None`.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_capacity_pass_hands_the_housekeeping_pass_its_figures() {
+        let dir = tempfile::tempdir().unwrap();
+        let api = test_api(dir.path());
+        let identity = crate::identity::generate(&dir.path().join("identity")).unwrap();
+        let h = start(test_cfg(dir.path()), Some(identity), &api).await;
+        assert!(h.running(), "{:?}", h.down_reason());
+        let head = api.events.subscribe(None).head;
+        let c = h.capacity_pass(&api).await.expect("a live fabric runs it");
+        let disk = c.disk.expect("statvfs of fabric/");
+        let fabric_dir = dir.path().join(FABRIC_DIR);
+        assert_eq!(disk.total, disk_space(&fabric_dir).unwrap().total);
+        let f = h.fabric().unwrap();
+        let (live, full) = f
+            .with_store(|s| (s.live_bytes().unwrap(), s.store_full()))
+            .await
+            .unwrap();
+        assert_eq!(c.live_bytes, Some(live), "PruneReport::live_after");
+        assert!(!full, "an empty store is not full");
+        let fabric_frames = api
+            .events
+            .subscribe(Some(head))
+            .replay
+            .iter()
+            .filter(|f| f.event == "fabric")
+            .count();
+        assert_eq!(
+            fabric_frames, 0,
+            "store_full unchanged: no frame, as before"
+        );
+        h.shutdown().await;
+
+        let dir = tempfile::tempdir().unwrap();
+        let api = test_api(dir.path());
+        let down = start(test_cfg(dir.path()), None, &api).await;
+        assert!(!down.running());
+        assert_eq!(
+            down.capacity_pass(&api).await,
+            None,
+            "no fabric: nothing read"
+        );
     }
 }

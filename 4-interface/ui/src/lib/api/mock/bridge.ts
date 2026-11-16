@@ -137,6 +137,7 @@ function component(id: string, adapter: NetworkId, over: Partial<BridgeComponent
     cached_bytes: 9_000_000,
     installed_bytes: null,
     rss_bytes: null,
+    start: "always",
     license: { spdx, read_at: readAt, notice },
     notice_hash: sha256Hex(notice),
     acknowledged: false,

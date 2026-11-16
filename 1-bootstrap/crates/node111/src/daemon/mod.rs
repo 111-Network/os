@@ -33,9 +33,12 @@ pub mod bridge;
 pub mod carrier;
 pub mod components;
 pub mod dashboard;
+pub mod datasets;
 pub mod devices;
 pub mod fabric;
+pub mod heal;
 pub mod health;
+pub mod housekeeping;
 pub mod intelligence;
 pub mod kb;
 pub mod meshtastic;
@@ -45,6 +48,8 @@ pub mod ports;
 pub mod registry;
 pub mod relay;
 pub mod services;
+pub mod state;
+pub mod storage;
 pub mod supervise;
 pub mod transport;
 pub mod updater;
@@ -68,6 +73,20 @@ pub struct DaemonLayout {
 }
 
 impl DaemonLayout {
+    /// The layout the daemon runs with (`$NODE111_ROOT` or `/var/lib/111`; the config dir
+    /// `/etc/111` on a host, a sibling of the root under Termux or `$NODE111_ROOT`); also
+    /// `111 update --from`'s (Layer 7 §9.2).
+    pub fn production() -> DaemonLayout {
+        DaemonLayout {
+            root: crate::util::paths::root(),
+            etc: if cfg!(target_os = "android") || std::env::var("NODE111_ROOT").is_ok() {
+                crate::util::paths::root().join("etc")
+            } else {
+                PathBuf::from("/etc/111")
+            },
+        }
+    }
+
     pub fn state_dir(&self) -> PathBuf {
         self.root.join("state")
     }
@@ -789,20 +808,24 @@ pub fn register_deltachat_with(
 }
 
 async fn daemon_main() -> anyhow::Result<()> {
-    let layout = DaemonLayout {
-        root: crate::util::paths::root(),
-        etc: if cfg!(target_os = "android") || std::env::var("NODE111_ROOT").is_ok() {
-            crate::util::paths::root().join("etc")
-        } else {
-            PathBuf::from("/etc/111")
-        },
-    };
+    let layout = DaemonLayout::production();
     let env_pairs = load_env(&layout.etc)?;
     for (k, v) in &env_pairs {
         if std::env::var(k).is_err() {
             unsafe { std::env::set_var(k, v) };
         }
     }
+    // Layer 8 (`os/8-storage/README.md` §13.2): `node/lock`, held for the daemon's lifetime and
+    // taken before any store opens; a store verb holding it ⇒ exit 75, and the unit starts the
+    // daemon again after `RestartSec=5` (T0: `acquire` returns at once and opens nothing)
+    let _node_lock = match storage::lock::acquire(&layout.root) {
+        Ok(lock) => lock,
+        Err(storage::lock::LockError::Held) => {
+            eprintln!("111 daemon: a store verb is running");
+            std::process::exit(75)
+        }
+        Err(e) => return Err(e.into()),
+    };
 
     let version = current_version(&layout);
     let state: SharedState = Arc::new(RwLock::new(DashboardState::new(&version)));
@@ -937,22 +960,35 @@ async fn daemon_main() -> anyhow::Result<()> {
     // updater loop (fetch/verify/stage; never flips — root helper owns that).
     // Started after the dashboard so `POST /api/v1/update/check` can wake it
     // (`ApiState::update_check`) and `/api/v1/status.update` can read it.
+    // Layer 7 row L4 (§9.1, §9.3): each round reads `updates.check_internet` from
+    // the relay settings cell (`state/relay.json`), and a serving hub admits what
+    // it stages into `state/origin/`.
+    let updater_cfg = updater::fetch::UpdaterConfig::production(
+        version
+            .parse()
+            .unwrap_or_else(|_| "2026.01.01".parse().unwrap()),
+    );
+    // `GET /api/v1/update/origins` lists the bases this loop uses
+    dashboard.api.insert_ext(Arc::new(updater_cfg.clone()));
+    let after_stage = updater::daemon_after_stage(Arc::clone(&dashboard.api));
     {
-        let cfg = updater::fetch::UpdaterConfig::production(
-            version
-                .parse()
-                .unwrap_or_else(|_| "2026.01.01".parse().unwrap()),
-        );
+        let cfg = updater_cfg.clone();
+        let relay_cell = dashboard::api_v1::relay7::cell(&dashboard.api);
         let hooks = updater::Hooks {
             wake: Arc::clone(&dashboard.api.update_check),
             status: Arc::new(updater::UpdaterStatus::default()),
         };
+        let relay_hooks = updater::RelayHooks {
+            check_internet: Some(Arc::new(move || relay_cell.settings().check_internet())),
+            after_stage: Some(Arc::clone(&after_stage)),
+        };
         dashboard.api.insert_ext(Arc::clone(&hooks.status));
-        tokio::spawn(updater::run_with_hooks(
+        tokio::spawn(updater::run_with_relay(
             layout.clone(),
             Arc::clone(&state),
             cfg,
             hooks,
+            relay_hooks,
         ));
     }
 
@@ -997,6 +1033,9 @@ async fn daemon_main() -> anyhow::Result<()> {
         dashboard.api.lan_enabled,
     ));
     dashboard.api.insert_ext(Arc::clone(&panel_host));
+    // Layer 8 (`os/8-storage/README.md` §2.2): the node-state store's start (the J2 fold, the
+    // legacy import, the spool sweep); returns at once until its rows land (nothing opened or read)
+    state::start(&layout);
     // Layer 5 F2: the messaging fabric (store, identity handle, tcp-lan,
     // routes' state, SSE `message`/`contact`/`fabric`, `fabric` service facts).
     let fabric = {
@@ -1009,6 +1048,10 @@ async fn daemon_main() -> anyhow::Result<()> {
         .await
     };
     dashboard.api.insert_ext(Arc::clone(&fabric));
+    // Layer 8 (`os/8-storage/README.md` §4.3, row D1): the one housekeeping interval (5 s; a
+    // capacity pass every 12th tick, the first at once), the daemon's with or without a live
+    // fabric; the fabric spawns none
+    let house = housekeeping::spawn(&dashboard.api, &fabric);
     // Layer 6: the bridge core (inert until an adapter is enabled), the Meshtastic client
     // registered (started by the module while service `meshtastic` is LIVE), the optional
     // components, the transport routes
@@ -1039,12 +1082,14 @@ async fn daemon_main() -> anyhow::Result<()> {
     // revoked Meshtastic panel sessions close their shim downlink; drop count
     let _mesh_panels = meshtastic.attach_panels(&panel_host);
     // POST /api/v1/services/{id}/restart: the children this daemon supervises
-    // (the Meshtastic module re-inserts it with meshmud + the reader added)
+    // (the Meshtastic module re-inserts it with meshmud + the reader added). Published with
+    // its generation (Layer 9 §3.1 rule 4, row D2), which every clone shares, the base
+    // handed to the Meshtastic module below included
     let supervised = services::Supervised::default()
         .with(services::ServiceId::Agent, intelligence.agent_control())
         .with(services::ServiceId::Model, intelligence.model_control())
         .with(services::ServiceId::Transport, transport.control());
-    dashboard.api.insert_ext(Arc::new(supervised.clone()));
+    supervised.publish(&dashboard.api);
     dashboard::api_v1::status::spawn_heartbeat(Arc::clone(&dashboard.api));
     let restart = Arc::new(tokio::sync::Notify::new());
     let restart_signal = dashboard::api_v1::actions::RestartSignal(Arc::clone(&restart));
@@ -1081,6 +1126,18 @@ async fn daemon_main() -> anyhow::Result<()> {
     // Layer 7 (`os/7-relay/README.md` §6.3): relay & presence; returns at once while every
     // switch is off (nothing read, spawned, bound or scheduled)
     relay::start(&dashboard.api, &fabric);
+    // Layer 7 §9.3 (row L4): the home hub's origin, checked once per attribution of the link
+    // to it while its announce carries `ROLE_ORIGIN` (one task on the fabric's event channel;
+    // no timer)
+    let _hub_origin = updater::hub::spawn(
+        &fabric,
+        updater::hub_check(
+            updater_cfg,
+            layout.clone(),
+            Arc::clone(&state),
+            Some(after_stage),
+        ),
+    );
     // G1 (Layer 6 §16): debug builds only — the StubAdapters `$NODE111_BRIDGE_STUBS`
     // declares; returns at once when the variable is unset (bridge::stub::scenario)
     #[cfg(debug_assertions)]
@@ -1104,6 +1161,9 @@ async fn daemon_main() -> anyhow::Result<()> {
     dashboard.stop();
     // Layer 6: adapters off, component children joined (before rnsd stops below)
     layer6.shutdown().await;
+    // Layer 8 (§4.3): the housekeeping interval ends before the fabric closes, as the fabric's
+    // own did, so no pass races the close
+    house.stop().await;
     // Layer 5: close the fabric cleanly (store clean record + L2 counters)
     fabric.shutdown().await;
     // join every child (SIGTERM, grace, SIGKILL) before exiting: an orphaned

@@ -45,6 +45,10 @@ import { finalSentence, pickReply, tokenize } from "./chat";
 import { createBridgeMock } from "./bridge";
 import type { RelayAdapter } from "../relay";
 import { createRelayMock, type RelayRoutes } from "./relay";
+import type { RepairsAdapter } from "../repairs";
+import type { StorageAdapter } from "../storage";
+import { createRepairsMock, type RepairsRoutes } from "./repairs";
+import { createStorageMock, type StorageRoutes } from "./storage";
 import { buildFixtures, iso, layersRunning, logLine } from "./fixtures";
 import { HUB, MOCK_HUB_ADDRESS, MOCK_REASONS, buildNearby, buildPanels, cancelQueued, fabricRow, hex64, hubBundleText, makeContact, meshtasticLiveRow, pageOf, threadsOf } from "./messaging";
 import { cardFor } from "./qr";
@@ -81,6 +85,12 @@ export interface MockControls {
   /** Layer 7: the relay adapter over the same bus (`getRelay()` in ../index.ts returns it for a mock page), and its mock controls. */
   readonly relay: RelayAdapter;
   readonly relayControl: RelayRoutes["control"];
+  /** Layer 8: the storage adapter over the same bus (`getStorage()` in ../index.ts returns it for a mock page), and its mock controls. */
+  readonly storage: StorageAdapter;
+  readonly storageControl: StorageRoutes["control"];
+  /** Layer 9: the repairs adapter over the same bus (`getRepairs()` in ../index.ts returns it for a mock page), and its mock controls. */
+  readonly repairs: RepairsAdapter;
+  readonly repairsControl: RepairsRoutes["control"];
   dispose(): void;
 }
 
@@ -400,6 +410,48 @@ export function createMockAdapter(opts: MockOptions = {}): MockAdapter {
     browseRegistry: () => rest(() => R.browseRegistry()),
     nearbyHops: () => rest(() => R.nearbyHops()),
     updateOrigins: () => rest(() => R.updateOrigins()),
+  };
+
+  // --- Layer 8: storage status, settings, export offers, store-state writes (mock/storage.ts) --------------------------------------
+  const ST = createStorageMock({
+    publish: (f) => bus.publish(f),
+    loopback: () => state.auth.loopback,
+    hub: () => state.messaging.fabric.settings.hub_role === true,
+    lan: () => state.settings.lan_enabled,
+    nodeId: () => state.status.node.node_id ?? undefined,
+    componentStart: (id) => B.bridge.components().find((c) => c.id === id)?.start ?? undefined,
+  });
+  const storage: StorageAdapter = {
+    kind: "mock",
+    status: () => rest(() => ST.status()),
+    patchSettings: (patch, acceptWarning) => rest(() => ST.patchSettings(patch, acceptWarning)),
+    answerExportOffer: (cls) => rest(() => ST.answerExportOffer(cls)).then(() => undefined),
+    acceptUpdateWithoutCopy: (release, store, acceptWarning) => rest(() => ST.acceptUpdateWithoutCopy(release, store, acceptWarning)).then(() => undefined),
+    deleteSetAside: (file) => rest(() => ST.deleteSetAside(file)).then(() => undefined),
+    startEmpty: (store, acceptWarning) => rest(() => ST.startEmpty(store, acceptWarning)).then(() => undefined),
+    datasets: () => rest(() => ST.datasets()),
+    checkDatasets: () => rest(() => ST.checkDatasets()).then(() => undefined),
+    fetchDataset: (ref, accept) => rest(() => ST.fetchDataset(ref, accept)),
+    removeDataset: (ref) => rest(() => ST.removeDataset(ref)).then(() => undefined),
+    cancelDatasetJob: (job) => rest(() => ST.cancelDatasetJob(job)).then(() => undefined),
+    resumeDatasetJob: (job, accept) => rest(() => ST.resumeDatasetJob(job, accept)),
+    datasetDrafts: () => rest(() => ST.datasetDrafts()),
+    createDatasetDraft: (req) => rest(() => ST.createDatasetDraft(req)),
+    publishDatasets: (req) => rest(() => ST.publishDatasets(req)),
+    searchDatasets: (query) => rest(() => ST.searchDatasets(query)),
+    tiles: () => rest(() => ST.tiles()),
+    stopComponent: (id) => rest(() => ST.stopComponent(id)).then(() => undefined),
+  };
+
+  // --- Layer 9: the Repairs status, the incidents and their dismissal, the audit trail (mock/repairs.ts) --------------------------
+  const RP = createRepairsMock({ publish: (f) => bus.publish(f) });
+  const repairs: RepairsAdapter = {
+    kind: "mock",
+    status: () => rest(() => RP.status()),
+    incidents: (query) => rest(() => RP.incidents(query)),
+    incident: (id) => rest(() => RP.incident(id)),
+    dismissIncident: (id) => rest(() => RP.dismissIncident(id)).then(() => undefined),
+    audit: (query) => rest(() => RP.audit(query)),
   };
 
   const ctx: ScriptContext = {
@@ -1198,6 +1250,10 @@ export function createMockAdapter(opts: MockOptions = {}): MockAdapter {
     bridgeReceive: (conv, sender, text, o) => B.receive(conv, sender, text, o),
     relay,
     relayControl: R.control,
+    storage,
+    storageControl: ST.control,
+    repairs,
+    repairsControl: RP.control,
     dispose() {
       disposed = true;
       bus.stop();

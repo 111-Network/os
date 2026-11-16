@@ -282,6 +282,30 @@ for r in l7["reject"]:
 check("layer7 rejects cover every built kind but CUSTODY_PUT", sorted(l7kinds),
       sorted(k for k in L7KIND if k != 0x03))
 
+# ------------------------------------------------- layer8/node-state-kdf.json
+# Layer 8 §2.2 rule 2: node_state_key = BLAKE2b-256(key = store_secret,
+# data = "111/node-state/v1" ‖ NodeId), RFC 7693 keyed mode (§2.7 S1: the
+# store KDF under its own tag), re-derived from the spec alone over the
+# inputs of store-kdf.json, in its order; the same inputs under
+# "111/store/v1" give that file's store_key, never this key.
+l8 = load(os.path.join("layer8", "node-state-kdf.json"))
+L8_TAG = b"111/node-state/v1"
+check("layer8 tag", l8["tag"], L8_TAG.decode("ascii"))
+check("layer8 inputs are store-kdf.json's, in its order",
+      [(c["name"], c["store_secret"], c["node_id"]) for c in l8["cases"]],
+      [(c["name"], c["store_secret"], c["node_id"]) for c in kdf["cases"]])
+for c, sc in zip(l8["cases"], kdf["cases"]):
+    name = "layer8 " + c["name"]
+    secret = bytes.fromhex(c["store_secret"])
+    node_id = bytes.fromhex(c["node_id"])
+    check(f"{name} input sizes", (len(secret), len(node_id)), (32, 32))
+    data = L8_TAG + node_id
+    check(f"{name} kdf_input", data.hex(), c["kdf_input"])
+    key = b2b(data, 32, key=secret)
+    check(f"{name} node_state_key", key.hex(), c["node_state_key"])
+    check(f"{name} sqlcipher literal", f"x'{key.hex()}'", c["sqlcipher_key"])
+    check(f"{name} differs from the store key of the same inputs", key.hex() != sc["store_key"], True)
+
 if FAILS:
     print("\n".join(FAILS))
     print(f"crosscheck: {len(FAILS)} mismatches")

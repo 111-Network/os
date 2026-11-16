@@ -38,7 +38,7 @@
 //! sent twice and never sent after being dismissed.
 //!
 //! **Layer 6 kinds** (`os/6-transport/README.md` §8, §9, §12, §13; bodies
-//! parsed by [`crate::daemon::fabric::proposal`]). `KINDS` grows to eight (Layer 7: nine, `relay`).
+//! parsed by [`crate::daemon::fabric::proposal`]). `KINDS` grows to eight (Layer 7: nine, `relay`; Layer 8: ten, `storage`).
 //! Accepting one is applied like `message`, under the same lock, with the
 //! same record discipline (`applied: {pending: true}` first, the result
 //! after, a refusal before anything ran removes the pending record and the
@@ -72,6 +72,20 @@
 //!   an applier in ext (the device core not wired) a device proposal is `409
 //!   unsupported_action` and stays open.
 //!
+//! - `relay` (Layer 7 §13.2, row D10): the body is one JSON object `{"why": string,
+//!   "actions": [Action]}` from the closed vocabulary `gateway.enable {carrier, mode}`,
+//!   `hub.pair {}`, `carrier.flush {}` (row A1's writer); `presence.interval` is refused `409
+//!   unsupported_action` before any transport check (§2.4), and so is a name outside the
+//!   vocabulary; a body that is not that shape is `502 upstream_error`
+//!   (`relay7::parse_relay_body`). Acceptance runs the routes' own validation, consent and
+//!   refusal paths (`relay7::prepare_relay`: `gateway.enable` is the `PATCH /relay/settings`
+//!   plan with the decision's `accept_warning`, so a consent gate answers `409
+//!   consent_required` and the human repeats the decision with the hash; `carrier.flush` meets
+//!   the flush route's refusals; `hub.pair` needs the hub role and only opens the pairing
+//!   screen), nothing written until all pass; then the pending record, the write and the flush
+//!   (`relay7::apply_relay`), `applied: {actions, flush_started?}`. A refusal on the way leaves
+//!   the proposal open.
+//!
 //! The agent's bearer never decides (the global write gate, `401`).
 //!
 //! Events: a recorded decision publishes `event: proposal` with the
@@ -100,8 +114,8 @@ use time::OffsetDateTime;
 /// List cap (newest first).
 pub const MAX_LIST: usize = 200;
 /// `Proposal.kind` (contract enum; Layer 6 adds three, §10; Layer 7 adds `relay`, `7-relay/README.md`
-/// §13.2, the ninth).
-pub const KINDS: [&str; 9] = [
+/// §13.2, the ninth; Layer 8 adds `storage`, `8-storage/README.md` §16.4, the tenth).
+pub const KINDS: [&str; 10] = [
     "diagnose",
     "propose",
     "patch",
@@ -111,7 +125,10 @@ pub const KINDS: [&str; 9] = [
     "bridge_edge",
     "device",
     "relay",
+    "storage",
 ];
+/// Layer 8 §16.4: a storage proposal (quota and dataset actions).
+pub const STORAGE_KIND: &str = "storage";
 /// `Proposal.kind` of a message the agent proposes (§17).
 pub const MESSAGE_KIND: &str = "message";
 /// Layer 6 §9: a text into foreign conversations (and 111 contacts).
@@ -120,6 +137,8 @@ pub const BRIDGE_MESSAGE_KIND: &str = "bridge_message";
 pub const BRIDGE_EDGE_KIND: &str = "bridge_edge";
 /// Layer 6 §12: device actions (incl. the `identify` / `service.restart` one-shots).
 pub const DEVICE_KIND: &str = "device";
+/// Layer 7 §13.2: relay actions (`gateway.enable`, `hub.pair`, `carrier.flush`).
+pub const RELAY_KIND: &str = super::relay7::RELAY_KIND;
 /// Largest proposal/decision file read (bodies are model-written markdown).
 const MAX_FILE: u64 = 1 << 20;
 
@@ -684,6 +703,20 @@ async fn decision_handler(
                 Err(problem) => problem.into_response(),
             };
         }
+        if p.kind == RELAY_KIND {
+            return match decide_relay(&api, p, decision, accept).await {
+                Ok(p) => {
+                    api.events.publish("proposal", &p.event());
+                    Json(p).into_response()
+                }
+                Err(problem) => problem.into_response(),
+            };
+        }
+        // Fail closed until the storage dispatch (D15) lands: accepting never records a
+        // decision that applied nothing.
+        if let Some(problem) = storage_not_applied(&p.kind, &decision) {
+            return problem.into_response();
+        }
         if [BRIDGE_MESSAGE_KIND, BRIDGE_EDGE_KIND, DEVICE_KIND].contains(&p.kind.as_str()) {
             let by = super::auth::session_label(&api, &headers, &ext);
             return match decide_layer6(&api, p, decision, accept, by).await {
@@ -717,6 +750,18 @@ fn unsupported(action: &str, why: &str) -> ProblemWith {
         )
         .detail(format!("{action:?}: {why}")),
     )
+}
+
+/// `8-storage/README.md` §16.4: a `storage` proposal runs the routes' own checks when accepted.
+/// Until that dispatch exists, accepting one is `409 unsupported_action` and the proposal stays
+/// open (dismissing it is the plain decision).
+fn storage_not_applied(kind: &str, decision: &str) -> Option<ProblemWith> {
+    (kind == STORAGE_KIND && decision == "accepted").then(|| {
+        unsupported(
+            STORAGE_KIND,
+            "this node does not apply storage proposals yet",
+        )
+    })
 }
 
 fn upstream(r: &crate::daemon::fabric::proposal::Refusal) -> ProblemWith {
@@ -1026,6 +1071,52 @@ async fn accept_bridge_edge(
     }
 }
 
+// ---------------------------------------------------------------- Layer 7: relay
+
+/// A decision on a `relay` proposal (module doc; Layer 7 §13.2). Under the same lock and record
+/// discipline as the Layer 6 kinds: every check first, then the pending record, then the change.
+async fn decide_relay(
+    api: &ApiState,
+    p: Proposal,
+    decision: String,
+    accept: Option<String>,
+) -> Result<Proposal, ProblemWith> {
+    let _one = MESSAGE_DECIDE.lock().await;
+    let layout = api.layout.clone();
+    let id = p.id.clone();
+    let current = {
+        let (layout, id) = (layout.clone(), id.clone());
+        tokio::task::spawn_blocking(move || get_checked(&layout, &id))
+            .await
+            .map_err(|e| ProblemWith::new(internal(e)))?
+            .map_err(ProblemWith::new)?
+    };
+    let Some(p) = current else {
+        return Err(ProblemWith::new(not_found()));
+    };
+    if p.decision.is_some() || decision != "accepted" {
+        let d = decision.clone();
+        return tokio::task::spawn_blocking(move || decide(&layout, &id, &d))
+            .await
+            .map_err(|e| ProblemWith::new(internal(e)))?
+            .map_err(ProblemWith::new);
+    }
+    check_own_stamp(api, &p)?;
+    let actions = super::relay7::parse_relay_body(&p.body)?;
+    let prepared = super::relay7::prepare_relay(api, actions, accept).await?;
+    let accepted = record_pending(&api.layout, &p.id).await?;
+    match super::relay7::apply_relay(api, prepared).await {
+        Ok(applied) => {
+            finalise(&api.layout, &accepted, applied).await;
+            Ok(accepted)
+        }
+        Err(e) => {
+            reopen(&api.layout, &p.id, "the relay change was refused");
+            Err(e)
+        }
+    }
+}
+
 /// A `device` proposal: the device core's applier decides and records it (module doc).
 async fn accept_device(api: &ApiState, p: &Proposal) -> Result<Proposal, ProblemWith> {
     use crate::daemon::devices::applier::{self, Applier, ApplierRequest};
@@ -1075,6 +1166,13 @@ mod tests {
             "kind": "chat", "title": format!("t-{id}"), "body": "b", "created_at": created_at
         });
         std::fs::write(dir.join(format!("{id}.json")), body.to_string()).unwrap();
+    }
+
+    #[test]
+    fn an_accepted_storage_proposal_is_refused_and_a_dismissed_one_is_not() {
+        assert!(storage_not_applied("storage", "accepted").is_some());
+        assert!(storage_not_applied("storage", "dismissed").is_none());
+        assert!(storage_not_applied("chat", "accepted").is_none());
     }
 
     #[test]
@@ -1163,8 +1261,9 @@ mod tests {
 
     #[test]
     fn kinds_mirror_the_contract_enum_with_relay_last() {
-        assert_eq!(KINDS.len(), 9);
+        assert_eq!(KINDS.len(), 10);
         assert_eq!(KINDS[8], "relay");
+        assert_eq!(KINDS[9], "storage");
         if let Some(contract) = contract_kinds() {
             assert_eq!(
                 contract, KINDS,

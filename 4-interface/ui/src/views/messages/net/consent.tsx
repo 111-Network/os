@@ -5,7 +5,7 @@
 import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import { Badge } from "../../../components/badge";
 import { Button } from "../../../components/button";
-import { consentOf } from "../../../lib/api/bridge";
+import { consentOf, formatBytes } from "../../../lib/api/bridge";
 import { cleanPeerText } from "../../../lib/api/messages";
 import type { ConsentRequired } from "../../../lib/api/types";
 
@@ -18,7 +18,8 @@ const ADDON_WORD: Record<string, string> = {
   uplinked_channel: "published to the internet",
 };
 
-// Partial: an action with no entry here reads "Confirm". The last four are Layer 7's (os/7-relay/README.md §12).
+// Partial: an action with no entry here reads "Confirm". The four after `uplink_send` are Layer 7's (os/7-relay/README.md §12), the six
+// after `origin_serve` Layer 8's (os/8-storage/README.md §15.2).
 const ACTION_WORD: Partial<Record<ConsentRequired["action"], string>> = {
   edge_enable: "Start this relay",
   edge_resume: "Resume this relay",
@@ -29,7 +30,46 @@ const ACTION_WORD: Partial<Record<ConsentRequired["action"], string>> = {
   pair_plain: "Pair on an unencrypted link",
   gateway_bit: "Advertise this node as a gateway",
   origin_serve: "Serve update files",
+  dataset_fetch: "Download this dataset",
+  dataset_override: "Continue past today's allowance",
+  datasets_serve: "Serve dataset files to this network",
+  components_serve: "Serve program files to this network",
+  update_without_copy: "Update without a rollback copy",
+  store_start_empty: "Start an empty store",
 };
+
+type Facts = NonNullable<ConsentRequired["facts"]>;
+
+/**
+ * The live figures a Layer 8 consent carries beside its text (`ConsentRequired.facts`), as the sentence the spec words for each action
+ * (§15.2). They are never part of the hash: a figure that moves does not ask again. An action with no facts, or facts that do not fit it,
+ * shows nothing.
+ */
+export function factsLine(action: ConsentRequired["action"], facts: ConsentRequired["facts"] | undefined): string | null {
+  if (!facts) return null;
+  const n = (v: number | undefined): v is number => typeof v === "number" && Number.isFinite(v) && v >= 0;
+  if (action === "dataset_fetch" && n(facts.free) && n(facts.free_after)) {
+    const days = n(facts.days) ? ` About ${facts.days} ${facts.days === 1 ? "day" : "days"} on this link.` : "";
+    return `Free space now: ${formatBytes(facts.free)}; after this: ${formatBytes(facts.free_after)}.${days}`;
+  }
+  if (action === "dataset_override" && n(facts.remaining)) return `Up to ${formatBytes(facts.remaining)} more.`;
+  if (action === "update_without_copy" && n(facts.needed) && n(facts.free)) return `Needed: ${formatBytes(facts.needed)}; free now: ${formatBytes(facts.free)}.`;
+  return null;
+}
+
+/** `consentOf` (bridge.ts) with the optional `facts` kept: whole non-negative numbers only. */
+function consentWithFacts(error: unknown): ConsentRequired | null {
+  const c = consentOf(error);
+  if (!c) return null;
+  const raw = (error as { problem?: { consent?: { facts?: unknown } } }).problem?.consent?.facts;
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return c;
+  const facts: Facts = {};
+  for (const k of ["free", "free_after", "days", "remaining", "needed"] as const) {
+    const v = (raw as Record<string, unknown>)[k];
+    if (typeof v === "number" && Number.isSafeInteger(v) && v >= 0) facts[k] = v;
+  }
+  return Object.keys(facts).length > 0 ? { ...c, facts } : c;
+}
 
 export const addonWord = (a: string): string => (Object.prototype.hasOwnProperty.call(ADDON_WORD, a) ? ADDON_WORD[a]! : a.replace(/[^\w .:/-]/g, "").slice(0, 60));
 export const actionWord = (a: ConsentRequired["action"]): string => (Object.prototype.hasOwnProperty.call(ACTION_WORD, a) ? ACTION_WORD[a] ?? "Confirm" : "Confirm");
@@ -76,6 +116,11 @@ export function ConsentPanel({ consent, changed = false, busy = false, onConfirm
       <pre id="consent-text" dir="auto" className="whitespace-pre-wrap break-words border border-border bg-secondary/20 p-3 text-sm leading-relaxed text-foreground [unicode-bidi:isolate]" data-testid="consent-text">
         {cleanPeerText(consent.warning_text)}
       </pre>
+      {factsLine(consent.action, consent.facts) ? (
+        <p className="text-xs leading-relaxed text-muted-foreground" data-testid="consent-facts">
+          {factsLine(consent.action, consent.facts)}
+        </p>
+      ) : null}
       {consent.addons.length > 0 ? (
         <ul className="flex flex-wrap gap-2" aria-label="What makes this text stronger">
           {consent.addons.map((a) => (
@@ -124,7 +169,7 @@ export async function runConsent<T>(
     try {
       return { ok: true, value: await call(hash, shown) };
     } catch (error) {
-      const consent = consentOf(error);
+      const consent = consentWithFacts(error);
       // The same hash twice would loop on a daemon that never accepts it; the second time it is a plain failure.
       if (!consent || (hash !== undefined && consent.hash === hash)) return { ok: false, cancelled: false, error };
       if (!(await ask(consent, changed))) return { ok: false, cancelled: true };

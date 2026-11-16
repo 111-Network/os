@@ -47,7 +47,22 @@ else
   skipped "musl checks"
 fi
 echo "== test (host) =="
-cargo test
+# Eight tests assume a non-root user (6-transport/TASKS.md:80; verify/checks.toml [[known]] euid0): the phone
+# preflight refuses root (adb.rs) and a 0o500 directory does not stop root. As root they are skipped by name and
+# listed; a non-root run (CI, the owner's machine) runs them all.
+if [ "$(id -u)" = 0 ]; then
+  root_only="preflight_happy preflight_two_devices_refused preflight_serial_flag_selects preflight_sdk21_refused
+    preflight_armeabi_refused preflight_bbk_old_build_refused_and_override preflight_miui_simless_refused_with_sim_ok
+    message_proposals_are_checked_then_applied_once"
+  skips=""
+  names=""
+  for t in $root_only; do skips="$skips --skip $t"; names="$names $t"; done
+  echo "note: running as root: skipping the eight non-root tests:$names"
+  # shellcheck disable=SC2086 # one --skip per word
+  cargo test -- $skips
+else
+  cargo test
+fi
 echo "== shellcheck =="
 if command -v shellcheck >/dev/null 2>&1; then
   find shim termux verify scripts -type f \( -name '*.sh' -o -name 'install.sh' \) -print0 2>/dev/null | xargs -0 -r shellcheck -s sh
@@ -87,6 +102,19 @@ else
   skipped "build-scripts gate"
 fi
 echo "== systemd-analyze =="
+# Layer 9 L2 (§3.3 rule 2): the unit carries the witness as an unprivileged ExecStopPost (no `+`), keeps
+# Restart=always and StartLimitIntervalSec=0, and has no OnFailure=.
+if [ -f systemd/111node.service ]; then
+  grep -qx 'ExecStopPost=/usr/local/bin/111 heal-witness' systemd/111node.service ||
+    { echo "FAIL: systemd/111node.service lacks 'ExecStopPost=/usr/local/bin/111 heal-witness' (no + prefix)" >&2; exit 1; }
+  if ! grep -qx 'Restart=always' systemd/111node.service || ! grep -qx 'StartLimitIntervalSec=0' systemd/111node.service; then
+    echo "FAIL: systemd/111node.service must keep Restart=always and StartLimitIntervalSec=0" >&2; exit 1
+  fi
+  if grep -q '^OnFailure=' systemd/111node.service; then
+    echo "FAIL: systemd/111node.service must not set OnFailure=" >&2; exit 1
+  fi
+  echo "witness: ExecStopPost=heal-witness present, Restart=always, StartLimitIntervalSec=0, no OnFailure="
+fi
 if command -v systemd-analyze >/dev/null 2>&1 && ls systemd/*.service >/dev/null 2>&1; then
   # verify resolves units by name — point it at a temp unit dir (systemd 249
   # lacks `verify --root` and absolute-path FILE handling is version-dependent)

@@ -1,14 +1,26 @@
 // Agent view (spec 6.1): a plain chat box to the node's local AI. The conversation itself lives in
 // `chatSession` (module level), so this component is only a window onto it.
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useSyncExternalStore } from "react";
+import {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useSyncExternalStore,
+} from "react";
 import { announce } from "../../app/LiveRegion";
 import { Button } from "../../components/button";
 import { CopyButton } from "../../components/copy-button";
 import { JsonBlock } from "../../components/json-block";
 import { Panel } from "../../components/panel";
 import { StatusDot } from "../../components/status-dot";
-import { useActivity, useProposals, useServices, useStatus } from "../../lib/api/hooks";
-import { openProposalsOf } from "../../lib/api/store";
+import {
+  useActivity,
+  useProposals,
+  useServices,
+  useStatus,
+} from "../../lib/api/hooks";
+import { applyingProposalsOf, openProposalsOf } from "../../lib/api/store";
 import { consumeParam } from "../../lib/params";
 import { Adv } from "../../lib/mode";
 import { takePrompt } from "../../lib/prompts";
@@ -27,10 +39,15 @@ export default function AgentView() {
   const status = useStatus();
   const proposals = useProposals();
   const activity = useActivity();
-  const snap = useSyncExternalStore(session.subscribe, session.getSnapshot, session.getSnapshot);
+  const snap = useSyncExternalStore(
+    session.subscribe,
+    session.getSnapshot,
+    session.getSnapshot,
+  );
 
   const state = useMemo(() => agentState(services, status), [services, status]);
   const open = useMemo(() => openProposalsOf(proposals), [proposals]);
+  const applying = useMemo(() => applyingProposalsOf(proposals), [proposals]);
 
   // --- tell the session what the agent can do right now --------------------------------------
   const notice = queuedNotice(state);
@@ -57,7 +74,9 @@ export default function AgentView() {
   const pinned = useRef(true);
   const onScroll = () => {
     const el = listRef.current;
-    if (el) pinned.current = el.scrollHeight - el.scrollTop - el.clientHeight < FOLLOW_SLACK_PX;
+    if (el)
+      pinned.current =
+        el.scrollHeight - el.scrollTop - el.clientHeight < FOLLOW_SLACK_PX;
   };
   useLayoutEffect(() => {
     const el = listRef.current;
@@ -81,11 +100,15 @@ export default function AgentView() {
   }, [proposals, open]);
 
   const stage = useCallback((text: string) => session.stage(text), []);
-  const startersList = useMemo(() => starters(services, status), [services, status]);
+  const startersList = useMemo(
+    () => starters(services, status),
+    [services, status],
+  );
 
   const focusList = useCallback(() => listRef.current?.focus(), []);
 
-  const empty = snap.rows.length === 0 && !snap.live && snap.queued.length === 0;
+  const empty =
+    snap.rows.length === 0 && !snap.live && snap.queued.length === 0;
   const intelligence = status?.intelligence;
 
   const chip = (
@@ -97,7 +120,9 @@ export default function AgentView() {
       <Button
         size="sm"
         aria-label="New conversation"
-        {...(snap.rows.length > 0 || snap.queued.length > 0 ? { confirm: "new conversation" } : {})}
+        {...(snap.rows.length > 0 || snap.queued.length > 0
+          ? { confirm: "new conversation" }
+          : {})}
         onClick={() => session.newConversation()}
       >
         <span className="sm:hidden">new</span>
@@ -121,19 +146,35 @@ export default function AgentView() {
       <Adv>
         {/* One line, whatever the screen: the id is the part that gets cut. Gone while the keyboard leaves < 480 px. */}
         <div className="relative flex [@media(max-height:480px)]:hidden items-center gap-x-3 overflow-hidden whitespace-nowrap border-b border-border px-4 text-xs text-muted-foreground">
-          <span className="min-w-0 truncate">model: {intelligence?.model_id ?? "none"}</span>
-          <span className="shrink-0">serving: {intelligence?.agent_state ?? "unknown"}</span>
+          <span className="min-w-0 truncate">
+            model: {intelligence?.model_id ?? "none"}
+          </span>
+          <span className="shrink-0">
+            serving: {intelligence?.agent_state ?? "unknown"}
+          </span>
           <span className="min-w-0 flex-1 truncate" title={snap.conversationId}>
             conversation: {snap.conversationId}
           </span>
-          <CopyButton text={snap.conversationId} label="copy" ariaLabel="Copy conversation id" className="shrink-0" />
+          <CopyButton
+            text={snap.conversationId}
+            label="copy"
+            ariaLabel="Copy conversation id"
+            className="shrink-0"
+          />
         </div>
       </Adv>
 
       {snap.prepared ? (
-        <PreparedBanner from={snap.prepared.from} text={snap.prepared.text} unavailable={state.kind === "unavailable"} onDismiss={() => session.dismissPrepared()} />
+        <PreparedBanner
+          from={snap.prepared.from}
+          text={snap.prepared.text}
+          unavailable={state.kind === "unavailable"}
+          onDismiss={() => session.dismissPrepared()}
+        />
       ) : null}
-      {state.kind === "no-model" ? <OfferCard state={state} loopback={status?.auth.loopback} /> : null}
+      {state.kind === "no-model" ? (
+        <OfferCard state={state} loopback={status?.auth.loopback} />
+      ) : null}
       {snap.queued.length === 0 ? <StateNotice state={state} /> : null}
 
       <div
@@ -145,25 +186,53 @@ export default function AgentView() {
         onScroll={onScroll}
         className="relative flex min-h-0 flex-1 flex-col gap-4 overflow-y-auto px-4 py-4 focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-foreground focus-visible:outline-none"
       >
-        {snap.history === "loading" && empty ? <p className="text-xs text-muted-foreground">loading conversation</p> : null}
-        {snap.history === "error" ? <p className="text-xs text-muted-foreground">The earlier messages of this conversation could not be loaded.</p> : null}
-        {empty && snap.history !== "loading" ? <Greeting starters={startersList} onStage={stage} /> : null}
+        {snap.history === "loading" && empty ? (
+          <p className="text-xs text-muted-foreground">loading conversation</p>
+        ) : null}
+        {snap.history === "error" ? (
+          <p className="text-xs text-muted-foreground">
+            The earlier messages of this conversation could not be loaded.
+          </p>
+        ) : null}
+        {empty && snap.history !== "loading" ? (
+          <Greeting starters={startersList} onStage={stage} />
+        ) : null}
         <Transcript rows={snap.rows} live={snap.live} />
-        <QueuedList queued={snap.queued} onRemove={(id) => session.removeQueued(id)} onRetry={() => session.retryQueued()} />
+        <QueuedList
+          queued={snap.queued}
+          onRemove={(id) => session.removeQueued(id)}
+          onRetry={() => session.retryQueued()}
+        />
         {/* Proposals are part of the conversation (spec 6.1): inline, where the agent said them. */}
-        <ProposalCards proposals={open} onWhy={(p) => session.stage(whyPrompt(p, status))} onDecided={focusList} />
+        <ProposalCards
+          proposals={open}
+          applying={applying}
+          onWhy={(p) => session.stage(whyPrompt(p, status))}
+          onDecided={focusList}
+        />
         <Adv>
-          <JsonBlock summary={`raw events (last ${Math.min(activity.length, RAW_EVENTS)})`} value={activity.slice(0, RAW_EVENTS)} />
+          <JsonBlock
+            summary={`raw events (last ${Math.min(activity.length, RAW_EVENTS)})`}
+            value={activity.slice(0, RAW_EVENTS)}
+          />
         </Adv>
       </div>
 
       {snap.notice ? (
-        <p role="status" className="border-t border-border px-4 py-2 text-xs text-muted-foreground">
+        <p
+          role="status"
+          className="border-t border-border px-4 py-2 text-xs text-muted-foreground"
+        >
           {snap.notice}
         </p>
       ) : null}
 
-      <Composer session={session} streaming={snap.live !== null} draftSeq={snap.draftSeq} onSubmitted={follow} />
+      <Composer
+        session={session}
+        streaming={snap.live !== null}
+        draftSeq={snap.draftSeq}
+        onSubmitted={follow}
+      />
     </Panel>
   );
 }

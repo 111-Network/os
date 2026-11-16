@@ -49,7 +49,7 @@ function ComponentCard({ c, networks }: { c: BridgeComponent; networks: readonly
       const adapter = await getAdapter();
       const out = await attempt((hash) => adapter.bridge.enableComponent(c.id, hash));
       if (out.ok) {
-        announce(`${networkLabel(networks, c.adapter)} is on.`);
+        announce(`${networkLabel(networks, c.adapter ?? c.id)} is on.`);
         refresh();
       } else if (!out.cancelled) setError(problemText(out.error));
     } finally {
@@ -60,7 +60,7 @@ function ComponentCard({ c, networks }: { c: BridgeComponent; networks: readonly
   return (
     <li className="flex flex-col gap-3 border border-border p-4" data-testid={`component-${c.id}`}>
       <div className="flex flex-wrap items-center gap-3">
-        <span className="font-mono text-sm text-foreground">{networkLabel(networks, c.adapter)}</span>
+        <span className="font-mono text-sm text-foreground">{networkLabel(networks, c.adapter ?? c.id)}</span>
         <Badge data-testid="component-state">{c.state}</Badge>
         {c.acknowledged ? <Badge>licence acknowledged</Badge> : null}
       </div>

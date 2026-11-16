@@ -1,4 +1,4 @@
-# Layer 9 - Self-Healing & Evolution: spec v0.2 (draft, the adversarial panel's findings applied)
+# Layer 9 - Self-Healing & Evolution: spec v1.0 (locked 2026-11-15, D39)
 
 The layer that makes a node notice its own failures, explain them and fix the ones it can fix safely, with a human at the last step. **`111d` observes**
 every layer the node runs from events it already receives: no timer, no poll, no new process. It records each failure as an **incident**, checks it
@@ -8,11 +8,11 @@ works, and reverts by itself on failure or after its own death. A phone asks its
 hub or a contact, where it is a proposal again once the same failure is open there. A **code fix** is a draft on a hub that opted in, exported for the human to open as a pull request.
 Nothing applies code, nothing is shared without a human, and the agent never holds a key or writes anything but a proposal.
 
-Status: **draft v0.2, 2026-11-13**, the adversarial panel's three reports applied under the lead's triage (`review/triage.md`; what changed where is
-`review/fix-map.md`). Written from D35 (the owner took every pick, detail pick, plan correction and default of
-the options brief), D36, the brief (`plan/layers/9-evolution/options.md`), its judge's check (`review/options-check.md`: ready), research R00-R07g3, the
-Layer 8 draft (`8-storage/README.md` v0.1, whose §3 is the one joint storage contract) and the as-built code. v0.2's §4, §7.4, §7.5 and §23 L8
-are re-read against Layer 8 as it stands on 2026-11-13 (locked v1.0, `DECISIONS.md` D38) and are re-checked against it at Layer 9's lock. Nothing here is built. No Layer 9 code is
+Status: 🔒 **locked v1.0 (2026-11-15, D39)** = v0.3 as re-checked (`review/recheck-2.md`: lock; its four minors folded into this lock edit). v0.3: the adversarial panel's three reports applied under the lead's triage (`review/triage.md`) and the re-check of v0.2
+applied under the lead's ruling (`review/recheck.md`; what changed where is `review/fix-map.md`). Written from D35 (the owner took every pick, detail pick, plan correction and default of
+the options brief), D36, the brief (`plan/layers/9-evolution/options.md`), its judge's check (`review/options-check.md`: ready), research R00-R07g3,
+Layer 8 (`8-storage/README.md`, locked v1.0, `DECISIONS.md` D38, whose §3 is the one joint storage contract) and the as-built code. §3.3, §3.4, §4, §7.4, §7.5 and §23 L8
+are read against Layer 8's locked text and are re-checked against it at Layer 9's lock. Nothing here is built. No Layer 9 code is
 written before the lock; the build board `9-evolution/TASKS.md` follows the lock.
 
 ## 0. Reading guide
@@ -27,11 +27,9 @@ under `os/plan/layers/9-evolution/`.
 
 **Citations.** `N/` = `1-bootstrap/crates/node111/src/daemon` · `NI/` = `1-bootstrap/crates/node111/src` · `M/` = `5-messaging/crates/mesh111/src` ·
 `ID/` = `2-identity/crates/id111/src` · `A/` = `3-intelligence/crates/agent111` · `UI/` = `4-interface/ui` · `API` = `4-interface/api/openapi.yaml` ·
-`L0`…`L8` = the layer READMEs; locked Layer 7 and the Layer 8 draft are cited by section and item, never by line. The v0.1 citations were read on 2026-11-11
-at head `fa1daeb`, which is behind HEAD in committed code, not only in the working tree (for example `M/fabric.rs:1237-1243` was `send` there and is
-`link_events` at HEAD); a citation v0.2 changed was read at head `680162d`, or at `0d1dd41` (committed content) for those its integration fixes
-added; every `file:line` is re-pinned at the lock head before the lock (§24 C12).
-The working tree carries uncommitted Layer 7 edits; no citation here reads them: the two UI files cited (`proposals.tsx`, `settings/index.tsx`) are read from the committed tree. **Evidence:** *(src)* source read ·
+`L0`…`L8` = the layer READMEs; locked Layers 7 and 8 are cited by section and item, never by line.
+**The pin:** every `file:line` in this spec is read from committed content at head `abced06` (`git show abced06:<path>`), and a moved one was
+re-derived there by the symbol or sentence it names (§24 C12); a later head re-pins them before the lock. **Evidence:** *(src)* source read ·
 *(doc)* docs read by a scout · *(design)* not built · *(unverified from this box)* a claim no scout could fetch (R06 §7, OB §6).
 
 **Map.** §1 scope and the Pi floor · §2-§13 the decided areas in the brief's order (F1 autonomy, F2 observer, F3 state, F4 diagnosis, F5 playbooks,
@@ -209,16 +207,19 @@ schedule's window (`BackoffSchedule::record_exit`, `:465-485`). `requested` is s
 4. **The inbox line** `state/heal/inbox` (J2), ASCII, at most 96 B: `v1 boot=<32 hex|-> result=<word ≤16> code=<≤3 digits|-> signal=<≤3 digits|->`
    (84 B at most, arithmetic). No free text. The file keeps the newest 256 lines: each writer appends through a temp file and a rename, as Layer 8's J2
    words it, so a crash loop with the store unopenable cannot grow it.
-5. **At start, before serving,** in this order: `111d` reads the marker without rewriting it, the inbox and the update tombstone; reconciles
-   `state/heal/undo` (§7.5); then rewrites the marker (`starts` plus one, `clean: false`). It opens or bumps the incidents of the two tables below
-   (§3.4), folds the lines into `heal/` and clears both files (J2). One event, one incident: each inbox line, oldest first, is classified alone.
+5. **At start, before serving,** in this order: `111d` takes `node/lock` (L8 §13.2); reads the marker without rewriting it, the inbox and the update
+   tombstone; reconciles `state/heal/undo` (§7.5); then rewrites the marker (`starts` plus one, `clean: false`). A `111d` that finds `node/lock` held by
+   a store verb exits with status 75 before any of these steps, so that exit touches neither the marker nor the undo file. It opens or bumps the
+   incidents of the two tables below (§3.4), folds the lines into `heal/` and clears both files (J2). One event, one incident: each inbox line, oldest
+   first, is classified alone.
 
    | Inbox line | Opens or bumps |
    |---|---|
    | `result=success` (Linux) or `result=exit code=0` (Termux): a clean exit | nothing |
    | `result=watchdog` | `(1, 111d, watchdog_kill)` only |
    | `result=signal signal=9` written by the Termux hook | `(1, 111d, killed_by_os)` only (Android's phantom-process kill); its shipped playbook's one action is the `human_step` "On your computer, connected to this phone, run `111 install --phone` again" (OB §3 "The phone"), one card with the §12.6 step when both are due |
-   | any other line, also under a clean marker | `(1, 111d, unclean_exit)` |
+   | any other line, also under a clean marker, except the `code=75` line below | `(1, 111d, unclean_exit)` |
+   | `result=exit-code code=75` (Linux) or `result=exit code=75` (Termux): `111d` exited because a store verb held `node/lock` | nothing: the line is folded into `heal/` with its code and the evidence "a store verb held `node/lock`" (L8 J2, §13.2), never counted as a crash |
 
    | Marker and tombstone | Opens |
    |---|---|
@@ -252,7 +253,7 @@ diagnosis until the evidence hash (§3.5) changes. At most 64 incidents are open
 `overflow` on `GET /api/v1/repairs` (capacity, not policy).
 
 **One subject id space, one source per failure.** A subject is a `ServiceId` (`N/services/mod.rs:87-99`), a component id, or one of the fixed daemon
-subjects `111d`, `updater`, `identity`, `heal` and Layer 8's subjects; each `(subject, reason code)` pair is a row of one compiled table in node111
+subjects `111d`, `updater`, `identity`, `heal` and `storage` (Layer 8's); each `(subject, reason code)` pair is a row of one compiled table in node111
 (§6.3), and nothing else is a subject. A supervised child is observed only through its state watch and its exit facts: its subject is its service id or
 component id and its layer that service's layer (the model child is `model`, never `llama-server`). Rows whose code is `child_backoff`,
 `child_degraded`, `child_stopped`, `spawn_pending` (`N/services/mod.rs:707-722`) or `transport_degraded` (`:857`) are not incident sources: the
@@ -265,14 +266,14 @@ child's watch and exit facts are.
 | the service's: 3 `agent`, `model`; 6 `transport`; 5 `meshtastic`; a component's own | an exit fact with `requested: false` (§3.2) of a supervised child, a component runner's included | the service id or the component id · `child_exit` (the code or signal stays in the `exit` evidence; `exit_is` tests it) |
 | 2 | `health.identity` false, or the `fabric` row's `no_identity` or `restore_pending` (`N/services/mod.rs:1152-1170`): one fingerprint, whichever arrives first; that row is not also a Layer 5 source | `identity` · `no_identity`, `restore_pending` |
 | 3 | the `agent` or `model` row in state `error` with a code that is not a child code above | the row id · its code |
-| 5 | the `fabric` or `meshtastic` row in state `error` | the row id · its code (`store_full`, `port_busy`, …) |
+| 5 | the `fabric` or `meshtastic` row in state `error` | the row id · its code (`store_full`, `port_busy`, …); a full fabric store opens only `(5, fabric, store_full)`: Layer 8's `capacity.store_full` is the same flag (L8 §13.4, §16.3) and opens nothing beside it |
 | 6 | the `transport` or `radio` row in state `error` | the row id · its code (`stack_down`, …) |
 | 7 | none in v1: the `gateway` row's codes are `unset` or `live` (`carrier_pending` is the normal offline state, L7 §3.5 item 2; `N/services/mod.rs:1065-1068`) | — |
-| 8 | Layer 8's typed storage state, read after a `storage` frame, each named: `disk_low` set; `store_full` set; the node-state store `unavailable` | Layer 8's subject · `disk_low`, `store_full`, `node_state_unavailable` |
-| 9 | a revert that failed; the store unopenable (J2) | `heal` · `revert_failed`, `store_unavailable` |
+| 8 | Layer 8's typed storage state, read after a `storage` frame: `disk_low` set | `storage` · `disk_low` |
+| 9 | a revert that failed; the store unopenable (J2), with Layer 8's node-state store `unavailable` (L8 §16.3) as its `storage` evidence, never a second incident | `heal` · `revert_failed`, `store_unavailable` |
 
-Rules: (1) Only a service row in state `error` opens an incident, never `unset` or `starting`; this governs service rows, and Layer 8's sources are the
-three named above. So `carrier_pending`, `kb_absent` and the `codeagent` row (only `unset` or `live`, `N/services/mod.rs:1088-1121`) open nothing,
+Rules: (1) Only a service row in state `error` opens an incident, never `unset` or `starting`; this governs service rows, and Layer 8's one source is
+`disk_low` (row 8): a full fabric store is the `fabric` row's and an unopenable node-state store is `heal`'s, one source per failure. So `carrier_pending`, `kb_absent` and the `codeagent` row (only `unset` or `live`, `N/services/mod.rs:1088-1121`) open nothing,
 and Layer 7 has no incident source in v1 until it publishes an `error` code (§0). (2) Only an exit with `requested: false` opens or bumps an incident: a
 requested restart (a human's, Layer 9's own `service.restart`, the applier's rnsd restart, `stop_before`/`start_after` around a dependency restart,
 `N/components/mod.rs:449-464`), a component disable, `Stopped`, a held runner and a graceful daemon stop open nothing; the observer stops before
@@ -284,12 +285,15 @@ its condition clears: a row leaves `error`; a child has been `Running` for the c
 one-shot sleep armed on the `Running` transition; a start fact as §3.3 rule 5 says; `witness_absent` and `apk_outdated` when their condition clears.
 
 **3.5 The incident record (normative shape; R01 §3.2; OB §3).** `{schema: 1, id: "inc-<12 hex>", fingerprint: {layer, subject, reason_code}, severity:
-"warning"|"error"|"critical", count, state, opened: {seq, boot_id, mono_ms, tick, epoch: null, wall_claim}, last: {…}, closed: {…}|null, evidence: [{id, kind,
+"warning"|"error"|"critical", count, state: "open"|"closed", opened: {seq, boot_id, mono_ms, tick, epoch: null, wall_claim}, last: {…}, closed: {…}|null, evidence: [{id, kind,
 ref, excerpt}], checks: [{check_id, result}], ruled_out: [cause_id], diagnosis: {cause_id, by: "t0"|"t1"|"hub", confidence: {checks_satisfied,
-agreement}}|null, attempts: [{proposal_id, action, decision, outcome}], dismissed: {cause_id}|null, outcome: "open"|"self_recovered"|"fixed"|"unresolved"}`.
+agreement}}|null, explanation: {task_id, text}|null, attempts: [Attempt], dismissed: {cause_id}|null, outcome: "open"|"self_recovered"|"fixed"|"unresolved"|"dismissed"}`.
+`state` is §4.2's incident state; `attempts` holds §18.4's `Attempt` objects; `explanation` holds the result of the incident task route's mode
+`explain` (§5.2), rendered preformatted, never as Markdown.
 `id` is `inc-` plus 12 hex digits from the OS random source, minted by `111d` as its other id families are (§18.2), so an incident has its id
 before any store write, with the store closed and under J7; it never derives from `seq`. `seq` is the store's (J4); `tick` the daemon tick (`N/mod.rs:906`); `epoch` stays `null` until Layer 7's epoch has a consumer (L7 §8); `wall_claim` is
-display only. Evidence `kind` is closed: `service_record`, `health`, `counters`, `exit`, `witness`, `update_tombstone`, `child_log_tail`. An excerpt is at
+display only. Evidence `kind` is closed: `service_record`, `health`, `counters`, `exit`, `witness`, `update_tombstone`, `child_log_tail`, `storage`
+(Layer 8's typed storage state, §3.4 row 9). An excerpt is at
 most 512 B and comes only from `111d`'s own typed sources and its own children's logs (agent, model, rnsd, meshmud: `N/dashboard/api_v1/services.rs:10-14`);
 never a message body, never a bridge adapter's or the presence sidecar's log text (counters and reason codes only, Q13). A `child_log_tail` excerpt is
 the line a `log_contains` check matched, else the last line before the exit, at most 512 B; it stays on the node. Off the node goes only text 111
@@ -320,7 +324,7 @@ the same J1 rules, and naming them in J1 is a request to Layer 8 (§23 L8). Each
 | incidents | `heal/incidents` records | J1, J3, J4 | `open` |
 | apply attempts | `heal/attempts` records | J1 | `armed`, `awaiting_confirm`; `revert_blocked` and `revert_failed` until the human resolves or dismisses them (§7.4) |
 | the proposed actions of each `repair`, `fix` and `human_step` proposal and their `action_hash`, written in the same J9 call as the proposal (§7.3) | `heal/proposals` records | J1 | `undecided` (a `decided` record goes with its proposal) |
-| the loop ledger, keyed `sha256(action ‖ target)` | `heal/ledger` records | J1 | — |
+| the loop ledger, keyed `sha256(action ‖ target)` | `heal/ledger` records | J1 | always (§4.2) |
 | kept-change snapshots, the last five | `heal/snapshots` records | J1, J3 | — (a snapshot belongs to its kept change, the last five by capacity, Q7; reclaimed last, §4.2) |
 | fixes received and sent | `heal/fixes` records | J1, J6 | `undecided` |
 | one `{author, high_water}` record per trusted author, the highest `author_seq` accepted (§11.4 step 3) | `heal/fixes` records | J1 | `high_water` (never reclaimed) |
@@ -363,14 +367,16 @@ Every Layer 9 write is one J9 call (`put`, `append`, `set_state`); the audit rec
    cursor), re-arms each one's recovery window (§3.4's one-shot sleep, armed on the state it reads now) and closes as `self_recovered` those whose
    condition is clear: a row no longer in `error`, a child `Running` once its window has passed, a start fact as §3.3 rule 5 says.
 2. **The store closed** (no key in Mode T, a newer `user_version`, a damaged file: L8 §2.2 rule 8): the J2 files stay (J2), the observer keeps at most 64
-   incidents in memory and records `(9, heal, store_unavailable)` there, T0 runs, nothing else does: no proposal is filed, no T1 or human task is
+   incidents in memory and records `(9, heal, store_unavailable)` there, Layer 8's `unavailable` state its `storage` evidence and no Layer 8 row
+   opened beside it (§3.4 row 9), T0 runs, nothing else does: no proposal is filed, no T1 or human task is
    submitted, no fix is sent and no delegation composed. `GET /api/v1/repairs` answers `store: {state: "unavailable", reason}`, and the decision route
    answers `503 store_unavailable` and applies nothing (L8 §2.2 rule 8). When the store opens, the in-memory incidents are written and rule 1 runs.
 3. **J7** (the store not built): the ring holds `heal/` (J7); observation and diagnosis run, and no proposal is filed until the store exists.
 4. **`Full`** (L8 §4.5: the class is `full` while its export offer is unanswered): observation continues in memory under the 64-incident bound; no new
    `repair`, `fix` or `human_step` proposal is filed; `RepairsStatus.store = {state: "full"}`, and the Repairs page links to the Storage page's offer.
    An armed apply finishes and its decision is written (J9 writes the three decision calls whatever the class's state); its attempt is written once
-   the class has room, and until then the undo file keeps its last phase (§7.5). A T1 fold that returns `Full` leaves the spool file for the next sweep
+   the class has room, and until then the undo file keeps its last phase (§7.5) and every accept and `apply_unrecorded` answers `409 busy` (§7.4
+   step 2). A T1 fold that returns `Full` leaves the spool file for the next sweep
    (Layer 8's hand-off rule unlinks only after the write).
 5. **Inbound frames while `full` or closed.** A consumer for 0x10 or 0x13 never returns an error, so the fabric acknowledges the frame (L8 §12.3) and
    nothing is retransmitted without end: a fix is dropped and counted (its author's `high_water` is not advanced); a `diagnose` is answered `refuse` 3.
@@ -425,15 +431,15 @@ Layer 3's question (§22).
 - None of the three ⇒ the incident reads `unable_to_diagnose`, honestly.
 
 **5.2 The `incident` input (amends Layer 3, additive).** `TaskRequest` (`A/src/http.rs:159-164`, `API:832-838`) gains an optional `incident` object (§3.5's
-fields, minus `attempts`), `causes: [{id, text}]` and `narrative: bool` (default `false`; `true` asks the explanation of mode `explain`
+fields, minus `attempts` and `explanation`), `causes: [{id, text}]` and `narrative: bool` (default `false`; `true` asks the explanation of mode `explain`
 instead of the classification, with the same untrusted block and no `response_format`). With it, `diagnose` renders the incident inside a labelled untrusted block, switches off
 `daemon_health` and `recent_events` for that task (today's context, `A/src/tasks.rs:360-390`) and sends `response_format` with the schema
 `{cause_id: enum, evidence: [enum of the incident's evidence ids] ≤3}`: the schema constrains `evidence` to the ids the incident holds, and no quote
 is asked for; the card shows the excerpt of each cited id. The prompt is ≈0.5 KB (R07g2 F4), never today's ≈6,000-token context (R01 §3.4,
 estimate). **The fold (normative).** `111d` records on the incident the id of the T1 task it submitted. The task's result is written as a
 `kind: diagnose` proposal whose body is that JSON; at ingest (on `task.done`, `relay.rs:826`, or at a sweep, inside Layer 8's one hand-off rule) a
-proposal whose `task_id` names such a task is folded into its incident with one J9 `put`, committed before the spool file is unlinked, and the file is
-unlinked: it never enters `agent/proposals`, any proposals list or the open count, and never shows in "Needs you". A hub folds a delegated task's result
+proposal whose `task_id` names such a task is folded into its incident with one J9 `put` (a `diagnose` result sets `diagnosis`, an `explain` result
+sets `explanation`, §3.5), committed before the spool file is unlinked, and the file is unlinked: it never enters `agent/proposals`, any proposals list or the open count, and never shows in "Needs you". A hub folds a delegated task's result
 into its delegation record the same way (§12.4). The fold applies to the incident task route's modes `diagnose` and `explain` only (§18.1); `kb_draft`
 and `patch` proposals are ingested normally.
 
@@ -452,7 +458,7 @@ Pi 5 *(unverified from this box: 2.3 tok/s, a search snippet, R01 §3.4)*, measu
 **6.1 The entry (amends L0, additive).** `category: playbook` joins the enum (`L0:45`; rule F05, `0-knowledge/_meta/schema.md:19`), folder `playbooks/`,
 filename `repair-<subject>-<reason>.md` (`_` written as `-`; `any` for a subject wildcard), rendered from the block's `[match]`: N06 renders `[match]` into
 the expected filename and compares, never splits a filename (so `repair-model-child-exit.md` matches every unrequested exit of `model`). No new
-frontmatter field (the twelve of `L0:40` and F02, `schema.md:16`). The applicability matrix (`schema.md:96-110`) gains a `playbook` column: `title`,
+frontmatter field (the twelve of `L0:40` and F02, `schema.md:16`). The applicability matrix (`schema.md:96-111`) gains a `playbook` column: `title`,
 `category`, `status`, `summary`, `tags`, `last_verified` R; `aliases`, `sources`, `relations` O; `platforms`, `upstream`, `license` forbidden
 (first-party). `relations` carry `depends_on` only when the subject is a third-party project with a KB entry, and then it is required; `runs_on` is
 optional; neither enters N06; no relation names a target without an entry (R02), so 111's own subjects (`kb`, `fabric`, `111d`) carry none.
@@ -475,7 +481,7 @@ tagged on `p` with no fallback variant. The twelve predicates (Q9 default):
 | `health_is` | `of` ∈ `daemon` (`ok`, `error`; `N/health.rs:24-40`) or `agent` (`ok`, `error`: the code the services probe keeps, `N/services/probe.rs:162-165`; the agent's `degraded` answers 200, `L3:84`, so v1 cannot read it), `is` | the health struct `111d` holds (`status.rs:332-337`); the probe's last code for the agent |
 | `file_exists` | `root` ∈ `state`, `run`, `data`; `rel` matching `^[a-z0-9._-]+(/[a-z0-9._-]+)*$` | one `metadata()` call, never a read |
 | `log_contains` | `id` (an own child), `literal` ≤ 64 B | the last 100 lines or 8 KiB of the sanitised tail (`N/services/log.rs:12-17`); no regex |
-| `disk_free_below` | `percent` | the fabric's `statvfs` (`N/fabric/mod.rs:420-432`) |
+| `disk_free_below` | `percent` | the fabric's `statvfs` (`N/fabric/mod.rs:471-484`) |
 | `unclean_exit` | — | §3.3's marker |
 | `component_enabled` | `id`, `is` | `Components::status` |
 | `release_at_least` | `calver` | the running release |
@@ -578,7 +584,7 @@ device actions are ported byte-for-byte (D29); `kind: device` proposals keep the
 | `service.restart {service_id}` | `restart_service` (`N/dashboard/api_v1/services.rs:113`), which also clears `Degraded` (`N/supervise.rs:682-723`) | in a `repair` or `fix`: the service's published row is out of `error` (the registry's two-tick confirm, `N/services/mod.rs:1459-1468`) and no new exit fact with `requested: false` (§3.2) arrived inside the window; in a `device` proposal: none, Layer 6's one-shot as built (`N/devices/applier.rs:18`, `:100`, D29) | none: "a restart cannot be undone" | the restart and what the child held in memory | none |
 | `identify {device_id}` (`device` proposals only) | the consented identify, as built (`N/devices/applier.rs:17`) | none (a one-shot) | none | — | none |
 | `rns.interface.upsert`†, `rns.interface.remove`†, `rns.posture.set`, `radio.region.set` | as built (D29) | as built (`N/devices/applier.rs:11-18`) | the snapshot | `rns.posture.set`: the rnsd restart and the links it dropped | none |
-| `settings.set {key, value}`, keys `fabric.listen_lan`, `fabric.hub_role`, `fabric.quota.<class>` | through the `PATCH /fabric/settings` code path, under that route's loopback-only gate (§7.3) | the listener's bound state; the quota in `GET /fabric` | the previous value | the items a lowered `fabric.quota.<class>` evicted (`M/store/prune.rs:44-46`) | `may_affect` for the first two |
+| `settings.set {key, value}`, keys `fabric.listen_lan`, `fabric.hub_role`, `fabric.quota.<class>` | through the `PATCH /fabric/settings` code path, under that route's loopback-only gate (§7.3); a `fabric.quota.<class>` key calls Layer 8's `quota.set` (L8 §16.4), the one writer of a class quota, which applies through that same route and gate | the listener's bound state; the quota in `GET /fabric` | the previous value | the items a lowered `fabric.quota.<class>` evicted (`M/store/prune.rs:44-46`) | `may_affect` for the first two |
 | `component.enable {id}` · `component.disable {id}` | `enable_component` (`N/dashboard/api_v1/bridge.rs:288`), the function the bridge settings route calls, addressed by component id, with the component's own consent and cached payload (`N/components/mod.rs:12-40`, `:480`) · `stop_and_wait` | `running` and its health · `stopped` | disable · enable (a licence notice that is not current stops it `revert_blocked`, §2.2 item 5) | enable: the installed tree and the recorded acknowledgement (`N/components/mod.rs:17-20`) · disable: — | none |
 | `bridge.edge.pause {edge_id}`† · `bridge.edge.set {edge_id, oversize?, honour_ok_to_mqtt?}`† | `PATCH /bridge/edges/{id}` fields (`API:482`) | the edge reads the values | the previous values (resuming a `consent_paused` edge whose consent is not current stops `revert_blocked`) | `bridge.edge.set`: copies already relayed | none |
 | `bridge.order.set {order}`† | `interfaces.toml` `[order]` through the spine | the file re-parses with that order | the snapshot | — | none |
@@ -595,8 +601,8 @@ after 60 s of red (`N/mod.rs:137-180`), and the helper ignores a revert request 
 update incident carries a `human_step` that names Layer 1's own probation revert and the monotonic floor (§24 C1). Two code facts bound the table: a component whose
 payload is not cached answers `component_unavailable` (enable never downloads, `N/components/mod.rs:36-40`), so the proposal becomes a `human_step` naming
 `sudo 111 install --components <id>` (§24 C3); `fabric.listen_lan` and `fabric.hub_role` are the only settings keys because each has a probe; `lan_enabled`
-takes effect only at daemon restart (`N/dashboard/api_v1/settings.rs:14-15`) and is refused (Q6). An adapterless component (Layer 8's D1 + D2 vs I3
-ruling: kiwix, opencode) is not a `component.*` target in v1, and an adapter that enables two components needs two proposals (§7.3's one-consent rule).
+takes effect only at daemon restart (`N/dashboard/api_v1/settings.rs:14-15`) and is refused (Q6). An adapterless component (Layer 8 §9.2's form:
+kiwix; opencode, §8.2) is not a `component.*` target in v1, and an adapter that enables two components needs two proposals (§7.3's one-consent rule).
 
 **7.3 The `repair` proposal (normative).** `111d` composes it for a diagnosed cause under `propose`: kind `repair`, body one JSON object `{"why", "incident",
 "playbook", "cause", "actions": [Action]}`, at most 8 actions (`MAX_ACTIONS`, `N/devices/applier.rs:89`), at most 16 KiB (`MAX_BODY`, `:91`), stamped with
@@ -608,11 +614,13 @@ records "read" (`N/dashboard/api_v1/proposals.rs:698`), as today. Further rules:
    these three kinds and treats the file as Layer 8 §2.4 rule 4 treats a file it does not ingest: never ingested, never deleted by `111d`, counted. At
    accept, `111d` takes the actions from its own `heal/proposals` record for that proposal id, never from the proposal body, and requires their hash to
    equal the `action_hash` recorded at `proposed`; a mismatch or a missing record answers `refused` and applies nothing. When the proposal's incident
-   closes, `111d` marks the proposal withdrawn.
+   closes while the proposal is undecided, `111d` withdraws it: it decides the proposal itself through J9's `decision_begin` and `decision_complete`,
+   decision `dismissed`, `applied: {withdrawn: true}` (§18.4), sets the `heal/proposals` record `withdrawn` (§4.2) and appends an audit record `kind:
+   dismissed`, `by: "daemon"`. The proposal leaves the open count and Needs you, and a later accept answers `409 already_decided`.
 2. **An action inherits the gate of the route it wraps.** Accepting a proposal that holds an action on a loopback-only key (`fabric.listen_lan`,
    `fabric.hub_role`, `fabric.quota.<class>`: `PATCH /fabric/settings` takes the `LoopbackOnly` extractor, `N/dashboard/api_v1/fabric.rs:441`;
    `API:354`) from a non-loopback peer answers `403 loopback_only`, writes nothing and leaves the proposal open. Layer 8 states the same rule for
-   `quota.set` (its I32); the decision route itself stays session-or-loopback (`N/dashboard/api_v1/proposals.rs:638`).
+   `quota.set` (L8 §15.1, §16.4); the decision route itself stays session-or-loopback (`N/dashboard/api_v1/proposals.rs:638`).
 3. **A removal is consented, mechanically.** When any action's `plan()` returns `removes_capability` or `evicts > 0`, accept answers
    `409 consent_required` with `action: heal_remove`, a `warning_text` `111d` writes ("This repair turns off <x>." or "This repair removes <n> stored
    items.") and its hash; the human repeats with `accept_warning`. The `why` text is never a gate.
@@ -629,7 +637,9 @@ human's `PATCH /api/v1/transport/posture`, `N/dashboard/api_v1/transport.rs:377-
 2. **Arm the undo** before the first effect: `decision_begin` writes the pending decision, `applied: {pending: true}` as today
    (`N/devices/applier.rs:992-1004`); then `state/heal/undo` (J2) = `{schema: 1, phase: "armed", proposal_id|null, attempt_id, action, target, snapshot
    (base64), release, starts, armed: {boot_id, mono_ms}}`, atomic, 0600, fsync, where `release` and `starts` are the run marker's (§3.3). A record that
-   does not re-read equal after the fsync refuses the action before its first effect.
+   does not re-read equal after the fsync refuses the action before its first effect. While `state/heal/undo` exists in any phase, an accept and an
+   `apply_unrecorded` answer `409 busy` whose `detail` carries the attempt id (`att-…`), and nothing is armed; an Undo runs this loop and answers the same (§7.7). The one apply
+   that proceeds is the `/restore` of the attempt the file names, which rewrites that file (step 6).
 3. `apply()`, then `probe()` within its window: kept (step 4) or reverted (step 5).
 4. **Keep:** rewrite the file with `phase: "keeping"` (fsync), then `decision_complete(kept)`, the attempt, the ledger and the snapshot record
    (`heal/snapshots`, with the `after_hash` of the state the action left); the file is removed last.
@@ -640,7 +650,8 @@ human's `PATCH /api/v1/transport/posture`, `N/dashboard/api_v1/transport.rs:377-
    `revert_blocked` (shown in Needs you), completes the decision and releases the lock. The human resolves it on `POST
    /api/v1/repairs/attempts/{id}/restore` (the consent round trip, `409 consent_required` then `accept_warning`, then the restore through this loop; a
    session or loopback, never the agent's bearer) or dismisses it ("leave as is", `POST /api/v1/repairs/attempts/{id}/dismiss`), which removes the file.
-   An attempt in `revert_blocked` or `revert_failed` is never reclaimed until it is resolved or dismissed (§4).
+   A `revert_failed` attempt is dismissed on the same route ("leave as is"), which records it `dismissed` (§4.2); its file is already gone (step 5,
+   §7.5). An attempt in `revert_blocked` or `revert_failed` is never reclaimed until it is resolved or dismissed (§4).
 
 Debug builds read `NODE111_HEAL_PAUSE_AT` ∈ `apply`, `keeping`, `decided`, `restoring`, `restored` (the `NODE111_BRIDGE_STUBS` pattern) and stop at
 that point, so G20 can cut the loop there; release builds ignore it.
@@ -658,7 +669,9 @@ without rewriting it, reconciles `state/heal/undo`, and only then rewrites the m
 | no file, with a `pending` decision | `interrupted`, through `decision_complete` once the store opens |
 
 `service.restart` arms no undo and records `interrupted`. An `apply_unrecorded` record (`proposal_id: null`) follows the same rows with its attempt and no
-decision record. When the store does not open (J2), the cold restore still runs and the file keeps its phase until a later start folds it. This replaces
+decision record. After a start-time `revert_failed` (the first two rows) the file is removed once the attempt and its incident are written; the human
+dismisses the attempt on `/dismiss` (§7.4 step 6, §18.1). When the store does not open (J2), the cold restore still runs and the file keeps its phase
+until a later start folds it; while it exists, §7.4 step 2's guard answers every accept `409 busy`. This replaces
 "a crash mid-apply leaves a visibly half-applied proposal" (`L6:657-658`; `N/devices/applier.rs:35-37`); "never a second apply" stands, and a record
 is restored at most once. No clock: the rule is ESP-IDF's `PENDING_VERIFY` state *(doc, R02 F7)*.
 
@@ -677,7 +690,7 @@ current state hash equals the `after_hash` recorded at keep; otherwise the card 
 effect (the file equals the snapshot and the spine applied it), never the original capability probe. The ledger (`heal/ledger`, `{applied, reverted,
 unresolved, last_cause, last_evidence_hash}`): after a revert, or after an applied action that is `unresolved`, the same action for the same cause is
 not re-proposed until the human asks again from the incident or the evidence hash (§3.5) changes. An applied action is `unresolved` when a new unrequested event
-bumps its incident's `count` after the keep. While an apply holds the lock, an accept answers `409 busy` (§7.4).
+bumps its incident's `count` after the keep. While an apply holds the lock or the undo file exists, an accept answers `409 busy` (§7.4).
 
 **7.8 Validation by category, said plainly in the UI.** Every node runs `plan()` and the action's own probe (a phone gets exactly that). A Pi adds supervisor
 events as probe inputs. A hub adds, for pull requests only, §8. "Validated" is never self-assigned: the card names the probe that passed.
@@ -693,7 +706,7 @@ loopback trusted as the human on Linux (`N/dashboard/api_v1/auth.rs:3-10`, `:995
 into the task's work directory; the child gets the five `OPENCODE_DISABLE_*` flags R07g1 F2 lists set to `1` (`…_MODELS_FETCH`, `…_AUTOUPDATE`,
 `…_LSP_DOWNLOAD`, `…_EXTERNAL_SKILLS`, and the flag that stops it reading another assistant's home config); `--auto` is never passed (`OPENCODE_ARGV`,
 `A/src/tasks.rs:32`); the `npm` value stays the constant (a different one triggers a download, R07g1 F4). This restores `L3:55` ("no host shell for the
-agent") on hubs. Not landed at `fa1daeb`.
+agent") on hubs. Not landed at `abced06`.
 
 **8.2 The patch component (amends L1 and L6 additively).** opencode 1.19.5 (MIT, licence read, R07g1 §2) becomes a declared optional component,
 `1-bootstrap/crates/node111/assets/components/opencode.toml` (none exists: the folder holds `deltachat`, `lxmf`, `madmail`, `simplex`), hub targets only,
@@ -751,7 +764,7 @@ toolchain, 111-127 MB xz) is OB F7 C, later, after a measured cold `cargo check`
 ## 10. Signing: `111d` signs what leaves the node (D35 F9)
 
 **10.1 Who signs.** The node key, through `111d`, the identity holder: `Keyset::sign_with_tag` (`ID/keyset.rs:475`) behind node111's `sign(tag, msg)`
-(`N/fabric/sealer.rs:432-433`). The agent holds zero key material (`L2:234`; "No key material ever reaches it", `N/intelligence.rs:10-12`). `111d` builds the
+(`N/fabric/sealer.rs:466-467`). The agent holds zero key material (`L2:234`; "No key material ever reaches it", `N/intelligence.rs:10-12`). `111d` builds the
 signed bytes from records it holds and never signs bytes the agent hands it: no signing oracle.
 
 **10.2 The two tags (normative; registered in L2 §13.3 A19, Layer 8 §21 L2's block).**
@@ -768,10 +781,11 @@ control artifacts only — never routine traffic" (`L2:91`), and Layer 9 signs n
 ## 11. Sharing proven fixes between nodes (D35 F10)
 
 **11.1 The artefact (normative).** `fix/v1` body: UTF-8 JSON, signed as exact bytes, never re-serialised, at most 4,096 B: `{schema: 1, author, author_seq,
-epoch|null, class: "typed"|"code"|"kb", applies_to: {category, layers_run, release, components}, incident: {fingerprint, diagnosis ≤512 B}, actions: [Action]
+epoch|null, class: "typed"|"code"|"kb", applies_to: {category, layers_run, release, components}, incident: {fingerprint, cause_id ≤ 24, diagnosis ≤ 512 B}, actions: [Action]
 (typed only), evidence: {probe, result, before_hash, after_hash, reverted: false}, not_verified: [string], attachment: {kind: "diff", bytes, blake3}|null}`.
-`author_seq` is minted from the Layer 2 announce counter, as Layer 8's catalogue `seq` is (L8 D6), so a words-only restore cannot restart it (a replay is
-not increasing); no wall clock. **v1 carries `class: "typed"` and `attachment: null` only:** `code` and `kb` fixes travel as drafts and reach other nodes
+`incident.cause_id` is the diagnosed cause's id (§6.2), by which the receiver selects its peer subset (§11.4 step 6) and `Fix.cause_id` (§18.4);
+`diagnosis` is that cause's one-line text. `author_seq` is minted from the Layer 2 announce counter, as Layer 8's catalogue `seq` is (L8 §6.4, §21 L2),
+so a words-only restore cannot restart it (a replay is not increasing); no wall clock. **v1 carries `class: "typed"` and `attachment: null` only:** `code` and `kb` fixes travel as drafts and reach other nodes
 through the human's pull request (§9); the signed input keeps `attachment_hash` (32 zero bytes, §10.2) so a later release adds attachments under the same
 tag (§22). The body parses strictly: an unknown field or a duplicate key refuses it; an unknown `schema` is parked "needs a later release";
 `applies_to.release` matches by equality in v1. For the release that adds attachments the rule is fixed now: the attachment's BLAKE3 must equal both the
@@ -797,18 +811,21 @@ warns "too large for a carrier" above 2,937 B. A carrier's refusal stays Layer 7
 (`forward_too_large`, L7 §5.2, §5.9), and the sender's fix reads "not delivered"; the honest custody status is Layer 7's v1.1 item.
 
 **11.3 Sending (normative).** Only a human sends: "Send this fix" on a kept change, `POST /api/v1/repairs/fixes/{id}/send {to}`, where `to` is the home hub
-or a pinned contact as `heal.fixes.send` allows; off by default. The consent `fix_send` (§17) shows the exact bytes that would leave; the send screen
+under `home_hub`, or under `contacts` the home hub or any Layer 5 contact the human picks for that send (§17.1); off by default. Layer 5's `pinned`
+flag plays no part. Each send asks its own consent `fix_send` (§17), naming that recipient and showing the exact bytes that would leave; the send screen
 shows the sealed size and the carrier warning of §11.2. `111d` builds the body
 from the incident, the attempt and the verify log, signs it (§10) and sends it through `Fabric::send_op` (§23 L5).
 
 **11.4 Receiving (normative), all before a human sees a button.**
 1. The fabric hands the `PATCH` body to Layer 9's consumer (L8 §12.3), never to a message row; `RECEIPT_STRONG` returns the hash (`M/envelope.rs:113`).
    The consumer receives the frame's authenticated sender NodeId, whether the link is attributed, the `msg_id` and the body (a request to Layer 8, §23 L8).
+   It returns only after its own durable J9 write of what it keeps (a fix dropped and counted keeps nothing) and is idempotent by `msg_id`: a frame
+   redelivered after a crash between that write and the fabric's commit leaves one record (L8 §12.3 rule 2).
 2. Parse the body strictly (§11.1) and verify the signature; a bad one is dropped and counted.
 3. The frame's authenticated sender must equal the body's `author`; anything else is dropped and counted, whoever signed it. The author must be in the
    set `heal.fixes.receive` names (§17.1): `home_hub` = the enrolled `home_hub` NodeId; `paired_hubs` = the home hub plus the Layer 7 paired hubs (offered
-   on a hub only); `named_contacts` = the home hub plus each NodeId in `heal.fixes.senders`; a fix from an author outside the set is dropped and counted and leaves no
-record, so bytes from strangers never take room from incidents in the `heal` class (no ring for unknown authors in v1, §22).
+   on a hub only); `named_contacts` = the home hub plus each NodeId in `heal.fixes.senders`; a fix from an author outside the set is dropped and
+   counted and leaves no record, so bytes from strangers never take room from incidents in the `heal` class (no ring for unknown authors in v1, §22).
    `author_seq` must be above the author's `high_water` record (§4), else it is a replay, dropped and counted; an accepted fix raises `high_water`. A
    reclaim never touches `high_water`.
 4. A body from an author in the set with another class than `typed`, or with an attachment, is parked "needs a later release": never applied, never
@@ -864,9 +881,9 @@ literals of key 9 (§3.5).
 
 **12.2 The size gate and the queue (normative).** Before sealing, `send_op` checks that `len` fits the sum of the per-fragment budgets of 16 fragments
 for the path's profile: `payload_budget` takes five arguments (the bearer payload, the shim, the sequence, the fragment position, the signed flag;
-`M/envelope.rs:1395-1401`), and a fragment's budget is smaller by its `frag` varints; otherwise the request stays `queued` with the reason "needs a
-longer link"; on the 160 B floor a SIGNED fragment carries 3-5 B (R07g2 F4). **v1's one link.** In v1 a delegation, like a fix, travels over
-`tcp-lan` only: it is the one fabric link the daemon builds (`impl Link for TcpLan`, `M/link/tcp_lan.rs:714`); `kiss-modem`, `meshtastic-client` and
+`M/envelope.rs:1395-1401`), and a fragment's budget is smaller by its `frag` varints; otherwise `send_op` refuses it, nothing is sealed, and the
+member's `open` delegation record carries the reason "needs a longer link"; on the 160 B floor a SIGNED fragment carries 3-5 B (R07g2 F4). **v1's one link.** In v1 a delegation, like a fix, travels over
+`tcp-lan` only: it is the one fabric link the daemon builds (`impl Link for TcpLan`, `M/link/tcp_lan.rs:734`); `kiss-modem`, `meshtastic-client` and
 `rns-bridge` are enum seams (`M/link/mod.rs:231-242`), and the 160 B profile exists only as mesh111's `lossy` test link (`M/link/lossy.rs:241`), which
 node111 never constructs. The size gate is written for the links later layers add and is proven on that `lossy` link in mesh111's
 `tests/send_op.rs` (G23 (5)). **Path:**
@@ -882,7 +899,10 @@ and only while `heal.serve_members` is on; anything else is dropped and counted,
 (a capacity, the lead's default; measured at build); beyond it it answers `refuse` 3. The queue is memory only: a restart loses it and the member's
 re-send (§12.2) restores it. The member accepts `diagnosis` or `refuse` only from
 its `home_hub`, on an attributed connection, for an open `req_id`. A contact is never a delegate. A hub stores no member's op for others (a put whose
-`dest` is the hub itself is refused, L7 §5).
+`dest` is the hub itself is refused, L7 §5). The 0x10 consumer (L8 §12.3), on either side, returns only after its own durable J9 write of what it
+keeps (the member's delegation record on a `diagnosis` or a `refuse`; the hub's stored-reply record when it answers; a request queued in memory keeps
+nothing durable) and is idempotent by the frame's `msg_id`: a frame redelivered after a crash between that write and the fabric's commit changes
+nothing twice (L8 §12.3 rule 2).
 
 **12.4 The hub side (normative).** `111d` serialises one delegated diagnosis at a time over loopback (§5.2, with the member's incident as the untrusted
 `incident` and its own health and journal switched off) on the llama-server whose `model` row is `live` (it starts, stops and reloads no model), and
@@ -891,8 +911,8 @@ reason 4. A request whose check ids are not all in the hub's playbook answers `r
 turn waits. The delegated task's result is folded into its delegation record, never into `agent/proposals` (§5.2). The hub keeps one stored-reply record per enrolled member
 (the latest; reclaimable, §4),
 `{member, req_id, request hash, fingerprint, checks hash, reply}` and nothing else of the request: the same `req_id` with the same request hash gets the
-stored reply; the same `req_id` with another hash gets `refuse` reason 6 `request_changed`, so a member whose counter restarted never reads a reply meant
-for another incident; a new request whose fingerprint and checks hash equal the stored ones gets the stored reply with no model call.
+stored reply; the same `req_id` with another hash gets `refuse` reason 6 `request_changed`, so a member never reads a reply meant for another request
+under a re-used `req_id`; a new request whose fingerprint and checks hash equal the stored ones gets the stored reply with no model call.
 
 **12.5 The member side (normative).** Under `heal.ask_hub` (off by default; consent `heal_delegate` lists the exact request fields), `111d` sends the request
 when an incident opens with no T0 cause and the home hub's card carries `ROLE_HEAL` (§23 L7), and again as §12.2's re-send says; a start fact never
@@ -946,7 +966,7 @@ when the file matches the pins. An absent file opens nothing and files no `human
 
 **14.1 The page (normative).** Settings → Layer 9, `/settings/l9`, "Repairs", its own lazy chunk ≤ 64 KB (D21; the `l6` precedent at
 `UI/src/views/settings/index.tsx:13-14` in the committed tree). Sections: **verdict** (one sentence: "Nothing needs repair." · "2 repairs are waiting
-for you." · "A change is waiting for your confirmation") · **Needs you** (open proposals, `revert_failed`, `revert_blocked` with its Restore and "Leave as is", `refused`) · **Timeline** (one row per incident:
+for you." · "A change is waiting for your confirmation") · **Needs you** (open proposals, `revert_failed` with "Leave as is", `revert_blocked` with its Restore and "Leave as is", `refused`) · **Timeline** (one row per incident:
 fingerprint, first and last seen, count, state chip, the actor of the last step, expandable evidence, checks, attempts, verify log, outcome) · **Changes**
 (kept changes with Undo while a snapshot is kept and the target is unchanged since the keep; "changed since, cannot undo" or "A restart cannot be
 undone" otherwise) · **Fixes** (received, with "does not apply here yet" and "needs a later release" named as such; sent; drafts, with Download mbox and
@@ -954,7 +974,7 @@ Download PR.md; a received fix is accepted only from its full review screen, nev
 loaded, refused with "needs release X") · **Audit** (advanced) · the **consent block** (§17). Event-fed (`incident`, `proposal`): no UI timer and no
 ticking countdown.
 
-**The lazy budget (normative).** After Layer 7's row U2 the lazy bucket holds 238.9 of D21's 256 KB (`7-relay/TASKS.md:90`; the `l7` chunk is 11.9 KB
+**The lazy budget (normative).** After Layer 7's row U2 the lazy bucket holds 238.9 of D21's 256 KB (`7-relay/TASKS.md:91`; the `l7` chunk is 11.9 KB
 gzip), and Layer 8 takes 12 KB gzip of the 17.1 KB left for its chunks, adapter and card (L8 §15.4). Layer 9's allowance is what Layer 8 leaves:
 5.1 KB gzip for the Repairs page, its proposal cards and its adapter together (default; measured at build), restated against the bucket at the lock
 head. The advanced sections (Playbooks, Audit, Fixes) are their own chunk where that saves bytes. When the measured chunks exceed the allowance, the
@@ -968,8 +988,9 @@ budget gate is never left red and never loosened by a build.
 computed from §4.2's store states, never stored: an open incident reads `diagnosing` while its T1 task or delegation runs, `unable_to_diagnose` when
 no tier found a cause, `proposed` while a proposal for it is undecided, `applying` or `awaiting_confirm` while its attempt is `armed` or
 `awaiting_confirm`, else `open`; an attempt reads its own state (`kept`, `reverted`, `revert_failed`, `revert_blocked`; an `interrupted` one leaves
-its incident `open`); a closed incident reads `resolved`, or `dismissed` when the human dismissed it; a
-proposal the human refused reads `refused`. Three severities (§3.5). A dismissal survives restarts and re-opens on a changed cause (Home Assistant's issue registry, Apache-2.0,
+its incident `open`); a closed incident reads `resolved`, or `dismissed` when the human dismissed it. `refused` is an accept `111d`
+refused (a `plan()` refusal, a missing or mismatched `heal/proposals` record, §7.3 rule 1) or a received fix in state `refused` (§4.2); a proposal
+the human turned down reads `dismissed`, as its `Decision` does. Three severities (§3.5). A dismissal survives restarts and re-opens on a changed cause (Home Assistant's issue registry, Apache-2.0,
 a reference only).
 
 **14.3 Simple mode (Q3).** The Overview's Needs-you block (`L4:212-214`) gains "N repairs waiting" and "a change was reverted"; the full page is advanced.
@@ -999,7 +1020,7 @@ and send routes; item 8 the drafts routes. Item 10 is the Repairs page and the t
 4. State per the joint contract (§4): after Layer 8's state service (L8 §14 item 2); else J7.
 5. Grammar v1, the first playbooks, T0 and T1 (§5, §6).
 6. The `Action` trait and the v1 vocabulary (§7); F1's grant format pinned, off (§2.3).
-7. The two tags (§10); the op pair and the hub's serving switch (§12); typed fixes to the home hub and pinned contacts (§11).
+7. The two tags (§10); the op pair and the hub's serving switch (§12); typed fixes to the home hub and to the contacts a human picks per send (§11).
 8. The mbox and `PR.md` (§9); code drafts on opted-in hubs (§8).
 9. The agent data seam, `kb_draft`, the three bridge actions, the CI suite (§13).
 10. The Repairs page and the two copy lines (§14); the APK `human_step` (§12.6).
@@ -1009,8 +1030,11 @@ node overlay · hub eval replay · the opt-in probe · delegation certs · Tier 
 
 ## 16. The sixteen amendments to locked layers (D35 F13)
 
-Each is additive and owner-visible; with Layer 9's switches off and no `heal` traffic, wire bytes and contracts are unchanged. One removal and three
-corrections are marked. The exact text per layer is §23. Rows 17 onward are amendments the panel's findings need beyond D35's sixteen; each is also
+Each is additive and owner-visible; with Layer 9's switches off and no `heal` traffic, wire bytes and contracts are unchanged, save what the
+corrections of rows 7, 15 and 18 change: a `patch` task no longer carries `gather_context`'s journal and health (§8.3), and an accept or a posture
+change made while another apply holds the lock, or while the undo file exists, answers `409 busy` where today it waits on the applier's lock
+(`N/devices/applier.rs:993`), a `device` proposal included. One removal and five corrections are marked (rows 5, 7, 8, 15
+and 18). The exact text per layer is §23. Rows 17 onward are amendments the panel's findings need beyond D35's sixteen; each is also
 listed for the owner in §24 "Deviations". A row whose text the findings widen says so in §23.
 
 | # | Layer | Amendment | Kind | Here |
@@ -1021,7 +1045,7 @@ listed for the owner in §24 "Deviations". A row whose text the findings widen s
 | 4 | L1 | changed: no `receipt.apk`; the provisioner pushes `state/apk.json` after the APK step of the phone flow | additive | §12.6 |
 | 5 | L1 | the probation wording (`L1:183`) | **correction** | §24 |
 | 6 | L2 | `111/fix/v1`, `111/fix-vouch/v1` | additive | §10 |
-| 7 | L3 | the `incident` input; `incident.read`; `service.log`; widened: `evidence` constrained to the incident's ids with no `quotes`, `TaskRequest.kb_draft`, `TaskRequest.narrative`, `AGENT111_DATA_DIR` with no fallback, the reason code `prompts_invalid` | additive | §5.2, §13, §18 |
+| 7 | L3 | the `incident` input; `incident.read`; `service.log`; widened: `evidence` constrained to the incident's ids with no `quotes`, `TaskRequest.kb_draft`, `TaskRequest.narrative`, `AGENT111_DATA_DIR` with no fallback, the reason code `prompts_invalid`; `gather_context` switched off for every `patch` task, whether or not it carries `incident` (§8.3) | additive; **correction** | §5.2, §8.3, §13, §18 |
 | 8 | L3 | the opencode deny block and `HOME` | **correction** | §8.1 |
 | 9 | L3 | prompts as release files | additive | §13 |
 | 10 | L4 | `Proposal.kind` +4, `applied`, `incident`, the repairs routes, `/settings/l9`; widened: `repair`, `fix` and `human_step` are kinds the agent's writer never writes, `ConsentRequired.action` gains `heal_remove`, the `device` vocabulary text and card gain the three bridge actions, the drafts list route, the shapes of §18.4, `Problem.code` `heal_full` | additive | §7.3, §14, §18 |
@@ -1029,13 +1053,14 @@ listed for the owner in §24 "Deviations". A row whose text the findings widen s
 | 12 | L5 | `STREAM_AGENT = 1` | reserved in v1 (§24 D1) | §12.2 |
 | 13 | L5 | a consumer for 0x10 and 0x13 instead of a chat row (built once with L8 §12.3) | additive | §11.4 |
 | 14 | L5 | the Tier sentence for `PATCH` | additive | §23 L5 |
-| 15 | L6 | the trait, persisted undo, reach class, vocabulary; armed at start = revert; widened: one apply at a time node-wide, the lock held from arm to keep, revert or confirm, `apply_unrecorded` armed with `proposal_id: null`; `restore_cold(Bytes)` and the undo file's phases; the three bridge actions join `device.propose`'s closed vocabulary | additive; **correction** | §7 |
+| 15 | L6 | the trait, persisted undo, reach class, vocabulary; armed at start = revert; widened: one apply at a time node-wide, the lock held from arm to keep, revert or confirm, `apply_unrecorded` armed with `proposal_id: null`; `restore_cold(Bytes)` and the undo file's phases; the three bridge actions join `device.propose`'s closed vocabulary; corrections: armed at start = revert, and a second accept, a `device` proposal's included, answers `409 busy` while an apply holds the lock or the undo file exists in any phase (§7.4 step 2), where today it waits on the applier's lock (`N/devices/applier.rs:993`) | additive; **correction** | §7 |
 | 16 | L7 | role bit 6 `ROLE_HEAL` | additive | §23 L7 |
 | 17 | L4 | `POST /api/v1/proposals/{id}/decision` answers `403 loopback_only` to a non-loopback accept of a proposal holding an action on a loopback-only key | additive (**new**) | §7.3 |
-| 18 | L4 | `PATCH /api/v1/transport/posture` answers `409 busy` while an undo is armed | additive (**new**) | §7.4 |
-| 19 | L1 | the CLI verb `111 heal settings [<key> <value>]` over the loopback settings route | additive (**new**) | §17.1 |
+| 18 | L4 | `PATCH /api/v1/transport/posture` answers `409 busy` while an apply holds the lock or the undo file exists in any phase, where today it waits on the applier's lock; the Layer 6 posture control shows `busy` | **correction** (**new**) | §7.4 |
+| 19 | L1 | the CLI verb `111 heal settings [<key> <value>]` over the loopback settings route; widened: `111 heal [status \| incidents \| fixes \| playbooks \| audit]`, loopback GETs that print §18.4's shapes | additive (**new**) | §17.1 |
 | 20 | L6 | §2.1 rule 1, beside Layer 8's `adapter`-optional amendment: a `[run]`-less tool component form and a `requires.hub` key | additive (**new**) | §8.2 |
 | 21 | L3 | "Interfaces": `111d` passes the agent `AGENT111_OPENCODE_PATH` (the agent reads it today, `--opencode-path`) when the opencode component is enabled | additive (**new**) | §8.2 |
+| 22 | L8 | seven lock-amendment requests: J1's list of record kinds names the kinds §4 places beyond it; the layout row for Layer 9 (L8 §21 L1) carries `state/heal.json`; a §12.3 consumer receives the frame's authenticated sender NodeId, whether the link is attributed, the `msg_id` and the body; the hand-off's "a 64 KiB attachment cap" reads "no attachment in v1"; J9's protected states read as each namespace's own declaration; the T1 fold inside Layer 8's ingest (L8 §2.4; §5.2); the ingest's refusal of the kinds `repair`, `fix` and `human_step` as L8 §2.4 rule 4's file (§7.3 rule 1) | additive (**new**) | §23 L8 |
 
 Every wire-visible addition (old nodes drop the kinds as today; with every switch off none is sent):
 
@@ -1052,15 +1077,18 @@ Every wire-visible addition (old nodes drop the kinds as today; with every switc
 Unknown keys are kept and ignored (L8 §15.1's rule, so a rollback never drops a consent); an unknown value of any key reads as that key's default.
 Changed only by `PATCH /api/v1/repairs/settings`, loopback-only, with the body `RepairsSettingsPatch` (§18.4). A headless node (a Cat 3 bridge, most hubs) changes them with
 `111 heal settings [<key> <value>]`: the CLI calls that loopback route like `111 fabric` does (`NI/cli.rs:75-77`; `N/fabric/cli.rs:1-10`), prints a
-setting's consent text, asks y/N and sends `accept_warning` only on `y`; with no argument it prints every setting. On Termux, where loopback is not
-trusted, it reports the `401` with the way forward, as `111 fabric` does.
+setting's consent text, asks y/N and sends `accept_warning` only on `y`; with no argument it prints every setting. The same verb reads:
+`111 heal status`, `111 heal incidents`, `111 heal fixes`, `111 heal playbooks` and `111 heal audit` make the loopback GETs of §18.1
+(`/api/v1/repairs`, `/repairs/incidents`, `/repairs/fixes`, `/repairs/playbooks`, `/repairs/audit`) and print §18.4's shapes, so a section the Repairs
+page holds back (§14.1) stays reachable on the node. On Termux, where loopback is not trusted, each reports the `401` with the way forward, as
+`111 fabric` does.
 
 | Key | Values | Default | Who | Consent |
 |---|---|---|---|---|
 | `heal.autonomy` | `observe`, `diagnose`, `propose` | `propose` | a human | — |
 | `heal.fixes.receive` | `off`, `home_hub`, `paired_hubs` (hubs only), `named_contacts`; each an explicit set of senders (§11.4 step 3) | `home_hub` | a human | — |
 | `heal.fixes.senders` | a list of contact NodeIds, read only under `named_contacts`; the setting's text lists the names it holds. Layer 5's `pinned` flag keeps its one meaning ("never pruned") and gains no trust meaning: pinning a contact never lets it send this node fixes | `[]` | a human | — |
-| `heal.fixes.send` | `off`, `home_hub`, `pinned_contacts` | `off` | a human | `fix_send` |
+| `heal.fixes.send` | `off`, `home_hub`, `contacts`; each an explicit set of recipients: `home_hub` the enrolled home hub; `contacts` the home hub or any Layer 5 contact the human picks for that send, each send under its own `fix_send` (§11.3). Layer 5's `pinned` flag gains no meaning here | `off` | a human | `fix_send` |
 | `heal.ask_hub` | `false`, `true` (members) | `false` | a human | `heal_delegate` |
 | `heal.serve_members` | `false`, `true` (`hub_role` only, else `409 needs_hub`) | `false` | a human | `heal_serve` |
 | `heal.code_drafts` | `false`, `true` (`hub_role` and the `opencode` component enabled); it carries OB §3's "open PRs from this hub (off)" switch in v1, and the PR switch itself arrives with the hub token (§22; §24 D42) | `false` | a human | the component's own licence notice |
@@ -1100,25 +1128,30 @@ The bearer is refused on every non-GET route Layer 9 adds (D26 (2)); the agent n
 | Route | Method | Shape | Who |
 |---|---|---|---|
 | `/api/v1/repairs` | GET | `RepairsStatus` (§18.4) | session or loopback; the bearer reads |
-| `/api/v1/repairs/incidents` · `/{id}` | GET | `{schema, incidents: [Incident]}` (`?state&limit`) · `Incident` (§3.5) | the bearer reads |
+| `/api/v1/repairs/incidents` · `/{id}` | GET | `{schema, incidents: [Incident], next_after_seq}` (`?state&after_seq&limit`) · `Incident` (§3.5) | the bearer reads |
 | `/api/v1/repairs/incidents/{id}/dismiss` | POST | 204 | a human |
 | `/api/v1/repairs/incidents/{id}/task` | POST | `{mode}`, `mode` ∈ `diagnose` (ask again, §7.7), `explain` (§5.1), `kb_draft` (§13 item 4), `patch` (an opted-in hub, §8.3) → 202 with the task id; 409 `busy` while one runs for that incident; where no agent runs, `diagnose` runs T0 again, clears the ledger block, re-sends the delegation and answers 204; a mode this node cannot run answers 409 `needs_hub` or `component_unavailable`; with the store closed 503 `store_unavailable`, with `heal` `full` 409 `heal_full` (§4.1) | a human |
-| `/api/v1/repairs/changes` · `/{id}/undo` | GET · POST | kept changes with `undo_available` · 202; 409 `busy`, `nothing_to_undo`, `changed_since` (§7.7) | the bearer reads · a human |
+| `/api/v1/repairs/changes` · `/{id}/undo` | GET · POST | `{schema, changes: [Change], next_after_seq}` (`?after_seq&limit`), kept changes with `undo_available` · 202; 409 `busy`, `nothing_to_undo`, `changed_since` (§7.7) | the bearer reads · a human |
 | `/api/v1/repairs/attempts/{id}/confirm` | POST | 204; 409 `confirm_window_closed` | a human: the accept's session, or with trusted loopback and no session its peer address (§7.6) |
-| `/api/v1/repairs/attempts/{id}/restore` · `/dismiss` | POST · POST | a `revert_blocked` attempt: 202; 409 `consent_required`, `busy` · 204 ("leave as is") (§7.4 step 6) | a human, session or loopback; never the bearer |
-| `/api/v1/repairs/audit` | GET | `{schema, entries}` (`?since_seq`) | session |
-| `/api/v1/repairs/settings` | GET · PATCH | `RepairsSettings` (§17.1) · `RepairsSettingsPatch` (§18.4) → `RepairsSettings`; 409 `consent_required`, `needs_hub`, `component_unavailable` | read: session · write: loopback only, which `111 heal settings` uses (§17.1) |
-| `/api/v1/repairs/fixes` · `/{id}` · `/{id}/send` | GET · GET · POST | `{schema, fixes: [Fix]}` · `Fix` · `FixSend {to, accept_warning?}` → 202; 409 `consent_required` | the bearer reads · a human |
-| `/api/v1/repairs/drafts` | GET | `{schema, drafts: [Draft]}` (`?state&limit`; `Draft`, §18.4) | the bearer reads |
+| `/api/v1/repairs/attempts/{id}/restore` · `/dismiss` | POST · POST | a `revert_blocked` attempt: 202; 409 `consent_required`, `busy` · a `revert_blocked` or a `revert_failed` attempt: 204 ("leave as is") (§7.4 step 6, §7.5) | a human, session or loopback; never the bearer |
+| `/api/v1/repairs/audit` | GET | `{schema, entries, next_after_seq}` (`?after_seq&limit`) | session or loopback (`111 heal audit`) |
+| `/api/v1/repairs/settings` | GET · PATCH | `RepairsSettings` (§17.1) · `RepairsSettingsPatch` (§18.4) → `RepairsSettings`; 409 `consent_required`, `needs_hub`, `component_unavailable` | read: session or loopback · write: loopback only, which `111 heal settings` uses (§17.1) |
+| `/api/v1/repairs/fixes` · `/{id}` · `/{id}/send` | GET · GET · POST | `{schema, fixes: [Fix], next_after_seq}` (`?after_seq&limit`) · `Fix` · `FixSend {to, accept_warning?}` → 202; 409 `consent_required` | the bearer reads · a human |
+| `/api/v1/repairs/drafts` | GET | `{schema, drafts: [Draft], next_after_seq}` (`?state&after_seq&limit`; `Draft`, §18.4) | the bearer reads |
 | `/api/v1/repairs/drafts/{id}/mbox` · `/pr` | GET | `text/plain` downloads (§9) | session |
 | `/api/v1/repairs/playbooks` | GET | `{schema, playbooks: [{slug, schema, state: loaded\|refused, reason}]}` | the bearer reads |
 
+**Paging (normative).** Each list route above that reads the store (incidents, changes, audit, fixes, drafts) takes `?after_seq&limit`, `limit` at
+most 1,000 (Layer 8's J9 bound for `list` and `read_stream`; an absent `limit` reads 1,000), and answers `next_after_seq`, the `seq` of its last row, or `null` when no row follows.
+The playbooks list is read from the payload, not the store, and carries no cursor. "The bearer reads" means a session or loopback reads it too.
+
 **18.2 Additions to existing shapes and the pin list.** `Proposal.kind` gains `repair`, `fix`, `human_step`, `kb_draft` (appended to `API:848`; nine kinds
-at `fa1daeb`, `N/dashboard/api_v1/proposals.rs:104-114`, ten after Layer 8's `storage`). `Proposal.decision` gains the optional `applied` member Layer 8 adds (L8 §16.2; the decision record already
-holds it, `proposals.rs:170-182`; `API:840-852`), so `reverted` becomes visible; Layer 9 gives its `oneOf` (§18.4). `TaskRequest` gains `incident`, `causes` and `narrative` (§5.2) and `kb_draft` on a `propose` task (§13 item 4). `ConsentRequired.action`
+today, `N/dashboard/api_v1/proposals.rs:104-114`, Layer 7's `relay` the ninth; ten after Layer 8's `storage`). `Proposal.decision` gains the optional `applied` member Layer 8 adds (L8 §16.2; the decision file already
+carries it, written by `decide_applied`, `proposals.rs:418-424`, described at `:26-28`, while `DecisionRec`, `:163-168`, has no such member and
+the API's `decision` does not show it; `API:840-852`), so `reverted` becomes visible; Layer 9 gives its `oneOf` (§18.4). `TaskRequest` gains `incident`, `causes` and `narrative` (§5.2) and `kb_draft` on a `propose` task (§13 item 4). `ConsentRequired.action`
 gains `fix_send`, `heal_delegate`, `heal_serve`, `heal_remove` (§7.3), appended (`API:1497`). `Problem.code` gains `busy`, `nothing_to_undo`,
 `changed_since`, `confirm_window_closed`, `heal_full` (§4.1), appended (`API:692`); the `agent` row's reason codes gain `prompts_invalid` (§13 item 1); `would_lock_out` is not added in v1 (§22); `store_unavailable` is Layer 8's. New SSE event `incident` → `SseIncident` (one `Incident` on change),
-appended to `x-sse-events.events` (`API:2044-2059`); after `reset` the Repairs view refetches `/repairs` and `/repairs/incidents`. Id families minted by
+appended to `x-sse-events.events` (`API:2044-2060`); after `reset` the Repairs view refetches `/repairs` and `/repairs/incidents`. Id families minted by
 `111d` from the OS random source: `inc-…`, `att-…`, `del-…`, `dft-…`, each the prefix plus 12 hex (§3.5); a fix id is 64 hex (`fix_id`). **Pin list** (the conventions' form, `4-interface/api/README.md:190-207`): (1)
 `Proposal.kind` +4: `KINDS`, the UI's card, the agent's writer (which writes `kb_draft` only and never `repair`, `fix` or `human_step`, §7.3) · (2) the agent tool count +2 (§18.3) · (3) `pnpm gen:types`, then `node scripts/gen-sse.mjs
 --check`, with the new enum tuples listed in `UI/scripts/gen-sse.mjs` · (4) `incident` in `x-sse-events` and in the store's `switch (frame.event)` · (5)
@@ -1131,10 +1164,10 @@ appended to `x-sse-events.events` (`API:2044-2059`); after `reset` the Repairs v
 | `incident.read` | read | `{id?, state?}` → incidents; excerpts inside a labelled untrusted block | none |
 | `service.log` | read | `{service_id, n ≤ 100}` → `GET /api/v1/services/{id}/log` (own children only), inside an untrusted block | none |
 
-The count grows by two from the count the build finds: 17 at `fa1daeb`, 20 at `680162d` after Layer 7's three (`A/tests/daemon_tools.rs:322`,
-`A/tests/chat_loop.rs:308`), +3 for Layer 8 (`storage.read`, `encyclopedia.search`, `storage.propose`, L8 §16.5: 23), so 25 after Layer 9; the three
-boards bump the same two test constants in one order: Layer 7, then 8, then 9. Two, not three: a `kb_draft` is a `propose` task with
-`kb_draft: true` (§13 item 4), not a tool. At `0d1dd41` the schemas list ends with `relay.propose` (`A/src/tools.rs:352`) and dispatch is
+The count grows by two from the count the build finds: 20 today, since Layer 7 row A1 added its three (`A/tests/daemon_tools.rs:322`,
+`A/tests/chat_loop.rs:308`), +3 for Layer 8 (`storage.read`, `encyclopedia.search`, `storage.propose`, L8 §16.5: 23), so 25 after Layer 9; the two
+boards still to land bump the same two test constants in one order: Layer 8, then 9. Two, not three: a `kb_draft` is a `propose` task with
+`kb_draft: true` (§13 item 4), not a tool. The schemas list ends with `relay.propose` (`A/src/tools.rs:352`) and dispatch is
 `:382-403`; Layer 9's two schemas and dispatch arms are appended after Layer 8's (the A1 precedent). No typed-repair tool: `proposal.write` takes
 only a title and a body (`:113-121`) and repairs come from playbooks (§7.3).
 
@@ -1162,8 +1195,9 @@ families; `seq` values are the store's.
   recipient's NodeId as 64 hex. **`IncidentTask`** `{mode}` → 202 `{task_id}`, or 204 where no agent runs (§18.1).
 - **`Proposal.decision.applied`** a `oneOf`: `{pending: true}` while an apply runs (a `device` record also carries `actions`), `{message_id}` (a
   `message` proposal, `N/dashboard/api_v1/proposals.rs:418-424`), `{group_id, items}` (a bridge group, `:56`), the applier's `ApplyReport`
-  `{applied, reverted, reason|null, actions: [{action, applied, reverted, skipped, reason|null, result?}]}` (`N/devices/applier.rs:448-475`, a
-  `device` proposal), and for `repair` and `fix` `{attempt_id, state}` (§4.2's attempt state).
+  `{applied, reverted, reason|null, actions: [{action, applied, reverted, skipped, reason|null, result?}]}` (`N/devices/applier.rs:449-476`, a
+  `device` proposal), for `repair` and `fix` `{attempt_id, state}` (§4.2's attempt state), and `{withdrawn: true}` for a `repair`, `fix` or
+  `human_step` proposal `111d` withdrew when its incident closed (decision `dismissed`, §7.3 rule 1).
 
 ## 19. Security, privacy and the threat model
 
@@ -1226,7 +1260,7 @@ families; `seq` values are the store's.
 ## 20. Verification (lock gates; netns, no hardware)
 
 **Gate homes.** New `9-evolution/verify/{observer,engine,diagnose,share,delegate,codefix,evolution}.sh`, a stdlib-only stub model
-`9-evolution/verify/stub-model.py` (replays recorded completions on the model port inside a netns), known-answer vectors under `9-evolution/verify/vectors/`,
+`9-evolution/verify/stub-model.py` (replays recorded completions on the model port inside a netns), known-answer vectors under `9-evolution/verify/vectors/`, recorded tapes under `9-evolution/verify/tapes/` (G20 (1), G22 (6)),
 and `9-evolution/verify/lib.sh`, which sources `6-transport/verify/lib.sh` and `6-transport/verify/root.sh` as `7-relay/verify/lib.sh` does and names the
 netns, veth, addresses (10.111.9x.0/24) and ports. The conventions are `6-transport/verify/lib.sh`: each check prints `ok:` or `FAIL:` (`note:` informs); a
 gate whose prerequisites are absent (unprivileged netns through `unshare -Urnm`, a built binary, `OPENCODE_BIN`) prints `<GATE> SKIPPED: <reason>` and exits
@@ -1262,7 +1296,9 @@ then a restart opens `(1, 111d, unclean_exit)`; a graceful stop opens nothing; t
 EXIT_STATUS=KILL` reads `signal=9`, is folded and the file cleared; a non-clean line under a clean marker opens `unclean_exit`; `result=watchdog` opens
 `watchdog_kill` only; a Termux line `result=signal signal=9` opens `killed_by_os` only and `result=exit code=0` nothing; `starts` is the old value plus
 one; a start fact closes `self_recovered` after the window and makes no model request; `111 heal-witness` exits 0 with `state/heal/` missing; 300 exits
-leave 256 lines · (4) a tombstone with `pending: false, health_confirmed: false` and another version opens `update_reverted` · (5) no timer: with Layer 9
+leave 256 lines; a `111d` started while a store verb holds `node/lock` exits 75 and leaves the run marker and `state/heal/undo` byte-unchanged, and
+the line it leaves (`result=exit-code code=75`, and the Termux `result=exit code=75`) opens and bumps nothing, is folded with its code and is never
+counted as a crash (§3.3 rule 5) · (4) a tombstone with `pending: false, health_confirmed: false` and another version opens `update_reverted` · (5) no timer: with Layer 9
 present and no incident open, Layer 7's `idle.sh` wakeup line (L7 §3.7) is unchanged, the wakeup count with Layer 9 idle is recorded beside Layer 7's
 baseline; that no playbook is held parsed is a node111 unit test (`heal_playbooks.rs`), not a shell assertion · (6) a 65th fingerprint opens nothing and counts
 `overflow` · (7) `[L8-L9:heal-store]` (§4.1) with the store unopenable the J2 files stay, `GET /api/v1/repairs` answers
@@ -1282,12 +1318,19 @@ classifies from the run marker alone with evidence `witness: absent` and opens `
 APK step when both are due; `111d` writes neither file; `1-bootstrap/scripts/check.sh`'s `systemd-analyze` stage and `termux/tests/dryrun.sh` assert
 the line and the hook's output format · (11) `[L1-L9:observer-change-engine]` (§12.6) a `state/apk.json` whose sha256 differs from the manifest's
 `apk.*` pin opens `(1, 111d, apk_outdated)` with its one `human_step`, which closes when the file matches; with the file absent nothing opens; the
-phone dry run (`termux/tests/dryrun.sh`) shows the provisioner pushing the file after the APK step. **Pass:** `G19 GREEN`.
+phone dry run (`termux/tests/dryrun.sh`) shows the provisioner pushing the file after the APK step · (12) `[L8-L9:heal-store]` (§7.3 rule 1) an
+incident that closes `self_recovered` withdraws its open `repair`: the proposal's decision reads `dismissed` with `applied: {withdrawn: true}`, the
+audit holds `dismissed` with `by: "daemon"`, the open count and Needs you drop it, and a later accept answers `409 already_decided` · (13)
+`[L8-L9:heal-store]` (§3.4 rows 5, 8, 9) a full fabric store opens exactly one incident, `(5, fabric, store_full)`, and an unopenable node-state
+store exactly one, `(9, heal, store_unavailable)`, with Layer 8's `unavailable` state as its `storage` evidence; `disk_low` opens `(8, storage,
+disk_low)` · (14) `[L1-L9:observer-change-engine]` (§3.4 row 2) `no_identity` and `restore_pending`, each arriving through both `health.identity` and
+the `fabric` row, open exactly one incident `(2, identity, …)` and no Layer 5 incident. **Pass:** `G19 GREEN`.
 
 **G20, the engine** (`engine.sh`: G1's bridge stubs, `NODE111_BRIDGE_STUBS`, debug builds only, `N/mod.rs:1084`, and G5's device fakes,
 `6-transport/verify/devices.sh`; node111 tests). Asserts: (1) `[L6-L9:typed-actions]` the four device actions through the trait give byte-identical
 files and decision records to the Layer 6 applier: a tape of the applier's files and decision records, recorded with G5's fakes at the lock head
-before the decision route moves into Layer 8's store, under `9-evolution/verify/tapes/`, compared after the port · (2) a probe
+before the decision route moves into Layer 8's store, under `9-evolution/verify/tapes/`, compared after the port, each accept made alone (a
+concurrent accept answers `409 busy` where the applier waited, a correction, §16 row 15) · (2) a probe
 that fails reverts byte-exact and records `reverted` · (3) `[L1-L9:observer-change-engine]` `kill -9` between apply and probe: at the next start the
 snapshot is restored before the listener answers, the decision record reads `reverted (daemon restart)`, and a retry is `409 already_decided` · (4)
 `[L4-L9:repairs-api]` a `may_affect` action with no confirm reverts after the window; with a confirm carrying the accept's session (or, with trusted
@@ -1304,22 +1347,33 @@ accept whose `heal/proposals` record is missing, or whose actions no longer hash
 (11) `[L1-L9:observer-change-engine]` the start rules of §7.5, each cut by `NODE111_HEAL_PAUSE_AT` and a `kill -9`: a record found `restoring` is not
 restored again and reads `revert_failed`; a record whose `release` or `starts` is not the previous run's is not restored and reads `revert_failed`; two
 starts with the store closed after a cold restore read `reverted`, not `revert_failed`; a cut at `keeping` or at `decided` finishes the keep with no
-restore; a `pending` decision with no undo file reads `interrupted`; an `apply_unrecorded` cut at `apply` is restored at start with `proposal_id: null` ·
+restore; a `pending` decision with no undo file reads `interrupted`; an `apply_unrecorded` cut at `apply` is restored at start with `proposal_id: null`;
+after a start-time `revert_failed` the undo file is gone once the attempt and its incident are written, and `/dismiss` of that attempt answers 204
+and records it `dismissed` (§7.5, §18.1) ·
 (12) `[L6-L9:typed-actions]` a revert that needs a consent that is not current (a component whose notice hash changed, a `consent_paused` edge) stops
 `revert_blocked`, writes no consent and releases the lock; at the next start `blocked` is not restored; `/restore` answers `409 consent_required`, then
-restores with `accept_warning`; `/dismiss` removes the file · (13) `[L4-L9:repairs-api]` a lowered `fabric.quota.<class>` that would evict stored
+restores with `accept_warning`; `/dismiss` removes the file; an accept made between `revert_blocked` and its Restore answers `409 busy` whose `detail` carries the
+attempt id and arms nothing, a `PATCH /api/v1/transport/posture` and an Undo made in the same span also answer `409 busy`, the Layer 6 posture
+control renders busy (UI test), and the Restore then restores byte-exact (§7.4 step 2) · (13) `[L4-L9:repairs-api]` a lowered `fabric.quota.<class>` that would evict stored
 items, and a `component.disable`, answer `409 consent_required` with `action: heal_remove` and `111d`'s text naming the count or the component; with
-`accept_warning` they apply; the card shows the "Not undone" column · (14) `[L6-L9:typed-actions]` `component.enable` runs `enable_component` (an
+`accept_warning` they apply; the card shows the "Not undone" column; a `fabric.quota.<class>` value is written through Layer 8's `quota.set`
+(§7.2) · (14) `[L6-L9:typed-actions]` `component.enable` runs `enable_component` (an
 adapter's prepare hook runs and its arguments reach the child); a proposal with two consent-gated actions is split into two; a `repair`
 `service.restart` whose row stays in `error`, or whose child exits unrequested inside the window, fails its probe; a `device` proposal's
-`service.restart` and `identify` stay one-shots with results byte-identical to Layer 6; every new action passes its round trip (apply, a forced probe
+`service.restart` and `identify` stay one-shots with results byte-identical to Layer 6, each accept made alone (§16 row 15); every new action passes its round trip (apply, a forced probe
 failure, state equal to before) · (15) `[L4-L9:repairs-api]` `111 heal settings heal.ask_hub true` calls the loopback `PATCH /api/v1/repairs/settings`,
-prints the `heal_delegate` text and writes nothing until `y`; with `y` the setting reads `true`; `111 heal settings` prints every setting · (16) `[L4-L9:repairs-api]` (UI checks) `pnpm build && pnpm budget`
+prints the `heal_delegate` text and writes nothing until `y`; with `y` the setting reads `true`; `111 heal settings` prints every setting;
+`111 heal incidents` makes the loopback `GET /api/v1/repairs/incidents` and prints its rows in §18.4's `Incident` shape (§17.1) · (16) `[L4-L9:repairs-api]` (UI checks) `pnpm build && pnpm budget`
 passes with Layer 9's chunks inside the allowance of §14.1 and the lazy total within D21's; `GET /api/v1/repairs/drafts` lists a draft with its
 `issue_url` of typed fields only; a `PATCH /api/v1/repairs/settings` and a `POST …/fixes/{id}/send` with `accept_warning` matching the consent hash
 apply, with a stale one answer `409 consent_required`; every route of §18.1 answers the shape of §18.4 (`layer9-contract.test.ts` and
 `api_v1_repairs.rs`), and a `repair` decision's `applied` is `{attempt_id, state}`; a `fix` proposal shows no accept control on a list row or a notification, only on
-its review screen (`repairs-view.test.ts`, §11.4 step 7). **Pass:** `G20 GREEN`.
+its review screen (`repairs-view.test.ts`, §11.4 step 7); `refused` shows only for an accept `111d` refused or a refused fix, and a proposal the
+human turned down reads `dismissed` (`repairs-view.test.ts`, §14.2) · (17) `[L6-L9:typed-actions]` (node111 `heal_engine.rs`) an undo record that does not
+re-read equal after its fsync refuses the action before its first effect (§7.4 step 2); `[L4-L9:repairs-api]` an accept or an incident task that
+would create a draft answers `503 store_unavailable` with the store closed and `409 heal_full` naming the Storage page while `heal` is `full`, and
+writes nothing (§4.1 rule 5); each list route of §18.1 returns at most `limit` rows and its `next_after_seq` reads the remaining rows in `seq`
+order, `null` at the end. **Pass:** `G20 GREEN`.
 
 **G21, diagnosis** (`diagnose.sh`: one node with the real agent and `stub-model.py`, which becomes the model child by sitting at
 `current/bin/llama-server` with a `.gguf` file under `models/current/`, the two facts `111d` checks before it supervises the model,
@@ -1328,7 +1382,8 @@ its review screen (`repairs-view.test.ts`, §11.4 step 7). **Pass:** `G20 GREEN`
 leaves or 2,049 B refuse; `"@subject"` is the only substitution · (2) `[L3-L9:diagnosis-playbooks]` one satisfied cause ⇒ `by: t0` with no model request
 (the stub logs none) · (3) two satisfied causes ⇒ one task whose request carries the `incident` block, `response_format` with the cause enum, and no
 `daemon_health` or `recent_events`, and whose `response_format` constrains `evidence` to the incident's evidence ids with no `quotes`; after the T1 run
-`GET /api/v1/proposals` and the open count are unchanged and the spool file is gone · (4) a stub reply citing an unknown evidence id is discarded, no second
+`GET /api/v1/proposals` and the open count are unchanged and the spool file is gone; an `explain` task's result lands in the incident's
+`explanation` and a `diagnose` result in its `diagnosis` (§3.5, §5.2) · (4) a stub reply citing an unknown evidence id is discarded, no second
 request · (5)
 two incidents at once make one model request at a time · (6) under `observe` nothing is evaluated; under `diagnose` no `repair` proposal is filed · (7)
 `incident.read` and `service.log` return untrusted blocks; the tool count is the build's +2 · (8) `[L0-L9:evolution]` the lint and the loader refuse a
@@ -1343,7 +1398,8 @@ playbook with `within_events` or `health_is {of: agent, is: degraded}` is refuse
 
 **G22, sharing fixes** (`share.sh`: nodes A and B and hub H in netns over `tcp-lan`; node111 and mesh111 tests). Asserts: (1) `[L2-L9:fix-signing]` the
 vectors verify; a flipped body byte or attachment byte fails · (2) `[L5/7-L9:fix-sharing-delegation]` with `heal.fixes.send = off` no fix leaves A
-(capture); after `fix_send` one leaves for H only · (3) on H the body reaches the consumer, never a message row; a fix from an author outside the
+(capture); after `fix_send` one leaves for H only; under `contacts` a send to a contact the human picks asks its own `fix_send` naming that
+contact, and a contact's `pinned` flag changes nothing (§11.3, §17.1) · (3) on H the body reaches the consumer, never a message row; a fix from an author outside the
 `heal.fixes.receive` set is dropped and counted; a `code` or `kb` body, or one with an attachment, from a trusted author is parked "needs a later
 release" with no button and no diff; an action outside the peer subset is shown "their words, not checked" with no accept button · (4) accepting it on H runs
 the loop and A receives one `accepted` vouch · (5) a replayed `author_seq` and an oversized payload are dropped and counted; a 17th fix from one author
@@ -1355,15 +1411,18 @@ subject, a `human_step`, a `settings.set fabric.quota.<class>`, a `component.ena
 words, not checked" with no button; an action byte-equal to H's own playbook action for that cause files a proposal whose targets are H's `@subject`;
 with no such incident open the fix is stored "does not apply here yet" and files its proposal when the incident opens, with no timer · (8) a fix A
 signed, delivered to B by H, is dropped and counted (sender is not the author); an `author_seq` at or below the author's `high_water` is dropped, and
-`high_water` survives a reclaim; a vouch from a node B never sent that fix to is dropped; the highest `voucher_seq` per (voucher, fix) wins · (9) a fix
+`high_water` survives a reclaim; a vouch from a node B never sent that fix to is dropped; the highest `voucher_seq` per (voucher, fix) wins; a vouch for a `sent` fix that a reclaim
+removed is dropped and counted (§4.2) · (9) a fix
 accepted on H whose probe fails sends A one `reverted` vouch, and a later Undo on H sends nothing; the `fix` card carries the fixed vouch text · (10)
 `[L2-L9:fix-signing]` a body with an unknown field or a duplicate key is dropped and counted; an unknown `schema` is parked "needs a later release"; an
-`applies_to.release` that differs reads "does not apply here" · (11) `[L5/7-L9:fix-sharing-delegation]` on Layer 7's G9 topology: a typed fix whose
+`applies_to.release` that differs reads "does not apply here"; an `incident` without `cause_id`, or with a field beyond `fingerprint`, `cause_id`
+and `diagnosis`, is dropped and counted (§11.1) · (11) `[L5/7-L9:fix-sharing-delegation]` on Layer 7's G9 topology: a typed fix whose
 sealed put is at most 2,937 B, sent from member A, crosses one carrier hop and is stored on a named contact on the far island; a larger one is counted
 `forward_too_large` on A's hub and A's fix reads "not delivered"; A's send screen shows the sealed size and the carrier warning above 2,937 B; the
 sender refuses only a fix above the `tcp-lan` frame · (12) `[L5/7-L9:fix-sharing-delegation]` (§4.1 rule 5) with H's `heal` class `full`, and
 again with H's store closed, a fix from A is acknowledged by H's fabric, dropped and counted, H's `high_water` for A does not move and A retransmits
-nothing; a `diagnose` from M to H in either state is answered `refuse` 3. **Pass:** `G22 GREEN`.
+nothing; a `diagnose` from M to H in either state is answered `refuse` 3; with H's store open, a fix frame redelivered after a cut between the
+consumer's write and the fabric's commit leaves one record (§11.4 step 1). **Pass:** `G22 GREEN`.
 
 **G23, delegation** (`delegate.sh`: hub H and members M1, M2 in netns over `tcp-lan`; `stub-model.py` on H; mesh111 tests). Asserts: (1)
 `[L5/7-L9:fix-sharing-delegation]` with `heal.ask_hub` off M composes nothing; on, an incident with no T0 cause sends one `diagnose` (its size recorded
@@ -1371,7 +1430,8 @@ against R07g2 F4's 450-600 B estimate), with no log line at all: key 9 holds mat
 runs no task; on, it sets role bit 6 and answers once per `req_id` · (3) a contact that is not `enrolled` is dropped and counted; a second open request
 from M1 gets `refuse` reason 3 · (4) M files the reply as a proposal, never applied, its actions shown through the peer subset (a `service.restart`
 for another subject or a `human_step` reads "their words, not checked"); a reply for a closed `req_id` is dropped · (5) (mesh111 `tests/send_op.rs`, on the `lossy` link, since node111 builds no 160 B link in v1,
-§12.2) a 160 B profile leaves the request `queued` "needs a longer link" and a request within 16 fragments of a 233 B profile is sent · (6) the narrative is the playbook's line, byte-exact · (7)
+§12.2) on a 160 B profile `send_op` refuses the request "needs a longer link" and seals nothing, and a request within 16 fragments of a 233 B
+profile is sent · (6) the narrative is the playbook's line, byte-exact · (7)
 `[L5/7-L9:fix-sharing-delegation]` the same `req_id` with the same request hash gets the stored reply and no second task; the same `req_id` with
 another hash gets `refuse` reason 6 `request_changed`, which M never retries; `req_id` is 8 bytes from the OS random source · (8)
 `[L5/7-L9:fix-sharing-delegation]` the delegation's life: with no link attributed to H, M sends nothing and puts nothing in custody or a mailbox; on
@@ -1380,7 +1440,8 @@ it; a `refuse` 3 is retried on the next link-attribution event; with 4 requests 
 with the same fingerprint and checks hash gets the stored reply and no second model request; a delegated run waits while a local chat turn runs;
 check ids not all in H's playbook get `refuse` 5; a restart of H loses its queue and M's re-send restores it; a start fact on M sends nothing · (9)
 `[L5/7-L9:fix-sharing-delegation]` (node111 `heal_delegate.rs`) an `AGENT_OP` map with keys out of order, a duplicate key, an indefinite length or a
-non-shortest integer is dropped and counted and never answered; a map `ciborium` encodes for a request equals its deterministic encoding.
+non-shortest integer is dropped and counted and never answered; a map `ciborium` encodes for a request equals its deterministic encoding; a `diagnosis`
+frame redelivered to M after a cut between its delegation write and the fabric's commit changes the delegation record once (§12.3).
 **Pass:** `G23 GREEN`.
 
 **G24, code drafts** (`codefix.sh`; `OPENCODE_BIN` a pinned opencode, else `G24 SKIPPED` unless `REQUIRE_G24=1`). Asserts: (1) `[L3-L9:code-drafts]` the
@@ -1424,6 +1485,8 @@ must be unchanged. **Pass:** both.
 
 **Unit and integration test homes.** node111 (`1-bootstrap/crates/node111/tests/`): new `heal_observer.rs`, `heal_witness.rs`, `heal_playbooks.rs` (with
 `fixtures/playbooks/`), `heal_engine.rs`, `heal_fix.rs`, `heal_delegate.rs`, `api_v1_repairs.rs`; the existing device-applier tests stay and pass unchanged.
+`api_v1_repairs.rs` asserts that an unknown value of any setting in `state/heal.json` reads as that key's default (§2.3, §17.1); `heal_observer.rs`
+asserts one notification when the Needs-you set goes from empty to non-empty, however many items join it, and none while it stays non-empty (§14.4).
 mesh111: `tests/send_op.rs` (the size gate on the `lossy` link, `direct_only`, commit-before-seal; G23 (5)); `tests/consumers.rs` is Layer 8's.
 agent111: `tests/incident_input.rs`, `tests/opencode_config.rs`, `tests/evolution_suite.rs` (with `tests/evolution/cases/`, §13 item 2),
 `tests/store_atomic.rs` (Layer 8's), the tool count in `daemon_tools.rs` and `chat_loop.rs`. UI:
@@ -1494,7 +1557,7 @@ baseline and idle RSS under its ceiling (G7, extended). A change to the first co
   `_meta/schema.md` §1: "Playbook filename not `repair-<subject>-<reason>.md`, or its `[match]` disagrees with the filename or the closed vocabulary"; rule
   **B10**: "Playbook `### Checks` block missing, not one `toml` fence, not parsing with `tomllib`, or breaking grammar v1's limits"; the H3 vocabulary under
   `## Details`; B09's playbook budget 2,000. `build.py` (`0-knowledge/_meta/build.py:44-52`, the recipe rules at `:575-602`) gains the category and both rules.
-  Recipes and N03 untouched; `skills/` stays deferred. Item 1 widened: the applicability matrix (`_meta/schema.md:96-110`) gains the `playbook` column
+  Recipes and N03 untouched; `skills/` stays deferred. Item 1 widened: the applicability matrix (`_meta/schema.md:96-111`) gains the `playbook` column
   of §6.1 (`platforms`, `upstream`, `license` forbidden; `relations` optional, `depends_on` only to a third-party project with an entry, `runs_on`
   optional, neither in N06); the gate adaptations (`L0:91`) gain "**playbook** = `candidate` lint-clean with `### Alternatives considered`; `testing` a
   `### Smoke test` on a real node; `proven` a `### Field log`"; the scope line ("six category folders", `_meta/schema.md:5`), the root index and
@@ -1513,13 +1576,14 @@ baseline and idle RSS under its ceiling (G7, extended). A change to the first co
   with `111 install` and `111 install --phone` only; `111d` reads the unit and the hook at start and opens `witness_absent` with its `human_step` when
   the witness is absent; it never writes either, §3.3 rule 7); `111 heal-witness` exits 0 on every error; the hook writes `result=exit` or
   `result=signal`; the inbox keeps the newest 256 lines. The removal widened (§3.3 rule 6): `termux/cron/*`; the `CRON_HEALTH` include and its install
-  step (`NI/install/phone/mod.rs:24`, `:224-229`); `termux/tests/dryrun.sh:99-110`; `L1:156`'s text; the provisioner deletes the copy already pushed to
+  step (`NI/install/phone/mod.rs:24`, `:224-229`); `termux/tests/dryrun.sh:102-120`; `L1:156`'s text; the provisioner deletes the copy already pushed to
   `$PREFIX/var/lib/111/share/termux/cron-healthcheck.sh` on its next run; "Release assets", the Termux .deb closure row (`L1:68`): `cronie` leaves the
   minimum, with `LICENSING.md:65`'s row, the minimum in `1-bootstrap/crates/node111/tests/manifest_parse.rs:76-82` and the `cronie` entries of the
   manifest fixtures (`tests/fixtures/l7-*/**/channel-111-stable.toml`); its deb size is the measured saving. (item 19, **new**) the CLI gains
-  `111 heal settings [<key> <value>]`, which calls the loopback `PATCH /api/v1/repairs/settings`, prints the consent text and asks y/N (§17.1).
+  `111 heal settings [<key> <value>]`, which calls the loopback `PATCH /api/v1/repairs/settings`, prints the consent text and asks y/N (§17.1); item 19
+  widened: `111 heal [status | incidents | fixes | playbooks | audit]`, loopback GETs of §18.1 that print §18.4's shapes (§17.1).
   Conditional, not in v1: the `termux-api` deb joins the closure only on the owner's word (§14.4). Code seams, no spec text: `ChildControl::exits()` (§3.2); the run marker and
-  inbox under `state/heal/` (J8); `state/heal.json` in the layout table. The hand-offs closed: "Layer 9: supervision-tree handles, `/health` contract,
+  inbox under `state/heal/` (J2, J8; the directory is L8 §21 L1's layout row); `state/heal.json` in the layout table. The hand-offs closed: "Layer 9: supervision-tree handles, `/health` contract,
   exit(0)-restart, watchdog heartbeat" (`L1:277`) and "APK refresh = Layer 9 maintenance task" (`L1:185`).
 - **Layer 2 (locked v2):** (item 6) `111/fix/v1` and `111/fix-vouch/v1` with the constructions of §10.2, in the one Layers 8 and 9 block (L8 §21 L2, A19);
   id111 gains no code; vectors in `9-evolution/verify/vectors/`. The construction of `111/fix/v1` keeps `attachment_hash`, 32 zero bytes in v1; vouch
@@ -1530,7 +1594,8 @@ baseline and idle RSS under its ceiling (G7, extended). A change to the first co
   "The agent signs its outbound artifacts (proposals, patch PRs) with the node key" gains "As built by Layer 9: `111d`, the identity holder, signs fixes on
   its behalf; proposals are never signed (Layer 9 §10)"; `L3:84` "proposal *signing* is deferred to Layer 9's PR packaging" gains the same note. The
   hand-off "Tasks → Layer 9" (`L3:47`) is closed by §5 and §8. Items 7-9 widened: the `patch` task's inputs are the incident in an untrusted block and
-  the note, nothing from the journal (§8.3); T1's enum is the matched causes, or the playbook's plus `unknown` (§5.1); `response_format` constrains
+  the note, nothing from the journal (§8.3), and `gather_context` is switched off for every `patch` task, whether or not it carries `incident` (a
+  **correction** of today's `patch` prompt, §16 row 7); T1's enum is the matched causes, or the playbook's plus `unknown` (§5.1); `response_format` constrains
   `evidence` to the incident's evidence ids and asks no `quotes` (§5.2); `TaskRequest.kb_draft` on a `propose` task, whose frontmatter and headings
   `111-agent` code writes from typed fields (§13 item 4); no new tool for it (§18.3); `TaskRequest.narrative` for mode `explain` (§5.2);
   `AGENT111_DATA_DIR`, set by `111d` as `AGENT111_KB_DIR` is, with no compiled-in fallback, and the `agent` row's reason code `prompts_invalid`
@@ -1543,8 +1608,11 @@ baseline and idle RSS under its ceiling (G7, extended). A change to the first co
   routes `attempts/{id}/restore` and `/dismiss`, `GET /api/v1/repairs/drafts` and the incident task route (§18.1); the shapes of §18.4, with
   `Proposal.decision.applied` as a `oneOf` beside Layer 8's member; the `device` vocabulary text (`API:848`) and the device card gain `bridge.edge.pause`, `bridge.edge.set` and `bridge.order.set`, and so
   does the agent's `device.propose` tool schema. (item 17, **new**) `POST /api/v1/proposals/{id}/decision` answers `403 loopback_only` to a non-loopback
-  accept of a proposal holding an action on a loopback-only key: an action inherits the gate of the route it wraps (§7.3; Layer 8's I32 states the same
-  for `quota.set`). (item 18, **new**) `PATCH /api/v1/transport/posture` answers `409 busy` while an undo is armed (§7.4).
+  accept of a proposal holding an action on a loopback-only key: an action inherits the gate of the route it wraps (§7.3; Layer 8 states the same
+  for `quota.set`, L8 §15.1, §16.4). (item 18, **new**, a **correction**) `PATCH /api/v1/transport/posture` answers `409 busy` while an apply holds the
+  lock or the undo file exists in any phase, where today it waits on the applier's lock (`N/devices/applier.rs:993`); the Layer 6 posture control
+  shows `busy` (§7.4). Item 10 widened by the re-check: `Proposal.decision.applied` gains `{withdrawn: true}` (§7.3 rule 1, §18.4); the list routes
+  take `?after_seq&limit` and answer `next_after_seq` (§18.1); `/attempts/{id}/dismiss` takes a `revert_failed` attempt too (§18.1).
 - **Layer 5 (locked v1.2):** (item 11) `Fabric::send_op(to, kind, payload, receipt_strong) -> msg_id` for `AgentOp` and `Patch` only, beside `send`
   (`M/fabric.rs:1279`), with the Tier 0/1 size gate of §12.2 and the same commit-before-seal rule; `send` stays byte for byte. Item 11 widened:
   `send_op` takes `direct_only`, which sends only on a link attributed to the destination and never puts the item in custody or a mailbox (§12.2);
@@ -1559,11 +1627,13 @@ baseline and idle RSS under its ceiling (G7, extended). A change to the first co
   true. Item 15 widened: one apply at a time node-wide, the lock held from arm to keep, revert or confirm, and `apply_unrecorded` armed with
   `proposal_id: null` (§7.4); the trait's `restore_cold(Bytes)` and the undo file's phases `armed`, `keeping`, `restoring`, `restored`, `blocked`
   (§7.4, §7.5); an automatic revert never passes a consent gate (§2.2 item 5); the three bridge actions join `device.propose`'s closed vocabulary
-  (Layer 6 §13), as "human or `device.propose` only" (§7.2); a `device` proposal keeps `service.restart` and `identify` as Layer 6's one-shots. `assets/components/opencode.toml` follows §2.1 rule 3 (`prefetch = false`). (item 20, **new**) §2.1 rule 1, beside Layer 8's
+  (Layer 6 §13), as "human or `device.propose` only" (§7.2); a `device` proposal keeps `service.restart` and `identify` as Layer 6's one-shots; a
+  **correction** beside "armed at start = revert": a second accept, a `device` proposal's included, answers `409 busy` while an apply holds the lock
+  or the undo file exists in any phase, where today it waits on the applier's lock (`N/devices/applier.rs:993`; §7.4 step 2, §16 row 15). `assets/components/opencode.toml` follows §2.1 rule 3 (`prefetch = false`). (item 20, **new**) §2.1 rule 1, beside Layer 8's
   `adapter`-optional amendment: a `[run]`-less tool component form (no supervised child, no health) and a `requires.hub` key; today `adapter` and
   `[run]` are required (`N/components/manifest.rs:243`, `:248`) (§8.2). G7 covers Layer 9 idle.
 - **Layer 7 (locked v1.0):** (item 16) the §7.2 table gains bit 6 `ROLE_HEAL`, set by `heal.serve_members`, defined in node111 beside bits 3-5
-  (`roles(s, relay, lan)`, `N/fabric/mod.rs:592` at `680162d`: bit 6 needs a third input, and a toggle of `heal.serve_members` re-mints the announce
+  (`roles(s, relay, lan)`, `N/fabric/mod.rs:592`: bit 6 needs a third input, and a toggle of `heal.serve_members` re-mints the announce
   once), no mesh111 change, no consent of its own beyond `heal_serve`. Fixes across islands ride §5 custody unchanged.
 - **Layer 8 (locked v1.0, `DECISIONS.md` D38):** the joint contract J1-J9 consumed, nothing added; the `heal` class of §4.1; the `Full` answer of J9 and §4.5,
   handled by §4.1 here; the consumer registry (§12.3); the `[source]` pin (§11.6), read where Layer 8's updater placed it and never written by Layer 9
@@ -1572,7 +1642,11 @@ baseline and idle RSS under its ceiling (G7, extended). A change to the first co
   record, sent fixes, the `high_water` records, delegations and stored replies, drafts, grants); its layout row for Layer 9 (§21 L1) carries
   `state/heal.json` (0600) beside `state/heal/`; a consumer of §12.3 receives the frame's authenticated sender NodeId, whether the link is attributed, the `msg_id` and the body
   (§11.4 steps 1, 3 and 8); the hand-off sentence "a 64 KiB attachment cap" reads "no attachment in v1" (§11.1); J9's protected states read as each
-  namespace's own declaration, so `heal/proposals` `undecided`, `high_water` and the `revert_blocked` and `revert_failed` attempts stand beside it (§4).
+  namespace's own declaration, so `heal/proposals` `undecided`, `high_water` and the `revert_blocked` and `revert_failed` attempts stand beside it (§4);
+  Layer 8's ingest (L8 §2.4) folds a T1 result into its incident instead of ingesting it (§5.2) and refuses the kinds `repair`, `fix` and
+  `human_step` as its rule 4 treats a file it does not ingest (§7.3 rule 1). The seven are §16 row 22 and §24 D46, for the owner. Layer 9 relies on
+  Layer 8's own rules unchanged: `quota.set` is the one writer of a class quota (L8 §16.4; §7.2); a §12.3 consumer returns only after its durable
+  write and is idempotent by `msg_id` (§11.4 step 1, §12.3); a J9 `list` returns at most 1,000 rows after the `seq` cursor (§18.1).
 - **`LICENSING.md`, `DECISIONS.md`, repo:** §5 a `diffy` row; §3's opencode row (`LICENSING.md:63`) updated to 1.19.5, its provider package bundled (R07g1
   F4) and the component declaration; `THIRD-PARTY-NOTICES.md` regenerated; `.github/PULL_REQUEST_TEMPLATE.md` gains the DCO 1.1 line (Q2).
 - **Plan:** `plan/cross-layer/parked.md` P4 is picked up (§7); its "may skip approval" clause stays unbuilt (§2.3).
@@ -1609,25 +1683,28 @@ items 13-14. · (13) `L6:487-488` (cited `:458-459`) stays true. · (14) `L0:32`
 - **C5** Layer 7's tags are registered as A14 (`L2:449-456`): Layer 9's two join Layer 8's A19 block (L8 C4).
 - **C6** The deny block and the `HOME` fix have not landed (`A/src/tasks.rs:495-509`, `:429-433`): §15 item 1.
 - **C7** `/health` is two-state (`N/health.rs:24-40`) and the tri-state is the agent's (`L3:84`): `health_is` names which (§6.2).
-- **C8** A services row publishes only after two identical ticks (`N/services/mod.rs:1459-1468` at `0d1dd41`; was `:1445-1481`): children are observed
+- **C8** A services row publishes only after two identical ticks (`N/services/mod.rs:1459-1468`; was `:1445-1481`): children are observed
   through their watch, rows through the registry's change signal, never by parsing the `services` frame (§3.1).
-- **C9** `Proposal.kind` holds nine kinds and the agent seventeen tools at `fa1daeb` (`proposals.rs:104-114`; `A/tests/daemon_tools.rs:318`), twenty tools
-  at `680162d` after Layer 7 (`A/tests/daemon_tools.rs:322`, `A/tests/chat_loop.rs:308`): bumps are relative.
+- **C9** `Proposal.kind` holds nine kinds (`proposals.rs:104-114`) and the agent twenty tools, since Layer 7 row A1 added its three to the
+  seventeen the brief counted (`A/tests/daemon_tools.rs:322`, `A/tests/chat_loop.rs:308`): bumps are relative (§18.3).
 - **C10** Layer 8 §11.6 adds the release's source tarball as a manifest `[source]` pin; the brief's hub-only source asset is that pin (§24 D4).
 - **C11** A SIGNED `tcp-lan` payload is about 65,381 B (`M/envelope.rs:81`, `:2198`): 4 KiB plus 64 KiB does not fit one frame (§24 D5).
-- **C12** Line moves since 2026-11-02, re-pinned here: `L1:154`, `:156`, `:183`, `:185` (were `:129`, `:131`, `:158`, `:160`); `L5:141-142`, `:175`, `:241`,
-  `:452`, `:831` (were `:139-140`, `:173`, `:239`, `:453`, `:832`); `L6:487-488`, `:657-658` (were `:458-459`, `:628-629`); `L2:91`, `:227`, `:234` (were `:85`,
-  `:217`, `:224`); the daemon tick `N/mod.rs:906` (was `:902`); `roles(s, relay, lan)` `N/fabric/mod.rs:592` at `680162d` (was `roles(s)` `:435-444`;
-  L7 cites `:334-343`); `KINDS` `proposals.rs:104-114`;
-  `API:840-852` (was `:746-758`). `fa1daeb` is behind HEAD in committed code, not only in the working tree: at `680162d` `M/fabric.rs:1237-1243` is
-  `link_events` and `send` is `:1279`; the `PATCH /fabric/settings` handler takes `LoopbackOnly` at `N/dashboard/api_v1/fabric.rs:441`. Also at
-  `680162d`: `N/kb.rs:32-34` is `verify_current`'s doc comment, and the `kb` row's codes are at `N/services/mod.rs:1028` (`verify_failed`) and `:1034`
-  (`kb_absent`); `status.rs:407-428` is `publish` (`:411`), the health components are at `:332-337`; `payload_budget` takes five arguments
-  (`M/envelope.rs:1395-1401`), not a profile; the registry's change signal is `N/services/mod.rs:1451`, `:1474-1477`, `snapshot` `:1515`, the
-  `services` publish `:1576`, the row key `:1433-1435`; the services tick is `N/services/probe.rs:45`, its loop `:520`; netlink's one consumer is
-  `debounced`, `N/transport/netlink.rs:315`. At `0d1dd41`: the agent view's Layer 9 line is `UI/src/views/agent/proposals.tsx:137` (was `:121`); the
-  lazy-bucket figure is `7-relay/TASKS.md:90` (row U2). v0.2 re-read the
-  citations it changed at `680162d`; every citation is re-pinned at the lock head before the lock.
+- **C12** The pin is `abced06` (§0): every citation was read there, and a moved one re-derived by the symbol or sentence it names. Line moves since
+  2026-11-02: `L1:154`, `:156`, `:183`, `:185` (were `:129`, `:131`, `:158`, `:160`); `L5:141-142`, `:175`, `:241`, `:452`, `:831` (were `:139-140`,
+  `:173`, `:239`, `:453`, `:832`); `L6:487-488`, `:657-658` (were `:458-459`, `:628-629`); `L2:91`, `:227`, `:234` (were `:85`, `:217`, `:224`); the
+  daemon tick `N/mod.rs:906` (was `:902`); `roles(s, relay, lan)` `N/fabric/mod.rs:592` (was `roles(s)` `:435-444`; L7 cites `:334-343`); `KINDS`
+  `proposals.rs:104-114`; `API:840-852` (was `:746-758`); `send` is `M/fabric.rs:1279` (`:1237-1243`, which v0.1 cited, is `link_events`); the
+  `PATCH /fabric/settings` handler takes `LoopbackOnly` at `N/dashboard/api_v1/fabric.rs:441`; `N/kb.rs:32-34` is `verify_current`'s doc comment, and
+  the `kb` row's codes are at `N/services/mod.rs:1028` (`verify_failed`) and `:1034` (`kb_absent`); `status.rs:407-428` is `publish` (`:411`), the
+  health components are at `:332-337`; `payload_budget` takes five arguments (`M/envelope.rs:1395-1401`), not a profile; the registry's change signal
+  is `N/services/mod.rs:1451`, `:1474-1477`, `snapshot` `:1515`, the `services` publish `:1576`, the row key `:1433-1435`; the services tick is
+  `N/services/probe.rs:45`, its loop `:520`; netlink's one consumer is `debounced`, `N/transport/netlink.rs:315`; the agent view's Layer 9 line is
+  `UI/src/views/agent/proposals.tsx:137` (was `:121`); the lazy-bucket figure is row U2 of `7-relay/TASKS.md`, `:91` (was `:88`, then `:90`; it moves
+  as that board grows). Re-pinned by the re-check: node111's `sign(tag, msg)` is `N/fabric/sealer.rs:466-467` (`:432-433` is pair-key cache code);
+  the decision file's `applied` is written by `decide_applied`, `proposals.rs:418-424` (described at `:26-28`), and `DecisionRec` (`:163-168`) has no
+  such member; `x-sse-events` is `API:2044-2060` (it ends with `registry`); the applicability matrix is `0-knowledge/_meta/schema.md:96-111`
+  (`relations` is `:111`); `impl Link for TcpLan` is `M/link/tcp_lan.rs:734` (was `:714`, before Layer 7 row D8's `redial_at_max`). A later head
+  re-pins every citation before the lock.
 - **C13** The brief's model lifecycle is not built: `111d` starts llama-server with `--model --host --port` only and keeps it resident wherever the
   binary and a GGUF exist (`N/intelligence.rs:172-192`); `--sleep-idle-seconds` is in no argv. There is no on-demand load and nothing to reload: T1 and
   the hub's T2 use the resident server, and idle unload is Layer 3's question (§5.1, §12.4, §22; §24 D28).
@@ -1647,7 +1724,7 @@ items 13-14. · (13) `L6:487-488` (cited `:458-459`) stays true. · (14) `L0:32`
   hands the agent an installed opencode (its default is `opencode` on `PATH`, `A/src/config.rs:100`; `agent_spec` passes no path): §8.2's declaration
   form and `AGENT111_OPENCODE_PATH` (§16 rows 20, 21). The install verb fetches the source tarball once, so after an update it is the previous
   release's: §8.3's sha256 check before a `patch` task.
-- **C18** The daemon builds one fabric link, `tcp-lan` (`M/link/tcp_lan.rs:714`); the other link kinds are enum seams (`M/link/mod.rs:231-242`) and the
+- **C18** The daemon builds one fabric link, `tcp-lan` (`M/link/tcp_lan.rs:734`); the other link kinds are enum seams (`M/link/mod.rs:231-242`) and the
   160 B profile exists only as mesh111's `lossy` test link (`M/link/lossy.rs:241`): a fix and a delegation travel over `tcp-lan` in v1 and the size gate
   is proven in mesh111 (§11.2, §12.2; §24 D39).
 - **C19** `zero-weight.sh` records RSS and asserts nothing about it and needs a daemon no harness starts (`6-transport/verify/zero-weight.sh:6`,
@@ -1661,7 +1738,9 @@ Layer 1's probation revert and the monotonic floor (§7.2, §22) · **D3** a com
 source asset is Layer 8's `[source]` pin, fetched by the install verb on an opted-in hub (C10) · **D5** moot in v1: no fix carries an attachment (D17); C11's arithmetic stands for the release that adds attachments (§22) · **D6** F3's "three small files … under `state/`" are the paths Layer 8 pins, `state/heal/{run,inbox,undo}` and
 `state/heal/journal.jsonl` (J2, J7; L8 D13), followed here because the contract is stated once, in Layer 8 §3 · **D7** F3's "registered in the one L2
 table in one amendment" is Layer 8's A19 block for Layers 8 and 9, Layer 7's tags being A14 already (C5) · **D8** `heal.fixes.send` takes `off`,
-`home_hub`, `pinned_contacts`: F10 A names a pinned contact as a recipient while OB §3 lists only `off` and `home_hub` · **D9** settings live in
+`home_hub`, `contacts` (the home hub or any Layer 5 contact the human picks for that send, each send under its own `fix_send`; §11.3, §17.1): F10 A
+names a pinned contact as a recipient while OB §3 lists only `off` and `home_hub`; Layer 5's `pinned` flag gains no meaning here, as D18 rules on the
+receive side · **D9** settings live in
 `state/heal.json` (L8 C1's reason) · **D10** a T1 diagnosis is written as a `kind: diagnose` proposal with a JSON body and folded into its incident at ingest: it never enters
 `agent/proposals`, a proposals list or the open count (§5.2) · **D11** `heal.serve_members` has
 its own consent, `heal_serve` · **D12** the narrative in a delegated reply is the hub playbook's line, not model text · **D13** a start-time revert is
@@ -1708,7 +1787,9 @@ token (§17.1, §22) · **D43** the display phases are thirteen, OB §3's eleven
 (Layer 3: `111d` passes `AGENT111_OPENCODE_PATH`) (§8.2; C17) · **D45** the Repairs page's lazy allowance is 5.1 KB gzip, what Layer 8's 12 KB leaves
 of the 17.1 KB after Layer 7 (default, measured at build); when it does not fit, the page ships the incident list, Needs you, accept, undo and dismiss,
 the other sections are held back from the v1 UI and stay reachable through `111 heal` and the API, and raising D21's lazy total is the owner's
-(§14.1; Open (0)).
+(§14.1; Open (0)) · **D46** one new Layer 8 amendment, §16 row 22: seven lock-amendment requests to locked Layer 8 (J1's record kinds,
+`state/heal.json` in the layout row, the consumer's arguments, "no attachment in v1" for the hand-off's 64 KiB cap, the per-namespace protected
+states, the T1 fold and the refused kinds inside Layer 8's ingest; §23 L8), none of them made silently in Layer 8's text.
 
 **Open for the owner (each applied here as the lead's default until answered).** (0) raising D21's lazy total, if the measured Repairs chunks exceed
 Layer 9's 5.1 KB allowance; until then the page ships what fits and the overage is recorded in `9-evolution/TASKS.md` (§14.1, D45) · (1) `diffy` as build-time weight on every `111-agent` (AGENTS.md asks
@@ -1724,10 +1805,20 @@ with code and signal at most 3 digits (§3.3). From the triage: a hub queues at 
 one stored reply per enrolled member, the latest (§12.4) · three fix size bounds, 2,937 B through a carrier being Layer 7's (§11.2) · an idle-RSS ceiling of the Layer 8 build's plus 512 KiB (§1 rule 3, G7;
 default, measured at build) · Layer 9's lazy UI allowance of 5.1 KB gzip, what Layer 8's 12 KB leaves of 17.1 KB (§14.1; default, measured at build) ·
 50 cases in the first release's must-not-break suite (§13 item 2; R04 §1's figure, default) · `inc-` ids of 12 hex (§3.5), and the same 12 hex for `att-`, `del-`, `dft-`
-(§18.2; default). The drafter's own, for the panel: K = 3 for `accepted_by_n` · the playbook budget 2,000 tokens · 10.111.9x.0/24. From the safety review, accepted by the triage: a subject line ≤ 72 B (§9) · `req_id` 8 bytes from
+(§18.2; default). From the re-check: a list route of §18.1 returns at most 1,000 rows per page (Layer 8's J9 bound; default, measured at build).
+The drafter's own, for the panel: K = 3 for `accepted_by_n` · the playbook budget 2,000 tokens · 10.111.9x.0/24. From the safety review, accepted by the triage: a subject line ≤ 72 B (§9) · `req_id` 8 bytes from
 the OS random source (§12.1).
 
-## Changelog v0.1
+## Changelog
 
-- 2026-11-11: first draft from D35, D36, the options brief, research R00-R07g3, the Layer 8 draft's joint contract and the code at `fa1daeb`, for the
-  adversarial panel.
+- v0.1, 2026-11-11: first draft from D35, D36, the options brief, research R00-R07g3, the Layer 8 draft's joint contract and the code of that day, for
+  the adversarial panel.
+- v0.2, 2026-11-13: the panel's three reports (S1-S28, O1-O29, I1-I32) applied under the lead's triage: the peer subset, the undo file's phases and the
+  node-wide lock, one subject id space, the record states and the reclaim, the shapes of §18.4, the witness's delivery, `tcp-lan` as v1's one link;
+  §16 rows 17-21 and §24 D16-D45 for the owner (`review/fix-map.md`).
+- v0.3, 2026-11-15: the re-check of v0.2 applied under the lead's ruling: I1's status-75 row, the four stale citations and R1-R14 (the undo file
+  guards every accept, a withdrawn proposal is decided by `111d`, one source per storage failure, `heal.fixes.send`'s `contacts`, the `111 heal` read
+  verbs, list paging); §16 row 22 and §24 D46; every citation pinned at `abced06` (`review/fix-map.md`, "v0.3").
+- v1.0, 2026-11-15: locked (D39) on the second re-check's verdict (`review/recheck-2.md`); the lock edit folds its four minors (the v0.3 date, the
+  undo guard's posture and Undo arms and the busy control in G20 (12), the attempt id in the `409 busy` detail, an absent `limit` reading 1,000) and
+  tightens one citation (`N/devices/applier.rs:449-476`).

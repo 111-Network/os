@@ -49,6 +49,7 @@ use node111::daemon::dashboard::{
     routes, serve_listener, ApiConfig, ApiState, DashboardState, SharedState,
 };
 use node111::daemon::fabric::{self, json as fjson, FabricConfig, FabricHandle};
+use node111::daemon::housekeeping::{self, Housekeeping};
 use node111::daemon::ports::PortTable;
 use node111::daemon::services::{ServiceId, Supervised};
 use node111::daemon::supervise::{spawn_child, BackoffPolicy, ChildControl, ChildSpec};
@@ -544,6 +545,8 @@ impl Dependencies for NoDeps {
 struct Node {
     api: Arc<ApiState>,
     fabric: Arc<FabricHandle>,
+    /// The daemon's housekeeping interval for `fabric` (Layer 8 row D1), alive as long as it.
+    _house: Housekeeping,
     bridge: Arc<Bridge>,
     components: Components,
     token: DaemonToken,
@@ -602,6 +605,8 @@ async fn node_with(declared: Vec<Component>) -> Node {
     let fabric = fabric::start(c, Some(identity), &api).await;
     assert!(fabric.running(), "{:?}", fabric.down_reason());
     api.insert_ext(Arc::clone(&fabric));
+    // the daemon's one housekeeping interval, spawned where `daemon/mod.rs` spawns it
+    let house = housekeeping::spawn(&api, &fabric);
     let mut ccfg = ComponentsConfig::new(&layout.root);
     ccfg.runner = RunnerConfig {
         retry: Duration::from_millis(50),
@@ -633,6 +638,7 @@ async fn node_with(declared: Vec<Component>) -> Node {
     Node {
         api,
         fabric,
+        _house: house,
         bridge,
         components,
         token,
@@ -1821,6 +1827,8 @@ fn a_fresh_layer6_spawns_nothing_and_enables_nothing() {
         c.housekeeping = Duration::from_secs(3600);
         let fabric = fabric::start(c, Some(identity), &api).await;
         assert!(fabric.running());
+        // the daemon's one housekeeping interval, spawned before Layer 6 as `daemon/mod.rs` does
+        let house = housekeeping::spawn(&api, &fabric);
         // the Meshtastic client is registered but not started (no board: service off)
         let client = node111::daemon::meshtastic::client::MeshtasticAdapter::new(
             node111::daemon::meshtastic::client::ClientConfig::production(
@@ -1906,6 +1914,7 @@ fn a_fresh_layer6_spawns_nothing_and_enables_nothing() {
             "no file of Delta Chat or Madmail while they are disabled"
         );
         l6.shutdown().await;
+        house.stop().await;
     });
 }
 
@@ -1975,6 +1984,8 @@ fn f2_a_tick_after_shutdown_never_re_enables_the_meshtastic_adapter() {
         c.housekeeping = Duration::from_secs(3600);
         let fabric = fabric::start(c, Some(identity), &api).await;
         assert!(fabric.running());
+        // the daemon's one housekeeping interval, spawned before Layer 6 as `daemon/mod.rs` does
+        let house = housekeeping::spawn(&api, &fabric);
         // a client whose connection task runs (it retries a closed downlink): running()
         let closed = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let downlink = closed.local_addr().unwrap();
@@ -2001,10 +2012,12 @@ fn f2_a_tick_after_shutdown_never_re_enables_the_meshtastic_adapter() {
         l6.tick_once().await;
         assert_eq!(l6.bridge.enabled(), vec!["meshtastic".to_string()]);
         assert_eq!(l6.bridge.recv_tasks(), 1);
-        // the daemon's stop order: layer6, then the fabric; the client still runs
+        // the daemon's stop order: layer6, the housekeeping interval, then the fabric; the
+        // client still runs
         l6.shutdown().await;
         assert!(l6.stopping());
         assert!(l6.bridge.enabled().is_empty());
+        house.stop().await;
         fabric.shutdown().await;
         assert!(client.running(), "the window: meshtastic stops last");
         for _ in 0..3 {
@@ -2453,6 +2466,10 @@ async fn the_lxmf_seam_writes_the_client_config_attaches_the_adapter_and_feeds_n
     let hash = lxmf_component().notice_hash();
     let client = config::client_config_path(&root);
 
+    // Layer 7 §13.1 (row D2): the hop read while the Reticulum component is off is 409
+    // component_unavailable, and nothing ran
+    n.post(HOPS, json!({}))
+        .problem(409, "component_unavailable");
     // without the acknowledgement: 409 consent_required, and the hook wrote nothing
     n.post(enable, json!({})).problem(409, "consent_required");
     assert!(!root.join("bridge/lxmf").exists());
@@ -2541,6 +2558,29 @@ async fn the_lxmf_seam_writes_the_client_config_attaches_the_adapter_and_feeds_n
     assert_schema("SseNearby", &v);
     assert!(frame.1.contains(LX_PEER), "{}", frame.1);
 
+    // Layer 7 §10.1 rule 1, §13.1 (row D2): the hop read over HTTP. The agent's bearer is
+    // refused (401) and takes no window; a person's POST starts one read (202; this spine's
+    // rnstatus runner answers nothing, so the read changes nothing and logs one line); a second
+    // within 30 s is 429 rate_limited with Retry-After
+    http(
+        n.port,
+        "POST",
+        HOPS,
+        &[("Authorization", &n.bearer())],
+        Some(&json!({})),
+    )
+    .problem(401, "unauthenticated");
+    let r = n.post(HOPS, json!({}));
+    check_op("runNearbyHops", &r);
+    assert_eq!(r.status, 202, "{}", r.body);
+    let r = n.post(HOPS, json!({}));
+    r.problem(429, "rate_limited");
+    let wait: u64 = r
+        .header("retry-after")
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0);
+    assert!((1..=30).contains(&wait), "Retry-After {wait}");
+
     // disable: the adapter goes (before the child), its source with it, the child stops
     let r = n.post("/api/v1/bridge/components/lxmf/disable", json!({}));
     check_op("disableBridgeComponent", &r);
@@ -2557,6 +2597,9 @@ async fn the_lxmf_seam_writes_the_client_config_attaches_the_adapter_and_feeds_n
         "no child, no stdio"
     );
 }
+
+/// `runNearbyHops` (Layer 7 §13.1).
+const HOPS: &str = "/api/v1/nearby/hops";
 
 /// A transport spine over `n`'s root with rnsd's config rendered (its `rpc_key` minted).
 fn lxmf_spine(n: &Node) -> Arc<node111::daemon::transport::posture::Spine> {

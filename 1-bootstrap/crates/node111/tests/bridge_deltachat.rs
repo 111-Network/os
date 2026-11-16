@@ -37,6 +37,7 @@ use node111::daemon::components::{
 };
 use node111::daemon::dashboard::{ApiConfig, ApiState, DashboardState, SharedState};
 use node111::daemon::fabric::{self, FabricConfig};
+use node111::daemon::housekeeping::{self, Housekeeping};
 use node111::daemon::ports::PortTable;
 use node111::daemon::services::ServiceId;
 use node111::daemon::supervise::{
@@ -626,6 +627,8 @@ async fn f1_a_second_contact_id_with_a_joined_address_never_crosses_and_is_count
 struct Node {
     bridge: Arc<Bridge>,
     handle: Arc<node111::daemon::fabric::FabricHandle>,
+    /// The daemon's housekeeping interval for `handle` (Layer 8 row D1), alive as long as it.
+    _house: Housekeeping,
     _api: Arc<ApiState>,
     _dir: tempfile::TempDir,
 }
@@ -648,10 +651,13 @@ async fn node() -> Node {
     c.housekeeping = Duration::from_secs(3600);
     let handle = fabric::start(c, Some(identity), &api).await;
     assert!(handle.running(), "{:?}", handle.down_reason());
+    // the daemon's one housekeeping interval, spawned where `daemon/mod.rs` spawns it
+    let house = housekeeping::spawn(&api, &handle);
     let bridge = Bridge::new(BridgeConfig::new(&layout.root), Arc::clone(&handle), &api);
     Node {
         bridge,
         handle,
+        _house: house,
         _api: api,
         _dir: dir,
     }

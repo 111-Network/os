@@ -65,7 +65,7 @@
 use std::collections::HashMap;
 use std::io;
 use std::net::SocketAddr;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
 
@@ -321,6 +321,10 @@ struct ConnHandle {
 struct Target {
     released: AtomicBool,
     wake: Notify,
+    /// The back-off the redial loop last slept or now sleeps, in ms (0 before the first
+    /// sleep; back to `backoff_min` after a completed handshake). Read by
+    /// [`TcpLan::redial_at_max`] (Layer 7 §7.7).
+    backoff_ms: AtomicU64,
 }
 
 struct Shared {
@@ -494,6 +498,22 @@ impl TcpLan {
                 c.close.notify_one();
             }
         }
+    }
+
+    /// Whether the redial back-off of the maintained target `addr` has
+    /// reached `backoff_max` (Layer 7 §7.7: the connection there has been
+    /// down for one full back-off cycle). `false` for an address that is no
+    /// target, and before its first back-off sleep. While a connection there
+    /// is up the value is the one from before it came up: the caller asks
+    /// only for a target it knows to be down.
+    pub fn redial_at_max(&self, addr: SocketAddr) -> bool {
+        let max = u64::try_from(self.shared.cfg.backoff_max.as_millis()).unwrap_or(u64::MAX);
+        self.shared
+            .targets
+            .lock()
+            .ok()
+            .and_then(|t| t.get(&addr).map(|x| x.backoff_ms.load(Ordering::SeqCst)))
+            .is_some_and(|ms| ms > 0 && ms >= max)
     }
 
     /// Connections currently up.
@@ -795,6 +815,7 @@ impl Dialer for TcpLan {
         let target = Arc::new(Target {
             released: AtomicBool::new(false),
             wake: Notify::new(),
+            backoff_ms: AtomicU64::new(0),
         });
         {
             let Ok(mut t) = self.shared.targets.lock() else {
@@ -830,6 +851,8 @@ impl Dialer for TcpLan {
                 if target.released.load(Ordering::SeqCst) {
                     return;
                 }
+                let ms = u64::try_from(backoff.as_millis()).unwrap_or(u64::MAX);
+                target.backoff_ms.store(ms, Ordering::SeqCst);
                 tokio::select! {
                     _ = target.wake.notified() => {}
                     _ = tokio::time::sleep(backoff) => {}
@@ -941,6 +964,42 @@ mod tests {
         assert_eq!(opening(at).await, first);
         t.set_announce(second.clone());
         assert_eq!(opening(at).await, second);
+        t.shutdown();
+    }
+
+    /// `redial_at_max` (Layer 7 §7.7): false for no target and before the
+    /// back-off has grown to `backoff_max`; true once a target that never
+    /// answers sleeps the maximum; false again once released.
+    #[tokio::test]
+    async fn redial_at_max_follows_the_back_off() {
+        let mut cfg = TcpLanConfig::new(vec![0xa1u8; announce::BASE_LEN]);
+        cfg.refuse_loopback = false;
+        cfg.backoff_min = Duration::from_millis(10);
+        cfg.backoff_max = Duration::from_millis(80);
+        let (events, _rx) = mpsc::unbounded_channel();
+        let t = TcpLan::new(
+            LinkId::new("tcp-lan"),
+            cfg,
+            events,
+            Arc::new(super::super::AdmitAll),
+        );
+        // a closed port: every dial is refused at once
+        let closed = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let at = closed.local_addr().unwrap();
+        drop(closed);
+        assert!(!t.redial_at_max(at), "no target yet");
+        t.maintain(at, None);
+        assert!(!t.redial_at_max(at), "the first dial has not slept");
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        while !t.redial_at_max(at) {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "never reached the maximum"
+            );
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        t.release(at);
+        assert!(!t.redial_at_max(at), "a released address is no target");
         t.shutdown();
     }
 

@@ -53,6 +53,7 @@ pub mod actions;
 pub mod auth;
 pub mod bridge;
 pub mod contacts;
+pub mod datasets;
 pub mod devices;
 pub mod events;
 pub mod fabric;
@@ -68,9 +69,12 @@ pub mod proposals;
 pub mod registry;
 pub mod relay;
 pub mod relay7;
+pub mod repairs;
 pub mod services;
 pub mod settings;
 pub mod status;
+pub mod storage;
+pub mod tiles;
 pub mod transport;
 
 use super::bind::BindInfo;
@@ -286,6 +290,12 @@ pub fn router(state: Arc<ApiState>) -> axum::Router {
         .merge(pair::router())
         .merge(registry::router())
         .merge(origins::router())
+        // Layer 8 (§16.1): storage, datasets, tiles
+        .merge(storage::router())
+        .merge(datasets::router())
+        .merge(tiles::router())
+        // Layer 9 (§18.1): the Repairs routes
+        .merge(repairs::router())
         .route_layer(middleware::from_fn_with_state(
             Arc::clone(&state),
             auth::require_session,

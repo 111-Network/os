@@ -796,7 +796,7 @@ fn timed_runner_kills_a_hung_rnstatus() {
     std::fs::set_permissions(&prog, std::fs::Permissions::from_mode(0o755)).unwrap();
     let runner = rnstatus::TimedRunner {
         timeout: Duration::from_millis(300),
-        home: dir.path().to_path_buf(),
+        ..rnstatus::TimedRunner::new(dir.path())
     };
     let t0 = std::time::Instant::now();
     let rn = Rnstatus::new(Arc::new(runner), dir.path());

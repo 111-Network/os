@@ -6,4 +6,48 @@ PREFIX=${PREFIX:-/data/data/com.termux/files/usr}
 LOG="$PREFIX/var/log/111node.log"
 mkdir -p "$PREFIX/var/log"
 printf '%s 111node: exited (code %s, signal %s)\n' "$(date -Iseconds 2>/dev/null || date)" "${1:-?}" "${2:-?}" >> "$LOG"
+
+# Layer 9 witness (§3.3 rule 3): the same `v1` line `111 heal-witness` writes on Linux, appended to
+# state/heal/inbox through a temp file and a rename keeping the newest 256 lines. Never fails the hook;
+# state/heal/ missing (111d creates it at its first start) means nothing is written.
+HEAL="$PREFIX/var/lib/111/state/heal"
+if [ -d "$HEAL" ]; then
+	(
+		umask 077
+		code=-
+		sig=-
+		if [ "${1:-}" = "-1" ]; then
+			res=signal
+			# runit's second argument is the raw wait status: the signal is its low 7 bits
+			case "${2:-}" in
+				'' | *[!0-9]* | ??????*) ;;
+				*) sig=$(($2 & 127)); [ "$sig" -gt 0 ] || sig=- ;;
+			esac
+		else
+			res="exit"
+			case "${1:-}" in
+				'' | *[!0-9]* | ????*) ;;
+				*) code=$1 ;;
+			esac
+		fi
+		boot=$(tr -d '-' < /proc/sys/kernel/random/boot_id 2>/dev/null)
+		case "$boot" in
+			*[!0-9a-f]* | '') boot=- ;;
+			????????????????????????????????) ;;
+			*) boot=- ;;
+		esac
+		# temps a killed earlier run left (this hook is the only writer here, one finish at a time)
+		rm -f "$HEAL"/.inbox.tmp-* 2>/dev/null
+		tmp="$HEAL/.inbox.tmp-$$"
+		# rename only when every write succeeded: a full disk must never replace the inbox with a cut file
+		if {
+			if [ -f "$HEAL/inbox" ]; then tail -n 255 "$HEAL/inbox" || false; fi &&
+				printf 'v1 boot=%s result=%s code=%s signal=%s\n' "$boot" "$res" "$code" "$sig"
+		} > "$tmp" 2>/dev/null && mv -f "$tmp" "$HEAL/inbox" 2>/dev/null; then
+			:
+		else
+			rm -f "$tmp" 2>/dev/null
+		fi
+	) 2>/dev/null
+fi
 exit 0

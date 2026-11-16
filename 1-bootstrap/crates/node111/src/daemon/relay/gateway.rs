@@ -189,6 +189,10 @@ impl GatewayConfig {
         let carrier = match r.carrier_kind() {
             CarrierKind::None => None,
             CarrierKind::Ntfy => r.ntfy_server().and_then(|server| {
+                // the consent owed now (row D10: a cap set or raised owes a new one), not any hash
+                if !crate::daemon::relay::consent::holds(r, ConsentKind::CarrierEnable) {
+                    return None;
+                }
                 let consent = r.consent_hash(ConsentKind::CarrierEnable)?;
                 Some(CarrierSwitch {
                     kind: CARRIER_NTFY,
@@ -1292,15 +1296,37 @@ mod tests {
             None,
             "no consent: no carrier"
         );
-        r.set_consent_hash(ConsentKind::CarrierEnable, Some(&"ab".repeat(32)))
-            .unwrap();
+        r.set_consent_hash(
+            ConsentKind::CarrierEnable,
+            Some(
+                &crate::daemon::relay::consent::owed(&r, ConsentKind::CarrierEnable)
+                    .unwrap()
+                    .hash,
+            ),
+        )
+        .unwrap();
         r.set_carrier_mode(CarrierMode::FiveB, false).unwrap();
         let c = GatewayConfig::from_settings(&r, false).carrier.unwrap();
         assert_eq!(c.kind, CARRIER_NTFY);
         assert_eq!(c.endpoint.as_deref(), Some("ntfy.example.net"));
         assert_eq!(c.mode, "5B");
         assert_eq!(c.server, "https://ntfy.example.net:8443/base");
-        assert_eq!(c.consent, "ab".repeat(32));
+        let owed = crate::daemon::relay::consent::owed(&r, ConsentKind::CarrierEnable)
+            .unwrap()
+            .hash;
+        assert_eq!(c.consent, owed);
+        assert_eq!(
+            GatewayConfig::from_settings(&r, true).carrier.unwrap().mode,
+            "5A",
+            "5B runs as 5A on Termux"
+        );
+        // a consent recorded under another text (a stale copy; row D10: a cap set or raised owes
+        // a new one) arms no carrier until the one owed now is given
+        r.set_consent_hash(ConsentKind::CarrierEnable, Some(&"ab".repeat(32)))
+            .unwrap();
+        assert_eq!(GatewayConfig::from_settings(&r, false).carrier, None);
+        r.set_consent_hash(ConsentKind::CarrierEnable, Some(&owed))
+            .unwrap();
         assert_eq!(
             GatewayConfig::from_settings(&r, true).carrier.unwrap().mode,
             "5A",

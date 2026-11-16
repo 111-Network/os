@@ -37,8 +37,9 @@ export function resolveRef(ref: string): JsonSchema {
 export function validate(value: unknown, schema: JsonSchema, path = "$"): string[] {
   if (typeof schema.$ref === "string") return validate(value, resolveRef(schema.$ref), path);
   const errors: string[] = [];
-  if (Array.isArray(schema.oneOf)) {
-    const failures = (schema.oneOf as JsonSchema[]).map((branch) => validate(value, branch, path));
+  const alts = Array.isArray(schema.oneOf) ? schema.oneOf : Array.isArray(schema.anyOf) ? schema.anyOf : null;
+  if (alts) {
+    const failures = (alts as JsonSchema[]).map((branch) => validate(value, branch, path));
     if (!failures.some((f) => f.length === 0)) {
       return [`${path}: matches none of ${failures.length} oneOf branches (${failures.map((f) => f[0] ?? "").join(" | ")})`];
     }

@@ -74,14 +74,19 @@ L7_G10_VETH_LG=l7g10lg
 L7_G10_VETH_LGP=l7g10lgp
 L7_G10_VETH_NTFY=l7g10n
 
-# ---- G11 TLS-RPK (§15 G11): two hubs on TEST-NET-3
+# ---- G11 TLS-RPK (§15 G11): two hubs on TEST-NET-3 (X, Y); Z and Q are row V5's additions: Z a plain member of X
+# (§4.1 rule 3), Q a third hub whose key X never pinned (the wrong-key, mismatched-announce and plain-pair items)
 L7_G11_BR=l7g11br0
 L7_G11_NET=203.0.113.0/24 # TEST-NET-3 (RFC 5737)
-L7_G11_NODES="X Y"
+L7_G11_NODES="X Y Z Q"
 L7_G11_IP_X=203.0.113.11
 L7_G11_IP_Y=203.0.113.12
+L7_G11_IP_Z=203.0.113.13
+L7_G11_IP_Q=203.0.113.14
 L7_G11_VETH_X=l7g11x
 L7_G11_VETH_Y=l7g11y
+L7_G11_VETH_Z=l7g11z
+L7_G11_VETH_Q=l7g11q
 
 # ---- G12 the hub origin (§15 G12): hub O with LAN sharing, member U with no internet route
 L7_G12_BR=l7g12br0

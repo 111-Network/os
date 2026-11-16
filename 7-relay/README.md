@@ -13,6 +13,9 @@ options brief) → three-judge panel → the lead's triage (`plan/layers/7-relay
 `7-relay/TASKS.md`. The six owner forks of D31 are applied as the lead recommends (§19 "Owner forks"); a different answer lands as a lock amendment,
 recorded in `plan/DECISIONS.md`.
 
+Amended under **D33** (open; each item lands as it is ruled): the DNS-SD service type is `_n111._tcp` (owner, 2026-11-15: RFC 6335 §5.1
+needs a letter in a service name, and `mdns-sd` refuses `_111._tcp`; found by row D8).
+
 ## 0. Reading guide
 
 Reads with: `os/README.md` §7 and "Category 5" · `os/5-messaging/README.md` §3, §6.2, §7.3, §8.1, §9, §10.3–§10.4, §12, §21 (the locked fabric this layer
@@ -46,7 +49,7 @@ written "panel Cn".
 | Hub links (§4) | TLS 1.3 RPK for non-LAN hub-to-hub; TOFU pin from the pairing bundle | attested link key (`transport_id` `0x04`) |
 | Custody (§5) | single-copy push between paired hubs and through a carrier; the twelve Layer 5 amendments | the radio form (hint custody), chains, signed forward receipts, member-gateways, sweep-before-ack, multi-copy |
 | Carriers (§6) | ntfy prototype in `111d`; chatmail glue after the ntfy smoke log | the JSON-lines pipe, `carrier` `LinkKind`, Nostr, LXMF propagation, iroh, yggstack |
-| Registry (§7) | DNS-SD `_111._tcp`; role bits 3–5; members-only gateway facts | the sealed registry query (two control kinds pinned in §7.3) |
+| Registry (§7) | DNS-SD `_n111._tcp`; role bits 3–5; members-only gateway facts | the sealed registry query (two control kinds pinned in §7.3) |
 | Epoch (§8) | beacon bytes, unit (day), advance rule, carriage: pinned only | built with its first consumer, freeze protection for updates |
 | Updates (§9) | hub origin; `111 update --from`; the Layer 1 trust amendments | Tier 2 transfer; a release tag in announces |
 | Nearby (§10) | SVG radar | the map bucket (D21 amendment), Leaflet + PMTiles |
@@ -65,7 +68,7 @@ owner. Section numbers in R07g2's replacement texts ("Layer 7 section 9a") read 
 |---|---|
 | Cat 1 (the stock MeshCore repeater, D19 c) | the repeater's own floods, seen-table, 63-hop cap and adverts. Nothing of ours runs there; it is relay-blind and is asked for nothing (no presence, no epoch, no update). |
 | Cat 2A, 2B, 3 (phones, laptops, terminals) | presence from events, the `111` Nearby kind, role bits the owner chooses, `111 update --from`. Nothing resident. |
-| Cat 4 hubs | the above plus pairing, forwarding, the gateway role with a carrier, the update origin, the `_111._tcp` record while LAN sharing is on. Every one is a switch, off by default. |
+| Cat 4 hubs | the above plus pairing, forwarding, the gateway role with a carrier, the update origin, the `_n111._tcp` record while LAN sharing is on. Every one is a switch, off by default. |
 | Cat 5 (overlay) | in v1 a gateway is a hub with internet and a carrier its owner enabled (D30 F4, Q20). A phone that is only a member carries nothing for others. |
 
 **The Raspberry Pi floor (hard rule, AGENTS.md).**
@@ -194,7 +197,7 @@ installer's one-time probe (`NI/install/preflight.rs:14-15`) is unchanged.
   which calls `spine.on_link_change` (`N/transport/mod.rs:498-517`), is untouched, so a DHCP renew never re-renders rnsd (S15; §19 D8). A burst of route
   updates is one check. A failed bind is logged once; for a carrier it selects §3.4, for mdns-sd it keeps the default check (below).
 - **mdns-sd's own 5 s IP check** (`MD/service_daemon.rs:69`) stays at its default until the second netlink socket is bound; only then is it set to 0
-  (`set_ip_check_interval`, `:696-701`). On a bind failure the 5 s check stays and the failure is logged once, so the `111.local` and `_111._tcp` records
+  (`set_ip_check_interval`, `:696-701`). On a bind failure the 5 s check stays and the failure is logged once, so the `111.local` and `_n111._tcp` records
   never freeze at the start-time addresses (S3).
 - **The re-arm (pinned procedure, S2).** The daemon has no "check now": `process_set_option` schedules the next check at now + interval (`:1705-1708`) and
   `schedule_ip_check` re-arms it after every run while the interval is non-zero, and cancels a pending one at 0 (`:1844-1850`). So, on a debounced address
@@ -750,7 +753,7 @@ Each fact lives in the cheapest layer that can hold it honestly.
 
 **7.1 DNS-SD, an unauthenticated hint.** A second `ServiceInfo` in the mdns-sd daemon the dashboard already runs (`N/dashboard/mdns.rs:40-80`), which starts
 only while the dashboard is LAN-bound (`N/dashboard/mod.rs:259`); the registry never starts the daemon itself.
-- Type `_111._tcp.local.`; instance = the L2 label (`xxxx-xxxx-xx`); host = the dashboard's mDNS host (`111.local.` or its rename, `mdns.rs:15-16`); SRV
+- Type `_n111._tcp.local.`; instance = the L2 label (`xxxx-xxxx-xx`); host = the dashboard's mDNS host (`111.local.` or its rename, `mdns.rs:15-16`); SRV
   port 11183; A records only (the daemon disables IPv6, `mdns.rs:44-47`; the fabric listener is `0.0.0.0`, `N/fabric/mod.rs:173`).
 - TXT, 78 B with length bytes: `v=1` · `r=<roles, 4 hex>` · `k=<NodeId, 64 hex>` (RFC 6763 size guidance *unverified from this box*).
 - Present only while `discovery.lan_record` (default `false`), the dashboard is LAN-bound and the fabric listener is LAN-bound (`hub_role` or `listen_lan`,
@@ -804,7 +807,7 @@ by the user (v1) or taken from a query reply (v1.1), never from a TXT.
 
 **7.7 Lost-hub recovery.** The existing back-off keeps redialling the last address (`M/link/tcp_lan.rs:658-700`). On the user's "Find my hub", or on a
 netlink address change while the home hub's connection has been down for one full back-off cycle (its redial back-off has reached `backoff_max`, 60 s,
-`M/link/tcp_lan.rs:128-129`; S23: a DHCP renew with the hub up costs nothing), a member whose dashboard is LAN-bound browses `_111._tcp` for 5 s and
+`M/link/tcp_lan.rs:128-129`; S23: a DHCP renew with the hub up costs nothing), a member whose dashboard is LAN-bound browses `_n111._tcp` for 5 s and
 matches `k`; the new address is kept only after a handshake names the hub's NodeId (the dial's expected check, `tcp_lan.rs:30-35`). Otherwise: rescan the
 hub's QR. **No `/24` sweep** (D30 Q10). **Termux:** no MulticastLock, so no mDNS browse or answer (R01 §3 finding 8): a phone finds its hub by address or
 QR and is found through its hub; held sockets die in Doze, so a phone hub is 5A.
@@ -1155,7 +1158,7 @@ announce, a card and a keepalive create or refresh nothing · **heartbeat, the e
 `licensed_board` for a licensed board and `400` below 9 min for a phone category (the category is a hardware re-probe, `N/mod.rs:841-844`, so a netns node
 cannot be a phone); with the Layer 6 bridge stub (`NODE111_BRIDGE_STUBS`, `6-transport/verify/bridge.sh:18-19`) reporting a licensed board, no Layer 7
 path sends to it · **the mdns-sd re-arm (S2, the first test written):** `get_ip_check_interval()` reads 0 within 2 s of every address event and the record's
-A records changed; with the second netlink bind failing it reads 5 · `_111._tcp` exists only with `lan_record`, LAN sharing and a LAN-bound listener, its TXT
+A records changed; with the second netlink bind failing it reads 5 · `_n111._tcp` exists only with `lan_record`, LAN sharing and a LAN-bound listener, its TXT
 is exactly `v`, `r`, `k` · a browse stops within 5 s · no alias, load, battery, position or model in any record · a role-bit change re-mints once · the
 `gateway` row walks its four codes · **the hop read (I6):** one `rnpath` spawn per `POST /nearby/hops`, none on any GET, `409 component_unavailable` with the
 component off, `429` within 30 s · lost-hub recovery dials no address it was not given (egress log). **Pass:** all green.
@@ -1229,7 +1232,7 @@ recorded, never counted as tree faults (D29), and CI and the owner's machine run
 
 ## 16. Pi-floor accounting
 
-| Item | Non-hub node | Hub, nothing paired | Per paired hub | ntfy 5A | ntfy 5B | LAN-sharing node (+ the `_111._tcp` record) | Basis |
+| Item | Non-hub node | Hub, nothing paired | Per paired hub | ntfy 5A | ntfy 5B | LAN-sharing node (+ the `_n111._tcp` record) | Basis |
 |---|---|---|---|---|---|---|---|
 | processes | 0 | 0 | 0 | 0 | 0 | 0 | design |
 | listeners | 0 | 0 | 0 | 0 | 0 | 0 (the record rides mdns-sd's socket) | design |

@@ -568,6 +568,18 @@ may pin later); a CD workflow now (needs the musl toolchains on the runner, a re
 - **Why:** the panel's blockers were seams and honesty gaps, D31 closed the forks, the re-check found nothing of weight, and the spec is wired to the
   built layers by citations re-read at the lock head.
 
+## D33 — Layer 7 lock amendment (open)
+
+- **Date:** opened 2026-11-15; closes with the Layer 7 Summary (`7-relay/TASKS.md`), when the candidates written on the board rows are ruled.
+- **Ruled so far:**
+  - **The DNS-SD service type is `_n111._tcp`** (owner, 2026-11-15). The spec's `_111._tcp` is not a valid service name: RFC 6335 §5.1 requires
+    at least one letter, and `mdns-sd` (`check_service_name`) refuses to register it, so the record could never exist; browsing it still worked.
+    Found by the D8 author. Applied to `7-relay/README.md`, `4-interface/api/openapi.yaml` (descriptions only, no schema change) and the
+    reference in `6-transport/README.md`; plan research and options keep the old name as history.
+  - **Rejected:** `_mesh111._tcp`, `_node111._tcp` (longer, no gain); keeping `_111._tcp` with a patched `mdns-sd` (a fork for a name).
+- **Candidates still open:** on the board rows (the handoff of 2026-11-15 lists them: store v5, the struck README rewordings, consent through
+  PATCH, the node's own target triple, the topic KDF, the `wan` row name, D6's deviations, D2's paired-hub evidence, D8's `redial_at_max` seam).
+
 ## D34 — Layer 8 (Storage & Shared State) design decisions
 
 - **Date:** 2026-11-11
@@ -627,6 +639,25 @@ may pin later); a CD workflow now (needs the musl toolchains on the runner, a re
   the lazy UI budget (D21), which leaves Layer 9 about 5 KB · the legal reads and Q25 · every number marked "default, measured at build".
 - **Why:** two re-checks, the second with nothing of weight; no fork open; and Layer 9's fix pass needs the storage contract as locked text.
 
+## D39 — Layer 9 spec locked (v1.0); the board comes next
+
+- **Date:** 2026-11-15
+- **Decision:** the Layer 9 (Self-Healing & Evolution) spec `os/9-evolution/README.md` is **locked at v1.0** = draft v0.3 as re-checked: v0.1 (from
+  D35, D36, the options brief and research R00–R07g3) → three fable judges (safety · observe · integration; each amend-then-lock, eight blockers;
+  `plan/layers/9-evolution/review/{safety,observe,integration}.md`) → the lead's triage (`triage.md`: eight merged groups, 22 forks, and the rulings
+  on the 21 collisions of `triage-check.md`) → v0.2 (`fix-map.md`; the integration author was cut off on 2026-11-13 and resumed on 2026-11-15
+  against its own partial text) → a re-check (`recheck.md`: amend-then-lock; 85 fixed, 2 partly, R1–R10 new) → v0.3 under the lead's ruling (every
+  fix as proposed; R10 closes the safety author's `pinned_contacts` point: `heal.fixes.send` is `off | home_hub | contacts`) → a second re-check
+  (`recheck-2.md`: **lock**; four minors folded into the lock edit, the author's ten choices ruled acceptable). Citations pinned at `abced06`.
+- **What v1 commits to:** the spec's own §1–§24; nothing is built; the board `9-evolution/TASKS.md` follows, then the build per `EXECUTION.md`,
+  after Layer 8's node-state store and joint contract (its Wave 1), which Layer 9's records ride.
+- **Open (owner):** the triage's rulings listed for the owner (named fix senders instead of pinned contacts; a fix that arrives early is kept until
+  its failure opens; the Repairs page ships what fits about 5 KB of UI budget) · §24 D46: Layer 8 lock-amendment requests (J1's record kinds,
+  `state/heal.json` in the layout, the consumer's arguments, no attachment in v1, the per-namespace protected states, the T1 fold and the refused kinds
+  in Layer 8's ingest) — each lands as a Layer 8 amendment in the row that needs it · the numbers marked "default, measured at build".
+- **Why:** the panel's blockers and the re-check's three majors were seams with locked layers (Layer 8's status 75, the undo file outliving the lock,
+  one source per storage failure); the second re-check found nothing of weight.
+
 ## Pending
 
 - Move deep architecture content out of `os/README.md` into per-layer specs (Layers 0–6 have their homes; the README's Layer 7–9 content waits for theirs).
@@ -636,5 +667,5 @@ may pin later); a CD workflow now (needs the musl toolchains on the runner, a re
 - **Layer 7 (Relay & Presence) building** (D30 picks, D31 amendments, lock D32 2026-11-02) — board `7-relay/TASKS.md`: Wave 0 and its fix waves (M4b, M5b, M5c, M4c) landed 2026-11-02, each Rust row with an independent read-only review; paused for the PR #2 merge (`plan/HANDOFF-2026-11-02.md`): next M4d, then Wave 1 (`wave-1.js`), Waves 2–3. **Lock-amendment candidates for D33** (recorded on the rows): `PairedHub { ours, theirs }` beyond amendment 10's shape; `state/update-origins.json` in §18; the pair link-up ping; a mesh111 `set_home_hub_address`; the ENROLL_OK pairing flag; a hint column for paged / evicted forward rows; a former member's fwd=0 rows stranded; rule 3 of the home-hub rebuild stricter; a mesh111 `Dialer::is_target` seam (D8's residual); rule (1) rounds counted per verified far frame (D11 calls `forward_take` at a drain boundary). **Wave 0 owner questions:** row M4 (the `forwarding` reason narrower than amendment 8), L2 (the updater's loopback-http allowance), P1 (`X-Firebase: no`; the since-miss 400), M4c (newest-first eviction, accepted by the lead for per-target custody order).
 - **Owner-side push of the tag `checkpoint-layer-6`** (annotated at `4689dbf`, the Layer 7 lock commit = the last tree before Layer 7 code; G9's old hub): the cloud session's git proxy refuses tag pushes, so the owner tags and pushes from their machine; G9 takes the commit hash until then.
 - **Layer 7 owner questions (D31, applied as the lead recommends until answered):** (1) the tcp-lan stream seam for TLS-RPK as a code seam, or tunnel-only pairing in v1; (2) byte-identical code seams listed beside the twelve, or no `attributed_on` accessor; (3) a hub's own messages cross islands only via its home hub in v1; (4) the sealed registry query in v1.1; (5) hubs meet once over tcp-lan to pair; (6) refused forward rows end and Transit has a per-origin share.
-- **Layers 8 and 9 are decided (D34, D35, 2026-11-11)**: specs in drafting; no Layer 8 or 9 code before each spec locks.
+- **Layers 8 and 9 are locked (D38, D39)**: Layer 8's board is written (T0 next); Layer 9's board comes next; no Layer 9 code before its board.
 - **The cross-layer test system (D36, D37)**: building per `plan/cross-layer/test-system/TASKS.md`.

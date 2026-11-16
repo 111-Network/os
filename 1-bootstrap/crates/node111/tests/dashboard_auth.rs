@@ -1404,14 +1404,28 @@ fn concrete(path: &str) -> String {
 
 /// Contract operations 111d serves no route for (contract-only: `404` for everyone, so a
 /// bearer reaches nothing there either). The Layer 7 writes are in the contract ahead of
-/// their routes (`7-relay/TASKS.md` C1 before the D-rows): the row that routes one removes
+/// their routes (`7-relay/TASKS.md` C1 before the D-rows; Layer 8's, `8-storage/TASKS.md` C1, likewise): the row that routes one removes
 /// it from here, so the walk then holds it to the rule like every other write.
 const UNROUTED: &[&str] = &[
     "flashDevice",
-    "patchRelaySettings",
-    "checkRelayCarrier",
-    "flushRelayCarrier",
-    "browseRegistry",
+    // Layer 8 (`8-storage/TASKS.md` C1 before the D-rows): the row that routes one removes it
+    "patchStorageSettings",
+    "answerStorageExportOffer",
+    "acceptUpdateWithoutCopy",
+    "deleteStorageSetAside",
+    "startEmptyStore",
+    // Layer 8, part 2 (`8-storage/TASKS.md` C2 before the D-rows): the dataset writes and the component stop
+    "checkDatasets",
+    "fetchDataset",
+    "removeDataset",
+    "cancelDatasetJob",
+    "resumeDatasetJob",
+    "createDatasetDraft",
+    "publishDatasets",
+    "adoptDatasets",
+    "stopBridgeComponent",
+    // Layer 9 (`9-evolution/TASKS.md` C1 before D22): the incident dismissal; the row that routes it removes it. The reads need no entry: the walk holds writes only.
+    "dismissRepairIncident",
 ];
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

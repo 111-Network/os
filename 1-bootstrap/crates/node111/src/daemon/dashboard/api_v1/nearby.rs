@@ -29,7 +29,10 @@
 //! `rnpath -t -j` through the `rnstatus` runner, its timeout and its owner
 //! guard ([`Rnstatus::path_table`]), off the request path; the hop counts
 //! land in `hops_away` of the `reticulum` source only and go out on the
-//! `nearby` frame. `202 RelayAccepted` once started; `409
+//! `nearby` frame; a failed read (a spawn failure or timeout, a non-zero
+//! exit, a table that does not parse or is over its own cap) changes
+//! nothing and is one fixed log line (the contract's 202 has no later
+//! answer). `202 RelayAccepted` once started; `409
 //! component_unavailable` while the Reticulum component (the LXMF helper, the
 //! source's only producer) is off, the transport spine is absent, or the
 //! supervised rnsd does not hold the shared instance (nothing spawned); `429
@@ -419,7 +422,8 @@ pub async fn start_hops(
                 RnstatusError::NoInstance | RnstatusError::NotFound(_) => {
                     "no shared rnsd instance answered".into()
                 }
-                RnstatusError::Unparsed(_) => "the path table did not parse".into(),
+                // ours, a fixed phrase: a table over its cap says so
+                RnstatusError::Unparsed(what) => format!("{what} did not parse"),
             };
             eprintln!("111 nearby: the hop read failed: {why}");
             false

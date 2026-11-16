@@ -492,6 +492,38 @@ protects no content (§12 rule 12: static-static ECDH never protects confidentia
 frozen: the topic KDF in Layer 7 task P1 (node111 `carrier::ntfy` test `topic_known_answers`) and the X25519 behind the handle in task M5
 (node111 `fabric::sealer` test `carrier_topic_x25519_known_answers_and_refusals`).
 
+> **Amended by Layer 8 (§13.3):** `appdata` role bit 7 is Layer 8's `ROLE_DATASETS`, a note under A17 (the "Layer 7 appends" paragraph above).
+
+### 13.3 Layers 8 and 9 amendments (Layer 8 D34, D38; Layer 9 D35, D39; recorded 2026-11-16)
+
+The A numbers continue §13.2's series (A13-A18) and are this spec's own, unrelated to any build-board task id.
+
+Requested by Layer 8 (`os/8-storage/README.md` §21 L2, locked v1.0) and by Layer 9 (its tags, J5), and recorded here as text only. Additive: the
+locked text above is unchanged, `id111` gains no code, and the frozen vectors are untouched.
+
+**A19 — domain tags (§6.1, A4, A14).** Registered here; each tag leads its input, and every signed or keyed use of it is pinned by its owning
+layer's spec:
+
+| Tag | Use (owner) |
+|---|---|
+| `111/catalogue/v1` | Ed25519 by the publisher's node key over `tag ‖ publisher NodeId (32) ‖ the catalogue file's bytes` (Layer 8 §6.1) |
+| `111/export/v1` | Ed25519 by the node key over `tag ‖ NodeId (32) ‖ length (8 LE) ‖ BLAKE3(the blob before the signature)` (Layer 8 §13.1) |
+| `111/node-state/v1` | a key-derivation input, never a signing tag: the node-state store key, the `111/store/v1` pattern of A9 (Layer 8 §2.2) |
+| `111/catalogue-vouch/v1` | reserved: an endorsement of one catalogue entry (Layer 8 §6.5); no construction in v1 |
+| `111/fix/v1`, `111/fix-vouch/v1` | Layer 9's fix artefact and its vouch; their constructions are Layer 9's |
+
+**A20 — the export is built (§8.5(i)).** §8.5(i) is built (Layer 8 §13.1): its tag is `111/export/v1`; its ciphertext is chunked (64 KiB of plaintext
+per AEAD call, the chunk index in the nonce and the last-chunk flag in the AD) so a store of any size never sits in memory; and the signature covers
+the length and the BLAKE3 prehash of every byte before it, so a cut or an extension fails. The byte layout `version(1) ‖ ephemeral_pk(32) ‖
+ciphertext ‖ node_sig(64)` is unchanged, and restore still verifies the signature before decrypting. The root node key signs catalogues and exports
+(§6.1: control artifacts).
+
+**Note under §8.4 — the counter's second caller.** The announce counter (§6.2) gains a second caller, the catalogue `seq` Layer 8 mints at each
+publish (Layer 8 §6.4). A mint only moves the counter up, so the restore floor (`floor + 1024`) and Layer 5's `msg_seq` epochs (A3) are unaffected.
+
+**Note under A17 — role bit 7.** `appdata` role bit 7 is Layer 8's `ROLE_DATASETS`, set while its `origin.datasets` setting is consented (Layer 8
+§12.4, Layer 7 §7.2). Like bits 3-5 it is set by `node111` alone and carried as opaque by `id111` and `mesh111`; the announce wire (§6.2) is unchanged.
+
 ## 14. Test vectors & conformance
 
 All vectors live in `os/2-identity/test-vectors/` at build. Conformance gates:

@@ -1066,6 +1066,15 @@ async fn restart_is_both_children_and_the_identify_child_is_swapped_after_it_exi
         return;
     };
     h.start().await;
+    // Layer 9 §3.1 rule 4 (row D2): the module publishes its children through
+    // `Supervised::publish`, so the generation the start set shares bumps at a
+    // hand-over that adds or removes a child, and never for a respawn in place
+    let mut generation = h
+        .api
+        .ext::<Arc<Supervised>>()
+        .expect("start publishes the base")
+        .generation();
+    let at_start = *generation.borrow_and_update();
     let port = h.serve().await;
     let board = h.by_name(HELTEC);
     let r = http(
@@ -1080,6 +1089,13 @@ async fn restart_is_both_children_and_the_identify_child_is_swapped_after_it_exi
         h.launched("reader").iter().any(|l| l.ends_with("service"))
     })
     .await;
+    wait_until(
+        "the identify hand-over bumps the generation",
+        Duration::from_secs(5),
+        || *generation.borrow() > at_start,
+    )
+    .await;
+    let handed_over = *generation.borrow_and_update();
 
     // restart = meshmud first, then the reader (Supervised registration order)
     let sup = h.api.ext::<Arc<Supervised>>().unwrap();
@@ -1111,6 +1127,11 @@ async fn restart_is_both_children_and_the_identify_child_is_swapped_after_it_exi
         h.m.service_pids().and_then(|s| s.1) == Some(pid)
     })
     .await;
+    assert_eq!(
+        *generation.borrow(),
+        handed_over,
+        "a restart respawns both children in place: no child joined or left"
+    );
 
     // the identify-born child never respawns by itself (identify profile) …
     kill9(pid);
@@ -1133,6 +1154,15 @@ async fn restart_is_both_children_and_the_identify_child_is_swapped_after_it_exi
         h.meshmud_pids().len() == 3 && h.m.facts().running
     })
     .await;
+    // the swap is one hand-over: the identify child left, the service's joined
+    wait_until(
+        "the swap bumps the generation",
+        Duration::from_secs(5),
+        || *generation.borrow() > handed_over,
+    )
+    .await;
+    let swapped_in = *generation.borrow_and_update();
+    assert_eq!(swapped_in, handed_over + 1, "the swap bumps once");
     assert!(
         h.held().iter().all(|(_, t)| t == "meshmud"),
         "{:?}",
@@ -1147,6 +1177,11 @@ async fn restart_is_both_children_and_the_identify_child_is_swapped_after_it_exi
     .await;
     let sup = h.api.ext::<Arc<Supervised>>().unwrap();
     assert_eq!(sup.children(ServiceId::Meshtastic).len(), 2);
+    assert_eq!(
+        *generation.borrow(),
+        swapped_in,
+        "a supervisor respawn inside one child bumps nothing"
+    );
 
     // shutdown joins both children and releases the claims
     let (_, mm, rd) = h.m.service_pids().unwrap();

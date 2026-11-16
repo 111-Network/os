@@ -28,15 +28,37 @@
 //!
 //! Weight: a runner exists only while its component is enabled (§2.1 rule 2);
 //! its retry timer and probe run only then. No wall clock is read.
+//!
+//! **The generation** (Layer 9 §3.1 rule 4; row D2): once
+//! [`super::Components`] puts a runner on its control list
+//! ([`ComponentRunner::attach`]), every spawn and every stop of the runner's
+//! child bumps the list's generation once, right after the new child (or
+//! none) is published; [`ComponentRunner::detach`] takes it off again. A
+//! supervisor respawn inside one child changes no child and bumps nothing.
 
 use crate::daemon::supervise::{
     spawn_child, ChildControl, ChildHandle, ChildSpec, ChildState, ChildStdio, PipedIo,
 };
 use crate::daemon::transport::rnstatus::owner;
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 use tokio::sync::{mpsc, oneshot, watch};
+
+/// Where an attached runner announces a change of its child (Layer 9 §3.1
+/// rule 4): the generation of [`super::Components`]' control list, `None`
+/// while the runner is not on it. Shared by the handle and the task; its lock
+/// orders a publication of the child against an attach or a detach.
+type Announce = Arc<Mutex<Option<watch::Sender<u64>>>>;
+
+fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
+    m.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// One more on a generation.
+fn bump(generation: &watch::Sender<u64>) {
+    generation.send_modify(|g| *g = g.wrapping_add(1));
+}
 
 /// The serving probe (blocking; run off the async threads).
 pub type ServingProbe = Arc<dyn Fn() -> bool + Send + Sync>;
@@ -109,6 +131,8 @@ pub struct ComponentRunner {
     child_rx: watch::Receiver<Option<ChildControl>>,
     cmd_tx: mpsc::Sender<Cmd>,
     task: tokio::task::JoinHandle<()>,
+    /// The generation it bumps while attached (module doc).
+    announce: Announce,
 }
 
 impl ComponentRunner {
@@ -127,6 +151,7 @@ impl ComponentRunner {
         let (stdio_tx, stdio_rx) = watch::channel(None);
         let (child_tx, child_rx) = watch::channel(None);
         let (cmd_tx, cmd_rx) = mpsc::channel(8);
+        let announce = Announce::default();
         let task = tokio::spawn(
             Task {
                 spec,
@@ -136,6 +161,7 @@ impl ComponentRunner {
                 stdio_tx,
                 child_tx,
                 cmd_rx,
+                announce: Arc::clone(&announce),
             }
             .run(),
         );
@@ -145,6 +171,7 @@ impl ComponentRunner {
             child_rx,
             cmd_tx,
             task,
+            announce,
         }
     }
 
@@ -164,6 +191,29 @@ impl ComponentRunner {
     /// The current child, while one is spawned.
     pub fn child(&self) -> Option<ChildControl> {
         self.child_rx.borrow().clone()
+    }
+
+    /// A watch of [`Self::child`]: the slot [`super::Components`]' control
+    /// list reads (Layer 9 §3.1 rule 4).
+    pub(super) fn child_watch(&self) -> watch::Receiver<Option<ChildControl>> {
+        self.child_rx.clone()
+    }
+
+    /// Put the runner on the control list whose generation this is (Layer 9
+    /// §3.1 rule 4): one bump now, then one per spawn or stop of its child
+    /// until [`Self::detach`].
+    pub(super) fn attach(&self, generation: &watch::Sender<u64>) {
+        let mut slot = lock(&self.announce);
+        bump(generation);
+        *slot = Some(generation.clone());
+    }
+
+    /// Take the runner off the control list: one bump when it was on it; a
+    /// later stop of its child bumps nothing.
+    pub(super) fn detach(&self) {
+        if let Some(generation) = lock(&self.announce).take() {
+            bump(&generation);
+        }
     }
 
     /// The child is up and passed its post-spawn check.
@@ -206,6 +256,7 @@ struct Task {
     stdio_tx: watch::Sender<Option<PipedIo>>,
     child_tx: watch::Sender<Option<ChildControl>>,
     cmd_rx: mpsc::Receiver<Cmd>,
+    announce: Announce,
 }
 
 /// What a wait ended with.
@@ -263,10 +314,20 @@ impl Task {
         self.status_tx.send_replace(s);
     }
 
+    /// Publish the current child (or none), then bump the generation once
+    /// while attached (module doc).
+    fn set_child(&self, child: Option<ChildControl>) {
+        let slot = lock(&self.announce);
+        self.child_tx.send_replace(child);
+        if let Some(generation) = slot.as_ref() {
+            bump(generation);
+        }
+    }
+
     async fn stop_child(&self, h: ChildHandle) {
         self.stdio_tx.send_replace(None);
         h.stop_and_wait(self.cfg.grace).await;
-        self.child_tx.send_replace(None);
+        self.set_child(None);
     }
 
     fn on_cmd(cmd: Option<Cmd>) -> Next {
@@ -343,7 +404,7 @@ impl Task {
 
             // ---- spawn
             let handle = spawn_child(self.spec.clone().with_stdio(ChildStdio::Piped));
-            self.child_tx.send_replace(Some(handle.control()));
+            self.set_child(Some(handle.control()));
             let mut stdio = handle.stdio();
             let mut dep_state = self
                 .gate
@@ -676,6 +737,58 @@ mod tests {
         assert!(status_is(&r, |s| matches!(s, RunnerStatus::Running { .. })).await);
         assert_ne!(r.child().unwrap().pid(), Some(pid));
         r.shutdown().await;
+    }
+
+    /// Layer 9 §3.1 rule 4 (row D2): not attached, its spawn bumps nothing;
+    /// attached, one bump for the attach and one per stop and per spawn of
+    /// its child (held, then resumed), each after the child (or none) is
+    /// published; a supervisor respawn inside the same child bumps nothing;
+    /// detached, one bump, and its shutdown's stop bumps nothing.
+    #[tokio::test]
+    async fn an_attached_runner_bumps_once_per_spawn_and_stop_of_its_child() {
+        let (generation, mut g) = watch::channel(0u64);
+        let r = ComponentRunner::start(sh("c", "exec cat"), None, fast());
+        assert!(status_is(&r, |s| matches!(s, RunnerStatus::Running { .. })).await);
+        assert!(
+            !g.has_changed().unwrap(),
+            "not attached: its spawn bumps nothing"
+        );
+        r.attach(&generation);
+        assert_eq!(*g.borrow_and_update(), 1, "the attach bumps once");
+        let slot = r.child_watch();
+        // a respawn by the supervisor: the same child, a new stdio generation
+        let first = r.child().unwrap();
+        let RunnerStatus::Running { generation: io } = r.status() else {
+            unreachable!()
+        };
+        assert!(first.restart(LIMIT).await);
+        assert!(
+            status_is(
+                &r,
+                |s| matches!(s, RunnerStatus::Running { generation: now } if now != io)
+            )
+            .await
+        );
+        assert!(!g.has_changed().unwrap(), "the same child: no bump");
+        // held: the child stopped, one bump, the slot already empty when it comes
+        r.stop_before().await;
+        assert_eq!(*g.borrow_and_update(), 2, "the stop bumps once");
+        assert!(slot.borrow().is_none());
+        // resumed: a new child, one bump, already in the slot when it comes
+        r.start_after().await;
+        tokio::time::timeout(LIMIT, g.changed())
+            .await
+            .expect("the spawn bumps")
+            .unwrap();
+        assert_eq!(*g.borrow_and_update(), 3, "the spawn bumps once");
+        let second = slot.borrow().clone().expect("published before the bump");
+        assert!(!second.state_watch().same_channel(&first.state_watch()));
+        // detached: one bump; the stop at shutdown bumps nothing
+        r.detach();
+        assert_eq!(*g.borrow_and_update(), 4, "the detach bumps once");
+        r.detach();
+        r.shutdown().await;
+        assert!(!g.has_changed().unwrap(), "off the list: nothing more");
     }
 
     #[test]

@@ -30,7 +30,12 @@ the `x-sse-events` map) into `ui/src/lib/api/types.gen.ts` — never hand-edited
   snapshots). After `reset` the Layer 5 views also refetch `/fabric`, `/messages/threads`, `/contacts`,
   `/nearby` and `/panels`. Layer 6 adds `network_message` and `bridge` (below); after `reset` its views also refetch
   `/networks`, `/bridge/edges` and `/transport`. Layer 7 adds `relay` (a full `RelayStatus` on change) and `registry` (`{rows}`, a full
-  snapshot); after `reset` its views also refetch `/relay` and `/registry` (the store re-reads a slice only once something loaded it).
+  snapshot); after `reset` its views also refetch `/relay` and `/registry` (the store re-reads a slice only once something loaded it). Layer 8 adds `storage` (§16.3): the fields the housekeeping pass
+  already holds, `{schema, disk, keep, node_state, integrity, classes, notices}`, with `classes` the four budgeted ones (`fabric`, `agent`, `heal`,
+  `logs`), never a figure that needs a walk, and sent only on a change of `disk_low`, `store_full`, a class's `full`, `node_state.state` to or from
+  `unavailable` (or its `reason`), `integrity`, or after a reclaim: an open or a close of the node-state store on use sends none, and no timer sends
+  one. The page refetches `GET /storage` on the frame for the rest; after `reset` the Layer 8 views refetch `/storage` (a loaded slice only). Its
+  second part adds the `dataset` frame, coalesced per job (at most one per 5 s tick while it runs, plus one on each state change and at its end). Layer 9 adds `incident` (one `Incident` on change, §18.2); after `reset` the Repairs view refetches `/repairs` and `/repairs/incidents` (a loaded slice only), and no timer sends a frame.
 - **Layer 5 additions (Messaging & Data; `os/5-messaging/README.md` §15, D20) — additive under `/api/v1`:**
   - *Routes:* `GET /messages/threads`, `GET /messages/threads/{peer}`, `POST /messages`, `POST /messages/{id}/retry`,
     `GET|POST /contacts`, `GET|PATCH|DELETE /contacts/{id}`, `GET /contacts/me/card`, `GET /fabric`,
@@ -46,8 +51,9 @@ the `x-sse-events` map) into `ui/src/lib/api/types.gen.ts` — never hand-edited
     `POST /messages` always answers 202 and never promises delivery. The agent does not call it: it proposes
     (`kind: message`) and the human accepts in the UI. Peer-authored strings (`Message.text`, `NearbyNode.*` names) are
     untrusted: text-only rendering.
-  - *Writes that are loopback-only* (403 `loopback_only` otherwise): `PATCH /fabric/settings`, `POST /fabric/hub/offer`.
-    The rest follow the usual rule (loopback or a paired session).
+  - *Writes that are loopback-only* (403 `loopback_only` otherwise): `PATCH /fabric/settings`, `POST /fabric/hub/offer`; Layer 7 adds
+    `POST /relay/pair/offer`, `POST /relay/pair`, `DELETE /relay/paired/{node_id}` (below); Layer 8 adds `PATCH /storage/settings`,
+    `DELETE /storage/set-aside/{file}`, `POST /storage/start-empty` and `POST /datasets/adopt` (below). The rest follow the usual rule (loopback or a paired session).
   - *Problem codes:* `port_busy` (409 on `identify` when the port has another owner), `panel_ticket_expired` (403, sent
     by a **panel listener** on its own port, not by `/api/v1`: a spent or expired ticket without a cookie),
     `upstream_error` (502: a panel shim whose upstream is down, a hub that is unreachable or refuses, meshmud that did not
@@ -207,8 +213,118 @@ the `x-sse-events` map) into `ui/src/lib/api/types.gen.ts` — never hand-edited
        actions above.
   - *The UI seam:* the Layer 7 adapter is `ui/src/lib/api/relay.ts` (`RelayAdapter`, `createHttpRelay`), reached through `getRelay()` in
     `lib/api/index.ts` and imported dynamically, so none of it is in the eager chunk; the dev mock's relay is `adapter.mock.relay`.
+- **Layer 8 additions, part 1 (Storage & Shared State; `os/8-storage/README.md` §16, D34, D38) — additive under `/api/v1`; the dataset routes and shapes are the second part:**
+  - *Routes:* `GET /storage` (`StorageStatus`), `PATCH /storage/settings` (a partial `StorageSettings` plus `accept_warning`), `POST /storage/export-offer`
+    (`{class: fabric|agent|heal}` → 204), `POST /storage/update-without-copy` (`{release, store, accept_warning?}` → 204), `DELETE /storage/set-aside/{file}`
+    (→ 204; 404 for a name no `set_aside_store` notice gives) and `POST /storage/start-empty` (`{store, accept_warning?}` → 204). `GET /chat/history` and
+    `POST /proposals/{id}/decision` answer 503 `store_unavailable` while the node-state store is unavailable (the decision applies nothing).
+  - *Who may call:* the `GET` follows the usual rule and the agent's bearer reads it (`storage.read`); it carries no secret and no consent hash. The
+    agent's bearer is refused (401) on every write here (the global gate, no allowlist); the agent acts only through proposals (`kind: storage`).
+    **Loopback-only** (403 `loopback_only` otherwise): `PATCH /storage/settings`, `DELETE /storage/set-aside/{file}`, `POST /storage/start-empty`; a paired
+    session reads every setting and changes only the `update-without-copy` consent and the export offers. A `quota.set` decided from a session that is not on loopback
+    answers 403 `loopback_only` on `POST /proposals/{id}/decision`, applies nothing and leaves the proposal open.
+  - *`StorageStatus`:* `disk` (`free`, `total`, `floor`, `disk_low`, `origin`: null unless `state/origin/` is its own filesystem), `keep` (`bytes`, `default`,
+    `effective` = the sum of the caps in force, `rule` ∈ `termux`, `hub`, `linux`, `user`), `node_state` (`state` ∈ `open`, `closed`, `unavailable`; `reason`;
+    `file_bytes`), `integrity` (`fabric`, `node_state` ∈ null, `checking`, `ok`, `failed`), `classes[]` (`id` the closed set of §4.1; `layer`, `bytes`, `cap`,
+    `budgeted`, `export_offer_needed`, `full`) and `notices[]` (`unreadable_agent_files`, `update_refused_space`, `set_aside_store`). Two shapes the spec left to prose are
+    fixed here: `classes[].at_least` (optional boolean: a walked figure that stopped at the 100,000-entry bound) and, on the `agent` class only,
+    `classes[].beside` = `{spool, work, legacy_v0}`, each `{bytes, at_least}`: three on-request walks outside `bytes`, never budgeted. `settings` (a
+    `StorageSettings`) is optional beside the figures; the frame never carries it. Every name in a notice is untrusted: text only.
+  - *Consent round-trip (`409 consent_required`):* the Layer 6 and 7 round-trip, unchanged. Layer 8 appends the actions `dataset_fetch`, `dataset_override`,
+    `datasets_serve`, `components_serve` (`PATCH /storage/settings`, `origin.*`; addon `termux` for the Termux tick), `update_without_copy` (subject
+    `<release>:<store>`) and `store_start_empty` (subject the store). `ConsentRequired` gains an optional `facts` object, absent for every earlier action: the
+    live figures shown under `warning_text` and never part of `hash` (`{free, free_after, days?}`, `{remaining}`, `{needed, free}`), so a figure that moves does not ask again.
+  - *Enum growth (all additive; unknown values render as `unknown`):* `Proposal.kind` + `storage` (body: one JSON object `{"why": string, "actions": [Action]}` from
+    `quota.set {class, bytes or null}`, `dataset.remove {publisher?, id, version}`, `dataset.fetch {publisher?, id, version}`; rendered as a card from the parsed
+    JSON, never as Markdown); `Proposal.decision.applied` (optional: the record's `applied`, `{pending: true}` while an apply runs); `Status.update.last_result`
+    + `refused_space`; `ConsentRequired.action` + the six above; `Problem.code` + `insufficient_space`, `untrusted_publisher`, `job_running`, `store_unavailable`,
+    `range_not_satisfiable`; `FabricStatus.unconsumed {agent_op, kb, update, patch, sync}` (optional). New schemas: `StorageStatus`, `StorageSettings`,
+    `StorageSettingsPatch` and their parts.
+  - *Pin list for these items (each enum or tool-count bump touches these; the change is not done until all are green):* (1) `Proposal.kind` 9 → 10 (`storage`): `KINDS` in
+    `1-bootstrap/crates/node111/src/daemon/dashboard/api_v1/proposals.rs` (`[&str; 10]`), the UI's proposal card (`ui/src/views/agent/proposal-body.tsx`), the agent's
+    writer. (3) `pnpm gen:types`, then `node scripts/gen-sse.mjs --check`; the tuples `STORAGE_CLASS_IDS`, `STORAGE_STORES`, `STORAGE_NOTICE_KINDS`,
+    `STORAGE_KEEP_RULES`, `STORAGE_INTEGRITY_STATES`, `STORAGE_NODE_STATES`, `EXPORT_OFFER_CLASSES` are listed in `scripts/gen-sse.mjs` (`ENUMS`), and `PROBLEM_CODES`,
+    `CONSENT_ACTIONS`, `PROPOSAL_KINDS` grow. (4) `x-sse-events.events` gains `storage`, and the UI store's `switch (frame.event)` handles it (a `storage` slice, completed by
+    `GET /storage`, re-read after `reset` once loaded). (5) `test/gen.test.ts`, `test/http.test.ts`, `test/layer8-contract.test.ts` and the mock storage
+    (`ui/src/lib/api/mock/storage.ts`), whose frames validate against `x-sse-events`; `test/layer6-contract.test.ts` and `test/layer7-contract.test.ts` pin the prefixes of the
+    grown lists. (6) node111's mirrors sit beside their routes (`dashboard/api_v1/{storage,datasets,tiles}.rs`). (8) the adapter seam `getStorage()` beside `getRelay()` in
+    `lib/api/index.ts`. (9) this section. (10) `decision.applied`, `refused_space`, `store_start_empty`, the three routes above and their client methods in the storage adapter.
+  - *The UI seam:* the Layer 8 adapter is `ui/src/lib/api/storage.ts` (`StorageAdapter`, `createHttpStorage`), reached through `getStorage()` in `lib/api/index.ts` and imported
+    dynamically (only by a Layer 8 view, or by the store after a `storage` frame), so none of it is in the eager chunk; the dev mock's storage is `adapter.mock.storage`.
+- **Layer 8 additions, part 2 (datasets, tiles, the server component and the child panel; `os/8-storage/README.md` §16, §9, §10, D34, D38) — additive under `/api/v1`:**
+  - *Routes:* `GET /datasets` (`{schema, publishers: [Publisher], holdings: [Holding], jobs: [Job]}`), `POST /datasets/check` (202), the entries under
+    `/datasets/entries/{publisher}/{id}/{version}` (`DELETE`, and `POST …/fetch` → 202 `Job`) so no `id` meets a literal sibling (`check`, `drafts`, `publish`,
+    `search`, `jobs`, `adopt`), `DELETE /datasets/jobs/{job}` and `POST /datasets/jobs/{job}/resume`, `GET`/`POST /datasets/drafts` (`POST` → 202 `Job`),
+    `POST /datasets/publish` (→ `{seq}`), `GET /datasets/search` (`q`, `book?`, `publisher?`, `n?`), `POST /datasets/adopt` (→ 204), `GET /tiles`,
+    `GET`/`HEAD /tiles/{publisher}/{id}/{version}` and `POST /bridge/components/{id}/stop` (→ 204). `panelId` on `POST /panels/{id}/session` is a `ServiceId` or,
+    for a `child` panel, its `ComponentId` (`PanelId`; `Panel.id` follows).
+  - *Who may call:* every GET follows the usual rule and the agent's bearer reads it. Every write refuses the agent's bearer (401, the global gate, no
+    allowlist). **`POST /datasets/adopt` is loopback only** (403 `loopback_only` otherwise) and is never a session and never the bearer: it is `111 dataset import`'s
+    hand-off, so the page has no client method for it. Fetch, remove, jobs, check and drafts are a human (a loopback or paired session); publish is a loopback or paired
+    session, a human, and 409 `needs_hub` without the hub role.
+  - *Shapes:* `Publisher {node_id, label, home, seq, source, sources, skipped, entries: [DatasetEntry]}`; `DatasetEntry` = the §5.3 fields plus `state`, `location`
+    and `non_commercial`; **one state enum** for `DatasetEntry.state` and `Holding.state`: `not_held` (an entry only), `partial`, `present`, `unverified`,
+    `disk_absent`; `location` is `origin` or `in_place` on both and null on an entry that is `not_held`; `Holding {publisher, id, version, sha256, bytes,
+    location, state, used_by}`; `Job {id, publisher, entry, version, state, done_bytes, total_bytes, source, metered: {match, cap, days} | null,
+    override_bytes}` with `id` = `job-…` and `state` one of the §7.4 states (`queued`, `running`, `paused (offline | metered cap | metered link | disk low |
+    source busy)`, `done`, `failed (<reason>)`, `cancelled`; a pause is a state, never an error, and a `failed (…)` reason a page does not know renders as it is).
+    `Component.adapter` is `NetworkId` or null (a server component, kiwix) and stays in `Component.required`, so the key never vanishes; `Component.start` is
+    `always` or `on_demand` (optional: an older node omits it, which means `always`).
+  - *Publisher strings are untrusted:* `Publisher.label` and an entry's `name`, `version`, `licence`, `attribution`, `source_url`, `built` and `book`, a job's
+    `source`, and the same strings inside a consent's `warning_text`, are the publisher's: rendered as text only, never Markdown or HTML (the rule for names and labels above).
+  - *Consent:* `POST …/fetch`, `POST /datasets/drafts` and `POST /datasets/jobs/{job}/resume` are the round-trip: 409 `consent_required` with `consent.action`
+    `dataset_fetch` (and, at a metered cap, `dataset_override` until `accept_override` carries its hash), the text, the hash and `facts` (`{free, free_after, days?}`,
+    `{remaining}`) shown under the text and never hashed. Other refusals: 409 `insufficient_space` (checked again on the repeat), `untrusted_publisher`, `job_running`
+    (only for an entry that already has a job), `needs_hub`, `component_unavailable` (the search while kiwix-serve is off).
+  - *Ranges:* `GET`/`HEAD /tiles/{publisher}/{id}/{version}` serve the file through the Range arm as `application/octet-stream` (206 for one range; `Accept-Ranges: bytes`;
+    always `Content-Length`). A range past the end, or two or more ranges, answers **416 with a `problem+json` body, code `range_not_satisfiable`**, under `/api/v1` and on a
+    panel listener (and none on `/origin/v1/`, which has no body for a 416, §7.1). The browser reads tiles from the dashboard it is paired with, under the unchanged
+    `connect-src 'self'`.
+  - *SSE:* `dataset` → `SseDataset` (a `Job`), **coalesced per job** (§7.4): at most one per 5 s housekeeping tick while it runs, plus one on each state change and at its
+    end; no timer, none on a node with no job. After `reset` the Layer 8 views refetch `/datasets` (a loaded slice only: the store re-reads it once something loaded it).
+  - *Pin list for these items:* (3) `pnpm gen:types`, then `node scripts/gen-sse.mjs --check`: the tuples `DATASET_KINDS`, `DATASET_STATES`, `DATASET_LOCATIONS`,
+    `DATASET_USED_BY`, `JOB_STATES` (the closed part of `Job.state`; `failed (<reason>)` is open) and `COMPONENT_STARTS` are listed in `ENUMS`, with the aliases for the new
+    shapes. (4) `x-sse-events.events` gains `dataset`; the store's `switch (frame.event)` handles it (a `datasets` slice, folded per job and re-read on a state change).
+    (5) `test/gen.test.ts`, `test/http.test.ts` (every new operation has a client call except `adoptDatasets` and `getTile`, which a page never calls as a method; `HEAD /tiles/…` is in `openapi.yaml` but the digest lists GET, POST, PUT, PATCH and DELETE),
+    `test/layer8-contract.test.ts` and the mock (`ui/src/lib/api/mock/storage.ts`). (7) the components stop route's client method (`stopComponent` on the storage adapter,
+    with its mock) and `panelId` (`panelFor` takes a `PanelId`; `openSession`, the panel model and the mock's `openSession` are widened to it by row U5). (9) this section. (10) the search route's `publisher`.
+  - *The UI seam:* the dataset methods and `stopComponent` are on the same `StorageAdapter` (`ui/src/lib/api/storage.ts`), so none of them is in the eager chunk.
+- **Layer 9 additions, part 1 (Self-Healing & Evolution, the incidents; `os/9-evolution/README.md` §3.4, §3.5, §18, D35, D39) — additive under `/api/v1`; the other routes of §18.1 are the contract's later parts:**
+  - *Routes:* `GET /repairs` (`RepairsStatus`), `GET /repairs/incidents` (`{schema, incidents, next_after_seq}`, `?state&after_seq&limit`), `GET /repairs/incidents/{id}` (`Incident`),
+    `POST /repairs/incidents/{id}/dismiss` (→ 204, no body) and `GET /repairs/audit` (`{schema, entries, next_after_seq}`, `?after_seq&limit`).
+  - *Who may call:* the status and the incident reads follow the usual rule and the agent's bearer reads them (the agent's `incident.read` tool, §18.3). `/repairs/audit` is for a paired
+    session or loopback (`111 heal audit`; §18.1 does not list the bearer for it). **The dismissal is a human's** (a loopback or paired session): the agent's bearer is refused (401, the
+    global gate, no allowlist); the agent proposes and never dismisses. 404 `not_found` for an incident id the node does not hold.
+  - *Paging (normative, every Layer 9 list that reads the store):* `?after_seq&limit`; `limit` is at most 1,000 and an absent `limit` reads 1,000 (Layer 8's J9 bound); a `limit` of 0 or above
+    1,000, or an `after_seq` that is not a whole number, is 400 `bad_request`. `next_after_seq` is the `seq` of the last row returned, or `null` when that page is the last (an empty page is null too; a store-closed node lists its in-memory rows, `seq` 0, in one page and only when `after_seq` is absent). An incident row's `seq`
+    is its `last.seq` (the store's `seq` of its newest write: a recurrence moves it, so a row can come again on a later page; keep the newest copy by `id`); an audit entry's is its own `seq`.
+    The playbooks list (a later part) is read from the payload and carries no cursor.
+  - *Id families, minted by `111d` from the OS random source (never derived from `seq`):* `inc-`, `att-`, `del-`, `dft-`, each the prefix plus 12 lowercase hex; a fix id is the 64-hex BLAKE3-256 of
+    the fix body (`fix_id`). Schemas `IncidentId`, `AttemptId`, `DelegationId`, `DraftId`, `FixId`.
+  - *Shapes:* `RepairsStatus {schema, verdict, needs_you, open, overflow, store, model_tasks}` with `verdict` ∈ `clear`, `waiting`, `confirm`; `needs_you[] {kind, id, incident_id|null, title}` with `kind` ∈
+    `proposal`, `confirm`, `revert_failed`, `revert_blocked`, `refused`; `store {state, reason|null}` with `state` ∈ `open`, `full`, `unavailable`, `journal`; `model_tasks {running, waiting}`.
+    `Incident` is §3.5's record (`opened`, `last` and `closed` are `IncidentMark {seq, boot_id, mono_ms, tick, epoch: null, wall_claim|null}`; `wall_claim` is display only and never orders anything);
+    `Attempt {id, proposal_id|null, incident_id|null, action, target, state, probe: {name, result}|null, confirm_by: session|peer|null}` with §4.2's eight attempt states; `AuditEntry {seq, boot_id,
+    mono_ms, kind, proposal_id|null, action_hash|null, probe_result|null, revert_result|null, confirmer: probe|human|null, by: human|daemon}` with §4's fourteen kinds. Shapes §18.4 leaves to prose,
+    fixed here: the audit list's envelope and `AuditEntry`'s null members; the check and probe `result` words are open strings the page renders as they are; `IncidentMark.seq` is 0 while a record is held only in memory; an incident row's cursor is `last.seq`; `next_after_seq` is null on the last page; `dismissed.cause_id` is nullable; text bounds the spec does not give (explanation 8,192, needs-you title 256, fingerprint subject and reason 64, evidence ref 128, attempt target 256) are the contract's.
+  - *Untrusted text:* an evidence `excerpt` (at most 512 B), a subject, an `explanation.text`, a `needs_you[].title` and every name in an attempt are rendered as text, preformatted where multi-line, never as
+    Markdown or HTML. No Layer 9 shape carries a secret, a message body or a log line beyond the 512 B excerpt.
+  - *SSE:* `incident` → `SseIncident` (one `Incident`, on change), appended to `x-sse-events.events`. After `reset` the Repairs view refetches `/repairs` and `/repairs/incidents`.
+  - *Pin list for these items:* (3) `pnpm gen:types`, then `node scripts/gen-sse.mjs --check`; the tuples `REPAIRS_VERDICTS`, `NEEDS_YOU_KINDS`, `REPAIRS_STORE_STATES`, `INCIDENT_STATES`, `INCIDENT_OUTCOMES`,
+    `INCIDENT_SEVERITIES`, `INCIDENT_EVIDENCE_KINDS`, `INCIDENT_AGREEMENTS`, `ATTEMPT_STATES`, `ATTEMPT_CONFIRM_BY`, `AUDIT_KINDS` are listed in `scripts/gen-sse.mjs` (`ENUMS`), with the aliases for the new shapes.
+    (4) `incident` in `x-sse-events.events` and in the store's `switch (frame.event)` (`repairs` and `incidents` slices; a frame is folded into a loaded list and reads `GET /repairs`; with nothing loaded it reads both).
+    (5) `test/gen.test.ts`, `test/http.test.ts` (every new operation has a client call), `test/layer9-contract.test.ts` and the mock repairs (`ui/src/lib/api/mock/repairs.ts`), whose frames validate against `x-sse-events`;
+    `test/layer8-contract.test.ts` pins the prefix of the grown event list. (6) node111's mirrors sit beside their routes (`dashboard/api_v1/repairs.rs`, D22); until then the dismissal is in `UNROUTED` of `tests/dashboard_auth.rs`.
+  - *The UI seam:* the Layer 9 adapter is `ui/src/lib/api/repairs.ts` (`RepairsAdapter`, `createHttpRepairs`), reached through `getRepairs()` in `lib/api/index.ts` and imported dynamically (only by a Layer 9 view, or by the
+    store after an `incident` frame), so none of it is in the eager chunk; the dev mock's repairs is `adapter.mock.repairs`.
+  - *The `busy` rule (Layer 9, part 0; §7.4 step 2, §16 rows 15 and 18, corrections of locked Layers 4 and 6):* `Problem.code` gains `busy`, appended. While another change holds the node-wide apply lock (an apply, probe and
+    revert loop, a reach-class confirm wait included) or the undo file exists in any phase, `PATCH /api/v1/transport/posture` and an accept on `POST /api/v1/proposals/{id}/decision` (any proposal kind, a
+    `device` one included) answer **409 `busy`** at once where today they wait on the applier's lock. The problem's `detail` carries that attempt's id (`att-…`, the family above); nothing is armed, the
+    proposal stays open and the call changes nothing. A client shows `busy` (the Layer 6 posture control, the proposal card) and lets the person try again; it never retries by itself. A dismissal of a
+    proposal is not an accept and is not refused. No route is added. `ui/src/lib/api/sse.gen.ts` lists `busy` in `PROBLEM_CODES` after `range_not_satisfiable` (and `types.gen.ts` in the `Problem.code` union); the guard itself lands with D20.
 - **Not gated:** `/`, static assets, `/health` (body is booleans), `/origin/v1/*` (Layer 7, §9.1: the hub's verified update files, GET only,
-  404 unless the hub serves them; outside `openapi.yaml`) and `/api/v1/auth/*`. Everything
+  404 unless the hub serves them; outside `openapi.yaml`; Layer 8 adds `/origin/v1/catalogue/*` and `/origin/v1/notice/*`, §16.7: GET and HEAD only, 405
+  otherwise, served only while `hub_role`, LAN sharing and `origin.datasets` (or `origin.components`, or `origin.serve` for the release's source, for a notice) are on, outside `API`) and `/api/v1/auth/*`. Everything
   else — including the Layer 1 seam `/api/status` and the `/v1` legacy page — needs loopback or a
   session.
 - **Chat stream (`POST /chat`, `stream:true`):** the response body is `text/event-stream` with
@@ -218,4 +334,4 @@ the `x-sse-events` map) into `ui/src/lib/api/types.gen.ts` — never hand-edited
 - **Identity:** no key material on any route, ever (Layer 2 rule). `node.label`/`bech32` are
   display forms computed from the public id.
 - **Timestamps:** RFC 3339 UTC. **IDs:** `conv-…` minted by the client (`[A-Za-z0-9_-]{1,128}`);
-  `prop-…`/`task-…` minted by `111-agent`; `msg-…` minted by `111d` (Layer 5); `fc-…`/`fm-…`/`be-…`/`sg-…` minted by `111d` (Layer 6). Layer 7 mints no new id family: a paired hub is its `NodeId`.
+  `prop-…`/`task-…` minted by `111-agent`; `msg-…` minted by `111d` (Layer 5); `fc-…`/`fm-…`/`be-…`/`sg-…` minted by `111d` (Layer 6). Layer 7 mints no new id family: a paired hub is its `NodeId`. Layer 8's first part mints none (a store is `fabric` or `node_state`, a class one of §4.1's nine ids); its second part adds `job-…`, minted by `111d` (a dataset job, §7.4).

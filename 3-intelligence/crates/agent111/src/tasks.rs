@@ -29,12 +29,52 @@ use crate::store::{new_id, Store, Task, TaskState};
 /// <prompt>`. See 0-knowledge/projects/opencode.md (headless JSONL is the
 /// delegation seam). The exact subcommand/flags drift across opencode
 /// releases (the 2.x line moves fast), so pinning a version is one edit here.
+/// Never an auto-approve switch (`--auto`, or its hidden aliases `--yolo` and
+/// `--dangerously-skip-permissions`): without one, a headless run rejects
+/// every permission it would have to ask for (Layer 9 §8.1; R07g1 F1).
 const OPENCODE_ARGV: &[&str] = &["run", "--format", "json", "--pure"];
 /// Provider id declared in the per-task `opencode.json`; the model flag is
-/// `-m local/<model_id>`. Verified against opencode 1.18.18: without this
-/// project config it rejects any model id not in its catalog
-/// ("ProviderModelNotFoundError"), and `--pure` disables external plugins.
+/// `-m local/<model_id>`. Pinned to opencode 1.19.5 (Layer 9 §8.2), read at
+/// its tag: without this project config it rejects any model id not in its
+/// catalog ("ProviderModelNotFoundError"), and `--pure` disables external
+/// plugins.
 const OPENCODE_PROVIDER: &str = "local";
+/// The provider package opencode 1.19.5 bundles: any other `npm` value takes
+/// its install path, a download at run time (Layer 9 §8.1; R07g1 F4).
+const OPENCODE_PROVIDER_NPM: &str = "@ai-sdk/openai-compatible";
+/// Set to `1` in the child (Layer 9 §8.1; R07g1 F2, opencode 1.19.5's names):
+/// no model catalogue fetch, no update check, no LSP server download, no
+/// import of another assistant's home prompt and skills, no external skills.
+const OPENCODE_DISABLE_FLAGS: [&str; 5] = [
+    "OPENCODE_DISABLE_MODELS_FETCH",
+    "OPENCODE_DISABLE_AUTOUPDATE",
+    "OPENCODE_DISABLE_LSP_DOWNLOAD",
+    "OPENCODE_DISABLE_CLAUDE_CODE",
+    "OPENCODE_DISABLE_EXTERNAL_SKILLS",
+];
+/// The child's `HOME` is `<work dir>/home` (Layer 9 §8.1).
+const OPENCODE_HOME: &str = "home";
+/// The four XDG base directories, each at its XDG default under that `HOME`.
+const OPENCODE_XDG: [(&str, &str); 4] = [
+    ("XDG_CONFIG_HOME", ".config"),
+    ("XDG_DATA_HOME", ".local/share"),
+    ("XDG_CACHE_HOME", ".cache"),
+    ("XDG_STATE_HOME", ".local/state"),
+];
+/// The child's `TMPDIR`, under that `HOME` too (Layer 9 §8.1: nothing of the
+/// child outside the task's work dir). opencode 1.19.5 creates
+/// `<os.tmpdir()>/opencode` at every start (`core/src/global.ts:15`, `:39`):
+/// with `TMPDIR` unset that is `/tmp/opencode`, a shared directory.
+const OPENCODE_TMPDIR: (&str, &str) = ("TMPDIR", "tmp");
+/// npm offline in the child (Layer 9 §8.1, no download at run time; R07g1
+/// F4). opencode 1.19.5 starts a background install of `@opencode-ai/plugin`
+/// from the npm registry into its config dir whenever that dir holds no
+/// `node_modules` (`opencode/src/config/config.ts:450-471`,
+/// `core/src/npm.ts:147-163`): with a fresh `HOME` per task, at every task.
+/// It reads its npm settings from the child's environment
+/// (`core/src/npm-config.ts:12-29`); offline, the install finds nothing in
+/// its empty cache and fails without a request, and opencode only logs it.
+const OPENCODE_NPM_OFFLINE: (&str, &str) = ("npm_config_offline", "true");
 
 const DEFAULT_PATCH_TIMEOUT: Duration = Duration::from_secs(600);
 const HEALTH_TIMEOUT: Duration = Duration::from_secs(2);
@@ -411,8 +451,12 @@ impl Ctx {
             MAX_PATCH_PROMPT,
         );
 
-        // No WAN/cloud model, no API keys: the child sees only PATH, HOME and
-        // the one permitted provider, the local OpenAI-compatible endpoint.
+        // No WAN/cloud model, no API keys, nothing of the node's home (Layer 9
+        // §8.1): the project config denies every tool but read, glob and
+        // grep; the child sees the node's PATH, a HOME, the XDG dirs and a
+        // TMPDIR inside the work dir, opencode's five switches, npm offline,
+        // and the one permitted provider, the local OpenAI-compatible
+        // endpoint.
         let model_base = format!("{}/v1", self.cfg.model_base.trim_end_matches('/'));
         write_opencode_config(&work, &model_base, &self.cfg.model_id)
             .map_err(|e| format!("cannot write opencode.json: {e}"))?;
@@ -422,17 +466,11 @@ impl Ctx {
             .arg(format!("{OPENCODE_PROVIDER}/{}", self.cfg.model_id))
             .arg(prompt)
             .current_dir(&work)
-            .env_clear()
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
-        for key in ["PATH", "HOME"] {
-            if let Some(v) = std::env::var_os(key) {
-                cmd.env(key, v);
-            }
-        }
-        cmd.env("OPENAI_BASE_URL", &model_base)
-            .env("OPENAI_API_KEY", "local");
+        opencode_env(&mut cmd, &work, &model_base)
+            .map_err(|e| format!("cannot prepare opencode's home in {}: {e}", work.display()))?;
 
         let child = cmd
             .spawn()
@@ -492,20 +530,74 @@ enum Msg {
 /// Per-task opencode project config: exactly one provider, the local
 /// OpenAI-compatible endpoint, with the node's model declared so opencode's
 /// catalog check passes. No cloud provider can be reached from this config.
+///
+/// Layer 9 §8.1, the deny block (R07g1 F2): every tool is denied but `read`,
+/// `glob` and `grep`, and those only inside the cwd (`external_directory`
+/// denied); no update check, no session sharing. opencode applies the last
+/// rule that matches a permission, in the file's key order, so the `*` rule
+/// must come first: serde_json's map writes its keys sorted, and `*` sorts
+/// before every tool name.
 fn write_opencode_config(work: &Path, model_base: &str, model_id: &str) -> std::io::Result<()> {
     let cfg = serde_json::json!({
         "$schema": "https://opencode.ai/config.json",
         "provider": {
             OPENCODE_PROVIDER: {
-                "npm": "@ai-sdk/openai-compatible",
+                "npm": OPENCODE_PROVIDER_NPM,
                 "name": "111 local model",
                 "options": { "baseURL": model_base, "apiKey": "local" },
                 "models": { model_id: { "name": model_id } }
             }
         },
-        "model": format!("{OPENCODE_PROVIDER}/{model_id}")
+        "model": format!("{OPENCODE_PROVIDER}/{model_id}"),
+        "permission": {
+            "*": "deny",
+            "read": "allow",
+            "glob": "allow",
+            "grep": "allow",
+            "edit": "deny",
+            "bash": "deny",
+            "webfetch": "deny",
+            "websearch": "deny",
+            "external_directory": "deny",
+            "task": "deny",
+            "skill": "deny",
+            "lsp": "deny",
+            "question": "deny"
+        },
+        "autoupdate": false,
+        "share": "disabled"
     });
     std::fs::write(work.join("opencode.json"), serde_json::to_vec_pretty(&cfg)?)
+}
+
+/// The child's whole environment (Layer 9 §8.1): cleared, then the node's
+/// `PATH`; `HOME`, the four XDG base directories and `TMPDIR` inside the
+/// task's work dir, created here, so opencode's database, `auth.json`, logs,
+/// caches, truncated tool output and temporary files stay with the task and
+/// nothing it reads at start comes from the node's home (R07g1 F3); the five
+/// switches of [`OPENCODE_DISABLE_FLAGS`] set to `1`; npm offline
+/// ([`OPENCODE_NPM_OFFLINE`]); the local endpoint. `HOME` is made absolute:
+/// the child would resolve a relative one against its own cwd.
+fn opencode_env(cmd: &mut Command, work: &Path, model_base: &str) -> std::io::Result<()> {
+    let home = std::path::absolute(work)?.join(OPENCODE_HOME);
+    cmd.env_clear();
+    if let Some(path) = std::env::var_os("PATH") {
+        cmd.env("PATH", path);
+    }
+    cmd.env("HOME", &home);
+    for (key, rel) in OPENCODE_XDG.into_iter().chain([OPENCODE_TMPDIR]) {
+        let dir = home.join(rel);
+        std::fs::create_dir_all(&dir)?;
+        cmd.env(key, dir);
+    }
+    for flag in OPENCODE_DISABLE_FLAGS {
+        cmd.env(flag, "1");
+    }
+    let (npm_key, npm_value) = OPENCODE_NPM_OFFLINE;
+    cmd.env(npm_key, npm_value)
+        .env("OPENAI_BASE_URL", model_base)
+        .env("OPENAI_API_KEY", "local");
+    Ok(())
 }
 
 /// Drive a piped child to completion or the deadline. Reader threads feed a
@@ -751,5 +843,87 @@ mod tests {
     fn caps_respect_char_boundaries() {
         assert_eq!(tail_of("aé", 2), "é");
         assert!(cap_str("ééé", 3).starts_with('é'));
+    }
+
+    /// Layer 9 §8.1: none of opencode 1.19.5's auto-approve switches, in any
+    /// spelling yargs accepts (`--x`, `--x=…`, the camel-case alias).
+    #[test]
+    fn opencode_argv_never_auto_approves() {
+        for arg in OPENCODE_ARGV {
+            let name = arg.split('=').next().unwrap_or(arg);
+            assert!(
+                !matches!(
+                    name,
+                    "--auto"
+                        | "--yolo"
+                        | "--dangerously-skip-permissions"
+                        | "--dangerouslySkipPermissions"
+                ),
+                "auto-approve switch in OPENCODE_ARGV: {arg}"
+            );
+        }
+    }
+
+    /// Layer 9 §8.1: the explicit environment is exactly PATH, HOME, the four
+    /// XDG dirs and TMPDIR (absolute, under that HOME, created), the five
+    /// switches at `1`, npm offline and the local endpoint; nothing comes
+    /// from the node's HOME or its TMPDIR.
+    #[test]
+    fn opencode_env_keeps_home_and_xdg_in_the_work_dir() {
+        use std::collections::BTreeMap;
+
+        let dir = tempfile::tempdir().unwrap();
+        let work = dir.path().join("work").join("task-1");
+        let mut cmd = Command::new("true");
+        opencode_env(&mut cmd, &work, "http://127.0.0.1:11181/v1").unwrap();
+        let envs: BTreeMap<String, String> = cmd
+            .get_envs()
+            .map(|(k, v)| {
+                let v = v
+                    .expect("set, never removed")
+                    .to_string_lossy()
+                    .into_owned();
+                (k.to_string_lossy().into_owned(), v)
+            })
+            .collect();
+
+        let home = Path::new(&envs["HOME"]);
+        assert_eq!(home, work.join(OPENCODE_HOME));
+        // The XDG dirs and TMPDIR: opencode makes `$TMPDIR/opencode` at
+        // every start, `/tmp/opencode` when TMPDIR is unset.
+        for key in OPENCODE_XDG
+            .map(|(key, _)| key)
+            .into_iter()
+            .chain(["TMPDIR"])
+        {
+            let p = Path::new(envs.get(key).unwrap_or_else(|| panic!("{key} is set")));
+            assert!(
+                p.is_absolute() && p.starts_with(home),
+                "{key}={} is under HOME",
+                p.display()
+            );
+            assert!(p.is_dir(), "{key} is created: {}", p.display());
+        }
+        for flag in OPENCODE_DISABLE_FLAGS {
+            assert_eq!(envs.get(flag).map(String::as_str), Some("1"), "{flag}");
+        }
+        // opencode's background npm install into a fresh config dir makes
+        // no request in offline mode.
+        assert_eq!(
+            envs.get("npm_config_offline").map(String::as_str),
+            Some("true"),
+            "npm offline"
+        );
+        assert_eq!(envs["OPENAI_BASE_URL"], "http://127.0.0.1:11181/v1");
+        assert_eq!(envs["OPENAI_API_KEY"], "local");
+        let path = std::env::var_os("PATH").map(|p| p.to_string_lossy().into_owned());
+        assert_eq!(envs.get("PATH"), path.as_ref(), "the node's PATH, as is");
+        // HOME, the XDG dirs, TMPDIR, the switches, npm offline, the endpoint.
+        let expected = 1 + OPENCODE_XDG.len() + 1 + OPENCODE_DISABLE_FLAGS.len() + 1 + 2;
+        assert_eq!(
+            envs.len(),
+            expected + usize::from(path.is_some()),
+            "{envs:?}"
+        );
     }
 }

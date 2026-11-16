@@ -1,0 +1,94 @@
+{
+  "case": "region-kept",
+  "decision": {
+    "applied": {
+      "actions": [
+        {
+          "action": "radio.region.set",
+          "applied": true,
+          "reason": null,
+          "reverted": false,
+          "skipped": false
+        }
+      ],
+      "applied": true,
+      "reason": null,
+      "reverted": false
+    },
+    "at": "NORMALISED",
+    "decision": "accepted",
+    "schema": 1
+  },
+  "files": [
+    {
+      "mode": "600",
+      "path": "agent/decisions/prop-p1-region-kept.json",
+      "sha256": "d06998611b18c2360888b1d5b3edae58ddd80f4a9b4f30785e06c82cce54ba6e"
+    },
+    {
+      "mode": "600",
+      "path": "rns/config",
+      "sha256": "a8a14d9a5ecf52d52a0fb7cf84e776bedf602e8783558b65874221905ed49e55"
+    },
+    {
+      "mode": "600",
+      "path": "state/dashboard-pair.json",
+      "sha256": null
+    },
+    {
+      "mode": "600",
+      "path": "state/dashboard-sessions.json",
+      "sha256": null
+    },
+    {
+      "mode": "644",
+      "path": "state/dashboard.json",
+      "sha256": null
+    },
+    {
+      "mode": "600",
+      "path": "state/devices.json",
+      "sha256": null
+    },
+    {
+      "mode": "600",
+      "path": "state/interfaces.toml",
+      "sha256": "098b68eab1d08f3cd98bb8b64c7fcef99a0b1ab904af3a86ba1a5fcac919af39"
+    },
+    {
+      "mode": "644",
+      "path": "state/panels.json",
+      "sha256": null
+    },
+    {
+      "mode": "600",
+      "path": "state/staging.lock",
+      "sha256": null
+    }
+  ],
+  "http_status": 200,
+  "proposal": {
+    "actions": [
+      {
+        "action": "radio.region.set",
+        "region": "US"
+      }
+    ],
+    "why": "P1 region"
+  },
+  "recorded_at_commit": "3da8e300eb0af0b4bd9855a987e197ca364f7f86",
+  "report": {
+    "actions": [
+      {
+        "action": "radio.region.set",
+        "applied": true,
+        "reason": null,
+        "reverted": false,
+        "skipped": false
+      }
+    ],
+    "applied": true,
+    "reason": null,
+    "reverted": false
+  }
+}

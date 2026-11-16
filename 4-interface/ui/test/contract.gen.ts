@@ -55,7 +55,13 @@ export const schemas: Record<string, JsonSchema> = {
           "licensed_board",
           "metered_cap",
           "lan_off",
-          "pair_role_mismatch"
+          "pair_role_mismatch",
+          "insufficient_space",
+          "untrusted_publisher",
+          "job_running",
+          "store_unavailable",
+          "range_not_satisfiable",
+          "busy"
         ]
       },
       "errors": {
@@ -170,7 +176,11 @@ export const schemas: Record<string, JsonSchema> = {
           "pending": {"type":"boolean"},
           "pending_version": {"type":["string","null"]},
           "last_check": {"type":["string","null"],"format":"date-time"},
-          "last_result": {"type":["string","null"],"enum":["up_to_date","staged","refused","degraded",null]},
+          "last_result": {
+            "type": ["string","null"],
+            "enum": ["up_to_date","staged","refused","degraded","refused_space",null],
+            "description": "Layer 8 appends `refused_space` (§13.6 (5)): the release was refused because this node could not keep a rollback copy; an `update_refused_space` notice on `GET /storage` names it"
+          },
           "floor": {"type":["string","null"]},
           "clock_fault": {"type":"boolean"}
         }
@@ -302,15 +312,35 @@ export const schemas: Record<string, JsonSchema> = {
       "task_id": {"type":["string","null"]},
       "kind": {
         "type": "string",
-        "enum": ["diagnose","propose","patch","chat","message","bridge_message","bridge_edge","device","relay"],
-        "description": "Layer 7 adds `relay` (§13.2; body: one JSON object `{\"why\": string, \"actions\": [Action]}` where an Action is `{\"action\": name, …args}` from the closed vocabulary `gateway.enable {carrier, mode}`, `hub.pair {}`, `presence.interval {transport, minutes}`, `carrier.flush {}`; accepting it runs the same validation, consent and refusal paths as the routes (a consent gate answers 409 `consent_required` and the human repeats the decision with `accept_warning`); `presence.interval` is refused `unsupported_action` in v1; a body that is not that shape is 502 `upstream_error`; it renders as a card from the parsed JSON, never as Markdown). Layer 6 adds `bridge_message` (body: `to: <fc-id>` lines, a blank line, then the text verbatim; accepting runs the fan-out validation and, if a consent gate applies, the 409 `consent_required` round-trip), `bridge_edge` (body: a `from: <fc-id>` line and a `to: <fc-id>` line, then the agent's reason; accepting runs the edge-enable consent round-trip) and `device` (body: one JSON object `{\"why\": string, \"actions\": [Action]}` where an Action is `{\"action\": name, …args}` from the closed vocabulary `rns.interface.upsert {device_id, type, params}`, `rns.interface.remove {name}`, `rns.posture.set {share_instance, enable_transport}`, `radio.region.set {region}`, plus the one-shots `identify {device_id}` and `service.restart {service_id}`; 111d validates, applies, probes and reverts; the other vocabulary entries are refused `unsupported_action`; a body that is not that shape is 502 `upstream_error`). RENDERING RULE: the text part of a `bridge_message` or `bridge_edge` body quotes foreign, untrusted text and is rendered as a preformatted text block, never as Markdown (no links, no emphasis); `device` bodies render as a card from the parsed JSON. Layer 5 adds `message` (§17 `messages.send`): the body is exactly `to: <64 lowercase hex>` + a blank line + the text verbatim; accepting it (POST /proposals/{id}/decision) makes 111d send it — only to an accepted contact and only when the proposal's `node_id` names this node — and the decision is recorded after the store committed the message"
+        "enum": [
+          "diagnose",
+          "propose",
+          "patch",
+          "chat",
+          "message",
+          "bridge_message",
+          "bridge_edge",
+          "device",
+          "relay",
+          "storage"
+        ],
+        "description": "Layer 8 adds `storage` (§16.4; body: one JSON object `{\"why\": string, \"actions\": [Action]}` where an Action is `{\"action\": name, …args}` from the closed vocabulary `quota.set {class, bytes or null}` (class: `keep`, `agent`, `heal` or a Layer 5 refusable class), `dataset.remove {publisher?, id, version}`, `dataset.fetch {publisher?, id, version}` (`publisher` defaults to the home hub); accepting it runs the routes' own validation, consent and refusal paths, a consent gate answering 409 `consent_required` and the human repeating the decision with `accept_warning`; a `quota.set` applies through `PATCH /storage/settings` or `PATCH /fabric/settings` with that route's own `loopback_only` check, so a decision from a session that is not on loopback answers 403 `loopback_only`, applies nothing and leaves the proposal open; any other action is `unsupported_action`; a body that is not that shape is 502 `upstream_error`; it renders as a card from the parsed JSON, never as Markdown). Layer 7 adds `relay` (§13.2; body: one JSON object `{\"why\": string, \"actions\": [Action]}` where an Action is `{\"action\": name, …args}` from the closed vocabulary `gateway.enable {carrier, mode}`, `hub.pair {}`, `presence.interval {transport, minutes}`, `carrier.flush {}`; accepting it runs the same validation, consent and refusal paths as the routes (a consent gate answers 409 `consent_required` and the human repeats the decision with `accept_warning`); `presence.interval` is refused `unsupported_action` in v1; a body that is not that shape is 502 `upstream_error`; it renders as a card from the parsed JSON, never as Markdown). Layer 6 adds `bridge_message` (body: `to: <fc-id>` lines, a blank line, then the text verbatim; accepting runs the fan-out validation and, if a consent gate applies, the 409 `consent_required` round-trip), `bridge_edge` (body: a `from: <fc-id>` line and a `to: <fc-id>` line, then the agent's reason; accepting runs the edge-enable consent round-trip) and `device` (body: one JSON object `{\"why\": string, \"actions\": [Action]}` where an Action is `{\"action\": name, …args}` from the closed vocabulary `rns.interface.upsert {device_id, type, params}`, `rns.interface.remove {name}`, `rns.posture.set {share_instance, enable_transport}`, `radio.region.set {region}`, plus the one-shots `identify {device_id}` and `service.restart {service_id}`; 111d validates, applies, probes and reverts; the other vocabulary entries are refused `unsupported_action`; a body that is not that shape is 502 `upstream_error`). RENDERING RULE: the text part of a `bridge_message` or `bridge_edge` body quotes foreign, untrusted text and is rendered as a preformatted text block, never as Markdown (no links, no emphasis); `device` bodies render as a card from the parsed JSON. Layer 5 adds `message` (§17 `messages.send`): the body is exactly `to: <64 lowercase hex>` + a blank line + the text verbatim; accepting it (POST /proposals/{id}/decision) makes 111d send it — only to an accepted contact and only when the proposal's `node_id` names this node — and the decision is recorded after the store committed the message"
       },
       "title": {"type":"string"},
       "body": {"type":"string","description":"markdown"},
       "created_at": {"type":"string","format":"date-time"},
       "decision": {
         "type": ["object","null"],
-        "properties": {"decision":{"$ref":"#/components/schemas/Decision"},"at":{"type":"string","format":"date-time"}}
+        "properties": {
+          "decision": {"$ref":"#/components/schemas/Decision"},
+          "at": {"type":"string","format":"date-time"},
+          "applied": {
+            "type": "object",
+            "additionalProperties": true,
+            "properties": {"pending":{"type":"boolean"}},
+            "description": "Layer 8 (§2.4 rule 5), optional: the record's `applied` as the node-state store holds it, `{pending: true}` while an apply runs and then the result, so a half-applied decision is readable through `GET /proposals/{id}`. Absent for a decision with nothing to apply and from older nodes."
+          }
+        }
       }
     }
   },
@@ -871,13 +901,13 @@ export const schemas: Record<string, JsonSchema> = {
       "quotas": {
         "type": "object",
         "additionalProperties": {"type":["integer","null"],"minimum":0},
-        "description": "capacity shaping per refusable stored-data class, in bytes: kb, update, patch, sync, object, custody, foreign (Layer 6: foreign-network rows, §3; messages and agent ops are never refused, §10.4, so they take no quota); null means no quota. Not a per-sender limit; those do not exist"
+        "description": "capacity shaping per refusable stored-data class, in bytes: kb, update, patch, sync, object, custody, foreign, transit (Layer 6: foreign-network rows, §3; messages and agent ops are never refused, §10.4, so they take no quota); null means no quota. Layer 7 (§5.8, §6.3) adds `transit`: a hub's forward rows for its paired hubs, apart from its members' `custody`; it always has a quota, so while the fabric runs it reads a number: unset, one quarter of the custody quota, else of the store's high watermark (128 MiB at the default), and each origin of forward rows holds at most one eighth of it (no key of its own). While the fabric is stopped `quotas` is empty (no class is read), and a class whose quota the store cannot read reads null. Not a per-sender limit; those do not exist"
       }
     }
   },
   "FabricSettingsPatch": {
     "type": "object",
-    "description": "Partial merge. In `quotas`, a class set to null drops its quota; only the refusable classes (kb, update, patch, sync, object, custody, foreign) take one — any other key is 400.",
+    "description": "Partial merge. In `quotas`, a class set to null drops its quota (`transit`, Layer 7 §5.8, then reads its derived default again: one quarter of the custody quota, else of the high watermark); only the refusable classes (kb, update, patch, sync, object, custody, foreign, transit) take one — any other key is 400.",
     "properties": {
       "hub_role": {"type":"boolean"},
       "listen_lan": {"type":"boolean"},
@@ -954,6 +984,18 @@ export const schemas: Record<string, JsonSchema> = {
       "counters": {
         "$ref": "#/components/schemas/FabricCounters",
         "description": "diagnostics for Advanced; absent while the fabric is not running (store.open false) and from older daemons"
+      },
+      "unconsumed": {
+        "type": "object",
+        "required": ["agent_op","kb","update","patch","sync"],
+        "description": "Layer 8 (§12.3), optional: items of each shared-log kind committed and acknowledged with no consumer registered since the fabric started, a session counter. Absent from older nodes.",
+        "properties": {
+          "agent_op": {"type":"integer","minimum":0},
+          "kb": {"type":"integer","minimum":0},
+          "update": {"type":"integer","minimum":0},
+          "patch": {"type":"integer","minimum":0},
+          "sync": {"type":"integer","minimum":0}
+        }
       }
     }
   },
@@ -1080,7 +1122,10 @@ export const schemas: Record<string, JsonSchema> = {
     "required": ["id","port","entry","needs_secure_context","allow","optional_hosts","state"],
     "description": "A hosted panel (§13): an adopted project's own web UI on its own origin `http://<host as typed>:<port>`. The UI builds the origin from `location.hostname` and `port`, never from a shared snapshot. The dashboard frames only registry-declared panels.",
     "properties": {
-      "id": {"$ref":"#/components/schemas/ServiceId","description":"= the service id and KB link"},
+      "id": {
+        "$ref": "#/components/schemas/PanelId",
+        "description": "= the service id and KB link; a `child` panel (Layer 8) has its component's id"
+      },
       "port": {
         "type": "integer",
         "minimum": 11190,
@@ -1181,6 +1226,10 @@ export const schemas: Record<string, JsonSchema> = {
     "pattern": "^[a-z0-9][a-z0-9_-]{0,39}$",
     "description": "an optional component's id from `assets/components/<id>.toml` (§2.1)"
   },
+  "PanelId": {
+    "description": "A hosted panel's id (Layer 8, §9.1 (5)): a `ServiceId`, or for a `child` panel its component's `ComponentId`. `anyOf`: every `ServiceId` also matches the `ComponentId` pattern.",
+    "anyOf": [{"$ref":"#/components/schemas/ServiceId"},{"$ref":"#/components/schemas/ComponentId"}]
+  },
   "Sha256Hex": {
     "type": "string",
     "pattern": "^[0-9a-f]{64}$",
@@ -1255,7 +1304,15 @@ export const schemas: Record<string, JsonSchema> = {
     "description": "An optional third-party component (§2.1). While `disabled` or only `declared`/`cached` it has no process, listener, loaded code, timer or open file; the sizes are what enabling would add.",
     "properties": {
       "id": {"$ref":"#/components/schemas/ComponentId"},
-      "adapter": {"$ref":"#/components/schemas/NetworkId","description":"the network this component carries"},
+      "adapter": {
+        "oneOf": [{"$ref":"#/components/schemas/NetworkId"},{"type":"null"}],
+        "description": "the network this component carries; null for a server component that names none (kiwix, Layer 8 §9.2). The key is always present."
+      },
+      "start": {
+        "type": "string",
+        "enum": ["always","on_demand"],
+        "description": "Layer 8 (§9.2, optional; absent from an older node, which means `always`): `on_demand` starts the child on first use and stops it when idle (`POST …/stop`, 30 idle passes), `always` from enable on"
+      },
       "state": {"$ref":"#/components/schemas/ComponentState"},
       "cached_bytes": {
         "type": ["integer","null"],
@@ -1731,9 +1788,15 @@ export const schemas: Record<string, JsonSchema> = {
           "carrier_enable",
           "pair_plain",
           "gateway_bit",
-          "origin_serve"
+          "origin_serve",
+          "dataset_fetch",
+          "dataset_override",
+          "datasets_serve",
+          "components_serve",
+          "update_without_copy",
+          "store_start_empty"
         ],
-        "description": "which confirmation this is. Layer 7 appends `carrier_enable` (ntfy on, or its metered cap set or raised; subject `<kind>:<server>`), `pair_plain` (pairing over an unencrypted non-private link; subject the far hub's NodeId), `gateway_bit` (the public gateway role bit) and `origin_serve` (serving update files to the LAN)"
+        "description": "which confirmation this is. Layer 8 appends `dataset_fetch` (subject `<publisher short>:<id>@<version>`), `dataset_override` (the same subject: a fetch past a metered cap), `datasets_serve` and `components_serve` (subject the hub's NodeId, short; `components_serve` carries the addon `termux` for the Termux install files), `update_without_copy` (subject `<release>:<store>`, §13.6 (5)) and `store_start_empty` (subject the store, §13.7). Layer 7 appends `carrier_enable` (ntfy on, or its metered cap set or raised; subject `<kind>:<server>`), `pair_plain` (pairing over an unencrypted non-private link; subject the far hub's NodeId), `gateway_bit` (the public gateway role bit) and `origin_serve` (serving update files to the LAN)"
       },
       "subject": {
         "type": "string",
@@ -1748,6 +1811,17 @@ export const schemas: Record<string, JsonSchema> = {
         "type": "array",
         "items": {"type":"string"},
         "description": "the live add-on facts included in the text (default-key source, uplinked destination, licensed account) so the UI can badge them"
+      },
+      "facts": {
+        "type": "object",
+        "description": "Layer 8 (§7.7), optional; absent for every earlier action: the live figures the UI shows under `warning_text`. They are never part of `hash`, so a figure that moves does not ask again. `{free, free_after, days?}` for `dataset_fetch` (`days` when the link is metered), `{remaining}` for `dataset_override`, `{needed, free}` for `update_without_copy`. Bytes; `days` a whole number.",
+        "properties": {
+          "free": {"type":"integer","minimum":0},
+          "free_after": {"type":"integer","minimum":0},
+          "days": {"type":"integer","minimum":0},
+          "remaining": {"type":"integer","minimum":0},
+          "needed": {"type":"integer","minimum":0}
+        }
       }
     }
   },
@@ -2413,7 +2487,7 @@ export const schemas: Record<string, JsonSchema> = {
     "properties": {
       "lan_record": {
         "type": "boolean",
-        "description": "the `_111._tcp` DNS-SD record (§7.1); needs LAN sharing and a LAN-bound listener"
+        "description": "the `_n111._tcp` DNS-SD record (§7.1); needs LAN sharing and a LAN-bound listener"
       },
       "public_gateway_bit": {
         "type": "boolean",
@@ -2681,6 +2755,1021 @@ export const schemas: Record<string, JsonSchema> = {
     "type": "object",
     "required": ["rows"],
     "properties": {"rows":{"type":"array","items":{"$ref":"#/components/schemas/RegistryRow"}}}
+  },
+  "StorageClassId": {
+    "type": "string",
+    "enum": ["fabric","agent","heal","logs","datasets","updates","components","bridge","kb"],
+    "description": "The closed set of §4.1. Unknown values render as `unknown`."
+  },
+  "StorageStore": {
+    "type": "string",
+    "enum": ["fabric","node_state"],
+    "description": "The two encrypted stores (§2, §13): `fabric` is `fabric/store.db`, `node_state` is `node/state.db`."
+  },
+  "StorageWalk": {
+    "type": "object",
+    "required": ["bytes","at_least"],
+    "description": "One on-request walk (§4.1): `at_least` is true when it stopped at the 100,000-entry bound (D13) and the figure is a lower bound.",
+    "properties": {"bytes":{"type":"integer","minimum":0},"at_least":{"type":"boolean"}}
+  },
+  "StorageClass": {
+    "type": "object",
+    "required": ["id","layer","bytes","cap","budgeted","export_offer_needed","full"],
+    "description": "One class of §4.1. `bytes` is the class's figure; `cap` its share or override in force (null for an unbudgeted class). `full` (§4.5) is false for every class but `agent` and `heal`.",
+    "properties": {
+      "id": {"$ref":"#/components/schemas/StorageClassId"},
+      "layer": {"type":"integer","minimum":0,"maximum":9},
+      "bytes": {"type":"integer","minimum":0},
+      "cap": {"type":["integer","null"],"minimum":0},
+      "budgeted": {"type":"boolean"},
+      "export_offer_needed": {"type":"boolean","description":"the class's export offer is unanswered (§4.5)"},
+      "full": {"type":"boolean"},
+      "at_least": {
+        "type": "boolean",
+        "description": "optional: `bytes` is a walked figure that stopped at the 100,000-entry bound (D13), so it is a lower bound; absent when exact"
+      },
+      "beside": {
+        "type": "object",
+        "required": ["spool","work","legacy_v0"],
+        "description": "On the `agent` class only (§4.1): the three on-request walks, outside `bytes` and never budgeted.",
+        "properties": {
+          "spool": {"$ref":"#/components/schemas/StorageWalk"},
+          "work": {"$ref":"#/components/schemas/StorageWalk"},
+          "legacy_v0": {"$ref":"#/components/schemas/StorageWalk"}
+        }
+      }
+    }
+  },
+  "StorageDiskOrigin": {
+    "type": "object",
+    "required": ["free","total","floor","disk_low"],
+    "description": "`state/origin/` when it is another filesystem than the root's (§5.1).",
+    "properties": {
+      "free": {"type":"integer","minimum":0},
+      "total": {"type":"integer","minimum":0},
+      "floor": {"type":"integer","minimum":0},
+      "disk_low": {"type":"boolean"}
+    }
+  },
+  "StorageDisk": {
+    "type": "object",
+    "required": ["free","total","floor","disk_low","origin"],
+    "properties": {
+      "free": {"type":"integer","minimum":0},
+      "total": {"type":"integer","minimum":0},
+      "floor": {"type":"integer","minimum":0,"description":"the fabric's built 1 % (§4.2 item 5)"},
+      "disk_low": {"type":"boolean"},
+      "origin": {
+        "oneOf": [{"$ref":"#/components/schemas/StorageDiskOrigin"},{"type":"null"}],
+        "description": "null unless `state/origin/` is its own filesystem"
+      }
+    }
+  },
+  "StorageKeep": {
+    "type": "object",
+    "required": ["bytes","default","effective","rule"],
+    "description": "The one budget of the four budgeted classes (§4.2). `effective` is the sum of the caps in force; the page shows it when it differs from `bytes`.",
+    "properties": {
+      "bytes": {"type":"integer","minimum":0},
+      "default": {"type":"integer","minimum":0},
+      "effective": {"type":"integer","minimum":0},
+      "rule": {
+        "type": "string",
+        "enum": ["termux","hub","linux","user"],
+        "description": "which rule produced `bytes`: the install-time default for a Termux node, a hub, any other Linux node, or the user's own figure"
+      }
+    }
+  },
+  "StorageNodeState": {
+    "type": "object",
+    "required": ["state","reason","file_bytes"],
+    "properties": {
+      "state": {
+        "type": "string",
+        "enum": ["open","closed","unavailable"],
+        "description": "`closed` is the idle state (§2.2 rule 7), not a fault; `unavailable` carries `reason`"
+      },
+      "reason": {"type":["string","null"],"description":"display-only; why the store is unavailable, else null"},
+      "file_bytes": {
+        "type": ["integer","null"],
+        "minimum": 0,
+        "description": "`state.db`'s size from one `stat`; null when there is no file"
+      }
+    }
+  },
+  "StorageIntegrityState": {
+    "type": ["string","null"],
+    "enum": ["checking","ok","failed",null],
+    "description": "null: no check is due (§13.7)"
+  },
+  "StorageIntegrity": {
+    "type": "object",
+    "required": ["fabric","node_state"],
+    "properties": {
+      "fabric": {"$ref":"#/components/schemas/StorageIntegrityState"},
+      "node_state": {"$ref":"#/components/schemas/StorageIntegrityState"}
+    }
+  },
+  "StorageNotice": {
+    "type": "object",
+    "required": ["kind"],
+    "description": "One thing the page shows beside the figures. `unreadable_agent_files` {count} (§2.4); `update_refused_space` {release, store, needed_bytes} (§13.6 (5)); `set_aside_store` {file, bytes}: a `.rolled-back-v<N>`, `.damaged-<n>` or `.replaced-<n>` file. Unknown kinds render as nothing.",
+    "properties": {
+      "kind": {"type":"string","enum":["unreadable_agent_files","update_refused_space","set_aside_store"]},
+      "count": {"type":"integer","minimum":0},
+      "release": {"type":"string"},
+      "store": {"$ref":"#/components/schemas/StorageStore"},
+      "needed_bytes": {"type":"integer","minimum":0},
+      "file": {"type":"string","description":"a file name under the node's state, never a path"},
+      "bytes": {"type":"integer","minimum":0}
+    }
+  },
+  "StorageOrigin": {
+    "type": "object",
+    "required": ["datasets","components","termux","max_streams"],
+    "properties": {
+      "datasets": {"type":"boolean"},
+      "components": {"type":"boolean"},
+      "termux": {
+        "type": "boolean",
+        "description": "the \"Termux install files\" tick under `components` (§11.5); not offered, so off, in a release without verified licences for those pins"
+      },
+      "max_streams": {"type":"integer","minimum":1,"maximum":16}
+    }
+  },
+  "StorageSettings": {
+    "type": "object",
+    "required": ["keep_bytes","keep_default","caps","logs","follow","sources","origin"],
+    "description": "Every setting of `state/storage.json` a person may read (§15.1). `update_without_copy` consents are not here, and no consent hash is.",
+    "properties": {
+      "keep_bytes": {"type":["integer","null"],"minimum":0,"description":"null = `keep_default`"},
+      "keep_default": {"type":"integer","minimum":0,"description":"an install-time fact; nobody writes it"},
+      "caps": {
+        "type": "object",
+        "required": ["agent","heal"],
+        "properties": {
+          "agent": {"type":["integer","null"],"minimum":0,"description":"null = the share (§4.2 item 3)"},
+          "heal": {"type":["integer","null"],"minimum":0}
+        }
+      },
+      "logs": {
+        "type": "object",
+        "required": ["max_file_bytes"],
+        "properties": {"max_file_bytes":{"type":"integer","minimum":1}}
+      },
+      "follow": {
+        "type": "array",
+        "items": {"$ref":"#/components/schemas/NodeId"},
+        "description": "followed publishers (the home hub is always trusted)"
+      },
+      "sources": {
+        "type": "object",
+        "additionalProperties": {"type":"array","items":{"type":"string"}},
+        "description": "`{publisher hex: [origin URL]}` (§7.4). Untrusted strings: text only."
+      },
+      "origin": {"$ref":"#/components/schemas/StorageOrigin"}
+    }
+  },
+  "StorageSettingsPatch": {
+    "type": "object",
+    "description": "Partial merge of `StorageSettings`' writable keys. `accept_warning` is the hash of the `datasets_serve` or `components_serve` text the human was shown; absent on the first call.",
+    "properties": {
+      "keep_bytes": {"type":["integer","null"],"minimum":0},
+      "caps": {
+        "type": "object",
+        "properties": {"agent":{"type":["integer","null"],"minimum":0},"heal":{"type":["integer","null"],"minimum":0}}
+      },
+      "logs": {"type":"object","properties":{"max_file_bytes":{"type":"integer","minimum":1}}},
+      "follow": {"type":"array","items":{"$ref":"#/components/schemas/NodeId"},"description":"replaces the list"},
+      "sources": {
+        "type": "object",
+        "additionalProperties": {"type":"array","items":{"type":"string"}},
+        "description": "replaces the map"
+      },
+      "origin": {
+        "type": "object",
+        "properties": {
+          "datasets": {"type":"boolean"},
+          "components": {"type":"boolean"},
+          "termux": {"type":"boolean"},
+          "max_streams": {"type":"integer","minimum":1,"maximum":16}
+        }
+      },
+      "accept_warning": {"$ref":"#/components/schemas/Sha256Hex"}
+    }
+  },
+  "StorageStatus": {
+    "type": "object",
+    "required": ["schema","disk","keep","node_state","integrity","classes","notices"],
+    "description": "The whole storage state (§16.2). `settings` is optional and beside the figures so the page reads the switches with them; the frame does not carry it.",
+    "properties": {
+      "schema": {"type":"integer"},
+      "disk": {"$ref":"#/components/schemas/StorageDisk"},
+      "keep": {"$ref":"#/components/schemas/StorageKeep"},
+      "node_state": {"$ref":"#/components/schemas/StorageNodeState"},
+      "integrity": {"$ref":"#/components/schemas/StorageIntegrity"},
+      "classes": {"type":"array","items":{"$ref":"#/components/schemas/StorageClass"}},
+      "notices": {"type":"array","items":{"$ref":"#/components/schemas/StorageNotice"}},
+      "settings": {"$ref":"#/components/schemas/StorageSettings"}
+    }
+  },
+  "StorageExportOfferRequest": {
+    "type": "object",
+    "required": ["class"],
+    "properties": {"class":{"type":"string","enum":["fabric","agent","heal"]}}
+  },
+  "UpdateWithoutCopyRequest": {
+    "type": "object",
+    "required": ["release","store"],
+    "properties": {
+      "release": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 64,
+        "description": "the release an `update_refused_space` notice names"
+      },
+      "store": {"$ref":"#/components/schemas/StorageStore"},
+      "accept_warning": {
+        "$ref": "#/components/schemas/Sha256Hex",
+        "description": "the hash of the `update_without_copy` text the user was shown; absent on the first call"
+      }
+    }
+  },
+  "StartEmptyRequest": {
+    "type": "object",
+    "required": ["store"],
+    "properties": {
+      "store": {"$ref":"#/components/schemas/StorageStore"},
+      "accept_warning": {
+        "$ref": "#/components/schemas/Sha256Hex",
+        "description": "the hash of the `store_start_empty` text the user was shown; absent on the first call"
+      }
+    }
+  },
+  "SseStorage": {
+    "$ref": "#/components/schemas/StorageStatus",
+    "description": "A `StorageStatus` without `settings`, on a change §16.3 lists: `classes` holds the four budgeted ones (§4.1), never a figure that needs a walk or a read of the index or the registry; the page refetches `GET /storage` for the rest."
+  },
+  "DatasetKind": {
+    "type": "string",
+    "enum": ["zim","pmtiles"],
+    "description": "The reader (§5.3). `patch` is reserved for v1.1: an entry of a kind this node does not know is skipped whole and counted in `Publisher.skipped`, so no unknown kind reaches a page."
+  },
+  "DatasetState": {
+    "type": "string",
+    "enum": ["not_held","partial","present","unverified","disk_absent"],
+    "description": "The one state enum of `DatasetEntry.state` and `Holding.state` (§5.5): `not_held` (listed, not held; an entry only), `partial`, `present`, `unverified` (an out-of-tree file whose tuple changed or after an unclean shutdown: it answers 404 until re-hashed), `disk_absent` (an in-place file whose disk is not attached)."
+  },
+  "DatasetLocation": {
+    "type": ["string","null"],
+    "enum": ["origin","in_place",null],
+    "description": "Where a held file lives (§5.5): `origin` is the shared tree `state/origin/blob/`, `in_place` a path outside it; null on an entry that is `not_held`."
+  },
+  "DatasetUsedBy": {"type":"string","enum":["map","encyclopedia","agent","updates"],"description":"The chips of §15.4."},
+  "DatasetEntry": {
+    "type": "object",
+    "required": [
+      "id",
+      "kind",
+      "name",
+      "version",
+      "seq",
+      "size",
+      "sha256",
+      "blake3",
+      "ob_log",
+      "outboard_sha256",
+      "licence",
+      "attribution",
+      "source_url",
+      "built",
+      "used_by",
+      "state",
+      "location",
+      "non_commercial"
+    ],
+    "description": "A catalogue entry (§5.3) plus what this node holds. `name`, `version`, `licence`, `attribution`, `source_url`, `built` and `book` are the publisher's: untrusted, text only (never Markdown or HTML).",
+    "properties": {
+      "id": {
+        "type": "string",
+        "pattern": "^[a-z0-9][a-z0-9_.-]{0,63}$",
+        "description": "stable across versions; never a path"
+      },
+      "kind": {"$ref":"#/components/schemas/DatasetKind"},
+      "name": {"type":"string","maxLength":120},
+      "version": {
+        "type": "string",
+        "pattern": "^[A-Za-z0-9][A-Za-z0-9_.+-]{0,39}$",
+        "description": "never ordered, never a path"
+      },
+      "seq": {
+        "type": "integer",
+        "minimum": 0,
+        "description": "the catalogue `seq` at which this (id, version) first appeared: orders the versions of an id"
+      },
+      "size": {"type":"integer","minimum":0,"description":"bytes"},
+      "sha256": {"type":"string","pattern":"^[0-9a-f]{64}$","description":"the address in the tree"},
+      "blake3": {"type":"string","pattern":"^[0-9a-f]{64}$","description":"the root every block is checked against"},
+      "ob_log": {
+        "type": "integer",
+        "minimum": 10,
+        "maximum": 16,
+        "description": "the sidecar's block size, log2 of the chunk count per block"
+      },
+      "outboard_sha256": {"type":"string","pattern":"^[0-9a-f]{64}$","description":"the sidecar's address"},
+      "licence": {"type":"string","maxLength":256,"description":"an SPDX expression or `LicenseRef-…`"},
+      "attribution": {"type":"string","maxLength":1024},
+      "source_url": {"type":"string","maxLength":2048},
+      "built": {"type":"string","maxLength":40,"description":"a display string, never used for ordering"},
+      "requires": {"$ref":"#/components/schemas/ComponentId","description":"optional: `kiwix` for a `zim`"},
+      "fits": {
+        "type": "string",
+        "maxLength": 8,
+        "description": "optional: the smallest category it is meant for (`2A` … `4B`), shown in the consent, never a refusal"
+      },
+      "used_by": {"type":"array","items":{"$ref":"#/components/schemas/DatasetUsedBy"}},
+      "book": {
+        "type": "string",
+        "maxLength": 120,
+        "description": "optional, `zim` only: the ZIM's own `Name` metadata, the name kiwix-serve's search knows the book by (§9.4)"
+      },
+      "state": {"$ref":"#/components/schemas/DatasetState"},
+      "location": {"$ref":"#/components/schemas/DatasetLocation"},
+      "non_commercial": {
+        "type": "boolean",
+        "description": "the licence is an `-NC-` id: tagged \"non-commercial\" wherever it shows (§9.7)"
+      }
+    }
+  },
+  "Publisher": {
+    "type": "object",
+    "required": ["node_id","label","home","seq","source","sources","skipped","entries"],
+    "description": "One trusted publisher's verified catalogue (§6.2, §16.2). `label` is the publisher's: untrusted, text only.",
+    "properties": {
+      "node_id": {"$ref":"#/components/schemas/NodeId"},
+      "label": {"type":"string"},
+      "home": {"type":"boolean","description":"the pinned home hub"},
+      "seq": {
+        "type": "integer",
+        "minimum": 0,
+        "description": "the highest verified catalogue `seq` this node holds (§6.3)"
+      },
+      "source": {
+        "type": ["string","null"],
+        "description": "where that catalogue was last seen (\"newest catalogue seen: seq N from <source>\"); null for one only imported. Untrusted: text only."
+      },
+      "sources": {
+        "type": "array",
+        "items": {"type":"string"},
+        "description": "the origin URLs `sources` lists for it (§7.4). Untrusted: text only."
+      },
+      "skipped": {
+        "type": "integer",
+        "minimum": 0,
+        "description": "entries of a kind this node does not know (\"N entries need a newer 111\", §5.4)"
+      },
+      "entries": {"type":"array","items":{"$ref":"#/components/schemas/DatasetEntry"}}
+    }
+  },
+  "Holding": {
+    "type": "object",
+    "required": ["publisher","id","version","sha256","bytes","location","state","used_by"],
+    "description": "One held (publisher, id, version) of the holdings index (§5.5).",
+    "properties": {
+      "publisher": {"$ref":"#/components/schemas/NodeId"},
+      "id": {"type":"string","pattern":"^[a-z0-9][a-z0-9_.-]{0,63}$"},
+      "version": {"type":"string","pattern":"^[A-Za-z0-9][A-Za-z0-9_.+-]{0,39}$"},
+      "sha256": {"type":"string","pattern":"^[0-9a-f]{64}$"},
+      "bytes": {"type":"integer","minimum":0},
+      "location": {"$ref":"#/components/schemas/DatasetLocation"},
+      "state": {"$ref":"#/components/schemas/DatasetState"},
+      "used_by": {"type":"array","items":{"$ref":"#/components/schemas/DatasetUsedBy"}}
+    }
+  },
+  "JobId": {
+    "type": "string",
+    "pattern": "^job-[A-Za-z0-9_-]{1,124}$",
+    "description": "minted by `111d` (a new id family, §16.2)"
+  },
+  "JobState": {
+    "description": "The §7.4 states: `queued`, `running`, `paused (offline)`, `paused (metered cap)`, `paused (metered link)`, `paused (disk low)`, `paused (source busy)`, `done`, `failed (<reason>)` (`failed (name mismatch)` and `failed (source cannot resume)` among them) and `cancelled`. A pause is a state, never an error. A reason this page does not know renders as it is. `anyOf`, not `oneOf`: the two `failed (...)` literals also match the open pattern, and a conforming validator must accept them.",
+    "anyOf": [
+      {
+        "type": "string",
+        "enum": [
+          "queued",
+          "running",
+          "paused (offline)",
+          "paused (metered cap)",
+          "paused (metered link)",
+          "paused (disk low)",
+          "paused (source busy)",
+          "done",
+          "failed (name mismatch)",
+          "failed (source cannot resume)",
+          "cancelled"
+        ]
+      },
+      {"type":"string","pattern":"^failed \\([^()]{1,80}\\)$"}
+    ]
+  },
+  "Job": {
+    "type": "object",
+    "required": [
+      "id",
+      "publisher",
+      "entry",
+      "version",
+      "state",
+      "done_bytes",
+      "total_bytes",
+      "source",
+      "metered",
+      "override_bytes"
+    ],
+    "description": "One dataset job (§7.4, §16.2). At most one runs per node; accepted fetches queue in order.",
+    "properties": {
+      "id": {"$ref":"#/components/schemas/JobId"},
+      "publisher": {"$ref":"#/components/schemas/NodeId"},
+      "entry": {"type":"string","pattern":"^[a-z0-9][a-z0-9_.-]{0,63}$","description":"the entry's `id`"},
+      "version": {"type":"string","pattern":"^[A-Za-z0-9][A-Za-z0-9_.+-]{0,39}$"},
+      "state": {"$ref":"#/components/schemas/JobState"},
+      "done_bytes": {"type":"integer","minimum":0},
+      "total_bytes": {"type":"integer","minimum":0},
+      "source": {
+        "type": ["string","null"],
+        "description": "the source in use (the home hub's origin or a `sources` URL, or the first copy's upstream); null while queued. Untrusted: text only."
+      },
+      "metered": {
+        "oneOf": [
+          {
+            "type": "object",
+            "required": ["match","cap","days"],
+            "properties": {
+              "match": {
+                "type": "object",
+                "description": "the metered rule that matches the job's connection: exactly one of `iface` or `ssid`",
+                "properties": {"iface":{"type":"string"},"ssid":{"type":"string"}}
+              },
+              "cap": {"type":"integer","minimum":1,"description":"the rule's daily cap, bytes"},
+              "days": {
+                "type": ["integer","null"],
+                "minimum": 0,
+                "description": "the days the pull takes at that cap, when it can be told"
+              }
+            }
+          },
+          {"type":"null"}
+        ],
+        "description": "null when the link is not metered (\"No metered link is set\")"
+      },
+      "override_bytes": {
+        "type": "integer",
+        "minimum": 0,
+        "description": "the bytes moved past a cap under `dataset_override` (§7.8)"
+      }
+    }
+  },
+  "SseDataset": {
+    "$ref": "#/components/schemas/Job",
+    "description": "A `Job`, coalesced per job (§7.4): at most one per 5 s housekeeping tick while it runs, plus one on each state change and at its end. Never on a timer; a node with no job sends none."
+  },
+  "DatasetsListing": {
+    "type": "object",
+    "required": ["schema","publishers","holdings","jobs"],
+    "properties": {
+      "schema": {"type":"integer"},
+      "publishers": {"type":"array","items":{"$ref":"#/components/schemas/Publisher"}},
+      "holdings": {"type":"array","items":{"$ref":"#/components/schemas/Holding"}},
+      "jobs": {"type":"array","items":{"$ref":"#/components/schemas/Job"}}
+    }
+  },
+  "DatasetDraft": {
+    "type": "object",
+    "required": ["draft","entry"],
+    "properties": {
+      "draft": {
+        "type": "string",
+        "pattern": "^[a-z0-9][a-z0-9_.-]{0,63}@[A-Za-z0-9][A-Za-z0-9_.+-]{0,39}$",
+        "description": "the `<id>@<version>` name `publish` takes"
+      },
+      "entry": {"$ref":"#/components/schemas/DatasetEntry"}
+    }
+  },
+  "DatasetDrafts": {
+    "type": "object",
+    "required": ["schema","drafts"],
+    "properties": {
+      "schema": {"type":"integer"},
+      "drafts": {"type":"array","items":{"$ref":"#/components/schemas/DatasetDraft"}}
+    }
+  },
+  "DatasetFetchRequest": {
+    "type": "object",
+    "description": "The pinned consent round-trip (§7.7): `accept_warning` is the hash of the `dataset_fetch` text the person was shown, `accept_override` the hash of the `dataset_override` text. Absent on the first call.",
+    "properties": {
+      "accept_warning": {"$ref":"#/components/schemas/Sha256Hex"},
+      "accept_override": {"$ref":"#/components/schemas/Sha256Hex"}
+    }
+  },
+  "DatasetDraftRequest": {
+    "type": "object",
+    "required": ["url","id","kind","name","version","licence","attribution","source_url","used_by"],
+    "description": "A first copy (§7.5): the upstream URL, optionally its sha256, and the entry's fields. `size`, `blake3`, the sidecar and `seq` are computed by the job. Publisher strings: text only.",
+    "properties": {
+      "url": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 2048,
+        "description": "https, or http to a URL the person typed (§7.3 (2))"
+      },
+      "sha256": {
+        "type": "string",
+        "pattern": "^[0-9a-f]{64}$",
+        "description": "the upstream's sha256, when the person or the mirror supplied one"
+      },
+      "id": {"type":"string","pattern":"^[a-z0-9][a-z0-9_.-]{0,63}$"},
+      "kind": {"$ref":"#/components/schemas/DatasetKind"},
+      "name": {"type":"string","minLength":1,"maxLength":120},
+      "version": {"type":"string","pattern":"^[A-Za-z0-9][A-Za-z0-9_.+-]{0,39}$"},
+      "licence": {"type":"string","minLength":1,"maxLength":256},
+      "attribution": {"type":"string","maxLength":1024},
+      "source_url": {"type":"string","maxLength":2048},
+      "built": {"type":"string","maxLength":40},
+      "requires": {"$ref":"#/components/schemas/ComponentId"},
+      "fits": {"type":"string","maxLength":8},
+      "used_by": {"type":"array","items":{"$ref":"#/components/schemas/DatasetUsedBy"}},
+      "book": {"type":"string","maxLength":120},
+      "accept_warning": {"$ref":"#/components/schemas/Sha256Hex"},
+      "accept_override": {"$ref":"#/components/schemas/Sha256Hex"}
+    }
+  },
+  "DatasetPublishRequest": {
+    "type": "object",
+    "required": ["drafts","remove"],
+    "properties": {
+      "drafts": {
+        "type": "array",
+        "items": {"type":"string","pattern":"^[a-z0-9][a-z0-9_.-]{0,63}@[A-Za-z0-9][A-Za-z0-9_.+-]{0,39}$"},
+        "description": "`<id>@<version>` draft names"
+      },
+      "remove": {
+        "type": "array",
+        "items": {
+          "type": "object",
+          "required": ["id","version"],
+          "properties": {
+            "id": {"type":"string","pattern":"^[a-z0-9][a-z0-9_.-]{0,63}$"},
+            "version": {"type":"string","pattern":"^[A-Za-z0-9][A-Za-z0-9_.+-]{0,39}$"}
+          }
+        },
+        "description": "entries to drop from the new catalogue"
+      }
+    }
+  },
+  "DatasetAdoptRequest": {
+    "type": "object",
+    "required": ["request","incoming","catalogues","drafts","in_place"],
+    "description": "What `111 dataset import` staged (§7.6); loopback only. Every item is checked again before anything is written. A draft is a `DatasetEntry` shape; the node ignores `state`, `location`, `non_commercial` and `seq` (derived at adoption and publish) and a CLI-staged draft may omit `built` and `used_by` semantics it has no flag for.",
+    "properties": {
+      "request": {
+        "type": "string",
+        "pattern": "^adopt-[0-9]{1,10}\\.json$",
+        "description": "the request file in `state/origin/incoming/`, deleted once adopted"
+      },
+      "incoming": {
+        "type": "array",
+        "items": {"type":"string","pattern":"^[0-9a-f]{64}$"},
+        "description": "sha256 of each verified copy in `incoming/` to rename into the tree"
+      },
+      "catalogues": {
+        "type": "array",
+        "items": {"$ref":"#/components/schemas/NodeId"},
+        "description": "publisher hex of each staged catalogue"
+      },
+      "drafts": {"type":"array","items":{"$ref":"#/components/schemas/DatasetEntry"}},
+      "in_place": {
+        "type": "array",
+        "items": {
+          "type": "object",
+          "required": ["sha256","path"],
+          "properties": {
+            "sha256": {"type":"string","pattern":"^[0-9a-f]{64}$"},
+            "path": {"type":"string","minLength":1,"maxLength":4096}
+          }
+        }
+      },
+      "follow": {"type":"array","items":{"$ref":"#/components/schemas/NodeId"}},
+      "sources": {"type":"object","additionalProperties":{"type":"array","items":{"type":"string"}}}
+    }
+  },
+  "DatasetSearchResult": {
+    "type": "object",
+    "required": ["schema","format","body"],
+    "properties": {
+      "schema": {"type":"integer"},
+      "format": {"type":"string","enum":["opensearch-xml"]},
+      "body": {
+        "type": "string",
+        "maxLength": 8192,
+        "description": "the upstream text capped at 8 KiB. Untrusted: text only, never parsed as markup by a page."
+      }
+    }
+  },
+  "TileSet": {
+    "type": "object",
+    "required": ["id","publisher","version","name","bytes","licence","attribution","url"],
+    "description": "One held PMTiles set (§10 (5)). `name`, `licence` and `attribution` are the publisher's: untrusted, text only.",
+    "properties": {
+      "id": {"type":"string","pattern":"^[a-z0-9][a-z0-9_.-]{0,63}$"},
+      "publisher": {"$ref":"#/components/schemas/NodeId"},
+      "version": {"type":"string","pattern":"^[A-Za-z0-9][A-Za-z0-9_.+-]{0,39}$"},
+      "name": {"type":"string"},
+      "bytes": {"type":"integer","minimum":0},
+      "licence": {"type":"string"},
+      "attribution": {"type":"string"},
+      "url": {"type":"string","description":"the path below: `/api/v1/tiles/{publisher}/{id}/{version}`"}
+    }
+  },
+  "TileSets": {
+    "type": "object",
+    "required": ["schema","sets"],
+    "properties": {"schema":{"type":"integer"},"sets":{"type":"array","items":{"$ref":"#/components/schemas/TileSet"}}}
+  },
+  "IncidentId": {
+    "type": "string",
+    "pattern": "^inc-[0-9a-f]{12}$",
+    "description": "`inc-` plus 12 hex from the OS random source, minted by `111d` before any store write (§3.5, §18.2)"
+  },
+  "AttemptId": {
+    "type": "string",
+    "pattern": "^att-[0-9a-f]{12}$",
+    "description": "`att-` plus 12 hex, minted by `111d` (§18.2)"
+  },
+  "DelegationId": {
+    "type": "string",
+    "pattern": "^del-[0-9a-f]{12}$",
+    "description": "`del-` plus 12 hex, minted by `111d` (§18.2)"
+  },
+  "DraftId": {
+    "type": "string",
+    "pattern": "^dft-[0-9a-f]{12}$",
+    "description": "`dft-` plus 12 hex, minted by `111d` (§18.2)"
+  },
+  "FixId": {
+    "type": "string",
+    "pattern": "^[0-9a-f]{64}$",
+    "description": "a fix's id: the BLAKE3-256 of its body bytes, 64 lowercase hex (§10, §18.2)"
+  },
+  "RepairsVerdict": {
+    "type": "string",
+    "enum": ["clear","waiting","confirm"],
+    "description": "`clear`: nothing needs the person; `waiting`: something waits for them; `confirm`: a change is applied and waits for the person's confirm (§14.1)"
+  },
+  "NeedsYouKind": {"type":"string","enum":["proposal","confirm","revert_failed","revert_blocked","refused"]},
+  "NeedsYouItem": {
+    "type": "object",
+    "required": ["kind","id","incident_id","title"],
+    "properties": {
+      "kind": {"$ref":"#/components/schemas/NeedsYouKind"},
+      "id": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 128,
+        "description": "the proposal's id (`proposal`), the attempt's id (`confirm`, `revert_failed`, `revert_blocked`), or for `refused` the proposal's id or a received fix's 64-hex id (no attempt exists then)"
+      },
+      "incident_id": {
+        "oneOf": [{"$ref":"#/components/schemas/IncidentId"},{"type":"null"}],
+        "description": "null for an item no incident raised (a fix received from a peer, an `apply_unrecorded`)"
+      },
+      "title": {"type":"string","maxLength":256,"description":"text 111 wrote or a playbook's own words; text only"}
+    }
+  },
+  "RepairsStoreState": {
+    "type": "string",
+    "enum": ["open","full","unavailable","journal"],
+    "description": "`open`: `heal/` records are written; `full`: the `heal` class is full while its export offer is unanswered (§4.1 rule 4); `unavailable`: the node-state store is closed (rule 2); `journal`: the store is not built and the fallback ring holds `heal/` (J7, rule 3)"
+  },
+  "RepairsStore": {
+    "type": "object",
+    "required": ["state","reason"],
+    "properties": {
+      "state": {"$ref":"#/components/schemas/RepairsStoreState"},
+      "reason": {
+        "type": ["string","null"],
+        "maxLength": 128,
+        "description": "the store's own reason code when it is not `open`; null when it is"
+      }
+    }
+  },
+  "RepairsModelTasks": {
+    "type": "object",
+    "required": ["running","waiting"],
+    "description": "The model tasks `111d` submitted (one at a time per node, §5.3).",
+    "properties": {"running":{"type":"integer","minimum":0},"waiting":{"type":"integer","minimum":0}}
+  },
+  "RepairsStatus": {
+    "type": "object",
+    "required": ["schema","verdict","needs_you","open","overflow","store","model_tasks"],
+    "properties": {
+      "schema": {"type":"integer","enum":[1]},
+      "verdict": {"$ref":"#/components/schemas/RepairsVerdict"},
+      "needs_you": {"type":"array","items":{"$ref":"#/components/schemas/NeedsYouItem"}},
+      "open": {"type":"integer","minimum":0,"maximum":64,"description":"open incidents (§3.4)"},
+      "overflow": {
+        "type": "integer",
+        "minimum": 0,
+        "description": "fingerprints refused because 64 incidents were open (capacity, not policy, §3.4)"
+      },
+      "store": {"$ref":"#/components/schemas/RepairsStore"},
+      "model_tasks": {"$ref":"#/components/schemas/RepairsModelTasks"}
+    }
+  },
+  "IncidentState": {"type":"string","enum":["open","closed"],"description":"§4.2's incident state"},
+  "IncidentOutcome": {"type":"string","enum":["open","self_recovered","fixed","unresolved","dismissed"]},
+  "IncidentSeverity": {"type":"string","enum":["warning","error","critical"]},
+  "IncidentFingerprint": {
+    "type": "object",
+    "required": ["layer","subject","reason_code"],
+    "description": "`(layer, subject, reason_code)`, one open incident per fingerprint (§3.4). `subject` is a service id, a component id or one of `111d`, `updater`, `identity`, `heal`, `storage`.",
+    "properties": {
+      "layer": {"type":"integer","minimum":0,"maximum":9},
+      "subject": {"type":"string","minLength":1,"maxLength":64},
+      "reason_code": {"type":"string","minLength":1,"maxLength":64}
+    }
+  },
+  "IncidentMark": {
+    "type": "object",
+    "required": ["seq","boot_id","mono_ms","tick","epoch","wall_claim"],
+    "description": "Where an incident opened, last recurred or closed (§3.5): the store's `seq`, the journal's boot-id and monotonic pair, the daemon tick. Ordering uses these, never `wall_claim`.",
+    "properties": {
+      "seq": {
+        "type": "integer",
+        "minimum": 0,
+        "description": "the store's (J4); 0 while the record is held only in memory"
+      },
+      "boot_id": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 36,
+        "description": "`/proc/sys/kernel/random/boot_id`, or `-` when it cannot be read"
+      },
+      "mono_ms": {"type":"integer","minimum":0},
+      "tick": {"type":"integer","minimum":0,"description":"the daemon tick (§3.5)"},
+      "epoch": {"type":"null","description":"stays null until Layer 7's epoch has a consumer (§3.5)"},
+      "wall_claim": {
+        "type": ["integer","null"],
+        "minimum": 0,
+        "description": "the node's own wall-clock claim in seconds; display only, never an ordering or a decision"
+      }
+    }
+  },
+  "IncidentEvidenceKind": {
+    "type": "string",
+    "enum": ["service_record","health","counters","exit","witness","update_tombstone","child_log_tail","storage"]
+  },
+  "IncidentEvidence": {
+    "type": "object",
+    "required": ["id","kind","ref","excerpt"],
+    "properties": {
+      "id": {"type":"string","minLength":1,"maxLength":32,"description":"the evidence id a diagnosis cites (§5.2)"},
+      "kind": {"$ref":"#/components/schemas/IncidentEvidenceKind"},
+      "ref": {"type":"string","maxLength":128},
+      "excerpt": {
+        "type": "string",
+        "maxLength": 512,
+        "description": "at most 512 B, from `111d`'s own typed sources and its own children's logs; untrusted text, rendered preformatted and never as Markdown (§3.5)"
+      }
+    }
+  },
+  "IncidentCheck": {
+    "type": "object",
+    "required": ["check_id","result"],
+    "properties": {
+      "check_id": {"type":"string","minLength":1,"maxLength":64},
+      "result": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 64,
+        "description": "the check's result word as the node writes it; a value a page does not know renders as it is"
+      }
+    }
+  },
+  "IncidentAgreement": {"type":"string","enum":["rule_only","model_only","agree","disagree"],"description":"§5.3"},
+  "IncidentDiagnosis": {
+    "type": "object",
+    "required": ["cause_id","by","confidence"],
+    "properties": {
+      "cause_id": {"type":"string","minLength":1,"maxLength":24,"description":"a playbook cause id, or `unknown`"},
+      "by": {"type":"string","enum":["t0","t1","hub"]},
+      "confidence": {
+        "type": "object",
+        "required": ["checks_satisfied","agreement"],
+        "properties": {
+          "checks_satisfied": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 1000,
+            "description": "per-mille of the cause's checks that held (§5.3)"
+          },
+          "agreement": {"$ref":"#/components/schemas/IncidentAgreement"}
+        }
+      }
+    }
+  },
+  "IncidentExplanation": {
+    "type": "object",
+    "required": ["task_id","text"],
+    "description": "The result of the incident task's mode `explain` (§5.2): the model's words, untrusted; rendered preformatted, never as Markdown.",
+    "properties": {"task_id":{"type":"string","minLength":1,"maxLength":64},"text":{"type":"string","maxLength":8192}}
+  },
+  "IncidentDismissed": {
+    "type": "object",
+    "required": ["cause_id"],
+    "properties": {
+      "cause_id": {
+        "type": ["string","null"],
+        "maxLength": 24,
+        "description": "the cause the person dismissed; null when the incident had no diagnosis"
+      }
+    }
+  },
+  "AttemptState": {
+    "type": "string",
+    "enum": ["armed","awaiting_confirm","kept","reverted","revert_failed","revert_blocked","interrupted","dismissed"],
+    "description": "§4.2's attempt state; `awaiting_confirm` is a change applied that waits for the person's confirm inside its window (§7.6)"
+  },
+  "AttemptConfirmBy": {"type":"string","enum":["session","peer"],"description":"which confirm §7.6 accepts"},
+  "AttemptProbe": {
+    "type": "object",
+    "required": ["name","result"],
+    "properties": {
+      "name": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 64,
+        "description": "the capability probe the action names (§7.2)"
+      },
+      "result": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 64,
+        "description": "the probe's result word as the node writes it"
+      }
+    }
+  },
+  "Attempt": {
+    "type": "object",
+    "required": ["id","proposal_id","incident_id","action","target","state","probe","confirm_by"],
+    "description": "One apply attempt (§7.4). The UI calls `/repairs/attempts/{id}/confirm`, `/restore` or `/dismiss` with `id` (Layer 9's second half, §18.1).",
+    "properties": {
+      "id": {"$ref":"#/components/schemas/AttemptId"},
+      "proposal_id": {
+        "type": ["string","null"],
+        "maxLength": 128,
+        "description": "null for an Undo or an apply no proposal carried"
+      },
+      "incident_id": {"oneOf":[{"$ref":"#/components/schemas/IncidentId"},{"type":"null"}]},
+      "action": {"type":"string","minLength":1,"maxLength":64,"description":"a name of the closed vocabulary (§7.3)"},
+      "target": {
+        "type": "string",
+        "maxLength": 256,
+        "description": "the action's target as text; a name or an id, never a path"
+      },
+      "state": {"$ref":"#/components/schemas/AttemptState"},
+      "probe": {
+        "oneOf": [{"$ref":"#/components/schemas/AttemptProbe"},{"type":"null"}],
+        "description": "null until the probe ran"
+      },
+      "confirm_by": {
+        "oneOf": [{"$ref":"#/components/schemas/AttemptConfirmBy"},{"type":"null"}],
+        "description": "null unless the attempt is `awaiting_confirm`"
+      }
+    }
+  },
+  "Incident": {
+    "type": "object",
+    "required": [
+      "schema",
+      "id",
+      "fingerprint",
+      "severity",
+      "count",
+      "state",
+      "opened",
+      "last",
+      "closed",
+      "evidence",
+      "checks",
+      "ruled_out",
+      "diagnosis",
+      "explanation",
+      "attempts",
+      "dismissed",
+      "outcome"
+    ],
+    "description": "§3.5's record. A re-opened fingerprint keeps its record and its diagnosis until the evidence hash changes. Every `excerpt` and every name is untrusted: text only.",
+    "properties": {
+      "schema": {"type":"integer","enum":[1]},
+      "id": {"$ref":"#/components/schemas/IncidentId"},
+      "fingerprint": {"$ref":"#/components/schemas/IncidentFingerprint"},
+      "severity": {"$ref":"#/components/schemas/IncidentSeverity"},
+      "count": {"type":"integer","minimum":1},
+      "state": {"$ref":"#/components/schemas/IncidentState"},
+      "opened": {"$ref":"#/components/schemas/IncidentMark"},
+      "last": {"$ref":"#/components/schemas/IncidentMark"},
+      "closed": {"oneOf":[{"$ref":"#/components/schemas/IncidentMark"},{"type":"null"}]},
+      "evidence": {"type":"array","items":{"$ref":"#/components/schemas/IncidentEvidence"}},
+      "checks": {"type":"array","items":{"$ref":"#/components/schemas/IncidentCheck"}},
+      "ruled_out": {"type":"array","items":{"type":"string","minLength":1,"maxLength":24}},
+      "diagnosis": {"oneOf":[{"$ref":"#/components/schemas/IncidentDiagnosis"},{"type":"null"}]},
+      "explanation": {"oneOf":[{"$ref":"#/components/schemas/IncidentExplanation"},{"type":"null"}]},
+      "attempts": {"type":"array","items":{"$ref":"#/components/schemas/Attempt"}},
+      "dismissed": {"oneOf":[{"$ref":"#/components/schemas/IncidentDismissed"},{"type":"null"}]},
+      "outcome": {"$ref":"#/components/schemas/IncidentOutcome"}
+    }
+  },
+  "SseIncident": {
+    "$ref": "#/components/schemas/Incident",
+    "description": "One `Incident` on change (§18.2): opened, its count or last moved, diagnosed, an attempt changed, closed or dismissed. Never a timer. After `reset` the Repairs view refetches `/repairs` and `/repairs/incidents`."
+  },
+  "IncidentList": {
+    "type": "object",
+    "required": ["schema","incidents","next_after_seq"],
+    "properties": {
+      "schema": {"type":"integer","enum":[1]},
+      "incidents": {"type":"array","maxItems":1000,"items":{"$ref":"#/components/schemas/Incident"}},
+      "next_after_seq": {
+        "type": ["integer","null"],
+        "minimum": 0,
+        "description": "the `seq` of the last row, or null when that page is the last"
+      }
+    }
+  },
+  "AuditKind": {
+    "type": "string",
+    "enum": [
+      "proposed",
+      "accepted",
+      "applied",
+      "kept",
+      "reverted",
+      "revert_failed",
+      "dismissed",
+      "undo",
+      "fix_sent",
+      "fix_received",
+      "delegated",
+      "refused",
+      "revert_blocked",
+      "vouch_sent"
+    ]
+  },
+  "AuditConfirmer": {"type":"string","enum":["probe","human"]},
+  "AuditBy": {"type":"string","enum":["human","daemon"]},
+  "AuditEntry": {
+    "type": "object",
+    "required": [
+      "seq",
+      "boot_id",
+      "mono_ms",
+      "kind",
+      "proposal_id",
+      "action_hash",
+      "probe_result",
+      "revert_result",
+      "confirmer",
+      "by"
+    ],
+    "description": "One record of the `heal/audit` stream (§4). Nothing in it is free text from a log, a message or a peer; nothing in it is signed.",
+    "properties": {
+      "seq": {"type":"integer","minimum":0},
+      "boot_id": {"type":"string","minLength":1,"maxLength":36},
+      "mono_ms": {"type":"integer","minimum":0},
+      "kind": {"$ref":"#/components/schemas/AuditKind"},
+      "proposal_id": {"type":["string","null"],"maxLength":128},
+      "action_hash": {
+        "type": ["string","null"],
+        "pattern": "^[0-9a-f]{64}$",
+        "description": "the proposal's `action_hash` (§7.3)"
+      },
+      "probe_result": {"type":["string","null"],"maxLength":64},
+      "revert_result": {"type":["string","null"],"maxLength":64},
+      "confirmer": {
+        "oneOf": [{"$ref":"#/components/schemas/AuditConfirmer"},{"type":"null"}],
+        "description": "who confirmed the keep; null where no keep was asked"
+      },
+      "by": {"$ref":"#/components/schemas/AuditBy"}
+    }
+  },
+  "RepairAudit": {
+    "type": "object",
+    "required": ["schema","entries","next_after_seq"],
+    "properties": {
+      "schema": {"type":"integer","enum":[1]},
+      "entries": {"type":"array","maxItems":1000,"items":{"$ref":"#/components/schemas/AuditEntry"}},
+      "next_after_seq": {"type":["integer","null"],"minimum":0}
+    }
   }
 };
 
@@ -2991,13 +4080,13 @@ export const operations: Record<string, ContractOperation> = {
         "decision": {"$ref":"#/components/schemas/Decision"},
         "accept_warning": {
           "$ref": "#/components/schemas/Sha256Hex",
-          "description": "Layer 6/7: the hash of the consent text the user was shown (`bridge_edge`, a `bridge_message` behind a consent gate, or a `relay` action behind `carrier_enable` / `gateway_bit` / `origin_serve`); absent on the first call"
+          "description": "Layer 6/7/8: the hash of the consent text the user was shown (`bridge_edge`, a `bridge_message` behind a consent gate, a `relay` action behind `carrier_enable` / `gateway_bit` / `origin_serve`, or a `storage` `dataset.fetch` behind `dataset_fetch` / `dataset_override`); absent on the first call"
         }
       }
     },
     "query": [],
     "pathParams": ["id"],
-    "errors": [404,409,502]
+    "errors": [403,404,409,500,502,503]
   },
   "getSettings": {
     "method": "GET",
@@ -3786,7 +4875,7 @@ export const operations: Record<string, ContractOperation> = {
     "requestSchema": {"$ref":"#/components/schemas/RelaySettingsPatch"},
     "query": [],
     "pathParams": [],
-    "errors": [400,409]
+    "errors": [400,409,500]
   },
   "offerRelayPair": {
     "method": "POST",
@@ -3928,6 +5017,253 @@ export const operations: Record<string, ContractOperation> = {
     "pathParams": [],
     "errors": []
   },
+  "getStorage": {
+    "method": "GET",
+    "path": "/api/v1/storage",
+    "success": 200,
+    "contentType": "application/json",
+    "schema": {"$ref":"#/components/schemas/StorageStatus"},
+    "schemasByType": {"application/json":{"$ref":"#/components/schemas/StorageStatus"}},
+    "requestSchema": null,
+    "query": [],
+    "pathParams": [],
+    "errors": []
+  },
+  "patchStorageSettings": {
+    "method": "PATCH",
+    "path": "/api/v1/storage/settings",
+    "success": 200,
+    "contentType": "application/json",
+    "schema": {"$ref":"#/components/schemas/StorageSettings"},
+    "schemasByType": {"application/json":{"$ref":"#/components/schemas/StorageSettings"}},
+    "requestSchema": {"$ref":"#/components/schemas/StorageSettingsPatch"},
+    "query": [],
+    "pathParams": [],
+    "errors": [400,403,409]
+  },
+  "answerStorageExportOffer": {
+    "method": "POST",
+    "path": "/api/v1/storage/export-offer",
+    "success": 204,
+    "contentType": null,
+    "schema": null,
+    "schemasByType": {},
+    "requestSchema": {"$ref":"#/components/schemas/StorageExportOfferRequest"},
+    "query": [],
+    "pathParams": [],
+    "errors": [400,503]
+  },
+  "acceptUpdateWithoutCopy": {
+    "method": "POST",
+    "path": "/api/v1/storage/update-without-copy",
+    "success": 204,
+    "contentType": null,
+    "schema": null,
+    "schemasByType": {},
+    "requestSchema": {"$ref":"#/components/schemas/UpdateWithoutCopyRequest"},
+    "query": [],
+    "pathParams": [],
+    "errors": [400,409]
+  },
+  "deleteStorageSetAside": {
+    "method": "DELETE",
+    "path": "/api/v1/storage/set-aside/{file}",
+    "success": 204,
+    "contentType": null,
+    "schema": null,
+    "schemasByType": {},
+    "requestSchema": null,
+    "query": [],
+    "pathParams": ["file"],
+    "errors": [403,404]
+  },
+  "startEmptyStore": {
+    "method": "POST",
+    "path": "/api/v1/storage/start-empty",
+    "success": 204,
+    "contentType": null,
+    "schema": null,
+    "schemasByType": {},
+    "requestSchema": {"$ref":"#/components/schemas/StartEmptyRequest"},
+    "query": [],
+    "pathParams": [],
+    "errors": [400,403,409]
+  },
+  "listDatasets": {
+    "method": "GET",
+    "path": "/api/v1/datasets",
+    "success": 200,
+    "contentType": "application/json",
+    "schema": {"$ref":"#/components/schemas/DatasetsListing"},
+    "schemasByType": {"application/json":{"$ref":"#/components/schemas/DatasetsListing"}},
+    "requestSchema": null,
+    "query": [],
+    "pathParams": [],
+    "errors": []
+  },
+  "checkDatasets": {
+    "method": "POST",
+    "path": "/api/v1/datasets/check",
+    "success": 202,
+    "contentType": null,
+    "schema": null,
+    "schemasByType": {},
+    "requestSchema": null,
+    "query": [],
+    "pathParams": [],
+    "errors": []
+  },
+  "fetchDataset": {
+    "method": "POST",
+    "path": "/api/v1/datasets/entries/{publisher}/{id}/{version}/fetch",
+    "success": 202,
+    "contentType": "application/json",
+    "schema": {"$ref":"#/components/schemas/Job"},
+    "schemasByType": {"application/json":{"$ref":"#/components/schemas/Job"}},
+    "requestSchema": {"$ref":"#/components/schemas/DatasetFetchRequest"},
+    "query": [],
+    "pathParams": ["publisher","id","version"],
+    "errors": [404,409]
+  },
+  "removeDataset": {
+    "method": "DELETE",
+    "path": "/api/v1/datasets/entries/{publisher}/{id}/{version}",
+    "success": 204,
+    "contentType": null,
+    "schema": null,
+    "schemasByType": {},
+    "requestSchema": null,
+    "query": [],
+    "pathParams": ["publisher","id","version"],
+    "errors": [404]
+  },
+  "cancelDatasetJob": {
+    "method": "DELETE",
+    "path": "/api/v1/datasets/jobs/{job}",
+    "success": 204,
+    "contentType": null,
+    "schema": null,
+    "schemasByType": {},
+    "requestSchema": null,
+    "query": [],
+    "pathParams": ["job"],
+    "errors": [404]
+  },
+  "resumeDatasetJob": {
+    "method": "POST",
+    "path": "/api/v1/datasets/jobs/{job}/resume",
+    "success": 202,
+    "contentType": "application/json",
+    "schema": {"$ref":"#/components/schemas/Job"},
+    "schemasByType": {"application/json":{"$ref":"#/components/schemas/Job"}},
+    "requestSchema": {"$ref":"#/components/schemas/DatasetFetchRequest"},
+    "query": [],
+    "pathParams": ["job"],
+    "errors": [404,409]
+  },
+  "listDatasetDrafts": {
+    "method": "GET",
+    "path": "/api/v1/datasets/drafts",
+    "success": 200,
+    "contentType": "application/json",
+    "schema": {"$ref":"#/components/schemas/DatasetDrafts"},
+    "schemasByType": {"application/json":{"$ref":"#/components/schemas/DatasetDrafts"}},
+    "requestSchema": null,
+    "query": [],
+    "pathParams": [],
+    "errors": []
+  },
+  "createDatasetDraft": {
+    "method": "POST",
+    "path": "/api/v1/datasets/drafts",
+    "success": 202,
+    "contentType": "application/json",
+    "schema": {"$ref":"#/components/schemas/Job"},
+    "schemasByType": {"application/json":{"$ref":"#/components/schemas/Job"}},
+    "requestSchema": {"$ref":"#/components/schemas/DatasetDraftRequest"},
+    "query": [],
+    "pathParams": [],
+    "errors": [400,409]
+  },
+  "publishDatasets": {
+    "method": "POST",
+    "path": "/api/v1/datasets/publish",
+    "success": 200,
+    "contentType": "application/json",
+    "schema": {"type":"object","required":["seq"],"properties":{"seq":{"type":"integer","minimum":0}}},
+    "schemasByType": {
+      "application/json": {"type":"object","required":["seq"],"properties":{"seq":{"type":"integer","minimum":0}}}
+    },
+    "requestSchema": {"$ref":"#/components/schemas/DatasetPublishRequest"},
+    "query": [],
+    "pathParams": [],
+    "errors": [400,409]
+  },
+  "searchDatasets": {
+    "method": "GET",
+    "path": "/api/v1/datasets/search",
+    "success": 200,
+    "contentType": "application/json",
+    "schema": {"$ref":"#/components/schemas/DatasetSearchResult"},
+    "schemasByType": {"application/json":{"$ref":"#/components/schemas/DatasetSearchResult"}},
+    "requestSchema": null,
+    "query": [
+      {"name":"q","required":true},
+      {"name":"book","required":false},
+      {"name":"publisher","required":false},
+      {"name":"n","required":false}
+    ],
+    "pathParams": [],
+    "errors": [400,409]
+  },
+  "adoptDatasets": {
+    "method": "POST",
+    "path": "/api/v1/datasets/adopt",
+    "success": 204,
+    "contentType": null,
+    "schema": null,
+    "schemasByType": {},
+    "requestSchema": {"$ref":"#/components/schemas/DatasetAdoptRequest"},
+    "query": [],
+    "pathParams": [],
+    "errors": [400,403,409]
+  },
+  "listTiles": {
+    "method": "GET",
+    "path": "/api/v1/tiles",
+    "success": 200,
+    "contentType": "application/json",
+    "schema": {"$ref":"#/components/schemas/TileSets"},
+    "schemasByType": {"application/json":{"$ref":"#/components/schemas/TileSets"}},
+    "requestSchema": null,
+    "query": [],
+    "pathParams": [],
+    "errors": []
+  },
+  "getTile": {
+    "method": "GET",
+    "path": "/api/v1/tiles/{publisher}/{id}/{version}",
+    "success": 200,
+    "contentType": "application/octet-stream",
+    "schema": {"type":"string","format":"binary"},
+    "schemasByType": {"application/octet-stream":{"type":"string","format":"binary"}},
+    "requestSchema": null,
+    "query": [],
+    "pathParams": ["publisher","id","version"],
+    "errors": [404,416]
+  },
+  "stopBridgeComponent": {
+    "method": "POST",
+    "path": "/api/v1/bridge/components/{id}/stop",
+    "success": 204,
+    "contentType": null,
+    "schema": null,
+    "schemasByType": {},
+    "requestSchema": null,
+    "query": [],
+    "pathParams": ["id"],
+    "errors": [400,404]
+  },
   "events": {
     "method": "GET",
     "path": "/api/v1/events",
@@ -3939,6 +5275,70 @@ export const operations: Record<string, ContractOperation> = {
     "query": [],
     "pathParams": [],
     "errors": []
+  },
+  "getRepairs": {
+    "method": "GET",
+    "path": "/api/v1/repairs",
+    "success": 200,
+    "contentType": "application/json",
+    "schema": {"$ref":"#/components/schemas/RepairsStatus"},
+    "schemasByType": {"application/json":{"$ref":"#/components/schemas/RepairsStatus"}},
+    "requestSchema": null,
+    "query": [],
+    "pathParams": [],
+    "errors": []
+  },
+  "listRepairIncidents": {
+    "method": "GET",
+    "path": "/api/v1/repairs/incidents",
+    "success": 200,
+    "contentType": "application/json",
+    "schema": {"$ref":"#/components/schemas/IncidentList"},
+    "schemasByType": {"application/json":{"$ref":"#/components/schemas/IncidentList"}},
+    "requestSchema": null,
+    "query": [
+      {"name":"state","required":false},
+      {"name":"after_seq","required":false},
+      {"name":"limit","required":false}
+    ],
+    "pathParams": [],
+    "errors": [400]
+  },
+  "getRepairIncident": {
+    "method": "GET",
+    "path": "/api/v1/repairs/incidents/{id}",
+    "success": 200,
+    "contentType": "application/json",
+    "schema": {"$ref":"#/components/schemas/Incident"},
+    "schemasByType": {"application/json":{"$ref":"#/components/schemas/Incident"}},
+    "requestSchema": null,
+    "query": [],
+    "pathParams": ["id"],
+    "errors": [404]
+  },
+  "dismissRepairIncident": {
+    "method": "POST",
+    "path": "/api/v1/repairs/incidents/{id}/dismiss",
+    "success": 204,
+    "contentType": null,
+    "schema": null,
+    "schemasByType": {},
+    "requestSchema": null,
+    "query": [],
+    "pathParams": ["id"],
+    "errors": [404]
+  },
+  "listRepairAudit": {
+    "method": "GET",
+    "path": "/api/v1/repairs/audit",
+    "success": 200,
+    "contentType": "application/json",
+    "schema": {"$ref":"#/components/schemas/RepairAudit"},
+    "schemasByType": {"application/json":{"$ref":"#/components/schemas/RepairAudit"}},
+    "requestSchema": null,
+    "query": [{"name":"after_seq","required":false},{"name":"limit","required":false}],
+    "pathParams": [],
+    "errors": [400]
   }
 };
 
@@ -3959,7 +5359,10 @@ export const sse: { events: Record<string, string>; chat: Record<string, string>
     "network_message": "SseNetworkMessage",
     "bridge": "SseBridge",
     "relay": "SseRelay",
-    "registry": "SseRegistry"
+    "registry": "SseRegistry",
+    "storage": "SseStorage",
+    "dataset": "SseDataset",
+    "incident": "SseIncident"
   },
   "chat": {"token":"SseChatToken","tool":"SseChatTool","done":"SseChatDone","error":"SseChatError"}
 };

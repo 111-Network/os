@@ -403,13 +403,58 @@
 //!   cycle the two agree, but a held stream hands in one far flush frame by
 //!   frame, so the daemon's held-stream driver (D11) must call
 //!   [`Fabric::forward_take`] only at a drain boundary.
+//!
+//! ### The consumer registry (Layer 8 `8-storage/README.md` §12.3)
+//!
+//! An additive amendment of L5's dispatch (Layer 8 §21 L5 (6)). An inbound
+//! `AGENT_OP`, `KB`, `UPDATE`, `PATCH` or `SYNC` (0x10–0x14) from a
+//! contact passes §4's sequencing and acknowledgement like a message and
+//! never becomes a message row (it was stored as a textless row of its
+//! class). [`Fabric::set_consumer`] registers one [`Consumer`] per kind;
+//! none is registered in v1 (Layer 9 registers 0x10 and 0x13).
+//!
+//! - With no consumer the body is dropped and counted ([`Counters`]
+//!   `unconsumed_*`, a session count), and `n` is committed and
+//!   acknowledged.
+//! - With one, the order is fixed: the §4 decision on `n` is taken inside
+//!   one FULL transaction on the fabric store that stays open while the
+//!   consumer runs. A new frame's whole body (a Tier 1 message reassembled
+//!   inside that transaction, its completing fragment recorded there too)
+//!   goes to [`Consumer::consume`], which returns after its own durable
+//!   write; only then does the transaction commit and the ACK fall due. A
+//!   consumer error rolls the transaction back (the frame stays
+//!   unacknowledged and the sender retransmits it, over the mailbox as
+//!   the last item says; one `errors` count); a crash before the commit
+//!   leaves nothing of the frame in the fabric store, so it comes again
+//!   and the consumer, idempotent by `msg_id`, keeps one record. A
+//!   duplicate is re-acknowledged and never reaches the consumer.
+//! - A Tier 1 message of these kinds is therefore never left complete and
+//!   undelivered in the store, so the restart path that finishes such a
+//!   message (as a `MSG`: stored fragments carry no kind) never meets one.
+//! - Over the mailbox the hub stands in for the sender: once the hub holds
+//!   an item the sender's copy only waits for the ACK (put again after a
+//!   restart, it is a `DUPLICATE` while the hub keeps the row), so only
+//!   the hub's stream brings it back. A `MAILBOX_COMMIT` says the member
+//!   stored everything up to it (§9), so the member's cursor never passes
+//!   an item whose frame was left uncommitted (a consumer error, a store
+//!   error, the fault point), nor any later item while that one waits:
+//!   the hub keeps it and streams it again at the member's next fetch (its
+//!   next link-up, or [`Fabric::retry_all`]), where the consumer takes it.
+//!   Later items are handled meanwhile and acknowledged (again, as
+//!   duplicates, when they come back); past
+//!   [`crate::mailbox::PUSH_WINDOW`] of them the hub waits for that fetch.
+//!   The hold is kept in memory; the stored cursor, below the item, does
+//!   the same after a restart. `MSG` and every other kind move the cursor
+//!   as before.
 
+use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex, RwLock};
 
 use id111::announce::Announce;
 use id111::keyset::NodeId;
+use rusqlite::{Transaction, TransactionBehavior};
 use tokio::sync::{broadcast, mpsc, oneshot};
 use tokio::task::JoinHandle;
 
@@ -425,7 +470,7 @@ use crate::envelope::{
     DEST_HUB_ALONE_LEN, DEST_HUB_LEN, MAX_PACKET_LEN, MIN_PACKET_LEN, OUTER_OVERHEAD,
 };
 use crate::frag::{frag_slice, plan, FragError, TxTracker, CUSTODY_WRAP, MAX_OUTSTANDING};
-use crate::ids::{MsgSeq, STREAM_1TO1};
+use crate::ids::{MsgId, MsgSeq, STREAM_1TO1};
 use crate::link::{
     AnnounceGate, Dialer, EventSink, Frame, FrameType, Link, LinkError, LinkEvent, LinkId,
     LinkKind, LinkState, PathProfile, PeerAddr, DEFAULT_MTU,
@@ -436,12 +481,13 @@ use crate::mailbox::{
 };
 use crate::outbox::{build_ack_block, highest_seen, MessageBody, Reason};
 use crate::sealer::{Freshness, Sealer, SealerError};
+use crate::store::rx::{offer_fragment_in, offer_in};
 use crate::store::{
     Class, ContactRow, CustodyPut, Dir, EdgeConsent, EdgeCounter, EdgeNew, EdgeOversize, EdgeRow,
     EpochDecision, EpochState, ForeignConversationRow, ForeignDir, ForeignInsert, ForeignKind,
     ForeignMessageRow, ForeignSend, ForeignState, ForwardHead, ForwardItem, FragOffer, Fwd,
-    GroupPart, MessageRow, MetaValue, MsgState, NewMessage, RequestPut, SendGroupRow, Seq,
-    StateChange, Store, StoreError, Trust, MAX_FOREIGN_BATCH,
+    GroupPart, MessageRow, MetaValue, MsgState, NewMessage, Offer as RxOffer, RequestPut,
+    SendGroupRow, Seq, StateChange, Store, StoreError, Trust, MAX_FOREIGN_BATCH,
 };
 
 /// Bytes a stream link's fragment plan keeps free for the INTRO card
@@ -498,6 +544,84 @@ const FORWARD_PASSES: usize = 4;
 /// nothing. At ntfy's 3,068 B a 2,937 B item fits and 2,938 B does not.
 pub fn carrier_fits(max_frame: Option<usize>, item_len: usize) -> bool {
     max_frame.is_some_and(|m| item_len.saturating_add(FORWARD_PUT_WRAP) <= m)
+}
+
+/// The kinds the consumer registry covers (Layer 8 §12.3: 0x10–0x14).
+const CONSUMER_KINDS: usize = 5;
+
+/// The registry slot of `kind` (Layer 8 §12.3): `AGENT_OP`, `KB`,
+/// `UPDATE`, `PATCH` and `SYNC` in byte order; `None` for every other kind
+/// (`MSG`, custody, mailbox and enrolment kinds are unchanged).
+fn consumer_slot(kind: Kind) -> Option<usize> {
+    match kind {
+        Kind::AgentOp => Some(0),
+        Kind::Kb => Some(1),
+        Kind::Update => Some(2),
+        Kind::Patch => Some(3),
+        Kind::Sync => Some(4),
+        _ => None,
+    }
+}
+
+/// Count one frame of a registry kind dropped with no consumer (§12.3).
+fn count_unconsumed(c: &mut Counters, kind: Kind) {
+    let n = match kind {
+        Kind::AgentOp => &mut c.unconsumed_agent_op,
+        Kind::Kb => &mut c.unconsumed_kb,
+        Kind::Update => &mut c.unconsumed_update,
+        Kind::Patch => &mut c.unconsumed_patch,
+        Kind::Sync => &mut c.unconsumed_sync,
+        _ => return,
+    };
+    *n += 1;
+}
+
+/// What the §12.3 transaction decided for one frame of a registry kind.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Consumed {
+    /// Nothing to acknowledge: a stale epoch, a deferred `n`, a fragment
+    /// whose count disagrees with its partial.
+    Drop,
+    /// A fragment recorded or seen again (its SACK), or a frame already
+    /// delivered: (re-)acknowledge only, the consumer untouched.
+    Ack,
+    /// New with no consumer registered: dropped, counted, committed.
+    Unconsumed,
+    /// New, and the consumer returned: committed.
+    Delivered,
+    /// The consumer failed: rolled back, unacknowledged.
+    Failed,
+    /// The test fault point (debug builds): rolled back, unacknowledged.
+    Fault,
+}
+
+/// Run `f` in one FULL `IMMEDIATE` transaction on the fabric store that
+/// stays open while `f` runs (Layer 8 §12.3: a registry kind's §4 decision
+/// commits only after its consumer returned). `f` answers whether to
+/// commit; on `false` or an error nothing it wrote is kept. The store's own
+/// transactions take `&mut Store`, which would keep `f` from reading the
+/// store (a Tier 1 reassembly) inside one; the FULL level is set and reset
+/// around it as theirs is.
+fn hold_tx<T>(
+    store: &Store,
+    f: impl FnOnce(&Transaction<'_>) -> std::result::Result<(T, bool), StoreError>,
+) -> std::result::Result<T, StoreError> {
+    store.conn.pragma_update(None, "synchronous", "FULL")?;
+    let res = (|| {
+        let tx = Transaction::new_unchecked(&store.conn, TransactionBehavior::Immediate)?;
+        let (v, commit) = f(&tx)?;
+        if commit {
+            tx.commit()?;
+        } else {
+            tx.rollback()?;
+        }
+        Ok(v)
+    })();
+    let reset = store.conn.pragma_update(None, "synchronous", "NORMAL");
+    if res.is_ok() {
+        reset?;
+    }
+    res
 }
 
 // ---------------------------------------------------------------------------
@@ -1078,6 +1202,18 @@ pub struct Counters {
     /// Hub: puts answered `REJECT_UNKNOWN_DEST` because their only targets
     /// were carrier pairs they do not fit (Layer 7 §5.2, C15).
     pub forward_too_large: u64,
+    /// Layer 8 §12.3: `AGENT_OP` frames (0x10) committed and acknowledged
+    /// with no consumer registered, their bodies dropped (module doc, "The
+    /// consumer registry"). A session count: it restarts at zero.
+    pub unconsumed_agent_op: u64,
+    /// `KB` (0x11), as [`Counters::unconsumed_agent_op`].
+    pub unconsumed_kb: u64,
+    /// `UPDATE` (0x12), as [`Counters::unconsumed_agent_op`].
+    pub unconsumed_update: u64,
+    /// `PATCH` (0x13), as [`Counters::unconsumed_agent_op`].
+    pub unconsumed_patch: u64,
+    /// `SYNC` (0x14), as [`Counters::unconsumed_agent_op`].
+    pub unconsumed_sync: u64,
 }
 
 /// `GET /fabric`.
@@ -1098,6 +1234,50 @@ pub struct FabricStatus {
     /// Hub: the paired hubs, in `paired_hubs` order (Layer 7 §5.3
     /// amendment 11: per-pair `reachable` and `pending`).
     pub paired: Vec<PairView>,
+}
+
+/// Layer 8 §12.3: the consumer of one kind of the registry (`AGENT_OP`,
+/// `KB`, `UPDATE`, `PATCH`, `SYNC`: 0x10–0x14), registered with
+/// [`Fabric::set_consumer`]. The fabric calls it once per new frame of its
+/// kind from a contact, on the actor, inside the FULL transaction that
+/// holds the frame's §4 decision uncommitted (module doc, "The consumer
+/// registry"):
+///
+/// - Return only after the consumer's own durable write of what it keeps;
+///   the fabric then commits `n` and acknowledges.
+/// - Return an error only when that write failed (its store busy, full or
+///   failing): the frame stays uncommitted and unacknowledged, one
+///   [`Counters::errors`] counts it, and it comes again (the sender
+///   retransmits it; through the mailbox the hub streams it at the
+///   member's next fetch). Until it is taken the sender's stream waits on
+///   it (its §4 prefix stays below it), and through the mailbox the
+///   member's cursor does too.
+/// - A body it refuses (malformed, an unknown version, not meant for this
+///   node) returns `Ok` after recording or dropping it, never an error: an
+///   error would bring the same bytes back on every retransmission and
+///   hold the stream, and the mailbox, behind them for good.
+/// - Be idempotent by `msg_id`: a crash between the consumer's write and
+///   the fabric's commit delivers the same frame again.
+/// - A duplicate never reaches it: the fabric re-acknowledges it alone.
+/// - It runs on the actor, which waits for it: keep it to its one write,
+///   never call the [`Fabric`] handle from it (the call would wait on the
+///   actor that is waiting on it), and never panic (a panic on the actor
+///   stops the fabric; the open transaction is rolled back).
+///
+/// The arguments: the frame's kind; its `msg_id` (`sender` authenticated by
+/// `pair_mac`, never by `sig`; `recipient` this node; `stream`, `epoch`,
+/// `n`); whether it arrived on a connection attributed to its sender
+/// (`false` for a mailbox item); and its whole body (a Tier 1 message
+/// reassembled): untrusted bytes, which the consumer parses strictly.
+pub trait Consumer: Send + Sync {
+    /// Take one new frame (the trait doc).
+    fn consume(
+        &self,
+        kind: Kind,
+        msg_id: &MsgId,
+        attributed: bool,
+        body: &[u8],
+    ) -> std::result::Result<(), Box<dyn std::error::Error + Send + Sync>>;
 }
 
 // ---------------------------------------------------------------------------
@@ -1194,6 +1374,11 @@ impl Fabric {
             peer_dials: HashSet::new(),
             read_marks: HashMap::new(),
             counters,
+            consumers: Default::default(),
+            #[cfg(debug_assertions)]
+            consume_fault: false,
+            rx_unstored: false,
+            mailbox_hold: None,
             fwd: Forwarder::default(),
             events: events.clone(),
             pending_events: BTreeMap::new(),
@@ -1607,6 +1792,33 @@ impl Fabric {
     #[doc(hidden)]
     pub async fn forward_target_computations(&self) -> Result<u64> {
         self.call(|c| c.fwd.computed).await
+    }
+}
+
+/// Layer 8 §12.3 (an additive amendment of L5's dispatch): the consumer
+/// registry for 0x10–0x14 (module doc, "The consumer registry").
+impl Fabric {
+    /// Register `consumer` for `kind` (`AGENT_OP`, `KB`, `UPDATE`, `PATCH`
+    /// or `SYNC`), replacing the one registered before; `Invalid` for any
+    /// other kind. Register before the first [`Fabric::add_link`]: a frame
+    /// that arrives while its kind has no consumer is acknowledged and
+    /// counted, and its body is gone.
+    pub async fn set_consumer(&self, kind: Kind, consumer: Arc<dyn Consumer>) -> Result<()> {
+        let Some(slot) = consumer_slot(kind) else {
+            return Err(FabricError::Invalid("not a consumer kind"));
+        };
+        self.call(move |c| c.consumers[slot] = Some(consumer)).await
+    }
+
+    /// A test hook, not an API (debug builds only): the §12.3 fault point.
+    /// The next new frame a consumer returns from is neither committed nor
+    /// acknowledged, as if the process were killed between the consumer's
+    /// write and the fabric's commit; the caller then stops the fabric with
+    /// [`Fabric::abort`] and starts it again (`tests/consumers.rs`).
+    #[cfg(debug_assertions)]
+    #[doc(hidden)]
+    pub async fn fault_after_consume(&self) -> Result<()> {
+        self.call(|c| c.consume_fault = true).await
     }
 }
 
@@ -2649,6 +2861,22 @@ struct Core {
     peer_dials: HashSet<SocketAddr>,
     read_marks: HashMap<NodeId, u64>,
     counters: Counters,
+    /// Layer 8 §12.3: the registered consumers, one slot per registry kind
+    /// (`consumer_slot`); all empty in v1 until a layer registers one.
+    consumers: [Option<Arc<dyn Consumer>>; CONSUMER_KINDS],
+    /// The Layer 8 §12.3 test fault point ([`Fabric::fault_after_consume`]).
+    #[cfg(debug_assertions)]
+    consume_fault: bool,
+    /// Layer 8 §12.3: set by [`Core::on_consumed`] when the packet in hand
+    /// was a registry frame left uncommitted (its consumer failed, the
+    /// store failed, the fault point fired); [`Core::on_item`] takes it.
+    rx_unstored: bool,
+    /// Layer 8 §12.3 over the mailbox (§9): the home hub and the custody
+    /// sequence of the lowest item whose registry frame was left
+    /// uncommitted. The cursor stays below it until it comes again and is
+    /// taken ([`Core::cursor_may_pass`]); in memory only, as the stored
+    /// cursor already stays below it.
+    mailbox_hold: Option<(NodeId, u64)>,
     /// Layer 7 §5.9: the forwarder (empty and idle on a non-hub node).
     fwd: Forwarder,
     events: broadcast::Sender<FabricEvent>,
@@ -2811,7 +3039,9 @@ impl Core {
     // -- startup -----------------------------------------------------------
 
     fn recover(&mut self, unclean: bool) -> Result<()> {
-        // §5: a crash between the last fragment and delivery.
+        // §5: a crash between the last fragment and delivery. This build
+        // leaves only a `MSG` so: a registry kind's completing fragment
+        // commits with its delivery (Layer 8 §12.3, `on_consumed`).
         for p in self.store.complete_partials()? {
             let Ok(n) = u32::try_from(p.n) else { continue };
             self.finish_partial(
@@ -4068,7 +4298,7 @@ impl Core {
                     self.apply_ack(&sender, &p.block);
                 }
             }
-            k if k.carries_msg_seq() => self.on_data(&opened),
+            k if k.carries_msg_seq() => self.on_data(&opened, attributed),
             Kind::CustodyPut => {
                 if let Some(ck) = ck.as_ref().filter(|_| attributed) {
                     let hint = opened.inner.ext.dest_hub;
@@ -4106,8 +4336,12 @@ impl Core {
         }
     }
 
-    /// §4 + §5 + §7.2 (3): a sequenced packet's content.
-    fn on_data(&mut self, opened: &Opened) {
+    /// §4 + §5 + §7.2 (3): a sequenced packet's content. A kind of the
+    /// Layer 8 §12.3 consumer registry (0x10–0x14) from a contact goes to
+    /// [`Core::on_consumed`] and never becomes a message row; `attributed`
+    /// (the packet's connection is attributed to its sender) is passed on
+    /// to its consumer.
+    fn on_data(&mut self, opened: &Opened, attributed: bool) {
         let sender = opened.sender.node_id;
         let sb = sender.to_bytes();
         let mut held = self.request_pending(&sender);
@@ -4148,7 +4382,9 @@ impl Core {
         };
         let mut ack = false;
         let mut strong = None;
-        if let Some(f) = opened.inner.frag {
+        if let Some(slot) = consumer_slot(opened.inner.kind) {
+            (ack, strong) = self.on_consumed(opened, slot, attributed);
+        } else if let Some(f) = opened.inner.frag {
             match self.store.offer_fragment(
                 &sb,
                 opened.stream,
@@ -4210,6 +4446,133 @@ impl Core {
                     o.strong.push(s);
                 }
             }
+        }
+    }
+
+    /// Layer 8 §12.3: a sequenced frame of a registry kind from a contact
+    /// (module doc, "The consumer registry"). The §4 decision on `n`, the
+    /// record of a Tier 1 message's completing fragment and the consumer's
+    /// call share one FULL transaction ([`hold_tx`]), committed only after
+    /// the consumer returned; with no consumer the frame is committed and
+    /// counted. Every other fragment is recorded (and SACKed) as a
+    /// message's is. Returns whether to ACK, and the strong receipt (a
+    /// Tier 0 frame's, as a message's); a frame left uncommitted (a
+    /// consumer error, a store error, the fault point) also sets
+    /// `rx_unstored` for [`Core::on_item`].
+    fn on_consumed(
+        &mut self,
+        opened: &Opened,
+        slot: usize,
+        attributed: bool,
+    ) -> (bool, Option<StrongReceipt>) {
+        let kind = opened.inner.kind;
+        let sb = opened.sender.node_id.to_bytes();
+        let (stream, seq) = (opened.stream, opened.inner.seq);
+        let (epoch, n) = (seq.epoch, u64::from(seq.n));
+        let payload = opened.inner.payload.as_slice();
+        let frag = opened.inner.frag;
+        let msg_id = opened.msg_id(self.own);
+        let consumer = self.consumers.get(slot).cloned().flatten();
+        let fault = self.consume_fault_armed();
+        let store = &self.store;
+        let verdict = hold_tx(store, |tx| {
+            let (offer, body) = match frag {
+                None => (offer_in(tx, &sb, stream, epoch, n)?, Cow::Borrowed(payload)),
+                Some(f) => {
+                    match offer_fragment_in(tx, &sb, stream, epoch, n, f.idx, f.count, payload)? {
+                        FragOffer::Stored { complete: true } => {
+                            // Read back inside this transaction (only a
+                            // consumer needs the body), then `n` recorded,
+                            // which drops the fragments with the partial.
+                            let whole = if consumer.is_some() {
+                                store
+                                    .reassemble(&sb, stream, epoch, n)?
+                                    .ok_or(StoreError::Corrupt("rx_frags"))?
+                            } else {
+                                Vec::new()
+                            };
+                            (offer_in(tx, &sb, stream, epoch, n)?, Cow::Owned(whole))
+                        }
+                        FragOffer::Stored { complete: false } | FragOffer::DuplicateFragment => {
+                            return Ok((Consumed::Ack, true));
+                        }
+                        FragOffer::Delivered(o) => {
+                            let v = if o.re_ack() {
+                                Consumed::Ack
+                            } else {
+                                Consumed::Drop
+                            };
+                            return Ok((v, false));
+                        }
+                        FragOffer::StaleEpoch | FragOffer::Deferred | FragOffer::Mismatch => {
+                            return Ok((Consumed::Drop, false));
+                        }
+                    }
+                }
+            };
+            if offer != RxOffer::New {
+                let v = if offer.re_ack() {
+                    Consumed::Ack
+                } else {
+                    Consumed::Drop
+                };
+                return Ok((v, false));
+            }
+            let Some(c) = &consumer else {
+                return Ok((Consumed::Unconsumed, true));
+            };
+            if c.consume(kind, &msg_id, attributed, &body).is_err() {
+                return Ok((Consumed::Failed, false));
+            }
+            if fault {
+                return Ok((Consumed::Fault, false));
+            }
+            Ok((Consumed::Delivered, true))
+        });
+        let ack = match verdict {
+            Ok(Consumed::Ack | Consumed::Delivered) => true,
+            Ok(Consumed::Unconsumed) => {
+                count_unconsumed(&mut self.counters, kind);
+                true
+            }
+            Ok(Consumed::Drop) => false,
+            Ok(Consumed::Fault) => {
+                self.disarm_consume_fault();
+                self.rx_unstored = true;
+                false
+            }
+            Ok(Consumed::Failed) | Err(_) => {
+                self.counters.errors += 1;
+                self.rx_unstored = true;
+                false
+            }
+        };
+        let strong =
+            (ack && frag.is_none() && opened.inner.receipt_strong).then(|| StrongReceipt {
+                seq,
+                payload_hash: strong_hash(payload),
+            });
+        (ack, strong)
+    }
+
+    /// Whether the §12.3 test fault point is armed (never, in a release
+    /// build: [`Fabric::fault_after_consume`] is debug-only).
+    fn consume_fault_armed(&self) -> bool {
+        #[cfg(debug_assertions)]
+        {
+            self.consume_fault
+        }
+        #[cfg(not(debug_assertions))]
+        {
+            false
+        }
+    }
+
+    /// The fault point fired once: disarm it.
+    fn disarm_consume_fault(&mut self) {
+        #[cfg(debug_assertions)]
+        {
+            self.consume_fault = false;
         }
     }
 
@@ -4692,10 +5055,42 @@ impl Core {
         };
         let item = item.to_vec();
         self.counters.items_received += 1;
+        self.rx_unstored = false;
         self.on_sealed(None, &item);
+        let unstored = std::mem::take(&mut self.rx_unstored);
+        if !self.cursor_may_pass(hub, seq, unstored) {
+            return;
+        }
         match self.store.advance_cursor(hub.as_bytes(), seq) {
             Ok(c) => self.commit_owed = Some(self.commit_owed.unwrap_or(0).max(c)),
             Err(_) => self.counters.errors += 1,
+        }
+    }
+
+    /// Layer 8 §12.3 over the mailbox (module doc, "The consumer
+    /// registry"): whether the cursor at `hub` may advance to item `seq`;
+    /// `unstored` when that item was a registry frame left uncommitted. A
+    /// `MAILBOX_COMMIT` says the member stored everything up to it (§9), so
+    /// such an item is held (the lowest, when several are): the cursor
+    /// stays below it, and no item after it moves the cursor, until it
+    /// comes again (the hub streams it at the next fetch) and is taken.
+    /// With nothing held every item moves the cursor as before.
+    fn cursor_may_pass(&mut self, hub: NodeId, seq: u64, unstored: bool) -> bool {
+        if self.mailbox_hold.is_some_and(|(h, _)| h != hub) {
+            self.mailbox_hold = None;
+        }
+        let held = self.mailbox_hold.map(|(_, s)| s);
+        if unstored {
+            self.mailbox_hold = Some((hub, held.map_or(seq, |s| s.min(seq))));
+            return false;
+        }
+        match held {
+            Some(s) if seq > s => false,
+            Some(s) if seq == s => {
+                self.mailbox_hold = None;
+                true
+            }
+            _ => true,
         }
     }
 

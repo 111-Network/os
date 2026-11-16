@@ -1,0 +1,104 @@
+{
+  "case": "restart",
+  "decision": {
+    "applied": {
+      "actions": [
+        {
+          "action": "service.restart",
+          "applied": true,
+          "reason": null,
+          "result": {
+            "id": "transport",
+            "restarting": true,
+            "schema": 1
+          },
+          "reverted": false,
+          "skipped": false
+        }
+      ],
+      "applied": true,
+      "reason": null,
+      "reverted": false
+    },
+    "at": "NORMALISED",
+    "decision": "accepted",
+    "schema": 1
+  },
+  "files": [
+    {
+      "mode": "600",
+      "path": "agent/decisions/prop-p1-restart.json",
+      "sha256": "3f4997eddd763f01e6933292ba7d167e338b01c62bcff6672bb235b656744136"
+    },
+    {
+      "mode": "600",
+      "path": "rns/config",
+      "sha256": "a120d1e74298c80baed44faf734e23cd530a1ac5816ce29d0f8e2ad7fd8b8310"
+    },
+    {
+      "mode": "600",
+      "path": "state/dashboard-pair.json",
+      "sha256": null
+    },
+    {
+      "mode": "600",
+      "path": "state/dashboard-sessions.json",
+      "sha256": null
+    },
+    {
+      "mode": "644",
+      "path": "state/dashboard.json",
+      "sha256": null
+    },
+    {
+      "mode": "600",
+      "path": "state/devices.json",
+      "sha256": null
+    },
+    {
+      "mode": "600",
+      "path": "state/interfaces.toml",
+      "sha256": "c1e8e9161186c8cf62ff61a452ed3e383e3922b4389c028bb40e217b936a70d4"
+    },
+    {
+      "mode": "644",
+      "path": "state/panels.json",
+      "sha256": null
+    },
+    {
+      "mode": "600",
+      "path": "state/staging.lock",
+      "sha256": null
+    }
+  ],
+  "http_status": 200,
+  "proposal": {
+    "actions": [
+      {
+        "action": "service.restart",
+        "service_id": "transport"
+      }
+    ],
+    "why": "P1 restart"
+  },
+  "recorded_at_commit": "3da8e300eb0af0b4bd9855a987e197ca364f7f86",
+  "report": {
+    "actions": [
+      {
+        "action": "service.restart",
+        "applied": true,
+        "reason": null,
+        "result": {
+          "id": "transport",
+          "restarting": true,
+          "schema": 1
+        },
+        "reverted": false,
+        "skipped": false
+      }
+    ],
+    "applied": true,
+    "reason": null,
+    "reverted": false
+  }
+}

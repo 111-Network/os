@@ -7,7 +7,7 @@ tags: [messaging, networking, dtn]
 platforms: [linux]
 upstream: https://github.com/binwiederhier/ntfy
 license: Apache-2.0 OR GPL-2.0-only
-last_verified: 2026-11-02
+last_verified: 2026-11-15
 sources:
   - https://raw.githubusercontent.com/binwiederhier/ntfy/main/LICENSE
   - https://raw.githubusercontent.com/binwiederhier/ntfy/main/LICENSE.GPLv2
@@ -69,6 +69,8 @@ Gates still unread from this box (D30 Q16 accepts them for a prototype behind th
 - ntfy.sh's anonymous limits (reported 250 messages a day) and its retention;
 - whether a server forwards messages to a third-party push service.
 
+None of these was read in the D11 build either; the status stays `candidate`.
+
 ## Evidence
 
 ### Alternatives considered
@@ -83,6 +85,13 @@ Gates still unread from this box (D30 Q16 accepts them for a prototype behind th
   loopback, not ntfy): the 5A flush order over the fake hand-off, the 4,096 / 4,097 B body boundary, a 429, `since`
   after a stub restart, the 5B held stream with its keepalive, RSS during a flush and bytes per frame; the eleven
   owner-server items (token header, `since` on a real server, retention, limits) are marked "not run from this box".
+- 2026-11-15 — the carrier as built (row D11, `1-bootstrap/crates/node111/src/daemon/carrier/{mod,ntfy}.rs`), in-process
+  behind the hand-off API; nothing is built while `gateway.enabled` is off, `carrier.kind` is not `ntfy`, the consent is
+  not held (a metered cap set or raised owes a new one) or the node is not a hub. Built: a 5A flush on a debounced
+  address or route change, a fabric `Forward` event or "Flush now" (drain acks, post in custody order, drain once, stop;
+  no idle connection); a 5B held stream on one thread for one pair (refused on Termux). The accept is a "posted" mark;
+  only the far `CUSTODY_ACK` commits. The last id per topic and a rolling 24 h metered window are saved in
+  `state/relay.json`. Checked against the stub only, never a real ntfy server.
 - Only the owner-run G10 smoke log (`7-relay/verify/logs/ntfy-smoke-<calver>.md`) moves this entry to `testing`.
 
 ## Links

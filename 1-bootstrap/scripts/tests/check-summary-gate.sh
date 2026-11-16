@@ -45,7 +45,8 @@ cp "$B/scripts/notices/tests/test_stub.py" "$B/scripts/tests/test_stub.py"
 for g in check-summary-gate cross-build-ui-gate cross-build-asserts-gate; do
   printf 'echo %s stub\n' "$g" >"$B/scripts/tests/$g.sh"
 done
-: >"$B/systemd/111node.service"
+# the unit carries the three lines check.sh's systemd-analyze stage asserts (Layer 9 L2: the witness)
+printf '%s\n' 'Restart=always' 'StartLimitIntervalSec=0' 'ExecStopPost=/usr/local/bin/111 heal-witness' >"$B/systemd/111node.service"
 : >"$B/systemd/111node-update.service"
 : >"$B/systemd/111node-update.path"
 : >"$R/4-interface/ui/node_modules/.modules.yaml"

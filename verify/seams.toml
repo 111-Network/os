@@ -66,13 +66,20 @@ gap = "Format only: build.py --check lints the entries; no code reads them."
 
 [[seam]]
 id = "L0-L9:evolution"
-status = "planned"
-spec = ["9-evolution/README.md"]
-a = { layer = 0, files = [] }
-b = { layer = 9, files = [] }
+status = "stub"
+spec = ["9-evolution/README.md §6.1", "9-evolution/README.md §6.2", "9-evolution/README.md §6.3", "9-evolution/README.md §13", "9-evolution/README.md §20"]
+a = { layer = 0, files = ["0-knowledge/_meta/build.py", "0-knowledge/_meta/schema.md"] }
+b = { layer = 9, files = [
+  "1-bootstrap/crates/node111/src/daemon/heal/vocab.rs",
+  "1-bootstrap/crates/node111/src/daemon/heal/playbook/mod.rs",
+  "1-bootstrap/crates/node111/src/daemon/heal/playbook/grammar.rs",
+  "1-bootstrap/crates/node111/src/daemon/heal/playbook/eval.rs",
+  "1-bootstrap/crates/node111/src/daemon/heal/action.rs",
+  "1-bootstrap/crates/node111/src/daemon/heal/drafts.rs",
+] }
 read_first = "a"
-symptom = "agent, knowledge-base and bridging-logic evolution; amending locked specs by permission"
-gap = "None: planned; no code and no spec section yet."
+symptom = "a playbook does not load or the lint and the loader disagree: GET /api/v1/repairs/playbooks lists it refused ('unsupported grammar N, needs release X'); build.py --check fails N06 or B10; 0-knowledge/_meta/playbook-vocabulary.toml differs from the compiled table; a tampered share/agent/ file leaves the agent row in error with prompts_invalid; an accepted kb_draft writes under current/share/kb/"
+gap = "None: a T0 stub; rows D3 to D5, D48, D49, K1 to K4 and A6 build it, and G21 and G25 print SKIPPED."
 
 [[seam]]
 id = "L1-L1:cli-config"
@@ -364,13 +371,13 @@ gap = "check.sh runs cargo test before the UI build, so Rust tests see the 'not 
 
 [[seam]]
 id = "L1-L5:blob-intake"
-status = "stub"
+status = "planned"
 spec = ["1-bootstrap/README.md Layer 5 amendments", "7-relay/README.md §9"]
 a = { layer = 1, files = ["1-bootstrap/crates/node111/src/daemon/updater/mod.rs"] }
 b = { layer = 5, files = ["5-messaging/crates/mesh111/src/blobs.rs"] }
 read_first = "a"
 symptom = "no symptom yet: the updater intake of a staged payload at fabric/blobs is planned (wire fill v1.1)"
-gap = "None: planned, no code on the updater side."
+gap = "Deferred to v1.1 (1-bootstrap/README.md:247, 7-relay/README.md §17): the wire transfer that fills `fabric/blobs` for the updater arrives in v1.1; no v1 row builds either side."
 
 [[seam]]
 id = "L1-L5:fabric-cli"
@@ -512,17 +519,17 @@ gap = "Rows D7 and D5b landed: the serving side runs in process (origin_serve th
 
 [[seam]]
 id = "L1-L7:registry-dnssd"
-status = "stub"
+status = "built"
 spec = ["7-relay/README.md §7"]
 a = { layer = 1, files = ["1-bootstrap/crates/node111/src/daemon/registry/mod.rs"] }
 b = { layer = 7, files = ["1-bootstrap/crates/node111/src/daemon/dashboard/mdns.rs"] }
 read_first = "a"
-symptom = "no 'Find my hub': 409 lan_off, an empty GET /registry"
-gap = "None: a T0 stub."
+symptom = "no 'Find my hub': 409 lan_off, an empty GET /registry; the _n111._tcp record missing or stale"
+gap = "Row D8 landed: the record, the browse and the lost-hub rehome run against real mdns-sd daemons and real fabrics on loopback (tests/registry_mdns.rs), the re-arm in a network namespace; G8 (presence.sh) still prints SKIPPED, so no two-host LAN run."
 
 [[seam]]
 id = "L1-L7:relay-state"
-status = "stub"
+status = "built"
 spec = ["7-relay/README.md §6.3"]
 a = { layer = 1, files = [
   "1-bootstrap/crates/node111/src/daemon/relay/settings.rs",
@@ -531,37 +538,69 @@ a = { layer = 1, files = [
 b = { layer = 7, files = ["1-bootstrap/crates/node111/src/daemon/dashboard/api_v1/relay7.rs"] }
 read_first = "a"
 symptom = "settings are lost or a secret leaks: the GET /relay shape"
-gap = "relay/settings.rs has 19 unit tests, but the /relay routes answer 404 until D10 and the link-key file is a stub."
+gap = "Row D10 landed: GET /relay and PATCH /relay/settings run on D1's settings cell, every consent round trip and refusal through the real router (tests/api_v1_relay7.rs); the link-key file is D5's. No two-host run yet (G9-G11 SKIPPED)."
 
 [[seam]]
 id = "L1-L8:state-service"
-status = "planned"
-spec = ["8-storage/README.md"]
-a = { layer = 1, files = [] }
-b = { layer = 8, files = [] }
-read_first = "a"
-symptom = "the node111 state service and the SQLCipher state file with its budget classes"
-gap = "None: planned; no code and no spec section yet."
+status = "stub"
+spec = ["8-storage/README.md §2.2", "8-storage/README.md §4.3", "8-storage/README.md §13.4", "8-storage/README.md §13.8", "8-storage/README.md §18"]
+a = { layer = 1, files = ["1-bootstrap/crates/node111/src/daemon/housekeeping.rs"] }
+b = { layer = 8, files = [
+  "1-bootstrap/crates/node111/src/daemon/state/mod.rs",
+  "1-bootstrap/crates/node111/src/daemon/state/schema.rs",
+  "1-bootstrap/crates/node111/src/daemon/storage/settings.rs",
+  "1-bootstrap/crates/node111/src/daemon/storage/budget.rs",
+  "1-bootstrap/crates/node111/src/daemon/storage/reclaim.rs",
+  "1-bootstrap/crates/node111/src/daemon/storage/logs.rs",
+  "1-bootstrap/crates/node111/src/daemon/storage/integrity.rs",
+  "1-bootstrap/crates/node111/src/daemon/storage/setaside.rs",
+  "1-bootstrap/crates/node111/src/daemon/datasets/index.rs",
+] }
+read_first = "b"
+symptom = "the agent's history is not kept or the disk fills: GET /api/v1/storage shows node_state unavailable with its reason, a class full or disk_low; an idle pass writes fabric/store.db or node/state.db; a child log grows past logs.max_file_bytes"
+gap = "None: a T0 stub; rows D1, D2, D9 to D12, D18, D20 and D25 build it, and G13, G14, G15 and the extended G7 print SKIPPED."
 
 [[seam]]
 id = "L1-L8:updates-backup"
-status = "planned"
-spec = ["8-storage/README.md"]
-a = { layer = 1, files = [] }
-b = { layer = 8, files = [] }
+status = "stub"
+spec = ["8-storage/README.md §13.2", "8-storage/README.md §13.6", "8-storage/README.md §11.3"]
+a = { layer = 1, files = ["1-bootstrap/crates/node111/src/store_export/mod.rs"] }
+b = { layer = 8, files = [
+  "5-messaging/crates/mesh111/src/store/copy.rs",
+  "1-bootstrap/crates/node111/src/daemon/storage/lock.rs",
+  "1-bootstrap/crates/node111/src/daemon/storage/migrate.rs",
+  "1-bootstrap/crates/node111/src/daemon/origin/termux.rs",
+] }
 read_first = "a"
-symptom = "dataset and package updates beyond the 111 release; store export and migrations"
-gap = "None: planned; no code and no spec section yet."
+symptom = "a rollback leaves a store unreadable or a backup does not restore: no .pre-v<N> copy (SchemaTooNew after a revert), /status.update.last_result reads refused_space, 111 store import refuses; a member cannot install a component from its hub"
+gap = "None: a T0 stub; rows M6, D16, D17, D21, D46, L2 to L5 and L9 to L11 build it, and G13 and G18 print SKIPPED."
 
 [[seam]]
 id = "L1-L9:observer-change-engine"
-status = "planned"
-spec = ["9-evolution/README.md"]
-a = { layer = 1, files = [] }
-b = { layer = 9, files = [] }
+status = "stub"
+spec = ["9-evolution/README.md §3.1", "9-evolution/README.md §3.2", "9-evolution/README.md §3.3", "9-evolution/README.md §3.4", "9-evolution/README.md §7.5", "9-evolution/README.md §12.6", "1-bootstrap/README.md Supervision"]
+a = { layer = 1, files = [
+  "1-bootstrap/crates/node111/src/daemon/supervise.rs",
+  "1-bootstrap/crates/node111/src/daemon/services/mod.rs",
+  "1-bootstrap/crates/node111/src/daemon/dashboard/api_v1/events.rs",
+  "1-bootstrap/crates/node111/src/daemon/updater/mod.rs",
+  "1-bootstrap/crates/node111/src/probation.rs",
+  "1-bootstrap/systemd/111node.service",
+  "1-bootstrap/termux/sv/111node/finish",
+] }
+b = { layer = 9, files = [
+  "1-bootstrap/crates/node111/src/daemon/heal/mod.rs",
+  "1-bootstrap/crates/node111/src/daemon/heal/observer.rs",
+  "1-bootstrap/crates/node111/src/daemon/heal/incident.rs",
+  "1-bootstrap/crates/node111/src/daemon/heal/facts.rs",
+  "1-bootstrap/crates/node111/src/daemon/heal/witness.rs",
+  "1-bootstrap/crates/node111/src/daemon/heal/undo.rs",
+  "1-bootstrap/crates/node111/src/daemon/heal/apk.rs",
+  "1-bootstrap/crates/node111/src/heal_witness.rs",
+] }
 read_first = "a"
-symptom = "the observer waking and witnessing 111d's death; typed apply, verify, undo through a root helper"
-gap = "None: planned; no code and no spec section yet."
+symptom = "a failure is missed or miscounted: a supervised child's unrequested exit opens no (layer, id, child_exit) incident in GET /api/v1/repairs/incidents, while a requested restart or a graceful stop opens one; a kill -9 of 111d leaves no (1, 111d, unclean_exit); state/heal/inbox holds more than 256 lines; an armed state/heal/undo is not restored at the next start (its decision does not read reverted (daemon restart))"
+gap = "None: a T0 stub; row D1 landed the exit facts (ChildControl::exits in supervise.rs); rows D2, D6, D10 to D12, D16, D21, D50 and L1 to L4 build the rest, and G19 and G20 print SKIPPED."
 
 [[seam]]
 id = "L1-X:pi-floor"
@@ -676,23 +715,28 @@ gap = "Rows D5 and D5b landed: the link key (mint, cache, discard after a restor
 
 [[seam]]
 id = "L2-L8:dataset-signing"
-status = "planned"
-spec = ["8-storage/README.md"]
-a = { layer = 2, files = [] }
-b = { layer = 8, files = [] }
-read_first = "a"
-symptom = "the 111/catalogue/v1 and 111/export/v1 signing tags"
-gap = "None: planned; no code and no spec section yet."
+status = "stub"
+spec = ["8-storage/README.md §6.1", "8-storage/README.md §13.1", "2-identity/README.md §6.1", "2-identity/README.md §8.5"]
+a = { layer = 2, files = ["2-identity/crates/id111/src/keyset.rs"] }
+b = { layer = 8, files = [
+  "1-bootstrap/crates/node111/src/daemon/datasets/catalogue.rs",
+  "1-bootstrap/crates/node111/src/daemon/datasets/sidecar.rs",
+  "1-bootstrap/crates/node111/src/daemon/datasets/publish.rs",
+  "1-bootstrap/crates/node111/src/store_export/format.rs",
+] }
+read_first = "b"
+symptom = "a catalogue or an export does not verify: the Datasets view lists no catalogue (409 untrusted_publisher, a lower seq refused); 111 store import refuses before decrypting; the node-state store does not open with its key"
+gap = "None: a T0 stub; rows M1, D23, D24, D28 and L2 build it, and G13 and G15 print SKIPPED."
 
 [[seam]]
 id = "L2-L9:fix-signing"
-status = "planned"
-spec = ["9-evolution/README.md"]
-a = { layer = 2, files = [] }
-b = { layer = 9, files = [] }
-read_first = "a"
-symptom = "node-key signatures (111/fix/v1, 111/fix-vouch/v1) on the two outbound artefacts"
-gap = "None: planned; no code and no spec section yet."
+status = "stub"
+spec = ["9-evolution/README.md §10.1", "9-evolution/README.md §10.2", "9-evolution/README.md §11.1", "2-identity/README.md §6.1"]
+a = { layer = 2, files = ["2-identity/crates/id111/src/keyset.rs"] }
+b = { layer = 9, files = ["1-bootstrap/crates/node111/src/daemon/heal/fix/body.rs"] }
+read_first = "b"
+symptom = "a fix or a vouch verifies where it must not, or not where it must: the receiver drops and counts a well-signed fix, a flipped body byte still verifies, or 9-evolution/verify/vectors/fix-v1.json disagrees with the build"
+gap = "None: a T0 stub; rows D7, D36, D37 and D39 build it, and G22 prints SKIPPED."
 
 [[seam]]
 id = "L3-L4:agent-events"
@@ -793,43 +837,68 @@ gap = "No real agent ever calls an L6 tool: a second stub-daemon copy stands in,
 
 [[seam]]
 id = "L3-L7:l7-tools"
-status = "stub"
+status = "built"
 spec = ["3-intelligence/README.md Layer 7 tools", "7-relay/README.md §13.3"]
 a = { layer = 3, files = ["3-intelligence/crates/agent111/src/tools.rs"] }
 b = { layer = 7, files = ["1-bootstrap/crates/node111/src/daemon/relay/mod.rs"] }
 read_first = "a"
 symptom = "the tool-count pin moves: the agent offers 20 tools (17 and presence.read, gateway.read, relay.propose)"
-gap = "Row A1 landed and layer7_tools runs the three tools against a hand-typed stub daemon; the routes they read (GET /relay of D10, the 111 source of GET /nearby of D2) are not built, so no real daemon answers them."
+gap = "Rows A1, D2 and D10 landed: the agent's three Layer 7 tools (A/src/tools.rs) read GET /nearby's 111 source and GET /relay, both routed by the daemon now; layer7_tools still runs them against a hand-typed stub daemon (F), and no test drives the real daemon's routes from the agent."
 
 [[seam]]
 id = "L3-L7:offload"
-status = "stub"
+status = "built"
 spec = ["3-intelligence/README.md Model profiles", "7-relay/README.md §7"]
 a = { layer = 3, files = ["3-intelligence/crates/agent111/src/config.rs"] }
 b = { layer = 7, files = ["1-bootstrap/crates/node111/src/daemon/registry/mod.rs"] }
 read_first = "a"
 symptom = "a model-less node has no model: the agent state is unavailable (not a hang)"
-gap = "The private-IP refusal is tested on the agent side only; the hub registry it would read is a T0 stub."
+gap = "Rows D8 and D9 landed: a hub's registry row carries the offload role (bit 4) and the agent refuses a public model base (`guard_model_base`, A/src/config.rs; F in config_guard); by design no code turns a registry row into the agent's model base (the human types it, Layer 7 §7), so the integration proof is a node111 test feeding a registry row's private IP literal to the guard (not written)."
 
 [[seam]]
 id = "L3-L8:agent-state"
-status = "planned"
-spec = ["8-storage/README.md"]
-a = { layer = 3, files = [] }
-b = { layer = 8, files = [] }
+status = "stub"
+spec = ["8-storage/README.md §2.3", "8-storage/README.md §2.4", "8-storage/README.md §2.5", "3-intelligence/README.md State ← Layer 8"]
+a = { layer = 3, files = [
+  "3-intelligence/crates/agent111/src/chat.rs",
+  "3-intelligence/crates/agent111/src/store.rs",
+  "3-intelligence/crates/agent111/src/tasks.rs",
+] }
+b = { layer = 8, files = [
+  "1-bootstrap/crates/node111/src/daemon/state/service.rs",
+  "1-bootstrap/crates/node111/src/daemon/state/spool.rs",
+  "1-bootstrap/crates/node111/src/daemon/state/legacy.rs",
+] }
 read_first = "a"
-symptom = "agent state (conversations, tasks, proposals) moves into the 111d-owned encrypted store"
-gap = "None: planned; no code and no spec section yet."
+symptom = "a chat turn is answered but not kept: the chat view says 'History is not being saved: <reason>' or GET /api/v1/chat/history answers 503 store_unavailable; a proposal stays in agent/proposals/ and GET /api/v1/proposals does not list it"
+gap = "None: a T0 stub; rows D3, D5, D6, D8 and A1 build it, and G13 prints SKIPPED."
+
+[[seam]]
+id = "L3-L9:code-drafts"
+status = "stub"
+spec = ["9-evolution/README.md §8.1", "9-evolution/README.md §8.3", "9-evolution/README.md Applies cleanly", "9-evolution/README.md §9", "9-evolution/README.md §20", "3-intelligence/README.md Tasks"]
+a = { layer = 3, files = ["3-intelligence/crates/agent111/src/tasks.rs"] }
+b = { layer = 9, files = [
+  "1-bootstrap/crates/node111/src/daemon/heal/drafts.rs",
+  "1-bootstrap/crates/node111/src/daemon/heal/export.rs",
+] }
+read_first = "a"
+symptom = "a code draft escapes or misleads: a patch task's opencode.json lacks the deny block, or opencode connects to 127.0.0.1:11180; a file outside the task's work dir reaches a model request or the diff; a draft reads 'drafted and applies cleanly, not built' for a diff that does not apply; fix-<id>.mbox fails git am, or git mailsplit finds two patches; the task route's patch mode submits a task with no source tarball matching the [source] pin instead of answering 409 component_unavailable"
+gap = "None: a T0 stub on Layer 9's side; row A1 landed the deny block in tasks.rs (l3.agent111.opencode_config, strength F: a recorder stands in for opencode); rows A4, A5, D9, D44 to D47 and L7 build the rest, and G24 prints SKIPPED."
 
 [[seam]]
 id = "L3-L9:diagnosis-playbooks"
-status = "planned"
-spec = ["9-evolution/README.md"]
-a = { layer = 3, files = [] }
-b = { layer = 9, files = [] }
+status = "stub"
+spec = ["9-evolution/README.md §5.1", "9-evolution/README.md §5.2", "9-evolution/README.md §5.3", "9-evolution/README.md §18.3", "3-intelligence/README.md Contracts", "3-intelligence/README.md Tasks"]
+a = { layer = 3, files = [
+  "3-intelligence/crates/agent111/src/http.rs",
+  "3-intelligence/crates/agent111/src/tasks.rs",
+  "3-intelligence/crates/agent111/src/tools.rs",
+] }
+b = { layer = 9, files = ["1-bootstrap/crates/node111/src/daemon/heal/diagnose.rs"] }
 read_first = "a"
-symptom = "diagnosis tiers, the playbook grammar and evaluator, new task kinds"
-gap = "None: planned; no code and no spec section yet."
+symptom = "an incident's diagnosis is wrong or costly: one satisfied cause still makes a model request; the T1 request lacks the incident block, carries daemon_health or recent_events, or has no response_format cause enum; a reply citing an unknown evidence id is kept; the result shows in GET /api/v1/proposals and the open count instead of on the incident; two incidents make two model requests at once"
+gap = "None: a T0 stub; rows A2, A3, A9, D13, D23, D24 and D54 build it, and G21 and G25 print SKIPPED."
 
 [[seam]]
 id = "L4-L1:tapes"
@@ -950,7 +1019,7 @@ gap = ""
 
 [[seam]]
 id = "L4-L7:relay-api"
-status = "stub"
+status = "built"
 spec = ["7-relay/README.md §13", "4-interface/api/README.md"]
 a = { layer = 4, files = ["4-interface/ui/src/lib/api/relay.ts"] }
 b = { layer = 7, files = [
@@ -961,17 +1030,47 @@ b = { layer = 7, files = [
 ] }
 read_first = "b"
 symptom = "Settings > Relay is dead: the routes answer 404; the layer7 tests run on the mock only"
-gap = "ui:layer7-contract uses hand fixtures 'not daemon output', and eight Layer 7 operations sit in dashboard_auth's UNROUTED list; relay_pair (row D6, landed) drives the three pair routes through the real dashboard app."
+gap = "Row D10 landed: the relay routes, the relay frame and the relay proposals answer the contract (tests/api_v1_relay7.rs, the dashboard_auth contract walk); the carrier check and flush answer through a no-op hook until row D11."
 
 [[seam]]
 id = "L4-L8:hub-content"
-status = "planned"
-spec = ["8-storage/README.md"]
+status = "stub"
+spec = ["8-storage/README.md §16.1", "8-storage/README.md §15.4", "8-storage/README.md §10", "4-interface/api/README.md"]
 a = { layer = 4, files = [] }
-b = { layer = 8, files = [] }
-read_first = "a"
-symptom = "encyclopedias and maps served to the LAN; new UI views and routes"
-gap = "None: planned; no code and no spec section yet."
+b = { layer = 8, files = [
+  "1-bootstrap/crates/node111/src/daemon/dashboard/api_v1/storage.rs",
+  "1-bootstrap/crates/node111/src/daemon/dashboard/api_v1/datasets.rs",
+  "1-bootstrap/crates/node111/src/daemon/dashboard/api_v1/tiles.rs",
+  "1-bootstrap/crates/node111/src/daemon/storage/mod.rs",
+  "1-bootstrap/crates/node111/src/daemon/storage/walk.rs",
+  "1-bootstrap/crates/node111/src/daemon/datasets/mod.rs",
+  "1-bootstrap/crates/node111/src/daemon/datasets/search.rs",
+  "1-bootstrap/crates/node111/src/daemon/datasets/kiwix.rs",
+] }
+read_first = "b"
+symptom = "Settings > Storage and the Datasets view are empty: /api/v1/storage, /datasets and /tiles answer 404 and no storage or dataset frame arrives; the map chunk loads on a node with no tile set"
+gap = "None: a T0 stub (three empty routers, 404); rows C1, C2, D13, D14, D29, D35, D42 to D44 and U1 to U7 build it, and G14 to G17 print SKIPPED."
+
+[[seam]]
+id = "L4-L9:repairs-api"
+status = "stub"
+spec = ["9-evolution/README.md §18.1", "9-evolution/README.md §18.4", "9-evolution/README.md §14.1", "9-evolution/README.md §17.1", "9-evolution/README.md §20", "4-interface/api/README.md"]
+a = { layer = 4, files = [
+  "1-bootstrap/crates/node111/src/daemon/dashboard/api_v1/proposals.rs",
+  "1-bootstrap/crates/node111/src/daemon/dashboard/api_v1/events.rs",
+  "4-interface/api/openapi.yaml",
+  "4-interface/ui/src/views/settings/index.tsx",
+] }
+b = { layer = 9, files = [
+  "1-bootstrap/crates/node111/src/daemon/dashboard/api_v1/repairs.rs",
+  "1-bootstrap/crates/node111/src/daemon/heal/proposal.rs",
+  "1-bootstrap/crates/node111/src/daemon/heal/settings.rs",
+  "1-bootstrap/crates/node111/src/daemon/heal/notify.rs",
+  "1-bootstrap/crates/node111/src/heal_cmd.rs",
+] }
+read_first = "b"
+symptom = "the Repairs page is empty or acts wrongly: /api/v1/repairs* answer 404 (the T0 router) or a shape the contract does not give; no incident frame arrives on /api/v1/events; a LAN session's accept of a repair holding a loopback-only key applies instead of answering 403 loopback_only; the bearer's POST on a Layer 9 route is not 401; 111 heal settings writes before its y/N"
+gap = "None: a T0 stub (an empty router, 404); rows C1 to C6, D14, D22, D24 to D26, D31 to D36, D40, D47, D51, D53, L6 and U1 to U5 build it, and G20 prints SKIPPED."
 
 [[seam]]
 id = "L5-L6:foreign-tables"
@@ -1048,7 +1147,7 @@ gap = "In-process only; S2 13b exercises the quota for member rows alone."
 
 [[seam]]
 id = "L5-L7:fabric-tap"
-status = "stub"
+status = "built"
 spec = ["7-relay/README.md §2.1", "7-relay/README.md §3.5"]
 a = { layer = 5, files = ["1-bootstrap/crates/node111/src/daemon/fabric/mod.rs"] }
 b = { layer = 7, files = [
@@ -1057,17 +1156,17 @@ b = { layer = 7, files = [
 ] }
 read_first = "a"
 symptom = "no 111 Nearby kind: GET /nearby has no 111 source"
-gap = "None: a T0 stub on the relay side."
+gap = "Row D2 landed: the fabric tap (`relay::tap`, N/relay/mod.rs) hands each fabric batch to presence, the gateway row and the relay frame; the presence book is unit-tested against fake reads (`--lib daemon::relay::presence`, inside l1.node111.lib); no running system shows a 111 row yet: G8 (`7-relay/verify/presence.sh`, row V2) is a T0 stub."
 
 [[seam]]
 id = "L5-L7:forwarder-handoff"
-status = "stub"
+status = "built"
 spec = ["7-relay/README.md §5.9"]
 a = { layer = 5, files = ["5-messaging/crates/mesh111/src/fabric.rs"] }
 b = { layer = 7, files = ["1-bootstrap/crates/node111/src/daemon/carrier/mod.rs"] }
 read_first = "a"
 symptom = "custody is not forwarded: a message stays relayed with reason_code forwarding and never reaches delivered"
-gap = "B on the mesh side (forward.rs); carrier/mod.rs has no tests and G9 and G10 are stubs, so the daemon side is silent."
+gap = "Row D11 landed: the carrier runtime (N/carrier/mod.rs) drains the forwarder and posts through ntfy, proven at I against stub-ntfy.py by l1.node111.carrier_flow (two real hubs and a member at each); no real ntfy server has carried it (D12 waits for the owner-run smoke log), and G9 (forward.sh, row V3) and G10 (carrier.sh, row V4) are T0 stubs."
 
 [[seam]]
 id = "L5-L7:pair-gate"
@@ -1090,6 +1189,26 @@ symptom = "a wrong role is advertised: the registry TXT r field"
 gap = "Bits 0-2 are tested in mesh111; bits 3-5 (gateway, origin, registry) are defined in node111 but unbuilt on the wire."
 
 [[seam]]
+id = "L5-L8:child-panel"
+status = "planned"
+spec = ["8-storage/README.md §9.1", "8-storage/README.md §18"]
+a = { layer = 5, files = [] }
+b = { layer = 8, files = [] }
+read_first = "a"
+symptom = "Open encyclopedia fails: POST /api/v1/panels/kiwix/session answers 404, the panel answers 403 or lets a WebSocket upgrade reach the child, or an answer lacks the appended connect-src 'self'"
+gap = "None: planned (8-storage/README.md §18, a new seam); Layer 8 rows D41 and U5 build it, and G16 prints SKIPPED."
+
+[[seam]]
+id = "L5-L8:consumer-registry"
+status = "planned"
+spec = ["8-storage/README.md §12.3", "8-storage/README.md §18"]
+a = { layer = 5, files = [] }
+b = { layer = 8, files = [] }
+read_first = "a"
+symptom = "an inbound AGENT_OP, KB, UPDATE, PATCH or SYNC frame shows as a textless chat row or is redelivered forever; FabricStatus.unconsumed does not count it"
+gap = "None: planned (8-storage/README.md §18, a new seam); Layer 8 row M5 builds it in mesh111 (tests/consumers.rs), and G14 prints SKIPPED."
+
+[[seam]]
 id = "L5-L8:tier2-objects"
 status = "planned"
 spec = ["8-storage/README.md"]
@@ -1101,13 +1220,27 @@ gap = "None: planned; no code and no spec section yet."
 
 [[seam]]
 id = "L5/7-L9:fix-sharing-delegation"
-status = "planned"
-spec = ["9-evolution/README.md"]
-a = { layer = [5, 7], files = [] }
-b = { layer = 9, files = [] }
+status = "stub"
+spec = ["9-evolution/README.md §11.2", "9-evolution/README.md §11.3", "9-evolution/README.md §11.4", "9-evolution/README.md §12.1", "9-evolution/README.md §12.2", "9-evolution/README.md §12.3", "7-relay/README.md §5", "7-relay/README.md §7.2"]
+a = { layer = [5, 7], files = [
+  "5-messaging/crates/mesh111/src/fabric.rs",
+  "5-messaging/crates/mesh111/src/envelope.rs",
+  "1-bootstrap/crates/node111/src/daemon/fabric/mod.rs",
+] }
+b = { layer = 9, files = [
+  "1-bootstrap/crates/node111/src/daemon/heal/fix/mod.rs",
+  "1-bootstrap/crates/node111/src/daemon/heal/fix/body.rs",
+  "1-bootstrap/crates/node111/src/daemon/heal/fix/send.rs",
+  "1-bootstrap/crates/node111/src/daemon/heal/fix/receive.rs",
+  "1-bootstrap/crates/node111/src/daemon/heal/fix/peer.rs",
+  "1-bootstrap/crates/node111/src/daemon/heal/delegate/mod.rs",
+  "1-bootstrap/crates/node111/src/daemon/heal/delegate/cbor.rs",
+  "1-bootstrap/crates/node111/src/daemon/heal/delegate/member.rs",
+  "1-bootstrap/crates/node111/src/daemon/heal/delegate/hub.rs",
+] }
 read_first = "a"
-symptom = "proven-fix exchange over the fabric, AGENT_OP delegation and pull requests"
-gap = "None: planned; no code and no spec section yet."
+symptom = "a fix or a delegation does not cross, or crosses where it must not: with heal.fixes.send off a fix leaves the node (capture); a received fix shows as a textless chat row instead of in GET /api/v1/repairs/fixes; a diagnose to the home hub gets no answer, or refuse 3 on every re-send; a fix sealed to at most 2,937 B is not stored on the far island after one carrier hop"
+gap = "None: a T0 stub; rows M2, M3, L5, D36 to D43 and D54 build it, and G22 and G23 print SKIPPED."
 
 [[seam]]
 id = "L6-L6:deltachat-madmail"
@@ -1144,13 +1277,13 @@ gap = "One unit test only; nothing runs simplex-chat."
 
 [[seam]]
 id = "L6-L7:hops"
-status = "stub"
+status = "built"
 spec = ["7-relay/README.md §10"]
 a = { layer = 6, files = ["1-bootstrap/crates/node111/src/daemon/transport/rnstatus.rs"] }
 b = { layer = 7, files = ["1-bootstrap/crates/node111/src/daemon/dashboard/api_v1/nearby.rs"] }
 read_first = "b"
 symptom = "no hop counts: rate_limited or component_unavailable on POST /nearby/hops"
-gap = "None: planned; POST /nearby/hops is not built."
+gap = "Row D2 landed: POST /nearby/hops runs one `rnpath -t -j` through the rnstatus runner (its timeout, output cap and owner gate) into the reticulum source's `hops_away`; tests/api_v1_bridge.rs drives the route (409 component_unavailable, 401 for the agent's bearer, 202, 429 within 30 s) and the rnstatus unit tests parse scripted path tables; no harness runs a real rnpath: G8 (row V2) is a T0 stub."
 
 [[seam]]
 id = "L6-L7:netlink-gateway"
@@ -1166,6 +1299,40 @@ symptom = "the gateway state is stale: services gateway reason_code (gateway_non
 gap = "Rows D3, D4, D3b and D4c landed: netwatch.rs (20 unit tests) runs against a scripted netlink source and a fake opener, gateway.rs (17) against scripted facts, netlink.rs (the group masks and the classifier of the kernel's message shapes) against byte shapes; the one test that reads the real kernel (transport::netlink::tests::the_kernel_s_messages_classify_as_documented, NODE111_NETNS_CHECK=1 under unshare -Urn) is ignored and run by hand, and G7-extended idle.sh still prints SKIPPED, so no running system exercises the seam."
 
 [[seam]]
+id = "L6-L8:server-component"
+status = "planned"
+spec = ["8-storage/README.md §9.2", "8-storage/README.md §9.3", "8-storage/README.md §18"]
+a = { layer = 6, files = [] }
+b = { layer = 8, files = [] }
+read_first = "a"
+symptom = "kiwix-serve is resident while off, or never starts: zero-weight.sh lists a kiwix process or listener; GET /api/v1/bridge/components lacks adapter: null; POST /api/v1/bridge/components/kiwix/stop answers 400"
+gap = "None: planned (8-storage/README.md §18, a new seam); Layer 8 rows D39, D40, D42 and D47 build it, and G16 and the extended G7 print SKIPPED."
+
+[[seam]]
+id = "L6-L9:typed-actions"
+status = "stub"
+spec = ["9-evolution/README.md §7.1", "9-evolution/README.md §7.2", "9-evolution/README.md §7.4", "9-evolution/README.md §20", "6-transport/README.md §12"]
+a = { layer = 6, files = [
+  "1-bootstrap/crates/node111/src/daemon/devices/applier.rs",
+  "1-bootstrap/crates/node111/src/daemon/transport/posture.rs",
+] }
+b = { layer = 9, files = [
+  "1-bootstrap/crates/node111/src/daemon/heal/engine.rs",
+  "1-bootstrap/crates/node111/src/daemon/heal/undo.rs",
+  "1-bootstrap/crates/node111/src/daemon/heal/ledger.rs",
+  "1-bootstrap/crates/node111/src/daemon/heal/action.rs",
+  "1-bootstrap/crates/node111/src/daemon/heal/actions/mod.rs",
+  "1-bootstrap/crates/node111/src/daemon/heal/actions/device.rs",
+  "1-bootstrap/crates/node111/src/daemon/heal/actions/service.rs",
+  "1-bootstrap/crates/node111/src/daemon/heal/actions/settings_set.rs",
+  "1-bootstrap/crates/node111/src/daemon/heal/actions/component.rs",
+  "1-bootstrap/crates/node111/src/daemon/heal/actions/bridge.rs",
+] }
+read_first = "b"
+symptom = "an accepted action differs from the Layer 6 applier or does not come back: a device proposal's files and decision records differ from 9-evolution/verify/tapes/applier-l6/; a failed probe does not revert byte-exact and record reverted; a second accept waits instead of answering 409 busy; a revert that needs a consent passes it instead of stopping revert_blocked"
+gap = "None: a T0 stub; row P1 recorded the applier tape; rows D19, D20, D26 to D30, D52 and M1 build it, and G20 prints SKIPPED."
+
+[[seam]]
 id = "L6-X:rns-lxmf-api"
 status = "built"
 spec = ["6-transport/README.md §6"]
@@ -1177,13 +1344,23 @@ gap = "The helper's own tests run on a fake RNS and LXMF surface written from rn
 
 [[seam]]
 id = "L7-L8:move-datasets"
-status = "planned"
-spec = ["8-storage/README.md"]
-a = { layer = 7, files = [] }
-b = { layer = 8, files = [] }
+status = "stub"
+spec = ["8-storage/README.md §7", "8-storage/README.md §11.1", "8-storage/README.md §12.4", "7-relay/README.md §9", "7-relay/README.md §12"]
+a = { layer = 7, files = ["1-bootstrap/crates/node111/src/daemon/origin/mod.rs"] }
+b = { layer = 8, files = [
+  "1-bootstrap/crates/node111/src/daemon/datasets/pull.rs",
+  "1-bootstrap/crates/node111/src/daemon/datasets/job.rs",
+  "1-bootstrap/crates/node111/src/daemon/datasets/firstcopy.rs",
+  "1-bootstrap/crates/node111/src/daemon/datasets/metered.rs",
+  "1-bootstrap/crates/node111/src/daemon/datasets/check.rs",
+  "1-bootstrap/crates/node111/src/daemon/datasets/adopt.rs",
+  "1-bootstrap/crates/node111/src/daemon/storage/consent.rs",
+  "1-bootstrap/crates/node111/src/daemon/origin/pins.rs",
+  "1-bootstrap/crates/node111/src/dataset_cmd.rs",
+] }
 read_first = "a"
-symptom = "the metered cap and the hub origin or carrier as the dataset transfer path"
-gap = "None: planned; no code and no spec section yet."
+symptom = "a dataset never arrives: /origin/v1/* answers 404, 405 or 503, a range answers 416 or 200; the job stays paused (offline) or paused (metered cap), or ends failed (name mismatch) or failed (source cannot resume)"
+gap = "None: a T0 stub; rows D19, D22, D27, D30 to D35, D38, L6, L6b, L7 and L8 build it, and G15 prints SKIPPED."
 
 [[seam]]
 id = "L8-L8:shared-log"
@@ -1197,13 +1374,16 @@ gap = "None: planned; no code and no spec section yet."
 
 [[seam]]
 id = "L8-L9:heal-store"
-status = "planned"
-spec = ["8-storage/README.md"]
-a = { layer = 8, files = [] }
-b = { layer = 9, files = [] }
+status = "stub"
+spec = ["8-storage/README.md §3", "8-storage/README.md §2.5", "9-evolution/README.md §4", "9-evolution/README.md §4.1", "9-evolution/README.md §4.2"]
+a = { layer = 8, files = ["1-bootstrap/crates/node111/src/daemon/state/heal.rs"] }
+b = { layer = 9, files = [
+  "1-bootstrap/crates/node111/src/daemon/heal/store.rs",
+  "1-bootstrap/crates/node111/src/daemon/heal/witness.rs",
+] }
 read_first = "a"
-symptom = "the heal/ namespace and three plaintext boot files read before serving"
-gap = "None: planned; no code and no spec section yet."
+symptom = "state/heal/{run,inbox,undo} stay unfolded and the Repairs page says the store did not open; a J9 write to heal/ returns Full"
+gap = "None: a T0 stub on both sides; Layer 8 rows D3, D4 and D8 build Layer 8's, Layer 9 rows D15 to D18 Layer 9's (the J9 adapter, the J2 folder, the reclaimer, the degraded modes), and G13 and G19 print SKIPPED."
 
 [[seam]]
 id = "X:licensing-notices"

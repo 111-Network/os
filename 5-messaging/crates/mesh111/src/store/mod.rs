@@ -4,8 +4,16 @@
 //! - **Engine (§10.1):** raw 32-byte key (`PRAGMA key = "x'…'"`, no PBKDF2 at
 //!   open), `cipher_compatibility = 4` (file format pinned to SQLCipher 4),
 //!   WAL, `temp_store = MEMORY`, `auto_vacuum = INCREMENTAL`,
-//!   `secure_delete = ON`, `synchronous = FULL` on sequence-allocating (and
+//!   `secure_delete = ON`, `journal_size_limit` = 4 MiB (Layer 8 §13.5:
+//!   the WAL is cut back after a checkpoint instead of keeping its
+//!   high-water size), `synchronous = FULL` on sequence-allocating (and
 //!   other promise-bearing) transactions, NORMAL otherwise. One DB, 0600.
+//! - **The engine as a seam (Layer 8 §2.7 S2):** [`open_encrypted`] is this
+//!   open's first half (the 0700 directory, the 0600 file, the key and the
+//!   pragmas) for any SQLCipher file: Layer 8's node-state store
+//!   (`node/state.db`), its export verb and its migration copy. It takes no
+//!   epoch decision and never reads or erases the clean record;
+//!   [`schema::migrate_with`] runs a caller's own migration list.
 //! - **Clean-shutdown record (§10.1):** `settings.clean = 1` **and** the L2
 //!   `announce_last`, written by [`Store::close`]; [`Store::open`] reads both,
 //!   then erases `clean` durably so a crash in this run is seen next time.
@@ -56,12 +64,14 @@ use std::fs::{self, DirBuilder, OpenOptions};
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
+use rusqlite::config::DbConfig;
 use rusqlite::{Connection, OpenFlags, OptionalExtension, Transaction, TransactionBehavior};
 
 use crate::blobs::{BlobDir, BlobError};
 use crate::keys::{KeyError, KeyProvider, StoreKey};
 
 pub mod blobs;
+mod copy;
 pub mod foreign;
 pub mod prune;
 pub mod rows;
@@ -94,6 +104,14 @@ pub const DB_FILE: &str = "store.db";
 pub const BLOB_DIR: &str = "blobs";
 /// The largest `n` within one epoch: `n` would wrap 2^32 beyond it (§4).
 pub const N_MAX: u64 = u32::MAX as u64;
+/// `PRAGMA journal_size_limit` on every store this module opens (Layer 8
+/// §13.5, amending §10.1): 4 MiB, about the WAL of SQLite's 1,000-page
+/// automatic checkpoint at 4 KiB pages (Layer 8 research R04, fork 4). The
+/// first commit after a completed checkpoint restarts the WAL and cuts the
+/// file back to this size, so it does not keep its high-water size. The
+/// lead's number, a default measured at build. `wal_autocheckpoint`,
+/// `cache_size` and `mmap_size` stay unset (SQLite's defaults).
+pub(crate) const JOURNAL_SIZE_LIMIT: i64 = 4 * 1024 * 1024;
 
 /// Typed store failures (never a panic on input).
 #[derive(Debug, thiserror::Error)]
@@ -256,28 +274,9 @@ impl Store {
     /// The clean-shutdown record is consumed: after this returns, a crash
     /// leaves it absent, so the next open mints.
     pub fn open(dir: &Path, key: &StoreKey, params: &OpenParams) -> Result<(Store, EpochDecision)> {
-        if !dir.exists() {
-            DirBuilder::new().recursive(true).mode(0o700).create(dir)?;
-        }
-        let db_path = dir.join(DB_FILE);
-        // 0600 before SQLite touches it; SQLite gives -wal/-shm the same mode.
-        match OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(0o600)
-            .open(&db_path)
-        {
-            Ok(_) => {}
-            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-                fs::set_permissions(&db_path, fs::Permissions::from_mode(0o600))?;
-            }
-            Err(e) => return Err(e.into()),
-        }
-        let conn = Connection::open_with_flags(
-            &db_path,
-            OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX,
-        )?;
-        apply_key_and_pragmas(&conn, key)?;
+        // `dir` 0700 when absent, `store.db` 0600, the key and the §10.1
+        // pragmas: the Layer 8 §2.7 S2 seam is this open's first half.
+        let conn = open_encrypted(&dir.join(DB_FILE), key)?;
         schema::migrate(&conn)?;
         let heal_failed = schema::heal(&conn)?;
 
@@ -428,6 +427,119 @@ impl Store {
     }
 }
 
+/// Layer 8 §2.7 S2 (§2.2 rules 1 and 3): open (or create) the SQLCipher file
+/// at `path` with `key` exactly as [`Store::open`] opens `store.db`, and
+/// nothing more.
+///
+/// - **Modes:** `path`'s directory is created 0700 when absent (an existing
+///   one is left as it is). A new file is created 0600 before SQLite touches
+///   it, so SQLite gives its `-wal` and `-shm` 0600 too. An existing path
+///   must be a regular file, or a link to one (followed, as SQLite follows
+///   it): a directory, a device, a FIFO or a socket is refused
+///   ([`StoreError::Invalid`]) before SQLite opens it. An existing file, its
+///   `-wal` and its `-shm` (SQLite makes them with the file's mode) are set
+///   to 0600 only once the key has opened the file, and each only when its
+///   mode is another: a refused open leaves the file's mode and ctime as
+///   they were, and an open of a file already 0600 makes no chmod (one
+///   would move its ctime).
+/// - **Engine (§10.1):** the raw key and `cipher_compatibility = 4`; a
+///   library that is not SQLCipher is refused ([`StoreError::NoCipher`]);
+///   the first read decrypts page 1, so a wrong key or a plaintext SQLite
+///   file fails there ([`StoreError::WrongKey`]) and the refused connection
+///   closes without a checkpoint: the file and a `-wal` a crash left are
+///   not written (the WAL stays, Layer 8 §13.7's unclean signal; SQLite may
+///   leave its `-shm` index beside it). Then `auto_vacuum = INCREMENTAL`
+///   (set only on a file that does not read it already: a new file takes
+///   it; a FULL file is converted by its first open, one commit; a file
+///   with tables and no auto-vacuum cannot take it and is not written),
+///   WAL, `temp_store = MEMORY`, `secure_delete = ON`, `foreign_keys = ON`,
+///   `synchronous = NORMAL` and `journal_size_limit` = 4 MiB (Layer 8
+///   §13.5). The WAL mode, `temp_store`, `secure_delete`, `foreign_keys`,
+///   `journal_size_limit` and the SQLCipher 4 format are read back; the
+///   auto-vacuum mode is [`schema::migrate_with`]'s check, which refuses a
+///   file without it.
+///
+/// No schema (a caller runs its own list through [`schema::migrate_with`]),
+/// no epoch decision, and the clean record (`settings.clean` of a fabric
+/// store) is neither read nor erased: Layer 8's export (§13.2) and migration
+/// copy (§13.6) open `store.db` through it for that reason. On an existing
+/// file the open commits nothing (Layer 8 §2.2 rule 9); a new, empty file
+/// gets its header page (page 1) and no table. The connection is left at
+/// `synchronous = NORMAL`: a caller raises it to FULL around its own
+/// promise-bearing transactions, as [`Store`] does.
+///
+/// ```no_run
+/// use mesh111::keys::{KeyProvider, NODE_STATE_KDF_TAG};
+/// use mesh111::store::{open_encrypted, schema::migrate_with, StoreError};
+///
+/// const OWN: &[&str] = &["CREATE TABLE meta (key TEXT PRIMARY KEY, value ANY) STRICT;"];
+///
+/// fn open_node_state(root: &std::path::Path, keys: &dyn KeyProvider) -> Result<(), StoreError> {
+///     let key = keys.key_for(NODE_STATE_KDF_TAG)?;
+///     let conn = open_encrypted(&root.join("node").join("state.db"), &key)?;
+///     migrate_with(&conn, OWN)?;
+///     Ok(())
+/// }
+/// ```
+pub fn open_encrypted(path: &Path, key: &StoreKey) -> Result<Connection> {
+    // A bare file name lives in the current directory: nothing to create.
+    if let Some(dir) = path.parent().filter(|d| !d.as_os_str().is_empty()) {
+        if !dir.exists() {
+            DirBuilder::new().recursive(true).mode(0o700).create(dir)?;
+        }
+    }
+    // A new file: 0600 before SQLite touches it; SQLite gives -wal/-shm the
+    // same mode. An existing one: a regular file (a link is followed, as
+    // SQLite follows it), or refused before SQLite opens it.
+    match OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(path)
+    {
+        Ok(_) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+            if !fs::metadata(path)?.is_file() {
+                return Err(StoreError::Invalid("store path is not a regular file"));
+            }
+        }
+        Err(e) => return Err(e.into()),
+    }
+    let conn = Connection::open_with_flags(
+        path,
+        OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )?;
+    apply_key_and_pragmas(&conn, key)?;
+    // The key has opened it: now the file, and the -wal and -shm SQLite made
+    // with its mode, are set to 0600 where they are not. They sit beside the
+    // path SQLite resolved (a link's target).
+    let db = conn
+        .path()
+        .filter(|p| !p.is_empty())
+        .map_or_else(|| path.to_path_buf(), PathBuf::from);
+    for suffix in ["", "-wal", "-shm"] {
+        let mut name = db.clone().into_os_string();
+        name.push(suffix);
+        set_0600(Path::new(&name))?;
+    }
+    Ok(conn)
+}
+
+/// Layer 8 §2.2 rule 1: set `p` to 0600 when it is a regular file with
+/// another mode. Nothing when it is absent, not a regular file, or 0600
+/// already: a chmod to the same mode would still move its ctime.
+fn set_0600(p: &Path) -> Result<()> {
+    match fs::symlink_metadata(p) {
+        Ok(m) if m.is_file() && m.permissions().mode() & 0o7777 != 0o600 => {
+            fs::set_permissions(p, fs::Permissions::from_mode(0o600))?;
+            Ok(())
+        }
+        Ok(_) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(e.into()),
+    }
+}
+
 /// §10.1 — key first, then the format pin, then verify the key opens the
 /// file, then the operational pragmas.
 fn apply_key_and_pragmas(conn: &Connection, key: &StoreKey) -> Result<()> {
@@ -447,6 +559,12 @@ fn apply_key_and_pragmas(conn: &Connection, key: &StoreKey) -> Result<()> {
     if version.as_deref().is_none_or(str::is_empty) {
         return Err(StoreError::NoCipher);
     }
+    // Until the key is proven, closing must not checkpoint: a WAL a crash
+    // left is opened (and indexed) before page 1 is read, and the refused
+    // connection's close would copy it into the file and delete it, the
+    // node-state store's unclean signal (Layer 8 §13.7). Back to SQLite's
+    // default once page 1 has decrypted.
+    conn.set_db_config(DbConfig::SQLITE_DBCONFIG_NO_CKPT_ON_CLOSE, true)?;
     // The first read decrypts page 1: a wrong key fails here.
     match conn.query_row("SELECT count(*) FROM sqlite_master", [], |r| {
         r.get::<_, i64>(0)
@@ -459,9 +577,20 @@ fn apply_key_and_pragmas(conn: &Connection, key: &StoreKey) -> Result<()> {
         }
         Err(e) => return Err(e.into()),
     }
-    // auto_vacuum only takes on a database with no tables yet (fresh file);
-    // every store this code creates has it, and it is verified below.
-    conn.execute_batch("PRAGMA auto_vacuum = INCREMENTAL;")?;
+    conn.set_db_config(DbConfig::SQLITE_DBCONFIG_NO_CKPT_ON_CLOSE, false)?;
+    // INCREMENTAL takes on a file with no tables yet (a new one) and converts
+    // a FULL one (one commit, at its first open); a file with tables and no
+    // auto-vacuum cannot take it without a VACUUM, and SQLite then writes
+    // nothing. Every store this code creates has it from its first page, and
+    // `schema::migrate_with` refuses a file without it. Set only when the
+    // file does not read INCREMENTAL already: on one that does, setting it
+    // again rewrites header page 1 (its incremental-vacuum field, unchanged)
+    // in a write transaction, a commit on every open, which an open that only
+    // reads must not make (Layer 8 §2.2 rule 9, §2.7 S2). The resulting file
+    // is the same either way.
+    if pragma_int(conn, "auto_vacuum")? != 2 {
+        conn.execute_batch("PRAGMA auto_vacuum = INCREMENTAL;")?;
+    }
     let mode: String = conn.pragma_update_and_check(None, "journal_mode", "WAL", |r| r.get(0))?;
     if !mode.eq_ignore_ascii_case("wal") {
         return Err(StoreError::Pragma("journal_mode"));
@@ -472,9 +601,12 @@ fn apply_key_and_pragmas(conn: &Connection, key: &StoreKey) -> Result<()> {
          PRAGMA foreign_keys = ON;
          PRAGMA synchronous = NORMAL;",
     )?;
+    // Layer 8 §13.5: per connection, never stored in the file; it writes nothing.
+    conn.pragma_update(None, "journal_size_limit", JOURNAL_SIZE_LIMIT)?;
     check_pragma(conn, "temp_store", 2)?;
     check_pragma(conn, "secure_delete", 1)?;
     check_pragma(conn, "foreign_keys", 1)?;
+    check_pragma(conn, "journal_size_limit", JOURNAL_SIZE_LIMIT)?;
     // `cipher_compatibility` is write-only; verify the SQLCipher 4 format
     // parameters it pins instead (4 KiB pages, HMAC-SHA512, PBKDF2-SHA512).
     for (pragma, want) in [

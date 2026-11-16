@@ -41,6 +41,9 @@
 //! Never adds: a listener, a task, a timer or a resident buffer (§1 rule 2, §16). Disk: one
 //! payload per served target plus the manifest and its signature (§16).
 
+pub mod pins;
+pub mod termux;
+
 use crate::calver::Calver;
 use crate::daemon::dashboard::ApiState;
 use crate::daemon::fabric::FabricHandle;
@@ -48,8 +51,9 @@ use crate::daemon::updater::fetch::PAYLOAD_MAX_BYTES;
 use crate::floor::Floor;
 use crate::manifest::{ChannelManifest, MANIFEST_MAX_BYTES, SIGNATURE_MAX_BYTES};
 use axum::body::{Body, Bytes};
-use axum::extract::{Path as UrlPath, State};
-use axum::http::{header, HeaderValue, StatusCode};
+use axum::extract::{Path as UrlPath, Request, State};
+use axum::http::{header, HeaderValue, Method, StatusCode};
+use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use sha2::Digest;
@@ -913,13 +917,29 @@ fn read_capped(path: &Path, max: u64) -> Option<Vec<u8>> {
 // ---------------------------------------------------------------- the routes
 
 /// `GET /origin/v1/{channel-111-stable.toml, channel-111-stable.toml.minisig, blob/{sha256}}`
-/// (§9.1): GET only (axum answers 405 to any other method), outside the session gate. Merged
-/// into the dashboard's open router (`dashboard::routes::app`).
+/// (§9.1): GET only, 405 with `Allow: GET` to any other method ([`get_only`]), outside the
+/// session gate. Merged into the dashboard's open router (`dashboard::routes::app`).
 pub fn routes() -> axum::Router<Arc<ApiState>> {
     axum::Router::new()
         .route(&format!("{ROUTE_PREFIX}{MANIFEST_NAME}"), get(manifest))
         .route(&format!("{ROUTE_PREFIX}{SIGNATURE_NAME}"), get(signature))
         .route(&format!("{ROUTE_PREFIX}{BLOB_DIR}/{{sha256}}"), get(blob))
+        .layer(middleware::from_fn(get_only))
+}
+
+/// §9.1's "GET only (405 otherwise)". axum's `get` also answers HEAD (the GET handler with the
+/// body dropped) and its own 405 names `GET,HEAD`; this refuses every method but GET, HEAD
+/// included, before anything is looked up. `Router::layer` wraps each route's method fallback
+/// as well, so a POST reaches this too and the `Allow` header names GET alone.
+async fn get_only(req: Request, next: Next) -> Response {
+    if req.method() == Method::GET {
+        return next.run(req).await;
+    }
+    (
+        StatusCode::METHOD_NOT_ALLOWED,
+        [(header::ALLOW, "GET"), (header::CACHE_CONTROL, "no-store")],
+    )
+        .into_response()
 }
 
 fn not_found() -> Response {

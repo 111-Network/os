@@ -603,6 +603,27 @@ covered_by = "l1.gate"
 strength = "F"
 needs = ["cargo"]
 
+# Row D11: the carrier on the forwarder (§3.1, §3.2, §5.9, §6.1, §6.2, §12) against the stdlib stub ntfy: real hubs paired through
+# the carrier with a member at each, the stub's request log read per topic. Nothing built while a switch is off; drain, post, drain on
+# a Forward event; commit on the far ack only; an ack posted once; the carrier bound set on build and cleared on teardown; the re-post
+# rule (never on a flush, Flush now, a since miss); 413 and 429; the metered stop; the licensed refusal; a foreign frame dropped and
+# counted; 5B on its one named thread. Both ends are real, so strength I.
+[[check]]
+id = "l1.node111.carrier_flow"
+kind = "unit"
+cmd = ["cargo", "test", "--manifest-path", "1-bootstrap/Cargo.toml", "-p", "node111", "--test", "carrier_flow"]
+tier = "slow"
+layers = [1, 5, 7]
+seams = ["L5-L7:forwarder-handoff", "L1-L7:carrier-ntfy"]
+adapter = "libtest"
+cargo = true
+timeout_s = 1800
+rerun = "cargo test --manifest-path 1-bootstrap/Cargo.toml -p node111 --test carrier_flow -- --exact {test}"
+rerun_cost = "slow, ~15 s warm"
+covered_by = "l1.gate"
+strength = "I"
+needs = ["cargo"]
+
 [[check]]
 id = "l1.node111.categorize_table"
 kind = "unit"
@@ -707,6 +728,29 @@ adapter = "libtest"
 cargo = true
 timeout_s = 1800
 rerun = "cargo test --manifest-path 1-bootstrap/Cargo.toml -p node111 --test devices_core -- --exact {test}"
+rerun_cost = "slow, ~20 s warm"
+covered_by = "l1.gate"
+strength = "F"
+needs = ["cargo"]
+
+# Layer 9 row L1 (9-evolution/README.md §3.3 rules 2 and 4; G19 (3), the witness half): `111 heal-witness`, the hidden
+# verb the unit's ExecStopPost= runs after each daemon exit, run as the real binary on a temp NODE111_ROOT with systemd's
+# SERVICE_RESULT, EXIT_CODE and EXIT_STATUS standing in for the service manager: a signal name written as its number
+# (KILL => signal=9), result=exit-code code=75 as such, an unknown name as -, 300 runs leave the newest 256 lines (0600,
+# no temp file left), every line <= 96 B of the grammar with each field at its maximum and with hostile values,
+# state/heal/ missing => exit 0 and no file, absent from the usage text. 111d's side (the inbox folded at start) is row
+# D12's, which adds its cases to this file; until then the service manager's side is a stand-in, so strength F.
+[[check]]
+id = "l1.node111.heal_witness"
+kind = "unit"
+cmd = ["cargo", "test", "--manifest-path", "1-bootstrap/Cargo.toml", "-p", "node111", "--test", "heal_witness"]
+tier = "slow"
+layers = [1, 9]
+seams = ["L1-L9:observer-change-engine"]
+adapter = "libtest"
+cargo = true
+timeout_s = 1800
+rerun = "cargo test --manifest-path 1-bootstrap/Cargo.toml -p node111 --test heal_witness -- --exact {test}"
 rerun_cost = "slow, ~20 s warm"
 covered_by = "l1.gate"
 strength = "F"
@@ -922,6 +966,79 @@ covered_by = "l1.gate"
 strength = "I"
 needs = ["cargo"]
 
+# Row D6d: the relay frame follows a pairing scan (§13.1 with §4.6), two hubs with the real identity handle and fabric on
+# loopback, the scan, offer and unpair called as their routes call them: the half a scan records is on the frame at once (no
+# fabric event moves it), nothing publishes while the attempt dials, and the attempt's end after its route answered is followed
+# by exactly one frame, the last status apart from its ages. A binary of its own with one test: the frame's binding is one per
+# process, so the scans of relay_pair would publish frames on its bus. Both ends are real, so strength I.
+[[check]]
+id = "l1.node111.relay_pair_frame"
+kind = "unit"
+cmd = ["cargo", "test", "--manifest-path", "1-bootstrap/Cargo.toml", "-p", "node111", "--test", "relay_pair_frame"]
+tier = "slow"
+layers = [1, 4, 5, 7]
+seams = ["L4-L7:relay-api", "L5-L7:pair-gate"]
+adapter = "libtest"
+cargo = true
+timeout_s = 1800
+rerun = "cargo test --manifest-path 1-bootstrap/Cargo.toml -p node111 --test relay_pair_frame -- --exact {test}"
+rerun_cost = "slow, ~15 s warm"
+covered_by = "l1.gate"
+strength = "I"
+needs = ["cargo"]
+
+# Row D10: the relay status, settings and consents through the real dashboard app (GET /relay, PATCH /relay/settings, POST
+# /relay/carrier/check and /flush, decideProposal for kind relay), nodes with the real identity handle and fabric on loopback:
+# RelayStatus with everything off and the rns row from Layer 6, the carrier_enable, gateway_bit and origin_serve round trips
+# (the copies verbatim, hashes recorded, a stale hash refused, a switch turned off asking again, two gates converging), the
+# secrets write-only (never in a GET, frame or problem), every heartbeat write 409 with nothing written, needs_hub and
+# lan_off, the lead's rulings (consent through PATCH alone, the own target kept, a private pair's tls), a metered cap set or
+# raised re-asking, check and flush refused in order then handed to the carrier hook, bearer 401, the relay proposals, the
+# relay frame (after a write, relay::changed() from any thread, a fabric event that moved the status; never a GET); the
+# review fixes: a failed role-bit re-mint retried by the same PATCH and by deciding the relay proposal again, every metered
+# link's cap in the carrier text (a second link or a non-max cap raised asks), a consent recorded under another text off
+# for bits 3 and 5 and asked on the next write to its section, quota.transit set and null restoring its derived quarter.
+# Both ends are real, so strength I.
+[[check]]
+id = "l1.node111.api_v1_relay7"
+kind = "unit"
+cmd = ["cargo", "test", "--manifest-path", "1-bootstrap/Cargo.toml", "-p", "node111", "--test", "api_v1_relay7"]
+tier = "slow"
+layers = [1, 4, 5, 7]
+seams = ["L1-L7:relay-state", "L4-L7:relay-api"]
+adapter = "libtest"
+cargo = true
+timeout_s = 1800
+rerun = "cargo test --manifest-path 1-bootstrap/Cargo.toml -p node111 --test api_v1_relay7 -- --exact {test}"
+rerun_cost = "slow, ~5 s warm"
+covered_by = "l1.gate"
+strength = "I"
+needs = ["cargo"]
+
+# Row D8: the Service Discovery Registry (§7.1, §7.6, §7.7). The `_n111._tcp` record's presence rule and TXT over real fabrics on
+# loopback with a recording daemon (never on Termux; an idle sync reads nothing; a refused register waits for an input change;
+# the shutdown goodbye withdraws a record a sync in flight registers), the record resolved between two real mdns-sd daemons
+# under the real type, a real browse stopped within 5 s, POST /registry/browse through the real dashboard app (409 lan_off,
+# bearer 401, 202 and the registry frame), and "Find my hub" on a member: a forged hint refused by the handshake, the held
+# dead address never taken for success, the hub's new address kept only after its handshake (M5's replace_home_hub_address),
+# no browse while the redial back-off grows, the same browse with no call once it sits at its maximum, a forged flood held
+# to REHOME_MAX tries per browse with a human's call queued (its frame arrives) and the real record reached next browse.
+[[check]]
+id = "l1.node111.registry_mdns"
+kind = "unit"
+cmd = ["cargo", "test", "--manifest-path", "1-bootstrap/Cargo.toml", "-p", "node111", "--test", "registry_mdns"]
+tier = "slow"
+layers = [1, 4, 5, 7]
+seams = ["L1-L7:registry-dnssd", "L4-L7:relay-api"]
+adapter = "libtest"
+cargo = true
+timeout_s = 1800
+rerun = "cargo test --manifest-path 1-bootstrap/Cargo.toml -p node111 --test registry_mdns -- --exact {test}"
+rerun_cost = "slow, ~10 s warm"
+covered_by = "l1.gate"
+strength = "I"
+needs = ["cargo"]
+
 # Row D5 (landed): TLS 1.3 with raw public keys for paired-hub links through mesh111's tcp-lan stream seam: two real TcpLan
 # adapters on loopback with relay::tls::wrap over their own pair tables and link keys; raw rustls peers stand in for the
 # misbehaving far ends (a wrong client key, a wrong server key, X.509, TLS 1.2, a non-Ed25519 key: each refused before any
@@ -1052,6 +1169,27 @@ covered_by = "l1.gate"
 strength = "F"
 needs = ["cargo"]
 
+# Row L4: the hub-origin client and `111 update --from` (updater/{mod,hub,fetch}.rs, cli.rs, api_v1/origins.rs): the home hub
+# asked only on a rising edge of its link attributing and only while its announce carries ROLE_ORIGIN (the fabric reads faked),
+# the real binary's `update --from <dir>` (T5: nothing but the staging), exit 75 on a held lock, the admission into state/origin/
+# on a serving hub, check_internet = false read each round, GET /update/origins. The hub is a hand-written LogServer (side b),
+# so the record reads the updater: strength F, like updater_stage.
+[[check]]
+id = "l1.node111.updater_origin"
+kind = "unit"
+cmd = ["cargo", "test", "--manifest-path", "1-bootstrap/Cargo.toml", "-p", "node111", "--test", "updater_origin"]
+tier = "slow"
+layers = [1, 4, 7]
+seams = ["L1-L7:origin", "L4-L7:relay-api"]
+adapter = "libtest"
+cargo = true
+timeout_s = 1800
+rerun = "cargo test --manifest-path 1-bootstrap/Cargo.toml -p node111 --test updater_origin -- --exact {test}"
+rerun_cost = "slow, ~20 s warm"
+covered_by = "l1.gate"
+strength = "F"
+needs = ["cargo"]
+
 [[check]]
 id = "l1.node111.util_fs"
 kind = "unit"
@@ -1065,6 +1203,28 @@ rerun = "cargo test --manifest-path 1-bootstrap/Cargo.toml -p node111 --test uti
 rerun_cost = "slow, ~20 s warm"
 covered_by = "l1.gate"
 strength = "I"
+needs = ["cargo"]
+
+# Layer 9 row D3, the one vocabulary (9-evolution/README.md §3.4, §6.3; G25 (5)'s drift half): a source scan of the row
+# constructors in src/daemon/services/mod.rs finds every reason literal published in state error, and the test fails on one
+# the compiled table (src/daemon/heal/vocab.rs) lacks, on a row no constructor publishes any more and on a code that is not a
+# literal; 0-knowledge/_meta/playbook-vocabulary.toml, which build.py reads, equals the table byte for byte
+# (UPDATE_PLAYBOOK_VOCABULARY=1 rewrites it). Static, no peer runs: strength C. Rows D4 and D5 add the grammar, the loader
+# and the evaluator to the same file.
+[[check]]
+id = "l1.node111.heal_playbooks"
+kind = "unit"
+cmd = ["cargo", "test", "--manifest-path", "1-bootstrap/Cargo.toml", "-p", "node111", "--test", "heal_playbooks"]
+tier = "slow"
+layers = [0, 1, 9]
+seams = ["L0-L9:evolution"]
+adapter = "libtest"
+cargo = true
+timeout_s = 1800
+rerun = "cargo test --manifest-path 1-bootstrap/Cargo.toml -p node111 --test heal_playbooks -- --exact {test}"
+rerun_cost = "slow, ~20 s warm"
+covered_by = "l1.gate"
+strength = "C"
 needs = ["cargo"]
 
 # THE node111 --lib TESTS, SPLIT BY MODULE PATH. One `cargo test -p node111 --lib` runs them all (in a gate run too: l1.gate's
@@ -1597,6 +1757,49 @@ covered_by = "l3.gate"
 strength = "F"
 needs = ["cargo"]
 
+# Layer 9 row A1, the containment correction (9-evolution/README.md §8.1; G24 (1) in the crate): a patch task's opencode.json
+# parses equal to the deny block, the child's HOME, four XDG directories and TMPDIR are inside the task's work dir, the five
+# OPENCODE_DISABLE_* switches are 1 and npm is offline, no auto-approve switch is in its argv. A recorder script stands in for opencode, hence
+# strength F. Its seam is L3-L9:code-drafts (added by Layer 9's T0; this check proves side a, agent111's tasks.rs); layers = [3, 9] so a
+# Layer 9 run plans it.
+[[check]]
+id = "l3.agent111.opencode_config"
+kind = "unit"
+cmd = ["cargo", "test", "--manifest-path", "3-intelligence/Cargo.toml", "-p", "agent111", "--test", "opencode_config"]
+tier = "slow"
+layers = [3, 9]
+seams = ["L3-L9:code-drafts"]
+adapter = "libtest"
+cargo = true
+timeout_s = 1800
+rerun = "cargo test --manifest-path 3-intelligence/Cargo.toml -p agent111 --test opencode_config -- --exact {test}"
+rerun_cost = "slow, ~20 s warm"
+covered_by = "l3.gate"
+strength = "F"
+needs = ["cargo"]
+
+# Layer 8 row A1, the agent's side of the store (8-storage/README.md §2.4 rule 1, §2.3 rule 2; G13 (2) and (4) in the crate):
+# proposals/ and tasks/ written through a .tmp- file, fsync and rename (a rewrite is a new inode, a reader listing <id>.json never
+# reads a torn file), every .tmp- of the two spool directories removed at the agent's start and never read as a task, and a chat turn
+# whose body carries history leaves no conversation file and its sentences in no file (the real router, a scripted model). No 111d
+# and no fake of it, hence strength C. Its seam is L3-L8:agent-state (this check proves side a); layers = [3, 8] so a Layer 8 run
+# plans it.
+[[check]]
+id = "l3.agent111.store_atomic"
+kind = "unit"
+cmd = ["cargo", "test", "--manifest-path", "3-intelligence/Cargo.toml", "-p", "agent111", "--test", "store_atomic"]
+tier = "slow"
+layers = [3, 8]
+seams = ["L3-L8:agent-state"]
+adapter = "libtest"
+cargo = true
+timeout_s = 1800
+rerun = "cargo test --manifest-path 3-intelligence/Cargo.toml -p agent111 --test store_atomic -- --exact {test}"
+rerun_cost = "slow, ~20 s warm"
+covered_by = "l3.gate"
+strength = "C"
+needs = ["cargo"]
+
 # The in-crate agent111 tests (config.rs, health.rs, status.rs, http.rs, tasks.rs, tools.rs, model.rs): pure functions
 # of the agent's own side, no peer and no fake, hence strength C. They are what a targeted run of L1-L3:env-precedence,
 # L3-L7:offload, L1-L3:health-restart or L3-L6:l6-tools reaches on the agent side besides the integration tests:
@@ -1635,6 +1838,28 @@ adapter = "stagewise"
 cargo = true
 timeout_s = 1800
 rerun_cost = "slow, ~10 min warm"
+strength = "I"
+needs = ["cargo"]
+
+# Layer 8 row M5 (8-storage/README.md §12.3, G14 (8)): the consumer registry for 0x10-0x14 in mesh111's fabric, fed by a
+# raw tcp-lan peer and through a hub's mailbox: no message row, acknowledged and counted with no consumer (a Tier 1 frame
+# once), delivered once with one, the commit after the consumer returned, a failing consumer redelivered (through the
+# mailbox: the member's cursor held below it until the hub streams it again), a refused body taken with Ok, a duplicate
+# never delivered, a Tier 1 frame whole, and (debug builds, the fault point's) a kill between the consumer and the commit
+# redelivered at the next connection or the next start's fetch, one record kept.
+[[check]]
+id = "l5.mesh111.consumers"
+kind = "unit"
+cmd = ["cargo", "test", "--manifest-path", "5-messaging/Cargo.toml", "-p", "mesh111", "--test", "consumers"]
+tier = "slow"
+layers = [5, 8]
+seams = ["L5-L8:consumer-registry"]
+adapter = "libtest"
+cargo = true
+timeout_s = 1800
+rerun = "cargo test --manifest-path 5-messaging/Cargo.toml -p mesh111 --test consumers -- --exact {test}"
+rerun_cost = "slow, ~20 s warm"
+covered_by = "l5.gate"
 strength = "I"
 needs = ["cargo"]
 
@@ -1994,6 +2219,62 @@ seams = ["L4-L4:openapi-ts", "L4-L7:relay-api", "L5-L7:role-bits"]
 adapter = "vitest"
 timeout_s = 1800
 rerun = "pnpm --dir 4-interface/ui exec vitest run test/layer7-contract.test.ts"
+rerun_cost = "slow, ~10 s"
+covered_by = "l4.ui"
+strength = "C"
+needs = ["pnpm"]
+requires = ["l4.contract.fresh"]
+
+[[check]]
+id = "l4.ui.layer8-contract"
+kind = "unit"
+cmd = [
+  "pnpm",
+  "exec",
+  "vitest",
+  "run",
+  "test/layer8-contract.test.ts",
+  "--reporter=default",
+  "--reporter=json",
+  "--outputFile={scratch}/vitest.json",
+]
+cwd = "4-interface/ui"
+tier = "slow"
+layers = [4, 8]
+seams = ["L4-L4:openapi-ts"]
+adapter = "vitest"
+timeout_s = 1800
+rerun = "pnpm --dir 4-interface/ui exec vitest run test/layer8-contract.test.ts"
+rerun_cost = "slow, ~10 s"
+covered_by = "l4.ui"
+strength = "C"
+needs = ["pnpm"]
+requires = ["l4.contract.fresh"]
+
+# Layer 9 row C1 (9-evolution/README.md §18.1, §18.4): the Repairs contract, part 1 (the incidents): the routes, auth and
+# paging (the last.seq cursor, null on the last page, a store-closed node's seq-0 rows in one page), the shapes, the
+# `incident` SSE frame and the store's handling of it, the lazy repairs adapter and its mock; Layer 8's tails pinned as
+# prefixes so later parts append.
+[[check]]
+id = "l4.ui.layer9-contract"
+kind = "unit"
+cmd = [
+  "pnpm",
+  "exec",
+  "vitest",
+  "run",
+  "test/layer9-contract.test.ts",
+  "--reporter=default",
+  "--reporter=json",
+  "--outputFile={scratch}/vitest.json",
+]
+cwd = "4-interface/ui"
+tier = "slow"
+layers = [4, 9]
+seams = ["L4-L4:openapi-ts", "L4-L9:repairs-api"]
+adapter = "vitest"
+timeout_s = 1800
+rerun = "pnpm --dir 4-interface/ui exec vitest run test/layer9-contract.test.ts"
 rerun_cost = "slow, ~10 s"
 covered_by = "l4.ui"
 strength = "C"
@@ -2427,9 +2708,10 @@ rerun_cost = "ns, ~1 min"
 strength = "R"
 needs = ["userns", "minisign", "python3"]
 
-# G7 extended (the no-timer gate): wakeups and outbound of an idle 111d. Row V1.
-# A T0 stub: it prints '<G> SKIPPED: not built yet (T0 stub)' and exits 0 (7-relay/TASKS.md row V1). Strength N
-# until the row lands; promote it to R then (and to cargo = true if the gate builds).
+# G7 extended (the no-timer gate): wakeups and outbound of an idle 111d (row V1): the real daemon in a fresh netns with every
+# Layer 7 switch off and updates.check_internet false; window 1 counts voluntary context switches over every thread of 111d and its
+# agent, window 2 the egress logger and an strace of connect/sendto/sendmsg (any non-loopback target fails); the daemon is checked
+# alive after the settle and each window. SKIPPED without a user+net+pid namespace or strace (FAIL under REQUIRE_G7=1).
 [[check]]
 id = "l7.g7ext"
 kind = "unit"
@@ -2440,13 +2722,18 @@ seams = ["L1-X:pi-floor", "L6-L7:netlink-gateway"]
 adapter = "okfail"
 lock = "verify"
 timeout_s = 1800
-rerun_cost = "ns, T0 stub: SKIPPED today"
-strength = "N"
-needs = ["bash"]
+rerun_cost = "ns, about 2.5 min (the default 60 s windows plus the settle)"
+strength = "R"
+needs = ["bash", "userns", "netns", "python3", "strace"]
 
-# G8 presence: the 111 Nearby kind, the LAN/hub split, the registry TXT, hops. Row V2.
-# A T0 stub: it prints '<G> SKIPPED: not built yet (T0 stub)' and exits 0 (7-relay/TASKS.md row V2). Strength N
-# until the row lands; promote it to R then (and to cargo = true if the gate builds).
+# G8 presence and the registry (row V2): hub H and members M1, M2 as real `111 daemon`s in network namespaces on one bridge (M1 also
+# direct to M2 through two recording relays; M1 with the Layer 6 bridge stub and a fake Reticulum venv, M2 under a bind() shim): the `111`
+# Nearby rows and their strings, the LAN-vs-hub split, nothing refreshed by a replay, a card or a keepalive, the heartbeat codes, the
+# gateway row's four codes (the stub ntfy server), the role bit's re-mint, the `_n111._tcp` record and its gates, a browse's 5 s stop,
+# the mdns-sd re-arm (the daemon thread's wakeups, the A records), no Layer 7 path sending to a licensed board (the stub send logs stay
+# put; no `licensed_board` refusal exists on a Layer 7 route in v1), the hop read (a fake `rnpath`), lost-hub recovery with an outbound
+# SYN/ARP log, and `cargo test -p node111 --lib` for relay::presence (the validator tests) and the two mDNS re-arm tests. SKIPPED without a
+# user+net+pid namespace, a built `111` (BIN111 or CARGO_TARGET_DIR), python3, ip, nsenter, curl or jq (FAIL under REQUIRE_G8=1).
 [[check]]
 id = "l7.g8"
 kind = "unit"
@@ -2457,9 +2744,9 @@ seams = ["L5-L7:fabric-tap", "L1-L7:registry-dnssd", "L6-L7:hops"]
 adapter = "okfail"
 lock = "verify"
 timeout_s = 1800
-rerun_cost = "ns, T0 stub: SKIPPED today"
-strength = "N"
-needs = ["bash"]
+rerun_cost = "ns, about 11 min (three daemons, a settle wait of about 2.5 min before the wakeup windows, the 30 s LAN refresh waits, daemon restarts, a cargo test build on first use; needs a built 111)"
+strength = "R"
+needs = ["bash", "userns", "netns", "python3", "ip", "nsenter", "curl", "jq", "cargo", "gcc"]
 
 # G9 cross-hub custody over TEST-NET-1 with TLS. Row V3. Needs the tag checkpoint-layer-6 (absent).
 # A T0 stub: it prints '<G> SKIPPED: not built yet (T0 stub)' and exits 0 (7-relay/TASKS.md row V3). Strength N
@@ -2496,8 +2783,11 @@ strength = "N"
 needs = ["bash"]
 
 # G11 TLS 1.3 raw public keys between two hubs. Row V5.
-# A T0 stub: it prints '<G> SKIPPED: not built yet (T0 stub)' and exits 0 (7-relay/TASKS.md row V5). Strength N
-# until the row lands; promote it to R then (and to cargo = true if the gate builds).
+# Four real `111 daemon`s (X and Y the pair, Z a plain member, Q a third hub) in network namespaces on TEST-NET-3
+# behind one bridge, an AF_PACKET tap that keeps the port-11183 streams, python TLS clients (X.509, TLS 1.2),
+# and `cargo tree -e features -p node111` (no aws-lc-rs, no second provider). SKIPPED without a user+net+pid
+# namespace, a built `111` (BIN111 or CARGO_TARGET_DIR) or openssl (FAIL under REQUIRE_G11=1). The OpenSSL >= 3.2 peer
+# step is NOT IMPLEMENTED (a note on every box; REQUIRE_OPENSSL_RPK=1 makes it a FAIL on every box until it is written).
 [[check]]
 id = "l7.g11"
 kind = "unit"
@@ -2508,13 +2798,20 @@ seams = ["L2-L7:epoch-linkkey"]
 adapter = "okfail"
 lock = "verify"
 timeout_s = 1800
-rerun_cost = "ns, T0 stub: SKIPPED today"
-strength = "N"
-needs = ["bash"]
+rerun_cost = "ns, about 3 min (four daemons, the pairing waits, a 100 s idle window; needs a built 111)"
+strength = "R"
+needs = ["bash", "userns", "netns", "python3", "ip", "nsenter", "curl", "jq", "ss", "openssl", "cargo"]
 
-# G12 the hub as update origin. Row V6.
-# A T0 stub: it prints '<G> SKIPPED: not built yet (T0 stub)' and exits 0 (7-relay/TASKS.md row V6). Strength N
-# until the row lands; promote it to R then (and to cargo = true if the gate builds).
+# G12 the hub as update origin and the Layer 1 trust fixes. Row V6.
+# Real `111 daemon`s (hub O with LAN sharing, member U with no internet route) and the real `111 update --from` verb in a user + net
+# + pid namespace on bridge l7g12br0: T1 (a signed beta under the stable name), T2 (the keychain walk, a broken link, the floor
+# generation), T3 (min-upgrade-from at the daemon's staging decision), the staging lock (exit 75, a concurrent run stages once, a
+# daemon's own check holding it), the blob rule (blob/<sha256>, never payload.url, no last-update-check.json), /origin/v1/* behind
+# the hub role, LAN sharing and origin.serve (200 byte-exact, 405, no session, 404s, off at run time and across restarts), the member
+# staging from its hub, a missing blob at the hub, check_internet false (the egress log: no off-link frame) against true (the
+# positive control), and the transient RSS of a staged update. Signs with minisign and the node111 tests' throwaway keys (the debug
+# binary's compiled key is the test key). T3's helper refusal and every flip stay node111 tests (root-only). SKIPPED without a user+net+pid
+# namespace, a built debug `111` (BIN111 or CARGO_TARGET_DIR), minisign or the fixtures (FAIL under REQUIRE_G12=1).
 [[check]]
 id = "l7.g12"
 kind = "unit"
@@ -2522,6 +2819,261 @@ cmd = ["bash", "7-relay/verify/origin.sh"]
 tier = "ns"
 layers = [7]
 seams = ["L1-L7:origin", "L1-L1:manifest-trust"]
+adapter = "okfail"
+lock = "verify"
+timeout_s = 1800
+rerun_cost = "ns, about 4 min (two daemons, five restarts, two 20 s egress passes; needs a built debug 111 and minisign)"
+strength = "R"
+needs = ["bash", "userns", "netns", "python3", "ip", "nsenter", "curl", "jq", "minisign"]
+
+# G13 the node-state store and the joint contract: one node with the real 111d, the real 111-agent and a stub model. Row V3.
+# A T0 stub: it prints '<G> SKIPPED: not built yet (T0 stub)' and exits 0 (8-storage/TASKS.md row V3). Strength N
+# until the row lands; promote it to R then (and to cargo = true if the gate builds).
+[[check]]
+id = "l8.g13"
+kind = "unit"
+cmd = ["bash", "8-storage/verify/state.sh"]
+tier = "ns"
+layers = [8]
+seams = ["L3-L8:agent-state", "L1-L8:state-service", "L8-L9:heal-store", "L2-L8:dataset-signing", "L1-L8:updates-backup"]
+adapter = "okfail"
+lock = "verify"
+timeout_s = 1800
+rerun_cost = "ns, T0 stub: SKIPPED today"
+strength = "N"
+needs = ["bash"]
+
+# G14 the budget: one node whose root is a small tmpfs; the log rings, no idle write, the consumer registry. Row V4.
+# A T0 stub: it prints '<G> SKIPPED: not built yet (T0 stub)' and exits 0 (8-storage/TASKS.md row V4). Strength N
+# until the row lands; promote it to R then (and to cargo = true if the gate builds).
+[[check]]
+id = "l8.g14"
+kind = "unit"
+cmd = ["bash", "8-storage/verify/budget.sh"]
+tier = "ns"
+layers = [8]
+seams = ["L1-L8:state-service", "L4-L8:hub-content", "L5-L8:consumer-registry"]
+adapter = "okfail"
+lock = "verify"
+timeout_s = 1800
+rerun_cost = "ns, T0 stub: SKIPPED today"
+strength = "N"
+needs = ["bash"]
+
+# G15 datasets: hubs H and H2 and a member M on one bridge with the stub mirror. Row V5.
+# A T0 stub: it prints '<G> SKIPPED: not built yet (T0 stub)' and exits 0 (8-storage/TASKS.md row V5). Strength N
+# until the row lands; promote it to R then (and to cargo = true if the gate builds).
+[[check]]
+id = "l8.g15"
+kind = "unit"
+cmd = ["bash", "8-storage/verify/datasets.sh"]
+tier = "ns"
+layers = [8]
+seams = ["L1-L8:state-service", "L2-L8:dataset-signing", "L7-L8:move-datasets", "L4-L8:hub-content"]
+adapter = "okfail"
+lock = "verify"
+timeout_s = 1800
+rerun_cost = "ns, T0 stub: SKIPPED today"
+strength = "N"
+needs = ["bash"]
+
+# G16 the encyclopedia: part A the stub child as the kiwix program; part B kiwix-serve (KIWIX_BIN, KIWIX_ZIM). Row V6.
+# A T0 stub: it prints '<G> SKIPPED: not built yet (T0 stub)' and exits 0 (8-storage/TASKS.md row V6). Strength N
+# until the row lands; promote it to R then (and to cargo = true if the gate builds).
+[[check]]
+id = "l8.g16"
+kind = "unit"
+cmd = ["bash", "8-storage/verify/kiwix.sh"]
+tier = "ns"
+layers = [8]
+seams = ["L4-L8:hub-content", "L6-L8:server-component", "L5-L8:child-panel"]
+adapter = "okfail"
+lock = "verify"
+timeout_s = 1800
+rerun_cost = "ns, T0 stub: SKIPPED today"
+strength = "N"
+needs = ["bash"]
+
+# G17 maps: the tiles routes over a PMTiles fixture gen-pmtiles.py writes into the scratch root; the UI checks. Row V7.
+# A T0 stub: it prints '<G> SKIPPED: not built yet (T0 stub)' and exits 0 (8-storage/TASKS.md row V7). Strength N
+# until the row lands; promote it to R then (and to cargo = true if the gate builds).
+[[check]]
+id = "l8.g17"
+kind = "unit"
+cmd = ["bash", "8-storage/verify/maps.sh"]
+tier = "ns"
+layers = [8]
+seams = ["L4-L8:hub-content"]
+adapter = "okfail"
+lock = "verify"
+timeout_s = 1800
+rerun_cost = "ns, T0 stub: SKIPPED today"
+strength = "N"
+needs = ["bash"]
+
+# G18 component pins from a hub: origin.components, the installer's origin list, the files table, the tarball. Row V8.
+# A T0 stub: it prints '<G> SKIPPED: not built yet (T0 stub)' and exits 0 (8-storage/TASKS.md row V8). Strength N
+# until the row lands; promote it to R then (and to cargo = true if the gate builds).
+[[check]]
+id = "l8.g18"
+kind = "unit"
+cmd = ["bash", "8-storage/verify/components.sh"]
+tier = "ns"
+layers = [8]
+seams = ["L1-L8:updates-backup"]
+adapter = "okfail"
+lock = "verify"
+timeout_s = 1800
+rerun_cost = "ns, T0 stub: SKIPPED today"
+strength = "N"
+needs = ["bash"]
+
+# G7 extended for Layer 8 (§18): zero-weight.sh with kiwix declared and disabled, and idle.sh's no-timer line. Row V9.
+# A T0 stub: it prints 'G7 SKIPPED: not built yet (T0 stub; ...)' and exits 0 (8-storage/TASKS.md row V9). Strength N
+# until the row lands; promote it to R then (and to cargo = true if the gate builds).
+[[check]]
+id = "l8.g7ext"
+kind = "unit"
+cmd = ["bash", "-c", "echo 'G7 SKIPPED: not built yet (T0 stub; Layer 8 row V9 runs 6-transport/verify/zero-weight.sh and 7-relay/verify/idle.sh with Layer 8 present)'"]
+tier = "ns"
+layers = [8]
+seams = ["L1-L8:state-service", "L6-L8:server-component"]
+adapter = "okfail"
+lock = "verify"
+timeout_s = 1800
+rerun_cost = "ns, T0 stub: SKIPPED today"
+strength = "N"
+needs = ["bash"]
+
+# G19 the observer: one netns node with the real 111d, a real supervised stub child and the real agent off; node111 tests. Row V3.
+# A T0 stub: it prints '<G> SKIPPED: not built yet (T0 stub)' and exits 0 (9-evolution/TASKS.md row V3). Strength N
+# until the row lands; promote it to R then (and to cargo = true if the gate builds).
+[[check]]
+id = "l9.g19"
+kind = "unit"
+cmd = ["bash", "9-evolution/verify/observer.sh"]
+tier = "ns"
+layers = [9]
+seams = ["L1-L9:observer-change-engine", "L8-L9:heal-store"]
+adapter = "okfail"
+lock = "verify"
+timeout_s = 1800
+rerun_cost = "ns, T0 stub: SKIPPED today"
+strength = "N"
+needs = ["bash"]
+
+# G20 the engine: G1's bridge stubs, G5's device fakes and the Layer 6 applier tape under the Action trait; node111 and UI tests. Row V4.
+# A T0 stub: it prints '<G> SKIPPED: not built yet (T0 stub)' and exits 0 (9-evolution/TASKS.md row V4). Strength N
+# until the row lands; promote it to R then (and to cargo = true if the gate builds).
+[[check]]
+id = "l9.g20"
+kind = "unit"
+cmd = ["bash", "9-evolution/verify/engine.sh"]
+tier = "ns"
+layers = [9]
+seams = ["L6-L9:typed-actions", "L4-L9:repairs-api", "L1-L9:observer-change-engine"]
+adapter = "okfail"
+lock = "verify"
+timeout_s = 1800
+rerun_cost = "ns, T0 stub: SKIPPED today"
+strength = "N"
+needs = ["bash"]
+
+# G21 diagnosis: one node with the real agent and stub-model.py as the model child; node111 and agent111 tests. Row V5.
+# A T0 stub: it prints '<G> SKIPPED: not built yet (T0 stub)' and exits 0 (9-evolution/TASKS.md row V5). Strength N
+# until the row lands; promote it to R then (and to cargo = true if the gate builds).
+[[check]]
+id = "l9.g21"
+kind = "unit"
+cmd = ["bash", "9-evolution/verify/diagnose.sh"]
+tier = "ns"
+layers = [9]
+seams = ["L3-L9:diagnosis-playbooks", "L0-L9:evolution"]
+adapter = "okfail"
+lock = "verify"
+timeout_s = 1800
+rerun_cost = "ns, T0 stub: SKIPPED today"
+strength = "N"
+needs = ["bash"]
+
+# G22 sharing fixes: nodes A and B and hub H over tcp-lan, item (11) on Layer 7's G9 topology; node111 and mesh111 tests. Row V6.
+# A T0 stub: it prints '<G> SKIPPED: not built yet (T0 stub)' and exits 0 (9-evolution/TASKS.md row V6). Strength N
+# until the row lands; promote it to R then (and to cargo = true if the gate builds).
+[[check]]
+id = "l9.g22"
+kind = "unit"
+cmd = ["bash", "9-evolution/verify/share.sh"]
+tier = "ns"
+layers = [9]
+seams = ["L5/7-L9:fix-sharing-delegation", "L2-L9:fix-signing"]
+adapter = "okfail"
+lock = "verify"
+timeout_s = 1800
+rerun_cost = "ns, T0 stub: SKIPPED today"
+strength = "N"
+needs = ["bash"]
+
+# G23 delegation: hub H and members M1, M2 over tcp-lan, stub-model.py on H; mesh111 tests. Row V7.
+# A T0 stub: it prints '<G> SKIPPED: not built yet (T0 stub)' and exits 0 (9-evolution/TASKS.md row V7). Strength N
+# until the row lands; promote it to R then (and to cargo = true if the gate builds).
+[[check]]
+id = "l9.g23"
+kind = "unit"
+cmd = ["bash", "9-evolution/verify/delegate.sh"]
+tier = "ns"
+layers = [9]
+seams = ["L5/7-L9:fix-sharing-delegation"]
+adapter = "okfail"
+lock = "verify"
+timeout_s = 1800
+rerun_cost = "ns, T0 stub: SKIPPED today"
+strength = "N"
+needs = ["bash"]
+
+# G24 code drafts: OPENCODE_BIN a pinned opencode, else SKIPPED (the lock run sets REQUIRE_G24=1); the deny block, the mbox. Row V8.
+# A T0 stub: it prints '<G> SKIPPED: not built yet (T0 stub)' and exits 0 (9-evolution/TASKS.md row V8). Strength N
+# until the row lands; promote it to R then (and to cargo = true if the gate builds).
+[[check]]
+id = "l9.g24"
+kind = "unit"
+cmd = ["bash", "9-evolution/verify/codefix.sh"]
+tier = "ns"
+layers = [9]
+seams = ["L3-L9:code-drafts"]
+adapter = "okfail"
+lock = "verify"
+timeout_s = 1800
+rerun_cost = "ns, T0 stub: SKIPPED today"
+strength = "N"
+needs = ["bash"]
+
+# G25 evolution: build.py's playbook lint and fixtures, the agent's data by release, kb_draft; agent111 tests. Row V9.
+# A T0 stub: it prints '<G> SKIPPED: not built yet (T0 stub)' and exits 0 (9-evolution/TASKS.md row V9). Strength N
+# until the row lands; promote it to R then (and to cargo = true if the gate builds).
+[[check]]
+id = "l9.g25"
+kind = "unit"
+cmd = ["bash", "9-evolution/verify/evolution.sh"]
+tier = "ns"
+layers = [9]
+seams = ["L0-L9:evolution", "L3-L9:diagnosis-playbooks"]
+adapter = "okfail"
+lock = "verify"
+timeout_s = 1800
+rerun_cost = "ns, T0 stub: SKIPPED today"
+strength = "N"
+needs = ["bash"]
+
+# G7 extended for Layer 9 (§20): zero-weight.sh against observer.sh's own idle daemon (idle RSS under the Layer 8 build's plus 512 KiB), and idle.sh's no-timer line. Row V10.
+# A T0 stub: it prints 'G7 SKIPPED: not built yet (T0 stub; ...)' and exits 0 (9-evolution/TASKS.md row V10). Strength N
+# until the row lands; promote it to R then (and to cargo = true if the gate builds).
+[[check]]
+id = "l9.g7ext"
+kind = "unit"
+cmd = ["bash", "-c", "echo 'G7 SKIPPED: not built yet (T0 stub; Layer 9 row V10 runs 6-transport/verify/zero-weight.sh and 7-relay/verify/idle.sh with Layer 9 present)'"]
+tier = "ns"
+layers = [9]
+seams = ["L1-X:pi-floor"]
 adapter = "okfail"
 lock = "verify"
 timeout_s = 1800
@@ -2830,9 +3382,12 @@ reason = "returns early as root (access(2) always succeeds), so a PASS here prov
 "6-transport/verify/rns-venv.sh" = "sourced helper that builds the hash-locked rnsd/LXMF venv for G3, G4 and G5; not a check"
 "6-transport/verify/devices/fake-rnodeconf.sh" = "G5's fake rnodeconf (also a [[fake]] on L1-L6:devices-hotplug): devices.sh installs a rendered copy as venvs/rns/bin/rnodeconf; not a check"
 "6-transport/verify/spine/node.sh" = "sourced helper of the G4 and G5 gates (spine.sh and devices.sh: ok/fail/note counting, req/jb/t/tw, nx/api, roots, daemons); not a check"
+"9-evolution/verify/record-applier-tape.sh" = "Layer 9 row P1: a one-off recorder of the Layer 6 applier tape (9-evolution/verify/tapes/applier-l6/), run once before Layer 8 row D7; not a check, its tapes are what G20 (1) compares the port against"
 "6-transport/verify/root.sh" = "sourced helper (g6_make_root, g6_identity) for G1 and the Layer 7 lib; not a check"
 "6-transport/verify/zero-weight.sh" = "G7 needs an already-running daemon (NODE111_ROOT) and prints SKIPPED alone; row N4 runs it inside smoke.sh against the harness's own daemon, then it gets a check"
 "7-relay/verify/lib.sh" = "sourced helper: port, namespace and address names for G7-extended to G12; creates nothing, not a check"
+"8-storage/verify/lib.sh" = "sourced helper: netns, veth, address and port names for G13 to G18; creates nothing, not a check"
+"9-evolution/verify/lib.sh" = "sourced helper: netns, veth, address and port names for G19 to G25; creates nothing, not a check"
 "2-identity/monocypher-harness/mutation-check.sh" = "evidence that the Monocypher harness kills 17 mutants, 'not part of the gate' (2-identity/monocypher-harness/README.md); run by hand"
 "4-interface/ui/test/agent.test.ts" = "agent view logic over the mock and the generated types; no seam"
 "4-interface/ui/test/bus.test.ts" = "the mock event bus; no seam"

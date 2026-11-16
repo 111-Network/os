@@ -9,6 +9,9 @@
 // Layer 7 (os/7-relay/README.md §13.2): a `relay` body is the same JSON shape `{why, actions}` over its own closed vocabulary
 // (`gateway.enable`, `hub.pair`, `presence.interval`, `carrier.flush`) and renders as a card per action the same way. It never goes
 // through the Markdown renderer, and every string in it (the model wrote it) is cleaned and drawn as text.
+//
+// Layer 8 (os/8-storage/README.md §16.4): a `storage` body is the same JSON shape over `quota.set`, `dataset.remove` and `dataset.fetch`,
+// rendered the same way: a card from the parsed JSON, never Markdown.
 import { useMemo } from "react";
 import { useServices } from "../../lib/api/hooks";
 import { cleanPeerText } from "../../lib/api/messages";
@@ -19,10 +22,21 @@ export type BodyKind = string | undefined;
 
 const BRIDGE_KINDS: readonly string[] = ["bridge_message", "bridge_edge"];
 /** Accepting a bridge proposal can answer 409 `consent_required`; the card shows the dialog and repeats the decision with the hash. */
-export const isBridgeKind = (kind: BodyKind): boolean => kind !== undefined && BRIDGE_KINDS.includes(kind);
+export const isBridgeKind = (kind: BodyKind): boolean =>
+  kind !== undefined && BRIDGE_KINDS.includes(kind);
 
-const clip = (s: string, max: number): string => (Array.from(s).length <= max ? s : `${Array.from(s).slice(0, max - 1).join("")}…`);
-const text = (v: unknown, max = 200): string => (typeof v === "string" ? clip(cleanPeerText(v), max) : v === undefined || v === null ? "" : clip(cleanPeerText(JSON.stringify(v)), max));
+const clip = (s: string, max: number): string =>
+  Array.from(s).length <= max
+    ? s
+    : `${Array.from(s)
+        .slice(0, max - 1)
+        .join("")}…`;
+const text = (v: unknown, max = 200): string =>
+  typeof v === "string"
+    ? clip(cleanPeerText(v), max)
+    : v === undefined || v === null
+      ? ""
+      : clip(cleanPeerText(JSON.stringify(v)), max);
 
 // --- bridge_message / bridge_edge ----------------------------------------------------------------------------------------
 
@@ -38,7 +52,8 @@ export function splitBridgeBody(body: string): BridgeBody {
   const lines = body.replace(/\r\n?/g, "\n").split("\n");
   const header: string[] = [];
   let i = 0;
-  while (i < lines.length && /^(to|from):\s*\S/.test(lines[i]!)) header.push(lines[i++]!.trim());
+  while (i < lines.length && /^(to|from):\s*\S/.test(lines[i]!))
+    header.push(lines[i++]!.trim());
   if (header.length === 0) return { header, text: body };
   if (lines[i] === "") i++;
   return { header, text: lines.slice(i).join("\n") };
@@ -47,9 +62,16 @@ export function splitBridgeBody(body: string): BridgeBody {
 function BridgeText({ body, kind }: { body: string; kind: string }) {
   const { header, text: rest } = useMemo(() => splitBridgeBody(body), [body]);
   return (
-    <div className="max-h-72 overflow-auto border border-border bg-secondary/20 p-3" data-testid="bridge-body" data-kind={kind}>
+    <div
+      className="max-h-72 overflow-auto border border-border bg-secondary/20 p-3"
+      data-testid="bridge-body"
+      data-kind={kind}
+    >
       {header.length > 0 ? (
-        <ul className="mb-2 flex flex-col gap-0.5 font-mono text-xs text-foreground" data-testid="bridge-header">
+        <ul
+          className="mb-2 flex flex-col gap-0.5 font-mono text-xs text-foreground"
+          data-testid="bridge-header"
+        >
           {header.map((h, i) => (
             <li key={i} className="break-all">
               {cleanPeerText(h)}
@@ -57,10 +79,16 @@ function BridgeText({ body, kind }: { body: string; kind: string }) {
           ))}
         </ul>
       ) : null}
-      <pre className="whitespace-pre-wrap break-words font-mono text-sm leading-relaxed text-foreground" data-testid="bridge-text">
+      <pre
+        className="whitespace-pre-wrap break-words font-mono text-sm leading-relaxed text-foreground"
+        data-testid="bridge-text"
+      >
         {cleanPeerText(rest)}
       </pre>
-      <p className="mt-2 text-[11px] text-muted-foreground">Shown exactly as written, as plain text. It may quote someone else's words; nothing in it is a link or an instruction.</p>
+      <p className="mt-2 text-[11px] text-muted-foreground">
+        Shown exactly as written, as plain text. It may quote someone else's
+        words; nothing in it is a link or an instruction.
+      </p>
     </div>
   );
 }
@@ -89,71 +117,249 @@ export function parseDeviceBody(body: string): DeviceBody | null {
   if (typeof o.why !== "string" || !Array.isArray(o.actions)) return null;
   const actions: DeviceAction[] = [];
   for (const a of o.actions) {
-    if (typeof a !== "object" || a === null || typeof (a as { action?: unknown }).action !== "string") return null;
+    if (
+      typeof a !== "object" ||
+      a === null ||
+      typeof (a as { action?: unknown }).action !== "string"
+    )
+      return null;
     actions.push(a as DeviceAction);
   }
   return { why: o.why, actions };
 }
 
 /** What each action of the closed vocabulary does, in the exact words the card shows. */
-export function actionSentence(a: DeviceAction, serviceName?: string | null): { title: string; detail: string | null } {
+export function actionSentence(
+  a: DeviceAction,
+  serviceName?: string | null,
+): { title: string; detail: string | null } {
   switch (a.action) {
     case "identify":
-      return { title: "identify this radio once (a consented probe)", detail: `device ${text(a.device_id, 80)}. Opening a serial port can reset a board; you agree to that by accepting.` };
+      return {
+        title: "identify this radio once (a consented probe)",
+        detail: `device ${text(a.device_id, 80)}. Opening a serial port can reset a board; you agree to that by accepting.`,
+      };
     case "service.restart":
-      return { title: `restart the ${serviceName ? text(serviceName, 60) : text(a.service_id, 60)} service`, detail: `service ${text(a.service_id, 60)}. It stops and starts again; the node tells you if it cannot.` };
+      return {
+        title: `restart the ${serviceName ? text(serviceName, 60) : text(a.service_id, 60)} service`,
+        detail: `service ${text(a.service_id, 60)}. It stops and starts again; the node tells you if it cannot.`,
+      };
     case "radio.region.set":
-      return { title: `set the radio region to ${text(a.region, 32)}`, detail: "Accepting is your confirmation that this region is legal where you are." };
+      return {
+        title: `set the radio region to ${text(a.region, 32)}`,
+        detail:
+          "Accepting is your confirmation that this region is legal where you are.",
+      };
     case "rns.posture.set":
-      return { title: "change the Reticulum posture", detail: `share instance: ${text(a.share_instance, 8)} · route for others: ${text(a.enable_transport, 8)}. It is checked for 30 seconds and goes back if it does not work.` };
+      return {
+        title: "change the Reticulum posture",
+        detail: `share instance: ${text(a.share_instance, 8)} · route for others: ${text(a.enable_transport, 8)}. It is checked for 30 seconds and goes back if it does not work.`,
+      };
     case "rns.interface.upsert":
-      return { title: `add or change a ${text(a.type, 40)} interface`, detail: `for device ${text(a.device_id, 80)}. Parameters: ${text(a.params, 200)}` };
+      return {
+        title: `add or change a ${text(a.type, 40)} interface`,
+        detail: `for device ${text(a.device_id, 80)}. Parameters: ${text(a.params, 200)}`,
+      };
     case "rns.interface.remove":
-      return { title: `remove the interface ${text(a.name, 60)}`, detail: null };
+      return {
+        title: `remove the interface ${text(a.name, 60)}`,
+        detail: null,
+      };
     default:
-      return { title: `unknown action: ${text(a.action, 60)}`, detail: "This node does not apply it; accepting is refused and the proposal stays open." };
+      return {
+        title: `unknown action: ${text(a.action, 60)}`,
+        detail:
+          "This node does not apply it; accepting is refused and the proposal stays open.",
+      };
   }
 }
 
 // --- relay ----------------------------------------------------------------------------------------------------------------------
 
 /** Parse a `relay` body: one JSON object `{why, actions: [{action, …}]}`, the `device` shape. Anything else is null (shown raw, as text). */
-export const parseRelayBody = (body: string): DeviceBody | null => parseDeviceBody(body);
+export const parseRelayBody = (body: string): DeviceBody | null =>
+  parseDeviceBody(body);
 
 /** What each action of the Layer 7 vocabulary does, in the exact words the card shows. Accepting runs the same checks as the routes. */
-export function relayActionSentence(a: DeviceAction): { title: string; detail: string | null } {
+export function relayActionSentence(a: DeviceAction): {
+  title: string;
+  detail: string | null;
+} {
   switch (a.action) {
     case "gateway.enable":
       return {
         title: `turn on the gateway through ${text(a.carrier, 40) || "a carrier"}${a.mode === undefined ? "" : ` (mode ${text(a.mode, 8)})`}`,
-        detail: "The carrier's own consent text is shown first and you confirm it; nothing is sent until you do, and nothing is sent while the switch is off.",
+        detail:
+          "The carrier's own consent text is shown first and you confirm it; nothing is sent until you do, and nothing is sent while the switch is off.",
       };
     case "hub.pair":
-      return { title: "open the pairing screen", detail: "Pairing itself stays with you: you show this hub's bundle and scan or paste the other hub's. Nothing is paired by accepting." };
+      return {
+        title: "open the pairing screen",
+        detail:
+          "Pairing itself stays with you: you show this hub's bundle and scan or paste the other hub's. Nothing is paired by accepting.",
+      };
     case "presence.interval":
-      return { title: `set the ${text(a.transport, 40)} presence interval to ${text(a.minutes, 8)} min`, detail: "Not available in this version: accepting is refused and the proposal stays open." };
+      return {
+        title: `set the ${text(a.transport, 40)} presence interval to ${text(a.minutes, 8)} min`,
+        detail:
+          "Not available in this version: accepting is refused and the proposal stays open.",
+      };
     case "carrier.flush":
-      return { title: "send and fetch through the carrier once", detail: "Posts what waits and reads what came back, one time. It counts against a metered cap and is refused past it." };
+      return {
+        title: "send and fetch through the carrier once",
+        detail:
+          "Posts what waits and reads what came back, one time. It counts against a metered cap and is refused past it.",
+      };
     default:
-      return { title: `unknown action: ${text(a.action, 60)}`, detail: "This node does not apply it; accepting is refused and the proposal stays open." };
+      return {
+        title: `unknown action: ${text(a.action, 60)}`,
+        detail:
+          "This node does not apply it; accepting is refused and the proposal stays open.",
+      };
   }
+}
+
+// --- storage --------------------------------------------------------------------------------------------------------------------
+
+/** Parse a `storage` body: one JSON object `{why, actions: [{action, …}]}`, the `device` shape. Anything else is null (shown raw, as text). */
+export const parseStorageBody = (body: string): DeviceBody | null =>
+  parseDeviceBody(body);
+
+const QUOTA_CLASS_WORD: Record<string, string> = {
+  keep: "the space set aside for this node",
+  agent: "the agent's state",
+  heal: "repair records",
+};
+
+const quotaBytes = (v: unknown): string => {
+  if (typeof v !== "number" || !Number.isFinite(v) || v < 0)
+    return "an unreadable size";
+  if (v < 1000) return `${Math.round(v)} B`;
+  if (v < 1_000_000) return `${Math.round(v / 1000)} kB`;
+  if (v < 1_000_000_000) return `${(v / 1_000_000).toFixed(1)} MB`;
+  return `${(v / 1_000_000_000).toFixed(1)} GB`;
+};
+
+const datasetName = (a: DeviceAction): string =>
+  `${text(a.id, 80)} ${text(a.version, 40)}${typeof a.publisher === "string" && a.publisher !== "" ? ` from ${text(a.publisher, 16)}` : " from the home hub"}`;
+
+/** `bytes: null` per class (§15.1): `keep` goes back to its install-time default; `agent` and `heal` take their share again; any other class loses its limit. */
+function quotaResetTitle(cls: string, what: string): string {
+  if (cls === "keep") return `set ${what} back to its default`;
+  if (cls === "agent" || cls === "heal")
+    return `remove the cap on ${what} (it takes its share again)`;
+  return `remove the limit on ${what}`;
+}
+
+/** What each action of the Layer 8 vocabulary does, in the exact words the card shows. Accepting runs the same checks as the routes. */
+export function storageActionSentence(a: DeviceAction): {
+  title: string;
+  detail: string | null;
+} {
+  switch (a.action) {
+    case "quota.set": {
+      const cls = typeof a.class === "string" ? a.class : "";
+      const what = Object.prototype.hasOwnProperty.call(QUOTA_CLASS_WORD, cls)
+        ? QUOTA_CLASS_WORD[cls]!
+        : `the ${text(a.class, 40)} class`;
+      return {
+        title:
+          a.bytes === null
+            ? quotaResetTitle(cls, what)
+            : `set ${what} to ${quotaBytes(a.bytes)}`,
+        detail:
+          "Changing a size is made on the node itself: from a session that is not on it, accepting is refused and the proposal stays open.",
+      };
+    }
+    case "dataset.remove":
+      return {
+        title: `remove ${datasetName(a)}`,
+        detail:
+          "The file is deleted from this node. It can be downloaded again if the hub still lists it.",
+      };
+    case "dataset.fetch":
+      return {
+        title: `download ${datasetName(a)}`,
+        detail:
+          "The download's own confirmation, with its size, source and licence, is shown first and you confirm it; nothing is fetched until you do.",
+      };
+    default:
+      return {
+        title: `unknown action: ${text(a.action, 60)}`,
+        detail:
+          "This node does not apply it; accepting is refused and the proposal stays open.",
+      };
+  }
+}
+
+function StorageCard({ body }: { body: DeviceBody }) {
+  return (
+    <div
+      className="flex max-h-72 flex-col gap-2 overflow-auto border border-border bg-secondary/20 p-3"
+      data-testid="storage-card"
+    >
+      <p className="text-sm text-foreground" data-testid="storage-why">
+        {cleanPeerText(body.why)}
+      </p>
+      {body.actions.length === 0 ? (
+        <p className="text-xs text-muted-foreground">It names no action.</p>
+      ) : null}
+      <ul className="flex flex-col gap-2">
+        {body.actions.map((a, i) => {
+          const s = storageActionSentence(a);
+          return (
+            <li
+              key={i}
+              className="border border-border p-2"
+              data-testid="storage-action"
+            >
+              <p className="font-mono text-[10px] uppercase tracking-widest text-muted-foreground">
+                {text(a.action, 40)}
+              </p>
+              <p className="text-sm text-foreground">{s.title}</p>
+              {s.detail ? (
+                <p className="text-xs leading-relaxed text-muted-foreground">
+                  {s.detail}
+                </p>
+              ) : null}
+            </li>
+          );
+        })}
+      </ul>
+    </div>
+  );
 }
 
 function RelayCard({ body }: { body: DeviceBody }) {
   return (
-    <div className="flex max-h-72 flex-col gap-2 overflow-auto border border-border bg-secondary/20 p-3" data-testid="relay-card">
+    <div
+      className="flex max-h-72 flex-col gap-2 overflow-auto border border-border bg-secondary/20 p-3"
+      data-testid="relay-card"
+    >
       <p className="text-sm text-foreground" data-testid="relay-why">
         {cleanPeerText(body.why)}
       </p>
-      {body.actions.length === 0 ? <p className="text-xs text-muted-foreground">It names no action.</p> : null}
+      {body.actions.length === 0 ? (
+        <p className="text-xs text-muted-foreground">It names no action.</p>
+      ) : null}
       <ul className="flex flex-col gap-2">
         {body.actions.map((a, i) => {
           const s = relayActionSentence(a);
           return (
-            <li key={i} className="border border-border p-2" data-testid="relay-action">
-              <p className="font-mono text-[10px] uppercase tracking-widest text-muted-foreground">{text(a.action, 40)}</p>
+            <li
+              key={i}
+              className="border border-border p-2"
+              data-testid="relay-action"
+            >
+              <p className="font-mono text-[10px] uppercase tracking-widest text-muted-foreground">
+                {text(a.action, 40)}
+              </p>
               <p className="text-sm text-foreground">{s.title}</p>
-              {s.detail ? <p className="text-xs leading-relaxed text-muted-foreground">{s.detail}</p> : null}
+              {s.detail ? (
+                <p className="text-xs leading-relaxed text-muted-foreground">
+                  {s.detail}
+                </p>
+              ) : null}
             </li>
           );
         })}
@@ -165,20 +371,40 @@ function RelayCard({ body }: { body: DeviceBody }) {
 function DeviceCard({ body }: { body: DeviceBody }) {
   const services = useServices();
   return (
-    <div className="flex max-h-72 flex-col gap-2 overflow-auto border border-border bg-secondary/20 p-3" data-testid="device-card">
+    <div
+      className="flex max-h-72 flex-col gap-2 overflow-auto border border-border bg-secondary/20 p-3"
+      data-testid="device-card"
+    >
       <p className="text-sm text-foreground" data-testid="device-why">
         {cleanPeerText(body.why)}
       </p>
-      {body.actions.length === 0 ? <p className="text-xs text-muted-foreground">It names no action.</p> : null}
+      {body.actions.length === 0 ? (
+        <p className="text-xs text-muted-foreground">It names no action.</p>
+      ) : null}
       <ul className="flex flex-col gap-2">
         {body.actions.map((a, i) => {
-          const svc = a.action === "service.restart" ? services?.find((s) => s.id === a.service_id) : undefined;
+          const svc =
+            a.action === "service.restart"
+              ? services?.find((s) => s.id === a.service_id)
+              : undefined;
           const s = actionSentence(a, svc?.plain_name ?? null);
           return (
-            <li key={i} className="border border-border p-2" data-testid={a.action === "service.restart" ? "service-card" : "action-card"}>
-              <p className="font-mono text-[10px] uppercase tracking-widest text-muted-foreground">{text(a.action, 40)}</p>
+            <li
+              key={i}
+              className="border border-border p-2"
+              data-testid={
+                a.action === "service.restart" ? "service-card" : "action-card"
+              }
+            >
+              <p className="font-mono text-[10px] uppercase tracking-widest text-muted-foreground">
+                {text(a.action, 40)}
+              </p>
               <p className="text-sm text-foreground">{s.title}</p>
-              {s.detail ? <p className="text-xs leading-relaxed text-muted-foreground">{s.detail}</p> : null}
+              {s.detail ? (
+                <p className="text-xs leading-relaxed text-muted-foreground">
+                  {s.detail}
+                </p>
+              ) : null}
             </li>
           );
         })}
@@ -187,17 +413,61 @@ function DeviceCard({ body }: { body: DeviceBody }) {
   );
 }
 
-export function ProposalBody({ body, kind }: { body: string; kind?: BodyKind }) {
-  const doc = useMemo(() => (kind === "bridge_message" || kind === "bridge_edge" || kind === "device" || kind === "relay" ? null : parseMarkdown(body)), [body, kind]);
-  const device = useMemo(() => (kind === "device" ? parseDeviceBody(body) : null), [body, kind]);
-  const relay = useMemo(() => (kind === "relay" ? parseRelayBody(body) : null), [body, kind]);
-  if (kind === "bridge_message" || kind === "bridge_edge") return <BridgeText body={body} kind={kind} />;
+export function ProposalBody({
+  body,
+  kind,
+}: {
+  body: string;
+  kind?: BodyKind;
+}) {
+  const doc = useMemo(
+    () =>
+      kind === "bridge_message" ||
+      kind === "bridge_edge" ||
+      kind === "device" ||
+      kind === "relay" ||
+      kind === "storage"
+        ? null
+        : parseMarkdown(body),
+    [body, kind],
+  );
+  const device = useMemo(
+    () => (kind === "device" ? parseDeviceBody(body) : null),
+    [body, kind],
+  );
+  const relay = useMemo(
+    () => (kind === "relay" ? parseRelayBody(body) : null),
+    [body, kind],
+  );
+  const storage = useMemo(
+    () => (kind === "storage" ? parseStorageBody(body) : null),
+    [body, kind],
+  );
+  if (kind === "bridge_message" || kind === "bridge_edge")
+    return <BridgeText body={body} kind={kind} />;
   if (kind === "relay") {
     if (relay) return <RelayCard body={relay} />;
     return (
       <div className="max-h-72 overflow-auto border border-border bg-secondary/20 p-3">
-        <p className="mb-2 text-xs text-muted-foreground">This body is not in the expected shape, so it is shown as plain text.</p>
-        <pre className="whitespace-pre-wrap break-words font-mono text-sm text-foreground">{cleanPeerText(body)}</pre>
+        <p className="mb-2 text-xs text-muted-foreground">
+          This body is not in the expected shape, so it is shown as plain text.
+        </p>
+        <pre className="whitespace-pre-wrap break-words font-mono text-sm text-foreground">
+          {cleanPeerText(body)}
+        </pre>
+      </div>
+    );
+  }
+  if (kind === "storage") {
+    if (storage) return <StorageCard body={storage} />;
+    return (
+      <div className="max-h-72 overflow-auto border border-border bg-secondary/20 p-3">
+        <p className="mb-2 text-xs text-muted-foreground">
+          This body is not in the expected shape, so it is shown as plain text.
+        </p>
+        <pre className="whitespace-pre-wrap break-words font-mono text-sm text-foreground">
+          {cleanPeerText(body)}
+        </pre>
       </div>
     );
   }
@@ -205,8 +475,12 @@ export function ProposalBody({ body, kind }: { body: string; kind?: BodyKind }) 
     if (device) return <DeviceCard body={device} />;
     return (
       <div className="max-h-72 overflow-auto border border-border bg-secondary/20 p-3">
-        <p className="mb-2 text-xs text-muted-foreground">This body is not in the expected shape, so it is shown as plain text.</p>
-        <pre className="whitespace-pre-wrap break-words font-mono text-sm text-foreground">{cleanPeerText(body)}</pre>
+        <p className="mb-2 text-xs text-muted-foreground">
+          This body is not in the expected shape, so it is shown as plain text.
+        </p>
+        <pre className="whitespace-pre-wrap break-words font-mono text-sm text-foreground">
+          {cleanPeerText(body)}
+        </pre>
       </div>
     );
   }
@@ -214,7 +488,9 @@ export function ProposalBody({ body, kind }: { body: string; kind?: BodyKind }) 
   return (
     <div className="max-h-72 overflow-auto border border-border bg-secondary/20 p-3 pt-1">
       <Blocks blocks={doc.blocks} headingsAsBold compact />
-      {doc.truncated ? <p className="mt-2 text-xs text-muted-foreground">[truncated]</p> : null}
+      {doc.truncated ? (
+        <p className="mt-2 text-xs text-muted-foreground">[truncated]</p>
+      ) : null}
     </div>
   );
 }

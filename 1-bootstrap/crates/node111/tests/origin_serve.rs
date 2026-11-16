@@ -25,6 +25,7 @@ use axum::extract::connect_info::MockConnectInfo;
 use node111::daemon::dashboard::routes::{self, CSP};
 use node111::daemon::dashboard::{serve_listener, ApiConfig, ApiState, DashboardState};
 use node111::daemon::fabric::{self, FabricConfig, FabricHandle};
+use node111::daemon::housekeeping::{self, Housekeeping};
 use node111::daemon::origin::{AdmitError, Origin, MANIFEST_NAME, SIGNATURE_NAME};
 use node111::daemon::relay::settings::{self as relay_settings, ConsentKind, RelaySettings};
 use node111::daemon::updater::fetch::TARGET_TRIPLE;
@@ -137,6 +138,9 @@ const ALL_ON: Switches = Switches {
 struct Node {
     api: Arc<ApiState>,
     fabric: Arc<FabricHandle>,
+    /// The daemon's housekeeping interval (Layer 8 row D1; it runs with the fabric down too),
+    /// alive as long as `fabric`.
+    _house: Housekeeping,
     state_dir: PathBuf,
     _dir: tempfile::TempDir,
 }
@@ -145,7 +149,9 @@ fn relay(serve: bool, consent: bool) -> RelaySettings {
     let mut r = RelaySettings::default();
     r.set_origin_serve(serve);
     if consent {
-        r.set_consent_hash(ConsentKind::OriginServe, Some(&"ab".repeat(32)))
+        // the hash of the text owed now (role bit 5 reads only a current consent, Layer 7 §12)
+        let hash = node111::daemon::relay::consent::origin_serve().hash;
+        r.set_consent_hash(ConsentKind::OriginServe, Some(&hash))
             .unwrap();
     }
     r
@@ -177,9 +183,12 @@ async fn node(sw: Switches) -> Node {
         .await
         .expect("the relay switches are applied");
     api.insert_ext(Arc::clone(&fabric));
+    // the daemon's one housekeeping interval, spawned where `daemon/mod.rs` spawns it
+    let house = housekeeping::spawn(&api, &fabric);
     Node {
         api,
         fabric,
+        _house: house,
         state_dir,
         _dir: dir,
     }
@@ -328,14 +337,12 @@ async fn every_other_method_is_405() {
     let port = n.serve(Some("192.168.1.20:40000")).await;
     let host = format!("127.0.0.1:{port}");
     for path in paths() {
-        for method in ["POST", "PUT", "PATCH", "DELETE"] {
+        // HEAD too: axum's `get` would answer it with the GET handler (§9.1: GET only)
+        for method in ["HEAD", "POST", "PUT", "PATCH", "DELETE"] {
             let r = http(port, method, &path, &host);
             assert_eq!(r.status, 405, "{method} {path}");
-            assert!(
-                r.header("allow").is_some_and(|a| a.contains("GET")),
-                "{}",
-                r.head
-            );
+            assert_eq!(r.header("allow").as_deref(), Some("GET"), "{}", r.head);
+            assert!(r.body.is_empty(), "{method} {path}");
         }
     }
     // the same while not serving: the method is refused before anything is looked up
@@ -346,10 +353,13 @@ async fn every_other_method_is_405() {
     .await;
     let port = n.serve(None).await;
     let [mp, ..] = paths();
-    assert_eq!(
-        http(port, "POST", &mp, &format!("127.0.0.1:{port}")).status,
-        405
-    );
+    for method in ["HEAD", "POST"] {
+        assert_eq!(
+            http(port, method, &mp, &format!("127.0.0.1:{port}")).status,
+            405,
+            "{method}"
+        );
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

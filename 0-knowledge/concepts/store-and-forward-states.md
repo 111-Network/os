@@ -30,7 +30,8 @@ Retries happen on link and contact events, never on wall-clock timers, and the s
 ## Do NOT use when
 
 - A hop-by-hop link acknowledgement is meant: that belongs to the link adapter, not these states.
-- A cross-hub delivery guarantee is assumed: v1 custody works between members of one hub or over a direct link.
+- A cross-hub delivery guarantee is assumed: custody works between members of one hub, over a direct link, or hub to hub
+  through a paired gateway (Layer 7); `forwarding` is a hub's hold, not delivery.
 
 ## Details
 
@@ -38,8 +39,10 @@ Retries happen on link and contact events, never on wall-clock timers, and the s
   Reasons shown: waiting for their key; their hub is not yours; restore pending.
 - `sent` — a frame was written to a link (LoRa: the modem accepted TX), or a custody reject came back.
   Reasons shown: your hub does not know them; mailbox full.
-- `relayed` — an authenticated `CUSTODY_ACK` with `ACCEPTED` from a mailbox-role node for a known member.
-  Copy: "a mailbox node saved it and will hold it for them".
+- `relayed` — an authenticated `CUSTODY_ACK` with `ACCEPTED` from a mailbox-role node for a known member, or held for
+  forwarding to another hub (Layer 7 §5). Copy: "a mailbox node saved it and will hold it for them". Reason `forwarding`
+  (Layer 7 §5.3, §5.6): the same state when the recipient's hint names another hub this node knows; copy: "Your hub
+  holds it and passes it to their hub." The hub's `ACCEPTED` then says it holds the item for forwarding.
 - `delivered` — the recipient's own `ACK`; only this releases the sender's copy.
 
 Custody receipt statuses: 1 `ACCEPTED`, 2 `DUPLICATE`, 3 `REJECT_FULL`, 4 `REJECT_UNENROLLED`,

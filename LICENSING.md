@@ -175,6 +175,16 @@ None is copyleft, so the section 7 rule (no GPL, LGPL, AGPL or SSPL linked) stil
 
 Neither is copyleft, so the section 7 rule still holds for Layer 7. The ntfy server the carrier talks to is an owner-run program, never linked or shipped (section 3).
 
+**Layer 8 additions (direct edges only; `8-storage/README.md` §1 rule 2, §5.6, §21 L1; D34, D38).** No new lockfile entry: three crates already linked into `111` through `mesh111` (the Layer 5 additions above) become direct dependencies of `node111` at the same pins, each line asking for exactly `mesh111`'s selection, so no crate, feature or build script is added and the counts above are unchanged (231 third-party crate versions in the `111` musl closure before and after). Read from `1-bootstrap/Cargo.lock` and the crates in the local cargo registry on 2026-11-16; sign-off row "Layer 8 additions" under "Dependency policy" in `1-bootstrap/TASKS.md`.
+
+| Component | Version in `1-bootstrap/Cargo.lock` | License | Notes |
+|---|---|---|---|
+| `rusqlite` (now also a direct dependency of `node111`) | 0.40.2 | MIT | `features = ["bundled-sqlcipher-vendored-openssl"]` with the default features, `mesh111`'s selection: the same `libsqlite3-sys` 0.38.2, SQLCipher and vendored OpenSSL as the rows above, no second copy. The node-state store `node/state.db` (Layer 8 §2) |
+| `bao-tree` (now also a direct dependency of `node111`) | 0.16.1 | `MIT OR Apache-2.0` | Default features, `mesh111`'s selection. The dataset sidecar, a post-order outboard (Layer 8 §5.2); the 0.17 note above stands until Tier 2 |
+| `blake3` (now also a direct dependency of `node111`) | 1.8.7 | `CC0-1.0 OR Apache-2.0 OR Apache-2.0 WITH LLVM-exception` | Default features (`std`), `mesh111`'s selection. A dataset's BLAKE3 root and the export's prehash (Layer 8 §5.2, §13.1) |
+
+None is copyleft and none is new, so the section 7 rule still holds for Layer 8's direct edges.
+
 **Fonts** (`4-interface/FONTS.md`, self-hosted woff2, byte-for-byte copies; four files): Geist Mono and Geist Pixel Line (SIL OFL 1.1, Copyright 2023 Vercel with
 basement.studio) and Silkscreen 400 and 700 (SIL OFL 1.1, Copyright 2001 The Silkscreen Project Authors). OFL texts ship next to the files and in `dist/fonts/`.
 

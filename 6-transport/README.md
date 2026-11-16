@@ -37,7 +37,7 @@ from v0.1 is at the end.
 > - **The `rns` heartbeat stays Layer 6's:** the LXMF helper's announce interval, `PATCH /bridge/settings`; Layer 7 shows it and never writes it
 >   (Layer 7 §2.4). The bridge stub (`NODE111_BRIDGE_STUBS`) serves G8 and G10's licensed-board items.
 > - **Recorded as the code stands** (Layer 7 §19 item 2): `ROLE_LORA_ATTACHED` is defined and never set; mdns-sd advertises the dashboard only until
->   Layer 7's optional `_111._tcp` record; the phone-relay QR joins rnsd's Backbone, not the fabric.
+>   Layer 7's optional `_n111._tcp` record; the phone-relay QR joins rnsd's Backbone, not the fabric.
 
 ## 0. Reading guide
 

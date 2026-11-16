@@ -15,6 +15,10 @@
 //! - `FabricStatus.counters` (diagnostics for Advanced) are mesh111's
 //!   bounded `Counters` since this fabric started (§18 rule 1: a failure
 //!   leaves no trace but a counter); the down shape carries none.
+//! - `FabricStatus.unconsumed` (Layer 8 `8-storage/README.md` §12.3, §16.2)
+//!   mirrors mesh111's per-kind session counts of `AGENT_OP`, `KB`,
+//!   `UPDATE`, `PATCH` and `SYNC` frames committed and acknowledged with no
+//!   consumer registered; like `counters`, the down shape carries none.
 //!
 //! **Layer 6 foreign shapes** (`6-transport/README.md` §3 "Ids", §10; the
 //! contract's `ForeignConversation`, `ForeignMessage`, `SendGroup`,
@@ -302,7 +306,8 @@ pub fn quota_classes() -> impl Iterator<Item = Class> {
 }
 
 /// A quota class by its contract key (`kb`, `update`, `patch`, `sync`,
-/// `object`, `custody`, `foreign`).
+/// `object`, `custody`, `foreign`, `transit`; `transit` set to `null`
+/// reads its derived default again, Layer 7 §5.8).
 pub fn quota_class(name: &str) -> Option<Class> {
     quota_classes().find(|c| c.name() == name)
 }
@@ -341,6 +346,12 @@ pub fn counters(c: &Counters) -> Value {
         // Layer 7 §13.1: mirrored by `RelayStatus.forward`, not `FabricCounters`.
         forward_refused: _,
         forward_too_large: _,
+        // Layer 8 §12.3: mirrored by `FabricStatus.unconsumed` (`unconsumed`).
+        unconsumed_agent_op: _,
+        unconsumed_kb: _,
+        unconsumed_update: _,
+        unconsumed_patch: _,
+        unconsumed_sync: _,
     } = *c;
     json!({
         "dropped": dropped,
@@ -355,6 +366,19 @@ pub fn counters(c: &Counters) -> Value {
         "items_received": items_received,
         "conflicts": conflicts,
         "errors": errors,
+    })
+}
+
+/// `FabricStatus.unconsumed` (Layer 8 §12.3, §16.2): the frames of each
+/// consumer-registry kind committed and acknowledged with no consumer
+/// registered since this fabric started.
+fn unconsumed(c: &Counters) -> Value {
+    json!({
+        "agent_op": c.unconsumed_agent_op,
+        "kb": c.unconsumed_kb,
+        "update": c.unconsumed_update,
+        "patch": c.unconsumed_patch,
+        "sync": c.unconsumed_sync,
     })
 }
 
@@ -374,6 +398,7 @@ pub fn status(st: &FabricStatus, quotas: &[(Class, Option<u64>)]) -> Value {
         },
         "settings": settings(&st.settings, quotas),
         "counters": counters(&st.counters),
+        "unconsumed": unconsumed(&st.counters),
     })
 }
 
@@ -788,6 +813,63 @@ mod tests {
             assert_eq!(r.len(), size);
             assert!(r.bytes().all(|b| b == b'0' || b == b'1'));
         }
+    }
+
+    /// Layer 8 §12.3, §16.2: a running fabric's status carries
+    /// `unconsumed`, each kind its own counter, and `counters` keeps
+    /// exactly `FabricCounters`; the down shape carries neither.
+    #[test]
+    fn status_mirrors_the_unconsumed_counts() {
+        let st = FabricStatus {
+            links: Vec::new(),
+            hub: HubView {
+                enrolled: false,
+                connected: false,
+                reachable: false,
+                cursor: 0,
+                node_id: None,
+                address: None,
+                members: 0,
+                offer_active: false,
+            },
+            custody: (0, 0),
+            store: mesh111::fabric::StoreView {
+                used: 0,
+                watermark: 0,
+                store_full: false,
+                epoch: Some(1),
+                restore_pending: false,
+            },
+            settings: FabricSettings::default(),
+            counters: Counters {
+                unconsumed_agent_op: 1,
+                unconsumed_kb: 2,
+                unconsumed_update: 3,
+                unconsumed_patch: 4,
+                unconsumed_sync: 5,
+                ..Counters::default()
+            },
+            paired: Vec::new(),
+        };
+        let v = status(&st, &[]);
+        assert_eq!(
+            v["unconsumed"],
+            json!({"agent_op": 1, "kb": 2, "update": 3, "patch": 4, "sync": 5})
+        );
+        let keys: Vec<&str> = v["counters"]
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        assert!(
+            keys.iter().all(|k| !k.starts_with("unconsumed")),
+            "{keys:?}"
+        );
+        super::foreign_tests::assert_schema(&v, "FabricStatus");
+        let down = status_down(&FabricSettings::default());
+        assert!(down.get("unconsumed").is_none() && down.get("counters").is_none());
+        super::foreign_tests::assert_schema(&down, "FabricStatus");
     }
 }
 

@@ -36,6 +36,7 @@ use node111::daemon::bridge::{
 use node111::daemon::components::manifest::{self, Health, Payload};
 use node111::daemon::dashboard::{ApiConfig, ApiState, DashboardState, SharedState};
 use node111::daemon::fabric::{self, FabricConfig};
+use node111::daemon::housekeeping::{self, Housekeeping};
 use node111::daemon::services::ServiceId;
 use node111::daemon::supervise::{spawn_child, BackoffPolicy, ChildHandle, ChildSpec, ChildStdio};
 use node111::daemon::DaemonLayout;
@@ -1156,6 +1157,9 @@ fn the_component_declaration_registers_through_the_loader() {
 struct Core {
     _dir: tempfile::TempDir,
     handle: Arc<fabric::FabricHandle>,
+    /// The daemon's housekeeping interval for `handle` (Layer 8 row D1), alive as long as it;
+    /// stopped before the fabric, as the daemon stops it.
+    house: Housekeeping,
     bridge: Arc<Bridge>,
 }
 
@@ -1177,10 +1181,13 @@ async fn core() -> Core {
     c.housekeeping = Duration::from_secs(3600);
     let handle = fabric::start(c, Some(identity), &api).await;
     assert!(handle.running(), "{:?}", handle.down_reason());
+    // the daemon's one housekeeping interval, spawned where `daemon/mod.rs` spawns it
+    let house = housekeeping::spawn(&api, &handle);
     let bridge = Bridge::new(BridgeConfig::new(&layout.root), Arc::clone(&handle), &api);
     Core {
         _dir: dir,
         handle,
+        house,
         bridge,
     }
 }
@@ -1198,6 +1205,7 @@ async fn f1_a_send_queued_when_the_helper_is_killed_stays_queued_and_is_handed_a
     let Core {
         _dir,
         handle,
+        house,
         bridge,
     } = core().await;
     let runs = json!([
@@ -1316,6 +1324,7 @@ async fn f1_a_send_queued_when_the_helper_is_killed_stays_queued_and_is_handed_a
     hp.adapter.quit().await;
     assert!(bridge.disable("lxmf").await);
     hp.stop().await;
+    house.stop().await;
     handle.shutdown().await;
 }
 
@@ -1331,6 +1340,7 @@ async fn fa2_a_parked_send_is_a_queued_row_waiting_for_the_announce_handed_once(
     let Core {
         _dir,
         handle,
+        house,
         bridge,
     } = core().await;
     let runs = json!([[
@@ -1395,6 +1405,7 @@ async fn fa2_a_parked_send_is_a_queued_row_waiting_for_the_announce_handed_once(
     hp.adapter.quit().await;
     assert!(bridge.disable("lxmf").await);
     hp.stop().await;
+    house.stop().await;
     handle.shutdown().await;
 }
 
@@ -1403,6 +1414,7 @@ async fn registered_through_bridge_enable_its_texts_echoes_nearby_and_sends_flow
     let Core {
         _dir,
         handle,
+        house,
         bridge,
     } = core().await;
     let nearby: Arc<Mutex<Vec<(String, Value)>>> = Arc::default();
@@ -1502,5 +1514,6 @@ async fn registered_through_bridge_enable_its_texts_echoes_nearby_and_sends_flow
     assert!(bridge.disable("lxmf").await);
     assert_eq!(bridge.recv_tasks(), 0);
     hp.stop().await;
+    house.stop().await;
     handle.shutdown().await;
 }

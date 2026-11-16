@@ -5,12 +5,30 @@ import { join, resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
   CHAT_EVENT_NAMES,
+  COMPONENT_STARTS,
   CONSENT_ACTIONS,
+  DATASET_KINDS,
+  DATASET_LOCATIONS,
+  DATASET_STATES,
+  DATASET_USED_BY,
   DEVICE_KINDS,
   DEVICE_STATES,
+  ATTEMPT_CONFIRM_BY,
+  ATTEMPT_STATES,
+  AUDIT_KINDS,
   DEVICE_TRANSPORTS,
   EVENTS_EVENT_NAMES,
   EVIDENCE_TRANSPORTS,
+  EXPORT_OFFER_CLASSES,
+  INCIDENT_AGREEMENTS,
+  INCIDENT_EVIDENCE_KINDS,
+  INCIDENT_OUTCOMES,
+  INCIDENT_SEVERITIES,
+  INCIDENT_STATES,
+  NEEDS_YOU_KINDS,
+  REPAIRS_STORE_STATES,
+  REPAIRS_VERDICTS,
+  JOB_STATES,
   NEARBY_KINDS,
   PAIR_ROLES,
   PAIR_TLS,
@@ -21,8 +39,14 @@ import {
   RELAY_GATEWAY_STATES,
   SERVICE_IDS,
   SERVICE_STATES,
+  STORAGE_CLASS_IDS,
+  STORAGE_INTEGRITY_STATES,
+  STORAGE_KEEP_RULES,
+  STORAGE_NODE_STATES,
+  STORAGE_NOTICE_KINDS,
+  STORAGE_STORES,
 } from "../src/lib/api/types";
-import { schemas, sse } from "./contract.gen";
+import { operations, schemas, sse } from "./contract.gen";
 
 const root = resolve(__dirname, "..");
 
@@ -82,5 +106,76 @@ describe("runtime tuples mirror the contract", () => {
     expect(sse.events.registry).toBe("SseRegistry");
     expect([...EVENTS_EVENT_NAMES]).toContain("relay");
     expect([...EVENTS_EVENT_NAMES]).toContain("registry");
+  });
+
+  it("Layer 8 enums, part 1 (the tuples gen-sse.mjs lists in ENUMS)", () => {
+    const at = (name: string, ...path: string[]) => path.reduce((n: unknown, k) => (n as Record<string, unknown>)[k], schemas[name]!) as { enum: unknown[] };
+    expect([...STORAGE_CLASS_IDS]).toEqual(schemas.StorageClassId!.enum);
+    expect([...STORAGE_STORES]).toEqual(schemas.StorageStore!.enum);
+    expect([...STORAGE_NOTICE_KINDS]).toEqual(at("StorageNotice", "properties", "kind").enum);
+    expect([...STORAGE_KEEP_RULES]).toEqual(at("StorageKeep", "properties", "rule").enum);
+    expect([...STORAGE_INTEGRITY_STATES]).toEqual(schemas.StorageIntegrityState!.enum);
+    expect([...STORAGE_NODE_STATES]).toEqual(at("StorageNodeState", "properties", "state").enum);
+    expect([...EXPORT_OFFER_CLASSES]).toEqual(at("StorageExportOfferRequest", "properties", "class").enum);
+  });
+
+  it("the Layer 8 `storage` event is in the map and the tuple", () => {
+    expect(sse.events.storage).toBe("SseStorage");
+    expect([...EVENTS_EVENT_NAMES]).toContain("storage");
+  });
+
+  it("Layer 8 enums, part 2 (the dataset tuples gen-sse.mjs lists in ENUMS)", () => {
+    expect([...DATASET_KINDS]).toEqual(schemas.DatasetKind!.enum);
+    expect([...DATASET_STATES]).toEqual(["not_held", "partial", "present", "unverified", "disk_absent"]);
+    expect([...DATASET_STATES]).toEqual(schemas.DatasetState!.enum);
+    expect([...DATASET_LOCATIONS]).toEqual(["origin", "in_place", null]);
+    expect([...DATASET_USED_BY]).toEqual(["map", "encyclopedia", "agent", "updates"]);
+    const jobState = schemas.JobState as { anyOf: { enum?: unknown[]; pattern?: string }[] };
+    expect([...JOB_STATES]).toEqual(jobState.anyOf[0]!.enum);
+    // the closed part holds every state of §7.4, with `paused (metered link)` and `failed (source cannot resume)` among them
+    expect([...JOB_STATES]).toEqual(expect.arrayContaining(["queued", "running", "paused (offline)", "paused (metered cap)", "paused (metered link)", "paused (disk low)", "paused (source busy)", "done", "failed (name mismatch)", "failed (source cannot resume)", "cancelled"]));
+    expect([...COMPONENT_STARTS]).toEqual(["always", "on_demand"]);
+  });
+
+  it("the Layer 8 `dataset` event is in the map and the tuple, after `storage`", () => {
+    expect(sse.events.dataset).toBe("SseDataset");
+    expect([...EVENTS_EVENT_NAMES].slice(-3, -1)).toEqual(["storage", "dataset"]);
+  });
+
+  it("Layer 9 enums, part 1 (the tuples gen-sse.mjs lists in ENUMS)", () => {
+    expect([...REPAIRS_VERDICTS]).toEqual(schemas.RepairsVerdict!.enum);
+    expect([...NEEDS_YOU_KINDS]).toEqual(schemas.NeedsYouKind!.enum);
+    expect([...REPAIRS_STORE_STATES]).toEqual(schemas.RepairsStoreState!.enum);
+    expect([...INCIDENT_STATES]).toEqual(schemas.IncidentState!.enum);
+    expect([...INCIDENT_OUTCOMES]).toEqual(schemas.IncidentOutcome!.enum);
+    expect([...INCIDENT_SEVERITIES]).toEqual(schemas.IncidentSeverity!.enum);
+    expect([...INCIDENT_EVIDENCE_KINDS]).toEqual(schemas.IncidentEvidenceKind!.enum);
+    expect([...INCIDENT_AGREEMENTS]).toEqual(schemas.IncidentAgreement!.enum);
+    expect([...ATTEMPT_STATES]).toEqual(schemas.AttemptState!.enum);
+    expect([...ATTEMPT_CONFIRM_BY]).toEqual(schemas.AttemptConfirmBy!.enum);
+    expect([...AUDIT_KINDS]).toEqual(schemas.AuditKind!.enum);
+  });
+
+  it("the Layer 9 `incident` event is in the map and the tuple", () => {
+    expect(sse.events.incident).toBe("SseIncident");
+    expect([...EVENTS_EVENT_NAMES]).toContain("incident");
+  });
+
+  it("Layer 9 part 0: `busy` is the last Problem code, and the posture and decision routes list it", () => {
+    expect(PROBLEM_CODES[PROBLEM_CODES.length - 1]).toBe("busy");
+    const yaml = readFileSync(resolve(root, "../api/openapi.yaml"), "utf8");
+    for (const path of ["/api/v1/transport/posture:", "/api/v1/proposals/{id}/decision:"]) {
+      const at = yaml.indexOf(`\n  ${path}`);
+      expect(at, path).toBeGreaterThan(0);
+      const next = yaml.indexOf("\n  /api/", at + 1);
+      const block = yaml.slice(at, next);
+      const line = block.split("\n").find((l) => l.trimStart().startsWith('"409"'));
+      expect(line, path).toBeDefined();
+      expect(line).toMatch(/busy/);
+      expect(line).toMatch(/att-/);
+    }
+    for (const id of ["patchTransportPosture", "decideProposal"] as const) {
+      expect(operations[id]!.errors).toContain(409);
+    }
   });
 });
