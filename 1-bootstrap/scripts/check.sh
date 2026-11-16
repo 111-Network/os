@@ -102,6 +102,18 @@ else
   skipped "build-scripts gate"
 fi
 echo "== systemd-analyze =="
+# Layer 9 L2 (§3.3 rule 2): the unit carries the witness as an unprivileged ExecStopPost (no `+`), keeps
+# Restart=always and StartLimitIntervalSec=0, and has no OnFailure=.
+if [ -f systemd/111node.service ]; then
+  grep -qx 'ExecStopPost=/usr/local/bin/111 heal-witness' systemd/111node.service ||
+    { echo "FAIL: systemd/111node.service lacks 'ExecStopPost=/usr/local/bin/111 heal-witness' (no + prefix)" >&2; exit 1; }
+  grep -qx 'Restart=always' systemd/111node.service && grep -qx 'StartLimitIntervalSec=0' systemd/111node.service ||
+    { echo "FAIL: systemd/111node.service must keep Restart=always and StartLimitIntervalSec=0" >&2; exit 1; }
+  if grep -q '^OnFailure=' systemd/111node.service; then
+    echo "FAIL: systemd/111node.service must not set OnFailure=" >&2; exit 1
+  fi
+  echo "witness: ExecStopPost=heal-witness present, Restart=always, StartLimitIntervalSec=0, no OnFailure="
+fi
 if command -v systemd-analyze >/dev/null 2>&1 && ls systemd/*.service >/dev/null 2>&1; then
   # verify resolves units by name — point it at a temp unit dir (systemd 249
   # lacks `verify --root` and absolute-path FILE handling is version-dependent)

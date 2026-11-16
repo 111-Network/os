@@ -21,6 +21,9 @@ StartLimitIntervalSec=0
 Type=notify
 ExecStartPre=+/usr/local/bin/111 update-guard
 ExecStart=/usr/local/bin/111 daemon
+# Layer 9 witness (§3.3 rule 2): one transient process per exit, as node111 (no `+`); it exits 0 on every
+# error, so it never fails the unit. No OnFailure=; Restart=always and StartLimitIntervalSec=0 stand.
+ExecStopPost=/usr/local/bin/111 heal-witness
 User=node111
 SupplementaryGroups=dialout uucp
 

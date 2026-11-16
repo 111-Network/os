@@ -171,6 +171,53 @@ else
 	echo "$OUT" >&2
 fi
 
+# --- case 8: runit finish hook appends the Layer 9 witness line (G19 (10), dry-run half) ---
+HEAL="$PREF/var/lib/111/state/heal"
+LINE_RE='^v1 boot=([0-9a-f]{32}|-) result=(exit|signal) code=([0-9]{1,3}|-) signal=([0-9]{1,3}|-)$'
+# state/heal/ missing: only the log line, no inbox, exit 0
+rm -rf "$HEAL"
+sh sv/111node/finish 1 0 && RC=0 || RC=$?
+if [ "$RC" -eq 0 ] && [ ! -e "$HEAL/inbox" ]; then
+	pass "finish: state/heal/ missing -> exit 0, nothing written"
+else
+	fail "finish with state/heal/ missing (rc=$RC)"
+fi
+mkdir -p "$HEAL"
+sh sv/111node/finish 75 0 && RC=0 || RC=$?
+sh sv/111node/finish -1 9 && RC2=0 || RC2=$?
+if [ "$RC" -eq 0 ] && [ "$RC2" -eq 0 ] && [ "$(wc -l < "$HEAL/inbox")" -eq 2 ] \
+	&& sed -n 1p "$HEAL/inbox" | grep -Eq "$LINE_RE" && sed -n 1p "$HEAL/inbox" | grep -Eq 'result=exit code=75 signal=-$' \
+	&& sed -n 2p "$HEAL/inbox" | grep -Eq "$LINE_RE" && sed -n 2p "$HEAL/inbox" | grep -Eq 'result=signal code=- signal=9$'; then
+	pass "finish: a code exit and a signal exit each append one well-formed v1 line"
+else
+	fail "finish witness lines"
+	cat "$HEAL/inbox" >&2
+fi
+i=0
+while [ "$i" -lt 300 ]; do sh sv/111node/finish 1 0; i=$((i + 1)); done
+BAD=$(grep -Evc "$LINE_RE" "$HEAL/inbox")
+MAXB=$(awk '{ if (length($0) > m) m = length($0) } END { print m + 0 }' "$HEAL/inbox")
+if [ "$(wc -l < "$HEAL/inbox")" -eq 256 ] && [ "$BAD" -eq 0 ] && [ "$MAXB" -le 96 ] \
+	&& [ "$(stat -c %a "$HEAL/inbox")" = 600 ] && [ -z "$(find "$HEAL" -name '.inbox.tmp-*')" ]; then
+	pass "finish: 300 exits leave 256 lines, all well-formed, 0600, no temp left"
+else
+	fail "finish retention (lines=$(wc -l < "$HEAL/inbox") bad=$BAD max=$MAXB)"
+fi
+
+# a failing write must leave the old inbox byte for byte; a stale temp from a killed run is swept
+BEFORE=$(cat "$HEAL/inbox")
+echo stale > "$HEAL/.inbox.tmp-1"
+FAKEBIN=$(mktemp -d)
+printf '#!/bin/sh\nexit 1\n' > "$FAKEBIN/tail"
+chmod +x "$FAKEBIN/tail"
+PATH="$FAKEBIN:$PATH" sh sv/111node/finish 1 0 && RC=0 || RC=$?
+rm -rf "$FAKEBIN"
+if [ "$RC" -eq 0 ] && [ "$(cat "$HEAL/inbox")" = "$BEFORE" ] && [ -z "$(find "$HEAL" -name '.inbox.tmp-*')" ]; then
+	pass "finish: a failed write keeps the old inbox intact; stale temps are swept"
+else
+	fail "finish failed-write handling (rc=$RC)"
+fi
+
 echo
 if [ "$FAILS" -eq 0 ]; then
 	say "ALL CASES GREEN"
