@@ -1146,6 +1146,27 @@ covered_by = "l1.gate"
 strength = "F"
 needs = ["cargo"]
 
+# Row L4: the hub-origin client and `111 update --from` (updater/{mod,hub,fetch}.rs, cli.rs, api_v1/origins.rs): the home hub
+# asked only on a rising edge of its link attributing and only while its announce carries ROLE_ORIGIN (the fabric reads faked),
+# the real binary's `update --from <dir>` (T5: nothing but the staging), exit 75 on a held lock, the admission into state/origin/
+# on a serving hub, check_internet = false read each round, GET /update/origins. The hub is a hand-written LogServer (side b),
+# so the record reads the updater: strength F, like updater_stage.
+[[check]]
+id = "l1.node111.updater_origin"
+kind = "unit"
+cmd = ["cargo", "test", "--manifest-path", "1-bootstrap/Cargo.toml", "-p", "node111", "--test", "updater_origin"]
+tier = "slow"
+layers = [1, 4, 7]
+seams = ["L1-L7:origin", "L4-L7:relay-api"]
+adapter = "libtest"
+cargo = true
+timeout_s = 1800
+rerun = "cargo test --manifest-path 1-bootstrap/Cargo.toml -p node111 --test updater_origin -- --exact {test}"
+rerun_cost = "slow, ~20 s warm"
+covered_by = "l1.gate"
+strength = "F"
+needs = ["cargo"]
+
 [[check]]
 id = "l1.node111.util_fs"
 kind = "unit"

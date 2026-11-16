@@ -68,6 +68,20 @@ pub struct DaemonLayout {
 }
 
 impl DaemonLayout {
+    /// The layout the daemon runs with (`$NODE111_ROOT` or `/var/lib/111`; the config dir
+    /// `/etc/111` on a host, a sibling of the root under Termux or `$NODE111_ROOT`); also
+    /// `111 update --from`'s (Layer 7 §9.2).
+    pub fn production() -> DaemonLayout {
+        DaemonLayout {
+            root: crate::util::paths::root(),
+            etc: if cfg!(target_os = "android") || std::env::var("NODE111_ROOT").is_ok() {
+                crate::util::paths::root().join("etc")
+            } else {
+                PathBuf::from("/etc/111")
+            },
+        }
+    }
+
     pub fn state_dir(&self) -> PathBuf {
         self.root.join("state")
     }
@@ -789,14 +803,7 @@ pub fn register_deltachat_with(
 }
 
 async fn daemon_main() -> anyhow::Result<()> {
-    let layout = DaemonLayout {
-        root: crate::util::paths::root(),
-        etc: if cfg!(target_os = "android") || std::env::var("NODE111_ROOT").is_ok() {
-            crate::util::paths::root().join("etc")
-        } else {
-            PathBuf::from("/etc/111")
-        },
-    };
+    let layout = DaemonLayout::production();
     let env_pairs = load_env(&layout.etc)?;
     for (k, v) in &env_pairs {
         if std::env::var(k).is_err() {
@@ -937,22 +944,35 @@ async fn daemon_main() -> anyhow::Result<()> {
     // updater loop (fetch/verify/stage; never flips — root helper owns that).
     // Started after the dashboard so `POST /api/v1/update/check` can wake it
     // (`ApiState::update_check`) and `/api/v1/status.update` can read it.
+    // Layer 7 row L4 (§9.1, §9.3): each round reads `updates.check_internet` from
+    // the relay settings cell (`state/relay.json`), and a serving hub admits what
+    // it stages into `state/origin/`.
+    let updater_cfg = updater::fetch::UpdaterConfig::production(
+        version
+            .parse()
+            .unwrap_or_else(|_| "2026.01.01".parse().unwrap()),
+    );
+    // `GET /api/v1/update/origins` lists the bases this loop uses
+    dashboard.api.insert_ext(Arc::new(updater_cfg.clone()));
+    let after_stage = updater::daemon_after_stage(Arc::clone(&dashboard.api));
     {
-        let cfg = updater::fetch::UpdaterConfig::production(
-            version
-                .parse()
-                .unwrap_or_else(|_| "2026.01.01".parse().unwrap()),
-        );
+        let cfg = updater_cfg.clone();
+        let relay_cell = dashboard::api_v1::relay7::cell(&dashboard.api);
         let hooks = updater::Hooks {
             wake: Arc::clone(&dashboard.api.update_check),
             status: Arc::new(updater::UpdaterStatus::default()),
         };
+        let relay_hooks = updater::RelayHooks {
+            check_internet: Some(Arc::new(move || relay_cell.settings().check_internet())),
+            after_stage: Some(Arc::clone(&after_stage)),
+        };
         dashboard.api.insert_ext(Arc::clone(&hooks.status));
-        tokio::spawn(updater::run_with_hooks(
+        tokio::spawn(updater::run_with_relay(
             layout.clone(),
             Arc::clone(&state),
             cfg,
             hooks,
+            relay_hooks,
         ));
     }
 
@@ -1081,6 +1101,18 @@ async fn daemon_main() -> anyhow::Result<()> {
     // Layer 7 (`os/7-relay/README.md` §6.3): relay & presence; returns at once while every
     // switch is off (nothing read, spawned, bound or scheduled)
     relay::start(&dashboard.api, &fabric);
+    // Layer 7 §9.3 (row L4): the home hub's origin, checked once per attribution of the link
+    // to it while its announce carries `ROLE_ORIGIN` (one task on the fabric's event channel;
+    // no timer)
+    let _hub_origin = updater::hub::spawn(
+        &fabric,
+        updater::hub_check(
+            updater_cfg,
+            layout.clone(),
+            Arc::clone(&state),
+            Some(after_stage),
+        ),
+    );
     // G1 (Layer 6 §16): debug builds only — the StubAdapters `$NODE111_BRIDGE_STUBS`
     // declares; returns at once when the variable is unset (bridge::stub::scenario)
     #[cfg(debug_assertions)]

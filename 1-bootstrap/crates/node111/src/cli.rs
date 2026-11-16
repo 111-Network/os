@@ -1,6 +1,6 @@
 //! CLI surface: install · daemon · identity backup|restore|commission ·
 //! config · dashboard [rotate] · fabric status|offer|enroll|pair · uninstall ·
-//! update-helper · update-guard.
+//! update-helper · update-guard · update --from <dir|url> (Layer 7 §9.2).
 //! Flags: --phone --serial --keep-adb --reboot-test --yes --allow-degraded --min-installer-version
 //! --version (calver). Host install and --phone are mutually exclusive.
 
@@ -81,6 +81,9 @@ enum Cmd {
     },
     UpdateHelper,
     UpdateGuard,
+    /// `111 update --from <dir|url>` (Layer 7 §9.2, T5; row L4): a oneshot as the
+    /// node user that checks that one origin and stages into `state/staging/`.
+    UpdateFrom(crate::daemon::updater::fetch::Origin),
     Version,
     Help,
 }
@@ -185,6 +188,12 @@ fn parse(args: &[String]) -> anyhow::Result<Cmd> {
                 .and_then(|i| args.get(i + 2).cloned());
             Cmd::Uninstall { phone, serial }
         }
+        "update" => match (args.get(1).map(String::as_str), args.get(2), args.len()) {
+            (Some("--from"), Some(src), 3) => {
+                Cmd::UpdateFrom(crate::daemon::updater::from_origin(src)?)
+            }
+            _ => anyhow::bail!("usage: 111 update --from <directory|URL>"),
+        },
         "update-helper" => Cmd::UpdateHelper,
         "update-guard" => Cmd::UpdateGuard,
         "--version" | "-V" | "version" => Cmd::Version,
@@ -212,6 +221,8 @@ USAGE:
                                    (hub to hub: show this hub's pairing bundle, or pair with another
                                     hub's; --lan marks a LAN or tunnel link, which then runs plain)
   111 uninstall [--phone] [--serial SERIAL]
+  111 update --from <directory|URL>   (run as the node user: sudo -u node111 111 update --from /media/stick;
+                                    stages a release from a USB stick or a URL; the root helper installs it)
   111 update-helper | 111 update-guard     (root oneshots via systemd)
   111 --version";
 
@@ -223,6 +234,9 @@ pub fn main_entry(args: Vec<String>) -> i32 {
             return 2;
         }
     };
+    if let Cmd::UpdateFrom(origin) = cmd {
+        return update_from(origin);
+    }
     let result: anyhow::Result<()> = match cmd {
         Cmd::Help => {
             println!("{USAGE}");
@@ -248,6 +262,7 @@ pub fn main_entry(args: Vec<String>) -> i32 {
                 crate::uninstall::run_host()
             }
         }
+        Cmd::UpdateFrom(_) => unreachable!("handled above"),
         Cmd::UpdateHelper => crate::update_helper::run(),
         Cmd::UpdateGuard => crate::update_guard::run(),
     };
@@ -255,6 +270,49 @@ pub fn main_entry(args: Vec<String>) -> i32 {
         Ok(()) => 0,
         Err(e) => {
             eprintln!("111: {e:#}");
+            1
+        }
+    }
+}
+
+/// `111 update --from` (Layer 7 §9.2): 0 staged or up to date, 75 while another
+/// run holds the staging lock (nothing staged), 1 refused or unreachable (a
+/// directory that cannot be read included), 2 when run by any user but the node
+/// user, the owner of `state/` (root included; nothing read or written).
+fn update_from(origin: crate::daemon::updater::fetch::Origin) -> i32 {
+    use crate::daemon::updater::{self, fetch::FetchOutcome};
+    let layout = crate::daemon::DaemonLayout::production();
+    match updater::update_from(&layout, origin) {
+        Ok(FetchOutcome::Staged { version } | FetchOutcome::AlreadyStaged { version }) => {
+            println!("staged {version}; the root helper installs it next");
+            0
+        }
+        Ok(FetchOutcome::UpToDate) => {
+            println!("already up to date: this origin has nothing newer");
+            0
+        }
+        Ok(FetchOutcome::Held) => {
+            eprintln!("111: the daemon is checking now; try again in a minute");
+            updater::EXIT_HELD
+        }
+        Ok(FetchOutcome::Refused { reason }) => {
+            eprintln!("111: update refused: {reason}");
+            1
+        }
+        Ok(FetchOutcome::Degraded { reason, .. }) => {
+            eprintln!("111: {reason}");
+            1
+        }
+        Ok(FetchOutcome::NoOrigin) => {
+            eprintln!("111: no origin given");
+            1
+        }
+        Err(e) if e.downcast_ref::<updater::NotNodeUser>().is_some() => {
+            eprintln!("111: {e:#}");
+            2
+        }
+        Err(e) => {
+            eprintln!("111: {}", updater::fetch::error_detail(&e));
             1
         }
     }

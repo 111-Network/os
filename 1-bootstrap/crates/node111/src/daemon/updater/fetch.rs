@@ -62,7 +62,56 @@ pub const ORIGINS_RECORD: &str = "update-origins.json";
 /// Origins kept in [`ORIGINS_RECORD`]; the oldest-added one leaves first.
 const ORIGINS_RECORD_MAX: usize = 16;
 const ORIGINS_RECORD_MAX_BYTES: u64 = 64 * 1024;
-const DETAIL_MAX_CHARS: usize = 300;
+/// The longest detail recorded, shown or logged ([`display_safe`]).
+pub const DETAIL_MAX_CHARS: usize = 300;
+
+/// The reason recorded, shown and logged when `parse_verified` refuses an origin's manifest
+/// (§9.5 T2, T6; row L4): one fixed class, never the parser's text, which can quote the offered
+/// bytes before anything in them verified. The same text as the origin store's refusal of the
+/// same class (D7's `origin::UNVERIFIED_SIGNATURE`). It is the `detail` of every such refusal in
+/// [`ORIGINS_RECORD`] and `GET /api/v1/update/origins`, and the whole [`FetchOutcome::Refused`]
+/// reason of a hub, directory or typed-URL origin.
+pub const UNVERIFIED: &str = crate::daemon::origin::UNVERIFIED_SIGNATURE;
+
+/// Text from an error or a foreign source made safe to log, print or store (row L4): every
+/// control character (a newline, a terminal escape, C1) and every invisible or bidirectional
+/// formatting character is written as its `\u{..}` escape, and the result is capped at `max`
+/// characters (`…` marks a cut). Printable text is kept as it is; nothing is ever a second line.
+pub fn display_safe(s: &str, max: usize) -> String {
+    let mut out = String::new();
+    let mut used = 0usize;
+    for c in s.chars() {
+        let hidden = c.is_control()
+            || matches!(
+                c,
+                '\u{200b}'..='\u{200f}'
+                    | '\u{2028}'..='\u{202e}'
+                    | '\u{2060}'..='\u{2069}'
+                    | '\u{feff}'
+            );
+        let width = if hidden {
+            c.escape_unicode().count()
+        } else {
+            1
+        };
+        if used + width > max {
+            out.push('…');
+            return out;
+        }
+        if hidden {
+            out.extend(c.escape_unicode());
+        } else {
+            out.push(c);
+        }
+        used += width;
+    }
+    out
+}
+
+/// An error's whole chain, [`display_safe`] and capped at [`DETAIL_MAX_CHARS`].
+pub fn error_detail(e: &anyhow::Error) -> String {
+    display_safe(&format!("{e:#}"), DETAIL_MAX_CHARS)
+}
 
 #[derive(Debug, Clone)]
 pub struct UpdaterConfig {
@@ -320,8 +369,59 @@ fn is_sha256_hex(s: &str) -> bool {
 /// The hourly check (§9.3): the internet bases in order, waiting for the staging
 /// lock. With `check_internet` off it contacts nothing ([`FetchOutcome::NoOrigin`]).
 pub fn check_once(cfg: &UpdaterConfig, layout: &DaemonLayout) -> anyhow::Result<FetchOutcome> {
-    check_origins(cfg, layout, &cfg.internet_origins(), LockWait::Wait)
+    check_once_with(cfg, layout, None)
 }
+
+/// [`check_once`] with the hand-over a serving hub runs after a stage ([`AfterStage`]).
+pub fn check_once_with(
+    cfg: &UpdaterConfig,
+    layout: &DaemonLayout,
+    after: Option<AfterStage<'_>>,
+) -> anyhow::Result<FetchOutcome> {
+    check_origins_with(cfg, layout, &cfg.internet_origins(), LockWait::Wait, after)
+}
+
+/// A release this check staged, handed to [`AfterStage`] (Layer 7 §9.1, row L4): the bytes
+/// that passed `parse_verified`, the payload whose sha256 and size matched its pin, and the
+/// origin they came from. Handed over while `state/staging.lock` is still held, before
+/// `state/update-request.json` is written (so the root helper has not yet moved the bundle).
+pub struct Staged<'a> {
+    /// The staged release.
+    pub release: Calver,
+    /// The verified manifest.
+    pub manifest: &'a ChannelManifest,
+    /// Its bytes, as verified.
+    pub manifest_bytes: &'a [u8],
+    /// Its minisign signature, as verified.
+    pub signature: &'a str,
+    /// `state/staging/<ver>/payload.tar.gz` (this node's own target, pin-checked).
+    pub payload: &'a Path,
+    /// Where it came from.
+    pub origin: &'a Origin,
+}
+
+impl Staged<'_> {
+    /// The blobs a directory origin holds for the payload pins of `targets` besides this
+    /// node's own (§9.1 `origin.targets`): `<dir>/blob/<sha256>` files that exist. No other
+    /// origin offers more than the own payload (nothing more is fetched, §9.2).
+    pub fn other_blobs(&self, targets: &[String]) -> Vec<PathBuf> {
+        let Origin::Dir { path } = self.origin else {
+            return Vec::new();
+        };
+        targets
+            .iter()
+            .filter(|t| t.as_str() != TARGET_TRIPLE)
+            .filter_map(|t| self.manifest.payload_for(t))
+            .filter(|p| is_sha256_hex(&p.sha256))
+            .map(|p| path.join("blob").join(&p.sha256))
+            .filter(|b| std::fs::symlink_metadata(b).is_ok_and(|m| m.is_file()))
+            .collect()
+    }
+}
+
+/// What runs after a stage, under the staging lock (row L4: a serving hub admits the files into
+/// `state/origin/`, D7's `Origin::admit`). It never fails the stage: it reports on its own.
+pub type AfterStage<'a> = &'a (dyn Fn(&Staged<'_>) + Sync);
 
 /// One check against `origins` in order, under `state/staging.lock` for the
 /// whole fetch–stage–request sequence (§9.2, S1). `LockWait::NoWait` answers
@@ -334,6 +434,17 @@ pub fn check_origins(
     origins: &[Origin],
     wait: LockWait,
 ) -> anyhow::Result<FetchOutcome> {
+    check_origins_with(cfg, layout, origins, wait, None)
+}
+
+/// [`check_origins`] with the after-stage hand-over ([`AfterStage`]).
+pub fn check_origins_with(
+    cfg: &UpdaterConfig,
+    layout: &DaemonLayout,
+    origins: &[Origin],
+    wait: LockWait,
+    after: Option<AfterStage<'_>>,
+) -> anyhow::Result<FetchOutcome> {
     if origins.is_empty() {
         return Ok(FetchOutcome::NoOrigin);
     }
@@ -343,7 +454,7 @@ pub fn check_origins(
     };
     let mut failures = Vec::new();
     for origin in origins {
-        match check_origin(cfg, layout, origin, &lock)? {
+        match check_origin(cfg, layout, origin, &lock, after)? {
             Step::Done(outcome) => return Ok(outcome),
             Step::Next(why) => failures.push(format!("{}: {why}", origin.label())),
         }
@@ -365,6 +476,7 @@ fn check_origin(
     layout: &DaemonLayout,
     origin: &Origin,
     lock: &StagingLock,
+    after: Option<AfterStage<'_>>,
 ) -> anyhow::Result<Step> {
     let state_dir = layout.state_dir();
     let source = Source::open(origin, cfg.timeout)?;
@@ -380,8 +492,9 @@ fn check_origin(
     let (manifest_bytes, sig_text) = match fetched {
         Ok(v) => v,
         Err(e) => {
-            note_origin(layout, origin, unreachable(&e), None, Some(&e))?;
-            return Ok(Step::Next(format!("manifest fetch failed: {e:#}")));
+            let detail = error_detail(&e);
+            note_origin(layout, origin, unreachable(&e), None, Some(detail.clone()))?;
+            return Ok(Step::Next(format!("manifest fetch failed: {detail}")));
         }
     };
     // Clock-fault is a surfaced class regardless of outcome (spec §Updates): a
@@ -403,10 +516,32 @@ fn check_origin(
     ) {
         Ok(m) => m,
         Err(e) => {
-            note_origin(layout, origin, Answer::Refused, None, Some(&e))?;
-            return Ok(Step::Done(FetchOutcome::Refused {
-                reason: format!("{e:#}"),
-            }));
+            // The parser's text can quote the offered bytes (a TOML error shows the offending
+            // line): the record, and so the API, carry the fixed class only (row L4).
+            note_origin(
+                layout,
+                origin,
+                Answer::Refused,
+                None,
+                Some(UNVERIFIED.to_string()),
+            )?;
+            let reason = if origin.is_internet() {
+                // a first-party https base: the hourly loop's journal line keeps the parser's
+                // text, as before, escaped and capped
+                error_detail(&e)
+            } else {
+                // plain http on the LAN (T6), a stick or a typed URL: only the fixed class leaves
+                // this function; a debug build logs the detail, escaped and capped (as D7 does)
+                if cfg!(debug_assertions) {
+                    eprintln!(
+                        "111 updater: {UNVERIFIED} ({} origin): {}",
+                        origin.kind(),
+                        error_detail(&e)
+                    );
+                }
+                UNVERIFIED.to_string()
+            };
+            return Ok(Step::Done(FetchOutcome::Refused { reason }));
         }
     };
     let release = manifest.release();
@@ -437,8 +572,13 @@ fn check_origin(
     };
     let manifest_sha = crate::util::hash::sha256_bytes(&manifest_bytes);
     // The run this one waited for may have staged exactly this (§9.2: a
-    // concurrent run stages once).
-    if lock.waited() && stage::already_requested(&state_dir, &release, &manifest_sha) {
+    // concurrent run stages once). The home hub's origin, asked on every
+    // attribution of the link to it (§9.3), never fetches or stages again a
+    // release whose request already stands with its bundle in place (row L4): a
+    // flapping link costs the manifest, never the payload, a staging rewrite or
+    // a new run of the root helper (the request file is not touched).
+    let once = lock.waited() || matches!(origin, Origin::HomeHub { .. });
+    if once && stage::already_requested(&state_dir, &release, &manifest_sha) {
         succeeded(layout, origin, Answer::Staged, release)?;
         return Ok(Step::Done(FetchOutcome::AlreadyStaged { version: release }));
     }
@@ -458,8 +598,15 @@ fn check_origin(
     let tarball = match tarball {
         Ok(t) => t,
         Err(e) => {
-            note_origin(layout, origin, unreachable(&e), Some(release), Some(&e))?;
-            return Ok(Step::Next(format!("payload fetch failed: {e:#}")));
+            let detail = error_detail(&e);
+            note_origin(
+                layout,
+                origin,
+                unreachable(&e),
+                Some(release),
+                Some(detail.clone()),
+            )?;
+            return Ok(Step::Next(format!("payload fetch failed: {detail}")));
         }
     };
     let staged = stage::stage_payload(&tarball, payload, &state_dir.join("staging"), &release)?;
@@ -470,7 +617,13 @@ fn check_origin(
     // refused now, its staging bundle removed and the helper never asked.
     if let Err(e) = manifest.verify_layer5_tree(&staged.join("tree"), TARGET_TRIPLE) {
         let _ = std::fs::remove_dir_all(&staged);
-        note_origin(layout, origin, Answer::Refused, Some(release), Some(&e))?;
+        note_origin(
+            layout,
+            origin,
+            Answer::Refused,
+            Some(release),
+            Some(error_detail(&e)),
+        )?;
         return Ok(Step::Done(FetchOutcome::Refused {
             reason: format!("payload disagrees with the manifest's Layer 5 pins: {e:#}"),
         }));
@@ -479,6 +632,16 @@ fn check_origin(
     // signed channel manifest + its minisig ride alongside the tarball.
     crate::util::fs::atomic_write(&staged.join(MANIFEST_NAME), &manifest_bytes, 0o644)?;
     crate::util::fs::atomic_write(&staged.join(SIGNATURE_NAME), sig_text.as_bytes(), 0o644)?;
+    if let Some(after) = after {
+        after(&Staged {
+            release,
+            manifest: &manifest,
+            manifest_bytes: &manifest_bytes,
+            signature: &sig_text,
+            payload: &staged.join("payload.tar.gz"),
+            origin,
+        });
+    }
     stage::write_update_request(&state_dir, &release, &manifest_sha, &staged)?;
     succeeded(layout, origin, Answer::Staged, release)?;
     Ok(Step::Done(FetchOutcome::Staged { version: release }))
@@ -493,6 +656,7 @@ fn succeeded(
     release: Calver,
 ) -> anyhow::Result<()> {
     if origin.is_internet() {
+        remember_internet(origin, answer, Some(release), None);
         record_success(layout)
     } else {
         note_origin(layout, origin, answer, Some(release), None)
@@ -540,7 +704,9 @@ pub enum Answer {
 
 /// One origin's entry in [`ORIGINS_RECORD`] (Layer 7 §9.3; T4's "newest release
 /// seen: <calver> from <origin>"). `at` is shown, never ordered by; `newest_seen`
-/// is the highest release of a manifest that verified.
+/// is the highest release of a manifest that verified. The answer's age comes from
+/// `CLOCK_BOOTTIME` (`boot_id`, `boot_s`; row L4): the wall-clock `at` is read only
+/// for a record of an earlier boot ([`OriginRecord::ago_s`]).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OriginRecord {
     pub kind: String,
@@ -551,6 +717,228 @@ pub struct OriginRecord {
     pub newest_seen: Option<String>,
     pub detail: Option<String>,
     pub at: String,
+    /// The kernel's boot id when the answer came (absent in a record written before row L4).
+    #[serde(default)]
+    pub boot_id: Option<String>,
+    /// `CLOCK_BOOTTIME` seconds when the answer came.
+    #[serde(default)]
+    pub boot_s: Option<u64>,
+}
+
+impl OriginRecord {
+    /// Seconds since this answer (`GET /api/v1/update/origins` `last_answer.ago_s`, §9.3): the
+    /// monotonic difference when the record is of this boot; otherwise the answer predates this
+    /// boot, so it is at least the time since boot (the wall-clock difference from `at`, a
+    /// display figure only, when that says more).
+    pub fn ago_s(&self, now: &BootClock) -> u64 {
+        match (&self.boot_id, self.boot_s, &now.boot_id) {
+            (Some(rec), Some(at), Some(cur)) if rec == cur && at <= now.boot_s => now.boot_s - at,
+            _ => {
+                let wall = time::OffsetDateTime::parse(
+                    &self.at,
+                    &time::format_description::well_known::Rfc3339,
+                )
+                .ok()
+                .map(|at| (time::OffsetDateTime::now_utc() - at).whole_seconds())
+                .and_then(|s| u64::try_from(s).ok())
+                .unwrap_or(0);
+                wall.max(now.boot_s)
+            }
+        }
+    }
+
+    /// Whether the answer was a manifest that verified (up to date or staged).
+    pub fn ok(&self) -> bool {
+        self.answer.ok()
+    }
+}
+
+impl Answer {
+    /// Up to date or staged: a manifest that verified.
+    pub fn ok(self) -> bool {
+        matches!(self, Answer::UpToDate | Answer::Staged)
+    }
+}
+
+/// The kernel's id of this boot.
+pub const BOOT_ID_PATH: &str = "/proc/sys/kernel/random/boot_id";
+const BOOT_ID_MAX: u64 = 64;
+
+/// A point on the host's monotonic clock: the boot and its `CLOCK_BOOTTIME` second (never the
+/// wall clock); the ages of [`ORIGINS_RECORD`] are read against it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BootClock {
+    /// The boot id (`None` when unreadable: every record then reads as of an earlier boot).
+    pub boot_id: Option<String>,
+    /// `CLOCK_BOOTTIME` seconds.
+    pub boot_s: u64,
+}
+
+impl BootClock {
+    /// The clock now (`boot_s` 0 when `clock_gettime` fails).
+    pub fn now() -> BootClock {
+        BootClock {
+            boot_id: read_boot_id(Path::new(BOOT_ID_PATH)),
+            boot_s: boottime_s().unwrap_or(0),
+        }
+    }
+}
+
+/// `CLOCK_BOOTTIME` in whole seconds (monotonic, counts suspend).
+fn boottime_s() -> Option<u64> {
+    let mut ts = libc::timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
+    // SAFETY: `ts` is a valid, writable timespec; CLOCK_BOOTTIME is a valid clock id on Linux.
+    let rc = unsafe { libc::clock_gettime(libc::CLOCK_BOOTTIME, &mut ts) };
+    if rc != 0 {
+        return None;
+    }
+    u64::try_from(ts.tv_sec).ok()
+}
+
+/// The boot id in `path` (hex digits and dashes), size checked before the read.
+fn read_boot_id(path: &Path) -> Option<String> {
+    let bytes = read_capped(path, BOOT_ID_MAX).ok()?;
+    let id = std::str::from_utf8(&bytes).ok()?.trim();
+    (!id.is_empty() && id.bytes().all(|c| c.is_ascii_hexdigit() || c == b'-'))
+        .then(|| id.to_string())
+}
+
+/// An internet base's last answer this daemon lifetime (row L4, §9.3): in memory only (§9.2:
+/// an internet check writes `record_success`, never [`ORIGINS_RECORD`]), aged on the monotonic
+/// clock. One small entry per internet base.
+#[derive(Debug, Clone)]
+struct InternetAnswer {
+    base: String,
+    answer: Answer,
+    newest_seen: Option<Calver>,
+    detail: Option<String>,
+    at: std::time::Instant,
+}
+
+static INTERNET_ANSWERS: std::sync::Mutex<Vec<InternetAnswer>> = std::sync::Mutex::new(Vec::new());
+
+fn remember_internet(
+    origin: &Origin,
+    answer: Answer,
+    release: Option<Calver>,
+    detail: Option<String>,
+) {
+    let Origin::Internet { base } = origin else {
+        return;
+    };
+    let mut all = INTERNET_ANSWERS.lock().unwrap_or_else(|p| p.into_inner());
+    let previous = all
+        .iter()
+        .position(|a| a.base == *base)
+        .map(|i| all.remove(i));
+    let newest_seen = match (previous.and_then(|p| p.newest_seen), release) {
+        (Some(a), Some(b)) => Some(a.max(b)),
+        (a, b) => a.or(b),
+    };
+    all.push(InternetAnswer {
+        base: base.clone(),
+        answer,
+        newest_seen,
+        detail: detail.map(|d| display_safe(&d, DETAIL_MAX_CHARS)),
+        at: std::time::Instant::now(),
+    });
+    if all.len() > ORIGINS_RECORD_MAX {
+        all.remove(0);
+    }
+}
+
+/// One origin's last answer as `GET /api/v1/update/origins` shows it (`UpdateOrigin.last_answer`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct LastAnswer {
+    /// A manifest that verified (up to date or staged).
+    pub ok: bool,
+    /// Seconds since, on the monotonic clock.
+    pub ago_s: u64,
+    /// What went wrong (untrusted text: an error naming the origin), if anything did.
+    pub detail: Option<String>,
+}
+
+/// One row of `GET /api/v1/update/origins` (the contract's `UpdateOrigin`, §9.3).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct OriginView {
+    /// `hub`, `internet`, `directory` or `url`.
+    pub kind: &'static str,
+    /// The origin base (or the directory).
+    pub url: String,
+    /// `None` before this origin was asked.
+    pub last_answer: Option<LastAnswer>,
+    /// The newest release this origin served and this node verified (T4).
+    pub newest_seen: Option<String>,
+}
+
+/// The rows of `GET /api/v1/update/origins` (§9.3, T4), in the order they are tried: the home
+/// hub (`home_hub`: the caller gives it only while its announce carries `ROLE_ORIGIN`), the
+/// internet bases of `cfg` (listed with `check_internet` off too: shown, never contacted), then
+/// each directory or URL typed for `111 update --from`, oldest first. Ages are read against
+/// `now`; nothing is written or fetched.
+pub fn visible_origins(
+    cfg: &UpdaterConfig,
+    home_hub: Option<Origin>,
+    state_dir: &Path,
+    now: &BootClock,
+) -> Vec<OriginView> {
+    let records = origin_records(state_dir);
+    let from_record = |r: &OriginRecord| LastAnswer {
+        ok: r.ok(),
+        ago_s: r.ago_s(now),
+        detail: r.detail.clone(),
+    };
+    let internet = INTERNET_ANSWERS
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .clone();
+    let mut rows = Vec::new();
+    for origin in cfg.visible_order(home_hub) {
+        let label = origin.label();
+        rows.push(match &origin {
+            Origin::Internet { base } => {
+                let a = internet.iter().find(|a| a.base == *base);
+                OriginView {
+                    kind: "internet",
+                    url: label,
+                    last_answer: a.map(|a| LastAnswer {
+                        ok: a.answer.ok(),
+                        ago_s: a.at.elapsed().as_secs(),
+                        detail: a.detail.clone(),
+                    }),
+                    newest_seen: a.and_then(|a| a.newest_seen).map(|c| c.to_string()),
+                }
+            }
+            _ => {
+                let r = records
+                    .iter()
+                    .find(|r| r.kind == origin.kind() && r.origin == label);
+                OriginView {
+                    kind: "hub",
+                    url: label,
+                    last_answer: r.map(from_record),
+                    newest_seen: r.and_then(|r| r.newest_seen.clone()),
+                }
+            }
+        });
+    }
+    for r in &records {
+        let kind = match r.kind.as_str() {
+            "dir" => "directory",
+            "url" => "url",
+            _ => continue,
+        };
+        rows.push(OriginView {
+            kind,
+            url: r.origin.clone(),
+            last_answer: Some(from_record(r)),
+            newest_seen: r.newest_seen.clone(),
+        });
+    }
+    rows
 }
 
 #[derive(Debug, Default, Serialize, Deserialize)]
@@ -571,18 +959,21 @@ pub fn origin_records(state_dir: &Path) -> Vec<OriginRecord> {
 }
 
 /// Write a hub, directory or typed-URL origin's answer (S5); an internet base
-/// writes `record_success` instead. Runs under the staging lock.
+/// writes `record_success` instead. Runs under the staging lock. `detail` is
+/// stored [`display_safe`] (row L4: a refused manifest's is [`UNVERIFIED`]).
 fn note_origin(
     layout: &DaemonLayout,
     origin: &Origin,
     answer: Answer,
     release: Option<Calver>,
-    error: Option<&anyhow::Error>,
+    detail: Option<String>,
 ) -> anyhow::Result<()> {
     if origin.is_internet() {
+        remember_internet(origin, answer, release, detail);
         return Ok(());
     }
     let state_dir = layout.state_dir();
+    let clock = BootClock::now();
     let mut records = origin_records(&state_dir);
     let (kind, label) = (origin.kind(), origin.label());
     let previous = records
@@ -603,8 +994,10 @@ fn note_origin(
         answer,
         release: release.map(|r| r.to_string()),
         newest_seen: newest_seen.map(|r| r.to_string()),
-        detail: error.map(|e| format!("{e:#}").chars().take(DETAIL_MAX_CHARS).collect()),
+        detail: detail.map(|d| display_safe(&d, DETAIL_MAX_CHARS)),
         at: now_rfc3339(),
+        boot_id: clock.boot_id,
+        boot_s: Some(clock.boot_s),
     });
     if records.len() > ORIGINS_RECORD_MAX {
         records.drain(..records.len() - ORIGINS_RECORD_MAX);
@@ -747,6 +1140,36 @@ mod tests {
             FetchOutcome::NoOrigin
         ));
         assert!(!StagingLock::path(&layout.state_dir()).exists());
+    }
+
+    /// Review of row L4: nothing foreign is ever a second log line, a terminal escape or a
+    /// reordering of the text around it; printable text is kept; the cap holds.
+    #[test]
+    fn display_safe_escapes_what_could_forge_a_line() {
+        let s = display_safe("a\nb\r\u{1b}[2J\u{202e}\u{85}\u{2028}é ok", 200);
+        assert_eq!(
+            s, "a\\u{a}b\\u{d}\\u{1b}[2J\\u{202e}\\u{85}\\u{2028}é ok",
+            "{s}"
+        );
+        assert!(!s.chars().any(|c| c.is_control()));
+        assert_eq!(display_safe("abcdef", 4), "abcd…");
+        assert_eq!(
+            display_safe("ab\ncd", 6),
+            "ab…",
+            "an escape is never cut in half"
+        );
+        assert_eq!(
+            display_safe("this node's \"floor\"", 100),
+            "this node's \"floor\""
+        );
+        let e = anyhow::anyhow!("outer\nline").context("ctx");
+        assert_eq!(error_detail(&e), "ctx: outer\\u{a}line");
+        assert!(
+            display_safe(&"x".repeat(1000), DETAIL_MAX_CHARS)
+                .chars()
+                .count()
+                <= DETAIL_MAX_CHARS + 1
+        );
     }
 
     #[test]
