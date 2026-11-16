@@ -751,3 +751,329 @@ fn every_run_as_command_carries_the_termux_env() {
         assert!(syntax.success(), "inner command is not valid sh: {inner}");
     }
 }
+
+// ---------- step 4's service files: the Termux cron seam removed (Layer 9 §3.3 rule 6) ----------
+
+/// The cron script's path on a phone an earlier provisioner pushed it to (spelled out here,
+/// not borrowed from the crate).
+const OLD_CRON_SCRIPT: &str = "$PREFIX/var/lib/111/share/termux/cron-healthcheck.sh";
+
+/// A file of `1-bootstrap/termux/` as the tree holds it: what step 4 pushes, byte for byte.
+fn termux_asset(rel: &str) -> Vec<u8> {
+    std::fs::read(format!("{}/../../termux/{rel}", env!("CARGO_MANIFEST_DIR"))).unwrap()
+}
+
+/// The two run-as calls of one `runas::install_file`: the write (on stdin), then the hash probe.
+fn install_file_script(content: &[u8], remote: &str, executable: bool) -> Vec<(String, Output)> {
+    let chmod = if executable {
+        format!("&& chmod 0755 {remote}")
+    } else {
+        String::new()
+    };
+    let sha = node111::util::hash::sha256_bytes(content);
+    vec![
+        (
+            ra(&format!(
+                "mkdir -p $(dirname {remote}) && cat > {remote} {chmod} && echo WRITE_OK"
+            )),
+            out(0, "WRITE_OK\n"),
+        ),
+        (
+            ra(&format!(
+                "sha256sum {remote} | cut -d' ' -f1 | grep -qx {sha} && echo HASH_OK"
+            )),
+            out(0, "HASH_OK\n"),
+        ),
+    ]
+}
+
+/// Step 4's service files up to the delete: the profile, runit's `run` and its `finish` hook.
+fn service_files_script() -> Vec<(String, Output)> {
+    let mut script = install_file_script(
+        &termux_asset("profile.env"),
+        "$PREFIX/var/lib/111/profile.env",
+        false,
+    );
+    script.extend(install_file_script(
+        &termux_asset("sv/111node/run"),
+        "$PREFIX/var/lib/111/sv/111node/run",
+        true,
+    ));
+    script.extend(install_file_script(
+        &termux_asset("sv/111node/finish"),
+        "$PREFIX/var/lib/111/sv/111node/finish",
+        true,
+    ));
+    script
+}
+
+/// The exact transcript: three files written, none of them the cron script (a push of it would
+/// be an unexpected call), then the one delete (missing, the script is left unexhausted); a
+/// delete that fails fails the step, so its re-run resumes there.
+#[test]
+fn service_files_push_no_cron_script_and_delete_an_earlier_copy() {
+    let mut script = service_files_script();
+    script.push((
+        ra(&format!("rm -f {OLD_CRON_SCRIPT} && echo RM_OK")),
+        out(0, "RM_OK\n"),
+    ));
+    let runner = MockRunner::new(script);
+    node111::install::phone::install_service_files(&adb_of(&runner)).unwrap();
+    runner.assert_exhausted();
+    let calls = runner.calls();
+    let writes: Vec<&String> = calls.iter().filter(|c| c.contains("<stdin:")).collect();
+    assert_eq!(writes.len(), 3, "{writes:#?}");
+    assert!(writes.iter().all(|c| !c.contains("cron")), "{writes:#?}");
+    let cron: Vec<&String> = calls.iter().filter(|c| c.contains("cron")).collect();
+    assert_eq!(cron.len(), 1, "{cron:#?}");
+    assert!(
+        cron[0].contains(&format!("rm -f {OLD_CRON_SCRIPT}")),
+        "{cron:#?}"
+    );
+
+    let mut script = service_files_script();
+    script.push((
+        ra(&format!("rm -f {OLD_CRON_SCRIPT} && echo RM_OK")),
+        out(1, ""),
+    ));
+    let runner = MockRunner::new(script);
+    let err = node111::install::phone::install_service_files(&adb_of(&runner)).unwrap_err();
+    assert!(err.to_string().contains("run-as command failed"), "{err}");
+    runner.assert_exhausted();
+}
+
+/// A phone whose Termux tree is a temp dir: each run-as command is parsed as the device shell
+/// parses it (the host `sh`, as above), its Termux env re-pointed at the temp dir, and run by
+/// the host `sh` with the call's stdin. Anything but a run-as call is refused.
+struct SandboxPhone {
+    root: tempfile::TempDir,
+    calls: std::sync::Mutex<Vec<String>>,
+}
+
+impl SandboxPhone {
+    fn new() -> Self {
+        SandboxPhone {
+            root: tempfile::tempdir().unwrap(),
+            calls: std::sync::Mutex::new(Vec::new()),
+        }
+    }
+
+    /// `$PREFIX/var/lib/111` inside the sandbox.
+    fn lib(&self) -> std::path::PathBuf {
+        self.root.path().join("usr/var/lib/111")
+    }
+
+    fn exec(&self, program: &str, args: &[&str], input: &[u8]) -> anyhow::Result<Output> {
+        use std::io::Write;
+        use std::process::{Command, Stdio};
+        let cmd = format!("{program} {}", args.join(" "));
+        self.calls.lock().unwrap().push(cmd.clone());
+        let quoted = cmd
+            .strip_prefix("adb -s SER1 shell run-as com.termux sh -c ")
+            .ok_or_else(|| anyhow::anyhow!("not a run-as call: {cmd}"))?;
+        let parsed = Command::new("sh")
+            .args(["-c", &format!("printf '%s\\n' {quoted}")])
+            .output()?;
+        let text = String::from_utf8(parsed.stdout)?;
+        let lines: Vec<&str> = text.lines().collect();
+        anyhow::ensure!(lines.len() == 1, "split into several words: {cmd}");
+        let body = lines[0]
+            .strip_prefix(TERMUX_ENV)
+            .ok_or_else(|| anyhow::anyhow!("missing the Termux env: {}", lines[0]))?;
+        let env = format!(
+            "export PREFIX={} HOME={};",
+            self.root.path().join("usr").display(),
+            self.root.path().join("home").display()
+        );
+        let mut child = Command::new("sh")
+            .args(["-c", &format!("{env}{body}")])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()?;
+        child.stdin.take().unwrap().write_all(input)?;
+        let done = child.wait_with_output()?;
+        Ok(Output {
+            status: done.status.code().unwrap_or(-1),
+            stdout: String::from_utf8_lossy(&done.stdout).into_owned(),
+            stderr: String::from_utf8_lossy(&done.stderr).into_owned(),
+        })
+    }
+}
+
+impl node111::util::run::Runner for SandboxPhone {
+    fn run(&self, program: &str, args: &[&str]) -> anyhow::Result<Output> {
+        self.exec(program, args, b"")
+    }
+    fn run_as(&self, _: &str, _: &str, _: &[&str]) -> anyhow::Result<Output> {
+        anyhow::bail!("the phone flow never uses host sudo")
+    }
+    fn run_stdin(&self, program: &str, args: &[&str], input: &[u8]) -> anyhow::Result<Output> {
+        self.exec(program, args, input)
+    }
+}
+
+/// End to end on a sandboxed Termux tree: the next run deletes the cron script an earlier
+/// provisioner pushed and lands the service files byte for byte; a later run, and a phone that
+/// never had the script, see the delete succeed with nothing to do and no script pushed.
+#[test]
+fn a_cron_script_pushed_earlier_is_deleted_on_the_next_run() {
+    use std::os::unix::fs::PermissionsExt;
+    let phone = SandboxPhone::new();
+    let adb = Adb::new(&phone, Some("SER1".into()), "adb");
+    let old = phone.lib().join("share/termux/cron-healthcheck.sh");
+    std::fs::create_dir_all(old.parent().unwrap()).unwrap();
+    // the copy a provisioner before Layer 9 left: the script's bytes, executable
+    std::fs::write(
+        &old,
+        b"#!/data/data/com.termux/files/usr/bin/sh\ncurl -fsS -m 10 http://127.0.0.1:11180/health\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&old, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    node111::install::phone::install_service_files(&adb).unwrap();
+    assert!(!old.exists(), "the copy pushed earlier survived the run");
+    for (rel, executable) in [
+        ("profile.env", false),
+        ("sv/111node/run", true),
+        ("sv/111node/finish", true),
+    ] {
+        let got = phone.lib().join(rel);
+        assert_eq!(std::fs::read(&got).unwrap(), termux_asset(rel), "{rel}");
+        if executable {
+            let mode = std::fs::metadata(&got).unwrap().permissions().mode();
+            assert_eq!(mode & 0o777, 0o755, "{rel}");
+        }
+    }
+
+    // a later run: nothing to delete, still a success, nothing pushed back
+    node111::install::phone::install_service_files(&adb).unwrap();
+    assert!(!old.exists());
+    let calls = phone.calls.lock().unwrap().clone();
+    // per run: three writes, three hash probes, one delete
+    assert_eq!(calls.len(), 14, "{calls:#?}");
+    let cron: Vec<&String> = calls.iter().filter(|c| c.contains("cron")).collect();
+    assert_eq!(cron.len(), 2, "{cron:#?}");
+    assert!(cron.iter().all(|c| c.contains("rm -f ")), "{cron:#?}");
+
+    // a phone that never had the script: the delete has nothing to do, nothing lands under share/
+    let fresh = SandboxPhone::new();
+    node111::install::phone::install_service_files(&Adb::new(&fresh, Some("SER1".into()), "adb"))
+        .unwrap();
+    assert!(fresh.lib().join("sv/111node/finish").exists());
+    assert!(!fresh.lib().join("share").exists());
+}
+
+/// The four calls of one `runas::push_verified`: the stage dir, the push, the on-device hash
+/// check and copy, the staged copy removed.
+fn push_verified_script(local: &std::path::Path, remote: &str, sha: &str) -> Vec<(String, Output)> {
+    let stage = "/data/local/tmp/111-stage";
+    let staged = format!("{stage}/{}", local.file_name().unwrap().to_string_lossy());
+    vec![
+        (format!("adb -s SER1 shell mkdir -p {stage}"), out(0, "")),
+        (
+            format!("adb -s SER1 push {} {staged}", local.to_string_lossy()),
+            out(0, ""),
+        ),
+        (
+            ra(&format!(
+                "sha256sum {staged} | cut -d' ' -f1 | grep -qx {sha} && mkdir -p $(dirname {remote}) && cp {staged} {remote} && echo PUSH_OK"
+            )),
+            out(0, "PUSH_OK\n"),
+        ),
+        (format!("adb -s SER1 shell rm -f {staged}"), out(0, "")),
+    ]
+}
+
+/// Step 4 whole on the run-as channel, as `phone::run` calls it: the exact transcript puts the
+/// three service files and the one delete after the payload's extract and before the debs, so a
+/// step 4 that drops them, or moves them out of the run-as branch, fails here (`run` itself needs
+/// a real adb and the network: the owner's real-device run covers it).
+#[test]
+fn step_4_writes_the_service_files_and_deletes_the_cron_script_before_the_debs() {
+    let cache = tempfile::tempdir().unwrap();
+    let payload = cache.path().join("payload-aarch64.tar.gz");
+    std::fs::write(&payload, b"payload-bytes").unwrap();
+    let deb = cache.path().join("openssh.deb");
+    std::fs::write(&deb, b"deb-bytes").unwrap();
+    let payload_pin = artifact(
+        "aarch64-unknown-linux-musl",
+        &node111::util::hash::sha256_bytes(b"payload-bytes"),
+    );
+    let debs = [artifact(
+        "openssh",
+        &node111::util::hash::sha256_bytes(b"deb-bytes"),
+    )];
+    let release: node111::calver::Calver = "2026.11.16".parse().unwrap();
+    let boot = "/data/data/com.termux/files/home/.termux/boot/00-111-node.sh";
+    let boot_sha = node111::util::hash::sha256_bytes(&termux_asset("boot/00-111-node.sh"));
+    let rel = "$PREFIX/var/lib/111/releases";
+    let deb_remote = "/data/data/com.termux/files/usr/var/lib/111/debs/openssh.deb";
+
+    let mut script = vec![
+        (
+            "adb -s SER1 shell am start -n com.termux/.app.TermuxActivity".to_string(),
+            out(0, ""),
+        ),
+        (
+            ra("dpkg -l >/dev/null 2>&1 && test -d /data/data/com.termux/files/usr/etc && echo BOOTSTRAP_OK"),
+            out(0, "BOOTSTRAP_OK\n"),
+        ),
+        (ra("echo RA_OK"), out(0, "RA_OK\n")),
+        (
+            ra(&format!(
+                "mkdir -p /data/data/com.termux/files/home/.termux/boot && cat > {boot} && chmod 0755 {boot} && echo BOOT_OK"
+            )),
+            out(0, "BOOT_OK\n"),
+        ),
+        (
+            ra(&format!(
+                "sha256sum {boot} | cut -d' ' -f1 | grep -qx {boot_sha} && echo HASH_OK"
+            )),
+            out(0, "HASH_OK\n"),
+        ),
+    ];
+    script.extend(push_verified_script(
+        &payload,
+        &format!("{rel}/payload.tar.gz"),
+        &payload_pin.sha256,
+    ));
+    script.push((
+        ra(&format!(
+            "mkdir -p {rel}/2026.11.16 && tar -xzf {rel}/payload.tar.gz -C {rel}/2026.11.16 && ln -sfn {rel}/2026.11.16 $PREFIX/var/lib/111/current && rm {rel}/payload.tar.gz && echo EXTRACT_OK"
+        )),
+        out(0, "EXTRACT_OK\n"),
+    ));
+    script.extend(service_files_script());
+    script.push((
+        ra(&format!("rm -f {OLD_CRON_SCRIPT} && echo RM_OK")),
+        out(0, "RM_OK\n"),
+    ));
+    script.extend(push_verified_script(&deb, deb_remote, &debs[0].sha256));
+    script.extend([
+        (
+            ra(&format!("dpkg -i {deb_remote} && echo DPKG_OK")),
+            out(0, "DPKG_OK\n"),
+        ),
+        (
+            ra("grep -q 'allow-external-apps *= *true' /data/data/com.termux/files/home/.termux/termux.properties 2>/dev/null && echo VIOLATION || echo CLEAN"),
+            out(0, "CLEAN\n"),
+        ),
+    ]);
+    let runner = MockRunner::new(script);
+    node111::install::phone::headless_channel(
+        &adb_of(&runner),
+        &payload,
+        &payload_pin,
+        release,
+        cache.path(),
+        &debs,
+    )
+    .unwrap();
+    runner.assert_exhausted();
+    let calls = runner.calls();
+    let writes: Vec<&String> = calls.iter().filter(|c| c.contains("<stdin:")).collect();
+    // the boot script and the three service files; no write names the cron script
+    assert_eq!(writes.len(), 4, "{writes:#?}");
+    assert!(writes.iter().all(|c| !c.contains("cron")), "{writes:#?}");
+}

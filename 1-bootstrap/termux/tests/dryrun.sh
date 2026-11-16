@@ -46,7 +46,6 @@ fake nohup 'shift 0; exec "$@" 2>/dev/null || exit 0'
 printf '#!/bin/sh\n[ -f "%s/runsvdir.up" ] && exit 0; exit 1\n' "$T" > "$BIN/pgrep"
 chmod 0755 "$BIN/pgrep"
 fake sv 'exit 0'
-fake curl 'exit 0'
 
 # runsvdir fake also drops the "up" marker
 cat > "$BIN/runsvdir" <<EOF
@@ -99,30 +98,9 @@ else
 	cat "$CALLS" >&2
 fi
 
-# --- case 4: healthcheck success (fake curl exit 0) → no failure log ---------
-mkdir -p "$PREF/var/lib/111/share/termux"
-cp cron/healthcheck.sh "$PREF/var/lib/111/share/termux/cron-healthcheck.sh"
-sh "$PREF/var/lib/111/share/termux/cron-healthcheck.sh"
-if [ ! -f "$PREF/var/lib/111/state/health-failures.log" ]; then
-	pass "healthcheck: healthy stays silent"
-else
-	fail "healthcheck healthy"
-fi
-
-# --- case 5: healthcheck failure records a marker ----------------------------
-printf '#!/bin/sh\necho "curl: $*" >> "%s"\nexit 22\n' "$CALLS" > "$BIN/curl"
-chmod 0755 "$BIN/curl"
-sh "$PREF/var/lib/111/share/termux/cron-healthcheck.sh"
-if [ -f "$PREF/var/lib/111/state/health-failures.log" ] && grep -q "health check failed" "$PREF/var/lib/111/state/health-failures.log"; then
-	pass "healthcheck: failure recorded (Layer 9 seam)"
-else
-	fail "healthcheck failure marker"
-fi
+# (cases 4 and 5, the cron health check, went with the Termux cron seam: Layer 9 §3.3 rule 6)
 
 # --- case 6: e2e stub — positive fetch + verify + handoff --------------------
-# restore the real curl BEFORE anything polls (the fake one always exits 22)
-rm -f "$BIN/curl"
-
 mkdir -p "$T/srv"
 printf '#!/bin/sh\necho "payload-executed: $@" >> "%s"\n' "$CALLS" > "$T/srv/payload"
 E2E_SHA=$(sha256sum "$T/srv/payload" | cut -d' ' -f1)

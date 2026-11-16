@@ -71,17 +71,21 @@ fn canonical_fixture_parses() {
             && names.contains(&"termux-api")
     );
 
-    // Spec-pinned minimum deb closure.
+    // Spec-pinned minimum deb closure. `cronie` left it with the Termux cron seam (Layer 9
+    // §1 rule 2, §3.3 rule 6): nothing in the tree schedules a cron job any more.
     let debs: Vec<&str> = m.termux_debs().iter().map(|d| d.name.as_str()).collect();
     for need in [
         "openssh",
         "termux-services",
-        "cronie",
         "python",
         "python-cryptography",
     ] {
         assert!(debs.contains(&need), "closure missing {need}");
     }
+    assert!(
+        !debs.contains(&"cronie"),
+        "cronie is no longer in the closure"
+    );
 
     assert_eq!(m.rns_lock().size, 2048);
     assert_eq!(m.kb().size, 1048576);

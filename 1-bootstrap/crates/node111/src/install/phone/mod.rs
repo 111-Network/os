@@ -11,8 +11,9 @@ pub mod start;
 pub mod teardown;
 pub mod verify;
 
+use crate::calver::Calver;
 use crate::cli::InstallArgs;
-use crate::manifest::ChannelManifest;
+use crate::manifest::{ChannelManifest, PinnedArtifact};
 use adb::Adb;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
@@ -21,7 +22,10 @@ const BOOT_SCRIPT: &str = include_str!("../../../../../termux/boot/00-111-node.s
 const PROFILE_ENV: &str = include_str!("../../../../../termux/profile.env");
 const SV_RUN: &str = include_str!("../../../../../termux/sv/111node/run");
 const SV_FINISH: &str = include_str!("../../../../../termux/sv/111node/finish");
-const CRON_HEALTH: &str = include_str!("../../../../../termux/cron/healthcheck.sh");
+/// Where a provisioner before Layer 9 pushed the Termux cron health script. The script left the
+/// tree with the cron seam (Layer 9 §1 rule 2, §3.3 rule 6); [`install_service_files`] deletes a
+/// copy still on the phone.
+const OLD_CRON_SCRIPT: &str = "$PREFIX/var/lib/111/share/termux/cron-healthcheck.sh";
 
 /// Host-side resume marker (per device serial): which steps completed.
 #[derive(Debug, Default, Serialize, Deserialize)]
@@ -103,6 +107,89 @@ fn fetch_manifest(fetcher: &crate::util::http::Fetcher) -> anyhow::Result<Channe
     anyhow::bail!("channel manifest unreachable on all endpoints (needed for APK/deb pins)")
 }
 
+/// Step 4's service files over run-as: `profile.env`, then runit's `run` and its `finish` hook
+/// (the hook carries Layer 9's exit witness and reaches a phone only this way, Layer 9 §3.3
+/// rule 7). Then the one delete the removal of the Termux cron seam adds (Layer 9 §3.3 rule 6):
+/// the health script a provisioner before Layer 9 pushed (`OLD_CRON_SCRIPT`) is deleted when
+/// present; `rm -f` has nothing to do where it is absent. Nothing pushes the script any more,
+/// and `111d` never deletes it (it is inert: nothing schedules it, Layer 9 §1 rule 2).
+pub fn install_service_files(adb: &Adb<'_>) -> anyhow::Result<()> {
+    runas::install_file(
+        adb,
+        PROFILE_ENV.as_bytes(),
+        "$PREFIX/var/lib/111/profile.env",
+        false,
+    )?;
+    runas::install_file(
+        adb,
+        SV_RUN.as_bytes(),
+        "$PREFIX/var/lib/111/sv/111node/run",
+        true,
+    )?;
+    runas::install_file(
+        adb,
+        SV_FINISH.as_bytes(),
+        "$PREFIX/var/lib/111/sv/111node/finish",
+        true,
+    )?;
+    let out = runas::run_as_output(adb, &format!("rm -f {OLD_CRON_SCRIPT} && echo RM_OK"))?;
+    anyhow::ensure!(
+        out.contains("RM_OK"),
+        "deleting the old cron health script failed: {}",
+        out.trim()
+    );
+    Ok(())
+}
+
+/// Step 4, the headless channel (Layer 1 "Install flow — phone over USB-C", step 4), whole: the
+/// bootstrap wait, then over run-as the boot script, the payload (pushed, hash-checked, extracted
+/// as `release`), [`install_service_files`] (with Layer 9 §3.3 rule 6's one delete) and the
+/// `.deb` closure from `cache`; when run-as is broken, the E2 fallback instead (the stub over
+/// `adb reverse`); last, the `allow-external-apps` guard. One function so a transcript test
+/// pins the order `run` provisions in.
+pub fn headless_channel(
+    adb: &Adb<'_>,
+    payload_path: &Path,
+    payload: &PinnedArtifact,
+    release: Calver,
+    cache: &Path,
+    debs: &[PinnedArtifact],
+) -> anyhow::Result<()> {
+    runas::wait_bootstrap(adb, 120)?;
+    if runas::run_as_works(adb) {
+        runas::install_boot_script(adb, BOOT_SCRIPT.as_bytes())?;
+        runas::push_verified(
+            adb,
+            payload_path,
+            "$PREFIX/var/lib/111/releases/payload.tar.gz",
+            &payload.sha256,
+        )?;
+        let ver = release.to_string();
+        let out = runas::run_as_output(
+            adb,
+            &format!(
+                "mkdir -p $PREFIX/var/lib/111/releases/{ver} && tar -xzf $PREFIX/var/lib/111/releases/payload.tar.gz -C $PREFIX/var/lib/111/releases/{ver} && ln -sfn $PREFIX/var/lib/111/releases/{ver} $PREFIX/var/lib/111/current && rm $PREFIX/var/lib/111/releases/payload.tar.gz && echo EXTRACT_OK"
+            ),
+        )?;
+        anyhow::ensure!(
+            out.contains("EXTRACT_OK"),
+            "on-device payload extract failed: {out}"
+        );
+        // profile + runit service; an earlier provisioner's cron script deleted
+        install_service_files(adb)?;
+        runas::install_debs(adb, cache, debs)?;
+    } else {
+        eprintln!("111 phone: run-as channel broken — E2 fallback (typed stub + adb reverse)");
+        let port = 18111u16;
+        runas::e2e_reverse(adb, port)?;
+        let stub = resolve_e2e_stub(port, payload)?;
+        runas::e2e_inject_stub(adb, &stub)?;
+        // the stub pulls + verifies the payload via the reverse channel;
+        // the remaining files go through the same host server
+    }
+    runas::assert_no_external_apps(adb)
+}
+
 /// Step runner with resume markers.
 macro_rules! step {
     ($state:expr, $marker:expr, $name:literal, $body:block) => {
@@ -182,62 +269,14 @@ pub fn run(args: InstallArgs) -> anyhow::Result<()> {
 
     // 4. headless channel
     step!(state, &marker, "channel", {
-        runas::wait_bootstrap(&adb, 120)?;
-        if runas::run_as_works(&adb) {
-            runas::install_boot_script(&adb, BOOT_SCRIPT.as_bytes())?;
-            runas::push_verified(
-                &adb,
-                &payload_path,
-                "$PREFIX/var/lib/111/releases/payload.tar.gz",
-                &payload_artifact.sha256,
-            )?;
-            let ver = manifest.release().to_string();
-            let out = runas::run_as_output(
-                &adb,
-                &format!(
-                    "mkdir -p $PREFIX/var/lib/111/releases/{ver} && tar -xzf $PREFIX/var/lib/111/releases/payload.tar.gz -C $PREFIX/var/lib/111/releases/{ver} && ln -sfn $PREFIX/var/lib/111/releases/{ver} $PREFIX/var/lib/111/current && rm $PREFIX/var/lib/111/releases/payload.tar.gz && echo EXTRACT_OK"
-                ),
-            )?;
-            anyhow::ensure!(
-                out.contains("EXTRACT_OK"),
-                "on-device payload extract failed: {out}"
-            );
-            // profile + runit service + cron healthcheck
-            runas::install_file(
-                &adb,
-                PROFILE_ENV.as_bytes(),
-                "$PREFIX/var/lib/111/profile.env",
-                false,
-            )?;
-            runas::install_file(
-                &adb,
-                SV_RUN.as_bytes(),
-                "$PREFIX/var/lib/111/sv/111node/run",
-                true,
-            )?;
-            runas::install_file(
-                &adb,
-                SV_FINISH.as_bytes(),
-                "$PREFIX/var/lib/111/sv/111node/finish",
-                true,
-            )?;
-            runas::install_file(
-                &adb,
-                CRON_HEALTH.as_bytes(),
-                "$PREFIX/var/lib/111/share/termux/cron-healthcheck.sh",
-                true,
-            )?;
-            runas::install_debs(&adb, &cache, manifest.termux_debs())?;
-        } else {
-            eprintln!("111 phone: run-as channel broken — E2 fallback (typed stub + adb reverse)");
-            let port = 18111u16;
-            runas::e2e_reverse(&adb, port)?;
-            let stub = resolve_e2e_stub(port, &payload_artifact)?;
-            runas::e2e_inject_stub(&adb, &stub)?;
-            // the stub pulls + verifies the payload via the reverse channel;
-            // the remaining files go through the same host server
-        }
-        runas::assert_no_external_apps(&adb)?;
+        headless_channel(
+            &adb,
+            &payload_path,
+            &payload_artifact,
+            manifest.release(),
+            &cache,
+            manifest.termux_debs(),
+        )?;
     });
 
     // 5. harden
