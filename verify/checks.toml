@@ -2135,6 +2135,32 @@ needs = ["pnpm"]
 requires = ["l4.contract.fresh"]
 
 [[check]]
+id = "l4.ui.layer8-contract"
+kind = "unit"
+cmd = [
+  "pnpm",
+  "exec",
+  "vitest",
+  "run",
+  "test/layer8-contract.test.ts",
+  "--reporter=default",
+  "--reporter=json",
+  "--outputFile={scratch}/vitest.json",
+]
+cwd = "4-interface/ui"
+tier = "slow"
+layers = [4, 8]
+seams = ["L4-L4:openapi-ts"]
+adapter = "vitest"
+timeout_s = 1800
+rerun = "pnpm --dir 4-interface/ui exec vitest run test/layer8-contract.test.ts"
+rerun_cost = "slow, ~10 s"
+covered_by = "l4.ui"
+strength = "C"
+needs = ["pnpm"]
+requires = ["l4.contract.fresh"]
+
+[[check]]
 id = "l4.ui.layer7-views"
 kind = "unit"
 cmd = [

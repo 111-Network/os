@@ -429,6 +429,26 @@ const ALIASES = [
   ["NearbyEvidenceTransport", "NearbyEvidenceTransport"],
   ["RelayEvent", "SseRelay"],
   ["RegistryEvent", "SseRegistry"],
+  // Layer 8 (Storage & Shared State, os/8-storage/README.md §16; part 1)
+  ["StorageStatus", "StorageStatus"],
+  ["StorageClassId", "StorageClassId"],
+  ["StorageClass", "StorageClass"],
+  ["StorageWalk", "StorageWalk"],
+  ["StorageDisk", "StorageDisk"],
+  ["StorageDiskOrigin", "StorageDiskOrigin"],
+  ["StorageKeep", "StorageKeep"],
+  ["StorageNodeState", "StorageNodeState"],
+  ["StorageIntegrity", "StorageIntegrity"],
+  ["StorageIntegrityState", "StorageIntegrityState"],
+  ["StorageNotice", "StorageNotice"],
+  ["StorageStore", "StorageStore"],
+  ["StorageOrigin", "StorageOrigin"],
+  ["StorageSettings", "StorageSettings"],
+  ["StorageSettingsPatch", "StorageSettingsPatch"],
+  ["StorageExportOfferRequest", "StorageExportOfferRequest"],
+  ["UpdateWithoutCopyRequest", "UpdateWithoutCopyRequest"],
+  ["StartEmptyRequest", "StartEmptyRequest"],
+  ["StorageEvent", "SseStorage"],
 ];
 
 // Runtime enum tuples. [exportedName, schemaName, path inside the schema to the enum array]
@@ -470,6 +490,14 @@ const ENUMS = [
   ["PAIR_TLS", "PairTls", []],
   ["REGISTRY_ANSWERS", "RegistryAnswer", []],
   ["EVIDENCE_TRANSPORTS", "NearbyEvidenceTransport", []],
+  // Layer 8 (part 1; the dataset tuples, Job.state among them, are the contract's second part)
+  ["STORAGE_CLASS_IDS", "StorageClassId", []],
+  ["STORAGE_STORES", "StorageStore", []],
+  ["STORAGE_NOTICE_KINDS", "StorageNotice", ["properties", "kind"]],
+  ["STORAGE_KEEP_RULES", "StorageKeep", ["properties", "rule"]],
+  ["STORAGE_INTEGRITY_STATES", "StorageIntegrityState", []],
+  ["STORAGE_NODE_STATES", "StorageNodeState", ["properties", "state"]],
+  ["EXPORT_OFFER_CLASSES", "StorageExportOfferRequest", ["properties", "class"]],
 ];
 
 function schemaRefName(ref, schemas) {

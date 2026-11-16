@@ -1,14 +1,46 @@
 // Tiny external store for the live node state. Pure TypeScript (no React); `hooks.ts` wraps it in
 // useSyncExternalStore. The store is the only consumer of the adapter's read side and of the
 // events stream: components read through hooks and never fetch snapshots themselves.
-import type { Adapter, ConnectionInfo, ConnectionState, EventsFrameWithId } from "./adapter";
+import type {
+  Adapter,
+  ConnectionInfo,
+  ConnectionState,
+  EventsFrameWithId,
+} from "./adapter";
+import type { StorageAdapter } from "./storage"; // type only, like the relay one: the module stays out of the eager chunk (see getStorage in ./index)
 import type { RelayAdapter } from "./relay"; // type only: the module itself stays out of the eager chunk (see getRelay in ./index)
 import { openRequests, removeContact, upsertContact } from "./contacts";
-import { applyForeignTail, FOREIGN_PAGE_LIMIT, mergeForeignPage, sameConversations, topSeq, trimForeign, type ForeignPage } from "./networks";
-import { applyMessageToPage, mergeThreadPage, THREAD_PAGE_LIMIT, trimPage, type ThreadPage } from "./messages";
+import {
+  applyForeignTail,
+  FOREIGN_PAGE_LIMIT,
+  mergeForeignPage,
+  sameConversations,
+  topSeq,
+  trimForeign,
+  type ForeignPage,
+} from "./networks";
+import {
+  applyMessageToPage,
+  mergeThreadPage,
+  THREAD_PAGE_LIMIT,
+  trimPage,
+  type ThreadPage,
+} from "./messages";
 import { sameSources } from "./nearby";
 import { isApiError, type ApiError } from "./problem";
-import { browserStorage, ignoreRequest, isIgnored, loadIgnored, NO_IGNORED, pruneIgnored, requestSeq, restoreRequest, saveIgnored, type IgnoredRequests, type KeyValueStorage } from "./requests";
+import {
+  browserStorage,
+  ignoreRequest,
+  isIgnored,
+  loadIgnored,
+  NO_IGNORED,
+  pruneIgnored,
+  requestSeq,
+  restoreRequest,
+  saveIgnored,
+  type IgnoredRequests,
+  type KeyValueStorage,
+} from "./requests";
 import type {
   AgentEvent,
   BridgeComponent,
@@ -30,6 +62,7 @@ import type {
   Proposal,
   RegistryRow,
   RelayStatus,
+  StorageStatus,
   ServiceRecord,
   Status,
   Thread,
@@ -126,6 +159,8 @@ export interface StoreState {
   relay: RelayStatus | null;
   /** Layer 7: the service registry rows; null until a `registry` frame or a Layer 7 view loads it. Untrusted strings. */
   registry: RegistryRow[] | null;
+  /** Layer 8: the storage status (disk, budget, classes, notices); null until a `storage` frame or a Layer 8 view loads it. A frame carries the four budgeted classes and is completed by a `GET /storage`. */
+  storage: StorageStatus | null;
   connection: ConnectionSnapshot;
   /** Agent events, newest first, at most ACTIVITY_RING, deduped on (seq, ts). */
   activity: AgentEvent[];
@@ -144,8 +179,15 @@ export interface StoreState {
   servicesRev: number;
 }
 
-export function isDisconnected(state: ConnectionState, everOpened: boolean): boolean {
-  return state === "stale" || state === "closed" || (state === "connecting" && everOpened);
+export function isDisconnected(
+  state: ConnectionState,
+  everOpened: boolean,
+): boolean {
+  return (
+    state === "stale" ||
+    state === "closed" ||
+    (state === "connecting" && everOpened)
+  );
 }
 
 /**
@@ -160,20 +202,55 @@ export function computeAttention(
   ignored: IgnoredRequests = NO_IGNORED,
   threads: readonly Thread[] | null = null,
 ): Attention {
-  const openProposals = proposals ? proposals.filter((p) => p.decision === null).length : 0;
-  const erroredServices = services ? services.filter((s) => s.state === "error").length : 0;
-  const erroredDevices = devices ? devices.filter((d) => d.state === "error").length : 0;
+  const openProposals = proposals
+    ? proposals.filter((p) => p.decision === null).length
+    : 0;
+  const erroredServices = services
+    ? services.filter((s) => s.state === "error").length
+    : 0;
+  const erroredDevices = devices
+    ? devices.filter((d) => d.state === "error").length
+    : 0;
   let pending = openRequests(contacts);
-  if (pending.length > 0 && ignored !== NO_IGNORED && Object.keys(ignored).length > 0) {
-    const seqs = new Map((threads ?? []).filter((t) => t.request).map((t) => [t.peer, requestSeq(t)] as const));
-    pending = pending.filter((c) => !isIgnored(ignored, c.node_id, seqs.get(c.node_id) ?? null));
+  if (
+    pending.length > 0 &&
+    ignored !== NO_IGNORED &&
+    Object.keys(ignored).length > 0
+  ) {
+    const seqs = new Map(
+      (threads ?? [])
+        .filter((t) => t.request)
+        .map((t) => [t.peer, requestSeq(t)] as const),
+    );
+    pending = pending.filter(
+      (c) => !isIgnored(ignored, c.node_id, seqs.get(c.node_id) ?? null),
+    );
   }
   const requests = pending.length;
-  return { count: openProposals + erroredServices + erroredDevices + requests, openProposals, erroredServices, erroredDevices, openRequests: requests };
+  return {
+    count: openProposals + erroredServices + erroredDevices + requests,
+    openProposals,
+    erroredServices,
+    erroredDevices,
+    openRequests: requests,
+  };
 }
 
-export function openProposalsOf(proposals: readonly Proposal[] | null): Proposal[] {
+export function openProposalsOf(
+  proposals: readonly Proposal[] | null,
+): Proposal[] {
   return proposals ? proposals.filter((p) => p.decision === null) : [];
+}
+
+/** Decided proposals whose apply was cut off or is still running: `decision.applied` is `{pending: true}` (Layer 8, §2.4 rule 5). */
+export function applyingProposalsOf(
+  proposals: readonly Proposal[] | null,
+): Proposal[] {
+  return proposals
+    ? proposals.filter(
+        (p) => p.decision !== null && p.decision.applied?.pending === true,
+      )
+    : [];
 }
 
 function sameJson(a: unknown, b: unknown): boolean {
@@ -185,7 +262,11 @@ function sameJson(a: unknown, b: unknown): boolean {
  * by `key` (their id), so a reload costs one comparison per record, not one per pair: a list of hundreds of threads
  * stays cheap on a phone.
  */
-function reuse<T>(prev: readonly T[] | null, next: readonly T[], key: (item: T) => string): T[] {
+function reuse<T>(
+  prev: readonly T[] | null,
+  next: readonly T[],
+  key: (item: T) => string,
+): T[] {
   if (!prev) return [...next];
   const before = new Map<string, T>();
   for (const p of prev) before.set(key(p), p);
@@ -220,7 +301,9 @@ function coalesced(fn: () => Promise<void>): () => Promise<void> {
 }
 
 /** `coalesced`, one lane per key: concurrent calls for the same key become one trailing pass; other keys do not wait. */
-function coalescedBy<K extends string>(fn: (key: K) => Promise<void>): (key: K) => Promise<void> {
+function coalescedBy<K extends string>(
+  fn: (key: K) => Promise<void>,
+): (key: K) => Promise<void> {
   const lanes = new Map<K, () => Promise<void>>();
   return (key) => {
     let lane = lanes.get(key);
@@ -233,10 +316,17 @@ function coalescedBy<K extends string>(fn: (key: K) => Promise<void>): (key: K) 
 }
 
 function newestFirst(list: readonly Proposal[]): Proposal[] {
-  return [...list].sort((a, b) => (a.created_at < b.created_at ? 1 : a.created_at > b.created_at ? -1 : 0));
+  return [...list].sort((a, b) =>
+    a.created_at < b.created_at ? 1 : a.created_at > b.created_at ? -1 : 0,
+  );
 }
 
-const INITIAL_CONNECTION: ConnectionSnapshot = { state: "connecting", lastEventAt: null, everOpened: false, disconnected: false };
+const INITIAL_CONNECTION: ConnectionSnapshot = {
+  state: "connecting",
+  lastEventAt: null,
+  everOpened: false,
+  disconnected: false,
+};
 
 function initialState(): StoreState {
   return {
@@ -261,12 +351,19 @@ function initialState(): StoreState {
     transport: null,
     relay: null,
     registry: null,
+    storage: null,
     connection: INITIAL_CONNECTION,
     activity: [],
     baselineVersion: null,
     version: null,
     versionChanged: false,
-    attention: { count: 0, openProposals: 0, erroredServices: 0, erroredDevices: 0, openRequests: 0 },
+    attention: {
+      count: 0,
+      openProposals: 0,
+      erroredServices: 0,
+      erroredDevices: 0,
+      openRequests: 0,
+    },
     meta: { ready: false, needsPair: false, error: null },
     servicesRev: 0,
   };
@@ -278,6 +375,8 @@ export class ApiStore {
   private adapter: Adapter | null = null;
   /** Layer 7: how to reach the relay adapter. Called only to re-read a slice that is already loaded; never at start-up. */
   private relayLoader: (() => Promise<RelayAdapter>) | null = null;
+  /** Layer 8: how to reach the storage adapter. Called after a `storage` frame and to re-read a loaded slice; never at start-up. */
+  private storageLoader: (() => Promise<StorageAdapter>) | null = null;
   private unsubscribe: (() => void) | null = null;
   /** The snapshot load started by the latest `attach`, while it is still running. */
   private initialLoad: Promise<void> | null = null;
@@ -294,7 +393,9 @@ export class ApiStore {
   /** Where the per-device fold of ignored requests is kept; null when the browser gives none. */
   private readonly storage: KeyValueStorage | null;
 
-  constructor(deps: { now?: () => number; storage?: KeyValueStorage | null } = {}) {
+  constructor(
+    deps: { now?: () => number; storage?: KeyValueStorage | null } = {},
+  ) {
     this.now = deps.now ?? (() => Date.now());
     this.storage = deps.storage === undefined ? browserStorage() : deps.storage;
     this.state = { ...this.state, ignored: loadIgnored(this.storage) };
@@ -319,8 +420,22 @@ export class ApiStore {
         saveIgnored(this.storage, ignored);
       }
     }
-    if ("proposals" in patch || "services" in patch || "devices" in patch || "contacts" in patch || "threads" in patch || "ignored" in patch) {
-      next.attention = computeAttention(next.proposals, next.services, next.devices, next.contacts, next.ignored, next.threads);
+    if (
+      "proposals" in patch ||
+      "services" in patch ||
+      "devices" in patch ||
+      "contacts" in patch ||
+      "threads" in patch ||
+      "ignored" in patch
+    ) {
+      next.attention = computeAttention(
+        next.proposals,
+        next.services,
+        next.devices,
+        next.contacts,
+        next.ignored,
+        next.threads,
+      );
     }
     this.state = next;
     for (const l of [...this.listeners]) l();
@@ -373,12 +488,18 @@ export class ApiStore {
     this.unsubscribe = null;
     this.adapter = null;
     this.relayLoader = null;
+    this.storageLoader = null;
     this.initialLoad = null;
   }
 
   /** Layer 7: hand the store the lazy loader of the relay adapter (call after `attach`). Nothing is fetched until a slice is loaded. */
   attachRelay(load: (() => Promise<RelayAdapter>) | null): void {
     this.relayLoader = load;
+  }
+
+  /** Layer 8: hand the store the lazy loader of the storage adapter (call after `attach`). Nothing is fetched until a frame or a view asks. */
+  attachStorage(load: (() => Promise<StorageAdapter>) | null): void {
+    this.storageLoader = load;
   }
 
   private subscribeStream(): void {
@@ -402,7 +523,10 @@ export class ApiStore {
       this.unsubscribe = null;
       // The watchdog died with the stream: an "open" that nobody is watching any more is a lie.
       const c = this.state.connection;
-      if (c.state === "open") this.commit({ connection: { ...c, state: "closed", disconnected: true } });
+      if (c.state === "open")
+        this.commit({
+          connection: { ...c, state: "closed", disconnected: true },
+        });
     } else {
       this.subscribeStream();
     }
@@ -422,8 +546,20 @@ export class ApiStore {
     const prev = this.state.connection;
     const everOpened = prev.everOpened || state === "open";
     const lastEventAt = info?.lastEventAt ?? prev.lastEventAt;
-    if (prev.state === state && prev.lastEventAt === lastEventAt && prev.everOpened === everOpened) return;
-    this.commit({ connection: { state, lastEventAt, everOpened, disconnected: isDisconnected(state, everOpened) } });
+    if (
+      prev.state === state &&
+      prev.lastEventAt === lastEventAt &&
+      prev.everOpened === everOpened
+    )
+      return;
+    this.commit({
+      connection: {
+        state,
+        lastEventAt,
+        everOpened,
+        disconnected: isDisconnected(state, everOpened),
+      },
+    });
     // A fatal close is usually a lost session: probe so a 401 reaches the shell.
     if (state === "closed" && this.unsubscribe) void this.refreshStatus();
   }
@@ -434,7 +570,12 @@ export class ApiStore {
     const c = this.state.connection;
     const at = this.now();
     if (c.lastEventAt !== at || c.state !== "open") {
-      patch.connection = { state: "open", lastEventAt: at, everOpened: true, disconnected: false };
+      patch.connection = {
+        state: "open",
+        lastEventAt: at,
+        everOpened: true,
+        disconnected: false,
+      };
     }
     let refetchProposals = false;
     let refetchAll = false;
@@ -451,18 +592,24 @@ export class ApiStore {
       }
       case "services":
         if (frame.data && Array.isArray(frame.data.services)) {
-          patch.services = reuse(this.state.services, frame.data.services, byId);
+          patch.services = reuse(
+            this.state.services,
+            frame.data.services,
+            byId,
+          );
           patch.servicesRev = this.state.servicesRev + 1;
         }
         break;
       case "devices":
-        if (frame.data && Array.isArray(frame.data.devices)) patch.devices = reuse(this.state.devices, frame.data.devices, byId);
+        if (frame.data && Array.isArray(frame.data.devices))
+          patch.devices = reuse(this.state.devices, frame.data.devices, byId);
         break;
       case "proposal":
         refetchProposals = true;
         break;
       case "agent":
-        if (frame.data && typeof frame.data.seq === "number") Object.assign(patch, this.activityPatch(frame.data));
+        if (frame.data && typeof frame.data.seq === "number")
+          Object.assign(patch, this.activityPatch(frame.data));
         break;
       case "message":
         // The conversation, if it is open, takes the message at once; the list (last line, unread, state counts) is
@@ -479,13 +626,18 @@ export class ApiStore {
         }
         break;
       case "fabric":
-        if (frame.data && Array.isArray(frame.data.links)) patch.fabric = sameJson(this.state.fabric, frame.data) ? this.state.fabric : frame.data;
+        if (frame.data && Array.isArray(frame.data.links))
+          patch.fabric = sameJson(this.state.fabric, frame.data)
+            ? this.state.fabric
+            : frame.data;
         break;
       case "nearby":
-        if (frame.data && Array.isArray(frame.data.sources)) patch.nearby = sameSources(this.state.nearby, frame.data.sources);
+        if (frame.data && Array.isArray(frame.data.sources))
+          patch.nearby = sameSources(this.state.nearby, frame.data.sources);
         break;
       case "panels":
-        if (frame.data && Array.isArray(frame.data.panels)) patch.panels = reuse(this.state.panels, frame.data.panels, byId);
+        if (frame.data && Array.isArray(frame.data.panels))
+          patch.panels = reuse(this.state.panels, frame.data.panels, byId);
         break;
       case "network_message":
         // Carries no text: refetch what it names. The open conversation takes the tail, the lists follow.
@@ -493,16 +645,34 @@ export class ApiStore {
         break;
       case "relay":
         // A full RelayStatus snapshot (like `fabric`).
-        if (isRelayStatus(frame.data)) patch.relay = sameJson(this.state.relay, frame.data) ? this.state.relay : frame.data;
+        if (isRelayStatus(frame.data))
+          patch.relay = sameJson(this.state.relay, frame.data)
+            ? this.state.relay
+            : frame.data;
         break;
       case "registry":
         // The rows, as a full snapshot.
-        if (frame.data && Array.isArray(frame.data.rows)) patch.registry = reuse(this.state.registry, frame.data.rows, byId);
+        if (frame.data && Array.isArray(frame.data.rows))
+          patch.registry = reuse(this.state.registry, frame.data.rows, byId);
+        break;
+      case "storage":
+        // The frame holds what the housekeeping pass already had (the four budgeted classes, never a figure that needs a walk): fold it into
+        // the slice and read `GET /storage` for the rest. A node that sends none never loads the adapter.
+        if (isStorageStatus(frame.data)) {
+          patch.storage = mergeStorageFrame(this.state.storage, frame.data);
+          void this.refreshStorage();
+        }
         break;
       case "bridge":
         // Full snapshots of whichever part changed.
-        if (frame.data && Array.isArray(frame.data.networks)) patch.networks = reuse(this.state.networks, frame.data.networks, byId);
-        if (frame.data && Array.isArray(frame.data.edges)) patch.edges = reuse(this.state.edges, frame.data.edges, byId);
+        if (frame.data && Array.isArray(frame.data.networks))
+          patch.networks = reuse(
+            this.state.networks,
+            frame.data.networks,
+            byId,
+          );
+        if (frame.data && Array.isArray(frame.data.edges))
+          patch.edges = reuse(this.state.edges, frame.data.edges, byId);
         break;
       case "reset":
         // The first reset after attach is the daemon saying "start from a snapshot". That snapshot is
@@ -521,18 +691,39 @@ export class ApiStore {
   private messagePatch(ev: MessageChangeEvent): Partial<StoreState> {
     const slot = this.state.threadPages[ev.peer];
     if (!slot?.page) return {};
-    const page = applyMessageToPage(slot.page, ev.peer, ev.message, ev.change, this.pageLimits.get(ev.peer) ?? THREAD_PAGE_LIMIT);
+    const page = applyMessageToPage(
+      slot.page,
+      ev.peer,
+      ev.message,
+      ev.change,
+      this.pageLimits.get(ev.peer) ?? THREAD_PAGE_LIMIT,
+    );
     if (!page || page === slot.page) return {};
-    return { threadPages: { ...this.state.threadPages, [ev.peer]: { ...slot, page } } };
+    return {
+      threadPages: { ...this.state.threadPages, [ev.peer]: { ...slot, page } },
+    };
   }
 
   private contactPatch(ev: ContactChangeEvent): Partial<StoreState> {
-    const contacts = ev.change === "removed" ? removeContact(this.state.contacts, ev.contact.node_id) : upsertContact(this.state.contacts, ev.contact);
+    const contacts =
+      ev.change === "removed"
+        ? removeContact(this.state.contacts, ev.contact.node_id)
+        : upsertContact(this.state.contacts, ev.contact);
     const patch: Partial<StoreState> = { contacts };
     // A request that was accepted or a peer that changed: an open conversation follows the flag.
     const slot = this.state.threadPages[ev.contact.node_id];
-    if (slot?.page && slot.page.request !== ev.contact.request && ev.change !== "removed") {
-      patch.threadPages = { ...this.state.threadPages, [ev.contact.node_id]: { ...slot, page: { ...slot.page, request: ev.contact.request } } };
+    if (
+      slot?.page &&
+      slot.page.request !== ev.contact.request &&
+      ev.change !== "removed"
+    ) {
+      patch.threadPages = {
+        ...this.state.threadPages,
+        [ev.contact.node_id]: {
+          ...slot,
+          page: { ...slot.page, request: ev.contact.request },
+        },
+      };
     }
     return patch;
   }
@@ -545,19 +736,26 @@ export class ApiStore {
       status,
       version,
       baselineVersion,
-      versionChanged: baselineVersion !== null && version !== null && version !== baselineVersion,
+      versionChanged:
+        baselineVersion !== null &&
+        version !== null &&
+        version !== baselineVersion,
     };
   }
 
   private activityPatch(ev: AgentEvent): Partial<StoreState> {
-    if (this.state.activity.some((a) => a.seq === ev.seq && a.ts === ev.ts)) return {};
+    if (this.state.activity.some((a) => a.seq === ev.seq && a.ts === ev.ts))
+      return {};
     return { activity: [ev, ...this.state.activity].slice(0, ACTIVITY_RING) };
   }
 
   // --- snapshots ------------------------------------------------------------------------------
   private fail(errors: unknown[]): Partial<StoreMeta> {
     const apiErrors = errors.filter(isApiError);
-    return { needsPair: apiErrors.some((e) => e.unauthenticated), error: apiErrors[0] ?? null };
+    return {
+      needsPair: apiErrors.some((e) => e.unauthenticated),
+      error: apiErrors[0] ?? null,
+    };
   }
 
   /** Reload status, services, devices and proposals. Concurrent calls coalesce into one trailing pass. */
@@ -565,56 +763,84 @@ export class ApiStore {
     const a = this.adapter;
     if (!a) return;
     // Layer 5 reads are optional: an older daemon answers 404, and an adapter without them simply leaves the slice empty.
-    const optional = <T,>(read: (x: Adapter) => Promise<T>): Promise<T> => {
+    const optional = <T>(read: (x: Adapter) => Promise<T>): Promise<T> => {
       try {
         return read(a);
       } catch (e) {
         return Promise.reject(e);
       }
     };
-    const [st, sv, dv, pr, th, ct, fb, nb, pn, nw, eg] = await Promise.allSettled([
-      a.status(),
-      a.services(),
-      a.devices(),
-      a.proposals("all"),
-      optional((x) => x.messages.threads()),
-      optional((x) => x.contacts.list()),
-      optional((x) => x.fabric.status()),
-      optional((x) => x.nearby()),
-      optional((x) => x.panels.list()),
-      optional((x) => x.networks.list()),
-      optional((x) => x.bridge.edges()),
-    ]);
+    const [st, sv, dv, pr, th, ct, fb, nb, pn, nw, eg] =
+      await Promise.allSettled([
+        a.status(),
+        a.services(),
+        a.devices(),
+        a.proposals("all"),
+        optional((x) => x.messages.threads()),
+        optional((x) => x.contacts.list()),
+        optional((x) => x.fabric.status()),
+        optional((x) => x.nearby()),
+        optional((x) => x.panels.list()),
+        optional((x) => x.networks.list()),
+        optional((x) => x.bridge.edges()),
+      ]);
     if (this.adapter !== a) return; // detached or swapped while loading
     const patch: Partial<StoreState> = {};
-    if (st.status === "fulfilled") Object.assign(patch, this.statusPatch(st.value));
+    if (st.status === "fulfilled")
+      Object.assign(patch, this.statusPatch(st.value));
     if (sv.status === "fulfilled") {
       patch.services = reuse(this.state.services, sv.value, byId);
       patch.servicesRev = this.state.servicesRev + 1;
     }
-    if (dv.status === "fulfilled") patch.devices = reuse(this.state.devices, dv.value, byId);
+    if (dv.status === "fulfilled")
+      patch.devices = reuse(this.state.devices, dv.value, byId);
     if (pr.status === "fulfilled") patch.proposals = newestFirst(pr.value);
-    if (th.status === "fulfilled") patch.threads = reuse(this.state.threads, th.value, byPeer);
-    if (ct.status === "fulfilled") patch.contacts = reuse(this.state.contacts, ct.value, byNodeId);
-    if (fb.status === "fulfilled") patch.fabric = sameJson(this.state.fabric, fb.value) ? this.state.fabric : fb.value;
-    if (nb.status === "fulfilled") patch.nearby = sameSources(this.state.nearby, nb.value);
-    if (pn.status === "fulfilled") patch.panels = reuse(this.state.panels, pn.value, byId);
-    if (nw.status === "fulfilled") patch.networks = reuse(this.state.networks, nw.value, byId);
-    if (eg.status === "fulfilled") patch.edges = reuse(this.state.edges, eg.value, byId);
-    const errors = [st, sv, dv, pr].flatMap((r) => (r.status === "rejected" ? [r.reason] : []));
+    if (th.status === "fulfilled")
+      patch.threads = reuse(this.state.threads, th.value, byPeer);
+    if (ct.status === "fulfilled")
+      patch.contacts = reuse(this.state.contacts, ct.value, byNodeId);
+    if (fb.status === "fulfilled")
+      patch.fabric = sameJson(this.state.fabric, fb.value)
+        ? this.state.fabric
+        : fb.value;
+    if (nb.status === "fulfilled")
+      patch.nearby = sameSources(this.state.nearby, nb.value);
+    if (pn.status === "fulfilled")
+      patch.panels = reuse(this.state.panels, pn.value, byId);
+    if (nw.status === "fulfilled")
+      patch.networks = reuse(this.state.networks, nw.value, byId);
+    if (eg.status === "fulfilled")
+      patch.edges = reuse(this.state.edges, eg.value, byId);
+    const errors = [st, sv, dv, pr].flatMap((r) =>
+      r.status === "rejected" ? [r.reason] : [],
+    );
     // A Layer 5 read can only add the pairing signal: its other failures keep the previous slice and stay quiet.
-    for (const r of [th, ct, fb, nb, pn, nw, eg]) if (r.status === "rejected" && isApiError(r.reason) && r.reason.unauthenticated) errors.push(r.reason);
-    patch.meta = { ready: true, ...(this.fail(errors) as { needsPair: boolean; error: ApiError | null }) };
+    for (const r of [th, ct, fb, nb, pn, nw, eg])
+      if (
+        r.status === "rejected" &&
+        isApiError(r.reason) &&
+        r.reason.unauthenticated
+      )
+        errors.push(r.reason);
+    patch.meta = {
+      ready: true,
+      ...(this.fail(errors) as { needsPair: boolean; error: ApiError | null }),
+    };
     this.commit(patch);
     this.syncStream();
     // Conversations that are open follow a reload, with the window they had.
-    for (const peer of Object.keys(this.state.threadPages)) void this.loadThread(peer, this.pageLimits.get(peer));
+    for (const peer of Object.keys(this.state.threadPages))
+      void this.loadThread(peer, this.pageLimits.get(peer));
     // The same for the foreign conversations that are open, and the network lists a view asked for.
-    for (const [conv, slot] of Object.entries(this.state.foreignPages)) void this.loadForeign(slot.network, conv, this.foreignLimits.get(conv));
-    for (const net of Object.keys(this.state.conversations)) void this.refreshConversations(net);
+    for (const [conv, slot] of Object.entries(this.state.foreignPages))
+      void this.loadForeign(slot.network, conv, this.foreignLimits.get(conv));
+    for (const net of Object.keys(this.state.conversations))
+      void this.refreshConversations(net);
     // Layer 7 slices follow a reload only once something loaded them (a frame or a view): a node that never opens a Layer 7 view asks nothing.
     if (this.state.relay !== null) void this.refreshRelay();
     if (this.state.registry !== null) void this.refreshRegistry();
+    // Layer 8: after `reset` the Storage views refetch `/storage` (the datasets listing is the contract's second part).
+    if (this.state.storage !== null) void this.refreshStorage();
   });
 
   refreshStatus = coalesced(async () => {
@@ -628,7 +854,10 @@ export class ApiStore {
       err = e;
     }
     if (this.adapter !== a) return;
-    patch.meta = { ...this.state.meta, ...(err ? this.fail([err]) : { needsPair: false, error: null }) } as StoreMeta;
+    patch.meta = {
+      ...this.state.meta,
+      ...(err ? this.fail([err]) : { needsPair: false, error: null }),
+    } as StoreMeta;
     this.commit(patch);
     this.syncStream();
   });
@@ -638,7 +867,11 @@ export class ApiStore {
     if (!a) return;
     try {
       const services = await a.services();
-      if (this.adapter === a) this.commit({ services: reuse(this.state.services, services, byId), servicesRev: this.state.servicesRev + 1 });
+      if (this.adapter === a)
+        this.commit({
+          services: reuse(this.state.services, services, byId),
+          servicesRev: this.state.servicesRev + 1,
+        });
     } catch {
       /* keep the previous snapshot; the connection state tells the user */
     }
@@ -649,7 +882,8 @@ export class ApiStore {
     if (!a) return;
     try {
       const devices = await a.devices();
-      if (this.adapter === a) this.commit({ devices: reuse(this.state.devices, devices, byId) });
+      if (this.adapter === a)
+        this.commit({ devices: reuse(this.state.devices, devices, byId) });
     } catch {
       /* keep the previous snapshot */
     }
@@ -660,7 +894,8 @@ export class ApiStore {
     if (!a) return;
     try {
       const proposals = await a.proposals("all");
-      if (this.adapter === a) this.commit({ proposals: newestFirst(proposals) });
+      if (this.adapter === a)
+        this.commit({ proposals: newestFirst(proposals) });
     } catch {
       /* keep the previous snapshot */
     }
@@ -673,7 +908,8 @@ export class ApiStore {
     if (!a) return;
     try {
       const threads = await a.messages.threads();
-      if (this.adapter === a) this.commit({ threads: reuse(this.state.threads, threads, byPeer) });
+      if (this.adapter === a)
+        this.commit({ threads: reuse(this.state.threads, threads, byPeer) });
     } catch {
       /* keep the previous list */
     }
@@ -684,7 +920,10 @@ export class ApiStore {
     if (!a) return;
     try {
       const contacts = await a.contacts.list();
-      if (this.adapter === a) this.commit({ contacts: reuse(this.state.contacts, contacts, byNodeId) });
+      if (this.adapter === a)
+        this.commit({
+          contacts: reuse(this.state.contacts, contacts, byNodeId),
+        });
     } catch {
       /* keep the previous list */
     }
@@ -695,7 +934,12 @@ export class ApiStore {
     if (!a) return;
     try {
       const fabric = await a.fabric.status();
-      if (this.adapter === a) this.commit({ fabric: sameJson(this.state.fabric, fabric) ? this.state.fabric : fabric });
+      if (this.adapter === a)
+        this.commit({
+          fabric: sameJson(this.state.fabric, fabric)
+            ? this.state.fabric
+            : fabric,
+        });
     } catch {
       /* keep the previous snapshot */
     }
@@ -706,7 +950,8 @@ export class ApiStore {
     if (!a) return;
     try {
       const sources = await a.nearby();
-      if (this.adapter === a) this.commit({ nearby: sameSources(this.state.nearby, sources) });
+      if (this.adapter === a)
+        this.commit({ nearby: sameSources(this.state.nearby, sources) });
     } catch {
       /* keep the previous snapshot */
     }
@@ -717,7 +962,8 @@ export class ApiStore {
     if (!a) return;
     try {
       const panels = await a.panels.list();
-      if (this.adapter === a) this.commit({ panels: reuse(this.state.panels, panels, byId) });
+      if (this.adapter === a)
+        this.commit({ panels: reuse(this.state.panels, panels, byId) });
     } catch {
       /* keep the previous snapshot */
     }
@@ -729,30 +975,51 @@ export class ApiStore {
    * the same conversation overlap freely: only the newest call's answer is taken, and an answer is laid over what a
    * `message` frame has already added rather than over it (see `mergeThreadPage`).
    */
-  async loadThread(peer: NodeId, limit: number = THREAD_PAGE_LIMIT): Promise<void> {
+  async loadThread(
+    peer: NodeId,
+    limit: number = THREAD_PAGE_LIMIT,
+  ): Promise<void> {
     const a = this.adapter;
     if (!a) return;
     this.pageLimits.set(peer, limit);
     const gen = ++this.loadCounter;
     this.threadGen.set(peer, gen);
     const have = this.state.threadPages[peer];
-    if (!have) this.commit({ threadPages: { ...this.state.threadPages, [peer]: { state: "loading", page: null, error: null } } });
+    if (!have)
+      this.commit({
+        threadPages: {
+          ...this.state.threadPages,
+          [peer]: { state: "loading", page: null, error: null },
+        },
+      });
     try {
       const fetched = await a.messages.thread(peer, { limit });
       if (this.adapter !== a || this.threadGen.get(peer) !== gen) return; // detached, or a newer call is in flight
       const prev = this.state.threadPages[peer];
-      const page = trimPage(mergeThreadPage(prev?.page, fetched), this.pageLimits.get(peer) ?? limit);
-      const slot: ThreadSlot = prev?.page && sameJson(prev.page, page) ? { ...prev, state: "ready", error: null } : { state: "ready", page, error: null };
+      const page = trimPage(
+        mergeThreadPage(prev?.page, fetched),
+        this.pageLimits.get(peer) ?? limit,
+      );
+      const slot: ThreadSlot =
+        prev?.page && sameJson(prev.page, page)
+          ? { ...prev, state: "ready", error: null }
+          : { state: "ready", page, error: null };
       this.commit({ threadPages: { ...this.state.threadPages, [peer]: slot } });
     } catch (e) {
       if (this.adapter !== a || this.threadGen.get(peer) !== gen) return;
       const error = isApiError(e) ? e : null;
       const prev = this.state.threadPages[peer];
-      const next: ThreadSlot = error?.status === 404 ? { state: "missing", page: null, error } : { state: prev?.page ? "ready" : "error", page: prev?.page ?? null, error };
+      const next: ThreadSlot =
+        error?.status === 404
+          ? { state: "missing", page: null, error }
+          : {
+              state: prev?.page ? "ready" : "error",
+              page: prev?.page ?? null,
+              error,
+            };
       this.commit({ threadPages: { ...this.state.threadPages, [peer]: next } });
     }
   }
-
 
   // --- Layer 7 snapshots (relay status, registry) -------------------------------------------------------------------------
 
@@ -762,7 +1029,10 @@ export class ApiStore {
     if (!a || !load) return;
     try {
       const relay = await (await load()).status();
-      if (this.adapter === a) this.commit({ relay: sameJson(this.state.relay, relay) ? this.state.relay : relay });
+      if (this.adapter === a)
+        this.commit({
+          relay: sameJson(this.state.relay, relay) ? this.state.relay : relay,
+        });
     } catch {
       /* keep the previous snapshot (an older node answers 404 and the slice stays as it was) */
     }
@@ -774,9 +1044,29 @@ export class ApiStore {
     if (!a || !load) return;
     try {
       const rows = await (await load()).registry();
-      if (this.adapter === a) this.commit({ registry: reuse(this.state.registry, rows, byId) });
+      if (this.adapter === a)
+        this.commit({ registry: reuse(this.state.registry, rows, byId) });
     } catch {
       /* keep the previous snapshot */
+    }
+  });
+
+  // --- Layer 8 snapshot (storage status) ----------------------------------------------------------------------------------
+
+  refreshStorage = coalesced(async () => {
+    const a = this.adapter;
+    const load = this.storageLoader;
+    if (!a || !load) return;
+    try {
+      const storage = await (await load()).status();
+      if (this.adapter === a)
+        this.commit({
+          storage: sameJson(this.state.storage, storage)
+            ? this.state.storage
+            : storage,
+        });
+    } catch {
+      /* keep the previous snapshot (an older node answers 404 and the slice stays as it was) */
     }
   });
 
@@ -787,7 +1077,8 @@ export class ApiStore {
     if (!a) return;
     try {
       const networks = await a.networks.list();
-      if (this.adapter === a) this.commit({ networks: reuse(this.state.networks, networks, byId) });
+      if (this.adapter === a)
+        this.commit({ networks: reuse(this.state.networks, networks, byId) });
     } catch {
       /* keep the previous list */
     }
@@ -798,7 +1089,8 @@ export class ApiStore {
     if (!a) return;
     try {
       const edges = await a.bridge.edges();
-      if (this.adapter === a) this.commit({ edges: reuse(this.state.edges, edges, byId) });
+      if (this.adapter === a)
+        this.commit({ edges: reuse(this.state.edges, edges, byId) });
     } catch {
       /* keep the previous list */
     }
@@ -809,7 +1101,12 @@ export class ApiStore {
     if (!a) return;
     try {
       const settings = await a.bridge.settings();
-      if (this.adapter === a) this.commit({ bridgeSettings: sameJson(this.state.bridgeSettings, settings) ? this.state.bridgeSettings : settings });
+      if (this.adapter === a)
+        this.commit({
+          bridgeSettings: sameJson(this.state.bridgeSettings, settings)
+            ? this.state.bridgeSettings
+            : settings,
+        });
     } catch {
       /* keep the previous snapshot */
     }
@@ -820,7 +1117,10 @@ export class ApiStore {
     if (!a) return;
     try {
       const components = await a.bridge.components();
-      if (this.adapter === a) this.commit({ components: reuse(this.state.components, components, byId) });
+      if (this.adapter === a)
+        this.commit({
+          components: reuse(this.state.components, components, byId),
+        });
     } catch {
       /* keep the previous list */
     }
@@ -831,7 +1131,12 @@ export class ApiStore {
     if (!a) return;
     try {
       const transport = await a.transport.status();
-      if (this.adapter === a) this.commit({ transport: sameJson(this.state.transport, transport) ? this.state.transport : transport });
+      if (this.adapter === a)
+        this.commit({
+          transport: sameJson(this.state.transport, transport)
+            ? this.state.transport
+            : transport,
+        });
     } catch {
       /* keep the previous snapshot */
     }
@@ -851,7 +1156,13 @@ export class ApiStore {
     if (!a) return;
     try {
       const list = await a.networks.conversations(net);
-      if (this.adapter === a) this.commit({ conversations: { ...this.state.conversations, [net]: sameConversations(this.state.conversations[net], list) } });
+      if (this.adapter === a)
+        this.commit({
+          conversations: {
+            ...this.state.conversations,
+            [net]: sameConversations(this.state.conversations[net], list),
+          },
+        });
     } catch {
       /* keep the previous list */
     }
@@ -861,27 +1172,59 @@ export class ApiStore {
    * Load one foreign conversation (the newest `limit` rows, default 100), keyed by its `fc-…` id. Overlapping calls for the same
    * conversation are fine: only the newest call's answer is taken, laid over what a frame already added (`mergeForeignPage`).
    */
-  async loadForeign(net: NetworkId, conv: string, limit: number = FOREIGN_PAGE_LIMIT): Promise<void> {
+  async loadForeign(
+    net: NetworkId,
+    conv: string,
+    limit: number = FOREIGN_PAGE_LIMIT,
+  ): Promise<void> {
     const a = this.adapter;
     if (!a) return;
     this.foreignLimits.set(conv, limit);
     const gen = ++this.loadCounter;
     this.foreignGen.set(conv, gen);
     const have = this.state.foreignPages[conv];
-    if (!have) this.commit({ foreignPages: { ...this.state.foreignPages, [conv]: { state: "loading", network: net, page: null, error: null } } });
+    if (!have)
+      this.commit({
+        foreignPages: {
+          ...this.state.foreignPages,
+          [conv]: { state: "loading", network: net, page: null, error: null },
+        },
+      });
     try {
       const fetched = await a.networks.conversation(net, conv, { limit });
       if (this.adapter !== a || this.foreignGen.get(conv) !== gen) return;
       const prev = this.state.foreignPages[conv];
-      const page = trimForeign(mergeForeignPage(prev?.page, { conversation: fetched.conversation, messages: fetched.messages, more: fetched.more }), this.foreignLimits.get(conv) ?? limit);
-      const slot: ForeignSlot = prev?.page && sameJson(prev.page, page) ? { ...prev, state: "ready", error: null } : { state: "ready", network: net, page, error: null };
-      this.commit({ foreignPages: { ...this.state.foreignPages, [conv]: slot } });
+      const page = trimForeign(
+        mergeForeignPage(prev?.page, {
+          conversation: fetched.conversation,
+          messages: fetched.messages,
+          more: fetched.more,
+        }),
+        this.foreignLimits.get(conv) ?? limit,
+      );
+      const slot: ForeignSlot =
+        prev?.page && sameJson(prev.page, page)
+          ? { ...prev, state: "ready", error: null }
+          : { state: "ready", network: net, page, error: null };
+      this.commit({
+        foreignPages: { ...this.state.foreignPages, [conv]: slot },
+      });
     } catch (e) {
       if (this.adapter !== a || this.foreignGen.get(conv) !== gen) return;
       const error = isApiError(e) ? e : null;
       const prev = this.state.foreignPages[conv];
-      const next: ForeignSlot = error?.status === 404 ? { state: "missing", network: net, page: null, error } : { state: prev?.page ? "ready" : "error", network: net, page: prev?.page ?? null, error };
-      this.commit({ foreignPages: { ...this.state.foreignPages, [conv]: next } });
+      const next: ForeignSlot =
+        error?.status === 404
+          ? { state: "missing", network: net, page: null, error }
+          : {
+              state: prev?.page ? "ready" : "error",
+              network: net,
+              page: prev?.page ?? null,
+              error,
+            };
+      this.commit({
+        foreignPages: { ...this.state.foreignPages, [conv]: next },
+      });
     }
   }
 
@@ -892,7 +1235,12 @@ export class ApiStore {
     const gone = new Set(ids);
     const messages = slot.page.messages.filter((m) => !gone.has(m.id));
     if (messages.length === slot.page.messages.length) return;
-    this.commit({ foreignPages: { ...this.state.foreignPages, [conv]: { ...slot, page: { ...slot.page, messages } } } });
+    this.commit({
+      foreignPages: {
+        ...this.state.foreignPages,
+        [conv]: { ...slot, page: { ...slot.page, messages } },
+      },
+    });
   }
 
   /**
@@ -916,7 +1264,11 @@ export class ApiStore {
    * shows unread the moment the page becomes visible, so the node counts it read, then refreshes that network's list. No timer.
    */
   private watchVisibility(): void {
-    if (typeof document === "undefined" || typeof document.addEventListener !== "function") return;
+    if (
+      typeof document === "undefined" ||
+      typeof document.addEventListener !== "function"
+    )
+      return;
     const doc = document;
     const onVisible = () => {
       try {
@@ -927,7 +1279,8 @@ export class ApiStore {
       void this.markOpenRead();
     };
     doc.addEventListener("visibilitychange", onVisible);
-    this.unwatchVisibility = () => doc.removeEventListener("visibilitychange", onVisible);
+    this.unwatchVisibility = () =>
+      doc.removeEventListener("visibilitychange", onVisible);
   }
   private async markOpenRead(): Promise<void> {
     const a = this.adapter;
@@ -935,17 +1288,26 @@ export class ApiStore {
     for (const conv of this.openConvs.keys()) {
       const slot = this.state.foreignPages[conv];
       if (!slot?.page) continue;
-      const listed = this.state.conversations[slot.network]?.find((c) => c.id === conv);
-      if (Math.max(listed?.unread ?? 0, slot.page.conversation.unread) <= 0) continue;
+      const listed = this.state.conversations[slot.network]?.find(
+        (c) => c.id === conv,
+      );
+      if (Math.max(listed?.unread ?? 0, slot.page.conversation.unread) <= 0)
+        continue;
       await this.loadForeign(slot.network, conv, this.foreignLimits.get(conv));
-      if (this.adapter === a && this.state.conversations[slot.network] !== undefined) await this.refreshConversations(slot.network);
+      if (
+        this.adapter === a &&
+        this.state.conversations[slot.network] !== undefined
+      )
+        await this.refreshConversations(slot.network);
     }
   }
   /** Is somebody looking at this conversation right now (a view is mounted and the page is not hidden)? */
   private isReading(conv: string): boolean {
     if (!this.openConvs.has(conv)) return false;
     try {
-      return typeof document === "undefined" || document.visibilityState !== "hidden";
+      return (
+        typeof document === "undefined" || document.visibilityState !== "hidden"
+      );
     } catch {
       return true;
     }
@@ -963,9 +1325,15 @@ export class ApiStore {
   private networkFrame(ev: NetworkMessageEvent): void {
     const slot = this.state.foreignPages[ev.conv];
     const held = this.state.conversations[ev.network] !== undefined;
-    const reading = ev.change === "new" && !!slot?.page && this.isReading(ev.conv);
+    const reading =
+      ev.change === "new" && !!slot?.page && this.isReading(ev.conv);
     if (slot?.page) {
-      if (ev.change === "conversation") void this.loadForeign(ev.network, ev.conv, this.foreignLimits.get(ev.conv));
+      if (ev.change === "conversation")
+        void this.loadForeign(
+          ev.network,
+          ev.conv,
+          this.foreignLimits.get(ev.conv),
+        );
       else void this.refreshForeignTail(ev);
     }
     // A read in progress refreshes the list itself once the node has counted it read; a list read now would show the old count.
@@ -981,22 +1349,46 @@ export class ApiStore {
     // A new text on a conversation somebody is reading: the node counts a read without `since_seq` as the person reading it.
     if (ev.change === "new" && this.isReading(conv)) {
       await this.loadForeign(slot.network, conv, this.foreignLimits.get(conv));
-      if (this.adapter === a && this.state.conversations[slot.network] !== undefined) await this.refreshConversations(slot.network);
+      if (
+        this.adapter === a &&
+        this.state.conversations[slot.network] !== undefined
+      )
+        await this.refreshConversations(slot.network);
       return;
     }
     const held = slot.page.messages;
     const row = ev.id ? held.find((m) => m.id === ev.id) : undefined;
     const since = row ? Math.max(0, row.seq - 1) : topSeq(held);
     try {
-      const tail = await a.networks.conversation(slot.network, conv, { sinceSeq: since, limit: FOREIGN_PAGE_LIMIT });
+      const tail = await a.networks.conversation(slot.network, conv, {
+        sinceSeq: since,
+        limit: FOREIGN_PAGE_LIMIT,
+      });
       if (this.adapter !== a) return;
       const cur = this.state.foreignPages[conv];
       if (!cur?.page) return;
       // More than a tail's worth arrived: the window itself is stale.
-      if (tail.more) return void this.loadForeign(slot.network, conv, this.foreignLimits.get(conv));
-      const merged = trimForeign(applyForeignTail(cur.page, { conversation: tail.conversation, messages: tail.messages, more: tail.more }), this.foreignLimits.get(conv) ?? FOREIGN_PAGE_LIMIT);
+      if (tail.more)
+        return void this.loadForeign(
+          slot.network,
+          conv,
+          this.foreignLimits.get(conv),
+        );
+      const merged = trimForeign(
+        applyForeignTail(cur.page, {
+          conversation: tail.conversation,
+          messages: tail.messages,
+          more: tail.more,
+        }),
+        this.foreignLimits.get(conv) ?? FOREIGN_PAGE_LIMIT,
+      );
       if (sameJson(cur.page, merged)) return;
-      this.commit({ foreignPages: { ...this.state.foreignPages, [conv]: { ...cur, state: "ready", page: merged, error: null } } });
+      this.commit({
+        foreignPages: {
+          ...this.state.foreignPages,
+          [conv]: { ...cur, state: "ready", page: merged, error: null },
+        },
+      });
     } catch {
       /* the next frame or a reload brings it */
     }
@@ -1007,7 +1399,13 @@ export class ApiStore {
     const waiting = this.tailEvents.get(ev.conv);
     // A frame that names a row we hold must not be replaced by a later nameless one: the state change sits below the newest `seq`.
     // A `new` text that is waiting stays `new` when a state frame replaces it: the read that marks the conversation read is still owed.
-    if (!waiting || ev.id) this.tailEvents.set(ev.conv, waiting?.change === "new" && ev.change !== "new" ? { ...ev, change: "new" } : ev);
+    if (!waiting || ev.id)
+      this.tailEvents.set(
+        ev.conv,
+        waiting?.change === "new" && ev.change !== "new"
+          ? { ...ev, change: "new" }
+          : ev,
+      );
     return this.tailLane(ev.conv);
   }
 
@@ -1026,22 +1424,81 @@ export class ApiStore {
 
 function isMessageFrame(d: unknown): d is MessageChangeEvent {
   const x = d as Partial<MessageChangeEvent> | null;
-  return !!x && typeof x === "object" && typeof x.peer === "string" && !!x.message && typeof x.message === "object" && typeof x.message.id === "string";
+  return (
+    !!x &&
+    typeof x === "object" &&
+    typeof x.peer === "string" &&
+    !!x.message &&
+    typeof x.message === "object" &&
+    typeof x.message.id === "string"
+  );
 }
 
 function isNetworkFrame(d: unknown): d is NetworkMessageEvent {
   const x = d as Partial<NetworkMessageEvent> | null;
-  return !!x && typeof x === "object" && typeof x.network === "string" && typeof x.conv === "string" && typeof x.change === "string";
+  return (
+    !!x &&
+    typeof x === "object" &&
+    typeof x.network === "string" &&
+    typeof x.conv === "string" &&
+    typeof x.change === "string"
+  );
 }
 
 function isContactFrame(d: unknown): d is ContactChangeEvent {
   const x = d as Partial<ContactChangeEvent> | null;
-  return !!x && typeof x === "object" && !!x.contact && typeof x.contact === "object" && typeof x.contact.node_id === "string";
+  return (
+    !!x &&
+    typeof x === "object" &&
+    !!x.contact &&
+    typeof x.contact === "object" &&
+    typeof x.contact.node_id === "string"
+  );
 }
 
 function isRelayStatus(d: unknown): d is RelayStatus {
   const x = d as Partial<RelayStatus> | null;
-  return !!x && typeof x === "object" && !!x.gateway && typeof x.gateway === "object" && Array.isArray(x.paired_hubs);
+  return (
+    !!x &&
+    typeof x === "object" &&
+    !!x.gateway &&
+    typeof x.gateway === "object" &&
+    Array.isArray(x.paired_hubs)
+  );
+}
+
+function isStorageStatus(d: unknown): d is StorageStatus {
+  const x = d as Partial<StorageStatus> | null;
+  return (
+    !!x &&
+    typeof x === "object" &&
+    !!x.disk &&
+    typeof x.disk === "object" &&
+    !!x.keep &&
+    typeof x.keep === "object" &&
+    Array.isArray(x.classes) &&
+    Array.isArray(x.notices)
+  );
+}
+
+/**
+ * A `storage` frame over what the slice holds: the frame's classes replace the budgeted ones in place, the classes only a request can
+ * measure (`datasets`, `updates`, `components`, `bridge`, `kb`) and the `settings` stay as the last `GET /storage` left them.
+ */
+export function mergeStorageFrame(
+  prev: StorageStatus | null,
+  frame: StorageStatus,
+): StorageStatus {
+  if (!prev) return frame;
+  const byClass = new Map(frame.classes.map((c) => [c.id, c] as const));
+  const kept = prev.classes.map((c) => byClass.get(c.id) ?? c);
+  const added = frame.classes.filter(
+    (c) => !prev.classes.some((p) => p.id === c.id),
+  );
+  const out: StorageStatus = { ...frame, classes: [...kept, ...added] };
+  if (frame.settings === undefined && prev.settings !== undefined)
+    out.settings = prev.settings;
+  return sameJson(prev, out) ? prev : out;
 }
 
 /** The app-wide store. Tests construct their own ApiStore. */

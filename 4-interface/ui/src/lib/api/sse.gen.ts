@@ -21,7 +21,8 @@ export type EventsFrame =
   | { event: "network_message"; data: Schemas["SseNetworkMessage"] }
   | { event: "bridge"; data: Schemas["SseBridge"] }
   | { event: "relay"; data: Schemas["SseRelay"] }
-  | { event: "registry"; data: Schemas["SseRegistry"] };
+  | { event: "registry"; data: Schemas["SseRegistry"] }
+  | { event: "storage"; data: Schemas["SseStorage"] };
 
 /** Frames on the `POST /api/v1/chat` response stream. */
 export type ChatFrame =
@@ -33,7 +34,7 @@ export type ChatFrame =
 export type EventsEventName = EventsFrame["event"];
 export type ChatEventName = ChatFrame["event"];
 
-export const EVENTS_EVENT_NAMES = ["status", "services", "devices", "proposal", "agent", "reset", "message", "contact", "fabric", "nearby", "panels", "network_message", "bridge", "relay", "registry"] as const;
+export const EVENTS_EVENT_NAMES = ["status", "services", "devices", "proposal", "agent", "reset", "message", "contact", "fabric", "nearby", "panels", "network_message", "bridge", "relay", "registry", "storage"] as const;
 export const CHAT_EVENT_NAMES = ["token", "tool", "done", "error"] as const;
 
 // Convenience aliases for the schemas the app uses.
@@ -185,6 +186,25 @@ export type NearbyEvidence = Schemas["NearbyEvidence"];
 export type NearbyEvidenceTransport = Schemas["NearbyEvidenceTransport"];
 export type RelayEvent = Schemas["SseRelay"];
 export type RegistryEvent = Schemas["SseRegistry"];
+export type StorageStatus = Schemas["StorageStatus"];
+export type StorageClassId = Schemas["StorageClassId"];
+export type StorageClass = Schemas["StorageClass"];
+export type StorageWalk = Schemas["StorageWalk"];
+export type StorageDisk = Schemas["StorageDisk"];
+export type StorageDiskOrigin = Schemas["StorageDiskOrigin"];
+export type StorageKeep = Schemas["StorageKeep"];
+export type StorageNodeState = Schemas["StorageNodeState"];
+export type StorageIntegrity = Schemas["StorageIntegrity"];
+export type StorageIntegrityState = Schemas["StorageIntegrityState"];
+export type StorageNotice = Schemas["StorageNotice"];
+export type StorageStore = Schemas["StorageStore"];
+export type StorageOrigin = Schemas["StorageOrigin"];
+export type StorageSettings = Schemas["StorageSettings"];
+export type StorageSettingsPatch = Schemas["StorageSettingsPatch"];
+export type StorageExportOfferRequest = Schemas["StorageExportOfferRequest"];
+export type UpdateWithoutCopyRequest = Schemas["UpdateWithoutCopyRequest"];
+export type StartEmptyRequest = Schemas["StartEmptyRequest"];
+export type StorageEvent = Schemas["SseStorage"];
 export type ProblemCode = Schemas["Problem"]["code"];
 
 // Enum tuples (runtime copies of the contract enums).
@@ -195,7 +215,7 @@ export const DEVICE_KINDS = ["radio", "bluetooth", "companion", "node", "analog"
 export const DEVICE_STATES = ["connected", "disconnected", "needs_setup", "error"] as const;
 export const DEVICE_TRANSPORTS = ["usb-serial", "spi", "bluetooth", "wifi", "lan", "tcp", "audio", "unknown"] as const;
 export const DECISIONS = ["accepted", "dismissed"] as const;
-export const PROBLEM_CODES = ["unauthenticated", "loopback_only", "lan_read_only", "agent_unavailable", "model_unavailable", "bad_request", "not_found", "rate_limited", "already_decided", "not_supervised", "settings_locked", "offer_stale", "needs_hub", "upstream_error", "internal", "port_busy", "panel_ticket_expired", "restore_pending", "consent_required", "oversize", "component_unavailable", "unsupported_action", "no_such_transport", "licensed_board", "metered_cap", "lan_off", "pair_role_mismatch"] as const;
+export const PROBLEM_CODES = ["unauthenticated", "loopback_only", "lan_read_only", "agent_unavailable", "model_unavailable", "bad_request", "not_found", "rate_limited", "already_decided", "not_supervised", "settings_locked", "offer_stale", "needs_hub", "upstream_error", "internal", "port_busy", "panel_ticket_expired", "restore_pending", "consent_required", "oversize", "component_unavailable", "unsupported_action", "no_such_transport", "licensed_board", "metered_cap", "lan_off", "pair_role_mismatch", "insufficient_space", "untrusted_publisher", "job_running", "store_unavailable", "range_not_satisfiable"] as const;
 export const DEVICE_ACTIONS = ["rename", "forget", "agent", "identify", "pair", "authorize", "flash"] as const;
 export const MESSAGE_STATES = ["queued", "sent", "relayed", "delivered"] as const;
 export const MESSAGE_DIRS = ["own", "in"] as const;
@@ -213,12 +233,19 @@ export const FOREIGN_REASON_CODES = ["region_unset", "no_channel", "too_large", 
 export const NETWORK_STATES = ["live", "not_set", "error", "disabled"] as const;
 export const COMPONENT_STATES = ["declared", "cached", "installed", "running", "disabled"] as const;
 export const SEND_MODES = ["refuse", "split"] as const;
-export const PROPOSAL_KINDS = ["diagnose", "propose", "patch", "chat", "message", "bridge_message", "bridge_edge", "device", "relay"] as const;
+export const PROPOSAL_KINDS = ["diagnose", "propose", "patch", "chat", "message", "bridge_message", "bridge_edge", "device", "relay", "storage"] as const;
 export const NETWORK_MESSAGE_CHANGES = ["new", "state", "conversation"] as const;
-export const CONSENT_ACTIONS = ["edge_enable", "edge_resume", "component_enable", "ham_confirm", "uplink_send", "carrier_enable", "pair_plain", "gateway_bit", "origin_serve"] as const;
+export const CONSENT_ACTIONS = ["edge_enable", "edge_resume", "component_enable", "ham_confirm", "uplink_send", "carrier_enable", "pair_plain", "gateway_bit", "origin_serve", "dataset_fetch", "dataset_override", "datasets_serve", "components_serve", "update_without_copy", "store_start_empty"] as const;
 export const RELAY_GATEWAY_STATES = ["gateway_none", "carrier_ok", "carrier_pending", "gateway_off"] as const;
 export const PAIR_ROLES = ["peer", "leaf", "gateway"] as const;
 export const PAIR_VIAS = ["tcp", "carrier"] as const;
 export const PAIR_TLS = ["rpk", "plain", "none"] as const;
 export const REGISTRY_ANSWERS = ["hint", "signed"] as const;
 export const EVIDENCE_TRANSPORTS = ["tcp-lan", "hub", "carrier"] as const;
+export const STORAGE_CLASS_IDS = ["fabric", "agent", "heal", "logs", "datasets", "updates", "components", "bridge", "kb"] as const;
+export const STORAGE_STORES = ["fabric", "node_state"] as const;
+export const STORAGE_NOTICE_KINDS = ["unreadable_agent_files", "update_refused_space", "set_aside_store"] as const;
+export const STORAGE_KEEP_RULES = ["termux", "hub", "linux", "user"] as const;
+export const STORAGE_INTEGRITY_STATES = ["checking", "ok", "failed", null] as const;
+export const STORAGE_NODE_STATES = ["open", "closed", "unavailable"] as const;
+export const EXPORT_OFFER_CLASSES = ["fabric", "agent", "heal"] as const;

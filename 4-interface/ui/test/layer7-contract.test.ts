@@ -61,16 +61,16 @@ const NEARBY_111 = {
 };
 
 describe("Layer 7 enums (the pins an enum bump touches)", () => {
-  it("Proposal.kind is 9 with `relay` last; NearbySource.kind gained `111`", () => {
-    expect([...PROPOSAL_KINDS]).toEqual(["diagnose", "propose", "patch", "chat", "message", "bridge_message", "bridge_edge", "device", "relay"]);
+  it("Proposal.kind is 9 with `relay` last, as Layer 7 left it (a later layer appends: `test/layer8-contract.test.ts` pins that); NearbySource.kind gained `111`", () => {
+    expect([...PROPOSAL_KINDS].slice(0, 9)).toEqual(["diagnose", "propose", "patch", "chat", "message", "bridge_message", "bridge_edge", "device", "relay"]);
     expect([...NEARBY_KINDS]).toEqual(["meshtastic", "reticulum", "111"]);
   });
-  it("Problem.code appends exactly the five codes; `needs_hub` and `settings_locked` already existed", () => {
-    expect([...PROBLEM_CODES].slice(-5)).toEqual(["no_such_transport", "licensed_board", "metered_cap", "lan_off", "pair_role_mismatch"]);
+  it("Problem.code appends exactly the five codes (the prefix Layer 7 left); `needs_hub` and `settings_locked` already existed", () => {
+    expect([...PROBLEM_CODES].slice(22, 27)).toEqual(["no_such_transport", "licensed_board", "metered_cap", "lan_off", "pair_role_mismatch"]);
     for (const c of ["needs_hub", "settings_locked", "unsupported_action", "component_unavailable", "consent_required", "rate_limited", "loopback_only"]) expect(PROBLEM_CODES as readonly string[]).toContain(c);
   });
-  it("ConsentRequired.action appends the four, in order", () => {
-    expect([...CONSENT_ACTIONS]).toEqual(["edge_enable", "edge_resume", "component_enable", "ham_confirm", "uplink_send", "carrier_enable", "pair_plain", "gateway_bit", "origin_serve"]);
+  it("ConsentRequired.action appends the four, in order (the prefix Layer 7 left)", () => {
+    expect([...CONSENT_ACTIONS].slice(0, 9)).toEqual(["edge_enable", "edge_resume", "component_enable", "ham_confirm", "uplink_send", "carrier_enable", "pair_plain", "gateway_bit", "origin_serve"]);
   });
   it("evidence transports are the closed set tcp-lan | hub | carrier", () => {
     expect([...EVIDENCE_TRANSPORTS]).toEqual(["tcp-lan", "hub", "carrier"]);
@@ -89,7 +89,7 @@ describe("Layer 7 enums (the pins an enum bump touches)", () => {
   it("the SSE map appends `relay` and `registry` after the Layer 6 events; the earlier thirteen are untouched", () => {
     expect(sse.events.relay).toBe("SseRelay");
     expect(sse.events.registry).toBe("SseRegistry");
-    expect([...EVENTS_EVENT_NAMES]).toEqual([
+    expect([...EVENTS_EVENT_NAMES].slice(0, 15)).toEqual([
       "status", "services", "devices", "proposal", "agent", "reset", "message", "contact", "fabric", "nearby", "panels", "network_message", "bridge", "relay", "registry",
     ]);
   });

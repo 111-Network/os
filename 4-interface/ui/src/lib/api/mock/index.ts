@@ -45,6 +45,8 @@ import { finalSentence, pickReply, tokenize } from "./chat";
 import { createBridgeMock } from "./bridge";
 import type { RelayAdapter } from "../relay";
 import { createRelayMock, type RelayRoutes } from "./relay";
+import type { StorageAdapter } from "../storage";
+import { createStorageMock, type StorageRoutes } from "./storage";
 import { buildFixtures, iso, layersRunning, logLine } from "./fixtures";
 import { HUB, MOCK_HUB_ADDRESS, MOCK_REASONS, buildNearby, buildPanels, cancelQueued, fabricRow, hex64, hubBundleText, makeContact, meshtasticLiveRow, pageOf, threadsOf } from "./messaging";
 import { cardFor } from "./qr";
@@ -81,6 +83,9 @@ export interface MockControls {
   /** Layer 7: the relay adapter over the same bus (`getRelay()` in ../index.ts returns it for a mock page), and its mock controls. */
   readonly relay: RelayAdapter;
   readonly relayControl: RelayRoutes["control"];
+  /** Layer 8: the storage adapter over the same bus (`getStorage()` in ../index.ts returns it for a mock page), and its mock controls. */
+  readonly storage: StorageAdapter;
+  readonly storageControl: StorageRoutes["control"];
   dispose(): void;
 }
 
@@ -400,6 +405,24 @@ export function createMockAdapter(opts: MockOptions = {}): MockAdapter {
     browseRegistry: () => rest(() => R.browseRegistry()),
     nearbyHops: () => rest(() => R.nearbyHops()),
     updateOrigins: () => rest(() => R.updateOrigins()),
+  };
+
+  // --- Layer 8: storage status, settings, export offers, store-state writes (mock/storage.ts) --------------------------------------
+  const ST = createStorageMock({
+    publish: (f) => bus.publish(f),
+    loopback: () => state.auth.loopback,
+    hub: () => state.messaging.fabric.settings.hub_role === true,
+    lan: () => state.settings.lan_enabled,
+    nodeId: () => state.status.node.node_id ?? undefined,
+  });
+  const storage: StorageAdapter = {
+    kind: "mock",
+    status: () => rest(() => ST.status()),
+    patchSettings: (patch, acceptWarning) => rest(() => ST.patchSettings(patch, acceptWarning)),
+    answerExportOffer: (cls) => rest(() => ST.answerExportOffer(cls)).then(() => undefined),
+    acceptUpdateWithoutCopy: (release, store, acceptWarning) => rest(() => ST.acceptUpdateWithoutCopy(release, store, acceptWarning)).then(() => undefined),
+    deleteSetAside: (file) => rest(() => ST.deleteSetAside(file)).then(() => undefined),
+    startEmpty: (store, acceptWarning) => rest(() => ST.startEmpty(store, acceptWarning)).then(() => undefined),
   };
 
   const ctx: ScriptContext = {
@@ -1198,6 +1221,8 @@ export function createMockAdapter(opts: MockOptions = {}): MockAdapter {
     bridgeReceive: (conv, sender, text, o) => B.receive(conv, sender, text, o),
     relay,
     relayControl: R.control,
+    storage,
+    storageControl: ST.control,
     dispose() {
       disposed = true;
       bus.stop();

@@ -30,7 +30,12 @@ the `x-sse-events` map) into `ui/src/lib/api/types.gen.ts` — never hand-edited
   snapshots). After `reset` the Layer 5 views also refetch `/fabric`, `/messages/threads`, `/contacts`,
   `/nearby` and `/panels`. Layer 6 adds `network_message` and `bridge` (below); after `reset` its views also refetch
   `/networks`, `/bridge/edges` and `/transport`. Layer 7 adds `relay` (a full `RelayStatus` on change) and `registry` (`{rows}`, a full
-  snapshot); after `reset` its views also refetch `/relay` and `/registry` (the store re-reads a slice only once something loaded it).
+  snapshot); after `reset` its views also refetch `/relay` and `/registry` (the store re-reads a slice only once something loaded it). Layer 8 adds `storage` (§16.3): the fields the housekeeping pass
+  already holds, `{schema, disk, keep, node_state, integrity, classes, notices}`, with `classes` the four budgeted ones (`fabric`, `agent`, `heal`,
+  `logs`), never a figure that needs a walk, and sent only on a change of `disk_low`, `store_full`, a class's `full`, `node_state.state` to or from
+  `unavailable` (or its `reason`), `integrity`, or after a reclaim: an open or a close of the node-state store on use sends none, and no timer sends
+  one. The page refetches `GET /storage` on the frame for the rest; after `reset` the Layer 8 views refetch `/storage` (a loaded slice only). Its
+  second part adds the `dataset` frame, coalesced per job (at most one per 5 s tick while it runs, plus one on each state change and at its end).
 - **Layer 5 additions (Messaging & Data; `os/5-messaging/README.md` §15, D20) — additive under `/api/v1`:**
   - *Routes:* `GET /messages/threads`, `GET /messages/threads/{peer}`, `POST /messages`, `POST /messages/{id}/retry`,
     `GET|POST /contacts`, `GET|PATCH|DELETE /contacts/{id}`, `GET /contacts/me/card`, `GET /fabric`,
@@ -46,8 +51,9 @@ the `x-sse-events` map) into `ui/src/lib/api/types.gen.ts` — never hand-edited
     `POST /messages` always answers 202 and never promises delivery. The agent does not call it: it proposes
     (`kind: message`) and the human accepts in the UI. Peer-authored strings (`Message.text`, `NearbyNode.*` names) are
     untrusted: text-only rendering.
-  - *Writes that are loopback-only* (403 `loopback_only` otherwise): `PATCH /fabric/settings`, `POST /fabric/hub/offer`.
-    The rest follow the usual rule (loopback or a paired session).
+  - *Writes that are loopback-only* (403 `loopback_only` otherwise): `PATCH /fabric/settings`, `POST /fabric/hub/offer`; Layer 7 adds
+    `POST /relay/pair/offer`, `POST /relay/pair`, `DELETE /relay/paired/{node_id}` (below); Layer 8 adds `PATCH /storage/settings`,
+    `DELETE /storage/set-aside/{file}` and `POST /storage/start-empty` (below). The rest follow the usual rule (loopback or a paired session).
   - *Problem codes:* `port_busy` (409 on `identify` when the port has another owner), `panel_ticket_expired` (403, sent
     by a **panel listener** on its own port, not by `/api/v1`: a spent or expired ticket without a cookie),
     `upstream_error` (502: a panel shim whose upstream is down, a hub that is unreachable or refuses, meshmud that did not
@@ -207,6 +213,44 @@ the `x-sse-events` map) into `ui/src/lib/api/types.gen.ts` — never hand-edited
        actions above.
   - *The UI seam:* the Layer 7 adapter is `ui/src/lib/api/relay.ts` (`RelayAdapter`, `createHttpRelay`), reached through `getRelay()` in
     `lib/api/index.ts` and imported dynamically, so none of it is in the eager chunk; the dev mock's relay is `adapter.mock.relay`.
+- **Layer 8 additions, part 1 (Storage & Shared State; `os/8-storage/README.md` §16, D34, D38) — additive under `/api/v1`; the dataset routes and shapes are the second part:**
+  - *Routes:* `GET /storage` (`StorageStatus`), `PATCH /storage/settings` (a partial `StorageSettings` plus `accept_warning`), `POST /storage/export-offer`
+    (`{class: fabric|agent|heal}` → 204), `POST /storage/update-without-copy` (`{release, store, accept_warning?}` → 204), `DELETE /storage/set-aside/{file}`
+    (→ 204; 404 for a name no `set_aside_store` notice gives) and `POST /storage/start-empty` (`{store, accept_warning?}` → 204). `GET /chat/history` and
+    `POST /proposals/{id}/decision` answer 503 `store_unavailable` while the node-state store is unavailable (the decision applies nothing).
+  - *Who may call:* the `GET` follows the usual rule and the agent's bearer reads it (`storage.read`); it carries no secret and no consent hash. The
+    agent's bearer is refused (401) on every write here (the global gate, no allowlist); the agent acts only through proposals (`kind: storage`).
+    **Loopback-only** (403 `loopback_only` otherwise): `PATCH /storage/settings`, `DELETE /storage/set-aside/{file}`, `POST /storage/start-empty`; a paired
+    session reads every setting and changes only the `update-without-copy` consent and the export offers. A `quota.set` decided from a session that is not on loopback
+    answers 403 `loopback_only` on `POST /proposals/{id}/decision`, applies nothing and leaves the proposal open.
+  - *`StorageStatus`:* `disk` (`free`, `total`, `floor`, `disk_low`, `origin`: null unless `state/origin/` is its own filesystem), `keep` (`bytes`, `default`,
+    `effective` = the sum of the caps in force, `rule` ∈ `termux`, `hub`, `linux`, `user`), `node_state` (`state` ∈ `open`, `closed`, `unavailable`; `reason`;
+    `file_bytes`), `integrity` (`fabric`, `node_state` ∈ null, `checking`, `ok`, `failed`), `classes[]` (`id` the closed set of §4.1; `layer`, `bytes`, `cap`,
+    `budgeted`, `export_offer_needed`, `full`) and `notices[]` (`unreadable_agent_files`, `update_refused_space`, `set_aside_store`). Two shapes the spec left to prose are
+    fixed here: `classes[].at_least` (optional boolean: a walked figure that stopped at the 100,000-entry bound) and, on the `agent` class only,
+    `classes[].beside` = `{spool, work, legacy_v0}`, each `{bytes, at_least}`: three on-request walks outside `bytes`, never budgeted. `settings` (a
+    `StorageSettings`) is optional beside the figures; the frame never carries it. Every name in a notice is untrusted: text only.
+  - *Consent round-trip (`409 consent_required`):* the Layer 6 and 7 round-trip, unchanged. Layer 8 appends the actions `dataset_fetch`, `dataset_override`,
+    `datasets_serve`, `components_serve` (`PATCH /storage/settings`, `origin.*`; addon `termux` for the Termux tick), `update_without_copy` (subject
+    `<release>:<store>`) and `store_start_empty` (subject the store). `ConsentRequired` gains an optional `facts` object, absent for every earlier action: the
+    live figures shown under `warning_text` and never part of `hash` (`{free, free_after, days?}`, `{remaining}`, `{needed, free}`), so a figure that moves does not ask again.
+  - *Enum growth (all additive; unknown values render as `unknown`):* `Proposal.kind` + `storage` (body: one JSON object `{"why": string, "actions": [Action]}` from
+    `quota.set {class, bytes or null}`, `dataset.remove {publisher?, id, version}`, `dataset.fetch {publisher?, id, version}`; rendered as a card from the parsed
+    JSON, never as Markdown); `Proposal.decision.applied` (optional: the record's `applied`, `{pending: true}` while an apply runs); `Status.update.last_result`
+    + `refused_space`; `ConsentRequired.action` + the six above; `Problem.code` + `insufficient_space`, `untrusted_publisher`, `job_running`, `store_unavailable`,
+    `range_not_satisfiable`; `FabricStatus.unconsumed {agent_op, kb, update, patch, sync}` (optional). New schemas: `StorageStatus`, `StorageSettings`,
+    `StorageSettingsPatch` and their parts.
+  - *Pin list for these items (each enum or tool-count bump touches these; the change is not done until all are green):* (1) `Proposal.kind` 9 → 10 (`storage`): `KINDS` in
+    `1-bootstrap/crates/node111/src/daemon/dashboard/api_v1/proposals.rs` (`[&str; 10]`), the UI's proposal card (`ui/src/views/agent/proposal-body.tsx`), the agent's
+    writer. (3) `pnpm gen:types`, then `node scripts/gen-sse.mjs --check`; the tuples `STORAGE_CLASS_IDS`, `STORAGE_STORES`, `STORAGE_NOTICE_KINDS`,
+    `STORAGE_KEEP_RULES`, `STORAGE_INTEGRITY_STATES`, `STORAGE_NODE_STATES`, `EXPORT_OFFER_CLASSES` are listed in `scripts/gen-sse.mjs` (`ENUMS`), and `PROBLEM_CODES`,
+    `CONSENT_ACTIONS`, `PROPOSAL_KINDS` grow. (4) `x-sse-events.events` gains `storage`, and the UI store's `switch (frame.event)` handles it (a `storage` slice, completed by
+    `GET /storage`, re-read after `reset` once loaded). (5) `test/gen.test.ts`, `test/http.test.ts`, `test/layer8-contract.test.ts` and the mock storage
+    (`ui/src/lib/api/mock/storage.ts`), whose frames validate against `x-sse-events`; `test/layer6-contract.test.ts` and `test/layer7-contract.test.ts` pin the prefixes of the
+    grown lists. (6) node111's mirrors sit beside their routes (`dashboard/api_v1/{storage,datasets,tiles}.rs`). (8) the adapter seam `getStorage()` beside `getRelay()` in
+    `lib/api/index.ts`. (9) this section. (10) `decision.applied`, `refused_space`, `store_start_empty`, the three routes above and their client methods in the storage adapter.
+  - *The UI seam:* the Layer 8 adapter is `ui/src/lib/api/storage.ts` (`StorageAdapter`, `createHttpStorage`), reached through `getStorage()` in `lib/api/index.ts` and imported
+    dynamically (only by a Layer 8 view, or by the store after a `storage` frame), so none of it is in the eager chunk; the dev mock's storage is `adapter.mock.storage`.
 - **Not gated:** `/`, static assets, `/health` (body is booleans), `/origin/v1/*` (Layer 7, §9.1: the hub's verified update files, GET only,
   404 unless the hub serves them; outside `openapi.yaml`) and `/api/v1/auth/*`. Everything
   else — including the Layer 1 seam `/api/status` and the `/v1` legacy page — needs loopback or a
@@ -218,4 +262,4 @@ the `x-sse-events` map) into `ui/src/lib/api/types.gen.ts` — never hand-edited
 - **Identity:** no key material on any route, ever (Layer 2 rule). `node.label`/`bech32` are
   display forms computed from the public id.
 - **Timestamps:** RFC 3339 UTC. **IDs:** `conv-…` minted by the client (`[A-Za-z0-9_-]{1,128}`);
-  `prop-…`/`task-…` minted by `111-agent`; `msg-…` minted by `111d` (Layer 5); `fc-…`/`fm-…`/`be-…`/`sg-…` minted by `111d` (Layer 6). Layer 7 mints no new id family: a paired hub is its `NodeId`.
+  `prop-…`/`task-…` minted by `111-agent`; `msg-…` minted by `111d` (Layer 5); `fc-…`/`fm-…`/`be-…`/`sg-…` minted by `111d` (Layer 6). Layer 7 mints no new id family: a paired hub is its `NodeId`. Layer 8's first part mints none either (a store is `fabric` or `node_state`, a class one of §4.1's nine ids).

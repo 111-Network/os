@@ -15,10 +15,24 @@ import { useConsentFlow } from "../messages/net/consent";
 import { ProposalBody, isBridgeKind } from "./proposal-body";
 
 /**
- * Accepting a bridge (Layer 6) or a relay (Layer 7) proposal runs the same validation as the direct route, so it can answer 409
- * `consent_required`: the card shows the dialog and repeats the decision with the hash. Every other kind is recorded as it is.
+ * Accepting a bridge (Layer 6), a relay (Layer 7) or a storage (Layer 8) proposal runs the same validation as the direct route, so it can
+ * answer 409 `consent_required`: the card shows the dialog and repeats the decision with the hash. Every other kind is recorded as it is.
  */
-export const acceptRunsConsent = (kind: string | undefined): boolean => isBridgeKind(kind) || kind === "relay";
+export const acceptRunsConsent = (kind: string | undefined): boolean =>
+  isBridgeKind(kind) || kind === "relay" || kind === "storage";
+
+/**
+ * A decision's `applied` record (Layer 8, os/8-storage/README.md §2.4 rule 5) in one line: "being applied" while it is `{pending: true}`
+ * (a decided proposal whose apply was cut off), nothing otherwise. The record's other keys are not read until the node fixes their shape.
+ */
+export function appliedLine(
+  decision: Proposal["decision"] | undefined,
+): string | null {
+  const applied = decision?.applied;
+  return applied && typeof applied === "object" && applied.pending === true
+    ? "Being applied now."
+    : null;
+}
 
 type Attempt = ReturnType<typeof useConsentFlow>["attempt"];
 
@@ -27,9 +41,16 @@ type Attempt = ReturnType<typeof useConsentFlow>["attempt"];
  * gate answers 409 with the exact text: the person reads it in the card's dialog (`attempt`), and the decision is repeated with its hash.
  * "cancelled": the person said no to the text, and the proposal stays open. Any refusal is thrown.
  */
-export async function decideProposal(adapter: Pick<Adapter, "decide">, attempt: Attempt, proposal: Pick<Proposal, "id" | "kind">, decision: Decision): Promise<"done" | "cancelled"> {
+export async function decideProposal(
+  adapter: Pick<Adapter, "decide">,
+  attempt: Attempt,
+  proposal: Pick<Proposal, "id" | "kind">,
+  decision: Decision,
+): Promise<"done" | "cancelled"> {
   if (decision === "accepted" && acceptRunsConsent(proposal.kind)) {
-    const out = await attempt((hash) => adapter.decide(proposal.id, decision, hash));
+    const out = await attempt((hash) =>
+      adapter.decide(proposal.id, decision, hash),
+    );
     if (out.ok) return "done";
     if (out.cancelled) return "cancelled";
     throw out.error;
@@ -60,13 +81,26 @@ function ProposalCard({ proposal, now, onWhy, onDecided }: CardProps) {
     setError(null);
     try {
       const adapter = await getAdapter();
-      if ((await decideProposal(adapter, attempt, proposal, decision)) === "cancelled") return;
-      announce(decision === "accepted" ? "proposal marked accepted" : "proposal dismissed");
+      if (
+        (await decideProposal(adapter, attempt, proposal, decision)) ===
+        "cancelled"
+      )
+        return;
+      announce(
+        decision === "accepted"
+          ? "proposal marked accepted"
+          : "proposal dismissed",
+      );
       onDecided();
     } catch (err) {
       if (redirectIfUnauthenticated(err)) return;
       // Decided elsewhere in the meantime: the refresh below removes the card.
-      if (!(isApiError(err) && err.code === "already_decided")) setError(err instanceof Error ? err.message : "The decision could not be saved.");
+      if (!(isApiError(err) && err.code === "already_decided"))
+        setError(
+          err instanceof Error
+            ? err.message
+            : "The decision could not be saved.",
+        );
     } finally {
       setBusy(null);
       void apiStore.refreshProposals();
@@ -76,9 +110,15 @@ function ProposalCard({ proposal, now, onWhy, onDecided }: CardProps) {
   return (
     <li className="border border-border p-3">
       <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
-        <p className="min-w-0 flex-1 break-words text-sm text-foreground">{proposal.title}</p>
+        <p className="min-w-0 flex-1 break-words text-sm text-foreground">
+          {proposal.title}
+        </p>
         <Badge>{proposal.kind}</Badge>
-        <time dateTime={proposal.created_at} title={proposal.created_at} className="text-[10px] text-muted-foreground">
+        <time
+          dateTime={proposal.created_at}
+          title={proposal.created_at}
+          className="text-[10px] text-muted-foreground"
+        >
           {createdText(proposal.created_at, now)}
         </time>
       </div>
@@ -93,13 +133,29 @@ function ProposalCard({ proposal, now, onWhy, onDecided }: CardProps) {
         <ProposalBody body={proposal.body} kind={proposal.kind} />
       </Disclosure>
       <div className="mt-1 flex flex-wrap gap-2">
-        <Button size="sm" variant="primary" arrow={false} loading={busy === "accepted"} aria-disabled={busy !== null || undefined} onClick={() => void decide("accepted")}>
+        <Button
+          size="sm"
+          variant="primary"
+          arrow={false}
+          loading={busy === "accepted"}
+          aria-disabled={busy !== null || undefined}
+          onClick={() => void decide("accepted")}
+        >
           Mark accepted
         </Button>
-        <Button size="sm" loading={busy === "dismissed"} aria-disabled={busy !== null || undefined} onClick={() => void decide("dismissed")}>
+        <Button
+          size="sm"
+          loading={busy === "dismissed"}
+          aria-disabled={busy !== null || undefined}
+          onClick={() => void decide("dismissed")}
+        >
           Dismiss
         </Button>
-        <Button size="sm" aria-disabled={busy !== null || undefined} onClick={() => onWhy(proposal)}>
+        <Button
+          size="sm"
+          aria-disabled={busy !== null || undefined}
+          onClick={() => onWhy(proposal)}
+        >
           Why?
         </Button>
       </div>
@@ -119,22 +175,74 @@ export interface ProposalCardsProps {
   onWhy: (p: Proposal) => void;
   /** A decision was saved (the card is about to disappear): move focus somewhere sensible. */
   onDecided: () => void;
+  /** Decided proposals whose apply is still pending (`decision.applied.pending`): listed without buttons. */
+  applying?: Proposal[];
 }
 
-export function ProposalCards({ proposals, onWhy, onDecided }: ProposalCardsProps) {
+export function ProposalCards({
+  proposals,
+  onWhy,
+  onDecided,
+  applying = [],
+}: ProposalCardsProps) {
   const now = useNow(proposals.length > 0, 30_000);
-  if (proposals.length === 0) return null;
+  const applyingList =
+    applying.length > 0 ? (
+      <section
+        aria-label="Proposals being applied"
+        className="shrink-0 border border-border bg-secondary/20 p-3"
+        data-testid="proposals-applying"
+      >
+        <ul className="flex flex-col gap-2">
+          {applying.map((p) => (
+            <li key={p.id} className="border border-border p-3">
+              <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
+                <p className="min-w-0 flex-1 break-words text-sm text-foreground">
+                  {p.title}
+                </p>
+                <Badge>{p.kind}</Badge>
+              </div>
+              <p
+                role="status"
+                className="mt-2 text-xs text-muted-foreground"
+                data-testid="proposal-applied"
+              >
+                {appliedLine(p.decision)}
+              </p>
+            </li>
+          ))}
+        </ul>
+      </section>
+    ) : null;
+  if (proposals.length === 0) return applyingList;
   return (
-    <section aria-label="Open proposals" className="shrink-0 border border-border bg-secondary/20 p-3">
-      <p className="mb-2 text-[10px] uppercase tracking-widest text-muted-foreground">
-        {proposals.length === 1 ? "1 proposal needs you" : `${proposals.length} proposals need you`}
-      </p>
-      <ul className="flex flex-col gap-2">
-        {proposals.map((p) => (
-          <ProposalCard key={p.id} proposal={p} now={now} onWhy={onWhy} onDecided={onDecided} />
-        ))}
-      </ul>
-      <p className="mt-2 text-xs text-muted-foreground">Applying accepted proposals arrives with Layer 9 (Repairs); for now follow the steps or ask the agent.</p>
-    </section>
+    <>
+      {applyingList}
+      <section
+        aria-label="Open proposals"
+        className="shrink-0 border border-border bg-secondary/20 p-3"
+      >
+        <p className="mb-2 text-[10px] uppercase tracking-widest text-muted-foreground">
+          {proposals.length === 1
+            ? "1 proposal needs you"
+            : `${proposals.length} proposals need you`}
+        </p>
+        <ul className="flex flex-col gap-2">
+          {proposals.map((p) => (
+            <ProposalCard
+              key={p.id}
+              proposal={p}
+              now={now}
+              onWhy={onWhy}
+              onDecided={onDecided}
+            />
+          ))}
+        </ul>
+        <p className="mt-2 text-xs text-muted-foreground">
+          Applying accepted proposals arrives with Layer 9 (Repairs); for now
+          follow the steps or ask the agent.
+        </p>
+      </section>
+    </>
   );
 }

@@ -3,6 +3,7 @@ import type { Adapter } from "../src/lib/api/adapter";
 import { createHttpAdapter, panelsSeenAtLoad, resetPanelsAtLoadForTests } from "../src/lib/api/http";
 import { createHttpRelay, relayConsentOf, type RelayAdapter } from "../src/lib/api/relay";
 import { ApiError } from "../src/lib/api/problem";
+import { consentFacts, createHttpStorage, storageConsentOf, type StorageAdapter } from "../src/lib/api/storage";
 import type { ChatFrame } from "../src/lib/api/types";
 import { operations } from "./contract.gen";
 import { bytes, collect, jsonResponse, problemResponse, splitBytes, sseResponse } from "./helpers/fakes";
@@ -437,9 +438,35 @@ describe("adapter <-> openapi.yaml", () => {
     "/api/v1/update/origins": { schema: 1, origins: [] },
   };
 
-  it("covers every operation except the event stream (the Layer 6 and Layer 7 operations included)", () => {
-    expect([...Object.keys(CALLS), ...Object.keys(RELAY_CALLS)].sort()).toEqual(Object.keys(operations).filter((id) => id !== "events").sort());
+  // Layer 8 (os/8-storage/README.md section 16, part 1): its own adapter (src/lib/api/storage.ts), so its calls take a StorageAdapter.
+  const STORAGE_CALLS: Record<string, (a: StorageAdapter) => Promise<unknown>> = {
+    getStorage: (a) => a.status(),
+    patchStorageSettings: (a) => a.patchSettings({ keep_bytes: 2_147_483_648, caps: { agent: null }, origin: { datasets: true, max_streams: 4 } }, HASH),
+    answerStorageExportOffer: (a) => a.answerExportOffer("agent"),
+    acceptUpdateWithoutCopy: (a) => a.acceptUpdateWithoutCopy("2026.11.2", "fabric", HASH),
+    deleteStorageSetAside: (a) => a.deleteSetAside("store.db.damaged-1"),
+    startEmptyStore: (a) => a.startEmpty("node_state", HASH),
+  };
+
+  it("covers every operation except the event stream (the Layer 6, 7 and 8 part 1 operations included)", () => {
+    expect([...Object.keys(CALLS), ...Object.keys(RELAY_CALLS), ...Object.keys(STORAGE_CALLS)].sort()).toEqual(Object.keys(operations).filter((id) => id !== "events").sort());
   });
+
+  for (const [id, call] of Object.entries(STORAGE_CALLS)) {
+    it(`${id} matches its contract operation`, async () => {
+      const op = operations[id]!;
+      const r = recorder(() => (op.success === 204 ? new Response(null, { status: 204 }) : jsonResponse({ schema: 1 }, op.success)));
+      await call(createHttpStorage({ fetch: r.fetch }));
+      expect(r.calls).toHaveLength(1);
+      const c = r.calls[0]!;
+      expect(c.method).toBe(op.method);
+      expect(c.path).toMatch(toRegex(op.path));
+      expect(c.init).toMatchObject({ credentials: "same-origin", cache: "no-store" });
+      if (c.method !== "GET") expect(c.headers["Content-Type"]).toBe("application/json");
+      if (op.requestSchema) expect(validate(c.body, op.requestSchema)).toEqual([]);
+      else expect(c.body).toBeUndefined();
+    });
+  }
 
   for (const [id, call] of Object.entries(RELAY_CALLS)) {
     it(`${id} matches its contract operation`, async () => {
@@ -593,5 +620,77 @@ describe("the Layer 7 relay adapter (src/lib/api/relay.ts)", () => {
   it("a network failure is the adapter's `network` error", async () => {
     const relay = createHttpRelay({ fetch: (() => Promise.reject(new TypeError("Failed to fetch"))) as typeof fetch });
     expect(((await relay.status().catch((e: unknown) => e)) as ApiError).code).toBe("network");
+  });
+});
+
+describe("the Layer 8 storage adapter (src/lib/api/storage.ts)", () => {
+  const HASH = "a".repeat(64);
+  const CONSENT = { action: "update_without_copy", subject: "2026.11.2:fabric", warning_text: "Install 2026.11.2 without a rollback copy of messages. ...", hash: HASH, addons: [] as string[] };
+  const consent409 = (consent: unknown) => jsonResponse({ type: "about:blank", title: "Confirm", status: 409, code: "consent_required", consent }, 409, { "content-type": "application/problem+json" });
+
+  it("repeats a settings write with accept_warning and adds no key on the first call", async () => {
+    const r = recorder(() => jsonResponse({}));
+    const st = createHttpStorage({ fetch: r.fetch });
+    await st.patchSettings({ origin: { datasets: true } });
+    await st.patchSettings({ origin: { datasets: true } }, HASH);
+    expect(r.calls[0]!.body).toEqual({ origin: { datasets: true } });
+    expect(r.calls[1]!.body).toEqual({ origin: { datasets: true }, accept_warning: HASH });
+    expect(r.calls[1]!.method).toBe("PATCH");
+  });
+
+  it("the three store-state writes send their body, answer 204 and encode a file name into its one path segment", async () => {
+    const r = recorder(() => new Response(null, { status: 204 }));
+    const st = createHttpStorage({ fetch: r.fetch });
+    await expect(st.acceptUpdateWithoutCopy("2026.11.2", "node_state")).resolves.toBeUndefined();
+    await expect(st.startEmpty("fabric", HASH)).resolves.toBeUndefined();
+    await expect(st.deleteSetAside("a/b c.damaged-1")).resolves.toBeUndefined();
+    await expect(st.answerExportOffer("heal")).resolves.toBeUndefined();
+    expect(r.calls.map((c) => [c.method, c.path])).toEqual([
+      ["POST", "/api/v1/storage/update-without-copy"],
+      ["POST", "/api/v1/storage/start-empty"],
+      ["DELETE", "/api/v1/storage/set-aside/a%2Fb%20c.damaged-1"],
+      ["POST", "/api/v1/storage/export-offer"],
+    ]);
+    expect(r.calls[0]!.body).toEqual({ release: "2026.11.2", store: "node_state" });
+    expect(r.calls[1]!.body).toEqual({ store: "fabric", accept_warning: HASH });
+    expect(r.calls[3]!.body).toEqual({ class: "heal" });
+    expect(r.calls[2]!.body).toBeUndefined();
+  });
+
+  it("a 409 consent_required keeps the exact text and hash and the facts, for each Layer 8 action", async () => {
+    for (const action of ["dataset_fetch", "dataset_override", "datasets_serve", "components_serve", "update_without_copy", "store_start_empty"]) {
+      const r = recorder(() => consent409({ ...CONSENT, action, facts: { needed: 5, free: 3, junk: 1, remaining: -4, days: 1.5 } }));
+      const err = await createHttpStorage({ fetch: r.fetch }).acceptUpdateWithoutCopy("2026.11.2", "fabric").catch((e: unknown) => e);
+      expect(err).toBeInstanceOf(ApiError);
+      expect(storageConsentOf(err)).toEqual({ ...CONSENT, action, facts: { needed: 5, free: 3 } });
+    }
+  });
+
+  it("a consent without facts has none, a malformed one is never offered, and a foreign action is refused", async () => {
+    const without = await createHttpStorage({ fetch: recorder(() => consent409(CONSENT)).fetch }).startEmpty("fabric").catch((e: unknown) => e);
+    expect(storageConsentOf(without)).toEqual(CONSENT);
+    for (const bad of [{ ...CONSENT, hash: "short" }, { ...CONSENT, warning_text: "" }, { ...CONSENT, action: "format_disk" }, { ...CONSENT, subject: 3 }, null]) {
+      const err = await createHttpStorage({ fetch: recorder(() => consent409(bad)).fetch }).startEmpty("fabric").catch((e: unknown) => e);
+      expect(storageConsentOf(err)).toBeNull();
+    }
+    expect(storageConsentOf(new Error("x"))).toBeNull();
+    expect(consentFacts("no")).toBeUndefined();
+    expect(consentFacts([1])).toBeUndefined();
+    expect(consentFacts({ free: Number.NaN })).toBeUndefined();
+  });
+
+  it("loopback_only, store_unavailable and not_found arrive as the problem's own code", async () => {
+    for (const [status, code] of [[403, "loopback_only"], [503, "store_unavailable"], [404, "not_found"]] as const) {
+      const r = recorder(() => problemResponse(status, code));
+      const err = await createHttpStorage({ fetch: r.fetch }).deleteSetAside("x.damaged-1").catch((e: unknown) => e);
+      expect((err as ApiError).code).toBe(code);
+    }
+  });
+
+  it("a reply that is not JSON is a bad response; a failed fetch is a network error", async () => {
+    const st = createHttpStorage({ fetch: recorder(() => new Response("<html>", { status: 200 })).fetch });
+    expect(((await st.status().catch((e: unknown) => e)) as ApiError).code).toBe("upstream_error");
+    const down = createHttpStorage({ fetch: (() => Promise.reject(new TypeError("Failed to fetch"))) as typeof fetch });
+    expect(((await down.status().catch((e: unknown) => e)) as ApiError).code).toBe("network");
   });
 });

@@ -1,7 +1,7 @@
 // Base fixtures for the dev-only mock: one believable laptop node ("Node2B") with all endpoints'
 // data, shaped exactly like api/openapi.yaml. Scenarios (scenarios.ts) clone and bend these.
 // Nothing here is imported by production code: the mock is reached only via a DEV-guarded dynamic import.
-import type { AgentStatus, DeviceRecord, Proposal, ServiceId, ServiceRecord, Settings, Status } from "../types";
+import type { AgentStatus, DeviceRecord, Proposal, ServiceId, ServiceRecord, Settings, Status, StorageStatus } from "../types";
 import { buildBridgeQuiet, type BridgeData } from "./bridge";
 import { buildMessaging, type MessagingData } from "./messaging";
 
@@ -583,4 +583,45 @@ Nothing to fix right now. If it repeats, ask me to check the Wi-Fi power-saving 
 /** Append a fresh log line to a service's tail (used by scenario scripts). */
 export function logLine(at: number, text: string): string {
   return `${iso(at).slice(0, 19)}Z ${text}`;
+}
+
+// --- Layer 8: the storage status the mock starts from (os/8-storage/README.md §16.2) --------------------------------------------------
+
+const MIB = 1024 * 1024;
+const GIB = 1024 * MIB;
+
+/**
+ * A healthy Linux node: 12.4 GB free of 29.8 GB, the default 2 GiB budget, the node-state store idle, every class of §4.1 in the spec's
+ * order with the four budgeted ones first, no notice. The arithmetic of §4.2 item 3 at keep 2 GiB with the logs reserve of 13 MiB: the
+ * fabric takes 3/4 of the rest, the node-state store 1/4, `heal` at most 1/4 of that and `agent` the remainder. The mock recomputes the
+ * caps when the budget moves; a test reads this as a valid, complete `StorageStatus`.
+ */
+export function buildStorageStatus(): StorageStatus {
+  const keep = 2 * GIB;
+  const logs = 13 * MIB;
+  const rest = keep - logs;
+  const fabric = Math.floor((rest * 3) / 4);
+  const ns = rest - fabric;
+  const heal = Math.floor(ns / 4);
+  const agent = ns - heal;
+  const walk = (bytes: number) => ({ bytes, at_least: false });
+  return {
+    schema: 1,
+    disk: { free: 12_400_000_000, total: 29_800_000_000, floor: 298_000_000, disk_low: false, origin: null },
+    keep: { bytes: keep, default: keep, effective: fabric + agent + heal + logs, rule: "linux" },
+    node_state: { state: "closed", reason: null, file_bytes: 4 * MIB },
+    integrity: { fabric: null, node_state: null },
+    classes: [
+      { id: "fabric", layer: 5, bytes: 81_234_567, cap: fabric, budgeted: true, export_offer_needed: false, full: false },
+      { id: "agent", layer: 3, bytes: 2_400_000, cap: agent, budgeted: true, export_offer_needed: false, full: false, beside: { spool: walk(0), work: walk(0), legacy_v0: walk(0) } },
+      { id: "heal", layer: 9, bytes: 0, cap: heal, budgeted: true, export_offer_needed: false, full: false },
+      { id: "logs", layer: 1, bytes: 1_800_000, cap: logs, budgeted: true, export_offer_needed: false, full: false },
+      { id: "datasets", layer: 8, bytes: 7_400_028_224, cap: null, budgeted: false, export_offer_needed: false, full: false },
+      { id: "updates", layer: 1, bytes: 188_000_000, cap: null, budgeted: false, export_offer_needed: false, full: false },
+      { id: "components", layer: 6, bytes: 0, cap: null, budgeted: false, export_offer_needed: false, full: false },
+      { id: "bridge", layer: 6, bytes: 0, cap: null, budgeted: false, export_offer_needed: false, full: false },
+      { id: "kb", layer: 0, bytes: 410_000, cap: null, budgeted: false, export_offer_needed: false, full: false },
+    ],
+    notices: [],
+  };
 }

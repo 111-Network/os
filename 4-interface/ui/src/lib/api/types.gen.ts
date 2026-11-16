@@ -185,6 +185,7 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
+        /** @description Layer 8 (§2.3): answered by `111d` from the node-state store; 503 `store_unavailable` while that store is unavailable (the chat view then says history is not being saved). */
         get: operations["chatHistory"];
         put?: never;
         post?: never;
@@ -233,6 +234,7 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
+        /** @description Layer 8 (§2.4 rule 2): answered from the node-state store after a spool sweep (shapes unchanged). */
         get: operations["listProposals"];
         put?: never;
         post?: never;
@@ -267,7 +269,7 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** @description Record the human's decision. A `kind: message` proposal is applied on acceptance (Layer 5 §17): its body must be `to: <64 hex>` + a blank line + the text, its node-id stamp must name this node and the recipient must be an accepted contact; then 111d queues the message itself and the decision is recorded (the agent never sends). A refused acceptance answers the problem below and leaves the proposal open; the agent's bearer never decides a message proposal (401). Layer 6: a `bridge_message` proposal runs the fan-out validation on acceptance, a `bridge_edge` proposal the edge-enable consent round-trip, a `device` proposal the apply, probe, revert loop (or the one-shot `identify` / `service.restart`). A consent gate answers 409 `consent_required` with `consent` {text, hash}; the client shows the text and repeats the decision with `accept_warning` = the hash. Layer 7: a `relay` proposal runs the same validation, consent and refusal paths as `PATCH /relay/settings`, `POST /relay/carrier/flush` and the pairing screen (`gateway.enable`, `carrier.flush`, `hub.pair`); `presence.interval` is refused `unsupported_action` in v1. A refusal leaves the proposal open. */
+        /** @description Record the human's decision. A `kind: message` proposal is applied on acceptance (Layer 5 §17): its body must be `to: <64 hex>` + a blank line + the text, its node-id stamp must name this node and the recipient must be an accepted contact; then 111d queues the message itself and the decision is recorded (the agent never sends). A refused acceptance answers the problem below and leaves the proposal open; the agent's bearer never decides a message proposal (401). Layer 6: a `bridge_message` proposal runs the fan-out validation on acceptance, a `bridge_edge` proposal the edge-enable consent round-trip, a `device` proposal the apply, probe, revert loop (or the one-shot `identify` / `service.restart`). A consent gate answers 409 `consent_required` with `consent` {text, hash}; the client shows the text and repeats the decision with `accept_warning` = the hash. Layer 7: a `relay` proposal runs the same validation, consent and refusal paths as `PATCH /relay/settings`, `POST /relay/carrier/flush` and the pairing screen (`gateway.enable`, `carrier.flush`, `hub.pair`); `presence.interval` is refused `unsupported_action` in v1. A refusal leaves the proposal open. Layer 8: proposals are answered from the node-state store after a spool sweep (§2.4 rule 2); while that store is unavailable this route answers 503 `store_unavailable` and applies nothing; a `storage` proposal runs the routes' own validation, consent and refusal paths (§16.4), so a `quota.set` decided from a session that is not on loopback answers 403 `loopback_only` and leaves the proposal open. A `dataset.fetch` carries the same `dataset_fetch` consent (and `dataset_override` past a metered cap): the client repeats the decision with `accept_warning` = the hash. An action outside the Layer 8 vocabulary, or a node that does not apply `storage` proposals yet, answers 409 `unsupported_action` and the proposal stays open. */
         post: operations["decideProposal"];
         delete?: never;
         options?: never;
@@ -1166,6 +1168,111 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/storage": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * The node's disk, its one budget, the store, the classes and the notices (§16.2)
+         * @description Every figure is computed on request. The four budgeted classes (`fabric`, `agent`, `heal`, `logs`) come from what the housekeeping pass already holds; the others (`datasets`, `updates`, `components`, `bridge`, `kb`) come from the holdings index, the registry or one bounded walk each, kept for at most 60 s (§4.1), and a walk that stopped at its entry bound says `at_least: true`. The `agent` class carries `beside` (the spool, `agent/work/` and `agent/legacy-v0/`, measured on request, never budgeted). No secret and no consent hash is in it: the agent's bearer reads it (`storage.read`). A change §16.3 lists publishes the SSE `storage` frame.
+         */
+        get: operations["getStorage"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/storage/settings": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        /** @description Partial merge of the Layer 8 settings (`state/storage.json`, §15.1): `keep_bytes`, `caps`, `logs`, `follow`, `sources`, `origin.*`. A list (`follow`) or `sources` replaces what was there. `keep_default` and `update_without_copy` are not writable here. `origin.datasets` and `origin.components` (and the `origin.termux` tick under it) are consent round-trips: the first call without `accept_warning` answers 409 `consent_required` (`datasets_serve` or `components_serve`, the latter with the addon `termux` for the tick) carrying the exact text and its hash, and the client repeats the call with `accept_warning` = the hash; 409 `needs_hub` without the hub role, 409 `lan_off` without LAN sharing. A value outside its range (`origin.max_streams` is 1..=16) is 400 `bad_request`. Loopback-only (403 `loopback_only` otherwise, the `PATCH /fabric/settings` posture); the agent's bearer is refused (401); the agent proposes `quota.set` (`kind: storage`), which applies through this route's own checks. */
+        patch: operations["patchStorageSettings"];
+        trace?: never;
+    };
+    "/api/v1/storage/export-offer": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** @description Record that the person has seen a class's export offer (§4.5): the class may then reclaim its oldest records when the budget needs room. 204. `fabric`, `agent` or `heal`. A human (a loopback or paired session); the agent's bearer is refused (401). */
+        post: operations["answerStorageExportOffer"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/storage/update-without-copy": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** @description Consent to install a release without a rollback copy of one store (§13.6 (5)). The first call, without `accept_warning`, answers 409 `consent_required` (`update_without_copy`, subject `<release>:<store>`, `facts` `{needed, free}`); the repeat carries the hash and answers 204: the consent is recorded in `state/storage.json` for that release and store and read by the updater at its next check. 400 `bad_request` for a release and store that no `update_refused_space` notice names. A human in a dashboard session or on loopback; the agent's bearer is refused (401). */
+        post: operations["acceptUpdateWithoutCopy"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/storage/set-aside/{file}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /** @description Delete one set-aside store file that a `set_aside_store` notice names (`.rolled-back-v<N>`, `.damaged-<n>` or `.replaced-<n>`, with its `-wal` and `-shm`) (§13.2, §13.6, §13.7); the blob sweep resumes once no set-aside fabric store remains. 204. 404 `not_found` for any other name. Loopback-only (403 `loopback_only` otherwise); the agent's bearer is refused (401). */
+        delete: operations["deleteStorageSetAside"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/storage/start-empty": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** @description Lift a store's closed state so the next open creates it empty; the damaged file stays on the node, set aside and never read again (§13.7). The first call, without `accept_warning`, answers 409 `consent_required` (`store_start_empty`, subject the store); the repeat carries the hash and answers 204. 400 `bad_request` for a store that is not closed after a set-aside. Loopback-only (403 `loopback_only` otherwise); the agent's bearer is refused (401). */
+        post: operations["startEmptyStore"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/events": {
         parameters: {
             query?: never;
@@ -1194,7 +1301,7 @@ export interface components {
             status: number;
             detail?: string;
             /** @enum {string} */
-            code: "unauthenticated" | "loopback_only" | "lan_read_only" | "agent_unavailable" | "model_unavailable" | "bad_request" | "not_found" | "rate_limited" | "already_decided" | "not_supervised" | "settings_locked" | "offer_stale" | "needs_hub" | "upstream_error" | "internal" | "port_busy" | "panel_ticket_expired" | "restore_pending" | "consent_required" | "oversize" | "component_unavailable" | "unsupported_action" | "no_such_transport" | "licensed_board" | "metered_cap" | "lan_off" | "pair_role_mismatch";
+            code: "unauthenticated" | "loopback_only" | "lan_read_only" | "agent_unavailable" | "model_unavailable" | "bad_request" | "not_found" | "rate_limited" | "already_decided" | "not_supervised" | "settings_locked" | "offer_stale" | "needs_hub" | "upstream_error" | "internal" | "port_busy" | "panel_ticket_expired" | "restore_pending" | "consent_required" | "oversize" | "component_unavailable" | "unsupported_action" | "no_such_transport" | "licensed_board" | "metered_cap" | "lan_off" | "pair_role_mismatch" | "insufficient_space" | "untrusted_publisher" | "job_running" | "store_unavailable" | "range_not_satisfiable";
             errors?: {
                 pointer?: string;
                 message: string;
@@ -1279,8 +1386,11 @@ export interface components {
                 pending_version?: string | null;
                 /** Format: date-time */
                 last_check: string | null;
-                /** @enum {string|null} */
-                last_result?: "up_to_date" | "staged" | "refused" | "degraded" | null;
+                /**
+                 * @description Layer 8 appends `refused_space` (§13.6 (5)): the release was refused because this node could not keep a rollback copy; an `update_refused_space` notice on `GET /storage` names it
+                 * @enum {string|null}
+                 */
+                last_result?: "up_to_date" | "staged" | "refused" | "degraded" | "refused_space" | null;
                 floor?: string | null;
                 clock_fault: boolean;
             };
@@ -1388,10 +1498,10 @@ export interface components {
             node_id: string | null;
             task_id: string | null;
             /**
-             * @description Layer 7 adds `relay` (§13.2; body: one JSON object `{"why": string, "actions": [Action]}` where an Action is `{"action": name, …args}` from the closed vocabulary `gateway.enable {carrier, mode}`, `hub.pair {}`, `presence.interval {transport, minutes}`, `carrier.flush {}`; accepting it runs the same validation, consent and refusal paths as the routes (a consent gate answers 409 `consent_required` and the human repeats the decision with `accept_warning`); `presence.interval` is refused `unsupported_action` in v1; a body that is not that shape is 502 `upstream_error`; it renders as a card from the parsed JSON, never as Markdown). Layer 6 adds `bridge_message` (body: `to: <fc-id>` lines, a blank line, then the text verbatim; accepting runs the fan-out validation and, if a consent gate applies, the 409 `consent_required` round-trip), `bridge_edge` (body: a `from: <fc-id>` line and a `to: <fc-id>` line, then the agent's reason; accepting runs the edge-enable consent round-trip) and `device` (body: one JSON object `{"why": string, "actions": [Action]}` where an Action is `{"action": name, …args}` from the closed vocabulary `rns.interface.upsert {device_id, type, params}`, `rns.interface.remove {name}`, `rns.posture.set {share_instance, enable_transport}`, `radio.region.set {region}`, plus the one-shots `identify {device_id}` and `service.restart {service_id}`; 111d validates, applies, probes and reverts; the other vocabulary entries are refused `unsupported_action`; a body that is not that shape is 502 `upstream_error`). RENDERING RULE: the text part of a `bridge_message` or `bridge_edge` body quotes foreign, untrusted text and is rendered as a preformatted text block, never as Markdown (no links, no emphasis); `device` bodies render as a card from the parsed JSON. Layer 5 adds `message` (§17 `messages.send`): the body is exactly `to: <64 lowercase hex>` + a blank line + the text verbatim; accepting it (POST /proposals/{id}/decision) makes 111d send it — only to an accepted contact and only when the proposal's `node_id` names this node — and the decision is recorded after the store committed the message
+             * @description Layer 8 adds `storage` (§16.4; body: one JSON object `{"why": string, "actions": [Action]}` where an Action is `{"action": name, …args}` from the closed vocabulary `quota.set {class, bytes or null}` (class: `keep`, `agent`, `heal` or a Layer 5 refusable class), `dataset.remove {publisher?, id, version}`, `dataset.fetch {publisher?, id, version}` (`publisher` defaults to the home hub); accepting it runs the routes' own validation, consent and refusal paths, a consent gate answering 409 `consent_required` and the human repeating the decision with `accept_warning`; a `quota.set` applies through `PATCH /storage/settings` or `PATCH /fabric/settings` with that route's own `loopback_only` check, so a decision from a session that is not on loopback answers 403 `loopback_only`, applies nothing and leaves the proposal open; any other action is `unsupported_action`; a body that is not that shape is 502 `upstream_error`; it renders as a card from the parsed JSON, never as Markdown). Layer 7 adds `relay` (§13.2; body: one JSON object `{"why": string, "actions": [Action]}` where an Action is `{"action": name, …args}` from the closed vocabulary `gateway.enable {carrier, mode}`, `hub.pair {}`, `presence.interval {transport, minutes}`, `carrier.flush {}`; accepting it runs the same validation, consent and refusal paths as the routes (a consent gate answers 409 `consent_required` and the human repeats the decision with `accept_warning`); `presence.interval` is refused `unsupported_action` in v1; a body that is not that shape is 502 `upstream_error`; it renders as a card from the parsed JSON, never as Markdown). Layer 6 adds `bridge_message` (body: `to: <fc-id>` lines, a blank line, then the text verbatim; accepting runs the fan-out validation and, if a consent gate applies, the 409 `consent_required` round-trip), `bridge_edge` (body: a `from: <fc-id>` line and a `to: <fc-id>` line, then the agent's reason; accepting runs the edge-enable consent round-trip) and `device` (body: one JSON object `{"why": string, "actions": [Action]}` where an Action is `{"action": name, …args}` from the closed vocabulary `rns.interface.upsert {device_id, type, params}`, `rns.interface.remove {name}`, `rns.posture.set {share_instance, enable_transport}`, `radio.region.set {region}`, plus the one-shots `identify {device_id}` and `service.restart {service_id}`; 111d validates, applies, probes and reverts; the other vocabulary entries are refused `unsupported_action`; a body that is not that shape is 502 `upstream_error`). RENDERING RULE: the text part of a `bridge_message` or `bridge_edge` body quotes foreign, untrusted text and is rendered as a preformatted text block, never as Markdown (no links, no emphasis); `device` bodies render as a card from the parsed JSON. Layer 5 adds `message` (§17 `messages.send`): the body is exactly `to: <64 lowercase hex>` + a blank line + the text verbatim; accepting it (POST /proposals/{id}/decision) makes 111d send it — only to an accepted contact and only when the proposal's `node_id` names this node — and the decision is recorded after the store committed the message
              * @enum {string}
              */
-            kind: "diagnose" | "propose" | "patch" | "chat" | "message" | "bridge_message" | "bridge_edge" | "device" | "relay";
+            kind: "diagnose" | "propose" | "patch" | "chat" | "message" | "bridge_message" | "bridge_edge" | "device" | "relay" | "storage";
             title: string;
             /** @description markdown */
             body: string;
@@ -1401,6 +1511,12 @@ export interface components {
                 decision?: components["schemas"]["Decision"];
                 /** Format: date-time */
                 at?: string;
+                /** @description Layer 8 (§2.4 rule 5), optional: the record's `applied` as the node-state store holds it, `{pending: true}` while an apply runs and then the result, so a half-applied decision is readable through `GET /proposals/{id}`. Absent for a decision with nothing to apply and from older nodes. */
+                applied?: {
+                    pending?: boolean;
+                } & {
+                    [key: string]: unknown;
+                };
             } | null;
         };
         Settings: {
@@ -1827,6 +1943,14 @@ export interface components {
             settings: components["schemas"]["FabricSettings"];
             /** @description diagnostics for Advanced; absent while the fabric is not running (store.open false) and from older daemons */
             counters?: components["schemas"]["FabricCounters"];
+            /** @description Layer 8 (§12.3), optional: items of each shared-log kind committed and acknowledged with no consumer registered since the fabric started, a session counter. Absent from older nodes. */
+            unconsumed?: {
+                agent_op: number;
+                kb: number;
+                update: number;
+                patch: number;
+                sync: number;
+            };
         };
         HubEnrollRequest: {
             /** @description the hub's tcp-lan address, host:port */
@@ -2268,10 +2392,10 @@ export interface components {
         /** @description The 409 consent round-trip (§2.1, §8): the daemon states the exact text, the client shows it and echoes `hash` back (`accept_warning` or `accept_notice_hash`). A text that changed since (a live fact moved) has a new hash, so a stale echo is refused again. Never a bare PATCH. */
         ConsentRequired: {
             /**
-             * @description which confirmation this is. Layer 7 appends `carrier_enable` (ntfy on, or its metered cap set or raised; subject `<kind>:<server>`), `pair_plain` (pairing over an unencrypted non-private link; subject the far hub's NodeId), `gateway_bit` (the public gateway role bit) and `origin_serve` (serving update files to the LAN)
+             * @description which confirmation this is. Layer 8 appends `dataset_fetch` (subject `<publisher short>:<id>@<version>`), `dataset_override` (the same subject: a fetch past a metered cap), `datasets_serve` and `components_serve` (subject the hub's NodeId, short; `components_serve` carries the addon `termux` for the Termux install files), `update_without_copy` (subject `<release>:<store>`, §13.6 (5)) and `store_start_empty` (subject the store, §13.7). Layer 7 appends `carrier_enable` (ntfy on, or its metered cap set or raised; subject `<kind>:<server>`), `pair_plain` (pairing over an unencrypted non-private link; subject the far hub's NodeId), `gateway_bit` (the public gateway role bit) and `origin_serve` (serving update files to the LAN)
              * @enum {string}
              */
-            action: "edge_enable" | "edge_resume" | "component_enable" | "ham_confirm" | "uplink_send" | "carrier_enable" | "pair_plain" | "gateway_bit" | "origin_serve";
+            action: "edge_enable" | "edge_resume" | "component_enable" | "ham_confirm" | "uplink_send" | "carrier_enable" | "pair_plain" | "gateway_bit" | "origin_serve" | "dataset_fetch" | "dataset_override" | "datasets_serve" | "components_serve" | "update_without_copy" | "store_start_empty";
             /** @description what it is about: the edge id or `src>dst` pair, the component id, the account, or the channel's `fc-…` id */
             subject: string;
             /** @description the exact text the user is confirming; may quote untrusted channel names: text only */
@@ -2279,6 +2403,14 @@ export interface components {
             hash: components["schemas"]["Sha256Hex"];
             /** @description the live add-on facts included in the text (default-key source, uplinked destination, licensed account) so the UI can badge them */
             addons: string[];
+            /** @description Layer 8 (§7.7), optional; absent for every earlier action: the live figures the UI shows under `warning_text`. They are never part of `hash`, so a figure that moves does not ask again. `{free, free_after, days?}` for `dataset_fetch` (`days` when the link is metered), `{remaining}` for `dataset_override`, `{needed, free}` for `update_without_copy`. Bytes; `days` a whole number. */
+            facts?: {
+                free?: number;
+                free_after?: number;
+                days?: number;
+                remaining?: number;
+                needed?: number;
+            };
         };
         /** @description One target of a fan-out: a foreign conversation (or recipient list) of an enabled network, or a 111 contact. */
         FanoutTarget: components["schemas"]["FanoutForeignTarget"] | components["schemas"]["FanoutContactTarget"];
@@ -2880,6 +3012,181 @@ export interface components {
         SseRegistry: {
             rows: components["schemas"]["RegistryRow"][];
         };
+        /**
+         * @description The closed set of §4.1. Unknown values render as `unknown`.
+         * @enum {string}
+         */
+        StorageClassId: "fabric" | "agent" | "heal" | "logs" | "datasets" | "updates" | "components" | "bridge" | "kb";
+        /**
+         * @description The two encrypted stores (§2, §13): `fabric` is `fabric/store.db`, `node_state` is `node/state.db`.
+         * @enum {string}
+         */
+        StorageStore: "fabric" | "node_state";
+        /** @description One on-request walk (§4.1): `at_least` is true when it stopped at the 100,000-entry bound (D13) and the figure is a lower bound. */
+        StorageWalk: {
+            bytes: number;
+            at_least: boolean;
+        };
+        /** @description One class of §4.1. `bytes` is the class's figure; `cap` its share or override in force (null for an unbudgeted class). `full` (§4.5) is false for every class but `agent` and `heal`. */
+        StorageClass: {
+            id: components["schemas"]["StorageClassId"];
+            layer: number;
+            bytes: number;
+            cap: number | null;
+            budgeted: boolean;
+            /** @description the class's export offer is unanswered (§4.5) */
+            export_offer_needed: boolean;
+            full: boolean;
+            /** @description optional: `bytes` is a walked figure that stopped at the 100,000-entry bound (D13), so it is a lower bound; absent when exact */
+            at_least?: boolean;
+            /** @description On the `agent` class only (§4.1): the three on-request walks, outside `bytes` and never budgeted. */
+            beside?: {
+                spool: components["schemas"]["StorageWalk"];
+                work: components["schemas"]["StorageWalk"];
+                legacy_v0: components["schemas"]["StorageWalk"];
+            };
+        };
+        /** @description `state/origin/` when it is another filesystem than the root's (§5.1). */
+        StorageDiskOrigin: {
+            free: number;
+            total: number;
+            floor: number;
+            disk_low: boolean;
+        };
+        StorageDisk: {
+            free: number;
+            total: number;
+            /** @description the fabric's built 1 % (§4.2 item 5) */
+            floor: number;
+            disk_low: boolean;
+            /** @description null unless `state/origin/` is its own filesystem */
+            origin: components["schemas"]["StorageDiskOrigin"] | null;
+        };
+        /** @description The one budget of the four budgeted classes (§4.2). `effective` is the sum of the caps in force; the page shows it when it differs from `bytes`. */
+        StorageKeep: {
+            bytes: number;
+            default: number;
+            effective: number;
+            /**
+             * @description which rule produced `bytes`: the install-time default for a Termux node, a hub, any other Linux node, or the user's own figure
+             * @enum {string}
+             */
+            rule: "termux" | "hub" | "linux" | "user";
+        };
+        StorageNodeState: {
+            /**
+             * @description `closed` is the idle state (§2.2 rule 7), not a fault; `unavailable` carries `reason`
+             * @enum {string}
+             */
+            state: "open" | "closed" | "unavailable";
+            /** @description display-only; why the store is unavailable, else null */
+            reason: string | null;
+            /** @description `state.db`'s size from one `stat`; null when there is no file */
+            file_bytes: number | null;
+        };
+        /**
+         * @description null: no check is due (§13.7)
+         * @enum {string|null}
+         */
+        StorageIntegrityState: "checking" | "ok" | "failed" | null;
+        StorageIntegrity: {
+            fabric: components["schemas"]["StorageIntegrityState"];
+            node_state: components["schemas"]["StorageIntegrityState"];
+        };
+        /** @description One thing the page shows beside the figures. `unreadable_agent_files` {count} (§2.4); `update_refused_space` {release, store, needed_bytes} (§13.6 (5)); `set_aside_store` {file, bytes}: a `.rolled-back-v<N>`, `.damaged-<n>` or `.replaced-<n>` file. Unknown kinds render as nothing. */
+        StorageNotice: {
+            /** @enum {string} */
+            kind: "unreadable_agent_files" | "update_refused_space" | "set_aside_store";
+            count?: number;
+            release?: string;
+            store?: components["schemas"]["StorageStore"];
+            needed_bytes?: number;
+            /** @description a file name under the node's state, never a path */
+            file?: string;
+            bytes?: number;
+        };
+        StorageOrigin: {
+            datasets: boolean;
+            components: boolean;
+            /** @description the "Termux install files" tick under `components` (§11.5); not offered, so off, in a release without verified licences for those pins */
+            termux: boolean;
+            max_streams: number;
+        };
+        /** @description Every setting of `state/storage.json` a person may read (§15.1). `update_without_copy` consents are not here, and no consent hash is. */
+        StorageSettings: {
+            /** @description null = `keep_default` */
+            keep_bytes: number | null;
+            /** @description an install-time fact; nobody writes it */
+            keep_default: number;
+            caps: {
+                /** @description null = the share (§4.2 item 3) */
+                agent: number | null;
+                heal: number | null;
+            };
+            logs: {
+                max_file_bytes: number;
+            };
+            /** @description followed publishers (the home hub is always trusted) */
+            follow: components["schemas"]["NodeId"][];
+            /** @description `{publisher hex: [origin URL]}` (§7.4). Untrusted strings: text only. */
+            sources: {
+                [key: string]: string[];
+            };
+            origin: components["schemas"]["StorageOrigin"];
+        };
+        /** @description Partial merge of `StorageSettings`' writable keys. `accept_warning` is the hash of the `datasets_serve` or `components_serve` text the human was shown; absent on the first call. */
+        StorageSettingsPatch: {
+            keep_bytes?: number | null;
+            caps?: {
+                agent?: number | null;
+                heal?: number | null;
+            };
+            logs?: {
+                max_file_bytes?: number;
+            };
+            /** @description replaces the list */
+            follow?: components["schemas"]["NodeId"][];
+            /** @description replaces the map */
+            sources?: {
+                [key: string]: string[];
+            };
+            origin?: {
+                datasets?: boolean;
+                components?: boolean;
+                termux?: boolean;
+                max_streams?: number;
+            };
+            accept_warning?: components["schemas"]["Sha256Hex"];
+        };
+        /** @description The whole storage state (§16.2). `settings` is optional and beside the figures so the page reads the switches with them; the frame does not carry it. */
+        StorageStatus: {
+            schema: number;
+            disk: components["schemas"]["StorageDisk"];
+            keep: components["schemas"]["StorageKeep"];
+            node_state: components["schemas"]["StorageNodeState"];
+            integrity: components["schemas"]["StorageIntegrity"];
+            classes: components["schemas"]["StorageClass"][];
+            notices: components["schemas"]["StorageNotice"][];
+            settings?: components["schemas"]["StorageSettings"];
+        };
+        StorageExportOfferRequest: {
+            /** @enum {string} */
+            class: "fabric" | "agent" | "heal";
+        };
+        UpdateWithoutCopyRequest: {
+            /** @description the release an `update_refused_space` notice names */
+            release: string;
+            store: components["schemas"]["StorageStore"];
+            /** @description the hash of the `update_without_copy` text the user was shown; absent on the first call */
+            accept_warning?: components["schemas"]["Sha256Hex"];
+        };
+        StartEmptyRequest: {
+            store: components["schemas"]["StorageStore"];
+            /** @description the hash of the `store_start_empty` text the user was shown; absent on the first call */
+            accept_warning?: components["schemas"]["Sha256Hex"];
+        };
+        /** @description A `StorageStatus` without `settings`, on a change §16.3 lists: `classes` holds the four budgeted ones (§4.1), never a figure that needs a walk or a read of the index or the registry; the page refetches `GET /storage` for the rest. */
+        SseStorage: components["schemas"]["StorageStatus"];
     };
     responses: {
         /** @description problem+json */
@@ -3363,7 +3670,7 @@ export interface operations {
             content: {
                 "application/json": {
                     decision: components["schemas"]["Decision"];
-                    /** @description Layer 6/7: the hash of the consent text the user was shown (`bridge_edge`, a `bridge_message` behind a consent gate, or a `relay` action behind `carrier_enable` / `gateway_bit` / `origin_serve`); absent on the first call */
+                    /** @description Layer 6/7/8: the hash of the consent text the user was shown (`bridge_edge`, a `bridge_message` behind a consent gate, a `relay` action behind `carrier_enable` / `gateway_bit` / `origin_serve`, or a `storage` `dataset.fetch` behind `dataset_fetch` / `dataset_override`); absent on the first call */
                     accept_warning?: components["schemas"]["Sha256Hex"];
                 };
             };
@@ -3378,13 +3685,17 @@ export interface operations {
                     "application/json": components["schemas"]["Proposal"];
                 };
             };
+            /** @description loopback_only: a Layer 8 `storage` proposal's `quota.set` decided from a session that is not on loopback; nothing is applied and the proposal stays open */
+            403: components["responses"]["Problem"];
             404: components["responses"]["Problem"];
-            /** @description already_decided; for kind message also bad_request (the recipient is not a contact, or is a pending message request) and restore_pending (the identity holder reports a restore floor, so nothing is sealed yet); Layer 6 adds consent_required (`consent` carries text + hash), oversize and component_unavailable (bridge kinds), unsupported_action (a `device` action outside the four applied and two one-shot actions) and not_supervised (`service.restart` on a child 111d does not supervise); Layer 7 adds, for a `relay` proposal, consent_required (`carrier_enable`, `gateway_bit`), unsupported_action (`presence.interval` in v1, or an action outside the vocabulary), needs_hub, no_such_transport, licensed_board and metered_cap — the proposal stays open */
+            /** @description already_decided; for kind message also bad_request (the recipient is not a contact, or is a pending message request) and restore_pending (the identity holder reports a restore floor, so nothing is sealed yet); Layer 6 adds consent_required (`consent` carries text + hash), oversize and component_unavailable (bridge kinds), unsupported_action (a `device` action outside the four applied and two one-shot actions) and not_supervised (`service.restart` on a child 111d does not supervise); Layer 7 adds, for a `relay` proposal, consent_required (`carrier_enable`, `gateway_bit`), unsupported_action (`presence.interval` in v1, or an action outside the vocabulary), needs_hub, no_such_transport, licensed_board and metered_cap; Layer 8 adds, for a `storage` proposal, consent_required (`dataset_fetch`, `dataset_override`), insufficient_space, untrusted_publisher, job_running and unsupported_action (an action outside the vocabulary) — the proposal stays open */
             409: components["responses"]["Problem"];
             /** @description internal: for a `relay` proposal, the `gateway.enable` settings were saved but the role bits are not announced yet (the own announce could not be re-minted); the proposal stays open and deciding it again retries the announce */
             500: components["responses"]["Problem"];
             /** @description upstream_error: the agent wrote a kind outside the enum, or (kind message) a body that does not follow the `to:` contract or a node-id stamp that does not name this node */
             502: components["responses"]["Problem"];
+            /** @description store_unavailable (Layer 8): the node-state store is unavailable; nothing is applied */
+            503: components["responses"]["Problem"];
         };
     };
     getSettings: {
@@ -4878,6 +5189,153 @@ export interface operations {
                     };
                 };
             };
+        };
+    };
+    getStorage: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["StorageStatus"];
+                };
+            };
+        };
+    };
+    patchStorageSettings: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["StorageSettingsPatch"];
+            };
+        };
+        responses: {
+            /** @description The settings after the change */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["StorageSettings"];
+                };
+            };
+            400: components["responses"]["Problem"];
+            403: components["responses"]["Problem"];
+            /** @description consent_required (`datasets_serve`, `components_serve`; `consent` carries the text and its hash), needs_hub, lan_off */
+            409: components["responses"]["Problem"];
+        };
+    };
+    answerStorageExportOffer: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["StorageExportOfferRequest"];
+            };
+        };
+        responses: {
+            /** @description Recorded */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            400: components["responses"]["Problem"];
+            /** @description store_unavailable: the node-state store is unavailable (`agent`, `heal`) */
+            503: components["responses"]["Problem"];
+        };
+    };
+    acceptUpdateWithoutCopy: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["UpdateWithoutCopyRequest"];
+            };
+        };
+        responses: {
+            /** @description Recorded */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            400: components["responses"]["Problem"];
+            /** @description consent_required (`update_without_copy`; `consent` carries the text, its hash and `facts`) */
+            409: components["responses"]["Problem"];
+        };
+    };
+    deleteStorageSetAside: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description the file name a `set_aside_store` notice gives, never a path */
+                file: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Deleted */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            403: components["responses"]["Problem"];
+            404: components["responses"]["Problem"];
+        };
+    };
+    startEmptyStore: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["StartEmptyRequest"];
+            };
+        };
+        responses: {
+            /** @description The closed state is lifted */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            400: components["responses"]["Problem"];
+            403: components["responses"]["Problem"];
+            /** @description consent_required (`store_start_empty`) */
+            409: components["responses"]["Problem"];
         };
     };
     events: {

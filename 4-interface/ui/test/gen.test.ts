@@ -11,6 +11,7 @@ import {
   DEVICE_TRANSPORTS,
   EVENTS_EVENT_NAMES,
   EVIDENCE_TRANSPORTS,
+  EXPORT_OFFER_CLASSES,
   NEARBY_KINDS,
   PAIR_ROLES,
   PAIR_TLS,
@@ -21,6 +22,12 @@ import {
   RELAY_GATEWAY_STATES,
   SERVICE_IDS,
   SERVICE_STATES,
+  STORAGE_CLASS_IDS,
+  STORAGE_INTEGRITY_STATES,
+  STORAGE_KEEP_RULES,
+  STORAGE_NODE_STATES,
+  STORAGE_NOTICE_KINDS,
+  STORAGE_STORES,
 } from "../src/lib/api/types";
 import { schemas, sse } from "./contract.gen";
 
@@ -82,5 +89,21 @@ describe("runtime tuples mirror the contract", () => {
     expect(sse.events.registry).toBe("SseRegistry");
     expect([...EVENTS_EVENT_NAMES]).toContain("relay");
     expect([...EVENTS_EVENT_NAMES]).toContain("registry");
+  });
+
+  it("Layer 8 enums, part 1 (the tuples gen-sse.mjs lists in ENUMS)", () => {
+    const at = (name: string, ...path: string[]) => path.reduce((n: unknown, k) => (n as Record<string, unknown>)[k], schemas[name]!) as { enum: unknown[] };
+    expect([...STORAGE_CLASS_IDS]).toEqual(schemas.StorageClassId!.enum);
+    expect([...STORAGE_STORES]).toEqual(schemas.StorageStore!.enum);
+    expect([...STORAGE_NOTICE_KINDS]).toEqual(at("StorageNotice", "properties", "kind").enum);
+    expect([...STORAGE_KEEP_RULES]).toEqual(at("StorageKeep", "properties", "rule").enum);
+    expect([...STORAGE_INTEGRITY_STATES]).toEqual(schemas.StorageIntegrityState!.enum);
+    expect([...STORAGE_NODE_STATES]).toEqual(at("StorageNodeState", "properties", "state").enum);
+    expect([...EXPORT_OFFER_CLASSES]).toEqual(at("StorageExportOfferRequest", "properties", "class").enum);
+  });
+
+  it("the Layer 8 `storage` event is in the map and the tuple", () => {
+    expect(sse.events.storage).toBe("SseStorage");
+    expect([...EVENTS_EVENT_NAMES]).toContain("storage");
   });
 });

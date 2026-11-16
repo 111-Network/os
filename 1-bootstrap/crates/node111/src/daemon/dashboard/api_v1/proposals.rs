@@ -38,7 +38,7 @@
 //! sent twice and never sent after being dismissed.
 //!
 //! **Layer 6 kinds** (`os/6-transport/README.md` §8, §9, §12, §13; bodies
-//! parsed by [`crate::daemon::fabric::proposal`]). `KINDS` grows to eight (Layer 7: nine, `relay`).
+//! parsed by [`crate::daemon::fabric::proposal`]). `KINDS` grows to eight (Layer 7: nine, `relay`; Layer 8: ten, `storage`).
 //! Accepting one is applied like `message`, under the same lock, with the
 //! same record discipline (`applied: {pending: true}` first, the result
 //! after, a refusal before anything ran removes the pending record and the
@@ -114,8 +114,8 @@ use time::OffsetDateTime;
 /// List cap (newest first).
 pub const MAX_LIST: usize = 200;
 /// `Proposal.kind` (contract enum; Layer 6 adds three, §10; Layer 7 adds `relay`, `7-relay/README.md`
-/// §13.2, the ninth).
-pub const KINDS: [&str; 9] = [
+/// §13.2, the ninth; Layer 8 adds `storage`, `8-storage/README.md` §16.4, the tenth).
+pub const KINDS: [&str; 10] = [
     "diagnose",
     "propose",
     "patch",
@@ -125,7 +125,10 @@ pub const KINDS: [&str; 9] = [
     "bridge_edge",
     "device",
     "relay",
+    "storage",
 ];
+/// Layer 8 §16.4: a storage proposal (quota and dataset actions).
+pub const STORAGE_KIND: &str = "storage";
 /// `Proposal.kind` of a message the agent proposes (§17).
 pub const MESSAGE_KIND: &str = "message";
 /// Layer 6 §9: a text into foreign conversations (and 111 contacts).
@@ -709,6 +712,11 @@ async fn decision_handler(
                 Err(problem) => problem.into_response(),
             };
         }
+        // Fail closed until the storage dispatch (D15) lands: accepting never records a
+        // decision that applied nothing.
+        if let Some(problem) = storage_not_applied(&p.kind, &decision) {
+            return problem.into_response();
+        }
         if [BRIDGE_MESSAGE_KIND, BRIDGE_EDGE_KIND, DEVICE_KIND].contains(&p.kind.as_str()) {
             let by = super::auth::session_label(&api, &headers, &ext);
             return match decide_layer6(&api, p, decision, accept, by).await {
@@ -742,6 +750,18 @@ fn unsupported(action: &str, why: &str) -> ProblemWith {
         )
         .detail(format!("{action:?}: {why}")),
     )
+}
+
+/// `8-storage/README.md` §16.4: a `storage` proposal runs the routes' own checks when accepted.
+/// Until that dispatch exists, accepting one is `409 unsupported_action` and the proposal stays
+/// open (dismissing it is the plain decision).
+fn storage_not_applied(kind: &str, decision: &str) -> Option<ProblemWith> {
+    (kind == STORAGE_KIND && decision == "accepted").then(|| {
+        unsupported(
+            STORAGE_KIND,
+            "this node does not apply storage proposals yet",
+        )
+    })
 }
 
 fn upstream(r: &crate::daemon::fabric::proposal::Refusal) -> ProblemWith {
@@ -1149,6 +1169,13 @@ mod tests {
     }
 
     #[test]
+    fn an_accepted_storage_proposal_is_refused_and_a_dismissed_one_is_not() {
+        assert!(storage_not_applied("storage", "accepted").is_some());
+        assert!(storage_not_applied("storage", "dismissed").is_none());
+        assert!(storage_not_applied("chat", "accepted").is_none());
+    }
+
+    #[test]
     fn id_rule() {
         assert!(valid_id("prop-18f2a-0001"));
         assert!(valid_id("a_B-9"));
@@ -1234,8 +1261,9 @@ mod tests {
 
     #[test]
     fn kinds_mirror_the_contract_enum_with_relay_last() {
-        assert_eq!(KINDS.len(), 9);
+        assert_eq!(KINDS.len(), 10);
         assert_eq!(KINDS[8], "relay");
+        assert_eq!(KINDS[9], "storage");
         if let Some(contract) = contract_kinds() {
             assert_eq!(
                 contract, KINDS,

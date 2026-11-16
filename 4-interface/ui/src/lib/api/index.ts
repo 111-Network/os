@@ -9,10 +9,12 @@
 import type { Adapter } from "./adapter";
 import { createHttpAdapter } from "./http";
 import type { RelayAdapter } from "./relay";
+import type { StorageAdapter } from "./storage";
 import { apiStore } from "./store";
 
 export type { Adapter } from "./adapter";
 export type { RelayAdapter } from "./relay";
+export type { StorageAdapter } from "./storage";
 export { ApiError, isApiError, isProblem } from "./problem";
 export { apiStore } from "./store";
 
@@ -53,10 +55,29 @@ export function getRelay(): Promise<RelayAdapter> {
   return relaySingleton;
 }
 
+let storageSingleton: Promise<StorageAdapter> | null = null;
+
+/**
+ * The Layer 8 adapter for this page load (memoized), the `getRelay` seam again: `./storage` is imported here, dynamically and only when a
+ * Layer 8 view (or the store, after a `storage` frame) asks, and the mock's storage is reached only through the mock adapter, inside the
+ * same `import.meta.env.DEV` guard as the mock itself. Its size counts in Layer 8's lazy allowance (os/8-storage/README.md §15.4).
+ */
+export function getStorage(): Promise<StorageAdapter> {
+  storageSingleton ??= (async () => {
+    const adapter = await getAdapter();
+    const mockStorage = (adapter as { mock?: { storage?: StorageAdapter } }).mock?.storage;
+    if (adapter.kind === "mock" && mockStorage) return mockStorage;
+    const { createHttpStorage } = await import("./storage");
+    return createHttpStorage();
+  })();
+  return storageSingleton;
+}
+
 /** Test seam: forget the memoized adapters. */
 export function resetAdapterForTests(): void {
   singleton = null;
   relaySingleton = null;
+  storageSingleton = null;
 }
 
 /** Boot helper for main.tsx: pick the adapter, hand it to the store, return it. */
@@ -64,5 +85,6 @@ export async function startApi(): Promise<Adapter> {
   const adapter = await getAdapter();
   apiStore.attach(adapter);
   apiStore.attachRelay(getRelay); // after attach: `detach` forgets the loader, and the store calls it only once a Layer 7 slice is loaded
+  apiStore.attachStorage(getStorage); // the same for Layer 8: called after a `storage` frame, or to re-read a loaded slice
   return adapter;
 }

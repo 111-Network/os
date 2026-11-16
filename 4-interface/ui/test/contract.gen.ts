@@ -55,7 +55,12 @@ export const schemas: Record<string, JsonSchema> = {
           "licensed_board",
           "metered_cap",
           "lan_off",
-          "pair_role_mismatch"
+          "pair_role_mismatch",
+          "insufficient_space",
+          "untrusted_publisher",
+          "job_running",
+          "store_unavailable",
+          "range_not_satisfiable"
         ]
       },
       "errors": {
@@ -170,7 +175,11 @@ export const schemas: Record<string, JsonSchema> = {
           "pending": {"type":"boolean"},
           "pending_version": {"type":["string","null"]},
           "last_check": {"type":["string","null"],"format":"date-time"},
-          "last_result": {"type":["string","null"],"enum":["up_to_date","staged","refused","degraded",null]},
+          "last_result": {
+            "type": ["string","null"],
+            "enum": ["up_to_date","staged","refused","degraded","refused_space",null],
+            "description": "Layer 8 appends `refused_space` (§13.6 (5)): the release was refused because this node could not keep a rollback copy; an `update_refused_space` notice on `GET /storage` names it"
+          },
           "floor": {"type":["string","null"]},
           "clock_fault": {"type":"boolean"}
         }
@@ -302,15 +311,35 @@ export const schemas: Record<string, JsonSchema> = {
       "task_id": {"type":["string","null"]},
       "kind": {
         "type": "string",
-        "enum": ["diagnose","propose","patch","chat","message","bridge_message","bridge_edge","device","relay"],
-        "description": "Layer 7 adds `relay` (§13.2; body: one JSON object `{\"why\": string, \"actions\": [Action]}` where an Action is `{\"action\": name, …args}` from the closed vocabulary `gateway.enable {carrier, mode}`, `hub.pair {}`, `presence.interval {transport, minutes}`, `carrier.flush {}`; accepting it runs the same validation, consent and refusal paths as the routes (a consent gate answers 409 `consent_required` and the human repeats the decision with `accept_warning`); `presence.interval` is refused `unsupported_action` in v1; a body that is not that shape is 502 `upstream_error`; it renders as a card from the parsed JSON, never as Markdown). Layer 6 adds `bridge_message` (body: `to: <fc-id>` lines, a blank line, then the text verbatim; accepting runs the fan-out validation and, if a consent gate applies, the 409 `consent_required` round-trip), `bridge_edge` (body: a `from: <fc-id>` line and a `to: <fc-id>` line, then the agent's reason; accepting runs the edge-enable consent round-trip) and `device` (body: one JSON object `{\"why\": string, \"actions\": [Action]}` where an Action is `{\"action\": name, …args}` from the closed vocabulary `rns.interface.upsert {device_id, type, params}`, `rns.interface.remove {name}`, `rns.posture.set {share_instance, enable_transport}`, `radio.region.set {region}`, plus the one-shots `identify {device_id}` and `service.restart {service_id}`; 111d validates, applies, probes and reverts; the other vocabulary entries are refused `unsupported_action`; a body that is not that shape is 502 `upstream_error`). RENDERING RULE: the text part of a `bridge_message` or `bridge_edge` body quotes foreign, untrusted text and is rendered as a preformatted text block, never as Markdown (no links, no emphasis); `device` bodies render as a card from the parsed JSON. Layer 5 adds `message` (§17 `messages.send`): the body is exactly `to: <64 lowercase hex>` + a blank line + the text verbatim; accepting it (POST /proposals/{id}/decision) makes 111d send it — only to an accepted contact and only when the proposal's `node_id` names this node — and the decision is recorded after the store committed the message"
+        "enum": [
+          "diagnose",
+          "propose",
+          "patch",
+          "chat",
+          "message",
+          "bridge_message",
+          "bridge_edge",
+          "device",
+          "relay",
+          "storage"
+        ],
+        "description": "Layer 8 adds `storage` (§16.4; body: one JSON object `{\"why\": string, \"actions\": [Action]}` where an Action is `{\"action\": name, …args}` from the closed vocabulary `quota.set {class, bytes or null}` (class: `keep`, `agent`, `heal` or a Layer 5 refusable class), `dataset.remove {publisher?, id, version}`, `dataset.fetch {publisher?, id, version}` (`publisher` defaults to the home hub); accepting it runs the routes' own validation, consent and refusal paths, a consent gate answering 409 `consent_required` and the human repeating the decision with `accept_warning`; a `quota.set` applies through `PATCH /storage/settings` or `PATCH /fabric/settings` with that route's own `loopback_only` check, so a decision from a session that is not on loopback answers 403 `loopback_only`, applies nothing and leaves the proposal open; any other action is `unsupported_action`; a body that is not that shape is 502 `upstream_error`; it renders as a card from the parsed JSON, never as Markdown). Layer 7 adds `relay` (§13.2; body: one JSON object `{\"why\": string, \"actions\": [Action]}` where an Action is `{\"action\": name, …args}` from the closed vocabulary `gateway.enable {carrier, mode}`, `hub.pair {}`, `presence.interval {transport, minutes}`, `carrier.flush {}`; accepting it runs the same validation, consent and refusal paths as the routes (a consent gate answers 409 `consent_required` and the human repeats the decision with `accept_warning`); `presence.interval` is refused `unsupported_action` in v1; a body that is not that shape is 502 `upstream_error`; it renders as a card from the parsed JSON, never as Markdown). Layer 6 adds `bridge_message` (body: `to: <fc-id>` lines, a blank line, then the text verbatim; accepting runs the fan-out validation and, if a consent gate applies, the 409 `consent_required` round-trip), `bridge_edge` (body: a `from: <fc-id>` line and a `to: <fc-id>` line, then the agent's reason; accepting runs the edge-enable consent round-trip) and `device` (body: one JSON object `{\"why\": string, \"actions\": [Action]}` where an Action is `{\"action\": name, …args}` from the closed vocabulary `rns.interface.upsert {device_id, type, params}`, `rns.interface.remove {name}`, `rns.posture.set {share_instance, enable_transport}`, `radio.region.set {region}`, plus the one-shots `identify {device_id}` and `service.restart {service_id}`; 111d validates, applies, probes and reverts; the other vocabulary entries are refused `unsupported_action`; a body that is not that shape is 502 `upstream_error`). RENDERING RULE: the text part of a `bridge_message` or `bridge_edge` body quotes foreign, untrusted text and is rendered as a preformatted text block, never as Markdown (no links, no emphasis); `device` bodies render as a card from the parsed JSON. Layer 5 adds `message` (§17 `messages.send`): the body is exactly `to: <64 lowercase hex>` + a blank line + the text verbatim; accepting it (POST /proposals/{id}/decision) makes 111d send it — only to an accepted contact and only when the proposal's `node_id` names this node — and the decision is recorded after the store committed the message"
       },
       "title": {"type":"string"},
       "body": {"type":"string","description":"markdown"},
       "created_at": {"type":"string","format":"date-time"},
       "decision": {
         "type": ["object","null"],
-        "properties": {"decision":{"$ref":"#/components/schemas/Decision"},"at":{"type":"string","format":"date-time"}}
+        "properties": {
+          "decision": {"$ref":"#/components/schemas/Decision"},
+          "at": {"type":"string","format":"date-time"},
+          "applied": {
+            "type": "object",
+            "additionalProperties": true,
+            "properties": {"pending":{"type":"boolean"}},
+            "description": "Layer 8 (§2.4 rule 5), optional: the record's `applied` as the node-state store holds it, `{pending: true}` while an apply runs and then the result, so a half-applied decision is readable through `GET /proposals/{id}`. Absent for a decision with nothing to apply and from older nodes."
+          }
+        }
       }
     }
   },
@@ -954,6 +983,18 @@ export const schemas: Record<string, JsonSchema> = {
       "counters": {
         "$ref": "#/components/schemas/FabricCounters",
         "description": "diagnostics for Advanced; absent while the fabric is not running (store.open false) and from older daemons"
+      },
+      "unconsumed": {
+        "type": "object",
+        "required": ["agent_op","kb","update","patch","sync"],
+        "description": "Layer 8 (§12.3), optional: items of each shared-log kind committed and acknowledged with no consumer registered since the fabric started, a session counter. Absent from older nodes.",
+        "properties": {
+          "agent_op": {"type":"integer","minimum":0},
+          "kb": {"type":"integer","minimum":0},
+          "update": {"type":"integer","minimum":0},
+          "patch": {"type":"integer","minimum":0},
+          "sync": {"type":"integer","minimum":0}
+        }
       }
     }
   },
@@ -1731,9 +1772,15 @@ export const schemas: Record<string, JsonSchema> = {
           "carrier_enable",
           "pair_plain",
           "gateway_bit",
-          "origin_serve"
+          "origin_serve",
+          "dataset_fetch",
+          "dataset_override",
+          "datasets_serve",
+          "components_serve",
+          "update_without_copy",
+          "store_start_empty"
         ],
-        "description": "which confirmation this is. Layer 7 appends `carrier_enable` (ntfy on, or its metered cap set or raised; subject `<kind>:<server>`), `pair_plain` (pairing over an unencrypted non-private link; subject the far hub's NodeId), `gateway_bit` (the public gateway role bit) and `origin_serve` (serving update files to the LAN)"
+        "description": "which confirmation this is. Layer 8 appends `dataset_fetch` (subject `<publisher short>:<id>@<version>`), `dataset_override` (the same subject: a fetch past a metered cap), `datasets_serve` and `components_serve` (subject the hub's NodeId, short; `components_serve` carries the addon `termux` for the Termux install files), `update_without_copy` (subject `<release>:<store>`, §13.6 (5)) and `store_start_empty` (subject the store, §13.7). Layer 7 appends `carrier_enable` (ntfy on, or its metered cap set or raised; subject `<kind>:<server>`), `pair_plain` (pairing over an unencrypted non-private link; subject the far hub's NodeId), `gateway_bit` (the public gateway role bit) and `origin_serve` (serving update files to the LAN)"
       },
       "subject": {
         "type": "string",
@@ -1748,6 +1795,17 @@ export const schemas: Record<string, JsonSchema> = {
         "type": "array",
         "items": {"type":"string"},
         "description": "the live add-on facts included in the text (default-key source, uplinked destination, licensed account) so the UI can badge them"
+      },
+      "facts": {
+        "type": "object",
+        "description": "Layer 8 (§7.7), optional; absent for every earlier action: the live figures the UI shows under `warning_text`. They are never part of `hash`, so a figure that moves does not ask again. `{free, free_after, days?}` for `dataset_fetch` (`days` when the link is metered), `{remaining}` for `dataset_override`, `{needed, free}` for `update_without_copy`. Bytes; `days` a whole number.",
+        "properties": {
+          "free": {"type":"integer","minimum":0},
+          "free_after": {"type":"integer","minimum":0},
+          "days": {"type":"integer","minimum":0},
+          "remaining": {"type":"integer","minimum":0},
+          "needed": {"type":"integer","minimum":0}
+        }
       }
     }
   },
@@ -2681,6 +2739,260 @@ export const schemas: Record<string, JsonSchema> = {
     "type": "object",
     "required": ["rows"],
     "properties": {"rows":{"type":"array","items":{"$ref":"#/components/schemas/RegistryRow"}}}
+  },
+  "StorageClassId": {
+    "type": "string",
+    "enum": ["fabric","agent","heal","logs","datasets","updates","components","bridge","kb"],
+    "description": "The closed set of §4.1. Unknown values render as `unknown`."
+  },
+  "StorageStore": {
+    "type": "string",
+    "enum": ["fabric","node_state"],
+    "description": "The two encrypted stores (§2, §13): `fabric` is `fabric/store.db`, `node_state` is `node/state.db`."
+  },
+  "StorageWalk": {
+    "type": "object",
+    "required": ["bytes","at_least"],
+    "description": "One on-request walk (§4.1): `at_least` is true when it stopped at the 100,000-entry bound (D13) and the figure is a lower bound.",
+    "properties": {"bytes":{"type":"integer","minimum":0},"at_least":{"type":"boolean"}}
+  },
+  "StorageClass": {
+    "type": "object",
+    "required": ["id","layer","bytes","cap","budgeted","export_offer_needed","full"],
+    "description": "One class of §4.1. `bytes` is the class's figure; `cap` its share or override in force (null for an unbudgeted class). `full` (§4.5) is false for every class but `agent` and `heal`.",
+    "properties": {
+      "id": {"$ref":"#/components/schemas/StorageClassId"},
+      "layer": {"type":"integer","minimum":0,"maximum":9},
+      "bytes": {"type":"integer","minimum":0},
+      "cap": {"type":["integer","null"],"minimum":0},
+      "budgeted": {"type":"boolean"},
+      "export_offer_needed": {"type":"boolean","description":"the class's export offer is unanswered (§4.5)"},
+      "full": {"type":"boolean"},
+      "at_least": {
+        "type": "boolean",
+        "description": "optional: `bytes` is a walked figure that stopped at the 100,000-entry bound (D13), so it is a lower bound; absent when exact"
+      },
+      "beside": {
+        "type": "object",
+        "required": ["spool","work","legacy_v0"],
+        "description": "On the `agent` class only (§4.1): the three on-request walks, outside `bytes` and never budgeted.",
+        "properties": {
+          "spool": {"$ref":"#/components/schemas/StorageWalk"},
+          "work": {"$ref":"#/components/schemas/StorageWalk"},
+          "legacy_v0": {"$ref":"#/components/schemas/StorageWalk"}
+        }
+      }
+    }
+  },
+  "StorageDiskOrigin": {
+    "type": "object",
+    "required": ["free","total","floor","disk_low"],
+    "description": "`state/origin/` when it is another filesystem than the root's (§5.1).",
+    "properties": {
+      "free": {"type":"integer","minimum":0},
+      "total": {"type":"integer","minimum":0},
+      "floor": {"type":"integer","minimum":0},
+      "disk_low": {"type":"boolean"}
+    }
+  },
+  "StorageDisk": {
+    "type": "object",
+    "required": ["free","total","floor","disk_low","origin"],
+    "properties": {
+      "free": {"type":"integer","minimum":0},
+      "total": {"type":"integer","minimum":0},
+      "floor": {"type":"integer","minimum":0,"description":"the fabric's built 1 % (§4.2 item 5)"},
+      "disk_low": {"type":"boolean"},
+      "origin": {
+        "oneOf": [{"$ref":"#/components/schemas/StorageDiskOrigin"},{"type":"null"}],
+        "description": "null unless `state/origin/` is its own filesystem"
+      }
+    }
+  },
+  "StorageKeep": {
+    "type": "object",
+    "required": ["bytes","default","effective","rule"],
+    "description": "The one budget of the four budgeted classes (§4.2). `effective` is the sum of the caps in force; the page shows it when it differs from `bytes`.",
+    "properties": {
+      "bytes": {"type":"integer","minimum":0},
+      "default": {"type":"integer","minimum":0},
+      "effective": {"type":"integer","minimum":0},
+      "rule": {
+        "type": "string",
+        "enum": ["termux","hub","linux","user"],
+        "description": "which rule produced `bytes`: the install-time default for a Termux node, a hub, any other Linux node, or the user's own figure"
+      }
+    }
+  },
+  "StorageNodeState": {
+    "type": "object",
+    "required": ["state","reason","file_bytes"],
+    "properties": {
+      "state": {
+        "type": "string",
+        "enum": ["open","closed","unavailable"],
+        "description": "`closed` is the idle state (§2.2 rule 7), not a fault; `unavailable` carries `reason`"
+      },
+      "reason": {"type":["string","null"],"description":"display-only; why the store is unavailable, else null"},
+      "file_bytes": {
+        "type": ["integer","null"],
+        "minimum": 0,
+        "description": "`state.db`'s size from one `stat`; null when there is no file"
+      }
+    }
+  },
+  "StorageIntegrityState": {
+    "type": ["string","null"],
+    "enum": ["checking","ok","failed",null],
+    "description": "null: no check is due (§13.7)"
+  },
+  "StorageIntegrity": {
+    "type": "object",
+    "required": ["fabric","node_state"],
+    "properties": {
+      "fabric": {"$ref":"#/components/schemas/StorageIntegrityState"},
+      "node_state": {"$ref":"#/components/schemas/StorageIntegrityState"}
+    }
+  },
+  "StorageNotice": {
+    "type": "object",
+    "required": ["kind"],
+    "description": "One thing the page shows beside the figures. `unreadable_agent_files` {count} (§2.4); `update_refused_space` {release, store, needed_bytes} (§13.6 (5)); `set_aside_store` {file, bytes}: a `.rolled-back-v<N>`, `.damaged-<n>` or `.replaced-<n>` file. Unknown kinds render as nothing.",
+    "properties": {
+      "kind": {"type":"string","enum":["unreadable_agent_files","update_refused_space","set_aside_store"]},
+      "count": {"type":"integer","minimum":0},
+      "release": {"type":"string"},
+      "store": {"$ref":"#/components/schemas/StorageStore"},
+      "needed_bytes": {"type":"integer","minimum":0},
+      "file": {"type":"string","description":"a file name under the node's state, never a path"},
+      "bytes": {"type":"integer","minimum":0}
+    }
+  },
+  "StorageOrigin": {
+    "type": "object",
+    "required": ["datasets","components","termux","max_streams"],
+    "properties": {
+      "datasets": {"type":"boolean"},
+      "components": {"type":"boolean"},
+      "termux": {
+        "type": "boolean",
+        "description": "the \"Termux install files\" tick under `components` (§11.5); not offered, so off, in a release without verified licences for those pins"
+      },
+      "max_streams": {"type":"integer","minimum":1,"maximum":16}
+    }
+  },
+  "StorageSettings": {
+    "type": "object",
+    "required": ["keep_bytes","keep_default","caps","logs","follow","sources","origin"],
+    "description": "Every setting of `state/storage.json` a person may read (§15.1). `update_without_copy` consents are not here, and no consent hash is.",
+    "properties": {
+      "keep_bytes": {"type":["integer","null"],"minimum":0,"description":"null = `keep_default`"},
+      "keep_default": {"type":"integer","minimum":0,"description":"an install-time fact; nobody writes it"},
+      "caps": {
+        "type": "object",
+        "required": ["agent","heal"],
+        "properties": {
+          "agent": {"type":["integer","null"],"minimum":0,"description":"null = the share (§4.2 item 3)"},
+          "heal": {"type":["integer","null"],"minimum":0}
+        }
+      },
+      "logs": {
+        "type": "object",
+        "required": ["max_file_bytes"],
+        "properties": {"max_file_bytes":{"type":"integer","minimum":1}}
+      },
+      "follow": {
+        "type": "array",
+        "items": {"$ref":"#/components/schemas/NodeId"},
+        "description": "followed publishers (the home hub is always trusted)"
+      },
+      "sources": {
+        "type": "object",
+        "additionalProperties": {"type":"array","items":{"type":"string"}},
+        "description": "`{publisher hex: [origin URL]}` (§7.4). Untrusted strings: text only."
+      },
+      "origin": {"$ref":"#/components/schemas/StorageOrigin"}
+    }
+  },
+  "StorageSettingsPatch": {
+    "type": "object",
+    "description": "Partial merge of `StorageSettings`' writable keys. `accept_warning` is the hash of the `datasets_serve` or `components_serve` text the human was shown; absent on the first call.",
+    "properties": {
+      "keep_bytes": {"type":["integer","null"],"minimum":0},
+      "caps": {
+        "type": "object",
+        "properties": {"agent":{"type":["integer","null"],"minimum":0},"heal":{"type":["integer","null"],"minimum":0}}
+      },
+      "logs": {"type":"object","properties":{"max_file_bytes":{"type":"integer","minimum":1}}},
+      "follow": {"type":"array","items":{"$ref":"#/components/schemas/NodeId"},"description":"replaces the list"},
+      "sources": {
+        "type": "object",
+        "additionalProperties": {"type":"array","items":{"type":"string"}},
+        "description": "replaces the map"
+      },
+      "origin": {
+        "type": "object",
+        "properties": {
+          "datasets": {"type":"boolean"},
+          "components": {"type":"boolean"},
+          "termux": {"type":"boolean"},
+          "max_streams": {"type":"integer","minimum":1,"maximum":16}
+        }
+      },
+      "accept_warning": {"$ref":"#/components/schemas/Sha256Hex"}
+    }
+  },
+  "StorageStatus": {
+    "type": "object",
+    "required": ["schema","disk","keep","node_state","integrity","classes","notices"],
+    "description": "The whole storage state (§16.2). `settings` is optional and beside the figures so the page reads the switches with them; the frame does not carry it.",
+    "properties": {
+      "schema": {"type":"integer"},
+      "disk": {"$ref":"#/components/schemas/StorageDisk"},
+      "keep": {"$ref":"#/components/schemas/StorageKeep"},
+      "node_state": {"$ref":"#/components/schemas/StorageNodeState"},
+      "integrity": {"$ref":"#/components/schemas/StorageIntegrity"},
+      "classes": {"type":"array","items":{"$ref":"#/components/schemas/StorageClass"}},
+      "notices": {"type":"array","items":{"$ref":"#/components/schemas/StorageNotice"}},
+      "settings": {"$ref":"#/components/schemas/StorageSettings"}
+    }
+  },
+  "StorageExportOfferRequest": {
+    "type": "object",
+    "required": ["class"],
+    "properties": {"class":{"type":"string","enum":["fabric","agent","heal"]}}
+  },
+  "UpdateWithoutCopyRequest": {
+    "type": "object",
+    "required": ["release","store"],
+    "properties": {
+      "release": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 64,
+        "description": "the release an `update_refused_space` notice names"
+      },
+      "store": {"$ref":"#/components/schemas/StorageStore"},
+      "accept_warning": {
+        "$ref": "#/components/schemas/Sha256Hex",
+        "description": "the hash of the `update_without_copy` text the user was shown; absent on the first call"
+      }
+    }
+  },
+  "StartEmptyRequest": {
+    "type": "object",
+    "required": ["store"],
+    "properties": {
+      "store": {"$ref":"#/components/schemas/StorageStore"},
+      "accept_warning": {
+        "$ref": "#/components/schemas/Sha256Hex",
+        "description": "the hash of the `store_start_empty` text the user was shown; absent on the first call"
+      }
+    }
+  },
+  "SseStorage": {
+    "$ref": "#/components/schemas/StorageStatus",
+    "description": "A `StorageStatus` without `settings`, on a change §16.3 lists: `classes` holds the four budgeted ones (§4.1), never a figure that needs a walk or a read of the index or the registry; the page refetches `GET /storage` for the rest."
   }
 };
 
@@ -2991,13 +3303,13 @@ export const operations: Record<string, ContractOperation> = {
         "decision": {"$ref":"#/components/schemas/Decision"},
         "accept_warning": {
           "$ref": "#/components/schemas/Sha256Hex",
-          "description": "Layer 6/7: the hash of the consent text the user was shown (`bridge_edge`, a `bridge_message` behind a consent gate, or a `relay` action behind `carrier_enable` / `gateway_bit` / `origin_serve`); absent on the first call"
+          "description": "Layer 6/7/8: the hash of the consent text the user was shown (`bridge_edge`, a `bridge_message` behind a consent gate, a `relay` action behind `carrier_enable` / `gateway_bit` / `origin_serve`, or a `storage` `dataset.fetch` behind `dataset_fetch` / `dataset_override`); absent on the first call"
         }
       }
     },
     "query": [],
     "pathParams": ["id"],
-    "errors": [404,409,500,502]
+    "errors": [403,404,409,500,502,503]
   },
   "getSettings": {
     "method": "GET",
@@ -3928,6 +4240,78 @@ export const operations: Record<string, ContractOperation> = {
     "pathParams": [],
     "errors": []
   },
+  "getStorage": {
+    "method": "GET",
+    "path": "/api/v1/storage",
+    "success": 200,
+    "contentType": "application/json",
+    "schema": {"$ref":"#/components/schemas/StorageStatus"},
+    "schemasByType": {"application/json":{"$ref":"#/components/schemas/StorageStatus"}},
+    "requestSchema": null,
+    "query": [],
+    "pathParams": [],
+    "errors": []
+  },
+  "patchStorageSettings": {
+    "method": "PATCH",
+    "path": "/api/v1/storage/settings",
+    "success": 200,
+    "contentType": "application/json",
+    "schema": {"$ref":"#/components/schemas/StorageSettings"},
+    "schemasByType": {"application/json":{"$ref":"#/components/schemas/StorageSettings"}},
+    "requestSchema": {"$ref":"#/components/schemas/StorageSettingsPatch"},
+    "query": [],
+    "pathParams": [],
+    "errors": [400,403,409]
+  },
+  "answerStorageExportOffer": {
+    "method": "POST",
+    "path": "/api/v1/storage/export-offer",
+    "success": 204,
+    "contentType": null,
+    "schema": null,
+    "schemasByType": {},
+    "requestSchema": {"$ref":"#/components/schemas/StorageExportOfferRequest"},
+    "query": [],
+    "pathParams": [],
+    "errors": [400,503]
+  },
+  "acceptUpdateWithoutCopy": {
+    "method": "POST",
+    "path": "/api/v1/storage/update-without-copy",
+    "success": 204,
+    "contentType": null,
+    "schema": null,
+    "schemasByType": {},
+    "requestSchema": {"$ref":"#/components/schemas/UpdateWithoutCopyRequest"},
+    "query": [],
+    "pathParams": [],
+    "errors": [400,409]
+  },
+  "deleteStorageSetAside": {
+    "method": "DELETE",
+    "path": "/api/v1/storage/set-aside/{file}",
+    "success": 204,
+    "contentType": null,
+    "schema": null,
+    "schemasByType": {},
+    "requestSchema": null,
+    "query": [],
+    "pathParams": ["file"],
+    "errors": [403,404]
+  },
+  "startEmptyStore": {
+    "method": "POST",
+    "path": "/api/v1/storage/start-empty",
+    "success": 204,
+    "contentType": null,
+    "schema": null,
+    "schemasByType": {},
+    "requestSchema": {"$ref":"#/components/schemas/StartEmptyRequest"},
+    "query": [],
+    "pathParams": [],
+    "errors": [400,403,409]
+  },
   "events": {
     "method": "GET",
     "path": "/api/v1/events",
@@ -3959,7 +4343,8 @@ export const sse: { events: Record<string, string>; chat: Record<string, string>
     "network_message": "SseNetworkMessage",
     "bridge": "SseBridge",
     "relay": "SseRelay",
-    "registry": "SseRegistry"
+    "registry": "SseRegistry",
+    "storage": "SseStorage"
   },
   "chat": {"token":"SseChatToken","tool":"SseChatTool","done":"SseChatDone","error":"SseChatError"}
 };
