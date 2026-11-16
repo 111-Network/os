@@ -1227,6 +1227,29 @@ covered_by = "l1.gate"
 strength = "C"
 needs = ["cargo"]
 
+# Layer 8 row D2, the node-state store (8-storage/README.md §2.2; G13 (1) and (13)): node/state.db on a scratch root through
+# its public handle: node/ 0700 and its files 0600, the key through KeyProvider::key_for("111/node-state/v1") (the
+# layer8/node-state-kdf.json vector), a plaintext file and a wrong key refused with the file untouched, opened on use and
+# closed on the first idle pass (a held turn keeps it open across passes), a read-only open that leaves state.db and its
+# WAL unchanged, a non-empty WAL as the unclean signal, a newer user_version unavailable with its reason, and the daemon's
+# start keying it from its identity with no fabric, closed by the real housekeeping pass (housekeeping.rs, side a of
+# L1-L8:state-service). Real SQLCipher stores and a real id111 identity, no fake: strength I.
+[[check]]
+id = "l1.node111.node_state"
+kind = "unit"
+cmd = ["cargo", "test", "--manifest-path", "1-bootstrap/Cargo.toml", "-p", "node111", "--test", "node_state"]
+tier = "slow"
+layers = [1, 8]
+seams = ["L1-L8:state-service", "L2-L8:dataset-signing"]
+adapter = "libtest"
+cargo = true
+timeout_s = 1800
+rerun = "cargo test --manifest-path 1-bootstrap/Cargo.toml -p node111 --test node_state -- --exact {test}"
+rerun_cost = "slow, ~20 s warm"
+covered_by = "l1.gate"
+strength = "I"
+needs = ["cargo"]
+
 # THE node111 --lib TESTS, SPLIT BY MODULE PATH. One `cargo test -p node111 --lib` runs them all (in a gate run too: l1.gate's
 # one cargo test prints them under the single binary `unittests src/lib.rs`), and the libtest adapter gives each test to
 # the unit whose filter (a substring of the test's path, the longest wins) it contains, and to the unit with no filter when
