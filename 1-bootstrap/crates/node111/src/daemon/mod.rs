@@ -1048,6 +1048,10 @@ async fn daemon_main() -> anyhow::Result<()> {
         .await
     };
     dashboard.api.insert_ext(Arc::clone(&fabric));
+    // Layer 8 (`os/8-storage/README.md` §4.3, row D1): the one housekeeping interval (5 s; a
+    // capacity pass every 12th tick, the first at once), the daemon's with or without a live
+    // fabric; the fabric spawns none
+    let house = housekeeping::spawn(&dashboard.api, &fabric);
     // Layer 6: the bridge core (inert until an adapter is enabled), the Meshtastic client
     // registered (started by the module while service `meshtastic` is LIVE), the optional
     // components, the transport routes
@@ -1155,6 +1159,9 @@ async fn daemon_main() -> anyhow::Result<()> {
     dashboard.stop();
     // Layer 6: adapters off, component children joined (before rnsd stops below)
     layer6.shutdown().await;
+    // Layer 8 (§4.3): the housekeeping interval ends before the fabric closes, as the fabric's
+    // own did, so no pass races the close
+    house.stop().await;
     // Layer 5: close the fabric cleanly (store clean record + L2 counters)
     fabric.shutdown().await;
     // join every child (SIGTERM, grace, SIGKILL) before exiting: an orphaned
