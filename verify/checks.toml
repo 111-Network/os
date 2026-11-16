@@ -1774,6 +1774,28 @@ rerun_cost = "slow, ~10 min warm"
 strength = "I"
 needs = ["cargo"]
 
+# Layer 8 row M5 (8-storage/README.md §12.3, G14 (8)): the consumer registry for 0x10-0x14 in mesh111's fabric, fed by a
+# raw tcp-lan peer and through a hub's mailbox: no message row, acknowledged and counted with no consumer (a Tier 1 frame
+# once), delivered once with one, the commit after the consumer returned, a failing consumer redelivered (through the
+# mailbox: the member's cursor held below it until the hub streams it again), a refused body taken with Ok, a duplicate
+# never delivered, a Tier 1 frame whole, and (debug builds, the fault point's) a kill between the consumer and the commit
+# redelivered at the next connection or the next start's fetch, one record kept.
+[[check]]
+id = "l5.mesh111.consumers"
+kind = "unit"
+cmd = ["cargo", "test", "--manifest-path", "5-messaging/Cargo.toml", "-p", "mesh111", "--test", "consumers"]
+tier = "slow"
+layers = [5, 8]
+seams = ["L5-L8:consumer-registry"]
+adapter = "libtest"
+cargo = true
+timeout_s = 1800
+rerun = "cargo test --manifest-path 5-messaging/Cargo.toml -p mesh111 --test consumers -- --exact {test}"
+rerun_cost = "slow, ~20 s warm"
+covered_by = "l5.gate"
+strength = "I"
+needs = ["cargo"]
+
 [[check]]
 id = "l5.mesh111.contacts"
 kind = "unit"
