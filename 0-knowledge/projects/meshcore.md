@@ -54,7 +54,7 @@ the whole advert at about 100 bytes, verifiable by anyone, registry-free.
 Advert structure: 32-byte public key plus 4-byte timestamp plus 64-byte
 signature plus role flags, with the signature covering the entire advert.
 Companion devices do not relay; repeaters and room servers forward and
-store; up to 64 hops. Its X25519 ECDH is derived by converting the
+store; up to 63 hops (a 6-bit `path_length`). Its X25519 ECDH is derived by converting the
 Ed25519 key, the birational coupling our spec rejects in favor of a
 sibling derived key. Performance relies on a vendored TweetNaCl-class
 Ed25519, roughly 1.5 to 2 seconds to verify on Cortex-M4 class parts.
