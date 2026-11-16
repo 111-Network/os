@@ -1,0 +1,186 @@
+# node111's compiled (layer, subject, reason) vocabulary (9-evolution/README.md §3.4, §6.3):
+# one [[row]] per fingerprint a playbook's [match] may name, sorted by layer, subject and
+# reason in byte order. Subject "any" is every component. service_row names the service row
+# whose state `error` publishes the reason; it is absent for an exit fact (child_exit), a
+# start fact (111d, updater), Layer 8's storage state (storage) and Layer 9's own (heal).
+# Generated from 1-bootstrap/crates/node111/src/daemon/heal/vocab.rs by
+# `cargo test -p node111 --test heal_playbooks vocabulary`; do not edit it by hand:
+# UPDATE_PLAYBOOK_VOCABULARY=1 rewrites it, and the test, in CI too, fails while it differs.
+# The playbook lint (0-knowledge/_meta/build.py) reads it.
+schema = 1
+
+[[row]]
+layer = 0
+subject = "kb"
+reason = "verify_failed"
+service_row = "kb"
+
+[[row]]
+layer = 1
+subject = "111d"
+reason = "apk_outdated"
+
+[[row]]
+layer = 1
+subject = "111d"
+reason = "killed_by_os"
+
+[[row]]
+layer = 1
+subject = "111d"
+reason = "unclean_boot"
+
+[[row]]
+layer = 1
+subject = "111d"
+reason = "unclean_exit"
+
+[[row]]
+layer = 1
+subject = "111d"
+reason = "watchdog_kill"
+
+[[row]]
+layer = 1
+subject = "111d"
+reason = "witness_absent"
+
+[[row]]
+layer = 1
+subject = "updater"
+reason = "release_reverted_at_start"
+
+[[row]]
+layer = 1
+subject = "updater"
+reason = "update_reverted"
+
+[[row]]
+layer = 2
+subject = "identity"
+reason = "no_identity"
+service_row = "fabric"
+
+[[row]]
+layer = 2
+subject = "identity"
+reason = "restore_pending"
+service_row = "fabric"
+
+[[row]]
+layer = 3
+subject = "agent"
+reason = "child_exit"
+
+[[row]]
+layer = 3
+subject = "agent"
+reason = "health_503"
+service_row = "agent"
+
+[[row]]
+layer = 3
+subject = "agent"
+reason = "health_error"
+service_row = "agent"
+
+[[row]]
+layer = 3
+subject = "agent"
+reason = "health_unreachable"
+service_row = "agent"
+
+[[row]]
+layer = 3
+subject = "model"
+reason = "child_exit"
+
+[[row]]
+layer = 3
+subject = "model"
+reason = "health_503"
+service_row = "model"
+
+[[row]]
+layer = 3
+subject = "model"
+reason = "health_error"
+service_row = "model"
+
+[[row]]
+layer = 3
+subject = "model"
+reason = "health_unreachable"
+service_row = "model"
+
+[[row]]
+layer = 5
+subject = "fabric"
+reason = "store_failed"
+service_row = "fabric"
+
+[[row]]
+layer = 5
+subject = "fabric"
+reason = "store_full"
+service_row = "fabric"
+
+[[row]]
+layer = 5
+subject = "meshtastic"
+reason = "binary_absent"
+service_row = "meshtastic"
+
+[[row]]
+layer = 5
+subject = "meshtastic"
+reason = "child_exit"
+
+[[row]]
+layer = 5
+subject = "meshtastic"
+reason = "port_busy"
+service_row = "meshtastic"
+
+[[row]]
+layer = 5
+subject = "meshtastic"
+reason = "presence_unavailable"
+service_row = "meshtastic"
+
+[[row]]
+layer = 5
+subject = "meshtastic"
+reason = "uplink_lost"
+service_row = "meshtastic"
+
+[[row]]
+layer = 6
+subject = "any"
+reason = "child_exit"
+
+[[row]]
+layer = 6
+subject = "radio"
+reason = "stack_down"
+service_row = "radio"
+
+[[row]]
+layer = 6
+subject = "transport"
+reason = "child_exit"
+
+[[row]]
+layer = 8
+subject = "storage"
+reason = "disk_low"
+
+[[row]]
+layer = 9
+subject = "heal"
+reason = "revert_failed"
+
+[[row]]
+layer = 9
+subject = "heal"
+reason = "store_unavailable"

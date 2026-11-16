@@ -1205,6 +1205,28 @@ covered_by = "l1.gate"
 strength = "I"
 needs = ["cargo"]
 
+# Layer 9 row D3, the one vocabulary (9-evolution/README.md §3.4, §6.3; G25 (5)'s drift half): a source scan of the row
+# constructors in src/daemon/services/mod.rs finds every reason literal published in state error, and the test fails on one
+# the compiled table (src/daemon/heal/vocab.rs) lacks, on a row no constructor publishes any more and on a code that is not a
+# literal; 0-knowledge/_meta/playbook-vocabulary.toml, which build.py reads, equals the table byte for byte
+# (UPDATE_PLAYBOOK_VOCABULARY=1 rewrites it). Static, no peer runs: strength C. Rows D4 and D5 add the grammar, the loader
+# and the evaluator to the same file.
+[[check]]
+id = "l1.node111.heal_playbooks"
+kind = "unit"
+cmd = ["cargo", "test", "--manifest-path", "1-bootstrap/Cargo.toml", "-p", "node111", "--test", "heal_playbooks"]
+tier = "slow"
+layers = [0, 1, 9]
+seams = ["L0-L9:evolution"]
+adapter = "libtest"
+cargo = true
+timeout_s = 1800
+rerun = "cargo test --manifest-path 1-bootstrap/Cargo.toml -p node111 --test heal_playbooks -- --exact {test}"
+rerun_cost = "slow, ~20 s warm"
+covered_by = "l1.gate"
+strength = "C"
+needs = ["cargo"]
+
 # THE node111 --lib TESTS, SPLIT BY MODULE PATH. One `cargo test -p node111 --lib` runs them all (in a gate run too: l1.gate's
 # one cargo test prints them under the single binary `unittests src/lib.rs`), and the libtest adapter gives each test to
 # the unit whose filter (a substring of the test's path, the longest wins) it contains, and to the unit with no filter when
