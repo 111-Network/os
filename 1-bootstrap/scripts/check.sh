@@ -107,8 +107,9 @@ echo "== systemd-analyze =="
 if [ -f systemd/111node.service ]; then
   grep -qx 'ExecStopPost=/usr/local/bin/111 heal-witness' systemd/111node.service ||
     { echo "FAIL: systemd/111node.service lacks 'ExecStopPost=/usr/local/bin/111 heal-witness' (no + prefix)" >&2; exit 1; }
-  grep -qx 'Restart=always' systemd/111node.service && grep -qx 'StartLimitIntervalSec=0' systemd/111node.service ||
-    { echo "FAIL: systemd/111node.service must keep Restart=always and StartLimitIntervalSec=0" >&2; exit 1; }
+  if ! grep -qx 'Restart=always' systemd/111node.service || ! grep -qx 'StartLimitIntervalSec=0' systemd/111node.service; then
+    echo "FAIL: systemd/111node.service must keep Restart=always and StartLimitIntervalSec=0" >&2; exit 1
+  fi
   if grep -q '^OnFailure=' systemd/111node.service; then
     echo "FAIL: systemd/111node.service must not set OnFailure=" >&2; exit 1
   fi
