@@ -449,6 +449,29 @@ const ALIASES = [
   ["UpdateWithoutCopyRequest", "UpdateWithoutCopyRequest"],
   ["StartEmptyRequest", "StartEmptyRequest"],
   ["StorageEvent", "SseStorage"],
+  // Layer 8, part 2 (datasets, tiles, the server component and the child panel)
+  ["PanelId", "PanelId"],
+  ["DatasetKind", "DatasetKind"],
+  ["DatasetState", "DatasetState"],
+  ["DatasetLocation", "DatasetLocation"],
+  ["DatasetUsedBy", "DatasetUsedBy"],
+  ["DatasetEntry", "DatasetEntry"],
+  ["Publisher", "Publisher"],
+  ["Holding", "Holding"],
+  ["JobId", "JobId"],
+  ["JobState", "JobState"],
+  ["Job", "Job"],
+  ["DatasetsListing", "DatasetsListing"],
+  ["DatasetDraft", "DatasetDraft"],
+  ["DatasetDrafts", "DatasetDrafts"],
+  ["DatasetFetchRequest", "DatasetFetchRequest"],
+  ["DatasetDraftRequest", "DatasetDraftRequest"],
+  ["DatasetPublishRequest", "DatasetPublishRequest"],
+  ["DatasetAdoptRequest", "DatasetAdoptRequest"],
+  ["DatasetSearchResult", "DatasetSearchResult"],
+  ["TileSet", "TileSet"],
+  ["TileSets", "TileSets"],
+  ["DatasetEvent", "SseDataset"],
 ];
 
 // Runtime enum tuples. [exportedName, schemaName, path inside the schema to the enum array]
@@ -498,6 +521,13 @@ const ENUMS = [
   ["STORAGE_INTEGRITY_STATES", "StorageIntegrityState", []],
   ["STORAGE_NODE_STATES", "StorageNodeState", ["properties", "state"]],
   ["EXPORT_OFFER_CLASSES", "StorageExportOfferRequest", ["properties", "class"]],
+  // Layer 8, part 2: the dataset tuples. `JOB_STATES` is the closed part of `Job.state` (`failed (<reason>)` is open: a pattern beside it).
+  ["DATASET_KINDS", "DatasetKind", []],
+  ["DATASET_STATES", "DatasetState", []],
+  ["DATASET_LOCATIONS", "DatasetLocation", []],
+  ["DATASET_USED_BY", "DatasetUsedBy", []],
+  ["JOB_STATES", "JobState", ["anyOf", 0]],
+  ["COMPONENT_STARTS", "Component", ["properties", "start"]],
 ];
 
 function schemaRefName(ref, schemas) {

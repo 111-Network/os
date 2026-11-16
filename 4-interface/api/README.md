@@ -53,7 +53,7 @@ the `x-sse-events` map) into `ui/src/lib/api/types.gen.ts` — never hand-edited
     untrusted: text-only rendering.
   - *Writes that are loopback-only* (403 `loopback_only` otherwise): `PATCH /fabric/settings`, `POST /fabric/hub/offer`; Layer 7 adds
     `POST /relay/pair/offer`, `POST /relay/pair`, `DELETE /relay/paired/{node_id}` (below); Layer 8 adds `PATCH /storage/settings`,
-    `DELETE /storage/set-aside/{file}` and `POST /storage/start-empty` (below). The rest follow the usual rule (loopback or a paired session).
+    `DELETE /storage/set-aside/{file}`, `POST /storage/start-empty` and `POST /datasets/adopt` (below). The rest follow the usual rule (loopback or a paired session).
   - *Problem codes:* `port_busy` (409 on `identify` when the port has another owner), `panel_ticket_expired` (403, sent
     by a **panel listener** on its own port, not by `/api/v1`: a spent or expired ticket without a cookie),
     `upstream_error` (502: a panel shim whose upstream is down, a hub that is unreachable or refuses, meshmud that did not
@@ -251,8 +251,47 @@ the `x-sse-events` map) into `ui/src/lib/api/types.gen.ts` — never hand-edited
     `lib/api/index.ts`. (9) this section. (10) `decision.applied`, `refused_space`, `store_start_empty`, the three routes above and their client methods in the storage adapter.
   - *The UI seam:* the Layer 8 adapter is `ui/src/lib/api/storage.ts` (`StorageAdapter`, `createHttpStorage`), reached through `getStorage()` in `lib/api/index.ts` and imported
     dynamically (only by a Layer 8 view, or by the store after a `storage` frame), so none of it is in the eager chunk; the dev mock's storage is `adapter.mock.storage`.
+- **Layer 8 additions, part 2 (datasets, tiles, the server component and the child panel; `os/8-storage/README.md` §16, §9, §10, D34, D38) — additive under `/api/v1`:**
+  - *Routes:* `GET /datasets` (`{schema, publishers: [Publisher], holdings: [Holding], jobs: [Job]}`), `POST /datasets/check` (202), the entries under
+    `/datasets/entries/{publisher}/{id}/{version}` (`DELETE`, and `POST …/fetch` → 202 `Job`) so no `id` meets a literal sibling (`check`, `drafts`, `publish`,
+    `search`, `jobs`, `adopt`), `DELETE /datasets/jobs/{job}` and `POST /datasets/jobs/{job}/resume`, `GET`/`POST /datasets/drafts` (`POST` → 202 `Job`),
+    `POST /datasets/publish` (→ `{seq}`), `GET /datasets/search` (`q`, `book?`, `publisher?`, `n?`), `POST /datasets/adopt` (→ 204), `GET /tiles`,
+    `GET`/`HEAD /tiles/{publisher}/{id}/{version}` and `POST /bridge/components/{id}/stop` (→ 204). `panelId` on `POST /panels/{id}/session` is a `ServiceId` or,
+    for a `child` panel, its `ComponentId` (`PanelId`; `Panel.id` follows).
+  - *Who may call:* every GET follows the usual rule and the agent's bearer reads it. Every write refuses the agent's bearer (401, the global gate, no
+    allowlist). **`POST /datasets/adopt` is loopback only** (403 `loopback_only` otherwise) and is never a session and never the bearer: it is `111 dataset import`'s
+    hand-off, so the page has no client method for it. Fetch, remove, jobs, check and drafts are a human (a loopback or paired session); publish is a loopback or paired
+    session, a human, and 409 `needs_hub` without the hub role.
+  - *Shapes:* `Publisher {node_id, label, home, seq, source, sources, skipped, entries: [DatasetEntry]}`; `DatasetEntry` = the §5.3 fields plus `state`, `location`
+    and `non_commercial`; **one state enum** for `DatasetEntry.state` and `Holding.state`: `not_held` (an entry only), `partial`, `present`, `unverified`,
+    `disk_absent`; `location` is `origin` or `in_place` on both and null on an entry that is `not_held`; `Holding {publisher, id, version, sha256, bytes,
+    location, state, used_by}`; `Job {id, publisher, entry, version, state, done_bytes, total_bytes, source, metered: {match, cap, days} | null,
+    override_bytes}` with `id` = `job-…` and `state` one of the §7.4 states (`queued`, `running`, `paused (offline | metered cap | metered link | disk low |
+    source busy)`, `done`, `failed (<reason>)`, `cancelled`; a pause is a state, never an error, and a `failed (…)` reason a page does not know renders as it is).
+    `Component.adapter` is `NetworkId` or null (a server component, kiwix) and stays in `Component.required`, so the key never vanishes; `Component.start` is
+    `always` or `on_demand` (optional: an older node omits it, which means `always`).
+  - *Publisher strings are untrusted:* `Publisher.label` and an entry's `name`, `version`, `licence`, `attribution`, `source_url`, `built` and `book`, a job's
+    `source`, and the same strings inside a consent's `warning_text`, are the publisher's: rendered as text only, never Markdown or HTML (the rule for names and labels above).
+  - *Consent:* `POST …/fetch`, `POST /datasets/drafts` and `POST /datasets/jobs/{job}/resume` are the round-trip: 409 `consent_required` with `consent.action`
+    `dataset_fetch` (and, at a metered cap, `dataset_override` until `accept_override` carries its hash), the text, the hash and `facts` (`{free, free_after, days?}`,
+    `{remaining}`) shown under the text and never hashed. Other refusals: 409 `insufficient_space` (checked again on the repeat), `untrusted_publisher`, `job_running`
+    (only for an entry that already has a job), `needs_hub`, `component_unavailable` (the search while kiwix-serve is off).
+  - *Ranges:* `GET`/`HEAD /tiles/{publisher}/{id}/{version}` serve the file through the Range arm as `application/octet-stream` (206 for one range; `Accept-Ranges: bytes`;
+    always `Content-Length`). A range past the end, or two or more ranges, answers **416 with a `problem+json` body, code `range_not_satisfiable`**, under `/api/v1` and on a
+    panel listener (and none on `/origin/v1/`, which has no body for a 416, §7.1). The browser reads tiles from the dashboard it is paired with, under the unchanged
+    `connect-src 'self'`.
+  - *SSE:* `dataset` → `SseDataset` (a `Job`), **coalesced per job** (§7.4): at most one per 5 s housekeeping tick while it runs, plus one on each state change and at its
+    end; no timer, none on a node with no job. After `reset` the Layer 8 views refetch `/datasets` (a loaded slice only: the store re-reads it once something loaded it).
+  - *Pin list for these items:* (3) `pnpm gen:types`, then `node scripts/gen-sse.mjs --check`: the tuples `DATASET_KINDS`, `DATASET_STATES`, `DATASET_LOCATIONS`,
+    `DATASET_USED_BY`, `JOB_STATES` (the closed part of `Job.state`; `failed (<reason>)` is open) and `COMPONENT_STARTS` are listed in `ENUMS`, with the aliases for the new
+    shapes. (4) `x-sse-events.events` gains `dataset`; the store's `switch (frame.event)` handles it (a `datasets` slice, folded per job and re-read on a state change).
+    (5) `test/gen.test.ts`, `test/http.test.ts` (every new operation has a client call except `adoptDatasets` and `getTile`, which a page never calls as a method; `HEAD /tiles/…` is in `openapi.yaml` but the digest lists GET, POST, PUT, PATCH and DELETE),
+    `test/layer8-contract.test.ts` and the mock (`ui/src/lib/api/mock/storage.ts`). (7) the components stop route's client method (`stopComponent` on the storage adapter,
+    with its mock) and `panelId` (`panelFor` takes a `PanelId`; `openSession`, the panel model and the mock's `openSession` are widened to it by row U5). (9) this section. (10) the search route's `publisher`.
+  - *The UI seam:* the dataset methods and `stopComponent` are on the same `StorageAdapter` (`ui/src/lib/api/storage.ts`), so none of them is in the eager chunk.
 - **Not gated:** `/`, static assets, `/health` (body is booleans), `/origin/v1/*` (Layer 7, §9.1: the hub's verified update files, GET only,
-  404 unless the hub serves them; outside `openapi.yaml`) and `/api/v1/auth/*`. Everything
+  404 unless the hub serves them; outside `openapi.yaml`; Layer 8 adds `/origin/v1/catalogue/*` and `/origin/v1/notice/*`, §16.7: GET and HEAD only, 405
+  otherwise, served only while `hub_role`, LAN sharing and `origin.datasets` (or `origin.components`, or `origin.serve` for the release's source, for a notice) are on, outside `API`) and `/api/v1/auth/*`. Everything
   else — including the Layer 1 seam `/api/status` and the `/v1` legacy page — needs loopback or a
   session.
 - **Chat stream (`POST /chat`, `stream:true`):** the response body is `text/event-stream` with
@@ -262,4 +301,4 @@ the `x-sse-events` map) into `ui/src/lib/api/types.gen.ts` — never hand-edited
 - **Identity:** no key material on any route, ever (Layer 2 rule). `node.label`/`bech32` are
   display forms computed from the public id.
 - **Timestamps:** RFC 3339 UTC. **IDs:** `conv-…` minted by the client (`[A-Za-z0-9_-]{1,128}`);
-  `prop-…`/`task-…` minted by `111-agent`; `msg-…` minted by `111d` (Layer 5); `fc-…`/`fm-…`/`be-…`/`sg-…` minted by `111d` (Layer 6). Layer 7 mints no new id family: a paired hub is its `NodeId`. Layer 8's first part mints none either (a store is `fabric` or `node_state`, a class one of §4.1's nine ids).
+  `prop-…`/`task-…` minted by `111-agent`; `msg-…` minted by `111d` (Layer 5); `fc-…`/`fm-…`/`be-…`/`sg-…` minted by `111d` (Layer 6). Layer 7 mints no new id family: a paired hub is its `NodeId`. Layer 8's first part mints none (a store is `fabric` or `node_state`, a class one of §4.1's nine ids); its second part adds `job-…`, minted by `111d` (a dataset job, §7.4).

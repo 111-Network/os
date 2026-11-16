@@ -63,6 +63,8 @@ import type {
   RegistryRow,
   RelayStatus,
   StorageStatus,
+  DatasetsListing,
+  Job,
   ServiceRecord,
   Status,
   Thread,
@@ -161,6 +163,8 @@ export interface StoreState {
   registry: RegistryRow[] | null;
   /** Layer 8: the storage status (disk, budget, classes, notices); null until a `storage` frame or a Layer 8 view loads it. A frame carries the four budgeted classes and is completed by a `GET /storage`. */
   storage: StorageStatus | null;
+  /** Layer 8, part 2: the datasets listing (publishers with their entries, holdings, jobs); null until a `dataset` frame or a Layer 8 view loads it. Publisher strings are untrusted: text only. */
+  datasets: DatasetsListing | null;
   connection: ConnectionSnapshot;
   /** Agent events, newest first, at most ACTIVITY_RING, deduped on (seq, ts). */
   activity: AgentEvent[];
@@ -352,6 +356,7 @@ function initialState(): StoreState {
     relay: null,
     registry: null,
     storage: null,
+    datasets: null,
     connection: INITIAL_CONNECTION,
     activity: [],
     baselineVersion: null,
@@ -663,6 +668,22 @@ export class ApiStore {
           void this.refreshStorage();
         }
         break;
+      case "dataset":
+        // One job, coalesced by the node (at most one per 5 s while it runs, plus each state change and its end). Fold it into a loaded
+        // listing at once; any change of state (a job that ended moves a holding, a paused one is a state) re-reads the listing, and so
+        // does a frame with nothing loaded yet (the adapter is imported lazily, here, like after a `storage` frame).
+        if (isJob(frame.data)) {
+          const job = frame.data;
+          const cur = this.state.datasets;
+          const prior = cur?.jobs.find((j) => j.id === job.id);
+          this.datasetFrames.set(job.id, job);
+          if (cur) patch.datasets = mergeJobFrame(cur, job);
+          if (!cur || !prior || prior.state !== job.state) {
+            void this.refreshDatasets();
+            if (this.state.storage !== null && (!prior || prior.state !== job.state)) void this.refreshStorage();
+          }
+        }
+        break;
       case "bridge":
         // Full snapshots of whichever part changed.
         if (frame.data && Array.isArray(frame.data.networks))
@@ -841,6 +862,7 @@ export class ApiStore {
     if (this.state.registry !== null) void this.refreshRegistry();
     // Layer 8: after `reset` the Storage views refetch `/storage` (the datasets listing is the contract's second part).
     if (this.state.storage !== null) void this.refreshStorage();
+    if (this.state.datasets !== null) void this.refreshDatasets();
   });
 
   refreshStatus = coalesced(async () => {
@@ -1067,6 +1089,33 @@ export class ApiStore {
         });
     } catch {
       /* keep the previous snapshot (an older node answers 404 and the slice stays as it was) */
+    }
+  });
+
+  /** Job frames received while a `GET /datasets` is in flight: they are newer than its snapshot and are folded back over it. */
+  private datasetFrames = new Map<string, Job>();
+
+  refreshDatasets = coalesced(async () => {
+    const a = this.adapter;
+    const load = this.storageLoader;
+    if (!a || !load) return;
+    try {
+      this.datasetFrames = new Map();
+      let datasets = await (await load()).datasets();
+      // Same state, more bytes: a progress frame newer than the snapshot. A state change re-reads anyway, so it is left to that read.
+      for (const job of this.datasetFrames.values()) {
+        const snap = datasets.jobs.find((j) => j.id === job.id);
+        if (snap && snap.state === job.state && job.done_bytes > snap.done_bytes) datasets = mergeJobFrame(datasets, job);
+      }
+      this.datasetFrames = new Map();
+      if (this.adapter === a)
+        this.commit({
+          datasets: sameJson(this.state.datasets, datasets)
+            ? this.state.datasets
+            : datasets,
+        });
+    } catch {
+      /* keep the previous listing (an older node answers 404 and the slice stays as it was) */
     }
   });
 
@@ -1499,6 +1548,29 @@ export function mergeStorageFrame(
   if (frame.settings === undefined && prev.settings !== undefined)
     out.settings = prev.settings;
   return sameJson(prev, out) ? prev : out;
+}
+
+function isJob(d: unknown): d is Job {
+  const x = d as Partial<Job> | null;
+  return (
+    !!x &&
+    typeof x === "object" &&
+    typeof x.id === "string" &&
+    typeof x.state === "string" &&
+    typeof x.publisher === "string" &&
+    typeof x.entry === "string" &&
+    typeof x.version === "string" &&
+    typeof x.done_bytes === "number" &&
+    typeof x.total_bytes === "number"
+  );
+}
+
+/** A `dataset` frame over a loaded listing: the job replaces its own row (by id) or joins the list; nothing else moves. */
+export function mergeJobFrame(prev: DatasetsListing, job: Job): DatasetsListing {
+  const i = prev.jobs.findIndex((j) => j.id === job.id);
+  if (i >= 0 && sameJson(prev.jobs[i], job)) return prev;
+  const jobs = i >= 0 ? prev.jobs.map((j, k) => (k === i ? job : j)) : [...prev.jobs, job];
+  return { ...prev, jobs };
 }
 
 /** The app-wide store. Tests construct their own ApiStore. */

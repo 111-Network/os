@@ -446,10 +446,27 @@ describe("adapter <-> openapi.yaml", () => {
     acceptUpdateWithoutCopy: (a) => a.acceptUpdateWithoutCopy("2026.11.2", "fabric", HASH),
     deleteStorageSetAside: (a) => a.deleteSetAside("store.db.damaged-1"),
     startEmptyStore: (a) => a.startEmpty("node_state", HASH),
+    // part 2 (task C2): the datasets, the tiles listing and the stop of a component, on the same adapter
+    listDatasets: (a) => a.datasets(),
+    checkDatasets: (a) => a.checkDatasets(),
+    fetchDataset: (a) => a.fetchDataset({ publisher: PEER, id: "wikipedia-en-simple", version: "2026-10" }, { warning: HASH, override: HASH }),
+    removeDataset: (a) => a.removeDataset({ publisher: PEER, id: "wikipedia-en-simple", version: "2026-10" }),
+    cancelDatasetJob: (a) => a.cancelDatasetJob("job-0001"),
+    resumeDatasetJob: (a) => a.resumeDatasetJob("job-0001", { override: HASH }),
+    listDatasetDrafts: (a) => a.datasetDrafts(),
+    createDatasetDraft: (a) =>
+      a.createDatasetDraft({ url: "https://mirror.example.org/x.zim", sha256: HASH, id: "x", kind: "zim", name: "X", version: "1", licence: "CC0-1.0", attribution: "none", source_url: "https://mirror.example.org/", used_by: ["encyclopedia"], accept_warning: HASH }),
+    publishDatasets: (a) => a.publishDatasets({ drafts: ["x@1"], remove: [{ id: "y", version: "2" }] }),
+    searchDatasets: (a) => a.searchDatasets({ q: "water", book: "wikipedia-en-simple", publisher: PEER, n: 5 }),
+    listTiles: (a) => a.tiles(),
+    stopBridgeComponent: (a) => a.stopComponent("kiwix"),
   };
+  // Operations a page never calls as a method: the adopt hand-off is loopback only, never a session (§16.1: `111 dataset import` calls it), and a tile
+  // file is read by the map library through its URL (`tileUrl`), with Range headers the browser sets.
+  const NO_CLIENT = ["adoptDatasets", "getTile"];
 
-  it("covers every operation except the event stream (the Layer 6, 7 and 8 part 1 operations included)", () => {
-    expect([...Object.keys(CALLS), ...Object.keys(RELAY_CALLS), ...Object.keys(STORAGE_CALLS)].sort()).toEqual(Object.keys(operations).filter((id) => id !== "events").sort());
+  it("covers every operation except the event stream (the Layer 6, 7 and 8 operations included), the two with no client method named", () => {
+    expect([...Object.keys(CALLS), ...Object.keys(RELAY_CALLS), ...Object.keys(STORAGE_CALLS), ...NO_CLIENT].sort()).toEqual(Object.keys(operations).filter((id) => id !== "events").sort());
   });
 
   for (const [id, call] of Object.entries(STORAGE_CALLS)) {
@@ -463,6 +480,8 @@ describe("adapter <-> openapi.yaml", () => {
       expect(c.path).toMatch(toRegex(op.path));
       expect(c.init).toMatchObject({ credentials: "same-origin", cache: "no-store" });
       if (c.method !== "GET") expect(c.headers["Content-Type"]).toBe("application/json");
+      for (const q of op.query) if (q.required) expect(c.query.has(q.name), `required query ${q.name}`).toBe(true);
+      for (const name of c.query.keys()) expect(op.query.map((q) => q.name)).toContain(name);
       if (op.requestSchema) expect(validate(c.body, op.requestSchema)).toEqual([]);
       else expect(c.body).toBeUndefined();
     });
@@ -655,6 +674,66 @@ describe("the Layer 8 storage adapter (src/lib/api/storage.ts)", () => {
     expect(r.calls[1]!.body).toEqual({ store: "fabric", accept_warning: HASH });
     expect(r.calls[3]!.body).toEqual({ class: "heal" });
     expect(r.calls[2]!.body).toBeUndefined();
+  });
+
+  it("the dataset routes address an entry by publisher, id and version under entries/, with the hashes only when given", async () => {
+    const r = recorder((c) => (c.method === "DELETE" ? new Response(null, { status: 204 }) : jsonResponse({ id: "job-0001" }, 202)));
+    const st = createHttpStorage({ fetch: r.fetch });
+    const ref = { publisher: "ab".repeat(32), id: "world-overview", version: "2026-09" };
+    await st.fetchDataset(ref);
+    await st.fetchDataset(ref, { warning: HASH });
+    await st.fetchDataset(ref, { warning: HASH, override: "b".repeat(64) });
+    await st.removeDataset(ref);
+    await st.resumeDatasetJob("job-0001", { override: HASH });
+    await st.cancelDatasetJob("job-0001");
+    const base = `/api/v1/datasets/entries/${ref.publisher}/world-overview/2026-09`;
+    expect(r.calls.map((c) => [c.method, c.path])).toEqual([
+      ["POST", `${base}/fetch`],
+      ["POST", `${base}/fetch`],
+      ["POST", `${base}/fetch`],
+      ["DELETE", base],
+      ["POST", "/api/v1/datasets/jobs/job-0001/resume"],
+      ["DELETE", "/api/v1/datasets/jobs/job-0001"],
+    ]);
+    expect(r.calls[0]!.body).toEqual({});
+    expect(r.calls[1]!.body).toEqual({ accept_warning: HASH });
+    expect(r.calls[2]!.body).toEqual({ accept_warning: HASH, accept_override: "b".repeat(64) });
+    expect(r.calls[4]!.body).toEqual({ accept_override: HASH });
+  });
+
+  it("a part of a dataset key that is not a plain segment is percent-encoded, never a second path", async () => {
+    const r = recorder(() => new Response(null, { status: 204 }));
+    await createHttpStorage({ fetch: r.fetch }).removeDataset({ publisher: "p", id: "../x", version: "1/2" });
+    expect(r.calls[0]!.path).toBe("/api/v1/datasets/entries/p/..%2Fx/1%2F2");
+  });
+
+  it("the search sends q and only the optional keys it was given, encoded", async () => {
+    const r = recorder(() => jsonResponse({ schema: 1, format: "opensearch-xml", body: "" }));
+    const st = createHttpStorage({ fetch: r.fetch });
+    await st.searchDatasets({ q: "clean water & soap" });
+    await st.searchDatasets({ q: "x", book: "b", publisher: PEER, n: 3 });
+    expect([...r.calls[0]!.query.keys()]).toEqual(["q"]);
+    expect(r.calls[0]!.query.get("q")).toBe("clean water & soap");
+    expect(Object.fromEntries(r.calls[1]!.query)).toEqual({ q: "x", book: "b", publisher: PEER, n: "3" });
+  });
+
+  it("a 409 on a fetch keeps its consent with the facts, and the other refusals keep their codes", async () => {
+    const consent = { action: "dataset_fetch", subject: "ab:x@1", warning_text: "Download X 1, 1.0 GB, from the hub.", hash: HASH, addons: ["metered"], facts: { free: 10, free_after: 4, days: 3 } };
+    const err = await createHttpStorage({ fetch: recorder(() => consent409(consent)).fetch }).fetchDataset({ publisher: PEER, id: "x", version: "1" }).catch((e: unknown) => e);
+    expect(storageConsentOf(err)).toEqual(consent);
+    for (const code of ["insufficient_space", "untrusted_publisher", "job_running", "needs_hub", "component_unavailable"]) {
+      const e = await createHttpStorage({ fetch: recorder(() => jsonResponse({ type: "about:blank", title: "t", status: 409, code }, 409, { "content-type": "application/problem+json" })).fetch })
+        .fetchDataset({ publisher: PEER, id: "x", version: "1" })
+        .catch((x: unknown) => x);
+      expect((e as { code?: string }).code).toBe(code);
+      expect(storageConsentOf(e)).toBeNull();
+    }
+  });
+
+  it("the stop route posts to the component's one path segment and answers 204", async () => {
+    const r = recorder(() => new Response(null, { status: 204 }));
+    await expect(createHttpStorage({ fetch: r.fetch }).stopComponent("kiwix")).resolves.toBeUndefined();
+    expect(r.calls[0]).toMatchObject({ method: "POST", path: "/api/v1/bridge/components/kiwix/stop", body: undefined });
   });
 
   it("a 409 consent_required keeps the exact text and hash and the facts, for each Layer 8 action", async () => {

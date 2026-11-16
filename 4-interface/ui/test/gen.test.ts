@@ -5,13 +5,19 @@ import { join, resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
   CHAT_EVENT_NAMES,
+  COMPONENT_STARTS,
   CONSENT_ACTIONS,
+  DATASET_KINDS,
+  DATASET_LOCATIONS,
+  DATASET_STATES,
+  DATASET_USED_BY,
   DEVICE_KINDS,
   DEVICE_STATES,
   DEVICE_TRANSPORTS,
   EVENTS_EVENT_NAMES,
   EVIDENCE_TRANSPORTS,
   EXPORT_OFFER_CLASSES,
+  JOB_STATES,
   NEARBY_KINDS,
   PAIR_ROLES,
   PAIR_TLS,
@@ -105,5 +111,23 @@ describe("runtime tuples mirror the contract", () => {
   it("the Layer 8 `storage` event is in the map and the tuple", () => {
     expect(sse.events.storage).toBe("SseStorage");
     expect([...EVENTS_EVENT_NAMES]).toContain("storage");
+  });
+
+  it("Layer 8 enums, part 2 (the dataset tuples gen-sse.mjs lists in ENUMS)", () => {
+    expect([...DATASET_KINDS]).toEqual(schemas.DatasetKind!.enum);
+    expect([...DATASET_STATES]).toEqual(["not_held", "partial", "present", "unverified", "disk_absent"]);
+    expect([...DATASET_STATES]).toEqual(schemas.DatasetState!.enum);
+    expect([...DATASET_LOCATIONS]).toEqual(["origin", "in_place", null]);
+    expect([...DATASET_USED_BY]).toEqual(["map", "encyclopedia", "agent", "updates"]);
+    const jobState = schemas.JobState as { anyOf: { enum?: unknown[]; pattern?: string }[] };
+    expect([...JOB_STATES]).toEqual(jobState.anyOf[0]!.enum);
+    // the closed part holds every state of §7.4, with `paused (metered link)` and `failed (source cannot resume)` among them
+    expect([...JOB_STATES]).toEqual(expect.arrayContaining(["queued", "running", "paused (offline)", "paused (metered cap)", "paused (metered link)", "paused (disk low)", "paused (source busy)", "done", "failed (name mismatch)", "failed (source cannot resume)", "cancelled"]));
+    expect([...COMPONENT_STARTS]).toEqual(["always", "on_demand"]);
+  });
+
+  it("the Layer 8 `dataset` event is in the map and the tuple, after `storage`", () => {
+    expect(sse.events.dataset).toBe("SseDataset");
+    expect([...EVENTS_EVENT_NAMES].slice(-2)).toEqual(["storage", "dataset"]);
   });
 });

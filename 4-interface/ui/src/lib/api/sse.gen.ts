@@ -22,7 +22,8 @@ export type EventsFrame =
   | { event: "bridge"; data: Schemas["SseBridge"] }
   | { event: "relay"; data: Schemas["SseRelay"] }
   | { event: "registry"; data: Schemas["SseRegistry"] }
-  | { event: "storage"; data: Schemas["SseStorage"] };
+  | { event: "storage"; data: Schemas["SseStorage"] }
+  | { event: "dataset"; data: Schemas["SseDataset"] };
 
 /** Frames on the `POST /api/v1/chat` response stream. */
 export type ChatFrame =
@@ -34,7 +35,7 @@ export type ChatFrame =
 export type EventsEventName = EventsFrame["event"];
 export type ChatEventName = ChatFrame["event"];
 
-export const EVENTS_EVENT_NAMES = ["status", "services", "devices", "proposal", "agent", "reset", "message", "contact", "fabric", "nearby", "panels", "network_message", "bridge", "relay", "registry", "storage"] as const;
+export const EVENTS_EVENT_NAMES = ["status", "services", "devices", "proposal", "agent", "reset", "message", "contact", "fabric", "nearby", "panels", "network_message", "bridge", "relay", "registry", "storage", "dataset"] as const;
 export const CHAT_EVENT_NAMES = ["token", "tool", "done", "error"] as const;
 
 // Convenience aliases for the schemas the app uses.
@@ -205,6 +206,28 @@ export type StorageExportOfferRequest = Schemas["StorageExportOfferRequest"];
 export type UpdateWithoutCopyRequest = Schemas["UpdateWithoutCopyRequest"];
 export type StartEmptyRequest = Schemas["StartEmptyRequest"];
 export type StorageEvent = Schemas["SseStorage"];
+export type PanelId = Schemas["PanelId"];
+export type DatasetKind = Schemas["DatasetKind"];
+export type DatasetState = Schemas["DatasetState"];
+export type DatasetLocation = Schemas["DatasetLocation"];
+export type DatasetUsedBy = Schemas["DatasetUsedBy"];
+export type DatasetEntry = Schemas["DatasetEntry"];
+export type Publisher = Schemas["Publisher"];
+export type Holding = Schemas["Holding"];
+export type JobId = Schemas["JobId"];
+export type JobState = Schemas["JobState"];
+export type Job = Schemas["Job"];
+export type DatasetsListing = Schemas["DatasetsListing"];
+export type DatasetDraft = Schemas["DatasetDraft"];
+export type DatasetDrafts = Schemas["DatasetDrafts"];
+export type DatasetFetchRequest = Schemas["DatasetFetchRequest"];
+export type DatasetDraftRequest = Schemas["DatasetDraftRequest"];
+export type DatasetPublishRequest = Schemas["DatasetPublishRequest"];
+export type DatasetAdoptRequest = Schemas["DatasetAdoptRequest"];
+export type DatasetSearchResult = Schemas["DatasetSearchResult"];
+export type TileSet = Schemas["TileSet"];
+export type TileSets = Schemas["TileSets"];
+export type DatasetEvent = Schemas["SseDataset"];
 export type ProblemCode = Schemas["Problem"]["code"];
 
 // Enum tuples (runtime copies of the contract enums).
@@ -249,3 +272,9 @@ export const STORAGE_KEEP_RULES = ["termux", "hub", "linux", "user"] as const;
 export const STORAGE_INTEGRITY_STATES = ["checking", "ok", "failed", null] as const;
 export const STORAGE_NODE_STATES = ["open", "closed", "unavailable"] as const;
 export const EXPORT_OFFER_CLASSES = ["fabric", "agent", "heal"] as const;
+export const DATASET_KINDS = ["zim", "pmtiles"] as const;
+export const DATASET_STATES = ["not_held", "partial", "present", "unverified", "disk_absent"] as const;
+export const DATASET_LOCATIONS = ["origin", "in_place", null] as const;
+export const DATASET_USED_BY = ["map", "encyclopedia", "agent", "updates"] as const;
+export const JOB_STATES = ["queued", "running", "paused (offline)", "paused (metered cap)", "paused (metered link)", "paused (disk low)", "paused (source busy)", "done", "failed (name mismatch)", "failed (source cannot resume)", "cancelled"] as const;
+export const COMPONENT_STARTS = ["always", "on_demand"] as const;

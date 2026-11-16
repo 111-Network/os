@@ -1121,7 +1121,10 @@ export const schemas: Record<string, JsonSchema> = {
     "required": ["id","port","entry","needs_secure_context","allow","optional_hosts","state"],
     "description": "A hosted panel (§13): an adopted project's own web UI on its own origin `http://<host as typed>:<port>`. The UI builds the origin from `location.hostname` and `port`, never from a shared snapshot. The dashboard frames only registry-declared panels.",
     "properties": {
-      "id": {"$ref":"#/components/schemas/ServiceId","description":"= the service id and KB link"},
+      "id": {
+        "$ref": "#/components/schemas/PanelId",
+        "description": "= the service id and KB link; a `child` panel (Layer 8) has its component's id"
+      },
       "port": {
         "type": "integer",
         "minimum": 11190,
@@ -1222,6 +1225,10 @@ export const schemas: Record<string, JsonSchema> = {
     "pattern": "^[a-z0-9][a-z0-9_-]{0,39}$",
     "description": "an optional component's id from `assets/components/<id>.toml` (§2.1)"
   },
+  "PanelId": {
+    "description": "A hosted panel's id (Layer 8, §9.1 (5)): a `ServiceId`, or for a `child` panel its component's `ComponentId`. `anyOf`: every `ServiceId` also matches the `ComponentId` pattern.",
+    "anyOf": [{"$ref":"#/components/schemas/ServiceId"},{"$ref":"#/components/schemas/ComponentId"}]
+  },
   "Sha256Hex": {
     "type": "string",
     "pattern": "^[0-9a-f]{64}$",
@@ -1296,7 +1303,15 @@ export const schemas: Record<string, JsonSchema> = {
     "description": "An optional third-party component (§2.1). While `disabled` or only `declared`/`cached` it has no process, listener, loaded code, timer or open file; the sizes are what enabling would add.",
     "properties": {
       "id": {"$ref":"#/components/schemas/ComponentId"},
-      "adapter": {"$ref":"#/components/schemas/NetworkId","description":"the network this component carries"},
+      "adapter": {
+        "oneOf": [{"$ref":"#/components/schemas/NetworkId"},{"type":"null"}],
+        "description": "the network this component carries; null for a server component that names none (kiwix, Layer 8 §9.2). The key is always present."
+      },
+      "start": {
+        "type": "string",
+        "enum": ["always","on_demand"],
+        "description": "Layer 8 (§9.2, optional; absent from an older node, which means `always`): `on_demand` starts the child on first use and stops it when idle (`POST …/stop`, 30 idle passes), `always` from enable on"
+      },
       "state": {"$ref":"#/components/schemas/ComponentState"},
       "cached_bytes": {
         "type": ["integer","null"],
@@ -2993,6 +3008,392 @@ export const schemas: Record<string, JsonSchema> = {
   "SseStorage": {
     "$ref": "#/components/schemas/StorageStatus",
     "description": "A `StorageStatus` without `settings`, on a change §16.3 lists: `classes` holds the four budgeted ones (§4.1), never a figure that needs a walk or a read of the index or the registry; the page refetches `GET /storage` for the rest."
+  },
+  "DatasetKind": {
+    "type": "string",
+    "enum": ["zim","pmtiles"],
+    "description": "The reader (§5.3). `patch` is reserved for v1.1: an entry of a kind this node does not know is skipped whole and counted in `Publisher.skipped`, so no unknown kind reaches a page."
+  },
+  "DatasetState": {
+    "type": "string",
+    "enum": ["not_held","partial","present","unverified","disk_absent"],
+    "description": "The one state enum of `DatasetEntry.state` and `Holding.state` (§5.5): `not_held` (listed, not held; an entry only), `partial`, `present`, `unverified` (an out-of-tree file whose tuple changed or after an unclean shutdown: it answers 404 until re-hashed), `disk_absent` (an in-place file whose disk is not attached)."
+  },
+  "DatasetLocation": {
+    "type": ["string","null"],
+    "enum": ["origin","in_place",null],
+    "description": "Where a held file lives (§5.5): `origin` is the shared tree `state/origin/blob/`, `in_place` a path outside it; null on an entry that is `not_held`."
+  },
+  "DatasetUsedBy": {"type":"string","enum":["map","encyclopedia","agent","updates"],"description":"The chips of §15.4."},
+  "DatasetEntry": {
+    "type": "object",
+    "required": [
+      "id",
+      "kind",
+      "name",
+      "version",
+      "seq",
+      "size",
+      "sha256",
+      "blake3",
+      "ob_log",
+      "outboard_sha256",
+      "licence",
+      "attribution",
+      "source_url",
+      "built",
+      "used_by",
+      "state",
+      "location",
+      "non_commercial"
+    ],
+    "description": "A catalogue entry (§5.3) plus what this node holds. `name`, `version`, `licence`, `attribution`, `source_url`, `built` and `book` are the publisher's: untrusted, text only (never Markdown or HTML).",
+    "properties": {
+      "id": {
+        "type": "string",
+        "pattern": "^[a-z0-9][a-z0-9_.-]{0,63}$",
+        "description": "stable across versions; never a path"
+      },
+      "kind": {"$ref":"#/components/schemas/DatasetKind"},
+      "name": {"type":"string","maxLength":120},
+      "version": {
+        "type": "string",
+        "pattern": "^[A-Za-z0-9][A-Za-z0-9_.+-]{0,39}$",
+        "description": "never ordered, never a path"
+      },
+      "seq": {
+        "type": "integer",
+        "minimum": 0,
+        "description": "the catalogue `seq` at which this (id, version) first appeared: orders the versions of an id"
+      },
+      "size": {"type":"integer","minimum":0,"description":"bytes"},
+      "sha256": {"type":"string","pattern":"^[0-9a-f]{64}$","description":"the address in the tree"},
+      "blake3": {"type":"string","pattern":"^[0-9a-f]{64}$","description":"the root every block is checked against"},
+      "ob_log": {
+        "type": "integer",
+        "minimum": 10,
+        "maximum": 16,
+        "description": "the sidecar's block size, log2 of the chunk count per block"
+      },
+      "outboard_sha256": {"type":"string","pattern":"^[0-9a-f]{64}$","description":"the sidecar's address"},
+      "licence": {"type":"string","maxLength":256,"description":"an SPDX expression or `LicenseRef-…`"},
+      "attribution": {"type":"string","maxLength":1024},
+      "source_url": {"type":"string","maxLength":2048},
+      "built": {"type":"string","maxLength":40,"description":"a display string, never used for ordering"},
+      "requires": {"$ref":"#/components/schemas/ComponentId","description":"optional: `kiwix` for a `zim`"},
+      "fits": {
+        "type": "string",
+        "maxLength": 8,
+        "description": "optional: the smallest category it is meant for (`2A` … `4B`), shown in the consent, never a refusal"
+      },
+      "used_by": {"type":"array","items":{"$ref":"#/components/schemas/DatasetUsedBy"}},
+      "book": {
+        "type": "string",
+        "maxLength": 120,
+        "description": "optional, `zim` only: the ZIM's own `Name` metadata, the name kiwix-serve's search knows the book by (§9.4)"
+      },
+      "state": {"$ref":"#/components/schemas/DatasetState"},
+      "location": {"$ref":"#/components/schemas/DatasetLocation"},
+      "non_commercial": {
+        "type": "boolean",
+        "description": "the licence is an `-NC-` id: tagged \"non-commercial\" wherever it shows (§9.7)"
+      }
+    }
+  },
+  "Publisher": {
+    "type": "object",
+    "required": ["node_id","label","home","seq","source","sources","skipped","entries"],
+    "description": "One trusted publisher's verified catalogue (§6.2, §16.2). `label` is the publisher's: untrusted, text only.",
+    "properties": {
+      "node_id": {"$ref":"#/components/schemas/NodeId"},
+      "label": {"type":"string"},
+      "home": {"type":"boolean","description":"the pinned home hub"},
+      "seq": {
+        "type": "integer",
+        "minimum": 0,
+        "description": "the highest verified catalogue `seq` this node holds (§6.3)"
+      },
+      "source": {
+        "type": ["string","null"],
+        "description": "where that catalogue was last seen (\"newest catalogue seen: seq N from <source>\"); null for one only imported. Untrusted: text only."
+      },
+      "sources": {
+        "type": "array",
+        "items": {"type":"string"},
+        "description": "the origin URLs `sources` lists for it (§7.4). Untrusted: text only."
+      },
+      "skipped": {
+        "type": "integer",
+        "minimum": 0,
+        "description": "entries of a kind this node does not know (\"N entries need a newer 111\", §5.4)"
+      },
+      "entries": {"type":"array","items":{"$ref":"#/components/schemas/DatasetEntry"}}
+    }
+  },
+  "Holding": {
+    "type": "object",
+    "required": ["publisher","id","version","sha256","bytes","location","state","used_by"],
+    "description": "One held (publisher, id, version) of the holdings index (§5.5).",
+    "properties": {
+      "publisher": {"$ref":"#/components/schemas/NodeId"},
+      "id": {"type":"string","pattern":"^[a-z0-9][a-z0-9_.-]{0,63}$"},
+      "version": {"type":"string","pattern":"^[A-Za-z0-9][A-Za-z0-9_.+-]{0,39}$"},
+      "sha256": {"type":"string","pattern":"^[0-9a-f]{64}$"},
+      "bytes": {"type":"integer","minimum":0},
+      "location": {"$ref":"#/components/schemas/DatasetLocation"},
+      "state": {"$ref":"#/components/schemas/DatasetState"},
+      "used_by": {"type":"array","items":{"$ref":"#/components/schemas/DatasetUsedBy"}}
+    }
+  },
+  "JobId": {
+    "type": "string",
+    "pattern": "^job-[A-Za-z0-9_-]{1,124}$",
+    "description": "minted by `111d` (a new id family, §16.2)"
+  },
+  "JobState": {
+    "description": "The §7.4 states: `queued`, `running`, `paused (offline)`, `paused (metered cap)`, `paused (metered link)`, `paused (disk low)`, `paused (source busy)`, `done`, `failed (<reason>)` (`failed (name mismatch)` and `failed (source cannot resume)` among them) and `cancelled`. A pause is a state, never an error. A reason this page does not know renders as it is. `anyOf`, not `oneOf`: the two `failed (...)` literals also match the open pattern, and a conforming validator must accept them.",
+    "anyOf": [
+      {
+        "type": "string",
+        "enum": [
+          "queued",
+          "running",
+          "paused (offline)",
+          "paused (metered cap)",
+          "paused (metered link)",
+          "paused (disk low)",
+          "paused (source busy)",
+          "done",
+          "failed (name mismatch)",
+          "failed (source cannot resume)",
+          "cancelled"
+        ]
+      },
+      {"type":"string","pattern":"^failed \\([^()]{1,80}\\)$"}
+    ]
+  },
+  "Job": {
+    "type": "object",
+    "required": [
+      "id",
+      "publisher",
+      "entry",
+      "version",
+      "state",
+      "done_bytes",
+      "total_bytes",
+      "source",
+      "metered",
+      "override_bytes"
+    ],
+    "description": "One dataset job (§7.4, §16.2). At most one runs per node; accepted fetches queue in order.",
+    "properties": {
+      "id": {"$ref":"#/components/schemas/JobId"},
+      "publisher": {"$ref":"#/components/schemas/NodeId"},
+      "entry": {"type":"string","pattern":"^[a-z0-9][a-z0-9_.-]{0,63}$","description":"the entry's `id`"},
+      "version": {"type":"string","pattern":"^[A-Za-z0-9][A-Za-z0-9_.+-]{0,39}$"},
+      "state": {"$ref":"#/components/schemas/JobState"},
+      "done_bytes": {"type":"integer","minimum":0},
+      "total_bytes": {"type":"integer","minimum":0},
+      "source": {
+        "type": ["string","null"],
+        "description": "the source in use (the home hub's origin or a `sources` URL, or the first copy's upstream); null while queued. Untrusted: text only."
+      },
+      "metered": {
+        "oneOf": [
+          {
+            "type": "object",
+            "required": ["match","cap","days"],
+            "properties": {
+              "match": {
+                "type": "object",
+                "description": "the metered rule that matches the job's connection: exactly one of `iface` or `ssid`",
+                "properties": {"iface":{"type":"string"},"ssid":{"type":"string"}}
+              },
+              "cap": {"type":"integer","minimum":1,"description":"the rule's daily cap, bytes"},
+              "days": {
+                "type": ["integer","null"],
+                "minimum": 0,
+                "description": "the days the pull takes at that cap, when it can be told"
+              }
+            }
+          },
+          {"type":"null"}
+        ],
+        "description": "null when the link is not metered (\"No metered link is set\")"
+      },
+      "override_bytes": {
+        "type": "integer",
+        "minimum": 0,
+        "description": "the bytes moved past a cap under `dataset_override` (§7.8)"
+      }
+    }
+  },
+  "SseDataset": {
+    "$ref": "#/components/schemas/Job",
+    "description": "A `Job`, coalesced per job (§7.4): at most one per 5 s housekeeping tick while it runs, plus one on each state change and at its end. Never on a timer; a node with no job sends none."
+  },
+  "DatasetsListing": {
+    "type": "object",
+    "required": ["schema","publishers","holdings","jobs"],
+    "properties": {
+      "schema": {"type":"integer"},
+      "publishers": {"type":"array","items":{"$ref":"#/components/schemas/Publisher"}},
+      "holdings": {"type":"array","items":{"$ref":"#/components/schemas/Holding"}},
+      "jobs": {"type":"array","items":{"$ref":"#/components/schemas/Job"}}
+    }
+  },
+  "DatasetDraft": {
+    "type": "object",
+    "required": ["draft","entry"],
+    "properties": {
+      "draft": {
+        "type": "string",
+        "pattern": "^[a-z0-9][a-z0-9_.-]{0,63}@[A-Za-z0-9][A-Za-z0-9_.+-]{0,39}$",
+        "description": "the `<id>@<version>` name `publish` takes"
+      },
+      "entry": {"$ref":"#/components/schemas/DatasetEntry"}
+    }
+  },
+  "DatasetDrafts": {
+    "type": "object",
+    "required": ["schema","drafts"],
+    "properties": {
+      "schema": {"type":"integer"},
+      "drafts": {"type":"array","items":{"$ref":"#/components/schemas/DatasetDraft"}}
+    }
+  },
+  "DatasetFetchRequest": {
+    "type": "object",
+    "description": "The pinned consent round-trip (§7.7): `accept_warning` is the hash of the `dataset_fetch` text the person was shown, `accept_override` the hash of the `dataset_override` text. Absent on the first call.",
+    "properties": {
+      "accept_warning": {"$ref":"#/components/schemas/Sha256Hex"},
+      "accept_override": {"$ref":"#/components/schemas/Sha256Hex"}
+    }
+  },
+  "DatasetDraftRequest": {
+    "type": "object",
+    "required": ["url","id","kind","name","version","licence","attribution","source_url","used_by"],
+    "description": "A first copy (§7.5): the upstream URL, optionally its sha256, and the entry's fields. `size`, `blake3`, the sidecar and `seq` are computed by the job. Publisher strings: text only.",
+    "properties": {
+      "url": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 2048,
+        "description": "https, or http to a URL the person typed (§7.3 (2))"
+      },
+      "sha256": {
+        "type": "string",
+        "pattern": "^[0-9a-f]{64}$",
+        "description": "the upstream's sha256, when the person or the mirror supplied one"
+      },
+      "id": {"type":"string","pattern":"^[a-z0-9][a-z0-9_.-]{0,63}$"},
+      "kind": {"$ref":"#/components/schemas/DatasetKind"},
+      "name": {"type":"string","minLength":1,"maxLength":120},
+      "version": {"type":"string","pattern":"^[A-Za-z0-9][A-Za-z0-9_.+-]{0,39}$"},
+      "licence": {"type":"string","minLength":1,"maxLength":256},
+      "attribution": {"type":"string","maxLength":1024},
+      "source_url": {"type":"string","maxLength":2048},
+      "built": {"type":"string","maxLength":40},
+      "requires": {"$ref":"#/components/schemas/ComponentId"},
+      "fits": {"type":"string","maxLength":8},
+      "used_by": {"type":"array","items":{"$ref":"#/components/schemas/DatasetUsedBy"}},
+      "book": {"type":"string","maxLength":120},
+      "accept_warning": {"$ref":"#/components/schemas/Sha256Hex"},
+      "accept_override": {"$ref":"#/components/schemas/Sha256Hex"}
+    }
+  },
+  "DatasetPublishRequest": {
+    "type": "object",
+    "required": ["drafts","remove"],
+    "properties": {
+      "drafts": {
+        "type": "array",
+        "items": {"type":"string","pattern":"^[a-z0-9][a-z0-9_.-]{0,63}@[A-Za-z0-9][A-Za-z0-9_.+-]{0,39}$"},
+        "description": "`<id>@<version>` draft names"
+      },
+      "remove": {
+        "type": "array",
+        "items": {
+          "type": "object",
+          "required": ["id","version"],
+          "properties": {
+            "id": {"type":"string","pattern":"^[a-z0-9][a-z0-9_.-]{0,63}$"},
+            "version": {"type":"string","pattern":"^[A-Za-z0-9][A-Za-z0-9_.+-]{0,39}$"}
+          }
+        },
+        "description": "entries to drop from the new catalogue"
+      }
+    }
+  },
+  "DatasetAdoptRequest": {
+    "type": "object",
+    "required": ["request","incoming","catalogues","drafts","in_place"],
+    "description": "What `111 dataset import` staged (§7.6); loopback only. Every item is checked again before anything is written. A draft is a `DatasetEntry` shape; the node ignores `state`, `location`, `non_commercial` and `seq` (derived at adoption and publish) and a CLI-staged draft may omit `built` and `used_by` semantics it has no flag for.",
+    "properties": {
+      "request": {
+        "type": "string",
+        "pattern": "^adopt-[0-9]{1,10}\\.json$",
+        "description": "the request file in `state/origin/incoming/`, deleted once adopted"
+      },
+      "incoming": {
+        "type": "array",
+        "items": {"type":"string","pattern":"^[0-9a-f]{64}$"},
+        "description": "sha256 of each verified copy in `incoming/` to rename into the tree"
+      },
+      "catalogues": {
+        "type": "array",
+        "items": {"$ref":"#/components/schemas/NodeId"},
+        "description": "publisher hex of each staged catalogue"
+      },
+      "drafts": {"type":"array","items":{"$ref":"#/components/schemas/DatasetEntry"}},
+      "in_place": {
+        "type": "array",
+        "items": {
+          "type": "object",
+          "required": ["sha256","path"],
+          "properties": {
+            "sha256": {"type":"string","pattern":"^[0-9a-f]{64}$"},
+            "path": {"type":"string","minLength":1,"maxLength":4096}
+          }
+        }
+      },
+      "follow": {"type":"array","items":{"$ref":"#/components/schemas/NodeId"}},
+      "sources": {"type":"object","additionalProperties":{"type":"array","items":{"type":"string"}}}
+    }
+  },
+  "DatasetSearchResult": {
+    "type": "object",
+    "required": ["schema","format","body"],
+    "properties": {
+      "schema": {"type":"integer"},
+      "format": {"type":"string","enum":["opensearch-xml"]},
+      "body": {
+        "type": "string",
+        "maxLength": 8192,
+        "description": "the upstream text capped at 8 KiB. Untrusted: text only, never parsed as markup by a page."
+      }
+    }
+  },
+  "TileSet": {
+    "type": "object",
+    "required": ["id","publisher","version","name","bytes","licence","attribution","url"],
+    "description": "One held PMTiles set (§10 (5)). `name`, `licence` and `attribution` are the publisher's: untrusted, text only.",
+    "properties": {
+      "id": {"type":"string","pattern":"^[a-z0-9][a-z0-9_.-]{0,63}$"},
+      "publisher": {"$ref":"#/components/schemas/NodeId"},
+      "version": {"type":"string","pattern":"^[A-Za-z0-9][A-Za-z0-9_.+-]{0,39}$"},
+      "name": {"type":"string"},
+      "bytes": {"type":"integer","minimum":0},
+      "licence": {"type":"string"},
+      "attribution": {"type":"string"},
+      "url": {"type":"string","description":"the path below: `/api/v1/tiles/{publisher}/{id}/{version}`"}
+    }
+  },
+  "TileSets": {
+    "type": "object",
+    "required": ["schema","sets"],
+    "properties": {"schema":{"type":"integer"},"sets":{"type":"array","items":{"$ref":"#/components/schemas/TileSet"}}}
   }
 };
 
@@ -4312,6 +4713,181 @@ export const operations: Record<string, ContractOperation> = {
     "pathParams": [],
     "errors": [400,403,409]
   },
+  "listDatasets": {
+    "method": "GET",
+    "path": "/api/v1/datasets",
+    "success": 200,
+    "contentType": "application/json",
+    "schema": {"$ref":"#/components/schemas/DatasetsListing"},
+    "schemasByType": {"application/json":{"$ref":"#/components/schemas/DatasetsListing"}},
+    "requestSchema": null,
+    "query": [],
+    "pathParams": [],
+    "errors": []
+  },
+  "checkDatasets": {
+    "method": "POST",
+    "path": "/api/v1/datasets/check",
+    "success": 202,
+    "contentType": null,
+    "schema": null,
+    "schemasByType": {},
+    "requestSchema": null,
+    "query": [],
+    "pathParams": [],
+    "errors": []
+  },
+  "fetchDataset": {
+    "method": "POST",
+    "path": "/api/v1/datasets/entries/{publisher}/{id}/{version}/fetch",
+    "success": 202,
+    "contentType": "application/json",
+    "schema": {"$ref":"#/components/schemas/Job"},
+    "schemasByType": {"application/json":{"$ref":"#/components/schemas/Job"}},
+    "requestSchema": {"$ref":"#/components/schemas/DatasetFetchRequest"},
+    "query": [],
+    "pathParams": ["publisher","id","version"],
+    "errors": [404,409]
+  },
+  "removeDataset": {
+    "method": "DELETE",
+    "path": "/api/v1/datasets/entries/{publisher}/{id}/{version}",
+    "success": 204,
+    "contentType": null,
+    "schema": null,
+    "schemasByType": {},
+    "requestSchema": null,
+    "query": [],
+    "pathParams": ["publisher","id","version"],
+    "errors": [404]
+  },
+  "cancelDatasetJob": {
+    "method": "DELETE",
+    "path": "/api/v1/datasets/jobs/{job}",
+    "success": 204,
+    "contentType": null,
+    "schema": null,
+    "schemasByType": {},
+    "requestSchema": null,
+    "query": [],
+    "pathParams": ["job"],
+    "errors": [404]
+  },
+  "resumeDatasetJob": {
+    "method": "POST",
+    "path": "/api/v1/datasets/jobs/{job}/resume",
+    "success": 202,
+    "contentType": "application/json",
+    "schema": {"$ref":"#/components/schemas/Job"},
+    "schemasByType": {"application/json":{"$ref":"#/components/schemas/Job"}},
+    "requestSchema": {"$ref":"#/components/schemas/DatasetFetchRequest"},
+    "query": [],
+    "pathParams": ["job"],
+    "errors": [404,409]
+  },
+  "listDatasetDrafts": {
+    "method": "GET",
+    "path": "/api/v1/datasets/drafts",
+    "success": 200,
+    "contentType": "application/json",
+    "schema": {"$ref":"#/components/schemas/DatasetDrafts"},
+    "schemasByType": {"application/json":{"$ref":"#/components/schemas/DatasetDrafts"}},
+    "requestSchema": null,
+    "query": [],
+    "pathParams": [],
+    "errors": []
+  },
+  "createDatasetDraft": {
+    "method": "POST",
+    "path": "/api/v1/datasets/drafts",
+    "success": 202,
+    "contentType": "application/json",
+    "schema": {"$ref":"#/components/schemas/Job"},
+    "schemasByType": {"application/json":{"$ref":"#/components/schemas/Job"}},
+    "requestSchema": {"$ref":"#/components/schemas/DatasetDraftRequest"},
+    "query": [],
+    "pathParams": [],
+    "errors": [400,409]
+  },
+  "publishDatasets": {
+    "method": "POST",
+    "path": "/api/v1/datasets/publish",
+    "success": 200,
+    "contentType": "application/json",
+    "schema": {"type":"object","required":["seq"],"properties":{"seq":{"type":"integer","minimum":0}}},
+    "schemasByType": {
+      "application/json": {"type":"object","required":["seq"],"properties":{"seq":{"type":"integer","minimum":0}}}
+    },
+    "requestSchema": {"$ref":"#/components/schemas/DatasetPublishRequest"},
+    "query": [],
+    "pathParams": [],
+    "errors": [400,409]
+  },
+  "searchDatasets": {
+    "method": "GET",
+    "path": "/api/v1/datasets/search",
+    "success": 200,
+    "contentType": "application/json",
+    "schema": {"$ref":"#/components/schemas/DatasetSearchResult"},
+    "schemasByType": {"application/json":{"$ref":"#/components/schemas/DatasetSearchResult"}},
+    "requestSchema": null,
+    "query": [
+      {"name":"q","required":true},
+      {"name":"book","required":false},
+      {"name":"publisher","required":false},
+      {"name":"n","required":false}
+    ],
+    "pathParams": [],
+    "errors": [400,409]
+  },
+  "adoptDatasets": {
+    "method": "POST",
+    "path": "/api/v1/datasets/adopt",
+    "success": 204,
+    "contentType": null,
+    "schema": null,
+    "schemasByType": {},
+    "requestSchema": {"$ref":"#/components/schemas/DatasetAdoptRequest"},
+    "query": [],
+    "pathParams": [],
+    "errors": [400,403,409]
+  },
+  "listTiles": {
+    "method": "GET",
+    "path": "/api/v1/tiles",
+    "success": 200,
+    "contentType": "application/json",
+    "schema": {"$ref":"#/components/schemas/TileSets"},
+    "schemasByType": {"application/json":{"$ref":"#/components/schemas/TileSets"}},
+    "requestSchema": null,
+    "query": [],
+    "pathParams": [],
+    "errors": []
+  },
+  "getTile": {
+    "method": "GET",
+    "path": "/api/v1/tiles/{publisher}/{id}/{version}",
+    "success": 200,
+    "contentType": "application/octet-stream",
+    "schema": {"type":"string","format":"binary"},
+    "schemasByType": {"application/octet-stream":{"type":"string","format":"binary"}},
+    "requestSchema": null,
+    "query": [],
+    "pathParams": ["publisher","id","version"],
+    "errors": [404,416]
+  },
+  "stopBridgeComponent": {
+    "method": "POST",
+    "path": "/api/v1/bridge/components/{id}/stop",
+    "success": 204,
+    "contentType": null,
+    "schema": null,
+    "schemasByType": {},
+    "requestSchema": null,
+    "query": [],
+    "pathParams": ["id"],
+    "errors": [400,404]
+  },
   "events": {
     "method": "GET",
     "path": "/api/v1/events",
@@ -4344,7 +4920,8 @@ export const sse: { events: Record<string, string>; chat: Record<string, string>
     "bridge": "SseBridge",
     "relay": "SseRelay",
     "registry": "SseRegistry",
-    "storage": "SseStorage"
+    "storage": "SseStorage",
+    "dataset": "SseDataset"
   },
   "chat": {"token":"SseChatToken","tool":"SseChatTool","done":"SseChatDone","error":"SseChatError"}
 };

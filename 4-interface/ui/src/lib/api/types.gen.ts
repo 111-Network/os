@@ -1273,6 +1273,271 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/datasets": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Publishers with their entries, what the node holds, and the jobs (§16.1)
+         * @description The trusted publishers' verified catalogues (the home hub's and every followed publisher's, §6.2), each entry with its held `state` and `location`; the holdings index (§5.5); the jobs: running, queued, paused and the last few that ended (`done`, `failed (…)`, `cancelled`). No timer refreshes a catalogue: `POST /datasets/check` does. After a `reset` the Layer 8 views refetch it.
+         */
+        get: operations["listDatasets"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/datasets/check": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Ask each source for the catalogues now (§6.2, §12.4)
+         * @description 202: one GET per source and catalogue name (the home hub's and every followed publisher's `catalogue/<hex>.toml` and `.toml.sig`), with `If-None-Match`, counted in the metered window. The outcome arrives on `GET /datasets`. A human.
+         */
+        post: operations["checkDatasets"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/datasets/entries/{publisher}/{id}/{version}/fetch": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Fetch a listed entry (§7.4, §7.7)
+         * @description Queues a job behind a running one and answers 202 with it. The first call, without `accept_warning`, answers 409 `consent_required` (`dataset_fetch`; at a metered cap `dataset_override` until `accept_override` is set) with the exact text, its hash and `facts` (`free`, `free_after`, `days?`); the repeat carries the hash. 409 `insufficient_space` (checked again on the repeat), `untrusted_publisher` (a publisher the node does not follow), `job_running` (only for an entry that already has a job). 404 for an entry the catalogue does not list. A human; the agent proposes `dataset.fetch` (`kind: storage`), which opens the same dialog.
+         */
+        post: operations["fetchDataset"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/datasets/entries/{publisher}/{id}/{version}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /**
+         * Remove a held dataset (§7.9)
+         * @description 204: deletes the file and its sidecar unless another held entry or a pin list still names them. Entries live under `entries/`, keyed as a holding is (§5.5), so no `id` meets a literal sibling (`check`, `drafts`, `publish`, `search`, `jobs`, `adopt`). A human; the agent proposes `dataset.remove`.
+         */
+        delete: operations["removeDataset"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/datasets/jobs/{job}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /**
+         * Cancel a job (§7.4)
+         * @description 204: the job ends `cancelled` and its `.part` and bitmap are deleted. 404 for a job that does not exist or has already ended. A human.
+         */
+        delete: operations["cancelDatasetJob"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/datasets/jobs/{job}/resume": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Resume a paused job (§7.4, §7.8)
+         * @description 202 with the job. A job `paused (metered link)` answers 409 `consent_required` (`dataset_fetch`, the text naming the new rule) until the repeat carries `accept_warning`; one `paused (metered cap)` answers 409 `consent_required` (`dataset_override`, `facts` `{remaining}`) until the repeat carries `accept_override`. A job that is not paused is 409 `bad_request`; one that cannot resume is `failed (source cannot resume)`. A human.
+         */
+        post: operations["resumeDatasetJob"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/datasets/drafts": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Entries not yet published (§6.4)
+         * @description `draft` is the `<id>@<version>` name `publish` takes; `entry` a `DatasetEntry`. Session or loopback; the agent's bearer reads.
+         */
+        get: operations["listDatasetDrafts"];
+        put?: never;
+        /**
+         * A first copy from upstream, on a hub with internet (§7.5)
+         * @description 202 with the job that pulls the file in consecutive windows, checks the sha256 the person or the mirror supplied, computes BLAKE3 and the sidecar in the same pass, places both in the tree and writes a draft. The pinned consent round-trip as a fetch (`dataset_fetch`). 409 `needs_hub` without the hub role. A human.
+         */
+        post: operations["createDatasetDraft"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/datasets/publish": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Publish the drafts named and remove the entries named (§6.4)
+         * @description 200 `{seq}`: the new catalogue is built from the previous one, signed through the identity handle with one `seq` minted from the announce counter, and installed. Only an entry whose file and sidecar the hub holds and verified can be published. 409 `needs_hub` without the hub role. Loopback or a paired session, a human; the agent's bearer is refused.
+         */
+        post: operations["publishDatasets"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/datasets/search": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Search the held encyclopedias (§9.4)
+         * @description While kiwix-serve runs, `111d` asks it for `pageLength = n` results and answers `{schema, format: "opensearch-xml", body}`, `body` the upstream text capped at 8 KiB and untrusted. `book` is an entry `id` (mapped to the entry's `book` field); an entry without one is 400 `bad_request`. Each search resets kiwix-serve's idle-stop counter. While the component is off: 409 `component_unavailable` ("The encyclopedia is off."). Session or loopback; the agent's bearer reads (`encyclopedia.search`).
+         */
+        get: operations["searchDatasets"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/datasets/adopt": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Adopt what a dataset verb staged (§7.6)
+         * @description 204: each staged catalogue's signature and `seq` checked again and installed, the drafts written, each in-place path `stat`ed again against the tuple the request file recorded and indexed, the verified copies in `incoming/` renamed into the tree and indexed, `follow` and `sources` written, the library rebuilt, the request file deleted. An item that fails: 400 `bad_request` naming it, 409 `untrusted_publisher` or `needs_hub`, and nothing written. Loopback only (403 `loopback_only` otherwise): never a session, never the bearer. Called by `111 dataset import`, not by the page.
+         */
+        post: operations["adoptDatasets"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/tiles": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * The held PMTiles sets (§10 (5))
+         * @description `url` is the path of the set's file below. Only a `present` set is listed. Session or loopback; the agent's bearer reads. `name`, `licence` and `attribution` are the publisher's: text only.
+         */
+        get: operations["listTiles"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/tiles/{publisher}/{id}/{version}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * One PMTiles file through the Range arm (§7.1, §10 (5))
+         * @description `application/octet-stream`, keyed as a held entry is (§5.5). `Accept-Ranges: bytes`; one range answers 206 with `Content-Range`; a range past the end, or two or more ranges, answers 416 with `Content-Range: bytes *\/size` and a `problem+json` body, code `range_not_satisfiable`; `If-Range` against the ETag; always `Content-Length`, never compressed or chunked. 404 for a set that is not `present`. No stream cap. Session or loopback; the agent's bearer reads.
+         */
+        get: operations["getTile"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        /** The same headers without a body (§7.1) */
+        head: operations["headTile"];
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/bridge/components/{id}/stop": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Stop a running on-demand component (§9.3)
+         * @description 204: stops a running `on_demand` component (kiwix-serve); its files and its enable switch stay, and the next panel open starts it again. 400 `bad_request` for a component that is not `on_demand`. Idempotent for one that is not running. A human; the agent's bearer is refused (401).
+         */
+        post: operations["stopBridgeComponent"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/events": {
         parameters: {
             query?: never;
@@ -2036,8 +2301,8 @@ export interface components {
         };
         /** @description A hosted panel (§13): an adopted project's own web UI on its own origin `http://<host as typed>:<port>`. The UI builds the origin from `location.hostname` and `port`, never from a shared snapshot. The dashboard frames only registry-declared panels. */
         Panel: {
-            /** @description = the service id and KB link */
-            id: components["schemas"]["ServiceId"];
+            /** @description = the service id and KB link; a `child` panel (Layer 8) has its component's id */
+            id: components["schemas"]["PanelId"];
             /** @description the listener slot, stable in state/panels.json */
             port: number;
             /** @description entry path, e.g. / */
@@ -2097,6 +2362,8 @@ export interface components {
         SendGroupId: string;
         /** @description an optional component's id from `assets/components/<id>.toml` (§2.1) */
         ComponentId: string;
+        /** @description A hosted panel's id (Layer 8, §9.1 (5)): a `ServiceId`, or for a `child` panel its component's `ComponentId`. `anyOf`: every `ServiceId` also matches the `ComponentId` pattern. */
+        PanelId: components["schemas"]["ServiceId"] | components["schemas"]["ComponentId"];
         /** @description lowercase hex SHA-256 of the exact UTF-8 bytes of the consent text it names */
         Sha256Hex: string;
         /**
@@ -2140,8 +2407,13 @@ export interface components {
         /** @description An optional third-party component (§2.1). While `disabled` or only `declared`/`cached` it has no process, listener, loaded code, timer or open file; the sizes are what enabling would add. */
         Component: {
             id: components["schemas"]["ComponentId"];
-            /** @description the network this component carries */
-            adapter: components["schemas"]["NetworkId"];
+            /** @description the network this component carries; null for a server component that names none (kiwix, Layer 8 §9.2). The key is always present. */
+            adapter: components["schemas"]["NetworkId"] | null;
+            /**
+             * @description Layer 8 (§9.2, optional; absent from an older node, which means `always`): `on_demand` starts the child on first use and stops it when idle (`POST …/stop`, 30 idle passes), `always` from enable on
+             * @enum {string}
+             */
+            start?: "always" | "on_demand";
             state: components["schemas"]["ComponentState"];
             /** @description size of the cached payload; null when none is cached */
             cached_bytes: number | null;
@@ -3187,6 +3459,215 @@ export interface components {
         };
         /** @description A `StorageStatus` without `settings`, on a change §16.3 lists: `classes` holds the four budgeted ones (§4.1), never a figure that needs a walk or a read of the index or the registry; the page refetches `GET /storage` for the rest. */
         SseStorage: components["schemas"]["StorageStatus"];
+        /**
+         * @description The reader (§5.3). `patch` is reserved for v1.1: an entry of a kind this node does not know is skipped whole and counted in `Publisher.skipped`, so no unknown kind reaches a page.
+         * @enum {string}
+         */
+        DatasetKind: "zim" | "pmtiles";
+        /**
+         * @description The one state enum of `DatasetEntry.state` and `Holding.state` (§5.5): `not_held` (listed, not held; an entry only), `partial`, `present`, `unverified` (an out-of-tree file whose tuple changed or after an unclean shutdown: it answers 404 until re-hashed), `disk_absent` (an in-place file whose disk is not attached).
+         * @enum {string}
+         */
+        DatasetState: "not_held" | "partial" | "present" | "unverified" | "disk_absent";
+        /**
+         * @description Where a held file lives (§5.5): `origin` is the shared tree `state/origin/blob/`, `in_place` a path outside it; null on an entry that is `not_held`.
+         * @enum {string|null}
+         */
+        DatasetLocation: "origin" | "in_place" | null;
+        /**
+         * @description The chips of §15.4.
+         * @enum {string}
+         */
+        DatasetUsedBy: "map" | "encyclopedia" | "agent" | "updates";
+        /** @description A catalogue entry (§5.3) plus what this node holds. `name`, `version`, `licence`, `attribution`, `source_url`, `built` and `book` are the publisher's: untrusted, text only (never Markdown or HTML). */
+        DatasetEntry: {
+            /** @description stable across versions; never a path */
+            id: string;
+            kind: components["schemas"]["DatasetKind"];
+            name: string;
+            /** @description never ordered, never a path */
+            version: string;
+            /** @description the catalogue `seq` at which this (id, version) first appeared: orders the versions of an id */
+            seq: number;
+            /** @description bytes */
+            size: number;
+            /** @description the address in the tree */
+            sha256: string;
+            /** @description the root every block is checked against */
+            blake3: string;
+            /** @description the sidecar's block size, log2 of the chunk count per block */
+            ob_log: number;
+            /** @description the sidecar's address */
+            outboard_sha256: string;
+            /** @description an SPDX expression or `LicenseRef-…` */
+            licence: string;
+            attribution: string;
+            source_url: string;
+            /** @description a display string, never used for ordering */
+            built: string;
+            /** @description optional: `kiwix` for a `zim` */
+            requires?: components["schemas"]["ComponentId"];
+            /** @description optional: the smallest category it is meant for (`2A` … `4B`), shown in the consent, never a refusal */
+            fits?: string;
+            used_by: components["schemas"]["DatasetUsedBy"][];
+            /** @description optional, `zim` only: the ZIM's own `Name` metadata, the name kiwix-serve's search knows the book by (§9.4) */
+            book?: string;
+            state: components["schemas"]["DatasetState"];
+            location: components["schemas"]["DatasetLocation"];
+            /** @description the licence is an `-NC-` id: tagged "non-commercial" wherever it shows (§9.7) */
+            non_commercial: boolean;
+        };
+        /** @description One trusted publisher's verified catalogue (§6.2, §16.2). `label` is the publisher's: untrusted, text only. */
+        Publisher: {
+            node_id: components["schemas"]["NodeId"];
+            label: string;
+            /** @description the pinned home hub */
+            home: boolean;
+            /** @description the highest verified catalogue `seq` this node holds (§6.3) */
+            seq: number;
+            /** @description where that catalogue was last seen ("newest catalogue seen: seq N from <source>"); null for one only imported. Untrusted: text only. */
+            source: string | null;
+            /** @description the origin URLs `sources` lists for it (§7.4). Untrusted: text only. */
+            sources: string[];
+            /** @description entries of a kind this node does not know ("N entries need a newer 111", §5.4) */
+            skipped: number;
+            entries: components["schemas"]["DatasetEntry"][];
+        };
+        /** @description One held (publisher, id, version) of the holdings index (§5.5). */
+        Holding: {
+            publisher: components["schemas"]["NodeId"];
+            id: string;
+            version: string;
+            sha256: string;
+            bytes: number;
+            location: components["schemas"]["DatasetLocation"];
+            state: components["schemas"]["DatasetState"];
+            used_by: components["schemas"]["DatasetUsedBy"][];
+        };
+        /** @description minted by `111d` (a new id family, §16.2) */
+        JobId: string;
+        /** @description The §7.4 states: `queued`, `running`, `paused (offline)`, `paused (metered cap)`, `paused (metered link)`, `paused (disk low)`, `paused (source busy)`, `done`, `failed (<reason>)` (`failed (name mismatch)` and `failed (source cannot resume)` among them) and `cancelled`. A pause is a state, never an error. A reason this page does not know renders as it is. `anyOf`, not `oneOf`: the two `failed (...)` literals also match the open pattern, and a conforming validator must accept them. */
+        JobState: ("queued" | "running" | "paused (offline)" | "paused (metered cap)" | "paused (metered link)" | "paused (disk low)" | "paused (source busy)" | "done" | "failed (name mismatch)" | "failed (source cannot resume)" | "cancelled") | string;
+        /** @description One dataset job (§7.4, §16.2). At most one runs per node; accepted fetches queue in order. */
+        Job: {
+            id: components["schemas"]["JobId"];
+            publisher: components["schemas"]["NodeId"];
+            /** @description the entry's `id` */
+            entry: string;
+            version: string;
+            state: components["schemas"]["JobState"];
+            done_bytes: number;
+            total_bytes: number;
+            /** @description the source in use (the home hub's origin or a `sources` URL, or the first copy's upstream); null while queued. Untrusted: text only. */
+            source: string | null;
+            /** @description null when the link is not metered ("No metered link is set") */
+            metered: {
+                /** @description the metered rule that matches the job's connection: exactly one of `iface` or `ssid` */
+                match: {
+                    iface?: string;
+                    ssid?: string;
+                };
+                /** @description the rule's daily cap, bytes */
+                cap: number;
+                /** @description the days the pull takes at that cap, when it can be told */
+                days: number | null;
+            } | null;
+            /** @description the bytes moved past a cap under `dataset_override` (§7.8) */
+            override_bytes: number;
+        };
+        /** @description A `Job`, coalesced per job (§7.4): at most one per 5 s housekeeping tick while it runs, plus one on each state change and at its end. Never on a timer; a node with no job sends none. */
+        SseDataset: components["schemas"]["Job"];
+        DatasetsListing: {
+            schema: number;
+            publishers: components["schemas"]["Publisher"][];
+            holdings: components["schemas"]["Holding"][];
+            jobs: components["schemas"]["Job"][];
+        };
+        DatasetDraft: {
+            /** @description the `<id>@<version>` name `publish` takes */
+            draft: string;
+            entry: components["schemas"]["DatasetEntry"];
+        };
+        DatasetDrafts: {
+            schema: number;
+            drafts: components["schemas"]["DatasetDraft"][];
+        };
+        /** @description The pinned consent round-trip (§7.7): `accept_warning` is the hash of the `dataset_fetch` text the person was shown, `accept_override` the hash of the `dataset_override` text. Absent on the first call. */
+        DatasetFetchRequest: {
+            accept_warning?: components["schemas"]["Sha256Hex"];
+            accept_override?: components["schemas"]["Sha256Hex"];
+        };
+        /** @description A first copy (§7.5): the upstream URL, optionally its sha256, and the entry's fields. `size`, `blake3`, the sidecar and `seq` are computed by the job. Publisher strings: text only. */
+        DatasetDraftRequest: {
+            /** @description https, or http to a URL the person typed (§7.3 (2)) */
+            url: string;
+            /** @description the upstream's sha256, when the person or the mirror supplied one */
+            sha256?: string;
+            id: string;
+            kind: components["schemas"]["DatasetKind"];
+            name: string;
+            version: string;
+            licence: string;
+            attribution: string;
+            source_url: string;
+            built?: string;
+            requires?: components["schemas"]["ComponentId"];
+            fits?: string;
+            used_by: components["schemas"]["DatasetUsedBy"][];
+            book?: string;
+            accept_warning?: components["schemas"]["Sha256Hex"];
+            accept_override?: components["schemas"]["Sha256Hex"];
+        };
+        DatasetPublishRequest: {
+            /** @description `<id>@<version>` draft names */
+            drafts: string[];
+            /** @description entries to drop from the new catalogue */
+            remove: {
+                id: string;
+                version: string;
+            }[];
+        };
+        /** @description What `111 dataset import` staged (§7.6); loopback only. Every item is checked again before anything is written. A draft is a `DatasetEntry` shape; the node ignores `state`, `location`, `non_commercial` and `seq` (derived at adoption and publish) and a CLI-staged draft may omit `built` and `used_by` semantics it has no flag for. */
+        DatasetAdoptRequest: {
+            /** @description the request file in `state/origin/incoming/`, deleted once adopted */
+            request: string;
+            /** @description sha256 of each verified copy in `incoming/` to rename into the tree */
+            incoming: string[];
+            /** @description publisher hex of each staged catalogue */
+            catalogues: components["schemas"]["NodeId"][];
+            drafts: components["schemas"]["DatasetEntry"][];
+            in_place: {
+                sha256: string;
+                path: string;
+            }[];
+            follow?: components["schemas"]["NodeId"][];
+            sources?: {
+                [key: string]: string[];
+            };
+        };
+        DatasetSearchResult: {
+            schema: number;
+            /** @enum {string} */
+            format: "opensearch-xml";
+            /** @description the upstream text capped at 8 KiB. Untrusted: text only, never parsed as markup by a page. */
+            body: string;
+        };
+        /** @description One held PMTiles set (§10 (5)). `name`, `licence` and `attribution` are the publisher's: untrusted, text only. */
+        TileSet: {
+            id: string;
+            publisher: components["schemas"]["NodeId"];
+            version: string;
+            name: string;
+            bytes: number;
+            licence: string;
+            attribution: string;
+            /** @description the path below: `/api/v1/tiles/{publisher}/{id}/{version}` */
+            url: string;
+        };
+        TileSets: {
+            schema: number;
+            sets: components["schemas"]["TileSet"][];
+        };
     };
     responses: {
         /** @description problem+json */
@@ -3206,7 +3687,13 @@ export interface components {
         /** @description the contact's `node_id` */
         contactId: components["schemas"]["NodeId"];
         messageId: components["schemas"]["MessageId"];
-        panelId: components["schemas"]["ServiceId"];
+        /** @description a `ServiceId` or, for a `child` panel, its `ComponentId` (Layer 8, §9.1 (5)) */
+        panelId: components["schemas"]["PanelId"];
+        /** @description the publisher's NodeId (a holding is keyed by publisher, id and version, §5.5) */
+        datasetPublisher: components["schemas"]["NodeId"];
+        datasetId: string;
+        datasetVersion: string;
+        jobId: components["schemas"]["JobId"];
         /** @description a network id; the colon of `app:…` is percent-encoded */
         networkId: components["schemas"]["NetworkId"];
         foreignConvId: components["schemas"]["ForeignConversationId"];
@@ -4359,6 +4846,7 @@ export interface operations {
             query?: never;
             header?: never;
             path: {
+                /** @description a `ServiceId` or, for a `child` panel, its `ComponentId` (Layer 8, §9.1 (5)) */
                 id: components["parameters"]["panelId"];
             };
             cookie?: never;
@@ -5336,6 +5824,405 @@ export interface operations {
             403: components["responses"]["Problem"];
             /** @description consent_required (`store_start_empty`) */
             409: components["responses"]["Problem"];
+        };
+    };
+    listDatasets: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DatasetsListing"];
+                };
+            };
+        };
+    };
+    checkDatasets: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Accepted */
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    fetchDataset: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description the publisher's NodeId (a holding is keyed by publisher, id and version, §5.5) */
+                publisher: components["parameters"]["datasetPublisher"];
+                id: components["parameters"]["datasetId"];
+                version: components["parameters"]["datasetVersion"];
+            };
+            cookie?: never;
+        };
+        requestBody?: {
+            content: {
+                "application/json": components["schemas"]["DatasetFetchRequest"];
+            };
+        };
+        responses: {
+            /** @description The job, queued or running */
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Job"];
+                };
+            };
+            404: components["responses"]["Problem"];
+            /** @description consent_required (`dataset_fetch`, `dataset_override`), insufficient_space, untrusted_publisher, job_running */
+            409: components["responses"]["Problem"];
+        };
+    };
+    removeDataset: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description the publisher's NodeId (a holding is keyed by publisher, id and version, §5.5) */
+                publisher: components["parameters"]["datasetPublisher"];
+                id: components["parameters"]["datasetId"];
+                version: components["parameters"]["datasetVersion"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Removed */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            404: components["responses"]["Problem"];
+        };
+    };
+    cancelDatasetJob: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                job: components["parameters"]["jobId"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Cancelled */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            404: components["responses"]["Problem"];
+        };
+    };
+    resumeDatasetJob: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                job: components["parameters"]["jobId"];
+            };
+            cookie?: never;
+        };
+        requestBody?: {
+            content: {
+                "application/json": components["schemas"]["DatasetFetchRequest"];
+            };
+        };
+        responses: {
+            /** @description The job after the resume */
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Job"];
+                };
+            };
+            404: components["responses"]["Problem"];
+            /** @description consent_required (`dataset_fetch`, `dataset_override`), bad_request (the job is not paused) */
+            409: components["responses"]["Problem"];
+        };
+    };
+    listDatasetDrafts: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DatasetDrafts"];
+                };
+            };
+        };
+    };
+    createDatasetDraft: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["DatasetDraftRequest"];
+            };
+        };
+        responses: {
+            /** @description The first-copy job */
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Job"];
+                };
+            };
+            400: components["responses"]["Problem"];
+            /** @description consent_required (`dataset_fetch`, `dataset_override`), needs_hub, insufficient_space, job_running */
+            409: components["responses"]["Problem"];
+        };
+    };
+    publishDatasets: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["DatasetPublishRequest"];
+            };
+        };
+        responses: {
+            /** @description Published */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        seq: number;
+                    };
+                };
+            };
+            400: components["responses"]["Problem"];
+            /** @description needs_hub */
+            409: components["responses"]["Problem"];
+        };
+    };
+    searchDatasets: {
+        parameters: {
+            query: {
+                q: string;
+                /** @description an entry id */
+                book?: string;
+                /** @description defaults to the home hub */
+                publisher?: components["schemas"]["NodeId"];
+                n?: number;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DatasetSearchResult"];
+                };
+            };
+            400: components["responses"]["Problem"];
+            /** @description component_unavailable (the encyclopedia is off) */
+            409: components["responses"]["Problem"];
+        };
+    };
+    adoptDatasets: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["DatasetAdoptRequest"];
+            };
+        };
+        responses: {
+            /** @description Adopted */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            400: components["responses"]["Problem"];
+            403: components["responses"]["Problem"];
+            /** @description untrusted_publisher, needs_hub */
+            409: components["responses"]["Problem"];
+        };
+    };
+    listTiles: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TileSets"];
+                };
+            };
+        };
+    };
+    getTile: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description the publisher's NodeId (a holding is keyed by publisher, id and version, §5.5) */
+                publisher: components["parameters"]["datasetPublisher"];
+                id: components["parameters"]["datasetId"];
+                version: components["parameters"]["datasetVersion"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The whole file */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/octet-stream": string;
+                };
+            };
+            /** @description One range of the file */
+            206: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/octet-stream": string;
+                };
+            };
+            404: components["responses"]["Problem"];
+            /** @description range_not_satisfiable */
+            416: components["responses"]["Problem"];
+        };
+    };
+    headTile: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description the publisher's NodeId (a holding is keyed by publisher, id and version, §5.5) */
+                publisher: components["parameters"]["datasetPublisher"];
+                id: components["parameters"]["datasetId"];
+                version: components["parameters"]["datasetVersion"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Headers of the whole file */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Headers of one range */
+            206: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description not_found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description range_not_satisfiable */
+            416: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    stopBridgeComponent: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: components["parameters"]["componentId"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Stopped */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            400: components["responses"]["Problem"];
+            404: components["responses"]["Problem"];
         };
     };
     events: {

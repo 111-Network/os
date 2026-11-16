@@ -414,6 +414,7 @@ export function createMockAdapter(opts: MockOptions = {}): MockAdapter {
     hub: () => state.messaging.fabric.settings.hub_role === true,
     lan: () => state.settings.lan_enabled,
     nodeId: () => state.status.node.node_id ?? undefined,
+    componentStart: (id) => B.bridge.components().find((c) => c.id === id)?.start ?? undefined,
   });
   const storage: StorageAdapter = {
     kind: "mock",
@@ -423,6 +424,18 @@ export function createMockAdapter(opts: MockOptions = {}): MockAdapter {
     acceptUpdateWithoutCopy: (release, store, acceptWarning) => rest(() => ST.acceptUpdateWithoutCopy(release, store, acceptWarning)).then(() => undefined),
     deleteSetAside: (file) => rest(() => ST.deleteSetAside(file)).then(() => undefined),
     startEmpty: (store, acceptWarning) => rest(() => ST.startEmpty(store, acceptWarning)).then(() => undefined),
+    datasets: () => rest(() => ST.datasets()),
+    checkDatasets: () => rest(() => ST.checkDatasets()).then(() => undefined),
+    fetchDataset: (ref, accept) => rest(() => ST.fetchDataset(ref, accept)),
+    removeDataset: (ref) => rest(() => ST.removeDataset(ref)).then(() => undefined),
+    cancelDatasetJob: (job) => rest(() => ST.cancelDatasetJob(job)).then(() => undefined),
+    resumeDatasetJob: (job, accept) => rest(() => ST.resumeDatasetJob(job, accept)),
+    datasetDrafts: () => rest(() => ST.datasetDrafts()),
+    createDatasetDraft: (req) => rest(() => ST.createDatasetDraft(req)),
+    publishDatasets: (req) => rest(() => ST.publishDatasets(req)),
+    searchDatasets: (query) => rest(() => ST.searchDatasets(query)),
+    tiles: () => rest(() => ST.tiles()),
+    stopComponent: (id) => rest(() => ST.stopComponent(id)).then(() => undefined),
   };
 
   const ctx: ScriptContext = {

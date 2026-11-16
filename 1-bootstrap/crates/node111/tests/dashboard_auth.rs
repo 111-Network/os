@@ -1414,6 +1414,16 @@ const UNROUTED: &[&str] = &[
     "acceptUpdateWithoutCopy",
     "deleteStorageSetAside",
     "startEmptyStore",
+    // Layer 8, part 2 (`8-storage/TASKS.md` C2 before the D-rows): the dataset writes and the component stop
+    "checkDatasets",
+    "fetchDataset",
+    "removeDataset",
+    "cancelDatasetJob",
+    "resumeDatasetJob",
+    "createDatasetDraft",
+    "publishDatasets",
+    "adoptDatasets",
+    "stopBridgeComponent",
 ];
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

@@ -1,9 +1,13 @@
 // Panels slice (os/5-messaging/README.md §13, §15): helpers over the declared hosted panels. A panel lives on its own
 // origin `http://<host as typed>:<port>`; the dashboard builds that from `location.hostname` and the panel's `port`,
 // never from a shared snapshot, and frames only registry-declared panels.
-import type { HostedPanel, ServiceId } from "./types";
+import type { HostedPanel, PanelId } from "./types";
 
-export const panelFor = (panels: readonly HostedPanel[] | null | undefined, id: ServiceId): HostedPanel | null => panels?.find((p) => p.id === id) ?? null;
+/**
+ * The declared panel with this id: a `ServiceId`, or for a `child` panel (Layer 8, os/8-storage/README.md §9.1 (5)) its component's
+ * `ComponentId`, so the encyclopedia's panel is found by `"kiwix"`.
+ */
+export const panelFor = (panels: readonly HostedPanel[] | null | undefined, id: PanelId): HostedPanel | null => panels?.find((p) => p.id === id) ?? null;
 
 /** Where the dashboard page is served from, for building a panel origin and judging its secure context. */
 export interface PanelLocation {
