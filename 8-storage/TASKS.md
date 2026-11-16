@@ -223,7 +223,7 @@ SKIPPED and REQUIRE paths, shellcheck, `python3 -I -B verify/run.py --lint` LINT
 | threads · every switch off, idle node, chat turn, hub idle, kiwix enabled never opened | 0 | — (`/proc/<pid>/task` count of `111d` against Layer 7's tree) | V12 |
 | threads · dataset job | +1 (`111d-dataset`), none after | — | D32 |
 | threads · kiwix-serve started | the runner's, as any child | — | D40 |
-| timers · every column | 0 (the 5 s interval's owner moved; a busy source retried on the pass; the idle stop a counter on the pass) | — (`idle.sh`'s line unchanged) | D1, D32, D42, V9 |
+| timers · every column | 0 (the 5 s interval's owner moved; a busy source retried on the pass; the idle stop a counter on the pass) | — (`idle.sh`'s line unchanged) · D1: none added with a live fabric, the fabric handle's tasks 2 → 1 and the daemon's one interval (`a_live_fabric_spawns_no_housekeeping_interval_of_its_own`); with the fabric down one interval where there was none, as §4.3 requires | D1, D32, D42, V9 |
 | timers · kiwix-serve started | kiwix's own 1 Hz wake | — | D47 |
 | open files · every switch off, idle node | 1 (`node/lock`) | — | D16 |
 | open files · chat turn | +3 (`state.db`, `-wal`, `-shm`) until the next idle pass | — | D2 |
