@@ -2657,8 +2657,11 @@ strength = "N"
 needs = ["bash"]
 
 # G11 TLS 1.3 raw public keys between two hubs. Row V5.
-# A T0 stub: it prints '<G> SKIPPED: not built yet (T0 stub)' and exits 0 (7-relay/TASKS.md row V5). Strength N
-# until the row lands; promote it to R then (and to cargo = true if the gate builds).
+# Four real `111 daemon`s (X and Y the pair, Z a plain member, Q a third hub) in network namespaces on TEST-NET-3
+# behind one bridge, an AF_PACKET tap that keeps the port-11183 streams, python TLS clients (X.509, TLS 1.2),
+# and `cargo tree -e features -p node111` (no aws-lc-rs, no second provider). SKIPPED without a user+net+pid
+# namespace, a built `111` (BIN111 or CARGO_TARGET_DIR) or openssl (FAIL under REQUIRE_G11=1). The OpenSSL >= 3.2 peer
+# step is NOT IMPLEMENTED (a note on every box; REQUIRE_OPENSSL_RPK=1 makes it a FAIL on every box until it is written).
 [[check]]
 id = "l7.g11"
 kind = "unit"
@@ -2669,9 +2672,9 @@ seams = ["L2-L7:epoch-linkkey"]
 adapter = "okfail"
 lock = "verify"
 timeout_s = 1800
-rerun_cost = "ns, T0 stub: SKIPPED today"
-strength = "N"
-needs = ["bash"]
+rerun_cost = "ns, about 3 min (four daemons, the pairing waits, a 100 s idle window; needs a built 111)"
+strength = "R"
+needs = ["bash", "userns", "netns", "python3", "ip", "nsenter", "curl", "jq", "ss", "openssl", "cargo"]
 
 # G12 the hub as update origin and the Layer 1 trust fixes. Row V6.
 # Real `111 daemon`s (hub O with LAN sharing, member U with no internet route) and the real `111 update --from` verb in a user + net
