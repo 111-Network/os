@@ -1046,6 +1046,282 @@ fn blob_round_trips_refcounts_and_sweep() {
     );
 }
 
+// ---------------------------------------------------------------------------
+// Layer 8 §2.7 S3: the orphan sweep beside a set-aside fabric store
+// ---------------------------------------------------------------------------
+
+/// `<from>` in `fabric/` with its `-wal` and `-shm` renamed to `<to>` with
+/// theirs, as a set-aside (Layer 8 §13.2, §13.6 (3), §13.7) or a put-back
+/// moves a store; a file that is not there is skipped.
+fn move_store_files(fabric: &Path, from: &str, to: &str) {
+    for suffix in ["", "-wal", "-shm"] {
+        let src = fabric.join(format!("{from}{suffix}"));
+        if src.exists() {
+            fs::rename(&src, fabric.join(format!("{to}{suffix}"))).unwrap();
+        }
+    }
+}
+
+/// A blob's files with no row, as a crash between the files and the row
+/// leaves them: an orphan for the sweep.
+fn plant_orphan(s: &Store, bytes: &[u8]) -> BlobHash {
+    s.blob_dir().write(bytes).unwrap().hash
+}
+
+/// The temp entries under `fabric/blobs/`.
+fn temp_entries(s: &Store) -> Vec<String> {
+    let names = s.blob_dir().entries().unwrap().into_iter().map(|(n, _)| n);
+    names
+        .filter(|n| n.starts_with(crate::blobs::TMP_PREFIX))
+        .collect()
+}
+
+/// Layer 8 §2.7 S3 (S6; §13.2, §13.6 (3), §13.7): the store in place is an
+/// earlier copy of the store set aside beside it (a revert's copy, an
+/// import's export), and the set-aside store lists blobs this copy does not:
+/// one that arrived later (no row here) and one this copy had pruned and the
+/// later store fetched again (`present = 0` here, its files back on disk).
+/// For each set-aside kind the open's sweep keeps both, their bytes intact,
+/// and still removes the temp entries; the set-aside store, put back in
+/// place, reads both.
+#[test]
+fn a_set_aside_fabric_store_keeps_the_blob_files_its_rows_list() {
+    const BOTH: &[u8] = b"listed by both stores";
+    const ARRIVAL: &[u8] = b"arrived after the copy";
+    const FETCHED: &[u8] = b"pruned, then fetched again";
+    for set_aside in [
+        "store.db.rolled-back-v6",
+        "store.db.damaged-1",
+        "store.db.replaced-2",
+    ] {
+        let t = tempfile::tempdir().unwrap();
+        let fabric = t.path().join("fabric");
+        // The earlier store: a blob both list, and a re-fetchable one it
+        // pruned (the row kept with `present = 0`, the files removed).
+        let (mut s, _) = open(&fabric, 1);
+        s.record_epoch(1).unwrap();
+        let both = s.blob_put_public(BOTH, Class::Kb, false).unwrap();
+        let fetched = s.blob_put_public(FETCHED, Class::Object, true).unwrap();
+        s.conn
+            .execute(
+                "UPDATE blobs SET present = 0 WHERE hash = ?1",
+                [&fetched.0[..]],
+            )
+            .unwrap();
+        s.blob_dir().remove(&fetched).unwrap();
+        s.close(1).unwrap();
+        let earlier = fs::read(fabric.join(DB_FILE)).unwrap();
+        // The later store gains a blob and fetches the pruned one again.
+        let (mut s, _) = open(&fabric, 1);
+        let arrival = s.blob_put_public(ARRIVAL, Class::Object, false).unwrap();
+        assert_eq!(
+            s.blob_put_public(FETCHED, Class::Object, true).unwrap(),
+            fetched
+        );
+        assert!(s.blob(&fetched).unwrap().unwrap().present);
+        s.close(1).unwrap();
+        // It is set aside, the earlier store placed instead, and a crash
+        // mid-write left two temp entries.
+        move_store_files(&fabric, DB_FILE, set_aside);
+        fs::write(fabric.join(DB_FILE), &earlier).unwrap();
+        fs::create_dir(fabric.join(BLOB_DIR).join(".tmp-123")).unwrap();
+        fs::write(fabric.join(BLOB_DIR).join(".tmp-9"), b"partial").unwrap();
+
+        let (s, _) = open(&fabric, 1);
+        assert!(s.blob(&arrival).unwrap().is_none(), "{set_aside}");
+        assert!(!s.blob(&fetched).unwrap().unwrap().present, "{set_aside}");
+        for (h, bytes) in [(both, BOTH), (arrival, ARRIVAL), (fetched, FETCHED)] {
+            assert_eq!(
+                s.blob_dir().read(&h, u64::MAX).unwrap(),
+                bytes,
+                "{set_aside}: the blob file is kept"
+            );
+        }
+        assert!(
+            temp_entries(&s).is_empty(),
+            "{set_aside}: the temp entries still go"
+        );
+        s.close(1).unwrap();
+
+        // Put back in place, the set-aside store reads what it lists.
+        move_store_files(&fabric, DB_FILE, "store.db.replaced-9");
+        move_store_files(&fabric, set_aside, DB_FILE);
+        let (s, _) = open(&fabric, 1);
+        assert_eq!(s.blob_read(&arrival, u64::MAX).unwrap(), ARRIVAL);
+        assert_eq!(s.blob_read(&fetched, u64::MAX).unwrap(), FETCHED);
+        s.close(1).unwrap();
+    }
+}
+
+/// Layer 8 §2.7 S3 (R17): the hold is read from `fabric/` at each open, by
+/// name. A migration copy and one cut short, a set-aside store's `-wal` and
+/// `-shm` alone, near-miss names, the node-state store's set-aside name, the
+/// name inside `blobs/` and one outside `fabric/` hold nothing: the open
+/// sweeps as built. Two set-aside stores hold it until the user deletes the
+/// last (`DELETE /api/v1/storage/set-aside/{file}`, §16.1); the next open then
+/// removes the orphan directory and the files of the row marked
+/// `present = 0`, and keeps the listed blob.
+#[test]
+fn the_sweep_resumes_once_no_set_aside_fabric_store_remains() {
+    let t = tempfile::tempdir().unwrap();
+    let fabric = t.path().join("fabric");
+    let (mut s, _) = open(&fabric, 1);
+    s.record_epoch(1).unwrap();
+    let listed = s.blob_put_public(b"listed", Class::Kb, false).unwrap();
+    for name in [
+        "store.db.pre-v6",
+        "store.db.pre-v7.tmp",
+        "store.db.damaged-1-wal",
+        "store.db.damaged-1-shm",
+        "store.db.damaged-",
+        "store.db.rolled-back-6",
+        "store.db.replaced-1.tmp",
+        "state.db.damaged-1",
+    ] {
+        fs::write(fabric.join(name), b"x").unwrap();
+    }
+    fs::write(fabric.join(BLOB_DIR).join("store.db.replaced-1"), b"x").unwrap();
+    fs::write(t.path().join("store.db.replaced-1"), b"x").unwrap();
+    let orphan = plant_orphan(&s, b"an orphan");
+    s.close(1).unwrap();
+    let (mut s, _) = open(&fabric, 1);
+    assert!(
+        !s.blob_dir().path(&orphan).exists(),
+        "no set-aside fabric store: swept as built"
+    );
+    assert!(
+        fabric.join(BLOB_DIR).join("store.db.replaced-1").exists(),
+        "an unknown name in blobs/ is left alone"
+    );
+
+    // An orphan directory and a row marked `present = 0` whose files a
+    // pruning pass had not removed yet; two set-aside stores.
+    let orphan = plant_orphan(&s, b"another orphan");
+    let pruned = s.blob_put_public(b"pruned", Class::Object, true).unwrap();
+    s.conn
+        .execute(
+            "UPDATE blobs SET present = 0 WHERE hash = ?1",
+            [&pruned.0[..]],
+        )
+        .unwrap();
+    fs::write(fabric.join("store.db.rolled-back-v6"), b"x").unwrap();
+    fs::write(fabric.join("store.db.damaged-1"), b"x").unwrap();
+    s.close(1).unwrap();
+    let (s, _) = open(&fabric, 1);
+    assert!(s.blob_dir().exists(&orphan) && s.blob_dir().exists(&pruned));
+    s.close(1).unwrap();
+    fs::remove_file(fabric.join("store.db.rolled-back-v6")).unwrap();
+    let (s, _) = open(&fabric, 1);
+    assert!(
+        s.blob_dir().exists(&orphan) && s.blob_dir().exists(&pruned),
+        "one set-aside store remains: held"
+    );
+    s.close(1).unwrap();
+    // The last one deleted; its `-wal` and `-shm` stay, and alone they are
+    // not a store.
+    fs::remove_file(fabric.join("store.db.damaged-1")).unwrap();
+    let (s, _) = open(&fabric, 1);
+    assert!(!s.blob_dir().path(&orphan).exists(), "swept");
+    assert!(!s.blob_dir().path(&pruned).exists(), "swept");
+    assert_eq!(s.blob_read(&listed, u64::MAX).unwrap(), b"listed");
+    assert!(fabric.join("store.db.damaged-1-wal").exists());
+    s.close(1).unwrap();
+}
+
+/// Layer 8 §13.7 and §2.7 S3: a damaged fabric store set aside after a crash,
+/// and an empty store created in its place ("Start an empty store", the next
+/// start): every blob file is an orphan to the new store, and all are kept,
+/// an own private attachment's included, while the damaged file stays on the
+/// node. Once it is deleted with its `-wal` and `-shm`, the next open sweeps
+/// them.
+#[test]
+fn a_store_started_empty_beside_a_damaged_one_keeps_its_blob_files() {
+    let t = tempfile::tempdir().unwrap();
+    let fabric = t.path().join("fabric");
+    let (mut s, _) = open(&fabric, 1);
+    s.record_epoch(1).unwrap();
+    let public = s
+        .blob_put_public(b"the damaged store's", Class::Object, false)
+        .unwrap();
+    let (private, _) = s
+        .blob_put_private(b"an own attachment", Class::Object)
+        .unwrap();
+    drop(s); // crash: no clean record
+    move_store_files(&fabric, DB_FILE, "store.db.damaged-1");
+
+    let (s, d) = open(&fabric, 1);
+    assert!(
+        matches!(d, EpochDecision::Mint(r) if r.unclean),
+        "a new store"
+    );
+    for h in [public, private] {
+        assert!(s.blob(&h).unwrap().is_none());
+        assert!(s.blob_dir().exists(&h), "kept beside the damaged store");
+    }
+    drop(s);
+    for suffix in ["", "-wal", "-shm"] {
+        let file = fabric.join(format!("store.db.damaged-1{suffix}"));
+        if file.exists() {
+            fs::remove_file(&file).unwrap();
+        }
+    }
+    let (s, _) = open(&fabric, 1);
+    for h in [public, private] {
+        assert!(!s.blob_dir().path(&h).exists(), "swept");
+    }
+}
+
+/// Layer 8 §2.7 S3 (`8-storage/TASKS.md` M3, "never adds"): a sweep (one per
+/// open, [`Store::open`]) reads `fabric/` at most once, and not at all when no
+/// blob file would go. Its set-aside check is counted: no call beside listed
+/// blobs, an unknown name and temp entries only; exactly one, with the fabric
+/// directory, beside four orphan directories and the files of a row marked
+/// `present = 0`, whether it answers held (all five kept) or not (all five
+/// removed); the temp entries go and the listed blob stays either way.
+#[test]
+fn the_sweep_reads_the_fabric_directory_at_most_once() {
+    let (t, mut s) = ready();
+    let fabric = t.path();
+    let blobs = fabric.join(BLOB_DIR);
+    let listed = s.blob_put_public(b"listed", Class::Kb, false).unwrap();
+    fs::create_dir(blobs.join(".tmp-1")).unwrap();
+    fs::write(blobs.join("unknown"), b"x").unwrap();
+    let mut reads = Vec::new();
+    s.sweep_blob_orphans_with(|dir| {
+        reads.push(dir.to_path_buf());
+        true
+    })
+    .unwrap();
+    assert!(reads.is_empty(), "no blob file would go: no read");
+    assert!(temp_entries(&s).is_empty());
+    assert!(blobs.join("unknown").exists(), "an unknown name stays");
+
+    let mut swept: Vec<BlobHash> = (0..4u8).map(|i| plant_orphan(&s, &[i; 9])).collect();
+    let pruned = s.blob_put_public(b"pruned", Class::Object, true).unwrap();
+    s.conn
+        .execute(
+            "UPDATE blobs SET present = 0 WHERE hash = ?1",
+            [&pruned.0[..]],
+        )
+        .unwrap();
+    swept.push(pruned);
+    for held in [true, false] {
+        fs::create_dir(blobs.join(".tmp-2")).unwrap();
+        let mut reads = Vec::new();
+        s.sweep_blob_orphans_with(|dir| {
+            reads.push(dir.to_path_buf());
+            held
+        })
+        .unwrap();
+        assert_eq!(reads, [fabric], "held: {held}: one read");
+        assert!(temp_entries(&s).is_empty(), "held: {held}");
+        for h in &swept {
+            assert_eq!(s.blob_dir().exists(h), held, "held: {held}");
+        }
+        assert_eq!(s.blob_read(&listed, u64::MAX).unwrap(), b"listed");
+    }
+}
+
 #[test]
 fn a_full_class_never_refuses_another_class() {
     let (_t, mut s) = ready();
@@ -4230,7 +4506,8 @@ fn per_item_statements_cost_the_same_at_any_size() {
 /// with a fabric, and admission while the store is full or a quota hit
 /// clears) reads no candidate list and writes nothing while the persisted
 /// outcome is unchanged; it writes the outcome when it changes, as every
-/// pass did.
+/// pass did. New disk figures are not part of that outcome (Layer 8 §13.4
+/// (2)).
 #[test]
 fn a_pass_at_rest_reads_no_candidate_and_writes_nothing() {
     for (fwd, member) in [(6, 4), (5_000, 2_000)] {
@@ -4275,17 +4552,16 @@ fn a_pass_at_rest_reads_no_candidate_and_writes_nothing() {
             "a pass at rest over {} rows: {per_pass:?} per pass (debug build)",
             fwd + member + 1
         );
-        // New disk figures change the outcome: written, as before.
+        // New disk figures do not change the persisted outcome (Layer 8
+        // §13.4 (2)): nothing is written; the pass keeps them in memory.
         let disk = DiskSpace {
             free: 1 << 40,
             total: 1 << 41,
         };
         assert!(s.prune(disk).unwrap().pruned.is_empty());
-        assert!(s.conn.total_changes() > changes);
-        assert_eq!(
-            get_u64(&s.conn, "capacity.disk_free").unwrap(),
-            Some(1 << 40)
-        );
+        assert_eq!(s.conn.total_changes(), changes, "new disk figures");
+        assert_eq!(s.last_disk, Some(disk));
+        assert_eq!(get_u64(&s.conn, "capacity.disk_free").unwrap(), None);
         // A store_full left by the last pass is cleared by a pass at rest,
         // in memory and on disk.
         let r = s
@@ -4304,6 +4580,257 @@ fn a_pass_at_rest_reads_no_candidate_and_writes_nothing() {
         assert!(!r.store_full && !s.store_full() && r.pruned.is_empty());
         assert_eq!(get_i64(&s.conn, "capacity.store_full").unwrap(), Some(0));
         assert_totals_exact(&s);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Layer 8 §13.4: the disk figures are not persisted
+// ---------------------------------------------------------------------------
+
+/// The keys an earlier build persisted the disk figures as (Layer 8 §13.4
+/// (2)), spelled out here rather than taken from `prune.rs`.
+const OLD_DISK_KEYS: [&str; 2] = ["capacity.disk_free", "capacity.disk_total"];
+
+/// The WAL beside the fabric store in `dir`.
+fn wal_of(dir: &Path) -> PathBuf {
+    dir.join(format!("{DB_FILE}-wal"))
+}
+
+/// A checkpoint that copies every frame back and cuts the WAL to 0 bytes,
+/// so the frames that follow are exactly the commits made since.
+fn truncate_wal(s: &Store, wal: &Path) {
+    let busy: i64 = s
+        .conn
+        .query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(busy, 0, "the checkpoint completed");
+    assert_eq!(len_of(wal), 0, "the WAL is empty");
+}
+
+/// The commits in the WAL since it was last empty: the frames whose header
+/// carries the database size, which SQLite writes on the last frame of a
+/// transaction only (SQLCipher encrypts the page a frame holds, not the
+/// 24-byte frame header).
+fn wal_commits(wal: &Path) -> usize {
+    let bytes = fs::read(wal).unwrap_or_default();
+    if bytes.is_empty() {
+        return 0;
+    }
+    assert!(bytes.len() >= 32, "a WAL header");
+    let page = u32::from_be_bytes(bytes[8..12].try_into().unwrap()) as usize;
+    let frames = &bytes[32..];
+    assert_eq!(frames.len() % (24 + page), 0, "whole frames of {page} B");
+    frames
+        .chunks(24 + page)
+        .filter(|f| f[4..8] != [0; 4])
+        .count()
+}
+
+/// Whether `settings` holds a row under `key`, whatever its value.
+fn setting_present(s: &Store, key: &str) -> bool {
+    s.conn
+        .query_row("SELECT count(*) FROM settings WHERE key = ?1", [key], |r| {
+            r.get::<_, i64>(0)
+        })
+        .unwrap()
+        == 1
+}
+
+/// Layer 8 §13.4 (2)-(3), §1 rule 3, §22 C2: free space moves with any
+/// write on the filesystem, so the disk figures are not part of the
+/// persisted outcome. Three passes at rest whose figures differ each time
+/// (another program wrote, then freed more than it wrote, then `statvfs`
+/// gave none) commit nothing: `total_changes` and the WAL's size are
+/// unchanged, the WAL a checkpoint emptied stays empty, and no disk key is
+/// written. Each pass's figures still reach admission, in memory only.
+#[test]
+fn passes_whose_free_space_moves_commit_nothing() {
+    let (t, mut s) = ready();
+    accepted(s.custody_put(&PEER, &[1; 3000]).unwrap());
+    s.blob_put_public(b"a kb item", Class::Kb, false).unwrap();
+    let gib = 1u64 << 30;
+    // The first pass writes the outcome a fresh store has never had.
+    let r = s
+        .prune(DiskSpace {
+            free: 10 * gib,
+            total: 32 * gib,
+        })
+        .unwrap();
+    assert!(!r.triggered && r.pruned.is_empty() && !r.store_full);
+    let wal = wal_of(t.path());
+    truncate_wal(&s, &wal);
+    let changes = s.conn.total_changes();
+    for disk in [
+        DiskSpace {
+            free: 10 * gib - 4096,
+            total: 32 * gib,
+        },
+        DiskSpace {
+            free: 10 * gib + (64 << 20),
+            total: 32 * gib,
+        },
+        DiskSpace::UNKNOWN,
+    ] {
+        let r = s.prune(disk).unwrap();
+        assert!(
+            !r.triggered && r.pruned.is_empty() && !r.store_full,
+            "{disk:?}"
+        );
+        assert_eq!(s.conn.total_changes(), changes, "{disk:?}: no row written");
+        assert_eq!(len_of(&wal), 0, "{disk:?}: no frame in the WAL");
+        assert_eq!(s.last_disk, Some(disk), "{disk:?}: kept for admission");
+    }
+    for key in OLD_DISK_KEYS {
+        assert!(!setting_present(&s, key), "{key} never written");
+    }
+    assert_eq!(get_i64(&s.conn, "capacity.store_full").unwrap(), Some(0));
+    assert_eq!(get_u64(&s.conn, "capacity.full_classes").unwrap(), Some(0));
+}
+
+/// Layer 8 §13.4 (1) (built by Layer 7 row M1c, kept): the record a pass at
+/// rest compares is `store_full` and the class mask. A class over its quota
+/// with nothing a step may take is marked full by a pruning pass, which
+/// writes the mask in its own transaction; once the quota is lifted, the
+/// first pass at rest finds the stored mask changed and commits once, the
+/// two keys in one transaction; the passes after it, free space still
+/// moving, commit nothing, and a reopen reads the cleared mask.
+#[test]
+fn a_changed_mask_commits_once() {
+    let (t, mut s) = ready();
+    // A KB item no step may take: neither re-fetchable nor superseded.
+    s.blob_put_public(&[7; 2000], Class::Kb, false).unwrap();
+    let disk = |free: u64| DiskSpace {
+        free,
+        total: 1 << 40,
+    };
+    assert!(s.prune(disk(1 << 39)).unwrap().full_classes.is_empty());
+    let wal = wal_of(t.path());
+
+    s.set_quota(Class::Kb, Some(100)).unwrap();
+    truncate_wal(&s, &wal);
+    let r = s.prune(disk((1 << 39) - 4096)).unwrap();
+    assert_eq!(r.full_classes, vec![Class::Kb]);
+    assert!(r.pruned.is_empty() && !r.store_full);
+    assert_eq!(
+        wal_commits(&wal),
+        1,
+        "the pruning pass: its own transaction"
+    );
+    assert_eq!(
+        get_u64(&s.conn, "capacity.full_classes").unwrap(),
+        Some(1 << (Class::Kb as u8))
+    );
+
+    s.set_quota(Class::Kb, None).unwrap();
+    truncate_wal(&s, &wal);
+    let changes = s.conn.total_changes();
+    let r = s.prune(disk((1 << 39) + 8192)).unwrap();
+    assert!(r.full_classes.is_empty() && !r.triggered && r.pruned.is_empty());
+    assert_eq!(
+        s.conn.total_changes(),
+        changes + 2,
+        "the record's two keys, written once"
+    );
+    assert_eq!(wal_commits(&wal), 1, "one commit");
+    assert_eq!(get_u64(&s.conn, "capacity.full_classes").unwrap(), Some(0));
+    let after = len_of(&wal);
+    for free in [1 << 38, (1 << 39) + 1, 3 << 38] {
+        assert!(s.prune(disk(free)).unwrap().full_classes.is_empty());
+        assert_eq!(s.conn.total_changes(), changes + 2, "free {free}");
+        assert_eq!((len_of(&wal), wal_commits(&wal)), (after, 1), "free {free}");
+    }
+    for key in OLD_DISK_KEYS {
+        assert!(!setting_present(&s, key), "{key} never written");
+    }
+    s.close(1).unwrap();
+    let (s, _) = open(t.path(), 1);
+    assert!(s.full_classes().is_empty() && !s.store_full());
+}
+
+/// Layer 8 §13.4 (2), §22 C2: the keys an earlier build persisted the disk
+/// figures as are deleted at the first open of this build, in one
+/// transaction, and never written again: a later open has nothing to
+/// delete (two rows changed and one commit fewer than the first), and no
+/// pass writes them. The figures are not restored: `last_disk` stays unset
+/// until the first pass fills it (admission reads [`DiskSpace::UNKNOWN`]
+/// until then), while `store_full` and the mask are restored as before. One
+/// key alone, or a value that is not an integer, goes the same way, and the
+/// open still succeeds.
+#[test]
+fn the_disk_keys_are_gone_after_the_first_open() {
+    // A store as an earlier build left it: full, the KB class full, and the
+    // figures of a disk under the floor.
+    let (t, s) = ready();
+    let kb = 1i64 << (Class::Kb as u8);
+    for (key, value) in [
+        ("capacity.store_full", 1),
+        ("capacity.full_classes", kb),
+        ("capacity.disk_free", 5),
+        ("capacity.disk_total", 1000),
+    ] {
+        set_i64(&s.conn, key, value).unwrap();
+    }
+    s.close(1).unwrap();
+    let wal = wal_of(t.path());
+
+    let (s, d) = open(t.path(), 1);
+    assert_eq!(d, EpochDecision::Keep { epoch: 1 });
+    let (first, first_commits) = (s.conn.total_changes(), wal_commits(&wal));
+    for key in OLD_DISK_KEYS {
+        assert!(!setting_present(&s, key), "{key} deleted at the first open");
+    }
+    assert_eq!(s.last_disk, None, "the figures are not restored");
+    assert!(s.store_full());
+    assert_eq!(s.full_classes(), &[Class::Kb]);
+    s.close(1).unwrap();
+
+    let (mut s, _) = open(t.path(), 1);
+    assert_eq!(
+        (first, first_commits),
+        (s.conn.total_changes() + 2, wal_commits(&wal) + 1),
+        "the two keys deleted once, in one transaction, at the first open only"
+    );
+    assert_eq!(s.last_disk, None);
+    assert!(s.store_full() && s.full_classes() == [Class::Kb]);
+    // The first pass fills the figures, in memory; a disk with room and no
+    // quota clear the outcome, and neither key is written.
+    let disk = DiskSpace {
+        free: 1 << 39,
+        total: 1 << 40,
+    };
+    let r = s.prune(disk).unwrap();
+    assert!(!r.store_full && r.full_classes.is_empty());
+    assert_eq!(s.last_disk, Some(disk));
+    for key in OLD_DISK_KEYS {
+        assert!(!setting_present(&s, key), "{key} never written");
+    }
+    s.close(1).unwrap();
+    let (s, _) = open(t.path(), 1);
+    assert!(!s.store_full() && s.full_classes().is_empty());
+    assert_eq!(s.last_disk, None);
+    s.close(1).unwrap();
+
+    // One key alone, whatever its value: deleted, and the open succeeds.
+    for (key, value) in [
+        ("capacity.disk_free", "x'2a'"),
+        ("capacity.disk_total", "'not a figure'"),
+        ("capacity.disk_total", "-1"),
+        ("capacity.disk_free", "NULL"),
+    ] {
+        let (t, s) = ready();
+        s.conn
+            .execute(
+                &format!("INSERT INTO settings (key, value) VALUES (?1, {value})"),
+                [key],
+            )
+            .unwrap();
+        s.close(1).unwrap();
+        let (s, _) = open(t.path(), 1);
+        for k in OLD_DISK_KEYS {
+            assert!(!setting_present(&s, k), "{key} = {value}: {k}");
+        }
+        assert_eq!(s.last_disk, None, "{key} = {value}");
+        s.close(1).unwrap();
     }
 }
 

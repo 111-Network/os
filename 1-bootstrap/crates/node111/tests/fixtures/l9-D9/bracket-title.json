@@ -1,0 +1,23 @@
+{
+  "case": "bracket-title",
+  "smuggles": "a title git am's subject cleanup strips to nothing (bracket groups, Re: and colons), so the commit would take its subject from the body's first paragraph: an indented Signed-off-by, and a second line that runs that paragraph past 72 B",
+  "title": "[mallory] Re: : [v2] [skip ci]",
+  "body": "Signed-off-by: Mallory <mallory@example.com>\nand a second line that runs the first paragraph past seventy-two bytes, which a subject never does\n\nThe fix restarts rnsd once its socket is back.",
+  "diagnosis": "rnsd lost its socket.",
+  "verify_log": "drafted and applies cleanly, not built",
+  "not_verified": [
+    "the restart was not tried on a live node"
+  ],
+  "diff": "diff --git a/README.md b/README.md\n--- a/README.md\n+++ b/README.md\n@@ -1,4 +1,4 @@\n # demo\n line one\n-line two\n+line 2\n line three\n",
+  "subject": "fix dft-0123456789ab",
+  "readme_after": "# demo\nline one\nline 2\nline three\n",
+  "mbox_lines": [
+    "Subject: [PATCH] fix dft-0123456789ab",
+    " Signed-off-by: Mallory <mallory@example.com>",
+    "and a second line that runs the first paragraph past seventy-two bytes, which a subject never does",
+    "The fix restarts rnsd once its socket is back."
+  ],
+  "pr_lines": [
+    "> rnsd lost its socket."
+  ]
+}

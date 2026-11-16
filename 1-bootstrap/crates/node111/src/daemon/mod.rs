@@ -1033,9 +1033,11 @@ async fn daemon_main() -> anyhow::Result<()> {
         dashboard.api.lan_enabled,
     ));
     dashboard.api.insert_ext(Arc::clone(&panel_host));
-    // Layer 8 (`os/8-storage/README.md` §2.2): the node-state store's start (the J2 fold, the
-    // legacy import, the spool sweep); returns at once until its rows land (nothing opened or read)
-    state::start(&layout);
+    // Layer 8 (`os/8-storage/README.md` §2.2, row D2): the node-state store, keyed through the
+    // identity handle here, outside the fabric's boot, so it derives with the fabric down (no
+    // identity, no key); then the J2 fold, the legacy import and the spool sweep. Nothing is
+    // opened until a use; held to the end, where its drop closes the store cleanly
+    let _node_state = state::start(&layout, identity.as_ref());
     // Layer 5 F2: the messaging fabric (store, identity handle, tcp-lan,
     // routes' state, SSE `message`/`contact`/`fabric`, `fabric` service facts).
     let fabric = {

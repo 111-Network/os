@@ -66,6 +66,7 @@ use id111::counters::{CounterError, CounterStore, Freshness as L2Freshness};
 use id111::keyset::{Keyset, NodeId};
 use id111::seal::{self, OpenError, SealHeader};
 use mesh111::envelope::derive_pair_key;
+use mesh111::keys::ModeS;
 use mesh111::sealer::{Direction, Freshness, Key32, Sealer, SealerError};
 use std::collections::HashMap;
 use std::path::Path;
@@ -142,6 +143,17 @@ pub fn store_secret_from(private_keyset: &[u8; 64]) -> Result<Zeroizing<Key32>, 
     secret.copy_from_slice(&out);
     out.zeroize();
     Ok(secret)
+}
+
+/// Layer 8 (`os/8-storage/README.md` §2.2 rule 2; row D2): the node-state store's key custody,
+/// taken outside `fabric::boot`: Mode S over this identity's `store_secret`, the secret the
+/// identity handle gives the fabric ([`IdentitySealer`]'s `store_secret`, [`store_secret_from`]),
+/// so `node/state.db`'s key, `key_for(NODE_STATE_KDF_TAG)` (§2.7 S1), derives with the fabric
+/// down. The X25519 half is copied only into zeroizing buffers and the custody zeroizes the secret
+/// when dropped; the daemon keeps only the key it derives (`state::start`), never on disk.
+pub fn node_state_keys(identity: &Identity) -> Result<ModeS, SealerError> {
+    let secret = store_secret_from(&identity.keyset().to_bytes())?;
+    Ok(ModeS::new(secret, identity.node_id.to_bytes()))
 }
 
 /// Layer 7 §6.2: the X25519 output that keys a pairing's carrier topic,
@@ -553,6 +565,30 @@ mod tests {
         let a = sealer(t.path());
         let want = store_secret_from(&a.keyset().to_bytes()).unwrap();
         assert_eq!(a.store_secret().unwrap(), *want);
+    }
+
+    /// Layer 8 §2.2 rule 2 (row D2): the custody taken outside the fabric's boot answers the
+    /// handle's own `store_secret` under the node-state tag, and the fabric's key under its own.
+    #[test]
+    fn the_node_state_custody_is_the_handles_store_secret_under_its_own_tag() {
+        use mesh111::keys::{derive_tagged_key, KeyProvider, NODE_STATE_KDF_TAG, STORE_KDF_TAG};
+        let t = tempfile::tempdir().unwrap();
+        let handle = sealer(t.path());
+        // the same identity, loaded again as the daemon holds it before the fabric boots
+        let id = crate::identity::load(&t.path().join("identity")).unwrap();
+        let keys = node_state_keys(&id).unwrap();
+        let secret = handle.store_secret().unwrap();
+        let node = handle.node_id().to_bytes();
+        let want = derive_tagged_key(NODE_STATE_KDF_TAG, &secret, &node).unwrap();
+        let got = keys.key_for(NODE_STATE_KDF_TAG).unwrap();
+        assert_eq!(got.as_bytes(), want.as_bytes());
+        let fabric = derive_tagged_key(STORE_KDF_TAG, &secret, &node).unwrap();
+        assert_eq!(keys.store_key().unwrap().as_bytes(), fabric.as_bytes());
+        assert_ne!(
+            got.as_bytes(),
+            fabric.as_bytes(),
+            "a different tag, a different key"
+        );
     }
 
     #[test]

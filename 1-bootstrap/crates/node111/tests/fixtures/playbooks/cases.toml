@@ -1,0 +1,502 @@
+# The playbook cases (9-evolution/README.md §6.2, §6.3 "One fixture directory"): grammar v1's accept
+# and reject cases, read by node111's tests/heal_playbooks.rs (row D4) and by
+# `0-knowledge/_meta/build.py --selftest` (row K1); never in the payload. Row D5 adds the facts cases.
+#
+# One [[case]] per .md file of this folder: `file`; `verdict`, "accept" or "reject"; for an accept,
+# `renders`, the filename its [match] renders (§6.1, N06); for a reject, `rule`, the one rule it
+# breaks (node111's `heal::playbook::grammar::Rule` ids). The verdict is the document's: the one
+# ```toml fence under the one `### Checks` heading, then grammar v1 against
+# 0-knowledge/_meta/playbook-vocabulary.toml. A fixture's own name is its case, never the rendered
+# one, and the Layer 0 entry rules (frontmatter, the six H2 sections) are not part of the verdict.
+#
+# The rules, in the order node111 applies them (each reject case breaks one; the field rules are
+# node111's src/daemon/heal/action.rs and src/daemon/heal/playbook/grammar.rs):
+#   checks_block   no `### Checks` ATX heading outside a fence, more than one, or its section (to the
+#                  next heading of level 1 to 3) not holding exactly one closed fence (``` or ~~~,
+#                  3 or more, up to 3 spaces of indent) whose info string is `toml`
+#   block_size     the bytes between the two fence lines over 2,048, checked before the parse
+#   toml           the block is not TOML (a duplicate key among it)
+#   schema         schema missing, not an integer, or not 1 to MAX_SCHEMA (1)
+#   value          a TOML date or time anywhere (grammar v1 takes none); then, in the same pass as
+#                  the four rules below: anything but a table where grammar v1 takes one ([match],
+#                  each [[check]] and [[cause]], a test, each operand of all and any, not's
+#                  operand, a cause's action), and an array or a table in a predicate's field or
+#                  in severity (serde would read an array as a table's fields in order, and a
+#                  one-key table as an enum's name: `test = ["service_state", "model",
+#                  "degraded"]`, `is = { degraded = {} }`)
+#   unknown_predicate  a `p` that is none of the twelve predicates, all, any, not
+#   depth          a check's test deeper than 3 (a leaf is 1, a combinator one more than its deepest)
+#   leaves         more than 16 leaves in the whole block
+#   unknown_action a cause's `action` name the vocabulary lacks (firmware.flash, update.rollback)
+#   unknown_field  a key a table does not take (restarts_at_least's within_events among them)
+#   unknown_service  an `id` outside its set: service_state, restarts_at_least, exit_is,
+#                  log_contains and service.restart take a supervised child (agent, model,
+#                  transport, meshtastic: the vocabulary's child_exit subjects but `any`) or
+#                  "@subject"; service_reason any service row or "@subject"
+#   subject        a value starting with `@` that is not "@subject" in a subject field (a
+#                  component's id, in component_enabled and component.*, takes a literal only)
+#   value          a value of the wrong type or out of its bounds; a field, the checks or the causes
+#                  missing; an empty all or any (health_is reads ok or error only: of = agent,
+#                  is = degraded is refused here)
+#   match          [match] not a row of the vocabulary at its own layer
+#   ids            a check id not 1 to 16 B or a cause id not 1 to 24 B of a-z, 0-9 and _; an id
+#                  twice; a cause named `unknown`; a `when` empty, naming a check twice or one the
+#                  block lacks
+#   subject        "@subject" in an `any` playbook, or where the [match] subject is not a value the
+#                  field takes (a supervised child; for service_reason a service row)
+#   unknown_reason a service_reason code the vocabulary lacks for that service row
+#   human_only     a cause naming rns.interface.upsert, rns.interface.remove, bridge.edge.pause,
+#                  bridge.edge.set, bridge.order.set or identify
+#   log_only       a cause whose action is not advise or escalate, none of whose `when` checks
+#                  holds a leaf that is not log_contains
+schema = 1
+
+[[case]]
+file = "accept-advise-on-log.md"
+verdict = "accept"
+renders = "repair-meshtastic-port-busy.md"
+
+[[case]]
+file = "accept-any-component.md"
+verdict = "accept"
+renders = "repair-any-child-exit.md"
+
+[[case]]
+file = "accept-block-2048.md"
+verdict = "accept"
+renders = "repair-model-child-exit.md"
+
+[[case]]
+file = "accept-every-predicate.md"
+verdict = "accept"
+renders = "repair-model-child-exit.md"
+
+[[case]]
+file = "accept-human-step.md"
+verdict = "accept"
+renders = "repair-111d-witness-absent.md"
+
+[[case]]
+file = "accept-limits.md"
+verdict = "accept"
+renders = "repair-model-child-exit.md"
+
+[[case]]
+file = "accept-other-fences.md"
+verdict = "accept"
+renders = "repair-model-child-exit.md"
+
+[[case]]
+file = "accept-service-reason-subject.md"
+verdict = "accept"
+renders = "repair-kb-verify-failed.md"
+
+[[case]]
+file = "accept-settings.md"
+verdict = "accept"
+renders = "repair-fabric-store-full.md"
+
+[[case]]
+file = "accept-spec-example.md"
+verdict = "accept"
+renders = "repair-model-child-exit.md"
+
+[[case]]
+file = "accept-subject-bound.md"
+verdict = "accept"
+renders = "repair-model-child-exit.md"
+
+[[case]]
+file = "accept-transport-actions.md"
+verdict = "accept"
+renders = "repair-transport-child-exit.md"
+
+[[case]]
+file = "reject-action-array-form.md"
+verdict = "reject"
+rule = "value"
+
+[[case]]
+file = "reject-agent-degraded.md"
+verdict = "reject"
+rule = "value"
+
+[[case]]
+file = "reject-another-substitution.md"
+verdict = "reject"
+rule = "subject"
+
+[[case]]
+file = "reject-bad-calver.md"
+verdict = "reject"
+rule = "value"
+
+[[case]]
+file = "reject-block-2049.md"
+verdict = "reject"
+rule = "block_size"
+
+[[case]]
+file = "reject-cause-array-form.md"
+verdict = "reject"
+rule = "value"
+
+[[case]]
+file = "reject-cause-id-25.md"
+verdict = "reject"
+rule = "ids"
+
+[[case]]
+file = "reject-cause-unknown.md"
+verdict = "reject"
+rule = "ids"
+
+[[case]]
+file = "reject-check-array-form.md"
+verdict = "reject"
+rule = "value"
+
+[[case]]
+file = "reject-check-id-17.md"
+verdict = "reject"
+rule = "ids"
+
+[[case]]
+file = "reject-check-id-twice.md"
+verdict = "reject"
+rule = "ids"
+
+[[case]]
+file = "reject-check-id-upper.md"
+verdict = "reject"
+rule = "ids"
+
+[[case]]
+file = "reject-count-zero.md"
+verdict = "reject"
+rule = "value"
+
+[[case]]
+file = "reject-datetime.md"
+verdict = "reject"
+rule = "value"
+
+[[case]]
+file = "reject-depth-4.md"
+verdict = "reject"
+rule = "depth"
+
+[[case]]
+file = "reject-depth-array-form.md"
+verdict = "reject"
+rule = "value"
+
+[[case]]
+file = "reject-duplicate-key.md"
+verdict = "reject"
+rule = "toml"
+
+[[case]]
+file = "reject-edge-pause.md"
+verdict = "reject"
+rule = "human_only"
+
+[[case]]
+file = "reject-edge-set.md"
+verdict = "reject"
+rule = "human_only"
+
+[[case]]
+file = "reject-empty-all.md"
+verdict = "reject"
+rule = "value"
+
+[[case]]
+file = "reject-enum-table.md"
+verdict = "reject"
+rule = "value"
+
+[[case]]
+file = "reject-escalate-task.md"
+verdict = "reject"
+rule = "value"
+
+[[case]]
+file = "reject-exit-code-and-signal.md"
+verdict = "reject"
+rule = "value"
+
+[[case]]
+file = "reject-fence-not-toml.md"
+verdict = "reject"
+rule = "checks_block"
+
+[[case]]
+file = "reject-fence-unclosed.md"
+verdict = "reject"
+rule = "checks_block"
+
+[[case]]
+file = "reject-firmware-flash.md"
+verdict = "reject"
+rule = "unknown_action"
+
+[[case]]
+file = "reject-identify.md"
+verdict = "reject"
+rule = "human_only"
+
+[[case]]
+file = "reject-interface-remove.md"
+verdict = "reject"
+rule = "human_only"
+
+[[case]]
+file = "reject-interface-upsert.md"
+verdict = "reject"
+rule = "human_only"
+
+[[case]]
+file = "reject-leaves-17-across-checks.md"
+verdict = "reject"
+rule = "leaves"
+
+[[case]]
+file = "reject-leaves-17.md"
+verdict = "reject"
+rule = "leaves"
+
+[[case]]
+file = "reject-leaves-array-form.md"
+verdict = "reject"
+rule = "value"
+
+[[case]]
+file = "reject-literal-65.md"
+verdict = "reject"
+rule = "value"
+
+[[case]]
+file = "reject-log-from-component.md"
+verdict = "reject"
+rule = "unknown_service"
+
+[[case]]
+file = "reject-log-only-human-step.md"
+verdict = "reject"
+rule = "log_only"
+
+[[case]]
+file = "reject-log-only-under-not.md"
+verdict = "reject"
+rule = "log_only"
+
+[[case]]
+file = "reject-log-only.md"
+verdict = "reject"
+rule = "log_only"
+
+[[case]]
+file = "reject-match-array-form.md"
+verdict = "reject"
+rule = "value"
+
+[[case]]
+file = "reject-match-layer-10.md"
+verdict = "reject"
+rule = "match"
+
+[[case]]
+file = "reject-match-layer.md"
+verdict = "reject"
+rule = "match"
+
+[[case]]
+file = "reject-match-reason.md"
+verdict = "reject"
+rule = "match"
+
+[[case]]
+file = "reject-match-subject.md"
+verdict = "reject"
+rule = "match"
+
+[[case]]
+file = "reject-no-cause.md"
+verdict = "reject"
+rule = "value"
+
+[[case]]
+file = "reject-no-checks-heading.md"
+verdict = "reject"
+rule = "checks_block"
+
+[[case]]
+file = "reject-not-array-form.md"
+verdict = "reject"
+rule = "value"
+
+[[case]]
+file = "reject-not-toml.md"
+verdict = "reject"
+rule = "toml"
+
+[[case]]
+file = "reject-one-bad-cause.md"
+verdict = "reject"
+rule = "human_only"
+
+[[case]]
+file = "reject-operand-array-form.md"
+verdict = "reject"
+rule = "value"
+
+[[case]]
+file = "reject-order-set.md"
+verdict = "reject"
+rule = "human_only"
+
+[[case]]
+file = "reject-quota-class.md"
+verdict = "reject"
+rule = "value"
+
+[[case]]
+file = "reject-rel-dotdot.md"
+verdict = "reject"
+rule = "value"
+
+[[case]]
+file = "reject-schema-0.md"
+verdict = "reject"
+rule = "schema"
+
+[[case]]
+file = "reject-schema-2.md"
+verdict = "reject"
+rule = "schema"
+
+[[case]]
+file = "reject-schema-missing.md"
+verdict = "reject"
+rule = "schema"
+
+[[case]]
+file = "reject-schema-string.md"
+verdict = "reject"
+rule = "schema"
+
+[[case]]
+file = "reject-settings-key.md"
+verdict = "reject"
+rule = "value"
+
+[[case]]
+file = "reject-severity.md"
+verdict = "reject"
+rule = "value"
+
+[[case]]
+file = "reject-subject-component.md"
+verdict = "reject"
+rule = "subject"
+
+[[case]]
+file = "reject-subject-daemon.md"
+verdict = "reject"
+rule = "subject"
+
+[[case]]
+file = "reject-subject-in-any.md"
+verdict = "reject"
+rule = "subject"
+
+[[case]]
+file = "reject-subject-in-text.md"
+verdict = "reject"
+rule = "subject"
+
+[[case]]
+file = "reject-test-array-form.md"
+verdict = "reject"
+rule = "value"
+
+[[case]]
+file = "reject-two-checks-headings.md"
+verdict = "reject"
+rule = "checks_block"
+
+[[case]]
+file = "reject-two-fences.md"
+verdict = "reject"
+rule = "checks_block"
+
+[[case]]
+file = "reject-unknown-field-action.md"
+verdict = "reject"
+rule = "unknown_field"
+
+[[case]]
+file = "reject-unknown-field-cause.md"
+verdict = "reject"
+rule = "unknown_field"
+
+[[case]]
+file = "reject-unknown-field-match.md"
+verdict = "reject"
+rule = "unknown_field"
+
+[[case]]
+file = "reject-unknown-field-predicate.md"
+verdict = "reject"
+rule = "unknown_field"
+
+[[case]]
+file = "reject-unknown-field-top.md"
+verdict = "reject"
+rule = "unknown_field"
+
+[[case]]
+file = "reject-unknown-predicate-nested.md"
+verdict = "reject"
+rule = "unknown_predicate"
+
+[[case]]
+file = "reject-unknown-predicate.md"
+verdict = "reject"
+rule = "unknown_predicate"
+
+[[case]]
+file = "reject-unknown-reason.md"
+verdict = "reject"
+rule = "unknown_reason"
+
+[[case]]
+file = "reject-unknown-service-action.md"
+verdict = "reject"
+rule = "unknown_service"
+
+[[case]]
+file = "reject-unknown-service.md"
+verdict = "reject"
+rule = "unknown_service"
+
+[[case]]
+file = "reject-update-rollback.md"
+verdict = "reject"
+rule = "unknown_action"
+
+[[case]]
+file = "reject-when-empty.md"
+verdict = "reject"
+rule = "ids"
+
+[[case]]
+file = "reject-when-undefined.md"
+verdict = "reject"
+rule = "ids"
+
+[[case]]
+file = "reject-within-events.md"
+verdict = "reject"
+rule = "unknown_field"

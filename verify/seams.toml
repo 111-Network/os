@@ -501,7 +501,7 @@ a = { layer = 1, files = ["1-bootstrap/crates/node111/src/daemon/carrier/ntfy.rs
 b = { layer = 7, files = ["7-relay/verify/stub-ntfy.py", "7-relay/carriers/ntfy/server.yml"] }
 read_first = "a"
 symptom = "cross-island custody is stuck: 409 metered_cap, RelayStatus.carrier"
-gap = "The stub-ntfy.py stand-in is unverified against a real ntfy server (11 log items 'not run from this box')."
+gap = "G10 (carrier.sh, row V4, REQUIRE_G10=1 GREEN) runs two real gateways against stub-ntfy.py, the stdlib stand-in, which is unverified against a real ntfy server: NTFY_BIN is unset on this box, so the real-server items are SKIPPED (REQUIRE_NTFY=1 makes them a FAIL), and D12 waits for the owner-run smoke log."
 
 [[seam]]
 id = "L1-L7:origin"
@@ -525,7 +525,7 @@ a = { layer = 1, files = ["1-bootstrap/crates/node111/src/daemon/registry/mod.rs
 b = { layer = 7, files = ["1-bootstrap/crates/node111/src/daemon/dashboard/mdns.rs"] }
 read_first = "a"
 symptom = "no 'Find my hub': 409 lan_off, an empty GET /registry; the _n111._tcp record missing or stale"
-gap = "Row D8 landed: the record, the browse and the lost-hub rehome run against real mdns-sd daemons and real fabrics on loopback (tests/registry_mdns.rs), the re-arm in a network namespace; G8 (presence.sh) still prints SKIPPED, so no two-host LAN run."
+gap = "Row D8 landed with its follow-up: the record, the browse and the lost-hub rehome run against real mdns-sd daemons and real fabrics on loopback (tests/registry_mdns.rs, each fabric beside the daemon's housekeeping interval), the re-arm and two rename tests on a real daemon in network namespaces; G8 (presence.sh, row V2, REQUIRE_G8=1 GREEN) runs the record and its gates, a renumber and back, and lost-hub recovery on three real daemons over one LAN bridge. mdns-sd 0.21.5's own bugs behind the follow-up are worked around in node111, not fixed upstream."
 
 [[seam]]
 id = "L1-L7:relay-state"
@@ -538,7 +538,7 @@ a = { layer = 1, files = [
 b = { layer = 7, files = ["1-bootstrap/crates/node111/src/daemon/dashboard/api_v1/relay7.rs"] }
 read_first = "a"
 symptom = "settings are lost or a secret leaks: the GET /relay shape"
-gap = "Row D10 landed: GET /relay and PATCH /relay/settings run on D1's settings cell, every consent round trip and refusal through the real router (tests/api_v1_relay7.rs); the link-key file is D5's. No two-host run yet (G9-G11 SKIPPED)."
+gap = "Row D10 landed: GET /relay and PATCH /relay/settings run on D1's settings cell, every consent round trip and refusal through the real router (tests/api_v1_relay7.rs); the link-key file is D5's. On running daemons: G11 (tls.sh, row V5) and G9 (forward.sh, row V3) read GET /relay on paired hubs; G10 (carrier.sh, row V4) switches the gateway and carrier through PATCH /relay/settings on real gateways."
 
 [[seam]]
 id = "L1-L8:state-service"
@@ -1156,7 +1156,7 @@ b = { layer = 7, files = [
 ] }
 read_first = "a"
 symptom = "no 111 Nearby kind: GET /nearby has no 111 source"
-gap = "Row D2 landed: the fabric tap (`relay::tap`, N/relay/mod.rs) hands each fabric batch to presence, the gateway row and the relay frame; the presence book is unit-tested against fake reads (`--lib daemon::relay::presence`, inside l1.node111.lib); no running system shows a 111 row yet: G8 (`7-relay/verify/presence.sh`, row V2) is a T0 stub."
+gap = "Row D2 landed: the fabric tap (`relay::tap`, N/relay/mod.rs) hands each fabric batch to presence, the gateway row and the relay frame; the presence book is unit-tested against fake reads (`--lib daemon::relay::presence`, inside l1.node111.lib); G8 (`7-relay/verify/presence.sh`, row V2, REQUIRE_G8=1 GREEN) shows the 111 rows on three real daemons: the §2.2 strings, the LAN-vs-hub split, nothing refreshed by a replayed announce, a card or a keepalive."
 
 [[seam]]
 id = "L5-L7:forwarder-handoff"
@@ -1166,7 +1166,7 @@ a = { layer = 5, files = ["5-messaging/crates/mesh111/src/fabric.rs"] }
 b = { layer = 7, files = ["1-bootstrap/crates/node111/src/daemon/carrier/mod.rs"] }
 read_first = "a"
 symptom = "custody is not forwarded: a message stays relayed with reason_code forwarding and never reaches delivered"
-gap = "Row D11 landed: the carrier runtime (N/carrier/mod.rs) drains the forwarder and posts through ntfy, proven at I against stub-ntfy.py by l1.node111.carrier_flow (two real hubs and a member at each); no real ntfy server has carried it (D12 waits for the owner-run smoke log), and G9 (forward.sh, row V3) and G10 (carrier.sh, row V4) are T0 stubs."
+gap = "Row D11 landed: the carrier runtime (N/carrier/mod.rs) drains the forwarder and posts through ntfy, proven at I against stub-ntfy.py by l1.node111.carrier_flow (two real hubs and a member at each); no real ntfy server has carried it (D12 waits for the owner-run smoke log). G9 (forward.sh, row V3, REQUIRE_G9=1 GREEN) forwards between three real hubs over TEST-NET with TLS-RPK: the hint, the probe order, every pair refusing, restarts with deduplication, the Transit quota, REJECT_FULL, a Layer 6 hub; G10 (carrier.sh, row V4, REQUIRE_G10=1 GREEN) carries forwards between two real gateways through stub-ntfy.py on a private WAN (5A and 5B, the commit on the far ack only, re-posts, the body limits); its leaf-hub phase (§5 rows 2 and 3) is open."
 
 [[seam]]
 id = "L5-L7:pair-gate"
@@ -1176,7 +1176,7 @@ a = { layer = 5, files = ["5-messaging/crates/mesh111/src/fabric.rs", "5-messagi
 b = { layer = 7, files = ["1-bootstrap/crates/node111/src/daemon/relay/pair.rs", "1-bootstrap/crates/node111/src/daemon/relay/tls.rs"] }
 read_first = "a"
 symptom = "hubs cannot pair: 409 pair_role_mismatch; PairedHub.tls"
-gap = "The mesh side runs real tcp-lan on loopback (a ~3 min suite); the daemon side is tested in process (relay_tls, row D5: pinned-key TLS between two real tcp-lan adapters; relay_pair, row D6: pairing through the dashboard routes and the CLI, two hubs paired end to end) and G9 prints SKIPPED, so no two daemons pair in a running system."
+gap = "The mesh side runs real tcp-lan on loopback (a ~3 min suite); the daemon side is tested in process (relay_tls, row D5: pinned-key TLS between two real tcp-lan adapters; relay_pair, row D6: pairing through the dashboard routes and the CLI, two hubs paired end to end); G9 (forward.sh, row V3, REQUIRE_G9=1 GREEN) pairs three real daemons on TEST-NET (the role matrix, a half pair that forwards nothing, no pairing refused with REJECT_UNKNOWN_DEST, no TLS dial answered in clear)."
 
 [[seam]]
 id = "L5-L7:role-bits"
@@ -1283,7 +1283,7 @@ a = { layer = 6, files = ["1-bootstrap/crates/node111/src/daemon/transport/rnsta
 b = { layer = 7, files = ["1-bootstrap/crates/node111/src/daemon/dashboard/api_v1/nearby.rs"] }
 read_first = "b"
 symptom = "no hop counts: rate_limited or component_unavailable on POST /nearby/hops"
-gap = "Row D2 landed: POST /nearby/hops runs one `rnpath -t -j` through the rnstatus runner (its timeout, output cap and owner gate) into the reticulum source's `hops_away`; tests/api_v1_bridge.rs drives the route (409 component_unavailable, 401 for the agent's bearer, 202, 429 within 30 s) and the rnstatus unit tests parse scripted path tables; no harness runs a real rnpath: G8 (row V2) is a T0 stub."
+gap = "Row D2 landed: POST /nearby/hops runs one `rnpath -t -j` through the rnstatus runner (its timeout, output cap and owner gate) into the reticulum source's `hops_away`; tests/api_v1_bridge.rs drives the route (409 component_unavailable, 401 for the agent's bearer, 202, 429 within 30 s) and the rnstatus unit tests parse scripted path tables; G8 (row V2) drives the route on running daemons with a fake Reticulum (one `rnpath` per 30 s, 409 without the component, no spawn on any GET); no harness runs a real rnpath."
 
 [[seam]]
 id = "L6-L7:netlink-gateway"

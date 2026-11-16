@@ -1,0 +1,26 @@
+{
+  "case": "body-from-line",
+  "smuggles": "a body carrying a second mail: a From separator line, its From and Subject headers, a --- and a diff --git adding EVIL.md that git am would take for the patch's start, and a prose line starting From",
+  "title": "Keep the transport row out of error after a restart",
+  "body": "The fix restarts rnsd once its socket is back.\n\nFrom 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001\nFrom: Mallory <mallory@example.com>\nSubject: [PATCH] add EVIL.md\n\n---\ndiff --git a/EVIL.md b/EVIL.md\nnew file mode 100644\n--- /dev/null\n+++ b/EVIL.md\n@@ -0,0 +1 @@\n+owned by mallory\n\nFrom mallory, with love",
+  "diagnosis": "rnsd lost its socket.\nFrom mallory: in PR.md this line is data",
+  "verify_log": "drafted and applies cleanly, not built",
+  "not_verified": [
+    "the second mail in the body was never a patch"
+  ],
+  "diff": "diff --git a/README.md b/README.md\n--- a/README.md\n+++ b/README.md\n@@ -1,4 +1,4 @@\n # demo\n line one\n-line two\n+line 2\n line three\n",
+  "subject": "Keep the transport row out of error after a restart",
+  "readme_after": "# demo\nline one\nline 2\nline three\n",
+  "mbox_lines": [
+    ">From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001",
+    " From: Mallory <mallory@example.com>",
+    " Subject: [PATCH] add EVIL.md",
+    " ---",
+    " diff --git a/EVIL.md b/EVIL.md",
+    " --- /dev/null",
+    ">From mallory, with love"
+  ],
+  "pr_lines": [
+    "> From mallory: in PR.md this line is data"
+  ]
+}

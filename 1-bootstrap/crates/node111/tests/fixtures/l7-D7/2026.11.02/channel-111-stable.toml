@@ -52,12 +52,6 @@ sha256 = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
 size = 40002
 
 [[deb]]
-name = "cronie"
-url = "https://example.invalid/debs/cronie_1.7_aarch64.deb"
-sha256 = "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
-size = 80003
-
-[[deb]]
 name = "python"
 url = "https://example.invalid/debs/python_3.12_aarch64.deb"
 sha256 = "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"

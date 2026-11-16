@@ -1077,13 +1077,24 @@ async fn v5_1_a_client_that_disconnects_mid_apply_never_cancels_the_revert() {
     })
     .await
     .unwrap();
-    // the client is gone while the probe still waits: the new posture is on disk now
-    assert_ne!(
-        n.files().0,
-        before.0,
-        "the change was applied before the drop"
-    );
-    assert!(n.take_log().iter().any(|l| l == "restart rnsd"));
+    // the client is gone mid-apply, and the apply runs on in its own task: the new posture
+    // reaches the disk, then rnsd restarts. Both are waited for, bounded: the write and the
+    // restart are two steps of that task, and on a loaded runner the client's 400 ms can end
+    // between them (CI once read the new interfaces.toml before the restart was logged). A
+    // disconnect that cancelled the apply would never restart rnsd and still fails here.
+    let mut log: Vec<String> = Vec::new();
+    let mut on_disk = false;
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while std::time::Instant::now() < deadline {
+        on_disk |= n.files().0 != before.0;
+        log.extend(n.take_log());
+        if on_disk && log.iter().any(|l| l == "restart rnsd") {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(on_disk, "the change was applied after the drop");
+    assert!(log.iter().any(|l| l == "restart rnsd"), "{log:?}");
     // ... and the loop goes on without it: the probe fails, the snapshot comes back
     assert!(
         until_files(&n, &before, Duration::from_secs(15)).await,

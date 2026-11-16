@@ -1,0 +1,19 @@
+{
+  "case": "title-line-break",
+  "smuggles": "a title whose line breaks would end the Subject header and start a second mail with its own author, subject and a diff adding EVIL.md",
+  "title": "Restart rnsd after its socket vanished\n\nFrom 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001\nFrom: Mallory <mallory@example.com>\nSubject: [PATCH] add EVIL.md\n\ndiff --git a/EVIL.md b/EVIL.md\nnew file mode 100644\n--- /dev/null\n+++ b/EVIL.md\n@@ -0,0 +1 @@\n+owned by mallory\n",
+  "body": "rnsd exits when its shared instance socket goes away; restart it once the socket is back.",
+  "diagnosis": "The transport row reads stack_down after rnsd lost its socket.",
+  "verify_log": "drafted and applies cleanly, not built\napplied 1 hunk to README.md",
+  "not_verified": [
+    "the restart was not tried on a live node"
+  ],
+  "diff": "diff --git a/README.md b/README.md\n--- a/README.md\n+++ b/README.md\n@@ -1,4 +1,4 @@\n # demo\n line one\n-line two\n+line 2\n line three\n",
+  "subject": "Restart rnsd after its socket vanished From 0000000000000000000000000000",
+  "readme_after": "# demo\nline one\nline 2\nline three\n",
+  "mbox_lines": [
+    "Subject: [PATCH] Restart rnsd after its socket vanished From 0000000000000000000000000000",
+    "From: kitchen node <node@111.invalid>"
+  ],
+  "pr_lines": []
+}

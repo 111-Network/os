@@ -26,6 +26,11 @@ Modelled:
             process loses every message, which is the point
   health    GET /v1/health => {"healthy":true} (never limited)
 
+  access    --access-log FILE: one JSON line per answered request, {"t" (monotonic s), "ip", "m", "p",
+            "s" (status), "req" (request body bytes), "resp" (response body bytes, null for a held
+            stream, which is logged when it opens)}; a gate (7-relay/verify/carrier.sh) reads it for
+            the requests, their order and the bytes per message. stderr is unchanged.
+
 The bound port is printed on stdout as one line (bind --port 0 for an ephemeral one), then stdout
 is not written again; requests are logged on stderr unless --quiet. Stops on SIGTERM or SIGINT.
 """
@@ -137,8 +142,32 @@ class Handler(http.server.BaseHTTPRequestHandler):
     def visitor(self):
         return self.client_address[0]
 
+    def log_access(self, status, resp_len):
+        path = self.server.store.args.access_log
+        if not path:
+            return
+        try:
+            req_len = int(self.headers.get("Content-Length", "0") or 0)
+        except ValueError:
+            req_len = 0
+        line = json.dumps(
+            {
+                "t": round(time.monotonic(), 3),
+                "ip": self.client_address[0],
+                "m": self.command,
+                "p": self.path,
+                "s": status,
+                "req": req_len,
+                "resp": resp_len,
+            }
+        )
+        with self.server.store.cond:
+            with open(path, "a") as f:
+                f.write(line + "\n")
+
     def answer(self, status, body, ctype="application/json"):
         data = body.encode("utf-8")
+        self.log_access(status, len(data))
         self.send_response(status)
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(data)))
@@ -271,6 +300,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self.answer(429, error_body(42903, 429, "limit reached: too many subscriptions"))
             return
         try:
+            self.log_access(200, None)
             self.send_response(200)
             self.send_header("Content-Type", "application/x-ndjson; charset=utf-8")
             self.send_header("Transfer-Encoding", "chunked")
@@ -323,6 +353,7 @@ def main():
     ap.add_argument("--cache-duration", type=float, default=12 * 3600.0, help="seconds")
     ap.add_argument("--since-miss", choices=("error", "all"), default="error")
     ap.add_argument("--token", action="append", default=[])
+    ap.add_argument("--access-log", default="", help="append one JSON line per request to FILE")
     ap.add_argument("--quiet", action="store_true")
     args = ap.parse_args()
 

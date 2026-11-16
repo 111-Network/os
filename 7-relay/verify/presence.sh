@@ -168,7 +168,8 @@ print(json.dumps({"ptr": sorted(res["ptr"]), "srv": res["srv"], "txt": res["txt"
 PY
 }
 
-# pktlog.py: an AF_PACKET logger on one interface (outbound only): every TCP SYN and every mDNS query, one JSON line
+# pktlog.py: an AF_PACKET logger on one interface (outbound, plus who dialed in): every TCP SYN sent and received, every ARP
+# who-has and every mDNS query, one JSON line
 # each with a monotonic time (CLOCK_MONOTONIC, the shell's `cat /proc/uptime` clock is not used: times are compared
 # only to each other inside this file's own output and to `now` printed by `pktlog.py --now`).
 write_pktlog() {
@@ -211,11 +212,14 @@ while not stop:
     dst = socket.inet_ntoa(d[30:34])
     t = time.time()
     l4 = 14 + ihl
-    if proto == 6 and out and len(d) >= l4 + 14:
+    if proto == 6 and len(d) >= l4 + 14:
         sport, dport = struct.unpack("!HH", d[l4:l4 + 4])
         flags = d[l4 + 13]
         if flags & 2 and not flags & 16:
-            f.write(json.dumps({"t": t, "k": "syn", "dst": dst, "port": dport}) + "\n")
+            if out:
+                f.write(json.dumps({"t": t, "k": "syn", "dst": dst, "port": dport}) + "\n")
+            elif a[2] == 0:
+                f.write(json.dumps({"t": t, "k": "synin", "src": socket.inet_ntoa(d[26:30]), "port": dport}) + "\n")
     elif proto == 17 and len(d) >= l4 + 8:
         sport, dport = struct.unpack("!HH", d[l4:l4 + 4])
         p = d[l4 + 8:]
@@ -795,6 +799,12 @@ inner() {
     '[ "$ST" = 200 ] && [ "$(sha "${NROOT[M1]}/state/relay.json")" != "$rl0" ]'
 
   # ---------------------------------------------------------------- the helpers of the phases below
+  dialed_in() { # NODE → the unique addresses that opened a TCP connection to the node (an inbound SYN), over the whole run
+    jq -r 'select(.k == "synin") | .src' "$G8_WORK/pkt-$1.jsonl" 2>/dev/null | sort -u | tr '\n' ' ' | sed 's/ $//'
+  }
+  syn_to() { # NODE SINCE → the unique addresses the node sent a TCP SYN to since SINCE
+    jq -r --argjson s "$2" 'select(.k == "syn" and .t >= $s) | .dst' "$G8_WORK/pkt-$1.jsonl" 2>/dev/null | sort -u | tr '\n' ' ' | sed 's/ $//'
+  }
   dials() { # NODE SINCE → the unique addresses the node tried to reach since SINCE: every TCP SYN and every ARP who-has
     jq -r --argjson s "$2" 'select((.k == "syn" or .k == "arp") and .t >= $s) | .dst' "$G8_WORK/pkt-$1.jsonl" 2>/dev/null | sort -u | tr '\n' ' ' | sed 's/ $//'
   }
@@ -1203,17 +1213,33 @@ inner() {
   dm2=$(dials M2 "$tl0")
   allowed1="${NIP[H]} $MOVED_IP ${NIP[M2]}"
   allowed2="${NIP[H]} ${NIP[M1]}"
+  # an ARP who-has, and no SYN in this window, for an address that had dialed in to the node (an inbound SYN earlier in the run) is the
+  # reply path of a connection that peer opened, not a dial: renumbered to 10.111.78.112 in phase 12, M2 dials its peer M1 through M1's relay,
+  # and once that address is gone the relay socket's retransmits keep M1's kernel asking who has it for minutes
+  local in1 in2 sn1 sn2 rep1="" rep2="" nd1 nd2
+  in1=$(dialed_in M1)
+  in2=$(dialed_in M2)
+  sn1=$(syn_to M1 "$tl0")
+  sn2=$(syn_to M2 "$tl0")
   odd=""
-  for x in $dm1; do [[ " $allowed1 " == *" $x "* ]] || odd="$odd M1→$x"; done
-  for x in $dm2; do [[ " $allowed2 " == *" $x "* ]] || odd="$odd M2→$x"; done
-  t "egress: M1 reached out only to addresses it was given — ${NIP[H]} (its enrolment), $MOVED_IP (the DNS-SD record of its hub) and ${NIP[M2]} (its peer): [$dm1]; M2 only to ${NIP[H]} and ${NIP[M1]}: [$dm2]; anything else: [${odd# }]" \
+  for x in $dm1; do
+    [[ " $allowed1 " == *" $x "* ]] && continue
+    if [[ " $in1 " == *" $x "* ]] && [[ " $sn1 " != *" $x "* ]]; then rep1="$rep1 $x"; else odd="$odd M1→$x"; fi
+  done
+  for x in $dm2; do
+    [[ " $allowed2 " == *" $x "* ]] && continue
+    if [[ " $in2 " == *" $x "* ]] && [[ " $sn2 " != *" $x "* ]]; then rep2="$rep2 $x"; else odd="$odd M2→$x"; fi
+  done
+  nd1=$(( $(printf '%s\n' $dm1 | grep -c .) - $(printf '%s\n' $rep1 | grep -c .) ))
+  nd2=$(( $(printf '%s\n' $dm2 | grep -c .) - $(printf '%s\n' $rep2 | grep -c .) ))
+  t "egress: M1 reached out only to addresses it was given — ${NIP[H]} (its enrolment), $MOVED_IP (the DNS-SD record of its hub) and ${NIP[M2]} (its peer): [$dm1]; M2 only to ${NIP[H]} and ${NIP[M1]}: [$dm2]; anything else: [${odd# }]; ARP only to an address that had dialed in (a reply path, not a dial): M1 [${rep1# }], M2 [${rep2# }]" \
     '[ -z "$odd" ] && [[ " $dm1 " == *" $MOVED_IP "* ]] && [[ " $dm1 " == *" ${NIP[H]} "* ]] && [[ " $dm2 " == *" ${NIP[H]} "* ]]'
   sy1=$(syns M1 "$tl0")
   odd=""
   for x in $sy1; do [[ " ${NIP[H]}:$L7_PORT_FABRIC $MOVED_IP:$L7_PORT_FABRIC ${NIP[M2]}:$RELAY_PORT " == *" $x "* ]] || odd="$odd $x"; done
   t "egress by port: M1's TCP SYNs went only to H's two addresses on $L7_PORT_FABRIC and its peer ${NIP[M2]}:$RELAY_PORT, and not to the registry hit of M2 (${NIP[M2]}:$L7_PORT_FABRIC): [$sy1], anything else: [${odd# }]" \
     '[ -z "$odd" ] && [[ " $sy1 " == *" $MOVED_IP:$L7_PORT_FABRIC "* ]]'
-  t "…no sweep of the /24: $(printf '%s\n' $dm1 | wc -l) distinct addresses for M1, $(printf '%s\n' $dm2 | wc -l) for M2" '[ "$(printf "%s\n" $dm1 | wc -l)" -le 3 ] && [ "$(printf "%s\n" $dm2 | wc -l)" -le 2 ]'
+  t "…no sweep of the /24: $nd1 distinct addresses dialed by M1, $nd2 by M2 (reply paths left out)" '[ "$nd1" -le 3 ] && [ "$nd2" -le 2 ]'
   # the negative control of the egress check: one deliberate dial to an address nobody was given is caught
   local tn
   tn=$(now)
@@ -1252,6 +1278,9 @@ if [ "${1:-}" = --inner ]; then
   inner
   exit 0
 fi
+# a bash error inside `inner` (under set -u, a bad subscript) aborts the `if` above and lands here:
+# end the inner run instead of falling through into the outer part, which would unshare again
+[ "${1:-}" = --inner ] && { echo "FAIL: the inner run stopped on a shell error"; exit 1; }
 
 if [ "${REQUIRE_G8:-0}" = 1 ]; then
   for k in G8_UNTIL G8_SKIP_CARGO G8_REARM_WIN G8_REARM_EW G8_SETTLE_MAX G8_DIAG; do
@@ -1365,8 +1394,12 @@ else
   cargo_rc=0
   (cd 1-bootstrap && env -u TMPDIR CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=2 cargo test -p node111 --lib -- --nocapture relay::presence \
     $MT::the_real_daemon_reads_zero_after_the_bind_and_after_each_event $MT::a_real_address_change_changes_the_a_records_through_the_re_arm) >"$CARGO_LOG" 2>&1 || cargo_rc=$?
+  # the registry's real-daemon namespace tests (row D8 follow-up): they print SKIPPED where the box has no namespace
+  RT=an_update_of_the_record_renames_nothing_on_a_real_daemon
+  RA=a_renamed_host_stays_bounded_and_truthful_on_the_real_announcer
+  (cd 1-bootstrap && env -u TMPDIR CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=2 cargo test -p node111 --test registry_mdns -- --nocapture $RT $RA) >>"$CARGO_LOG" 2>&1 || cargo_rc=$?
   for tn in relay::presence::tests::the_bans_apply_after_the_transport_check relay::presence::tests::every_v1_heartbeat_write_is_refused_by_transport \
-    $MT::the_real_daemon_reads_zero_after_the_bind_and_after_each_event $MT::a_real_address_change_changes_the_a_records_through_the_re_arm; do
+    $MT::the_real_daemon_reads_zero_after_the_bind_and_after_each_event $MT::a_real_address_change_changes_the_a_records_through_the_re_arm $RT $RA; do
     if grep -q "$tn ... ok" "$CARGO_LOG"; then
       ok "unit test $tn passes"
     else
@@ -1374,10 +1407,10 @@ else
     fi
   done
   if grep -q '^SKIPPED' "$CARGO_LOG"; then
-    note "a re-arm lib test printed SKIPPED: $(grep -m2 '^SKIPPED' "$CARGO_LOG" | tr '\n' ' ')"
-    [ "${REQUIRE_G8:-0}" = 1 ] && fail "REQUIRE_G8=1 and a re-arm lib test skipped itself (the box lacks mDNS or a network namespace)"
+    note "a re-arm or registry namespace test printed SKIPPED: $(grep -m2 '^SKIPPED' "$CARGO_LOG" | tr '\n' ' ')"
+    [ "${REQUIRE_G8:-0}" = 1 ] && fail "REQUIRE_G8=1 and a re-arm or registry namespace test skipped itself (the box lacks mDNS or a network namespace)"
   fi
-  if [ "$cargo_rc" = 0 ] && grep -qE '^test result: ok\.' "$CARGO_LOG"; then
+  if [ "$cargo_rc" = 0 ] && grep -qE '^test result: ok\.' "$CARGO_LOG" && ! grep -qE '^test result: FAILED' "$CARGO_LOG"; then
     ok "cargo test exit 0: $(grep -E '^test result' "$CARGO_LOG" | head -1)"
   else
     fail "cargo test exit $cargo_rc: $(grep -E '^test result|^failures:|FAILED' "$CARGO_LOG" | head -4 | tr '\n' ' ')"

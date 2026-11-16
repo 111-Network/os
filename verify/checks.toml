@@ -1227,6 +1227,29 @@ covered_by = "l1.gate"
 strength = "C"
 needs = ["cargo"]
 
+# Layer 8 row D2, the node-state store (8-storage/README.md §2.2; G13 (1) and (13)): node/state.db on a scratch root through
+# its public handle: node/ 0700 and its files 0600, the key through KeyProvider::key_for("111/node-state/v1") (the
+# layer8/node-state-kdf.json vector), a plaintext file and a wrong key refused with the file untouched, opened on use and
+# closed on the first idle pass (a held turn keeps it open across passes), a read-only open that leaves state.db and its
+# WAL unchanged, a non-empty WAL as the unclean signal, a newer user_version unavailable with its reason, and the daemon's
+# start keying it from its identity with no fabric, closed by the real housekeeping pass (housekeeping.rs, side a of
+# L1-L8:state-service). Real SQLCipher stores and a real id111 identity, no fake: strength I.
+[[check]]
+id = "l1.node111.node_state"
+kind = "unit"
+cmd = ["cargo", "test", "--manifest-path", "1-bootstrap/Cargo.toml", "-p", "node111", "--test", "node_state"]
+tier = "slow"
+layers = [1, 8]
+seams = ["L1-L8:state-service", "L2-L8:dataset-signing"]
+adapter = "libtest"
+cargo = true
+timeout_s = 1800
+rerun = "cargo test --manifest-path 1-bootstrap/Cargo.toml -p node111 --test node_state -- --exact {test}"
+rerun_cost = "slow, ~20 s warm"
+covered_by = "l1.gate"
+strength = "I"
+needs = ["cargo"]
+
 # THE node111 --lib TESTS, SPLIT BY MODULE PATH. One `cargo test -p node111 --lib` runs them all (in a gate run too: l1.gate's
 # one cargo test prints them under the single binary `unittests src/lib.rs`), and the libtest adapter gives each test to
 # the unit whose filter (a substring of the test's path, the longest wins) it contains, and to the unit with no filter when
@@ -2748,9 +2771,17 @@ rerun_cost = "ns, about 11 min (three daemons, a settle wait of about 2.5 min be
 strength = "R"
 needs = ["bash", "userns", "netns", "python3", "ip", "nsenter", "curl", "jq", "cargo", "gcc"]
 
-# G9 cross-hub custody over TEST-NET-1 with TLS. Row V3. Needs the tag checkpoint-layer-6 (absent).
-# A T0 stub: it prints '<G> SKIPPED: not built yet (T0 stub)' and exits 0 (7-relay/TASKS.md row V3). Strength N
-# until the row lands; promote it to R then (and to cargo = true if the gate builds).
+# G9 cross-hub custody forward (row V3): eight network namespaces (hubs A, B, C on TEST-NET-1 so §4.1 rule 1 puts every hub link in
+# TLS 1.3 raw public keys; members M, M2 of A and D, D2 of B; E held by nobody), a real `111 daemon` in each, one AF_PACKET tap on every
+# veth: no pairing (REJECT_UNKNOWN_DEST, the committed tape of the frames), the hint (the 11 B TLV as a put length, `relayed` with
+# `forwarding`, the held row as a pending count, the commit, one delivery, the ACK back), no hint (the ACK before a probe's answer, the
+# probe order, the cache), every pair refusing (forward_refused, a down pair, the per-origin share), loops and the role matrix, a restart
+# with a protected row (an nft bridge rule drops B -> A: B deduplicates), a test-sized Transit quota, REJECT_FULL retried on the next run
+# and on the next attribution, a Layer 6 build as hub B (the hint TLV skipped; its frames equal the tape), a non-hub holding a
+# paired_hubs row dials nothing, a deleted fabric/settings, a half pair, nothing in clear on the TEST-NET veth (with a positive
+# control), the records. The old hub is built from G9_OLD_REV (default checkpoint-layer-6; the lead sets 561cb5e) with its own cargo
+# target dir: that part is SKIPPED without the revision (FAIL under REQUIRE_G9=1). SKIPPED without a user+net+pid namespace, a built `111`
+# (BIN111 or CARGO_TARGET_DIR), python3, ip, nsenter, curl, jq, nft, ss or git (FAIL under REQUIRE_G9=1).
 [[check]]
 id = "l7.g9"
 kind = "unit"
@@ -2760,14 +2791,18 @@ layers = [7]
 seams = ["L5-L7:forwarder-handoff", "L5-L7:pair-gate"]
 adapter = "okfail"
 lock = "verify"
-timeout_s = 1800
-rerun_cost = "ns, T0 stub: SKIPPED today"
-strength = "N"
-needs = ["bash"]
+timeout_s = 2400
+rerun_cost = "ns, about 7 min (eight daemons, restarts of hubs with the redial back-off, two 60 s idle windows; a first cargo build of the Layer 6 hub adds about 4 min on 2 jobs; needs a built 111)"
+strength = "R"
+needs = ["bash", "userns", "netns", "python3", "ip", "nsenter", "curl", "jq", "nft", "ss", "git", "cargo"]
 
 # G10 the ntfy carrier through stub-ntfy.py in five namespaces. Row V4 (--smoke is l7.g10-smoke).
-# A T0 stub: it prints '<G> SKIPPED: not built yet (T0 stub)' and exits 0 (7-relay/TASKS.md row V4). Strength N
-# until the row lands; promote it to R then (and to cargo = true if the gate builds).
+# Two real `111 daemon` gateways G and G' (each with a member) in a user + net + pid namespace; the stub in a fifth netns; after the
+# one-off enrolment the two gateway ports are isolated on the bridge, so the stub is the only path. 5A (no request until an event; the
+# drain-post-drain on a Forward event, a route event and Flush now; idle afterwards), the commit on the far ack only, 5B (one stream, one
+# thread, a stub restart), re-posts counted, a dropped ack healed, 4,096 B / 2,937 B / 413 / 429, a third client, the metered cap, the
+# switch off under strace. NTFY_BIN (a real ntfy) is absent: its items are SKIPPED, REQUIRE_NTFY=1 makes that a FAIL. Writes
+# 7-relay/verify/logs/ntfy-smoke-<calver>-stub.md (a tracked file). Needs a built 111 (BIN111 or CARGO_TARGET_DIR).
 [[check]]
 id = "l7.g10"
 kind = "unit"
@@ -2778,9 +2813,9 @@ seams = ["L1-L7:carrier-ntfy", "L5-L7:forwarder-handoff"]
 adapter = "okfail"
 lock = "verify"
 timeout_s = 1800
-rerun_cost = "ns, T0 stub: SKIPPED today"
-strength = "N"
-needs = ["bash"]
+rerun_cost = "ns, about 8 min (four daemons, enrolment and pairing, a netlink debounce of 2 s after each route event, the 5B phase, the strace windows; needs a built 111)"
+strength = "R"
+needs = ["bash", "userns", "netns", "python3", "ip", "nsenter", "curl", "jq", "ss", "strace"]
 
 # G11 TLS 1.3 raw public keys between two hubs. Row V5.
 # Four real `111 daemon`s (X and Y the pair, Z a plain member, Q a third hub) in network namespaces on TEST-NET-3
