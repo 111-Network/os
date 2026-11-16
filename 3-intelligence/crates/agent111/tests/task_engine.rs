@@ -331,6 +331,18 @@ fn patch_delegates_to_opencode_with_scrubbed_env() {
             [
                 "PATH",
                 "HOME",
+                // Layer 9 §8.1 (row A1): the child's own home, temp dir and switches
+                "XDG_CONFIG_HOME",
+                "XDG_DATA_HOME",
+                "XDG_CACHE_HOME",
+                "XDG_STATE_HOME",
+                "TMPDIR",
+                "OPENCODE_DISABLE_MODELS_FETCH",
+                "OPENCODE_DISABLE_AUTOUPDATE",
+                "OPENCODE_DISABLE_LSP_DOWNLOAD",
+                "OPENCODE_DISABLE_CLAUDE_CODE",
+                "OPENCODE_DISABLE_EXTERNAL_SKILLS",
+                "npm_config_offline",
                 "OPENAI_BASE_URL",
                 "OPENAI_API_KEY",
                 "PWD",

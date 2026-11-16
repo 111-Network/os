@@ -1712,6 +1712,25 @@ covered_by = "l3.gate"
 strength = "F"
 needs = ["cargo"]
 
+# Layer 9 row A1, the containment correction (9-evolution/README.md §8.1; G24 (1) in the crate): a patch task's opencode.json
+# parses equal to the deny block, the child's HOME, four XDG directories and TMPDIR are inside the task's work dir, the five
+# OPENCODE_DISABLE_* switches are 1 and npm is offline, no auto-approve switch is in its argv. A recorder script stands in for opencode, hence
+# strength F. No seam yet: L3-L9:code-drafts arrives with Layer 9's T0 (planned); layers = [3, 9] so a Layer 9 run plans it.
+[[check]]
+id = "l3.agent111.opencode_config"
+kind = "unit"
+cmd = ["cargo", "test", "--manifest-path", "3-intelligence/Cargo.toml", "-p", "agent111", "--test", "opencode_config"]
+tier = "slow"
+layers = [3, 9]
+adapter = "libtest"
+cargo = true
+timeout_s = 1800
+rerun = "cargo test --manifest-path 3-intelligence/Cargo.toml -p agent111 --test opencode_config -- --exact {test}"
+rerun_cost = "slow, ~20 s warm"
+covered_by = "l3.gate"
+strength = "F"
+needs = ["cargo"]
+
 # The in-crate agent111 tests (config.rs, health.rs, status.rs, http.rs, tasks.rs, tools.rs, model.rs): pure functions
 # of the agent's own side, no peer and no fake, hence strength C. They are what a targeted run of L1-L3:env-precedence,
 # L3-L7:offload, L1-L3:health-restart or L3-L6:l6-tools reaches on the agent side besides the integration tests:
