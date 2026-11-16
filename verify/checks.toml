@@ -733,6 +733,29 @@ covered_by = "l1.gate"
 strength = "F"
 needs = ["cargo"]
 
+# Layer 9 row L1 (9-evolution/README.md §3.3 rules 2 and 4; G19 (3), the witness half): `111 heal-witness`, the hidden
+# verb the unit's ExecStopPost= runs after each daemon exit, run as the real binary on a temp NODE111_ROOT with systemd's
+# SERVICE_RESULT, EXIT_CODE and EXIT_STATUS standing in for the service manager: a signal name written as its number
+# (KILL => signal=9), result=exit-code code=75 as such, an unknown name as -, 300 runs leave the newest 256 lines (0600,
+# no temp file left), every line <= 96 B of the grammar with each field at its maximum and with hostile values,
+# state/heal/ missing => exit 0 and no file, absent from the usage text. 111d's side (the inbox folded at start) is row
+# D12's, which adds its cases to this file; until then the service manager's side is a stand-in, so strength F.
+[[check]]
+id = "l1.node111.heal_witness"
+kind = "unit"
+cmd = ["cargo", "test", "--manifest-path", "1-bootstrap/Cargo.toml", "-p", "node111", "--test", "heal_witness"]
+tier = "slow"
+layers = [1, 9]
+seams = ["L1-L9:observer-change-engine"]
+adapter = "libtest"
+cargo = true
+timeout_s = 1800
+rerun = "cargo test --manifest-path 1-bootstrap/Cargo.toml -p node111 --test heal_witness -- --exact {test}"
+rerun_cost = "slow, ~20 s warm"
+covered_by = "l1.gate"
+strength = "F"
+needs = ["cargo"]
+
 [[check]]
 id = "l1.node111.helper_guard"
 kind = "unit"

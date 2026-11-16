@@ -84,6 +84,10 @@ enum Cmd {
     /// `111 update --from <dir|url>` (Layer 7 §9.2, T5; row L4): a oneshot as the
     /// node user that checks that one origin and stages into `state/staging/`.
     UpdateFrom(crate::daemon::updater::fetch::Origin),
+    /// Hidden (not in USAGE; Layer 9 §3.3 rule 2, row L1): the unit's
+    /// `ExecStopPost=` runs it after each daemon exit; exits 0 on every error,
+    /// extra arguments ignored.
+    HealWitness,
     Version,
     Help,
 }
@@ -196,6 +200,7 @@ fn parse(args: &[String]) -> anyhow::Result<Cmd> {
         },
         "update-helper" => Cmd::UpdateHelper,
         "update-guard" => Cmd::UpdateGuard,
+        "heal-witness" => Cmd::HealWitness,
         "--version" | "-V" | "version" => Cmd::Version,
         "--help" | "-h" | "help" => Cmd::Help,
         other => anyhow::bail!("unknown subcommand {other:?} (try `111 help`)"),
@@ -265,6 +270,7 @@ pub fn main_entry(args: Vec<String>) -> i32 {
         Cmd::UpdateFrom(_) => unreachable!("handled above"),
         Cmd::UpdateHelper => crate::update_helper::run(),
         Cmd::UpdateGuard => crate::update_guard::run(),
+        Cmd::HealWitness => return crate::heal_witness::run(),
     };
     match result {
         Ok(()) => 0,
@@ -806,6 +812,18 @@ mod tests {
             .find("discard_link_key_after_restore(")
             .expect("identity_restore discards the link key");
         assert!(restored < discarded, "after the restore, not before");
+    }
+
+    /// Layer 9 §3.3 rule 2 (row L1): `heal-witness` is routed, with any
+    /// trailing arguments (it never fails the unit), and absent from USAGE.
+    #[test]
+    fn heal_witness_is_a_hidden_verb() {
+        for argv in [&["heal-witness"][..], &["heal-witness", "extra", "--x"]] {
+            let argv: Vec<String> = argv.iter().map(|s| s.to_string()).collect();
+            assert!(matches!(parse(&argv), Ok(Cmd::HealWitness)), "{argv:?}");
+        }
+        assert!(!USAGE.contains("heal-witness"));
+        assert!(!USAGE.contains("witness"));
     }
 
     #[test]
