@@ -603,6 +603,27 @@ covered_by = "l1.gate"
 strength = "F"
 needs = ["cargo"]
 
+# Row D11: the carrier on the forwarder (§3.1, §3.2, §5.9, §6.1, §6.2, §12) against the stdlib stub ntfy: real hubs paired through
+# the carrier with a member at each, the stub's request log read per topic. Nothing built while a switch is off; drain, post, drain on
+# a Forward event; commit on the far ack only; an ack posted once; the carrier bound set on build and cleared on teardown; the re-post
+# rule (never on a flush, Flush now, a since miss); 413 and 429; the metered stop; the licensed refusal; a foreign frame dropped and
+# counted; 5B on its one named thread. Both ends are real, so strength I.
+[[check]]
+id = "l1.node111.carrier_flow"
+kind = "unit"
+cmd = ["cargo", "test", "--manifest-path", "1-bootstrap/Cargo.toml", "-p", "node111", "--test", "carrier_flow"]
+tier = "slow"
+layers = [1, 5, 7]
+seams = ["L5-L7:forwarder-handoff", "L1-L7:carrier-ntfy"]
+adapter = "libtest"
+cargo = true
+timeout_s = 1800
+rerun = "cargo test --manifest-path 1-bootstrap/Cargo.toml -p node111 --test carrier_flow -- --exact {test}"
+rerun_cost = "slow, ~15 s warm"
+covered_by = "l1.gate"
+strength = "I"
+needs = ["cargo"]
+
 [[check]]
 id = "l1.node111.categorize_table"
 kind = "unit"

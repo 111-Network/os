@@ -9,9 +9,11 @@
 //!   `ApiState` ext. It reads `state/relay.json` once (row D1, into the settings cell of the
 //!   `/relay` routes, row D10) and builds only what a switch turned on: the presence book (no
 //!   switch, nothing spawned; D2), the registry's record (D8), the `gateway` row's facts (only
-//!   once a gateway or carrier is configured; D3), the carrier hook ([`CarrierHook`]; D11 replaces
-//!   the no-op one), and the binding of the `relay` frame ([`changed`]). Nothing is spawned,
-//!   scheduled, bound or subscribed by D10's part of it.
+//!   once a gateway or carrier is configured; D3), the carrier hook ([`CarrierHook`]: row D11's
+//!   [`crate::daemon::carrier::CarrierRuntime`], registered here unless a hook is registered
+//!   already; it builds the carrier only while its switches hold), and the binding of the
+//!   `relay` frame ([`changed`]). Nothing is spawned, scheduled, bound or subscribed while every
+//!   switch is off.
 //! - [`tap`]: hands each fabric event to the presence (§2.1, D2) and gateway (§3.5, D3) consumers
 //!   and to the `relay` frame (§13.1, D10). It is called from the fabric's fan-out (Message,
 //!   Contact, Fabric and Forward events, `FabricHandle::publish`); each consumer returns at once
@@ -21,8 +23,9 @@
 //!   `RelayStatus` frame (§13.1). No timer: a frame is built only when something calls this or a
 //!   fabric event moved the pair set.
 //! - [`carrier_hook`]: the seam the `/relay/carrier/check` and `/flush` routes and the relay
-//!   proposals hand to (§13.1). Until row D11 registers the carrier's own hook, the registered
-//!   [`NoopCarrier`] records each request and starts nothing.
+//!   proposals hand to (§13.1): the carrier runtime [`start`] registers (row D11), else the
+//!   [`NoopCarrier`] (an `ApiState` used without [`start`]: it records each request and starts
+//!   nothing).
 
 pub mod consent;
 pub mod gateway;
@@ -57,7 +60,9 @@ pub fn start(api: &Arc<ApiState>, fabric: &Arc<FabricHandle>) {
     crate::daemon::registry::install(api, fabric);
     // §3.5 (D3): the `gateway` row's switches; nothing is constructed while none is on.
     gateway::apply(fabric, &s);
-    // §6.1–§6.2 (D11): the carrier is built here by its hook, only while its switches hold.
+    // §6.1–§6.2 (D11): the carrier runtime as the hook (unless one is registered already); it
+    // builds the carrier only while its switches hold.
+    crate::daemon::carrier::install(api, fabric);
     carrier_hook(api).reconfigure(&s);
     // §13.1 (D10): the `relay` frame follows this daemon's fabric (no task until a change).
     relay7::bind(api, fabric);
@@ -85,10 +90,10 @@ pub fn changed() {
 
 /// What the carrier routes and the relay proposals hand to (§13.1 `POST /relay/carrier/check`,
 /// `/flush`; §13.2 `carrier.flush {}`), and what the status reads of the carrier's budget (§12).
-/// Row D11 registers its implementation in `ApiState` ext (`Arc<dyn CarrierHook>`, inserted
-/// before [`start`] or replacing the no-op one); the routes have already refused the request when
-/// no carrier is configured, its `carrier_enable` consent is not the one owed now, the metered cap
-/// is reached ([`CarrierHook::metered_cap_reached`]) or a licensed board would carry it
+/// Row D11's [`crate::daemon::carrier::CarrierRuntime`] is registered in `ApiState` ext
+/// (`Arc<dyn CarrierHook>`) by [`start`] unless a hook was inserted before; the routes have
+/// already refused the request when no carrier is configured, its `carrier_enable` consent is
+/// not the one owed now, the metered cap is reached ([`CarrierHook::metered_cap_reached`]) or a licensed board would carry it
 /// ([`CarrierHook::licensed_board`]).
 pub trait CarrierHook: Send + Sync {
     /// The relay settings at [`start`] and after every write of them: build, rebuild or tear down
@@ -105,9 +110,9 @@ pub trait CarrierHook: Send + Sync {
     fn licensed_board(&self) -> bool;
 }
 
-/// The hook registered until row D11 lands: it records each request (a count) and starts nothing,
-/// so `check` and `flush` answer `202` with `started: false`. No cap is ever reached and no board
-/// is licensed: v1 has no sealed LoRa path (§12), and the metered budget is D11's.
+/// The hook of an `ApiState` used without [`start`] (and of tests): it records each request (a
+/// count) and starts nothing, so `check` and `flush` answer `202` with `started: false`. No cap
+/// is ever reached and no board is licensed.
 #[derive(Debug, Default)]
 pub struct NoopCarrier {
     checks: AtomicU64,
@@ -150,8 +155,8 @@ impl CarrierHook for NoopCarrier {
     }
 }
 
-/// The registered carrier hook (`ApiState` ext `Arc<dyn CarrierHook>`), the no-op one
-/// ([`NoopCarrier`]) inserted at the first use when none is registered.
+/// The registered carrier hook (`ApiState` ext `Arc<dyn CarrierHook>`): the carrier runtime
+/// [`start`] registered, else the no-op one ([`NoopCarrier`]) inserted at the first use.
 pub fn carrier_hook(api: &ApiState) -> Arc<dyn CarrierHook> {
     api.ext_or_insert_with(|| Arc::new(NoopCarrier::default()) as Arc<dyn CarrierHook>)
 }

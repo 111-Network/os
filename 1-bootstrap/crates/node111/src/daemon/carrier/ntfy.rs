@@ -21,9 +21,10 @@
 //! - **Outcomes** (§5.9): 2xx ⇒ `Taken`; 413, 401, 403 ⇒ `Rejected`; 429, 5xx, no route ⇒ `Retry`;
 //!   a status §5.9 does not name ⇒ `Rejected` (fail closed: the row returns, never dropped).
 //!
-//! The §5.9 re-post rule, the consent record, the metered budget and the licensed-board rule
-//! (§6.1 rule 6, §12) are D11's; [`NtfyCarrier::flush_5a`] is the §6.2 5A order (drain, post,
-//! drain, stop) over a [`HandOff`], the prototype's smoke sequence. Nothing here is built while
+//! The §5.9 re-post triggers, the consent record, the metered budget and the licensed-board rule
+//! (§6.1 rule 6, §12) are the daemon's runtime in [`super`] (row D11), which also counts
+//! [`NtfyStats::wire_bytes`] against the metered window; [`NtfyCarrier::flush_5a`] is the §6.2 5A
+//! order (drain, post, drain, stop) over a [`HandOff`], the prototype's smoke sequence. Nothing here is built while
 //! `carrier.kind = "none"` (§6.3): this module holds no static state, starts nothing at load, and
 //! an [`NtfyCarrier`] opens no socket, thread or file until one of its calls runs.
 
@@ -98,6 +99,10 @@ const BACKOFF_MAX: Duration = Duration::from_secs(60);
 const HOLD_QUEUE: usize = 16;
 /// Request records kept when [`NtfyConfig::trace`] is on (the smoke log's instrument).
 const TRACE_CAP: usize = 64;
+/// The request header bytes ureq adds that this module does not see (`Host`, `User-Agent`,
+/// `Accept`, `Accept-Encoding`, `Content-Length`, the line ends): a fixed estimate for the
+/// metered count (§12), on the high side.
+pub const REQUEST_HEAD_EXTRA: u64 = 160;
 
 // ---------------------------------------------------------------- topics (§6.2 "Topic")
 
@@ -658,7 +663,8 @@ impl NtfyConfig {
 pub struct RequestRecord {
     /// `POST` or `GET`.
     pub method: &'static str,
-    /// `publish`, `poll` (5A drain) or `stream` (5B; latency to the response head).
+    /// `publish`, `poll` (5A drain), `stream` (5B; latency to the response head) or `health`
+    /// (the check with no pair, row D11).
     pub kind: &'static str,
     /// The HTTP status, `None` when no answer came (no route, timeout).
     pub status: Option<u16>,
@@ -695,6 +701,11 @@ pub struct NtfyStats {
     pub keepalive_gap_ms: u64,
     /// 5B connections opened after the first.
     pub reconnects: u64,
+    /// Carrier bytes both ways (§12 metered budget): request lines and headers as sent (the
+    /// fixed headers ureq adds estimated at [`REQUEST_HEAD_EXTRA`]), request bodies, response
+    /// status lines, headers and the body bytes read; for 5B every streamed line. Counted for
+    /// failed requests too (fail closed).
+    pub wire_bytes: u64,
 }
 
 #[derive(Default)]
@@ -709,6 +720,7 @@ struct Counters {
     keepalives: AtomicU64,
     keepalive_gap_ms: AtomicU64,
     reconnects: AtomicU64,
+    wire_bytes: AtomicU64,
 }
 
 fn bump(c: &AtomicU64, by: u64) {
@@ -737,6 +749,21 @@ struct Inner {
     trace: Option<Mutex<VecDeque<RequestRecord>>>,
     /// The 5B thread is alive.
     holding: AtomicBool,
+    /// Woken when the 5B thread ends ([`NtfyCarrier::released`]).
+    released: tokio::sync::Notify,
+    /// The 5B thread stops once [`NtfyStats::wire_bytes`] reaches this (§12: the metered budget
+    /// the daemon has left; `u64::MAX`: none).
+    wire_limit: AtomicU64,
+}
+
+/// What the 5B held stream of [`NtfyCarrier::hold_owned`] yields besides errors.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HoldEvent {
+    /// A connection was opened and the server answered 2xx: a check that succeeded (§3.2 (b),
+    /// a held stream's reconnect is a check).
+    Opened,
+    /// One sealed frame, for [`HandOff::carrier_inbound`].
+    Frame(Vec<u8>),
 }
 
 /// The ntfy carrier (§6.2). One per configured server; it serves every `carrier` pair, each by its
@@ -814,6 +841,8 @@ impl NtfyCarrier {
                 counters: Counters::default(),
                 trace: cfg.trace.then(|| Mutex::new(VecDeque::new())),
                 holding: AtomicBool::new(false),
+                released: tokio::sync::Notify::new(),
+                wire_limit: AtomicU64::new(u64::MAX),
             }),
         })
     }
@@ -878,6 +907,7 @@ impl NtfyCarrier {
             keepalives: g(&c.keepalives),
             keepalive_gap_ms: g(&c.keepalive_gap_ms),
             reconnects: g(&c.reconnects),
+            wire_bytes: g(&c.wire_bytes),
         }
     }
 
@@ -896,6 +926,38 @@ impl NtfyCarrier {
     /// within one keepalive interval of the stream's drop, at once while it waits to reconnect).
     pub fn holding(&self) -> bool {
         self.inner.holding.load(Ordering::Acquire)
+    }
+
+    /// Waits until the 5B thread has ended (at once when none runs): a new hold after a dropped
+    /// one starts only then (one held stream per carrier).
+    pub async fn released(&self) {
+        while self.holding() {
+            self.inner.released.notified().await;
+        }
+    }
+
+    /// The 5B thread stops (and its stream ends with `Err(Retry)`) once
+    /// [`NtfyStats::wire_bytes`] reaches `limit` (§12; the daemon sets it from the metered budget
+    /// left; `u64::MAX`: no limit). Checked before every connect and after every line read.
+    pub fn set_wire_limit(&self, limit: u64) {
+        self.inner.wire_limit.store(limit, Ordering::Release);
+    }
+
+    /// The server's health route, `GET <server>/v1/health` (one request, in `spawn_blocking`):
+    /// the §3.2 check when no `carrier` pair is paired yet (a pair's check is its drain). `Ok`
+    /// for a 2xx; the status mapping of §5.9 otherwise. Counted in [`NtfyStats::wire_bytes`].
+    pub async fn health(&self) -> Result<(), CarrierError> {
+        let inner = self.inner.clone();
+        tokio::task::spawn_blocking(move || inner.health_blocking())
+            .await
+            .map_err(join_error)?
+    }
+
+    /// The 5B held stream of `pair`'s inbound topic as an owned stream (the daemon's driver holds
+    /// it across awaits): [`Carrier::hold`] without the borrow, and with [`HoldEvent::Opened`]
+    /// after every connection the server accepted (§3.2 (b)).
+    pub fn hold_owned(&self, pair: &Pair) -> BoxStream<'static, Result<HoldEvent, CarrierError>> {
+        hold_stream(self.inner.clone(), inbound_topic(pair))
     }
 
     /// One 5A drain of `pair` handed to the fabric (§6.2 "Drain"): a `since` miss reads again
@@ -995,6 +1057,23 @@ fn base_config() -> ureq::config::ConfigBuilder<ureq::typestate::AgentScope> {
         .max_idle_connections_per_host(0)
 }
 
+/// The bytes of a request's line and headers (§12 metered count): `METHOD url HTTP/1.1`, the
+/// token header when set, and [`REQUEST_HEAD_EXTRA`].
+fn request_head_bytes(method: &str, url: &str, auth: Option<&Zeroizing<String>>) -> u64 {
+    let auth = auth.map_or(0, |a| "Authorization: ".len() + a.len() + 2);
+    (method.len() + 1 + url.len() + 11 + auth) as u64 + REQUEST_HEAD_EXTRA
+}
+
+/// The bytes of a response's status line and headers as received (§12 metered count).
+fn response_head_bytes<B>(resp: &ureq::http::Response<B>) -> u64 {
+    let headers: usize = resp
+        .headers()
+        .iter()
+        .map(|(k, v)| k.as_str().len() + 2 + v.as_bytes().len() + 2)
+        .sum();
+    (17 + headers + 2) as u64
+}
+
 impl Inner {
     fn with_cursor<T>(&self, topic: &str, f: impl FnOnce(&mut Cursor) -> T) -> T {
         let mut map = self.cursors.lock().unwrap_or_else(|p| p.into_inner());
@@ -1052,9 +1131,14 @@ impl Inner {
         if let Some(a) = &self.auth {
             req = req.header("Authorization", a.as_str());
         }
+        bump(
+            &self.counters.wire_bytes,
+            request_head_bytes("POST", &url, self.auth.as_ref()) + body.len() as u64 + 26,
+        );
         match req.send(body) {
             Ok(mut resp) => {
                 let status = resp.status().as_u16();
+                bump(&self.counters.wire_bytes, response_head_bytes(&resp));
                 let received = resp
                     .body_mut()
                     .with_config()
@@ -1062,6 +1146,7 @@ impl Inner {
                     .read_to_vec()
                     .map(|v| v.len())
                     .unwrap_or(0);
+                bump(&self.counters.wire_bytes, received as u64);
                 self.record(RequestRecord {
                     method: "POST",
                     kind: "publish",
@@ -1113,6 +1198,54 @@ impl Inner {
         out
     }
 
+    /// `GET <server>/v1/health` (blocking), the answer read capped and discarded.
+    fn health_blocking(&self) -> Result<(), CarrierError> {
+        let url = format!("{}/v1/health", self.server);
+        let started = Instant::now();
+        bump(
+            &self.counters.wire_bytes,
+            request_head_bytes("GET", &url, self.auth.as_ref()),
+        );
+        let mut resp = match self.get(&self.agent, &url) {
+            Ok(r) => r,
+            Err(e) => {
+                self.record(RequestRecord {
+                    method: "GET",
+                    kind: "health",
+                    status: None,
+                    sent: 0,
+                    received: 0,
+                    latency: started.elapsed(),
+                    error: Some(e.to_string()),
+                });
+                return Err(CarrierError::Retry(format!("ntfy: health: {e}")));
+            }
+        };
+        let status = resp.status().as_u16();
+        bump(&self.counters.wire_bytes, response_head_bytes(&resp));
+        let received = resp
+            .body_mut()
+            .with_config()
+            .limit(MAX_PUBLISH_ANSWER)
+            .read_to_vec()
+            .map(|v| v.len())
+            .unwrap_or(0);
+        bump(&self.counters.wire_bytes, received as u64);
+        self.record(RequestRecord {
+            method: "GET",
+            kind: "health",
+            status: Some(status),
+            sent: 0,
+            received,
+            latency: started.elapsed(),
+            error: None,
+        });
+        match status_outcome(status).error() {
+            None => Ok(()),
+            Some(e) => Err(e),
+        }
+    }
+
     /// One 5A poll (blocking): `GET …/json?poll=1&since=<id|all>`, NDJSON, bounded.
     fn poll_blocking(&self, topic: &str, since: &Since) -> Result<Polled, CarrierError> {
         let url = format!(
@@ -1122,6 +1255,10 @@ impl Inner {
             since.query()
         );
         let started = Instant::now();
+        bump(
+            &self.counters.wire_bytes,
+            request_head_bytes("GET", &url, self.auth.as_ref()),
+        );
         let resp = match self.get(&self.agent, &url) {
             Ok(r) => r,
             Err(e) => {
@@ -1138,6 +1275,7 @@ impl Inner {
             }
         };
         let status = resp.status().as_u16();
+        bump(&self.counters.wire_bytes, response_head_bytes(&resp));
         if let Some(err) = status_outcome(status).error() {
             self.record(RequestRecord {
                 method: "GET",
@@ -1199,6 +1337,7 @@ impl Inner {
             error: cut.clone(),
         });
         bump(&self.counters.malformed, polled.malformed as u64);
+        bump(&self.counters.wire_bytes, received as u64);
         if let (Some(why), None) = (&cut, &polled.last_id) {
             return Err(CarrierError::Retry(format!("ntfy: poll: {why}")));
         }
@@ -1319,6 +1458,14 @@ impl Carrier for NtfyCarrier {
     /// [`NtfyCarrier::commit_drain`].
     fn hold<'a>(&'a self, pair: &'a Pair) -> BoxStream<'a, Result<Vec<u8>, CarrierError>> {
         hold_stream(self.inner.clone(), inbound_topic(pair))
+            .filter_map(|r| {
+                std::future::ready(match r {
+                    Ok(HoldEvent::Opened) => None,
+                    Ok(HoldEvent::Frame(f)) => Some(Ok(f)),
+                    Err(e) => Some(Err(e)),
+                })
+            })
+            .boxed()
     }
 }
 
@@ -1330,7 +1477,14 @@ struct Delivery {
     frames: Vec<Vec<u8>>,
 }
 
-type HoldItem = Result<Delivery, CarrierError>;
+/// The 5B thread's messages to the stream.
+enum Msg {
+    /// A connection the server accepted.
+    Opened,
+    Delivery(Delivery),
+}
+
+type HoldItem = Result<Msg, CarrierError>;
 
 /// Clears [`Inner::holding`] when the 5B thread ends (or when its closure is dropped unrun).
 struct HoldFlag(Arc<Inner>);
@@ -1338,6 +1492,8 @@ struct HoldFlag(Arc<Inner>);
 impl Drop for HoldFlag {
     fn drop(&mut self) {
         self.0.holding.store(false, Ordering::Release);
+        // a stored permit when nobody waits yet: `released` re-checks the flag
+        self.0.released.notify_one();
     }
 }
 
@@ -1354,7 +1510,7 @@ struct HoldState {
 fn hold_stream(
     inner: Arc<Inner>,
     topic: String,
-) -> BoxStream<'static, Result<Vec<u8>, CarrierError>> {
+) -> BoxStream<'static, Result<HoldEvent, CarrierError>> {
     let refused = |why: String| {
         futures_util::stream::once(async move { Err(CarrierError::Retry(why)) }).boxed()
     };
@@ -1395,11 +1551,12 @@ fn hold_stream(
                         st.inner.set_seen(&st.topic, id);
                     }
                 }
-                return Some((Ok(f), st));
+                return Some((Ok(HoldEvent::Frame(f)), st));
             }
             match st.rx.recv().await? {
-                Ok(d) if d.frames.is_empty() => st.inner.set_seen(&st.topic, d.id),
-                Ok(d) => {
+                Ok(Msg::Opened) => return Some((Ok(HoldEvent::Opened), st)),
+                Ok(Msg::Delivery(d)) if d.frames.is_empty() => st.inner.set_seen(&st.topic, d.id),
+                Ok(Msg::Delivery(d)) => {
                     st.buf.extend(d.frames);
                     st.pending_id = Some(d.id);
                 }
@@ -1421,6 +1578,13 @@ enum StreamEnd {
     /// A drop or a transient refusal: reconnect after the back-off. `progress`: an event arrived
     /// after the open, so the back-off starts over.
     Dropped { progress: bool, why: String },
+    /// [`Inner::wire_limit`] reached (§12): the thread ends.
+    Budget,
+}
+
+/// The metered budget the daemon left is spent ([`NtfyCarrier::set_wire_limit`]).
+fn over_budget(inner: &Inner) -> bool {
+    inner.counters.wire_bytes.load(Ordering::Relaxed) >= inner.wire_limit.load(Ordering::Acquire)
 }
 
 /// The 5B thread: hold, read, reconnect with back-off, until the stream is dropped or refused.
@@ -1445,12 +1609,20 @@ fn hold_thread(
         if tx.is_closed() {
             return;
         }
+        if over_budget(inner) {
+            let _ = tx.blocking_send(Err(CarrierError::Retry(
+                "ntfy: 5B: the metered budget is spent".into(),
+            )));
+            return;
+        }
         if !first {
             bump(&inner.counters.reconnects, 1);
         }
         first = false;
         match stream_once(inner, &agent, topic, &mut since, tx) {
             StreamEnd::Closed => return,
+            // the next turn of the loop reports it and ends
+            StreamEnd::Budget => {}
             StreamEnd::Rejected(why) => {
                 let _ = tx.blocking_send(Err(CarrierError::Rejected(why)));
                 return;
@@ -1506,6 +1678,10 @@ fn stream_once(
         latency: started.elapsed(),
         error,
     };
+    bump(
+        &inner.counters.wire_bytes,
+        request_head_bytes("GET", &url, inner.auth.as_ref()),
+    );
     let resp = match inner.get(agent, &url) {
         Ok(r) => r,
         Err(e) => {
@@ -1517,6 +1693,7 @@ fn stream_once(
         }
     };
     let status = resp.status().as_u16();
+    bump(&inner.counters.wire_bytes, response_head_bytes(&resp));
     inner.record(record(Some(status), None));
     match status_outcome(status) {
         Outcome::Ok => {}
@@ -1529,6 +1706,9 @@ fn stream_once(
         }
         Outcome::Rejected(why) => return StreamEnd::Rejected(why),
     }
+    if tx.blocking_send(Ok(Msg::Opened)).is_err() {
+        return StreamEnd::Closed;
+    }
     let mut reader = BufReader::new(resp.into_body().into_reader());
     let mut line = Vec::new();
     let mut progress = false;
@@ -1537,7 +1717,13 @@ fn stream_once(
         if tx.is_closed() {
             return StreamEnd::Closed;
         }
-        match read_line_capped(&mut reader, &mut line, MAX_LINE) {
+        let read = read_line_capped(&mut reader, &mut line, MAX_LINE);
+        match read {
+            Ok(Line::Complete) => bump(&inner.counters.wire_bytes, line.len() as u64 + 1),
+            Ok(Line::TooLong) => bump(&inner.counters.wire_bytes, MAX_LINE as u64 + 1),
+            _ => {}
+        }
+        match read {
             Ok(Line::Eof) => {
                 return StreamEnd::Dropped {
                     progress,
@@ -1567,7 +1753,10 @@ fn stream_once(
                     });
                     bump(&inner.counters.frames_in, frames.len() as u64);
                     *since = Since::Id(id.clone());
-                    if tx.blocking_send(Ok(Delivery { id, frames })).is_err() {
+                    if tx
+                        .blocking_send(Ok(Msg::Delivery(Delivery { id, frames })))
+                        .is_err()
+                    {
                         return StreamEnd::Closed;
                     }
                 }
@@ -1582,6 +1771,10 @@ fn stream_once(
                 };
                 return StreamEnd::Dropped { progress, why };
             }
+        }
+        // after the line was handed on: what was read is not read again
+        if over_budget(inner) {
+            return StreamEnd::Budget;
         }
     }
 }

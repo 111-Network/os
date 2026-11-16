@@ -29,8 +29,10 @@
 //!   `409 bad_request` with no carrier configured, `409 consent_required` while the recorded
 //!   `carrier_enable` hash is not the hash of the text owed now (the human accepts through `PATCH
 //!   /relay/settings`, below), `409 metered_cap`, `409 licensed_board`; then the request goes to
-//!   the registered carrier hook (`relay::carrier_hook`). Until row D11 registers the carrier's
-//!   own, the no-op hook records the request and starts nothing (`started: false`).
+//!   the registered carrier hook (`relay::carrier_hook`): row D11's carrier runtime answers
+//!   `started: true` when a check or flush starts (or is queued behind one running) and `false`
+//!   while no carrier is built (`gateway.enabled` off, the hub role off, or a switch the
+//!   routes do not refuse); its outcome arrives on `/relay` and the `relay` frame.
 //!
 //! **Consents (§12; I2), in the pinned round trip.** Three gates, asked one per round in this
 //! order: `gateway_bit` (turning `discovery.public_gateway_bit` on, or, while it is on and its
@@ -186,6 +188,14 @@ impl RelayCell {
     /// Hold `s` as the settings (after a write of `state/relay.json` outside these routes).
     pub fn replace(&self, s: RelaySettings) {
         *self.settings.write().unwrap_or_else(|p| p.into_inner()) = s;
+    }
+
+    /// The write lock every read-plan-write of the settings holds (a PATCH, a relay proposal):
+    /// a writer outside these routes (the carrier's drain cursors and metered window, row D11)
+    /// holds it across its `relay::settings::update` and [`RelayCell::replace`], so the cell
+    /// never goes back to an older snapshot.
+    pub async fn write_lock(&self) -> tokio::sync::OwnedMutexGuard<()> {
+        Arc::clone(&self.write).lock_owned().await
     }
 }
 
