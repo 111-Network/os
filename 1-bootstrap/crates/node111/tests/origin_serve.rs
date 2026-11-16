@@ -330,14 +330,12 @@ async fn every_other_method_is_405() {
     let port = n.serve(Some("192.168.1.20:40000")).await;
     let host = format!("127.0.0.1:{port}");
     for path in paths() {
-        for method in ["POST", "PUT", "PATCH", "DELETE"] {
+        // HEAD too: axum's `get` would answer it with the GET handler (§9.1: GET only)
+        for method in ["HEAD", "POST", "PUT", "PATCH", "DELETE"] {
             let r = http(port, method, &path, &host);
             assert_eq!(r.status, 405, "{method} {path}");
-            assert!(
-                r.header("allow").is_some_and(|a| a.contains("GET")),
-                "{}",
-                r.head
-            );
+            assert_eq!(r.header("allow").as_deref(), Some("GET"), "{}", r.head);
+            assert!(r.body.is_empty(), "{method} {path}");
         }
     }
     // the same while not serving: the method is refused before anything is looked up
@@ -348,10 +346,13 @@ async fn every_other_method_is_405() {
     .await;
     let port = n.serve(None).await;
     let [mp, ..] = paths();
-    assert_eq!(
-        http(port, "POST", &mp, &format!("127.0.0.1:{port}")).status,
-        405
-    );
+    for method in ["HEAD", "POST"] {
+        assert_eq!(
+            http(port, method, &mp, &format!("127.0.0.1:{port}")).status,
+            405,
+            "{method}"
+        );
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
