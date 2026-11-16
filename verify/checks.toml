@@ -2647,9 +2647,16 @@ rerun_cost = "ns, T0 stub: SKIPPED today"
 strength = "N"
 needs = ["bash"]
 
-# G12 the hub as update origin. Row V6.
-# A T0 stub: it prints '<G> SKIPPED: not built yet (T0 stub)' and exits 0 (7-relay/TASKS.md row V6). Strength N
-# until the row lands; promote it to R then (and to cargo = true if the gate builds).
+# G12 the hub as update origin and the Layer 1 trust fixes. Row V6.
+# Real `111 daemon`s (hub O with LAN sharing, member U with no internet route) and the real `111 update --from` verb in a user + net
+# + pid namespace on bridge l7g12br0: T1 (a signed beta under the stable name), T2 (the keychain walk, a broken link, the floor
+# generation), T3 (min-upgrade-from at the daemon's staging decision), the staging lock (exit 75, a concurrent run stages once, a
+# daemon's own check holding it), the blob rule (blob/<sha256>, never payload.url, no last-update-check.json), /origin/v1/* behind
+# the hub role, LAN sharing and origin.serve (200 byte-exact, 405, no session, 404s, off at run time and across restarts), the member
+# staging from its hub, a missing blob at the hub, check_internet false (the egress log: no off-link frame) against true (the
+# positive control), and the transient RSS of a staged update. Signs with minisign and the node111 tests' throwaway keys (the debug
+# binary's compiled key is the test key). T3's helper refusal and every flip stay node111 tests (root-only). SKIPPED without a user+net+pid
+# namespace, a built debug `111` (BIN111 or CARGO_TARGET_DIR), minisign or the fixtures (FAIL under REQUIRE_G12=1).
 [[check]]
 id = "l7.g12"
 kind = "unit"
@@ -2660,9 +2667,9 @@ seams = ["L1-L7:origin", "L1-L1:manifest-trust"]
 adapter = "okfail"
 lock = "verify"
 timeout_s = 1800
-rerun_cost = "ns, T0 stub: SKIPPED today"
-strength = "N"
-needs = ["bash"]
+rerun_cost = "ns, about 4 min (two daemons, five restarts, two 20 s egress passes; needs a built debug 111 and minisign)"
+strength = "R"
+needs = ["bash", "userns", "netns", "python3", "ip", "nsenter", "curl", "jq", "minisign"]
 
 # G13 the node-state store and the joint contract: one node with the real 111d, the real 111-agent and a stub model. Row V3.
 # A T0 stub: it prints '<G> SKIPPED: not built yet (T0 stub)' and exits 0 (8-storage/TASKS.md row V3). Strength N
