@@ -35,7 +35,7 @@ the `x-sse-events` map) into `ui/src/lib/api/types.gen.ts` — never hand-edited
   `logs`), never a figure that needs a walk, and sent only on a change of `disk_low`, `store_full`, a class's `full`, `node_state.state` to or from
   `unavailable` (or its `reason`), `integrity`, or after a reclaim: an open or a close of the node-state store on use sends none, and no timer sends
   one. The page refetches `GET /storage` on the frame for the rest; after `reset` the Layer 8 views refetch `/storage` (a loaded slice only). Its
-  second part adds the `dataset` frame, coalesced per job (at most one per 5 s tick while it runs, plus one on each state change and at its end).
+  second part adds the `dataset` frame, coalesced per job (at most one per 5 s tick while it runs, plus one on each state change and at its end). Layer 9 adds `incident` (one `Incident` on change, §18.2); after `reset` the Repairs view refetches `/repairs` and `/repairs/incidents` (a loaded slice only), and no timer sends a frame.
 - **Layer 5 additions (Messaging & Data; `os/5-messaging/README.md` §15, D20) — additive under `/api/v1`:**
   - *Routes:* `GET /messages/threads`, `GET /messages/threads/{peer}`, `POST /messages`, `POST /messages/{id}/retry`,
     `GET|POST /contacts`, `GET|PATCH|DELETE /contacts/{id}`, `GET /contacts/me/card`, `GET /fabric`,
@@ -289,6 +289,34 @@ the `x-sse-events` map) into `ui/src/lib/api/types.gen.ts` — never hand-edited
     `test/layer8-contract.test.ts` and the mock (`ui/src/lib/api/mock/storage.ts`). (7) the components stop route's client method (`stopComponent` on the storage adapter,
     with its mock) and `panelId` (`panelFor` takes a `PanelId`; `openSession`, the panel model and the mock's `openSession` are widened to it by row U5). (9) this section. (10) the search route's `publisher`.
   - *The UI seam:* the dataset methods and `stopComponent` are on the same `StorageAdapter` (`ui/src/lib/api/storage.ts`), so none of them is in the eager chunk.
+- **Layer 9 additions, part 1 (Self-Healing & Evolution, the incidents; `os/9-evolution/README.md` §3.4, §3.5, §18, D35, D39) — additive under `/api/v1`; the other routes of §18.1 are the contract's later parts:**
+  - *Routes:* `GET /repairs` (`RepairsStatus`), `GET /repairs/incidents` (`{schema, incidents, next_after_seq}`, `?state&after_seq&limit`), `GET /repairs/incidents/{id}` (`Incident`),
+    `POST /repairs/incidents/{id}/dismiss` (→ 204, no body) and `GET /repairs/audit` (`{schema, entries, next_after_seq}`, `?after_seq&limit`).
+  - *Who may call:* the status and the incident reads follow the usual rule and the agent's bearer reads them (the agent's `incident.read` tool, §18.3). `/repairs/audit` is for a paired
+    session or loopback (`111 heal audit`; §18.1 does not list the bearer for it). **The dismissal is a human's** (a loopback or paired session): the agent's bearer is refused (401, the
+    global gate, no allowlist); the agent proposes and never dismisses. 404 `not_found` for an incident id the node does not hold.
+  - *Paging (normative, every Layer 9 list that reads the store):* `?after_seq&limit`; `limit` is at most 1,000 and an absent `limit` reads 1,000 (Layer 8's J9 bound); a `limit` of 0 or above
+    1,000, or an `after_seq` that is not a whole number, is 400 `bad_request`. `next_after_seq` is the `seq` of the last row returned, or `null` when that page is the last (an empty page is null too; a store-closed node lists its in-memory rows, `seq` 0, in one page and only when `after_seq` is absent). An incident row's `seq`
+    is its `last.seq` (the store's `seq` of its newest write: a recurrence moves it, so a row can come again on a later page; keep the newest copy by `id`); an audit entry's is its own `seq`.
+    The playbooks list (a later part) is read from the payload and carries no cursor.
+  - *Id families, minted by `111d` from the OS random source (never derived from `seq`):* `inc-`, `att-`, `del-`, `dft-`, each the prefix plus 12 lowercase hex; a fix id is the 64-hex BLAKE3-256 of
+    the fix body (`fix_id`). Schemas `IncidentId`, `AttemptId`, `DelegationId`, `DraftId`, `FixId`.
+  - *Shapes:* `RepairsStatus {schema, verdict, needs_you, open, overflow, store, model_tasks}` with `verdict` ∈ `clear`, `waiting`, `confirm`; `needs_you[] {kind, id, incident_id|null, title}` with `kind` ∈
+    `proposal`, `confirm`, `revert_failed`, `revert_blocked`, `refused`; `store {state, reason|null}` with `state` ∈ `open`, `full`, `unavailable`, `journal`; `model_tasks {running, waiting}`.
+    `Incident` is §3.5's record (`opened`, `last` and `closed` are `IncidentMark {seq, boot_id, mono_ms, tick, epoch: null, wall_claim|null}`; `wall_claim` is display only and never orders anything);
+    `Attempt {id, proposal_id|null, incident_id|null, action, target, state, probe: {name, result}|null, confirm_by: session|peer|null}` with §4.2's eight attempt states; `AuditEntry {seq, boot_id,
+    mono_ms, kind, proposal_id|null, action_hash|null, probe_result|null, revert_result|null, confirmer: probe|human|null, by: human|daemon}` with §4's fourteen kinds. Shapes §18.4 leaves to prose,
+    fixed here: the audit list's envelope and `AuditEntry`'s null members; the check and probe `result` words are open strings the page renders as they are; `IncidentMark.seq` is 0 while a record is held only in memory; an incident row's cursor is `last.seq`; `next_after_seq` is null on the last page; `dismissed.cause_id` is nullable; text bounds the spec does not give (explanation 8,192, needs-you title 256, fingerprint subject and reason 64, evidence ref 128, attempt target 256) are the contract's.
+  - *Untrusted text:* an evidence `excerpt` (at most 512 B), a subject, an `explanation.text`, a `needs_you[].title` and every name in an attempt are rendered as text, preformatted where multi-line, never as
+    Markdown or HTML. No Layer 9 shape carries a secret, a message body or a log line beyond the 512 B excerpt.
+  - *SSE:* `incident` → `SseIncident` (one `Incident`, on change), appended to `x-sse-events.events`. After `reset` the Repairs view refetches `/repairs` and `/repairs/incidents`.
+  - *Pin list for these items:* (3) `pnpm gen:types`, then `node scripts/gen-sse.mjs --check`; the tuples `REPAIRS_VERDICTS`, `NEEDS_YOU_KINDS`, `REPAIRS_STORE_STATES`, `INCIDENT_STATES`, `INCIDENT_OUTCOMES`,
+    `INCIDENT_SEVERITIES`, `INCIDENT_EVIDENCE_KINDS`, `INCIDENT_AGREEMENTS`, `ATTEMPT_STATES`, `ATTEMPT_CONFIRM_BY`, `AUDIT_KINDS` are listed in `scripts/gen-sse.mjs` (`ENUMS`), with the aliases for the new shapes.
+    (4) `incident` in `x-sse-events.events` and in the store's `switch (frame.event)` (`repairs` and `incidents` slices; a frame is folded into a loaded list and reads `GET /repairs`; with nothing loaded it reads both).
+    (5) `test/gen.test.ts`, `test/http.test.ts` (every new operation has a client call), `test/layer9-contract.test.ts` and the mock repairs (`ui/src/lib/api/mock/repairs.ts`), whose frames validate against `x-sse-events`;
+    `test/layer8-contract.test.ts` pins the prefix of the grown event list. (6) node111's mirrors sit beside their routes (`dashboard/api_v1/repairs.rs`, D22); until then the dismissal is in `UNROUTED` of `tests/dashboard_auth.rs`.
+  - *The UI seam:* the Layer 9 adapter is `ui/src/lib/api/repairs.ts` (`RepairsAdapter`, `createHttpRepairs`), reached through `getRepairs()` in `lib/api/index.ts` and imported dynamically (only by a Layer 9 view, or by the
+    store after an `incident` frame), so none of it is in the eager chunk; the dev mock's repairs is `adapter.mock.repairs`.
 - **Not gated:** `/`, static assets, `/health` (body is booleans), `/origin/v1/*` (Layer 7, §9.1: the hub's verified update files, GET only,
   404 unless the hub serves them; outside `openapi.yaml`; Layer 8 adds `/origin/v1/catalogue/*` and `/origin/v1/notice/*`, §16.7: GET and HEAD only, 405
   otherwise, served only while `hub_role`, LAN sharing and `origin.datasets` (or `origin.components`, or `origin.serve` for the release's source, for a notice) are on, outside `API`) and `/api/v1/auth/*`. Everything

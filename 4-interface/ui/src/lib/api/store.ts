@@ -7,6 +7,7 @@ import type {
   ConnectionState,
   EventsFrameWithId,
 } from "./adapter";
+import type { RepairsAdapter } from "./repairs"; // type only, like the storage one: the module stays out of the eager chunk (see getRepairs in ./index)
 import type { StorageAdapter } from "./storage"; // type only, like the relay one: the module stays out of the eager chunk (see getStorage in ./index)
 import type { RelayAdapter } from "./relay"; // type only: the module itself stays out of the eager chunk (see getRelay in ./index)
 import { openRequests, removeContact, upsertContact } from "./contacts";
@@ -62,6 +63,8 @@ import type {
   Proposal,
   RegistryRow,
   RelayStatus,
+  RepairsStatus,
+  Incident,
   StorageStatus,
   DatasetsListing,
   Job,
@@ -165,6 +168,10 @@ export interface StoreState {
   storage: StorageStatus | null;
   /** Layer 8, part 2: the datasets listing (publishers with their entries, holdings, jobs); null until a `dataset` frame or a Layer 8 view loads it. Publisher strings are untrusted: text only. */
   datasets: DatasetsListing | null;
+  /** Layer 9: the Repairs verdict, what needs the person, the store and the model queue; null until an `incident` frame or a Layer 9 view loads it. */
+  repairs: RepairsStatus | null;
+  /** Layer 9: the incidents, oldest `seq` first; null until a Layer 9 view loads them (an `incident` frame is folded in only once they are; a frame alone loads the verdict, never the list). Excerpts are untrusted: text only. */
+  incidents: Incident[] | null;
   connection: ConnectionSnapshot;
   /** Agent events, newest first, at most ACTIVITY_RING, deduped on (seq, ts). */
   activity: AgentEvent[];
@@ -357,6 +364,8 @@ function initialState(): StoreState {
     registry: null,
     storage: null,
     datasets: null,
+    repairs: null,
+    incidents: null,
     connection: INITIAL_CONNECTION,
     activity: [],
     baselineVersion: null,
@@ -382,6 +391,8 @@ export class ApiStore {
   private relayLoader: (() => Promise<RelayAdapter>) | null = null;
   /** Layer 8: how to reach the storage adapter. Called after a `storage` frame and to re-read a loaded slice; never at start-up. */
   private storageLoader: (() => Promise<StorageAdapter>) | null = null;
+  /** Layer 9: how to reach the repairs adapter. Called after an `incident` frame and to re-read a loaded slice; never at start-up. */
+  private repairsLoader: (() => Promise<RepairsAdapter>) | null = null;
   private unsubscribe: (() => void) | null = null;
   /** The snapshot load started by the latest `attach`, while it is still running. */
   private initialLoad: Promise<void> | null = null;
@@ -494,6 +505,7 @@ export class ApiStore {
     this.adapter = null;
     this.relayLoader = null;
     this.storageLoader = null;
+    this.repairsLoader = null;
     this.initialLoad = null;
   }
 
@@ -505,6 +517,11 @@ export class ApiStore {
   /** Layer 8: hand the store the lazy loader of the storage adapter (call after `attach`). Nothing is fetched until a frame or a view asks. */
   attachStorage(load: (() => Promise<StorageAdapter>) | null): void {
     this.storageLoader = load;
+  }
+
+  /** Layer 9: hand the store the lazy loader of the repairs adapter (call after `attach`). Nothing is fetched until a frame or a view asks. */
+  attachRepairs(load: (() => Promise<RepairsAdapter>) | null): void {
+    this.repairsLoader = load;
   }
 
   private subscribeStream(): void {
@@ -682,6 +699,15 @@ export class ApiStore {
             void this.refreshDatasets();
             if (this.state.storage !== null && (!prior || prior.state !== job.state)) void this.refreshStorage();
           }
+        }
+        break;
+      case "incident":
+        // One incident on change. Fold it into a loaded list at once (the newest copy of an id wins, the list stays in `last.seq` order),
+        // and read the verdict again: it is computed on the node. With no list loaded the adapter is imported here, lazily, and reads the verdict only: the list loads when a Layer 9 view asks for it.
+        if (isIncident(frame.data)) {
+          const cur = this.state.incidents;
+          if (cur) patch.incidents = mergeIncidentFrame(cur, frame.data);
+          void this.refreshRepairs();
         }
         break;
       case "bridge":
@@ -863,6 +889,9 @@ export class ApiStore {
     // Layer 8: after `reset` the Storage views refetch `/storage` (the datasets listing is the contract's second part).
     if (this.state.storage !== null) void this.refreshStorage();
     if (this.state.datasets !== null) void this.refreshDatasets();
+    // Layer 9: after `reset` the Repairs view refetches `/repairs` and `/repairs/incidents` (a loaded slice only).
+    if (this.state.repairs !== null) void this.refreshRepairs();
+    if (this.state.incidents !== null) void this.refreshIncidents();
   });
 
   refreshStatus = coalesced(async () => {
@@ -1116,6 +1145,42 @@ export class ApiStore {
         });
     } catch {
       /* keep the previous listing (an older node answers 404 and the slice stays as it was) */
+    }
+  });
+
+  // --- Layer 9 snapshots (the Repairs status, the incidents) ----------------------------------------------------------------
+
+  refreshRepairs = coalesced(async () => {
+    const a = this.adapter;
+    const load = this.repairsLoader;
+    if (!a || !load) return;
+    try {
+      const repairs = await (await load()).status();
+      if (this.adapter === a)
+        this.commit({
+          repairs: sameJson(this.state.repairs, repairs)
+            ? this.state.repairs
+            : repairs,
+        });
+    } catch {
+      /* keep the previous snapshot (an older node answers 404 and the slice stays as it was) */
+    }
+  });
+
+  refreshIncidents = coalesced(async () => {
+    const a = this.adapter;
+    const load = this.repairsLoader;
+    if (!a || !load) return;
+    try {
+      const incidents = await listAllIncidents(await load());
+      if (this.adapter === a)
+        this.commit({
+          incidents: sameJson(this.state.incidents, incidents)
+            ? this.state.incidents
+            : incidents,
+        });
+    } catch {
+      /* keep the previous list (an older node answers 404 and the slice stays as it was) */
     }
   });
 
@@ -1548,6 +1613,42 @@ export function mergeStorageFrame(
   if (frame.settings === undefined && prev.settings !== undefined)
     out.settings = prev.settings;
   return sameJson(prev, out) ? prev : out;
+}
+
+function isIncident(d: unknown): d is Incident {
+  const x = d as Partial<Incident> | null;
+  return (
+    !!x &&
+    typeof x === "object" &&
+    typeof x.id === "string" &&
+    typeof x.state === "string" &&
+    !!x.last &&
+    typeof x.last === "object" &&
+    typeof x.last.seq === "number" &&
+    !!x.fingerprint &&
+    typeof x.fingerprint === "object" &&
+    Array.isArray(x.attempts)
+  );
+}
+
+/** Every incident of a state (or of any), walking `next_after_seq` until it is null; stops on a cursor that does not advance. */
+export async function listAllIncidents(a: Pick<RepairsAdapter, "incidents">, state?: "open" | "closed"): Promise<Incident[]> {
+  const byId = new Map<string, Incident>();
+  let after: number | undefined;
+  for (let page = 0; page < 1000; page++) {
+    const r = await a.incidents({ ...(state === undefined ? {} : { state }), ...(after === undefined ? {} : { after_seq: after }), limit: 1000 });
+    for (const i of r.incidents) byId.set(i.id, i); // a recurrence moves `last.seq`, so a row can come again: the newest copy wins
+    if (r.next_after_seq === null || (after !== undefined && r.next_after_seq <= after)) break;
+    after = r.next_after_seq;
+  }
+  return [...byId.values()].sort((a, b) => a.last.seq - b.last.seq);
+}
+
+/** An `incident` frame over a loaded list: the incident replaces its older copy by `id` (or joins), and the list stays in `last.seq` order. */
+export function mergeIncidentFrame(list: readonly Incident[], frame: Incident): Incident[] {
+  const out = list.filter((i) => i.id !== frame.id);
+  out.push(frame);
+  return out.sort((a, b) => a.last.seq - b.last.seq);
 }
 
 function isJob(d: unknown): d is Job {

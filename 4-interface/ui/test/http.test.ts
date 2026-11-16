@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import type { Adapter } from "../src/lib/api/adapter";
 import { createHttpAdapter, panelsSeenAtLoad, resetPanelsAtLoadForTests } from "../src/lib/api/http";
 import { createHttpRelay, relayConsentOf, type RelayAdapter } from "../src/lib/api/relay";
+import { createHttpRepairs, type RepairsAdapter } from "../src/lib/api/repairs";
 import { ApiError } from "../src/lib/api/problem";
 import { consentFacts, createHttpStorage, storageConsentOf, type StorageAdapter } from "../src/lib/api/storage";
 import type { ChatFrame } from "../src/lib/api/types";
@@ -463,11 +464,35 @@ describe("adapter <-> openapi.yaml", () => {
   };
   // Operations a page never calls as a method: the adopt hand-off is loopback only, never a session (§16.1: `111 dataset import` calls it), and a tile
   // file is read by the map library through its URL (`tileUrl`), with Range headers the browser sets.
+  // Layer 9 (os/9-evolution/README.md section 18, part 1): its own adapter (src/lib/api/repairs.ts), so its calls take a RepairsAdapter.
+  const REPAIRS_CALLS: Record<string, (a: RepairsAdapter) => Promise<unknown>> = {
+    getRepairs: (a) => a.status(),
+    listRepairIncidents: (a) => a.incidents({ state: "open", after_seq: 3, limit: 10 }),
+    getRepairIncident: (a) => a.incident("inc-0123456789ab"),
+    dismissRepairIncident: (a) => a.dismissIncident("inc-0123456789ab"),
+    listRepairAudit: (a) => a.audit({ after_seq: 3, limit: 10 }),
+  };
+
   const NO_CLIENT = ["adoptDatasets", "getTile"];
 
-  it("covers every operation except the event stream (the Layer 6, 7 and 8 operations included), the two with no client method named", () => {
-    expect([...Object.keys(CALLS), ...Object.keys(RELAY_CALLS), ...Object.keys(STORAGE_CALLS), ...NO_CLIENT].sort()).toEqual(Object.keys(operations).filter((id) => id !== "events").sort());
+  it("covers every operation except the event stream (the Layer 6, 7, 8 and 9 part 1 operations included), the two with no client method named", () => {
+    expect([...Object.keys(CALLS), ...Object.keys(RELAY_CALLS), ...Object.keys(STORAGE_CALLS), ...Object.keys(REPAIRS_CALLS), ...NO_CLIENT].sort()).toEqual(Object.keys(operations).filter((id) => id !== "events").sort());
   });
+
+  for (const [id, call] of Object.entries(REPAIRS_CALLS)) {
+    it(`${id} matches its contract operation`, async () => {
+      const op = operations[id]!;
+      const r = recorder(() => (op.success === 204 ? new Response(null, { status: 204 }) : jsonResponse({ schema: 1 }, op.success)));
+      await call(createHttpRepairs({ fetch: r.fetch }));
+      expect(r.calls).toHaveLength(1);
+      const c = r.calls[0]!;
+      expect(c.method).toBe(op.method);
+      expect(c.path).toMatch(toRegex(op.path));
+      expect(c.init).toMatchObject({ credentials: "same-origin", cache: "no-store" });
+      if (c.method !== "GET") expect(c.headers["Content-Type"]).toBe("application/json");
+      expect(c.body).toBeUndefined();
+    });
+  }
 
   for (const [id, call] of Object.entries(STORAGE_CALLS)) {
     it(`${id} matches its contract operation`, async () => {

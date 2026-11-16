@@ -1,7 +1,7 @@
 // Base fixtures for the dev-only mock: one believable laptop node ("Node2B") with all endpoints'
 // data, shaped exactly like api/openapi.yaml. Scenarios (scenarios.ts) clone and bend these.
 // Nothing here is imported by production code: the mock is reached only via a DEV-guarded dynamic import.
-import type { AgentStatus, DeviceRecord, Proposal, ServiceId, ServiceRecord, Settings, Status, StorageStatus } from "../types";
+import type { AgentStatus, DeviceRecord, Incident, Proposal, RepairsStatus, ServiceId, ServiceRecord, Settings, Status, StorageStatus } from "../types";
 import { buildBridgeQuiet, type BridgeData } from "./bridge";
 import { buildMessaging, type MessagingData } from "./messaging";
 
@@ -623,5 +623,41 @@ export function buildStorageStatus(): StorageStatus {
       { id: "kb", layer: 0, bytes: 410_000, cap: null, budgeted: false, export_offer_needed: false, full: false },
     ],
     notices: [],
+  };
+}
+
+/** A healthy node's `RepairsStatus` (os/9-evolution/README.md §18.4): nothing open, nothing waiting, the store open, no model task. */
+export function buildRepairsStatus(): RepairsStatus {
+  return { schema: 1, verdict: "clear", needs_you: [], open: 0, overflow: 0, store: { state: "open", reason: null }, model_tasks: { running: 0, waiting: 0 } };
+}
+
+/**
+ * An open incident of the shape §3.5 fixes, a crashing agent: `(3, agent, child_exit)` with its evidence, one check, no diagnosis, no attempt.
+ * `n` is the incident's number (it picks the id and the `seq`); the excerpt is a node's own text, so a test reads it as untrusted.
+ */
+export function buildIncident(n = 1): Incident {
+  const hex = n.toString(16).padStart(12, "0");
+  const mark = { seq: n, boot_id: "3f2a9c1e5b7d4a0c8e6f1b2d9a7c5e30", mono_ms: 41_000 + n, tick: 12 + n, epoch: null, wall_claim: null };
+  return {
+    schema: 1,
+    id: `inc-${hex}`,
+    fingerprint: { layer: 3, subject: "agent", reason_code: "child_exit" },
+    severity: "error",
+    count: 1,
+    state: "open",
+    opened: mark,
+    last: mark,
+    closed: null,
+    evidence: [
+      { id: "ev1", kind: "exit", ref: "agent", excerpt: "exit code 1; restarts in window: 1" },
+      { id: "ev2", kind: "child_log_tail", ref: "agent", excerpt: "thread 'main' panicked: model file not found" },
+    ],
+    checks: [{ check_id: "exit_is", result: "true" }],
+    ruled_out: [],
+    diagnosis: null,
+    explanation: null,
+    attempts: [],
+    dismissed: null,
+    outcome: "open",
   };
 }

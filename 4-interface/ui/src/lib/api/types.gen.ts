@@ -1555,6 +1555,106 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/repairs": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * The Repairs verdict, what needs the person, the store and the model queue (§18.4)
+         * @description `RepairsStatus`: `verdict` (`clear`, `waiting`, `confirm`) and `needs_you` (one row per proposal, confirm, failed revert, blocked revert or refusal that waits for a human) are what the UI words from §14.1; `open` and `overflow` are the open incident count and the fingerprints refused past the bound of 64 (§3.4); `store` says whether `heal/` records are written (`open`), refused (`full`, the class's export offer is unanswered), held in memory (`unavailable`: the node-state store is closed) or held in the fallback ring (`journal`, J7); `model_tasks` counts the model tasks running and waiting (§5.3). Computed on request; the SSE `incident` frame carries one changed incident, and the page refetches this route on it. The agent's bearer reads it (a session or loopback too).
+         */
+        get: operations["getRepairs"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/repairs/incidents": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Incidents, oldest `seq` first, a page at a time (§18.1, Paging)
+         * @description `{schema, incidents, next_after_seq}`. `state` filters on the incident's state (`open` or `closed`). Paging: `after_seq` is the last `seq` the caller read (an incident row's `seq` is its `last.seq`, the store's `seq` of its newest write; a recurrence moves it, so a row can reappear on a later page and the caller keeps the newest copy by `id`), `limit` is at most 1,000 and an absent `limit` reads 1,000; `next_after_seq` is the `seq` of the last row returned, or null when that page is the last (no row follows it; an empty page is null too). A node whose store is closed lists the incidents it holds in memory (at most 64, §4.1 rule 2); their `seq` is 0, so they come in one page with `next_after_seq` null, and only when `after_seq` is absent (`after_seq=0` lists none, as it lists rows after seq 0). The agent's bearer reads it (a session or loopback too); the agent's `incident.read` tool uses it (§18.3).
+         */
+        get: operations["listRepairIncidents"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/repairs/incidents/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * One incident (§3.5)
+         * @description The incident's record with its attempts. 404 `not_found` for an id the node does not hold. The agent's bearer reads it (a session or loopback too).
+         */
+        get: operations["getRepairIncident"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/repairs/incidents/{id}/dismiss": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Dismiss an incident: "this is not a problem" (§3.4, §14)
+         * @description Closes the incident with outcome `dismissed` and records the diagnosed cause in `dismissed.cause_id`, so the same cause does not ask again; like any closed incident it re-opens when its fingerprint recurs with a changed cause (§3.4, §14.2). Any `repair`, `fix` or `human_step` proposal filed for it is withdrawn (decision `dismissed`, `applied: {withdrawn: true}`). 204; 404 `not_found` for an id the node does not hold. A human (a loopback or paired session); the agent's bearer is refused (401). The body is empty.
+         */
+        post: operations["dismissRepairIncident"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/repairs/audit": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * The audit trail of what Layer 9 proposed, applied, kept and reverted (§4, §18.1)
+         * @description `{schema, entries, next_after_seq}`, oldest `seq` first, paged as the incidents are (`?after_seq&limit`, `limit` at most 1,000 and 1,000 when absent). An entry is one record of the `heal/audit` stream and carries no free text, no log line and no secret. Read by a paired session or loopback only (`111 heal audit`): this is the one Layer 9 GET the agent's bearer does not read (401 unauthenticated for it).
+         */
+        get: operations["listRepairAudit"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
 }
 export type webhooks = Record<string, never>;
 export interface components {
@@ -3668,6 +3768,217 @@ export interface components {
             schema: number;
             sets: components["schemas"]["TileSet"][];
         };
+        /** @description `inc-` plus 12 hex from the OS random source, minted by `111d` before any store write (§3.5, §18.2) */
+        IncidentId: string;
+        /** @description `att-` plus 12 hex, minted by `111d` (§18.2) */
+        AttemptId: string;
+        /** @description `del-` plus 12 hex, minted by `111d` (§18.2) */
+        DelegationId: string;
+        /** @description `dft-` plus 12 hex, minted by `111d` (§18.2) */
+        DraftId: string;
+        /** @description a fix's id: the BLAKE3-256 of its body bytes, 64 lowercase hex (§10, §18.2) */
+        FixId: string;
+        /**
+         * @description `clear`: nothing needs the person; `waiting`: something waits for them; `confirm`: a change is applied and waits for the person's confirm (§14.1)
+         * @enum {string}
+         */
+        RepairsVerdict: "clear" | "waiting" | "confirm";
+        /** @enum {string} */
+        NeedsYouKind: "proposal" | "confirm" | "revert_failed" | "revert_blocked" | "refused";
+        NeedsYouItem: {
+            kind: components["schemas"]["NeedsYouKind"];
+            /** @description the proposal's id (`proposal`), the attempt's id (`confirm`, `revert_failed`, `revert_blocked`), or for `refused` the proposal's id or a received fix's 64-hex id (no attempt exists then) */
+            id: string;
+            /** @description null for an item no incident raised (a fix received from a peer, an `apply_unrecorded`) */
+            incident_id: components["schemas"]["IncidentId"] | null;
+            /** @description text 111 wrote or a playbook's own words; text only */
+            title: string;
+        };
+        /**
+         * @description `open`: `heal/` records are written; `full`: the `heal` class is full while its export offer is unanswered (§4.1 rule 4); `unavailable`: the node-state store is closed (rule 2); `journal`: the store is not built and the fallback ring holds `heal/` (J7, rule 3)
+         * @enum {string}
+         */
+        RepairsStoreState: "open" | "full" | "unavailable" | "journal";
+        RepairsStore: {
+            state: components["schemas"]["RepairsStoreState"];
+            /** @description the store's own reason code when it is not `open`; null when it is */
+            reason: string | null;
+        };
+        /** @description The model tasks `111d` submitted (one at a time per node, §5.3). */
+        RepairsModelTasks: {
+            running: number;
+            waiting: number;
+        };
+        RepairsStatus: {
+            /** @enum {integer} */
+            schema: 1;
+            verdict: components["schemas"]["RepairsVerdict"];
+            needs_you: components["schemas"]["NeedsYouItem"][];
+            /** @description open incidents (§3.4) */
+            open: number;
+            /** @description fingerprints refused because 64 incidents were open (capacity, not policy, §3.4) */
+            overflow: number;
+            store: components["schemas"]["RepairsStore"];
+            model_tasks: components["schemas"]["RepairsModelTasks"];
+        };
+        /**
+         * @description §4.2's incident state
+         * @enum {string}
+         */
+        IncidentState: "open" | "closed";
+        /** @enum {string} */
+        IncidentOutcome: "open" | "self_recovered" | "fixed" | "unresolved" | "dismissed";
+        /** @enum {string} */
+        IncidentSeverity: "warning" | "error" | "critical";
+        /** @description `(layer, subject, reason_code)`, one open incident per fingerprint (§3.4). `subject` is a service id, a component id or one of `111d`, `updater`, `identity`, `heal`, `storage`. */
+        IncidentFingerprint: {
+            layer: number;
+            subject: string;
+            reason_code: string;
+        };
+        /** @description Where an incident opened, last recurred or closed (§3.5): the store's `seq`, the journal's boot-id and monotonic pair, the daemon tick. Ordering uses these, never `wall_claim`. */
+        IncidentMark: {
+            /** @description the store's (J4); 0 while the record is held only in memory */
+            seq: number;
+            /** @description `/proc/sys/kernel/random/boot_id`, or `-` when it cannot be read */
+            boot_id: string;
+            mono_ms: number;
+            /** @description the daemon tick (§3.5) */
+            tick: number;
+            /** @description stays null until Layer 7's epoch has a consumer (§3.5) */
+            epoch: null;
+            /** @description the node's own wall-clock claim in seconds; display only, never an ordering or a decision */
+            wall_claim: number | null;
+        };
+        /** @enum {string} */
+        IncidentEvidenceKind: "service_record" | "health" | "counters" | "exit" | "witness" | "update_tombstone" | "child_log_tail" | "storage";
+        IncidentEvidence: {
+            /** @description the evidence id a diagnosis cites (§5.2) */
+            id: string;
+            kind: components["schemas"]["IncidentEvidenceKind"];
+            ref: string;
+            /** @description at most 512 B, from `111d`'s own typed sources and its own children's logs; untrusted text, rendered preformatted and never as Markdown (§3.5) */
+            excerpt: string;
+        };
+        IncidentCheck: {
+            check_id: string;
+            /** @description the check's result word as the node writes it; a value a page does not know renders as it is */
+            result: string;
+        };
+        /**
+         * @description §5.3
+         * @enum {string}
+         */
+        IncidentAgreement: "rule_only" | "model_only" | "agree" | "disagree";
+        IncidentDiagnosis: {
+            /** @description a playbook cause id, or `unknown` */
+            cause_id: string;
+            /** @enum {string} */
+            by: "t0" | "t1" | "hub";
+            confidence: {
+                /** @description per-mille of the cause's checks that held (§5.3) */
+                checks_satisfied: number;
+                agreement: components["schemas"]["IncidentAgreement"];
+            };
+        };
+        /** @description The result of the incident task's mode `explain` (§5.2): the model's words, untrusted; rendered preformatted, never as Markdown. */
+        IncidentExplanation: {
+            task_id: string;
+            text: string;
+        };
+        IncidentDismissed: {
+            /** @description the cause the person dismissed; null when the incident had no diagnosis */
+            cause_id: string | null;
+        };
+        /**
+         * @description §4.2's attempt state; `awaiting_confirm` is a change applied that waits for the person's confirm inside its window (§7.6)
+         * @enum {string}
+         */
+        AttemptState: "armed" | "awaiting_confirm" | "kept" | "reverted" | "revert_failed" | "revert_blocked" | "interrupted" | "dismissed";
+        /**
+         * @description which confirm §7.6 accepts
+         * @enum {string}
+         */
+        AttemptConfirmBy: "session" | "peer";
+        AttemptProbe: {
+            /** @description the capability probe the action names (§7.2) */
+            name: string;
+            /** @description the probe's result word as the node writes it */
+            result: string;
+        };
+        /** @description One apply attempt (§7.4). The UI calls `/repairs/attempts/{id}/confirm`, `/restore` or `/dismiss` with `id` (Layer 9's second half, §18.1). */
+        Attempt: {
+            id: components["schemas"]["AttemptId"];
+            /** @description null for an Undo or an apply no proposal carried */
+            proposal_id: string | null;
+            incident_id: components["schemas"]["IncidentId"] | null;
+            /** @description a name of the closed vocabulary (§7.3) */
+            action: string;
+            /** @description the action's target as text; a name or an id, never a path */
+            target: string;
+            state: components["schemas"]["AttemptState"];
+            /** @description null until the probe ran */
+            probe: components["schemas"]["AttemptProbe"] | null;
+            /** @description null unless the attempt is `awaiting_confirm` */
+            confirm_by: components["schemas"]["AttemptConfirmBy"] | null;
+        };
+        /** @description §3.5's record. A re-opened fingerprint keeps its record and its diagnosis until the evidence hash changes. Every `excerpt` and every name is untrusted: text only. */
+        Incident: {
+            /** @enum {integer} */
+            schema: 1;
+            id: components["schemas"]["IncidentId"];
+            fingerprint: components["schemas"]["IncidentFingerprint"];
+            severity: components["schemas"]["IncidentSeverity"];
+            count: number;
+            state: components["schemas"]["IncidentState"];
+            opened: components["schemas"]["IncidentMark"];
+            last: components["schemas"]["IncidentMark"];
+            closed: components["schemas"]["IncidentMark"] | null;
+            evidence: components["schemas"]["IncidentEvidence"][];
+            checks: components["schemas"]["IncidentCheck"][];
+            ruled_out: string[];
+            diagnosis: components["schemas"]["IncidentDiagnosis"] | null;
+            explanation: components["schemas"]["IncidentExplanation"] | null;
+            attempts: components["schemas"]["Attempt"][];
+            dismissed: components["schemas"]["IncidentDismissed"] | null;
+            outcome: components["schemas"]["IncidentOutcome"];
+        };
+        /** @description One `Incident` on change (§18.2): opened, its count or last moved, diagnosed, an attempt changed, closed or dismissed. Never a timer. After `reset` the Repairs view refetches `/repairs` and `/repairs/incidents`. */
+        SseIncident: components["schemas"]["Incident"];
+        IncidentList: {
+            /** @enum {integer} */
+            schema: 1;
+            incidents: components["schemas"]["Incident"][];
+            /** @description the `seq` of the last row, or null when that page is the last */
+            next_after_seq: number | null;
+        };
+        /** @enum {string} */
+        AuditKind: "proposed" | "accepted" | "applied" | "kept" | "reverted" | "revert_failed" | "dismissed" | "undo" | "fix_sent" | "fix_received" | "delegated" | "refused" | "revert_blocked" | "vouch_sent";
+        /** @enum {string} */
+        AuditConfirmer: "probe" | "human";
+        /** @enum {string} */
+        AuditBy: "human" | "daemon";
+        /** @description One record of the `heal/audit` stream (§4). Nothing in it is free text from a log, a message or a peer; nothing in it is signed. */
+        AuditEntry: {
+            seq: number;
+            boot_id: string;
+            mono_ms: number;
+            kind: components["schemas"]["AuditKind"];
+            proposal_id: string | null;
+            /** @description the proposal's `action_hash` (§7.3) */
+            action_hash: string | null;
+            probe_result: string | null;
+            revert_result: string | null;
+            /** @description who confirmed the keep; null where no keep was asked */
+            confirmer: components["schemas"]["AuditConfirmer"] | null;
+            by: components["schemas"]["AuditBy"];
+        };
+        RepairAudit: {
+            /** @enum {integer} */
+            schema: 1;
+            entries: components["schemas"]["AuditEntry"][];
+            next_after_seq: number | null;
+        };
     };
     responses: {
         /** @description problem+json */
@@ -3699,6 +4010,11 @@ export interface components {
         foreignConvId: components["schemas"]["ForeignConversationId"];
         edgeId: components["schemas"]["BridgeEdgeId"];
         componentId: components["schemas"]["ComponentId"];
+        incidentId: components["schemas"]["IncidentId"];
+        /** @description the store's `seq` of the last row the caller read; rows after it are returned (Layer 9 paging, §18.1) */
+        afterSeq: number;
+        /** @description at most 1,000 rows (Layer 8's J9 bound); an absent `limit` reads 1,000 */
+        pageLimit: number;
     };
     requestBodies: never;
     headers: never;
@@ -6243,6 +6559,124 @@ export interface operations {
                     "text/event-stream": string;
                 };
             };
+        };
+    };
+    getRepairs: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RepairsStatus"];
+                };
+            };
+        };
+    };
+    listRepairIncidents: {
+        parameters: {
+            query?: {
+                state?: components["schemas"]["IncidentState"];
+                /** @description the store's `seq` of the last row the caller read; rows after it are returned (Layer 9 paging, §18.1) */
+                after_seq?: components["parameters"]["afterSeq"];
+                /** @description at most 1,000 rows (Layer 8's J9 bound); an absent `limit` reads 1,000 */
+                limit?: components["parameters"]["pageLimit"];
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["IncidentList"];
+                };
+            };
+            /** @description `bad_request`: an `after_seq` or `limit` that is not a whole number, a `limit` of 0 or above 1,000, or a `state` that is not `open` or `closed` */
+            400: components["responses"]["Problem"];
+        };
+    };
+    getRepairIncident: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: components["parameters"]["incidentId"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Incident"];
+                };
+            };
+            404: components["responses"]["Problem"];
+        };
+    };
+    dismissRepairIncident: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: components["parameters"]["incidentId"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Dismissed */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            404: components["responses"]["Problem"];
+        };
+    };
+    listRepairAudit: {
+        parameters: {
+            query?: {
+                /** @description the store's `seq` of the last row the caller read; rows after it are returned (Layer 9 paging, §18.1) */
+                after_seq?: components["parameters"]["afterSeq"];
+                /** @description at most 1,000 rows (Layer 8's J9 bound); an absent `limit` reads 1,000 */
+                limit?: components["parameters"]["pageLimit"];
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RepairAudit"];
+                };
+            };
+            400: components["responses"]["Problem"];
         };
     };
 }

@@ -1424,6 +1424,8 @@ const UNROUTED: &[&str] = &[
     "publishDatasets",
     "adoptDatasets",
     "stopBridgeComponent",
+    // Layer 9 (`9-evolution/TASKS.md` C1 before D22): the incident dismissal; the row that routes it removes it. The reads need no entry: the walk holds writes only.
+    "dismissRepairIncident",
 ];
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

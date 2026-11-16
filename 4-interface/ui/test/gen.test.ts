@@ -13,10 +13,21 @@ import {
   DATASET_USED_BY,
   DEVICE_KINDS,
   DEVICE_STATES,
+  ATTEMPT_CONFIRM_BY,
+  ATTEMPT_STATES,
+  AUDIT_KINDS,
   DEVICE_TRANSPORTS,
   EVENTS_EVENT_NAMES,
   EVIDENCE_TRANSPORTS,
   EXPORT_OFFER_CLASSES,
+  INCIDENT_AGREEMENTS,
+  INCIDENT_EVIDENCE_KINDS,
+  INCIDENT_OUTCOMES,
+  INCIDENT_SEVERITIES,
+  INCIDENT_STATES,
+  NEEDS_YOU_KINDS,
+  REPAIRS_STORE_STATES,
+  REPAIRS_VERDICTS,
   JOB_STATES,
   NEARBY_KINDS,
   PAIR_ROLES,
@@ -128,6 +139,25 @@ describe("runtime tuples mirror the contract", () => {
 
   it("the Layer 8 `dataset` event is in the map and the tuple, after `storage`", () => {
     expect(sse.events.dataset).toBe("SseDataset");
-    expect([...EVENTS_EVENT_NAMES].slice(-2)).toEqual(["storage", "dataset"]);
+    expect([...EVENTS_EVENT_NAMES].slice(-3, -1)).toEqual(["storage", "dataset"]);
+  });
+
+  it("Layer 9 enums, part 1 (the tuples gen-sse.mjs lists in ENUMS)", () => {
+    expect([...REPAIRS_VERDICTS]).toEqual(schemas.RepairsVerdict!.enum);
+    expect([...NEEDS_YOU_KINDS]).toEqual(schemas.NeedsYouKind!.enum);
+    expect([...REPAIRS_STORE_STATES]).toEqual(schemas.RepairsStoreState!.enum);
+    expect([...INCIDENT_STATES]).toEqual(schemas.IncidentState!.enum);
+    expect([...INCIDENT_OUTCOMES]).toEqual(schemas.IncidentOutcome!.enum);
+    expect([...INCIDENT_SEVERITIES]).toEqual(schemas.IncidentSeverity!.enum);
+    expect([...INCIDENT_EVIDENCE_KINDS]).toEqual(schemas.IncidentEvidenceKind!.enum);
+    expect([...INCIDENT_AGREEMENTS]).toEqual(schemas.IncidentAgreement!.enum);
+    expect([...ATTEMPT_STATES]).toEqual(schemas.AttemptState!.enum);
+    expect([...ATTEMPT_CONFIRM_BY]).toEqual(schemas.AttemptConfirmBy!.enum);
+    expect([...AUDIT_KINDS]).toEqual(schemas.AuditKind!.enum);
+  });
+
+  it("the Layer 9 `incident` event is in the map and the tuple", () => {
+    expect(sse.events.incident).toBe("SseIncident");
+    expect([...EVENTS_EVENT_NAMES]).toContain("incident");
   });
 });

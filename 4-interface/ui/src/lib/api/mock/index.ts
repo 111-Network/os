@@ -45,7 +45,9 @@ import { finalSentence, pickReply, tokenize } from "./chat";
 import { createBridgeMock } from "./bridge";
 import type { RelayAdapter } from "../relay";
 import { createRelayMock, type RelayRoutes } from "./relay";
+import type { RepairsAdapter } from "../repairs";
 import type { StorageAdapter } from "../storage";
+import { createRepairsMock, type RepairsRoutes } from "./repairs";
 import { createStorageMock, type StorageRoutes } from "./storage";
 import { buildFixtures, iso, layersRunning, logLine } from "./fixtures";
 import { HUB, MOCK_HUB_ADDRESS, MOCK_REASONS, buildNearby, buildPanels, cancelQueued, fabricRow, hex64, hubBundleText, makeContact, meshtasticLiveRow, pageOf, threadsOf } from "./messaging";
@@ -86,6 +88,9 @@ export interface MockControls {
   /** Layer 8: the storage adapter over the same bus (`getStorage()` in ../index.ts returns it for a mock page), and its mock controls. */
   readonly storage: StorageAdapter;
   readonly storageControl: StorageRoutes["control"];
+  /** Layer 9: the repairs adapter over the same bus (`getRepairs()` in ../index.ts returns it for a mock page), and its mock controls. */
+  readonly repairs: RepairsAdapter;
+  readonly repairsControl: RepairsRoutes["control"];
   dispose(): void;
 }
 
@@ -436,6 +441,17 @@ export function createMockAdapter(opts: MockOptions = {}): MockAdapter {
     searchDatasets: (query) => rest(() => ST.searchDatasets(query)),
     tiles: () => rest(() => ST.tiles()),
     stopComponent: (id) => rest(() => ST.stopComponent(id)).then(() => undefined),
+  };
+
+  // --- Layer 9: the Repairs status, the incidents and their dismissal, the audit trail (mock/repairs.ts) --------------------------
+  const RP = createRepairsMock({ publish: (f) => bus.publish(f) });
+  const repairs: RepairsAdapter = {
+    kind: "mock",
+    status: () => rest(() => RP.status()),
+    incidents: (query) => rest(() => RP.incidents(query)),
+    incident: (id) => rest(() => RP.incident(id)),
+    dismissIncident: (id) => rest(() => RP.dismissIncident(id)).then(() => undefined),
+    audit: (query) => rest(() => RP.audit(query)),
   };
 
   const ctx: ScriptContext = {
@@ -1236,6 +1252,8 @@ export function createMockAdapter(opts: MockOptions = {}): MockAdapter {
     relayControl: R.control,
     storage,
     storageControl: ST.control,
+    repairs,
+    repairsControl: RP.control,
     dispose() {
       disposed = true;
       bus.stop();

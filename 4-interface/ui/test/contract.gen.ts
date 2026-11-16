@@ -3394,6 +3394,381 @@ export const schemas: Record<string, JsonSchema> = {
     "type": "object",
     "required": ["schema","sets"],
     "properties": {"schema":{"type":"integer"},"sets":{"type":"array","items":{"$ref":"#/components/schemas/TileSet"}}}
+  },
+  "IncidentId": {
+    "type": "string",
+    "pattern": "^inc-[0-9a-f]{12}$",
+    "description": "`inc-` plus 12 hex from the OS random source, minted by `111d` before any store write (§3.5, §18.2)"
+  },
+  "AttemptId": {
+    "type": "string",
+    "pattern": "^att-[0-9a-f]{12}$",
+    "description": "`att-` plus 12 hex, minted by `111d` (§18.2)"
+  },
+  "DelegationId": {
+    "type": "string",
+    "pattern": "^del-[0-9a-f]{12}$",
+    "description": "`del-` plus 12 hex, minted by `111d` (§18.2)"
+  },
+  "DraftId": {
+    "type": "string",
+    "pattern": "^dft-[0-9a-f]{12}$",
+    "description": "`dft-` plus 12 hex, minted by `111d` (§18.2)"
+  },
+  "FixId": {
+    "type": "string",
+    "pattern": "^[0-9a-f]{64}$",
+    "description": "a fix's id: the BLAKE3-256 of its body bytes, 64 lowercase hex (§10, §18.2)"
+  },
+  "RepairsVerdict": {
+    "type": "string",
+    "enum": ["clear","waiting","confirm"],
+    "description": "`clear`: nothing needs the person; `waiting`: something waits for them; `confirm`: a change is applied and waits for the person's confirm (§14.1)"
+  },
+  "NeedsYouKind": {"type":"string","enum":["proposal","confirm","revert_failed","revert_blocked","refused"]},
+  "NeedsYouItem": {
+    "type": "object",
+    "required": ["kind","id","incident_id","title"],
+    "properties": {
+      "kind": {"$ref":"#/components/schemas/NeedsYouKind"},
+      "id": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 128,
+        "description": "the proposal's id (`proposal`), the attempt's id (`confirm`, `revert_failed`, `revert_blocked`), or for `refused` the proposal's id or a received fix's 64-hex id (no attempt exists then)"
+      },
+      "incident_id": {
+        "oneOf": [{"$ref":"#/components/schemas/IncidentId"},{"type":"null"}],
+        "description": "null for an item no incident raised (a fix received from a peer, an `apply_unrecorded`)"
+      },
+      "title": {"type":"string","maxLength":256,"description":"text 111 wrote or a playbook's own words; text only"}
+    }
+  },
+  "RepairsStoreState": {
+    "type": "string",
+    "enum": ["open","full","unavailable","journal"],
+    "description": "`open`: `heal/` records are written; `full`: the `heal` class is full while its export offer is unanswered (§4.1 rule 4); `unavailable`: the node-state store is closed (rule 2); `journal`: the store is not built and the fallback ring holds `heal/` (J7, rule 3)"
+  },
+  "RepairsStore": {
+    "type": "object",
+    "required": ["state","reason"],
+    "properties": {
+      "state": {"$ref":"#/components/schemas/RepairsStoreState"},
+      "reason": {
+        "type": ["string","null"],
+        "maxLength": 128,
+        "description": "the store's own reason code when it is not `open`; null when it is"
+      }
+    }
+  },
+  "RepairsModelTasks": {
+    "type": "object",
+    "required": ["running","waiting"],
+    "description": "The model tasks `111d` submitted (one at a time per node, §5.3).",
+    "properties": {"running":{"type":"integer","minimum":0},"waiting":{"type":"integer","minimum":0}}
+  },
+  "RepairsStatus": {
+    "type": "object",
+    "required": ["schema","verdict","needs_you","open","overflow","store","model_tasks"],
+    "properties": {
+      "schema": {"type":"integer","enum":[1]},
+      "verdict": {"$ref":"#/components/schemas/RepairsVerdict"},
+      "needs_you": {"type":"array","items":{"$ref":"#/components/schemas/NeedsYouItem"}},
+      "open": {"type":"integer","minimum":0,"maximum":64,"description":"open incidents (§3.4)"},
+      "overflow": {
+        "type": "integer",
+        "minimum": 0,
+        "description": "fingerprints refused because 64 incidents were open (capacity, not policy, §3.4)"
+      },
+      "store": {"$ref":"#/components/schemas/RepairsStore"},
+      "model_tasks": {"$ref":"#/components/schemas/RepairsModelTasks"}
+    }
+  },
+  "IncidentState": {"type":"string","enum":["open","closed"],"description":"§4.2's incident state"},
+  "IncidentOutcome": {"type":"string","enum":["open","self_recovered","fixed","unresolved","dismissed"]},
+  "IncidentSeverity": {"type":"string","enum":["warning","error","critical"]},
+  "IncidentFingerprint": {
+    "type": "object",
+    "required": ["layer","subject","reason_code"],
+    "description": "`(layer, subject, reason_code)`, one open incident per fingerprint (§3.4). `subject` is a service id, a component id or one of `111d`, `updater`, `identity`, `heal`, `storage`.",
+    "properties": {
+      "layer": {"type":"integer","minimum":0,"maximum":9},
+      "subject": {"type":"string","minLength":1,"maxLength":64},
+      "reason_code": {"type":"string","minLength":1,"maxLength":64}
+    }
+  },
+  "IncidentMark": {
+    "type": "object",
+    "required": ["seq","boot_id","mono_ms","tick","epoch","wall_claim"],
+    "description": "Where an incident opened, last recurred or closed (§3.5): the store's `seq`, the journal's boot-id and monotonic pair, the daemon tick. Ordering uses these, never `wall_claim`.",
+    "properties": {
+      "seq": {
+        "type": "integer",
+        "minimum": 0,
+        "description": "the store's (J4); 0 while the record is held only in memory"
+      },
+      "boot_id": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 36,
+        "description": "`/proc/sys/kernel/random/boot_id`, or `-` when it cannot be read"
+      },
+      "mono_ms": {"type":"integer","minimum":0},
+      "tick": {"type":"integer","minimum":0,"description":"the daemon tick (§3.5)"},
+      "epoch": {"type":"null","description":"stays null until Layer 7's epoch has a consumer (§3.5)"},
+      "wall_claim": {
+        "type": ["integer","null"],
+        "minimum": 0,
+        "description": "the node's own wall-clock claim in seconds; display only, never an ordering or a decision"
+      }
+    }
+  },
+  "IncidentEvidenceKind": {
+    "type": "string",
+    "enum": ["service_record","health","counters","exit","witness","update_tombstone","child_log_tail","storage"]
+  },
+  "IncidentEvidence": {
+    "type": "object",
+    "required": ["id","kind","ref","excerpt"],
+    "properties": {
+      "id": {"type":"string","minLength":1,"maxLength":32,"description":"the evidence id a diagnosis cites (§5.2)"},
+      "kind": {"$ref":"#/components/schemas/IncidentEvidenceKind"},
+      "ref": {"type":"string","maxLength":128},
+      "excerpt": {
+        "type": "string",
+        "maxLength": 512,
+        "description": "at most 512 B, from `111d`'s own typed sources and its own children's logs; untrusted text, rendered preformatted and never as Markdown (§3.5)"
+      }
+    }
+  },
+  "IncidentCheck": {
+    "type": "object",
+    "required": ["check_id","result"],
+    "properties": {
+      "check_id": {"type":"string","minLength":1,"maxLength":64},
+      "result": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 64,
+        "description": "the check's result word as the node writes it; a value a page does not know renders as it is"
+      }
+    }
+  },
+  "IncidentAgreement": {"type":"string","enum":["rule_only","model_only","agree","disagree"],"description":"§5.3"},
+  "IncidentDiagnosis": {
+    "type": "object",
+    "required": ["cause_id","by","confidence"],
+    "properties": {
+      "cause_id": {"type":"string","minLength":1,"maxLength":24,"description":"a playbook cause id, or `unknown`"},
+      "by": {"type":"string","enum":["t0","t1","hub"]},
+      "confidence": {
+        "type": "object",
+        "required": ["checks_satisfied","agreement"],
+        "properties": {
+          "checks_satisfied": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 1000,
+            "description": "per-mille of the cause's checks that held (§5.3)"
+          },
+          "agreement": {"$ref":"#/components/schemas/IncidentAgreement"}
+        }
+      }
+    }
+  },
+  "IncidentExplanation": {
+    "type": "object",
+    "required": ["task_id","text"],
+    "description": "The result of the incident task's mode `explain` (§5.2): the model's words, untrusted; rendered preformatted, never as Markdown.",
+    "properties": {"task_id":{"type":"string","minLength":1,"maxLength":64},"text":{"type":"string","maxLength":8192}}
+  },
+  "IncidentDismissed": {
+    "type": "object",
+    "required": ["cause_id"],
+    "properties": {
+      "cause_id": {
+        "type": ["string","null"],
+        "maxLength": 24,
+        "description": "the cause the person dismissed; null when the incident had no diagnosis"
+      }
+    }
+  },
+  "AttemptState": {
+    "type": "string",
+    "enum": ["armed","awaiting_confirm","kept","reverted","revert_failed","revert_blocked","interrupted","dismissed"],
+    "description": "§4.2's attempt state; `awaiting_confirm` is a change applied that waits for the person's confirm inside its window (§7.6)"
+  },
+  "AttemptConfirmBy": {"type":"string","enum":["session","peer"],"description":"which confirm §7.6 accepts"},
+  "AttemptProbe": {
+    "type": "object",
+    "required": ["name","result"],
+    "properties": {
+      "name": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 64,
+        "description": "the capability probe the action names (§7.2)"
+      },
+      "result": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 64,
+        "description": "the probe's result word as the node writes it"
+      }
+    }
+  },
+  "Attempt": {
+    "type": "object",
+    "required": ["id","proposal_id","incident_id","action","target","state","probe","confirm_by"],
+    "description": "One apply attempt (§7.4). The UI calls `/repairs/attempts/{id}/confirm`, `/restore` or `/dismiss` with `id` (Layer 9's second half, §18.1).",
+    "properties": {
+      "id": {"$ref":"#/components/schemas/AttemptId"},
+      "proposal_id": {
+        "type": ["string","null"],
+        "maxLength": 128,
+        "description": "null for an Undo or an apply no proposal carried"
+      },
+      "incident_id": {"oneOf":[{"$ref":"#/components/schemas/IncidentId"},{"type":"null"}]},
+      "action": {"type":"string","minLength":1,"maxLength":64,"description":"a name of the closed vocabulary (§7.3)"},
+      "target": {
+        "type": "string",
+        "maxLength": 256,
+        "description": "the action's target as text; a name or an id, never a path"
+      },
+      "state": {"$ref":"#/components/schemas/AttemptState"},
+      "probe": {
+        "oneOf": [{"$ref":"#/components/schemas/AttemptProbe"},{"type":"null"}],
+        "description": "null until the probe ran"
+      },
+      "confirm_by": {
+        "oneOf": [{"$ref":"#/components/schemas/AttemptConfirmBy"},{"type":"null"}],
+        "description": "null unless the attempt is `awaiting_confirm`"
+      }
+    }
+  },
+  "Incident": {
+    "type": "object",
+    "required": [
+      "schema",
+      "id",
+      "fingerprint",
+      "severity",
+      "count",
+      "state",
+      "opened",
+      "last",
+      "closed",
+      "evidence",
+      "checks",
+      "ruled_out",
+      "diagnosis",
+      "explanation",
+      "attempts",
+      "dismissed",
+      "outcome"
+    ],
+    "description": "§3.5's record. A re-opened fingerprint keeps its record and its diagnosis until the evidence hash changes. Every `excerpt` and every name is untrusted: text only.",
+    "properties": {
+      "schema": {"type":"integer","enum":[1]},
+      "id": {"$ref":"#/components/schemas/IncidentId"},
+      "fingerprint": {"$ref":"#/components/schemas/IncidentFingerprint"},
+      "severity": {"$ref":"#/components/schemas/IncidentSeverity"},
+      "count": {"type":"integer","minimum":1},
+      "state": {"$ref":"#/components/schemas/IncidentState"},
+      "opened": {"$ref":"#/components/schemas/IncidentMark"},
+      "last": {"$ref":"#/components/schemas/IncidentMark"},
+      "closed": {"oneOf":[{"$ref":"#/components/schemas/IncidentMark"},{"type":"null"}]},
+      "evidence": {"type":"array","items":{"$ref":"#/components/schemas/IncidentEvidence"}},
+      "checks": {"type":"array","items":{"$ref":"#/components/schemas/IncidentCheck"}},
+      "ruled_out": {"type":"array","items":{"type":"string","minLength":1,"maxLength":24}},
+      "diagnosis": {"oneOf":[{"$ref":"#/components/schemas/IncidentDiagnosis"},{"type":"null"}]},
+      "explanation": {"oneOf":[{"$ref":"#/components/schemas/IncidentExplanation"},{"type":"null"}]},
+      "attempts": {"type":"array","items":{"$ref":"#/components/schemas/Attempt"}},
+      "dismissed": {"oneOf":[{"$ref":"#/components/schemas/IncidentDismissed"},{"type":"null"}]},
+      "outcome": {"$ref":"#/components/schemas/IncidentOutcome"}
+    }
+  },
+  "SseIncident": {
+    "$ref": "#/components/schemas/Incident",
+    "description": "One `Incident` on change (§18.2): opened, its count or last moved, diagnosed, an attempt changed, closed or dismissed. Never a timer. After `reset` the Repairs view refetches `/repairs` and `/repairs/incidents`."
+  },
+  "IncidentList": {
+    "type": "object",
+    "required": ["schema","incidents","next_after_seq"],
+    "properties": {
+      "schema": {"type":"integer","enum":[1]},
+      "incidents": {"type":"array","maxItems":1000,"items":{"$ref":"#/components/schemas/Incident"}},
+      "next_after_seq": {
+        "type": ["integer","null"],
+        "minimum": 0,
+        "description": "the `seq` of the last row, or null when that page is the last"
+      }
+    }
+  },
+  "AuditKind": {
+    "type": "string",
+    "enum": [
+      "proposed",
+      "accepted",
+      "applied",
+      "kept",
+      "reverted",
+      "revert_failed",
+      "dismissed",
+      "undo",
+      "fix_sent",
+      "fix_received",
+      "delegated",
+      "refused",
+      "revert_blocked",
+      "vouch_sent"
+    ]
+  },
+  "AuditConfirmer": {"type":"string","enum":["probe","human"]},
+  "AuditBy": {"type":"string","enum":["human","daemon"]},
+  "AuditEntry": {
+    "type": "object",
+    "required": [
+      "seq",
+      "boot_id",
+      "mono_ms",
+      "kind",
+      "proposal_id",
+      "action_hash",
+      "probe_result",
+      "revert_result",
+      "confirmer",
+      "by"
+    ],
+    "description": "One record of the `heal/audit` stream (§4). Nothing in it is free text from a log, a message or a peer; nothing in it is signed.",
+    "properties": {
+      "seq": {"type":"integer","minimum":0},
+      "boot_id": {"type":"string","minLength":1,"maxLength":36},
+      "mono_ms": {"type":"integer","minimum":0},
+      "kind": {"$ref":"#/components/schemas/AuditKind"},
+      "proposal_id": {"type":["string","null"],"maxLength":128},
+      "action_hash": {
+        "type": ["string","null"],
+        "pattern": "^[0-9a-f]{64}$",
+        "description": "the proposal's `action_hash` (§7.3)"
+      },
+      "probe_result": {"type":["string","null"],"maxLength":64},
+      "revert_result": {"type":["string","null"],"maxLength":64},
+      "confirmer": {
+        "oneOf": [{"$ref":"#/components/schemas/AuditConfirmer"},{"type":"null"}],
+        "description": "who confirmed the keep; null where no keep was asked"
+      },
+      "by": {"$ref":"#/components/schemas/AuditBy"}
+    }
+  },
+  "RepairAudit": {
+    "type": "object",
+    "required": ["schema","entries","next_after_seq"],
+    "properties": {
+      "schema": {"type":"integer","enum":[1]},
+      "entries": {"type":"array","maxItems":1000,"items":{"$ref":"#/components/schemas/AuditEntry"}},
+      "next_after_seq": {"type":["integer","null"],"minimum":0}
+    }
   }
 };
 
@@ -4899,6 +5274,70 @@ export const operations: Record<string, ContractOperation> = {
     "query": [],
     "pathParams": [],
     "errors": []
+  },
+  "getRepairs": {
+    "method": "GET",
+    "path": "/api/v1/repairs",
+    "success": 200,
+    "contentType": "application/json",
+    "schema": {"$ref":"#/components/schemas/RepairsStatus"},
+    "schemasByType": {"application/json":{"$ref":"#/components/schemas/RepairsStatus"}},
+    "requestSchema": null,
+    "query": [],
+    "pathParams": [],
+    "errors": []
+  },
+  "listRepairIncidents": {
+    "method": "GET",
+    "path": "/api/v1/repairs/incidents",
+    "success": 200,
+    "contentType": "application/json",
+    "schema": {"$ref":"#/components/schemas/IncidentList"},
+    "schemasByType": {"application/json":{"$ref":"#/components/schemas/IncidentList"}},
+    "requestSchema": null,
+    "query": [
+      {"name":"state","required":false},
+      {"name":"after_seq","required":false},
+      {"name":"limit","required":false}
+    ],
+    "pathParams": [],
+    "errors": [400]
+  },
+  "getRepairIncident": {
+    "method": "GET",
+    "path": "/api/v1/repairs/incidents/{id}",
+    "success": 200,
+    "contentType": "application/json",
+    "schema": {"$ref":"#/components/schemas/Incident"},
+    "schemasByType": {"application/json":{"$ref":"#/components/schemas/Incident"}},
+    "requestSchema": null,
+    "query": [],
+    "pathParams": ["id"],
+    "errors": [404]
+  },
+  "dismissRepairIncident": {
+    "method": "POST",
+    "path": "/api/v1/repairs/incidents/{id}/dismiss",
+    "success": 204,
+    "contentType": null,
+    "schema": null,
+    "schemasByType": {},
+    "requestSchema": null,
+    "query": [],
+    "pathParams": ["id"],
+    "errors": [404]
+  },
+  "listRepairAudit": {
+    "method": "GET",
+    "path": "/api/v1/repairs/audit",
+    "success": 200,
+    "contentType": "application/json",
+    "schema": {"$ref":"#/components/schemas/RepairAudit"},
+    "schemasByType": {"application/json":{"$ref":"#/components/schemas/RepairAudit"}},
+    "requestSchema": null,
+    "query": [{"name":"after_seq","required":false},{"name":"limit","required":false}],
+    "pathParams": [],
+    "errors": [400]
   }
 };
 
@@ -4921,7 +5360,8 @@ export const sse: { events: Record<string, string>; chat: Record<string, string>
     "relay": "SseRelay",
     "registry": "SseRegistry",
     "storage": "SseStorage",
-    "dataset": "SseDataset"
+    "dataset": "SseDataset",
+    "incident": "SseIncident"
   },
   "chat": {"token":"SseChatToken","tool":"SseChatTool","done":"SseChatDone","error":"SseChatError"}
 };

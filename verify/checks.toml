@@ -2184,6 +2184,36 @@ strength = "C"
 needs = ["pnpm"]
 requires = ["l4.contract.fresh"]
 
+# Layer 9 row C1 (9-evolution/README.md §18.1, §18.4): the Repairs contract, part 1 (the incidents): the routes, auth and
+# paging (the last.seq cursor, null on the last page, a store-closed node's seq-0 rows in one page), the shapes, the
+# `incident` SSE frame and the store's handling of it, the lazy repairs adapter and its mock; Layer 8's tails pinned as
+# prefixes so later parts append.
+[[check]]
+id = "l4.ui.layer9-contract"
+kind = "unit"
+cmd = [
+  "pnpm",
+  "exec",
+  "vitest",
+  "run",
+  "test/layer9-contract.test.ts",
+  "--reporter=default",
+  "--reporter=json",
+  "--outputFile={scratch}/vitest.json",
+]
+cwd = "4-interface/ui"
+tier = "slow"
+layers = [4, 9]
+seams = ["L4-L4:openapi-ts", "L4-L9:repairs-api"]
+adapter = "vitest"
+timeout_s = 1800
+rerun = "pnpm --dir 4-interface/ui exec vitest run test/layer9-contract.test.ts"
+rerun_cost = "slow, ~10 s"
+covered_by = "l4.ui"
+strength = "C"
+needs = ["pnpm"]
+requires = ["l4.contract.fresh"]
+
 [[check]]
 id = "l4.ui.layer7-views"
 kind = "unit"

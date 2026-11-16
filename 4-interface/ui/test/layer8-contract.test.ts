@@ -217,13 +217,13 @@ describe("Layer 8 enums (the pins an enum bump touches)", () => {
   });
   it("the SSE map appends `storage` and `dataset` after Layer 7's `registry`; the earlier fifteen are untouched", () => {
     expect(sse.events.storage).toBe("SseStorage");
-    expect([...EVENTS_EVENT_NAMES].slice(13)).toEqual([
+    expect([...EVENTS_EVENT_NAMES].slice(13, 17)).toEqual([
       "relay",
       "registry",
       "storage",
       "dataset",
     ]);
-    expect([...EVENTS_EVENT_NAMES]).toHaveLength(17);
+    expect([...EVENTS_EVENT_NAMES].length).toBeGreaterThanOrEqual(17); // Layer 9 appends `incident` (test/layer9-contract.test.ts pins the whole list)
   });
 });
 

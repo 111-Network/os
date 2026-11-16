@@ -23,7 +23,8 @@ export type EventsFrame =
   | { event: "relay"; data: Schemas["SseRelay"] }
   | { event: "registry"; data: Schemas["SseRegistry"] }
   | { event: "storage"; data: Schemas["SseStorage"] }
-  | { event: "dataset"; data: Schemas["SseDataset"] };
+  | { event: "dataset"; data: Schemas["SseDataset"] }
+  | { event: "incident"; data: Schemas["SseIncident"] };
 
 /** Frames on the `POST /api/v1/chat` response stream. */
 export type ChatFrame =
@@ -35,7 +36,7 @@ export type ChatFrame =
 export type EventsEventName = EventsFrame["event"];
 export type ChatEventName = ChatFrame["event"];
 
-export const EVENTS_EVENT_NAMES = ["status", "services", "devices", "proposal", "agent", "reset", "message", "contact", "fabric", "nearby", "panels", "network_message", "bridge", "relay", "registry", "storage", "dataset"] as const;
+export const EVENTS_EVENT_NAMES = ["status", "services", "devices", "proposal", "agent", "reset", "message", "contact", "fabric", "nearby", "panels", "network_message", "bridge", "relay", "registry", "storage", "dataset", "incident"] as const;
 export const CHAT_EVENT_NAMES = ["token", "tool", "done", "error"] as const;
 
 // Convenience aliases for the schemas the app uses.
@@ -228,6 +229,40 @@ export type DatasetSearchResult = Schemas["DatasetSearchResult"];
 export type TileSet = Schemas["TileSet"];
 export type TileSets = Schemas["TileSets"];
 export type DatasetEvent = Schemas["SseDataset"];
+export type IncidentId = Schemas["IncidentId"];
+export type AttemptId = Schemas["AttemptId"];
+export type DelegationId = Schemas["DelegationId"];
+export type DraftId = Schemas["DraftId"];
+export type FixId = Schemas["FixId"];
+export type RepairsStatus = Schemas["RepairsStatus"];
+export type RepairsVerdict = Schemas["RepairsVerdict"];
+export type NeedsYouKind = Schemas["NeedsYouKind"];
+export type NeedsYouItem = Schemas["NeedsYouItem"];
+export type RepairsStoreState = Schemas["RepairsStoreState"];
+export type RepairsStore = Schemas["RepairsStore"];
+export type RepairsModelTasks = Schemas["RepairsModelTasks"];
+export type Incident = Schemas["Incident"];
+export type IncidentState = Schemas["IncidentState"];
+export type IncidentOutcome = Schemas["IncidentOutcome"];
+export type IncidentSeverity = Schemas["IncidentSeverity"];
+export type IncidentFingerprint = Schemas["IncidentFingerprint"];
+export type IncidentMark = Schemas["IncidentMark"];
+export type IncidentEvidence = Schemas["IncidentEvidence"];
+export type IncidentEvidenceKind = Schemas["IncidentEvidenceKind"];
+export type IncidentCheck = Schemas["IncidentCheck"];
+export type IncidentAgreement = Schemas["IncidentAgreement"];
+export type IncidentDiagnosis = Schemas["IncidentDiagnosis"];
+export type IncidentExplanation = Schemas["IncidentExplanation"];
+export type IncidentDismissed = Schemas["IncidentDismissed"];
+export type IncidentList = Schemas["IncidentList"];
+export type Attempt = Schemas["Attempt"];
+export type AttemptState = Schemas["AttemptState"];
+export type AttemptConfirmBy = Schemas["AttemptConfirmBy"];
+export type AttemptProbe = Schemas["AttemptProbe"];
+export type AuditEntry = Schemas["AuditEntry"];
+export type AuditKind = Schemas["AuditKind"];
+export type RepairAudit = Schemas["RepairAudit"];
+export type IncidentEvent = Schemas["SseIncident"];
 export type ProblemCode = Schemas["Problem"]["code"];
 
 // Enum tuples (runtime copies of the contract enums).
@@ -278,3 +313,14 @@ export const DATASET_LOCATIONS = ["origin", "in_place", null] as const;
 export const DATASET_USED_BY = ["map", "encyclopedia", "agent", "updates"] as const;
 export const JOB_STATES = ["queued", "running", "paused (offline)", "paused (metered cap)", "paused (metered link)", "paused (disk low)", "paused (source busy)", "done", "failed (name mismatch)", "failed (source cannot resume)", "cancelled"] as const;
 export const COMPONENT_STARTS = ["always", "on_demand"] as const;
+export const REPAIRS_VERDICTS = ["clear", "waiting", "confirm"] as const;
+export const NEEDS_YOU_KINDS = ["proposal", "confirm", "revert_failed", "revert_blocked", "refused"] as const;
+export const REPAIRS_STORE_STATES = ["open", "full", "unavailable", "journal"] as const;
+export const INCIDENT_STATES = ["open", "closed"] as const;
+export const INCIDENT_OUTCOMES = ["open", "self_recovered", "fixed", "unresolved", "dismissed"] as const;
+export const INCIDENT_SEVERITIES = ["warning", "error", "critical"] as const;
+export const INCIDENT_EVIDENCE_KINDS = ["service_record", "health", "counters", "exit", "witness", "update_tombstone", "child_log_tail", "storage"] as const;
+export const INCIDENT_AGREEMENTS = ["rule_only", "model_only", "agree", "disagree"] as const;
+export const ATTEMPT_STATES = ["armed", "awaiting_confirm", "kept", "reverted", "revert_failed", "revert_blocked", "interrupted", "dismissed"] as const;
+export const ATTEMPT_CONFIRM_BY = ["session", "peer"] as const;
+export const AUDIT_KINDS = ["proposed", "accepted", "applied", "kept", "reverted", "revert_failed", "dismissed", "undo", "fix_sent", "fix_received", "delegated", "refused", "revert_blocked", "vouch_sent"] as const;
