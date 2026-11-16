@@ -6,7 +6,10 @@ use std::path::Path;
 
 use super::*;
 use crate::blobs::{BlobError, BlobHash, ObjectKey};
-use crate::keys::{derive_store_key, KeyError, ModeS, ModeT};
+use crate::keys::{
+    derive_store_key, derive_tagged_key, KeyError, KeyProvider, ModeS, ModeT, NODE_STATE_KDF_TAG,
+    STORE_KDF_TAG,
+};
 
 const ME: [u8; 32] = [0xA0; 32];
 const PEER: [u8; 32] = [0xB0; 32];
@@ -5582,4 +5585,85 @@ fn a_missing_fixed_totals_key_fails_closed_and_is_healed_at_open() {
     assert_eq!(s.custody_stats().unwrap(), stats);
     assert_eq!(s.forward_stats().unwrap(), fwd);
     assert_totals_exact(&s);
+}
+
+// ---------------------------------------------------------------------------
+// Layer 8 §2.7 S1: `KeyProvider::key_for`, the node-state store's key seam
+// ---------------------------------------------------------------------------
+
+/// Layer 8 §2.7 S1, G13 (1): through the provider seam the store opens with,
+/// `store_key()` equals `key_for(STORE_KDF_TAG)` byte for byte, so a fabric
+/// store keyed by either reopens with the other; `key_for(NODE_STATE_KDF_TAG)`
+/// is the node-state store's key (Layer 8 §2.2 rule 2), another key, which
+/// the fabric store refuses on page 1.
+#[test]
+fn key_for_the_store_tag_is_the_store_key_byte_for_byte() {
+    for (secret, node) in [([1; 32], ME), ([0; 32], PEER), ([0xff; 32], PEER2)] {
+        let mode_s = ModeS::new(zeroize::Zeroizing::new(secret), node);
+        let p: &dyn KeyProvider = &mode_s;
+        let store = p.store_key().unwrap();
+        assert_eq!(
+            store.as_bytes(),
+            p.key_for(STORE_KDF_TAG).unwrap().as_bytes()
+        );
+        assert_eq!(
+            store.as_bytes(),
+            derive_store_key(&secret, &node).unwrap().as_bytes()
+        );
+        let node_state = p.key_for(NODE_STATE_KDF_TAG).unwrap();
+        assert_eq!(
+            node_state.as_bytes(),
+            derive_tagged_key(NODE_STATE_KDF_TAG, &secret, &node)
+                .unwrap()
+                .as_bytes()
+        );
+        assert_ne!(node_state.as_bytes(), store.as_bytes());
+    }
+
+    let mode_s = ModeS::new(zeroize::Zeroizing::new([1; 32]), ME);
+    let p: &dyn KeyProvider = &mode_s;
+    let t = tempfile::tempdir().unwrap();
+    let (mut s, d) = Store::open(t.path(), &p.key_for(STORE_KDF_TAG).unwrap(), &params(1)).unwrap();
+    assert!(matches!(d, EpochDecision::Mint(r) if r.unclean));
+    s.record_epoch(1).unwrap();
+    s.close(1).unwrap();
+    let (s, d) = Store::open_with(t.path(), p, &params(1)).unwrap();
+    assert_eq!(d, EpochDecision::Keep { epoch: 1 });
+    s.close(1).unwrap();
+    assert!(matches!(
+        Store::open(
+            t.path(),
+            &p.key_for(NODE_STATE_KDF_TAG).unwrap(),
+            &params(1)
+        ),
+        Err(StoreError::WrongKey)
+    ));
+    // The refused key changed nothing: the store's own key still opens it.
+    let (s, d) = Store::open(t.path(), &p.key_for(STORE_KDF_TAG).unwrap(), &params(1)).unwrap();
+    assert_eq!(d, EpochDecision::Keep { epoch: 1 });
+    s.close(1).unwrap();
+}
+
+/// Layer 8 §2.2 rule 2: Mode T answers `Unsupported` for every tag, the
+/// node-state tag included, with the same refusal as its `store_key()`, so
+/// `store_key()` and `key_for(STORE_KDF_TAG)` agree there too; no store opens.
+#[test]
+fn mode_t_key_for_is_unsupported() {
+    let p: &dyn KeyProvider = &ModeT;
+    for tag in [STORE_KDF_TAG, NODE_STATE_KDF_TAG, b"111/any/v1".as_slice()] {
+        assert!(
+            matches!(p.key_for(tag), Err(KeyError::Unsupported(_))),
+            "{tag:?}"
+        );
+    }
+    assert_eq!(
+        p.store_key().unwrap_err(),
+        p.key_for(STORE_KDF_TAG).unwrap_err()
+    );
+    let t = tempfile::tempdir().unwrap();
+    assert!(matches!(
+        Store::open_with(t.path(), p, &params(1)),
+        Err(StoreError::Key(KeyError::Unsupported(_)))
+    ));
+    assert!(!t.path().join(DB_FILE).exists());
 }
