@@ -2605,9 +2605,14 @@ rerun_cost = "ns, about 2.5 min (the default 60 s windows plus the settle)"
 strength = "R"
 needs = ["bash", "userns", "netns", "python3", "strace"]
 
-# G8 presence: the 111 Nearby kind, the LAN/hub split, the registry TXT, hops. Row V2.
-# A T0 stub: it prints '<G> SKIPPED: not built yet (T0 stub)' and exits 0 (7-relay/TASKS.md row V2). Strength N
-# until the row lands; promote it to R then (and to cargo = true if the gate builds).
+# G8 presence and the registry (row V2): hub H and members M1, M2 as real `111 daemon`s in network namespaces on one bridge (M1 also
+# direct to M2 through two recording relays; M1 with the Layer 6 bridge stub and a fake Reticulum venv, M2 under a bind() shim): the `111`
+# Nearby rows and their strings, the LAN-vs-hub split, nothing refreshed by a replay, a card or a keepalive, the heartbeat codes, the
+# gateway row's four codes (the stub ntfy server), the role bit's re-mint, the `_n111._tcp` record and its gates, a browse's 5 s stop,
+# the mdns-sd re-arm (the daemon thread's wakeups, the A records), no Layer 7 path sending to a licensed board (the stub send logs stay
+# put; no `licensed_board` refusal exists on a Layer 7 route in v1), the hop read (a fake `rnpath`), lost-hub recovery with an outbound
+# SYN/ARP log, and `cargo test -p node111 --lib` for relay::presence (the validator tests) and the two mDNS re-arm tests. SKIPPED without a
+# user+net+pid namespace, a built `111` (BIN111 or CARGO_TARGET_DIR), python3, ip, nsenter, curl or jq (FAIL under REQUIRE_G8=1).
 [[check]]
 id = "l7.g8"
 kind = "unit"
@@ -2618,9 +2623,9 @@ seams = ["L5-L7:fabric-tap", "L1-L7:registry-dnssd", "L6-L7:hops"]
 adapter = "okfail"
 lock = "verify"
 timeout_s = 1800
-rerun_cost = "ns, T0 stub: SKIPPED today"
-strength = "N"
-needs = ["bash"]
+rerun_cost = "ns, about 11 min (three daemons, a settle wait of about 2.5 min before the wakeup windows, the 30 s LAN refresh waits, daemon restarts, a cargo test build on first use; needs a built 111)"
+strength = "R"
+needs = ["bash", "userns", "netns", "python3", "ip", "nsenter", "curl", "jq", "cargo", "gcc"]
 
 # G9 cross-hub custody over TEST-NET-1 with TLS. Row V3. Needs the tag checkpoint-layer-6 (absent).
 # A T0 stub: it prints '<G> SKIPPED: not built yet (T0 stub)' and exits 0 (7-relay/TASKS.md row V3). Strength N
