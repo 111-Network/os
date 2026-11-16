@@ -317,6 +317,11 @@ the `x-sse-events` map) into `ui/src/lib/api/types.gen.ts` — never hand-edited
     `test/layer8-contract.test.ts` pins the prefix of the grown event list. (6) node111's mirrors sit beside their routes (`dashboard/api_v1/repairs.rs`, D22); until then the dismissal is in `UNROUTED` of `tests/dashboard_auth.rs`.
   - *The UI seam:* the Layer 9 adapter is `ui/src/lib/api/repairs.ts` (`RepairsAdapter`, `createHttpRepairs`), reached through `getRepairs()` in `lib/api/index.ts` and imported dynamically (only by a Layer 9 view, or by the
     store after an `incident` frame), so none of it is in the eager chunk; the dev mock's repairs is `adapter.mock.repairs`.
+  - *The `busy` rule (Layer 9, part 0; §7.4 step 2, §16 rows 15 and 18, corrections of locked Layers 4 and 6):* `Problem.code` gains `busy`, appended. While another change holds the node-wide apply lock (an apply, probe and
+    revert loop, a reach-class confirm wait included) or the undo file exists in any phase, `PATCH /api/v1/transport/posture` and an accept on `POST /api/v1/proposals/{id}/decision` (any proposal kind, a
+    `device` one included) answer **409 `busy`** at once where today they wait on the applier's lock. The problem's `detail` carries that attempt's id (`att-…`, the family above); nothing is armed, the
+    proposal stays open and the call changes nothing. A client shows `busy` (the Layer 6 posture control, the proposal card) and lets the person try again; it never retries by itself. A dismissal of a
+    proposal is not an accept and is not refused. No route is added. `ui/src/lib/api/sse.gen.ts` lists `busy` in `PROBLEM_CODES` after `range_not_satisfiable` (and `types.gen.ts` in the `Problem.code` union); the guard itself lands with D20.
 - **Not gated:** `/`, static assets, `/health` (body is booleans), `/origin/v1/*` (Layer 7, §9.1: the hub's verified update files, GET only,
   404 unless the hub serves them; outside `openapi.yaml`; Layer 8 adds `/origin/v1/catalogue/*` and `/origin/v1/notice/*`, §16.7: GET and HEAD only, 405
   otherwise, served only while `hub_role`, LAN sharing and `origin.datasets` (or `origin.components`, or `origin.serve` for the release's source, for a notice) are on, outside `API`) and `/api/v1/auth/*`. Everything

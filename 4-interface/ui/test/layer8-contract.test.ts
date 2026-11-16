@@ -142,7 +142,7 @@ describe("Layer 8 enums (the pins an enum bump touches)", () => {
     ]);
   });
   it("Problem.code appends exactly the five codes after Layer 7's; none already existed", () => {
-    expect([...PROBLEM_CODES].slice(27)).toEqual([
+    expect([...PROBLEM_CODES].slice(27, 32)).toEqual([
       "insufficient_space",
       "untrusted_publisher",
       "job_running",

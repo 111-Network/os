@@ -46,7 +46,7 @@ import {
   STORAGE_NOTICE_KINDS,
   STORAGE_STORES,
 } from "../src/lib/api/types";
-import { schemas, sse } from "./contract.gen";
+import { operations, schemas, sse } from "./contract.gen";
 
 const root = resolve(__dirname, "..");
 
@@ -159,5 +159,23 @@ describe("runtime tuples mirror the contract", () => {
   it("the Layer 9 `incident` event is in the map and the tuple", () => {
     expect(sse.events.incident).toBe("SseIncident");
     expect([...EVENTS_EVENT_NAMES]).toContain("incident");
+  });
+
+  it("Layer 9 part 0: `busy` is the last Problem code, and the posture and decision routes list it", () => {
+    expect(PROBLEM_CODES[PROBLEM_CODES.length - 1]).toBe("busy");
+    const yaml = readFileSync(resolve(root, "../api/openapi.yaml"), "utf8");
+    for (const path of ["/api/v1/transport/posture:", "/api/v1/proposals/{id}/decision:"]) {
+      const at = yaml.indexOf(`\n  ${path}`);
+      expect(at, path).toBeGreaterThan(0);
+      const next = yaml.indexOf("\n  /api/", at + 1);
+      const block = yaml.slice(at, next);
+      const line = block.split("\n").find((l) => l.trimStart().startsWith('"409"'));
+      expect(line, path).toBeDefined();
+      expect(line).toMatch(/busy/);
+      expect(line).toMatch(/att-/);
+    }
+    for (const id of ["patchTransportPosture", "decideProposal"] as const) {
+      expect(operations[id]!.errors).toContain(409);
+    }
   });
 });

@@ -60,7 +60,8 @@ export const schemas: Record<string, JsonSchema> = {
           "untrusted_publisher",
           "job_running",
           "store_unavailable",
-          "range_not_satisfiable"
+          "range_not_satisfiable",
+          "busy"
         ]
       },
       "errors": {

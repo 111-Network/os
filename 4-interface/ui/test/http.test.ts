@@ -161,6 +161,15 @@ describe("devices", () => {
 });
 
 describe("errors", () => {
+  it("a 409 busy on the posture and the decision routes keeps its code and the attempt id in `detail`", async () => {
+    const busy = () => problemResponse(409, "busy", "Busy", "att-0123456789ab");
+    const a = adapterWith(busy);
+    const decide = await a.adapter.decide("prop-1", "accepted").catch((e: unknown) => e);
+    expect(decide).toMatchObject({ status: 409, code: "busy", message: "att-0123456789ab" });
+    const posture = await a.adapter.transport.patchPosture({ region: "EU_868" }).catch((e: unknown) => e);
+    expect(posture).toMatchObject({ status: 409, code: "busy", message: "att-0123456789ab" });
+  });
+
   it("rejects with ApiError carrying the problem+json", async () => {
     const { adapter } = adapterWith(() => problemResponse(409, "already_decided", "Already decided", "It was accepted."));
     const err = await adapter.decide("p", "dismissed").catch((e: unknown) => e);
