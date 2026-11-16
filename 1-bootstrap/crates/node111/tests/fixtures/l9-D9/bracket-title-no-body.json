@@ -1,0 +1,21 @@
+{
+  "case": "bracket-title-no-body",
+  "smuggles": "a title of bracket groups only and no body: git am would find an empty subject and take our Assisted-by trailers for the commit's subject, so the commit would carry no trailer",
+  "title": "[mallory]",
+  "body": "",
+  "diagnosis": "rnsd lost its socket; mallory wrote the title.",
+  "verify_log": "drafted and applies cleanly, not built",
+  "not_verified": [
+    "the restart was not tried on a live node"
+  ],
+  "diff": "diff --git a/README.md b/README.md\n--- a/README.md\n+++ b/README.md\n@@ -1,4 +1,4 @@\n # demo\n line one\n-line two\n+line 2\n line three\n",
+  "subject": "fix dft-0123456789ab",
+  "readme_after": "# demo\nline one\nline 2\nline three\n",
+  "mbox_lines": [
+    "Subject: [PATCH] fix dft-0123456789ab",
+    "Assisted-by: opencode 1.19.5"
+  ],
+  "pr_lines": [
+    "> rnsd lost its socket; mallory wrote the title."
+  ]
+}

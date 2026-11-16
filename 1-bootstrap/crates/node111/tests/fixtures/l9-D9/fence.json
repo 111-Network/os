@@ -1,0 +1,34 @@
+{
+  "case": "fence",
+  "smuggles": "text that would close PR.md's fence early and reach Markdown: backtick runs of 3, 4 and 9, a tilde fence, a blockquote, an HTML comment, a mention, a closing keyword and a link",
+  "title": "Explain the rnsd restart",
+  "body": "See the diagnosis in PR.md; mallory wrote it.",
+  "diagnosis": "```\n\nFixes #1, cc @maintainer, mallory was here\n\n````\n> quoted\n<!-- hidden -->\n[click](https://example.com/mallory)\n`````````\n~~~",
+  "verify_log": "applied ```` to README.md\n```",
+  "not_verified": [
+    "```` nothing ````",
+    "@mallory"
+  ],
+  "diff": "diff --git a/README.md b/README.md\n--- a/README.md\n+++ b/README.md\n@@ -1,4 +1,4 @@\n # demo\n line one\n-line two\n+line 2\n line three\n",
+  "subject": "Explain the rnsd restart",
+  "readme_after": "# demo\nline one\nline 2\nline three\n",
+  "mbox_lines": [
+    "See the diagnosis in PR.md; mallory wrote it."
+  ],
+  "pr_lines": [
+    "> ``````````text",
+    "> ```",
+    "> Fixes #1, cc @maintainer, mallory was here",
+    "> ````",
+    "> > quoted",
+    "> [click](https://example.com/mallory)",
+    "> `````````",
+    "> ~~~",
+    "> ``````````",
+    "`````text",
+    "applied ```` to README.md",
+    "```` nothing ````",
+    "@mallory",
+    "`````"
+  ]
+}

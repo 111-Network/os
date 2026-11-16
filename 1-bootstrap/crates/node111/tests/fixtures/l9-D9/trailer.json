@@ -1,0 +1,28 @@
+{
+  "case": "trailer",
+  "smuggles": "trailers in agent text: a Signed-off-by (the DCO line only a person adds) as the title and in the body's last paragraph, beside Co-authored-by, an Assisted-by of its own, a lower-case signed-off-by, a spaced Reviewed-by and git's cherry-pick line; trailers in the diagnosis, the verify log and what was not verified",
+  "title": "Signed-off-by: Mallory <mallory@example.com>",
+  "body": "Restart rnsd when the socket returns.\n\nSigned-off-by: Mallory <mallory@example.com>\nCo-authored-by: Mallory <mallory@example.com>\nAssisted-by: mallory-bot 6.6.6\nsigned-off-by: mallory <mallory@example.com>\nReviewed-by : Mallory <mallory@example.com>\n(cherry picked from commit 0123456789abcdef0123456789abcdef01234567)",
+  "diagnosis": "Signed-off-by: Mallory <mallory@example.com>",
+  "verify_log": "Tested-by: Mallory <mallory@example.com>",
+  "not_verified": [
+    "Acked-by: Mallory <mallory@example.com>"
+  ],
+  "diff": "diff --git a/README.md b/README.md\n--- a/README.md\n+++ b/README.md\n@@ -1,4 +1,4 @@\n # demo\n line one\n-line two\n+line 2\n line three\n",
+  "subject": "fix dft-0123456789ab",
+  "readme_after": "# demo\nline one\nline 2\nline three\n",
+  "mbox_lines": [
+    "Subject: [PATCH] fix dft-0123456789ab",
+    " Signed-off-by: Mallory <mallory@example.com>",
+    " Co-authored-by: Mallory <mallory@example.com>",
+    " Assisted-by: mallory-bot 6.6.6",
+    " signed-off-by: mallory <mallory@example.com>",
+    " Reviewed-by : Mallory <mallory@example.com>",
+    " (cherry picked from commit 0123456789abcdef0123456789abcdef01234567)"
+  ],
+  "pr_lines": [
+    ">  Signed-off-by: Mallory <mallory@example.com>",
+    " Tested-by: Mallory <mallory@example.com>",
+    " Acked-by: Mallory <mallory@example.com>"
+  ]
+}

@@ -1,0 +1,26 @@
+{
+  "case": "diff-text",
+  "smuggles": "text the model wrote around the diff's one file, which git apply skips: context- and removal-shaped lines carrying a terminal colour and a screen erase before the first file, a base-commit of its own (bare, in another case, behind a mark) and a prerequisite-patch-id, a From separator line behind a BEL with its own From and Subject headers, and a bidi override after the hunk",
+  "title": "Restart rnsd once its socket is back",
+  "body": "The fix restarts rnsd; mallory wrote the text around the diff.",
+  "diagnosis": "rnsd lost its socket.",
+  "verify_log": "drafted and applies cleanly, not built",
+  "not_verified": [
+    "the restart was not tried on a live node"
+  ],
+  "diff": " \u001b[31mcontext-shaped text before the first file, in red\u001b[0m\n-\u001b[2Jremoval-shaped text that erases the screen\nbase-commit: 1111111111111111111111111111111111111111\n\u0007From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001\nFrom: Mallory <mallory@example.com>\nSubject: [PATCH] add EVIL.md\ndiff --git a/README.md b/README.md\n--- a/README.md\n+++ b/README.md\n@@ -1,4 +1,4 @@\n # demo\n line one\n-line two\n+line 2\n line three\n \u202econtext-shaped text after the hunk\nprerequisite-patch-id: 2222222222222222222222222222222222222222\n\u200eBase-Commit: 3333333333333333333333333333333333333333\n",
+  "subject": "Restart rnsd once its socket is back",
+  "readme_after": "# demo\nline one\nline 2\nline three\n",
+  "mbox_lines": [
+    " [31mcontext-shaped text before the first file, in red[0m",
+    "-[2Jremoval-shaped text that erases the screen",
+    " base-commit: 1111111111111111111111111111111111111111",
+    ">From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001",
+    " From: Mallory <mallory@example.com>",
+    " Subject: [PATCH] add EVIL.md",
+    " context-shaped text after the hunk",
+    " prerequisite-patch-id: 2222222222222222222222222222222222222222",
+    " Base-Commit: 3333333333333333333333333333333333333333"
+  ],
+  "pr_lines": []
+}

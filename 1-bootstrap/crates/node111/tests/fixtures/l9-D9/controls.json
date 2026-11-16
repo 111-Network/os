@@ -1,0 +1,30 @@
+{
+  "case": "controls",
+  "smuggles": "control characters (an ANSI erase and conceal, an OSC 8 link, backspaces, NUL), a bare CR line break before a From separator, bidi overrides, an RFC 2047 word that decodes to a line break, in-body From and Subject headers and a [PATCH] line that steer git am's author and subject, a scissors line, and a concealed addition in the diff",
+  "title": "\u001b[2K\rFix \u202erestart\u202c rnsd =?UTF-8?q?evil=0AFrom:=20mallory?=\u0000",
+  "body": "From: Mallory <mallory@example.com>\nSubject: [PATCH] the subject mallory wants\n[PATCH] another subject from mallory\n\nRestart rnsd.\rFrom 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001\n-- >8 --\nFrom: Mallory <mallory@example.com>\nSubject: [PATCH] scissored by mallory\n\u001b[8mhidden from the terminal\u001b[0m\u202e",
+  "diagnosis": "\u001b]8;;https://example.com/mallory\u0007link\u001b]8;;\u0007",
+  "verify_log": "ok\b\b\b\bfail",
+  "not_verified": [
+    "\u202eesrever ni nettirw"
+  ],
+  "diff": "diff --git a/README.md b/README.md\n--- a/README.md\n+++ b/README.md\n@@ -1,4 +1,4 @@\n # demo\n line one\n-line two\n+line 2\u001b[8m concealed by mallory\u001b[0m\n line three\nFrom 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001\nFrom: Mallory <mallory@example.com>\n",
+  "subject": "[2K Fix restart rnsd = ?UTF-8?q?evil=0AFrom:=20mallory?=",
+  "readme_after": "# demo\nline one\nline 2[8m concealed by mallory[0m\nline three\n",
+  "mbox_lines": [
+    " From: Mallory <mallory@example.com>",
+    " Subject: [PATCH] the subject mallory wants",
+    " [PATCH] another subject from mallory",
+    "Restart rnsd.",
+    ">From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001",
+    "-- > 8 --",
+    " Subject: [PATCH] scissored by mallory",
+    "[8mhidden from the terminal[0m",
+    "+line 2[8m concealed by mallory[0m"
+  ],
+  "pr_lines": [
+    "> ]8;;https://example.com/mallorylink]8;;",
+    "okfail",
+    "esrever ni nettirw"
+  ]
+}
