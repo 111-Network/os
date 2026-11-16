@@ -4,7 +4,7 @@
 
 ## Optional
 
-- [age](age.md): File-encryption format with X25519 recipients; planned for history export only. | candidate | identity,offline,storage
+- [age](age.md): File-encryption format with X25519 recipients; possible hub-side tooling format. | candidate | identity,offline,storage
 - [Automerge](automerge.md): Local-first CRDT library for JSON documents with Git-like merge history. | candidate | crdt,offline,storage
 - [bc-sskr](bc-sskr.md): Audited C Shamir key sharing that round-trips with BIP-39 mnemonics. | candidate | identity,offline
 - [BLAKE3 bao-tree](blake3-bao.md): BLAKE3 addressing with verified streaming for bulk objects; bao-tree is pre-1.0. | candidate | messaging,storage,sync
@@ -20,6 +20,7 @@
 - [Home Assistant Ingress](home-assistant-ingress.md): Case study of sub-path panel proxying; it shares the dashboard origin. | candidate | networking,panel
 - [Iroh NodeId](iroh-nodeid.md): Raw-Ed25519-pubkey NodeId proven at 200M-plus endpoints on public relays. | candidate | identity,networking
 - [jsQR](jsqr.md): Pure-JavaScript QR decoder; camera capture around it needs a secure context. | candidate | identity,panel
+- [kiwix-tools](kiwix-tools.md): GPL offline-encyclopedia server for ZIM files; RSS on a Pi unmeasured. | candidate | offline,panel,storage
 - [Leviculum](leviculum.md): Independent Rust reimplementation of Reticulum; AGPL-3.0-or-later, not upstream, reference only. | candidate | mesh,networking,offline
 - [libsodium](libsodium.md): Portable C crypto library; no comprehensive audit, parity and reference role only. | candidate | identity,networking,offline
 - [llama.cpp](llama-cpp.md): Low-level portable C/C++ GGUF inference engine for CPU-first local inference. | candidate | llm,offline,runtime
@@ -38,6 +39,8 @@
 - [Monocypher](monocypher.md): Audited compact C crypto for Cat 1; single maintainer, CC0 forkability recorded. | testing | hardware,identity,offline
 - [ntfy](ntfy.md): HTTP pub-sub notification server; the first Layer 7 hub-to-hub carrier candidate. | candidate | dtn,messaging,networking
 - [OpenCode](opencode.md): Open-source coding agent CLI with terminal TUI and 75+ model providers. | candidate | agent,llm
+- [p2panda-core](p2panda-core.md): Rust signed per-author log library; pre-1.0 API, adoption target only. | candidate | storage,sync
+- [PMTiles](pmtiles.md): Single-file map tile archive read by HTTP Range; offline labels unverified. | candidate | offline,panel,storage
 - [Reticulum](reticulum.md): Sovereign end-to-end encrypted networking stack; custom license needs legal review | candidate | mesh,networking,offline
 - [RNode Firmware](rnode-firmware.md): GPL-3.0 LoRa modem firmware for Reticulum; flasher ships inside the rns wheel. | candidate | firmware,hardware,lora
 - [rusqlite](rusqlite.md): Rust SQLite binding; SQLCipher build adds 5.4 to 6.4 MB per binary. | candidate | messaging,offline,storage

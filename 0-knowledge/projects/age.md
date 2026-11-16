@@ -2,7 +2,7 @@
 title: age
 category: project
 status: candidate
-summary: File-encryption format with X25519 recipients; planned for history export only.
+summary: File-encryption format with X25519 recipients; possible hub-side tooling format.
 tags: [storage, identity, offline]
 platforms: [linux, android, macos, windows]
 upstream: https://github.com/str4d/rage
@@ -13,20 +13,19 @@ sources:
   - https://raw.githubusercontent.com/C2SP/C2SP/main/age.md
 ---
 
-File-encryption format with X25519 recipients; planned for history export only.
+File-encryption format with X25519 recipients; possible hub-side tooling format.
 
 ## What it is
 
 age is a simple file-encryption format (specified in C2SP) and `rage` is its Rust implementation;
 the `age` crate is at 0.12.1 (rage release 2026-07-14).
-Layer 5 reserves it for exports: a phone can encrypt a backup of message history to a hub's `enc_pubkey`
-with no new key type, matching Layer 2's deferred recipient-mode export.
-It is deferred, not built in v1; the CLI instruction stands in until then.
+111's export uses the Layer 2 §8.5(i) format (Layer 8 §13.1), not age; Layer 5 §10.4 and §21 no longer name an age-based export.
+age stays a possible format for hub-side tooling: it pulls hpke, ml-kem, p256, scrypt and i18n and carries no sender signature.
 
 ## Use when
 
 - A history or backup file must be encrypted to a recipient key that is already an X25519 public key.
-- The "export before prune" offer needs an export format (spec §10.4, §21).
+- Hub-side tooling needs a file-encryption format outside the 111 export (the export itself is the Layer 2 §8.5(i) format).
 
 ## Do NOT use when
 
