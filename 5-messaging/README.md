@@ -12,6 +12,8 @@ re-check (decisions D18, D19, D20 in `os/plan/DECISIONS.md`; options brief `os/p
 
 Amendment note: amended by Layer 7 (D30 F5): twelve additive items, the replacement texts of `os/7-relay/README.md` §5.3 (and §4.6 for item 12); every item is additive or default-off, and no other line of this spec changes. The lock above is unchanged.
 
+Amendment note: amended by Layer 8 (D34, D38): six additive items, the replacement texts of `os/8-storage/README.md` §21 L5 (1)-(6) (§10.1, §10.3, §10.4 and §21, §11, §13 and the dispatch of §3.2); every item is additive or default-off, no wire byte changes, and no other line of this spec changes. The lock above is unchanged.
+
 Reads with: `os/README.md` §5 (vision) · `os/2-identity/README.md` §6, §8.4, §9, §10, §12, §13 (the sealed packet,
 announces, restore, delegation, attestation, hand-offs) · `os/4-interface/README.md` §5–§7, §10–§11 (dashboard, services,
 contract, auth) · `os/3-intelligence/README.md` (tools, task API) · `os/plan/cross-layer/devices.md` (Layer 6 brief, amended by D19 c)
@@ -30,7 +32,7 @@ contract, auth) · `os/3-intelligence/README.md` (tools, task API) · `os/plan/c
 - **Delivery model v1** (D19 b): direct links + **home-hub mailbox** + contact cards. Store-and-forward in v1 works
   **between members of the same hub, or over a direct link**; cross-hub custody is Layer 7's single-copy push (Layer 7 §5). No multi-hop discovery, no periodic announces, nothing from Layer 7.
 - **Hosted panels** (D19 d): one origin per panel by port, served by `111d`. v1 ships **static** panels plus a built-in
-  **Meshtastic HTTP shim**; the generic reverse proxy for `child`/`detected` panels is specified (§13) and reserved.
+  **Meshtastic HTTP shim**; `child` panels for plain-HTTP children are built by Layer 8 (§13); `detected` panels and WebSocket/SSE children stay reserved.
 - **Meshtastic service** (D18 #3, D19 g): consented identify (the Meshtastic step), `meshmud` multiplexer, read-only
   presence into Nearby, the hosted panel. **No message bridge.**
 - **Messages** view, **Contacts**, **Nearby** list (Meshtastic presence), **Settings → Messaging & Data**, agent tools.
@@ -53,7 +55,7 @@ never links into our Rust binary.
 |---|---|---|---|
 | `mesh111` crate | fabric library (§3–§12), `KeyProvider` seam, store schema, `Link` trait | custom (this layer) | every node running Layer 5 (Cat 2–5) |
 | `111d` `daemon/fabric/` | wires `mesh111` to identity, links, store dir, API, SSE, services registry | custom glue (Layer 1 crate, D15-style sanction) | same |
-| `111d` `daemon/panels/` | panel listeners: static serving, ticket auth, header policy, the Meshtastic HTTP shim; the generic reverse proxy is reserved (§13) | custom glue (`hyper`/`axum` already in the graph) | nodes with the dashboard |
+| `111d` `daemon/panels/` | panel listeners: static serving, ticket auth, header policy, the Meshtastic HTTP shim; the generic reverse proxy is reserved except for plain-HTTP `child` panels (§13) | custom glue (`hyper`/`axum` already in the graph) | nodes with the dashboard |
 | SQLCipher via `rusqlite` | encrypted store engine (§10) | adopted: `0-knowledge/projects/rusqlite.md`, `sqlcipher.md` | same |
 | `blake3` + `bao-tree` | content addressing + verified streaming of bulk objects (§11) | adopted: `0-knowledge/projects/blake3-bao.md` | same |
 | `meshmud` | Meshtastic multiplexer: one serial/TCP uplink, many TCP downlinks | adopted: `0-knowledge/projects/meshmud.md` — own code MIT; the CI build records a license verdict and the binary is conveyed as GPL-3.0 only if its module list shows Meshtastic's GPL-3.0 Go protobufs linked (the v1.0.0 source as read on 2026-10-14 has none — a hand-written varint framing — so the expected verdict is MIT-only); pinned by upstream tag + tarball sha256 + commit, CI-built, only `go.mod`/`go.sum` data snapshots in `os/` | nodes with a Meshtastic board (§14) |
@@ -179,6 +181,14 @@ size ‖ class)` for public object adverts).
 
 Control kinds (`msg_seq = 0`) are exempt from `rx_state` and ACKs; each is idempotent as listed, so a lost control
 packet never leaves a hole.
+
+**Dispatch of 0x10-0x14 (Layer 8 §12.3, additive).** An inbound `AGENT_OP`, `KB`, `UPDATE`, `PATCH` or `SYNC` passes §4's sequencing and
+acknowledgement and never becomes a message row. `Fabric::set_consumer(kind, consumer)` is the consumer registry (shared with Layer 9). With no
+consumer the body is dropped and counted (`unconsumed`, per kind, a session counter on the `fabric` status), and the sequence is committed and
+acknowledged. With a consumer the order is fixed: the fabric decides the sequence (new, duplicate or stale) without committing; a new frame's body
+goes to the consumer, which returns only after its own durable write and is idempotent by the frame's `msg_id`; then the fabric commits the
+sequence and acknowledges. A consumer error leaves the frame unacknowledged, so the sender retransmits it; a duplicate is re-acknowledged without
+reaching the consumer.
 
 ### 3.3 Message body (`MSG`, Cat 2+)
 
@@ -421,8 +431,8 @@ never on wall-clock timers; the sender's copy is kept until `delivered`.
 x86_64 and aarch64 — measured +6.4 / +5.4 MB). **File format pinned to SQLCipher 4** (`PRAGMA cipher_compatibility =
 4`); 5.0 migration planned via `cipher_migrate` behind the Layer 1 updater. Raw key (`PRAGMA key = "x'…'"`, no
 PBKDF2 at open), WAL, `synchronous = FULL` on sequence-allocating transactions, `temp_store = MEMORY` (transient files
-are not encrypted), `auto_vacuum = INCREMENTAL` so pruning frees disk, `secure_delete = ON`, a clean-shutdown record
-(`settings.clean = 1` **and** the L2 `announce_last` value, written on close; the §4 epoch rules read both at open). One DB: `fabric/store.db`, 0600, owner `node111`.
+are not encrypted), `auto_vacuum = INCREMENTAL` so pruning frees disk, `secure_delete = ON`, `journal_size_limit` = 4 MiB (Layer 8 §13.5), a clean-shutdown record
+(`settings.clean = 1` **and** the L2 `announce_last` value, written on close; the §4 epoch rules read both at open). One DB: `fabric/store.db`, 0600, owner `node111`. Layer 8 keeps a second file, `node/state.db`, for the node's own state (Layer 8 §2).
 
 ### 10.2 Key custody (`KeyProvider` seam)
 
@@ -445,6 +455,7 @@ are not encrypted), `auto_vacuum = INCREMENTAL` so pruning frees disk, `secure_d
 SACK bitmap) · `rx_state` (`(peer, stream, epoch)` → prefix + ranges; newest 4 epochs kept) · `rx_floor` (`(peer, stream)` → highest evicted epoch) · `partials` (fragment bitmaps **and the fragment bytes**, one FULL transaction, so a SACKed fragment survives a crash; capacity-evicted oldest-first) · `custody` (hub: `dest`,
 `custody_seq`, `pkt_ref`, bytes, `committed`, `fwd` (0 member · 1 from a member · 2 from a leaf hub · 3 from the carrier; Layer 7 §5.1), `fwd_from`) · `cursors` (member: hub → cursor) · `blobs` (`hash`, `size`,
 `refcount`, `public`, `object_key?`) · `requests` (pending INTROs) · `settings`.
+Before any migration of the store (a `user_version` above 0 and below the build's) the build takes the migration copy `store.db.pre-v<N>` (checkpoint, copy, no clean record, rename into place; Layer 8 §13.6): a cut copy is only ever a `.tmp`, and the update guard's rollback renames the copy back.
 Bodies of `MSG` live in the DB (small); attachments (v1.1) and every bulk object are files under `fabric/blobs/` named
 by BLAKE3 root — private objects are encrypted once with a **random per-object `object_key`** generated inside the store (never
 caller-supplied; XChaCha20-Poly1305 in 64 KiB chunks, nonce = LE chunk index ‖ zeros, AD = chunk index ‖ last-chunk
@@ -457,7 +468,7 @@ Trigger: live bytes (DB pages minus freelist + blob dir) above the high watermar
 Order: (1) transit custody that is `committed` and public chunks that are re-fetchable — weight = size × age (old and
 large first; age = `local_seq` distance, never a clock) · (2) superseded release/KB objects below the Layer 1 monotonic
 floor, fully fetched deltas · (3) own conversation history oldest-first **only at hard capacity and only after an
-export offer** (§21: `age`-based export) · (4) **never** undelivered outbound, uncommitted custody, forward rows included; a forward row marked refused is committed, pending
+export offer** (the L2 §8.5(i) export, Layer 8 §13.1) · (4) **never** undelivered outbound, uncommitted custody, forward rows included; a forward row marked refused is committed, pending
 requests, pinned items or contacts — instead the store refuses new custody and new bulk, and surfaces `store_full` on
 the `fabric` service and to the agent. Per-class quotas exist as capacity shaping (configurable); per-sender limits and
 stamp costs are policy and do not exist.
@@ -474,9 +485,7 @@ chunk boundary. The fabric treats bulk as `bulk-small` (≤ 64 KiB) or `bulk-lar
 Bulk` links by default and cross a `LowBandwidth` link only when the user or the agent explicitly asks (physics: a 32 KB
 KB delta is 5–9 min of pure LoRa airtime at LongFast, which is 8–15 h of wall time under a 1 % duty cycle; a
 5.7 MB binary is 15–27 h of airtime, months at 1 %). Consumers: attachments in `MSG` (v1.1),
-`KB` deltas and git bundles (Layer 7), `UPDATE` payloads (Layer 1's minisign manifest stays the trust root; the updater
-gains an intake path for a staged payload at `fabric/blobs/<hash>`, §19), `PATCH` (Layer 9), `SYNC` ops for Layer 8's
-append-only log (opaque, idempotent ids, per-peer cursors — seam only).
+the KB (rides the release payload, Layer 7 §9.4; git bundles were rejected, D30 F6), `UPDATE` payloads (Layer 1's minisign manifest stays the trust root; the updater's intake is `state/origin/blob/<sha256>`, Layer 7 §9.1, superseding the staged payload at `fabric/blobs/<hash>`), `PATCH` (Layer 9), `SYNC` reserved with no consumer in v1 (Layer 8 §12: no cursor table and no prune step for `Class::Sync`).
 
 ## 12. Groups & broadcast
 
@@ -504,7 +513,7 @@ title = "Meshtastic"
 kb_entry = "projects/meshtastic-web"
 
 [source]
-kind = "static"                         # static | child | detected  (v1 implements static)
+kind = "static"                         # static | child | detected  (v1 implements static; Layer 8 adds child, below)
 bundle = "panels/meshtastic-web"        # unpacked from the hash-pinned release payload; SPA fallback for non-API paths
 shim = "meshtastic-http"                # built-in: /api/v1/toradio|fromradio reframed onto a meshmud TCP downlink (§14)
 
@@ -520,7 +529,7 @@ needs_secure_context = false
 sandbox = "default"
 secure_note = "USB or Bluetooth from this browser works only on the node itself and only for a radio this node has not bound; the bound board is reached through the panel's HTTP connection."
 
-[proxy]                                 # reserved for child/detected panels (P7); true here fails adoption in v1
+[proxy]                                 # child panels (Layer 8, below); websocket/sse true fails adoption in v1
 websocket = false
 sse = false
 max_body = "8MiB"
@@ -570,7 +579,7 @@ source_offer = "THIRD-PARTY-NOTICES.md" # names the pinned tag; CI builds the bu
   `frame-ancestors`, then append `Content-Security-Policy: frame-ancestors <dashboard origins on the request's accepted
   host: :11180 and :80>`; add `X-Content-Type-Options: nosniff` and `Referrer-Policy: no-referrer`; strip hop-by-hop
   headers; never rewrite bodies; never apply the dashboard's own CSP middleware to panel responses. For the generic
-  proxy (reserved): strip `Domain=` from upstream `Set-Cookie` and **drop any upstream `Set-Cookie` named `s111` or
+  proxy (reserved, and every `child` panel forward, Layer 8 §9.1): strip `Domain=` from upstream `Set-Cookie` and **drop any upstream `Set-Cookie` named `s111` or
   `p111_*`**; strip `s111`/`p111_*` from upstream requests; add `X-Forwarded-*`. Shim/API paths answer
   `502 upstream_error` (problem+json) when the upstream is down — the SPA fallback never serves `index.html` under an
   API path.
@@ -593,6 +602,15 @@ source_offer = "THIRD-PARTY-NOTICES.md" # names the pinned tag; CI builds the bu
 - **Contract:** `ServiceRecord` gains `panel: {id, port, entry, needs_secure_context, allow[], optional_hosts[], state}
   | null` (additive; `embed_url` is kept for link-out and is never set when `panel` is non-null). `GET /api/v1/panels`
   lists declared panels and slots.
+- **`child` panels (Layer 8 §9.1, additive).** A `child` panel fronts a component's plain-HTTP server: `[source] kind = "child"`,
+  `component = "<id>"`, `upstream = "127.0.0.1:<port>"` (one of that component's `[run] ports`, loopback). Its id is its component's id
+  (`panelId` is a `ServiceId` or a `ComponentId`; the parser accepts a declared component id for `kind = "child"` only), it has no `bundle`,
+  it is enabled while its component is enabled (it holds its panel listener from then on), and its health is the component's port
+  (the component declaration's `health = "listen"`, Layer 8 §9.2). It is framed from Storage → Datasets, not from a service's LIVE page. Every request the listener admitted (the ticket,
+  the `p111_<id>` cookie and every guard above, unchanged) is forwarded to `upstream` with the body capped at `max_body`, the panel cookie
+  and the dashboard's session cookie stripped, and the response policy above applied; its answers carry one appended header,
+  `Content-Security-Policy: connect-src 'self'`. `[proxy] websocket` and `sse` stay `false` (`true` still fails adoption), and `detected`
+  stays reserved.
 
 What stays from D15: one origin for our own UI and `/api/v1`; `frame-ancestors 'none'` + `X-Frame-Options: DENY` on
 dashboard responses; no runtime fetch of anything by us; **no TLS in v1** (Chrome 154's HTTPS-by-default excludes
@@ -787,7 +805,7 @@ Termux). Tools run inside `111-agent`; writes only via the proposal path (L3 "on
    them (sealed, `pkt_ref`-bound receipts, `msg_seq` idempotency).
 7. Panels: third-party code runs on its own origin; every request is guarded (§13), CORS headers never leave a panel
    origin, no loopback skip; `s111` never reaches an upstream; dashboard CSP stays closed; panels that need a secure
-   context are never faked; the reserved proxy drops upstream cookies named like ours.
+   context are never faked; the reserved proxy and every `child` panel forward drop upstream cookies named like ours.
 8. Meshtastic: the presence reader has no send path and its output is untrusted text; the panel's writes go to the
    *board* through meshmud (the user's own radio, their decision), never to the fabric; no HTTP listener exists outside
    the guarded panel origin.
@@ -817,7 +835,7 @@ Termux). Tools run inside `111-agent`; writes only via the proposal path (L3 "on
   path (`go-licenses` or a hand list gated by `check.sh`) and names the pinned tags in the GPL source offers;
   `LICENSING.md` §3 rows for meshmud (+ Go closure, conveyed as GPL-3.0) and the reader venv, §4 wording kept true (no
   foreign source copied into `os/`); the updater gains an intake path for a staged payload at `fabric/blobs/<hash>`
-  verified by the same minisign manifest (seam); `check.sh` builds SQLCipher for both targets.
+  verified by the same minisign manifest (seam; **superseded**: the intake is `state/origin/blob/<sha256>`, §11, Layer 7 §9.1); `check.sh` builds SQLCipher for both targets.
 - **Layer 3:** tools §17 + the bearer token; offload stays on the LAN binding + pairing auth (not v1 fabric traffic).
 - **Layer 4:** D15 amendment §13; main listener 308 `Host: localhost` → `127.0.0.1`; `require_session` bearer rule (loopback only); Messages/Contacts/Nearby/Settings
   views §16; `jsQR` dependency; `ServiceId` growth (the fixed-size registry arrays grow to 9); `panel` object; per-request
@@ -827,7 +845,7 @@ Termux). Tools run inside `111-agent`; writes only via the proposal path (L3 "on
   (RNode, Meshtastic, MeshCore; port-owner table reused); the MeshCore data-type range registration; INTRO over LoRa.
 - **Layer 7:** presence from announces/`nearby` sources; hub-to-hub replication (A+); `KB` consumer; `appdata` TLVs;
   public broadcast frames; announce-as-routing questions stay open there.
-- **Layer 8:** `SYNC` class + per-peer cursors; the append-only log is an opaque consumer.
+- **Layer 8:** `SYNC` class + per-peer cursors; the append-only log is an opaque consumer. **Closed by Layer 8 §12:** there is no shared log in v1, `SYNC` stays reserved with no consumer, no cursor table and no prune step for `Class::Sync`; the registry of §3.2 is the only seam.
 - **Layer 9:** `PATCH` class, `AGENT_OP`, `RECEIPT_STRONG`; the apply→verify→undo engine (P4).
 
 ## 20. Verification (lock gates; netns, no hardware)
@@ -862,7 +880,7 @@ unresolvable `sender_ref` wait in a capacity-bounded pending-INTRO buffer until 
 `meshtastic-client`, `rns-bridge`, `ble`, online Noise IK / TLS-RPK links (L6) · message bridges (P1) · sender-key groups
 and MLS behind a hub DS · rolling recipient ratchets (RATCHET flag, TLV 0x10) · erasure coding (`coding` field; RaptorQ
 IPR review) · crypto-mode `0x02` and the unsealed-chunk carve-out (A5, v1.1) · owner-linked device replicas (Delta
-Chat ceremony + L2 attestation) · `age` recipient-mode export of history and the "export before prune" offer ·
+Chat ceremony + L2 attestation) · the "export before prune" offer (the L2 §8.5(i) export, Layer 8 §13.1) ·
 SQLCipher 5 migration · the generic reverse proxy with WebSocket/SSE (first consumer MeshChatX, P7) · MeshMonitor as an
 optional presence/MeshCore service · `<id>.111.localhost` panel origins · TLS · camera QR scanning on LAN origins (needs
 a secure context) · KB/UPDATE/PATCH consumers (L7/L9) · LXMF-style stamp costs (rejected as policy unless a network
