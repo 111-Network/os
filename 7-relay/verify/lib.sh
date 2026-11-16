@@ -40,7 +40,7 @@ L7_G8_VETH_M2=l7g8m2
 # ---- G9 cross-hub forward (§15 G9): hubs A, B, C; A and B on TEST-NET-1 so TLS applies; member M on A, D on B
 L7_G9_WAN_BR=l7g9wan
 L7_G9_WAN_NET=192.0.2.0/24 # TEST-NET-1 (RFC 5737)
-L7_G9_NODES="A B C M D"
+L7_G9_NODES="A B C M M2 D D2 E" # row V3 added M2 (a second member of A), D2 (a member of B whose card carries no hint) and E (a standalone node no hub holds)
 L7_G9_IP_A=192.0.2.11
 L7_G9_IP_B=192.0.2.12
 L7_G9_IP_C=192.0.2.13
@@ -55,7 +55,15 @@ L7_G9_VETH_B=l7g9b
 L7_G9_VETH_C=l7g9c
 L7_G9_VETH_M=l7g9m
 L7_G9_VETH_D=l7g9d
-L7_G9_OLD_TAG=checkpoint-layer-6 # the old hub B of item 6 (4689dbf), exported under the scratchpad
+L7_G9_IP_M2=10.111.79.12 # row V3: M2, a second member of A (the per-origin share)
+L7_G9_IP_D2=10.111.89.12 # row V3: D2, a second member of B
+L7_G9_BR_LA=l7g9la # row V3: A's LAN bridge (A .1, M, M2)
+L7_G9_BR_LB=l7g9lb # row V3: B's LAN bridge (B .1, D, D2)
+L7_G9_VETH_AL=l7g9al # row V3: the bridge-side ends of the LAN veths: A's LAN end, B's LAN end, M2, D2
+L7_G9_VETH_BL=l7g9bl
+L7_G9_VETH_M2=l7g9m2
+L7_G9_VETH_D2=l7g9d2
+L7_G9_OLD_TAG=checkpoint-layer-6 # the old hub B of item 6 (4689dbf), exported under the scratchpad (G9_OLD_REV overrides)
 
 # ---- G10 the carrier (§15 G10): gateways G and G' in two netns, each with a leaf hub, joined only through the stub
 L7_G10_WAN_BR=l7g10wan

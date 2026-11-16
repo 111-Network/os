@@ -538,7 +538,7 @@ a = { layer = 1, files = [
 b = { layer = 7, files = ["1-bootstrap/crates/node111/src/daemon/dashboard/api_v1/relay7.rs"] }
 read_first = "a"
 symptom = "settings are lost or a secret leaks: the GET /relay shape"
-gap = "Row D10 landed: GET /relay and PATCH /relay/settings run on D1's settings cell, every consent round trip and refusal through the real router (tests/api_v1_relay7.rs); the link-key file is D5's. No two-host run yet (G9-G11 SKIPPED)."
+gap = "Row D10 landed: GET /relay and PATCH /relay/settings run on D1's settings cell, every consent round trip and refusal through the real router (tests/api_v1_relay7.rs); the link-key file is D5's. On running daemons: G11 (tls.sh, row V5) and G9 (forward.sh, row V3) read GET /relay on paired hubs; PATCH /relay/settings between hosts waits for G10 (carrier.sh, row V4)."
 
 [[seam]]
 id = "L1-L8:state-service"
@@ -1166,7 +1166,7 @@ a = { layer = 5, files = ["5-messaging/crates/mesh111/src/fabric.rs"] }
 b = { layer = 7, files = ["1-bootstrap/crates/node111/src/daemon/carrier/mod.rs"] }
 read_first = "a"
 symptom = "custody is not forwarded: a message stays relayed with reason_code forwarding and never reaches delivered"
-gap = "Row D11 landed: the carrier runtime (N/carrier/mod.rs) drains the forwarder and posts through ntfy, proven at I against stub-ntfy.py by l1.node111.carrier_flow (two real hubs and a member at each); no real ntfy server has carried it (D12 waits for the owner-run smoke log), and G9 (forward.sh, row V3) and G10 (carrier.sh, row V4) are T0 stubs."
+gap = "Row D11 landed: the carrier runtime (N/carrier/mod.rs) drains the forwarder and posts through ntfy, proven at I against stub-ntfy.py by l1.node111.carrier_flow (two real hubs and a member at each); no real ntfy server has carried it (D12 waits for the owner-run smoke log). G9 (forward.sh, row V3, REQUIRE_G9=1 GREEN) forwards between three real hubs over TEST-NET with TLS-RPK: the hint, the probe order, every pair refusing, restarts with deduplication, the Transit quota, REJECT_FULL, a Layer 6 hub; G10 (carrier.sh, row V4) is a T0 stub."
 
 [[seam]]
 id = "L5-L7:pair-gate"
@@ -1176,7 +1176,7 @@ a = { layer = 5, files = ["5-messaging/crates/mesh111/src/fabric.rs", "5-messagi
 b = { layer = 7, files = ["1-bootstrap/crates/node111/src/daemon/relay/pair.rs", "1-bootstrap/crates/node111/src/daemon/relay/tls.rs"] }
 read_first = "a"
 symptom = "hubs cannot pair: 409 pair_role_mismatch; PairedHub.tls"
-gap = "The mesh side runs real tcp-lan on loopback (a ~3 min suite); the daemon side is tested in process (relay_tls, row D5: pinned-key TLS between two real tcp-lan adapters; relay_pair, row D6: pairing through the dashboard routes and the CLI, two hubs paired end to end) and G9 prints SKIPPED, so no two daemons pair in a running system."
+gap = "The mesh side runs real tcp-lan on loopback (a ~3 min suite); the daemon side is tested in process (relay_tls, row D5: pinned-key TLS between two real tcp-lan adapters; relay_pair, row D6: pairing through the dashboard routes and the CLI, two hubs paired end to end); G9 (forward.sh, row V3, REQUIRE_G9=1 GREEN) pairs three real daemons on TEST-NET (the role matrix, a half pair that forwards nothing, no pairing refused with REJECT_UNKNOWN_DEST, no TLS dial answered in clear)."
 
 [[seam]]
 id = "L5-L7:role-bits"

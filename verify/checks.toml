@@ -2771,9 +2771,17 @@ rerun_cost = "ns, about 11 min (three daemons, a settle wait of about 2.5 min be
 strength = "R"
 needs = ["bash", "userns", "netns", "python3", "ip", "nsenter", "curl", "jq", "cargo", "gcc"]
 
-# G9 cross-hub custody over TEST-NET-1 with TLS. Row V3. Needs the tag checkpoint-layer-6 (absent).
-# A T0 stub: it prints '<G> SKIPPED: not built yet (T0 stub)' and exits 0 (7-relay/TASKS.md row V3). Strength N
-# until the row lands; promote it to R then (and to cargo = true if the gate builds).
+# G9 cross-hub custody forward (row V3): eight network namespaces (hubs A, B, C on TEST-NET-1 so §4.1 rule 1 puts every hub link in
+# TLS 1.3 raw public keys; members M, M2 of A and D, D2 of B; E held by nobody), a real `111 daemon` in each, one AF_PACKET tap on every
+# veth: no pairing (REJECT_UNKNOWN_DEST, the committed tape of the frames), the hint (the 11 B TLV as a put length, `relayed` with
+# `forwarding`, the held row as a pending count, the commit, one delivery, the ACK back), no hint (the ACK before a probe's answer, the
+# probe order, the cache), every pair refusing (forward_refused, a down pair, the per-origin share), loops and the role matrix, a restart
+# with a protected row (an nft bridge rule drops B -> A: B deduplicates), a test-sized Transit quota, REJECT_FULL retried on the next run
+# and on the next attribution, a Layer 6 build as hub B (the hint TLV skipped; its frames equal the tape), a non-hub holding a
+# paired_hubs row dials nothing, a deleted fabric/settings, a half pair, nothing in clear on the TEST-NET veth (with a positive
+# control), the records. The old hub is built from G9_OLD_REV (default checkpoint-layer-6; the lead sets 561cb5e) with its own cargo
+# target dir: that part is SKIPPED without the revision (FAIL under REQUIRE_G9=1). SKIPPED without a user+net+pid namespace, a built `111`
+# (BIN111 or CARGO_TARGET_DIR), python3, ip, nsenter, curl, jq, nft, ss or git (FAIL under REQUIRE_G9=1).
 [[check]]
 id = "l7.g9"
 kind = "unit"
@@ -2783,10 +2791,10 @@ layers = [7]
 seams = ["L5-L7:forwarder-handoff", "L5-L7:pair-gate"]
 adapter = "okfail"
 lock = "verify"
-timeout_s = 1800
-rerun_cost = "ns, T0 stub: SKIPPED today"
-strength = "N"
-needs = ["bash"]
+timeout_s = 2400
+rerun_cost = "ns, about 7 min (eight daemons, restarts of hubs with the redial back-off, two 60 s idle windows; a first cargo build of the Layer 6 hub adds about 4 min on 2 jobs; needs a built 111)"
+strength = "R"
+needs = ["bash", "userns", "netns", "python3", "ip", "nsenter", "curl", "jq", "nft", "ss", "git", "cargo"]
 
 # G10 the ntfy carrier through stub-ntfy.py in five namespaces. Row V4 (--smoke is l7.g10-smoke).
 # A T0 stub: it prints '<G> SKIPPED: not built yet (T0 stub)' and exits 0 (7-relay/TASKS.md row V4). Strength N
