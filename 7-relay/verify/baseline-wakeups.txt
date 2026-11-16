@@ -1,0 +1,11 @@
+# 7-relay/verify/baseline-wakeups.txt — the idle-wakeup baseline of gate G7 extended (spec §3.7 step 4), read by idle.sh.
+#
+# One number: the idle wakeups per minute (the summed `voluntary_ctxt_switches` of 111d and 111-agent over the 60 s
+# window 1, nothing attached) that the post-trim required configuration measures. idle.sh passes while the measured rate
+# is <= 1.10 x this number. The line is a default; the owner may change it (a later commit that raises the measured rate
+# above the line fails G7 until the owner accepts a new baseline).
+#
+# While there is no number below (this file empty of one, as shipped), idle.sh prints the measured rate as a `note:` and
+# passes on the outbound check alone. The first lead run on the post-trim build records the figure here and in
+# 7-relay/TASKS.md. Lines starting with `#` and blank lines are ignored; the first number is the baseline.
+

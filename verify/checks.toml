@@ -2542,9 +2542,10 @@ rerun_cost = "ns, ~1 min"
 strength = "R"
 needs = ["userns", "minisign", "python3"]
 
-# G7 extended (the no-timer gate): wakeups and outbound of an idle 111d. Row V1.
-# A T0 stub: it prints '<G> SKIPPED: not built yet (T0 stub)' and exits 0 (7-relay/TASKS.md row V1). Strength N
-# until the row lands; promote it to R then (and to cargo = true if the gate builds).
+# G7 extended (the no-timer gate): wakeups and outbound of an idle 111d (row V1): the real daemon in a fresh netns with every
+# Layer 7 switch off and updates.check_internet false; window 1 counts voluntary context switches over every thread of 111d and its
+# agent, window 2 the egress logger and an strace of connect/sendto/sendmsg (any non-loopback target fails); the daemon is checked
+# alive after the settle and each window. SKIPPED without a user+net+pid namespace or strace (FAIL under REQUIRE_G7=1).
 [[check]]
 id = "l7.g7ext"
 kind = "unit"
@@ -2555,9 +2556,9 @@ seams = ["L1-X:pi-floor", "L6-L7:netlink-gateway"]
 adapter = "okfail"
 lock = "verify"
 timeout_s = 1800
-rerun_cost = "ns, T0 stub: SKIPPED today"
-strength = "N"
-needs = ["bash"]
+rerun_cost = "ns, about 2.5 min (the default 60 s windows plus the settle)"
+strength = "R"
+needs = ["bash", "userns", "netns", "python3", "strace"]
 
 # G8 presence: the 111 Nearby kind, the LAN/hub split, the registry TXT, hops. Row V2.
 # A T0 stub: it prints '<G> SKIPPED: not built yet (T0 stub)' and exits 0 (7-relay/TASKS.md row V2). Strength N
