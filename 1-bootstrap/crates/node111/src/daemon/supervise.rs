@@ -40,6 +40,19 @@
 //! closed and the reader drains what the pipe still holds (at most
 //! [`READER_DRAIN`]), then ends and closes the queue: no task outlives its
 //! child. stderr still goes to `stdout_log`, else it is inherited.
+//!
+//! **Exit facts (Layer 9 §3.2, an additive Layer 1 code seam).** The status
+//! the loop awaits is kept: after every exit of a child, once the loop has
+//! read its stop and restart flags, it publishes one [`ExitFacts`] on
+//! [`ChildControl::exits`], before the state that exit leads to (`Backoff`,
+//! `Degraded`, `Stopped`, or the respawn's `Running`). `requested` comes from
+//! those two flags: every stop and every restart sends SIGTERM, so the status
+//! alone cannot tell a request from a failure. `seq` counts the exits, so a
+//! receiver that slept through several (a watch keeps only the newest value)
+//! counts from it. A spawn that fails is not an exit (no process ran): it
+//! feeds the schedule's window as before and publishes nothing. Back-off, the
+//! `Degraded` rule and every state transition are unchanged; no task, timer or
+//! second send is added.
 
 use std::collections::VecDeque;
 use std::path::PathBuf;
@@ -420,6 +433,99 @@ pub enum ChildState {
     Stopped,
 }
 
+/// What one exit of a supervised child leaves (Layer 9 §3.2): published on
+/// [`ChildControl::exits`] once per exit, after the supervisor read its stop
+/// and restart flags and before the state the exit leads to (module doc,
+/// "Exit facts"). The default (`seq` 0) is the value before any exit.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ExitFacts {
+    /// Exits of this child since [`spawn_child`]: 0 before the first, then
+    /// one more per exit. A watch keeps only the newest value, so a receiver
+    /// counts exits from `seq`, never from its wake-ups (§3.2). Requested
+    /// exits count too: the rise between two values a receiver saw is every
+    /// exit between them, so it bounds the crashes among them from above,
+    /// and a crash that coalesced under a later requested exit shows only in
+    /// that rise.
+    pub seq: u64,
+    /// The exit code when the child exited by itself; `None` when a signal
+    /// ended it or the wait failed.
+    pub code: Option<i32>,
+    /// The signal that ended the child (9 for SIGKILL); `None` when it exited
+    /// with a code or the wait failed.
+    pub signal: Option<i32>,
+    /// A stop or a restart was pending when the loop read its flags after the
+    /// wait (§3.2; §3.4 rule 2 opens incidents only on `false`): `true`
+    /// exactly when the loop did not count the exit as a crash. Every stop
+    /// and every restart sends SIGTERM, then SIGKILL after the grace, so only
+    /// this tells a request from a failure. A restart asked while no child
+    /// ran is taken by the next spawn: that spawn's own exit reads `false`.
+    /// It tells what this supervisor was asked, not what ended the child: a
+    /// crash reads `true` when a request lands between the death and the read
+    /// (for a piped child, up to [`READER_DRAIN`] when a grandchild holds its
+    /// stdout), and a signal from elsewhere with no request pending reads
+    /// `false`, the service manager's cgroup SIGTERM at `systemctl stop`
+    /// included when it reaches the child before `111d`'s stop path sets its
+    /// flag.
+    pub requested: bool,
+    /// The exits the back-off schedule's crash-loop window holds once this
+    /// exit was handled (§3.2; the `restarts_at_least` predicate, §6.2): for
+    /// an unrequested exit, the window [`BackoffSchedule::record_exit`] just
+    /// pruned, this exit (and a failed spawn inside the window) included, so
+    /// the exit that reaches `crash_loop_threshold` reads the threshold; 0
+    /// after a requested restart (a fresh schedule); for a stop, the exits
+    /// still inside the window.
+    pub restarts_in_window: u32,
+}
+
+impl ExitFacts {
+    /// The facts of exit number `seq`, from what the wait returned: the code,
+    /// or the signal that ended the child; neither when the wait failed.
+    fn of(
+        seq: u64,
+        status: &std::io::Result<std::process::ExitStatus>,
+        requested: bool,
+        restarts_in_window: u32,
+    ) -> Self {
+        use std::os::unix::process::ExitStatusExt;
+        let (code, signal) = match status {
+            Ok(s) => (s.code(), s.signal()),
+            Err(_) => (None, None),
+        };
+        ExitFacts {
+            seq,
+            code,
+            signal,
+            requested,
+            restarts_in_window,
+        }
+    }
+}
+
+/// The supervisor task's side of [`ChildControl::exits`]: the sender and the
+/// exit count (§3.2).
+struct ExitsTx {
+    tx: tokio::sync::watch::Sender<ExitFacts>,
+    seq: u64,
+}
+
+impl ExitsTx {
+    /// Publish one exit's facts: `seq` rises by one, one send.
+    fn publish(
+        &mut self,
+        status: &std::io::Result<std::process::ExitStatus>,
+        requested: bool,
+        restarts_in_window: u32,
+    ) {
+        self.seq = self.seq.saturating_add(1);
+        self.tx.send_replace(ExitFacts::of(
+            self.seq,
+            status,
+            requested,
+            restarts_in_window,
+        ));
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Decision {
     /// Sleep this long before the next spawn.
@@ -483,6 +589,20 @@ impl BackoffSchedule {
         let jittered = base * (1.0 - spread + 2.0 * spread * self.rand01());
         Decision::Delay(Duration::from_millis(jittered as u64))
     }
+
+    /// The exits the crash-loop window holds at `now`, read only (Layer 9
+    /// §3.2's `restarts_in_window`): right after [`Self::record_exit`]`(now)`
+    /// it counts that exit too (the threshold at the exit that degrades);
+    /// after [`Self::reset`] it is 0.
+    pub fn exits_in_window(&self, now: Instant) -> u32 {
+        let window = Duration::from_secs(self.policy.crash_loop_window_secs);
+        let n = self
+            .restart_epochs
+            .iter()
+            .filter(|&&t| now.saturating_duration_since(t) <= window)
+            .count();
+        u32::try_from(n).unwrap_or(u32::MAX)
+    }
 }
 
 /// Pid + pending restart, under one lock so a restart request and the
@@ -497,9 +617,9 @@ struct Shared {
 /// After SIGKILL, how long to wait for the supervisor to reap the child.
 pub const KILL_WAIT: Duration = Duration::from_secs(2);
 
-/// The cloneable control side of one supervised child: read its state and
-/// pid, stop it, restart it. Obtained from [`ChildHandle::control`]; the
-/// dashboard's per-service restart route holds these.
+/// The cloneable control side of one supervised child: read its state, pid
+/// and exit facts, stop it, restart it. Obtained from [`ChildHandle::control`];
+/// the dashboard's per-service restart route holds these.
 #[derive(Clone)]
 pub struct ChildControl {
     name: String,
@@ -510,6 +630,8 @@ pub struct ChildControl {
     kick: Arc<tokio::sync::Notify>,
     /// The current spawn's piped stdio (always `None` for [`ChildStdio::Null`]).
     stdio_rx: tokio::sync::watch::Receiver<Option<PipedIo>>,
+    /// The last exit's facts (Layer 9 §3.2); never marked seen here.
+    exits_rx: tokio::sync::watch::Receiver<ExitFacts>,
 }
 
 fn signal(pid: u32, sig: libc::c_int) {
@@ -633,6 +755,16 @@ impl ChildControl {
     /// after every spawn; `None` between runs and for a null-stdio child.
     pub fn stdio(&self) -> tokio::sync::watch::Receiver<Option<PipedIo>> {
         self.stdio_rx.clone()
+    }
+
+    /// A watch of the last exit's [`ExitFacts`] (Layer 9 §3.2): one value per
+    /// exit, published before the state that exit leads to, so whoever sees
+    /// `Backoff`, `Degraded` or `Stopped` finds that exit's facts here. The
+    /// receiver starts unseen: once any exit happened, its first `changed()`
+    /// returns at once. A watch coalesces: count exits from
+    /// [`ExitFacts::seq`].
+    pub fn exits(&self) -> tokio::sync::watch::Receiver<ExitFacts> {
+        self.exits_rx.clone()
     }
 
     /// Current child PID when running (None while backing off/stopped).
@@ -852,6 +984,7 @@ pub fn spawn_child(spec: impl Into<SpawnSpec>) -> ChildHandle {
     let piped = stdio == ChildStdio::Piped;
     let (state_tx, state_rx) = tokio::sync::watch::channel(ChildState::Backoff);
     let (stdio_tx, stdio_rx) = tokio::sync::watch::channel(None::<PipedIo>);
+    let (exits_tx, exits_rx) = tokio::sync::watch::channel(ExitFacts::default());
     let ctl = ChildControl {
         name: spec.name.clone(),
         state_rx,
@@ -859,10 +992,15 @@ pub fn spawn_child(spec: impl Into<SpawnSpec>) -> ChildHandle {
         shared: Arc::new(Mutex::new(Shared::default())),
         kick: Arc::new(tokio::sync::Notify::new()),
         stdio_rx,
+        exits_rx,
     };
 
     let task = {
         let ctl = ctl.clone();
+        let mut exits = ExitsTx {
+            tx: exits_tx,
+            seq: 0,
+        };
         let mut schedule = BackoffSchedule::new(
             spec.backoff.clone(),
             std::time::SystemTime::now()
@@ -969,7 +1107,8 @@ pub fn spawn_child(spec: impl Into<SpawnSpec>) -> ChildHandle {
                     }
                 }
 
-                let _ = child.wait().await;
+                // kept for the exit facts (Layer 9 §3.2)
+                let status = child.wait().await;
                 if let Some(attached) = attached {
                     attached.detach(&stdio_tx).await;
                 }
@@ -979,15 +1118,23 @@ pub fn spawn_child(spec: impl Into<SpawnSpec>) -> ChildHandle {
                     std::mem::take(&mut sh.restart)
                 };
 
+                // §3.2: one publish per exit, after the two flags are read
+                // (the same reads that pick the branch) and before the state
+                // the exit leads to
                 if stopping() {
+                    exits.publish(&status, true, schedule.exits_in_window(Instant::now()));
                     break;
                 }
                 if restarting {
                     // requested restart: respawn now, fresh back-off
                     schedule.reset();
+                    exits.publish(&status, true, schedule.exits_in_window(Instant::now()));
                     continue;
                 }
-                match schedule.record_exit(Instant::now()) {
+                let now = Instant::now();
+                let decision = schedule.record_exit(now);
+                exits.publish(&status, false, schedule.exits_in_window(now));
+                match decision {
                     Decision::Delay(d) => {
                         let _ = state_tx.send(ChildState::Backoff);
                         ctl.wait_for_request(Some(d)).await;
@@ -1214,6 +1361,10 @@ mod tests {
         assert!(took < Duration::from_secs(3), "{took:?}");
         assert_eq!(h.state(), ChildState::Stopped);
         assert!(!alive(pid), "SIGKILLed and reaped");
+        // §3.2: the stop's own SIGKILL is still a request
+        let facts = *h.exits().borrow();
+        assert_eq!((facts.seq, facts.requested), (1, true));
+        assert_eq!((facts.code, facts.signal), (None, Some(libc::SIGKILL)));
     }
 
     #[tokio::test]
@@ -1256,7 +1407,22 @@ mod tests {
         assert!(h.control().restart(Duration::from_millis(300)).await);
         assert!(until(Duration::from_secs(2), || h.pid().is_some_and(|p| p != old)).await);
         assert!(!alive(old));
+        // published before the respawn, so the new pid implies the facts
+        let facts = *h.exits().borrow();
         h.stop_and_wait(Duration::from_millis(300)).await;
+        // §3.2: the restart's own SIGKILL is still a request, in a fresh
+        // window (checked after the stop: this child ignores SIGTERM, so a
+        // failed check must not leave it to the parent-death signal)
+        assert_eq!(
+            facts,
+            ExitFacts {
+                seq: 1,
+                code: None,
+                signal: Some(libc::SIGKILL),
+                requested: true,
+                restarts_in_window: 0,
+            }
+        );
     }
 
     #[tokio::test]
@@ -1379,5 +1545,331 @@ mod tests {
         let h = spawn_child(spec);
         tokio::time::sleep(Duration::from_millis(400)).await;
         assert_eq!(h.state(), ChildState::Degraded);
+        // §3.2: a spawn that fails is not an exit (no process ran): it feeds
+        // the window, as before, and publishes no facts
+        assert_eq!(*h.exits().borrow(), ExitFacts::default());
+        assert!(!h.exits().has_changed().unwrap());
+    }
+
+    /// The next exit facts `rx` has not seen (5 s at most).
+    async fn next_exit(rx: &mut tokio::sync::watch::Receiver<ExitFacts>) -> ExitFacts {
+        tokio::time::timeout(Duration::from_secs(5), rx.changed())
+            .await
+            .expect("an exit within 5 s")
+            .expect("the supervisor is alive or left its last facts");
+        *rx.borrow_and_update()
+    }
+
+    /// The lines `path` holds (0 when it does not exist yet).
+    fn lines(path: &std::path::Path) -> usize {
+        std::fs::read_to_string(path).map_or(0, |s| s.lines().count())
+    }
+
+    #[test]
+    fn exit_facts_take_the_code_or_the_signal() {
+        use std::os::unix::process::ExitStatusExt;
+        let exited = Ok(std::process::ExitStatus::from_raw(3 << 8));
+        let killed = Ok(std::process::ExitStatus::from_raw(libc::SIGKILL));
+        let lost = Err(std::io::Error::other("the wait failed"));
+        let f = ExitFacts::of(7, &exited, false, 2);
+        assert_eq!(
+            f,
+            ExitFacts {
+                seq: 7,
+                code: Some(3),
+                signal: None,
+                requested: false,
+                restarts_in_window: 2,
+            }
+        );
+        let f = ExitFacts::of(1, &killed, true, 0);
+        assert_eq!((f.code, f.signal, f.requested), (None, Some(9), true));
+        let f = ExitFacts::of(2, &lost, false, 1);
+        assert_eq!((f.seq, f.code, f.signal), (2, None, None));
+    }
+
+    #[test]
+    fn exits_in_window_reads_what_record_exit_keeps() {
+        let mut s = BackoffSchedule::new(policy(100), 42);
+        let t0 = Instant::now();
+        assert_eq!(s.exits_in_window(t0), 0);
+        for i in 0..5u64 {
+            let now = t0 + Duration::from_millis(i * 10);
+            let d = s.record_exit(now);
+            assert_eq!(s.exits_in_window(now), i as u32 + 1);
+            assert_eq!(d == Decision::Degraded, i == 4, "the fifth degrades");
+        }
+        // read only: an hour on nothing is inside the window, nothing pruned
+        assert_eq!(s.exits_in_window(t0 + Duration::from_secs(3600)), 0);
+        assert_eq!(s.exits_in_window(t0 + Duration::from_millis(40)), 5);
+        s.reset();
+        assert_eq!(s.exits_in_window(t0 + Duration::from_millis(40)), 0);
+    }
+
+    /// §3.2, §3.4 rule 2: a child killed from outside (SIGKILL, as the OOM
+    /// killer does) is a failure.
+    #[tokio::test]
+    async fn a_sigkill_from_outside_is_an_unrequested_exit_with_signal_9() {
+        let h = spawn_child(sh("exec sleep 30", &[]));
+        let mut exits = h.exits();
+        assert!(until(Duration::from_secs(2), || h.pid().is_some()).await);
+        assert_eq!(*exits.borrow(), ExitFacts::default(), "no exit yet");
+        assert!(!exits.has_changed().unwrap());
+        signal(h.pid().unwrap(), libc::SIGKILL);
+        assert_eq!(
+            next_exit(&mut exits).await,
+            ExitFacts {
+                seq: 1,
+                code: None,
+                signal: Some(9),
+                requested: false,
+                restarts_in_window: 1,
+            }
+        );
+        h.stop_and_wait(Duration::from_secs(5)).await;
+    }
+
+    /// §3.2: every stop and every restart sends SIGTERM, so only `requested`
+    /// tells them from a failure; a restart starts a fresh window.
+    #[tokio::test]
+    async fn stop_and_restart_are_requested_exits() {
+        let h = spawn_child(sh("exec sleep 30", &[]));
+        let mut exits = h.exits();
+        assert!(until(Duration::from_secs(2), || h.pid().is_some()).await);
+        let old = h.pid().unwrap();
+        assert!(h.control().restart(Duration::from_secs(5)).await);
+        assert_eq!(
+            next_exit(&mut exits).await,
+            ExitFacts {
+                seq: 1,
+                code: None,
+                signal: Some(libc::SIGTERM),
+                requested: true,
+                restarts_in_window: 0,
+            }
+        );
+        assert!(until(Duration::from_secs(2), || h.pid().is_some_and(|p| p != old)).await);
+        h.stop_and_wait(Duration::from_secs(5)).await;
+        assert_eq!(h.state(), ChildState::Stopped);
+        assert_eq!(
+            next_exit(&mut exits).await,
+            ExitFacts {
+                seq: 2,
+                code: None,
+                signal: Some(libc::SIGTERM),
+                requested: true,
+                restarts_in_window: 0,
+            }
+        );
+    }
+
+    /// §3.2: a SIGTERM this supervisor did not send is a failure, whoever
+    /// sent it: the service manager's cgroup kill at `systemctl stop` can
+    /// reach a child before `111d`'s stop path sets its flag, and the loop
+    /// counts that exit as a crash, as before. Telling a daemon stop from a
+    /// crash is the observer's (§3.4 rule 2).
+    #[tokio::test]
+    async fn a_sigterm_this_supervisor_did_not_send_is_unrequested() {
+        let h = spawn_child(sh("exec sleep 30", &[]));
+        let mut exits = h.exits();
+        assert!(until(Duration::from_secs(2), || h.pid().is_some()).await);
+        let first = h.pid().unwrap();
+        signal(first, libc::SIGTERM);
+        assert_eq!(
+            next_exit(&mut exits).await,
+            ExitFacts {
+                seq: 1,
+                code: None,
+                signal: Some(libc::SIGTERM),
+                requested: false,
+                restarts_in_window: 1,
+            }
+        );
+        // counted as a crash: backed off, then respawned
+        assert!(
+            until(Duration::from_secs(2), || h
+                .pid()
+                .is_some_and(|p| p != first))
+            .await
+        );
+        h.stop_and_wait(Duration::from_secs(5)).await;
+    }
+
+    /// §3.2: the flags are read after a piped child's drain, so `requested`
+    /// agrees with what the loop does with the exit: a restart that lands in
+    /// the drain (held here for the full [`READER_DRAIN`] by a grandchild
+    /// that keeps the stdout) takes a crash as requested, in a fresh window,
+    /// and the child is respawned at once.
+    #[tokio::test]
+    async fn a_restart_landing_in_a_piped_drain_is_read_as_the_loop_takes_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let grandchild = dir.path().join("grandchild");
+        let up = dir.path().join("up");
+        // the first run leaves a grandchild on its stdout (3 s), then crashes
+        let spec = sh(
+            "test -f \"$2\" && exec sleep 30; sleep 3 & echo $! > \"$1\"; exit 3",
+            &[grandchild.to_str().unwrap(), up.to_str().unwrap()],
+        );
+        let h = spawn_child(spec.with_stdio(ChildStdio::Piped));
+        let mut exits = h.exits();
+        assert!(until(Duration::from_secs(2), || h.pid().is_some()).await);
+        let first = h.pid().unwrap();
+        // reaped, and the drain under way: the flags are not read yet
+        assert!(until(Duration::from_secs(2), || !alive(first)).await);
+        assert_eq!(h.pid(), Some(first), "inside the drain");
+        std::fs::write(&up, "").unwrap();
+        assert!(h.control().restart(Duration::from_secs(3)).await);
+        let facts = next_exit(&mut exits).await;
+        // the grandchild is still alive (3 s) and no longer needed; its comm
+        // is checked first, so a reused pid is never signalled
+        if let Some(pid) = std::fs::read_to_string(&grandchild)
+            .ok()
+            .and_then(|s| s.trim().parse::<u32>().ok())
+            .filter(|pid| {
+                std::fs::read_to_string(format!("/proc/{pid}/comm"))
+                    .is_ok_and(|comm| comm.trim() == "sleep")
+            })
+        {
+            signal(pid, libc::SIGKILL);
+        }
+        assert_eq!(
+            facts,
+            ExitFacts {
+                seq: 1,
+                code: Some(3),
+                signal: None,
+                requested: true,
+                restarts_in_window: 0,
+            }
+        );
+        assert!(
+            until(Duration::from_secs(2), || h
+                .pid()
+                .is_some_and(|p| p != first))
+            .await,
+            "respawned"
+        );
+        h.stop_and_wait(Duration::from_secs(5)).await;
+    }
+
+    /// §3.2: five exits inside the window (the default rule, 5 in 60 s)
+    /// degrade at the fifth as before, and that exit's facts are visible by
+    /// the time `Degraded` is. A restart out of `Degraded` is taken by the
+    /// spawn, so the next exit is a failure again, in a fresh window.
+    #[tokio::test]
+    async fn five_exits_in_the_window_degrade_at_the_fifth_with_seq_5() {
+        let dir = tempfile::tempdir().unwrap();
+        let runs = dir.path().join("runs");
+        let up = dir.path().join("up");
+        let mut spec = sh(
+            "echo x >> \"$1\"; test -f \"$2\" && exec sleep 30; exit 3",
+            &[runs.to_str().unwrap(), up.to_str().unwrap()],
+        );
+        spec.backoff = policy(20); // threshold 5, window 60 s: the default rule
+        let h = spawn_child(spec);
+        let mut exits = h.exits();
+        let mut state = h.state_watch();
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            state.wait_for(|s| *s == ChildState::Degraded),
+        )
+        .await
+        .expect("degraded within 5 s")
+        .expect("the supervisor is alive");
+        assert_eq!(
+            *exits.borrow(),
+            ExitFacts {
+                seq: 5,
+                code: Some(3),
+                signal: None,
+                requested: false,
+                restarts_in_window: 5,
+            },
+            "the fifth exit degraded; its facts went out first"
+        );
+        // terminal until a restart request: no sixth run, no sixth exit
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert_eq!(h.state(), ChildState::Degraded);
+        assert_eq!(exits.borrow().seq, 5);
+        assert_eq!(lines(&runs), 5);
+
+        std::fs::write(&up, "").unwrap();
+        assert!(h.control().restart(Duration::from_secs(1)).await);
+        assert!(
+            until(Duration::from_secs(2), || lines(&runs) == 6
+                && h.state() == ChildState::Running)
+            .await
+        );
+        assert_eq!(exits.borrow().seq, 5, "leaving Degraded is no exit");
+        signal(h.pid().unwrap(), libc::SIGKILL);
+        tokio::time::timeout(Duration::from_secs(5), exits.wait_for(|f| f.seq == 6))
+            .await
+            .expect("the sixth exit within 5 s")
+            .expect("the supervisor is alive");
+        assert_eq!(
+            *exits.borrow(),
+            ExitFacts {
+                seq: 6,
+                code: None,
+                signal: Some(9),
+                requested: false,
+                restarts_in_window: 1,
+            }
+        );
+        // the seventh run is up (a stop inside the back-off would end the
+        // supervisor with no seventh exit)
+        assert!(
+            until(Duration::from_secs(2), || lines(&runs) == 7
+                && h.state() == ChildState::Running)
+            .await
+        );
+        h.stop_and_wait(Duration::from_secs(5)).await;
+        let last = *exits.borrow();
+        assert_eq!((last.seq, last.requested), (7, true));
+    }
+
+    /// §3.2: a watch coalesces; a receiver that wakes once after three exits
+    /// reads `seq` 3 and has nothing more to wake for.
+    #[tokio::test]
+    async fn a_receiver_that_wakes_once_after_three_exits_reads_seq_3() {
+        let dir = tempfile::tempdir().unwrap();
+        let runs = dir.path().join("runs");
+        // exits on its first three runs, then stays up
+        let mut spec = sh(
+            "echo x >> \"$1\"; n=$(($(wc -l < \"$1\"))); [ \"$n\" -gt 3 ] && exec sleep 30; exit 1",
+            &[runs.to_str().unwrap()],
+        );
+        spec.backoff = policy(20); // threshold 5: three exits only back off
+        let h = spawn_child(spec);
+        let mut exits = h.exits();
+        assert!(
+            until(Duration::from_secs(5), || lines(&runs) == 4
+                && h.state() == ChildState::Running)
+            .await,
+            "the fourth run is up"
+        );
+        tokio::time::timeout(Duration::from_secs(1), exits.changed())
+            .await
+            .expect("woken")
+            .expect("the supervisor is alive");
+        let facts = *exits.borrow_and_update();
+        assert_eq!(
+            facts,
+            ExitFacts {
+                seq: 3,
+                code: Some(1),
+                signal: None,
+                requested: false,
+                restarts_in_window: 3,
+            },
+            "three exits, one wake"
+        );
+        assert!(
+            tokio::time::timeout(Duration::from_millis(200), exits.changed())
+                .await
+                .is_err(),
+            "nothing more to wake for"
+        );
+        h.stop_and_wait(Duration::from_secs(5)).await;
     }
 }
