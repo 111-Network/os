@@ -635,6 +635,24 @@ pub(crate) fn pragma_int(conn: &Connection, name: &'static str) -> Result<i64> {
     }
 }
 
+/// `PRAGMA incremental_vacuum` stepped to its end (Layer 8 §13.4 (3); the
+/// store is `auto_vacuum = INCREMENTAL`). The statement frees one freelist
+/// page per step and answers one row for each, so a single step (rusqlite's
+/// `execute_batch`, which steps a statement once) frees one page only.
+/// Nothing runs when the freelist is empty. Returns the pages freed.
+pub(crate) fn vacuum_freelist(conn: &Connection) -> Result<u64> {
+    if pragma_int(conn, "freelist_count")? <= 0 {
+        return Ok(0);
+    }
+    let mut st = conn.prepare("PRAGMA incremental_vacuum")?;
+    let mut rows = st.query([])?;
+    let mut freed = 0u64;
+    while rows.next()?.is_some() {
+        freed = freed.saturating_add(1);
+    }
+    Ok(freed)
+}
+
 fn check_pragma(conn: &Connection, name: &'static str, want: i64) -> Result<()> {
     let got = pragma_int(conn, name)?;
     if got == want {

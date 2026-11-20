@@ -1199,10 +1199,9 @@ impl Store {
         }
         // The removed rows' pages are on the freelist (`auto_vacuum =
         // INCREMENTAL`): vacuumed when it holds some, as at rest (Layer 8
-        // §13.4 (3)); with none there is nothing to free.
-        if super::pragma_int(&self.conn, "freelist_count")? > 0 {
-            self.conn.execute_batch("PRAGMA incremental_vacuum;")?;
-        }
+        // §13.4 (3)); with none there is nothing to free. Stepped to its
+        // end: one step frees one page.
+        super::vacuum_freelist(&self.conn)?;
         let live_after = self.live_bytes()?;
         self.store_full = store_full;
         self.full_classes = full_classes.clone();
@@ -1238,10 +1237,7 @@ impl Store {
         if wrote {
             self.with_tx(Durability::Normal, |tx| save_capacity(tx, false, &[]))?;
         }
-        let vacuumed = super::pragma_int(&self.conn, "freelist_count")? > 0;
-        if vacuumed {
-            self.conn.execute_batch("PRAGMA incremental_vacuum;")?;
-        }
+        let vacuumed = super::vacuum_freelist(&self.conn)? > 0;
         let live_after = if wrote || vacuumed {
             self.live_bytes()?
         } else {
@@ -1700,7 +1696,7 @@ impl Store {
                 self.blobs.remove(&h)?;
             }
         }
-        self.conn.execute_batch("PRAGMA incremental_vacuum;")?;
+        super::vacuum_freelist(&self.conn)?;
         let live_after = self.live_bytes()?;
         self.store_full = store_full;
         self.full_classes = full_classes.clone();

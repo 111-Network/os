@@ -4687,6 +4687,77 @@ fn passes_whose_free_space_moves_commit_nothing() {
     assert_eq!(get_u64(&s.conn, "capacity.full_classes").unwrap(), Some(0));
 }
 
+/// Layer 8 §13.4 (3): a pass's `incremental_vacuum` is stepped to its end.
+/// The statement frees one freelist page per step, so a single step
+/// (rusqlite's `execute_batch`) freed one page whatever a prune removed
+/// (Layer 8 row D3 measured 4,096 B freed for a 3,148,800 B prune). A
+/// pruning pass that evicts about 1.5 MB of committed custody leaves the
+/// freelist empty and the file smaller by about what it removed.
+#[test]
+fn a_pruning_pass_empties_the_freelist() {
+    let (_t, mut s) = ready();
+    let mut last = 0;
+    for i in 0..300u32 {
+        let mut body = vec![0x5a; 5000];
+        body[..4].copy_from_slice(&i.to_le_bytes());
+        last = accepted(s.custody_put(&PEER, &body).unwrap());
+    }
+    s.custody_commit(&PEER, last).unwrap();
+    let pages_before = pragma_int(&s.conn, "page_count").unwrap();
+    let page = pragma_int(&s.conn, "page_size").unwrap();
+    s.set_watermarks(Watermarks { high: 0, low: 0 }).unwrap();
+    let r = s.prune(DiskSpace::UNKNOWN).unwrap();
+    assert!(r.triggered);
+    let evicted = r
+        .pruned
+        .iter()
+        .filter(|p| matches!(p.item, PrunedRef::Custody(_)))
+        .count();
+    assert_eq!(evicted, 300, "every committed custody item evicted");
+    assert_eq!(
+        pragma_int(&s.conn, "freelist_count").unwrap(),
+        0,
+        "the freelist is emptied, not cut by one page"
+    );
+    let shrunk = (pages_before - pragma_int(&s.conn, "page_count").unwrap()) * page;
+    assert!(
+        shrunk >= 1_400_000,
+        "the file gave back what the pass removed: {shrunk} B"
+    );
+    assert_eq!(r.live_after, s.live_bytes().unwrap());
+}
+
+/// Layer 8 §13.4 (3), the pass at rest: pages a write elsewhere left on the
+/// freelist (here a scratch table dropped) are all freed by the next pass,
+/// which prunes nothing; the pass after it finds an empty freelist and
+/// commits nothing.
+#[test]
+fn a_pass_at_rest_empties_the_freelist() {
+    let (t, mut s) = ready();
+    s.conn
+        .execute_batch(
+            "CREATE TABLE scratch (b BLOB);
+             WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 400)
+             INSERT INTO scratch SELECT zeroblob(3000) FROM n;
+             DROP TABLE scratch;",
+        )
+        .unwrap();
+    let free = pragma_int(&s.conn, "freelist_count").unwrap();
+    assert!(free > 100, "the dropped table's pages are free: {free}");
+    let r = s.prune(DiskSpace::UNKNOWN).unwrap();
+    assert!(!r.triggered && r.pruned.is_empty());
+    assert_eq!(pragma_int(&s.conn, "freelist_count").unwrap(), 0);
+    assert_eq!(r.live_after, s.live_bytes().unwrap());
+
+    let wal = wal_of(t.path());
+    truncate_wal(&s, &wal);
+    let changes = s.conn.total_changes();
+    let r = s.prune(DiskSpace::UNKNOWN).unwrap();
+    assert!(!r.triggered && r.pruned.is_empty());
+    assert_eq!(s.conn.total_changes(), changes, "nothing to free: no write");
+    assert_eq!(len_of(&wal), 0, "no frame in the WAL");
+}
+
 /// Layer 8 §13.4 (1) (built by Layer 7 row M1c, kept): the record a pass at
 /// rest compares is `store_full` and the class mask. A class over its quota
 /// with nothing a step may take is marked full by a pruning pass, which
@@ -5992,8 +6063,9 @@ fn a_failed_index_heal_is_counted_and_a_failed_totals_heal_is_fatal() {
     // A full disk: the index's first page cannot be written (its old
     // pages leave the freelist first, so none can be reused).
     s.conn
-        .execute_batch("DROP INDEX custody_forward_open_by_dest; PRAGMA incremental_vacuum;")
+        .execute_batch("DROP INDEX custody_forward_open_by_dest;")
         .unwrap();
+    vacuum_freelist(&s.conn).unwrap();
     let pages: i64 = s
         .conn
         .query_row("PRAGMA page_count", [], |r| r.get(0))
